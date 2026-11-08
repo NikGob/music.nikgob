@@ -619,6 +619,7 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
         }
     }
     tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
+    crate::recordings::carry_recording_in(tx, &f, &t)?;
     tx.execute(
         "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
           WHERE track_id = ?1 AND deleted = 0",

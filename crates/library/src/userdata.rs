@@ -19,6 +19,10 @@
 //! * `rec_feedback.json` - «Не рекомендовать» marks (tracks, artists and the
 //!   songs and artists of the services), cleared ones included; merged by
 //!   their time like likes. Written only once there is something to write.
+//! * `recordings.json` - the songs on two albums linked into one recording
+//!   and the pairs said to be different songs («Разные песни»). An import
+//!   links what the file links (what was said apart stays apart). Written
+//!   only once there is something to write.
 //!
 //! * `fingerprint.json` - [`Library::userdata_fingerprint`] of the database
 //!   the files were written from, written last: a database that no longer
@@ -57,6 +61,7 @@ pub const EVENTS_FILE: &str = "events.jsonl";
 pub const STREAMS_FILE: &str = "streams.json";
 pub const REC_FEEDBACK_FILE: &str = "rec_feedback.json";
 pub const SAVED_FILE: &str = "saved.json";
+pub const RECORDINGS_FILE: &str = "recordings.json";
 pub const FINGERPRINT_FILE: &str = "fingerprint.json";
 
 #[derive(Serialize, Deserialize)]
@@ -104,6 +109,15 @@ struct SavedDoc {
     service: String,
     id: String,
     track_id: TrackId,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RecordingsFile {
+    version: u32,
+    #[serde(default)]
+    links: Vec<crate::recordings::RecordingLink>,
+    #[serde(default)]
+    apart: Vec<crate::recordings::RecordingApart>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -238,8 +252,9 @@ impl Library {
         let events_path = dir.join(EVENTS_FILE);
 
         // One snapshot for everything.
-        let (playlists, likes, streams, feedback, saved, fingerprint, events_mark, event_count) = self.read(|c| {
+        let (playlists, likes, streams, feedback, saved, recordings, fingerprint, events_mark, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
+            let recordings = crate::recordings::read_recordings(c)?;
             let likes = read_likes(c)?;
             let streams = read_streams(c)?;
             let feedback = read_feedback(c)?;
@@ -249,7 +264,7 @@ impl Library {
                 c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64;
             let mark = meta_get(c, &marker_key)?.as_deref().and_then(EventsMark::parse);
             let mark = export_events(c, &events_path, mark, event_count)?;
-            Ok((playlists, likes, streams, feedback, saved, fingerprint, mark, event_count))
+            Ok((playlists, likes, streams, feedback, saved, recordings, fingerprint, mark, event_count))
         })?;
 
         let mut report = ExportReport {
@@ -262,6 +277,15 @@ impl Library {
             saved: saved.len(),
             files_written: usize::from(events_mark.is_some()),
         };
+        let recordings_path = dir.join(RECORDINGS_FILE);
+        if !recordings.0.is_empty() || !recordings.1.is_empty() || recordings_path.exists() {
+            let json = serde_json::to_vec_pretty(&RecordingsFile {
+                version: USERDATA_VERSION,
+                links: recordings.0,
+                apart: recordings.1,
+            })?;
+            report.files_written += usize::from(write_atomic(&recordings_path, &json)?);
+        }
         let saved_path = dir.join(SAVED_FILE);
         if !saved.is_empty() || saved_path.exists() {
             let json = serde_json::to_vec_pretty(&SavedFile {
@@ -343,12 +367,14 @@ impl Library {
         let streams: Option<StreamsFile> = read_json(&dir.join(STREAMS_FILE))?;
         let feedback: Option<RecFeedbackFile> = read_json(&dir.join(REC_FEEDBACK_FILE))?;
         let saved: Option<SavedFile> = read_json(&dir.join(SAVED_FILE))?;
+        let recordings: Option<RecordingsFile> = read_json(&dir.join(RECORDINGS_FILE))?;
         for version in [
             playlists.as_ref().map(|f| f.version),
             likes.as_ref().map(|f| f.version),
             streams.as_ref().map(|f| f.version),
             feedback.as_ref().map(|f| f.version),
             saved.as_ref().map(|f| f.version),
+            recordings.as_ref().map(|f| f.version),
         ]
         .into_iter()
         .flatten()
@@ -377,6 +403,7 @@ impl Library {
             Err(e) => return Err(e.into()),
         }
 
+        let device = self.device_id();
         self.write(|tx| {
             let mut report = ImportReport {
                 invalid_lines,
@@ -409,6 +436,10 @@ impl Library {
                 if insert_event(tx, event)? {
                     report.events_added += 1;
                 }
+            }
+            // After the likes: a link spreads a like over its recording.
+            if let Some(f) = &recordings {
+                crate::recordings::merge_recordings_in(tx, &f.links, &f.apart, device.as_str())?;
             }
             // Likes and entries came in: stream tracks may join or leave.
             refresh_in_library_all(tx)?;
@@ -455,9 +486,11 @@ fn fingerprint_in(c: &Connection) -> Result<Vec<i64>> {
                 (SELECT COALESCE(SUM(updated_at + dislike), 0) FROM rec_feedback),
                 (SELECT COUNT(*) FROM event), (SELECT COALESCE(MAX(ts), 0) FROM event),
                 (SELECT COUNT(*) FROM track), (SELECT COUNT(*) FROM source),
-                (SELECT COUNT(*) FROM external_id WHERE service = 'saved')",
+                (SELECT COUNT(*) FROM external_id WHERE service = 'saved'),
+                (SELECT COUNT(*) FROM recording_link), (SELECT COUNT(DISTINCT recording) FROM recording_link),
+                (SELECT COUNT(*) FROM recording_apart)",
     )?;
-    Ok(stmt.query_row([], |r| (0..13).map(|i| r.get(i)).collect())?)
+    Ok(stmt.query_row([], |r| (0..16).map(|i| r.get(i)).collect())?)
 }
 
 fn read_saved(conn: &Connection) -> Result<Vec<SavedDoc>> {

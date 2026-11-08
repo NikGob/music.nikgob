@@ -182,19 +182,31 @@ impl Library {
         })
     }
 
+    /// The plays of `track`, and of the same song on other albums (one
+    /// recording, see `recordings`): they count for the song once.
     pub fn track_stats(&self, track: TrackId) -> Result<TrackStats> {
         self.read(|c| {
             Ok(c
-                .prepare_cached(&format!("SELECT {STATS_COLS} FROM event WHERE track_id = ?1"))?
+                .prepare_cached(&format!(
+                    "SELECT {STATS_COLS} FROM event
+                      WHERE track_id IN (SELECT ?1
+                                         UNION SELECT b.track_id FROM recording_link a
+                                                 JOIN recording_link b ON b.recording = a.recording
+                                                WHERE a.track_id = ?1)"
+                ))?
                 .query_row([track.to_string()], |r| stats_from_row_at(r, 0))?)
         })
     }
 
-    /// Stats of every track that has at least one event (input for recommendations).
+    /// Stats of every track that has at least one event (input for
+    /// recommendations); the plays of a song on two albums count for the
+    /// copy standing for it (`recording_canon`), one row.
     pub fn all_track_stats(&self) -> Result<Vec<(TrackId, TrackStats)>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(&format!(
-                "SELECT track_id, {STATS_COLS} FROM event GROUP BY track_id"
+                "SELECT coalesce(s.canon, e.track_id) AS song, {STATS_COLS}
+                   FROM event e LEFT JOIN recording_spare s ON s.track_id = e.track_id
+                  GROUP BY song"
             ))?;
             let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, stats_from_row_at(r, 1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

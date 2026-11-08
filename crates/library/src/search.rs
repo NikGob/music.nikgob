@@ -52,6 +52,7 @@ impl Library {
                 let mut stmt = c.prepare_cached(&format!(
                     "{TRACK_ROW_SELECT} JOIN track_fts ON track_fts.rowid = t.seq
                       WHERE track_fts MATCH ?1 AND t.deleted_at IS NULL AND t.in_library = 1
+                        AND t.id NOT IN (SELECT track_id FROM recording_spare)
                       ORDER BY bm25(track_fts, 8.0, 4.0, 2.0), t.has_local DESC, t.seq LIMIT ?2"
                 ))?;
                 let rows = stmt.query_map(params![expr, limit], track_row)?;
