@@ -6,7 +6,8 @@
 //! is none), and downloads the models on first use.
 //!
 //! One thread at the lowest priority with one [`Aligner`]; the user's jobs
-//! go first, and a background track gives way the moment one comes. Every
+//! go first, and a background track gives way the moment one comes or a
+//! game is in front; the pass rests between tracks ([`crate::quiet`]). Every
 //! result goes to the library (`lyrics_align`, the heard text into
 //! `lyrics_text`), so nothing is made twice; the worker hears of it as
 //! [`Msg`].
@@ -548,10 +549,17 @@ impl Thread {
                 self.last_work = Instant::now();
                 continue;
             }
-            if Instant::now() >= self.pass_at && self.pass_wanted() {
+            // While a game is in front the pass waits (the models it kept go
+            // after `KEEP_LOADED` as ever).
+            if Instant::now() >= self.pass_at && self.pass_wanted() && !crate::quiet::busy() {
+                let started = Instant::now();
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.pass_step())) {
                     Ok(true) => {
                         self.last_work = Instant::now();
+                        // The duty cycle: a rest K times the track's work
+                        // (times the model threads on the CPU).
+                        let cores = if self.settings.gpu { 1 } else { THREADS };
+                        self.pass_at = Instant::now() + crate::quiet::rest_for(started.elapsed(), cores);
                         continue;
                     }
                     Ok(false) => {}
@@ -737,7 +745,8 @@ impl Thread {
                 last_stage = Some(stage);
                 let _ = self.tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: Some(track), stage, progress: f, asked, bytes: None }))));
             }
-            !self.stopped() && !self.cancelled() && !self.superseded() && (asked || self.rx.is_empty())
+            // A game in front calls the background track off (its models go too).
+            !self.stopped() && !self.cancelled() && !self.superseded() && (asked || (self.rx.is_empty() && !crate::quiet::busy()))
         }
     }
 
