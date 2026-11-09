@@ -274,13 +274,6 @@ pub enum Script {
     LineTimes,
 }
 
-impl Script {
-    /// It plays the built-in text (it needs a break, or no word times).
-    fn wants_sample(self) -> bool {
-        matches!(self, Self::Interlude | Self::Countdown | Self::LineTimes)
-    }
-}
-
 /// What the settings page asks the stage to show this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StageRequest {
@@ -422,6 +415,26 @@ pub fn stepped(t: f32, starts: &[f32], every: f32) -> f32 {
     starts[(n as i64).rem_euclid(starts.len() as i64) as usize] + (t - n * every)
 }
 
+/// A line every this many seconds («Каскад строк»); a little slower through
+/// the soft bands.
+const STEP: f32 = 1.4;
+const EDGES_STEP: f32 = 1.6;
+
+/// Seconds into a step scene (a line every `every`) that put it at `pos`:
+/// on the line the text is on, as far into it as it got. A scene coming on
+/// goes on from where the text was instead of starting it over.
+pub fn stepped_phase(pos: f32, starts: &[f32], every: f32) -> f32 {
+    let Some(k) = starts.iter().rposition(|s| *s <= pos) else { return 0.0 };
+    k as f32 * every + (pos - starts[k]).clamp(0.0, every * 0.9)
+}
+
+/// Seconds into the pause scene that put its clock at `pos` (on a playing
+/// part of it): the inverse of [`pause_played`].
+pub fn pause_phase(pos: f32) -> f32 {
+    let n = (pos.max(0.0) / 2.5).floor();
+    n * 4.5 + (pos.max(0.0) - n * 2.5)
+}
+
 /// The lyrics' scroll by hand `t` seconds in (all of it so far, so each
 /// frame's move is the difference): pushed away once a `cycle` and left to
 /// come back by itself.
@@ -432,16 +445,29 @@ pub fn hand_at(t: f32, cycle: f32) -> f32 {
     (n + x * x * (3.0 - 2.0 * x)) * PUSH
 }
 
-/// The built-in text: (start, line) — four lines, a break, four more.
-const SAMPLE: [(f32, &str); 8] = [
-    (1.0, "Где-то рядом"),
-    (3.4, "Слышишь этот ритм"),
-    (5.8, "Он ведёт меня"),
-    (8.2, "Сквозь огни домов"),
-    (16.5, "До самого утра"),
-    (18.9, "И дальше вперёд"),
-    (21.3, "Пока горит свет"),
-    (23.7, "Мы не спим"),
+/// Where the lines of a built-in text start: four lines, a break, four more.
+const STARTS: [f32; 8] = [1.0, 3.4, 5.8, 8.2, 16.5, 18.9, 21.3, 23.7];
+/// The built-in texts, their syllables parted by `|` (a word ends with its
+/// space), so «Шаг подсветки» shows letters, syllables and words apart.
+const SAMPLE_RU: [&str; 8] = [
+    "Где-|то |ря|дом",
+    "Слы|шишь |э|тот |ритм",
+    "Он |ве|дёт |ме|ня",
+    "Сквозь |ог|ни |до|мов",
+    "До |са|мо|го |ут|ра",
+    "И |даль|ше |впе|рёд",
+    "По|ка |го|рит |свет",
+    "Мы |не |спим",
+];
+const SAMPLE_EN: [&str; 8] = [
+    "Some|where |close |to |me",
+    "Can |you |hear |the |beat",
+    "Lead|ing |me |a|long",
+    "Through |the |ci|ty |lights",
+    "Un|til |the |mor|ning |comes",
+    "And |fur|ther |on |we |go",
+    "While |the |light |is |on",
+    "We |don't |sleep |to|night",
 ];
 /// How long each line is sung.
 const SING: f32 = 1.8;
@@ -450,18 +476,60 @@ pub const SAMPLE_LOOP: f32 = 27.0;
 /// Its break between the lines.
 const BREAK: (f32, f32) = (8.2 + SING, 16.5);
 
-/// The built-in text, with word times (`words`) or line times only.
-pub fn sample_lyrics(words: bool) -> Vec<LyricLine> {
-    SAMPLE
-        .iter()
-        .map(|&(start, text)| {
-            let mut line = LyricLine::new(Duration::from_secs_f32(start), text);
+/// The language of the built-in text: the playing song's script.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SampleLang {
+    #[default]
+    Ru,
+    En,
+}
+
+impl SampleLang {
+    /// Russian for a song titled (or sung by someone named) in Cyrillic,
+    /// English for any other script.
+    pub fn of(t: &TrackRow) -> Self {
+        let (mut cyr, mut other) = (0usize, 0usize);
+        for c in t.title.chars().chain(t.artist.chars()).filter(|c| c.is_alphabetic()) {
+            if ('\u{0400}'..='\u{04FF}').contains(&c) {
+                cyr += 1;
+            } else {
+                other += 1;
+            }
+        }
+        if cyr > 0 && cyr >= other { Self::Ru } else if other > 0 { Self::En } else { Self::Ru }
+    }
+
+    fn texts(self) -> &'static [&'static str; 8] {
+        match self {
+            Self::Ru => &SAMPLE_RU,
+            Self::En => &SAMPLE_EN,
+        }
+    }
+}
+
+/// The built-in text in `lang`, with syllable times (`words`) or line
+/// times only.
+pub fn sample_lyrics(lang: SampleLang, words: bool) -> Vec<LyricLine> {
+    timed_lines(lang.texts().iter().copied(), words)
+}
+
+/// `texts` on the built-in text's line times (its break included), each
+/// line sung over [`SING`]: with `words`, its pieces (`|` parts syllables,
+/// else each word is one) share that time by their letters.
+fn timed_lines<'a>(texts: impl Iterator<Item = &'a str>, words: bool) -> Vec<LyricLine> {
+    texts
+        .zip(STARTS)
+        .map(|(marked, start)| {
+            let pieces: Vec<&str> =
+                if marked.contains('|') { marked.split('|').collect() } else { marked.split_inclusive(' ').collect() };
+            let text: String = pieces.concat();
+            let mut line = LyricLine::new(Duration::from_secs_f32(start), text.clone());
             if words {
                 line.end = Some(Duration::from_secs_f32(start + SING));
                 let letters = |w: &str| w.chars().filter(|c| !c.is_whitespace()).count() as f32;
-                let total = letters(text).max(1.0);
+                let total = letters(&text).max(1.0);
                 let mut at = 0.0;
-                for w in text.split_inclusive(' ') {
+                for w in pieces {
                     let n = letters(w);
                     line.words.push(LyricWord {
                         start: Duration::from_secs_f32(start + at / total * SING),
@@ -476,15 +544,45 @@ pub fn sample_lyrics(words: bool) -> Vec<LyricLine> {
         .collect()
 }
 
-/// The break of the built-in text on a loop, a little before and after it.
-pub fn interlude_at(t: f32) -> f32 {
-    let (from, to) = (BREAK.0 - 0.4, BREAK.1 + 0.6);
+/// The first lines of a plain (untimed) text, as the built-in text's eight:
+/// section marks («[Chorus]») left out, a short text repeated. `None`
+/// without a line.
+fn plain_lines(plain: &str) -> Option<Vec<String>> {
+    let lines: Vec<String> = plain
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !(l.starts_with('[') && l.ends_with(']')))
+        .take(STARTS.len())
+        .map(|l| l.chars().take(60).collect())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some((0..STARTS.len()).map(|i| lines[i % lines.len()].clone()).collect())
+}
+
+/// A break of at least 6 s in a timed text, (from, to) seconds: between
+/// two lines, else before the first one.
+fn break_in(lines: &[LyricLine]) -> Option<(f32, f32)> {
+    let main: Vec<&LyricLine> = lines.iter().filter(|l| !l.background && !l.text.trim().is_empty()).collect();
+    let between = main.windows(2).find_map(|w| {
+        let start = w[0].start.as_secs_f32();
+        let end = w[0].end.map_or(start + SING, |e| e.as_secs_f32().max(start));
+        let next = w[1].start.as_secs_f32();
+        (next - end >= 6.0).then_some((end, next))
+    });
+    between.or_else(|| main.first().map(|l| l.start.as_secs_f32()).filter(|s| *s >= 6.0).map(|s| (0.0, s)))
+}
+
+/// A break `brk` on a loop, a little before and after it.
+pub fn interlude_at(t: f32, brk: (f32, f32)) -> f32 {
+    let (from, to) = (brk.0 - 0.4, brk.1 + 0.6);
     from + t.rem_euclid(to - from)
 }
 
-/// The last 4 s of the break (its countdown) on a loop.
-pub fn countdown_at(t: f32) -> f32 {
-    let (from, to) = (BREAK.1 - 4.0, BREAK.1 + 0.6);
+/// The last 4 s of a break `brk` (its countdown) on a loop.
+pub fn countdown_at(t: f32, brk: (f32, f32)) -> f32 {
+    let (from, to) = (brk.1 - 4.0, brk.1 + 0.6);
     from + t.rem_euclid(to - from)
 }
 
@@ -541,10 +639,28 @@ fn placeholder(id: TrackId) -> TrackRow {
     }
 }
 
+/// The state the stage draws, and how its text plays.
+pub(crate) struct Staged {
+    pub state: ViewState,
+    /// The text is the stage's own (the built-in one, or a plain text
+    /// given line times): it plays on the stage's clock, looping after
+    /// this many seconds. `None`: the song's own timed text, at the song's
+    /// position.
+    pub own: Option<f32>,
+    /// The break the pause scenes play.
+    pub brk: (f32, f32),
+}
+
 /// The state the stage draws `scene` from: the player, the lyrics, the
 /// accounts and the dislikes of the real one, `prefs` the settings shown;
 /// Главная and the album only for their own scenes, the library never.
-pub(crate) fn light_state(state: &ViewState, prefs: &Prefs, scene: Scene, script: Script, track: TrackId) -> ViewState {
+///
+/// The text is the song's own whenever it has one: its timed lines (their
+/// times dropped for «Если нет времени слов»; a pause scene needs a break
+/// of 6 s in them), else its plain text given made-up times. Only a song
+/// without a text, or without a break for the pause scenes, gets the
+/// built-in one, in the song's script (Russian for Cyrillic, else English).
+pub(crate) fn light_state(state: &ViewState, prefs: &Prefs, scene: Scene, script: Script, track: TrackId) -> Staged {
     let mut v = ViewState {
         player: state.player.clone(),
         lyrics: state.lyrics.clone(),
@@ -559,6 +675,7 @@ pub(crate) fn light_state(state: &ViewState, prefs: &Prefs, scene: Scene, script
         Scene::Album => v.release = state.release.clone(),
         Scene::Track | Scene::Lyrics => {}
     }
+    let playing = v.player.current.as_ref().map(|t| t.id);
     if v.player.current.is_none() {
         v.player.current = Some(placeholder(track));
         v.player.duration = Some(Duration::from_secs(195));
@@ -566,17 +683,34 @@ pub(crate) fn light_state(state: &ViewState, prefs: &Prefs, scene: Scene, script
     if v.player.duration.is_none_or(|d| d.is_zero()) {
         v.player.duration = Some(Duration::from_secs(195));
     }
-    if script.wants_sample() || v.lyrics.lines.is_empty() {
-        v.lyrics.lines = sample_lyrics(script != Script::LineTimes);
-        v.lyrics.plain = None;
-        v.lyrics.loading = false;
-    }
-    v
-}
-
-/// Whether the stage plays the built-in text.
-fn plays_sample(state: &ViewState, script: Script) -> bool {
-    script.wants_sample() || state.lyrics.lines.is_empty()
+    // The text is the playing song's (not one left from the song before).
+    let own_song = playing.is_some() && v.lyrics.track.is_none_or(|t| Some(t) == playing);
+    let lang = v.player.current.as_ref().map_or_else(SampleLang::default, SampleLang::of);
+    let words = script != Script::LineTimes;
+    let needs_break = matches!(script, Script::Interlude | Script::Countdown);
+    let timed = (own_song && !v.lyrics.lines.is_empty()).then(|| break_in(&v.lyrics.lines));
+    let (own, brk) = match timed {
+        Some(brk) if !needs_break || brk.is_some() => {
+            if !words {
+                for l in &mut v.lyrics.lines {
+                    l.words.clear();
+                    l.end = None;
+                }
+            }
+            (None, brk.unwrap_or(BREAK))
+        }
+        _ => {
+            let plain = v.lyrics.plain.as_deref().filter(|_| own_song).and_then(plain_lines);
+            v.lyrics.lines = match plain {
+                Some(lines) => timed_lines(lines.iter().map(String::as_str), words),
+                None => sample_lyrics(lang, words),
+            };
+            v.lyrics.plain = None;
+            v.lyrics.loading = false;
+            (Some(SAMPLE_LOOP), BREAK)
+        }
+    };
+    Staged { state: v, own, brk }
 }
 
 /// Where each line of `lines` starts (main lines with words).
@@ -585,20 +719,21 @@ fn starts(lines: &[LyricLine]) -> Vec<f32> {
 }
 
 /// One frame of the stage's player: always playing (on its own `clock`
-/// where the real one is not, or the scene plays the built-in text), the
-/// scene's play-acting (`t` seconds into it) on top.
-fn drive(v: &mut ViewState, real: &PlayerView, script: Script, t: f32, clock: f32, sample: bool) {
+/// where the real one is not, or the text is the stage's own, looping
+/// after `own` seconds), the scene's play-acting (`t` seconds into it, the
+/// pause scenes over the break `brk`) on top.
+fn drive(v: &mut ViewState, real: &PlayerView, script: Script, t: f32, clock: f32, own: Option<f32>, brk: (f32, f32)) {
     let p = &mut v.player;
-    let len = if sample { SAMPLE_LOOP } else { p.duration.map_or(195.0, |d| d.as_secs_f32()).max(10.0) };
+    let len = own.unwrap_or_else(|| p.duration.map_or(195.0, |d| d.as_secs_f32()).max(10.0));
     let real_playing = real.status == Status::Playing;
     let lines = starts(&v.lyrics.lines);
     let pos = match script {
-        Script::Interlude => Some(interlude_at(t)),
-        Script::Countdown => Some(countdown_at(t)),
-        Script::LyricsStep => Some(stepped(t, &lines, 1.4)),
-        Script::EdgesScroll => Some(stepped(t, &lines, 1.6)),
+        Script::Interlude => Some(interlude_at(t, brk)),
+        Script::Countdown => Some(countdown_at(t, brk)),
+        Script::LyricsStep => Some(stepped(t, &lines, STEP)),
+        Script::EdgesScroll => Some(stepped(t, &lines, EDGES_STEP)),
         Script::PausePlay => Some(pause_played(t).rem_euclid(len)),
-        _ if real_playing && !sample => None,
+        _ if real_playing && own.is_none() => None,
         _ => Some(clock.rem_euclid(len)),
     };
     p.status = if script == Script::PausePlay && !pause_playing(t) { Status::Paused } else { Status::Playing };
@@ -713,7 +848,10 @@ struct Cache {
     scene: Scene,
     script: Script,
     state: ViewState,
-    sample: bool,
+    /// The text plays on the stage's clock, looping after this.
+    own: Option<f32>,
+    /// The break the pause scenes play.
+    brk: (f32, f32),
     album: Option<Album>,
 }
 
@@ -735,6 +873,12 @@ pub struct StageUi {
     /// Seconds into the script last frame (the hand's move is the
     /// difference).
     script_last: f32,
+    /// Where the stage's song was last frame, seconds: a scene coming on
+    /// (or going) carries on from it.
+    last_pos: f32,
+    /// Added to the stage's clock, so its own text goes on from where a
+    /// scene left it.
+    shift: f32,
     reroll: i64,
     born: Option<f64>,
     track: TrackId,
@@ -760,6 +904,8 @@ impl Default for StageUi {
             script: Script::None,
             script_since: 0.0,
             script_last: 0.0,
+            last_pos: 0.0,
+            shift: 0.0,
             reroll: 0,
             born: None,
             track: TrackId::new(),
@@ -846,32 +992,50 @@ impl StageUi {
         let visible = req.rect.intersect(clip);
         let local_clip = global.inverse() * visible;
 
-        // The light state, built again only when something it shows changed.
-        if req.script != self.script {
-            self.script = req.script;
-            self.script_since = now;
-            self.script_last = 0.0;
-        }
+        // The light state, built again only when something it shows changed
+        // (a value under the pointer is a new state, not a new song: the
+        // text, its place and its springs go on as they were).
         let rebuild = self.cache.as_ref().is_none_or(|c| {
             c.revision != state.revision || c.prefs != req.prefs || c.scene != scene || c.script != req.script
         });
         if rebuild {
-            let v = light_state(state, &req.prefs, scene, req.script, self.track);
-            let album = (scene == Scene::Album).then(|| album_of(&v));
+            let staged = light_state(state, &req.prefs, scene, req.script, self.track);
+            let album = (scene == Scene::Album).then(|| album_of(&staged.state));
             self.cache = Some(Cache {
                 revision: state.revision,
                 prefs: req.prefs.clone(),
                 scene,
                 script: req.script,
-                sample: plays_sample(state, req.script),
-                state: v,
+                own: staged.own,
+                brk: staged.brk,
+                state: staged.state,
                 album,
             });
         }
-        let t = (now - self.script_since) as f32;
         let clock = (now - born) as f32;
         let Some(cache) = self.cache.as_mut() else { return };
-        drive(&mut cache.state, &state.player, req.script, t, clock, cache.sample);
+        // A scene coming on goes on from where the song is (the line it is
+        // on, the playing part of a pause), and the stage's own clock from
+        // where a scene left it: moving from row to row never starts the
+        // text over.
+        if req.script != self.script {
+            let pos = self.last_pos;
+            let lines = starts(&cache.state.lyrics.lines);
+            let t0 = match req.script {
+                Script::LyricsStep => stepped_phase(pos, &lines, STEP),
+                Script::EdgesScroll => stepped_phase(pos, &lines, EDGES_STEP),
+                Script::PausePlay => pause_phase(pos),
+                _ => 0.0,
+            };
+            let len = cache.own.unwrap_or_else(|| cache.state.player.duration.map_or(195.0, |d| d.as_secs_f32()).max(10.0));
+            self.shift = (pos - clock).rem_euclid(len);
+            self.script = req.script;
+            self.script_since = now - f64::from(t0);
+            self.script_last = t0;
+        }
+        let t = (now - self.script_since) as f32;
+        drive(&mut cache.state, &state.player, req.script, t, clock + self.shift, cache.own, cache.brk);
+        self.last_pos = cache.state.player.position_now().as_secs_f32();
 
         // The scene's play-acting.
         let (pressed, taps) = if req.script == Script::DoubleTap { double_tap(t) } else { (false, 0) };
@@ -1148,9 +1312,9 @@ mod tests {
         // The break: inside the text's gap (a little either side), on a loop.
         for i in 0..200 {
             let t = i as f32 * 0.1;
-            let p = interlude_at(t);
+            let p = interlude_at(t, BREAK);
             assert!(p >= BREAK.0 - 0.41 && p <= BREAK.1 + 0.61, "{t}: {p}");
-            let c = countdown_at(t);
+            let c = countdown_at(t, BREAK);
             assert!(c >= BREAK.1 - 4.01 && c <= BREAK.1 + 0.61, "{t}: {c}");
         }
         assert!(BREAK.1 - BREAK.0 >= 6.0, "a 6 s break");
@@ -1159,6 +1323,15 @@ mod tests {
         assert!((stepped(0.1, &starts, 1.4) - 1.1).abs() < 1e-5);
         assert!((stepped(1.5, &starts, 1.4) - 3.1).abs() < 1e-4);
         assert!((stepped(4.3, &starts, 1.4) - 1.1).abs() < 1e-4);
+        // A step scene or a pause coming on goes on from where the song is.
+        for pos in [0.5, 1.2, 3.3, 5.9] {
+            let t = stepped_phase(pos, &starts, 1.4);
+            assert!((stepped(t, &starts, 1.4) - pos).abs() < 0.2, "{pos}: {}", stepped(t, &starts, 1.4));
+        }
+        for pos in [0.0, 1.0, 2.6, 7.4] {
+            assert!((pause_played(pause_phase(pos)) - pos).abs() < 1e-4, "{pos}");
+            assert!(pause_playing(pause_phase(pos)), "{pos}");
+        }
         // The hand: pushed once a cycle, never pulled back by the script.
         let mut last = hand_at(0.0, 4.0);
         for i in 1..200 {
@@ -1174,13 +1347,75 @@ mod tests {
 
     #[test]
     fn the_built_in_text_has_a_break_and_words_on_request() {
-        let words = sample_lyrics(true);
-        assert_eq!(words.len(), 8);
-        assert!(words.iter().all(|l| !l.words.is_empty() && l.end.is_some()));
-        assert!(words.iter().all(|l| l.words.iter().map(|w| w.text.as_str()).collect::<String>() == l.text));
-        let lines = sample_lyrics(false);
-        assert!(lines.iter().all(|l| l.words.is_empty() && l.end.is_none()));
-        assert!(SAMPLE.last().is_some_and(|(s, _)| s + SING < SAMPLE_LOOP));
+        for lang in [SampleLang::Ru, SampleLang::En] {
+            let words = sample_lyrics(lang, true);
+            assert_eq!(words.len(), 8);
+            assert!(words.iter().all(|l| !l.words.is_empty() && l.end.is_some()));
+            assert!(words.iter().all(|l| l.words.iter().map(|w| w.text.as_str()).collect::<String>() == l.text));
+            assert!(words.iter().all(|l| !l.text.contains('|')));
+            // Syllables, not only words: «Шаг подсветки» shows them apart.
+            let pieces: usize = words.iter().map(|l| l.words.len()).sum();
+            let spoken: usize = words.iter().map(|l| l.text.split_whitespace().count()).sum();
+            assert!(pieces > spoken + 6, "{lang:?}: {pieces} pieces, {spoken} words");
+            let lines = sample_lyrics(lang, false);
+            assert!(lines.iter().all(|l| l.words.is_empty() && l.end.is_none()));
+            assert_eq!(break_in(&words), Some(BREAK));
+        }
+        assert!(STARTS.last().is_some_and(|s| s + SING < SAMPLE_LOOP));
+        assert_eq!(sample_lyrics(SampleLang::En, true)[0].text, "Somewhere close to me");
+        assert_eq!(sample_lyrics(SampleLang::Ru, true)[0].text, "Где-то рядом");
+    }
+
+    /// The stage sings the song's own text when it has one, a plain text on
+    /// made-up times, and only otherwise the built-in one in the song's
+    /// script.
+    #[test]
+    fn the_stage_sings_the_songs_own_text() {
+        let track = TrackId::new();
+        let mut state = ViewState::default();
+        let mut song = placeholder(TrackId::new());
+        song.title = "Hollow Sea".into();
+        song.artist = "Kevin".into();
+        state.player.current = Some(song.clone());
+        let p = Prefs::default();
+        // No text: the English one for a Latin title.
+        let s = light_state(&state, &p, Scene::Lyrics, Script::None, track);
+        assert_eq!(s.state.lyrics.lines[0].text, "Somewhere close to me");
+        assert_eq!(s.own, Some(SAMPLE_LOOP));
+        song.title = "Где-то".into();
+        assert_eq!(SampleLang::of(&song), SampleLang::Ru);
+        // A plain text: its lines on the built-in times.
+        state.lyrics.track = state.player.current.as_ref().map(|t| t.id);
+        state.lyrics.plain = Some("[Verse]\nFirst line here\n\nSecond one".into());
+        let s = light_state(&state, &p, Scene::Lyrics, Script::None, track);
+        assert_eq!(s.state.lyrics.lines[0].text, "First line here");
+        assert_eq!(s.state.lyrics.lines[1].text, "Second one");
+        assert!(!s.state.lyrics.lines[0].words.is_empty());
+        // Its own timed text: as it is, at the song's position.
+        let mut a = LyricLine::new(Duration::from_secs(2), "Hello there");
+        a.words = vec![LyricWord { start: Duration::from_secs(2), end: Duration::from_secs(3), text: "Hello there".into() }];
+        let b = LyricLine::new(Duration::from_secs(4), "Second");
+        state.lyrics.lines = vec![a.clone(), b];
+        let s = light_state(&state, &p, Scene::Lyrics, Script::None, track);
+        assert_eq!(s.state.lyrics.lines[0], a);
+        assert_eq!(s.own, None);
+        // Line times only: its own lines without the word times.
+        let s = light_state(&state, &p, Scene::Lyrics, Script::LineTimes, track);
+        assert_eq!(s.state.lyrics.lines[0].text, "Hello there");
+        assert!(s.state.lyrics.lines[0].words.is_empty());
+        // A pause scene needs a break: none in it, so the built-in text.
+        let s = light_state(&state, &p, Scene::Lyrics, Script::Interlude, track);
+        assert_eq!(s.own, Some(SAMPLE_LOOP));
+        assert_eq!(s.brk, BREAK);
+        // One with a break plays it.
+        let late = LyricLine::new(Duration::from_secs(20), "Later");
+        state.lyrics.lines.push(late);
+        let s = light_state(&state, &p, Scene::Lyrics, Script::Interlude, track);
+        assert_eq!((s.own, s.brk), (None, (4.0 + SING, 20.0)));
+        // A text left from the song before is not this song's.
+        state.lyrics.track = Some(TrackId::new());
+        let s = light_state(&state, &p, Scene::Lyrics, Script::None, track);
+        assert_eq!(s.state.lyrics.lines[0].text, "Somewhere close to me");
     }
 
     #[test]
@@ -1193,7 +1428,7 @@ mod tests {
         let prefs = Prefs { reduced_motion: true, ..Default::default() };
         let track = TrackId::new();
         for scene in Scene::ALL {
-            let v = light_state(&state, &prefs, scene, Script::None, track);
+            let v = light_state(&state, &prefs, scene, Script::None, track).state;
             assert_eq!(v.home.greeting_hour == 7, scene == Scene::Home, "{scene:?}");
             assert!(!v.library.loaded, "{scene:?}: the library is never cloned");
             assert!(v.prefs.reduced_motion, "the settings shown");
@@ -1205,8 +1440,8 @@ mod tests {
         }
         // The placeholder keeps its id, so a random shape is not drawn anew
         // on every rebuild.
-        let a = light_state(&state, &prefs, Scene::Track, Script::None, track);
-        let b = light_state(&state, &prefs, Scene::Track, Script::None, track);
+        let a = light_state(&state, &prefs, Scene::Track, Script::None, track).state;
+        let b = light_state(&state, &prefs, Scene::Track, Script::None, track).state;
         assert_eq!(a.player.current.map(|t| t.id), b.player.current.map(|t| t.id));
     }
 
@@ -1214,13 +1449,14 @@ mod tests {
     fn the_stage_always_plays() {
         let state = ViewState::default();
         let track = TrackId::new();
-        let mut v = light_state(&state, &Prefs::default(), Scene::Track, Script::None, track);
-        drive(&mut v, &state.player, Script::None, 0.0, 30.0, true);
+        let mut v = light_state(&state, &Prefs::default(), Scene::Track, Script::None, track).state;
+        let own = Some(SAMPLE_LOOP);
+        drive(&mut v, &state.player, Script::None, 0.0, 30.0, own, BREAK);
         assert_eq!(v.player.status, Status::Playing);
         assert!((v.player.position.as_secs_f32() - (30.0 - SAMPLE_LOOP)).abs() < 0.01, "round the loop");
-        drive(&mut v, &state.player, Script::PausePlay, 3.0, 30.0, true);
+        drive(&mut v, &state.player, Script::PausePlay, 3.0, 30.0, own, BREAK);
         assert_eq!(v.player.status, Status::Paused);
-        drive(&mut v, &state.player, Script::Volume, 1.0, 30.0, true);
+        drive(&mut v, &state.player, Script::Volume, 1.0, 30.0, own, BREAK);
         assert!((v.player.volume - (state.player.volume.clamp(0.15, 0.75) + 0.2)).abs() < 1e-4);
     }
 
