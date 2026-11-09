@@ -671,6 +671,7 @@ impl Worker {
             Command::ImportFromService(service) => self.import_from_service(service),
             Command::ImportExportFiles(path) => self.import_export_files(path),
             Command::WindowState { visible, focused } => self.window_state(visible, focused),
+            Command::PlayFromYoutube => self.play_from_youtube(),
             Command::ClearStreamCache => {
                 for s in &self.streams {
                     s.clear_cache();

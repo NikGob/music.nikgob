@@ -508,6 +508,31 @@ impl Worker {
         true
     }
 
+    /// [`nikgob_view::Command::PlayFromYoutube`]: the playing track goes on
+    /// from where it is on its YouTube Music copy, its other sources set
+    /// aside for this play. Without a copy one is looked up (and attached,
+    /// so the next time it is there at once); meanwhile it waits as a
+    /// stream does. Nothing changes when YouTube Music cannot play now or
+    /// missed the song a moment ago.
+    pub(crate) fn play_from_youtube(&mut self) {
+        let Some(e) = self.playing else { return };
+        if self.playing_source.is_some_and(|(_, kind)| kind == SourceKind::Youtube) {
+            return;
+        }
+        let sources = self.lib.sources_of_track(e.track).unwrap_or_default();
+        let copy = self.has_audio(Service::Youtube)
+            && sources.iter().any(|s| s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none());
+        if !copy && !self.can_resolve_on(e.track, PLAYED_MISS_TTL, Service::Youtube) {
+            log::info!("{}: no YouTube Music copy to play now", e.track);
+            self.toast("Нет на YouTube Music", None);
+            return;
+        }
+        log::info!("{}: from YouTube Music at {} s", e.track, self.position_now().as_secs());
+        self.failover = Some((e.id, self.position_now()));
+        self.tried.extend(sources.iter().filter(|s| s.kind != SourceKind::Youtube).map(|s| s.id));
+        self.try_next_source(e);
+    }
+
     pub(crate) fn resolved(&mut self, track: TrackId, via: Service, found: Lookup, filled: Option<Box<StreamTrack>>) {
         self.streaming.resolving.remove(&track);
         self.streaming.resolve_via.remove(&track);
