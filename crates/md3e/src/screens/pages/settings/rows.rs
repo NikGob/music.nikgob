@@ -32,12 +32,15 @@ pub(crate) struct Mode {
     pub deep: bool,
     pub dev: bool,
     pub opacity: f32,
+    /// The live stage stands beside the rows (it shows what is under the
+    /// pointer, so the rows' own samples stay still).
+    pub stage: bool,
 }
 
 impl Default for Mode {
     /// Outside the page (a test drawing one block): everything there is.
     fn default() -> Self {
-        Self { deep: true, dev: brand::own_build(), opacity: 1.0 }
+        Self { deep: true, dev: brand::own_build(), opacity: 1.0, stage: false }
     }
 }
 
@@ -694,9 +697,9 @@ mod tests {
 
     #[test]
     fn levels_show_by_mode() {
-        let simple = Mode { deep: false, dev: true, opacity: 1.0 };
-        let deep = Mode { deep: true, dev: false, opacity: 1.0 };
-        let own = Mode { deep: true, dev: true, opacity: 1.0 };
+        let simple = Mode { deep: false, dev: true, opacity: 1.0, stage: false };
+        let deep = Mode { deep: true, dev: false, opacity: 1.0, stage: false };
+        let own = Mode { deep: true, dev: true, opacity: 1.0, stage: false };
         assert!(level_shown(simple, Level::Simple) && !level_shown(simple, Level::Deep) && !level_shown(simple, Level::Dev));
         assert!(level_shown(deep, Level::Deep) && !level_shown(deep, Level::Dev));
         assert!(level_shown(own, Level::Dev));

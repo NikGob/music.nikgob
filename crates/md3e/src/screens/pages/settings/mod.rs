@@ -215,7 +215,7 @@ pub(super) fn page(
         ui.painter().rect_filled(stage, crate::tokens::shape::EXTRA_LARGE, s.surface_container_low);
     }
 
-    rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity() });
+    rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity(), stage: at.stage.is_some() });
     let mut rui = ui.new_child(UiBuilder::new().max_rect(at.rows).id_salt(("settings-rows-ui", tab)));
     let mut area = egui::ScrollArea::vertical().id_salt(("settings-rows", tab)).auto_shrink([false, false]);
     if let Some(y) = restore {
@@ -244,7 +244,7 @@ pub(super) fn page(
         ui.add_space(8.0);
         ui.add_space(bottom_inset);
     });
-    rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity() });
+    rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity(), stage: at.stage.is_some() });
     let offer = preset::take_offer(&ctx);
     let sent = rows::take_sent(&ctx);
 

@@ -146,11 +146,23 @@ pub(super) fn row(ui: &mut Ui, area: Area, p: &Prefs) -> Option<Prefs> {
         Some(_) if p.custom_presets.contains_key(&area) => rows::send(&ctx, PrefPatch::PresetCustom(area)),
         _ => {}
     }
-    let under = rects.iter().position(|r| ui.rect_contains_pointer(*r));
+    // The preset under the pointer; in a gap between two, the one shown
+    // last stays (the stage and the rows do not flick back to the current
+    // values on the way to the next one).
+    let held_key = egui::Id::new(("settings-preset-held", id));
+    let line = rects.iter().fold(Rect::NOTHING, |a, r| a.union(*r));
+    let mut under = rects.iter().position(|r| ui.rect_contains_pointer(*r));
+    if under.is_none() && ui.rect_contains_pointer(line) {
+        under = ctx.data(|d| d.get_temp::<usize>(held_key)).filter(|i| *i < rects.len());
+    }
     if !dwelt(ui, id, under) {
+        if under.is_none() {
+            ctx.data_mut(|d| d.remove::<usize>(held_key));
+        }
         return None;
     }
     let i = under?;
+    ctx.data_mut(|d| d.insert_temp(held_key, i));
     let shown = offered(area, p, i);
     settings_help::set_future(&ctx, settings_help::preset_changes(area, p, &shown));
     let pass = ctx.cumulative_pass_nr();
@@ -170,13 +182,29 @@ fn buttons(ui: &mut Ui, area: Area, custom: bool, current: usize) -> (Option<usi
 /// A tile's card.
 const TILE: egui::Vec2 = vec2(112.0, 72.0);
 
+/// A still tile as it was last drawn: what it showed, and its shapes.
+struct Snapshot {
+    prefs: Prefs,
+    size: egui::Vec2,
+    /// The theme's colours it was drawn in.
+    scheme: (egui::Color32, egui::Color32, egui::Color32, bool),
+    /// Where its card was then.
+    at: egui::Pos2,
+    shapes: Vec<egui::Shape>,
+}
+
 /// The presets as live tiles: a small sample of the track screen (glow,
-/// shapes, the cover with its ring) and the name under it; only the tile
-/// under the pointer moves. «Свои» draws the values kept.
+/// shapes, the cover with its ring) and the name under it; «Свои» draws the
+/// values kept. A still tile is drawn once and its shapes kept (only moved
+/// with the page), so a row of them costs next to nothing a frame; only
+/// the tile under the pointer moves, and beside the stage none does (the
+/// stage plays the preset under the pointer, big).
 fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (Option<usize>, Vec<Rect>) {
+    let _p = crate::prof::scope("settings.tiles");
     let ctx = ui.ctx().clone();
     let app = Theme::get(&ctx);
     let s = app.scheme;
+    let beside_stage = rows::mode(&ctx).stage;
     let n = area.names().len() + usize::from(custom);
     let mut picked = None;
     let mut rects = Vec::with_capacity(n);
@@ -191,27 +219,27 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
             let selected = i == current;
             let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(card));
             painter.rect_filled(card, shape::MEDIUM, s.surface_container_high);
-            // The sample: still unless the pointer is on it.
-            let moving = resp.hovered();
+            let moving = resp.hovered() && !beside_stage;
             let shown = offered(area, p, i);
             let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(card).id_salt(("set-preset-tile-ui", area, i)));
             tui.set_clip_rect(ui.clip_rect().intersect(card));
-            Theme::set(&ctx, app.with_reduced_motion(app.reduced_motion || !moving));
-            let t = anim::now(&ctx) as f32;
-            let kick = if moving { settings_help::beat(t) } else { 0.0 };
-            if shown.ambient != nikgob_view::Ambient::Off {
-                let bass = if shown.ambient == nikgob_view::Ambient::Reactive { kick } else { 0.0 };
-                ambient::paint(&ctx, tui.painter(), card, bass, moving, shown.ambient_strength);
-            }
-            if shown.bg_shapes != nikgob_view::BgShapes::Off {
-                let transients = [kick; 8];
-                bg_shapes::preview(&tui, card, &shown, kick, &transients, egui::Id::new(("set-preset-bg", area, i)));
-            }
-            now_playing::preview(&tui, card.shrink(4.0), &shown, shown.ring);
-            Theme::set(&ctx, app);
             if moving {
-                painter.rect_filled(card, shape::MEDIUM, s.on_surface.gamma_multiply(0.08));
+                sample(&tui, area, i, card, &shown, true);
                 ctx.request_repaint();
+            } else {
+                still(&tui, area, i, card, &shown);
+            }
+            // The hover and press state layers fade in and out (M3).
+            let layer = if resp.is_pointer_button_down_on() {
+                0.10
+            } else if resp.hovered() {
+                0.08
+            } else {
+                0.0
+            };
+            let layer = anim::fraction(&ctx, egui::Id::new(("set-preset-tile-hover", area, i)), layer, app.motion.fast_effects);
+            if layer > 0.001 {
+                painter.rect_filled(card, shape::MEDIUM, s.on_surface.gamma_multiply(layer));
             }
             if selected {
                 painter.rect_stroke(card, shape::MEDIUM, Stroke::new(2.0, s.primary), egui::StrokeKind::Inside);
@@ -231,4 +259,57 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
         }
     });
     (picked, rects)
+}
+
+/// The tile's sample: the glow, the shapes, the cover with its ring under
+/// `shown`; on a made-up beat while `moving`, else at rest.
+fn sample(ui: &Ui, area: Area, i: usize, card: Rect, shown: &Prefs, moving: bool) {
+    let ctx = ui.ctx();
+    let app = Theme::get(ctx);
+    Theme::set(ctx, app.with_reduced_motion(app.reduced_motion || !moving));
+    let t = anim::now(ctx) as f32;
+    let kick = if moving { settings_help::beat(t) } else { 0.0 };
+    if shown.ambient != nikgob_view::Ambient::Off {
+        let bass = if shown.ambient == nikgob_view::Ambient::Reactive { kick } else { 0.0 };
+        // Its own drift (a still tile's clouds at their start), so a tile
+        // never holds back the stage's or the player's clouds.
+        ambient::paint_at(ctx, ui.painter(), card, bass, if moving { t } else { 0.0 }, shown.ambient_strength);
+    }
+    if shown.bg_shapes != nikgob_view::BgShapes::Off {
+        let transients = [kick; 8];
+        bg_shapes::preview(ui, card, shown, kick, &transients, egui::Id::new(("set-preset-bg", area, i)));
+    }
+    now_playing::preview(ui, card.shrink(4.0), shown, shown.ring);
+    Theme::set(ctx, app);
+}
+
+/// A tile at rest: its kept shapes moved to where the card is now, or drawn
+/// anew (and kept) when what it shows, its size or the theme changed. Kept
+/// only from a frame drawn at full opacity (the page's fade is applied to
+/// them as they are drawn again).
+fn still(ui: &Ui, area: Area, i: usize, card: Rect, shown: &Prefs) {
+    let ctx = ui.ctx();
+    let theme = Theme::get(ctx);
+    let s = theme.scheme;
+    let scheme = (s.primary, s.secondary_container, s.surface, theme.dark);
+    let key = egui::Id::new(("set-preset-tile-still", area, i));
+    let kept = ctx.data(|d| d.get_temp::<std::sync::Arc<Snapshot>>(key));
+    if let Some(k) = kept.filter(|k| k.prefs == *shown && k.size == card.size() && k.scheme == scheme) {
+        let delta = card.min - k.at;
+        ui.painter().extend(k.shapes.iter().cloned().map(|mut sh| {
+            sh.translate(delta);
+            sh
+        }));
+        return;
+    }
+    let layer = ui.layer_id();
+    let start = ctx.graphics(|g| g.get(layer).map_or(0, |l| l.next_idx().0));
+    sample(ui, area, i, card, shown, false);
+    if ui.opacity() < 0.999 {
+        return;
+    }
+    let shapes: Vec<egui::Shape> =
+        ctx.graphics(|g| g.get(layer).map(|l| l.all_entries().skip(start).map(|c| c.shape.clone()).collect()).unwrap_or_default());
+    let snap = Snapshot { prefs: shown.clone(), size: card.size(), scheme, at: card.min, shapes };
+    ctx.data_mut(|d| d.insert_temp(key, std::sync::Arc::new(snap)));
 }
