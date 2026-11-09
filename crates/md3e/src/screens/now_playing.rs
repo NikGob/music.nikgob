@@ -1019,13 +1019,10 @@ pub fn show_on(
     let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
     let swap = shape_swap(&ctx, stage, shape, morph >= 0.999, theme.reduced_motion);
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
-    // TODO(r21-wire): `prefs.cover_spin_s` (default 48), the pulse's
-    // strength `prefs.cover_pulse_strength` (default 0.08) and the ring's
-    // `prefs.ring_spin_s` (default 36) once r21-presets adds them.
-    let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
+    // «Обложка → Скорость» and «Пульсация → Сила».
+    let period = if prefs.cover_spin && motion { prefs.cover_spin_s.max(1.0) } else { 0.0 };
     let spin = turn(ui, stage.id("np-cover-angle"), playing, bass, period, prefs.cover_ccw);
-    // Stronger than in the player, so a small sample shows it.
-    let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
+    let swell = if prefs.cover_pulse { 1.0 + prefs.cover_pulse_strength * kick } else { 1.0 };
     // Instant feedback: the cover sinks a little while pressed, so a tap
     // feels taken even while it waits to see whether a second one comes.
     // (The stage's copy is pressed by its scene, not the pointer.)
@@ -1055,7 +1052,7 @@ pub fn show_on(
     let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
     let ring_scope = crate::prof::scope("np.ring");
     if prefs.ring {
-        let period = if prefs.spin_ring && motion { 36.0 } else { 0.0 };
+        let period = if prefs.spin_ring && motion { prefs.ring_spin_s.max(1.0) } else { 0.0 };
         let angle = turn(ui, stage.id("np-ring-angle"), playing, bass, period, prefs.ring_ccw);
         let beat = prefs.ring_beat && playing;
         let heights = if bars { cava(ui, stage, &bands, beat && motion) } else { Vec::new() };
@@ -1334,10 +1331,10 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
     let t = anim::now(ui.ctx()) as f32;
     let kick = if motion { super::pages::settings_help::beat(t) } else { 0.0 };
     let sign = |ccw: bool| if ccw { -1.0 } else { 1.0 };
-    // Faster than in the player (48 s and 36 s a turn) so it is seen at all.
-    let spin = if prefs.cover_spin && motion { t * TAU / 12.0 * sign(prefs.cover_ccw) } else { 0.0 };
-    // Stronger than in the player, so a small sample shows it.
-    let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
+    // Four times faster than in the player, so a small sample shows it.
+    let period = (prefs.cover_spin_s / 4.0).max(2.0);
+    let spin = if prefs.cover_spin && motion { t * TAU / period * sign(prefs.cover_ccw) } else { 0.0 };
+    let swell = if prefs.cover_pulse { 1.0 + prefs.cover_pulse_strength * kick } else { 1.0 };
     let pad = if with_ring { RING_PAD * 0.8 } else { 8.0 };
     let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0);
     let cover = Rect::from_center_size(rect.center(), vec2(side, side) * swell);
@@ -1357,7 +1354,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
     outline.paint(ui, None);
     if with_ring {
         let angle = if prefs.spin_ring && motion && prefs.ring_style != RingStyle::Bars {
-            t * TAU / 10.0 * sign(prefs.ring_ccw)
+            t * TAU / (prefs.ring_spin_s / 3.6).max(2.0) * sign(prefs.ring_ccw)
         } else {
             0.0
         };

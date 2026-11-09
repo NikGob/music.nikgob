@@ -143,8 +143,6 @@ pub enum Section {
     Releases,
 }
 
-// For «Разделы главной» (r21-wire).
-#[cfg_attr(not(test), allow(dead_code))]
 impl Section {
     /// Every section, in the page's own order.
     pub const ALL: [Self; 7] = [
@@ -171,11 +169,28 @@ impl Section {
     }
 }
 
+/// The page's section for a line of «Разделы главной» (the same seven, in
+/// the same order).
+pub fn section_of(key: nikgob_view::HomeSection) -> Section {
+    use nikgob_view::HomeSection as H;
+    match key {
+        H::Shortcuts => Section::Shortcuts,
+        H::Mixes => Section::Mixes,
+        H::ListenAgain => Section::ListenAgain,
+        H::OfDay => Section::OfDay,
+        H::FromLibrary => Section::FromLibrary,
+        H::New => Section::New,
+        H::Releases => Section::Releases,
+    }
+}
+
 /// The order and the sections turned on, as «Разделы главной» sets them;
 /// empty: all of them in the page's own order.
-pub fn order_of(_prefs: &nikgob_view::Prefs) -> Vec<(Section, bool)> {
-    // TODO(r21-wire): from `Prefs::home_sections` (r21-presets).
-    Vec::new()
+pub fn order_of(prefs: &nikgob_view::Prefs) -> Vec<(Section, bool)> {
+    if prefs.home_sections.is_empty() {
+        return Vec::new();
+    }
+    prefs.home_order().into_iter().map(|s| (section_of(s.key), s.on)).collect()
 }
 
 /// `shown` in `order`: the sections it names, turned on, in its order;
