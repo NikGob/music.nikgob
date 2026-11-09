@@ -166,6 +166,9 @@ pub(super) fn page(
         let deep_sent = pages.settings_memory.deep_sent;
         pages.settings_memory = Memory { deep_sent, ..Memory::default() };
         preset::close_all(&ctx);
+        // A «Текст песни» dialog whose gear (or any link) led here closes:
+        // it would stand over the page it opened.
+        crate::screens::lyrics_ui::close_dialog(&ctx);
     }
     pages.settings_seen = pass;
     // The saved mode is the prefs'; the one just picked counts until they

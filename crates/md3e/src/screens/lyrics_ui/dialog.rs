@@ -45,7 +45,7 @@ pub(super) fn grow(ctx: &Context, key: &str, from: Rect) {
     });
 }
 
-fn close(ctx: &Context) {
+pub(super) fn close(ctx: &Context) {
     shut(ctx, OPEN);
 }
 

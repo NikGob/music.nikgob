@@ -45,6 +45,12 @@ pub(crate) fn overlays(ctx: &Context, state: &ViewState, out: &mut Vec<Command>)
     editor::show(ctx, state, out);
 }
 
+/// Closes the «Текст песни» dialog (it shrinks back): Settings opening
+/// must not show it over its page. The editor stays (it may hold edits).
+pub(crate) fn close_dialog(ctx: &Context) {
+    dialog::close(ctx);
+}
+
 /// The user's own text is there: «Вернуть найденный» goes back to the
 /// found ones.
 pub(crate) fn has_own(l: &LyricsView) -> bool {
