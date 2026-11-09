@@ -24,6 +24,11 @@
 //! which is then a live source of the widget. A track the widget failed
 //! keeps the old fallback (the runtime's next source, YouTube Music).
 //!
+//! The developer profile's tracks have no files (`profile.rs`): a missing
+//! local file of a known length plays there as silence of that length
+//! ([`Silence`]), so position, lyrics and the end of the track run as for a
+//! real song; elsewhere a missing file fails as ever.
+//!
 //! Switching the output device restarts the engine: the old `Player` is
 //! dropped (its threads stop and the device closes), a new one opens the
 //! chosen device, and the runtime replays the current track from where it
@@ -32,18 +37,78 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PlayItem, Player, PlayerOptions};
+use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, Player, PlayerOptions};
 use nikgob_core::streaming::{AudioStream, StreamError, StreamService};
 use nikgob_core::streaming::Service as StreamKind;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
 
 /// The analyzer of the engine that plays right now.
 pub type AnalyzerSlot = Arc<Mutex<Option<Analyzer>>>;
+
+/// Missing files of a known length play as silence (the developer profile).
+static SILENT_MISSING: AtomicBool = AtomicBool::new(false);
+
+/// From now on a local file that is not there plays as silence of the
+/// track's length (the developer profile, whose tracks have no files).
+pub fn play_missing_files_silent() {
+    SILENT_MISSING.store(true, Ordering::Relaxed);
+}
+
+/// Silence of a set length: a track of the developer profile without a file.
+struct Silence {
+    frames: u64,
+    at: u64,
+}
+
+impl Silence {
+    const RATE: u32 = 44_100;
+
+    fn new(length: Duration) -> Self {
+        Self { frames: (length.as_secs_f64() * f64::from(Self::RATE)) as u64, at: 0 }
+    }
+}
+
+impl PcmSource for Silence {
+    fn sample_rate(&self) -> u32 {
+        Self::RATE
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> Result<PcmRead, PcmError> {
+        let left = self.frames.saturating_sub(self.at);
+        if left == 0 {
+            return Ok(PcmRead::End);
+        }
+        let n = (out.len() / 2).min(usize::try_from(left).unwrap_or(usize::MAX));
+        out[..n * 2].fill(0.0);
+        self.at += n as u64;
+        Ok(PcmRead::Frames(n))
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs_f64(self.frames as f64 / f64::from(Self::RATE)))
+    }
+
+    fn seek(&mut self, position: Duration) -> bool {
+        self.at = ((position.as_secs_f64() * f64::from(Self::RATE)) as u64).min(self.frames);
+        true
+    }
+}
+
+/// The silence a request plays instead of its missing file, when that is on.
+fn silence_for(r: &PlayRequest) -> Option<Silence> {
+    let PlaySource::File(path) = &r.source else { return None };
+    let length = r.duration.filter(|d| !d.is_zero())?;
+    (SILENT_MISSING.load(Ordering::Relaxed) && !path.exists()).then(|| Silence::new(length))
+}
 
 /// Shared by every engine generation.
 #[derive(Clone, Default)]
@@ -210,6 +275,15 @@ impl Engine {
             return PlayItem {
                 id: r.id,
                 source: ItemSource::Pcm(Box::new(s.track(id, r.duration))),
+                gain_db: 0.0,
+                duration_hint: r.duration,
+            };
+        }
+        if let Some(silence) = silence_for(&r) {
+            log::debug!("item {}: no file, silence of {:?}", r.id, r.duration);
+            return PlayItem {
+                id: r.id,
+                source: ItemSource::Pcm(Box::new(silence)),
                 gain_db: 0.0,
                 duration_hint: r.duration,
             };
