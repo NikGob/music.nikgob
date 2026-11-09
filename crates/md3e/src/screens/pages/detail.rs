@@ -245,28 +245,20 @@ pub fn release(
         }
         let ids: Vec<_> = r.tracks.iter().map(|t| t.id).collect();
         let more = &resp[3 + off];
-        let picked = Menu::new("rel-more")
-            .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!c.artists.linked().is_empty()))
-            .item(MenuItem::new("Поделиться").icon(Icon::Share))
-            .divider()
-            .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
-            .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
-            .attach(more);
-        match picked {
-            Some(0) => out.push(Command::PlayReleaseNext(id)),
-            Some(1) => out.push(Command::EnqueueRelease(id)),
-            Some(2) => {
+        // The same actions as the album's right-click menu
+        // ([`widgets::release_rows`]), less the buttons left of it.
+        let (menu, acts) = widgets::menu_of("rel-more", widgets::release_rows(c, true));
+        match menu.attach(more).and_then(|i| acts.get(i).copied()) {
+            Some(widgets::ReleaseAct::Playlist) => {
                 pages.pending_add = Some(ids.clone());
                 pages.pending_add_anchor = Some(more.rect);
             }
-            Some(3) => nav = crate::screens::artist_links::go_to(ui.ctx(), crate::screens::artist_links::library(&c.artists)),
-            Some(4) => out.push(Command::Share(nikgob_view::ShareTarget::Release(id))),
-            Some(5) => super::request_release_delete(ui.ctx(), id, &c.title, false),
-            Some(6) => super::request_release_delete(ui.ctx(), id, &c.title, true),
-            _ => {}
+            Some(a) => {
+                if let Some(r) = widgets::release_apply(ui.ctx(), a, c, out) {
+                    nav = Some(r);
+                }
+            }
+            None => {}
         }
         ui.add_space(16.0);
         // «Не скачано · 1»: only the lines without a file (the album has

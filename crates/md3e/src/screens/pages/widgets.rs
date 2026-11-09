@@ -193,38 +193,75 @@ pub fn album_like_label(liked: bool) -> &'static str {
     if liked { "Убрать из любимого" } else { "В любимое" }
 }
 
-/// Right-click menu of an album (card or row).
+//// What the menu of an album does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseAct {
+    Play,
+    Shuffle,
+    Next,
+    Queue,
+    Playlist,
+    Like,
+    Artist,
+    Share,
+    Trash,
+    Purge,
+}
+
+/// The one list of an album's actions, for its right-click menu (card or
+/// row) and the ⋮ of its page. On the page (`on_page`) «Слушать»,
+/// «Перемешать» and the like are buttons beside it and are left out; «В
+/// плейлист…» needs the album's tracks, which only its page has.
+pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
+    use ReleaseAct as A;
+    let mut rows = Vec::new();
+    if !on_page {
+        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+    }
+    rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    if on_page {
+        rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    }
+    rows.push(Row::Divider);
+    if !on_page {
+        rows.push(Row::Item(A::Like, MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked)));
+    }
+    rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!r.artists.linked().is_empty())));
+    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Divider);
+    rows.push(Row::Item(A::Trash, MenuItem::new("Удалить альбом").icon(Icon::Delete)));
+    rows.push(Row::Item(A::Purge, MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete)));
+    rows
+}
+
+/// Does an album action (all but «В плейлист…», which the page opens).
+pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
+    match act {
+        ReleaseAct::Play => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
+        ReleaseAct::Shuffle => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: true }),
+        ReleaseAct::Next => out.push(Command::PlayReleaseNext(r.id)),
+        ReleaseAct::Queue => out.push(Command::EnqueueRelease(r.id)),
+        ReleaseAct::Like => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
+        // Several artists: a chooser.
+        ReleaseAct::Artist => return artist_links::go_to(ctx, artist_links::library(&r.artists)),
+        ReleaseAct::Share => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
+        ReleaseAct::Trash => super::request_release_delete(ctx, r.id, &r.title, false),
+        ReleaseAct::Purge => super::request_release_delete(ctx, r.id, &r.title, true),
+        ReleaseAct::Playlist => {}
+    }
+    None
+}
+
+/// Right-click menu of an album (card or row): [`release_rows`].
 pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
     if Menu::context_idle(resp, ("release-menu", resp.id)) {
         return None;
     }
-    let picked = Menu::new(("release-menu", resp.id))
-        .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
-        .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
-        .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-        .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!r.artists.linked().is_empty()))
-        .divider()
-        .item(MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked))
-        .item(MenuItem::new("Поделиться").icon(Icon::Share))
-        .divider()
-        .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
-        .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
-        .context_menu(resp);
-    match picked? {
-        0 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
-        1 => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: true }),
-        2 => out.push(Command::PlayReleaseNext(r.id)),
-        3 => out.push(Command::EnqueueRelease(r.id)),
-        4 => return artist_links::go_to(&resp.ctx, artist_links::library(&r.artists)),
-        5 => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
-        6 => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
-        7 => super::request_release_delete(&resp.ctx, r.id, &r.title, false),
-        8 => super::request_release_delete(&resp.ctx, r.id, &r.title, true),
-
-        _ => {}
-    }
-    None
+    let (menu, acts) = menu_of(("release-menu", resp.id), release_rows(r, false));
+    let act = menu.context_menu(resp).and_then(|i| acts.get(i).copied())?;
+    release_apply(&resp.ctx, act, r, out)
 }
 
 /// A playlist card; with `pages` its right-click menu can rename and delete.
