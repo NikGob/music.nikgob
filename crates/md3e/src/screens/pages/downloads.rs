@@ -151,7 +151,24 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             ui.add_space(12.0);
             ui.label(TypeRole::LabelLarge.style().rich(&c.question, s.on_surface_variant));
             ui.add_space(4.0);
-            for (i, o) in c.options.iter().enumerate() {
+            // A yes or no question: the songs it is about, nothing to choose.
+            if c.yes_no {
+                for o in &c.options {
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        let width = ui.available_width() - 8.0;
+                        ui.vertical(|ui| {
+                            ui.set_max_width(width);
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.add(egui::Label::new(TypeRole::TitleSmall.style().rich(&o.label, s.on_surface)).wrap());
+                            ui.add(egui::Label::new(TypeRole::BodySmall.style().rich(&o.detail, s.on_surface_variant)).wrap());
+                        });
+                    });
+                    ui.add_space(6.0);
+                }
+                choice = 0;
+            }
+            for (i, o) in c.options.iter().enumerate().filter(|_| !c.yes_no) {
                 let bg = ui.painter().add(egui::Shape::Noop);
                 let row = ui.horizontal(|ui| {
                     ui.add_space(4.0);

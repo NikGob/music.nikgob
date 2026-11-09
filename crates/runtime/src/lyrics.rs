@@ -858,6 +858,14 @@ fn cached_lyrics_at(
     kept: Option<&Path>,
     now: i64,
 ) -> TrackLyrics {
+    // One song on two albums: the lyrics and the word timing found for the
+    // other copy are this one's when the two are as long (never fetched
+    // twice).
+    match lib.share_recording_lyrics(track) {
+        Ok(true) => log::info!("lyrics of {track}: from the same recording on another album"),
+        Ok(false) => {}
+        Err(e) => log::warn!("lyrics of {track}: the same recording's: {e}"),
+    }
     let mut tl = TrackLyrics {
         pick: lib
             .lyrics_pick(track)

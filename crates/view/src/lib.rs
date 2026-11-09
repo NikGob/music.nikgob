@@ -1123,6 +1123,10 @@ pub struct Confirm {
     /// buttons act on the ticked ones only ([`Command::ConfirmPicked`]).
     /// `None`: one option is chosen ([`Command::ConfirmChoice`]).
     pub pick: Option<ConfirmPick>,
+    /// A yes or no question about the options («Одна и та же песня?» with
+    /// the two songs): they are shown without a choice, the accept button
+    /// answers yes (`option: Some(0)`) and the other no (`None`).
+    pub yes_no: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2348,6 +2352,10 @@ pub struct ViewState {
     /// Disliked tracks and artists not to recommend («Не нравится»,
     /// «Не рекомендовать исполнителя»).
     pub dislikes: DislikesView,
+    /// The tracks of one song on two albums (one recording): another album
+    /// it is on and that album's title, for the track's menu («Есть и на
+    /// альбоме «…»»).
+    pub also_on: std::sync::Arc<std::collections::HashMap<TrackId, (ReleaseId, String)>>,
     /// Bumped when cover files on disk may have been rewritten (an import,
     /// a retag), so a UI looks at the covers it holds again.
     pub cover_files: u64,
@@ -2626,6 +2634,10 @@ pub enum Command {
     WrongFile(nikgob_core::model::TrackId),
     /// Takes [`Self::WrongFile`] back: the file plays again.
     UndoWrongFile(nikgob_core::model::TrackId),
+    /// «Разные песни» on a track of one song on two albums
+    /// ([`ViewState::also_on`]): it is another song than the tracks it was
+    /// linked with, and never linked with them again.
+    RecordingApart(nikgob_core::model::TrackId),
     /// Folds the editions of [`EditionOffer::id`] into one album.
     MergeEditions(u64),
     /// Keeps them apart and never offers them again.

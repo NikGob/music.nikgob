@@ -1098,6 +1098,7 @@ fn upgrade_offer() -> nikgob_view::Confirm {
         recommended,
     };
     nikgob_view::Confirm {
+        yes_no: false,
         id: (1 << 47) | 1,
         title: "8 способов как бросить... — Пошлая Молли".into(),
         origin: "Качество лучше · трек".into(),
@@ -1126,6 +1127,7 @@ fn fake_flac_card() -> nikgob_view::Confirm {
     };
     let ids = (1..=3u128).map(|n| nikgob_core::model::SourceId(nikgob_core::model::Uuid::from_u128(0xfa1e_0000 + n))).collect();
     nikgob_view::Confirm {
+        yes_no: false,
         // The runtime's bit of the fakes cards (`quality::QUALITY_ID`).
         id: (1 << 45) | 1,
         title: "8 способов как бросить...".into(),
@@ -1183,6 +1185,7 @@ fn confirm() -> nikgob_view::Confirm {
         recommended,
     };
     nikgob_view::Confirm {
+        yes_no: false,
         id: 1,
         title: "Shake It Now. (feat. Ado) — Nakimushi".into(),
         origin: "Хочу скачать · трек".into(),

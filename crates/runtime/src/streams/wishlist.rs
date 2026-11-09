@@ -472,6 +472,18 @@ impl Worker {
             && sources.iter().filter(live).any(|s| !s.kind.is_local())
     }
 
+    /// The library has `track`'s song on another album with a file (one
+    /// recording: the same ISRC, recording MBID or AcoustID, linked now if
+    /// it was not yet): a track item of it needs no download. An album
+    /// item still completes its album.
+    fn have_recording(&self, track: TrackId) -> bool {
+        let linked = crate::same_audio::link_by_ids(&self.lib, Some(track));
+        if linked > 0 {
+            log::info!("wishlist: {track} is the same recording as a song on another album");
+        }
+        self.lib.recording_has_file(track).unwrap_or(false)
+    }
+
     /// An open item of the same song as `item` under another track (a
     /// twin not merged yet): the same ISRC, or the same title and artist.
     fn open_twin(&self, item: &WishlistItem) -> Option<WishlistItem> {
@@ -556,6 +568,9 @@ impl Worker {
         if !self.state.read().prefs.like_downloads || !self.stream_only(track) {
             return false;
         }
+        if self.have_recording(track) {
+            return false;
+        }
         let existing = self.lib.wishlist_for_track(track).unwrap_or_default();
         let open = |i: &WishlistItem| !matches!(i.status, WishlistStatus::Done | WishlistStatus::Failed);
         if existing.iter().any(open) {
@@ -637,7 +652,7 @@ impl Worker {
     /// track item is made for it.
     fn wish_track_now(&mut self, track: TrackId) -> Wished {
         let has_file = self.lib.get_track_row(track).ok().flatten().is_some_and(|r| r.has_local);
-        if has_file {
+        if has_file || self.have_recording(track) {
             return Wished::Nothing;
         }
         let existing = self.lib.wishlist_for_track(track).unwrap_or_default();
@@ -2985,6 +3000,7 @@ impl Worker {
             _ => "Хочу скачать".into(),
         };
         v::Confirm {
+            yes_no: false,
             id,
             title: what,
             origin: match item.scope {

@@ -443,19 +443,19 @@ impl Library {
     /// and the word timing made against the recording. Copies of different
     /// lengths keep their own timing. Returns whether anything came.
     pub fn share_recording_lyrics(&self, track: TrackId) -> Result<bool> {
-        self.write(|tx| {
-            let t = track.to_string();
-            let own: Option<bool> = tx
+        let t = track.to_string();
+        // Looked up first without the writer: most tracks have their own.
+        let twin: Option<String> = self.read(|c| {
+            let own: Option<bool> = c
                 .prepare_cached(
                     "SELECT synced IS NULL AND plain IS NULL AND instrumental = 0 FROM lyrics WHERE track_id = ?1",
                 )?
                 .query_row([&t], |r| r.get(0))
                 .optional()?;
             if own == Some(false) {
-                return Ok(false);
+                return Ok(None);
             }
-            let twin: Option<String> = tx
-                .prepare_cached(
+            Ok(c.prepare_cached(
                     "SELECT b.track_id FROM recording_link a
                        JOIN recording_link b ON b.recording = a.recording AND b.track_id != a.track_id
                        JOIN track ta ON ta.id = a.track_id
@@ -467,10 +467,12 @@ impl Library {
                         AND abs(ta.duration_ms - tb.duration_ms) <= 1000
                       ORDER BY l.fetched_at DESC, tb.seq
                       LIMIT 1",
-                )?
-                .query_row([&t], |r| r.get(0))
-                .optional()?;
-            let Some(twin) = twin else { return Ok(false) };
+            )?
+            .query_row([&t], |r| r.get(0))
+            .optional()?)
+        })?;
+        let Some(twin) = twin else { return Ok(false) };
+        self.write(|tx| {
             tx.execute(
                 "INSERT INTO lyrics(track_id, synced, plain, instrumental, source, fetched_at)
                  SELECT ?1, synced, plain, instrumental, source, fetched_at FROM lyrics WHERE track_id = ?2
