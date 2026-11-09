@@ -17,6 +17,7 @@ use crate::{
 pub(super) fn group(ui: &mut Ui, title: &str) -> egui::Response {
     let s = Theme::get(ui.ctx()).scheme;
     settings_help::group_start(ui);
+    settings_help::note_group(ui.ctx(), title);
     ui.add_space(24.0);
     let header = ui.label(TypeRole::TitleSmall.style().rich(title, s.primary));
     ui.add_space(4.0);

@@ -17,6 +17,7 @@ mod pages;
 mod pane;
 mod player_bar;
 mod sound_quality;
+pub mod sweep;
 mod tag_editor;
 mod visualizer;
 
