@@ -866,6 +866,9 @@ impl Worker {
             Command::CancelCraft => self.cancel_craft(),
             Command::ShowLyricsAs(t, sync) => self.show_lyrics_as(t, sync),
             Command::SaveLyrics { track, source } => self.save_lyrics(track, source),
+            Command::SaveOwnLyrics { track, lines, timed } => self.save_own_lyrics(track, lines, timed),
+            Command::DropOwnLyrics(track) => self.drop_own_lyrics(track),
+            Command::RestoreOwnLyrics(track) => self.restore_own_lyrics(track),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
                 let p = self.position_now().as_millis() as i64 + ms;

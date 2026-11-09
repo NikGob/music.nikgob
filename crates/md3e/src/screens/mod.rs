@@ -703,7 +703,8 @@ impl Md3eUi {
     }
 
     fn shortcuts(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
-        let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
+        // The lyrics editor takes Space, Enter and the arrows while it is up.
+        let typing = (ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input()) || lyrics_ui::takes_keys(ctx);
         let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && !compact_page(self.route()));
         let mut previous = false;
         let mut go = None;

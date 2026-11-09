@@ -4,9 +4,8 @@
 //! text is seen and the timing to make) and where the text is kept with
 //! «Сохранить текст»; the shown text on the right, following the song.
 //!
-//! The right side is where the lyrics editor will go (the text and its
-//! times by hand, saved as a lyrics file next to the track): `text_side`
-//! is its slot.
+//! «Изменить текст…» puts the lyrics editor on the right side in place of
+//! the text ([`super::editor::page`]) until it is saved or given up.
 
 use egui::{Align, Layout, Ui, vec2};
 use nikgob_view::{Command, LyricsAvail, Route, ViewState};
@@ -165,7 +164,14 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
     }
 }
 
-/// The shown text in full, following the song. (The editor goes here.)
+/// The shown text in full, following the song, or the editor while the
+/// text is edited.
 fn text_side(ui: &mut Ui, size: egui::Vec2, state: &ViewState, out: &mut Vec<Command>) {
-    super::text_card(ui, size, state, out);
+    match super::editor::on_page(ui.ctx()) {
+        Some(track) => {
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            super::editor::page(ui, rect, track, state, out);
+        }
+        None => super::text_card(ui, size, state, out),
+    }
 }

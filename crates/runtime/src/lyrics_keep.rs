@@ -8,6 +8,13 @@
 //! a file keeps the `.ttml` in its artist's folder of the library («Только
 //! текст»), or is saved as a file there first and keeps its text next to
 //! it like any song («Песню и текст»).
+//!
+//! The user's own text (edited by hand, «Изменить текст…») goes to the
+//! same `.ttml` place, marked as theirs ([`nikgob_metadata::mark_ttml_own`]),
+//! never into the tag: the player shows it first from then on. A text that
+//! lay there before goes to the library's Trash, and so does the user's own
+//! text when they go back to the found ones («Вернуть найденный», with
+//! undo).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -72,6 +79,24 @@ pub(crate) enum Keep {
 }
 
 impl Keep {
+    /// The user's own text as the editor gives it: `lines` with their
+    /// timing, or (`timed` false) their texts one a line as a plain text.
+    pub(crate) fn own(lines: Vec<LyricLine>, timed: bool) -> Self {
+        if timed && !lines.is_empty() {
+            Self::Lines(lines)
+        } else {
+            Self::Plain(lines.iter().map(|l| l.text.trim()).collect::<Vec<_>>().join("\n"))
+        }
+    }
+
+    /// Nothing to keep: no line with a word in it.
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Lines(l) => l.iter().all(|l| l.text.trim().is_empty()),
+            Self::Plain(t) => t.trim().is_empty(),
+        }
+    }
+
     /// Times to the millisecond ([`to_millis`]).
     pub(crate) fn to_millis(self) -> Self {
         match self {
@@ -100,13 +125,59 @@ impl Keep {
 /// Writes the `.ttml` at `path` (its folder made when missing) and gives
 /// the text as the player reads it back.
 pub(crate) fn write_ttml(path: &Path, keep: &Keep) -> Result<Text, String> {
-    let xml = keep.ttml();
+    write_xml(path, &keep.ttml())
+}
+
+/// [`write_ttml`] of the user's own text: marked as theirs.
+pub(crate) fn write_own_ttml(path: &Path, keep: &Keep) -> Result<Text, String> {
+    write_xml(path, &nikgob_metadata::mark_ttml_own(&keep.ttml()))
+}
+
+/// `xml` at `path` (nothing written for an empty text).
+fn write_xml(path: &Path, xml: &str) -> Result<Text, String> {
+    let text = Text::from_ttml(xml).ok_or_else(|| "пустой текст".to_owned())?;
     let long = nikgob_import::sanitize::long_path(path);
     if let Some(dir) = long.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&long, &xml).map_err(|e| e.to_string())?;
-    Text::from_ttml(&xml).ok_or_else(|| "пустой текст".to_owned())
+    std::fs::write(&long, xml).map_err(|e| e.to_string())?;
+    Ok(text)
+}
+
+/// The user's own text at `path` ([`write_own_ttml`]), whatever lay there
+/// before going to the Trash in `trash` first (a text «Сохранить текст»
+/// put there: kept, not overwritten).
+pub(crate) fn keep_own_at(path: &Path, trash: &Path, keep: &Keep) -> Result<Text, String> {
+    if keep.is_empty() {
+        return Err("пустой текст".to_owned());
+    }
+    let there = nikgob_import::sanitize::long_path(path).is_file();
+    if there && !crate::lyrics::read_ttml(path).is_some_and(|(_, own)| own) {
+        nikgob_import::trash_file(trash, path).map_err(|e| e.to_string())?;
+    }
+    write_own_ttml(path, keep)
+}
+
+/// The user's own text at `path` goes to the Trash in `trash`; where it
+/// went (`None`: nothing of theirs lies there).
+pub(crate) fn drop_own_at(path: &Path, trash: &Path) -> Result<Option<PathBuf>, String> {
+    if !crate::lyrics::read_ttml(path).is_some_and(|(_, own)| own) {
+        return Ok(None);
+    }
+    nikgob_import::trash_file(trash, path).map(Some).map_err(|e| e.to_string())
+}
+
+/// Brings the user's own text back from the Trash (`at`) to `to`, unless
+/// something lies there now.
+pub(crate) fn restore_own_at(at: &Path, to: &Path) -> Result<Text, String> {
+    if nikgob_import::sanitize::long_path(to).exists() {
+        return Err("на его месте уже другой текст".to_owned());
+    }
+    if let Some(dir) = nikgob_import::sanitize::long_path(to).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    nikgob_import::fsutil::move_file(at, to).map_err(|e| e.to_string())?;
+    crate::lyrics::read_ttml(to).map(|(t, _)| t).ok_or_else(|| "пустой текст".to_owned())
 }
 
 /// The lyrics tag of `file` as enhanced LRC (word stamps where the timing
@@ -177,6 +248,11 @@ impl Worker {
     pub(crate) fn save_lyrics(&mut self, track: TrackId, source: LyricsSource) {
         let Some(tl) = self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)) else { return };
         let Some(keep) = tl.to_keep(source).map(Keep::to_millis) else { return };
+        // The user's own text with the timing made of it stays theirs.
+        if source == LyricsSource::Own {
+            self.keep_own(track, keep);
+            return;
+        }
         let (place, folder) = (tl.place.clone(), tl.folder);
         match place {
             Place::File => {
@@ -197,6 +273,116 @@ impl Worker {
                 });
             }
             _ => {}
+        }
+    }
+
+    /// Where the user's own text of `track` is kept: next to its file, or
+    /// for a song without one in its artist's folder of the library.
+    pub(crate) fn own_path(&self, track: TrackId) -> Option<PathBuf> {
+        if let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) {
+            return Some(self.res.path(&src.locator).with_extension("ttml"));
+        }
+        if self.lyrics_folder(track) { self.kept_text(track) } else { None }
+    }
+
+    /// `Command::SaveOwnLyrics`: the text the user edited by hand is kept
+    /// as theirs (see the module docs).
+    pub(crate) fn save_own_lyrics(&mut self, track: TrackId, lines: Vec<LyricLine>, timed: bool) {
+        self.keep_own(track, Keep::own(lines, timed).to_millis());
+    }
+
+    fn keep_own(&mut self, track: TrackId, keep: Keep) {
+        let Some(path) = self.own_path(track) else {
+            // A song without a file and without an artist or a title to
+            // keep its text under.
+            self.toast("Не получилось сохранить текст: неясно, чья это песня", None);
+            return;
+        };
+        let Some(svc) = self.import.as_ref() else { return };
+        let (trash, tx) = (svc.config().trash_dir.clone(), svc.internal());
+        svc.spawn_blocking(move || {
+            let result = keep_own_at(&path, &trash, &keep);
+            let _ = tx.send(Internal::Align(Msg::KeptOwn { track, result }));
+        });
+    }
+
+    /// The user's own text is on the computer: it is shown from now on, as
+    /// it is (whatever was picked or chosen to be seen before).
+    pub(crate) fn own_lyrics_kept(&mut self, track: TrackId, result: Result<Text, String>) {
+        let text = match result {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("saving the own lyrics: {e}");
+                self.toast(format!("Не получилось сохранить текст: {e}"), None);
+                return;
+            }
+        };
+        if let Err(e) = self.lib.set_lyrics_pick(track, None) {
+            log::warn!("saving lyrics pick: {e}");
+        }
+        let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) else { return };
+        tl.set_text(LyricsSource::Own, Some(text));
+        tl.set_pick(None);
+        if tl.display.take().is_some()
+            && let Err(e) = self.lib.set_lyrics_show(track, None)
+        {
+            log::warn!("forgetting how lyrics are seen: {e}");
+        }
+        let view = tl.view(track);
+        self.publish(|s| {
+            if s.lyrics.track == Some(track) {
+                s.lyrics = view;
+            }
+        });
+    }
+
+    /// `Command::DropOwnLyrics` («Вернуть найденный»): the user's own text
+    /// goes to the library's Trash, with undo, and the found texts are
+    /// shown again.
+    pub(crate) fn drop_own_lyrics(&mut self, track: TrackId) {
+        let Some(path) = self.own_path(track) else { return };
+        let Some(trash) = self.import.as_ref().map(|s| s.config().trash_dir.clone()) else { return };
+        let undo = match drop_own_at(&path, &trash) {
+            Ok(Some(at)) => {
+                self.align.own_trashed.insert(track, (at, path));
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                log::warn!("removing the own lyrics of {track}: {e}");
+                self.toast(format!("Не получилось убрать свой текст: {e}"), None);
+                return;
+            }
+        };
+        if self.import.as_ref().and_then(|s| s.lyrics_cache.get(&track)).is_some_and(|tl| tl.picked() == Some(LyricsSource::Own))
+            && let Err(e) = self.lib.set_lyrics_pick(track, None)
+        {
+            log::warn!("saving lyrics pick: {e}");
+        }
+        if let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) {
+            tl.forget(LyricsSource::Own);
+            let view = tl.view(track);
+            self.publish(|s| {
+                if s.lyrics.track == Some(track) {
+                    s.lyrics = view;
+                }
+            });
+        }
+        if undo {
+            self.toast("Свой текст в корзине", Some(("Отменить".to_owned(), nikgob_view::Command::RestoreOwnLyrics(track))));
+        }
+    }
+
+    /// `Command::RestoreOwnLyrics`: the user's own text comes back from the
+    /// Trash and is shown again.
+    pub(crate) fn restore_own_lyrics(&mut self, track: TrackId) {
+        let Some((at, to)) = self.align.own_trashed.remove(&track) else { return };
+        match restore_own_at(&at, &to) {
+            Ok(text) => self.own_lyrics_kept(track, Ok(text)),
+            Err(e) => {
+                log::warn!("bringing back the own lyrics of {track}: {e}");
+                self.toast(format!("Не получилось вернуть свой текст: {e}"), None);
+            }
         }
     }
 
@@ -657,6 +843,90 @@ mod tests {
         wait(&rt, "its text shown", |s| s.lyrics.source == Some(LyricsSource::File) && !s.lyrics.stream);
         assert!(!kept.exists(), "the text kept before goes");
         wait_until("the saved audio gone", || files(&cfg.downloads_dir).is_empty());
+    }
+
+    /// The user's own text goes to the song's `.ttml` marked as theirs; a
+    /// found text that lay there goes to the Trash first, and the player
+    /// reads the own text as [`LyricsSource::Own`] (the file's text from
+    /// what else it has). Going back puts it in the Trash too, and the undo
+    /// brings it back unless something lies there now.
+    #[test]
+    fn an_own_text_keeps_what_lay_there_and_goes_to_the_trash_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let trash = dir.path().join("Trash");
+        let file = dir.path().join("Song.opus");
+        let ttml = file.with_extension("ttml");
+        std::fs::write(file.with_extension("lrc"), "[00:01.00]Найденная строка").unwrap();
+        write_ttml(&ttml, &Keep::Plain("Найденный текст".into())).unwrap();
+        let s = Duration::from_secs;
+        let own = Keep::own(vec![LyricLine::new(s(1), "Своя"), LyricLine::new(s(2), "строка")], true).to_millis();
+        let text = keep_own_at(&ttml, &trash, &own).unwrap();
+        assert_eq!(text.lines.len(), 2);
+        assert_eq!(files(&trash).len(), 1, "the found one kept in the Trash");
+        assert!(crate::lyrics::read_ttml(&ttml).unwrap().1, "marked as the user's");
+        // Saved again: the own text is rewritten, nothing more goes.
+        keep_own_at(&ttml, &trash, &Keep::own(vec![LyricLine::new(s(1), "Своя"), LyricLine::new(s(2), "строка")], false)).unwrap();
+        assert_eq!(files(&trash).len(), 1);
+        assert_eq!(crate::lyrics::read_ttml(&ttml).unwrap().0.plain.as_deref(), Some("Своя\nстрока"));
+        assert!(keep_own_at(&ttml, &trash, &Keep::own(vec![LyricLine::new(s(1), " ")], true)).is_err(), "an empty text is not kept");
+        assert!(ttml.is_file());
+
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&nikgob_core::model::Track::new("Song", nikgob_core::model::ArtistCredit::single("Artist", None))).unwrap().id;
+        let tl = crate::lyrics::cached_lyrics(&lib, track, Some(&file), None, false, None);
+        assert!(tl.texts_of(LyricsSource::Own).is_some());
+        assert_eq!(tl.texts_of(LyricsSource::File).map(|t| t.lines[0].text.as_str()), Some("Найденная строка"));
+        assert_eq!(tl.view(track).source, Some(LyricsSource::Own), "first over the file's timed text");
+
+        let at = drop_own_at(&ttml, &trash).unwrap().unwrap();
+        assert!(!ttml.exists());
+        assert_eq!(files(&trash).len(), 2);
+        assert_eq!(drop_own_at(&ttml, &trash).unwrap(), None, "nothing of the user's there");
+        let tl = crate::lyrics::cached_lyrics(&lib, track, Some(&file), None, false, None);
+        assert!(tl.texts_of(LyricsSource::Own).is_none());
+        std::fs::write(&ttml, "x").unwrap();
+        assert!(restore_own_at(&at, &ttml).is_err(), "never over another file");
+        std::fs::remove_file(&ttml).unwrap();
+        assert_eq!(restore_own_at(&at, &ttml).unwrap().plain.as_deref(), Some("Своя\nстрока"));
+        assert!(crate::lyrics::read_ttml(&ttml).unwrap().1);
+        assert_eq!(files(&trash).len(), 1);
+    }
+
+    /// A song without a file keeps the user's own text in its artist's
+    /// folder of the (temp) library: shown first over the found text and
+    /// again in a new run; «Вернуть найденный» puts it in the Trash and the
+    /// found text is back, and the undo brings it back.
+    #[test]
+    fn a_stream_s_own_text_is_shown_first_kept_and_taken_back_with_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = stream_track(&lib, "yt-gruppa-2", false);
+        let row = lib.get_track(song).unwrap().unwrap();
+        let lines = vec![LyricLine::new(Duration::from_millis(1_500), "Знаешь, не беда"), LyricLine::new(Duration::from_millis(5_000), "Своя строка")];
+        let own = |s: &nikgob_view::ViewState| s.lyrics.source == Some(LyricsSource::Own) && s.lyrics.lines.len() == 2;
+        {
+            let (rt, cfg) = rig(&lib, prefs(), dir.path());
+            play(&rt, song);
+            wait(&rt, "the found text", |s| s.lyrics.source == Some(LyricsSource::Genius));
+            rt.send(nikgob_view::Command::SaveOwnLyrics { track: song, lines: lines.clone(), timed: true });
+            wait(&rt, "the own text shown", own);
+            let kept = nikgob_import::layout::kept_text_path(&cfg.library_dir, &artist_of(&row), &row.title);
+            assert!(nikgob_metadata::ttml_is_own(&std::fs::read_to_string(&kept).unwrap()));
+        }
+        let (rt, cfg) = rig(&lib, prefs(), dir.path());
+        play(&rt, song);
+        wait(&rt, "the own text again", own);
+        let kept = nikgob_import::layout::kept_text_path(&cfg.library_dir, &artist_of(&row), &row.title);
+        rt.send(nikgob_view::Command::DropOwnLyrics(song));
+        wait(&rt, "the found text again", |s| s.lyrics.source == Some(LyricsSource::Genius));
+        assert!(!kept.exists());
+        assert_eq!(files(&cfg.trash_dir).len(), 1);
+        let undo = nikgob_view::Command::RestoreOwnLyrics(song);
+        assert!(rt.state().toasts.iter().any(|t| t.action.as_ref().is_some_and(|(_, c)| *c == undo)));
+        rt.send(undo);
+        wait(&rt, "the own text back", own);
+        assert!(kept.is_file());
+        assert!(files(&cfg.trash_dir).is_empty());
     }
 
     #[test]

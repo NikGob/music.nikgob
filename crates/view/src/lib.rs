@@ -2510,6 +2510,17 @@ pub enum Command {
     /// Keep the shown text (with the timing the player made) on the
     /// computer ([`LyricsView::savable`]).
     SaveLyrics { track: TrackId, source: LyricsSource },
+    /// Keep the text the user edited by hand as their own: `lines` with
+    /// their timing (`timed`), or untimed, their texts one a line. A `.ttml`
+    /// next to the file (for a song without one in its artist's folder),
+    /// marked as theirs ([`LyricsSource::Own`]): shown first from then on,
+    /// never refetched.
+    SaveOwnLyrics { track: TrackId, lines: Vec<LyricLine>, timed: bool },
+    /// «Вернуть найденный»: the user's own text goes to the Trash (with
+    /// undo) and the found texts are shown again.
+    DropOwnLyrics(TrackId),
+    /// The undo of [`Command::DropOwnLyrics`].
+    RestoreOwnLyrics(TrackId),
     /// Download (true) or delete a lyrics model by its [`AlignModel::key`].
     AlignModel { key: String, download: bool },
     SetVolume(f32),
