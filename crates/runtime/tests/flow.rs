@@ -890,6 +890,54 @@ fn an_album_played_next_goes_right_after_the_current_track() {
 }
 
 
+/// «В плейлист…» of a library album's card: its tracks by the album's id,
+/// in its track order, each once; into «Любимые» each is liked.
+#[test]
+fn a_library_album_goes_to_a_playlist_by_its_id() {
+    use nikgob_core::model::{Artist, ArtistCredit, Release, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let album = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    // Added out of order: the playlist gets them by their track numbers.
+    let add = |title: &str, no: u32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(album.id);
+        t.track_no = no;
+        lib.upsert_track(&t).unwrap().id
+    };
+    let a2 = add("a2", 2);
+    let a1 = add("a1", 1);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::CreatePlaylist("Mix".into()));
+    wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Mix"));
+    let mix = rt.state().library.playlists.iter().find(|p| p.name == "Mix").unwrap().id;
+    let entries = |lib: &Library| lib.playlist_entries(mix, 0, 100).unwrap().iter().map(|e| e.track.id).collect::<Vec<_>>();
+    rt.send(Command::AddAlbumToPlaylist(mix, album.id));
+    wait_for(&rt, "the album in the playlist", |_| entries(&lib) == [a1, a2]);
+    // Again: nothing twice.
+    rt.send(Command::AddAlbumToPlaylist(mix, album.id));
+    wait_for(&rt, "the second time", |s| s.toasts.iter().any(|t| t.text == "Уже есть в «Mix»"));
+    assert_eq!(entries(&lib), [a1, a2]);
+    rt.send(Command::AddAlbumToPlaylist(nikgob_view::LIKED_PLAYLIST, album.id));
+    wait_for(&rt, "the album liked", |_| lib.is_liked(a1).unwrap() && lib.is_liked(a2).unwrap());
+}
+
+
 /// A service album's card: «Сыграть следующим», «В конец очереди» and «В
 /// плейлист…» by the album's id fetch its tracks as playing it does and
 /// put them where the library album's would go.

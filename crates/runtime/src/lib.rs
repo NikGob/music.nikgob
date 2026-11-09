@@ -963,6 +963,13 @@ impl Worker {
                 let ids = self.release_tracks(id);
                 self.command(Command::Enqueue(ids));
             }
+            Command::AddAlbumToPlaylist(playlist, id) => {
+                let ids = self.release_tracks(id);
+                if ids.is_empty() {
+                    return;
+                }
+                self.command(Command::AddToPlaylist(playlist, ids));
+            }
             Command::PlayPlaylistNext(id) => {
                 let (ids, name) = self.playlist_tracks(id, None);
                 if ids.is_empty() {

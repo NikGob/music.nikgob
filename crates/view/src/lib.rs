@@ -2570,6 +2570,9 @@ pub enum Command {
     RenamePlaylist(PlaylistId, String),
     DeletePlaylist(PlaylistId),
     AddToPlaylist(PlaylistId, Vec<TrackId>),
+    /// All tracks of a library album, in its disc / track order, into a
+    /// playlist (as [`Command::AddToPlaylist`]; «Любимые» likes each).
+    AddAlbumToPlaylist(PlaylistId, ReleaseId),
     RemoveFromPlaylist(PlaylistId, TrackId),
     MoveInPlaylist { playlist: PlaylistId, track: TrackId, to: usize },
     /// Delete a track: into the Trash (30 days), or for good when
