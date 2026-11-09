@@ -1744,7 +1744,8 @@ mod tests {
             }
             let rows = pages::settings_help::drawn_rows(&ctx).1;
             assert!(!rows.is_empty(), "{width}: the settings rows");
-            let column = rows[0].clip;
+            // The rows' own extent (the clip is the whole scroll area).
+            let column = rows.iter().fold(rows[0].rect, |r, row| r.union(row.rect));
             match ui.stage.rect {
                 Some(s) if width > 1000.0 => {
                     assert!(column.right() < s.left(), "{width}: the stage on the right of {column:?}: {s:?}");
