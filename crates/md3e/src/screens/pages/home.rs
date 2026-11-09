@@ -143,6 +143,9 @@ pub enum Section {
     Releases,
 }
 
+// The settings name the sections from `nikgob_view::HomeSection`; these
+// are for the tests.
+#[cfg_attr(not(test), allow(dead_code))]
 impl Section {
     /// Every section, in the page's own order.
     pub const ALL: [Self; 7] = [

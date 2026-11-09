@@ -96,8 +96,11 @@ pub(super) fn row(ui: &mut Ui, area: Area, p: &Prefs) -> Option<Prefs> {
     let current = area.current(p).unwrap_or(names.len());
     let ctx = ui.ctx().clone();
     let mode = rows::mode(&ctx);
-    // A chevron opens the group's «Подробно» rows in «Просто».
-    let hidden = !mode.deep && area.fields().iter().flat_map(|f| settings_help::preset_rows(*f)).any(|r| r.level() == Level::Deep);
+    // A chevron opens the group's «Подробно» rows in «Просто» (beside the
+    // stage the stage shows what a preset does).
+    let hidden = !mode.deep
+        && !area.tiles()
+        && area.fields().iter().flat_map(|f| settings_help::preset_rows(*f)).any(|r| r.level() == Level::Deep);
     let mut open = ctx.data(|d| d.get_temp::<Vec<Area>>(open_key())).unwrap_or_default();
     let mut toggled = false;
     let drawn = rows::item(ui, id, |ui| {
