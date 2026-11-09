@@ -117,8 +117,8 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, stage: &St
     sizes.sub *= scale;
     sizes.gap *= scale;
     paint(ui, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, stage, out);
-    // The control keeps its row on the stage but is not drawn there: it
-    // notes itself for the menus' and screenshots' sake.
+    // On the stage the control keeps its row but is not drawn: it notes
+    // itself app-wide (for its menu and the screenshot runs).
     let Some(row) = row.filter(|_| stage.live) else { return false };
     let left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left")));
     control_in(ui, row, Some(left.unwrap_or(live.left() + 12.0)), state, out)
