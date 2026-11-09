@@ -422,9 +422,15 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     row(ui, Id::RadioNoRepeat, "Не повторять сыгранное", None, |ui| {
         choice_menu(ui, Id::RadioNoRepeat, p);
     });
-    dimmed(ui, p.mixes_downloaded_only, |ui| {
+    // Random picks come only within the share of new music: with no new
+    // music in any kind of radio the row has nothing to do.
+    let no_new = p.mixes_downloaded_only
+        || [RadioKind::Track, RadioKind::Artist, RadioKind::Mix, RadioKind::Autoplay]
+            .into_iter()
+            .all(|kind| p.new_share_of(kind) == nikgob_view::RadioNewShare::None);
+    dimmed(ui, no_new, |ui| {
         row(ui, Id::RadioExplore, "Подмешивать случайное", None, |ui| {
-            ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice_menu(ui, Id::RadioExplore, p));
+            ui.add_enabled_ui(!no_new, |ui| choice_menu(ui, Id::RadioExplore, p));
         });
     });
     row(ui, Id::RadioUnheard, "Преимущественно новые песни", None, |ui| {
