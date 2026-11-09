@@ -343,8 +343,8 @@ pub fn album_status(a: &StreamAlbumCard, wishlist: &WishlistView) -> CoverStatus
 
 /// An album of a service as a card, like a library album: opens its page,
 /// ▶ plays it; on hover a small ⬇ (the album to «Хочу скачать», no like)
-/// and ⋮; right click or ⋮: Слушать · Скачать · В Любимые · Поделиться ·
-/// Открыть. The cover corner shows its download status ([`album_status`]).
+/// and ⋮; right click or ⋮: [`stream_album_rows`]. The cover corner shows
+/// its download status ([`album_status`]).
 pub fn album_card(
     ui: &mut Ui,
     a: &StreamAlbumCard,
@@ -370,10 +370,11 @@ pub fn album_card(
     }
     let mut nav = None;
     if let Some(m) = &o.menu {
-        nav = album_pick(album_menu(("st-album-more", m.id), a, can_download).align_right(true).attach(m), a, out);
+        let (menu, acts) = widgets::menu_of(("st-album-more", m.id), stream_album_rows(album_of(a, can_download)));
+        nav = album_pick(ui, menu.align_right(true).attach(m), &acts, a, out);
     }
-    nav = album_pick(album_menu(("st-album-menu", o.response.id), a, can_download).context_menu(&o.response), a, out)
-        .or(nav);
+    let (menu, acts) = widgets::menu_of(("st-album-menu", o.response.id), stream_album_rows(album_of(a, can_download)));
+    nav = album_pick(ui, menu.context_menu(&o.response), &acts, a, out).or(nav);
     if o.play_clicked {
         out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
         None
@@ -384,28 +385,108 @@ pub fn album_card(
     }
 }
 
-fn album_menu(key: impl egui::AsId, a: &StreamAlbumCard, can_download: bool) -> Menu {
-    Menu::new(key)
-        .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
-        .item(MenuItem::new("Скачать").icon(Icon::Download).enabled(can_download))
-        .item(MenuItem::new("В любимое").icon(Icon::Favorite).enabled(!a.have.complete()))
-        .divider()
-        .item(MenuItem::new("Поделиться").icon(Icon::Share))
-        .item(MenuItem::new("Открыть").icon(Icon::Album))
+/// What the menu of a service's album does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamAlbumAct {
+    Play,
+    Shuffle,
+    Next,
+    Queue,
+    Playlist,
+    Like,
+    Artist,
+    Share,
+    Download,
+    Open,
+    Library,
 }
 
-fn album_pick(picked: Option<usize>, a: &StreamAlbumCard, out: &mut Vec<Command>) -> Option<Route> {
-    match picked? {
-        0 => out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false }),
-        // «Скачать» downloads without a like; «В Любимые» is the like (which
-        // also downloads, as the settings say).
-        1 => out.push(Command::DownloadStreamAlbum(a.remote.clone())),
-        2 => out.push(Command::LikeStreamAlbum { album: a.remote.clone(), on: true }),
-        3 => out.push(Command::Share(ShareTarget::StreamAlbum(a.remote.clone()))),
-        4 => return Some(Route::Stream(StreamPage::Album(a.remote.clone()))),
-        _ => {}
+/// What a service's album menu is built over.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StreamAlbumMenuOf {
+    /// The ⋮ of its page (else the card's right click or ⋮).
+    pub on_page: bool,
+    pub has_artists: bool,
+    /// Linked to a library album.
+    pub in_library: bool,
+    /// The library has all of it.
+    pub complete: bool,
+    pub can_download: bool,
+}
+
+/// The one list of a service album's actions, in the order of the library
+/// album's ([`widgets::release_rows`]): its card's right click and ⋮ and
+/// the ⋮ of its page. The page leaves out its buttons (play, shuffle, the
+/// like, «Скачать»); playing next, the queue and «В плейлист…» need the
+/// tracks only the page has. The service's own rows come last.
+pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAct>> {
+    use StreamAlbumAct as A;
+    use widgets::Row;
+    let mut rows = Vec::new();
+    if o.on_page {
+        rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    } else {
+        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+    }
+    rows.push(Row::Divider);
+    if !o.on_page {
+        // The like also downloads (as the settings say): nothing to do
+        // once the library has it all.
+        rows.push(Row::Item(A::Like, MenuItem::new("В любимое").icon(Icon::Favorite).enabled(!o.complete)));
+    }
+    rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person).enabled(o.has_artists)));
+    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Divider);
+    if !o.on_page {
+        rows.push(Row::Item(A::Download, MenuItem::new("Скачать").icon(Icon::Download).enabled(o.can_download)));
+        rows.push(Row::Item(A::Open, MenuItem::new("Открыть").icon(Icon::Album)));
+    }
+    rows.push(Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic).enabled(o.in_library)));
+    rows
+}
+
+/// Does a service album action (all but the page's next / queue / «В
+/// плейлист…», which need its tracks).
+fn stream_album_apply(
+    ctx: &egui::Context,
+    act: StreamAlbumAct,
+    id: &RemoteId,
+    artists: &nikgob_view::StreamArtistLinks,
+    release: Option<nikgob_view::ReleaseId>,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    use StreamAlbumAct as A;
+    match act {
+        A::Play => out.push(Command::PlayStreamAlbum { id: id.clone(), start: None, shuffle: false }),
+        A::Shuffle => out.push(Command::PlayStreamAlbum { id: id.clone(), start: None, shuffle: true }),
+        // «Скачать» downloads without a like; «В любимое» is the like.
+        A::Download => out.push(Command::DownloadStreamAlbum(id.clone())),
+        A::Like => out.push(Command::LikeStreamAlbum { album: id.clone(), on: true }),
+        A::Share => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),
+        A::Artist => return artist_links::go_to(ctx, artist_links::stream(artists)),
+        A::Open => return Some(Route::Stream(StreamPage::Album(id.clone()))),
+        A::Library => return release.map(Route::Release),
+        A::Next | A::Queue | A::Playlist => {}
     }
     None
+}
+
+fn album_of(a: &StreamAlbumCard, can_download: bool) -> StreamAlbumMenuOf {
+    StreamAlbumMenuOf {
+        on_page: false,
+        has_artists: !a.artists.linked().is_empty(),
+        in_library: a.release.is_some(),
+        complete: a.have.complete(),
+        can_download,
+    }
+}
+
+fn album_pick(ui: &Ui, picked: Option<usize>, acts: &[StreamAlbumAct], a: &StreamAlbumCard, out: &mut Vec<Command>) -> Option<Route> {
+    let act = picked.and_then(|i| acts.get(i).copied())?;
+    stream_album_apply(ui.ctx(), act, &a.remote, &a.artists, a.release, out)
 }
 
 /// An artist of a service: the photo (or initials) in a shape, the name.
@@ -647,23 +728,20 @@ fn album_page(
         out.push(Command::LikeStreamAlbum { album: id.clone(), on: !v.liked });
     }
     let more = &r[4];
-    let picked = Menu::new("st-album-more")
-        .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-        .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
-        .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .divider()
-        .item(MenuItem::new("Поделиться").icon(Icon::Share))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!artists.is_empty()))
-        .item(MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic).enabled(v.release.is_some()))
-        .attach(more);
-    match picked {
-        Some(0) => out.push(Command::PlayStreamNext(remotes.clone())),
-        Some(1) => out.push(Command::EnqueueStream(remotes.clone())),
-        Some(2) => pages.add_stream_to_playlist(remotes.clone(), Some(more.rect)),
-        Some(3) => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),
-        Some(4) => nav = artist_links::go_to(ui.ctx(), artists.clone()),
-        Some(5) => nav = v.release.map(Route::Release),
-        _ => {}
+    let of = StreamAlbumMenuOf {
+        on_page: true,
+        has_artists: !artists.is_empty(),
+        in_library: v.release.is_some(),
+        complete: all_local,
+        can_download: dl_can,
+    };
+    let (menu, acts) = widgets::menu_of("st-album-more", stream_album_rows(of));
+    match menu.attach(more).and_then(|i| acts.get(i).copied()) {
+        Some(StreamAlbumAct::Next) => out.push(Command::PlayStreamNext(remotes.clone())),
+        Some(StreamAlbumAct::Queue) => out.push(Command::EnqueueStream(remotes.clone())),
+        Some(StreamAlbumAct::Playlist) => pages.add_stream_to_playlist(remotes.clone(), Some(more.rect)),
+        Some(act) => nav = stream_album_apply(ui.ctx(), act, id, &v.subtitle_artists, v.release, out).or(nav),
+        None => {}
     }
     ui.add_space(16.0);
     let rows = track_rows(ui, "st-album", &v.tracks, true, &StreamFrom::Album(id.clone()), state, pages, out);
