@@ -360,18 +360,11 @@ pub fn artist(
         if r[3].clicked() {
             out.push(Command::Like(LikeTarget::Artist(id), !a.liked));
         }
-        // "В очередь всё" queues what the artist page knows: the popular tracks.
-        let picked = Menu::new("artist-more")
-            .item(MenuItem::new("В очередь всё").icon(Icon::QueueMusic).enabled(!a.top_tracks.is_empty()))
-            .item(MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite))
-            .divider()
-            .item(super::ban_item(Some(id), &state.dislikes))
-            .attach(&r[4]);
-        match picked {
-            Some(0) => out.push(Command::EnqueueArtist(a.card.id)),
-            Some(1) => out.push(Command::Like(LikeTarget::Artist(id), !a.liked)),
-            Some(2) => out.push(super::ban_command(id, &state.dislikes)),
-            _ => {}
+        // The same actions as the artist's right-click menu
+        // ([`widgets::artist_rows`]), less the buttons left of it.
+        let (menu, acts) = widgets::menu_of("artist-more", widgets::artist_rows(&a.card, true, &state.dislikes));
+        if let Some(act) = menu.attach(&r[4]).and_then(|i| acts.get(i).copied()) {
+            widgets::artist_apply(act, &a.card, &state.dislikes, out);
         }
 
         ui.add_space(widgets::SECTION_GAP);

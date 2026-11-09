@@ -720,8 +720,50 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
     (resp.clicked() && !play).then_some(Route::Artist(a.id)).or(menu)
 }
 
-/// Right-click menu of an artist (card or row): Слушать микс · Перемешать ·
-/// Радио исполнителя · Подписаться.
+/// What the menu of an artist does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtistAct {
+    Play,
+    Shuffle,
+    Radio,
+    Queue,
+    Follow,
+    Ban,
+}
+
+/// The one list of an artist's actions, for its right-click menu (card or
+/// row) and the ⋮ of its page. On the page (`on_page`) the mix, shuffle,
+/// radio and «Подписаться» are buttons beside it and are left out.
+pub fn artist_rows(a: &ArtistCard, on_page: bool, marks: &nikgob_view::DislikesView) -> Vec<Row<ArtistAct>> {
+    use ArtistAct as A;
+    let mut rows = Vec::new();
+    if !on_page {
+        rows.push(Row::Item(A::Play, MenuItem::new("Слушать микс").icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
+    }
+    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    rows.push(Row::Divider);
+    if !on_page {
+        rows.push(Row::Item(A::Follow, MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite)));
+    }
+    rows.push(Row::Item(A::Ban, super::ban_item(Some(a.id), marks)));
+    rows
+}
+
+/// Does an artist action.
+pub fn artist_apply(act: ArtistAct, a: &ArtistCard, marks: &nikgob_view::DislikesView, out: &mut Vec<Command>) {
+    out.push(match act {
+        ArtistAct::Play => Command::PlayArtist { id: a.id, shuffle: false },
+        ArtistAct::Shuffle => Command::PlayArtist { id: a.id, shuffle: true },
+        ArtistAct::Radio => Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a.id) },
+        ArtistAct::Queue => Command::EnqueueArtist(a.id),
+        ArtistAct::Follow => Command::Like(LikeTarget::Artist(a.id), !a.liked),
+        ArtistAct::Ban => super::ban_command(a.id, marks),
+    });
+}
+
+/// Right-click menu of an artist (card or row): [`artist_rows`].
 pub fn artist_menu(resp: &Response, a: &ArtistCard, out: &mut Vec<Command>) {
     artist_menu_with(resp, a, false, out);
 }
@@ -755,22 +797,9 @@ fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<
         }
         return None;
     }
-    match Menu::new(("artist-menu", resp.id))
-        .item(MenuItem::new("Слушать микс").icon(Icon::PlayArrow))
-        .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
-        .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio))
-        .divider()
-        .item(follow)
-        .item(ban)
-        .context_menu(resp)?
-    {
-        0 => out.push(Command::PlayArtist { id: a.id, shuffle: false }),
-        1 => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
-        2 => out.push(radio_cmd),
-        3 => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
-        4 => out.push(super::ban_command(a.id, &marks)),
-        _ => {}
-    }
+    let (menu, acts) = menu_of(("artist-menu", resp.id), artist_rows(a, false, &marks));
+    let act = menu.context_menu(resp).and_then(|i| acts.get(i).copied())?;
+    artist_apply(act, a, &marks, out);
     None
 }
 
@@ -1580,7 +1609,10 @@ pub fn edition_offers(ui: &mut Ui, state: &ViewState, artist: Option<&str>, out:
 
 #[cfg(test)]
 mod menu_tests {
-    use super::{PlaylistAct, PlaylistMenuOf, ReleaseAct, Row, playlist_command, playlist_rows, release_rows, row_acts};
+    use super::{
+        ArtistAct, PlaylistAct, PlaylistMenuOf, ReleaseAct, Row, artist_rows, playlist_command, playlist_rows, release_rows,
+        row_acts,
+    };
     use nikgob_view::{ArtistLinks, Command, PlaylistId, PlaylistSyncMode, ReleaseCard, ReleaseId, ReleaseType};
 
     fn labels<A>(rows: &[Row<A>]) -> Vec<String> {
@@ -1674,5 +1706,28 @@ mod menu_tests {
         for acts in [&card, &page] {
             assert_eq!(&acts[acts.len() - 2..], [ReleaseAct::Trash, ReleaseAct::Purge]);
         }
+    }
+
+    /// The artist's right-click menu and its page's ⋮: one list, the page
+    /// without its buttons (mix, shuffle, radio, «Подписаться»).
+    #[test]
+    fn an_artist_offers_the_same_actions_by_right_click_and_by_more() {
+        let a = nikgob_view::ArtistCard {
+            id: nikgob_view::ArtistId::new(),
+            name: "Artist".into(),
+            image: None,
+            liked: false,
+            track_count: 0,
+        };
+        let marks = nikgob_view::DislikesView::default();
+        let card = row_acts(&artist_rows(&a, false, &marks));
+        let page = row_acts(&artist_rows(&a, true, &marks));
+        let shared: Vec<ArtistAct> = card
+            .iter()
+            .copied()
+            .filter(|x| !matches!(x, ArtistAct::Play | ArtistAct::Shuffle | ArtistAct::Radio | ArtistAct::Follow))
+            .collect();
+        assert_eq!(shared, page);
+        assert_eq!(page, [ArtistAct::Queue, ArtistAct::Ban]);
     }
 }
