@@ -19,6 +19,7 @@ mod worlds;
 pub mod widgets;
 
 pub use search::{restore_search_scroll, search_results, search_scroll};
+pub use settings::{StageSlot, stage_slot};
 pub use settings_help::SettingId;
 pub(crate) use worlds::choose as choose_world;
 
@@ -308,8 +309,17 @@ pub struct PageState {
     pub focus_setting: Option<SettingId>,
     /// The whole group of [`Self::focus_setting`] is shown, not the row.
     pub focus_group: bool,
-    /// Settings tab: 0 general, 1 appearance.
+    /// Settings tab: [`settings_help::TABS`] (0 «Музыка» … 5 «Система»).
     settings_tab: usize,
+    /// «Просто · Подробно» picked this session; `None`: the build's own
+    /// start (the owner's builds «Подробно», a handout «Просто»).
+    // TODO(r21-wire): `Prefs::settings_deep` instead.
+    settings_deep: Option<bool>,
+    /// A link to a row «Просто» does not show opened this visit of
+    /// Settings in «Подробно» (the picked mode stays).
+    settings_visit_deep: bool,
+    /// The pass Settings was last drawn in (a new visit after a gap).
+    settings_seen: u64,
     /// Latest bass level for the ambient glow (set by the host each frame).
     pub levels_bass: f32,
     /// Ask the shell to open a pane tab (e.g. "Источник и качество").
@@ -348,7 +358,7 @@ pub struct PageState {
     files_done: bool,
     indexer_url: String,
     indexer_key: String,
-    /// «Soulseek» on «Источники»: what is typed (the password and the
+    /// «Soulseek» on «Загрузки»: what is typed (the password and the
     /// token are never shown back), and whether the fields were filled from
     /// the saved settings.
     slsk_remote: bool,
@@ -368,7 +378,7 @@ pub struct PageState {
     /// the settings row) before it is kept.
     name_draft: String,
     name_synced: bool,
-    /// «Источники»: what is typed into the Spotify Client ID and the
+    /// «Сервисы»: what is typed into the Spotify Client ID and the
     /// YouTube cookies fields, and which folds are open.
     /// Spotify Soloist's setup: the open dialog, the key being typed, the
     /// flow (each step's dialog opens when the one before is done), the
@@ -446,6 +456,12 @@ impl PageState {
     #[cfg(test)]
     pub(crate) fn scroll_target(&self) -> Option<f32> {
         self.scroll_restore.as_ref().map(|r| r.y)
+    }
+
+    /// «Просто» (false) or «Подробно» (true) on Settings, as its switch
+    /// sets it (the settings sweep shoots every row).
+    pub(crate) fn set_settings_deep(&mut self, deep: bool) {
+        self.settings_deep = Some(deep);
     }
 
     /// Opens Settings at row `id` (its tab, scrolled into view, glowing).
@@ -1133,6 +1149,13 @@ pub fn page(
     // Back where it was: the offset is held until the page is tall enough
     // for it (a page that loads is short at first).
     let restore = pages.scroll_restore.as_ref().filter(|r| r.route == *route).map(|r| r.y);
+    // Settings keeps its title and tabs and scrolls its rows (beside the
+    // stage) itself.
+    if *route == Route::Settings {
+        let o = settings::page(ui, state, bottom_inset, restore, pages, out);
+        settle_scroll(ui, pages, restore, o.offset, o.max);
+        return None;
+    }
     let mut area = egui::ScrollArea::vertical().id_salt(("page-scroll", id)).auto_shrink([false, false]);
     if let Some(y) = restore {
         area = area.vertical_scroll_offset(y);
@@ -1147,7 +1170,7 @@ pub fn page(
                 Route::Artist(id) => detail::artist(ui, *id, state, pages, out),
                 Route::Playlist(id) => detail::playlist(ui, *id, state, pages, out),
                 Route::Downloads(_) => downloads::show(ui, state, pages, out),
-                Route::Settings => settings::show(ui, state, pages, out),
+                Route::Settings => None,
                 Route::Lyrics => crate::screens::lyrics_ui::page::show(ui, state, bottom_inset, out),
                 Route::Stream(page) => streams::page(ui, page, state, pages, out),
                 Route::World(key) => world::show(ui, key, state, pages, out),
@@ -1157,9 +1180,17 @@ pub fn page(
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);
         });
-    pages.scroll_now = o.state.offset.y;
+    settle_scroll(ui, pages, restore, o.state.offset.y, (o.content_size.y - o.inner_rect.height()).max(0.0));
+    nav
+}
+
+/// Keeps how far the page is scrolled (`offset`, of `max`), and lets go of
+/// the history's offset once the page is tall enough for it (or its time
+/// is up).
+fn settle_scroll(ui: &Ui, pages: &mut PageState, restore: Option<f32>, offset: f32, max: f32) {
+    pages.scroll_now = offset;
     if let (Some(y), Some(r)) = (restore, pages.scroll_restore.as_mut()) {
-        let reachable = (o.content_size.y - o.inner_rect.height()).max(0.0) + 0.5 >= y;
+        let reachable = max + 0.5 >= y;
         r.frames = r.frames.saturating_sub(1);
         if reachable || r.frames == 0 {
             pages.scroll_restore = None;
@@ -1167,7 +1198,6 @@ pub fn page(
             ui.ctx().request_repaint();
         }
     }
-    nav
 }
 
 /// Human size: "412 МБ", "1.1 ГБ".

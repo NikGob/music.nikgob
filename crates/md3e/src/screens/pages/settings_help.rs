@@ -1,16 +1,18 @@
 //! What every settings row is: an id other screens can link to ("настроить"
-//! opens Settings on that row, scrolls to it and makes it glow), a one-line
+//! opens Settings on that row, scrolls to it and makes it glow), its name,
+//! tab and level («Просто», «Подробно», «Для разработчика»), a short
 //! explanation and, for the looks, a small live preview painted by the real
 //! painters.
 //!
-//! The explanation shows in a card under the row while it is hovered (over
-//! one option of a choice: that option, previewed). The small ⓘ button next
-//! to the label pins a larger card open: the explanation and, for a choice,
-//! every option side by side with its own preview; a click on one picks it.
-//! The pinned card closes on the button, a click outside or Esc.
+//! Nothing explains itself on hover: the small ⓘ button next to the label
+//! pins a card open with the explanation and, for a choice, every option
+//! (the one under the pointer previewed; beside the live stage the card
+//! has no sample of its own). The card closes on the button, a click
+//! outside or Esc.
 //!
-//! A new row opts in by getting a [`SettingId`] variant, a [`SettingId::tab`]
-//! and a [`SettingId::help`] line (a choice also [`SettingId::choices`]);
+//! A new row opts in by getting a [`SettingId`] variant with its
+//! [`SettingId::tab`], [`SettingId::level`], [`SettingId::label`] and
+//! [`SettingId::help`] (a choice also [`SettingId::choices`]);
 //! [`super::settings`] does the rest.
 
 use std::collections::HashMap;
@@ -24,7 +26,7 @@ use nikgob_view::{self as v, Prefs};
 
 use crate::screens::{bg_shapes, lyrics, now_playing};
 use crate::{
-    Animated, ColorScheme, Contrast, Elevation, Icon, SchemeVariant, Theme, TypeRole,
+    ColorScheme, Contrast, Elevation, Icon, SchemeVariant, Theme, TypeRole,
     components::{anim, paint, paint::Radii, slider::wave_line},
     tokens::shape,
 };
@@ -32,8 +34,7 @@ use crate::{
 /// One settings row (or block of fields).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SettingId {
-    // Внешний вид.
-    Design,
+    // Вид.
     Theme,
     Contrast,
     Scheme,
@@ -98,7 +99,6 @@ pub enum SettingId {
     PaneQueue,
     PaneLyrics,
     PaneInfo,
-    HomeCard,
     NpMotion,
     ReducedMotion,
     Tooltips,
@@ -111,7 +111,6 @@ pub enum SettingId {
     CoverClickPause,
     DblClickShape,
     TapWait,
-    Keys,
     /// «Уведомления на экране»: how long a snackbar stays.
     ToastTime,
     SaveLyrics,
@@ -146,15 +145,12 @@ pub enum SettingId {
     LibraryDir,
     MastersDir,
     Inbox,
-    NamingRules,
     Trash,
     ExportData,
     OpusBitrate,
+    /// «Ненастоящий FLAC»: not checked, marked, asked about or made MP3
+    /// by itself (three prefs as one choice).
     FakeFlac,
-    /// «Предлагать MP3 вместо «фейкового» FLAC».
-    FakeConvert,
-    /// «Без вопроса».
-    FakeAuto,
     /// «Вернуть FLAC из Корзины».
     FakeRestore,
     MusicBrainz,
@@ -165,17 +161,16 @@ pub enum SettingId {
     UserName,
     /// «Новое в радио и миксах».
     RadioNewShare,
-    /// «Миксы только из скачанного».
+    /// «Только из скачанного».
     MixesDownloadedOnly,
     /// «Автовоспроизведение».
     Autoplay,
     /// «Продолжать мир после альбома».
     AutoplayWorld,
-    /// Where radios pick from: «Миксы только из скачанного» and «Новое в
-    /// радио» as one choice (the queue shows it; Settings has both rows).
+    /// Where radios pick from: «Только из скачанного» and «Новое в радио и
+    /// миксах» as one choice. Only the queue's radio header shows it; it has
+    /// no row in Settings.
     RadioSource,
-    /// «Анализ звука»: how far it is (no control of its own).
-    SoundAnalysis,
     /// «Не повторять сыгранное» in the radio and autoplay.
     RadioNoRepeat,
     /// «Подмешивать случайное» in the radio and autoplay.
@@ -260,7 +255,7 @@ pub enum SettingId {
     UpgradeBar,
     /// «Замена файла»: asked in «Подтверди», or by itself.
     UpgradeAuto,
-    /// One line of «Источники скачивания»: its switch and place.
+    /// One line of «Откуда качать»: its switch and place.
     DownloadSource(v::SourceKey),
     PlaylistSync,
     ImportSpotify,
@@ -286,7 +281,6 @@ pub enum SettingId {
     Spotify,
     YouTube,
     SoundCloud,
-    Nodes,
 }
 
 /// Where a radio of `kind` takes its tracks, in a few words (the line under
@@ -328,12 +322,31 @@ pub fn radio_source_patches(p: &Prefs, kind: v::RadioKind, i: usize) -> Vec<v::P
 }
 
 /// Settings tabs, in the order of the tab switch.
-pub const TAB_GENERAL: usize = 0;
-pub const TAB_RECS: usize = 1;
-pub const TAB_SOURCES: usize = 2;
-pub const TAB_APPEARANCE: usize = 3;
+pub const TAB_MUSIC: usize = 0;
+pub const TAB_LYRICS: usize = 1;
+pub const TAB_LOOK: usize = 2;
+pub const TAB_SERVICES: usize = 3;
+pub const TAB_DOWNLOADS: usize = 4;
+pub const TAB_SYSTEM: usize = 5;
 /// Labels of the tab switch, in [`SettingId::tab`] order.
-pub const TABS: [&str; 4] = ["Основные", "Рекомендации", "Источники", "Внешний вид"];
+pub const TABS: [&str; 6] = ["Музыка", "Тексты", "Вид", "Сервисы", "Загрузки", "Система"];
+
+/// The tabs beside which the live stage stands (the lyrics and the looks).
+pub fn stage_tab(tab: usize) -> bool {
+    matches!(tab, TAB_LYRICS | TAB_LOOK)
+}
+
+/// When a row shows: in «Просто» (and «Подробно»), only in «Подробно», or
+/// only in «Подробно» of the owner's own builds («Для разработчика»).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Level {
+    Simple,
+    Deep,
+    Dev,
+}
+
+/// «Запускать вместе с Windows», named as the user knows the system.
+const AUTOSTART_LABEL: &str = if cfg!(windows) { "Запускать вместе с Windows" } else { "Запускать вместе с системой" };
 
 /// The live sample a card draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -402,32 +415,262 @@ fn share_index(s: v::RadioNewShare) -> usize {
 }
 
 impl SettingId {
-    /// The tab the row lives on.
+    /// The tab the row lives on (settings-v2-concept.md §1.3).
     pub fn tab(self) -> usize {
         use SettingId::*;
         match self {
-            Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
-            | CoverPauseMorph | AlbumDate | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
-            | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
-            | LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
-            | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
-            | ReducedMotion | Tooltips | FpsLimit => {
-                TAB_APPEARANCE
+            OutputDevice | Gapless | Crossfade | Normalization | Autoplay | AutoplayWorld | KeepShuffle | ShuffleRadio
+            | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
+            | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikedArtists | DislikedTracks => {
+                TAB_MUSIC
             }
-            // Streaming, imports and torrents (docs/stage3.md §0 "Где настройки").
-            Spotify | SpotifyEnabled | SpotifyPlayback | SpotifySoloist | SpotifyPersonal | YouTube | YouTubeEnabled | DeezerEnabled
-            | SoundCloud | SoundCloudEnabled | SoundCloudToken | ImportSoundCloud
-            | YouTubeCookies | LikeDownload | PushLikes | AlbumLike | SingleLike | LikedAlbumsPlace | AutoDownloads | DownloadToasts | UpgradeEvery | UpgradeBar | UpgradeAuto | DownloadSource(_) | PlaylistSync | ImportSpotify
-            | ImportYouTube | ImportFiles | ImportSavedSongs | StreamCache | StreamAnalysis | Prowlarr | Soulseek | SoulseekShare | SoulseekUpload | NoSeed | SeedLimit | SeedDays
-            | SeedRatio | DownloadLimit | UploadLimit => TAB_SOURCES,
-            RadioNewShare | MixesDownloadedOnly | Autoplay | AutoplayWorld | RadioSource | SoundAnalysis | RadioNoRepeat | RadioExplore | RadioUnheard | NewShareBy(_)
-            | MixesWithNew | BackgroundCountsLess | ProfilesSplit | ProfileNames
-            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | MixClickOpensList | HiddenMixes
-            | GraphUse | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste | LastfmKey | ListenbrainzToken
-            | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikeInRecs | DislikedTracks | DislikedArtists => {
-                TAB_RECS
+            LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsScale | LyricsLead | LyricsDim
+            | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade | LyricsGap
+            | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | WaveFallback | LyricsReturn | LyricsGenius
+            | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
+            | LyricsModels => TAB_LYRICS,
+            Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
+            | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
+            | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
+            | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
+            | MixClickOpensList | HiddenMixes | AlbumDate | LikedAlbumsPlace | RailCompact | ReducedMotion | Tooltips | PaneQueue
+            | PaneLyrics | PaneInfo => TAB_LOOK,
+            SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
+            | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
+            | DeezerEnabled | PushLikes | AlbumLike | SingleLike | PlaylistSync | ImportFiles | ImportSavedSongs | StreamCache => {
+                TAB_SERVICES
             }
-            _ => TAB_GENERAL,
+            DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
+            | Soulseek | SoulseekShare | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
+            | SoulseekUpload => TAB_DOWNLOADS,
+            UserName | Autostart | AutostartHidden | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate
+            | LyricsDeep | LyricsWordsAll | ToastTime | DownloadToasts | LibraryDir | MastersDir | Inbox | Trash | ExportData
+            // «Для разработчика».
+            | LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
+            | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
+            | DislikeInRecs | DemoProfile => TAB_SYSTEM,
+        }
+    }
+
+    /// When the row shows: «Просто» draws [`Level::Simple`], «Подробно»
+    /// adds [`Level::Deep`], and in the owner's own builds [`Level::Dev`].
+    pub fn level(self) -> Level {
+        use SettingId::*;
+        match self {
+            OutputDevice | Gapless | Crossfade | Normalization | Autoplay | KeepShuffle | DislikeButton | DislikeSkips
+            | DislikedArtists | DislikedTracks | LyricsStyle | LyricsScale | LyricsLead | LyricsGenius | SaveLyrics
+            | LyricsWordsPlaying | Theme | Scheme | CoverShape | ShapeRange | ShapePick | Ring | Ambient | BgShapes | AlbumDate
+            | RailCompact | ReducedMotion | SpotifyEnabled | Spotify | YouTubeEnabled | YouTube | SoundCloudEnabled | SoundCloud
+            | DeezerEnabled | PushLikes | DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | Soulseek | Prowlarr
+            | UserName | Autostart | AutostartHidden | ToastTime | LibraryDir => Level::Simple,
+            LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
+            | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
+            | DislikeInRecs | DemoProfile => Level::Dev,
+            AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_)
+            | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere | LyricsUnit | LyricsSmooth
+            | LightSpeed | WaveJump | JumpSpeed | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth
+            | LyricsSoftStrength | LyricsSoftFade | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize
+            | LyricsCountdown | WaveFallback | LyricsReturn | LyricsCheck | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep
+            | LyricsRecognize | LyricsModels | Contrast | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph | RingStyle
+            | RingSpin | RingDir | RingBeat | AmbientStrength | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors
+            | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape | TapWait | NpMotion
+            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames | MixClickOpensList
+            | HiddenMixes | LikedAlbumsPlace | Tooltips | PaneQueue | PaneLyrics | PaneInfo | SpotifyPersonal | SpotifyPlayback
+            | SpotifySoloist | ImportSpotify | YouTubeCookies | ImportYouTube | SoundCloudToken | ImportSoundCloud | AlbumLike
+            | SingleLike | PlaylistSync | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac
+            | FakeRestore | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
+            | SoulseekUpload | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep
+            | LyricsWordsAll | DownloadToasts | MastersDir | Inbox | Trash | ExportData => Level::Deep,
+        }
+    }
+
+    /// The nearest row a user sees, for a link to a [`Level::Dev`] row
+    /// where developer rows do not show (and for a link to its whole group,
+    /// which must not tint «Для разработчика»). Every other row is itself.
+    pub fn user_neighbour(self) -> Self {
+        use SettingId::*;
+        match self {
+            // «Настройки текста…» under the lyrics: the lyrics' own look.
+            LyricsUi => LyricsStyle,
+            LyricsGpu | LyricsModelsAuto => LyricsModels,
+            MusicBrainz | AcoustId | DemoProfile => LibraryDir,
+            LastfmKey | ListenbrainzToken | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste => GraphUse,
+            BackgroundCountsLess | ProfilesSplit => ProfileNames,
+            DislikeInRecs => DislikeButton,
+            other => other,
+        }
+    }
+
+    /// The row's name: the thing it changes, as the page shows it (never
+    /// its value).
+    pub fn label(self) -> &'static str {
+        use SettingId::*;
+        match self {
+            Theme => "Тема",
+            Contrast => "Контраст",
+            Scheme => "Схема цвета",
+            ProgressWave => "Волна на полосе прогресса",
+            NpVolume => "Громкость на экране трека",
+            NpVolumeHold => "Плашка громкости",
+            CoverShape => "Форма обложки",
+            ShapeRange => "Фигуры для случайной",
+            ShapePick => "Фигура",
+            CoverPauseMorph => "Менять форму на паузе",
+            CoverSpin | RingSpin => "Вращение",
+            CoverDir | RingDir => "Направление",
+            CoverPulse => "Пульсация",
+            Ring => "Кольцо",
+            RingStyle => "Вид",
+            RingBeat => "В такт",
+            Ambient => "Свечение фона",
+            AmbientStrength => "Яркость свечения",
+            BgShapes => "Фигуры на фоне",
+            BgCount => "Количество",
+            BgSize | LyricsGapSize => "Размер",
+            BgOpacity => "Яркость",
+            BgSpeed => "Скорость",
+            BgReact => "Реакция на музыку",
+            BgColors => "Цвета",
+            BgHue => "Свой цвет",
+            LyricsStyle => "Анимация",
+            WaveFallback => "Если нет времени слов",
+            WaveJump => "Высота прыжка",
+            JumpSpeed => "Скорость прыжка",
+            LightSpeed => "Скорость подсветки",
+            LyricsSmooth => "Плавность",
+            LyricsDim => "Приглушение строк",
+            LyricsScale => "Размер текста",
+            LyricsLead => "Опережение подсветки",
+            LyricsCascade => "Каскад строк",
+            LyricsGlow => "Свечение",
+            LyricsGap => "Индикатор паузы",
+            LyricsGapWaves => "Длина волны",
+            LyricsGapHeight => "Высота волн",
+            LyricsCountdown => "Отсчёт 3-2-1",
+            LyricsUnit => "Шаг подсветки",
+            LyricsSoftEdges => "Мягкие края",
+            LyricsSoftStrength => "Сила размытия",
+            LyricsSoftDepth => "Глубина",
+            LyricsSoftFade => "Затухание",
+            RailCompact => "Боковая панель всегда компактная",
+            AlbumDate => "Дата альбома",
+            PaneQueue => "Очередь",
+            PaneLyrics => "Текст песни",
+            PaneInfo => "Источник и качество",
+            NpMotion => "Открытие экрана",
+            ReducedMotion => "Меньше движения",
+            Tooltips => "Подсказки при наведении",
+            FpsLimit => "Лимит кадров",
+            Autostart => AUTOSTART_LABEL,
+            AutostartHidden => "Сразу в трей",
+            TrayKeepWindow => "Быстрое открытие из трея",
+            CoverClickPause => "Клик по обложке — пауза",
+            DblClickShape => "Двойной клик — другая фигура",
+            TapWait => "Пауза двойного клика",
+            ToastTime => "На экране",
+            SaveLyrics => "Сохранять текст в файл трека",
+            LyricsReturn => "Возврат к строке",
+            LyricsCheck => "Сверять текст с голосом",
+            LyricsLinesAuto => "Строки для простого текста",
+            LyricsUi => "Где делать подсветку",
+            LyricsWordsPlaying => "Слова для играющей песни",
+            LyricsWordsAll => "Вся библиотека по словам",
+            LyricsRecognize => "Расслышать текст",
+            LyricsSeparate => "Отделять голос",
+            LyricsDeep => "Глубокое создание субтитров",
+            LyricsGpu => "Где считать",
+            LyricsModelsAuto => "Скачивать модели сами",
+            LyricsGenius => "Тексты с Genius",
+            LyricsStreams => "Песни с YouTube",
+            LyricsStreamKeep => "Сохранять с YouTube",
+            LyricsModels => "Модели",
+            KeepShuffle => "Перемешивание остаётся включённым",
+            ShuffleRadio => "Перемешивать радио и автовоспроизведение",
+            OutputDevice => "Устройство вывода",
+            Gapless => "Без пауз между треками",
+            Crossfade => "Кроссфейд",
+            Normalization => "Нормализация громкости",
+            LibraryDir => "Папка музыки",
+            MastersDir => "Архив FLAC",
+            Inbox => "Inbox",
+            Trash => "Корзина",
+            ExportData => "Экспорт данных",
+            OpusBitrate => "Битрейт Opus",
+            FakeFlac => "Ненастоящий FLAC",
+            FakeRestore => "Вернуть FLAC из Корзины",
+            MusicBrainz => "Контакт MusicBrainz",
+            AcoustId => "Ключ AcoustID",
+            DemoProfile => "Демо-профиль",
+            UserName => "Как к тебе обращаться",
+            RadioNewShare => "Новое в радио и миксах",
+            MixesDownloadedOnly => "Только из скачанного",
+            Autoplay | NewShareBy(v::RadioKind::Autoplay) => "Автовоспроизведение",
+            AutoplayWorld => "Продолжать мир после альбома",
+            RadioSource => "Откуда",
+            RadioNoRepeat => "Не повторять сыгранное",
+            RadioExplore => "Случайные песни",
+            RadioUnheard => "Неслышанные песни",
+            NewShareBy(v::RadioKind::Track) => "Радио по треку",
+            NewShareBy(v::RadioKind::Artist) => "Радио по исполнителю",
+            NewShareBy(v::RadioKind::Mix) => "Бесконечные миксы",
+            MixesWithNew => "С новым в «Миксах для тебя»",
+            BackgroundCountsLess => "Фон меньше влияет на рекомендации",
+            ProfilesSplit => "Делить профили по звуку",
+            ProfileNames => "Названия профилей",
+            MixesProfiles => "Миксы профилей",
+            MixesEverything => "Всё вперемешку",
+            MixesMoods => "Спокойное и погромче",
+            MixesOnRepeat => "На повторе",
+            BackgroundCards => "Миксы для фона",
+            MixClickOpensList => "Нажатие на микс открывает его страницу",
+            DislikeButton => "Кнопка на экране трека",
+            DislikeSkips => "Пропускать сразу",
+            DislikeSkipEverywhere => "Пропускать везде",
+            DislikeInRecs => "Дизлайк в рекомендациях",
+            DislikedTracks => "Треки с «Не нравится»",
+            DislikedArtists => "Не рекомендовать исполнителей",
+            HiddenMixes => "Скрытые миксы",
+            GraphUse => "Похожее по слушателям",
+            GraphServices => "Спрашивать YouTube Music и Deezer",
+            GraphOpenData => "Спрашивать ListenBrainz и MusicBrainz",
+            GraphPersonal => "Мои плейлисты и импорт истории",
+            LibraryAsTaste => "Без истории — по библиотеке",
+            LastfmKey => "Ключ Last.fm",
+            ListenbrainzToken => "Токен ListenBrainz",
+            SpotifyEnabled | YouTubeEnabled | DeezerEnabled | SoundCloudEnabled => "Использовать",
+            Spotify | YouTube | SoundCloud => "Аккаунт",
+            SpotifyPlayback => "Звук из Spotify",
+            SpotifySoloist => "Spotify Soloist",
+            SpotifyPersonal => "Свой ключ",
+            YouTubeCookies => "Вход по cookies",
+            SoundCloudToken => "Токен",
+            ImportSpotify | ImportYouTube | ImportSoundCloud => "Плейлисты и история",
+            LikeDownload => "Что качать по лайку",
+            PushLikes => "Лайки обратно в сервисы",
+            AlbumLike => "Лайк альбома",
+            SingleLike => "Лайк песни из сингла",
+            LikedAlbumsPlace => "Любимые альбомы",
+            AutoDownloads => "Одновременных автозагрузок",
+            DownloadToasts => "О загрузках",
+            UpgradeEvery => "Искать копии лучше",
+            UpgradeBar => "Хорошее качество",
+            UpgradeAuto => "Замена файла",
+            DownloadSource(k) => k.display_name(),
+            PlaylistSync => "Синхронизация по умолчанию",
+            ImportFiles => "Из файлов выгрузки",
+            ImportSavedSongs => "Песни медиатеки YouTube Music",
+            StreamCache => "Кэш стриминга",
+            StreamAnalysis => "Анализ звука стримов",
+            Prowlarr => "Prowlarr",
+            Soulseek => "Soulseek",
+            SoulseekShare => "Раздавать библиотеку",
+            SoulseekUpload => "Отдача Soulseek",
+            NoSeed => "Не раздавать",
+            SeedLimit => "Лимит раздачи",
+            SeedDays => "Срок раздачи",
+            SeedRatio => "Предел отдачи",
+            DownloadLimit => "Скорость загрузки",
+            UploadLimit => "Отдача торрентов",
         }
     }
 
@@ -442,7 +685,6 @@ impl SettingId {
     pub fn help(self) -> &'static str {
         use SettingId::*;
         match self {
-            Design => "Общий вид всего приложения. Пока доступен только Material 3, другие появятся позже.",
             Theme => "Светлый или тёмный фон приложения.",
             Contrast => "Насколько текст и кнопки выделяются на фоне. Выше — читать легче, но цвета резче.",
             Scheme => "Приложение окрашивается в цвета обложки играющего трека. Здесь выбирается, насколько ярко.",
@@ -497,18 +739,16 @@ impl SettingId {
             PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
             PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
-            HomeCard => "Большая карточка вверху Главной: альбом или серия, которую слушаешь, и рядом другие твои миры — что дослушать и что ещё не начато. Без неё Главная начинается сразу с приветствия.",
             NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
             ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
-            Tooltips => "Короткие подсказки, когда задерживаешь курсор на кнопке. Карточки с примерами в настройках показываются всегда.",
+            Tooltips => "Короткие подсказки, когда задерживаешь курсор на кнопке.",
             FpsLimit => "Как часто перерисовывается экран. Меньше — тише вентилятор и дольше работает батарея.",
             Autostart => AUTOSTART_HELP,
             TrayKeepWindow => "Крестик прячет окно в трей, но не закрывает его совсем: по клику на значок оно появляется сразу, там же, где было. Пока окно спрятано, оно ничего не рисует и не тратит процессор, но держит в памяти свои картинки и шрифты. Выключи — окно будет закрываться полностью и собираться заново при открытии: памяти меньше, открывается чуть дольше.",
             AutostartHidden => AUTOSTART_HIDDEN_HELP,
-            CoverClickPause => "Нажатие на обложку на экране трека ставит музыку на паузу и снова запускает.",
+            CoverClickPause => "Нажатие на обложку на экране трека ставит музыку на паузу и снова запускает. Клавиши там же: L — текст рядом с обложкой, Q — очередь, Esc — назад к обложке.",
             DblClickShape => "Двойной клик по экрану трека меняет фигуру обложки.",
-            TapWait => "Чтобы отличить одиночный клик (пауза) от двойного (другая фигура), плеер чуть ждёт второго клика. Меньше — пауза срабатывает быстрее, но двойной клик нужно делать быстрее. «Сразу» — пауза мгновенная, а второй клик снимает её обратно и меняет фигуру.",
-            Keys => "Клавиши, которые работают на экране трека.",
+            TapWait => "Чтобы отличить одиночный клик (пауза) от двойного (другая фигура), плеер чуть ждёт второго клика. Меньше — пауза срабатывает быстрее, но двойной клик нужно делать быстрее. 0 — пауза мгновенная, а второй клик снимает её обратно и меняет фигуру.",
             ToastTime => "Сколько держится уведомление внизу окна, пока не уйдёт само. Пока на нём курсор, время стоит.",
             SaveLyrics => "Найденный в интернете текст песни сохраняется прямо в файл трека и потом показывается без интернета.",
             LyricsReturn => "Если ты сам прокрутил текст, через столько секунд он вернётся к строке, которую поют.",
@@ -516,12 +756,12 @@ impl SettingId {
             LyricsUi => "Источник текста и то, как его видеть (по словам, по строкам или без подсветки), всегда выбираются в маленьком меню у кнопки под текстом. Здесь выбирается, где делать подсветку по строкам или словам: прямо в этом меню, в окне поверх плеера или на отдельном экране «Текст песни».",
             LyricsLinesAuto => "Если ни у одного источника нет текста со временем строк, плеер сам ставит строки простого текста по голосу играющей песни, и текст идёт вместе с песней.",
             LyricsWordsPlaying => "Плеер сам расставляет слова по голосу в песне, которая играет, и подсветка идёт по словам даже там, где источник дал только строки или простой текст.",
-            LyricsWordsAll => "То же для всех песен с файлом, понемногу в фоне, пока плеер открыт. На большой библиотеке это часы работы видеокарты. Сделанное хранится в библиотеке и не делается заново.",
+            LyricsWordsAll => "Плеер заранее расставляет слова по голосу во всех песнях с файлом, понемногу в фоне, пока он открыт. На большой библиотеке это часы работы видеокарты. Сделанное хранится в библиотеке и не делается заново.",
             LyricsRecognize => "Если текста нет нигде, плеер пробует расслышать слова сам. Работает медленно и ошибается, особенно в быстром рэпе и сильно обработанном голосе.",
             LyricsSeparate => "Перед сверкой голос отделяется от музыки: слова ложатся точнее. На процессоре это долго, около двух минут на песню.",
             LyricsDeep => "Подсветка делается моделями крупнее: голос отделяется чище, слова слушаются дважды. Модели скачиваются при первом включении; на видеокарте песня занимает до минуты, на процессоре — несколько минут.",
             LyricsGpu => "Где считают модели. На видеокарте (через DirectML) в десятки раз быстрее; если она не справится, плеер сам перейдёт на процессор.",
-            LyricsModelsAuto => "Нужные модели скачиваются сами, когда понадобятся. Выключено — только кнопкой ниже.",
+            LyricsModelsAuto => "Нужные модели скачиваются сами, когда понадобятся. Выключено — только вручную, в списке моделей.",
             LyricsGenius => "Если подходящего текста со временем нет, плеер берёт простой текст с genius.com. Найденный текст хранится в библиотеке, второй раз его не ищут.",
             LyricsStreams => "Подсветку по словам можно сделать и для песни, которая играет с YouTube: плеер на время скачивает её звук, слушает голос и удаляет звук. Только для песен, где ясно, кто и что поёт.",
             LyricsStreamKeep => "Что «Сохранить текст» кладёт в папку исполнителя в библиотеке для песни без файла.",
@@ -530,33 +770,30 @@ impl SettingId {
             KeepShuffle => "Новый альбом, плейлист, микс, радио или поиск играет вперемешку, если перемешивание было включено. Выключи — новый список сам выключает перемешивание и играет по порядку, а «Перемешать» включает его.",
             ShuffleRadio => "При включённом перемешивании радио, автовоспроизведение и дейлист тоже играют вперемешку. Выключи — они идут в своём порядке.",
             Gapless => "Треки альбома идут друг за другом без тишины, как на диске.",
-            Crossfade => "Конец трека плавно затихает, пока начинается следующий.",
+            Crossfade => "Конец трека плавно затихает, пока начинается следующий. 0 — без кроссфейда.",
             Normalization => "Все треки звучат примерно одинаково громко, не нужно крутить громкость.",
-            LibraryDir => "Папка на диске, где лежит твоя музыка.",
+            LibraryDir => "Папка на диске, где лежит твоя музыка. Добавленное раскладывается так: Исполнитель/Год - Альбом/01 - Трек.opus.",
             MastersDir => "Сюда откладываются исходные файлы FLAC после сжатия в Opus, чтобы ничего не потерять.",
             Inbox => "Положи файлы в эту папку — и они сами добавятся в библиотеку.",
-            NamingRules => "Как называются папки и файлы после добавления в библиотеку.",
             Trash => "Включена — удалённое 30 дней лежит в Библиотека → Корзина, и его можно вернуть. Выключена — удаляется сразу.",
             ExportData => "Лайки и плейлисты хранятся в обычных файлах рядом с музыкой, их легко сохранить.",
             OpusBitrate => "Качество звука при сжатии новых треков. Выше — звук лучше, но файлы больше.",
-            FakeFlac => "Находит «ненастоящий» FLAC — файлы, сделанные из MP3: высокое качество в них только на бумаге.",
-            FakeConvert => "Явный «ненастоящий» FLAC (MP3 внутри, резкий срез) появляется в «Подтверди»: можно превратить его в MP3 320 (или V0, если исходник был слабее) — звук тот же, места меньше — или оставить. Теги, обложка, текст и всё о треке остаются, FLAC уходит в Корзину на 30 дней. Выключено — файл остаётся как есть, подписан тем, что он на самом деле. Нужен ffmpeg.",
-            FakeAuto => "Явный «ненастоящий» FLAC сразу становится MP3, без вопроса в «Подтверди». FLAC всё равно 30 дней лежит в Корзине.",
+            FakeFlac => "«Ненастоящий» FLAC — файл, сделанный из MP3: высокое качество в нём только на бумаге. Что делать с такими файлами при добавлении в библиотеку.",
             FakeRestore => "Возвращает из Корзины все FLAC, которые стали MP3, и снова играет их; MP3 уходят в Корзину. Лайки, прослушивания, плейлисты и тексты остаются.",
             MusicBrainz => "Почта или сайт для сервиса MusicBrainz, откуда берутся названия и обложки. Сервис просит его указать.",
             AcoustId => "Ключ сервиса AcoustID: он узнаёт трек по звуку, если у файла нет названий.",
             DemoProfile => "Отдельный плеер со своей библиотекой популярной музыки, настройками и входами в сервисы — для видео и проверки интерфейса. Работает рядом с этим; твоя библиотека и аккаунты в нём не видны. «Сбросить» стирает только его папку и собирает её заново.",
-            UserName => "Имя в приветствии на главной: «Добрый вечер, Ник». Пустое поле — приветствие без имени.",
+            UserName => "Имя в приветствии на главной: «Добрый вечер, Ник». Пустое поле — приветствие без имени. Сохраняется, когда уходишь из поля или жмёшь Enter.",
             Prowlarr => "Адрес и ключ программы Prowlarr — через неё ищутся раздачи с музыкой.",
             Soulseek => "Свой аккаунт в сети Soulseek: новый ник и пароль заводятся сами при первом входе. «В плеере» — клиент работает внутри плеера в фоне; «На сервере» — утилита nikgob-slsk на сервере или Raspberry Pi, плеер забирает у неё скачанное. Хранится в settings.toml.",
             SoulseekShare => "Другие люди в Soulseek могут скачивать у тебя треки из папки библиотеки (только чтение). Сеть держится на обмене: кто раздаёт, тому охотнее отдают.",
-            SoulseekUpload => "Максимальная скорость, с которой Soulseek отдаёт треки другим.",
+            SoulseekUpload => "Максимальная скорость, с которой Soulseek отдаёт треки другим. ∞ — без лимита.",
             NoSeed => "Скачанные треки сразу перестают раздаваться другим.",
-            SeedLimit => "Сколько всего можно отдать другим, после чего раздача остановится.",
+            SeedLimit => "Сколько всего можно отдать другим, после чего раздача остановится. ∞ — без лимита.",
             SeedDays => "Сколько дней раздавать скачанное, потом раздача удаляется.",
-            SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал.",
-            DownloadLimit => "Максимальная скорость скачивания, чтобы не занимать весь интернет.",
-            UploadLimit => "Максимальная скорость раздачи другим.",
+            SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал. ∞ — без предела.",
+            DownloadLimit => "Максимальная скорость скачивания торрентов, чтобы не занимать весь интернет. ∞ — без лимита.",
+            UploadLimit => "Максимальная скорость, с которой торренты отдают скачанное другим. ∞ — без лимита.",
             Spotify => "Вход в аккаунт Spotify через браузер со своим ключом: поиск, лайки, плейлисты и история. Нужен Premium — без него Spotify не подключить, а YouTube Music работает и так. Пароль приложение не видит.",
             SpotifyEnabled => "Выключи — Spotify не используется нигде: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
             SpotifyPlayback => "Отдельное разрешение на звук из Spotify (второе окно согласия). Пока его нет, те же треки играют с YouTube Music — в плеере это видно по подписи «YouTube».",
@@ -580,7 +817,7 @@ impl SettingId {
             UpgradeEvery => "Треки и альбомы, у которых файл хуже выбранного в «Хорошее качество», плеер сам ищет снова во всех источниках скачивания — по нескольку в час, чтобы не мешать. Что нашлось лучше, заменяет файл: лайки, прослушивания, плейлисты и текст остаются, старый файл уходит в корзину. Ход поиска видно в «Хочу скачать».",
             UpgradeBar => "Какое качество считать достаточным. Файлы хуже ищутся снова, и заменяет их только копия не хуже этого.",
             UpgradeAuto => "Найденная копия может оказаться другим изданием (ремастер, другой трек-лист), поэтому по умолчанию замена ждёт тебя в «Подтверди». «Заменять сам» — плеер скачивает и заменяет без вопросов.",
-            DownloadSource(v::SourceKey::Torrents) => "Раздачи, которые находит Prowlarr (адрес и ключ — ниже, в «Торренты»). Из альбома или дискографии берётся только нужный трек. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
+            DownloadSource(v::SourceKey::Torrents) => "Раздачи, которые находит Prowlarr. Из альбома или дискографии берётся только нужный трек. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
             DownloadSource(v::SourceKey::Khinsider) => "Саундтреки игр с downloads.khinsider.com, часто во FLAC. Спрашивается только для саундтреков: альбом так и называется или песня написана для игры. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
             DownloadSource(v::SourceKey::Soulseek) => "Отдельные треки от других людей в сети Soulseek, часто во FLAC. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
             DownloadSource(v::SourceKey::Qobuz) => "Каталог Qobuz во FLAC (до Hi-Res) через открытый сервис-посредник, без своего аккаунта. Такие сервисы то работают, то нет: если не отвечает, плеер просто попробует позже. Сначала берётся FLAC, где бы он ни был; при равном качестве — источник выше. Копия с YouTube — только когда нигде нет.",
@@ -591,17 +828,15 @@ impl SettingId {
             PlaylistSync => "Как новый плейлист, связанный с сервисом, следит за ним. У каждого плейлиста это можно поменять в его меню ⋮.",
             ImportSpotify => "Забирает из Spotify свои плейлисты и недавние прослушивания. Лайки приходят сами сразу после входа. Плейлисты появятся в библиотеке; скачивается только то, что скачаешь сам.",
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",
-            RadioNewShare => "Радио по треку или исполнителю и бесконечные миксы (настроения, «Твои миксы», «Новое для тебя») подмешивают музыку, которой у тебя ещё нет: похожее из YouTube Music и Deezer. Здесь — сколько. «Твой микс» на главной собирается только из твоего. Пока включены «Миксы только из скачанного», не действует: нового нет нигде.",
+            RadioNewShare => "Радио по треку или исполнителю и бесконечные миксы (настроения, «Твои миксы», «Новое для тебя») подмешивают музыку, которой у тебя ещё нет: похожее из YouTube Music и Deezer. Здесь — сколько. «Твой микс» на главной собирается только из твоего. Пока включено «Только из скачанного», не действует: нового нет нигде.",
             Autoplay => "Когда в очереди играет последний трек, она не кончается: следом сами добавляются похожие треки, как в радио по этому треку, и дальше дописываются по мере игры. Повтор не мешает: при включённом повторе очередь просто начинается заново. Откуда берутся треки — как у радио: только скачанное, вся библиотека или с новым из сервисов (это же переключается прямо в очереди).",
             AutoplayWorld => "Если в очереди был альбом, после него автовоспроизведение сначала играет следующие треки его мира по порядку альбомов — саундтрека франшизы или дискографии исполнителя, что ещё не слышал, — и только когда мир кончится, похожее, как радио. Выключи — сразу похожее.",
-            RadioSource => "Откуда радио, бесконечные миксы и автовоспроизведение берут треки. Это те же две настройки, что ниже в «Рекомендациях»: «Миксы только из скачанного» и «Новое в радио и миксах».",
+            RadioSource => "Откуда радио, бесконечные миксы и автовоспроизведение берут треки.",
             MixesDownloadedOnly => "Всё, что подбирается для тебя — «Твой микс», дейлист, плитки главной, настроения, «Твои миксы», миксы исполнителей и радио, — берёт только треки, у которых есть файл: ни стримов, ни новой музыки из сервисов. Плитки, которым не хватило таких треков, пропадают, «Ещё не скачано» не показывается. Главная пересобирается сразу. «Новое для тебя» остаётся: это отдельная полка новинок.",
-            SoundAnalysis => "Миксы и радио подбирают треки по звуку: темп, громкость, яркость, ровность. Для этого каждый трек один раз анализируется в фоне — тихо, с пониженным приоритетом. Пока анализ идёт, подборки уже работают, просто чуть менее точно.",
             StreamAnalysis => "Лайкнутые и плейлистные треки без файла тоже анализируются: их звук по одному тихо скачивается с YouTube Music в память (несколько мегабайт), анализируется и сразу выбрасывается. Не чаще раза в 20 секунд и не больше 300 треков в день; трек, сыгравший из стрима, анализируется из кэша без лишнего скачивания. Выключи — стримы останутся без анализа, а миксы будут подбирать их по исполнителю и истории.",
-            StreamCache => "Недавно игравшие треки хранятся на диске, и «Назад» или повтор не качают их заново. YouTube — файлы как есть, Spotify — только в зашифрованном виде, как у официального клиента. Лимит у каждого сервиса свой; старое удаляется само.",
-            ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы. Spotify: Аккаунт → Конфиденциальность → «Расширенная история». Google Takeout: YouTube и YouTube Music. История учит рекомендации и не добавляет в библиотеку ни треков, ни альбомов; само ничего не скачивается.",
+            StreamCache => "Недавно игравшие треки хранятся на диске, и «Назад» или повтор не качают их заново. 0 — не хранить. YouTube — файлы как есть, Spotify — только в зашифрованном виде, как у официального клиента. Лимит у каждого сервиса свой; старое удаляется само.",
+            ImportFiles => "Файлы выгрузки — вся история прослушиваний за годы, папкой или .zip. Spotify: Аккаунт → Конфиденциальность → «Расширенная история стриминга» (готовится до 30 дней). Google Takeout: YouTube и YouTube Music. История учит рекомендации и не добавляет в библиотеку ни треков, ни альбомов; само ничего не скачивается.",
             ImportSavedSongs => "Песни, сохранённые в медиатеке YouTube Music (в Takeout — файл «music library songs»), учат рекомендации, что тебе нравится: без лайков, без загрузок, в «Библиотеке» и «Любимых» их не будет. Выключи — этот файл при импорте пропускается.",
-            Nodes => "Синхронизация и резервная копия на другие устройства — появится позже.",
             NewShareBy(v::RadioKind::Track) => "Сколько нового в радио по треку. Выбор в очереди над радио меняет это же.",
             NewShareBy(v::RadioKind::Artist) => "Сколько нового в радио по исполнителю.",
             NewShareBy(v::RadioKind::Mix) => "Сколько нового в бесконечных миксах: настроения, «Твои миксы», «Новое для тебя».",
@@ -619,8 +854,7 @@ impl SettingId {
             RadioUnheard => "Сколько в радио и автовоспроизведении песен, которых ты ещё не слышал: из твоей музыки и новых. Когда таких не остаётся, играет как обычно.",
             MixClickOpensList => "Нажатие на карточку микса открывает его страницу с песнями, а играет он по кнопке ▶. Выключи — микс будет играть сразу по нажатию на карточку, а страница откроется из ⋮ → «Список треков».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
-            DislikeButton => "Кнопка рядом
- с ♡ на экране трека. «Не нравится» остаётся и в меню ⋮ любого трека.",
+            DislikeButton => "Кнопка рядом с ♡ на экране трека. «Не нравится» остаётся и в меню ⋮ любого трека.",
             DislikeSkips => "Трек, которому поставили «Не нравится», сразу пропускается.",
             DislikeSkipEverywhere => "Треки с «Не нравится» и исполнители, которых не рекомендовать, пропускаются и в твоих альбомах и плейлистах. Выключено — только в миксах, радио и автовоспроизведении; трек, выбранный тобой, играет всегда.",
             DislikeInRecs => "«Не нравится» чуть опускает и самые похожие по звуку треки. Выключено — уходит только сам трек. Исполнителя дизлайк не трогает.",
@@ -661,13 +895,13 @@ impl SettingId {
                 c!("Сдержанная", "Почти серые цвета с лёгким оттенком обложки."),
             ],
             Self::NpVolume => &[
-                c!("Всегда", "Ползунок всегда рядом с кнопкой звука."),
-                c!("При изменении", "Внизу по центру всплывает плашка, пока меняешь громкость, и прячется через пару секунд."),
-                c!("Нет", "Только кнопка звука; громкость — колесом мыши."),
+                c!("Ползунок", "Ползунок всегда рядом с кнопкой звука."),
+                c!("Плашка", "Внизу по центру всплывает плашка, пока меняешь громкость, и прячется через пару секунд."),
+                c!("Только кнопка", "Только кнопка звука; громкость — колесом мыши."),
             ],
             Self::CoverShape => &[
                 c!("Квадрат", "Обложка как есть, обычный квадрат."),
-                c!("Фигура", "Обложка вырезана одной фигурой, которую ты выберешь ниже."),
+                c!("Фигура", "Обложка вырезана одной фигурой из сетки."),
                 c!("Случайная", "У каждого трека своя случайная фигура."),
             ],
             Self::LyricsUi => &[
@@ -699,7 +933,7 @@ impl SettingId {
             ],
             Self::Ambient => &[
                 c!("Выкл", "Обычный ровный фон."),
-                c!("Свечение", "Цветные пятна медленно плывут за экраном."),
+                c!("Ровное", "Цветные пятна медленно плывут за экраном."),
                 c!("Под звук", "Пятна плывут и вспыхивают на басах."),
             ],
             Self::BgShapes => &[
@@ -730,9 +964,9 @@ impl SettingId {
                 c!("Волна", "Буквы или слова по очереди загораются и подпрыгивают."),
             ],
             Self::LyricsUnit => &[
-                c!("По буквам", "Караоке закрашивает слова буква за буквой, в «Волне» прыгает каждая буква, «Фокус» зажигает строку целиком."),
-                c!("По слогам", "Каждый слог заливается, пока его поют: быстрые слоги пробегают быстро, протяжный светится всю ноту. В «Волне» слово поднимается со своими слогами."),
-                c!("По словам", "Каждое слово загорается целиком, когда его начинают петь, а в «Волне» подпрыгивает всё слово."),
+                c!("Буквы", "Караоке закрашивает слова буква за буквой, в «Волне» прыгает каждая буква, «Фокус» зажигает строку целиком."),
+                c!("Слоги", "Каждый слог заливается, пока его поют: быстрые слоги пробегают быстро, протяжный светится всю ноту. В «Волне» слово поднимается со своими слогами."),
+                c!("Слова", "Каждое слово загорается целиком, когда его начинают петь, а в «Волне» подпрыгивает всё слово."),
             ],
             Self::WaveFallback => &[
                 c!("Угадывать слова", "Время слов угадывается по строке, и выбранная анимация идёт по ним как обычно."),
@@ -797,7 +1031,7 @@ impl SettingId {
                 c!("Скопировать один раз", "Плейлист скопирован один раз и дальше живёт сам по себе."),
             ],
             Self::RadioSource => &[
-                c!("Скачанное", "Только треки с файлом: без стримов и без новой музыки. Это же включает «Миксы только из скачанного» на главной."),
+                c!("Скачанное", "Только треки с файлом: без стримов и без новой музыки. Это же включает «Только из скачанного»."),
                 c!("Библиотека", "Вся твоя музыка: скачанное и лайкнутое или из плейлистов, что пока играет из стрима. Без нового."),
                 c!("С новым", "Твоя музыка и похожая новая из YouTube Music и Deezer (сколько — в «Новое в радио и миксах»)."),
             ],
@@ -816,7 +1050,7 @@ impl SettingId {
                 c!("Никогда", "Только новое, похожее по звуку на то, что играет."),
                 c!("Редко", "Примерно одна песня из десяти."),
                 c!("Иногда", "Примерно одна песня из пяти."),
-                c!("Часто", "Примерно три песни из десяти, если в «Новом» выбрано «Побольше»."),
+                c!("Часто", "Примерно три песни из десяти, если в «Новом в радио и миксах» выбрано «Побольше»."),
             ],
             Self::RadioUnheard => &[
                 c!("Как обычно", "Слышанное и неслышанное — по тому, что подходит лучше."),
@@ -833,6 +1067,12 @@ impl SettingId {
             Self::ProfileNames => &[
                 c!("Тип и язык", "«Японские песни», «Саундтреки без слов»; исполнители — под названием."),
                 c!("Исполнители", "Названия из главных исполнителей профиля."),
+            ],
+            Self::FakeFlac => &[
+                c!("Не проверять", "Файлы не проверяются: FLAC считается FLAC."),
+                c!("Только помечать", "Файл остаётся как есть и подписан тем, что он на самом деле."),
+                c!("Спрашивать", "Явный ненастоящий FLAC (MP3 внутри, резкий срез) ждёт в «Подтверди»: можно превратить его в MP3 320 (или V0, если исходник был слабее) — звук тот же, места меньше — или оставить. Теги, обложка и текст остаются, FLAC уходит в Корзину на 30 дней. Нужен ffmpeg."),
+                c!("Менять на MP3 сам", "Явный ненастоящий FLAC сразу становится MP3, без вопроса. FLAC 30 дней лежит в Корзине."),
             ],
             Self::OpusBitrate => &[
                 c!("128", "Файлы поменьше; на слух почти как оригинал."),
@@ -900,6 +1140,12 @@ impl SettingId {
             Self::DblClickShape => usize::from(p.dbl_click_shape).min(2),
             Self::ToastTime => TOAST_TIMES.iter().position(|s| *s == p.toast_s).unwrap_or(0),
             Self::OpusBitrate => OPUS.iter().position(|b| *b == p.opus_bitrate).unwrap_or(1),
+            Self::FakeFlac => match (p.check_fake_lossless, p.convert_fake_lossless, p.fake_flac_auto) {
+                (false, _, _) => 0,
+                (true, false, _) => 1,
+                (true, true, false) => 2,
+                (true, true, true) => 3,
+            },
             Self::LikeDownload if !p.like_downloads => 2,
             Self::LikeDownload => usize::from(p.like_download_scope == v::WishlistScope::Album),
             Self::UpgradeEvery => v::UpgradeEvery::ALL.iter().position(|e| *e == p.upgrade_every).unwrap_or(1),
@@ -972,6 +1218,14 @@ impl SettingId {
             Self::DblClickShape => p.dbl_click_shape = i.min(2) as u8,
             Self::ToastTime => p.toast_s = TOAST_TIMES[i.min(TOAST_TIMES.len() - 1)],
             Self::OpusBitrate => p.opus_bitrate = OPUS[i.min(OPUS.len() - 1)],
+            // Not checking leaves the other two as they were (they come
+            // back with the check).
+            Self::FakeFlac => match i {
+                0 => p.check_fake_lossless = false,
+                1 => (p.check_fake_lossless, p.convert_fake_lossless) = (true, false),
+                2 => (p.check_fake_lossless, p.convert_fake_lossless, p.fake_flac_auto) = (true, true, false),
+                _ => (p.check_fake_lossless, p.convert_fake_lossless, p.fake_flac_auto) = (true, true, true),
+            },
             Self::LikeDownload => {
                 p.like_downloads = i < 2;
                 if i < 2 {
@@ -1131,34 +1385,6 @@ enum Body {
     All,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CardKey {
-    id: SettingId,
-    body: Body,
-    /// About an item of the row's open menu (the card goes beside it).
-    menu: bool,
-}
-
-/// The hover card between frames: what it shows, the pointer's timing,
-/// and its springs (rect as x, y, w, h; opacity; content opacity).
-#[derive(Clone, Copy, Debug)]
-struct Hover {
-    key: Option<CardKey>,
-    open: bool,
-    /// What the pointer rests on while no card is open, and since when.
-    candidate: Option<CardKey>,
-    since: f64,
-    /// When the pointer left every row (the card waits a little).
-    left: Option<f64>,
-    rect: Animated<[f32; 4]>,
-    alpha: Animated<f32>,
-    content: Animated<f32>,
-    /// Where the card was drawn last frame.
-    drawn: Option<Rect>,
-    /// The pointer last frame, for its speed.
-    last: Option<(Pos2, f64)>,
-}
-
 fn focus_key() -> Id {
     Id::new("settings-focus")
 }
@@ -1181,10 +1407,6 @@ fn group_key() -> Id {
 
 fn pinned_key() -> Id {
     Id::new("settings-help-pinned")
-}
-
-fn hover_key() -> Id {
-    Id::new("settings-help-hover")
 }
 
 fn pinned(ctx: &egui::Context) -> Option<Pinned> {
@@ -1426,10 +1648,10 @@ fn help_button_at(ui: &Ui, id: SettingId, rect: Rect) {
     Icon::Info.widget(on, tint, 16.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(16.0)));
 }
 
-/// After the page: scrolls to a linked row and shows the pinned card, or
-/// the hover card for what the pointer rests on. A pick in the pinned card
-/// lands in `prefs`.
-pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
+/// After the page: scrolls to a linked row and shows the pinned card. A
+/// pick in the card lands in `prefs`. Beside the live stage (`samples`
+/// false) the card has no sample of its own: the stage shows it.
+pub fn finish(ui: &mut Ui, prefs: &mut Prefs, samples: bool) {
     let ctx = ui.ctx().clone();
     end_group(ui);
     if let Some(mut f) = ctx.data(|d| d.get_temp::<Focus>(focus_key())) {
@@ -1447,7 +1669,9 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
             ctx.request_repaint();
         }
         let lasts = if f.group { GROUP_S } else { FOCUS_S };
-        if f.scrolls == 0 && anim::now(&ctx) - f.start > lasts {
+        // A row that never shows (another level, a hidden list) lets go too.
+        let gone = anim::now(&ctx) - f.start > lasts + 1.0;
+        if (f.scrolls == 0 && anim::now(&ctx) - f.start > lasts) || gone {
             ctx.data_mut(|d| d.remove::<Focus>(focus_key()));
         } else {
             ctx.data_mut(|d| d.insert_temp(focus_key(), f));
@@ -1458,8 +1682,6 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
     let rows = ctx.data(|d| d.get_temp::<Rows>(rows_key())).filter(|r| r.pass == pass).map(|r| r.list).unwrap_or_default();
 
     if let Some(mut pin) = pinned(&ctx) {
-        // The hover card gives way at once.
-        ctx.data_mut(|d| d.remove::<Hover>(hover_key()));
         // Gone with its row (another tab, hidden, scrolled away).
         let Some(row) = rows.iter().find(|r| r.id == pin.id && r.clip.intersects(r.rect)) else {
             set_pinned(&ctx, None);
@@ -1477,12 +1699,13 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
             set_pinned(&ctx, None);
             return;
         }
-        // The row's current option, or the option whose button the
-        // pointer is on.
+        // The row's current option, or the option whose button (or item
+        // of its open menu) the pointer is on.
         let now = anim::now(&ctx);
         let pointer = ctx.pointer_hover_pos();
         let n = row.id.choices().len();
-        let body = match pointer.and_then(|p| row.choices.iter().position(|r| r.contains(p))).filter(|i| *i < n) {
+        let on = |p: Pos2| row.choices.iter().position(|r| r.contains(p)).or_else(|| row.menu.iter().position(|r| r.contains(p)));
+        let body = match pointer.and_then(on).filter(|i| *i < n) {
             Some(i) => Body::Option(i),
             None => base_body(row.id),
         };
@@ -1494,7 +1717,7 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
         if content < 1.0 {
             ctx.request_repaint();
         }
-        let layout = Layout::new(&ctx, row, body, true);
+        let layout = Layout::new(&ctx, row, body, samples);
         // Stays where it opened while its content swaps.
         let x = row.control.map_or(row.button.left(), |r| r.left());
         let target = Rect::from_min_size(place(row.rect, x, layout.size, ctx.content_rect()), layout.size);
@@ -1512,174 +1735,13 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs) {
         }
         pin.card = Some(rect);
         set_pinned(&ctx, (!out.close).then_some(pin));
-        return;
     }
-    hover(&ctx, &rows, prefs);
-}
-
-/// First card: the pointer rests this long on an option or an ⓘ.
-const ENTER_DELAY: f64 = 0.3;
-/// With a card up, resting this long on another one switches to it.
-const SWITCH_DELAY: f64 = 0.12;
-/// Faster than this (px/s) the pointer is passing by, not resting.
-const PASSING: f32 = 300.0;
-/// The card waits this long after the pointer leaves.
-const LEAVE_GRACE: f64 = 0.15;
-
-/// What the pointer at `p` asks for: an option button or menu item of a
-/// row (that option), or its ⓘ (every option, else the row). Labels,
-/// sliders and switches ask for nothing.
-fn key_at(row: &Row, p: Pos2) -> Option<CardKey> {
-    let n = row.id.choices().len();
-    if let Some(i) = row.menu.iter().position(|r| r.contains(p)).filter(|i| *i < n) {
-        return Some(CardKey { id: row.id, body: Body::Option(i), menu: true });
-    }
-    if !row.hovered {
-        return None;
-    }
-    if let Some(i) = row.choices.iter().position(|r| r.contains(p)).filter(|i| *i < n) {
-        return Some(CardKey { id: row.id, body: Body::Option(i), menu: false });
-    }
-    row.button.contains(p).then(|| CardKey { id: row.id, body: base_body(row.id), menu: false })
 }
 
 /// What the ⓘ card of `id` shows: the explanation and the current
 /// option's preview, or the options as lines when nothing is previewed.
 fn base_body(id: SettingId) -> Body {
     if !id.choices().is_empty() && id.preview().is_none() { Body::All } else { Body::Row }
-}
-
-/// The hover card: only for an option button, a menu item or an ⓘ the
-/// pointer rests on (a pass over them opens nothing). With a card up, a
-/// short rest on a neighbour switches it, gliding and cross-fading; it
-/// stays while the pointer is on it and a moment after the pointer leaves.
-fn hover(ctx: &egui::Context, rows: &[Row], prefs: &mut Prefs) {
-    let theme = Theme::get(ctx);
-    let now = anim::now(ctx);
-    let spatial = anim::effective(ctx, theme.motion.fast_spatial.without_bounce());
-    let effects = anim::effective(ctx, theme.motion.fast_effects);
-    let mut h = ctx.data(|d| d.get_temp::<Hover>(hover_key())).unwrap_or(Hover {
-        key: None,
-        open: false,
-        candidate: None,
-        since: now,
-        left: None,
-        rect: Animated::new([0.0; 4], spatial),
-        alpha: Animated::new(0.0, effects),
-        content: Animated::new(1.0, effects),
-        drawn: None,
-        last: None,
-    });
-    let pointer = ctx.pointer_hover_pos();
-    let speed = match (pointer, h.last) {
-        (Some(p), Some((q, t))) if now > t => p.distance(q) / (now - t) as f32,
-        _ => 0.0,
-    };
-    h.last = pointer.map(|p| (p, now));
-    // On the card itself: keep what it shows.
-    let on_card = h.open && pointer.is_some_and(|p| h.drawn.is_some_and(|r| r.contains(p)));
-    let want = if on_card { h.key } else { pointer.and_then(|p| rows.iter().find_map(|r| key_at(r, p))) };
-    if want.is_some() {
-        h.left = None;
-    }
-    if h.candidate != want || speed > PASSING {
-        h.candidate = want;
-        h.since = now;
-    }
-    let rested = now - h.since;
-    let showing = h.open || h.alpha.value(now) > 0.05;
-    match want {
-        Some(k) if showing => {
-            if h.key != Some(k) {
-                if rested >= SWITCH_DELAY {
-                    if h.key.is_some() {
-                        h.content.snap(0.0);
-                        h.content.set_target(1.0, now);
-                    }
-                    if h.key.is_some_and(|o| o.menu != k.menu) {
-                        h.drawn = None;
-                    }
-                    h.key = Some(k);
-                } else {
-                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(SWITCH_DELAY - rested));
-                }
-            }
-            if !h.open && h.key == Some(k) {
-                h.open = true;
-                h.alpha.set_target(1.0, now);
-            }
-        }
-        Some(k) => {
-            if rested >= ENTER_DELAY {
-                h.key = Some(k);
-                h.open = true;
-                h.drawn = None;
-                h.content.snap(1.0);
-                h.alpha.snap(0.0);
-                h.alpha.set_target(1.0, now);
-            } else {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((ENTER_DELAY - rested).max(0.01)));
-            }
-        }
-        None => {
-            if h.open {
-                let left = *h.left.get_or_insert(now);
-                if now - left >= LEAVE_GRACE {
-                    h.open = false;
-                    h.alpha.set_target(0.0, now);
-                } else {
-                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(LEAVE_GRACE - (now - left)));
-                }
-            }
-        }
-    }
-
-    let alpha = h.alpha.value(now).clamp(0.0, 1.0);
-    let row = h.key.and_then(|k| rows.iter().find(|r| r.id == k.id).map(|r| (k, r)));
-    match row {
-        Some((key, row)) if alpha > 0.005 || h.open => {
-            let layout = Layout::new(ctx, row, key.body, false);
-            let screen = ctx.content_rect();
-            let item = match key.body {
-                Body::Option(i) if key.menu => row.menu.get(i).copied(),
-                _ => None,
-            };
-            let target = match item {
-                Some(item) => Rect::from_min_size(beside(&row.menu, item, layout.size, screen), layout.size),
-                None => Rect::from_min_size(place(row.rect, layout.anchor_x, layout.size, screen), layout.size),
-            };
-            let goal = [target.left(), target.top(), target.width(), target.height()];
-            if h.drawn.is_none() {
-                // Appearing: rise a little from the row's side.
-                let rise = if item.is_some() { 0.0 } else if target.top() >= row.rect.bottom() { -8.0 } else { 8.0 };
-                h.rect.snap([goal[0], goal[1] - rise, goal[2], goal[3]]);
-            }
-            h.rect.set_target(goal, now);
-            let [x, y, w, hh] = h.rect.value(now);
-            let rect = Rect::from_min_size(pos2(x, y), vec2(w, hh));
-            let content = h.content.value(now).clamp(0.0, 1.0);
-            show_card(ctx, Id::new("settings-help-card"), rect, alpha, content, &layout, row, prefs, false);
-            h.drawn = Some(rect);
-            if !(h.rect.is_settled(now) && h.alpha.is_settled(now) && h.content.is_settled(now)) {
-                ctx.request_repaint();
-            }
-        }
-        _ => {
-            h.key = if h.open { h.key } else { None };
-            h.drawn = None;
-        }
-    }
-    ctx.data_mut(|d| d.insert_temp(hover_key(), h));
-}
-
-/// Where a card about a menu item goes: beside the open menu (right, else
-/// left), level with the item, inside `screen`.
-fn beside(menu: &[Rect], item: Rect, size: Vec2, screen: Rect) -> Pos2 {
-    let screen = screen.shrink2(vec2(8.0, 4.0));
-    let all = menu.iter().fold(item, |a, r| a.union(*r)).expand(8.0);
-    let x = if all.right() + GAP + size.x <= screen.right() { all.right() + GAP } else { (all.left() - GAP - size.x).max(screen.left()) };
-    let y = item.top().clamp(screen.top(), (screen.bottom() - size.y).max(screen.top()));
-    pos2(x, y)
 }
 
 /// Text width of a one-thing card.
@@ -1731,10 +1793,9 @@ fn with_choice(id: SettingId, prefs: &Prefs, i: usize) -> Prefs {
     p
 }
 
-/// A card laid out: its size, where it lines up, and its texts.
+/// A card laid out: its size and its texts.
 struct Layout {
     size: Vec2,
-    anchor_x: f32,
     body: Body,
     kind: Option<Preview>,
     title: Arc<Galley>,
@@ -1752,11 +1813,12 @@ const BETA_CARD: &str = "Функция в бета-тестировании. ";
 const CLOSE_W: f32 = 32.0;
 
 impl Layout {
-    fn new(ctx: &egui::Context, row: &Row, body: Body, pinned: bool) -> Self {
+    fn new(ctx: &egui::Context, row: &Row, body: Body, samples: bool) -> Self {
+        let pinned = true;
         let s = Theme::get(ctx).scheme;
         let painter = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("settings-help-measure")));
         let choices = row.id.choices();
-        let kind = if body == Body::All { None } else { row.id.preview() };
+        let kind = if body == Body::All || !samples { None } else { row.id.preview() };
         let (title, help) = match body {
             Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help.to_owned()),
             _ if row.id.beta() => (row.label.clone(), BETA_CARD.to_owned() + row.id.help()),
@@ -1787,13 +1849,7 @@ impl Layout {
             h += 8.0 + lg.size().y + hg.size().y;
         }
         h += PAD;
-        let anchor_x = match body {
-            Body::Option(i) => row.choices.get(i).map(|r| r.left()),
-            _ => None,
-        }
-        .or(row.control.map(|r| r.left()))
-        .unwrap_or(row.button.left());
-        Self { size: vec2(CARD_W + 2.0 * PAD, h), anchor_x, body, kind, title, help, texts, close: pinned }
+        Self { size: vec2(CARD_W + 2.0 * PAD, h), body, kind, title, help, texts, close: pinned }
     }
 }
 
@@ -2197,6 +2253,8 @@ pub struct DrawnRow {
     pub clip: Rect,
     pub opacity: f32,
     pub enabled: bool,
+    /// The pointer is on it (or its ⓘ).
+    pub hovered: bool,
 }
 
 /// The rows of the last pass that drew any, with that pass's number.
@@ -2216,6 +2274,7 @@ pub fn drawn_rows(ctx: &egui::Context) -> (u64, Vec<DrawnRow>) {
             clip: r.clip,
             opacity: r.opacity,
             enabled: r.enabled,
+            hovered: r.hovered,
         })
         .collect();
     (rows.pass, list)
@@ -2256,59 +2315,88 @@ mod tests {
         assert!(group_tint_at(2.2, true) < 0.2);
     }
 
+    /// Every row knows its tab, level, name and ⓘ text.
     #[test]
-    fn linked_rows_know_their_tab_and_every_row_has_help() {
-        assert_eq!(SettingId::LyricsStyle.tab(), TAB_APPEARANCE);
-        assert_eq!(SettingId::BgHue.tab(), TAB_APPEARANCE);
-        // Torrents moved to «Источники»: old links land there.
-        assert_eq!(SettingId::Prowlarr.tab(), TAB_SOURCES);
-        assert_eq!(SettingId::NoSeed.tab(), TAB_SOURCES);
-        assert_eq!(SettingId::Spotify.tab(), TAB_SOURCES);
-        assert_eq!(SettingId::MusicBrainz.tab(), TAB_GENERAL);
-        assert_eq!(SettingId::RadioNewShare.tab(), TAB_RECS);
-        assert_eq!(SettingId::SoundAnalysis.tab(), TAB_RECS);
-        assert_eq!(SettingId::StreamAnalysis.tab(), TAB_SOURCES);
-        assert_eq!(SettingId::MixesDownloadedOnly.tab(), TAB_RECS);
-        assert_eq!(SettingId::Autoplay.tab(), TAB_RECS);
-        assert_eq!(SettingId::DislikeInRecs.tab(), TAB_RECS);
-        assert_eq!(SettingId::NewShareBy(v::RadioKind::Mix).tab(), TAB_RECS);
-        assert_eq!(SettingId::BackgroundCountsLess.tab(), TAB_RECS);
-        assert_eq!(SettingId::ProfilesSplit.tab(), TAB_RECS);
-        assert_eq!(SettingId::ProfileNames.tab(), TAB_RECS);
-        assert_eq!(SettingId::BackgroundCards.tab(), TAB_RECS);
-        assert_eq!(SettingId::MixesEverything.tab(), TAB_RECS);
-        for id in [
-            SettingId::GraphUse,
-            SettingId::GraphServices,
-            SettingId::GraphOpenData,
-            SettingId::GraphPersonal,
-            SettingId::LibraryAsTaste,
-            SettingId::LastfmKey,
-            SettingId::ListenbrainzToken,
+    fn every_row_has_a_tab_a_level_a_name_and_help() {
+        for &id in crate::screens::sweep::ALL {
+            assert!(id.tab() < TABS.len(), "{id:?}");
+            assert!(!id.label().is_empty(), "{id:?}");
+            assert!(!id.help().is_empty(), "{id:?}");
+            // A name says the thing, never its value.
+            assert!(!id.label().contains(':') && !id.label().ends_with(" с"), "{id:?}: {}", id.label());
+        }
+    }
+
+    /// Links from other screens land on the tab that has the row now.
+    #[test]
+    fn linked_rows_know_their_new_tab() {
+        use SettingId as S;
+        for (id, tab) in [
+            (S::LyricsStyle, TAB_LYRICS),
+            (S::LyricsUi, TAB_SYSTEM),
+            (S::LyricsModels, TAB_LYRICS),
+            (S::BgHue, TAB_LOOK),
+            (S::MixesProfiles, TAB_LOOK),
+            (S::HiddenMixes, TAB_LOOK),
+            (S::LikedAlbumsPlace, TAB_LOOK),
+            (S::CoverClickPause, TAB_LOOK),
+            (S::Prowlarr, TAB_DOWNLOADS),
+            (S::NoSeed, TAB_DOWNLOADS),
+            (S::SeedRatio, TAB_DOWNLOADS),
+            (S::UploadLimit, TAB_DOWNLOADS),
+            (S::Soulseek, TAB_DOWNLOADS),
+            (S::SoulseekUpload, TAB_DOWNLOADS),
+            (S::DownloadSource(v::SourceKey::Torrents), TAB_DOWNLOADS),
+            (S::LikeDownload, TAB_DOWNLOADS),
+            (S::Spotify, TAB_SERVICES),
+            (S::SpotifyPlayback, TAB_SERVICES),
+            (S::YouTube, TAB_SERVICES),
+            (S::PlaylistSync, TAB_SERVICES),
+            (S::StreamAnalysis, TAB_SYSTEM),
+            (S::MusicBrainz, TAB_SYSTEM),
+            (S::Autoplay, TAB_MUSIC),
+            (S::RadioSource, TAB_MUSIC),
+            (S::NewShareBy(v::RadioKind::Mix), TAB_MUSIC),
+            (S::DislikeButton, TAB_MUSIC),
         ] {
-            assert_eq!(id.tab(), TAB_RECS);
-            assert!(!id.help().is_empty());
+            assert_eq!(id.tab(), tab, "{id:?}");
         }
-        assert!(!SettingId::Autoplay.help().is_empty() && !SettingId::RadioSource.help().is_empty());
-        assert_eq!(SettingId::RadioNoRepeat.tab(), TAB_RECS);
-        assert!(!SettingId::RadioNoRepeat.help().is_empty());
-        for id in [SettingId::RadioExplore, SettingId::RadioUnheard] {
-            assert_eq!(id.tab(), TAB_RECS);
-            assert!(!id.help().is_empty());
+        assert!(stage_tab(TAB_LYRICS) && stage_tab(TAB_LOOK) && !stage_tab(TAB_SYSTEM));
+    }
+
+    /// A link to a developer row in a handout build, or to its group, goes
+    /// to a row users see; every other row is its own neighbour.
+    #[test]
+    fn no_link_ends_on_a_developer_row() {
+        for &id in crate::screens::sweep::ALL {
+            let n = id.user_neighbour();
+            assert_ne!(n.level(), Level::Dev, "{id:?} → {n:?}");
+            if id.level() != Level::Dev {
+                assert_eq!(n, id);
+            }
         }
-        for id in [SettingId::RadioNewShare, SettingId::MixesDownloadedOnly, SettingId::SoundAnalysis, SettingId::StreamAnalysis] {
-            assert!(!id.help().is_empty());
+        assert_eq!(SettingId::LyricsUi.user_neighbour(), SettingId::LyricsStyle);
+        assert_eq!(SettingId::LyricsGpu.user_neighbour(), SettingId::LyricsModels);
+    }
+
+    /// «Ненастоящий FLAC» reads and writes the three old prefs, and nothing
+    /// starts out making MP3 by itself.
+    #[test]
+    fn fake_flac_is_one_choice_over_three_prefs() {
+        let id = SettingId::FakeFlac;
+        for p in [Prefs::default(), Prefs::first_start()] {
+            assert_ne!(id.chosen(&p), 3);
         }
-        for id in [SettingId::SpotifyPersonal, SettingId::YouTubeCookies, SettingId::ImportFiles, SettingId::ImportSavedSongs, SettingId::AutoDownloads] {
-            assert!(!id.help().is_empty());
-        }
-        for id in [SettingId::LyricsUi, SettingId::LyricsLinesAuto, SettingId::LyricsWordsPlaying, SettingId::LyricsWordsAll] {
-            assert_eq!(id.tab(), TAB_GENERAL);
-            assert!(!id.help().is_empty());
-        }
-        for id in [SettingId::Design, SettingId::FpsLimit, SettingId::Nodes, SettingId::RingBeat] {
-            assert!(!id.help().is_empty());
-        }
+        let mut p = Prefs::default();
+        id.choose(&mut p, 3);
+        assert!(p.check_fake_lossless && p.convert_fake_lossless && p.fake_flac_auto);
+        id.choose(&mut p, 0);
+        assert!(!p.check_fake_lossless);
+        assert_eq!(id.chosen(&p), 0);
+        id.choose(&mut p, 1);
+        assert!(p.check_fake_lossless && !p.convert_fake_lossless);
+        id.choose(&mut p, 2);
+        assert!(p.check_fake_lossless && p.convert_fake_lossless && !p.fake_flac_auto);
     }
 
     #[test]
@@ -2320,9 +2408,8 @@ mod tests {
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
-            S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto,
+            S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto, S::FakeFlac,
         ] {
-
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {
                 let mut p = Prefs::default();

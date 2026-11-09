@@ -18,7 +18,9 @@ use nikgob_view::{self as v, Command, CoverShape, NpSlot, Prefs, Route, ViewStat
 
 use super::pages::settings_help;
 pub use super::pages::SettingId;
-pub use super::pages::settings_help::{DrawnRow, TABS};
+pub use super::pages::settings_help::{DrawnRow, Level, TABS};
+/// Where the settings page keeps the live stage's room this pass.
+pub use super::pages::{StageSlot, stage_slot};
 use super::{Md3eUi, PaneTab};
 
 /// How a row is set.
@@ -71,7 +73,7 @@ enum Spec {
     Count(fn(&mut Prefs) -> &mut u32, f32, f32, f32),
     /// A speed limit in KiB/s (0: none, the right end).
     Speed(fn(&mut Prefs) -> &mut u32),
-    /// One line of «Источники скачивания»: its switch.
+    /// One line of «Откуда качать»: its switch.
     Source(v::SourceKey),
     ShapeRange,
     ShapePick,
@@ -199,34 +201,37 @@ const KINDS: [K; 4] = [K::Track, K::Artist, K::Mix, K::Autoplay];
 pub const ALL: &[SettingId] = {
     use SettingId::*;
     &[
-        // Основные.
-        UserName, Autostart, AutostartHidden, TrayKeepWindow, CoverClickPause, DblClickShape, TapWait, Keys, ToastTime, DemoProfile,
-        LyricsWordsPlaying, SaveLyrics, LyricsReturn, LyricsUi, LyricsGenius, LyricsCheck, LyricsLinesAuto, LyricsWordsAll,
-        LyricsStreams, LyricsStreamKeep, LyricsGpu, LyricsSeparate, LyricsDeep, LyricsRecognize, LyricsModelsAuto, LyricsModels,
-        KeepShuffle, ShuffleRadio, OutputDevice, Gapless, Crossfade, Normalization, LibraryDir, MastersDir, Inbox, NamingRules,
-        Trash, ExportData, OpusBitrate, FakeFlac, FakeConvert, FakeAuto, FakeRestore, MusicBrainz, AcoustId,
-        // Рекомендации.
-        RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay), MixesWithNew,
-        Autoplay, AutoplayWorld, RadioSource, MixesDownloadedOnly, RadioNoRepeat, RadioExplore, RadioUnheard, SoundAnalysis,
-        MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, MixClickOpensList, HiddenMixes,
-        BackgroundCountsLess, ProfilesSplit, ProfileNames, GraphUse, GraphServices, GraphOpenData, GraphPersonal, LibraryAsTaste,
-        LastfmKey, ListenbrainzToken, DislikeButton, DislikeSkips, DislikeSkipEverywhere, DislikeInRecs, DislikedArtists,
-        DislikedTracks,
-        // Источники.
-        SpotifyEnabled, Spotify, SpotifyPlayback, SpotifySoloist, SpotifyPersonal, ImportSpotify, YouTubeEnabled, YouTube,
-        ImportYouTube, YouTubeCookies, SoundCloudEnabled, SoundCloud, ImportSoundCloud, SoundCloudToken, DeezerEnabled,
+        // Музыка.
+        OutputDevice, Gapless, Crossfade, Normalization, Autoplay, AutoplayWorld, KeepShuffle, ShuffleRadio, RadioNoRepeat,
+        MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
+        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, DislikedArtists,
+        DislikedTracks, RadioSource,
+        // Тексты.
+        LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsScale, LyricsLead, LyricsDim, LyricsCascade,
+        LyricsGlow, LyricsSoftEdges, LyricsSoftDepth, LyricsSoftStrength, LyricsSoftFade, LyricsGap, LyricsGapWaves, LyricsGapHeight,
+        LyricsGapSize, LyricsCountdown, WaveFallback, LyricsReturn, LyricsGenius, SaveLyrics, LyricsCheck, LyricsWordsPlaying,
+        LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
+        // Вид.
+        Theme, Scheme, Contrast, SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir, CoverPulse, CoverPauseMorph, Ring,
+        RingStyle, RingSpin, RingDir, RingBeat, Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact,
+        BgColors, BgHue, ProgressWave, NpVolume, NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, MixesProfiles,
+        MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
+        LikedAlbumsPlace, RailCompact, ReducedMotion, Tooltips, PaneQueue, PaneLyrics, PaneInfo,
+        // Сервисы.
+        SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
+        YouTubeCookies, ImportYouTube, SoundCloudEnabled, SoundCloud, SoundCloudToken, ImportSoundCloud, DeezerEnabled, PushLikes,
+        AlbumLike, SingleLike, PlaylistSync, ImportFiles, ImportSavedSongs, StreamCache,
+        // Загрузки.
         DownloadSource(Src::Torrents), DownloadSource(Src::Khinsider), DownloadSource(Src::Soulseek), DownloadSource(Src::Qobuz),
         DownloadSource(Src::Tidal), DownloadSource(Src::Squidify), DownloadSource(Src::Archive), DownloadSource(Src::Bandcamp),
-        LikeDownload, PushLikes, AlbumLike, SingleLike, LikedAlbumsPlace, AutoDownloads, DownloadToasts, UpgradeEvery, UpgradeBar,
-        UpgradeAuto, PlaylistSync, StreamAnalysis, ImportFiles, ImportSavedSongs, StreamCache, Soulseek, SoulseekShare,
-        SoulseekUpload, Prowlarr, NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit,
-        // Внешний вид.
-        Design, Theme, Contrast, Scheme, ProgressWave, NpVolume, NpVolumeHold, SettingId::CoverShape, ShapeRange, ShapePick, CoverPauseMorph, CoverSpin,
-        CoverDir, CoverPulse, Ring, RingStyle, RingSpin, RingDir, RingBeat, Ambient, AmbientStrength, BgShapes, BgCount, BgSize,
-        BgOpacity, BgSpeed, BgReact, BgColors, BgHue, LyricsStyle, LyricsUnit, LyricsSmooth, WaveFallback, WaveJump, JumpSpeed,
-        LightSpeed, LyricsLead, LyricsDim, LyricsScale, LyricsCascade, LyricsGlow, LyricsSoftEdges, LyricsSoftDepth,
-        LyricsSoftStrength, LyricsSoftFade, LyricsGap, LyricsGapWaves, LyricsGapHeight, LyricsGapSize, LyricsCountdown,
-        AlbumDate, RailCompact, PaneQueue, PaneLyrics, PaneInfo, HomeCard, NpMotion, ReducedMotion, Tooltips, FpsLimit, Nodes,
+        LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
+        NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
+        // Система.
+        UserName, Autostart, AutostartHidden, FpsLimit, TrayKeepWindow, AutoDownloads, StreamAnalysis, LyricsSeparate, LyricsDeep,
+        LyricsWordsAll, ToastTime, DownloadToasts, LibraryDir, MastersDir, Inbox, Trash, ExportData,
+        // Для разработчика.
+        LyricsUi, LyricsGpu, LyricsModelsAuto, MusicBrainz, AcoustId, LastfmKey, ListenbrainzToken, BackgroundCountsLess,
+        ProfilesSplit, GraphServices, GraphOpenData, GraphPersonal, LibraryAsTaste, DislikeInRecs, DemoProfile,
     ]
 };
 
@@ -253,25 +258,33 @@ pub fn beta(id: SettingId) -> bool {
     id.beta()
 }
 
+/// The row's name as the page shows it.
+pub fn label(id: SettingId) -> &'static str {
+    id.label()
+}
+
+/// When the row shows: «Просто», «Подробно» or «Для разработчика».
+pub fn level(id: SettingId) -> Level {
+    id.level()
+}
+
 fn spec(id: SettingId) -> Spec {
-    use Kind::{Action, Field, Info, List, Menu, Segments};
+    use Kind::{Action, Field, List, Menu, Segments};
     use SettingId as S;
     const ACCOUNT: &str = "a service account (sign-in); shown with whatever the data dir has";
     const SECRET: &str = "kept in settings.toml, not in the prefs; typed in, never set by the sweep";
     const BUTTONS: &str = "buttons only; the sweep never presses them (they open folders, sign in or change files)";
-    const INFO: &str = "a line of text, nothing to set";
     const LIST: &str = "a list of what was marked elsewhere; nothing to set here";
     match id {
-        S::Design => Spec::Fixed(Segments, "one design exists; the other options are off"),
-        S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingDir | S::RingStyle | S::Ambient | S::BgShapes
-        | S::BgColors | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu
-        | S::LyricsStreamKeep | S::OpusBitrate | S::RadioNewShare | S::RadioSource | S::ProfileNames | S::LikeDownload
-        | S::AlbumLike | S::SingleLike | S::LikedAlbumsPlace | S::UpgradeEvery | S::UpgradeBar | S::UpgradeAuto
-        | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
+        S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingDir | S::RingStyle | S::Ambient | S::BgColors
+        | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu | S::LyricsStreamKeep
+        | S::OpusBitrate | S::RadioNewShare | S::ProfileNames | S::LikeDownload | S::AlbumLike | S::SingleLike
+        | S::LikedAlbumsPlace | S::UpgradeBar | S::UpgradeAuto | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
         S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
-        | S::RadioUnheard | S::BackgroundCards => Spec::Choice(Menu),
+        | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac => Spec::Choice(Menu),
+        S::RadioSource => Spec::Fixed(Segments, "chosen in the queue's radio header; no row in Settings"),
         S::ProgressWave => Spec::Switch(|p| &mut p.progress_wave),
         S::NpVolumeHold => Spec::Slider(|p| &mut p.np_volume_pop_hold, 0.3, 3.0, 0.1),
         S::ShapeRange => Spec::ShapeRange,
@@ -309,7 +322,6 @@ fn spec(id: SettingId) -> Spec {
         S::PaneQueue => Spec::Switch(|p| &mut p.pane_queue),
         S::PaneLyrics => Spec::Switch(|p| &mut p.pane_lyrics),
         S::PaneInfo => Spec::Switch(|p| &mut p.pane_info),
-        S::HomeCard => Spec::Switch(|p| &mut p.home_card),
         S::ReducedMotion => Spec::Switch(|p| &mut p.reduced_motion),
         S::Tooltips => Spec::Switch(|p| &mut p.tooltips),
         S::FpsLimit => Spec::Count(|p| &mut p.fps_limit, 30.0, 144.0, 1.0),
@@ -320,7 +332,6 @@ fn spec(id: SettingId) -> Spec {
         S::TrayKeepWindow => Spec::Switch(|p| &mut p.tray_keep_window),
         S::CoverClickPause => Spec::Switch(|p| &mut p.cover_click_pause),
         S::TapWait => Spec::Slider(|p| &mut p.np_tap_wait, 0.0, 0.4, 0.02),
-        S::Keys => Spec::Fixed(Info, INFO),
         S::SaveLyrics => Spec::Switch(|p| &mut p.save_found_lyrics),
         S::LyricsReturn => Spec::Slider(|p| &mut p.lyrics_return_s, 1.0, 15.0, 1.0),
         S::LyricsCheck => Spec::Switch(|p| &mut p.lyrics_check),
@@ -341,11 +352,7 @@ fn spec(id: SettingId) -> Spec {
         S::Crossfade => Spec::Slider(|p| &mut p.crossfade_s, 0.0, 12.0, 1.0),
         S::Normalization => Spec::Switch(|p| &mut p.normalization),
         S::LibraryDir | S::MastersDir | S::Inbox | S::ExportData | S::FakeRestore | S::DemoProfile => Spec::Fixed(Action, BUTTONS),
-        S::NamingRules => Spec::Fixed(Info, INFO),
         S::Trash => Spec::Switch(|p| &mut p.use_trash),
-        S::FakeFlac => Spec::Switch(|p| &mut p.check_fake_lossless),
-        S::FakeConvert => Spec::Switch(|p| &mut p.convert_fake_lossless),
-        S::FakeAuto => Spec::Switch(|p| &mut p.fake_flac_auto),
         S::MusicBrainz | S::AcoustId | S::LastfmKey | S::ListenbrainzToken | S::Prowlarr | S::Soulseek | S::SpotifyPersonal
         | S::YouTubeCookies | S::SoundCloudToken => Spec::Fixed(Field, SECRET),
         // Рекомендации.
@@ -353,7 +360,6 @@ fn spec(id: SettingId) -> Spec {
         S::MixesWithNew => Spec::Switch(|p| &mut p.mixes_with_new),
         S::Autoplay => Spec::Switch(|p| &mut p.autoplay),
         S::AutoplayWorld => Spec::Switch(|p| &mut p.autoplay_continue_world),
-        S::SoundAnalysis => Spec::Fixed(Info, "the analysis progress line and a link to «Анализ звука стримов»"),
         S::BackgroundCountsLess => Spec::Switch(|p| &mut p.background_counts_less),
         S::ProfilesSplit => Spec::Switch(|p| &mut p.profiles_split),
         S::MixesProfiles => Spec::Switch(|p| &mut p.mixes_profiles),
@@ -395,7 +401,6 @@ fn spec(id: SettingId) -> Spec {
         S::SeedRatio => Spec::Slider(|p| &mut p.seed_ratio, 0.0, 5.0, 0.5),
         S::DownloadLimit => Spec::Speed(|p| &mut p.download_limit_kbps),
         S::UploadLimit => Spec::Speed(|p| &mut p.upload_limit_kbps),
-        S::Nodes => Spec::Fixed(Info, "no row on the page yet («появится позже»)"),
     }
 }
 
@@ -416,9 +421,9 @@ pub fn needs(id: SettingId) -> Option<&'static str> {
     use SettingId as S;
     match (spec(id), id) {
         (Spec::Fixed(_, why), _) => Some(why),
-        (_, S::HomeCard) if !v::HOME_CARD => Some("hidden in this build (HOME_CARD is off): the row is not drawn"),
-        (_, S::DownloadSource(_)) => Some("drawn only for the sources the runtime lists as available"),
         (_, S::LyricsGpu) if !cfg!(windows) => Some("Windows only (DirectML)"),
+        (_, id) if id.level() == Level::Dev => Some("«Для разработчика»: drawn in «Подробно» of the owner's own builds only"),
+        (_, S::DownloadSource(_)) => Some("drawn only for the sources the runtime lists as available"),
         (_, S::Gapless | S::Crossfade) => Some("faded while Spotify Soloist plays"),
         _ => None,
     }
@@ -613,7 +618,6 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
             }
         }
         S::LyricsStreamKeep => p.lyrics_streams = true,
-        S::FakeAuto => (p.check_fake_lossless, p.convert_fake_lossless) = (true, true),
         S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew => p.mixes_downloaded_only = false,
         S::RadioExplore => {
             p.mixes_downloaded_only = false;
@@ -655,11 +659,11 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::RailCompact => vec![Home, Library],
         S::PaneQueue => vec![Home, Queue],
         S::PaneLyrics => vec![Home, LyricsPane],
-        S::PaneInfo | S::HomeCard | S::UserName => vec![Home],
+        S::PaneInfo | S::UserName => vec![Home],
         S::NpMotion => vec![NpOpening],
         S::ReducedMotion => vec![NpOpening, Np, NpLyrics],
         S::LyricsUi => vec![LyricsUi],
-        S::Autoplay | S::AutoplayWorld | S::RadioSource => vec![NpQueue],
+        S::Autoplay | S::AutoplayWorld => vec![NpQueue],
         S::MixesDownloadedOnly | S::MixesProfiles | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat
         | S::BackgroundCards | S::ProfileNames | S::ProfilesSplit | S::MixesWithNew => vec![Home],
         S::LikedAlbumsPlace => vec![Library],
@@ -703,12 +707,15 @@ pub fn animated(id: SettingId) -> bool {
     )
 }
 
-/// A row every tab has drawn, for opening the tab at its top.
+/// A row every tab draws first («Просто» too), for opening the tab at its
+/// top.
 pub fn tab_first(tab: usize) -> SettingId {
     match tab {
-        settings_help::TAB_RECS => SettingId::RadioNewShare,
-        settings_help::TAB_SOURCES => SettingId::SpotifyEnabled,
-        settings_help::TAB_APPEARANCE => SettingId::Design,
+        settings_help::TAB_MUSIC => SettingId::OutputDevice,
+        settings_help::TAB_LYRICS => SettingId::LyricsStyle,
+        settings_help::TAB_LOOK => SettingId::Theme,
+        settings_help::TAB_SERVICES => SettingId::SpotifyEnabled,
+        settings_help::TAB_DOWNLOADS => SettingId::DownloadSource(Src::Torrents),
         _ => SettingId::UserName,
     }
 }
@@ -721,8 +728,10 @@ pub fn rows_now(ctx: &Context) -> Vec<DrawnRow> {
 }
 
 impl Md3eUi {
-    /// Opens Settings at row `id`, scrolled to it, as a link does.
+    /// Opens Settings at row `id`, scrolled to it, as a link does, in
+    /// «Подробно» (the sweep shoots every row).
     pub fn sweep_open_setting(&mut self, id: SettingId) {
+        self.pages.set_settings_deep(true);
         self.pages.open_setting(id);
     }
 
@@ -784,9 +793,11 @@ impl Survey {
         Self { ctx, ui: Md3eUi::new(), state, time: 0.0, size: vec2(size[0], size[1]) }
     }
 
-    /// The rows of `tab` as the page draws them with `prefs`.
+    /// The rows of `tab` as the page draws them with `prefs`, in
+    /// «Подробно».
     pub fn tab(&mut self, prefs: &Prefs, tab: usize) -> Vec<DrawnRow> {
         self.state.prefs = prefs.clone();
+        self.ui.pages.set_settings_deep(true);
         self.ui.pages.open_setting(tab_first(tab));
         let mut rows = Vec::new();
         for _ in 0..3 {
@@ -830,34 +841,33 @@ mod tests {
         use SettingId as S;
         let pos = |id: SettingId| ALL.iter().position(|x| *x == id).unwrap_or(usize::MAX);
         match id {
-            S::Design | S::Theme | S::Contrast | S::Scheme | S::ProgressWave | S::NpVolume | S::NpVolumeHold | S::CoverShape
-            | S::ShapeRange | S::ShapePick | S::CoverSpin | S::CoverDir | S::CoverPulse | S::Ring | S::RingStyle | S::RingSpin
-            | S::RingDir | S::RingBeat | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount | S::BgSize | S::BgOpacity
-            | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::LyricsStyle | S::WaveFallback | S::WaveJump | S::JumpSpeed
-            | S::LightSpeed | S::LyricsSmooth | S::LyricsDim | S::LyricsScale | S::LyricsLead | S::LyricsCascade | S::LyricsGlow
-            | S::LyricsGap | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize | S::LyricsCountdown | S::LyricsUnit
-            | S::LyricsSoftEdges | S::LyricsSoftStrength | S::LyricsSoftDepth | S::LyricsSoftFade | S::RailCompact | S::PaneQueue
-            | S::PaneLyrics | S::PaneInfo | S::HomeCard | S::NpMotion | S::ReducedMotion | S::Tooltips | S::FpsLimit | S::Autostart
-            | S::AutostartHidden | S::TrayKeepWindow | S::CoverClickPause | S::DblClickShape | S::TapWait | S::Keys | S::ToastTime
-            | S::SaveLyrics | S::LyricsReturn | S::LyricsCheck | S::LyricsLinesAuto | S::LyricsUi | S::LyricsWordsPlaying
-            | S::LyricsWordsAll | S::LyricsRecognize | S::LyricsSeparate | S::LyricsDeep | S::LyricsGpu | S::LyricsModelsAuto
-            | S::LyricsGenius | S::LyricsStreams | S::LyricsStreamKeep | S::LyricsModels | S::KeepShuffle | S::ShuffleRadio
-            | S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::LibraryDir | S::MastersDir | S::Inbox
-            | S::NamingRules | S::Trash | S::ExportData | S::OpusBitrate | S::FakeFlac | S::FakeConvert | S::FakeAuto
-            | S::FakeRestore | S::MusicBrainz | S::AcoustId | S::UserName | S::RadioNewShare | S::MixesDownloadedOnly
-            | S::Autoplay | S::AutoplayWorld | S::RadioSource | S::SoundAnalysis | S::RadioNoRepeat | S::RadioExplore
-            | S::RadioUnheard | S::NewShareBy(_) | S::MixesWithNew | S::BackgroundCountsLess | S::ProfilesSplit
-            | S::ProfileNames | S::MixesProfiles | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards
-            | S::MixClickOpensList | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere | S::DislikeInRecs
-            | S::DislikedTracks | S::DislikedArtists | S::HiddenMixes | S::GraphUse | S::GraphServices | S::GraphOpenData
-            | S::GraphPersonal | S::LibraryAsTaste | S::LastfmKey | S::ListenbrainzToken | S::SpotifyEnabled
-            | S::SpotifyPlayback | S::SpotifySoloist | S::SpotifyPersonal | S::YouTubeEnabled | S::YouTubeCookies
-            | S::DeezerEnabled | S::SoundCloudEnabled | S::SoundCloudToken | S::LikeDownload | S::PushLikes | S::AlbumLike
-            | S::SingleLike | S::LikedAlbumsPlace | S::AutoDownloads | S::DownloadToasts | S::UpgradeEvery | S::UpgradeBar
-            | S::UpgradeAuto | S::DownloadSource(_) | S::PlaylistSync | S::ImportSpotify | S::ImportYouTube
-            | S::ImportSoundCloud | S::ImportFiles | S::ImportSavedSongs | S::StreamCache | S::StreamAnalysis | S::Prowlarr
-            | S::Soulseek | S::SoulseekShare | S::SoulseekUpload | S::NoSeed | S::SeedLimit | S::SeedDays | S::SeedRatio
-            | S::DownloadLimit | S::UploadLimit | S::Spotify | S::YouTube | S::SoundCloud | S::Nodes | S::CoverPauseMorph | S::AlbumDate | S::DemoProfile => pos(id),
+            S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Autoplay | S::AutoplayWorld | S::KeepShuffle
+            | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
+            | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
+            | S::DislikedArtists | S::DislikedTracks | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth
+            | S::LightSpeed | S::WaveJump | S::JumpSpeed | S::LyricsScale | S::LyricsLead | S::LyricsDim | S::LyricsCascade
+            | S::LyricsGlow | S::LyricsSoftEdges | S::LyricsSoftDepth | S::LyricsSoftStrength | S::LyricsSoftFade | S::LyricsGap
+            | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize | S::LyricsCountdown | S::WaveFallback | S::LyricsReturn
+            | S::LyricsGenius | S::SaveLyrics | S::LyricsCheck | S::LyricsWordsPlaying | S::LyricsLinesAuto | S::LyricsStreams
+            | S::LyricsStreamKeep | S::LyricsRecognize | S::LyricsModels | S::Theme | S::Scheme | S::Contrast | S::CoverShape
+            | S::ShapeRange | S::ShapePick | S::CoverSpin | S::CoverDir | S::CoverPulse | S::CoverPauseMorph | S::Ring
+            | S::RingStyle | S::RingSpin | S::RingDir | S::RingBeat | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount
+            | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::ProgressWave | S::NpVolume
+            | S::NpVolumeHold | S::CoverClickPause | S::DblClickShape | S::TapWait | S::NpMotion | S::MixesProfiles
+            | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames | S::MixClickOpensList
+            | S::HiddenMixes | S::AlbumDate | S::LikedAlbumsPlace | S::RailCompact | S::ReducedMotion | S::Tooltips | S::PaneQueue
+            | S::PaneLyrics | S::PaneInfo | S::SpotifyEnabled | S::Spotify | S::SpotifyPersonal | S::SpotifyPlayback
+            | S::SpotifySoloist | S::ImportSpotify | S::YouTubeEnabled | S::YouTube | S::YouTubeCookies | S::ImportYouTube
+            | S::SoundCloudEnabled | S::SoundCloud | S::SoundCloudToken | S::ImportSoundCloud | S::DeezerEnabled | S::PushLikes
+            | S::AlbumLike | S::SingleLike | S::PlaylistSync | S::ImportFiles | S::ImportSavedSongs | S::StreamCache
+            | S::DownloadSource(_) | S::LikeDownload | S::UpgradeBar | S::UpgradeEvery | S::OpusBitrate | S::UpgradeAuto
+            | S::FakeFlac | S::FakeRestore | S::Soulseek | S::SoulseekShare | S::Prowlarr | S::NoSeed | S::SeedLimit | S::SeedDays
+            | S::SeedRatio | S::DownloadLimit | S::UploadLimit | S::SoulseekUpload | S::UserName | S::Autostart
+            | S::AutostartHidden | S::FpsLimit | S::TrayKeepWindow | S::AutoDownloads | S::StreamAnalysis | S::LyricsSeparate
+            | S::LyricsDeep | S::LyricsWordsAll | S::ToastTime | S::DownloadToasts | S::LibraryDir | S::MastersDir | S::Inbox
+            | S::Trash | S::ExportData | S::LyricsUi | S::LyricsGpu | S::LyricsModelsAuto | S::MusicBrainz | S::AcoustId
+            | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
+            | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile => pos(id),
         }
     }
 
@@ -917,6 +927,17 @@ mod tests {
                 }
                 assert!(!apply(id, vals.len(), &mut en.clone()), "{id:?}: a value past the end applies");
             }
+        }
+    }
+
+    /// [`ALL`] runs tab by tab, in the tabs' order.
+    #[test]
+    fn the_list_goes_tab_by_tab() {
+        let tabs: Vec<usize> = ALL.iter().map(|id| id.tab()).collect();
+        assert!(tabs.windows(2).all(|w| w[0] <= w[1]), "{tabs:?}");
+        for tab in 0..TABS.len() {
+            assert_eq!(tab_first(tab).tab(), tab);
+            assert_eq!(tab_first(tab).level(), Level::Simple);
         }
     }
 
