@@ -1017,7 +1017,6 @@ pub fn show_on(
     let pad = if bars { (cover_box.width() * 0.13).clamp(RING_PAD, 80.0) } else { RING_PAD };
     let normal_cover = cover_box.shrink(pad);
     let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
-    let shown = morph.clamp(0.0, 1.0);
     let swap = shape_swap(&ctx, stage, shape, morph >= 0.999, theme.reduced_motion);
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
     // TODO(r21-wire): `prefs.cover_spin_s` (default 48), the pulse's
