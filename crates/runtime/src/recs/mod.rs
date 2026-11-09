@@ -58,7 +58,7 @@ use nikgob_recs::{
     Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Ended, FEATURE_VERSION, Item, ModelInput, Mood,
     NewTrack, Pick, RadioParams, RadioState as Engine, Reason, Recs, SONGTYPE_RULES, ServiceSuggestions, Session, SongInput,
     SongTypes, StyleMix, TasteInput, TrackInfo, UserModel, VectorIndex, Weights, album_key, artist_key, daylist_title,
-    daylist_until, match_suggestions, song_key, song_types, stream_song_key, style_words,
+    match_suggestions, song_key, song_types, stream_song_key, style_words,
 };
 use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
@@ -229,7 +229,7 @@ pub(crate) struct DaylistHome {
     /// «НА ВЕЧЕР».
     pub kicker: &'static str,
     pub title: String,
-    /// «что ты слушаешь по вечерам · до 23:00».
+    /// «25 треков».
     pub subtitle: String,
     /// The radio that plays on after the picks.
     pub state: Engine,
@@ -501,17 +501,6 @@ const fn daylist_kicker(part: DayPart) -> &'static str {
         DayPart::Evening => "НА ВЕЧЕР",
         DayPart::Night => "НА НОЧЬ",
     }
-}
-
-/// «что ты слушаешь по вечерам · до 23:00»: what the daylist is made of.
-fn daylist_subtitle(part: DayPart) -> String {
-    let when = match part {
-        DayPart::Morning => "по утрам",
-        DayPart::Day => "днём",
-        DayPart::Evening => "по вечерам",
-        DayPart::Night => "по ночам",
-    };
-    format!("что ты слушаешь {when} · {}", daylist_until(part))
 }
 
 /// Covers of the picks' releases (stream picks by their urls).
@@ -1363,11 +1352,8 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     if picks.is_empty() {
         return (key, None);
     }
-    let subtitle = if history {
-        daylist_subtitle(part)
-    } else {
-        "Слушай — подборка соберётся из того, что нравится".to_owned()
-    };
+    // The number of songs only: no «what it is made of», no «until 23:00».
+    let subtitle = tracks_count(picks.len());
     let covers = covers_of(snap, &picks, &streams);
     let home = DaylistHome {
         kicker: daylist_kicker(part),

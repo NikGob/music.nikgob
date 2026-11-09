@@ -1265,7 +1265,7 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
         covers,
     };
     s.home.daylist = daylist.then(|| {
-        card(MixId::Daylist, "НА ВЕЧЕР", "Тягучий вечер четверга", "что ты слушаешь по вечерам · до 23:00", pick(0, 4))
+        card(MixId::Daylist, "НА ВЕЧЕР", "Тягучий вечер четверга", "25 треков", pick(0, 4))
     });
     let tile = |k: TileKind, title: &str, subtitle: &str, from: usize| card(MixId::Tile(k), "", title, subtitle, pick(from, 1));
     let tiles = [
