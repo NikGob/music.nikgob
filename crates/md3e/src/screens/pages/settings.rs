@@ -1370,9 +1370,6 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             acoustid_key: (!key.is_empty()).then_some(key),
         });
     }
-
-    group(ui, "Узлы и бэкап");
-    row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Появится позже"), |_| {});
 }
 
 /// «1 240»: thousands apart with a no-break space, as Russian writes them.
