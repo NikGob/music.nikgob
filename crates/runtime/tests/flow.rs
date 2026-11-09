@@ -890,6 +890,71 @@ fn an_album_played_next_goes_right_after_the_current_track() {
 }
 
 
+/// A service album's card: «Сыграть следующим», «В конец очереди» and «В
+/// плейлист…» by the album's id fetch its tracks as playing it does and
+/// put them where the library album's would go.
+#[test]
+fn a_service_album_plays_next_queues_and_goes_to_a_playlist_by_its_id() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+    use nikgob_core::streaming::{FakeService, RemoteId, Service, StreamService};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let single = lib.upsert_release(&Release::new("Single", credit.clone())).unwrap();
+    let ids: Vec<_> = (0..3u32)
+        .map(|i| {
+            let mut t = Track::new(&format!("q{i}"), credit.clone());
+            t.release_id = Some(single.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            let file = dir.path().join(format!("q{i}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+            t.id
+        })
+        .collect();
+    let yt: Arc<dyn StreamService> = Arc::new(FakeService::new(Service::Youtube).with_album("hm3", "Heavy Metal 3", 2));
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: vec![yt],
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| -> Vec<_> { s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect() };
+    let album = RemoteId::new(Service::Youtube, "yt-alb-hm3");
+    let track = |n: u32| lib.track_by_remote(&RemoteId::new(Service::Youtube, format!("yt-hm3-{n}"))).unwrap();
+
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue", |s| order(s) == ids);
+    rt.send(Command::PlayStreamAlbumNext(album.clone()));
+    wait_for(&rt, "the album after the current track", |s| order(s).len() == 5);
+    let (a1, a2) = (track(1).expect("the first track is known"), track(2).expect("the second track is known"));
+    assert_eq!(order(&rt.state()), [ids[0], a1, a2, ids[1], ids[2]]);
+    assert!(rt.state().toasts.iter().any(|t| t.text == "Следующим: «Heavy Metal 3»"));
+
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue again", |s| order(s) == ids);
+    rt.send(Command::EnqueueStreamAlbum(album.clone()));
+    wait_for(&rt, "the album at the end", |s| order(s) == [ids[0], ids[1], ids[2], a1, a2]);
+
+    rt.send(Command::CreatePlaylist("Mix".into()));
+    wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Mix"));
+    let mix = rt.state().library.playlists.iter().find(|p| p.name == "Mix").unwrap().id;
+    rt.send(Command::AddStreamAlbumToPlaylist(mix, album));
+    wait_for(&rt, "the album in the playlist", |_| {
+        lib.playlist_entries(mix, 0, 100).unwrap().iter().map(|e| e.track.id).collect::<Vec<_>>() == [a1, a2]
+    });
+}
+
 /// «Перемешивание остаётся включённым»: on (the default), a new album keeps
 /// shuffle on; off, it turns shuffle off and plays in order, «Перемешать»
 /// still turns it on, and shuffle off by hand brings the order back.
