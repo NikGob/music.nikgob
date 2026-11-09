@@ -108,8 +108,135 @@ pub(crate) fn marks(ctx: &Context) -> std::sync::Arc<nikgob_view::DislikesView> 
 
 
 
-/// Where «Радио по треку» is in the track menu of the lists.
-const RADIO_ITEM: usize = 3;
+/// What a track menu does. Every track menu (a library row, a playlist
+/// row, a service's song) draws its rows from [`track_rows`] in one order;
+/// the caller appends the rows of the place the track is in (`Remove`, the
+/// deletes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackAct {
+    Next,
+    Queue,
+    Playlist,
+    Radio,
+    Album,
+    AlsoOn,
+    Apart,
+    Artist,
+    Info,
+    Share,
+    /// A file: its tags; no file: download it (no like).
+    Fetch,
+    AlbumDownload,
+    Torrents,
+    FindSong,
+    WrongFile,
+    Dislike,
+    Ban,
+    Remove,
+    Trash,
+    Purge,
+}
+
+/// What a track menu is built over: the common rows are always there (some
+/// greyed), the optional ones only for a track that has them.
+pub struct TrackMenuOf {
+    pub playable: bool,
+    pub has_album: bool,
+    pub has_artists: bool,
+    /// The other album of the same song («Есть и на альбоме «…»»).
+    pub also_on: Option<String>,
+    /// «Источник и качество» (the side pane's part, off by default).
+    pub info: bool,
+    pub fetch: MenuItem,
+    pub torrents: Option<&'static str>,
+    pub find_song: Option<&'static str>,
+    pub wrong_file: bool,
+    pub dislike: MenuItem,
+    pub ban: MenuItem,
+}
+
+/// The one list of a track's actions: play next / queue / to a playlist /
+/// radio │ album (and the other album of the song) / artist / info / share
+/// │ the files │ «Не нравится» / «Не рекомендовать исполнителя».
+pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
+    use TrackAct as A;
+    use widgets::Row;
+    let mut rows = vec![
+        Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic).enabled(o.playable)),
+        Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic).enabled(o.playable)),
+        Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)),
+        Row::Item(A::Radio, MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio)),
+        Row::Divider,
+        Row::Item(A::Album, MenuItem::new("К альбому").icon(Icon::Album).enabled(o.has_album)),
+    ];
+    // One song on two albums: the other album, and the way out of it.
+    if let Some(album) = o.also_on {
+        rows.push(Row::Item(A::AlsoOn, MenuItem::new(format!("Есть и на альбоме «{album}»")).icon(Icon::Album)));
+        rows.push(Row::Item(A::Apart, MenuItem::new("Разные песни").icon(Icon::Close)));
+    }
+    rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person).enabled(o.has_artists)));
+    if o.info {
+        rows.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
+    }
+    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Divider);
+    rows.push(Row::Item(A::Fetch, o.fetch));
+    rows.push(Row::Item(A::AlbumDownload, MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(o.has_album)));
+    if let Some(t) = o.torrents {
+        rows.push(Row::Item(A::Torrents, MenuItem::new(t).icon(Icon::Search)));
+    }
+    // A clip: its song by hand; a stream from YouTube: another version.
+    if let Some(f) = o.find_song {
+        rows.push(Row::Item(A::FindSong, MenuItem::new(f).icon(Icon::MusicNote)));
+    }
+    // A file that holds another song: to the Trash, looked for again.
+    if o.wrong_file {
+        rows.push(Row::Item(A::WrongFile, MenuItem::new(WRONG_FILE).icon(Icon::Delete)));
+    }
+    rows.push(Row::Divider);
+    rows.push(Row::Item(A::Dislike, o.dislike));
+    rows.push(Row::Item(A::Ban, o.ban));
+    rows
+}
+
+/// [`track_rows`] of a library track (in the library or in a playlist).
+pub(crate) fn library_track_rows(
+    track: &TrackRow,
+    marks: &nikgob_view::DislikesView,
+    info: bool,
+    also: Option<&(ReleaseId, String)>,
+) -> Vec<widgets::Row<TrackAct>> {
+    // A file: its tags and a better copy; no file: download it (no like)
+    // or look for a release by hand.
+    let fetch = if track.has_local {
+        MenuItem::new("Редактировать теги…").icon(Icon::Edit)
+    } else {
+        MenuItem::new("Скачать").icon(Icon::Download)
+    };
+    track_rows(TrackMenuOf {
+        playable: true,
+        has_album: track.release_id.is_some(),
+        has_artists: !track.artists.linked().is_empty(),
+        also_on: also.map(|(_, a)| a.clone()),
+        info,
+        fetch,
+        torrents: Some(if track.has_local { "Найти качество лучше…" } else { "Искать раздачу…" }),
+        find_song: super::find_song::label(track),
+        wrong_file: track.has_local,
+        dislike: dislike_item(marks.track(track.id)),
+        ban: ban_item(track.artist_id(), marks),
+    })
+}
+
+/// The library's deletes, after a library row's [`library_track_rows`].
+fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
+    rows.push(widgets::Row::Divider);
+    rows.push(widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)));
+    rows.push(widgets::Row::Item(
+        TrackAct::Purge,
+        MenuItem::new("Удалить навсегда").icon(Icon::Delete).enabled(track.has_local),
+    ));
+}
 
 /// The command of «Радио по треку» for a library track.
 pub(crate) fn radio_by_track(track: TrackId) -> Command {
@@ -369,142 +496,67 @@ impl PageState {
     /// The track menu, keyed by its anchor: the ⋮ menu and the right-click
     /// menu of one row (or the same track in two lists) must not share an id,
     /// or each closes the other and both draw the same widgets.
-    fn track_menu_items(anchor: egui::Id, track: &TrackRow, marks: &nikgob_view::DislikesView, info: bool, also: Option<&(ReleaseId, String)>) -> Menu {
-        // A file: its tags and a better copy; no file: download it (no
-        // like) or look for a release by hand.
-        let (fetch, fetch_icon) = if track.has_local {
-            ("Редактировать теги…", Icon::Edit)
-        } else {
-            ("Скачать", Icon::Download)
-        };
-        let mut m = Menu::new(("track-menu", anchor))
-            .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-            .item(MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio))
-            .item(dislike_item(marks.track(track.id)))
-            .item(ban_item(track.artist_id(), marks))
-            .divider()
-            .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()));
-        // One song on two albums: the other album, and the way out of it.
-        if let Some((_, album)) = also {
-            m = m
-                .item(MenuItem::new(format!("Есть и на альбоме «{album}»")).icon(Icon::Album))
-                .item(MenuItem::new("Разные песни").icon(Icon::Close));
-        }
-        m = m.item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()));
-        // «Источник и качество» opens a part of the side pane, off by default.
-        if info {
-            m = m.item(MenuItem::new("Источник и качество").icon(Icon::Info));
-        }
-        m = m
-            .item(MenuItem::new("Поделиться").icon(Icon::Share))
-            .item(MenuItem::new(fetch).icon(fetch_icon))
-            .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(track.release_id.is_some()))
-            .item(MenuItem::new(if track.has_local { "Найти качество лучше…" } else { "Искать раздачу…" }).icon(Icon::Search));
-        // A clip: its song by hand; a stream from YouTube: another version.
-        if let Some(find) = super::find_song::label(track) {
-            m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
-        }
-        // A file that holds another song: to the Trash, looked for again.
-        if track.has_local {
-            m = m.item(MenuItem::new(WRONG_FILE).icon(Icon::Delete));
-        }
-        m = m
-            .divider()
-            .item(MenuItem::new("Удалить из библиотеки").icon(Icon::Delete))
-            .item(MenuItem::new("Удалить навсегда").icon(Icon::Delete).enabled(track.has_local));
-        m = m.align_right(true);
-        m
-    }
-
-    fn track_menu_pick(
-        &mut self,
-        ctx: &Context,
-        picked: Option<usize>,
+    fn track_menu_items(
+        anchor: egui::Id,
         track: &TrackRow,
         marks: &nikgob_view::DislikesView,
         info: bool,
         also: Option<&(ReleaseId, String)>,
+    ) -> (Menu, Vec<TrackAct>) {
+        let mut rows = library_track_rows(track, marks, info, also);
+        push_deletes(&mut rows, track);
+        let (menu, acts) = widgets::menu_of(("track-menu", anchor), rows);
+        (menu.align_right(true), acts)
+    }
+
+    /// Does a library track's action (all but a playlist's `Remove`).
+    pub(crate) fn track_apply(
+        &mut self,
+        ctx: &Context,
+        act: TrackAct,
+        track: &TrackRow,
+        marks: &nikgob_view::DislikesView,
+        also: Option<&(ReleaseId, String)>,
+        anchor: Option<Rect>,
         out: &mut Vec<Command>,
     ) -> Option<Route> {
-        let find = super::find_song::label(track).is_some();
-        // «Радио по треку», «Не нравится» and «Не рекомендовать
-        // исполнителя» sit after «В плейлист…»; the rest as before them.
-        let picked = match picked? {
-            RADIO_ITEM => {
-                out.push(radio_by_track(track.id));
-                return None;
-            }
-            n if n == RADIO_ITEM + 1 => {
-                out.push(dislike_command(track.id, marks));
-                return None;
-            }
-            n if n == RADIO_ITEM + 2 => {
-                out.extend(track.artist_id().map(|a| ban_command(a, marks)));
-                return None;
-            }
-            n if n > RADIO_ITEM => n - 3,
-            n => n,
-        };
-        // «Есть и на альбоме «…»» and «Разные песни» sit after «К альбому».
-        let picked = match (picked, also) {
-            (4, Some((release, _))) => return Some(Route::Release(*release)),
-            (5, Some(_)) => {
-                out.push(Command::RecordingApart(track.id));
-                return None;
-            }
-            (n, Some(_)) if n > 5 => n - 2,
-            (n, _) => n,
-        };
-        // Without «Источник и качество» the items after it move up one.
-        let picked = if !info && picked >= 5 { picked + 1 } else { picked };
-        // The deletes come after the optional «Найти песню…» and «В файле
-        // другая песня» (a track with a file).
-        let picked = match picked {
-            10 if find => {
-                out.push(Command::FindSong { track: track.id, query: None });
-                return None;
-            }
-            n if find && n > 10 => n - 1,
-            n => n,
-        };
-        let picked = match picked {
-            10 if track.has_local => {
-                out.push(Command::WrongFile(track.id));
-                return None;
-            }
-            n if track.has_local && n > 10 => n - 1,
-            n => n,
-        };
-        match picked {
-            0 => out.push(Command::PlayNext(vec![track.id])),
-            1 => out.push(Command::Enqueue(vec![track.id])),
-            2 => {
+        use TrackAct as A;
+        match act {
+            A::Next => out.push(Command::PlayNext(vec![track.id])),
+            A::Queue => out.push(Command::Enqueue(vec![track.id])),
+            A::Playlist => {
                 self.pending_add = Some(vec![track.id]);
+                self.pending_add_anchor = anchor;
             }
-            3 => return track.release_id.map(Route::Release),
+            A::Radio => out.push(radio_by_track(track.id)),
+            A::Album => return track.release_id.map(Route::Release),
+            A::AlsoOn => return also.map(|(release, _)| Route::Release(*release)),
+            A::Apart => out.push(Command::RecordingApart(track.id)),
             // Several artists: a chooser.
-            4 => return crate::screens::artist_links::go_to(ctx, crate::screens::artist_links::library(&track.artists)),
-            5 => self.open_pane = Some(PaneTab::Info),
-            6 => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
-            7 if track.has_local => out.push(Command::OpenTagEditor(track.id)),
-            7 => out.push(Command::DownloadTracks(vec![track.id])),
+            A::Artist => return crate::screens::artist_links::go_to(ctx, crate::screens::artist_links::library(&track.artists)),
+            A::Info => self.open_pane = Some(PaneTab::Info),
+            A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
+            A::Fetch if track.has_local => out.push(Command::OpenTagEditor(track.id)),
+            A::Fetch => out.push(Command::DownloadTracks(vec![track.id])),
             // The whole album the track is from, the files it lacks.
-            8 => {
+            A::AlbumDownload => {
                 if let Some(r) = track.release_id {
                     out.push(Command::DownloadRelease(r));
                 }
             }
-            9 => out.push(Command::SearchTorrents(format!(
+            A::Torrents => out.push(Command::SearchTorrents(format!(
                 "{} {}{}",
                 track.artist,
                 track.album.as_deref().unwrap_or(&track.title),
                 if track.has_local { " FLAC" } else { "" }
             ))),
-            10 => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
-            11 => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
-            _ => {}
+            A::FindSong => out.push(Command::FindSong { track: track.id, query: None }),
+            A::WrongFile => out.push(Command::WrongFile(track.id)),
+            A::Dislike => out.push(dislike_command(track.id, marks)),
+            A::Ban => out.extend(track.artist_id().map(|a| ban_command(a, marks))),
+            A::Trash => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            A::Purge => self.confirm_purge = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
+            A::Remove => {}
         }
         None
     }
@@ -519,8 +571,9 @@ impl PageState {
     ) -> Option<Route> {
         let info = state.prefs.pane_info;
         let also = state.also_on.get(&track.id);
-        let picked = Self::track_menu_items(anchor.id, track, &state.dislikes, info, also).attach(anchor);
-        self.track_menu_pick(&anchor.ctx, picked, track, &state.dislikes, info, also, out)
+        let (menu, acts) = Self::track_menu_items(anchor.id, track, &state.dislikes, info, also);
+        let act = menu.attach(anchor).and_then(|i| acts.get(i).copied())?;
+        self.track_apply(&anchor.ctx, act, track, &state.dislikes, also, None, out)
     }
 
     /// Right click on a track row.
@@ -536,8 +589,9 @@ impl PageState {
         }
         let info = state.prefs.pane_info;
         let also = state.also_on.get(&track.id);
-        let picked = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, info, also).context_menu(row);
-        self.track_menu_pick(&row.ctx, picked, track, &state.dislikes, info, also, out)
+        let (menu, acts) = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, info, also);
+        let act = menu.context_menu(row).and_then(|i| acts.get(i).copied())?;
+        self.track_apply(&row.ctx, act, track, &state.dislikes, also, None, out)
     }
 
     /// The ⋮ menu for the playing track (Now Playing header).
@@ -550,8 +604,10 @@ impl PageState {
         out: &mut Vec<Command>,
     ) {
         if let Some(t) = track {
-            let picked = Self::track_menu_items(anchor.id, t, marks, true, None).attach(anchor);
-            if let Some(r) = self.track_menu_pick(&anchor.ctx, picked, t, marks, true, None, out) {
+            let (menu, acts) = Self::track_menu_items(anchor.id, t, marks, true, None);
+            if let Some(act) = menu.attach(anchor).and_then(|i| acts.get(i).copied())
+                && let Some(r) = self.track_apply(&anchor.ctx, act, t, marks, None, None, out)
+            {
                 self.pending_nav = Some(r);
             }
         }
