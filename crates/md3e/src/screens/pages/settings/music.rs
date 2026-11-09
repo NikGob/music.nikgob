@@ -2,9 +2,11 @@
 //! liked. No stage: a preset here shows what it changes in its rows.
 
 use egui::Ui;
+use nikgob_view::presets::Area;
 use nikgob_view::{Command, Prefs, RadioKind, RadioNewShare, ViewState};
 
 use super::super::settings_help::SettingId as Id;
+use super::preset;
 use super::rows::{self, Num, child, dimmed, group, menu, row, switch, switch_enabled};
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
@@ -52,8 +54,9 @@ fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
 /// random, the unheard, the listeners' graph.
 fn recommendations(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Рекомендации");
-    // TODO(r21-wire): the preset of `Area::Recs` (buttons with «Свои» and
-    // the chevron) is the group's first row, in «Просто» too.
+    // While a preset is under the pointer the rows show what it would give.
+    let mut preview = preset::row(ui, Area::Recs, p);
+    let p: &mut Prefs = preview.as_mut().unwrap_or(p);
     switch(ui, Id::MixesDownloadedOnly, &mut p.mixes_downloaded_only);
     let downloaded = p.mixes_downloaded_only;
     dimmed(ui, downloaded, |ui| {

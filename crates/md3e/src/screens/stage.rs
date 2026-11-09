@@ -16,8 +16,7 @@
 //! where its parts are ([`Stage::part`]) so the row under the pointer can
 //! have its part outlined and small parts brought up to 1:1.
 
-// The settings rows ask for scenes, parts and scripts once r21-wire joins
-// them up; until then some of the stage's vocabulary has no caller.
+// A few helpers are only read by the tests and the shell's checks.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -737,6 +736,8 @@ pub struct StageUi {
     cost: f32,
     /// Drawn this frame.
     pub visible: bool,
+    /// Where it was drawn this frame (on screen).
+    pub rect: Option<Rect>,
 }
 
 impl Default for StageUi {
@@ -758,6 +759,7 @@ impl Default for StageUi {
             scheme: None,
             cost: 0.0,
             visible: false,
+            rect: None,
         }
     }
 }
@@ -785,6 +787,7 @@ impl StageUi {
     /// (`clip`), faded with it (`opacity`). `levels` are the real ones.
     pub fn draw(&mut self, ctx: &Context, page: LayerId, clip: Rect, opacity: f32, state: &ViewState, levels: (f32, &[f32])) {
         self.visible = false;
+        self.rect = None;
         let Some(req) = take(ctx).filter(|r| r.rect.is_positive() && r.opacity > 0.0) else {
             self.fade = None;
             return;
@@ -943,6 +946,7 @@ impl StageUi {
         ctx.set_transform_layer(layer, global);
         self.rects = rects;
         self.visible = true;
+        self.rect = Some(req.rect);
         let ms = started.elapsed().as_secs_f32() * 1000.0;
         self.cost = self.cost * 0.9 + ms * 0.1;
     }

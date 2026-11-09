@@ -965,7 +965,7 @@ fn mix_gone(ui: &mut Ui, key: MixKey, world: Option<&str>, state: &ViewState, pa
         let (body, action, to) = match (world, hidden) {
             (Some(w), _) => ("На странице мира теперь другие миксы.", "К миру", Route::World(w.to_owned())),
             (None, Some(_)) => (
-                "Ты попросил его не предлагать. Вернуть можно в Настройках → «Рекомендации».",
+                "Ты попросил его не предлагать. Вернуть можно в Настройках → «Вид» → «Главная».",
                 "На главную",
                 Route::Home,
             ),

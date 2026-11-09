@@ -19,7 +19,6 @@ mod worlds;
 pub mod widgets;
 
 pub use search::{restore_search_scroll, search_results, search_scroll};
-pub use settings::{StageSlot, stage_slot};
 pub use settings_help::SettingId;
 pub(crate) use worlds::choose as choose_world;
 
@@ -311,15 +310,16 @@ pub struct PageState {
     pub focus_group: bool,
     /// Settings tab: [`settings_help::TABS`] (0 «Музыка» … 5 «Система»).
     settings_tab: usize,
-    /// «Просто · Подробно» picked this session; `None`: the build's own
-    /// start (the owner's builds «Подробно», a handout «Просто»).
-    // TODO(r21-wire): `Prefs::settings_deep` instead.
+    /// «Просто · Подробно» held for this session whatever the prefs say
+    /// (the settings sweep, tests); `None`: `Prefs::settings_deep`.
     settings_deep: Option<bool>,
     /// A link to a row «Просто» does not show opened this visit of
     /// Settings in «Подробно» (the picked mode stays).
     settings_visit_deep: bool,
     /// The pass Settings was last drawn in (a new visit after a gap).
     settings_seen: u64,
+    /// What Settings keeps for this visit: its stage, its Ctrl+Z.
+    settings_memory: settings::Memory,
     /// Latest bass level for the ambient glow (set by the host each frame).
     pub levels_bass: f32,
     /// Ask the shell to open a pane tab (e.g. "Источник и качество").
@@ -458,8 +458,8 @@ impl PageState {
         self.scroll_restore.as_ref().map(|r| r.y)
     }
 
-    /// «Просто» (false) or «Подробно» (true) on Settings, as its switch
-    /// sets it (the settings sweep shoots every row).
+    /// «Просто» (false) or «Подробно» (true) on Settings for this session,
+    /// whatever the prefs say (the settings sweep shoots both).
     pub(crate) fn set_settings_deep(&mut self, deep: bool) {
         self.settings_deep = Some(deep);
     }

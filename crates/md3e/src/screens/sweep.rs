@@ -19,9 +19,8 @@ use nikgob_view::{self as v, Command, CoverShape, NpSlot, Prefs, Route, ViewStat
 use super::pages::settings_help;
 pub use super::pages::SettingId;
 pub use super::pages::settings_help::{DrawnRow, Level, TABS};
-/// Where the settings page keeps the live stage's room this pass.
-pub use super::pages::{StageSlot, stage_slot};
 use super::{Md3eUi, PaneTab};
+use nikgob_view::presets::Area;
 
 /// How a row is set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +78,8 @@ enum Spec {
     ShapePick,
     UserName,
     OutputDevice,
+    /// «Разделы главной»: a few orders and sections left out.
+    HomeSections,
 }
 
 /// A screen a setting changes, as the sweep shoots it.
@@ -203,7 +204,7 @@ pub const ALL: &[SettingId] = {
     &[
         // Музыка.
         OutputDevice, Gapless, Crossfade, Normalization, Autoplay, AutoplayWorld, KeepShuffle, ShuffleRadio, RadioNoRepeat,
-        MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
+        Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
         MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, DislikedArtists,
         DislikedTracks, RadioSource,
         // Тексты.
@@ -212,22 +213,23 @@ pub const ALL: &[SettingId] = {
         LyricsGapSize, LyricsCountdown, WaveFallback, LyricsReturn, LyricsGenius, SaveLyrics, LyricsCheck, LyricsWordsPlaying,
         LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
         // Вид.
-        Theme, Scheme, Contrast, SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir, CoverPulse, CoverPauseMorph, Ring,
-        RingStyle, RingSpin, RingDir, RingBeat, Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact,
-        BgColors, BgHue, ProgressWave, NpVolume, NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, MixesProfiles,
-        MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
+        Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
+        CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle, RingSpin, RingDir, RingSpinSpeed, RingBeat,
+        Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
+        NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
         LikedAlbumsPlace, RailCompact, ReducedMotion, Tooltips, PaneQueue, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
         YouTubeCookies, ImportYouTube, SoundCloudEnabled, SoundCloud, SoundCloudToken, ImportSoundCloud, DeezerEnabled, PushLikes,
         AlbumLike, SingleLike, PlaylistSync, ImportFiles, ImportSavedSongs, StreamCache,
         // Загрузки.
-        DownloadSource(Src::Torrents), DownloadSource(Src::Khinsider), DownloadSource(Src::Soulseek), DownloadSource(Src::Qobuz),
+        Preset(Area::Sources), DownloadSource(Src::Torrents), DownloadSource(Src::Khinsider), DownloadSource(Src::Soulseek),
+        DownloadSource(Src::Qobuz),
         DownloadSource(Src::Tidal), DownloadSource(Src::Squidify), DownloadSource(Src::Archive), DownloadSource(Src::Bandcamp),
         LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
-        NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
+        Preset(Area::Seeding), NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
         // Система.
-        UserName, Autostart, AutostartHidden, FpsLimit, TrayKeepWindow, AutoDownloads, StreamAnalysis, LyricsSeparate, LyricsDeep,
+        UserName, Autostart, AutostartHidden, Preset(Area::Load), FpsLimit, TrayKeepWindow, AutoDownloads, StreamAnalysis, LyricsSeparate, LyricsDeep,
         LyricsWordsAll, ToastTime, DownloadToasts, LibraryDir, MastersDir, Inbox, Trash, ExportData,
         // Для разработчика.
         LyricsUi, LyricsGpu, LyricsModelsAuto, MusicBrainz, AcoustId, LastfmKey, ListenbrainzToken, BackgroundCountsLess,
@@ -285,6 +287,13 @@ fn spec(id: SettingId) -> Spec {
         S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
         | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac => Spec::Choice(Menu),
         S::RadioSource => Spec::Fixed(Segments, "chosen in the queue's radio header; no row in Settings"),
+        // A preset: its presets as choices (no «Свои»: it only takes back).
+        S::Preset(a) if a.names().is_empty() => Spec::Fixed(Segments, "no presets yet (TODO 36); the row is not drawn"),
+        S::Preset(_) => Spec::Choice(Segments),
+        S::CoverSpinSpeed => Spec::Slider(|p| &mut p.cover_spin_s, 12.0, 90.0, 1.0),
+        S::CoverPulseStrength => Spec::Slider(|p| &mut p.cover_pulse_strength, 0.02, 0.15, 0.01),
+        S::RingSpinSpeed => Spec::Slider(|p| &mut p.ring_spin_s, 10.0, 90.0, 1.0),
+        S::HomeSections => Spec::HomeSections,
         S::ProgressWave => Spec::Switch(|p| &mut p.progress_wave),
         S::NpVolumeHold => Spec::Slider(|p| &mut p.np_volume_pop_hold, 0.3, 3.0, 0.1),
         S::ShapeRange => Spec::ShapeRange,
@@ -412,6 +421,7 @@ pub fn kind(id: SettingId) -> Kind {
         Spec::ShapeRange | Spec::ShapePick => Kind::Shapes,
         Spec::UserName => Kind::Field,
         Spec::OutputDevice => Kind::Menu,
+        Spec::HomeSections => Kind::List,
     }
 }
 
@@ -452,6 +462,21 @@ pub fn num_key(v: f32) -> String {
 const SPEEDS: [u32; 5] = [50, 500, 2_000, 10_000, 0];
 const NAMES: [&str; 3] = ["", "Ник", "Константин Константинопольский"];
 
+/// «Разделы главной» as the sweep tries it: as it comes, without «Миксы для
+/// тебя», upside down.
+fn home_orders() -> Vec<(&'static str, &'static str, Vec<v::HomeSectionSwitch>)> {
+    let all = |off: Option<v::HomeSection>| {
+        v::HomeSection::ALL.iter().map(|k| v::HomeSectionSwitch { key: *k, on: Some(*k) != off }).collect::<Vec<_>>()
+    };
+    let mut upside_down = all(None);
+    upside_down.reverse();
+    vec![
+        ("all", "Все по порядку", Vec::new()),
+        ("no-mixes", "Без «Миксов для тебя»", all(Some(v::HomeSection::Mixes))),
+        ("reversed", "Снизу вверх", upside_down),
+    ]
+}
+
 fn shape_sets() -> Vec<(&'static str, String, Vec<CoverShape>)> {
     let all = CoverShape::shapes();
     vec![
@@ -489,6 +514,7 @@ pub fn values(id: SettingId, p: &Prefs) -> Vec<Value> {
         Spec::OutputDevice => std::iter::once(Value::new("default", "Системное по умолчанию"))
             .chain(p.output_devices.iter().take(2).enumerate().map(|(i, d)| Value::new(format!("device-{}", i + 1), d.clone())))
             .collect(),
+        Spec::HomeSections => home_orders().into_iter().map(|(k, l, _)| Value::new(k, l)).collect(),
     }
 }
 
@@ -542,6 +568,10 @@ pub fn apply(id: SettingId, i: usize, p: &mut Prefs) -> bool {
                 None => return false,
             },
         },
+        Spec::HomeSections => match home_orders().into_iter().nth(i) {
+            Some((_, _, list)) => p.home_sections = list,
+            None => return false,
+        },
     }
     true
 }
@@ -583,13 +613,14 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
         S::NpVolumeHold => (p.np_volume, p.np_volume_pop) = (false, true),
         S::ShapeRange => p.cover_shape = CoverShape::Random,
         S::CoverSpin => unsquare(p),
-        S::CoverDir => {
+        S::CoverDir | S::CoverSpinSpeed => {
             unsquare(p);
             p.cover_spin = true;
         }
+        S::CoverPulseStrength => p.cover_pulse = true,
         S::RingStyle | S::RingBeat => p.ring = true,
         S::RingSpin => ring_turns(p),
-        S::RingDir => {
+        S::RingDir | S::RingSpinSpeed => {
             ring_turns(p);
             p.spin_ring = true;
         }
@@ -650,6 +681,9 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::AlbumDate => vec![Album],
         S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength => vec![Np, NpPaused],
         S::CoverSpin | S::CoverDir | S::CoverPulse | S::RingSpin | S::RingDir | S::RingBeat => vec![Np],
+        S::CoverSpinSpeed | S::CoverPulseStrength | S::RingSpinSpeed => vec![Np],
+        S::Preset(Area::Track) => vec![Np, NpPaused],
+        S::Preset(Area::Recs) | S::HomeSections => vec![Home],
         S::BgShapes | S::BgCount | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue => vec![Np],
         S::LyricsStyle | S::LyricsUnit | S::WaveFallback | S::WaveJump | S::JumpSpeed | S::LightSpeed | S::LyricsSmooth
         | S::LyricsDim | S::LyricsScale | S::LyricsLead | S::LyricsGlow | S::LyricsCascade | S::LyricsSoftEdges
@@ -677,6 +711,10 @@ pub fn animated(id: SettingId) -> bool {
     matches!(
         id,
         S::ProgressWave
+            | S::CoverSpinSpeed
+            | S::CoverPulseStrength
+            | S::RingSpinSpeed
+            | S::Preset(Area::Track)
             | S::CoverSpin
             | S::CoverDir
             | S::CoverPulse
@@ -715,7 +753,7 @@ pub fn tab_first(tab: usize) -> SettingId {
         settings_help::TAB_LYRICS => SettingId::LyricsStyle,
         settings_help::TAB_LOOK => SettingId::Theme,
         settings_help::TAB_SERVICES => SettingId::SpotifyEnabled,
-        settings_help::TAB_DOWNLOADS => SettingId::DownloadSource(Src::Torrents),
+        settings_help::TAB_DOWNLOADS => SettingId::Preset(Area::Sources),
         _ => SettingId::UserName,
     }
 }
@@ -729,9 +767,10 @@ pub fn rows_now(ctx: &Context) -> Vec<DrawnRow> {
 
 impl Md3eUi {
     /// Opens Settings at row `id`, scrolled to it, as a link does, in
-    /// «Подробно» (the sweep shoots every row).
-    pub fn sweep_open_setting(&mut self, id: SettingId) {
-        self.pages.set_settings_deep(true);
+    /// «Подробно» (`deep`) or «Просто» (a row «Просто» does not show opens
+    /// that visit in «Подробно», as a link does).
+    pub fn sweep_open_setting(&mut self, id: SettingId, deep: bool) {
+        self.pages.set_settings_deep(deep);
         self.pages.open_setting(id);
     }
 
@@ -867,7 +906,8 @@ mod tests {
             | S::LyricsDeep | S::LyricsWordsAll | S::ToastTime | S::DownloadToasts | S::LibraryDir | S::MastersDir | S::Inbox
             | S::Trash | S::ExportData | S::LyricsUi | S::LyricsGpu | S::LyricsModelsAuto | S::MusicBrainz | S::AcoustId
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
-            | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile => pos(id),
+            | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::CoverSpinSpeed
+            | S::CoverPulseStrength | S::RingSpinSpeed | S::HomeSections | S::Preset(_) => pos(id),
         }
     }
 
@@ -878,6 +918,7 @@ mod tests {
         let mut every: Vec<SettingId> = ALL.to_vec();
         every.extend(KINDS.iter().map(|k| SettingId::NewShareBy(*k)));
         every.extend(v::SourceKey::ALL.iter().map(|k| SettingId::DownloadSource(*k)));
+        every.extend(Area::ALL.iter().filter(|a| !a.names().is_empty()).map(|a| SettingId::Preset(*a)));
         for id in every {
             let at = place(id);
             assert!(at < ALL.len(), "{id:?} is not in ALL");

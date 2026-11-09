@@ -24,6 +24,8 @@ use egui::{
 };
 use nikgob_view::{self as v, Prefs};
 
+use super::home::Section;
+use crate::screens::stage::{Part, Scene, Script};
 use crate::screens::{bg_shapes, lyrics, now_playing};
 use crate::{
     ColorScheme, Contrast, Elevation, Icon, SchemeVariant, Theme, TypeRole,
@@ -49,10 +51,16 @@ pub enum SettingId {
     CoverSpin,
     CoverDir,
     CoverPulse,
+    /// «Обложка → Скорость»: seconds a turn of the cover's outline takes.
+    CoverSpinSpeed,
+    /// «Пульсация → Сила».
+    CoverPulseStrength,
     Ring,
     RingStyle,
     RingSpin,
     RingDir,
+    /// «Кольцо → Скорость»: seconds a turn of the ring takes.
+    RingSpinSpeed,
     RingBeat,
     Ambient,
     AmbientStrength,
@@ -213,6 +221,11 @@ pub enum SettingId {
     DislikedArtists,
     /// The mixes of «Миксы для тебя» left out, with «Вернуть».
     HiddenMixes,
+    /// «Разделы главной»: the order of Главная's sections and which show.
+    HomeSections,
+    /// The presets of an area, the first row of its group («Строго · Живо ·
+    /// Максимум · Свои»).
+    Preset(v::presets::Area),
     /// «Похожее по слушателям» (the graph of similar music).
     GraphUse,
     /// «Спрашивать YouTube Music и Deezer».
@@ -418,7 +431,13 @@ impl SettingId {
     /// The tab the row lives on (settings-v2-concept.md §1.3).
     pub fn tab(self) -> usize {
         use SettingId::*;
+        use v::presets::Area;
         match self {
+            Preset(Area::Recs) => TAB_MUSIC,
+            Preset(Area::Lyrics) => TAB_LYRICS,
+            Preset(Area::Track) => TAB_LOOK,
+            Preset(Area::Sources | Area::Seeding) => TAB_DOWNLOADS,
+            Preset(Area::Load) => TAB_SYSTEM,
             OutputDevice | Gapless | Crossfade | Normalization | Autoplay | AutoplayWorld | KeepShuffle | ShuffleRadio
             | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
             | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikedArtists | DislikedTracks => {
@@ -430,6 +449,7 @@ impl SettingId {
             | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
             | LyricsModels => TAB_LYRICS,
             Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
+            | CoverSpinSpeed | CoverPulseStrength | RingSpinSpeed | HomeSections
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
@@ -462,7 +482,7 @@ impl SettingId {
             | LyricsWordsPlaying | Theme | Scheme | CoverShape | ShapeRange | ShapePick | Ring | Ambient | BgShapes | AlbumDate
             | RailCompact | ReducedMotion | SpotifyEnabled | Spotify | YouTubeEnabled | YouTube | SoundCloudEnabled | SoundCloud
             | DeezerEnabled | PushLikes | DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | Soulseek | Prowlarr
-            | UserName | Autostart | AutostartHidden | ToastTime | LibraryDir => Level::Simple,
+            | UserName | Autostart | AutostartHidden | ToastTime | LibraryDir | HomeSections | Preset(_) => Level::Simple,
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile => Level::Dev,
@@ -471,7 +491,8 @@ impl SettingId {
             | LightSpeed | WaveJump | JumpSpeed | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth
             | LyricsSoftStrength | LyricsSoftFade | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize
             | LyricsCountdown | WaveFallback | LyricsReturn | LyricsCheck | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep
-            | LyricsRecognize | LyricsModels | Contrast | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph | RingStyle
+            | LyricsRecognize | LyricsModels | Contrast | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph | CoverSpinSpeed
+            | CoverPulseStrength | RingSpinSpeed | RingStyle
             | RingSpin | RingDir | RingBeat | AmbientStrength | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors
             | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape | TapWait | NpMotion
             | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames | MixClickOpensList
@@ -519,6 +540,10 @@ impl SettingId {
             CoverSpin | RingSpin => "Вращение",
             CoverDir | RingDir => "Направление",
             CoverPulse => "Пульсация",
+            CoverSpinSpeed | RingSpinSpeed => "Скорость",
+            CoverPulseStrength => "Сила",
+            HomeSections => "Разделы главной",
+            Preset(a) => preset_title(a),
             Ring => "Кольцо",
             RingStyle => "Вид",
             RingBeat => "В такт",
@@ -698,6 +723,16 @@ impl SettingId {
             CoverSpin => "Край обложки медленно поворачивается, а сама картинка остаётся на месте.",
             CoverDir => "В какую сторону поворачивается край обложки.",
             CoverPulse => "Обложка слегка увеличивается в такт музыке, как будто дышит.",
+            CoverSpinSpeed => "Сколько секунд занимает один оборот края обложки. Меньше — быстрее; на громких местах край чуть ускоряется.",
+            CoverPulseStrength => "Насколько обложка увеличивается на ударе.",
+            RingSpinSpeed => "Сколько секунд занимает один оборот кольца. Меньше — быстрее.",
+            HomeSections => "Какие разделы есть на главной и в каком порядке. Стрелки двигают раздел, переключатель убирает его. Раздел, которому нечего показать, не виден и включённым.",
+            Preset(v::presets::Area::Recs) => "Сколько новой музыки в радио, миксах и автовоспроизведении — одним выбором. «Свои» возвращает твои значения.",
+            Preset(v::presets::Area::Lyrics) => "Готовые наборы для вида текста. «Свои» возвращает твои значения.",
+            Preset(v::presets::Area::Track) => "Готовые наборы для экрана трека: обложка, кольцо и фон. Набор фигур, направления, скорости и цвета не меняются. «Свои» возвращает твои значения.",
+            Preset(v::presets::Area::Sources) => "Какие источники включены. Порядок не меняется. «Свои» возвращает твои переключатели.",
+            Preset(v::presets::Area::Seeding) => "Сколько и как долго раздавать скачанное торрентами. «Свои» возвращает твои значения.",
+            Preset(v::presets::Area::Load) => "Насколько плеер нагружает компьютер: кадры, окно в трее, загрузки и работа с голосом. «Свои» возвращает твои значения.",
             Ring => "Вокруг обложки появляется кольцо из точек, которое шевелится под музыку.",
             RingStyle => "Как выглядит кольцо вокруг обложки.",
             RingSpin => "Кольцо из точек медленно вращается, пока играет музыка.",
@@ -874,7 +909,33 @@ impl SettingId {
     /// The options of a choice row (segmented buttons or a menu), in order;
     /// empty for every other row.
     pub fn choices(self) -> &'static [Choice] {
+        use v::presets::Area;
         match self {
+            Self::Preset(Area::Recs) => &[
+                c!("Только моё", "Радио, миксы и автовоспроизведение берут только твою музыку."),
+                c!("Сбалансировано", "Немного новой музыки в радио и миксах, изредка песня наугад."),
+                c!("Больше нового", "Больше новой и неслышанной музыки, песни наугад чаще."),
+            ],
+            Self::Preset(Area::Track) => &[
+                c!("Строго", "Квадратная обложка без кольца, ровное свечение фона."),
+                c!("Живо", "Обложка-фигура вращается и дышит в такт, кольцо, свечение под звук."),
+                c!("Максимум", "Случайные фигуры, кольцо, свечение под звук и фигуры на фоне."),
+            ],
+            Self::Preset(Area::Sources) => &[
+                c!("Законное", "Только Bandcamp и Internet Archive."),
+                c!("Обычно", "Всё, кроме Soulseek и Squidify."),
+                c!("Всё", "Все источники."),
+            ],
+            Self::Preset(Area::Seeding) => &[
+                c!("Не раздавать", "Скачанное сразу перестаёт раздаваться."),
+                c!("Обычно", "До 50 ГБ, 30 дней, пока не отдашь в 3,5 раза больше скачанного."),
+                c!("Щедро", "До 200 ГБ, 90 дней, без предела отдачи."),
+            ],
+            Self::Preset(Area::Load) => &[
+                c!("Тихо", "60 кадров, окно в трее закрывается целиком, одна автозагрузка, без тяжёлой работы с голосом."),
+                c!("Обычно", "120 кадров, быстрое открытие из трея, две автозагрузки, анализ стримов и отделение голоса."),
+                c!("Быстро", "142 кадра, три автозагрузки и глубокое создание субтитров."),
+            ],
             Self::Theme => &[
                 c!("Светлая", "Белый фон и тёмный текст. Удобно днём."),
                 c!("Тёмная", "Тёмный фон. Меньше слепит вечером, обложки смотрятся ярче."),
@@ -1087,6 +1148,8 @@ impl SettingId {
     /// Which of [`Self::choices`] `p` has.
     pub fn chosen(self, p: &Prefs) -> usize {
         match self {
+            // None matching: «Свои», the button after the presets.
+            Self::Preset(a) => a.current(p).unwrap_or(a.names().len()),
             Self::Theme => match p.theme {
                 v::ThemeMode::Light => 0,
                 v::ThemeMode::Dark => 1,
@@ -1172,6 +1235,8 @@ impl SettingId {
     /// Sets option `i` of [`Self::choices`] in `p`.
     pub fn choose(self, p: &mut Prefs, i: usize) {
         match self {
+            // As `PrefPatch::Preset` does it (from «Свои», the values are kept).
+            Self::Preset(a) => a.apply(p, i),
             Self::Theme => p.theme = [v::ThemeMode::Light, v::ThemeMode::Dark, v::ThemeMode::System][i.min(2)],
             Self::Contrast => p.contrast = i.min(2) as u8,
             Self::NpVolume => (p.np_volume, p.np_volume_pop) = [(true, false), (false, true), (false, false)][i.min(2)],
@@ -1266,9 +1331,9 @@ impl SettingId {
             Theme | Contrast | Scheme => Preview::Palette,
             Ambient | AmbientStrength => Preview::Ambient,
             ProgressWave | ReducedMotion => Preview::Wave,
-            CoverDir | CoverSpin => Preview::Turn(false),
-            RingDir | RingSpin => Preview::Turn(true),
-            CoverShape | ShapeRange | ShapePick | CoverPulse => Preview::Cover,
+            CoverDir | CoverSpin | CoverSpinSpeed => Preview::Turn(false),
+            RingDir | RingSpin | RingSpinSpeed => Preview::Turn(true),
+            CoverShape | ShapeRange | ShapePick | CoverPulse | CoverPulseStrength => Preview::Cover,
             Ring | RingStyle | RingBeat => Preview::Ring,
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
@@ -1280,6 +1345,219 @@ impl SettingId {
             NpVolume | NpVolumeHold => Preview::Volume,
             _ => return None,
         })
+    }
+}
+
+/// The title of the group an area's presets head.
+pub fn preset_title(a: v::presets::Area) -> &'static str {
+    use v::presets::Area;
+    match a {
+        Area::Recs => "Рекомендации",
+        Area::Lyrics => "Вид текста",
+        Area::Track => "Экран трека",
+        Area::Sources => "Откуда качать",
+        Area::Seeding => "Раздача",
+        Area::Load => "Нагрузка",
+    }
+}
+
+/// What the live stage shows for a row (settings v2 §2.3).
+impl SettingId {
+    /// The screen on the stage while the pointer is on the row; `None`: the
+    /// one there already (the theme shows on any).
+    pub fn scene(self) -> Option<Scene> {
+        use SettingId::*;
+        match self {
+            NpMotion | Preset(v::presets::Area::Track) => Some(Scene::Track),
+            Preset(v::presets::Area::Lyrics) => Some(Scene::Lyrics),
+            HomeSections => Some(Scene::Home),
+            LikedAlbumsPlace => Some(Scene::Album),
+            _ => self.part().and_then(Part::scene),
+        }
+    }
+
+    /// The part of the screen the row changes; `None`: the row is not on
+    /// the stage. [`Part::Whole`]: all of it, nothing outlined.
+    pub fn part(self) -> Option<Part> {
+        use SettingId::*;
+        Some(match self {
+            Theme | Contrast | Scheme | ReducedMotion | NpMotion | HomeSections => Part::Whole,
+            Preset(v::presets::Area::Track | v::presets::Area::Lyrics) => Part::Whole,
+            CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverSpinSpeed | CoverPulse | CoverPulseStrength
+            | CoverPauseMorph | CoverClickPause | DblClickShape | TapWait => Part::Cover,
+            Ring | RingStyle | RingSpin | RingDir | RingSpinSpeed | RingBeat => Part::Ring,
+            Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => {
+                Part::Background
+            }
+            ProgressWave => Part::Progress,
+            NpVolume | NpVolumeHold => Part::Volume,
+            LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLead | LyricsDim | LyricsGlow
+            | WaveFallback => Part::LyricsLine,
+            LyricsScale | LyricsCascade | LyricsReturn => Part::LyricsColumn,
+            LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade => Part::LyricsEdges,
+            LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown => Part::LyricsPause,
+            MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames | MixClickOpensList
+            | HiddenMixes => Part::Home(Section::Mixes),
+            AlbumDate => Part::AlbumDate,
+            _ => return None,
+        })
+    }
+
+    /// The parts outlined for the row: its own, or every part a preset
+    /// changes (none for [`Part::Whole`]).
+    pub fn parts(self) -> Vec<Part> {
+        use v::presets::Area;
+        match self {
+            Self::Preset(Area::Track) => vec![Part::Cover, Part::Ring, Part::Background, Part::Progress],
+            Self::Preset(Area::Lyrics) => vec![Part::LyricsLine, Part::LyricsColumn],
+            _ => self.part().filter(|p| *p != Part::Whole).into_iter().collect(),
+        }
+    }
+
+    /// What the stage acts out for the row with the settings `p` shown: what
+    /// cannot be seen without doing something.
+    pub fn script(self, p: &Prefs) -> Script {
+        use SettingId::*;
+        match self {
+            CoverShape if p.cover_shape == v::CoverShape::Random => Script::RandomShape,
+            ShapeRange => Script::RandomShape,
+            CoverPauseMorph | CoverClickPause => Script::PausePlay,
+            DblClickShape | TapWait => Script::DoubleTap,
+            NpVolume | NpVolumeHold => Script::Volume,
+            NpMotion => Script::Open,
+            LyricsCascade => Script::LyricsStep,
+            LyricsReturn => Script::LyricsReturn,
+            LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade => Script::EdgesScroll,
+            LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize => Script::Interlude,
+            LyricsCountdown => Script::Countdown,
+            WaveFallback => Script::LineTimes,
+            _ => Script::None,
+        }
+    }
+}
+
+/// The rows that show a field a preset owns (where its future value is
+/// drawn while the preset is under the pointer).
+pub fn preset_rows(f: v::presets::Field) -> Vec<SettingId> {
+    use SettingId as S;
+    use v::presets::Field as F;
+    match f {
+        F::CoverShape => vec![S::CoverShape],
+        F::CoverSpin => vec![S::CoverSpin],
+        F::CoverPulse => vec![S::CoverPulse],
+        F::Ring => vec![S::Ring],
+        F::RingBeat => vec![S::RingBeat],
+        F::SpinRing => vec![S::RingSpin],
+        F::Ambient => vec![S::Ambient],
+        F::BgShapes => vec![S::BgShapes],
+        F::ProgressWave => vec![S::ProgressWave],
+        F::MixesDownloadedOnly => vec![S::MixesDownloadedOnly],
+        F::RadioNewShare => vec![S::RadioNewShare],
+        F::RadioNewShareBy => [v::RadioKind::Track, v::RadioKind::Artist, v::RadioKind::Mix, v::RadioKind::Autoplay]
+            .into_iter()
+            .map(S::NewShareBy)
+            .collect(),
+        F::MixesWithNew => vec![S::MixesWithNew],
+        F::RadioExplore => vec![S::RadioExplore],
+        F::RadioUnheard => vec![S::RadioUnheard],
+        F::Source(k) => vec![S::DownloadSource(k)],
+        F::NoSeed => vec![S::NoSeed],
+        F::SeedLimitGb => vec![S::SeedLimit],
+        F::SeedDays => vec![S::SeedDays],
+        F::SeedRatio => vec![S::SeedRatio],
+        F::FpsLimit => vec![S::FpsLimit],
+        F::TrayKeepWindow => vec![S::TrayKeepWindow],
+        F::AutoDownloadLimit => vec![S::AutoDownloads],
+        F::StreamAnalysis => vec![S::StreamAnalysis],
+        F::LyricsSeparate => vec![S::LyricsSeparate],
+        F::LyricsDeep => vec![S::LyricsDeep],
+    }
+}
+
+/// The rows whose values `preview` changes from `p` among those `area`'s
+/// presets own.
+pub fn preset_changes(area: v::presets::Area, p: &Prefs, preview: &Prefs) -> Vec<SettingId> {
+    let mut out = Vec::new();
+    for &f in area.fields() {
+        let differs = match f {
+            // Each kind's own share, as the rows read it.
+            v::presets::Field::RadioNewShareBy => {
+                for kind in [v::RadioKind::Track, v::RadioKind::Artist, v::RadioKind::Mix, v::RadioKind::Autoplay] {
+                    if p.new_share_of(kind) != preview.new_share_of(kind) {
+                        out.push(SettingId::NewShareBy(kind));
+                    }
+                }
+                false
+            }
+            _ => f.get(p) != f.get(preview),
+        };
+        if differs {
+            out.extend(preset_rows(f));
+        }
+    }
+    out
+}
+
+/// A field's name in a preset's card (shorter than its row's, and never
+/// the same for two fields of one area).
+fn field_label(f: v::presets::Field) -> &'static str {
+    use v::presets::Field as F;
+    match f {
+        F::CoverShape => "Форма обложки",
+        F::CoverSpin => "Вращение обложки",
+        F::CoverPulse => "Пульсация",
+        F::Ring => "Кольцо",
+        F::RingBeat => "Кольцо в такт",
+        F::SpinRing => "Вращение кольца",
+        F::Ambient => "Свечение фона",
+        F::BgShapes => "Фигуры на фоне",
+        F::ProgressWave => "Волна на полосе",
+        F::MixesDownloadedOnly => "Только скачанное",
+        F::RadioNewShare => "Новое",
+        F::RadioNewShareBy => "Новое по видам",
+        F::MixesWithNew => "С новым в миксах",
+        F::RadioExplore => "Случайные песни",
+        F::RadioUnheard => "Неслышанные",
+        F::Source(k) => k.display_name(),
+        F::NoSeed => "Не раздавать",
+        F::SeedLimitGb => "Лимит",
+        F::SeedDays => "Срок",
+        F::SeedRatio => "Предел отдачи",
+        F::FpsLimit => "Кадры",
+        F::TrayKeepWindow => "Быстро из трея",
+        F::AutoDownloadLimit => "Автозагрузки",
+        F::StreamAnalysis => "Анализ стримов",
+        F::LyricsSeparate => "Отделять голос",
+        F::LyricsDeep => "Глубокие субтитры",
+    }
+}
+
+/// A value a preset writes, as its card shows it.
+fn field_text(f: v::presets::Field, value: &v::presets::FieldValue) -> String {
+    use v::presets::FieldValue as V;
+    // A choice: the label its row shows for it.
+    let choice = || {
+        let rows = preset_rows(f);
+        let id = rows.first().copied()?;
+        let mut p = Prefs::default();
+        f.set(&mut p, value);
+        id.choices().get(id.chosen(&p)).map(|c| c.label.to_owned())
+    };
+    match value {
+        V::Bool(true) => "да".to_owned(),
+        V::Bool(false) => "нет".to_owned(),
+        V::U32(n) => match f {
+            v::presets::Field::SeedLimitGb => format!("{n} ГБ"),
+            v::presets::Field::SeedDays => format!("{n} дн."),
+            _ => n.to_string(),
+        },
+        V::F32(x) if x.abs() < 1e-3 => "∞".to_owned(),
+        V::F32(x) => format!("{x:.1}").replace('.', ","),
+        V::Shape(v::CoverShape::Original) => "Квадрат".to_owned(),
+        V::Shape(v::CoverShape::Random) => "Случайная".to_owned(),
+        V::Shape(c) => c.label().to_owned(),
+        V::ShareBy(_) => "—".to_owned(),
+        _ => choice().unwrap_or_else(|| "—".to_owned()),
     }
 }
 
@@ -1383,6 +1661,9 @@ enum Body {
     Option(usize),
     /// The explanation and the options as lines (nothing to preview).
     All,
+    /// A preset's: the explanation, then its fields × its presets, the
+    /// current preset's column marked.
+    Table,
 }
 
 fn focus_key() -> Id {
@@ -1407,6 +1688,20 @@ fn group_key() -> Id {
 
 fn pinned_key() -> Id {
     Id::new("settings-help-pinned")
+}
+
+fn future_key() -> Id {
+    Id::new("settings-help-future")
+}
+
+/// While a preset is under the pointer, the rows it would change: drawn
+/// with their future values on a tonal underlay, until [`clear_future`].
+pub fn set_future(ctx: &egui::Context, rows: Vec<SettingId>) {
+    ctx.data_mut(|d| d.insert_temp(future_key(), rows));
+}
+
+pub fn clear_future(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<Vec<SettingId>>(future_key()));
 }
 
 fn pinned(ctx: &egui::Context) -> Option<Pinned> {
@@ -1551,6 +1846,14 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         }
         f.rect = Some(rect);
         ctx.data_mut(|d| d.insert_temp(focus_key(), f));
+    } else if ctx.data(|d| d.get_temp::<Vec<SettingId>>(future_key())).is_some_and(|f| f.contains(&id)) {
+        // A preset under the pointer would change it: the tonal underlay
+        // behind its future value.
+        let s = Theme::get(&ctx).scheme;
+        let r = Rect::from_x_y_ranges(ui.max_rect().x_range(), rect.y_range()).expand2(vec2(12.0, 4.0));
+        let mut painter = ui.painter().clone();
+        painter.set_clip_rect(Rect::from_x_y_ranges(r.x_range(), ui.clip_rect().y_range()));
+        painter.set(bg, Shape::rect_filled(r, shape::LARGE, s.secondary_container));
     }
     let parts = ctx.data_mut(|d| d.remove_temp::<Parts>(parts_key())).unwrap_or_default();
     let button = parts.button.unwrap_or_else(|| {
@@ -1741,11 +2044,21 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs, samples: bool) {
 /// What the ⓘ card of `id` shows: the explanation and the current
 /// option's preview, or the options as lines when nothing is previewed.
 fn base_body(id: SettingId) -> Body {
-    if !id.choices().is_empty() && id.preview().is_none() { Body::All } else { Body::Row }
+    if matches!(id, SettingId::Preset(_)) {
+        Body::Table
+    } else if !id.choices().is_empty() && id.preview().is_none() {
+        Body::All
+    } else {
+        Body::Row
+    }
 }
 
 /// Text width of a one-thing card.
 const CARD_W: f32 = 280.0;
+/// Text width of a preset's card (its table).
+const TABLE_W: f32 = 360.0;
+/// A line of a preset's table.
+const TABLE_ROW: f32 = 20.0;
 const PREVIEW_H: f32 = 120.0;
 const PAD: f32 = 12.0;
 /// Between a row and its card.
@@ -1802,8 +2115,73 @@ struct Layout {
     help: Arc<Galley>,
     /// [`Body::All`]: each option's name and what it does.
     texts: Vec<(Arc<Galley>, Arc<Galley>)>,
+    /// [`Body::Table`].
+    table: Option<Table>,
+    /// The text's width.
+    width: f32,
     /// A close button in the header (the pinned card).
     close: bool,
+}
+
+/// A preset's table: the presets across, the fields down (texts without a
+/// colour of their own, painted in the colour of their column).
+struct Table {
+    heads: Vec<Arc<Galley>>,
+    rows: Vec<(Arc<Galley>, Vec<Arc<Galley>>)>,
+    label_w: f32,
+}
+
+impl Table {
+    fn new(painter: &Painter, area: v::presets::Area, width: f32) -> Self {
+        let text = |role: TypeRole, t: &str| para(painter, role, t, Color32::PLACEHOLDER, width);
+        let heads: Vec<Arc<Galley>> = area.names().iter().map(|n| text(TypeRole::LabelMedium, *n)).collect();
+        let n = heads.len();
+        let rows: Vec<(Arc<Galley>, Vec<Arc<Galley>>)> = area
+            .fields()
+            .iter()
+            .filter(|f| **f != v::presets::Field::RadioNewShareBy)
+            .map(|&f| {
+                let values = (0..n)
+                    .map(|i| {
+                        let t = area.values(i).iter().find(|(g, _)| *g == f).map_or_else(|| "—".to_owned(), |(_, v)| field_text(f, v));
+                        text(TypeRole::BodySmall, &t)
+                    })
+                    .collect();
+                (text(TypeRole::BodySmall, field_label(f)), values)
+            })
+            .collect();
+        let label_w = rows.iter().map(|(l, _)| l.size().x).fold(0.0, f32::max).min(width * 0.42) + 8.0;
+        Self { heads, rows, label_w }
+    }
+
+    fn height(&self) -> f32 {
+        TABLE_ROW * (self.rows.len() + 1) as f32
+    }
+
+    /// Paints it from `(x, y)`, `width` wide, the column of preset
+    /// `current` marked.
+    fn paint(&self, painter: &Painter, x: f32, y: f32, width: f32, current: Option<usize>, s: &ColorScheme) {
+        let n = self.heads.len().max(1);
+        let col = (width - self.label_w) / n as f32;
+        let at = |i: usize| x + self.label_w + i as f32 * col;
+        if let Some(c) = current.filter(|c| *c < n) {
+            let r = Rect::from_min_size(pos2(at(c) - 4.0, y - 2.0), vec2(col, self.height() + 4.0));
+            painter.rect_filled(r, shape::SMALL, s.secondary_container);
+        }
+        let mid = |g: &Arc<Galley>, top: f32| top + (TABLE_ROW - g.size().y) * 0.5;
+        for (i, h) in self.heads.iter().enumerate() {
+            let color = if current == Some(i) { s.on_secondary_container } else { s.on_surface_variant };
+            painter.galley(pos2(at(i), mid(h, y)), h.clone(), color);
+        }
+        for (k, (label, values)) in self.rows.iter().enumerate() {
+            let top = y + TABLE_ROW * (k + 1) as f32;
+            painter.galley(pos2(x, mid(label, top)), label.clone(), s.on_surface);
+            for (i, v) in values.iter().enumerate() {
+                let color = if current == Some(i) { s.on_secondary_container } else { s.on_surface_variant };
+                painter.galley(pos2(at(i), mid(v, top)), v.clone(), color);
+            }
+        }
+    }
 }
 
 /// The first words of a [`SettingId::beta`] row's card.
@@ -1818,15 +2196,20 @@ impl Layout {
         let s = Theme::get(ctx).scheme;
         let painter = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("settings-help-measure")));
         let choices = row.id.choices();
-        let kind = if body == Body::All || !samples { None } else { row.id.preview() };
+        let kind = if matches!(body, Body::All | Body::Table) || !samples { None } else { row.id.preview() };
+        let width = if body == Body::Table { TABLE_W } else { CARD_W };
         let (title, help) = match body {
             Body::Option(i) => (format!("{} · {}", row.label, choices[i].label), choices[i].help.to_owned()),
             _ if row.id.beta() => (row.label.clone(), BETA_CARD.to_owned() + row.id.help()),
             _ => (row.label.clone(), row.id.help().to_owned()),
         };
         let close_w = if pinned { CLOSE_W } else { 0.0 };
-        let title = para(&painter, TypeRole::TitleSmall, &title, s.on_surface, CARD_W - close_w);
-        let help = para(&painter, TypeRole::BodyMedium, &help, s.on_surface_variant, CARD_W);
+        let title = para(&painter, TypeRole::TitleSmall, &title, s.on_surface, width - close_w);
+        let help = para(&painter, TypeRole::BodyMedium, &help, s.on_surface_variant, width);
+        let table = match (body, row.id) {
+            (Body::Table, SettingId::Preset(area)) => Some(Table::new(&painter, area, width)),
+            _ => None,
+        };
         let texts: Vec<(Arc<Galley>, Arc<Galley>)> = if body == Body::All {
             choices
                 .iter()
@@ -1848,8 +2231,11 @@ impl Layout {
         for (lg, hg) in &texts {
             h += 8.0 + lg.size().y + hg.size().y;
         }
+        if let Some(t) = &table {
+            h += 10.0 + t.height();
+        }
         h += PAD;
-        Self { size: vec2(CARD_W + 2.0 * PAD, h), body, kind, title, help, texts, close: pinned }
+        Self { size: vec2(width + 2.0 * PAD, h), body, kind, title, help, texts, table, width, close: pinned }
     }
 }
 
@@ -1925,6 +2311,10 @@ fn show_card(
                     }
                     _ => sample(ui, r, kind, prefs, None),
                 }
+            }
+            if let (Some(t), SettingId::Preset(area)) = (&layout.table, row.id) {
+                y += 10.0;
+                t.paint(ui.painter(), x0, y, layout.width, area.current(prefs), &s);
             }
             if !layout.texts.is_empty() {
                 // The options as lines: a radio mark, the name, what it does.
@@ -2249,6 +2639,8 @@ pub struct DrawnRow {
     pub button: Rect,
     pub control: Option<Rect>,
     pub choices: Vec<Rect>,
+    /// The items of its open menu, in [`SettingId::choices`] order.
+    pub menu: Vec<Rect>,
     /// What of the page is on screen around it.
     pub clip: Rect,
     pub opacity: f32,
@@ -2271,6 +2663,7 @@ pub fn drawn_rows(ctx: &egui::Context) -> (u64, Vec<DrawnRow>) {
             button: r.button,
             control: r.control,
             choices: r.choices,
+            menu: r.menu,
             clip: r.clip,
             opacity: r.opacity,
             enabled: r.enabled,

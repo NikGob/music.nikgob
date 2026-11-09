@@ -1,35 +1,42 @@
 //! Настройки (settings-v2-concept.md): one page, six tabs — Музыка ·
 //! Тексты · Вид · Сервисы · Загрузки · Система — and one switch, Просто ·
-//! Подробно. «Подробно» shows the same tabs, groups and rows in the same
-//! order, with the rest of the rows between them; a row never moves when
-//! the mode changes.
+//! Подробно (kept in the prefs). «Подробно» shows the same tabs, groups and
+//! rows in the same order, with the rest of the rows between them; a row
+//! never moves when the mode changes.
 //!
 //! The title line and the tabs stay; under them the rows scroll. Beside
-//! the rows of «Тексты» and «Вид» the page keeps room for the live stage
-//! (r21-stage draws it there): on the right of a wide page, as a strip
-//! over the rows of a narrow one, none in mini mode. Every change is sent
-//! as a whole new `Prefs` (the recommendations' rows as their patches).
+//! the rows of «Тексты» and «Вид» stands the live stage (screens/stage.rs
+//! draws it where the page asks): on the right of a wide page, as a strip
+//! over the rows of a narrow one, none in mini mode. It follows the row
+//! under the pointer (its screen, its part outlined, the option under the
+//! pointer shown before it is picked) and the row just changed.
+//!
+//! Every change is sent as a whole new `Prefs` (the recommendations' rows
+//! and the presets as their patches); Ctrl+Z steps back through this
+//! visit's changes.
 
 mod dev;
 mod downloads;
 mod look;
 mod lyrics;
 mod music;
+mod preset;
 mod rows;
 mod services;
 mod system;
 
-use egui::{Align2, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
-use nikgob_view::{Command, PrefPatch, Prefs, ViewState};
+use egui::{Align2, Key, Modifiers, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
+use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
 pub(super) use rows::fmt_speed;
 pub(crate) use services::{SoloistDialog, open_url};
 
-use super::settings_help::{self, Level, SettingId as Id, TABS};
+use super::settings_help::{self, DrawnRow, Level, SettingId as Id, TABS};
 use super::{PageState, brand, connected};
+use crate::screens::stage::{self, Part, Scene, Script, StageRequest};
 use crate::{
     Theme, TypeRole,
-    components::{Divider, Size},
+    components::{Divider, Size, anim},
 };
 
 /// How far the page's rows are scrolled, for the history's scroll restore.
@@ -39,30 +46,27 @@ pub(super) struct Scrolled {
     pub max: f32,
 }
 
-/// Where the live stage goes this pass: its rectangle and the room under
-/// it for the buttons of its screens (Трек · Текст · Главная · Альбом), on
-/// the page's tab, at the page's opacity. The page only keeps the room;
-/// the stage is drawn over it on its own layer.
-// TODO(r21-wire): becomes `stage::StageRequest { rect, scene, prefs, part,
-// script, opacity }` once the rows say their scene and part; the buttons
-// are drawn into `buttons`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StageSlot {
-    pub pass: u64,
-    pub rect: Rect,
-    pub buttons: Rect,
-    pub tab: usize,
-    pub opacity: f32,
+/// What Settings keeps between frames of one visit.
+#[derive(Default)]
+pub(crate) struct Memory {
+    /// The screen each stage tab showed last (Тексты, Вид).
+    scenes: [Option<Scene>; 2],
+    /// The row (and its option) under the pointer, and since when.
+    hover: Option<(Id, Option<usize>, f64)>,
+    /// The row changed last, and when: the stage stays on it a moment.
+    changed: Option<(Id, f64)>,
+    /// The prefs before each change of this visit, for Ctrl+Z.
+    undo: Vec<Prefs>,
+    /// The press going on already made its step (a slider's drag is one).
+    held: bool,
+    /// The mode just picked, until the prefs bring it back.
+    deep_sent: Option<bool>,
 }
 
-fn slot_key() -> egui::Id {
-    egui::Id::new("settings-stage-slot")
-}
-
-/// The stage's place if the settings page kept one this pass.
-pub fn stage_slot(ctx: &egui::Context) -> Option<StageSlot> {
-    ctx.data(|d| d.get_temp::<StageSlot>(slot_key())).filter(|s| s.pass == ctx.cumulative_pass_nr())
-}
+/// Ctrl+Z goes back this many changes at most.
+const UNDO: usize = 20;
+/// The stage stays on a changed row this long (its part glowing).
+const CHANGED_S: f64 = 0.9;
 
 /// The page's parts under the tabs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,7 +125,7 @@ pub(crate) fn link_target(id: Id, group: bool, deep: bool, own_build: bool) -> (
 }
 
 /// The page: the title with «Просто · Подробно», the tabs, then the rows
-/// (and the stage's room). `restore` scrolls the rows back where the
+/// (and the stage beside them). `restore` scrolls the rows back where the
 /// history left them.
 pub(super) fn page(
     ui: &mut Ui,
@@ -134,16 +138,23 @@ pub(super) fn page(
     let ctx = ui.ctx().clone();
     let own = brand::own_build();
     // A new visit when the page was not drawn a moment ago: a link's
-    // «Подробно» was for the last one.
+    // «Подробно», the open chevrons and Ctrl+Z were for the last one.
     let pass = ctx.cumulative_pass_nr();
     if pass > pages.settings_seen + 2 {
         pages.settings_visit_deep = false;
+        let deep_sent = pages.settings_memory.deep_sent;
+        pages.settings_memory = Memory { deep_sent, ..Memory::default() };
+        preset::close_all(&ctx);
     }
     pages.settings_seen = pass;
-    // TODO(r21-wire): the saved mode is `Prefs::settings_deep`
-    // (`PrefPatch::SettingsDeep`); until then the session keeps it, the
-    // owner's builds starting in «Подробно» and a handout in «Просто».
-    let mut deep = pages.settings_deep.unwrap_or(own) || pages.settings_visit_deep;
+    // The saved mode is the prefs'; the one just picked counts until they
+    // bring it back.
+    let mem = &mut pages.settings_memory;
+    if mem.deep_sent == Some(state.prefs.settings_deep) {
+        mem.deep_sent = None;
+    }
+    let saved = pages.settings_deep.or(mem.deep_sent).unwrap_or(state.prefs.settings_deep);
+    let mut deep = saved || pages.settings_visit_deep;
     if let Some(id) = pages.focus_setting.take() {
         let group = std::mem::take(&mut pages.focus_group);
         let (id, open_deep) = link_target(id, group, deep, own);
@@ -157,10 +168,14 @@ pub(super) fn page(
 
     let full = ui.max_rect();
     ui.add_space(8.0);
-    if let Some(d) = header(ui, deep) {
-        pages.settings_deep = Some(d);
+    let picked_mode = header(ui, deep);
+    if let Some(d) = picked_mode {
         pages.settings_visit_deep = false;
         deep = d;
+        match pages.settings_deep.as_mut() {
+            Some(held) => *held = d,
+            None => pages.settings_memory.deep_sent = Some(d),
+        }
     }
     ui.add_space(12.0);
     let tab = pages.settings_tab.min(TABS.len() - 1);
@@ -173,12 +188,10 @@ pub(super) fn page(
     let room = Rect::from_min_max(pos2(full.left(), ui.cursor().top()), full.max);
     let window = ctx.content_rect().size();
     let at = arrange(room, window, settings_help::stage_tab(tab));
-    if let (Some(stage), Some(buttons)) = (at.stage, at.buttons) {
-        // The room stays empty until the stage covers it.
+    if let Some(stage) = at.stage {
+        // Under the stage, and what shows while it fades between screens.
         let s = Theme::get(&ctx).scheme;
         ui.painter().rect_filled(stage, crate::tokens::shape::EXTRA_LARGE, s.surface_container_low);
-        let slot = StageSlot { pass, rect: stage, buttons, tab, opacity: ui.opacity() };
-        ctx.data_mut(|d| d.insert_temp(slot_key(), slot));
     }
 
     rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity() });
@@ -210,6 +223,9 @@ pub(super) fn page(
         ui.add_space(8.0);
         ui.add_space(bottom_inset);
     });
+    rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity() });
+    let offer = preset::take_offer(&ctx);
+    let sent = rows::take_sent(&ctx);
 
     // The recommendations' rows change one preference each.
     let patches = recs_patches(&before, &p);
@@ -217,11 +233,199 @@ pub(super) fn page(
     for patch in &patches {
         patch.apply(&mut patched);
     }
+    let changed = !patches.is_empty() || p != patched || !sent.is_empty();
     out.extend(patches.into_iter().map(Command::SetPref));
     if p != patched {
-        out.push(Command::SetPrefs(Box::new(p)));
+        out.push(Command::SetPrefs(Box::new(p.clone())));
+    }
+    // After the whole prefs, so they do not undo them.
+    out.extend(sent.into_iter().map(Command::SetPref));
+    if let Some(d) = picked_mode {
+        out.push(Command::SetPref(PrefPatch::SettingsDeep(d)));
+    }
+    undo(&ctx, state, &mut pages.settings_memory, changed, out);
+
+    if let (Some(rect), Some(buttons)) = (at.stage, at.buttons) {
+        let drawn = settings_help::drawn_rows(&ctx);
+        let rows = if drawn.0 == pass { drawn.1 } else { Vec::new() };
+        let mut req = follow(&ctx, &mut pages.settings_memory, tab, rect, &p, &rows, offer, p != before);
+        req.opacity = ui.opacity();
+        // Трек · Текст · Главная · Альбом: which screen is on the stage,
+        // and a way to look at any.
+        let labels: Vec<&str> = Scene::ALL.iter().map(|s| s.label()).collect();
+        let at_scene = Scene::ALL.iter().position(|s| *s == req.scene).unwrap_or(0);
+        let mut bui = ui.new_child(UiBuilder::new().max_rect(buttons).id_salt(("settings-stage-scenes", tab)));
+        if let Some(n) = connected(&mut bui, egui::Id::new("settings-stage-scene"), &labels, at_scene, &[]).0 {
+            req.scene = Scene::ALL[n];
+            req.parts.clear();
+            req.script = Script::None;
+            pages.settings_memory.scenes[stage_index(tab)] = Some(req.scene);
+        }
+        stage::request(&ctx, req);
     }
     Scrolled { offset: o.state.offset.y, max: (o.content_size.y - o.inner_rect.height()).max(0.0) }
+}
+
+/// The stage tab's slot in [`Memory::scenes`].
+fn stage_index(tab: usize) -> usize {
+    usize::from(tab == settings_help::TAB_LOOK)
+}
+
+/// The screen a stage tab shows when nothing asks for another.
+fn tab_scene(tab: usize) -> Scene {
+    if tab == settings_help::TAB_LYRICS { Scene::Lyrics } else { Scene::Track }
+}
+
+/// The settings option `i` of `id`'s row gives (shown on the stage before
+/// it is picked), where it is a value of the prefs.
+fn option_prefs(id: Id, p: &Prefs, i: usize) -> Option<Prefs> {
+    match id {
+        Id::ShapePick => CoverShape::shapes().get(i).map(|c| Prefs { cover_shape: *c, ..p.clone() }),
+        // The presets offer their own (the chevron's «Свои» too); the
+        // sections of Главная are places, not values.
+        Id::Preset(_) | Id::HomeSections => None,
+        _ if i < id.choices().len() => {
+            let mut q = p.clone();
+            id.choose(&mut q, i);
+            Some(q)
+        }
+        _ => None,
+    }
+}
+
+/// The parts outlined for option `i` of `id`'s row: a line of «Разделы
+/// главной» is its section; any other option, the row's parts.
+fn option_parts(id: Id, p: &Prefs, i: Option<usize>) -> Vec<Part> {
+    match (id, i) {
+        (Id::HomeSections, Some(i)) => {
+            p.home_order().get(i).map(|s| vec![Part::Home(super::home::section_of(s.key))]).unwrap_or_default()
+        }
+        _ => id.parts(),
+    }
+}
+
+/// What the stage shows this frame (settings v2 §2.3), by priority: the row
+/// being changed (a slider dragged, a field typed; a moment after too), the
+/// option or preset the pointer rests on (shown, not picked), the row the
+/// pointer rests on, else the tab's last screen with nothing outlined.
+#[allow(clippy::too_many_arguments)]
+fn follow(
+    ctx: &egui::Context,
+    mem: &mut Memory,
+    tab: usize,
+    rect: Rect,
+    p: &Prefs,
+    rows: &[DrawnRow],
+    offer: Option<preset::Offer>,
+    changed: bool,
+) -> StageRequest {
+    let now = anim::now(ctx);
+    let pointer = ctx.pointer_hover_pos();
+    let down = ctx.input(|i| i.pointer.any_down());
+    // The row and option under the pointer: an open menu's item first (it
+    // lies over other rows), then the row's own buttons.
+    let in_menu = pointer.and_then(|at| rows.iter().find_map(|r| r.menu.iter().position(|m| m.contains(at)).map(|i| (r.id, Some(i)))));
+    let on_row = || {
+        let r = rows.iter().find(|r| r.hovered && pointer.is_some_and(|at| r.clip.contains(at)))?;
+        let opt = pointer.and_then(|at| r.choices.iter().position(|c| c.contains(at)));
+        Some((r.id, opt))
+    };
+    let under = in_menu.or_else(on_row);
+    if changed && let Some((id, _)) = under {
+        mem.changed = Some((id, now));
+    }
+    // The pointer must rest a moment: passing over rows shows nothing.
+    let rested = match (under, mem.hover) {
+        (Some((id, opt)), Some((h, o, since))) if h == id && o == opt => now - since >= preset::DWELL,
+        (Some((id, opt)), _) => {
+            mem.hover = Some((id, opt, now));
+            false
+        }
+        (None, _) => {
+            mem.hover = None;
+            false
+        }
+    };
+    if under.is_some() && !rested {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(preset::DWELL + 0.01));
+    }
+    let slot = stage_index(tab);
+    let mut req = StageRequest::new(rect, mem.scenes[slot].unwrap_or_else(|| tab_scene(tab)), p.clone());
+    let show = |req: &mut StageRequest, mem: &mut Memory, id: Id, prefs: Prefs, parts: Vec<Part>, outline: f32| {
+        if let Some(scene) = id.scene() {
+            req.scene = scene;
+            mem.scenes[slot] = Some(scene);
+        }
+        req.script = id.script(&prefs);
+        req.prefs = prefs;
+        req.zoom = parts.len() == 1;
+        req.parts = parts;
+        req.outline = outline;
+    };
+    if let Some((id, at)) = mem.changed
+        && (down || now - at < CHANGED_S)
+        && id.part().is_some()
+    {
+        // The values are applied already: the stage shows them.
+        let glow = if down { 1.0 } else { settings_help::glow_at(((now - at) * settings_help::FOCUS_S / CHANGED_S) as f32) };
+        show(&mut req, mem, id, p.clone(), id.parts(), glow.max(0.35));
+        ctx.request_repaint();
+    } else if let Some(o) = offer {
+        // A preset: the whole of it, every part it changes.
+        show(&mut req, mem, o.id, o.prefs, o.id.parts(), 1.0);
+    } else if rested && let Some((id, opt)) = under {
+        if id.part().is_none() {
+            return req;
+        }
+        let prefs = opt.and_then(|i| option_prefs(id, p, i)).unwrap_or_else(|| p.clone());
+        show(&mut req, mem, id, prefs, option_parts(id, p, opt), 1.0);
+    }
+    req
+}
+
+/// Ctrl+Z: one step back through this visit's changes (a slider's drag is
+/// one step). The runtime's own fields stay as they are now.
+fn undo(ctx: &egui::Context, state: &ViewState, mem: &mut Memory, changed: bool, out: &mut Vec<Command>) {
+    let down = ctx.input(|i| i.pointer.any_down());
+    if changed {
+        if !(down && mem.held) {
+            mem.undo.push(state.prefs.clone());
+            if mem.undo.len() > UNDO {
+                mem.undo.remove(0);
+            }
+        }
+        mem.held = down;
+    } else if !down {
+        mem.held = false;
+    }
+    // A text field being typed in keeps its own Ctrl+Z.
+    if ctx.wants_keyboard_input() || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
+        return;
+    }
+    if let Some(before) = mem.undo.pop() {
+        out.push(Command::SetPrefs(Box::new(restored(&before, &state.prefs))));
+    }
+}
+
+/// `before` with what the runtime itself keeps in the prefs (accounts,
+/// devices, the mode, hidden mixes) as it is `now`.
+fn restored(before: &Prefs, now: &Prefs) -> Prefs {
+    let mut p = before.clone();
+    p.masters_dir = now.masters_dir.clone();
+    p.fallback_seed = now.fallback_seed;
+    p.prowlarr_url = now.prowlarr_url.clone();
+    p.prowlarr_configured = now.prowlarr_configured;
+    p.output_devices = now.output_devices.clone();
+    p.metadata_contact = now.metadata_contact.clone();
+    p.acoustid_configured = now.acoustid_configured;
+    p.lastfm_configured = now.lastfm_configured;
+    p.listenbrainz_configured = now.listenbrainz_configured;
+    p.home_card = now.home_card;
+    p.home_hidden_mixes = now.home_hidden_mixes.clone();
+    p.lyrics_settings_seen = now.lyrics_settings_seen;
+    p.settings_deep = now.settings_deep;
+    p.settings_rev = now.settings_rev;
+    p
 }
 
 /// «Настройки» and «Просто · Подробно» at the line's right (under the

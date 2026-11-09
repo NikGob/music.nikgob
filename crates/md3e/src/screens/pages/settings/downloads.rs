@@ -7,6 +7,7 @@ use nikgob_view::{self as v, Command, Prefs, ViewState};
 
 use super::super::PageState;
 use super::super::settings_help::{self, SettingId as Id};
+use super::preset;
 use super::rows::{self, Note, Num, child, dimmed, group, item, menu, row, row_note, segments, switch};
 use crate::{
     Icon, Theme, TypeRole,
@@ -15,10 +16,10 @@ use crate::{
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Откуда качать");
-    // TODO(r21-wire): the preset of `Area::Sources` (Законное · Обычно ·
-    // Всё · Свои) is the group's first row; its hover tints the sources it
-    // would switch and shows where their switches would go.
-    download_sources(ui, state, p);
+    // Законное · Обычно · Всё · Свои: the one under the pointer tints the
+    // sources it would switch and shows where their switches would go.
+    let mut preview = preset::row(ui, v::presets::Area::Sources, p);
+    download_sources(ui, state, preview.as_mut().unwrap_or(&mut *p));
 
     group(ui, "По лайку");
     segments(ui, Id::LikeDownload, p);
@@ -46,21 +47,24 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     prowlarr(ui, state, p, pages, out);
 
     group(ui, "Раздача");
-    // TODO(r21-wire): the preset of `Area::Seeding` (Не раздавать · Обычно ·
-    // Щедро · Свои) is the group's first row, in «Просто» too.
-    switch(ui, Id::NoSeed, &mut p.no_seed);
-    let no_seed = p.no_seed;
-    child(ui, no_seed, |ui| {
-        if let Some(v) = rows::slider(ui, Id::SeedLimit, p.seed_limit_gb as f32, Num::new(0.0, 500.0, 5.0, 0, " ГБ").zero("∞")) {
-            p.seed_limit_gb = v as u32;
-        }
-        if let Some(v) = rows::slider(ui, Id::SeedDays, p.seed_days as f32, Num::new(1.0, 90.0, 1.0, 0, " дн.")) {
-            p.seed_days = v as u32;
-        }
-        if let Some(v) = rows::slider(ui, Id::SeedRatio, p.seed_ratio, Num::new(0.0, 5.0, 0.5, 1, "").zero("∞")) {
-            p.seed_ratio = v;
-        }
-    });
+    // Не раздавать · Обычно · Щедро · Свои, with the rows they own.
+    let mut preview = preset::row(ui, v::presets::Area::Seeding, p);
+    {
+        let p: &mut Prefs = preview.as_mut().unwrap_or(&mut *p);
+        switch(ui, Id::NoSeed, &mut p.no_seed);
+        let no_seed = p.no_seed;
+        child(ui, no_seed, |ui| {
+            if let Some(v) = rows::slider(ui, Id::SeedLimit, p.seed_limit_gb as f32, Num::new(0.0, 500.0, 5.0, 0, " ГБ").zero("∞")) {
+                p.seed_limit_gb = v as u32;
+            }
+            if let Some(v) = rows::slider(ui, Id::SeedDays, p.seed_days as f32, Num::new(1.0, 90.0, 1.0, 0, " дн.")) {
+                p.seed_days = v as u32;
+            }
+            if let Some(v) = rows::slider(ui, Id::SeedRatio, p.seed_ratio, Num::new(0.0, 5.0, 0.5, 1, "").zero("∞")) {
+                p.seed_ratio = v;
+            }
+        });
+    }
     let (dragged, set) = rows::speed(ui, Id::DownloadLimit, p.download_limit_kbps, true);
     if let Some(v) = set.or(dragged) {
         p.download_limit_kbps = v;

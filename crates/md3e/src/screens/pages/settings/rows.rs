@@ -16,7 +16,7 @@
 //! the ⓘ cards.
 
 use egui::{Sense, Stroke, Ui, vec2};
-use nikgob_view::Prefs;
+use nikgob_view::{PrefPatch, Prefs};
 
 use super::super::settings_help::{self, Level, SettingId as Id};
 use super::super::{brand, connected};
@@ -46,7 +46,35 @@ fn mode_key() -> egui::Id {
 }
 
 pub(super) fn set_mode(ctx: &egui::Context, mode: Mode) {
-    ctx.data_mut(|d| d.insert_temp(mode_key(), mode));
+    ctx.data_mut(|d| {
+        d.insert_temp(mode_key(), mode);
+        d.remove::<bool>(expanded_key());
+    });
+    settings_help::clear_future(ctx);
+}
+
+fn expanded_key() -> egui::Id {
+    egui::Id::new("settings-group-expanded")
+}
+
+/// The rest of this group shows as in «Подробно» (its preset's chevron is
+/// open), until the next group.
+pub(crate) fn expand(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(expanded_key(), true));
+}
+
+fn sent_key() -> egui::Id {
+    egui::Id::new("settings-sent-patches")
+}
+
+/// A change sent as its own patch after the page's whole prefs (a preset:
+/// «Свои» keeps what the runtime has, not the page's copy).
+pub(crate) fn send(ctx: &egui::Context, patch: PrefPatch) {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Vec<PrefPatch>>(sent_key()).push(patch));
+}
+
+pub(super) fn take_sent(ctx: &egui::Context) -> Vec<PrefPatch> {
+    ctx.data_mut(|d| d.remove_temp::<Vec<PrefPatch>>(sent_key())).unwrap_or_default()
 }
 
 pub(crate) fn mode(ctx: &egui::Context) -> Mode {
@@ -62,9 +90,11 @@ pub(crate) fn level_shown(mode: Mode, level: Level) -> bool {
     }
 }
 
-/// Whether the row of `id` shows this pass.
+/// Whether the row of `id` shows this pass (a group whose preset's chevron
+/// is open shows its «Подробно» rows in «Просто» too).
 pub(crate) fn shown(ctx: &egui::Context, id: Id) -> bool {
-    level_shown(mode(ctx), id.level())
+    let expanded = ctx.data(|d| d.get_temp::<bool>(expanded_key())).unwrap_or(false);
+    level_shown(mode(ctx), id.level()) || (expanded && id.level() == Level::Deep)
 }
 
 /// A group's title and a subtitle, waiting for the first row that shows.
@@ -78,9 +108,14 @@ fn pending_key() -> egui::Id {
     egui::Id::new("settings-pending-title")
 }
 
-/// Starts a group titled `title`.
+/// Starts a group titled `title` (a preset's preview and chevron end with
+/// the group before).
 pub(crate) fn group(ui: &mut Ui, title: &str) {
-    ui.ctx().data_mut(|d| d.insert_temp(pending_key(), Pending { group: Some(title.to_owned()), sub: None }));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(pending_key(), Pending { group: Some(title.to_owned()), sub: None });
+        d.remove::<bool>(expanded_key());
+    });
+    settings_help::clear_future(ui.ctx());
 }
 
 /// A subtitle inside a big group: «Подробно» only (in «Просто» the few

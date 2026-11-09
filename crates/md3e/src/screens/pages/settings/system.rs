@@ -6,6 +6,7 @@ use nikgob_view::{Command, Prefs, Service, ViewState};
 
 use super::super::PageState;
 use super::super::settings_help::SettingId as Id;
+use super::preset;
 use super::rows::{self, Note, Num, child, group, item, row_note, segments, switch};
 use crate::{
     Icon,
@@ -58,8 +59,10 @@ fn user_name(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Comman
 /// is as a bar under its switch, without words.
 fn load(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     group(ui, "Нагрузка");
-    // TODO(r21-wire): the preset of `Area::Load` (Тихо · Обычно · Быстро ·
-    // Свои) is the group's first row, in «Просто» too.
+    // Тихо · Обычно · Быстро · Свои: while one is under the pointer the rows
+    // show what it would give.
+    let mut preview = preset::row(ui, nikgob_view::presets::Area::Load, p);
+    let p: &mut Prefs = preview.as_mut().unwrap_or(p);
     if let Some(v) = rows::slider(ui, Id::FpsLimit, p.fps_limit as f32, Num::new(30.0, 144.0, 1.0, 0, "")) {
         p.fps_limit = v as u32;
     }

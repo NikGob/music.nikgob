@@ -6,6 +6,7 @@ use egui::Ui;
 use nikgob_view::{Command, LYRICS_BY_LETTERS, Prefs, ViewState};
 
 use super::super::settings_help::SettingId as Id;
+use super::preset;
 use super::rows::{self, Num, child, dimmed, group, menu, segments, switch};
 use super::{out_push, size_label, take_pushed};
 use crate::{
@@ -37,7 +38,10 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<
 /// lines around, the edges, the pause.
 fn look(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Вид текста");
-    // TODO(r21-wire, after TODO 36): the tiles of `Area::Lyrics` first.
+    // The tiles of `Area::Lyrics` come with its presets (TODO 36); until
+    // then the area has none and the row draws nothing.
+    let mut preview = preset::row(ui, nikgob_view::presets::Area::Lyrics, p);
+    let p: &mut Prefs = preview.as_mut().unwrap_or(p);
     segments(ui, Id::LyricsStyle, p);
     segments(ui, Id::LyricsUnit, p);
     // Focus by letters brightens the whole line: nothing to smooth, nothing

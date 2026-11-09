@@ -34,7 +34,8 @@
 //!   "screens": ["np", "np_paused"], "combos": true, "baseline": false,
 //!   "shard": [0, 4], "sizes": [[1600, 1000], [1000, 700]],
 //!   "track": "<track id>", "album": "Title", "fakes": ["lyrics", "torrents", "align-models"],
-//!   "frames": 3, "frame_gap_ms": 400, "glow": false, "format": "png", "jpeg_quality": 90 }
+//!   "frames": 3, "frame_gap_ms": 400, "glow": false, "format": "png", "jpeg_quality": 90,
+//!   "deep": true }
 //! ```
 //!
 //! `tabs` takes names or numbers (0 «Основные» … 3 «Внешний вид»); `combos`
@@ -43,6 +44,10 @@
 //! `{"name": "…", "set": [["CoverShape", "0"], ["Ring", "on"]], "screens": ["np"]}`;
 //! `shard: [k, n]` keeps every n-th entry from the k-th; `screens` keeps
 //! only those (the settings page is always shot; `[]` shoots it alone).
+//! `deep` shoots the settings page in «Подробно» (`true`, the default) or
+//! «Просто» (`false`; a row «Просто» does not show still opens that visit
+//! in «Подробно», as a link does). Shoot the two modes into two `--out`
+//! dirs.
 //!
 //! # Output
 //!
@@ -548,6 +553,7 @@ pub fn shot(base: &Prefs) -> Option<crate::shot::Shot> {
         frames: plan.get("frames").and_then(J::as_u64).map_or(3, |f| f.clamp(1, 6) as usize),
         gap_ms: plan.get("frame_gap_ms").and_then(J::as_u64).unwrap_or(400),
         glow: plan.get("glow").and_then(J::as_bool) == Some(true),
+        deep: plan.get("deep").and_then(J::as_bool).unwrap_or(true),
         fakes,
         pick,
         track: None,
@@ -606,6 +612,8 @@ pub struct Run {
     frames: usize,
     gap_ms: u64,
     glow: bool,
+    /// The settings page in «Подробно» (else «Просто»).
+    deep: bool,
     fakes: Vec<String>,
     pick: Pick,
     track: Option<nikgob_core::model::TrackId>,
@@ -806,7 +814,7 @@ impl Run {
                 2
             }
             "sweep_survey" => {
-                ui.sweep_open_setting(s::tab_first(n));
+                ui.sweep_open_setting(s::tab_first(n), self.deep);
                 2
             }
             "sweep_survey_take" => {
@@ -821,13 +829,13 @@ impl Run {
             "sweep_sync" => self.sync(n, state, steps),
             "sweep_settings" => {
                 if let Some(id) = self.entries.get(n).and_then(Entry::row) {
-                    ui.sweep_open_setting(id);
+                    ui.sweep_open_setting(id, self.deep);
                 }
                 2
             }
             "sweep_open" => {
                 if let Some(id) = s::parse(rest) {
-                    ui.sweep_open_setting(id);
+                    ui.sweep_open_setting(id, self.deep);
                 }
                 2
             }
@@ -1177,6 +1185,7 @@ impl Run {
             meta.insert("value_label".into(), json!(e.value.as_ref().map(|v| v.1.clone())));
             meta.insert("combo".into(), json!(e.combo));
             meta.insert("baseline".into(), json!(e.baseline));
+            meta.insert("deep".into(), json!(self.deep));
             meta.insert("sets".into(), json!(sets));
             if let Some(id) = id {
                 meta.insert("kind".into(), json!(s::kind(id).name()));

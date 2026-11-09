@@ -3,16 +3,18 @@
 //! The stage beside the rows shows the track screen (Главная and the album
 //! for their groups).
 
-use egui::{Sense, Ui};
+use egui::{Rect, Sense, Ui, vec2};
 use nikgob_shapes::paint as shape_paint;
-use nikgob_view::{Ambient, BgShapes, Command, CoverShape, PrefPatch, Prefs, RingStyle};
+use nikgob_view::presets::Area;
+use nikgob_view::{self as v, Ambient, BgShapes, Command, CoverShape, HomeSectionSwitch, PrefPatch, Prefs, RingStyle};
 
 use super::super::settings_help::{self, SettingId as Id};
+use super::preset;
 use super::rows::{self, Num, child, dimmed, group, item, menu, row, segments, sub, switch};
 use crate::screens::{bg_shapes, now_playing};
 use crate::{
-    Theme,
-    components::{Button, Style},
+    Icon, Theme, TypeRole,
+    components::{Button, IconButton, Size, Style, Switch},
 };
 
 pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
@@ -42,17 +44,30 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
 /// Фон · Полоса и громкость · Управление.
 fn track_screen(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Экран трека");
-    // TODO(r21-wire): the tiles of `Area::Track` (Строго · Живо · Максимум ·
-    // Свои) are the group's first row, in «Просто» too.
+    // Строго · Живо · Максимум · Свои: while one is under the pointer the
+    // rows show what it would give (and keep none of it).
+    let mut preview = preset::row(ui, Area::Track, p);
+    let p: &mut Prefs = preview.as_mut().unwrap_or(p);
     sub(ui, "Обложка");
     segments(ui, Id::CoverShape, p);
     shapes(ui, p);
     switch(ui, Id::CoverSpin, &mut p.cover_spin);
     let spin = p.cover_spin;
-    child(ui, !spin, |ui| segments(ui, Id::CoverDir, p));
-    // TODO(r21-wire): «Скорость» (`cover_spin_s`, 12–90 с) in this child.
+    child(ui, !spin, |ui| {
+        segments(ui, Id::CoverDir, p);
+        let num = Num::new(*v::COVER_SPIN_RANGE.start(), *v::COVER_SPIN_RANGE.end(), 1.0, 0, " с");
+        if let Some(s) = rows::slider(ui, Id::CoverSpinSpeed, p.cover_spin_s, num) {
+            p.cover_spin_s = s;
+        }
+    });
     switch(ui, Id::CoverPulse, &mut p.cover_pulse);
-    // TODO(r21-wire): «Сила» (`cover_pulse_strength`, 2–15 %) as its child.
+    let pulse = p.cover_pulse;
+    child(ui, !pulse, |ui| {
+        let num = Num::pct(*v::COVER_PULSE_RANGE.start(), *v::COVER_PULSE_RANGE.end(), 0.01);
+        if let Some(s) = rows::slider(ui, Id::CoverPulseStrength, p.cover_pulse_strength, num) {
+            p.cover_pulse_strength = s;
+        }
+    });
     // The square cover has no shape to change.
     dimmed(ui, p.cover_shape == CoverShape::Original, |ui| switch(ui, Id::CoverPauseMorph, &mut p.cover_pause_morph));
 
@@ -65,8 +80,13 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
         let bars = p.ring_style == RingStyle::Bars;
         dimmed(ui, bars, |ui| switch(ui, Id::RingSpin, &mut p.spin_ring));
         let spins = p.spin_ring && !bars;
-        child(ui, !spins, |ui| segments(ui, Id::RingDir, p));
-        // TODO(r21-wire): «Скорость» (`ring_spin_s`, 10–90 с) in this child.
+        child(ui, !spins, |ui| {
+            segments(ui, Id::RingDir, p);
+            let num = Num::new(*v::RING_SPIN_RANGE.start(), *v::RING_SPIN_RANGE.end(), 1.0, 0, " с");
+            if let Some(s) = rows::slider(ui, Id::RingSpinSpeed, p.ring_spin_s, num) {
+                p.ring_spin_s = s;
+            }
+        });
         switch(ui, Id::RingBeat, &mut p.ring_beat);
     });
 
@@ -195,8 +215,7 @@ fn background(ui: &mut Ui, p: &mut Prefs) {
 /// «Главная»: what its mixes are and how they open.
 fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     group(ui, "Главная");
-    // TODO(r21-wire): «Разделы главной» (`home_sections`: order and switches
-    // of the seven sections) is the group's first row, in «Просто» too.
+    home_sections(ui, p);
     switch(ui, Id::MixesProfiles, &mut p.mixes_profiles);
     switch(ui, Id::MixesEverything, &mut p.mixes_everything);
     switch(ui, Id::MixesMoods, &mut p.mixes_moods);
@@ -215,6 +234,59 @@ fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     }
 }
 
+/// «Разделы главной»: the seven sections in their order, each with «Выше»
+/// / «Ниже» and its switch. The lines are the row's options (the stage
+/// outlines the section under the pointer).
+fn home_sections(ui: &mut Ui, p: &mut Prefs) {
+    let _ = item(ui, Id::HomeSections, |ui| {
+        let s = Theme::get(ui.ctx()).scheme;
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(TypeRole::BodyLarge.style().rich(Id::HomeSections.label(), s.on_surface));
+            settings_help::help_button(ui, Id::HomeSections);
+        });
+        ui.add_space(4.0);
+        let mut order = p.home_order();
+        let label_w = rows::label_column(ui.available_width()) - 16.0;
+        let n = order.len();
+        let mut moved: Option<(usize, usize)> = None;
+        let mut lines: Vec<Rect> = Vec::with_capacity(n);
+        for (i, sec) in order.iter_mut().enumerate() {
+            let line = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.add_space(16.0);
+                    let (name, _) = ui.allocate_exact_size(vec2(label_w.max(120.0), 40.0), Sense::hover());
+                    let color = if sec.on { s.on_surface } else { s.on_surface_variant };
+                    ui.painter().text(name.left_center(), egui::Align2::LEFT_CENTER, sec.key.label(), TypeRole::BodyLarge.font_id(), color);
+                    let up = IconButton::new(Icon::ExpandLess).size(Size::Xs).enabled(i > 0).tooltip("Выше");
+                    if ui.add(up.id_salt(("set-home-up", sec.key))).clicked() && i > 0 {
+                        moved = Some((i, i - 1));
+                    }
+                    let down = IconButton::new(Icon::ExpandMore).size(Size::Xs).enabled(i + 1 < n).tooltip("Ниже");
+                    if ui.add(down.id_salt(("set-home-down", sec.key))).clicked() && i + 1 < n {
+                        moved = Some((i, i + 1));
+                    }
+                    ui.add_space(8.0);
+                    ui.add(Switch::new(&mut sec.on).id_salt(("set-home-on", sec.key)));
+                })
+                .response
+                .rect;
+            lines.push(line);
+        }
+        settings_help::report_choices(ui.ctx(), lines);
+        if let Some((a, b)) = moved {
+            order.swap(a, b);
+        }
+        let next = HomeSectionSwitch::complete(&order);
+        if next != p.home_order() {
+            p.home_sections = next;
+        }
+        ui.add_space(4.0);
+    });
+}
+
 /// Tiles with every cover shape drawn, for picking one or a set, then
 /// `extra` and the row's ⓘ on the tiles' line. The hovered tile turns its
 /// shape, as it would in the player. Returns the clicked shape.
@@ -223,11 +295,16 @@ fn shape_grid(ui: &mut Ui, id: Id, selected: impl Fn(CoverShape) -> bool, extra:
     let time = ui.ctx().input(|i| i.time) as f32;
     let mut clicked = None;
     ui.add_space(4.0);
+    let mut tiles: Vec<Rect> = Vec::with_capacity(CoverShape::shapes().len());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         for &c in CoverShape::shapes() {
-            let Some(m) = now_playing::material(c) else { continue };
+            let Some(m) = now_playing::material(c) else {
+                tiles.push(Rect::NOTHING);
+                continue;
+            };
             let (rect, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), Sense::hover());
+            tiles.push(rect);
             let resp = ui.interact(rect, egui::Id::new((id, c)), Sense::click()).on_hover_text(c.label());
             let on = selected(c);
             let painter = ui.painter();
@@ -249,6 +326,9 @@ fn shape_grid(ui: &mut Ui, id: Id, selected: impl Fn(CoverShape) -> bool, extra:
             settings_help::help_button(ui, id);
         });
     });
+    // The shapes are the row's options, in `CoverShape::shapes` order (the
+    // stage shows the one under the pointer).
+    settings_help::report_choices(ui.ctx(), tiles);
     ui.add_space(8.0);
     clicked
 }
