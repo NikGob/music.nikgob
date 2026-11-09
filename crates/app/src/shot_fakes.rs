@@ -127,6 +127,11 @@ pub struct Fakes {
 }
 
 impl Fakes {
+    /// Lays nothing over the view any more.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     /// Takes `arg` of a `fake:` step; false when it is unknown.
     pub fn add(&mut self, arg: &str) -> bool {
         match arg {

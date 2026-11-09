@@ -21,6 +21,7 @@ mod pacing;
 mod shot;
 mod shot_fakes;
 mod streams;
+mod sweep;
 mod sysmotion;
 mod titlebar;
 mod scwidget;
@@ -490,6 +491,25 @@ fn main() -> eframe::Result {
     }
     logfile::init();
     stage("log");
+    // `--sweep-list out.json`: the settings sweep's list of every row, from
+    // the code and the prefs of `NIKGOB_DATA` (or the defaults); no window.
+    if let Some(path) = sweep::list_path() {
+        let base = std::env::var_os("NIKGOB_DATA")
+            .and_then(|d| std::fs::read(PathBuf::from(d).join("prefs.json")).ok())
+            .map(|b| prefs_of(Some(&b)))
+            .unwrap_or_default();
+        match sweep::write_list(&path, &base) {
+            Ok(n) => {
+                log::info!("sweep: {n} settings listed in {}", path.display());
+                std::process::exit(0);
+            }
+            Err(e) => {
+                log::error!("sweep: cannot write {}: {e}", path.display());
+                eprintln!("cannot write {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    }
     // Meanwhile, while the library opens and the window is made: the
     // fallback faces (the window's creator waits for them if need be) and
     // the audio outputs (the prefs wait for them).
@@ -502,6 +522,13 @@ fn main() -> eframe::Result {
     // of a real one, say) instead of the generated one.
     let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from);
     let demo = std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some();
+    // A settings sweep writes the prefs of the library it runs on: never
+    // the real profile's.
+    if sweep::active() && !demo {
+        log::error!("sweep: runs only on a copy (NIKGOB_DATA=dir) or the demo (NIKGOB_DEMO=1)");
+        eprintln!("the settings sweep runs only with NIKGOB_DATA=<a copy> or NIKGOB_DEMO=1");
+        std::process::exit(2);
+    }
     let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
     // One player per user: a second launch (a click on the shortcut while
     // the first waits in the tray) shows the running one's window and ends.
@@ -633,7 +660,7 @@ fn main() -> eframe::Result {
         cfg.fallback_seed_argb = prefs.fallback_seed;
         // A demo with the real services asks the real online metadata too
         // (covers, lyrics, the graph of similar music).
-        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some();
+        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some() || sweep::active();
         cfg.fetch_lyrics = !offline;
         cfg.fetch_cover_online = !offline;
         let mut meta = nikgob_runtime::MetadataConfig::new(settings.metadata.contact);
@@ -652,7 +679,8 @@ fn main() -> eframe::Result {
             watch_inbox: !demo,
             torrent_state_dir: paths.db.with_file_name("torrents"),
             torrent_offline: demo,
-            models_dir: Some(paths.db.with_file_name("models")),
+            // A sweep neither downloads nor runs the lyrics models.
+            models_dir: (!sweep::active()).then(|| paths.db.with_file_name("models")),
         }
     };
     // The demo's discovery and the services' suggestions ask the fake
@@ -669,6 +697,8 @@ fn main() -> eframe::Result {
     } else {
         StreamSchedule::default()
     };
+    // `--sweep` / `--sweep-baseline`: the settings sweep drives the window.
+    let sweep_shot = sweep::shot(&prefs);
     let runtime = Runtime::start_scheduled(
         RuntimeConfig {
             library,
@@ -704,7 +734,7 @@ fn main() -> eframe::Result {
         desktop: desktop::Desktop::start(wake),
         analyzer: links.map(|l| l.analyzer),
         commands: Vec::new(),
-        shot: shot::Shot::from_env(),
+        shot: shot::Shot::from_env().or(sweep_shot),
         frames: frames::Frames::from_env(),
         quit: false,
         reopen: false,

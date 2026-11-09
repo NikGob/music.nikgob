@@ -157,7 +157,7 @@ impl Screen {
             Self::NpLyricsCountdown => "Now Playing lyrics in the last 3 s of a pause (3-2-1 countdown when it is on)",
             Self::NpQueue => "Now Playing with the queue beside the cover",
             Self::LyricsPane => "Главная with the lyrics in the right side pane",
-            Self::LyricsUi => "Главная with what the lyrics control opens (menu, window or page, per «Где делать подсветку»)",
+            Self::LyricsUi => "Now Playing lyrics with what their control opens (menu, window or page, per «Где делать подсветку»)",
             Self::Queue => "Главная with the queue in the right side pane",
             Self::Home => "Главная (home page) with the player bar and the navigation rail",
             Self::Library => "Библиотека (library) page",
