@@ -85,7 +85,7 @@ impl SourceKey {
     }
 
     /// A free service of someone else's account (a public instance): the
-    /// group behind the «Бесплатные FLAC-сервисы» switch.
+    /// group that needs no account of the user's own.
     pub fn is_service(self) -> bool {
         matches!(self, Self::Qobuz | Self::Tidal)
     }
