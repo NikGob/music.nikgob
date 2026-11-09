@@ -11,7 +11,7 @@
 //!   version of the song (another length, another arrangement);
 //! * the word timing of the whole text, made from the alignment.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nikgob_core::lyrics::{LyricLine, LyricWord};
 
@@ -510,7 +510,7 @@ pub fn fit_text_with(em: &Emissions, vocab: &Vocab, foreign: &[Foreign<'_>], lin
     // took, go in as lines of their own.
     let mut all = lines.to_vec();
     if let Some(v) = voice {
-        for (li, extra) in repeats(em, vocab, lines, &placed, v.voiced, &alien) {
+        for (li, extra) in repeats(em, vocab, lines, &placed, v.voiced, &alien, REPEATS_BUDGET) {
             let at = all.len();
             all.push(LyricLine { start: Duration::ZERO, end: None, words: Vec::new(), ..lines[li].clone() });
             placed.extend(extra.into_iter().map(|p| Placed { line: at, ..p }));
@@ -772,6 +772,13 @@ const REPEAT: f32 = 0.6;
 /// … when it has this many letters at least (a short line is heard almost
 /// anywhere).
 const REPEAT_LETTERS: usize = 8;
+/// The search for lines sung once more gives up after this long and keeps
+/// what it found by then: over a text of another song (or another
+/// recording) a long stretch of voice no word covers can take minutes
+/// («Контракт» against another song's text sat for more than 5 minutes).
+/// The verdict does not depend on it, so a good text is never thrown out
+/// for a search cut short.
+const REPEATS_BUDGET: Duration = Duration::from_secs(3);
 
 /// Lines the song sings once more than the text has them (a last line
 /// sung three times, written once): in each stretch of voice that no
@@ -779,8 +786,9 @@ const REPEAT_LETTERS: usize = 8;
 /// after it (two) are tried, and the best heard ([`REPEAT`]) is that line
 /// again; what is left of the stretch is tried in turn. Each comes with
 /// its pieces, for a line of its own (their `line`: the line repeated).
-fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed], voiced: &[bool], skip: &[bool]) -> Vec<(usize, Vec<Placed>)> {
+fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed], voiced: &[bool], skip: &[bool], budget: Duration) -> Vec<(usize, Vec<Placed>)> {
     use crate::ctc::{Path, Tok, align_path};
+    let started = Instant::now();
     let n = em.frames().min(voiced.len());
     let frame = |s: f32| ((s * em.fps).round().max(0.0) as usize).min(n);
     let mut covered = vec![false; n];
@@ -815,6 +823,10 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
         let mut from = a;
         // A repeat found here may end past `b` (its slice runs 0.3 s on).
         while (b + 1).saturating_sub(from) >= long {
+            if started.elapsed() >= budget {
+                log::warn!("align: search for repeated lines stopped after {:.1} s at {:.1} s of {:.1} s, {} found", started.elapsed().as_secs_f32(), em.secs(from), em.secs(n), out.len());
+                return out;
+            }
             let (sa, sb) = (em.secs(from), em.secs(b + 1));
             let mut before: Vec<usize> = (0..lines.len()).filter(|&i| usable(i) && place[i].is_some_and(|(_, e)| e <= sa + 0.3)).collect();
             before.sort_by(|x, y| place[*y].unwrap().1.total_cmp(&place[*x].unwrap().1));
@@ -1949,6 +1961,20 @@ mod tests {
         p2.at = vec![None; 4];
         assert!(!even_repeats(&lines, &heads, &owner, &placed, &even, &mut p2, 3.0, false));
         assert!(!even_repeats(&lines, &heads, &owner, &placed, &spans, &mut p2, 3.0, true));
+    }
+
+    #[test]
+    fn the_repeat_search_out_of_time_keeps_what_it_has() {
+        // A line heard twice, written once: the second time is voice no
+        // word covers. With no time left the search stops at once.
+        let (v, em) = setup("абвабвабв абвабвабв");
+        let lines = [line(0.0, "абвабвабв")];
+        let placed = vec![Placed { line: 0, text: "абвабвабв".into(), say: "абвабвабв".into(), span: Some((0.0, 2.8)), peak: 0.9 }];
+        let voiced = vec![true; em.frames()];
+        let started = Instant::now();
+        let out = repeats(&em, &v, &lines, &placed, &voiced, &[false], Duration::ZERO);
+        assert!(out.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
