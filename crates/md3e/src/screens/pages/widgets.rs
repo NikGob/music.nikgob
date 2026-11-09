@@ -1706,4 +1706,64 @@ mod menu_tests {
         assert_eq!(shared, page);
         assert_eq!(page, [ArtistAct::Queue, ArtistAct::Ban]);
     }
+
+    fn track(has_local: bool) -> nikgob_view::TrackRow {
+        nikgob_view::TrackRow {
+            id: nikgob_view::TrackId::new(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: Some("Album".into()),
+            release_id: Some(ReleaseId::new()),
+            artists: Default::default(),
+            disc_no: 1,
+            track_no: 1,
+            duration: None,
+            quality: None,
+            source: None,
+            has_local,
+            liked: false,
+            cover: None,
+            clip: false,
+        }
+    }
+
+    /// The three track menus (a library row, a playlist row, a service's
+    /// song) share one list: the same common actions in one order, then
+    /// what only the place adds (the deletes, «Убрать из плейлиста»).
+    #[test]
+    fn every_track_menu_has_the_common_actions_in_one_order() {
+        use crate::screens::pages::{TrackAct as A, library_track_rows};
+        let marks = nikgob_view::DislikesView::default();
+        let t = track(true);
+        let library = row_acts(&library_track_rows(&t, &marks, false, None));
+        let playlist = row_acts(&super::playlist_track_rows(&t, PlaylistId::new(), &marks, false, None));
+        assert_eq!(&playlist[..library.len()], &library[..]);
+        assert_eq!(playlist.last(), Some(&A::Remove));
+        let head = [A::Next, A::Queue, A::Playlist, A::Radio, A::Album, A::Artist, A::Share];
+        assert_eq!(&library[..head.len()], head);
+        assert_eq!(&library[library.len() - 2..], [A::Dislike, A::Ban]);
+        // The service's song: the same head and tail around its downloads.
+        let stream = row_acts(&crate::screens::pages::track_rows(crate::screens::pages::TrackMenuOf {
+            playable: true,
+            has_album: true,
+            has_artists: true,
+            also_on: None,
+            info: false,
+            fetch: crate::components::MenuItem::new("Скачать"),
+            torrents: None,
+            find_song: None,
+            wrong_file: false,
+            dislike: crate::components::MenuItem::new("Не нравится"),
+            ban: crate::components::MenuItem::new("Не рекомендовать исполнителя"),
+        }));
+        assert_eq!(&stream[..head.len()], head);
+        assert_eq!(&stream[head.len()..], [A::Fetch, A::AlbumDownload, A::Dislike, A::Ban]);
+        // The other album of the song sits right after «К альбому».
+        let also = (ReleaseId::new(), "Other".to_owned());
+        let rows = library_track_rows(&t, &marks, true, Some(&also));
+        let acts = row_acts(&rows);
+        assert_eq!(&acts[4..8], [A::Album, A::AlsoOn, A::Apart, A::Artist]);
+        assert_eq!(acts[8], A::Info);
+        assert!(labels(&rows).iter().any(|l| l == "Есть и на альбоме «Other»"));
+    }
 }
