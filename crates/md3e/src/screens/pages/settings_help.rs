@@ -822,13 +822,13 @@ impl SettingId {
             Prowlarr => "Адрес и ключ программы Prowlarr — через неё ищутся раздачи с музыкой.",
             Soulseek => "Свой аккаунт в сети Soulseek: новый ник и пароль заводятся сами при первом входе. «В плеере» — клиент работает внутри плеера в фоне; «На сервере» — утилита nikgob-slsk на сервере или Raspberry Pi, плеер забирает у неё скачанное. Хранится в settings.toml.",
             SoulseekShare => "Другие люди в Soulseek могут скачивать у тебя треки из папки библиотеки (только чтение). Сеть держится на обмене: кто раздаёт, тому охотнее отдают.",
-            SoulseekUpload => "Максимальная скорость, с которой Soulseek отдаёт треки другим. ∞ — без лимита.",
+            SoulseekUpload => "Максимальная скорость, с которой Soulseek отдаёт треки другим. До упора вправо — без лимита.",
             NoSeed => "Скачанные треки сразу перестают раздаваться другим.",
-            SeedLimit => "Сколько всего можно отдать другим, после чего раздача остановится. ∞ — без лимита.",
+            SeedLimit => "Сколько всего можно отдать другим, после чего раздача остановится. До упора влево — без лимита: раздача не останавливается по объёму.",
             SeedDays => "Сколько дней раздавать скачанное, потом раздача удаляется.",
-            SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал. ∞ — без предела.",
-            DownloadLimit => "Максимальная скорость скачивания торрентов, чтобы не занимать весь интернет. ∞ — без лимита.",
-            UploadLimit => "Максимальная скорость, с которой торренты отдают скачанное другим. ∞ — без лимита.",
+            SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал. До упора влево — без предела.",
+            DownloadLimit => "Максимальная скорость скачивания торрентов, чтобы не занимать весь интернет. До упора вправо — без лимита.",
+            UploadLimit => "Максимальная скорость, с которой торренты отдают скачанное другим. До упора вправо — без лимита.",
             Spotify => "Вход в аккаунт Spotify через браузер со своим ключом: поиск, лайки, плейлисты и история. Нужен Premium — без него Spotify не подключить, а YouTube Music работает и так. Пароль приложение не видит.",
             SpotifyEnabled => "Выключи — Spotify не используется нигде: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
             SpotifyPlayback => "Отдельное разрешение на звук из Spotify (второе окно согласия). Пока его нет, те же треки играют с YouTube Music — в плеере это видно по подписи «YouTube».",
@@ -1566,11 +1566,13 @@ fn field_text(f: v::presets::Field, value: &v::presets::FieldValue) -> String {
         V::Bool(true) => "да".to_owned(),
         V::Bool(false) => "нет".to_owned(),
         V::U32(n) => match f {
+            // 0 is no cap (the torrents' policy), not «0 ГБ».
+            v::presets::Field::SeedLimitGb if n == 0 => "без лимита".to_owned(),
             v::presets::Field::SeedLimitGb => format!("{n} ГБ"),
             v::presets::Field::SeedDays => format!("{n} дн."),
             _ => n.to_string(),
         },
-        V::F32(x) if x.abs() < 1e-3 => "∞".to_owned(),
+        V::F32(x) if x.abs() < 1e-3 => "без предела".to_owned(),
         V::F32(x) => format!("{x:.1}").replace('.', ","),
         V::Shape(v::CoverShape::Original) => "Квадрат".to_owned(),
         V::Shape(v::CoverShape::Random) => "Случайная".to_owned(),
@@ -2883,7 +2885,8 @@ mod tests {
         let mut own = Prefs::first_start();
         own.fps_limit = 75;
         assert_eq!(SettingId::Preset(Area::Load).chosen(&own), 3, "«Свои»");
-        assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(0.0)), "∞");
+        assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(0.0)), "без предела");
+        assert_eq!(field_text(Field::SeedLimitGb, &FieldValue::U32(0)), "без лимита");
         assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(3.5)), "3,5");
         assert_eq!(field_text(Field::Ambient, &FieldValue::Ambient(v::Ambient::Reactive)), "Под звук");
         assert_eq!(field_text(Field::CoverShape, &FieldValue::Shape(v::CoverShape::Original)), "Квадрат");

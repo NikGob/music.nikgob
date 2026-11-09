@@ -166,11 +166,13 @@ const CALM: Look = Look { style: Style::Focus, by: By::Letters };
 pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lines: &[LyricLine], out: &mut Vec<Command>) {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let look = style_for(&state.prefs, lines);
+    // «Размер текста» too, as in the views.
+    let scale = state.prefs.lyrics_scale.clamp(0.8, 1.4);
     let mut sizes = PANE;
-    sizes.big = 22.0;
-    sizes.small = 17.0;
-    sizes.sub = 13.0;
-    sizes.gap = 14.0;
+    sizes.big = 22.0 * scale;
+    sizes.small = 17.0 * scale;
+    sizes.sub = 13.0 * scale;
+    sizes.gap = 14.0 * scale;
     paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, &Stage::REAL, out);
 }
 

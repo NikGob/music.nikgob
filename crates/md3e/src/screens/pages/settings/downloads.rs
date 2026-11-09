@@ -54,13 +54,13 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
         switch(ui, Id::NoSeed, &mut p.no_seed);
         let no_seed = p.no_seed;
         child(ui, no_seed, |ui| {
-            if let Some(v) = rows::slider(ui, Id::SeedLimit, p.seed_limit_gb as f32, Num::new(0.0, 500.0, 5.0, 0, " ГБ").zero("∞")) {
+            if let Some(v) = rows::slider(ui, Id::SeedLimit, p.seed_limit_gb as f32, Num::new(0.0, 500.0, 5.0, 0, " ГБ").zero("без лимита")) {
                 p.seed_limit_gb = v as u32;
             }
             if let Some(v) = rows::slider(ui, Id::SeedDays, p.seed_days as f32, Num::new(1.0, 90.0, 1.0, 0, " дн.")) {
                 p.seed_days = v as u32;
             }
-            if let Some(v) = rows::slider(ui, Id::SeedRatio, p.seed_ratio, Num::new(0.0, 5.0, 0.5, 1, "").zero("∞")) {
+            if let Some(v) = rows::slider(ui, Id::SeedRatio, p.seed_ratio, Num::new(0.0, 5.0, 0.5, 1, "").zero("без предела")) {
                 p.seed_ratio = v;
             }
         });
