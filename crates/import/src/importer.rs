@@ -173,6 +173,8 @@ struct Ready {
 struct Parked {
     /// The job it came from; `None` for one parked before a restart.
     ctx: Option<Ctx>,
+    /// When that job started ([`Ctx::started`]), kept across a restart.
+    job_started: i64,
     origin: SourceOrigin,
     targets: Arc<ImportTargets>,
     /// The file as read and what it was taken for; `None` after a restart
@@ -848,6 +850,7 @@ impl Importer {
             targets: (*analyzed.targets).clone(),
             tags,
             choices,
+            job_started: Some(ctx.started),
         };
         let path = analyzed.path.clone();
         let wishlist = analyzed.targets.wishlist;
@@ -877,6 +880,7 @@ impl Importer {
             id,
             Parked {
                 ctx: Some(ctx.clone()),
+                job_started: ctx.started,
                 origin: payload.origin,
                 targets: analyzed.targets.clone(),
                 read: Some((analyzed, base)),
@@ -924,6 +928,10 @@ impl Importer {
                 id,
                 Parked {
                     ctx: None,
+                    // A row from before the start was kept: nothing counts
+                    // as settled, so a file is only asked about, never
+                    // refused.
+                    job_started: p.job_started.unwrap_or(0),
                     origin: p.origin,
                     targets: Arc::new(p.targets),
                     read: None,
@@ -959,7 +967,10 @@ impl Importer {
             log::warn!("«Подтверди» row {} stays: {e}", item.0);
         }
         let path = parked.item.path.clone();
-        let ctx = parked.ctx.clone().unwrap_or_else(|| self.detached_ctx(parked.targets.clone()));
+        let ctx = parked
+            .ctx
+            .clone()
+            .unwrap_or_else(|| self.detached_ctx(parked.targets.clone(), parked.job_started));
         let result = async {
             let (mut analyzed, base) = match parked.read {
                 Some(r) => r,
@@ -1000,15 +1011,16 @@ impl Importer {
     }
 
     /// Events of a file answered after a restart: no job listens, the
-    /// broadcast does.
-    fn detached_ctx(&self, targets: Arc<ImportTargets>) -> Ctx {
+    /// broadcast does. `started`: when the file's own job started, so its
+    /// album-mates that came with it are not taken as settled.
+    fn detached_ctx(&self, targets: Arc<ImportTargets>, started: i64) -> Ctx {
         let (tx, _) = mpsc::unbounded_channel();
         Ctx {
             job: JobId(self.inner.next_job.fetch_add(1, Ordering::Relaxed)),
             tx,
             events: self.inner.events.clone(),
             targets,
-            started: nikgob_library::now_ms(),
+            started,
         }
     }
 

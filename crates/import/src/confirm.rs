@@ -137,6 +137,11 @@ pub(crate) struct Payload {
     pub targets: ImportTargets,
     pub tags: TagView,
     pub choices: Vec<Choice>,
+    /// When the file's job started (what the library had before it is
+    /// settled), for an answer after a restart; `None` in rows stored
+    /// before it was kept.
+    #[serde(default)]
+    pub job_started: Option<i64>,
 }
 
 impl Choice {
@@ -199,9 +204,15 @@ mod tests {
             targets: ImportTargets::new(vec![TrackId::new()]),
             tags: TagView { title: Some("Cash Machine".into()), ..TagView::default() },
             choices: vec![Choice::Tags, Choice::Candidate(Box::new((&cand).into()))],
+            job_started: Some(1_700_000_000_000),
         };
         let back: Payload = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
+        // A row stored before the job's start was kept reads without it.
+        let mut old: serde_json::Value = serde_json::to_value(&p).unwrap();
+        old.as_object_mut().unwrap().remove("job_started");
+        let old: Payload = serde_json::from_value(old).unwrap();
+        assert_eq!(old.job_started, None);
         let Choice::Candidate(c) = &back.choices[1] else { panic!() };
         assert_eq!(c.candidate().metadata, cand.metadata);
         let o = back.choices[1].option(&back.tags, Path::new("3.flac"));
