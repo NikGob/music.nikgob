@@ -269,7 +269,16 @@ impl Facts {
         let rows: HashMap<TrackId, RecTrack> = lib.rec_tracks().unwrap_or_default().into_iter().map(|r| (r.id, r)).collect();
         let facts: HashMap<TrackId, TrackFactsRow> =
             lib.track_facts().unwrap_or_default().into_iter().map(|f| (f.id, f)).collect();
-        let liked: HashSet<TrackId> = lib.liked_track_ids().unwrap_or_default().into_iter().collect();
+        // One song on two albums: the plays and the like of a copy are the
+        // standing copy's («Слушать снова» shows it once).
+        let spares = lib.recording_spares().unwrap_or_default();
+        for e in &mut events {
+            if let Some(c) = spares.get(&e.track_id) {
+                e.track_id = *c;
+            }
+        }
+        let liked: HashSet<TrackId> =
+            lib.liked_track_ids().unwrap_or_default().into_iter().map(|t| spares.get(&t).copied().unwrap_or(t)).collect();
         let mut starts = Vec::new();
         let mut completes: HashMap<TrackId, u32> = HashMap::new();
         let mut last_start = HashMap::new();

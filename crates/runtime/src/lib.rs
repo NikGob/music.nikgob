@@ -1179,6 +1179,7 @@ impl Worker {
             }
             Command::WrongFile(track) => self.wrong_file(track, None),
             Command::UndoWrongFile(track) => self.undo_wrong_file(track),
+            Command::RecordingApart(track) => self.recording_apart(track),
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),
             Command::DownloadsShown(shown) => self.torrents.shown = shown,
@@ -2198,6 +2199,7 @@ impl Worker {
     fn load_library(&mut self) {
         self.stream_analysis_changed();
         self.recs_library_changed();
+        self.publish_recordings();
         let sort = self.state.read().library.release_sort;
         let key = match sort {
             nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
@@ -2916,9 +2918,14 @@ impl Worker {
 
     /// Updates `liked` flags already shown without reloading everything.
     fn refresh_liked(&mut self, target: LikeTarget, on: bool, before: Held) {
+        // The same song on other albums: one ♡ for the recording.
+        let twins = match target {
+            LikeTarget::Track(t) => self.lib.recording_twins(t).unwrap_or_default(),
+            _ => Vec::new(),
+        };
         self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
-                if LikeTarget::Track(t.id) == target {
+                if LikeTarget::Track(t.id) == target || twins.contains(&t.id) {
                     t.liked = on;
                 }
             };

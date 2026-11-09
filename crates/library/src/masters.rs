@@ -135,6 +135,25 @@ fn has_file(col: &str) -> String {
     )
 }
 
+/// SQL: another live track of the recording of the track `col` (the same
+/// song on another album, see `recordings`) has a file: a track item of it
+/// needs no download.
+pub(crate) fn has_recording_file(col: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM recording_link ra
+                   JOIN recording_link rb ON rb.recording = ra.recording AND rb.track_id != ra.track_id
+                   JOIN track rt ON rt.id = rb.track_id
+                  WHERE ra.track_id = {col} AND rt.deleted_at IS NULL AND {})",
+        has_file("rb.track_id")
+    )
+}
+
+/// SQL: the track `col` has a file, or the same recording on another album
+/// has one.
+fn has_song_file(col: &str) -> String {
+    format!("({} OR {})", has_file(col), has_recording_file(col))
+}
+
 /// SQL: every live track of the release `col` has a file, and the release
 /// knows its whole tracklist (no count, or as many tracks as it says).
 fn release_has_files(col: &str) -> String {
@@ -160,6 +179,20 @@ pub(crate) fn settle_wishlist_in(tx: &Connection, track: &str) -> Result<usize> 
         &format!(
             "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?2
               WHERE scope = 'track' AND track_id = ?1 AND status IN {UNSTARTED} AND origin != 'upgrade' AND {}",
+            has_song_file("?1")
+        ),
+        params![track, now],
+    )?;
+    // The same recording on another album wished for as a track: this file
+    // is its song too.
+    n += tx.execute(
+        &format!(
+            "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?2
+              WHERE scope = 'track' AND status IN {UNSTARTED} AND origin != 'upgrade'
+                AND track_id IN (SELECT rb.track_id FROM recording_link ra
+                                   JOIN recording_link rb ON rb.recording = ra.recording AND rb.track_id != ra.track_id
+                                  WHERE ra.track_id = ?1)
+                AND {}",
             has_file("?1")
         ),
         params![track, now],
@@ -189,7 +222,7 @@ pub(crate) fn settle_downloaded_in(tx: &Connection) -> Result<usize> {
         &format!(
             "UPDATE wishlist SET status = 'done', next_try_at = NULL, note = 'Скачано', updated_at = ?1
               WHERE scope = 'track' AND track_id IS NOT NULL AND status IN {UNSTARTED} AND origin != 'upgrade' AND {}",
-            has_file("wishlist.track_id")
+            has_song_file("wishlist.track_id")
         ),
         [now],
     )?;
@@ -692,7 +725,7 @@ impl Library {
                            (w.scope = 'track' AND w.track_id IS NOT NULL AND {})
                         OR (w.scope = 'album' AND w.release_id IS NOT NULL AND {})))
                      OR {}",
-                has_file("w.track_id"),
+                has_song_file("w.track_id"),
                 release_has_files("w.release_id"),
                 covered_by_album("w")
             );

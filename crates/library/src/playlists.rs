@@ -42,7 +42,11 @@ pub(crate) fn set_like_in(
         params![target.kind_str(), target.id_string(), now, device.as_str(), deleted],
     )?;
     match target {
-        LikeTarget::Track(t) => refresh_in_library(tx, &t.to_string())?,
+        LikeTarget::Track(t) => {
+            refresh_in_library(tx, &t.to_string())?;
+            // One ♡ for a song on two albums.
+            crate::recordings::spread_like_in(tx, &t.to_string(), deleted, now, device.as_str())?;
+        }
         LikeTarget::Release(r) => refresh_in_library_of_release(tx, &r.to_string())?,
         _ => {}
     }
@@ -530,6 +534,7 @@ impl Library {
                 " FROM likes l JOIN track t ON t.id = l.target_id \
                   LEFT JOIN release r ON r.id = t.release_id \
                   WHERE l.target_kind = 'track' AND l.deleted = 0 AND t.deleted_at IS NULL \
+                    AND t.id NOT IN (SELECT track_id FROM recording_spare) \
                   ORDER BY l.updated_at DESC, t.seq DESC LIMIT ?1 OFFSET ?2"
             ))?;
             let rows = stmt.query_map(params![limit, offset], |r| track_row_at(r, 0))?;
@@ -541,7 +546,8 @@ impl Library {
         self.read(|c| {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM likes l JOIN track t ON t.id = l.target_id
-                  WHERE l.target_kind = 'track' AND l.deleted = 0 AND t.deleted_at IS NULL",
+                  WHERE l.target_kind = 'track' AND l.deleted = 0 AND t.deleted_at IS NULL
+                    AND t.id NOT IN (SELECT track_id FROM recording_spare)",
                 [],
                 |r| r.get(0),
             )?)
@@ -619,6 +625,8 @@ impl Library {
             for (i, id) in ids.iter().enumerate() {
                 let at = now - i as i64;
                 upsert.execute(params!["track", id, at, device.as_str(), !on])?;
+                // The same song on another album follows.
+                crate::recordings::spread_like_in(tx, id, !on, at, device.as_str())?;
             }
             upsert.execute(params!["release", rid, now, device.as_str(), !on])?;
             for id in &ids {

@@ -11,7 +11,16 @@
 //!   (what has a print is done).
 //! * «Подтверди»: one card per pair, «В каком файле другая песня?» with the
 //!   two songs; the chosen one is handled as the menu action below, «Всё
-//!   верно» keeps both and the pair is not asked again.
+//!   верно» keeps both and the pair is not asked again. A pair on two
+//!   albums is asked «Одна и та же песня?» instead: «Одна песня» links the
+//!   two tracks into one recording, «Разные песни» keeps them apart for
+//!   good.
+//! * One song on two albums (see `nikgob_library` `recordings`): the same
+//!   thread links the tracks of one recording, rows only — the same ISRC,
+//!   recording MBID or AcoustID at its start and after each import, and the
+//!   stored prints not yet compared (near bit-exact audio under one title
+//!   on another album), resumable like the rest
+//!   ([`nikgob_import::same_audio::same_recording`]).
 //! * «В файле другая песня» on a local track ([`Command::WrongFile`]): the
 //!   file goes to the Trash (see `nikgob_import::wrong_file`), the track is
 //!   looked for again in «Хочу скачать», and the toast's «Вернуть» takes it
@@ -28,9 +37,9 @@ use std::time::Duration;
 use crossbeam_channel::Sender;
 use nikgob_core::model::{SourceId, TrackId};
 use nikgob_import::quality::CheckError;
-use nikgob_import::same_audio::{Heard, Judgement, Known, judge, print_file_paced};
+use nikgob_import::same_audio::{Heard, Judgement, Known, Recording, Take, judge, print_file_paced, same_recording};
 use nikgob_import::{WrongFile, mark_wrong_file, undo_wrong_file};
-use nikgob_library::{AudioPrint, Library, PrintTodo, SameAudioOffer, SameSide};
+use nikgob_library::{AudioPrint, Library, PrintToLink, PrintTodo, RecordingSide, SameAudioOffer, SameSide};
 use nikgob_view::{self as v, Command};
 use parking_lot::{Condvar, Mutex};
 
@@ -57,6 +66,8 @@ pub(crate) enum Msg {
     Marked { track: TrackId, title: String, result: Result<WrongFile, String> },
     /// Its undo is done: whether the file came back.
     Undone { track: TrackId, result: Result<bool, String> },
+    /// Tracks of one song on two albums were linked (how many links).
+    Linked(usize),
 }
 
 #[derive(Default)]
@@ -70,6 +81,9 @@ struct Shared {
     tx: Sender<Internal>,
     stop: AtomicBool,
     playing: AtomicBool,
+    /// The ids of the library are looked at for one recording on two
+    /// albums (at the start, after an import).
+    ids_due: AtomicBool,
     wake: Mutex<Wake>,
     cond: Condvar,
     /// Without work, the library is looked at again this often.
@@ -108,6 +122,74 @@ pub(crate) fn pair_of(lib: &Library, t: &PrintTodo, print: &[u32], duration_ms: 
             Some((source, track, similarity))
         }
     }
+}
+
+/// A track as the rule of one recording sees it.
+fn take_of<'a>(s: &'a RecordingSide, print: Option<&'a [u32]>) -> Take<'a> {
+    Take {
+        title: &s.title,
+        release: s.release_id,
+        duration_ms: s.duration_ms,
+        isrc: s.isrc.as_deref(),
+        recording_mbid: s.recording_mbid.as_deref(),
+        acoustid: s.acoustid.as_deref(),
+        print,
+    }
+}
+
+/// Links the tracks on two albums with the same ISRC, recording MBID or
+/// AcoustID that the rule finds one recording: `track`'s only, or all.
+/// Returns how many links were made.
+pub(crate) fn link_by_ids(lib: &Library, track: Option<TrackId>) -> usize {
+    let pairs = match lib.recording_id_pairs(track) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("one recording: reading the ids: {e}");
+            return 0;
+        }
+    };
+    let mut linked = 0;
+    for (a, b) in &pairs {
+        let print = |t: TrackId| lib.prints_of_track(t).ok().and_then(|v| v.into_iter().next());
+        let (pa, pb) = (print(a.track_id), print(b.track_id));
+        let Recording::Same(how) = same_recording(&take_of(a, pa.as_deref()), &take_of(b, pb.as_deref())) else { continue };
+        match lib.link_recording(a.track_id, b.track_id, how.key()) {
+            Ok(true) => {
+                log::info!("one recording: «{}» and «{}» on two albums ({})", a.title, b.title, how.key());
+                linked += 1;
+            }
+            Ok(false) => {}
+            Err(e) => log::warn!("one recording: linking «{}»: {e}", a.title),
+        }
+    }
+    linked
+}
+
+/// The tracks on other albums whose file is the same audio as `p`'s under
+/// one title (or a version of it) and as long: one recording. The same
+/// audio under two titles is the check's pair for «Подтверди», not this.
+pub(crate) fn audio_twins(lib: &Library, p: &PrintToLink) -> Vec<(TrackId, nikgob_import::same_audio::How)> {
+    use nikgob_import::same_audio::{same_title, versions_of_one_song};
+    let Some(me) = lib.recording_side(p.track_id).ok().flatten() else { return Vec::new() };
+    let Ok(near) = lib.prints_near(None, Some(p.track_id), None) else { return Vec::new() };
+    let mine = Take { duration_ms: p.duration_ms.or(me.duration_ms), ..take_of(&me, Some(&p.print)) };
+    let mut out: Vec<(TrackId, nikgob_import::same_audio::How)> = Vec::new();
+    for n in &near {
+        if n.track_id == p.track_id || out.iter().any(|(t, _)| *t == n.track_id) {
+            continue;
+        }
+        if me.release_id.is_some() && n.release_id == me.release_id {
+            continue;
+        }
+        if !same_title(&me.title, &n.title) && !versions_of_one_song(&me.title, &n.title) {
+            continue;
+        }
+        let theirs = Take { title: &n.title, release: n.release_id, duration_ms: n.duration_ms, print: Some(&n.print), ..Take::default() };
+        if let Recording::Same(how) = same_recording(&mine, &theirs) {
+            out.push((n.track_id, how));
+        }
+    }
+    out
 }
 
 impl Shared {
@@ -238,6 +320,48 @@ impl Shared {
         worked
     }
 
+    /// One look for one song on two albums: the ids when due, then the
+    /// stored prints not compared yet (a batch, paced). True when prints
+    /// were compared.
+    fn link_pass(&self, pacer: &mut Pacer<'_>) -> bool {
+        let mut linked = 0;
+        if self.ids_due.swap(false, Ordering::Relaxed) {
+            linked += link_by_ids(&self.lib, None);
+        }
+        let todo = match self.lib.prints_to_link(BATCH) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("one recording: listing the prints: {e}");
+                Vec::new()
+            }
+        };
+        let worked = !todo.is_empty();
+        for p in &todo {
+            if self.stopped() || !pacer.begin() {
+                break;
+            }
+            for (other, how) in audio_twins(&self.lib, p) {
+                match self.lib.link_recording(p.track_id, other, how.key()) {
+                    Ok(true) => {
+                        log::info!("one recording: the file of {} is the song of {other} on another album", p.track_id);
+                        linked += 1;
+                    }
+                    Ok(false) => {}
+                    Err(e) => log::warn!("one recording: linking {}: {e}", p.track_id),
+                }
+            }
+            if let Err(e) = self.lib.mark_print_linked(p.source_id) {
+                log::warn!("one recording: marking the print of {}: {e}", p.track_id);
+                break;
+            }
+            pacer.rest();
+        }
+        if linked > 0 {
+            let _ = self.tx.send(Internal::SameAudio(Msg::Linked(linked)));
+        }
+        worked
+    }
+
     fn run(self: &Arc<Self>, start: Duration, alive: Sender<()>) {
         crate::quiet::lower_priority();
         self.pause(start);
@@ -252,7 +376,9 @@ impl Shared {
         let mut skip = HashSet::new();
         while !self.stopped() {
             self.wake.lock().kicked = false;
-            if !self.pass(&mut skip, &mut pacer) {
+            let heard = self.pass(&mut skip, &mut pacer);
+            let compared = !self.stopped() && self.link_pass(&mut pacer);
+            if !heard && !compared {
                 self.pause(self.idle);
             }
         }
@@ -299,9 +425,39 @@ pub(crate) fn card_sides(o: &SameAudioOffer) -> (&SameSide, &SameSide) {
     if o.b.added_at > o.a.added_at { (&o.b, &o.a) } else { (&o.a, &o.b) }
 }
 
-/// The «Подтверди» card of a pair.
+/// A song's row on the card of a pair on two albums: its title, its album,
+/// length and format.
+pub(crate) fn album_option(s: &SameSide) -> v::ConfirmOption {
+    let mut o = side_option(s);
+    if !s.album.is_empty() {
+        o.detail = format!("{} · {}", s.album, o.detail);
+    }
+    o
+}
+
+/// The two files of the pair are on two albums (or loose): one recording
+/// or two songs, not a wrong file.
+pub(crate) fn on_two_albums(o: &SameAudioOffer) -> bool {
+    !o.a.same_release(&o.b)
+}
+
+/// The «Подтверди» card of a pair: on one album, which file holds the
+/// other song; on two albums, whether the two are one song.
 pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
     let (first, second) = card_sides(o);
+    if on_two_albums(o) {
+        return v::Confirm {
+            id,
+            title: o.artist.clone(),
+            origin: String::new(),
+            question: "Одна и та же песня?".into(),
+            options: vec![album_option(first), album_option(second)],
+            skip_label: "Разные песни".into(),
+            accept_label: "Одна песня".into(),
+            pick: None,
+            yes_no: true,
+        };
+    }
     v::Confirm {
         id,
         title: o.album.clone(),
@@ -311,6 +467,7 @@ pub(crate) fn pair_card(id: u64, o: &SameAudioOffer) -> v::Confirm {
         skip_label: "Всё верно".into(),
         accept_label: "В файле другая песня".into(),
         pick: None,
+        yes_no: false,
     }
 }
 
@@ -340,6 +497,7 @@ impl SameAudioJob {
             tx: self.tx.clone(),
             stop: AtomicBool::new(false),
             playing: AtomicBool::new(false),
+            ids_due: AtomicBool::new(true),
             wake: Mutex::new(Wake::default()),
             cond: Condvar::new(),
             idle,
@@ -367,6 +525,7 @@ impl SameAudioJob {
     /// New files may be waiting (an import landed).
     pub(crate) fn kick(&self) {
         if let Some(s) = &self.shared {
+            s.ids_due.store(true, Ordering::Relaxed);
             s.wake.lock().kicked = true;
             s.cond.notify_all();
         }
@@ -435,7 +594,9 @@ impl Worker {
 
     /// The answer on a pair's card: option `i` holds another song (the
     /// action below, with the other one as the song it holds); none: both
-    /// are right, and the pair is not asked again.
+    /// are right, and the pair is not asked again. On two albums: an
+    /// option is «Одна песня» (the tracks become one recording), none is
+    /// «Разные песни» (never linked).
     pub(crate) fn same_audio_choice(&mut self, id: u64, option: Option<usize>) {
         let Some(o) = self.same_audio.shown.get(&id).cloned() else {
             log::info!("same audio: card {id} is no longer shown");
@@ -443,6 +604,26 @@ impl Worker {
             return;
         };
         let (first, second) = card_sides(&o);
+        if on_two_albums(&o) {
+            if let Err(e) = self.lib.keep_same_audio(o.a.source_id, o.b.source_id) {
+                log::warn!("same audio: keeping the pair: {e}");
+            }
+            let (a, b) = (o.a.track_id, o.b.track_id);
+            if option.is_some() {
+                match self.lib.link_recording(a, b, "user") {
+                    Ok(_) => log::info!("one recording: «{}» and «{}» are one song", o.a.title, o.b.title),
+                    Err(e) => log::warn!("one recording: linking «{}»: {e}", o.a.title),
+                }
+                self.recordings_changed();
+            } else {
+                if let Err(e) = self.lib.set_recording_apart(a, b) {
+                    log::warn!("one recording: «{}» apart: {e}", o.a.title);
+                }
+                log::info!("one recording: «{}» and «{}» are different songs", o.a.title, o.b.title);
+            }
+            self.publish_same_audio();
+            return;
+        }
         match option {
             None => {
                 if let Err(e) = self.lib.keep_same_audio(o.a.source_id, o.b.source_id) {
@@ -492,9 +673,61 @@ impl Worker {
         self.same_audio.busy.insert(track);
     }
 
+    /// Tracks were linked into one recording, or taken out of one: the
+    /// menus' «Есть и на альбоме», the hearts, «Любимые» and the
+    /// recommendations read the library again.
+    pub(crate) fn recordings_changed(&mut self) {
+        self.res.invalidate();
+        self.publish_now_playing();
+        self.load_library();
+        self.load_home();
+        let (release, artist, playlist) = {
+            let s = self.state.read();
+            (s.release.as_ref().map(|r| r.card.id), s.artist.as_ref().map(|a| a.card.id), s.playlist.as_ref().map(|p| p.card.id))
+        };
+        if let Some(id) = release {
+            self.load_release(id);
+        }
+        if let Some(id) = artist {
+            self.load_artist(id);
+        }
+        if let Some(id) = playlist {
+            self.load_playlist(id);
+        }
+        self.publish_same_audio();
+    }
+
+    /// The other album of each track of one song on two albums, for its
+    /// menu («Есть и на альбоме «…»»).
+    pub(crate) fn publish_recordings(&mut self) {
+        let albums = self.lib.recording_albums().unwrap_or_default();
+        if *self.state.read().also_on == albums {
+            return;
+        }
+        let albums = Arc::new(albums);
+        self.publish(|s| s.also_on = albums);
+    }
+
+    /// «Разные песни» in a track's menu: it leaves its recording, and is
+    /// never linked with those tracks again.
+    pub(crate) fn recording_apart(&mut self, track: TrackId) {
+        match self.lib.unlink_recording(track) {
+            Ok(others) if !others.is_empty() => {
+                log::info!("one recording: {track} is another song than {} tracks", others.len());
+                self.recordings_changed();
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("one recording: taking {track} out: {e}"),
+        }
+    }
+
     pub(crate) fn same_audio_msg(&mut self, m: Msg) {
         match m {
             Msg::Found => self.publish_same_audio(),
+            Msg::Linked(n) => {
+                log::info!("one recording: {n} links");
+                self.recordings_changed();
+            }
             Msg::Marked { track, title, result } => {
                 self.same_audio.busy.remove(&track);
                 match result {
@@ -554,6 +787,8 @@ mod tests {
             codec: Codec::Opus,
             bitrate: Some(160),
             added_at,
+            release_id: None,
+            album: String::new(),
         }
     }
 
@@ -561,12 +796,14 @@ mod tests {
     /// format, nothing recommended; the buttons say what they do.
     #[test]
     fn a_pair_is_asked_about_with_the_later_file_first() {
+        let album = Some(nikgob_core::model::ReleaseId::new());
         let o = SameAudioOffer {
-            a: side("Тмстс", 1_000),
-            b: side("Сфотографирую", 2_000),
+            a: SameSide { release_id: album, ..side("Тмстс", 1_000) },
+            b: SameSide { release_id: album, ..side("Сфотографирую", 2_000) },
             similarity: 0.97,
-            release: None,
+            release: album,
             album: "8 способов как бросить".into(),
+            artist: "Пошлая Молли".into(),
         };
         let card = pair_card(SAME_AUDIO_ID | 1, &o);
         assert_eq!(card.title, "8 способов как бросить");
@@ -577,8 +814,37 @@ mod tests {
         assert!(card.options.iter().all(|o| !o.recommended), "never accepted with the recommended ones");
         assert_eq!((card.accept_label.as_str(), card.skip_label.as_str()), ("В файле другая песня", "Всё верно"));
         assert!(card.pick.is_none());
+        assert!(!card.yes_no);
         let (first, _) = card_sides(&o);
         assert_eq!(first.title, "Сфотографирую");
+    }
+
+    /// The same audio on two albums under two titles: «Одна и та же
+    /// песня?», each song with its album, «Одна песня» / «Разные песни».
+    #[test]
+    fn a_pair_on_two_albums_asks_whether_it_is_one_song() {
+        let (ost, special) = (nikgob_core::model::ReleaseId::new(), nikgob_core::model::ReleaseId::new());
+        let o = SameAudioOffer {
+            a: SameSide { release_id: Some(ost), album: "OST".into(), duration_ms: Some(276_900), ..side("Oración", 1_000) },
+            b: SameSide { release_id: Some(special), album: "Special Edition".into(), duration_ms: Some(277_600), ..side("オラシオン", 2_000) },
+            similarity: 1.0,
+            release: Some(ost),
+            album: "OST".into(),
+            artist: "Joe Hisaishi".into(),
+        };
+        assert!(on_two_albums(&o));
+        let card = pair_card(SAME_AUDIO_ID | 2, &o);
+        assert_eq!(card.question, "Одна и та же песня?");
+        assert_eq!(card.title, "Joe Hisaishi");
+        assert!(card.yes_no);
+        assert_eq!((card.accept_label.as_str(), card.skip_label.as_str()), ("Одна песня", "Разные песни"));
+        assert_eq!(card.options[0].label, "オラシオン");
+        assert_eq!(card.options[0].detail, "Special Edition · 4:37 · Opus 160");
+        assert_eq!(card.options[1].detail, "OST · 4:36 · Opus 160");
+        assert!(card.options.iter().all(|o| !o.recommended));
+        // Two loose tracks are on no one album either.
+        let loose = SameAudioOffer { a: side("A", 1), b: side("B", 2), ..o };
+        assert!(on_two_albums(&loose));
     }
 
     /// «Загрузки → История» says which file held another song, by title.

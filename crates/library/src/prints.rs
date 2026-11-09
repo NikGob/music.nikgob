@@ -86,6 +86,17 @@ pub struct SameSide {
     pub bitrate: Option<u32>,
     /// When the file came into the library.
     pub added_at: UnixMs,
+    /// Its track's album, and the album's title ('' for a loose track).
+    pub release_id: Option<ReleaseId>,
+    pub album: String,
+}
+
+impl SameSide {
+    /// The two files are on one album (not two loose tracks): one of them
+    /// may hold another song; on two albums they may be one recording.
+    pub fn same_release(&self, other: &SameSide) -> bool {
+        self.release_id.is_some() && self.release_id == other.release_id
+    }
 }
 
 /// Two playing files that sound the same under different titles, not
@@ -99,6 +110,8 @@ pub struct SameAudioOffer {
     pub release: Option<ReleaseId>,
     /// Its title (the artist's line of a loose track).
     pub album: String,
+    /// The artist's line of the first.
+    pub artist: String,
 }
 
 /// Raw print items as stored (u32 little endian).
@@ -150,7 +163,8 @@ impl Library {
                         duration_ms = excluded.duration_ms,
                         came_hash = coalesce(excluded.came_hash, audio_print.came_hash),
                         came_from = coalesce(excluded.came_from, audio_print.came_from),
-                        failed = excluded.failed, at = excluded.at",
+                        failed = excluded.failed, at = excluded.at,
+                        linked_at = CASE WHEN excluded.print IS audio_print.print THEN audio_print.linked_at END",
                 params![
                     p.source_id.to_string(),
                     p.track_id.to_string(),
@@ -409,16 +423,19 @@ impl Library {
     pub fn same_audio_offers(&self) -> Result<Vec<SameAudioOffer>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT p.similarity, ta.release_id, coalesce(r.title, ta.artist_display),
-                        sa.id, ta.id, ta.title, ta.duration_ms, sa.codec, sa.bitrate, sa.added_at,
-                        sb.id, tb.id, tb.title, tb.duration_ms, sb.codec, sb.bitrate, sb.added_at
+                "SELECT p.similarity, ta.release_id, coalesce(r.title, ta.artist_display), ta.artist_display,
+                        sa.id, ta.id, ta.title, ta.duration_ms, sa.codec, sa.bitrate, sa.added_at, ta.release_id, coalesce(r.title, ''),
+                        sb.id, tb.id, tb.title, tb.duration_ms, sb.codec, sb.bitrate, sb.added_at, tb.release_id, coalesce(rb.title, '')
                    FROM same_audio p
                    JOIN source sa ON sa.id = p.source_id
                    JOIN source sb ON sb.id = p.other_source
                    JOIN track ta ON ta.id = sa.track_id
                    JOIN track tb ON tb.id = sb.track_id
                    LEFT JOIN release r ON r.id = ta.release_id
+                   LEFT JOIN release rb ON rb.id = tb.release_id
                   WHERE p.kept = 0 AND ta.id != tb.id
+                    AND NOT EXISTS (SELECT 1 FROM recording_link la JOIN recording_link lb ON lb.recording = la.recording
+                                     WHERE la.track_id = ta.id AND lb.track_id = tb.id)
                     AND ta.deleted_at IS NULL AND tb.deleted_at IS NULL
                     AND sa.is_active = 1 AND sa.trashed_at IS NULL AND sa.kind = 'local_file' AND sa.available = 1
                     AND sb.is_active = 1 AND sb.trashed_at IS NULL AND sb.kind = 'local_file' AND sb.available = 1
@@ -433,6 +450,8 @@ impl Library {
                     codec: Codec::parse(&r.get::<_, String>(at + 4)?),
                     bitrate: opt_u32(r, at + 5)?,
                     added_at: r.get(at + 6)?,
+                    release_id: get_opt_id(r, at + 7)?,
+                    album: r.get(at + 8)?,
                 })
             };
             let rows = stmt.query_map([], |r| {
@@ -440,8 +459,9 @@ impl Library {
                     similarity: r.get(0)?,
                     release: get_opt_id(r, 1)?,
                     album: r.get(2)?,
-                    a: side(r, 3)?,
-                    b: side(r, 10)?,
+                    artist: r.get(3)?,
+                    a: side(r, 4)?,
+                    b: side(r, 13)?,
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

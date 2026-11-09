@@ -35,6 +35,7 @@ mod prints;
 mod quality;
 mod rec_facts;
 mod graph;
+mod recordings;
 mod recs;
 mod repairs;
 pub mod search;
@@ -59,6 +60,7 @@ pub use prints::{AudioPrint, NearPrint, PrintTodo, SameAudioOffer, SameSide, Wro
 pub use quality::{Conversion, FakeOffer, QualityTodo};
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
+pub use recordings::{PrintToLink, RecordingSide};
 pub use recs::RecTrack;
 pub use unwanted::Unwanted;
 pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
@@ -70,6 +72,7 @@ pub use types::{
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
 pub use userdata::{
-    EVENTS_FILE, FINGERPRINT_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, SAVED_FILE, STREAMS_FILE, USERDATA_VERSION,
+    EVENTS_FILE, FINGERPRINT_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, RECORDINGS_FILE, SAVED_FILE, STREAMS_FILE,
+    USERDATA_VERSION,
 };
 pub use util::{fold, now_ms, sort_key};

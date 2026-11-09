@@ -364,6 +364,7 @@ pub(crate) fn fake_option(o: &FakeOffer) -> v::ConfirmOption {
 pub(crate) fn fake_card(id: u64, title: String, offers: &[FakeOffer]) -> v::Confirm {
     let n = offers.len();
     v::Confirm {
+        yes_no: false,
         id,
         title,
         origin: format!(

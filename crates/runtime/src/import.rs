@@ -484,6 +484,7 @@ impl ImportService {
                     .position(|o| o.source != nikgob_import::events::TAGS_OPTION)
                     .unwrap_or(0);
                 v::Confirm {
+                    yes_no: false,
                     id: IMPORT_ID | item.id.0,
                     title,
                     origin,

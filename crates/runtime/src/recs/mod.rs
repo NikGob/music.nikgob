@@ -676,8 +676,14 @@ fn read_parts(
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize, TasteInput), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
-    let events = lib.listening_events().map_err(|e| err("events", e))?;
-    let like_times = lib.liked_track_times().map_err(|e| err("likes", e))?;
+    let mut events = lib.listening_events().map_err(|e| err("events", e))?;
+    let mut like_times = lib.liked_track_times().map_err(|e| err("likes", e))?;
+    // One song on two albums is one recording: the copy standing for it
+    // takes the other copies' plays and likes, and only it is picked.
+    let spares = lib.recording_spares().unwrap_or_default();
+    let in_library: HashSet<TrackId> = rows.iter().filter(|r| r.in_library).map(|r| r.id).collect();
+    let spares: HashMap<TrackId, TrackId> = spares.into_iter().filter(|(_, canon)| in_library.contains(canon)).collect();
+    fold_recordings(&spares, &mut events, &mut like_times);
     let saved = lib.saved_tracks().map_err(|e| err("saved songs", e))?;
     let entries = lib.playlist_entry_times().map_err(|e| err("playlists", e))?;
     let feedback = lib.rec_dislikes().map_err(|e| err("feedback", e))?;
@@ -709,7 +715,7 @@ fn read_parts(
 
     // One song on two albums: the track with a file (the oldest) stands for it.
     let mut songs: HashMap<&str, (bool, TrackId)> = HashMap::new();
-    for r in rows.iter().filter(|r| r.in_library) {
+    for r in rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)) {
         let e = songs.entry(r.song.as_str()).or_insert((r.has_local, r.id));
         if r.has_local && !e.0 {
             *e = (true, r.id);
@@ -718,7 +724,7 @@ fn read_parts(
     // The worlds of Главная: one of them does not fill a mix.
     let album_worlds = crate::home_v2::worlds_of_releases(&release_rows);
     let mut worlds: HashMap<u64, (String, String)> = HashMap::new();
-    let catalog = Catalog::new(rows.iter().filter(|r| r.in_library).map(|r| {
+    let catalog = Catalog::new(rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)).map(|r| {
         let song = songs.get(r.song.as_str()).map_or(r.id, |s| s.1);
         let world = r.release.and_then(|a| album_worlds.get(&a));
         let mut t = TrackInfo::new(r.id, r.artists.clone(), r.release)
@@ -736,7 +742,8 @@ fn read_parts(
             });
         }
         t
-    }));
+    }))
+    .with_aliases(spares.iter().map(|(copy, canon)| (*copy, *canon)));
 
     // «Не рекомендовать»: library tracks and artists, songs and artists of
     // the services (an artist disliked by name is the library's too).
@@ -976,6 +983,33 @@ fn played_in_background(
         }
     }
     (nikgob_recs::background::background_playlists(&plays, &snap.model.listening), holding)
+}
+
+/// One song on two albums ([`Library::recording_spares`]: each other copy
+/// with the copy standing for it): the plays of a copy are the standing
+/// copy's, and its like is that one's (once, the newest time).
+pub(crate) fn fold_recordings(
+    spares: &HashMap<TrackId, TrackId>,
+    events: &mut [nikgob_core::model::Event],
+    likes: &mut Vec<(TrackId, UnixMs)>,
+) {
+    if spares.is_empty() {
+        return;
+    }
+    for e in events.iter_mut() {
+        if let Some(c) = spares.get(&e.track_id) {
+            e.track_id = *c;
+        }
+    }
+    for l in likes.iter_mut() {
+        if let Some(c) = spares.get(&l.0) {
+            l.0 = *c;
+        }
+    }
+    // Newest first: the first of each track stays.
+    likes.sort_by_key(|l| std::cmp::Reverse(l.1));
+    let mut seen = HashSet::new();
+    likes.retain(|l| seen.insert(l.0));
 }
 
 /// An event as the recommendations read it: a play imported before
@@ -2130,6 +2164,7 @@ impl Worker {
     /// A start, `origin` its chooser: the session goes on, and a start the
     /// user chose teaches the model of the next start.
     pub(crate) fn recs_started(&mut self, track: TrackId, origin: nikgob_core::model::EventOrigin) {
+        let track = self.recs_song_of(track);
         let now = recs_now();
         let ctx = self.play_context;
         let r = &mut self.recs;
@@ -2160,6 +2195,7 @@ impl Worker {
     /// How a start ended (not by closing the app): the session and the
     /// skip model learn it.
     pub(crate) fn recs_ended(&mut self, track: TrackId, complete: bool, position_ms: u32) {
+        let track = self.recs_song_of(track);
         let ended = if complete {
             Ended::Complete
         } else if position_ms < nikgob_recs::taste::EARLY_SKIP_MS {
@@ -2177,6 +2213,14 @@ impl Worker {
         let Some(snap) = r.snap.clone() else { return };
         r.weights.get_or_insert(snap.model.weights).skip.observe(&x, ended == Ended::Early);
         self.recs_keep_weights();
+    }
+
+    /// The catalog's track for `track`: itself, or the copy standing for
+    /// its recording when it is another copy of one song on two albums
+    /// (the session holds one id per song: «Не повторять сыгранное»
+    /// covers both).
+    fn recs_song_of(&self, track: TrackId) -> TrackId {
+        self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).map_or(track, |t| t.id)
     }
 
     /// The weights learnt online, into `recs.model`.
