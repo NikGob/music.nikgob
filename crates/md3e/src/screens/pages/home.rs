@@ -11,14 +11,14 @@
 
 use egui::{Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    AnalysisProgress, Command, HomeView, LaneCard, MixCard, MixId, RecTarget, Route, ShelfAlbum, Shortcut, Status,
+    Command, HomeView, LaneCard, MixCard, MixId, RecTarget, Route, ShelfAlbum, Shortcut, Status,
     StreamAlbumCard, StreamPage, StreamTrackRow, TileKind, TrackRow, ViewState,
 };
 
 use super::{PageState, cards, widgets, worlds};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, FilterChip, Menu, MenuItem, Size, Style, TooltipExt, anim},
+    components::{Button, FilterChip, Menu, MenuItem, Size, Style, anim},
 };
 
 pub(super) fn greeting(hour: u8) -> &'static str {
@@ -181,15 +181,6 @@ pub fn is_empty(h: &HomeView) -> bool {
         && h.tiles.is_empty()
 }
 
-/// «Разбираю звук библиотеки, миксы станут точнее · 40 %», while the
-/// analysis runs.
-pub fn analysis_line(a: &AnalysisProgress) -> Option<String> {
-    (!a.complete()).then(|| {
-        let pct = (a.fraction() * 100.0).floor() as u32;
-        format!("Разбираю звук библиотеки, миксы станут точнее · {pct}\u{a0}%")
-    })
-}
-
 /// The section's entrance, once per run: `n` from the top, 30 ms after the
 /// one above (up to four), rising 24 on the default spatial spring and
 /// fading in; reduced motion: a fade only.
@@ -301,7 +292,7 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
     job.wrap = egui::text::TextWrapping::truncate_at_width((chip.rect.left() - row.left() - 16.0).max(48.0));
     let g = crate::typography::layout(ui.painter(), job);
     ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, s.on_surface);
-    if chip.md3_tooltip("Миксы, «Слушать снова» и подборки — только из скачанных треков", None).clicked() {
+    if chip.clicked() {
         out.push(downloaded_only(!on));
     }
 }
@@ -370,15 +361,6 @@ fn section_header(ui: &mut Ui, grid: Grid, rect: Rect, title: &str, action: Opti
     ui.put(at, b).clicked()
 }
 
-/// A quiet line under a header (BodyMedium, on_surface_variant).
-fn quiet_at(ui: &Ui, at: egui::Pos2, text: &str, width: f32) -> f32 {
-    let s = Theme::get(ui.ctx()).scheme;
-    let g = widgets::wrapped(ui, text, TypeRole::BodyMedium.style(), s.on_surface_variant, width, 2);
-    let h = g.size().y;
-    ui.painter().galley(at, g, s.on_surface_variant);
-    h
-}
-
 // ---- Shortcuts.
 
 fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
@@ -409,17 +391,9 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
     let per = grid.cards_per_line();
     let card_w = grid.span(12 / per);
     let local_only = state.prefs.mixes_downloaded_only;
-    let note = if local_only {
-        Some("Включено «Только скачанное»: в миксах только треки с файлом.".to_owned())
-    } else if !h.history {
-        Some("Собраны из того, что у тебя есть. Станут точнее, когда послушаешь.".to_owned())
-    } else {
-        analysis_line(&state.analysis)
-    };
-    let note_h = if note.is_some() { 28.0 } else { 0.0 };
     let card_h = card_w + cards::MIX_TEXT_H;
     let body = lines(h.lanes.len(), per) as f32 * (card_h + 24.0) - 24.0;
-    let total = HEADER_H + note_h + HEADER_GAP + body;
+    let total = HEADER_H + HEADER_GAP + body;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "mixes", |ui| {
@@ -433,24 +407,11 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
         let mut gui = ui.new_child(UiBuilder::new().max_rect(group).id_salt("home-mixes-group"));
         let with_new = state.prefs.mixes_with_new && !local_only;
         let disabled: &[usize] = if local_only { &[0, 1] } else { &[] };
-        let (picked, rects) = super::connected(&mut gui, Id::new("home-mixes-new"), &labels, usize::from(with_new), disabled);
+        let (picked, _) = super::connected(&mut gui, Id::new("home-mixes-new"), &labels, usize::from(with_new), disabled);
         if let Some(p) = picked {
             out.push(Command::SetPref(nikgob_view::PrefPatch::MixesWithNew(p == 1)));
         }
-        let share = match state.prefs.radio_new_share {
-            nikgob_view::RadioNewShare::More => "Примерно каждый третий трек новый: похожее из YouTube Music и Deezer.",
-            _ => "Примерно каждый пятый трек новый: похожее из YouTube Music и Deezer.",
-        };
-        let tips = ["Скачанное, лайкнутое и треки из твоих плейлистов. Без нового.", share];
-        for (k, r) in rects.iter().enumerate() {
-            let _ = ui.interact(*r, Id::new(("home-mixes-tip", k)), Sense::hover()).md3_tooltip(tips[k], None);
-        }
-        let mut top = rect.top() + HEADER_H;
-        if let Some(line) = &note {
-            quiet_at(ui, pos2(grid.left, top + 4.0), line, grid.width);
-            top += note_h;
-        }
-        top += HEADER_GAP;
+        let top = rect.top() + HEADER_H + HEADER_GAP;
         for (i, l) in h.lanes.iter().enumerate() {
             let cell = grid.cell(i, per, top, card_h, 24.0);
             // «Смешать с…»: another profile to mix it with.
