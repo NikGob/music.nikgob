@@ -270,6 +270,17 @@ impl Outline {
         out
     }
 
+    /// How far the outline reaches from its centre at most: half the
+    /// width for a playing shape (they are [`centred`] to fit the circle),
+    /// up to [`SQUARE_REACH`] of it for the square.
+    fn reach(&self) -> f32 {
+        let c = self.rect.center();
+        shape_paint::shape_path(&self.cubics, self.rect, self.rotation, 0.5)
+            .iter()
+            .map(|p| p.distance(c))
+            .fold(self.rect.width() * 0.5, f32::max)
+    }
+
     /// Whether `p` falls inside the outline itself (not just its square):
     /// even-odd test on the flattened path.
     pub fn contains(&self, p: Pos2) -> bool {
@@ -323,6 +334,24 @@ impl Outline {
 /// Room the ring takes around the cover on each side.
 const RING_PAD: f32 = 28.0;
 
+/// How far the square cover (the rounded square of [`cover_morph`], corner
+/// radius a tenth of the side) reaches from its centre, in half sides: its
+/// half diagonal, `0.4·√2 + 0.1` of the side.
+const SQUARE_REACH: f32 = 2.0 * (0.4 * std::f32::consts::SQRT_2 + 0.1);
+
+/// The share of its box the cover takes so the ring fits around it: the
+/// circle ring stands a gap off the outline's farthest point, so around the
+/// square (whose corners reach [`SQUARE_REACH`] half sides out) the cover
+/// shrinks until that circle is where a shape's ring would be.
+fn ring_fit(prefs: &nikgob_view::Prefs, square: bool) -> f32 {
+    if square && prefs.ring && prefs.ring_style == RingStyle::Circle { 1.0 / SQUARE_REACH } else { 1.0 }
+}
+
+/// `r` scaled by `k` about its centre.
+fn scaled(r: Rect, k: f32) -> Rect {
+    Rect::from_center_size(r.center(), r.size() * k)
+}
+
 /// The spectrum level for direction `theta`: low bands at the top, high at
 /// the bottom, mirrored left and right.
 fn band_at(bands: &[f32], theta: f32) -> f32 {
@@ -372,7 +401,9 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
     match input.style {
         RingStyle::Circle => {
             let n = ((72.0 * kd).round() as usize).max(24);
-            let radius = outline.rect.width() * 0.5 + 14.0 * sc;
+            // A gap off the outline's farthest point, so no corner of the
+            // square (or of a shape on its way to it) covers a dot.
+            let radius = outline.reach() + 14.0 * sc;
             for i in 0..n {
                 let u = i as f32 / n as f32;
                 let theta = input.angle + u * TAU;
@@ -452,6 +483,26 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             }
         }
     }
+}
+
+/// How strongly the ring shows: dimmed on a pause (`played` 0). The
+/// contour ring and the bars stay around the square too, and so does the
+/// circle around the square cover; around a shape turning into the square
+/// (`shown` 0) the circle goes, and before the square's corners would push
+/// it out of its room, so it never leaves the cover's box.
+fn ring_alpha(style: RingStyle, shape: bool, shown: f32, played: f32, outline: &Outline) -> f32 {
+    let alpha = 0.35 + 0.65 * played;
+    if style != RingStyle::Circle || !shape {
+        return alpha;
+    }
+    let mut alpha = alpha.min(shown);
+    if shown < 0.999 {
+        // How far the half-square reaches past the shape's circle: a
+        // tenth of the cover's half and the ring is gone.
+        let grow = outline.reach() / (outline.rect.width() * 0.5).max(1.0) - 1.0;
+        alpha *= (1.0 - grow / 0.1).clamp(0.0, 1.0);
+    }
+    alpha
 }
 
 /// An angle that turns one revolution per `period` seconds (faster with
@@ -899,24 +950,39 @@ pub fn show(
 
     snack_spot(&ctx, rect, wide, slot_open, cover_box, info_rect);
 
-    // Cover: playing → Cookie12Sided, paused → rounded square; the ring
-    // around it fades in with the cookie.
+    // Cover: playing → its shape, paused → rounded square (with «Менять
+    // форму на паузе» off it keeps the shape, only still); the circle ring
+    // around a shape fades in with it.
+    let prefs = &state.prefs;
     let morph = anim::fraction(
         &ctx,
         egui::Id::new("np-cover-morph"),
-        if playing { 1.0 } else { 0.0 },
+        if playing || !prefs.cover_pause_morph { 1.0 } else { 0.0 },
         theme.motion.default_spatial,
     );
-    let prefs = &state.prefs;
-    let mega = mega_layout(body);
+    // Playing or paused, apart from the shape (the rings dim on a pause).
+    let played = anim::fraction(
+        &ctx,
+        egui::Id::new("np-cover-play"),
+        if playing { 1.0 } else { 0.0 },
+        theme.motion.default_spatial,
+    )
+    .clamp(0.0, 1.0);
+    let mut mega = mega_layout(body);
     let bars = prefs.ring && prefs.ring_style == RingStyle::Bars;
-    // The bars want room to grow: the cover gives way to them.
-    let pad = if bars { (cover_box.width() * 0.13).clamp(RING_PAD, 80.0) } else { RING_PAD };
-    let normal_cover = cover_box.shrink(pad);
-    let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
-    let shown = morph.clamp(0.0, 1.0);
     let current = p.current.as_ref();
     let shape = cover_shape(&ctx, prefs.cover_shape, &prefs.random_shapes, current);
+    // The bars want room to grow: the cover gives way to them.
+    let pad = if bars { (cover_box.width() * 0.13).clamp(RING_PAD, 80.0) } else { RING_PAD };
+    // The square gives way to a circle ring around its corners (beside
+    // the lyrics too; the small cover of a narrow window has no ring).
+    let fit = ring_fit(prefs, shape.is_none());
+    let normal_cover = scaled(cover_box.shrink(pad), fit);
+    if mega.wide {
+        mega.cover = scaled(mega.cover, fit);
+    }
+    let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
+    let shown = morph.clamp(0.0, 1.0);
     let swap = shape_swap(&ctx, shape, morph >= 0.999, theme.reduced_motion);
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
     let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
@@ -958,9 +1024,7 @@ pub fn show(
                 bars: &heights,
                 room: pad,
                 kick: if beat { kick } else { 0.0 },
-                // The contour ring stays around the square too; the
-                // circle one only belongs to a shape.
-                alpha: if prefs.ring_style == RingStyle::Circle { shown } else { 0.35 + 0.65 * shown },
+                alpha: ring_alpha(prefs.ring_style, shape.is_some(), shown, played, &outline),
                 scale: 1.0,
         };
         let alpha = input.alpha;
@@ -1221,7 +1285,8 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
     // Stronger than in the player, so a small sample shows it.
     let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
     let pad = if with_ring { RING_PAD * 0.8 } else { 8.0 };
-    let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0);
+    let fit = if with_ring { ring_fit(prefs, prefs.cover_shape == CoverShape::Original) } else { 1.0 };
+    let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0) * fit;
     let cover = Rect::from_center_size(rect.center(), vec2(side, side) * swell);
     let outline = match prefs.cover_shape {
         CoverShape::Random => {
@@ -1748,6 +1813,32 @@ mod tests {
         assert_eq!(super::split_line(100.0, alone), (100.0, None));
     }
     use super::*;
+
+    #[test]
+    fn the_circle_ring_clears_the_square_and_stays_in_its_box() {
+        let rect = Rect::from_center_size(pos2(300.0, 300.0), vec2(400.0, 400.0));
+        let square = Outline::new(None, 1.0, rect, 0.0);
+        assert!((square.reach() - 200.0 * SQUARE_REACH).abs() < 1.5, "{}", square.reach());
+        // Shrunk by the fit, the square's circle ring sits where a shape's
+        // does around the full-size cover.
+        let mut prefs = nikgob_view::Prefs { ring: true, ring_style: RingStyle::Circle, ..Default::default() };
+        let small = Outline::new(None, 1.0, scaled(rect, ring_fit(&prefs, true)), 0.0);
+        let shape = Outline::new(Some(MaterialShape::Cookie12Sided), 1.0, rect, 0.4);
+        assert!((small.reach() - shape.reach()).abs() < 1.5, "{} vs {}", small.reach(), shape.reach());
+        assert!((shape.reach() - 200.0).abs() < 1.5);
+        prefs.ring_style = RingStyle::Contour;
+        assert_eq!(ring_fit(&prefs, true), 1.0, "the contour follows the square itself");
+        prefs.ring_style = RingStyle::Circle;
+        assert_eq!(ring_fit(&prefs, false), 1.0);
+        // The circle around the square cover stays on a pause, dimmed; around
+        // a shape it is gone well before the square's corners push it out.
+        let s = Some(MaterialShape::Cookie12Sided);
+        assert!((ring_alpha(RingStyle::Circle, false, 0.0, 0.0, &square) - 0.35).abs() < 1e-4);
+        assert!((ring_alpha(RingStyle::Circle, true, 1.0, 1.0, &shape) - 1.0).abs() < 1e-4);
+        assert!((ring_alpha(RingStyle::Circle, true, 1.0, 0.0, &shape) - 0.35).abs() < 1e-4, "shape kept on a pause");
+        assert!(ring_alpha(RingStyle::Circle, true, 0.2, 0.2, &Outline::new(s, 0.2, rect, 0.0)) < 0.05);
+        assert!((ring_alpha(RingStyle::Contour, true, 0.0, 0.0, &square) - 0.35).abs() < 1e-4);
+    }
 
     #[test]
     fn only_the_shape_itself_is_the_cover() {
