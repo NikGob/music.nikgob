@@ -255,7 +255,7 @@ pub enum SettingId {
     UpgradeBar,
     /// «Замена файла»: asked in «Подтверди», or by itself.
     UpgradeAuto,
-    /// One line of «Источники скачивания»: its switch and place.
+    /// One line of «Откуда качать»: its switch and place.
     DownloadSource(v::SourceKey),
     PlaylistSync,
     ImportSpotify,

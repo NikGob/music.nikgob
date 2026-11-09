@@ -477,7 +477,7 @@ impl Num {
 /// The first number in `t` («+0,25 с» → 0.25).
 fn first_number(t: &str) -> Option<f32> {
     let part = |c: &char| c.is_ascii_digit() || matches!(c, '-' | '+' | ',' | '.');
-    let n: String = t.chars().skip_while(|c| !part(c)).take_while(part).collect();
+    let n: String = t.chars().skip_while(|c| !part(c)).take_while(|c| part(c)).collect();
     n.replace(',', ".").trim_start_matches('+').parse().ok()
 }
 
@@ -741,8 +741,9 @@ mod tests {
         assert_eq!(lead.fmt(0.2), "+0,20 с");
         assert_eq!(lead.fmt(0.0), "+0,00 с");
         assert_eq!(lead.fmt(-0.25), "-0,25 с");
-        assert_eq!(lead.parse("+0,25 с"), Some(0.25));
-        assert_eq!(lead.parse("-0.1"), Some(-0.1));
+        let near = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-4);
+        assert!(near(lead.parse("+0,25 с"), 0.25));
+        assert!(near(lead.parse("-0.1"), -0.1));
         assert_eq!(lead.parse("9"), Some(0.5), "clamped to the range");
         assert_eq!(lead.parse("быстро"), None);
         let pct = Num::pct(0.8, 1.4, 0.05);

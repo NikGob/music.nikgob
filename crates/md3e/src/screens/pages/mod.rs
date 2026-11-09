@@ -358,7 +358,7 @@ pub struct PageState {
     files_done: bool,
     indexer_url: String,
     indexer_key: String,
-    /// «Soulseek» on «Источники»: what is typed (the password and the
+    /// «Soulseek» on «Загрузки»: what is typed (the password and the
     /// token are never shown back), and whether the fields were filled from
     /// the saved settings.
     slsk_remote: bool,
@@ -378,7 +378,7 @@ pub struct PageState {
     /// the settings row) before it is kept.
     name_draft: String,
     name_synced: bool,
-    /// «Источники»: what is typed into the Spotify Client ID and the
+    /// «Сервисы»: what is typed into the Spotify Client ID and the
     /// YouTube cookies fields, and which folds are open.
     /// Spotify Soloist's setup: the open dialog, the key being typed, the
     /// flow (each step's dialog opens when the one before is done), the

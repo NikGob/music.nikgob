@@ -73,7 +73,7 @@ enum Spec {
     Count(fn(&mut Prefs) -> &mut u32, f32, f32, f32),
     /// A speed limit in KiB/s (0: none, the right end).
     Speed(fn(&mut Prefs) -> &mut u32),
-    /// One line of «Источники скачивания»: its switch.
+    /// One line of «Откуда качать»: its switch.
     Source(v::SourceKey),
     ShapeRange,
     ShapePick,
