@@ -210,8 +210,7 @@ pub enum ReleaseAct {
 
 /// The one list of an album's actions, for its right-click menu (card or
 /// row) and the ⋮ of its page. On the page (`on_page`) «Слушать»,
-/// «Перемешать» and the like are buttons beside it and are left out; «В
-/// плейлист…» needs the album's tracks, which only its page has.
+/// «Перемешать» and the like are buttons beside it and are left out.
 pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     use ReleaseAct as A;
     let mut rows = Vec::new();
@@ -221,9 +220,7 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     }
     rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
-    if on_page {
-        rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
-    }
+    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
     rows.push(Row::Divider);
     if !on_page {
         rows.push(Row::Item(A::Like, MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked)));
@@ -236,7 +233,7 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     rows
 }
 
-/// Does an album action (all but «В плейлист…», which the page opens).
+/// Does an album action (the page opens «В плейлист…» with its tracks).
 pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
     match act {
         ReleaseAct::Play => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
@@ -249,7 +246,10 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
         ReleaseAct::Share => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
         ReleaseAct::Trash => super::request_release_delete(ctx, r.id, &r.title, false),
         ReleaseAct::Purge => super::request_release_delete(ctx, r.id, &r.title, true),
-        ReleaseAct::Playlist => {}
+        ReleaseAct::Playlist => {
+            let anchor = ctx.input(|i| i.pointer.latest_pos()).map(|p| egui::Rect::from_center_size(p, egui::vec2(1.0, 1.0)));
+            super::request_release_to_playlist(ctx, r.id, anchor);
+        }
     }
     None
 }
@@ -1653,8 +1653,7 @@ mod menu_tests {
     }
 
     /// The album's right-click menu and its page's ⋮ are one list in one
-    /// order: the page leaves out its buttons (play, shuffle, the like) and
-    /// adds «В плейлист…», which needs the tracks only the page has.
+    /// order: the page leaves out its buttons (play, shuffle, the like).
     #[test]
     fn an_album_offers_the_same_actions_by_right_click_and_by_more() {
         let r = ReleaseCard {
@@ -1675,13 +1674,13 @@ mod menu_tests {
         let shared = |acts: &[ReleaseAct]| -> Vec<ReleaseAct> {
             acts.iter()
                 .copied()
-                .filter(|a| !matches!(a, ReleaseAct::Play | ReleaseAct::Shuffle | ReleaseAct::Like | ReleaseAct::Playlist))
+                .filter(|a| !matches!(a, ReleaseAct::Play | ReleaseAct::Shuffle | ReleaseAct::Like))
                 .collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(&card[..4], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Next, ReleaseAct::Queue]);
+        assert_eq!(&card[..5], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
         assert_eq!(&page[..3], [ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
-        assert_eq!(labels(&release_rows(&r, false))[3], "В конец очереди");
+        assert_eq!(&labels(&release_rows(&r, false))[3..5], ["В конец очереди", "В плейлист…"]);
         for acts in [&card, &page] {
             assert_eq!(&acts[acts.len() - 2..], [ReleaseAct::Trash, ReleaseAct::Purge]);
         }

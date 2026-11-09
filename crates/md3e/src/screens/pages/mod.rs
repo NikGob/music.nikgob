@@ -50,12 +50,14 @@ enum Ask {
     Magnet,
 }
 
-/// What the "В плейлист" picker of a service adds: stream tracks, or an
-/// album by its id (the runtime fetches its tracks).
+/// What the "В плейлист" picker of an album card or a service adds: stream
+/// tracks, a service album by its id, or a library album by its id (the
+/// runtime finds the tracks of either album).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum StreamAdd {
     Tracks(Vec<nikgob_view::RemoteId>),
     Album(nikgob_view::RemoteId),
+    Release(nikgob_view::ReleaseId),
 }
 
 impl StreamAdd {
@@ -63,6 +65,7 @@ impl StreamAdd {
         match self {
             Self::Tracks(tracks) => Command::AddStreamToPlaylist(playlist, tracks),
             Self::Album(album) => Command::AddStreamAlbumToPlaylist(playlist, album),
+            Self::Release(album) => Command::AddAlbumToPlaylist(playlist, album),
         }
     }
 }
@@ -71,6 +74,12 @@ impl StreamAdd {
 /// menu, which has no `PageState` at hand.
 pub(crate) fn request_stream_album_to_playlist(ctx: &Context, album: nikgob_view::RemoteId, anchor: Option<Rect>) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("stream-album-playlist-request"), Some((album, anchor))));
+}
+
+/// Opens the "В плейлист" picker for a library album; set from its card's
+/// menu, which has no `PageState` at hand.
+pub(crate) fn request_release_to_playlist(ctx: &Context, album: nikgob_view::ReleaseId, anchor: Option<Rect>) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("release-playlist-request"), Some((album, anchor))));
 }
 
 /// What a delete confirmation is about.
@@ -777,18 +786,24 @@ impl PageState {
             }
         }
 
-        // The same picker for stream tracks or a service album. «Любимые»
-        // only for one track: a like of each of many would also download
-        // each.
+        // The same picker for stream tracks or an album. «Любимые» only for
+        // one stream track (a like of each of many would also download
+        // each) or a library album (its tracks are here already).
         if let Some((album, anchor)) =
             ctx.data_mut(|d| d.remove_temp::<Option<(nikgob_view::RemoteId, Option<Rect>)>>(egui::Id::new("stream-album-playlist-request"))).flatten()
         {
             self.pending_add_stream = Some(StreamAdd::Album(album));
             self.pending_add_anchor = anchor;
         }
+        if let Some((album, anchor)) =
+            ctx.data_mut(|d| d.remove_temp::<Option<(nikgob_view::ReleaseId, Option<Rect>)>>(egui::Id::new("release-playlist-request"))).flatten()
+        {
+            self.pending_add_stream = Some(StreamAdd::Release(album));
+            self.pending_add_anchor = anchor;
+        }
         if let Some(add) = self.pending_add_stream.clone() {
             let mut open = true;
-            let liked = matches!(&add, StreamAdd::Tracks(t) if t.len() == 1);
+            let liked = matches!(&add, StreamAdd::Tracks(t) if t.len() == 1) || matches!(add, StreamAdd::Release(_));
             let mut menu = Menu::new("playlist-picker-stream");
             if liked {
                 menu = menu.item(MenuItem::new("Любимые").icon(Icon::Favorite));
@@ -806,6 +821,7 @@ impl PageState {
                 (Some(0), StreamAdd::Tracks(tracks)) => {
                     out.extend(tracks.into_iter().map(|track| Command::LikeStream { track, on: true }))
                 }
+                (Some(0), StreamAdd::Release(album)) => out.push(Command::AddAlbumToPlaylist(LIKED_PLAYLIST, album)),
                 (Some(0), StreamAdd::Album(_)) => {}
                 (Some(i), add) if i <= user.len() => out.push(add.into_playlist(user[i - 1].id)),
                 (Some(_), add) => self.open_ask(Ask::NewPlaylistStream(add)),
