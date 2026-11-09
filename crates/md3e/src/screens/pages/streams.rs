@@ -222,38 +222,53 @@ fn track_row(
     }
     let mut nav = None;
     if let Some(m) = &menu_resp {
-        let picked = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx)).attach(m);
-        nav = track_pick(&m.ctx, picked, t, Some(m.rect), pages, out);
+        let (menu, acts) = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx));
+        let act = menu.attach(m).and_then(|k| acts.get(k).copied());
+        nav = track_pick(&m.ctx, act, t, Some(m.rect), pages, out);
     }
-    let picked = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx)).context_menu(&o.response);
-    let nav = track_pick(&o.response.ctx, picked, t, None, pages, out).or(nav);
+    let (menu, acts) = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx));
+    let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
+    let nav = track_pick(&o.response.ctx, act, t, None, pages, out).or(nav);
     // An artist name or the album of the line: its page.
     o.link_clicked.and_then(|k| routes.get(k).cloned()).or(nav)
 }
 
-fn track_menu(key: egui::Id, t: &StreamTrackRow, wished: Option<WishlistStatus>, marks: &nikgob_view::DislikesView) -> Menu {
+/// [`super::track_rows`] of a service's song: the common rows in the
+/// library track's order, its download for the files.
+pub(crate) fn stream_track_rows(
+    t: &StreamTrackRow,
+    wished: Option<WishlistStatus>,
+    marks: &nikgob_view::DislikesView,
+) -> Vec<widgets::Row<super::TrackAct>> {
     let (download, can) = match (t.has_local, wished) {
         (true, _) => ("Уже скачан", false),
         (false, Some(WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Failed)) => ("Скачать сейчас", true),
         (false, Some(_)) => ("Уже в «Хочу скачать»", false),
         (false, None) => ("Скачать", true),
     };
-    Menu::new(key)
-        .align_right(true)
-        .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic).enabled(t.playable))
-        .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic).enabled(t.playable))
-        .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
-        .divider()
-        .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(t.album_id.is_some()))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!t.artists.linked().is_empty()))
-        .item(MenuItem::new("Поделиться").icon(Icon::Share))
-        .divider()
-        .item(MenuItem::new(download).icon(Icon::Download).enabled(can))
-        .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(t.album_id.is_some()))
-        .divider()
-        .item(super::dislike_item(t.track.is_some_and(|id| marks.track(id))))
-        .item(MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block))
+    super::track_rows(super::TrackMenuOf {
+        playable: t.playable,
+        has_album: t.album_id.is_some(),
+        has_artists: !t.artists.linked().is_empty(),
+        also_on: None,
+        info: false,
+        fetch: MenuItem::new(download).icon(Icon::Download).enabled(can),
+        torrents: None,
+        find_song: None,
+        wrong_file: false,
+        dislike: super::dislike_item(t.track.is_some_and(|id| marks.track(id))),
+        ban: MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block),
+    })
+}
+
+fn track_menu(
+    key: egui::Id,
+    t: &StreamTrackRow,
+    wished: Option<WishlistStatus>,
+    marks: &nikgob_view::DislikesView,
+) -> (Menu, Vec<super::TrackAct>) {
+    let (menu, acts) = widgets::menu_of(key, stream_track_rows(t, wished, marks));
+    (menu.align_right(true), acts)
 }
 
 /// «Не нравится» of a service's track: its library track's mark when it
@@ -267,33 +282,34 @@ fn stream_dislike(t: &StreamTrackRow, marks: &nikgob_view::DislikesView) -> Comm
 
 fn track_pick(
     ctx: &egui::Context,
-    picked: Option<usize>,
+    act: Option<super::TrackAct>,
     t: &StreamTrackRow,
     anchor: Option<Rect>,
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    match picked? {
-        0 => out.push(Command::PlayStreamNext(vec![t.remote.clone()])),
-        1 => out.push(Command::EnqueueStream(vec![t.remote.clone()])),
-        2 => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
-        3 => out.push(radio_by_stream(t)),
-        4 => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
+    use super::TrackAct as A;
+    match act? {
+        A::Next => out.push(Command::PlayStreamNext(vec![t.remote.clone()])),
+        A::Queue => out.push(Command::EnqueueStream(vec![t.remote.clone()])),
+        A::Playlist => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
+        A::Radio => out.push(radio_by_stream(t)),
+        A::Album => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
         // Several artists: a chooser.
-        5 => return artist_links::go_to(ctx, artist_links::stream(&t.artists)),
-        6 => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
+        A::Artist => return artist_links::go_to(ctx, artist_links::stream(&t.artists)),
+        A::Share => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
         // Download without a like: the like stays the ♡'s.
-        7 => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
+        A::Fetch => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
         // The whole album the track is from, without a like.
-        8 => {
+        A::AlbumDownload => {
             if let Some(a) = t.album_id.clone() {
                 out.push(Command::DownloadStreamAlbum(a));
             }
         }
-        9 => out.push(stream_dislike(t, &super::marks(ctx))),
-        10 => out.push(Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(t.artist.clone()), dislike: true }),
-        _ => {}
-
+        A::Dislike => out.push(stream_dislike(t, &super::marks(ctx))),
+        A::Ban => out.push(Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(t.artist.clone()), dislike: true }),
+        // Only a library track has these.
+        A::AlsoOn | A::Apart | A::Info | A::Torrents | A::FindSong | A::WrongFile | A::Remove | A::Trash | A::Purge => {}
     }
     None
 }
