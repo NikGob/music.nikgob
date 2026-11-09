@@ -115,9 +115,14 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     let legacy = value.get("np_slot").is_none();
     // Prefs from before a change of the lyrics defaults take the new ones.
     let lyrics_rev = value.get("lyrics_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
+    // Prefs from before the presets keep the values of their own once.
+    let settings_rev = value.get("settings_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     let mut prefs: Prefs = serde_json::from_value(value)?;
     if legacy { prefs.np_slot = slot; }
     prefs.upgrade_lyrics(lyrics_rev);
+    // The owner's own build opens the settings in «Подробно» the first
+    // time; a handout build in «Просто».
+    nikgob_view::presets::upgrade(&mut prefs, settings_rev, option_env!("NIKGOB_RELEASE").is_none());
     Ok(prefs)
 }
 
@@ -976,6 +981,50 @@ mod prefs_tests {
         nikgob_view::PrefPatch::LyricsSettingsSeen.apply(&mut p);
         let kept = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
         assert!(kept.lyrics_settings_seen);
+    }
+
+    /// Prefs from before the presets (a made-up sample, not anyone's
+    /// file) read and written again differ only by the new keys; the areas
+    /// that match no preset keep their values for «Свои» once.
+    #[test]
+    fn old_prefs_gain_only_the_new_keys() {
+        use nikgob_view::presets::{Area, SETTINGS_REV};
+        const NEW: [&str; 7] = ["settings_deep", "custom_presets", "settings_rev", "cover_spin_s", "ring_spin_s", "cover_pulse_strength", "home_sections"];
+        let mut sample = serde_json::to_value(Prefs {
+            fps_limit: 90,
+            seed_ratio: 2.0,
+            cover_shape: nikgob_view::CoverShape::Heart,
+            download_sources: vec![nikgob_view::SourceSwitch { key: nikgob_view::SourceKey::Soulseek, on: true }],
+            library_dir: PathBuf::from("music"),
+            ..Prefs::default()
+        })
+        .unwrap();
+        let old = sample.as_object_mut().unwrap();
+        for key in NEW {
+            old.remove(key);
+        }
+        let old = old.clone();
+        let read = parse_prefs(&serde_json::to_vec(&old).unwrap()).unwrap();
+        let written = serde_json::to_value(&read).unwrap();
+        let written = written.as_object().unwrap();
+        for (key, value) in &old {
+            assert_eq!(written.get(key), Some(value), "{key}");
+        }
+        for key in written.keys() {
+            assert!(old.contains_key(key) || NEW.contains(&key.as_str()), "{key}");
+        }
+        assert_eq!(read.settings_rev, SETTINGS_REV);
+        assert_eq!(read.settings_deep, option_env!("NIKGOB_RELEASE").is_none());
+        let kept: Vec<_> = read.custom_presets.keys().copied().collect();
+        assert_eq!(kept, [Area::Recs, Area::Track, Area::Sources, Area::Seeding, Area::Load]);
+        // «Свои» gives the same values back.
+        assert_eq!(Area::Track.custom(&read).unwrap(), read);
+        // Read again, nothing more changes.
+        let again = parse_prefs(&serde_json::to_vec(&read).unwrap()).unwrap();
+        assert_eq!(again, read);
+        // A first start keeps nothing and opens in «Просто».
+        let first = prefs_of(None);
+        assert!(first.custom_presets.is_empty() && !first.settings_deep);
     }
 
     /// Главная asks for the name on the first start only: not with a prefs
