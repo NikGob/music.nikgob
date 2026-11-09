@@ -1220,7 +1220,7 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let held_key = egui::Id::new("set-slsk-ul-held");
     let held = ui.ctx().data(|d| d.get_temp::<u32>(held_key)).filter(|v| *v != saved.upload_limit_kbps);
     dimmed(ui, !account || !saved.share, |ui| {
-        row(ui, Id::SoulseekUpload, "Скорость отдачи", Some(&fmt_speed(held.unwrap_or(saved.upload_limit_kbps))), |ui| {
+        row(ui, Id::SoulseekUpload, "Скорость отдачи в Soulseek", Some(&fmt_speed(held.unwrap_or(saved.upload_limit_kbps))), |ui| {
             let (dragging, released) = ui.add_enabled_ui(account, |ui| speed_slider_parts(ui, "set-slsk-ul", saved.upload_limit_kbps)).inner;
             match released.or(dragging) {
                 Some(v) => ui.ctx().data_mut(|d| {
@@ -1339,7 +1339,7 @@ fn torrents(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState
             p.download_limit_kbps = v;
         }
     });
-    row(ui, Id::UploadLimit, "Скорость отдачи", Some(&fmt_speed(p.upload_limit_kbps)), |ui| {
+    row(ui, Id::UploadLimit, "Скорость отдачи торрентов", Some(&fmt_speed(p.upload_limit_kbps)), |ui| {
         if let Some(v) = speed_slider(ui, "set-ul-limit", p.upload_limit_kbps) {
             p.upload_limit_kbps = v;
         }
