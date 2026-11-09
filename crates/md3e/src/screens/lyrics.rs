@@ -8,6 +8,7 @@ use egui::{Align2, Color32, Galley, Rect, Sense, Ui, pos2, text::LayoutJob, vec2
 use nikgob_motion::Spring;
 use nikgob_view::{Command, LyricLine, LyricsSync, Prefs, Status, ViewState};
 
+use super::stage::{Part, Stage};
 use crate::{
     Theme, TypeStyle,
     components::{Size, anim},
@@ -89,6 +90,14 @@ impl Look {
 /// The lyrics take the whole area given (less the mega view's control row):
 /// the soft bands, or the plain fade with them off, lie inside it.
 pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
+    show_on(ui, state, bass, mega, &Stage::REAL, out)
+}
+
+/// [`show`] for the real view or the settings' stage ([`Stage`]): the copy
+/// reads no pointer (its scene's hand scrolls it), asks for frames only
+/// while it moves and notes where its line, its pause indicator, its
+/// column and its soft bands are.
+pub fn show_on(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, stage: &Stage, out: &mut Vec<Command>) -> bool {
     let look = style_for(&state.prefs, &state.lyrics.lines);
     let size = vec2(ui.available_width(), ui.available_height().max(80.0));
     let full = Rect::from_min_size(ui.cursor().min, size);
@@ -98,7 +107,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     let (live, row) = if mega { control_row(full) } else { (full, None) };
     if mega && state.lyrics.lines.is_empty() {
         let left = plain(ui, live, state);
-        return row.is_some_and(|r| control_in(ui, r, left, state, out));
+        return stage.live && row.is_some_and(|r| control_in(ui, r, left, state, out));
     }
     let resp = ui.interact(live, ui.id().with("lyrics-live"), Sense::click_and_drag());
     let mut sizes = if mega { MEGA } else { PANE };
@@ -107,8 +116,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     sizes.small *= scale;
     sizes.sub *= scale;
     sizes.gap *= scale;
-    paint(ui, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, out);
-    let Some(row) = row else { return false };
+    paint(ui, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, stage, out);
+    // The control keeps its row on the stage but is not drawn there: it
+    // notes itself for the menus' and screenshots' sake.
+    let Some(row) = row.filter(|_| stage.live) else { return false };
     let left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left")));
     control_in(ui, row, Some(left.unwrap_or(live.left() + 12.0)), state, out)
 }
@@ -159,7 +170,7 @@ pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lin
     sizes.small = 17.0;
     sizes.sub = 13.0;
     sizes.gap = 14.0;
-    paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, out);
+    paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, &Stage::REAL, out);
 }
 
 /// Paints `lines` over `rect` (the view, clipped there; the soft bands
@@ -175,6 +186,7 @@ fn paint(
     bass: f32,
     sizes: Sizes,
     mega: bool,
+    stage: &Stage,
     out: &mut Vec<Command>,
 ) {
     let _p = crate::prof::scope("lyrics");
@@ -214,7 +226,7 @@ fn paint(
         Some(j) => {
             ctx.data_mut(|d| d.insert_temp(jump_id, j));
             // Let go of it at the latest when it times out.
-            ctx.request_repaint_after(Duration::from_secs_f64((j.at + JUMP_HOLD - now).max(0.0) + 0.01));
+            stage.repaint_after(&ctx, Duration::from_secs_f64((j.at + JUMP_HOLD - now).max(0.0) + 0.01));
         }
         None => ctx.data_mut(|d| d.remove::<Jump>(jump_id)),
     }
@@ -325,13 +337,26 @@ fn paint(
     // soft edges always clear of the top band (a lens: lines come into
     // focus as they arrive and go soft as they leave).
     let soft = Soft::of(&state.prefs);
+    if stage.is_copy() {
+        let band = if state.prefs.lyrics_soft_edges { soft.band(rect) } else { 72.0 };
+        stage.part(&ctx, Part::LyricsColumn, Rect::from_x_y_ranges(left - 12.0..=left + wrap + 12.0, rect.y_range()));
+        stage.part(&ctx, Part::LyricsEdges, Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + band)));
+        stage.part(&ctx, Part::LyricsEdges, Rect::from_min_max(pos2(rect.left(), rect.bottom() - band), rect.max));
+    }
     let anchor = rest_at(rect, sizes.anchor, state.prefs.lyrics_soft_edges.then_some(soft), slots[ci].0 * 0.5, sizes.big * 0.4);
     let follow = tops[ci] + slots[ci].0 * 0.5 - anchor;
 
     // Keep the user's offset, then ease it back over half a second.
     let manual_id = id.with("manual");
-    let mut dy = if resp.dragged() { ctx.input(|i| i.pointer.delta().y) } else { 0.0 };
-    if resp.hovered() {
+    let mut dy = if !stage.live {
+        // The stage's scene scrolls it, not the pointer.
+        stage.hand
+    } else if resp.dragged() {
+        ctx.input(|i| i.pointer.delta().y)
+    } else {
+        0.0
+    };
+    if stage.live && resp.hovered() {
         dy += ctx.input(|i| i.smooth_scroll_delta.y);
         ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
     }
@@ -350,9 +375,9 @@ fn paint(
     let manual_on = manual.on(now);
     ctx.data_mut(|d| d.insert_temp(manual_id, manual));
     if manual_on {
-        ctx.request_repaint_after(Duration::from_secs_f64((manual.until - now).max(0.0)));
+        stage.repaint_after(&ctx, Duration::from_secs_f64((manual.until - now).max(0.0)));
     } else if manual.offset != 0.0 && now < manual.until + 0.5 {
-        ctx.request_repaint();
+        stage.repaint(&ctx);
     }
     let scroll = follow + manual.shift(now);
     // A text swapped for another (the same song's from another source,
@@ -438,7 +463,7 @@ fn paint(
     let target = item_at(resp.hover_pos());
     // A tap on a touch screen ends with the pointer gone, so nothing is
     // hovered in the frame of its click: the click is placed where it was.
-    let clicked = if resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
+    let clicked = if stage.live && resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
     for (i, item) in items.iter().enumerate() {
         let y = ys[i];
         let (slot_h, extra) = slots[i];
@@ -500,6 +525,9 @@ fn paint(
             if let DisplayLine::Interlude { start, end, .. } = *item {
                 let k = sizes.big / PANE.big * state.prefs.lyrics_gap_size.clamp(0.8, 1.5) * room;
                 let line = Rect::from_min_size(pos2(side(56.0 * k), y), vec2(56.0 * k, slot_h * room));
+                if is_cur {
+                    stage.part(&ctx, Part::LyricsPause, line);
+                }
                 // Never over its neighbours, wherever their springs are.
                 let above = if i > 0 { ys[i - 1] + slots[i - 1].0 + slots[i - 1].1 } else { f32::NEG_INFINITY };
                 let below = ys.get(i + 1).copied().unwrap_or(f32::INFINITY);
@@ -530,6 +558,9 @@ fn paint(
             fixed_layout(&painter, &breaks[j].forced, size)
         };
         let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
+        if is_cur && !l.background {
+            stage.part(&ctx, Part::LyricsLine, line);
+        }
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back (from the look
         // before as the look changes), by how far the line is from the
@@ -632,11 +663,11 @@ fn paint(
         });
         ctx.request_repaint();
     }
-    if resp.hovered() {
+    if stage.live && resp.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if playing {
-        ctx.request_repaint();
+        stage.repaint(&ctx);
     }
 }
 
@@ -1837,7 +1868,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let p = pos.as_secs_f32();
     let theme = Theme::get(painter.ctx());
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
-    let ppp = painter.pixels_per_point();
+    let ppp = super::stage::ppp(painter.ctx());
     // Sung pieces are lit (and wave pieces up) in full on the current line,
     // and go back with its focus once it is over.
     let hold = focus.max(if current { 1.0 } else { 0.0 });
@@ -2196,7 +2227,7 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     let clearance = thick + 2.0 * amp + 3.0 * k * shrink;
     let gap = 2.0 * (clearance / (2.0 * radius)).clamp(0.0, 1.0).asin() * (1.0 - close);
     let sweep = progress * TAU;
-    let feather = 1.0 / painter.pixels_per_point();
+    let feather = 1.0 / super::stage::ppp(painter.ctx());
     let points = |from: f32, to: f32, amp: f32| -> Vec<egui::Pos2> {
         let n = ((to - from) * radius / (k * shrink * 0.6)).ceil().max(2.0) as usize;
         (0..=n)

@@ -248,3 +248,20 @@ fn a_discovery_has_the_service_song_menu_and_its_like() {
     assert_eq!(menu.last(), Some(&DiscoverAct::Like));
     assert_eq!(&menu[..4], [A::Next, A::Queue, A::Playlist, A::Radio].map(DiscoverAct::Track));
 }
+
+/// «Разделы главной»: its order first, the sections it turns off gone, a
+/// section it does not name after the rest; nothing set, nothing changes.
+#[test]
+fn sections_follow_their_order_and_switches() {
+    use Section as S;
+    let shown = vec![S::Shortcuts, S::Mixes, S::ListenAgain, S::New];
+    assert_eq!(arrange(shown.clone(), &[]), shown);
+    let order = [(S::New, true), (S::Shortcuts, true), (S::Mixes, false), (S::Releases, true)];
+    assert_eq!(arrange(shown.clone(), &order), vec![S::New, S::Shortcuts, S::ListenAgain]);
+    // A section named twice is drawn once.
+    assert_eq!(arrange(vec![S::Mixes], &[(S::Mixes, true), (S::Mixes, true)]), vec![S::Mixes]);
+    assert_eq!(Section::ALL.len(), 7);
+    assert!(Section::ALL.iter().all(|s| !s.title().is_empty()));
+    // Until «Разделы главной» are wired, the page keeps its own order.
+    assert!(order_of(&nikgob_view::Prefs::default()).is_empty());
+}

@@ -1,11 +1,12 @@
 //! Альбом / Исполнитель / Плейлист (md3e-player.md §3.3–3.4).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, MixKey, PlaylistCoverMode, PlaylistDetail, PlaylistId, ReleaseId,
-    ReleaseLine, ReleaseType, Route, TrackId, ViewState,
+    AlbumDate, ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, MixKey, PlaylistCoverMode, PlaylistDetail, PlaylistId,
+    ReleaseCard, ReleaseDay, ReleaseId, ReleaseLine, ReleaseType, Route, TrackId, ViewState,
 };
 
 use super::{PageState, widgets};
@@ -100,6 +101,93 @@ fn cover_size(ui: &Ui) -> f32 {
     if ui.available_width() > 720.0 { 232.0 } else { 160.0 }
 }
 
+/// What the header of an album's page shows: the album, how its date is
+/// written, how many places it counts and how long it is, its label and
+/// formats.
+pub struct ReleaseHeader<'a> {
+    pub card: &'a ReleaseCard,
+    pub released: Option<ReleaseDay>,
+    pub album_date: AlbumDate,
+    /// The places it counts (its lines, else its tracks).
+    pub count: u32,
+    pub total: Duration,
+    /// The label and the formats.
+    pub facts: Vec<&'a str>,
+}
+
+/// What [`release_header`] gives back.
+pub struct HeaderOut {
+    /// An artist clicked.
+    pub nav: Option<Route>,
+    /// Where the type and date line is.
+    pub date: Rect,
+}
+
+/// The header of an album's page: its cover, «АЛЬБОМ · 2019» (as far as
+/// `album_date` asks and the date is known), the artists, the count and
+/// the length, the label and the formats. Drawn by the page and by the
+/// settings' stage without the page open.
+pub fn release_header(ui: &mut Ui, h: &ReleaseHeader<'_>) -> HeaderOut {
+    let s = Theme::get(ui.ctx()).scheme;
+    let c = h.card;
+    let n = h.count;
+    let lacking = n.saturating_sub(c.local_tracks);
+    let mut nav = None;
+    let mut date = Rect::NOTHING;
+    let size = cover_size(ui);
+    header(ui, size, c.cover.as_ref(), None, |ui| {
+        // «АЛЬБОМ · 2019», «АЛЬБОМ · МАЙ 2019» or «АЛЬБОМ · 17 МАЯ 2019»
+        // (Prefs::album_date), as far as the date is known.
+        let when = common::fmt_album_date(h.released, c.year, h.album_date).map(|w| w.to_uppercase());
+        let line = match when {
+            Some(w) => format!("{} · {w}", type_label(c.release_type)),
+            None => type_label(c.release_type).to_owned(),
+        };
+        date = ui.label(TypeRole::LabelLarge.style().rich(line, s.primary)).rect;
+        // How much is here, in the same line as its size: «стрим» (no
+        // files: it plays from a service), «14 треков · 13 скачано · 1
+        // нет» — counted over the lines below.
+        let mut line = format!("{} · {n} {}", c.artist, common::plural(u64::from(n), "трек", "трека", "треков"));
+        if c.local_tracks > 0 && lacking > 0 {
+            line = format!("{line} · {} скачано · {lacking} нет", c.local_tracks);
+        }
+        line = format!("{line} · {}", common::fmt_total(h.total));
+        if c.local_tracks == 0 {
+            line.push_str(" · стрим");
+        }
+        // Each artist of the album is a link to its page.
+        let (links, routes) = crate::screens::artist_links::library_spans(&c.artists, &line);
+        let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+        if let Some(k) = crate::components::link_paragraph(ui, "rel-artists", &line, &links, format).clicked {
+            nav = routes.get(k).cloned();
+        }
+        // The label and the formats, quietly: nothing to press.
+        if !h.facts.is_empty() {
+            ui.label(TypeRole::BodyMedium.style().rich(h.facts.join(" · "), s.on_surface_variant));
+        }
+    });
+    HeaderOut { nav, date }
+}
+
+/// The top of an album's page without the page: the large bar with its
+/// title (never collapsed) over [`release_header`]. For the settings'
+/// stage.
+pub fn release_top(ui: &mut Ui, title: &str, h: &ReleaseHeader<'_>) -> HeaderOut {
+    let left = ui.cursor().left();
+    let top = ui.cursor().top();
+    let width = ui.available_width();
+    ui.add_space(app_bar::LARGE_HEIGHT);
+    let drawn = release_header(ui, h);
+    let m = app_bar::flexible_metrics(0.0, false, true);
+    let rect = Rect::from_min_size(pos2(left, top), vec2(width, m.height));
+    let mut bar_ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("detail-bar-ui"));
+    FlexibleAppBar::new(title)
+        .leading(Icon::ArrowBack, "Назад (Esc)")
+        .id_salt("detail-bar")
+        .show(&mut bar_ui, 0.0, |_| {});
+    drawn
+}
+
 pub fn release(
     ui: &mut Ui,
     id: ReleaseId,
@@ -107,7 +195,6 @@ pub fn release(
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
     let Some(r) = state.release.as_ref().filter(|r| r.card.id == id) else {
         return with_bar(ui, "", pages, |ui, _| {
             ui.add(LoadingIndicator::new());
@@ -131,40 +218,15 @@ pub fn release(
     let n = if r.lines.is_empty() { r.tracks.len() } else { r.lines.len() } as u32;
     let lacking = n.saturating_sub(c.local_tracks);
     with_bar(ui, &c.title, pages, |ui, pages| {
-        let mut nav = None;
-        let size = cover_size(ui);
-        header(ui, size, c.cover.as_ref(), None, |ui| {
-            // «АЛЬБОМ · 2019», «АЛЬБОМ · МАЙ 2019» or «АЛЬБОМ · 17 МАЯ 2019»
-            // (Prefs::album_date), as far as the date is known.
-            let when = common::fmt_album_date(r.released, c.year, state.prefs.album_date).map(|w| w.to_uppercase());
-            let line = match when {
-                Some(w) => format!("{} · {w}", type_label(c.release_type)),
-                None => type_label(c.release_type).to_owned(),
-            };
-            ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
-            // How much is here, in the same line as its size: «стрим» (no
-            // files: it plays from a service), «14 треков · 13 скачано · 1
-            // нет» — counted over the lines below.
-            let mut line = format!("{} · {n} {}", c.artist, common::plural(u64::from(n), "трек", "трека", "треков"));
-            if c.local_tracks > 0 && lacking > 0 {
-                line = format!("{line} · {} скачано · {lacking} нет", c.local_tracks);
-            }
-            line = format!("{line} · {}", common::fmt_total(r.total_duration));
-            if c.local_tracks == 0 {
-                line.push_str(" · стрим");
-            }
-            // Each artist of the album is a link to its page.
-            let (links, routes) = crate::screens::artist_links::library_spans(&c.artists, &line);
-            let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
-            if let Some(k) = crate::components::link_paragraph(ui, "rel-artists", &line, &links, format).clicked {
-                nav = routes.get(k).cloned();
-            }
-            // The label and the formats, quietly: nothing to press.
-            let facts: Vec<&str> = r.label.iter().chain(&r.quality).map(String::as_str).collect();
-            if !facts.is_empty() {
-                ui.label(TypeRole::BodyMedium.style().rich(facts.join(" · "), s.on_surface_variant));
-            }
-        });
+        let head = ReleaseHeader {
+            card: c,
+            released: r.released,
+            album_date: state.prefs.album_date,
+            count: n,
+            total: r.total_duration,
+            facts: r.label.iter().chain(&r.quality).map(String::as_str).collect(),
+        };
+        let mut nav = release_header(ui, &head).nav;
         ui.add_space(16.0);
 
         // Actions: standard button group, "Слушать" is the only filled button.

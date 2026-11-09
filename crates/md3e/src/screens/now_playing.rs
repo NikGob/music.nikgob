@@ -23,6 +23,7 @@ use super::{
     common,
     pages::PageState,
     pane,
+    stage::{Part, Stage},
 };
 use crate::{
     Icon, Theme, TypeRole,
@@ -86,10 +87,21 @@ pub fn cover_shape(
     range: &[CoverShape],
     track: Option<&TrackRow>,
 ) -> Option<MaterialShape> {
+    cover_shape_in(ctx, random_id(), choice, range, track)
+}
+
+/// [`cover_shape`] with the random pick kept under `id` (the settings'
+/// stage keeps its own, [`Stage::id`]).
+fn cover_shape_in(
+    ctx: &egui::Context,
+    id: egui::Id,
+    choice: CoverShape,
+    range: &[CoverShape],
+    track: Option<&TrackRow>,
+) -> Option<MaterialShape> {
     if choice != CoverShape::Random {
         return material(choice);
     }
-    let id = random_id();
     let pool = random_pool(range);
     let key = track.map(|t| t.id);
     let reroll = ctx.data_mut(|d| d.remove_temp::<bool>(id.with("reroll"))).unwrap_or(false);
@@ -306,7 +318,7 @@ impl Outline {
         let texture = uri
             .and_then(|u| crate::covers::texture(ui.ctx(), u, rect.size(), 1.0))
             .map(|t| t.id);
-        let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
+        let opts = shape_paint::FillOptions::for_ppp(super::stage::ppp(ui.ctx()));
         let mesh: Mesh = match texture {
             Some(tex) => shape_paint::texture_mesh(
                 &self.cubics,
@@ -509,9 +521,8 @@ fn ring_alpha(style: RingStyle, shape: bool, shown: f32, played: f32, outline: &
 /// the bass, backwards when `ccw`) only while playing: a pause brakes it
 /// in a fraction of a second where it is, and play goes on from there.
 /// `period` 0 = still.
-fn turn(ui: &Ui, key: &str, playing: bool, bass: f32, period: f32, ccw: bool) -> f32 {
+fn turn(ui: &Ui, id: egui::Id, playing: bool, bass: f32, period: f32, ccw: bool) -> f32 {
     let ctx = ui.ctx();
-    let id = egui::Id::new(key);
     let now = anim::now(ctx);
     // Not the cover morph: that one takes its time, and the ring would
     // keep turning through it after a pause.
@@ -561,9 +572,8 @@ fn unwind(spin: f32, n: u32) -> f32 {
 /// pause or resume) it follows the spin's steps from the last angle, so it
 /// never meets a wrap that would jump the half-way shape: not the spin
 /// crossing `TAU`, nor a lopsided shape's angle crossing a half turn.
-fn cover_angle(ui: &Ui, shape: Option<MaterialShape>, spin: f32, morph: f32) -> f32 {
+fn cover_angle(ui: &Ui, id: egui::Id, shape: Option<MaterialShape>, spin: f32, morph: f32) -> f32 {
     let ctx = ui.ctx();
-    let id = egui::Id::new("np-cover-lobes");
     let n = symmetry(shape);
     let last: Option<(u32, f32, f32)> = ctx.data(|d| d.get_temp(id));
     let angle = match last {
@@ -591,9 +601,8 @@ struct Pulse {
 
 /// One step of the [`Pulse`]: the kick (0..1, sharp attack, ~0.15 s decay)
 /// and per-band transients (0..1).
-fn pulse(ui: &Ui, bass: f32, bands: &[f32]) -> (f32, Vec<f32>) {
+fn pulse(ui: &Ui, id: egui::Id, bass: f32, bands: &[f32]) -> (f32, Vec<f32>) {
     let ctx = ui.ctx();
-    let id = egui::Id::new("np-pulse");
     let now = anim::now(ctx);
     let mut p: Pulse = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
     let dt = if p.last == 0.0 { 1.0 / 60.0 } else { (now - p.last).clamp(0.0, 0.1) as f32 };
@@ -636,10 +645,10 @@ struct Cava {
 
 /// One step of the [`Cava`]: [`BAR_COUNT`] heights (0..1). `active` false
 /// lets the bars fall to rest.
-fn cava(ui: &Ui, bands: &[f32], active: bool) -> Vec<f32> {
+fn cava(ui: &Ui, stage: &Stage, bands: &[f32], active: bool) -> Vec<f32> {
     const GRAVITY: f32 = 3.2;
     let ctx = ui.ctx();
-    let id = egui::Id::new("np-cava");
+    let id = stage.id("np-cava");
     let now = anim::now(ctx);
     let mut c: Cava = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
     let dt = if c.last == 0.0 { 1.0 / 60.0 } else { (now - c.last).clamp(0.0, 0.1) as f32 };
@@ -661,7 +670,7 @@ fn cava(ui: &Ui, bands: &[f32], active: bool) -> Vec<f32> {
     }
     let out = c.shown.clone();
     if out.iter().any(|v| *v > 0.011) {
-        ctx.request_repaint();
+        stage.repaint(ctx);
     }
     ctx.data_mut(|d| d.insert_temp(id, c));
     out
@@ -723,12 +732,13 @@ fn cava_targets(c: &mut Cava, bands: &[f32], active: bool, peak_k: f32, floor_k:
 /// shown, so call it every frame.
 fn shape_swap(
     ctx: &egui::Context,
+    stage: &Stage,
     shape: Option<MaterialShape>,
     live: bool,
     reduced: bool,
 ) -> Option<(MaterialShape, MaterialShape, f32)> {
     const DURATION: f64 = 0.65;
-    let id = egui::Id::new("np-shape-swap");
+    let id = stage.id("np-shape-swap");
     let now = anim::now(ctx);
     let (last, from, start): (Option<MaterialShape>, Option<MaterialShape>, f64) =
         ctx.data(|d| d.get_temp(id)).unwrap_or((shape, None, 0.0));
@@ -740,7 +750,7 @@ fn shape_swap(
     if reduced || x >= 1.0 {
         return None;
     }
-    ctx.request_repaint();
+    stage.repaint(ctx);
     // A springy settle: quick, with a small overshoot.
     let t = 1.0 - (-6.0 * x).exp() * (7.0 * x).cos();
     Some((from, to, t))
@@ -802,12 +812,32 @@ pub fn show(
     chrome: &mut Chrome,
     out: &mut Vec<Command>,
 ) -> bool {
+    show_on(ui, rect, state, embedded, pages, chrome, &Stage::REAL, out)
+}
+
+/// [`show`] for the real screen ([`Stage::REAL`]) or the settings' stage:
+/// the copy keeps springs of its own, reads no pointer, claims neither the
+/// wheel nor the snackbars' spot, plays on the levels it is given and
+/// notes where its parts are. (Its commands are the caller's to drop.)
+#[allow(clippy::too_many_arguments)]
+pub fn show_on(
+    ui: &mut Ui,
+    rect: Rect,
+    state: &ViewState,
+    embedded: bool,
+    pages: &mut PageState,
+    chrome: &mut Chrome,
+    stage: &Stage,
+    out: &mut Vec<Command>,
+) -> bool {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let s = theme.scheme;
     let p = &state.player;
     let playing = p.status == Status::Playing;
     let mut closed = false;
+    let levels_bass = stage.bass(pages.levels_bass);
+    let bands = stage.bands(&chrome.bands);
 
     // The layer must know its size, or the wheel scrolls the page under it.
     ui.expand_to_include_rect(rect);
@@ -815,6 +845,7 @@ pub fn show(
     // down closes it.
     let bg = ui.interact(rect, ui.id().with("np-bg"), Sense::click_and_drag());
     if !embedded
+        && stage.live
         && bg.drag_stopped()
         && let Some(d) = bg.total_drag_delta()
         && d.y > 96.0
@@ -824,25 +855,28 @@ pub fn show(
     }
     {
         let _p = crate::prof::scope("np.ambient");
-        ambient(ui, rect, state, pages);
+        ambient(ui, rect, state, levels_bass, stage);
     }
     let motion = !theme.reduced_motion;
-    let bass = if playing { pages.levels_bass } else { 0.0 };
+    let bass = if playing { levels_bass } else { 0.0 };
     let (kick, transients) = if playing && motion {
-        pulse(ui, bass, &chrome.bands)
+        pulse(ui, stage.id("np-pulse"), bass, &bands)
     } else {
         (0.0, Vec::new())
     };
     {
         let _p = crate::prof::scope("np.bg_shapes");
-        super::bg_shapes::paint(ui, rect, &state.prefs, playing, kick, &transients, bass);
+        super::bg_shapes::paint(ui, stage.id("np-bg-shapes"), rect, &state.prefs, playing && stage.moving, kick, &transients, bass);
     }
+    stage.part(&ctx, Part::Background, rect);
 
     let class = size_class(rect.width());
     let margin = class.margin();
     let inner = rect.shrink2(vec2(margin, 16.0));
     // Content scrolls; the wheel elsewhere changes volume.
-    chrome.volume_zone(rect, WheelZone::Np);
+    if stage.live {
+        chrome.volume_zone(rect, WheelZone::Np);
+    }
 
     // Header.
     let header = snap(ui, Rect::from_min_size(inner.min, vec2(inner.width(), 48.0)));
@@ -913,8 +947,8 @@ pub fn show(
 
     let body = Rect::from_min_max(pos2(inner.left(), header.bottom() + 16.0), inner.max);
     let slot_open = chrome.np_slot != NpSlot::None;
-    let mega_k = anim::fraction(&ctx, egui::Id::new("np-mega"), if slot_open { 1.0 } else { 0.0 }, theme.motion.default_spatial).clamp(0.0, 1.0);
-    let content_alpha = slot_opacities(&ctx, chrome.np_slot);
+    let mega_k = anim::fraction(&ctx, stage.id("np-mega"), if slot_open { 1.0 } else { 0.0 }, theme.motion.default_spatial).clamp(0.0, 1.0);
+    let content_alpha = slot_opacities(&ctx, chrome.np_slot, stage);
     let main = body;
 
     // Layout: cover beside the text when there is room, above it otherwise.
@@ -948,7 +982,9 @@ pub fn show(
         )
     };
 
-    snack_spot(&ctx, rect, wide, slot_open, cover_box, info_rect);
+    if stage.live {
+        snack_spot(&ctx, rect, wide, slot_open, cover_box, info_rect);
+    }
 
     // Cover: playing → its shape, paused → rounded square (with «Менять
     // форму на паузе» off it keeps the shape, only still); the circle ring
@@ -956,14 +992,14 @@ pub fn show(
     let prefs = &state.prefs;
     let morph = anim::fraction(
         &ctx,
-        egui::Id::new("np-cover-morph"),
+        stage.id("np-cover-morph"),
         if playing || !prefs.cover_pause_morph { 1.0 } else { 0.0 },
         theme.motion.default_spatial,
     );
     // Playing or paused, apart from the shape (the rings dim on a pause).
     let played = anim::fraction(
         &ctx,
-        egui::Id::new("np-cover-play"),
+        stage.id("np-cover-play"),
         if playing { 1.0 } else { 0.0 },
         theme.motion.default_spatial,
     )
@@ -971,7 +1007,7 @@ pub fn show(
     let mut mega = mega_layout(body);
     let bars = prefs.ring && prefs.ring_style == RingStyle::Bars;
     let current = p.current.as_ref();
-    let shape = cover_shape(&ctx, prefs.cover_shape, &prefs.random_shapes, current);
+    let shape = cover_shape_in(&ctx, stage.id("np-random-shape"), prefs.cover_shape, &prefs.random_shapes, current);
     // The bars want room to grow: the cover gives way to them.
     let pad = if bars { (cover_box.width() * 0.13).clamp(RING_PAD, 80.0) } else { RING_PAD };
     // The square gives way to a circle ring around its corners (beside
@@ -983,27 +1019,35 @@ pub fn show(
     }
     let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
     let shown = morph.clamp(0.0, 1.0);
-    let swap = shape_swap(&ctx, shape, morph >= 0.999, theme.reduced_motion);
+    let swap = shape_swap(&ctx, stage, shape, morph >= 0.999, theme.reduced_motion);
     let uri = current.and_then(|t| t.cover.as_ref()).map(|c| c.uri());
+    // TODO(r21-wire): `prefs.cover_spin_s` (default 48), the pulse's
+    // strength `prefs.cover_pulse_strength` (default 0.08) and the ring's
+    // `prefs.ring_spin_s` (default 36) once r21-presets adds them.
     let period = if prefs.cover_spin && motion { 48.0 } else { 0.0 };
-    let spin = turn(ui, "np-cover-angle", playing, bass, period, prefs.cover_ccw);
+    let spin = turn(ui, stage.id("np-cover-angle"), playing, bass, period, prefs.cover_ccw);
     // Stronger than in the player, so a small sample shows it.
     let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
     // Instant feedback: the cover sinks a little while pressed, so a tap
     // feels taken even while it waits to see whether a second one comes.
-    let pressing = (prefs.cover_click_pause || prefs.dbl_click_shape > 0)
-        && ctx.input(|i| {
-            let inside = |p: Pos2| p.distance(cover_rect.center()) < cover_rect.width() * 0.45;
-            i.pointer.primary_down()
-                && i.pointer.press_origin().is_some_and(inside)
-                && i.pointer.interact_pos().is_some_and(inside)
-        });
-    let press = anim::fraction(&ctx, egui::Id::new("np-cover-press"), if pressing { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
+    // (The stage's copy is pressed by its scene, not the pointer.)
+    let pressing = if stage.live {
+        (prefs.cover_click_pause || prefs.dbl_click_shape > 0)
+            && ctx.input(|i| {
+                let inside = |p: Pos2| p.distance(cover_rect.center()) < cover_rect.width() * 0.45;
+                i.pointer.primary_down()
+                    && i.pointer.press_origin().is_some_and(inside)
+                    && i.pointer.interact_pos().is_some_and(inside)
+            })
+    } else {
+        stage.pressed
+    };
+    let press = anim::fraction(&ctx, stage.id("np-cover-press"), if pressing { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
     let swell = swell * (1.0 - 0.04 * press);
     let shaped = Rect::from_center_size(cover_rect.center(), cover_rect.size() * swell);
     // The outline unwinds to upright by the shortest way, not by every
     // turn it has made.
-    let angle = cover_angle(ui, shape, spin, morph);
+    let angle = cover_angle(ui, stage.id("np-cover-lobes"), shape, spin, morph);
     let outline = match swap {
         // Turned by the raw spin: a full turn or whole lobes of either
         // shape look the same, so neither end of the swap jumps.
@@ -1014,9 +1058,9 @@ pub fn show(
     let ring_scope = crate::prof::scope("np.ring");
     if prefs.ring {
         let period = if prefs.spin_ring && motion { 36.0 } else { 0.0 };
-        let angle = turn(ui, "np-ring-angle", playing, bass, period, prefs.ring_ccw);
+        let angle = turn(ui, stage.id("np-ring-angle"), playing, bass, period, prefs.ring_ccw);
         let beat = prefs.ring_beat && playing;
-        let heights = if bars { cava(ui, &chrome.bands, beat && motion) } else { Vec::new() };
+        let heights = if bars { cava(ui, stage, &bands, beat && motion) } else { Vec::new() };
         let mut input = RingInput {
                 style: prefs.ring_style,
                 angle,
@@ -1048,6 +1092,8 @@ pub fn show(
         outline.paint(ui, uri.as_deref());
     }
     drop(cover_scope);
+    stage.part(&ctx, Part::Cover, cover_rect);
+    stage.part(&ctx, Part::Ring, lerp_rect(cover_box, mega.cover.expand(RING_PAD), mega_k));
     let mut cover_resp = ui.interact(cover_rect, ui.id().with("np-cover"), Sense::click());
     // Only the shape itself is the cover: its square's corners count as
     // the background.
@@ -1059,7 +1105,7 @@ pub fn show(
     let shape_clicked = cover_resp.clicked() && on_shape(cover_resp.interact_pointer_pos());
     let corner_clicked = cover_resp.clicked() && !shape_clicked;
     if playing && !theme.reduced_motion {
-        ctx.request_repaint();
+        stage.repaint(&ctx);
     }
 
     let info_rect = snap(ui, info_rect);
@@ -1080,13 +1126,15 @@ pub fn show(
         1 => prefs.cover_shape == CoverShape::Random,
         _ => prefs.cover_shape != CoverShape::Original,
     };
-    let tap_id = egui::Id::new("np-tap");
-    if !embedded && (bg.clicked() || corner_clicked) {
+    let tap_id = stage.id("np-tap");
+    if !embedded && stage.live && (bg.clicked() || corner_clicked) {
         ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
         closed = true;
     }
     let single = (prefs.cover_click_pause && shape_clicked).then_some(Tap::Pause);
-    let fire = if gesture {
+    let fire = if !stage.live {
+        None
+    } else if gesture {
         let now = ctx.input(|i| i.time);
         // (what the first tap will do, when it landed).
         let pending = ctx.data(|d| d.get_temp::<(Option<Tap>, f64)>(tap_id));
@@ -1116,7 +1164,7 @@ pub fn show(
                 if instant { None } else { tap.filter(|_| now - at < double_tap + 0.25) }
             }
             Some((_, at)) => {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + double_tap - now).max(0.0) + 0.01));
+                stage.repaint_after(&ctx, std::time::Duration::from_secs_f64((at + double_tap - now).max(0.0) + 0.01));
                 now_fire
             }
             None => now_fire,
@@ -1133,22 +1181,24 @@ pub fn show(
         let mut normal_ui = ui.new_child(UiBuilder::new().max_rect(info_rect).id_salt("np-normal-info"));
         normal_ui.multiply_opacity(1.0 - mega_k);
         if slot_open { normal_ui.disable(); }
-        info(&mut normal_ui, info_rect, wide, InfoMode::Normal, state, pages, chrome, out);
+        info(&mut normal_ui, info_rect, wide, InfoMode::Normal, state, pages, chrome, stage, out);
     }
     if mega_k > 0.001 {
         let mut mega_ui = ui.new_child(UiBuilder::new().max_rect(body).id_salt("np-mega-body"));
         mega_ui.multiply_opacity(mega_k);
         if !slot_open { mega_ui.disable(); }
         if mega.wide {
-            info(&mut mega_ui, mega.info, false, InfoMode::Compact, state, pages, chrome, out);
+            info(&mut mega_ui, mega.info, false, InfoMode::Compact, state, pages, chrome, stage, out);
         } else {
             thumbnail_info(&mut mega_ui, mega.cover, state, chrome);
-            info(&mut mega_ui, mega.info, false, InfoMode::Transport, state, pages, chrome, out);
+            info(&mut mega_ui, mega.info, false, InfoMode::Transport, state, pages, chrome, stage, out);
         }
         let slide = if theme.reduced_motion { 0.0 } else { 32.0 * (1.0 - mega_k) };
         let content = mega.content.translate(vec2(slide, 0.0));
         mega_ui.interact(content, mega_ui.id().with("np-content-bg"), Sense::click());
-        chrome.wheel_block(content);
+        if stage.live {
+            chrome.wheel_block(content);
+        }
         for (slot, alpha) in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().zip(content_alpha) {
             if alpha <= 0.001 { continue; }
             let width = if slot == NpSlot::Lyrics { content.width() } else { content.width().min(720.0) };
@@ -1163,7 +1213,7 @@ pub fn show(
             match slot {
                 NpSlot::Lyrics => {
                     let _p = crate::prof::scope("np.lyrics");
-                    if super::lyrics::show(&mut cui, state, pages.levels_bass, true, out) {
+                    if super::lyrics::show_on(&mut cui, state, levels_bass, true, stage, out) && stage.live {
                         pages.open_setting_group(super::lyrics_ui::SETTINGS);
                         closed = true;
                     }
@@ -1176,10 +1226,10 @@ pub fn show(
     }
     drop(info_scope);
     if state.prefs.np_volume_pop && !state.prefs.np_volume {
-        volume_pop(ui, rect, state, chrome, out);
+        volume_pop(ui, rect, state, chrome, stage, out);
     }
 
-    closed
+    closed && stage.live
 }
 
 /// Where snackbars go while Now Playing is open: `(area, bottom inset)`,
@@ -1211,7 +1261,7 @@ fn snack_spot(ctx: &egui::Context, rect: Rect, wide: bool, slot_open: bool, cove
 /// shows the volume while it changes (wheel, keys, media keys, the menu)
 /// and slips away `Prefs::np_volume_pop_hold` after the last change; it
 /// stays while the pointer is on it, so it can be dragged too.
-fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, stage: &Stage, out: &mut Vec<Command>) {
     let hold = f64::from(state.prefs.np_volume_pop_hold.clamp(0.3, 5.0));
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
@@ -1219,7 +1269,7 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, o
     let p = &state.player;
     let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
     let now = ctx.input(|i| i.time);
-    let id = egui::Id::new("np-vol-pop");
+    let id = stage.id("np-vol-pop");
     // (last volume, muted, when it last changed, pointer on the pill).
     let (last, muted, at, held) = ctx
         .data(|d| d.get_temp::<(f32, bool, f64, bool)>(id))
@@ -1228,7 +1278,7 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, o
     let shown = held || now - at < hold;
     let k = anim::fraction(&ctx, id.with("k"), if shown { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
     if shown && !held {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64((at + hold - now).max(0.0) + 0.02));
+        stage.repaint_after(&ctx, std::time::Duration::from_secs_f64((at + hold - now).max(0.0) + 0.02));
     }
     let mut hovered = false;
     if k > 0.001 {
@@ -1265,8 +1315,11 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, o
             chrome.push_volume(state, v, out);
         }
         common::label(&mut row, &format!("{:.0}%", volume * 100.0), TypeRole::LabelLarge, s.on_surface);
-        hovered = back.contains_pointer() || vo.dragging.is_some();
-        chrome.volume_zone(pill, WheelZone::Np);
+        hovered = stage.live && (back.contains_pointer() || vo.dragging.is_some());
+        if stage.live {
+            chrome.volume_zone(pill, WheelZone::Np);
+        }
+        stage.part(&ctx, Part::Volume, pill);
     }
     ctx.data_mut(|d| d.insert_temp(id, (volume, p.muted, if hovered { now } else { at }, hovered)));
 }
@@ -1341,7 +1394,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
 }
 
 /// Retain the last content on close; only switching open slots crossfades it.
-fn slot_opacities(ctx: &egui::Context, slot: NpSlot) -> [f32; 4] {
+fn slot_opacities(ctx: &egui::Context, slot: NpSlot, stage: &Stage) -> [f32; 4] {
     let theme = Theme::get(ctx);
     let spring = anim::effective(ctx, theme.motion.fast_effects);
     let now = anim::now(ctx);
@@ -1351,7 +1404,7 @@ fn slot_opacities(ctx: &egui::Context, slot: NpSlot) -> [f32; 4] {
             NpSlot::Queue => [0.0, 1.0, 0.0, 0.0],
             NpSlot::Info => [0.0, 0.0, 1.0, 0.0],
         };
-        let (last, a) = d.get_temp_mut_or_insert_with(egui::Id::new("np-content-fade"), || (slot, Animated::new(target, spring)));
+        let (last, a) = d.get_temp_mut_or_insert_with(stage.id("np-content-fade"), || (slot, Animated::new(target, spring)));
         if slot != NpSlot::None {
             if *last == NpSlot::None { a.snap(target); }
             if a.spring() != spring {
@@ -1363,6 +1416,7 @@ fn slot_opacities(ctx: &egui::Context, slot: NpSlot) -> [f32; 4] {
         *last = slot;
         (a.value(now), a.is_settled(now))
     });
+    // A crossfade finishes even on a still stage.
     if !settled { ctx.request_repaint(); }
     alpha.map(|a| a.clamp(0.0, 1.0))
 }
@@ -1513,6 +1567,7 @@ fn info(
     state: &ViewState,
     pages: &mut PageState,
     chrome: &mut Chrome,
+    stage: &Stage,
     out: &mut Vec<Command>,
 ) {
     let ctx = ui.ctx().clone();
@@ -1522,12 +1577,20 @@ fn info(
     let current = p.current.as_ref();
     let col = rect;
     let mut y = col.top();
+    // Of the two layouts crossfading, the one mostly shown has the parts.
+    let mostly_shown = ui.opacity() > 0.5;
+    let part = |part: Part, r: Rect| {
+        if mostly_shown {
+            stage.part(&ctx, part, r);
+        }
+    };
 
     let compact = mode != InfoMode::Normal;
     let title_h = if compact { 32.0 } else { TITLE_H };
     // Title and links.
     if mode != InfoMode::Transport {
         let text_rect = Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), title_h + 4.0 + 24.0));
+        part(Part::Title, text_rect);
         let mut tui = ui.new_child(UiBuilder::new().max_rect(text_rect).id_salt("np-text"));
         tui.spacing_mut().item_spacing.y = 4.0;
         let title_role = if compact { TypeRole::HeadlineSmall } else if wide { TypeRole::DisplaySmall } else { TypeRole::HeadlineLarge };
@@ -1585,6 +1648,7 @@ fn info(
     // Progress.
     let dur = p.duration.unwrap_or_default();
     let prog_rect = Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), 64.0));
+    part(Part::Progress, prog_rect);
     let mut pui = ui.new_child(UiBuilder::new().max_rect(prog_rect).id_salt("np-progress"));
     let so = Slider::new("np-slider", p.fraction_now())
         .width(col.width())
@@ -1745,7 +1809,7 @@ fn info(
         pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
     }
     let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
-    aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let volume_row = aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
         // The slider is optional; the wheel sets the volume either way.
         if state.prefs.np_volume {
@@ -1778,11 +1842,12 @@ fn info(
             out.push(Command::Dislike { track, dislike: !disliked, sure: false, relike: false });
         }
     });
+    part(Part::Volume, volume_row.response.rect);
 }
 
 /// Background: soft colour clouds drifting over the window, breathing with
 /// the bass in reactive mode (effects spring, no overshoot).
-fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
+fn ambient(ui: &Ui, rect: Rect, state: &ViewState, levels_bass: f32, stage: &Stage) {
     let theme = Theme::get(ui.ctx());
     let mode = state.prefs.ambient;
     if mode == nikgob_view::Ambient::Off {
@@ -1790,12 +1855,13 @@ fn ambient(ui: &Ui, rect: Rect, state: &ViewState, pages: &PageState) {
     }
     let playing = state.player.status == Status::Playing;
     let bass = if mode == nikgob_view::Ambient::Reactive && playing {
-        pages.levels_bass
+        levels_bass
     } else {
         0.0
     };
-    let level = anim::fraction(ui.ctx(), egui::Id::new("np-glow"), bass, theme.motion.fast_effects);
-    super::ambient::paint(ui.ctx(), ui.painter(), rect, level.clamp(0.0, 1.0), playing, state.prefs.ambient_strength);
+    let level = anim::fraction(ui.ctx(), stage.id("np-glow"), bass, theme.motion.fast_effects);
+    // (The drift is shared with the real screen: one clock for both.)
+    super::ambient::paint(ui.ctx(), ui.painter(), rect, level.clamp(0.0, 1.0), playing && stage.moving, state.prefs.ambient_strength);
 }
 
 #[cfg(test)]
@@ -1887,7 +1953,7 @@ mod tests {
             .enumerate()
         {
             let mut out = ctx.run_ui(egui::RawInput { time: Some(i as f64 / 60.0), ..Default::default() }, |ui| {
-                let a = cover_angle(ui, lopsided, spin, morph);
+                let a = cover_angle(ui, Stage::REAL.id("np-cover-lobes"), lopsided, spin, morph);
                 if let Some(prev) = last {
                     let step: f32 = a - prev;
                     let expected = (spin - [3.10f32, 3.12, 3.16, 3.20, 6.27, 0.02][i.saturating_sub(1)] + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI;
@@ -1989,7 +2055,7 @@ mod tests {
                 (4.0, NpSlot::Info, Some([0.0, 0.0, 1.0, 0.0])),
             ] {
                 let mut output = ctx.run_ui(egui::RawInput { time: Some(time + if reduced { 10.0 } else { 0.0 }), ..Default::default() }, |ui| {
-                    let alpha = slot_opacities(ui.ctx(), slot);
+                    let alpha = slot_opacities(ui.ctx(), slot, &Stage::REAL);
                     if let Some(expected) = expected { assert_eq!(alpha, expected); }
                     else { assert!(alpha[0] > 0.0 && alpha[1] > 0.0); }
                     assert!((alpha.iter().sum::<f32>() - 1.0).abs() < 0.001);
