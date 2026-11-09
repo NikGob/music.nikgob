@@ -433,20 +433,20 @@ pub struct StreamAlbumMenuOf {
 /// The one list of a service album's actions, in the order of the library
 /// album's ([`widgets::release_rows`]): its card's right click and ⋮ and
 /// the ⋮ of its page. The page leaves out its buttons (play, shuffle, the
-/// like, «Скачать»); playing next, the queue and «В плейлист…» need the
-/// tracks only the page has. The service's own rows come last.
+/// like, «Скачать»); on the card playing next, the queue and «В плейлист…»
+/// go by the album's id (the runtime fetches its tracks). The service's
+/// own rows come last.
 pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAct>> {
     use StreamAlbumAct as A;
     use widgets::Row;
     let mut rows = Vec::new();
-    if o.on_page {
-        rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
-    } else {
+    if !o.on_page {
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
     }
+    rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
     rows.push(Row::Divider);
     if !o.on_page {
         // The like also downloads (as the settings say): nothing to do
@@ -464,8 +464,8 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
     rows
 }
 
-/// Does a service album action (all but the page's next / queue / «В
-/// плейлист…», which need its tracks).
+/// Does a service album action (the page does its next / queue / «В
+/// плейлист…» with the tracks it has).
 fn stream_album_apply(
     ctx: &egui::Context,
     act: StreamAlbumAct,
@@ -485,7 +485,12 @@ fn stream_album_apply(
         A::Artist => return artist_links::go_to(ctx, artist_links::stream(artists)),
         A::Open => return Some(Route::Stream(StreamPage::Album(id.clone()))),
         A::Library => return release.map(Route::Release),
-        A::Next | A::Queue | A::Playlist => {}
+        A::Next => out.push(Command::PlayStreamAlbumNext(id.clone())),
+        A::Queue => out.push(Command::EnqueueStreamAlbum(id.clone())),
+        A::Playlist => {
+            let anchor = ctx.input(|i| i.pointer.latest_pos()).map(|p| egui::Rect::from_center_size(p, egui::vec2(1.0, 1.0)));
+            super::request_stream_album_to_playlist(ctx, id.clone(), anchor);
+        }
     }
     None
 }
@@ -973,8 +978,8 @@ mod menu_tests {
     }
 
     /// A service album's right click and its page's ⋮ are one list in the
-    /// library album's order: the card has play / shuffle / the like /
-    /// «Скачать» / «Открыть», the page the rows that need its tracks.
+    /// library album's order: the card adds play / shuffle / the like /
+    /// «Скачать» / «Открыть»; both play next, queue and add to a playlist.
     #[test]
     fn a_service_album_offers_the_same_actions_by_right_click_and_by_more() {
         use StreamAlbumAct as A;
@@ -985,15 +990,19 @@ mod menu_tests {
             acts.iter()
                 .copied()
                 .filter(|a| {
-                    !matches!(a, A::Play | A::Shuffle | A::Like | A::Download | A::Open | A::Next | A::Queue | A::Playlist)
+                    !matches!(a, A::Play | A::Shuffle | A::Like | A::Download | A::Open)
                 })
                 .collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(shared(&card), [A::Artist, A::Share, A::Library]);
-        assert_eq!(card, [A::Play, A::Shuffle, A::Like, A::Artist, A::Share, A::Download, A::Open, A::Library]);
+        assert_eq!(shared(&card), [A::Next, A::Queue, A::Playlist, A::Artist, A::Share, A::Library]);
+        assert_eq!(
+            card,
+            [A::Play, A::Shuffle, A::Next, A::Queue, A::Playlist, A::Like, A::Artist, A::Share, A::Download, A::Open, A::Library]
+        );
         assert_eq!(&page[..3], [A::Next, A::Queue, A::Playlist]);
         assert_eq!(labels(&stream_album_rows(StreamAlbumMenuOf { on_page: true, ..of }))[2], "В плейлист…");
+        assert_eq!(&labels(&stream_album_rows(of))[2..5], ["Сыграть следующим", "В конец очереди", "В плейлист…"]);
     }
 
     /// A service playlist's right click and its page's ⋮: one list, the

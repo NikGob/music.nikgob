@@ -42,12 +42,35 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 enum Ask {
     NewPlaylist { then_add: Vec<TrackId> },
-    /// A new playlist for stream tracks.
-    NewPlaylistStream(Vec<nikgob_view::RemoteId>),
+    /// A new playlist for stream tracks or a service album.
+    NewPlaylistStream(StreamAdd),
     /// A magnet link for a wishlist item without a torrent.
     WishMagnet(nikgob_view::WishlistId),
     RenamePlaylist(nikgob_view::PlaylistId),
     Magnet,
+}
+
+/// What the "В плейлист" picker of a service adds: stream tracks, or an
+/// album by its id (the runtime fetches its tracks).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum StreamAdd {
+    Tracks(Vec<nikgob_view::RemoteId>),
+    Album(nikgob_view::RemoteId),
+}
+
+impl StreamAdd {
+    fn into_playlist(self, playlist: nikgob_view::PlaylistId) -> Command {
+        match self {
+            Self::Tracks(tracks) => Command::AddStreamToPlaylist(playlist, tracks),
+            Self::Album(album) => Command::AddStreamAlbumToPlaylist(playlist, album),
+        }
+    }
+}
+
+/// Opens the "В плейлист" picker for a service album; set from its card's
+/// menu, which has no `PageState` at hand.
+pub(crate) fn request_stream_album_to_playlist(ctx: &Context, album: nikgob_view::RemoteId, anchor: Option<Rect>) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("stream-album-playlist-request"), (album, anchor)));
 }
 
 /// What a delete confirmation is about.
@@ -360,8 +383,8 @@ pub struct PageState {
     add_after_create: Option<(String, Vec<TrackId>)>,
     /// Stream tracks waiting for the "В плейлист" picker, and for a new
     /// playlist to appear.
-    pending_add_stream: Option<Vec<nikgob_view::RemoteId>>,
-    stream_after_create: Option<(String, Vec<nikgob_view::RemoteId>)>,
+    pending_add_stream: Option<StreamAdd>,
+    stream_after_create: Option<(String, StreamAdd)>,
 }
 
 /// The library as a list (true) or a grid.
@@ -376,7 +399,7 @@ impl PageState {
 
     /// Opens the "В плейлист" picker for stream tracks.
     pub(crate) fn add_stream_to_playlist(&mut self, tracks: Vec<nikgob_view::RemoteId>, anchor: Option<Rect>) {
-        self.pending_add_stream = Some(tracks);
+        self.pending_add_stream = Some(StreamAdd::Tracks(tracks));
         self.pending_add_anchor = anchor;
     }
 
@@ -754,11 +777,18 @@ impl PageState {
             }
         }
 
-        // The same picker for stream tracks. «Любимые» only for one track:
-        // a like of each of many would also download each.
-        if let Some(tracks) = self.pending_add_stream.clone() {
+        // The same picker for stream tracks or a service album. «Любимые»
+        // only for one track: a like of each of many would also download
+        // each.
+        if let Some((album, anchor)) =
+            ctx.data_mut(|d| d.remove_temp::<(nikgob_view::RemoteId, Option<Rect>)>(egui::Id::new("stream-album-playlist-request")))
+        {
+            self.pending_add_stream = Some(StreamAdd::Album(album));
+            self.pending_add_anchor = anchor;
+        }
+        if let Some(add) = self.pending_add_stream.clone() {
             let mut open = true;
-            let liked = tracks.len() == 1;
+            let liked = matches!(&add, StreamAdd::Tracks(t) if t.len() == 1);
             let mut menu = Menu::new("playlist-picker-stream");
             if liked {
                 menu = menu.item(MenuItem::new("Любимые").icon(Icon::Favorite));
@@ -772,11 +802,14 @@ impl PageState {
                 .pending_add_anchor
                 .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
             let picked = menu.popup(ctx, anchor, &mut open).map(|i| if liked { i } else { i + 1 });
-            match picked {
-                Some(0) => out.extend(tracks.into_iter().map(|track| Command::LikeStream { track, on: true })),
-                Some(i) if i <= user.len() => out.push(Command::AddStreamToPlaylist(user[i - 1].id, tracks)),
-                Some(_) => self.open_ask(Ask::NewPlaylistStream(tracks)),
-                None => {}
+            match (picked, add) {
+                (Some(0), StreamAdd::Tracks(tracks)) => {
+                    out.extend(tracks.into_iter().map(|track| Command::LikeStream { track, on: true }))
+                }
+                (Some(0), StreamAdd::Album(_)) => {}
+                (Some(i), add) if i <= user.len() => out.push(add.into_playlist(user[i - 1].id)),
+                (Some(_), add) => self.open_ask(Ask::NewPlaylistStream(add)),
+                (None, _) => {}
             }
             if picked.is_some() || !open {
                 self.pending_add_stream = None;
@@ -822,9 +855,9 @@ impl PageState {
                         }
                         Ask::RenamePlaylist(id) => out.push(Command::RenamePlaylist(id, text)),
                         Ask::Magnet => out.push(Command::AddMagnet(text)),
-                        Ask::NewPlaylistStream(tracks) => {
+                        Ask::NewPlaylistStream(add) => {
                             out.push(Command::CreatePlaylist(text.clone()));
-                            self.stream_after_create = Some((text, tracks));
+                            self.stream_after_create = Some((text, add));
                         }
                         Ask::WishMagnet(item) => out.push(Command::WishlistAttach {
                             item,
@@ -848,10 +881,10 @@ impl PageState {
             out.push(Command::AddToPlaylist(p.id, tracks));
             self.add_after_create = None;
         }
-        if let Some((name, tracks)) = self.stream_after_create.clone()
+        if let Some((name, add)) = self.stream_after_create.clone()
             && let Some(p) = state.library.playlists.iter().find(|p| p.name == name && !p.pinned)
         {
-            out.push(Command::AddStreamToPlaylist(p.id, tracks));
+            out.push(add.into_playlist(p.id));
             self.stream_after_create = None;
         }
 
