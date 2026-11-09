@@ -482,8 +482,8 @@ impl Worker {
 
     /// «Вернуть» on the toast of [`Self::wrong_file`].
     pub(crate) fn undo_wrong_file(&mut self, track: TrackId) {
-        let Some(w) = self.same_audio.undo.remove(&track) else { return };
         let Some(svc) = &self.import else { return };
+        let Some(w) = self.same_audio.undo.remove(&track) else { return };
         let (lib, tx) = (self.lib.clone(), svc.internal());
         svc.spawn_blocking(move || {
             let result = undo_wrong_file(&lib, &w).map_err(|e| e.to_string());
@@ -520,8 +520,8 @@ impl Worker {
                 match result {
                     Ok(true) => {
                         self.reload_after_import();
-                        // The file is back: what looks for it is done.
-                        self.wish_imported(track, Path::new(""));
+                        // The file is back: what looks for it stops.
+                        self.wish_file_back(track);
                         self.toast("Файл вернулся", None);
                     }
                     Ok(false) => {

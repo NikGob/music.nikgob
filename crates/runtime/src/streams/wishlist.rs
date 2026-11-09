@@ -2700,6 +2700,30 @@ impl Worker {
         self.wish_tick();
     }
 
+    /// The track's file came back (the undo of «В файле другая песня»):
+    /// what its own item started for it stops (its torrent goes; a direct
+    /// download that ends later is dropped, the item being done), and the
+    /// item is done. An album's item goes on for its other tracks.
+    pub(crate) fn wish_file_back(&mut self, track: TrackId) {
+        for i in self.lib.wishlist_for_track(track).unwrap_or_default() {
+            if i.scope != WishlistScope::Track
+                || i.origin == WishlistOrigin::Upgrade
+                || matches!(i.status, WishlistStatus::Done | WishlistStatus::Dismissed)
+            {
+                continue;
+            }
+            let w = &mut self.streaming.wish;
+            w.cands.remove(&i.id);
+            w.doubtful.remove(&i.id);
+            w.probe.remove(&i.id);
+            w.from.remove(&i.id);
+            w.offer_keys.remove(&i.id);
+            w.wrong.remove(&i.id);
+            self.cancel_wish_torrent(i.id);
+        }
+        self.wish_imported(track, Path::new(""));
+    }
+
     /// An import of saved stream audio failed: the item goes back.
     pub(crate) fn wish_import_failed(&mut self, path: &Path) {
         if let Some(item) = self.streaming.wish.saving.remove(path) {
