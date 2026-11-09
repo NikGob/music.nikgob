@@ -70,7 +70,7 @@ impl StreamAdd {
 /// Opens the "В плейлист" picker for a service album; set from its card's
 /// menu, which has no `PageState` at hand.
 pub(crate) fn request_stream_album_to_playlist(ctx: &Context, album: nikgob_view::RemoteId, anchor: Option<Rect>) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("stream-album-playlist-request"), (album, anchor)));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("stream-album-playlist-request"), Some((album, anchor))));
 }
 
 /// What a delete confirmation is about.
@@ -781,7 +781,7 @@ impl PageState {
         // only for one track: a like of each of many would also download
         // each.
         if let Some((album, anchor)) =
-            ctx.data_mut(|d| d.remove_temp::<(nikgob_view::RemoteId, Option<Rect>)>(egui::Id::new("stream-album-playlist-request")))
+            ctx.data_mut(|d| d.remove_temp::<Option<(nikgob_view::RemoteId, Option<Rect>)>>(egui::Id::new("stream-album-playlist-request"))).flatten()
         {
             self.pending_add_stream = Some(StreamAdd::Album(album));
             self.pending_add_anchor = anchor;
