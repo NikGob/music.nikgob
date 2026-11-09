@@ -261,7 +261,7 @@ fn credits(v: Option<&serde_json::Value>) -> Result<Vec<Credit>, String> {
     let list = v.and_then(|v| v.as_array()).ok_or("an artist credit is missing")?;
     let out: Vec<Credit> = list
         .iter()
-        .map(|c| {
+        .map(|c| -> Result<Credit, String> {
             Ok(Credit {
                 name: text(c, "name").ok_or("an artist without a name")?,
                 mbid: text(c, "mbid"),
@@ -281,7 +281,7 @@ pub(crate) fn catalog() -> Result<Vec<CatRelease>, String> {
     let releases = doc.get("releases").and_then(|r| r.as_array()).ok_or("no releases")?;
     releases
         .iter()
-        .map(|r| {
+        .map(|r| -> Result<CatRelease, String> {
             let title = text(r, "title").ok_or("a release without a title")?;
             let kind = match r.get("type").and_then(|t| t.as_str()) {
                 Some("album") => ReleaseType::Album,
@@ -300,7 +300,7 @@ pub(crate) fn catalog() -> Result<Vec<CatRelease>, String> {
                 .and_then(|t| t.as_array())
                 .ok_or_else(|| format!("{title}: no tracks"))?
                 .iter()
-                .map(|t| {
+                .map(|t| -> Result<CatTrack, String> {
                     let name = text(t, "title").ok_or_else(|| format!("{title}: a track without a title"))?;
                     let ms = t
                         .get("ms")
