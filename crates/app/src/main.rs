@@ -607,6 +607,11 @@ fn main() -> eframe::Result {
         audio::play_missing_files_silent();
         log::info!("developer profile in {}", dir.display());
     }
+    // A sweep on a copy of the profile plays its file-less tracks as the
+    // profile does, so the screens show a track running.
+    if sweep::active() {
+        audio::play_missing_files_silent();
+    }
     // Next to the library in use: a demo's crash stays in the demo's dir.
     if let Some(dir) = paths.db.parent() {
         log_panics(dir.to_owned());
