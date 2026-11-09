@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod credit;
+pub mod dev;
 mod recs;
 mod streams;
 
@@ -2520,6 +2521,10 @@ pub enum Command {
     Previous,
     Seek(Duration),
     SeekBy(i64),
+    /// «Включить с YouTube» (the developer profile, [`dev::profile`]): the
+    /// playing track goes on from where it is on its YouTube Music copy,
+    /// looked up now when it has none (and kept as its source).
+    PlayFromYoutube,
     /// Show this track's lyrics from another source; `None` = automatic.
     PickLyricsSource(TrackId, Option<LyricsSource>),
     /// Look this track's lyrics up online again, whatever was found or not
@@ -2848,6 +2853,9 @@ pub enum Command {
     /// work (like pulls, playlist checks, completing imports) waits; on
     /// focus a like pull older than 10 minutes runs.
     WindowState { visible: bool, focused: bool },
+    /// Настройки → «Для разработчика» → «Демо-профиль»: done by the app,
+    /// never sent on to the runtime.
+    DevProfile(dev::DevProfile),
     /// «Загрузки» is (not) the page shown. Off it, the runtime publishes a
     /// torrent's changes but not its bytes, rates and progress, so seeding
     /// does not wake the window every second.

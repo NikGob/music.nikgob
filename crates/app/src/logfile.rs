@@ -31,8 +31,12 @@ const FILTER: &str = "info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runt
 /// Targets whose records repeat without telling more: each message once.
 const ONCE: &[&str] = &["rustls_platform_verifier"];
 
-/// Where the log lives: next to the library (the demo's dir in demo mode).
+/// Where the log lives: next to the library (the demo's dir in demo mode,
+/// the developer profile's in the profile).
 pub fn dir() -> PathBuf {
+    if crate::profile::requested() {
+        return crate::profile::dir();
+    }
     if let Some(dir) = std::env::var_os("NIKGOB_DATA") {
         return PathBuf::from(dir);
     }

@@ -859,6 +859,8 @@ impl Worker {
                 }
             }
             Command::Seek(p) => self.seek(p),
+            // The app opens and resets the developer profile itself.
+            Command::DevProfile(_) => {}
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
             Command::SearchLyricsAgain(t) => self.search_lyrics_again(t),
             Command::CraftLyrics { track, source, target, deep } => self.craft_lyrics(track, source, target, deep),
@@ -1301,6 +1303,7 @@ impl Worker {
             | Command::ImportExportFiles(_)
             | Command::ClearStreamCache
             | Command::WindowState { .. }
+            | Command::PlayFromYoutube
             | Command::SetPlaylistSync { .. }
             | Command::LoadDiscography(_)
             | Command::FindSong { .. }

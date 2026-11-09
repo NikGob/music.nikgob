@@ -49,7 +49,7 @@ const STYLES: &[usize] = &[0, 0, 2, 1, 0, 1, 2, 2, 2, 1, 0, 1, 2, 1];
 /// How much each style is listened to (a day's session is skipped above it).
 const STYLE_WEIGHT: [f32; 3] = [1.0, 0.7, 0.55];
 /// Days of history.
-const HISTORY_DAYS: i64 = 90;
+pub(crate) const HISTORY_DAYS: i64 = 90;
 /// Albums loved half a year ago and not played since («Забытое любимое»).
 const FORGOTTEN: &[usize] = &[6, 9];
 /// Albums whose first songs are on repeat this month («На повторе»).
@@ -68,12 +68,12 @@ const STREAM_ONLY: &[usize] = &[13];
 /// Albums without words (no lyrics).
 const NO_LYRICS: &[usize] = &[5, 9, 12];
 /// Added this long before the history starts.
-const ADDED_DAYS_AGO: i64 = 120;
-const DAY_MS: i64 = 24 * 3600 * 1000;
+pub(crate) const ADDED_DAYS_AGO: i64 = 120;
+pub(crate) const DAY_MS: i64 = 24 * 3600 * 1000;
 
 /// A cover: abstract art from the hue (sun over stripes, diagonal bands,
 /// soft blobs or a dot grid, by `seed`) with a little grain, 600×600 JPEG.
-fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
+pub(crate) fn make_cover(path: &Path, rgb: [u8; 3], seed: u32) {
     let size = 600u32;
     let base = rgb.map(f32::from);
     let mix = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
@@ -334,7 +334,7 @@ fn seed_with(lib: &Library, root: &Path, files: bool) {
         }
     }
     one_song_of_an_album(lib, root, files);
-    history(lib, &all);
+    history(lib, &all, &Plan::demo());
     // Photos for some artists; the rest are marked as looked up, so the
     // demo never asks a service for them.
     let photos = root.join("..").join("photos");
@@ -392,7 +392,7 @@ fn one_song_of_an_album(lib: &Library, root: &Path, files: bool) {
 }
 
 /// A number in −1..1 from the inputs (the same on every run).
-fn noise(a: usize, b: usize, c: usize, salt: u64) -> f32 {
+pub(crate) fn noise(a: usize, b: usize, c: usize, salt: u64) -> f32 {
     let mut h = 0xcbf2_9ce4_8422_2325_u64 ^ salt;
     for x in [a, b, c] {
         h = (h ^ x as u64).wrapping_mul(0x100_0000_01b3);
@@ -406,7 +406,7 @@ fn noise(a: usize, b: usize, c: usize, salt: u64) -> f32 {
 /// flatness mean and deviation, loudness mean and deviation, 13 chroma
 /// features): the style sets the timbre and harmony features, each track
 /// its own energy, brightness and steadiness, so moods cut across styles.
-fn vector(style: usize, album: usize, n: usize) -> Vec<f32> {
+pub(crate) fn vector(style: usize, album: usize, n: usize) -> Vec<f32> {
     let lean = [0.35, 0.15, -0.45][style];
     let energy = (noise(album, n, 1, 11) * 0.85 + lean).clamp(-1.0, 1.0);
     let bright = noise(album, n, 2, 13) * 0.9;
@@ -426,17 +426,82 @@ fn vector(style: usize, album: usize, n: usize) -> Vec<f32> {
     v
 }
 
+/// What a listening history is made of: each album's songs and style, how
+/// much each style is heard, and the albums of each tile's story (indices
+/// into the albums). The demo's songs are 24 s tones; a library of real
+/// songs gives their lengths, and its plays last as long.
+pub(crate) struct Plan<'a> {
+    /// Songs per album.
+    pub lens: Vec<usize>,
+    /// The style (0..3) of each album.
+    pub styles: &'a [usize],
+    /// How much each style is listened to (a day's session is skipped above it).
+    pub weights: [f32; 3],
+    pub forgotten: &'a [usize],
+    pub repeated: &'a [usize],
+    pub year_ago: &'a [usize],
+    pub comeback: &'a [usize],
+    pub unfinished: &'a [usize],
+    pub stream_only: &'a [usize],
+    /// Every song's length in ms by album and number; `None`: the demo's tones.
+    pub lengths: Option<Vec<Vec<u32>>>,
+}
+
+impl Plan<'static> {
+    /// The demo library's.
+    fn demo() -> Self {
+        Self {
+            lens: ALBUMS.iter().map(|a| a.5.len()).collect(),
+            styles: STYLES,
+            weights: STYLE_WEIGHT,
+            forgotten: FORGOTTEN,
+            repeated: REPEATED,
+            year_ago: YEAR_AGO,
+            comeback: COMEBACK,
+            unfinished: UNFINISHED,
+            stream_only: STREAM_ONLY,
+            lengths: None,
+        }
+    }
+}
+
+impl Plan<'_> {
+    /// How long a complete play of the song lasts.
+    fn length(&self, album: usize, n: usize) -> i64 {
+        self.lengths.as_ref().and_then(|l| l.get(album)?.get(n).copied()).map_or(24_000, i64::from)
+    }
+
+    /// The last songs of an album are played once («Глубже у любимых»): not
+    /// in a single, which is its one song.
+    fn deep(&self, album: usize, n: usize) -> bool {
+        let len = self.lens[album];
+        len > DEEP && n + DEEP >= len
+    }
+
+    /// The last song of an album is never played: not a single's.
+    fn last(&self, album: usize, n: usize) -> bool {
+        let len = self.lens[album];
+        len > 1 && n + 1 == len
+    }
+}
+
 /// Three months of listening: every track completed once long ago, then
 /// sessions of one style a day (the first style most), mostly in the
 /// evening and at night, with a few early skips; and the tiles' own
-/// history (see [`FORGOTTEN`], [`REPEATED`], [`YEAR_AGO`], [`DEEP`],
-/// [`COMEBACK`], [`UNFINISHED`]); the last song of every album is never
-/// played, the stream songs neither.
-fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
+/// history (the plan's albums for [`FORGOTTEN`], [`REPEATED`],
+/// [`YEAR_AGO`], [`COMEBACK`], [`UNFINISHED`], and [`DEEP`]); the last song
+/// of every album is never played, the stream songs neither.
+pub(crate) fn history(lib: &Library, tracks: &[(TrackId, usize, usize)], plan: &Plan<'_>) {
     let now = nikgob_library::now_ms();
     let today = now - now.rem_euclid(DAY_MS);
     let device = lib.device_id();
-    let play = |track: TrackId, ts: i64, skip: bool| {
+    // Real songs: a session that would end after now is not made up (the
+    // demo's tones keep their old history).
+    let until = if plan.lengths.is_some() { now } else { i64::MAX };
+    let play = |track: TrackId, ts: i64, skip: bool, length: i64| {
+        if ts + length > until {
+            return;
+        }
         let mut start = Event::new(track, EventType::Start, ts, device.clone());
         start.position_ms = Some(0);
         start.context = EventContext::Album;
@@ -446,41 +511,41 @@ fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
             e.position_ms = Some(6_000);
             e
         } else {
-            Event::new(track, EventType::Complete, ts + 24_000, device.clone())
+            Event::new(track, EventType::Complete, ts + length, device.clone())
         };
         end.context = EventContext::Album;
         let _ = lib.record_event_raw(&end);
     };
-    let deep = |i: usize, n: usize| n + DEEP >= ALBUMS[i].5.len();
     for (k, (t, i, n)) in tracks.iter().enumerate() {
-        if STREAM_ONLY.contains(i) {
+        let length = plan.length(*i, *n);
+        if plan.stream_only.contains(i) {
             continue;
         }
-        if UNFINISHED.contains(i) {
+        if plan.unfinished.contains(i) {
             if *n < 2 {
-                play(*t, today - 20 * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false);
+                play(*t, today - 20 * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false, length);
             }
             continue;
         }
-        if FORGOTTEN.contains(i) {
+        if plan.forgotten.contains(i) {
             // Loved half a year ago: four completes each.
             for r in 0..4 {
-                play(*t, today - (150 + r * 9) * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false);
+                play(*t, today - (150 + r * 9) * DAY_MS + 21 * 3_600_000 + k as i64 * 60_000, false, length);
             }
             continue;
         }
-        if *n + 1 == ALBUMS[*i].5.len() {
+        if plan.last(*i, *n) {
             continue;
         }
         let day = HISTORY_DAYS - 1 - (noise(*i, *n, 4, 23).abs() * 30.0) as i64;
-        play(*t, today - day * DAY_MS + 20 * 3_600_000 + k as i64 * 60_000, false);
-        if YEAR_AGO.contains(i) && !deep(*i, *n) {
+        play(*t, today - day * DAY_MS + 20 * 3_600_000 + k as i64 * 60_000, false, length);
+        if plan.year_ago.contains(i) && !plan.deep(*i, *n) {
             let day = 365 + (noise(*i, *n, 11, 59) * 10.0) as i64;
-            play(*t, today - day * DAY_MS + 19 * 3_600_000 + k as i64 * 60_000, false);
+            play(*t, today - day * DAY_MS + 19 * 3_600_000 + k as i64 * 60_000, false, length);
         }
-        if REPEATED.contains(i) && *n < 3 {
+        if plan.repeated.contains(i) && *n < 3 {
             for day in (1..28).step_by(3) {
-                play(*t, today - day * DAY_MS + 18 * 3_600_000 + k as i64 * 60_000, false);
+                play(*t, today - day * DAY_MS + 18 * 3_600_000 + k as i64 * 60_000, false, length);
             }
         }
     }
@@ -493,26 +558,35 @@ fn history(lib: &Library, tracks: &[(TrackId, usize, usize)]) {
         }
         let hour = HOURS[(noise(d, 1, 6, 31).abs() * 7.99) as usize];
         let style = (noise(d, 2, 7, 37).abs() * 2.99) as usize;
-        if noise(d, 3, 8, 41).abs() > STYLE_WEIGHT[style] {
+        if noise(d, 3, 8, 41).abs() > plan.weights[style] {
             continue;
         }
         let pool: Vec<&(TrackId, usize, usize)> = tracks
             .iter()
             .filter(|(_, i, n)| {
-                STYLES[*i] == style
-                    && !FORGOTTEN.contains(i)
-                    && !UNFINISHED.contains(i)
-                    && !STREAM_ONLY.contains(i)
-                    && !(COMEBACK.contains(i) && day < 45)
-                    && !deep(*i, *n)
+                plan.styles[*i] == style
+                    && !plan.forgotten.contains(i)
+                    && !plan.unfinished.contains(i)
+                    && !plan.stream_only.contains(i)
+                    && !(plan.comeback.contains(i) && day < 45)
+                    && !plan.deep(*i, *n)
             })
             .collect();
+        if pool.is_empty() {
+            continue;
+        }
         let mut ts = today - day * DAY_MS + hour * 3_600_000;
         for p in 0..(6 + (noise(d, 4, 9, 43).abs() * 6.0) as usize) {
             let (t, i, n) = pool[(noise(d, p, 10, 47).abs() * (pool.len() as f32 - 0.01)) as usize];
             let skip = noise(*i, *n, d, 53) > 0.8;
-            play(*t, ts, skip);
-            ts += 30_000;
+            let length = plan.length(*i, *n);
+            play(*t, ts, skip, length);
+            // The tones follow each other every 30 s; real songs as they end.
+            ts += match (&plan.lengths, skip) {
+                (None, _) => 30_000,
+                (Some(_), true) => 8_000,
+                (Some(_), false) => length + 2_000,
+            };
         }
     }
 }

@@ -18,6 +18,7 @@ mod frames;
 mod geometry;
 mod logfile;
 mod pacing;
+mod profile;
 mod shot;
 mod shot_fakes;
 mod streams;
@@ -216,7 +217,7 @@ impl Core {
         self.quit |= req.quit || self.quit_asked.swap(false, Ordering::Relaxed);
         self.wants_show |= req.show || req.toggle || self.show_asked.swap(false, Ordering::Relaxed);
         self.sync_autostart();
-        self.runtime.send_all(self.commands.drain(..));
+        send_commands(&self.runtime, &mut self.commands);
     }
 
     /// Puts a changed autostart switch into the system; one it refused
@@ -230,6 +231,19 @@ impl Core {
             self.commands.push(Command::SetPref(nikgob_view::PrefPatch::Autostart(system)));
         }
     }
+}
+
+/// Hands the commands to the runtime; the developer profile's own
+/// («Открыть», «Сбросить») the app does itself.
+fn send_commands(runtime: &Runtime, commands: &mut Vec<Command>) {
+    commands.retain(|c| match c {
+        Command::DevProfile(action) => {
+            profile::act(*action);
+            false
+        }
+        _ => true,
+    });
+    runtime.send_all(commands.drain(..));
 }
 
 impl Resident for Core {
@@ -405,7 +419,7 @@ impl eframe::App for Window {
             }
             state.prefs.fps_limit.max(15)
         };
-        core.runtime.send_all(core.commands.drain(..));
+        send_commands(&core.runtime, &mut core.commands);
         static FIRST: AtomicBool = AtomicBool::new(true);
         if FIRST.swap(false, Ordering::Relaxed) {
             stage("first frame");
@@ -474,10 +488,15 @@ fn main() -> eframe::Result {
             std::process::exit(code);
         }
     }
-    // `--quit`: the running player quits as from the tray's «Выход» (its
-    // session saved), so a script can restart it; nothing else starts.
+    // The developer profile (`--demo-profile`): its own folder, slot and
+    // library, beside the real player.
+    let profile = profile::requested();
+    let slot = if profile { profile::slot() } else { fastframe_instance::Slot::new("music.nikgob") };
+    // `--quit`: the running player (or profile) quits as from the tray's
+    // «Выход» (its session saved), so a script can restart it; nothing
+    // else starts.
     if std::env::args().any(|a| a == "--quit") {
-        match fastframe_instance::Slot::new("music.nikgob").send("quit") {
+        match slot.send("quit") {
             Ok(_) => std::process::exit(0),
             Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
                 eprintln!("music.nikgob is not running");
@@ -520,8 +539,11 @@ fn main() -> eframe::Result {
     let mut paths = paths();
     // `NIKGOB_DATA=dir`: a demo run on a library already in `dir` (a copy
     // of a real one, say) instead of the generated one.
-    let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from);
-    let demo = std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some();
+    let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from).filter(|_| !profile);
+    let demo = !profile && (std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some());
+    // Demo runs and the profile live beside the real app: no autostart, no
+    // start in the tray.
+    let beside = demo || profile;
     // A settings sweep writes the prefs of the library it runs on: never
     // the real profile's.
     if sweep::active() && !demo {
@@ -532,7 +554,8 @@ fn main() -> eframe::Result {
     let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
     // One player per user: a second launch (a click on the shortcut while
     // the first waits in the tray) shows the running one's window and ends.
-    // Demo and screenshot runs live beside the real app.
+    // Demo and screenshot runs live beside the real app; the profile has a
+    // slot of its own.
     let show_asked = Arc::new(AtomicBool::new(false));
     let quit_asked = Arc::new(AtomicBool::new(false));
     let waker = Waker::default();
@@ -541,10 +564,12 @@ fn main() -> eframe::Result {
     } else {
         let (asked, quit) = (Arc::clone(&show_asked), Arc::clone(&quit_asked));
         let w = waker.clone();
-        match fastframe_instance::Slot::new("music.nikgob").claim("show", move |request| {
+        match slot.claim("show", move |request| {
             let flag = match request {
                 "show" => &asked,
                 "quit" => &quit,
+                // «Сбросить» waits for the profile to be gone.
+                "ping" => return Some("ok".to_owned()),
                 _ => return None,
             };
             flag.store(true, Ordering::Relaxed);
@@ -574,6 +599,14 @@ fn main() -> eframe::Result {
         // The real services keep what is typed in next to the demo library.
         paths.settings = streams::real_in_demo().then(|| dir.join("settings.toml"));
     }
+    if profile {
+        let dir = profile::dir();
+        profile::prepare(&dir);
+        paths = profile::paths(&dir);
+        nikgob_view::dev::set_profile(true);
+        audio::play_missing_files_silent();
+        log::info!("developer profile in {}", dir.display());
+    }
     // Next to the library in use: a demo's crash stays in the demo's dir.
     if let Some(dir) = paths.db.parent() {
         log_panics(dir.to_owned());
@@ -594,18 +627,25 @@ fn main() -> eframe::Result {
     if demo && data_dir_asked.is_none() {
         demo::seed(&library, &paths.root.join("Music"));
     }
+    if profile {
+        profile::seed_if_empty(&library, &paths.root);
+        // «Сбросить»: seeded, and nothing else.
+        if profile::seed_only() {
+            return Ok(());
+        }
+    }
     stage("library");
     let settings = paths.settings.as_ref().and_then(|s| nikgob_core::settings::Settings::load(s).ok());
     let mut prefs = load_prefs(&paths, settings.as_ref(), devices);
     stage("prefs");
     // The system says whether autostart is on (Task Manager may have turned
     // it off), and a wished-for line that is gone is written again; demo
-    // runs leave it alone.
-    let autostart_system = (!demo).then(|| autostart::reconcile(prefs.autostart));
+    // runs and the profile leave it alone.
+    let autostart_system = (!beside).then(|| autostart::reconcile(prefs.autostart));
     if let Some(on) = autostart_system {
         prefs.autostart = on;
     }
-    let start_hidden = at_sign_in && !demo && prefs.autostart_hidden;
+    let start_hidden = at_sign_in && !beside && prefs.autostart_hidden;
 
     // Streaming services: each keeps its state in its own folder of the
     // data dir (the demo's own, in demo mode).
@@ -678,7 +718,8 @@ fn main() -> eframe::Result {
             metadata: (!offline).then_some(meta),
             watch_inbox: !demo,
             torrent_state_dir: paths.db.with_file_name("torrents"),
-            torrent_offline: demo,
+            // The profile neither downloads nor seeds torrents.
+            torrent_offline: demo || profile,
             // A sweep neither downloads nor runs the lyrics models.
             models_dir: (!sweep::active()).then(|| paths.db.with_file_name("models")),
         }
