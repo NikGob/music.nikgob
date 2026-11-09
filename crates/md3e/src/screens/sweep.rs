@@ -200,7 +200,7 @@ pub const ALL: &[SettingId] = {
     use SettingId::*;
     &[
         // Основные.
-        UserName, Autostart, AutostartHidden, TrayKeepWindow, CoverClickPause, DblClickShape, TapWait, Keys, ToastTime,
+        UserName, Autostart, AutostartHidden, TrayKeepWindow, CoverClickPause, DblClickShape, TapWait, Keys, ToastTime, DemoProfile,
         LyricsWordsPlaying, SaveLyrics, LyricsReturn, LyricsUi, LyricsGenius, LyricsCheck, LyricsLinesAuto, LyricsWordsAll,
         LyricsStreams, LyricsStreamKeep, LyricsGpu, LyricsSeparate, LyricsDeep, LyricsRecognize, LyricsModelsAuto, LyricsModels,
         KeepShuffle, ShuffleRadio, OutputDevice, Gapless, Crossfade, Normalization, LibraryDir, MastersDir, Inbox, NamingRules,
@@ -221,12 +221,12 @@ pub const ALL: &[SettingId] = {
         UpgradeAuto, PlaylistSync, StreamAnalysis, ImportFiles, ImportSavedSongs, StreamCache, Soulseek, SoulseekShare,
         SoulseekUpload, Prowlarr, NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit,
         // Внешний вид.
-        Design, Theme, Contrast, Scheme, ProgressWave, NpVolume, NpVolumeHold, SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin,
+        Design, Theme, Contrast, Scheme, ProgressWave, NpVolume, NpVolumeHold, SettingId::CoverShape, ShapeRange, ShapePick, CoverPauseMorph, CoverSpin,
         CoverDir, CoverPulse, Ring, RingStyle, RingSpin, RingDir, RingBeat, Ambient, AmbientStrength, BgShapes, BgCount, BgSize,
         BgOpacity, BgSpeed, BgReact, BgColors, BgHue, LyricsStyle, LyricsUnit, LyricsSmooth, WaveFallback, WaveJump, JumpSpeed,
         LightSpeed, LyricsLead, LyricsDim, LyricsScale, LyricsCascade, LyricsGlow, LyricsSoftEdges, LyricsSoftDepth,
         LyricsSoftStrength, LyricsSoftFade, LyricsGap, LyricsGapWaves, LyricsGapHeight, LyricsGapSize, LyricsCountdown,
-        RailCompact, PaneQueue, PaneLyrics, PaneInfo, HomeCard, NpMotion, ReducedMotion, Tooltips, FpsLimit, Nodes,
+        AlbumDate, RailCompact, PaneQueue, PaneLyrics, PaneInfo, HomeCard, NpMotion, ReducedMotion, Tooltips, FpsLimit, Nodes,
     ]
 };
 
@@ -267,7 +267,7 @@ fn spec(id: SettingId) -> Spec {
         | S::BgColors | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu
         | S::LyricsStreamKeep | S::OpusBitrate | S::RadioNewShare | S::RadioSource | S::ProfileNames | S::LikeDownload
         | S::AlbumLike | S::SingleLike | S::LikedAlbumsPlace | S::UpgradeEvery | S::UpgradeBar | S::UpgradeAuto
-        | S::PlaylistSync => Spec::Choice(Segments),
+        | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
         S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
@@ -276,6 +276,7 @@ fn spec(id: SettingId) -> Spec {
         S::NpVolumeHold => Spec::Slider(|p| &mut p.np_volume_pop_hold, 0.3, 3.0, 0.1),
         S::ShapeRange => Spec::ShapeRange,
         S::ShapePick => Spec::ShapePick,
+        S::CoverPauseMorph => Spec::Switch(|p| &mut p.cover_pause_morph),
         S::CoverSpin => Spec::Switch(|p| &mut p.cover_spin),
         S::CoverPulse => Spec::Switch(|p| &mut p.cover_pulse),
         S::Ring => Spec::Switch(|p| &mut p.ring),
@@ -339,7 +340,7 @@ fn spec(id: SettingId) -> Spec {
         S::Gapless => Spec::Switch(|p| &mut p.gapless),
         S::Crossfade => Spec::Slider(|p| &mut p.crossfade_s, 0.0, 12.0, 1.0),
         S::Normalization => Spec::Switch(|p| &mut p.normalization),
-        S::LibraryDir | S::MastersDir | S::Inbox | S::ExportData | S::FakeRestore => Spec::Fixed(Action, BUTTONS),
+        S::LibraryDir | S::MastersDir | S::Inbox | S::ExportData | S::FakeRestore | S::DemoProfile => Spec::Fixed(Action, BUTTONS),
         S::NamingRules => Spec::Fixed(Info, INFO),
         S::Trash => Spec::Switch(|p| &mut p.use_trash),
         S::FakeFlac => Spec::Switch(|p| &mut p.check_fake_lossless),
@@ -641,7 +642,8 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::Theme | S::Contrast | S::Scheme => vec![Home, Album, Np, NpLyrics],
         S::ProgressWave => vec![Np, NpPaused, Home],
         S::NpVolume | S::NpVolumeHold | S::FpsLimit | S::DislikeButton => vec![Np],
-        S::CoverShape | S::Ring | S::RingStyle => vec![Np, NpPaused, NpLyrics],
+        S::CoverShape | S::Ring | S::RingStyle | S::CoverPauseMorph => vec![Np, NpPaused, NpLyrics],
+        S::AlbumDate => vec![Album],
         S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength => vec![Np, NpPaused],
         S::CoverSpin | S::CoverDir | S::CoverPulse | S::RingSpin | S::RingDir | S::RingBeat => vec![Np],
         S::BgShapes | S::BgCount | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue => vec![Np],
@@ -855,7 +857,7 @@ mod tests {
             | S::UpgradeAuto | S::DownloadSource(_) | S::PlaylistSync | S::ImportSpotify | S::ImportYouTube
             | S::ImportSoundCloud | S::ImportFiles | S::ImportSavedSongs | S::StreamCache | S::StreamAnalysis | S::Prowlarr
             | S::Soulseek | S::SoulseekShare | S::SoulseekUpload | S::NoSeed | S::SeedLimit | S::SeedDays | S::SeedRatio
-            | S::DownloadLimit | S::UploadLimit | S::Spotify | S::YouTube | S::SoundCloud | S::Nodes => pos(id),
+            | S::DownloadLimit | S::UploadLimit | S::Spotify | S::YouTube | S::SoundCloud | S::Nodes | S::CoverPauseMorph | S::AlbumDate | S::DemoProfile => pos(id),
         }
     }
 
