@@ -411,7 +411,7 @@ fn undo(ctx: &egui::Context, state: &ViewState, mem: &mut Memory, changed: bool,
         mem.held = false;
     }
     // A text field being typed in keeps its own Ctrl+Z.
-    if ctx.wants_keyboard_input() || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
+    if ctx.egui_wants_keyboard_input() || !ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Z)) {
         return;
     }
     if let Some(before) = mem.undo.pop() {

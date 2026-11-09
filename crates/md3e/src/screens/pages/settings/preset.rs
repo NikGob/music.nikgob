@@ -43,7 +43,13 @@ fn offer_key() -> egui::Id {
 /// the stage).
 pub(super) fn take_offer(ctx: &egui::Context) -> Option<Offer> {
     let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.remove_temp::<(u64, Offer)>(offer_key())).filter(|(p, _)| *p == pass).map(|(_, o)| o)
+    ctx.data_mut(|d| {
+        let offer = d.get_temp::<(u64, Offer)>(offer_key());
+        d.remove::<(u64, Offer)>(offer_key());
+        offer
+    })
+    .filter(|(p, _)| *p == pass)
+    .map(|(_, o)| o)
 }
 
 fn open_key() -> egui::Id {
