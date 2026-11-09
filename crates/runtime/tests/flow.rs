@@ -890,6 +890,41 @@ fn an_album_played_next_goes_right_after_the_current_track() {
 }
 
 
+/// A preset sent as a patch lands on the prefs as the runtime has them:
+/// the user's own values are kept in the saved file first, and «Свои»
+/// brings them back.
+#[test]
+fn a_preset_and_custom_come_through_the_runtime() {
+    use nikgob_view::{PrefPatch, presets::Area};
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("prefs.json");
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs { fps_limit: 90, ..Prefs::default() },
+            prefs_path: Some(file.clone()),
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::SetPref(PrefPatch::Preset(Area::Load, 0)));
+    // The file is written right after the state is published.
+    let kept = |file: &Path| {
+        let saved = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Prefs>(&b).ok());
+        saved.and_then(|p| Area::Load.custom(&p)).map(|p| p.fps_limit) == Some(90)
+    };
+    wait_for(&rt, "the quiet preset, saved", |s| Area::Load.current(&s.prefs) == Some(0) && kept(&file));
+    rt.send(Command::SetPref(PrefPatch::PresetCustom(Area::Load)));
+    wait_for(&rt, "the user's own values back", |s| s.prefs.fps_limit == 90 && Area::Load.current(&s.prefs).is_none());
+    rt.send(Command::SetPref(PrefPatch::SettingsDeep(true)));
+    wait_for(&rt, "the detailed settings", |s| s.prefs.settings_deep);
+}
+
 /// «В плейлист…» of a library album's card: its tracks by the album's id,
 /// in its track order, each once; into «Любимые» each is liked.
 #[test]
