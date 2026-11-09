@@ -13,7 +13,7 @@ use crate::{
     Icon, Theme, TypeRole,
     components::{
         Button, ButtonRow, Dialog, DialogAction, FilterChip, FlexibleAppBar, IconButton, ListItem,
-        LoadingIndicator, Member, Menu, MenuItem, Size, SplitButton, Style, TextField, app_bar,
+        LoadingIndicator, Member, MenuItem, Size, SplitButton, Style, TextField, app_bar,
     },
     screens::common,
     tokens::shape,
