@@ -142,9 +142,9 @@ mod tests {
         let mine = Instances::new(&["https://mine".into()], &["https://a"], Duration::ZERO);
         let all_down = mine.call(|_| async { Err::<(), _>(SourceError::Blocked("ban".into())) }).await;
         assert!(matches!(all_down, Err(SourceError::Blocked(_))));
-        // It sits out now: refused without a request.
+        // It sits out now: refused without a request, told as what it was.
         let again = mine.call(|_| async { Ok(()) }).await;
-        assert!(matches!(again, Err(SourceError::RateLimited { .. })));
+        assert!(matches!(again, Err(SourceError::Blocked(_))));
     }
 
     /// An instance that only finds (403 on every file) is set aside after
@@ -221,7 +221,7 @@ mod tests {
         i.replace(&["https://c/".into(), "https://a".into(), "https://c".into()]);
         assert_eq!(i.urls(), ["https://c", "https://a"]);
         let got = i.call(|base| async move { if base == "https://c" { Err(SourceError::Http { status: 404 }) } else { Ok(base) } }).await;
-        assert!(matches!(got, Err(SourceError::RateLimited { .. })), "a still sits out: {got:?}");
+        assert!(matches!(got, Err(SourceError::Blocked(_))), "a still sits out: {got:?}");
         i.replace(&[]);
         assert_eq!(i.urls().len(), 2, "an empty list changes nothing");
         let mine = Instances::new(&["https://mine".into()], &["https://a"], Duration::ZERO);

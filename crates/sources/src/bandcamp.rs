@@ -25,7 +25,7 @@ use nikgob_core::source::{Fetched, Format, Offer, OfferScope, Progress, Source, 
 use nikgob_metadata::text::{similarity, title_key};
 use serde::{Deserialize, Serialize};
 
-use crate::http::{Breaker, PAGE_TIMEOUT, Pace, client, download, get_page, is_bot_check, safe_name};
+use crate::http::{Breaker, PAGE_TIMEOUT, Pace, SCRIPT_CHECK, client, download, get_page, is_bot_check, safe_name};
 use crate::matching::same_artist;
 use crate::text::{album_keys, artist_keys, catalogue_queries, franchise_of, is_soundtrack, title_keys};
 
@@ -75,7 +75,7 @@ impl Bandcamp {
         self.breaker.check()?;
         self.pace.wait().await;
         let r = get_page(&self.http, url, None).await.and_then(|body| {
-            if is_challenge(&body) { Err(SourceError::Blocked("a script check".into())) } else { Ok(body) }
+            if is_challenge(&body) { Err(SourceError::Blocked(SCRIPT_CHECK.into())) } else { Ok(body) }
         });
         self.breaker.note(&r);
         r
@@ -111,7 +111,7 @@ impl Bandcamp {
             .map(Duration::from_secs);
         let text = resp.text().await.map_err(|e| SourceError::Unreachable(e.without_url().to_string()))?;
         if is_bot_check(status, &text) || is_challenge(&text) {
-            return Err(SourceError::Blocked("a script check".into()));
+            return Err(SourceError::Blocked(SCRIPT_CHECK.into()));
         }
         match status.as_u16() {
             200..=299 => search_hits(&text),

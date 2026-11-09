@@ -12,11 +12,13 @@
 //! tells those that search from those that also give files. An instance
 //! can search and still refuse every file (`403 {"detail": "Upstream API
 //! error"}`: Tidal no longer plays for its account); the file is asked of
-//! the ones that give files.
+//! the ones that give files. When the list says none gives files, Tidal
+//! offers nothing (its search says so, [`SourceError::NothingToFetch`])
+//! until one does.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -31,10 +33,11 @@ use crate::instances::Instances;
 use crate::text::catalogue_queries;
 
 /// Asked when the uptime list cannot be read: the one that searched on
-/// 2026-11-04 (its files answered 403 that day) and Monochrome's own
-/// fallback. The monochrome.tf names (api, eu-central, us-west) had no DNS
-/// records any more.
-pub const DEFAULT_INSTANCES: &[&str] = &["https://monochrome-api.samidy.com", "https://tracks.monochrome.st"];
+/// 2026-11-04 (its files answered 403 that day). The monochrome.tf names
+/// (api, eu-central, us-west) had no DNS records any more, and
+/// `tracks.monochrome.st` is no hifi-api now (404 «Route not found» on
+/// every path, 2026-11-09).
+pub const DEFAULT_INSTANCES: &[&str] = &["https://monochrome-api.samidy.com"];
 
 /// Monochrome's uptime workers: `{"api": [{"url"}], "streaming": [{"url"}],
 /// "down": [{"url", "error"}]}`, the second one a mirror.
@@ -50,6 +53,8 @@ pub struct Tidal {
     instances: Instances,
     /// The instances asked for files.
     files: Instances,
+    /// The uptime list says no instance gives files now.
+    no_files: AtomicBool,
     /// One request to the instances per this.
     pace: Pace,
     /// Where the lists of the instances that work are read; none when the
@@ -71,6 +76,7 @@ impl Tidal {
         Self {
             instances,
             files: Instances::new(urls, DEFAULT_INSTANCES, Duration::ZERO),
+            no_files: AtomicBool::new(false),
             pace: Pace::new(every),
             uptime,
             checked: tokio::sync::Mutex::new(None),
@@ -93,11 +99,18 @@ impl Tidal {
             match get_json::<Value>(&self.http, url).await {
                 Ok(v) => {
                     let (search, files) = uptime_lists(&v, DEFAULT_INSTANCES);
-                    let before = (self.instances.urls(), self.files.urls());
+                    let before = (self.instances.urls(), self.files.urls(), self.no_files.load(Ordering::Relaxed));
                     self.instances.replace(&search);
-                    self.files.replace(&files);
-                    if before != (self.instances.urls(), self.files.urls()) {
-                        log::info!("tidal: searching in {:?}, files from {:?}", self.instances.urls(), self.files.urls());
+                    if let Some(files) = &files {
+                        self.files.replace(files);
+                    }
+                    self.no_files.store(files.is_none(), Ordering::Relaxed);
+                    let after = (self.instances.urls(), self.files.urls(), files.is_none());
+                    if before != after {
+                        match files {
+                            Some(_) => log::info!("tidal: searching in {:?}, files from {:?}", after.0, after.1),
+                            None => log::info!("tidal: searching in {:?}, no instance gives files", after.0),
+                        }
                     }
                     return;
                 }
@@ -108,9 +121,12 @@ impl Tidal {
 }
 
 /// The instances an uptime answer says work: those that search, and those
-/// that give files (the searching ones when it names none apart), each
-/// followed by `defaults` it does not say are down.
-pub fn uptime_lists(v: &Value, defaults: &[&str]) -> (Vec<String>, Vec<String>) {
+/// that give files, each followed by `defaults` it does not say are down.
+/// An answer without `streaming` (an older list) names none apart: the
+/// searching ones are asked for files. One with `streaming` empty says no
+/// instance gives files: `None`, nobody is asked for a file only to answer
+/// 403.
+pub fn uptime_lists(v: &Value, defaults: &[&str]) -> (Vec<String>, Option<Vec<String>>) {
     let urls = |key: &str| -> Vec<String> {
         v.get(key)
             .and_then(Value::as_array)
@@ -128,9 +144,11 @@ pub fn uptime_lists(v: &Value, defaults: &[&str]) -> (Vec<String>, Vec<String>) 
         list
     };
     let api = urls("api");
-    let streaming = urls("streaming");
-    let files = if streaming.is_empty() { api.clone() } else { streaming };
-    (with_defaults(api), with_defaults(files))
+    let files = match v.get("streaming") {
+        None | Some(Value::Null) => Some(api.clone()),
+        Some(_) => Some(urls("streaming")).filter(|s| !s.is_empty()),
+    };
+    (with_defaults(api), files.map(with_defaults))
 }
 
 /// The first array under `key` anywhere in `v` (breadth first, so the
@@ -330,6 +348,11 @@ impl Source for Tidal {
 
     fn search<'a>(&'a self, want: &'a Want) -> BoxFuture<'a, Result<Vec<Offer>, SourceError>> {
         Box::pin(async move {
+            // Nothing it finds could be downloaded: no offers, and said so.
+            self.refresh().await;
+            if self.no_files.load(Ordering::Relaxed) {
+                return Err(SourceError::NothingToFetch);
+            }
             let mut out: Vec<Offer> = Vec::new();
             for q in catalogue_queries(want) {
                 let (param, kind) = match want.scope {
@@ -355,6 +378,10 @@ impl Source for Tidal {
 
     fn fetch<'a>(&'a self, offer: &'a Offer, want: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
         Box::pin(async move {
+            self.refresh().await;
+            if self.no_files.load(Ordering::Relaxed) {
+                return Err(SourceError::NothingToFetch);
+            }
             let tracks: Vec<(String, String)> = match offer.handle.strip_prefix("album:") {
                 Some(album) => {
                     let v = self.ask(format!("/album/?id={}", enc(album))).await?;
@@ -406,9 +433,10 @@ mod tests {
         assert_eq!(title_of(&v).as_deref(), Some("Avant (Remastered)"));
     }
 
-    /// The uptime list as it was on 2026-11-04: one instance searches,
-    /// none is named for files (so the searching one is asked), the
-    /// monochrome.tf names are down; a default it does not name stays last.
+    /// The uptime list as it was on 2026-11-04 and 11-09: one instance
+    /// searches, `streaming` is empty — no instance gives files, so none is
+    /// asked for one; the monochrome.tf names are down; a default it does
+    /// not name stays last.
     #[test]
     fn the_uptime_list_says_which_instances_to_ask() {
         let v = serde_json::json!({
@@ -417,12 +445,20 @@ mod tests {
             "streaming": [],
             "down": [{"url": "https://api.monochrome.tf", "status": 504, "error": "Track unreachable"}]
         });
-        let defaults = ["https://monochrome-api.samidy.com/", "https://api.monochrome.tf", "https://tracks.monochrome.st"];
+        let defaults = ["https://monochrome-api.samidy.com/", "https://api.monochrome.tf", "https://other.example"];
         let (search, files) = uptime_lists(&v, &defaults);
-        assert_eq!(search, ["https://monochrome-api.samidy.com", "https://tracks.monochrome.st"]);
-        assert_eq!(files, search);
+        assert_eq!(search, ["https://monochrome-api.samidy.com", "https://other.example"]);
+        assert_eq!(files, None, "no instance gives files: none is asked");
         let v = serde_json::json!({"api": ["https://a", "https://b"], "streaming": [{"url": "https://b"}]});
         let (search, files) = uptime_lists(&v, &[]);
-        assert_eq!((search.len(), files), (2, vec!["https://b".to_owned()]));
+        assert_eq!((search.len(), files), (2, Some(vec!["https://b".to_owned()])));
+        // An older list without `streaming`: the searching ones give files.
+        let v = serde_json::json!({"api": ["https://a"]});
+        assert_eq!(uptime_lists(&v, &[]).1, Some(vec!["https://a".to_owned()]));
+    }
+
+    #[test]
+    fn the_dead_fallback_is_gone() {
+        assert!(!DEFAULT_INSTANCES.iter().any(|u| u.contains("tracks.monochrome.st")));
     }
 }
