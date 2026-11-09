@@ -50,6 +50,11 @@ pub enum Act {
     /// «В файле другая песня»: the file to the Trash, the track looked for
     /// again (only with a file).
     WrongFile,
+    /// «Есть и на альбоме «…»»: the other album of one song on two albums
+    /// (only shown then, after «К альбому»).
+    AlsoOn,
+    /// «Разные песни»: the way out of [`Act::AlsoOn`].
+    Apart,
     /// A divider.
     Sep,
 }
@@ -198,6 +203,11 @@ impl Chrome {
             Act::Share => MenuItem::new("Поделиться").icon(Icon::Share),
             Act::FindSong => MenuItem::new(super::find_song::label(t).unwrap_or("Найти песню…")).icon(Icon::MusicNote),
             Act::WrongFile => MenuItem::new(super::pages::WRONG_FILE).icon(Icon::Delete).enabled(t.has_local),
+            Act::AlsoOn => {
+                let album = state.also_on.get(&t.id).map_or("", |(_, a)| a.as_str());
+                MenuItem::new(format!("Есть и на альбоме «{album}»")).icon(Icon::Album)
+            }
+            Act::Apart => MenuItem::new("Разные песни").icon(Icon::Close),
             Act::Sep => MenuItem::new(""),
         }
     }
@@ -226,6 +236,7 @@ impl Chrome {
                 Act::Tags | Act::WrongFile => track.has_local,
                 Act::Trash => track.has_local || track.liked,
                 Act::FindSong => super::find_song::label(track).is_some(),
+                Act::AlsoOn | Act::Apart => state.also_on.contains_key(&track.id),
                 _ => true,
             })
             .collect();
@@ -248,6 +259,10 @@ impl Chrome {
                 out.push(super::pages::dislike_command(track.id, &state.dislikes));
             } else if picks[i] == Act::BanArtist {
                 out.extend(track.artist_id().map(|a| super::pages::ban_command(a, &state.dislikes)));
+            } else if picks[i] == Act::AlsoOn {
+                self.nav = state.also_on.get(&track.id).map(|(r, _)| Route::Release(*r));
+            } else if picks[i] == Act::Apart {
+                out.push(Command::RecordingApart(track.id));
             } else {
                 self.apply(picks[i], track, anchor.rect, wh, out);
             }
@@ -287,7 +302,7 @@ impl Chrome {
             Act::WrongFile => out.push(Command::WrongFile(t.id)),
             Act::Radio => out.push(super::pages::radio_by_track(t.id)),
             // Handled where the marks are known.
-            Act::Dislike | Act::BanArtist | Act::Sep => {}
+            Act::Dislike | Act::BanArtist | Act::AlsoOn | Act::Apart | Act::Sep => {}
 
         }
     }

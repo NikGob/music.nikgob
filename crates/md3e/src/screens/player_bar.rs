@@ -281,7 +281,7 @@ pub fn show(
             if !acts.is_empty() {
                 acts.push(Act::Sep);
             }
-            acts.extend([Act::Playlist, Act::Radio, Act::Artist, Act::Album]);
+            acts.extend([Act::Playlist, Act::Radio, Act::Album, Act::AlsoOn, Act::Apart, Act::Artist]);
             acts.extend(PaneTab::Info.on(&state.prefs).then_some(Act::Info));
             acts.extend([
                 Act::Share,

@@ -815,8 +815,10 @@ pub fn show(
             let acts = [
                 Act::Playlist,
                 Act::Radio,
-                Act::Artist,
                 Act::Album,
+                Act::AlsoOn,
+                Act::Apart,
+                Act::Artist,
                 Act::Info,
                 Act::Share,
                 Act::FindSong,
