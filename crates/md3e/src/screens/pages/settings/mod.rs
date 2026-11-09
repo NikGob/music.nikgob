@@ -33,7 +33,7 @@ pub(crate) use services::{SoloistDialog, open_url};
 
 use super::settings_help::{self, DrawnRow, Level, SettingId as Id, TABS};
 use super::{PageState, brand, connected};
-use crate::screens::stage::{self, Part, Scene, Script, StageRequest};
+use crate::screens::stage::{self, Scene, Script, StageRequest};
 use crate::{
     Theme, TypeRole,
     components::{Divider, Size, anim},
@@ -293,17 +293,6 @@ fn option_prefs(id: Id, p: &Prefs, i: usize) -> Option<Prefs> {
     }
 }
 
-/// The parts outlined for option `i` of `id`'s row: a line of «Разделы
-/// главной» is its section; any other option, the row's parts.
-fn option_parts(id: Id, p: &Prefs, i: Option<usize>) -> Vec<Part> {
-    match (id, i) {
-        (Id::HomeSections, Some(i)) => {
-            p.home_order().get(i).map(|s| vec![Part::Home(super::home::section_of(s.key))]).unwrap_or_default()
-        }
-        _ => id.parts(),
-    }
-}
-
 /// What the stage shows this frame (settings v2 §2.3), by priority: the row
 /// being changed (a slider dragged, a field typed; a moment after too), the
 /// option or preset the pointer rests on (shown, not picked), the row the
@@ -361,34 +350,33 @@ fn follow(
     }
     let slot = stage_index(tab);
     let mut req = StageRequest::new(rect, mem.scenes[slot].unwrap_or_else(|| tab_scene(tab)), p.clone());
-    let show = |req: &mut StageRequest, mem: &mut Memory, id: Id, prefs: Prefs, parts: Vec<Part>, outline: f32| {
+    // The stage just plays what the row or preset changes: no part outlined,
+    // nothing zoomed in (the owner found both useless).
+    let show = |req: &mut StageRequest, mem: &mut Memory, id: Id, prefs: Prefs| {
         if let Some(scene) = id.scene() {
             req.scene = scene;
             mem.scenes[slot] = Some(scene);
         }
         req.script = id.script(&prefs);
         req.prefs = prefs;
-        req.zoom = parts.len() == 1;
-        req.parts = parts;
-        req.outline = outline;
+        req.zoom = false;
     };
     if let Some((id, at)) = mem.changed
         && (down || now - at < CHANGED_S)
         && id.part().is_some()
     {
         // The values are applied already: the stage shows them.
-        let glow = if down { 1.0 } else { settings_help::glow_at(((now - at) * settings_help::FOCUS_S / CHANGED_S) as f32) };
-        show(&mut req, &mut *mem, id, p.clone(), id.parts(), glow.max(0.35));
+        show(&mut req, &mut *mem, id, p.clone());
         ctx.request_repaint();
     } else if let Some(o) = offer {
         // A preset: the whole of it, every part it changes.
-        show(&mut req, &mut *mem, o.id, o.prefs, o.id.parts(), 1.0);
+        show(&mut req, &mut *mem, o.id, o.prefs);
     } else if rested && let Some((id, opt)) = under {
         if id.part().is_none() {
             return req;
         }
         let prefs = opt.and_then(|i| option_prefs(id, p, i)).unwrap_or_else(|| p.clone());
-        show(&mut req, &mut *mem, id, prefs, option_parts(id, p, opt), 1.0);
+        show(&mut req, &mut *mem, id, prefs);
     }
     req
 }
@@ -725,8 +713,7 @@ mod tests {
         let req = stage::requested(&ctx).expect("a stage beside the rows");
         assert_eq!(req.prefs, Area::Track.with(&state.prefs, 0));
         assert_eq!(req.scene, Scene::Track);
-        assert_eq!(req.parts.len(), 4);
-        assert!(!req.zoom);
+        assert!(req.parts.is_empty() && !req.zoom, "the stage just plays the preset");
     }
 
     /// What the stage shows by the row under the pointer, once it rests
@@ -777,7 +764,7 @@ mod tests {
         assert!(first.parts.is_empty(), "passing over shows nothing yet");
         let _ = step(&progress, &mut mem);
         let rest = step(&progress, &mut mem);
-        assert_eq!((rest.scene, rest.parts.clone(), rest.zoom, rest.outline), (Scene::Track, vec![Part::Progress], true, 1.0));
+        assert_eq!((rest.scene, rest.parts.clone(), rest.zoom), (Scene::Track, Vec::new(), false));
 
         let volume = [row(Id::NpVolume, vec![Rect::from_min_size(pos2(200.0, 0.0), vec2(10.0, 10.0)), here])];
         for _ in 0..3 {
@@ -785,7 +772,7 @@ mod tests {
         }
         let pill = step(&volume, &mut mem);
         assert!(!pill.prefs.np_volume && pill.prefs.np_volume_pop, "the option under the pointer is shown");
-        assert_eq!((pill.script, pill.parts.clone()), (Script::Volume, vec![Part::Volume]));
+        assert_eq!((pill.script, pill.parts.clone()), (Script::Volume, Vec::new()));
 
         let date = [row(Id::AlbumDate, Vec::new())];
         for _ in 0..3 {

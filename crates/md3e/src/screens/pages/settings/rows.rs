@@ -500,40 +500,17 @@ impl Num {
         format!("{}{}", t.replace('.', ","), self.suffix)
     }
 
-    /// What was typed into the field: the first number in it (a comma or a
-    /// point for the decimals), in the field's unit; the zero label (or ∞)
-    /// for none. Nothing for text without a number.
-    pub(crate) fn parse(&self, text: &str) -> Option<f32> {
-        let t = text.trim().to_lowercase();
-        if let Some(z) = self.zero
-            && (t == z || t.starts_with('∞') || t.starts_with("без"))
-        {
-            return Some(self.snap(0.0));
-        }
-        let n = first_number(&t)?;
-        Some(self.snap(n / self.mul))
-    }
 }
 
-/// The first number in `t` («+0,25 с» → 0.25).
-fn first_number(t: &str) -> Option<f32> {
-    let part = |c: &char| c.is_ascii_digit() || matches!(c, '-' | '+' | ',' | '.');
-    let n: String = t.chars().skip_while(|c| !part(c)).take_while(|c| part(c)).collect();
-    n.replace(',', ".").trim_start_matches('+').parse().ok()
-}
-
-/// A slider row: the slider on the controls' line and its exact value in
-/// the field at the right. Returns a new value (dragged or typed).
+/// A slider row: a long slider on the controls' line, its value shown in
+/// its handle's label while dragged. Returns a new value.
 pub(crate) fn slider(ui: &mut Ui, id: Id, value: f32, num: Num) -> Option<f32> {
     slider_with(ui, id, value, num, 0.0, |_| {})
 }
 
 /// [`slider`] with more controls after it, `extra_w` wide («Очистить»).
 pub(crate) fn slider_with(ui: &mut Ui, id: Id, value: f32, num: Num, extra_w: f32, extra: impl FnOnce(&mut Ui)) -> Option<f32> {
-    let text = num.fmt(value);
     let mut dragged = None;
-    let mut typed = None;
-    let mut field = |ui: &mut Ui| typed = value_field(ui, egui::Id::new(("set-value", id)), &text, VALUE_W);
     row_full(
         ui,
         id,
@@ -551,52 +528,18 @@ pub(crate) fn slider_with(ui: &mut Ui, id: Id, value: f32, num: Num, extra_w: f3
                 extra(ui);
             });
         },
-        Some(&mut field),
+        None,
     );
-    dragged.or_else(|| typed.and_then(|t| num.parse(&t)))
+    dragged
 }
 
-/// Every slider 240 wide, narrower only where the row has no room (all
-/// the sliders of a column alike, their left edges on one line).
+/// Every slider 320 wide (long enough to set a value exactly), narrower
+/// only where the row has no room (all the sliders of a column alike).
 fn slider_width(ui: &Ui, extra_w: f32) -> f32 {
-    (ui.available_width() - VALUE_W - VALUE_GAP - extra_w).clamp(160.0, 240.0)
+    (ui.available_width() - extra_w).clamp(160.0, SLIDER_W)
 }
 
-/// The field of a slider's exact value: shows `shown`; while focused it
-/// edits its own copy. Returns what was typed when it is left (Enter or a
-/// click elsewhere), if it changed.
-pub(crate) fn value_field(ui: &mut Ui, salt: egui::Id, shown: &str, width: f32) -> Option<String> {
-    let s = Theme::get(ui.ctx()).scheme;
-    let key = salt.with("typed");
-    let edit = salt.with("edit");
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
-    // (as it read when the editing began, as it reads now)
-    let mut buf: (String, String) = ui.ctx().data(|d| d.get_temp(key)).unwrap_or_else(|| (shown.to_owned(), shown.to_owned()));
-    let focused = ui.ctx().memory(|m| m.has_focus(edit));
-    let painter = ui.painter();
-    painter.rect_filled(rect, 8.0, s.surface_container_highest);
-    if focused {
-        painter.rect_stroke(rect, 8.0, Stroke::new(2.0, s.primary), egui::StrokeKind::Inside);
-    }
-    let line = TypeRole::BodyMedium.style().line_height;
-    let inner = egui::Rect::from_center_size(rect.center(), vec2(width - 12.0, line));
-    let resp = ui.put(
-        inner,
-        egui::TextEdit::singleline(&mut buf.1)
-            .id(edit)
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin::ZERO)
-            .font(TypeRole::BodyMedium.font_id())
-            .text_color(s.on_surface)
-            .desired_width(width - 12.0),
-    );
-    if resp.has_focus() {
-        ui.ctx().data_mut(|d| d.insert_temp(key, buf));
-        return None;
-    }
-    ui.ctx().data_mut(|d| d.remove::<(String, String)>(key));
-    (resp.lost_focus() && buf.1.trim() != buf.0.trim()).then_some(buf.1)
-}
+const SLIDER_W: f32 = 320.0;
 
 /// KiB/s slider mapping: quadratic, so the low end is fine-grained; the
 /// far right end is no limit (the most there is).
@@ -640,41 +583,17 @@ pub(crate) fn fmt_speed(kbps: u32) -> String {
     }
 }
 
-/// A speed as its field shows it: «∞» for no limit.
-fn speed_field_text(kbps: u32) -> String {
-    if kbps == 0 { "∞".to_owned() } else { fmt_speed(kbps) }
-}
-
-/// A typed speed: KiB/s, or MiB/s with «м»/«m»; «∞» or «без…» for none.
-pub(super) fn parse_speed(text: &str) -> Option<u32> {
-    let t = text.trim().to_lowercase();
-    if t.starts_with('∞') || t.starts_with("без") || t == "0" {
-        return Some(0);
-    }
-    let n = first_number(&t)?;
-    let kib = if t.contains('м') || t.contains('m') { n * 1024.0 } else { n };
-    Some((kib.round().max(0.0) as u32).clamp(SPEED_MIN, SPEED_MAX as u32))
-}
-
-/// The field of a speed is wider: «1,5 МиБ/с».
-const SPEED_W: f32 = 84.0;
-
 /// A speed-limit row: the value under the pointer while dragging, and the
 /// one let go of (or typed).
 pub(crate) fn speed(ui: &mut Ui, id: Id, kbps: u32, enabled: bool) -> (Option<u32>, Option<u32>) {
-    let text = speed_field_text(kbps);
     let mut moved = (None, None);
-    let mut typed = None;
-    let mut field = |ui: &mut Ui| {
-        typed = ui.add_enabled_ui(enabled, |ui| value_field(ui, egui::Id::new(("set-value", id)), &text, SPEED_W)).inner;
-    };
     row_full(
         ui,
         id,
         None,
         |ui| {
             ui.add_enabled_ui(enabled, |ui| {
-                let w = (ui.available_width() - SPEED_W - VALUE_GAP).clamp(160.0, 240.0);
+                let w = ui.available_width().clamp(160.0, SLIDER_W);
                 let o = Slider::new(("set-slider", id), speed_frac(kbps))
                     .width(w)
                     .track(8.0)
@@ -683,10 +602,9 @@ pub(crate) fn speed(ui: &mut Ui, id: Id, kbps: u32, enabled: bool) -> (Option<u3
                 moved = (o.dragging.map(speed_at), o.committed.map(speed_at));
             });
         },
-        Some(&mut field),
+        None,
     );
-    let typed = typed.and_then(|t| parse_speed(&t)).filter(|v| *v != kbps);
-    (moved.0, moved.1.or(typed))
+    moved
 }
 
 /// A list's title as a group's, with its ⓘ.
@@ -772,36 +690,6 @@ mod tests {
             assert_eq!(speed_at(speed_frac(kbps)), kbps, "{kbps} stays");
             assert!(speed_frac(kbps) < speed_frac(0));
         }
-    }
-
-    /// The value fields read as Russian writes numbers, and what is typed
-    /// in them comes back on the slider's steps and inside its range.
-    #[test]
-    fn value_fields_read_and_take_numbers() {
-        let lead = Num::new(-0.5, 0.5, 0.05, 2, " с").signed();
-        assert_eq!(lead.fmt(0.2), "+0,20 с");
-        assert_eq!(lead.fmt(0.0), "+0,00 с");
-        assert_eq!(lead.fmt(-0.25), "-0,25 с");
-        let near = |a: Option<f32>, b: f32| a.is_some_and(|a| (a - b).abs() < 1e-4);
-        assert!(near(lead.parse("+0,25 с"), 0.25));
-        assert!(near(lead.parse("-0.1"), -0.1));
-        assert_eq!(lead.parse("9"), Some(0.5), "clamped to the range");
-        assert_eq!(lead.parse("быстро"), None);
-        let pct = Num::pct(0.8, 1.4, 0.05);
-        assert_eq!(pct.fmt(0.9), "90 %");
-        assert!((pct.parse("115 %").unwrap() - 1.15).abs() < 1e-4);
-        let ratio = Num::new(0.0, 5.0, 0.5, 1, "").zero("∞");
-        assert_eq!(ratio.fmt(0.0), "∞");
-        assert_eq!(ratio.fmt(3.5), "3,5");
-        assert_eq!(ratio.parse("∞"), Some(0.0));
-        assert_eq!(ratio.parse("2,2"), Some(2.0));
-        let wait = Num::new(0.0, 0.4, 0.02, 0, " мс").times(1000.0);
-        assert_eq!(wait.fmt(0.22), "220 мс");
-        assert!((wait.parse("100").unwrap() - 0.1).abs() < 1e-4);
-        assert_eq!(parse_speed("∞"), Some(0));
-        assert_eq!(parse_speed("500"), Some(500));
-        assert_eq!(parse_speed("1,5 МиБ/с"), Some(1536));
-        assert_eq!(speed_field_text(0), "∞");
     }
 
     #[test]
