@@ -98,7 +98,7 @@ fn args() -> Option<&'static Args> {
             return None;
         }
         let plan = match &plan_path {
-            Some(p) => match std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string())) {
+            Some(p) => match std::fs::read(p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<J>(&b).map_err(|e| e.to_string())) {
                 Ok(v) => v,
                 Err(e) => {
                     log::error!("sweep: cannot read the plan {p}: {e}");
@@ -112,7 +112,7 @@ fn args() -> Option<&'static Args> {
             .and_then(J::as_array)
             .map(|a| {
                 a.iter()
-                    .filter_map(|s| Some([s.get(0)?.as_f64()? as f32, s.get(1)?.as_f64()? as f32]))
+                    .filter_map(|v| Some([v.get(0)?.as_f64()? as f32, v.get(1)?.as_f64()? as f32]))
                     .filter(|[w, h]| *w >= 360.0 && *h >= 560.0)
                     .collect()
             })
@@ -435,7 +435,7 @@ pub fn shot(base: &Prefs) -> Option<crate::shot::Shot> {
         }
     }
     let tabs: Option<Vec<usize>> = strings(plan.get("tabs"))
-        .map(|l| l.iter().filter_map(|t| t.parse().ok().or_else(|| s::TABS.iter().position(|n| n == t))).collect());
+        .map(|l| l.iter().filter_map(|t| t.parse::<usize>().ok().or_else(|| s::TABS.iter().position(|n| *n == t.as_str()))).collect());
     let group_filter = strings(plan.get("groups"));
     let only = strings(plan.get("settings"));
     let exclude = strings(plan.get("exclude")).unwrap_or_default();
@@ -496,8 +496,8 @@ pub fn shot(base: &Prefs) -> Option<crate::shot::Shot> {
                 .filter_map(|c| match c {
                     J::String(name) => COMBOS.iter().find(|c| c.0 == name.as_str()).map(builtin),
                     J::Object(o) => {
-                        let set = o.get("set")?.as_array()?.iter().filter_map(|p| Some((p.get(0)?.as_str()?.to_owned(), p.get(1)?.as_str()?.to_owned()))).collect();
-                        let screens = strings(o.get("screens")).unwrap_or_default().iter().filter_map(|k| Screen::parse(k)).collect();
+                        let set: Vec<(String, String)> = o.get("set")?.as_array()?.iter().filter_map(|p| Some((p.get(0)?.as_str()?.to_owned(), p.get(1)?.as_str()?.to_owned()))).collect();
+                        let screens: Vec<Screen> = strings(o.get("screens")).unwrap_or_default().iter().filter_map(|k| Screen::parse(k)).collect();
                         Some((o.get("name")?.as_str()?.to_owned(), set, screens))
                     }
                     _ => None,
