@@ -422,9 +422,15 @@ fn recs(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, ou
     row(ui, Id::RadioNoRepeat, "Не повторять сыгранное", None, |ui| {
         choice_menu(ui, Id::RadioNoRepeat, p);
     });
-    dimmed(ui, p.mixes_downloaded_only, |ui| {
+    // Random picks come only within the share of new music: with no new
+    // music in any kind of radio the row has nothing to do.
+    let no_new = p.mixes_downloaded_only
+        || [RadioKind::Track, RadioKind::Artist, RadioKind::Mix, RadioKind::Autoplay]
+            .into_iter()
+            .all(|kind| p.new_share_of(kind) == nikgob_view::RadioNewShare::None);
+    dimmed(ui, no_new, |ui| {
         row(ui, Id::RadioExplore, "Подмешивать случайное", None, |ui| {
-            ui.add_enabled_ui(!p.mixes_downloaded_only, |ui| choice_menu(ui, Id::RadioExplore, p));
+            ui.add_enabled_ui(!no_new, |ui| choice_menu(ui, Id::RadioExplore, p));
         });
     });
     row(ui, Id::RadioUnheard, "Преимущественно новые песни", None, |ui| {
@@ -730,7 +736,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsStyle, "Анимация", Some("Как выделяется строка, которую поют"), |ui| {
         choice(ui, Id::LyricsStyle, p);
     });
-    row(ui, Id::LyricsUnit, "Подсвечивать", None, |ui| {
+    row(ui, Id::LyricsUnit, "Шаг подсветки", None, |ui| {
         choice(ui, Id::LyricsUnit, p);
     });
     // Focus by letters brightens the whole line: nothing to smooth.
@@ -968,7 +974,7 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
     });
 
     group(ui, "Что подсвечивать само");
-    row(ui, Id::LyricsLinesAuto, "Подсвечивать строки, если у текста нет подсветки", None, |ui| {
+    row(ui, Id::LyricsLinesAuto, "Строки простого текста", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_lines_auto).id_salt("set-lyrics-lines"));
     });
     let words = (p.lyrics_words_all && a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
@@ -1180,7 +1186,7 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
 
     group(ui, "Текст песен");
     // Word highlighting is the default experience: its switch comes first.
-    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам", Some("Плеер сам расставляет слова по голосу в песне, которая играет"), |ui| {
+    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам в играющей песне", Some("Плеер сам расставляет слова по голосу в песне, которая играет"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
     });
     row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
@@ -1364,9 +1370,6 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             acoustid_key: (!key.is_empty()).then_some(key),
         });
     }
-
-    group(ui, "Узлы и бэкап");
-    row(ui, Id::Nodes, "Raspberry Pi, сервер, телефон", Some("Появится позже"), |_| {});
 }
 
 /// «1 240»: thousands apart with a no-break space, as Russian writes them.

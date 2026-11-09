@@ -80,7 +80,7 @@ pub enum SettingId {
     LyricsGapHeight,
     LyricsGapSize,
     LyricsCountdown,
-    /// «Подсвечивать»: by letters or by words, under every animation.
+    /// «Шаг подсветки»: by letters or by words, under every animation.
     LyricsUnit,
     /// «Мягкие края» of the lyrics and their strength.
     LyricsSoftEdges,
@@ -113,11 +113,11 @@ pub enum SettingId {
     SaveLyrics,
     LyricsReturn,
     LyricsCheck,
-    /// «Подсветка по строкам для текстов без времени».
+    /// «Строки простого текста».
     LyricsLinesAuto,
     /// «Вид»: what the control under the lyrics opens.
     LyricsUi,
-    /// «Подсветка по словам для песен, которые слушаю».
+    /// «Подсветка по словам в играющей песне».
     LyricsWordsPlaying,
     LyricsWordsAll,
     LyricsRecognize,

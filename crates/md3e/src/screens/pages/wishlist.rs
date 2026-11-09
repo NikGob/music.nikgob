@@ -153,7 +153,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             ui.set_width(ui.available_width());
             ui.label(TypeRole::TitleSmall.style().rich("Источники скачивания выключены", s.on_surface));
             ui.label(TypeRole::BodyMedium.style().rich_para(
-                "Всё отсюда скачается, когда включишь источник: торренты через Prowlarr, khinsider или бесплатные FLAC-сервисы. А пока трек можно сохранить с YouTube — качество пониже, найденное потом заменит его.",
+                "Всё отсюда скачается, когда включишь источник: торренты через Prowlarr, khinsider, Bandcamp, Soulseek, Qobuz или Tidal. А пока трек можно сохранить с YouTube — качество пониже, найденное потом заменит его.",
                 s.on_surface_variant,
             ));
             ui.add_space(8.0);
