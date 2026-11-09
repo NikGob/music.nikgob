@@ -10,7 +10,9 @@
 //! services' songs, under the metadata clients' rate limits). What the
 //! song is comes from the stream track the services gave (its title, the
 //! channel and the names the title credits). A lookup a service could not
-//! answer stops them for the run, like the library's sweep.
+//! answer (a timeout, a network hiccup) is skipped and the lookups rest a
+//! while; [`STOP_AFTER`] such in a row (a refusal, a rate limit) stop them
+//! for the run.
 //!
 //! What is found is kept in the library's cache
 //! (`cover_better.stream.<video id>`, a miss too, asked again after
@@ -19,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nikgob_core::streaming::{RemoteId, Service, StreamService, StreamTrack, TrackKind};
 use nikgob_library::now_ms;
@@ -35,16 +37,31 @@ const RETRY_MS: i64 = 14 * 86_400_000;
 const QUEUE_MAX: usize = 24;
 /// One lookup takes at most this long.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// After a lookup a service could not answer, the lookups rest this long
+/// times the failures in a row.
+const PAUSE: Duration = Duration::from_secs(60);
+/// This many failures in a row: the service refuses, nothing more is asked
+/// this run.
+const STOP_AFTER: u32 = 3;
 
 /// The lookups of this run.
 #[derive(Default)]
 pub(crate) struct StreamCovers {
-    /// Thumbnails looked at this run (waiting, asked, or not a stream's).
+    /// Thumbnails looked at this run (waiting, asked, answered from the
+    /// cache, or not a stream's).
     seen: HashSet<String>,
+    /// Drawn before the services gave their stream track: looked at again
+    /// with the next thumbnails drawn (at most [`QUEUE_MAX`]).
+    unknown: VecDeque<String>,
     /// Waiting, the latest drawn first.
     queue: VecDeque<(String, StreamTrack)>,
     busy: bool,
-    /// A service could not answer: nothing more is asked this run.
+    /// Lookups a service could not answer, in a row.
+    failures: u32,
+    /// Resting after one of them until then.
+    paused_until: Option<Instant>,
+    /// Services refused [`STOP_AFTER`] times in a row: nothing more is asked
+    /// this run.
     stopped: bool,
     /// Thumbnail url → the art found.
     found: HashMap<String, String>,
@@ -66,6 +83,12 @@ pub(crate) fn video_id(url: &str) -> Option<&str> {
 
 fn key(video: &str) -> String {
     format!("cover_better.stream.{video}")
+}
+
+/// After the `failures`-th lookup in a row a service could not answer: how
+/// long the lookups rest, or `None` when they stop for the run.
+fn rest_after(failures: u32) -> Option<Duration> {
+    (failures < STOP_AFTER).then(|| PAUSE * failures.max(1))
 }
 
 /// What a stream track says of its song: a clip's titles as its title has
@@ -98,22 +121,44 @@ impl Worker {
         }
         let now = now_ms();
         let mut hits = false;
-        for url in urls {
-            if !self.stream_covers.seen.insert(url.clone()) {
+        // Those drawn before their stream track was known go first, the
+        // new ones after (pushed to the front, the latest drawn wins).
+        let earlier: Vec<String> = self.stream_covers.unknown.drain(..).collect();
+        for url in earlier.into_iter().chain(urls) {
+            if self.stream_covers.seen.contains(&url) {
                 continue;
             }
-            let Some(video) = video_id(&url).map(str::to_owned) else { continue };
+            // Not a video's thumbnail: nothing to look up, ever.
+            let Some(video) = video_id(&url).map(str::to_owned) else {
+                self.stream_covers.seen.insert(url);
+                continue;
+            };
             match self.lib.cache_get(&key(&video)) {
                 Ok(Some((_, art))) if !art.is_empty() => {
+                    self.stream_covers.seen.insert(url.clone());
                     self.stream_covers.found.insert(url, art);
                     hits = true;
                     continue;
                 }
-                Ok(Some((at, _))) if now - at < RETRY_MS => continue,
+                Ok(Some((at, _))) if now - at < RETRY_MS => {
+                    self.stream_covers.seen.insert(url);
+                    continue;
+                }
+                // Asked again when it is drawn again.
                 Err(_) => continue,
                 _ => {}
             }
-            let Some(t) = self.streaming.known.get(&RemoteId::new(Service::Youtube, video)).cloned() else { continue };
+            let Some(t) = self.streaming.known.get(&RemoteId::new(Service::Youtube, video)).cloned() else {
+                let c = &mut self.stream_covers;
+                if !c.unknown.contains(&url) {
+                    c.unknown.push_back(url);
+                }
+                while c.unknown.len() > QUEUE_MAX {
+                    c.unknown.pop_front();
+                }
+                continue;
+            };
+            self.stream_covers.seen.insert(url.clone());
             // The library's own tracks are the library's sweep's.
             if self.library_track_of(&t).and_then(|id| self.lib.track_in_library(id).ok().flatten()).unwrap_or(false) {
                 continue;
@@ -134,7 +179,8 @@ impl Worker {
 
     /// Asks the next waiting thumbnail, unless one is on its way.
     fn real_covers_next(&mut self) {
-        if self.stream_covers.busy || self.stream_covers.stopped {
+        let c = &self.stream_covers;
+        if c.busy || c.stopped || c.paused_until.is_some_and(|t| Instant::now() < t) {
             return;
         }
         let Some(meta) = self.real_covers_meta() else { return };
@@ -158,6 +204,8 @@ impl Worker {
         self.stream_covers.busy = false;
         match f.result {
             Ok(art) => {
+                self.stream_covers.failures = 0;
+                self.stream_covers.paused_until = None;
                 let art = art.unwrap_or_default();
                 let _ = self.lib.cache_put(&key(&f.video), now_ms(), &art);
                 if !art.is_empty() {
@@ -168,9 +216,22 @@ impl Worker {
                 self.real_covers_next();
             }
             Err(e) => {
-                log::info!("covers of streams: stopped for this run ({e})");
-                self.stream_covers.stopped = true;
-                self.stream_covers.queue.clear();
+                let c = &mut self.stream_covers;
+                // Not kept: asked again when it is drawn again.
+                c.seen.remove(&f.url);
+                c.failures += 1;
+                match rest_after(c.failures) {
+                    Some(rest) => {
+                        log::info!("covers of streams: {} skipped, resting {}s ({e})", f.video, rest.as_secs());
+                        c.paused_until = Some(Instant::now() + rest);
+                    }
+                    None => {
+                        log::info!("covers of streams: stopped for this run ({e})");
+                        c.stopped = true;
+                        c.queue.clear();
+                        c.unknown.clear();
+                    }
+                }
             }
         }
     }
@@ -185,6 +246,16 @@ impl Worker {
 mod tests {
     use super::*;
     use nikgob_core::streaming::ArtistRef;
+
+    /// A timeout or a hiccup skips one thumbnail and rests a while, longer
+    /// each time; only failures in a row stop the lookups for the run.
+    #[test]
+    fn lookups_rest_after_a_failure_and_stop_only_after_several() {
+        assert_eq!(rest_after(1), Some(PAUSE));
+        assert_eq!(rest_after(STOP_AFTER - 1), Some(PAUSE * (STOP_AFTER - 1)));
+        assert_eq!(rest_after(STOP_AFTER), None);
+        assert_eq!(rest_after(STOP_AFTER + 1), None);
+    }
 
     #[test]
     fn a_thumbnail_names_its_video() {
