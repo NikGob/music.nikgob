@@ -963,6 +963,23 @@ impl Worker {
                 let ids = self.release_tracks(id);
                 self.command(Command::Enqueue(ids));
             }
+            Command::PlayPlaylistNext(id) => {
+                let (ids, name) = self.playlist_tracks(id, None);
+                if ids.is_empty() {
+                    return;
+                }
+                self.queue.play_next(&ids);
+                self.preload_next();
+                self.publish_player();
+                self.toast(format!("Следующим: «{name}»"), None);
+            }
+            Command::EnqueuePlaylist(id) => {
+                let (ids, _) = self.playlist_tracks(id, None);
+                if ids.is_empty() {
+                    return;
+                }
+                self.command(Command::Enqueue(ids));
+            }
             Command::EnqueueArtist(id) => {
                 let rows = self
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))

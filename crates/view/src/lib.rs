@@ -2550,6 +2550,10 @@ pub enum Command {
     /// «Только скачанное» as playing it); the queue goes on after it.
     PlayReleaseNext(ReleaseId),
     EnqueueRelease(ReleaseId),
+    /// A whole playlist right after the current track / to the end of the
+    /// queue (what «Слушать» would play of it).
+    PlayPlaylistNext(PlaylistId),
+    EnqueuePlaylist(PlaylistId),
     EnqueueArtist(ArtistId),
     PlayQueueEntry(u64),
     RemoveFromQueue(u64),

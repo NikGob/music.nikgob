@@ -700,10 +700,7 @@ pub fn playlist(
             ));
             if let Some(l) = &p.sync {
                 ui.add_space(8.0);
-                let mode = super::settings_help::SettingId::PlaylistSync.choices()
-                    [super::settings_help::sync_index(l.mode)]
-                .label
-                .to_lowercase();
+                let mode = widgets::sync_state_label(l.mode);
                 // Which service it follows and how, in words (the modes are
                 // in ⋮), then a small status: running, failed, or when.
                 ui.horizontal(|ui| {
@@ -735,8 +732,8 @@ pub fn playlist(
         ];
         if !liked {
             members.push(Button::new("Добавить треки").icon(Icon::Add).size(Size::M).style(Style::Outlined).into());
-            members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
         }
+        members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
         let row = ButtonRow::new("pl-actions", Size::M).show(ui, members);
         let r = &row.responses;
         if r[0].clicked() {
@@ -745,52 +742,30 @@ pub fn playlist(
         if r[1].clicked() {
             out.push(Command::PlayPlaylist { id, start: None, shuffle: true });
         }
-        if !liked {
-            if r[2].clicked() {
-                put(ui.ctx(), add_key, AddState { open: true, ..get(ui.ctx(), add_key) });
-            }
-            let mut menu = Menu::new("pl-more")
-                .item(MenuItem::new("Изменить…").icon(Icon::Edit))
-                .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic));
-            // A playlist that follows one of a service: how it syncs (a
-            // greyed title, then the three modes).
-            let sync_n = if let Some(l) = &p.sync {
-                menu = menu
-                    .divider()
-                    .item(MenuItem::new(format!("Синхронизация с {}", l.remote.service.display_name())).enabled(false));
-                for (i, c) in super::settings_help::SettingId::PlaylistSync.choices().iter().enumerate() {
-                    let on = super::settings_help::sync_index(l.mode) == i;
-                    menu = menu.item(MenuItem::new(c.label).icon(Icon::Sync).selected(on));
-                }
-                nikgob_view::PlaylistSyncMode::ALL.len() + 1
-            } else {
-                // Not linked: send it to a service (two-way; it is made there).
-                menu = menu.item(MenuItem::new("Связать с сервисом…").icon(Icon::Sync));
-                0
+        if !liked && r[2].clicked() {
+            put(ui.ctx(), add_key, AddState { open: true, ..get(ui.ctx(), add_key) });
+        }
+        // The same actions as the playlist's right-click menu
+        // ([`widgets::playlist_rows`]), less «Слушать» and «Перемешать»
+        // (the buttons left of it).
+        {
+            let more = &r[r.len() - 1];
+            let of = widgets::PlaylistMenuOf {
+                on_page: true,
+                editable: !liked,
+                sync: p.sync.as_ref().map(|l| (l.remote.service.display_name(), l.mode)),
+                can_link: !liked && p.sync.is_none(),
             };
-            let link_at = (p.sync.is_none()).then_some(2);
-            let picked = menu
-                .divider()
-                .item(MenuItem::new("Удалить плейлист").icon(Icon::Delete))
-                .attach(&r[3]);
-            match picked {
-                Some(0) => put(
+            let (menu, acts) = widgets::menu_of("pl-more", widgets::playlist_rows(of));
+            match menu.attach(more).and_then(|i| acts.get(i).copied()) {
+                Some(widgets::PlaylistAct::Edit) => put(
                     ui.ctx(),
                     edit_key,
                     EditState { open: true, shown: false, name: p.card.name.clone(), cover: None, mode: None },
                 ),
-                Some(1) => out.push(Command::Enqueue(p.tracks.iter().map(|t| t.id).collect())),
-                Some(i) if link_at == Some(i) => out.push(Command::SetPlaylistSync {
-                    playlist: id,
-                    mode: nikgob_view::PlaylistSyncMode::TwoWay,
-                }),
-                Some(2) if sync_n > 0 => {}
-                Some(i) if i >= 3 && i < 2 + sync_n => out.push(Command::SetPlaylistSync {
-                    playlist: id,
-                    mode: nikgob_view::PlaylistSyncMode::ALL[i - 3],
-                }),
-                Some(_) => pages.confirm_delete = Some(id),
-                _ => {}
+                Some(widgets::PlaylistAct::Delete) => pages.confirm_delete = Some(id),
+                Some(a) => out.extend(widgets::playlist_command(a, id)),
+                None => {}
             }
         }
         ui.add_space(16.0);

@@ -267,8 +267,152 @@ pub fn playlist_card_with(
     }
 }
 
-/// Right-click menu of a playlist (card or row): Слушать · Перемешать, and
-/// with `pages` Переименовать · Удалить (confirmed in a dialog). The liked
+//// One row of a menu built from actions: an item standing for `A`, a
+/// divider, or a group label (not an item: nothing to pick).
+#[derive(Clone, Debug)]
+pub enum Row<A> {
+    Item(A, MenuItem),
+    Divider,
+    Label(String),
+}
+
+/// The actions of `rows` in item order (what a picked index stands for).
+pub fn row_acts<A: Copy>(rows: &[Row<A>]) -> Vec<A> {
+    rows.iter()
+        .filter_map(|r| match r {
+            Row::Item(a, _) => Some(*a),
+            Row::Divider | Row::Label(_) => None,
+        })
+        .collect()
+}
+
+/// A menu of `rows` and what each of its item indices stands for. A
+/// divider at the start, at the end or after another is left out.
+pub fn menu_of<A: Copy>(key: impl egui::AsId, rows: Vec<Row<A>>) -> (Menu, Vec<A>) {
+    let acts = row_acts(&rows);
+    let mut menu = Menu::new(key);
+    let mut after_divider = true;
+    let n = rows.len();
+    for (i, r) in rows.into_iter().enumerate() {
+        match r {
+            Row::Item(_, item) => {
+                menu = menu.item(item);
+                after_divider = false;
+            }
+            Row::Label(text) => {
+                menu = menu.group_label(text);
+                after_divider = false;
+            }
+            Row::Divider => {
+                if !after_divider && i + 1 < n {
+                    menu = menu.divider();
+                    after_divider = true;
+                }
+            }
+        }
+    }
+    (menu, acts)
+}
+
+/// What the menu of a playlist does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaylistAct {
+    Play,
+    Shuffle,
+    Next,
+    Queue,
+    Edit,
+    Sync(nikgob_view::PlaylistSyncMode),
+    Link,
+    Delete,
+}
+
+/// Where a playlist's menu is and what it may offer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlaylistMenuOf<'a> {
+    /// The ⋮ of the playlist's page: «Слушать» and «Перемешать» are its
+    /// buttons, so the menu leaves them out.
+    pub on_page: bool,
+    /// Can be renamed (edited) and deleted.
+    pub editable: bool,
+    /// Linked: the service's name and how it syncs.
+    pub sync: Option<(&'a str, nikgob_view::PlaylistSyncMode)>,
+    /// Not linked, and may be sent to a service.
+    pub can_link: bool,
+}
+
+/// The sync mode as a choice of a linked playlist's menu: each says what
+/// it does; «Не синхронизировать» (the link stays, nothing syncs) stops it.
+pub fn sync_menu_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
+    use nikgob_view::PlaylistSyncMode as M;
+    match m {
+        M::TwoWay => "Изменения в обе стороны",
+        M::Follow => "Только получать изменения",
+        M::Once => "Не синхронизировать",
+    }
+}
+
+/// The sync mode in the playlist page's line under the title.
+pub fn sync_state_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
+    use nikgob_view::PlaylistSyncMode as M;
+    match m {
+        M::TwoWay => "изменения в обе стороны",
+        M::Follow => "только получение изменений",
+        M::Once => "не синхронизируется",
+    }
+}
+
+/// The one list of a playlist's actions, for its right-click menu (card or
+/// row) and the ⋮ of its page: play, next, queue; edit; sync; delete.
+pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
+    use PlaylistAct as A;
+    let mut rows = Vec::new();
+    if !o.on_page {
+        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+    }
+    rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    if o.editable {
+        rows.push(Row::Divider);
+        // The page edits the name and the cover; a card renames.
+        let edit = if o.on_page { "Изменить…" } else { "Переименовать…" };
+        rows.push(Row::Item(A::Edit, MenuItem::new(edit).icon(Icon::Edit)));
+    }
+    if let Some((service, mode)) = o.sync {
+        rows.push(Row::Divider);
+        rows.push(Row::Label(format!("Синхронизация с {service}")));
+        for &m in nikgob_view::PlaylistSyncMode::ALL {
+            rows.push(Row::Item(A::Sync(m), MenuItem::new(sync_menu_label(m)).icon(Icon::Sync).selected(m == mode)));
+        }
+    } else if o.can_link {
+        rows.push(Row::Item(A::Link, MenuItem::new("Связать с сервисом…").icon(Icon::Sync)));
+    }
+    if o.editable {
+        rows.push(Row::Divider);
+        rows.push(Row::Item(A::Delete, MenuItem::new("Удалить плейлист").icon(Icon::Delete)));
+    }
+    rows
+}
+
+/// The command of a playlist action that needs no dialog (not «Изменить»
+/// or «Удалить»).
+pub fn playlist_command(act: PlaylistAct, id: PlaylistId) -> Option<Command> {
+    use nikgob_view::PlaylistSyncMode as M;
+    Some(match act {
+        PlaylistAct::Play => Command::PlayPlaylist { id, start: None, shuffle: false },
+        PlaylistAct::Shuffle => Command::PlayPlaylist { id, start: None, shuffle: true },
+        PlaylistAct::Next => Command::PlayPlaylistNext(id),
+        PlaylistAct::Queue => Command::EnqueuePlaylist(id),
+        PlaylistAct::Sync(mode) => Command::SetPlaylistSync { playlist: id, mode },
+        // Not linked: it is made in a service, synced both ways.
+        PlaylistAct::Link => Command::SetPlaylistSync { playlist: id, mode: M::TwoWay },
+        PlaylistAct::Edit | PlaylistAct::Delete => return None,
+    })
+}
+
+/// Right-click menu of a playlist (card or row): [`playlist_rows`]; with
+/// `pages` it can rename and delete (confirmed in a dialog). The liked
 /// playlist can be neither renamed nor deleted.
 pub fn playlist_menu_at(
     resp: &Response,
@@ -280,34 +424,26 @@ pub fn playlist_menu_at(
         return;
     }
     let editable = pages.is_some() && !p.pinned && p.id != LIKED_PLAYLIST;
-    let mut menu = Menu::new(("playlist-menu", resp.id))
-        .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
-        .item(MenuItem::new("Перемешать").icon(Icon::Shuffle));
-    if editable {
-        menu = menu
-            .divider()
-            .item(MenuItem::new("Переименовать").icon(Icon::Edit))
-            .item(MenuItem::new("Удалить").icon(Icon::Delete));
-    }
-    match menu.context_menu(resp) {
-        Some(0) => out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: false }),
-        Some(1) => out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: true }),
-        Some(2) => {
+    let of = PlaylistMenuOf { editable, ..Default::default() };
+    let (menu, acts) = menu_of(("playlist-menu", resp.id), playlist_rows(of));
+    let Some(act) = menu.context_menu(resp).and_then(|i| acts.get(i).copied()) else { return };
+    match act {
+        PlaylistAct::Edit => {
             if let Some(pages) = pages {
                 pages.ask_text = p.name.clone();
                 pages.ask = Some(Ask::RenamePlaylist(p.id));
             }
         }
-        Some(3) => {
+        PlaylistAct::Delete => {
             if let Some(pages) = pages {
                 pages.confirm_delete = Some(p.id);
             }
         }
-        _ => {}
+        a => out.extend(playlist_command(a, p.id)),
     }
 }
 
-/// Shapes that artist avatars rotate through (formas only on media).
+// Shapes that artist avatars rotate through (formas only on media).
 const AVATAR_SHAPES: [MaterialShape; 6] = [
     MaterialShape::Circle,
     MaterialShape::Cookie12Sided,
