@@ -44,6 +44,9 @@
 //! The window opens off the screen, unfocused and without a taskbar button,
 //! so a run never jumps over the user's windows; `NIKGOB_SHOT_VISIBLE=1`
 //! shows it.
+//! `waitms:400` waits that long (not frames); `fake_clear` drops the
+//! `fake:` states laid so far. The settings sweep (`--sweep`, see
+//! [`crate::sweep`]) runs on this too: its `sweep_…` steps go to it.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -71,6 +74,18 @@ pub struct Shot {
     reopen: bool,
     /// `hide` asked to go to the tray and come back after this long.
     hide: Option<std::time::Duration>,
+    /// `waitms:` waits until then.
+    until: Option<std::time::Instant>,
+    /// A settings sweep: its steps, checks and files.
+    sweep: Option<Box<crate::sweep::Run>>,
+    /// The run ends without a last screenshot (a sweep saves its own).
+    quiet_end: bool,
+    /// A `.jpg` picture's quality.
+    jpeg_quality: u8,
+    /// The last frame's start, and whether a picture was saved in it (a
+    /// slow frame then says nothing about the app).
+    last_tick: Option<std::time::Instant>,
+    saved: bool,
 }
 
 fn nums(arg: &str) -> Vec<f32> {
@@ -89,11 +104,14 @@ pub const OFFSCREEN: [f32; 2] = [-16000.0, -16000.0];
 /// A screenshot run keeps its window off the screen, unfocused and off the
 /// taskbar (`NIKGOB_SHOT_VISIBLE=1` shows it where a normal start would).
 pub fn offscreen() -> bool {
-    std::env::var_os("NIKGOB_SHOT").is_some() && std::env::var_os("NIKGOB_SHOT_VISIBLE").is_none()
+    (std::env::var_os("NIKGOB_SHOT").is_some() || crate::sweep::active()) && std::env::var_os("NIKGOB_SHOT_VISIBLE").is_none()
 }
 
 /// `NIKGOB_SHOT_SIZE=w,h`: the window size for a screenshot run.
 pub fn window_size() -> Option<[f32; 2]> {
+    if crate::sweep::active() {
+        return crate::sweep::window_size();
+    }
     std::env::var_os("NIKGOB_SHOT")?;
     match nums(&std::env::var("NIKGOB_SHOT_SIZE").ok()?)[..] {
         [w, h] => Some([w, h]),
@@ -122,7 +140,37 @@ impl Shot {
             marked: false,
             reopen: false,
             hide: None,
+            until: None,
+            sweep: None,
+            quiet_end: false,
+            jpeg_quality: 90,
+            last_tick: None,
+            saved: false,
         })
+    }
+
+    /// A settings sweep's run: its steps, driven by `run`, ending without a
+    /// picture of its own.
+    pub fn sweep(steps: Vec<String>, run: crate::sweep::Run, jpeg_quality: u8) -> Self {
+        Self {
+            path: PathBuf::new(),
+            steps,
+            wait: 40,
+            requested: false,
+            input: VecDeque::new(),
+            fakes: Default::default(),
+            snap: None,
+            label: "sweep".to_owned(),
+            marked: true,
+            reopen: false,
+            hide: None,
+            until: None,
+            sweep: Some(Box::new(run)),
+            quiet_end: true,
+            jpeg_quality,
+            last_tick: None,
+            saved: false,
+        }
     }
 
     /// The view state with the `fake:` steps so far laid over it, if any.
@@ -176,18 +224,27 @@ impl Shot {
                 _ => None,
             })
         });
+        // A sweep times its frames (a frame that saved a picture is slow
+        // on purpose and does not count).
+        let now = std::time::Instant::now();
+        if let (Some(run), Some(last)) = (self.sweep.as_mut(), self.last_tick) {
+            run.tick(now - last, std::mem::take(&mut self.saved));
+        }
+        self.last_tick = Some(now);
         if let Some(img) = image {
             let [w, h] = img.size;
             let raw: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
             let to = self.snap.take();
             match image::RgbaImage::from_raw(w as u32, h as u32, raw) {
                 Some(buf) => {
-                    if let Err(e) = buf.save(to.as_ref().unwrap_or(&self.path)) {
-                        log::warn!("shot: cannot save the screenshot to {}: {e}", to.as_ref().unwrap_or(&self.path).display());
+                    let path = to.as_ref().unwrap_or(&self.path);
+                    if let Err(e) = save(buf, path, self.jpeg_quality) {
+                        log::warn!("shot: cannot save the screenshot to {}: {e}", path.display());
                     }
                 }
                 None => log::warn!("shot: the screenshot is not {w}×{h}"),
             }
+            self.saved = true;
             if to.is_some() {
                 self.requested = false;
                 ctx.request_repaint();
@@ -197,12 +254,22 @@ impl Shot {
             return true;
         }
         ctx.request_repaint();
+        if let Some(until) = self.until {
+            if std::time::Instant::now() < until {
+                return false;
+            }
+            self.until = None;
+        }
         if self.wait > 0 || !self.input.is_empty() {
             self.wait = self.wait.saturating_sub(1);
             return false;
         }
         if self.requested {
             return false;
+        }
+        if self.steps.is_empty() && self.quiet_end {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return true;
         }
         if self.steps.is_empty() {
             self.requested = true;
@@ -221,6 +288,20 @@ impl Shot {
         }
         match verb {
             "wait" => self.wait = arg.parse().unwrap_or(30),
+            "waitms" => {
+                self.wait = 0;
+                self.until = Some(std::time::Instant::now() + std::time::Duration::from_millis(arg.parse().unwrap_or(400)));
+            }
+            "fake_clear" => {
+                self.fakes.clear();
+                self.wait = 1;
+            }
+            v if v.starts_with("sweep_") => {
+                self.wait = match self.sweep.as_mut() {
+                    Some(run) => run.step(verb, arg, ctx, ui, state, out, &mut self.steps, &mut self.fakes),
+                    None => 0,
+                };
+            }
             "mark" => self.wait = 0,
             "reopen" => {
                 self.reopen = true;
@@ -674,4 +755,15 @@ impl Shot {
         }
         false
     }
+}
+
+/// Saves a picture: PNG, or JPEG (without alpha) at `quality` for `.jpg`.
+fn save(buf: image::RgbaImage, path: &std::path::Path, quality: u8) -> image::ImageResult<()> {
+    let jpeg = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"));
+    if !jpeg {
+        return buf.save(path);
+    }
+    let rgb = image::DynamicImage::ImageRgba8(buf).to_rgb8();
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality).encode_image(&rgb)
 }

@@ -1088,6 +1088,11 @@ struct Row {
     menu: Vec<Rect>,
     clip: Rect,
     hovered: bool,
+    /// How it was drawn: faded by a row it depends on, or switched off.
+    opacity: f32,
+    enabled: bool,
+    /// The title of the group it is in ([`note_group`]).
+    group: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1165,6 +1170,10 @@ fn parts_key() -> Id {
 
 fn rows_key() -> Id {
     Id::new("settings-help-rows")
+}
+
+fn group_key() -> Id {
+    Id::new("settings-help-group")
 }
 
 fn pinned_key() -> Id {
@@ -1335,6 +1344,9 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         menu: parts.menu,
         clip: ui.clip_rect(),
         hovered: ui.rect_contains_pointer(rect.union(button)),
+        opacity: ui.opacity(),
+        enabled: ui.is_enabled(),
+        group: ctx.data(|d| d.get_temp::<String>(group_key())).unwrap_or_default(),
     };
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| {
@@ -2159,6 +2171,51 @@ fn cascade_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
 /// A made-up 120 BPM beat (1 on the beat, decaying).
 pub(crate) fn beat(t: f32) -> f32 {
     (-(t * 2.0).fract() * 6.0).exp()
+}
+
+/// The settings group being drawn is titled `title` (the rows after it
+/// carry it, for the settings sweep).
+pub fn note_group(ctx: &egui::Context, title: &str) {
+    ctx.data_mut(|d| d.insert_temp(group_key(), title.to_owned()));
+}
+
+/// One settings row as the page drew it (the settings sweep reads them).
+#[derive(Clone, Debug)]
+pub struct DrawnRow {
+    pub id: SettingId,
+    pub label: String,
+    pub group: String,
+    /// The row with its ⓘ, its ⓘ, its control and the control's options.
+    pub rect: Rect,
+    pub button: Rect,
+    pub control: Option<Rect>,
+    pub choices: Vec<Rect>,
+    /// What of the page is on screen around it.
+    pub clip: Rect,
+    pub opacity: f32,
+    pub enabled: bool,
+}
+
+/// The rows of the last pass that drew any, with that pass's number.
+pub fn drawn_rows(ctx: &egui::Context) -> (u64, Vec<DrawnRow>) {
+    let rows = ctx.data(|d| d.get_temp::<Rows>(rows_key())).unwrap_or_default();
+    let list = rows
+        .list
+        .into_iter()
+        .map(|r| DrawnRow {
+            id: r.id,
+            label: r.label,
+            group: r.group,
+            rect: r.rect,
+            button: r.button,
+            control: r.control,
+            choices: r.choices,
+            clip: r.clip,
+            opacity: r.opacity,
+            enabled: r.enabled,
+        })
+        .collect();
+    (rows.pass, list)
 }
 
 #[cfg(test)]

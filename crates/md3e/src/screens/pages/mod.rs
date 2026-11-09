@@ -455,6 +455,14 @@ impl PageState {
         self.pending_nav = Some(Route::Settings);
     }
 
+    /// The typed fields of Settings («Как к тебе обращаться», the
+    /// MusicBrainz contact) read the prefs again when next shown (the
+    /// settings sweep changes the prefs under them).
+    pub(crate) fn forget_typed(&mut self) {
+        self.name_synced = false;
+        self.metadata_synced = false;
+    }
+
     /// Opens Settings at the group that holds row `id`, scrolled into view
     /// and briefly tinted, so it is clear which settings these are.
     pub fn open_setting_group(&mut self, id: SettingId) {

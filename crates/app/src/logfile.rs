@@ -63,6 +63,34 @@ pub fn init() {
     );
 }
 
+/// Warnings and errors kept for a settings sweep while it asks
+/// ([`capture_start`]): each shot says what went wrong during it.
+static CAPTURED: Mutex<Option<Vec<String>>> = Mutex::new(None);
+/// At most this many are kept between two takes.
+const CAPTURE_MAX: usize = 200;
+
+/// Starts keeping warnings and errors.
+pub fn capture_start() {
+    *CAPTURED.lock().unwrap_or_else(PoisonError::into_inner) = Some(Vec::new());
+}
+
+/// The warnings and errors since the last take (and goes on keeping them).
+pub fn capture_take() -> Vec<String> {
+    CAPTURED.lock().unwrap_or_else(PoisonError::into_inner).as_mut().map(std::mem::take).unwrap_or_default()
+}
+
+fn capture(record: &log::Record<'_>) {
+    if record.level() > log::Level::Warn {
+        return;
+    }
+    let mut kept = CAPTURED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(list) = kept.as_mut()
+        && list.len() < CAPTURE_MAX
+    {
+        list.push(format!("{} {}: {}", record.level(), record.target(), record.args()));
+    }
+}
+
 /// The logger, writing the records of [`ONCE`] once per message.
 struct Quiet {
     inner: env_logger::Logger,
@@ -81,6 +109,9 @@ impl log::Log for Quiet {
     }
 
     fn log(&self, record: &log::Record<'_>) {
+        if self.inner.matches(record) {
+            capture(record);
+        }
         if !ONCE.iter().any(|t| record.target().starts_with(t)) {
             self.inner.log(record);
             return;
