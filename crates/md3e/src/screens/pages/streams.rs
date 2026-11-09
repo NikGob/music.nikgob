@@ -280,7 +280,7 @@ fn stream_dislike(t: &StreamTrackRow, marks: &nikgob_view::DislikesView) -> Comm
     }
 }
 
-fn track_pick(
+pub(super) fn track_pick(
     ctx: &egui::Context,
     act: Option<super::TrackAct>,
     t: &StreamTrackRow,

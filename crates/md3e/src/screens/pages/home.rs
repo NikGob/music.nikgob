@@ -11,14 +11,14 @@
 
 use egui::{Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    Command, HomeView, LaneCard, MixCard, MixId, RecTarget, Route, ShelfAlbum, Shortcut, Status,
+    Command, HomeView, LaneCard, MixCard, MixId, Route, ShelfAlbum, Shortcut, Status,
     StreamAlbumCard, StreamPage, StreamTrackRow, TileKind, TrackRow, ViewState,
 };
 
 use super::{PageState, cards, widgets, worlds};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, FilterChip, Menu, MenuItem, Size, Style, anim},
+    components::{Button, FilterChip, MenuItem, Size, Style, anim},
 };
 
 pub(super) fn greeting(hour: u8) -> &'static str {
@@ -646,8 +646,9 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mut P
             } else if o.clicked && t.playable {
                 out.push(play_discover(&h.discover, i));
             }
-            nav = discover_pick(discover_menu(("discover-menu", o.response.id), t).context_menu(&o.response), t, None, pages, out)
-                .or(nav.take());
+            let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), discover_rows(t, &state.dislikes));
+            let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
+            nav = discover_pick(&o.response.ctx, act, t, pages, out).or(nav.take());
         }
     });
     nav
@@ -663,48 +664,51 @@ fn play_discover(rows: &[StreamTrackRow], i: usize) -> Command {
     }
 }
 
-/// «Не нравится» / «Не рекомендовать исполнителя» of a discovery.
-fn dislike(t: &StreamTrackRow, artist: bool) -> Command {
-    let target = if artist {
-        RecTarget::StreamArtist(t.artist.clone())
-    } else {
-        RecTarget::StreamTrack(t.remote.clone())
-    };
-    Command::RecFeedback { target, dislike: true }
+/// What a discovery's menu does: a service song's action, or its like.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscoverAct {
+    Track(super::TrackAct),
+    Like,
 }
 
-fn discover_menu(key: impl egui::AsId, t: &StreamTrackRow) -> Menu {
-    Menu::new(key)
-        .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic).enabled(t.playable))
-        .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic).enabled(t.playable))
-        .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
-        .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .item(MenuItem::new(if t.liked { "Убрать из любимого" } else { "В любимое" }).icon(Icon::Favorite).selected(t.liked))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!t.artists.linked().is_empty()))
-        .divider()
-        .item(MenuItem::new("Не нравится").icon(Icon::ThumbDown))
-        .item(MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block))
+/// A discovery's menu: a service song's one list
+/// ([`super::streams::stream_track_rows`]), then «В любимое».
+fn discover_rows(t: &StreamTrackRow, marks: &nikgob_view::DislikesView) -> Vec<widgets::Row<DiscoverAct>> {
+    with_like(super::streams::stream_track_rows(t, None, marks), t.liked)
+}
+
+/// A service song's `rows`, then the discovery's own «В любимое».
+fn with_like(rows: Vec<widgets::Row<super::TrackAct>>, liked: bool) -> Vec<widgets::Row<DiscoverAct>> {
+    let mut rows: Vec<widgets::Row<DiscoverAct>> = rows
+        .into_iter()
+        .map(|r| match r {
+            widgets::Row::Item(a, item) => widgets::Row::Item(DiscoverAct::Track(a), item),
+            widgets::Row::Divider => widgets::Row::Divider,
+            widgets::Row::Label(l) => widgets::Row::Label(l),
+        })
+        .collect();
+    rows.push(widgets::Row::Divider);
+    rows.push(widgets::Row::Item(
+        DiscoverAct::Like,
+        MenuItem::new(if liked { "Убрать из любимого" } else { "В любимое" }).icon(Icon::Favorite).selected(liked),
+    ));
+    rows
 }
 
 fn discover_pick(
-    picked: Option<usize>,
+    ctx: &egui::Context,
+    act: Option<DiscoverAct>,
     t: &StreamTrackRow,
-    anchor: Option<Rect>,
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    match picked? {
-        0 => out.push(Command::PlayStreamNext(vec![t.remote.clone()])),
-        1 => out.push(Command::EnqueueStream(vec![t.remote.clone()])),
-        2 => out.push(super::streams::radio_by_stream(t)),
-        3 => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
-        4 => out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked }),
-        5 => return t.artist_id().cloned().map(|a| Route::Stream(StreamPage::Artist(a))),
-        6 => out.push(dislike(t, false)),
-        7 => out.push(dislike(t, true)),
-        _ => {}
+    match act? {
+        DiscoverAct::Track(a) => super::streams::track_pick(ctx, Some(a), t, None, pages, out),
+        DiscoverAct::Like => {
+            out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
+            None
+        }
     }
-    None
 }
 
 // ---- «Новые релизы».

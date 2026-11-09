@@ -220,3 +220,31 @@ fn an_empty_home_is_one_line_and_its_buttons() {
     assert!(page.contains("Найти музыку") && page.contains("Добавить папку…"));
     assert!(!page.contains("Найди песню") && !page.contains("Здесь соберётся"));
 }
+
+/// A discovery's menu is a service song's one list (the same rows in the
+/// same order), then its own «В любимое».
+#[test]
+fn a_discovery_has_the_service_song_menu_and_its_like() {
+    use crate::screens::pages::{TrackAct as A, TrackMenuOf, track_rows, widgets::row_acts};
+    use crate::components::MenuItem;
+    let song = || {
+        track_rows(TrackMenuOf {
+            playable: true,
+            has_album: true,
+            has_artists: true,
+            also_on: None,
+            info: false,
+            fetch: MenuItem::new("Скачать"),
+            torrents: None,
+            find_song: None,
+            wrong_file: false,
+            dislike: MenuItem::new("Не нравится"),
+            ban: MenuItem::new("Не рекомендовать исполнителя"),
+        })
+    };
+    let list: Vec<DiscoverAct> = row_acts(&song()).into_iter().map(DiscoverAct::Track).collect();
+    let menu = row_acts(&with_like(song(), false));
+    assert_eq!(&menu[..list.len()], &list[..]);
+    assert_eq!(menu.last(), Some(&DiscoverAct::Like));
+    assert_eq!(&menu[..4], [A::Next, A::Queue, A::Playlist, A::Radio].map(DiscoverAct::Track));
+}
