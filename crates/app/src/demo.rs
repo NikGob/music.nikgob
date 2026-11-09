@@ -189,7 +189,7 @@ fn make_photo(path: &Path, rgb: [u8; 3], seed: u32) {
 }
 
 /// Marker file of the current seed; bump to reseed old demo libraries.
-pub const VERSION: &str = "seed-v16";
+pub const VERSION: &str = "seed-v17";
 
 /// The intro, instrumental gap and long line exercise both lyrics layouts.
 const DEMO_LRC: &str = "[00:03.00]Свет из окна ложится на пол
@@ -268,6 +268,11 @@ fn seed_with(lib: &Library, root: &Path, files: bool) {
         const ADDED_DAYS: [i64; 12] = [300, 200, 120, 90, 45, 40, 20, 12, 5, 3, 0, 0];
         r.added_at = nikgob_library::now_ms() - ADDED_DAYS[i % ADDED_DAYS.len()] * DAY_MS - i as i64 * 60_000;
         let r = lib.upsert_release(&r).expect("release");
+        // A whole release day (made up, from the album's place in the list),
+        // kept where the runtime keeps a day found by a service: «Дата
+        // альбома» shows Год / Месяц / Полностью apart on every album.
+        let day = format!("{year}-{:02}-{:02}", (i * 5) % 12 + 1, (i * 7) % 28 + 1);
+        let _ = lib.cache_put(&format!("released.{}", r.id), now, &day);
         if let Some(img) = files.then(|| image::open(&cover).ok()).flatten() {
             let rgba = img.to_rgba8();
             if let Some(seed) = nikgob_md3e::seed_from_image(rgba.as_raw(), rgba.width() as usize, rgba.height() as usize) {
