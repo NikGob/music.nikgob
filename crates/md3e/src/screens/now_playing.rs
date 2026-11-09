@@ -812,29 +812,9 @@ pub fn show(
     let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
         if let Some(t) = p.current.as_ref() {
-            let acts = [
-                Act::Playlist,
-                Act::Radio,
-                Act::Album,
-                Act::AlsoOn,
-                Act::Apart,
-                Act::Artist,
-                Act::Info,
-                Act::Share,
-                Act::FindSong,
-                Act::Tags,
-                Act::Replace,
-                Act::WrongFile,
-                Act::Visualizer,
-                Act::Sep,
-                Act::Dislike,
-                Act::BanArtist,
-                Act::Sep,
-                Act::Trash,
-            ];
-
-            let wh = Where::Np;
-            chrome.track_menu(&more, "np-more", &acts, t, state, wh, out);
+            // The track's one list, the visualizer before it, the delete last.
+            let rows = Chrome::player_rows(t, state, &[Act::Visualizer], true, true);
+            chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
         if ui.add(
             IconButton::new(Icon::QueueMusic)

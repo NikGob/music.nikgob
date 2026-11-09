@@ -273,29 +273,14 @@ pub fn show(
                 .id_salt("bar-more"),
         );
         if let Some(t) = current {
-            // What does not fit in the pill lives in the menu.
-            let mut acts = Vec::new();
-            acts.extend((!show_like).then_some(Act::Like));
-            acts.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
-            acts.extend((!show_volume).then_some(Act::Volume));
-            if !acts.is_empty() {
-                acts.push(Act::Sep);
-            }
-            acts.extend([Act::Playlist, Act::Radio, Act::Album, Act::AlsoOn, Act::Apart, Act::Artist]);
-            acts.extend(PaneTab::Info.on(&state.prefs).then_some(Act::Info));
-            acts.extend([
-                Act::Share,
-                Act::FindSong,
-                Act::Sep,
-                Act::Tags,
-                Act::Replace,
-                Act::WrongFile,
-                Act::Sep,
-                Act::Dislike,
-                Act::BanArtist,
-            ]);
-
-            chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
+            // What does not fit in the pill lives in the menu, before the
+            // track's one list.
+            let mut top = Vec::new();
+            top.extend((!show_like).then_some(Act::Like));
+            top.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
+            top.extend((!show_volume).then_some(Act::Volume));
+            let rows = Chrome::player_rows(t, state, &top, PaneTab::Info.on(&state.prefs), false);
+            chrome.track_menu(&more, "bar-more", rows, t, state, Where::Bar, out);
         }
     });
     // A click on the pill between the controls opens Now Playing too.

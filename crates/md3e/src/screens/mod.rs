@@ -1583,10 +1583,12 @@ mod tests {
             duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         };
         let mut out = Vec::new();
-        chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Np, &mut out);
+        let (ctx, state) = (egui::Context::default(), ViewState::default());
+        let info = crate::screens::pages::TrackAct::Info;
+        chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Np, &mut out);
         assert_eq!(chrome.np_slot, NpSlot::Info);
         assert_eq!(chrome.open_pane, None);
-        chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Bar, &mut out);
+        chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Bar, &mut out);
         assert_eq!(chrome.open_pane, Some(PaneTab::Info));
         assert_eq!(chrome.np_slot, NpSlot::Info);
     }
