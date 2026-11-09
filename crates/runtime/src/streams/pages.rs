@@ -40,6 +40,12 @@ pub(crate) enum Then {
     Download,
     /// The playlist into the library, following its service.
     Follow,
+    /// After the current track ([`Command::PlayStreamAlbumNext`]).
+    Next,
+    /// At the end of the queue ([`Command::EnqueueStreamAlbum`]).
+    Enqueue,
+    /// Into a library playlist ([`Command::AddStreamAlbumToPlaylist`]).
+    AddToPlaylist(v::PlaylistId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -529,17 +535,50 @@ impl Worker {
             self.follow_playlist(p);
             return;
         }
-        let (tracks, title, ctx, album, playlist) = match &data {
-            PageData::Album(a) => {
-                (a.tracks.clone(), format!("альбома «{}»", a.title), EventContext::Album, Some(a.id.clone()), None)
-            }
-            PageData::Playlist(p) => {
-                (p.tracks.clone(), format!("плейлиста «{}»", p.name), EventContext::Playlist, None, Some(p.id.clone()))
-            }
+        let (tracks, name, title, ctx, album, playlist) = match &data {
+            PageData::Album(a) => (
+                a.tracks.clone(),
+                a.title.clone(),
+                format!("альбома «{}»", a.title),
+                EventContext::Album,
+                Some(a.id.clone()),
+                None,
+            ),
+            PageData::Playlist(p) => (
+                p.tracks.clone(),
+                p.name.clone(),
+                format!("плейлиста «{}»", p.name),
+                EventContext::Playlist,
+                None,
+                Some(p.id.clone()),
+            ),
             PageData::Artist(_) => return,
         };
         let playable: Vec<StreamTrack> = tracks.into_iter().filter(|t| t.playable).collect();
         match then {
+            // As the library album's next / queue / «В плейлист…» do.
+            Then::Next => {
+                let ids = self.upsert_streams(&playable);
+                if ids.is_empty() {
+                    return;
+                }
+                self.queue.play_next(&ids);
+                self.preload_next();
+                self.publish_player();
+                self.toast(format!("Следующим: «{name}»"), None);
+                self.after_stream_play();
+            }
+            Then::Enqueue => {
+                let ids = self.upsert_streams(&playable);
+                self.command(Command::Enqueue(ids));
+                self.after_stream_play();
+            }
+            Then::AddToPlaylist(pid) => {
+                let ids = self.upsert_streams(&playable);
+                if !ids.is_empty() {
+                    self.command(Command::AddToPlaylist(pid, ids));
+                }
+            }
             Then::Play { start, shuffle } => {
                 let ids = self.upsert_streams(&playable);
                 let start = start

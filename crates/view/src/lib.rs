@@ -2745,6 +2745,11 @@ pub enum Command {
     /// Stream tracks after the current one / at the end of the queue.
     PlayStreamNext(Vec<RemoteId>),
     EnqueueStream(Vec<RemoteId>),
+    /// The tracks of an album of a service after the current one / at the
+    /// end of the queue (fetched as playing it does), like
+    /// [`Command::PlayReleaseNext`] / [`Command::EnqueueRelease`].
+    PlayStreamAlbumNext(RemoteId),
+    EnqueueStreamAlbum(RemoteId),
     /// «Не нравится» (`dislike`) or its undo for a track: out of every
     /// recommendation, skipped now when it plays ([`Prefs::dislike_skips`]),
     /// its like gone. A track liked or played to the end often is asked
@@ -2771,6 +2776,8 @@ pub enum Command {
     DownloadRelease(ReleaseId),
     /// Stream tracks into a library playlist (they join the library).
     AddStreamToPlaylist(PlaylistId, Vec<RemoteId>),
+    /// The tracks of an album of a service into a library playlist.
+    AddStreamAlbumToPlaylist(PlaylistId, RemoteId),
     /// A song.link / album.link for a track or album → [`ViewState::share`]
     /// and the clipboard, plus a toast.
     Share(ShareTarget),

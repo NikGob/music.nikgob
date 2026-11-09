@@ -641,6 +641,8 @@ impl Worker {
                 let ids = self.seen_tracks(&tracks);
                 self.command(Command::Enqueue(ids));
             }
+            Command::PlayStreamAlbumNext(album) => self.with_album(album, pages::Then::Next),
+            Command::EnqueueStreamAlbum(album) => self.with_album(album, pages::Then::Enqueue),
             Command::LikeStream { track, on } => self.like_stream(&track, on),
             Command::LikeStreamAlbum { album, on } => self.with_album(album, pages::Then::Like(on)),
             Command::DownloadStream { tracks } => self.download_stream(&tracks),
@@ -653,6 +655,9 @@ impl Worker {
                 if !ids.is_empty() {
                     self.command(Command::AddToPlaylist(playlist, ids));
                 }
+            }
+            Command::AddStreamAlbumToPlaylist(playlist, album) => {
+                self.with_album(album, pages::Then::AddToPlaylist(playlist));
             }
             Command::Share(target) => self.share(target),
             Command::LoadWishlist => self.publish_wishlist(),

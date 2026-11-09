@@ -1270,6 +1270,8 @@ impl Worker {
             | Command::PlayStreamPlaylist { .. }
             | Command::PlayStreamNext(_)
             | Command::EnqueueStream(_)
+            | Command::PlayStreamAlbumNext(_)
+            | Command::EnqueueStreamAlbum(_)
             | Command::LikeStream { .. }
             | Command::LikeStreamAlbum { .. }
             | Command::DownloadStream { .. }
@@ -1278,6 +1280,7 @@ impl Worker {
             | Command::DownloadRelease(_)
             | Command::FollowStreamPlaylist(_)
             | Command::AddStreamToPlaylist(..)
+            | Command::AddStreamAlbumToPlaylist(..)
             | Command::Share(_)
             | Command::LoadWishlist
             | Command::WishlistDownload(_)
