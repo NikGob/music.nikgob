@@ -893,8 +893,7 @@ pub struct HomeView {
     /// empty library).
     pub hero: Option<MixCard>,
     /// «Дейлист» ([`MixId::Daylist`]), the bento's big tile: title «Тягучий
-    /// вечер четверга», subtitle «Massive Attack, Kevin Penkin и другие ·
-    /// до 23:00», four covers. `None` until the recommendations are built
+    /// вечер четверга», subtitle «25 треков», four covers. `None` until the recommendations are built
     /// (or with an empty library).
     pub daylist: Option<MixCard>,
     /// The bento's smaller tiles of the day ([`MixId::Tile`]): «На повторе»

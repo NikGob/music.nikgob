@@ -566,7 +566,8 @@ fn the_home_gets_a_daylist_and_tiles_that_play() {
     let daylist = st.daylist.clone().unwrap();
     assert_eq!(daylist.id, MixId::Daylist);
     assert_eq!(daylist.title.split(' ').count(), 3, "«Тягучий вечер четверга»: {}", daylist.title);
-    assert!(daylist.subtitle.starts_with("что ты слушаешь ") && daylist.subtitle.contains(" · до "), "{}", daylist.subtitle);
+    assert!(daylist.subtitle.ends_with(" трек") || daylist.subtitle.ends_with(" трека") || daylist.subtitle.ends_with(" треков"), "{}", daylist.subtitle);
+    assert!(!daylist.subtitle.contains(" · "), "the number of songs alone: {}", daylist.subtitle);
     assert!(!daylist.covers.is_empty());
     // Up to four kinds of the day, each once, each with its kicker, its
     // length and covers; «На повторе», the lottery and the languages are

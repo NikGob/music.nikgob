@@ -1226,8 +1226,11 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, body: &str, action: Opt
             .paint_at(ui, Rect::from_center_size(r.center(), vec2(40.0, 40.0)));
         ui.add_space(16.0);
         ui.label(TypeRole::TitleLarge.style().rich(title, s.on_surface));
-        ui.add_space(4.0);
-        ui.label(TypeRole::BodyMedium.style().rich_para(body, s.on_surface_variant));
+        // An empty `body`: the title alone, no band under it.
+        if !body.is_empty() {
+            ui.add_space(4.0);
+            ui.label(TypeRole::BodyMedium.style().rich_para(body, s.on_surface_variant));
+        }
         if let Some(a) = action {
             ui.add_space(16.0);
             clicked = ui
