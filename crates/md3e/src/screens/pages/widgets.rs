@@ -934,15 +934,17 @@ pub fn track_list_ext(
         match opts.playlist {
             Some(pl) => {
                 if let Some(m) = &o.more {
-                    let picked = playlist_track_menu(menu_key, t, pl, &state.dislikes).attach(m);
-                    *nav = playlist_track_pick(&m.ctx, picked, t, pl, Some(m.rect), pages, &state.dislikes, out).or(nav.take());
+                    let (menu, acts) = playlist_track_menu(menu_key, t, pl, state);
+                    let act = menu.attach(m).and_then(|i| acts.get(i).copied());
+                    *nav = playlist_track_pick(&m.ctx, act, t, pl, Some(m.rect), pages, state, out).or(nav.take());
                 }
-                let picked = if Menu::context_idle(&o.response, menu_key.with("ctx")) {
+                let act = if Menu::context_idle(&o.response, menu_key.with("ctx")) {
                     None
                 } else {
-                    playlist_track_menu(menu_key.with("ctx"), t, pl, &state.dislikes).context_menu(&o.response)
+                    let (menu, acts) = playlist_track_menu(menu_key.with("ctx"), t, pl, state);
+                    menu.context_menu(&o.response).and_then(|i| acts.get(i).copied())
                 };
-                *nav = playlist_track_pick(&o.response.ctx, picked, t, pl, None, pages, &state.dislikes, out).or(nav.take());
+                *nav = playlist_track_pick(&o.response.ctx, act, t, pl, None, pages, state, out).or(nav.take());
 
             }
             None => {
@@ -1279,71 +1281,45 @@ pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std
     ui.add(IconButton::new(icon).size(Size::Xs).tooltip(tip).id_salt(Id::new(salt)))
 }
 
-/// ⋮ / right-click menu of a playlist row.
-fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, marks: &nikgob_view::DislikesView) -> Menu {
-    let mut m = Menu::new(key)
-        .align_right(true)
-        .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-        .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
-        .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-        .item(MenuItem::new(super::RADIO_BY_TRACK).icon(Icon::Radio))
-        .item(MenuItem::new("К альбому").icon(Icon::Album).enabled(track.release_id.is_some()))
-        .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!track.artists.linked().is_empty()))
-        .item(MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(track.release_id.is_some()));
-    // A clip: its song by hand; a stream from YouTube: another version.
-    if let Some(find) = crate::screens::find_song::label(track) {
-        m = m.item(MenuItem::new(find).icon(Icon::MusicNote));
-    }
-    m.divider()
-        .item(
-            MenuItem::new(if playlist == LIKED_PLAYLIST {
-                "Убрать из любимого"
-            } else {
-                "Убрать из плейлиста"
-            })
-            .icon(Icon::Delete),
-        )
-        .divider()
-        .item(super::dislike_item(marks.track(track.id)))
-        .item(super::ban_item(track.artist_id(), marks))
+/// ⋮ / right-click menu of a playlist row: the library track's
+/// [`super::library_track_rows`], then «Убрать из плейлиста».
+pub(crate) fn playlist_track_rows(
+    track: &TrackRow,
+    playlist: PlaylistId,
+    marks: &nikgob_view::DislikesView,
+    info: bool,
+    also: Option<&(ReleaseId, String)>,
+) -> Vec<Row<super::TrackAct>> {
+    let mut rows = super::library_track_rows(track, marks, info, also);
+    rows.push(Row::Divider);
+    let remove = if playlist == LIKED_PLAYLIST { "Убрать из любимого" } else { "Убрать из плейлиста" };
+    rows.push(Row::Item(super::TrackAct::Remove, MenuItem::new(remove).icon(Icon::Delete)));
+    rows
+}
+
+fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, state: &ViewState) -> (Menu, Vec<super::TrackAct>) {
+    let rows = playlist_track_rows(track, playlist, &state.dislikes, state.prefs.pane_info, state.also_on.get(&track.id));
+    let (menu, acts) = menu_of(key, rows);
+    (menu.align_right(true), acts)
 }
 
 fn playlist_track_pick(
     ctx: &egui::Context,
-    picked: Option<usize>,
+    act: Option<super::TrackAct>,
     track: &TrackRow,
     playlist: PlaylistId,
     anchor: Option<Rect>,
     pages: &mut PageState,
-    marks: &nikgob_view::DislikesView,
+    state: &ViewState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let find = crate::screens::find_song::label(track).is_some();
-    // «Не нравится» and «Не рекомендовать исполнителя» close the menu.
-    let remove = if find { 8 } else { 7 };
-    match picked? {
-        n if n == remove + 1 => out.push(super::dislike_command(track.id, marks)),
-        n if n == remove + 2 => out.extend(track.artist_id().map(|a| super::ban_command(a, marks))),
-        0 => out.push(Command::PlayNext(vec![track.id])),
-        1 => out.push(Command::Enqueue(vec![track.id])),
-        2 => {
-            pages.pending_add = Some(vec![track.id]);
-            pages.pending_add_anchor = anchor;
+    match act? {
+        super::TrackAct::Remove => {
+            out.push(Command::RemoveFromPlaylist(playlist, track.id));
+            None
         }
-        3 => out.push(super::radio_by_track(track.id)),
-        4 => return track.release_id.map(Route::Release),
-        // Several artists: a chooser.
-        5 => return artist_links::go_to(ctx, artist_links::library(&track.artists)),
-        6 => {
-            if let Some(r) = track.release_id {
-                out.push(Command::DownloadRelease(r));
-            }
-        }
-        7 if find => out.push(Command::FindSong { track: track.id, query: None }),
-        7 | 8 => out.push(Command::RemoveFromPlaylist(playlist, track.id)),
-        _ => {}
+        act => pages.track_apply(ctx, act, track, &state.dislikes, state.also_on.get(&track.id), anchor, out),
     }
-    None
 }
 
 /// Drag-reorder feedback and the final move: an insertion line follows the
