@@ -331,8 +331,18 @@ fn follow(
         Some((r.id, opt))
     };
     let under = in_menu.or_else(on_row);
-    if changed && let Some((id, _)) = under {
-        mem.changed = Some((id, now));
+    if changed {
+        // A drag stays the row it started on, wherever the pointer goes.
+        let dragging = down && mem.changed.is_some_and(|(_, at)| now - at < 0.5);
+        match (dragging, under) {
+            (true, _) => {
+                if let Some(c) = mem.changed.as_mut() {
+                    c.1 = now;
+                }
+            }
+            (false, Some((id, _))) => mem.changed = Some((id, now)),
+            (false, None) => {}
+        }
     }
     // The pointer must rest a moment: passing over rows shows nothing.
     let rested = match (under, mem.hover) {
