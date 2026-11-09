@@ -48,8 +48,9 @@ enum Style {
 enum By {
     Letters,
     /// The timed pieces: the syllables of a text timed by syllables (the
-    /// words of one timed by words), each filled evenly across its letters
-    /// over its own time; under the wave a word rises with its syllables.
+    /// words of one timed by words). The light steps a piece at a time: each
+    /// lights whole as it starts (in the wave its letters light across it,
+    /// and the word rises with its syllables).
     Syllables,
     /// Whole written words (each part of a hyphenated one; the syllables
     /// of one light together).
@@ -621,7 +622,7 @@ fn paint(
         let draw = |painter: &egui::Painter, look: Look, timing: &Timing| {
             // Words only change colour (their jump stays down), so they
             // still light up one by one.
-            if theme.reduced_motion && !look.words() {
+            if theme.reduced_motion && look.by == By::Letters {
                 if state.prefs.lyrics_glow {
                     let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
                     glow(painter, &g, line, head, feather, lit, focus * 0.1);
@@ -1877,23 +1878,11 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let mut glows = Vec::with_capacity(n);
     for (k, glyph) in timing.glyphs.iter().enumerate() {
         let syllable = glyph.map(|s| &timing.syllables[s]);
-        // By words: the written unit this glyph lights (and jumps) with.
-        let unit = timing.glyph_units[k].filter(|_| look.words());
         // A note held long glows while it is held: under karaoke, and in
         // every look by syllables.
         let sustained = syllable.filter(|s| current && (style == Style::Karaoke || look.by == By::Syllables) && held(s.start, s.end, s.letters, p));
-        // When the piece this glyph goes with is sung: its unit by words,
-        // its own letter in the wave (and in focus by syllables, which
-        // fills each syllable across its letters). Karaoke by letters or
-        // syllables follows the front instead; focus by letters lights the
-        // whole line.
-        let onset = if look.words() {
-            unit.map(|u| timing.units[u].start)
-        } else if style == Style::Wave || (style == Style::Focus && look.by == By::Syllables) {
-            syllable.map(|s| timing.onsets[k].unwrap_or(s.start))
-        } else {
-            None
-        };
+        // When the piece this glyph goes with is sung (see [`onset_of`]).
+        let onset = onset_of(timing, k, look);
         let on = onset.map(|at| light_over(p - at, rise, window));
         // Karaoke and Focus keep one baseline: sung and unsung words never
         // drift apart (that read as broken text). Reduced motion keeps the
@@ -1941,6 +1930,25 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         }
     }
     painter.galley(line.min, inked(g, |k| inks[k]), lit);
+}
+
+/// When glyph `k` of a line timed by `timing` starts to light under
+/// `look`: with its written unit by words; with its whole syllable by
+/// syllables (the light steps a syllable at a time), except in the wave,
+/// where each letter lights as it is sung and the word rises with its
+/// syllables; with its own letter in the wave by letters. `None`: karaoke
+/// by letters follows the front, focus by letters lights the whole line.
+fn onset_of(timing: &Timing, k: usize, look: Look) -> Option<f32> {
+    let syllable = timing.glyphs.get(k).copied().flatten().map(|s| &timing.syllables[s]);
+    if look.words() {
+        timing.glyph_units.get(k).copied().flatten().map(|u| timing.units[u].start)
+    } else if look.style == Style::Wave {
+        syllable.map(|s| timing.onsets[k].unwrap_or(s.start))
+    } else if look.by == By::Syllables {
+        syllable.map(|s| timing.onsets.get(s.glyphs.0).copied().flatten().unwrap_or(s.start))
+    } else {
+        None
+    }
 }
 
 /// Where the glow's copies of a line go.
@@ -3815,6 +3823,36 @@ mod tests {
             // By letters the same piece is weighted (its vowel takes longer).
             let w = Timing::new(&l, &g).unwrap();
             assert!((w.sung_at((s.start + s.end) * 0.5) - mid).abs() > 0.5);
+        });
+    }
+
+    /// «Шаг подсветки»: by letters karaoke follows the front, by syllables
+    /// each syllable lights whole as it starts, by words each word at its
+    /// first syllable.
+    #[test]
+    fn the_unit_sets_how_the_light_steps() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(3.0), "космо цветок");
+            l.words = vec![word(1.0, 1.4, "кос"), word(1.4, 1.8, "мо "), word(1.8, 2.4, "цве"), word(2.4, 2.8, "ток")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let look = |style, by| Look { style, by };
+            let t = Timing::of(&l, &g, look(Style::Karaoke, By::Syllables)).unwrap();
+            // Glyphs: к о с м о ␠ ц в е т о к.
+            let at = |k: usize, lk: Look| onset_of(&t, k, lk);
+            assert_eq!(at(0, look(Style::Karaoke, By::Letters)), None, "the front");
+            for style in [Style::Karaoke, Style::Focus] {
+                let s = look(style, By::Syllables);
+                assert_eq!(at(0, s), at(2, s), "«кос» lights whole");
+                assert_eq!(at(3, s), at(4, s), "«мо» lights whole");
+                assert!(at(3, s) > at(2, s), "a syllable after the other");
+                let w = look(style, By::Words);
+                assert_eq!(at(0, w), at(4, w), "«космо» lights whole");
+                assert!(at(6, w) > at(4, w));
+            }
+            assert_eq!(at(5, look(Style::Karaoke, By::Syllables)), None, "a space has none");
+            // The wave lights letter by letter, whatever the unit.
+            let wave = look(Style::Wave, By::Syllables);
+            assert!(at(1, wave) > at(0, wave));
         });
     }
 
