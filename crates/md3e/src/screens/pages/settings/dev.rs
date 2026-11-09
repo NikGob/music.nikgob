@@ -67,18 +67,27 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
         field.width(480.0).id_salt("set-acoustid").show(ui);
         ui.add_space(8.0);
         let contact_changed = pages.metadata_contact.trim() != p.metadata_contact.trim();
-        if ui
-            .add(
-                Button::new("Сохранить")
-                    .style(Style::Tonal)
-                    .enabled(contact_changed || !pages.acoustid_key.trim().is_empty())
-                    .id_salt("set-metadata-save"),
-            )
-            .clicked()
-        {
-            let key = std::mem::take(&mut pages.acoustid_key).trim().to_owned();
-            out.push(Command::SetMetadata { contact: pages.metadata_contact.trim().to_owned(), acoustid_key: (!key.is_empty()).then_some(key) });
-        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if ui
+                .add(
+                    Button::new("Сохранить")
+                        .style(Style::Tonal)
+                        .enabled(contact_changed || !pages.acoustid_key.trim().is_empty())
+                        .id_salt("set-metadata-save"),
+                )
+                .clicked()
+            {
+                let key = std::mem::take(&mut pages.acoustid_key).trim().to_owned();
+                out.push(Command::SetMetadata { contact: pages.metadata_contact.trim().to_owned(), acoustid_key: (!key.is_empty()).then_some(key) });
+            }
+            // An empty key leaves the saved one; this takes it away (the
+            // runtime clears it on an empty key), the contact as saved.
+            if p.acoustid_configured && ui.add(Button::new("Убрать ключ").style(Style::Text).id_salt("set-acoustid-clear")).clicked() {
+                pages.acoustid_key.clear();
+                out.push(Command::SetMetadata { contact: p.metadata_contact.trim().to_owned(), acoustid_key: Some(String::new()) });
+            }
+        });
     });
 }
 
