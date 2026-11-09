@@ -336,13 +336,6 @@ pub fn stage_tab(tab: usize) -> bool {
     matches!(tab, TAB_LYRICS | TAB_LOOK)
 }
 
-/// The tab of the session's old four-tab index (the page's history kept
-/// it): «Основные», «Рекомендации», «Источники», «Внешний вид» →
-/// «Система», «Музыка», «Загрузки», «Вид».
-pub fn tab_from_old(old: usize) -> usize {
-    [TAB_SYSTEM, TAB_MUSIC, TAB_DOWNLOADS, TAB_LOOK].get(old).copied().unwrap_or(TAB_MUSIC)
-}
-
 /// When a row shows: in «Просто» (and «Подробно»), only in «Подробно», or
 /// only in «Подробно» of the owner's own builds («Для разработчика»).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -2368,10 +2361,6 @@ mod tests {
         ] {
             assert_eq!(id.tab(), tab, "{id:?}");
         }
-        assert_eq!(tab_from_old(0), TAB_SYSTEM);
-        assert_eq!(tab_from_old(1), TAB_MUSIC);
-        assert_eq!(tab_from_old(2), TAB_DOWNLOADS);
-        assert_eq!(tab_from_old(3), TAB_LOOK);
         assert!(stage_tab(TAB_LYRICS) && stage_tab(TAB_LOOK) && !stage_tab(TAB_SYSTEM));
     }
 

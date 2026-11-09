@@ -1169,7 +1169,7 @@ impl Md3eUi {
 
     /// Opens Settings on a tab, scrolled to the row named `row` (scripted
     /// screenshots): `sources`, `spotify`, `youtube`, `import`, `torrents`,
-    /// `appearance`, anything else = «Основные».
+    /// `appearance`, anything else the controls of the track screen.
     pub fn open_settings_at(&mut self, row: &str) {
         use pages::SettingId as S;
         // As «Настройки текста…» under the lyrics opens it: the whole group.
@@ -1200,7 +1200,7 @@ impl Md3eUi {
             "dislikes" => S::DislikeButton,
             "blacklist" => S::DislikedArtists,
             "stream-analysis" => S::StreamAnalysis,
-            "appearance" => S::Design,
+            "appearance" => S::Theme,
             "pane" => S::PaneQueue,
             "lyrics" => S::LyricsModels,
             "lyrics-timing" => S::LyricsGenius,
@@ -1213,7 +1213,7 @@ impl Md3eUi {
         });
     }
 
-    /// Opens the cookies form of «Источники»
+    /// Opens the cookies form of «Сервисы»
     /// (scripted screenshots).
     pub fn unfold_sources(&mut self) {
         self.pages.unfold_sources();
@@ -1457,12 +1457,14 @@ mod tests {
         assert_eq!(ui.route(), &Route::Settings);
         let rects = tinted(&output);
         assert_eq!(rects.len(), 1, "one tinted group: {rects:?}");
-        for label in ["Текст песен", "Сохранять найденный текст в файл трека", "Где делать подсветку"] {
+        // «Где делать подсветку» is a developer's row now: the link lands
+        // on the lyrics' own look.
+        for label in ["Вид текста", "Анимация", "Размер текста"] {
             let at = text_at(&output, label).unwrap_or_else(|| panic!("{label} not drawn"));
             assert!(rects[0].contains(at + vec2(4.0, 4.0)), "{label} outside the tint");
             assert!((0.0..900.0).contains(&at.y), "{label} not scrolled into view");
         }
-        for label in ["Где искать текст", "Звук"] {
+        for label in ["Поиск текста", "Звук", "Для разработчика"] {
             if let Some(at) = text_at(&output, label) {
                 assert!(!rects[0].contains(at + vec2(4.0, 4.0)), "{label} inside the tint");
             }

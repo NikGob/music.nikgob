@@ -77,18 +77,22 @@ pub(crate) struct Arranged {
 
 /// Between the rows and the stage, and around the stage.
 const STAGE_GAP: f32 = 24.0;
+/// From this page width the stage stands beside the rows. The concept
+/// says 1000; a 1280 window with the rail open leaves the page 976, and
+/// there the stage still fits on the right.
+const WIDE: f32 = 960.0;
 
 /// Where the rows and the stage go in `room` (the page under the tabs) of
-/// a window `window` big: a wide page (≥ 1000) puts the rows on the left
-/// (42 %, 460–600) and the stage on the right in the window's proportions;
-/// a narrow one (600–1000) a strip over the rows (36 % high, 180–300);
-/// mini mode and the tabs without a stage, the rows alone.
+/// a window `window` big: a wide page puts the rows on the left (42 %,
+/// 460–600) and the stage on the right in the window's proportions; a
+/// narrow one (600 up to [`WIDE`]) a strip over the rows (36 % high,
+/// 180–300); mini mode and the tabs without a stage, the rows alone.
 pub(crate) fn arrange(room: Rect, window: Vec2, stage: bool) -> Arranged {
     let buttons_h = Size::S.height();
     if !stage || room.width() < 600.0 {
         return Arranged { rows: room, content_w: room.width().min(840.0), stage: None, buttons: None };
     }
-    if room.width() >= 1000.0 {
+    if room.width() >= WIDE {
         let rows_w = (room.width() * 0.42).clamp(460.0, 600.0);
         let rows = Rect::from_min_size(room.min, vec2(rows_w, room.height()));
         let left = rows.right() + STAGE_GAP;
@@ -446,10 +450,11 @@ mod tests {
     #[test]
     fn the_stage_has_its_place_by_width() {
         let window = vec2(1280.0, 800.0);
-        let wide = arrange(Rect::from_min_size(pos2(100.0, 200.0), vec2(1150.0, 600.0)), window, true);
+        // A 1280 window with the rail open.
+        let wide = arrange(Rect::from_min_size(pos2(280.0, 200.0), vec2(976.0, 600.0)), window, true);
         let stage = wide.stage.expect("a stage when wide");
         assert!(wide.rows.width() <= 600.0 && wide.rows.width() >= 460.0);
-        assert!(stage.left() > wide.rows.right() && stage.right() <= 1250.0 + 0.1);
+        assert!(stage.left() > wide.rows.right() && stage.right() <= 1256.0 + 0.1 && stage.width() > 400.0);
         assert!(wide.buttons.is_some_and(|b| b.top() > stage.bottom()));
         let narrow = arrange(Rect::from_min_size(pos2(100.0, 200.0), vec2(700.0, 600.0)), vec2(800.0, 800.0), true);
         let strip = narrow.stage.expect("a strip when narrow");
