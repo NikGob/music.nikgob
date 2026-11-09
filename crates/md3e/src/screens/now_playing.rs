@@ -282,17 +282,6 @@ impl Outline {
         out
     }
 
-    /// How far the outline reaches from its centre at most: half the
-    /// width for a playing shape (they are [`centred`] to fit the circle),
-    /// up to [`SQUARE_REACH`] of it for the square.
-    fn reach(&self) -> f32 {
-        let c = self.rect.center();
-        shape_paint::shape_path(&self.cubics, self.rect, self.rotation, 0.5)
-            .iter()
-            .map(|p| p.distance(c))
-            .fold(self.rect.width() * 0.5, f32::max)
-    }
-
     /// Whether `p` falls inside the outline itself (not just its square):
     /// even-odd test on the flattened path.
     pub fn contains(&self, p: Pos2) -> bool {
@@ -346,24 +335,6 @@ impl Outline {
 /// Room the ring takes around the cover on each side.
 const RING_PAD: f32 = 28.0;
 
-/// How far the square cover (the rounded square of [`cover_morph`], corner
-/// radius a tenth of the side) reaches from its centre, in half sides: its
-/// half diagonal, `0.4·√2 + 0.1` of the side.
-const SQUARE_REACH: f32 = 2.0 * (0.4 * std::f32::consts::SQRT_2 + 0.1);
-
-/// The share of its box the cover takes so the ring fits around it: the
-/// circle ring stands a gap off the outline's farthest point, so around the
-/// square (whose corners reach [`SQUARE_REACH`] half sides out) the cover
-/// shrinks until that circle is where a shape's ring would be.
-fn ring_fit(prefs: &nikgob_view::Prefs, square: bool) -> f32 {
-    if square && prefs.ring && prefs.ring_style == RingStyle::Circle { 1.0 / SQUARE_REACH } else { 1.0 }
-}
-
-/// `r` scaled by `k` about its centre.
-fn scaled(r: Rect, k: f32) -> Rect {
-    Rect::from_center_size(r.center(), r.size() * k)
-}
-
 /// The spectrum level for direction `theta`: low bands at the top, high at
 /// the bottom, mirrored left and right.
 fn band_at(bands: &[f32], theta: f32) -> f32 {
@@ -393,9 +364,12 @@ struct RingInput<'a> {
     /// Gaps, wobble and dot spacing relative to the player's (1); a small
     /// sample shrinks them so each style still reads as itself.
     scale: f32,
+    /// Where the «Круг» ring keeps its dots' place ([`dot_phase`]).
+    key: egui::Id,
 }
 
-/// The ring around the cover: dots on a soft 12-lobed circle, dots riding
+/// The ring around the cover: dots on a soft 12-lobed circle (around the
+/// square, its rounded offset), dots riding
 /// the outline at a fixed gap, or rounded bars growing out of it. Dots and
 /// bars jump out on each beat (`kick`) and where the spectrum spikes.
 fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
@@ -412,18 +386,45 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
     let kd = sc.sqrt();
     match input.style {
         RingStyle::Circle => {
+            // A circle around a shape; around the square (and every outline
+            // on the way between them) the outline's own offset, so no
+            // corner covers a dot and the path morphs with the cover. The
+            // dots sit evenly along it and keep the circle's speed.
+            let gap = 14.0 * sc;
+            let circle = outline.rect.width() * 0.5 + gap;
+            let path = circle_path(&outline.radii(), circle, gap);
+            let pts: Vec<Pos2> = (0..BINS).map(|i| center + dir(i as f32 * TAU / BINS as f32) * path[i]).collect();
+            let mut acc = Vec::with_capacity(BINS + 1);
+            let mut total = 0.0;
+            acc.push(0.0);
+            for i in 0..BINS {
+                total += pts[i].distance(pts[(i + 1) % BINS]);
+                acc.push(total);
+            }
             let n = ((72.0 * kd).round() as usize).max(24);
-            // A gap off the outline's farthest point, so no corner of the
-            // square (or of a shape on its way to it) covers a dot.
-            let radius = outline.reach() + 14.0 * sc;
-            for i in 0..n {
-                let u = i as f32 / n as f32;
-                let theta = input.angle + u * TAU;
+            let spacing = total / n as f32;
+            let u = dot_phase(ui.ctx(), input.key, input.angle, circle / spacing.max(1e-3));
+            let mut bin = 0;
+            for k in 0..n {
+                let along = k as f32 + u;
+                let d = (along * spacing) % total;
+                while bin + 1 < BINS && acc[bin + 1] < d {
+                    bin += 1;
+                }
+                while bin > 0 && acc[bin] > d {
+                    bin -= 1;
+                }
+                let seg = (acc[bin + 1] - acc[bin]).max(1e-3);
+                let f = ((d - acc[bin]) / seg).clamp(0.0, 1.0);
+                let (a, b) = (pts[bin], pts[(bin + 1) % BINS]);
+                let theta = (bin as f32 + f) * TAU / BINS as f32;
                 let level = band_at(input.transients, theta);
-                let r = radius + 3.0 * sc * (12.0 * u * TAU).cos() + (level * 16.0 + kick * 8.0) * sc;
+                // The soft 12 lobes ride with the dots.
+                let wobble = 3.0 * sc * (12.0 * TAU * along / n as f32).cos();
+                let out = dir(theta) * (wobble + (level * 16.0 + kick * 8.0) * sc);
                 let dot = (2.0 + level * 2.0 + kick * 0.8) * kd;
-                let a = input.alpha * (0.45 + 0.55 * level.max(kick * 0.6));
-                painter.circle_filled(center + dir(theta) * r, dot, s.primary.gamma_multiply(a));
+                let alpha = input.alpha * (0.45 + 0.55 * level.max(kick * 0.6));
+                painter.circle_filled(a + (b - a) * f + out, dot, s.primary.gamma_multiply(alpha));
             }
         }
         RingStyle::Contour => {
@@ -497,24 +498,28 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
     }
 }
 
-/// How strongly the ring shows: dimmed on a pause (`played` 0). The
-/// contour ring and the bars stay around the square too, and so does the
-/// circle around the square cover; around a shape turning into the square
-/// (`shown` 0) the circle goes, and before the square's corners would push
-/// it out of its room, so it never leaves the cover's box.
-fn ring_alpha(style: RingStyle, shape: bool, shown: f32, played: f32, outline: &Outline) -> f32 {
-    let alpha = 0.35 + 0.65 * played;
-    if style != RingStyle::Circle || !shape {
-        return alpha;
-    }
-    let mut alpha = alpha.min(shown);
-    if shown < 0.999 {
-        // How far the half-square reaches past the shape's circle: a
-        // tenth of the cover's half and the ring is gone.
-        let grow = outline.reach() / (outline.rect.width() * 0.5).max(1.0) - 1.0;
-        alpha *= (1.0 - grow / 0.1).clamp(0.0, 1.0);
-    }
-    alpha
+/// The «Круг» ring's path, one radius per [`BINS`] direction: the outline
+/// (`radii`) pushed out by `gap`, never inside `circle` (the ring around a
+/// shape). Around a shape that is the circle itself, around the square the
+/// rounded square's offset (no farther out at the sides than the circle, so
+/// it fits where the circle does), and in a morph between them each
+/// direction goes smoothly from one to the other.
+fn circle_path(radii: &[f32], circle: f32, gap: f32) -> Vec<f32> {
+    radii.iter().map(|r| (r + gap).max(circle)).collect()
+}
+
+/// Where the «Круг» ring's dots stand, as a fraction of their spacing: the
+/// dots are alike, so moving by whole ones shows nothing. It goes on by the
+/// ring's turn since the last frame times `per_radian` (dots per radian on
+/// the circle), so a dot runs as fast as it would on the circle along a
+/// longer path too, and a path that changes length never makes them jump.
+fn dot_phase(ctx: &egui::Context, key: egui::Id, angle: f32, per_radian: f32) -> f32 {
+    use std::f32::consts::PI;
+    let (last, u): (f32, f32) = ctx.data(|d| d.get_temp(key)).unwrap_or((angle, 0.0));
+    let step = (angle - last + PI).rem_euclid(TAU) - PI;
+    let u = (u + step * per_radian).rem_euclid(1.0);
+    ctx.data_mut(|d| d.insert_temp(key, (angle, u)));
+    u
 }
 
 /// An angle that turns one revolution per `period` seconds (faster with
@@ -987,8 +992,8 @@ pub fn show_on(
     }
 
     // Cover: playing → its shape, paused → rounded square (with «Менять
-    // форму на паузе» off it keeps the shape, only still); the circle ring
-    // around a shape fades in with it.
+    // форму на паузе» off it keeps the shape, only still); the ring follows
+    // the outline through the morph.
     let prefs = &state.prefs;
     let morph = anim::fraction(
         &ctx,
@@ -1004,19 +1009,13 @@ pub fn show_on(
         theme.motion.default_spatial,
     )
     .clamp(0.0, 1.0);
-    let mut mega = mega_layout(body);
+    let mega = mega_layout(body);
     let bars = prefs.ring && prefs.ring_style == RingStyle::Bars;
     let current = p.current.as_ref();
     let shape = cover_shape_in(&ctx, stage.id("np-random-shape"), prefs.cover_shape, &prefs.random_shapes, current);
     // The bars want room to grow: the cover gives way to them.
     let pad = if bars { (cover_box.width() * 0.13).clamp(RING_PAD, 80.0) } else { RING_PAD };
-    // The square gives way to a circle ring around its corners (beside
-    // the lyrics too; the small cover of a narrow window has no ring).
-    let fit = ring_fit(prefs, shape.is_none());
-    let normal_cover = scaled(cover_box.shrink(pad), fit);
-    if mega.wide {
-        mega.cover = scaled(mega.cover, fit);
-    }
+    let normal_cover = cover_box.shrink(pad);
     let cover_rect = if theme.reduced_motion { normal_cover } else { lerp_rect(normal_cover, mega.cover, mega_k) };
     let shown = morph.clamp(0.0, 1.0);
     let swap = shape_swap(&ctx, stage, shape, morph >= 0.999, theme.reduced_motion);
@@ -1068,8 +1067,11 @@ pub fn show_on(
                 bars: &heights,
                 room: pad,
                 kick: if beat { kick } else { 0.0 },
-                alpha: ring_alpha(prefs.ring_style, shape.is_some(), shown, played, &outline),
+                // Dimmed on a pause; every style stays around the square
+                // too, following the outline as it morphs.
+                alpha: 0.35 + 0.65 * played,
                 scale: 1.0,
+                key: egui::Id::new("np-ring-dots"),
         };
         let alpha = input.alpha;
         input.alpha *= if theme.reduced_motion || !mega.wide { 1.0 - mega_k } else { 1.0 };
@@ -1338,8 +1340,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
     // Stronger than in the player, so a small sample shows it.
     let swell = if prefs.cover_pulse { 1.0 + 0.08 * kick } else { 1.0 };
     let pad = if with_ring { RING_PAD * 0.8 } else { 8.0 };
-    let fit = if with_ring { ring_fit(prefs, prefs.cover_shape == CoverShape::Original) } else { 1.0 };
-    let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0) * fit;
+    let side = (rect.width().min(rect.height()) - 2.0 * pad).max(16.0);
     let cover = Rect::from_center_size(rect.center(), vec2(side, side) * swell);
     let outline = match prefs.cover_shape {
         CoverShape::Random => {
@@ -1388,6 +1389,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
             // The player's cover is ~300 px: at sample size the gaps and
             // the circle's wobble would swamp the shape.
             scale: (side / 300.0).clamp(0.3, 1.0),
+            key: egui::Id::new("np-ring-dots-sample"),
         };
         ring(ui, &outline, &input);
     }
@@ -1881,29 +1883,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_circle_ring_clears_the_square_and_stays_in_its_box() {
+    fn the_circle_ring_rounds_the_square_inside_the_circles_box() {
         let rect = Rect::from_center_size(pos2(300.0, 300.0), vec2(400.0, 400.0));
-        let square = Outline::new(None, 1.0, rect, 0.0);
-        assert!((square.reach() - 200.0 * SQUARE_REACH).abs() < 1.5, "{}", square.reach());
-        // Shrunk by the fit, the square's circle ring sits where a shape's
-        // does around the full-size cover.
-        let mut prefs = nikgob_view::Prefs { ring: true, ring_style: RingStyle::Circle, ..Default::default() };
-        let small = Outline::new(None, 1.0, scaled(rect, ring_fit(&prefs, true)), 0.0);
+        let (gap, circle) = (14.0, 214.0);
+        let dir = |i: usize| vec2((i as f32 * TAU / BINS as f32).sin(), -(i as f32 * TAU / BINS as f32).cos());
+        // Around a shape: the circle itself.
         let shape = Outline::new(Some(MaterialShape::Cookie12Sided), 1.0, rect, 0.4);
-        assert!((small.reach() - shape.reach()).abs() < 1.5, "{} vs {}", small.reach(), shape.reach());
-        assert!((shape.reach() - 200.0).abs() < 1.5);
-        prefs.ring_style = RingStyle::Contour;
-        assert_eq!(ring_fit(&prefs, true), 1.0, "the contour follows the square itself");
-        prefs.ring_style = RingStyle::Circle;
-        assert_eq!(ring_fit(&prefs, false), 1.0);
-        // The circle around the square cover stays on a pause, dimmed; around
-        // a shape it is gone well before the square's corners push it out.
-        let s = Some(MaterialShape::Cookie12Sided);
-        assert!((ring_alpha(RingStyle::Circle, false, 0.0, 0.0, &square) - 0.35).abs() < 1e-4);
-        assert!((ring_alpha(RingStyle::Circle, true, 1.0, 1.0, &shape) - 1.0).abs() < 1e-4);
-        assert!((ring_alpha(RingStyle::Circle, true, 1.0, 0.0, &shape) - 0.35).abs() < 1e-4, "shape kept on a pause");
-        assert!(ring_alpha(RingStyle::Circle, true, 0.2, 0.2, &Outline::new(s, 0.2, rect, 0.0)) < 0.05);
-        assert!((ring_alpha(RingStyle::Contour, true, 0.0, 0.0, &square) - 0.35).abs() < 1e-4);
+        assert!(circle_path(&shape.radii(), circle, gap).iter().all(|r| (r - circle).abs() < 1.0));
+        // Around the square (and half-way to it): a gap off every corner, and
+        // never farther out at the sides than the circle.
+        for k in [0.0, 0.5] {
+            let o = Outline::new(Some(MaterialShape::Cookie12Sided), k, rect, 0.0);
+            let radii = o.radii();
+            let path = circle_path(&radii, circle, gap);
+            for i in 0..BINS {
+                assert!(path[i] >= radii[i] + gap - 0.01);
+                let p = dir(i) * path[i];
+                assert!(p.x.abs() <= circle + 1.0 && p.y.abs() <= circle + 1.0, "{k} {i}: {p:?}");
+            }
+        }
+        let square = circle_path(&Outline::new(None, 1.0, rect, 0.0).radii(), circle, gap);
+        assert!(square[45] > circle + 50.0, "the corners go round, not under, the dots");
+        // The dots keep the circle's speed: a quarter turn moves them a
+        // quarter of the circle's dots, however long the path.
+        let ctx = egui::Context::default();
+        let key = egui::Id::new("t");
+        assert_eq!(dot_phase(&ctx, key, 6.0, 72.0 / TAU), 0.0);
+        let u = dot_phase(&ctx, key, 6.0 + 0.25 * TAU / 72.0, 72.0 / TAU);
+        assert!((u - 0.25).abs() < 1e-3);
+        // Across the wrap of the angle, no jump.
+        let u = dot_phase(&ctx, key, 0.01, 72.0 / TAU);
+        let expect = (0.25 + (0.01 + TAU - 6.0 - 0.25 * TAU / 72.0) * 72.0 / TAU).rem_euclid(1.0);
+        assert!((u - expect).abs() < 1e-3, "{u} vs {expect}");
     }
 
     #[test]
