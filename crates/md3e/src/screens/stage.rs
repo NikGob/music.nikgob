@@ -318,7 +318,11 @@ pub fn request(ctx: &Context, req: StageRequest) {
 }
 
 fn take(ctx: &Context) -> Option<StageRequest> {
-    ctx.data_mut(|d| d.remove_temp::<StageRequest>(request_id()))
+    ctx.data_mut(|d| {
+        let req = d.get_temp::<StageRequest>(request_id());
+        d.remove::<StageRequest>(request_id());
+        req
+    })
 }
 
 // ---- Geometry -----------------------------------------------------------
