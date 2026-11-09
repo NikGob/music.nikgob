@@ -382,6 +382,8 @@ fn follow(
             req.scene = scene;
             mem.scenes[slot] = Some(scene);
         }
+        // In the look that has what the row tunes (the wave for a jump).
+        let prefs = id.staged(&prefs);
         req.script = id.script(&prefs);
         req.prefs = prefs;
         req.zoom = false;

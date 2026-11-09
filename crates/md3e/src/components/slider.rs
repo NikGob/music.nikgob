@@ -146,11 +146,13 @@ impl Slider {
             );
             // No bounce: a spatial spring undershoots 0 on pause and would
             // have to be clamped there, which cuts the flattening short.
+            // With less motion the wave stays, still: «Волна на полосе
+            // прогресса» shows either way, only its travel stops.
             let running = self.wavy && !theme.reduced_motion;
             let wave_k = anim::fraction(
                 &ctx,
                 id.with("wave"),
-                if running { 1.0 } else { 0.0 },
+                if self.wavy { 1.0 } else { 0.0 },
                 theme.motion.slow_effects,
             )
             .clamp(0.0, 1.0);

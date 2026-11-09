@@ -1414,6 +1414,25 @@ impl SettingId {
         }
     }
 
+    /// The settings the stage shows for the row from `p`: where the row
+    /// tunes something the shown look does not have (a jump without the
+    /// wave, crests on a flat ring, a speed of a line that lights whole),
+    /// the look that has it, so every knob shows on the stage. Nothing of it
+    /// is kept.
+    pub fn staged(self, p: &Prefs) -> Prefs {
+        use SettingId::*;
+        let mut q = p.clone();
+        match self {
+            WaveJump | JumpSpeed if q.lyrics_style != 2 => q.lyrics_style = 2,
+            LyricsGapWaves | LyricsGapHeight if q.lyrics_gap_style % 2 == 0 => q.lyrics_gap_style += 1,
+            LyricsSmooth | LightSpeed if q.lyrics_style == 1 && q.lyrics_unit == v::LYRICS_BY_LETTERS => {
+                q.lyrics_unit = v::LYRICS_BY_SYLLABLES;
+            }
+            _ => {}
+        }
+        q
+    }
+
     /// What the stage acts out for the row with the settings `p` shown: what
     /// cannot be seen without doing something.
     pub fn script(self, p: &Prefs) -> Script {
@@ -2901,6 +2920,11 @@ mod tests {
         assert_eq!(S::LyricsCountdown.script(&p), Script::Countdown);
         assert_eq!(S::LyricsGapSize.script(&p), Script::Interlude);
         assert_eq!(S::NpMotion.script(&p), Script::Open);
+        // The stage shows a knob in the look that has it.
+        let karaoke = Prefs { lyrics_style: 0, lyrics_gap_style: 0, ..p.clone() };
+        assert_eq!(S::JumpSpeed.staged(&karaoke).lyrics_style, 2);
+        assert_eq!(S::LyricsGapWaves.staged(&karaoke).lyrics_gap_style, 1);
+        assert_eq!(S::LyricsDim.staged(&karaoke), karaoke, "a row the look has is shown as it is");
         assert_eq!(S::Preset(v::presets::Area::Track).parts().len(), 4);
         assert!(S::Theme.parts().is_empty(), "the whole screen: nothing outlined");
     }

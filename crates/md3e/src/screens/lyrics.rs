@@ -2220,8 +2220,11 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     let height = prefs.lyrics_gap_height.clamp(0.5, 2.0);
     // About half the stroke: anything less reads as a lumpy polygon, and
     // the tip (where the wave comes out) looks straight half the time.
+    // Fewer crests stand taller, more lie lower: «Количество волн» shows as
+    // a few big waves or a fine ripple, not the same ring.
+    let count = (8.0 / prefs.lyrics_gap_waves.clamp(3.0, 16.0)).sqrt().clamp(0.7, 1.6);
     let requested_amp = if prefs.lyrics_gap_style % 2 == 1 {
-        ramp * k * shrink * height * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
+        ramp * k * shrink * height * count * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
     } else { 0.0 };
     let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp, height);
     let amp = amp * (1.0 - close);
