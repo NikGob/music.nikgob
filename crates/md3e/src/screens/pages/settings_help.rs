@@ -2813,6 +2813,67 @@ mod tests {
         }
     }
 
+    /// A preset row's options are its presets: each one picked reads back,
+    /// values of the user's own read as «Свои» (the button after them), and
+    /// its card's table names the values as the rows do.
+    #[test]
+    fn presets_are_choices_and_their_cards_read() {
+        use v::presets::{Area, Field, FieldValue};
+        for area in Area::ALL.into_iter().filter(|a| !a.names().is_empty()) {
+            let id = SettingId::Preset(area);
+            assert_eq!(id.choices().len(), area.names().len(), "{area:?}");
+            for (i, c) in id.choices().iter().enumerate() {
+                assert_eq!(c.label, area.names()[i]);
+                let mut p = Prefs::default();
+                id.choose(&mut p, i);
+                assert_eq!(id.chosen(&p), i, "{area:?} {i}");
+            }
+            assert_eq!(id.level(), Level::Simple);
+            assert_eq!(preset_title(area), id.label());
+            assert!(matches!(base_body(id), Body::Table));
+        }
+        let mut own = Prefs::first_start();
+        own.fps_limit = 75;
+        assert_eq!(SettingId::Preset(Area::Load).chosen(&own), 3, "«Свои»");
+        assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(0.0)), "∞");
+        assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(3.5)), "3,5");
+        assert_eq!(field_text(Field::Ambient, &FieldValue::Ambient(v::Ambient::Reactive)), "Под звук");
+        assert_eq!(field_text(Field::CoverShape, &FieldValue::Shape(v::CoverShape::Original)), "Квадрат");
+        // The rows a preset would change, as the underlay marks them.
+        let p = Prefs::first_start();
+        let quiet = Area::Load.with(&p, 0);
+        let changed = preset_changes(Area::Load, &p, &quiet);
+        assert!(changed.contains(&SettingId::FpsLimit) && !changed.contains(&SettingId::LyricsWordsAll), "{changed:?}");
+        assert!(preset_changes(Area::Load, &p, &p).is_empty());
+    }
+
+    /// The new knobs of the track screen know their stage part, and the
+    /// scenes acted out come from the rows that need them.
+    #[test]
+    fn rows_say_what_the_stage_shows() {
+        use SettingId as S;
+        let p = Prefs::default();
+        for id in [S::CoverSpinSpeed, S::CoverPulseStrength] {
+            assert_eq!((id.scene(), id.part()), (Some(Scene::Track), Some(Part::Cover)), "{id:?}");
+        }
+        assert_eq!(S::RingSpinSpeed.part(), Some(Part::Ring));
+        assert_eq!(S::HomeSections.scene(), Some(Scene::Home));
+        assert_eq!(S::MixesProfiles.part(), Some(Part::Home(Section::Mixes)));
+        assert_eq!(S::AlbumDate.scene(), Some(Scene::Album));
+        assert_eq!(S::Theme.scene(), None, "the theme shows on any screen");
+        assert_eq!(S::RailCompact.part(), None);
+        let random = Prefs { cover_shape: v::CoverShape::Random, ..p.clone() };
+        assert_eq!(S::CoverShape.script(&random), Script::RandomShape);
+        assert_eq!(S::ShapeRange.script(&p), Script::RandomShape);
+        assert_eq!(S::LyricsCascade.script(&p), Script::LyricsStep);
+        assert_eq!(S::LyricsSoftDepth.script(&p), Script::EdgesScroll);
+        assert_eq!(S::LyricsCountdown.script(&p), Script::Countdown);
+        assert_eq!(S::LyricsGapSize.script(&p), Script::Interlude);
+        assert_eq!(S::NpMotion.script(&p), Script::Open);
+        assert_eq!(S::Preset(v::presets::Area::Track).parts().len(), 4);
+        assert!(S::Theme.parts().is_empty(), "the whole screen: nothing outlined");
+    }
+
     #[test]
     fn cards_sit_under_the_row_or_flip_above_and_stay_on_screen() {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));

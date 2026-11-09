@@ -144,7 +144,8 @@ pub(super) fn row(ui: &mut Ui, area: Area, p: &Prefs) -> Option<Prefs> {
     let i = under?;
     let shown = offered(area, p, i);
     settings_help::set_future(&ctx, settings_help::preset_changes(area, p, &shown));
-    ctx.data_mut(|d| d.insert_temp(offer_key(), (ctx.cumulative_pass_nr(), Offer { id, prefs: shown.clone() })));
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| d.insert_temp(offer_key(), (pass, Offer { id, prefs: shown.clone() })));
     Some(shown)
 }
 

@@ -368,17 +368,17 @@ fn follow(
     {
         // The values are applied already: the stage shows them.
         let glow = if down { 1.0 } else { settings_help::glow_at(((now - at) * settings_help::FOCUS_S / CHANGED_S) as f32) };
-        show(&mut req, mem, id, p.clone(), id.parts(), glow.max(0.35));
+        show(&mut req, &mut *mem, id, p.clone(), id.parts(), glow.max(0.35));
         ctx.request_repaint();
     } else if let Some(o) = offer {
         // A preset: the whole of it, every part it changes.
-        show(&mut req, mem, o.id, o.prefs, o.id.parts(), 1.0);
+        show(&mut req, &mut *mem, o.id, o.prefs, o.id.parts(), 1.0);
     } else if rested && let Some((id, opt)) = under {
         if id.part().is_none() {
             return req;
         }
         let prefs = opt.and_then(|i| option_prefs(id, p, i)).unwrap_or_else(|| p.clone());
-        show(&mut req, mem, id, prefs, option_parts(id, p, opt), 1.0);
+        show(&mut req, &mut *mem, id, prefs, option_parts(id, p, opt), 1.0);
     }
     req
 }
@@ -647,6 +647,228 @@ mod tests {
         assert!(seen, "the linked deep row is drawn");
         assert_eq!(pages.settings_tab, settings_help::TAB_DOWNLOADS);
         assert_eq!(pages.settings_deep, Some(false), "the saved mode stays");
+    }
+
+    /// One frame of the page alone at `time`, the pointer at `at`, with
+    /// `events`; what it sent.
+    fn run(ctx: &egui::Context, state: &ViewState, pages: &mut PageState, time: f64, at: Option<egui::Pos2>, events: Vec<egui::Event>) -> Vec<Command> {
+        let mut all: Vec<egui::Event> = at.map(egui::Event::PointerMoved).into_iter().collect();
+        all.extend(events);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+            time: Some(time),
+            events: all,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let mut done = ctx.run_ui(input, |ui| {
+            page(ui, state, 96.0, None, pages, &mut out);
+        });
+        done.textures_delta.clear();
+        out
+    }
+
+    /// The saved mode is the prefs' (the owner's build is given «Подробно»
+    /// once, a new user starts in «Просто»).
+    #[test]
+    fn the_mode_comes_from_the_prefs() {
+        let ctx = context();
+        for deep in [false, true] {
+            let mut state = crate::screens::sweep::survey_state();
+            state.prefs.settings_deep = deep;
+            let mut pages = PageState::default();
+            pages.settings_tab = settings_help::TAB_LOOK;
+            for f in 0..3 {
+                run(&ctx, &state, &mut pages, f64::from(f) * 0.1, None, Vec::new());
+            }
+            let rows = settings_help::drawn_rows(&ctx).1;
+            assert_eq!(rows.iter().any(|r| r.id == Id::Contrast), deep, "deep {deep}");
+            assert!(rows.iter().any(|r| r.id == Id::Preset(nikgob_view::presets::Area::Track)), "the preset shows in both");
+        }
+        assert!(!Prefs::first_start().settings_deep);
+    }
+
+    /// The preset under the pointer is drawn on the stage (all of it, every
+    /// part outlined) and nothing is sent until it is clicked.
+    #[test]
+    fn a_preset_under_the_pointer_is_shown_not_kept() {
+        use nikgob_view::presets::Area;
+        let ctx = context();
+        let state = crate::screens::sweep::survey_state();
+        let mut pages = PageState::default();
+        pages.settings_tab = settings_help::TAB_LOOK;
+        pages.settings_deep = Some(true);
+        for f in 0..3 {
+            run(&ctx, &state, &mut pages, f64::from(f) * 0.1, None, Vec::new());
+        }
+        let rows = settings_help::drawn_rows(&ctx).1;
+        let tiles = rows.iter().find(|r| r.id == Id::Preset(Area::Track)).map(|r| r.choices.clone()).unwrap_or_default();
+        assert_eq!(tiles.len(), 3, "Строго · Живо · Максимум");
+        let at = tiles[0].center();
+        let mut sent = Vec::new();
+        for t in [1.0, 1.1, 1.3, 1.5] {
+            sent.extend(run(&ctx, &state, &mut pages, t, Some(at), Vec::new()));
+        }
+        assert!(!sent.iter().any(|c| matches!(c, Command::SetPrefs(_) | Command::SetPref(_))), "{sent:?}");
+        let req = stage::requested(&ctx).expect("a stage beside the rows");
+        assert_eq!(req.prefs, Area::Track.with(&state.prefs, 0));
+        assert_eq!(req.scene, Scene::Track);
+        assert_eq!(req.parts.len(), 4);
+        assert!(!req.zoom);
+    }
+
+    /// What the stage shows by the row under the pointer, once it rests
+    /// there: the row's screen and part (a small part brought up), the
+    /// option under the pointer shown before it is picked with its scene
+    /// acted out, and a row not on the stage changes nothing.
+    #[test]
+    fn the_stage_follows_the_row_under_the_pointer() {
+        let ctx = context();
+        let p = Prefs::default();
+        let stage_rect = Rect::from_min_size(pos2(700.0, 100.0), vec2(500.0, 320.0));
+        let at = pos2(60.0, 60.0);
+        let here = Rect::from_center_size(at, vec2(40.0, 40.0));
+        let row = |id: Id, choices: Vec<Rect>| DrawnRow {
+            id,
+            label: String::new(),
+            group: String::new(),
+            rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(480.0, 120.0)),
+            button: Rect::NOTHING,
+            control: None,
+            choices,
+            menu: Vec::new(),
+            clip: Rect::EVERYTHING,
+            opacity: 1.0,
+            enabled: true,
+            hovered: true,
+        };
+        let mut mem = Memory::default();
+        let mut t = 0.0;
+        let mut step = |rows: &[DrawnRow], mem: &mut Memory| -> StageRequest {
+            t += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+                time: Some(t),
+                events: vec![egui::Event::PointerMoved(at)],
+                ..Default::default()
+            };
+            let mut req = None;
+            let mut done = ctx.run_ui(input, |ui| {
+                let c = ui.ctx().clone();
+                req = Some(follow(&c, mem, settings_help::TAB_LOOK, stage_rect, &p, rows, None, false));
+            });
+            done.textures_delta.clear();
+            req.expect("a request")
+        };
+        let progress = [row(Id::ProgressWave, Vec::new())];
+        let first = step(&progress, &mut mem);
+        assert!(first.parts.is_empty(), "passing over shows nothing yet");
+        let _ = step(&progress, &mut mem);
+        let rest = step(&progress, &mut mem);
+        assert_eq!((rest.scene, rest.parts.clone(), rest.zoom, rest.outline), (Scene::Track, vec![Part::Progress], true, 1.0));
+
+        let volume = [row(Id::NpVolume, vec![Rect::from_min_size(pos2(200.0, 0.0), vec2(10.0, 10.0)), here])];
+        for _ in 0..3 {
+            let _ = step(&volume, &mut mem);
+        }
+        let pill = step(&volume, &mut mem);
+        assert!(!pill.prefs.np_volume && pill.prefs.np_volume_pop, "the option under the pointer is shown");
+        assert_eq!((pill.script, pill.parts.clone()), (Script::Volume, vec![Part::Volume]));
+
+        let date = [row(Id::AlbumDate, Vec::new())];
+        for _ in 0..3 {
+            let _ = step(&date, &mut mem);
+        }
+        assert_eq!(step(&date, &mut mem).scene, Scene::Album);
+        let window = [row(Id::RailCompact, Vec::new())];
+        for _ in 0..3 {
+            let _ = step(&window, &mut mem);
+        }
+        let still = step(&window, &mut mem);
+        assert_eq!(still.scene, Scene::Album, "the last screen stays");
+        assert!(still.parts.is_empty());
+    }
+
+    /// Ctrl+Z takes back this visit's changes one by one (a drag is one),
+    /// at most 20, and leaves what the runtime keeps in the prefs alone.
+    #[test]
+    fn ctrl_z_takes_a_change_back() {
+        let ctx = context();
+        let mut state = ViewState::default();
+        let mut mem = Memory::default();
+        let mut t = 0.0;
+        let mut frame = |state: &ViewState, mem: &mut Memory, changed: bool, events: Vec<egui::Event>| -> Vec<Command> {
+            t += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+                time: Some(t),
+                events,
+                ..Default::default()
+            };
+            let mut out = Vec::new();
+            let mut done = ctx.run_ui(input, |ui| {
+                let c = ui.ctx().clone();
+                undo(&c, state, mem, changed, &mut out);
+            });
+            done.textures_delta.clear();
+            out
+        };
+        let was = state.prefs.ring;
+        assert!(frame(&state, &mut mem, true, Vec::new()).is_empty());
+        state.prefs.ring = !was;
+        state.prefs.output_devices = vec!["Наушники".into()];
+        let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+        let z = egui::Event::Key { key: Key::Z, physical_key: None, pressed: true, repeat: false, modifiers: ctrl };
+        let out = frame(&state, &mut mem, false, vec![z.clone()]);
+        let [Command::SetPrefs(back)] = out.as_slice() else { panic!("{out:?}") };
+        assert_eq!(back.ring, was);
+        assert_eq!(back.output_devices, state.prefs.output_devices, "the runtime's own stay");
+        assert!(frame(&state, &mut mem, false, vec![z]).is_empty(), "nothing more to take back");
+
+        // A drag: one step for the whole press.
+        let at = pos2(10.0, 10.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(&state, &mut mem, true, vec![egui::Event::PointerMoved(at), press(true)]);
+        frame(&state, &mut mem, true, Vec::new());
+        frame(&state, &mut mem, true, vec![press(false)]);
+        assert_eq!(mem.undo.len(), 1);
+        for _ in 0..30 {
+            frame(&state, &mut mem, true, Vec::new());
+        }
+        assert_eq!(mem.undo.len(), UNDO);
+    }
+
+    /// Every field a preset owns has its row on the preset's tab, and every
+    /// row of «Экран трека» and «Вид текста» has a screen and a part on the
+    /// stage.
+    #[test]
+    fn preset_fields_have_rows_and_stage_rows_have_parts() {
+        use nikgob_view::presets::Area;
+        let ctx = context();
+        let state = crate::screens::sweep::survey_state();
+        for area in Area::ALL.into_iter().filter(|a| !a.names().is_empty()) {
+            let tab = Id::Preset(area).tab();
+            let rows: Vec<Id> = drawn(&ctx, &state, tab, true, 1280.0).into_iter().map(|r| r.id).collect();
+            assert!(rows.contains(&Id::Preset(area)), "{area:?}");
+            for &f in area.fields() {
+                let ids = settings_help::preset_rows(f);
+                assert!(!ids.is_empty(), "{f:?}");
+                for id in ids {
+                    assert_eq!(id.tab(), tab, "{f:?} → {id:?}");
+                    assert!(rows.contains(&id), "{f:?} → {id:?} is not drawn");
+                }
+            }
+            let simple: Vec<Id> = drawn(&ctx, &state, tab, false, 1280.0).into_iter().map(|r| r.id).collect();
+            assert!(simple.contains(&Id::Preset(area)), "{area:?} in «Просто»");
+        }
+        for tab in [settings_help::TAB_LOOK, settings_help::TAB_LYRICS] {
+            let rows = drawn(&ctx, &state, tab, true, 1280.0);
+            let staged: Vec<&DrawnRow> = rows.iter().filter(|r| r.group == "Экран трека" || r.group == "Вид текста").collect();
+            assert!(staged.len() > 10, "tab {tab}");
+            for r in staged {
+                assert!(r.id.scene().is_some() && r.id.part().is_some(), "{:?}", r.id);
+            }
+        }
     }
 
     /// Wide: the stage on the right, the rows ≤ 600; narrow: a strip over

@@ -316,6 +316,13 @@ pub fn request(ctx: &Context, req: StageRequest) {
     ctx.data_mut(|d| d.insert_temp(request_id(), req));
 }
 
+/// What was asked for this frame and not drawn yet (tests of the page
+/// without the shell).
+#[cfg(test)]
+pub fn requested(ctx: &Context) -> Option<StageRequest> {
+    ctx.data(|d| d.get_temp::<StageRequest>(request_id()))
+}
+
 fn take(ctx: &Context) -> Option<StageRequest> {
     ctx.data_mut(|d| {
         let req = d.get_temp::<StageRequest>(request_id());

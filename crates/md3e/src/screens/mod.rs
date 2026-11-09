@@ -1729,6 +1729,38 @@ mod tests {
             egui::Shape::Text(text) if text.galley.text() == "Название песни")));
     }
 
+    /// The stage stands right of the rows in a 1280 window (the rows at
+    /// most 600 wide), as a strip over them at 800, and not at all at 500.
+    #[test]
+    fn the_stage_stands_right_wide_on_top_narrow_and_not_in_mini_mode() {
+        for width in [1280.0, 800.0, 500.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = sweep::survey_state();
+            state.prefs.settings_deep = true;
+            ui.pages.open_setting(pages::SettingId::Theme);
+            for i in 0..10 {
+                frame(&ctx, &mut ui, &mut state, f64::from(i) * 0.2, width, None);
+            }
+            let rows = pages::settings_help::drawn_rows(&ctx).1;
+            assert!(!rows.is_empty(), "{width}: the settings rows");
+            let column = rows[0].clip;
+            match ui.stage.rect {
+                Some(s) if width > 1000.0 => {
+                    assert!(column.right() < s.left(), "{width}: the stage on the right of {column:?}: {s:?}");
+                    assert!(column.width() <= 600.5, "{width}: rows {}", column.width());
+                    assert!(s.width() > 300.0);
+                }
+                Some(s) if width > 600.0 => {
+                    assert!(column.top() >= s.bottom(), "{width}: a strip over the rows {column:?}: {s:?}");
+                    assert!(s.width() > s.height() * 1.5, "{width}: a strip {s:?}");
+                }
+                None => assert!(width < 600.0, "{width}: no stage"),
+                Some(s) => panic!("{width}: a stage in mini mode {s:?}"),
+            }
+        }
+    }
+
     /// One frame with a pointer press or release at `pos`.
     fn pointer(ctx: &Context, ui: &mut Md3eUi, state: &ViewState, time: f64, pos: egui::Pos2, pressed: bool) {
         let events = vec![
