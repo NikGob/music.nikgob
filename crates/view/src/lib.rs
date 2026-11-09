@@ -1540,6 +1540,9 @@ pub struct Prefs {
     pub lyrics_settings_seen: bool,
     /// The outline the Now Playing cover takes while playing.
     pub cover_shape: CoverShape,
+    /// «Менять форму на паузе»: a pause turns the shaped cover into the
+    /// rounded square (off: it keeps its shape, only still).
+    pub cover_pause_morph: bool,
     /// The cover's outline turns while playing (the picture stays put).
     pub cover_spin: bool,
     /// The cover swells a little on each beat.
@@ -1610,6 +1613,8 @@ pub struct Prefs {
     /// The navigation rail always stays narrow (icons only) and its expand
     /// button is gone.
     pub rail_compact: bool,
+    /// «Дата альбома»: how much of an album's release date its page shows.
+    pub album_date: AlbumDate,
     /// The parts of the side pane by the content, each on its own: none by
     /// default, and a part that is off has no button, menu item or key.
     pub pane_queue: bool,
@@ -1947,6 +1952,10 @@ pub enum PrefPatch {
     HomeCard(bool),
     /// The outline the Now Playing cover takes.
     CoverShape(CoverShape),
+    /// «Менять форму на паузе».
+    CoverPauseMorph(bool),
+    /// «Дата альбома».
+    AlbumDate(AlbumDate),
     /// What stands beside the Now Playing cover.
     NpSlot(NpSlot),
     /// Windows starts the app at sign-in (as the system says).
@@ -2009,6 +2018,8 @@ impl PrefPatch {
             }
             Self::HomeCard(on) => p.home_card = *on,
             Self::CoverShape(s) => p.cover_shape = *s,
+            Self::CoverPauseMorph(on) => p.cover_pause_morph = *on,
+            Self::AlbumDate(d) => p.album_date = *d,
             Self::NpSlot(s) => p.np_slot = *s,
             Self::Autostart(on) => p.autostart = *on,
             Self::UserName(name) => {
@@ -2184,6 +2195,19 @@ pub enum RingStyle {
     /// Dots around the outline that grow into bars with the spectrum
     /// (caelestia's cover visualiser).
     Bars,
+}
+
+/// How much of an album's release date its page shows
+/// ([`Prefs::album_date`]); what is not known falls back to what is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AlbumDate {
+    /// «2026».
+    #[default]
+    Year,
+    /// «Октябрь 2026».
+    MonthYear,
+    /// «23 октября 2026».
+    Full,
 }
 
 /// The Now Playing cover's outline while playing.
@@ -2958,6 +2982,7 @@ impl Default for Prefs {
             lyrics_stream_keep: 0,
             lyrics_settings_seen: false,
             cover_shape: CoverShape::default(),
+            cover_pause_morph: true,
             cover_spin: true,
             cover_pulse: true,
             ring: true,
@@ -2988,6 +3013,7 @@ impl Default for Prefs {
             bg_shapes_hue: 5,
             ambient_strength: 1.0,
             rail_compact: false,
+            album_date: AlbumDate::Year,
             pane_queue: false,
             pane_lyrics: false,
             pane_info: false,
@@ -3111,6 +3137,7 @@ impl Prefs {
             bg_shapes_colors: 1,
             bg_shapes_hue: 6,
             rail_compact: true,
+            album_date: AlbumDate::Year,
             spotify_enabled: false,
             library_only_downloaded: true,
             auto_download_limit: 3,

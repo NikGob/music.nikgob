@@ -651,7 +651,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     });
 
     group(ui, "Обложка");
-    row(ui, Id::CoverShape, "Форма обложки", Some("Пока играет музыка; на паузе — квадрат"), |ui| {
+    row(ui, Id::CoverShape, "Форма обложки", None, |ui| {
         choice(ui, Id::CoverShape, p);
     });
     match p.cover_shape {
@@ -698,6 +698,12 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
             }
         }
     }
+    // The square cover has no shape to change.
+    dimmed(ui, p.cover_shape == CoverShape::Original, |ui| {
+        row(ui, Id::CoverPauseMorph, "Менять форму на паузе", None, |ui| {
+            ui.add(Switch::new(&mut p.cover_pause_morph).id_salt("set-cover-pause-morph"));
+        });
+    });
     row(ui, Id::CoverSpin, "Вращать форму", Some("Край поворачивается, картинка стоит"), |ui| {
         ui.add(Switch::new(&mut p.cover_spin).id_salt("set-cover-spin"));
     });
@@ -849,6 +855,9 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
             ui.add(Switch::new(&mut p.rail_compact).id_salt("set-rail-compact"));
         },
     );
+
+    group(ui, "Альбомы");
+    row(ui, Id::AlbumDate, "Дата альбома", None, |ui| choice(ui, Id::AlbumDate, p));
 
     group(ui, "Панель справа");
     row(ui, Id::PaneQueue, "Очередь", None, |ui| {

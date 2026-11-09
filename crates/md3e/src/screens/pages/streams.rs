@@ -729,11 +729,9 @@ fn album_page(
     let local = v.tracks.iter().filter(|t| t.has_local).count();
     let artists = artist_links::stream(&v.subtitle_artists);
     header(ui, v, false, |ui| {
-        let when = match (v.released, v.year) {
-            (Some(d), _) => crate::screens::common::fmt_release_day(d).to_uppercase(),
-            (None, Some(y)) => y.to_string(),
-            (None, None) => String::new(),
-        };
+        let when = crate::screens::common::fmt_album_date(v.released, v.year, state.prefs.album_date)
+            .map(|w| w.to_uppercase())
+            .unwrap_or_default();
         overline(ui, &[type_label(v.release_type), &when, service_upper(id.service)]);
         // How much of it is here, in the same line as its size
         // («8 из 10 у тебя»: counted over the page's own rows).

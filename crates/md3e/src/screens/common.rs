@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use egui::{Color32, Rect, Stroke, Ui, vec2};
-use nikgob_view::Cover;
+use nikgob_view::{AlbumDate, Cover, ReleaseDay};
 
 use crate::{
     Icon, Theme,
@@ -32,19 +32,23 @@ pub fn fmt_total(d: Duration) -> String {
     }
 }
 
-/// "17 мая 2019", or "май 2019" without the day.
-pub fn fmt_release_day(d: nikgob_view::ReleaseDay) -> String {
+/// An album's release date as [`AlbumDate`] says: «2026», «Октябрь 2026»
+/// or «23 октября 2026». What is not known falls back to what is (no day:
+/// the month and year; no month: the year); `None` without even a year.
+pub fn fmt_album_date(released: Option<ReleaseDay>, year: Option<i32>, how: AlbumDate) -> Option<String> {
     const OF: [&str; 12] = [
         "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря",
     ];
     const MONTH: [&str; 12] = [
-        "январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
     ];
+    let Some(d) = released else { return year.map(|y| y.to_string()) };
     let m = usize::from(d.month.clamp(1, 12) - 1);
-    match d.day {
-        Some(day) => format!("{day} {} {}", OF[m], d.year),
-        None => format!("{} {}", MONTH[m], d.year),
-    }
+    Some(match (how, d.day) {
+        (AlbumDate::Year, _) => d.year.to_string(),
+        (AlbumDate::Full, Some(day)) => format!("{day} {} {}", OF[m], d.year),
+        (AlbumDate::MonthYear | AlbumDate::Full, _) => format!("{} {}", MONTH[m], d.year),
+    })
 }
 
 /// Russian plural: 1 трек, 2 трека, 5 треков.
@@ -127,11 +131,23 @@ pub fn sound_line(state: &nikgob_view::ViewState) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use nikgob_view::ReleaseDay;
+    use nikgob_view::{AlbumDate, ReleaseDay};
 
     #[test]
-    fn release_days_read_in_russian() {
-        assert_eq!(super::fmt_release_day(ReleaseDay { year: 2019, month: 5, day: Some(17) }), "17 мая 2019");
-        assert_eq!(super::fmt_release_day(ReleaseDay { year: 2003, month: 12, day: None }), "декабрь 2003");
+    fn album_dates_read_in_russian_as_chosen() {
+        let day = Some(ReleaseDay { year: 2026, month: 10, day: Some(23) });
+        let month = Some(ReleaseDay { year: 2003, month: 12, day: None });
+        let f = super::fmt_album_date;
+        assert_eq!(f(day, Some(2026), AlbumDate::Year).as_deref(), Some("2026"));
+        assert_eq!(f(day, Some(2026), AlbumDate::MonthYear).as_deref(), Some("Октябрь 2026"));
+        assert_eq!(f(day, Some(2026), AlbumDate::Full).as_deref(), Some("23 октября 2026"));
+        // Only the month known: the full date is the month and year.
+        assert_eq!(f(month, None, AlbumDate::Full).as_deref(), Some("Декабрь 2003"));
+        assert_eq!(f(month, None, AlbumDate::Year).as_deref(), Some("2003"));
+        // Only the year known: every option is the year.
+        for how in [AlbumDate::Year, AlbumDate::MonthYear, AlbumDate::Full] {
+            assert_eq!(f(None, Some(1999), how).as_deref(), Some("1999"));
+            assert_eq!(f(None, None, how), None);
+        }
     }
 }

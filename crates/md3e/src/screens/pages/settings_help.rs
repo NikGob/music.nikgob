@@ -43,6 +43,8 @@ pub enum SettingId {
     CoverShape,
     ShapeRange,
     ShapePick,
+    /// «Менять форму на паузе».
+    CoverPauseMorph,
     CoverSpin,
     CoverDir,
     CoverPulse,
@@ -89,6 +91,8 @@ pub enum SettingId {
     LyricsSoftDepth,
     LyricsSoftFade,
     RailCompact,
+    /// «Дата альбома»: year, month or the whole date.
+    AlbumDate,
     /// The parts of the side pane: «Очередь», «Текст песни», «Источник и
     /// качество».
     PaneQueue,
@@ -401,7 +405,7 @@ impl SettingId {
         use SettingId::*;
         match self {
             Design | Theme | Contrast | Scheme | ProgressWave | NpVolume | NpVolumeHold | CoverShape | ShapeRange | ShapePick
-            | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
+            | CoverPauseMorph | AlbumDate | CoverSpin | CoverDir | CoverPulse | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient
             | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue
             | LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow
             | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | LyricsUnit | LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade | RailCompact | PaneQueue | PaneLyrics | PaneInfo | HomeCard | NpMotion
@@ -446,6 +450,7 @@ impl SettingId {
             CoverShape => "Обложка на экране трека может быть квадратной или вырезанной красивой фигурой.",
             ShapeRange => "Из этих фигур выбирается случайная для каждого трека. Нажми на фигуру, чтобы добавить или убрать её.",
             ShapePick => "Этой фигурой вырезается обложка, пока играет музыка.",
+            CoverPauseMorph => "На паузе обложка плавно становится квадратом, при воспроизведении снова принимает форму. Выключи — форма остаётся и на паузе.",
             CoverSpin => "Край обложки медленно поворачивается, а сама картинка остаётся на месте.",
             CoverDir => "В какую сторону поворачивается край обложки.",
             CoverPulse => "Обложка слегка увеличивается в такт музыке, как будто дышит.",
@@ -486,6 +491,7 @@ impl SettingId {
             LyricsSoftDepth => "Какая часть высоты текста сверху и снизу занята мягкими краями. Текущая строка всегда остаётся в чёткой середине.",
             LyricsSoftFade => "Как рано строка у края становится прозрачной: меньше — тает только у самого края, больше — начинает таять раньше.",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
+            AlbumDate => "Что показывать о дате выхода на странице альбома. Если день или месяц неизвестны, показывается то, что есть.",
             PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
             PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
@@ -678,6 +684,11 @@ impl SettingId {
                 c!("По часовой", "Поворачивается как стрелки часов: 12 → 3 → 6."),
                 c!("Против", "Поворачивается против часовой стрелки: 12 → 9 → 6."),
             ],
+            Self::AlbumDate => &[
+                c!("Год", "Только год: 2026."),
+                c!("Месяц", "Месяц и год: октябрь 2026."),
+                c!("Полностью", "День, месяц и год: 23 октября 2026."),
+            ],
             Self::RingStyle => &[
                 c!("Круг", "Точки стоят ровным кругом вокруг обложки."),
                 c!("Контур", "Точки повторяют форму обложки."),
@@ -851,6 +862,11 @@ impl SettingId {
                 _ => 1,
             },
             Self::CoverDir => usize::from(p.cover_ccw),
+            Self::AlbumDate => match p.album_date {
+                v::AlbumDate::Year => 0,
+                v::AlbumDate::MonthYear => 1,
+                v::AlbumDate::Full => 2,
+            },
             Self::LyricsGpu => usize::from(!p.lyrics_gpu),
             Self::LyricsStreamKeep => usize::from(p.lyrics_stream_keep.min(1)),
             Self::LyricsUi => usize::from(p.lyrics_ui.min(2)),
@@ -921,6 +937,7 @@ impl SettingId {
                 }
             }
             Self::CoverDir => p.cover_ccw = i == 1,
+            Self::AlbumDate => p.album_date = [v::AlbumDate::Year, v::AlbumDate::MonthYear, v::AlbumDate::Full][i.min(2)],
             Self::LyricsGpu => p.lyrics_gpu = i == 0,
             Self::LyricsStreamKeep => p.lyrics_stream_keep = i.min(1) as u8,
             Self::LyricsUi => p.lyrics_ui = i.min(2) as u8,
@@ -2238,7 +2255,7 @@ mod tests {
     fn every_choice_round_trips_through_prefs() {
         use SettingId as S;
         for id in [
-            S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::RingDir, S::RingStyle, S::Ambient,
+            S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::AlbumDate, S::RingDir, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::LyricsUnit, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,

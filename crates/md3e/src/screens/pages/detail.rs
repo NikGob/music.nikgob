@@ -134,12 +134,9 @@ pub fn release(
         let mut nav = None;
         let size = cover_size(ui);
         header(ui, size, c.cover.as_ref(), None, |ui| {
-            // «АЛЬБОМ · 17 МАЯ 2019» when the day is known, else the year.
-            let when = match (r.released, c.year) {
-                (Some(d), _) => Some(common::fmt_release_day(d).to_uppercase()),
-                (None, Some(y)) => Some(y.to_string()),
-                (None, None) => None,
-            };
+            // «АЛЬБОМ · 2019», «АЛЬБОМ · МАЙ 2019» or «АЛЬБОМ · 17 МАЯ 2019»
+            // (Prefs::album_date), as far as the date is known.
+            let when = common::fmt_album_date(r.released, c.year, state.prefs.album_date).map(|w| w.to_uppercase());
             let line = match when {
                 Some(w) => format!("{} · {w}", type_label(c.release_type)),
                 None => type_label(c.release_type).to_owned(),
