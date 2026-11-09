@@ -495,7 +495,13 @@ pub(crate) fn history(lib: &Library, tracks: &[(TrackId, usize, usize)], plan: &
     let now = nikgob_library::now_ms();
     let today = now - now.rem_euclid(DAY_MS);
     let device = lib.device_id();
+    // Real songs: a session that would end after now is not made up (the
+    // demo's tones keep their old history).
+    let until = if plan.lengths.is_some() { now } else { i64::MAX };
     let play = |track: TrackId, ts: i64, skip: bool, length: i64| {
+        if ts + length > until {
+            return;
+        }
         let mut start = Event::new(track, EventType::Start, ts, device.clone());
         start.position_ms = Some(0);
         start.context = EventContext::Album;
