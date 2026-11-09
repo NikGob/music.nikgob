@@ -995,9 +995,16 @@ impl StageUi {
         // The light state, built again only when something it shows changed
         // (a value under the pointer is a new state, not a new song: the
         // text, its place and its springs go on as they were).
-        let rebuild = self.cache.as_ref().is_none_or(|c| {
-            c.revision != state.revision || c.prefs != req.prefs || c.scene != scene || c.script != req.script
-        });
+        let rebuild = self.cache.as_ref().is_none_or(|c| c.revision != state.revision || c.scene != scene || c.script != req.script);
+        if !rebuild
+            && let Some(c) = self.cache.as_mut()
+            && c.prefs != req.prefs
+        {
+            // Only the settings shown changed (a value under the pointer, a
+            // slider being dragged): nothing else is cloned again.
+            c.prefs = req.prefs.clone();
+            c.state.prefs = req.prefs.clone();
+        }
         if rebuild {
             let staged = light_state(state, &req.prefs, scene, req.script, self.track);
             let album = (scene == Scene::Album).then(|| album_of(&staged.state));

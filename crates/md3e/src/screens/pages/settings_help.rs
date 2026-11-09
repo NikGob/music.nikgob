@@ -1606,6 +1606,8 @@ struct Span {
 struct Parts {
     button: Option<Rect>,
     control: Option<Rect>,
+    /// The part of the control a preset changes, when not all of it.
+    future: Option<Rect>,
     choices: Vec<Rect>,
     menu: Vec<Rect>,
 }
@@ -1848,16 +1850,9 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         }
         f.rect = Some(rect);
         ctx.data_mut(|d| d.insert_temp(focus_key(), f));
-    } else if ctx.data(|d| d.get_temp::<Vec<SettingId>>(future_key())).is_some_and(|f| f.contains(&id)) {
-        // A preset under the pointer would change it: the tonal underlay
-        // behind its future value.
-        let s = Theme::get(&ctx).scheme;
-        let r = Rect::from_x_y_ranges(ui.max_rect().x_range(), rect.y_range()).expand2(vec2(12.0, 4.0));
-        let mut painter = ui.painter().clone();
-        painter.set_clip_rect(Rect::from_x_y_ranges(r.x_range(), ui.clip_rect().y_range()));
-        painter.set(bg, Shape::rect_filled(r, shape::LARGE, s.secondary_container));
     }
     let parts = ctx.data_mut(|d| d.remove_temp::<Parts>(parts_key())).unwrap_or_default();
+    future_pill(ui, id, bg, parts.future.or(parts.control));
     let button = parts.button.unwrap_or_else(|| {
         // Blocks of fields: beside the first field, on its centre line.
         let r = Rect::from_min_size(pos2(rect.right() + 8.0, rect.top() + 17.0), Vec2::splat(BTN));
@@ -1892,6 +1887,31 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         rows.list.push(row);
     });
     inner.inner
+}
+
+/// While a preset under the pointer would change the row of `id`, its
+/// control shows the future value (drawn from the preset) on a soft tonal
+/// pill just behind it, in the reserved shape `bg`: no band across the row,
+/// nothing moves; the pill fades in and out on the effects spring, so
+/// passing from preset to preset never blinks.
+fn future_pill(ui: &Ui, id: SettingId, bg: egui::layers::ShapeIdx, control: Option<Rect>) {
+    let ctx = ui.ctx();
+    let theme = Theme::get(ctx);
+    let future = ctx.data(|d| d.get_temp::<Vec<SettingId>>(future_key())).is_some_and(|f| f.contains(&id));
+    let k = anim::fraction(ctx, Id::new(("settings-future", id)), if future { 1.0 } else { 0.0 }, theme.motion.fast_effects);
+    let Some(control) = control.filter(|_| k > 0.001) else { return };
+    let r = control.expand2(vec2(8.0, 4.0));
+    // A link's glow on the row has the shape.
+    if ctx.data(|d| d.get_temp::<Focus>(focus_key())).is_some_and(|f| f.id == id && !f.group) {
+        return;
+    }
+    ui.painter().set(bg, Shape::rect_filled(r, r.height() * 0.5, theme.scheme.primary.gamma_multiply(0.16 * k)));
+}
+
+/// The part of the item's control a preset changes (a switch among the
+/// row's other buttons), for its pill.
+pub fn report_future(ctx: &egui::Context, rect: Rect) {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).future = Some(rect));
 }
 
 /// Size of the ⓘ button.
