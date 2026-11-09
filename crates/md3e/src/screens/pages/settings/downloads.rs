@@ -100,6 +100,10 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     let lifted_key = egui::Id::new("src-lifted");
     let lifted = ui.ctx().data(|d| d.get_temp::<v::SourceKey>(lifted_key));
     let mut lift_next: Option<v::SourceKey> = None;
+    // The group's title stays put while the rows slide.
+    if !shown.is_empty() {
+        rows::titles(ui);
+    }
     let top = ui.cursor().top();
     for (n, key) in shown.iter().enumerate() {
         let Some(at) = order.iter().position(|o| o.key == *key) else { continue };

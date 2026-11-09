@@ -421,9 +421,9 @@ pub fn needs(id: SettingId) -> Option<&'static str> {
     use SettingId as S;
     match (spec(id), id) {
         (Spec::Fixed(_, why), _) => Some(why),
+        (_, S::LyricsGpu) if !cfg!(windows) => Some("Windows only (DirectML)"),
         (_, id) if id.level() == Level::Dev => Some("«Для разработчика»: drawn in «Подробно» of the owner's own builds only"),
         (_, S::DownloadSource(_)) => Some("drawn only for the sources the runtime lists as available"),
-        (_, S::LyricsGpu) if !cfg!(windows) => Some("Windows only (DirectML)"),
         (_, S::Gapless | S::Crossfade) => Some("faded while Spotify Soloist plays"),
         _ => None,
     }

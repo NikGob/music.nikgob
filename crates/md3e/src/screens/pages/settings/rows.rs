@@ -122,6 +122,12 @@ fn flush(ui: &mut Ui, same: Option<&str>) {
     });
 }
 
+/// Draws the titles waiting now, for rows that are drawn moved or lifted
+/// (the titles must not move with them). Call only when a row will show.
+pub(crate) fn titles(ui: &mut Ui) {
+    flush(ui, None);
+}
+
 fn indent_key() -> egui::Id {
     egui::Id::new("settings-indent")
 }
