@@ -53,6 +53,10 @@ pub(crate) struct Memory {
     scenes: [Option<Scene>; 2],
     /// The row (and its option) under the pointer, and since when.
     hover: Option<(Id, Option<usize>, f64)>,
+    /// What the stage shows for a row: kept until the pointer rests on
+    /// something else, so passing between options and rows never flicks
+    /// the stage back and forth.
+    shown: Option<Shown>,
     /// The row changed last, and when: the stage stays on it a moment.
     changed: Option<(Id, f64)>,
     /// The prefs before each change of this visit, for Ctrl+Z.
@@ -62,6 +66,23 @@ pub(crate) struct Memory {
     /// The mode just picked, until the prefs bring it back.
     deep_sent: Option<bool>,
 }
+
+/// What the stage was last asked to show for a row.
+#[derive(Clone, Debug)]
+struct Shown {
+    id: Id,
+    /// The option under the pointer (worked out again from the page's
+    /// settings, so a click shows what it picked).
+    opt: Option<usize>,
+    /// A preset's settings.
+    offer: Option<Prefs>,
+    /// When the pointer was last on the rows.
+    at: f64,
+}
+
+/// The stage keeps what it shows this long after the pointer leaves the
+/// rows (settings v2 §2.3), so crossing a gap between rows does not blink.
+const HOLD_S: f64 = 0.4;
 
 /// Ctrl+Z goes back this many changes at most.
 const UNDO: usize = 20;
@@ -280,7 +301,9 @@ fn tab_scene(tab: usize) -> Scene {
 /// it is picked), where it is a value of the prefs.
 fn option_prefs(id: Id, p: &Prefs, i: usize) -> Option<Prefs> {
     match id {
-        Id::ShapePick => CoverShape::shapes().get(i).map(|c| Prefs { cover_shape: *c, ..p.clone() }),
+        // A shape of the grid, the random pool's too: the cover in that
+        // shape, big on the stage.
+        Id::ShapePick | Id::ShapeRange => CoverShape::shapes().get(i).map(|c| Prefs { cover_shape: *c, ..p.clone() }),
         // The presets offer their own (the chevron's «Свои» too); the
         // sections of Главная are places, not values.
         Id::Preset(_) | Id::HomeSections => None,
@@ -319,7 +342,9 @@ fn follow(
         let opt = pointer.and_then(|at| r.choices.iter().position(|c| c.contains(at)));
         Some((r.id, opt))
     };
-    let under = in_menu.or_else(on_row);
+    // Keyboard focus counts as the pointer while the pointer is on no row.
+    let focused = || rows.iter().find(|r| r.focused).map(|r| (r.id, None));
+    let under = in_menu.or_else(on_row).or_else(focused);
     if changed {
         // A drag stays the row it started on, wherever the pointer goes.
         let dragging = down && mem.changed.is_some_and(|(_, at)| now - at < 0.5);
@@ -367,18 +392,44 @@ fn follow(
     {
         // The values are applied already: the stage shows them.
         show(&mut req, &mut *mem, id, p.clone());
+        mem.shown = None;
         ctx.request_repaint();
-    } else if let Some(o) = offer {
-        // A preset: the whole of it, every part it changes.
-        show(&mut req, &mut *mem, o.id, o.prefs);
+        return req;
+    }
+    // What the pointer rests on becomes what is shown: a preset (the whole
+    // of it), an option (shown before it is picked), a row (its screen); a
+    // row not on the stage shows the tab's last screen as it is.
+    if let Some(o) = offer {
+        mem.shown = Some(Shown { id: o.id, opt: None, offer: Some(o.prefs), at: now });
     } else if rested && let Some((id, opt)) = under {
-        if id.part().is_none() {
-            return req;
+        mem.shown = id.part().is_some().then_some(Shown { id, opt, offer: None, at: now });
+    }
+    // Until then the last one stays, and a moment after the pointer leaves.
+    if under.is_some() || still_held(&mem.shown, now) {
+        if let Some(s) = mem.shown.as_mut()
+            && under.is_some()
+        {
+            s.at = now;
         }
-        let prefs = opt.and_then(|i| option_prefs(id, p, i)).unwrap_or_else(|| p.clone());
-        show(&mut req, &mut *mem, id, prefs);
+    } else {
+        mem.shown = None;
+    }
+    if under.is_none()
+        && let Some(s) = &mem.shown
+    {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((s.at + HOLD_S - now).max(0.0) + 0.01));
+    }
+    if let Some(s) = mem.shown.clone() {
+        let prefs = s.offer.or_else(|| s.opt.and_then(|i| option_prefs(s.id, p, i))).unwrap_or_else(|| p.clone());
+        show(&mut req, &mut *mem, s.id, prefs);
     }
     req
+}
+
+/// Whether what the stage shows is still held after the pointer left the
+/// rows.
+fn still_held(shown: &Option<Shown>, now: f64) -> bool {
+    shown.as_ref().is_some_and(|s| now - s.at < HOLD_S)
 }
 
 /// Ctrl+Z: one step back through this visit's changes (a slider's drag is
@@ -740,6 +791,7 @@ mod tests {
             opacity: 1.0,
             enabled: true,
             hovered: true,
+            focused: false,
         };
         let mut mem = Memory::default();
         let mut t = 0.0;

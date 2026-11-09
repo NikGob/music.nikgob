@@ -308,12 +308,17 @@ fn shape_grid(ui: &mut Ui, id: Id, selected: impl Fn(CoverShape) -> bool, extra:
             let resp = ui.interact(rect, egui::Id::new((id, c)), Sense::click()).on_hover_text(c.label());
             let on = selected(c);
             let painter = ui.painter();
-            painter.rect_filled(rect, 16.0, if on { s.secondary_container } else { s.surface_container_high });
+            // The tile with its hover state layer, as one opaque colour.
+            let base = if on { s.secondary_container } else { s.surface_container_high };
+            let tile = if resp.hovered() { crate::lerp_color(base, s.on_surface, 0.08) } else { base };
+            painter.rect_filled(rect, 16.0, tile);
             if resp.hovered() {
-                painter.rect_filled(rect, 16.0, s.on_surface.gamma_multiply(0.08));
                 ui.ctx().request_repaint();
             }
-            let fill = if on { s.primary } else { s.on_surface_variant.gamma_multiply(0.5) };
+            // Opaque too: the many-petal shapes' thin points overlap in the
+            // fill's mesh, and a see-through colour showed every overlap as
+            // a dark dot along their edges.
+            let fill = if on { s.primary } else { crate::lerp_color(tile, s.on_surface_variant, 0.5) };
             let turn = if resp.hovered() { time * 0.9 } else { 0.0 };
             shape_paint::fill_shape(painter, now_playing::shape_cubics(m), rect.shrink(9.0), turn, fill);
             if resp.clicked() {

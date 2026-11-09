@@ -1419,8 +1419,8 @@ impl SettingId {
     pub fn script(self, p: &Prefs) -> Script {
         use SettingId::*;
         match self {
-            CoverShape if p.cover_shape == v::CoverShape::Random => Script::RandomShape,
-            ShapeRange => Script::RandomShape,
+            // A shape of the pool under the pointer is shown as it is.
+            CoverShape | ShapeRange if p.cover_shape == v::CoverShape::Random => Script::RandomShape,
             CoverPauseMorph | CoverClickPause => Script::PausePlay,
             DblClickShape | TapWait => Script::DoubleTap,
             NpVolume | NpVolumeHold => Script::Volume,
@@ -1623,6 +1623,8 @@ struct Row {
     menu: Vec<Rect>,
     clip: Rect,
     hovered: bool,
+    /// The widget with the keyboard focus is in it.
+    focused: bool,
     /// How it was drawn: faded by a row it depends on, or switched off.
     opacity: f32,
     enabled: bool,
@@ -1872,6 +1874,10 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         menu: parts.menu,
         clip: ui.clip_rect(),
         hovered: ui.rect_contains_pointer(rect.union(button)),
+        focused: ctx
+            .memory(|m| m.focused())
+            .and_then(|f| ctx.read_response(f))
+            .is_some_and(|r| rect.union(button).contains(r.rect.center())),
         opacity: ui.opacity(),
         enabled: ui.is_enabled(),
         group: ctx.data(|d| d.get_temp::<String>(group_key())).unwrap_or_default(),
@@ -2647,6 +2653,8 @@ pub struct DrawnRow {
     pub enabled: bool,
     /// The pointer is on it (or its ⓘ).
     pub hovered: bool,
+    /// The widget with the keyboard focus is in it.
+    pub focused: bool,
 }
 
 /// The rows of the last pass that drew any, with that pass's number.
@@ -2668,6 +2676,7 @@ pub fn drawn_rows(ctx: &egui::Context) -> (u64, Vec<DrawnRow>) {
             opacity: r.opacity,
             enabled: r.enabled,
             hovered: r.hovered,
+            focused: r.focused,
         })
         .collect();
     (rows.pass, list)
@@ -2864,7 +2873,9 @@ mod tests {
         assert_eq!(S::RailCompact.part(), None);
         let random = Prefs { cover_shape: v::CoverShape::Random, ..p.clone() };
         assert_eq!(S::CoverShape.script(&random), Script::RandomShape);
-        assert_eq!(S::ShapeRange.script(&p), Script::RandomShape);
+        assert_eq!(S::ShapeRange.script(&random), Script::RandomShape);
+        let one = Prefs { cover_shape: v::CoverShape::shapes()[3], ..random.clone() };
+        assert_eq!(S::ShapeRange.script(&one), Script::None, "a shape of the pool under the pointer stands still");
         assert_eq!(S::LyricsCascade.script(&p), Script::LyricsStep);
         assert_eq!(S::LyricsSoftDepth.script(&p), Script::EdgesScroll);
         assert_eq!(S::LyricsCountdown.script(&p), Script::Countdown);
