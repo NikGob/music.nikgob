@@ -138,6 +138,15 @@ pub fn open(ctx: &Context) {
     }
 }
 
+/// Shuts what [`open`] opened: the control's menu and the dialog (the
+/// screenshot runs, between entries; the page is left by navigating).
+pub fn close(ctx: &Context) {
+    if let Some((id, _)) = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST))) {
+        ctx.data_mut(|d| d.insert_temp(id.with("md3e-menu-open"), false));
+    }
+    dialog::close(ctx);
+}
+
 /// Opens the control's own menu, in any look (screenshot runs).
 pub fn open_menu(ctx: &Context) {
     if let Some((id, _)) = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST))) {

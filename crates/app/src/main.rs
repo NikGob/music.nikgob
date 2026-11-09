@@ -518,10 +518,17 @@ fn main() -> eframe::Result {
     // `--sweep-list out.json`: the settings sweep's list of every row, from
     // the code and the prefs of `NIKGOB_DATA` (or the defaults); no window.
     if let Some(path) = sweep::list_path() {
-        let base = std::env::var_os("NIKGOB_DATA")
-            .and_then(|d| std::fs::read(PathBuf::from(d).join("prefs.json")).ok())
-            .map(|b| prefs_of(Some(&b)))
-            .unwrap_or_default();
+        // The prefs the run itself starts from: the data dir's (the demo's
+        // own dir with `NIKGOB_DEMO`), read as the app reads them — a dir
+        // without a prefs.json starts as a first start, not as the
+        // defaults.
+        let dir = std::env::var_os("NIKGOB_DATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("NIKGOB_DEMO").map(|_| std::env::temp_dir().join("nikgob-demo")));
+        let base = match dir {
+            Some(d) => prefs_of(std::fs::read(d.join("prefs.json")).ok().as_deref()),
+            None => Prefs::default(),
+        };
         match sweep::write_list(&path, &base) {
             Ok(n) => {
                 log::info!("sweep: {n} settings listed in {}", path.display());

@@ -825,7 +825,11 @@ impl Run {
                 self.survey.insert((self.size, n), rows);
                 0
             }
-            "sweep_begin" => self.begin(n, ui, out, fakes),
+            "sweep_begin" => {
+                // Nothing of the entry before stays open over this one.
+                nikgob_md3e::screens::lyrics_ui::close(ctx);
+                self.begin(n, ui, out, fakes)
+            }
             "sweep_sync" => self.sync(n, state, steps),
             "sweep_settings" => {
                 if let Some(id) = self.entries.get(n).and_then(Entry::row) {
@@ -1120,6 +1124,9 @@ impl Run {
         if let Some(c) = self.cur.as_mut() {
             c.label = key.to_owned();
         }
+        // What an entry before opened over everything (the lyrics menu or
+        // dialog of `LyricsUi`) is shut, so it is in no other shot.
+        nikgob_md3e::screens::lyrics_ui::close(ctx);
         self.ensure_playing(state, out);
         let gap = matches!(screen, Screen::NpLyricsGap | Screen::NpLyricsCountdown);
         self.set_fakes(fakes, gap);
