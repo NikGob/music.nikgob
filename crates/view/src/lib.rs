@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 mod credit;
 pub mod dev;
+pub mod presets;
 mod recs;
 mod streams;
 
@@ -1804,6 +1805,131 @@ pub struct Prefs {
     /// «Преимущественно новые песни»: how much of a radio of a track or an
     /// artist (and autoplay) is music the user has not heard.
     pub radio_unheard: RadioUnheard,
+
+    // ---- Settings v2 (presets, «Просто» and «Подробно»).
+    /// The settings show every row («Подробно»); off, the main ones
+    /// («Просто»).
+    pub settings_deep: bool,
+    /// The values of the user's own an area had before a preset was
+    /// applied over them, for «Свои» ([`presets::Area::custom`]).
+    pub custom_presets: std::collections::BTreeMap<presets::Area, presets::Snapshot>,
+    /// Which defaults of the settings the prefs were written with
+    /// ([`presets::SETTINGS_REV`]); older prefs keep their values once
+    /// ([`presets::upgrade`]).
+    pub settings_rev: u8,
+    /// «Обложка → Скорость»: seconds a turn of the cover's outline takes
+    /// ([`COVER_SPIN_S`]).
+    pub cover_spin_s: f32,
+    /// «Кольцо → Скорость»: seconds a turn of the ring takes
+    /// ([`RING_SPIN_S`]).
+    pub ring_spin_s: f32,
+    /// «Пульсация → Сила»: how much the cover swells on a beat, a share of
+    /// its size ([`COVER_PULSE`]).
+    pub cover_pulse_strength: f32,
+    /// «Разделы главной»: the sections of Главная in the user's order, each
+    /// on or off; empty: all of them in the default order
+    /// ([`Prefs::home_order`]).
+    pub home_sections: Vec<HomeSectionSwitch>,
+}
+
+/// The default of [`Prefs::cover_spin_s`] and its range in the settings.
+pub const COVER_SPIN_S: f32 = 48.0;
+pub const COVER_SPIN_RANGE: std::ops::RangeInclusive<f32> = 12.0..=90.0;
+/// The default of [`Prefs::ring_spin_s`] and its range.
+pub const RING_SPIN_S: f32 = 36.0;
+pub const RING_SPIN_RANGE: std::ops::RangeInclusive<f32> = 10.0..=90.0;
+/// The default of [`Prefs::cover_pulse_strength`] and its range.
+pub const COVER_PULSE: f32 = 0.08;
+pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
+
+/// A section of Главная («Разделы главной»).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HomeSection {
+    /// «Быстрый доступ».
+    Shortcuts,
+    /// «Миксы для тебя».
+    Mixes,
+    /// «Слушать снова».
+    ListenAgain,
+    /// «Плитки дня».
+    OfDay,
+    /// «Из библиотеки».
+    FromLibrary,
+    /// «Новое».
+    New,
+    /// «Релизы».
+    Releases,
+}
+
+impl HomeSection {
+    /// Every section in Главная's default order.
+    pub const ALL: [Self; 7] = [
+        Self::Shortcuts,
+        Self::Mixes,
+        Self::ListenAgain,
+        Self::OfDay,
+        Self::FromLibrary,
+        Self::New,
+        Self::Releases,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shortcuts => "Быстрый доступ",
+            Self::Mixes => "Миксы для тебя",
+            Self::ListenAgain => "Слушать снова",
+            Self::OfDay => "Плитки дня",
+            Self::FromLibrary => "Из библиотеки",
+            Self::New => "Новое",
+            Self::Releases => "Релизы",
+        }
+    }
+}
+
+/// One line of [`Prefs::home_sections`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HomeSectionSwitch {
+    pub key: HomeSection,
+    pub on: bool,
+}
+
+impl Prefs {
+    /// Every section of Главная in the user's order, the ones not listed
+    /// yet in their default places (on).
+    pub fn home_order(&self) -> Vec<HomeSectionSwitch> {
+        HomeSectionSwitch::complete(&self.home_sections)
+    }
+
+    /// Whether Главная shows `section` (when it has anything for it).
+    pub fn home_section_on(&self, section: HomeSection) -> bool {
+        self.home_sections.iter().find(|s| s.key == section).is_none_or(|s| s.on)
+    }
+}
+
+impl HomeSectionSwitch {
+    /// `list` with each section once and every one there: the missing ones
+    /// in their default places, on.
+    pub fn complete(list: &[Self]) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for s in list {
+            if !out.iter().any(|o| o.key == s.key) {
+                out.push(*s);
+            }
+        }
+        for (i, k) in HomeSection::ALL.iter().enumerate() {
+            if out.iter().any(|o| o.key == *k) {
+                continue;
+            }
+            // After the default sections that come before it.
+            let at = HomeSection::ALL[..i]
+                .iter()
+                .filter_map(|prev| out.iter().position(|o| o.key == *prev))
+                .max()
+                .map_or(0, |p| p + 1);
+            out.insert(at, Self { key: *k, on: true });
+        }
+        out
+    }
 }
 
 /// One line of [`Prefs::download_sources`].
@@ -1997,6 +2123,15 @@ pub enum PrefPatch {
     RadioUnheard(RadioUnheard),
     /// «Настройки текста…» was picked from the lyrics control's menu.
     LyricsSettingsSeen,
+    /// A preset of an area by its number ([`presets::Area::apply`]: the
+    /// user's own values are kept first when the area has them).
+    Preset(presets::Area, usize),
+    /// «Свои»: the values kept before a preset come back.
+    PresetCustom(presets::Area),
+    /// «Просто» (false) or «Подробно».
+    SettingsDeep(bool),
+    /// «Разделы главной»: the order and switches of every section.
+    HomeSections(Vec<HomeSectionSwitch>),
 }
 
 impl PrefPatch {
@@ -2063,6 +2198,17 @@ impl PrefPatch {
             Self::RadioNoRepeat(h) => p.radio_no_repeat_hours = *h,
             Self::RadioExplore(e) => p.radio_explore = *e,
             Self::RadioUnheard(u) => p.radio_unheard = *u,
+            Self::Preset(area, n) => area.apply(p, *n),
+            Self::PresetCustom(area) => {
+                if let Some(back) = area.custom(p) {
+                    *p = back;
+                }
+            }
+            Self::SettingsDeep(on) => p.settings_deep = *on,
+            Self::HomeSections(list) => {
+                // Each section once, every one there, in the order given.
+                p.home_sections = HomeSectionSwitch::complete(list);
+            }
         }
     }
 }
@@ -3085,6 +3231,13 @@ impl Default for Prefs {
             radio_no_repeat_hours: 3,
             radio_explore: RadioExplore::Rare,
             radio_unheard: RadioUnheard::Usual,
+            settings_deep: false,
+            custom_presets: std::collections::BTreeMap::new(),
+            settings_rev: presets::SETTINGS_REV,
+            cover_spin_s: COVER_SPIN_S,
+            ring_spin_s: RING_SPIN_S,
+            cover_pulse_strength: COVER_PULSE,
+            home_sections: Vec::new(),
         }
     }
 }
@@ -3276,6 +3429,58 @@ mod release_day_tests {
         assert_eq!(ReleaseDay::parse("2003-02-01", Some(2019)), None);
         for bad in ["", "19-05-17", "2019-13-01", "2019-05-32", "2019-05-17-1", "май 2019", "2019-05-00"] {
             assert_eq!(ReleaseDay::parse(bad, None), None, "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_v2_tests {
+    use super::*;
+    use crate::presets::Area;
+
+    #[test]
+    fn home_sections_are_all_there_once_in_the_given_order() {
+        let p = Prefs::default();
+        assert_eq!(p.home_order().iter().map(|s| s.key).collect::<Vec<_>>(), HomeSection::ALL);
+        assert!(HomeSection::ALL.iter().all(|&s| p.home_section_on(s)));
+        let mut q = p.clone();
+        PrefPatch::HomeSections(vec![
+            HomeSectionSwitch { key: HomeSection::Releases, on: false },
+            HomeSectionSwitch { key: HomeSection::Releases, on: true },
+            HomeSectionSwitch { key: HomeSection::Mixes, on: true },
+        ])
+        .apply(&mut q);
+        let keys: Vec<_> = q.home_sections.iter().map(|s| s.key).collect();
+        // The given ones keep their order; a missing one sits after the
+        // default ones before it (Быстрый доступ has none: first).
+        use HomeSection as S;
+        assert_eq!(keys, [S::Shortcuts, S::Releases, S::Mixes, S::ListenAgain, S::OfDay, S::FromLibrary, S::New]);
+        assert!(!q.home_section_on(S::Releases), "the first of a section counts");
+        assert!(q.home_section_on(S::Shortcuts));
+    }
+
+    #[test]
+    fn preset_patches_apply_and_come_back() {
+        let mut p = Prefs { fps_limit: 90, ..Prefs::default() };
+        PrefPatch::Preset(Area::Load, 1).apply(&mut p);
+        assert_eq!((p.fps_limit, Area::Load.current(&p)), (120, Some(1)));
+        PrefPatch::PresetCustom(Area::Load).apply(&mut p);
+        assert_eq!(p.fps_limit, 90);
+        // «Свои» without kept values changes nothing.
+        let mut f = Prefs::first_start();
+        PrefPatch::PresetCustom(Area::Track).apply(&mut f);
+        assert_eq!(f, Prefs::first_start());
+        PrefPatch::SettingsDeep(true).apply(&mut f);
+        assert!(f.settings_deep);
+    }
+
+    #[test]
+    fn the_new_knobs_default_to_what_the_code_drew() {
+        for p in [Prefs::default(), Prefs::first_start()] {
+            assert_eq!((p.cover_spin_s, p.ring_spin_s, p.cover_pulse_strength), (48.0, 36.0, 0.08));
+            assert!(!p.settings_deep && p.custom_presets.is_empty() && p.home_sections.is_empty());
+            assert!(COVER_SPIN_RANGE.contains(&p.cover_spin_s) && RING_SPIN_RANGE.contains(&p.ring_spin_s));
+            assert!(COVER_PULSE_RANGE.contains(&p.cover_pulse_strength));
         }
     }
 }
