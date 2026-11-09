@@ -161,3 +161,62 @@ fn the_name_is_asked_once_on_the_first_start() {
     // Not asked of a library from before (its prefs file had no question).
     assert!(!texts(&state(Vec::new(), false), 1200.0).contains("Как к тебе обращаться?"));
 }
+
+/// A mix of «Миксы для тебя» without covers.
+fn lane(title: &str) -> LaneCard {
+    LaneCard {
+        key: nikgob_view::MixKey::Everything,
+        title: title.to_owned(),
+        short_titles: Vec::new(),
+        artists: vec!["Kevin Penkin".to_owned()],
+        new_artists: Vec::new(),
+        covers: Vec::new(),
+        new_cover: None,
+        tracks: Vec::new(),
+        blend_base: None,
+        queue: None,
+        why: None,
+    }
+}
+
+#[test]
+fn the_home_has_no_explanatory_lines() {
+    let quiet = [
+        "Разбираю звук",
+        "Собраны из того",
+        "в миксах только треки",
+        "Новое скрыто",
+        "Показать новое",
+        "Имя будет",
+        "Примерно каждый",
+        "Без нового",
+    ];
+    let mut st = state(Vec::new(), false);
+    st.home.lanes = vec![lane("Всё вперемешку")];
+    st.home.history = false;
+    st.analysis = nikgob_view::AnalysisProgress { files_done: 1, files_total: 10, streams_done: 0, streams_total: 0 };
+    st.prefs.name_prompt = true;
+    for local_only in [false, true] {
+        st.prefs.mixes_downloaded_only = local_only;
+        let page = texts(&st, 1280.0);
+        assert!(page.contains("Миксы для тебя") && page.contains("Как к тебе обращаться?"), "titles stay ({local_only})");
+        for q in quiet {
+            assert!(!page.contains(q), "«{q}» on the home with «Только скачанное» {local_only}");
+        }
+    }
+}
+
+#[test]
+fn downloaded_only_takes_the_new_music_away_without_a_word() {
+    let h = HomeView::default();
+    assert!(!sections(&h, true).contains(&Section::New), "no section left only to say why it is empty");
+    assert!(!sections(&h, false).contains(&Section::New));
+}
+
+#[test]
+fn an_empty_home_is_one_line_and_its_buttons() {
+    let page = texts(&ViewState::default(), 1280.0);
+    assert!(page.contains(EMPTY_LINE));
+    assert!(page.contains("Найти музыку") && page.contains("Добавить папку…"));
+    assert!(!page.contains("Найди песню") && !page.contains("Здесь соберётся"));
+}
