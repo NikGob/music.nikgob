@@ -37,6 +37,8 @@ pub enum Act {
     Volume,
     Visualizer,
     Trash,
+    /// «Включить с YouTube» (the developer profile only).
+    Youtube,
 }
 
 /// What a row of the playing track's ⋮ stands for.
@@ -173,6 +175,9 @@ impl Chrome {
                 .shortcut("F12"),
             // Only what is in the library (a file, or a like) can leave it.
             Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(t.has_local || t.liked),
+            Act::Youtube => MenuItem::new("Включить с YouTube")
+                .icon(Icon::PlayArrow)
+                .shortcut("Y"),
         }
     }
 
@@ -181,8 +186,13 @@ impl Chrome {
     /// without «Сыграть следующим» / «В конец очереди» (it is playing), then
     /// the delete when `trash` and the track is in the library.
     pub fn player_rows(t: &TrackRow, state: &ViewState, top: &[Act], info: bool, trash: bool) -> Vec<Row<PlayerAct>> {
-        let mut rows: Vec<Row<PlayerAct>> =
-            top.iter().map(|&a| Row::Item(PlayerAct::Own(a), Self::item(a, t, state))).collect();
+        // The developer profile's tracks have no files: the real song first.
+        let youtube = nikgob_view::dev::profile().then_some(Act::Youtube);
+        let mut rows: Vec<Row<PlayerAct>> = youtube
+            .iter()
+            .chain(top)
+            .map(|&a| Row::Item(PlayerAct::Own(a), Self::item(a, t, state)))
+            .collect();
         rows.push(Row::Divider);
         let also = state.also_on.get(&t.id);
         for r in super::pages::library_track_rows(t, &state.dislikes, info, also) {
@@ -235,6 +245,7 @@ impl Chrome {
             Act::Volume => self.vol.pinned = Some(anchor),
             Act::Visualizer => self.visualizer = true,
             Act::Trash => self.trash = Some((t.id, t.title.clone())),
+            Act::Youtube => out.push(Command::PlayFromYoutube),
         }
     }
 

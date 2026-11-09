@@ -760,6 +760,10 @@ impl Md3eUi {
             if i.consume_key(Modifiers::NONE, Key::Space) {
                 out.push(Command::TogglePlay);
             }
+            // The developer profile: the playing track from YouTube Music.
+            if nikgob_view::dev::profile() && state.player.current.is_some() && i.consume_key(Modifiers::NONE, Key::Y) {
+                out.push(Command::PlayFromYoutube);
+            }
             if i.consume_key(Modifiers::NONE, Key::ArrowRight) {
                 out.push(Command::SeekBy(5_000));
             }

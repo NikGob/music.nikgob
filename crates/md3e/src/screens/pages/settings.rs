@@ -11,7 +11,7 @@ use super::{PageState, connected};
 use crate::screens::{bg_shapes, common::plural, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, Divider, FilterChip, IconButton, Menu, MenuItem, Slider, Style, Switch, TextField},
+    components::{Button, Dialog, Divider, FilterChip, IconButton, Menu, MenuItem, Slider, Style, Switch, TextField},
 };
 
 pub(super) fn group(ui: &mut Ui, title: &str) -> egui::Response {
@@ -1369,6 +1369,42 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
             contact: pages.metadata_contact.trim().to_owned(),
             acoustid_key: (!key.is_empty()).then_some(key),
         });
+    }
+    // Own builds only, and never inside the profile itself.
+    if super::brand::own_build() && !nikgob_view::dev::profile() {
+        developer(ui, out);
+    }
+}
+
+/// «Для разработчика»: the separate profile for videos and UI tests
+/// (`--demo-profile`), started beside this player or reset after a question.
+fn developer(ui: &mut Ui, out: &mut Vec<Command>) {
+    use nikgob_view::dev::DevProfile;
+    group(ui, "Для разработчика");
+    let asking = egui::Id::new("set-dev-profile-asking");
+    row(ui, Id::DemoProfile, "Демо-профиль", None, |ui| {
+        ui.horizontal(|ui| {
+            if ui.add(Button::new("Открыть").style(Style::Tonal).id_salt("set-dev-profile-open")).clicked() {
+                out.push(Command::DevProfile(DevProfile::Open));
+            }
+            if ui.add(Button::new("Сбросить").style(Style::Outlined).id_salt("set-dev-profile-reset")).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(asking, true));
+            }
+        });
+    });
+    if ui.ctx().data(|d| d.get_temp::<bool>(asking)).unwrap_or(false) {
+        let mut open = true;
+        let r = Dialog::new("md3e-dev-profile-reset", "Сбросить демо-профиль?")
+            .icon(Icon::Refresh)
+            .action("Отмена")
+            .action("Сбросить")
+            .show(ui.ctx(), &mut open);
+        if r.action == Some(1) {
+            out.push(Command::DevProfile(DevProfile::Reset));
+        }
+        if r.action.is_some() || r.dismissed || !open {
+            ui.ctx().data_mut(|d| d.remove::<bool>(asking));
+        }
     }
 }
 
