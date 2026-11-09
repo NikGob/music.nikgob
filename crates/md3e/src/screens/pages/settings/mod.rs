@@ -387,8 +387,10 @@ fn follow(
 /// one step). The runtime's own fields stay as they are now.
 fn undo(ctx: &egui::Context, state: &ViewState, mem: &mut Memory, changed: bool, out: &mut Vec<Command>) {
     let down = ctx.input(|i| i.pointer.any_down());
+    // A slider lets go of its value on the frame the button comes up.
+    let pressed = down || ctx.input(|i| i.pointer.any_released());
     if changed {
-        if !(down && mem.held) {
+        if !(pressed && mem.held) {
             mem.undo.push(state.prefs.clone());
             if mem.undo.len() > UNDO {
                 mem.undo.remove(0);
@@ -830,7 +832,7 @@ mod tests {
         let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
         frame(&state, &mut mem, true, vec![egui::Event::PointerMoved(at), press(true)]);
         frame(&state, &mut mem, true, Vec::new());
-        frame(&state, &mut mem, true, vec![press(false)]);
+        frame(&state, &mut mem, false, vec![press(false)]);
         assert_eq!(mem.undo.len(), 1);
         for _ in 0..30 {
             frame(&state, &mut mem, true, Vec::new());
