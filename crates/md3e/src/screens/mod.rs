@@ -17,6 +17,7 @@ mod pages;
 mod pane;
 mod player_bar;
 mod sound_quality;
+pub(crate) mod stage;
 pub mod sweep;
 mod tag_editor;
 mod visualizer;
@@ -119,6 +120,8 @@ pub struct Md3eUi {
     scheme: SchemeAnim,
     pub(crate) pages: pages::PageState,
     chrome: chrome::Chrome,
+    /// The settings' live stage (with a chrome of its own).
+    stage: stage::StageUi,
     /// «Найти песню…» over everything.
     find_song: find_song::FindSongUi,
     system_reduced_motion: bool,
@@ -162,6 +165,7 @@ impl Md3eUi {
             scheme: SchemeAnim::default(),
             pages: pages::PageState::default(),
             chrome: chrome::Chrome::default(),
+            stage: stage::StageUi::default(),
             find_song: find_song::FindSongUi::default(),
             system_reduced_motion: false,
             fullscreen: false,
@@ -442,6 +446,8 @@ impl Md3eUi {
         // surface: the pages are not laid out for nothing (with the side
         // pane's lyrics they cost more than Now Playing itself).
         let covered = self.now_playing && self.np_anim.value(anim::now(ctx)) >= 0.999;
+        // Shown again only if the page lays out and asks for it.
+        self.stage.visible = false;
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(s.surface))
@@ -929,6 +935,16 @@ impl Md3eUi {
         } else {
             nav = pages::search_results(&mut page_ui, &self.search, state, bottom_inset, &mut self.pages, out).or(nav);
         }
+        // The settings' live stage, when the page asked for it: in a layer
+        // just over the page's, under the pane, menus, dialogs and snackbars.
+        self.stage.draw(
+            &ctx,
+            page_ui.layer_id(),
+            page_ui.clip_rect(),
+            page_ui.opacity(),
+            state,
+            (self.pages.levels_bass, &self.chrome.bands),
+        );
         if let Some(r) = nav {
             self.navigate(&ctx, r, out);
         }
@@ -1244,9 +1260,15 @@ impl Md3eUi {
 }
 
 impl Md3eUi {
-    /// Whether the ambient glow is on screen and wants audio levels.
+    /// Whether the ambient glow is on screen and wants audio levels (Now
+    /// Playing, the visualizer, the pane's lyrics, the settings' stage).
     pub fn wants_levels(&self) -> bool {
-        self.now_playing || self.chrome.np_covering || self.np_anim.target() > 0.5 || self.chrome.visualizer || self.pane == Some(PaneTab::Lyrics)
+        self.now_playing
+            || self.chrome.np_covering
+            || self.np_anim.target() > 0.5
+            || self.chrome.visualizer
+            || self.pane == Some(PaneTab::Lyrics)
+            || self.stage.visible
     }
 
     /// The latest bass energy (0..1) for the ambient glow.
@@ -1624,6 +1646,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The settings' stage: drawn where the page asks for it, with the
+    /// placeholder playing; it sends nothing, leaves the real Now Playing's
+    /// springs alone, and wants levels only while it is up.
+    #[test]
+    fn the_stage_is_a_picture_of_its_own() {
+        use stage::{Scene, Script, StageRequest};
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut state = ViewState::default();
+        state.prefs.np_volume = false;
+        state.prefs.np_volume_pop = true;
+        state.prefs.dbl_click_shape = 2;
+        state.prefs.cover_click_pause = true;
+        ui.navigate(&ctx, Route::Settings, &mut Vec::new());
+        frame(&ctx, &mut ui, &mut state, 0.0, 1280.0, None);
+        frame(&ctx, &mut ui, &mut state, 1.0, 1280.0, None);
+        assert!(!ui.wants_levels());
+        let rect = Rect::from_min_size(pos2(640.0, 160.0), vec2(560.0, 350.0));
+        let run = |ui: &mut Md3eUi, state: &ViewState, t: f64, req: Option<StageRequest>| {
+            if let Some(r) = req {
+                stage::request(&ctx, r);
+            }
+            let mut commands = Vec::new();
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+                time: Some(t),
+                ..Default::default()
+            }, |root| ui.frame(root, state, &mut commands));
+            output.textures_delta.clear();
+            (commands, output)
+        };
+        let shows = [
+            (Scene::Track, Script::None),
+            (Scene::Track, Script::DoubleTap),
+            (Scene::Track, Script::PausePlay),
+            (Scene::Track, Script::Volume),
+            (Scene::Lyrics, Script::LyricsReturn),
+            (Scene::Lyrics, Script::Interlude),
+            (Scene::Home, Script::None),
+            (Scene::Album, Script::None),
+            (Scene::Track, Script::Open),
+        ];
+        let mut t = 2.0;
+        let mut title_seen = false;
+        for (scene, script) in shows {
+            for _ in 0..12 {
+                t += 0.25;
+                let mut req = StageRequest::new(rect, scene, state.prefs.clone());
+                req.script = script;
+                req.parts = vec![stage::Part::Cover];
+                req.outline = 1.0;
+                let (commands, output) = run(&mut ui, &state, t, Some(req));
+                assert!(ui.wants_levels(), "{scene:?}: levels while the stage is up");
+                for c in &commands {
+                    assert!(!matches!(c,
+                        Command::TogglePlay | Command::Seek(_) | Command::SetVolume(_) | Command::ToggleMute
+                        | Command::Next | Command::Previous | Command::Like(..) | Command::Dislike { .. }
+                        | Command::SetPref(nikgob_view::PrefPatch::CoverShape(_))
+                    ), "{scene:?} {script:?}: the stage sent {c:?}");
+                }
+                if scene == Scene::Track && script == Script::None {
+                    title_seen |= output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Text(text) if text.galley.text() == "Название песни" && rect.contains(text.pos)));
+                }
+            }
+        }
+        assert!(title_seen, "the placeholder plays on the stage, inside its rect");
+        // The real screen's springs were never touched; the copy has its own.
+        assert!(ctx.data(|d| d.get_temp::<Animated<f32>>(egui::Id::new("np-mega"))).is_none());
+        assert!(ctx.data(|d| d.get_temp::<(NpSlot, Animated<[f32; 4]>)>(egui::Id::new("np-content-fade"))).is_none());
+        let copy = stage::Stage::copy(1.0, false, (0.0, Vec::new()));
+        assert!(ctx.data(|d| d.get_temp::<Animated<f32>>(copy.id("np-mega"))).is_some());
+        // No request: no stage, no levels.
+        let (_, output) = run(&mut ui, &state, t + 1.0, None);
+        assert!(!ui.wants_levels());
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == "Название песни")));
     }
 
     /// One frame with a pointer press or release at `pos`.

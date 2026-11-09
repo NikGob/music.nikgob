@@ -1,11 +1,11 @@
 //! Content pages and the menus and dialogs they open.
 
 mod brand;
-mod detail;
+pub(super) mod detail;
 mod dialogs;
 mod downloads;
 mod cards;
-mod home;
+pub(crate) mod home;
 mod library;
 mod search;
 mod shelf;

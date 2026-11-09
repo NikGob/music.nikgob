@@ -16,6 +16,7 @@ use nikgob_view::{
 };
 
 use super::{PageState, cards, widgets, worlds};
+use crate::screens::stage::{Part, Stage};
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, MenuItem, Size, Style, anim},
@@ -131,7 +132,7 @@ fn lines(n: usize, per_line: usize) -> usize {
 }
 
 /// The sections of the page, top to bottom.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
     Shortcuts,
     Mixes,
@@ -140,6 +141,58 @@ pub enum Section {
     FromLibrary,
     New,
     Releases,
+}
+
+// For «Разделы главной» (r21-wire).
+#[cfg_attr(not(test), allow(dead_code))]
+impl Section {
+    /// Every section, in the page's own order.
+    pub const ALL: [Self; 7] = [
+        Self::Shortcuts,
+        Self::Mixes,
+        Self::ListenAgain,
+        Self::OfDay,
+        Self::FromLibrary,
+        Self::New,
+        Self::Releases,
+    ];
+
+    /// Its name in «Разделы главной».
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Shortcuts => "Быстрый доступ",
+            Self::Mixes => "Миксы для тебя",
+            Self::ListenAgain => "Слушать снова",
+            Self::OfDay => "Плитки дня",
+            Self::FromLibrary => "Из библиотеки",
+            Self::New => "Новое",
+            Self::Releases => "Релизы",
+        }
+    }
+}
+
+/// The order and the sections turned on, as «Разделы главной» sets them;
+/// empty: all of them in the page's own order.
+pub fn order_of(_prefs: &nikgob_view::Prefs) -> Vec<(Section, bool)> {
+    // TODO(r21-wire): from `Prefs::home_sections` (r21-presets).
+    Vec::new()
+}
+
+/// `shown` in `order`: the sections it names, turned on, in its order;
+/// those it does not name (a section new since it was set) after them, in
+/// the page's own order. An empty `order` changes nothing.
+pub fn arrange(shown: Vec<Section>, order: &[(Section, bool)]) -> Vec<Section> {
+    if order.is_empty() {
+        return shown;
+    }
+    let mut out: Vec<Section> = Vec::with_capacity(shown.len());
+    for (s, on) in order {
+        if *on && shown.contains(s) && !out.contains(s) {
+            out.push(*s);
+        }
+    }
+    out.extend(shown.iter().filter(|s| !order.iter().any(|(o, _)| o == *s)));
+    out
 }
 
 /// What the page shows of `h`: «Только скачанное» (`local_only`) takes the
@@ -214,6 +267,12 @@ pub fn entering<R>(ui: &mut Ui, rect: Rect, n: usize, salt: impl std::hash::Hash
 }
 
 pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+    show_on(ui, state, pages, &Stage::REAL, out)
+}
+
+/// [`show`] for the page or the settings' stage, which notes where each
+/// section is and opens no sheet of its own.
+pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &Stage, out: &mut Vec<Command>) -> Option<Route> {
     let h = &state.home;
     let mut nav = None;
     ui.spacing_mut().item_spacing.y = 0.0;
@@ -254,10 +313,11 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         name_prompt(ui, grid, pages, out);
     }
 
-    let shown = sections(h, local_only);
+    let shown = arrange(sections(h, local_only), &order_of(&state.prefs));
     for (k, section) in shown.iter().enumerate() {
         ui.add_space(if k == 0 { 16.0 } else { SECTION_GAP });
         let i = n + k;
+        let top = ui.cursor().top();
         let r = match section {
             Section::Shortcuts => shortcuts(ui, grid, i, state, out),
             Section::Mixes => mixes(ui, grid, i, state, out),
@@ -267,9 +327,13 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             Section::New => new_music(ui, grid, i, state, pages, out),
             Section::Releases => releases(ui, grid, i, state, out),
         };
+        let bottom = ui.min_rect().bottom().max(top);
+        stage.part(ui.ctx(), Part::Home(*section), Rect::from_x_y_ranges(grid.left..=grid.left + grid.width, top..=bottom));
         nav = r.or(nav);
     }
-    blend_sheet(ui.ctx(), state, out);
+    if stage.live {
+        blend_sheet(ui.ctx(), state, out);
+    }
     nav
 }
 

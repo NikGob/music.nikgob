@@ -162,11 +162,14 @@ fn level(levels: &[f32], band: f32) -> f32 {
     (levels[i0] * (1.0 - f) + levels[i1] * f).clamp(0.0, 1.0)
 }
 
-/// Paints the shapes into `rect` under the current prefs. `kick` (0..1) is
-/// the beat, `transients` the per-band jumps, `bass` the smoothed bass.
-pub fn paint(ui: &Ui, rect: Rect, prefs: &Prefs, playing: bool, kick: f32, transients: &[f32], bass: f32) {
+/// Paints the shapes into `rect` under the current prefs, their field kept
+/// under `id` (`"np-bg-shapes"` for the real screen, its own for the
+/// settings' stage). `kick` (0..1) is the beat, `transients` the per-band
+/// jumps, `bass` the smoothed bass.
+#[allow(clippy::too_many_arguments)]
+pub fn paint(ui: &Ui, id: egui::Id, rect: Rect, prefs: &Prefs, playing: bool, kick: f32, transients: &[f32], bass: f32) {
     let scale = (rect.height() / 900.0).clamp(0.6, 1.6);
-    field(ui, egui::Id::new("np-bg-shapes"), rect, prefs, Look { scale, vis: 1.0, prewarm: false, jump: 1.0 }, playing, kick, transients, bass);
+    field(ui, id, rect, prefs, Look { scale, vis: 1.0, prewarm: false, jump: 1.0 }, playing, kick, transients, bass);
 }
 
 /// A small sample for the settings' cards, on its own field (one per
@@ -404,7 +407,8 @@ fn draw(ui: &Ui, rect: Rect, f: &Field, mode: BgShapes, prefs: &Prefs, scale: f3
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-    let opts = shape_paint::FillOptions::for_ppp(ui.ctx().pixels_per_point());
+    // On the settings' stage the feather follows its scale.
+    let opts = shape_paint::FillOptions::for_ppp(super::stage::ppp(ui.ctx()));
     let opacity = prefs.bg_shapes_opacity.clamp(0.25, 2.0);
     let (colors, alphas): ([Color32; 4], [f32; 4]) = match prefs.bg_shapes_colors {
         1 => ([s.primary; 4], if theme.dark { [0.10, 0.07, 0.05, 0.12] } else { [0.16, 0.11, 0.08, 0.2] }),
