@@ -444,8 +444,22 @@ pub(crate) fn seed(lib: &Library, root: &Path, releases: &[CatRelease], files: b
         })
         .collect();
     let fetched = if files {
-        let jobs: Vec<(String, PathBuf)> =
-            releases.iter().zip(&dirs).map(|(r, d)| (r.mbid.clone(), d.join("cover.jpg"))).collect();
+        // The release group's front is the album's usual cover; a release's
+        // own front is often a photo of that pressing (shrink wrap, stickers,
+        // a picture disc).
+        let jobs: Vec<(Vec<String>, PathBuf)> = releases
+            .iter()
+            .zip(&dirs)
+            .map(|(r, d)| {
+                let mut urls: Vec<String> = r
+                    .group_mbid
+                    .iter()
+                    .map(|g| format!("https://coverartarchive.org/release-group/{g}/front-1200"))
+                    .collect();
+                urls.push(format!("https://coverartarchive.org/release/{}/front-1200", r.mbid));
+                (urls, d.join("cover.jpg"))
+            })
+            .collect();
         fetch_covers(&jobs)
     } else {
         vec![false; releases.len()]
@@ -577,7 +591,7 @@ fn playlists(lib: &Library, releases: &[CatRelease], all: &[(TrackId, usize, usi
 /// The releases' front covers from the Cover Art Archive (by release MBID,
 /// 1200 px), saved at each job's path as JPEG with the 16 px `ambient.png`
 /// beside it; true where that worked. A few at a time, all within a minute.
-fn fetch_covers(jobs: &[(String, PathBuf)]) -> Vec<bool> {
+fn fetch_covers(jobs: &[(Vec<String>, PathBuf)]) -> Vec<bool> {
     let none = vec![false; jobs.len()];
     let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(4).thread_name("profile-covers").enable_all().build() {
         Ok(rt) => rt,
@@ -599,15 +613,21 @@ fn fetch_covers(jobs: &[(String, PathBuf)]) -> Vec<bool> {
         }
     };
     rt.block_on(async {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         let mut out = Vec::with_capacity(jobs.len());
         for batch in jobs.chunks(4) {
             let handles: Vec<_> = batch
                 .iter()
-                .map(|(mbid, path)| {
-                    let (http, path) = (http.clone(), path.clone());
-                    let url = format!("https://coverartarchive.org/release/{mbid}/front-1200");
-                    tokio::spawn(async move { fetch_cover(&http, &url, &path).await })
+                .map(|(urls, path)| {
+                    let (http, path, urls) = (http.clone(), path.clone(), urls.clone());
+                    tokio::spawn(async move {
+                        for url in &urls {
+                            if fetch_cover(&http, url, &path).await {
+                                return true;
+                            }
+                        }
+                        false
+                    })
                 })
                 .collect();
             for h in handles {
