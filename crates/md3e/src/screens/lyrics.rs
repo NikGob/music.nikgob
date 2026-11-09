@@ -42,7 +42,7 @@ enum Style {
     Wave,
 }
 
-/// What an animation goes over («Подсвечивать»).
+/// What an animation goes over («Шаг подсветки»).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum By {
     Letters,

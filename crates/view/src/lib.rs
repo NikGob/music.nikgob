@@ -1476,7 +1476,7 @@ pub struct Prefs {
     /// letters), before [`Self::lyrics_unit`]: read once by
     /// [`Prefs::upgrade_lyrics`].
     pub lyrics_by_words: bool,
-    /// «Подсвечивать»: what every animation goes over, [`LYRICS_BY_LETTERS`],
+    /// «Шаг подсветки»: what every animation goes over, [`LYRICS_BY_LETTERS`],
     /// [`LYRICS_BY_SYLLABLES`] (the timed syllables of a text that has
     /// them, the timed words of one that has words) or [`LYRICS_BY_WORDS`]
     /// (each part of a hyphenated word).
@@ -1504,11 +1504,11 @@ pub struct Prefs {
     /// «Подсветка по словам во всех песнях»: the background pass makes
     /// word timing for every song with a file (hours on a big library).
     pub lyrics_words_all: bool,
-    /// «Подсветка по строкам для текстов без времени»: the playing song's
+    /// «Строки простого текста»: the playing song's
     /// plain text gets line timing from the recording when no source has
     /// line timing.
     pub lyrics_lines_auto: bool,
-    /// «Подсветка по словам для песен, которые слушаю»: the playing song's
+    /// «Подсветка по словам в играющей песне»: the playing song's
     /// texts are shown with word timing made from the recording.
     pub lyrics_words_playing: bool,
     /// «Вид»: what the control under the lyrics opens: 0 its menu

@@ -736,7 +736,7 @@ fn appearance(ui: &mut Ui, p: &mut Prefs) {
     row(ui, Id::LyricsStyle, "Анимация", Some("Как выделяется строка, которую поют"), |ui| {
         choice(ui, Id::LyricsStyle, p);
     });
-    row(ui, Id::LyricsUnit, "Подсвечивать", None, |ui| {
+    row(ui, Id::LyricsUnit, "Шаг подсветки", None, |ui| {
         choice(ui, Id::LyricsUnit, p);
     });
     // Focus by letters brightens the whole line: nothing to smooth.
@@ -974,7 +974,7 @@ fn lyrics_align(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Com
     });
 
     group(ui, "Что подсвечивать само");
-    row(ui, Id::LyricsLinesAuto, "Подсвечивать строки, если у текста нет подсветки", None, |ui| {
+    row(ui, Id::LyricsLinesAuto, "Строки простого текста", None, |ui| {
         ui.add(Switch::new(&mut p.lyrics_lines_auto).id_salt("set-lyrics-lines"));
     });
     let words = (p.lyrics_words_all && a.total > 0).then(|| format!("Готово {} из {}", a.done.min(a.total), a.total));
@@ -1186,7 +1186,7 @@ fn general(ui: &mut Ui, _state: &ViewState, p: &mut Prefs, pages: &mut PageState
 
     group(ui, "Текст песен");
     // Word highlighting is the default experience: its switch comes first.
-    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам", Some("Плеер сам расставляет слова по голосу в песне, которая играет"), |ui| {
+    row(ui, Id::LyricsWordsPlaying, "Подсветка по словам в играющей песне", Some("Плеер сам расставляет слова по голосу в песне, которая играет"), |ui| {
         ui.add(Switch::new(&mut p.lyrics_words_playing).id_salt("set-lyrics-words-playing"));
     });
     row(ui, Id::SaveLyrics, "Сохранять найденный текст в файл трека", None, |ui| {
