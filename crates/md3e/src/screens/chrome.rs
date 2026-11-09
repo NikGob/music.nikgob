@@ -714,3 +714,24 @@ fn paint_vslider(ui: &Ui, rect: Rect, value: f32, pressed: bool) {
         Stroke::NONE,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One song on two albums: the Now Playing and bar ⋮ offer the other
+    /// album and «Разные песни», like the track menu of a list.
+    #[test]
+    fn the_other_album_of_a_song_is_in_the_player_menus() {
+        let track = TrackRow {
+            id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
+        };
+        let mut state = ViewState::default();
+        let other = nikgob_view::ReleaseId::new();
+        state.also_on = std::sync::Arc::new([(track.id, (other, "Live".to_owned()))].into_iter().collect());
+        assert_eq!(Chrome::item(Act::AlsoOn, &track, &state).label, "Есть и на альбоме «Live»");
+        assert_eq!(Chrome::item(Act::Apart, &track, &state).label, "Разные песни");
+    }
+}

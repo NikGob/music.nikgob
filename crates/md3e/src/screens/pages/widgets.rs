@@ -1577,3 +1577,102 @@ pub fn edition_offers(ui: &mut Ui, state: &ViewState, artist: Option<&str>, out:
         ui.add_space(12.0);
     }
 }
+
+#[cfg(test)]
+mod menu_tests {
+    use super::{PlaylistAct, PlaylistMenuOf, ReleaseAct, Row, playlist_command, playlist_rows, release_rows, row_acts};
+    use nikgob_view::{ArtistLinks, Command, PlaylistId, PlaylistSyncMode, ReleaseCard, ReleaseId, ReleaseType};
+
+    fn labels<A>(rows: &[Row<A>]) -> Vec<String> {
+        rows.iter()
+            .filter_map(|r| match r {
+                Row::Item(_, i) => Some(i.label.clone()),
+                Row::Divider | Row::Label(_) => None,
+            })
+            .collect()
+    }
+
+    /// The playlist's right-click menu and its page's ⋮ are one list: the
+    /// page leaves out only «Слушать» and «Перемешать» (its buttons), and
+    /// both can play the playlist next and queue it.
+    #[test]
+    fn a_playlist_offers_the_same_actions_by_right_click_and_by_more() {
+        let card = row_acts(&playlist_rows(PlaylistMenuOf { editable: true, ..Default::default() }));
+        let page = row_acts(&playlist_rows(PlaylistMenuOf { on_page: true, editable: true, ..Default::default() }));
+        let card_less_buttons: Vec<PlaylistAct> =
+            card.iter().copied().filter(|a| !matches!(a, PlaylistAct::Play | PlaylistAct::Shuffle)).collect();
+        assert_eq!(card_less_buttons, page);
+        for acts in [&card, &page] {
+            assert!(acts.contains(&PlaylistAct::Next) && acts.contains(&PlaylistAct::Queue));
+            assert_eq!(acts.last(), Some(&PlaylistAct::Delete));
+        }
+        // The liked playlist: no edit, no delete, still next and queue.
+        let liked = row_acts(&playlist_rows(PlaylistMenuOf::default()));
+        assert_eq!(liked, [PlaylistAct::Play, PlaylistAct::Shuffle, PlaylistAct::Next, PlaylistAct::Queue]);
+        let id = PlaylistId::new();
+        assert_eq!(playlist_command(PlaylistAct::Next, id), Some(Command::PlayPlaylistNext(id)));
+        assert_eq!(playlist_command(PlaylistAct::Queue, id), Some(Command::EnqueuePlaylist(id)));
+    }
+
+    /// A linked playlist's modes say what they do, and one stops the sync.
+    #[test]
+    fn a_linked_playlist_can_stop_syncing() {
+        let rows = playlist_rows(PlaylistMenuOf {
+            on_page: true,
+            editable: true,
+            sync: Some(("YouTube Music", PlaylistSyncMode::TwoWay)),
+            can_link: false,
+        });
+        let l = labels(&rows);
+        for want in ["Изменения в обе стороны", "Только получать изменения", "Не синхронизировать"] {
+            assert!(l.iter().any(|x| x == want), "{want} missing from {l:?}");
+        }
+        assert!(rows.iter().any(|r| matches!(r, Row::Label(t) if t == "Синхронизация с YouTube Music")));
+        let acts = row_acts(&rows);
+        assert!(!acts.contains(&PlaylistAct::Link));
+        let id = PlaylistId::new();
+        assert_eq!(
+            playlist_command(PlaylistAct::Sync(PlaylistSyncMode::Once), id),
+            Some(Command::SetPlaylistSync { playlist: id, mode: PlaylistSyncMode::Once })
+        );
+        // Not linked: the way to link it instead of the modes.
+        let unlinked = row_acts(&playlist_rows(PlaylistMenuOf { on_page: true, editable: true, can_link: true, ..Default::default() }));
+        assert!(unlinked.contains(&PlaylistAct::Link));
+        assert!(!unlinked.iter().any(|a| matches!(a, PlaylistAct::Sync(_))));
+    }
+
+    /// The album's right-click menu and its page's ⋮ are one list in one
+    /// order: the page leaves out its buttons (play, shuffle, the like) and
+    /// adds «В плейлист…», which needs the tracks only the page has.
+    #[test]
+    fn an_album_offers_the_same_actions_by_right_click_and_by_more() {
+        let r = ReleaseCard {
+            id: ReleaseId::new(),
+            title: "Album".into(),
+            artist: "Artist".into(),
+            artists: ArtistLinks::default(),
+            year: None,
+            release_type: ReleaseType::Album,
+            cover: None,
+            local_tracks: 1,
+            total_tracks: Some(1),
+            liked: false,
+            added_at: 0,
+        };
+        let card = row_acts(&release_rows(&r, false));
+        let page = row_acts(&release_rows(&r, true));
+        let shared = |acts: &[ReleaseAct]| -> Vec<ReleaseAct> {
+            acts.iter()
+                .copied()
+                .filter(|a| !matches!(a, ReleaseAct::Play | ReleaseAct::Shuffle | ReleaseAct::Like | ReleaseAct::Playlist))
+                .collect()
+        };
+        assert_eq!(shared(&card), shared(&page));
+        assert_eq!(&card[..4], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Next, ReleaseAct::Queue]);
+        assert_eq!(&page[..3], [ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
+        assert_eq!(labels(&release_rows(&r, false))[3], "В конец очереди");
+        for acts in [&card, &page] {
+            assert_eq!(&acts[acts.len() - 2..], [ReleaseAct::Trash, ReleaseAct::Purge]);
+        }
+    }
+}
