@@ -1487,7 +1487,7 @@ struct Sweep {
 
 /// Syllables of one word this close (seconds) are sung in one sweep; over a
 /// longer pause the front finishes the first and waits.
-const SWEEP_BRIDGE: f32 = 0.2;
+const SWEEP_BRIDGE: f32 = 0.3;
 /// A consonant takes its even share of a syllable's time up to this many
 /// seconds, and half its share past that; the vowels take what is left. A
 /// syllable sung at a speaking pace is crossed evenly, a held one draws out
@@ -1496,7 +1496,11 @@ const CONSONANT: f32 = 0.09;
 /// The soft edge comes onto a run's first letter and leaves its last within
 /// this many seconds before and after the run's own times, however slowly
 /// the run is sung.
-const EDGE_TIME: f32 = 0.12;
+const EDGE_TIME: f32 = 0.16;
+/// The same for the edge leaving a run's last letter: longer, so the end of
+/// a held note is not a sudden dash of the light but goes on gathering
+/// speed gently from the slow pace of the note.
+const EDGE_TAIL: f32 = 0.4;
 
 impl Sweep {
     /// Where the unlit end of the soft edge (`feather` px wide) is at `p`
@@ -1524,10 +1528,11 @@ impl Sweep {
         }
         let (v0, v1) = (self.slopes[0], self.slopes[self.slopes.len() - 1]);
         // The edge runs in at the run's own first speed, or faster when
-        // that would take longer than [`EDGE_TIME`]; and out likewise.
-        let run = |dx: f32, v: f32| if v * EDGE_TIME > dx { dx / v } else { EDGE_TIME };
+        // that would take longer than [`EDGE_TIME`]; and out likewise
+        // ([`EDGE_TAIL`]).
+        let run = |dx: f32, v: f32, most: f32| if v * most > dx { dx / v } else { most };
         let (dx_in, dx_out) = (x0 - self.from + half, half);
-        let (lead, tail) = (run(dx_in, v0), run(dx_out, v1));
+        let (lead, tail) = (run(dx_in, v0, EDGE_TIME), run(dx_out, v1, EDGE_TAIL));
         let centre = if p < t0 {
             if dx_in <= 0.0 || p <= t0 - lead {
                 return f32::NEG_INFINITY;
@@ -1986,6 +1991,24 @@ impl Pace {
 
 /// Focus brightens words this many times slower than the others light them.
 const FOCUS_CALM: f32 = 2.2;
+/// How lit (0..1 from the unsung tone to the lit one) the whole current
+/// line is under Focus by syllables or words; only the piece being sung is
+/// lit in full.
+const FOCUS_LINE: f32 = 0.7;
+/// Seconds a piece takes to go back to the line's tone once it is sung.
+const FOCUS_FALL: f32 = 0.6;
+/// A piece stands out for at least this long, however short it is sung.
+const FOCUS_HOLD: f32 = 0.25;
+
+/// How much (0..1) a piece sung from `start` to `end` stands out at `p`
+/// under Focus: up as it starts (see [`light_over`]), back down over
+/// [`FOCUS_FALL`] once it is sung. Nothing stays lit behind it: Focus has
+/// no fill.
+fn focus_pulse(p: f32, start: f32, end: f32, rise: f32, window: f32) -> f32 {
+    let end = end.max(start + FOCUS_HOLD) + 0.5 * window;
+    let down = ((p - end) / FOCUS_FALL).clamp(0.0, 1.0);
+    light_over(p - start, rise, window) * (1.0 - down * down * (3.0 - 2.0 * down))
+}
 
 /// The averaging window at full «Плавность», in seconds: two or three sung
 /// letters.
@@ -2158,7 +2181,12 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         let sustained = syllable.filter(|s| current && (style == Style::Karaoke || look.by == By::Syllables) && held(s.start, s.end, s.letters, p));
         // When the piece this glyph goes with is sung (see [`onset_of`]).
         let onset = onset_of(timing, k, look);
-        let on = onset.map(|at| light_over(p - at, rise, window));
+        // Focus has no fill: the line is bright as a whole and the piece
+        // being sung a little brighter, only while it is sung.
+        let on = onset.map(|at| match piece_end(timing, k, look).filter(|_| style == Style::Focus) {
+            Some(end) => FOCUS_LINE + (1.0 - FOCUS_LINE) * focus_pulse(p, at, end, rise, window),
+            None => light_over(p - at, rise, window),
+        });
         // Karaoke and Focus keep one baseline: sung and unsung words never
         // drift apart (that read as broken text); only a word with a held
         // note rises under karaoke by letters, and comes back down after
@@ -2229,6 +2257,16 @@ fn onset_of(timing: &Timing, k: usize, look: Look) -> Option<f32> {
         syllable.map(|s| timing.onsets.get(s.glyphs.0).copied().flatten().unwrap_or(s.start))
     } else {
         None
+    }
+}
+
+/// When the piece glyph `k` lights with under `look` (see [`onset_of`]) is
+/// sung: its written unit by words, else its syllable.
+fn piece_end(timing: &Timing, k: usize, look: Look) -> Option<f32> {
+    if look.words() {
+        timing.glyph_units.get(k).copied().flatten().map(|u| timing.units[u].end)
+    } else {
+        timing.glyphs.get(k).copied().flatten().map(|s| timing.syllables[s].end)
     }
 }
 
@@ -3947,6 +3985,17 @@ mod tests {
                         let case = format!("{timing}, style {style}, unit {unit}, smooth {smooth}");
                         let (glyphs, lit) = painted_glyphs(&prefs, l, 2.4);
                         assert_eq!(glyphs.len(), text.chars().count(), "{case}: the line was not painted with its timing");
+                        // Focus by syllables or words has no fill: the word
+                        // sung and the word to come are one tone, the
+                        // line's, and not the lit one.
+                        if style == 1 && !letters && timing != "calm" {
+                            // (A guessed «Свет» has only just been sung.)
+                            if timing != "guessed" {
+                                assert_eq!(glyphs[0], glyphs[13], "{case}: «Свет» and «ложится» differ");
+                            }
+                            assert!(!close(glyphs[0].unwrap(), lit), "{case}: the line is lit whole");
+                            continue;
+                        }
                         // «Свет» was sung over a second ago.
                         for (k, c) in glyphs[..4].iter().enumerate() {
                             assert!(close(c.unwrap(), lit), "{case}: letter {k} is {:?}, lit is {lit:?}", c.unwrap());
@@ -4250,6 +4299,36 @@ mod tests {
             assert!(heads[..3].iter().all(|h| *h == f32::INFINITY) && heads[3..].iter().all(|h| *h == f32::NEG_INFINITY));
             let last = |s: f32| t.sweeps[2].head(s, edge);
             assert!(last(6.8) == f32::NEG_INFINITY && last(7.0).is_finite() && last(7.2) == f32::INFINITY);
+        });
+    }
+
+    /// Focus by syllables or words: a piece stands out while it is sung and
+    /// goes back to the line's tone after it, evenly; nothing fills.
+    #[test]
+    fn focus_lifts_the_sung_piece_and_lets_it_go() {
+        let at = |p: f32| focus_pulse(p, 2.0, 3.0, 0.1, 0.0);
+        assert_eq!(at(1.5), 0.0);
+        assert!(at(2.5) > 0.99 && at(3.0) > 0.99);
+        assert!(at(3.0 + FOCUS_FALL * 0.5) > 0.3 && at(3.0 + FOCUS_FALL * 0.5) < 0.7);
+        assert!(at(3.0 + FOCUS_FALL + 0.01) < 1e-3);
+        let mut was = 0.0;
+        for ms in 1500..4000 {
+            let v = at(ms as f32 / 1000.0);
+            assert!((v - was).abs() < 0.05, "{ms}: a step");
+            was = v;
+        }
+        // A piece sung in a blink still shows.
+        assert!(focus_pulse(2.2, 2.0, 2.05, 0.1, 0.0) > 0.9);
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(3.0), "космо цветок");
+            l.words = vec![word(1.0, 1.4, "кос"), word(1.4, 1.8, "мо "), word(1.8, 2.4, "цве"), word(2.4, 2.8, "ток")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let look = |by| Look { style: Style::Focus, by };
+            // Glyphs: к о с м о ␠ ц в е т о к.
+            assert_eq!(piece_end(&t, 0, look(By::Syllables)), Some(t.syllables[0].end));
+            assert_eq!(piece_end(&t, 0, look(By::Words)), Some(t.syllables[1].end));
+            assert_eq!(piece_end(&t, 5, look(By::Words)), None);
         });
     }
 
