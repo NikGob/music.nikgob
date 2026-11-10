@@ -260,8 +260,54 @@ fn sections_follow_their_order_and_switches() {
     assert_eq!(arrange(shown.clone(), &order), vec![S::New, S::Shortcuts, S::ListenAgain]);
     // A section named twice is drawn once.
     assert_eq!(arrange(vec![S::Mixes], &[(S::Mixes, true), (S::Mixes, true)]), vec![S::Mixes]);
-    assert_eq!(Section::ALL.len(), 7);
+    assert_eq!(Section::ALL.len(), 8);
+    assert_eq!(Section::ALL.len(), nikgob_view::HomeSection::ALL.len());
+    for (s, key) in Section::ALL.iter().zip(nikgob_view::HomeSection::ALL) {
+        assert_eq!(section_of(key), *s);
+        assert_eq!(s.title(), key.label());
+    }
     assert!(Section::ALL.iter().all(|s| !s.title().is_empty()));
     // Until «Разделы главной» are wired, the page keeps its own order.
     assert!(order_of(&nikgob_view::Prefs::default()).is_empty());
+}
+
+/// A mix of the day.
+fn day_lane(n: u8) -> LaneCard {
+    LaneCard { key: nikgob_view::MixKey::Daily(n), ..lane(&format!("Микс дня {n}")) }
+}
+
+/// «Миксы дня» are a row of their own beside «Миксы для тебя»: each row
+/// takes its mixes by their keys, and both are drawn under their names at
+/// any width (what does not fit goes on sideways).
+#[test]
+fn the_mixes_of_the_day_have_their_own_row() {
+    let mut h = HomeView { lanes: vec![lane("Всё вперемешку")], ..HomeView::default() };
+    assert_eq!(sections(&h, false), [Section::Mixes]);
+    h.lanes = (1..=6).map(day_lane).collect();
+    assert_eq!(sections(&h, false), [Section::Daily]);
+    h.lanes.push(lane("Любимые"));
+    assert_eq!(sections(&h, false), [Section::Daily, Section::Mixes]);
+    let mut st = state(Vec::new(), false);
+    st.home.lanes = h.lanes;
+    for width in [900.0, 1280.0, 1700.0] {
+        let page = texts(&st, width);
+        assert!(page.contains("Миксы дня") && page.contains("Миксы для тебя"), "{width}");
+        assert!(page.contains("Микс дня 1") && page.contains("Любимые"), "{width}");
+    }
+    // Turned off in «Разделы главной», the row is gone and the other stays.
+    nikgob_view::PrefPatch::HomeSections(vec![nikgob_view::HomeSectionSwitch { key: nikgob_view::HomeSection::Daily, on: false }]).apply(&mut st.prefs);
+    let page = texts(&st, 1280.0);
+    assert!(!page.contains("Миксы дня") && page.contains("Миксы для тебя"));
+}
+
+/// Tiles of the day that fit share the row; more keep the row's count and
+/// go on sideways.
+#[test]
+fn the_tiles_of_the_day_fill_their_row() {
+    assert_eq!(of_day_per(4, 3), 3);
+    assert_eq!(of_day_per(4, 4), 4);
+    assert_eq!(of_day_per(4, 5), 4);
+    assert_eq!(of_day_per(2, 5), 2);
+    assert_eq!(of_day_per(2, 1), 1);
+    assert_eq!(of_day_per(4, 0), 1);
 }

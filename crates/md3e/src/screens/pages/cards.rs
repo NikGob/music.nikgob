@@ -456,12 +456,14 @@ pub enum MixItem {
 /// The items of mix `l`'s ⋮ in order, «Список треков» first with `list`.
 /// «На повторе» is what played: no other draw of it, and its switch is in
 /// Settings; a blend is the user's own for the day; a world's mix is of
-/// its page, the world's own. With `can_blend` it offers «Смешать с…».
+/// its page, the world's own; a mix of the day is another one tomorrow
+/// (its row is switched off in «Разделы главной»). With `can_blend` it
+/// offers «Смешать с…».
 pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool) -> Vec<MixItem> {
     let world = matches!(l.key, nikgob_view::MixKey::World(_));
     let redraw = l.key != nikgob_view::MixKey::OnRepeat && !world;
     let blend = can_blend && l.blend_base.is_some();
-    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_)) && !world;
+    let hide = !matches!(l.key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::Blend(_) | nikgob_view::MixKey::Daily(_)) && !world;
     let mut items = Vec::new();
     if list {
         items.push(MixItem::List);
