@@ -1334,3 +1334,74 @@ pub(super) fn connected_shown(
     });
     (picked, rects)
 }
+
+#[cfg(test)]
+mod speed_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use nikgob_view::{SpeedVariant, TrackSpeeds};
+
+    use super::widgets::{Row, row_acts};
+    use super::*;
+
+    fn rows() -> Vec<Row<TrackAct>> {
+        track_rows(TrackMenuOf {
+            playable: true,
+            has_album: true,
+            has_artists: true,
+            also_on: None,
+            info: false,
+            fetch: MenuItem::new("Скачать"),
+            torrents: None,
+            find_song: None,
+            wrong_file: false,
+            dislike: MenuItem::new("Не нравится"),
+            ban: MenuItem::new("Не рекомендовать исполнителя"),
+        })
+    }
+
+    fn speeds(enabled: bool, chosen: &[(TrackId, SpeedVariant)]) -> TrackSpeeds {
+        TrackSpeeds { enabled, chosen: Arc::new(chosen.iter().copied().collect::<HashMap<_, _>>()) }
+    }
+
+    /// «Скорость…» is in a track's menu, right after «Поделиться», only
+    /// while the speed of tracks is on in the settings.
+    #[test]
+    fn the_speed_row_is_there_only_while_the_speed_of_tracks_is_on() {
+        let track = TrackId::new();
+        let plain = row_acts(&rows());
+        let off = with_speed_row(rows(), &speeds(false, &[(track, SpeedVariant::Fast)]), track);
+        assert_eq!(row_acts(&off), plain, "switched off: the menu as it was");
+
+        let on = with_speed_row(rows(), &speeds(true, &[]), track);
+        let acts = row_acts(&on);
+        assert_eq!(acts.len(), plain.len() + 1);
+        let share = acts.iter().position(|a| *a == TrackAct::Share).unwrap();
+        assert_eq!(acts[share + 1], TrackAct::Speed);
+        // Still in the group of the track's own things: the divider follows.
+        let at = on.iter().position(|r| matches!(r, Row::Item(TrackAct::Speed, _))).unwrap();
+        assert!(matches!(on[at + 1], Row::Divider));
+    }
+
+    /// The row is marked while the track is not played as recorded, and
+    /// the picker marks the version it plays as.
+    #[test]
+    fn the_row_and_the_picker_show_the_version_of_the_track() {
+        let (fast, plain) = (TrackId::new(), TrackId::new());
+        let s = speeds(true, &[(fast, SpeedVariant::Nightcore)]);
+        let marked = |track| {
+            with_speed_row(rows(), &s, track).into_iter().find_map(|r| match r {
+                Row::Item(TrackAct::Speed, item) => Some(item.selected),
+                _ => None,
+            })
+        };
+        assert_eq!(marked(fast), Some(true));
+        assert_eq!(marked(plain), Some(false));
+        // Five versions, in the order of the menu; a pick is its command.
+        for (i, v) in SpeedVariant::ALL.into_iter().enumerate() {
+            assert_eq!(speed_command(fast, i), Some(Command::SetTrackSpeed { track: fast, variant: v }));
+        }
+        assert_eq!(speed_command(fast, SpeedVariant::ALL.len()), None);
+    }
+}
