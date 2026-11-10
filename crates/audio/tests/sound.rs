@@ -203,21 +203,20 @@ fn a_seek_at_speed_lands_on_the_items_own_time() {
     rig.player.play(PlayItem::file(1, &p).with_fx(speed(1.25)));
     rig.device.render(5000);
     let target = Duration::from_millis(3_250);
-    rig.player.seek(target);
-    assert_eq!(rig.player.position(), Some(target));
+    rig.seek_to(target);
     let out = rig.device.render(RATE as usize / 4);
     // Second 3 of the file is 700 Hz, heard a quarter higher.
     let f = measure_freq(&left(&out)[2400..], RATE);
     assert!((f - 875.0).abs() < 2.0, "{f}");
-    // A quarter second of sound later the item is 0.3125 s further (less
-    // the few milliseconds the old sound took to fade out).
+    // A quarter second of sound later the item is 0.3125 s further (the
+    // wait for the seek has already played out the old sound's fade).
     let pos = secs(rig.player.position());
     assert!((pos - 3.5625).abs() < 0.02, "{pos}");
     // The item's last second is 1100 Hz; it ends after 0.4 / 1.25 s more.
-    rig.player.seek(Duration::from_millis(7_600));
+    rig.seek_to(Duration::from_millis(7_600));
     let tail = rig.device.drain(RATE as usize * 5);
-    // 0.4 s of the item at 1.25 are 15360 frames, after up to 8 ms of the
-    // old sound fading out.
+    // 0.4 s of the item at 1.25 are 15360 frames, less the one frame the
+    // wait for the seek had already taken of them.
     let frames = tail.len() / 2;
     assert!(
         (15_358..=15_360 + 400).contains(&frames),
