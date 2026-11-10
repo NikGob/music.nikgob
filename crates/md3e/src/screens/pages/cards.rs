@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use egui::{Color32, CornerRadius, Galley, Id, Pos2, Rect, Response, Sense, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2};
+use egui::{Color32, Galley, Id, Pos2, Rect, Response, Sense, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2};
 use nikgob_view::{Command, LaneCard, MixCard, Route, Shortcut, Status, ViewState};
 
 use crate::{
@@ -102,16 +102,25 @@ fn line_w(ui: &Ui, s: &str, role: TypeStyle) -> f32 {
     crate::typography::layout(ui.painter(), role.job(s, Color32::WHITE)).size().x
 }
 
-fn corner(nw: f32, ne: f32, se: f32, sw: f32) -> CornerRadius {
-    let c = |v: f32| v.round().clamp(0.0, 255.0) as u8;
-    CornerRadius { nw: c(nw), ne: c(ne), se: c(se), sw: c(sw) }
+/// `rect` with its edges on whole pixels, so a card and the cover flush
+/// with its edge start on the same pixel in every column of the grid.
+pub fn on_pixels(ui: &Ui, rect: Rect) -> Rect {
+    let ppp = ui.ctx().pixels_per_point().max(0.01);
+    let f = |v: f32| (v * ppp).round() / ppp;
+    Rect::from_min_max(pos2(f(rect.min.x), f(rect.min.y)), pos2(f(rect.max.x), f(rect.max.y)))
+}
+
+/// A cover in `rect` cut to the outline a container of `radii` has there
+/// (the card's own corners where they share an edge), `zoom` times closer.
+fn cover_in(ui: &Ui, rect: Rect, uri: Option<&str>, radii: Radii, fallback: Icon, zoom: f32) {
+    crate::components::paint_image_shaped(ui, rect, uri, radii, fallback, zoom, &|_, _| false);
 }
 
 /// Covers as a 2×2 mosaic (2 apart) in a square of radius `r`; fewer than
 /// four: the first alone. Magnified `zoom` times inside.
 pub fn mosaic(ui: &Ui, rect: Rect, covers: &[String], r: f32, gap: f32, zoom: f32) {
     if covers.len() < 4 {
-        crate::components::paint_image_zoomed(ui, rect, covers.first().map(String::as_str), corner(r, r, r, r), Icon::QueueMusic, zoom);
+        cover_in(ui, rect, covers.first().map(String::as_str), Radii::all(r), Icon::QueueMusic, zoom);
         return;
     }
     let half = (rect.size() - vec2(gap, gap)) * 0.5;
@@ -119,12 +128,12 @@ pub fn mosaic(ui: &Ui, rect: Rect, covers: &[String], r: f32, gap: f32, zoom: f3
         let (col, row) = ((i % 2) as f32, (i / 2) as f32);
         let q = Rect::from_min_size(rect.min + vec2(col * (half.x + gap), row * (half.y + gap)), half);
         let c = match i {
-            0 => corner(r, 0.0, 0.0, 0.0),
-            1 => corner(0.0, r, 0.0, 0.0),
-            2 => corner(0.0, 0.0, 0.0, r),
-            _ => corner(0.0, 0.0, r, 0.0),
+            0 => Radii([r, 0.0, 0.0, 0.0]),
+            1 => Radii([0.0, r, 0.0, 0.0]),
+            2 => Radii([0.0, 0.0, 0.0, r]),
+            _ => Radii([0.0, 0.0, r, 0.0]),
         };
-        crate::components::paint_image_zoomed(ui, q, Some(uri), c, Icon::QueueMusic, zoom);
+        cover_in(ui, q, Some(uri), c, Icon::QueueMusic, zoom);
     }
 }
 
@@ -213,6 +222,7 @@ fn shortcut_playing(state: &ViewState, sc: &Shortcut) -> bool {
 /// cover plays it.
 pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
+    let cell = on_pixels(ui, cell);
     let id = ui.id().with(("home-shortcut", i));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.98);
@@ -242,25 +252,31 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
         match sc {
             Shortcut::Release(a) => {
                 let uri = a.cover.as_ref().map(|c| c.uri());
-                crate::components::paint_image(ui, cover, uri.as_deref(), corner(r, 0.0, 0.0, r), Icon::Album);
+                cover_in(ui, cover, uri.as_deref(), Radii::sides(r, 0.0), Icon::Album, 1.0);
             }
             Shortcut::Playlist(p, covers) => {
                 let uris: Vec<String> = covers.iter().map(|c| c.uri()).collect();
                 if uris.len() >= 4 {
-                    // The mosaic keeps the tile's corners at the left.
-                    let half = cover.width() / 2.0;
+                    // The mosaic keeps the tile's corners at the left; its
+                    // four pictures meet without a seam.
+                    let mid = cover.center();
+                    let seam = |a: Pos2, b: Pos2| {
+                        let on = |v: f32, m: f32| (v - m).abs() < 0.01;
+                        (on(a.x, mid.x) && on(b.x, mid.x)) || (on(a.y, mid.y) && on(b.y, mid.y))
+                    };
                     for (k, u) in uris.iter().take(4).enumerate() {
-                        let q = Rect::from_min_size(cover.min + vec2((k % 2) as f32 * half, (k / 2) as f32 * half), vec2(half, half));
+                        let min = pos2(if k % 2 == 0 { cover.left() } else { mid.x }, if k / 2 == 0 { cover.top() } else { mid.y });
+                        let max = pos2(if k % 2 == 0 { mid.x } else { cover.right() }, if k / 2 == 0 { mid.y } else { cover.bottom() });
                         let c = match k {
-                            0 => corner(r, 0.0, 0.0, 0.0),
-                            2 => corner(0.0, 0.0, 0.0, r),
-                            _ => corner(0.0, 0.0, 0.0, 0.0),
+                            0 => Radii([r, 0.0, 0.0, 0.0]),
+                            2 => Radii([0.0, 0.0, 0.0, r]),
+                            _ => Radii::all(0.0),
                         };
-                        crate::components::paint_image(ui, q, Some(u), c, Icon::QueueMusic);
+                        crate::components::paint_image_shaped(ui, Rect::from_min_max(min, max), Some(u), c, Icon::QueueMusic, 1.0, &seam);
                     }
                 } else {
                     let uri = p.cover.as_ref().map(|c| c.uri()).or_else(|| uris.first().cloned());
-                    crate::components::paint_image(ui, cover, uri.as_deref(), corner(r, 0.0, 0.0, r), Icon::QueueMusic);
+                    cover_in(ui, cover, uri.as_deref(), Radii::sides(r, 0.0), Icon::QueueMusic, 1.0);
                 }
             }
             Shortcut::Artist(a) => {
@@ -331,6 +347,7 @@ pub fn mix(
     let s = Theme::get(ui.ctx()).scheme;
     let theme = Theme::get(ui.ctx());
     let id = ui.id().with(("home-mix", l.key));
+    let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
@@ -542,7 +559,7 @@ pub fn song_row(
     scaled(ui, row.center(), squish, |ui| {
         paint::state_layer(ui.painter(), row, Radii::all(shape::LARGE), s.on_surface, layer);
         let c = Rect::from_min_size(pos2(cell.left(), cell.top() + 8.0), vec2(56.0, 56.0));
-        crate::components::paint_image(ui, c, cover.as_deref(), corner(8.0, 8.0, 8.0, 8.0), Icon::MusicNote);
+        cover_in(ui, on_pixels(ui, c), cover.as_deref(), Radii::all(8.0), Icon::MusicNote, 1.0);
         let left = c.right() + 16.0;
         let trail = if liked.is_some() { 56.0 } else { 8.0 };
         let w = (row.right() - trail - left).max(10.0);
@@ -577,6 +594,7 @@ pub fn song_row(
 pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usize) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with(("home-of-day", i));
+    let cell = on_pixels(ui, cell);
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.98);
     let r = shape::LARGE;
@@ -586,9 +604,9 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
         paint::container(ui.painter(), cell, Radii::all(r), s.surface_container, egui::Stroke::NONE);
         if let Some(p) = photo {
             let circle = cover.shrink(12.0);
-            crate::components::paint_image(ui, circle, Some(p), CornerRadius::same(44), Icon::Person);
+            cover_in(ui, circle, Some(p), Radii::all(circle.width() / 2.0), Icon::Person, 1.0);
         } else {
-            crate::components::paint_image(ui, cover, first.as_deref(), corner(r, 0.0, 0.0, r), Icon::QueueMusic);
+            cover_in(ui, cover, first.as_deref(), Radii::sides(r, 0.0), Icon::QueueMusic, 1.0);
         }
         paint::state_layer(ui.painter(), cell, Radii::all(r), s.on_surface, layer);
         let left = cover.right() + 16.0;
@@ -625,12 +643,13 @@ pub struct AlbumOutput {
 pub fn album(ui: &mut Ui, cell: Rect, title: &str, artist: &str, tail: &str, cover: Option<String>, salt: impl std::hash::Hash + std::fmt::Debug) -> AlbumOutput {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with(("home-album", salt));
+    let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
     let r = shape::LARGE;
     let play = scaled(ui, art.center(), squish, |ui| {
-        crate::components::paint_image(ui, art, cover.as_deref(), corner(r, r, r, r), Icon::Album);
+        cover_in(ui, art, cover.as_deref(), Radii::all(r), Icon::Album, 1.0);
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
