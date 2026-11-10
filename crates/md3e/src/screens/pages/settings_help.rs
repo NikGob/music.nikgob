@@ -62,6 +62,8 @@ pub enum SettingId {
     /// «Кольцо → Скорость»: seconds a turn of the ring takes.
     RingSpinSpeed,
     RingBeat,
+    /// «Кольцо на паузе»: dimmed on a pause, or gone until the music plays.
+    RingPause,
     Ambient,
     AmbientStrength,
     BgShapes,
@@ -456,7 +458,7 @@ impl SettingId {
             | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
             | LyricsModels => TAB_LYRICS,
             Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
-            | CoverSpinSpeed | CoverPulseStrength | RingSpinSpeed | HomeSections
+            | CoverSpinSpeed | CoverPulseStrength | RingSpinSpeed | RingPause | HomeSections
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
@@ -481,36 +483,56 @@ impl SettingId {
 
     /// When the row shows: «Просто» draws [`Level::Simple`], «Подробно»
     /// adds [`Level::Deep`], and in the owner's own builds [`Level::Dev`].
+    ///
+    /// «Просто» is what a user would look for by name: the presets;
+    /// whether a thing seen or heard is there and which kind of it (the
+    /// theme, the cover's shape, the ring, the lyrics' animation and its
+    /// step); the accounts, sources and folders the player needs. «Подробно»
+    /// adds how strong, how fast, how long and which way; what only matters
+    /// in a rare case (a fallback, a gesture, a part of the window); and the
+    /// technical rows (limits, the cache, the bitrate, the models, imports
+    /// from files, sync).
     pub fn level(self) -> Level {
         use SettingId::*;
         match self {
+            // Музыка.
             OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | Autoplay | KeepShuffle | DislikeButton
-            | DislikeSkips
-            | DislikedArtists | DislikedTracks | LyricsStyle | LyricsScale | LyricsLead | LyricsGenius | SaveLyrics
-            | LyricsWordsPlaying | Theme | Scheme | CoverShape | ShapeRange | ShapePick | Ring | Ambient | BgShapes | AlbumDate
-            | RailCompact | ReducedMotion | SpotifyEnabled | Spotify | YouTubeEnabled | YouTube | SoundCloudEnabled | SoundCloud
-            | DeezerEnabled | PushLikes | DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | Soulseek | Prowlarr
-            | UserName | Autostart | AutostartHidden | ToastTime | LibraryDir | HomeSections | Preset(_) => Level::Simple,
+            | DislikeSkips | DislikedArtists | DislikedTracks
+            // Тексты: the animation and its step, the size and the lead, each
+            // effect's switch, what lights up by itself.
+            | LyricsStyle | LyricsUnit | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsGap
+            | LyricsCountdown | LyricsGenius | SaveLyrics | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams
+            // Вид: the theme, each part of the track screen and which kind.
+            | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverPulse | Ring | RingStyle | RingPause
+            | Ambient | BgShapes | ProgressWave | NpVolume | HomeSections | HiddenMixes | AlbumDate | LikedAlbumsPlace
+            | RailCompact | ReducedMotion
+            // Сервисы: the accounts, their sound and their playlists.
+            | SpotifyEnabled | Spotify | SpotifyPlayback | ImportSpotify | YouTubeEnabled | YouTube | ImportYouTube
+            | SoundCloudEnabled | SoundCloud | ImportSoundCloud | DeezerEnabled | PushLikes
+            // Загрузки.
+            | DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | Soulseek | Prowlarr
+            // Система.
+            | UserName | Autostart | AutostartHidden | DownloadToasts | LibraryDir | Inbox | Trash | Preset(_) => Level::Simple,
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile => Level::Dev,
             KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
-            | NewShareBy(_)
-            | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere | LyricsUnit | LyricsSmooth
-            | LightSpeed | WaveJump | JumpSpeed | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth
-            | LyricsSoftStrength | LyricsSoftFade | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize
-            | LyricsCountdown | WaveFallback | LyricsReturn | LyricsCheck | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep
-            | LyricsRecognize | LyricsModels | Contrast | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph | CoverSpinSpeed
-            | CoverPulseStrength | RingSpinSpeed | RingStyle
-            | RingSpin | RingDir | RingBeat | AmbientStrength | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors
-            | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape | TapWait | NpMotion
-            | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames | MixClickOpensList
-            | HiddenMixes | LikedAlbumsPlace | Tooltips | PaneQueue | PaneLyrics | PaneInfo | SpotifyPersonal | SpotifyPlayback
-            | SpotifySoloist | ImportSpotify | YouTubeCookies | ImportYouTube | SoundCloudToken | ImportSoundCloud | AlbumLike
-            | SingleLike | PlaylistSync | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac
-            | FakeRestore | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
-            | SoulseekUpload | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep
-            | LyricsWordsAll | DownloadToasts | MastersDir | Inbox | Trash | ExportData => Level::Deep,
+            | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere
+            // How strong, how fast, how long.
+            | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsDim | LyricsSoftDepth | LyricsSoftStrength
+            | LyricsSoftFade | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsReturn | CoverDir | CoverSpinSpeed
+            | CoverPulseStrength | RingSpin | RingDir | RingSpinSpeed | RingBeat | AmbientStrength | BgCount | BgSize
+            | BgOpacity | BgSpeed | BgReact | BgColors | BgHue | NpVolumeHold | TapWait | ToastTime
+            // Rare cases, gestures, parts of the window and of Главная.
+            | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
+            | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
+            | ProfileNames | MixClickOpensList | Tooltips | PaneQueue | PaneLyrics | PaneInfo | AlbumLike | SingleLike
+            // Technical.
+            | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
+            | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
+            | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit | SoulseekUpload
+            | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep | LyricsWordsAll
+            | MastersDir | ExportData => Level::Deep,
         }
     }
 
@@ -556,6 +578,7 @@ impl SettingId {
             Ring => "Кольцо",
             RingStyle => "Вид",
             RingBeat => "В такт",
+            RingPause => "Кольцо на паузе",
             Ambient => "Свечение фона",
             AmbientStrength => "Яркость свечения",
             BgShapes => "Фигуры на фоне",
@@ -731,6 +754,7 @@ impl SettingId {
             CoverShape => "Обложка на экране трека может быть квадратной или вырезанной красивой фигурой.",
             ShapeRange => "Из этих фигур выбирается случайная для каждого трека. Нажми на фигуру, чтобы добавить или убрать её.",
             ShapePick => "Этой фигурой вырезается обложка, пока играет музыка.",
+            RingPause => "На паузе кольцо остаётся приглушённым. Выключи — на паузе оно плавно исчезает и возвращается, когда музыка снова играет.",
             CoverPauseMorph => "На паузе обложка плавно становится квадратом, при воспроизведении снова принимает форму. Выключи — форма остаётся и на паузе.",
             CoverSpin => "Край обложки медленно поворачивается, а сама картинка остаётся на месте.",
             CoverDir => "В какую сторону поворачивается край обложки.",
@@ -1405,7 +1429,7 @@ impl SettingId {
             Preset(v::presets::Area::Track | v::presets::Area::Lyrics) => Part::Whole,
             CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverSpinSpeed | CoverPulse | CoverPulseStrength
             | CoverPauseMorph | CoverClickPause | DblClickShape | TapWait => Part::Cover,
-            Ring | RingStyle | RingSpin | RingDir | RingSpinSpeed | RingBeat => Part::Ring,
+            Ring | RingStyle | RingSpin | RingDir | RingSpinSpeed | RingBeat | RingPause => Part::Ring,
             Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => {
                 Part::Background
             }
@@ -1460,7 +1484,7 @@ impl SettingId {
         match self {
             // A shape of the pool under the pointer is shown as it is.
             CoverShape | ShapeRange if p.cover_shape == v::CoverShape::Random => Script::RandomShape,
-            CoverPauseMorph | CoverClickPause => Script::PausePlay,
+            CoverPauseMorph | CoverClickPause | RingPause => Script::PausePlay,
             DblClickShape | TapWait => Script::DoubleTap,
             NpVolume | NpVolumeHold => Script::Volume,
             NpMotion => Script::Open,
@@ -2758,6 +2782,52 @@ mod tests {
         }
     }
 
+    /// «Просто» has whether a thing is there and which kind of it;
+    /// «Подробно» adds how strong, how fast and how long, the rare cases
+    /// and the technical rows.
+    #[test]
+    fn simple_has_the_thing_and_deep_its_tuning() {
+        use SettingId as S;
+        for id in [
+            // The animation, its step, each effect's switch.
+            S::LyricsStyle, S::LyricsUnit, S::LyricsScale, S::LyricsLead, S::LyricsCascade, S::LyricsGlow, S::LyricsSoftEdges,
+            S::LyricsGap, S::LyricsCountdown, S::LyricsWordsPlaying, S::LyricsLinesAuto, S::LyricsStreams,
+            // Each part of the track screen.
+            S::Contrast, S::CoverShape, S::CoverSpin, S::CoverPulse, S::Ring, S::RingStyle, S::Ambient, S::BgShapes,
+            S::ProgressWave, S::NpVolume, S::HiddenMixes,
+            S::SpotifyPlayback, S::ImportSpotify, S::DownloadToasts, S::Inbox, S::Trash,
+        ] {
+            assert_eq!(id.level(), Level::Simple, "{id:?}");
+        }
+        for id in [
+            S::LyricsSmooth, S::LightSpeed, S::WaveJump, S::JumpSpeed, S::LyricsDim, S::LyricsSoftDepth, S::LyricsSoftStrength,
+            S::LyricsSoftFade, S::LyricsGapWaves, S::LyricsGapHeight, S::LyricsGapSize, S::LyricsReturn, S::WaveFallback,
+            S::LyricsModels, S::CoverDir, S::CoverSpinSpeed, S::CoverPulseStrength, S::RingSpin, S::RingDir, S::RingSpinSpeed,
+            S::RingBeat, S::AmbientStrength, S::BgCount, S::NpVolumeHold, S::TapWait, S::ToastTime, S::StreamCache,
+            S::SeedRatio, S::FpsLimit,
+        ] {
+            assert_eq!(id.level(), Level::Deep, "{id:?}");
+        }
+        // A row that hangs on another shows no earlier than it does.
+        for (child, parent) in [
+            (S::RingStyle, S::Ring),
+            (S::RingPause, S::Ring),
+            (S::AutostartHidden, S::Autostart),
+            (S::LyricsSoftDepth, S::LyricsSoftEdges),
+            (S::LyricsGapSize, S::LyricsGap),
+            (S::LyricsStreamKeep, S::LyricsStreams),
+            (S::KeepTimbre, S::TrackSpeed),
+            (S::AutoplayWorld, S::Autoplay),
+            (S::CoverSpinSpeed, S::CoverSpin),
+            (S::CoverPulseStrength, S::CoverPulse),
+            (S::AmbientStrength, S::Ambient),
+            (S::BgCount, S::BgShapes),
+            (S::NpVolumeHold, S::NpVolume),
+        ] {
+            assert!(child.level() >= parent.level(), "{child:?} under {parent:?}");
+        }
+    }
+
     /// Links from other screens land on the tab that has the row now.
     #[test]
     fn linked_rows_know_their_new_tab() {
@@ -2890,6 +2960,14 @@ mod tests {
             assert_eq!((id.scene(), id.part()), (Some(Scene::Track), Some(Part::Cover)), "{id:?}");
         }
         assert_eq!(S::RingSpinSpeed.part(), Some(Part::Ring));
+        // «Кольцо на паузе» is shown by pausing: dimmed, or gone.
+        assert_eq!((S::RingPause.scene(), S::RingPause.part()), (Some(Scene::Track), Some(Part::Ring)));
+        assert_eq!(S::RingPause.script(&p), Script::PausePlay);
+        assert_eq!(S::RingPause.level(), Level::Simple);
+        assert!(now_playing::ring_alpha(true, 0.0) > 0.3 && now_playing::ring_alpha(false, 0.0) == 0.0);
+        assert!(now_playing::ring_alpha(false, 0.5) > 0.0 && now_playing::ring_alpha(false, 0.5) < 1.0, "it fades");
+        assert_eq!((now_playing::ring_alpha(true, 1.0), now_playing::ring_alpha(false, 1.0)), (1.0, 1.0));
+        assert!(Prefs::default().ring_on_pause && !Prefs::first_start().ring_on_pause);
         assert_eq!(S::HomeSections.scene(), Some(Scene::Home));
         assert_eq!(S::MixesProfiles.part(), Some(Part::Home(Section::Mixes)));
         assert_eq!(S::AlbumDate.scene(), Some(Scene::Album));

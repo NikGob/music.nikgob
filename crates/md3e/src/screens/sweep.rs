@@ -215,7 +215,7 @@ pub const ALL: &[SettingId] = {
         LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
         // Вид.
         Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
-        CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle, RingSpin, RingDir, RingSpinSpeed, RingBeat,
+        CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle, RingSpin, RingDir, RingSpinSpeed, RingBeat, RingPause,
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
         LikedAlbumsPlace, RailCompact, ReducedMotion, Tooltips, PaneQueue, PaneLyrics, PaneInfo,
@@ -305,6 +305,7 @@ fn spec(id: SettingId) -> Spec {
         S::Ring => Spec::Switch(|p| &mut p.ring),
         S::RingSpin => Spec::Switch(|p| &mut p.spin_ring),
         S::RingBeat => Spec::Switch(|p| &mut p.ring_beat),
+        S::RingPause => Spec::Switch(|p| &mut p.ring_on_pause),
         S::AmbientStrength => Spec::Slider(|p| &mut p.ambient_strength, 0.25, 2.0, 0.05),
         S::BgCount => Spec::Count(|p| &mut p.bg_shapes_count, 4.0, 32.0, 1.0),
         S::BgSize => Spec::Slider(|p| &mut p.bg_shapes_size, 0.5, 2.0, 0.05),
@@ -624,7 +625,7 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
             p.cover_spin = true;
         }
         S::CoverPulseStrength => p.cover_pulse = true,
-        S::RingStyle | S::RingBeat => p.ring = true,
+        S::RingStyle | S::RingBeat | S::RingPause => p.ring = true,
         S::RingSpin => ring_turns(p),
         S::RingDir | S::RingSpinSpeed => {
             ring_turns(p);
@@ -685,7 +686,7 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::NpVolume | S::NpVolumeHold | S::FpsLimit | S::DislikeButton => vec![Np],
         S::CoverShape | S::Ring | S::RingStyle | S::CoverPauseMorph => vec![Np, NpPaused, NpLyrics],
         S::AlbumDate => vec![Album],
-        S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength => vec![Np, NpPaused],
+        S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength | S::RingPause => vec![Np, NpPaused],
         S::CoverSpin | S::CoverDir | S::CoverPulse | S::RingSpin | S::RingDir | S::RingBeat => vec![Np],
         S::CoverSpinSpeed | S::CoverPulseStrength | S::RingSpinSpeed => vec![Np],
         S::Preset(Area::Track) => vec![Np, NpPaused],
@@ -915,7 +916,7 @@ mod tests {
             | S::Trash | S::ExportData | S::LyricsUi | S::LyricsGpu | S::LyricsModelsAuto | S::MusicBrainz | S::AcoustId
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
             | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::CoverSpinSpeed
-            | S::CoverPulseStrength | S::RingSpinSpeed | S::HomeSections | S::Preset(_) => pos(id),
+            | S::CoverPulseStrength | S::RingSpinSpeed | S::RingPause | S::HomeSections | S::Preset(_) => pos(id),
         }
     }
 

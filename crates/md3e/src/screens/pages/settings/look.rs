@@ -88,6 +88,7 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
             }
         });
         switch(ui, Id::RingBeat, &mut p.ring_beat);
+        switch(ui, Id::RingPause, &mut p.ring_on_pause);
     });
 
     sub(ui, "Фон");
