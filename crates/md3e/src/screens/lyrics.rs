@@ -628,25 +628,16 @@ fn paint(
         // current, and jump back when it stopped being so.
         let base = s.on_surface.gamma_multiply(edge * (rest + (rest.min(UNSUNG) - rest) * focus));
         let color = crate::lerp_color(dim, lit, focus.max(shine));
-        let pace = Pace::of(&state.prefs);
-        let feather = pace.feather(size);
         let draw = |painter: &egui::Painter, look: Look, timing: &Timing| {
-            // Reduced motion keeps the jump down: karaoke by letters still
-            // steps letter by letter on a hard front («Плавность» is
-            // [`smooth_window`]), the wave lights them one by one without
-            // rising, and focus lights the whole line.
-            let window = smooth_window(look, pace);
-            if theme.reduced_motion && look.by == By::Letters && look.style != Style::Wave {
+            // Reduced motion keeps everything down: karaoke by letters
+            // still fills along its front (no word rises), the wave lights
+            // its letters one by one without rising, and focus lights the
+            // whole line.
+            if theme.reduced_motion && look.by == By::Letters && look.style == Style::Focus {
                 if state.prefs.lyrics_glow {
-                    let (head, soft) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
-                    glow(painter, &g, line, head, soft, lit, focus * 0.1);
+                    glow(painter, &g, line, f32::INFINITY, 0.0, lit, focus * 0.1);
                 }
-                if look.style == Style::Karaoke {
-                    let (head, soft) = timing.glide(sung, feather, window);
-                    karaoke(painter, &g, line, head, soft, base, color);
-                } else {
-                    painter.galley_with_override_text_color(line.min, g.clone(), color);
-                }
+                painter.galley_with_override_text_color(line.min, g.clone(), color);
             } else {
                 timed_line(painter, &g, line, timing, sung, is_cur, focus, size, look, base, color, &state.prefs);
             }
@@ -1474,6 +1465,195 @@ struct Timing {
     xs: Vec<(f32, f32)>,
     /// First syllable of each whitespace-delimited word.
     words: Vec<usize>,
+    /// The runs the karaoke front by letters sweeps, each on its own.
+    sweeps: Vec<Sweep>,
+    /// Sweep index for each glyph (spaces have none).
+    glyph_sweeps: Vec<Option<usize>>,
+}
+
+/// One run of the karaoke front by letters: a written word, or the part of
+/// one sung without a pause. The front's centre goes through `knots` on a
+/// monotone cubic, so it crosses the run in one even motion: no change of
+/// pace at a letter or a syllable, and never back.
+struct Sweep {
+    /// Where the run starts on the line's advances.
+    from: f32,
+    /// (seconds, px along the advances), both rising: the ends of its
+    /// letters at the times they are sung.
+    knots: Vec<(f32, f32)>,
+    /// The front's speed at each knot, px a second.
+    slopes: Vec<f32>,
+}
+
+/// Syllables of one word this close (seconds) are sung in one sweep; over a
+/// longer pause the front finishes the first and waits.
+const SWEEP_BRIDGE: f32 = 0.2;
+/// A consonant takes its even share of a syllable's time up to this many
+/// seconds, and half its share past that; the vowels take what is left. A
+/// syllable sung at a speaking pace is crossed evenly, a held one draws out
+/// over its vowel.
+const CONSONANT: f32 = 0.09;
+/// The soft edge comes onto a run's first letter and leaves its last within
+/// this many seconds before and after the run's own times, however slowly
+/// the run is sung.
+const EDGE_TIME: f32 = 0.12;
+
+impl Sweep {
+    /// Where the unlit end of the soft edge (`feather` px wide) is at `p`
+    /// seconds: the edge's centre is at the run's start at its first time
+    /// and at its end at its last, and the edge runs in before and out
+    /// after, so the run is unlit before it and lit whole after it, with no
+    /// half-lit letter left in a pause. −∞ before the edge comes, +∞ once it
+    /// has gone.
+    fn head(&self, p: f32, feather: f32) -> f32 {
+        let (Some(&(t0, x0)), Some(&(t1, x1))) = (self.knots.first(), self.knots.last()) else {
+            return f32::INFINITY;
+        };
+        let feather = feather.max(0.0);
+        let half = 0.5 * feather;
+        // A run with no time of its own lights over the edge's time.
+        if self.knots.len() < 2 {
+            let k = (p - (t0 - EDGE_TIME)) / (2.0 * EDGE_TIME);
+            return if k <= 0.0 {
+                f32::NEG_INFINITY
+            } else if k >= 1.0 {
+                f32::INFINITY
+            } else {
+                self.from + (x1 + feather - self.from) * k
+            };
+        }
+        let (v0, v1) = (self.slopes[0], self.slopes[self.slopes.len() - 1]);
+        // The edge runs in at the run's own first speed, or faster when
+        // that would take longer than [`EDGE_TIME`]; and out likewise.
+        let run = |dx: f32, v: f32| if v * EDGE_TIME > dx { dx / v } else { EDGE_TIME };
+        let (dx_in, dx_out) = (x0 - self.from + half, half);
+        let (lead, tail) = (run(dx_in, v0), run(dx_out, v1));
+        let centre = if p < t0 {
+            if dx_in <= 0.0 || p <= t0 - lead {
+                return f32::NEG_INFINITY;
+            }
+            hermite((t0 - lead, x0 - dx_in, (2.0 * dx_in / lead - v0).max(0.0)), (t0, x0, v0), p)
+        } else if p >= t1 {
+            if dx_out <= 0.0 || p >= t1 + tail {
+                return f32::INFINITY;
+            }
+            hermite((t1, x1, v1), (t1 + tail, x1 + dx_out, (2.0 * dx_out / tail - v1).max(0.0)), p)
+        } else {
+            let i = self.knots.partition_point(|k| k.0 <= p).clamp(1, self.knots.len() - 1);
+            let ((ta, xa), (tb, xb)) = (self.knots[i - 1], self.knots[i]);
+            hermite((ta, xa, self.slopes[i - 1]), (tb, xb, self.slopes[i]), p)
+        };
+        centre + half
+    }
+}
+
+/// The cubic from `a` to `b` (each: time, value, speed) at `t`, clamped to
+/// its span.
+fn hermite(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> f32 {
+    let h = b.0 - a.0;
+    if h <= 0.0 {
+        return if t < a.0 { a.1 } else { b.1 };
+    }
+    let s = ((t - a.0) / h).clamp(0.0, 1.0);
+    let r = 1.0 - s;
+    a.1 * (1.0 + 2.0 * s) * r * r + h * a.2 * s * r * r + b.1 * s * s * (3.0 - 2.0 * s) - h * b.2 * s * s * r
+}
+
+/// The speeds at `knots` (times and values both rising) of the cubic through
+/// them that never overshoots: at each knot the harmonic mean of the paces
+/// either side (Fritsch and Butland), at the ends the pace of the end span.
+fn monotone_slopes(knots: &[(f32, f32)]) -> Vec<f32> {
+    let n = knots.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    let span = |i: usize| (knots[i + 1].0 - knots[i].0, (knots[i + 1].1 - knots[i].1) / (knots[i + 1].0 - knots[i].0));
+    (0..n)
+        .map(|i| {
+            if i == 0 {
+                return span(0).1;
+            }
+            if i == n - 1 {
+                return span(n - 2).1;
+            }
+            let ((h0, d0), (h1, d1)) = (span(i - 1), span(i));
+            if d0 <= 0.0 || d1 <= 0.0 {
+                return 0.0;
+            }
+            let (w0, w1) = (2.0 * h1 + h0, h1 + 2.0 * h0);
+            (w0 + w1) / (w0 / d0 + w1 / d1)
+        })
+        .collect()
+}
+
+/// The runs of the karaoke front by letters over `syllables` (see [`Sweep`])
+/// and the run of each glyph: a word's syllables in one run unless a pause
+/// parts them, each letter's end a knot at its time in its syllable.
+fn sweeps(syllables: &[Syllable], glyphs: &[Option<usize>], xs: &[(f32, f32)], chars: &[char]) -> (Vec<Sweep>, Vec<Option<usize>>) {
+    let mut runs: Vec<(f32, Vec<(f32, f32)>)> = Vec::new();
+    let mut of = vec![None; glyphs.len()];
+    let mut prev: Option<&Syllable> = None;
+    for (i, s) in syllables.iter().enumerate() {
+        let own: Vec<usize> = (s.glyphs.0..s.glyphs.1.min(glyphs.len())).filter(|&k| glyphs[k] == Some(i)).collect();
+        if own.is_empty() {
+            continue;
+        }
+        let joined = prev.is_some_and(|p| p.word == s.word && s.start - p.end <= SWEEP_BRIDGE && s.from >= p.to - 0.5);
+        match runs.last_mut().filter(|_| joined) {
+            // The pieces meet halfway through the short pause between them.
+            Some((_, knots)) => {
+                if let Some(last) = knots.last_mut() {
+                    last.0 = 0.5 * (last.0 + s.start);
+                }
+            }
+            None => runs.push((s.from, vec![(s.start, s.from)])),
+        }
+        let run = runs.len() - 1;
+        let knots = &mut runs[run].1;
+        let width = |k: usize| xs[k].1 - xs[k].0;
+        let vowel = |k: usize| letter_weight(chars[k]) > 2.0;
+        let time = s.end - s.start;
+        let total: f32 = own.iter().map(|&k| width(k)).sum::<f32>().max(f32::EPSILON);
+        let even = |k: usize| time * width(k) / total;
+        let quick = |k: usize| even(k).min((0.5 * even(k)).max(CONSONANT));
+        let vowels: f32 = own.iter().filter(|&&k| vowel(k)).map(|&k| width(k)).sum();
+        let left = time - own.iter().filter(|&&k| !vowel(k)).map(|&k| quick(k)).sum::<f32>();
+        let mut at = s.start;
+        for (n, &k) in own.iter().enumerate() {
+            at += if vowels <= 0.0 {
+                even(k)
+            } else if vowel(k) {
+                left * width(k) / vowels
+            } else {
+                quick(k)
+            };
+            // The last letter ends exactly with its syllable.
+            knots.push((if n + 1 == own.len() { s.end } else { at.min(s.end) }, xs[k].1));
+            of[k] = Some(run);
+        }
+        prev = Some(s);
+    }
+    let sweeps = runs
+        .into_iter()
+        .map(|(from, raw)| {
+            // Times and places both rise: a knot with no time after the one
+            // before it (a timing slip, a piece with no length) joins it.
+            let mut knots: Vec<(f32, f32)> = Vec::with_capacity(raw.len());
+            for (t, x) in raw {
+                match knots.last_mut() {
+                    Some(last) if t <= last.0 + 1e-4 => last.1 = last.1.max(x),
+                    Some(last) => {
+                        let x = x.max(last.1);
+                        knots.push((t, x));
+                    }
+                    None => knots.push((t, x)),
+                }
+            }
+            let slopes = monotone_slopes(&knots);
+            Sweep { from, knots, slopes }
+        })
+        .collect();
+    (sweeps, of)
 }
 
 impl Timing {
@@ -1514,6 +1694,7 @@ impl Timing {
         let mut x = 0.0;
         let mut glyphs = Vec::new();
         let mut xs = Vec::new();
+        let mut chars = Vec::new();
         let mut seen = vec![false; syllables.len()];
         let mut weights = vec![0.0f32; syllables.len()];
         for (k, gl) in g.rows.iter().flat_map(|r| &r.row.glyphs).enumerate() {
@@ -1529,6 +1710,7 @@ impl Timing {
                 weights[i] += letter_weight(gl.chr);
             }
             glyphs.push(syllable);
+            chars.push(gl.chr);
             xs.push((x, x + gl.advance_width));
             x += gl.advance_width;
         }
@@ -1584,7 +1766,45 @@ impl Timing {
             latest = latest.max(a);
             latest
         })).collect();
-        Some(Self { syllables, glyphs, units, glyph_units, letter_times: times, onsets, xs, words })
+        let (sweeps, glyph_sweeps) = sweeps(&syllables, &glyphs, &xs, &chars);
+        Some(Self { syllables, glyphs, units, glyph_units, letter_times: times, onsets, xs, words, sweeps, glyph_sweeps })
+    }
+
+    /// The karaoke front by letters at `p` seconds: for each glyph the
+    /// unlit end of the soft edge (`feather` px wide) of its own run
+    /// ([`Sweep::head`]): −∞ not sung yet, +∞ sung. A glyph with no run of
+    /// its own (a space, a letter past the timed text) goes with the run
+    /// before it.
+    fn swept(&self, p: f32, feather: f32) -> Vec<f32> {
+        let heads: Vec<f32> = self.sweeps.iter().map(|s| s.head(p, feather)).collect();
+        let mut last = f32::NEG_INFINITY;
+        self.glyph_sweeps
+            .iter()
+            .map(|s| {
+                if let Some(h) = s.and_then(|i| heads.get(i)) {
+                    last = *h;
+                }
+                last
+            })
+            .collect()
+    }
+
+    /// How far (0..1) each whitespace-delimited word is raised at `p` by a
+    /// note held in it (see [`held`]): up as the note starts, down over
+    /// [`SETTLE`] after it.
+    fn held_words(&self, p: f32) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.words.len()];
+        for s in &self.syllables {
+            if !held(s.start, s.end, s.letters, p) {
+                continue;
+            }
+            let up = ((p - s.start) / HELD_RISE).clamp(0.0, 1.0);
+            let level = up * up * (3.0 - 2.0 * up) * held_envelope(s.end, p);
+            if let Some(w) = out.get_mut(s.word) {
+                *w = w.max(level);
+            }
+        }
+        out
     }
 
     /// The light front as (centre of its soft edge, edge width): solid up
@@ -1755,6 +1975,13 @@ impl Pace {
     fn feather(self, size: f32) -> f32 {
         size * (0.06 + 0.8 * (1.0 - self.light))
     }
+
+    /// The soft edge of the karaoke front by letters at text `size`: about
+    /// two letters wide at the default «Скорость подсветки» (a letter is
+    /// some 0.55 of the size), half a letter at once, four at the smoothest.
+    fn edge(self, size: f32) -> f32 {
+        size * (0.3 + 2.0 * (1.0 - self.light))
+    }
 }
 
 /// Focus brightens words this many times slower than the others light them.
@@ -1869,6 +2096,11 @@ fn syllable_head(from: f32, to: f32, start: f32, end: f32, pos: f32) -> f32 {
 
 /// How long a held note's extra rise takes to settle after it ends.
 const SETTLE: f32 = 0.3;
+/// Seconds a word takes to rise as a held note starts in it.
+const HELD_RISE: f32 = 0.45;
+/// How high a karaoke word with a held note rises, in text sizes (a whole
+/// number of pixels at rest, one at least).
+const HELD_LIFT: f32 = 0.04;
 
 /// A syllable sung out long enough to get the held-note rise and glow; it
 /// stays "held" for [`SETTLE`] after its end so the letters come down smoothly.
@@ -1895,12 +2127,27 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let window = smooth_window(look, pace);
     let (head, feather) = timing.glide(pos, pace.feather(size), window);
     let p = pos.as_secs_f32();
+    // Karaoke by letters: each run of letters has its own front.
+    let sweeping = style == Style::Karaoke && look.by == By::Letters;
+    let edge = pace.edge(size);
+    let swept = if sweeping { timing.swept(p, edge) } else { Vec::new() };
     let theme = Theme::get(painter.ctx());
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
     let ppp = super::stage::ppp(painter.ctx());
     // Sung pieces are lit (and wave pieces up) in full on the current line,
     // and go back with its focus once it is over.
     let hold = focus.max(if current { 1.0 } else { 0.0 });
+    // A word with a held note stands a little higher while it is held: the
+    // whole word, by whole pixels at rest, and not with reduced motion.
+    let raised = if sweeping && !theme.reduced_motion { timing.held_words(p) } else { Vec::new() };
+    let held_lift = (HELD_LIFT * size * ppp).round().max(1.0) / ppp;
+    // A glyph of the swept line in `base` up to its run's front and `lit`
+    // behind it.
+    let front = |k: usize, lift: f32, base: Color32, lit: Color32| match swept.get(k).copied().unwrap_or(f32::INFINITY) {
+        h if h == f32::INFINITY => Ink::solid(lit, lift),
+        h if h == f32::NEG_INFINITY => Ink::solid(base, lift),
+        h => Ink { lift, base, lit, head: h, feather: edge },
+    };
     let n = timing.glyphs.len();
     let mut inks = Vec::with_capacity(n);
     let mut glows = Vec::with_capacity(n);
@@ -1913,9 +2160,13 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         let onset = onset_of(timing, k, look);
         let on = onset.map(|at| light_over(p - at, rise, window));
         // Karaoke and Focus keep one baseline: sung and unsung words never
-        // drift apart (that read as broken text). Reduced motion keeps the
-        // wave down too (it only lights up).
+        // drift apart (that read as broken text); only a word with a held
+        // note rises under karaoke by letters, and comes back down after
+        // it. Reduced motion keeps the wave down too (it only lights up).
         let lift = match onset {
+            None if !raised.is_empty() => {
+                syllable.and_then(|s| raised.get(s.word)).map_or(0.0, |level| level * held_lift * hold)
+            }
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
                 // The jump's speed scales its smoothing window too.
                 let spread = window / pace.jump;
@@ -1936,6 +2187,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         };
         inks.push(match on {
             Some(on) => Ink::solid(crate::lerp_color(base, lit, on * hold), lift),
+            None if sweeping => front(k, lift, base, lit),
             None if style == Style::Karaoke && !look.words() => Ink { lift, base, lit, head, feather },
             None => Ink::solid(lit, lift),
         });
@@ -1944,6 +2196,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         let glow_ink = |strength: f32| glow_color.gamma_multiply(strength.clamp(0.0, 1.0));
         glows.push(match (on, style) {
             (Some(on), _) => Ink::solid(glow_ink(strength * on), lift),
+            (None, _) if sweeping => front(k, lift, Color32::TRANSPARENT, glow_ink(strength)),
             (None, Style::Karaoke) if !look.words() => Ink { lift, base: Color32::TRANSPARENT, lit: glow_ink(strength), head, feather },
             (None, Style::Focus) if !look.words() => Ink::solid(glow_ink(strength), lift),
             _ => Ink::solid(Color32::TRANSPARENT, lift),
@@ -2133,6 +2386,7 @@ fn ink_quad(mesh: &mut egui::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink
 /// The line lit left to right (row by row when it wraps) up to `head`
 /// pixels of its glyphs (rows flattened), the edge of the light a soft
 /// gradient.
+#[cfg(test)]
 fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, feather: f32, base: Color32, lit: Color32) {
     if head.is_infinite() {
         painter.galley_with_override_text_color(line.min, g.clone(), lit);
@@ -3914,6 +4168,89 @@ mod tests {
         let words = Prefs { lyrics_unit: LYRICS_BY_WORDS, ..letters };
         let (glyphs, _) = painted_glyphs(&words, &l, 1.15);
         assert_eq!(glyphs[0], glyphs[3], "by words the whole word is one colour");
+    }
+
+    /// Karaoke by letters: the front crosses a word in one motion (never
+    /// back, no jump, no stall at a letter or a syllable), on time at the
+    /// syllables' ends and slower through a held vowel; between words it
+    /// waits with the sung word lit whole and the next one not started.
+    #[test]
+    fn the_letters_front_sweeps_a_word_in_one_motion_and_waits_between_words() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(6.0), "космоцветок домой");
+            l.words = vec![word(1.0, 1.2, "ко"), word(1.2, 1.5, "смо"), word(1.55, 2.6, "цве"), word(2.6, 2.9, "ток "), word(4.0, 5.0, "домой")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let edge = Pace::of(&Prefs::default()).edge(26.0);
+            assert!(edge > 26.0 * 0.8 && edge < 26.0 * 1.3, "about two letters: {edge}");
+            // A run a word: its syllables are glued or a short pause apart.
+            assert_eq!(t.sweeps.len(), 2);
+            for (sweep, from, to, (start, end)) in [
+                (&t.sweeps[0], t.syllables[0].from, t.syllables[3].to, (1.0f32, 2.9f32)),
+                (&t.sweeps[1], t.syllables[4].from, t.syllables[4].to, (4.0, 5.0)),
+            ] {
+                let at = |s: f32| sweep.head(s, edge);
+                assert_eq!(at(start - 0.3), f32::NEG_INFINITY);
+                assert_eq!(at(end + 0.3), f32::INFINITY);
+                let mut was = f32::NEG_INFINITY;
+                let mut seen = 0;
+                for ms in ((start - 0.3) * 1000.0) as i32..((end + 0.3) * 1000.0) as i32 {
+                    let h = at(ms as f32 / 1000.0);
+                    if h.is_finite() {
+                        if was.is_finite() {
+                            assert!(h >= was - 1e-3, "{ms}: runs back");
+                            assert!(h - was < 1.0, "{ms}: jumps by {}", h - was);
+                        } else {
+                            assert!(seen == 0 && h < from + 1.0, "{ms}: comes in at {h}, not {from}");
+                        }
+                        seen += 1;
+                    } else if was.is_finite() {
+                        assert!(h == f32::INFINITY && was > to + edge - 1.0, "{ms}: leaves at {was}");
+                    }
+                    was = h;
+                }
+                assert!(seen as f32 > (end - start) * 1000.0);
+                // No stall while the word is sung.
+                let mut s = start;
+                while s < end - 0.02 {
+                    assert!(at(s + 0.02) - at(s) > 0.02, "{s}: stalls");
+                    s += 0.02;
+                }
+                // The middle of the edge is at the word's ends on its times.
+                assert!((at(start) - 0.5 * edge - from).abs() < 0.01 && (at(end) - 0.5 * edge - to).abs() < 0.01);
+            }
+            let first = |s: f32| t.sweeps[0].head(s, edge) - 0.5 * edge;
+            // On time where its syllables meet.
+            assert!((first(1.2) - t.syllables[0].to).abs() < 0.01);
+            assert!((first(2.6) - t.syllables[2].to).abs() < 0.01);
+            // The held «цве» draws out over its vowel.
+            assert!(first(2.2) - first(2.0) < 0.5 * (first(1.2) - first(1.0)));
+            // Between the words nothing is half lit: «космоцветок» and its
+            // space are sung, «домой» is not.
+            for s in [3.1, 3.5, 3.8] {
+                let heads = t.swept(s, edge);
+                assert!(heads[..12].iter().all(|h| *h == f32::INFINITY), "{s}");
+                assert!(heads[12..].iter().all(|h| *h == f32::NEG_INFINITY), "{s}");
+            }
+            // The word with the held note is up while it is held, the other
+            // stays down.
+            assert_eq!(t.held_words(1.3), [0.0, 0.0]);
+            assert!((t.held_words(2.3)[0] - 1.0).abs() < 1e-3 && t.held_words(2.3)[1] == 0.0);
+            assert!(t.held_words(2.7)[0] > 0.0 && t.held_words(2.7)[0] < 1.0);
+            assert_eq!(t.held_words(3.0), [0.0, 0.0]);
+
+            // A long pause inside a word parts it: the sung piece is lit
+            // whole and the next waits. A piece with no length still lights.
+            let mut l = line(2.0, Some(8.0), "Hello а");
+            l.words = vec![word(2.0, 3.0, "Hel"), word(4.0, 6.0, "lo "), word(7.0, 7.0, "а")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            assert_eq!(t.sweeps.len(), 3);
+            let heads = t.swept(3.5, edge);
+            assert!(heads[..3].iter().all(|h| *h == f32::INFINITY) && heads[3..].iter().all(|h| *h == f32::NEG_INFINITY));
+            let last = |s: f32| t.sweeps[2].head(s, edge);
+            assert!(last(6.8) == f32::NEG_INFINITY && last(7.0).is_finite() && last(7.2) == f32::INFINITY);
+        });
     }
 
     /// By syllables under the wave a written word rises with each of its
