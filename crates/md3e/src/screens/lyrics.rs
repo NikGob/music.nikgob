@@ -512,6 +512,7 @@ fn paint(
         } else {
             (((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0), 0.0)
         };
+        let blur_radius = sizes.big * BLUR * soft.strength;
         if !stage.live && state.prefs.lyrics_soft_edges {
             blur = 0.0;
             if is_cur {
@@ -3883,6 +3884,7 @@ mod tests {
     /// window (0.4 s) averaged the whole word into one step.
     #[test]
     fn letters_of_a_word_light_one_by_one() {
+        use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_WORDS};
         let mut l = line(1.0, Some(3.0), "Свет окна");
         l.words = vec![word(1.0, 1.35, "Свет "), word(2.0, 3.0, "окна")];
         let letters = Prefs { lyrics_style: 0, lyrics_unit: LYRICS_BY_LETTERS, lyrics_smooth: 1.0, ..Prefs::default() };
