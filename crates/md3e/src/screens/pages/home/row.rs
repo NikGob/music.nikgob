@@ -183,7 +183,9 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         }
     }
     let spring_id = id.with("x");
-    let shown = if by_hand || !row.live {
+    let shown = if !row.live {
+        0.0
+    } else if by_hand {
         anim::snap_f32(&ctx, spring_id, state.offset);
         state.offset
     } else {
@@ -208,7 +210,7 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         let colors = Colors { container: s.surface_container_highest, content: s.on_surface, border: Color32::TRANSPARENT };
         let y = row.top + row.arrows_at - d / 2.0;
         let arrow = |icon: Icon, tip: &'static str, salt: &'static str| {
-            IconButton::new(icon).size(Size::S).style(Style::Filled).colors(colors).tooltip(tip).id_salt((salt, id))
+            IconButton::new(icon).size(Size::S).style(Style::Filled).colors(colors).tooltip(tip).id_salt(id.with(salt))
         };
         let on = hovered && !state.dragging();
         let back = Rect::from_min_size(pos2(view.left() + ARROW_INSET, y), Vec2::splat(d));
