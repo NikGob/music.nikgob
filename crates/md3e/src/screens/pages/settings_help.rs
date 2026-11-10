@@ -1567,7 +1567,7 @@ fn field_text(f: v::presets::Field, value: &v::presets::FieldValue) -> String {
         V::Bool(false) => "нет".to_owned(),
         V::U32(n) => match f {
             // 0 is no cap (the torrents' policy), not «0 ГБ».
-            v::presets::Field::SeedLimitGb if n == 0 => "без лимита".to_owned(),
+            v::presets::Field::SeedLimitGb if *n == 0 => "без лимита".to_owned(),
             v::presets::Field::SeedLimitGb => format!("{n} ГБ"),
             v::presets::Field::SeedDays => format!("{n} дн."),
             _ => n.to_string(),
