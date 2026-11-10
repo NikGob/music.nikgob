@@ -8,7 +8,9 @@
 mod align;
 mod analysis;
 mod quality;
+mod same_audio;
 mod better_covers;
+mod stream_covers;
 mod convert;
 mod enrich;
 mod hd_covers;
@@ -21,6 +23,8 @@ mod playlist_cover;
 mod recs;
 mod search;
 mod soulseek;
+mod quiet;
+pub use quiet::set_enabled as set_background_quiet;
 mod tags;
 mod torrents;
 pub mod queue;
@@ -28,10 +32,12 @@ mod session;
 mod sharing;
 mod editions;
 mod streams;
+#[cfg(test)]
+mod perf;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, select, tick};
 use nikgob_core::model::{
@@ -44,6 +50,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
+pub use nikgob_sources::khinsider::PageBrowser;
 pub use recs::{
     HomePreview, ModelPreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_replay, preview_replay_with,
     preview_tile_days,
@@ -84,6 +91,11 @@ pub struct PlayRequest {
     /// gain comes with the stream).
     pub gain_db: f32,
     pub duration: Option<Duration>,
+    /// The version the track plays as («Скорость»; `Normal` when that is
+    /// switched off).
+    pub speed: nikgob_view::SpeedVariant,
+    /// A version other than `Normal` keeps the timbre of its voices.
+    pub keep_timbre: bool,
 }
 
 /// Events the backend reports back (from any thread) through
@@ -106,6 +118,9 @@ pub enum PlaybackEvent {
     /// How long the item is, as the engine found it (the container's
     /// length, else the stream's): the length of a track that has none.
     Duration { id: u64, duration: Duration },
+    /// The item plays at this speed after all, not at its request's (a
+    /// live track of another player cannot be sped up).
+    Speed { id: u64, speed: f32 },
 }
 
 /// The audio engine as the runtime sees it.
@@ -122,6 +137,12 @@ pub trait Playback: Send {
     fn position(&self) -> Duration;
     /// Crossfade (None = gapless) and loudness normalization.
     fn configure(&mut self, _crossfade: Option<Duration>, _normalization: bool) {}
+    /// The equalizer: on or off, and each band's gain in dB.
+    fn set_equalizer(&mut self, _on: bool, _gains: [f32; nikgob_view::EQ_BANDS]) {}
+    /// Item `id` (the playing one, or the one preloaded) plays as `speed`
+    /// from now on, going on from where it is. Positions stay the track's
+    /// own time: at 1.2 the position moves 1.2 s a second.
+    fn set_speed(&mut self, _id: u64, _speed: nikgob_view::SpeedVariant, _keep_timbre: bool) {}
     /// Switches the output device (None = system default). Returns true if
     /// the engine was restarted and lost what it was playing.
     fn set_device(&mut self, _device: Option<String>) -> bool {
@@ -177,6 +198,7 @@ enum Msg {
     OdesliBase(String),
     GraphMetadata(Box<nikgob_metadata::Metadata>),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
+    KhinsiderBrowser(Arc<dyn nikgob_sources::khinsider::PageBrowser>),
     Shutdown,
 }
 
@@ -288,6 +310,12 @@ impl Runtime {
         let _ = self.tx.send(Msg::WebLogin(service, login));
     }
 
+    /// The hidden webview khinsider asks when a page is still a bot check.
+    /// None (Linux without WebKit) leaves the HTTP answer.
+    pub fn set_khinsider_browser(&self, browser: Arc<dyn nikgob_sources::khinsider::PageBrowser>) {
+        let _ = self.tx.send(Msg::KhinsiderBrowser(browser));
+    }
+
     /// Asks this Odesli base url for share links instead of
     /// api.song.link (tests).
     pub fn set_odesli_base(&self, base: impl Into<String>) {
@@ -346,11 +374,80 @@ enum Follow {
     Snap,
 }
 
+/// A turn of the worker's loop longer than this is logged: while it lasts
+/// no command is answered and no playback event is seen.
+const SLOW_TURN: Duration = Duration::from_millis(250);
+
+/// One turn of the worker's loop, timed (see [`SLOW_TURN`]).
+#[derive(Default)]
+struct Turn {
+    began: Option<(Instant, String)>,
+    laps: Vec<(&'static str, Instant)>,
+}
+
+impl Turn {
+    fn begin(&mut self, what: impl FnOnce() -> String) {
+        self.began = Some((Instant::now(), what()));
+    }
+
+    /// A part of the turn ends here.
+    fn lap(&mut self, part: &'static str) {
+        self.laps.push((part, Instant::now()));
+    }
+
+    fn end(self) {
+        let Some((at, what)) = self.began else { return };
+        let took = at.elapsed();
+        if took < SLOW_TURN {
+            return;
+        }
+        let mut from = at;
+        let parts: Vec<String> = self
+            .laps
+            .iter()
+            .map(|(part, to)| {
+                let ms = to.duration_since(from).as_millis();
+                from = *to;
+                format!("{part} {ms} ms")
+            })
+            .collect();
+        let parts = if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) };
+        log::warn!("the player's loop was held for {} ms by {what}{parts}", took.as_millis());
+    }
+}
+
+/// The first word of a value's `Debug` (an enum's variant), without
+/// writing out the rest.
+fn head_of(value: &impl std::fmt::Debug) -> String {
+    struct Head(String);
+    impl std::fmt::Write for Head {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                if !(c.is_alphanumeric() || c == '_') || self.0.len() >= 40 {
+                    return Err(std::fmt::Error);
+                }
+                self.0.push(c);
+            }
+            Ok(())
+        }
+    }
+    let mut head = Head(String::new());
+    let _ = std::fmt::write(&mut head, format_args!("{value:?}"));
+    head.0
+}
+
 /// How our position `ours` follows the heard one (`stalled`: it has not
 /// moved since the last report) while playing at `rate`. It never moves
 /// backwards: ahead of a stalled sound it waits, ahead of a moving one it
 /// slows down.
+#[cfg(test)]
 fn follow(ours: Duration, heard: Duration, stalled: bool, rate: f64) -> Follow {
+    follow_at(ours, heard, stalled, rate, 1.0)
+}
+
+/// [`follow`] for a track whose position moves `speed` seconds a second
+/// (a track played faster or slower: positions are its own time).
+fn follow_at(ours: Duration, heard: Duration, stalled: bool, rate: f64, speed: f64) -> Follow {
     if ours.abs_diff(heard) > POSITION_SNAP {
         return Follow::Snap;
     }
@@ -358,10 +455,10 @@ fn follow(ours: Duration, heard: Duration, stalled: bool, rate: f64) -> Follow {
         return Follow::Rate(0.0);
     }
     if ours.abs_diff(heard) <= POSITION_JITTER {
-        return if rate == 1.0 { Follow::Keep } else { Follow::Rate(1.0) };
+        return if rate == speed { Follow::Keep } else { Follow::Rate(speed) };
     }
     let error = heard.as_secs_f64() - ours.as_secs_f64();
-    Follow::Rate((1.0 + error / SLEW_SECS).clamp(1.0 - SLEW_MAX, 1.0 + SLEW_MAX))
+    Follow::Rate((speed + error / SLEW_SECS).clamp(speed - SLEW_MAX, speed + SLEW_MAX))
 }
 
 /// A toast no snackbar took away is dropped after this long.
@@ -436,6 +533,12 @@ struct Worker {
     /// How fast `position` moves from `position_at` (1 normal; a little off
     /// while it meets the heard position, 0 while the sound stalls).
     rate: f64,
+    /// How fast the position of the playing track moves when all is well:
+    /// its speed (1 as recorded).
+    speed: f64,
+    /// The version the playing entry was handed to the engine as, and
+    /// whether it keeps its timbre.
+    playing_fx: (nikgob_view::SpeedVariant, bool),
     /// The engine's last position report, to tell a stall.
     reported: Option<(u64, Duration)>,
     /// When we last moved `position` ourselves (see [`POSITION_SETTLE`]).
@@ -503,7 +606,13 @@ struct Worker {
     /// Download sources other than the indexer's torrents (khinsider, the
     /// free services, Soulseek), whether on or not (docs/stage4.5.md).
     sources: Vec<Arc<dyn nikgob_core::source::Source>>,
-    /// Last torrent search, indexed like `SearchView::torrents.results`.
+    /// khinsider, so a webview can be given to it after start.
+    khinsider: Option<Arc<nikgob_sources::khinsider::Khinsider>>,
+    /// Qobuz and Tidal, so `sources.toml` can change their lists.
+    qobuz: Option<Arc<nikgob_sources::qobuz::Qobuz>>,
+    tidal: Option<Arc<nikgob_sources::tidal::Tidal>>,
+    /// `sources.toml`'s mtime when it was last read.
+    sources_mtime: Option<SystemTime>,
     candidates: Vec<nikgob_core::indexer::Candidate>,
     torrents: torrents::Torrents,
     /// Accounts, stream search and pages, likes sync, wishlist, sharing.
@@ -512,12 +621,17 @@ struct Worker {
     analysis: analysis::FileAnalysis,
     /// The background spectrum check of the files (fake lossless).
     quality: quality::QualityJob,
+    /// Files that hold another song's audio: the background check, the
+    /// pairs in «Подтверди», «В файле другая песня».
+    same_audio: same_audio::SameAudioJob,
     /// Mixes, radio, discovery (stage 4).
     recs: recs::RecsState,
     /// Albums whose larger cover was looked up in this run.
     hd_asked: hd_covers::Asked,
     /// Albums and clips whose real art was looked up in this run.
     better_asked: better_covers::Asked,
+    /// Real art of the stream tracks' video thumbnails on screen.
+    stream_covers: stream_covers::StreamCovers,
     /// The album the queue plays (and the queue's generation then): its
     /// tracks the services add later join the queue.
     album_queue: Option<(nikgob_core::model::ReleaseId, u64)>,
@@ -553,6 +667,7 @@ impl Worker {
         let streaming = streams::Streams::new(internal.clone());
         let analysis = analysis::FileAnalysis::new(internal.clone());
         let quality = quality::QualityJob::new(internal.clone());
+        let same_audio = same_audio::SameAudioJob::new(internal.clone());
         let recs = recs::RecsState::new(internal.clone());
         let models_dir = config.import.as_ref().and_then(|i| i.models_dir.clone());
         let internal_tx = internal.clone();
@@ -565,7 +680,29 @@ impl Worker {
         let volume = saved.volume.unwrap_or(0.8).clamp(0.0, 1.0);
         playback.set_volume(if saved.muted { 0.0 } else { volume });
         playback.configure(crossfade(&config.prefs), config.prefs.normalization);
+        playback.set_equalizer(config.prefs.eq_on, config.prefs.eq_gains);
+        {
+            // The versions chosen for tracks («Скорость»).
+            let chosen: std::collections::HashMap<TrackId, nikgob_view::SpeedVariant> = config
+                .library
+                .track_fx()
+                .unwrap_or_else(|e| {
+                    log::warn!("the speeds of the tracks could not be read: {e}");
+                    Vec::new()
+                })
+                .into_iter()
+                .filter_map(|(track, key)| Some((track, nikgob_view::SpeedVariant::from_key(&key)?)))
+                .collect();
+            let mut st = state.write();
+            let enabled = st.prefs.speed_enabled;
+            st.speeds = nikgob_view::TrackSpeeds { enabled, chosen: Arc::new(chosen) };
+
+        }
         config.library.set_album_likes_tracks(config.prefs.album_like_tracks);
+        let web = search::web_sources_from(config.settings_path.as_deref());
+        let sources_mtime = config.settings_path.as_ref().and_then(|p| {
+            std::fs::metadata(nikgob_sources::config::beside(p)).and_then(|m| m.modified()).ok()
+        });
         Self {
             res: Resolver::new(config.library.clone(), config.library_dir),
             lib: config.library,
@@ -579,6 +716,8 @@ impl Worker {
             position: Duration::ZERO,
             position_at: Instant::now(),
             rate: 1.0,
+            speed: 1.0,
+            playing_fx: (nikgob_view::SpeedVariant::Normal, false),
             reported: None,
             jumped_at: Instant::now(),
             volume,
@@ -607,7 +746,11 @@ impl Worker {
             last_export: Instant::now(),
             exported_fp: None,
             indexer: search::indexer_from(config.settings_path.as_deref()),
-            sources: search::web_sources_from(config.settings_path.as_deref()),
+            sources: web.list,
+            khinsider: web.khinsider,
+            qobuz: web.qobuz,
+            tidal: web.tidal,
+            sources_mtime,
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
             import,
@@ -618,8 +761,10 @@ impl Worker {
             streaming,
             analysis,
             quality,
+            same_audio,
             hd_asked: Default::default(),
             better_asked: Default::default(),
+            stream_covers: Default::default(),
             album_queue: None,
             recs,
             soulseek,
@@ -637,6 +782,13 @@ impl Worker {
         // Once each, after a backup: doubles of a song, an artist or an
         // album become one, and every album has a line per place it counts.
         self.lib.repair_catalog();
+        // Once: the videos that are no music an old import left in its
+        // playlists go from them (entries only).
+        match self.lib.drop_imported_non_music(streams::music_video_title) {
+            Ok(0) => {}
+            Ok(n) => log::info!("library: repair of imported non-music entries: {n}"),
+            Err(e) => log::warn!("library: repair of imported non-music entries: {e}"),
+        }
         self.export_if_stale();
         self.load_torrent_history();
         self.publish_downloads();
@@ -650,20 +802,28 @@ impl Worker {
         self.start_streams();
         self.start_analysis();
         self.start_quality();
+        self.start_same_audio();
         self.start_align();
         self.dislikes_load(false);
         loop {
+            // What this turn of the loop does, for [`slow_turn`].
+            let mut turn = Turn::default();
             select! {
                 recv(rx) -> m => match m {
-                    Ok(Msg::Cmd(c)) => self.command(c),
+                    Ok(Msg::Cmd(c)) => {
+                        turn.begin(|| format!("command {}", head_of(&c)));
+                        self.command(c);
+                    }
                     Ok(Msg::Service(s)) => self.services.push(s),
                     Ok(Msg::Indexer(i)) => {
+                        turn.begin(|| "the indexer".to_owned());
                         self.indexer = Some(i);
                         self.publish_sources();
                         self.wish_sources_ready();
                         self.wish_tick();
                     }
                     Ok(Msg::Source(s)) => {
+                        turn.begin(|| "a source".to_owned());
                         // One per kind: a new one of a kind replaces the old.
                         self.sources.retain(|x| x.key() != s.key());
                         self.sources.push(s);
@@ -674,29 +834,47 @@ impl Worker {
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
                     Ok(Msg::GraphMetadata(m)) => self.set_graph_metadata(*m),
                     Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
+                    Ok(Msg::KhinsiderBrowser(browser)) => {
+                        if let Some(k) = &self.khinsider {
+                            k.set_browser(browser);
+                        }
+                    }
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
                         break;
                     }
                 },
-                recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
-                recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
+                recv(pb) -> e => if let Ok(e) = e {
+                    turn.begin(|| format!("playback {}", head_of(&e)));
+                    self.playback_event(e);
+                },
+                recv(internal) -> m => if let Ok(m) = m {
+                    turn.begin(|| m.turn_name());
+                    self.internal(m);
+                },
                 recv(fast) -> _ => {
+                    turn.begin(|| "the second's poll".to_owned());
                     self.soloist_poll();
                     self.poll_torrents();
                     self.poll_share();
                     self.wish_poll_direct();
-                }
+                    self.reload_sources_file();
+                },
                 recv(ticker) -> _ => {
+                    turn.begin(|| "the tick".to_owned());
                     self.expire_toasts();
                     self.maybe_export(false);
                     self.save_session();
                     self.stream_tick();
+                    turn.lap("streams");
                     self.recs_tick();
+                    turn.lap("recs");
                 }
             }
+            turn.end();
             self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.quality.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
+            self.same_audio.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
@@ -708,6 +886,7 @@ impl Worker {
         self.streaming.analysis.shutdown();
         self.analysis.shutdown();
         self.quality.shutdown();
+        self.same_audio.shutdown();
         self.align.shutdown();
     }
 
@@ -837,17 +1016,27 @@ impl Worker {
                 }
             }
             Command::Seek(p) => self.seek(p),
+            // The app opens and resets the developer profile itself.
+            Command::DevProfile(_) => {}
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
+            Command::SearchLyricsAgain(t) => self.search_lyrics_again(t),
             Command::CraftLyrics { track, source, target, deep } => self.craft_lyrics(track, source, target, deep),
             Command::ClearCraft => self.clear_craft(),
             Command::CancelCraft => self.cancel_craft(),
             Command::ShowLyricsAs(t, sync) => self.show_lyrics_as(t, sync),
             Command::SaveLyrics { track, source } => self.save_lyrics(track, source),
+            Command::SaveOwnLyrics { track, lines, timed } => self.save_own_lyrics(track, lines, timed),
+            Command::DropOwnLyrics(track) => self.drop_own_lyrics(track),
+            Command::RestoreOwnLyrics(track) => self.restore_own_lyrics(track),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
+                // Seconds as the listener counts them: more of the track
+                // when it plays faster.
+                let ms = (ms as f64 * self.speed).round() as i64;
                 let p = self.position_now().as_millis() as i64 + ms;
                 self.seek(Duration::from_millis(p.max(0) as u64));
             }
+            Command::SetTrackSpeed { track, variant } => self.set_track_speed(track, variant),
             Command::SetVolume(v) => {
                 let v = v.clamp(0.0, 1.0);
                 if v == self.volume && !self.muted {
@@ -908,15 +1097,8 @@ impl Worker {
                 tracks,
                 start,
                 context,
-            } => {
-                self.user_switch(EventOrigin::Manual);
-                self.queue.set(&tracks, start, Some(context));
-                self.play_context = EventContext::Library;
-                self.play_context_id = None;
-                if let Some(e) = self.queue.current() {
-                    self.start(e);
-                }
-            }
+            } => self.play_tracks(&tracks, Some(start), context),
+            Command::PlayAll { tracks, context } => self.play_tracks(&tracks, None, context),
             Command::PlayNext(t) => {
                 self.queue.play_next(&t);
                 self.preload_next();
@@ -942,6 +1124,30 @@ impl Worker {
             }
             Command::EnqueueRelease(id) => {
                 let ids = self.release_tracks(id);
+                self.command(Command::Enqueue(ids));
+            }
+            Command::AddAlbumToPlaylist(playlist, id) => {
+                let ids = self.release_tracks(id);
+                if ids.is_empty() {
+                    return;
+                }
+                self.command(Command::AddToPlaylist(playlist, ids));
+            }
+            Command::PlayPlaylistNext(id) => {
+                let (ids, name) = self.playlist_tracks(id, None);
+                if ids.is_empty() {
+                    return;
+                }
+                self.queue.play_next(&ids);
+                self.preload_next();
+                self.publish_player();
+                self.toast(format!("Следующим: «{name}»"), None);
+            }
+            Command::EnqueuePlaylist(id) => {
+                let (ids, _) = self.playlist_tracks(id, None);
+                if ids.is_empty() {
+                    return;
+                }
                 self.command(Command::Enqueue(ids));
             }
             Command::EnqueueArtist(id) => {
@@ -1152,9 +1358,15 @@ impl Worker {
             Command::ConfirmPicked { id, sources, accept } if id & quality::QUALITY_ID != 0 => {
                 self.quality_picked(sources, accept);
             }
+            Command::ConfirmChoice { id, option } if id & same_audio::SAME_AUDIO_ID != 0 => {
+                self.same_audio_choice(id, option);
+            }
             Command::ConfirmPicked { .. } => {
                 log::warn!("picked songs of an unknown card");
             }
+            Command::WrongFile(track) => self.wrong_file(track, None),
+            Command::UndoWrongFile(track) => self.undo_wrong_file(track),
+            Command::RecordingApart(track) => self.recording_apart(track),
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),
             Command::DownloadsShown(shown) => self.torrents.shown = shown,
@@ -1202,6 +1414,9 @@ impl Worker {
             Command::SetPlaylistCover(id, path) => self.set_playlist_cover(id, path),
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
             Command::SetLastfmKey(key) => self.set_lastfm_key(&key),
+            Command::SetListenbrainzToken(token) => self.set_listenbrainz_token(&token),
+            Command::OpenSourcesConfig => self.open_sources_config(),
+            Command::RealCovers(urls) => self.real_covers_wanted(urls),
             Command::SearchTorrents(q) => self.search_torrents(q),
             c @ (Command::DownloadTorrent { .. }
             | Command::ListTorrentFiles(_)
@@ -1226,6 +1441,8 @@ impl Worker {
             | Command::PlayStreamPlaylist { .. }
             | Command::PlayStreamNext(_)
             | Command::EnqueueStream(_)
+            | Command::PlayStreamAlbumNext(_)
+            | Command::EnqueueStreamAlbum(_)
             | Command::LikeStream { .. }
             | Command::LikeStreamAlbum { .. }
             | Command::DownloadStream { .. }
@@ -1234,6 +1451,7 @@ impl Worker {
             | Command::DownloadRelease(_)
             | Command::FollowStreamPlaylist(_)
             | Command::AddStreamToPlaylist(..)
+            | Command::AddStreamAlbumToPlaylist(..)
             | Command::Share(_)
             | Command::LoadWishlist
             | Command::WishlistDownload(_)
@@ -1247,6 +1465,7 @@ impl Worker {
             | Command::ImportExportFiles(_)
             | Command::ClearStreamCache
             | Command::WindowState { .. }
+            | Command::PlayFromYoutube
             | Command::SetPlaylistSync { .. }
             | Command::LoadDiscography(_)
             | Command::FindSong { .. }
@@ -1356,7 +1575,12 @@ impl Worker {
                 "its files are missing".to_owned()
             } else {
                 let services: Vec<&str> = sources.iter().filter_map(|s| s.kind.service()).map(|s| s.as_str()).collect();
-                format!("no audio from {} now ({} sources set aside)", services.join(", "), sources.iter().filter(|s| !s.available).count())
+                let off = if self.service(StreamKind::Youtube).is_none() { ", YouTube Music switched off" } else { "" };
+                format!(
+                    "no audio from {} now ({} sources set aside{off})",
+                    services.join(", "),
+                    sources.iter().filter(|s| !s.available).count()
+                )
             };
             log::warn!("{}: nothing to play: {why}", e.track);
             return None;
@@ -1385,13 +1609,84 @@ impl Worker {
                 0.0,
             ),
         };
+        let (speed, keep_timbre) = self.fx_of(e.track);
         let req = PlayRequest {
             id: e.id,
             source,
             gain_db,
             duration,
+            speed,
+            keep_timbre,
         };
         Some((req, src.id, src.kind))
+    }
+
+    /// The version `track` plays as now, and whether it keeps its timbre.
+    fn fx_of(&self, track: TrackId) -> (nikgob_view::SpeedVariant, bool) {
+        let st = self.state.read();
+        let variant = st.speeds.of(track);
+        (variant, st.prefs.keep_timbre && variant != nikgob_view::SpeedVariant::Normal)
+    }
+
+    /// `Command::SetTrackSpeed`: remembered with the track, heard at once
+    /// if it plays.
+    fn set_track_speed(&mut self, track: TrackId, variant: nikgob_view::SpeedVariant) {
+        // A speed of the listener's own that a ready version has is that
+        // version, and one out of range is the nearest the engine takes.
+        let variant = match variant {
+            nikgob_view::SpeedVariant::Custom(percent) => nikgob_view::SpeedVariant::at(percent),
+            ready => ready,
+        };
+        // The slider says the same speed again while it is held: nothing
+        // to save and nothing to restart.
+        if self.state.read().speeds.chosen.get(&track).copied().unwrap_or_default() == variant {
+            return;
+        }
+        let key = (variant != nikgob_view::SpeedVariant::Normal).then(|| variant.key());
+        if let Err(e) = self.lib.set_track_fx(track, key.as_deref()) {
+            log::warn!("{track}: its speed could not be saved: {e}");
+            return;
+        }
+        let mut chosen = (*self.state.read().speeds.chosen).clone();
+        if key.is_some() {
+            chosen.insert(track, variant);
+        } else {
+            chosen.remove(&track);
+        }
+        self.publish(|s| s.speeds.chosen = Arc::new(chosen));
+        self.apply_speed(Some(track));
+    }
+
+    /// The speed of `changed` (or of everything: the settings) changed: the
+    /// playing track goes on as its version now is, from where it is, and
+    /// the preloaded next track, if it is concerned, takes its version in
+    /// the engine. It is not handed over anew: near the end of the playing
+    /// track the engine is already producing it, and a second copy would
+    /// play after the first.
+    fn apply_speed(&mut self, changed: Option<TrackId>) {
+        if let Some(e) = self.playing {
+            let fx = self.fx_of(e.track);
+            if fx != self.playing_fx {
+                self.playback.set_speed(e.id, fx.0, fx.1);
+                self.playing_fx = fx;
+                // The position is the track's own time: it stays, and
+                // moves at the new pace from here.
+                let now = Instant::now();
+                self.position = self.position_at_instant(now);
+                self.position_at = now;
+                self.speed = f64::from(fx.0.speed());
+                self.rate = self.speed;
+                self.publish_player();
+            }
+        }
+        let playing = self.playing.map(|e| e.id);
+        if let Some(n) = self.queue.peek_auto_next()
+            && Some(n.id) != playing
+            && changed.is_none_or(|t| n.track == t)
+        {
+            let fx = self.fx_of(n.track);
+            self.playback.set_speed(n.id, fx.0, fx.1);
+        }
     }
 
     /// [`Self::request_skipping`] with nothing skipped.
@@ -1402,6 +1697,8 @@ impl Worker {
     /// Hands `req` (for the playing entry `e`) to the engine. A stream reads
     /// Buffering until the engine reports its start.
     fn play_request(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.playing_fx = (req.speed, req.keep_timbre);
+        self.speed = f64::from(req.speed.speed());
         self.playback.play(req);
         self.restarted = Some(e.id);
         self.playing = Some(e);
@@ -1428,7 +1725,7 @@ impl Worker {
         self.play_request(e, req, source, kind);
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.seek_to_failover(e);
         self.preload_next();
@@ -1444,9 +1741,38 @@ impl Worker {
         self.playback.seek(at);
         self.position = at;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.publish_player();
+    }
+
+    /// A new list (an album, a playlist, a mix, a radio, a search result)
+    /// is about to replace the queue: shuffle stays, or goes off without
+    /// «Перемешивание остаётся включённым».
+    pub(crate) fn new_list(&mut self) {
+        let keep = self.state.read().prefs.keep_shuffle;
+        self.queue.new_list(keep);
+    }
+
+    /// «Перемешивать радио и автовоспроизведение»: a radio's, autoplay's
+    /// and the daylist's picks play shuffled while shuffle is on.
+    pub(crate) fn shuffle_radio(&self) -> bool {
+        self.state.read().prefs.shuffle_radio
+    }
+
+    /// A list of tracks of the library's pages (downloaded, «Слушать
+    /// снова», worlds, cards) from `start`, or from the first (a random one
+    /// under shuffle) when the user picked none; shuffle stays or goes off
+    /// as for any new list.
+    fn play_tracks(&mut self, tracks: &[TrackId], start: Option<usize>, context: String) {
+        self.user_switch(EventOrigin::Manual);
+        self.new_list();
+        self.queue.set_from(tracks, start, Some(context));
+        self.play_context = EventContext::Library;
+        self.play_context_id = None;
+        if let Some(e) = self.queue.current() {
+            self.start(e);
+        }
     }
 
     fn play_list(
@@ -1462,21 +1788,16 @@ impl Worker {
             self.toast("Нечего играть", None);
             return;
         }
-        let start_idx = start
-            .and_then(|s| ids.iter().position(|&t| t == s))
-            .unwrap_or_else(|| {
-                if shuffle {
-                    fastrand::usize(..ids.len())
-                } else {
-                    0
-                }
-            });
+        let start_idx = start.and_then(|s| ids.iter().position(|&t| t == s));
         self.user_switch(EventOrigin::Manual);
-        self.queue.shuffle = false;
-        self.queue.set(&ids, start_idx, context);
+        // «Перемешать» turns shuffle on; a plain play keeps it as the user
+        // set it (on: the list plays shuffled, from a random track unless
+        // one was picked) or turns it off, as the setting says.
+        self.new_list();
         if shuffle {
-            self.queue.set_shuffle(true);
+            self.queue.shuffle = true;
         }
+        self.queue.set_from(&ids, start_idx, context);
         // The new queue's own context, never the one before it (a mix's,
         // a playlist's) carried over.
         self.play_context = ctx;
@@ -1517,7 +1838,20 @@ impl Worker {
             }
             log::warn!("no playable source for {}", e.track);
             if attempt == 0 {
-                self.toast("Нет файла для этого трека", None);
+                // A stream track's last way to the sound is YouTube Music:
+                // when it is off, that is the reason, not a missing file.
+                let streamed = self
+                    .lib
+                    .sources_of_track(e.track)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|s| s.trashed_at.is_none() && s.kind.service().is_some());
+                let text = if streamed && self.service(StreamKind::Youtube).is_none() {
+                    self.off_text(StreamKind::Youtube)
+                } else {
+                    "Нет файла для этого трека".to_owned()
+                };
+                self.toast(text, None);
             }
             match self.queue.skip_forward() {
                 Some(n) if n.id != e.id => e = n,
@@ -1533,7 +1867,7 @@ impl Worker {
         self.play_request(e, req, source, kind);
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
@@ -1570,7 +1904,7 @@ impl Worker {
             Status::Paused => {
                 self.heard_tick();
                 self.position_at = Instant::now();
-                self.rate = 1.0;
+                self.rate = self.speed;
                 self.status = Status::Playing;
                 self.playback.resume();
                 self.publish_player();
@@ -1607,7 +1941,7 @@ impl Worker {
         self.playback.seek(p);
         self.position = p;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
             let _ = self.lib.record_event(
@@ -1750,7 +2084,7 @@ impl Worker {
                         _ => Duration::ZERO,
                     };
                     self.position_at = Instant::now();
-                    self.rate = 1.0;
+                    self.rate = self.speed;
                     self.publish_player();
                 }
             }
@@ -1776,12 +2110,15 @@ impl Worker {
                     self.playing = Some(e);
                     self.tried.clear();
                     // The engine took over what `preload_next` asked for.
-                    self.playing_source = self
-                        .request_skipping(e, &[])
-                        .map(|(_, source, kind)| (source, kind));
+                    let taken = self.request_skipping(e, &[]);
+                    self.playing_fx = taken
+                        .as_ref()
+                        .map_or((nikgob_view::SpeedVariant::Normal, false), |(req, ..)| (req.speed, req.keep_timbre));
+                    self.speed = f64::from(self.playing_fx.0.speed());
+                    self.playing_source = taken.map(|(_, source, kind)| (source, kind));
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
-                    self.rate = 1.0;
+                    self.rate = self.speed;
                     let kind = self.playing_source.map(|(_, k)| k).filter(|k| !k.is_local());
                     self.record_start(e, kind);
                     self.preload_next();
@@ -1803,7 +2140,7 @@ impl Worker {
                     self.status = Status::Playing;
                     self.position = position;
                     self.position_at = Instant::now();
-                    self.rate = 1.0;
+                    self.rate = self.speed;
                     self.publish_player();
                     return;
                 }
@@ -1813,7 +2150,7 @@ impl Worker {
                     if self.status != Status::Playing {
                         self.position = position;
                         self.position_at = Instant::now();
-                        self.rate = 1.0;
+                        self.rate = self.speed;
                         return;
                     }
                     // The view extrapolates from its last publish and stops at
@@ -1824,8 +2161,8 @@ impl Worker {
                     let now = Instant::now();
                     let ours = self.position_at_instant(now);
                     // Where the sound is now (a stalled one stands still).
-                    let heard = if stalled { position } else { position + late };
-                    match follow(ours, heard, stalled, self.rate) {
+                    let heard = if stalled { position } else { position + late.mul_f64(self.speed) };
+                    match follow_at(ours, heard, stalled, self.rate, self.speed) {
                         Follow::Keep => {}
                         Follow::Snap => {
                             if self.jumped_at.elapsed() < POSITION_SETTLE {
@@ -1833,7 +2170,7 @@ impl Worker {
                             }
                             self.position = heard;
                             self.position_at = now;
-                            self.rate = if stalled { 0.0 } else { 1.0 };
+                            self.rate = if stalled { 0.0 } else { self.speed };
                             self.publish_player();
                         }
                         Follow::Rate(rate) => {
@@ -1847,6 +2184,17 @@ impl Worker {
             }
             // Taken as a position above.
             PlaybackEvent::Paused | PlaybackEvent::Resumed | PlaybackEvent::PositionAt { .. } => {}
+            PlaybackEvent::Speed { id, speed } => {
+                let speed = f64::from(speed);
+                if self.playing.map(|e| e.id) == Some(id) && speed.is_finite() && speed > 0.0 && speed != self.speed {
+                    let now = Instant::now();
+                    self.position = self.position_at_instant(now);
+                    self.position_at = now;
+                    self.speed = speed;
+                    self.rate = speed;
+                    self.publish_player();
+                }
+            }
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
                 // without one (a stream whose service did not say).
@@ -1996,6 +2344,7 @@ impl Worker {
         let status = self.status;
         let now = Instant::now();
         let (position, rate) = (self.position_at_instant(now), self.rate as f32);
+        let speed = self.speed as f32;
         let (volume, muted) = (self.volume, self.muted);
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
         let context = self.queue.context.clone();
@@ -2035,6 +2384,7 @@ impl Worker {
             p.position = position;
             p.at = now;
             p.rate = rate;
+            p.speed = speed;
             p.volume = volume;
             p.muted = muted;
             p.shuffle = shuffle;
@@ -2130,6 +2480,7 @@ impl Worker {
     fn load_library(&mut self) {
         self.stream_analysis_changed();
         self.recs_library_changed();
+        self.publish_recordings();
         let sort = self.state.read().library.release_sort;
         let key = match sort {
             nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
@@ -2174,7 +2525,13 @@ impl Worker {
         let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
         let res = &mut self.res;
-        let releases: Vec<_> = releases.iter().map(|r| res.release(r)).collect();
+        // By when they came, the albums only an import's playlists brought
+        // stay out, as in «Недавно добавлено».
+        let releases: Vec<_> = releases
+            .iter()
+            .filter(|r| sort != nikgob_view::ReleaseSort::Added || !brought.contains(&r.release.id))
+            .map(|r| res.release(r))
+            .collect();
         let artists: Vec<_> = artists
             .iter()
             .map(|a| {
@@ -2253,11 +2610,38 @@ impl Worker {
             return;
         };
         let liked = self.lib.release_liked(id).unwrap_or(false);
-        let detail = self.res.release_detail(&release, &listing, liked);
+        let mut detail = self.res.release_detail(&release, &listing, liked);
+        (detail.released, detail.label) = self.release_facts(&release, &detail.tracks);
         self.publish(|s| {
             s.release = Some(detail);
         });
         self.complete_tracklist(id);
+    }
+
+    /// The day an album came out (beyond its year) and its label: from the
+    /// tags of its first file that reads, the day else from a service.
+    fn release_facts(
+        &self,
+        release: &nikgob_core::model::Release,
+        tracks: &[nikgob_view::TrackRow],
+    ) -> (Option<nikgob_view::ReleaseDay>, Option<String>) {
+        let tags = tracks.iter().filter(|t| t.has_local).find_map(|t| {
+            let src = self.lib.active_source(t.id).ok().flatten().filter(|s| s.kind.is_local())?;
+            nikgob_import::tags::read_tags(&self.res.path(&src.locator)).ok().map(|(tags, _)| tags)
+        });
+        let label = tags
+            .as_ref()
+            .and_then(|t| t.label.as_deref())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned);
+        let day = |d: &str| nikgob_view::ReleaseDay::parse(d, release.year);
+        let released = tags
+            .as_ref()
+            .and_then(|t| t.date.as_deref())
+            .and_then(day)
+            .or_else(|| self.kept_released(release.id).as_deref().and_then(day));
+        (released, label)
     }
 
     fn load_artist(&mut self, id: nikgob_core::model::ArtistId) {
@@ -2350,8 +2734,19 @@ impl Worker {
             p.masters_dir = old.masters_dir.clone();
         }
         self.playback.configure(crossfade(&p), p.normalization);
+        if (old.eq_on, old.eq_gains) != (p.eq_on, p.eq_gains) {
+            self.playback.set_equalizer(p.eq_on, p.eq_gains);
+        }
+        let speed_changed = (old.speed_enabled, old.keep_timbre) != (p.speed_enabled, p.keep_timbre);
+        let speed_enabled = p.speed_enabled;
         self.torrent_prefs(&p);
-        self.publish(|s| s.prefs = *p.clone());
+        self.publish(|s| {
+            s.prefs = *p.clone();
+            s.speeds.enabled = speed_enabled;
+        });
+        if speed_changed {
+            self.apply_speed(None);
+        }
         self.save_prefs();
         self.import_prefs(&p);
         if (old.check_fake_lossless, old.convert_fake_lossless, old.fake_flac_auto)
@@ -2815,9 +3210,14 @@ impl Worker {
 
     /// Updates `liked` flags already shown without reloading everything.
     fn refresh_liked(&mut self, target: LikeTarget, on: bool, before: Held) {
+        // The same song on other albums: one ♡ for the recording.
+        let twins = match target {
+            LikeTarget::Track(t) => self.lib.recording_twins(t).unwrap_or_default(),
+            _ => Vec::new(),
+        };
         self.publish(|s| {
             let fix = |t: &mut nikgob_view::TrackRow| {
-                if LikeTarget::Track(t.id) == target {
+                if LikeTarget::Track(t.id) == target || twins.contains(&t.id) {
                     t.liked = on;
                 }
             };
@@ -2882,6 +3282,104 @@ impl Worker {
 
 
 impl Worker {
+    fn sources_file(&self) -> Option<std::path::PathBuf> {
+        self.settings_path.as_ref().map(|p| nikgob_sources::config::beside(p))
+    }
+
+    /// `sources.toml` changed: the new lists take over. A pause of an
+    /// instance that stays is kept. A file that does not parse is left as
+    /// it is, and the lists in use stay.
+    fn reload_sources_file(&mut self) {
+        let Some(path) = self.sources_file() else { return };
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified == self.sources_mtime {
+            return;
+        }
+        self.sources_mtime = modified;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("sources.toml: {e}");
+                return;
+            }
+        };
+        let defaults = source_defaults();
+        let lists = match nikgob_sources::config::parse(&text, defaults) {
+            Ok(l) => l,
+            Err(e) => {
+                log::warn!("sources.toml: {e}");
+                return;
+            }
+        };
+        if self.qobuz.as_ref().is_some_and(|q| q.instances_now() != (lists.qobuz.clone(), lists.qobuz_own)) {
+            if let Some(q) = &self.qobuz {
+                q.set_instances(&lists.qobuz, lists.qobuz_own);
+            }
+            log::info!("sources.toml: qobuz {:?}", lists.qobuz);
+        }
+        if self.tidal.as_ref().is_some_and(|t| t.instances_now() != (lists.tidal.clone(), lists.tidal_own)) {
+            if let Some(t) = &self.tidal {
+                t.set_instances(&lists.tidal, lists.tidal_own);
+            }
+            log::info!("sources.toml: tidal {:?}", lists.tidal);
+        }
+    }
+
+    /// Creates `sources.toml` if it is missing and opens it for editing.
+    fn open_sources_config(&mut self) {
+        let Some(settings) = self.settings_path.clone() else {
+            self.toast("Некуда сохранить настройки", None);
+            return;
+        };
+        let path = nikgob_sources::config::beside(&settings);
+        let saved = nikgob_core::settings::Settings::load(&settings).unwrap_or_default();
+        if let Err(e) = nikgob_sources::config::ensure(&path, source_defaults(), &saved.sources) {
+            log::error!("sources.toml: {e}");
+            self.toast("Не получилось создать файл инстансов", None);
+            return;
+        }
+        self.sources_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if let Err(e) = open_file(&path) {
+            log::warn!("sources.toml: {e}");
+            self.toast(format!("Файл инстансов: {}", path.display()), None);
+        }
+    }
+}
+
+fn source_defaults() -> nikgob_sources::config::Defaults<'static> {
+    nikgob_sources::config::Defaults {
+        qobuz: nikgob_sources::qobuz::DEFAULT_INSTANCES,
+        tidal: nikgob_sources::tidal::DEFAULT_INSTANCES,
+    }
+}
+
+/// Opens `path` with the system editor (a folder opener on Windows selects
+/// the file when it has no editor of its own). A test never launches one.
+fn open_file(path: &std::path::Path) -> std::io::Result<()> {
+    if cfg!(test) {
+        log::info!("sources.toml: not opened from a test ({})", path.display());
+        return Ok(());
+    }
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg("start").arg("").arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    let child = cmd.spawn()?;
+    #[cfg(unix)]
+    let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    #[cfg(not(unix))]
+    drop(child);
+    Ok(())
+}
+
+impl Worker {
     /// Stores the Prowlarr address and key in settings.toml (never in prefs).
     fn set_indexer(&mut self, url: String, api_key: String) {
         let Some(path) = self.settings_path.clone() else {
@@ -2943,7 +3441,9 @@ impl Worker {
         self.playback.set_volume(volume);
         let prefs = self.state.read().prefs.clone();
         self.playback.configure(crossfade(&prefs), prefs.normalization);
+        self.playback.set_equalizer(prefs.eq_on, prefs.eq_gains);
         let Some(e) = self.playing else { return };
+
         let pos = self.position_now();
         let status = self.status;
         if let Some(req) = self.request(e) {
@@ -2955,7 +3455,7 @@ impl Worker {
             }
             self.position = pos;
             self.position_at = Instant::now();
-            self.rate = 1.0;
+            self.rate = self.speed;
             self.preload_next();
         }
     }
@@ -3034,28 +3534,46 @@ impl Worker {
     /// The Last.fm key of the graph of similar music → settings.toml
     /// (empty: none), applied live.
     fn set_lastfm_key(&mut self, key: &str) {
+        let Some(configured) = self.set_metadata_secret(|m| &mut m.lastfm_key, key) else { return };
+        self.publish(|s| s.prefs.lastfm_configured = configured);
+        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+    }
+
+    /// The ListenBrainz token of the graph's popularity → settings.toml
+    /// (empty: none), applied live: the popularity is asked again at once.
+    fn set_listenbrainz_token(&mut self, token: &str) {
+        let Some(configured) = self.set_metadata_secret(|m| &mut m.listenbrainz_token, token) else { return };
+        self.publish(|s| s.prefs.listenbrainz_configured = configured);
+        self.graph_popularity_reopened();
+        self.toast(if configured { "Сохранено" } else { "Токен убран" }, None);
+    }
+
+    /// Keeps one secret of the online metadata in settings.toml (empty:
+    /// none) and applies the config live; whether one is set now, none when
+    /// it could not be kept (a toast says why).
+    fn set_metadata_secret(&mut self, field: impl FnOnce(&mut nikgob_core::settings::MetadataSettings) -> &mut Option<String>, value: &str) -> Option<bool> {
         let Some(path) = self.settings_path.clone() else {
             self.toast("Некуда сохранить настройки", None);
-            return;
+            return None;
         };
         let mut settings = match nikgob_core::settings::Settings::load(&path) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
                 self.toast("settings.toml не читается — поправь файл вручную", None);
-                return;
+                return None;
             }
         };
-        settings.metadata.lastfm_key = Some(key.trim().to_owned()).filter(|k| !k.is_empty());
+        let slot = field(&mut settings.metadata);
+        *slot = Some(value.trim().to_owned()).filter(|k| !k.is_empty());
+        let configured = slot.is_some();
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
             self.toast("Не удалось сохранить настройки", None);
-            return;
+            return None;
         }
         self.set_metadata_config(&metadata_config(&settings.metadata));
-        let configured = settings.metadata.lastfm_key.is_some();
-        self.publish(|s| s.prefs.lastfm_configured = configured);
-        self.toast(if configured { "Сохранено" } else { "Ключ убран" }, None);
+        Some(configured)
     }
 }
 
@@ -3067,6 +3585,9 @@ fn metadata_config(m: &nikgob_core::settings::MetadataSettings) -> MetadataConfi
     }
     if let Some(k) = &m.lastfm_key {
         cfg = cfg.with_lastfm_key(k.clone());
+    }
+    if let Some(t) = &m.listenbrainz_token {
+        cfg = cfg.with_listenbrainz_token(t.clone());
     }
     cfg
 }

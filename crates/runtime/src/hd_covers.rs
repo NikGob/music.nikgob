@@ -246,6 +246,7 @@ impl Worker {
         self.streaming.spawn_reporting(move |tx| async move {
             let mut failures = 0;
             for w in wants {
+                crate::quiet::free().await;
                 match tokio::time::timeout(Duration::from_secs(45), find(meta.as_ref(), &services, &w)).await {
                     Ok(Ok(found)) => {
                         failures = 0;

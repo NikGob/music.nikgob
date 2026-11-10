@@ -165,7 +165,8 @@ impl Resolver {
             disc_no: r.disc_no,
             track_no: r.track_no,
             duration: r.duration_ms.map(|ms| Duration::from_millis(u64::from(ms))),
-            // Honest about a "FLAC" made from an MP3 («FLAC из MP3 ~320»).
+            // Honest about a "FLAC" plainly made from an MP3 («FLAC из MP3
+            // ~192»); a doubt is said only in the quality panel.
             quality: r.codec.as_ref().map(|c| nikgob_core::quality::row_label(c, r.check.as_ref())),
             source: r.active_kind,
             has_local: r.has_local,
@@ -333,6 +334,9 @@ impl Resolver {
             quality,
             liked,
             lines,
+            // From the files' tags, filled by the page's load.
+            released: None,
+            label: None,
         }
     }
 
@@ -597,9 +601,10 @@ pub(crate) fn sound_details(
     };
     facts.push(("Откуда".into(), from.to_owned()));
     let local = src.kind == SourceKind::LocalFile;
+    // A plain fake is a warning; a doubt is worded as one and is none.
     let warning = check.is_some_and(|c| {
         let s: CheckSummary = c.summary();
-        nikgob_core::quality::label(&src.codec, src.bitrate, Some(&s)) != nikgob_core::quality::label(&src.codec, src.bitrate, None)
+        nikgob_core::quality::plain_fake(&src.codec, &s)
     });
     v::SoundDetails {
         facts,
@@ -789,6 +794,10 @@ mod tests {
         let real = sound_details(&flac, Some(Path::new("x.flac")), None, None, Some(&check(Verdict::Genuine, 22_050.0, None)));
         assert!(!real.warning);
         assert_eq!(real.band.as_deref(), Some("до 22,0 кГц, без среза"));
+        // A cut a real master may have too: a doubt in words, no warning.
+        let doubt = sound_details(&flac, Some(Path::new("x.flac")), None, None, Some(&check(Verdict::Transcoded, 20_155.0, None)));
+        assert!(!doubt.warning);
+        assert!(doubt.verdict.as_deref().unwrap().starts_with("Возможно, сделан из MP3 ~320"));
         let unchecked = sound_details(&flac, Some(Path::new("x.flac")), None, None, None);
         assert!(unchecked.pending && unchecked.verdict.is_none() && unchecked.spectrum.is_none());
 

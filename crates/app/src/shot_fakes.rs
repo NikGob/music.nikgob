@@ -127,6 +127,11 @@ pub struct Fakes {
 }
 
 impl Fakes {
+    /// Lays nothing over the view any more.
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     /// Takes `arg` of a `fake:` step; false when it is unknown.
     pub fn add(&mut self, arg: &str) -> bool {
         match arg {
@@ -1098,6 +1103,7 @@ fn upgrade_offer() -> nikgob_view::Confirm {
         recommended,
     };
     nikgob_view::Confirm {
+        yes_no: false,
         id: (1 << 47) | 1,
         title: "8 способов как бросить... — Пошлая Молли".into(),
         origin: "Качество лучше · трек".into(),
@@ -1126,6 +1132,7 @@ fn fake_flac_card() -> nikgob_view::Confirm {
     };
     let ids = (1..=3u128).map(|n| nikgob_core::model::SourceId(nikgob_core::model::Uuid::from_u128(0xfa1e_0000 + n))).collect();
     nikgob_view::Confirm {
+        yes_no: false,
         // The runtime's bit of the fakes cards (`quality::QUALITY_ID`).
         id: (1 << 45) | 1,
         title: "8 способов как бросить...".into(),
@@ -1183,6 +1190,7 @@ fn confirm() -> nikgob_view::Confirm {
         recommended,
     };
     nikgob_view::Confirm {
+        yes_no: false,
         id: 1,
         title: "Shake It Now. (feat. Ado) — Nakimushi".into(),
         origin: "Хочу скачать · трек".into(),
@@ -1262,7 +1270,7 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
         covers,
     };
     s.home.daylist = daylist.then(|| {
-        card(MixId::Daylist, "НА ВЕЧЕР", "Тягучий вечер четверга", "что ты слушаешь по вечерам · до 23:00", pick(0, 4))
+        card(MixId::Daylist, "НА ВЕЧЕР", "Тягучий вечер четверга", "25 треков", pick(0, 4))
     });
     let tile = |k: TileKind, title: &str, subtitle: &str, from: usize| card(MixId::Tile(k), "", title, subtitle, pick(from, 1));
     let tiles = [

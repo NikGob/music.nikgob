@@ -17,7 +17,7 @@ pub use slider::{Slider, SliderOutput, Wave, wavy_progress, wavy_progress_on};
 pub use toolbar::{ToolbarColor, floating_toolbar};
 
 mod common;
-pub(crate) use common::{paint_image, paint_image_zoomed, paint_shape_avatar};
+pub(crate) use common::{paint_image, paint_image_shaped, paint_image_zoomed, paint_shape_avatar};
 
 /// Filtering for photos drawn smaller than their file (covers, avatars):
 /// trilinear mipmaps, so a 1200 px cover at 48 dp does not alias.
@@ -52,6 +52,8 @@ pub mod search;
 pub use search::{Search, SearchBar, SearchBarOutput, SearchOutput};
 pub mod sheet;
 pub use sheet::{BottomSheet, Edge, SheetOutput, SideSheet, SupportingPane};
+pub mod modal_window;
+pub use modal_window::ModalWindow;
 pub mod fab;
 pub use fab::{Fab, FabColor, FabMenu, FabMenuItem, FabMenuOutput, FabSize};
 pub mod loading;

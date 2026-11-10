@@ -207,11 +207,6 @@ pub fn daylist_title(centre: Axes, part: DayPart, day: i64) -> String {
     format!("{} {noun} {}", agree(words[pick], gender), weekday_genitive(day))
 }
 
-/// «до 23:00»: when the part of the day ends.
-pub fn daylist_until(part: DayPart) -> String {
-    format!("до {:02}:00", part.end_hour())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,8 +288,6 @@ mod tests {
         let names: std::collections::HashSet<String> =
             (0..21).map(|d| daylist_title(quiet_dark_steady, DayPart::Evening, d * 7)).collect();
         assert!(names.len() >= 2, "{names:?}");
-        assert_eq!(daylist_until(DayPart::Evening), "до 23:00");
-        assert_eq!(daylist_until(DayPart::Night), "до 06:00");
     }
 
     /// 90 tracks by 45 artists, energy growing with the number; tracks 60..90

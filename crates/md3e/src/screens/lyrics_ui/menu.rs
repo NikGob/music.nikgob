@@ -1,6 +1,7 @@
 //! The control's own menu, in every look (docs/lyrics-control.md):
 //! «Автоматически», every source with how its text is timed (picking a
-//! source never needs a window), and «Настройки текста…» until it was
+//! source never needs a window), «Искать текст заново» (every source asked
+//! again, whatever was found before), and «Настройки текста…» until it was
 //! picked once. The window and page looks have just one row more, «Подсветка…»,
 //! that opens them: everything else about the text is there. The `menu`
 //! look does it all right here: how the shown text is seen («По словам»,
@@ -9,6 +10,9 @@
 //! whose song is unclear). While timing is made the control shows its
 //! progress and the menu offers «Отменить подсветку» (the window and the
 //! page their own «Отменить»); the result replaces the text by itself.
+//! In every look «Вернуть найденный» takes the user's own text away (to
+//! the Trash, with undo). The editor is not opened here: «Изменить текст…»
+//! is in the playing track's menu.
 
 use egui::{Id, Ui};
 use nikgob_view::{Command, LyricsAvail, LyricsSync, ViewState};
@@ -20,6 +24,8 @@ use crate::components::{Menu, MenuItem, anim};
 enum Row {
     Auto,
     Source(nikgob_view::LyricsSource),
+    /// «Искать текст заново».
+    Search,
     /// See the text so.
     Show(LyricsSync),
     /// Make timing so, deep or the normal way.
@@ -30,6 +36,8 @@ enum Row {
     Cancel,
     /// «Сохранить текст».
     Save,
+    /// «Вернуть найденный»: the user's own text goes.
+    Found,
     Settings,
 }
 
@@ -71,6 +79,13 @@ impl Rows {
     }
 }
 
+/// «Вернуть найденный», with the user's own text there.
+fn found_row(m: &mut Rows, state: &ViewState) {
+    if super::has_own(&state.lyrics) {
+        m.item(MenuItem::new("Вернуть найденный"), Row::Found);
+    }
+}
+
 /// The control and its menu, making timing as `look` does; true for
 /// «Настройки текста…».
 pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left: Option<f32>, out: &mut Vec<Command>) -> bool {
@@ -101,6 +116,9 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             }
             m.item(item, Row::Source(o.source));
         }
+        // Every source asked again (not while one still answers).
+        let searching = l.sources.iter().any(|o| o.state == LyricsAvail::Loading);
+        m.item(MenuItem::new("Искать текст заново").enabled(!searching), Row::Search);
         m.split();
     }
     let busy = super::busy(state).is_some();
@@ -116,6 +134,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         if l.savable && !busy {
             m.item(MenuItem::new(super::save_label(state)), Row::Save);
         }
+        found_row(&mut m, state);
         let actions = if busy { Vec::new() } else { super::actions(state) };
         // Each with its deep variant right after it (word timing).
         for a in &actions {
@@ -139,6 +158,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             (false, false) => "Подсветка…",
         };
         m.item(MenuItem::new(label), Row::Craft);
+        found_row(&mut m, state);
     }
     m.split();
     // Offered until it was picked once (the settings remember).
@@ -165,6 +185,12 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             }
             false
         }
+        Some(Row::Search) => {
+            if let Some(track) = l.track {
+                out.push(Command::SearchLyricsAgain(track));
+            }
+            false
+        }
         Some(Row::Show(sync)) => {
             super::show_as(state, *sync, out);
             false
@@ -187,6 +213,12 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         }
         Some(Row::Save) => {
             super::save(state, out);
+            false
+        }
+        Some(Row::Found) => {
+            if let Some(track) = l.track {
+                out.push(Command::DropOwnLyrics(track));
+            }
             false
         }
         Some(Row::Settings) => {

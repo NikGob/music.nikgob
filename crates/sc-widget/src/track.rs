@@ -10,7 +10,10 @@
 //! It starts once the widget's position moves (a DRM track takes ~5 s for
 //! its licence); an error of the widget, the host going away, or no start
 //! within [`START_TIMEOUT`] fails the item, and the runtime goes on to the
-//! track's other sources as before. The end is the widget's FINISH, or its
+//! track's other sources as before. Once playing, a widget that stops by
+//! itself (its position stands still for [`STUCK`], or it paused without
+//! being asked) is told to play once; still stuck [`STUCK`] later, the item
+//! fails the same way and the runtime goes on from the same position. The end is the widget's FINISH, or its
 //! position past the end. A FINISH well before the length the library
 //! knows is a preview, not the track: that fails it too (from there the
 //! runtime goes on on another source).
@@ -37,11 +40,77 @@ const SEEK_TIMEOUT: Duration = Duration::from_secs(4);
 const OVERRUN_MS: u64 = 3000;
 /// A FINISH this far before the known length is a preview's end.
 const PREVIEW_SLACK_MS: u64 = 10_000;
+/// A playing widget whose position stands still this long is stuck (the
+/// network, a hang); after it was told to play again, this long once more
+/// fails the track.
+pub const STUCK: Duration = Duration::from_secs(5);
+/// A pause the engine did not ask for counts as stuck after this long (not
+/// at once: a resume's PLAY may still be on its way).
+const OWN_PAUSE: Duration = Duration::from_secs(1);
+/// Looks further apart than this mean nobody watched (the engine did not
+/// read): the waits start over.
+const LOOK_GAP: Duration = Duration::from_secs(1);
+/// Stuck this close to the known length, it is the track's end (a widget
+/// that stopped without a FINISH).
+const END_SLACK_MS: u64 = 3000;
 
 /// Every failure says DRM: the runtime's toast then tells the user why the
 /// track goes on elsewhere.
 fn err(text: &str) -> PcmError {
     format!("SoundCloud player (DRM track): {text}").into()
+}
+
+/// What [`Stall::look`] makes of the widget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Fine,
+    /// It stopped by itself: tell it to play.
+    Nudge,
+    /// It was told to play and is still stuck.
+    Stuck,
+}
+
+/// Watches a playing load for the widget stopping by itself.
+#[derive(Debug, Default)]
+struct Stall {
+    /// The position the widget last reported.
+    last_ms: Option<u64>,
+    /// Since when it is stuck.
+    since: Option<Instant>,
+    /// When it was told to play again.
+    nudged: Option<Instant>,
+    /// The last look.
+    looked: Option<Instant>,
+}
+
+impl Stall {
+    /// One look: `reported` is the widget's last reported position of the
+    /// load (`None`: none, or another load), `status` what it does,
+    /// `paused_by_us` whether the engine paused it.
+    fn look(&mut self, reported: Option<u64>, status: Status, paused_by_us: bool, now: Instant) -> Verdict {
+        let gap = self.looked.is_some_and(|t| now.duration_since(t) > LOOK_GAP);
+        self.looked = Some(now);
+        let moved = reported.is_some() && reported != self.last_ms;
+        if reported.is_some() {
+            self.last_ms = reported;
+        }
+        if paused_by_us || gap || (moved && status == Status::Playing) {
+            // Paused by the engine, not watched, or it plays on.
+            self.since = None;
+            self.nudged = None;
+            return Verdict::Fine;
+        }
+        let since = *self.since.get_or_insert(now);
+        if let Some(at) = self.nudged {
+            return if now.duration_since(at) >= STUCK { Verdict::Stuck } else { Verdict::Fine };
+        }
+        let wait = if status == Status::Paused { OWN_PAUSE } else { STUCK };
+        if now.duration_since(since) >= wait {
+            self.nudged = Some(now);
+            return Verdict::Nudge;
+        }
+        Verdict::Fine
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,6 +134,7 @@ pub struct WidgetTrack {
     max_pos: u64,
     /// A seek asked for before the track started.
     pending_seek: Option<u64>,
+    stall: Stall,
 }
 
 impl WidgetTrack {
@@ -78,6 +148,7 @@ impl WidgetTrack {
             feed: Feed::new("sc widget"),
             max_pos: 0,
             pending_seek: None,
+            stall: Stall::default(),
         }
     }
 
@@ -89,6 +160,7 @@ impl WidgetTrack {
         // What was captured before is the track before ours (or silence).
         self.widget.clear_captured();
         self.phase = Phase::Playing { seq };
+        self.stall = Stall::default();
         let pos = view.position_ms(seq).unwrap_or(0);
         self.feed.restart(pos);
         self.max_pos = pos;
@@ -209,6 +281,7 @@ impl WidgetTrack {
                 if there || at.elapsed() > SEEK_TIMEOUT {
                     self.widget.clear_captured();
                     self.phase = Phase::Playing { seq };
+                    self.stall = Stall::default();
                     let from = if there { pos } else { target_ms };
                     self.feed.restart(from);
                     self.max_pos = from;
@@ -226,6 +299,23 @@ impl WidgetTrack {
         if self.ended(seq, &view)? {
             self.phase = Phase::Ended;
             return Ok(PcmRead::End);
+        }
+        let reported = view.position.filter(|_| view.seq == seq).map(|(ms, _)| ms);
+        match self.stall.look(reported, view.status, self.widget.paused_by_us(), Instant::now()) {
+            Verdict::Fine => {}
+            _ if self.known_ms(&view).is_some_and(|d| self.max_pos + END_SLACK_MS >= d) => {
+                log::info!("sc widget: load {seq} stopped at {} ms, at its end", self.max_pos);
+                self.phase = Phase::Ended;
+                return Ok(PcmRead::End);
+            }
+            Verdict::Nudge => {
+                log::info!("sc widget: load {seq} stopped by itself at {} ms ({:?}): play", self.max_pos, view.status);
+                self.widget.send(Command::Play { seq });
+            }
+            Verdict::Stuck => {
+                log::warn!("sc widget: load {seq} is stuck at {} ms", self.max_pos);
+                return Err(err("it stopped playing"));
+            }
         }
         let pos = view.position_ms(seq).unwrap_or(self.max_pos);
         Ok(self.feed.produce(pos, &*self.widget, out))
@@ -248,5 +338,96 @@ impl Drop for WidgetTrack {
         if self.counted {
             self.widget.playing(-1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clock() -> impl Fn(u64) -> Instant {
+        let t0 = Instant::now();
+        move |ms| t0 + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn a_widget_that_plays_on_is_fine() {
+        let at = clock();
+        let mut s = Stall::default();
+        for i in 0..100u64 {
+            assert_eq!(s.look(Some(i * 250), Status::Playing, false, at(i * 100)), Verdict::Fine);
+        }
+    }
+
+    #[test]
+    fn a_standing_position_is_nudged_once_then_fails() {
+        let at = clock();
+        let mut s = Stall::default();
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(0)), Verdict::Fine);
+        // The same position from here on, looked at every 100 ms: the wait
+        // starts at the first look that saw it standing.
+        for t in (100..5100).step_by(100) {
+            assert_eq!(s.look(Some(1000), Status::Playing, false, at(t)), Verdict::Fine, "{t}");
+        }
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(5100)), Verdict::Nudge);
+        for t in (5200..10_100).step_by(100) {
+            assert_eq!(s.look(Some(1000), Status::Playing, false, at(t)), Verdict::Fine, "{t}");
+        }
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(10_100)), Verdict::Stuck);
+    }
+
+    #[test]
+    fn moving_again_after_the_nudge_starts_over() {
+        let at = clock();
+        let mut s = Stall::default();
+        for t in (0..=5000).step_by(100) {
+            assert_eq!(s.look(Some(1000), Status::Playing, false, at(t)), Verdict::Fine, "{t}");
+        }
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(5100)), Verdict::Nudge);
+        assert_eq!(s.look(Some(1250), Status::Playing, false, at(5200)), Verdict::Fine);
+        // Stuck again later: another nudge first, not a failure.
+        for t in (5300..10_300).step_by(100) {
+            assert_eq!(s.look(Some(1250), Status::Playing, false, at(t)), Verdict::Fine, "{t}");
+        }
+        assert_eq!(s.look(Some(1250), Status::Playing, false, at(10_300)), Verdict::Nudge);
+    }
+
+    #[test]
+    fn its_own_pause_is_nudged_after_a_second_ours_never() {
+        let at = clock();
+        let mut s = Stall::default();
+        assert_eq!(s.look(Some(2000), Status::Playing, false, at(0)), Verdict::Fine);
+        // Paused by the engine: nothing, however long.
+        for t in (100..20_000).step_by(100) {
+            assert_eq!(s.look(Some(2000), Status::Paused, true, at(t)), Verdict::Fine, "{t}");
+        }
+        // Resumed: its PLAY may take a moment.
+        assert_eq!(s.look(Some(2000), Status::Paused, false, at(20_000)), Verdict::Fine);
+        assert_eq!(s.look(Some(2000), Status::Paused, false, at(20_500)), Verdict::Fine);
+        assert_eq!(s.look(Some(2000), Status::Paused, false, at(21_000)), Verdict::Nudge);
+        // It plays again.
+        assert_eq!(s.look(Some(2250), Status::Playing, false, at(21_100)), Verdict::Fine);
+    }
+
+    #[test]
+    fn a_gap_between_looks_starts_the_wait_over() {
+        let at = clock();
+        let mut s = Stall::default();
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(0)), Verdict::Fine);
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(800)), Verdict::Fine);
+        // Nobody looked for 10 s (the engine did not read).
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(10_800)), Verdict::Fine);
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(11_500)), Verdict::Fine);
+        assert_eq!(s.look(Some(1000), Status::Playing, false, at(12_400)), Verdict::Fine);
+    }
+
+    #[test]
+    fn no_report_while_playing_is_stuck_too() {
+        let at = clock();
+        let mut s = Stall::default();
+        for t in (0..5000).step_by(100) {
+            assert_eq!(s.look(None, Status::Playing, false, at(t)), Verdict::Fine, "{t}");
+        }
+        assert_eq!(s.look(None, Status::Playing, false, at(5000)), Verdict::Nudge);
     }
 }

@@ -1,12 +1,14 @@
-//! ListenBrainz: open data of its listeners' sessions, no key (the graph of
-//! similar music, docs/recs-graph.md).
+//! ListenBrainz: open data of its listeners' sessions (the graph of similar
+//! music, docs/recs-graph.md). The labs need no key; the popularity wants
+//! the user's own free token since autumn 2026 (it answers 401 without
+//! one), sent as `Authorization: Token …` with every request when set.
 //!
 //! * `labs.api.listenbrainz.org/similar-artists/json` and
 //!   `similar-recordings/json`: the artists and recordings heard in the
 //!   same sessions as an artist or recording (by MusicBrainz id), the most
 //!   first;
 //! * `api.listenbrainz.org/1/popularity/top-recordings-for-artist/<mbid>`:
-//!   an artist's recordings by how many listen to them.
+//!   an artist's recordings by how many listen to them (with the token).
 //!
 //! An id ListenBrainz does not know answers an empty list (some of its
 //! labs answer 400 for it).
@@ -33,11 +35,24 @@ pub struct Similar {
     pub score: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ListenBrainz {
     http: Http,
     labs: Url,
     api: Url,
+    /// The user's token, if any.
+    token: Option<String>,
+}
+
+// The token is a secret: never print it.
+impl std::fmt::Debug for ListenBrainz {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListenBrainz")
+            .field("labs", &self.labs.as_str())
+            .field("api", &self.api.as_str())
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]
@@ -77,19 +92,36 @@ fn unknown_is_empty<T>(r: Result<Vec<T>>) -> Result<Vec<T>> {
 
 impl ListenBrainz {
     pub fn new(http: Http) -> Self {
-        Self { http, labs: base_url(LABS_BASE).expect("valid"), api: base_url(API_BASE).expect("valid") }
+        Self { http, labs: base_url(LABS_BASE).expect("valid"), api: base_url(API_BASE).expect("valid"), token: None }
     }
 
     /// Points the client at other servers (tests).
     pub fn with_base_urls(http: Http, labs: &str, api: &str) -> Result<Self> {
-        Ok(Self { http, labs: base_url(labs)?, api: base_url(api)? })
+        Ok(Self { http, labs: base_url(labs)?, api: base_url(api)?, token: None })
+    }
+
+    /// The client with the user's token (none or empty: without one).
+    #[must_use]
+    pub fn with_token(mut self, token: Option<&str>) -> Self {
+        self.token = token.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
+        self
+    }
+
+    /// Whether a token is set: the popularity is asked only with one.
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, url: Url) -> Result<T> {
+        let auth = self.token.as_ref().map(|t| format!("Token {t}"));
+        self.http.get_json_auth(Service::ListenBrainz, url, auth.as_deref()).await
     }
 
     /// The artists heard with the artist `mbid`, the most first.
     pub async fn similar_artists(&self, mbid: &str) -> Result<Vec<Similar>> {
         mbid_ok(mbid)?;
         let url = build_url(&self.labs, "similar-artists/json", &[("artist_mbids", mbid), ("algorithm", ARTISTS_ALGORITHM)])?;
-        let raw: Result<Vec<RawArtist>> = self.http.get_json(Service::ListenBrainz, url).await;
+        let raw: Result<Vec<RawArtist>> = self.get(url).await;
         Ok(unknown_is_empty(raw)?
             .into_iter()
             .filter(|a| a.artist_mbid != mbid)
@@ -101,7 +133,7 @@ impl ListenBrainz {
     pub async fn similar_recordings(&self, mbid: &str) -> Result<Vec<Similar>> {
         mbid_ok(mbid)?;
         let url = build_url(&self.labs, "similar-recordings/json", &[("recording_mbids", mbid), ("algorithm", RECORDINGS_ALGORITHM)])?;
-        let raw: Result<Vec<RawRecording>> = self.http.get_json(Service::ListenBrainz, url).await;
+        let raw: Result<Vec<RawRecording>> = self.get(url).await;
         Ok(unknown_is_empty(raw)?.into_iter().filter(|r| r.recording_mbid != mbid).map(recording).collect())
     }
 
@@ -109,7 +141,7 @@ impl ListenBrainz {
     pub async fn top_recordings(&self, mbid: &str) -> Result<Vec<Similar>> {
         mbid_ok(mbid)?;
         let url = build_url(&self.api, &format!("popularity/top-recordings-for-artist/{mbid}"), &[])?;
-        let raw: Result<Vec<RawRecording>> = self.http.get_json(Service::ListenBrainz, url).await;
+        let raw: Result<Vec<RawRecording>> = self.get(url).await;
         Ok(unknown_is_empty(raw)?.into_iter().map(recording).collect())
     }
 }

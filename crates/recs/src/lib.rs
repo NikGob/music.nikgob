@@ -42,6 +42,7 @@ pub mod graph;
 pub mod index;
 pub mod junk;
 pub mod listening;
+pub mod mix_names;
 pub mod mixes;
 pub mod model;
 pub mod mood;
@@ -61,7 +62,7 @@ pub mod world_mixes;
 
 pub use analysis::{ANALYZED_WITH, AnalysisError, DIM, MAX_SECONDS, PcmAnalyzer, SAMPLE_RATE, Vector, analyze_pcm};
 pub use daily::DailyParams;
-pub use daylist::{Centre, DAYLIST_LEN, daylist_title, daylist_until};
+pub use daylist::{Centre, DAYLIST_LEN, daylist_title};
 pub use discover::{
     Discovery, DiscoveryFilter, DiscoverySeeds, NewRelease, SeedFinds, SeedRef, album_key, artist_key, rank_discoveries,
     song_key, stream_song_key,

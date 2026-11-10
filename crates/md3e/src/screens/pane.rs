@@ -586,6 +586,33 @@ pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Co
     super::lyrics::show(ui, state, bass, false, out) || configure
 }
 
+/// The track's info as Now Playing shows it: its headline with a close
+/// button, then [`info`]. True when the button was pressed.
+pub(super) fn info_sheet(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
+    let s = Theme::get(ui.ctx()).scheme;
+    let close_w = Size::S.height();
+    let row = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), close_w));
+    let mut tui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_max(row.min, egui::pos2(row.right() - close_w - 8.0, row.bottom())))
+            .layout(egui::Layout::left_to_right(egui::Align::Center))
+            .id_salt("info-sheet-title"),
+    );
+    common::label(&mut tui, "Источник и качество", TypeRole::TitleMedium, s.on_surface);
+    let mut cui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(egui::pos2(row.right() - close_w, row.top()), egui::vec2(close_w, close_w)))
+            .id_salt("info-sheet-close-slot"),
+    );
+    let closed = cui
+        .add(IconButton::new(Icon::Close).size(Size::S).tooltip("Закрыть (Esc)").id_salt("info-sheet-close"))
+        .clicked();
+    ui.advance_cursor_after_rect(row);
+    ui.add_space(12.0);
+    info(ui, state, out);
+    closed
+}
+
 pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let i = &state.info;

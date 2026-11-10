@@ -420,7 +420,7 @@ impl Library {
     /// then credits and artists, then duplicates, places and editions.
     /// A repair that fails is logged and the next one runs.
     pub fn repair_catalog(&self) {
-        let steps: [(&str, &dyn Fn() -> Result<usize>); 10] = [
+        let steps: [(&str, &dyn Fn() -> Result<usize>); 11] = [
             ("orphans", &|| self.drop_orphans()),
             ("combined credits", &|| self.split_combined_credits()),
             ("various artists", &|| self.unbind_various_artists().map(usize::from)),
@@ -431,6 +431,7 @@ impl Library {
             ("album editions", &|| self.fold_album_editions().map(usize::from)),
             ("tracklists", &|| self.reidentify_tracklists().map(usize::from)),
             ("downloaded wishes", &|| self.settle_downloaded_wishes()),
+            ("event contexts", &|| self.fix_event_contexts()),
         ];
         for (what, step) in steps {
             match step() {

@@ -434,7 +434,7 @@ fn the_users_order_and_switches_pick_among_equals() {
     wait_for(&r.rt, "the sources", |s| s.downloads.sources.iter().filter(|v| v.available).count() == 3);
     // Torrents, not listed, keep their default place: first.
     let order: Vec<SourceKey> = r.rt.state().downloads.sources.iter().map(|v| v.key).collect();
-    assert_eq!(order, [SourceKey::Torrents, SourceKey::Tidal, SourceKey::Qobuz, SourceKey::Khinsider, SourceKey::Soulseek]);
+    assert_eq!(order, [SourceKey::Torrents, SourceKey::Tidal, SourceKey::Qobuz, SourceKey::Khinsider, SourceKey::Bandcamp, SourceKey::Soulseek, SourceKey::Squidify, SourceKey::Archive]);
     r.rt.send(Command::Like(LikeTarget::Track(track), true));
     wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));
     assert_eq!((*tidal.fetched.lock().unwrap(), *qobuz.fetched.lock().unwrap()), (1, 0));
@@ -682,10 +682,20 @@ fn a_source_asking_to_wait_is_searched_again_after_the_wait() {
     wait_for(&r.rt, "its line", |s| s.downloads.history.iter().any(|j| j.subtitle.starts_with("Qobuz просит подождать")));
     assert_eq!(*qobuz.fetched.lock().unwrap(), 0);
 
-    // The wait is over: the scheduler asks Qobuz again (and only it).
+    // The wait is over: the scheduler asks Qobuz again (and only it). The
+    // source's own pause (a minute at least, by the clock) is ended the way
+    // the user ends it, Qobuz turned off and on; the item is made due by hand.
+    let set_qobuz = |on: bool| {
+        let mut prefs = r.rt.state().prefs.clone();
+        prefs.download_sources = vec![SourceSwitch { key: SourceKey::Tidal, on: true }, SourceSwitch { key: SourceKey::Qobuz, on }];
+        r.rt.send(Command::SetPrefs(Box::new(prefs)));
+        wait_for(&r.rt, "the switch", |s| s.prefs.source_on(SourceKey::Qobuz) == on);
+    };
+    set_qobuz(false);
     let mut due = item.clone();
     due.next_try_at = Some(nikgob_library::now_ms() - 1);
     lib.put_wishlist_item(&due).unwrap();
+    set_qobuz(true);
     let kh = FakeSource::new(SourceKey::Khinsider);
     r.rt.add_source(kh.clone());
     wait_until("the item done", || wish_status(&lib, track) == Some(WishlistStatus::Done));

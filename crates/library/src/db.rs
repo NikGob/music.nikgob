@@ -4,9 +4,10 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
-use std::time::Duration;
+use std::panic::Location;
+use std::time::{Duration, Instant};
 
-use nikgob_core::model::{DeviceId, UnixMs};
+use nikgob_core::model::{DeviceId, Event, UnixMs};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
 use crate::error::Result;
@@ -16,6 +17,10 @@ use crate::util::{meta_get, meta_set};
 /// Read-only connections kept for UI-adjacent reads.
 const READ_POOL_SIZE: usize = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// A read or a write that waits this long for its connection is logged…
+const SLOW_WAIT: Duration = Duration::from_millis(250);
+/// …and a write that keeps the writer this long.
+const SLOW_WRITE: Duration = Duration::from_millis(500);
 
 /// Cheap-to-clone handle to the library database.
 ///
@@ -28,8 +33,15 @@ pub struct Library {
     inner: Arc<Inner>,
 }
 
+/// The listening events of a stamp ([`crate::events::stamp`]).
+pub(crate) type KeptEvents = ((i64, i64, u64), Arc<Vec<Event>>);
+
 struct Inner {
     writer: Mutex<Connection>,
+    /// Where the last write that took the writer was asked from.
+    writing: Mutex<Option<&'static Location<'static>>>,
+    /// See [`Library::listening_events`].
+    listening: Mutex<Option<KeptEvents>>,
     readers: Option<ReadPool>,
     device: RwLock<DeviceId>,
     last_ts: AtomicI64,
@@ -171,6 +183,8 @@ impl Library {
         Ok(Self {
             inner: Arc::new(Inner {
                 writer: Mutex::new(writer),
+                writing: Mutex::new(None),
+                listening: Mutex::new(None),
                 readers,
                 device: RwLock::new(device),
                 last_ts: AtomicI64::new(0),
@@ -237,11 +251,27 @@ impl Library {
         self.read(migrations::user_version)
     }
 
+    /// The listening events kept from the last read, with their stamp.
+    pub(crate) fn listening_kept(&self) -> Option<KeptEvents> {
+        lock(&self.inner.listening).clone()
+    }
+
+    pub(crate) fn keep_listening(&self, stamp: (i64, i64, u64), events: &[Event]) {
+        *lock(&self.inner.listening) = Some((stamp, Arc::new(events.to_vec())));
+    }
+
     /// Runs `f` against a read-only snapshot.
+    #[track_caller]
     pub(crate) fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         match &self.inner.readers {
             Some(pool) => {
+                let me = Location::caller();
+                let asked = Instant::now();
                 let pooled = pool.checkout();
+                let waited = asked.elapsed();
+                if waited >= SLOW_WAIT {
+                    log::warn!("library: the read at {me} waited {} ms for a connection", waited.as_millis());
+                }
                 let conn = pooled.conn.as_ref().expect("checked-out connection");
                 let tx = conn.unchecked_transaction()?;
                 f(&tx)
@@ -261,12 +291,38 @@ impl Library {
     }
 
     /// Runs `f` inside one write transaction (committed if `f` succeeds).
+    /// There is one writer: a write that waits long behind another, or
+    /// holds the others up long itself, is logged with both places.
+    #[track_caller]
     pub(crate) fn write<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut conn = lock(&self.inner.writer);
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let out = f(&tx)?;
-        tx.commit()?;
-        Ok(out)
+        let me = Location::caller();
+        let asked = Instant::now();
+        let mut conn = match self.inner.writer.try_lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                let holder = *lock(&self.inner.writing);
+                let conn = lock(&self.inner.writer);
+                let waited = asked.elapsed();
+                if waited >= SLOW_WAIT {
+                    let by = holder.map_or_else(|| "another write".to_owned(), |h| format!("the write at {h}"));
+                    log::warn!("library: the write at {me} waited {} ms behind {by}", waited.as_millis());
+                }
+                conn
+            }
+        };
+        *lock(&self.inner.writing) = Some(me);
+        let began = Instant::now();
+        let out = (|| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let out = f(&tx)?;
+            tx.commit()?;
+            Ok(out)
+        })();
+        let held = began.elapsed();
+        if held >= SLOW_WRITE {
+            log::warn!("library: the write at {me} held the writer for {} ms", held.as_millis());
+        }
+        out
     }
 
     /// [`Self::write`] whose transaction is rolled back whatever `f` returns.

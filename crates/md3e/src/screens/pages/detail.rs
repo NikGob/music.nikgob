@@ -1,11 +1,12 @@
 //! Альбом / Исполнитель / Плейлист (md3e-player.md §3.3–3.4).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, MixKey, PlaylistCoverMode, PlaylistDetail, PlaylistId, ReleaseId,
-    ReleaseLine, ReleaseType, Route, TrackId, ViewState,
+    AlbumDate, ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, MixKey, PlaylistCoverMode, PlaylistDetail, PlaylistId,
+    ReleaseCard, ReleaseDay, ReleaseId, ReleaseLine, ReleaseType, Route, TrackId, ViewState,
 };
 
 use super::{PageState, widgets};
@@ -13,7 +14,7 @@ use crate::{
     Icon, Theme, TypeRole,
     components::{
         Button, ButtonRow, Dialog, DialogAction, FilterChip, FlexibleAppBar, IconButton, ListItem,
-        LoadingIndicator, Member, Menu, MenuItem, Size, SplitButton, Style, TextField, app_bar,
+        LoadingIndicator, Member, MenuItem, Size, SplitButton, Style, TextField, app_bar,
     },
     screens::common,
     tokens::shape,
@@ -100,6 +101,93 @@ fn cover_size(ui: &Ui) -> f32 {
     if ui.available_width() > 720.0 { 232.0 } else { 160.0 }
 }
 
+/// What the header of an album's page shows: the album, how its date is
+/// written, how many places it counts and how long it is, its label and
+/// formats.
+pub struct ReleaseHeader<'a> {
+    pub card: &'a ReleaseCard,
+    pub released: Option<ReleaseDay>,
+    pub album_date: AlbumDate,
+    /// The places it counts (its lines, else its tracks).
+    pub count: u32,
+    pub total: Duration,
+    /// The label and the formats.
+    pub facts: Vec<&'a str>,
+}
+
+/// What [`release_header`] gives back.
+pub struct HeaderOut {
+    /// An artist clicked.
+    pub nav: Option<Route>,
+    /// Where the type and date line is.
+    pub date: Rect,
+}
+
+/// The header of an album's page: its cover, «АЛЬБОМ · 2019» (as far as
+/// `album_date` asks and the date is known), the artists, the count and
+/// the length, the label and the formats. Drawn by the page and by the
+/// settings' stage without the page open.
+pub fn release_header(ui: &mut Ui, h: &ReleaseHeader<'_>) -> HeaderOut {
+    let s = Theme::get(ui.ctx()).scheme;
+    let c = h.card;
+    let n = h.count;
+    let lacking = n.saturating_sub(c.local_tracks);
+    let mut nav = None;
+    let mut date = Rect::NOTHING;
+    let size = cover_size(ui);
+    header(ui, size, c.cover.as_ref(), None, |ui| {
+        // «АЛЬБОМ · 2019», «АЛЬБОМ · МАЙ 2019» or «АЛЬБОМ · 17 МАЯ 2019»
+        // (Prefs::album_date), as far as the date is known.
+        let when = common::fmt_album_date(h.released, c.year, h.album_date).map(|w| w.to_uppercase());
+        let line = match when {
+            Some(w) => format!("{} · {w}", type_label(c.release_type)),
+            None => type_label(c.release_type).to_owned(),
+        };
+        date = ui.label(TypeRole::LabelLarge.style().rich(line, s.primary)).rect;
+        // How much is here, in the same line as its size: «стрим» (no
+        // files: it plays from a service), «14 треков · 13 скачано · 1
+        // нет» — counted over the lines below.
+        let mut line = format!("{} · {n} {}", c.artist, common::plural(u64::from(n), "трек", "трека", "треков"));
+        if c.local_tracks > 0 && lacking > 0 {
+            line = format!("{line} · {} скачано · {lacking} нет", c.local_tracks);
+        }
+        line = format!("{line} · {}", common::fmt_total(h.total));
+        if c.local_tracks == 0 {
+            line.push_str(" · стрим");
+        }
+        // Each artist of the album is a link to its page.
+        let (links, routes) = crate::screens::artist_links::library_spans(&c.artists, &line);
+        let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
+        if let Some(k) = crate::components::link_paragraph(ui, "rel-artists", &line, &links, format).clicked {
+            nav = routes.get(k).cloned();
+        }
+        // The label and the formats, quietly: nothing to press.
+        if !h.facts.is_empty() {
+            ui.label(TypeRole::BodyMedium.style().rich(h.facts.join(" · "), s.on_surface_variant));
+        }
+    });
+    HeaderOut { nav, date }
+}
+
+/// The top of an album's page without the page: the large bar with its
+/// title (never collapsed) over [`release_header`]. For the settings'
+/// stage.
+pub fn release_top(ui: &mut Ui, title: &str, h: &ReleaseHeader<'_>) -> HeaderOut {
+    let left = ui.cursor().left();
+    let top = ui.cursor().top();
+    let width = ui.available_width();
+    ui.add_space(app_bar::LARGE_HEIGHT);
+    let drawn = release_header(ui, h);
+    let m = app_bar::flexible_metrics(0.0, false, true);
+    let rect = Rect::from_min_size(pos2(left, top), vec2(width, m.height));
+    let mut bar_ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("detail-bar-ui"));
+    FlexibleAppBar::new(title)
+        .leading(Icon::ArrowBack, "Назад (Esc)")
+        .id_salt("detail-bar")
+        .show(&mut bar_ui, 0.0, |_| {});
+    drawn
+}
+
 pub fn release(
     ui: &mut Ui,
     id: ReleaseId,
@@ -107,7 +195,6 @@ pub fn release(
     pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
     let Some(r) = state.release.as_ref().filter(|r| r.card.id == id) else {
         return with_bar(ui, "", pages, |ui, _| {
             ui.add(LoadingIndicator::new());
@@ -131,36 +218,15 @@ pub fn release(
     let n = if r.lines.is_empty() { r.tracks.len() } else { r.lines.len() } as u32;
     let lacking = n.saturating_sub(c.local_tracks);
     with_bar(ui, &c.title, pages, |ui, pages| {
-        let mut nav = None;
-        let size = cover_size(ui);
-        header(ui, size, c.cover.as_ref(), None, |ui| {
-            let line = match c.year {
-                Some(y) => format!("{} · {y}", type_label(c.release_type)),
-                None => type_label(c.release_type).to_owned(),
-            };
-            ui.label(TypeRole::LabelLarge.style().rich(line, s.primary));
-            // How much is here, in the same line as its size: «стрим» (no
-            // files: it plays from a service), «14 треков · 13 скачано · 1
-            // нет» — counted over the lines below.
-            let mut line = format!("{} · {n} {}", c.artist, common::plural(u64::from(n), "трек", "трека", "треков"));
-            if c.local_tracks > 0 && lacking > 0 {
-                line = format!("{line} · {} скачано · {lacking} нет", c.local_tracks);
-            }
-            line = format!("{line} · {}", common::fmt_total(r.total_duration));
-            if c.local_tracks == 0 {
-                line.push_str(" · стрим");
-            }
-            // Each artist of the album is a link to its page.
-            let (links, routes) = crate::screens::artist_links::library_spans(&c.artists, &line);
-            let format = TypeRole::TitleMedium.style().text_format(s.on_surface_variant);
-            if let Some(k) = crate::components::link_paragraph(ui, "rel-artists", &line, &links, format).clicked {
-                nav = routes.get(k).cloned();
-            }
-            // The formats, quietly: nothing to press.
-            if let Some(q) = &r.quality {
-                ui.label(TypeRole::BodyMedium.style().rich(q, s.on_surface_variant));
-            }
-        });
+        let head = ReleaseHeader {
+            card: c,
+            released: r.released,
+            album_date: state.prefs.album_date,
+            count: n,
+            total: r.total_duration,
+            facts: r.label.iter().chain(&r.quality).map(String::as_str).collect(),
+        };
+        let mut nav = release_header(ui, &head).nav;
         ui.add_space(16.0);
 
         // Actions: standard button group, "Слушать" is the only filled button.
@@ -238,28 +304,20 @@ pub fn release(
         }
         let ids: Vec<_> = r.tracks.iter().map(|t| t.id).collect();
         let more = &resp[3 + off];
-        let picked = Menu::new("rel-more")
-            .item(MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic))
-            .item(MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd))
-            .item(MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!c.artists.linked().is_empty()))
-            .item(MenuItem::new("Поделиться").icon(Icon::Share))
-            .divider()
-            .item(MenuItem::new("Удалить альбом").icon(Icon::Delete))
-            .item(MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete))
-            .attach(more);
-        match picked {
-            Some(0) => out.push(Command::PlayReleaseNext(id)),
-            Some(1) => out.push(Command::EnqueueRelease(id)),
-            Some(2) => {
+        // The same actions as the album's right-click menu
+        // ([`widgets::release_rows`]), less the buttons left of it.
+        let (menu, acts) = widgets::menu_of("rel-more", widgets::release_rows(c, true));
+        match menu.attach(more).and_then(|i| acts.get(i).copied()) {
+            Some(widgets::ReleaseAct::Playlist) => {
                 pages.pending_add = Some(ids.clone());
                 pages.pending_add_anchor = Some(more.rect);
             }
-            Some(3) => nav = crate::screens::artist_links::go_to(ui.ctx(), crate::screens::artist_links::library(&c.artists)),
-            Some(4) => out.push(Command::Share(nikgob_view::ShareTarget::Release(id))),
-            Some(5) => super::request_release_delete(ui.ctx(), id, &c.title, false),
-            Some(6) => super::request_release_delete(ui.ctx(), id, &c.title, true),
-            _ => {}
+            Some(a) => {
+                if let Some(r) = widgets::release_apply(ui.ctx(), a, c, out) {
+                    nav = Some(r);
+                }
+            }
+            None => {}
         }
         ui.add_space(16.0);
         // «Не скачано · 1»: only the lines without a file (the album has
@@ -361,18 +419,11 @@ pub fn artist(
         if r[3].clicked() {
             out.push(Command::Like(LikeTarget::Artist(id), !a.liked));
         }
-        // "В очередь всё" queues what the artist page knows: the popular tracks.
-        let picked = Menu::new("artist-more")
-            .item(MenuItem::new("В очередь всё").icon(Icon::QueueMusic).enabled(!a.top_tracks.is_empty()))
-            .item(MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite))
-            .divider()
-            .item(super::ban_item(Some(id), &state.dislikes))
-            .attach(&r[4]);
-        match picked {
-            Some(0) => out.push(Command::EnqueueArtist(a.card.id)),
-            Some(1) => out.push(Command::Like(LikeTarget::Artist(id), !a.liked)),
-            Some(2) => out.push(super::ban_command(id, &state.dislikes)),
-            _ => {}
+        // The same actions as the artist's right-click menu
+        // ([`widgets::artist_rows`]), less the buttons left of it.
+        let (menu, acts) = widgets::menu_of("artist-more", widgets::artist_rows(&a.card, true, &state.dislikes));
+        if let Some(act) = menu.attach(&r[4]).and_then(|i| acts.get(i).copied()) {
+            widgets::artist_apply(act, &a.card, &state.dislikes, out);
         }
 
         ui.add_space(widgets::SECTION_GAP);
@@ -693,10 +744,7 @@ pub fn playlist(
             ));
             if let Some(l) = &p.sync {
                 ui.add_space(8.0);
-                let mode = super::settings_help::SettingId::PlaylistSync.choices()
-                    [super::settings_help::sync_index(l.mode)]
-                .label
-                .to_lowercase();
+                let mode = widgets::sync_state_label(l.mode);
                 // Which service it follows and how, in words (the modes are
                 // in ⋮), then a small status: running, failed, or when.
                 ui.horizontal(|ui| {
@@ -728,8 +776,8 @@ pub fn playlist(
         ];
         if !liked {
             members.push(Button::new("Добавить треки").icon(Icon::Add).size(Size::M).style(Style::Outlined).into());
-            members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
         }
+        members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
         let row = ButtonRow::new("pl-actions", Size::M).show(ui, members);
         let r = &row.responses;
         if r[0].clicked() {
@@ -738,52 +786,30 @@ pub fn playlist(
         if r[1].clicked() {
             out.push(Command::PlayPlaylist { id, start: None, shuffle: true });
         }
-        if !liked {
-            if r[2].clicked() {
-                put(ui.ctx(), add_key, AddState { open: true, ..get(ui.ctx(), add_key) });
-            }
-            let mut menu = Menu::new("pl-more")
-                .item(MenuItem::new("Изменить…").icon(Icon::Edit))
-                .item(MenuItem::new("В конец очереди").icon(Icon::QueueMusic));
-            // A playlist that follows one of a service: how it syncs (a
-            // greyed title, then the three modes).
-            let sync_n = if let Some(l) = &p.sync {
-                menu = menu
-                    .divider()
-                    .item(MenuItem::new(format!("Синхронизация с {}", l.remote.service.display_name())).enabled(false));
-                for (i, c) in super::settings_help::SettingId::PlaylistSync.choices().iter().enumerate() {
-                    let on = super::settings_help::sync_index(l.mode) == i;
-                    menu = menu.item(MenuItem::new(c.label).icon(Icon::Sync).selected(on));
-                }
-                nikgob_view::PlaylistSyncMode::ALL.len() + 1
-            } else {
-                // Not linked: send it to a service (two-way; it is made there).
-                menu = menu.item(MenuItem::new("Связать с сервисом…").icon(Icon::Sync));
-                0
+        if !liked && r[2].clicked() {
+            put(ui.ctx(), add_key, AddState { open: true, ..get(ui.ctx(), add_key) });
+        }
+        // The same actions as the playlist's right-click menu
+        // ([`widgets::playlist_rows`]), less «Слушать» and «Перемешать»
+        // (the buttons left of it).
+        {
+            let more = &r[r.len() - 1];
+            let of = widgets::PlaylistMenuOf {
+                on_page: true,
+                editable: !liked,
+                sync: p.sync.as_ref().map(|l| (l.remote.service.display_name(), l.mode)),
+                can_link: !liked && p.sync.is_none(),
             };
-            let link_at = (p.sync.is_none()).then_some(2);
-            let picked = menu
-                .divider()
-                .item(MenuItem::new("Удалить плейлист").icon(Icon::Delete))
-                .attach(&r[3]);
-            match picked {
-                Some(0) => put(
+            let (menu, acts) = widgets::menu_of("pl-more", widgets::playlist_rows(of));
+            match menu.attach(more).and_then(|i| acts.get(i).copied()) {
+                Some(widgets::PlaylistAct::Edit) => put(
                     ui.ctx(),
                     edit_key,
                     EditState { open: true, shown: false, name: p.card.name.clone(), cover: None, mode: None },
                 ),
-                Some(1) => out.push(Command::Enqueue(p.tracks.iter().map(|t| t.id).collect())),
-                Some(i) if link_at == Some(i) => out.push(Command::SetPlaylistSync {
-                    playlist: id,
-                    mode: nikgob_view::PlaylistSyncMode::TwoWay,
-                }),
-                Some(2) if sync_n > 0 => {}
-                Some(i) if i >= 3 && i < 2 + sync_n => out.push(Command::SetPlaylistSync {
-                    playlist: id,
-                    mode: nikgob_view::PlaylistSyncMode::ALL[i - 3],
-                }),
-                Some(_) => pages.confirm_delete = Some(id),
-                _ => {}
+                Some(widgets::PlaylistAct::Delete) => pages.confirm_delete = Some(id),
+                Some(a) => out.extend(widgets::playlist_command(a, id)),
+                None => {}
             }
         }
         ui.add_space(16.0);
@@ -939,7 +965,7 @@ fn mix_gone(ui: &mut Ui, key: MixKey, world: Option<&str>, state: &ViewState, pa
         let (body, action, to) = match (world, hidden) {
             (Some(w), _) => ("На странице мира теперь другие миксы.", "К миру", Route::World(w.to_owned())),
             (None, Some(_)) => (
-                "Ты попросил его не предлагать. Вернуть можно в Настройках → «Рекомендации».",
+                "Ты попросил его не предлагать. Вернуть можно в Настройках → «Вид» → «Главная».",
                 "На главную",
                 Route::Home,
             ),

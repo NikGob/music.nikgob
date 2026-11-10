@@ -53,6 +53,7 @@ use crate::Worker;
 use crate::import::Internal;
 
 pub(crate) use cold::{IMPORT_DEVICE, STREAM_JOB, plural};
+pub(crate) use export::music_video_title;
 pub(crate) use replace::shown_title;
 pub(crate) use wishlist::{WISH_ID, upgrade_job_words};
 pub(crate) use schedule::wake_jitter;
@@ -137,6 +138,9 @@ pub(crate) enum Msg {
     },
     Resolved {
         track: TrackId,
+        /// Where it was looked up: YouTube Music, or Spotify while
+        /// YouTube Music is off.
+        via: Service,
         found: resolve::Lookup,
         /// The full Deezer track asked for its ISRC on the way.
         filled: Option<Box<StreamTrack>>,
@@ -240,10 +244,13 @@ pub(crate) struct Streams {
     last_soloist: Option<nikgob_core::streaming::SoloistStatus>,
     pub(crate) search: search::SearchState,
     page_seq: u64,
-    /// YouTube lookups running / failed recently (unix ms), by track.
+    /// Copy lookups running / failed recently (unix ms), by track and
+    /// the service asked.
     resolving: HashSet<TrackId>,
+    /// Where each running lookup asks (YouTube Music or Spotify).
+    resolve_via: HashMap<TrackId, Service>,
     resolve_limit: resolve::ResolveLimit,
-    misses: HashMap<TrackId, i64>,
+    misses: HashMap<(TrackId, Service), i64>,
     /// YouTube videos that did not play, by video id (not by track: the
     /// same song has other copies).
     refused: HashMap<String, Instant>,
@@ -302,6 +309,7 @@ impl Streams {
             search: search::SearchState::default(),
             page_seq: 0,
             resolving: HashSet::new(),
+            resolve_via: HashMap::new(),
             resolve_limit: resolve::ResolveLimit::default(),
             misses: HashMap::new(),
             refused: HashMap::new(),
@@ -538,12 +546,18 @@ impl Worker {
     /// the cache size once a minute.
     pub(crate) fn stream_tick(&mut self) {
         let idle = self.streams_idle();
+        // Unattended passes wait while a game is in front.
+        let quiet = crate::quiet::busy();
         self.sync_tick(!idle);
         if !idle {
-            self.tracklist_tick();
-            self.enrich_tick();
+            if !quiet {
+                self.tracklist_tick();
+                self.enrich_tick();
+            }
             self.likes_tick();
-            self.clips_tick();
+            if !quiet {
+                self.clips_tick();
+            }
         }
         self.stream_analysis_tick();
         self.publish_accounts();
@@ -552,7 +566,9 @@ impl Worker {
             self.streaming.last_wish_tick = Some(Instant::now());
             self.publish_stream_cache();
             self.wish_tick();
-            self.upgrade_tick();
+            if !quiet {
+                self.upgrade_tick();
+            }
         }
     }
 
@@ -625,6 +641,8 @@ impl Worker {
                 let ids = self.seen_tracks(&tracks);
                 self.command(Command::Enqueue(ids));
             }
+            Command::PlayStreamAlbumNext(album) => self.with_album(album, pages::Then::Next),
+            Command::EnqueueStreamAlbum(album) => self.with_album(album, pages::Then::Enqueue),
             Command::LikeStream { track, on } => self.like_stream(&track, on),
             Command::LikeStreamAlbum { album, on } => self.with_album(album, pages::Then::Like(on)),
             Command::DownloadStream { tracks } => self.download_stream(&tracks),
@@ -638,6 +656,9 @@ impl Worker {
                     self.command(Command::AddToPlaylist(playlist, ids));
                 }
             }
+            Command::AddStreamAlbumToPlaylist(playlist, album) => {
+                self.with_album(album, pages::Then::AddToPlaylist(playlist));
+            }
             Command::Share(target) => self.share(target),
             Command::LoadWishlist => self.publish_wishlist(),
             Command::WishlistDownload(select) => self.wish_download(&select),
@@ -650,6 +671,7 @@ impl Worker {
             Command::ImportFromService(service) => self.import_from_service(service),
             Command::ImportExportFiles(path) => self.import_export_files(path),
             Command::WindowState { visible, focused } => self.window_state(visible, focused),
+            Command::PlayFromYoutube => self.play_from_youtube(),
             Command::ClearStreamCache => {
                 for s in &self.streams {
                     s.clear_cache();
@@ -680,7 +702,7 @@ impl Worker {
             } => self.stream_searched(seq, service, result, partial),
             Msg::SearchRetry { seq, service } => self.search_retry(seq, service),
             Msg::Loaded { key, result } => self.loaded(key, result),
-            Msg::Resolved { track, found, filled } => self.resolved(track, found, filled),
+            Msg::Resolved { track, via, found, filled } => self.resolved(track, via, found, filled),
             Msg::IsrcFilled(track, full) => self.isrc_filled(track, &full),
             Msg::SearchSettle { seq } => self.search_settle(seq),
             Msg::ResolveRetry(track) => self.resolve_retry(track),

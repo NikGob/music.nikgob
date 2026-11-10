@@ -21,7 +21,18 @@
 //! decoded to ([`web_seed`]).
 //!
 //! A cover inside black bars (a video's picture of a song uploaded with its
-//! art) is decoded without them (`nikgob_core::cover_frame`).
+//! art) is decoded without them (`nikgob_core::cover_frame`). A video's
+//! thumbnail (`i.ytimg.com`) that is drawn is remembered for the app
+//! ([`take_thumbnails`]) so it can look up the song's real art; once found
+//! ([`set_real_covers`]) the art is drawn in the thumbnail's place.
+//!
+//! A cover file can be rewritten while its sizes are loaded (an import
+//! replaces an album's `cover.jpg` with a larger one). Every size remembers
+//! the modification time and length its file had when it was read; a size
+//! read from the file as it is now forgets the sizes read from it before,
+//! and [`refresh`] (after a library change, when the window comes back)
+//! forgets every loaded size whose file changed. Both take effect at the end
+//! of a pass, and a forgotten size that is still drawn is read again.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -65,6 +76,25 @@ struct Job {
     tier: Option<u32>,
 }
 
+/// What a cover file was when a size of it was read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+fn file_stamp(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(Stamp { modified: meta.modified().ok(), len: meta.len() })
+}
+
+/// A [`refresh`] checking files, and whether another was asked meanwhile.
+#[derive(Default)]
+struct Check {
+    running: bool,
+    again: bool,
+}
+
 #[derive(Default)]
 struct Jobs {
     queue: Vec<Job>,
@@ -102,6 +132,18 @@ struct Shared {
     web_sizer: Mutex<Option<WebSizer>>,
     jobs: Mutex<Jobs>,
     lru: Mutex<Lru>,
+    /// The stamp of each loaded size of a cover file: by the file's URI,
+    /// then by the size's URI.
+    stamps: Mutex<HashMap<String, HashMap<String, Stamp>>>,
+    /// Sizes read from a file that changed since; forgotten at the end of
+    /// the pass.
+    stale: Mutex<Vec<String>>,
+    check: Mutex<Check>,
+    /// A video thumbnail's url → the real art found for it.
+    real: Mutex<Arc<HashMap<String, String>>>,
+    /// Video thumbnails drawn so far with the pass each was last drawn in,
+    /// and those not handed to the app yet.
+    thumbnails: Mutex<(HashMap<String, u64>, Vec<String>)>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -139,6 +181,11 @@ pub fn install(ctx: &Context) {
             pinned: HashSet::new(),
             budget: DEFAULT_BUDGET,
         }),
+        stamps: Mutex::default(),
+        stale: Mutex::default(),
+        check: Mutex::default(),
+        real: Mutex::default(),
+        thumbnails: Mutex::default(),
     });
     ctx.add_image_loader(Arc::new(CoverLoader(Arc::clone(&shared))));
     ctx.data_mut(|d| d.insert_temp(data_id(), Covers(Arc::clone(&shared))));
@@ -173,11 +220,60 @@ pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
     }
 }
 
+/// Looks at the files of every loaded cover again (on a thread) and forgets
+/// the sizes of those that changed since they were read, so they are read
+/// anew where they are drawn. Call it when cover files may have been
+/// rewritten: after an import or a retag, when the window comes back.
+pub fn refresh(ctx: &Context) {
+    let Some(shared) = shared(ctx) else { return };
+    if lock(&shared.stamps).is_empty() {
+        return;
+    }
+    {
+        let mut check = lock(&shared.check);
+        if check.running {
+            check.again = true;
+            return;
+        }
+        check.running = true;
+    }
+    let (me, ctx) = (Arc::clone(&shared), ctx.clone());
+    let spawned = std::thread::Builder::new()
+        .name("md3e-covers-check".into())
+        .spawn(move || me.check_files(&ctx));
+    if spawned.is_err() {
+        lock(&shared.check).running = false;
+    }
+}
+
 /// The colour-scheme seed of the web cover at `url`, once a size of it has
 /// been decoded; `None` before, or for a cover too grey for one.
 pub fn web_seed(ctx: &Context, url: &str) -> Option<u32> {
     let shared = shared(ctx)?;
-    lock(&shared.web_seeds).get(url).copied().flatten()
+    let url = shared.real_of(url).unwrap_or_else(|| url.to_owned());
+    lock(&shared.web_seeds).get(&url).copied().flatten()
+}
+
+/// The real art found for video thumbnails (thumbnail url → art url): drawn
+/// in their place from now on.
+pub fn set_real_covers(ctx: &Context, real: &Arc<HashMap<String, String>>) {
+    if let Some(s) = shared(ctx) {
+        let mut held = lock(&s.real);
+        if !Arc::ptr_eq(&held, real) {
+            *held = Arc::clone(real);
+        }
+    }
+}
+
+/// The video thumbnails that came on screen since the last call (once
+/// while they stay drawn): the app looks up their real art.
+pub fn take_thumbnails(ctx: &Context) -> Vec<String> {
+    shared(ctx).map(|s| std::mem::take(&mut lock(&s.thumbnails).1)).unwrap_or_default()
+}
+
+/// Whether `url` is a video's thumbnail rather than album art.
+fn is_thumbnail(url: &str) -> bool {
+    url.contains("i.ytimg.com/")
 }
 
 fn load(ctx: &Context, uri: &str) -> Result<Option<SizedTexture>, LoadError> {
@@ -216,9 +312,22 @@ pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedT
         Some(s) if parse(uri).is_some() => s,
         _ => return load(ctx, uri).ok().flatten(),
     };
+    // A video's thumbnail: its real art once found (the thumbnail while
+    // the art loads, so the swap does not blink), else it is asked for.
+    if is_web(uri) && is_thumbnail(uri) {
+        match shared.real_of(uri) {
+            Some(real) => return sized_texture(ctx, &shared, &real, size, zoom).or_else(|| sized_texture(ctx, &shared, uri, size, zoom)),
+            None => shared.thumbnail_drawn(uri, ctx.cumulative_pass_nr()),
+        }
+    }
+    sized_texture(ctx, &shared, uri, size, zoom)
+}
+
+/// [`texture`] of a cover the loader handles.
+fn sized_texture(ctx: &Context, shared: &Shared, uri: &str, size: Vec2, zoom: f32) -> Option<SizedTexture> {
     let px = size.max_elem() * ctx.pixels_per_point() * zoom.max(1.0);
     let tier = TIERS.iter().find(|t| px <= **t as f32).copied();
-    let (wanted, origin) = sized(&shared, uri, tier);
+    let (wanted, origin) = sized(shared, uri, tier);
     let pass = ctx.cumulative_pass_nr();
     match load(ctx, &wanted) {
         Ok(Some(texture)) => {
@@ -380,6 +489,21 @@ fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<image::DynamicImage> {
 }
 
 impl Shared {
+    /// The real art found for the web cover `url`, if it is a thumbnail.
+    fn real_of(&self, url: &str) -> Option<String> {
+        lock(&self.real).get(url).cloned()
+    }
+
+    /// Remembers the thumbnail `url` drawn in `pass`: handed to the app when
+    /// it was not drawn in the pass before (it came on screen).
+    fn thumbnail_drawn(&self, url: &str, pass: u64) {
+        let mut t = lock(&self.thumbnails);
+        let before = t.0.insert(url.to_owned(), pass);
+        if before.is_none_or(|p| p + 1 < pass) {
+            t.1.push(url.to_owned());
+        }
+    }
+
     fn used(&self, uri: &str, origin: &str, tier: Option<u32>, pass: u64, bytes: usize) {
         let mut lru = lock(&self.lru);
         let u = lru
@@ -433,6 +557,12 @@ impl Shared {
             if !matches!(lock(&self.slots).get(&job.uri), Some(Slot::Pending)) {
                 continue;
             }
+            // Before reading: a file rewritten in between is seen as changed
+            // later and read again, never the other way round.
+            let stamp = match &job.source {
+                Source::File(path) => file_stamp(path),
+                Source::Web(..) => None,
+            };
             let slot = match decode(&job.source, job.tier) {
                 Ok(img) => Slot::Ready(Arc::new(img)),
                 Err(e) => Slot::Failed(e),
@@ -449,10 +579,80 @@ impl Shared {
             }
             let mut slots = lock(&self.slots);
             if let Some(s @ Slot::Pending) = slots.get_mut(&job.uri) {
+                // Stamped before it can be drawn, so a refresh from then on
+                // sees it.
+                if let (Source::File(path), Some(stamp)) = (&job.source, stamp) {
+                    self.stamped(&job.uri, path, stamp);
+                }
                 *s = slot;
                 drop(slots);
                 ctx.request_repaint();
             }
+        }
+    }
+
+    /// Records the stamp a size of a file was read with. If another size was
+    /// read from a different file, the file changed in between: the sizes
+    /// not read from it as it is now become stale.
+    fn stamped(&self, uri: &str, path: &Path, stamp: Stamp) {
+        let origin = base(uri);
+        let mut stamps = lock(&self.stamps);
+        let sizes = stamps.entry(origin.to_owned()).or_default();
+        sizes.insert(uri.to_owned(), stamp);
+        if sizes.values().all(|s| *s == stamp) {
+            return;
+        }
+        let now = file_stamp(path);
+        let stale: Vec<String> = sizes.iter().filter(|(_, s)| Some(**s) != now).map(|(u, _)| u.clone()).collect();
+        for u in &stale {
+            sizes.remove(u);
+        }
+        if sizes.is_empty() {
+            stamps.remove(origin);
+        }
+        drop(stamps);
+        lock(&self.stale).extend(stale);
+    }
+
+    /// [`refresh`]'s thread: stats every loaded file once a round, again
+    /// while more refreshes were asked meanwhile.
+    fn check_files(&self, ctx: &Context) {
+        loop {
+            let files: Vec<(String, Vec<(String, Stamp)>)> = lock(&self.stamps)
+                .iter()
+                .map(|(origin, sizes)| (origin.clone(), sizes.iter().map(|(u, s)| (u.clone(), *s)).collect()))
+                .collect();
+            let mut changed = Vec::new();
+            for (origin, sizes) in files {
+                let Some((Parsed::File(path), _)) = parse(&origin) else { continue };
+                let now = file_stamp(&path);
+                changed.extend(sizes.into_iter().filter(|(_, s)| Some(*s) != now).map(|(u, s)| (origin.clone(), u, s)));
+            }
+            let mut stale = Vec::new();
+            if !changed.is_empty() {
+                let mut stamps = lock(&self.stamps);
+                for (origin, uri, stamp) in changed {
+                    let Some(sizes) = stamps.get_mut(&origin) else { continue };
+                    // A size read again meanwhile is already the new file.
+                    if sizes.get(&uri) == Some(&stamp) {
+                        sizes.remove(&uri);
+                        stale.push(uri);
+                    }
+                    if sizes.is_empty() {
+                        stamps.remove(&origin);
+                    }
+                }
+            }
+            if !stale.is_empty() {
+                lock(&self.stale).extend(stale);
+                ctx.request_repaint();
+            }
+            let mut check = lock(&self.check);
+            if !check.again {
+                check.running = false;
+                return;
+            }
+            check.again = false;
         }
     }
 
@@ -472,9 +672,14 @@ impl Shared {
     fn evict(&self, ctx: &Context) {
         let pass = ctx.cumulative_pass_nr();
         let shown = |u: &Use| u.last + 1 >= pass;
-        let mut forget = Vec::new();
+        // Read from a file that changed: forgotten even on screen, so the
+        // next pass reads it again.
+        let mut forget = std::mem::take(&mut *lock(&self.stale));
         {
             let mut lru = lock(&self.lru);
+            for uri in &forget {
+                lru.used.remove(uri);
+            }
             let Lru { used, pinned, budget } = &mut *lru;
             used.retain(|uri, u| {
                 let keep = u.bytes > 0 || shown(u);
@@ -573,10 +778,19 @@ impl ImageLoader for CoverLoader {
 
     fn forget(&self, uri: &str) {
         lock(&self.0.slots).remove(uri);
+        let origin = base(uri);
+        let mut stamps = lock(&self.0.stamps);
+        if let Some(sizes) = stamps.get_mut(origin) {
+            sizes.remove(uri);
+            if sizes.is_empty() {
+                stamps.remove(origin);
+            }
+        }
     }
 
     fn forget_all(&self) {
         lock(&self.0.slots).clear();
+        lock(&self.0.stamps).clear();
     }
 
     fn byte_size(&self) -> usize {
@@ -607,6 +821,28 @@ mod tests {
         let ctx = Context::default();
         install(&ctx);
         ctx
+    }
+
+    /// A thumbnail is handed to the app when it comes on screen, not at
+    /// every pass it stays drawn; the art found is drawn in its place.
+    #[test]
+    fn a_thumbnail_on_screen_is_handed_over_and_its_real_art_taken() {
+        let ctx = ctx();
+        let s = shared(&ctx).unwrap();
+        let thumb = "https://i.ytimg.com/vi/a/hqdefault.jpg";
+        s.thumbnail_drawn(thumb, 1);
+        s.thumbnail_drawn(thumb, 1);
+        s.thumbnail_drawn(thumb, 2);
+        assert_eq!(take_thumbnails(&ctx), vec![thumb.to_owned()]);
+        assert!(take_thumbnails(&ctx).is_empty());
+        // Scrolled away and back.
+        s.thumbnail_drawn(thumb, 9);
+        assert_eq!(take_thumbnails(&ctx), vec![thumb.to_owned()]);
+        assert_eq!(s.real_of(thumb), None);
+        let real = Arc::new(HashMap::from([(thumb.to_owned(), "https://x.invalid/art.jpg".to_owned())]));
+        set_real_covers(&ctx, &real);
+        assert_eq!(s.real_of(thumb).as_deref(), Some("https://x.invalid/art.jpg"));
+        assert!(is_thumbnail(thumb) && !is_thumbnail("https://x.invalid/art.jpg"));
     }
 
     #[test]
@@ -779,6 +1015,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("the next cover was not loaded ahead");
+    }
+
+    /// The path of a cover URI made by [`covers`].
+    fn path_of(uri: &str) -> PathBuf {
+        match parse(uri) {
+            Some((Parsed::File(p), _)) => p,
+            _ => panic!("not a file cover: {uri}"),
+        }
+    }
+
+    /// Passes drawing `uri` into `size` points until it is drawn at `want`.
+    fn settles_at(ctx: &Context, uri: &str, size: f32, want: Vec2) -> bool {
+        let uris = [uri.to_owned()];
+        for _ in 0..5000 {
+            if pass(ctx, &uris, size)[0].is_some_and(|t| t.size == want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+
+    #[test]
+    fn a_size_read_before_the_file_changed_is_read_again() {
+        let ctx = ctx();
+        let uris = covers("changed", 1, 600);
+        let uri = &uris[0];
+        pin(&ctx, [uri.as_str()]);
+        assert!(settles_at(&ctx, uri, 48.0, vec2(128.0, 128.0)));
+        // An import puts a larger, wider picture in its place.
+        image::RgbImage::from_pixel(1200, 600, image::Rgb([0, 200, 0])).save(path_of(uri)).unwrap();
+        // The big size is read from the new file...
+        assert!(settles_at(&ctx, uri, 400.0, vec2(512.0, 256.0)));
+        // ...and the small one, pinned and loaded before, follows it.
+        assert!(settles_at(&ctx, uri, 48.0, vec2(128.0, 64.0)), "the small size kept the old picture");
+    }
+
+    #[test]
+    fn refresh_reads_again_the_covers_whose_files_changed() {
+        let ctx = ctx();
+        let uris = covers("refresh", 2, 600);
+        pin(&ctx, uris.iter().map(String::as_str));
+        assert_eq!(show(&ctx, &uris, 48.0).iter().map(|t| t.size).collect::<Vec<_>>(), vec![vec2(128.0, 128.0); 2]);
+        image::RgbImage::from_pixel(600, 300, image::Rgb([0, 200, 0])).save(path_of(&uris[0])).unwrap();
+        refresh(&ctx);
+        assert!(settles_at(&ctx, &uris[0], 48.0, vec2(128.0, 64.0)), "the changed cover was not read again");
+        // The other file did not change: its size stays as it was.
+        assert!(loaded(&ctx).contains(&format!("{}#128", uris[1])));
+        assert!(lock(&shared(&ctx).unwrap().stamps).contains_key(&uris[1]));
     }
 
     #[test]

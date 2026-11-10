@@ -28,6 +28,11 @@ pub fn version() -> &'static str {
     }
 }
 
+/// The owner's own build (not a handout one): developer rows show.
+pub fn own_build() -> bool {
+    option_env!("NIKGOB_RELEASE").is_none()
+}
+
 /// The sun over the label, centred in `rect`'s width from its top;
 /// `alpha` fades both.
 fn paint(ui: &Ui, rect: Rect, side: f32, color: Color32, alpha: f32) {

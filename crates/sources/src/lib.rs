@@ -1,12 +1,16 @@
 //! Download sources behind [`nikgob_core::source::Source`]
 //! (docs/stage4.5.md): torrents through the indexer ([`torrent`]),
 //! khinsider ([`khinsider`]), the free FLAC services ([`qobuz`],
-//! [`tidal`]); the query variants ([`text`]), whether an offer is the
-//! wished thing ([`matching`]) and the one quality policy over all of them
-//! ([`select`]). Soulseek (crates/soulseek) is one more implementation of
+//! [`tidal`]), a Subsonic server ([`squidify`]), the Internet Archive
+//! ([`archive`]), Bandcamp's free releases ([`bandcamp`]); the query variants
+//! ([`text`]), whether an offer is the wished thing ([`matching`]) and the
+//! one quality policy over all of them ([`select`]). Soulseek (crates/soulseek) is one more implementation of
 //! the same trait.
 
 pub mod album;
+pub mod archive;
+pub mod bandcamp;
+pub mod config;
 pub mod html;
 pub mod http;
 pub mod instances;
@@ -14,6 +18,7 @@ pub mod khinsider;
 pub mod matching;
 pub mod qobuz;
 pub mod select;
+pub mod squidify;
 pub mod text;
 pub mod tidal;
 pub mod torrent;
@@ -23,14 +28,37 @@ use std::sync::Arc;
 use nikgob_core::settings::Settings;
 use nikgob_core::source::Source;
 
-/// The sources that need no setup (khinsider and the free services), at
-/// the addresses settings.toml gives or the built-in ones. Whether each
-/// is used is the user's switch on «Источники».
-pub fn web_sources(settings: &Settings) -> Vec<Arc<dyn Source>> {
+/// The web sources, with handles for the ones whose list or browser can
+/// change while the app runs.
+pub struct WebSources {
+    pub list: Vec<Arc<dyn Source>>,
+    pub khinsider: Option<Arc<khinsider::Khinsider>>,
+    pub qobuz: Option<Arc<qobuz::Qobuz>>,
+    pub tidal: Option<Arc<tidal::Tidal>>,
+}
+
+impl WebSources {
+    pub fn empty() -> Self {
+        Self { list: Vec::new(), khinsider: None, qobuz: None, tidal: None }
+    }
+}
+
+/// The sources that need no setup (khinsider, the free services, the
+/// Subsonic server). Qobuz and Tidal use `lists` (from `sources.toml`,
+/// merged with the built-in addresses). Whether each is used is the user's
+/// switch on «Источники».
+pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
     let s = &settings.sources;
-    vec![
-        Arc::new(khinsider::Khinsider::new(&s.khinsider_url)),
-        Arc::new(qobuz::Qobuz::new(&s.qobuz_instances)),
-        Arc::new(tidal::Tidal::new(&s.tidal_instances)),
-    ]
+    let kh = Arc::new(khinsider::Khinsider::new(&s.khinsider_url));
+    let q = Arc::new(qobuz::Qobuz::from_list(&lists.qobuz, lists.qobuz_own, std::time::Duration::from_millis(1500)));
+    let t = Arc::new(tidal::Tidal::from_list(&lists.tidal, lists.tidal_own, std::time::Duration::from_millis(1500)));
+    let list: Vec<Arc<dyn Source>> = vec![
+        kh.clone(),
+        q.clone(),
+        t.clone(),
+        Arc::new(squidify::Squidify::from_settings(s)),
+        Arc::new(archive::Archive::new(&s.archive_url)),
+        Arc::new(bandcamp::Bandcamp::new()),
+    ];
+    WebSources { list, khinsider: Some(kh), qobuz: Some(q), tidal: Some(t) }
 }

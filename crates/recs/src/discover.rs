@@ -47,7 +47,7 @@
 //! dated (to the day) within the last [`RELEASE_WINDOW_MS`] that the library
 //! does not have are ranked by the artist's affinity and freshness
 //! ([`Recs::new_releases`]). A year without a day (YouTube Music) cannot
-//! say "the last 60 days" and is left out.
+//! say "the last 90 days" and is left out.
 
 use std::collections::{HashMap, HashSet};
 
@@ -90,10 +90,13 @@ pub const CLIP_FACTOR: f32 = 0.7;
 const RANK_BONUS: f32 = 0.15;
 /// Shown this many times and never played: ignored.
 pub const IGNORED_AFTER: u32 = 3;
-pub const RELEASE_WINDOW_MS: i64 = 60 * DAY_MS;
-pub const RELEASE_ARTISTS: usize = 30;
-pub const NEW_RELEASES: usize = 20;
-const RELEASES_PER_ARTIST: usize = 2;
+/// A release is new for this long (three months: an artist puts something
+/// out a few times a year, and two months left most of them with nothing).
+pub const RELEASE_WINDOW_MS: i64 = 90 * DAY_MS;
+/// The artists whose discographies are checked: the best loved.
+pub const RELEASE_ARTISTS: usize = 50;
+pub const NEW_RELEASES: usize = 36;
+const RELEASES_PER_ARTIST: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Keys
@@ -922,10 +925,11 @@ mod tests {
                 vec![
                     album("1", "Fresh", Some(3), ReleaseType::Album),
                     album("2", "Older", Some(55), ReleaseType::Album),
-                    album("3", "Too old", Some(70), ReleaseType::Album),
+                    album("3", "Too old", Some(100), ReleaseType::Album),
                     album("4", "Year only", None, ReleaseType::Album),
                     album("5", "Owned", Some(5), ReleaseType::Album),
                     album("6", "Single", Some(4), ReleaseType::Single),
+                    album("8", "A fourth", Some(80), ReleaseType::Single),
                 ],
             ),
             (aid(0), vec![album("7", "Other band", Some(10), ReleaseType::Album)]),
@@ -944,7 +948,7 @@ mod tests {
         let titles: Vec<&str> = rel.iter().map(|r| r.album.title.as_str()).collect();
         let mut sorted = titles.clone();
         sorted.sort();
-        assert_eq!(sorted, ["Fresh", "Other band", "Single"], "two per artist, dated, unknown: {titles:?}");
+        assert_eq!(sorted, ["Fresh", "Older", "Other band", "Single"], "three per artist, dated within three months, unknown: {titles:?}");
         let pos = |t: &str| titles.iter().position(|x| *x == t).unwrap();
         assert!(pos("Fresh") < pos("Single"), "{titles:?}");
     }

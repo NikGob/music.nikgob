@@ -619,6 +619,7 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
         }
     }
     tx.execute("UPDATE source SET track_id = ?2, is_active = 0 WHERE track_id = ?1", params![f, t])?;
+    crate::recordings::carry_recording_in(tx, &f, &t)?;
     tx.execute(
         "UPDATE playlist_entry SET track_id = ?2, updated_at = ?3, updated_by = ?4
           WHERE track_id = ?1 AND deleted = 0",
@@ -644,6 +645,7 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
         )?;
     }
     tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    crate::events::edited();
     tx.execute(
         "INSERT OR IGNORE INTO track_alias(track_id, title, key, source)
          SELECT ?2, title, key, source FROM track_alias WHERE track_id = ?1
@@ -657,6 +659,9 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
     tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     dedupe_wishlist_of_track(tx, &t)?;
+    // What is not taken for the song again follows it.
+    tx.execute("UPDATE OR IGNORE wrong_audio SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    tx.execute("DELETE FROM wrong_audio WHERE track_id = ?1", [&f])?;
     // The item of a stream twin merged into the track with the file.
     crate::masters::settle_wishlist_in(tx, &t)?;
     // What it leaves behind: its artists and its album, when nothing else

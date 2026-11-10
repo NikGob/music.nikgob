@@ -566,7 +566,8 @@ fn the_home_gets_a_daylist_and_tiles_that_play() {
     let daylist = st.daylist.clone().unwrap();
     assert_eq!(daylist.id, MixId::Daylist);
     assert_eq!(daylist.title.split(' ').count(), 3, "«Тягучий вечер четверга»: {}", daylist.title);
-    assert!(daylist.subtitle.starts_with("что ты слушаешь ") && daylist.subtitle.contains(" · до "), "{}", daylist.subtitle);
+    assert!(daylist.subtitle.ends_with(" трек") || daylist.subtitle.ends_with(" трека") || daylist.subtitle.ends_with(" треков"), "{}", daylist.subtitle);
+    assert!(!daylist.subtitle.contains(" · "), "the number of songs alone: {}", daylist.subtitle);
     assert!(!daylist.covers.is_empty());
     // Up to four kinds of the day, each once, each with its kicker, its
     // length and covers; «На повторе», the lottery and the languages are
@@ -1025,7 +1026,10 @@ fn every_lane_names_its_artists() {
     let preview = nikgob_runtime::preview_home(&l.lib, &std::env::temp_dir()).unwrap();
     let lanes = &preview.home.lanes;
     let titles: Vec<&str> = lanes.iter().map(|c| c.title.as_str()).collect();
-    assert!(titles.iter().any(|t| t.contains("Русские")), "{titles:?}");
+    // The Russian songs: their own mix by its name, or (the moments are
+    // drawn by lot) a mix of their artists alone.
+    let ru_only = |c: &nikgob_view::LaneCard| !c.artists.is_empty() && c.artists.iter().all(|a| ["Серега Пират", "mzlff", "nyan.mp3", "MORGENSHTERN"].contains(&a.as_str()));
+    assert!(titles.iter().any(|t| t.contains("Русские")) || lanes.iter().any(ru_only), "{titles:?}");
     // The Japanese songs: their own mix or the cross ones.
     let ja = |c: &nikgob_view::LaneCard| c.artists.iter().any(|a| ["Eve", "Ado", "Yorushika", "ヒトリエ"].contains(&a.as_str()));
     assert!(lanes.iter().any(|c| c.key != nikgob_view::MixKey::OnRepeat && ja(c)), "{titles:?}");
@@ -1034,6 +1038,46 @@ fn every_lane_names_its_artists() {
     for c in lanes {
         assert!(!c.artists.is_empty(), "«{}» names no artist", c.title);
     }
+}
+
+/// The day's mixes stand in «Миксы для тебя»: one «Микс дня», the genre
+/// mixes and the named ones, no two cards of one name, none numbered, no
+/// song in two of the named ones nor in two genre mixes, and another build
+/// of the same day shows the same ones (they are kept for the day in the
+/// library's cache). The whole row is ten cards at most beside «На
+/// повторе», no two of one name, and the liked songs' mix is not there.
+#[test]
+fn the_mixes_of_the_day_stay_for_the_day() {
+    let l = library(3, 6, 12, &[]);
+    let dir = std::env::temp_dir();
+    let daily = |h: &nikgob_view::HomeView| -> Vec<(nikgob_view::MixKey, String, Vec<TrackId>)> {
+        h.lanes.iter().filter(|c| c.key.is_daily()).map(|c| (c.key, c.title.clone(), c.tracks.iter().map(|t| t.id).collect())).collect()
+    };
+    let first = daily(&nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home);
+    assert!(!first.is_empty(), "a library with a history has its mixes of the day");
+    assert_eq!(first.iter().filter(|m| m.1.starts_with("Микс дня")).count(), 1, "one mix of the day");
+    assert_eq!((first[0].0, first[0].1.as_str()), (nikgob_view::MixKey::Daily(0), "Микс дня"));
+    let (mut seen, mut seen_genre) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    let mut names = std::collections::HashSet::new();
+    for (key, title, tracks) in &first {
+        assert!(!title.trim().is_empty() && names.insert(title.clone()), "{key:?}: «{title}»");
+        assert!(tracks.len() >= 12, "«{title}»: {}", tracks.len());
+        if *key == nikgob_view::MixKey::Daily(0) {
+            continue;
+        }
+        assert!(!title.starts_with("Микс дня"), "{key:?}: «{title}» is numbered");
+        let seen = if matches!(key, nikgob_view::MixKey::Genre(_)) { &mut seen_genre } else { &mut seen };
+        for t in tracks {
+            assert!(seen.insert(*t), "«{title}»: a song of another mix of its sort");
+        }
+    }
+    let home = nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home;
+    assert_eq!(daily(&home), first);
+    let row: Vec<&nikgob_view::LaneCard> = home.lanes.iter().filter(|c| c.key != nikgob_view::MixKey::OnRepeat).collect();
+    assert!(row.len() <= 10, "{}", row.len());
+    let titles: std::collections::HashSet<String> = row.iter().map(|c| c.title.trim().to_lowercase()).collect();
+    assert_eq!(titles.len(), row.len(), "no two cards of one name");
+    assert!(row.iter().all(|c| c.key != nikgob_view::MixKey::Liked && c.title != "Микс любимых"));
 }
 
 /// Autoplay after an album played from its page as streams (tracks the

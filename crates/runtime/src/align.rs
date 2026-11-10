@@ -6,7 +6,8 @@
 //! is none), and downloads the models on first use.
 //!
 //! One thread at the lowest priority with one [`Aligner`]; the user's jobs
-//! go first, and a background track gives way the moment one comes. Every
+//! go first, and a background track gives way the moment one comes or a
+//! game is in front; the pass rests between tracks ([`crate::quiet`]). Every
 //! result goes to the library (`lyrics_align`, the heard text into
 //! `lyrics_text`), so nothing is made twice; the worker hears of it as
 //! [`Msg`].
@@ -135,6 +136,8 @@ pub(crate) enum Msg {
     StreamAudio { track: TrackId, source: LyricsSource, target: LyricsSync, deep: bool, result: Result<PathBuf, String> },
     /// A text went onto the computer («Сохранить текст»), as read back.
     Kept { track: TrackId, result: Result<Text, String> },
+    /// The user's own text went onto the computer, as read back.
+    KeptOwn { track: TrackId, result: Result<Text, String> },
     /// A stream was saved as a file for its text («Песню и текст»).
     SongSaved { track: TrackId, result: Result<PathBuf, String> },
     Counts(AlignCounts),
@@ -168,6 +171,9 @@ pub(crate) struct AlignService {
 
     /// Stream audio saved for that, to delete once imported.
     pub(crate) saved_audio: HashMap<PathBuf, TrackId>,
+    /// The user's own texts sent to the Trash («Вернуть найденный»): where
+    /// each went and where it lay, for the undo.
+    pub(crate) own_trashed: HashMap<TrackId, (PathBuf, PathBuf)>,
 }
 
 impl AlignService {
@@ -183,7 +189,7 @@ impl AlignService {
         let catalog = Catalog::new(models);
         self.catalog = Some(catalog.clone());
         let spawned = std::thread::Builder::new().name("nikgob-align".into()).spawn(move || {
-            crate::analysis::lower_priority();
+            crate::quiet::lower_priority();
             let mut t = Thread::new(lib, root, catalog, settings, tx, req_rx, stop, start);
             t.cancel = cancel;
             t.checks = checks;
@@ -536,6 +542,7 @@ impl Thread {
                     // A timing made deep (or not) for itself leaves the
                     // settings' mode to the jobs after it.
                     self.aligner.set_deep(self.settings.deep());
+                    self.aligner.set_spare_card(true);
                     match asked {
                         Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
                         Some((track, Some(source))) => {
@@ -548,10 +555,17 @@ impl Thread {
                 self.last_work = Instant::now();
                 continue;
             }
-            if Instant::now() >= self.pass_at && self.pass_wanted() {
+            // While a game is in front the pass waits (the models it kept go
+            // after `KEEP_LOADED` as ever).
+            if Instant::now() >= self.pass_at && self.pass_wanted() && !crate::quiet::busy() {
+                let started = Instant::now();
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.pass_step())) {
                     Ok(true) => {
                         self.last_work = Instant::now();
+                        // The duty cycle: a rest K times the track's work
+                        // (times the model threads on the CPU).
+                        let cores = if self.settings.gpu { 1 } else { THREADS };
+                        self.pass_at = Instant::now() + crate::quiet::rest_for(started.elapsed(), cores);
                         continue;
                     }
                     Ok(false) => {}
@@ -607,9 +621,12 @@ impl Thread {
                 // Deep or not for this timing only; the jobs after it go as
                 // the settings say (one thread: nothing runs meanwhile).
                 self.aligner.set_deep(if deep { Deep::CHOSEN } else { Deep::OFF });
+                // Asked for by hand: it may take the card over meanwhile.
+                self.aligner.set_spare_card(false);
                 // Called off while queued: never started.
                 let result = if self.cancelled() { Err(Error::Stopped) } else { self.craft(track, &path, &text, target) };
                 self.aligner.set_deep(self.settings.deep());
+                self.aligner.set_spare_card(true);
                 let cancelled = self.cancelled();
                 self.crafting = None;
                 if temp && let Err(e) = std::fs::remove_file(&path) {
@@ -737,7 +754,8 @@ impl Thread {
                 last_stage = Some(stage);
                 let _ = self.tx.send(Internal::Align(Msg::Job(Some(v::AlignJob { track: Some(track), stage, progress: f, asked, bytes: None }))));
             }
-            !self.stopped() && !self.cancelled() && !self.superseded() && (asked || self.rx.is_empty())
+            // A game in front calls the background track off (its models go too).
+            !self.stopped() && !self.cancelled() && !self.superseded() && (asked || (self.rx.is_empty() && !crate::quiet::busy()))
         }
     }
 
@@ -1000,6 +1018,7 @@ impl Worker {
             Msg::Crafted { track, source, result } => self.crafted(track, source, result),
             Msg::StreamAudio { track, source, target, deep, result } => self.stream_audio(track, source, target, deep, result),
             Msg::Kept { track, result } => self.lyrics_kept(track, result),
+            Msg::KeptOwn { track, result } => self.own_lyrics_kept(track, result),
             Msg::SongSaved { track, result } => self.song_saved(track, result),
         }
     }

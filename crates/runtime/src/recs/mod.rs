@@ -58,13 +58,14 @@ use nikgob_recs::{
     Catalog, DAYLIST_LEN, DailyParams, DayPart, DiscoveryFilter, Ended, FEATURE_VERSION, Item, ModelInput, Mood,
     NewTrack, Pick, RadioParams, RadioState as Engine, Reason, Recs, SONGTYPE_RULES, ServiceSuggestions, Session, SongInput,
     SongTypes, StyleMix, TasteInput, TrackInfo, UserModel, VectorIndex, Weights, album_key, artist_key, daylist_title,
-    daylist_until, match_suggestions, song_key, song_types, stream_song_key, style_words,
+    match_suggestions, song_key, song_types, stream_song_key, style_words,
 };
 use nikgob_view::{self as v, Command};
 use serde::{Deserialize, Serialize};
 
 use crate::Worker;
-use crate::analysis::{SoundIndex, lower_priority};
+use crate::analysis::SoundIndex;
+use crate::quiet::lower_priority;
 use crate::import::Internal;
 
 pub(crate) use radio::RadioSave;
@@ -72,6 +73,12 @@ pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
 
 /// Plays after which the taste is built again.
 const PLAYS_PER_BUILD: u32 = 20;
+/// After a build the next one the user did not ask for waits this many
+/// times as long as the build took ([`MAX_REST`] at most): a library whose
+/// builds are long (a history of years) is not built without a pause while
+/// imports and background passes keep changing it.
+const REST: u32 = 8;
+const MAX_REST: Duration = Duration::from_secs(300);
 /// The analysis added this many vectors (or a tenth of the index, or
 /// doubled it) since the last build: built again.
 const NEW_VECTORS: usize = 200;
@@ -228,7 +235,7 @@ pub(crate) struct DaylistHome {
     /// «НА ВЕЧЕР».
     pub kicker: &'static str,
     pub title: String,
-    /// «что ты слушаешь по вечерам · до 23:00».
+    /// «25 треков».
     pub subtitle: String,
     /// The radio that plays on after the picks.
     pub state: Engine,
@@ -253,6 +260,18 @@ pub(crate) enum Msg {
     Discover(discover::DiscoverMsg),
     Suggest(suggest::SuggestMsg),
     Graph(graph::GraphMsg),
+}
+
+impl Msg {
+    pub(crate) const fn turn_name(&self) -> &'static str {
+        match self {
+            Self::Built(_) => "a build came",
+            Self::Radio(_) => "the radio",
+            Self::Discover(_) => "new music",
+            Self::Suggest(_) => "suggestions",
+            Self::Graph(_) => "the graph",
+        }
+    }
 }
 
 /// «Твой микс» of a day as the library's cache keeps it.
@@ -300,6 +319,12 @@ pub(crate) struct RecsState {
     /// ([`Worker::recs_library_changed`]).
     changed_since: Option<Instant>,
     built_at: Option<Instant>,
+    /// When the build going on began, and how long the last one took: the
+    /// next one waits [`REST`] times that ([`Worker::recs_tick`]).
+    build_began: Option<Instant>,
+    build_took: Duration,
+    /// The user asked for the build that is due: it does not wait.
+    urgent: bool,
     built_index_len: usize,
     plays: u32,
     /// The next build picks «Твой микс» again.
@@ -358,6 +383,9 @@ impl RecsState {
             due: Some(Instant::now()),
             changed_since: None,
             built_at: None,
+            build_began: None,
+            build_took: Duration::ZERO,
+            urgent: false,
             built_index_len: 0,
             plays: 0,
             refresh_daily: false,
@@ -500,17 +528,6 @@ const fn daylist_kicker(part: DayPart) -> &'static str {
         DayPart::Evening => "НА ВЕЧЕР",
         DayPart::Night => "НА НОЧЬ",
     }
-}
-
-/// «что ты слушаешь по вечерам · до 23:00»: what the daylist is made of.
-fn daylist_subtitle(part: DayPart) -> String {
-    let when = match part {
-        DayPart::Morning => "по утрам",
-        DayPart::Day => "днём",
-        DayPart::Evening => "по вечерам",
-        DayPart::Night => "по ночам",
-    };
-    format!("что ты слушаешь {when} · {}", daylist_until(part))
 }
 
 /// Covers of the picks' releases (stream picks by their urls).
@@ -674,9 +691,22 @@ fn read_parts(
     extra: &ReadExtra,
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize, TasteInput), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
+    // Where the time goes, stage by stage (a long history makes it felt).
+    let mut stage = Instant::now();
+    let mut stages: Vec<(&str, u128)> = Vec::new();
+    let mut lap = |name: &'static str, stages: &mut Vec<(&str, u128)>| {
+        stages.push((name, stage.elapsed().as_millis()));
+        stage = Instant::now();
+    };
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
-    let events = lib.listening_events().map_err(|e| err("events", e))?;
-    let like_times = lib.liked_track_times().map_err(|e| err("likes", e))?;
+    let mut events = lib.listening_events().map_err(|e| err("events", e))?;
+    let mut like_times = lib.liked_track_times().map_err(|e| err("likes", e))?;
+    // One song on two albums is one recording: the copy standing for it
+    // takes the other copies' plays and likes, and only it is picked.
+    let spares = lib.recording_spares().unwrap_or_default();
+    let in_library: HashSet<TrackId> = rows.iter().filter(|r| r.in_library).map(|r| r.id).collect();
+    let spares: HashMap<TrackId, TrackId> = spares.into_iter().filter(|(_, canon)| in_library.contains(canon)).collect();
+    fold_recordings(&spares, &mut events, &mut like_times);
     let saved = lib.saved_tracks().map_err(|e| err("saved songs", e))?;
     let entries = lib.playlist_entry_times().map_err(|e| err("playlists", e))?;
     let feedback = lib.rec_dislikes().map_err(|e| err("feedback", e))?;
@@ -692,7 +722,9 @@ fn read_parts(
         artist_keys.entry(artist_key(name)).or_insert(*id);
         names.insert(*id, name.clone());
     }
+    lap("rows", &mut stages);
     let tiles_input = tiles::input(lib, &rows, &events, names.clone());
+    lap("tiles", &mut stages);
     // The songs saved in a service's library that the library lacks: the
     // taste of their artists and seeds of the new music, no catalog track.
     let saved_set: HashSet<TrackId> = saved.iter().copied().collect();
@@ -708,7 +740,7 @@ fn read_parts(
 
     // One song on two albums: the track with a file (the oldest) stands for it.
     let mut songs: HashMap<&str, (bool, TrackId)> = HashMap::new();
-    for r in rows.iter().filter(|r| r.in_library) {
+    for r in rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)) {
         let e = songs.entry(r.song.as_str()).or_insert((r.has_local, r.id));
         if r.has_local && !e.0 {
             *e = (true, r.id);
@@ -717,7 +749,7 @@ fn read_parts(
     // The worlds of Главная: one of them does not fill a mix.
     let album_worlds = crate::home_v2::worlds_of_releases(&release_rows);
     let mut worlds: HashMap<u64, (String, String)> = HashMap::new();
-    let catalog = Catalog::new(rows.iter().filter(|r| r.in_library).map(|r| {
+    let catalog = Catalog::new(rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)).map(|r| {
         let song = songs.get(r.song.as_str()).map_or(r.id, |s| s.1);
         let world = r.release.and_then(|a| album_worlds.get(&a));
         let mut t = TrackInfo::new(r.id, r.artists.clone(), r.release)
@@ -735,7 +767,8 @@ fn read_parts(
             });
         }
         t
-    }));
+    }))
+    .with_aliases(spares.iter().map(|(copy, canon)| (*copy, *canon)));
 
     // «Не рекомендовать»: library tracks and artists, songs and artists of
     // the services (an artist disliked by name is the library's too).
@@ -842,7 +875,9 @@ fn read_parts(
     for id in stale {
         index.remove(id);
     }
+    lap("catalog", &mut stages);
     let types = read_song_types(lib, &catalog, &index, &tiles_input, &names);
+    lap("types", &mut stages);
     let cached: Option<Weights> = lib
         .cache_get(MODEL_KEY)
         .ok()
@@ -877,11 +912,18 @@ fn read_parts(
     };
     // The graph of similar music the library keeps, resolved to it now.
     let similar = if extra.graph { graph::read(lib, &rows, &artist_keys) } else { graph::Resolved::default() };
+    lap("graph", &mut stages);
     let model = UserModel::build(
         &catalog,
         &history,
         ModelInput { index: &index, types: Some(&types), weights: cached, graph: (!similar.input.is_empty()).then_some(&similar.input) },
         now,
+    );
+    lap("model", &mut stages);
+    log::debug!(
+        "recs: snapshot of {} events: {}",
+        history.events.len(),
+        stages.iter().map(|(n, ms)| format!("{n} {ms} ms")).collect::<Vec<_>>().join(", ")
     );
     if cached.is_none()
         && let Ok(json) = serde_json::to_string(&model.weights)
@@ -975,6 +1017,33 @@ fn played_in_background(
         }
     }
     (nikgob_recs::background::background_playlists(&plays, &snap.model.listening), holding)
+}
+
+/// One song on two albums ([`Library::recording_spares`]: each other copy
+/// with the copy standing for it): the plays of a copy are the standing
+/// copy's, and its like is that one's (once, the newest time).
+pub(crate) fn fold_recordings(
+    spares: &HashMap<TrackId, TrackId>,
+    events: &mut [nikgob_core::model::Event],
+    likes: &mut Vec<(TrackId, UnixMs)>,
+) {
+    if spares.is_empty() {
+        return;
+    }
+    for e in events.iter_mut() {
+        if let Some(c) = spares.get(&e.track_id) {
+            e.track_id = *c;
+        }
+    }
+    for l in likes.iter_mut() {
+        if let Some(c) = spares.get(&l.0) {
+            l.0 = *c;
+        }
+    }
+    // Newest first: the first of each track stays.
+    likes.sort_by_key(|l| std::cmp::Reverse(l.1));
+    let mut seen = HashSet::new();
+    likes.retain(|l| seen.insert(l.0));
 }
 
 /// An event as the recommendations read it: a play imported before
@@ -1328,11 +1397,8 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     if picks.is_empty() {
         return (key, None);
     }
-    let subtitle = if history {
-        daylist_subtitle(part)
-    } else {
-        "Слушай — подборка соберётся из того, что нравится".to_owned()
-    };
+    // The number of songs only: no «what it is made of», no «until 23:00».
+    let subtitle = tracks_count(picks.len());
     let covers = covers_of(snap, &picks, &streams);
     let home = DaylistHome {
         kicker: daylist_kicker(part),
@@ -1557,7 +1623,8 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
-        let lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.covers.clone())).collect();
+        let mut lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.covers.clone())).collect();
+        distinct_leads(&mut lane_covers);
         let lanes: Vec<v::LaneCard> = self
             .lanes
             .into_iter()
@@ -1601,6 +1668,21 @@ impl HomeParts {
             if card {
                 card_first(home);
             }
+        }
+    }
+}
+
+/// A mix's card shows the first of its covers: each list of `covers` (one
+/// for each card of the row, in the row's order) starts with a picture no
+/// card before it starts with, while it has one.
+fn distinct_leads<T: PartialEq + Clone>(covers: &mut [Vec<T>]) {
+    let mut leads: Vec<T> = Vec::new();
+    for list in covers.iter_mut() {
+        if let Some(at) = list.iter().position(|c| !leads.contains(c)) {
+            list[..=at].rotate_right(1);
+        }
+        if let Some(first) = list.first() {
+            leads.push(first.clone());
         }
     }
 }
@@ -2090,6 +2172,7 @@ impl Worker {
         let at = Instant::now() + after;
         let r = &mut self.recs;
         r.due = Some(r.due.map_or(at, |d| d.min(at)));
+        r.urgent |= after.is_zero();
     }
 
     /// «Миксы только из скачанного» changed: the home is built again now
@@ -2129,6 +2212,7 @@ impl Worker {
     /// A start, `origin` its chooser: the session goes on, and a start the
     /// user chose teaches the model of the next start.
     pub(crate) fn recs_started(&mut self, track: TrackId, origin: nikgob_core::model::EventOrigin) {
+        let track = self.recs_song_of(track);
         let now = recs_now();
         let ctx = self.play_context;
         let r = &mut self.recs;
@@ -2159,6 +2243,7 @@ impl Worker {
     /// How a start ended (not by closing the app): the session and the
     /// skip model learn it.
     pub(crate) fn recs_ended(&mut self, track: TrackId, complete: bool, position_ms: u32) {
+        let track = self.recs_song_of(track);
         let ended = if complete {
             Ended::Complete
         } else if position_ms < nikgob_recs::taste::EARLY_SKIP_MS {
@@ -2176,6 +2261,14 @@ impl Worker {
         let Some(snap) = r.snap.clone() else { return };
         r.weights.get_or_insert(snap.model.weights).skip.observe(&x, ended == Ended::Early);
         self.recs_keep_weights();
+    }
+
+    /// The catalog's track for `track`: itself, or the copy standing for
+    /// its recording when it is another copy of one song on two albums
+    /// (the session holds one id per song: «Не повторять сыгранное»
+    /// covers both).
+    fn recs_song_of(&self, track: TrackId) -> TrackId {
+        self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).map_or(track, |t| t.id)
     }
 
     /// The weights learnt online, into `recs.model`.
@@ -2202,7 +2295,13 @@ impl Worker {
         let stale = r.built_at.is_some_and(|t| t.elapsed() >= every)
             || r.home.as_ref().is_some_and(|h| h.day != day || h.daylist_key != daylist)
             || (r.built_at.is_some() && grown);
-        if !r.building && (r.due.is_some_and(|d| now >= d) || stale) {
+        // Nobody looks at the recommendations while a game is in front:
+        // they are built, and new music looked for, when it is over.
+        if crate::quiet::busy() {
+            return;
+        }
+        let rested = r.urgent || r.built_at.is_none_or(|t| t.elapsed() >= (r.build_took * REST).min(MAX_REST));
+        if !r.building && rested && (r.due.is_some_and(|d| now >= d) || stale) {
             self.recs_build();
         }
         self.discover_tick();
@@ -2249,6 +2348,8 @@ impl Worker {
         match spawned {
             Ok(_) => {
                 self.recs.building = true;
+                self.recs.build_began = Some(Instant::now());
+                self.recs.urgent = false;
                 self.recs.due = None;
                 self.recs.changed_since = None;
             }
@@ -2269,6 +2370,7 @@ impl Worker {
     fn recs_built(&mut self, b: Result<Built, String>) {
         self.recs.building = false;
         self.recs.built_at = Some(Instant::now());
+        self.recs.build_took = self.recs.build_began.take().map_or(Duration::ZERO, |t| t.elapsed());
         let rerank = match b {
             Ok(b) => {
                 let rerank = b.rerank;
@@ -2596,9 +2698,12 @@ impl Worker {
             return;
         }
         self.user_switch(nikgob_core::model::EventOrigin::Mix);
-        self.queue.shuffle = false;
-        self.queue.set(&ids, 0, Some(format!("микса «{title}»")));
-        let entries: Vec<u64> = self.queue.current().into_iter().chain(self.queue.upcoming().iter().copied()).map(|e| e.id).collect();
+        // Shuffle stays as the user set it (on, the mix plays shuffled) or
+        // goes off, as the setting says.
+        self.new_list();
+        self.queue.set_from(&ids, None, Some(format!("микса «{title}»")));
+        // The entries in the mix's own order, as `whys` are.
+        let entries: Vec<u64> = self.queue.context_order().iter().map(|e| e.id).collect();
         self.recs.why.clear();
         self.explain_entries(&entries, whys);
         self.play_context = EventContext::HomeSection;
@@ -2631,7 +2736,8 @@ impl Worker {
         let (picks, title) = (lane.picks(false), lane.title.clone());
         if let Some(h) = self.recs.home.as_mut() {
             h.lanes.retain(|l| l.key != lane.key);
-            h.lanes.insert(0, lane);
+            let at = lanes::blend_place(&h.lanes);
+            h.lanes.insert(at, lane);
             // As the next build has it: the latest blends in the places of
             // the moments that fit now least.
             let blend = |l: &lanes::LaneHome| matches!(l.key, v::MixKey::Blend(_));
@@ -2640,8 +2746,8 @@ impl Worker {
                     h.lanes.remove(k);
                 }
             }
-            while h.lanes.iter().filter(|l| l.key != v::MixKey::OnRepeat).count() > nikgob_recs::mixes::MOMENTS {
-                if let Some(k) = h.lanes.iter().rposition(|l| l.key != v::MixKey::OnRepeat && !blend(l)) {
+            while h.lanes.iter().filter(|l| lanes::is_moment(l.key)).count() > nikgob_recs::mixes::MOMENTS {
+                if let Some(k) = h.lanes.iter().rposition(|l| lanes::is_moment(l.key) && !blend(l)) {
                     h.lanes.remove(k);
                 } else {
                     break;
@@ -2763,6 +2869,14 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Cards of one row lead with different pictures while they have them.
+    #[test]
+    fn the_cards_of_a_row_lead_with_different_covers() {
+        let mut covers = vec![vec![1, 2, 3], vec![1, 2, 3], vec![2, 1], vec![1], Vec::new(), vec![3, 4]];
+        distinct_leads(&mut covers);
+        assert_eq!(covers, [vec![1, 2, 3], vec![2, 1, 3], vec![2, 1], vec![1], vec![], vec![3, 4]]);
+    }
+
 
     #[test]
     fn style_titles_name_their_artists() {

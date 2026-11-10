@@ -60,6 +60,52 @@ pub fn runtime_loaded() -> bool {
     RUNTIME.get().is_some_and(Result::is_ok)
 }
 
+/// How much of the card's own memory is free: its size less what every
+/// program holds there now (Windows' counter of the adapter), and no more
+/// than Windows budgets this process; `None` where that is not known. The
+/// first adapter, which is DirectML's.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn card_free() -> Option<u64> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3, IDXGIFactory1};
+    use windows::Win32::System::Performance::{PDH_FMT_COUNTERVALUE, PDH_FMT_LARGE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW};
+    use windows::core::{HSTRING, Interface, PCWSTR};
+    // SAFETY: plain DXGI and PDH calls on objects this function owns; each
+    // struct is written by the call that takes its pointer, and the query
+    // is closed before returning.
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let adapter: IDXGIAdapter3 = factory.EnumAdapters1(0).ok()?.cast().ok()?;
+        let desc = adapter.GetDesc1().ok()?;
+        let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info).ok()?;
+        let budget = info.Budget.saturating_sub(info.CurrentUsage);
+
+        let luid = desc.AdapterLuid;
+        let path = HSTRING::from(format!(r"\GPU Adapter Memory(luid_0x{:08x}_0x{:08x}_phys_0)\Dedicated Usage", luid.HighPart, luid.LowPart));
+        let mut query = PDH_HQUERY::default();
+        if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != 0 {
+            return None;
+        }
+        let mut counter = PDH_HCOUNTER::default();
+        let mut value = PDH_FMT_COUNTERVALUE::default();
+        let read = PdhAddEnglishCounterW(query, &path, 0, &mut counter) == 0
+            && PdhCollectQueryData(query) == 0
+            && PdhGetFormattedCounterValue(counter, PDH_FMT_LARGE, None, &mut value) == 0;
+        PdhCloseQuery(query);
+        if !read {
+            return None;
+        }
+        let used = u64::try_from(value.Anonymous.largeValue).ok()?;
+        Some((desc.DedicatedVideoMemory as u64).saturating_sub(used).min(budget))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn card_free() -> Option<u64> {
+    None
+}
+
 /// One model's session.
 pub struct Model {
     session: Session,

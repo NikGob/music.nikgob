@@ -658,7 +658,7 @@ impl Inner {
             audio: true,
         };
         match self.load_me().await {
-            Ok(me) => log::info!("soundcloud: signed in again as {}", me.username),
+            Ok(_) => log::info!("soundcloud: signed in again"),
             // Offline at the start: the sign-in stays, /me is asked later.
             Err(e) => log::info!("soundcloud: the saved sign-in is not checked yet: {e}"),
         }
@@ -706,9 +706,9 @@ impl Inner {
         let result = self.load_me().await;
         self.trying.store(false, Ordering::SeqCst);
         match result {
-            Ok(me) if self.generation.load(Ordering::SeqCst) == generation => {
+            Ok(_) if self.generation.load(Ordering::SeqCst) == generation => {
                 self.store.save(&token);
-                log::info!("soundcloud: signed in as {}", me.username);
+                log::info!("soundcloud: signed in");
                 Ok(())
             }
             Ok(_) => Err(StreamError::NotLoggedIn),

@@ -32,6 +32,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 log.workspace = true
 thread-priority = "3"
 
+[target.'cfg(windows)'.dependencies]
+# The fullscreen / game check of the background passes (quiet.rs).
+windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 nikgob-core = { workspace = true, features = ["fake"] }
 librqbit = { version = "9", default-features = false, features = ["rust-tls"] }

@@ -585,7 +585,7 @@ impl Worker {
             link.sync_mode = PlaylistSyncMode::Follow;
             let _ = self.lib.put_playlist_remote(&link);
             self.toast(
-                format!("«{}» в {} менять нельзя — только слежка", remote.name, remote.id.service.display_name()),
+                format!("«{}» в {} менять нельзя — только получать изменения", remote.name, remote.id.service.display_name()),
                 None,
             );
         }
@@ -683,9 +683,9 @@ impl Worker {
         }
         let Some(local) = self.lib.get_playlist(playlist).ok().flatten() else { return };
         let label = match mode {
-            PlaylistSyncMode::TwoWay => "двусторонняя",
-            PlaylistSyncMode::Follow => "только слежка",
-            PlaylistSyncMode::Once => "разово (снимок)",
+            PlaylistSyncMode::TwoWay => "изменения в обе стороны",
+            PlaylistSyncMode::Follow => "только получать изменения",
+            PlaylistSyncMode::Once => "выключена",
         };
         match self.lib.playlist_remote(playlist).ok().flatten() {
             Some(mut link) => {

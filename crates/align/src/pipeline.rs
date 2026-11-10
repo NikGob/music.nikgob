@@ -664,6 +664,11 @@ impl<T> OneLoaded<T> {
     }
 }
 
+/// What deep mode's separator takes of the card while it separates
+/// (5.4 GB measured, docs/lyrics-align.md, «Time and memory»), with room
+/// left for what is drawn meanwhile.
+const ROFORMER_CARD: u64 = 5_800 << 20;
+
 /// The loaded models, kept modest (a whole-library pass runs for hours in
 /// the background): one aligner at a time, the separator only while it
 /// separates, Whisper only while it recognises.
@@ -680,11 +685,14 @@ pub struct Aligner {
     tuning: Tuning,
     /// What deep mode adds ([`Deep::OFF`]: nothing).
     deep: Deep,
+    /// Deep mode's separator loads only when the card has room for it
+    /// ([`Self::set_spare_card`]).
+    spare_card: bool,
 }
 
 impl Aligner {
     pub fn new(catalog: Catalog, device: Device, threads: usize) -> Self {
-        Self { catalog, device, threads, separator: None, ctc: OneLoaded::default(), vocabs: HashMap::new(), whisper: None, tuning: Tuning::default(), deep: Deep::OFF }
+        Self { catalog, device, threads, separator: None, ctc: OneLoaded::default(), vocabs: HashMap::new(), whisper: None, tuning: Tuning::default(), deep: Deep::OFF, spare_card: true }
     }
 
     /// How the timing pass places words from now on.
@@ -704,6 +712,30 @@ impl Aligner {
 
     pub fn deep(&self) -> Deep {
         self.deep
+    }
+
+    /// Whether deep mode's separator gives way when the card lacks the
+    /// memory it takes (on by default; off for a timing asked for by hand,
+    /// which may take the card over for its minute).
+    pub fn set_spare_card(&mut self, spare: bool) {
+        self.spare_card = spare;
+    }
+
+    /// Deep mode's separator fits the card next to what the other programs
+    /// hold there. Over the card's memory DirectML does not fail: it goes
+    /// on in shared system memory, many times slower, and every program
+    /// drawing on the card stutters meanwhile.
+    fn roformer_fits(&self) -> bool {
+        if !self.spare_card || self.device != Device::Gpu {
+            return true;
+        }
+        match crate::engine::card_free() {
+            Some(free) if free < ROFORMER_CARD => {
+                log::info!("align: {} MB of the card free, deep separation takes {}: separating as usual", free >> 20, ROFORMER_CARD >> 20);
+                false
+            }
+            _ => true,
+        }
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -773,7 +805,7 @@ impl Aligner {
             self.ctc.clear();
             let mix = decoded.resampled(separate::RATE)?;
             let mut voice = None;
-            if self.deep.separates(main) && self.catalog.ready(ModelId::SeparatorDeep) {
+            if self.deep.separates(main) && self.catalog.ready(ModelId::SeparatorDeep) && self.roformer_fits() {
                 match self.separate_deep(mix.clone(), progress) {
                     Ok(v) => {
                         voice = Some(v);

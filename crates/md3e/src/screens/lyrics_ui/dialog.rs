@@ -4,13 +4,13 @@
 //! the sources as a choice, the shown text in full following the song,
 //! under it «Подсветка» (how the text is seen and the timing to make, or
 //! its progress), and at the foot where the text is kept with «Сохранить
-//! текст».
+//! текст». The lyrics editor opens in the same kind of window
+//! ([`window`]).
 
-use egui::{Align, Area, Context, Id, Key, Layout, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder, vec2};
+use egui::{Align, Context, Id, Layout, Rect, Ui, Vec2, vec2};
 use nikgob_view::{Command, LyricsAvail, ViewState};
 
-use crate::components::{Button, ConnectedGroup, FilterChip, IconButton, Size, Style, anim, paint, paint::Radii};
-use crate::tokens::{Elevation, shape};
+use crate::components::{Button, ConnectedGroup, FilterChip, IconButton, ModalWindow, Size, Style};
 use crate::{Icon, Theme, TypeRole};
 
 const OPEN: &str = "lyrics-dialog-open";
@@ -24,13 +24,14 @@ const BESIDE_GAP: f32 = 24.0;
 
 /// Opens the dialog growing out of `from` (the control).
 pub(super) fn open(ctx: &Context, from: Rect) {
-    let theme = Theme::get(ctx);
-    let id = Id::new(OPEN);
+    grow(ctx, OPEN, from);
+}
+
+/// Opens the window `key` ([`window`]) growing out of `from` (the control).
+pub(super) fn grow(ctx: &Context, key: &str, from: Rect) {
+    let id = Id::new(key);
     // Both springs start from the control.
-    anim::f32(ctx, id.with("k"), 0.0, theme.motion.default_spatial);
-    anim::snap_f32(ctx, id.with("k"), 0.0);
-    anim::fraction(ctx, id.with("a"), 0.0, theme.motion.default_effects);
-    anim::snap_f32(ctx, id.with("a"), 0.0);
+    ModalWindow::rewind(ctx, id);
     ctx.data_mut(|d| {
         d.insert_temp(id, true);
         if from.is_positive() {
@@ -39,8 +40,13 @@ pub(super) fn open(ctx: &Context, from: Rect) {
     });
 }
 
-fn close(ctx: &Context) {
-    ctx.data_mut(|d| d.insert_temp(Id::new(OPEN), false));
+pub(super) fn close(ctx: &Context) {
+    shut(ctx, OPEN);
+}
+
+/// Closes the window `key` (it shrinks back into the control).
+pub(super) fn shut(ctx: &Context, key: &str) {
+    ctx.data_mut(|d| d.insert_temp(Id::new(key), false));
 }
 
 /// Draws the dialog while it is open or still shrinking back.
@@ -48,70 +54,28 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     if super::variant(&state.prefs) != super::Variant::Dialog {
         return;
     }
-    let theme = Theme::get(ctx);
-    let (s, motion) = (theme.scheme, theme.motion);
-    let id = Id::new(OPEN);
+    window(ctx, OPEN, vec2(MAX_W, MAX_H), true, |ui, inner| body(ui, inner, state, out));
+}
+
+/// The window `key` while it is open or still shrinking back: a modal
+/// over the dimmed player, as large as `max` allows, that grows out of the
+/// control and back; `body` fills its inner rect (usable once it has
+/// nearly arrived). A click on the scrim closes it, and Escape when
+/// `escape`; true when it was closed so.
+pub(super) fn window(ctx: &Context, key: &str, max: Vec2, escape: bool, body: impl FnOnce(&mut Ui, Rect)) -> bool {
+    let id = Id::new(key);
     let open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-    let k = anim::f32(ctx, id.with("k"), if open { 1.0 } else { 0.0 }, motion.default_spatial);
-    let alpha = anim::fraction(ctx, id.with("a"), if open { 1.0 } else { 0.0 }, motion.default_effects).clamp(0.0, 1.0);
-    if !open && alpha < 0.002 && k.abs() < 0.002 {
-        return;
-    }
-    let screen = ctx.content_rect();
-    let target = Rect::from_center_size(
-        screen.center(),
-        vec2((screen.width() - 96.0).clamp(320.0, MAX_W), (screen.height() - 96.0).clamp(320.0, MAX_H)),
-    );
+    let window = ModalWindow::new(id, max).escape(escape);
     // Back into the control where it is now (it may have moved).
     let from = ctx
         .data(|d| d.get_temp::<(Id, Rect)>(Id::new(super::LAST)).map(|(_, r)| r).or_else(|| d.get_temp::<Rect>(Id::new(FROM))))
         .filter(|r| r.is_positive())
-        .unwrap_or_else(|| Rect::from_center_size(target.center(), vec2(160.0, 32.0)));
-    let kc = k.clamp(0.0, 1.03);
-    let rect = Rect::from_min_max(from.min.lerp(target.min, kc), from.max.lerp(target.max, kc));
-    let radius = 16.0 + (shape::EXTRA_LARGE - 16.0) * k.clamp(0.0, 1.0);
-    // The content appears once the container has grown most of the way.
-    let content_a = ((k - 0.45) / 0.55).clamp(0.0, 1.0) * alpha;
-
-    // One layer over everything (Now Playing too): the scrim that dims the
-    // player and closes on a click, then the dialog.
-    let mut scrim_clicked = false;
-    Area::new(id.with("dialog"))
-        .fade_in(false)
-        .order(Order::Tooltip)
-        .fixed_pos(screen.min)
-        .constrain(false)
-        .interactable(open)
-        .show(ctx, |ui| {
-            ui.set_clip_rect(screen);
-            let (r, scrim) = ui.allocate_exact_size(screen.size(), Sense::click());
-            ui.painter().rect_filled(r, 0.0, s.scrim_overlay().gamma_multiply(alpha));
-            scrim_clicked = scrim.clicked() && !rect.contains(scrim.interact_pointer_pos().unwrap_or_default());
-            let radii = Radii::all(radius).clamped(rect);
-            // The control's colour turns into the dialog's.
-            let fill = lerp_color(s.secondary_container, s.surface_container_high, k.clamp(0.0, 1.0));
-            paint::shadow(ui.painter(), rect, radii, if alpha > 0.5 { Elevation::Level3 } else { Elevation::Level1 });
-            paint::container(ui.painter(), rect, radii, fill, Stroke::NONE);
-            let inner = target.shrink(24.0);
-            let mut cui = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)).id_salt("lyrics-dialog-body"));
-            cui.set_clip_rect(rect.shrink(2.0).intersect(screen));
-            cui.multiply_opacity(content_a);
-            // Usable once it has (nearly) arrived; a disabled ui fades what
-            // it paints, so only the content is.
-            if !(open && k > 0.9) {
-                cui.disable();
-            }
-            body(&mut cui, inner, state, out);
-        });
-    if open && (scrim_clicked || ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
-        close(ctx);
+        .unwrap_or_else(|| Rect::from_center_size(window.target(ctx).center(), vec2(160.0, 32.0)));
+    let closed = window.origin(from).show(ctx, open, body);
+    if closed {
+        shut(ctx, key);
     }
-}
-
-fn lerp_color(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
-    let (a, b) = (a.to_srgba_unmultiplied(), b.to_srgba_unmultiplied());
-    let m = |i: usize| (f32::from(a[i]) + (f32::from(b[i]) - f32::from(a[i])) * t).round() as u8;
-    egui::Color32::from_rgba_unmultiplied(m(0), m(1), m(2), m(3))
+    closed
 }
 
 fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {

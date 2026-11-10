@@ -28,8 +28,9 @@
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
 //!   music is placed by its sound (recs-v2 §11.3).
 //!
-//! Both run on one thread of their own at the lowest priority, like the file
-//! job; the worker only hands it jobs and hears back [`Done`]. With
+//! Both run on one thread of their own at the lowest priority, paced like the
+//! file job ([`crate::quiet`]: nothing new starts while a game runs); the
+//! worker only hands it jobs and hears back [`Done`]. With
 //! «Анализ звука стримов» off nothing starts, and a job in flight stops at
 //! its next chunk.
 //!
@@ -53,7 +54,8 @@ use nikgob_view as v;
 use super::Msg;
 use super::resolve::Lookup;
 use crate::Worker;
-use crate::analysis::{FileError, SoundIndex, analyze_bytes, lower_priority, store_vector};
+use crate::analysis::{FileError, SoundIndex, analyze_bytes, store_vector};
+use crate::quiet::{self, Pacer, lower_priority};
 use crate::import::Internal;
 
 /// Most bytes of one stream read for its analysis (8 minutes of YouTube's
@@ -150,6 +152,8 @@ pub(crate) struct StreamAnalysis {
     previewed: HashSet<TrackId>,
     /// The progress is counted again on the next tick.
     recount: bool,
+    /// Why the last step did not start a track (logged once per change).
+    held: Option<&'static str>,
 }
 
 impl StreamAnalysis {
@@ -160,12 +164,16 @@ impl StreamAnalysis {
     }
 }
 
-/// The analysis thread: one job at a time, until the worker goes.
+/// The analysis thread: one job at a time, until the worker goes, paced
+/// by [`crate::quiet`] (none of its jobs is one the user waits for).
 fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal>, off: Arc<AtomicBool>) {
     lower_priority();
+    let mut pacer = Pacer::new(&off);
     for job in jobs {
+        // While a game runs the job waits; switched off, it stops at once.
+        pacer.begin();
         let started = Instant::now();
-        let outcome = work(&job, &lib, &index, &off);
+        let outcome = work(&job, &lib, &index, &off, &mut pacer);
         log::debug!(
             "stream analysis: {} ({:?}) {outcome:?} in {:?}",
             job.video,
@@ -180,10 +188,11 @@ fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal
         if tx.send(Internal::Stream(Msg::Analysed(done))).is_err() {
             break;
         }
+        pacer.rest();
     }
 }
 
-fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool) -> Outcome {
+fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &mut Pacer<'_>) -> Outcome {
     if off.load(Ordering::Relaxed) {
         return Outcome::Stopped;
     }
@@ -201,7 +210,7 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool) -> Outco
         Ok(b) => b,
         Err(o) => return o,
     };
-    match analyze_bytes(bytes, ext, &format!("youtube:{}", job.video), off) {
+    match analyze_bytes(bytes, ext, &format!("youtube:{}", job.video), pacer) {
         Ok(vector) => match store_vector(lib, index, job.track, vector, AnalysisSource::Youtube) {
             Ok(stored) => Outcome::Stored(stored),
             Err(e) => Outcome::Transient(format!("storing: {e}")),
@@ -447,57 +456,105 @@ impl Worker {
             return;
         }
         if self.service(Service::Youtube).is_none() || !self.has_audio(Service::Youtube) {
+            self.analysis_held("YouTube Music has no audio now");
             return;
         }
         if let Some(left) = self.pause_left(Service::Youtube) {
+            self.analysis_held("YouTube Music is paused");
             self.analysis_wait(left + super::schedule::wake_jitter());
             return;
         }
         // Playback and its lookups go first.
-        if self.streams_idle() || self.status == v::Status::Buffering || !self.streaming.resolving.is_empty() {
+        if self.streams_idle() {
+            self.analysis_held("the app is idle");
+            return;
+        }
+        if self.status == v::Status::Buffering {
+            self.analysis_held("playback is buffering");
+            return;
+        }
+        if !self.streaming.resolving.is_empty() {
+            self.analysis_held("playback lookups are running");
+            return;
+        }
+        if quiet::busy() {
+            self.analysis_held("a game or a fullscreen app is in front");
             return;
         }
         let daily = self.streaming.schedule.analysis_daily;
         if self.analysis_downloads() >= daily {
+            self.analysis_held("today's downloads are used up");
             self.preview_step();
             return;
         }
+        self.streaming.analysis.held = None;
         let retry_before = now_ms() - self.streaming.schedule.miss_ttl.as_millis() as i64;
-        let todo = match self.lib.streams_needing_analysis(ANALYZED_WITH, retry_before, BATCH) {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("stream analysis: reading the queue: {e}");
-                return;
+        // The tracks set aside stay at the head of the queue: read past them,
+        // or they fill every batch and the rest is never reached.
+        let mut limit = BATCH;
+        loop {
+            let todo = match self.lib.streams_needing_analysis(ANALYZED_WITH, retry_before, limit) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("stream analysis: reading the queue: {e}");
+                    return;
+                }
+            };
+            let read = todo.len();
+            for t in todo {
+                let a = &self.streaming.analysis;
+                if a.skip.contains(&t.track_id) || a.played.contains(&t.track_id) {
+                    continue;
+                }
+                match t.youtube {
+                    Some(video) => {
+                        self.analysis_fetch(t.track_id, video);
+                        return;
+                    }
+                    None if self.can_resolve(t.track_id) => {
+                        log::info!("stream analysis: looking up the song of {}", t.track_id);
+                        self.streaming.analysis.busy = Some((t.track_id, Step::Resolving));
+                        self.begin_resolve(t.track_id);
+                        return;
+                    }
+                    // Looked up lately without a hit (its miss is marked when
+                    // the lookup answers), or YouTube cannot be asked.
+                    None => {
+                        self.streaming.analysis.skip.insert(t.track_id);
+                    }
+                }
             }
-        };
-        for t in todo {
+            if read < limit as usize {
+                break;
+            }
+            // Every track read was set aside: the next read goes past them
+            // (the limit grows each time, so this ends with the queue).
             let a = &self.streaming.analysis;
-            if a.skip.contains(&t.track_id) || a.played.contains(&t.track_id) {
-                continue;
-            }
-            match t.youtube {
-                Some(video) => {
-                    self.analysis_fetch(t.track_id, video);
-                    return;
-                }
-                None if self.can_resolve(t.track_id) => {
-                    log::info!("stream analysis: looking up the song of {}", t.track_id);
-                    self.streaming.analysis.busy = Some((t.track_id, Step::Resolving));
-                    self.begin_resolve(t.track_id);
-                    return;
-                }
-                // Looked up lately without a hit (its miss is marked when
-                // the lookup answers), or YouTube cannot be asked.
-                None => {
-                    self.streaming.analysis.skip.insert(t.track_id);
-                }
-            }
+            limit = BATCH + (a.skip.len() + a.played.len()) as u32;
         }
         if self.preview_step() {
             return;
         }
         let idle = self.streaming.schedule.analysis_idle;
-        self.streaming.analysis.idle_until = Some(now + idle);
+        let a = &mut self.streaming.analysis;
+        log::debug!(
+            "stream analysis: nothing to take now ({} set aside in this run), again in {} s",
+            a.skip.len(),
+            idle.as_secs()
+        );
+        // Looked at afresh after the pause: a lookup miss expires, YouTube
+        // may answer again.
+        a.skip.clear();
+        a.idle_until = Some(now + idle);
+    }
+
+    /// The background queue waits for `why`; logged when the reason changes.
+    fn analysis_held(&mut self, why: &'static str) {
+        let a = &mut self.streaming.analysis;
+        if a.held != Some(why) {
+            log::debug!("stream analysis: waiting: {why}");
+            a.held = Some(why);
+        }
     }
 
     /// The library's queue is done for now: the next new song's preview,

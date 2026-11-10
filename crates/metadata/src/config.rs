@@ -13,6 +13,9 @@ pub struct MetadataConfig {
     pub acoustid_client_key: Option<String>,
     /// The user's Last.fm API key. Without it Last.fm is not asked.
     pub lastfm_key: Option<String>,
+    /// The user's ListenBrainz token (`Authorization: Token …`). Without it
+    /// the endpoints that want one are not asked.
+    pub listenbrainz_token: Option<String>,
 }
 
 impl MetadataConfig {
@@ -21,12 +24,19 @@ impl MetadataConfig {
             contact: contact.into(),
             acoustid_client_key: None,
             lastfm_key: None,
+            listenbrainz_token: None,
         }
     }
 
     #[must_use]
     pub fn with_lastfm_key(mut self, key: impl Into<String>) -> Self {
         self.lastfm_key = Some(key.into()).filter(|k: &String| !k.trim().is_empty());
+        self
+    }
+
+    #[must_use]
+    pub fn with_listenbrainz_token(mut self, token: impl Into<String>) -> Self {
+        self.listenbrainz_token = Some(token.into().trim().to_owned()).filter(|t| !t.is_empty());
         self
     }
 
@@ -75,6 +85,7 @@ impl fmt::Debug for MetadataConfig {
                 &self.acoustid_client_key.as_ref().map(|_| "<redacted>"),
             )
             .field("lastfm_key", &self.lastfm_key.as_ref().map(|_| "<redacted>"))
+            .field("listenbrainz_token", &self.listenbrainz_token.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }

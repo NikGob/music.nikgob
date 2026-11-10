@@ -23,6 +23,11 @@
 //!   the last tracks the radio played to the end. Each extension logs the
 //!   share of new music queued so far. A new pick plays from the stream
 //!   like any search result.
+//! * «Подмешивать случайное» and «Преимущественно новые песни»
+//!   ([`v::Prefs::radio_explore`], [`v::Prefs::radio_unheard`]) go to the
+//!   engine before each extension and each splice of new music
+//!   ([`Engine::set_explore`], [`Engine::set_unheard`]); a change holds from
+//!   the next ones, what is queued stays.
 
 //! * The radio is saved in `session.json` with the queue, so it goes on
 //!   after a restart. Playing anything else (any command that replaces the
@@ -353,8 +358,8 @@ impl Worker {
         self.radio_fetch_new();
         match first {
             Some(t) => {
-                self.queue.shuffle = false;
-                self.queue.set(&[t], 0, Some(context));
+                self.new_list();
+                self.queue.set_ordered(&[t], 0, Some(context));
                 self.play_context = ctx;
                 self.play_context_id = self.recs.radio.run.as_ref().map(|r| seed_context_id(&r.state.seed, false));
                 let generation = self.queue.generation();
@@ -480,9 +485,9 @@ impl Worker {
             let next = crate::home_v2::world_next(&self.lib, e.track, &queued, local_only);
             if !next.is_empty() {
                 log::info!("autoplay: the world goes on with {} tracks of its next album", next.len());
-                self.queue.enqueue(&next);
-                let up = self.queue.upcoming();
-                self.autoplay_entries.extend(up[up.len().saturating_sub(next.len())..].iter().map(|e| e.id));
+                let shuffled = self.shuffle_radio();
+                let added = self.queue.enqueue_path(&next, shuffled);
+                self.autoplay_entries.extend(added.iter().map(|e| e.id));
                 self.preload_next();
                 self.publish_player();
                 return;
@@ -652,6 +657,8 @@ impl Worker {
         let (id, mut state) = (run.id, run.state.clone());
         state.attune(self.recs.session.clone(), self.recs.weights);
         state.set_no_repeat_ms(i64::from(prefs.radio_no_repeat_hours) * 3_600_000);
+        state.set_explore(Some(prefs.radio_explore.fraction()));
+        state.set_unheard(prefs.radio_unheard.fraction());
         let params = RadioParams { new_share, seed: run.seed };
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
@@ -804,12 +811,18 @@ impl Worker {
             }
             None => {
                 let (context, ctx) = (context_of(&run.title), run.ctx);
-                self.queue.shuffle = false;
-                self.queue.set(&ids, 0, Some(context));
+                // A radio's picks are a path: they keep their order (or play
+                // shuffled under shuffle with «Перемешивать радио и
+                // автовоспроизведение»); shuffle stays or goes off as the
+                // setting says.
+                self.new_list();
+                let shuffled = self.shuffle_radio();
+                self.queue.set_path(&ids, Some(context), shuffled);
                 self.play_context = ctx;
                 self.play_context_id = None;
                 let generation = self.queue.generation();
-                let entries: Vec<u64> = self.queue.current().into_iter().chain(self.queue.upcoming().iter().copied()).map(|e| e.id).collect();
+                // In the picks' own order, as `whys` are.
+                let entries: Vec<u64> = self.queue.context_order().iter().map(|e| e.id).collect();
                 self.recs.why.clear();
                 self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
@@ -822,9 +835,8 @@ impl Worker {
             }
             Some(_) => {
                 let resume = std::mem::take(&mut run.resume);
-                self.queue.enqueue(&ids);
-                let up = self.queue.upcoming();
-                let entries: Vec<u64> = up[up.len().saturating_sub(ids.len())..].iter().map(|e| e.id).collect();
+                let shuffled = self.shuffle_radio();
+                let entries: Vec<u64> = self.queue.enqueue_path(&ids, shuffled).iter().map(|e| e.id).collect();
                 self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.added.extend(entries);
@@ -863,7 +875,8 @@ impl Worker {
         if up.is_empty() || have >= want {
             return;
         }
-        let picks = run.state.take_new(&snap.recs().local_only(prefs.mixes_downloaded_only), want - have);
+        run.state.set_explore(Some(prefs.radio_explore.fraction()));
+        let picks = run.state.take_new(&snap.recs().local_only(prefs.mixes_downloaded_only), want - have, up.len(), have);
         let lately = self.played_lately();
         let mut ids: Vec<(TrackId, RemoteId)> = Vec::new();
         for p in picks {

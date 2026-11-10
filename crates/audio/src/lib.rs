@@ -76,7 +76,31 @@
 //! with how much audio was buffered at the time, which tells a network or
 //! disk stall from a CPU that cannot keep up.
 //!
+//! # Speed, tone, reverb, equalizer
+//!
+//! Each item may carry an [`ItemFx`]:
+//!
+//! * **Speed** is a change of the resampler's ratio (`source rate * speed`
+//!   to the device rate), so the pitch follows the tempo, as it does on the
+//!   sped-up and slowed versions people know. rubato's synchronous FFT
+//!   resampler filters with a Blackman-Harris-squared windowed sinc as long
+//!   as its block (at least 1024 taps here, e.g. 1911 for 44.1 kHz at 1.3
+//!   to a 48 kHz device), cut off just below the lower of the two Nyquist
+//!   frequencies: playing faster removes what would fold back above the
+//!   device's Nyquist (stopband beyond 100 dB), playing slower keeps the
+//!   whole spectrum of the source (its 22.05 kHz land at 18.7 kHz for 0.85)
+//!   and removes the images above it. The speed is an exact ratio of small
+//!   integers, so lengths never drift. Positions and lengths the engine
+//!   reports stay on the item's own timeline whatever the speed.
+//! * **Keeping the timbre** (optional, `formant`): the spectral envelope is
+//!   put back where it was recorded, the pitch still follows the speed.
+//! * **Tone and reverb** (`fx`): two shelves, a preamp and a feedback
+//!   delay network, per item on the decoder thread, before the crossfade.
+//!
+//! The **equalizer** (`eq`) is global and runs in the callback.
+//!
 //! # Not covered
+
 //!
 //! AAC/M4A gapless (no iTunSMPB parsing), chained Ogg streams, Opus
 //! multichannel, live looping. See the crate tests for what is verified.
@@ -84,8 +108,12 @@
 
 mod analyzer;
 mod backend;
+mod biquad;
 mod channels;
 mod decode;
+mod eq;
+mod formant;
+mod fx;
 mod offline;
 mod pipeline;
 mod player;
@@ -96,11 +124,12 @@ mod tap;
 mod types;
 
 pub use analyzer::Analyzer;
+pub use eq::{EQ_BANDS, EQ_FREQS, EQ_MAX_DB, eq_preamp_db, eq_response_db};
 pub use fastframe_audio::{Buffer, BufferSize, Device, OutputOptions, output_device_names};
 pub use offline::{OfflineDevice, OfflineOptions};
 pub use player::{Player, PlayerOptions, WakeFn};
 pub use tap::{SNAPSHOT_LEN, VisualizerTap};
 pub use types::{
-    ByteSource, DecodeError, Event, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, SpawnError,
-    StreamOpener,
+    ByteSource, DecodeError, Event, ItemFx, ItemSource, PcmError, PcmRead, PcmSource, PlayItem,
+    Reverb, SpawnError, StreamOpener,
 };

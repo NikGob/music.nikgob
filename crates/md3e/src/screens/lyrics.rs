@@ -8,6 +8,8 @@ use egui::{Align2, Color32, Galley, Rect, Sense, Ui, pos2, text::LayoutJob, vec2
 use nikgob_motion::Spring;
 use nikgob_view::{Command, LyricLine, LyricsSync, Prefs, Status, ViewState};
 
+use super::lyrics_front::{self, Ease, Piece, Run};
+use super::stage::{Part, Stage};
 use crate::{
     Theme, TypeStyle,
     components::{Size, anim},
@@ -42,16 +44,21 @@ enum Style {
     Wave,
 }
 
-/// What an animation goes over («Подсвечивать»).
+/// What an animation goes over («Шаг подсветки»): what the light's front
+/// keeps time by ([`Front`]) and what lights or jumps together.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum By {
+    /// The letters of each timed piece, by their weights: a held vowel
+    /// draws out.
     Letters,
     /// The timed pieces: the syllables of a text timed by syllables (the
-    /// words of one timed by words), each filled evenly across its letters
-    /// over its own time; under the wave a word rises with its syllables.
+    /// words of one timed by words), each crossed evenly over its own time.
+    /// Under Focus a piece lights whole as it starts; in the wave its
+    /// letters light across it, and the word rises with its syllables.
     Syllables,
-    /// Whole written words (each part of a hyphenated one; the syllables
-    /// of one light together).
+    /// Whole written words (each part of a hyphenated one), each crossed
+    /// evenly from its first sound to its last; outside karaoke the
+    /// syllables of one light (and jump) together.
     Words,
 }
 
@@ -89,6 +96,14 @@ impl Look {
 /// The lyrics take the whole area given (less the mega view's control row):
 /// the soft bands, or the plain fade with them off, lie inside it.
 pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec<Command>) -> bool {
+    show_on(ui, state, bass, mega, &Stage::REAL, out)
+}
+
+/// [`show`] for the real view or the settings' stage ([`Stage`]): the copy
+/// reads no pointer (its scene's hand scrolls it), asks for frames only
+/// while it moves and notes where its line, its pause indicator, its
+/// column and its soft bands are.
+pub fn show_on(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, stage: &Stage, out: &mut Vec<Command>) -> bool {
     let look = style_for(&state.prefs, &state.lyrics.lines);
     let size = vec2(ui.available_width(), ui.available_height().max(80.0));
     let full = Rect::from_min_size(ui.cursor().min, size);
@@ -98,7 +113,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     let (live, row) = if mega { control_row(full) } else { (full, None) };
     if mega && state.lyrics.lines.is_empty() {
         let left = plain(ui, live, state);
-        return row.is_some_and(|r| control_in(ui, r, left, state, out));
+        return stage.live && row.is_some_and(|r| control_in(ui, r, left, state, out));
     }
     let resp = ui.interact(live, ui.id().with("lyrics-live"), Sense::click_and_drag());
     let mut sizes = if mega { MEGA } else { PANE };
@@ -107,8 +122,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, bass: f32, mega: bool, out: &mut Vec
     sizes.small *= scale;
     sizes.sub *= scale;
     sizes.gap *= scale;
-    paint(ui, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, out);
-    let Some(row) = row else { return false };
+    paint(ui, live, &resp, state, &state.lyrics.lines, look, bass, sizes, mega, stage, out);
+    // On the stage the control keeps its row but is not drawn: it notes
+    // itself app-wide (for its menu and the screenshot runs).
+    let Some(row) = row.filter(|_| stage.live) else { return false };
     let left = ui.ctx().data(|d| d.get_temp::<f32>(ui.id().with("lyrics-view").with("text-left")));
     control_in(ui, row, Some(left.unwrap_or(live.left() + 12.0)), state, out)
 }
@@ -154,12 +171,14 @@ const CALM: Look = Look { style: Style::Focus, by: By::Letters };
 pub(crate) fn made_preview(ui: &mut Ui, size: egui::Vec2, state: &ViewState, lines: &[LyricLine], out: &mut Vec<Command>) {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let look = style_for(&state.prefs, lines);
+    // «Размер текста» too, as in the views.
+    let scale = state.prefs.lyrics_scale.clamp(0.8, 1.4);
     let mut sizes = PANE;
-    sizes.big = 22.0;
-    sizes.small = 17.0;
-    sizes.sub = 13.0;
-    sizes.gap = 14.0;
-    paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, out);
+    sizes.big = 22.0 * scale;
+    sizes.small = 17.0 * scale;
+    sizes.sub = 13.0 * scale;
+    sizes.gap = 14.0 * scale;
+    paint(ui, rect, &resp, state, lines, look, 0.0, sizes, false, &Stage::REAL, out);
 }
 
 /// Paints `lines` over `rect` (the view, clipped there; the soft bands
@@ -175,6 +194,7 @@ fn paint(
     bass: f32,
     sizes: Sizes,
     mega: bool,
+    stage: &Stage,
     out: &mut Vec<Command>,
 ) {
     let _p = crate::prof::scope("lyrics");
@@ -189,14 +209,21 @@ fn paint(
     let id = ui.id().with("lyrics-view");
     let now = anim::now(&ctx);
     let playing = state.player.status == Status::Playing;
-    let pos = steady(&ctx, id.with("steady"), led(state.player.position_now(), state.prefs.lyrics_lead), playing);
+    // The stage's copy plays a scene's own time, which runs as the scene
+    // says: it is taken as it is.
+    let heard = if stage.is_copy() { state.player.position_now() } else { clock(&ctx, id.with("clock"), &state.player, now, playing) };
+    let pos = steady(&ctx, id.with("steady"), led(heard, state.prefs.lyrics_lead), playing);
+    // Text is put on whole pixels where it rests and between them while it
+    // moves ([`afloat`]).
+    let ppp = painter.pixels_per_point();
+    let to_px = |v: f32| (v * ppp).round() / ppp;
     // Each item's motion (its place, focus, wait) is kept under its slot,
     // which stays with the same line when the text is swapped for the same
     // song's (timing made, another source), so nothing moves or dims then.
     // A wait new to a swapped text opens from folded instead of popping
     // open; the first frame of the view shows its state as it is.
-    let first_frame = ctx.data(|d| d.get_temp::<Slots>(id.with("slots"))).is_none();
-    let slot_of = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let (slot_of, swapped) = slots(&ctx, id.with("slots"), &item_keys(lines, &items));
+    let first_frame = swapped.is_none();
     // When the text's timing turns from line times only to real times or
     // back (made timing arrives, «По строкам» picked), the calm Focus and
     // the chosen look fade into each other instead of swapping at once.
@@ -214,7 +241,7 @@ fn paint(
         Some(j) => {
             ctx.data_mut(|d| d.insert_temp(jump_id, j));
             // Let go of it at the latest when it times out.
-            ctx.request_repaint_after(Duration::from_secs_f64((j.at + JUMP_HOLD - now).max(0.0) + 0.01));
+            stage.repaint_after(&ctx, Duration::from_secs_f64((j.at + JUMP_HOLD - now).max(0.0) + 0.01));
         }
         None => ctx.data_mut(|d| d.remove::<Jump>(jump_id)),
     }
@@ -274,7 +301,9 @@ fn paint(
             anim::snap_f32(&ctx, widest_id, widest);
             ctx.data_mut(|d| d.insert_temp(wrap_id, wrap));
         }
-        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap)
+        // Its overshoot is kept, so it settles instead of stopping dead
+        // at the full width.
+        anim::f32(&ctx, widest_id, widest, BLOCK).clamp(0.0, wrap * 1.1)
     } else {
         wrap
     };
@@ -289,7 +318,7 @@ fn paint(
     for (i, (h, extra)) in slots.iter().enumerate() {
         // Background vocals hug the line they belong to.
         if matches!(items[i], DisplayLine::Line(j) if lines[j].background) && i > 0 {
-            y -= gap * 0.6;
+            y -= to_px(gap * 0.6);
         }
         tops.push(y);
         // A wait only takes room while it is happening: it unfolds when it
@@ -301,31 +330,53 @@ fn paint(
         }
         let keep = match items[i] {
             // On Material's expressive spatial spring: the lines part (and
-            // close again) in one soft move.
+            // close again) in one soft move, its small overshoot and all
+            // (cut off at open and at folded, the lines stopped dead there
+            // instead of settling).
             DisplayLine::Interlude { .. } => anim::fraction(
                 &ctx,
                 id.with(("wait-room", slot_of[i])),
                 if cur == Some(i) { 1.0 } else { 0.0 },
                 if theme.reduced_motion { WAIT_ROOM.without_bounce() } else { WAIT_ROOM },
             )
-            .clamp(0.0, 1.0),
+            .clamp(-ROOM_OVERSHOOT, 1.0 + ROOM_OVERSHOOT),
             DisplayLine::Line(_) => 1.0,
         };
-        y += (h + extra + gap) * keep;
-        rooms.push(keep);
+        // Whole pixels from one item to the next, so with the text at rest
+        // every line lies on them; a wait's room moves between them.
+        y += to_px(h + extra + gap) * keep;
+        // The wait itself (its ring, highlight and pointer) takes the room
+        // it has, within its slot.
+        rooms.push(keep.clamp(0.0, 1.0));
     }
 
     // Where the current line rests: at its share of the whole view, with the
-    // soft edges always clear of the top band (a lens: lines come into
-    // focus as they arrive and go soft as they leave).
+    // soft edges always clear of the top band.
     let soft = Soft::of(&state.prefs);
+    // The soft edges thin the text over a band at the view's top and
+    // bottom, by its height on screen; the letters stay sharp and no line
+    // inside the view is left out.
+    let fade = state.prefs.lyrics_soft_edges.then(|| Fade::of(rect, soft));
+    if stage.is_copy() {
+        let band = if state.prefs.lyrics_soft_edges { soft.band(rect) } else { 72.0 };
+        stage.part(&ctx, Part::LyricsColumn, Rect::from_x_y_ranges(left - 12.0..=left + wrap + 12.0, rect.y_range()));
+        stage.part(&ctx, Part::LyricsEdges, Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + band)));
+        stage.part(&ctx, Part::LyricsEdges, Rect::from_min_max(pos2(rect.left(), rect.bottom() - band), rect.max));
+    }
     let anchor = rest_at(rect, sizes.anchor, state.prefs.lyrics_soft_edges.then_some(soft), slots[ci].0 * 0.5, sizes.big * 0.4);
     let follow = tops[ci] + slots[ci].0 * 0.5 - anchor;
 
     // Keep the user's offset, then ease it back over half a second.
     let manual_id = id.with("manual");
-    let mut dy = if resp.dragged() { ctx.input(|i| i.pointer.delta().y) } else { 0.0 };
-    if resp.hovered() {
+    let mut dy = if !stage.live {
+        // The stage's scene scrolls it, not the pointer.
+        stage.hand
+    } else if resp.dragged() {
+        ctx.input(|i| i.pointer.delta().y)
+    } else {
+        0.0
+    };
+    if stage.live && resp.hovered() {
         dy += ctx.input(|i| i.smooth_scroll_delta.y);
         ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
     }
@@ -344,11 +395,25 @@ fn paint(
     let manual_on = manual.on(now);
     ctx.data_mut(|d| d.insert_temp(manual_id, manual));
     if manual_on {
-        ctx.request_repaint_after(Duration::from_secs_f64((manual.until - now).max(0.0)));
+        stage.repaint_after(&ctx, Duration::from_secs_f64((manual.until - now).max(0.0)));
     } else if manual.offset != 0.0 && now < manual.until + 0.5 {
-        ctx.request_repaint();
+        stage.repaint(&ctx);
     }
     let scroll = follow + manual.shift(now);
+    // A text swapped for another (the same song's from another source,
+    // timing made, a wait more or less) is laid out anew at once: the
+    // text's spring is moved by as much as the line it was on moved, so
+    // that line stays where it is and only the rest of the way is
+    // animated, instead of the whole text jumping there and drifting back.
+    let held_id = id.with("held");
+    if swapped == Some(true)
+        && !state.prefs.lyrics_cascade
+        && !manual_on
+        && let Some(moved) = held_moved(ctx.data(|d| d.get_temp::<(u64, f32)>(held_id)), &slot_of, &tops)
+    {
+        anim::shift_f32(&ctx, id.with("scroll"), moved);
+    }
+    ctx.data_mut(|d| d.insert_temp(held_id, (slot_of[ci], tops[ci])));
     // When the view moves or resizes (the window, the layout's span, a card
     // that rises in), the text goes with it at once, kept at its share of
     // the height: the springs are moved with their frame instead of chasing
@@ -370,28 +435,33 @@ fn paint(
     ctx.data_mut(|d| d.insert_temp(frame_id, frame));
 
     // A scroll by hand follows the hand as closely in both modes; the
-    // text's own moves take the calmer spring.
+    // text's own moves take the calmer spring. The springs go to whole
+    // pixels: the text comes to rest sharp without a last step onto them
+    // (drawn to the pixel it stepped all the way, most visibly as it slowed).
     let together = if !state.prefs.lyrics_cascade {
-        anim::f32(&ctx, id.with("scroll"), scroll, if manual_on { HAND } else { Spring::new(1.0, 300.0) })
+        let rest = rect.top() - to_px(rect.top() - scroll);
+        anim::f32(&ctx, id.with("scroll"), rest, if manual_on { HAND } else { FOLLOW })
     } else { scroll };
 
     // Where each item is drawn this frame.
     let ys: Vec<f32> = (0..items.len())
         .map(|i| {
             let far = (i as i32 - ci as i32).unsigned_abs().min(8) as f32;
-            // A wave: lines further from the current one follow more
-            // lazily, without wobbling past their place.
-            let spring = if manual_on {
-                HAND
-            } else {
-                Spring::new(0.9, (300.0 - 26.0 * far).max(110.0))
-            };
             if state.prefs.lyrics_cascade {
-                anim::f32(&ctx, id.with(("y", slot_of[i])), rect.top() + tops[i] - scroll, spring)
+                let spring = if manual_on { HAND } else { follow_spring(far) };
+                anim::f32(&ctx, id.with(("y", slot_of[i])), to_px(rect.top() + tops[i] - scroll), spring)
             } else {
                 rect.top() + tops[i] - together
             }
         })
+        .collect();
+    // How far each item is from the current one, eased with the focus as
+    // the current line changes: the lines' resting brightness follows it,
+    // where every other line stepped brighter or dimmer at once the frame
+    // the next line came in, right as the lines began to move. Kept for
+    // items out of view too, so one scrolled back in is where it should be.
+    let aways: Vec<f32> = (0..items.len())
+        .map(|i| anim::f32(&ctx, id.with(("away", slot_of[i])), (i as f32 - ci as f32).clamp(-9.0, 9.0), AWAY))
         .collect();
     let shown = |i: usize| {
         let (slot_h, extra) = slots[i];
@@ -410,10 +480,8 @@ fn paint(
     let target = item_at(resp.hover_pos());
     // A tap on a touch screen ends with the pointer gone, so nothing is
     // hovered in the frame of its click: the click is placed where it was.
-    let clicked = if resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
+    let clicked = if stage.live && resp.clicked() { item_at(resp.interact_pointer_pos().or(resp.hover_pos())) } else { None };
     for (i, item) in items.iter().enumerate() {
-        let dist = i as i32 - ci as i32;
-        let far = dist.unsigned_abs().min(8) as f32;
         let y = ys[i];
         let (slot_h, extra) = slots[i];
         let room = rooms[i];
@@ -448,14 +516,16 @@ fn paint(
                 left
             }
         };
-        // Fade out towards the edges: softly, blurring, unless turned off.
-        let (edge, blur) = if state.prefs.lyrics_soft_edges {
-            let size = sizes.big * if let DisplayLine::Line(j) = *item { scale(&lines[j]) } else { 1.0 };
-            soft_edge(y, slot_h + extra, rect, size, soft)
-        } else {
-            (((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0), 0.0)
+        // Towards the edges the text fades out. With the soft edges its
+        // colour thins by height where it is drawn ([`fade_galley`]), so
+        // `edge` leaves the line whole; without them the line fades as one.
+        let edge = match fade {
+            Some(_) => 1.0,
+            None => ((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0),
         };
-        let blur_radius = sizes.big * BLUR * soft.strength;
+        // What has no height of its own to fade over (the hover's layer, a
+        // wait's ring) takes the fade at its middle.
+        let whole = fade.map_or(edge, |f| f.at(y + (slot_h + extra) * room * 0.5));
         // A wait that is unfolding or folding has only part of its slot:
         // its highlight and ring take that part and fade with it.
         let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, (slot_h + extra) * room));
@@ -468,12 +538,15 @@ fn paint(
         )
         .clamp(0.0, 1.0);
         if hover > 0.001 {
-            painter.rect_filled(slot.expand2(vec2(10.0, 6.0 * room)), 14, s.on_surface.gamma_multiply(0.06 * edge * room * hover));
+            painter.rect_filled(slot.expand2(vec2(10.0, 6.0 * room)), 14, s.on_surface.gamma_multiply(0.06 * whole * room * hover));
         }
         let DisplayLine::Line(j) = *item else {
             if let DisplayLine::Interlude { start, end, .. } = *item {
                 let k = sizes.big / PANE.big * state.prefs.lyrics_gap_size.clamp(0.8, 1.5) * room;
                 let line = Rect::from_min_size(pos2(side(56.0 * k), y), vec2(56.0 * k, slot_h * room));
+                if is_cur {
+                    stage.part(&ctx, Part::LyricsPause, line);
+                }
                 // Never over its neighbours, wherever their springs are.
                 let above = if i > 0 { ys[i - 1] + slots[i - 1].0 + slots[i - 1].1 } else { f32::NEG_INFINITY };
                 let below = ys.get(i + 1).copied().unwrap_or(f32::INFINITY);
@@ -491,26 +564,36 @@ fn paint(
                     if theme.reduced_motion { WAIT_RING.without_bounce() } else { WAIT_RING },
                 )
                 .max(0.0);
-                waiting(&clipped, line, k, start, end, pos, appear, playing, bass, edge, &state.prefs);
+                waiting(&clipped, line, k, start, end, pos, appear, playing, bass, whole, &state.prefs);
             }
             continue;
         };
         let l = &lines[j];
-        let size = (sizes.small + (sizes.big - sizes.small) * focus) * scale(l);
+        let rest_sizes = (sizes.small * scale(l), sizes.big * scale(l));
+        let size = rest_sizes.0 + (rest_sizes.1 - rest_sizes.0) * focus;
+        let (small, big) = (fixed_layout(&painter, &breaks[j].forced, rest_sizes.0), fixed_layout(&painter, &breaks[j].forced, rest_sizes.1));
         // Between the two resting sizes the size moves every frame.
-        let g = if focus > 0.0 && focus < 1.0 {
-            moving_layout(&painter, &breaks[j].forced, size)
+        let g = if focus <= 0.0 {
+            small.clone()
+        } else if focus >= 1.0 {
+            big.clone()
         } else {
-            fixed_layout(&painter, &breaks[j].forced, size)
+            moving_layout(&painter, &breaks[j].forced, rest_sizes, focus)
         };
-        let line = Rect::from_min_size(pos2(side(g.size().x), y + (slot_h - g.size().y) * 0.5), g.size());
+        // In the middle of its slot: on whole pixels at either resting
+        // size and evenly from one to the other, so the line is sharp where
+        // it rests and never steps on its way there.
+        let inset = |g: &Galley| to_px((slot_h - g.size().y) * 0.5);
+        let inset = inset(&*small) + (inset(&*big) - inset(&*small)) * focus;
+        let line = Rect::from_min_size(pos2(side(g.size().x), y + inset), g.size());
+        if is_cur && !l.background {
+            stage.part(&ctx, Part::LyricsLine, line);
+        }
         // Brightness of a line at rest: past lines a bit brighter than the
         // ones to come; focus mode pushes the rest far back (from the look
-        // before as the look changes).
-        let rest_in = |style: Style| match style {
-            Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
-            _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
-        };
+        // before as the look changes), by how far the line is from the
+        // current one as eased ([`AWAY`]).
+        let rest_in = |style: Style| rest_brightness(style, aways[i]);
         let mut rest = match look_was {
             Some(was) => rest_in(was.style) + (rest_in(look.style) - rest_in(was.style)) * look_mix,
             None => rest_in(look.style),
@@ -525,10 +608,10 @@ fn paint(
         if let Some(t) = sub(l) {
             let sg = sub_layout(t);
             let c = crate::lerp_color(dim, lit, focus * 0.6).gamma_multiply(0.8);
-            soft_galley(&painter, pos2(side(sg.size().x), y + slot_h + 4.0), &sg, c, blur, blur_radius * sizes.sub / sizes.big);
+            fade_galley(&painter, pos2(side(sg.size().x), y + to_px(slot_h + 4.0)), &sg, c, fade);
         }
         if !is_cur && focus < 0.01 {
-            soft_galley(&painter, line.min, &g, dim, blur, blur_radius);
+            fade_galley(&painter, line.min, &g, dim, fade);
             continue;
         }
         // Where the line is sung up to: the position while it is current;
@@ -548,11 +631,12 @@ fn paint(
         } else {
             l
         };
-        let Some(timing) = Timing::of(timed, &g, look) else {
+        let pace = Pace::of(&state.prefs);
+        let Some(timing) = timing_of(&ctx, timed, &g, look, pace, size) else {
             if state.prefs.lyrics_glow {
-                glow(&painter, &g, line, f32::INFINITY, 0.0, lit, focus * 0.1);
+                glow(&painter, &g, line, lit, focus * 0.1, fade);
             }
-            painter.galley_with_override_text_color(line.min, g, crate::lerp_color(dim, lit, focus));
+            fade_galley(&painter, line.min, &g, crate::lerp_color(dim, lit, focus), fade);
             continue;
         };
         // The not-yet-sung part eases with focus from the line's resting
@@ -561,27 +645,30 @@ fn paint(
         // current, and jump back when it stopped being so.
         let base = s.on_surface.gamma_multiply(edge * (rest + (rest.min(UNSUNG) - rest) * focus));
         let color = crate::lerp_color(dim, lit, focus.max(shine));
-        let pace = Pace::of(&state.prefs);
-        let (feather, window) = (pace.feather(size), pace.window());
+        // Focus draws the whole line in that colour, sung or not: there it
+        // eases in with the line's focus (as fast as the sung part's, the
+        // line went bright in a few frames, well before it had grown).
+        let calm = crate::lerp_color(dim, lit, focus);
+        // Sung pieces stay lit (and wave pieces up) in full while the line
+        // is current and go back with its focus after it; a line left
+        // before its focus was whole goes on from full all the same.
+        let hold = if is_cur { 1.0 } else { focus.max(shine) };
         let draw = |painter: &egui::Painter, look: Look, timing: &Timing| {
-            // Words only change colour (their jump stays down), so they
-            // still light up one by one.
-            if theme.reduced_motion && !look.words() {
+            let color = if look.style == Style::Focus { calm } else { color };
+            // Reduced motion keeps everything down: karaoke by letters
+            // still fills along its front (no word rises), the wave lights
+            // its letters one by one without rising, and focus lights the
+            // whole line.
+            if theme.reduced_motion && look.by == By::Letters && look.style == Style::Focus {
                 if state.prefs.lyrics_glow {
-                    let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
-                    glow(painter, &g, line, head, feather, lit, focus * 0.1);
+                    glow(painter, &g, line, lit, focus * 0.1, fade);
                 }
-                if look.style == Style::Karaoke {
-                    let (head, feather) = timing.glide(sung, feather, window);
-                    karaoke(painter, &g, line, head, feather, base, color);
-                } else {
-                    painter.galley_with_override_text_color(line.min, g.clone(), color);
-                }
+                fade_galley(painter, line.min, &g, color, fade);
             } else {
-                timed_line(painter, &g, line, timing, sung, is_cur, focus, size, look, base, color, &state.prefs);
+                timed_line(painter, &g, line, timing, sung, focus, hold, size, look, base, color, &state.prefs, fade);
             }
         };
-        match look_was.and_then(|was| Some((was, Timing::of(timed, &g, was)?))) {
+        match look_was.and_then(|was| Some((was, timing_of(&ctx, timed, &g, was, pace, size)?))) {
             // The look before goes as the new one comes, the line about as
             // opaque as ever between them (see [`look_fades`]).
             Some((was, before)) => {
@@ -608,16 +695,52 @@ fn paint(
         });
         ctx.request_repaint();
     }
-    if resp.hovered() {
+    if stage.live && resp.hovered() {
         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if playing {
-        ctx.request_repaint();
+        stage.repaint(&ctx);
     }
+}
+
+/// How far a text laid out anew moved the item the view was on (`held`:
+/// its slot and top the frame before), by the items' slots and `tops` now;
+/// `None` when it is not there any more.
+fn held_moved(held: Option<(u64, f32)>, slot_of: &[u64], tops: &[f32]) -> Option<f32> {
+    let (slot, top) = held?;
+    let i = slot_of.iter().position(|s| *s == slot)?;
+    Some(tops.get(i)? - top)
 }
 
 /// The spring the text follows a scroll by hand on.
 const HAND: Spring = Spring::new(1.0, 1600.0);
+
+/// The spring the text follows the current line on: that of a line's focus
+/// ([`AWAY`]), so the line comes to its place as it grows and lights, in
+/// one move and without swinging past it.
+const FOLLOW: Spring = Spring::new(1.0, 170.0);
+
+/// [`FOLLOW`] for a line `far` lines from the current one, when each line
+/// moves on its own: further ones follow more lazily, none past its place.
+fn follow_spring(far: f32) -> Spring {
+    Spring::new(1.0, (FOLLOW.stiffness - 14.0 * far.max(0.0)).max(70.0))
+}
+
+/// The spring a line's distance from the current one eases on (that of
+/// its focus, so its brightness moves with the rest of the change).
+const AWAY: Spring = Spring::new(1.0, 170.0);
+
+/// How bright a line at rest is under `style`, `away` lines from the
+/// current one (before it when negative; fractions between whole lines
+/// while the current line changes): lines sung already a bit brighter
+/// than the ones to come; focus pushes the rest far back.
+fn rest_brightness(style: Style, away: f32) -> f32 {
+    let far = away.abs().min(8.0);
+    match style {
+        Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
+        _ => (0.42 + 0.08 * (-away).clamp(0.0, 1.0)) * 0.86f32.powf((far - 1.0).max(0.0)),
+    }
+}
 
 /// The spring mega mode's block of text moves to its new middle on when
 /// the text changes.
@@ -676,34 +799,28 @@ fn look_fades(mix: f32) -> (f32, f32) {
 /// pointer and draws nothing.
 const ROOMLESS: f32 = 0.01;
 
-/// The Gaussian blur (sigma) of a line at the very edge, relative to the
-/// big text size (at «Сила размытия» 100 %).
-const BLUR: f32 = 0.12;
+/// How far past open or folded a wait's room may swing (its spring's own
+/// overshoot is a few hundredths); only a bound for safety.
+const ROOM_OVERSHOOT: f32 = 0.1;
 
 /// The soft edges' settings: how deep each band reaches (a share of the
-/// view's height, «Глубина»), how much a line at the edge is blurred
-/// («Сила размытия») and how early it fades («Затухание»).
+/// view's height, «Глубина») and how early a line fades in it
+/// («Затухание»).
 #[derive(Clone, Copy, Debug)]
 struct Soft {
     depth: f32,
-    strength: f32,
     fade: f32,
 }
 
 impl Soft {
     fn of(p: &Prefs) -> Self {
-        Self {
-            depth: p.lyrics_soft_depth.clamp(0.08, 0.4),
-            strength: p.lyrics_soft_strength.clamp(0.0, 1.5),
-            fade: p.lyrics_soft_fade.clamp(0.0, 1.0),
-        }
+        Self { depth: p.lyrics_soft_depth.clamp(0.08, 0.4), fade: p.lyrics_soft_fade.clamp(0.0, 1.0) }
     }
 
     /// How deep the band at each edge of `rect` reaches.
     fn band(self, rect: Rect) -> f32 {
         (rect.height() * self.depth).clamp(40.0, 360.0).min(rect.height() * 0.4)
     }
-
 }
 
 /// Where the current line's middle rests, down from `rect`'s top: `share`
@@ -718,26 +835,101 @@ fn rest_at(rect: Rect, share: f32, soft: Option<Soft>, half: f32, ink: f32) -> f
     }
 }
 
-/// The soft edges for an item `height` tall at `top`: (opacity, blur 0..1).
-/// Over the band its blur grows from nothing, slowly at first, to full at
-/// the edge, while it stays visible through most of the band, thinning
-/// faster only near the edge (a gentler fade keeps it bright until nearer
-/// the edge), so the band shows blurred lines instead of empty room; it
-/// is gone before its ink (accents and descenders, `size` × 0.4 around
-/// it) reaches the edge, so the view's clip never cuts a visible line.
-fn soft_edge(top: f32, height: f32, rect: Rect, size: f32, soft: Soft) -> (f32, f32) {
-    let band = soft.band(rect);
-    let ink = size * 0.4;
-    let room = (top - ink - rect.top()).min(rect.bottom() - (top + height + ink));
-    let f = (room / band.max(1.0)).clamp(0.0, 1.0);
-    let d = 1.0 - f;
-    (1.0 - d.powf(3.0 - 1.8 * soft.fade), d * d * (3.0 - 2.0 * d))
+/// The soft edges of a view from `top` to `bottom` (on screen): the text
+/// is whole in the middle and thins over a `band` at either edge, to
+/// nothing at the edge itself. A mask over the view, by height alone: a
+/// line in a band is thinner towards the edge and as sharp as any other,
+/// and every line in the view is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fade {
+    top: f32,
+    bottom: f32,
+    band: f32,
+    /// How the opacity rises over the band: 1 evenly, more keeps the text
+    /// brighter until nearer the edge.
+    power: f32,
 }
 
-/// `g` at `pos` in `color`, blurred by `blur` (0..1) of `radius` points
-/// of Gaussian sigma ([`super::lyrics_blur`]): one draw, sharp or not.
-fn soft_galley(painter: &egui::Painter, pos: egui::Pos2, g: &Arc<Galley>, color: Color32, blur: f32, radius: f32) {
-    super::lyrics_blur::galley(painter, pos, g, color, radius * blur);
+impl Fade {
+    fn of(rect: Rect, soft: Soft) -> Self {
+        Fade { top: rect.top(), bottom: rect.bottom(), band: soft.band(rect), power: 3.0 - 1.8 * soft.fade }
+    }
+
+    /// How opaque (0..1) the text is at height `y` on screen.
+    fn at(self, y: f32) -> f32 {
+        let room = (y - self.top).min(self.bottom - y);
+        let f = (room / self.band.max(1.0)).clamp(0.0, 1.0);
+        1.0 - (1.0 - f).powf(self.power)
+    }
+
+    /// Whether everything from `y0` down to `y1` is clear of both bands.
+    fn clear(self, y0: f32, y1: f32) -> bool {
+        y0 - self.top >= self.band && self.bottom - y1 >= self.band
+    }
+}
+
+/// `g` at `pos` with each glyph vertex in `color` (its own colour when
+/// `None`), thinned by `fade` at its height on screen: the glyphs are the
+/// galley's own, so the text is as sharp as ever.
+fn faded(g: &Galley, pos: egui::Pos2, color: Option<Color32>, fade: Fade) -> Arc<Galley> {
+    let mut out = g.clone();
+    for placed in &mut out.rows {
+        let top = pos.y + placed.pos.y;
+        let mut row = (*placed.row).clone();
+        let glyphs = row.visuals.glyph_vertex_range.clone();
+        if let Some(vertices) = row.visuals.mesh.vertices.get_mut(glyphs) {
+            for v in vertices {
+                v.color = color.unwrap_or(v.color).gamma_multiply(fade.at(top + v.pos.y));
+            }
+        }
+        placed.row = Arc::new(row);
+    }
+    Arc::new(out)
+}
+
+/// [`faded`] when `g` at `pos` reaches into one of `fade`'s bands; `None`
+/// when it lies clear of them (or there is no fade) and is drawn as it is.
+fn through(g: &Galley, pos: egui::Pos2, color: Option<Color32>, fade: Option<Fade>) -> Option<Arc<Galley>> {
+    let ink = g.mesh_bounds.translate(pos.to_vec2());
+    fade.filter(|f| !f.clear(ink.top(), ink.bottom())).map(|f| faded(g, pos, color, f))
+}
+
+/// `g` at `pos` in `color`, thinned towards the view's edges by `fade`.
+fn fade_galley(painter: &egui::Painter, pos: egui::Pos2, g: &Arc<Galley>, color: Color32, fade: Option<Fade>) {
+    if color.a() == 0 {
+        return;
+    }
+    let (pos, g) = afloat(painter, pos, g);
+    match through(&g, pos, Some(color), fade) {
+        Some(g) => {
+            painter.galley(pos, g, color);
+        }
+        None => {
+            painter.galley_with_override_text_color(pos, g, color);
+        }
+    }
+}
+
+/// `g` to be drawn at the height of `pos` exactly, between whole pixels
+/// too: the renderer puts a text's origin on whole pixels, so a line that
+/// moves steps from one to the next (seen as a shake while it slows to its
+/// place, and as lines trembling against each other when each moves on its
+/// own). Returns the origin on whole pixels and the galley with its rows
+/// moved by the rest; what rests on whole pixels is drawn as it is, as
+/// sharp as ever. Across, the origin is left to the renderer.
+fn afloat(painter: &egui::Painter, pos: egui::Pos2, g: &Arc<Galley>) -> (egui::Pos2, Arc<Galley>) {
+    let ppp = painter.pixels_per_point();
+    let whole = pos2(pos.x, (pos.y * ppp).round() / ppp);
+    let rest = pos.y - whole.y;
+    if !rest.is_finite() || (rest * ppp).abs() < 0.02 {
+        return (whole, g.clone());
+    }
+    let mut out = (**g).clone();
+    for placed in &mut out.rows {
+        placed.pos.y += rest;
+    }
+    out.mesh_bounds = out.mesh_bounds.translate(vec2(0.0, rest));
+    (whole, Arc::new(out))
 }
 
 /// The item under the pointer at height `y`, from each item's drawn
@@ -768,6 +960,58 @@ fn led(pos: Duration, lead: f32) -> Duration {
     } else {
         pos.saturating_sub(Duration::from_secs_f32(-lead))
     }
+}
+
+/// The view's own clock: where the song is, as the frames see it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Clock {
+    /// The time of the frame it was last read in.
+    at: f64,
+    /// The song's position then, seconds.
+    pos: f64,
+}
+
+/// The clock comes to the player's position over about this long, seconds.
+const CLOCK_BLEND: f64 = 0.15;
+/// Further than this from the player's position (a seek, another track, a
+/// loop) the clock goes there at once.
+const CLOCK_SEEK: f64 = 0.25;
+/// While it waits for the player's position to catch up, the clock still
+/// runs at this share of the pace: it slows down, never stops or goes back.
+const CLOCK_SLOWEST: f64 = 0.5;
+
+impl Clock {
+    /// The clock a frame on: at `now` (the frame's time) the player says
+    /// `heard` seconds and moves `rate` seconds a second. While it plays
+    /// the clock runs by the frames' own time, the one the springs go by,
+    /// and comes to the player's position little by little: that one is
+    /// read some way into each frame and is put right now and then, which
+    /// made every front and jump tremble or hop. `end`: the track's length.
+    fn step(last: Option<Clock>, heard: f64, now: f64, rate: f64, end: Option<f64>, playing: bool) -> Clock {
+        let there = Clock { at: now, pos: heard };
+        let Some(last) = last.filter(|_| playing) else { return there };
+        let dt = now - last.at;
+        if dt.is_nan() || dt < 0.0 {
+            return there;
+        }
+        let run = dt * rate.max(0.0);
+        let off = heard - (last.pos + run);
+        if off.is_nan() || off.abs() > CLOCK_SEEK {
+            return there;
+        }
+        let step = (run + off * (1.0 - (-dt / CLOCK_BLEND).exp())).max(run * CLOCK_SLOWEST);
+        let pos = last.pos + step;
+        Clock { at: now, pos: end.map_or(pos, |end| pos.min(end.max(last.pos))) }
+    }
+}
+
+/// The song's position for this frame of the view under `id` ([`Clock`]).
+fn clock(ctx: &egui::Context, id: egui::Id, player: &nikgob_view::PlayerView, now: f64, playing: bool) -> Duration {
+    let heard = player.position_now().as_secs_f64();
+    let end = player.duration.map(|d| d.as_secs_f64());
+    let c = Clock::step(ctx.data(|d| d.get_temp(id)), heard, now, f64::from(player.rate), end, playing);
+    ctx.data_mut(|d| d.insert_temp(id, c));
+    Duration::from_secs_f64(c.pos.max(0.0))
 }
 
 /// The painted position, kept from stepping back by a hair while playing:
@@ -994,16 +1238,20 @@ struct Slots {
 /// The slot of each item with `keys`: when most of them were there the
 /// frame before (the same song's text, swapped), each keeps its slot and a
 /// new one gets a slot of its own; otherwise (another song) the slots go
-/// by place, as the items do.
-fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> Vec<u64> {
-    let was = ctx.data(|d| d.get_temp::<Slots>(id)).unwrap_or_default();
-    if was.keys == keys {
-        return was.slots;
+/// by place, as the items do. With whether the items changed since the
+/// frame before (`None`: the view's first frame).
+fn slots(ctx: &egui::Context, id: egui::Id, keys: &[u64]) -> (Vec<u64>, Option<bool>) {
+    let was = ctx.data(|d| d.get_temp::<Slots>(id));
+    if let Some(was) = &was
+        && was.keys == keys
+    {
+        return (was.slots.clone(), Some(false));
     }
-    let now = carry_slots(&was, keys);
+    let changed = was.is_some().then_some(true);
+    let now = carry_slots(&was.unwrap_or_default(), keys);
     let out = now.slots.clone();
     ctx.data_mut(|d| d.insert_temp(id, now));
-    out
+    (out, changed)
 }
 
 fn carry_slots(was: &Slots, keys: &[u64]) -> Slots {
@@ -1088,9 +1336,11 @@ struct Breaks {
 
 /// Glyph advances round differently at different sizes. Freeze the BIG
 /// rows as paragraphs: newlines are row separators, never extra glyphs.
-fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, big: f32) -> Breaks {
+///
+/// Kept shared, so taking it every frame for every line copies no text.
+fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, big: f32) -> Arc<Breaks> {
     let ctx = painter.ctx();
-    if let Some(b) = ctx.data(|d| d.get_temp::<Breaks>(id))
+    if let Some(b) = ctx.data(|d| d.get_temp::<Arc<Breaks>>(id))
         && b.text == text && b.wrap == wrap && b.big == big
     {
         return b;
@@ -1100,7 +1350,7 @@ fn fixed_breaks(painter: &egui::Painter, id: egui::Id, text: &str, wrap: f32, bi
     let g = crate::typography::layout(painter, job);
     let forced = g.rows.iter().map(|r| r.row.glyphs.iter().map(|gl| gl.chr).collect::<String>()).collect::<Vec<_>>().join("\n");
     let size = fixed_layout(painter, &forced, big).size();
-    let b = Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x };
+    let b = Arc::new(Breaks { text: text.to_owned(), wrap, big, forced, height: size.y, width: size.x });
     ctx.data_mut(|d| d.insert_temp(id, b.clone()));
     b
 }
@@ -1109,12 +1359,42 @@ fn fixed_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
     crate::typography::layout(painter, LayoutJob::single_section(text.to_owned(), style_at(size).text_format(Color32::WHITE)))
 }
 
-/// [`fixed_layout`] for a size that is animating (see
-/// [`crate::typography::layout_sized`]).
-fn moving_layout(painter: &egui::Painter, text: &str, size: f32) -> Arc<Galley> {
-    crate::typography::layout_sized(painter, style_at(size), |style, _| {
-        LayoutJob::single_section(text.to_owned(), style.text_format(Color32::WHITE))
-    })
+/// [`fixed_layout`] for a line whose size moves between its resting sizes
+/// `rest` (small, big), `t` (0..1) of the way. It is the big resting
+/// layout scaled down to the size (the small one scaled up within half a
+/// point of it): one layout all the way, so each letter keeps its place in
+/// the line as it grows. Laid out anew at every whole size on the way, each
+/// with its letters on its own whole pixels, the letters shook against
+/// each other a dozen times a move, and each size drew its glyphs into the
+/// font atlas the first time. Its rows and height go evenly between the two
+/// resting layouts', so the line grows without the whole-pixel steps of
+/// each size's own rounded row height (which moved it in its slot by half
+/// a pixel at a time) and meets either resting layout where it ends.
+fn moving_layout(painter: &egui::Painter, text: &str, rest: (f32, f32), t: f32) -> Arc<Galley> {
+    let size = rest.0 + (rest.1 - rest.0) * t;
+    let (from, to) = (fixed_layout(painter, text, rest.0), fixed_layout(painter, text, rest.1));
+    let (base, at) = if (size - rest.0).abs() <= 0.5 && (size - rest.1).abs() > 0.5 { (&from, rest.0) } else { (&to, rest.1) };
+    let g = crate::typography::scale_galley(base, size / at.max(f32::EPSILON));
+    between(g, &from, &to, t)
+}
+
+/// `g` with its rows placed and its height taken `t` (0..1) of the way
+/// from `from`'s to `to`'s (the same rows at two sizes); as it is when the
+/// rows differ.
+fn between(g: Arc<Galley>, from: &Galley, to: &Galley, t: f32) -> Arc<Galley> {
+    if g.rows.len() != from.rows.len() || g.rows.len() != to.rows.len() {
+        return g;
+    }
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    let mut out = Arc::unwrap_or_clone(g);
+    let mut bounds = Rect::NOTHING;
+    for (r, placed) in out.rows.iter_mut().enumerate() {
+        placed.pos.y = lerp(from.rows[r].pos.y, to.rows[r].pos.y);
+        bounds = bounds.union(placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+    }
+    out.mesh_bounds = bounds;
+    out.rect = Rect::from_min_size(out.rect.min, vec2(out.rect.width(), lerp(from.rect.height(), to.rect.height())));
+    Arc::new(out)
 }
 
 /// A looping sample for the settings' hover card: the line being sung
@@ -1169,21 +1449,24 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     }
     let gap = 6.0 * fit.min(1.0);
     let g = fixed_layout(&painter, &line.text, big);
-    let cur = Rect::from_min_size(pos2(rect.left() + PAD, rect.center().y - g.size().y * 0.5 + big * 0.1), g.size());
+    // On whole pixels, as a line at rest in the view is.
+    let ppp = painter.pixels_per_point();
+    let top = ((rect.center().y - g.size().y * 0.5 + big * 0.1) * ppp).round() / ppp;
+    let cur = Rect::from_min_size(pos2(rect.left() + PAD, top), g.size());
     for (text, y) in [(TEXTS[0], cur.top() - gap), (TEXTS[2], cur.bottom() + gap)] {
         let sg = fixed_layout(&painter, text, small);
         let top = if y < cur.top() { y - sg.size().y } else { y };
         painter.galley_with_override_text_color(pos2(cur.left(), top), sg, dim);
     }
     let base = s.on_surface.gamma_multiply(rest.min(UNSUNG));
-    if let Some(timing) = Timing::of(&line, &g, look) {
+    if let Some(timing) = timing_of(ui.ctx(), &line, &g, look, Pace::of(prefs), big) {
         // Past the end the line is drawn as no longer current, its light
         // (and the wave's lift) easing out with `focus`.
         let back = ((pos.as_secs_f32() - BACK) / 0.4).clamp(0.0, 1.0);
         let back = back * back * (3.0 - 2.0 * back);
         let (current, focus) = if back > 0.0 { (false, 1.0 - back) } else { (true, 1.0) };
         let color = crate::lerp_color(base, lit, focus);
-        timed_line(&painter, &g, cur, &timing, pos, current, focus, big, look, base, color, prefs);
+        timed_line(&painter, &g, cur, &timing, pos, focus, if current { 1.0 } else { focus }, big, look, base, color, prefs, None);
     }
 }
 
@@ -1238,8 +1521,8 @@ pub(crate) fn countdown_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
 }
 
 /// The soft edges for their settings' card: lines rolling up through the
-/// sample as the lyrics scroll, blurring and fading at its top and bottom
-/// (when off, cut by the card as before).
+/// sample as the lyrics scroll, thinning over its top and bottom bands as
+/// in the view (when off, cut by the card as before).
 pub(crate) fn edges_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     let s = Theme::get(ui.ctx()).scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
@@ -1247,23 +1530,27 @@ pub(crate) fn edges_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     // A line every 1.6 s, each move eased out over half a second.
     const STEP: f64 = 1.6;
     let size = (rect.height() / 6.0).clamp(12.0, 20.0);
-    let pitch = size * 1.8;
+    // The lines rest on whole pixels, a whole number of them apart, and
+    // roll between them ([`afloat`]).
+    let ppp = painter.pixels_per_point();
+    let whole = |v: f32| (v * ppp).round() / ppp;
+    let pitch = whole(size * 1.8);
     let t = anim::now(ui.ctx()) / STEP;
     let n = t.floor() as i64;
     let x = ((t.fract() * STEP) / 0.5).min(1.0) as f32;
     let ease = 1.0 - (1.0 - x).powi(3);
-    let soft = Soft::of(prefs);
+    let fade = prefs.lyrics_soft_edges.then(|| Fade::of(rect, Soft::of(prefs)));
     for k in -4i64..=5 {
         let g = fixed_layout(&painter, TEXTS[(n + k).rem_euclid(TEXTS.len() as i64) as usize], size);
-        let top = rect.center().y + (k as f32 + 1.0 - ease) * pitch - g.size().y * 0.5;
-        let (alpha, blur) = if prefs.lyrics_soft_edges {
-            soft_edge(top, g.size().y, rect, size, soft)
+        let top = whole(rect.center().y - g.size().y * 0.5) + (k as f32 + 1.0 - ease) * pitch;
+        let alpha = if fade.is_some() {
+            1.0
         } else {
             let band = rect.height() * 0.12;
-            (((top + g.size().y - rect.top()) / band).min((rect.bottom() - top) / band).clamp(0.0, 1.0), 0.0)
+            ((top + g.size().y - rect.top()) / band).min((rect.bottom() - top) / band).clamp(0.0, 1.0)
         };
         let rest = if k == 0 { 1.0 } else { 0.45 };
-        soft_galley(&painter, pos2(rect.left() + 12.0, top), &g, s.on_surface.gamma_multiply(rest * alpha), blur, size * BLUR * soft.strength);
+        fade_galley(&painter, pos2(rect.left() + 12.0, top), &g, s.on_surface.gamma_multiply(rest * alpha), fade);
     }
 }
 
@@ -1319,31 +1606,187 @@ struct Timing {
     glyph_units: Vec<Option<usize>>,
     /// Each letter's own part of its syllable's time, weighted by
     /// [`letter_weight`] (spaces have none).
+    #[cfg(test)]
     letter_times: Vec<Option<(f32, f32)>>,
-    /// When each letter lights and jumps (spaces have none): its own
-    /// start, but never before a letter written ahead of it.
-    onsets: Vec<Option<f32>>,
+    /// When each letter starts to light (and to jump) under the look the
+    /// timing is for: as the front's way comes to it in the wave, or to its
+    /// syllable or written word where those light whole; never before a
+    /// letter written ahead of it. None for spaces, and for every letter
+    /// where nothing lights by itself: karaoke follows the front, Focus by
+    /// letters lights the whole line.
+    lit: Vec<Option<f32>>,
     /// Each glyph's span on the line's run of advances.
+    #[cfg(test)]
     xs: Vec<(f32, f32)>,
     /// First syllable of each whitespace-delimited word.
     words: Vec<usize>,
+    /// The way the light goes along the line.
+    front: Front,
+}
+
+/// The light's way along a line under a look: a [`Run`] for the pieces sung
+/// one after another without a pause (a whole line, when it is sung in one
+/// breath), each with a front of its own that crosses it in one motion: no
+/// stop and no step in its speed at a letter, a syllable or a word, and
+/// never back. It waits only where the singing does, at the end of a run,
+/// with the run lit whole and the next one not begun.
+///
+/// What it keeps time by is the look's unit: by syllables the timed
+/// pieces, each crossed evenly; by letters those with the ends of their
+/// letters as the letters' weights guess them (a held vowel draws out); by
+/// words each written word, crossed evenly from its first sound to its
+/// last.
+struct Front {
+    runs: Vec<Run>,
+    /// Run index for each glyph (spaces have none).
+    of: Vec<Option<usize>>,
+    /// The width of the light's soft edge, px: the front is its middle.
+    edge: f32,
+}
+
+impl Front {
+    /// The front for `look` over a line's pieces, and when each letter
+    /// starts to light under it ([`Timing::lit`]).
+    #[allow(clippy::too_many_arguments)]
+    fn over(
+        look: Look,
+        syllables: &[Syllable],
+        glyphs: &[Option<usize>],
+        units: &[Unit],
+        glyph_units: &[Option<usize>],
+        times: &[Option<(f32, f32)>],
+        xs: &[(f32, f32)],
+        edge: f32,
+        ease: Ease,
+    ) -> (Self, Vec<Option<f32>>) {
+        let n = glyphs.len();
+        // Focus by letters lights the line whole: nothing goes along it.
+        if look.style == Style::Focus && look.by == By::Letters {
+            return (Front { runs: Vec::new(), of: vec![None; n], edge: 0.0 }, vec![None; n]);
+        }
+        let sweeping = look.style == Style::Karaoke;
+        // Only karaoke draws the front's edge; the other looks take its
+        // times.
+        let edge = if sweeping { edge.max(0.0) } else { 0.0 };
+        let owners = if look.words() { glyph_units } else { glyphs };
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut marks: Vec<(f32, f32)> = Vec::new();
+        let mut piece_of: Vec<Option<usize>> = vec![None; n];
+        let mut filling = None;
+        for k in 0..n {
+            let Some(o) = owners[k] else { continue };
+            if filling != Some(o) {
+                let (start, end) = if look.words() {
+                    units.get(o).map_or((0.0, 0.0), |u| (u.start, u.end))
+                } else {
+                    (syllables[o].start, syllables[o].end)
+                };
+                pieces.push(Piece { start, end, from: xs[k].0, to: xs[k].1, marks: marks.len()..marks.len() });
+                filling = Some(o);
+            } else if let Some(piece) = pieces.last_mut() {
+                // By letters: where each letter ends inside its piece.
+                if look.by == By::Letters
+                    && let Some((at, _)) = times[k]
+                {
+                    marks.push((xs[k].0, at));
+                    piece.marks.end = marks.len();
+                }
+                piece.to = xs[k].1;
+            }
+            piece_of[k] = Some(pieces.len() - 1);
+        }
+        let (runs, run_of) = lyrics_front::runs(&pieces, &marks, edge, ease);
+        let of = piece_of.iter().map(|p| p.map(|i| run_of[i])).collect();
+        let lit = if sweeping {
+            vec![None; n]
+        } else {
+            // The wave lights letter by letter (by words the word whole).
+            let by_letter = look.style == Style::Wave && !look.words();
+            (0..n)
+                .map(|k| piece_of[k].map(|i| runs[run_of[i]].left(if by_letter { xs[k].0 } else { pieces[i].from })))
+                .collect()
+        };
+        (Front { runs, of, edge }, lit)
+    }
+
+    /// The unlit end of run `run`'s soft edge at `p` seconds, px along the
+    /// line: the light is whole an edge's width behind it. −∞ before the run
+    /// is sung (nothing of it lit), +∞ once its front has come to rest (all
+    /// of it lit); the edge is past either end of the run by then, so
+    /// neither is a step.
+    fn head(&self, run: usize, p: f64) -> f32 {
+        let Some(run) = self.runs.get(run) else { return f32::INFINITY };
+        let (start, rest) = run.times();
+        if p <= start {
+            f32::NEG_INFINITY
+        } else if p >= rest {
+            f32::INFINITY
+        } else {
+            run.at(p) + 0.5 * self.edge
+        }
+    }
+}
+
+/// The timings of the lines being sung, kept from frame to frame: a line's
+/// timing and its front's way are worked out once for its layout, look and
+/// settings, not every frame.
+#[derive(Clone, Default)]
+struct Timings(Vec<(u64, Arc<Timing>)>);
+
+/// How many timings are kept: the lines sung or fading at once, twice over
+/// for a change of look.
+const TIMINGS: usize = 12;
+
+/// [`Timing::of`], kept ([`Timings`]).
+fn timing_of(ctx: &egui::Context, l: &LyricLine, g: &Galley, look: Look, pace: Pace, size: f32) -> Option<Arc<Timing>> {
+    use std::hash::{Hash, Hasher};
+    if l.words.is_empty() {
+        return None;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (look.style as u8, look.by as u8, pace.edge(size).to_bits(), pace.smooth.to_bits()).hash(&mut h);
+    for w in &l.words {
+        (w.start, w.end, &w.text).hash(&mut h);
+    }
+    for gl in g.rows.iter().flat_map(|r| &r.row.glyphs) {
+        (gl.chr, gl.advance_width.to_bits()).hash(&mut h);
+    }
+    let key = h.finish();
+    let id = egui::Id::new("lyrics-timings");
+    let kept = ctx.data_mut(|d| d.get_temp_mut_or_default::<Timings>(id).0.iter().find(|(k, _)| *k == key).map(|(_, t)| t.clone()));
+    if kept.is_some() {
+        return kept;
+    }
+    let timing = Arc::new(Timing::of(l, g, look, pace, size)?);
+    ctx.data_mut(|d| {
+        let kept = &mut d.get_temp_mut_or_default::<Timings>(id).0;
+        if kept.len() >= TIMINGS {
+            kept.remove(0);
+        }
+        kept.push((key, timing.clone()));
+    });
+    Some(timing)
 }
 
 impl Timing {
-    /// The timing of `l` laid out as `g`, its letters' times by weight.
+    /// The timing of `l` laid out as `g`, by letters and on its times
+    /// exactly.
     #[cfg(test)]
     fn new(l: &LyricLine, g: &Galley) -> Option<Self> {
-        Self::build(l, g, false)
+        Self::build(l, g, Look { style: Style::Wave, by: By::Letters }, 0.0, Ease::EXACT)
     }
 
-    /// [`Self::new`] for `look`: by syllables each piece fills evenly
-    /// across its letters over its own time (the fill of a word runs piece
-    /// by piece, each at its own pace).
-    fn of(l: &LyricLine, g: &Galley, look: Look) -> Option<Self> {
-        Self::build(l, g, look.by == By::Syllables)
+    /// The timing of `l` laid out as `g` at text `size`, for `look` at
+    /// `pace`: «Плавность» is how closely the front keeps to the times,
+    /// «Скорость подсветки» how wide the karaoke edge is.
+    fn of(l: &LyricLine, g: &Galley, look: Look, pace: Pace, size: f32) -> Option<Self> {
+        Self::build(l, g, look, pace.edge(size), Ease::of(pace.smooth))
     }
 
-    fn build(l: &LyricLine, g: &Galley, even: bool) -> Option<Self> {
+    fn build(l: &LyricLine, g: &Galley, look: Look, edge: f32, ease: Ease) -> Option<Self> {
+        // By letters a letter's part of its syllable's time goes by its
+        // weight; else evenly by its advance.
+        let even = look.by != By::Letters;
         if l.words.is_empty() {
             return None;
         }
@@ -1424,7 +1867,7 @@ impl Timing {
         // timed to start before one written ahead of it (a timing slip)
         // waits for it, so the light never runs back along the line.
         let mut latest = f32::NEG_INFINITY;
-        let units = spans
+        let units: Vec<Unit> = spans
             .into_iter()
             .map(|u| {
                 last = u.unwrap_or(last);
@@ -1432,51 +1875,20 @@ impl Timing {
                 Unit { start: latest, end: last.end.max(latest) }
             })
             .collect();
-        let mut latest = f32::NEG_INFINITY;
-        let onsets = times.iter().map(|t| t.map(|(a, _)| {
-            latest = latest.max(a);
-            latest
-        })).collect();
-        Some(Self { syllables, glyphs, units, glyph_units, letter_times: times, onsets, xs, words })
-    }
-
-    /// The light front as (centre of its soft edge, edge width): solid up
-    /// to the sung position, the edge just ahead of it. No estimated pace or
-    /// movement between timed pieces, but the edge keeps its width at piece
-    /// boundaries and in the pauses between them (a hard cut mid-word reads
-    /// as a glitch); it only fades in as the line starts and out once the
-    /// last piece is sung, so the front never jumps.
-    #[cfg(test)]
-    fn head(&self, pos: Duration, feather: f32) -> (f32, f32) {
-        self.glide(pos, feather, 0.0)
-    }
-
-    /// The light front smoothed over `window` seconds («Плавность»): the sung
-    /// position averaged over the window around `pos`, so the front glides
-    /// through letters, pieces and short pauses at an even pace instead of
-    /// changing speed at each letter. On average it keeps to the times, it
-    /// never runs back, and it fades in and out half a window wider.
-    fn glide(&self, pos: Duration, feather: f32, window: f32) -> (f32, f32) {
-        const FADE: f32 = 0.15;
-        const SAMPLES: usize = 17;
-        let p = pos.as_secs_f32();
-        let (Some(first), Some(last)) = (self.syllables.first(), self.syllables.last()) else {
-            return (f32::INFINITY, 0.0);
-        };
-        let window = window.max(0.0);
-        let half = window * 0.5;
-        let out = 1.0 - ((p - half - last.end) / FADE).clamp(0.0, 1.0);
-        if out <= 0.0 {
-            return (f32::INFINITY, 0.0);
-        }
-        let at = if window <= 0.0 {
-            self.sung_at(p)
-        } else {
-            (0..SAMPLES).map(|i| self.sung_at(p - half + window * i as f32 / (SAMPLES - 1) as f32)).sum::<f32>()
-                / SAMPLES as f32
-        };
-        let f = feather * ((p + half - first.start) / FADE).clamp(0.0, 1.0).min(out);
-        (at + 0.5 * f, f)
+        let (front, lit) = Front::over(look, &syllables, &glyphs, &units, &glyph_units, &times, &xs, edge, ease);
+        Some(Self {
+            syllables,
+            glyphs,
+            units,
+            glyph_units,
+            #[cfg(test)]
+            letter_times: times,
+            lit,
+            #[cfg(test)]
+            xs,
+            words,
+            front,
+        })
     }
 
     /// How high (in rest heights) the written word of syllable `s` stands
@@ -1490,35 +1902,10 @@ impl Timing {
         let end = self.words.get(w + 1).copied().unwrap_or(self.syllables.len()).max(first + 1);
         let onset = |i: usize| {
             let sy = &self.syllables[i];
-            if sy.letters == 0 { sy.start } else { self.onsets.get(sy.glyphs.0).copied().flatten().unwrap_or(sy.start) }
+            if sy.letters == 0 { sy.start } else { self.lit.get(sy.glyphs.0).copied().flatten().unwrap_or(sy.start) }
         };
         let height = (first..end).map(|i| jump_over(p - onset(i), speed, window)).sum::<f32>() / (end - first) as f32;
         (height, p - onset(end - 1))
-    }
-
-    /// How far along the line's advances it is sung at `p` seconds.
-    fn sung_at(&self, p: f32) -> f32 {
-        let mut at = 0.0;
-        for s in &self.syllables {
-            if p < s.start {
-                break;
-            }
-            if p < s.end {
-                // Over the letters at their weighted pace.
-                at = s.from;
-                for k in s.glyphs.0..s.glyphs.1 {
-                    let (Some((a, b)), (x0, x1)) = (self.letter_times[k], self.xs[k]) else { continue };
-                    if p < b {
-                        at = syllable_head(x0, x1, a, b, p);
-                        break;
-                    }
-                    at = x1;
-                }
-                break;
-            }
-            at = s.to;
-        }
-        at
     }
 }
 
@@ -1577,7 +1964,7 @@ struct Pace {
     jump: f32,
     /// 0 lights up smoothly .. 1 at once.
     light: f32,
-    /// «Плавность»: 0 by the letters exactly .. 1 smooth.
+    /// «Плавность»: 0 by the times exactly .. 1 smooth.
     smooth: f32,
 }
 
@@ -1596,26 +1983,58 @@ impl Pace {
         self.smooth * SMOOTH_WINDOW
     }
 
-    /// Seconds a letter or word takes to light up (90 % of the way), 0 at
-    /// once; focus brightens [`FOCUS_CALM`] times slower.
+    /// Seconds a letter or word takes to light up (90 % of the way), never
+    /// less than [`LIGHT_FLOOR`]; focus brightens [`FOCUS_CALM`] times slower.
     fn rise(self, style: Style) -> f32 {
-        let rise = 0.5 * (1.0 - self.light) * (1.0 - self.light);
+        let rise = (0.5 * (1.0 - self.light) * (1.0 - self.light)).max(LIGHT_FLOOR);
         if style == Style::Focus { rise * FOCUS_CALM } else { rise }
     }
 
-    /// The karaoke front's soft edge at text `size`: how long a letter it
-    /// crosses takes to light up.
-    fn feather(self, size: f32) -> f32 {
-        size * (0.06 + 0.8 * (1.0 - self.light))
+    /// The soft edge of the karaoke front at text `size`, which is how long
+    /// a letter it crosses takes to light up: about a letter wide at the
+    /// default «Скорость подсветки» (a letter is some 0.55 of the size), a
+    /// fifth of one at once (still no hard cut), two and a half at the
+    /// smoothest.
+    fn edge(self, size: f32) -> f32 {
+        size * (0.12 + 1.3 * (1.0 - self.light))
     }
 }
 
+/// The shortest a letter or word takes to light up, at the fastest
+/// «Скорость подсветки»: three frames or so, a quick ease where lighting at
+/// once was a switch.
+const LIGHT_FLOOR: f32 = 0.05;
 /// Focus brightens words this many times slower than the others light them.
 const FOCUS_CALM: f32 = 2.2;
+/// How lit (0..1 from the unsung tone to the lit one) the whole current
+/// line is under Focus by syllables or words; only the piece being sung is
+/// lit in full.
+const FOCUS_LINE: f32 = 0.7;
+/// Seconds a piece takes to go back to the line's tone once it is sung.
+const FOCUS_FALL: f32 = 0.6;
+/// A piece stands out for at least this long, however short it is sung.
+const FOCUS_HOLD: f32 = 0.25;
+
+/// How much (0..1) a piece sung from `start` to `end` stands out at `p`
+/// under Focus: up as it starts (see [`light_over`]), back down over
+/// [`FOCUS_FALL`] once it is sung. Nothing stays lit behind it: Focus has
+/// no fill.
+fn focus_pulse(p: f32, start: f32, end: f32, rise: f32, window: f32) -> f32 {
+    let end = end.max(start + FOCUS_HOLD) + 0.5 * window;
+    let down = ((p - end) / FOCUS_FALL).clamp(0.0, 1.0);
+    light_over(p - start, rise, window) * (1.0 - down * down * (3.0 - 2.0 * down))
+}
 
 /// The averaging window at full «Плавность», in seconds: two or three sung
 /// letters.
 const SMOOTH_WINDOW: f32 = 0.4;
+
+/// «Плавность» for the lights and jumps of the wave and of Focus: the
+/// window each is spread over. Karaoke has none: its front takes
+/// «Плавность» as how closely it keeps to the times ([`Ease`]).
+fn smooth_window(look: Look, pace: Pace) -> f32 {
+    if look.style == Style::Karaoke { 0.0 } else { pace.window() }
+}
 
 /// A letter or word starts lighting up (and jumping) this long before its
 /// time, so the motion lands on the voice.
@@ -1688,6 +2107,9 @@ fn jump_height(t: f32, speed: f32) -> f32 {
 
 /// The jump's upward speed at its onset, in rest heights a second.
 const JUMP_KICK: f32 = 60.0;
+/// A jump is averaged over at least this many seconds, whatever «Плавность»
+/// is: its kick comes in over a few frames instead of in one.
+const JUMP_EASE: f32 = 0.05;
 /// A jump at speed 1 is at rest (within a hundredth of a pixel) after this.
 const JUMP_SETTLE: f32 = 0.4;
 /// A sung wave letter (or word) rests this high, in text sizes, at jump 1.
@@ -1708,75 +2130,95 @@ fn crisp_lift(rested: f32, hold: f32) -> f32 {
 /// Seconds a lift at rest takes to settle onto whole pixels.
 const CRISP: f32 = 0.15;
 
-fn syllable_head(from: f32, to: f32, start: f32, end: f32, pos: f32) -> f32 {
-    let progress = if end <= start { f32::from(pos >= start) } else { ((pos - start) / (end - start)).clamp(0.0, 1.0) };
-    from + (to - from) * progress
+/// How long a held note's extra glow takes to settle after it ends.
+const SETTLE: f32 = 0.3;
+/// Seconds a held note takes to come up to what sets it apart.
+const HELD_IN: f32 = 0.35;
+/// How far (0..1 from the unsung tone to the lit one) the letters of a held
+/// note brighten ahead of the karaoke front while the note is held: the
+/// front goes through it slowly, and the note reads as held, not as stuck.
+const HELD_WARM: f32 = 0.25;
+
+fn smoothstep(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
 }
 
-/// How long a held note's extra rise takes to settle after it ends.
-const SETTLE: f32 = 0.3;
+/// How much of a held note (0..1) a piece sung over `secs` seconds with
+/// `letters` letters is: none at a speaking pace, whole from 1.2 s on with
+/// a quarter of a second or more a letter (a long word sung at its usual
+/// pace is none). No threshold: a note a little shorter is set apart a
+/// little less.
+fn held_note(secs: f32, letters: usize) -> f32 {
+    smoothstep((secs - 0.6) / 0.6) * smoothstep((secs / letters.max(1) as f32 - 0.12) / 0.13)
+}
 
-/// A syllable sung out long enough to get the held-note rise and glow; it
-/// stays "held" for [`SETTLE`] after its end so the letters come down smoothly.
-fn held(start: f32, end: f32, letters: usize, pos: f32) -> bool {
-    end - start >= 1.0 && end - start >= 0.25 * letters as f32 && start <= pos && pos < end + SETTLE
+/// How far (0..1) a note held from `start` has come up at `pos`.
+fn held_in(start: f32, pos: f32) -> f32 {
+    smoothstep((pos - start) / HELD_IN)
 }
 
 /// 1 while the note is held, then down to 0 over [`SETTLE`].
 fn held_envelope(end: f32, pos: f32) -> f32 {
-    let t = (1.0 - (pos - end) / SETTLE).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    smoothstep(1.0 - (pos - end) / SETTLE)
 }
 
 #[allow(clippy::too_many_arguments)]
 /// `pos` is where the line is sung up to: the position while it is
 /// current, and after that on as it fades ([`sung_pos`]), so nothing in it
-/// jumps when it stops being current; it only goes back with `focus`.
+/// jumps when it stops being current; it only goes back with `hold`: how
+/// far (0..1) its sung pieces are lit (and its wave pieces up), 1 while it
+/// is current and down with its focus after that. `timing` is the line's
+/// for `look` ([`Timing::of`]).
 fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Timing, pos: Duration,
-    current: bool, focus: f32, size: f32, look: Look, base: Color32, lit: Color32, prefs: &Prefs)
+    focus: f32, hold: f32, size: f32, look: Look, base: Color32, lit: Color32, prefs: &Prefs, fade: Option<Fade>)
 {
     let style = look.style;
     let pace = Pace::of(prefs);
     let rise = pace.rise(style);
-    let window = pace.window();
-    let (head, feather) = timing.glide(pos, pace.feather(size), window);
+    let window = smooth_window(look, pace);
     let p = pos.as_secs_f32();
+    // Karaoke: each run of pieces is lit up to its own soft front, whatever
+    // the step ([`Front`]); a piece never lights at once.
+    let sweeping = style == Style::Karaoke;
+    let front = &timing.front;
+    let at = pos.as_secs_f64();
     let theme = Theme::get(painter.ctx());
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
-    let ppp = painter.pixels_per_point();
-    // Sung pieces are lit (and wave pieces up) in full on the current line,
-    // and go back with its focus once it is over.
-    let hold = focus.max(if current { 1.0 } else { 0.0 });
+    let ppp = super::stage::ppp(painter.ctx());
+    let hold = hold.clamp(0.0, 1.0);
     let n = timing.glyphs.len();
     let mut inks = Vec::with_capacity(n);
     let mut glows = Vec::with_capacity(n);
+    // The run of the last glyph that had one, and where its front is: a
+    // glyph with no run of its own (a space, a letter past the timed text)
+    // goes with the run before it.
+    let mut run = (usize::MAX, f32::NEG_INFINITY);
     for (k, glyph) in timing.glyphs.iter().enumerate() {
         let syllable = glyph.map(|s| &timing.syllables[s]);
-        // By words: the written unit this glyph lights (and jumps) with.
-        let unit = timing.glyph_units[k].filter(|_| look.words());
-        // A note held long glows while it is held: under karaoke, and in
-        // every look by syllables.
-        let sustained = syllable.filter(|s| current && (style == Style::Karaoke || look.by == By::Syllables) && held(s.start, s.end, s.letters, p));
-        // When the piece this glyph goes with is sung: its unit by words,
-        // its own letter in the wave (and in focus by syllables, which
-        // fills each syllable across its letters). Karaoke by letters or
-        // syllables follows the front instead; focus by letters lights the
-        // whole line.
-        let onset = if look.words() {
-            unit.map(|u| timing.units[u].start)
-        } else if style == Style::Wave || (style == Style::Focus && look.by == By::Syllables) {
-            syllable.map(|s| timing.onsets[k].unwrap_or(s.start))
-        } else {
-            None
-        };
-        let on = onset.map(|at| light_over(p - at, rise, window));
+        // A note held long stands out while it is held: under karaoke, and
+        // in every look by syllables. It goes with the line's hold.
+        let held = syllable
+            .filter(|s| (sweeping || look.by == By::Syllables) && p > s.start)
+            .map_or(0.0, |s| held_note(s.end - s.start, s.letters) * held_in(s.start, p) * hold);
+        let swell = syllable.map_or(0.0, |s| held * held_envelope(s.end, p));
+        // When the piece this glyph goes with starts to light.
+        let onset = timing.lit.get(k).copied().flatten();
+        // Focus has no fill: the line is bright as a whole and the piece
+        // being sung a little brighter, only while it is sung.
+        let on = onset.map(|at| match piece_end(timing, k, look).filter(|_| style == Style::Focus) {
+            Some(end) => FOCUS_LINE + (1.0 - FOCUS_LINE) * focus_pulse(p, at, end, rise, window),
+            None => light_over(p - at, rise, window),
+        });
         // Karaoke and Focus keep one baseline: sung and unsung words never
-        // drift apart (that read as broken text). Reduced motion keeps the
-        // wave down too (it only lights up).
+        // drift apart (that read as broken text), a word with a held note
+        // too (it glows instead). Reduced motion keeps the wave down as
+        // well (it only lights up).
         let lift = match onset {
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
-                // The jump's speed scales its smoothing window too.
-                let spread = window / pace.jump;
+                // The jump's speed scales its smoothing window too; with
+                // no window it still eases off the line ([`JUMP_EASE`]).
+                let spread = (window / pace.jump).max(JUMP_EASE);
                 // By syllables the whole written word goes up with them.
                 let (height, t) = match glyph.filter(|_| look.by == By::Syllables) {
                     Some(s) => timing.word_jump(s, p, pace.jump, spread),
@@ -1792,48 +2234,78 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
             }
             _ => 0.0,
         };
+        if sweeping
+            && let Some(r) = front.of.get(k).copied().flatten()
+            && r != run.0
+        {
+            run = (r, front.head(r, at));
+        }
+        // A glyph of the line the front goes along: in `ahead` until its
+        // run's front comes to it and in `behind` once the front is past.
+        let head = run.1;
+        let swept = |ahead: Color32, behind: Color32| {
+            if head == f32::INFINITY {
+                Ink::solid(behind, lift)
+            } else if head == f32::NEG_INFINITY {
+                Ink::solid(ahead, lift)
+            } else {
+                Ink { lift, base: ahead, lit: behind, head, feather: front.edge }
+            }
+        };
         inks.push(match on {
             Some(on) => Ink::solid(crate::lerp_color(base, lit, on * hold), lift),
-            None if style == Style::Karaoke && !look.words() => Ink { lift, base, lit, head, feather },
+            // A held note warms up ahead of the front, and only ever gets
+            // brighter: the front lights it whole as it goes through.
+            None if sweeping => swept(crate::lerp_color(base, lit, HELD_WARM * held), lit),
             None => Ink::solid(lit, lift),
         });
-        let strength = focus * (0.1 + sustained.map_or(0.0, |s|
-            0.06 * ((p - s.start) / 0.3).clamp(0.0, 1.0) * held_envelope(s.end, p)));
+        let strength = focus * (0.1 + 0.06 * swell);
         let glow_ink = |strength: f32| glow_color.gamma_multiply(strength.clamp(0.0, 1.0));
         glows.push(match (on, style) {
             (Some(on), _) => Ink::solid(glow_ink(strength * on), lift),
-            (None, Style::Karaoke) if !look.words() => Ink { lift, base: Color32::TRANSPARENT, lit: glow_ink(strength), head, feather },
+            (None, Style::Karaoke) => swept(Color32::TRANSPARENT, glow_ink(strength)),
             (None, Style::Focus) if !look.words() => Ink::solid(glow_ink(strength), lift),
             _ => Ink::solid(Color32::TRANSPARENT, lift),
         });
     }
     // Every glyph is drawn once, whole, in its own place and colour: no clip
     // edge between pieces, so no seam, cut overhang or second copy shows.
+    // In a soft band at the view's edge the colours thin by height too.
+    let put = |pos: egui::Pos2, g: Arc<Galley>, fallback: Color32| {
+        let (pos, g) = afloat(painter, pos, &g);
+        let g = through(&g, pos, None, fade).unwrap_or(g);
+        painter.galley(pos, g, fallback);
+    };
     if prefs.lyrics_glow && glows.iter().any(|i| i.lit.a() > 0) {
         let g = inked(g, |k| glows[k]);
         for offset in GLOW {
-            painter.galley(line.min + offset, g.clone(), glow_color);
+            put(line.min + offset, g.clone(), glow_color);
         }
     }
-    painter.galley(line.min, inked(g, |k| inks[k]), lit);
+    put(line.min, inked(g, |k| inks[k]), lit);
+}
+
+/// When the piece glyph `k` lights with under `look` ([`Timing::lit`]) is
+/// sung: its written unit by words, else its syllable.
+fn piece_end(timing: &Timing, k: usize, look: Look) -> Option<f32> {
+    if look.words() {
+        timing.glyph_units.get(k).copied().flatten().map(|u| timing.units[u].end)
+    } else {
+        timing.glyphs.get(k).copied().flatten().map(|s| timing.syllables[s].end)
+    }
 }
 
 /// Where the glow's copies of a line go.
 const GLOW: [egui::Vec2; 3] = [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0)];
 
-#[allow(clippy::too_many_arguments)]
-fn glow(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, feather: f32, color: Color32, strength: f32) {
-    if strength <= 0.001 { return; }
-    let c = color.gamma_multiply(strength);
-    if head.is_infinite() {
-        for offset in GLOW {
-            painter.galley_with_override_text_color(line.min + offset, g.clone(), c);
-        }
+/// A soft light around the whole line `g`: copies of it in `color` at
+/// `strength`, a pixel to either side and above.
+fn glow(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, color: Color32, strength: f32, fade: Option<Fade>) {
+    if strength <= 0.001 {
         return;
     }
-    let g = inked(g, |_| Ink { lift: 0.0, base: Color32::TRANSPARENT, lit: c, head, feather });
     for offset in GLOW {
-        painter.galley(line.min + offset, g.clone(), c);
+        fade_galley(painter, line.min + offset, g, color.gamma_multiply(strength), fade);
     }
 }
 
@@ -1972,6 +2444,7 @@ fn ink_quad(mesh: &mut egui::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink
 /// The line lit left to right (row by row when it wraps) up to `head`
 /// pixels of its glyphs (rows flattened), the edge of the light a soft
 /// gradient.
+#[cfg(test)]
 fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, feather: f32, base: Color32, lit: Color32) {
     if head.is_infinite() {
         painter.galley_with_override_text_color(line.min, g.clone(), lit);
@@ -2087,8 +2560,11 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     let height = prefs.lyrics_gap_height.clamp(0.5, 2.0);
     // About half the stroke: anything less reads as a lumpy polygon, and
     // the tip (where the wave comes out) looks straight half the time.
+    // Fewer crests stand taller, more lie lower: «Количество волн» shows as
+    // a few big waves or a fine ripple, not the same ring.
+    let count = (8.0 / prefs.lyrics_gap_waves.clamp(3.0, 16.0)).sqrt().clamp(0.7, 1.6);
     let requested_amp = if prefs.lyrics_gap_style % 2 == 1 {
-        ramp * k * shrink * height * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
+        ramp * k * shrink * height * count * (1.4 + 0.5 * if motion && playing { bass.clamp(0.0, 1.0) } else { 0.0 })
     } else { 0.0 };
     let (waves, amp) = wave_geometry(prefs.lyrics_gap_waves, radius, thick, requested_amp, height);
     let amp = amp * (1.0 - close);
@@ -2102,7 +2578,7 @@ fn waiting(painter: &egui::Painter, line: Rect, k: f32, start: Duration, end: Du
     let clearance = thick + 2.0 * amp + 3.0 * k * shrink;
     let gap = 2.0 * (clearance / (2.0 * radius)).clamp(0.0, 1.0).asin() * (1.0 - close);
     let sweep = progress * TAU;
-    let feather = 1.0 / painter.pixels_per_point();
+    let feather = 1.0 / super::stage::ppp(painter.ctx());
     let points = |from: f32, to: f32, amp: f32| -> Vec<egui::Pos2> {
         let n = ((to - from) * radius / (k * shrink * 0.6)).ceil().max(2.0) as usize;
         (0..=n)
@@ -2310,6 +2786,12 @@ mod tests {
         nikgob_view::LyricWord { start: Duration::from_secs_f32(start), end: Duration::from_secs_f32(end), text: text.into() }
     }
 
+    /// The timing of `l` laid out as `g` for `look`, at the default settings
+    /// and 26 px.
+    fn timing(l: &LyricLine, g: &Galley, look: Look) -> Timing {
+        Timing::of(l, g, look, Pace::of(&Prefs::default()), 26.0).unwrap()
+    }
+
     /// The units of a timed line as written, with their times.
     fn units_of(painter: &egui::Painter, l: &LyricLine) -> Vec<(String, f32, f32)> {
         let g = fixed_layout(painter, &l.text, 26.0);
@@ -2499,8 +2981,9 @@ mod tests {
         assert!(peak(0.5).0 > at);
     }
 
-    /// The speed settings: defaults light a word in about 60 ms and karaoke
-    /// keeps its old soft edge; the extremes are at once and slow.
+    /// The speed settings: defaults light a word in about 60 ms and the
+    /// karaoke edge is about a letter wide; the extremes are a quick ease
+    /// (never a hard cut) and slow.
     #[test]
     fn the_light_speed_runs_from_smooth_to_at_once() {
         let p = Prefs::default();
@@ -2508,12 +2991,22 @@ mod tests {
         let pace = Pace::of(&p);
         assert!(pace.rise(Style::Wave) > 0.04 && pace.rise(Style::Wave) < 0.08);
         assert!(pace.rise(Style::Focus) > pace.rise(Style::Karaoke));
-        assert!((pace.feather(26.0) - 26.0 * 0.34).abs() < 0.5);
+        assert!((pace.edge(26.0) - 26.0 * 0.575).abs() < 0.5);
+        // The fastest is a quick ease, never a switch: no frame at 240 a
+        // second takes it more than a fifth of the way.
         let at_once = Pace::of(&Prefs { lyrics_light_speed: 1.0, ..p.clone() });
-        assert_eq!(at_once.rise(Style::Karaoke), 0.0);
-        assert_eq!(light_up(-ONSET_LEAD + 0.001, at_once.rise(Style::Wave)), 1.0);
+        assert_eq!(at_once.rise(Style::Karaoke), LIGHT_FLOOR);
+        assert!(at_once.edge(26.0) > 2.0 && at_once.edge(26.0) < pace.edge(26.0));
+        assert!(at_once.rise(Style::Wave) <= pace.rise(Style::Wave));
+        let mut was = 0.0;
+        for i in 0..=120 {
+            let v = light_up(-ONSET_LEAD + i as f32 / 240.0, at_once.rise(Style::Wave));
+            assert!(v >= was && v - was < 0.2, "{i}: {was} → {v}");
+            was = v;
+        }
+        assert!(light_up(-ONSET_LEAD + LIGHT_FLOOR, at_once.rise(Style::Wave)) > 0.85 && was > 0.999);
         let smooth = Pace::of(&Prefs { lyrics_light_speed: 0.0, ..p.clone() });
-        assert!(smooth.rise(Style::Wave) >= 0.5 && smooth.feather(26.0) > pace.feather(26.0));
+        assert!(smooth.rise(Style::Wave) >= 0.5 && smooth.edge(26.0) > 2.0 * pace.edge(26.0));
         assert!(light_up(0.1, smooth.rise(Style::Wave)) < light_up(0.1, pace.rise(Style::Wave)));
         // Out-of-range values are held to the slider's range.
         let wild = Pace::of(&Prefs { lyrics_jump_speed: 9.0, lyrics_light_speed: -1.0, ..p });
@@ -2532,56 +3025,65 @@ mod tests {
             for style in [Style::Karaoke, Style::Focus, Style::Wave] {
                 for by in [By::Letters, By::Syllables, By::Words] {
                     let look = Look { style, by };
-                    let t = Timing::of(&l, &g, look).unwrap();
+                    let t = timing(&l, &g, look);
                     let prefs = Prefs { lyrics_glow: true, ..Prefs::default() };
                     for (at, current, focus) in [(0.5, true, 1.0), (2.5, true, 1.0), (2.9, false, 0.4), (5.0, false, 0.0)] {
-                        timed_line(painter, &g, rect, &t, Duration::from_secs_f32(at), current, focus, 26.0,
-                            look, Color32::GRAY, Color32::WHITE, &prefs);
+                        timed_line(painter, &g, rect, &t, Duration::from_secs_f32(at), focus, if current { 1.0 } else { focus }, 26.0,
+                            look, Color32::GRAY, Color32::WHITE, &prefs, None);
                     }
                 }
             }
         });
     }
 
-    /// Soft edges: a line deep inside is sharp and opaque; nearer an edge it
-    /// blurs and thins, gently at first, and it is gone before its ink
-    /// reaches the edge.
+    /// Soft edges: the text is whole in the middle of the view and thins
+    /// over a band at either edge, to nothing at the edge itself, by height
+    /// alone and with no step.
     #[test]
-    fn soft_edges_blur_and_fade_before_the_edge() {
+    fn soft_edges_fade_over_the_band_only() {
         let rect = Rect::from_min_size(pos2(0.0, 100.0), vec2(600.0, 500.0));
         let size = 26.0;
         let soft = Soft::of(&Prefs::default());
-        let at = |top: f32| soft_edge(top, 34.0, rect, size, soft);
-        assert_eq!(at(350.0), (1.0, 0.0));
-        let (alpha, blur) = at(rect.top() + size * 0.4 + 40.0);
-        assert!(alpha > 0.0 && alpha < 1.0 && blur > 0.0 && blur < 1.0, "{alpha} {blur}");
-        // Touching the edge with its ink: invisible, both at the top and bottom.
-        assert_eq!(at(rect.top() + size * 0.4).0, 0.0);
-        assert_eq!(at(rect.bottom() - 34.0 - size * 0.4).0, 0.0);
-        assert_eq!(at(rect.top() - 10.0), (0.0, 1.0));
-        // Opacity falls and blur grows steadily towards the edge, with no
-        // step at the band's inner end.
-        let mut last = (1.0, 0.0);
-        for top in (110..350).rev() {
-            let (a, b) = at(top as f32);
-            assert!(a <= last.0 + 1e-6 && b >= last.1 - 1e-6, "{top}");
-            assert!(last.0 - a < 0.05 && b - last.1 < 0.05, "smooth at {top}");
-            last = (a, b);
+        let fade = Fade::of(rect, soft);
+        let band = soft.band(rect);
+        assert!((40.0..=200.0).contains(&band), "{band}");
+        // Whole from the bands' inner ends on.
+        assert_eq!(fade.at(rect.top() + band), 1.0);
+        assert_eq!(fade.at(rect.center().y), 1.0);
+        assert_eq!(fade.at(rect.bottom() - band), 1.0);
+        assert!(fade.clear(rect.top() + band + 0.5, rect.bottom() - band - 0.5));
+        assert!(!fade.clear(rect.top() + band - 1.0, rect.center().y));
+        assert!(!fade.clear(rect.center().y, rect.bottom() - band + 1.0));
+        // Nothing at the edges and past them.
+        for y in [rect.top(), rect.bottom(), rect.top() - 30.0, rect.bottom() + 30.0] {
+            assert_eq!(fade.at(y), 0.0, "{y}");
         }
-        // A deeper band reaches further in; a gentler fade keeps a line
+        // Rising all the way in from an edge with no step, the same from
+        // the top and from the bottom.
+        let mut last = 0.0;
+        for i in 0..=(band as i32 * 4) {
+            let d = i as f32 * 0.25;
+            let a = fade.at(rect.top() + d);
+            assert!(a >= last - 1e-6 && a - last < 0.02, "{d}: {last} to {a}");
+            assert!((a - fade.at(rect.bottom() - d)).abs() < 1e-3, "{d}");
+            last = a;
+        }
+        // A line in the band is there to read: halfway in it is mostly
+        // opaque, a quarter of the way in clearly visible.
+        assert!(fade.at(rect.top() + band * 0.5) > 0.6);
+        assert!(fade.at(rect.top() + band * 0.25) > 0.3);
+        // A deeper band reaches further in; a gentler fade keeps the text
         // brighter at the same place.
-        let near = rect.top() + size * 0.4 + 90.0;
-        let deep = Soft { depth: 0.3, ..soft };
-        assert!(soft_edge(near, 34.0, rect, size, deep).0 < soft_edge(near, 34.0, rect, size, Soft { depth: 0.1, ..soft }).0);
-        let mid = rect.top() + size * 0.4 + soft.band(rect) * 0.5;
-        assert!(soft_edge(mid, 34.0, rect, size, Soft { fade: 0.0, ..soft }).0 > soft_edge(mid, 34.0, rect, size, Soft { fade: 1.0, ..soft }).0);
-        // A short view keeps its middle sharp.
+        let near = rect.top() + 45.0;
+        let of = |soft: Soft| Fade::of(rect, soft);
+        assert!(of(Soft { depth: 0.3, ..soft }).at(near) < of(Soft { depth: 0.1, ..soft }).at(near));
+        let mid = rect.top() + band * 0.5;
+        assert!(of(Soft { fade: 0.0, ..soft }).at(mid) > of(Soft { fade: 1.0, ..soft }).at(mid));
+        // A short view keeps its middle whole.
         let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 160.0));
-        assert_eq!(soft_edge(60.0, 30.0, small, 20.0, Soft { depth: 0.1, ..soft }), (1.0, 0.0));
-        // The band shows blurred lines, not empty room: a quarter of the
-        // way in, a line is still clearly there.
-        let quarter = rect.top() + size * 0.4 + soft.band(rect) * 0.25;
-        assert!(at(quarter).0 > 0.4 && at(quarter).1 > 0.5, "{:?}", at(quarter));
+        let short = Fade::of(small, Soft { depth: 0.1, ..soft });
+        assert_eq!(short.at(80.0), 1.0);
+        assert!(short.clear(60.0, 90.0));
         // The current line rests at 40 % of the whole view, clear of the
         // top band even when the band is deep, never below the middle.
         let (half, ink) = (17.0, size * 0.4);
@@ -2590,7 +3092,71 @@ mod tests {
         let deepest = Soft { depth: 0.4, ..soft };
         let rest = rest_at(rect, 0.4, Some(deepest), half, ink);
         assert!(rest > 200.0 && rest <= 250.0);
-        assert!(soft_edge(rect.top() + rest - half, half * 2.0, rect, size, deepest).0 > 0.999);
+        assert!(of(deepest).clear(rect.top() + rest - half, rect.top() + rest + half));
+    }
+
+    /// With the soft edges on every line in the view is still drawn, with
+    /// its own glyphs (sharp, no picture of it), and a line in the top
+    /// band thins towards the edge.
+    #[test]
+    fn soft_edges_keep_every_line_in_the_view() {
+        let view = Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 700.0));
+        // Each line drawn whole inside the view: its text, its top, and
+        // the least and the most opaque of its glyph vertices.
+        let drawn = |soft: bool| {
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::default();
+            crate::typography::install_fonts(&mut fonts);
+            ctx.set_fonts(fonts);
+            let mut state = ViewState::default();
+            state.prefs = Prefs { lyrics_soft_edges: soft, lyrics_soft_depth: 0.3, lyrics_glow: false, ..Prefs::default() };
+            state.player.status = Status::Paused;
+            state.player.position = Duration::from_secs(40);
+            state.lyrics.lines = (0..20).map(|i| line(i as f32 * 4.0, None, &format!("Строка номер {i}"))).collect();
+            let mut lines: Vec<(String, f32, u8, u8)> = Vec::new();
+            for frame in 0..16 {
+                let mut output = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(view),
+                    time: Some(frame as f64 * 0.25), ..Default::default()
+                }, |ui| {
+                    show(ui, &state, 0.0, false, &mut Vec::new());
+                });
+                output.textures_delta.clear();
+                lines.clear();
+                for shape in &output.shapes {
+                    let egui::Shape::Text(text) = &shape.shape else { continue };
+                    if !text.galley.job.text.starts_with("Строка номер") {
+                        continue;
+                    }
+                    let ink = text.galley.mesh_bounds.translate(text.pos.to_vec2());
+                    if ink.top() < view.top() + 2.0 || ink.bottom() > view.bottom() - 2.0 {
+                        continue;
+                    }
+                    let mut alphas = Vec::new();
+                    for row in &text.galley.rows {
+                        let v = &row.row.visuals;
+                        assert_eq!(v.mesh.texture_id, egui::TextureId::default(), "drawn from the font's own glyphs");
+                        alphas.extend(v.mesh.vertices[v.glyph_vertex_range.clone()].iter().map(|v| text.override_text_color.unwrap_or(v.color).a()));
+                    }
+                    let (least, most) = (alphas.iter().copied().min().unwrap_or(0), alphas.iter().copied().max().unwrap_or(0));
+                    lines.push((text.galley.job.text.clone(), ink.top(), least, most));
+                }
+            }
+            lines.sort_by(|a, b| a.1.total_cmp(&b.1));
+            lines
+        };
+        let (plain, soft) = (drawn(false), drawn(true));
+        assert!(plain.len() >= 8, "{plain:?}");
+        // The same lines are there with the soft edges as without.
+        let texts = |lines: &[(String, f32, u8, u8)]| lines.iter().map(|l| l.0.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&soft), texts(&plain));
+        assert!(soft.iter().all(|l| l.3 > 0), "{soft:?}");
+        // The topmost one lies in the band: thinner at its top than at its
+        // bottom. One in the middle is whole.
+        let top = &soft[0];
+        assert!(top.2 < top.3, "{top:?}");
+        let most = soft.iter().map(|l| l.3).max().unwrap();
+        assert!(top.3 < most, "{top:?} against {most}");
     }
 
     /// The mega view's control has its own row under the lyrics, with air
@@ -2854,11 +3420,97 @@ mod tests {
         output.textures_delta.clear();
     }
 
-    fn three_rows(painter: &egui::Painter, text: &str) -> Breaks {
+    fn three_rows(painter: &egui::Painter, text: &str) -> Arc<Breaks> {
         (200..900).step_by(10).find_map(|width| {
             let b = fixed_breaks(painter, egui::Id::new("test-breaks"), text, width as f32, 44.0);
             (b.forced.split('\n').count() == 3).then_some(b)
         }).expect("fixture must wrap into three rows")
+    }
+
+    /// A swapped text with two more lines above the one being sung, while
+    /// the view is moving to it: moved with that line, the text stays where
+    /// it is drawn and keeps its speed, and only the rest of the way is
+    /// animated.
+    #[test]
+    fn a_swapped_text_stays_where_it_is_drawn_and_keeps_its_speed() {
+        use nikgob_motion::Animated;
+        let old_tops = [0.0, 60.0, 120.0, 180.0];
+        let old_slots = [10, 11, 12, 13];
+        // The view moves from line 1 to line 2 (scroll = top − anchor 100).
+        let mut scroll = Animated::new(60.0_f32 - 100.0, Spring::new(1.0, 300.0));
+        scroll.set_target(120.0 - 100.0, 0.0);
+        let now = 0.08;
+        let drawn = old_tops[2] - scroll.value(now);
+        let speed = scroll.velocity(now);
+        // Two new lines come in before it; its slot stays with it.
+        let new_tops = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0];
+        let new_slots = [20, 21, 10, 11, 12, 13];
+        let moved = held_moved(Some((old_slots[2], old_tops[2])), &new_slots, &new_tops).unwrap();
+        assert_eq!(moved, 120.0);
+        scroll.shift(moved);
+        assert!((new_tops[4] - scroll.value(now) - drawn).abs() < 1e-3);
+        assert!((scroll.velocity(now) - speed).abs() < 1e-2);
+        // It goes on to the line's place in the new text, on the same spring.
+        scroll.set_target(new_tops[4] - 100.0, now);
+        assert!((new_tops[4] - scroll.value(now) - drawn).abs() < 1e-3);
+        assert!((scroll.velocity(now) - speed).abs() < 1e-2);
+        assert_eq!(scroll.value(5.0), new_tops[4] - 100.0);
+        // A line not in the new text moves nothing.
+        assert_eq!(held_moved(Some((99, 0.0)), &new_slots, &new_tops), None);
+        assert_eq!(held_moved(None, &new_slots, &new_tops), None);
+    }
+
+    /// At whole distances a line rests as bright as it always did; between
+    /// them (the current line changing) its brightness moves without a step.
+    #[test]
+    fn resting_brightness_moves_without_steps_as_the_current_line_changes() {
+        for style in [Style::Karaoke, Style::Focus, Style::Wave] {
+            for dist in -12i32..=12 {
+                let far = dist.unsigned_abs().min(8) as f32;
+                let old = match style {
+                    Style::Focus => 0.62f32.powf(far).max(0.08) * 0.7,
+                    _ => (if dist < 0 { 0.5 } else { 0.42 }) * 0.86f32.powf((far - 1.0).max(0.0)),
+                };
+                assert!((rest_brightness(style, dist as f32) - old).abs() < 1e-6, "{style:?} {dist}");
+            }
+            let mut was = rest_brightness(style, -10.0);
+            for k in 1..=2000 {
+                let now = rest_brightness(style, -10.0 + k as f32 * 0.01);
+                assert!((now - was).abs() < 0.006, "{style:?} at {}", -10.0 + k as f32 * 0.01);
+                was = now;
+            }
+        }
+    }
+
+    /// A line growing from one resting size to the other: its height and
+    /// rows move a little every frame (never by a rounded row height's
+    /// whole pixel at once), and it starts and ends on the resting layouts.
+    #[test]
+    fn a_growing_line_moves_evenly_and_meets_its_resting_layouts() {
+        with_painter(|painter| {
+            let b = three_rows(painter, "и слова, что не сказаны вслух, звучат громче всего остального, пока город считает шаги до утра");
+            let rest = (32.0 * 1.1, 44.0 * 1.1);
+            let (from, to) = (fixed_layout(painter, &b.forced, rest.0), fixed_layout(painter, &b.forced, rest.1));
+            let per_step = (to.rect.height() - from.rect.height()) / 200.0;
+            let mut was = from.clone();
+            for step in 1..200 {
+                let t = step as f32 / 200.0;
+                let g = moving_layout(painter, &b.forced, rest, t);
+                assert_eq!(g.rows.len(), 3);
+                assert!((g.rect.height() - was.rect.height() - per_step).abs() < 1e-3, "t={t}");
+                for r in 0..3 {
+                    let moved = g.rows[r].pos.y - was.rows[r].pos.y;
+                    let even = (to.rows[r].pos.y - from.rows[r].pos.y) / 200.0;
+                    assert!((moved - even).abs() < 1e-3, "t={t} row {r}");
+                }
+                was = g;
+            }
+            let near = |t: f32| moving_layout(painter, &b.forced, rest, t);
+            for (g, rest) in [(near(1e-4), &from), (near(1.0 - 1e-4), &to)] {
+                assert!((g.rect.height() - rest.rect.height()).abs() < 0.01);
+                assert!((g.rect.width() - rest.rect.width()).abs() < 0.05);
+            }
+        });
     }
 
     #[test]
@@ -2917,8 +3569,15 @@ mod tests {
                 }
                 assert!(letters.next().is_none());
                 let line = Rect::from_min_size(pos2(0.0, 0.0), g.size());
-                karaoke(painter, &g, line, 80.0, Pace::of(&Prefs::default()).feather(size), Color32::GRAY, Color32::WHITE);
-                timed_line(painter, &g, line, &timing, Duration::from_secs(4), true, 1.0, size, Look { style: Style::Karaoke, by: By::Letters }, Color32::GRAY, Color32::WHITE, &Prefs::default());
+                let pace = Pace::of(&Prefs::default());
+                karaoke(painter, &g, line, 80.0, pace.edge(size), Color32::GRAY, Color32::WHITE);
+                // Words a second each, one after another: one front
+                // through the three rows.
+                let look = Look { style: Style::Karaoke, by: By::Letters };
+                let sung = Timing::of(&l, &g, look, pace, size).unwrap();
+                assert_eq!(sung.front.runs.len(), 1);
+                assert!(sung.front.of.iter().zip(&sung.glyphs).all(|(run, s)| run.is_some() == s.is_some()));
+                timed_line(painter, &g, line, &sung, Duration::from_secs(4), 1.0, 1.0, size, look, Color32::GRAY, Color32::WHITE, &Prefs::default(), None);
             }
         });
     }
@@ -2962,8 +3621,11 @@ mod tests {
             let len = |(a, b): (f32, f32)| b - a;
             assert!(close(len(b[0]), 1.0 / 8.0) && close(len(b[1]), 2.5 / 8.0) && close(len(b[4]), 1.0 / 8.0));
             assert!(len(b[3]) > 2.0 * len(b[2]));
-            // The karaoke front crosses the «д» by its share, not by a fifth.
-            let at = |s: f32| t.head(Duration::from_secs_f32(s), 0.0).0;
+            // The karaoke front by letters, on the times exactly, crosses
+            // the «д» by its share, not by a fifth.
+            let k = Timing::build(&l, &g, Look { style: Style::Karaoke, by: By::Letters }, 0.0, Ease::EXACT).unwrap();
+            assert_eq!(k.front.runs.len(), 2, "a pause parts the words");
+            let at = |s: f32| k.front.runs[1].way(f64::from(s));
             let x = |i: usize| t.xs[i];
             let d = 6; // «д» after «здесь» and the space
             assert!((at(2.0 + 0.5 / 8.0) - (x(d).0 + x(d).1) / 2.0).abs() < 0.5);
@@ -2972,52 +3634,45 @@ mod tests {
             let mut was = 0.0;
             for ms in 1000..3000 {
                 let h = at(ms as f32 / 1000.0);
-                if h.is_finite() {
-                    assert!(h >= was - 1e-3, "{ms}");
-                    was = h;
-                }
+                assert!(h >= was - 1e-3, "{ms}");
+                was = h;
             }
         });
     }
 
     #[test]
-    fn syllable_head_is_continuous_and_clamped_to_its_own_span() {
-        assert_eq!(syllable_head(20.0, 120.0, 2.0, 4.0, 1.0), 20.0);
-        assert_eq!(syllable_head(20.0, 120.0, 2.0, 4.0, 3.0), 70.0);
-        assert_eq!(syllable_head(20.0, 120.0, 2.0, 4.0, 5.0), 120.0);
-        assert_eq!(syllable_head(20.0, 120.0, 2.0, 2.0, 2.0), 120.0);
-    }
-
-    #[test]
-    fn glued_syllables_share_a_word_and_the_head_waits_in_gaps() {
+    fn glued_syllables_share_a_word_and_the_front_waits_in_gaps() {
         with_painter(|painter| {
             let mut l = line(2.0, Some(8.0), "Hello world");
             l.words = [(2.0, 3.0, "Hel"), (4.0, 6.0, "lo "), (7.0, 8.0, "world")].map(|(s, e, text)| nikgob_view::LyricWord {
                 start: Duration::from_secs_f32(s), end: Duration::from_secs_f32(e), text: text.into(),
             }).to_vec();
             let g = fixed_layout(painter, &l.text, 44.0);
-            let t = Timing::new(&l, &g).unwrap();
+            let t = Timing::of(&l, &g, Look { style: Style::Karaoke, by: By::Letters }, Pace::of(&Prefs::default()), 44.0).unwrap();
             assert_eq!(t.words, [0, 2]);
             assert_eq!(t.syllables.iter().map(|s| s.word).collect::<Vec<_>>(), [0, 0, 1]);
-            // Solid up to the sung position; the soft edge sits ahead of it
-            // and keeps its width in the pauses (no hard cut mid-word).
-            let solid = |ms| {
-                let (head, feather) = t.head(Duration::from_millis(ms), 15.0);
-                (head - 0.5 * feather, feather)
-            };
-            assert_eq!(solid(1000), (0.0, 0.0));
-            assert_eq!(solid(3500), (t.syllables[0].to, 15.0));
-            assert_eq!(solid(6500), (t.syllables[1].to, 15.0));
-            let (at, feather) = solid(5000);
-            // Halfway through «lo»'s time: «l» takes 1 share, «o» 2.5, so
-            // the front is 0.3 into the «o».
-            let o = t.xs[t.syllables[1].glyphs.0 + 1];
-            assert!((at - (o.0 + 0.3 * (o.1 - o.0))).abs() < 0.01, "{at} {o:?}");
-            assert_eq!(feather, 15.0);
-            // It fades in and out instead of popping.
-            assert!(solid(2050).1 > 0.0 && solid(2050).1 < 15.0);
-            assert!(solid(8050).1 > 0.0 && solid(8050).1 < 15.0);
-            assert!(t.head(Duration::from_millis(8200), 15.0).0.is_infinite());
+            // A second of silence parts the pieces, each with a front of
+            // its own: in a gap the piece sung is lit whole and the next
+            // not begun, no letter left half lit (also inside a word).
+            let front = &t.front;
+            assert_eq!(front.runs.len(), 3);
+            let heads = |p: f64| [front.head(0, p), front.head(1, p), front.head(2, p)];
+            let (none, all) = (f32::NEG_INFINITY, f32::INFINITY);
+            assert_eq!(heads(1.0), [none; 3]);
+            assert_eq!(heads(3.6), [all, none, none]);
+            assert_eq!(heads(6.6), [all, all, none]);
+            assert_eq!(heads(9.0), [all; 3]);
+            // Inside «lo» its front is in it.
+            let h = front.head(1, 5.0);
+            assert!(h > t.syllables[1].from && h < t.syllables[1].to + front.edge, "{h}");
+            // It comes in and goes out with no pop: just sung, the edge has
+            // only begun on the first letter; about to rest, it is past the
+            // last.
+            let first = front.head(0, 2.02);
+            assert!(first > t.syllables[0].from && first < t.syllables[0].from + 0.3 * front.edge, "{first}");
+            let (_, rest) = front.runs[0].times();
+            let last = front.head(0, rest - 0.004);
+            assert!(last > t.syllables[0].to + 0.95 * front.edge, "{last}");
         });
     }
 
@@ -3280,58 +3935,177 @@ mod tests {
             l.words = vec![word(1.0, 1.5, "ab "), word(0.8, 1.2, "cd "), word(2.0, 2.5, "ef")];
             let g = fixed_layout(painter, &l.text, 26.0);
             let t = Timing::new(&l, &g).unwrap();
-            let onsets: Vec<f32> = t.onsets.iter().flatten().copied().collect();
+            let onsets: Vec<f32> = t.lit.iter().flatten().copied().collect();
             assert_eq!(onsets.len(), 6);
             assert!(onsets.windows(2).all(|w| w[0] <= w[1]), "{onsets:?}");
-            assert!(close(onsets[2], onsets[1]) && close(onsets[4], 2.0));
+            // «cd», timed before «ab» is over, waits for it.
+            assert!(close(onsets[2], 1.5) && close(onsets[3], 1.5) && close(onsets[4], 2.0), "{onsets:?}");
             assert!(t.units.windows(2).all(|w| w[0].start <= w[1].start && w[1].start <= w[1].end));
             // In order, they are the letters' own starts.
             let mut l = l;
             l.words[1] = word(1.5, 2.0, "cd ");
             let t = Timing::new(&l, &fixed_layout(painter, &l.text, 26.0)).unwrap();
             let own: Vec<f32> = t.letter_times.iter().flatten().map(|(a, _)| *a).collect();
-            assert_eq!(t.onsets.iter().flatten().copied().collect::<Vec<_>>(), own);
+            let lit: Vec<f32> = t.lit.iter().flatten().copied().collect();
+            assert!(lit.len() == own.len() && lit.iter().zip(&own).all(|(a, b)| close(*a, *b)), "{lit:?} against {own:?}");
         });
     }
 
-    /// «Плавность»: the front averaged over a window still follows the
-    /// times (none at 0, the same at the end), never runs back and glides:
-    /// no jump between frames, and an even pace through a word's letters.
-    #[test]
-    fn a_smooth_front_glides_and_keeps_to_the_times() {
-        with_painter(|painter| {
-            let mut l = line(1.0, Some(4.0), "здесь домой");
-            l.words = vec![word(1.0, 1.6, "здесь "), word(2.0, 3.0, "домой")];
-            let g = fixed_layout(painter, &l.text, 26.0);
-            let t = Timing::new(&l, &g).unwrap();
-            let at = |ms: u64, window: f32| t.glide(Duration::from_millis(ms), 8.0, window);
-            for ms in (900..3300).step_by(7) {
-                assert_eq!(at(ms, 0.0), t.head(Duration::from_millis(ms), 8.0));
+    /// The timed spans the front of `t` keeps time by under `by`: each
+    /// written word by words, else each timed piece, as (start, end, from,
+    /// to, its first glyph).
+    fn spans(t: &Timing, by: By) -> Vec<(f32, f32, f32, f32, usize)> {
+        if by != By::Words {
+            return t.syllables.iter().filter(|s| s.letters > 0).map(|s| (s.start, s.end, s.from, s.to, s.glyphs.0)).collect();
+        }
+        let mut out: Vec<(f32, f32, f32, f32, usize)> = Vec::new();
+        for (k, u) in t.glyph_units.iter().enumerate() {
+            let Some(u) = *u else { continue };
+            if out.len() <= u {
+                out.push((t.units[u].start, t.units[u].end, t.xs[k].0, t.xs[k].1, k));
             }
-            let window = Pace::of(&Prefs::default()).window();
-            assert!(window > 0.1 && window < 0.3, "the default is smoother than by letters");
-            let (mut was, mut steps, mut exact_steps) = (0.0f32, Vec::new(), Vec::new());
-            let mut exact_was = 0.0f32;
-            for ms in 1000..3000 {
-                let (h, f) = at(ms, window);
-                let (e, ef) = at(ms, 0.0);
-                if h.is_finite() && e.is_finite() {
-                    let (h, e) = (h - 0.5 * f, e - 0.5 * ef);
-                    assert!(h >= was - 1e-3, "{ms}: runs back");
-                    steps.push(h - was);
-                    exact_steps.push(e - exact_was);
-                    (was, exact_was) = (h, e);
+            out[u].3 = t.xs[k].1;
+        }
+        out
+    }
+
+    /// The report: karaoke went ragged, a long syllable dragging and a short
+    /// one flying by, every piece at its own speed. At every step, over
+    /// Cyrillic, Latin and Japanese, and at any «Плавность»: each run's
+    /// front crosses it in one motion (never back, no jump from one frame
+    /// to the next at any frame rate), is in no piece before that is sung
+    /// and through each within the tolerance, comes in on the first letter,
+    /// and leaves the run lit whole.
+    #[test]
+    fn the_karaoke_front_crosses_a_run_in_one_motion_at_every_step() {
+        let timed = |text: &str, pieces: &[(&str, f32, f32)]| {
+            let mut l = line(pieces[0].1, Some(pieces[pieces.len() - 1].2 + 1.0), text);
+            l.words = pieces.iter().map(|(t, a, b)| word(*a, *b, t)).collect();
+            assert_eq!(l.words.iter().map(|w| w.text.as_str()).collect::<String>(), text);
+            l
+        };
+        let lines = [
+            timed("космоцветок домой", &[("ко", 1.0, 1.2), ("смо", 1.2, 1.5), ("цве", 1.55, 2.6), ("ток ", 2.6, 2.9), ("до", 4.0, 4.3), ("мой", 4.3, 5.0)]),
+            timed("Somewhere close to me", &[("Some", 1.0, 1.18), ("where ", 1.18, 1.5), ("close ", 1.5, 2.4), ("to ", 2.45, 2.6), ("me", 2.6, 3.4)]),
+            timed("夜空に光る星", &[("夜", 1.0, 1.3), ("空", 1.3, 1.5), ("に", 1.5, 1.6), ("光", 1.6, 2.4), ("る", 2.4, 2.55), ("星", 2.55, 3.6)]),
+        ];
+        with_painter(|painter| {
+            for l in &lines {
+                let g = fixed_layout(painter, &l.text, 26.0);
+                for by in [By::Letters, By::Syllables, By::Words] {
+                    for smooth in [0.0, 0.5, 1.0] {
+                        let case = format!("«{}», {by:?}, smooth {smooth}", l.text);
+                        let look = Look { style: Style::Karaoke, by };
+                        let pace = Pace::of(&Prefs { lyrics_smooth: smooth, ..Prefs::default() });
+                        let t = Timing::of(l, &g, look, pace, 26.0).unwrap();
+                        let (front, ease) = (&t.front, Ease::of(smooth));
+                        let edge = front.edge;
+                        assert!((edge - pace.edge(26.0)).abs() < 1e-4 && edge > 2.0);
+                        // Every letter goes with a run, the runs in order.
+                        let runs: Vec<usize> = t.glyphs.iter().zip(&front.of).filter(|(s, _)| s.is_some()).map(|(_, r)| r.expect("a run")).collect();
+                        assert!(runs.windows(2).all(|w| w[0] <= w[1]) && runs.last() == Some(&(front.runs.len() - 1)), "{case}");
+                        for (r, run) in front.runs.iter().enumerate() {
+                            let own = || t.xs.iter().zip(&front.of).filter(move |(_, o)| **o == Some(r)).map(|(x, _)| *x);
+                            let (from, to) = (own().map(|x| x.0).fold(f32::MAX, f32::min), own().map(|x| x.1).fold(0.0, f32::max));
+                            let (start, rest) = run.times();
+                            assert_eq!((front.head(r, start), front.head(r, rest)), (f32::NEG_INFINITY, f32::INFINITY), "{case}");
+                            for fps in [60.0, 142.0] {
+                                let (mut was, mut seen) = (f32::NEG_INFINITY, 0);
+                                let mut frame = 0;
+                                loop {
+                                    let p = start - 0.1 + f64::from(frame) / fps;
+                                    frame += 1;
+                                    let h = front.head(r, p);
+                                    if h.is_finite() {
+                                        if was.is_finite() {
+                                            assert!(h >= was - 1e-3, "{case}, run {r} at {p:.3}: runs back");
+                                            assert!(h - was < 900.0 / fps as f32, "{case}, run {r} at {p:.3}: jumps by {}", h - was);
+                                        } else {
+                                            assert!(seen == 0 && h < from + 900.0 / fps as f32, "{case}, run {r}: comes in at {h}, not {from}");
+                                        }
+                                        seen += 1;
+                                    } else if was.is_finite() {
+                                        assert!(h == f32::INFINITY && was > to + edge - 900.0 / fps as f32, "{case}, run {r}: leaves at {was}, not {}", to + edge);
+                                    }
+                                    was = h;
+                                    if p > rest + 0.1 {
+                                        break;
+                                    }
+                                }
+                                assert!(seen > 5 && was == f32::INFINITY, "{case}, run {r}: {seen} frames");
+                            }
+                        }
+                        // The middle of the edge is the front: in no piece
+                        // before it is sung, through it within the
+                        // tolerance after.
+                        for (start, end, from, to, first) in spans(&t, by) {
+                            let run = &front.runs[front.of[first].expect("a run")];
+                            let before = run.at(f64::from(start));
+                            assert!(before <= from + 0.05, "{case}: at {before} when the piece at {from} starts");
+                            let after = run.at(f64::from(end + ease.behind()));
+                            assert!(after >= to - 0.05, "{case}: at {after}, the piece to {to} ended {} s ago", ease.behind());
+                        }
+                    }
                 }
             }
-            // Smoother: its fastest frame-to-frame move is well under the
-            // exact front's (which crosses a consonant in a few ms).
-            let fastest = |v: &[f32]| v.iter().skip(1).copied().fold(0.0f32, f32::max);
-            assert!(fastest(&steps) < fastest(&exact_steps) * 0.6, "{} vs {}", fastest(&steps), fastest(&exact_steps));
-            // Done singing: it reaches the end and lights the line whole.
-            assert!(at(3000 + (window * 500.0) as u64 + 1, window).0 >= t.syllables[1].to - 1e-3);
-            assert!(at(3400, window).0.is_infinite());
-            // Before the line: nothing lit.
-            assert_eq!(at(800, window), (0.0, 0.0));
+            // A pause parts the runs: in it the words sung are lit whole,
+            // their space too, and the next has not begun, at any step.
+            let l = &lines[0];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            for by in [By::Letters, By::Syllables, By::Words] {
+                let t = timing(l, &g, Look { style: Style::Karaoke, by });
+                assert_eq!(t.front.runs.len(), 2, "{by:?}");
+                for p in [3.4, 3.7, 4.0] {
+                    assert_eq!((t.front.head(0, p), t.front.head(1, p)), (f32::INFINITY, f32::NEG_INFINITY), "{by:?} at {p}");
+                }
+                assert!(t.front.of[..11].iter().all(|r| *r == Some(0)) && t.front.of[11].is_none() && t.front.of[12..].iter().all(|r| *r == Some(1)));
+            }
+        });
+    }
+
+    /// «Плавность» evens the front out: the quick syllables of a line are
+    /// crossed at paces closer to each other the smoother it is, a short
+    /// piece between calmer ones no longer flying by; the note held long
+    /// still takes its own long time, and warms up while it is held.
+    #[test]
+    fn smoothness_evens_the_front_out_and_a_held_note_stays_long() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(5.0), "тататам там тарарам");
+            l.words = [("та", 1.0, 1.1), ("та", 1.1, 1.36), ("там ", 1.36, 1.46), ("там ", 1.5, 3.1), ("та", 3.1, 3.18), ("ра", 3.18, 3.42), ("рам", 3.42, 3.6)]
+                .map(|(t, a, b)| word(a, b, t))
+                .to_vec();
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let front = |smooth: f32| {
+                let pace = Pace::of(&Prefs { lyrics_smooth: smooth, ..Prefs::default() });
+                Timing::of(&l, &g, Look { style: Style::Karaoke, by: By::Syllables }, pace, 26.0).unwrap()
+            };
+            // The fastest the front goes from frame to frame, and how long
+            // it takes over the held «там».
+            let measure = |t: &Timing| {
+                let run = &t.front.runs[0];
+                let fastest = (0..800).map(|f| (run.at(0.9 + f64::from(f + 1) / 240.0) - run.at(0.9 + f64::from(f) / 240.0)) * 240.0).fold(0.0f32, f32::max);
+                let held = &t.syllables[3];
+                let cross = |x: f32| (0..4000).map(|ms| 0.9 + f64::from(ms) / 1000.0).find(|p| run.at(*p) >= x).expect("crossed");
+                (fastest, (cross(held.to - 1.0) - cross(held.from + 1.0)) as f32)
+            };
+            let (exact, calm, calmest) = (measure(&front(0.0)), measure(&front(0.5)), measure(&front(1.0)));
+            assert_eq!(front(0.5).front.runs.len(), 1);
+            assert!(calm.0 < 0.8 * exact.0 && calmest.0 < calm.0, "{exact:?} {calm:?} {calmest:?}");
+            for held in [exact.1, calm.1, calmest.1] {
+                assert!(held > 1.2 && held < 1.75, "the held note takes {held} s");
+            }
+            // 1.6 s over three letters is a held note; «рам» is not.
+            assert_eq!(held_note(1.6, 3), 1.0);
+            assert_eq!(held_note(0.18, 3), 0.0);
+            assert!(held_note(0.9, 3) > 0.0 && held_note(0.9, 3) < 1.0 && held_note(2.0, 12) < 0.35);
+            let mut was = 0.0;
+            for ms in 1400..3600 {
+                let p = ms as f32 / 1000.0;
+                let (up, glow) = (held_in(1.5, p), held_in(1.5, p) * held_envelope(3.1, p));
+                assert!(up >= was && glow <= up && (up - was) < 0.01, "{ms}");
+                was = up;
+            }
+            assert!(held_in(1.5, 1.5) == 0.0 && held_in(1.5, 1.51 + HELD_IN) == 1.0 && held_envelope(3.1, 3.11 + SETTLE) == 0.0);
         });
     }
 
@@ -3443,6 +4217,17 @@ mod tests {
                         let case = format!("{timing}, style {style}, unit {unit}, smooth {smooth}");
                         let (glyphs, lit) = painted_glyphs(&prefs, l, 2.4);
                         assert_eq!(glyphs.len(), text.chars().count(), "{case}: the line was not painted with its timing");
+                        // Focus by syllables or words has no fill: the word
+                        // sung and the word to come are one tone, the
+                        // line's, and not the lit one.
+                        if style == 1 && !letters && timing != "calm" {
+                            // (A guessed «Свет» has only just been sung.)
+                            if timing != "guessed" {
+                                assert_eq!(glyphs[0], glyphs[13], "{case}: «Свет» and «ложится» differ");
+                            }
+                            assert!(!close(glyphs[0].unwrap(), lit), "{case}: the line is lit whole");
+                            continue;
+                        }
                         // «Свет» was sung over a second ago.
                         for (k, c) in glyphs[..4].iter().enumerate() {
                             assert!(close(c.unwrap(), lit), "{case}: letter {k} is {:?}, lit is {lit:?}", c.unwrap());
@@ -3498,6 +4283,146 @@ mod tests {
             assert!(c <= was && was - c < 0.05, "{i}: {was} → {c}");
             was = c;
         }
+    }
+
+    /// The view's clock at 240 frames a second: the player's position read
+    /// a little early or late in each frame and put right by 80 ms mid-way
+    /// never makes it hop, stop or go back; it is with the player again
+    /// within a second; a seek, a pause and the track's end are followed
+    /// at once.
+    #[test]
+    fn the_clock_runs_evenly_and_comes_to_the_player_without_a_hop() {
+        let dt = 1.0 / 240.0;
+        // The player: 10 s at frame 0, running at the pace of the frames,
+        // read up to 3 ms off, and 80 ms further on from frame 240.
+        let heard = |f: usize| {
+            let jitter = [0.003, -0.002, 0.001, -0.003, 0.002][f % 5];
+            10.0 + f as f64 * dt + jitter + if f >= 240 { 0.08 } else { 0.0 }
+        };
+        let mut c = Clock::step(None, heard(0), 0.0, 1.0, None, true);
+        assert_eq!(c.pos, heard(0), "a first frame is where the player is");
+        let (mut least, mut most) = (f64::INFINITY, 0.0f64);
+        for f in 1..720 {
+            let next = Clock::step(Some(c), heard(f), f as f64 * dt, 1.0, None, true);
+            let step = next.pos - c.pos;
+            least = least.min(step);
+            most = most.max(step);
+            // Before the correction it runs at the frames' pace, the
+            // reading's own unevenness all but gone.
+            if f < 240 {
+                assert!((step - dt).abs() < dt * 0.1, "frame {f}: {step}");
+            }
+            c = next;
+        }
+        assert!(least >= dt * CLOCK_SLOWEST - 1e-9, "never stops or goes back: {least}");
+        assert!(most < dt * 2.0, "the correction is run up to, not hopped: {most}");
+        assert!((c.pos - (10.0 + 719.0 * dt + 0.08)).abs() < 0.005, "with the player again: {}", c.pos);
+        // The player behind by a little: the clock slows down for it.
+        let slow = Clock::step(Some(c), c.pos + dt - 0.1, c.at + dt, 1.0, None, true);
+        assert!(slow.pos > c.pos && slow.pos < c.pos + dt);
+        // A seek either way, and a pause, at once.
+        assert_eq!(Clock::step(Some(c), 95.0, c.at + dt, 1.0, None, true).pos, 95.0);
+        assert_eq!(Clock::step(Some(c), 2.0, c.at + dt, 1.0, None, true).pos, 2.0);
+        assert_eq!(Clock::step(Some(c), c.pos - 0.01, c.at + dt, 1.0, None, false).pos, c.pos - 0.01);
+        // A stalled sound stands still; the track's end is not run past.
+        assert_eq!(Clock::step(Some(c), c.pos, c.at + dt, 0.0, None, true).pos, c.pos);
+        let end = c.pos + 0.001;
+        assert_eq!(Clock::step(Some(c), end, c.at + dt, 1.0, Some(end), true).pos, end);
+    }
+
+    /// A text between whole pixels is handed to the painter on them with its
+    /// rows moved by the rest, so it is drawn where it is, not on the pixel
+    /// nearest; one on whole pixels is drawn as it is.
+    #[test]
+    fn a_moving_text_is_drawn_between_whole_pixels() {
+        with_painter(|painter| {
+            let g = fixed_layout(painter, "Свет из окна\nложится на пол", 26.0);
+            let ppp = painter.pixels_per_point();
+            let (at, same) = afloat(painter, pos2(40.0, 120.0), &g);
+            assert_eq!(at, pos2(40.0, 120.0));
+            assert!(Arc::ptr_eq(&same, &g), "at rest: the layout itself");
+            // Gliding down a pixel in 240 steps: every step moves it.
+            let mut was = at.y + g.rows[1].pos.y;
+            for step in 1..=240 {
+                let y = 120.0 + step as f32 / 240.0 / ppp;
+                let (at, moved) = afloat(painter, pos2(40.0, y), &g);
+                assert!(((at.y * ppp).round() - at.y * ppp).abs() < 1e-3, "the origin is on whole pixels");
+                assert_eq!(moved.rows.len(), g.rows.len());
+                // (Up to the hair within which it counts as at rest.)
+                for (m, r) in moved.rows.iter().zip(&g.rows) {
+                    assert!((at.y + m.pos.y - (y + r.pos.y)).abs() < 0.021 / ppp, "step {step}");
+                    assert_eq!(m.pos.x, r.pos.x);
+                }
+                let drawn = at.y + moved.rows[1].pos.y;
+                assert!(drawn >= was - 1e-4 && drawn - was < 0.05 / ppp, "step {step}: {was} → {drawn}");
+                was = drawn;
+            }
+        });
+    }
+
+    /// A growing line is one layout scaled: each letter moves along the
+    /// line evenly, a little every frame, with one small shift at most (off
+    /// the small resting layout), where a layout at every whole size on the
+    /// way shook the letters against each other.
+    #[test]
+    fn a_growing_lines_letters_keep_their_places() {
+        with_painter(|painter| {
+            let text = "Слышишь этот ритм, он ведёт меня";
+            let rest = (20.0, 26.0);
+            let xs = |g: &Galley| g.rows[0].row.glyphs.iter().map(|gl| gl.pos.x).collect::<Vec<_>>();
+            let big = xs(&*fixed_layout(painter, text, rest.1));
+            let mut was = xs(&*moving_layout(painter, text, rest, 1.0 / 240.0));
+            let mut shifts = 0;
+            for step in 2..240 {
+                let t = step as f32 / 240.0;
+                let now = xs(&*moving_layout(painter, text, rest, t));
+                assert_eq!(now.len(), big.len());
+                // What a letter's place grows by in one step, at most.
+                let even = big.last().unwrap() * (rest.1 - rest.0) / rest.1 / 240.0 + 0.01;
+                let off = now.iter().zip(&was).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+                if off > even {
+                    shifts += 1;
+                    assert!(off < 1.5, "step {step}: {off}");
+                }
+                was = now;
+            }
+            assert!(shifts <= 1, "{shifts} shifts");
+            // Above the small resting size it is the big layout, scaled.
+            let size = rest.0 + (rest.1 - rest.0) * 0.5;
+            for (x, b) in xs(&*moving_layout(painter, text, rest, 0.5)).iter().zip(&big) {
+                assert!((x - b * size / rest.1).abs() < 1e-3);
+            }
+        });
+    }
+
+    /// The text follows the current line without swinging past its place,
+    /// lines further away later; a wave piece's jump comes off the line
+    /// over a few frames whatever «Плавность» is.
+    #[test]
+    fn the_scroll_settles_without_overshoot_and_a_jump_eases_off_the_line() {
+        for far in 0..=8 {
+            let spring = follow_spring(far as f32);
+            let (mut was, mut fastest) = (1.0f32, 0.0f32);
+            for f in 1..=480 {
+                // What is left of the way, from all of it at rest.
+                let (left, _) = spring.solve(1.0, 0.0, f as f32 / 240.0);
+                assert!(left >= -1e-4 && left <= was + 1e-5, "far {far}, frame {f}: {was} → {left}");
+                fastest = fastest.max(was - left);
+                was = left;
+            }
+            assert!(fastest < 0.03, "far {far}: {fastest} of the way in a frame");
+            assert!(was < 0.01, "far {far}: there within two seconds");
+            if far > 0 {
+                assert!(spring.stiffness <= follow_spring(far as f32 - 1.0).stiffness);
+            }
+        }
+        assert_eq!(follow_spring(0.0), FOLLOW);
+        let fastest = |window: f32| {
+            (-60..240).map(|f| jump_over((f + 1) as f32 / 240.0, 1.0, window) - jump_over(f as f32 / 240.0, 1.0, window))
+                .fold(0.0f32, f32::max)
+        };
+        assert!(fastest(JUMP_EASE) < fastest(0.0) * 0.7, "{} against {}", fastest(JUMP_EASE), fastest(0.0));
+        assert!(fastest(JUMP_EASE) < 0.16);
     }
 
     /// The same song's text swapped (timing made, another source) keeps each
@@ -3576,34 +4501,181 @@ mod tests {
         l.words = vec![word(1.0, 2.0, "Свет "), word(2.0, 2.5, "из "), word(2.5, 4.0, "окна")];
         with_painter(|painter| {
             let g = fixed_layout(painter, &l.text, 26.0);
-            let t = Timing::new(&l, &g).unwrap();
+            let t = timing(&l, &g, Look { style: Style::Karaoke, by: By::Syllables });
             let left = ms(3_000);
-            let (at, _) = t.glide(left, 8.0, 0.2);
-            let (next, _) = t.glide(sung_pos(Some(left), left + ms(16)), 8.0, 0.2);
+            let head = |at: Duration| t.front.head(0, at.as_secs_f64());
+            let (at, next) = (head(left), head(sung_pos(Some(left), left + ms(16))));
             assert!(at.is_finite() && next >= at && next - at < 5.0, "{at} → {next}");
         });
     }
 
-    /// By syllables each piece fills evenly across its letters over its
-    /// own time: a fast «ко» and «смо», a held «цве», then «ток».
+    /// The unit is what the karaoke front keeps time by. By syllables each
+    /// piece fills evenly across its letters over its own time: a fast «ко»
+    /// and «смо», a held «цве», then «ток». By letters its vowel takes
+    /// longer; by words the whole word is crossed evenly.
     #[test]
     fn a_syllable_fills_evenly_over_its_own_time() {
         with_painter(|painter| {
             let mut l = line(1.0, Some(3.0), "космоцветок");
             l.words = vec![word(1.0, 1.1, "ко"), word(1.1, 1.25, "смо"), word(1.25, 2.1, "цве"), word(2.1, 2.3, "ток")];
             let g = fixed_layout(painter, &l.text, 26.0);
-            let t = Timing::of(&l, &g, Look { style: Style::Karaoke, by: By::Syllables }).unwrap();
+            // On the times exactly.
+            let exact = |by| Timing::build(&l, &g, Look { style: Style::Karaoke, by }, 0.0, Ease::EXACT).unwrap();
+            let t = exact(By::Syllables);
+            let at = |p: f32| t.front.runs[0].way(f64::from(p));
             let s = &t.syllables[2];
             // Halfway through its time the front is halfway across it.
-            let mid = t.sung_at((s.start + s.end) * 0.5);
+            let mid = at((s.start + s.end) * 0.5);
             assert!((mid - (s.from + s.to) * 0.5).abs() < 0.5, "{mid} in {}..{}", s.from, s.to);
-            assert!((t.sung_at(s.start) - s.from).abs() < 1e-3 && (t.sung_at(s.end - 1e-4) - s.to).abs() < 0.1);
+            assert!((at(s.start) - s.from).abs() < 0.05 && (at(s.end) - s.to).abs() < 0.05);
             // The held one runs slowest.
             let pace = |i: usize| (t.syllables[i].to - t.syllables[i].from) / (t.syllables[i].end - t.syllables[i].start);
             assert!(pace(2) < pace(0) && pace(2) < pace(1));
             // By letters the same piece is weighted (its vowel takes longer).
-            let w = Timing::new(&l, &g).unwrap();
-            assert!((w.sung_at((s.start + s.end) * 0.5) - mid).abs() > 0.5);
+            let letters = exact(By::Letters);
+            assert!((letters.front.runs[0].way(f64::from((s.start + s.end) * 0.5)) - mid).abs() > 0.5);
+            // By words the front is halfway across the word halfway through
+            // it, whatever its syllables do (they are well past that).
+            let words = exact(By::Words);
+            let (from, to) = (t.syllables[0].from, t.syllables[3].to);
+            let half = words.front.runs[0].way(1.65);
+            assert!((half - (from + to) * 0.5).abs() < 0.5 && (half - at(1.65)).abs() > 5.0, "{half} against {}", at(1.65));
+        });
+    }
+
+    /// «Шаг подсветки»: karaoke follows its front at every step; under
+    /// Focus by syllables each syllable lights whole as it starts, by words
+    /// each word at its first syllable; the wave lights letter by letter,
+    /// by words the word whole.
+    #[test]
+    fn the_unit_sets_how_the_light_steps() {
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(3.0), "космо цветок");
+            l.words = vec![word(1.0, 1.4, "кос"), word(1.4, 1.8, "мо "), word(1.8, 2.4, "цве"), word(2.4, 2.8, "ток")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let of = |style, by| timing(&l, &g, Look { style, by });
+            // Glyphs: к о с м о ␠ ц в е т о к.
+            for by in [By::Letters, By::Syllables, By::Words] {
+                let t = of(Style::Karaoke, by);
+                assert!(t.lit.iter().all(Option::is_none), "the front");
+                assert_eq!(t.front.runs.len(), 1);
+            }
+            let s = of(Style::Focus, By::Syllables).lit;
+            assert_eq!(s[0], s[2], "«кос» lights whole");
+            assert_eq!(s[3], s[4], "«мо» lights whole");
+            assert!(s[0] == Some(1.0) && s[3] > s[2], "a syllable after the other");
+            assert_eq!(s[5], None, "a space has none");
+            let w = of(Style::Focus, By::Words).lit;
+            assert_eq!(w[0], w[4], "«космо» lights whole");
+            assert!(w[6] > w[4] && w[6] == w[11]);
+            // Focus by letters lights the whole line: nothing goes along it.
+            let calm = of(Style::Focus, By::Letters);
+            assert!(calm.lit.iter().all(Option::is_none) && calm.front.runs.is_empty());
+            for by in [By::Letters, By::Syllables] {
+                let wave = of(Style::Wave, by).lit;
+                assert!(wave[1] > wave[0] && wave[2] > wave[1] && wave[3] > wave[2], "{by:?}: letter by letter");
+                // No letter before its piece is sung, none much after it.
+                assert!(wave[0] == Some(1.0) && wave[6] >= Some(1.8) && wave[11] < Some(2.8 + 0.2), "{by:?}: {wave:?}");
+            }
+            let wave = of(Style::Wave, By::Words).lit;
+            assert_eq!(wave[0], wave[4], "the word jumps whole");
+        });
+    }
+
+    /// A line's timing is worked out once for its layout, look and settings
+    /// and kept: the same one comes back frame after frame, another for
+    /// another unit, «Плавность» or timing, and only a few are kept.
+    #[test]
+    fn a_lines_timing_is_kept_from_frame_to_frame() {
+        with_painter(|painter| {
+            let ctx = painter.ctx();
+            let mut l = line(1.0, Some(3.0), "космо цветок");
+            l.words = vec![word(1.0, 1.4, "кос"), word(1.4, 1.8, "мо "), word(1.8, 2.4, "цве"), word(2.4, 2.8, "ток")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let pace = Pace::of(&Prefs::default());
+            let look = Look { style: Style::Karaoke, by: By::Syllables };
+            let kept = timing_of(ctx, &l, &g, look, pace, 26.0).unwrap();
+            assert!(Arc::ptr_eq(&kept, &timing_of(ctx, &l, &g, look, pace, 26.0).unwrap()));
+            let other = |l: &LyricLine, look: Look, pace: Pace| !Arc::ptr_eq(&kept, &timing_of(ctx, l, &g, look, pace, 26.0).unwrap());
+            assert!(other(&l, Look { by: By::Words, ..look }, pace));
+            assert!(other(&l, look, Pace { smooth: 1.0, ..pace }));
+            let mut retimed = l.clone();
+            retimed.words[3].end = Duration::from_secs_f32(2.9);
+            assert!(other(&retimed, look, pace));
+            // A line that grows is laid out anew every frame: its timings
+            // push the oldest out.
+            for size in 10..40 {
+                timing_of(ctx, &l, &fixed_layout(painter, &l.text, size as f32), look, pace, size as f32);
+            }
+            let count = ctx.data_mut(|d| d.get_temp_mut_or_default::<Timings>(egui::Id::new("lyrics-timings")).0.len());
+            assert_eq!(count, TIMINGS);
+            assert!(timing_of(ctx, &line(1.0, None, "no words"), &g, look, pace, 26.0).is_none());
+        });
+    }
+
+    /// «Буквы» must not swallow a short word, at full «Плавность» either:
+    /// its letters light one after another as the front goes through it.
+    /// The view paints [`LYRICS_LEAD`] ahead of the player, so with the lead
+    /// off 1.15 is early in «Свет » (1.0 to 1.35) and 1.33 near its end.
+    #[test]
+    fn letters_of_a_word_light_one_by_one() {
+        use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_WORDS};
+        let mut l = line(1.0, Some(3.0), "Свет окна");
+        l.words = vec![word(1.0, 1.35, "Свет "), word(2.0, 3.0, "окна")];
+        let close = |a: Color32, b: Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| x.abs_diff(y) <= 3);
+        let bright = |c: Color32| c.to_array().iter().map(|v| u32::from(*v)).sum::<u32>();
+        let letters = Prefs {
+            lyrics_style: 0,
+            lyrics_unit: LYRICS_BY_LETTERS,
+            lyrics_smooth: 1.0,
+            lyrics_lead: 0.0,
+            ..Prefs::default()
+        };
+        // By words the front crosses the word too: it never lights at once.
+        let words = Prefs { lyrics_unit: LYRICS_BY_WORDS, ..letters.clone() };
+        for (unit, prefs) in [("letters", &letters), ("words", &words)] {
+            let (glyphs, lit) = painted_glyphs(prefs, &l, 1.15);
+            assert!(glyphs.len() >= 5, "{:?}", glyphs.len());
+            let (first, last, next) = (glyphs[0].expect("«С» is painted"), glyphs[3].expect("«т» is painted"), glyphs[5].expect("«о» is painted"));
+            assert!(bright(first) > bright(last), "{unit}: «С» lights before «т»: {first:?} {last:?}");
+            assert!(!close(last, lit) && last == next, "{unit}: «т» is not sung yet: {last:?}");
+            let (glyphs, lit) = painted_glyphs(prefs, &l, 1.33);
+            let (first, last) = (glyphs[0].unwrap(), glyphs[3].unwrap());
+            assert!(close(first, lit), "{unit}: «С» is sung: {first:?}");
+            assert!(!close(last, lit), "{unit}: «т» is still being sung: {last:?}");
+            // Sung and in the pause: the word is lit whole, the next not.
+            let (glyphs, lit) = painted_glyphs(prefs, &l, 1.9);
+            assert!(glyphs[..4].iter().all(|c| close(c.unwrap(), lit)) && !close(glyphs[5].unwrap(), lit), "{unit}: in the pause");
+        }
+    }
+
+    /// Focus by syllables or words: a piece stands out while it is sung and
+    /// goes back to the line's tone after it, evenly; nothing fills.
+    #[test]
+    fn focus_lifts_the_sung_piece_and_lets_it_go() {
+        let at = |p: f32| focus_pulse(p, 2.0, 3.0, 0.1, 0.0);
+        assert_eq!(at(1.5), 0.0);
+        assert!(at(2.5) > 0.99 && at(3.0) > 0.99);
+        assert!(at(3.0 + FOCUS_FALL * 0.5) > 0.3 && at(3.0 + FOCUS_FALL * 0.5) < 0.7);
+        assert!(at(3.0 + FOCUS_FALL + 0.01) < 1e-3);
+        let mut was = 0.0;
+        for ms in 1500..4000 {
+            let v = at(ms as f32 / 1000.0);
+            assert!((v - was).abs() < 0.05, "{ms}: a step");
+            was = v;
+        }
+        // A piece sung in a blink still shows.
+        assert!(focus_pulse(2.2, 2.0, 2.05, 0.1, 0.0) > 0.9);
+        with_painter(|painter| {
+            let mut l = line(1.0, Some(3.0), "космо цветок");
+            l.words = vec![word(1.0, 1.4, "кос"), word(1.4, 1.8, "мо "), word(1.8, 2.4, "цве"), word(2.4, 2.8, "ток")];
+            let g = fixed_layout(painter, &l.text, 26.0);
+            let t = Timing::new(&l, &g).unwrap();
+            let look = |by| Look { style: Style::Focus, by };
+            // Glyphs: к о с м о ␠ ц в е т о к.
+            assert_eq!(piece_end(&t, 0, look(By::Syllables)), Some(t.syllables[0].end));
+            assert_eq!(piece_end(&t, 0, look(By::Words)), Some(t.syllables[1].end));
+            assert_eq!(piece_end(&t, 5, look(By::Words)), None);
         });
     }
 
@@ -3616,7 +4688,7 @@ mod tests {
             let mut l = line(1.0, Some(4.0), "нон-стоп ok");
             l.words = vec![word(1.0, 1.5, "нон-"), word(1.5, 2.5, "стоп "), word(3.0, 3.5, "ok")];
             let g = fixed_layout(painter, &l.text, 26.0);
-            let t = Timing::of(&l, &g, Look { style: Style::Wave, by: By::Syllables }).unwrap();
+            let t = Timing::build(&l, &g, Look { style: Style::Wave, by: By::Syllables }, 0.0, Ease::EXACT).unwrap();
             assert_eq!(t.words, [0, 2]);
             let at = |p: f32| t.word_jump(1, p, 1.0, 0.0);
             assert_eq!(at(0.5).0, 0.0);

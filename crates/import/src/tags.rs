@@ -67,6 +67,9 @@ pub struct TagSet {
     pub r128_track_gain: Option<i16>,
     /// Read side: `REPLAYGAIN_TRACK_GAIN` in dB.
     pub replaygain_track_gain_db: Option<f32>,
+    /// Read side: the record label (`LABEL`/`ORGANIZATION`, ID3 `TPUB`,
+    /// the iTunes `LABEL` atom); never written.
+    pub label: Option<String>,
     /// Encoded image (JPEG/PNG) of the front cover.
     pub cover: Option<Vec<u8>>,
 }
@@ -234,6 +237,7 @@ pub fn read_tags(path: &Path) -> Result<(TagSet, FileInfo)> {
         set.album = text(tag, ItemKey::AlbumTitle);
         set.album_artist = text(tag, ItemKey::AlbumArtist);
         set.genre = text(tag, ItemKey::Genre);
+        set.label = text(tag, ItemKey::Label);
         set.compilation = text(tag, ItemKey::FlagCompilation).is_some_and(|v| v == "1");
 
         let (no, total) = text(tag, ItemKey::TrackNumber)

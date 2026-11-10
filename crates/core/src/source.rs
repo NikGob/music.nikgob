@@ -33,12 +33,29 @@ pub enum SourceKey {
     Qobuz,
     /// Tidal through a public hifi-api instance.
     Tidal,
+    /// squidify.org (or any Subsonic server): anime, game and film
+    /// soundtracks in FLAC.
+    Squidify,
+    /// The Internet Archive (archive.org): uploads of CD rips, rare and
+    /// old albums, often in FLAC.
+    Archive,
+    /// Bandcamp's free and name-your-price releases.
+    Bandcamp,
 }
 
 impl SourceKey {
     /// Every key, in the default order of «Источники»: the cheap and
     /// reliable first, the free services last (the poll of docs/stage4.5.md).
-    pub const ALL: [Self; 5] = [Self::Torrents, Self::Khinsider, Self::Soulseek, Self::Qobuz, Self::Tidal];
+    pub const ALL: [Self; 8] = [
+        Self::Torrents,
+        Self::Khinsider,
+        Self::Bandcamp,
+        Self::Soulseek,
+        Self::Qobuz,
+        Self::Tidal,
+        Self::Squidify,
+        Self::Archive,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -47,6 +64,9 @@ impl SourceKey {
             Self::Soulseek => "soulseek",
             Self::Qobuz => "qobuz",
             Self::Tidal => "tidal",
+            Self::Squidify => "squidify",
+            Self::Archive => "archive",
+            Self::Bandcamp => "bandcamp",
         }
     }
 
@@ -58,11 +78,14 @@ impl SourceKey {
             Self::Soulseek => "Soulseek",
             Self::Qobuz => "Qobuz",
             Self::Tidal => "Tidal",
+            Self::Squidify => "Squidify",
+            Self::Archive => "Internet Archive",
+            Self::Bandcamp => "Bandcamp",
         }
     }
 
     /// A free service of someone else's account (a public instance): the
-    /// group behind the «Бесплатные FLAC-сервисы» switch.
+    /// group that needs no account of the user's own.
     pub fn is_service(self) -> bool {
         matches!(self, Self::Qobuz | Self::Tidal)
     }

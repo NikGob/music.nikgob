@@ -4,12 +4,15 @@
 //! lists albums, an album page lists the songs with their CD, number,
 //! length and sizes per format, and a song's page links the files.
 //!
-//! The site sits behind a bot check that turns away clients asking too
-//! fast or coming back without the cookie it set: one request every two
-//! seconds with the site's cookies, and a pause when it does turn us away
-//! ([`crate::http::Breaker`]).
+//! The site sits behind a bot check. Page requests carry a browser's
+//! navigation headers; if the answer is still the check, and a browser was
+//! given ([`Khinsider::set_browser`]), that browser reads the HTML once
+//! (its own profile, no cookies copied into the HTTP client). The files
+//! stay on [`crate::http::download`] from the CDN. Still a check: the
+//! existing pause, and no second try. One request every two seconds.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nikgob_core::indexer::BoxFuture;
@@ -20,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::album::{Patience, fetch_each, left_out};
 use crate::html::{Cell, links, table, text_of};
-use crate::http::{Breaker, Cookies, Pace, client, download, get_page, safe_name};
+use crate::http::{Breaker, Cookies, Nav, Pace, client, download, get_page_nav, is_check, safe_name, BOT_CHECK};
 use crate::matching::contains_words;
 use crate::text::{album_core, album_keys, franchise_of, is_soundtrack, title_keys};
 
@@ -30,12 +33,21 @@ const ALBUMS: usize = 3;
 /// A song title this alike is the track.
 const TITLE: f64 = 0.85;
 
+/// Reads one page's HTML after a check only a browser passes. The cookies
+/// it earns stay in its profile; they are not given to the HTTP client.
+/// [`SourceError::NotConfigured`] means no webview can be opened (Linux
+/// without WebKit): the check stands, and nothing is tried again.
+pub trait PageBrowser: Send + Sync {
+    fn document<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Result<String, SourceError>>;
+}
+
 pub struct Khinsider {
     base: String,
     http: reqwest::Client,
     pace: Pace,
     breaker: Breaker,
     cookies: Cookies,
+    browser: Mutex<Option<Arc<dyn PageBrowser>>>,
 }
 
 impl Khinsider {
@@ -53,7 +65,14 @@ impl Khinsider {
             pace: Pace::new(every),
             breaker: Breaker::default(),
             cookies: Cookies::default(),
+            browser: Mutex::new(None),
         }
+    }
+
+    /// The hidden webview the app opens when a page is still a check.
+    /// None (or a browser that says it is not there) leaves the HTTP answer.
+    pub fn set_browser(&self, browser: Arc<dyn PageBrowser>) {
+        *self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(browser);
     }
 
     fn url(&self, href: &str) -> String {
@@ -67,9 +86,72 @@ impl Khinsider {
     async fn page(&self, url: &str) -> Result<String, SourceError> {
         self.breaker.check()?;
         self.pace.wait().await;
-        let r = get_page(&self.http, url, Some(&self.cookies)).await;
+        let http = get_page_nav(&self.http, url, Some(&self.cookies), nav_for(url, &self.base)).await;
+        let browser = self.browser.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let r = finish_page(http, browser.as_deref(), url).await;
         self.breaker.note(&r);
         r
+    }
+}
+
+/// The path of `url`, without its query.
+fn path_of(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let path = rest.find('/').map_or("/", |i| &rest[i..]);
+    path.split(['?', '#']).next().unwrap_or(path)
+}
+
+/// Navigation headers for one khinsider page. The first visit (the site,
+/// a search) is `none`; an album or a song is `same-origin` with the site
+/// as its referer.
+pub fn nav_for(url: &str, base: &str) -> Nav {
+    let path = path_of(url);
+    if path == "/" || path.is_empty() || path.starts_with("/search") {
+        Nav { site: "none", referer: None }
+    } else {
+        Nav { site: "same-origin", referer: Some(format!("{}/", base.trim_end_matches('/'))) }
+    }
+}
+
+/// A Cloudflare check page, whatever status it came with.
+pub fn is_challenge_html(html: &str) -> bool {
+    html.contains("Just a moment") || html.contains("cf-chl") || html.contains("challenge-platform") || html.contains("Attention Required")
+}
+
+fn as_check(http: Result<String, SourceError>) -> Result<String, SourceError> {
+    match http {
+        Err(e) if is_check(&e) => Err(e),
+        _ => Err(SourceError::Blocked(BOT_CHECK.into())),
+    }
+}
+
+/// What a page answer becomes. A check, and a browser: ask it once. A
+/// check and no browser, or a browser that is not there: the check stands.
+/// A page that is not a check is used as it is, and the browser is not asked.
+pub async fn finish_page(http: Result<String, SourceError>, browser: Option<&dyn PageBrowser>, url: &str) -> Result<String, SourceError> {
+    let check = match &http {
+        Err(e) if is_check(e) => true,
+        Ok(html) if is_challenge_html(html) => true,
+        _ => false,
+    };
+    if !check {
+        return http;
+    }
+    let Some(browser) = browser else { return as_check(http) };
+    match browser.document(url).await {
+        Err(SourceError::NotConfigured) => as_check(http),
+        other => after_browser(other),
+    }
+}
+
+/// The browser's one answer. A page that is still a check is the pause;
+/// there is no second ask.
+pub fn after_browser(got: Result<String, SourceError>) -> Result<String, SourceError> {
+    match got {
+        Ok(html) if !is_challenge_html(&html) => Ok(html),
+        Ok(_) => Err(SourceError::Blocked(BOT_CHECK.into())),
+        Err(e) if is_check(&e) => Err(e),
+        Err(_) => Err(SourceError::Blocked(BOT_CHECK.into())),
     }
 }
 
@@ -403,8 +485,13 @@ impl Source for Khinsider {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Mutex;
 
+    use nikgob_core::indexer::BoxFuture;
+    use nikgob_core::source::SourceError;
+
+    use super::*;
+    use crate::http::{is_check, BOT_CHECK};
     #[test]
     fn sizes_lengths_and_names() {
         assert_eq!(size_of("22.1 MB"), Some((22.1 * 1024.0 * 1024.0) as u64));
@@ -430,5 +517,73 @@ mod tests {
             Some("Supraland Six Inches Under")
         );
         assert_eq!(query_of(&w("ТУЗИК", "Каблуки")), None);
+    }
+
+    struct Fake {
+        html: Mutex<Result<String, SourceError>>,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl PageBrowser for Fake {
+        fn document<'a>(&'a self, _url: &'a str) -> BoxFuture<'a, Result<String, SourceError>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let r = self.html.lock().unwrap().clone();
+            Box::pin(async move { r })
+        }
+    }
+
+    fn calls(fake: &Fake) -> u32 {
+        fake.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn a_check_page_and_a_later_page_are_told_apart() {
+        assert!(is_challenge_html("<title>Just a moment...</title>"));
+        assert!(is_challenge_html("cf-chl-bypass"));
+        assert!(!is_challenge_html("Search - KHInsider Video Game Music"));
+        let search = nav_for("https://downloads.khinsider.com/search?search=supraland", DEFAULT_URL);
+        assert_eq!(search.site, "none");
+        assert!(search.referer.is_none());
+        let album = nav_for("https://downloads.khinsider.com/game-soundtracks/album/x", DEFAULT_URL);
+        assert_eq!(album.site, "same-origin");
+        assert_eq!(album.referer.as_deref(), Some("https://downloads.khinsider.com/"));
+    }
+
+    #[tokio::test]
+    async fn a_check_asks_the_browser_once_and_uses_the_cleared_page() {
+        let fake = Fake { html: Mutex::new(Ok("<html>Search - KHInsider</html>".into())), calls: std::sync::atomic::AtomicU32::new(0) };
+        let got = finish_page(Err(SourceError::Blocked(BOT_CHECK.into())), Some(&fake), "https://downloads.khinsider.com/search?search=a")
+            .await
+            .unwrap();
+        assert!(got.contains("KHInsider"));
+        assert_eq!(calls(&fake), 1);
+        // A 200 that is still the check goes to the browser too.
+        let still = finish_page(Ok("<title>Just a moment...</title>".into()), Some(&fake), "https://downloads.khinsider.com/").await;
+        assert!(still.unwrap().contains("KHInsider"), "the browser cleared it");
+        assert_eq!(calls(&fake), 2, "that page asked the browser once too");
+    }
+
+    #[tokio::test]
+    async fn a_check_the_browser_does_not_clear_is_a_block_without_a_second_ask() {
+        let fake = Fake {
+            html: Mutex::new(Ok("<title>Just a moment...</title>".into())),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        };
+        let got = finish_page(Err(SourceError::Blocked(BOT_CHECK.into())), Some(&fake), "https://downloads.khinsider.com/").await;
+        assert!(is_check(&got.unwrap_err()));
+        assert_eq!(calls(&fake), 1, "the browser is asked once, not in a loop");
+    }
+
+    #[tokio::test]
+    async fn no_webview_keeps_the_check_and_a_real_page_skips_the_browser() {
+        let none = finish_page(Err(SourceError::Blocked(BOT_CHECK.into())), None, "https://downloads.khinsider.com/").await;
+        assert!(is_check(&none.unwrap_err()));
+        let fake = Fake { html: Mutex::new(Err(SourceError::NotConfigured)), calls: std::sync::atomic::AtomicU32::new(0) };
+        let skipped = finish_page(Err(SourceError::Blocked(BOT_CHECK.into())), Some(&fake), "u").await;
+        assert!(is_check(&skipped.unwrap_err()), "a webview that is not there leaves the check");
+        assert_eq!(calls(&fake), 1);
+        let real = finish_page(Ok("albums".into()), Some(&fake), "u").await.unwrap();
+        assert_eq!(real, "albums");
+        assert_eq!(calls(&fake), 1, "a page that is not a check does not open the browser");
     }
 }

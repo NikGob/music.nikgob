@@ -33,7 +33,7 @@ pub use coverart::{CoverArtArchive, CoverImage, CoverTarget, FetchedCover};
 pub use deezer::{Deezer, DeezerAlbum, DeezerArtistHit, DeezerTrack};
 pub use itunes::{Itunes, ItunesSong};
 pub use error::{MetadataError, Result};
-pub use http::{Http, RateLimiter, RateLimits, RetryPolicy};
+pub use http::{Http, RateLimiter, RateLimits, RetryPolicy, in_background};
 pub use lastfm::{LastFm, LastFmSimilar};
 pub use listenbrainz::{ListenBrainz, Similar};
 pub use lrc::{parse_lrc, parse_lrc_lines};
@@ -49,7 +49,7 @@ pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;
 pub use genius::Genius;
-pub use ttml::{TtmlLyrics, parse_ttml, parse_ttml_plain, serialize_ttml, serialize_ttml_plain};
+pub use ttml::{TtmlLyrics, mark_ttml_own, parse_ttml, parse_ttml_plain, serialize_ttml, serialize_ttml_plain, ttml_is_own};
 
 /// Every client, built from one config and sharing one HTTP stack.
 #[derive(Clone, Debug)]
@@ -66,7 +66,8 @@ pub struct Metadata {
     /// Plain lyrics from Genius's public pages (no account).
     pub genius: Genius,
     pub itunes: Itunes,
-    /// Similar artists and recordings (no key).
+    /// Similar artists and recordings (no key); the popularity with the
+    /// user's token.
     pub listenbrainz: ListenBrainz,
     /// `None` without the user's Last.fm key.
     pub lastfm: Option<LastFm>,
@@ -88,7 +89,7 @@ impl Metadata {
             betterlyrics: BetterLyrics::new(http.clone()),
             genius: Genius::new(http.clone()),
             itunes: Itunes::new(http.clone()),
-            listenbrainz: ListenBrainz::new(http.clone()),
+            listenbrainz: ListenBrainz::new(http.clone()).with_token(config.listenbrainz_token.as_deref()),
             lastfm: config.lastfm_key.as_deref().and_then(|k| LastFm::new(http, k)),
         })
     }

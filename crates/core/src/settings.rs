@@ -38,17 +38,44 @@ pub struct Settings {
 }
 
 /// Where the download sources other than the indexer live
-/// (docs/stage4.5.md). Public instances, no accounts: empty lists take the
-/// built-in ones, a list of the user's own replaces them.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// (docs/stage4.5.md). Public instances, no accounts. Qobuz and Tidal
+/// instance lists live in `sources.toml` beside this file (written once
+/// with the built-in addresses). A non-empty list here is copied into that
+/// file only when it is first created.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourcesSettings {
     /// Qobuz-DL instances (`https://host`, the API under `/api/`).
+    /// Copied into `sources.toml` once, when that file is first created.
     pub qobuz_instances: Vec<String>,
     /// hifi-api instances for Tidal (`https://host`).
+    /// Copied into `sources.toml` once, when that file is first created.
     pub tidal_instances: Vec<String>,
     /// khinsider's address (empty: downloads.khinsider.com).
     pub khinsider_url: String,
+    /// A Subsonic server's address (empty: squidify.org), like
+    /// `https://music.example` or the user's own Navidrome.
+    pub subsonic_url: String,
+    /// Its login (empty: the guest login squidify.org publishes).
+    pub subsonic_user: String,
+    /// Never reaches logs.
+    pub subsonic_password: String,
+    /// The Internet Archive's address (empty: archive.org).
+    pub archive_url: String,
+}
+
+impl fmt::Debug for SourcesSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SourcesSettings")
+            .field("qobuz_instances", &self.qobuz_instances)
+            .field("tidal_instances", &self.tidal_instances)
+            .field("khinsider_url", &self.khinsider_url)
+            .field("subsonic_url", &self.subsonic_url)
+            .field("subsonic_user", &self.subsonic_user)
+            .field("subsonic_password", &"<redacted>")
+            .field("archive_url", &self.archive_url)
+            .finish()
+    }
 }
 
 /// Where Soulseek runs (docs/stage4.5.md, poll answer 3).
@@ -159,6 +186,9 @@ pub struct MetadataSettings {
     /// The user's own Last.fm API key (https://www.last.fm/api/account/create):
     /// the graph of similar music asks Last.fm only with it.
     pub lastfm_key: Option<String>,
+    /// The user's own ListenBrainz token (https://listenbrainz.org/settings/):
+    /// the graph's popularity asks ListenBrainz only with it.
+    pub listenbrainz_token: Option<String>,
 }
 
 impl Default for MetadataSettings {
@@ -167,6 +197,7 @@ impl Default for MetadataSettings {
             contact: "music.nikgob personal player".into(),
             acoustid_key: None,
             lastfm_key: None,
+            listenbrainz_token: None,
         }
     }
 }
@@ -177,6 +208,7 @@ impl fmt::Debug for MetadataSettings {
             .field("contact", &self.contact)
             .field("acoustid_key", &self.acoustid_key.as_ref().map(|_| "<redacted>"))
             .field("lastfm_key", &self.lastfm_key.as_ref().map(|_| "<redacted>"))
+            .field("listenbrainz_token", &self.listenbrainz_token.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -269,6 +301,8 @@ mod tests {
             },
             sources: SourcesSettings {
                 qobuz_instances: vec!["https://qobuz.example".into()],
+                subsonic_user: "navi-user".into(),
+                subsonic_password: "navi-pass".into(),
                 ..SourcesSettings::default()
             },
             soulseek: SoulseekSettings {
@@ -328,6 +362,8 @@ username = \"me\"
         assert!(!dbg.contains("my-client-id"));
         assert!(!dbg.contains("slsk-pass"));
         assert!(!dbg.contains("slsk-token"));
+        assert!(!dbg.contains("navi-pass"));
+        assert!(dbg.contains("navi-user"));
         assert!(dbg.contains("localhost:9696"));
     }
 }

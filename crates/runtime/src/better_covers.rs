@@ -444,7 +444,7 @@ pub(crate) fn widen(lib: &Library, spellings: &Spellings, w: &mut Want, own: &[T
 /// A clip title's song titles, the most specific first: a quoted title
 /// («"ReawakeR" by LiSA»), the title before « by », then the halves of the
 /// title from the last (the quoted song of «ヨルシカ「火星人」») to the whole.
-fn clip_titles(title: &str, channel: &str) -> Vec<String> {
+pub(crate) fn clip_titles(title: &str, channel: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |t: &str| {
         let t = t.trim().trim_matches(|c: char| "\"'«»“”".contains(c)).trim();
@@ -603,8 +603,16 @@ pub(crate) struct Swept {
 /// Looks `wants` up one after another with `look` (each within
 /// [`LOOKUP_TIMEOUT`]) and keeps what each found, a miss too. A lookup a
 /// service could not answer stops the run: it and the rest are not kept,
-/// so the next run asks them. `shown` is told of each art found.
-pub(crate) async fn sweep<F, Fut>(lib: &Library, wants: Vec<Want>, look: F, mut shown: impl FnMut()) -> Swept
+/// so the next run asks them. `shown` is told of each art found. `quiet`:
+/// an unattended run, which waits while a game is in front; the playing
+/// song's lookup never does.
+pub(crate) async fn sweep<F, Fut>(
+    lib: &Library,
+    wants: Vec<Want>,
+    quiet: bool,
+    look: F,
+    mut shown: impl FnMut(),
+) -> Swept
 where
     F: Fn(Want) -> Fut,
     Fut: Future<Output = Result<Option<String>, String>>,
@@ -613,6 +621,10 @@ where
     for w in wants {
         let Some(target) = w.target else { continue };
         let (current, title) = (w.current.clone(), w.titles.first().cloned());
+        // Waits while a game is in front (outside the lookup's timeout).
+        if quiet {
+            crate::quiet::free().await;
+        }
         let url = match tokio::time::timeout(LOOKUP_TIMEOUT, look(w)).await {
             Ok(Ok(url)) => url.unwrap_or_default(),
             Ok(Err(e)) => {
@@ -676,6 +688,7 @@ impl Worker {
         self.streaming.spawn_reporting(move |tx| async move {
             if sweep_run {
                 tokio::time::sleep(START).await;
+                crate::quiet::free().await;
             }
             let wants = {
                 let (lib, root, asked) = (lib.clone(), root.clone(), asked.clone());
@@ -700,7 +713,7 @@ impl Worker {
                 let (meta, services) = (meta.clone(), services.clone());
                 async move { find(Some(&meta), &services, &w).await }
             };
-            let done = sweep(&lib, wants, look, || {
+            let done = sweep(&lib, wants, sweep_run, look, || {
                 pending = true;
                 if last.is_none_or(|t| t.elapsed() >= SHOW_EVERY) {
                     last = Some(Instant::now());
@@ -997,7 +1010,7 @@ mod tests {
         let lib = Library::open_in_memory().unwrap();
         let wants = targets(8);
         let ids: Vec<Target> = wants.iter().filter_map(|w| w.target).collect();
-        let done = sweep(&lib, wants, |_| async { Ok(None) }, || {}).await;
+        let done = sweep(&lib, wants, false, |_| async { Ok(None) }, || {}).await;
         assert_eq!(done, Swept { asked: 8, found: 0, stopped: None });
         assert!(ids.iter().all(|t| !due(&lib, *t, None, now_ms())), "every miss kept for the re-ask");
 
@@ -1015,7 +1028,7 @@ mod tests {
                 }
             }
         };
-        let done = sweep(&lib, wants, look, || shown += 1).await;
+        let done = sweep(&lib, wants, false, look, || shown += 1).await;
         assert_eq!(done, Swept { asked: 5, found: 1, stopped: Some("Deezer: network error".into()) });
         assert_eq!(shown, 1);
         assert_eq!(n.load(Ordering::SeqCst), 6, "nothing asked after the refusal");

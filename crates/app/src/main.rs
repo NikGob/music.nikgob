@@ -18,12 +18,15 @@ mod frames;
 mod geometry;
 mod logfile;
 mod pacing;
+mod profile;
 mod shot;
 mod shot_fakes;
 mod streams;
+mod sweep;
 mod sysmotion;
 mod titlebar;
 mod scwidget;
+mod khpage;
 mod web_images;
 mod ytlogin;
 
@@ -65,7 +68,8 @@ fn paths() -> Paths {
 }
 
 /// A windowed app has no stderr: panics (thread, message, place, backtrace)
-/// are appended to `crash.log` next to the library, then handled as usual.
+/// are appended to `crash.log` next to the library, scrubbed as the log is
+/// ([`logfile::scrub`]), then handled as usual.
 fn log_panics(dir: PathBuf) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -83,9 +87,9 @@ fn log_panics(dir: PathBuf) {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("crash.log"))
+            .open(dir.join(logfile::CRASH))
         {
-            let _ = f.write_all(report.as_bytes());
+            let _ = f.write_all(logfile::scrub(&report).as_bytes());
         }
         log::error!("{info}");
         default(info);
@@ -113,9 +117,14 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     let legacy = value.get("np_slot").is_none();
     // Prefs from before a change of the lyrics defaults take the new ones.
     let lyrics_rev = value.get("lyrics_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
+    // Prefs from before the presets keep the values of their own once.
+    let settings_rev = value.get("settings_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     let mut prefs: Prefs = serde_json::from_value(value)?;
     if legacy { prefs.np_slot = slot; }
     prefs.upgrade_lyrics(lyrics_rev);
+    // The owner's own build opens the settings in «Подробно» the first
+    // time; a handout build in «Просто».
+    nikgob_view::presets::upgrade(&mut prefs, settings_rev, option_env!("NIKGOB_RELEASE").is_none());
     Ok(prefs)
 }
 
@@ -145,6 +154,7 @@ fn load_prefs(
         p.metadata_contact = s.metadata.contact.clone();
         p.acoustid_configured = s.metadata.acoustid_key.as_ref().is_some_and(|k| !k.trim().is_empty());
         p.lastfm_configured = s.metadata.lastfm_key.as_ref().is_some_and(|k| !k.trim().is_empty());
+        p.listenbrainz_configured = s.metadata.listenbrainz_token.as_ref().is_some_and(|k| !k.trim().is_empty());
         p.spotify_personal_app = s.streaming.spotify_client_id.is_some();
         p.youtube_cookies_set = s.streaming.youtube_cookies.is_some();
     }
@@ -214,7 +224,7 @@ impl Core {
         self.quit |= req.quit || self.quit_asked.swap(false, Ordering::Relaxed);
         self.wants_show |= req.show || req.toggle || self.show_asked.swap(false, Ordering::Relaxed);
         self.sync_autostart();
-        self.runtime.send_all(self.commands.drain(..));
+        send_commands(&self.runtime, &mut self.commands);
     }
 
     /// Puts a changed autostart switch into the system; one it refused
@@ -228,6 +238,19 @@ impl Core {
             self.commands.push(Command::SetPref(nikgob_view::PrefPatch::Autostart(system)));
         }
     }
+}
+
+/// Hands the commands to the runtime; the developer profile's own
+/// («Открыть», «Сбросить») the app does itself.
+fn send_commands(runtime: &Runtime, commands: &mut Vec<Command>) {
+    commands.retain(|c| match c {
+        Command::DevProfile(action) => {
+            profile::act(*action);
+            false
+        }
+        _ => true,
+    });
+    runtime.send_all(commands.drain(..));
 }
 
 impl Resident for Core {
@@ -403,7 +426,7 @@ impl eframe::App for Window {
             }
             state.prefs.fps_limit.max(15)
         };
-        core.runtime.send_all(core.commands.drain(..));
+        send_commands(&core.runtime, &mut core.commands);
         static FIRST: AtomicBool = AtomicBool::new(true);
         if FIRST.swap(false, Ordering::Relaxed) {
             stage("first frame");
@@ -457,12 +480,18 @@ fn stage(name: &str) {
 fn main() -> eframe::Result {
     LAUNCHED.get_or_init(Instant::now);
     // `--youtube-login` / `--soundcloud-login`: this run is only a sign-in
-    // window; `--sc-widget`: only SoundCloud's player host. They log to
-    // stderr, which the app copies into its own log; they must not write the
-    // app's log file themselves.
+    // window; `--khinsider-page`: a hidden page read; `--sc-widget`: only
+    // SoundCloud's player host. They log to stderr, which the app copies
+    // into its own log; they must not write the app's log file themselves.
     if std::env::args().any(|a| a == "--youtube-login" || a == "--soundcloud-login") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Some(code) = ytlogin::child_main() {
+            std::process::exit(code);
+        }
+    }
+    if std::env::args().any(|a| a == "--khinsider-page") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Some(code) = khpage::child_main() {
             std::process::exit(code);
         }
     }
@@ -472,10 +501,15 @@ fn main() -> eframe::Result {
             std::process::exit(code);
         }
     }
-    // `--quit`: the running player quits as from the tray's «Выход» (its
-    // session saved), so a script can restart it; nothing else starts.
+    // The developer profile (`--demo-profile`): its own folder, slot and
+    // library, beside the real player.
+    let profile = profile::requested();
+    let slot = if profile { profile::slot() } else { fastframe_instance::Slot::new("music.nikgob") };
+    // `--quit`: the running player (or profile) quits as from the tray's
+    // «Выход» (its session saved), so a script can restart it; nothing
+    // else starts.
     if std::env::args().any(|a| a == "--quit") {
-        match fastframe_instance::Slot::new("music.nikgob").send("quit") {
+        match slot.send("quit") {
             Ok(_) => std::process::exit(0),
             Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
                 eprintln!("music.nikgob is not running");
@@ -489,6 +523,32 @@ fn main() -> eframe::Result {
     }
     logfile::init();
     stage("log");
+    // `--sweep-list out.json`: the settings sweep's list of every row, from
+    // the code and the prefs of `NIKGOB_DATA` (or the defaults); no window.
+    if let Some(path) = sweep::list_path() {
+        // The prefs the run itself starts from: the data dir's (the demo's
+        // own dir with `NIKGOB_DEMO`), read as the app reads them — a dir
+        // without a prefs.json starts as a first start, not as the
+        // defaults.
+        let dir = std::env::var_os("NIKGOB_DATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("NIKGOB_DEMO").map(|_| std::env::temp_dir().join("nikgob-demo")));
+        let base = match dir {
+            Some(d) => prefs_of(std::fs::read(d.join("prefs.json")).ok().as_deref()),
+            None => Prefs::default(),
+        };
+        match sweep::write_list(&path, &base) {
+            Ok(n) => {
+                log::info!("sweep: {n} settings listed in {}", path.display());
+                std::process::exit(0);
+            }
+            Err(e) => {
+                log::error!("sweep: cannot write {}: {e}", path.display());
+                eprintln!("cannot write {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    }
     // Meanwhile, while the library opens and the window is made: the
     // fallback faces (the window's creator waits for them if need be) and
     // the audio outputs (the prefs wait for them).
@@ -499,12 +559,23 @@ fn main() -> eframe::Result {
     let mut paths = paths();
     // `NIKGOB_DATA=dir`: a demo run on a library already in `dir` (a copy
     // of a real one, say) instead of the generated one.
-    let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from);
-    let demo = std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some();
+    let data_dir_asked = std::env::var_os("NIKGOB_DATA").map(PathBuf::from).filter(|_| !profile);
+    let demo = !profile && (std::env::var_os("NIKGOB_DEMO").is_some() || data_dir_asked.is_some());
+    // Demo runs and the profile live beside the real app: no autostart, no
+    // start in the tray.
+    let beside = demo || profile;
+    // A settings sweep writes the prefs of the library it runs on: never
+    // the real profile's.
+    if sweep::active() && !demo {
+        log::error!("sweep: runs only on a copy (NIKGOB_DATA=dir) or the demo (NIKGOB_DEMO=1)");
+        eprintln!("the settings sweep runs only with NIKGOB_DATA=<a copy> or NIKGOB_DEMO=1");
+        std::process::exit(2);
+    }
     let at_sign_in = std::env::args().any(|a| a == autostart::FLAG);
     // One player per user: a second launch (a click on the shortcut while
     // the first waits in the tray) shows the running one's window and ends.
-    // Demo and screenshot runs live beside the real app.
+    // Demo and screenshot runs live beside the real app; the profile has a
+    // slot of its own.
     let show_asked = Arc::new(AtomicBool::new(false));
     let quit_asked = Arc::new(AtomicBool::new(false));
     let waker = Waker::default();
@@ -513,10 +584,12 @@ fn main() -> eframe::Result {
     } else {
         let (asked, quit) = (Arc::clone(&show_asked), Arc::clone(&quit_asked));
         let w = waker.clone();
-        match fastframe_instance::Slot::new("music.nikgob").claim("show", move |request| {
+        match slot.claim("show", move |request| {
             let flag = match request {
                 "show" => &asked,
                 "quit" => &quit,
+                // «Сбросить» waits for the profile to be gone.
+                "ping" => return Some("ok".to_owned()),
                 _ => return None,
             };
             flag.store(true, Ordering::Relaxed);
@@ -546,6 +619,19 @@ fn main() -> eframe::Result {
         // The real services keep what is typed in next to the demo library.
         paths.settings = streams::real_in_demo().then(|| dir.join("settings.toml"));
     }
+    if profile {
+        let dir = profile::dir();
+        profile::prepare(&dir);
+        paths = profile::paths(&dir);
+        nikgob_view::dev::set_profile(true);
+        audio::play_missing_files_silent();
+        log::info!("developer profile in {}", dir.display());
+    }
+    // A sweep on a copy of the profile plays its file-less tracks as the
+    // profile does, so the screens show a track running.
+    if sweep::active() {
+        audio::play_missing_files_silent();
+    }
     // Next to the library in use: a demo's crash stays in the demo's dir.
     if let Some(dir) = paths.db.parent() {
         log_panics(dir.to_owned());
@@ -566,18 +652,25 @@ fn main() -> eframe::Result {
     if demo && data_dir_asked.is_none() {
         demo::seed(&library, &paths.root.join("Music"));
     }
+    if profile {
+        profile::seed_if_empty(&library, &paths.root);
+        // «Сбросить»: seeded, and nothing else.
+        if profile::seed_only() {
+            return Ok(());
+        }
+    }
     stage("library");
     let settings = paths.settings.as_ref().and_then(|s| nikgob_core::settings::Settings::load(s).ok());
     let mut prefs = load_prefs(&paths, settings.as_ref(), devices);
     stage("prefs");
     // The system says whether autostart is on (Task Manager may have turned
     // it off), and a wished-for line that is gone is written again; demo
-    // runs leave it alone.
-    let autostart_system = (!demo).then(|| autostart::reconcile(prefs.autostart));
+    // runs and the profile leave it alone.
+    let autostart_system = (!beside).then(|| autostart::reconcile(prefs.autostart));
     if let Some(on) = autostart_system {
         prefs.autostart = on;
     }
-    let start_hidden = at_sign_in && !demo && prefs.autostart_hidden;
+    let start_hidden = at_sign_in && !beside && prefs.autostart_hidden;
 
     // Streaming services: each keeps its state in its own folder of the
     // data dir (the demo's own, in demo mode).
@@ -632,7 +725,7 @@ fn main() -> eframe::Result {
         cfg.fallback_seed_argb = prefs.fallback_seed;
         // A demo with the real services asks the real online metadata too
         // (covers, lyrics, the graph of similar music).
-        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some();
+        let offline = (demo && !streams::real_in_demo()) || std::env::var_os("NIKGOB_OFFLINE").is_some() || sweep::active();
         cfg.fetch_lyrics = !offline;
         cfg.fetch_cover_online = !offline;
         let mut meta = nikgob_runtime::MetadataConfig::new(settings.metadata.contact);
@@ -642,13 +735,18 @@ fn main() -> eframe::Result {
         if let Some(k) = settings.metadata.lastfm_key {
             meta = meta.with_lastfm_key(k);
         }
+        if let Some(t) = settings.metadata.listenbrainz_token {
+            meta = meta.with_listenbrainz_token(t);
+        }
         nikgob_runtime::ImportSetup {
             config: cfg,
             metadata: (!offline).then_some(meta),
             watch_inbox: !demo,
             torrent_state_dir: paths.db.with_file_name("torrents"),
-            torrent_offline: demo,
-            models_dir: Some(paths.db.with_file_name("models")),
+            // The profile neither downloads nor seeds torrents.
+            torrent_offline: demo || profile,
+            // A sweep neither downloads nor runs the lyrics models.
+            models_dir: (!sweep::active()).then(|| paths.db.with_file_name("models")),
         }
     };
     // The demo's discovery and the services' suggestions ask the fake
@@ -665,6 +763,8 @@ fn main() -> eframe::Result {
     } else {
         StreamSchedule::default()
     };
+    // `--sweep` / `--sweep-baseline`: the settings sweep drives the window.
+    let sweep_shot = sweep::shot(&prefs);
     let runtime = Runtime::start_scheduled(
         RuntimeConfig {
             library,
@@ -690,6 +790,13 @@ fn main() -> eframe::Result {
     if let Some(login) = ytlogin::WindowLogin::new(ytlogin::Site::Soundcloud, &data_dir.join("soundcloud")) {
         runtime.set_web_login(nikgob_core::streaming::Service::Soundcloud, Arc::new(login));
     }
+    // khinsider's check, when the HTTP client still sees it: a hidden
+    // webview with its own profile. No WebView2 / WebKit: the source stays
+    // on the HTTP answer.
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(page) = khpage::HiddenPage::new(&data_dir.join("khinsider")) {
+        runtime.set_khinsider_browser(Arc::new(page));
+    }
     if let Some(c) = relogin {
         runtime.send(c);
     }
@@ -700,7 +807,7 @@ fn main() -> eframe::Result {
         desktop: desktop::Desktop::start(wake),
         analyzer: links.map(|l| l.analyzer),
         commands: Vec::new(),
-        shot: shot::Shot::from_env(),
+        shot: shot::Shot::from_env().or(sweep_shot),
         frames: frames::Frames::from_env(),
         quit: false,
         reopen: false,
@@ -901,6 +1008,50 @@ mod prefs_tests {
         nikgob_view::PrefPatch::LyricsSettingsSeen.apply(&mut p);
         let kept = parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap();
         assert!(kept.lyrics_settings_seen);
+    }
+
+    /// Prefs from before the presets (a made-up sample, not anyone's
+    /// file) read and written again differ only by the new keys; the areas
+    /// that match no preset keep their values for «Свои» once.
+    #[test]
+    fn old_prefs_gain_only_the_new_keys() {
+        use nikgob_view::presets::{Area, SETTINGS_REV};
+        const NEW: [&str; 7] = ["settings_deep", "custom_presets", "settings_rev", "cover_spin_s", "ring_spin_s", "cover_pulse_strength", "home_sections"];
+        let mut sample = serde_json::to_value(Prefs {
+            fps_limit: 90,
+            seed_ratio: 2.0,
+            cover_shape: nikgob_view::CoverShape::Heart,
+            download_sources: vec![nikgob_view::SourceSwitch { key: nikgob_view::SourceKey::Soulseek, on: true }],
+            library_dir: PathBuf::from("music"),
+            ..Prefs::default()
+        })
+        .unwrap();
+        let old = sample.as_object_mut().unwrap();
+        for key in NEW {
+            old.remove(key);
+        }
+        let old = old.clone();
+        let read = parse_prefs(&serde_json::to_vec(&old).unwrap()).unwrap();
+        let written = serde_json::to_value(&read).unwrap();
+        let written = written.as_object().unwrap();
+        for (key, value) in &old {
+            assert_eq!(written.get(key), Some(value), "{key}");
+        }
+        for key in written.keys() {
+            assert!(old.contains_key(key) || NEW.contains(&key.as_str()), "{key}");
+        }
+        assert_eq!(read.settings_rev, SETTINGS_REV);
+        assert_eq!(read.settings_deep, option_env!("NIKGOB_RELEASE").is_none());
+        let kept: Vec<_> = read.custom_presets.keys().copied().collect();
+        assert_eq!(kept, [Area::Recs, Area::Track, Area::Sources, Area::Seeding, Area::Load]);
+        // «Свои» gives the same values back.
+        assert_eq!(Area::Track.custom(&read).unwrap(), read);
+        // Read again, nothing more changes.
+        let again = parse_prefs(&serde_json::to_vec(&read).unwrap()).unwrap();
+        assert_eq!(again, read);
+        // A first start keeps nothing and opens in «Просто».
+        let first = prefs_of(None);
+        assert!(first.custom_presets.is_empty() && !first.settings_deep);
     }
 
     /// Главная asks for the name on the first start only: not with a prefs

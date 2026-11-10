@@ -175,12 +175,13 @@ pub fn show(
         let avail = ui.available_width() - trailing_w - 8.0;
         if compact && avail >= 112.0 {
             let dur = p.duration.unwrap_or_default();
+            let speed = p.speed;
             let out_s = Slider::new("bar-progress", p.fraction_now())
                 .width(avail - 8.0)
                 .track(8.0)
                 .wavy(playing && state.prefs.progress_wave)
                 .colors(on, on.gamma_multiply(0.24))
-                .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
+                .value_label(move |v| common::fmt_time(nikgob_view::heard_time(dur.mul_f32(v), speed)))
                 .show(ui);
             if let Some(v) = out_s.committed {
                 out.push(Command::Seek(dur.mul_f32(v)));
@@ -192,18 +193,19 @@ pub fn show(
         } else if avail > 160.0 {
             let pos = p.position_now();
             let dur = p.duration.unwrap_or_default();
-            time_label(ui, pos, on);
+            let speed = p.speed;
+            time_label(ui, nikgob_view::heard_time(pos, speed), on);
             let slider_w = avail - 2.0 * 44.0;
             let out_s = Slider::new("bar-progress", p.fraction_now())
                 .width(slider_w)
                 .wavy(playing && state.prefs.progress_wave)
                 .colors(on, on.gamma_multiply(0.24))
-                .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
+                .value_label(move |v| common::fmt_time(nikgob_view::heard_time(dur.mul_f32(v), speed)))
                 .show(ui);
             if let Some(v) = out_s.committed {
                 out.push(Command::Seek(dur.mul_f32(v)));
             }
-            time_label(ui, dur, on);
+            time_label(ui, nikgob_view::heard_time(dur, speed), on);
         } else {
             ui.add_space(avail.max(0.0));
         }
@@ -273,28 +275,14 @@ pub fn show(
                 .id_salt("bar-more"),
         );
         if let Some(t) = current {
-            // What does not fit in the pill lives in the menu.
-            let mut acts = Vec::new();
-            acts.extend((!show_like).then_some(Act::Like));
-            acts.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
-            acts.extend((!show_volume).then_some(Act::Volume));
-            if !acts.is_empty() {
-                acts.push(Act::Sep);
-            }
-            acts.extend([Act::Playlist, Act::Radio, Act::Artist, Act::Album]);
-            acts.extend(PaneTab::Info.on(&state.prefs).then_some(Act::Info));
-            acts.extend([
-                Act::Share,
-                Act::FindSong,
-                Act::Sep,
-                Act::Tags,
-                Act::Replace,
-                Act::Sep,
-                Act::Dislike,
-                Act::BanArtist,
-            ]);
-
-            chrome.track_menu(&more, "bar-more", &acts, t, state, Where::Bar, out);
+            // What does not fit in the pill lives in the menu, before the
+            // track's one list.
+            let mut top = Vec::new();
+            top.extend((!show_like).then_some(Act::Like));
+            top.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
+            top.extend((!show_volume).then_some(Act::Volume));
+            let rows = Chrome::player_rows(t, state, &top, PaneTab::Info.on(&state.prefs), false);
+            chrome.track_menu(&more, "bar-more", rows, t, state, Where::Bar, out);
         }
     });
     // A click on the pill between the controls opens Now Playing too.

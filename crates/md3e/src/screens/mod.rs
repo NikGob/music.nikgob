@@ -11,12 +11,14 @@ mod chrome;
 mod common;
 mod find_song;
 mod lyrics;
-mod lyrics_blur;
+mod lyrics_front;
 pub mod lyrics_ui;
 mod pages;
 mod pane;
 mod player_bar;
 mod sound_quality;
+pub(crate) mod stage;
+pub mod sweep;
 mod tag_editor;
 mod visualizer;
 
@@ -118,6 +120,8 @@ pub struct Md3eUi {
     scheme: SchemeAnim,
     pub(crate) pages: pages::PageState,
     chrome: chrome::Chrome,
+    /// The settings' live stage (with a chrome of its own).
+    stage: stage::StageUi,
     /// «Найти песню…» over everything.
     find_song: find_song::FindSongUi,
     system_reduced_motion: bool,
@@ -161,6 +165,7 @@ impl Md3eUi {
             scheme: SchemeAnim::default(),
             pages: pages::PageState::default(),
             chrome: chrome::Chrome::default(),
+            stage: stage::StageUi::default(),
             find_song: find_song::FindSongUi::default(),
             system_reduced_motion: false,
             fullscreen: false,
@@ -383,6 +388,7 @@ impl Md3eUi {
         self.update_theme(ctx, state);
         drop(theme_scope);
         pages::set_marks(ctx, &state.dislikes);
+        pages::set_track_menu(ctx, &state.prefs.track_menu);
         crate::components::tooltip::set_enabled(ctx, state.prefs.tooltips);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
         // The current and the next cover stay loaded while off screen (set
@@ -397,6 +403,27 @@ impl Md3eUi {
                 .collect();
             crate::covers::pin(ctx, pinned.iter().map(String::as_str));
         }
+        // Cover files rewritten by the app (an import, a retag) or by
+        // anything else while the window was away: the covers held are
+        // looked at again.
+        let files_id = egui::Id::new("md3e-cover-files");
+        let focused = ctx.input(|i| i.focused);
+        let seen = ctx.data(|d| d.get_temp::<(u64, bool)>(files_id));
+        if seen != Some((state.cover_files, focused)) {
+            ctx.data_mut(|d| d.insert_temp(files_id, (state.cover_files, focused)));
+            let came_back = focused && seen.is_some_and(|(_, was)| !was);
+            if came_back || seen.is_some_and(|(n, _)| n != state.cover_files) {
+                crate::covers::refresh(ctx);
+            }
+        }
+        // Video thumbnails of stream tracks: the real art the runtime found
+        // is drawn in their place, those drawn since the last frame are
+        // looked up.
+        crate::covers::set_real_covers(ctx, &state.real_covers);
+        let thumbnails = crate::covers::take_thumbnails(ctx);
+        if !thumbnails.is_empty() {
+            out.push(Command::RealCovers(thumbnails));
+        }
         // The next one is decoded and uploaded at the sizes the current one
         // is drawn at, while nothing waits for it.
         if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {
@@ -408,7 +435,10 @@ impl Md3eUi {
         self.np_motion = state.prefs.np_motion;
         if !self.chrome.np_loaded {
             self.chrome.np_loaded = true;
-            self.chrome.np_slot = state.prefs.np_slot;
+            // The track's info is a look-up opened from a menu, never what
+            // Now Playing opens with: prefs that kept it open nothing (and
+            // are put right below).
+            self.chrome.np_slot = if state.prefs.np_slot == NpSlot::Info { NpSlot::None } else { state.prefs.np_slot };
             self.chrome.np_saved = Some(state.prefs.np_slot);
         }
         self.chrome.np_covering = self.np_anim.value(anim::now(ctx)) > 0.01;
@@ -420,6 +450,8 @@ impl Md3eUi {
         // surface: the pages are not laid out for nothing (with the side
         // pane's lyrics they cost more than Now Playing itself).
         let covered = self.now_playing && self.np_anim.value(anim::now(ctx)) >= 0.999;
+        // Shown again only if the page lays out and asks for it.
+        self.stage.visible = false;
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(s.surface))
@@ -670,7 +702,9 @@ impl Md3eUi {
                 self.back(ctx, out);
             }
         }
-        if self.chrome.np_saved != Some(self.chrome.np_slot) {
+        // Kept between openings: the lyrics or the queue, not the track's
+        // info (while it is up, what was kept stays as it is).
+        if self.chrome.np_slot != NpSlot::Info && self.chrome.np_saved != Some(self.chrome.np_slot) {
             self.chrome.np_saved = Some(self.chrome.np_slot);
             // Preserve any other preference edited during this frame.
             if let Some(Command::SetPrefs(prefs)) = out[first_cmd..].iter_mut().rev().find(|c| matches!(c, Command::SetPrefs(_))) {
@@ -682,10 +716,12 @@ impl Md3eUi {
     }
 
     fn shortcuts(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
-        let typing = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
+        // The lyrics editor takes Space, Enter and the arrows while it is up.
+        let typing = (ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input()) || lyrics_ui::takes_keys(ctx);
         let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && !compact_page(self.route()));
         let mut previous = false;
         let mut go = None;
+        let mut sound = None;
         ctx.input_mut(|i| {
             // Ctrl+1…4: the rail's destinations.
             for (n, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4].into_iter().enumerate() {
@@ -738,6 +774,17 @@ impl Md3eUi {
             if i.consume_key(Modifiers::NONE, Key::Space) {
                 out.push(Command::TogglePlay);
             }
+            // The sound sheet: the playing track's speed, the equalizer.
+            if i.consume_key(Modifiers::NONE, Key::S) {
+                sound = Some(pages::sound::Tab::Speed);
+            }
+            if i.consume_key(Modifiers::NONE, Key::E) {
+                sound = Some(pages::sound::Tab::Equalizer);
+            }
+            // The developer profile: the playing track from YouTube Music.
+            if nikgob_view::dev::profile() && state.player.current.is_some() && i.consume_key(Modifiers::NONE, Key::Y) {
+                out.push(Command::PlayFromYoutube);
+            }
             if i.consume_key(Modifiers::NONE, Key::ArrowRight) {
                 out.push(Command::SeekBy(5_000));
             }
@@ -755,6 +802,9 @@ impl Md3eUi {
         });
         if previous {
             chrome::press_previous(ctx, state, out);
+        }
+        if let Some(tab) = sound {
+            pages::sound::toggle(ctx, tab, state);
         }
         if let Some(n) = go {
             self.chrome.nav = Some(Self::destinations()[n].clone());
@@ -902,6 +952,16 @@ impl Md3eUi {
         } else {
             nav = pages::search_results(&mut page_ui, &self.search, state, bottom_inset, &mut self.pages, out).or(nav);
         }
+        // The settings' live stage, when the page asked for it: in a layer
+        // just over the page's, under the pane, menus, dialogs and snackbars.
+        self.stage.draw(
+            &ctx,
+            page_ui.layer_id(),
+            page_ui.clip_rect(),
+            page_ui.opacity(),
+            state,
+            (self.pages.levels_bass, &self.chrome.bands),
+        );
         if let Some(r) = nav {
             self.navigate(&ctx, r, out);
         }
@@ -1142,7 +1202,7 @@ impl Md3eUi {
 
     /// Opens Settings on a tab, scrolled to the row named `row` (scripted
     /// screenshots): `sources`, `spotify`, `youtube`, `import`, `torrents`,
-    /// `appearance`, anything else = «Основные».
+    /// `appearance`, anything else the controls of the track screen.
     pub fn open_settings_at(&mut self, row: &str) {
         use pages::SettingId as S;
         // As «Настройки текста…» under the lyrics opens it: the whole group.
@@ -1165,13 +1225,15 @@ impl Md3eUi {
             "soulseek" => S::Soulseek,
             "graph" => S::GraphUse,
             "no-repeat" => S::RadioNoRepeat,
+            "random" => S::RadioExplore,
+            "unheard" => S::RadioUnheard,
             "recs" => S::RadioNewShare,
             "autoplay" => S::Autoplay,
             "mixes" => S::MixesProfiles,
             "dislikes" => S::DislikeButton,
             "blacklist" => S::DislikedArtists,
             "stream-analysis" => S::StreamAnalysis,
-            "appearance" => S::Design,
+            "appearance" => S::Theme,
             "pane" => S::PaneQueue,
             "lyrics" => S::LyricsModels,
             "lyrics-timing" => S::LyricsGenius,
@@ -1184,7 +1246,7 @@ impl Md3eUi {
         });
     }
 
-    /// Opens the cookies form of «Источники»
+    /// Opens the cookies form of «Сервисы»
     /// (scripted screenshots).
     pub fn unfold_sources(&mut self) {
         self.pages.unfold_sources();
@@ -1215,9 +1277,15 @@ impl Md3eUi {
 }
 
 impl Md3eUi {
-    /// Whether the ambient glow is on screen and wants audio levels.
+    /// Whether the ambient glow is on screen and wants audio levels (Now
+    /// Playing, the visualizer, the pane's lyrics, the settings' stage).
     pub fn wants_levels(&self) -> bool {
-        self.now_playing || self.chrome.np_covering || self.np_anim.target() > 0.5 || self.chrome.visualizer || self.pane == Some(PaneTab::Lyrics)
+        self.now_playing
+            || self.chrome.np_covering
+            || self.np_anim.target() > 0.5
+            || self.chrome.visualizer
+            || self.pane == Some(PaneTab::Lyrics)
+            || self.stage.visible
     }
 
     /// The latest bass energy (0..1) for the ambient glow.
@@ -1428,12 +1496,14 @@ mod tests {
         assert_eq!(ui.route(), &Route::Settings);
         let rects = tinted(&output);
         assert_eq!(rects.len(), 1, "one tinted group: {rects:?}");
-        for label in ["Текст песен", "Сохранять найденный текст в файл трека", "Где делать подсветку"] {
+        // «Где делать подсветку» is a developer's row now: the link lands
+        // on the lyrics' own look.
+        for label in ["Вид текста", "Анимация", "Размер текста"] {
             let at = text_at(&output, label).unwrap_or_else(|| panic!("{label} not drawn"));
             assert!(rects[0].contains(at + vec2(4.0, 4.0)), "{label} outside the tint");
             assert!((0.0..900.0).contains(&at.y), "{label} not scrolled into view");
         }
-        for label in ["Где искать текст", "Звук"] {
+        for label in ["Поиск текста", "Звук", "Для разработчика"] {
             if let Some(at) = text_at(&output, label) {
                 assert!(!rects[0].contains(at + vec2(4.0, 4.0)), "{label} inside the tint");
             }
@@ -1537,16 +1607,51 @@ mod tests {
                 ui.set_now_playing(&ctx, true);
                 let t = 10.0 + i as f64 * 5.0;
                 frame(&ctx, &mut ui, &mut state, t, width, None);
-                assert_eq!(ui.chrome.np_slot, slot);
+                // The track's info is never restored: prefs that kept it
+                // open nothing.
+                let shown = if slot == NpSlot::Info { NpSlot::None } else { slot };
+                assert_eq!(ui.chrome.np_slot, shown);
                 frame(&ctx, &mut ui, &mut state, t + 1.0, width, None);
                 frame(&ctx, &mut ui, &mut state, t + 2.0, width, Some(Key::Escape));
                 assert_eq!(state.prefs.np_slot, NpSlot::None);
-                assert_eq!(ui.now_playing, slot != NpSlot::None);
-                if slot != NpSlot::None {
+                assert_eq!(ui.now_playing, shown != NpSlot::None);
+                if shown != NpSlot::None {
                     frame(&ctx, &mut ui, &mut state, t + 3.0, width, Some(Key::Escape));
                     assert!(!ui.now_playing);
                 }
             }
+        }
+    }
+
+    /// «Источник и качество» of Now Playing's ⋮: Esc puts it away and the
+    /// player stays; it is never saved, so closing the player with it open
+    /// and opening it again shows what was kept before, not the info.
+    #[test]
+    fn track_info_is_a_look_up_that_is_never_kept() {
+        for width in [380.0, 800.0, 1440.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = ViewState::default();
+            state.prefs.np_slot = NpSlot::Lyrics;
+            ui.set_now_playing(&ctx, true);
+            frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Lyrics);
+            ui.chrome.np_slot = NpSlot::Info;
+            frame(&ctx, &mut ui, &mut state, 1.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Info);
+            assert_eq!(state.prefs.np_slot, NpSlot::Lyrics, "the info is not saved");
+            ui.set_now_playing(&ctx, false);
+            frame(&ctx, &mut ui, &mut state, 2.0, width, None);
+            ui.set_now_playing(&ctx, true);
+            frame(&ctx, &mut ui, &mut state, 3.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Lyrics, "what was kept comes back, not the info");
+
+            ui.chrome.np_slot = NpSlot::Info;
+            frame(&ctx, &mut ui, &mut state, 4.0, width, None);
+            frame(&ctx, &mut ui, &mut state, 5.0, width, Some(Key::Escape));
+            assert_eq!(ui.chrome.np_slot, NpSlot::None);
+            assert_eq!(state.prefs.np_slot, NpSlot::None);
+            assert!(ui.now_playing, "Esc put the info away, not the player");
         }
     }
 
@@ -1559,10 +1664,12 @@ mod tests {
             duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         };
         let mut out = Vec::new();
-        chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Np, &mut out);
+        let (ctx, state) = (egui::Context::default(), ViewState::default());
+        let info = crate::screens::pages::TrackAct::Info;
+        chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Np, &mut out);
         assert_eq!(chrome.np_slot, NpSlot::Info);
         assert_eq!(chrome.open_pane, None);
-        chrome.apply(chrome::Act::Info, &track, Rect::NOTHING, chrome::Where::Bar, &mut out);
+        chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Bar, &mut out);
         assert_eq!(chrome.open_pane, Some(PaneTab::Info));
         assert_eq!(chrome.np_slot, NpSlot::Info);
     }
@@ -1577,7 +1684,12 @@ mod tests {
                 state.prefs.np_slot = slot;
                 ui.set_now_playing(&ctx, true);
                 frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+                // The info is opened from the ⋮ menu, never restored.
+                ui.chrome.np_slot = slot;
                 frame(&ctx, &mut ui, &mut state, 1.0, width, None);
+                // The content's place is known a frame after it has opened.
+                frame(&ctx, &mut ui, &mut state, 1.8, width, None);
+                frame(&ctx, &mut ui, &mut state, 1.9, width, None);
                 for (i, pos) in [pos2(width * 0.75, 400.0), pos2(20.0, 40.0)].into_iter().enumerate() {
                     let mut commands = Vec::new();
                     let mut output = ctx.run_ui(egui::RawInput {
@@ -1591,6 +1703,118 @@ mod tests {
                     output.textures_delta.clear();
                     assert_eq!(commands.iter().any(|c| matches!(c, Command::SetVolume(_))), i == 1);
                 }
+            }
+        }
+    }
+
+    /// The settings' stage: drawn where the page asks for it, with the
+    /// placeholder playing; it sends nothing, leaves the real Now Playing's
+    /// springs alone, and wants levels only while it is up.
+    #[test]
+    fn the_stage_is_a_picture_of_its_own() {
+        use stage::{Scene, Script, StageRequest};
+        let ctx = context();
+        let mut ui = Md3eUi::new();
+        let mut state = ViewState::default();
+        state.prefs.np_volume = false;
+        state.prefs.np_volume_pop = true;
+        state.prefs.dbl_click_shape = 2;
+        state.prefs.cover_click_pause = true;
+        ui.navigate(&ctx, Route::Settings, &mut Vec::new());
+        frame(&ctx, &mut ui, &mut state, 0.0, 1280.0, None);
+        frame(&ctx, &mut ui, &mut state, 1.0, 1280.0, None);
+        assert!(!ui.wants_levels());
+        let rect = Rect::from_min_size(pos2(640.0, 160.0), vec2(560.0, 350.0));
+        let run = |ui: &mut Md3eUi, state: &ViewState, t: f64, req: Option<StageRequest>| {
+            if let Some(r) = req {
+                stage::request(&ctx, r);
+            }
+            let mut commands = Vec::new();
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+                time: Some(t),
+                ..Default::default()
+            }, |root| ui.frame(root, state, &mut commands));
+            output.textures_delta.clear();
+            (commands, output)
+        };
+        let shows = [
+            (Scene::Track, Script::None),
+            (Scene::Track, Script::DoubleTap),
+            (Scene::Track, Script::PausePlay),
+            (Scene::Track, Script::Volume),
+            (Scene::Lyrics, Script::LyricsReturn),
+            (Scene::Lyrics, Script::Interlude),
+            (Scene::Home, Script::None),
+            (Scene::Album, Script::None),
+            (Scene::Track, Script::Open),
+        ];
+        let mut t = 2.0;
+        let mut title_seen = false;
+        for (scene, script) in shows {
+            for _ in 0..12 {
+                t += 0.25;
+                let mut req = StageRequest::new(rect, scene, state.prefs.clone());
+                req.script = script;
+                req.parts = vec![stage::Part::Cover];
+                req.outline = 1.0;
+                let (commands, output) = run(&mut ui, &state, t, Some(req));
+                assert!(ui.wants_levels(), "{scene:?}: levels while the stage is up");
+                for c in &commands {
+                    assert!(!matches!(c,
+                        Command::TogglePlay | Command::Seek(_) | Command::SetVolume(_) | Command::ToggleMute
+                        | Command::Next | Command::Previous | Command::Like(..) | Command::Dislike { .. }
+                        | Command::SetPref(nikgob_view::PrefPatch::CoverShape(_))
+                    ), "{scene:?} {script:?}: the stage sent {c:?}");
+                }
+                if scene == Scene::Track && script == Script::None {
+                    title_seen |= output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Text(text) if text.galley.text() == "Название песни" && rect.contains(text.pos)));
+                }
+            }
+        }
+        assert!(title_seen, "the placeholder plays on the stage, inside its rect");
+        // The real screen's springs were never touched; the copy has its own.
+        assert!(ctx.data(|d| d.get_temp::<Animated<f32>>(egui::Id::new("np-mega"))).is_none());
+        assert!(ctx.data(|d| d.get_temp::<(NpSlot, Animated<[f32; 4]>)>(egui::Id::new("np-content-fade"))).is_none());
+        let copy = stage::Stage::copy(1.0, false, (0.0, Vec::new()));
+        assert!(ctx.data(|d| d.get_temp::<Animated<f32>>(copy.id("np-mega"))).is_some());
+        // No request: no stage, no levels.
+        let (_, output) = run(&mut ui, &state, t + 1.0, None);
+        assert!(!ui.wants_levels());
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == "Название песни")));
+    }
+
+    /// The stage stands right of the rows in a 1280 window (the rows at
+    /// most 600 wide), as a strip over them at 800, and not at all at 500.
+    #[test]
+    fn the_stage_stands_right_wide_on_top_narrow_and_not_in_mini_mode() {
+        for width in [1280.0, 800.0, 500.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = sweep::survey_state();
+            state.prefs.settings_deep = true;
+            ui.pages.open_setting(pages::SettingId::Theme);
+            for i in 0..10 {
+                frame(&ctx, &mut ui, &mut state, f64::from(i) * 0.2, width, None);
+            }
+            let rows = pages::settings_help::drawn_rows(&ctx).1;
+            assert!(!rows.is_empty(), "{width}: the settings rows");
+            // The rows' own extent (the clip is the whole scroll area).
+            let column = rows.iter().fold(rows[0].rect, |r, row| r.union(row.rect));
+            match ui.stage.rect {
+                Some(s) if width > 1000.0 => {
+                    assert!(column.right() < s.left(), "{width}: the stage on the right of {column:?}: {s:?}");
+                    assert!(column.width() <= 600.5, "{width}: rows {}", column.width());
+                    assert!(s.width() > 300.0);
+                }
+                Some(s) if width > 600.0 => {
+                    assert!(column.top() >= s.bottom(), "{width}: a strip over the rows {column:?}: {s:?}");
+                    assert!(s.width() > s.height() * 1.5, "{width}: a strip {s:?}");
+                }
+                None => assert!(width < 600.0, "{width}: no stage"),
+                Some(s) => panic!("{width}: a stage in mini mode {s:?}"),
             }
         }
     }

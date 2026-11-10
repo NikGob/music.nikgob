@@ -6,8 +6,9 @@
 //! similar artists and popular recordings, on a mock server), keeps the
 //! answers in the library, and the next build resolves them to the library
 //! and scores with them; the switches of «Рекомендации» keep it off.
-//! Deezer's top tracks give the popularity without ListenBrainz, and the
-//! pass goes through the whole library without waiting for the next one.
+//! Deezer's top tracks give the popularity without ListenBrainz (its
+//! popularity wants the user's token), and the pass goes through the whole
+//! library without waiting for the next one.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{Analysis, AnalysisSource, Artist, ArtistCredit, ArtistId, Codec, Release, Source, SourceKind, Track};
 use nikgob_core::streaming::{FakeService, StreamService};
 use nikgob_library::Library;
-use nikgob_metadata::{Http, ListenBrainz, Metadata, MetadataConfig, MusicBrainz, RateLimits};
+use nikgob_metadata::{Deezer, Http, ListenBrainz, Metadata, MetadataConfig, MusicBrainz, RateLimits};
 use nikgob_runtime::{ModelPreview, NullPlayback, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::Prefs;
 
@@ -38,6 +39,8 @@ fn start(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs) -> R
 }
 
 fn start_with(lib: &Library, streams: Vec<Arc<dyn StreamService>>, prefs: Prefs, schedule: StreamSchedule) -> Runtime {
+    // A game on the machine running the tests must not hold the walk.
+    nikgob_runtime::set_background_quiet(false);
     Runtime::start_scheduled(
         RuntimeConfig {
             library: lib.clone(),
@@ -182,6 +185,7 @@ fn open_data_finds_the_artist_then_its_neighbours() {
         Mock::given(method("GET")).and(path("/labs/similar-artists/json")).respond_with(json("[]".to_owned())).mount(&mock).await;
         Mock::given(method("GET"))
             .and(path(format!("/api/popularity/top-recordings-for-artist/{KINO}")))
+            .and(wiremock::matchers::header("authorization", "Token user-token"))
             .respond_with(json(r#"[{"recording_mbid":"44444444-4444-4444-4444-444444444444","recording_name":"Война","artist_name":"Кино","total_listen_count":50}]"#.to_owned()))
             .mount(&mock)
             .await;
@@ -194,7 +198,8 @@ fn open_data_finds_the_artist_then_its_neighbours() {
     let http = Http::new(&MetadataConfig::new("tests@example.invalid")).unwrap().with_rate_limits(RateLimits::unlimited());
     let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
     meta.musicbrainz = MusicBrainz::with_base_url(http.clone(), &format!("{uri}/ws/2/")).unwrap();
-    meta.listenbrainz = ListenBrainz::with_base_urls(http, &format!("{uri}/labs/"), &format!("{uri}/api/")).unwrap();
+    meta.deezer = Deezer::with_base_url(http.clone(), &format!("{uri}/deezer/")).unwrap();
+    meta.listenbrainz = ListenBrainz::with_base_urls(http, &format!("{uri}/labs/"), &format!("{uri}/api/")).unwrap().with_token(Some("user-token"));
     rt.set_graph_metadata(meta);
     wait_until("ListenBrainz's answers", || lib.graph_edges().unwrap().iter().any(|r| r.source == "listenbrainz"));
     wait_until("the popular recordings", || lib.graph_edges().unwrap().iter().any(|r| r.source == "popularity"));
@@ -215,8 +220,8 @@ fn path_regex_any() -> wiremock::matchers::PathRegexMatcher {
 }
 
 /// A source that wants an account now (ListenBrainz's popular recordings
-/// answer 401 without a token) is asked once a run, not once an artist;
-/// the rest of the open data goes on.
+/// answer 401 to a token it does not take) is asked once a run, not once
+/// an artist; the rest of the open data goes on.
 #[test]
 fn a_source_that_wants_an_account_is_asked_once() {
     use wiremock::matchers::{method, path, path_regex};
@@ -255,7 +260,8 @@ fn a_source_that_wants_an_account_is_asked_once() {
     let http = Http::new(&MetadataConfig::new("tests@example.invalid")).unwrap().with_rate_limits(RateLimits::unlimited());
     let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
     meta.musicbrainz = MusicBrainz::with_base_url(http.clone(), &format!("{uri}/ws/2/")).unwrap();
-    meta.listenbrainz = ListenBrainz::with_base_urls(http, &format!("{uri}/labs/"), &format!("{uri}/api/")).unwrap();
+    meta.deezer = Deezer::with_base_url(http.clone(), &format!("{uri}/deezer/")).unwrap();
+    meta.listenbrainz = ListenBrainz::with_base_urls(http, &format!("{uri}/labs/"), &format!("{uri}/api/")).unwrap().with_token(Some("revoked"));
     rt.set_graph_metadata(meta);
     let similar = || lib.graph_fetches().unwrap().iter().filter(|f| f.source == "listenbrainz").count();
     wait_until("ListenBrainz's similar artists of every artist", || similar() == SONGS.len());
@@ -266,6 +272,75 @@ fn a_source_that_wants_an_account_is_asked_once() {
     let closed = lib.graph_fetches().unwrap().into_iter().filter(|f| f.source == "popularity").collect::<Vec<_>>();
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].status, "error");
+    drop(mock);
+}
+
+/// Without a ListenBrainz token its popularity is never asked: Deezer's
+/// open top of each artist (an artist search first) gives it instead when
+/// the Deezer lane is off, with the rest of the open data.
+#[test]
+fn without_a_token_the_popularity_comes_from_deezers_open_top() {
+    use wiremock::matchers::{method, path, path_regex, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = tokio::runtime::Runtime::new().unwrap();
+    let (mock, uri) = server.block_on(async {
+        let mock = MockServer::start().await;
+        let json = |body: &str| ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "application/json");
+        // Two artists of that name: the one with more fans is it.
+        Mock::given(method("GET"))
+            .and(path("/deezer/search/artist"))
+            .and(query_param("q", "Кино"))
+            .respond_with(json(r#"{"data":[{"id":8,"name":"Кино","nb_fan":3},{"id":7,"name":"Кино","nb_fan":900},{"id":9,"name":"Кино и немцы","nb_fan":5000}]}"#))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET")).and(path("/deezer/search/artist")).respond_with(json(r#"{"data":[]}"#)).mount(&mock).await;
+        Mock::given(method("GET"))
+            .and(path("/deezer/artist/7/top"))
+            .respond_with(json(
+                r#"{"data":[{"id":71,"title":"Война","artist":{"id":7,"name":"Кино"}},{"id":72,"title":"Группа крови","artist":{"id":7,"name":"Кино"}},{"id":73,"title":"Кукушка","artist":{"id":7,"name":"Кино"}}]}"#,
+            ))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET")).and(path_regex("^/deezer/")).respond_with(json(r#"{"data":[]}"#)).mount(&mock).await;
+        Mock::given(method("GET")).and(path("/ws/2/artist")).respond_with(json(r#"{"artists":[]}"#)).mount(&mock).await;
+        Mock::given(method("GET")).and(path_regex_any()).respond_with(json("[]")).mount(&mock).await;
+        let uri = mock.uri();
+        (mock, uri)
+    });
+    let (lib, artists) = library();
+    let rt = start(&lib, Vec::new(), Prefs::default());
+    let http = Http::new(&MetadataConfig::new("tests@example.invalid")).unwrap().with_rate_limits(RateLimits::unlimited());
+    let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+    meta.musicbrainz = MusicBrainz::with_base_url(http.clone(), &format!("{uri}/ws/2/")).unwrap();
+    meta.deezer = Deezer::with_base_url(http.clone(), &format!("{uri}/deezer/")).unwrap();
+    meta.listenbrainz = ListenBrainz::with_base_urls(http, &format!("{uri}/labs/"), &format!("{uri}/api/")).unwrap();
+    rt.set_graph_metadata(meta);
+    let kino = of(&artists, "Кино").to_string();
+    let tracks = lib.rec_tracks().unwrap();
+    let top = || {
+        lib.graph_edges()
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.source == "deezer_top" && r.subject_id == kino)
+            .map(|r| (r.entry.name, r.entry.remote_id))
+            .collect::<Vec<_>>()
+    };
+    wait_until("Deezer's open top of Кино", || top().len() == 3);
+    assert_eq!(top()[0], ("Война".to_owned(), Some("71".to_owned())));
+    let asked = |source: &str| lib.graph_fetches().unwrap().iter().filter(|f| f.source == source).count();
+    wait_until("every artist's top", || asked("deezer_top") == SONGS.len());
+    std::thread::sleep(Duration::from_millis(300));
+    let requests = server.block_on(mock.received_requests()).unwrap();
+    assert!(!requests.iter().any(|r| r.url.path().starts_with("/api/popularity/")), "{:?}", requests.iter().map(|r| r.url.path().to_owned()).collect::<Vec<_>>());
+    assert_eq!(asked("popularity"), 0);
+    let id = |title: &str| tracks.iter().find(|t| t.title == title).unwrap().id;
+    wait_until("the popularity in the prior", || {
+        let p = ModelPreview::of(&lib).unwrap();
+        let m = p.model();
+        let prior = |t| m.graph.prior(m.position(t).unwrap());
+        prior(id("Война")) > prior(id("Группа крови"))
+    });
     drop(mock);
 }
 

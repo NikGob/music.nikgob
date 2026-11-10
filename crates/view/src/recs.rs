@@ -80,7 +80,12 @@ impl MixId {
 /// for the view): a taste profile's mix by the profile's key, «Всё
 /// вперемешку», the calm and the lively side of everything loved, a card of
 /// «Фон», a blend of two or three profiles, a kind of song before there are
-/// profiles, «На повторе»; a mix of the world's page open.
+/// profiles, «На повторе»; a mix of the world's page open; the liked
+/// songs' mix (not in the row: «Любимые» is the playlist's tile), the mix
+/// of a part of the day (its index: morning, day, evening, night: «На
+/// вечер»), the day's mixes — 0 is «Микс дня», from 1 the named mixes
+/// («Микс: ZUTOMAYO») by their number — and the day's mix of one family of
+/// genres («Хип-хоп микс») by the family's number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum MixKey {
     Profile(u32),
@@ -92,6 +97,18 @@ pub enum MixKey {
     Kind(u8),
     OnRepeat,
     World(WorldMix),
+    Liked,
+    Part(u8),
+    Daily(u8),
+    Genre(u8),
+}
+
+impl MixKey {
+    /// One of the day's mixes («Микс дня», a named mix, a genre mix): kept
+    /// for the day.
+    pub const fn is_daily(self) -> bool {
+        matches!(self, Self::Daily(_) | Self::Genre(_))
+    }
 }
 
 /// A mix of a world's page (recs-v2 §8): «Лучшее», «Ещё не слышал», «В

@@ -651,6 +651,7 @@ impl Worker {
         };
         let album = item.scope == WishlistScope::Album;
         v::Confirm {
+            yes_no: false,
             id,
             title: what,
             origin: if album { "Качество лучше · альбом" } else { "Качество лучше · трек" }.into(),

@@ -484,7 +484,7 @@ impl Inner {
             }
             _ => return Err(Error::Protocol("no login answer".into())),
         }
-        info!("soulseek: logged in as {}", self.cfg.username);
+        info!("soulseek: logged in");
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
         *self.server_tx.lock() = Some(tx);
         let stop = self.shutdown.child_token();

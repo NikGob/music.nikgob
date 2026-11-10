@@ -5,7 +5,7 @@ exclude = ["vendor"]
 default-members = ["crates/app"]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.98"
 license = "PolyForm-Strict-1.0.0"
@@ -61,6 +61,11 @@ opt-level = 3
 [profile.dev.package.nikgob-align]
 opt-level = 3
 
+# And the file checks of the import (Chromaprint of the first two minutes,
+# the spectrum of the quality check), run on every library file once.
+[profile.dev.package.nikgob-import]
+opt-level = 3
+
 # The interface draws every frame in its own crates (springs, shape
 # morphs, lyrics layout, the tessellated paths of covers and glows): at
 # opt-level 0 a Now Playing frame takes about three times as long and the
@@ -78,6 +83,25 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.nikgob-view]
+opt-level = 2
+
+# The player's loop (commands, the home and the recommendations it builds,
+# the library's queries and the texts' parsing) answers every click: at
+# opt-level 0 it holds the loop several times longer, so the crates it
+# runs in are optimised in dev as well.
+[profile.dev.package.nikgob-runtime]
+opt-level = 2
+
+[profile.dev.package.nikgob-library]
+opt-level = 2
+
+[profile.dev.package.nikgob-core]
+opt-level = 2
+
+[profile.dev.package.nikgob-metadata]
+opt-level = 2
+
+[profile.dev.package.nikgob-sources]
 opt-level = 2
 
 [profile.release]

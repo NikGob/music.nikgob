@@ -14,6 +14,11 @@
 //! The control is one tonal button: where the text comes from and how it
 //! is timed («Genius · по словам»). While timing is made it shows its
 //! progress and stage; a failure says why until it is opened.
+//!
+//! «Изменить текст…» in the playing track's menu opens the lyrics editor
+//! ([`editor`], the lines in [`edit`]): the user's own text, kept as theirs
+//! and shown first; «Вернуть найденный» in the control's menu goes back to
+//! the found ones.
 
 use std::sync::OnceLock;
 
@@ -26,10 +31,38 @@ use crate::tokens::{shape, state};
 use crate::{Icon, Theme, TypeRole};
 
 mod dialog;
+mod edit;
+mod editor;
 mod menu;
 pub(crate) mod page;
 
-pub(crate) use dialog::show as overlays;
+pub use editor::open_any as open_editor;
+pub(crate) use editor::takes_keys;
+
+/// The windows the looks open over everything: the «Окно» look's and the
+/// editor's.
+pub(crate) fn overlays(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+    dialog::show(ctx, state, out);
+    editor::show(ctx, state, out);
+}
+
+/// Closes the «Текст песни» dialog (it shrinks back): Settings opening
+/// must not show it over its page. The editor stays (it may hold edits).
+pub(crate) fn close_dialog(ctx: &Context) {
+    dialog::close(ctx);
+}
+
+/// «Изменить текст…» is offered: the shown track has a text, and no
+/// timing is being made for it.
+pub(crate) fn can_edit(state: &ViewState) -> bool {
+    editor::editable(state) && busy(state).is_none()
+}
+
+/// The user's own text is there: «Вернуть найденный» goes back to the
+/// found ones.
+pub(crate) fn has_own(l: &LyricsView) -> bool {
+    l.sources.iter().any(|o| o.source == LyricsSource::Own)
+}
 
 /// Which look the control opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +145,15 @@ pub fn open(ctx: &Context) {
     }
 }
 
+/// Shuts what [`open`] opened: the control's menu and the dialog (the
+/// screenshot runs, between entries; the page is left by navigating).
+pub fn close(ctx: &Context) {
+    if let Some((id, _)) = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST))) {
+        ctx.data_mut(|d| d.insert_temp(id.with("md3e-menu-open"), false));
+    }
+    dialog::close(ctx);
+}
+
 /// Opens the control's own menu, in any look (screenshot runs).
 pub fn open_menu(ctx: &Context) {
     if let Some((id, _)) = ctx.data(|d| d.get_temp::<(Id, Rect)>(Id::new(LAST))) {
@@ -166,6 +208,7 @@ pub(crate) fn source_name(l: &LyricsView, source: LyricsSource) -> &'static str 
 /// guess.
 pub(crate) fn chip_label(l: &LyricsView) -> String {
     let from = match l.source {
+        Some(LyricsSource::Own) => LyricsSource::Own.label().to_owned(),
         Some(LyricsSource::Recognized) => "Текст расслышан плеером".to_owned(),
         Some(LyricsSource::File) if l.stream => KEPT.to_owned(),
         Some(LyricsSource::File) => "Текст из файла трека".to_owned(),
@@ -714,6 +757,9 @@ mod tests {
         assert_eq!(chip_label(&l), "Текст с Genius");
         l.lines.clear();
         assert_eq!(chip_label(&l), "Текст с Genius · без подсветки");
+        l.source = Some(LyricsSource::Own);
+        assert_eq!(chip_label(&l), "Свой текст · без подсветки");
+        assert_eq!(name(LyricsSource::Own), "Свой текст");
         l.source = Some(LyricsSource::Recognized);
         l.lines = lines.clone();
         assert_eq!(chip_label(&l), "Текст расслышан плеером");

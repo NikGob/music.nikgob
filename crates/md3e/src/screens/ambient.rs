@@ -37,8 +37,19 @@ const CLOUDS: [Cloud; 4] = [
 /// (`Prefs::ambient_strength`).
 pub fn paint(ctx: &Context, painter: &Painter, rect: Rect, bass: f32, moving: bool, strength: f32) {
     let theme = Theme::get(ctx);
-    let s = theme.scheme;
     let phase = drift(ctx, moving && !theme.reduced_motion);
+    paint_at(ctx, painter, rect, bass, phase, strength);
+    if moving {
+        ctx.request_repaint();
+    }
+}
+
+/// [`paint`] at drift `phase` (seconds of drift), touching no shared clock:
+/// for samples drawn beside the player (a still one at 0), which would
+/// otherwise hold back its drift or speed it up.
+pub fn paint_at(ctx: &Context, painter: &Painter, rect: Rect, bass: f32, phase: f32, strength: f32) {
+    let theme = Theme::get(ctx);
+    let s = theme.scheme;
     let colors = [s.primary, s.tertiary, s.secondary, s.primary_container];
     let strength = (if theme.dark { 0.20 } else { 0.16 } * (1.0 + 0.6 * bass) * strength.clamp(0.25, 2.0)).min(1.0);
     let size = rect.width().max(rect.height());
@@ -63,9 +74,6 @@ pub fn paint(ctx: &Context, painter: &Painter, rect: Rect, bass: f32, moving: bo
             );
         }
         painter.add(egui::Shape::mesh(mesh));
-    }
-    if moving {
-        ctx.request_repaint();
     }
 }
 

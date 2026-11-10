@@ -27,9 +27,11 @@ pub struct RecTrack {
     /// are "seen" stream tracks, kept for their history.
     pub in_library: bool,
     pub has_local: bool,
-    /// Which song it is: its recording's MusicBrainz id, else its ISRC,
-    /// else its folded title with its main artist. One song on two albums
-    /// (an OST and its special edition) is one key: a mix plays it once.
+    /// Which song it is: the recording it is linked into (the same song on
+    /// two albums, see `recordings`), else its recording's MusicBrainz id,
+    /// else its ISRC, else its folded title with its main artist. One song
+    /// on two albums (an OST and its special edition) is one key: a mix
+    /// plays it once.
     pub song: String,
 }
 
@@ -45,11 +47,13 @@ impl Library {
                 artists.entry(t).or_default().push(a);
             }
             let mut stmt = c.prepare_cached(
-                "SELECT id, title, artist_display, release_id, in_library, has_local, recording_mbid, isrc FROM track
+                "SELECT id, title, artist_display, release_id, in_library, has_local, recording_mbid, isrc,
+                        (SELECT l.recording FROM recording_link l WHERE l.track_id = track.id)
+                   FROM track
                   WHERE deleted_at IS NULL ORDER BY seq",
             )?;
             let rows = stmt.query_map([], |r| {
-                let ids: (Option<String>, Option<String>) = (r.get(6)?, r.get(7)?);
+                let ids: (Option<String>, Option<String>, Option<String>) = (r.get(6)?, r.get(7)?, r.get(8)?);
                 Ok((
                     RecTrack {
                         id: get_id(r, 0)?,
@@ -66,12 +70,13 @@ impl Library {
             })?;
             let mut out = Vec::new();
             for row in rows {
-                let (mut t, (recording, isrc)) = row?;
+                let (mut t, (recording, isrc, linked)) = row?;
                 t.artists = artists.remove(&t.id).unwrap_or_default();
-                t.song = match (recording.filter(|m| !m.is_empty()), crate::streams::normal_isrc(isrc.as_deref())) {
-                    (Some(m), _) => format!("mb:{m}"),
-                    (None, Some(i)) => format!("isrc:{i}"),
-                    (None, None) => {
+                t.song = match (linked, recording.filter(|m| !m.is_empty()), crate::streams::normal_isrc(isrc.as_deref())) {
+                    (Some(g), _, _) => format!("rec:{g}"),
+                    (None, Some(m), _) => format!("mb:{m}"),
+                    (None, None, Some(i)) => format!("isrc:{i}"),
+                    (None, None, None) => {
                         let by = t.artists.first().map_or_else(|| crate::streams::credit_keys(&t.artist).join(","), ToString::to_string);
                         format!("song:{}|{by}", crate::streams::song_key(&t.title))
                     }
@@ -84,15 +89,27 @@ impl Library {
 
     /// Every start, complete and skip, oldest first (the taste model's
     /// history; likes and the rest are read as state).
+    ///
+    /// A long history is read again and again (every build of the
+    /// recommendations, every home), so the last answer is kept while the
+    /// events are what they were ([`crate::events::stamp`]).
     pub fn listening_events(&self) -> Result<Vec<Event>> {
         self.read(|c| {
+            let stamp = crate::events::stamp(c)?;
+            if let Some((at, kept)) = self.listening_kept()
+                && at == stamp
+            {
+                return Ok(kept.as_ref().clone());
+            }
             let mut stmt = c.prepare_cached(
                 &format!(
                     "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') ORDER BY ts, id"
                 ),
             )?;
             let rows = stmt.query_map([], event_from_row)?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            let events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            self.keep_listening(stamp, &events);
+            Ok(events)
         })
     }
 

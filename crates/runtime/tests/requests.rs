@@ -328,3 +328,32 @@ fn completing_three_hundred_imported_tracks_is_six_calls() {
     assert_eq!(sp.calls("tracks"), 6, "was 300 single lookups");
     assert_eq!(sp.calls("track"), 0);
 }
+
+#[test]
+fn a_deezer_track_plays_from_spotify_while_youtube_music_is_off() {
+    let lib = Library::open_in_memory().unwrap();
+    // YouTube Music off (not registered), Spotify plays.
+    let sp = Arc::new(FakeService::spotify());
+    pulled_before(&lib, std::slice::from_ref(&sp));
+    // A song that is not liked on Spotify (so not in the library yet).
+    let liked: Vec<String> = sp.tracks().into_iter().filter(|t| sp.liked_ids().contains(&t.id.id)).map(|t| t.title).collect();
+    let mut dz = FakeService::deezer().tracks().into_iter().find(|t| !liked.contains(&t.title)).unwrap();
+    dz.isrc = None; // as Deezer lists it: "artist title" is searched
+    let track = lib.upsert_stream_track(&dz).unwrap();
+    assert!(!lib.sources_of_track(track).unwrap().iter().any(|s| s.kind == SourceKind::Spotify));
+    let rig = start(&lib, std::slice::from_ref(&sp), quick());
+    rig.rt.send(Command::PlayTracks {
+        tracks: vec![track],
+        start: 0,
+        context: "test".into(),
+    });
+    wait_for("playback", 10, || !rig.asked.lock().unwrap().is_empty());
+    let asked = rig.asked.lock().unwrap()[0].source.clone();
+    assert!(
+        matches!(&asked, nikgob_runtime::PlaySource::Stream { service: Service::Spotify, id } if id.starts_with("sp-")),
+        "{asked:?}"
+    );
+    assert!(lib.sources_of_track(track).unwrap().iter().any(|s| s.kind == SourceKind::Spotify));
+    report("deezer via spotify", &[&sp]);
+    assert_eq!(sp.calls("search_kind"), 1, "one songs search, no videos");
+}

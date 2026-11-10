@@ -151,13 +151,13 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     if !torrents {
         Card::filled().id_salt("wish-no-torrents").show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(TypeRole::TitleSmall.style().rich("Источники скачивания выключены", s.on_surface));
+            ui.label(TypeRole::TitleSmall.style().rich("Все источники выключены", s.on_surface));
             ui.label(TypeRole::BodyMedium.style().rich_para(
-                "Всё отсюда скачается, когда включишь источник: торренты через Prowlarr, khinsider или бесплатные FLAC-сервисы. А пока трек можно сохранить с YouTube — качество пониже, найденное потом заменит его.",
+                "Всё отсюда скачается, когда включишь источник в «Откуда качать». А пока трек можно сохранить с YouTube — качество пониже, найденное потом заменит его.",
                 s.on_surface_variant,
             ));
             ui.add_space(8.0);
-            if ui.add(Button::new("Источники").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
+            if ui.add(Button::new("Откуда качать").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
                 pages.open_setting(super::SettingId::DownloadSource(nikgob_view::SourceKey::Torrents));
             }
         });

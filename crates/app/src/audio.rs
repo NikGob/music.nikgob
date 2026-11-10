@@ -24,6 +24,11 @@
 //! which is then a live source of the widget. A track the widget failed
 //! keeps the old fallback (the runtime's next source, YouTube Music).
 //!
+//! The developer profile's tracks have no files (`profile.rs`): a missing
+//! local file of a known length plays there as silence of that length
+//! ([`Silence`]), so position, lyrics and the end of the track run as for a
+//! real song; elsewhere a missing file fails as ever.
+//!
 //! Switching the output device restarts the engine: the old `Player` is
 //! dropped (its threads stop and the device closes), a new one opens the
 //! chosen device, and the runtime replays the current track from where it
@@ -32,18 +37,100 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PlayItem, Player, PlayerOptions};
+use nikgob_audio::{
+    Analyzer, ByteSource, Event, ItemFx, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, Player, PlayerOptions, Reverb,
+};
 use nikgob_core::streaming::{AudioStream, StreamError, StreamService};
 use nikgob_core::streaming::Service as StreamKind;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
 
 /// The analyzer of the engine that plays right now.
 pub type AnalyzerSlot = Arc<Mutex<Option<Analyzer>>>;
+
+/// Missing files of a known length play as silence (the developer profile).
+static SILENT_MISSING: AtomicBool = AtomicBool::new(false);
+
+/// From now on a local file that is not there plays as silence of the
+/// track's length (the developer profile, whose tracks have no files).
+pub fn play_missing_files_silent() {
+    SILENT_MISSING.store(true, Ordering::Relaxed);
+}
+
+/// Silence of a set length: a track of the developer profile without a file.
+struct Silence {
+    frames: u64,
+    at: u64,
+}
+
+impl Silence {
+    const RATE: u32 = 44_100;
+
+    fn new(length: Duration) -> Self {
+        Self { frames: (length.as_secs_f64() * f64::from(Self::RATE)) as u64, at: 0 }
+    }
+}
+
+impl PcmSource for Silence {
+    fn sample_rate(&self) -> u32 {
+        Self::RATE
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> Result<PcmRead, PcmError> {
+        let left = self.frames.saturating_sub(self.at);
+        if left == 0 {
+            return Ok(PcmRead::End);
+        }
+        let n = (out.len() / 2).min(usize::try_from(left).unwrap_or(usize::MAX));
+        out[..n * 2].fill(0.0);
+        self.at += n as u64;
+        Ok(PcmRead::Frames(n))
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs_f64(self.frames as f64 / f64::from(Self::RATE)))
+    }
+
+    fn seek(&mut self, position: Duration) -> bool {
+        self.at = ((position.as_secs_f64() * f64::from(Self::RATE)) as u64).min(self.frames);
+        true
+    }
+}
+
+/// What the engine does for a version of a track («Скорость»): its speed,
+/// tone and reverb as the view names them, and whether the voices keep
+/// their timbre.
+fn item_fx(speed: nikgob_view::SpeedVariant, keep_timbre: bool) -> ItemFx {
+    let s = speed.sound();
+    ItemFx {
+        speed: s.speed,
+        low_shelf_db: s.low_shelf_db,
+        high_shelf_db: s.high_shelf_db,
+        preamp_db: s.preamp_db,
+        reverb: s.echo.map(|e| Reverb {
+            wet: e.wet,
+            decay_s: e.decay_s,
+            damping: e.damping,
+            pre_delay_ms: e.pre_delay_ms,
+        }),
+        keep_formants: keep_timbre,
+    }
+}
+
+/// The silence a request plays instead of its missing file, when that is on.
+fn silence_for(r: &PlayRequest) -> Option<Silence> {
+    let PlaySource::File(path) = &r.source else { return None };
+    let length = r.duration.filter(|d| !d.is_zero())?;
+    (SILENT_MISSING.load(Ordering::Relaxed) && !path.exists()).then(|| Silence::new(length))
+}
 
 /// Shared by every engine generation.
 #[derive(Clone, Default)]
@@ -190,15 +277,29 @@ impl Engine {
         }
     }
 
+    /// A live track (another player's sound as it plays) cannot be sped
+    /// up: it plays as recorded, and the runtime is told so.
+    fn plays_live(&self, r: &PlayRequest) {
+        if r.speed == nikgob_view::SpeedVariant::Normal {
+            return;
+        }
+        let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(to) = to {
+            let _ = to.send(PlaybackEvent::Speed { id: r.id, speed: 1.0 });
+        }
+    }
+
     fn item(&self, r: PlayRequest) -> PlayItem {
         if let (Some(w), PlaySource::Stream { id, .. }) = (self.widget_for(&r), &r.source) {
             log::debug!("soundcloud {id} plays through SoundCloud's player (item {})", r.id);
             self.quality(r.id, "Плеер SoundCloud");
+            self.plays_live(&r);
             return PlayItem {
                 id: r.id,
                 source: ItemSource::Pcm(Box::new(w.track(id, r.duration))),
                 gain_db: 0.0,
                 duration_hint: r.duration,
+                fx: ItemFx::default(),
             };
         }
         if let (Some(s), PlaySource::Stream { id, .. }) = (self.soloist_for(&r), &r.source) {
@@ -207,13 +308,26 @@ impl Engine {
             if let Some(to) = to {
                 let _ = to.send(PlaybackEvent::Quality { id: r.id, label: "Soloist".into() });
             }
+            self.plays_live(&r);
             return PlayItem {
                 id: r.id,
                 source: ItemSource::Pcm(Box::new(s.track(id, r.duration))),
                 gain_db: 0.0,
                 duration_hint: r.duration,
+                fx: ItemFx::default(),
             };
         }
+        if let Some(silence) = silence_for(&r) {
+            log::debug!("item {}: no file, silence of {:?}", r.id, r.duration);
+            return PlayItem {
+                id: r.id,
+                source: ItemSource::Pcm(Box::new(silence)),
+                gain_db: 0.0,
+                duration_hint: r.duration,
+                fx: item_fx(r.speed, r.keep_timbre),
+            };
+        }
+        let fx = item_fx(r.speed, r.keep_timbre);
         let source = match r.source {
             PlaySource::File(path) => ItemSource::File(path),
             PlaySource::Stream { service, id } => {
@@ -254,6 +368,7 @@ impl Engine {
             source,
             gain_db: r.gain_db,
             duration_hint: r.duration,
+            fx,
         }
     }
 }
@@ -412,6 +527,24 @@ impl Playback for Engine {
         self.player.set_crossfade(crossfade);
         self.player.set_normalization(normalization);
     }
+
+    fn set_equalizer(&mut self, on: bool, gains: [f32; nikgob_view::EQ_BANDS]) {
+        self.player.set_eq(on, gains);
+    }
+
+    fn set_speed(&mut self, id: u64, speed: nikgob_view::SpeedVariant, keep_timbre: bool) {
+        if self.on_live.is_none() {
+            self.player.set_fx(id, item_fx(speed, keep_timbre));
+            return;
+        }
+        // Not for a live track: it plays as its player plays it.
+        let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(to) = to {
+            let _ = to.send(PlaybackEvent::Speed { id, speed: 1.0 });
+        }
+
+    }
+
 
     fn set_device(&mut self, device: Option<String>) -> bool {
         self.player.stop();

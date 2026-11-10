@@ -82,8 +82,14 @@ mod host {
     const ORIGIN: &str = "http://scwidget.localhost/";
     /// wry's own defaults (they are replaced by any arguments given), plus
     /// no media keys: the keyboard's play/pause and the system's media
-    /// flyout never reach the widget, only the app pauses it.
-    const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,HardwareMediaKeyHandling \
+    /// flyout never reach the widget, only the app pauses it. And nothing
+    /// slows the page down for being out of sight (Chromium may count a
+    /// window on no monitor as covered): the widget's progress keeps coming,
+    /// so a stuck player is told from a throttled one.
+    const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,HardwareMediaKeyHandling,\
+                                CalculateNativeWinOcclusion \
+                                --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
+                                --disable-background-timer-throttling \
                                 --autoplay-policy=no-user-gesture-required";
 
     /// Keeps the off-screen window out of Alt+Tab and Task View (a tool

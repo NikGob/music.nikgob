@@ -1,7 +1,8 @@
 //! Background sound analysis of the library's files (docs/stage4.md §2).
 //!
-//! One thread (two with 8 or more logical cores, the second only while
-//! nothing plays) at the lowest priority takes batches of [`Library::tracks_needing_analysis`]: tracks with a file
+//! One thread at the lowest priority, paced by [`crate::quiet`] (it rests
+//! five times what it worked, and waits while a game runs), takes batches
+//! of [`Library::tracks_needing_analysis`]: tracks with a file
 //! and no current analysis, an analysis of an older bliss, or one of a
 //! stream. Each file is decoded with the importer's decoder straight into
 //! [`PcmAnalyzer`] (only its first 8 minutes, as 22 050 Hz mono), and the
@@ -16,9 +17,8 @@
 //! bliss computes its descriptors on a few scoped threads of its own, which
 //! run at normal priority for the second or so the features of one track
 //! take; decoding and resampling, the bulk of the time, run on ours. Only
-//! one such feature pass runs at a time (see `nikgob_recs`), and while
-//! music plays only one thread works, so the two never pile up on the CPU
-//! the audio threads need.
+//! one such feature pass runs at a time (see `nikgob_recs`), and the rest
+//! after each track counts it too.
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::ControlFlow;
@@ -38,6 +38,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::Worker;
 use crate::import::Internal;
+use crate::quiet::{Pacer, lower_priority};
 
 /// Every analysed track's vector, by track (files and streams alike).
 pub(crate) type SoundIndex = Arc<RwLock<VectorIndex<TrackId>>>;
@@ -49,7 +50,7 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(2);
 /// A shutdown waits this long for a track being analysed.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
-/// From the analysis threads to the worker.
+/// From the analysis thread to the worker.
 pub(crate) enum Msg {
     Progress(v::AnalysisProgress),
 }
@@ -67,27 +68,28 @@ pub(crate) enum FileError {
     Undecodable(String),
 }
 
-/// Decodes `path` and analyses its first 8 minutes. `stop` aborts the decode.
-pub(crate) fn analyze_file(path: &Path, stop: &AtomicBool) -> Result<Vector, FileError> {
-    analyze_decoded(|sink| decode_file(path, sink), stop)
+/// Decodes `path` and analyses its first 8 minutes, at `pacer`'s pace (its
+/// stop aborts the decode).
+pub(crate) fn analyze_file(path: &Path, pacer: &mut Pacer<'_>) -> Result<Vector, FileError> {
+    analyze_decoded(|sink| decode_file(path, sink), pacer)
 }
 
 /// [`analyze_file`] for encoded audio in memory (a stream's; `ext` is its
 /// container as a file extension, `name` names it in the log).
-pub(crate) fn analyze_bytes(bytes: Vec<u8>, ext: &str, name: &str, stop: &AtomicBool) -> Result<Vector, FileError> {
-    analyze_decoded(|sink| decode_bytes(bytes, ext, name, sink), stop)
+pub(crate) fn analyze_bytes(bytes: Vec<u8>, ext: &str, name: &str, pacer: &mut Pacer<'_>) -> Result<Vector, FileError> {
+    analyze_decoded(|sink| decode_bytes(bytes, ext, name, sink), pacer)
 }
 
 type Sink<'a> = &'a mut dyn FnMut(&[f32], PcmSpec) -> ControlFlow<()>;
 
 fn analyze_decoded(
     decode: impl FnOnce(Sink<'_>) -> Result<PcmSpec, ImportError>,
-    stop: &AtomicBool,
+    pacer: &mut Pacer<'_>,
 ) -> Result<Vector, FileError> {
     let mut analyzer: Option<PcmAnalyzer> = None;
     let mut format: Option<AnalysisError> = None;
     let mut sink = |chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
-        if stop.load(Ordering::Relaxed) {
+        if !pacer.step() {
             return ControlFlow::Break(());
         }
         let a = match &mut analyzer {
@@ -103,7 +105,7 @@ fn analyze_decoded(
         a.push(chunk)
     };
     let decoded = decode(&mut sink);
-    if stop.load(Ordering::Relaxed) {
+    if pacer.stopped() {
         return Err(FileError::Stopped);
     }
     match decoded {
@@ -189,7 +191,7 @@ struct Shared {
     sent: Mutex<(Option<v::AnalysisProgress>, Instant)>,
     /// Without work, the library is looked at again this often.
     idle: Duration,
-    /// Music is playing: the second thread waits.
+    /// Music is playing (said in the log).
     playing: AtomicBool,
 }
 
@@ -209,17 +211,12 @@ impl Shared {
         }
     }
 
-    /// The next file to analyse; waits while there is none (and, for the
-    /// `helper` thread, while music plays). `None` = stop.
-    fn next(&self, helper: bool) -> Option<AnalysisTodo> {
+    /// The next file to analyse; waits while there is none. `None` = stop.
+    fn next(&self) -> Option<AnalysisTodo> {
         let mut q = self.queue.lock();
         loop {
             if self.stopped() {
                 return None;
-            }
-            if helper && self.playing.load(Ordering::Relaxed) {
-                self.wake.wait_for(&mut q, self.idle);
-                continue;
             }
             while let Some(t) = q.todo.pop_front() {
                 if q.busy.insert(t.track_id) {
@@ -260,7 +257,7 @@ impl Shared {
         }
     }
 
-    fn work(&self, todo: AnalysisTodo) {
+    fn work(&self, todo: AnalysisTodo, pacer: &mut Pacer<'_>) {
         let path = file_path(&self.root, &todo.locator);
         let started = Instant::now();
         // At info, so a dropout in the log can be set against the analysis.
@@ -269,7 +266,7 @@ impl Shared {
             path.display(),
             if self.playing.load(Ordering::Relaxed) { " (music playing)" } else { "" }
         );
-        let skip = match analyze_file(&path, &self.stop) {
+        let skip = match analyze_file(&path, pacer) {
             Ok(vector) => match store_vector(&self.lib, &self.index, todo.track_id, vector, AnalysisSource::File) {
                 Ok(_) => {
                     log::info!("analysis: {} done in {:?}", path.display(), started.elapsed());
@@ -330,34 +327,21 @@ impl Shared {
         }
     }
 
-    fn run(self: &Arc<Self>, helper: bool, start: Duration, alive: Sender<()>) {
+    fn run(self: &Arc<Self>, start: Duration, alive: Sender<()>) {
         lower_priority();
-        if !helper {
-            load_index(&self.lib, &self.index);
-            self.report(true);
-            self.pause(start);
-            let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-            if cores >= 8 && !self.stopped() {
-                let shared = self.clone();
-                let alive = alive.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("nikgob-analysis-2".into())
-                    .spawn(move || shared.run(true, Duration::ZERO, alive));
-                if let Err(e) = spawned {
-                    log::warn!("analysis: second thread: {e}");
-                }
+        load_index(&self.lib, &self.index);
+        self.report(true);
+        self.pause(start);
+        let mut pacer = Pacer::new(&self.stop);
+        while let Some(todo) = self.next() {
+            if !pacer.begin() {
+                self.done(todo.track_id, false);
+                break;
             }
-        }
-        while let Some(todo) = self.next(helper) {
-            self.work(todo);
+            self.work(todo, &mut pacer);
+            pacer.rest();
         }
         drop(alive);
-    }
-}
-
-pub(crate) fn lower_priority() {
-    if let Err(e) = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min) {
-        log::debug!("analysis: thread priority: {e:?}");
     }
 }
 
@@ -366,7 +350,7 @@ pub(crate) struct FileAnalysis {
     index: SoundIndex,
     tx: Sender<Internal>,
     shared: Option<Arc<Shared>>,
-    /// Disconnects when every analysis thread has ended.
+    /// Disconnects when the analysis thread has ended.
     gone: Option<crossbeam_channel::Receiver<()>>,
 }
 
@@ -410,7 +394,7 @@ impl FileAnalysis {
         let s = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("nikgob-analysis".into())
-            .spawn(move || s.run(false, start, alive));
+            .spawn(move || s.run(start, alive));
         match spawned {
             Ok(_) => {
                 self.shared = Some(shared);
@@ -420,14 +404,10 @@ impl FileAnalysis {
         }
     }
 
-    /// Whether music plays: while it does, only one thread analyses.
+    /// Whether music plays (said in the log).
     pub(crate) fn set_playing(&self, playing: bool) {
-        if let Some(s) = &self.shared
-            && s.playing.swap(playing, Ordering::Relaxed) != playing
-            && !playing
-        {
-            let _q = s.queue.lock();
-            s.wake.notify_all();
+        if let Some(s) = &self.shared {
+            s.playing.store(playing, Ordering::Relaxed);
         }
     }
 
@@ -439,7 +419,7 @@ impl FileAnalysis {
         }
     }
 
-    /// Stops the threads: a decode stops at its next chunk, bliss finishes
+    /// Stops the thread: a decode stops at its next chunk, bliss finishes
     /// the track it is on. Waits up to [`STOP_WAIT`].
     pub(crate) fn shutdown(&mut self) {
         let Some(s) = self.shared.take() else { return };
@@ -451,7 +431,7 @@ impl FileAnalysis {
         if let Some(gone) = self.gone.take()
             && let Err(crossbeam_channel::RecvTimeoutError::Timeout) = gone.recv_timeout(STOP_WAIT)
         {
-            log::warn!("analysis: a thread is still busy at shutdown");
+            log::warn!("analysis: the thread is still busy at shutdown");
         }
     }
 }
@@ -515,26 +495,26 @@ mod tests {
         write_wav(&low, 44_100, 6.0, 220.0);
         write_wav(&high, 48_000, 6.0, 1760.0);
         let stop = AtomicBool::new(false);
-        let a = analyze_file(&low, &stop).unwrap();
-        let b = analyze_file(&high, &stop).unwrap();
+        let a = analyze_file(&low, &mut Pacer::unpaced(&stop)).unwrap();
+        let b = analyze_file(&high, &mut Pacer::unpaced(&stop)).unwrap();
         assert!(a.iter().chain(&b).all(|x| x.is_finite()));
         assert_ne!(a, b);
-        assert_eq!(analyze_file(&low, &stop).unwrap(), a, "deterministic");
+        assert_eq!(analyze_file(&low, &mut Pacer::unpaced(&stop)).unwrap(), a, "deterministic");
 
         // Not a sound: marked as undecodable; missing: only unavailable.
         let junk = dir.path().join("junk.flac");
         std::fs::write(&junk, b"not audio at all").unwrap();
-        assert!(matches!(analyze_file(&junk, &stop), Err(FileError::Undecodable(_))));
+        assert!(matches!(analyze_file(&junk, &mut Pacer::unpaced(&stop)), Err(FileError::Undecodable(_))));
         assert!(matches!(
-            analyze_file(&dir.path().join("gone.opus"), &stop),
+            analyze_file(&dir.path().join("gone.opus"), &mut Pacer::unpaced(&stop)),
             Err(FileError::Unavailable(_))
         ));
         // Too short to say anything.
         let blip = dir.path().join("blip.wav");
         write_wav(&blip, 44_100, 0.3, 440.0);
-        assert!(matches!(analyze_file(&blip, &stop), Err(FileError::Undecodable(_))));
+        assert!(matches!(analyze_file(&blip, &mut Pacer::unpaced(&stop)), Err(FileError::Undecodable(_))));
         stop.store(true, Ordering::Relaxed);
-        assert!(matches!(analyze_file(&low, &stop), Err(FileError::Stopped)));
+        assert!(matches!(analyze_file(&low, &mut Pacer::unpaced(&stop)), Err(FileError::Stopped)));
     }
 
     #[test]

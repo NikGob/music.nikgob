@@ -889,3 +889,234 @@ fn an_album_played_next_goes_right_after_the_current_track() {
     wait_for(&rt, "the whole album after the current track", |s| order(s) == want);
 }
 
+
+/// A preset sent as a patch lands on the prefs as the runtime has them:
+/// the user's own values are kept in the saved file first, and «Свои»
+/// brings them back.
+#[test]
+fn a_preset_and_custom_come_through_the_runtime() {
+    use nikgob_view::{PrefPatch, presets::Area};
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("prefs.json");
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs { fps_limit: 90, ..Prefs::default() },
+            prefs_path: Some(file.clone()),
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::SetPref(PrefPatch::Preset(Area::Load, 0)));
+    // The file is written right after the state is published.
+    let kept = |file: &Path| {
+        let saved = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Prefs>(&b).ok());
+        saved.and_then(|p| Area::Load.custom(&p)).map(|p| p.fps_limit) == Some(90)
+    };
+    wait_for(&rt, "the quiet preset, saved", |s| Area::Load.current(&s.prefs) == Some(0) && kept(&file));
+    rt.send(Command::SetPref(PrefPatch::PresetCustom(Area::Load)));
+    wait_for(&rt, "the user's own values back", |s| s.prefs.fps_limit == 90 && Area::Load.current(&s.prefs).is_none());
+    rt.send(Command::SetPref(PrefPatch::SettingsDeep(true)));
+    wait_for(&rt, "the detailed settings", |s| s.prefs.settings_deep);
+}
+
+/// «В плейлист…» of a library album's card: its tracks by the album's id,
+/// in its track order, each once; into «Любимые» each is liked.
+#[test]
+fn a_library_album_goes_to_a_playlist_by_its_id() {
+    use nikgob_core::model::{Artist, ArtistCredit, Release, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let album = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    // Added out of order: the playlist gets them by their track numbers.
+    let add = |title: &str, no: u32| {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(album.id);
+        t.track_no = no;
+        lib.upsert_track(&t).unwrap().id
+    };
+    let a2 = add("a2", 2);
+    let a1 = add("a1", 1);
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    rt.send(Command::CreatePlaylist("Mix".into()));
+    wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Mix"));
+    let mix = rt.state().library.playlists.iter().find(|p| p.name == "Mix").unwrap().id;
+    let entries = |lib: &Library| lib.playlist_entries(mix, 0, 100).unwrap().iter().map(|e| e.track.id).collect::<Vec<_>>();
+    rt.send(Command::AddAlbumToPlaylist(mix, album.id));
+    wait_for(&rt, "the album in the playlist", |_| entries(&lib) == [a1, a2]);
+    // Again: nothing twice.
+    rt.send(Command::AddAlbumToPlaylist(mix, album.id));
+    wait_for(&rt, "the second time", |s| s.toasts.iter().any(|t| t.text == "Уже есть в «Mix»"));
+    assert_eq!(entries(&lib), [a1, a2]);
+    rt.send(Command::AddAlbumToPlaylist(nikgob_view::LIKED_PLAYLIST, album.id));
+    wait_for(&rt, "the album liked", |_| lib.is_liked(a1).unwrap() && lib.is_liked(a2).unwrap());
+}
+
+
+/// A service album's card: «Сыграть следующим», «В конец очереди» and «В
+/// плейлист…» by the album's id fetch its tracks as playing it does and
+/// put them where the library album's would go.
+#[test]
+fn a_service_album_plays_next_queues_and_goes_to_a_playlist_by_its_id() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+    use nikgob_core::streaming::{FakeService, RemoteId, Service, StreamService};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let single = lib.upsert_release(&Release::new("Single", credit.clone())).unwrap();
+    let ids: Vec<_> = (0..3u32)
+        .map(|i| {
+            let mut t = Track::new(&format!("q{i}"), credit.clone());
+            t.release_id = Some(single.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            let file = dir.path().join(format!("q{i}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+            t.id
+        })
+        .collect();
+    let yt: Arc<dyn StreamService> = Arc::new(FakeService::new(Service::Youtube).with_album("hm3", "Heavy Metal 3", 2));
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: vec![yt],
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| -> Vec<_> { s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect() };
+    let album = RemoteId::new(Service::Youtube, "yt-alb-hm3");
+    let track = |n: u32| lib.track_by_remote(&RemoteId::new(Service::Youtube, format!("yt-hm3-{n}"))).unwrap();
+
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue", |s| order(s) == ids);
+    rt.send(Command::PlayStreamAlbumNext(album.clone()));
+    wait_for(&rt, "the album after the current track", |s| order(s).len() == 5);
+    let (a1, a2) = (track(1).expect("the first track is known"), track(2).expect("the second track is known"));
+    assert_eq!(order(&rt.state()), [ids[0], a1, a2, ids[1], ids[2]]);
+    assert!(rt.state().toasts.iter().any(|t| t.text == "Следующим: «Heavy Metal 3»"));
+
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "q".into() });
+    wait_for(&rt, "the queue again", |s| order(s) == ids);
+    rt.send(Command::EnqueueStreamAlbum(album.clone()));
+    wait_for(&rt, "the album at the end", |s| order(s) == [ids[0], ids[1], ids[2], a1, a2]);
+
+    rt.send(Command::CreatePlaylist("Mix".into()));
+    wait_for(&rt, "the playlist", |s| s.library.playlists.iter().any(|p| p.name == "Mix"));
+    let mix = rt.state().library.playlists.iter().find(|p| p.name == "Mix").unwrap().id;
+    rt.send(Command::AddStreamAlbumToPlaylist(mix, album));
+    wait_for(&rt, "the album in the playlist", |_| {
+        lib.playlist_entries(mix, 0, 100).unwrap().iter().map(|e| e.track.id).collect::<Vec<_>>() == [a1, a2]
+    });
+}
+
+/// «Перемешивание остаётся включённым»: on (the default), a new album keeps
+/// shuffle on; off, it turns shuffle off and plays in order, «Перемешать»
+/// still turns it on, and shuffle off by hand brings the order back.
+#[test]
+fn a_new_album_keeps_shuffle_as_the_setting_says() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let ids: Vec<_> = (0..4)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            let file = dir.path().join(format!("t{i}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+            t.id
+        })
+        .collect();
+    // No radio after the last track: only the album is queued.
+    let prefs = Prefs { autoplay: false, ..Prefs::default() };
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs,
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| {
+        let mut q: Vec<_> = s.queue.prev.iter().map(|e| e.track.id).collect();
+        q.extend(s.queue.current.iter().map(|t| t.id));
+        q.extend(s.queue.next.iter().map(|e| e.track.id));
+        q
+    };
+    let current = |s: &ViewState| s.queue.current.as_ref().map(|t| t.id);
+    let same = |a: &[nikgob_core::model::TrackId]| a.len() == ids.len() && ids.iter().all(|t| a.contains(t));
+    assert!(rt.state().prefs.keep_shuffle && !rt.state().prefs.shuffle_radio);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on", |s| s.player.shuffle);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
+    wait_for(&rt, "the album under shuffle", |s| current(s) == Some(ids[1]) && s.player.shuffle && same(&order(s)));
+
+    let prefs = Prefs { keep_shuffle: false, ..rt.state().prefs.clone() };
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "the setting off", |s| !s.prefs.keep_shuffle);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[2]), shuffle: false });
+    wait_for(&rt, "the album in order, shuffle off", |s| current(s) == Some(ids[2]) && !s.player.shuffle && order(s) == ids);
+    // «Перемешать» turns it on all the same.
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: true });
+    wait_for(&rt, "the album shuffled", |s| s.player.shuffle && s.queue.prev.is_empty() && same(&order(s)));
+    let playing = current(&rt.state());
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "the order back", |s| !s.player.shuffle && order(s) == ids && current(s) == playing);
+
+    // The library's own lists (downloaded, «Слушать снова», worlds) go the
+    // same way: with the setting off, shuffle goes off and they play in order.
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on again", |s| s.player.shuffle);
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 1, context: "скачанного".into() });
+    wait_for(&rt, "the downloaded in order, shuffle off", |s| {
+        current(s) == Some(ids[1]) && !s.player.shuffle && order(s) == ids
+    });
+    // With it on, «Слушать всё» under shuffle plays the whole list shuffled.
+    let prefs = Prefs { keep_shuffle: true, ..rt.state().prefs.clone() };
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "the setting on", |s| s.prefs.keep_shuffle);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on", |s| s.player.shuffle);
+    rt.send(Command::PlayAll { tracks: ids.clone(), context: "Слушать снова".into() });
+    wait_for(&rt, "the whole list under shuffle", |s| s.player.shuffle && s.queue.prev.is_empty() && same(&order(s)));
+}

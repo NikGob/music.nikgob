@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 mod credit;
+pub mod dev;
+pub mod presets;
 mod recs;
+mod sound;
 mod streams;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
@@ -18,6 +21,7 @@ pub use nikgob_core::model::{
 };
 pub use credit::*;
 pub use recs::*;
+pub use sound::*;
 pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
@@ -165,6 +169,47 @@ pub struct ReleaseDetail {
     /// The page's lines in order, one per place the album counts (the
     /// card's «13 из 14» is their count); empty: just the tracks.
     pub lines: Vec<ReleaseLine>,
+    /// The day (or month) it came out, when known beyond the card's year:
+    /// from its files' tags, else from a service.
+    pub released: Option<ReleaseDay>,
+    /// The record label, when its files' tags name one.
+    pub label: Option<String>,
+}
+
+/// The day an album came out, or its month when the day is not known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleaseDay {
+    pub year: i32,
+    /// 1–12.
+    pub month: u8,
+    /// 1–31.
+    pub day: Option<u8>,
+}
+
+impl ReleaseDay {
+    /// From a tag's or a service's date: `2019-05-17`, `2019-05`,
+    /// `2019-05-17T00:00:00Z`, `2019/05/17`. `None` for a bare year,
+    /// anything else, or a date in another year than `year` (when known: the
+    /// date of a recording is not the release's).
+    pub fn parse(date: &str, year: Option<i32>) -> Option<Self> {
+        let date = date.trim();
+        let date = date.split(['T', ' ']).next().unwrap_or(date);
+        let mut parts = date.split(['-', '/', '.']);
+        let y = parts.next().filter(|p| p.len() == 4)?.parse::<i32>().ok()?;
+        let m = parts.next().filter(|p| (1..=2).contains(&p.len()))?.parse::<u8>().ok()?;
+        let d = match parts.next() {
+            Some(p) if (1..=2).contains(&p.len()) => Some(p.parse::<u8>().ok()?),
+            Some(_) => return None,
+            None => None,
+        };
+        if parts.next().is_some() || !(1000..=9999).contains(&y) || !(1..=12).contains(&m) {
+            return None;
+        }
+        if d.is_some_and(|d| !(1..=31).contains(&d)) || year.is_some_and(|year| year != y) {
+            return None;
+        }
+        Some(Self { year: y, month: m, day: d })
+    }
 }
 
 /// One line of an album page.
@@ -297,7 +342,12 @@ pub struct PlayerView {
     pub at: Instant,
     /// How fast the position moves from `at` while playing: 1, or a little
     /// off while the runtime brings it to what is heard (never below 0).
+    /// For a track played at another speed it is that speed, or a little
+    /// off: `position` and `duration` are the track's own time.
     pub rate: f32,
+    /// The speed the current track plays at (1: as recorded). What the
+    /// listener sees is [`heard_time`] of the position and the length.
+    pub speed: f32,
     pub duration: Option<Duration>,
     /// 0..1 perceptual.
     pub volume: f32,
@@ -330,6 +380,7 @@ impl Default for PlayerView {
             position: Duration::ZERO,
             at: Instant::now(),
             rate: 1.0,
+            speed: 1.0,
             duration: None,
             volume: 0.8,
             muted: false,
@@ -833,7 +884,9 @@ pub struct HomeView {
     /// The shortcuts at the top (six, eight on a wide window), or the
     /// recently added albums without a history.
     pub shortcuts: Vec<Shortcut>,
-    /// «Миксы для тебя»: the moments of the day in the order of now, then
+    /// The mixes, each row's by its key: «Миксы дня» ([`MixKey::Daily`], in
+    /// their order) and «Миксы для тебя» — «Любимые» and the mix of the
+    /// part of the day, the moments of the epoch in the order of now, then
     /// «На повторе».
     pub lanes: Vec<LaneCard>,
     /// The taste profiles «Смешать с…» offers.
@@ -852,8 +905,7 @@ pub struct HomeView {
     /// empty library).
     pub hero: Option<MixCard>,
     /// «Дейлист» ([`MixId::Daylist`]), the bento's big tile: title «Тягучий
-    /// вечер четверга», subtitle «Massive Attack, Kevin Penkin и другие ·
-    /// до 23:00», four covers. `None` until the recommendations are built
+    /// вечер четверга», subtitle «25 треков», four covers. `None` until the recommendations are built
     /// (or with an empty library).
     pub daylist: Option<MixCard>,
     /// The bento's smaller tiles of the day ([`MixId::Tile`]): «На повторе»
@@ -1082,6 +1134,10 @@ pub struct Confirm {
     /// buttons act on the ticked ones only ([`Command::ConfirmPicked`]).
     /// `None`: one option is chosen ([`Command::ConfirmChoice`]).
     pub pick: Option<ConfirmPick>,
+    /// A yes or no question about the options («Одна и та же песня?» with
+    /// the two songs): they are shown without a choice, the accept button
+    /// answers yes (`option: Some(0)`) and the other no (`None`).
+    pub yes_no: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1342,6 +1398,25 @@ pub struct Prefs {
     pub gapless: bool,
     pub crossfade_s: f32,
     pub normalization: bool,
+    /// «Эквалайзер»: on, and the gain of each of its ten bands in dB
+    /// ([`EQ_FREQS`]). One for the player, like the normalization.
+    pub eq_on: bool,
+    pub eq_gains: [f32; EQ_BANDS],
+    /// «Скорость трека»: the «Скорость» item of a track's menu and the
+    /// versions chosen with it. Off, every track plays as recorded; the
+    /// choices are kept and come back with the switch.
+    pub speed_enabled: bool,
+    /// «Сохранять тембр голоса»: a track played faster or slower keeps the
+    /// character of its voices (the pitch still moves with the speed).
+    pub keep_timbre: bool,
+    /// «Перемешивание остаётся включённым»: a new album, playlist, mix,
+    /// radio or search result keeps shuffle as it was (off: it turns
+    /// shuffle off, «Перемешать» turns it on).
+    pub keep_shuffle: bool,
+    /// «Перемешивать радио и автовоспроизведение»: with shuffle on, the
+    /// picks of a radio, autoplay and the daylist play shuffled too (off:
+    /// they keep their own order).
+    pub shuffle_radio: bool,
     pub opus_bitrate: u32,
     pub check_fake_lossless: bool,
     /// A "lossless" file plainly made from a lossy one is offered in
@@ -1389,11 +1464,12 @@ pub struct Prefs {
     /// settles (0.5..2, 1: Material's expressive fast spatial spring).
     pub lyrics_jump_speed: f32,
     /// «Скорость подсветки»: how fast a letter or word lights up, 0
-    /// smoothly .. 1 at once (karaoke by letters: how soft the front is).
+    /// smoothly .. 1 at once (karaoke: how soft the front's edge is).
     pub lyrics_light_speed: f32,
-    /// «Плавность»: 0 lights and moves exactly letter by letter .. 1 the
-    /// karaoke front glides and the wave's jumps spread over neighbouring
-    /// letters (motions averaged over up to 0.4 s; the times still lead).
+    /// «Плавность»: 0 keeps to the times exactly .. 1 the karaoke front
+    /// takes the most even way through them (never before a time, up to
+    /// 0.3 s after it) and the wave's lights and jumps spread over
+    /// neighbouring letters (averaged over up to 0.4 s).
     pub lyrics_smooth: f32,
     /// How far lines other than the current one fade (0 none .. 1 strong).
     pub lyrics_dim: f32,
@@ -1423,7 +1499,7 @@ pub struct Prefs {
     /// letters), before [`Self::lyrics_unit`]: read once by
     /// [`Prefs::upgrade_lyrics`].
     pub lyrics_by_words: bool,
-    /// «Подсвечивать»: what every animation goes over, [`LYRICS_BY_LETTERS`],
+    /// «Шаг подсветки»: what every animation goes over, [`LYRICS_BY_LETTERS`],
     /// [`LYRICS_BY_SYLLABLES`] (the timed syllables of a text that has
     /// them, the timed words of one that has words) or [`LYRICS_BY_WORDS`]
     /// (each part of a hyphenated word).
@@ -1451,11 +1527,11 @@ pub struct Prefs {
     /// «Подсветка по словам во всех песнях»: the background pass makes
     /// word timing for every song with a file (hours on a big library).
     pub lyrics_words_all: bool,
-    /// «Подсветка по строкам для текстов без времени»: the playing song's
+    /// «Строки простого текста»: the playing song's
     /// plain text gets line timing from the recording when no source has
     /// line timing.
     pub lyrics_lines_auto: bool,
-    /// «Подсветка по словам для песен, которые слушаю»: the playing song's
+    /// «Подсветка по словам в играющей песне»: the playing song's
     /// texts are shown with word timing made from the recording.
     pub lyrics_words_playing: bool,
     /// «Вид»: what the control under the lyrics opens: 0 its menu
@@ -1488,6 +1564,9 @@ pub struct Prefs {
     pub lyrics_settings_seen: bool,
     /// The outline the Now Playing cover takes while playing.
     pub cover_shape: CoverShape,
+    /// «Менять форму на паузе»: a pause turns the shaped cover into the
+    /// rounded square (off: it keeps its shape, only still).
+    pub cover_pause_morph: bool,
     /// The cover's outline turns while playing (the picture stays put).
     pub cover_spin: bool,
     /// The cover swells a little on each beat.
@@ -1496,6 +1575,9 @@ pub struct Prefs {
     pub ring: bool,
     /// The ring's dots jump with the music.
     pub ring_beat: bool,
+    /// «Кольцо на паузе»: a pause dims the ring (off: the ring fades out
+    /// on a pause and comes back with the music).
+    pub ring_on_pause: bool,
     /// What the ring is made of and where it sits.
     pub ring_style: RingStyle,
     /// The ring turns counter-clockwise.
@@ -1558,6 +1640,8 @@ pub struct Prefs {
     /// The navigation rail always stays narrow (icons only) and its expand
     /// button is gone.
     pub rail_compact: bool,
+    /// «Дата альбома»: how much of an album's release date its page shows.
+    pub album_date: AlbumDate,
     /// The parts of the side pane by the content, each on its own: none by
     /// default, and a part that is off has no button, menu item or key.
     pub pane_queue: bool,
@@ -1733,10 +1817,274 @@ pub struct Prefs {
     pub library_as_taste: bool,
     /// settings.toml has a Last.fm API key (the key is not here).
     pub lastfm_configured: bool,
+    /// settings.toml has a ListenBrainz token (the token is not here).
+    pub listenbrainz_configured: bool,
     /// «Не повторять сыгранное»: the radio and autoplay leave out what
     /// played this many hours ago or less (and in the session) while
     /// anything else is left.
     pub radio_no_repeat_hours: u8,
+    /// «Подмешивать случайное»: how much of a radio of a track or an artist
+    /// (and autoplay) may be new music not known to sound like what it
+    /// grows from.
+    pub radio_explore: RadioExplore,
+    /// «Преимущественно новые песни»: how much of a radio of a track or an
+    /// artist (and autoplay) is music the user has not heard.
+    pub radio_unheard: RadioUnheard,
+
+    // ---- Settings v2 (presets, «Просто» and «Подробно»).
+    /// The settings show every row («Подробно»); off, the main ones
+    /// («Просто»).
+    pub settings_deep: bool,
+    /// The values of the user's own an area had before a preset was
+    /// applied over them, for «Свои» ([`presets::Area::custom`]).
+    pub custom_presets: std::collections::BTreeMap<presets::Area, presets::Snapshot>,
+    /// Which defaults of the settings the prefs were written with
+    /// ([`presets::SETTINGS_REV`]); older prefs keep their values once
+    /// ([`presets::upgrade`]).
+    pub settings_rev: u8,
+    /// «Обложка → Скорость»: seconds a turn of the cover's outline takes
+    /// ([`COVER_SPIN_S`]).
+    pub cover_spin_s: f32,
+    /// «Кольцо → Скорость»: seconds a turn of the ring takes
+    /// ([`RING_SPIN_S`]).
+    pub ring_spin_s: f32,
+    /// «Пульсация → Сила»: how much the cover swells on a beat, a share of
+    /// its size ([`COVER_PULSE`]).
+    pub cover_pulse_strength: f32,
+    /// «Разделы главной»: the sections of Главная in the user's order, each
+    /// on or off; empty: all of them in the default order
+    /// ([`Prefs::home_order`]).
+    pub home_sections: Vec<HomeSectionSwitch>,
+    /// «Меню трека»: the items of a track's menu taken from their default
+    /// places ([`TrackMenuItem::default_place`]); empty: the menu as it is
+    /// by default ([`Prefs::track_menu_place`]).
+    pub track_menu: Vec<TrackMenuSlot>,
+}
+
+/// The default of [`Prefs::cover_spin_s`] and its range in the settings.
+pub const COVER_SPIN_S: f32 = 48.0;
+pub const COVER_SPIN_RANGE: std::ops::RangeInclusive<f32> = 12.0..=90.0;
+/// The default of [`Prefs::ring_spin_s`] and its range.
+pub const RING_SPIN_S: f32 = 36.0;
+pub const RING_SPIN_RANGE: std::ops::RangeInclusive<f32> = 10.0..=90.0;
+/// The default of [`Prefs::cover_pulse_strength`] and its range.
+pub const COVER_PULSE: f32 = 0.08;
+pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
+
+/// An item of a track's menu whose place «Меню трека» chooses. The names
+/// are kept in the prefs: an item is never renamed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackMenuItem {
+    Radio,
+    Album,
+    Artist,
+    Share,
+    /// «Источник и качество».
+    Info,
+    /// «Скорость и эквалайзер» of the playing track, «Скорость…» of a row.
+    Sound,
+    Visualizer,
+    /// «Редактировать теги…».
+    Tags,
+    /// «Изменить текст…».
+    LyricsEdit,
+    /// «Скачать альбом», and «Скачать» of a track with no file.
+    Download,
+    /// «Найти качество лучше…» / «Искать раздачу…».
+    Torrents,
+    /// «В файле другая песня».
+    WrongFile,
+    Dislike,
+    /// «Не рекомендовать исполнителя».
+    Ban,
+}
+
+impl TrackMenuItem {
+    /// Every item, in the order of the menu.
+    pub const ALL: [Self; 14] = [
+        Self::Radio,
+        Self::Album,
+        Self::Artist,
+        Self::Share,
+        Self::Info,
+        Self::Sound,
+        Self::Visualizer,
+        Self::Tags,
+        Self::LyricsEdit,
+        Self::Download,
+        Self::Torrents,
+        Self::WrongFile,
+        Self::Dislike,
+        Self::Ban,
+    ];
+
+    /// The item's name in the settings.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Radio => "Радио по треку",
+            Self::Album => "К альбому",
+            Self::Artist => "К исполнителю",
+            Self::Share => "Поделиться",
+            Self::Info => "Источник и качество",
+            Self::Sound => "Скорость и эквалайзер",
+            Self::Visualizer => "Визуализатор",
+            Self::Tags => "Редактировать теги…",
+            Self::LyricsEdit => "Изменить текст…",
+            Self::Download => "Скачать, скачать альбом",
+            Self::Torrents => "Найти качество лучше…",
+            Self::WrongFile => "В файле другая песня",
+            Self::Dislike => "Не нравится",
+            Self::Ban => "Не рекомендовать исполнителя",
+        }
+    }
+
+    /// Where the item stands until the settings say otherwise.
+    pub fn default_place(self) -> TrackMenuPlace {
+        match self {
+            Self::Tags | Self::LyricsEdit | Self::Download | Self::Torrents | Self::WrongFile => TrackMenuPlace::File,
+            _ => TrackMenuPlace::Menu,
+        }
+    }
+}
+
+/// Where an item of a track's menu stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackMenuPlace {
+    /// In the menu itself.
+    Menu,
+    /// In its «Файл» submenu.
+    File,
+    Hidden,
+}
+
+impl TrackMenuPlace {
+    pub const ALL: [Self; 3] = [Self::Menu, Self::File, Self::Hidden];
+}
+
+/// One line of [`Prefs::track_menu`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackMenuSlot {
+    pub item: TrackMenuItem,
+    pub place: TrackMenuPlace,
+}
+
+impl TrackMenuSlot {
+    /// Where `item` stands by `slots` (the last line about it counts).
+    pub fn place_of(slots: &[Self], item: TrackMenuItem) -> TrackMenuPlace {
+        slots.iter().rev().find(|s| s.item == item).map_or(item.default_place(), |s| s.place)
+    }
+}
+
+impl Prefs {
+    /// Where `item` of a track's menu stands.
+    pub fn track_menu_place(&self, item: TrackMenuItem) -> TrackMenuPlace {
+        TrackMenuSlot::place_of(&self.track_menu, item)
+    }
+
+    /// Puts `item` at `place`; only what differs from the default is kept.
+    pub fn set_track_menu_place(&mut self, item: TrackMenuItem, place: TrackMenuPlace) {
+        self.track_menu.retain(|s| s.item != item);
+        if place != item.default_place() {
+            self.track_menu.push(TrackMenuSlot { item, place });
+        }
+    }
+}
+
+/// A section of Главная («Разделы главной»).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HomeSection {
+    /// «Быстрый доступ».
+    Shortcuts,
+    /// «Миксы дня», a row there no longer is (its mixes stand in «Миксы
+    /// для тебя»): kept so that a list saved with it still reads; it is in
+    /// no order and no list ([`HomeSectionSwitch::complete`]).
+    Daily,
+    /// «Миксы для тебя».
+    Mixes,
+    /// «Слушать снова».
+    ListenAgain,
+    /// «Плитки дня».
+    OfDay,
+    /// «Из библиотеки».
+    FromLibrary,
+    /// «Новое».
+    New,
+    /// «Релизы».
+    Releases,
+}
+
+impl HomeSection {
+    /// Every section in Главная's default order.
+    pub const ALL: [Self; 7] = [
+        Self::Shortcuts,
+        Self::Mixes,
+        Self::ListenAgain,
+        Self::OfDay,
+        Self::FromLibrary,
+        Self::New,
+        Self::Releases,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Shortcuts => "Быстрый доступ",
+            Self::Daily => "Миксы дня",
+            Self::Mixes => "Миксы для тебя",
+            Self::ListenAgain => "Слушать снова",
+            Self::OfDay => "Плитки дня",
+            Self::FromLibrary => "Из библиотеки",
+            Self::New => "Новое",
+            Self::Releases => "Релизы",
+        }
+    }
+}
+
+/// One line of [`Prefs::home_sections`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HomeSectionSwitch {
+    pub key: HomeSection,
+    pub on: bool,
+}
+
+impl Prefs {
+    /// Every section of Главная in the user's order, the ones not listed
+    /// yet in their default places (on).
+    pub fn home_order(&self) -> Vec<HomeSectionSwitch> {
+        HomeSectionSwitch::complete(&self.home_sections)
+    }
+
+    /// Whether Главная shows `section` (when it has anything for it).
+    pub fn home_section_on(&self, section: HomeSection) -> bool {
+        self.home_sections.iter().find(|s| s.key == section).is_none_or(|s| s.on)
+    }
+}
+
+impl HomeSectionSwitch {
+    /// `list` with each section once and every one there: the missing ones
+    /// in their default places, on.
+    pub fn complete(list: &[Self]) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for s in list {
+            if HomeSection::ALL.contains(&s.key) && !out.iter().any(|o| o.key == s.key) {
+                out.push(*s);
+            }
+        }
+        for (i, k) in HomeSection::ALL.iter().enumerate() {
+            if out.iter().any(|o| o.key == *k) {
+                continue;
+            }
+            // After the default sections that come before it.
+            let at = HomeSection::ALL[..i]
+                .iter()
+                .filter_map(|prev| out.iter().position(|o| o.key == *prev))
+                .max()
+                .map_or(0, |p| p + 1);
+            out.insert(at, Self { key: *k, on: true });
+        }
+        out
+    }
 }
 
 /// One line of [`Prefs::download_sources`].
@@ -1766,8 +2114,9 @@ impl Prefs {
                 .filter_map(|prev| out.iter().position(|o| o.key == *prev))
                 .max()
                 .map_or(0, |p| p + 1);
-            // Soulseek needs the user's own account: off until switched on.
-            out.insert(at, SourceSwitch { key: *k, on: *k != SourceKey::Soulseek });
+            // Soulseek needs the user's own account, and Squidify's owner
+            // keeps downloads closed to guests: off until switched on.
+            out.insert(at, SourceSwitch { key: *k, on: !matches!(*k, SourceKey::Soulseek | SourceKey::Squidify) });
         }
         out
     }
@@ -1885,6 +2234,10 @@ pub enum PrefPatch {
     HomeCard(bool),
     /// The outline the Now Playing cover takes.
     CoverShape(CoverShape),
+    /// «Менять форму на паузе».
+    CoverPauseMorph(bool),
+    /// «Дата альбома».
+    AlbumDate(AlbumDate),
     /// What stands beside the Now Playing cover.
     NpSlot(NpSlot),
     /// Windows starts the app at sign-in (as the system says).
@@ -1921,8 +2274,19 @@ pub enum PrefPatch {
     GraphPersonal(bool),
     LibraryAsTaste(bool),
     RadioNoRepeat(u8),
+    RadioExplore(RadioExplore),
+    RadioUnheard(RadioUnheard),
     /// «Настройки текста…» was picked from the lyrics control's menu.
     LyricsSettingsSeen,
+    /// A preset of an area by its number ([`presets::Area::apply`]: the
+    /// user's own values are kept first when the area has them).
+    Preset(presets::Area, usize),
+    /// «Свои»: the values kept before a preset come back.
+    PresetCustom(presets::Area),
+    /// «Просто» (false) or «Подробно».
+    SettingsDeep(bool),
+    /// «Разделы главной»: the order and switches of every section.
+    HomeSections(Vec<HomeSectionSwitch>),
 }
 
 impl PrefPatch {
@@ -1945,6 +2309,8 @@ impl PrefPatch {
             }
             Self::HomeCard(on) => p.home_card = *on,
             Self::CoverShape(s) => p.cover_shape = *s,
+            Self::CoverPauseMorph(on) => p.cover_pause_morph = *on,
+            Self::AlbumDate(d) => p.album_date = *d,
             Self::NpSlot(s) => p.np_slot = *s,
             Self::Autostart(on) => p.autostart = *on,
             Self::UserName(name) => {
@@ -1985,6 +2351,19 @@ impl PrefPatch {
             Self::LibraryAsTaste(on) => p.library_as_taste = *on,
             Self::LyricsSettingsSeen => p.lyrics_settings_seen = true,
             Self::RadioNoRepeat(h) => p.radio_no_repeat_hours = *h,
+            Self::RadioExplore(e) => p.radio_explore = *e,
+            Self::RadioUnheard(u) => p.radio_unheard = *u,
+            Self::Preset(area, n) => area.apply(p, *n),
+            Self::PresetCustom(area) => {
+                if let Some(back) = area.custom(p) {
+                    *p = back;
+                }
+            }
+            Self::SettingsDeep(on) => p.settings_deep = *on,
+            Self::HomeSections(list) => {
+                // Each section once, every one there, in the order given.
+                p.home_sections = HomeSectionSwitch::complete(list);
+            }
         }
     }
 }
@@ -2018,6 +2397,62 @@ impl RadioNewShare {
             Self::None => 0.0,
             Self::Some => 0.2,
             Self::More => 0.4,
+        }
+    }
+}
+
+/// «Подмешивать случайное»: how often a radio of a track or an artist (and
+/// autoplay) plays new music not known to sound like what it grows from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RadioExplore {
+    /// «Никогда»: only new music that sounds like it.
+    Never,
+    /// «Редко», about one in ten.
+    #[default]
+    Rare,
+    /// «Иногда», about one in five (as every radio did before).
+    Sometimes,
+    /// «Часто», about three in ten.
+    Often,
+}
+
+impl RadioExplore {
+    pub const ALL: [Self; 4] = [Self::Never, Self::Rare, Self::Sometimes, Self::Often];
+
+    /// The share of a radio at most that may be such new music (within
+    /// its share of new music).
+    pub const fn fraction(self) -> f32 {
+        match self {
+            Self::Never => 0.0,
+            Self::Rare => 0.1,
+            Self::Sometimes => 0.2,
+            Self::Often => 0.3,
+        }
+    }
+}
+
+/// «Преимущественно новые песни»: how much of a radio of a track or an
+/// artist (and autoplay) is music the user has not heard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RadioUnheard {
+    /// «Как обычно».
+    #[default]
+    Usual,
+    /// «Больше новых»: half of the library's picks at least.
+    More,
+    /// «Только новые»: all, while there are.
+    Only,
+}
+
+impl RadioUnheard {
+    pub const ALL: [Self; 3] = [Self::Usual, Self::More, Self::Only];
+
+    /// The share of the library's picks at least that is unheard.
+    pub const fn fraction(self) -> f32 {
+        match self {
+            Self::Usual => 0.0,
+            Self::More => 0.5,
+            Self::Only => 1.0,
         }
     }
 }
@@ -2062,6 +2497,19 @@ pub enum RingStyle {
     /// Dots around the outline that grow into bars with the spectrum
     /// (caelestia's cover visualiser).
     Bars,
+}
+
+/// How much of an album's release date its page shows
+/// ([`Prefs::album_date`]); what is not known falls back to what is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AlbumDate {
+    /// «2026».
+    #[default]
+    Year,
+    /// «Октябрь 2026».
+    MonthYear,
+    /// «23 октября 2026».
+    Full,
 }
 
 /// The Now Playing cover's outline while playing.
@@ -2229,6 +2677,18 @@ pub struct ViewState {
     /// Disliked tracks and artists not to recommend («Не нравится»,
     /// «Не рекомендовать исполнителя»).
     pub dislikes: DislikesView,
+    /// The tracks played faster or slower («Скорость»).
+    pub speeds: TrackSpeeds,
+    /// The tracks of one song on two albums (one recording): another album
+    /// it is on and that album's title, for the track's menu («Есть и на
+    /// альбоме «…»»).
+    pub also_on: std::sync::Arc<std::collections::HashMap<TrackId, (ReleaseId, String)>>,
+    /// Bumped when cover files on disk may have been rewritten (an import,
+    /// a retag), so a UI looks at the covers it holds again.
+    pub cover_files: u64,
+    /// Real album art found for the video thumbnails of stream tracks drawn
+    /// on screen ([`Command::RealCovers`]): the thumbnail's url → the art's.
+    pub real_covers: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
 }
@@ -2364,8 +2824,19 @@ pub enum Command {
     Previous,
     Seek(Duration),
     SeekBy(i64),
+    /// «Скорость» of a track: the version it plays as from now on
+    /// (remembered with the track; the playing one changes at once).
+    SetTrackSpeed { track: TrackId, variant: SpeedVariant },
+
+    /// «Включить с YouTube» (the developer profile, [`dev::profile`]): the
+    /// playing track goes on from where it is on its YouTube Music copy,
+    /// looked up now when it has none (and kept as its source).
+    PlayFromYoutube,
     /// Show this track's lyrics from another source; `None` = automatic.
     PickLyricsSource(TrackId, Option<LyricsSource>),
+    /// Look this track's lyrics up online again, whatever was found or not
+    /// found before (a text found earlier stays until a new one comes).
+    SearchLyricsAgain(TrackId),
     /// Make line or word timing for a source's text from the recording
     /// ([`AlignView::craft`]); `deep`: with deep mode's parts for this one
     /// timing, whatever `Prefs::lyrics_deep` says (which decides only the
@@ -2382,6 +2853,17 @@ pub enum Command {
     /// Keep the shown text (with the timing the player made) on the
     /// computer ([`LyricsView::savable`]).
     SaveLyrics { track: TrackId, source: LyricsSource },
+    /// Keep the text the user edited by hand as their own: `lines` with
+    /// their timing (`timed`), or untimed, their texts one a line. A `.ttml`
+    /// next to the file (for a song without one in its artist's folder),
+    /// marked as theirs ([`LyricsSource::Own`]): shown first from then on,
+    /// never refetched.
+    SaveOwnLyrics { track: TrackId, lines: Vec<LyricLine>, timed: bool },
+    /// «Вернуть найденный»: the user's own text goes to the Trash (with
+    /// undo) and the found texts are shown again.
+    DropOwnLyrics(TrackId),
+    /// The undo of [`Command::DropOwnLyrics`].
+    RestoreOwnLyrics(TrackId),
     /// Download (true) or delete a lyrics model by its [`AlignModel::key`].
     AlignModel { key: String, download: bool },
     SetVolume(f32),
@@ -2391,7 +2873,11 @@ pub enum Command {
     PlayRelease { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
     PlayPlaylist { id: PlaylistId, start: Option<TrackId>, shuffle: bool },
     PlayArtist { id: ArtistId, shuffle: bool },
+    /// These tracks from the one at `start` (the user picked it).
     PlayTracks { tracks: Vec<TrackId>, start: usize, context: String },
+    /// A whole list with no track picked («Слушать всё»): from the first,
+    /// or from a random one under shuffle.
+    PlayAll { tracks: Vec<TrackId>, context: String },
     PlayNext(Vec<TrackId>),
     Enqueue(Vec<TrackId>),
     /// All tracks of an album / an artist to the end of the queue.
@@ -2399,6 +2885,10 @@ pub enum Command {
     /// «Только скачанное» as playing it); the queue goes on after it.
     PlayReleaseNext(ReleaseId),
     EnqueueRelease(ReleaseId),
+    /// A whole playlist right after the current track / to the end of the
+    /// queue (what «Слушать» would play of it).
+    PlayPlaylistNext(PlaylistId),
+    EnqueuePlaylist(PlaylistId),
     EnqueueArtist(ArtistId),
     PlayQueueEntry(u64),
     RemoveFromQueue(u64),
@@ -2416,6 +2906,9 @@ pub enum Command {
     RenamePlaylist(PlaylistId, String),
     DeletePlaylist(PlaylistId),
     AddToPlaylist(PlaylistId, Vec<TrackId>),
+    /// All tracks of a library album, in its disc / track order, into a
+    /// playlist (as [`Command::AddToPlaylist`]; «Любимые» likes each).
+    AddAlbumToPlaylist(PlaylistId, ReleaseId),
     RemoveFromPlaylist(PlaylistId, TrackId),
     MoveInPlaylist { playlist: PlaylistId, track: TrackId, to: usize },
     /// Delete a track: into the Trash (30 days), or for good when
@@ -2492,6 +2985,16 @@ pub enum Command {
     /// the fakes become MP3s) or not (kept as they are, never offered
     /// again). Only these sources change, never the rest of the card.
     ConfirmPicked { id: u64, sources: Vec<nikgob_core::model::SourceId>, accept: bool },
+    /// «В файле другая песня» on a local track: its file goes to the
+    /// Trash, the track is looked for again, and that file and the place it
+    /// came from are never taken for it again.
+    WrongFile(nikgob_core::model::TrackId),
+    /// Takes [`Self::WrongFile`] back: the file plays again.
+    UndoWrongFile(nikgob_core::model::TrackId),
+    /// «Разные песни» on a track of one song on two albums
+    /// ([`ViewState::also_on`]): it is another song than the tracks it was
+    /// linked with, and never linked with them again.
+    RecordingApart(nikgob_core::model::TrackId),
     /// Folds the editions of [`EditionOffer::id`] into one album.
     MergeEditions(u64),
     /// Keeps them apart and never offers them again.
@@ -2523,6 +3026,15 @@ pub enum Command {
     /// The Last.fm API key of the graph of similar music → settings.toml
     /// (never into prefs); empty clears it.
     SetLastfmKey(String),
+    /// The ListenBrainz token of the graph's popularity → settings.toml
+    /// (never into prefs); empty clears it.
+    SetListenbrainzToken(String),
+    /// Opens `sources.toml` (Qobuz and Tidal instance lists) beside
+    /// settings.toml. The settings page does not draw the button yet.
+    OpenSourcesConfig,
+    /// Video thumbnails (`i.ytimg.com`) of stream tracks drawn on screen:
+    /// their real album art is looked up ([`ViewState::real_covers`]).
+    RealCovers(Vec<String>),
     DismissToast(u64),
 
     // Streaming: accounts (stage 3). Every network call runs in the
@@ -2575,6 +3087,11 @@ pub enum Command {
     /// Stream tracks after the current one / at the end of the queue.
     PlayStreamNext(Vec<RemoteId>),
     EnqueueStream(Vec<RemoteId>),
+    /// The tracks of an album of a service after the current one / at the
+    /// end of the queue (fetched as playing it does), like
+    /// [`Command::PlayReleaseNext`] / [`Command::EnqueueRelease`].
+    PlayStreamAlbumNext(RemoteId),
+    EnqueueStreamAlbum(RemoteId),
     /// «Не нравится» (`dislike`) or its undo for a track: out of every
     /// recommendation, skipped now when it plays ([`Prefs::dislike_skips`]),
     /// its like gone. A track liked or played to the end often is asked
@@ -2601,6 +3118,8 @@ pub enum Command {
     DownloadRelease(ReleaseId),
     /// Stream tracks into a library playlist (they join the library).
     AddStreamToPlaylist(PlaylistId, Vec<RemoteId>),
+    /// The tracks of an album of a service into a library playlist.
+    AddStreamAlbumToPlaylist(PlaylistId, RemoteId),
     /// A song.link / album.link for a track or album → [`ViewState::share`]
     /// and the clipboard, plus a toast.
     Share(ShareTarget),
@@ -2644,6 +3163,9 @@ pub enum Command {
     /// work (like pulls, playlist checks, completing imports) waits; on
     /// focus a like pull older than 10 minutes runs.
     WindowState { visible: bool, focused: bool },
+    /// Настройки → «Для разработчика» → «Демо-профиль»: done by the app,
+    /// never sent on to the runtime.
+    DevProfile(dev::DevProfile),
     /// «Загрузки» is (not) the page shown. Off it, the runtime publishes a
     /// torrent's changes but not its bytes, rates and progress, so seeding
     /// does not wake the window every second.
@@ -2713,6 +3235,12 @@ impl Default for Prefs {
             gapless: true,
             crossfade_s: 0.0,
             normalization: true,
+            eq_on: false,
+            eq_gains: [0.0; EQ_BANDS],
+            speed_enabled: true,
+            keep_timbre: false,
+            keep_shuffle: true,
+            shuffle_radio: false,
             opus_bitrate: 160,
             check_fake_lossless: true,
             convert_fake_lossless: true,
@@ -2776,10 +3304,13 @@ impl Default for Prefs {
             lyrics_stream_keep: 0,
             lyrics_settings_seen: false,
             cover_shape: CoverShape::default(),
+            cover_pause_morph: true,
             cover_spin: true,
             cover_pulse: true,
             ring: true,
             ring_beat: true,
+            // Prefs written before the switch keep the dimmed ring.
+            ring_on_pause: true,
             ring_style: RingStyle::default(),
             ring_ccw: false,
             cover_ccw: true,
@@ -2806,6 +3337,7 @@ impl Default for Prefs {
             bg_shapes_hue: 5,
             ambient_strength: 1.0,
             rail_compact: false,
+            album_date: AlbumDate::Year,
             pane_queue: false,
             pane_lyrics: false,
             pane_info: false,
@@ -2865,7 +3397,18 @@ impl Default for Prefs {
             graph_personal: true,
             library_as_taste: true,
             lastfm_configured: false,
+            listenbrainz_configured: false,
             radio_no_repeat_hours: 3,
+            radio_explore: RadioExplore::Rare,
+            radio_unheard: RadioUnheard::Usual,
+            settings_deep: false,
+            custom_presets: std::collections::BTreeMap::new(),
+            settings_rev: presets::SETTINGS_REV,
+            cover_spin_s: COVER_SPIN_S,
+            ring_spin_s: RING_SPIN_S,
+            cover_pulse_strength: COVER_PULSE,
+            home_sections: Vec::new(),
+            track_menu: Vec::new(),
         }
     }
 }
@@ -2895,9 +3438,10 @@ impl Prefs {
             lyrics_soft_strength: 0.25,
             lyrics_soft_depth: 0.29,
             save_found_lyrics: true,
-            lyrics_deep: true,
+            lyrics_deep: false,
             cover_shape: CoverShape::Random,
             ring_style: RingStyle::Circle,
+            ring_on_pause: false,
             np_volume_pop: true,
             np_volume_pop_hold: 0.5,
             random_shapes: vec![
@@ -2926,6 +3470,7 @@ impl Prefs {
             bg_shapes_colors: 1,
             bg_shapes_hue: 6,
             rail_compact: true,
+            album_date: AlbumDate::Year,
             spotify_enabled: false,
             library_only_downloaded: true,
             auto_download_limit: 3,
@@ -3036,5 +3581,117 @@ mod context_tests {
         assert_eq!(with("альбома «Группа крови»", None), None);
         assert_eq!(with("поиска: лёд", album.clone()), None);
         assert_eq!(with("библиотеки", album), None);
+    }
+}
+
+#[cfg(test)]
+mod release_day_tests {
+    use super::ReleaseDay;
+
+    #[test]
+    fn dates_parse_to_the_day_or_the_month() {
+        let day = |y, m, d| Some(ReleaseDay { year: y, month: m, day: d });
+        assert_eq!(ReleaseDay::parse("2019-05-17", Some(2019)), day(2019, 5, Some(17)));
+        assert_eq!(ReleaseDay::parse(" 2019-05-17T00:00:00Z ", None), day(2019, 5, Some(17)));
+        assert_eq!(ReleaseDay::parse("2019/5/7", None), day(2019, 5, Some(7)));
+        assert_eq!(ReleaseDay::parse("2019-05", Some(2019)), day(2019, 5, None));
+        // A bare year says nothing the card does not.
+        assert_eq!(ReleaseDay::parse("2019", Some(2019)), None);
+        // A recording's date of another year is not the album's.
+        assert_eq!(ReleaseDay::parse("2003-02-01", Some(2019)), None);
+        for bad in ["", "19-05-17", "2019-13-01", "2019-05-32", "2019-05-17-1", "май 2019", "2019-05-00"] {
+            assert_eq!(ReleaseDay::parse(bad, None), None, "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_v2_tests {
+    use super::*;
+    use crate::presets::Area;
+
+    #[test]
+    fn home_sections_are_all_there_once_in_the_given_order() {
+        let p = Prefs::default();
+        assert_eq!(p.home_order().iter().map(|s| s.key).collect::<Vec<_>>(), HomeSection::ALL);
+        assert!(HomeSection::ALL.iter().all(|&s| p.home_section_on(s)));
+        let mut q = p.clone();
+        PrefPatch::HomeSections(vec![
+            HomeSectionSwitch { key: HomeSection::Releases, on: false },
+            HomeSectionSwitch { key: HomeSection::Releases, on: true },
+            HomeSectionSwitch { key: HomeSection::Mixes, on: true },
+        ])
+        .apply(&mut q);
+        let keys: Vec<_> = q.home_sections.iter().map(|s| s.key).collect();
+        // The given ones keep their order; a missing one sits after the
+        // default ones before it (Быстрый доступ has none: first).
+        use HomeSection as S;
+        assert_eq!(keys, [S::Shortcuts, S::Releases, S::Mixes, S::ListenAgain, S::OfDay, S::FromLibrary, S::New]);
+        // A list saved with the row there no longer is reads without it.
+        let old = [HomeSectionSwitch { key: S::Daily, on: false }, HomeSectionSwitch { key: S::Mixes, on: true }];
+        assert!(HomeSectionSwitch::complete(&old).iter().all(|s| s.key != S::Daily));
+        assert_eq!(HomeSectionSwitch::complete(&old).len(), HomeSection::ALL.len());
+        assert!(!q.home_section_on(S::Releases), "the first of a section counts");
+        assert!(q.home_section_on(S::Shortcuts));
+    }
+
+    #[test]
+    fn preset_patches_apply_and_come_back() {
+        let mut p = Prefs { fps_limit: 90, ..Prefs::default() };
+        PrefPatch::Preset(Area::Load, 1).apply(&mut p);
+        assert_eq!((p.fps_limit, Area::Load.current(&p)), (120, Some(1)));
+        PrefPatch::PresetCustom(Area::Load).apply(&mut p);
+        assert_eq!(p.fps_limit, 90);
+        // «Свои» without kept values changes nothing.
+        let mut f = Prefs::first_start();
+        PrefPatch::PresetCustom(Area::Track).apply(&mut f);
+        assert_eq!(f, Prefs::first_start());
+        PrefPatch::SettingsDeep(true).apply(&mut f);
+        assert!(f.settings_deep);
+    }
+
+    #[test]
+    fn the_new_knobs_default_to_what_the_code_drew() {
+        for p in [Prefs::default(), Prefs::first_start()] {
+            assert_eq!((p.cover_spin_s, p.ring_spin_s, p.cover_pulse_strength), (48.0, 36.0, 0.08));
+            assert!(!p.settings_deep && p.custom_presets.is_empty() && p.home_sections.is_empty());
+            assert!(COVER_SPIN_RANGE.contains(&p.cover_spin_s) && RING_SPIN_RANGE.contains(&p.ring_spin_s));
+            assert!(COVER_PULSE_RANGE.contains(&p.cover_pulse_strength));
+        }
+    }
+}
+
+#[cfg(test)]
+mod track_menu_tests {
+    use serde::Deserialize;
+    use serde::de::value::{Error, MapDeserializer};
+
+    use super::{Prefs, TrackMenuItem as I, TrackMenuPlace as P, TrackMenuSlot};
+
+    #[test]
+    fn the_menu_is_as_it_was_until_an_item_is_moved() {
+        let mut p = Prefs::default();
+        assert!(p.track_menu.is_empty() && Prefs::first_start().track_menu.is_empty());
+        for item in I::ALL {
+            assert_eq!(p.track_menu_place(item), item.default_place());
+        }
+        assert_eq!((I::Info.default_place(), I::Tags.default_place()), (P::Menu, P::File));
+        p.set_track_menu_place(I::Share, P::File);
+        p.set_track_menu_place(I::Tags, P::Menu);
+        p.set_track_menu_place(I::Ban, P::Hidden);
+        assert_eq!((p.track_menu_place(I::Share), p.track_menu_place(I::Tags), p.track_menu_place(I::Ban)), (P::File, P::Menu, P::Hidden));
+        // Back at its default place an item is not kept.
+        p.set_track_menu_place(I::Share, P::Menu);
+        p.set_track_menu_place(I::Tags, P::File);
+        assert_eq!(p.track_menu, [TrackMenuSlot { item: I::Ban, place: P::Hidden }]);
+    }
+
+    /// Prefs saved before «Меню трека» have no such field: the default.
+    #[test]
+    fn old_prefs_load_with_the_default_menu() {
+        let old = MapDeserializer::<_, Error>::new([("tooltips", true)].into_iter());
+        let p = Prefs::deserialize(old).unwrap();
+        assert!(p.tooltips && p.track_menu.is_empty());
+        assert_eq!(p, Prefs { tooltips: true, ..Prefs::default() });
     }
 }

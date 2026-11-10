@@ -56,13 +56,16 @@ impl Pace {
     }
 }
 
-/// A site that turned us away sits out a while: 30 minutes, doubling up
-/// to a day while it keeps doing so; one answer that works ends it. A bot
+/// A site that turned us away sits out a while ([`pause_for`]): 30
+/// minutes, doubling up to a day while it keeps doing so (a bot check from
+/// [`BLOCKED_PAUSE`]: a page only a browser with scripts passes does not
+/// let us in an hour later either); one answer that works ends it. A bot
 /// check or a rate limit starts the pause at once; a 401/403 (an instance
-/// whose account the service banned: it finds, it does not give files)
-/// or no answer at all (an instance whose name is gone) only once it did
-/// so [`STRIKES`] times with no working answer between. A wait the site
-/// asked for is waited out whole (up to a day).
+/// whose account the service banned: it finds, it does not give files),
+/// no answer at all (an instance whose name is gone), or a 400 right after
+/// a pause (a Worker whose day of requests started over and still cannot
+/// answer) only once it did so [`STRIKES`] times with no working answer
+/// between. A wait the site asked for is waited out whole (up to a day).
 pub struct Breaker {
     state: Mutex<BreakerState>,
 }
@@ -79,9 +82,35 @@ struct BreakerState {
 }
 
 const FIRST_PAUSE: Duration = Duration::from_secs(30 * 60);
-const LONGEST_PAUSE: Duration = Duration::from_secs(24 * 3600);
+/// The first pause after a bot check or a ban.
+pub const BLOCKED_PAUSE: Duration = Duration::from_secs(3 * 3600);
+pub const LONGEST_PAUSE: Duration = Duration::from_secs(24 * 3600);
 /// 401/403 answers (or none) in a row that set an instance aside.
 pub const STRIKES: u32 = 2;
+
+/// What a bot check is told as ([`SourceError::Blocked`]).
+pub const BOT_CHECK: &str = "a bot check";
+/// What a page that wants scripts run first is told as.
+pub const SCRIPT_CHECK: &str = "a script check";
+
+/// The site shows a check page only a browser passes (Cloudflare's «Just a
+/// moment…»), as opposed to refusing a login or a key.
+pub fn is_check(e: &SourceError) -> bool {
+    matches!(e, SourceError::Blocked(why) if why == BOT_CHECK || why == SCRIPT_CHECK)
+}
+
+/// How long a site that turned us away with `e` sits out, the `n`th pause
+/// in a row (from 0): the wait it asked for (a minute to a day), else
+/// [`BLOCKED_PAUSE`] for a check or a ban and 30 minutes for the rest,
+/// doubling each time up to a day.
+pub fn pause_for(e: &SourceError, n: u32) -> Duration {
+    let first = match e {
+        SourceError::RateLimited { retry_after: Some(d) } => return (*d).clamp(Duration::from_secs(60), LONGEST_PAUSE),
+        SourceError::Blocked(_) => BLOCKED_PAUSE,
+        _ => FIRST_PAUSE,
+    };
+    (first * 2u32.pow(n.min(6))).min(LONGEST_PAUSE)
+}
 
 impl Default for Breaker {
     fn default() -> Self {
@@ -90,18 +119,24 @@ impl Default for Breaker {
 }
 
 impl Breaker {
-    /// Err while the site sits out: a wait (with how long is left) when
-    /// it turned us away or asked to wait; what it kept answering (a 403,
-    /// no answer) when that set it aside, so it is not told as a wait.
+    /// Err while the site sits out: what set it aside — a bot check stays
+    /// a bot check (the site did not ask us to wait), a 403 or no answer
+    /// stays what it was; a wait it asked for, with how long is left.
     pub fn check(&self) -> Result<(), SourceError> {
         let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match st.until {
             Some(until) if Instant::now() < until => Err(match &st.why {
-                Some(e @ (SourceError::Http { .. } | SourceError::Unreachable(_))) => e.clone(),
+                Some(e @ (SourceError::Http { .. } | SourceError::Unreachable(_) | SourceError::Blocked(_))) => e.clone(),
                 _ => SourceError::RateLimited { retry_after: Some(until - Instant::now()) },
             }),
             _ => Ok(()),
         }
+    }
+
+    /// How long the site still sits out, if it does.
+    pub fn left(&self) -> Option<Duration> {
+        let st = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.until.and_then(|u| u.checked_duration_since(Instant::now())).filter(|d| !d.is_zero())
     }
 
     /// Notes what a request did: a block or a rate limit starts (or
@@ -119,17 +154,19 @@ impl Breaker {
                 st.strikes += 1;
                 st.strikes >= STRIKES
             }
+            // Back from a pause and still no answer (a Worker's day started
+            // over, its way to the service broken): not well yet.
+            Err(SourceError::Http { status: 400 }) if st.pauses > 0 => {
+                st.strikes += 1;
+                st.strikes >= STRIKES
+            }
             Err(_) => false,
         };
         if !pause {
             return;
         }
-        let n = st.pauses.min(6);
-        let long = (FIRST_PAUSE * 2u32.pow(n)).min(LONGEST_PAUSE);
-        let long = match r {
-            Err(SourceError::RateLimited { retry_after: Some(d) }) => (*d).clamp(Duration::from_secs(60), LONGEST_PAUSE),
-            _ => long,
-        };
+        let Err(e) = r else { return };
+        let long = pause_for(e, st.pauses);
         st.until = Some(Instant::now() + long);
         st.pauses += 1;
         st.strikes = 0;
@@ -153,6 +190,15 @@ pub fn is_daily_limit(status: StatusCode, body: &str) -> bool {
 pub fn until_utc_midnight(now: u64) -> Duration {
     const DAY: u64 = 86_400;
     Duration::from_secs(DAY - now % DAY)
+}
+
+/// A wait of `left` from `now` (unix seconds) ends at a midnight UTC, give
+/// or take two minutes: a Worker's day of requests, not a wait it named.
+pub fn ends_at_utc_midnight(now: u64, left: Duration) -> bool {
+    const DAY: u64 = 86_400;
+    const SLACK: u64 = 120;
+    let r = (now + left.as_secs()) % DAY;
+    left.as_secs() >= SLACK && (r <= SLACK || r >= DAY - SLACK)
 }
 
 /// No answer, with why (the name not found, the TLS handshake): reqwest's
@@ -209,6 +255,28 @@ impl Cookies {
     }
 }
 
+/// Navigation headers a browser sends with a document (khinsider's check
+/// stays up without them). `site` is `none` on the first visit and
+/// `same-origin` after; `referer` is set for the later pages.
+pub struct Nav {
+    pub site: &'static str,
+    pub referer: Option<String>,
+}
+
+/// A response that arrived, including one that is not 2xx. A failure to
+/// connect is [`SourceError`], not this.
+pub struct Reply {
+    pub status: u16,
+    pub body: String,
+    pub retry_after: Option<Duration>,
+}
+
+/// The status and body of `url`, including an error page. Cookies, when
+/// given, are sent and kept as [`get_page`] does.
+pub async fn read(http: &Client, url: &str) -> Result<Reply, SourceError> {
+    exchange(http, url, None, None).await
+}
+
 /// The body of a page or an API answer; a bot check is `Blocked`, a 429
 /// `RateLimited`, any other failure `Http`.
 pub async fn get_text(http: &Client, url: &str) -> Result<String, SourceError> {
@@ -217,11 +285,31 @@ pub async fn get_text(http: &Client, url: &str) -> Result<String, SourceError> {
 
 /// [`get_text`] with the site's cookies kept and sent back.
 pub async fn get_page(http: &Client, url: &str, cookies: Option<&Cookies>) -> Result<String, SourceError> {
+    classify_page(exchange(http, url, cookies, None).await?)
+}
+
+/// [`get_page`] with [`Nav`] added: khinsider's pages, not the other sources.
+pub async fn get_page_nav(http: &Client, url: &str, cookies: Option<&Cookies>, nav: Nav) -> Result<String, SourceError> {
+    classify_page(exchange(http, url, cookies, Some(&nav)).await?)
+}
+
+async fn exchange(http: &Client, url: &str, cookies: Option<&Cookies>, nav: Option<&Nav>) -> Result<Reply, SourceError> {
     let mut req = http
         .get(url)
         .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .timeout(PAGE_TIMEOUT);
+    if let Some(nav) = nav {
+        req = req
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", nav.site)
+            .header("Sec-Fetch-User", "?1")
+            .header("Upgrade-Insecure-Requests", "1");
+        if let Some(referer) = &nav.referer {
+            req = req.header(reqwest::header::REFERER, referer);
+        }
+    }
     if let Some(c) = cookies.and_then(Cookies::header) {
         req = req.header(reqwest::header::COOKIE, c);
     }
@@ -229,21 +317,26 @@ pub async fn get_page(http: &Client, url: &str, cookies: Option<&Cookies>) -> Re
     if let Some(c) = cookies {
         c.keep(&resp);
     }
-    let status = resp.status();
-    let wait = retry_after(&resp);
+    let status = resp.status().as_u16();
+    let retry_after = retry_after(&resp);
     let body = resp.text().await.map_err(unreachable)?;
+    Ok(Reply { status, body, retry_after })
+}
+
+fn classify_page(reply: Reply) -> Result<String, SourceError> {
+    let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if status.is_success() {
-        return Ok(body);
+        return Ok(reply.body);
     }
-    if is_bot_check(status, &body) {
-        return Err(SourceError::Blocked("a bot check".into()));
+    if is_bot_check(status, &reply.body) {
+        return Err(SourceError::Blocked(BOT_CHECK.into()));
     }
-    if is_daily_limit(status, &body) {
+    if is_daily_limit(status, &reply.body) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         return Err(SourceError::RateLimited { retry_after: Some(until_utc_midnight(now)) });
     }
     Err(match status {
-        StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: wait },
+        StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: reply.retry_after },
         s => SourceError::Http { status: s.as_u16() },
     })
 }
@@ -388,6 +481,50 @@ mod tests {
         assert_eq!(get_text(&http, &at("/gone")).await.unwrap_err(), SourceError::Http { status: 404 });
     }
 
+    /// khinsider's check stays up unless the request looks like a document
+    /// navigation. The headers go on those pages only.
+    #[tokio::test]
+    async fn a_navigated_page_sends_the_browser_headers() {
+        use wiremock::matchers::header;
+        let server = MockServer::start().await;
+        Mock::given(path("/search"))
+            .and(header("sec-fetch-dest", "document"))
+            .and(header("sec-fetch-mode", "navigate"))
+            .and(header("sec-fetch-site", "none"))
+            .and(header("sec-fetch-user", "?1"))
+            .and(header("upgrade-insecure-requests", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/album"))
+            .and(header("sec-fetch-site", "same-origin"))
+            .and(header("referer", "https://downloads.khinsider.com/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("album"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let http = client();
+        let search = get_page_nav(
+            &http,
+            &format!("{}/search", server.uri()),
+            None,
+            Nav { site: "none", referer: None },
+        )
+        .await
+        .unwrap();
+        assert_eq!(search, "ok");
+        let album = get_page_nav(
+            &http,
+            &format!("{}/album", server.uri()),
+            None,
+            Nav { site: "same-origin", referer: Some("https://downloads.khinsider.com/".into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(album, "album");
+    }
+
     #[tokio::test]
     async fn downloads_land_whole_or_not_at_all() {
         let server = MockServer::start().await;
@@ -441,6 +578,57 @@ mod tests {
         assert!(b.check().is_err());
         b.note(&Ok(()));
         assert!(b.check().is_ok());
+    }
+
+    /// A bot check is told as a bot check while the site sits out, not as
+    /// the site asking to wait (khinsider's «Just a moment…», 2026-11).
+    #[test]
+    fn a_bot_check_stays_a_bot_check_while_it_sits_out() {
+        let b = Breaker::default();
+        b.note::<()>(&Err(SourceError::Blocked(BOT_CHECK.into())));
+        let got = b.check().unwrap_err();
+        assert!(is_check(&got), "{got:?}");
+        assert!(b.left().is_some_and(|d| d > Duration::from_secs(2 * 3600)), "a long pause: {:?}", b.left());
+        assert!(!is_check(&SourceError::Blocked("the indexer rejected the API key".into())));
+    }
+
+    #[test]
+    fn pauses_grow_and_a_wait_asked_for_is_kept() {
+        let cf = SourceError::Blocked(BOT_CHECK.into());
+        assert_eq!(pause_for(&cf, 0), BLOCKED_PAUSE);
+        assert_eq!(pause_for(&cf, 1), BLOCKED_PAUSE * 2);
+        assert_eq!(pause_for(&cf, 9), LONGEST_PAUSE);
+        assert_eq!(pause_for(&SourceError::Http { status: 403 }, 0), Duration::from_secs(30 * 60));
+        let wait = SourceError::RateLimited { retry_after: Some(Duration::from_secs(5 * 3600)) };
+        assert_eq!(pause_for(&wait, 3), Duration::from_secs(5 * 3600));
+    }
+
+    /// The Qobuz Worker on 2026-11-09: past midnight UTC its day started
+    /// over and it answered 400 — not a working answer, and twice in a row
+    /// it sits out, told as the 400.
+    #[test]
+    fn a_400_after_a_pause_is_not_an_answer() {
+        let b = Breaker::default();
+        b.note::<()>(&Err(SourceError::Http { status: 400 }));
+        b.note::<()>(&Err(SourceError::Http { status: 400 }));
+        assert!(b.check().is_ok(), "a 400 out of the blue is a bad request, not a pause");
+        b.note::<()>(&Err(SourceError::RateLimited { retry_after: Some(Duration::from_secs(60)) }));
+        // The day started over.
+        b.state.lock().unwrap().until = Some(Instant::now());
+        assert!(b.check().is_ok());
+        b.note::<()>(&Err(SourceError::Http { status: 400 }));
+        assert!(b.check().is_ok(), "once is not yet");
+        b.note::<()>(&Err(SourceError::Http { status: 400 }));
+        assert_eq!(b.check(), Err(SourceError::Http { status: 400 }));
+    }
+
+    #[test]
+    fn a_wait_until_midnight_utc_is_known() {
+        let day = 86_400 * 20_000;
+        assert!(ends_at_utc_midnight(day + 3_600, Duration::from_secs(23 * 3_600)));
+        assert!(ends_at_utc_midnight(day + 3_600, Duration::from_secs(23 * 3_600 + 60)));
+        assert!(!ends_at_utc_midnight(day + 3_600, Duration::from_secs(2 * 3_600)));
+        assert!(!ends_at_utc_midnight(day - 30, Duration::from_secs(30)), "too short to tell");
     }
 
     /// One 403 may be one track the account cannot play; twice in a row,

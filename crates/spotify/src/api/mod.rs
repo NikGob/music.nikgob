@@ -52,17 +52,17 @@ pub enum Lane {
     Interactive,
 }
 
-/// The path without ids and the query, for the log ("/albums/{id}/tracks").
+/// The path without ids (a user's, of any length, too) and the query, for
+/// the log ("/albums/{id}/tracks").
 fn endpoint_name(path: &str) -> String {
     let path = path.split('?').next().unwrap_or_default();
     let path = path.strip_prefix(API_URL).unwrap_or(path);
+    let mut user = false;
     path.split('/')
         .map(|seg| {
-            if seg.len() >= 16 && seg.chars().all(|c| c.is_ascii_alphanumeric()) {
-                "{id}"
-            } else {
-                seg
-            }
+            let id = user || (seg.len() >= 16 && seg.chars().all(|c| c.is_ascii_alphanumeric()));
+            user = seg == "users";
+            if id { "{id}" } else { seg }
         })
         .collect::<Vec<_>>()
         .join("/")

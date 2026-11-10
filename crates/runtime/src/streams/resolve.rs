@@ -18,6 +18,12 @@
 //! first asked of Deezer alone (`/track/{id}`, one request): the ISRC it
 //! brings is kept on the track and makes the YouTube lookup exact.
 //!
+//! While YouTube Music is off (or gives no sound) and Spotify plays, the
+//! track being played and the ones ahead are looked up on Spotify the same
+//! way instead (ISRC, then "artist title", songs only), and the hit is
+//! attached as a Spotify source. The stream analysis and saving from
+//! YouTube Music only ever ask YouTube Music.
+//!
 //! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
 //! for the pause to end, and a track that waits for its lookup (Buffering)
 //! is looked up again by itself when a pause of up to a minute ends («YouTube
@@ -155,9 +161,12 @@ fn pick_isrc(hit: &StreamTrack, q: &ResolveQuery) -> bool {
 
 /// Tracks to look up ahead in the queue.
 const AHEAD: usize = 2;
-/// Library cache key of a lookup that found nothing.
-fn miss_key(track: TrackId) -> String {
-    format!("yt_miss.{track}")
+/// Library cache key of a lookup on `via` that found nothing.
+fn miss_key(track: TrackId, via: Service) -> String {
+    match via {
+        Service::Spotify => format!("sp_miss.{track}"),
+        _ => format!("yt_miss.{track}"),
+    }
 }
 
 /// Re-lookups of a waiting track after rate limits.
@@ -180,14 +189,21 @@ pub(crate) struct ResolveLimit {
     retries: HashMap<TrackId, u32>,
 }
 
-/// Songs, then videos only when no song fits; a rate limit stops it.
+/// Songs, then videos only when no song fits (YouTube Music: Spotify
+/// has songs only); a rate limit stops it.
 async fn songs_then_videos(
     yt: &dyn nikgob_core::streaming::StreamService,
     text: &str,
     keep: &(dyn Fn(&StreamTrack) -> bool + Sync),
     q: &ResolveQuery,
 ) -> Lookup {
-    for kind in [SearchKind::Songs, SearchKind::Videos] {
+    let who = yt.service().display_name();
+    let kinds: &[SearchKind] = if yt.service() == Service::Youtube {
+        &[SearchKind::Songs, SearchKind::Videos]
+    } else {
+        &[SearchKind::Songs]
+    };
+    for &kind in kinds {
         match yt.search_kind(text, kind).await {
             Ok(r) => {
                 let hits: Vec<StreamTrack> = r.tracks.into_iter().filter(|t| keep(t)).collect();
@@ -196,10 +212,10 @@ async fn songs_then_videos(
                 }
             }
             Err(e @ nikgob_core::streaming::StreamError::RateLimited { retry_after }) => {
-                log::warn!("YouTube lookup of {text}: {e}");
+                log::warn!("{who} lookup of {text}: {e}");
                 return Err(retry_after);
             }
-            Err(e) => log::warn!("YouTube lookup of {text}: {e}"),
+            Err(e) => log::warn!("{who} lookup of {text}: {e}"),
         }
     }
     Ok(None)
@@ -315,7 +331,26 @@ impl Worker {
 
     /// [`Self::can_resolve`] with a miss older than `ttl` forgotten.
     fn can_resolve_within(&mut self, track: TrackId, ttl: Duration) -> bool {
-        if self.service(Service::Youtube).is_none() || !self.has_audio(Service::Youtube) {
+        self.can_resolve_on(track, ttl, Service::Youtube)
+    }
+
+    /// Where a track that plays from nothing now is looked up: YouTube
+    /// Music, or Spotify while YouTube Music is off or silent (see the
+    /// module docs). `None` when neither can be asked.
+    fn play_lookup(&mut self, track: TrackId, ttl: Duration) -> Option<Service> {
+        if self.streaming.resolving.contains(&track) {
+            return Some(self.streaming.resolve_via.get(&track).copied().unwrap_or(Service::Youtube));
+        }
+        if self.service(Service::Youtube).is_some() && self.has_audio(Service::Youtube) {
+            return self.can_resolve_on(track, ttl, Service::Youtube).then_some(Service::Youtube);
+        }
+        self.can_resolve_on(track, ttl, Service::Spotify).then_some(Service::Spotify)
+    }
+
+    /// The track can be looked up on `via`: it is on and plays, the track
+    /// has no copy there yet, and it did not miss there within `ttl`.
+    fn can_resolve_on(&mut self, track: TrackId, ttl: Duration, via: Service) -> bool {
+        if self.service(via).is_none() || !self.has_audio(via) {
             return false;
         }
         if self.streaming.resolving.contains(&track) {
@@ -323,26 +358,27 @@ impl Worker {
         }
         let ttl = ttl.as_millis() as i64;
         let now = nikgob_library::now_ms();
-        let missed = match self.streaming.misses.get(&track) {
+        let missed = match self.streaming.misses.get(&(track, via)) {
             Some(at) => Some(*at),
             None => self
                 .lib
-                .cache_get(&miss_key(track))
+                .cache_get(&miss_key(track, via))
                 .ok()
                 .flatten()
                 .map(|(at, _)| at),
         };
         if let Some(at) = missed {
             if now - at < ttl {
-                self.streaming.misses.insert(track, at);
+                self.streaming.misses.insert((track, via), at);
                 return false;
             }
-            self.streaming.misses.remove(&track);
+            self.streaming.misses.remove(&(track, via));
         }
-        let has_youtube = self.lib.sources_of_track(track).unwrap_or_default().iter().any(|s| {
-            s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none()
+        let kind = if via == Service::Spotify { SourceKind::Spotify } else { SourceKind::Youtube };
+        let has_copy = self.lib.sources_of_track(track).unwrap_or_default().iter().any(|s| {
+            s.kind == kind && s.available && s.trashed_at.is_none()
         });
-        !has_youtube && self.lib.get_track(track).ok().flatten().is_some()
+        !has_copy && self.lib.get_track(track).ok().flatten().is_some()
     }
 
     /// Every name of the track's artists the library knows: the credited
@@ -383,10 +419,15 @@ impl Worker {
 
     /// Starts the YouTube lookup of `track` (once).
     pub(crate) fn begin_resolve(&mut self, track: TrackId) {
+        self.begin_resolve_on(track, Service::Youtube);
+    }
+
+    /// Starts the lookup of `track` on `via` (once).
+    fn begin_resolve_on(&mut self, track: TrackId, via: Service) {
         if self.streaming.resolving.contains(&track) {
             return;
         }
-        let Some(yt) = self.service(Service::Youtube) else { return };
+        let Some(yt) = self.service(via) else { return };
         let Some(t) = self.lib.get_track(track).ok().flatten() else { return };
         let mut q = ResolveQuery {
             title: t.title.clone(),
@@ -398,7 +439,8 @@ impl Worker {
         };
         let deezer = if q.isrc.is_none() { self.isrc_source(track) } else { None };
         self.streaming.resolving.insert(track);
-        log::info!("looking up {} on YouTube Music", q.text());
+        self.streaming.resolve_via.insert(track, via);
+        log::info!("looking up {} on {}", q.text(), via.display_name());
         self.streaming.spawn(async move {
             // A Deezer track without its ISRC: Deezer tells it first.
             let mut filled = None;
@@ -417,12 +459,14 @@ impl Worker {
             {
                 return Msg::Resolved {
                     track,
+                    via,
                     found: Ok(Some(hit)),
                     filled,
                 };
             }
             Msg::Resolved {
                 track,
+                via,
                 found: lookup_youtube(yt.as_ref(), &q).await,
                 filled,
             }
@@ -447,10 +491,10 @@ impl Worker {
         // A track being played is looked up again unless it was missed just
         // now: a miss of a lookup ahead (or of a search that failed) must
         // not keep it silent for days.
-        if !self.can_resolve_within(e.track, PLAYED_MISS_TTL) {
+        let Some(via) = self.play_lookup(e.track, PLAYED_MISS_TTL) else {
             return false;
-        }
-        self.begin_resolve(e.track);
+        };
+        self.begin_resolve_on(e.track, via);
         self.playback.stop();
         self.playing = Some(e);
         self.playing_source = None;
@@ -464,9 +508,37 @@ impl Worker {
         true
     }
 
-    pub(crate) fn resolved(&mut self, track: TrackId, found: Lookup, filled: Option<Box<StreamTrack>>) {
+    /// [`nikgob_view::Command::PlayFromYoutube`]: the playing track goes on
+    /// from where it is on its YouTube Music copy, its other sources set
+    /// aside for this play. Without a copy one is looked up (and attached,
+    /// so the next time it is there at once); meanwhile it waits as a
+    /// stream does. Nothing changes when YouTube Music cannot play now or
+    /// missed the song a moment ago.
+    pub(crate) fn play_from_youtube(&mut self) {
+        let Some(e) = self.playing else { return };
+        if self.playing_source.is_some_and(|(_, kind)| kind == SourceKind::Youtube) {
+            return;
+        }
+        let sources = self.lib.sources_of_track(e.track).unwrap_or_default();
+        let copy = self.has_audio(Service::Youtube)
+            && sources.iter().any(|s| s.kind == SourceKind::Youtube && s.available && s.trashed_at.is_none());
+        if !copy && !self.can_resolve_on(e.track, PLAYED_MISS_TTL, Service::Youtube) {
+            log::info!("{}: no YouTube Music copy to play now", e.track);
+            self.toast("Нет на YouTube Music", None);
+            return;
+        }
+        log::info!("{}: from YouTube Music at {} s", e.track, self.position_now().as_secs());
+        self.failover = Some((e.id, self.position_now()));
+        self.tried.extend(sources.iter().filter(|s| s.kind != SourceKind::Youtube).map(|s| s.id));
+        self.try_next_source(e);
+    }
+
+    pub(crate) fn resolved(&mut self, track: TrackId, via: Service, found: Lookup, filled: Option<Box<StreamTrack>>) {
         self.streaming.resolving.remove(&track);
-        self.analysis_resolved(track, &found);
+        self.streaming.resolve_via.remove(&track);
+        if via == Service::Youtube {
+            self.analysis_resolved(track, &found);
+        }
         if let Some(full) = &filled {
             self.isrc_filled(track, full);
         }
@@ -475,25 +547,27 @@ impl Worker {
                 self.streaming.resolve_limit.retries.remove(&track);
                 f
             }
-            Err(retry_after) => return self.resolve_limited(track, retry_after),
+            Err(retry_after) => return self.resolve_limited(track, via, retry_after),
         };
         match &found {
             Some(hit) => {
-                log::info!("{track} plays from YouTube Music as {}", hit.id.id);
+                log::info!("{track} plays from {} as {}", via.display_name(), hit.id.id);
                 self.streaming.learn(std::slice::from_ref(hit));
                 if let Err(e) = self.lib.attach_stream_source(track, hit) {
-                    log::warn!("attaching the YouTube copy of {track}: {e}");
+                    log::warn!("attaching the {} copy of {track}: {e}", via.display_name());
                 }
             }
             None => {
-                log::info!("{track}: no copy on YouTube Music");
+                log::info!("{track}: no copy on {}", via.display_name());
                 let now = nikgob_library::now_ms();
-                self.streaming.misses.insert(track, now);
-                let _ = self.lib.cache_put(&miss_key(track), now, "");
+                self.streaming.misses.insert((track, via), now);
+                let _ = self.lib.cache_put(&miss_key(track, via), now, "");
             }
         }
         let why = self.streaming.failures.remove(&track);
-        if let Some(item) = self.streaming.save_after_resolve.remove(&track) {
+        if via == Service::Youtube
+            && let Some(item) = self.streaming.save_after_resolve.remove(&track)
+        {
             self.wish_save_from_youtube(item);
         }
         let waiting = self
@@ -525,7 +599,7 @@ impl Worker {
                             self.toast_open(format!("{title}: {why}"), "Войти", nikgob_view::Link::Setting(link));
                         }
                         Some((why, None)) => self.toast(format!("{title}: {why}"), find),
-                        None => self.toast(format!("{title}: не нашёл эту песню на YouTube Music"), find),
+                        None => self.toast(format!("{title}: не нашёл эту песню на {}", via.display_name()), find),
                     }
                     match self.queue.skip_forward() {
                         Some(n) if n.id != e.id => self.start(n),
@@ -542,8 +616,9 @@ impl Worker {
     /// YouTube Music rate-limited the lookup of `track` (see the module
     /// docs): not a miss. The waiting track is looked up again when a short
     /// pause ends; after a long one playback stops and says until when.
-    fn resolve_limited(&mut self, track: TrackId, retry_after: Option<Duration>) {
-        let pause = retry_after.or_else(|| self.pause_left(Service::Youtube));
+    fn resolve_limited(&mut self, track: TrackId, via: Service, retry_after: Option<Duration>) {
+        let who = via.display_name();
+        let pause = retry_after.or_else(|| self.pause_left(via));
         let wait = pause.unwrap_or(UNKNOWN_PAUSE);
         self.streaming.resolve_limit.until = Some(Instant::now() + wait);
         self.streaming.failures.remove(&track);
@@ -552,16 +627,16 @@ impl Worker {
             .filter(|e| e.track == track && self.playing_source.is_none());
         if waiting.is_none() {
             // A lookup ahead: done again when the pause is over.
-            log::info!("{track}: YouTube lookup rate limited, later");
+            log::info!("{track}: {who} lookup rate limited, later");
             return;
         }
         let n = self.streaming.resolve_limit.retries.entry(track).or_default();
         *n += 1;
         let n = *n;
         if wait <= super::search::SHORT_WAIT && n <= LIMIT_RETRIES {
-            log::info!("{track}: YouTube lookup rate limited, again in {} s ({n} of {LIMIT_RETRIES})", wait.as_secs());
+            log::info!("{track}: {who} lookup rate limited, again in {} s ({n} of {LIMIT_RETRIES})", wait.as_secs());
             if n == 1 {
-                self.toast("YouTube Music просит подождать — продолжу сам", None);
+                self.toast(format!("{who} просит подождать — продолжу сам"), None);
             }
             let after = wait + super::schedule::wake_jitter();
             self.streaming.spawn(async move {
@@ -577,9 +652,9 @@ impl Worker {
             .and_then(super::accounts::hm_after)
             .map(|hm| format!(" до {hm}"))
             .unwrap_or_default();
-        log::info!("{track}: YouTube lookup still rate limited: stopping");
+        log::info!("{track}: {who} lookup still rate limited: stopping");
         // Not skipped: the next tracks would hit the same pause.
-        self.toast(format!("{title}: YouTube Music просит подождать{until} — включи трек позже"), None);
+        self.toast(format!("{title}: {who} просит подождать{until} — включи трек позже"), None);
         self.stop();
     }
 
@@ -593,7 +668,9 @@ impl Worker {
             self.streaming.resolve_limit.retries.remove(&track);
             return;
         }
-        self.begin_resolve(track);
+        if let Some(via) = self.play_lookup(track, Duration::ZERO) {
+            self.begin_resolve_on(track, via);
+        }
     }
 
     /// Looks up the next [`AHEAD`] tracks of the queue that only YouTube
@@ -614,8 +691,12 @@ impl Worker {
             if Some(e.track) == current {
                 continue;
             }
-            if self.request(e).is_none() && self.can_resolve(e.track) {
-                self.begin_resolve(e.track);
+            if self.request(e).is_some() {
+                continue;
+            }
+            let ttl = self.streaming.schedule.miss_ttl;
+            if let Some(via) = self.play_lookup(e.track, ttl) {
+                self.begin_resolve_on(e.track, via);
                 return;
             }
         }

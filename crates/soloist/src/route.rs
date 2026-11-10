@@ -17,7 +17,7 @@
 use std::sync::OnceLock;
 #[cfg(windows)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -43,10 +43,28 @@ pub const DRIFT_MS: u64 = 160;
 /// A captured sample above this many times the session level cannot have
 /// come through it (full scale is 1): the session is at another level.
 const TOO_LOUD: f32 = 8.0;
-/// While a track plays, the session level is set again this often (the
-/// volume mixer, a new session on another output device).
+/// While a track plays, the session level is set again this often (a new
+/// session on another output device, a new process of the tree). In
+/// between, the sessions found then are read again on every pass of the
+/// session thread (one call each), which keeps the level fresh.
 #[cfg(windows)]
 const REAPPLY: Duration = Duration::from_secs(2);
+/// For this long after the output devices changed, the level is set again
+/// this often instead: a process that follows the default device opens its
+/// new session there a moment later, at a level of its own.
+#[cfg(windows)]
+const DEVICE_SETTLE: Duration = Duration::from_secs(3);
+#[cfg(windows)]
+const SETTLE_REAPPLY: Duration = Duration::from_millis(100);
+/// A level read back longer ago than this is not trusted: the volume mixer
+/// or a new session may have moved it in a quiet moment, where no captured
+/// sound shows it, and a quiet copy scaled up by the old factor would hiss.
+/// The track gives silence until it is read again. The session thread reads
+/// it on every pass (100 ms apart) and device changes untrust it at once,
+/// so this only covers a pass that held the thread (a slow COM walk over
+/// Bluetooth endpoints, a stalled capture joined): a few seconds, never a
+/// gap in the track for one slow pass.
+const LEVEL_FRESH: Duration = Duration::from_secs(3);
 /// The process plays and the capture's frames stand still this long: it
 /// stalled.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -108,6 +126,36 @@ fn retry_delay(attempts: usize) -> Duration {
 /// A level read back is the level set (float rounding aside).
 pub(crate) fn level_matches(got: f32, want: f32) -> bool {
     got.is_finite() && want.is_finite() && (got - want).abs() <= want.abs() * 0.01 + 1e-9
+}
+
+/// Whether a routed capture's level may be undone now (`now`, and the
+/// times below, are counted from one start): the sessions were read back at
+/// [`ROUTED_LEVEL`] by a read that began at `read_at`, no longer than
+/// [`LEVEL_FRESH`] ago and after the output devices last changed
+/// (`devices_at`).
+fn level_trusted(level: f32, read_at: Option<Duration>, devices_at: Option<Duration>, now: Duration) -> bool {
+    let Some(read_at) = read_at else { return false };
+    level_matches(level, ROUTED_LEVEL)
+        && now.saturating_sub(read_at) <= LEVEL_FRESH
+        && devices_at.is_none_or(|d| read_at > d)
+}
+
+/// How long after the sessions' level was last set it is set again while a
+/// track plays; `since_devices`: how long ago the output devices changed.
+#[cfg(windows)]
+fn reapply_every(since_devices: Option<Duration>) -> Duration {
+    if since_devices.is_some_and(|d| d < DEVICE_SETTLE) { SETTLE_REAPPLY } else { REAPPLY }
+}
+
+/// A time as stored in an atomic: ms since `epoch`, plus one (0: never).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn stamp(epoch: Instant, at: Instant) -> u64 {
+    at.saturating_duration_since(epoch).as_millis() as u64 + 1
+}
+
+/// The time [`stamp`] stored, since `epoch`.
+fn unstamp(stored: u64) -> Option<Duration> {
+    stored.checked_sub(1).map(Duration::from_millis)
 }
 
 /// Watches a capture's frame count while the process plays.
@@ -190,6 +238,16 @@ pub struct Router {
     /// The level the sessions were read back at after it was last set (f32
     /// bits); NaN while not known.
     session_level: AtomicU32,
+    /// When the read that gave `session_level` began ([`stamp`]).
+    session_level_at: AtomicU64,
+    /// When the output devices last changed ([`stamp`]).
+    devices_at: AtomicU64,
+    /// Where the stamps count from.
+    epoch: Instant,
+    /// Held while the sessions' level is set, so a release puts them back at
+    /// full level only after a pass that read the process before it went.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    applying: Mutex<()>,
 }
 
 impl Router {
@@ -209,6 +267,10 @@ impl Router {
             session_want: AtomicU32::new(1),
             session_done: AtomicU32::new(0),
             session_level: AtomicU32::new(f32::NAN.to_bits()),
+            session_level_at: AtomicU64::new(0),
+            devices_at: AtomicU64::new(0),
+            epoch: Instant::now(),
+            applying: Mutex::new(()),
         });
         #[cfg(windows)]
         {
@@ -453,17 +515,24 @@ impl Router {
     /// One look of the session thread; returns how long to wait for the
     /// next.
     #[cfg(windows)]
-    fn session_pass(&self, watch: &mut Watch, applied_at: &mut Option<Instant>) -> Duration {
+    fn session_pass(&self, k: &mut Keeping) -> Duration {
         let playing = self.playing.load(Ordering::Acquire) > 0;
-        self.watch_capture(watch);
+        self.watch_capture(&mut k.watch);
         self.restart_capture_if_due();
-        if playing && self.session_clean() && applied_at.is_none_or(|t| t.elapsed() >= REAPPLY) {
-            // The user may move the process in the volume mixer, or it may
-            // open a new session (another output device).
+        let since_devices = unstamp(self.devices_at.load(Ordering::Acquire))
+            .map(|d| self.epoch.elapsed().saturating_sub(d));
+        if playing && self.session_clean() && k.applied_at.is_none_or(|t| t.elapsed() >= reapply_every(since_devices)) {
+            // The process may open a new session (another output device, a
+            // new process of its tree).
             self.session_dirty();
         }
-        if !self.session_clean() && self.apply_session_volume() {
-            *applied_at = Some(Instant::now());
+        if !self.session_clean() {
+            if self.apply_session_volume(&mut k.held) {
+                k.applied_at = Some(Instant::now());
+            }
+        } else if playing && self.routed_now() {
+            // The volume mixer may move a session any time.
+            self.check_session_level(k.held.as_ref());
         }
         match (playing, self.session_clean()) {
             (true, false) => Duration::from_millis(50),
@@ -515,12 +584,16 @@ impl Router {
     }
 
     /// The level of the process's audio sessions, which the capture went
-    /// through. Routed, it is [`ROUTED_LEVEL`] only once the sessions were
-    /// read back at it; 0 (unknown: the track gives silence) until then.
+    /// through. Routed, it is [`ROUTED_LEVEL`] only while the sessions were
+    /// read back at it lately ([`LEVEL_FRESH`], after the last change of the
+    /// output devices); 0 (unknown: the track gives silence) otherwise.
     pub fn capture_gain(&self) -> f32 {
         if self.routed_now() {
             let level = f32::from_bits(self.session_level.load(Ordering::Acquire));
-            return if level_matches(level, ROUTED_LEVEL) { ROUTED_LEVEL } else { 0.0 };
+            let read_at = unstamp(self.session_level_at.load(Ordering::Acquire));
+            let devices_at = unstamp(self.devices_at.load(Ordering::Acquire));
+            let trusted = level_trusted(level, read_at, devices_at, self.epoch.elapsed());
+            return if trusted { ROUTED_LEVEL } else { 0.0 };
         }
         let v = self.volume();
         if cfg!(windows) { v * v * v } else { 1.0 }
@@ -581,15 +654,23 @@ impl Router {
     /// session appears with the process's first sound: until then there is
     /// none to set.
     #[cfg(windows)]
-    fn apply_session_volume(&self) -> bool {
-        let Some(pid) = *lock(&self.pid) else { return false };
+    fn apply_session_volume(&self, held: &mut Option<crate::capture::HeldSessions>) -> bool {
+        let _applying = lock(&self.applying);
+        // The id is copied out: no lock of it is held across the COM calls.
+        let pid = *lock(&self.pid);
+        let Some(pid) = pid else {
+            *held = None;
+            return false;
+        };
         let generation = self.session_want.load(Ordering::Acquire);
         let want = self.target_level();
         let pids = self.session_pids(pid);
-        match crate::capture::set_sessions_read_back(&pids, Some(false), Some(want)) {
-            Ok(levels) if !levels.is_empty() => {
+        let began = Instant::now();
+        match crate::capture::set_sessions_held(&pids, Some(false), Some(want)) {
+            Ok((levels, sessions)) if !levels.is_empty() => {
                 let all = levels.iter().all(|l| level_matches(*l, want));
-                self.session_level.store(if all { want } else { f32::NAN }.to_bits(), Ordering::Release);
+                self.level_read(if all { want } else { f32::NAN }, began);
+                *held = Some(sessions);
                 if all {
                     self.session_done.store(generation, Ordering::Release);
                 } else {
@@ -597,8 +678,12 @@ impl Router {
                 }
                 all
             }
-            Ok(_) => false,
+            Ok(_) => {
+                *held = None;
+                false
+            }
             Err(e) => {
+                *held = None;
                 self.session_level.store(f32::NAN.to_bits(), Ordering::Release);
                 log::debug!("{}: session level: {e}", self.name);
                 false
@@ -606,29 +691,112 @@ impl Router {
         }
     }
 
-    /// Puts the process's sessions back at full level (before it goes away,
-    /// so nothing is left near silent). Blocks for the COM calls.
-    pub fn restore_sessions(&self) {
+    /// Reads the level of the sessions found when it was last set (one call
+    /// each, nothing set): still the routed level, it stays trusted; moved
+    /// (the volume mixer) or gone (a device removed), the track gives
+    /// silence until it is set again.
+    #[cfg(windows)]
+    fn check_session_level(&self, held: Option<&crate::capture::HeldSessions>) {
+        let Some(held) = held else {
+            // Nothing to read: it is set (and found) again.
+            self.session_dirty();
+            return;
+        };
+        let began = Instant::now();
+        match held.levels() {
+            Ok(levels) if !levels.is_empty() && levels.iter().all(|l| level_matches(*l, ROUTED_LEVEL)) => {
+                self.level_read(ROUTED_LEVEL, began);
+            }
+            Ok(levels) => {
+                log::debug!("{}: session levels moved to {levels:?}", self.name);
+                self.session_invalidate();
+            }
+            Err(e) => {
+                log::debug!("{}: session level: {e}", self.name);
+                self.session_invalidate();
+            }
+        }
+    }
+
+    /// The sessions were read back at `level` by a read that began `began`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn level_read(&self, level: f32, began: Instant) {
+        self.session_level_at.store(stamp(self.epoch, began), Ordering::Release);
+        self.session_level.store(level.to_bits(), Ordering::Release);
+    }
+
+    /// An output device was added, removed, enabled or disabled, or another
+    /// one became the default (a thread of the system's): the level is not
+    /// trusted until it is read back after this, and is set often for a
+    /// while ([`DEVICE_SETTLE`]).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn devices_changed(&self) {
+        self.devices_at.store(stamp(self.epoch, Instant::now()), Ordering::Release);
+        self.session_invalidate();
+    }
+
+    /// The process goes away: it is no longer routed, then its sessions are
+    /// put back at full level, so nothing is left near silent. In that
+    /// order, and after any pass of the session thread still setting them,
+    /// so they are not turned down again. Blocks for the COM calls.
+    pub fn release_process(&self) {
+        // The id is copied out: no lock of it is held across the COM calls.
+        let pid = *lock(&self.pid);
         #[cfg(windows)]
-        if let Some(pid) = *lock(&self.pid) {
-            let pids = self.session_pids(pid);
+        let pids = pid.map(|p| self.session_pids(p));
+        #[cfg(not(windows))]
+        let _ = pid;
+        self.set_process(None);
+        #[cfg(windows)]
+        if let Some(pids) = pids {
+            let _applying = lock(&self.applying);
             if let Err(e) = crate::capture::set_sessions(&pids, Some(false), Some(1.0)) {
                 log::debug!("{}: sessions not restored: {e}", self.name);
             }
         }
-        self.session_invalidate();
     }
+}
+
+/// What the session thread keeps between its passes.
+#[cfg(windows)]
+struct Keeping {
+    watch: Watch,
+    /// When the sessions' level was last set (and read back).
+    applied_at: Option<Instant>,
+    /// The sessions found then.
+    held: Option<crate::capture::HeldSessions>,
+    #[allow(dead_code)]
+    devices: Option<crate::capture::DeviceWatch>,
+    /// Last: COM goes after the objects above (fields drop in order).
+    #[allow(dead_code)]
+    com: crate::capture::ComThread,
 }
 
 /// The session thread: keeps the sessions at their level, watches the
 /// capture and starts it again; ends with the router.
 #[cfg(windows)]
 fn session_loop(me: &Weak<Router>) {
-    let mut watch = Watch::default();
-    let mut applied_at = None;
+    let com = crate::capture::ComThread::init();
+    let devices = {
+        let weak = me.clone();
+        match crate::capture::DeviceWatch::start(Box::new(move || {
+            if let Some(r) = weak.upgrade() {
+                r.devices_changed();
+            }
+        })) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                if let Some(r) = me.upgrade() {
+                    log::info!("{}: output device changes are not heard: {e}", r.name);
+                }
+                None
+            }
+        }
+    };
+    let mut k = Keeping { watch: Watch::default(), applied_at: None, held: None, devices, com };
     loop {
         let Some(s) = me.upgrade() else { return };
-        let wait = s.session_pass(&mut watch, &mut applied_at);
+        let wait = s.session_pass(&mut k);
         drop(s);
         std::thread::park_timeout(wait);
     }
@@ -793,6 +961,46 @@ mod tests {
         assert!(!level_matches(f32::NAN, ROUTED_LEVEL), "not known");
         assert!(level_matches(0.0, 0.0));
         assert!(level_matches(0.125, 0.125));
+    }
+
+    #[test]
+    fn a_level_is_trusted_only_while_fresh_and_read_after_the_devices_changed() {
+        let ms = Duration::from_millis;
+        // Never read: not trusted.
+        assert!(!level_trusted(ROUTED_LEVEL, None, None, ms(0)));
+        // Read just now at the routed level.
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1100)));
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1500)));
+        // One slow pass (a COM walk, a stalled capture joined) is no gap.
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(2500)));
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1000) + LEVEL_FRESH));
+        // Older than LEVEL_FRESH: silence until read again.
+        assert!(!level_trusted(ROUTED_LEVEL, Some(ms(1000)), None, ms(1001) + LEVEL_FRESH));
+        // Another level, or unknown.
+        assert!(!level_trusted(1.0, Some(ms(1000)), None, ms(1100)));
+        assert!(!level_trusted(f32::NAN, Some(ms(1000)), None, ms(1100)));
+        // The devices changed after the read began (or in the same ms).
+        assert!(!level_trusted(ROUTED_LEVEL, Some(ms(1000)), Some(ms(1050)), ms(1100)));
+        assert!(!level_trusted(ROUTED_LEVEL, Some(ms(1000)), Some(ms(1000)), ms(1100)));
+        // ... or before it: the read saw them.
+        assert!(level_trusted(ROUTED_LEVEL, Some(ms(1000)), Some(ms(900)), ms(1100)));
+    }
+
+    #[test]
+    fn stamps_keep_zero_for_never() {
+        let epoch = Instant::now();
+        assert_eq!(unstamp(0), None);
+        assert_eq!(unstamp(stamp(epoch, epoch)), Some(Duration::ZERO));
+        assert_eq!(unstamp(stamp(epoch, epoch + Duration::from_millis(1234))), Some(Duration::from_millis(1234)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_level_is_set_often_right_after_the_devices_changed() {
+        assert_eq!(reapply_every(None), REAPPLY);
+        assert_eq!(reapply_every(Some(Duration::from_millis(10))), SETTLE_REAPPLY);
+        assert_eq!(reapply_every(Some(DEVICE_SETTLE - Duration::from_millis(1))), SETTLE_REAPPLY);
+        assert_eq!(reapply_every(Some(DEVICE_SETTLE)), REAPPLY);
     }
 
     #[test]

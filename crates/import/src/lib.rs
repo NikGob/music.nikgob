@@ -20,12 +20,14 @@ pub mod resample;
 pub mod repair;
 pub mod retag;
 pub mod rebuild;
+pub mod same_audio;
 pub mod sanitize;
 pub mod spectrum;
 mod store;
 pub mod tags;
 pub mod trash;
 pub mod watch;
+pub mod wrong_file;
 
 pub use album::{AlbumTrack, folder_has_album};
 pub use config::{ImportConfig, normalize_masters_dir};
@@ -45,3 +47,4 @@ pub use trash::{
     restore_track, trash_file, trash_purge,
 };
 pub use watch::InboxWatcher;
+pub use wrong_file::{WrongFile, mark_wrong_file, undo_wrong_file};
