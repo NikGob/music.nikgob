@@ -1456,7 +1456,8 @@ impl SettingId {
 
     /// Whether the stage should pulse on a beat while this row is shown.
     /// Cover shape, ring style and the rest stay calm, so the shape can be
-    /// judged; only a row whose change is the beat itself pulses.
+    /// judged. Only a row whose change is the beat itself pulses, and only
+    /// while that switch is on: pulse off, or ring beat off, stays calm.
     pub fn needs_beat(self, p: &Prefs) -> bool {
         use SettingId::*;
         match self {
@@ -1475,8 +1476,7 @@ impl SettingId {
     }
 }
 
-/// The rows that show a field a preset owns (where its future value is
-/// drawn while the preset is under the pointer).
+/// The rows that show a field a preset owns.
 pub fn preset_rows(f: v::presets::Field) -> Vec<SettingId> {
     use SettingId as S;
     use v::presets::Field as F;
@@ -1511,30 +1511,6 @@ pub fn preset_rows(f: v::presets::Field) -> Vec<SettingId> {
         F::LyricsSeparate => vec![S::LyricsSeparate],
         F::LyricsDeep => vec![S::LyricsDeep],
     }
-}
-
-/// The rows whose values `preview` changes from `p` among those `area`'s
-/// presets own.
-pub fn preset_changes(area: v::presets::Area, p: &Prefs, preview: &Prefs) -> Vec<SettingId> {
-    let mut out = Vec::new();
-    for &f in area.fields() {
-        let differs = match f {
-            // Each kind's own share, as the rows read it.
-            v::presets::Field::RadioNewShareBy => {
-                for kind in [v::RadioKind::Track, v::RadioKind::Artist, v::RadioKind::Mix, v::RadioKind::Autoplay] {
-                    if p.new_share_of(kind) != preview.new_share_of(kind) {
-                        out.push(SettingId::NewShareBy(kind));
-                    }
-                }
-                false
-            }
-            _ => f.get(p) != f.get(preview),
-        };
-        if differs {
-            out.extend(preset_rows(f));
-        }
-    }
-    out
 }
 
 /// A field's name in a preset's card (shorter than its row's, and never
@@ -1733,7 +1709,6 @@ fn pinned_key() -> Id {
     Id::new("settings-help-pinned")
 }
 
-
 fn pinned(ctx: &egui::Context) -> Option<Pinned> {
     ctx.data(|d| d.get_temp::<Option<Pinned>>(pinned_key())).flatten()
 }
@@ -1914,7 +1889,6 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
     inner.inner
 }
 
-
 /// Size of the ⓘ button.
 pub const BTN: f32 = 22.0;
 
@@ -1939,7 +1913,7 @@ pub fn report_menu(ctx: &egui::Context, rects: Vec<Rect>) {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).menu = rects);
 }
 
-/// The rect of the item's control, so cards line up with it.
+/// The rect of the item's control (the sweep checks it does not cover the ⓘ).
 pub fn report_control(ctx: &egui::Context, rect: Rect) {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).control = Some(rect));
 }
@@ -2012,8 +1986,9 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs, samples: bool) {
     let rows = ctx.data(|d| d.get_temp::<Rows>(rows_key())).filter(|r| r.pass == pass).map(|r| r.list).unwrap_or_default();
 
     if let Some(mut pin) = pinned(&ctx) {
-        // Gone with its row (another tab, hidden, scrolled away).
-        let Some(row) = rows.iter().find(|r| r.id == pin.id && r.clip.intersects(r.rect)) else {
+        // Gone with its ⓘ (another tab, hidden, scrolled away): the card
+        // opens next to that button, so it has nothing to hold on to.
+        let Some(row) = rows.iter().find(|r| r.id == pin.id && r.clip.intersects(r.button)) else {
             set_pinned(&ctx, None);
             return;
         };
@@ -2048,16 +2023,17 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs, samples: bool) {
             ctx.request_repaint();
         }
         let layout = Layout::new(&ctx, row, body, samples);
-        // Stays where it opened while its content swaps.
-        let x = row.control.map_or(row.button.left(), |r| r.left());
-        let target = Rect::from_min_size(place(row.rect, x, layout.size, ctx.content_rect()), layout.size);
+        // Next to this row's own ⓘ, not under the row: a group title's row
+        // is the whole list, and anchoring there dropped the card in the corner.
+        let anchor = row.button;
+        let target = Rect::from_min_size(place(anchor, layout.size, ctx.content_rect()), layout.size);
         // A short fade and rise from the row (effects timing, no bounce).
         let t = ((anim::now(&ctx) - pin.at) / 0.18).clamp(0.0, 1.0) as f32;
         let k = 1.0 - (1.0 - t).powi(3);
         if t < 1.0 {
             ctx.request_repaint();
         }
-        let rise = if target.top() >= row.rect.bottom() { -1.0 } else { 1.0 } * 8.0 * (1.0 - k);
+        let rise = if target.top() >= anchor.bottom() { -1.0 } else { 1.0 } * 8.0 * (1.0 - k);
         let rect = target.translate(vec2(0.0, -rise));
         let out = show_card(&ctx, Id::new("settings-help-pinned-card"), rect, k, content, &layout, row, prefs, true);
         if let Some(i) = out.pick {
@@ -2088,7 +2064,7 @@ const TABLE_W: f32 = 360.0;
 const TABLE_ROW: f32 = 20.0;
 const PREVIEW_H: f32 = 120.0;
 const PAD: f32 = 12.0;
-/// Between a row and its card.
+/// Between a row's ⓘ and its card.
 const GAP: f32 = 6.0;
 
 /// A paragraph in `role`, wrapped at `width`.
@@ -2098,24 +2074,36 @@ fn para(painter: &Painter, role: TypeRole, text: &str, color: Color32, width: f3
     painter.layout_job(job)
 }
 
-/// Where a card of `size` goes for `row`: just under it, from `x`, or just
-/// above when there is no room below; inside `screen`, and over the row
-/// only when it fits neither way.
-fn place(row: Rect, x: f32, size: Vec2, screen: Rect) -> Pos2 {
+/// Where a card of `size` opens next to `button`: just under it, from the
+/// button's left, or just above when there is no room below; grown left
+/// from the button's right edge when it would leave the screen on the right.
+/// On screen, and over the button only when it fits neither way.
+fn place(button: Rect, size: Vec2, screen: Rect) -> Pos2 {
     // Keep off the window's edges: more at the sides than at the bottom,
-    // where a few px decide whether the card fits under its row.
+    // where a few px decide whether the card fits under its button.
     let screen = screen.shrink2(vec2(8.0, 4.0));
-    let x = x.clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
-    let below = row.bottom() + GAP;
-    let above = row.top() - GAP - size.y;
+    let below = button.bottom() + GAP;
+    let above = button.top() - GAP - size.y;
     let y = if below + size.y <= screen.bottom() {
         below
     } else if above >= screen.top() {
         above
-    } else if screen.bottom() - row.bottom() >= row.top() - screen.top() {
+    } else if screen.bottom() - button.bottom() >= button.top() - screen.top() {
         (screen.bottom() - size.y).max(screen.top())
     } else {
         screen.top()
+    };
+    // Next to the ⓘ: grow right from its left edge. If that leaves the
+    // screen, grow left from its right edge. If neither fits, stay on screen.
+    let grow_right = button.left();
+    let grow_left = button.right() - size.x;
+    let fits = |x: f32| x >= screen.left() && x + size.x <= screen.right();
+    let x = if fits(grow_right) {
+        grow_right
+    } else if fits(grow_left) {
+        grow_left
+    } else {
+        grow_right.clamp(screen.left(), (screen.right() - size.x).max(screen.left()))
     };
     pos2(x, y)
 }
@@ -2870,12 +2858,6 @@ mod tests {
         assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(3.5)), "3,5");
         assert_eq!(field_text(Field::Ambient, &FieldValue::Ambient(v::Ambient::Reactive)), "Под звук");
         assert_eq!(field_text(Field::CoverShape, &FieldValue::Shape(v::CoverShape::Original)), "Квадрат");
-        // The rows a preset would change, as the underlay marks them.
-        let p = Prefs::first_start();
-        let quiet = Area::Load.with(&p, 0);
-        let changed = preset_changes(Area::Load, &p, &quiet);
-        assert!(changed.contains(&SettingId::FpsLimit) && !changed.contains(&SettingId::LyricsWordsAll), "{changed:?}");
-        assert!(preset_changes(Area::Load, &p, &p).is_empty());
     }
 
     /// The new knobs of the track screen know their stage part, and the
@@ -2910,32 +2892,46 @@ mod tests {
         assert_eq!(S::LyricsDim.staged(&karaoke), karaoke, "a row the look has is shown as it is");
         assert_eq!(S::Preset(v::presets::Area::Track).parts().len(), 4);
         assert!(S::Theme.parts().is_empty(), "the whole screen: nothing outlined");
-        let calm = Prefs::default();
+        // Pulse and ring-beat default on. Those rows pulse only while the
+        // switch is on; off, the stage stays calm. A shape row never pulses.
+        let calm = Prefs { cover_pulse: false, ring_beat: false, ..Prefs::default() };
         assert!(!S::CoverShape.needs_beat(&calm) && !S::RingStyle.needs_beat(&calm), "a shape stays calm");
+        assert!(!S::CoverShape.needs_beat(&Prefs::default()), "a shape stays calm even when pulse is on");
+        assert!(!S::CoverPulse.needs_beat(&calm), "pulse off: calm");
         assert!(S::CoverPulse.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
-        assert!(!S::CoverPulse.needs_beat(&calm));
+        assert!(!S::CoverPulseStrength.needs_beat(&calm));
+        assert!(S::CoverPulseStrength.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
         assert!(S::RingBeat.needs_beat(&Prefs { ring_beat: true, ..calm.clone() }));
+        assert!(!S::RingBeat.needs_beat(&calm));
         assert!(S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Reactive, ..calm.clone() }));
         assert!(!S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Glow, ..calm }));
     }
 
+    /// The card opens next to its own ⓘ, not under the row. A group title's
+    /// row is the whole list; anchoring there used to drop the card at the
+    /// window's corner.
     #[test]
-    fn cards_sit_under_the_row_or_flip_above_and_stay_on_screen() {
+    fn cards_open_next_to_their_button() {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
         let size = vec2(300.0, 200.0);
-        // Room below: just under the row, from the anchor.
-        let row = Rect::from_min_max(pos2(100.0, 100.0), pos2(900.0, 156.0));
-        let p = place(row, 400.0, size, screen);
-        assert_eq!(p, pos2(400.0, 156.0 + GAP));
-        // No room below: above, never over the row.
-        let low = Rect::from_min_max(pos2(100.0, 650.0), pos2(900.0, 706.0));
-        let p = place(low, 400.0, size, screen);
-        assert!(p.y + size.y <= low.top());
-        // Pushed in from the right edge.
-        let p = place(row, 1100.0, size, screen);
-        assert!(p.x + size.x <= screen.right() - 8.0 + 0.01);
-        // Exactly enough room below still goes below.
-        let tight = Rect::from_min_max(pos2(100.0, 800.0 - 4.0 - 200.0 - GAP - 56.0), pos2(900.0, 800.0 - 4.0 - 200.0 - GAP));
-        assert_eq!(place(tight, 400.0, size, screen).y, tight.bottom() + GAP);
+        let button = Rect::from_min_size(pos2(120.0, 140.0), Vec2::splat(22.0));
+        assert_eq!(place(button, size, screen), pos2(button.left(), button.bottom() + GAP), "just under the ⓘ");
+        // Near the bottom: above the button, still on its left edge.
+        let low = Rect::from_min_size(pos2(120.0, 700.0), Vec2::splat(22.0));
+        let p = place(low, size, screen);
+        assert!(p.y + size.y <= low.top() + 0.01, "flips above, {p:?}");
+        assert!((p.x - low.left()).abs() < 0.01, "stays on the ⓘ, {p:?}");
+        // No room to the right: the card grows left, still touching the ⓘ.
+        let edge = Rect::from_min_size(pos2(1100.0, 140.0), Vec2::splat(22.0));
+        let p = place(edge, size, screen);
+        assert!(p.x + size.x <= screen.right() - 8.0 + 0.01, "on screen, {p:?}");
+        assert!((p.x + size.x - edge.right()).abs() < 0.01, "flips left onto the ⓘ, {p:?}");
+        assert!((p.y - (edge.bottom() + GAP)).abs() < 0.01, "still just under it, {p:?}");
+        // A ⓘ in the bottom-right corner flips above and left, next to itself.
+        let corner = Rect::from_min_size(pos2(1160.0, 760.0), Vec2::splat(22.0));
+        let p = place(corner, size, screen);
+        assert!(p.y + size.y <= corner.top() + 0.01, "above the corner ⓘ, {p:?}");
+        assert!((p.x + size.x - corner.right()).abs() < 0.01, "left onto the corner ⓘ, {p:?}");
+        assert!(p.x >= screen.left() && p.y >= screen.top());
     }
 }

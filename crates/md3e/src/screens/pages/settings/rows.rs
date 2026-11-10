@@ -276,9 +276,10 @@ fn beta_mark(ui: &mut Ui) {
     p.galley(rect.center() - galley.size() * 0.5, galley, s.tertiary);
 }
 
-/// The control, reported so the row's cards line up with it. Beside the
-/// text its width is kept for the next frame's layout (under the text a
-/// control may stretch, which says nothing about the room it needs).
+/// The control, reported so the sweep can check it stays on the page and
+/// clear of the ⓘ. Beside the text its width is kept for the next frame's
+/// layout (under the text a control may stretch, which says nothing about
+/// the room it needs).
 fn row_control(ui: &mut Ui, id: Id, beside: bool, control: impl FnOnce(&mut Ui)) {
     let r = ui.scope(control).response.rect;
     settings_help::report_control(ui.ctx(), r);
@@ -385,7 +386,7 @@ pub(crate) fn menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
 pub(crate) fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
     let labels: Vec<&str> = id.choices().iter().map(|c| c.label).collect();
     let saved = id.chosen(p);
-    let shown = hovered_choice(ui, id).unwrap_or(saved);
+    let shown = hovered_choice(ui, id).filter(|i| *i < labels.len()).unwrap_or(saved);
     let (pick, rects) = connected_shown(ui, egui::Id::new(("set-choice", id)), &labels, saved, &[], shown);
     settings_help::report_choices(ui.ctx(), rects.clone());
     ui.ctx().data_mut(|d| d.insert_temp(choice_rects_key(id), rects));
@@ -398,7 +399,9 @@ pub(crate) fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
 /// item under the pointer as the current one.
 pub(crate) fn choice_menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
     let cur = id.chosen(p);
-    let shown = hovered_choice(ui, id).unwrap_or(cur);
+    // The rects are last frame's: a row whose options changed since keeps
+    // its saved one rather than reading past them.
+    let shown = hovered_choice(ui, id).filter(|i| *i < id.choices().len()).unwrap_or(cur);
     let options: Vec<(String, bool)> = id.choices().iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == shown)).collect();
     let salt = format!("set-menu-{id:?}");
     let pick = dropdown(ui, &salt, id.choices()[shown].label, &options);
