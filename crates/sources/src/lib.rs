@@ -15,6 +15,7 @@ pub mod html;
 pub mod http;
 pub mod instances;
 pub mod khinsider;
+pub mod matching;
 pub mod qobuz;
 pub mod select;
 pub mod squidify;

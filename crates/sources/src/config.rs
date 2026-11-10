@@ -21,6 +21,7 @@ pub struct Lists {
 }
 
 /// The addresses shipped in code, for a list the file does not set.
+#[derive(Clone, Copy)]
 pub struct Defaults<'a> {
     pub qobuz: &'a [&'a str],
     pub tidal: &'a [&'a str],
