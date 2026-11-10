@@ -157,7 +157,11 @@ impl TrackSpeeds {
 /// sound, the player counts in the track's own time.
 pub fn heard_time(track_time: Duration, speed: f32) -> Duration {
     if speed.is_finite() && speed > 0.0 && speed != 1.0 {
-        track_time.div_f32(speed)
+        // In f64 and to whole microseconds: 1.2 as an f32 is not 1.2, and a
+        // clock showing 3:19 for 3:20 of sound reads as a bug.
+        let speed = (f64::from(speed) * 1e6).round() / 1e6;
+        let us = (track_time.as_secs_f64() * 1e6 / speed).round();
+        Duration::from_micros(us as u64)
     } else {
         track_time
     }
