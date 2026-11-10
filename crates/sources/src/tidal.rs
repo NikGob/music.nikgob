@@ -17,8 +17,8 @@
 //! until one does.
 
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -28,7 +28,7 @@ use nikgob_core::source::{Fetched, Format, Offer, OfferScope, Progress, Source, 
 use serde_json::Value;
 
 use crate::album::{Patience, fetch_each, left_out};
-use crate::http::{Pace, client, download, get_json, safe_name};
+use crate::http::{Pace, client, download, get_json, is_bot_check, is_daily_limit, read, safe_name, until_utc_midnight};
 use crate::instances::Instances;
 use crate::text::catalogue_queries;
 
@@ -39,12 +39,11 @@ use crate::text::catalogue_queries;
 /// every path, 2026-11-09).
 pub const DEFAULT_INSTANCES: &[&str] = &["https://monochrome-api.samidy.com"];
 
-/// Monochrome's uptime workers: `{"api": [{"url"}], "streaming": [{"url"}],
-/// "down": [{"url", "error"}]}`, the second one a mirror.
-pub const UPTIME: &[&str] = &[
-    "https://tidal-uptime.props-76styles.workers.dev/",
-    "https://tidal-uptime.jiffy-puffs-1j.workers.dev/",
-];
+/// Monochrome's uptime worker: `{"api": [{"url"}], "streaming": [{"url"}],
+/// "down": [{"url", "error"}]}`. The mirror
+/// `tidal-uptime.jiffy-puffs-1j.workers.dev` answered 404 (error 1042) on
+/// 2026-11-10; a dead second URL made a failed first look like no list.
+pub const UPTIME: &[&str] = &["https://tidal-uptime.props-76styles.workers.dev/"];
 /// The uptime list is read again after this.
 const UPTIME_EVERY: Duration = Duration::from_secs(30 * 60);
 
@@ -57,11 +56,16 @@ pub struct Tidal {
     no_files: AtomicBool,
     /// One request to the instances per this.
     pace: Pace,
-    /// Where the lists of the instances that work are read; none when the
-    /// user set the instances.
+    /// Where the lists of the instances that work are read.
     uptime: Vec<String>,
+    /// The user's list is in use: the uptime list does not replace it.
+    follow_uptime: AtomicBool,
+    /// `set_instances` asked for a fresh uptime read.
+    stale: AtomicBool,
     /// When the uptime list was last read.
     checked: tokio::sync::Mutex<Option<Instant>>,
+    /// When the user's own instances were last probed.
+    probed: tokio::sync::Mutex<Option<Instant>>,
     http: reqwest::Client,
 }
 
@@ -71,26 +75,55 @@ impl Tidal {
     }
 
     pub fn with_pace(urls: &[String], every: Duration) -> Self {
-        let instances = Instances::new(urls, DEFAULT_INSTANCES, Duration::ZERO);
-        let uptime = if instances.is_own() { Vec::new() } else { UPTIME.iter().map(|u| (*u).to_owned()).collect() };
+        let own = urls.iter().any(|u| !u.trim().is_empty());
+        Self::from_list(urls, own, every)
+    }
+
+    /// `own`: `urls` is the user's list (`sources.toml`). The uptime list
+    /// is not asked, and a reload can turn that back on.
+    pub fn from_list(urls: &[String], own: bool, every: Duration) -> Self {
         Self {
-            instances,
-            files: Instances::new(urls, DEFAULT_INSTANCES, Duration::ZERO),
+            instances: Instances::with_own(urls, DEFAULT_INSTANCES, own, Duration::ZERO),
+            files: Instances::with_own(urls, DEFAULT_INSTANCES, own, Duration::ZERO),
             no_files: AtomicBool::new(false),
             pace: Pace::new(every),
-            uptime,
+            uptime: UPTIME.iter().map(|u| (*u).to_owned()).collect(),
+            follow_uptime: AtomicBool::new(!own),
+            stale: AtomicBool::new(false),
             checked: tokio::sync::Mutex::new(None),
+            probed: tokio::sync::Mutex::new(None),
             http: client(),
         }
     }
 
+    /// The list `sources.toml` names now. An instance that stays keeps its pause.
+    pub fn set_instances(&self, urls: &[String], own: bool) {
+        self.instances.apply(urls, DEFAULT_INSTANCES, own);
+        self.files.apply(urls, DEFAULT_INSTANCES, own);
+        self.follow_uptime.store(!own, Ordering::Relaxed);
+        if own {
+            self.no_files.store(false, Ordering::Relaxed);
+        } else {
+            self.stale.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The search instances, and whether the list is the user's.
+    pub fn instances_now(&self) -> (Vec<String>, bool) {
+        (self.instances.urls(), self.instances.is_own())
+    }
+
     /// The instances of the uptime list, read at most every
     /// [`UPTIME_EVERY`]; the lists stay as they were when it cannot be read.
+    /// The user's own list is not replaced.
     async fn refresh(&self) {
-        if self.uptime.is_empty() {
+        if !self.follow_uptime.load(Ordering::Relaxed) {
             return;
         }
         let mut checked = self.checked.lock().await;
+        if self.stale.swap(false, Ordering::Relaxed) {
+            *checked = None;
+        }
         if checked.is_some_and(|t| t.elapsed() < UPTIME_EVERY) {
             return;
         }
@@ -316,25 +349,220 @@ fn enc(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+/// Tries on one instance before the next one is asked.
+const RETRIES: u32 = 3;
+/// HTTP attempts for one item, across every instance. Two instances get
+/// the three tries; a longer list is not asked. Never a flood.
+const ITEM_CAP: u32 = 6;
+const UPSTREAM: &str = "Upstream API error";
+
+/// What to do after one attempt of an item.
+enum Again {
+    /// Wait, then try the same instance.
+    Wait(Duration),
+    /// This instance is done; the next one may be asked.
+    Next,
+    /// The item's cap is spent; no further request.
+    Stop,
+}
+
+/// `status` 0 is a timeout. A 403 is retried only when the body is the
+/// upstream error the owner sees clear on a later press; a ban is not.
+fn retryable(status: u16, body: &str) -> bool {
+    if status == 0 {
+        return true;
+    }
+    if status == 403 && body.contains(UPSTREAM) {
+        return true;
+    }
+    matches!(status, 202 | 408 | 425 | 500 | 502 | 503 | 504 | 521 | 522 | 524)
+}
+
+fn again(attempt: u32, status: u16, body: &str, spent: u32) -> Again {
+    if spent >= ITEM_CAP {
+        return Again::Stop;
+    }
+    if attempt + 1 >= RETRIES || !retryable(status, body) {
+        return Again::Next;
+    }
+    let wait = if attempt == 0 { Duration::from_secs(1) } else { Duration::from_secs(4) };
+    Again::Wait(wait)
+}
+
+struct Budget {
+    spent: AtomicU32,
+    last: Mutex<SourceError>,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self { spent: AtomicU32::new(0), last: Mutex::new(SourceError::NotConfigured) }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.spent.load(Ordering::Relaxed) >= ITEM_CAP
+    }
+
+    fn last(&self) -> SourceError {
+        self.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn note(&self, e: &SourceError) {
+        *self.last.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = e.clone();
+    }
+
+    /// Reserves one attempt. False when the cap was already spent.
+    fn take(&self) -> bool {
+        self.spent.fetch_add(1, Ordering::Relaxed) < ITEM_CAP
+    }
+}
+
+enum Fail {
+    Maybe { status: u16, body: String, error: SourceError },
+    Stop(SourceError),
+}
+
+fn transport(e: SourceError) -> Fail {
+    match &e {
+        SourceError::Unreachable(s) if s.contains("timed out") => Fail::Maybe { status: 0, body: String::new(), error: e },
+        _ => Fail::Stop(e),
+    }
+}
+
+async fn once(http: &reqwest::Client, url: &str) -> Result<Value, Fail> {
+    let reply = match read(http, url).await {
+        Ok(r) => r,
+        Err(e) => return Err(transport(e)),
+    };
+    let status = reqwest::StatusCode::from_u16(reply.status).unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    if status.is_success() {
+        return serde_json::from_str(&reply.body).map_err(|e| Fail::Stop(SourceError::Parse(e.to_string())));
+    }
+    if is_daily_limit(status, &reply.body) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        return Err(Fail::Stop(SourceError::RateLimited { retry_after: Some(until_utc_midnight(now)) }));
+    }
+    if is_bot_check(status, &reply.body) {
+        return Err(Fail::Stop(SourceError::Blocked(crate::http::BOT_CHECK.into())));
+    }
+    let error = match status {
+        reqwest::StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: reply.retry_after },
+        s => SourceError::Http { status: s.as_u16() },
+    };
+    if retryable(reply.status, &reply.body) {
+        Err(Fail::Maybe { status: reply.status, body: reply.body, error })
+    } else {
+        Err(Fail::Stop(error))
+    }
+}
+
+/// Up to [`RETRIES`] on this URL, 1 s then 4 s apart, stopping at
+/// [`ITEM_CAP`] for the item. A non-transient error is not retried.
+async fn polite(http: &reqwest::Client, url: &str, budget: &Budget) -> Result<Value, SourceError> {
+    let mut attempt = 0u32;
+    loop {
+        if !budget.take() {
+            return Err(budget.last());
+        }
+        let spent = budget.spent.load(Ordering::Relaxed);
+        match once(http, url).await {
+            Ok(v) => return Ok(v),
+            Err(Fail::Stop(e)) => {
+                budget.note(&e);
+                return Err(e);
+            }
+            Err(Fail::Maybe { status, body, error }) => {
+                budget.note(&error);
+                match again(attempt, status, &body, spent) {
+                    Again::Wait(d) => {
+                        attempt += 1;
+                        tokio::time::sleep(d).await;
+                    }
+                    Again::Next | Again::Stop => return Err(error),
+                }
+            }
+        }
+    }
+}
+
+fn hard_outage(e: &SourceError) -> bool {
+    match e {
+        SourceError::Unreachable(_) | SourceError::RateLimited { .. } | SourceError::Blocked(_) => true,
+        SourceError::Http { status } if *status >= 500 => true,
+        _ => false,
+    }
+}
+
 impl Tidal {
     /// `path` of the searching instances.
     async fn ask(&self, path: String) -> Result<Value, SourceError> {
         self.ask_of(&self.instances, path).await
     }
 
+    /// One item: a few polite retries on a transient answer, then the next
+    /// instance, and no more than [`ITEM_CAP`] requests in all.
     async fn ask_of(&self, instances: &Instances, path: String) -> Result<Value, SourceError> {
         self.refresh().await;
+        let budget = Arc::new(Budget::new());
         let (http, pace) = (&self.http, &self.pace);
         instances
             .call(|base| {
                 let path = path.clone();
+                let budget = Arc::clone(&budget);
                 async move {
+                    if budget.exhausted() {
+                        return Err(budget.last());
+                    }
                     pace.wait().await;
-                    get_json::<Value>(http, &format!("{base}{path}")).await
+                    polite(http, &format!("{base}{path}"), &budget).await
                 }
             })
             .await
     }
+
+    /// The user's own instances, probed at most every [`UPTIME_EVERY`], so
+    /// a dead one is skipped. The uptime list is that probe when it is followed.
+    async fn health(&self) {
+        if self.follow_uptime.load(Ordering::Relaxed) {
+            return;
+        }
+        {
+            let mut probed = self.probed.lock().await;
+            if probed.is_some_and(|t| t.elapsed() < UPTIME_EVERY) {
+                return;
+            }
+            *probed = Some(Instant::now());
+        }
+        for base in self.instances.urls() {
+            if self.instances.paused(&base) {
+                continue;
+            }
+            self.pace.wait().await;
+            let r = probe_search(&self.http, &base).await;
+            match &r {
+                Ok(()) => self.instances.note_at(&base, &r),
+                Err(e) if hard_outage(e) => {
+                    log::info!("tidal: {base} is not healthy: {e}");
+                    self.instances.note_at(&base, &r);
+                    self.files.note_at(&base, &r);
+                }
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+async fn probe_search(http: &reqwest::Client, base: &str) -> Result<(), SourceError> {
+    let reply = read(http, &format!("{base}/search/?s=a")).await?;
+    let status = reqwest::StatusCode::from_u16(reply.status).unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    if status.is_success() {
+        return Ok(());
+    }
+    if is_daily_limit(status, &reply.body) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        return Err(SourceError::RateLimited { retry_after: Some(until_utc_midnight(now)) });
+    }
+    Err(SourceError::Http { status: reply.status })
 }
 
 impl Source for Tidal {
@@ -350,6 +578,7 @@ impl Source for Tidal {
         Box::pin(async move {
             // Nothing it finds could be downloaded: no offers, and said so.
             self.refresh().await;
+            self.health().await;
             if self.no_files.load(Ordering::Relaxed) {
                 return Err(SourceError::NothingToFetch);
             }
@@ -379,6 +608,7 @@ impl Source for Tidal {
     fn fetch<'a>(&'a self, offer: &'a Offer, want: &'a Want, dest: &'a Path, progress: Progress) -> BoxFuture<'a, Result<Fetched, SourceError>> {
         Box::pin(async move {
             self.refresh().await;
+            self.health().await;
             if self.no_files.load(Ordering::Relaxed) {
                 return Err(SourceError::NothingToFetch);
             }
@@ -460,5 +690,44 @@ mod tests {
     #[test]
     fn the_dead_fallback_is_gone() {
         assert!(!DEFAULT_INSTANCES.iter().any(|u| u.contains("tracks.monochrome.st")));
+        assert!(!UPTIME.iter().any(|u| u.contains("jiffy-puffs")), "the dead uptime mirror is not asked");
+    }
+
+    /// 403 «Upstream API error» and a transient status are tried three
+    /// times (waits of 1 s and 4 s), then the next instance. Six attempts
+    /// for one item is the cap: a third instance is not asked.
+    #[test]
+    fn an_upstream_error_is_retried_a_few_times_then_capped() {
+        let body = r#"{"detail":"Upstream API error"}"#;
+        assert!(matches!(again(0, 403, body, 1), Again::Wait(d) if d == Duration::from_secs(1)));
+        assert!(matches!(again(1, 403, body, 2), Again::Wait(d) if d == Duration::from_secs(4)));
+        assert!(matches!(again(2, 403, body, 3), Again::Next), "the third try is the last on this instance");
+        assert!(matches!(again(0, 504, "", 1), Again::Wait(_)));
+        assert!(matches!(again(0, 521, "", 1), Again::Wait(_)));
+        assert!(matches!(again(0, 202, "", 1), Again::Wait(_)));
+        assert!(matches!(again(0, 0, "", 1), Again::Wait(_)), "a timeout is retried");
+        assert!(matches!(again(0, 403, "forbidden", 1), Again::Next), "a 403 that is not the upstream error is not retried");
+        assert!(matches!(again(0, 404, body, 1), Again::Next));
+        assert!(matches!(again(0, 403, body, ITEM_CAP), Again::Stop));
+        let mut spent = 0u32;
+        let mut instances = 0u32;
+        while spent < ITEM_CAP + 2 && instances < 5 {
+            instances += 1;
+            let mut attempt = 0u32;
+            loop {
+                spent += 1;
+                match again(attempt, 403, body, spent) {
+                    Again::Wait(_) => attempt += 1,
+                    Again::Next => break,
+                    Again::Stop => {
+                        assert!(instances <= 2, "a third instance is not given the retries");
+                        assert_eq!(spent, ITEM_CAP);
+                        return;
+                    }
+                }
+            }
+            assert!(attempt + 1 <= RETRIES, "one instance is not tried more than {RETRIES} times");
+        }
+        panic!("the cap did not stop the item: spent {spent}, instances {instances}");
     }
 }

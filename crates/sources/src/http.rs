@@ -255,6 +255,28 @@ impl Cookies {
     }
 }
 
+/// Navigation headers a browser sends with a document (khinsider's check
+/// stays up without them). `site` is `none` on the first visit and
+/// `same-origin` after; `referer` is set for the later pages.
+pub struct Nav {
+    pub site: &'static str,
+    pub referer: Option<String>,
+}
+
+/// A response that arrived, including one that is not 2xx. A failure to
+/// connect is [`SourceError`], not this.
+pub struct Reply {
+    pub status: u16,
+    pub body: String,
+    pub retry_after: Option<Duration>,
+}
+
+/// The status and body of `url`, including an error page. Cookies, when
+/// given, are sent and kept as [`get_page`] does.
+pub async fn read(http: &Client, url: &str) -> Result<Reply, SourceError> {
+    exchange(http, url, None, None).await
+}
+
 /// The body of a page or an API answer; a bot check is `Blocked`, a 429
 /// `RateLimited`, any other failure `Http`.
 pub async fn get_text(http: &Client, url: &str) -> Result<String, SourceError> {
@@ -263,11 +285,31 @@ pub async fn get_text(http: &Client, url: &str) -> Result<String, SourceError> {
 
 /// [`get_text`] with the site's cookies kept and sent back.
 pub async fn get_page(http: &Client, url: &str, cookies: Option<&Cookies>) -> Result<String, SourceError> {
+    classify_page(exchange(http, url, cookies, None).await?)
+}
+
+/// [`get_page`] with [`Nav`] added: khinsider's pages, not the other sources.
+pub async fn get_page_nav(http: &Client, url: &str, cookies: Option<&Cookies>, nav: Nav) -> Result<String, SourceError> {
+    classify_page(exchange(http, url, cookies, Some(&nav)).await?)
+}
+
+async fn exchange(http: &Client, url: &str, cookies: Option<&Cookies>, nav: Option<&Nav>) -> Result<Reply, SourceError> {
     let mut req = http
         .get(url)
         .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8")
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .timeout(PAGE_TIMEOUT);
+    if let Some(nav) = nav {
+        req = req
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", nav.site)
+            .header("Sec-Fetch-User", "?1")
+            .header("Upgrade-Insecure-Requests", "1");
+        if let Some(referer) = &nav.referer {
+            req = req.header(reqwest::header::REFERER, referer);
+        }
+    }
     if let Some(c) = cookies.and_then(Cookies::header) {
         req = req.header(reqwest::header::COOKIE, c);
     }
@@ -275,21 +317,26 @@ pub async fn get_page(http: &Client, url: &str, cookies: Option<&Cookies>) -> Re
     if let Some(c) = cookies {
         c.keep(&resp);
     }
-    let status = resp.status();
-    let wait = retry_after(&resp);
+    let status = resp.status().as_u16();
+    let retry_after = retry_after(&resp);
     let body = resp.text().await.map_err(unreachable)?;
+    Ok(Reply { status, body, retry_after })
+}
+
+fn classify_page(reply: Reply) -> Result<String, SourceError> {
+    let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if status.is_success() {
-        return Ok(body);
+        return Ok(reply.body);
     }
-    if is_bot_check(status, &body) {
+    if is_bot_check(status, &reply.body) {
         return Err(SourceError::Blocked(BOT_CHECK.into()));
     }
-    if is_daily_limit(status, &body) {
+    if is_daily_limit(status, &reply.body) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         return Err(SourceError::RateLimited { retry_after: Some(until_utc_midnight(now)) });
     }
     Err(match status {
-        StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: wait },
+        StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: reply.retry_after },
         s => SourceError::Http { status: s.as_u16() },
     })
 }
@@ -432,6 +479,50 @@ mod tests {
             SourceError::RateLimited { retry_after: Some(Duration::from_secs(120)) }
         );
         assert_eq!(get_text(&http, &at("/gone")).await.unwrap_err(), SourceError::Http { status: 404 });
+    }
+
+    /// khinsider's check stays up unless the request looks like a document
+    /// navigation. The headers go on those pages only.
+    #[tokio::test]
+    async fn a_navigated_page_sends_the_browser_headers() {
+        use wiremock::matchers::header;
+        let server = MockServer::start().await;
+        Mock::given(path("/search"))
+            .and(header("sec-fetch-dest", "document"))
+            .and(header("sec-fetch-mode", "navigate"))
+            .and(header("sec-fetch-site", "none"))
+            .and(header("sec-fetch-user", "?1"))
+            .and(header("upgrade-insecure-requests", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path("/album"))
+            .and(header("sec-fetch-site", "same-origin"))
+            .and(header("referer", "https://downloads.khinsider.com/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("album"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let http = client();
+        let search = get_page_nav(
+            &http,
+            &format!("{}/search", server.uri()),
+            None,
+            Nav { site: "none", referer: None },
+        )
+        .await
+        .unwrap();
+        assert_eq!(search, "ok");
+        let album = get_page_nav(
+            &http,
+            &format!("{}/album", server.uri()),
+            None,
+            Nav { site: "same-origin", referer: Some("https://downloads.khinsider.com/".into()) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(album, "album");
     }
 
     #[tokio::test]
