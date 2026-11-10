@@ -280,9 +280,20 @@ impl Player {
     pub fn set_fx(&self, id: u64, fx: ItemFx) {
         let gen_id = self.next_gen();
         let now = position_of(&self.inner.sh, &self.inner.clock, &self.inner.pending);
-        if let Some((current, pos)) = now
+        // A play or a seek still on its way keeps answering for the
+        // position: the change goes on from where that one lands.
+        let applied = self.inner.sh.cursor.read().applied_gen;
+        let waiting = self
+            .inner
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|p| applied < p.gen_id);
+        if !waiting
+            && let Some((current, pos)) = now
             && current == id
         {
+
             self.set_pending(Some(PendingPos {
                 gen_id,
                 id,

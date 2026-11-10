@@ -234,11 +234,16 @@ impl Stream {
                 u32::try_from(v)
                     .map_err(|_| DecodeError::Unsupported("sample rate ratio too large".into()))
             };
+            // As rates, not as the reduced ratio: the resampler sizes its
+            // filter from them.
+            let rate_in = u64::from(item.src_rate) * u64::from(item.speed.num);
+            let rate_out = u64::from(cfg.rate) * u64::from(item.speed.den);
             Some(StreamResampler::new(
-                narrow(ratio.0)?,
-                narrow(ratio.1)?,
+                narrow(rate_in)?,
+                narrow(rate_out)?,
                 rs_channels,
             )?)
+
         } else {
             None
         };
@@ -921,9 +926,6 @@ impl Decoder {
     }
 
     fn set_next(&mut self, item: PlayItem) {
-        // Files open on the opener thread too: probing one (a cold disk, a
-        // virus scanner, a big embedded cover) can take longer than the
-        // buffered audio, and this runs while the current item plays.
         // A change asked for the next item that was opening is over with it
         // (the new item brings its own).
         if self
@@ -932,6 +934,9 @@ impl Decoder {
         {
             self.pending_fx = None;
         }
+        // Files open on the opener thread too: probing one (a cold disk, a
+        // virus scanner, a big embedded cover) can take longer than the
+        // buffered audio, and this runs while the current item plays.
         if !matches!(item.source, ItemSource::Pcm(_)) {
             self.next = None;
             self.pending_next_file = matches!(item.source, ItemSource::File(_));
