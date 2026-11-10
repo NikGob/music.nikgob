@@ -54,7 +54,7 @@ fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         ui.spacing_mut().item_spacing.x = 12.0;
         ui.add(Switch::new(&mut p.eq_on).id_salt(("set-switch", Id::Equalizer)));
         if ui.add(Button::new("Настроить").style(Style::Text).id_salt("set-eq-open")).clicked() {
-            super::super::equalizer::open(ui.ctx());
+            super::super::sound::open(ui.ctx(), super::super::sound::Tab::Equalizer, None);
         }
     });
     switch(ui, Id::TrackSpeed, &mut p.speed_enabled);

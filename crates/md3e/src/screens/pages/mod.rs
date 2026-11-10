@@ -11,6 +11,7 @@ mod library;
 mod search;
 mod shelf;
 mod settings;
+pub(crate) mod sound;
 pub(crate) mod settings_help;
 mod sources;
 mod streams;
@@ -157,8 +158,11 @@ pub enum TrackAct {
     Artist,
     Info,
     Share,
-    /// «Скорость…»: the version the track plays as.
+    /// «Скорость…»: the sound sheet on the track's speed.
     Speed,
+    /// «Эквалайзер…» of the playing track's menu: the sound sheet on the
+    /// equalizer.
+    Equalizer,
     /// A file: its tags; no file: download it (no like).
     Fetch,
     AlbumDownload,
@@ -253,20 +257,6 @@ pub(crate) fn with_speed_row(
         .map_or(rows.len(), |i| i + 1);
     rows.insert(at, widgets::Row::Item(TrackAct::Speed, item));
     rows
-}
-
-/// The five versions of «Скорость», the one `track` plays as marked.
-pub(crate) fn speed_menu(id_salt: impl egui::AsId, speeds: &nikgob_view::TrackSpeeds, track: TrackId) -> Menu {
-    let now = speeds.of(track);
-    nikgob_view::SpeedVariant::ALL
-        .into_iter()
-        .fold(Menu::new(id_salt), |menu, v| menu.item(MenuItem::new(v.label()).selected(v == now)))
-}
-
-/// The command of item `picked` of [`speed_menu`].
-pub(crate) fn speed_command(track: TrackId, picked: usize) -> Option<Command> {
-    let variant = *nikgob_view::SpeedVariant::ALL.get(picked)?;
-    Some(Command::SetTrackSpeed { track, variant })
 }
 
 /// [`track_rows`] of a library track (in the library or in a playlist).
@@ -436,8 +426,6 @@ pub struct PageState {
     /// Tracks waiting for the "В плейлист" picker.
     pending_add: Option<Vec<TrackId>>,
     pending_add_anchor: Option<Rect>,
-    /// The track waiting for the «Скорость» picker.
-    pending_speed: Option<TrackId>,
     /// (playlist name, tracks) to add once the new playlist appears.
     add_after_create: Option<(String, Vec<TrackId>)>,
     /// Stream tracks waiting for the "В плейлист" picker, and for a new
@@ -633,10 +621,9 @@ impl PageState {
             A::Artist => return crate::screens::artist_links::go_to(ctx, crate::screens::artist_links::library(&track.artists)),
             A::Info => self.open_pane = Some(PaneTab::Info),
             A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
-            A::Speed => {
-                self.pending_speed = Some(track.id);
-                self.pending_add_anchor = anchor;
-            }
+            // Of this track, which need not be the one playing.
+            A::Speed => sound::open(ctx, sound::Tab::Speed, Some((track.id, track.title.clone()))),
+            A::Equalizer => sound::open(ctx, sound::Tab::Equalizer, None),
             A::Fetch if track.has_local => out.push(Command::OpenTagEditor(track.id)),
             A::Fetch => out.push(Command::DownloadTracks(vec![track.id])),
             // The whole album the track is from, the files it lacks.
@@ -827,7 +814,7 @@ impl PageState {
     /// `snack`: where the snackbars sit, `(area, bottom inset)`.
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, snack: (Rect, f32), out: &mut Vec<Command>) {
         dialogs::drain(ctx, out);
-        equalizer::overlay(ctx, state, out);
+        sound::overlay(ctx, state, out);
         // Playlist picker.
         if let Some(tracks) = self.pending_add.clone() {
             let mut open = true;
@@ -852,20 +839,6 @@ impl PageState {
             }
             if picked.is_some() || !open {
                 self.pending_add = None;
-                self.pending_add_anchor = None;
-            }
-        }
-
-        // «Скорость» of a track: the five versions.
-        if let Some(track) = self.pending_speed {
-            let mut open = true;
-            let anchor = self
-                .pending_add_anchor
-                .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
-            let picked = speed_menu("speed-picker", &state.speeds, track).popup(ctx, anchor, &mut open);
-            out.extend(picked.and_then(|i| speed_command(track, i)));
-            if picked.is_some() || !open {
-                self.pending_speed = None;
                 self.pending_add_anchor = None;
             }
         }
@@ -1384,12 +1357,12 @@ mod speed_tests {
         assert!(matches!(on[at + 1], Row::Divider));
     }
 
-    /// The row is marked while the track is not played as recorded, and
-    /// the picker marks the version it plays as.
+    /// The row is marked while the track is not played as recorded, at a
+    /// ready version or at a speed of the listener's own.
     #[test]
-    fn the_row_and_the_picker_show_the_version_of_the_track() {
-        let (fast, plain) = (TrackId::new(), TrackId::new());
-        let s = speeds(true, &[(fast, SpeedVariant::Nightcore)]);
+    fn the_row_shows_that_the_track_is_not_played_as_recorded() {
+        let (fast, own, plain) = (TrackId::new(), TrackId::new(), TrackId::new());
+        let s = speeds(true, &[(fast, SpeedVariant::Nightcore), (own, SpeedVariant::Custom(70))]);
         let marked = |track| {
             with_speed_row(rows(), &s, track).into_iter().find_map(|r| match r {
                 Row::Item(TrackAct::Speed, item) => Some(item.selected),
@@ -1397,11 +1370,7 @@ mod speed_tests {
             })
         };
         assert_eq!(marked(fast), Some(true));
+        assert_eq!(marked(own), Some(true));
         assert_eq!(marked(plain), Some(false));
-        // Five versions, in the order of the menu; a pick is its command.
-        for (i, v) in SpeedVariant::ALL.into_iter().enumerate() {
-            assert_eq!(speed_command(fast, i), Some(Command::SetTrackSpeed { track: fast, variant: v }));
-        }
-        assert_eq!(speed_command(fast, SpeedVariant::ALL.len()), None);
     }
 }
