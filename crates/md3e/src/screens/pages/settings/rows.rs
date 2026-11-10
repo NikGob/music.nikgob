@@ -4,8 +4,8 @@
 //!
 //! A row draws only at its [`Level`]: «Просто» draws `Simple`, «Подробно»
 //! adds `Deep`, and the owner's own builds `Dev` in «Подробно». A group's
-//! title (and a subtitle in «Подробно») waits until its first row that
-//! shows, so a group with nothing to show has no title either.
+//! title (and a subtitle inside it) waits until its first row that shows,
+//! so a group or a part of it with nothing to show has no title either.
 //!
 //! The grid: the name (40 % of the row, 180–320, with its ⓘ) · the control,
 //! its left edge on one line in every row · for a slider the exact value in
@@ -52,6 +52,8 @@ pub(super) fn set_mode(ctx: &egui::Context, mode: Mode) {
     ctx.data_mut(|d| {
         d.insert_temp(mode_key(), mode);
         d.remove::<bool>(expanded_key());
+        // A title no row came for does not wait for another tab's row.
+        d.remove::<Pending>(pending_key());
     });
 }
 
@@ -119,12 +121,10 @@ pub(crate) fn group(ui: &mut Ui, title: &str) {
     });
 }
 
-/// A subtitle inside a big group: «Подробно» only (in «Просто» the few
-/// rows of the group need none).
+/// A subtitle inside a big group («Обложка», «Кольцо»): it says what the
+/// rows under it are about («Вращение» of what), in «Просто» too, and
+/// shows only with a row under it.
 pub(crate) fn sub(ui: &mut Ui, title: &str) {
-    if !mode(ui.ctx()).deep {
-        return;
-    }
     ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Pending>(pending_key()).sub = Some(title.to_owned()));
 }
 
@@ -198,6 +198,19 @@ pub(crate) fn item<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> Op
         return None;
     }
     flush(ui, None);
+    Some(settings_help::item(ui, id, id.label(), add))
+}
+
+/// A block of fields (text fields with their buttons) as one item: the
+/// same room above every block, after the titles waiting for it and not
+/// before them, and its ⓘ beside the first field (the block starts with
+/// the field, so the ⓘ lands on its centre line).
+pub(crate) fn block<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    if !shown(ui.ctx(), id) {
+        return None;
+    }
+    flush(ui, None);
+    ui.add_space(4.0);
     Some(settings_help::item(ui, id, id.label(), add))
 }
 

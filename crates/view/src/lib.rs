@@ -1572,6 +1572,9 @@ pub struct Prefs {
     pub ring: bool,
     /// The ring's dots jump with the music.
     pub ring_beat: bool,
+    /// «Кольцо на паузе»: a pause dims the ring (off: the ring fades out
+    /// on a pause and comes back with the music).
+    pub ring_on_pause: bool,
     /// What the ring is made of and where it sits.
     pub ring_style: RingStyle,
     /// The ring turns counter-clockwise.
@@ -3173,6 +3176,8 @@ impl Default for Prefs {
             cover_pulse: true,
             ring: true,
             ring_beat: true,
+            // Prefs written before the switch keep the dimmed ring.
+            ring_on_pause: true,
             ring_style: RingStyle::default(),
             ring_ccw: false,
             cover_ccw: true,
@@ -3302,6 +3307,7 @@ impl Prefs {
             lyrics_deep: true,
             cover_shape: CoverShape::Random,
             ring_style: RingStyle::Circle,
+            ring_on_pause: false,
             np_volume_pop: true,
             np_volume_pop_hold: 0.5,
             random_shapes: vec![

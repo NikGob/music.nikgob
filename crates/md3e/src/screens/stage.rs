@@ -21,7 +21,7 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use egui::{Context, Id, LayerId, Pos2, Rect, Stroke, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2};
+use egui::{Context, Id, LayerId, Painter, Pos2, Rect, Stroke, Ui, UiBuilder, Vec2, emath::GuiRounding as _, emath::TSTransform, pos2, vec2};
 use nikgob_motion::Spring;
 use nikgob_view::{
     Command, CoverShape, LyricLine, LyricWord, NpSlot, PlayerView, Prefs, ReleaseCard, ReleaseDay, ReleaseId,
@@ -54,8 +54,9 @@ const STILL_AFTER: f32 = 8.0;
 /// second.
 const BUDGET_MS: f32 = 2.0;
 const FRAME_60: Duration = Duration::from_micros(16_667);
-/// The screen's corners on the stage (points on screen).
-const CORNER: f32 = 28.0;
+/// The corners of the stage's card (points on screen): M3 extra-large. The
+/// page's fill under the card, the screen's clip and the border share it.
+pub const CORNER: f32 = crate::tokens::shape::EXTRA_LARGE;
 
 // ---- What the painters are told -----------------------------------------
 
@@ -972,10 +973,14 @@ impl StageUi {
     pub fn draw(&mut self, ctx: &Context, page: LayerId, clip: Rect, opacity: f32, state: &ViewState, levels: (f32, &[f32])) {
         self.visible = false;
         self.rect = None;
-        let Some(req) = take(ctx).filter(|r| r.rect.is_positive() && r.opacity > 0.0) else {
+        let Some(mut req) = take(ctx).filter(|r| r.rect.is_positive() && r.opacity > 0.0) else {
             self.fade = None;
             return;
         };
+        // The card on whole pixels: the screen is laid over this very rect,
+        // clipped to it and bordered along it, so no edge is half a pixel
+        // off another.
+        req.rect = req.rect.round_to_pixels(ctx.pixels_per_point());
         let _p = crate::prof::scope("settings.stage");
         let started = Instant::now();
         let now = anim::now(ctx);
@@ -1190,13 +1195,21 @@ impl StageUi {
             .fade_in(false)
             .show(ctx, |ui| {
                 ui.set_clip_rect(local_clip);
+                // The card's corners and border stay while one screen fades
+                // into another: only the page's own fade takes them.
+                let mut edge = ui.painter().clone();
+                edge.multiply_opacity(req.opacity * opacity);
                 ui.multiply_opacity(req.opacity * opacity * alpha);
                 Theme::set(ctx, theme);
+                // The screen's surface under all of the card: a page fitted
+                // in whole is narrower than the card, and its sides are the
+                // same surface, not the page's fill showing through.
+                ui.painter().rect_filled((global.inverse() * req.rect).expand(1.0), 0.0, theme.scheme.surface);
                 paint_scene(ui, virt, scene, &cache.state, cache.album.as_ref(), &stage, open, chrome, pages, &mut dropped);
                 Theme::set(ctx, app);
                 ctx.data_mut(|d| d.remove_temp::<f32>(scale_id()));
                 rects = ctx.data_mut(|d| d.remove_temp::<Parts>(parts_id())).unwrap_or_default().0;
-                frame(ui, global, req.rect, &rects, &parts, outline, app);
+                frame(&edge, global, req.rect, &rects, &parts, outline, app);
             });
         drop(dropped);
         let layer = area.response.layer_id;
@@ -1292,11 +1305,13 @@ fn transformed(ui: &mut Ui, t: TSTransform, add: impl FnOnce(&mut Ui)) {
 }
 
 /// Over the scene, in canvas points: the outline of the parts asked for,
-/// then the screen's rounded corners (the page's surface over the corners
-/// of the window onto the canvas) and its thin edge.
-fn frame(ui: &Ui, global: TSTransform, rect: Rect, drawn: &[(Part, Rect)], parts: &[Part], outline: f32, app: Theme) {
+/// then the card's shape. The scene is clipped to the card's rect; the
+/// page's surface covers what of it lies outside the rounded corners, and
+/// the border runs along the same shape. Both are strokes of one rect with
+/// one radius (one outside it, one inside), so they are rounded to pixels
+/// alike at any scale and the border never parts from the corner.
+fn frame(painter: &Painter, global: TSTransform, rect: Rect, drawn: &[(Part, Rect)], parts: &[Part], outline: f32, app: Theme) {
     let s = app.scheme;
-    let painter = ui.painter();
     let px = 1.0 / global.scaling.max(1e-3);
     if outline > 0.001 {
         for (_, r) in drawn.iter().filter(|(p, _)| *p != Part::Whole && parts.contains(p)) {
@@ -1306,11 +1321,18 @@ fn frame(ui: &Ui, global: TSTransform, rect: Rect, drawn: &[(Part, Rect)], parts
             painter.rect_stroke(r, radius, Stroke::new(2.0 * px, s.primary.gamma_multiply(outline)), egui::StrokeKind::Outside);
         }
     }
-    let window = global.inverse() * rect;
-    let radius = (CORNER * px).min(170.0);
-    // A ring as wide as the radius, its inner edge the rounded window.
-    painter.rect_stroke(window.expand(radius * 0.5), radius * 1.5, Stroke::new(radius, s.surface), egui::StrokeKind::Middle);
+    let (window, radius) = card(global, rect);
+    // As wide as the radius: it reaches past the corner of the rect.
+    painter.rect_stroke(window, radius, Stroke::new(radius, s.surface), egui::StrokeKind::Outside);
     painter.rect_stroke(window, radius, Stroke::new(px, s.outline_variant), egui::StrokeKind::Inside);
+}
+
+/// The card `rect` (on screen) in canvas points, and its corner there: the
+/// radius that comes out as [`CORNER`] on screen (a radius is kept in whole
+/// points, at most 255).
+fn card(global: TSTransform, rect: Rect) -> (Rect, f32) {
+    let px = 1.0 / global.scaling.max(1e-3);
+    (global.inverse() * rect, (CORNER * px).round().min(255.0))
 }
 
 #[cfg(test)]
@@ -1329,6 +1351,24 @@ mod tests {
         // A low, wide band: the canvas is wider than the window, not cut.
         let (c, _) = canvas(vec2(760.0, 250.0));
         assert!((c.y - CANVAS_MIN_H).abs() < 0.01 && c.x > 1500.0, "{c:?}");
+    }
+
+    /// The card keeps its 28 corner on screen at every scale the stage is
+    /// shown at (beside the rows, as a strip, fitted in), and its window
+    /// onto the canvas is the card itself.
+    #[test]
+    fn the_card_keeps_its_corner_at_every_scale() {
+        for size in [vec2(700.0, 440.0), vec2(760.0, 250.0), vec2(416.0, 300.0), vec2(1800.0, 1100.0)] {
+            let rect = Rect::from_min_size(pos2(500.0, 140.0), size);
+            let (c, _) = canvas(size);
+            for t in [to_global(rect, c, None, 0.0), fit_page(rect, vec2(c.x, 1400.0))] {
+                let (window, radius) = card(t, rect);
+                assert!((radius * t.scaling - CORNER).abs() <= 0.5, "{size:?}: {} on screen", radius * t.scaling);
+                let back = t * window;
+                assert!(back.min.distance(rect.min) < 0.05 && back.max.distance(rect.max) < 0.05, "{size:?}: {back:?}");
+                assert!(radius * 2.0 <= window.width().min(window.height()), "{size:?}: the corners fit");
+            }
+        }
     }
 
     #[test]

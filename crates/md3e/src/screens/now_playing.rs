@@ -784,6 +784,13 @@ enum Tap {
     Pause,
 }
 
+/// How visible the ring is `played` of the way from paused (0) to playing
+/// (1): dimmed on a pause, or with «Кольцо на паузе» off faded out.
+pub(crate) fn ring_alpha(on_pause: bool, played: f32) -> f32 {
+    let paused = if on_pause { 0.35 } else { 0.0 };
+    paused + (1.0 - paused) * played.clamp(0.0, 1.0)
+}
+
 /// The container under Now Playing: the floating pill's colour and radius
 /// turning into the full surface as `k` goes 0 → 1.
 pub fn container(ui: &Ui, rect: Rect, k: f32) {
@@ -1063,9 +1070,9 @@ pub fn show_on(
                 bars: &heights,
                 room: pad,
                 kick: if beat { kick } else { 0.0 },
-                // Dimmed on a pause; every style stays around the square
-                // too, following the outline as it morphs.
-                alpha: 0.35 + 0.65 * played,
+                // Dimmed on a pause, or gone with «Кольцо на паузе» off;
+                // every style follows the outline as it morphs.
+                alpha: ring_alpha(prefs.ring_on_pause, played),
                 scale: 1.0,
                 key: egui::Id::new("np-ring-dots"),
         };

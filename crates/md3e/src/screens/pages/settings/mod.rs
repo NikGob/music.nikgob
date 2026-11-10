@@ -25,7 +25,7 @@ mod rows;
 mod services;
 mod system;
 
-use egui::{Align2, Key, Modifiers, Rect, Sense, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Align2, Key, Modifiers, Rect, Sense, Ui, UiBuilder, Vec2, emath::GuiRounding as _, pos2, vec2};
 use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
 pub(super) use rows::fmt_speed;
@@ -92,6 +92,9 @@ pub(crate) struct Arranged {
 
 /// Between the rows and the stage, and around the stage.
 const STAGE_GAP: f32 = 24.0;
+/// A stage beside the rows starts on the line of their first group's title
+/// (the space a group leaves above its title).
+const STAGE_TOP: f32 = 24.0;
 /// From this page width the stage stands beside the rows. The concept
 /// says 1000; a 1280 window with the rail open leaves the page 976, and
 /// there the stage still fits on the right.
@@ -113,8 +116,8 @@ pub(crate) fn arrange(room: Rect, window: Vec2, stage: bool) -> Arranged {
         let left = rows.right() + STAGE_GAP;
         let w = (room.right() - left).max(0.0);
         let aspect = (window.y / window.x.max(1.0)).clamp(0.4, 1.0);
-        let h = (w * aspect).min(room.height() - 8.0 - 12.0 - buttons_h - STAGE_GAP).max(0.0);
-        let stage = Rect::from_min_size(pos2(left, room.top() + 8.0), vec2(w, h));
+        let h = (w * aspect).min(room.height() - STAGE_TOP - 12.0 - buttons_h - STAGE_GAP).max(0.0);
+        let stage = Rect::from_min_size(pos2(left, room.top() + STAGE_TOP), vec2(w, h));
         let buttons = Rect::from_min_size(pos2(left, stage.bottom() + 12.0), vec2(w, buttons_h));
         return Arranged { rows, content_w: rows_w, stage: Some(stage), buttons: Some(buttons) };
     }
@@ -201,11 +204,14 @@ pub(super) fn page(
 
     let room = Rect::from_min_max(pos2(full.left(), ui.cursor().top()), full.max);
     let window = ctx.content_rect().size();
-    let at = arrange(room, window, settings_help::stage_tab(tab));
+    let mut at = arrange(room, window, settings_help::stage_tab(tab));
+    // The card's edges on whole pixels: its fill here, the screen drawn in
+    // it and its border all take this one rect.
+    at.stage = at.stage.map(|r| r.round_to_pixels(ctx.pixels_per_point()));
     if let Some(stage) = at.stage {
         // Under the stage, and what shows while it fades between screens.
         let s = Theme::get(&ctx).scheme;
-        ui.painter().rect_filled(stage, crate::tokens::shape::EXTRA_LARGE, s.surface_container_low);
+        ui.painter().rect_filled(stage, stage::CORNER, s.surface_container_low);
     }
 
     rows::set_mode(&ctx, rows::Mode { deep, dev: own, opacity: ui.opacity(), stage: at.stage.is_some() });
@@ -347,6 +353,11 @@ fn follow(
     // Keyboard focus counts as the pointer while the pointer is on no row.
     let focused = || rows.iter().find(|r| r.focused).map(|r| (r.id, None));
     let under = in_menu.or_else(|| on_row(mem)).or_else(focused);
+    // A drag is over once the button is up and nothing changes: the next
+    // press (on any row) is not held to the row changed before it.
+    if !down && !changed {
+        mem.changed = None;
+    }
     if changed {
         let dragging = down && mem.changed.is_some();
         match (dragging, under) {
@@ -703,7 +714,7 @@ mod tests {
                 run(&ctx, &state, &mut pages, f64::from(f) * 0.1, None, Vec::new());
             }
             let rows = settings_help::drawn_rows(&ctx).1;
-            assert_eq!(rows.iter().any(|r| r.id == Id::Contrast), deep, "deep {deep}");
+            assert_eq!(rows.iter().any(|r| r.id == Id::CoverDir), deep, "deep {deep}");
             assert!(rows.iter().any(|r| r.id == Id::Preset(nikgob_view::presets::Area::Track)), "the preset shows in both");
         }
         assert!(!Prefs::first_start().settings_deep);
@@ -735,6 +746,109 @@ mod tests {
         assert_eq!(req.prefs, Area::Track.with(&state.prefs, 0));
         assert_eq!(req.scene, Scene::Track);
         assert!(req.parts.is_empty() && !req.zoom, "the stage just plays the preset");
+    }
+
+    /// Every option of every choice row beside the stage, in «Просто» and
+    /// in «Подробно»: with the pointer on it the stage is asked for the
+    /// settings that option gives (the animation picked is the one shown),
+    /// and nothing is sent.
+    #[test]
+    fn every_option_under_the_pointer_is_what_the_stage_shows() {
+        let ctx = context();
+        let mut state = crate::screens::sweep::survey_state();
+        state.prefs.lyrics_style = 0;
+        for tab in [settings_help::TAB_LYRICS, settings_help::TAB_LOOK] {
+            for deep in [false, true] {
+                let mut pages = PageState::default();
+                pages.settings_tab = tab;
+                pages.settings_deep = Some(deep);
+                let mut t = 0.0;
+                for _ in 0..3 {
+                    t += 0.1;
+                    run(&ctx, &state, &mut pages, t, None, Vec::new());
+                }
+                let rows = settings_help::drawn_rows(&ctx).1;
+                let mut checked = Vec::new();
+                for r in &rows {
+                    let n = r.id.choices().len();
+                    if n == 0 || r.choices.len() != n || r.id.part().is_none() || matches!(r.id, Id::Preset(_)) {
+                        continue;
+                    }
+                    for (i, rect) in r.choices.iter().enumerate() {
+                        // Only what is on screen can be pointed at.
+                        if !r.clip.contains_rect(*rect) {
+                            continue;
+                        }
+                        let mut sent = Vec::new();
+                        for _ in 0..2 {
+                            t += 0.1;
+                            sent.extend(run(&ctx, &state, &mut pages, t, Some(rect.center()), Vec::new()));
+                        }
+                        assert!(!sent.iter().any(|c| matches!(c, Command::SetPrefs(_) | Command::SetPref(_))), "{:?} option {i} (deep {deep}): {sent:?}", r.id);
+                        let req = stage::requested(&ctx).expect("a stage beside the rows");
+                        let option = option_prefs(r.id, &state.prefs, i).expect("an option of the prefs");
+                        assert_eq!(req.prefs, r.id.staged(&option), "{:?} option {i} (deep {deep})", r.id);
+                        if r.id == Id::LyricsStyle {
+                            assert_eq!(usize::from(req.prefs.lyrics_style), i, "deep {deep}");
+                            assert_eq!(req.scene, Scene::Lyrics);
+                        }
+                        checked.push((r.id, i));
+                    }
+                }
+                let first = if tab == settings_help::TAB_LYRICS { Id::LyricsStyle } else { Id::Theme };
+                for i in 0..first.choices().len() {
+                    assert!(checked.contains(&(first, i)), "{first:?} option {i} (deep {deep}): {checked:?}");
+                }
+                if tab == settings_help::TAB_LYRICS {
+                    assert!(checked.contains(&(Id::LyricsUnit, 0)), "«Шаг подсветки» in both modes (deep {deep})");
+                }
+            }
+        }
+    }
+
+    /// A press is held to the row being dragged only while that drag lasts:
+    /// after a change, pressing an option of another row still shows that
+    /// option.
+    #[test]
+    fn a_press_after_a_change_is_not_held_to_the_changed_row() {
+        let ctx = context();
+        let p = Prefs::default();
+        let stage_rect = Rect::from_min_size(pos2(700.0, 100.0), vec2(500.0, 320.0));
+        let at = pos2(60.0, 60.0);
+        let style = DrawnRow {
+            id: Id::LyricsStyle,
+            label: String::new(),
+            group: String::new(),
+            rect: Rect::from_min_size(pos2(0.0, 0.0), vec2(480.0, 120.0)),
+            button: Rect::NOTHING,
+            control: None,
+            choices: vec![Rect::from_min_size(pos2(200.0, 0.0), vec2(10.0, 10.0)), Rect::from_center_size(at, vec2(40.0, 40.0))],
+            menu: Vec::new(),
+            clip: Rect::EVERYTHING,
+            opacity: 1.0,
+            enabled: true,
+            hovered: true,
+            focused: false,
+        };
+        let rows = [style];
+        let mut mem = Memory { changed: Some((Id::LyricsDim, 0.0)), ..Memory::default() };
+        let press = egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+        let mut last = None;
+        for (i, events) in [vec![egui::Event::PointerMoved(at)], vec![egui::Event::PointerMoved(at), press]].into_iter().enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 900.0))),
+                time: Some(0.1 * (i + 1) as f64),
+                events,
+                ..Default::default()
+            };
+            let mut done = ctx.run_ui(input, |ui| {
+                let c = ui.ctx().clone();
+                last = Some(follow(&c, &mut mem, settings_help::TAB_LYRICS, stage_rect, &p, &rows, None, false));
+            });
+            done.textures_delta.clear();
+        }
+        assert!(mem.changed.is_none());
+        assert_eq!(last.expect("a request").prefs.lyrics_style, 1, "«Фокус» under the pressed pointer");
     }
 
     /// What the stage shows by the row under the pointer, once it rests
@@ -901,6 +1015,7 @@ mod tests {
         assert!(wide.rows.width() <= 600.0 && wide.rows.width() >= 460.0);
         assert!(stage.left() > wide.rows.right() && stage.right() <= 1256.0 + 0.1 && stage.width() > 400.0);
         assert!(wide.buttons.is_some_and(|b| b.top() > stage.bottom()));
+        assert_eq!(stage.top(), wide.rows.top() + STAGE_TOP, "on the line of the first group's title");
         let narrow = arrange(Rect::from_min_size(pos2(100.0, 200.0), vec2(700.0, 600.0)), vec2(800.0, 800.0), true);
         let strip = narrow.stage.expect("a strip when narrow");
         assert_eq!(strip.width(), 700.0);

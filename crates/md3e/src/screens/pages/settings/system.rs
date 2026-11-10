@@ -7,7 +7,7 @@ use nikgob_view::{Command, Prefs, Service, ViewState};
 use super::super::PageState;
 use super::super::settings_help::SettingId as Id;
 use super::preset;
-use super::rows::{self, Note, Num, child, group, item, row_note, segments, switch};
+use super::rows::{self, Note, Num, child, group, block, row_note, segments, switch};
 use crate::{
     Icon,
     components::{Button, Style, Switch, TextField},
@@ -39,7 +39,7 @@ fn user_name(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Comman
         pages.name_draft = p.user_name.clone();
         pages.name_synced = true;
     }
-    item(ui, Id::UserName, |ui| {
+    block(ui, Id::UserName, |ui| {
         let field = TextField::new(&mut pages.name_draft, Id::UserName.label())
             .placeholder("Имя")
             .leading_icon(Icon::Person)

@@ -88,6 +88,7 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
             }
         });
         switch(ui, Id::RingBeat, &mut p.ring_beat);
+        switch(ui, Id::RingPause, &mut p.ring_on_pause);
     });
 
     sub(ui, "Фон");
@@ -248,7 +249,11 @@ fn home_sections(ui: &mut Ui, p: &mut Prefs) {
         });
         ui.add_space(4.0);
         let mut order = p.home_order();
-        let label_w = rows::label_column(ui.available_width()) - 16.0;
+        // The arrows start on the line of the other rows' controls: the
+        // name's column, the gap after it and the 16 before a control,
+        // less this line's own 16 in and 4 between.
+        let full = ui.available_width();
+        let label_w = (rows::label_column(full) + ui.spacing().item_spacing.x - 4.0).min(full - 170.0);
         let n = order.len();
         let mut moved: Option<(usize, usize)> = None;
         let mut lines: Vec<Rect> = Vec::with_capacity(n);
