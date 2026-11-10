@@ -1685,6 +1685,9 @@ mod tests {
                 // The info is opened from the ⋮ menu, never restored.
                 ui.chrome.np_slot = slot;
                 frame(&ctx, &mut ui, &mut state, 1.0, width, None);
+                // The content's place is known a frame after it has opened.
+                frame(&ctx, &mut ui, &mut state, 1.8, width, None);
+                frame(&ctx, &mut ui, &mut state, 1.9, width, None);
                 for (i, pos) in [pos2(width * 0.75, 400.0), pos2(20.0, 40.0)].into_iter().enumerate() {
                     let mut commands = Vec::new();
                     let mut output = ctx.run_ui(egui::RawInput {
