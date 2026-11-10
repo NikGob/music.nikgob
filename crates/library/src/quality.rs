@@ -485,7 +485,8 @@ mod tests {
 
     /// OMORI's tracks cut at 20.1–20.2 kHz (may be the master's own filter)
     /// were ranked as plain fakes: they rank as an MP3 320 now, an MP3 made
-    /// from one too; the rows say it as a possibility. A plain fake stays.
+    /// from one too; the rows say the plain codec (the doubt is the quality
+    /// panel's to word). A plain fake stays.
     #[test]
     fn a_cut_a_master_may_have_ranks_as_mp3_320_and_says_maybe() {
         let lib = Library::open_in_memory().unwrap();
@@ -504,9 +505,11 @@ mod tests {
 
         let row = lib.get_track_row(flac.track_id).unwrap().unwrap();
         assert_eq!(row.check.as_ref().and_then(|c| c.cutoff_hz), Some(20_186));
-        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "FLAC, возможно из MP3 320");
+        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "FLAC");
+        assert_eq!(nikgob_core::quality::label(row.codec.as_ref().unwrap(), None, row.check.as_ref()), "FLAC, возможно из MP3 320");
         let row = lib.get_track_row(mp3.track_id).unwrap().unwrap();
-        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "MP3 из FLAC, возможно поддельного");
+        assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "MP3");
+        assert_eq!(nikgob_core::quality::label(row.codec.as_ref().unwrap(), None, row.check.as_ref()), "MP3 из FLAC, возможно поддельного");
         let row = lib.get_track_row(plain.track_id).unwrap().unwrap();
         assert_eq!(nikgob_core::quality::row_label(row.codec.as_ref().unwrap(), row.check.as_ref()), "FLAC из MP3 ~128");
 
