@@ -1132,9 +1132,15 @@ pub fn show_on(
         _ => prefs.cover_shape != CoverShape::Original,
     };
     let tap_id = stage.id("np-tap");
-    if !embedded && stage.live && (bg.clicked() || corner_clicked) {
-        ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
-        closed = true;
+    if stage.live && (bg.clicked() || corner_clicked) {
+        match outside_click(chrome.np_slot, embedded) {
+            Outside::CloseInfo => chrome.np_slot = NpSlot::None,
+            Outside::ClosePlayer => {
+                ctx.data_mut(|d| d.remove::<(Option<Tap>, f64)>(tap_id));
+                closed = true;
+            }
+            Outside::Nothing => {}
+        }
     }
     let single = (prefs.cover_click_pause && shape_clicked).then_some(Tap::Pause);
     let fire = if !stage.live {
@@ -1224,7 +1230,11 @@ pub fn show_on(
                     }
                 }
                 NpSlot::Queue => pane::queue(&mut cui, state, chrome, out),
-                NpSlot::Info => pane::info(&mut cui, state, out),
+                NpSlot::Info => {
+                    if pane::info_sheet(&mut cui, state, out) && stage.live {
+                        chrome.np_slot = NpSlot::None;
+                    }
+                }
                 NpSlot::None => unreachable!(),
             }
         }
@@ -1235,6 +1245,26 @@ pub fn show_on(
     }
 
     closed && stage.live
+}
+
+/// What a click on Now Playing's empty space does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outside {
+    /// The track's info is put away; the player stays.
+    CloseInfo,
+    ClosePlayer,
+    Nothing,
+}
+
+/// A click beside the track's info (a look-up opened from the ⋮ menu) puts
+/// it away, in the window and in mini mode alike; otherwise it closes the
+/// player, which mini mode (`embedded`) has nothing under to close to.
+fn outside_click(slot: NpSlot, embedded: bool) -> Outside {
+    match (slot, embedded) {
+        (NpSlot::Info, _) => Outside::CloseInfo,
+        (_, false) => Outside::ClosePlayer,
+        (_, true) => Outside::Nothing,
+    }
 }
 
 /// Where snackbars go while Now Playing is open: `(area, bottom inset)`,
@@ -1929,6 +1959,20 @@ mod tests {
         assert_eq!(super::split_line(100.0, alone), (100.0, None));
     }
     use super::*;
+
+    /// A click on empty space puts the track's info away and leaves the
+    /// player open; with the lyrics, the queue or nothing beside the cover
+    /// it closes the player (mini mode has nothing to close to).
+    #[test]
+    fn a_click_beside_the_track_info_closes_the_info_not_the_player() {
+        for embedded in [false, true] {
+            assert_eq!(outside_click(NpSlot::Info, embedded), Outside::CloseInfo);
+        }
+        for slot in [NpSlot::None, NpSlot::Lyrics, NpSlot::Queue] {
+            assert_eq!(outside_click(slot, false), Outside::ClosePlayer);
+            assert_eq!(outside_click(slot, true), Outside::Nothing);
+        }
+    }
 
     #[test]
     fn the_circle_ring_rounds_the_square_inside_the_circles_box() {
