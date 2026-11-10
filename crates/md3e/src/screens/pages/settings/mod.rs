@@ -757,12 +757,13 @@ mod tests {
         let ctx = context();
         let mut state = crate::screens::sweep::survey_state();
         state.prefs.lyrics_style = 0;
+        // One context for every pass: its clock only goes forward.
+        let mut t = 0.0;
         for tab in [settings_help::TAB_LYRICS, settings_help::TAB_LOOK] {
             for deep in [false, true] {
                 let mut pages = PageState::default();
                 pages.settings_tab = tab;
                 pages.settings_deep = Some(deep);
-                let mut t = 0.0;
                 for _ in 0..3 {
                     t += 0.1;
                     run(&ctx, &state, &mut pages, t, None, Vec::new());
