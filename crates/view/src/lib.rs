@@ -1464,11 +1464,12 @@ pub struct Prefs {
     /// settles (0.5..2, 1: Material's expressive fast spatial spring).
     pub lyrics_jump_speed: f32,
     /// «Скорость подсветки»: how fast a letter or word lights up, 0
-    /// smoothly .. 1 at once (karaoke by letters: how soft the front is).
+    /// smoothly .. 1 at once (karaoke: how soft the front's edge is).
     pub lyrics_light_speed: f32,
-    /// «Плавность»: 0 lights and moves exactly letter by letter .. 1 the
-    /// karaoke front glides and the wave's jumps spread over neighbouring
-    /// letters (motions averaged over up to 0.4 s; the times still lead).
+    /// «Плавность»: 0 keeps to the times exactly .. 1 the karaoke front
+    /// takes the most even way through them (never before a time, up to
+    /// 0.3 s after it) and the wave's lights and jumps spread over
+    /// neighbouring letters (averaged over up to 0.4 s).
     pub lyrics_smooth: f32,
     /// How far lines other than the current one fade (0 none .. 1 strong).
     pub lyrics_dim: f32,
@@ -3437,7 +3438,7 @@ impl Prefs {
             lyrics_soft_strength: 0.25,
             lyrics_soft_depth: 0.29,
             save_found_lyrics: true,
-            lyrics_deep: true,
+            lyrics_deep: false,
             cover_shape: CoverShape::Random,
             ring_style: RingStyle::Circle,
             ring_on_pause: false,

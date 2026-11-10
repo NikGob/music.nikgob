@@ -175,7 +175,7 @@ type LoadRow = (u32, bool, u32, bool, bool, bool);
 const LOAD: [LoadRow; 3] = [
     (60, false, 1, false, false, false),
     (120, true, 2, true, true, false),
-    (142, true, 3, true, true, true),
+    (142, true, 3, true, true, false),
 ];
 
 impl Area {

@@ -542,6 +542,7 @@ impl Thread {
                     // A timing made deep (or not) for itself leaves the
                     // settings' mode to the jobs after it.
                     self.aligner.set_deep(self.settings.deep());
+                    self.aligner.set_spare_card(true);
                     match asked {
                         Some((track, None)) => self.send(Msg::Checked { track, rows: Vec::new(), heard: None }),
                         Some((track, Some(source))) => {
@@ -620,9 +621,12 @@ impl Thread {
                 // Deep or not for this timing only; the jobs after it go as
                 // the settings say (one thread: nothing runs meanwhile).
                 self.aligner.set_deep(if deep { Deep::CHOSEN } else { Deep::OFF });
+                // Asked for by hand: it may take the card over meanwhile.
+                self.aligner.set_spare_card(false);
                 // Called off while queued: never started.
                 let result = if self.cancelled() { Err(Error::Stopped) } else { self.craft(track, &path, &text, target) };
                 self.aligner.set_deep(self.settings.deep());
+                self.aligner.set_spare_card(true);
                 let cancelled = self.cancelled();
                 self.crafting = None;
                 if temp && let Err(e) = std::fs::remove_file(&path) {
