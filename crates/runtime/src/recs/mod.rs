@@ -2670,7 +2670,8 @@ impl Worker {
         let (picks, title) = (lane.picks(false), lane.title.clone());
         if let Some(h) = self.recs.home.as_mut() {
             h.lanes.retain(|l| l.key != lane.key);
-            h.lanes.insert(0, lane);
+            let at = lanes::blend_place(&h.lanes);
+            h.lanes.insert(at, lane);
             // As the next build has it: the latest blends in the places of
             // the moments that fit now least.
             let blend = |l: &lanes::LaneHome| matches!(l.key, v::MixKey::Blend(_));
@@ -2679,8 +2680,8 @@ impl Worker {
                     h.lanes.remove(k);
                 }
             }
-            while h.lanes.iter().filter(|l| l.key != v::MixKey::OnRepeat).count() > nikgob_recs::mixes::MOMENTS {
-                if let Some(k) = h.lanes.iter().rposition(|l| l.key != v::MixKey::OnRepeat && !blend(l)) {
+            while h.lanes.iter().filter(|l| lanes::is_moment(l.key)).count() > nikgob_recs::mixes::MOMENTS {
+                if let Some(k) = h.lanes.iter().rposition(|l| lanes::is_moment(l.key) && !blend(l)) {
                     h.lanes.remove(k);
                 } else {
                     break;

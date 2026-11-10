@@ -884,7 +884,9 @@ pub struct HomeView {
     /// The shortcuts at the top (six, eight on a wide window), or the
     /// recently added albums without a history.
     pub shortcuts: Vec<Shortcut>,
-    /// «Миксы для тебя»: the moments of the day in the order of now, then
+    /// The mixes, each row's by its key: «Миксы дня» ([`MixKey::Daily`], in
+    /// their order) and «Миксы для тебя» — «Любимые» and the mix of the
+    /// part of the day, the moments of the epoch in the order of now, then
     /// «На повторе».
     pub lanes: Vec<LaneCard>,
     /// The taste profiles «Смешать с…» offers.
@@ -1869,6 +1871,8 @@ pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
 pub enum HomeSection {
     /// «Быстрый доступ».
     Shortcuts,
+    /// «Миксы дня».
+    Daily,
     /// «Миксы для тебя».
     Mixes,
     /// «Слушать снова».
@@ -1885,8 +1889,9 @@ pub enum HomeSection {
 
 impl HomeSection {
     /// Every section in Главная's default order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Shortcuts,
+        Self::Daily,
         Self::Mixes,
         Self::ListenAgain,
         Self::OfDay,
@@ -1898,6 +1903,7 @@ impl HomeSection {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Shortcuts => "Быстрый доступ",
+            Self::Daily => "Миксы дня",
             Self::Mixes => "Миксы для тебя",
             Self::ListenAgain => "Слушать снова",
             Self::OfDay => "Плитки дня",
@@ -3492,7 +3498,7 @@ mod settings_v2_tests {
         // The given ones keep their order; a missing one sits after the
         // default ones before it (Быстрый доступ has none: first).
         use HomeSection as S;
-        assert_eq!(keys, [S::Shortcuts, S::Releases, S::Mixes, S::ListenAgain, S::OfDay, S::FromLibrary, S::New]);
+        assert_eq!(keys, [S::Shortcuts, S::Daily, S::Releases, S::Mixes, S::ListenAgain, S::OfDay, S::FromLibrary, S::New]);
         assert!(!q.home_section_on(S::Releases), "the first of a section counts");
         assert!(q.home_section_on(S::Shortcuts));
     }

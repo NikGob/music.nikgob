@@ -1,8 +1,11 @@
 //! Главная (home-v2 spec): the card at the top («Миры», [`worlds`]), the
-//! greeting with «Только скачанное», the shortcuts, «Миксы для тебя»,
-//! «Слушать снова», «Подборки дня», «Из твоей библиотеки», «Новое для
-//! тебя» and «Новые релизы» — on a grid of 12 columns, without a single
-//! sideways row, so the wheel always scrolls the page.
+//! greeting with «Только скачанное», the shortcuts, «Миксы дня», «Миксы
+//! для тебя», «Слушать снова», «Подборки дня», «Из твоей библиотеки»,
+//! «Новое для тебя» and «Новые релизы» — on a grid of 12 columns. A row
+//! of cards (the mixes, the tiles of the day, the albums) with more than
+//! fit goes on sideways ([`row`]): Shift + the wheel or a sideways wheel,
+//! a drag, the arrows at its ends under the pointer; the plain wheel
+//! always scrolls the page.
 //!
 //! One rule for clicks (§4): what the app put together (a mix, a tile of
 //! the day, a song row) plays; a real thing (an album, a playlist, an
@@ -17,6 +20,8 @@ use nikgob_view::{
 
 use super::{PageState, cards, widgets, worlds};
 use crate::screens::stage::{Part, Stage};
+
+mod row;
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, MenuItem, Size, Style, anim},
@@ -135,6 +140,7 @@ fn lines(n: usize, per_line: usize) -> usize {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
     Shortcuts,
+    Daily,
     Mixes,
     ListenAgain,
     OfDay,
@@ -148,8 +154,9 @@ pub enum Section {
 #[cfg_attr(not(test), allow(dead_code))]
 impl Section {
     /// Every section, in the page's own order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Shortcuts,
+        Self::Daily,
         Self::Mixes,
         Self::ListenAgain,
         Self::OfDay,
@@ -162,6 +169,7 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Self::Shortcuts => "Быстрый доступ",
+            Self::Daily => "Миксы дня",
             Self::Mixes => "Миксы для тебя",
             Self::ListenAgain => "Слушать снова",
             Self::OfDay => "Плитки дня",
@@ -172,12 +180,13 @@ impl Section {
     }
 }
 
-/// The page's section for a line of «Разделы главной» (the same seven, in
+/// The page's section for a line of «Разделы главной» (the same ones, in
 /// the same order).
 pub fn section_of(key: nikgob_view::HomeSection) -> Section {
     use nikgob_view::HomeSection as H;
     match key {
         H::Shortcuts => Section::Shortcuts,
+        H::Daily => Section::Daily,
         H::Mixes => Section::Mixes,
         H::ListenAgain => Section::ListenAgain,
         H::OfDay => Section::OfDay,
@@ -220,7 +229,10 @@ pub fn sections(h: &HomeView, local_only: bool) -> Vec<Section> {
     if !h.shortcuts.is_empty() {
         out.push(Section::Shortcuts);
     }
-    if !h.lanes.is_empty() {
+    if h.lanes.iter().any(|l| l.key.is_daily()) {
+        out.push(Section::Daily);
+    }
+    if h.lanes.iter().any(|l| !l.key.is_daily()) {
         out.push(Section::Mixes);
     }
     if !h.listen_again.is_empty() {
@@ -348,12 +360,13 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
             }
             match section {
                 Section::Shortcuts => shortcuts(ui, grid, i, state, out),
-                Section::Mixes => mixes(ui, grid, i, state, out),
+                Section::Daily => daily(ui, grid, i, stage.live, state, out),
+                Section::Mixes => mixes(ui, grid, i, stage.live, state, out),
                 Section::ListenAgain => listen_again(ui, grid, i, state, pages, out),
-                Section::OfDay => of_day(ui, grid, i, state, out),
-                Section::FromLibrary => from_library(ui, grid, i, state, out),
+                Section::OfDay => of_day(ui, grid, i, stage.live, state, out),
+                Section::FromLibrary => from_library(ui, grid, i, stage.live, state, out),
                 Section::New => new_music(ui, grid, i, state, pages, out),
-                Section::Releases => releases(ui, grid, i, state, out),
+                Section::Releases => releases(ui, grid, i, stage.live, state, out),
             }
         }).inner;
         let bottom = ui.min_rect().bottom().max(top);
@@ -504,21 +517,61 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec
     nav
 }
 
-// ---- «Миксы для тебя».
+// ---- «Миксы дня» and «Миксы для тебя».
 
 /// The lane playing now: its queue was started from it and plays.
 pub(super) fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
     state.player.status == Status::Playing && state.player.context.as_deref() == Some(l.context().as_str())
 }
 
-fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+/// A mix card's height on `grid`: its mosaic and the lines under it.
+fn mix_card_h(grid: Grid) -> f32 {
+    grid.span(12 / grid.cards_per_line()) + cards::MIX_TEXT_H
+}
+
+/// The row `name` of the mixes `lanes` under the section's header in
+/// `rect`: as many as fit, the rest sideways.
+#[allow(clippy::too_many_arguments)]
+fn mix_row(ui: &mut Ui, grid: Grid, rect: Rect, name: &str, lanes: &[&LaneCard], live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let h = &state.home;
     let per = grid.cards_per_line();
-    let card_w = grid.span(12 / per);
+    let with_new = state.prefs.mixes_with_new && !state.prefs.mixes_downloaded_only;
+    let opens = state.prefs.mix_click_opens_list;
+    let mut nav = None;
+    let at = row::Row {
+        name,
+        top: rect.top() + HEADER_H + HEADER_GAP,
+        card_h: mix_card_h(grid),
+        arrows_at: grid.span(12 / per) / 2.0,
+        per,
+        n: lanes.len(),
+        live,
+    };
+    row::show(ui, grid, at, |ui, i, cell| {
+        let l = lanes[i];
+        // «Смешать с…»: another profile to mix it with.
+        let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
+        nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
+    });
+    nav
+}
+
+/// «Миксы дня»: the mixes of the day, the heaviest first.
+fn daily(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+    let lanes: Vec<&LaneCard> = state.home.lanes.iter().filter(|l| l.key.is_daily()).collect();
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + mix_card_h(grid)), Sense::hover());
+    let mut nav = None;
+    entering(ui, rect, n, "daily", |ui| {
+        section_header(ui, grid, rect, "Миксы дня", None);
+        nav = mix_row(ui, grid, rect, "daily", &lanes, live, state, out);
+    });
+    nav
+}
+
+fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+    let lanes: Vec<&LaneCard> = state.home.lanes.iter().filter(|l| !l.key.is_daily()).collect();
     let local_only = state.prefs.mixes_downloaded_only;
-    let card_h = card_w + cards::MIX_TEXT_H;
-    let body = lines(h.lanes.len(), per) as f32 * (card_h + 24.0) - 24.0;
-    let total = HEADER_H + HEADER_GAP + body;
+    let total = HEADER_H + HEADER_GAP + mix_card_h(grid);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "mixes", |ui| {
@@ -536,14 +589,7 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Com
         if let Some(p) = picked {
             out.push(Command::SetPref(nikgob_view::PrefPatch::MixesWithNew(p == 1)));
         }
-        let top = rect.top() + HEADER_H + HEADER_GAP;
-        for (i, l) in h.lanes.iter().enumerate() {
-            let cell = grid.cell(i, per, top, card_h, 24.0);
-            // «Смешать с…»: another profile to mix it with.
-            let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
-            let opens = state.prefs.mix_click_opens_list;
-            nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
-        }
+        nav = mix_row(ui, grid, rect, "mixes", &lanes, live, state, out);
     });
     nav
 }
@@ -655,25 +701,39 @@ fn play_again(rows: &[TrackRow], i: usize) -> Command {
 
 // ---- «Подборки дня».
 
-fn of_day(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
-    let tiles: Vec<&MixCard> = state.home.tiles.iter().take(4).collect();
-    // Three tiles of a day share the row in thirds rather than leave a hole.
-    let per = grid.of_day_per_line().min(tiles.len().max(1));
-    let body = lines(tiles.len(), per) as f32 * (OF_DAY_H + 16.0) - 16.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
+fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+    let tiles: &[MixCard] = &state.home.tiles;
+    // Tiles that fit share the row (three in thirds rather than leave a
+    // hole); more of them go on sideways.
+    let per = of_day_per(grid.of_day_per_line(), tiles.len());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + OF_DAY_H), Sense::hover());
     entering(ui, rect, n, "of-day", |ui| {
         section_header(ui, grid, rect, "Подборки дня", None);
-        let top = rect.top() + HEADER_H + HEADER_GAP;
-        for (i, m) in tiles.iter().enumerate() {
-            let cell = grid.cell(i, per, top, OF_DAY_H, 16.0);
+        let at = row::Row {
+            name: "of-day",
+            top: rect.top() + HEADER_H + HEADER_GAP,
+            card_h: OF_DAY_H,
+            arrows_at: OF_DAY_H / 2.0,
+            per,
+            n: tiles.len(),
+            live,
+        };
+        row::show(ui, grid, at, |ui, i, cell| {
+            let m = &tiles[i];
             let artist = matches!(m.id, MixId::Tile(TileKind::ArtistOfDay | TileKind::Comeback));
             let photo = artist.then(|| artist_photo(state, &m.title)).flatten();
             if cards::of_day(ui, cell, m, photo.as_deref(), i) {
                 out.push(Command::PlayMix { id: m.id });
             }
-        }
+        });
     });
     None
+}
+
+/// Tiles of the day in view of `n`, `fit` to a row: those that fit share
+/// the row, more keep the row's own count.
+pub fn of_day_per(fit: usize, n: usize) -> usize {
+    if n <= fit { n.max(1) } else { fit.max(1) }
 }
 
 /// The photo of the artist named `name`, from the library's artists.
@@ -704,10 +764,10 @@ pub fn shelf_tail(a: &ShelfAlbum, history: bool) -> String {
     if a.heard == 0 { "не слушал".to_owned() } else { format!("слушал {} из {}", a.heard, a.total) }
 }
 
-fn from_library(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let h = &state.home;
     let per = grid.cards_per_line();
-    let albums: Vec<&ShelfAlbum> = h.from_library.iter().take(per).collect();
+    let albums: &[ShelfAlbum] = &h.from_library;
     let w = grid.span(12 / per);
     let card_h = w + cards::ALBUM_TEXT_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
@@ -715,9 +775,9 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut 
     let title = if h.history { "Из твоей библиотеки" } else { "С чего начать" };
     entering(ui, rect, n, "shelf", |ui| {
         section_header(ui, grid, rect, title, None);
-        let top = rect.top() + HEADER_H + HEADER_GAP;
-        for (i, a) in albums.iter().enumerate() {
-            let cell = grid.cell(i, per, top, card_h, 24.0);
+        let at = row::Row { name: "shelf", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live };
+        row::show(ui, grid, at, |ui, i, cell| {
+            let a = &albums[i];
             let c = &a.card;
             let o = cards::album(
                 ui,
@@ -734,7 +794,7 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut 
                 nav = Some(Route::Release(c.id));
             }
             nav = widgets::release_menu(&o.response, c, out).or(nav.take());
-        }
+        });
     });
     nav
 }
@@ -839,9 +899,13 @@ fn release_line(a: &StreamAlbumCard) -> (String, String) {
     (a.artist.clone(), a.year.map(|y| y.to_string()).unwrap_or_default())
 }
 
-fn releases(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+/// «Новые релизы» shows this many albums in its row; «Все» has the rest.
+pub const RELEASES_ROW: usize = 18;
+
+fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let per = grid.cards_per_line();
-    let albums: Vec<&StreamAlbumCard> = state.home.new_releases.iter().take(per).collect();
+    let all = &state.home.new_releases;
+    let albums: &[StreamAlbumCard] = &all[..all.len().min(RELEASES_ROW)];
     let w = grid.span(12 / per);
     let card_h = w + cards::ALBUM_TEXT_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
@@ -850,9 +914,9 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<
         if section_header(ui, grid, rect, "Новые релизы", Some(("Все", Some(Icon::ArrowForward)))) {
             nav = Some(Route::NewReleases);
         }
-        let top = rect.top() + HEADER_H + HEADER_GAP;
-        for (i, a) in albums.iter().enumerate() {
-            let cell = grid.cell(i, per, top, card_h, 24.0);
+        let at = row::Row { name: "releases", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live };
+        row::show(ui, grid, at, |ui, i, cell| {
+            let a = &albums[i];
             let (artist, tail) = release_line(a);
             let o = cards::album(ui, cell, &a.title, &artist, &tail, a.cover_url.clone(), ("release", i));
             if o.play {
@@ -860,7 +924,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<
             } else if o.clicked {
                 nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
             }
-        }
+        });
     });
     nav
 }

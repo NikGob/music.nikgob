@@ -256,6 +256,56 @@ pub(crate) fn paint_image_zoomed(
         .paint_at(ui, Rect::from_center_size(rect.center(), vec2(size, size)));
 }
 
+/// [`paint_image_zoomed`] cut to the outline [`super::paint::container`]
+/// draws for `rect` and `radii` (fractional radii, the same points): a cover
+/// flush with a card's edge follows the card's own corners at any scale.
+/// An edge `seam` says yes to is hard (it meets another picture).
+pub(crate) fn paint_image_shaped(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    uri: Option<&str>,
+    radii: super::paint::Radii,
+    fallback: crate::Icon,
+    zoom: f32,
+    seam: &dyn Fn(Pos2, Pos2) -> bool,
+) {
+    use egui::{Rect, pos2, vec2};
+
+    use super::paint;
+
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    if let Some(uri) = uri
+        && let Some(texture) = crate::covers::texture(ui.ctx(), uri, rect.size(), zoom)
+    {
+        let (tw, th) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
+        let target = rect.width() / rect.height().max(1.0);
+        let aspect = tw / th;
+        let uv = if aspect > target {
+            let f = target / aspect;
+            Rect::from_min_max(pos2((1.0 - f) * 0.5, 0.0), pos2((1.0 + f) * 0.5, 1.0))
+        } else {
+            let f = aspect / target;
+            Rect::from_min_max(pos2(0.0, (1.0 - f) * 0.5), pos2(1.0, (1.0 + f) * 0.5))
+        };
+        let uv = Rect::from_center_size(uv.center(), uv.size() / zoom.max(1.0));
+        let points = paint::rounded_rect_points(rect, radii);
+        let feather = 1.0 / ui.ctx().pixels_per_point().max(0.01);
+        let mesh = paint::textured_polygon(&points, rect, uv, texture.id, feather, &|a, b| !seam(a, b));
+        if !mesh.is_empty() {
+            ui.painter().add(egui::Shape::mesh(mesh));
+        }
+        return;
+    }
+    let s = Theme::get(ui.ctx()).scheme;
+    paint::container(ui.painter(), rect, radii, s.secondary_container, egui::Stroke::NONE);
+    let size = (rect.width().min(rect.height()) * 0.4).clamp(16.0, 56.0);
+    fallback
+        .widget(true, s.on_secondary_container, size)
+        .paint_at(ui, Rect::from_center_size(rect.center(), vec2(size, size)));
+}
+
 /// `c` fully transparent but keeping its hue, so colour springs between
 /// "none" and `c` do not pass through black.
 pub(crate) fn clear(c: Color32) -> Color32 {
