@@ -1578,7 +1578,8 @@ impl HomeParts {
                 covers: covers(c),
             })
             .collect();
-        let lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.covers.clone())).collect();
+        let mut lane_covers: Vec<Vec<v::Cover>> = self.lanes.iter().map(|l| covers(l.covers.clone())).collect();
+        distinct_leads(&mut lane_covers);
         let lanes: Vec<v::LaneCard> = self
             .lanes
             .into_iter()
@@ -1622,6 +1623,21 @@ impl HomeParts {
             if card {
                 card_first(home);
             }
+        }
+    }
+}
+
+/// A mix's card shows the first of its covers: each list of `covers` (one
+/// for each card of the row, in the row's order) starts with a picture no
+/// card before it starts with, while it has one.
+fn distinct_leads<T: PartialEq + Clone>(covers: &mut [Vec<T>]) {
+    let mut leads: Vec<T> = Vec::new();
+    for list in covers.iter_mut() {
+        if let Some(at) = list.iter().position(|c| !leads.contains(c)) {
+            list[..=at].rotate_right(1);
+        }
+        if let Some(first) = list.first() {
+            leads.push(first.clone());
         }
     }
 }
@@ -2803,6 +2819,14 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Cards of one row lead with different pictures while they have them.
+    #[test]
+    fn the_cards_of_a_row_lead_with_different_covers() {
+        let mut covers = vec![vec![1, 2, 3], vec![1, 2, 3], vec![2, 1], vec![1], Vec::new(), vec![3, 4]];
+        distinct_leads(&mut covers);
+        assert_eq!(covers, [vec![1, 2, 3], vec![2, 1, 3], vec![2, 1], vec![1], vec![], vec![3, 4]]);
+    }
+
 
     #[test]
     fn style_titles_name_their_artists() {

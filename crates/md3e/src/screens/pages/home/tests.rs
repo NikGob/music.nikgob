@@ -209,8 +209,8 @@ fn the_home_has_no_explanatory_lines() {
 #[test]
 fn downloaded_only_takes_the_new_music_away_without_a_word() {
     let h = HomeView::default();
-    assert!(!sections(&h, true).contains(&Section::New), "no section left only to say why it is empty");
-    assert!(!sections(&h, false).contains(&Section::New));
+    assert!(!sections(&h, false, true).contains(&Section::New), "no section left only to say why it is empty");
+    assert!(!sections(&h, false, false).contains(&Section::New));
 }
 
 #[test]
@@ -260,7 +260,10 @@ fn sections_follow_their_order_and_switches() {
     assert_eq!(arrange(shown.clone(), &order), vec![S::New, S::Shortcuts, S::ListenAgain]);
     // A section named twice is drawn once.
     assert_eq!(arrange(vec![S::Mixes], &[(S::Mixes, true), (S::Mixes, true)]), vec![S::Mixes]);
-    assert_eq!(Section::ALL.len(), 8);
+    assert_eq!(Section::ALL.len(), 7);
+    // A list saved with the row of the day's mixes: they are in «Миксы для
+    // тебя» now.
+    assert_eq!(section_of(nikgob_view::HomeSection::Daily), S::Mixes);
     assert_eq!(Section::ALL.len(), nikgob_view::HomeSection::ALL.len());
     for (s, key) in Section::ALL.iter().zip(nikgob_view::HomeSection::ALL) {
         assert_eq!(section_of(key), *s);
@@ -272,32 +275,68 @@ fn sections_follow_their_order_and_switches() {
 }
 
 /// A mix of the day.
-fn day_lane(n: u8) -> LaneCard {
-    LaneCard { key: nikgob_view::MixKey::Daily(n), ..lane(&format!("Микс дня {n}")) }
+fn day_lane(n: u8, title: &str) -> LaneCard {
+    LaneCard { key: nikgob_view::MixKey::Daily(n), ..lane(title) }
 }
 
-/// «Миксы дня» are a row of their own beside «Миксы для тебя»: each row
-/// takes its mixes by their keys, and both are drawn under their names at
-/// any width (what does not fit goes on sideways).
+/// The day's mixes stand in «Миксы для тебя» with the others, in one row
+/// at any width (what does not fit goes on sideways): there is no row of
+/// numbered mixes. «Любимые», the playlist, is first while anything is
+/// liked, and makes the row by itself.
 #[test]
-fn the_mixes_of_the_day_have_their_own_row() {
+fn the_mixes_are_one_row() {
     let mut h = HomeView { lanes: vec![lane("Всё вперемешку")], ..HomeView::default() };
-    assert_eq!(sections(&h, false), [Section::Mixes]);
-    h.lanes = (1..=6).map(day_lane).collect();
-    assert_eq!(sections(&h, false), [Section::Daily]);
-    h.lanes.push(lane("Любимые"));
-    assert_eq!(sections(&h, false), [Section::Daily, Section::Mixes]);
+    assert_eq!(sections(&h, false, false), [Section::Mixes]);
+    h.lanes = vec![day_lane(0, "Микс дня"), day_lane(1, "Хип-хоп микс"), lane("Микс любимых")];
+    assert_eq!(sections(&h, false, false), [Section::Mixes]);
+    assert!(sections(&HomeView::default(), false, false).is_empty());
+    assert_eq!(sections(&HomeView::default(), true, false), [Section::Mixes]);
     let mut st = state(Vec::new(), false);
     st.home.lanes = h.lanes;
+    assert!(liked_playlist(&st).is_none());
     for width in [900.0, 1280.0, 1700.0] {
         let page = texts(&st, width);
-        assert!(page.contains("Миксы дня") && page.contains("Миксы для тебя"), "{width}");
-        assert!(page.contains("Микс дня 1") && page.contains("Любимые"), "{width}");
+        assert!(!page.contains("Миксы дня") && page.contains("Миксы для тебя"), "{width}");
+        assert!(page.contains("Микс дня") && page.contains("Хип-хоп микс"), "{width}");
+        assert!(!page.contains("Любимые"), "{width}");
     }
-    // Turned off in «Разделы главной», the row is gone and the other stays.
-    nikgob_view::PrefPatch::HomeSections(vec![nikgob_view::HomeSectionSwitch { key: nikgob_view::HomeSection::Daily, on: false }]).apply(&mut st.prefs);
+    // Nothing liked: no tile. Something liked: the playlist, first.
+    let liked = |n: u32| nikgob_view::PlaylistCard {
+        id: nikgob_view::LIKED_PLAYLIST,
+        name: "Любимые".into(),
+        cover: None,
+        track_count: n,
+        pinned: false,
+        cover_mode: Default::default(),
+        service: None,
+    };
+    st.library.playlists = vec![liked(0)];
+    assert!(liked_playlist(&st).is_none());
+    assert!(!texts(&st, 1280.0).contains("Любимые"));
+    st.library.playlists = vec![liked(5)];
+    assert_eq!(liked_playlist(&st).map(|p| p.track_count), Some(5));
     let page = texts(&st, 1280.0);
-    assert!(!page.contains("Миксы дня") && page.contains("Миксы для тебя"));
+    assert!(page.contains("Любимые") && page.contains("5 треков") && page.contains("Микс любимых"));
+}
+
+/// «Слушать снова» and «Новое для тебя» stand in columns of two songs,
+/// which go on sideways like the cards.
+#[test]
+fn the_songs_stand_in_columns() {
+    assert_eq!(song_columns(0), (0, 0));
+    assert_eq!(song_columns(1), (1, 1));
+    assert_eq!(song_columns(2), (1, 2));
+    assert_eq!(song_columns(12), (6, 2));
+    assert_eq!(song_columns(13), (7, 2));
+    let cell = Rect::from_min_size(pos2(10.0, 100.0), vec2(300.0, 2.0 * ROW_H));
+    assert_eq!(song_cell(cell, 1), Rect::from_min_size(pos2(10.0, 100.0 + ROW_H), vec2(300.0, ROW_H)));
+    // Twelve songs at a width of three columns: the first six are on the
+    // page, the rest wait at the right.
+    let mut st = state(Vec::new(), false);
+    st.home.listen_again = (0..12).map(|i| song(&format!("Song {i}"))).collect();
+    let page = texts(&st, 1280.0);
+    assert!(page.contains("Song 0") && page.contains("Song 5"));
+    assert!(!page.contains("Song 11"), "the last column is out of the row's view");
 }
 
 /// Tiles of the day that fit share the row; more keep the row's count and

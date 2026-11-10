@@ -1,5 +1,5 @@
 //! The pieces of Главная (home-v2 spec §3): a shortcut, a mix with its
-//! mosaic, a row of a song, a tile of the day and an album card, each laid
+//! cover and its name on it, the tile of «Любимые», a row of a song, a tile of the day and an album card, each laid
 //! out in the rect the page's grid gives it, plus the motion helpers they
 //! share (a picture moved or scaled after it was painted, a button that
 //! grows in under the pointer).
@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use egui::{Color32, Galley, Id, Pos2, Rect, Response, Sense, Ui, UiBuilder, Vec2, emath::TSTransform, pos2, vec2};
-use nikgob_view::{Command, LaneCard, MixCard, Route, Shortcut, Status, ViewState};
+use nikgob_view::{Command, LaneCard, MixCard, PlaylistCard, Route, Shortcut, Status, ViewState};
 
 use crate::{
     Icon, Theme, TypeRole, TypeStyle,
@@ -15,8 +15,12 @@ use crate::{
     tokens::{shape, state},
 };
 
-/// Under a mix's mosaic: 8, the title (24) and two lines (40).
-pub const MIX_TEXT_H: f32 = 8.0 + 24.0 + 40.0;
+/// Under a mix's cover: 8 and two lines (40); its name stands on the cover.
+pub const MIX_TEXT_H: f32 = 8.0 + 40.0;
+/// The band of a mix's name on its cover: this far in from the cover's
+/// edges, a line of the name this high.
+const BAND_PAD: f32 = 12.0;
+const BAND_LINE: f32 = 24.0;
 /// Under an album's cover: 8, two lines of the title (40) and a line (16).
 pub const ALBUM_TEXT_H: f32 = 8.0 + 40.0 + 16.0;
 
@@ -324,13 +328,21 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
 
 // ---- Mix.
 
-/// A mix of «Миксы для тебя» (§3.3, §4): the 2×2 mosaic of its covers
-/// (with «С новым» the fourth is a new song's), the name in one line and
-/// its artists in two. A click opens its page (`opens_list`; of the world
-/// `world`'s page for its mixes) or plays it; under the pointer ⋮ at the top
-/// and ▶ at the bottom grow in and the mosaic comes a little closer; while
-/// it plays the name is primary and ⏸ stays in a square. With `can_blend`
-/// ⋮ offers «Смешать с…» (the sheet of the other profiles).
+/// The rows `t` takes in `role` at `width`.
+fn rows_at(ui: &Ui, t: &str, role: TypeStyle, width: f32) -> usize {
+    let mut job = egui::text::LayoutJob::single_section(t.to_owned(), role.text_format(Color32::WHITE));
+    job.wrap.max_width = width;
+    crate::typography::layout(ui.painter(), job).rows.len()
+}
+
+/// A mix of «Миксы для тебя» (§3.3, §4): one cover, its leading artist's
+/// album, with the mix's name on a tonal band along its bottom (a long
+/// name in two lines), and its artists in two lines under it. A click
+/// opens its page (`opens_list`; of the world `world`'s page for its
+/// mixes) or plays it; under the pointer ⋮ at the top and ▶ over the band
+/// grow in and the cover comes a little closer; while it plays the band is
+/// primary and ⏸ stays in a square. With `can_blend` ⋮ offers «Смешать
+/// с…» (the sheet of the other profiles).
 #[allow(clippy::too_many_arguments)]
 pub fn mix(
     ui: &mut Ui,
@@ -354,21 +366,30 @@ pub fn mix(
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
     let hover = hover || menu_open;
     let zoom = 1.0 + 0.06 * anim::fraction(ui.ctx(), id.with("zoom"), f32::from(u8::from(hover)), theme.motion.default_effects);
-    let mut covers: Vec<String> = l.covers.iter().map(|c| c.uri()).collect();
-    if with_new && let Some(c) = &l.new_cover {
-        covers.truncate(3);
-        if covers.len() == 3 {
-            covers.push(c.uri());
-        }
-    }
+    let cover: Option<String> = l.covers.first().map(|c| c.uri());
     let r = shape::LARGE;
+    // A blend's name too long for two lines says a shorter form of it, the
+    // whole in the name's tooltip.
+    let title_role = TypeRole::TitleMedium.style();
+    let band_w = (cell.width() - 2.0 * BAND_PAD).max(10.0);
+    let title = std::iter::once(&l.title)
+        .chain(&l.short_titles)
+        .find(|t| rows_at(ui, t, title_role, band_w) <= 2)
+        .or(l.short_titles.last())
+        .unwrap_or(&l.title);
+    let title_lines = if rows_at(ui, title, title_role, band_w) > 1 { 2 } else { 1 };
+    let band = Rect::from_min_max(pos2(art.left(), art.bottom() - 2.0 * BAND_PAD - BAND_LINE * title_lines as f32), art.max);
+    let (band_c, title_c) = if playing { (s.primary_container, s.on_primary_container) } else { (s.secondary_container, s.on_secondary_container) };
     let mut play = false;
     let mut more: Option<Response> = None;
     scaled(ui, art.center(), squish, |ui| {
-        mosaic(ui, art, &covers, r, 2.0, zoom);
+        cover_in(ui, art, cover.as_deref(), Radii::all(r), Icon::QueueMusic, zoom);
+        paint::container(ui.painter(), band, Radii([0.0, 0.0, r, r]), band_c, egui::Stroke::NONE);
+        let name = text(ui, title, title_role, title_c, band_w, title_lines);
+        ui.painter().galley(pos2(band.left() + BAND_PAD, band.top() + BAND_PAD), name, title_c);
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
-        let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
+        let slot = Rect::from_min_size(pos2(art.right() - 8.0 - d, band.top() - 8.0 - d), vec2(d, d));
         let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", l.title) };
         if let Some(b) = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn"))) {
             play = b.clicked();
@@ -379,40 +400,20 @@ pub fn mix(
         let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
         more = grow_button(ui, id.with("more"), hover, slot, button);
     });
-    let title_c = if playing { s.primary } else { s.on_surface };
-    // A long name («Русские песни + Саундтреки без слов») takes two lines,
-    // the artists then one.
-    let rows = |t: &str, role: TypeStyle| {
-        let mut job = egui::text::LayoutJob::single_section(t.to_owned(), role.text_format(s.on_surface));
-        job.wrap.max_width = cell.width();
-        crate::typography::layout(ui.painter(), job).rows.len()
-    };
-    // A blend's name too long for two lines says a shorter form of it, the
-    // whole in the title's tooltip.
-    let title_role = TypeRole::TitleMedium.style();
-    let title = std::iter::once(&l.title)
-        .chain(&l.short_titles)
-        .find(|t| rows(t, title_role) <= 2)
-        .or(l.short_titles.last())
-        .unwrap_or(&l.title);
-    let title_lines = if rows(title, title_role) > 1 { 2 } else { 1 };
-    let name = text(ui, title, title_role, title_c, cell.width(), title_lines);
-    let title_rect = Rect::from_min_size(pos2(cell.left(), art.bottom() + 8.0), name.size());
-    ui.painter().galley(title_rect.min, name, title_c);
-    // Over the title: the whole name when it is shortened; elsewhere why the
-    // mix is offered.
-    if *title != l.title && resp.hover_pos().is_some_and(|p| title_rect.contains(p)) {
+    // Over the name: the whole of it when it is shortened; elsewhere why
+    // the mix is offered.
+    if *title != l.title && resp.hover_pos().is_some_and(|p| band.contains(p)) {
         resp.clone().md3_tooltip(&l.title, None);
     } else if let Some(why) = &l.why {
         resp.clone().md3_tooltip(why, None);
     }
     let role = TypeRole::BodyMedium.style();
-    let artist_lines = 3 - title_lines;
-    let fits = |t: &str| rows(t, role) <= artist_lines;
+    let artist_lines = 2;
+    let fits = |t: &str| rows_at(ui, t, role, cell.width()) <= artist_lines;
     let new: &[String] = if with_new { &l.new_artists } else { &[] };
     let line = names_line(&fits, &l.artists, new);
     let g = text(ui, &line, role, s.on_surface_variant, cell.width(), artist_lines);
-    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + 24.0 * title_lines as f32), g, s.on_surface_variant);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), g, s.on_surface_variant);
 
     let items = mix_items(l, can_blend, !opens_list);
     let mut picked = mix_menu(id.with("ctx"), l, &items).context_menu(&resp);
@@ -433,6 +434,40 @@ pub fn mix(
         }
     }
     nav
+}
+
+/// «Любимые» in «Миксы для тебя»: the playlist of every liked song itself,
+/// a heart on a container of the scheme, its name and its length under it.
+/// A click opens the playlist, ▶ plays it.
+pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, out: &mut Vec<Command>) -> Option<Route> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let id = ui.id().with("home-liked-playlist");
+    let cell = on_pixels(ui, cell);
+    let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
+    let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
+    let r = shape::LARGE;
+    let play = scaled(ui, art.center(), squish, |ui| {
+        paint::container(ui.painter(), art, Radii::all(r), s.primary_container, egui::Stroke::NONE);
+        let size = (art.width() * 0.4).clamp(24.0, 96.0);
+        Icon::Favorite.widget(true, s.on_primary_container, size).paint_at(ui, Rect::from_center_size(art.center(), vec2(size, size)));
+        paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
+        let d = Size::M.height();
+        let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
+        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &format!("Слушать «{}»", p.name), id.with("play-btn")))
+            .is_some_and(|r| r.clicked())
+    });
+    let name = text(ui, &p.name, TypeRole::TitleMedium.style(), s.on_surface, cell.width(), 1);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, s.on_surface);
+    let n = u64::from(p.track_count);
+    let count = format!("{n} {}", crate::screens::common::plural(n, "трек", "трека", "треков"));
+    let line = text(ui, &count, TypeRole::BodyMedium.style(), s.on_surface_variant, cell.width(), 1);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + BAND_LINE), line, s.on_surface_variant);
+    if play {
+        out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: false });
+        return None;
+    }
+    resp.clicked().then_some(Route::Playlist(p.id))
 }
 
 /// The page of mix `l` (of the world `world`'s page, if any).
