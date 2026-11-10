@@ -115,9 +115,10 @@ async fn khinsider_behind_its_bot_check_sits_out() {
     let kh = Khinsider::with_pace(&server.uri(), Duration::ZERO);
     let err = kh.search(&supraland()).await.unwrap_err();
     assert!(matches!(err, SourceError::Blocked(_)), "{err:?}");
-    // Asked again at once: no request, it waits.
+    // Asked again at once: no request, and still told as the bot check
+    // (the site never asked us to wait).
     let again = kh.search(&supraland()).await.unwrap_err();
-    assert!(matches!(again, SourceError::RateLimited { .. }), "{again:?}");
+    assert!(nikgob_sources::http::is_check(&again), "{again:?}");
 }
 
 fn qobuz_track(id: u64, artist: &str, title: &str, secs: u32, bits: u8, khz: f64) -> serde_json::Value {
