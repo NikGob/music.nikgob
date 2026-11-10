@@ -1331,10 +1331,12 @@ mod tests {
         assert!((stepped(1.5, &starts, 1.4) - 3.1).abs() < 1e-4);
         assert!((stepped(4.3, &starts, 1.4) - 1.1).abs() < 1e-4);
         // A step scene or a pause coming on goes on from where the song is.
-        for pos in [0.5, 1.2, 3.3, 5.9] {
+        for pos in [1.2, 3.3, 5.9] {
             let t = stepped_phase(pos, &starts, 1.4);
             assert!((stepped(t, &starts, 1.4) - pos).abs() < 0.2, "{pos}: {}", stepped(t, &starts, 1.4));
         }
+        // Before the first line, the steps begin at it.
+        assert!((stepped(stepped_phase(0.5, &starts, 1.4), &starts, 1.4) - 1.1).abs() < 0.2);
         for pos in [0.0, 1.0, 2.6, 7.4] {
             assert!((pause_played(pause_phase(pos)) - pos).abs() < 1e-4, "{pos}");
             assert!(pause_playing(pause_phase(pos)), "{pos}");
