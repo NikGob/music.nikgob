@@ -2900,6 +2900,7 @@ mod tests {
         assert!(!S::CoverPulse.needs_beat(&calm), "pulse off: calm");
         assert!(S::CoverPulse.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
         assert!(!S::CoverPulseStrength.needs_beat(&calm));
+        assert!(S::CoverPulseStrength.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
         assert!(S::RingBeat.needs_beat(&Prefs { ring_beat: true, ..calm.clone() }));
         assert!(!S::RingBeat.needs_beat(&calm));
         assert!(S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Reactive, ..calm.clone() }));
