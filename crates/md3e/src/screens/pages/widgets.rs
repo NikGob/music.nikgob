@@ -1299,7 +1299,7 @@ pub(crate) fn playlist_track_rows(
 
 fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, state: &ViewState) -> (Menu, Vec<super::TrackAct>) {
     let rows = playlist_track_rows(track, playlist, &state.dislikes, state.prefs.pane_info, state.also_on.get(&track.id));
-    let (menu, acts) = menu_of(key, rows);
+    let (menu, acts) = menu_of(key, super::with_speed_row(rows, &state.speeds, track.id));
     (menu.align_right(true), acts)
 }
 

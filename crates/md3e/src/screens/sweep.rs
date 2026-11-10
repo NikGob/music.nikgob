@@ -203,7 +203,8 @@ pub const ALL: &[SettingId] = {
     use SettingId::*;
     &[
         // Музыка.
-        OutputDevice, Gapless, Crossfade, Normalization, Autoplay, AutoplayWorld, KeepShuffle, ShuffleRadio, RadioNoRepeat,
+        OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, KeepShuffle,
+        ShuffleRadio, RadioNoRepeat,
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
         MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, DislikedArtists,
         DislikedTracks, RadioSource,
@@ -360,6 +361,10 @@ fn spec(id: SettingId) -> Spec {
         S::Gapless => Spec::Switch(|p| &mut p.gapless),
         S::Crossfade => Spec::Slider(|p| &mut p.crossfade_s, 0.0, 12.0, 1.0),
         S::Normalization => Spec::Switch(|p| &mut p.normalization),
+        // Its switch; «Настроить» opens the sheet, which the sweep leaves shut.
+        S::Equalizer => Spec::Switch(|p| &mut p.eq_on),
+        S::TrackSpeed => Spec::Switch(|p| &mut p.speed_enabled),
+        S::KeepTimbre => Spec::Switch(|p| &mut p.keep_timbre),
         S::LibraryDir | S::MastersDir | S::Inbox | S::ExportData | S::FakeRestore | S::DemoProfile => Spec::Fixed(Action, BUTTONS),
         S::Trash => Spec::Switch(|p| &mut p.use_trash),
         S::MusicBrainz | S::AcoustId | S::LastfmKey | S::ListenbrainzToken | S::Prowlarr | S::Soulseek | S::SpotifyPersonal
@@ -611,6 +616,7 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
     };
     match id {
         S::NpVolumeHold => (p.np_volume, p.np_volume_pop) = (false, true),
+        S::KeepTimbre => p.speed_enabled = true,
         S::ShapeRange => p.cover_shape = CoverShape::Random,
         S::CoverSpin => unsquare(p),
         S::CoverDir | S::CoverSpinSpeed => {
@@ -880,7 +886,9 @@ mod tests {
         use SettingId as S;
         let pos = |id: SettingId| ALL.iter().position(|x| *x == id).unwrap_or(usize::MAX);
         match id {
-            S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Autoplay | S::AutoplayWorld | S::KeepShuffle
+            S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Equalizer | S::TrackSpeed | S::KeepTimbre
+            | S::Autoplay | S::AutoplayWorld | S::KeepShuffle
+
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
             | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
             | S::DislikedArtists | S::DislikedTracks | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth

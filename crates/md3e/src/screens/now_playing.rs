@@ -1617,7 +1617,11 @@ fn info(
                         sep: width_of(" · "),
                         album: t.album.as_deref().map_or(0.0, width_of),
                     };
-                    let (artist_w, album_w) = split_line(ui.available_width(), widths);
+                    // A track not played as recorded says so, quietly, at
+                    // the end of the line (its room comes off the album).
+                    let mark = speed_mark_of(state, t.id);
+                    let mark_w = mark.map_or(0.0, |m| speed_mark_width(ui, m) + SPEED_MARK_GAP);
+                    let (artist_w, album_w) = split_line((ui.available_width() - mark_w).max(0.0), widths);
                     let h = ui.available_height();
                     // Each artist is a link of its own.
                     ui.allocate_ui(vec2(artist_w, h), |ui| {
@@ -1634,6 +1638,10 @@ fn info(
                             }
                         });
                     }
+                    if let Some(m) = mark {
+                        ui.add_space(SPEED_MARK_GAP);
+                        speed_mark(ui, m);
+                    }
                 });
             }
             None => {
@@ -1645,22 +1653,25 @@ fn info(
 
     // Progress.
     let dur = p.duration.unwrap_or_default();
+    let speed = p.speed;
     let prog_rect = Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), 64.0));
     part(Part::Progress, prog_rect);
     let mut pui = ui.new_child(UiBuilder::new().max_rect(prog_rect).id_salt("np-progress"));
     let so = Slider::new("np-slider", p.fraction_now())
         .width(col.width())
         .wavy(playing && state.prefs.progress_wave)
-        .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
+        .value_label(move |v| common::fmt_time(nikgob_view::heard_time(dur.mul_f32(v), speed)))
         .show(&mut pui);
     if let Some(v) = so.committed {
         out.push(Command::Seek(dur.mul_f32(v)));
     }
     let shown = so.dragging.map_or_else(|| p.position_now(), |v| dur.mul_f32(v));
     pui.horizontal(|ui| {
+        let shown = nikgob_view::heard_time(shown, speed);
         ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(shown), s.on_surface_variant));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(dur), s.on_surface_variant));
+            let heard = nikgob_view::heard_time(dur, speed);
+            ui.label(TypeRole::LabelMedium.style().rich(common::fmt_time(heard), s.on_surface_variant));
             // What really plays, in one quiet line: where a stream's sound
             // comes from (a Spotify track may play from YouTube Music) and
             // its format, or a file's own format.
@@ -1843,7 +1854,41 @@ fn info(
     part(Part::Volume, volume_row.response.rect);
 }
 
+/// Between the artist line and the speed mark.
+const SPEED_MARK_GAP: f32 = 8.0;
+/// Height of the speed mark and of the line it sits on.
+const SPEED_MARK_H: f32 = 18.0;
+const SPEED_LINE_H: f32 = 24.0;
+
+/// The mark of the playing track's version («×1.2», «замедленно»), when it
+/// is not played as recorded.
+fn speed_mark_of(state: &ViewState, track: nikgob_view::TrackId) -> Option<&'static str> {
+    // A live track of another player plays as recorded whatever was chosen.
+    if state.player.speed == 1.0 {
+        return None;
+    }
+    state.speeds.of(track).chip()
+}
+
+fn speed_mark_width(ui: &Ui, text: &str) -> f32 {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), TypeRole::LabelSmall.font_id(), Color32::WHITE);
+    (galley.size().x + 14.0).ceil()
+}
+
+/// A quiet outlined mark: no fill, the colour of the line it ends.
+fn speed_mark(ui: &mut Ui, text: &str) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), TypeRole::LabelSmall.font_id(), s.on_surface_variant);
+    let size = vec2((galley.size().x + 14.0).ceil(), SPEED_LINE_H);
+    let (line, _) = ui.allocate_exact_size(size, Sense::hover());
+    let rect = Rect::from_center_size(line.center(), vec2(size.x, SPEED_MARK_H));
+    let p = ui.painter();
+    p.rect_stroke(rect, SPEED_MARK_H * 0.5, Stroke::new(1.0, s.outline_variant), egui::StrokeKind::Inside);
+    p.galley(rect.center() - galley.size() * 0.5, galley, s.on_surface_variant);
+}
+
 /// Background: soft colour clouds drifting over the window, breathing with
+
 /// the bass in reactive mode (effects spring, no overshoot).
 fn ambient(ui: &Ui, rect: Rect, state: &ViewState, levels_bass: f32, stage: &Stage) {
     let theme = Theme::get(ui.ctx());

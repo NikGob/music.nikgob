@@ -4,6 +4,7 @@ mod brand;
 pub(super) mod detail;
 mod dialogs;
 mod downloads;
+mod equalizer;
 mod cards;
 pub(crate) mod home;
 mod library;
@@ -156,6 +157,8 @@ pub enum TrackAct {
     Artist,
     Info,
     Share,
+    /// «Скорость…»: the version the track plays as.
+    Speed,
     /// A file: its tags; no file: download it (no like).
     Fetch,
     AlbumDownload,
@@ -229,6 +232,41 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     rows.push(Row::Item(A::Dislike, o.dislike));
     rows.push(Row::Item(A::Ban, o.ban));
     rows
+}
+
+/// «Скорость…» of a library track's menu, after «Поделиться»: there while
+/// the speed of tracks is on in the settings, marked while the track is not
+/// played as recorded.
+pub(crate) fn with_speed_row(
+    mut rows: Vec<widgets::Row<TrackAct>>,
+    speeds: &nikgob_view::TrackSpeeds,
+    track: TrackId,
+) -> Vec<widgets::Row<TrackAct>> {
+    if !speeds.enabled {
+        return rows;
+    }
+    let changed = speeds.of(track) != nikgob_view::SpeedVariant::Normal;
+    let item = MenuItem::new("Скорость…").icon(Icon::GraphicEq).selected(changed);
+    let at = rows
+        .iter()
+        .position(|r| matches!(r, widgets::Row::Item(TrackAct::Share, _)))
+        .map_or(rows.len(), |i| i + 1);
+    rows.insert(at, widgets::Row::Item(TrackAct::Speed, item));
+    rows
+}
+
+/// The five versions of «Скорость», the one `track` plays as marked.
+pub(crate) fn speed_menu(id_salt: impl egui::AsId, speeds: &nikgob_view::TrackSpeeds, track: TrackId) -> Menu {
+    let now = speeds.of(track);
+    nikgob_view::SpeedVariant::ALL
+        .into_iter()
+        .fold(Menu::new(id_salt), |menu, v| menu.item(MenuItem::new(v.label()).selected(v == now)))
+}
+
+/// The command of item `picked` of [`speed_menu`].
+pub(crate) fn speed_command(track: TrackId, picked: usize) -> Option<Command> {
+    let variant = *nikgob_view::SpeedVariant::ALL.get(picked)?;
+    Some(Command::SetTrackSpeed { track, variant })
 }
 
 /// [`track_rows`] of a library track (in the library or in a playlist).
@@ -398,6 +436,8 @@ pub struct PageState {
     /// Tracks waiting for the "В плейлист" picker.
     pending_add: Option<Vec<TrackId>>,
     pending_add_anchor: Option<Rect>,
+    /// The track waiting for the «Скорость» picker.
+    pending_speed: Option<TrackId>,
     /// (playlist name, tracks) to add once the new playlist appears.
     add_after_create: Option<(String, Vec<TrackId>)>,
     /// Stream tracks waiting for the "В плейлист" picker, and for a new
@@ -556,10 +596,11 @@ impl PageState {
         anchor: egui::Id,
         track: &TrackRow,
         marks: &nikgob_view::DislikesView,
+        speeds: &nikgob_view::TrackSpeeds,
         info: bool,
         also: Option<&(ReleaseId, String)>,
     ) -> (Menu, Vec<TrackAct>) {
-        let mut rows = library_track_rows(track, marks, info, also);
+        let mut rows = with_speed_row(library_track_rows(track, marks, info, also), speeds, track.id);
         push_deletes(&mut rows, track);
         let (menu, acts) = widgets::menu_of(("track-menu", anchor), rows);
         (menu.align_right(true), acts)
@@ -592,6 +633,10 @@ impl PageState {
             A::Artist => return crate::screens::artist_links::go_to(ctx, crate::screens::artist_links::library(&track.artists)),
             A::Info => self.open_pane = Some(PaneTab::Info),
             A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(track.id))),
+            A::Speed => {
+                self.pending_speed = Some(track.id);
+                self.pending_add_anchor = anchor;
+            }
             A::Fetch if track.has_local => out.push(Command::OpenTagEditor(track.id)),
             A::Fetch => out.push(Command::DownloadTracks(vec![track.id])),
             // The whole album the track is from, the files it lacks.
@@ -627,7 +672,7 @@ impl PageState {
     ) -> Option<Route> {
         let info = state.prefs.pane_info;
         let also = state.also_on.get(&track.id);
-        let (menu, acts) = Self::track_menu_items(anchor.id, track, &state.dislikes, info, also);
+        let (menu, acts) = Self::track_menu_items(anchor.id, track, &state.dislikes, &state.speeds, info, also);
         let act = menu.attach(anchor).and_then(|i| acts.get(i).copied())?;
         self.track_apply(&anchor.ctx, act, track, &state.dislikes, also, None, out)
     }
@@ -645,7 +690,7 @@ impl PageState {
         }
         let info = state.prefs.pane_info;
         let also = state.also_on.get(&track.id);
-        let (menu, acts) = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, info, also);
+        let (menu, acts) = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, &state.speeds, info, also);
         let act = menu.context_menu(row).and_then(|i| acts.get(i).copied())?;
         self.track_apply(&row.ctx, act, track, &state.dislikes, also, None, out)
     }
@@ -660,7 +705,7 @@ impl PageState {
         out: &mut Vec<Command>,
     ) {
         if let Some(t) = track {
-            let (menu, acts) = Self::track_menu_items(anchor.id, t, marks, true, None);
+            let (menu, acts) = Self::track_menu_items(anchor.id, t, marks, &nikgob_view::TrackSpeeds::default(), true, None);
             if let Some(act) = menu.attach(anchor).and_then(|i| acts.get(i).copied())
                 && let Some(r) = self.track_apply(&anchor.ctx, act, t, marks, None, None, out)
             {
@@ -782,6 +827,7 @@ impl PageState {
     /// `snack`: where the snackbars sit, `(area, bottom inset)`.
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, area: Rect, snack: (Rect, f32), out: &mut Vec<Command>) {
         dialogs::drain(ctx, out);
+        equalizer::overlay(ctx, state, out);
         // Playlist picker.
         if let Some(tracks) = self.pending_add.clone() {
             let mut open = true;
@@ -809,6 +855,21 @@ impl PageState {
                 self.pending_add_anchor = None;
             }
         }
+
+        // «Скорость» of a track: the five versions.
+        if let Some(track) = self.pending_speed {
+            let mut open = true;
+            let anchor = self
+                .pending_add_anchor
+                .unwrap_or_else(|| Rect::from_center_size(area.center(), egui::vec2(1.0, 1.0)));
+            let picked = speed_menu("speed-picker", &state.speeds, track).popup(ctx, anchor, &mut open);
+            out.extend(picked.and_then(|i| speed_command(track, i)));
+            if picked.is_some() || !open {
+                self.pending_speed = None;
+                self.pending_add_anchor = None;
+            }
+        }
+
 
         // The same picker for stream tracks or an album. «Любимые» only for
         // one stream track (a like of each of many would also download
