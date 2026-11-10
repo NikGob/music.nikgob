@@ -74,8 +74,6 @@ struct Shown {
     opt: Option<usize>,
     /// A preset's settings.
     offer: Option<Prefs>,
-    /// When the pointer was last on the rows.
-    at: f64,
 }
 
 /// Ctrl+Z goes back this many changes at most.
@@ -391,9 +389,9 @@ fn follow(
     }
     let in_rows = pointer.is_some_and(|at| rows.iter().any(|r| r.clip.contains(at)));
     if let Some(o) = offer {
-        mem.shown = Some(Shown { id: o.id, opt: None, offer: Some(o.prefs), at: now });
+        mem.shown = Some(Shown { id: o.id, opt: None, offer: Some(o.prefs) });
     } else if let Some((id, opt)) = under {
-        mem.shown = id.part().is_some().then(|| Shown { id, opt, offer: None, at: now });
+        mem.shown = id.part().is_some().then(|| Shown { id, opt, offer: None });
     } else if !in_rows {
         mem.shown = None;
     }

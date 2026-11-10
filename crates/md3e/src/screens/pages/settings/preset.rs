@@ -4,9 +4,9 @@
 //! user's own.
 //!
 //! The preset under the pointer is shown at once, before it is applied: the
-//! stage draws it, and the rows it would change take their future values
-//! (nothing of them is kept). A click sends the preset as its own patch, so
-//! the values kept for «Свои» are the runtime's, not the page's copy.
+//! stage draws it, and the rows it changes show the preset's values (nothing
+//! of them is kept). A click sends the preset as its own patch, so the values
+//! kept for «Свои» are the runtime's, not the page's copy.
 
 use egui::{Rect, Sense, Stroke, Ui, vec2};
 use nikgob_view::presets::{Area, CUSTOM};
@@ -21,7 +21,6 @@ use crate::{
     components::{IconButton, Size, anim},
     tokens::shape,
 };
-
 
 /// What the preset row offers this pass while the pointer rests on one of
 /// its presets: the settings it would give.
@@ -56,7 +55,6 @@ fn open_key() -> egui::Id {
 pub(super) fn close_all(ctx: &egui::Context) {
     ctx.data_mut(|d| d.remove::<Vec<Area>>(open_key()));
 }
-
 
 /// The settings option `i` of `area`'s row gives: a preset, or «Свои» (the
 /// values kept, or the current ones when none were).

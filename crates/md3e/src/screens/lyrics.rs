@@ -629,18 +629,21 @@ fn paint(
         let base = s.on_surface.gamma_multiply(edge * (rest + (rest.min(UNSUNG) - rest) * focus));
         let color = crate::lerp_color(dim, lit, focus.max(shine));
         let pace = Pace::of(&state.prefs);
-        let (feather, window) = (pace.feather(size), pace.window());
+        let feather = pace.feather(size);
         let draw = |painter: &egui::Painter, look: Look, timing: &Timing| {
-            // Words only change colour (their jump stays down), so they
-            // still light up one by one.
-            if theme.reduced_motion && look.by == By::Letters {
+            // Reduced motion keeps the jump down: karaoke by letters still
+            // steps letter by letter on a hard front («Плавность» is
+            // [`smooth_window`]), the wave lights them one by one without
+            // rising, and focus lights the whole line.
+            let window = smooth_window(look, pace);
+            if theme.reduced_motion && look.by == By::Letters && look.style != Style::Wave {
                 if state.prefs.lyrics_glow {
-                    let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, 0.0) } else { (f32::INFINITY, 0.0) };
-                    glow(painter, &g, line, head, feather, lit, focus * 0.1);
+                    let (head, soft) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
+                    glow(painter, &g, line, head, soft, lit, focus * 0.1);
                 }
                 if look.style == Style::Karaoke {
-                    let (head, feather) = timing.glide(sung, feather, 0.0);
-                    karaoke(painter, &g, line, head, feather, base, color);
+                    let (head, soft) = timing.glide(sung, feather, window);
+                    karaoke(painter, &g, line, head, soft, base, color);
                 } else {
                     painter.galley_with_override_text_color(line.min, g.clone(), color);
                 }
@@ -1761,6 +1764,13 @@ const FOCUS_CALM: f32 = 2.2;
 /// letters.
 const SMOOTH_WINDOW: f32 = 0.4;
 
+/// «Плавность», except karaoke by letters: that window (up to 0.4 s)
+/// averages a short word into one step, so letters and words look the same.
+/// Syllables, words, the wave, and letters outside karaoke keep it.
+fn smooth_window(look: Look, pace: Pace) -> f32 {
+    if look.by == By::Letters && look.style == Style::Karaoke { 0.0 } else { pace.window() }
+}
+
 /// A letter or word starts lighting up (and jumping) this long before its
 /// time, so the motion lands on the voice.
 const ONSET_LEAD: f32 = 0.03;
@@ -1882,10 +1892,7 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let style = look.style;
     let pace = Pace::of(prefs);
     let rise = pace.rise(style);
-    // «Буквы»: the smoothness window (up to 0.4 s) averages a whole sung
-    // word into one step, so letters and words look the same. The edge
-    // stays on the letter. Syllables and words keep the window.
-    let window = if look.by == By::Letters && style == Style::Karaoke { 0.0 } else { pace.window() };
+    let window = smooth_window(look, pace);
     let (head, feather) = timing.glide(pos, pace.feather(size), window);
     let p = pos.as_secs_f32();
     let theme = Theme::get(painter.ctx());
@@ -3881,16 +3888,29 @@ mod tests {
     }
 
     /// «Буквы» must not swallow a short word. At full «Плавность» the old
-    /// window (0.4 s) averaged the whole word into one step.
+    /// window (0.4 s) averaged the whole word into one step. The view paints
+    /// [`LYRICS_LEAD`] ahead of the player, so a sample at 1.15 would already
+    /// be at the end of «Свет » (1.35): both letters lit for that reason, not
+    /// because the word lights at once. With the lead off, 1.15 is in the vowel.
     #[test]
     fn letters_of_a_word_light_one_by_one() {
         use nikgob_view::{LYRICS_BY_LETTERS, LYRICS_BY_WORDS};
         let mut l = line(1.0, Some(3.0), "Свет окна");
         l.words = vec![word(1.0, 1.35, "Свет "), word(2.0, 3.0, "окна")];
-        let letters = Prefs { lyrics_style: 0, lyrics_unit: LYRICS_BY_LETTERS, lyrics_smooth: 1.0, ..Prefs::default() };
-        let (glyphs, _) = painted_glyphs(&letters, &l, 1.15);
+        let close = |a: Color32, b: Color32| a.to_array().iter().zip(b.to_array()).all(|(x, y)| x.abs_diff(y) <= 3);
+        let letters = Prefs {
+            lyrics_style: 0,
+            lyrics_unit: LYRICS_BY_LETTERS,
+            lyrics_smooth: 1.0,
+            lyrics_lead: 0.0,
+            ..Prefs::default()
+        };
+        let (glyphs, lit) = painted_glyphs(&letters, &l, 1.15);
         assert!(glyphs.len() >= 5, "{:?}", glyphs.len());
-        assert_ne!(glyphs[0], glyphs[3], "«С» and «т» are not the same step, {:?}", (glyphs[0], glyphs[3]));
+        let (sung, next) = (glyphs[0].expect("«С» is painted"), glyphs[3].expect("«т» is painted"));
+        assert!(close(sung, lit), "«С» is sung: {sung:?}");
+        assert!(!close(next, lit), "«т» is not sung yet: {next:?}");
+        // By words the whole word lights at once, both letters one colour.
         let words = Prefs { lyrics_unit: LYRICS_BY_WORDS, ..letters };
         let (glyphs, _) = painted_glyphs(&words, &l, 1.15);
         assert_eq!(glyphs[0], glyphs[3], "by words the whole word is one colour");
