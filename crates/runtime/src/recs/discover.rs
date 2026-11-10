@@ -60,7 +60,7 @@ use crate::streams::StreamSchedule;
 /// Requests of the discovery part of a pass…
 pub(crate) const DISCOVER_BUDGET: u32 = 60;
 /// …and of the new releases.
-pub(crate) const RELEASE_BUDGET: u32 = 40;
+pub(crate) const RELEASE_BUDGET: u32 = 60;
 /// An artist's discography is asked at most this often.
 pub(crate) const RELEASES_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Similar artists whose tops are read, per list.
@@ -332,6 +332,15 @@ fn by_shares(steps: Vec<Step>, shares: &std::collections::BTreeMap<Source, f32>)
     out
 }
 
+/// The discography of `artist` as just answered, in place of what the
+/// pass read of it before (an older answer kept in the cache).
+fn keep_releases(releases: &mut Vec<(ArtistId, Vec<StreamAlbum>)>, artist: ArtistId, albums: Vec<StreamAlbum>) {
+    match releases.iter_mut().find(|r| r.0 == artist) {
+        Some(r) => r.1 = albums,
+        None => releases.push((artist, albums)),
+    }
+}
+
 fn releases_key(artist: ArtistId) -> String {
     format!("releases.{artist}")
 }
@@ -563,16 +572,21 @@ impl Worker {
         if dz {
             let now = now_ms();
             for a in release_artists {
-                let cached: Option<Vec<StreamAlbum>> = self
+                let cached: Option<(UnixMs, Vec<StreamAlbum>)> = self
                     .lib
                     .cache_get(&releases_key(a))
                     .ok()
                     .flatten()
-                    .filter(|(at, _)| now - at < RELEASES_TTL_MS)
-                    .and_then(|(_, json)| serde_json::from_str(&json).ok());
-                if let Some(albums) = cached {
+                    .and_then(|(at, json)| Some((at, serde_json::from_str(&json).ok()?)));
+                // What was read before stands until the answer replaces
+                // it: an artist whose request the budget leaves for the
+                // next pass, or whose request fails, keeps the releases
+                // already known.
+                if let Some((at, albums)) = cached {
                     pass.releases.push((a, albums));
-                    continue;
+                    if now - at < RELEASES_TTL_MS {
+                        continue;
+                    }
                 }
                 let known = self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
                 match known.iter().find(|r| r.service == Service::Deezer) {
@@ -758,7 +772,7 @@ impl Worker {
                 if let Ok(json) = serde_json::to_string(&albums) {
                     let _ = self.lib.cache_put(&releases_key(artist), now_ms(), &json);
                 }
-                pass.releases.push((artist, albums));
+                keep_releases(&mut pass.releases, artist, albums);
             }
             (step, _) => log::warn!("discover: an unexpected answer to {step:?}"),
         }
@@ -903,5 +917,34 @@ impl Worker {
             .map(|(_, album)| self.album_card(album))
             .collect();
         (rows, albums)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An artist's answer takes the place of what the pass read of them
+    /// from the cache; another artist's is added.
+    #[test]
+    fn an_answer_replaces_the_older_releases() {
+        let (a, b) = (ArtistId::new(), ArtistId::new());
+        let mut releases: Vec<(ArtistId, Vec<StreamAlbum>)> = vec![(a, Vec::new())];
+        let album = |id: &str| StreamAlbum {
+            id: RemoteId::new(Service::Deezer, id),
+            title: id.to_owned(),
+            artists: Vec::new(),
+            year: None,
+            release_date: None,
+            release_type: Default::default(),
+            cover_url: None,
+            total_tracks: None,
+            tracks: Vec::new(),
+        };
+        keep_releases(&mut releases, a, vec![album("1"), album("2")]);
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].1.len(), 2);
+        keep_releases(&mut releases, b, vec![album("3")]);
+        assert_eq!(releases.iter().map(|r| (r.0, r.1.len())).collect::<Vec<_>>(), [(a, 2), (b, 1)]);
     }
 }
