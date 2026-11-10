@@ -216,6 +216,42 @@ pub fn rig(rate: u32) -> Rig {
     }
 }
 
+impl Rig {
+    /// Seeks to `target` and renders until the seek has landed: the audio
+    /// callback has applied it and the item plays from the target.
+    ///
+    /// A frame at a time, so that only the one frame the callback takes of the
+    /// new position before the helper notices is lost. Without the wait a test
+    /// races the decoder thread: the offline device pulls as fast as it is
+    /// called, so however much of the old sound was still buffered plays (and
+    /// is measured) before the seek is heard.
+    pub fn seek_to(&mut self, target: Duration) {
+        self.player.seek(target);
+        // A seek reports its target from the moment it is asked for, until
+        // the callback applies it.
+        assert_eq!(
+            self.player.position(),
+            Some(target),
+            "the seek is reported at once"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.player.position() {
+                // Past the target: the callback has applied the seek and the
+                // item runs on from there.
+                Some(pos) if pos > target => return,
+                Some(_) => {}
+                None => panic!("nothing is playing to seek in"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the seek to {target:?} never landed"
+            );
+            let _ = self.device.render(1);
+        }
+    }
+}
+
 /// Collects events until `pred` matches one or the timeout passes.
 pub fn wait_event(
     events: &Receiver<Event>,
