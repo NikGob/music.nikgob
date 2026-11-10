@@ -719,6 +719,7 @@ impl Md3eUi {
         let now_playing_open = self.now_playing || (size_class(ctx.content_rect().width()) == SizeClass::Compact && !compact_page(self.route()));
         let mut previous = false;
         let mut go = None;
+        let mut sound = None;
         ctx.input_mut(|i| {
             // Ctrl+1…4: the rail's destinations.
             for (n, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4].into_iter().enumerate() {
@@ -771,6 +772,13 @@ impl Md3eUi {
             if i.consume_key(Modifiers::NONE, Key::Space) {
                 out.push(Command::TogglePlay);
             }
+            // The sound sheet: the playing track's speed, the equalizer.
+            if i.consume_key(Modifiers::NONE, Key::S) {
+                sound = Some(pages::sound::Tab::Speed);
+            }
+            if i.consume_key(Modifiers::NONE, Key::E) {
+                sound = Some(pages::sound::Tab::Equalizer);
+            }
             // The developer profile: the playing track from YouTube Music.
             if nikgob_view::dev::profile() && state.player.current.is_some() && i.consume_key(Modifiers::NONE, Key::Y) {
                 out.push(Command::PlayFromYoutube);
@@ -792,6 +800,9 @@ impl Md3eUi {
         });
         if previous {
             chrome::press_previous(ctx, state, out);
+        }
+        if let Some(tab) = sound {
+            pages::sound::toggle(ctx, tab, state);
         }
         if let Some(n) = go {
             self.chrome.nav = Some(Self::destinations()[n].clone());

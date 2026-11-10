@@ -1,16 +1,17 @@
 //! The sound a listener chooses: the speed of a track (a version of the
 //! song, remembered with it) and the equalizer (one for the player).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use nikgob_core::model::TrackId;
 
-/// How a track is played: as recorded, or as one of the versions people
-/// make of songs by playing them faster or slower. The pitch moves with
-/// the speed, as on a turntable; each version has the tone (and, for the
-/// last, the reverb) that goes with it.
+/// How a track is played: as recorded, as one of the versions people make
+/// of songs by playing them faster or slower, or at any other speed. The
+/// pitch moves with the speed, as on a turntable; each version has the tone
+/// (and, for «Замедленно с эхом», the reverb) that goes with it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpeedVariant {
     #[default]
@@ -19,6 +20,39 @@ pub enum SpeedVariant {
     Nightcore,
     Slow,
     SlowEcho,
+    /// A speed of the listener's own, in hundredths (115: ×1.15). Never one
+    /// a ready version without an echo has: [`SpeedVariant::at`] names
+    /// those.
+    Custom(u16),
+}
+
+/// The slowest and the fastest a track plays, in hundredths: what the
+/// engine's resampler takes.
+pub const SPEED_MIN: u16 = 50;
+pub const SPEED_MAX: u16 = 200;
+/// The speeds the slider stops at are this far apart, in hundredths.
+pub const SPEED_STEP: u16 = 5;
+
+/// The tone that goes with a speed: `(low shelf, high shelf, preamp)`, dB.
+/// A line through the ready versions (0.85, 1, 1.2, 1.3), level past them,
+/// so the sound changes evenly along the slider and is the ready version's
+/// where the slider is on one.
+fn tone_at(speed: f32) -> (f32, f32, f32) {
+    const KNOTS: [(f32, [f32; 3]); 4] =
+        [(0.85, [3.0, -2.0, -3.0]), (1.0, [0.0, 0.0, 0.0]), (1.2, [-1.0, 2.0, -1.0]), (1.3, [-2.0, 3.0, -1.5])];
+    let speed = speed.clamp(KNOTS[0].0, KNOTS[KNOTS.len() - 1].0);
+    for pair in KNOTS.windows(2) {
+        let ((a, from), (b, to)) = (pair[0], pair[1]);
+        if speed <= b {
+            let t = (speed - a) / (b - a);
+            let at = |i: usize| from[i] + (to[i] - from[i]) * t;
+            let low = at(0);
+            // A bass boost takes all of its headroom, exactly.
+            return (low, at(1), if low > 0.0 { -low } else { at(2) });
+        }
+    }
+    let [low, high, preamp] = KNOTS[KNOTS.len() - 1].1;
+    (low, high, preamp)
 }
 
 /// A reverb of a [`SpeedVariant`].
@@ -47,9 +81,11 @@ pub struct SpeedSound {
 }
 
 impl SpeedVariant {
+    /// The ready versions, as «Скорость» offers them.
     pub const ALL: [Self; 5] = [Self::Normal, Self::Fast, Self::Nightcore, Self::Slow, Self::SlowEcho];
 
-    /// The name in the «Скорость» menu.
+    /// The name of a ready version (a speed of the listener's own has only
+    /// its number).
     pub const fn label(self) -> &'static str {
         match self {
             Self::Normal => "Обычно",
@@ -57,38 +93,72 @@ impl SpeedVariant {
             Self::Nightcore => "Nightcore",
             Self::Slow => "Замедленно",
             Self::SlowEcho => "Замедленно с эхом",
+            Self::Custom(_) => "",
         }
     }
 
     /// The quiet mark under the title while the track is not played as
     /// recorded.
-    pub const fn chip(self) -> Option<&'static str> {
+    pub fn chip(self) -> Option<Cow<'static, str>> {
         match self {
             Self::Normal => None,
-            Self::Fast => Some("×1.2"),
-            Self::Nightcore => Some("×1.3"),
-            Self::Slow => Some("замедленно"),
-            Self::SlowEcho => Some("замедленно · эхо"),
+            Self::Slow => Some("замедленно".into()),
+            Self::SlowEcho => Some("замедленно · эхо".into()),
+            Self::Fast | Self::Nightcore | Self::Custom(_) => Some(speed_text(self.percent()).into()),
         }
     }
 
     /// The name it is stored under.
-    pub const fn key(self) -> &'static str {
+    pub fn key(self) -> Cow<'static, str> {
         match self {
-            Self::Normal => "normal",
-            Self::Fast => "fast",
-            Self::Nightcore => "nightcore",
-            Self::Slow => "slow",
-            Self::SlowEcho => "slow_echo",
+            Self::Normal => "normal".into(),
+            Self::Fast => "fast".into(),
+            Self::Nightcore => "nightcore".into(),
+            Self::Slow => "slow".into(),
+            Self::SlowEcho => "slow_echo".into(),
+            Self::Custom(_) => format!("x{}", self.percent()).into(),
         }
     }
 
     pub fn from_key(key: &str) -> Option<Self> {
+        if let Some(percent) = key.strip_prefix('x') {
+            let percent: u16 = percent.parse().ok()?;
+            return (SPEED_MIN..=SPEED_MAX).contains(&percent).then(|| Self::at(percent));
+        }
         Self::ALL.into_iter().find(|v| v.key() == key)
     }
 
+    /// The version without an echo that plays at `percent` hundredths (kept
+    /// to what the engine takes): a ready one where there is one.
+    pub fn at(percent: u16) -> Self {
+        let percent = percent.clamp(SPEED_MIN, SPEED_MAX);
+        [Self::Normal, Self::Fast, Self::Nightcore, Self::Slow]
+            .into_iter()
+            .find(|v| v.percent() == percent)
+            .unwrap_or(Self::Custom(percent))
+    }
+
+    /// The speed in hundredths (100: as recorded).
+    pub const fn percent(self) -> u16 {
+        match self {
+            Self::Normal => 100,
+            Self::Fast => 120,
+            Self::Nightcore => 130,
+            Self::Slow | Self::SlowEcho => 85,
+            Self::Custom(percent) => {
+                if percent < SPEED_MIN {
+                    SPEED_MIN
+                } else if percent > SPEED_MAX {
+                    SPEED_MAX
+                } else {
+                    percent
+                }
+            }
+        }
+    }
+
     pub fn speed(self) -> f32 {
-        self.sound().speed
+        f32::from(self.percent()) / 100.0
     }
 
     /// The numbers of each version.
@@ -100,6 +170,8 @@ impl SpeedVariant {
     /// * The preamp is the headroom of the boost: all of a bass shelf
     ///   (the bass is where a master peaks), half of a treble shelf, so the
     ///   limiter stays out of it.
+    /// * A speed of the listener's own has the tone of the ready versions
+    ///   around it ([`tone_at`]) and no echo.
     /// * The echo: the reverberation is 8 dB under the music, which leaves
     ///   the words in front; a tail of 2.8 s, darker than the song (highs
     ///   gone in about a second), starting 25 ms after the sound so the
@@ -117,6 +189,11 @@ impl SpeedVariant {
             Self::Fast => plain(1.2, -1.0, 2.0, -1.0),
             Self::Nightcore => plain(1.3, -2.0, 3.0, -1.5),
             Self::Slow => plain(0.85, 3.0, -2.0, -3.0),
+            Self::Custom(_) => {
+                let speed = self.speed();
+                let (low, high, preamp) = tone_at(speed);
+                plain(speed, low, high, preamp)
+            }
             Self::SlowEcho => SpeedSound {
                 speed: 0.85,
                 low_shelf_db: 4.0,
@@ -131,6 +208,31 @@ impl SpeedVariant {
             },
         }
     }
+}
+
+/// A speed as it is written on screen: «×1.2», «×0.85».
+pub fn speed_text(percent: u16) -> String {
+    let text = format!("{:.2}", f32::from(percent) / 100.0);
+    // One decimal at least: «×1.0», «×1.2», «×1.25».
+    let text = text.strip_suffix('0').unwrap_or(&text);
+    format!("×{text}")
+}
+
+/// Where a speed is along a slider from 0 to 1. By ratio, so «as recorded»
+/// is the middle and twice as fast is as far from it as twice as slow.
+pub fn speed_to_slider(percent: u16) -> f32 {
+    let (min, max) = (f32::from(SPEED_MIN), f32::from(SPEED_MAX));
+    let percent = f32::from(percent.clamp(SPEED_MIN, SPEED_MAX));
+    (percent / min).ln() / (max / min).ln()
+}
+
+/// The speed a slider at `at` (0 to 1) asks for, on the steps.
+pub fn slider_to_speed(at: f32) -> u16 {
+    let (min, max) = (f32::from(SPEED_MIN), f32::from(SPEED_MAX));
+    let at = if at.is_finite() { at.clamp(0.0, 1.0) } else { 0.5 };
+    let percent = min * (max / min).powf(at);
+    let step = f32::from(SPEED_STEP);
+    (((percent / step).round() * step) as u16).clamp(SPEED_MIN, SPEED_MAX)
 }
 
 /// The tracks that are not played as recorded.
@@ -225,11 +327,76 @@ mod tests {
     #[test]
     fn variants_keep_their_keys() {
         for v in SpeedVariant::ALL {
-            assert_eq!(SpeedVariant::from_key(v.key()), Some(v));
+            assert_eq!(SpeedVariant::from_key(&v.key()), Some(v));
         }
         assert_eq!(SpeedVariant::from_key("twice"), None);
         assert_eq!(SpeedVariant::Normal.chip(), None);
         assert!(SpeedVariant::ALL[1..].iter().all(|v| v.chip().is_some()));
+    }
+
+    #[test]
+    fn a_speed_of_ones_own_is_kept_by_its_number() {
+        let own = SpeedVariant::at(115);
+        assert_eq!(own, SpeedVariant::Custom(115));
+        assert_eq!(own.key(), "x115");
+        assert_eq!(SpeedVariant::from_key("x115"), Some(own));
+        assert_eq!(own.chip().as_deref(), Some("×1.15"));
+        assert_eq!(SpeedVariant::Fast.chip().as_deref(), Some("×1.2"));
+        assert_eq!(speed_text(100), "×1.0");
+        assert_eq!(speed_text(50), "×0.5");
+        // Out of what the engine takes, or not a number: no version.
+        for key in ["x49", "x201", "x", "x1.2", "x-5"] {
+            assert_eq!(SpeedVariant::from_key(key), None, "{key}");
+        }
+        // A ready version's speed is that version, whatever asked for it.
+        assert_eq!(SpeedVariant::at(100), SpeedVariant::Normal);
+        assert_eq!(SpeedVariant::at(120), SpeedVariant::Fast);
+        assert_eq!(SpeedVariant::at(130), SpeedVariant::Nightcore);
+        assert_eq!(SpeedVariant::at(85), SpeedVariant::Slow);
+        assert_eq!(SpeedVariant::from_key("x120"), Some(SpeedVariant::Fast));
+        assert_eq!(SpeedVariant::at(10), SpeedVariant::Custom(SPEED_MIN));
+        assert_eq!(SpeedVariant::at(900), SpeedVariant::Custom(SPEED_MAX));
+        assert_eq!(SpeedVariant::Custom(900).speed(), 2.0);
+    }
+
+    #[test]
+    fn the_tone_runs_evenly_through_the_ready_versions() {
+        for v in [SpeedVariant::Normal, SpeedVariant::Fast, SpeedVariant::Nightcore, SpeedVariant::Slow] {
+            let (ready, own) = (v.sound(), SpeedVariant::Custom(v.percent()).sound());
+            assert!((ready.speed - own.speed).abs() < 1e-6, "{v:?}");
+            assert!((ready.low_shelf_db - own.low_shelf_db).abs() < 1e-3, "{v:?}");
+            assert!((ready.high_shelf_db - own.high_shelf_db).abs() < 1e-3, "{v:?}");
+            assert!((ready.preamp_db - own.preamp_db).abs() < 1e-3, "{v:?}");
+            assert_eq!(own.echo, None);
+        }
+        // Between two of them, between their tones; past the ends, the end's.
+        let between = SpeedVariant::Custom(110).sound();
+        assert!((between.high_shelf_db - 1.0).abs() < 1e-3 && (between.low_shelf_db + 0.5).abs() < 1e-3);
+        assert!((SpeedVariant::Custom(50).sound().low_shelf_db - 3.0).abs() < 1e-3);
+        assert!((SpeedVariant::Custom(200).sound().high_shelf_db - 3.0).abs() < 1e-3);
+        // Every speed the slider stops at keeps the headroom of its boost.
+        for percent in (SPEED_MIN..=SPEED_MAX).step_by(usize::from(SPEED_STEP)) {
+            let s = SpeedVariant::at(percent).sound();
+            assert!(s.preamp_db <= 0.0 && s.preamp_db <= -s.low_shelf_db.max(0.0), "{percent}");
+        }
+    }
+
+    #[test]
+    fn the_slider_has_as_recorded_in_the_middle_and_stops_on_the_steps() {
+        assert!(speed_to_slider(SPEED_MIN).abs() < 1e-6);
+        assert!((speed_to_slider(100) - 0.5).abs() < 1e-6);
+        assert!((speed_to_slider(SPEED_MAX) - 1.0).abs() < 1e-6);
+        assert_eq!(slider_to_speed(0.0), SPEED_MIN);
+        assert_eq!(slider_to_speed(0.5), 100);
+        assert_eq!(slider_to_speed(1.0), SPEED_MAX);
+        assert_eq!(slider_to_speed(f32::NAN), 100);
+        for percent in (SPEED_MIN..=SPEED_MAX).step_by(usize::from(SPEED_STEP)) {
+            assert_eq!(slider_to_speed(speed_to_slider(percent)), percent);
+        }
+        // The ready versions are on the steps, so the slider reaches them.
+        for v in SpeedVariant::ALL {
+            assert_eq!(v.percent() % SPEED_STEP, 0, "{v:?}");
+        }
     }
 
     #[test]

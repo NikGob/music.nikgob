@@ -1549,8 +1549,19 @@ impl Worker {
     /// `Command::SetTrackSpeed`: remembered with the track, heard at once
     /// if it plays.
     fn set_track_speed(&mut self, track: TrackId, variant: nikgob_view::SpeedVariant) {
+        // A speed of the listener's own that a ready version has is that
+        // version, and one out of range is the nearest the engine takes.
+        let variant = match variant {
+            nikgob_view::SpeedVariant::Custom(percent) => nikgob_view::SpeedVariant::at(percent),
+            ready => ready,
+        };
+        // The slider says the same speed again while it is held: nothing
+        // to save and nothing to restart.
+        if self.state.read().speeds.chosen.get(&track).copied().unwrap_or_default() == variant {
+            return;
+        }
         let key = (variant != nikgob_view::SpeedVariant::Normal).then(|| variant.key());
-        if let Err(e) = self.lib.set_track_fx(track, key) {
+        if let Err(e) = self.lib.set_track_fx(track, key.as_deref()) {
             log::warn!("{track}: its speed could not be saved: {e}");
             return;
         }

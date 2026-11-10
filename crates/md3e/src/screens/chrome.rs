@@ -133,8 +133,6 @@ pub struct Chrome {
     pub setting: Option<super::pages::SettingId>,
     pub tag: TagEditorUi,
     picker: Option<Picker>,
-    /// The track the «Скорость» picker is for, and its anchor.
-    speed_picker: Option<(TrackId, Rect)>,
     ask: Option<Ask>,
     ask_text: String,
     add_after_create: Option<(String, Vec<TrackId>)>,
@@ -198,13 +196,22 @@ impl Chrome {
         rows.push(Row::Divider);
         let also = state.also_on.get(&t.id);
         let list = super::pages::library_track_rows(t, &state.dislikes, info, also);
+        // «Эквалайзер…» follows «Скорость…» (or stands where it would).
+        let before_eq = if state.speeds.enabled { TrackAct::Speed } else { TrackAct::Share };
         for r in super::pages::with_speed_row(list, &state.speeds, t.id) {
+            let eq_next = matches!(&r, Row::Item(a, _) if *a == before_eq);
             rows.push(match r {
                 Row::Item(TrackAct::Next | TrackAct::Queue, _) => continue,
+                // The key is the playing track's: only its own menu names it.
+                Row::Item(TrackAct::Speed, item) => Row::Item(PlayerAct::Track(TrackAct::Speed), item.shortcut("S")),
                 Row::Item(a, item) => Row::Item(PlayerAct::Track(a), item),
                 Row::Divider => Row::Divider,
                 Row::Label(l) => Row::Label(l),
             });
+            if eq_next {
+                let item = MenuItem::new("Эквалайзер…").icon(Icon::Equalizer).selected(state.prefs.eq_on).shortcut("E");
+                rows.push(Row::Item(PlayerAct::Track(TrackAct::Equalizer), item));
+            }
         }
         if trash && (t.has_local || t.liked) {
             rows.push(Row::Divider);
@@ -286,7 +293,8 @@ impl Chrome {
             A::Artist => self.nav = super::artist_links::go_to(ctx, super::artist_links::library(&t.artists)),
             A::Info => self.show(PaneTab::Info, wh),
             A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
-            A::Speed => self.speed_picker = Some((t.id, anchor)),
+            A::Speed => super::pages::sound::open(ctx, super::pages::sound::Tab::Speed, None),
+            A::Equalizer => super::pages::sound::open(ctx, super::pages::sound::Tab::Equalizer, None),
             A::Fetch if t.has_local => out.push(Command::OpenTagEditor(t.id)),
             A::Fetch => out.push(Command::DownloadTracks(vec![t.id])),
             // The whole album the track is from, the files it lacks.
@@ -317,22 +325,9 @@ impl Chrome {
     /// Menus, dialogs and popovers that float above the screens.
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
         self.picker_ui(ctx, state, out);
-        self.speed_picker_ui(ctx, state, out);
         self.dialogs(ctx, state, out);
         self.tag.show(ctx, state, out);
         self.volume_ui(ctx, state, out);
-    }
-
-    /// «Скорость» of the playing track: the five versions.
-    fn speed_picker_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
-        let Some((track, anchor)) = self.speed_picker else { return };
-        let mut open = true;
-        let menu = super::pages::speed_menu("md3e-speed-picker", &state.speeds, track).align_right(true);
-        let picked = menu.popup(ctx, anchor, &mut open);
-        out.extend(picked.and_then(|i| super::pages::speed_command(track, i)));
-        if picked.is_some() || !open {
-            self.speed_picker = None;
-        }
     }
 
     fn picker_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
@@ -748,17 +743,20 @@ mod tests {
     }
 
     /// The Now Playing and bar ⋮ are a library row's one list without
-    /// «Сыграть следующим» / «В конец очереди» (the track is playing): the
-    /// player's own rows before it, Now Playing's delete after it.
+    /// «Сыграть следующим» / «В конец очереди» (the track is playing) and
+    /// with «Эквалайзер…» after «Поделиться»: the player's own rows before
+    /// it, Now Playing's delete after it.
     #[test]
     fn the_player_menus_are_the_track_list_with_their_own_rows() {
         let state = ViewState::default();
         let t = track(true, false);
-        let list: Vec<PlayerAct> = row_acts(&library_track_rows(&t, &state.dislikes, true, None))
+        let mut list: Vec<PlayerAct> = row_acts(&library_track_rows(&t, &state.dislikes, true, None))
             .into_iter()
             .filter(|a| !matches!(a, A::Next | A::Queue))
             .map(PlayerAct::Track)
             .collect();
+        let share = list.iter().position(|a| *a == PlayerAct::Track(A::Share)).unwrap();
+        list.insert(share + 1, PlayerAct::Track(A::Equalizer));
         let np = row_acts(&Chrome::player_rows(&t, &state, &[Act::Visualizer], true, true));
         assert_eq!(np[0], PlayerAct::Own(Act::Visualizer));
         assert_eq!(&np[1..np.len() - 1], &list[..]);
@@ -771,6 +769,38 @@ mod tests {
         // Not in the library (no file, no like): nothing to delete.
         let stream = row_acts(&Chrome::player_rows(&track(false, false), &state, &[], true, true));
         assert!(!stream.contains(&PlayerAct::Own(Act::Trash)));
+    }
+
+    /// The sound of the playing track is in its menu: «Скорость…» while the
+    /// speed of tracks is on, «Эквалайзер…» always, each with its key, the
+    /// equalizer's row marked while the equalizer is on.
+    #[test]
+    fn the_player_menus_open_the_sound_sheet() {
+        let t = track(true, false);
+        let mut state = ViewState::default();
+        let sound = |state: &ViewState| -> Vec<(PlayerAct, String, Option<String>, bool)> {
+            Chrome::player_rows(&t, state, &[], true, false)
+                .into_iter()
+                .filter_map(|r| match r {
+                    Row::Item(a @ PlayerAct::Track(A::Speed | A::Equalizer), item) => {
+                        Some((a, item.label.to_string(), item.shortcut.as_ref().map(ToString::to_string), item.selected))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let eq = |on: bool| (PlayerAct::Track(A::Equalizer), "Эквалайзер…".to_owned(), Some("E".to_owned()), on);
+        assert_eq!(sound(&state), vec![eq(false)]);
+        state.prefs.eq_on = true;
+        assert_eq!(sound(&state), vec![eq(true)]);
+
+        state.speeds.enabled = true;
+        let speed = (PlayerAct::Track(A::Speed), "Скорость…".to_owned(), Some("S".to_owned()), false);
+        assert_eq!(sound(&state), vec![speed, eq(true)]);
+        // Next to each other, right after «Поделиться».
+        let acts = row_acts(&Chrome::player_rows(&t, &state, &[], true, false));
+        let share = acts.iter().position(|a| *a == PlayerAct::Track(A::Share)).unwrap();
+        assert_eq!(&acts[share + 1..share + 3], [A::Speed, A::Equalizer].map(PlayerAct::Track));
     }
 
     /// One song on two albums: the Now Playing and bar ⋮ offer the other

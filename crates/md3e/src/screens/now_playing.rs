@@ -21,7 +21,7 @@ use nikgob_view::{Command, CoverShape, LikeTarget, NpSlot, Repeat, RingStyle, St
 use super::{
     chrome::{self, Act, Chrome, WheelZone, Where},
     common,
-    pages::PageState,
+    pages::{PageState, sound},
     pane,
     stage::{Part, Stage},
 };
@@ -1657,6 +1657,7 @@ fn info(
                     // A track not played as recorded says so, quietly, at
                     // the end of the line (its room comes off the album).
                     let mark = speed_mark_of(state, t.id);
+                    let mark = mark.as_deref();
                     let mark_w = mark.map_or(0.0, |m| speed_mark_width(ui, m) + SPEED_MARK_GAP);
                     let (artist_w, album_w) = split_line((ui.available_width() - mark_w).max(0.0), widths);
                     let h = ui.available_height();
@@ -1677,7 +1678,10 @@ fn info(
                     }
                     if let Some(m) = mark {
                         ui.add_space(SPEED_MARK_GAP);
-                        speed_mark(ui, m);
+                        // The mark is the way to what it says.
+                        if speed_mark(ui, m).clicked() {
+                            sound::open(ui.ctx(), sound::Tab::Speed, None);
+                        }
                     }
                 });
             }
@@ -1853,6 +1857,14 @@ fn info(
         let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист").id_salt("np-add"));
 
         pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
+        // The sound of the track: its speed and the equalizer. Lit while
+        // either changes what is heard.
+        let changed = state.prefs.eq_on || state.speeds.of(t.id) != nikgob_view::SpeedVariant::Normal;
+        let tab = sound::first_tab(state);
+        let tip = if tab == sound::Tab::Speed { "Скорость и эквалайзер (S, E)" } else { "Эквалайзер (E)" };
+        if aui.add(IconButton::new(Icon::Equalizer).selected(changed).tooltip(tip).id_salt("np-sound")).clicked() {
+            sound::open(aui.ctx(), tab, None);
+        }
     }
     let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
     let volume_row = aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1899,7 +1911,7 @@ const SPEED_LINE_H: f32 = 24.0;
 
 /// The mark of the playing track's version («×1.2», «замедленно»), when it
 /// is not played as recorded.
-fn speed_mark_of(state: &ViewState, track: nikgob_view::TrackId) -> Option<&'static str> {
+fn speed_mark_of(state: &ViewState, track: nikgob_view::TrackId) -> Option<std::borrow::Cow<'static, str>> {
     // A live track of another player plays as recorded whatever was chosen.
     if state.player.speed == 1.0 {
         return None;
@@ -1912,16 +1924,29 @@ fn speed_mark_width(ui: &Ui, text: &str) -> f32 {
     (galley.size().x + 14.0).ceil()
 }
 
-/// A quiet outlined mark: no fill, the colour of the line it ends.
-fn speed_mark(ui: &mut Ui, text: &str) {
-    let s = Theme::get(ui.ctx()).scheme;
+/// A quiet outlined mark: no fill, the colour of the line it ends. A press
+/// on it opens the track's speed, so it takes the states of a button.
+fn speed_mark(ui: &mut Ui, text: &str) -> egui::Response {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
     let galley = ui.painter().layout_no_wrap(text.to_owned(), TypeRole::LabelSmall.font_id(), s.on_surface_variant);
     let size = vec2((galley.size().x + 14.0).ceil(), SPEED_LINE_H);
-    let (line, _) = ui.allocate_exact_size(size, Sense::hover());
+    let (line, response) = ui.allocate_exact_size(size, Sense::click());
     let rect = Rect::from_center_size(line.center(), vec2(size.x, SPEED_MARK_H));
+    let layer = if response.is_pointer_button_down_on() {
+        crate::tokens::state::PRESSED
+    } else if response.hovered() {
+        crate::tokens::state::HOVER
+    } else {
+        0.0
+    };
+    let layer = anim::fraction(ui.ctx(), response.id.with("layer"), layer, theme.motion.fast_effects);
     let p = ui.painter();
+    paint::state_layer(p, rect, Radii::all(SPEED_MARK_H * 0.5), s.on_surface_variant, layer);
     p.rect_stroke(rect, SPEED_MARK_H * 0.5, Stroke::new(1.0, s.outline_variant), egui::StrokeKind::Inside);
     p.galley(rect.center() - galley.size() * 0.5, galley, s.on_surface_variant);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Скорость: {text}")));
+    crate::components::tooltip(response.on_hover_cursor(egui::CursorIcon::PointingHand), "Скорость", Some("S"))
 }
 
 /// Background: soft colour clouds drifting over the window, breathing with
