@@ -7,22 +7,23 @@
 //! * **A drag**: the pointer held on the row and moved [`DRAG_FROM`]
 //!   sideways takes the row with it (the card under it is not clicked: a
 //!   click moves less); let go, the row comes to rest on a card's edge.
-//! * **The arrows**: a small round button at each end the row can go to,
-//!   grown in over the cards while the pointer is on the row; a click
-//!   scrolls by the cards that fit. They take no room: nothing moves when
-//!   they come and go.
+//! * **The arrows**: a filled tonal icon button (40, M3's standard) at
+//!   each end the row can still go to, on the middle of the covers, faded
+//!   in while the pointer is on the row and out when it leaves; a click
+//!   sends the row a page of cards on, on the spatial spring, to rest on
+//!   a card's edge. They take no room: nothing moves when they come and
+//!   go.
 //!
 //! The row's state ([`Scroll`]) is plain numbers, kept in egui's memory by
 //! the row's name; the cards are painted clipped to the grid's width, and
 //! only those in view.
 
-use egui::{Color32, Id, Rect, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::{Id, Rect, Response, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use super::{GUTTER, Grid};
 use crate::{
     Icon, Theme,
-    components::{IconButton, Size, Style, anim, button::Colors},
-    screens::pages::cards,
+    components::{IconButton, Size, Style, anim},
 };
 
 /// The pointer moved this far sideways with the button down: a drag.
@@ -130,6 +131,22 @@ pub struct Row<'a> {
     /// Takes the pointer (the real page; the settings' copy stands still
     /// at its start).
     pub live: bool,
+    /// How far past the grid's edges its cards may paint (a song row's
+    /// state layer reaches into the margin).
+    pub bleed: f32,
+}
+
+/// An arrow of a row in `slot`: fading in while `shown` and out after (the
+/// fast effects spring), taking clicks while it is there to see.
+fn arrow(ui: &mut Ui, id: Id, shown: bool, slot: Rect, button: IconButton) -> Option<Response> {
+    let theme = Theme::get(ui.ctx());
+    let k = anim::fraction(ui.ctx(), id.with("fade"), f32::from(u8::from(shown)), theme.motion.fast_effects).clamp(0.0, 1.0);
+    if k <= 0.01 {
+        return None;
+    }
+    let mut child = ui.new_child(UiBuilder::new().max_rect(slot).id_salt(id.with("slot")));
+    child.set_opacity(k * ui.opacity());
+    Some(child.add_enabled(shown && k > 0.5, button))
 }
 
 /// Lays `row` out on `grid` and calls `card` with the place of each card
@@ -189,13 +206,15 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         anim::snap_f32(&ctx, spring_id, state.offset);
         state.offset
     } else {
-        anim::f32(&ctx, spring_id, state.offset, Theme::get(&ctx).motion.default_spatial.without_bounce()).clamp(0.0, max)
+        // The spring's overshoot shows between two cards; at the row's
+        // ends it stops on the edge.
+        anim::f32(&ctx, spring_id, state.offset, Theme::get(&ctx).motion.default_spatial).clamp(0.0, max)
     };
 
     // The cards, cut at the grid's edges (a little room above and below
     // for what a card paints around itself).
     let mut child = ui.new_child(UiBuilder::new().max_rect(view).id_salt(("home-row-ui", row.name)));
-    child.set_clip_rect(view.expand2(vec2(0.0, 8.0)).intersect(ui.clip_rect()));
+    child.set_clip_rect(view.expand2(vec2(row.bleed, 8.0)).intersect(ui.clip_rect()));
     for i in 0..row.n {
         let cell = Rect::from_min_size(pos2(grid.left + i as f32 * pitch - shown, row.top), vec2(card_w, row.card_h));
         if cell.right() <= view.left() || cell.left() >= view.right() {
@@ -205,21 +224,17 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
     }
 
     if row.live && max > 0.0 {
-        let s = Theme::get(&ctx).scheme;
         let d = Size::S.height();
-        let colors = Colors { container: s.surface_container_highest, content: s.on_surface, border: Color32::TRANSPARENT };
         let y = row.top + row.arrows_at - d / 2.0;
-        let arrow = |icon: Icon, tip: &'static str, salt: &'static str| {
-            IconButton::new(icon).size(Size::S).style(Style::Filled).colors(colors).tooltip(tip).id_salt(id.with(salt))
-        };
+        let button = |icon: Icon, tip: &'static str, salt: &'static str| IconButton::new(icon).size(Size::S).style(Style::Tonal).tooltip(tip).id_salt(id.with(salt));
         let on = hovered && !state.dragging();
         let back = Rect::from_min_size(pos2(view.left() + ARROW_INSET, y), Vec2::splat(d));
-        let clicked = cards::grow_button(ui, id.with("back"), on && state.can_back(), back, arrow(Icon::ChevronLeft, "Назад", "home-row-back"));
+        let clicked = arrow(ui, id.with("back"), on && state.can_back(), back, button(Icon::ChevronLeft, "Назад", "home-row-back"));
         if clicked.is_some_and(|r| r.clicked()) {
             state.page(false, per, pitch, max);
         }
         let forward = Rect::from_min_size(pos2(view.right() - ARROW_INSET - d, y), Vec2::splat(d));
-        let clicked = cards::grow_button(ui, id.with("forward"), on && state.can_forward(max), forward, arrow(Icon::ChevronRight, "Дальше", "home-row-forward"));
+        let clicked = arrow(ui, id.with("forward"), on && state.can_forward(max), forward, button(Icon::ChevronRight, "Дальше", "home-row-forward"));
         if clicked.is_some_and(|r| r.clicked()) {
             state.page(true, per, pitch, max);
         }

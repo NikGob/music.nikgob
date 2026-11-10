@@ -70,15 +70,19 @@
 //!   [`STALE_MS`] (or never, loved by such a state alone) is an old one: a
 //!   mix takes [`STALE_SHARE`] of them at most while it has others
 //!   («Любимые» half), the rest of them are «Забытое любимое»'s.
-//! * **The mixes of the day** ([`Builder::daily`], «Микс дня 1…6»): what the
-//!   user listens to now, by taste profile, the heavier profiles split by
-//!   sound into two or three (a weighted k-means from the farthest
-//!   points), one mix for each cluster, the heaviest first, at most
-//!   [`DAILY_MIXES`]. A cluster's mix draws from the songs of its profile
-//!   nearest its centre: every song is one cluster's, so no two mixes of
-//!   the day share a song. Mostly loved and familiar, [`DAILY_UNHEARD`] of
-//!   songs never played that stand near them; seeded by the day, and what
-//!   a day drew stays the day's ([`Kept`]) whatever is played meanwhile.
+//! * **The mixes of the day** ([`Builder::daily`]): one «Микс дня» of
+//!   everything the user listens to now, and the named mixes beside it —
+//!   what the user listens to now by taste profile, the heavier profiles
+//!   split by sound into two or three (a weighted k-means from the
+//!   farthest points), one mix for each cluster, the heaviest first, at
+//!   most [`DAILY_MIXES`], each named by what it is made of
+//!   ([`Builder::name_daily`], [`crate::mix_names`]: its genre, its leading
+//!   artist, its decade, its mood). A cluster's mix draws from the songs
+//!   of its profile nearest its centre: every song is one cluster's, so no
+//!   two named mixes share a song. Mostly loved and familiar,
+//!   [`DAILY_UNHEARD`] of songs never played that stand near them; seeded
+//!   by the day, and what a day drew stays the day's ([`Kept`]) whatever
+//!   is played meanwhile.
 //! * **The mixes that are always there** ([`Builder::pinned`]): «Любимые»,
 //!   the liked songs with those heard and liked lately first, and the mix
 //!   of this part of the day (the loved songs this part hears more than
@@ -92,6 +96,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
 use crate::index::euclid;
+use crate::mix_names::Makeup;
 use crate::model::{Live, Moment, UserModel};
 use crate::pick::{Diversity, Reason, Recs, Seen, Slot, repair, repair_within};
 use crate::profiles::{ACTIVE_SHARE, Kind, LaneKey, NameStyle, background_cards, lang_adjective, quota};
@@ -103,8 +108,8 @@ use crate::taste::{DAY_MS, DayPart, HOUR_MS};
 
 /// Moments of «Миксы для тебя».
 pub const MOMENTS: usize = 5;
-/// Mixes of the day at most.
-pub const DAILY_MIXES: usize = 6;
+/// Named mixes of the day at most (beside the one «Микс дня»).
+pub const DAILY_MIXES: usize = 5;
 /// A cluster of the day needs this many songs listened to now…
 const DAILY_CORES: usize = 8;
 /// …and a profile gets one more mix for each this many of them (while its
@@ -248,7 +253,9 @@ pub enum MixKey {
     Liked,
     /// The mix of a part of the day, by [`DayPart::index`].
     Part(u8),
-    /// «Микс дня» number this (from 1), the heaviest cluster first.
+    /// The day's mixes: 0 is «Микс дня», of everything listened to now;
+    /// from 1 the named mix of the day's cluster of that number, the
+    /// heaviest first.
     Daily(u8),
 }
 
@@ -268,6 +275,11 @@ impl MixKey {
             Self::Daily(n) => (10, u32::from(n), 0, 0),
         };
         crate::pick::token(&[a.to_le_bytes(), b.to_le_bytes(), c.to_le_bytes(), d.to_le_bytes()].concat())
+    }
+
+    /// A named mix of the day: one cluster's.
+    pub const fn is_cluster(self) -> bool {
+        matches!(self, Self::Daily(n) if n > 0)
     }
 
     /// The profile «Смешать с…» starts from.
@@ -864,8 +876,38 @@ impl<'a> Builder<'a> {
                 let part = DayPart::ALL.get(usize::from(p)).copied()?;
                 Pool { arc: Arc::of(part), cross: true, ..plain(self.part_tracks(part)) }
             }
+            MixKey::Daily(0) => {
+                // Everything the clusters of the day draw from; before
+                // there is enough of that, whatever a mix may take.
+                let mut tracks: Vec<usize> = self.daily_pools().iter().flatten().copied().collect();
+                if tracks.len() < MIN_SONGS {
+                    tracks = (0..self.value.len()).filter(|&i| self.pickable(i)).collect();
+                }
+                tracks.sort_unstable();
+                tracks.dedup();
+                // Each taste profile by what of it is listened to now, in
+                // blocks, as «Всё вперемешку» takes them by their shares.
+                let mut weight: HashMap<usize, f32> = HashMap::new();
+                for &i in &tracks {
+                    if let Some(j) = self.model.profile_at(i)
+                        && !self.stale[i]
+                    {
+                        *weight.entry(j).or_default() += self.a[i].max(0.0);
+                    }
+                }
+                let mut of: Vec<(usize, f32)> = weight.into_iter().filter(|w| w.1 > 0.0).collect();
+                of.sort_by(|a, b| a.0.cmp(&b.0));
+                let total: f32 = of.iter().map(|w| w.1).sum();
+                let by_profile: Option<HashMap<usize, usize>> = (of.len() >= 2 && total > 0.0).then(|| {
+                    let shares: Vec<f32> = of.iter().map(|w| w.1 / total).collect();
+                    let counts = quota(&shares, MIX_LEN, &vec![false; of.len()], MIX_LEN);
+                    of.iter().map(|w| w.0).zip(counts).collect()
+                });
+                let blocks = by_profile.as_ref().map(|_| 0);
+                Pool { unheard: DAILY_UNHEARD, arc: Arc::Day, cross: true, quota: by_profile, blocks, ..plain(tracks) }
+            }
             MixKey::Daily(n) => {
-                let tracks = self.daily_pools().get(usize::from(n).checked_sub(1)?)?.clone();
+                let tracks = self.daily_pools().get(usize::from(n) - 1)?.clone();
                 // The day's order, whatever the part.
                 Pool { unheard: DAILY_UNHEARD, arc: Arc::Day, ..plain(tracks) }
             }
@@ -969,21 +1011,111 @@ impl<'a> Builder<'a> {
     }
 
     /// The mixes of the day (see the module docs): the day's own as they
-    /// were drawn (`kept`: its lineup, each mix's songs), else one for each
-    /// cluster of what the user listens to now, the heaviest first; named
-    /// by their places. And the lineup to keep.
+    /// were drawn (`kept`: its lineup, each mix's songs), else «Микс дня»
+    /// and one for each cluster of what the user listens to now, the
+    /// heaviest first. A cluster's mix is called by its taste profile
+    /// until [`Self::name_daily`] names it by what it is made of. And the
+    /// lineup to keep.
     pub fn daily(&self, kept: &Kept) -> (Vec<Mix>, Vec<MixKey>) {
         let keys: Vec<MixKey> = if kept.lineup.is_empty() {
-            (1..=self.daily_pools().len().min(DAILY_MIXES)).map(|n| MixKey::Daily(n as u8)).collect()
+            (0..=self.daily_pools().len().min(DAILY_MIXES)).map(|n| MixKey::Daily(n as u8)).collect()
         } else {
             kept.lineup.clone()
         };
-        let mut mixes: Vec<Mix> = keys.into_iter().filter_map(|k| self.mix(k, kept)).collect();
-        for (k, m) in mixes.iter_mut().enumerate() {
-            m.title = format!("Микс дня {}", k + 1);
-        }
+        let mixes: Vec<Mix> = keys.into_iter().filter_map(|k| self.mix(k, kept)).collect();
         let keys = mixes.iter().map(|m| m.key).collect();
         (mixes, keys)
+    }
+
+    /// What each of `mixes` is made of, for its name
+    /// ([`crate::mix_names`]): `tags` of an artist, `artist` their name,
+    /// `year` and `song` of the track at a catalog position.
+    pub fn makeups(
+        &self,
+        mixes: &[Mix],
+        tags: &dyn Fn(ArtistId) -> Vec<(String, f32)>,
+        artist: &dyn Fn(ArtistId) -> Option<String>,
+        year: &dyn Fn(usize) -> Option<i32>,
+        song: &dyn Fn(usize) -> Option<String>,
+    ) -> Vec<Makeup> {
+        // The library's energies, to place a mix among them.
+        let mut energies: Vec<f32> = (0..self.value.len()).filter(|&i| self.pickable(i)).filter_map(|i| self.model.energy_at(i)).collect();
+        energies.sort_by(f32::total_cmp);
+        mixes
+            .iter()
+            .map(|m| {
+                let mut count: HashMap<ArtistId, (usize, usize)> = HashMap::new();
+                let mut of_artist: HashMap<ArtistId, Vec<(String, f32)>> = HashMap::new();
+                let mut song_tags: Vec<Vec<(String, f32)>> = Vec::with_capacity(m.tracks.len());
+                for (k, &i) in m.tracks.iter().enumerate() {
+                    let Some(a) = self.recs.info(i).artists.first().copied() else {
+                        song_tags.push(Vec::new());
+                        continue;
+                    };
+                    count.entry(a).or_insert((0, k)).0 += 1;
+                    song_tags.push(of_artist.entry(a).or_insert_with(|| tags(a)).clone());
+                }
+                let mut ranked: Vec<(ArtistId, (usize, usize))> = count.into_iter().collect();
+                ranked.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(a.1.1.cmp(&b.1.1)));
+                let mut own: Vec<f32> = m.tracks.iter().filter_map(|&i| self.model.energy_at(i)).collect();
+                own.sort_by(f32::total_cmp);
+                let placed = !own.is_empty() && own.len() * 2 >= m.tracks.len() && energies.len() >= 4 * MIN_SONGS;
+                let energy = placed.then(|| {
+                    let median = own[own.len() / 2];
+                    energies.partition_point(|e| *e < median) as f32 / energies.len() as f32
+                });
+                Makeup {
+                    tags: song_tags,
+                    artists: ranked.into_iter().filter_map(|(a, (n, _))| Some((artist(a)?, n))).collect(),
+                    years: m.tracks.iter().map(|&i| year(i)).collect(),
+                    energy,
+                    kind: Some(self.cluster_title(&m.tracks)),
+                    songs: m.tracks.iter().take(3).filter_map(|&i| song(i)).collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// Names the named mixes of the day among `mixes` by what they are made
+    /// of (`makeups` of [`Self::makeups`], one for each of `mixes`): no
+    /// two alike, none of a name in `taken` (the other cards of the row);
+    /// `common_decade` is the decade most of the library is of. A mix
+    /// nothing can name is left out.
+    pub fn name_daily(&self, mixes: &mut Vec<Mix>, makeups: &[Makeup], taken: &[String], common_decade: Option<i32>) {
+        let at: Vec<usize> = (0..mixes.len()).filter(|&k| mixes[k].key.is_cluster()).collect();
+        let of: Vec<Makeup> = at.iter().map(|&k| makeups.get(k).cloned().unwrap_or_default()).collect();
+        let mut taken: Vec<String> = taken.to_vec();
+        taken.extend(mixes.iter().filter(|m| !m.key.is_cluster()).map(|m| m.title.clone()));
+        let names = crate::mix_names::assign(&of, &taken, common_decade);
+        let mut unnamed: Vec<usize> = Vec::new();
+        for (&k, name) in at.iter().zip(names) {
+            match name {
+                Some(n) => mixes[k].title = n,
+                None => unnamed.push(k),
+            }
+        }
+        for k in unnamed.into_iter().rev() {
+            mixes.remove(k);
+        }
+    }
+
+    /// What a named mix of `tracks` is called before its makeup is known:
+    /// its taste profile's name, or its songs' kind.
+    fn cluster_title(&self, tracks: &[usize]) -> String {
+        let mut of: HashMap<usize, usize> = HashMap::new();
+        for &i in tracks {
+            if let Some(j) = self.model.profile_at(i) {
+                *of.entry(j).or_default() += 1;
+            }
+        }
+        if let Some((j, _)) = of.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))) {
+            return self.model.profiles.name(j, NameStyle::Kind, &|_| None).0;
+        }
+        let mut kinds: HashMap<LaneKey, usize> = HashMap::new();
+        for &i in tracks {
+            *kinds.entry(LaneKey::of(self.model.song_type_at(i))).or_default() += 1;
+        }
+        kinds.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map_or_else(|| "Песни".to_owned(), |k| kind_title(k.0))
     }
 
     /// The pools of the mixes of the day, the heaviest cluster first.
@@ -1223,7 +1355,7 @@ impl<'a> Builder<'a> {
         // A mix of one kind keeps to the scene its first songs are of: what
         // the graph links to the songs taken stands higher
         // (docs/recs-graph.md); without a graph nothing changes.
-        let cohere = matches!(key, MixKey::Profile(_) | MixKey::Kind(_) | MixKey::Daily(_)) && !self.model.graph.is_empty();
+        let cohere = (matches!(key, MixKey::Profile(_) | MixKey::Kind(_)) || key.is_cluster()) && !self.model.graph.is_empty();
         if cohere {
             let mut top: Vec<(f32, usize)> = core[..k].to_vec();
             self.take_cohering(&mut pick, &mut top, 1.0 / tau, &|p: &Picking<'_, '_>| p.len() >= half || p.full(n), &|_| false);
@@ -1760,9 +1892,12 @@ impl<'a> Builder<'a> {
                 if self.settings.names == NameStyle::Kind { blend_title(names) } else { names.join(" + ") }
             }
             MixKey::Kind(c) => kind_title(lane_of_code(c)),
-            MixKey::Liked => "Любимые".into(),
+            // «Любимые» is the playlist of every liked song; this is a mix
+            // of them.
+            MixKey::Liked => "Микс любимых".into(),
             MixKey::Part(p) => part_title(p).into(),
-            MixKey::Daily(n) => format!("Микс дня {n}"),
+            MixKey::Daily(0) => "Микс дня".into(),
+            MixKey::Daily(_) => self.cluster_title(tracks),
         }
     }
 
@@ -2514,7 +2649,7 @@ mod tests {
                 assert!(n as f32 <= (share * len as f32).ceil(), "{}: {n} old songs of {}", mix.title, mix.tracks.len());
             }
             let daily = b.daily(&Kept::default()).0;
-            assert!(daily.len() >= 3, "{}", daily.len());
+            assert!(daily.len() >= 4, "{}", daily.len());
             let all: usize = daily.iter().map(|x| x.tracks.len()).sum();
             let of_old: usize = daily.iter().map(|x| x.tracks.iter().filter(|i| old.contains(i)).count()).sum();
             assert!(of_old * 3 <= all, "the mixes of the day: {of_old} old songs of {all}");
@@ -2537,33 +2672,42 @@ mod tests {
         });
     }
 
-    /// The mixes of the day: one at least for each taste profile, six at
-    /// most, named by their places, no song in two of them, a share of
-    /// songs never played; the same all day whatever is played meanwhile
-    /// and whatever the part of the day, other songs the next day.
+    /// The day's mixes: one «Микс дня» of every profile listened to now,
+    /// then the named mixes, one at least for each taste profile, five at
+    /// most, no song in two of the named ones, a share of songs never
+    /// played; the same all day whatever is played meanwhile and whatever
+    /// the part of the day, other songs the next day.
     #[test]
     fn the_mixes_of_the_day_are_distinct_and_the_days_own() {
         let l = lib(40, &[]);
         let m = model(&l, T0 + 7 * HOUR_MS);
         let day = 77u64;
         let (first, keys) = in_epoch(&l, &m, DayPart::Morning, day, |b| b.daily(&Kept::default()));
-        assert!((3..=DAILY_MIXES).contains(&first.len()), "{}", first.len());
+        assert_eq!(first[0].key, MixKey::Daily(0));
+        assert_eq!(first[0].title, "Микс дня");
+        assert!(first[0].profiles.len() >= 2, "«Микс дня» is of every profile: {:?}", first[0].profiles);
+        let named = &first[1..];
+        assert!((3..=DAILY_MIXES).contains(&named.len()), "{}", named.len());
         let mut seen: HashSet<usize> = HashSet::new();
         let mut profiles: HashSet<usize> = HashSet::new();
         for (k, mix) in first.iter().enumerate() {
-            assert_eq!(mix.title, format!("Микс дня {}", k + 1));
             assert_eq!(mix.key, keys[k]);
-            assert!(matches!(mix.key, MixKey::Daily(_)));
             assert!((MIN_SONGS..=MIX_LEN).contains(&mix.tracks.len()), "{}: {}", mix.title, mix.tracks.len());
-            assert!(mix.profiles.len() <= 1, "{}: of {:?}", mix.title, mix.profiles);
-            profiles.extend(mix.profiles.iter().copied());
-            for &i in &mix.tracks {
-                assert!(seen.insert(i), "{}: a song of another mix of the day", mix.title);
-            }
             let unheard = mix.tracks.iter().filter(|&&i| m.tracks[i].starts == 0).count();
             assert!(unheard as f32 <= (DAILY_UNHEARD * MIX_LEN as f32).ceil(), "{}: {unheard} never played", mix.title);
         }
-        assert!(profiles.len() >= 3, "each profile has its mix of the day: {profiles:?}");
+        for mix in named {
+            assert!(mix.key.is_cluster() && !MixKey::Daily(0).is_cluster());
+            // Its profile's name until its makeup names it: never a number.
+            assert!(!mix.title.is_empty() && !mix.title.chars().any(|c| c.is_ascii_digit()), "{}", mix.title);
+            assert!(!mix.title.starts_with("Микс дня"), "one mix of the day: {}", mix.title);
+            assert!(mix.profiles.len() <= 1, "{}: of {:?}", mix.title, mix.profiles);
+            profiles.extend(mix.profiles.iter().copied());
+            for &i in &mix.tracks {
+                assert!(seen.insert(i), "{}: a song of another named mix", mix.title);
+            }
+        }
+        assert!(profiles.len() >= 3, "each profile has its named mix: {profiles:?}");
         // Another part of the same day, nothing kept: the same.
         let (evening, _) = in_epoch(&l, &m, DayPart::Evening, day, |b| b.daily(&Kept::default()));
         let songs = |x: &[Mix]| x.iter().map(|m| (m.key, m.tracks.clone())).collect::<Vec<_>>();
@@ -2579,11 +2723,48 @@ mod tests {
         assert_eq!(keys2, keys);
         let ids = |m: &UserModel, x: &[Mix]| x.iter().map(|mix| mix.tracks.iter().map(|&i| m.id(i)).collect::<Vec<_>>()).collect::<Vec<_>>();
         assert_eq!(ids(&m2, &again), ids(&m, &first));
-        assert_eq!(again.iter().map(|x| x.title.clone()).collect::<Vec<_>>(), first.iter().map(|x| x.title.clone()).collect::<Vec<_>>());
         // The next day draws again.
         let (next, _) = in_epoch(&l, &m, DayPart::Morning, day + 1, |b| b.daily(&Kept::default()));
         assert_eq!(next.len(), first.len());
         assert!(next.iter().zip(&first).any(|(a, b)| a.tracks != b.tracks), "another day, other songs");
+    }
+
+    /// The named mixes are called by what they are made of: the Russian
+    /// songs' artists are tagged as rappers, so their mix is «Хип-хоп
+    /// микс»; nobody tagged the others, so they go by an artist, a mood or
+    /// their kind. No two cards alike, none of a name the row has, none
+    /// numbered, and «Микс дня» stays what it is.
+    #[test]
+    fn the_named_mixes_are_named_by_their_makeup() {
+        let l = lib(40, &[]);
+        let m = model(&l, T0 + 7 * HOUR_MS);
+        in_epoch(&l, &m, DayPart::Morning, 77, |b| {
+            let (mut mixes, _) = b.daily(&Kept::default());
+            let n = mixes.len();
+            let kind = |a: ArtistId| (a.0.as_u128() / 100) as usize;
+            let tags = |a: ArtistId| if kind(a) == 0 { vec![("hip hop".to_owned(), 5.0), ("russian".to_owned(), 2.0)] } else { Vec::new() };
+            let artist = |a: ArtistId| Some(format!("{} {}", ["Ru", "Ja", "Ost"][kind(a).min(2)], (b'a' + (a.0.as_u128() % 100) as u8) as char));
+            let year = |_: usize| None;
+            let song = |i: usize| Some(format!("Song {i}"));
+            let makeups = b.makeups(&mixes, &tags, &artist, &year, &song);
+            assert_eq!(makeups.len(), n);
+            for (mix, made) in mixes.iter().zip(&makeups) {
+                assert_eq!(made.tags.len(), mix.tracks.len());
+                assert!(!made.artists.is_empty() && made.kind.is_some());
+            }
+            let taken = ["Любимые".to_owned(), "Японские песни".to_owned()];
+            b.name_daily(&mut mixes, &makeups, &taken, None);
+            assert_eq!(mixes.len(), n, "every mix has something to be named by");
+            assert_eq!(mixes[0].title, "Микс дня");
+            let titles: Vec<&str> = mixes.iter().map(|x| x.title.as_str()).collect();
+            assert!(titles.contains(&"Хип-хоп микс"), "{titles:?}");
+            let unique: HashSet<&str> = titles.iter().copied().collect();
+            assert_eq!(unique.len(), titles.len(), "{titles:?}");
+            for t in &titles {
+                assert!(!t.trim().is_empty() && !t.chars().any(|c| c.is_ascii_digit()), "{titles:?}");
+                assert!(!taken.iter().any(|x| x == t), "{titles:?}");
+            }
+        });
     }
 
     /// «Любимые» is there while there are likes enough, first, of liked
@@ -2607,7 +2788,7 @@ mod tests {
         let m = model(&l, T0);
         let pinned = with(&l, &m, DayPart::Morning, |b| b.pinned(&Kept::default()));
         assert_eq!(pinned[0].key, MixKey::Liked, "«Любимые» first");
-        assert_eq!(pinned[0].title, "Любимые");
+        assert_eq!(pinned[0].title, "Микс любимых");
         assert!((MIN_SONGS..=LIKED_LEN).contains(&pinned[0].tracks.len()), "{}", pinned[0].tracks.len());
         assert!(pinned[0].tracks.iter().all(|&i| m.tracks[i].liked(T0)), "liked songs alone");
         // Kept for the epoch: the same songs in their order.
@@ -2623,6 +2804,7 @@ mod tests {
         assert!(b.pinned(&Kept::default()).is_empty());
         assert_eq!(part_title(DayPart::Night.index() as u8), "Ночной микс");
         assert_ne!(MixKey::Liked.token(), MixKey::Daily(1).token());
+        assert_ne!(MixKey::Daily(0).token(), MixKey::Daily(1).token());
     }
 
     #[test]

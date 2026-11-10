@@ -1,11 +1,12 @@
 //! Главная (home-v2 spec): the card at the top («Миры», [`worlds`]), the
-//! greeting with «Только скачанное», the shortcuts, «Миксы дня», «Миксы
-//! для тебя», «Слушать снова», «Подборки дня», «Из твоей библиотеки»,
-//! «Новое для тебя» and «Новые релизы» — on a grid of 12 columns. A row
-//! of cards (the mixes, the tiles of the day, the albums) with more than
-//! fit goes on sideways ([`row`]): Shift + the wheel or a sideways wheel,
-//! a drag, the arrows at its ends under the pointer; the plain wheel
-//! always scrolls the page.
+//! greeting with «Только скачанное», the shortcuts, «Миксы для тебя»
+//! («Любимые», «Микс дня», the named mixes, the moments), «Слушать
+//! снова», «Подборки дня», «Из твоей библиотеки», «Новое для тебя» and
+//! «Новые релизы» — on a grid of 12 columns. Every row under a header
+//! (the mixes, the songs in columns of two, the tiles of the day, the
+//! albums) with more than fit goes on sideways ([`row`]): Shift + the
+//! wheel or a sideways wheel, a drag, the arrows at its ends under the
+//! pointer; the plain wheel always scrolls the page.
 //!
 //! One rule for clicks (§4): what the app put together (a mix, a tile of
 //! the day, a song row) plays; a real thing (an album, a playlist, an
@@ -14,7 +15,7 @@
 
 use egui::{Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    Command, HomeView, LaneCard, MixCard, MixId, Route, ShelfAlbum, Shortcut, Status,
+    Command, HomeView, LaneCard, MixCard, MixId, PlaylistCard, Route, ShelfAlbum, Shortcut, Status,
     StreamAlbumCard, StreamPage, StreamTrackRow, TileKind, TrackRow, ViewState,
 };
 
@@ -59,6 +60,9 @@ pub const HEADER_GAP: f32 = 8.0;
 /// A shortcut, the rows of songs.
 pub const SHORTCUT_H: f32 = 72.0;
 pub const ROW_H: f32 = 72.0;
+/// «Слушать снова» and «Новое для тебя» stand in columns of this many
+/// songs; the columns that do not fit go on sideways.
+pub const SONG_LINES: usize = 2;
 /// A tile of the day.
 pub const OF_DAY_H: f32 = 112.0;
 /// The shortcuts and the song rows go four to a row from this width.
@@ -136,11 +140,21 @@ fn lines(n: usize, per_line: usize) -> usize {
     n.div_ceil(per_line.max(1))
 }
 
+/// `n` songs in columns of [`SONG_LINES`]: the columns and the lines the
+/// tallest of them has.
+pub fn song_columns(n: usize) -> (usize, usize) {
+    (n.div_ceil(SONG_LINES), n.min(SONG_LINES))
+}
+
+/// The place of song `k` of a column in the column's `cell`.
+fn song_cell(cell: Rect, k: usize) -> Rect {
+    Rect::from_min_size(pos2(cell.left(), cell.top() + k as f32 * ROW_H), vec2(cell.width(), ROW_H))
+}
+
 /// The sections of the page, top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Section {
     Shortcuts,
-    Daily,
     Mixes,
     ListenAgain,
     OfDay,
@@ -154,9 +168,8 @@ pub enum Section {
 #[cfg_attr(not(test), allow(dead_code))]
 impl Section {
     /// Every section, in the page's own order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Shortcuts,
-        Self::Daily,
         Self::Mixes,
         Self::ListenAgain,
         Self::OfDay,
@@ -169,7 +182,6 @@ impl Section {
     pub fn title(self) -> &'static str {
         match self {
             Self::Shortcuts => "Быстрый доступ",
-            Self::Daily => "Миксы дня",
             Self::Mixes => "Миксы для тебя",
             Self::ListenAgain => "Слушать снова",
             Self::OfDay => "Плитки дня",
@@ -186,8 +198,8 @@ pub fn section_of(key: nikgob_view::HomeSection) -> Section {
     use nikgob_view::HomeSection as H;
     match key {
         H::Shortcuts => Section::Shortcuts,
-        H::Daily => Section::Daily,
-        H::Mixes => Section::Mixes,
+        // The day's mixes stand in «Миксы для тебя» now.
+        H::Daily | H::Mixes => Section::Mixes,
         H::ListenAgain => Section::ListenAgain,
         H::OfDay => Section::OfDay,
         H::FromLibrary => Section::FromLibrary,
@@ -222,17 +234,21 @@ pub fn arrange(shown: Vec<Section>, order: &[(Section, bool)]) -> Vec<Section> {
     out
 }
 
+/// «Любимые» for «Миксы для тебя»: the playlist of the liked songs, while
+/// anything is liked.
+pub fn liked_playlist(state: &ViewState) -> Option<&PlaylistCard> {
+    state.library.playlists.iter().find(|p| p.id == nikgob_view::LIKED_PLAYLIST && p.track_count > 0)
+}
+
 /// What the page shows of `h`: «Только скачанное» (`local_only`) takes the
 /// new music away, sections and all (the chip in the header brings it back).
-pub fn sections(h: &HomeView, local_only: bool) -> Vec<Section> {
+/// `liked`: there is «Любимые» to stand among the mixes.
+pub fn sections(h: &HomeView, liked: bool, local_only: bool) -> Vec<Section> {
     let mut out = Vec::new();
     if !h.shortcuts.is_empty() {
         out.push(Section::Shortcuts);
     }
-    if h.lanes.iter().any(|l| l.key.is_daily()) {
-        out.push(Section::Daily);
-    }
-    if h.lanes.iter().any(|l| !l.key.is_daily()) {
+    if liked || !h.lanes.is_empty() {
         out.push(Section::Mixes);
     }
     if !h.listen_again.is_empty() {
@@ -343,7 +359,7 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
         name_prompt(ui, grid, pages, out);
     }
 
-    let available = sections(h, local_only);
+    let available = sections(h, liked_playlist(state).is_some(), local_only);
     let order = order_of(&state.prefs);
     let drawn: Vec<(Section, f32)> = if stage.live {
         arrange(available.clone(), &order).into_iter().map(|s| (s, 1.0)).collect()
@@ -360,12 +376,11 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
             }
             match section {
                 Section::Shortcuts => shortcuts(ui, grid, i, state, out),
-                Section::Daily => daily(ui, grid, i, stage.live, state, out),
                 Section::Mixes => mixes(ui, grid, i, stage.live, state, out),
-                Section::ListenAgain => listen_again(ui, grid, i, state, pages, out),
+                Section::ListenAgain => listen_again(ui, grid, i, stage.live, state, pages, out),
                 Section::OfDay => of_day(ui, grid, i, stage.live, state, out),
                 Section::FromLibrary => from_library(ui, grid, i, stage.live, state, out),
-                Section::New => new_music(ui, grid, i, state, pages, out),
+                Section::New => new_music(ui, grid, i, stage.live, state, pages, out),
                 Section::Releases => releases(ui, grid, i, stage.live, state, out),
             }
         }).inner;
@@ -517,38 +532,55 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec
     nav
 }
 
-// ---- «Миксы дня» and «Миксы для тебя».
+// ---- «Миксы для тебя».
 
 /// The lane playing now: its queue was started from it and plays.
 pub(super) fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
     state.player.status == Status::Playing && state.player.context.as_deref() == Some(l.context().as_str())
 }
 
-/// A mix card's height on `grid`: its mosaic and the lines under it.
+/// A mix card's height on `grid`: its cover and the lines under it.
 fn mix_card_h(grid: Grid) -> f32 {
     grid.span(12 / grid.cards_per_line()) + cards::MIX_TEXT_H
 }
 
-/// The row `name` of the mixes `lanes` under the section's header in
-/// `rect`: as many as fit, the rest sideways.
+/// The row `name` of «Любимые» (`liked`, first) and the mixes `lanes`
+/// under the section's header in `rect`: as many as fit, the rest
+/// sideways.
 #[allow(clippy::too_many_arguments)]
-fn mix_row(ui: &mut Ui, grid: Grid, rect: Rect, name: &str, lanes: &[&LaneCard], live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+fn mix_row(
+    ui: &mut Ui,
+    grid: Grid,
+    rect: Rect,
+    name: &str,
+    liked: Option<&PlaylistCard>,
+    lanes: &[&LaneCard],
+    live: bool,
+    state: &ViewState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
     let h = &state.home;
     let per = grid.cards_per_line();
     let with_new = state.prefs.mixes_with_new && !state.prefs.mixes_downloaded_only;
     let opens = state.prefs.mix_click_opens_list;
     let mut nav = None;
+    let first = usize::from(liked.is_some());
     let at = row::Row {
         name,
         top: rect.top() + HEADER_H + HEADER_GAP,
         card_h: mix_card_h(grid),
         arrows_at: grid.span(12 / per) / 2.0,
         per,
-        n: lanes.len(),
+        n: first + lanes.len(),
         live,
+        bleed: 0.0,
     };
     row::show(ui, grid, at, |ui, i, cell| {
-        let l = lanes[i];
+        if let Some(p) = liked.filter(|_| i == 0) {
+            nav = cards::liked_playlist(ui, cell, p, out).or(nav.take());
+            return;
+        }
+        let l = lanes[i - first];
         // «Смешать с…»: another profile to mix it with.
         let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
         nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
@@ -556,20 +588,8 @@ fn mix_row(ui: &mut Ui, grid: Grid, rect: Rect, name: &str, lanes: &[&LaneCard],
     nav
 }
 
-/// «Миксы дня»: the mixes of the day, the heaviest first.
-fn daily(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
-    let lanes: Vec<&LaneCard> = state.home.lanes.iter().filter(|l| l.key.is_daily()).collect();
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + mix_card_h(grid)), Sense::hover());
-    let mut nav = None;
-    entering(ui, rect, n, "daily", |ui| {
-        section_header(ui, grid, rect, "Миксы дня", None);
-        nav = mix_row(ui, grid, rect, "daily", &lanes, live, state, out);
-    });
-    nav
-}
-
 fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
-    let lanes: Vec<&LaneCard> = state.home.lanes.iter().filter(|l| !l.key.is_daily()).collect();
+    let lanes: Vec<&LaneCard> = state.home.lanes.iter().collect();
     let local_only = state.prefs.mixes_downloaded_only;
     let total = HEADER_H + HEADER_GAP + mix_card_h(grid);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
@@ -589,7 +609,7 @@ fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: 
         if let Some(p) = picked {
             out.push(Command::SetPref(nikgob_view::PrefPatch::MixesWithNew(p == 1)));
         }
-        nav = mix_row(ui, grid, rect, "mixes", &lanes, live, state, out);
+        nav = mix_row(ui, grid, rect, "mixes", liked_playlist(state), &lanes, live, state, out);
     });
     nav
 }
@@ -666,26 +686,30 @@ pub(super) fn open_blend(ctx: &egui::Context, base: u32) {
 
 // ---- «Слушать снова».
 
-fn listen_again(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let rows = &state.home.listen_again;
     let per = grid.rows_per_line();
-    let body = lines(rows.len(), per) as f32 * ROW_H;
+    let (columns, tall) = song_columns(rows.len());
+    let body = tall as f32 * ROW_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "again", |ui| {
         if section_header(ui, grid, rect, "Слушать снова", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
             out.push(Command::PlayAll { tracks: rows.iter().map(|t| t.id).collect(), context: "Слушать снова".into() });
         }
-        let top = rect.top() + HEADER_H + HEADER_GAP;
-        for (i, t) in rows.iter().enumerate() {
-            let cell = grid.cell(i, per, top, ROW_H, 0.0);
-            let playing = state.player.current.as_ref().is_some_and(|c| c.id == t.id);
-            let o = cards::song_row(ui, cell, &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
-            if o.clicked {
-                out.push(play_again(rows, i));
+        let at = row::Row { name: "again", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
+        row::show(ui, grid, at, |ui, column, cell| {
+            for k in 0..SONG_LINES {
+                let i = column * SONG_LINES + k;
+                let Some(t) = rows.get(i) else { break };
+                let playing = state.player.current.as_ref().is_some_and(|c| c.id == t.id);
+                let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
+                if o.clicked {
+                    out.push(play_again(rows, i));
+                }
+                nav = pages.track_context_menu(&o.response, t, state, out).or(nav.take());
             }
-            nav = pages.track_context_menu(&o.response, t, state, out).or(nav.take());
-        }
+        });
     });
     nav
 }
@@ -717,6 +741,7 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
             per,
             n: tiles.len(),
             live,
+            bleed: 0.0,
         };
         row::show(ui, grid, at, |ui, i, cell| {
             let m = &tiles[i];
@@ -775,7 +800,7 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
     let title = if h.history { "Из твоей библиотеки" } else { "С чего начать" };
     entering(ui, rect, n, "shelf", |ui| {
         section_header(ui, grid, rect, title, None);
-        let at = row::Row { name: "shelf", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live };
+        let at = row::Row { name: "shelf", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live, bleed: 0.0 };
         row::show(ui, grid, at, |ui, i, cell| {
             let a = &albums[i];
             let c = &a.card;
@@ -801,36 +826,35 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
 
 // ---- «Новое для тебя».
 
-fn new_music(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
+fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let h = &state.home;
     let per = grid.rows_per_line();
-    // Only whole rows: three to a row show six, four show four or eight.
-    let mut count = h.discover.len().min(per * 2);
-    if count > per {
-        count -= count % per;
-    }
-    let rows = &h.discover[..count];
-    let body = lines(count, per) as f32 * ROW_H;
+    let rows = &h.discover;
+    let (columns, tall) = song_columns(rows.len());
+    let body = tall as f32 * ROW_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + body), Sense::hover());
     let mut nav = None;
     entering(ui, rect, n, "new", |ui| {
         if section_header(ui, grid, rect, "Новое для тебя", Some(("Слушать всё", Some(Icon::PlayArrow)))) {
             out.push(Command::PlayMix { id: MixId::Discover });
         }
-        let top = rect.top() + HEADER_H + HEADER_GAP;
-        for (i, t) in rows.iter().enumerate() {
-            let cell = grid.cell(i, per, top, ROW_H, 0.0);
-            let playing = state.player.current.as_ref().is_some_and(|c| t.track == Some(c.id));
-            let o = cards::song_row(ui, cell, &t.title, &t.artist, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
-            if o.liked {
-                out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
-            } else if o.clicked && t.playable {
-                out.push(play_discover(&h.discover, i));
+        let at = row::Row { name: "new", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
+        row::show(ui, grid, at, |ui, column, cell| {
+            for k in 0..SONG_LINES {
+                let i = column * SONG_LINES + k;
+                let Some(t) = rows.get(i) else { break };
+                let playing = state.player.current.as_ref().is_some_and(|c| t.track == Some(c.id));
+                let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
+                if o.liked {
+                    out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
+                } else if o.clicked && t.playable {
+                    out.push(play_discover(&h.discover, i));
+                }
+                let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), discover_rows(t, &state.dislikes));
+                let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
+                nav = discover_pick(&o.response.ctx, act, t, pages, out).or(nav.take());
             }
-            let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), discover_rows(t, &state.dislikes));
-            let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
-            nav = discover_pick(&o.response.ctx, act, t, pages, out).or(nav.take());
-        }
+        });
     });
     nav
 }
@@ -900,7 +924,7 @@ fn release_line(a: &StreamAlbumCard) -> (String, String) {
 }
 
 /// «Новые релизы» shows this many albums in its row; «Все» has the rest.
-pub const RELEASES_ROW: usize = 18;
+pub const RELEASES_ROW: usize = 24;
 
 fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let per = grid.cards_per_line();
@@ -914,7 +938,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
         if section_header(ui, grid, rect, "Новые релизы", Some(("Все", Some(Icon::ArrowForward)))) {
             nav = Some(Route::NewReleases);
         }
-        let at = row::Row { name: "releases", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live };
+        let at = row::Row { name: "releases", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live, bleed: 0.0 };
         row::show(ui, grid, at, |ui, i, cell| {
             let a = &albums[i];
             let (artist, tail) = release_line(a);

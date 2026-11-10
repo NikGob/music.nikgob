@@ -1037,9 +1037,10 @@ fn every_lane_names_its_artists() {
     }
 }
 
-/// «Миксы дня» stand beside «Миксы для тебя»: named by their places, no
-/// song in two of them, and another build of the same day shows the same
-/// ones (they are kept for the day in the library's cache).
+/// The day's mixes stand in «Миксы для тебя»: one «Микс дня» and the named
+/// mixes, no two cards of one name, none numbered, no song in two of the
+/// named ones, and another build of the same day shows the same ones (they
+/// are kept for the day in the library's cache).
 #[test]
 fn the_mixes_of_the_day_stay_for_the_day() {
     let l = library(3, 6, 12, &[]);
@@ -1049,12 +1050,19 @@ fn the_mixes_of_the_day_stay_for_the_day() {
     };
     let first = daily(&nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home);
     assert!(!first.is_empty(), "a library with a history has its mixes of the day");
+    assert_eq!(first.iter().filter(|m| m.1.starts_with("Микс дня")).count(), 1, "one mix of the day");
+    assert_eq!((first[0].0, first[0].1.as_str()), (nikgob_view::MixKey::Daily(0), "Микс дня"));
     let mut seen = std::collections::HashSet::new();
-    for (k, (key, title, tracks)) in first.iter().enumerate() {
-        assert_eq!(*title, format!("Микс дня {}", k + 1), "{key:?}");
+    let mut names = std::collections::HashSet::new();
+    for (key, title, tracks) in &first {
+        assert!(!title.trim().is_empty() && names.insert(title.clone()), "{key:?}: «{title}»");
         assert!(tracks.len() >= 12, "«{title}»: {}", tracks.len());
+        if *key == nikgob_view::MixKey::Daily(0) {
+            continue;
+        }
+        assert!(!title.starts_with("Микс дня"), "{key:?}: «{title}» is numbered");
         for t in tracks {
-            assert!(seen.insert(*t), "«{title}»: a song of another mix of the day");
+            assert!(seen.insert(*t), "«{title}»: a song of another named mix");
         }
     }
     let again = daily(&nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home);

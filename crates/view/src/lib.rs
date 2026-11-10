@@ -1871,7 +1871,9 @@ pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
 pub enum HomeSection {
     /// «Быстрый доступ».
     Shortcuts,
-    /// «Миксы дня».
+    /// «Миксы дня», a row there no longer is (its mixes stand in «Миксы
+    /// для тебя»): kept so that a list saved with it still reads; it is in
+    /// no order and no list ([`HomeSectionSwitch::complete`]).
     Daily,
     /// «Миксы для тебя».
     Mixes,
@@ -1889,9 +1891,8 @@ pub enum HomeSection {
 
 impl HomeSection {
     /// Every section in Главная's default order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::Shortcuts,
-        Self::Daily,
         Self::Mixes,
         Self::ListenAgain,
         Self::OfDay,
@@ -1940,7 +1941,7 @@ impl HomeSectionSwitch {
     pub fn complete(list: &[Self]) -> Vec<Self> {
         let mut out: Vec<Self> = Vec::new();
         for s in list {
-            if !out.iter().any(|o| o.key == s.key) {
+            if HomeSection::ALL.contains(&s.key) && !out.iter().any(|o| o.key == s.key) {
                 out.push(*s);
             }
         }
@@ -3498,7 +3499,11 @@ mod settings_v2_tests {
         // The given ones keep their order; a missing one sits after the
         // default ones before it (Быстрый доступ has none: first).
         use HomeSection as S;
-        assert_eq!(keys, [S::Shortcuts, S::Daily, S::Releases, S::Mixes, S::ListenAgain, S::OfDay, S::FromLibrary, S::New]);
+        assert_eq!(keys, [S::Shortcuts, S::Releases, S::Mixes, S::ListenAgain, S::OfDay, S::FromLibrary, S::New]);
+        // A list saved with the row there no longer is reads without it.
+        let old = [HomeSectionSwitch { key: S::Daily, on: false }, HomeSectionSwitch { key: S::Mixes, on: true }];
+        assert!(HomeSectionSwitch::complete(&old).iter().all(|s| s.key != S::Daily));
+        assert_eq!(HomeSectionSwitch::complete(&old).len(), HomeSection::ALL.len());
         assert!(!q.home_section_on(S::Releases), "the first of a section counts");
         assert!(q.home_section_on(S::Shortcuts));
     }

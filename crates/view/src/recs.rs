@@ -80,9 +80,10 @@ impl MixId {
 /// for the view): a taste profile's mix by the profile's key, «Всё
 /// вперемешку», the calm and the lively side of everything loved, a card of
 /// «Фон», a blend of two or three profiles, a kind of song before there are
-/// profiles, «На повторе»; a mix of the world's page open; «Любимые», the
-/// mix of a part of the day (its index: morning, day, evening, night) and
-/// a mix of the day by its number («Миксы дня»).
+/// profiles, «На повторе»; a mix of the world's page open; «Микс любимых»,
+/// the mix of a part of the day (its index: morning, day, evening, night)
+/// and the day's mixes: 0 is «Микс дня», from 1 the named mixes («Хип-хоп
+/// микс») by their number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum MixKey {
     Profile(u32),
@@ -100,7 +101,7 @@ pub enum MixKey {
 }
 
 impl MixKey {
-    /// A mix of the day: its row is «Миксы дня».
+    /// One of the day's mixes («Микс дня», a named mix): kept for the day.
     pub const fn is_daily(self) -> bool {
         matches!(self, Self::Daily(_))
     }
