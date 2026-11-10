@@ -474,6 +474,11 @@ impl Chrome {
         self.vol.zones = zones;
         self.vol.blocks = blocks;
         let Some(p) = ctx.pointer_hover_pos() else { return };
+        // A dialog over Now Playing (the lyrics window, any other) scrolls
+        // its own content: the wheel is its, not the volume's.
+        if ctx.layer_id_at(p).is_some_and(|l| l.order >= egui::Order::Tooltip) && self.vol.popover.is_none_or(|r| !r.contains(p)) {
+            return;
+        }
         let on_button = self.vol.button.is_some_and(|b| b.contains(p))
             || self.vol.popover.is_some_and(|r| r.contains(p));
         let zone = if on_button {
