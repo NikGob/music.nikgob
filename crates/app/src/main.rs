@@ -26,6 +26,7 @@ mod sweep;
 mod sysmotion;
 mod titlebar;
 mod scwidget;
+mod khpage;
 mod web_images;
 mod ytlogin;
 
@@ -478,12 +479,18 @@ fn stage(name: &str) {
 fn main() -> eframe::Result {
     LAUNCHED.get_or_init(Instant::now);
     // `--youtube-login` / `--soundcloud-login`: this run is only a sign-in
-    // window; `--sc-widget`: only SoundCloud's player host. They log to
-    // stderr, which the app copies into its own log; they must not write the
-    // app's log file themselves.
+    // window; `--khinsider-page`: a hidden page read; `--sc-widget`: only
+    // SoundCloud's player host. They log to stderr, which the app copies
+    // into its own log; they must not write the app's log file themselves.
     if std::env::args().any(|a| a == "--youtube-login" || a == "--soundcloud-login") {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
         if let Some(code) = ytlogin::child_main() {
+            std::process::exit(code);
+        }
+    }
+    if std::env::args().any(|a| a == "--khinsider-page") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        if let Some(code) = khpage::child_main() {
             std::process::exit(code);
         }
     }
@@ -781,6 +788,13 @@ fn main() -> eframe::Result {
     }
     if let Some(login) = ytlogin::WindowLogin::new(ytlogin::Site::Soundcloud, &data_dir.join("soundcloud")) {
         runtime.set_web_login(nikgob_core::streaming::Service::Soundcloud, Arc::new(login));
+    }
+    // khinsider's check, when the HTTP client still sees it: a hidden
+    // webview with its own profile. No WebView2 / WebKit: the source stays
+    // on the HTTP answer.
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(page) = khpage::HiddenPage::new(&data_dir.join("khinsider")) {
+        runtime.set_khinsider_browser(Arc::new(page));
     }
     if let Some(c) = relogin {
         runtime.send(c);

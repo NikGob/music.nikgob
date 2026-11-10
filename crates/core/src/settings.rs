@@ -38,14 +38,18 @@ pub struct Settings {
 }
 
 /// Where the download sources other than the indexer live
-/// (docs/stage4.5.md). Public instances, no accounts: empty lists take the
-/// built-in ones, a list of the user's own replaces them.
+/// (docs/stage4.5.md). Public instances, no accounts. Qobuz and Tidal
+/// instance lists live in `sources.toml` beside this file (written once
+/// with the built-in addresses). A non-empty list here is copied into that
+/// file only when it is first created.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourcesSettings {
     /// Qobuz-DL instances (`https://host`, the API under `/api/`).
+    /// Copied into `sources.toml` once, when that file is first created.
     pub qobuz_instances: Vec<String>,
     /// hifi-api instances for Tidal (`https://host`).
+    /// Copied into `sources.toml` once, when that file is first created.
     pub tidal_instances: Vec<String>,
     /// khinsider's address (empty: downloads.khinsider.com).
     pub khinsider_url: String,

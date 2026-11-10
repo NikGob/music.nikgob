@@ -35,7 +35,7 @@ mod streams;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender, select, tick};
 use nikgob_core::model::{
@@ -48,6 +48,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
+pub use nikgob_sources::khinsider::PageBrowser;
 pub use recs::{
     HomePreview, ModelPreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_replay, preview_replay_with,
     preview_tile_days,
@@ -181,6 +182,7 @@ enum Msg {
     OdesliBase(String),
     GraphMetadata(Box<nikgob_metadata::Metadata>),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
+    KhinsiderBrowser(Arc<dyn nikgob_sources::khinsider::PageBrowser>),
     Shutdown,
 }
 
@@ -290,6 +292,12 @@ impl Runtime {
     /// Google sign-in; see [`WebLogin`]). A logout also forgets its session.
     pub fn set_web_login(&self, service: StreamKind, login: Arc<dyn WebLogin>) {
         let _ = self.tx.send(Msg::WebLogin(service, login));
+    }
+
+    /// The hidden webview khinsider asks when a page is still a bot check.
+    /// None (Linux without WebKit) leaves the HTTP answer.
+    pub fn set_khinsider_browser(&self, browser: Arc<dyn nikgob_sources::khinsider::PageBrowser>) {
+        let _ = self.tx.send(Msg::KhinsiderBrowser(browser));
     }
 
     /// Asks this Odesli base url for share links instead of
@@ -507,7 +515,13 @@ struct Worker {
     /// Download sources other than the indexer's torrents (khinsider, the
     /// free services, Soulseek), whether on or not (docs/stage4.5.md).
     sources: Vec<Arc<dyn nikgob_core::source::Source>>,
-    /// Last torrent search, indexed like `SearchView::torrents.results`.
+    /// khinsider, so a webview can be given to it after start.
+    khinsider: Option<Arc<nikgob_sources::khinsider::Khinsider>>,
+    /// Qobuz and Tidal, so `sources.toml` can change their lists.
+    qobuz: Option<Arc<nikgob_sources::qobuz::Qobuz>>,
+    tidal: Option<Arc<nikgob_sources::tidal::Tidal>>,
+    /// `sources.toml`'s mtime when it was last read.
+    sources_mtime: Option<SystemTime>,
     candidates: Vec<nikgob_core::indexer::Candidate>,
     torrents: torrents::Torrents,
     /// Accounts, stream search and pages, likes sync, wishlist, sharing.
@@ -576,6 +590,10 @@ impl Worker {
         playback.set_volume(if saved.muted { 0.0 } else { volume });
         playback.configure(crossfade(&config.prefs), config.prefs.normalization);
         config.library.set_album_likes_tracks(config.prefs.album_like_tracks);
+        let web = search::web_sources_from(config.settings_path.as_deref());
+        let sources_mtime = config.settings_path.as_ref().and_then(|p| {
+            std::fs::metadata(nikgob_sources::config::beside(p)).and_then(|m| m.modified()).ok()
+        });
         Self {
             res: Resolver::new(config.library.clone(), config.library_dir),
             lib: config.library,
@@ -617,7 +635,11 @@ impl Worker {
             last_export: Instant::now(),
             exported_fp: None,
             indexer: search::indexer_from(config.settings_path.as_deref()),
-            sources: search::web_sources_from(config.settings_path.as_deref()),
+            sources: web.list,
+            khinsider: web.khinsider,
+            qobuz: web.qobuz,
+            tidal: web.tidal,
+            sources_mtime,
             candidates: Vec::new(),
             torrents: torrents::Torrents::new(torrent_state, torrent_offline),
             import,
@@ -694,6 +716,11 @@ impl Worker {
                     Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
                     Ok(Msg::GraphMetadata(m)) => self.set_graph_metadata(*m),
                     Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
+                    Ok(Msg::KhinsiderBrowser(browser)) => {
+                        if let Some(k) = &self.khinsider {
+                            k.set_browser(browser);
+                        }
+                    }
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
                         break;
@@ -706,7 +733,8 @@ impl Worker {
                     self.poll_torrents();
                     self.poll_share();
                     self.wish_poll_direct();
-                }
+                    self.reload_sources_file();
+                },
                 recv(ticker) -> _ => {
                     self.expire_toasts();
                     self.maybe_export(false);
@@ -1254,6 +1282,7 @@ impl Worker {
             Command::SetMetadata { contact, acoustid_key } => self.set_metadata(contact, acoustid_key),
             Command::SetLastfmKey(key) => self.set_lastfm_key(&key),
             Command::SetListenbrainzToken(token) => self.set_listenbrainz_token(&token),
+            Command::OpenSourcesConfig => self.open_sources_config(),
             Command::RealCovers(urls) => self.real_covers_wanted(urls),
             Command::SearchTorrents(q) => self.search_torrents(q),
             c @ (Command::DownloadTorrent { .. }
@@ -3018,6 +3047,104 @@ impl Worker {
     }
 }
 
+
+impl Worker {
+    fn sources_file(&self) -> Option<std::path::PathBuf> {
+        self.settings_path.as_ref().map(|p| nikgob_sources::config::beside(p))
+    }
+
+    /// `sources.toml` changed: the new lists take over. A pause of an
+    /// instance that stays is kept. A file that does not parse is left as
+    /// it is, and the lists in use stay.
+    fn reload_sources_file(&mut self) {
+        let Some(path) = self.sources_file() else { return };
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified == self.sources_mtime {
+            return;
+        }
+        self.sources_mtime = modified;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("sources.toml: {e}");
+                return;
+            }
+        };
+        let defaults = source_defaults();
+        let lists = match nikgob_sources::config::parse(&text, defaults) {
+            Ok(l) => l,
+            Err(e) => {
+                log::warn!("sources.toml: {e}");
+                return;
+            }
+        };
+        if self.qobuz.as_ref().is_some_and(|q| q.instances_now() != (lists.qobuz.clone(), lists.qobuz_own)) {
+            if let Some(q) = &self.qobuz {
+                q.set_instances(&lists.qobuz, lists.qobuz_own);
+            }
+            log::info!("sources.toml: qobuz {:?}", lists.qobuz);
+        }
+        if self.tidal.as_ref().is_some_and(|t| t.instances_now() != (lists.tidal.clone(), lists.tidal_own)) {
+            if let Some(t) = &self.tidal {
+                t.set_instances(&lists.tidal, lists.tidal_own);
+            }
+            log::info!("sources.toml: tidal {:?}", lists.tidal);
+        }
+    }
+
+    /// Creates `sources.toml` if it is missing and opens it for editing.
+    fn open_sources_config(&mut self) {
+        let Some(settings) = self.settings_path.clone() else {
+            self.toast("Некуда сохранить настройки", None);
+            return;
+        };
+        let path = nikgob_sources::config::beside(&settings);
+        let saved = nikgob_core::settings::Settings::load(&settings).unwrap_or_default();
+        if let Err(e) = nikgob_sources::config::ensure(&path, source_defaults(), &saved.sources) {
+            log::error!("sources.toml: {e}");
+            self.toast("Не получилось создать файл инстансов", None);
+            return;
+        }
+        self.sources_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if let Err(e) = open_file(&path) {
+            log::warn!("sources.toml: {e}");
+            self.toast(format!("Файл инстансов: {}", path.display()), None);
+        }
+    }
+}
+
+fn source_defaults() -> nikgob_sources::config::Defaults<'static> {
+    nikgob_sources::config::Defaults {
+        qobuz: nikgob_sources::qobuz::DEFAULT_INSTANCES,
+        tidal: nikgob_sources::tidal::DEFAULT_INSTANCES,
+    }
+}
+
+/// Opens `path` with the system editor (a folder opener on Windows selects
+/// the file when it has no editor of its own). A test never launches one.
+fn open_file(path: &std::path::Path) -> std::io::Result<()> {
+    if cfg!(test) {
+        log::info!("sources.toml: not opened from a test ({})", path.display());
+        return Ok(());
+    }
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg("start").arg("").arg(path);
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    let child = cmd.spawn()?;
+    #[cfg(unix)]
+    let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+        let _ = child.wait();
+    });
+    #[cfg(not(unix))]
+    drop(child);
+    Ok(())
+}
 
 impl Worker {
     /// Stores the Prowlarr address and key in settings.toml (never in prefs).
