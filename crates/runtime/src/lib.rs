@@ -88,6 +88,11 @@ pub struct PlayRequest {
     /// gain comes with the stream).
     pub gain_db: f32,
     pub duration: Option<Duration>,
+    /// The version the track plays as («Скорость»; `Normal` when that is
+    /// switched off).
+    pub speed: nikgob_view::SpeedVariant,
+    /// A version other than `Normal` keeps the timbre of its voices.
+    pub keep_timbre: bool,
 }
 
 /// Events the backend reports back (from any thread) through
@@ -110,6 +115,9 @@ pub enum PlaybackEvent {
     /// How long the item is, as the engine found it (the container's
     /// length, else the stream's): the length of a track that has none.
     Duration { id: u64, duration: Duration },
+    /// The item plays at this speed after all, not at its request's (a
+    /// live track of another player cannot be sped up).
+    Speed { id: u64, speed: f32 },
 }
 
 /// The audio engine as the runtime sees it.
@@ -126,6 +134,12 @@ pub trait Playback: Send {
     fn position(&self) -> Duration;
     /// Crossfade (None = gapless) and loudness normalization.
     fn configure(&mut self, _crossfade: Option<Duration>, _normalization: bool) {}
+    /// The equalizer: on or off, and each band's gain in dB.
+    fn set_equalizer(&mut self, _on: bool, _gains: [f32; nikgob_view::EQ_BANDS]) {}
+    /// Item `id` (the playing one, or the one preloaded) plays as `speed`
+    /// from now on, going on from where it is. Positions stay the track's
+    /// own time: at 1.2 the position moves 1.2 s a second.
+    fn set_speed(&mut self, _id: u64, _speed: nikgob_view::SpeedVariant, _keep_timbre: bool) {}
     /// Switches the output device (None = system default). Returns true if
     /// the engine was restarted and lost what it was playing.
     fn set_device(&mut self, _device: Option<String>) -> bool {
@@ -354,7 +368,14 @@ enum Follow {
 /// moved since the last report) while playing at `rate`. It never moves
 /// backwards: ahead of a stalled sound it waits, ahead of a moving one it
 /// slows down.
+#[cfg(test)]
 fn follow(ours: Duration, heard: Duration, stalled: bool, rate: f64) -> Follow {
+    follow_at(ours, heard, stalled, rate, 1.0)
+}
+
+/// [`follow`] for a track whose position moves `speed` seconds a second
+/// (a track played faster or slower: positions are its own time).
+fn follow_at(ours: Duration, heard: Duration, stalled: bool, rate: f64, speed: f64) -> Follow {
     if ours.abs_diff(heard) > POSITION_SNAP {
         return Follow::Snap;
     }
@@ -362,10 +383,10 @@ fn follow(ours: Duration, heard: Duration, stalled: bool, rate: f64) -> Follow {
         return Follow::Rate(0.0);
     }
     if ours.abs_diff(heard) <= POSITION_JITTER {
-        return if rate == 1.0 { Follow::Keep } else { Follow::Rate(1.0) };
+        return if rate == speed { Follow::Keep } else { Follow::Rate(speed) };
     }
     let error = heard.as_secs_f64() - ours.as_secs_f64();
-    Follow::Rate((1.0 + error / SLEW_SECS).clamp(1.0 - SLEW_MAX, 1.0 + SLEW_MAX))
+    Follow::Rate((speed + error / SLEW_SECS).clamp(speed - SLEW_MAX, speed + SLEW_MAX))
 }
 
 /// A toast no snackbar took away is dropped after this long.
@@ -440,6 +461,12 @@ struct Worker {
     /// How fast `position` moves from `position_at` (1 normal; a little off
     /// while it meets the heard position, 0 while the sound stalls).
     rate: f64,
+    /// How fast the position of the playing track moves when all is well:
+    /// its speed (1 as recorded).
+    speed: f64,
+    /// The version the playing entry was handed to the engine as, and
+    /// whether it keeps its timbre.
+    playing_fx: (nikgob_view::SpeedVariant, bool),
     /// The engine's last position report, to tell a stall.
     reported: Option<(u64, Duration)>,
     /// When we last moved `position` ourselves (see [`POSITION_SETTLE`]).
@@ -575,6 +602,24 @@ impl Worker {
         let volume = saved.volume.unwrap_or(0.8).clamp(0.0, 1.0);
         playback.set_volume(if saved.muted { 0.0 } else { volume });
         playback.configure(crossfade(&config.prefs), config.prefs.normalization);
+        playback.set_equalizer(config.prefs.eq_on, config.prefs.eq_gains);
+        {
+            // The versions chosen for tracks («Скорость»).
+            let chosen: std::collections::HashMap<TrackId, nikgob_view::SpeedVariant> = config
+                .library
+                .track_fx()
+                .unwrap_or_else(|e| {
+                    log::warn!("the speeds of the tracks could not be read: {e}");
+                    Vec::new()
+                })
+                .into_iter()
+                .filter_map(|(track, key)| Some((track, nikgob_view::SpeedVariant::from_key(&key)?)))
+                .collect();
+            let mut st = state.write();
+            let enabled = st.prefs.speed_enabled;
+            st.speeds = nikgob_view::TrackSpeeds { enabled, chosen: Arc::new(chosen) };
+
+        }
         config.library.set_album_likes_tracks(config.prefs.album_like_tracks);
         Self {
             res: Resolver::new(config.library.clone(), config.library_dir),
@@ -589,6 +634,8 @@ impl Worker {
             position: Duration::ZERO,
             position_at: Instant::now(),
             rate: 1.0,
+            speed: 1.0,
+            playing_fx: (nikgob_view::SpeedVariant::Normal, false),
             reported: None,
             jumped_at: Instant::now(),
             volume,
@@ -873,9 +920,13 @@ impl Worker {
             Command::RestoreOwnLyrics(track) => self.restore_own_lyrics(track),
             Command::AlignModel { key, download } => self.align_model(&key, download),
             Command::SeekBy(ms) => {
+                // Seconds as the listener counts them: more of the track
+                // when it plays faster.
+                let ms = (ms as f64 * self.speed).round() as i64;
                 let p = self.position_now().as_millis() as i64 + ms;
                 self.seek(Duration::from_millis(p.max(0) as u64));
             }
+            Command::SetTrackSpeed { track, variant } => self.set_track_speed(track, variant),
             Command::SetVolume(v) => {
                 let v = v.clamp(0.0, 1.0);
                 if v == self.volume && !self.muted {
@@ -1447,13 +1498,66 @@ impl Worker {
                 0.0,
             ),
         };
+        let (speed, keep_timbre) = self.fx_of(e.track);
         let req = PlayRequest {
             id: e.id,
             source,
             gain_db,
             duration,
+            speed,
+            keep_timbre,
         };
         Some((req, src.id, src.kind))
+    }
+
+    /// The version `track` plays as now, and whether it keeps its timbre.
+    fn fx_of(&self, track: TrackId) -> (nikgob_view::SpeedVariant, bool) {
+        let st = self.state.read();
+        let variant = st.speeds.of(track);
+        (variant, st.prefs.keep_timbre && variant != nikgob_view::SpeedVariant::Normal)
+    }
+
+    /// `Command::SetTrackSpeed`: remembered with the track, heard at once
+    /// if it plays.
+    fn set_track_speed(&mut self, track: TrackId, variant: nikgob_view::SpeedVariant) {
+        let key = (variant != nikgob_view::SpeedVariant::Normal).then(|| variant.key());
+        if let Err(e) = self.lib.set_track_fx(track, key) {
+            log::warn!("{track}: its speed could not be saved: {e}");
+            return;
+        }
+        let mut chosen = (*self.state.read().speeds.chosen).clone();
+        if key.is_some() {
+            chosen.insert(track, variant);
+        } else {
+            chosen.remove(&track);
+        }
+        self.publish(|s| s.speeds.chosen = Arc::new(chosen));
+        self.apply_speed(Some(track));
+    }
+
+    /// The speed of `changed` (or of everything: the settings) changed: the
+    /// playing track goes on as its version now is, from where it is, and
+    /// the preloaded next track is prepared anew if it is concerned.
+    fn apply_speed(&mut self, changed: Option<TrackId>) {
+        if let Some(e) = self.playing {
+            let fx = self.fx_of(e.track);
+            if fx != self.playing_fx {
+                self.playback.set_speed(e.id, fx.0, fx.1);
+                self.playing_fx = fx;
+                // The position is the track's own time: it stays, and
+                // moves at the new pace from here.
+                let now = Instant::now();
+                self.position = self.position_at_instant(now);
+                self.position_at = now;
+                self.speed = f64::from(fx.0.speed());
+                self.rate = self.speed;
+                self.publish_player();
+            }
+        }
+        let next = self.queue.peek_auto_next();
+        if next.is_some_and(|n| changed.is_none_or(|t| n.track == t)) {
+            self.preload_next();
+        }
     }
 
     /// [`Self::request_skipping`] with nothing skipped.
@@ -1464,6 +1568,8 @@ impl Worker {
     /// Hands `req` (for the playing entry `e`) to the engine. A stream reads
     /// Buffering until the engine reports its start.
     fn play_request(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.playing_fx = (req.speed, req.keep_timbre);
+        self.speed = f64::from(req.speed.speed());
         self.playback.play(req);
         self.restarted = Some(e.id);
         self.playing = Some(e);
@@ -1490,7 +1596,7 @@ impl Worker {
         self.play_request(e, req, source, kind);
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.seek_to_failover(e);
         self.preload_next();
@@ -1506,7 +1612,7 @@ impl Worker {
         self.playback.seek(at);
         self.position = at;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.publish_player();
     }
@@ -1632,7 +1738,7 @@ impl Worker {
         self.play_request(e, req, source, kind);
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
@@ -1669,7 +1775,7 @@ impl Worker {
             Status::Paused => {
                 self.heard_tick();
                 self.position_at = Instant::now();
-                self.rate = 1.0;
+                self.rate = self.speed;
                 self.status = Status::Playing;
                 self.playback.resume();
                 self.publish_player();
@@ -1706,7 +1812,7 @@ impl Worker {
         self.playback.seek(p);
         self.position = p;
         self.position_at = Instant::now();
-        self.rate = 1.0;
+        self.rate = self.speed;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
             let _ = self.lib.record_event(
@@ -1849,7 +1955,7 @@ impl Worker {
                         _ => Duration::ZERO,
                     };
                     self.position_at = Instant::now();
-                    self.rate = 1.0;
+                    self.rate = self.speed;
                     self.publish_player();
                 }
             }
@@ -1875,12 +1981,15 @@ impl Worker {
                     self.playing = Some(e);
                     self.tried.clear();
                     // The engine took over what `preload_next` asked for.
-                    self.playing_source = self
-                        .request_skipping(e, &[])
-                        .map(|(_, source, kind)| (source, kind));
+                    let taken = self.request_skipping(e, &[]);
+                    self.playing_fx = taken
+                        .as_ref()
+                        .map_or((nikgob_view::SpeedVariant::Normal, false), |(req, ..)| (req.speed, req.keep_timbre));
+                    self.speed = f64::from(self.playing_fx.0.speed());
+                    self.playing_source = taken.map(|(_, source, kind)| (source, kind));
                     self.position = Duration::ZERO;
                     self.position_at = Instant::now();
-                    self.rate = 1.0;
+                    self.rate = self.speed;
                     let kind = self.playing_source.map(|(_, k)| k).filter(|k| !k.is_local());
                     self.record_start(e, kind);
                     self.preload_next();
@@ -1902,7 +2011,7 @@ impl Worker {
                     self.status = Status::Playing;
                     self.position = position;
                     self.position_at = Instant::now();
-                    self.rate = 1.0;
+                    self.rate = self.speed;
                     self.publish_player();
                     return;
                 }
@@ -1912,7 +2021,7 @@ impl Worker {
                     if self.status != Status::Playing {
                         self.position = position;
                         self.position_at = Instant::now();
-                        self.rate = 1.0;
+                        self.rate = self.speed;
                         return;
                     }
                     // The view extrapolates from its last publish and stops at
@@ -1923,8 +2032,8 @@ impl Worker {
                     let now = Instant::now();
                     let ours = self.position_at_instant(now);
                     // Where the sound is now (a stalled one stands still).
-                    let heard = if stalled { position } else { position + late };
-                    match follow(ours, heard, stalled, self.rate) {
+                    let heard = if stalled { position } else { position + late.mul_f64(self.speed) };
+                    match follow_at(ours, heard, stalled, self.rate, self.speed) {
                         Follow::Keep => {}
                         Follow::Snap => {
                             if self.jumped_at.elapsed() < POSITION_SETTLE {
@@ -1932,7 +2041,7 @@ impl Worker {
                             }
                             self.position = heard;
                             self.position_at = now;
-                            self.rate = if stalled { 0.0 } else { 1.0 };
+                            self.rate = if stalled { 0.0 } else { self.speed };
                             self.publish_player();
                         }
                         Follow::Rate(rate) => {
@@ -1946,6 +2055,17 @@ impl Worker {
             }
             // Taken as a position above.
             PlaybackEvent::Paused | PlaybackEvent::Resumed | PlaybackEvent::PositionAt { .. } => {}
+            PlaybackEvent::Speed { id, speed } => {
+                let speed = f64::from(speed);
+                if self.playing.map(|e| e.id) == Some(id) && speed.is_finite() && speed > 0.0 && speed != self.speed {
+                    let now = Instant::now();
+                    self.position = self.position_at_instant(now);
+                    self.position_at = now;
+                    self.speed = speed;
+                    self.rate = speed;
+                    self.publish_player();
+                }
+            }
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
                 // without one (a stream whose service did not say).
@@ -2095,6 +2215,7 @@ impl Worker {
         let status = self.status;
         let now = Instant::now();
         let (position, rate) = (self.position_at_instant(now), self.rate as f32);
+        let speed = self.speed as f32;
         let (volume, muted) = (self.volume, self.muted);
         let (shuffle, repeat) = (self.queue.shuffle, self.queue.repeat);
         let context = self.queue.context.clone();
@@ -2134,6 +2255,7 @@ impl Worker {
             p.position = position;
             p.at = now;
             p.rate = rate;
+            p.speed = speed;
             p.volume = volume;
             p.muted = muted;
             p.shuffle = shuffle;
@@ -2483,8 +2605,19 @@ impl Worker {
             p.masters_dir = old.masters_dir.clone();
         }
         self.playback.configure(crossfade(&p), p.normalization);
+        if (old.eq_on, old.eq_gains) != (p.eq_on, p.eq_gains) {
+            self.playback.set_equalizer(p.eq_on, p.eq_gains);
+        }
+        let speed_changed = (old.speed_enabled, old.keep_timbre) != (p.speed_enabled, p.keep_timbre);
+        let speed_enabled = p.speed_enabled;
         self.torrent_prefs(&p);
-        self.publish(|s| s.prefs = *p.clone());
+        self.publish(|s| {
+            s.prefs = *p.clone();
+            s.speeds.enabled = speed_enabled;
+        });
+        if speed_changed {
+            self.apply_speed(None);
+        }
         self.save_prefs();
         self.import_prefs(&p);
         if (old.check_fake_lossless, old.convert_fake_lossless, old.fake_flac_auto)
@@ -3081,7 +3214,9 @@ impl Worker {
         self.playback.set_volume(volume);
         let prefs = self.state.read().prefs.clone();
         self.playback.configure(crossfade(&prefs), prefs.normalization);
+        self.playback.set_equalizer(prefs.eq_on, prefs.eq_gains);
         let Some(e) = self.playing else { return };
+
         let pos = self.position_now();
         let status = self.status;
         if let Some(req) = self.request(e) {
@@ -3093,7 +3228,7 @@ impl Worker {
             }
             self.position = pos;
             self.position_at = Instant::now();
-            self.rate = 1.0;
+            self.rate = self.speed;
             self.preload_next();
         }
     }

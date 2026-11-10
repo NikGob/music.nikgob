@@ -40,7 +40,9 @@ mod recs;
 mod repairs;
 pub mod search;
 mod streams;
+mod track_fx;
 mod trash;
+
 mod types;
 mod unwanted;
 mod userdata;

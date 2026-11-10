@@ -42,7 +42,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
-use nikgob_audio::{Analyzer, ByteSource, Event, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, Player, PlayerOptions};
+use nikgob_audio::{
+    Analyzer, ByteSource, Event, ItemFx, ItemSource, PcmError, PcmRead, PcmSource, PlayItem, Player, PlayerOptions, Reverb,
+};
 use nikgob_core::streaming::{AudioStream, StreamError, StreamService};
 use nikgob_core::streaming::Service as StreamKind;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent};
@@ -100,6 +102,26 @@ impl PcmSource for Silence {
     fn seek(&mut self, position: Duration) -> bool {
         self.at = ((position.as_secs_f64() * f64::from(Self::RATE)) as u64).min(self.frames);
         true
+    }
+}
+
+/// What the engine does for a version of a track («Скорость»): its speed,
+/// tone and reverb as the view names them, and whether the voices keep
+/// their timbre.
+fn item_fx(speed: nikgob_view::SpeedVariant, keep_timbre: bool) -> ItemFx {
+    let s = speed.sound();
+    ItemFx {
+        speed: s.speed,
+        low_shelf_db: s.low_shelf_db,
+        high_shelf_db: s.high_shelf_db,
+        preamp_db: s.preamp_db,
+        reverb: s.echo.map(|e| Reverb {
+            wet: e.wet,
+            decay_s: e.decay_s,
+            damping: e.damping,
+            pre_delay_ms: e.pre_delay_ms,
+        }),
+        keep_formants: keep_timbre,
     }
 }
 
@@ -255,15 +277,29 @@ impl Engine {
         }
     }
 
+    /// A live track (another player's sound as it plays) cannot be sped
+    /// up: it plays as recorded, and the runtime is told so.
+    fn plays_live(&self, r: &PlayRequest) {
+        if r.speed == nikgob_view::SpeedVariant::Normal {
+            return;
+        }
+        let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(to) = to {
+            let _ = to.send(PlaybackEvent::Speed { id: r.id, speed: 1.0 });
+        }
+    }
+
     fn item(&self, r: PlayRequest) -> PlayItem {
         if let (Some(w), PlaySource::Stream { id, .. }) = (self.widget_for(&r), &r.source) {
             log::debug!("soundcloud {id} plays through SoundCloud's player (item {})", r.id);
             self.quality(r.id, "Плеер SoundCloud");
+            self.plays_live(&r);
             return PlayItem {
                 id: r.id,
                 source: ItemSource::Pcm(Box::new(w.track(id, r.duration))),
                 gain_db: 0.0,
                 duration_hint: r.duration,
+                fx: ItemFx::default(),
             };
         }
         if let (Some(s), PlaySource::Stream { id, .. }) = (self.soloist_for(&r), &r.source) {
@@ -272,11 +308,13 @@ impl Engine {
             if let Some(to) = to {
                 let _ = to.send(PlaybackEvent::Quality { id: r.id, label: "Soloist".into() });
             }
+            self.plays_live(&r);
             return PlayItem {
                 id: r.id,
                 source: ItemSource::Pcm(Box::new(s.track(id, r.duration))),
                 gain_db: 0.0,
                 duration_hint: r.duration,
+                fx: ItemFx::default(),
             };
         }
         if let Some(silence) = silence_for(&r) {
@@ -286,8 +324,10 @@ impl Engine {
                 source: ItemSource::Pcm(Box::new(silence)),
                 gain_db: 0.0,
                 duration_hint: r.duration,
+                fx: item_fx(r.speed, r.keep_timbre),
             };
         }
+        let fx = item_fx(r.speed, r.keep_timbre);
         let source = match r.source {
             PlaySource::File(path) => ItemSource::File(path),
             PlaySource::Stream { service, id } => {
@@ -328,6 +368,7 @@ impl Engine {
             source,
             gain_db: r.gain_db,
             duration_hint: r.duration,
+            fx,
         }
     }
 }
@@ -486,6 +527,24 @@ impl Playback for Engine {
         self.player.set_crossfade(crossfade);
         self.player.set_normalization(normalization);
     }
+
+    fn set_equalizer(&mut self, on: bool, gains: [f32; nikgob_view::EQ_BANDS]) {
+        self.player.set_eq(on, gains);
+    }
+
+    fn set_speed(&mut self, id: u64, speed: nikgob_view::SpeedVariant, keep_timbre: bool) {
+        if self.on_live.is_none() {
+            self.player.set_fx(id, item_fx(speed, keep_timbre));
+            return;
+        }
+        // Not for a live track: it plays as its player plays it.
+        let to = self.links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(to) = to {
+            let _ = to.send(PlaybackEvent::Speed { id, speed: 1.0 });
+        }
+
+    }
+
 
     fn set_device(&mut self, device: Option<String>) -> bool {
         self.player.stop();
