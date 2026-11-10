@@ -18,12 +18,13 @@ use fastframe_audio::{Buffer, BufferSize, OutputOptions};
 
 use crate::analyzer::Analyzer;
 use crate::backend::{Backend, BackendNote, DeviceBackend, OfflineBackend, RenderHandle};
+use crate::eq::{EQ_BANDS, EQ_MAX_DB, eq_preamp_db};
 use crate::offline::{OfflineDevice, OfflineOptions};
 use crate::pipeline::{DecCmd, DecEvent, Decoder};
 use crate::render::{CbEvent, Mark, Renderer};
 use crate::shared::{LogLimiter, ManualClock, PlayClock, Shared, volume_curve};
 use crate::tap::VisualizerTap;
-use crate::types::{Event, PlayItem, SpawnError};
+use crate::types::{Event, ItemFx, PlayItem, SpawnError};
 
 /// Samples the ring can hold (about 5 s of 48 kHz stereo; the decoder keeps
 /// it only about 1 s full).
@@ -96,6 +97,7 @@ enum Command {
     Toggle,
     Stop { gen_id: u64 },
     Seek { pos: Duration, id: u64, gen_id: u64 },
+    SetFx { id: u64, fx: ItemFx, gen_id: u64 },
 }
 
 /// A position the listener asked for that the audio callback has not applied
@@ -193,6 +195,7 @@ impl Player {
                 | Command::ClearNext
                 | Command::Stop { .. }
                 | Command::Seek { .. }
+                | Command::SetFx { .. }
         ) {
             self.inner.sh.inflight.fetch_add(1, Ordering::AcqRel);
         }
@@ -268,6 +271,64 @@ impl Player {
         self.send(Command::Seek { pos, id, gen_id });
     }
 
+    /// Changes the speed, tone and reverb of item `id` (see [`ItemFx`]),
+    /// the playing one or the one prepared as next. The playing item goes
+    /// on from where it is with the new sound, heard at once (what was
+    /// buffered of the old sound is dropped behind short fades, as for a
+    /// seek); [`position`](Self::position) does not jump, since it is on
+    /// the item's own timeline.
+    pub fn set_fx(&self, id: u64, fx: ItemFx) {
+        let gen_id = self.next_gen();
+        let now = position_of(&self.inner.sh, &self.inner.clock, &self.inner.pending);
+        // A play or a seek still on its way keeps answering for the
+        // position: the change goes on from where that one lands.
+        let applied = self.inner.sh.cursor.read().applied_gen;
+        let waiting = self
+            .inner
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|p| applied < p.gen_id);
+        if !waiting
+            && let Some((current, pos)) = now
+            && current == id
+        {
+
+            self.set_pending(Some(PendingPos {
+                gen_id,
+                id,
+                pos_ns: u64::try_from(pos.as_nanos()).unwrap_or(u64::MAX),
+            }));
+        }
+        self.send(Command::SetFx { id, fx, gen_id });
+    }
+
+    /// Sets the ten-band equalizer: on or off, and the gain of each band
+    /// in dB (see [`EQ_FREQS`](crate::EQ_FREQS), within
+    /// +-[`EQ_MAX_DB`](crate::EQ_MAX_DB)). Heard within a callback; the
+    /// gains glide to the new curve, so neither a preset switch nor a
+    /// dragged point clicks. The level before the bands is lowered by the
+    /// curve's highest point ([`eq_preamp_db`](crate::eq_preamp_db)), so a
+    /// boost never pushes a full-scale mix over full scale. Off (or all
+    /// zero) leaves the samples untouched.
+    pub fn set_eq(&self, on: bool, gains_db: [f32; EQ_BANDS]) {
+        let gains = gains_db.map(|g| {
+            if g.is_finite() {
+                g.clamp(-EQ_MAX_DB, EQ_MAX_DB)
+            } else {
+                0.0
+            }
+        });
+        let sh = &self.inner.sh;
+        for (slot, gain) in sh.eq_gains.iter().zip(gains) {
+            slot.store(gain.to_bits(), Ordering::Relaxed);
+        }
+        sh.eq_preamp
+            .store(eq_preamp_db(&gains).to_bits(), Ordering::Relaxed);
+        sh.eq_on.store(on, Ordering::Relaxed);
+        sh.eq_gen.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Sets the volume, 0.0 to 1.0, on a perceptual (cubic) curve. Takes
     /// effect within a few milliseconds without zipper noise.
     pub fn set_volume(&self, volume: f32) {
@@ -319,7 +380,9 @@ impl Player {
 
     /// Time-based position of the audible item, from the output device's
     /// played clock (so it stays smooth and accounts for device latency).
-    /// `None` when nothing is loaded. Safe to call every frame.
+    /// It is a position on the item's own timeline: an item playing at
+    /// another speed ([`ItemFx::speed`]) moves through it that much faster
+    /// or slower. `None` when nothing is loaded. Safe to call every frame.
     #[must_use]
     pub fn position(&self) -> Option<Duration> {
         position_of(&self.inner.sh, &self.inner.clock, &self.inner.pending).map(|(_, p)| p)
@@ -377,7 +440,9 @@ fn position_of(
     if snap.moving
         && let Some(clock) = clock.get()
     {
-        pos += clock.played_ns().saturating_sub(snap.clock_ns);
+        pos += snap
+            .speed
+            .item_ns(clock.played_ns().saturating_sub(snap.clock_ns));
     }
     Some((snap.id, Duration::from_nanos(pos)))
 }
@@ -664,8 +729,12 @@ impl Control {
                 self.idle_pause_at = Some(Instant::now() + IDLE_PAUSE_DELAY);
                 self.emit(Event::Stopped);
             }
+            Command::SetFx { id, fx, gen_id } => {
+                let _ = self.dec_tx.send(DecCmd::SetFx { id, fx, gen_id });
+            }
             Command::Seek { pos, id, gen_id } => {
                 let _ = self.dec_tx.send(DecCmd::Seek { pos, id, gen_id });
+
                 if let Some((id, p)) = position_of(&self.sh, &self.clock, &self.pending) {
                     self.emit(Event::Position { id, pos: p, at: Instant::now() });
                 }

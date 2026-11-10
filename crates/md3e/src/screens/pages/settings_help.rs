@@ -150,6 +150,12 @@ pub enum SettingId {
     Gapless,
     Crossfade,
     Normalization,
+    /// «Эквалайзер»: its switch, and the sheet with the curve.
+    Equalizer,
+    /// «Скорость трека»: the «Скорость» item of a track's menu.
+    TrackSpeed,
+    /// «Сохранять тембр голоса» of a track played faster or slower.
+    KeepTimbre,
     LibraryDir,
     MastersDir,
     Inbox,
@@ -438,7 +444,8 @@ impl SettingId {
             Preset(Area::Track) => TAB_LOOK,
             Preset(Area::Sources | Area::Seeding) => TAB_DOWNLOADS,
             Preset(Area::Load) => TAB_SYSTEM,
-            OutputDevice | Gapless | Crossfade | Normalization | Autoplay | AutoplayWorld | KeepShuffle | ShuffleRadio
+            OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | KeepTimbre | Autoplay | AutoplayWorld
+            | KeepShuffle | ShuffleRadio
             | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
             | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikedArtists | DislikedTracks => {
                 TAB_MUSIC
@@ -477,7 +484,8 @@ impl SettingId {
     pub fn level(self) -> Level {
         use SettingId::*;
         match self {
-            OutputDevice | Gapless | Crossfade | Normalization | Autoplay | KeepShuffle | DislikeButton | DislikeSkips
+            OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | Autoplay | KeepShuffle | DislikeButton
+            | DislikeSkips
             | DislikedArtists | DislikedTracks | LyricsStyle | LyricsScale | LyricsLead | LyricsGenius | SaveLyrics
             | LyricsWordsPlaying | Theme | Scheme | CoverShape | ShapeRange | ShapePick | Ring | Ambient | BgShapes | AlbumDate
             | RailCompact | ReducedMotion | SpotifyEnabled | Spotify | YouTubeEnabled | YouTube | SoundCloudEnabled | SoundCloud
@@ -486,7 +494,8 @@ impl SettingId {
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile => Level::Dev,
-            AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_)
+            KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
+            | NewShareBy(_)
             | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere | LyricsUnit | LyricsSmooth
             | LightSpeed | WaveJump | JumpSpeed | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth
             | LyricsSoftStrength | LyricsSoftFade | LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize
@@ -615,6 +624,9 @@ impl SettingId {
             Gapless => "Без пауз между треками",
             Crossfade => "Кроссфейд",
             Normalization => "Нормализация громкости",
+            Equalizer => "Эквалайзер",
+            TrackSpeed => "Скорость трека",
+            KeepTimbre => "Сохранять тембр голоса",
             LibraryDir => "Папка музыки",
             MastersDir => "Архив FLAC",
             Inbox => "Inbox",
@@ -807,6 +819,14 @@ impl SettingId {
             Gapless => "Треки альбома идут друг за другом без тишины, как на диске.",
             Crossfade => "Конец трека плавно затихает, пока начинается следующий. 0 — без кроссфейда.",
             Normalization => "Все треки звучат примерно одинаково громко, не нужно крутить громкость.",
+            Equalizer => "Звук под наушники или колонки: готовая кривая или своя, десять полос. «Настроить» открывает кривую.",
+            TrackSpeed => {
+                "В меню трека есть «Скорость»: быстрее, nightcore, замедленно, замедленно с эхом. Выбор запоминается для трека. Выключено: всё играет как записано, выбор остаётся."
+            }
+            KeepTimbre => {
+                "На другой скорости высота меняется вместе с темпом, а голос остаётся похож на себя: не писклявый на быстрой и не глухой на медленной."
+            }
+
             LibraryDir => "Папка на диске, где лежит твоя музыка. Добавленное раскладывается так: Исполнитель/Год - Альбом/01 - Трек.opus.",
             MastersDir => "Сюда откладываются исходные файлы FLAC после сжатия в Opus, чтобы ничего не потерять.",
             Inbox => "Положи файлы в эту папку — и они сами добавятся в библиотеку.",

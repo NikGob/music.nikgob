@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use std::time::{Duration, Instant};
 
+use crate::eq::EQ_BANDS;
 use crate::tap::VisualizerTap;
+use crate::types::Speed;
 
 /// A clock that tells how much audio has been *heard*.
 #[derive(Clone, Debug)]
@@ -62,6 +64,7 @@ pub(crate) struct Cursor {
     pos_ns: AtomicU64,
     clock_ns: AtomicU64,
     applied_gen: AtomicU64,
+    speed: AtomicU64,
 }
 
 /// A consistent reading of the [`Cursor`].
@@ -76,6 +79,8 @@ pub(crate) struct CursorSnapshot {
     pub clock_ns: u64,
     /// The newest flush generation the callback has applied.
     pub applied_gen: u64,
+    /// How fast the position moves against the clock while it moves.
+    pub speed: Speed,
 }
 
 impl Cursor {
@@ -90,6 +95,7 @@ impl Cursor {
         self.pos_ns.store(s.pos_ns, Ordering::Relaxed);
         self.clock_ns.store(s.clock_ns, Ordering::Relaxed);
         self.applied_gen.store(s.applied_gen, Ordering::Relaxed);
+        self.speed.store(s.speed.pack(), Ordering::Relaxed);
         self.seq.store(seq.wrapping_add(2), Ordering::Release);
     }
 
@@ -107,6 +113,7 @@ impl Cursor {
                 pos_ns: self.pos_ns.load(Ordering::Relaxed),
                 clock_ns: self.clock_ns.load(Ordering::Relaxed),
                 applied_gen: self.applied_gen.load(Ordering::Relaxed),
+                speed: Speed::unpack(self.speed.load(Ordering::Relaxed)),
             };
             fence(Ordering::Acquire);
             if self.seq.load(Ordering::Relaxed) == before {
@@ -133,6 +140,14 @@ pub(crate) struct Shared {
     pub crossfade_ms: AtomicU32,
     /// The listener asked for pause: the callback fades out and holds.
     pub pause_req: AtomicBool,
+    // --- equalizer: the values first, then `eq_gen`, which the callback
+    // watches ---
+    pub eq_on: AtomicBool,
+    /// Band gains in dB, f32 bits.
+    pub eq_gains: [AtomicU32; EQ_BANDS],
+    /// Gain before the bands in dB (never positive), f32 bits.
+    pub eq_preamp: AtomicU32,
+    pub eq_gen: AtomicU32,
     // --- published by the callback ---
     pub cursor: Cursor,
     /// Item-relative position (ns) of the next sample the callback will
@@ -175,6 +190,10 @@ impl Shared {
             normalization: AtomicBool::new(true),
             crossfade_ms: AtomicU32::new(0),
             pause_req: AtomicBool::new(false),
+            eq_on: AtomicBool::new(false),
+            eq_gains: std::array::from_fn(|_| AtomicU32::new(0f32.to_bits())),
+            eq_preamp: AtomicU32::new(0f32.to_bits()),
+            eq_gen: AtomicU32::new(0),
             cursor: Cursor::default(),
             consumed_pos_ns: AtomicU64::new(0),
             consumed_id: AtomicU64::new(0),
@@ -269,10 +288,13 @@ mod tests {
             pos_ns: 123,
             clock_ns: 456,
             applied_gen: 9,
+            speed: Speed { num: 6, den: 5 },
         };
         c.write(s);
         let r = c.read();
         assert!(r.has_item && r.moving);
+        assert_eq!(r.speed, Speed { num: 6, den: 5 });
+
         assert_eq!(
             (r.id, r.pos_ns, r.clock_ns, r.applied_gen),
             (7, 123, 456, 9)

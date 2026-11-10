@@ -12,6 +12,7 @@ mod credit;
 pub mod dev;
 pub mod presets;
 mod recs;
+mod sound;
 mod streams;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
@@ -20,6 +21,7 @@ pub use nikgob_core::model::{
 };
 pub use credit::*;
 pub use recs::*;
+pub use sound::*;
 pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
@@ -340,7 +342,12 @@ pub struct PlayerView {
     pub at: Instant,
     /// How fast the position moves from `at` while playing: 1, or a little
     /// off while the runtime brings it to what is heard (never below 0).
+    /// For a track played at another speed it is that speed, or a little
+    /// off: `position` and `duration` are the track's own time.
     pub rate: f32,
+    /// The speed the current track plays at (1: as recorded). What the
+    /// listener sees is [`heard_time`] of the position and the length.
+    pub speed: f32,
     pub duration: Option<Duration>,
     /// 0..1 perceptual.
     pub volume: f32,
@@ -373,6 +380,7 @@ impl Default for PlayerView {
             position: Duration::ZERO,
             at: Instant::now(),
             rate: 1.0,
+            speed: 1.0,
             duration: None,
             volume: 0.8,
             muted: false,
@@ -1388,6 +1396,17 @@ pub struct Prefs {
     pub gapless: bool,
     pub crossfade_s: f32,
     pub normalization: bool,
+    /// «Эквалайзер»: on, and the gain of each of its ten bands in dB
+    /// ([`EQ_FREQS`]). One for the player, like the normalization.
+    pub eq_on: bool,
+    pub eq_gains: [f32; EQ_BANDS],
+    /// «Скорость трека»: the «Скорость» item of a track's menu and the
+    /// versions chosen with it. Off, every track plays as recorded; the
+    /// choices are kept and come back with the switch.
+    pub speed_enabled: bool,
+    /// «Сохранять тембр голоса»: a track played faster or slower keeps the
+    /// character of its voices (the pitch still moves with the speed).
+    pub keep_timbre: bool,
     /// «Перемешивание остаётся включённым»: a new album, playlist, mix,
     /// radio or search result keeps shuffle as it was (off: it turns
     /// shuffle off, «Перемешать» turns it on).
@@ -2522,6 +2541,8 @@ pub struct ViewState {
     /// Disliked tracks and artists not to recommend («Не нравится»,
     /// «Не рекомендовать исполнителя»).
     pub dislikes: DislikesView,
+    /// The tracks played faster or slower («Скорость»).
+    pub speeds: TrackSpeeds,
     /// The tracks of one song on two albums (one recording): another album
     /// it is on and that album's title, for the track's menu («Есть и на
     /// альбоме «…»»).
@@ -2667,6 +2688,10 @@ pub enum Command {
     Previous,
     Seek(Duration),
     SeekBy(i64),
+    /// «Скорость» of a track: the version it plays as from now on
+    /// (remembered with the track; the playing one changes at once).
+    SetTrackSpeed { track: TrackId, variant: SpeedVariant },
+
     /// «Включить с YouTube» (the developer profile, [`dev::profile`]): the
     /// playing track goes on from where it is on its YouTube Music copy,
     /// looked up now when it has none (and kept as its source).
@@ -3074,6 +3099,10 @@ impl Default for Prefs {
             gapless: true,
             crossfade_s: 0.0,
             normalization: true,
+            eq_on: false,
+            eq_gains: [0.0; EQ_BANDS],
+            speed_enabled: true,
+            keep_timbre: false,
             keep_shuffle: true,
             shuffle_radio: false,
             opus_bitrate: 160,

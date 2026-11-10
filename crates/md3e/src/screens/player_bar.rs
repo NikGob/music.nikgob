@@ -175,12 +175,13 @@ pub fn show(
         let avail = ui.available_width() - trailing_w - 8.0;
         if compact && avail >= 112.0 {
             let dur = p.duration.unwrap_or_default();
+            let speed = p.speed;
             let out_s = Slider::new("bar-progress", p.fraction_now())
                 .width(avail - 8.0)
                 .track(8.0)
                 .wavy(playing && state.prefs.progress_wave)
                 .colors(on, on.gamma_multiply(0.24))
-                .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
+                .value_label(move |v| common::fmt_time(nikgob_view::heard_time(dur.mul_f32(v), speed)))
                 .show(ui);
             if let Some(v) = out_s.committed {
                 out.push(Command::Seek(dur.mul_f32(v)));
@@ -192,18 +193,19 @@ pub fn show(
         } else if avail > 160.0 {
             let pos = p.position_now();
             let dur = p.duration.unwrap_or_default();
-            time_label(ui, pos, on);
+            let speed = p.speed;
+            time_label(ui, nikgob_view::heard_time(pos, speed), on);
             let slider_w = avail - 2.0 * 44.0;
             let out_s = Slider::new("bar-progress", p.fraction_now())
                 .width(slider_w)
                 .wavy(playing && state.prefs.progress_wave)
                 .colors(on, on.gamma_multiply(0.24))
-                .value_label(move |v| common::fmt_time(dur.mul_f32(v)))
+                .value_label(move |v| common::fmt_time(nikgob_view::heard_time(dur.mul_f32(v), speed)))
                 .show(ui);
             if let Some(v) = out_s.committed {
                 out.push(Command::Seek(dur.mul_f32(v)));
             }
-            time_label(ui, dur, on);
+            time_label(ui, nikgob_view::heard_time(dur, speed), on);
         } else {
             ui.add_space(avail.max(0.0));
         }

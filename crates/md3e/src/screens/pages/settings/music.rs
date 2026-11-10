@@ -8,6 +8,7 @@ use nikgob_view::{Command, Prefs, RadioKind, RadioNewShare, ViewState};
 use super::super::settings_help::SettingId as Id;
 use super::preset;
 use super::rows::{self, Num, child, dimmed, group, menu, row, switch, switch_enabled};
+use crate::components::{Button, Style, Switch};
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
     sound(ui, state, p);
@@ -24,7 +25,8 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<
     dislikes(ui, state, p, out);
 }
 
-/// «Звук»: the device, gaps, crossfade, loudness.
+/// «Звук»: the device, gaps, crossfade, loudness, the equalizer, the speed
+/// of tracks.
 fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     group(ui, "Звук");
     row(ui, Id::OutputDevice, |ui| {
@@ -48,7 +50,18 @@ fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         });
     });
     switch(ui, Id::Normalization, &mut p.normalization);
+    row(ui, Id::Equalizer, |ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.add(Switch::new(&mut p.eq_on).id_salt(("set-switch", Id::Equalizer)));
+        if ui.add(Button::new("Настроить").style(Style::Text).id_salt("set-eq-open")).clicked() {
+            super::super::equalizer::open(ui.ctx());
+        }
+    });
+    switch(ui, Id::TrackSpeed, &mut p.speed_enabled);
+    let speed = p.speed_enabled;
+    child(ui, !speed, |ui| switch(ui, Id::KeepTimbre, &mut p.keep_timbre));
 }
+
 
 /// «Рекомендации»: how much new music, from where, how much of it at
 /// random, the unheard, the listeners' graph.

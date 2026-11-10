@@ -133,6 +133,8 @@ pub struct Chrome {
     pub setting: Option<super::pages::SettingId>,
     pub tag: TagEditorUi,
     picker: Option<Picker>,
+    /// The track the «Скорость» picker is for, and its anchor.
+    speed_picker: Option<(TrackId, Rect)>,
     ask: Option<Ask>,
     ask_text: String,
     add_after_create: Option<(String, Vec<TrackId>)>,
@@ -195,7 +197,8 @@ impl Chrome {
             .collect();
         rows.push(Row::Divider);
         let also = state.also_on.get(&t.id);
-        for r in super::pages::library_track_rows(t, &state.dislikes, info, also) {
+        let list = super::pages::library_track_rows(t, &state.dislikes, info, also);
+        for r in super::pages::with_speed_row(list, &state.speeds, t.id) {
             rows.push(match r {
                 Row::Item(TrackAct::Next | TrackAct::Queue, _) => continue,
                 Row::Item(a, item) => Row::Item(PlayerAct::Track(a), item),
@@ -283,6 +286,7 @@ impl Chrome {
             A::Artist => self.nav = super::artist_links::go_to(ctx, super::artist_links::library(&t.artists)),
             A::Info => self.show(PaneTab::Info, wh),
             A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
+            A::Speed => self.speed_picker = Some((t.id, anchor)),
             A::Fetch if t.has_local => out.push(Command::OpenTagEditor(t.id)),
             A::Fetch => out.push(Command::DownloadTracks(vec![t.id])),
             // The whole album the track is from, the files it lacks.
@@ -313,12 +317,26 @@ impl Chrome {
     /// Menus, dialogs and popovers that float above the screens.
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
         self.picker_ui(ctx, state, out);
+        self.speed_picker_ui(ctx, state, out);
         self.dialogs(ctx, state, out);
         self.tag.show(ctx, state, out);
         self.volume_ui(ctx, state, out);
     }
 
+    /// «Скорость» of the playing track: the five versions.
+    fn speed_picker_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        let Some((track, anchor)) = self.speed_picker else { return };
+        let mut open = true;
+        let menu = super::pages::speed_menu("md3e-speed-picker", &state.speeds, track).align_right(true);
+        let picked = menu.popup(ctx, anchor, &mut open);
+        out.extend(picked.and_then(|i| super::pages::speed_command(track, i)));
+        if picked.is_some() || !open {
+            self.speed_picker = None;
+        }
+    }
+
     fn picker_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+
         let Some(p) = self.picker.clone() else { return };
         let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
         let mut menu = Menu::new("md3e-playlist-picker")

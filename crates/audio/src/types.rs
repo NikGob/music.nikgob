@@ -20,6 +20,122 @@ pub struct PlayItem {
     /// length (live PCM, MP3 without a Xing header); the source's own value
     /// wins otherwise.
     pub duration_hint: Option<Duration>,
+    /// Speed, tone and reverb of this item ([`ItemFx::default`]: none).
+    pub fx: ItemFx,
+}
+
+/// How one item is changed on its way out: played faster or slower (the
+/// pitch follows, as on a turntable), tilted in tone, with a reverb.
+///
+/// Positions and lengths the engine reports stay on the item's own
+/// timeline: at speed 1.25 the position of a playing item advances 1.25 s
+/// every second, and a four-minute item still reports four minutes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ItemFx {
+    /// Playback speed, 0.5 to 2.0 (1.0: as recorded), rounded to 0.01.
+    pub speed: f32,
+    /// Shelf below about 100 Hz, dB.
+    pub low_shelf_db: f32,
+    /// Shelf above about 7 kHz, dB.
+    pub high_shelf_db: f32,
+    /// Level before the tone and the reverb, dB: the headroom they need.
+    pub preamp_db: f32,
+    /// The reverb, if any.
+    pub reverb: Option<Reverb>,
+    /// Keep the voice's timbre: the pitch still follows the speed, but the
+    /// spectral envelope (the formants) is put back where it was recorded,
+    /// so a sped-up voice does not turn thin and a slowed one not hollow.
+    /// Only has an effect at a speed other than 1.
+    pub keep_formants: bool,
+}
+
+impl Default for ItemFx {
+    fn default() -> Self {
+        Self {
+            speed: 1.0,
+            low_shelf_db: 0.0,
+            high_shelf_db: 0.0,
+            preamp_db: 0.0,
+            reverb: None,
+            keep_formants: false,
+        }
+    }
+}
+
+/// A reverb added to an item (see [`ItemFx`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reverb {
+    /// Level of the reverberation against the dry sound (which stays at
+    /// 1): 1.0 is as loud as the music itself on a sustained sound.
+    pub wet: f32,
+    /// Time the tail takes to fall by 60 dB, seconds (the low and middle
+    /// frequencies; the highs go sooner, see `damping`).
+    pub decay_s: f32,
+    /// 0 (bright tail) to 1 (dark): how soon the highs of the tail die.
+    pub damping: f32,
+    /// Gap between the sound and its reverberation, milliseconds.
+    pub pre_delay_ms: f32,
+}
+
+/// A speed as an exact ratio, so lengths and positions never drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Speed {
+    pub num: u32,
+    pub den: u32,
+}
+
+impl Default for Speed {
+    fn default() -> Self {
+        Self::ONE
+    }
+}
+
+impl Speed {
+    pub(crate) const ONE: Self = Self { num: 1, den: 1 };
+
+
+    /// `speed` rounded to a hundredth, within 0.5 to 2.
+    pub(crate) fn new(speed: f32) -> Self {
+        let speed = if speed.is_finite() { speed } else { 1.0 };
+        let num = (speed.clamp(0.5, 2.0) * 100.0).round() as u32;
+        let g = gcd(u64::from(num), 100) as u32;
+        Self {
+            num: num / g,
+            den: 100 / g,
+        }
+    }
+
+    pub(crate) const fn is_one(self) -> bool {
+        self.num == self.den
+    }
+
+    /// `ns` of wall time as time on the item's timeline.
+    pub(crate) fn item_ns(self, ns: u64) -> u64 {
+        if self.is_one() {
+            return ns;
+        }
+        (u128::from(ns) * u128::from(self.num) / u128::from(self.den)) as u64
+    }
+
+    pub(crate) const fn pack(self) -> u64 {
+        ((self.num as u64) << 32) | self.den as u64
+    }
+
+    pub(crate) const fn unpack(bits: u64) -> Self {
+        let (num, den) = ((bits >> 32) as u32, bits as u32);
+        if num == 0 || den == 0 {
+            Self::ONE
+        } else {
+            Self { num, den }
+        }
+    }
+}
+
+pub(crate) fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a.max(1)
 }
 
 impl PlayItem {
@@ -31,6 +147,7 @@ impl PlayItem {
             source: ItemSource::File(path.into()),
             gain_db: 0.0,
             duration_hint: None,
+            fx: ItemFx::default(),
         }
     }
 
@@ -42,6 +159,7 @@ impl PlayItem {
             source: ItemSource::Pcm(source),
             gain_db: 0.0,
             duration_hint,
+            fx: ItemFx::default(),
         }
     }
 
@@ -54,6 +172,7 @@ impl PlayItem {
             source: ItemSource::Stream(open),
             gain_db: 0.0,
             duration_hint: None,
+            fx: ItemFx::default(),
         }
     }
 
@@ -61,6 +180,13 @@ impl PlayItem {
     #[must_use]
     pub fn with_gain_db(mut self, gain_db: f32) -> Self {
         self.gain_db = gain_db;
+        self
+    }
+
+    /// Sets the speed, tone and reverb.
+    #[must_use]
+    pub fn with_fx(mut self, fx: ItemFx) -> Self {
+        self.fx = fx;
         self
     }
 
@@ -79,6 +205,7 @@ impl fmt::Debug for PlayItem {
             .field("source", &self.source)
             .field("gain_db", &self.gain_db)
             .field("duration_hint", &self.duration_hint)
+            .field("fx", &self.fx)
             .finish()
     }
 }

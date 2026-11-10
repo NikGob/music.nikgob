@@ -309,7 +309,8 @@ pub(super) fn track_pick(
         A::Dislike => out.push(stream_dislike(t, &super::marks(ctx))),
         A::Ban => out.push(Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(t.artist.clone()), dislike: true }),
         // Only a library track has these.
-        A::AlsoOn | A::Apart | A::Info | A::Torrents | A::FindSong | A::WrongFile | A::Remove | A::Trash | A::Purge => {}
+        A::AlsoOn | A::Apart | A::Info | A::Speed | A::Torrents | A::FindSong | A::WrongFile | A::Remove | A::Trash
+        | A::Purge => {}
     }
     None
 }

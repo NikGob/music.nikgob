@@ -14,10 +14,12 @@ use rtrb::Producer;
 
 use crate::channels;
 use crate::decode::{self, FrameSource, PcmFrames, ReadStatus};
+use crate::formant::Formant;
+use crate::fx::Chain;
 use crate::render::{Mark, Start};
 use crate::resample::StreamResampler;
 use crate::shared::{LogLimiter, Shared, frames_to_ns, ns_to_frames};
-use crate::types::{DecodeError, ItemSource, PlayItem};
+use crate::types::{DecodeError, ItemFx, ItemSource, PlayItem, Speed, gcd};
 
 /// Frames produced per step. Small enough that commands are answered
 /// promptly, large enough to keep per-chunk overhead negligible.
@@ -49,6 +51,12 @@ pub(crate) enum DecCmd {
         gen_id: u64,
     },
     Stop {
+        gen_id: u64,
+    },
+    /// New speed, tone and reverb for item `id` (playing or prepared).
+    SetFx {
+        id: u64,
+        fx: ItemFx,
         gen_id: u64,
     },
     /// An item (a stream, or a file set as next) finished opening on its
@@ -94,11 +102,14 @@ pub(crate) struct Item {
     src_channels: usize,
     /// Playable length in source frames, from the file or the caller's hint.
     total_src: Option<u64>,
+    fx: ItemFx,
+    speed: Speed,
 }
 
 impl Item {
     fn open(item: PlayItem) -> Result<Self, (u64, DecodeError)> {
         let id = item.id;
+        let fx = item.fx;
         let mut hint = item.duration_hint;
         let mut gain_db = item.gain_db;
         let src: Box<dyn FrameSource> = match item.source {
@@ -130,7 +141,31 @@ impl Item {
             src_rate,
             src,
             total_src,
+            fx,
+            speed: Speed::new(fx.speed),
         })
+    }
+
+    fn set_fx(&mut self, fx: ItemFx) {
+        self.fx = fx;
+        self.speed = Speed::new(fx.speed);
+    }
+
+    /// Source frames in and device frames out, as the smallest ratio: the
+    /// source rate times the speed against the device rate. Everything
+    /// that converts between the two timelines uses this one ratio, so the
+    /// end of the item, the crossfade and the join to the next item fall
+    /// where the sound really is.
+    fn ratio(&self, device_rate: u32) -> (u64, u64) {
+        let a = u64::from(self.src_rate) * u64::from(self.speed.num);
+        let b = u64::from(device_rate) * u64::from(self.speed.den);
+        let g = gcd(a, b);
+        (a / g, b / g)
+    }
+
+    /// Whether the timbre stage runs for this item.
+    fn keeps_formants(&self) -> bool {
+        self.fx.keep_formants && !self.speed.is_one()
     }
 
     fn duration(&self) -> Option<Duration> {
@@ -142,12 +177,20 @@ impl Item {
 /// Decoded, resampled, channel-mapped audio of one item at the device format.
 struct Stream {
     cfg: Cfg,
+    /// Source frames in, device frames out (see [`Item::ratio`]).
+    ratio: (u64, u64),
     resampler: Option<StreamResampler>,
+    /// Puts the voice's timbre back after a speed change; like the
+    /// resampler it runs on through a chained item, so the join stays
+    /// continuous.
+    post: Option<Formant>,
     /// Map to the device channel count before resampling (cheaper when
     /// downmixing).
     map_first: bool,
     raw: Vec<f32>,
     tmp: Vec<f32>,
+    /// Device-format frames on their way into `post`.
+    stage: Vec<f32>,
     /// Ready device-format frames and how many of them were handed out.
     ready: Vec<f32>,
     ready_pos: usize,
@@ -178,7 +221,8 @@ enum StreamRead {
 
 impl Stream {
     fn new(item: &Item, cfg: Cfg) -> Result<Self, DecodeError> {
-        let needs_resample = item.src_rate != cfg.rate;
+        let ratio = item.ratio(cfg.rate);
+        let needs_resample = ratio.0 != ratio.1;
         let map_first = item.src_channels > cfg.channels;
         let rs_channels = if map_first {
             cfg.channels
@@ -186,16 +230,36 @@ impl Stream {
             item.src_channels
         };
         let resampler = if needs_resample {
-            Some(StreamResampler::new(item.src_rate, cfg.rate, rs_channels)?)
+            let narrow = |v: u64| {
+                u32::try_from(v)
+                    .map_err(|_| DecodeError::Unsupported("sample rate ratio too large".into()))
+            };
+            // As rates, not as the reduced ratio: the resampler sizes its
+            // filter from them.
+            let rate_in = u64::from(item.src_rate) * u64::from(item.speed.num);
+            let rate_out = u64::from(cfg.rate) * u64::from(item.speed.den);
+            Some(StreamResampler::new(
+                narrow(rate_in)?,
+                narrow(rate_out)?,
+                rs_channels,
+            )?)
+
         } else {
             None
         };
+        let post = (item.keeps_formants() && needs_resample).then(|| {
+            let speed = item.speed.num as f32 / item.speed.den as f32;
+            Formant::new(cfg.rate, cfg.channels, speed)
+        });
         Ok(Self {
             cfg,
+            ratio,
             resampler,
+            post,
             map_first,
             raw: Vec::new(),
             tmp: Vec::new(),
+            stage: Vec::new(),
             ready: Vec::new(),
             ready_pos: 0,
             src_done: false,
@@ -227,41 +291,82 @@ impl Stream {
     fn ingest(&mut self, src_channels: usize) -> Result<(), DecodeError> {
         let dev = self.cfg.channels;
         self.src_in += (self.raw.len() / src_channels) as u64;
-        match &mut self.resampler {
-            None => channels::convert(&self.raw, src_channels, dev, &mut self.ready),
-            Some(rs) if self.map_first => {
-                self.tmp.clear();
-                channels::convert(&self.raw, src_channels, dev, &mut self.tmp);
-                rs.process(&self.tmp, &mut self.ready)?;
+        let Self {
+            resampler,
+            post,
+            map_first,
+            raw,
+            tmp,
+            stage,
+            ready,
+            ..
+        } = self;
+        // With the timbre stage on, the converted audio passes through it.
+        let dst: &mut Vec<f32> = if post.is_some() {
+            stage.clear();
+            &mut *stage
+        } else {
+            &mut *ready
+        };
+        match resampler {
+            None => channels::convert(raw, src_channels, dev, dst),
+            Some(rs) if *map_first => {
+                tmp.clear();
+                channels::convert(raw, src_channels, dev, tmp);
+                rs.process(tmp, dst)?;
             }
             Some(rs) => {
-                self.tmp.clear();
-                rs.process(&self.raw, &mut self.tmp)?;
-                channels::convert(&self.tmp, src_channels, dev, &mut self.ready);
+                tmp.clear();
+                rs.process(raw, tmp)?;
+                channels::convert(tmp, src_channels, dev, dst);
             }
         }
-        self.raw.clear();
+        if let Some(post) = post {
+            post.process(stage, ready);
+        }
+        raw.clear();
         Ok(())
     }
 
     fn flush(&mut self, src_channels: usize) -> Result<(), DecodeError> {
         let dev = self.cfg.channels;
-        if let Some(rs) = &mut self.resampler {
-            if self.map_first {
-                rs.finish(&mut self.ready)?;
+        let Self {
+            resampler,
+            post,
+            map_first,
+            tmp,
+            stage,
+            ready,
+            ..
+        } = self;
+        let dst: &mut Vec<f32> = if post.is_some() {
+            stage.clear();
+            &mut *stage
+        } else {
+            &mut *ready
+        };
+        if let Some(rs) = resampler {
+            if *map_first {
+                rs.finish(dst)?;
             } else {
-                self.tmp.clear();
-                rs.finish(&mut self.tmp)?;
-                channels::convert(&self.tmp, src_channels, dev, &mut self.ready);
+                tmp.clear();
+                rs.finish(tmp)?;
+                channels::convert(tmp, src_channels, dev, dst);
             }
+        }
+        if let Some(post) = post {
+            post.process(stage, ready);
+            post.finish(ready);
         }
         self.src_done = true;
         Ok(())
     }
 
     /// Appends up to `want` frames to `out`. With `chain`, the end of `item`
-    /// flows straight into the start of the next item (same rate and
-    /// channels) through the same resampler.
+    /// flows straight into the start of the next item (same rate, channels
+    /// and speed) through the same resampler. Items at different speeds
+    /// need different resamplers: they join as two flushed streams, with
+    /// no silence between them.
     fn read(
         &mut self,
         item: &mut Item,
@@ -296,11 +401,14 @@ impl Stream {
                     let can_chain = !self.chained
                         && self.resampler.is_some()
                         && next.is_some_and(|n| {
-                            n.src_rate == item.src_rate && n.src_channels == item.src_channels
+                            n.src_rate == item.src_rate
+                                && n.src_channels == item.src_channels
+                                && n.speed == item.speed
+                                && n.keeps_formants() == item.keeps_formants()
                         });
                     if can_chain {
-                        let rs_in = u128::from(self.src_in) * u128::from(self.cfg.rate);
-                        let end = rs_in.div_ceil(u128::from(item.src_rate)) as u64;
+                        let rs_in = u128::from(self.src_in) * u128::from(self.ratio.1);
+                        let end = rs_in.div_ceil(u128::from(self.ratio.0)) as u64;
                         self.boundary = Some(end.saturating_sub(self.out_base));
                         self.chained = true;
                         self.chain_id = next.map(|n| n.id);
@@ -340,6 +448,12 @@ struct Active {
     start_src: u64,
     /// Device frames handed out since then.
     produced: u64,
+    /// The item's tone and reverb, built for `fx_cfg` on the first read.
+    fx: Option<Chain>,
+    fx_cfg: Option<Cfg>,
+    /// The item is over and its reverb plays out: frames left, and of how
+    /// many.
+    ring: Option<(u64, u64)>,
 }
 
 impl Active {
@@ -349,6 +463,9 @@ impl Active {
             stream: None,
             start_src: 0,
             produced: 0,
+            fx: None,
+            fx_cfg: None,
+            ring: None,
         }
     }
 
@@ -372,15 +489,76 @@ impl Active {
         out: &mut Vec<f32>,
         chain: Option<&mut Item>,
     ) -> Result<StreamRead, DecodeError> {
+        if self.ring.is_some() {
+            return Ok(self.read_ring(cfg, want, out));
+        }
         self.prepare(cfg)?;
         let Some(stream) = self.stream.as_mut() else {
             return Ok(StreamRead::Eof);
         };
+        let from = out.len();
         let r = stream.read(&mut self.item, chain, want, out)?;
         if let StreamRead::Frames(n) = r {
             self.produced += n as u64;
+            self.apply_fx(cfg, &mut out[from..]);
         }
         Ok(r)
+    }
+
+    /// Runs the item's tone and reverb over freshly read frames (or over
+    /// silence after its end, which lets the reverb ring on).
+    fn apply_fx(&mut self, cfg: Cfg, buf: &mut [f32]) {
+        if self.fx_cfg != Some(cfg) {
+            self.fx = Chain::new(&self.item.fx, cfg.rate, cfg.channels);
+            self.fx_cfg = Some(cfg);
+        }
+        if let Some(fx) = &mut self.fx {
+            fx.process(buf);
+        }
+    }
+
+    /// The source is over and nothing follows: lets a reverb play out
+    /// instead of cutting it. False when there is nothing to play out (or
+    /// it already did).
+    fn start_ring_out(&mut self) -> bool {
+        if self.ring.is_some() {
+            return false;
+        }
+        let Some(fx) = self.fx.as_ref().filter(|fx| fx.has_long_tail()) else {
+            return false;
+        };
+        let frames = fx.tail_frames();
+        self.ring = Some((frames, frames));
+        frames > 0
+    }
+
+    fn ringing(&self) -> bool {
+        self.ring.is_some()
+    }
+
+    /// The next frames of the reverb playing out, eased to nothing at its
+    /// end.
+    fn read_ring(&mut self, cfg: Cfg, want: usize, out: &mut Vec<f32>) -> StreamRead {
+        let (Some((left, total)), Some(fx)) = (self.ring, self.fx.as_mut()) else {
+            return StreamRead::Eof;
+        };
+        let n = (want as u64).min(left) as usize;
+        if n == 0 || self.fx_cfg != Some(cfg) {
+            return StreamRead::Eof;
+        }
+        let ch = cfg.channels;
+        let from = out.len();
+        out.resize(from + n * ch, 0.0);
+        fx.process(&mut out[from..]);
+        for (i, frame) in out[from..].chunks_exact_mut(ch).enumerate() {
+            let g = (left - i as u64) as f32 / total as f32;
+            for s in frame {
+                *s *= g;
+            }
+        }
+        self.ring = Some((left - n as u64, total));
+        self.produced += n as u64;
+        StreamRead::Frames(n)
     }
 
     /// Positions the source at `src_frame` and drops buffered audio.
@@ -389,18 +567,30 @@ impl Active {
         self.stream = None;
         self.start_src = src_frame;
         self.produced = 0;
+        self.fx = None;
+        self.fx_cfg = None;
+        self.ring = None;
         Ok(())
     }
 
     /// Device frames from the item's end, if its length is known.
     fn remaining(&self, cfg: Cfg) -> Option<u64> {
         let total = self.item.total_src?;
-        let total_dev =
-            (u128::from(total) * u128::from(cfg.rate)).div_ceil(u128::from(self.item.src_rate));
-        let start_dev =
-            u128::from(self.start_src) * u128::from(cfg.rate) / u128::from(self.item.src_rate);
+        let (src, dev) = self.item.ratio(cfg.rate);
+        let total_dev = (u128::from(total) * u128::from(dev)).div_ceil(u128::from(src));
+        let start_dev = u128::from(self.start_src) * u128::from(dev) / u128::from(src);
         let done = start_dev + u128::from(self.produced);
         Some(u64::try_from(total_dev.saturating_sub(done)).unwrap_or(u64::MAX))
+    }
+
+    /// What starts when this item does, at `pos_ns` of its timeline.
+    fn start_at(&self, pos_ns: u64, announce: bool) -> Start {
+        Start {
+            id: self.item.id,
+            pos_ns,
+            announce,
+            speed: self.item.speed,
+        }
     }
 
     fn gain(&self, normalization: bool) -> f32 {
@@ -416,6 +606,16 @@ struct Crossfade {
     to: Active,
     len: u64,
     done: u64,
+}
+
+/// The tone and reverb of an item that ended at a gapless join, still
+/// sounding under what follows. It is fed silence; being linear, what it
+/// gives added to the next item's own chain is exactly the uncut sound.
+struct Tail {
+    fx: Chain,
+    gain_db: f32,
+    left: u64,
+    total: u64,
 }
 
 pub(crate) struct Decoder {
@@ -435,6 +635,11 @@ pub(crate) struct Decoder {
     /// current item holds just short of its end for it (see
     /// [`Self::hold_for_next`]).
     pending_next_file: bool,
+    /// Id of that pending next item.
+    pending_next_id: Option<u64>,
+    /// A change of speed, tone and reverb asked for an item that is still
+    /// opening: applied when it is open.
+    pending_fx: Option<(u64, ItemFx)>,
     events: Sender<DecEvent>,
     sh: Arc<Shared>,
     ring: Producer<f32>,
@@ -451,6 +656,7 @@ pub(crate) struct Decoder {
     cur: Option<Active>,
     next: Option<Active>,
     xfade: Option<Crossfade>,
+    tail: Option<Tail>,
 
     buf: Vec<f32>,
     buf_b: Vec<f32>,
@@ -484,6 +690,8 @@ impl Decoder {
             pending_seek: None,
             pending_next: None,
             pending_next_file: false,
+            pending_next_id: None,
+            pending_fx: None,
             events,
             sh,
             ring,
@@ -497,6 +705,7 @@ impl Decoder {
             cur: None,
             next: None,
             xfade: None,
+            tail: None,
             buf: Vec::with_capacity(CHUNK_FRAMES * 2),
             buf_b: Vec::with_capacity(CHUNK_FRAMES * 2),
             short_wait: false,
@@ -599,6 +808,7 @@ impl Decoder {
                 self.xfade = None;
                 self.push_flush(gen_id, None);
             }
+            DecCmd::SetFx { id, fx, gen_id } => self.set_fx(id, fx, gen_id),
             DecCmd::Opened { token, result } => self.opened(token, result),
             DecCmd::Shutdown => return false,
         }
@@ -642,8 +852,11 @@ impl Decoder {
             self.pending_play = None;
             let seek = self.pending_seek.take();
             match result {
-                Ok(item) => {
+                Ok(mut item) => {
                     let id = item.id;
+                    if let Some((_, fx)) = self.pending_fx.take_if(|(want, _)| *want == id) {
+                        item.set_fx(fx);
+                    }
                     self.start_item(item, gen_id);
                     if let Some((pos, seek_gen)) = seek {
                         self.seek(pos, id, seek_gen);
@@ -673,6 +886,7 @@ impl Decoder {
     fn play(&mut self, item: PlayItem, gen_id: u64) {
         self.pending_play = None;
         self.pending_next = None;
+        self.pending_fx = None;
         self.drop_pending_seek();
         if item.source.is_stream() {
             // Cut what plays now and start the stream once it is open. The
@@ -703,28 +917,30 @@ impl Decoder {
             duration: item.duration(),
         });
         let active = Active::new(item);
-        let id = active.id();
+        let start = active.start_at(0, true);
         self.last_gen = gen_id;
         self.play_gen = gen_id;
         self.xfade = None;
         self.cur = Some(active);
-        self.push_flush(
-            gen_id,
-            Some(Start {
-                id,
-                pos_ns: 0,
-                announce: true,
-            }),
-        );
+        self.push_flush(gen_id, Some(start));
     }
 
     fn set_next(&mut self, item: PlayItem) {
+        // A change asked for the next item that was opening is over with it
+        // (the new item brings its own).
+        if self
+            .pending_fx
+            .is_some_and(|(id, _)| self.pending_play.is_none_or(|(_, _, playing)| playing != id))
+        {
+            self.pending_fx = None;
+        }
         // Files open on the opener thread too: probing one (a cold disk, a
         // virus scanner, a big embedded cover) can take longer than the
         // buffered audio, and this runs while the current item plays.
         if !matches!(item.source, ItemSource::Pcm(_)) {
             self.next = None;
             self.pending_next_file = matches!(item.source, ItemSource::File(_));
+            self.pending_next_id = Some(item.id);
             self.pending_next = Some(self.open_async(item));
             return;
         }
@@ -734,7 +950,10 @@ impl Decoder {
 
     fn accept_next(&mut self, result: Result<Item, (u64, DecodeError)>) {
         match result {
-            Ok(item) => {
+            Ok(mut item) => {
+                if let Some((_, fx)) = self.pending_fx.take_if(|(want, _)| *want == item.id) {
+                    item.set_fx(fx);
+                }
                 let _ = self.events.send(DecEvent::Opened {
                     id: item.id,
                     duration: item.duration(),
@@ -786,7 +1005,7 @@ impl Decoder {
             target = target.min(total);
         }
         let id = cur.id();
-        let rate = cur.item.src_rate;
+        let start = cur.start_at(frames_to_ns(target, cur.item.src_rate), false);
         let was_chained = cur.stream.as_ref().is_some_and(|s| s.chained);
         let result = cur.reposition(target);
         if was_chained {
@@ -798,14 +1017,7 @@ impl Decoder {
         match result {
             Ok(()) => {
                 self.last_gen = gen_id;
-                self.push_flush(
-                    gen_id,
-                    Some(Start {
-                        id,
-                        pos_ns: frames_to_ns(target, rate),
-                        announce: false,
-                    }),
-                );
+                self.push_flush(gen_id, Some(start));
             }
             Err(e) => {
                 self.report(Some(id), &e);
@@ -827,18 +1039,101 @@ impl Decoder {
         };
         let frame = ns_to_frames(pos_ns, cur.item.src_rate);
         if cur.reposition(frame).is_ok() {
+            let start = cur.start_at(pos_ns, false);
             self.last_gen = gen_id;
-            self.push_flush(
-                gen_id,
-                Some(Start {
-                    id,
-                    pos_ns,
-                    announce: false,
-                }),
-            );
+            self.push_flush(gen_id, Some(start));
         } else {
             self.cur = None;
             self.push_flush(gen_id, None);
+        }
+    }
+
+    /// `Player::set_fx`: the item's speed, tone and reverb change now. The
+    /// playing item restarts where the listener is with the new sound (the
+    /// buffered second of the old one is flushed, with the usual de-click
+    /// fades, so the change is heard at once); a prepared next item simply
+    /// starts with it.
+    fn set_fx(&mut self, id: u64, fx: ItemFx, gen_id: u64) {
+        let opening = self.pending_play.is_some_and(|(_, _, want)| want == id)
+            || (self.pending_next.is_some() && self.pending_next_id == Some(id));
+        if opening {
+            self.pending_fx = Some((id, fx));
+        }
+
+        let chained_into_it = self.cur.as_ref().is_some_and(|c| {
+            c.stream
+                .as_ref()
+                .is_some_and(|s| s.chained && s.chain_id == Some(id))
+        });
+        if let Some(next) = self.next.as_mut().filter(|n| n.id() == id) {
+            next.item.set_fx(fx);
+            next.fx = None;
+            next.fx_cfg = None;
+            if next.stream.is_some() || chained_into_it {
+                let _ = next.reposition(0);
+            }
+        }
+        let producing = self
+            .xfade
+            .as_ref()
+            .map(|x| x.to.id())
+            .or_else(|| self.cur.as_ref().map(Active::id));
+        let is_current = producing == Some(id);
+        if !is_current && !chained_into_it {
+            let _ = self.events.send(DecEvent::SeekDropped { gen_id });
+            return;
+        }
+        // During a crossfade the audible item is the incoming one.
+        if let Some(x) = self.xfade.take() {
+            self.cur = Some(x.to);
+        }
+        if is_current && let Some(cur) = self.cur.as_mut() {
+            cur.item.set_fx(fx);
+        }
+        // Otherwise the playing item's resampler had already run on into
+        // the changed next item: it starts over to let go of that.
+        self.restart_current(gen_id);
+    }
+
+    /// Rebuilds the playing item's stream where the listener is and flushes
+    /// what was buffered of it.
+    fn restart_current(&mut self, gen_id: u64) {
+        let cursor = self.sh.cursor.read();
+        let unapplied_play = cursor.applied_gen < self.play_gen;
+        // A flush of ours the callback has not applied yet (a seek a moment
+        // ago): what it consumed is from before that, the item is where
+        // that flush put it.
+        let settled = cursor.applied_gen >= self.last_gen;
+        let Some(cur) = self.cur.as_mut() else {
+            let _ = self.events.send(DecEvent::SeekDropped { gen_id });
+            return;
+        };
+        let id = cur.id();
+        let rate = cur.item.src_rate;
+        let consumed = (settled && self.sh.consumed_id.load(Ordering::Relaxed) == id)
+            .then(|| self.sh.consumed_pos_ns.load(Ordering::Relaxed));
+        let pos_ns = consumed.unwrap_or_else(|| frames_to_ns(cur.start_src, rate));
+        let mut frame = ns_to_frames(pos_ns, rate);
+        if let Some(total) = cur.item.total_src {
+            frame = frame.min(total);
+        }
+        let was_chained = cur.stream.as_ref().is_some_and(|s| s.chained);
+        let result = cur.reposition(frame);
+        let start = cur.start_at(pos_ns, unapplied_play);
+        if was_chained && let Some(next) = self.next.as_mut() {
+            let _ = next.reposition(0);
+        }
+        match result {
+            Ok(()) => {
+                self.last_gen = gen_id;
+                self.push_flush(gen_id, Some(start));
+            }
+            Err(e) => {
+                self.report(Some(id), &e);
+                self.cur = None;
+                self.last_gen = gen_id;
+                self.push_flush(gen_id, None);
+            }
         }
     }
 
@@ -882,13 +1177,7 @@ impl Decoder {
             } else {
                 cur.reposition(frame)
             } {
-                Ok(()) => {
-                    start = Some(Start {
-                        id,
-                        pos_ns,
-                        announce: unapplied_play,
-                    });
-                }
+                Ok(()) => start = Some(cur.start_at(pos_ns, unapplied_play)),
                 Err(e) => {
                     let _ = self.events.send(DecEvent::Error {
                         id: Some(id),
@@ -969,7 +1258,11 @@ impl Decoder {
         let mut want = CHUNK_FRAMES as u64;
         if cross > 0
             && self.next.is_some()
-            && let Some(rem) = self.cur.as_ref().and_then(|c| c.remaining(cfg))
+            && let Some(rem) = self
+                .cur
+                .as_ref()
+                .filter(|c| !c.ringing())
+                .and_then(|c| c.remaining(cfg))
         {
             let len = cross.min(self.next_len_limit());
             if len > 0 && rem <= len {
@@ -1000,6 +1293,7 @@ impl Decoder {
         match cur.read(cfg, want, &mut self.buf, chain) {
             Ok(StreamRead::Frames(_)) => {
                 apply_gain(&mut self.buf, gain);
+                self.mix_tail(normalization);
                 self.push_samples_buf();
                 Step::Worked
             }
@@ -1014,7 +1308,12 @@ impl Decoder {
                 Step::Idle
             }
             Ok(StreamRead::Eof) => {
-                self.finish_current();
+                // Nothing follows: a reverb plays out before the end.
+                let rings =
+                    self.next.is_none() && self.cur.as_mut().is_some_and(Active::start_ring_out);
+                if !rings {
+                    self.finish_current();
+                }
                 Step::Worked
             }
             Err(e) => {
@@ -1022,6 +1321,40 @@ impl Decoder {
                 self.finish_current();
                 Step::Worked
             }
+        }
+    }
+
+    /// Adds what the item before a gapless join still sounds like to
+    /// `self.buf` (see [`Tail`]); eased to nothing over its last quarter.
+    fn mix_tail(&mut self, normalization: bool) {
+        let Some(tail) = self.tail.as_mut() else {
+            return;
+        };
+        let ch = self.cfg.channels;
+        let n = ((self.buf.len() / ch) as u64).min(tail.left) as usize;
+        self.buf_b.clear();
+        self.buf_b.resize(n * ch, 0.0);
+        tail.fx.process(&mut self.buf_b);
+        let gain = if normalization {
+            10f32.powf(tail.gain_db / 20.0)
+        } else {
+            1.0
+        };
+        let quarter = (tail.total / 4).max(1) as f32;
+        for (i, (out, add)) in self
+            .buf
+            .chunks_exact_mut(ch)
+            .zip(self.buf_b.chunks_exact(ch))
+            .enumerate()
+        {
+            let ease = ((tail.left - i as u64) as f32 / quarter).min(1.0);
+            for (o, a) in out.iter_mut().zip(add) {
+                *o += a * gain * ease;
+            }
+        }
+        tail.left -= n as u64;
+        if tail.left == 0 {
+            self.tail = None;
         }
     }
 
@@ -1057,11 +1390,7 @@ impl Decoder {
             return;
         }
         let from = self.cur.as_ref().map(Active::id);
-        let start = Start {
-            id: to.id(),
-            pos_ns: 0,
-            announce: true,
-        };
+        let start = to.start_at(0, true);
         self.push_mark(Mark {
             at: self.pushed,
             flush: false,
@@ -1086,8 +1415,14 @@ impl Decoder {
 
         self.buf.clear();
         self.buf_b.clear();
-        // Outgoing item: whatever it still has, silence once it is over.
+        // Outgoing item: whatever it still has, silence once it is over
+        // (through its reverb, which rings on under the incoming item).
         let from_err = cur.read(cfg, want, &mut self.buf, None).err();
+        let got = self.buf.len().min(want * ch);
+        self.buf.resize(want * ch, 0.0);
+        if got < want * ch && cur.fx.is_some() {
+            cur.apply_fx(cfg, &mut self.buf[got..]);
+        }
         // Incoming item.
         let mut to_eof = false;
         let to_err = match x.to.read(cfg, want, &mut self.buf_b, None) {
@@ -1128,6 +1463,7 @@ impl Decoder {
         if let Some(e) = to_err {
             self.report(Some(to_id), &e);
         }
+        self.mix_tail(normalization);
         self.push_samples_buf();
         if finished && let Some(x) = self.xfade.take() {
             self.cur = Some(x.to);
@@ -1162,11 +1498,24 @@ impl Decoder {
             };
             match ready {
                 Ok(()) => {
-                    let start = Start {
-                        id: next.id(),
-                        pos_ns: 0,
-                        announce: true,
-                    };
+                    // Its shelves and reverb ring on under the next item
+                    // (unless the reverb already played out).
+                    let rang_out = ended.ringing();
+                    let same_format = ended.fx_cfg == Some(cfg);
+                    self.tail = ended
+                        .fx
+                        .take()
+                        .filter(|_| same_format && !rang_out)
+                        .map(|fx| {
+                            let total = fx.tail_frames().max(1);
+                            Tail {
+                                fx,
+                                gain_db: ended.item.gain_db,
+                                left: total,
+                                total,
+                            }
+                        });
+                    let start = next.start_at(0, true);
                     self.push_mark(Mark {
                         at: self.pushed,
                         flush: false,
@@ -1194,6 +1543,8 @@ impl Decoder {
     // ----- ring access ---------------------------------------------------
 
     fn push_flush(&mut self, gen_id: u64, start: Option<Start>) {
+        // What rang on from an earlier item is stale too.
+        self.tail = None;
         self.push_mark(Mark {
             at: self.pushed,
             flush: true,
@@ -1294,7 +1645,10 @@ mod tests {
             src_rate: 44_100,
             src_channels: 2,
             total_src: Some(frames),
+            fx: ItemFx::default(),
+            speed: Speed::ONE,
         }
+
     }
 
     /// Reads `item` (chaining into `next`) until its own end; returns the
@@ -1324,8 +1678,93 @@ mod tests {
         assert_eq!(fill_target(48_000, 2, 4096), 2048);
     }
 
+    fn at_speed(mut item: Item, speed: f32) -> Item {
+        item.set_fx(ItemFx {
+            speed,
+            ..ItemFx::default()
+        });
+        item
+    }
+
+    const CFG: Cfg = Cfg {
+        rate: 48_000,
+        channels: 2,
+        gen_id: 1,
+    };
+
+    #[test]
+    fn the_end_of_an_item_is_counted_in_sound_not_in_source_frames() {
+        // A second of 44.1 kHz at 1.25 is 0.8 s of sound: 38400 frames.
+        let fast = Active::new(at_speed(item(1, 44_100), 1.25));
+        assert_eq!(fast.remaining(CFG), Some(38_400));
+        let slow = Active::new(at_speed(item(1, 44_100), 0.85));
+        assert_eq!(slow.remaining(CFG), Some((44_100u64 * 3200).div_ceil(2499)));
+        let plain = Active::new(item(1, 44_100));
+        assert_eq!(plain.remaining(CFG), Some(48_000));
+        // From the middle, after a seek: what is left of it.
+        let mut fast = Active::new(at_speed(item(1, 44_100), 1.25));
+        fast.reposition(22_050).unwrap();
+        assert_eq!(fast.remaining(CFG), Some(19_200));
+    }
+
+    #[test]
+    fn items_at_one_speed_share_a_resampler_and_keep_exact_lengths() {
+        let frames = [44_101u64, 50_003];
+        let (mut a, mut b) = (
+            at_speed(item(1, frames[0]), 1.2),
+            at_speed(item(2, frames[1]), 1.2),
+        );
+        let mut c = at_speed(item(3, 10), 1.2);
+        let mut stream = Stream::new(&a, CFG).unwrap();
+        let ceil = |n: u64| (n * 400).div_ceil(441);
+        assert_eq!(read_item(&mut stream, &mut a, &mut b), ceil(frames[0]));
+        assert!(stream.chained);
+        stream.rebase();
+        assert_eq!(
+            read_item(&mut stream, &mut b, &mut c),
+            ceil(frames[0] + frames[1]) - ceil(frames[0])
+        );
+    }
+
+    #[test]
+    fn items_at_different_speeds_do_not_share_a_resampler() {
+        let (mut a, mut b) = (at_speed(item(1, 44_101), 1.2), at_speed(item(2, 50_003), 0.85));
+        let mut stream = Stream::new(&a, CFG).unwrap();
+        // The first is flushed to its own exact end instead of flowing on.
+        assert_eq!(read_item(&mut stream, &mut a, &mut b), (44_101u64 * 400).div_ceil(441));
+        assert!(!stream.chained);
+        // Neither do a plain item and one that keeps its timbre.
+        let (mut a, mut b) = (at_speed(item(1, 44_101), 1.2), at_speed(item(2, 50_003), 1.2));
+        b.fx.keep_formants = true;
+        let mut stream = Stream::new(&a, CFG).unwrap();
+        assert_eq!(read_item(&mut stream, &mut a, &mut b), (44_101u64 * 400).div_ceil(441));
+        assert!(!stream.chained);
+    }
+
+    #[test]
+    fn keeping_the_timbre_keeps_the_exact_length_through_a_chain() {
+        let keep = |item: Item| {
+            let mut item = at_speed(item, 1.2);
+            item.fx.keep_formants = true;
+            item
+        };
+        let frames = [44_101u64, 50_003];
+        let (mut a, mut b, mut c) = (keep(item(1, frames[0])), keep(item(2, frames[1])), keep(item(3, 10)));
+        let mut stream = Stream::new(&a, CFG).unwrap();
+        assert!(stream.post.is_some());
+        let ceil = |n: u64| (n * 400).div_ceil(441);
+        assert_eq!(read_item(&mut stream, &mut a, &mut b), ceil(frames[0]));
+        assert!(stream.chained);
+        stream.rebase();
+        assert_eq!(
+            read_item(&mut stream, &mut b, &mut c),
+            ceil(frames[0] + frames[1]) - ceil(frames[0])
+        );
+    }
+
     #[test]
     fn chained_items_get_their_own_exact_lengths_through_one_resampler() {
+
         let cfg = Cfg {
             rate: 48_000,
             channels: 2,
