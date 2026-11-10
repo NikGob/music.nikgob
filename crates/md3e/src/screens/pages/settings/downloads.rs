@@ -8,7 +8,7 @@ use nikgob_view::{self as v, Command, Prefs, ViewState};
 use super::super::PageState;
 use super::super::settings_help::{self, SettingId as Id};
 use super::preset;
-use super::rows::{self, Note, Num, child, dimmed, group, item, menu, row, row_note, segments, switch};
+use super::rows::{self, Note, Num, child, dimmed, group, block, menu, row, row_note, segments, switch};
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, IconButton, LoadingIndicator, Size, Style, Switch, TextField, anim},
@@ -234,8 +234,7 @@ fn soulseek(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     // Where it runs is the developer's choice; a saved server setup still
     // shows its fields.
     let dev = rows::level_shown(rows::mode(ui.ctx()), settings_help::Level::Dev);
-    ui.add_space(4.0);
-    item(ui, Id::Soulseek, |ui| {
+    block(ui, Id::Soulseek, |ui| {
         if dev {
             let (pick, rects) = super::super::connected(ui, egui::Id::new("set-slsk-where"), &["В плеере", "На сервере"], usize::from(pages.slsk_remote), &[]);
             // The group fills its row: the ⓘ goes right after it, not beside
@@ -332,8 +331,7 @@ fn prowlarr(ui: &mut Ui, state: &ViewState, p: &Prefs, pages: &mut PageState, ou
     if pages.indexer_url.is_empty() && !p.prowlarr_url.is_empty() {
         pages.indexer_url = p.prowlarr_url.clone();
     }
-    ui.add_space(4.0);
-    item(ui, Id::Prowlarr, |ui| {
+    block(ui, Id::Prowlarr, |ui| {
         TextField::new(&mut pages.indexer_url, "Адрес Prowlarr")
             .placeholder("https://…")
             .leading_icon(Icon::Link)

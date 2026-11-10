@@ -201,6 +201,19 @@ pub(crate) fn item<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> Op
     Some(settings_help::item(ui, id, id.label(), add))
 }
 
+/// A block of fields (text fields with their buttons) as one item: the
+/// same room above every block, after the titles waiting for it and not
+/// before them, and its ⓘ beside the first field (the block starts with
+/// the field, so the ⓘ lands on its centre line).
+pub(crate) fn block<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    if !shown(ui.ctx(), id) {
+        return None;
+    }
+    flush(ui, None);
+    ui.add_space(4.0);
+    Some(settings_help::item(ui, id, id.label(), add))
+}
+
 /// A list (or a block) under its own title, which carries its ⓘ; a group
 /// of the same name is not titled twice.
 pub(crate) fn titled<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {

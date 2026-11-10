@@ -9,7 +9,7 @@ use nikgob_view::{Command, Prefs, ViewState};
 
 use super::super::PageState;
 use super::super::settings_help::SettingId as Id;
-use super::rows::{Note, group, item, row, row_note, segments, switch};
+use super::rows::{Note, block, group, row, row_note, segments, switch};
 use crate::{
     Icon,
     components::{Button, Dialog, Style, TextField},
@@ -49,8 +49,7 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
         pages.metadata_contact = p.metadata_contact.clone();
         pages.metadata_synced = true;
     }
-    item(ui, Id::MusicBrainz, |ui| {
-        ui.add_space(8.0);
+    block(ui, Id::MusicBrainz, |ui| {
         TextField::new(&mut pages.metadata_contact, Id::MusicBrainz.label())
             .placeholder("почта или адрес сайта")
             .leading_icon(Icon::Person)
@@ -58,8 +57,7 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
             .id_salt("set-mb-contact")
             .show(ui);
     });
-    item(ui, Id::AcoustId, |ui| {
-        ui.add_space(8.0);
+    block(ui, Id::AcoustId, |ui| {
         let mut field = TextField::new(&mut pages.acoustid_key, Id::AcoustId.label()).password(true);
         if p.acoustid_configured {
             field = field.placeholder("Сохранён");
@@ -94,8 +92,7 @@ fn metadata(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command
 /// «Ключ Last.fm» and «Токен ListenBrainz», each saved or taken away on
 /// its own (kept in settings.toml).
 fn keys(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
-    item(ui, Id::LastfmKey, |ui| {
-        ui.add_space(8.0);
+    block(ui, Id::LastfmKey, |ui| {
         let mut field = TextField::new(&mut pages.lastfm_key, Id::LastfmKey.label()).password(true);
         if p.lastfm_configured {
             field = field.placeholder("Сохранён");
@@ -113,8 +110,7 @@ fn keys(ui: &mut Ui, p: &Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
             }
         });
     });
-    item(ui, Id::ListenbrainzToken, |ui| {
-        ui.add_space(8.0);
+    block(ui, Id::ListenbrainzToken, |ui| {
         let mut field = TextField::new(&mut pages.listenbrainz_token, Id::ListenbrainzToken.label()).password(true);
         if p.listenbrainz_configured {
             field = field.placeholder("Сохранён");
