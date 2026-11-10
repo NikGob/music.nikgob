@@ -1102,7 +1102,7 @@ impl<'a> Builder<'a> {
                     .collect();
             }
         }
-        vec![(cores.iter().map(|&i| w[i]).sum(), pool.to_vec())]
+        vec![(cores.iter().map(|&i| w[i]).sum::<f32>(), pool.to_vec())]
     }
 
     /// The calm (or the lively) side of what is loved, by the energy of
@@ -1193,10 +1193,10 @@ impl<'a> Builder<'a> {
             // of it alone: that makes no mix.
             world: ((n as f32 * WORLD_SHARE).ceil() as usize).max(2),
             unheard: if self.history { ((n as f32 * pool.unheard).ceil() as usize).max(1) } else { usize::MAX },
-            // Old songs: their share, or what the songs heard now leave
-            // empty.
+            // Old songs: their share, or what the songs loved and heard
+            // now leave empty (never the place of a song nobody loves).
             stale: {
-                let heard_now = pool.tracks.iter().filter(|&&i| !self.stale[i] && !self.unheard(i)).count();
+                let heard_now = pool.tracks.iter().filter(|&&i| !self.stale[i] && self.a[i] > 0.0).count();
                 ((n as f32 * pool.stale).ceil() as usize).max(n.saturating_sub(heard_now))
             },
         };
