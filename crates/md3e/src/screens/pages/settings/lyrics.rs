@@ -89,9 +89,6 @@ fn look(ui: &mut Ui, p: &mut Prefs) {
         if let Some(v) = rows::slider(ui, Id::LyricsSoftDepth, p.lyrics_soft_depth, Num::pct(0.08, 0.4, 0.01)) {
             p.lyrics_soft_depth = v;
         }
-        if let Some(v) = rows::slider(ui, Id::LyricsSoftStrength, p.lyrics_soft_strength, Num::pct(0.0, 1.5, 0.05)) {
-            p.lyrics_soft_strength = v;
-        }
         if let Some(v) = rows::slider(ui, Id::LyricsSoftFade, p.lyrics_soft_fade, Num::pct(0.0, 1.0, 0.05)) {
             p.lyrics_soft_fade = v;
         }
