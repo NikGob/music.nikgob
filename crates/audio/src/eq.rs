@@ -5,10 +5,15 @@
 //! dragged point is heard on the next block rather than after the buffered
 //! second.
 //!
+//! What is set is the curve, not the bells: neighbouring bells overlap, so
+//! each one's own gain is fitted ([`eq_filter_gains`]) until all ten
+//! together have, at every band's centre, the gain asked for that band.
+//!
 //! Real-time rules hold: fixed arrays, no locks, no allocation. The control
 //! side writes the wanted gains to atomics and bumps a generation; the
-//! callback picks them up and *glides* there: every [`STEP_FRAMES`] frames
-//! each band's gain moves a little towards its target and its coefficients
+//! callback picks them up, fits the bells to them for its own rate (a few
+//! thousand multiplies, once a change) and *glides* there: every
+//! [`STEP_FRAMES`] frames each band's gain moves a little towards its target and its coefficients
 //! are recomputed, and the preamp is interpolated per sample, so a preset
 //! switch or a dragged point makes no zipper noise and no click.
 //!
@@ -21,7 +26,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::biquad::{Coefs, State, angle};
+use crate::biquad::{Coefs, State, angle, point};
 use crate::shared::Shared;
 
 /// Number of bands.
@@ -30,7 +35,7 @@ pub const EQ_BANDS: usize = 10;
 pub const EQ_FREQS: [f32; EQ_BANDS] = [
     32.0, 64.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16_000.0,
 ];
-/// The farthest a band goes either way, dB.
+/// The farthest the curve goes either way at a band's centre, dB.
 pub const EQ_MAX_DB: f32 = 12.0;
 /// Quality of every band: about an octave wide, so neighbours add up to a
 /// smooth curve.
@@ -45,8 +50,20 @@ const GLIDE_MS: f64 = 30.0;
 const RING_MS: f64 = 250.0;
 /// Closer than this to its target (dB), a gain is set to it.
 const SNAP_DB: f32 = 0.005;
-/// Rate the preamp is worked out at (the curve barely depends on it).
+/// Rate the preamp and the drawn curve are worked out at (between the
+/// centres the curve barely depends on it).
 const NOMINAL_RATE: f64 = 48_000.0;
+/// The farthest a bell is driven to hold the curve, dB. A band up between
+/// two that are down needs more than its own gain; the steepest setting
+/// asks for about 20.
+const FIT_MAX_DB: f64 = 24.0;
+/// Rounds a fit takes at most (it is done in 3 to 14).
+const FIT_ROUNDS: usize = 30;
+/// Share of what is missing that a round adds: the neighbours answer the
+/// same miss, so the whole of it overshoots and takes longer to settle.
+const FIT_STEP: f64 = 0.7;
+/// Closer than this to the curve at every centre (dB), the fit is done.
+const FIT_CLOSE_DB: f64 = 0.01;
 
 fn clean(gains: &[f32; EQ_BANDS]) -> [f32; EQ_BANDS] {
     gains.map(|g| {
@@ -58,33 +75,116 @@ fn clean(gains: &[f32; EQ_BANDS]) -> [f32; EQ_BANDS] {
     })
 }
 
+/// The ten bands laid out for one rate.
+#[derive(Clone, Copy)]
+struct Layout {
+    /// `cos(w0)` and `sin(w0) / 2Q` of every band.
+    band: [(f64, f64); EQ_BANDS],
+    /// Every band's centre on the unit circle (see [`point`]).
+    centre: [[f64; 4]; EQ_BANDS],
+}
+
+impl Layout {
+    /// No rate yet.
+    const NONE: Self = Self {
+        band: [(0.0, 0.0); EQ_BANDS],
+        centre: [[0.0; 4]; EQ_BANDS],
+    };
+
+    fn new(rate: f64) -> Self {
+        let mut layout = Self::NONE;
+        for (band, freq) in EQ_FREQS.iter().enumerate() {
+            let (cos, sin) = angle(rate, f64::from(*freq));
+            layout.band[band] = (cos, sin / (2.0 * Q));
+            // Where `angle` keeps the band: under Nyquist.
+            layout.centre[band] = point(rate, f64::from(*freq).min(rate * 0.45));
+        }
+        layout
+    }
+
+    fn coefs(&self, gain: &[f64; EQ_BANDS]) -> [Coefs; EQ_BANDS] {
+        std::array::from_fn(|band| {
+            let (cos, alpha) = self.band[band];
+            Coefs::peaking_at(cos, alpha, gain[band])
+        })
+    }
+
+    /// The gain of all ten bells together at a point of the unit circle, dB.
+    fn db_on(coefs: &[Coefs; EQ_BANDS], at: &[f64; 4]) -> f64 {
+        let power: f64 = coefs.iter().map(|c| c.power_on(at)).product();
+        10.0 * power.log10()
+    }
+
+    /// The bells' gains that put the curve on `curve` at every centre.
+    ///
+    /// Each round reads the curve at the centres and gives every bell a
+    /// share of what its own centre misses. Deterministic, no allocation;
+    /// a round is ten `powf`, ten `log10` and a hundred small products.
+    fn fit(&self, curve: &[f32; EQ_BANDS]) -> [f32; EQ_BANDS] {
+        let curve = clean(curve);
+        if curve.iter().all(|g| *g == 0.0) {
+            return [0.0; EQ_BANDS];
+        }
+        let mut gain = curve.map(f64::from);
+        for _ in 0..FIT_ROUNDS {
+            let coefs = self.coefs(&gain);
+            let mut next = gain;
+            let mut worst = 0.0f64;
+            for band in 0..EQ_BANDS {
+                let miss = f64::from(curve[band]) - Self::db_on(&coefs, &self.centre[band]);
+                worst = worst.max(miss.abs());
+                next[band] = (gain[band] + FIT_STEP * miss).clamp(-FIT_MAX_DB, FIT_MAX_DB);
+            }
+            if worst < FIT_CLOSE_DB {
+                break;
+            }
+            gain = next;
+        }
+        gain.map(|g| g as f32)
+    }
+
+    /// The gain at `freq` (Hz) of bells run at `gain`, dB.
+    fn response_db(&self, rate: f64, gain: &[f32; EQ_BANDS], freq: f32) -> f32 {
+        if gain.iter().all(|g| *g == 0.0) {
+            return 0.0;
+        }
+        let coefs = self.coefs(&gain.map(f64::from));
+        Self::db_on(&coefs, &point(rate, f64::from(freq))) as f32
+    }
+}
+
+/// The gain each of the ten bells runs at (dB) so that all of them together
+/// have, at every band's centre, the gain set for that band: the curve
+/// passes through what was set. Flat stays exactly flat. Worked out for
+/// 48 kHz; the callback does the same for the device's rate.
+#[must_use]
+pub fn eq_filter_gains(gains: &[f32; EQ_BANDS]) -> [f32; EQ_BANDS] {
+    Layout::new(NOMINAL_RATE).fit(gains)
+}
+
 /// The equalizer's gain at `freq` (Hz) for these band gains, dB: the curve
-/// the listener hears, for drawing it.
+/// the listener hears, for drawing it. At a band's centre it is that band's
+/// gain.
 #[must_use]
 pub fn eq_response_db(gains: &[f32; EQ_BANDS], freq: f32) -> f32 {
-    let gains = clean(gains);
-    let mut power = 1.0f64;
-    for (band, gain) in gains.iter().enumerate() {
-        if *gain != 0.0 {
-            let c = Coefs::peaking(NOMINAL_RATE, f64::from(EQ_FREQS[band]), Q, f64::from(*gain));
-            power *= c.power_at(NOMINAL_RATE, f64::from(freq));
-        }
-    }
-    (10.0 * power.log10()) as f32
+    Layout::new(NOMINAL_RATE).response_db(NOMINAL_RATE, &eq_filter_gains(gains), freq)
 }
 
 /// The gain (dB, never positive) that goes before these band gains so the
 /// curve's highest point sits at 0 dB: what was at full scale stays there.
-/// Neighbouring boosts add up, so this is the peak of the whole curve, not
-/// of the highest band.
+/// Between two raised bands the curve can stand a little above both, so
+/// this is the peak of the whole curve, not of the highest band.
 #[must_use]
 pub fn eq_preamp_db(gains: &[f32; EQ_BANDS]) -> f32 {
-    // Twelve points an octave from 16 Hz to 22 kHz: the curve is far
-    // smoother than that.
-    let mut peak = 0.0f32;
+    let layout = Layout::new(NOMINAL_RATE);
+    let fitted = eq_filter_gains(gains);
+    let at = |freq: f32| layout.response_db(NOMINAL_RATE, &fitted, freq);
+    // The centres, and twelve points an octave from 16 Hz to 22 kHz: the
+    // curve is far smoother than that.
+    let mut peak = EQ_FREQS.iter().fold(0.0f32, |peak, freq| peak.max(at(*freq)));
     let mut freq = 16.0f32;
     while freq < 22_000.0 {
-        peak = peak.max(eq_response_db(gains, freq));
+        peak = peak.max(at(freq));
         freq *= 2f32.powf(1.0 / 12.0);
     }
     -peak
@@ -94,7 +194,9 @@ pub fn eq_preamp_db(gains: &[f32; EQ_BANDS]) -> f32 {
 pub(crate) struct Eq {
     rate: f64,
     seen_gen: u32,
-    /// Where the gains are going, dB (all zero when switched off).
+    /// The curve asked for, dB at every centre (all zero when switched off).
+    curve: [f32; EQ_BANDS],
+    /// Where the bells' gains are going, dB: fitted to the curve.
     target: [f32; EQ_BANDS],
     target_pre: f32,
     /// Where they are.
@@ -102,8 +204,8 @@ pub(crate) struct Eq {
     pre_db: f32,
     pre: f64,
     glide: f32,
-    /// `cos(w0)` and `sin(w0) / 2Q` of every band at this rate.
-    band: [(f64, f64); EQ_BANDS],
+    /// The bands at this rate.
+    layout: Layout,
     coefs: [Coefs; EQ_BANDS],
     state: [[State; EQ_BANDS]; MAX_CHANNELS],
     /// In the path. False: the samples pass untouched.
@@ -119,13 +221,14 @@ impl Eq {
         Self {
             rate: 0.0,
             seen_gen: 0,
+            curve: [0.0; EQ_BANDS],
             target: [0.0; EQ_BANDS],
             target_pre: 0.0,
             gain: [0.0; EQ_BANDS],
             pre_db: 0.0,
             pre: 1.0,
             glide: 1.0,
-            band: [(0.0, 0.0); EQ_BANDS],
+            layout: Layout::NONE,
             coefs: [Coefs::IDENTITY; EQ_BANDS],
             state: [[State::default(); EQ_BANDS]; MAX_CHANNELS],
             active: false,
@@ -134,14 +237,13 @@ impl Eq {
         }
     }
 
-    /// The device rate changed: the bands are laid out anew and the gains
-    /// taken over at once (the stream restarts with a fade anyway).
+    /// The device rate changed: the bands are laid out anew, the bells
+    /// fitted to the curve again and their gains taken over at once (the
+    /// stream restarts with a fade anyway).
     pub(crate) fn configure(&mut self, rate: u32) {
         self.rate = f64::from(rate.max(1));
-        for (band, freq) in EQ_FREQS.iter().enumerate() {
-            let (cos, sin) = angle(self.rate, f64::from(*freq));
-            self.band[band] = (cos, sin / (2.0 * Q));
-        }
+        self.layout = Layout::new(self.rate);
+        self.target = self.layout.fit(&self.curve);
         let step_ms = STEP_FRAMES as f64 * 1000.0 / self.rate;
         self.glide = (1.0 - (-step_ms / GLIDE_MS).exp()) as f32;
         self.gain = self.target;
@@ -179,7 +281,7 @@ impl Eq {
 
     fn update_coefs(&mut self) {
         for band in 0..EQ_BANDS {
-            let (cos, alpha) = self.band[band];
+            let (cos, alpha) = self.layout.band[band];
             self.coefs[band] = Coefs::peaking_at(cos, alpha, f64::from(self.gain[band]));
         }
     }
@@ -193,12 +295,16 @@ impl Eq {
         self.seen_gen = generation;
         if sh.eq_on.load(Ordering::Relaxed) {
             for band in 0..EQ_BANDS {
-                self.target[band] = f32::from_bits(sh.eq_gains[band].load(Ordering::Relaxed));
+                self.curve[band] = f32::from_bits(sh.eq_gains[band].load(Ordering::Relaxed));
             }
             self.target_pre = f32::from_bits(sh.eq_preamp.load(Ordering::Relaxed));
         } else {
-            self.target = [0.0; EQ_BANDS];
+            self.curve = [0.0; EQ_BANDS];
             self.target_pre = 0.0;
+        }
+        // Before the first rate there is nothing to fit to; `configure` does it.
+        if self.rate > 0.0 {
+            self.target = self.layout.fit(&self.curve);
         }
     }
 
@@ -452,14 +558,142 @@ mod tests {
     }
 
     #[test]
-    fn the_curve_is_the_bands_added_up() {
+    fn two_raised_neighbours_do_not_add_up_and_the_preamp_is_the_peak() {
         assert_eq!(eq_response_db(&[0.0; EQ_BANDS], 1000.0), 0.0);
         let two = [0.0, 6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        // Unfitted, the two bells stood at 7.7 dB between them.
         let between = eq_response_db(&two, 90.0);
-        assert!(between > 5.0 && between < 8.5, "{between}");
+        assert!(between > 4.8 && between < 6.2, "{between}");
         let pre = eq_preamp_db(&two);
-        assert!(pre < -6.5 && pre > -9.0, "{pre}");
+        assert!(pre <= -5.98 && pre > -6.3, "{pre}");
+        assert!((eq_preamp_db(&only(5, 6.0)) + 6.0).abs() < 0.02);
         assert_eq!(eq_preamp_db(&[-6.0; EQ_BANDS]), 0.0);
+    }
+
+    /// How far the curve of `layout`'s fit is from `curve` at the centres.
+    fn worst_miss(layout: &Layout, curve: &[f32; EQ_BANDS]) -> f64 {
+        let fitted = layout.fit(curve).map(f64::from);
+        let coefs = layout.coefs(&fitted);
+        (0..EQ_BANDS)
+            .map(|band| (f64::from(curve[band]) - Layout::db_on(&coefs, &layout.centre[band])).abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// The editor's ready curves but the flat one.
+    const READY: [[f32; EQ_BANDS]; 4] = [
+        [0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, -1.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0],
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -2.0, -3.0, 0.0],
+    ];
+
+    fn alternating(db: f32) -> [f32; EQ_BANDS] {
+        std::array::from_fn(|band| if band % 2 == 0 { db } else { -db })
+    }
+
+    #[test]
+    fn the_curve_passes_through_every_band_s_gain() {
+        let mut curves = vec![
+            only(0, 12.0),
+            only(5, 6.0),
+            only(5, -12.0),
+            only(9, 12.0),
+            alternating(6.0),
+            alternating(-12.0),
+            [6.0, 5.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [12.0; EQ_BANDS],
+            [-12.0; EQ_BANDS],
+            [12.0, 12.0, 12.0, 0.0, -12.0, -12.0, 0.0, 12.0, 12.0, 12.0],
+            [0.0, 0.0, 0.0, 12.0, -12.0, 12.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        curves.extend(READY);
+        for rate in [44_100.0, 48_000.0, 96_000.0, 192_000.0] {
+            let layout = Layout::new(rate);
+            for curve in &curves {
+                let miss = worst_miss(&layout, curve);
+                assert!(miss < 0.1, "{curve:?} at {rate} Hz: {miss} dB off");
+                // No setting within the range drives a bell to the stop.
+                let fitted = layout.fit(curve);
+                assert!(fitted.iter().all(|g| f64::from(g.abs()) < FIT_MAX_DB), "{curve:?}: {fitted:?}");
+            }
+        }
+        // The public curve is the same thing at the nominal rate.
+        for curve in &curves {
+            for (band, freq) in EQ_FREQS.iter().enumerate() {
+                let got = eq_response_db(curve, *freq);
+                assert!((got - curve[band]).abs() < 0.1, "{curve:?} at {freq} Hz: {got}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_curve_is_fitted_with_no_gain_at_all() {
+        assert_eq!(eq_filter_gains(&[0.0; EQ_BANDS]), [0.0; EQ_BANDS]);
+        assert_eq!(eq_filter_gains(&[f32::NAN; EQ_BANDS]), [0.0; EQ_BANDS]);
+        assert_eq!(Layout::new(44_100.0).fit(&[0.0; EQ_BANDS]), [0.0; EQ_BANDS]);
+    }
+
+    #[test]
+    fn a_fit_moves_the_neighbours_of_a_raised_band_the_other_way() {
+        let fitted = eq_filter_gains(&only(5, 6.0));
+        assert!(fitted[5] > 6.2 && fitted[5] < 6.7, "{fitted:?}");
+        assert!(fitted[4] < -1.0 && fitted[4] > -1.4, "{fitted:?}");
+        assert!(fitted[6] < -1.0 && fitted[6] > -1.4, "{fitted:?}");
+        assert!(fitted[0].abs() < 0.01 && fitted[9].abs() < 0.01, "{fitted:?}");
+        // The numbers the editor's own copy of the fit is held to as well.
+        let bass = eq_filter_gains(&READY[0]);
+        for (bell, expected) in bass.iter().zip([-0.76, 3.89, 1.33, -0.38, -0.01]) {
+            assert!((bell - expected).abs() < 0.03, "{bass:?}");
+        }
+        // The steepest setting asks the most of the bells, and gets it.
+        let steep = eq_filter_gains(&alternating(12.0));
+        let most = steep.iter().fold(0.0f32, |m, g| m.max(g.abs()));
+        assert!(most > 19.0 && most < 21.5, "{steep:?}");
+    }
+
+    #[test]
+    fn the_ready_curves_are_fitted_the_same_every_time_and_stay_near_themselves() {
+        for curve in READY {
+            let fitted = eq_filter_gains(&curve);
+            assert_eq!(fitted, eq_filter_gains(&curve));
+            for (bell, set) in fitted.iter().zip(curve) {
+                assert!((bell - set).abs() < 1.0, "{curve:?}: {fitted:?}");
+            }
+            assert!(worst_miss(&Layout::new(NOMINAL_RATE), &curve) < 0.02);
+            // Nothing stands above the highest band by more than a hair.
+            let top = curve.iter().fold(0.0f32, |m, g| m.max(*g));
+            let pre = eq_preamp_db(&curve);
+            assert!(pre <= -top + 0.02 && pre > -top - 0.1, "{curve:?}: {pre}");
+        }
+    }
+
+    #[test]
+    fn a_raised_band_leaves_a_sine_at_its_neighbour_s_centre_alone() {
+        let sh = Shared::new();
+        let mut eq = Eq::new();
+        eq.configure(RATE);
+        set(&sh, true, only(5, 6.0), 0.0);
+        let out = run(&mut eq, &sh, 500.0, 0.25, 0, RATE as usize * 2);
+        let dry = sine(500.0, 0.25, RATE as usize, RATE as usize);
+        let got = 20.0 * (rms(&out[RATE as usize * 2..]) / rms(&dry)).log10();
+        // The bell alone has 1.5 dB there.
+        assert!(got.abs() < 0.1, "{got} dB");
+    }
+
+    #[test]
+    fn a_new_rate_fits_the_curve_again() {
+        let sh = Shared::new();
+        let mut eq = Eq::new();
+        // Set before the device has a rate: fitted once it has.
+        let curve = [12.0; EQ_BANDS];
+        set(&sh, true, curve, eq_preamp_db(&curve));
+        eq.process(&sh, &mut [0.0f32; 64], 2);
+        eq.configure(RATE);
+        assert_eq!(eq.target, Layout::new(48_000.0).fit(&curve));
+        assert_eq!(eq.gain, eq.target);
+        eq.configure(96_000);
+        assert_eq!(eq.target, Layout::new(96_000.0).fit(&curve));
+        assert_ne!(eq.target, Layout::new(48_000.0).fit(&curve));
     }
 
     #[test]

@@ -222,11 +222,11 @@ fn track_row(
     }
     let mut nav = None;
     if let Some(m) = &menu_resp {
-        let (menu, acts) = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx));
+        let (menu, acts) = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx), &super::track_menu_slots(&m.ctx));
         let act = menu.attach(m).and_then(|k| acts.get(k).copied());
         nav = track_pick(&m.ctx, act, t, Some(m.rect), pages, out);
     }
-    let (menu, acts) = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx));
+    let (menu, acts) = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx), &super::track_menu_slots(&o.response.ctx));
     let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
     let nav = track_pick(&o.response.ctx, act, t, None, pages, out).or(nav);
     // An artist name or the album of the line: its page.
@@ -266,8 +266,11 @@ fn track_menu(
     t: &StreamTrackRow,
     wished: Option<WishlistStatus>,
     marks: &nikgob_view::DislikesView,
+    slots: &[nikgob_view::TrackMenuSlot],
 ) -> (Menu, Vec<super::TrackAct>) {
-    let (menu, acts) = widgets::menu_of(key, stream_track_rows(t, wished, marks));
+    // Its «Скачать» is the download, never the tags.
+    let rows = super::placed(stream_track_rows(t, wished, marks), slots, |a| a.menu_item(false));
+    let (menu, acts) = widgets::menu_of(key, rows);
     (menu.align_right(true), acts)
 }
 
@@ -971,7 +974,7 @@ mod menu_tests {
         rows.iter()
             .filter_map(|r| match r {
                 Row::Item(_, i) => Some(i.label.clone()),
-                Row::Divider | Row::Label(_) => None,
+                Row::Divider | Row::Label(_) | Row::Sub(..) => None,
             })
             .collect()
     }

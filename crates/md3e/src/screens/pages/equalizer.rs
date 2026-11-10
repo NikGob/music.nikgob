@@ -2,11 +2,11 @@
 //!
 //! A band is a rail with a handle on it, the handle at the band's own gain;
 //! from the middle line to the handle the rail is filled. Behind the rails
-//! lies what the listener hears: the response of all ten filters together,
-//! which near a moved band is not that band's gain (neighbours add up), so
-//! it is drawn as the ground the handles stand on and not as a line through
-//! them. A handle's number shows only while it is dragged; a double click
-//! puts it back on the middle line.
+//! lies what the listener hears: the response of all ten filters together.
+//! The filters are fitted to the handles (neighbours add up, so a filter's
+//! own gain is not its band's), so the response passes through every handle
+//! and is drawn as the ground they stand on. A handle's number shows only
+//! while it is dragged; a double click puts it back on the middle line.
 //!
 //! The editor changes the switch and the gains it is given; the sheet that
 //! shows it ([`super::sound`]) sends them, so every move of a handle is
@@ -14,7 +14,7 @@
 //! crackle).
 
 use egui::{Align2, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Ui, pos2, vec2};
-use nikgob_view::{EQ_BANDS, EQ_FREQS, EQ_MAX_DB, EQ_PRESETS, eq_curve_db, eq_preset_of};
+use nikgob_view::{EQ_BANDS, EQ_FREQS, EQ_MAX_DB, EQ_PRESETS, eq_curve_db, eq_filter_gains, eq_preset_of};
 
 use crate::{
     Theme, TypeRole,
@@ -32,6 +32,8 @@ const EDGE: f32 = 16.0;
 const STEP_DB: f32 = 0.5;
 /// How far past the outer bands the response is drawn, in bands.
 const OVERHANG: f32 = 0.45;
+/// Points of the response's line from one band to the next.
+const RESPONSE_PER_BAND: i32 = 12;
 /// Width of a band's rail.
 const RAIL_W: f32 = 4.0;
 /// Radius of a handle, at rest (every band's is the same) and held.
@@ -109,14 +111,20 @@ pub(super) fn editor(ui: &mut Ui, on: &mut bool, gains: &mut [f32; EQ_BANDS]) {
     field(ui, on, gains);
 }
 
-/// The response of the whole equalizer across a field, left to right.
+/// The response of the whole equalizer across a field, left to right: of
+/// the filters fitted to `gains`, so it passes through the handles.
 fn response_line(gains: &[f32; EQ_BANDS], left: f32, right: f32, top: f32, bottom: f32) -> Vec<Pos2> {
-    let steps = 120;
+    let bells = eq_filter_gains(gains);
     let (from, to) = (-OVERHANG, (EQ_BANDS - 1) as f32 + OVERHANG);
-    (0..=steps)
-        .map(|i| {
-            let band = from + (to - from) * i as f32 / steps as f32;
-            let db = eq_curve_db(gains, band_freq(band)).clamp(-EQ_MAX_DB * 1.25, EQ_MAX_DB * 1.25);
+    // The centres are among the points: the response turns sharpest at a
+    // handle, and a line that stepped over it would miss it.
+    let per = RESPONSE_PER_BAND as f32;
+    let inner = ((from * per).ceil() as i32..=(to * per).floor() as i32).map(|i| i as f32 / per);
+    std::iter::once(from)
+        .chain(inner)
+        .chain(std::iter::once(to))
+        .map(|band| {
+            let db = eq_curve_db(&bells, band_freq(band)).clamp(-EQ_MAX_DB * 1.25, EQ_MAX_DB * 1.25);
             pos2(band_x(left, right, band), db_y(top, bottom, db))
         })
         .collect()
@@ -188,7 +196,8 @@ fn field(ui: &mut Ui, on: &mut bool, gains: &mut [f32; EQ_BANDS]) {
 
         // The rail, and its part from the middle line to the handle.
         let rail = Rect::from_min_max(pos2(x - RAIL_W * 0.5, top), pos2(x + RAIL_W * 0.5, bottom));
-        paint::container(&p, rail, Radii::all(shape::FULL), s.surface_container_highest, Stroke::NONE);
+        // On the card's own tone a rail of a container tone is not seen.
+        paint::container(&p, rail, Radii::all(shape::FULL), s.outline_variant, Stroke::NONE);
         let active = Rect::from_min_max(pos2(x - RAIL_W * 0.5, at.y.min(zero)), pos2(x + RAIL_W * 0.5, at.y.max(zero)));
         if active.height() > 0.5 {
             paint::container(&p, active, Radii::all(shape::FULL), ink, Stroke::NONE);
@@ -214,8 +223,8 @@ fn field(ui: &mut Ui, on: &mut bool, gains: &mut [f32; EQ_BANDS]) {
             theme.motion.fast_spatial,
         )
         .max(HANDLE_R - 1.0);
-        // A rim of the sheet's own colour keeps the handle apart from its rail.
-        p.circle_filled(at, radius + 2.0, s.surface_container_low);
+        // A rim of the card's own colour keeps the handle apart from its rail.
+        p.circle_filled(at, radius + 2.0, s.surface_container_highest);
         p.circle_filled(at, radius, ink);
 
         p.text(
@@ -290,6 +299,25 @@ mod tests {
         let handle = pos2(band_x(left, right, 5.0), db_y(top, bottom, 6.0));
         let nearest = line.iter().min_by(|a, b| (a.x - handle.x).abs().total_cmp(&(b.x - handle.x).abs())).unwrap();
         assert!((nearest.y - handle.y).abs() < 2.0, "{nearest:?} against {handle:?}");
+
+        // And through every handle of a curve whose bands pull each other.
+        let curves: [[f32; EQ_BANDS]; 5] = [
+            [0.0, 6.0, 6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [6.0, -6.0, 6.0, -6.0, 6.0, -6.0, 6.0, -6.0, 6.0, -6.0],
+            [12.0; EQ_BANDS],
+            EQ_PRESETS[1].1,
+            EQ_PRESETS[4].1,
+        ];
+        for gains in curves {
+            let pulled = response_line(&gains, left, right, top, bottom);
+            for (band, gain) in gains.iter().enumerate() {
+                let handle = pos2(band_x(left, right, band as f32), db_y(top, bottom, *gain));
+                let i = pulled.iter().position(|p| p.x >= handle.x).unwrap();
+                let (a, b) = (pulled[i - 1], pulled[i]);
+                let y = a.y + (b.y - a.y) * (handle.x - a.x) / (b.x - a.x);
+                assert!((y - handle.y).abs() < 1.5, "{gains:?}, band {band}: {y} against {}", handle.y);
+            }
+        }
 
         let fill = response_fill(&line, zero, Color32::WHITE);
         assert_eq!(fill.vertices.len(), line.len() * 2);

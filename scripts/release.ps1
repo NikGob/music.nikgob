@@ -22,7 +22,11 @@ if ((Test-Path $out) -and -not $Force) {
 }
 
 $target = 'x86_64-pc-windows-msvc'
-$env:RUSTFLAGS = '-C target-feature=+crt-static'
+# The paths of this machine stay out of the exe (panic places, backtraces):
+# the repo reads as nikgob\, the registry as cargo\, the toolchain as rustup\.
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+$rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+$env:RUSTFLAGS = "-C target-feature=+crt-static --remap-path-prefix=$root=nikgob --remap-path-prefix=$cargoHome=cargo --remap-path-prefix=$rustupHome=rustup"
 # A handout build shows its version at the foot of Настройки; the owner's
 # own builds say «admin» there.
 $env:NIKGOB_RELEASE = '1'

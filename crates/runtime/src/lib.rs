@@ -32,6 +32,8 @@ mod session;
 mod sharing;
 mod editions;
 mod streams;
+#[cfg(test)]
+mod perf;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -370,6 +372,68 @@ enum Follow {
     Rate(f64),
     /// Jump to the heard position.
     Snap,
+}
+
+/// A turn of the worker's loop longer than this is logged: while it lasts
+/// no command is answered and no playback event is seen.
+const SLOW_TURN: Duration = Duration::from_millis(250);
+
+/// One turn of the worker's loop, timed (see [`SLOW_TURN`]).
+#[derive(Default)]
+struct Turn {
+    began: Option<(Instant, String)>,
+    laps: Vec<(&'static str, Instant)>,
+}
+
+impl Turn {
+    fn begin(&mut self, what: impl FnOnce() -> String) {
+        self.began = Some((Instant::now(), what()));
+    }
+
+    /// A part of the turn ends here.
+    fn lap(&mut self, part: &'static str) {
+        self.laps.push((part, Instant::now()));
+    }
+
+    fn end(self) {
+        let Some((at, what)) = self.began else { return };
+        let took = at.elapsed();
+        if took < SLOW_TURN {
+            return;
+        }
+        let mut from = at;
+        let parts: Vec<String> = self
+            .laps
+            .iter()
+            .map(|(part, to)| {
+                let ms = to.duration_since(from).as_millis();
+                from = *to;
+                format!("{part} {ms} ms")
+            })
+            .collect();
+        let parts = if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) };
+        log::warn!("the player's loop was held for {} ms by {what}{parts}", took.as_millis());
+    }
+}
+
+/// The first word of a value's `Debug` (an enum's variant), without
+/// writing out the rest.
+fn head_of(value: &impl std::fmt::Debug) -> String {
+    struct Head(String);
+    impl std::fmt::Write for Head {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                if !(c.is_alphanumeric() || c == '_') || self.0.len() >= 40 {
+                    return Err(std::fmt::Error);
+                }
+                self.0.push(c);
+            }
+            Ok(())
+        }
+    }
+    let mut head = Head(String::new());
+    let _ = std::fmt::write(&mut head, format_args!("{value:?}"));
+    head.0
 }
 
 /// How our position `ours` follows the heard one (`stalled`: it has not
@@ -742,17 +806,24 @@ impl Worker {
         self.start_align();
         self.dislikes_load(false);
         loop {
+            // What this turn of the loop does, for [`slow_turn`].
+            let mut turn = Turn::default();
             select! {
                 recv(rx) -> m => match m {
-                    Ok(Msg::Cmd(c)) => self.command(c),
+                    Ok(Msg::Cmd(c)) => {
+                        turn.begin(|| format!("command {}", head_of(&c)));
+                        self.command(c);
+                    }
                     Ok(Msg::Service(s)) => self.services.push(s),
                     Ok(Msg::Indexer(i)) => {
+                        turn.begin(|| "the indexer".to_owned());
                         self.indexer = Some(i);
                         self.publish_sources();
                         self.wish_sources_ready();
                         self.wish_tick();
                     }
                     Ok(Msg::Source(s)) => {
+                        turn.begin(|| "a source".to_owned());
                         // One per kind: a new one of a kind replaces the old.
                         self.sources.retain(|x| x.key() != s.key());
                         self.sources.push(s);
@@ -773,9 +844,16 @@ impl Worker {
                         break;
                     }
                 },
-                recv(pb) -> e => if let Ok(e) = e { self.playback_event(e) },
-                recv(internal) -> m => if let Ok(m) = m { self.internal(m) },
+                recv(pb) -> e => if let Ok(e) = e {
+                    turn.begin(|| format!("playback {}", head_of(&e)));
+                    self.playback_event(e);
+                },
+                recv(internal) -> m => if let Ok(m) = m {
+                    turn.begin(|| m.turn_name());
+                    self.internal(m);
+                },
                 recv(fast) -> _ => {
+                    turn.begin(|| "the second's poll".to_owned());
                     self.soloist_poll();
                     self.poll_torrents();
                     self.poll_share();
@@ -783,13 +861,17 @@ impl Worker {
                     self.reload_sources_file();
                 },
                 recv(ticker) -> _ => {
+                    turn.begin(|| "the tick".to_owned());
                     self.expire_toasts();
                     self.maybe_export(false);
                     self.save_session();
                     self.stream_tick();
+                    turn.lap("streams");
                     self.recs_tick();
+                    turn.lap("recs");
                 }
             }
+            turn.end();
             self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.quality.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.same_audio.set_playing(matches!(self.status, Status::Playing | Status::Buffering));

@@ -10,9 +10,9 @@
 //! whose song is unclear). While timing is made the control shows its
 //! progress and the menu offers «Отменить подсветку» (the window and the
 //! page their own «Отменить»); the result replaces the text by itself.
-//! In every look «Изменить текст…» opens the editor (in a window, on the
-//! page in the «Экран» look), and «Вернуть найденный» takes the user's
-//! own text away (to the Trash, with undo).
+//! In every look «Вернуть найденный» takes the user's own text away (to
+//! the Trash, with undo). The editor is not opened here: «Изменить текст…»
+//! is in the playing track's menu.
 
 use egui::{Id, Ui};
 use nikgob_view::{Command, LyricsAvail, LyricsSync, ViewState};
@@ -36,8 +36,6 @@ enum Row {
     Cancel,
     /// «Сохранить текст».
     Save,
-    /// «Изменить текст…»: the editor.
-    Edit,
     /// «Вернуть найденный»: the user's own text goes.
     Found,
     Settings,
@@ -81,12 +79,8 @@ impl Rows {
     }
 }
 
-/// «Изменить текст…» (not while timing is made) and, with the user's own
-/// text there, «Вернуть найденный».
-fn edit_rows(m: &mut Rows, state: &ViewState, busy: bool) {
-    if super::editor::editable(state) && !busy {
-        m.item(MenuItem::new("Изменить текст…"), Row::Edit);
-    }
+/// «Вернуть найденный», with the user's own text there.
+fn found_row(m: &mut Rows, state: &ViewState) {
     if super::has_own(&state.lyrics) {
         m.item(MenuItem::new("Вернуть найденный"), Row::Found);
     }
@@ -140,7 +134,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         if l.savable && !busy {
             m.item(MenuItem::new(super::save_label(state)), Row::Save);
         }
-        edit_rows(&mut m, state, busy);
+        found_row(&mut m, state);
         let actions = if busy { Vec::new() } else { super::actions(state) };
         // Each with its deep variant right after it (word timing).
         for a in &actions {
@@ -164,7 +158,7 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
             (false, false) => "Подсветка…",
         };
         m.item(MenuItem::new(label), Row::Craft);
-        edit_rows(&mut m, state, busy);
+        found_row(&mut m, state);
     }
     m.split();
     // Offered until it was picked once (the settings remember).
@@ -219,13 +213,6 @@ pub(super) fn control(ui: &mut Ui, state: &ViewState, look: super::Variant, left
         }
         Some(Row::Save) => {
             super::save(state, out);
-            false
-        }
-        Some(Row::Edit) => {
-            match look {
-                super::Variant::Page => super::editor::open_on_page(&ctx, state),
-                _ => super::editor::open(&ctx, state, resp.rect),
-            }
             false
         }
         Some(Row::Found) => {

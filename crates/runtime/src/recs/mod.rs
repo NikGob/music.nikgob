@@ -73,6 +73,12 @@ pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
 
 /// Plays after which the taste is built again.
 const PLAYS_PER_BUILD: u32 = 20;
+/// After a build the next one the user did not ask for waits this many
+/// times as long as the build took ([`MAX_REST`] at most): a library whose
+/// builds are long (a history of years) is not built without a pause while
+/// imports and background passes keep changing it.
+const REST: u32 = 8;
+const MAX_REST: Duration = Duration::from_secs(300);
 /// The analysis added this many vectors (or a tenth of the index, or
 /// doubled it) since the last build: built again.
 const NEW_VECTORS: usize = 200;
@@ -256,6 +262,18 @@ pub(crate) enum Msg {
     Graph(graph::GraphMsg),
 }
 
+impl Msg {
+    pub(crate) const fn turn_name(&self) -> &'static str {
+        match self {
+            Self::Built(_) => "a build came",
+            Self::Radio(_) => "the radio",
+            Self::Discover(_) => "new music",
+            Self::Suggest(_) => "suggestions",
+            Self::Graph(_) => "the graph",
+        }
+    }
+}
+
 /// «Твой микс» of a day as the library's cache keeps it.
 #[derive(Serialize, Deserialize)]
 struct DailyCache {
@@ -301,6 +319,12 @@ pub(crate) struct RecsState {
     /// ([`Worker::recs_library_changed`]).
     changed_since: Option<Instant>,
     built_at: Option<Instant>,
+    /// When the build going on began, and how long the last one took: the
+    /// next one waits [`REST`] times that ([`Worker::recs_tick`]).
+    build_began: Option<Instant>,
+    build_took: Duration,
+    /// The user asked for the build that is due: it does not wait.
+    urgent: bool,
     built_index_len: usize,
     plays: u32,
     /// The next build picks «Твой микс» again.
@@ -359,6 +383,9 @@ impl RecsState {
             due: Some(Instant::now()),
             changed_since: None,
             built_at: None,
+            build_began: None,
+            build_took: Duration::ZERO,
+            urgent: false,
             built_index_len: 0,
             plays: 0,
             refresh_daily: false,
@@ -664,6 +691,13 @@ fn read_parts(
     extra: &ReadExtra,
 ) -> Result<(Snapshot, nikgob_recs::TilesInput, usize, TasteInput), String> {
     let err = |what: &str, e: nikgob_library::LibraryError| format!("{what}: {e}");
+    // Where the time goes, stage by stage (a long history makes it felt).
+    let mut stage = Instant::now();
+    let mut stages: Vec<(&str, u128)> = Vec::new();
+    let mut lap = |name: &'static str, stages: &mut Vec<(&str, u128)>| {
+        stages.push((name, stage.elapsed().as_millis()));
+        stage = Instant::now();
+    };
     let rows = lib.rec_tracks().map_err(|e| err("tracks", e))?;
     let mut events = lib.listening_events().map_err(|e| err("events", e))?;
     let mut like_times = lib.liked_track_times().map_err(|e| err("likes", e))?;
@@ -688,7 +722,9 @@ fn read_parts(
         artist_keys.entry(artist_key(name)).or_insert(*id);
         names.insert(*id, name.clone());
     }
+    lap("rows", &mut stages);
     let tiles_input = tiles::input(lib, &rows, &events, names.clone());
+    lap("tiles", &mut stages);
     // The songs saved in a service's library that the library lacks: the
     // taste of their artists and seeds of the new music, no catalog track.
     let saved_set: HashSet<TrackId> = saved.iter().copied().collect();
@@ -839,7 +875,9 @@ fn read_parts(
     for id in stale {
         index.remove(id);
     }
+    lap("catalog", &mut stages);
     let types = read_song_types(lib, &catalog, &index, &tiles_input, &names);
+    lap("types", &mut stages);
     let cached: Option<Weights> = lib
         .cache_get(MODEL_KEY)
         .ok()
@@ -874,11 +912,18 @@ fn read_parts(
     };
     // The graph of similar music the library keeps, resolved to it now.
     let similar = if extra.graph { graph::read(lib, &rows, &artist_keys) } else { graph::Resolved::default() };
+    lap("graph", &mut stages);
     let model = UserModel::build(
         &catalog,
         &history,
         ModelInput { index: &index, types: Some(&types), weights: cached, graph: (!similar.input.is_empty()).then_some(&similar.input) },
         now,
+    );
+    lap("model", &mut stages);
+    log::debug!(
+        "recs: snapshot of {} events: {}",
+        history.events.len(),
+        stages.iter().map(|(n, ms)| format!("{n} {ms} ms")).collect::<Vec<_>>().join(", ")
     );
     if cached.is_none()
         && let Ok(json) = serde_json::to_string(&model.weights)
@@ -2127,6 +2172,7 @@ impl Worker {
         let at = Instant::now() + after;
         let r = &mut self.recs;
         r.due = Some(r.due.map_or(at, |d| d.min(at)));
+        r.urgent |= after.is_zero();
     }
 
     /// «Миксы только из скачанного» changed: the home is built again now
@@ -2254,7 +2300,8 @@ impl Worker {
         if crate::quiet::busy() {
             return;
         }
-        if !r.building && (r.due.is_some_and(|d| now >= d) || stale) {
+        let rested = r.urgent || r.built_at.is_none_or(|t| t.elapsed() >= (r.build_took * REST).min(MAX_REST));
+        if !r.building && rested && (r.due.is_some_and(|d| now >= d) || stale) {
             self.recs_build();
         }
         self.discover_tick();
@@ -2301,6 +2348,8 @@ impl Worker {
         match spawned {
             Ok(_) => {
                 self.recs.building = true;
+                self.recs.build_began = Some(Instant::now());
+                self.recs.urgent = false;
                 self.recs.due = None;
                 self.recs.changed_since = None;
             }
@@ -2321,6 +2370,7 @@ impl Worker {
     fn recs_built(&mut self, b: Result<Built, String>) {
         self.recs.building = false;
         self.recs.built_at = Some(Instant::now());
+        self.recs.build_took = self.recs.build_began.take().map_or(Duration::ZERO, |t| t.elapsed());
         let rerank = match b {
             Ok(b) => {
                 let rerank = b.rerank;

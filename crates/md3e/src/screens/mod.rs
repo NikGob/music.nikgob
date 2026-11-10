@@ -387,6 +387,7 @@ impl Md3eUi {
         self.update_theme(ctx, state);
         drop(theme_scope);
         pages::set_marks(ctx, &state.dislikes);
+        pages::set_track_menu(ctx, &state.prefs.track_menu);
         crate::components::tooltip::set_enabled(ctx, state.prefs.tooltips);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
         // The current and the next cover stay loaded while off screen (set

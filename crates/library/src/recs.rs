@@ -89,15 +89,27 @@ impl Library {
 
     /// Every start, complete and skip, oldest first (the taste model's
     /// history; likes and the rest are read as state).
+    ///
+    /// A long history is read again and again (every build of the
+    /// recommendations, every home), so the last answer is kept while the
+    /// events are what they were ([`crate::events::stamp`]).
     pub fn listening_events(&self) -> Result<Vec<Event>> {
         self.read(|c| {
+            let stamp = crate::events::stamp(c)?;
+            if let Some((at, kept)) = self.listening_kept()
+                && at == stamp
+            {
+                return Ok(kept.as_ref().clone());
+            }
             let mut stmt = c.prepare_cached(
                 &format!(
                     "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') ORDER BY ts, id"
                 ),
             )?;
             let rows = stmt.query_map([], event_from_row)?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            let events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            self.keep_listening(stamp, &events);
+            Ok(events)
         })
     }
 

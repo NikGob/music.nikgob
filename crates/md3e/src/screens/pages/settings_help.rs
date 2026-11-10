@@ -109,6 +109,8 @@ pub enum SettingId {
     PaneQueue,
     PaneLyrics,
     PaneInfo,
+    /// «Меню трека»: where each item of a track's menu stands.
+    TrackMenu,
     NpMotion,
     ReducedMotion,
     Tooltips,
@@ -463,7 +465,7 @@ impl SettingId {
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
             | MixClickOpensList | HiddenMixes | AlbumDate | LikedAlbumsPlace | RailCompact | ReducedMotion | Tooltips | PaneQueue
-            | PaneLyrics | PaneInfo => TAB_LOOK,
+            | PaneLyrics | PaneInfo | TrackMenu => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
             | DeezerEnabled | PushLikes | AlbumLike | SingleLike | PlaylistSync | ImportFiles | ImportSavedSongs | StreamCache => {
@@ -526,7 +528,7 @@ impl SettingId {
             // Rare cases, gestures, parts of the window and of Главная.
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
-            | ProfileNames | MixClickOpensList | Tooltips | PaneQueue | PaneLyrics | PaneInfo | AlbumLike | SingleLike
+            | ProfileNames | MixClickOpensList | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
             | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
@@ -614,6 +616,7 @@ impl SettingId {
             PaneQueue => "Очередь",
             PaneLyrics => "Текст песни",
             PaneInfo => "Источник и качество",
+            TrackMenu => "Меню трека",
             NpMotion => "Открытие экрана",
             ReducedMotion => "Меньше движения",
             Tooltips => "Подсказки при наведении",
@@ -810,6 +813,7 @@ impl SettingId {
             PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
             PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
+            TrackMenu => "Где стоит каждый пункт меню трека: в самом меню, в подменю «Файл» или скрыт. «Сбросить» возвращает меню как было.",
             NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
             ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
             Tooltips => "Короткие подсказки, когда задерживаешь курсор на кнопке.",

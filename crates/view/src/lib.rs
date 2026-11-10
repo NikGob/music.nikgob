@@ -1854,6 +1854,10 @@ pub struct Prefs {
     /// on or off; empty: all of them in the default order
     /// ([`Prefs::home_order`]).
     pub home_sections: Vec<HomeSectionSwitch>,
+    /// «Меню трека»: the items of a track's menu taken from their default
+    /// places ([`TrackMenuItem::default_place`]); empty: the menu as it is
+    /// by default ([`Prefs::track_menu_place`]).
+    pub track_menu: Vec<TrackMenuSlot>,
 }
 
 /// The default of [`Prefs::cover_spin_s`] and its range in the settings.
@@ -1865,6 +1869,127 @@ pub const RING_SPIN_RANGE: std::ops::RangeInclusive<f32> = 10.0..=90.0;
 /// The default of [`Prefs::cover_pulse_strength`] and its range.
 pub const COVER_PULSE: f32 = 0.08;
 pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
+
+/// An item of a track's menu whose place «Меню трека» chooses. The names
+/// are kept in the prefs: an item is never renamed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackMenuItem {
+    Radio,
+    Album,
+    Artist,
+    Share,
+    /// «Источник и качество».
+    Info,
+    /// «Скорость и эквалайзер» of the playing track, «Скорость…» of a row.
+    Sound,
+    Visualizer,
+    /// «Редактировать теги…».
+    Tags,
+    /// «Изменить текст…».
+    LyricsEdit,
+    /// «Скачать альбом», and «Скачать» of a track with no file.
+    Download,
+    /// «Найти качество лучше…» / «Искать раздачу…».
+    Torrents,
+    /// «В файле другая песня».
+    WrongFile,
+    Dislike,
+    /// «Не рекомендовать исполнителя».
+    Ban,
+}
+
+impl TrackMenuItem {
+    /// Every item, in the order of the menu.
+    pub const ALL: [Self; 14] = [
+        Self::Radio,
+        Self::Album,
+        Self::Artist,
+        Self::Share,
+        Self::Info,
+        Self::Sound,
+        Self::Visualizer,
+        Self::Tags,
+        Self::LyricsEdit,
+        Self::Download,
+        Self::Torrents,
+        Self::WrongFile,
+        Self::Dislike,
+        Self::Ban,
+    ];
+
+    /// The item's name in the settings.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Radio => "Радио по треку",
+            Self::Album => "К альбому",
+            Self::Artist => "К исполнителю",
+            Self::Share => "Поделиться",
+            Self::Info => "Источник и качество",
+            Self::Sound => "Скорость и эквалайзер",
+            Self::Visualizer => "Визуализатор",
+            Self::Tags => "Редактировать теги…",
+            Self::LyricsEdit => "Изменить текст…",
+            Self::Download => "Скачать, скачать альбом",
+            Self::Torrents => "Найти качество лучше…",
+            Self::WrongFile => "В файле другая песня",
+            Self::Dislike => "Не нравится",
+            Self::Ban => "Не рекомендовать исполнителя",
+        }
+    }
+
+    /// Where the item stands until the settings say otherwise.
+    pub fn default_place(self) -> TrackMenuPlace {
+        match self {
+            Self::Tags | Self::LyricsEdit | Self::Download | Self::Torrents | Self::WrongFile => TrackMenuPlace::File,
+            _ => TrackMenuPlace::Menu,
+        }
+    }
+}
+
+/// Where an item of a track's menu stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackMenuPlace {
+    /// In the menu itself.
+    Menu,
+    /// In its «Файл» submenu.
+    File,
+    Hidden,
+}
+
+impl TrackMenuPlace {
+    pub const ALL: [Self; 3] = [Self::Menu, Self::File, Self::Hidden];
+}
+
+/// One line of [`Prefs::track_menu`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackMenuSlot {
+    pub item: TrackMenuItem,
+    pub place: TrackMenuPlace,
+}
+
+impl TrackMenuSlot {
+    /// Where `item` stands by `slots` (the last line about it counts).
+    pub fn place_of(slots: &[Self], item: TrackMenuItem) -> TrackMenuPlace {
+        slots.iter().rev().find(|s| s.item == item).map_or(item.default_place(), |s| s.place)
+    }
+}
+
+impl Prefs {
+    /// Where `item` of a track's menu stands.
+    pub fn track_menu_place(&self, item: TrackMenuItem) -> TrackMenuPlace {
+        TrackMenuSlot::place_of(&self.track_menu, item)
+    }
+
+    /// Puts `item` at `place`; only what differs from the default is kept.
+    pub fn set_track_menu_place(&mut self, item: TrackMenuItem, place: TrackMenuPlace) {
+        self.track_menu.retain(|s| s.item != item);
+        if place != item.default_place() {
+            self.track_menu.push(TrackMenuSlot { item, place });
+        }
+    }
+}
 
 /// A section of Главная («Разделы главной»).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -3282,6 +3407,7 @@ impl Default for Prefs {
             ring_spin_s: RING_SPIN_S,
             cover_pulse_strength: COVER_PULSE,
             home_sections: Vec::new(),
+            track_menu: Vec::new(),
         }
     }
 }
@@ -3531,5 +3657,40 @@ mod settings_v2_tests {
             assert!(COVER_SPIN_RANGE.contains(&p.cover_spin_s) && RING_SPIN_RANGE.contains(&p.ring_spin_s));
             assert!(COVER_PULSE_RANGE.contains(&p.cover_pulse_strength));
         }
+    }
+}
+
+#[cfg(test)]
+mod track_menu_tests {
+    use serde::Deserialize;
+    use serde::de::value::{Error, MapDeserializer};
+
+    use super::{Prefs, TrackMenuItem as I, TrackMenuPlace as P, TrackMenuSlot};
+
+    #[test]
+    fn the_menu_is_as_it_was_until_an_item_is_moved() {
+        let mut p = Prefs::default();
+        assert!(p.track_menu.is_empty() && Prefs::first_start().track_menu.is_empty());
+        for item in I::ALL {
+            assert_eq!(p.track_menu_place(item), item.default_place());
+        }
+        assert_eq!((I::Info.default_place(), I::Tags.default_place()), (P::Menu, P::File));
+        p.set_track_menu_place(I::Share, P::File);
+        p.set_track_menu_place(I::Tags, P::Menu);
+        p.set_track_menu_place(I::Ban, P::Hidden);
+        assert_eq!((p.track_menu_place(I::Share), p.track_menu_place(I::Tags), p.track_menu_place(I::Ban)), (P::File, P::Menu, P::Hidden));
+        // Back at its default place an item is not kept.
+        p.set_track_menu_place(I::Share, P::Menu);
+        p.set_track_menu_place(I::Tags, P::File);
+        assert_eq!(p.track_menu, [TrackMenuSlot { item: I::Ban, place: P::Hidden }]);
+    }
+
+    /// Prefs saved before «Меню трека» have no such field: the default.
+    #[test]
+    fn old_prefs_load_with_the_default_menu() {
+        let old = MapDeserializer::<_, Error>::new([("tooltips", true)].into_iter());
+        let p = Prefs::deserialize(old).unwrap();
+        assert!(p.tooltips && p.track_menu.is_empty());
+        assert_eq!(p, Prefs { tooltips: true, ..Prefs::default() });
     }
 }

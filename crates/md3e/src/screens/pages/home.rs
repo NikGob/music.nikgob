@@ -850,7 +850,11 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                 } else if o.clicked && t.playable {
                     out.push(play_discover(&h.discover, i));
                 }
-                let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), discover_rows(t, &state.dislikes));
+                let rows = super::placed(discover_rows(t, &state.dislikes), &state.prefs.track_menu, |a| match a {
+                    DiscoverAct::Track(a) => a.menu_item(false),
+                    DiscoverAct::Like => None,
+                });
+                let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), rows);
                 let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
                 nav = discover_pick(&o.response.ctx, act, t, pages, out).or(nav.take());
             }
@@ -884,14 +888,7 @@ fn discover_rows(t: &StreamTrackRow, marks: &nikgob_view::DislikesView) -> Vec<w
 
 /// A service song's `rows`, then the discovery's own «В любимое».
 fn with_like(rows: Vec<widgets::Row<super::TrackAct>>, liked: bool) -> Vec<widgets::Row<DiscoverAct>> {
-    let mut rows: Vec<widgets::Row<DiscoverAct>> = rows
-        .into_iter()
-        .map(|r| match r {
-            widgets::Row::Item(a, item) => widgets::Row::Item(DiscoverAct::Track(a), item),
-            widgets::Row::Divider => widgets::Row::Divider,
-            widgets::Row::Label(l) => widgets::Row::Label(l),
-        })
-        .collect();
+    let mut rows: Vec<widgets::Row<DiscoverAct>> = rows.into_iter().map(|r| r.map(&mut DiscoverAct::Track)).collect();
     rows.push(widgets::Row::Divider);
     rows.push(widgets::Row::Item(
         DiscoverAct::Like,

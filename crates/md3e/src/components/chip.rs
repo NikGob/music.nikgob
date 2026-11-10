@@ -33,6 +33,8 @@ struct Spec {
     elevated: bool,
     enabled: bool,
     id_salt: Option<Id>,
+    /// A selected filter chip shows its check.
+    check: bool,
 }
 
 struct Painted {
@@ -50,7 +52,7 @@ fn chip(ui: &mut Ui, spec: Spec) -> Painted {
 
     // Filter chips show a check while selected (unless they have an icon).
     let leading = match (spec.kind, spec.selected, spec.icon) {
-        (Kind::Filter, true, _) => Some(Icon::Check),
+        (Kind::Filter, true, _) if spec.check => Some(Icon::Check),
         (_, _, icon) => icon,
     };
     let slot = anim::f32(
@@ -230,6 +232,7 @@ impl FilterChip {
                 elevated: false,
                 enabled: true,
                 id_salt: None,
+                check: true,
             },
         }
     }
@@ -243,6 +246,13 @@ impl FilterChip {
     /// A trailing icon (for example a dropdown arrow).
     pub fn trailing_icon(mut self, icon: Icon) -> Self {
         self.spec.trailing = Some(icon);
+        self
+    }
+
+    /// One of a set where exactly one is picked: selected, it keeps its
+    /// width (no check), so the row of them never moves.
+    pub fn one_of(mut self) -> Self {
+        self.spec.check = false;
         self
     }
 
@@ -286,6 +296,7 @@ impl AssistChip {
                 elevated: false,
                 enabled: true,
                 id_salt: None,
+                check: true,
             },
         }
     }
@@ -342,6 +353,7 @@ impl InputChip {
                 elevated: false,
                 enabled: true,
                 id_salt: None,
+                check: true,
             },
         }
     }

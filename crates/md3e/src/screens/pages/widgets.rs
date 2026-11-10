@@ -304,36 +304,115 @@ pub fn playlist_card_with(
     }
 }
 
-//// One row of a menu built from actions: an item standing for `A`, a
-/// divider, or a group label (not an item: nothing to pick).
+/// One row of a menu built from actions: an item standing for `A`, a
+/// divider, a group label (not an item: nothing to pick), or a row that
+/// opens a submenu of rows (one level).
 #[derive(Clone, Debug)]
 pub enum Row<A> {
     Item(A, MenuItem),
     Divider,
     Label(String),
+    Sub(MenuItem, Vec<Row<A>>),
 }
 
-/// The actions of `rows` in item order (what a picked index stands for).
+impl<A> Row<A> {
+    /// The same row for another kind of action (a submenu's rows too).
+    pub fn map<B>(self, f: &mut impl FnMut(A) -> B) -> Row<B> {
+        match self {
+            Row::Item(a, item) => Row::Item(f(a), item),
+            Row::Divider => Row::Divider,
+            Row::Label(l) => Row::Label(l),
+            Row::Sub(item, rows) => Row::Sub(item, rows.into_iter().map(|r| r.map(&mut *f)).collect()),
+        }
+    }
+}
+
+/// The actions of `rows` in item order (what a picked index stands for),
+/// a submenu's in its place.
 pub fn row_acts<A: Copy>(rows: &[Row<A>]) -> Vec<A> {
-    rows.iter()
-        .filter_map(|r| match r {
-            Row::Item(a, _) => Some(*a),
-            Row::Divider | Row::Label(_) => None,
-        })
-        .collect()
+    let mut acts = Vec::new();
+    for r in rows {
+        match r {
+            Row::Item(a, _) => acts.push(*a),
+            Row::Divider | Row::Label(_) => {}
+            Row::Sub(_, rows) => acts.extend(row_acts(rows)),
+        }
+    }
+    acts
 }
 
-/// A menu of `rows` and what each of its item indices stands for. A
-/// divider at the start, at the end or after another is left out.
+/// The items of `rows` in item order with their actions, a submenu's in
+/// its place.
+#[cfg(test)]
+pub fn row_items<A: Copy>(rows: &[Row<A>]) -> Vec<(A, &MenuItem)> {
+    let mut items = Vec::new();
+    for r in rows {
+        match r {
+            Row::Item(a, item) => items.push((*a, item)),
+            Row::Divider | Row::Label(_) => {}
+            Row::Sub(_, rows) => items.extend(row_items(rows)),
+        }
+    }
+    items
+}
+
+/// The rows of the submenu `label` of `rows`.
+#[cfg(test)]
+pub fn sub_rows<'a, A>(rows: &'a [Row<A>], label: &str) -> Option<&'a [Row<A>]> {
+    rows.iter().find_map(|r| match r {
+        Row::Sub(item, rows) if item.label == label => Some(rows.as_slice()),
+        _ => None,
+    })
+}
+
+/// The rows of the submenu `label` of `rows`, to add to.
+pub fn sub_rows_mut<'a, A>(rows: &'a mut [Row<A>], label: &str) -> Option<&'a mut Vec<Row<A>>> {
+    rows.iter_mut().find_map(|r| match r {
+        Row::Sub(item, rows) if item.label == label => Some(rows),
+        _ => None,
+    })
+}
+
+/// `rows` as a menu shows them: a submenu with no item is left out, the
+/// one item of a submenu stands in the menu in its place.
+pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
+    let mut shown = Vec::with_capacity(rows.len());
+    for r in rows {
+        match r {
+            Row::Sub(parent, rows) => {
+                let rows = shown_rows(rows);
+                match rows.iter().filter(|r| matches!(r, Row::Item(..))).count() {
+                    0 => {}
+                    1 => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
+                    _ => shown.push(Row::Sub(parent, rows)),
+                }
+            }
+            r => shown.push(r),
+        }
+    }
+    shown
+}
+
+/// A menu of `rows` ([`shown_rows`]) and what each of its item indices
+/// stands for. A divider at the start, at the end or after another is left
+/// out.
 pub fn menu_of<A: Copy>(key: impl egui::AsId, rows: Vec<Row<A>>) -> (Menu, Vec<A>) {
+    let rows = shown_rows(rows);
     let acts = row_acts(&rows);
-    let mut menu = Menu::new(key);
+    (fill(Menu::new(key), rows), acts)
+}
+
+fn fill<A>(mut menu: Menu, rows: Vec<Row<A>>) -> Menu {
     let mut after_divider = true;
     let n = rows.len();
     for (i, r) in rows.into_iter().enumerate() {
         match r {
             Row::Item(_, item) => {
                 menu = menu.item(item);
+                after_divider = false;
+            }
+            Row::Sub(item, rows) => {
+                menu = menu.item(item.submenu(fill(Menu::new("submenu"), rows)));
                 after_divider = false;
             }
             Row::Label(text) => {
@@ -348,7 +427,7 @@ pub fn menu_of<A: Copy>(key: impl egui::AsId, rows: Vec<Row<A>>) -> (Menu, Vec<A
             }
         }
     }
-    (menu, acts)
+    menu
 }
 
 /// What the menu of a playlist does.
@@ -1299,7 +1378,8 @@ pub(crate) fn playlist_track_rows(
 
 fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, state: &ViewState) -> (Menu, Vec<super::TrackAct>) {
     let rows = playlist_track_rows(track, playlist, &state.dislikes, state.prefs.pane_info, state.also_on.get(&track.id));
-    let (menu, acts) = menu_of(key, super::with_speed_row(rows, &state.speeds, track.id));
+    let rows = super::placed(super::with_speed_row(rows, &state.speeds), &state.prefs.track_menu, |a| a.menu_item(track.has_local));
+    let (menu, acts) = menu_of(key, rows);
     (menu.align_right(true), acts)
 }
 
@@ -1598,7 +1678,7 @@ mod menu_tests {
         rows.iter()
             .filter_map(|r| match r {
                 Row::Item(_, i) => Some(i.label.clone()),
-                Row::Divider | Row::Label(_) => None,
+                Row::Divider | Row::Label(_) | Row::Sub(..) => None,
             })
             .collect()
     }
@@ -1765,7 +1845,7 @@ mod menu_tests {
         let rows = library_track_rows(&t, &marks, true, Some(&also));
         let acts = row_acts(&rows);
         assert_eq!(&acts[4..8], [A::Album, A::AlsoOn, A::Apart, A::Artist]);
-        assert_eq!(acts[8], A::Info);
+        assert_eq!(&acts[8..10], [A::Share, A::Info]);
         assert!(labels(&rows).iter().any(|l| l == "Есть и на альбоме «Other»"));
     }
 }

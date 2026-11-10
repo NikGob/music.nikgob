@@ -26,7 +26,8 @@ pub(crate) use worlds::choose as choose_world;
 
 use egui::{Context, Rect, Response, Ui, UiBuilder, vec2};
 use nikgob_view::{
-    Command, LIKED_PLAYLIST, LibraryTab, ReleaseId, Route, TorrentFiles, TrackId, TrackRow, ViewState,
+    Command, LIKED_PLAYLIST, LibraryTab, ReleaseId, Route, TorrentFiles, TrackId, TrackMenuItem, TrackMenuPlace, TrackMenuSlot,
+    TrackRow, ViewState,
 };
 
 use super::PaneTab;
@@ -101,6 +102,8 @@ pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, 
 pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
 /// The menu item of a track whose file holds another song.
 pub(crate) const WRONG_FILE: &str = "В файле другая песня";
+/// The submenu of a track's menu ([`track_rows`]).
+pub(crate) const FILE: &str = "Файл";
 
 /// «Не нравится» of a track, or its undo when it is disliked.
 pub(crate) fn dislike_item(disliked: bool) -> MenuItem {
@@ -140,6 +143,24 @@ pub(crate) fn marks(ctx: &Context) -> std::sync::Arc<nikgob_view::DislikesView> 
     ctx.data(|d| d.get_temp(marks_key())).unwrap_or_default()
 }
 
+fn track_menu_key() -> egui::Id {
+    egui::Id::new("md3e-track-menu-slots")
+}
+
+/// Keeps «Меню трека» (`Prefs::track_menu`) for the menus drawn without
+/// the view state.
+pub(crate) fn set_track_menu(ctx: &Context, slots: &[TrackMenuSlot]) {
+    let same = ctx.data(|d| d.get_temp::<std::sync::Arc<Vec<TrackMenuSlot>>>(track_menu_key())).is_some_and(|s| s.as_slice() == slots);
+    if !same {
+        ctx.data_mut(|d| d.insert_temp(track_menu_key(), std::sync::Arc::new(slots.to_vec())));
+    }
+}
+
+/// What [`set_track_menu`] kept.
+pub(crate) fn track_menu_slots(ctx: &Context) -> std::sync::Arc<Vec<TrackMenuSlot>> {
+    ctx.data(|d| d.get_temp(track_menu_key())).unwrap_or_default()
+}
+
 
 
 /// What a track menu does. Every track menu (a library row, a playlist
@@ -176,6 +197,31 @@ pub enum TrackAct {
     Purge,
 }
 
+impl TrackAct {
+    /// The item of «Меню трека» the action is, if the settings place it.
+    /// `tags`: the track has a file, so [`Self::Fetch`] edits its tags
+    /// (else it downloads the track).
+    pub(crate) fn menu_item(self, tags: bool) -> Option<TrackMenuItem> {
+        use TrackMenuItem as I;
+        Some(match self {
+            Self::Radio => I::Radio,
+            Self::Album => I::Album,
+            Self::Artist => I::Artist,
+            Self::Share => I::Share,
+            Self::Info => I::Info,
+            Self::Speed | Self::Equalizer => I::Sound,
+            Self::Fetch if tags => I::Tags,
+            Self::Fetch | Self::AlbumDownload => I::Download,
+            Self::Torrents => I::Torrents,
+            Self::WrongFile => I::WrongFile,
+            Self::Dislike => I::Dislike,
+            Self::Ban => I::Ban,
+            Self::Next | Self::Queue | Self::Playlist | Self::AlsoOn | Self::Apart | Self::FindSong | Self::Remove
+            | Self::Trash | Self::Purge => return None,
+        })
+    }
+}
+
 /// What a track menu is built over: the common rows are always there (some
 /// greyed), the optional ones only for a track that has them.
 pub struct TrackMenuOf {
@@ -195,8 +241,12 @@ pub struct TrackMenuOf {
 }
 
 /// The one list of a track's actions: play next / queue / to a playlist /
-/// radio │ album (and the other album of the song) / artist / info / share
-/// │ the files │ «Не нравится» / «Не рекомендовать исполнителя».
+/// radio │ album (and the other album of the song) / artist / share /
+/// info │ the sound (the speed, and what the player adds: see
+/// [`sound_at`]) / «Файл ▸» (the files, and the deletes of the place) │
+/// «Не нравится» / «Не рекомендовать исполнителя». A submenu is shown as
+/// [`widgets::shown_rows`] has it: not at all with no item, its one item
+/// in its place.
 pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     use TrackAct as A;
     use widgets::Row;
@@ -214,48 +264,107 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
         rows.push(Row::Item(A::Apart, MenuItem::new("Разные песни").icon(Icon::Close)));
     }
     rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person).enabled(o.has_artists)));
+    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
     if o.info {
         rows.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
     }
-    rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
     rows.push(Row::Divider);
-    rows.push(Row::Item(A::Fetch, o.fetch));
-    rows.push(Row::Item(A::AlbumDownload, MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(o.has_album)));
+    let mut file = Vec::new();
+    file.push(Row::Item(A::Fetch, o.fetch));
+    file.push(Row::Item(A::AlbumDownload, MenuItem::new("Скачать альбом").icon(Icon::Download).enabled(o.has_album)));
     if let Some(t) = o.torrents {
-        rows.push(Row::Item(A::Torrents, MenuItem::new(t).icon(Icon::Search)));
+        file.push(Row::Item(A::Torrents, MenuItem::new(t).icon(Icon::Search)));
     }
     // A clip: its song by hand; a stream from YouTube: another version.
     if let Some(f) = o.find_song {
-        rows.push(Row::Item(A::FindSong, MenuItem::new(f).icon(Icon::MusicNote)));
+        file.push(Row::Item(A::FindSong, MenuItem::new(f).icon(Icon::MusicNote)));
     }
     // A file that holds another song: to the Trash, looked for again.
     if o.wrong_file {
-        rows.push(Row::Item(A::WrongFile, MenuItem::new(WRONG_FILE).icon(Icon::Delete)));
+        file.push(Row::Item(A::WrongFile, MenuItem::new(WRONG_FILE).icon(Icon::Delete)));
     }
+    rows.push(Row::Sub(MenuItem::new(FILE).icon(Icon::Folder), file));
     rows.push(Row::Divider);
     rows.push(Row::Item(A::Dislike, o.dislike));
     rows.push(Row::Item(A::Ban, o.ban));
     rows
 }
 
-/// «Скорость…» of a library track's menu, after «Поделиться»: there while
-/// the speed of tracks is on in the settings, marked while the track is not
-/// played as recorded.
+/// Where the rows of the sound go in a track's `rows`: right before «Файл».
+pub(crate) fn sound_at<A>(rows: &[widgets::Row<A>]) -> usize {
+    rows.iter()
+        .position(|r| matches!(r, widgets::Row::Sub(item, _) if item.label == FILE))
+        .unwrap_or(rows.len())
+}
+
+/// A track's `rows` as «Меню трека» (`slots`) has them: an item sent to
+/// «Файл» joins the submenu, one taken out of it stands right before it,
+/// a hidden one is gone; each keeps its place among the others of where it
+/// went. `item` names the item an action is (`None`: the row stays).
+pub(crate) fn placed<A: Copy>(
+    rows: Vec<widgets::Row<A>>,
+    slots: &[TrackMenuSlot],
+    item: impl Fn(A) -> Option<TrackMenuItem>,
+) -> Vec<widgets::Row<A>> {
+    use TrackMenuPlace as P;
+    use widgets::Row;
+    let at = sound_at(&rows);
+    if slots.is_empty() || at == rows.len() {
+        return rows;
+    }
+    let place = |a: A| item(a).map(|i| TrackMenuSlot::place_of(slots, i));
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    // Sent to «Файл» from above it and from below it; taken out of it.
+    let (mut head, mut tail, mut out) = (Vec::new(), Vec::new(), Vec::new());
+    let mut file = Vec::new();
+    let mut parent = None;
+    for (i, r) in rows.into_iter().enumerate() {
+        match r {
+            Row::Sub(m, inner) if i == at => {
+                parent = Some(m);
+                for r in inner {
+                    match r {
+                        Row::Item(a, m) => match place(a) {
+                            Some(P::Menu) => out.push(Row::Item(a, m)),
+                            Some(P::Hidden) => {}
+                            Some(P::File) | None => file.push(Row::Item(a, m)),
+                        },
+                        r => file.push(r),
+                    }
+                }
+            }
+            Row::Item(a, m) => {
+                let (stay, moved) = if i < at { (&mut before, &mut head) } else { (&mut after, &mut tail) };
+                match place(a) {
+                    Some(P::File) => moved.push(Row::Item(a, m)),
+                    Some(P::Hidden) => {}
+                    Some(P::Menu) | None => stay.push(Row::Item(a, m)),
+                }
+            }
+            r if i < at => before.push(r),
+            r => after.push(r),
+        }
+    }
+    // The deletes stay last, after their divider.
+    let deletes = file.iter().position(|r| matches!(r, Row::Divider)).unwrap_or(file.len());
+    drop(file.splice(deletes..deletes, tail));
+    head.extend(file);
+    before.extend(out);
+    before.extend(parent.map(|m| Row::Sub(m, head)));
+    before.extend(after);
+    before
+}
+
+/// «Скорость…» of a library track's menu ([`sound_at`]): there while the
+/// speed of tracks is on in the settings.
 pub(crate) fn with_speed_row(
     mut rows: Vec<widgets::Row<TrackAct>>,
     speeds: &nikgob_view::TrackSpeeds,
-    track: TrackId,
 ) -> Vec<widgets::Row<TrackAct>> {
-    if !speeds.enabled {
-        return rows;
+    if speeds.enabled {
+        let at = sound_at(&rows);
+        rows.insert(at, widgets::Row::Item(TrackAct::Speed, MenuItem::new("Скорость…").icon(Icon::GraphicEq)));
     }
-    let changed = speeds.of(track) != nikgob_view::SpeedVariant::Normal;
-    let item = MenuItem::new("Скорость…").icon(Icon::GraphicEq).selected(changed);
-    let at = rows
-        .iter()
-        .position(|r| matches!(r, widgets::Row::Item(TrackAct::Share, _)))
-        .map_or(rows.len(), |i| i + 1);
-    rows.insert(at, widgets::Row::Item(TrackAct::Speed, item));
     rows
 }
 
@@ -288,14 +397,18 @@ pub(crate) fn library_track_rows(
     })
 }
 
-/// The library's deletes, after a library row's [`library_track_rows`].
+/// The library's deletes, last in «Файл» of a library row's
+/// [`library_track_rows`].
 fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
-    rows.push(widgets::Row::Divider);
-    rows.push(widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)));
-    rows.push(widgets::Row::Item(
-        TrackAct::Purge,
-        MenuItem::new("Удалить навсегда").icon(Icon::Delete).enabled(track.has_local),
-    ));
+    let deletes = [
+        widgets::Row::Divider,
+        widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)),
+        widgets::Row::Item(TrackAct::Purge, MenuItem::new("Удалить навсегда").icon(Icon::Delete).enabled(track.has_local)),
+    ];
+    match widgets::sub_rows_mut(rows, FILE) {
+        Some(file) => file.extend(deletes),
+        None => rows.extend(deletes),
+    }
 }
 
 /// The command of «Радио по треку» for a library track.
@@ -587,9 +700,11 @@ impl PageState {
         speeds: &nikgob_view::TrackSpeeds,
         info: bool,
         also: Option<&(ReleaseId, String)>,
+        slots: &[TrackMenuSlot],
     ) -> (Menu, Vec<TrackAct>) {
-        let mut rows = with_speed_row(library_track_rows(track, marks, info, also), speeds, track.id);
+        let mut rows = with_speed_row(library_track_rows(track, marks, info, also), speeds);
         push_deletes(&mut rows, track);
+        let rows = placed(rows, slots, |a| a.menu_item(track.has_local));
         let (menu, acts) = widgets::menu_of(("track-menu", anchor), rows);
         (menu.align_right(true), acts)
     }
@@ -659,7 +774,7 @@ impl PageState {
     ) -> Option<Route> {
         let info = state.prefs.pane_info;
         let also = state.also_on.get(&track.id);
-        let (menu, acts) = Self::track_menu_items(anchor.id, track, &state.dislikes, &state.speeds, info, also);
+        let (menu, acts) = Self::track_menu_items(anchor.id, track, &state.dislikes, &state.speeds, info, also, &state.prefs.track_menu);
         let act = menu.attach(anchor).and_then(|i| acts.get(i).copied())?;
         self.track_apply(&anchor.ctx, act, track, &state.dislikes, also, None, out)
     }
@@ -677,7 +792,7 @@ impl PageState {
         }
         let info = state.prefs.pane_info;
         let also = state.also_on.get(&track.id);
-        let (menu, acts) = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, &state.speeds, info, also);
+        let (menu, acts) = Self::track_menu_items(row.id.with("ctx"), track, &state.dislikes, &state.speeds, info, also, &state.prefs.track_menu);
         let act = menu.context_menu(row).and_then(|i| acts.get(i).copied())?;
         self.track_apply(&row.ctx, act, track, &state.dislikes, also, None, out)
     }
@@ -692,7 +807,8 @@ impl PageState {
         out: &mut Vec<Command>,
     ) {
         if let Some(t) = track {
-            let (menu, acts) = Self::track_menu_items(anchor.id, t, marks, &nikgob_view::TrackSpeeds::default(), true, None);
+            let slots = track_menu_slots(&anchor.ctx);
+            let (menu, acts) = Self::track_menu_items(anchor.id, t, marks, &nikgob_view::TrackSpeeds::default(), true, None, &slots);
             if let Some(act) = menu.attach(anchor).and_then(|i| acts.get(i).copied())
                 && let Some(r) = self.track_apply(&anchor.ctx, act, t, marks, None, None, out)
             {
@@ -1315,7 +1431,7 @@ mod speed_tests {
 
     use nikgob_view::{SpeedVariant, TrackSpeeds};
 
-    use super::widgets::{Row, row_acts};
+    use super::widgets::{Row, row_acts, row_items, shown_rows, sub_rows};
     use super::*;
 
     fn rows() -> Vec<Row<TrackAct>> {
@@ -1338,39 +1454,137 @@ mod speed_tests {
         TrackSpeeds { enabled, chosen: Arc::new(chosen.iter().copied().collect::<HashMap<_, _>>()) }
     }
 
-    /// «Скорость…» is in a track's menu, right after «Поделиться», only
-    /// while the speed of tracks is on in the settings.
+    /// «Скорость…» is in a track's menu, right before «Файл», only while
+    /// the speed of tracks is on in the settings.
     #[test]
     fn the_speed_row_is_there_only_while_the_speed_of_tracks_is_on() {
         let track = TrackId::new();
         let plain = row_acts(&rows());
-        let off = with_speed_row(rows(), &speeds(false, &[(track, SpeedVariant::Fast)]), track);
+        let off = with_speed_row(rows(), &speeds(false, &[(track, SpeedVariant::Fast)]));
         assert_eq!(row_acts(&off), plain, "switched off: the menu as it was");
 
-        let on = with_speed_row(rows(), &speeds(true, &[]), track);
+        let on = with_speed_row(rows(), &speeds(true, &[]));
         let acts = row_acts(&on);
         assert_eq!(acts.len(), plain.len() + 1);
         let share = acts.iter().position(|a| *a == TrackAct::Share).unwrap();
         assert_eq!(acts[share + 1], TrackAct::Speed);
-        // Still in the group of the track's own things: the divider follows.
         let at = on.iter().position(|r| matches!(r, Row::Item(TrackAct::Speed, _))).unwrap();
-        assert!(matches!(on[at + 1], Row::Divider));
+        assert!(matches!(on[at - 1], Row::Divider));
+        assert!(matches!(&on[at + 1], Row::Sub(item, _) if item.label == FILE));
     }
 
-    /// The row is marked while the track is not played as recorded, at a
-    /// ready version or at a speed of the listener's own.
+    /// The row is the same whatever the track's speed: nothing marks it.
     #[test]
-    fn the_row_shows_that_the_track_is_not_played_as_recorded() {
-        let (fast, own, plain) = (TrackId::new(), TrackId::new(), TrackId::new());
-        let s = speeds(true, &[(fast, SpeedVariant::Nightcore), (own, SpeedVariant::Custom(70))]);
-        let marked = |track| {
-            with_speed_row(rows(), &s, track).into_iter().find_map(|r| match r {
-                Row::Item(TrackAct::Speed, item) => Some(item.selected),
-                _ => None,
-            })
+    fn the_speed_row_is_not_marked() {
+        let fast = TrackId::new();
+        let s = speeds(true, &[(fast, SpeedVariant::Nightcore)]);
+        let rows = with_speed_row(rows(), &s);
+        let marked: Vec<bool> =
+            row_items(&rows).into_iter().filter(|(a, _)| *a == TrackAct::Speed).map(|(_, item)| item.selected).collect();
+        assert_eq!(marked, [false]);
+    }
+
+    /// The menu is short: the files are behind «Файл»; the info stands in
+    /// the menu itself, right after «Поделиться».
+    #[test]
+    fn the_files_are_in_a_submenu() {
+        let labels = |rows: &[Row<TrackAct>]| -> Vec<String> {
+            rows.iter()
+                .filter_map(|r| match r {
+                    Row::Item(_, item) | Row::Sub(item, _) => Some(item.label.clone()),
+                    Row::Divider | Row::Label(_) => None,
+                })
+                .collect()
         };
-        assert_eq!(marked(fast), Some(true));
-        assert_eq!(marked(own), Some(true));
-        assert_eq!(marked(plain), Some(false));
+        let shown = shown_rows(rows());
+        let top = labels(&shown);
+        assert_eq!(&top[top.len() - 4..], ["Поделиться", FILE, "Не нравится", "Не рекомендовать исполнителя"]);
+        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::Fetch, TrackAct::AlbumDownload]);
+        // The speed stands in the menu itself, right before «Файл».
+        let shown = shown_rows(with_speed_row(rows(), &speeds(true, &[])));
+        let top = labels(&shown);
+        let at = top.iter().position(|l| l == "Скорость…").unwrap();
+        assert_eq!(top[at + 1], FILE);
+        // What is shown stands for the same actions in the same order.
+        assert_eq!(row_acts(&shown), row_acts(&with_speed_row(rows(), &speeds(true, &[]))));
+        // A library row's deletes close «Файл».
+        let t = TrackRow {
+            id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
+        };
+        let mut library = library_track_rows(&t, &nikgob_view::DislikesView::default(), true, None);
+        push_deletes(&mut library, &t);
+        let file = row_acts(sub_rows(&library, FILE).unwrap());
+        assert_eq!(file[0], TrackAct::Fetch);
+        assert_eq!(&file[file.len() - 2..], [TrackAct::Trash, TrackAct::Purge]);
+        let top = labels(&library);
+        let share = top.iter().position(|l| l == "Поделиться").unwrap();
+        assert_eq!(&top[share + 1..share + 3], ["Источник и качество", FILE]);
+        let acts = row_acts(&library);
+        assert_eq!(&acts[acts.len() - 2..], [TrackAct::Dislike, TrackAct::Ban]);
+    }
+
+    /// «Меню трека»: an item sent to «Файл» joins the submenu in the menu's
+    /// order, one taken out stands right before it, a hidden one is gone;
+    /// nothing set, nothing changes.
+    #[test]
+    fn the_settings_place_the_items_of_the_menu() {
+        use nikgob_view::{TrackMenuItem as I, TrackMenuPlace as P, TrackMenuSlot};
+        use TrackAct as A;
+        let t = TrackRow {
+            id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
+        };
+        let library = || {
+            let mut rows = with_speed_row(library_track_rows(&t, &nikgob_view::DislikesView::default(), true, None), &speeds(true, &[]));
+            push_deletes(&mut rows, &t);
+            rows
+        };
+        let with = |slots: &[(I, P)]| {
+            let slots: Vec<TrackMenuSlot> = slots.iter().map(|&(item, place)| TrackMenuSlot { item, place }).collect();
+            placed(library(), &slots, |a| a.menu_item(true))
+        };
+        let top = |rows: &[Row<A>]| -> Vec<A> {
+            rows.iter()
+                .filter_map(|r| match r {
+                    Row::Item(a, _) => Some(*a),
+                    _ => None,
+                })
+                .collect()
+        };
+        let file = |rows: &[Row<A>]| row_acts(sub_rows(rows, FILE).unwrap());
+        assert_eq!(row_acts(&with(&[])), row_acts(&library()));
+        let plain = (top(&library()), file(&library()));
+        assert_eq!(plain.1[..2], [A::Fetch, A::AlbumDownload]);
+
+        // Into «Файл»: before its own items, in the menu's order; from
+        // below it: after them, before the deletes.
+        let rows = with(&[(I::Share, P::File), (I::Radio, P::File), (I::Ban, P::File)]);
+        assert!(!top(&rows).contains(&A::Share) && !top(&rows).contains(&A::Radio) && !top(&rows).contains(&A::Ban));
+        let f = file(&rows);
+        assert_eq!(f[..3], [A::Radio, A::Share, A::Fetch]);
+        assert_eq!(f[f.len() - 3..], [A::Ban, A::Trash, A::Purge]);
+        assert!(matches!(sub_rows(&rows, FILE).unwrap()[f.len() - 2], Row::Divider));
+
+        // Hidden: not built at all.
+        let rows = with(&[(I::Info, P::Hidden), (I::Torrents, P::Hidden)]);
+        let acts = row_acts(&rows);
+        assert!(!acts.contains(&A::Info) && !acts.contains(&A::Torrents));
+        assert_eq!(acts.len(), row_acts(&library()).len() - 2);
+
+        // «Редактировать теги…» taken out: in the menu, right before «Файл».
+        let rows = with(&[(I::Tags, P::Menu)]);
+        let at = rows.iter().position(|r| matches!(r, Row::Sub(..))).unwrap();
+        assert!(matches!(rows[at - 1], Row::Item(A::Fetch, _)) && matches!(rows[at - 2], Row::Item(A::Speed, _)));
+        assert_eq!(file(&rows)[0], A::AlbumDownload);
+
+        // Everything taken out of «Файл»: the deletes alone stay in it.
+        let rows = with(&[(I::Tags, P::Menu), (I::Download, P::Menu), (I::Torrents, P::Menu), (I::WrongFile, P::Hidden)]);
+        assert!(file(&rows).iter().all(|a| matches!(a, A::FindSong | A::Trash | A::Purge)));
+        // No divider is doubled or left at an end once the menu is built.
+        let (_, acts) = widgets::menu_of("placed-test", rows);
+        assert!(acts.contains(&A::Fetch) && acts.contains(&A::Trash));
     }
 }

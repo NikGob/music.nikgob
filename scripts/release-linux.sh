@@ -9,7 +9,8 @@
 #
 # Run it on Arch Linux (the WSL distro does): makepkg is Arch's. The version
 # is the workspace's in Cargo.toml. CARGO_TARGET_DIR is honoured, so a build
-# kept on the Linux file system is reused; CARGO_BUILD_JOBS defaults to 4 and
+# kept on the Linux file system is reused (a release build has flags of its
+# own, so its artifacts are its own too); CARGO_BUILD_JOBS defaults to 4 and
 # cargo runs at the lowest priority, so the machine stays usable meanwhile.
 set -euo pipefail
 
@@ -30,8 +31,15 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 out="$root/releases"
 mkdir -p "$out"
 
+# The paths of this machine stay out of the binary (panic places,
+# backtraces): the repo reads as nikgob/, the registry as cargo/, the
+# toolchain as rustup/.
+remap="--remap-path-prefix=$root=nikgob"
+remap="$remap --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
+remap="$remap --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=rustup"
+
 echo "music.nikgob $version: building"
-(cd "$root" && NIKGOB_RELEASE=1 nice -n 19 cargo build --release --locked -p nikgob)
+(cd "$root" && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap" NIKGOB_RELEASE=1 nice -n 19 cargo build --release --locked -p nikgob)
 bin="$target/release/nikgob"
 [ -x "$bin" ] || { echo "no binary at $bin" >&2; exit 1; }
 

@@ -1833,8 +1833,9 @@ fn info(
     y += CONTROLS_H + 16.0;
 
 
-    // Actions: like and add on the left; volume and dislike on the right,
-    // so like and dislike sit at opposite ends of the row.
+    // Actions: like and add on the left; volume, the sound window and
+    // dislike on the right, so like and dislike sit at opposite ends of
+    // the row.
     let row = snap(ui, Rect::from_min_size(pos2(col.left(), y), vec2(col.width(), 48.0)));
     let mut aui = ui.new_child(
         UiBuilder::new()
@@ -1857,21 +1858,16 @@ fn info(
         let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист").id_salt("np-add"));
 
         pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
-        // The sound of the track: its speed and the equalizer. Lit while
-        // either changes what is heard.
-        let changed = state.prefs.eq_on || state.speeds.of(t.id) != nikgob_view::SpeedVariant::Normal;
-        let tab = sound::first_tab(state);
-        let tip = if tab == sound::Tab::Speed { "Скорость и эквалайзер (S, E)" } else { "Эквалайзер (E)" };
-        if aui.add(IconButton::new(Icon::Equalizer).selected(changed).tooltip(tip).id_salt("np-sound")).clicked() {
-            sound::open(aui.ctx(), tab, None);
-        }
     }
+    // The sound of the track (its speed and the equalizer), by the volume.
+    // Lit while either changes what is heard.
+    let sound_changed = current.map(|t| state.prefs.eq_on || state.speeds.of(t.id) != nikgob_view::SpeedVariant::Normal);
     let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
     let volume_row = aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
         // The slider is optional; the wheel sets the volume either way.
         if state.prefs.np_volume {
-            let buttons = if dislike.is_some() { 96.0 } else { 48.0 };
+            let buttons = 48.0 * (1.0 + f32::from(u8::from(dislike.is_some())) + f32::from(u8::from(sound_changed.is_some())));
             let w = (ui.available_width() - buttons).clamp(96.0, 220.0);
             let vo = Slider::new("np-vol", volume)
                 .track(8.0)
@@ -1891,6 +1887,13 @@ fn info(
             .clicked()
         {
             out.push(Command::ToggleMute);
+        }
+        if let Some(changed) = sound_changed {
+            let button = ui.add(IconButton::new(Icon::Tune).selected(changed).tooltip("Скорость и эквалайзер").id_salt("np-sound"));
+            if button.clicked() {
+                // The window grows out of its button.
+                sound::open_from(ui.ctx(), sound::first_tab(state), None, button.rect);
+            }
         }
         if let Some((track, disliked)) = dislike
             && ui

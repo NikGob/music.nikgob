@@ -68,7 +68,8 @@ fn paths() -> Paths {
 }
 
 /// A windowed app has no stderr: panics (thread, message, place, backtrace)
-/// are appended to `crash.log` next to the library, then handled as usual.
+/// are appended to `crash.log` next to the library, scrubbed as the log is
+/// ([`logfile::scrub`]), then handled as usual.
 fn log_panics(dir: PathBuf) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -86,9 +87,9 @@ fn log_panics(dir: PathBuf) {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("crash.log"))
+            .open(dir.join(logfile::CRASH))
         {
-            let _ = f.write_all(report.as_bytes());
+            let _ = f.write_all(logfile::scrub(&report).as_bytes());
         }
         log::error!("{info}");
         default(info);

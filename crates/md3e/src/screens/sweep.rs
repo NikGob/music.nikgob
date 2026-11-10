@@ -218,7 +218,7 @@ pub const ALL: &[SettingId] = {
         CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle, RingSpin, RingDir, RingSpinSpeed, RingBeat, RingPause,
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
-        LikedAlbumsPlace, RailCompact, ReducedMotion, Tooltips, PaneQueue, PaneLyrics, PaneInfo,
+        LikedAlbumsPlace, RailCompact, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
         YouTubeCookies, ImportYouTube, SoundCloudEnabled, SoundCloud, SoundCloudToken, ImportSoundCloud, DeezerEnabled, PushLikes,
@@ -387,6 +387,7 @@ fn spec(id: SettingId) -> Spec {
         S::DislikeSkipEverywhere => Spec::Switch(|p| &mut p.dislike_skip_everywhere),
         S::DislikeInRecs => Spec::Switch(|p| &mut p.dislike_in_recs),
         S::DislikedTracks | S::DislikedArtists => Spec::Fixed(List, LIST),
+        S::TrackMenu => Spec::Fixed(Action, "a row that opens the list of the track menu's items; the sweep never opens it"),
         S::HiddenMixes => Spec::Fixed(List, "shown only while a mix is hidden from Главная (⋮ → «Не предлагать этот микс»)"),
         S::GraphUse => Spec::Switch(|p| &mut p.graph_use),
         S::GraphServices => Spec::Switch(|p| &mut p.graph_services),
@@ -904,7 +905,7 @@ mod tests {
             | S::NpVolumeHold | S::CoverClickPause | S::DblClickShape | S::TapWait | S::NpMotion | S::MixesProfiles
             | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames | S::MixClickOpensList
             | S::HiddenMixes | S::AlbumDate | S::LikedAlbumsPlace | S::RailCompact | S::ReducedMotion | S::Tooltips | S::PaneQueue
-            | S::PaneLyrics | S::PaneInfo | S::SpotifyEnabled | S::Spotify | S::SpotifyPersonal | S::SpotifyPlayback
+            | S::PaneLyrics | S::PaneInfo | S::TrackMenu | S::SpotifyEnabled | S::Spotify | S::SpotifyPersonal | S::SpotifyPlayback
             | S::SpotifySoloist | S::ImportSpotify | S::YouTubeEnabled | S::YouTube | S::YouTubeCookies | S::ImportYouTube
             | S::SoundCloudEnabled | S::SoundCloud | S::SoundCloudToken | S::ImportSoundCloud | S::DeezerEnabled | S::PushLikes
             | S::AlbumLike | S::SingleLike | S::PlaylistSync | S::ImportFiles | S::ImportSavedSongs | S::StreamCache

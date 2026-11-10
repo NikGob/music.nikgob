@@ -643,6 +643,21 @@ mod tests {
         }
     }
 
+    /// «Меню трека» is a row of «Вид» → «Окно» in «Подробно», with a
+    /// name for each item and each of its three places.
+    #[test]
+    fn the_track_menu_has_its_row() {
+        let ctx = context();
+        let state = crate::screens::sweep::survey_state();
+        let deep = drawn(&ctx, &state, settings_help::TAB_LOOK, true, 1280.0);
+        let row = deep.iter().find(|r| r.id == Id::TrackMenu).expect("the row");
+        assert_eq!((row.label.as_str(), row.group.as_str()), ("Меню трека", "Окно"));
+        assert!(!drawn(&ctx, &state, settings_help::TAB_LOOK, false, 1280.0).iter().any(|r| r.id == Id::TrackMenu));
+        assert_eq!(look::TRACK_MENU_PLACES.len(), nikgob_view::TrackMenuPlace::ALL.len());
+        let names: std::collections::BTreeSet<&str> = nikgob_view::TrackMenuItem::ALL.iter().map(|i| i.label()).collect();
+        assert_eq!(names.len(), nikgob_view::TrackMenuItem::ALL.len());
+    }
+
     /// A link to a row «Просто» does not show opens this visit in
     /// «Подробно»; a developer row in a handout build, and any whole
     /// group, lands on a row users see.

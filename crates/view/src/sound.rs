@@ -273,8 +273,10 @@ pub fn heard_time(track_time: Duration, speed: f32) -> Duration {
 pub const EQ_BANDS: usize = 10;
 /// Centre of each band, Hz.
 pub const EQ_FREQS: [f32; EQ_BANDS] = [32.0, 64.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16_000.0];
-/// The farthest a band goes either way, dB.
+/// The farthest the curve goes either way at a band's centre, dB.
 pub const EQ_MAX_DB: f32 = 12.0;
+/// The farthest a band's bell is driven to hold the curve, dB.
+const EQ_BELL_MAX_DB: f64 = 24.0;
 
 /// The equalizer's ready curves, by name. The first is flat.
 pub const EQ_PRESETS: [(&str, [f32; EQ_BANDS]); 5] = [
@@ -292,20 +294,60 @@ pub fn eq_preset_of(gains: &[f32; EQ_BANDS]) -> Option<usize> {
         .position(|(_, g)| g.iter().zip(gains).all(|(a, b)| (a - b).abs() < 0.05))
 }
 
-/// The equalizer's gain at `freq` (Hz) for these band gains, dB: the curve
-/// drawn through the points. Each band is a bell an octave wide (the same
-/// filter the engine runs), so neighbours add up.
-pub fn eq_curve_db(gains: &[f32; EQ_BANDS], freq: f32) -> f32 {
+/// The gain each band's bell runs at (dB) so that the curve of all ten
+/// passes through `gains` at the bands' centres. Each band is a bell an
+/// octave wide and neighbours add up, so a bell's own gain is not its
+/// band's: every round each bell gets a share of what the curve misses at
+/// its centre. Flat stays exactly flat.
+///
+/// The engine fits its bells the same way (its `eq_filter_gains`); the two
+/// crates do not see each other, so both are held to the same numbers by
+/// their tests.
+pub fn eq_filter_gains(gains: &[f32; EQ_BANDS]) -> [f32; EQ_BANDS] {
+    const ROUNDS: usize = 30;
+    const STEP: f64 = 0.7;
+    const CLOSE_DB: f64 = 0.01;
+    let curve = gains.map(|g| if g.is_finite() { f64::from(g.clamp(-EQ_MAX_DB, EQ_MAX_DB)) } else { 0.0 });
+    if curve.iter().all(|g| *g == 0.0) {
+        return [0.0; EQ_BANDS];
+    }
+    let mut bells = curve;
+    for _ in 0..ROUNDS {
+        let mut next = bells;
+        let mut worst = 0.0f64;
+        for band in 0..EQ_BANDS {
+            let miss = curve[band] - bells_db(&bells, f64::from(EQ_FREQS[band]));
+            worst = worst.max(miss.abs());
+            next[band] = (bells[band] + STEP * miss).clamp(-EQ_BELL_MAX_DB, EQ_BELL_MAX_DB);
+        }
+        if worst < CLOSE_DB {
+            break;
+        }
+        bells = next;
+    }
+    bells.map(|g| g as f32)
+}
+
+/// The equalizer's gain at `freq` (Hz) with its bells at `bells` (dB, from
+/// [`eq_filter_gains`]): the curve the listener hears, which passes through
+/// the points. The same filters the engine runs.
+pub fn eq_curve_db(bells: &[f32; EQ_BANDS], freq: f32) -> f32 {
+    let bells = bells.map(|g| if g.is_finite() { f64::from(g).clamp(-EQ_BELL_MAX_DB, EQ_BELL_MAX_DB) } else { 0.0 });
+    bells_db(&bells, f64::from(freq)) as f32
+}
+
+/// The ten bells added up at `freq`, dB.
+fn bells_db(bells: &[f64; EQ_BANDS], freq: f64) -> f64 {
     const RATE: f64 = 48_000.0;
     const Q: f64 = 1.41;
-    let w = std::f64::consts::TAU * f64::from(freq) / RATE;
+    let w = std::f64::consts::TAU * freq / RATE;
     let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
     let mut db = 0.0f64;
-    for (gain, centre) in gains.iter().zip(EQ_FREQS) {
-        if *gain == 0.0 || !gain.is_finite() {
+    for (gain, centre) in bells.iter().zip(EQ_FREQS) {
+        if *gain == 0.0 {
             continue;
         }
-        let a = 10f64.powf(f64::from(gain.clamp(-EQ_MAX_DB, EQ_MAX_DB)) / 40.0);
+        let a = 10f64.powf(gain / 40.0);
         let w0 = std::f64::consts::TAU * f64::from(centre) / RATE;
         let (cos, alpha) = (w0.cos(), w0.sin() / (2.0 * Q));
         let power = |b0: f64, b2: f64| {
@@ -317,7 +359,7 @@ pub fn eq_curve_db(gains: &[f32; EQ_BANDS], freq: f32) -> f32 {
         let den = power(1.0 + alpha / a, 1.0 - alpha / a);
         db += 10.0 * (num / den).log10();
     }
-    db as f32
+    db
 }
 
 #[cfg(test)]
@@ -440,8 +482,47 @@ mod tests {
         gains[5] = 6.0;
         assert!((eq_curve_db(&gains, 1000.0) - 6.0).abs() < 0.01);
         assert!(eq_curve_db(&gains, 60.0).abs() < 0.1);
+        // The bell alone reaches into its neighbours' bands; fitted, it does not.
+        assert!(eq_curve_db(&gains, 500.0) > 1.0);
+        let bells = eq_filter_gains(&gains);
+        assert!((eq_curve_db(&bells, 1000.0) - 6.0).abs() < 0.02);
+        assert!(eq_curve_db(&bells, 500.0).abs() < 0.02 && eq_curve_db(&bells, 2000.0).abs() < 0.02);
         assert_eq!(eq_preset_of(&[0.0; EQ_BANDS]), Some(0));
         assert_eq!(eq_preset_of(&EQ_PRESETS[2].1), Some(2));
         assert_eq!(eq_preset_of(&gains), None);
+    }
+
+    #[test]
+    fn the_fitted_curve_passes_through_every_band_s_gain() {
+        let alternating = |db: f32| -> [f32; EQ_BANDS] { std::array::from_fn(|band| if band % 2 == 0 { db } else { -db }) };
+        let mut curves = vec![
+            alternating(6.0),
+            alternating(-12.0),
+            [6.0, 5.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [12.0; EQ_BANDS],
+            [-12.0; EQ_BANDS],
+            [0.0, 0.0, 0.0, 12.0, -12.0, 12.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        curves.extend(EQ_PRESETS.map(|(_, curve)| curve));
+        for curve in &curves {
+            let bells = eq_filter_gains(curve);
+            assert_eq!(bells, eq_filter_gains(curve));
+            assert!(bells.iter().all(|g| f64::from(g.abs()) < EQ_BELL_MAX_DB), "{curve:?}: {bells:?}");
+            for (band, freq) in EQ_FREQS.iter().enumerate() {
+                let got = eq_curve_db(&bells, *freq);
+                assert!((got - curve[band]).abs() < 0.1, "{curve:?} at {freq} Hz: {got}");
+            }
+        }
+        assert_eq!(eq_filter_gains(&[0.0; EQ_BANDS]), [0.0; EQ_BANDS]);
+        assert_eq!(eq_filter_gains(&[f32::NAN; EQ_BANDS]), [0.0; EQ_BANDS]);
+        // The numbers the engine's own fit is held to as well.
+        let bass = eq_filter_gains(&EQ_PRESETS[1].1);
+        for (bell, expected) in bass.iter().zip([-0.76, 3.89, 1.33, -0.38, -0.01]) {
+            assert!((bell - expected).abs() < 0.03, "{bass:?}");
+        }
+        let mut lone = [0.0; EQ_BANDS];
+        lone[5] = 6.0;
+        let lone = eq_filter_gains(&lone);
+        assert!(lone[5] > 6.2 && lone[5] < 6.7 && lone[4] < -1.0 && lone[4] > -1.4, "{lone:?}");
     }
 }

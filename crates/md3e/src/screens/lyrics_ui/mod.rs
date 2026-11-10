@@ -15,9 +15,10 @@
 //! is timed («Genius · по словам»). While timing is made it shows its
 //! progress and stage; a failure says why until it is opened.
 //!
-//! «Изменить текст…» in the control's menu opens the lyrics editor
+//! «Изменить текст…» in the playing track's menu opens the lyrics editor
 //! ([`editor`], the lines in [`edit`]): the user's own text, kept as theirs
-//! and shown first; «Вернуть найденный» goes back to the found ones.
+//! and shown first; «Вернуть найденный» in the control's menu goes back to
+//! the found ones.
 
 use std::sync::OnceLock;
 
@@ -49,6 +50,12 @@ pub(crate) fn overlays(ctx: &Context, state: &ViewState, out: &mut Vec<Command>)
 /// must not show it over its page. The editor stays (it may hold edits).
 pub(crate) fn close_dialog(ctx: &Context) {
     dialog::close(ctx);
+}
+
+/// «Изменить текст…» is offered: the shown track has a text, and no
+/// timing is being made for it.
+pub(crate) fn can_edit(state: &ViewState) -> bool {
+    editor::editable(state) && busy(state).is_none()
 }
 
 /// The user's own text is there: «Вернуть найденный» goes back to the

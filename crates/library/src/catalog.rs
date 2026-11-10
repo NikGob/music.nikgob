@@ -645,6 +645,7 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
         )?;
     }
     tx.execute("UPDATE event SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
+    crate::events::edited();
     tx.execute(
         "INSERT OR IGNORE INTO track_alias(track_id, title, key, source)
          SELECT ?2, title, key, source FROM track_alias WHERE track_id = ?1

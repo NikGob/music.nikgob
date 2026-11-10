@@ -14,7 +14,7 @@ use super::rows::{self, Num, child, dimmed, group, item, menu, row, segments, su
 use crate::screens::{bg_shapes, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, IconButton, Size, Style, Switch},
+    components::{Button, Dialog, IconButton, Size, Style, Switch},
 };
 
 pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
@@ -34,6 +34,7 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     switch(ui, Id::RailCompact, &mut p.rail_compact);
     switch(ui, Id::ReducedMotion, &mut p.reduced_motion);
     switch(ui, Id::Tooltips, &mut p.tooltips);
+    track_menu(ui, p);
     sub(ui, "Панель справа");
     switch(ui, Id::PaneQueue, &mut p.pane_queue);
     switch(ui, Id::PaneLyrics, &mut p.pane_lyrics);
@@ -232,6 +233,51 @@ fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
                 });
             }
         });
+    }
+}
+
+/// The places of «Меню трека», as [`v::TrackMenuPlace::ALL`] has them.
+pub(super) const TRACK_MENU_PLACES: [&str; 3] = ["В меню", "В «Файл»", "Скрыт"];
+/// The column of the items' names in the list of «Меню трека».
+const TRACK_MENU_NAME_W: f32 = 280.0;
+
+/// «Меню трека»: a row that opens the list of the menu's items, each in
+/// the menu, in «Файл» or hidden, and «Сбросить» under it.
+fn track_menu(ui: &mut Ui, p: &mut Prefs) {
+    let open_id = egui::Id::new("set-track-menu-open");
+    row(ui, Id::TrackMenu, |ui| {
+        if ui.add(Button::new("Настроить").style(Style::Outlined).size(Size::S).id_salt("set-track-menu")).clicked() {
+            ui.ctx().data_mut(|d| d.insert_temp(open_id, true));
+        }
+    });
+    if !ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+        return;
+    }
+    let s = Theme::get(ui.ctx()).scheme;
+    let mut open = true;
+    let r = Dialog::new("set-track-menu-list", Id::TrackMenu.label()).max_width(640.0).action("Закрыть").show_with(ui.ctx(), &mut open, |ui| {
+        egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+            for item in v::TrackMenuItem::ALL {
+                ui.horizontal(|ui| {
+                    let (name, _) = ui.allocate_exact_size(vec2(TRACK_MENU_NAME_W, 40.0), Sense::hover());
+                    ui.painter().text(name.left_center(), egui::Align2::LEFT_CENTER, item.label(), TypeRole::BodyLarge.font_id(), s.on_surface);
+                    let now = p.track_menu_place(item);
+                    let at = v::TrackMenuPlace::ALL.iter().position(|x| *x == now).unwrap_or(0);
+                    let (picked, _) = super::super::connected(ui, egui::Id::new(("set-track-menu-place", item)), &TRACK_MENU_PLACES, at, &[]);
+                    if let Some(i) = picked {
+                        p.set_track_menu_place(item, v::TrackMenuPlace::ALL[i.min(v::TrackMenuPlace::ALL.len() - 1)]);
+                    }
+                });
+            }
+        });
+        ui.add_space(8.0);
+        let reset = Button::new("Сбросить").style(Style::Outlined).size(Size::S).enabled(!p.track_menu.is_empty());
+        if ui.add(reset.id_salt("set-track-menu-reset")).clicked() {
+            p.track_menu.clear();
+        }
+    });
+    if r.action.is_some() || r.dismissed || !open {
+        ui.ctx().data_mut(|d| d.remove::<bool>(open_id));
     }
 }
 

@@ -248,6 +248,7 @@ impl PcmSource for SoloistTrack {
                 // request, or a restart of ours shows.
                 let fresh = view.track_changes > changes || restarted(&view, at) || at.elapsed() > FRESH_FALLBACK;
                 if fresh && self.ours(&view) && view.status == Status::Playing {
+                    log::info!("soloist: the track plays {} ms after it was asked for", at.elapsed().as_millis());
                     self.start_playing(&view);
                 } else if at.elapsed() > START_TIMEOUT {
                     return Err(err("Spotify Soloist не начал трек"));

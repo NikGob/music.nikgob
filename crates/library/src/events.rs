@@ -4,6 +4,7 @@
 
 use nikgob_core::model::{DeviceId, Event, EventContext, EventId, EventMeta, EventType, SourceKind, TrackId};
 use rusqlite::{Connection, Row, Transaction, params};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::db::Library;
 use crate::error::Result;
@@ -59,6 +60,7 @@ fn fix_contexts(tx: &Transaction<'_>) -> Result<(usize, usize)> {
         [],
     )?;
     if albums + autoplay > 0 {
+        edited();
         note!("library: {albums} plays of an album took its id instead of a mix's, {autoplay} plays of autoplay are in the radio now");
     }
     Ok((albums + autoplay, albums + autoplay))
@@ -76,6 +78,21 @@ fn stats_from_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<TrackStats>
         skips: row.get::<_, i64>(base + 2)? as u32,
         last_played: row.get(base + 3)?,
     })
+}
+
+/// Edits of stored events (their count and newest time stay the same).
+static EDITS: AtomicU64 = AtomicU64::new(0);
+
+/// An event already stored was changed in place.
+pub(crate) fn edited() {
+    EDITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// What the events are now, cheaply: how many, the newest one's time, the
+/// edits in place so far. Two equal stamps: the same events.
+pub(crate) fn stamp(conn: &Connection) -> Result<(i64, i64, u64)> {
+    let (count, newest) = conn.query_row("SELECT count(*), coalesce(max(ts), 0) FROM event", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok((count, newest, EDITS.load(Ordering::Relaxed)))
 }
 
 /// Inserts an event unless its id is already stored. `true` if it was new.

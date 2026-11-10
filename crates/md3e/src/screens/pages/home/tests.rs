@@ -287,7 +287,7 @@ fn day_lane(n: u8, title: &str) -> LaneCard {
 fn the_mixes_are_one_row() {
     let mut h = HomeView { lanes: vec![lane("Всё вперемешку")], ..HomeView::default() };
     assert_eq!(sections(&h, false, false), [Section::Mixes]);
-    h.lanes = vec![day_lane(0, "Микс дня"), day_lane(1, "Хип-хоп микс"), lane("Микс любимых")];
+    h.lanes = vec![day_lane(0, "Микс дня"), LaneCard { key: nikgob_view::MixKey::Genre(7), ..lane("Хип-хоп микс") }, lane("На вечер")];
     assert_eq!(sections(&h, false, false), [Section::Mixes]);
     assert!(sections(&HomeView::default(), false, false).is_empty());
     assert_eq!(sections(&HomeView::default(), true, false), [Section::Mixes]);
@@ -316,7 +316,7 @@ fn the_mixes_are_one_row() {
     st.library.playlists = vec![liked(5)];
     assert_eq!(liked_playlist(&st).map(|p| p.track_count), Some(5));
     let page = texts(&st, 1280.0);
-    assert!(page.contains("Любимые") && page.contains("5 треков") && page.contains("Микс любимых"));
+    assert!(page.contains("Любимые") && page.contains("5 треков") && page.contains("На вечер"));
 }
 
 /// «Слушать снова» and «Новое для тебя» stand in columns of two songs,

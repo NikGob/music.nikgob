@@ -8,15 +8,20 @@
 //! состав» and the blends of the day): a start of the app or the next
 //! part of the day draws them again ([`crate::home_v2::Epoch`]).
 //!
-//! Before the moments stand «Микс дня», the mixes that are always there —
-//! «Микс любимых» and the mix of the part of the day
-//! ([`Builder::pinned`]), the epoch's as the moments are — and the named
-//! mixes («Хип-хоп микс», «Микс: ZUTOMAYO»: [`nikgob_recs::mix_names`]).
-//! «Микс дня» and the named mixes ([`Builder::daily`]) are the day's:
-//! seeded by the day and kept for it in `recs.day_mixes` (their lineup,
-//! each one's songs, yesterday's to draw other ones), whatever is played
-//! meanwhile and however often the app starts; a new day, a history that
-//! appeared and «Только скачанное» switched draw them again.
+//! Before the moments stand «Микс дня», the genre mixes («Хип-хоп микс»,
+//! built of the songs of one family of genres by the tags the graph of
+//! similar music keeps for their artists), the mix of the part of the day
+//! («На вечер»: [`Builder::pinned`], the epoch's as the moments are) and a
+//! named mix or two («Микс: ZUTOMAYO»: [`nikgob_recs::mix_names`]). «Микс
+//! дня», the genre mixes and the named ones ([`Builder::daily`]) are the
+//! day's: seeded by the day and kept for it in `recs.day_mixes` (their
+//! lineup, each one's songs, yesterday's to draw other ones), whatever is
+//! played meanwhile and however often the app starts; a new day, a history
+//! that appeared and «Только скачанное» switched draw them again.
+//!
+//! What of all that the row shows, in which order and how many, is
+//! [`nikgob_recs::mixes::row`]'s: ten cards at most, no two alike. «Любимые»
+//! is the playlist's own tile before the row (the page's).
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,9 +38,9 @@ use super::{BuildInput, CoverRef, Snapshot, cache_read, cache_write};
 
 const MIXES_KEY: &str = "recs.mixes";
 const DAY_MIXES_KEY: &str = "recs.day_mixes";
-/// The day's mixes as kept: 1 is «Микс дня» and the named mixes (before it
-/// six numbered ones).
-const DAY_MIXES_V: u8 = 1;
+/// The day's mixes as kept: 2 is «Микс дня», the genre mixes and the named
+/// ones (1 had no genre mixes, before it six numbered ones).
+const DAY_MIXES_V: u8 = 2;
 /// A song shorter than this is an interlude: no mix picks it.
 const INTERLUDE_MS: u32 = 75_000;
 /// About two hours of «На повторе».
@@ -138,24 +143,22 @@ pub(crate) fn engine_key(k: v::MixKey) -> Option<MixKey> {
         v::MixKey::Liked => MixKey::Liked,
         v::MixKey::Part(p) => MixKey::Part(p),
         v::MixKey::Daily(n) => MixKey::Daily(n),
+        v::MixKey::Genre(f) => MixKey::Genre(f),
         v::MixKey::OnRepeat | v::MixKey::World(_) => return None,
     })
 }
 
 /// A moment of the epoch's lottery (or a blend): what «Миксы для тебя»
-/// shows [`nikgob_recs::mixes::MOMENTS`] of; the mixes that are always
-/// there, «На повторе» and the mixes of the day are beside them.
+/// shows [`nikgob_recs::mixes::MOMENTS`] of; the mix of the part of the
+/// day, «На повторе» and the mixes of the day are beside them.
 pub(crate) fn is_moment(k: v::MixKey) -> bool {
-    !matches!(k, v::MixKey::Liked | v::MixKey::Part(_) | v::MixKey::Daily(_) | v::MixKey::OnRepeat | v::MixKey::World(_))
+    !matches!(k, v::MixKey::Liked | v::MixKey::Part(_) | v::MixKey::Daily(_) | v::MixKey::Genre(_) | v::MixKey::OnRepeat | v::MixKey::World(_))
 }
 
-/// Where a blend made now stands among `lanes`: after the mixes that are
-/// always there, before the moments.
+/// Where a blend made now stands among `lanes`: after the mixes of the day
+/// and of its part, the first of the moments.
 pub(crate) fn blend_place(lanes: &[LaneHome]) -> usize {
-    lanes
-        .iter()
-        .position(|l| is_moment(l.key) || l.key == v::MixKey::OnRepeat || matches!(l.key, v::MixKey::Daily(n) if n > 0))
-        .unwrap_or(lanes.len())
+    lanes.iter().position(|l| is_moment(l.key) || l.key == v::MixKey::OnRepeat).unwrap_or(lanes.len())
 }
 
 /// What the cache keeps of the mixes of the day: the day they are for,
@@ -185,6 +188,7 @@ fn view_key(k: MixKey) -> v::MixKey {
         MixKey::Liked => v::MixKey::Liked,
         MixKey::Part(p) => v::MixKey::Part(p),
         MixKey::Daily(n) => v::MixKey::Daily(n),
+        MixKey::Genre(f) => v::MixKey::Genre(f),
     }
 }
 
@@ -240,14 +244,45 @@ impl MixPrefs {
     }
 }
 
-/// The engine over `snap` for `session` at `now`, in the epoch of `seed`.
+/// The tags other listeners gave an artist, as the graph of similar music
+/// keeps them: what a genre mix is built by and a named one called by.
+type ArtistTags = HashMap<ArtistId, Vec<(String, f32)>>;
+
+fn artist_tags(lib: &nikgob_library::Library) -> ArtistTags {
+    let mut tags = ArtistTags::new();
+    for t in lib.graph_tags().unwrap_or_default() {
+        if t.subject_kind == "artist"
+            && let Ok(a) = t.subject_id.parse::<ArtistId>()
+        {
+            tags.entry(a).or_default().push((t.tag, t.weight));
+        }
+    }
+    tags
+}
+
+/// The engine over `snap` for `session` at `now`, in the epoch of `seed`;
+/// with `tags` it knows the genres ([`Builder::with_genres`]).
 #[allow(clippy::too_many_arguments)]
-fn with_builder<T>(snap: &Snapshot, prefs: &MixPrefs, fit: &[bool], ok: &dyn Fn(usize) -> bool, session: &Session, now: nikgob_core::model::UnixMs, utc_offset_min: i32, seed: u64, f: impl FnOnce(&Builder<'_>) -> T) -> T {
+fn with_builder<T>(
+    snap: &Snapshot,
+    prefs: &MixPrefs,
+    fit: &[bool],
+    ok: &dyn Fn(usize) -> bool,
+    tags: Option<&ArtistTags>,
+    session: &Session,
+    now: nikgob_core::model::UnixMs,
+    utc_offset_min: i32,
+    seed: u64,
+    f: impl FnOnce(&Builder<'_>) -> T,
+) -> T {
     let recs = snap.recs();
     let live: Live = snap.model.live(session);
     let suits = |i: usize| fit.get(i).copied().unwrap_or(false);
     let (part, _, _) = super::daylist_key(now, utc_offset_min);
-    let b = Builder::new(&recs, &snap.model, ok, &suits, seed, part, live, settings(prefs));
+    let mut b = Builder::new(&recs, &snap.model, ok, &suits, seed, part, live, settings(prefs));
+    if let Some(tags) = tags {
+        b = b.with_genres(&|a| tags.get(&a).cloned().unwrap_or_default());
+    }
     f(&b)
 }
 
@@ -290,7 +325,10 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         tiles.facts.contains_key(&t.id) && (t.local || !snap.local_only)
     };
     let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
-    let (mixes, lineup, blendable, pinned) = with_builder(snap, prefs, &snap.background, &ok, &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
+    // The genres: a genre mix is built by them, and a moment that is a
+    // genre's songs again is told by them.
+    let tags = artist_tags(lib);
+    let (mixes, lineup, blendable, pinned) = with_builder(snap, prefs, &snap.background, &ok, Some(&tags), &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
         let pinned = b.pinned(&cache.kept);
         let (mut mixes, lineup) = b.lineup(&cache.kept);
         b.named(&mut mixes, &names);
@@ -303,12 +341,11 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // The named mixes take no name another card of the row has.
     let mut taken: Vec<String> = pinned.iter().chain(&mixes).map(|m| m.title.clone()).collect();
     taken.extend(["Любимые".to_owned(), "На повторе".to_owned()]);
-    let mut daily = day_mixes(snap, input, tiles, &taken, &ok);
-    // «Микс дня», then the liked songs' mix and the part of the day's,
-    // the named mixes, the moments: a new song of «С новым» goes to the
-    // first that fits it.
-    let named = daily.split_off(usize::from(daily.first().is_some_and(|m| m.key == MixKey::Daily(0))));
-    let mut mixes: Vec<Mix> = daily.into_iter().chain(pinned).chain(named).chain(mixes).collect();
+    let daily = day_mixes(snap, input, tiles, &tags, &taken, &ok);
+    // The row: «Микс дня», the genre mixes, the part of the day's, a
+    // named mix or two, the moments, no two alike. A new song of «С
+    // новым» goes to the first that fits it.
+    let mut mixes: Vec<Mix> = nikgob_recs::mixes::row(daily, pinned.into_iter().next(), mixes);
     log_lineup(snap, tiles, &mixes);
 
     let seed = input.epoch.seed;
@@ -351,7 +388,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
 
 /// «Миксы дня»: the day's as they were drawn, else drawn now and kept for
 /// the day (see the module docs). «Другой состав» of one draws it again.
-fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, taken: &[String], ok: &dyn Fn(usize) -> bool) -> Vec<Mix> {
+fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, tags: &ArtistTags, taken: &[String], ok: &dyn Fn(usize) -> bool) -> Vec<Mix> {
     let lib = &input.lib;
     let history = snap.model.taste.has_history();
     let mut cache: DayMixesCache = cache_read(lib, DAY_MIXES_KEY).unwrap_or_default();
@@ -360,7 +397,7 @@ fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, taken: &[S
         let kept = std::mem::take(&mut cache.kept).next_epoch(false);
         cache = DayMixesCache { v: DAY_MIXES_V, day: input.day.clone(), history, local_only: snap.local_only, kept };
     }
-    if let Some(key @ MixKey::Daily(_)) = input.refresh_mix.and_then(engine_key) {
+    if let Some(key @ (MixKey::Daily(_) | MixKey::Genre(_))) = input.refresh_mix.and_then(engine_key) {
         let salt = fastrand::u64(1..);
         match cache.kept.salts.iter_mut().find(|s| s.0 == key) {
             Some(s) => s.1 = salt,
@@ -369,19 +406,11 @@ fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, taken: &[S
     }
     // The day's seed, not the epoch's: a start of the app changes nothing.
     let seed = super::day_seed(&input.day);
-    // What names a mix: the tags other listeners gave its artists, the
-    // artists' names, the years.
-    let mut tags: HashMap<ArtistId, Vec<(String, f32)>> = HashMap::new();
-    for t in lib.graph_tags().unwrap_or_default() {
-        if t.subject_kind == "artist"
-            && let Ok(a) = t.subject_id.parse::<ArtistId>()
-        {
-            tags.entry(a).or_default().push((t.tag, t.weight));
-        }
-    }
+    // What names a mix: the tags other listeners gave its artists (a
+    // genre mix is built by them), the artists' names, the years.
     let fact = |i: usize| tiles.facts.get(&snap.model.id(i));
     let decade = common_decade(tiles.facts.values().filter_map(|f| f.year));
-    let (mixes, lineup) = with_builder(snap, &input.mix_prefs, &snap.background, ok, &Session::default(), input.now, input.utc_offset_min, seed, |b| {
+    let (mixes, lineup) = with_builder(snap, &input.mix_prefs, &snap.background, ok, Some(tags), &Session::default(), input.now, input.utc_offset_min, seed, |b| {
         let (mut mixes, lineup) = b.daily(&cache.kept);
         let made = b.makeups(
             &mixes,
@@ -391,7 +420,7 @@ fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, taken: &[S
             &|i| fact(i).map(|f| f.title.clone()).filter(|t| !t.trim().is_empty()),
         );
         // The lineup and the songs are kept as drawn; a mix nothing can
-        // name is only not shown.
+        // name, or one that is a genre's mix again, is only not shown.
         let drawn = mixes.clone();
         b.name_daily(&mut mixes, &made, taken, decade);
         (mixes, (drawn, lineup))
@@ -421,7 +450,7 @@ pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], nam
     let key = MixKey::blend(profiles)?;
     let (now, utc_offset_min) = (super::recs_now(), super::local_day().1);
     let ok = |i: usize| snap.catalog.tracks()[i].local || !snap.local_only;
-    let mix = with_builder(snap, prefs, &[], &ok, session, now, utc_offset_min, seed, |b| {
+    let mix = with_builder(snap, prefs, &[], &ok, None, session, now, utc_offset_min, seed, |b| {
         let mut m = vec![b.mix(key, &Kept::default())?];
         b.named(&mut m, names);
         m.pop()
@@ -495,7 +524,7 @@ fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
     }
 }
 
-/// The lineup in the log: each card, its first songs.
+/// The row as it is shown, in the log: each card, its first songs.
 fn log_lineup(snap: &Snapshot, tiles: &TilesInput, mixes: &[Mix]) {
     let line: Vec<String> = mixes.iter().map(|m| format!("«{}» {}", m.title, m.tracks.len())).collect();
     log::info!("recs: mixes for you: {}", line.join(", "));
@@ -685,18 +714,21 @@ fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, m: &M
 mod tests {
     use super::*;
 
-    /// «Любимые», the mix of a part of the day and a mix of the day keep
-    /// their keys both ways and are no moments of the lottery.
+    /// The liked songs' mix, the mix of a part of the day, a mix of the
+    /// day and a genre mix keep their keys both ways and are no moments of
+    /// the lottery, and a genre mix is kept with the day's.
     #[test]
     fn the_mixes_beside_the_moments_keep_their_keys() {
-        for k in [v::MixKey::Liked, v::MixKey::Part(2), v::MixKey::Daily(0), v::MixKey::Daily(3), v::MixKey::Calm, v::MixKey::Profile(7)] {
+        for k in [v::MixKey::Liked, v::MixKey::Part(2), v::MixKey::Daily(0), v::MixKey::Daily(3), v::MixKey::Genre(7), v::MixKey::Calm, v::MixKey::Profile(7)] {
             assert_eq!(engine_key(k).map(view_key), Some(k));
         }
         assert!(is_moment(v::MixKey::Calm) && is_moment(v::MixKey::Blend([1, 2, 0])) && is_moment(v::MixKey::Profile(1)));
-        for k in [v::MixKey::Liked, v::MixKey::Part(0), v::MixKey::Daily(1), v::MixKey::OnRepeat] {
+        for k in [v::MixKey::Liked, v::MixKey::Part(0), v::MixKey::Daily(1), v::MixKey::Genre(7), v::MixKey::OnRepeat] {
             assert!(!is_moment(k), "{k:?}");
         }
-        assert!(v::MixKey::Daily(2).is_daily() && !v::MixKey::Liked.is_daily());
+        assert!(v::MixKey::Daily(2).is_daily() && v::MixKey::Genre(7).is_daily() && !v::MixKey::Liked.is_daily());
+        let json = serde_json::to_string(&Kept { lineup: vec![MixKey::Daily(0), MixKey::Genre(7)], ..Kept::default() }).unwrap();
+        assert_eq!(serde_json::from_str::<Kept>(&json).unwrap().lineup, [MixKey::Daily(0), MixKey::Genre(7)]);
     }
 
     /// A library where one franchise is the most loved (as MADE IN ABYSS
@@ -751,7 +783,7 @@ mod tests {
         }
         let prefs = MixPrefs::of(&v::Prefs::default());
         let ok = |i: usize| tiles.facts.contains_key(&snap.catalog.tracks()[i].id);
-        let mixes = with_builder(&snap, &prefs, &[], &ok, &Session::default(), 1_000 * DAY_MS, 0, 1, |b| b.lineup(&Kept::default()).0);
+        let mixes = with_builder(&snap, &prefs, &[], &ok, None, &Session::default(), 1_000 * DAY_MS, 0, 1, |b| b.lineup(&Kept::default()).0);
         assert!(!mixes.is_empty());
         for m in &mixes {
             let picked: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();

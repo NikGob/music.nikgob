@@ -136,6 +136,9 @@ material_icons! {
     AttachFile => "attach_file",
     Equalizer => "equalizer",
     GraphicEq => "graphic_eq",
+    /// Sliders: the sound's settings (speed and equalizer). Drawn for this
+    /// set (three tracks with their handles), on its grid and weight.
+    Tune => "tune",
     CloudDownload => "cloud_download",
     Error => "error",
     Fullscreen => "fullscreen",

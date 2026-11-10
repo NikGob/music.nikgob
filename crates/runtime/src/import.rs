@@ -31,6 +31,20 @@ pub struct ImportSetup {
     pub models_dir: Option<std::path::PathBuf>,
 }
 
+impl Internal {
+    /// What the worker's loop is busy with while it handles this.
+    pub(crate) fn turn_name(&self) -> String {
+        match self {
+            Self::Import(_) => "an import event".into(),
+            Self::Stream(_) => "a streaming answer".into(),
+            Self::Analysis(_) => "the sound analysis".into(),
+            Self::Recs(m) => format!("the recommendations ({})", m.turn_name()),
+            Self::LyricsFetched(..) | Self::LyricsEmbedded(..) | Self::Align(_) => "lyrics".into(),
+            other => format!("a background answer ({:?})", std::mem::discriminant(other)),
+        }
+    }
+}
+
 /// Messages from background tasks to the worker.
 pub(crate) enum Internal {
     Import(ImportEvent),

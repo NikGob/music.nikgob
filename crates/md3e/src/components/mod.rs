@@ -52,6 +52,8 @@ pub mod search;
 pub use search::{Search, SearchBar, SearchBarOutput, SearchOutput};
 pub mod sheet;
 pub use sheet::{BottomSheet, Edge, SheetOutput, SideSheet, SupportingPane};
+pub mod modal_window;
+pub use modal_window::ModalWindow;
 pub mod fab;
 pub use fab::{Fab, FabColor, FabMenu, FabMenuItem, FabMenuOutput, FabSize};
 pub mod loading;

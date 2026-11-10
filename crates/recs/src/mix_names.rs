@@ -17,6 +17,12 @@
 //! 6. The second genre, then every artist in turn, then a song: something
 //!    of the mix itself, so the name is never empty and never a number.
 //!
+//! A family is also what a genre mix is built by ([`crate::mixes`]): an
+//! artist is of the family that leads their tags with [`LEAD_SHARE`] of
+//! them ([`leading`]), a song of its main artist's, and the mix is called
+//! by the family's name ([`family_title`]). A named mix whose own genre
+//! has such a mix in the row is that mix again and is not shown.
+//!
 //! Pure: the runtime brings the tags, the names and the years.
 
 /// A song's main artist's tags with their votes.
@@ -42,37 +48,45 @@ const DATED_SHARE: f32 = 0.5;
 pub const CALM_BELOW: f32 = 0.25;
 pub const LIVELY_ABOVE: f32 = 0.75;
 
-/// The families of genres with their mixes' names, the more special
-/// first: a tag is of the first family one of whose keys it has. A key is
-/// a run of whole words («hip hop» in «southern hip hop»); one starting
-/// with `*` is found anywhere in a word («*rock» in «krautrock»).
-const FAMILIES: &[(&str, &[&str])] = &[
-    ("J-pop микс", &["j pop", "jpop", "japanese pop", "city pop", "kayokyoku", "anison", "vocaloid", "utaite"]),
-    ("K-pop микс", &["k pop", "kpop", "korean pop"]),
-    ("J-rock микс", &["j rock", "jrock", "japanese rock", "visual kei"]),
-    ("Пост-панк микс", &["post punk", "new wave", "coldwave", "darkwave", "gothic rock"]),
-    ("Латинский микс", &["latin", "latino", "latina", "*reggaeton", "salsa", "bachata", "cumbia", "bossa nova"]),
-    ("Регги-микс", &["*reggae", "dancehall", "ska", "dub"]),
-    ("Хип-хоп микс", &["hip hop", "hiphop", "*rap", "drill", "grime", "boom bap", "phonk"]),
-    ("Метал-микс", &["*metal", "deathcore", "djent", "grindcore"]),
-    ("Панк-микс", &["punk", "emo"]),
-    ("Инди-микс", &["*indie"]),
-    ("Рок-микс", &["*rock", "grunge", "shoegaze"]),
-    ("Поп-микс", &["*pop"]),
-    ("Микс саундтреков", &["soundtrack", "soundtracks", "score", "film score", "video game", "video game music", "vgm", "game music", "anime", "ost"]),
-    ("Лоу-фай микс", &["lo fi", "lofi", "chillhop"]),
-    ("Эмбиент-микс", &["ambient", "drone", "new age"]),
+/// An artist is of a family when it has this share of what their tags say
+/// of genres: below it they are of several and of no one's mix.
+pub const LEAD_SHARE: f32 = 0.5;
+
+/// The families of genres with their numbers and their mixes' names, the
+/// more special first: a tag is of the first family one of whose keys it
+/// has. A key is a run of whole words («hip hop» in «southern hip hop»);
+/// one starting with `*` is found anywhere in a word («*rock» in
+/// «krautrock»). A number is the family's for good (the caches and the
+/// mixes left out keep it): a new family takes a new one wherever it
+/// stands, none is used again.
+const FAMILIES: &[(u8, &str, &[&str])] = &[
+    (1, "J-pop микс", &["j pop", "jpop", "japanese pop", "city pop", "kayokyoku", "anison", "vocaloid", "utaite"]),
+    (2, "K-pop микс", &["k pop", "kpop", "korean pop"]),
+    (3, "J-rock микс", &["j rock", "jrock", "japanese rock", "visual kei"]),
+    (4, "Пост-панк микс", &["post punk", "new wave", "coldwave", "darkwave", "gothic rock"]),
+    (5, "Латинский микс", &["latin", "latino", "latina", "*reggaeton", "salsa", "bachata", "cumbia", "bossa nova"]),
+    (6, "Регги-микс", &["*reggae", "dancehall", "ska", "dub"]),
+    (7, "Хип-хоп микс", &["hip hop", "hiphop", "*rap", "drill", "grime", "boom bap", "phonk"]),
+    (8, "Метал-микс", &["*metal", "deathcore", "djent", "grindcore"]),
+    (9, "Панк-микс", &["punk", "emo"]),
+    (10, "Инди-микс", &["*indie"]),
+    (11, "Рок-микс", &["*rock", "grunge", "shoegaze"]),
+    (12, "Поп-микс", &["*pop"]),
+    (13, "Микс саундтреков", &["soundtrack", "soundtracks", "score", "film score", "video game", "video game music", "vgm", "game music", "anime", "ost"]),
+    (14, "Лоу-фай микс", &["lo fi", "lofi", "chillhop"]),
+    (15, "Эмбиент-микс", &["ambient", "drone", "new age"]),
     (
+        16,
         "Электронный микс",
         &["*electro", "house", "*techno", "trance", "edm", "dance", "drum and bass", "dnb", "dubstep", "garage", "breakbeat", "idm", "*synth", "future bass", "footwork", "hardstyle"],
     ),
-    ("R&B микс", &["r&b", "rnb", "*soul", "*funk", "motown"]),
-    ("Джазовый микс", &["*jazz", "swing", "bebop"]),
-    ("Блюзовый микс", &["*blues"]),
-    ("Классический микс", &["classical", "baroque", "opera", "orchestral", "symphony", "chamber music"]),
-    ("Кантри-микс", &["country", "bluegrass", "americana"]),
-    ("Фолк-микс", &["*folk", "celtic"]),
-    ("Диско-микс", &["*disco"]),
+    (17, "R&B микс", &["r&b", "rnb", "*soul", "*funk", "motown"]),
+    (18, "Джазовый микс", &["*jazz", "swing", "bebop"]),
+    (19, "Блюзовый микс", &["*blues"]),
+    (20, "Классический микс", &["classical", "baroque", "opera", "orchestral", "symphony", "chamber music"]),
+    (21, "Кантри-микс", &["country", "bluegrass", "americana"]),
+    (22, "Фолк-микс", &["*folk", "celtic"]),
+    (23, "Диско-микс", &["*disco"]),
 ];
 
 /// The family of the tag `tag` (its mix's name), if it is of one: «russian
@@ -92,7 +106,29 @@ pub fn family(tag: &str) -> Option<&'static str> {
         Some(part) => words.iter().any(|w| w.contains(part)),
         None => padded.contains(&format!(" {key} ")),
     };
-    FAMILIES.iter().find(|(_, keys)| keys.iter().any(|k| has(k))).map(|(title, _)| *title)
+    FAMILIES.iter().find(|(_, _, keys)| keys.iter().any(|k| has(k))).map(|(_, title, _)| *title)
+}
+
+/// The name of the mix of the family of the number `id`.
+pub fn family_title(id: u8) -> Option<&'static str> {
+    FAMILIES.iter().find(|f| f.0 == id).map(|f| f.1)
+}
+
+/// The number of the family whose mix is called `title`.
+pub fn family_id(title: &str) -> Option<u8> {
+    FAMILIES.iter().find(|f| f.1 == title).map(|f| f.0)
+}
+
+/// The family an artist of `tags` is of (its number): the one that leads
+/// them with [`LEAD_SHARE`]; `None` for an artist nobody tagged with a
+/// genre, or of several genres alike.
+pub fn leading(tags: &Tags) -> Option<u8> {
+    let of = families(tags);
+    let (title, share) = of.first()?;
+    if *share < LEAD_SHARE {
+        return None;
+    }
+    family_id(title)
 }
 
 /// The families of an artist's `tags` with their shares of the artist
@@ -335,9 +371,15 @@ mod tests {
         ] {
             assert_eq!(family(tag), want, "{tag}");
         }
-        for (title, keys) in FAMILIES {
+        let mut ids: Vec<u8> = Vec::new();
+        for (id, title, keys) in FAMILIES {
             assert!(title.contains("икс") && !keys.is_empty(), "{title}");
+            assert!(!ids.contains(id), "{title}: the number {id} is another family's");
+            ids.push(*id);
+            assert_eq!(family_title(*id), Some(*title));
+            assert_eq!(family_id(title), Some(*id));
         }
+        assert_eq!(family_title(0), None);
     }
 
     #[test]
@@ -348,6 +390,12 @@ mod tests {
         assert_eq!(f[1].0, "Поп-микс");
         assert!((f.iter().map(|x| x.1).sum::<f32>() - 1.0).abs() < 1e-4);
         assert!(families(&tags(&[("2010s", 5.0)])).is_empty());
+        // The artist is a rapper; one of two genres alike is of neither,
+        // one nobody tagged with a genre of none.
+        assert_eq!(leading(&tags(&[("hip hop", 9.0), ("pop rap", 3.0), ("pop", 3.0)])).and_then(family_title), Some("Хип-хоп микс"));
+        assert_eq!(leading(&tags(&[("rock", 2.0), ("jazz", 2.0), ("folk", 2.0)])), None);
+        assert_eq!(leading(&tags(&[("2010s", 5.0)])), None);
+        assert_eq!(leading(&[]), None);
     }
 
     /// A mix of mostly rappers is «Хип-хоп микс»; one whose artists nobody

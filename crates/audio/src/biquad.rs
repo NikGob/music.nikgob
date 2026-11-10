@@ -94,9 +94,12 @@ impl Coefs {
 
     /// Gain at `freq`, as a power ratio.
     pub(crate) fn power_at(&self, rate: f64, freq: f64) -> f64 {
-        let w = TAU * freq / rate;
-        let (c1, s1) = (w.cos(), w.sin());
-        let (c2, s2) = ((2.0 * w).cos(), (2.0 * w).sin());
+        self.power_on(&point(rate, freq))
+    }
+
+    /// [`Self::power_at`] from the frequency's precomputed [`point`].
+    pub(crate) fn power_on(&self, at: &[f64; 4]) -> f64 {
+        let [c1, s1, c2, s2] = *at;
         let num_re = self.b0 + self.b1 * c1 + self.b2 * c2;
         let num_im = -(self.b1 * s1 + self.b2 * s2);
         let den_re = 1.0 + self.a1 * c1 + self.a2 * c2;
@@ -109,6 +112,13 @@ impl Coefs {
 pub(crate) fn angle(rate: f64, freq: f64) -> (f64, f64) {
     let w = TAU * freq.min(rate * 0.45) / rate;
     (w.cos(), w.sin())
+}
+
+/// Where `freq` is on the unit circle at `rate`: `cos(w)`, `sin(w)`,
+/// `cos(2w)` and `sin(2w)`, all a response there needs.
+pub(crate) fn point(rate: f64, freq: f64) -> [f64; 4] {
+    let w = TAU * freq / rate;
+    [w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin()]
 }
 
 /// The two delay elements of one section for one channel.
