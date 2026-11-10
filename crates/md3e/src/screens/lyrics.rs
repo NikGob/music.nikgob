@@ -503,13 +503,21 @@ fn paint(
             }
         };
         // Fade out towards the edges: softly, blurring, unless turned off.
-        let (edge, blur) = if state.prefs.lyrics_soft_edges {
+        // On the stage the blur mesh lands outside the scaled clip and the
+        // line vanishes (TODO 48 redoes the effect). Fade only there, and
+        // keep the current line readable.
+        let (mut edge, mut blur) = if state.prefs.lyrics_soft_edges {
             let size = sizes.big * if let DisplayLine::Line(j) = *item { scale(&lines[j]) } else { 1.0 };
             soft_edge(y, slot_h + extra, rect, size, soft)
         } else {
             (((y + slot_h - rect.top()) / 72.0).min((rect.bottom() - y) / 72.0).clamp(0.0, 1.0), 0.0)
         };
-        let blur_radius = sizes.big * BLUR * soft.strength;
+        if !stage.live && state.prefs.lyrics_soft_edges {
+            blur = 0.0;
+            if is_cur {
+                edge = edge.max(0.85);
+            }
+        }
         // A wait that is unfolding or folding has only part of its slot:
         // its highlight and ring take that part and fade with it.
         let slot = Rect::from_min_size(pos2(left, y), vec2(wrap, (slot_h + extra) * room));
@@ -626,11 +634,11 @@ fn paint(
             // still light up one by one.
             if theme.reduced_motion && look.by == By::Letters {
                 if state.prefs.lyrics_glow {
-                    let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, window) } else { (f32::INFINITY, 0.0) };
+                    let (head, feather) = if look.style == Style::Karaoke { timing.glide(sung, feather, 0.0) } else { (f32::INFINITY, 0.0) };
                     glow(painter, &g, line, head, feather, lit, focus * 0.1);
                 }
                 if look.style == Style::Karaoke {
-                    let (head, feather) = timing.glide(sung, feather, window);
+                    let (head, feather) = timing.glide(sung, feather, 0.0);
                     karaoke(painter, &g, line, head, feather, base, color);
                 } else {
                     painter.galley_with_override_text_color(line.min, g.clone(), color);
@@ -824,6 +832,13 @@ fn soft_edge(top: f32, height: f32, rect: Rect, size: f32, soft: Soft) -> (f32, 
 /// `g` at `pos` in `color`, blurred by `blur` (0..1) of `radius` points
 /// of Gaussian sigma ([`super::lyrics_blur`]): one draw, sharp or not.
 fn soft_galley(painter: &egui::Painter, pos: egui::Pos2, g: &Arc<Galley>, color: Color32, blur: f32, radius: f32) {
+    // The blur mesh is built at the window's pixels per point. Under the
+    // stage's scale it misses the clip and the line is gone (TODO 48).
+    let ctx = painter.ctx();
+    if (super::stage::ppp(ctx) - ctx.pixels_per_point()).abs() > 0.01 {
+        painter.galley_with_override_text_color(pos, g.clone(), color);
+        return;
+    }
     super::lyrics_blur::galley(painter, pos, g, color, radius * blur);
 }
 
@@ -1866,7 +1881,10 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let style = look.style;
     let pace = Pace::of(prefs);
     let rise = pace.rise(style);
-    let window = pace.window();
+    // «Буквы»: the smoothness window (up to 0.4 s) averages a whole sung
+    // word into one step, so letters and words look the same. The edge
+    // stays on the letter. Syllables and words keep the window.
+    let window = if look.by == By::Letters && style == Style::Karaoke { 0.0 } else { pace.window() };
     let (head, feather) = timing.glide(pos, pace.feather(size), window);
     let p = pos.as_secs_f32();
     let theme = Theme::get(painter.ctx());
@@ -3859,6 +3877,21 @@ mod tests {
             let wave = look(Style::Wave, By::Syllables);
             assert!(at(1, wave) > at(0, wave));
         });
+    }
+
+    /// «Буквы» must not swallow a short word. At full «Плавность» the old
+    /// window (0.4 s) averaged the whole word into one step.
+    #[test]
+    fn letters_of_a_word_light_one_by_one() {
+        let mut l = line(1.0, Some(3.0), "Свет окна");
+        l.words = vec![word(1.0, 1.35, "Свет "), word(2.0, 3.0, "окна")];
+        let letters = Prefs { lyrics_style: 0, lyrics_unit: LYRICS_BY_LETTERS, lyrics_smooth: 1.0, ..Prefs::default() };
+        let (glyphs, _) = painted_glyphs(&letters, &l, 1.15);
+        assert!(glyphs.len() >= 5, "{:?}", glyphs.len());
+        assert_ne!(glyphs[0], glyphs[3], "«С» and «т» are not the same step, {:?}", (glyphs[0], glyphs[3]));
+        let words = Prefs { lyrics_unit: LYRICS_BY_WORDS, ..letters };
+        let (glyphs, _) = painted_glyphs(&words, &l, 1.15);
+        assert_eq!(glyphs[0], glyphs[3], "by words the whole word is one colour");
     }
 
     /// By syllables under the wave a written word rises with each of its
