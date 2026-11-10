@@ -22,7 +22,9 @@ use std::time::{Duration, Instant};
 use fastframe_audio::Render;
 use rtrb::{Consumer, Producer};
 
+use crate::eq::Eq;
 use crate::shared::{CursorSnapshot, PlayClock, Shared, frames_to_ns, ns_to_frames};
+use crate::types::Speed;
 
 /// Length of the de-click ramps around flushes.
 const DECLICK_MS: u32 = 8;
@@ -49,6 +51,9 @@ pub(crate) struct Start {
     /// Tell the application (`Started` / `TrackChanged`). False for seeks
     /// and device reconfiguration.
     pub announce: bool,
+    /// How fast the item's position moves: its timeline advances this many
+    /// seconds for every second of sound.
+    pub speed: Speed,
 }
 
 /// A position in the sample stream where something changes.
@@ -102,6 +107,8 @@ pub(crate) struct Renderer {
     cur: Option<u64>,
     base_ns: u64,
     cur_frames: u64,
+    /// Speed of the audible item (see [`Start::speed`]).
+    speed: Speed,
     moving: bool,
     applied_gen: u64,
 
@@ -129,6 +136,9 @@ pub(crate) struct Renderer {
     fresh: bool,
     /// When the previous callback of steady playback came.
     last_callback: Option<Instant>,
+    eq: Eq,
+    /// The pause fade is done but the device was not told yet.
+    pause_ready_due: bool,
 }
 
 impl Renderer {
@@ -154,6 +164,7 @@ impl Renderer {
             cur: None,
             base_ns: 0,
             cur_frames: 0,
+            speed: Speed::ONE,
             moving: false,
             applied_gen: 0,
             clock_base_ns: 0,
@@ -174,7 +185,18 @@ impl Renderer {
             dropout: false,
             fresh: false,
             last_callback: None,
+            eq: Eq::new(),
+            pause_ready_due: false,
         }
+    }
+
+    /// Position of the audible item on its own timeline: where this
+    /// stretch began plus the frames played since, at the item's speed.
+    fn item_pos_ns(&self) -> u64 {
+        self.base_ns
+            + self
+                .speed
+                .item_ns(frames_to_ns(self.cur_frames, self.rate))
     }
 
     /// The device was reconfigured and the decoder has not answered yet
@@ -195,7 +217,7 @@ impl Renderer {
     }
 
     fn publish_cursor(&self, offset_frames: usize) {
-        let pos = self.base_ns + frames_to_ns(self.cur_frames, self.rate);
+        let pos = self.item_pos_ns();
         let clock_ns =
             self.clock_base_ns + frames_to_ns(self.rendered + offset_frames as u64, self.rate);
         self.sh.cursor.write(CursorSnapshot {
@@ -205,6 +227,7 @@ impl Renderer {
             pos_ns: pos,
             clock_ns,
             applied_gen: self.applied_gen,
+            speed: self.speed,
         });
     }
 
@@ -225,13 +248,19 @@ impl Renderer {
             self.env_target = 1.0;
             self.env_step = 1.0 / self.resume_frames as f32;
             self.moving = false;
+            self.pause_ready_due = false;
+            if !self.eq.ringing() {
+                // Whatever the filters hold is from before the pause.
+                self.eq.reset();
+            }
         }
     }
 
     fn enter_hold(&mut self) {
         self.holding = true;
         self.moving = false;
-        self.push_event(CbEvent::PauseReady);
+        // Reported once the equalizer has rung out (see `render`).
+        self.pause_ready_due = true;
         self.publish_cursor(0);
     }
 
@@ -320,6 +349,7 @@ impl Renderer {
         self.announce(mark.ended, mark.start);
         self.cur = mark.start.map(|s| s.id);
         self.base_ns = mark.start.map_or(0, |s| s.pos_ns);
+        self.speed = mark.start.map_or(Speed::ONE, |s| s.speed);
         self.fresh = mark.start.is_some();
         self.dropout = false;
         if mark.start.is_some() && !self.pausing && !self.holding {
@@ -356,6 +386,7 @@ impl Renderer {
         self.announce(mark.ended, mark.start);
         self.cur = mark.start.map(|s| s.id);
         self.base_ns = mark.start.map_or(0, |s| s.pos_ns);
+        self.speed = mark.start.map_or(Speed::ONE, |s| s.speed);
         self.cur_frames = 0;
         if mark.start.is_none() {
             self.moving = false;
@@ -389,7 +420,11 @@ impl Renderer {
                 }
             }
         }
-        // The visualizer sees the music as decoded, before the user's volume.
+        // The equalizer comes before the volume and the limiter, so a
+        // boost is caught by the limiter, and before the visualizer, which
+        // shows what is heard.
+        self.eq.process(&self.sh, seg, ch);
+        // The visualizer sees the music before the user's volume.
         self.sh.tap.write_interleaved(seg, ch);
 
         let target = self.sh.volume_gain();
@@ -503,7 +538,7 @@ impl Render for Renderer {
         // Frames already counted belong to the old rate: fold them into the
         // time base before the rate changes.
         if self.rate != 0 {
-            self.base_ns += frames_to_ns(self.cur_frames, self.rate);
+            self.base_ns = self.item_pos_ns();
             self.cur_frames = 0;
         }
         self.rate = sample_rate;
@@ -524,6 +559,7 @@ impl Render for Renderer {
             ns_to_frames(self.sh.device_buffer_ns.load(Ordering::Relaxed), rate);
         self.vol_k = 1.0 - (-1.0 / (rate as f32 * VOLUME_TAU_MS / 1000.0)).exp();
         self.sh.tap.set_sample_rate(sample_rate);
+        self.eq.configure(sample_rate);
         if changed || self.cfg_gen == 0 {
             self.sh.cfg_rate.store(sample_rate, Ordering::Relaxed);
             self.sh
@@ -649,6 +685,16 @@ impl Render for Renderer {
         if w < frames {
             out[w * ch..].fill(0.0);
             self.sh.tap.write_interleaved(&out[w * ch..frames * ch], ch);
+            // What the equalizer's filters still hold rings out into the
+            // silence (a pause, the end, a dropout) instead of stopping
+            // dead, which would click.
+            let rest = &mut out[w * ch..frames * ch];
+            if self.eq.ring_out(&self.sh, rest, ch) {
+                let vol = self.vol;
+                for s in rest.iter_mut() {
+                    *s = soft_limit(*s * vol);
+                }
+            }
             if self.cur.is_some()
                 && !self.awaiting_sync
                 && !self.holding
@@ -666,8 +712,15 @@ impl Render for Renderer {
             out[frames * ch..].fill(0.0);
         }
         self.rendered += frames as u64;
+        // The device may stop asking for audio once the fade is rendered
+        // and nothing rings on.
+        if self.pause_ready_due && !self.eq.ringing() {
+            self.pause_ready_due = false;
+            self.push_event(CbEvent::PauseReady);
+        }
 
-        let pos = self.base_ns + frames_to_ns(self.cur_frames, self.rate);
+        let pos = self.item_pos_ns();
+
         self.sh.consumed_pos_ns.store(pos, Ordering::Relaxed);
         self.sh
             .consumed_id
@@ -711,7 +764,9 @@ mod tests {
                 id,
                 pos_ns: 0,
                 announce: true,
+                speed: Speed::ONE,
             }),
+
         }
     }
 
