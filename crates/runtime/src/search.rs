@@ -20,12 +20,18 @@ pub(crate) fn indexer_from(path: Option<&std::path::Path>) -> Option<Arc<dyn Ind
 }
 
 /// The download sources that need no setup (khinsider, the free FLAC
-/// services) at the addresses settings.toml gives; none without a settings
-/// file (tests, demos).
-pub(crate) fn web_sources_from(path: Option<&std::path::Path>) -> Vec<Arc<dyn nikgob_core::source::Source>> {
-    let Some(path) = path else { return Vec::new() };
+/// services). Qobuz and Tidal take their lists from `sources.toml` beside
+/// `settings.toml` (created with the built-in addresses when missing).
+/// None without a settings file (tests, demos).
+pub(crate) fn web_sources_from(path: Option<&std::path::Path>) -> nikgob_sources::WebSources {
+    let Some(path) = path else { return nikgob_sources::WebSources::empty() };
     let settings = nikgob_core::settings::Settings::load(path).unwrap_or_default();
-    nikgob_sources::web_sources(&settings)
+    let defaults = nikgob_sources::config::Defaults {
+        qobuz: nikgob_sources::qobuz::DEFAULT_INSTANCES,
+        tidal: nikgob_sources::tidal::DEFAULT_INSTANCES,
+    };
+    let lists = nikgob_sources::config::load(&nikgob_sources::config::beside(path), defaults, &settings.sources);
+    nikgob_sources::web_sources(&settings, &lists)
 }
 
 /// `needle` occurs in `hay` not glued to letters on either side ("wav" is not

@@ -2868,6 +2868,9 @@ pub enum Command {
     /// The ListenBrainz token of the graph's popularity → settings.toml
     /// (never into prefs); empty clears it.
     SetListenbrainzToken(String),
+    /// Opens `sources.toml` (Qobuz and Tidal instance lists) beside
+    /// settings.toml. The settings page does not draw the button yet.
+    OpenSourcesConfig,
     /// Video thumbnails (`i.ytimg.com`) of stream tracks drawn on screen:
     /// their real album art is looked up ([`ViewState::real_covers`]).
     RealCovers(Vec<String>),
