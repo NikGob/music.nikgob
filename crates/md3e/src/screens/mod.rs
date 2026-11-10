@@ -11,7 +11,6 @@ mod chrome;
 mod common;
 mod find_song;
 mod lyrics;
-mod lyrics_blur;
 pub mod lyrics_ui;
 mod pages;
 mod pane;
