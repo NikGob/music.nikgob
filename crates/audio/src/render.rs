@@ -63,6 +63,11 @@ pub(crate) struct Mark {
     pub at: u64,
     /// Everything before `at` is stale.
     pub flush: bool,
+    /// On a cut: the samples from `at` up to this index are dropped when
+    /// the callback gets to `at` (an item that began here was started over
+    /// before anyone heard it; what follows the dropped stretch is its new
+    /// beginning). What is before `at` plays as it is.
+    pub skip_to: Option<u64>,
     /// Device configuration generation the stream was produced for.
     pub cfg_gen: u32,
     /// Flush generation, echoed back through the cursor once applied.
@@ -397,6 +402,20 @@ impl Renderer {
         self.publish_cursor(offset_frames);
     }
 
+    /// Drops the ring's samples up to index `to` of the pushed stream (see
+    /// [`Mark::skip_to`]). They were pushed before the mark that asks for
+    /// it, so they are all there.
+    fn skip_to(&mut self, to: u64) {
+        let n = usize::try_from(to.saturating_sub(self.popped)).unwrap_or(usize::MAX);
+        let n = n.min(self.ring.slots());
+        if n > 0
+            && let Ok(chunk) = self.ring.read_chunk(n)
+        {
+            chunk.commit_all();
+        }
+        self.popped += n as u64;
+    }
+
     /// The fade-out before a flush ran its course: perform the flush.
     fn finish_pending(&mut self) {
         if let Some(p) = self.pending.take() {
@@ -635,7 +654,22 @@ impl Render for Renderer {
                 let until = mark.at.saturating_sub(self.popped);
                 if until == 0 {
                     let _ = self.marks.pop();
-                    self.apply_boundary(mark, w);
+                    match mark.skip_to {
+                        // The callback was already past the join when the
+                        // decoder decided: what plays is the old beginning,
+                        // which goes the way a seek does, behind a fade.
+                        Some(to) if mark.at < self.popped => self.apply_flush(Mark {
+                            at: to,
+                            flush: true,
+                            skip_to: None,
+                            ..mark
+                        }),
+                        Some(to) => {
+                            self.apply_boundary(mark, w);
+                            self.skip_to(to);
+                        }
+                        None => self.apply_boundary(mark, w),
+                    }
                     continue;
                 }
                 limit = until;
@@ -757,7 +791,9 @@ mod tests {
         Mark {
             at,
             flush: true,
+            skip_to: None,
             cfg_gen: sh.cfg_gen.load(Ordering::Acquire),
+
             gen_id,
             ended: None,
             start: Some(Start {

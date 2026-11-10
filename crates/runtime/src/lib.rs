@@ -1566,7 +1566,10 @@ impl Worker {
 
     /// The speed of `changed` (or of everything: the settings) changed: the
     /// playing track goes on as its version now is, from where it is, and
-    /// the preloaded next track is prepared anew if it is concerned.
+    /// the preloaded next track, if it is concerned, takes its version in
+    /// the engine. It is not handed over anew: near the end of the playing
+    /// track the engine is already producing it, and a second copy would
+    /// play after the first.
     fn apply_speed(&mut self, changed: Option<TrackId>) {
         if let Some(e) = self.playing {
             let fx = self.fx_of(e.track);
@@ -1583,9 +1586,13 @@ impl Worker {
                 self.publish_player();
             }
         }
-        let next = self.queue.peek_auto_next();
-        if next.is_some_and(|n| changed.is_none_or(|t| n.track == t)) {
-            self.preload_next();
+        let playing = self.playing.map(|e| e.id);
+        if let Some(n) = self.queue.peek_auto_next()
+            && Some(n.id) != playing
+            && changed.is_none_or(|t| n.track == t)
+        {
+            let fx = self.fx_of(n.track);
+            self.playback.set_speed(n.id, fx.0, fx.1);
         }
     }
 

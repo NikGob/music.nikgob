@@ -608,6 +608,20 @@ struct Crossfade {
     done: u64,
 }
 
+/// How the item being produced began in the pushed stream. The decoder
+/// runs about a second ahead of the listener, so "the current item" here
+/// may not be heard yet, with the end of the one before it still in the
+/// ring: what may be done to it depends on how it got there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Began {
+    /// After a flush (a play, a seek): nothing older is worth keeping.
+    Flush,
+    /// At a gapless join, at this index of the pushed stream.
+    Boundary(u64),
+    /// Inside a crossfade: its start is mixed with the item before it.
+    Mixed,
+}
+
 /// The tone and reverb of an item that ended at a gapless join, still
 /// sounding under what follows. It is fed silence; being linear, what it
 /// gives added to the next item's own chain is exactly the uncut sound.
@@ -657,6 +671,10 @@ pub(crate) struct Decoder {
     next: Option<Active>,
     xfade: Option<Crossfade>,
     tail: Option<Tail>,
+    cur_began: Began,
+    /// A change of speed, tone and reverb for the item being produced that
+    /// has to wait until the listener reaches it (see [`Self::set_fx`]).
+    deferred_fx: Option<(u64, ItemFx)>,
 
     buf: Vec<f32>,
     buf_b: Vec<f32>,
@@ -706,6 +724,8 @@ impl Decoder {
             next: None,
             xfade: None,
             tail: None,
+            cur_began: Began::Flush,
+            deferred_fx: None,
             buf: Vec::with_capacity(CHUNK_FRAMES * 2),
             buf_b: Vec::with_capacity(CHUNK_FRAMES * 2),
             short_wait: false,
@@ -738,6 +758,7 @@ impl Decoder {
                 }
             }
             self.check_config();
+            self.try_deferred_fx();
             let buffered = buffered_before.take().unwrap_or_else(|| self.buffered_ms());
             let began = Instant::now();
             let step = self.pump();
@@ -1083,6 +1104,32 @@ impl Decoder {
             let _ = self.events.send(DecEvent::SeekDropped { gen_id });
             return;
         }
+        // The item is being produced but the listener is not there yet: the
+        // end of the item before it is still in the ring and must play.
+        // Flushing would cut that off (up to a second of music).
+        let heard = self.sh.consumed_id.load(Ordering::Relaxed) == id;
+        if is_current && !heard {
+            match self.cur_began {
+                // It began at a clean join: start it over with the new
+                // sound and have the callback skip what was pushed of the
+                // old one, right at the join.
+                Began::Boundary(at) if self.xfade.is_none() => {
+                    self.restart_unheard(fx, at);
+                    let _ = self.events.send(DecEvent::SeekDropped { gen_id });
+                    return;
+                }
+                // Its start is mixed into a crossfade: nothing can be taken
+                // back. The change waits until the listener is in it.
+                Began::Boundary(_) | Began::Mixed => {
+                    self.deferred_fx = Some((id, fx));
+                    let _ = self.events.send(DecEvent::SeekDropped { gen_id });
+                    return;
+                }
+                // A play or a seek the callback has not applied yet: what
+                // is in the ring goes anyway.
+                Began::Flush => {}
+            }
+        }
         // During a crossfade the audible item is the incoming one.
         if let Some(x) = self.xfade.take() {
             self.cur = Some(x.to);
@@ -1093,6 +1140,69 @@ impl Decoder {
         // Otherwise the playing item's resampler had already run on into
         // the changed next item: it starts over to let go of that.
         self.restart_current(gen_id);
+    }
+
+    /// The item being produced began at a gapless join (at `at` of the
+    /// pushed stream) and nobody has heard it yet: it starts over from its
+    /// first frame with `fx`. What was pushed of it so far stays in the
+    /// ring behind the join; a mark tells the callback to skip it when it
+    /// gets there, so the item before it plays to its end and the join is
+    /// as gapless as it was.
+    fn restart_unheard(&mut self, fx: ItemFx, at: u64) {
+        let Some(cur) = self.cur.as_mut() else {
+            return;
+        };
+        let id = cur.id();
+        let was_chained = cur.stream.as_ref().is_some_and(|s| s.chained);
+        cur.item.set_fx(fx);
+        let result = cur.reposition(0);
+        let start = cur.start_at(0, false);
+        if was_chained && let Some(next) = self.next.as_mut() {
+            let _ = next.reposition(0);
+        }
+        match result {
+            Ok(()) => {
+                self.push_mark(Mark {
+                    at,
+                    flush: false,
+                    skip_to: Some(self.pushed),
+                    cfg_gen: self.cfg.gen_id,
+                    gen_id: self.last_gen,
+                    ended: None,
+                    start: Some(start),
+                });
+                self.cur_began = Began::Boundary(self.pushed);
+            }
+            Err(e) => {
+                // It cannot start over: it ends here, as on a decode error.
+                self.report(Some(id), &e);
+                self.finish_current();
+            }
+        }
+    }
+
+    /// Applies a change that waited for the listener to reach its item.
+    fn try_deferred_fx(&mut self) {
+        let Some((id, fx)) = self.deferred_fx else {
+            return;
+        };
+        let producing = self
+            .xfade
+            .as_ref()
+            .map(|x| x.to.id())
+            .or_else(|| self.cur.as_ref().map(Active::id));
+        if producing != Some(id) {
+            // The item is gone (it ended, or something else was played).
+            self.deferred_fx = None;
+            return;
+        }
+        let heard = self.sh.consumed_id.load(Ordering::Relaxed) == id;
+        if heard || self.cur_began == Began::Flush {
+            self.deferred_fx = None;
+            // Not a request of its own any more: it keeps the generation.
+            let gen_id = self.last_gen;
+            self.set_fx(id, fx, gen_id);
+        }
     }
 
     /// Rebuilds the playing item's stream where the listener is and flushes
@@ -1394,11 +1504,13 @@ impl Decoder {
         self.push_mark(Mark {
             at: self.pushed,
             flush: false,
+            skip_to: None,
             cfg_gen: cfg.gen_id,
             gen_id: self.last_gen,
             ended: from,
             start: Some(start),
         });
+        self.cur_began = Began::Mixed;
         self.xfade = Some(Crossfade { to, len, done: 0 });
     }
 
@@ -1519,11 +1631,13 @@ impl Decoder {
                     self.push_mark(Mark {
                         at: self.pushed,
                         flush: false,
+                        skip_to: None,
                         cfg_gen: cfg.gen_id,
                         gen_id: self.last_gen,
                         ended: Some(ended_id),
                         start: Some(start),
                     });
+                    self.cur_began = Began::Boundary(self.pushed);
                     self.cur = Some(next);
                     return;
                 }
@@ -1533,6 +1647,7 @@ impl Decoder {
         self.push_mark(Mark {
             at: self.pushed,
             flush: false,
+            skip_to: None,
             cfg_gen: cfg.gen_id,
             gen_id: self.last_gen,
             ended: Some(ended_id),
@@ -1545,9 +1660,12 @@ impl Decoder {
     fn push_flush(&mut self, gen_id: u64, start: Option<Start>) {
         // What rang on from an earlier item is stale too.
         self.tail = None;
+        self.cur_began = Began::Flush;
+
         self.push_mark(Mark {
             at: self.pushed,
             flush: true,
+            skip_to: None,
             cfg_gen: self.cfg.gen_id,
             gen_id,
             ended: None,

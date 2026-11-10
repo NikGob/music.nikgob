@@ -295,30 +295,31 @@ fn items_at_different_speeds_follow_each_other_without_silence() {
 #[test]
 fn a_crossfade_starts_where_the_faster_item_really_ends() {
     let dir = tmp();
-    let a = sine_wav(&dir, "a.wav", RATE, 440.0, 0.3, RATE as usize * 3);
+    // Long enough that the fade starts well past the second the decoder
+    // runs ahead: the next item, which opens on its own thread, is there by
+    // then (a fade due inside that first second starts when it is, a few
+    // milliseconds late and that much shorter, with or without a speed).
+    let a = sine_wav(&dir, "a.wav", RATE, 440.0, 0.3, RATE as usize * 6);
     let b = sine_wav(&dir, "b.wav", RATE, 880.0, 0.3, RATE as usize * 3);
     let mut rig = rig(RATE);
     rig.player.set_crossfade(Some(Duration::from_secs(1)));
     rig.player.play(PlayItem::file(1, &a).with_fx(speed(1.5)));
     rig.player.set_next(PlayItem::file(2, &b));
     let out = rig.device.drain(RATE as usize * 30);
-    // Three seconds at 1.5 are two of sound; the last of them overlaps the
+    // Six seconds at 1.5 are four of sound; the last of them overlaps the
     // first second of the next item, which plays its own three seconds.
-    let frames = out.len() / 2;
-    assert!(
-        (frames as i64 - i64::from(RATE) * 4).abs() <= 4,
-        "{frames} frames"
-    );
+    assert_eq!(out.len() / 2, RATE as usize * 6);
     let l = left(&out);
+    let sec = RATE as usize;
     // Before the fade only the first item (660 Hz: 440 at 1.5) ...
-    let f = measure_freq(&l[4800..RATE as usize - 2400], RATE);
+    let f = measure_freq(&l[4800..sec * 3 - 2400], RATE);
     assert!((f - 660.0).abs() < 1.0, "{f}");
     // ... in the middle of it both, each at 0.3 * cos(45 deg) ...
-    let mid = RATE as usize + RATE as usize / 2;
+    let mid = sec * 3 + sec / 2;
     let level = rms(&l[mid - 2400..mid + 2400]);
     assert!((level - 0.212).abs() < 0.02, "{level}");
     // ... and after it only the second.
-    let f = measure_freq(&l[RATE as usize * 2 + 2400..RATE as usize * 3], RATE);
+    let f = measure_freq(&l[sec * 4 + 2400..sec * 5], RATE);
     assert!((f - 880.0).abs() < 1.0, "{f}");
 }
 
@@ -389,12 +390,60 @@ fn the_next_item_takes_a_new_speed_before_it_starts() {
     rig.device.render(RATE as usize / 4);
     rig.player.set_fx(2, speed(1.25));
     let rest = rig.device.drain(RATE as usize * 10);
+    // The first item plays to its own end (the decoder was already past
+    // it: nothing buffered of it may be dropped), then the second at its
+    // new speed from its first frame.
     let total = RATE as usize / 4 + rest.len() / 2;
     assert_eq!(total, RATE as usize + RATE as usize * 2 * 4 / 5);
     let l = left(&rest);
-    let f = measure_freq(&l[l.len() - RATE as usize..l.len() - 2400], RATE);
+    let rest_of_first = RATE as usize * 3 / 4;
+    let f = measure_freq(&l[2400..rest_of_first - 2400], RATE);
+    assert!((f - 500.0).abs() < 1.0, "the end of the first item: {f}");
+    let f = measure_freq(&l[rest_of_first + 2400..l.len() - 2400], RATE);
+    assert!((f - 625.0).abs() < 1.0, "{f}");
+    for w in l[rest_of_first - 1200..rest_of_first + 1200].chunks(120) {
+        assert!(rms(w) > 0.1, "a gap at the join");
+    }
+    let events = wait_event(&rig.events, Duration::from_secs(2), |e| *e == Event::QueueEmpty);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::TrackChanged { from: 1, to: 2, .. })),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn a_new_speed_for_an_item_fading_in_waits_until_it_is_heard() {
+    // With a crossfade the next item's start is mixed into the end of the
+    // playing one a second before the listener gets there: the change must
+    // not cut the playing item short, and still has to come.
+    let dir = tmp();
+    let a = sine_wav(&dir, "a.wav", RATE, 500.0, 0.4, RATE as usize * 3);
+    let b = sine_wav(&dir, "b.wav", RATE, 500.0, 0.4, RATE as usize * 3);
+    let mut rig = rig(RATE);
+    rig.player.set_crossfade(Some(Duration::from_secs(1)));
+    rig.player.play(PlayItem::file(1, &a));
+    rig.player.set_next(PlayItem::file(2, &b));
+    // The listener is at 1.5 s, the decoder about a second on: in the fade.
+    let first = rig.device.render(RATE as usize * 3 / 2);
+    assert_eq!(rig.player.current_id(), Some(1));
+    rig.player.set_fx(2, speed(1.25));
+    let rest = rig.device.drain(RATE as usize * 10);
+    let total = (first.len() + rest.len()) / 2;
+    // Untouched it would be 5 s; changed the moment the second item is
+    // heard (at 2 s), 2 s + 3 s / 1.25.
+    let sec = RATE as usize;
+    assert!(total > sec * 43 / 10 && total < sec * 49 / 10, "{total} frames");
+    let l = left(&rest);
+    // The playing item went on undisturbed up to the fade ...
+    let f = measure_freq(&l[2400..sec / 2 - 2400], RATE);
+    assert!((f - 500.0).abs() < 1.0, "{f}");
+    // ... and the second ends at its new speed.
+    let f = measure_freq(&l[l.len() - sec / 2..l.len() - 2400], RATE);
     assert!((f - 625.0).abs() < 1.0, "{f}");
 }
+
 
 // ----- timbre ---------------------------------------------------------------
 
