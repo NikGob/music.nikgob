@@ -240,7 +240,10 @@ async fn an_instance_that_says_no_is_not_a_crash() {
         .await;
     let q = Qobuz::with_pace(&[server.uri()], Duration::ZERO);
     let want = Want { artists: vec!["Eve".into()], title: Some("Underdog".into()), ..Want::default() };
-    assert_eq!(q.search(&want).await.unwrap_err(), SourceError::Http { status: 400 });
+    // The instance's dead token sits that instance out for hours: an error,
+    // never a crash.
+    let e = q.search(&want).await.unwrap_err();
+    assert!(matches!(e, SourceError::RateLimited { .. } | SourceError::Http { status: 400 }), "{e:?}");
 }
 
 fn bts(url: &str) -> String {

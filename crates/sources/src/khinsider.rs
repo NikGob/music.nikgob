@@ -557,8 +557,9 @@ mod tests {
             .unwrap();
         assert!(got.contains("KHInsider"));
         assert_eq!(calls(&fake), 1);
+        // A 200 that is still the check goes to the browser too.
         let still = finish_page(Ok("<title>Just a moment...</title>".into()), Some(&fake), "https://downloads.khinsider.com/").await;
-        assert!(is_check(&still.unwrap_err()), "a 200 that is still the check is a check");
+        assert!(still.unwrap().contains("KHInsider"), "the browser cleared it");
         assert_eq!(calls(&fake), 2, "that page asked the browser once too");
     }
 
