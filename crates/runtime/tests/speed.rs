@@ -284,3 +284,28 @@ fn the_equalizer_reaches_the_engine_at_the_start_and_when_it_changes() {
     wait_for("the runtime to be through", || r.version_of(r.tracks[0]) == SpeedVariant::Fast);
     assert_eq!(eqs(&r).len(), 2);
 }
+
+#[test]
+fn a_speed_of_the_listeners_own_is_saved_by_its_number_and_heard() {
+    let r = rig(Prefs::default(), &[]);
+    let id = r.play();
+    r.rt.send(Command::SetTrackSpeed { track: r.tracks[0], variant: SpeedVariant::Custom(115) });
+    wait_for("the view", || r.speed() == 1.15);
+    assert_eq!(r.speeds(), vec![(id, SpeedVariant::Custom(115), false)]);
+    assert_eq!(r.rate(), 1.15);
+    assert_eq!(r.lib.track_fx().unwrap(), vec![(r.tracks[0], "x115".to_owned())]);
+    // The speed of a ready version is that version, under its own name.
+    r.rt.send(Command::SetTrackSpeed { track: r.tracks[0], variant: SpeedVariant::Custom(120) });
+    wait_for("the view", || r.speed() == 1.2);
+    assert_eq!(r.version_of(r.tracks[0]), SpeedVariant::Fast);
+    assert_eq!(r.lib.track_fx().unwrap(), vec![(r.tracks[0], "fast".to_owned())]);
+}
+
+#[test]
+fn a_speed_of_the_listeners_own_is_read_back_at_the_start() {
+    let r = rig(Prefs::default(), &[(0, "x70")]);
+    assert_eq!(r.version_of(r.tracks[0]), SpeedVariant::Custom(70));
+    let id = r.play();
+    assert_eq!(r.plays(), vec![(id, SpeedVariant::Custom(70), false)]);
+    wait_for("the view", || r.speed() == 0.7);
+}
