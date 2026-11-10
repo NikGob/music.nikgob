@@ -153,10 +153,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
                             lift_next = Some(*key);
                         }
                         ui.add_space(8.0);
-                        let switch = ui.add(Switch::new(&mut on).enabled(!needs_setup).id_salt(("src-on", key.as_str())));
-                        // A preset under the pointer moves only the switch:
-                        // its pill is behind the switch, not the arrows.
-                        settings_help::report_future(ui.ctx(), switch.rect);
+                        let _ = ui.add(Switch::new(&mut on).enabled(!needs_setup).id_salt(("src-on", key.as_str())));
                     });
                 })
             })

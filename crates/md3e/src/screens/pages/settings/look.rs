@@ -235,8 +235,8 @@ fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
 }
 
 /// «Разделы главной»: the seven sections in their order, each with «Выше»
-/// / «Ниже» and its switch. The lines are the row's options (the stage
-/// outlines the section under the pointer).
+/// / «Ниже» and its switch. While the row is shown the stage fits the
+/// whole of Главная, so a toggle is visible.
 fn home_sections(ui: &mut Ui, p: &mut Prefs) {
     let _ = item(ui, Id::HomeSections, |ui| {
         let s = Theme::get(ui.ctx()).scheme;

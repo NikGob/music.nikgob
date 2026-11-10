@@ -353,7 +353,7 @@ fn spec(id: SettingId) -> Spec {
         S::LyricsModelsAuto => Spec::Switch(|p| &mut p.lyrics_models_auto),
         S::LyricsGenius => Spec::Switch(|p| &mut p.lyrics_genius),
         S::LyricsStreams => Spec::Switch(|p| &mut p.lyrics_streams),
-        S::LyricsModels => Spec::Fixed(List, "the models with «Скачать» / delete; the sweep never presses them"),
+        S::LyricsModels => Spec::Fixed(List, "a «Модели» row that opens the list; the sweep never opens it and never presses «Скачать» / delete"),
         S::KeepShuffle => Spec::Switch(|p| &mut p.keep_shuffle),
         S::ShuffleRadio => Spec::Switch(|p| &mut p.shuffle_radio),
         S::OutputDevice => Spec::OutputDevice,

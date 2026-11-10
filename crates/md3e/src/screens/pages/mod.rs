@@ -1225,6 +1225,19 @@ pub(super) fn connected(
     selected: usize,
     disabled: &[usize],
 ) -> (Option<usize>, Vec<Rect>) {
+    connected_shown(ui, id, labels, selected, disabled, selected)
+}
+
+/// [`connected`] painting `shown` as the selected member (a hover preview)
+/// while a click still commits against `selected`.
+pub(super) fn connected_shown(
+    ui: &mut Ui,
+    id: egui::Id,
+    labels: &[&str],
+    selected: usize,
+    disabled: &[usize],
+    shown: usize,
+) -> (Option<usize>, Vec<Rect>) {
     let n = labels.len();
     let inner = Size::S.connected_inner();
     let mut picked = None;
@@ -1234,7 +1247,7 @@ pub(super) fn connected(
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for (i, label) in labels.iter().enumerate() {
-            let sel = i == selected;
+            let sel = i == shown;
             let off = disabled.contains(&i);
             let l = if i == 0 || sel { shape::FULL } else { inner };
             let r = if i + 1 == n || sel { shape::FULL } else { inner };
@@ -1253,7 +1266,7 @@ pub(super) fn connected(
                 .id_salt((id, i));
             let resp = ui.add(b);
             rects.push(resp.rect);
-            if resp.clicked() && !sel && !off {
+            if resp.clicked() && i != selected && !off {
                 picked = Some(i);
             }
         }

@@ -291,11 +291,19 @@ pub struct StageRequest {
     pub zoom: bool,
     pub script: Script,
     pub opacity: f32,
+    /// Pulse on the scripted beat while the row depends on it. Otherwise
+    /// the stage stays calm, so a shape can be judged.
+    pub beat: bool,
+    /// «Разделы главной»: fit the whole of Главная into the stage.
+    pub fit_home: bool,
 }
 
 impl StageRequest {
     pub fn new(rect: Rect, scene: Scene, prefs: Prefs) -> Self {
-        Self { rect, scene, prefs, parts: Vec::new(), outline: 0.0, zoom: true, script: Script::None, opacity: 1.0 }
+        Self {
+            rect, scene, prefs, parts: Vec::new(), outline: 0.0, zoom: true, script: Script::None, opacity: 1.0, beat: false,
+            fit_home: false,
+        }
     }
 }
 
@@ -357,6 +365,19 @@ pub fn to_global(rect: Rect, canvas: Vec2, focus: Option<Rect>, k: f32) -> TSTra
         (centre.y - window.y * 0.5).clamp(0.0, room.y),
     );
     TSTransform::new(rect.min.to_vec2() - min.to_vec2() * scale, scale)
+}
+
+/// Canvas → screen for a page taller than the stage: the whole of `content`
+/// fits in `rect`, top-aligned, one scale.
+pub fn fit_page(rect: Rect, content: Vec2) -> TSTransform {
+    let scale = (rect.width() / content.x.max(1.0)).min(rect.height() / content.y.max(1.0)).max(1e-3);
+    let fitted = content * scale;
+    TSTransform::new(vec2(rect.left() + (rect.width() - fitted.x) * 0.5, rect.top()), scale)
+}
+
+fn lerp_transform(a: TSTransform, b: TSTransform, k: f32) -> TSTransform {
+    let k = k.clamp(0.0, 1.0);
+    TSTransform::new(a.translation + (b.translation - a.translation) * k, a.scaling + (b.scaling - a.scaling) * k)
 }
 
 // ---- Scenes acted out ---------------------------------------------------
@@ -586,7 +607,8 @@ pub fn countdown_at(t: f32, brk: (f32, f32)) -> f32 {
     from + t.rem_euclid(to - from)
 }
 
-/// Made-up levels on a 120 BPM beat, for when nothing plays.
+/// Made-up levels on a 120 BPM beat, for when nothing plays and the row
+/// depends on the beat.
 pub fn fake_levels(t: f32) -> (f32, Vec<f32>) {
     let kick = pages::settings_help::beat(t);
     let bands = (0..32)
@@ -596,6 +618,11 @@ pub fn fake_levels(t: f32) -> (f32, Vec<f32>) {
         })
         .collect();
     (0.15 + 0.6 * kick, bands)
+}
+
+/// Still levels: no kick, a flat low spectrum, so a shape can be judged.
+pub fn calm_levels() -> (f32, Vec<f32>) {
+    (0.0, vec![0.12; 32])
 }
 
 /// The day `days` after 1970-01-01 (UTC).
@@ -987,8 +1014,26 @@ impl StageUi {
             self.focus = None;
         }
         let (size, _) = canvas(req.rect.size());
-        let virt = Rect::from_min_size(Pos2::ZERO, size);
-        let global = to_global(req.rect, size, self.focus.map(|(_, r)| r), k);
+        let home_bottom = self
+            .rects
+            .iter()
+            .filter(|(p, _)| matches!(p, Part::Home(_)))
+            .map(|(_, r)| r.bottom())
+            .fold(0.0, f32::max);
+        let fitting = req.fit_home && scene == Scene::Home && home_bottom > size.y + 8.0;
+        if req.fit_home && scene == Scene::Home && !fitting {
+            ctx.request_repaint();
+        }
+        let content = vec2(size.x, if fitting { home_bottom + 24.0 } else { size.y });
+        let fit_k = anim::fraction(
+            ctx,
+            Id::new(SALT).with("fit-home"),
+            if fitting { 1.0 } else { 0.0 },
+            app.motion.fast_spatial.without_bounce(),
+        );
+        let normal = to_global(req.rect, size, self.focus.map(|(_, r)| r), k);
+        let global = lerp_transform(normal, fit_page(req.rect, content), fit_k);
+        let virt = Rect::from_min_size(Pos2::ZERO, if fit_k > 0.001 { content } else { size });
         let visible = req.rect.intersect(clip);
         let local_clip = global.inverse() * visible;
 
@@ -1076,12 +1121,21 @@ impl StageUi {
         self.script_last = t;
 
         let real_playing = state.player.status == Status::Playing;
-        let levels = if real_playing && req.script != Script::PausePlay {
+        // A scripted beat only while the row depends on it. Anything else
+        // stays calm, so a shape can be judged; real music is used when
+        // that row wants a beat and something is actually playing.
+        let levels = if !req.beat {
+            calm_levels()
+        } else if real_playing && req.script != Script::PausePlay {
             (levels.0, levels.1.to_vec())
         } else {
             fake_levels(clock)
         };
-        let moving = real_playing || ctx.input(|i| i.pointer.time_since_last_movement()) < STILL_AFTER;
+        let beating = req.beat && !(real_playing && req.script != Script::PausePlay);
+        if beating {
+            ctx.request_repaint();
+        }
+        let moving = real_playing || beating || ctx.input(|i| i.pointer.time_since_last_movement()) < STILL_AFTER;
         let mut stage = Stage::copy(global.scaling, moving, levels);
         stage.hand = hand;
         stage.pressed = pressed;
@@ -1251,6 +1305,17 @@ mod tests {
         assert!((c.y - CANVAS_MIN_H).abs() < 0.01 && c.x > 1500.0, "{c:?}");
     }
 
+    #[test]
+    fn a_tall_home_fits_inside_the_stage() {
+        let rect = Rect::from_min_size(pos2(400.0, 120.0), vec2(520.0, 360.0));
+        let content = vec2(960.0, 1800.0);
+        let t = fit_page(rect, content);
+        let fitted = Rect::from_min_size(rect.left_top() + vec2((rect.width() - content.x * t.scaling) * 0.5, 0.0), content * t.scaling);
+        assert!(t.scaling < rect.width() / content.x);
+        assert!(fitted.bottom() <= rect.bottom() + 0.5, "{}", fitted.bottom());
+        assert!(fitted.left() >= rect.left() - 0.5 && fitted.right() <= rect.right() + 0.5);
+        assert!((fitted.top() - rect.top()).abs() < 0.5, "top aligned");
+    }
     #[test]
     fn canvas_and_stage_map_onto_each_other_and_back() {
         let rect = Rect::from_min_size(pos2(500.0, 140.0), vec2(700.0, 440.0));
