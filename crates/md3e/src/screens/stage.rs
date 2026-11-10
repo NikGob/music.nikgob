@@ -893,6 +893,9 @@ pub struct StageUi {
     held: Option<Held>,
     /// The part zoomed in on (kept while zooming back out).
     focus: Option<(Part, Rect)>,
+    /// How far down Главная on the stage is scrolled by the wheel (canvas
+    /// points).
+    home_scroll: f32,
     /// Where the parts were last frame.
     rects: Vec<(Part, Rect)>,
     script: Script,
@@ -927,6 +930,7 @@ impl Default for StageUi {
             fade: None,
             held: None,
             focus: None,
+            home_scroll: 0.0,
             rects: Vec::new(),
             script: Script::None,
             script_since: 0.0,
@@ -1031,9 +1035,31 @@ impl StageUi {
             if fitting { 1.0 } else { 0.0 },
             app.motion.fast_spatial.without_bounce(),
         );
-        let normal = to_global(req.rect, size, self.focus.map(|(_, r)| r), k);
+        // Главная on the stage scrolls with the wheel over it (not while the
+        // whole page is fitted in): the rest of the page can be looked at.
+        let (_, scale) = canvas(req.rect.size());
+        let room = (home_bottom + 24.0 - size.y).max(0.0);
+        if scene == Scene::Home && !fitting {
+            if let Some(p) = ctx.pointer_hover_pos()
+                && req.rect.contains(p)
+            {
+                let dy = ctx.input(|i| i.smooth_scroll_delta.y);
+                if dy != 0.0 {
+                    self.home_scroll -= dy / scale.max(0.01);
+                    ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
+                }
+            }
+            self.home_scroll = self.home_scroll.clamp(0.0, room);
+        } else if scene != Scene::Home {
+            self.home_scroll = 0.0;
+        }
+        let scrolled = if scene == Scene::Home && !fitting { self.home_scroll } else { 0.0 };
+        let normal = to_global(req.rect, size, self.focus.map(|(_, r)| r), k) * TSTransform::from_translation(vec2(0.0, -scrolled));
         let global = lerp_transform(normal, fit_page(req.rect, content), fit_k);
-        let virt = Rect::from_min_size(Pos2::ZERO, if fit_k > 0.001 { content } else { size });
+        let virt = Rect::from_min_size(
+            Pos2::ZERO,
+            if fit_k > 0.001 { content } else { vec2(size.x, size.y + scrolled) },
+        );
         let visible = req.rect.intersect(clip);
         let local_clip = global.inverse() * visible;
 
