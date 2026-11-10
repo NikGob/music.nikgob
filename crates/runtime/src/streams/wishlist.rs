@@ -53,6 +53,7 @@ use nikgob_view::{self as v, Command};
 use super::Msg;
 use crate::Worker;
 
+mod backoff;
 mod upgrade;
 
 pub(crate) use upgrade::upgrade_job_words;
@@ -102,6 +103,8 @@ pub(crate) enum WishMsg {
         /// The sources that answered, and the ones that could not (why).
         answered: Vec<SourceKey>,
         down: Vec<(SourceKey, SourceError)>,
+        /// Those of them sitting out, not asked (told as what set them aside).
+        paused: Vec<SourceKey>,
     },
     Fetched {
         item: WishlistId,
@@ -140,9 +143,16 @@ pub(crate) struct WishState {
     /// How far those downloads are, as their tasks write it.
     live: Arc<parking_lot::Mutex<HashMap<WishlistId, u8>>>,
     /// Sources that could not answer their last search, and why.
-    pub(crate) down: HashMap<SourceKey, String>,
+    pub(crate) down: HashMap<SourceKey, SourceError>,
     /// Sources whose last download failed though they found it, and why.
-    pub(crate) fetch_down: HashMap<SourceKey, String>,
+    pub(crate) fetch_down: HashMap<SourceKey, SourceError>,
+    /// Web sources sitting out after their searches turned us away (kept
+    /// across restarts, [`backoff`]).
+    pauses: backoff::Pauses,
+    /// Each item's searches of its last day (kept across restarts).
+    tries: backoff::DayTries,
+    /// When a time told in «Источники» passes: they are told again.
+    status_until: Option<Instant>,
     /// Who an item's file comes from, while it downloads.
     from: HashMap<WishlistId, String>,
     /// Sources the user just turned on or set up: once one can search,
@@ -314,23 +324,75 @@ pub(crate) enum Wished {
     Nothing,
 }
 
-/// A source that could not answer, in words for «Источники».
-fn down_text(e: &SourceError) -> String {
-    match e {
-        SourceError::Blocked(_) => "Не пускает — попробую позже".into(),
-        SourceError::RateLimited { .. } => "Просит подождать — попробую позже".into(),
-        SourceError::Http { status } => format!("Отвечает ошибкой {status}"),
+/// A source that finds but gives no file.
+const FINDS_ONLY: &str = "Находит, но не скачивает";
+
+/// Now, in unix seconds.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// A wait of `left` (from `now`, unix seconds) is a Worker's day of
+/// requests: it ends at midnight UTC.
+fn day_limit(left: Duration, now: u64) -> bool {
+    nikgob_sources::http::ends_at_utc_midnight(now, left)
+}
+
+/// «02:00» when a wait of `left` is long enough to be told with its time.
+fn told_hm(left: Option<Duration>) -> Option<String> {
+    left.filter(|d| *d >= WAIT_TOLD).and_then(super::accounts::hm_after)
+}
+
+/// A source that could not answer, in words for «Источники»; `left`: how
+/// long it still sits out, when it does (its time is told).
+fn down_text(e: &SourceError, left: Option<Duration>) -> String {
+    down_text_at(e, left, unix_now())
+}
+
+fn down_text_at(e: &SourceError, left: Option<Duration>, now: u64) -> String {
+    let hm = told_hm(left);
+    match (e, hm) {
+        // Cloudflare's «Just a moment…»: only a browser passes it, waiting
+        // does not help, and the site never asked us to wait.
+        (e, _) if nikgob_sources::http::is_check(e) => "Сайт закрыт проверкой — не могу зайти".into(),
+        (SourceError::Blocked(_), Some(hm)) => format!("Не пускает — попробую в {hm}"),
+        (SourceError::Blocked(_), None) => "Не пускает — попробую позже".into(),
+        (SourceError::RateLimited { .. }, Some(hm)) if left.is_some_and(|d| day_limit(d, now)) => {
+            format!("Лимит на сегодня — попробую в {hm}")
+        }
+        (SourceError::RateLimited { .. }, Some(hm)) => format!("Просит подождать — попробую в {hm}"),
+        (SourceError::RateLimited { .. }, None) => "Просит подождать — попробую позже".into(),
+        (SourceError::Http { status }, Some(hm)) => format!("Отвечает ошибкой {status} — попробую в {hm}"),
+        (SourceError::Http { status }, None) => format!("Отвечает ошибкой {status}"),
+        // Its search works, but no file it finds can be had (Tidal while no
+        // instance gives files).
+        (SourceError::NothingToFetch, _) => FINDS_ONLY.into(),
         _ => "Не отвечает".into(),
     }
 }
 
+/// The same state of a source (what it says, not how long is left), so
+/// its log line is written once, not at every search.
+fn same_state(a: &SourceError, b: &SourceError) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b)
+        && match (a, b) {
+            (SourceError::Http { status: x }, SourceError::Http { status: y }) => x == y,
+            (SourceError::Blocked(x), SourceError::Blocked(y)) => x == y,
+            _ => true,
+        }
+}
+
 /// A source whose download failed, in words for «Источники»; `None` when
 /// the failure says nothing of the source (the disk, an empty offer).
-fn fetch_down_text(e: &SourceError) -> Option<String> {
+/// `aside`: how long it is still set aside for refusing, when it is.
+fn fetch_down_text(e: &SourceError, aside: Option<Duration>) -> Option<String> {
     match e {
         SourceError::Io(_) | SourceError::NothingToFetch | SourceError::NotConfigured => None,
-        SourceError::Blocked(_) | SourceError::RateLimited { .. } => Some(down_text(e)),
-        _ => Some("Находит, но не скачивает".into()),
+        SourceError::Blocked(_) | SourceError::RateLimited { .. } => Some(down_text(e, aside)),
+        _ => Some(match aside.and_then(super::accounts::hm_after) {
+            Some(hm) => format!("{FINDS_ONLY} — пропускаю до {hm}"),
+            None => FINDS_ONLY.into(),
+        }),
     }
 }
 
@@ -347,14 +409,23 @@ fn source_name(key: SourceKey) -> &'static str {
 /// сейчас не отдаёт этот трек», «сервер Qobuz недоступен», «Qobuz просит
 /// подождать до 03:00». `what`: «этот трек», «этот альбом», «остальное».
 fn why_words(key: SourceKey, e: &SourceError, what: &str) -> String {
+    why_words_at(key, e, what, unix_now())
+}
+
+fn why_words_at(key: SourceKey, e: &SourceError, what: &str, now: u64) -> String {
     let name = source_name(key);
     match e {
+        SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD && day_limit(*d, now) => {
+            format!("у {name} лимит на сегодня")
+        }
         SourceError::RateLimited { retry_after: Some(d) } if *d >= WAIT_TOLD => match super::accounts::hm_after(*d) {
             Some(hm) => format!("{name} просит подождать до {hm}"),
             None => format!("{name} просит подождать"),
         },
         SourceError::RateLimited { .. } => format!("{name} просит подождать"),
+        e if nikgob_sources::http::is_check(e) => format!("{name} закрыт проверкой"),
         SourceError::Blocked(_) => format!("{name} не пускает"),
+        SourceError::NothingToFetch => format!("{name} находит, но не скачивает"),
         // A ban of the instance's account, a file it cannot give (DRM).
         SourceError::Http { status: 401 | 403 } | SourceError::Parse(_) => format!("{name} сейчас не отдаёт {what}"),
         SourceError::Http { status } if *status >= 500 => format!("сервер {name} недоступен"),
@@ -1064,6 +1135,18 @@ impl Worker {
         }
         let keys: Vec<SourceKey> = self.download_sources().iter().map(|s| s.key()).collect();
         let before = self.streaming.wish.enabled.len();
+        // Turned on again by the user: it is asked at once, whatever it
+        // said before.
+        let w = &mut self.streaming.wish;
+        let mut forgot = false;
+        for k in w.enabled.iter().filter(|k| keys.contains(k)) {
+            forgot |= w.pauses.answered(*k);
+            w.down.remove(k);
+        }
+        if forgot {
+            self.save_backoff();
+            self.publish_sources();
+        }
         self.streaming.wish.enabled.retain(|k| !keys.contains(k));
         if self.streaming.wish.enabled.len() < before {
             self.wish_retry_all();
@@ -1086,25 +1169,104 @@ impl Worker {
     /// and how the last search of each went.
     pub(crate) fn publish_sources(&mut self) {
         let order = self.state.read().prefs.source_order();
-        let mut down = self.streaming.wish.fetch_down.clone();
-        // A search that failed says more: the source is not there at all.
-        down.extend(self.streaming.wish.down.clone());
         let have: Vec<SourceKey> = self.sources.iter().map(|s| s.key()).collect();
         let indexer = self.indexer.is_some();
+        let now = Instant::now();
+        let mut soonest: Option<Instant> = None;
         let rows: Vec<v::SourceView> = order
             .iter()
-            .map(|s| v::SourceView {
-                key: s.key,
-                name: s.key.display_name().to_owned(),
-                available: if s.key == SourceKey::Torrents { indexer } else { have.contains(&s.key) },
-                status: down.get(&s.key).cloned(),
+            .map(|s| {
+                let (status, until) = self.source_status(s.key, now);
+                if let Some(u) = until {
+                    soonest = Some(soonest.map_or(u, |x| x.min(u)));
+                }
+                v::SourceView {
+                    key: s.key,
+                    name: s.key.display_name().to_owned(),
+                    available: if s.key == SourceKey::Torrents { indexer } else { have.contains(&s.key) },
+                    status,
+                }
             })
             .collect();
+        self.streaming.wish.status_until = soonest;
         let can = self.can_download();
         self.publish(|st| {
             st.downloads.sources = rows;
             st.downloads.wishlist.can_search = can;
         });
+    }
+
+    /// How `key` is, in words for «Источники», and until when they hold
+    /// (a time told in them). Sitting out after its searches turned us
+    /// away says the most, then its last search failing (it is not there
+    /// at all), then its last download failing.
+    fn source_status(&self, key: SourceKey, now: Instant) -> (Option<String>, Option<Instant>) {
+        let w = &self.streaming.wish;
+        if let (Some(until), Some(e)) = (w.pauses.until(key, now), w.pauses.error(key, now)) {
+            return (Some(down_text(&e, Some(until - now))), Some(until));
+        }
+        if let Some(e) = w.down.get(&key) {
+            return (Some(down_text(e, None)), None);
+        }
+        let Some(e) = w.fetch_down.get(&key) else { return (None, None) };
+        let aside = w.refusals.aside(key, now);
+        (fetch_down_text(e, aside.map(|u| u - now)), aside)
+    }
+
+    /// A time told in «Источники» passed: they are told again (without it).
+    fn sources_expire(&mut self) {
+        if self.streaming.wish.status_until.is_some_and(|u| Instant::now() >= u) {
+            self.publish_sources();
+        }
+    }
+
+    /// What turned the downloads away, kept for the next run ([`backoff`]).
+    fn save_backoff(&self) {
+        let w = &self.streaming.wish;
+        let saved = backoff::Saved::of(&w.pauses, &w.refusals, &w.later, &w.retry_only, &w.tries, Instant::now(), Self::now());
+        match serde_json::to_string(&saved) {
+            Ok(json) => {
+                if let Err(e) = self.lib.cache_put(backoff::KEY, Self::now(), &json) {
+                    log::warn!("wishlist: the pauses are not kept: {e}");
+                }
+            }
+            Err(e) => log::warn!("wishlist: the pauses are not kept: {e}"),
+        }
+    }
+
+    /// What turned the downloads away in the last run: its pauses go on.
+    /// The retries of an item that is done or turned down meanwhile go.
+    fn load_backoff(&mut self) {
+        let Some((_, json)) = self.lib.cache_get(backoff::KEY).ok().flatten() else { return };
+        let saved: backoff::Saved = match serde_json::from_str(&json) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("wishlist: the kept pauses do not read: {e}");
+                return;
+            }
+        };
+        let now = Instant::now();
+        let r = saved.restore(now, Self::now());
+        let open = |id: &WishlistId| {
+            self.lib
+                .get_wishlist_item(*id)
+                .ok()
+                .flatten()
+                .is_some_and(|i| !matches!(i.status, WishlistStatus::Dismissed | WishlistStatus::Done))
+        };
+        let later: HashMap<WishlistId, u32> = r.later.into_iter().filter(|(id, _)| open(id)).collect();
+        let retry_only: HashMap<WishlistId, Vec<SourceKey>> = r.retry_only.into_iter().filter(|(id, _)| open(id)).collect();
+        for key in SourceKey::ALL {
+            if let Some(until) = r.pauses.until(key, now) {
+                log::info!("wishlist: {key:?} still sits out for {} min", (until - now).as_secs() / 60);
+            }
+        }
+        let w = &mut self.streaming.wish;
+        w.pauses = r.pauses;
+        w.refusals = r.refusals;
+        w.later = later;
+        w.retry_only = retry_only;
+        w.tries = r.tries;
     }
 
     // ------------------------------------------------------------- scheduler
@@ -1180,12 +1342,37 @@ impl Worker {
         if sources.is_empty() {
             return;
         }
+        // A web source sitting out (a bot check, a day's limit) is not
+        // asked: it counts as having said no again, without a request.
+        let now = Instant::now();
+        let paused: Vec<(SourceKey, SourceError)> = sources
+            .iter()
+            .filter_map(|s| self.streaming.wish.pauses.error(s.key(), now).map(|e| (s.key(), e)))
+            .collect();
+        sources.retain(|s| !paused.iter().any(|(k, _)| *k == s.key()));
+        let not_asked: Vec<SourceKey> = paused.iter().map(|(k, _)| *k).collect();
         let want = self.want_of(&item);
         if want.artists.is_empty() || (want.title.is_none() && want.album.is_none()) {
             self.no_torrent(item.id, false);
             return;
         }
         let id = item.id;
+        // A few searches a day at most (better copies keep their own pace).
+        if !sources.is_empty() && item.origin != WishlistOrigin::Upgrade {
+            let day = self.streaming.wish.tries.take(id, Self::now());
+            self.save_backoff();
+            if let Err(at) = day {
+                let wait = Duration::from_millis((at - Self::now()).max(0) as u64);
+                log::info!("wishlist: {id} searched {} times today, again in {} min", backoff::DAY_TRIES, wait.as_secs() / 60);
+                self.set_item(id, |i| {
+                    i.status = WishlistStatus::New;
+                    i.next_try_at = Some(at);
+                    i.note = Some(capitalised(&format!("поищу снова {}", at_words(wait))));
+                });
+                self.publish_wishlist();
+                return;
+            }
+        }
         self.set_item(id, |i| {
             i.status = WishlistStatus::Searching;
             i.attempts += 1;
@@ -1210,7 +1397,7 @@ impl Worker {
                 }
             });
             let mut offers = Vec::new();
-            let (mut answered, mut down) = (Vec::new(), Vec::new());
+            let (mut answered, mut down) = (Vec::new(), paused);
             for (key, r) in futures_util::future::join_all(asks).await {
                 match r {
                     Ok(o) => {
@@ -1219,10 +1406,15 @@ impl Worker {
                         answered.push(key);
                     }
                     Err(SourceError::NotConfigured) => {}
-                    Err(e) => {
-                        log::warn!("wishlist: {key:?}: {e}");
-                        down.push((key, e));
+                    // It searched, but nothing it finds can be had: no
+                    // offers, and «Источники» say so.
+                    Err(SourceError::NothingToFetch) => {
+                        answered.push(key);
+                        down.push((key, SourceError::NothingToFetch));
                     }
+                    // Logged once per state, when it comes back
+                    // ([`Worker::wish_msg`]).
+                    Err(e) => down.push((key, e)),
                 }
             }
             // Nobody could answer: not "not found", just later.
@@ -1236,6 +1428,7 @@ impl Worker {
                 result,
                 answered,
                 down,
+                paused: not_asked,
             })
         });
         self.publish_wishlist();
@@ -1248,14 +1441,32 @@ impl Worker {
                 result,
                 answered,
                 down,
+                paused,
             } => {
                 let now = Instant::now();
+                let mut kept = false;
                 for k in answered {
-                    self.streaming.wish.down.remove(&k);
-                    self.streaming.wish.asked.entry(item).or_default().insert(k, now);
+                    let w = &mut self.streaming.wish;
+                    w.down.remove(&k);
+                    w.asked.entry(item).or_default().insert(k, now);
+                    kept |= w.pauses.answered(k);
                 }
                 for (k, e) in &down {
-                    self.streaming.wish.down.insert(*k, down_text(e));
+                    let w = &mut self.streaming.wish;
+                    // Once per state, not at every search.
+                    if !w.down.insert(*k, e.clone()).is_some_and(|was| same_state(&was, e)) {
+                        log::warn!("wishlist: {k:?}: {e}");
+                    }
+                    if paused.contains(k) {
+                        continue;
+                    }
+                    if let Some(until) = w.pauses.failed(*k, e, now) {
+                        log::info!("wishlist: {k:?} is not asked for {} min", (until - now).as_secs() / 60);
+                        kept = true;
+                    }
+                }
+                if kept {
+                    self.save_backoff();
                 }
                 let turned: Vec<(SourceKey, SourceError)> = down.into_iter().filter(|(_, e)| e.is_refusal()).collect();
                 self.streaming.wish.turned.insert(item, turned);
@@ -1270,6 +1481,9 @@ impl Worker {
                 Ok(Fetched::Torrent(p)) => self.wish_inspect(item, *offer, p),
                 Ok(Fetched::Files(files)) => {
                     let was_aside = self.streaming.wish.refusals.worked(offer.source);
+                    if was_aside {
+                        self.save_backoff();
+                    }
                     if self.streaming.wish.fetch_down.remove(&offer.source).is_some() {
                         self.publish_sources();
                     }
@@ -1282,10 +1496,8 @@ impl Worker {
                 Ok(Fetched::Partial { files, missing, error }) => self.wish_partial(item, *offer, files, missing.len(), error),
                 Err(e) => {
                     log::warn!("wishlist: fetching {} from {:?}: {e}", offer.title, offer.source);
-                    if offer.source != SourceKey::Torrents
-                        && let Some(text) = fetch_down_text(&e)
-                    {
-                        self.streaming.wish.fetch_down.insert(offer.source, text);
+                    if offer.source != SourceKey::Torrents && fetch_down_text(&e, None).is_some() {
+                        self.streaming.wish.fetch_down.insert(offer.source, e.clone());
                         self.publish_sources();
                     }
                     self.streaming.wish.live.lock().remove(&item);
@@ -1877,7 +2089,9 @@ impl Worker {
             self.wish_turned_away(id, &offer, &error);
             why_words(offer.source, &error, "остальное")
         } else {
-            self.streaming.wish.refusals.worked(offer.source);
+            if self.streaming.wish.refusals.worked(offer.source) {
+                self.save_backoff();
+            }
             format!("остальных {missing} у {} нет", source_name(offer.source))
         };
         // A better copy says only what it found and what came of it.
@@ -1902,10 +2116,12 @@ impl Worker {
         if let Some(until) = self.streaming.wish.refusals.refused(key, e, Instant::now()) {
             let left = until.saturating_duration_since(Instant::now());
             log::info!("wishlist: {key:?} keeps turning downloads away, set aside for {} min", left.as_secs() / 60);
-            let when = super::accounts::hm_after(left).map_or_else(String::new, |hm| format!(" до {hm}"));
-            self.streaming.wish.fetch_down.insert(key, format!("Находит, но не скачивает — пропускаю{when}"));
+            // «Находит, но не скачивает — пропускаю до 02:07», the time
+            // told while it holds ([`Self::source_status`]).
+            self.streaming.wish.fetch_down.entry(key).or_insert_with(|| e.clone());
             self.publish_sources();
         }
+        self.save_backoff();
     }
 
     /// A download of `key` worked after it had been set aside: the items
@@ -1959,10 +2175,10 @@ impl Worker {
                 continue;
             }
             let aside = self.streaming.wish.refusals.aside(k, now).map(|u| u - now);
-            let back = match (e.wait(), aside) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            };
+            // A web source sitting out after a bot check is back when its
+            // pause ends (a check names no wait of its own).
+            let paused = self.streaming.wish.pauses.until(k, now).map(|u| u - now);
+            let back = [e.wait(), aside, paused].into_iter().flatten().max();
             let why = match aside {
                 Some(_) => self.streaming.wish.refusals.why(k).cloned().unwrap_or(e),
                 None => e,
@@ -1991,6 +2207,7 @@ impl Worker {
             // Tried enough for now: the weekly search, in every source.
             self.streaming.wish.later.remove(&id);
             self.streaming.wish.retry_only.remove(&id);
+            self.save_backoff();
             let copy = self.copy_quality(&item).is_some();
             self.no_torrent(id, false);
             // A better copy is looked for when its schedule says, quietly.
@@ -2020,6 +2237,7 @@ impl Worker {
         let retry = plan_retry(n, &backs, &others);
         let at = Self::now() + retry.wait.as_millis() as i64;
         self.streaming.wish.retry_only.insert(id, keys);
+        self.save_backoff();
         let note = later_line(partly, &why, retry.wait, &retry.ask);
         log::info!("wishlist: {id} was turned away ({}), again in {} min", why.join(", "), retry.wait.as_secs() / 60);
         self.set_item(id, |i| {
@@ -2190,6 +2408,9 @@ impl Worker {
     pub(crate) fn wish_retry(&mut self, id: WishlistId) {
         self.streaming.wish.later.remove(&id);
         self.streaming.wish.retry_only.remove(&id);
+        // The user asks: the day's count starts over.
+        self.streaming.wish.tries.forget(id);
+        self.save_backoff();
         let item = self.set_item(id, |i| {
             if i.status != WishlistStatus::Dismissed {
                 i.status = WishlistStatus::New;
@@ -2225,6 +2446,7 @@ impl Worker {
                 item.status = WishlistStatus::New;
                 item.next_try_at = None;
                 item.updated_at = now;
+                self.streaming.wish.tries.forget(item.id);
                 self.put_item(&item);
                 n += 1;
             }
@@ -2234,6 +2456,7 @@ impl Worker {
             if item.origin != WishlistOrigin::Upgrade && item.next_try_at.is_some_and(|t| t > now) {
                 self.streaming.wish.later.remove(&item.id);
                 self.streaming.wish.retry_only.remove(&item.id);
+                self.streaming.wish.tries.forget(item.id);
                 item.next_try_at = None;
                 item.updated_at = now;
                 self.put_item(&item);
@@ -2241,6 +2464,7 @@ impl Worker {
             }
         }
         if n > 0 {
+            self.save_backoff();
             self.toast(format!("Ищу заново: {n}"), None);
         }
         self.wish_tick();
@@ -2754,6 +2978,7 @@ impl Worker {
     /// How far the downloads of sources other than torrents are, on their
     /// rows (each second; the torrents' come with theirs).
     pub(crate) fn wish_poll_direct(&mut self) {
+        self.sources_expire();
         let live = self.streaming.wish.direct_progress();
         let mut next = self.streaming.wish.progress.clone();
         next.retain(|k, _| !self.streaming.wish.direct.contains_key(k) || live.contains_key(k));
@@ -2803,7 +3028,11 @@ impl Worker {
     /// After a restart: searches that were running start over, and so do
     /// downloads of sources other than torrents (they do not go on), whose
     /// folders go unless files of them wait in «Подтверди».
+    ///
+    /// What turned the downloads away before goes on ([`backoff`]): the
+    /// pauses of the sources, the retries in a row, the day's searches.
     pub(crate) fn wish_restart(&mut self) {
+        self.load_backoff();
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Searching).unwrap_or_default() {
             self.set_item(i.id, |i| i.status = WishlistStatus::New);
         }
@@ -3149,12 +3378,73 @@ mod tests {
         assert_eq!(why_words(SourceKey::Tidal, &SourceError::Parse("a DASH manifest".into()), t), "Tidal сейчас не отдаёт этот трек");
         assert_eq!(why_words(SourceKey::Qobuz, &SourceError::Unreachable("dns error".into()), t), "сервер Qobuz недоступен");
         assert_eq!(why_words(SourceKey::Qobuz, &SourceError::Http { status: 522 }, t), "сервер Qobuz недоступен");
-        assert_eq!(why_words(SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider не пускает");
+        assert_eq!(why_words(SourceKey::Khinsider, &SourceError::Blocked("a bot check".into()), t), "khinsider закрыт проверкой");
+        assert_eq!(why_words(SourceKey::Soulseek, &SourceError::Blocked("login refused".into()), t), "Soulseek не пускает");
         assert_eq!(why_words(SourceKey::Torrents, &SourceError::Unreachable("x".into()), t), "сервер Prowlarr недоступен");
         let short = SourceError::RateLimited { retry_after: Some(MIN) };
         assert_eq!(why_words(SourceKey::Qobuz, &short, t), "Qobuz просит подождать");
+        // 01:00 UTC: five hours is a wait it named, 23 hours its day's limit.
+        let one_am = 86_400 * 20_000 + 3_600;
         let long = SourceError::RateLimited { retry_after: Some(300 * MIN) };
-        assert!(why_words(SourceKey::Qobuz, &long, t).starts_with("Qobuz просит подождать до "));
+        assert!(why_words_at(SourceKey::Qobuz, &long, t, one_am).starts_with("Qobuz просит подождать до "));
+        let day = SourceError::RateLimited { retry_after: Some(23 * 60 * MIN) };
+        assert_eq!(why_words_at(SourceKey::Qobuz, &day, t, one_am), "у Qobuz лимит на сегодня");
+        assert_eq!(why_words(SourceKey::Tidal, &SourceError::NothingToFetch, t), "Tidal находит, но не скачивает");
+    }
+
+    /// «Источники» tell each state as it is: a bot check is not a wait;
+    /// a day's limit says when it is tried again; a wait or an error a
+    /// source sits out for says until when; a source whose search works
+    /// but gives no file says so.
+    #[test]
+    fn a_source_state_in_words() {
+        let one_am = 86_400 * 20_000 + 3_600;
+        let cf = SourceError::Blocked(nikgob_sources::http::BOT_CHECK.into());
+        assert_eq!(down_text_at(&cf, None, one_am), "Сайт закрыт проверкой — не могу зайти");
+        assert_eq!(down_text_at(&cf, Some(180 * MIN), one_am), "Сайт закрыт проверкой — не могу зайти");
+        let login = SourceError::Blocked("the server refused the login: 40".into());
+        assert_eq!(down_text_at(&login, None, one_am), "Не пускает — попробую позже");
+        assert!(down_text_at(&login, Some(180 * MIN), one_am).starts_with("Не пускает — попробую в "));
+        let wait = SourceError::RateLimited { retry_after: None };
+        let day = down_text_at(&wait, Some(23 * 60 * MIN), one_am);
+        assert!(day.starts_with("Лимит на сегодня — попробую в "), "{day}");
+        assert!(down_text_at(&wait, Some(120 * MIN), one_am).starts_with("Просит подождать — попробую в "));
+        assert_eq!(down_text_at(&wait, Some(MIN), one_am), "Просит подождать — попробую позже", "a short wait is not timed");
+        assert_eq!(down_text_at(&wait, None, one_am), "Просит подождать — попробую позже");
+        let bad = SourceError::Http { status: 400 };
+        assert_eq!(down_text_at(&bad, None, one_am), "Отвечает ошибкой 400");
+        assert!(down_text_at(&bad, Some(60 * MIN), one_am).starts_with("Отвечает ошибкой 400 — попробую в "));
+        assert_eq!(down_text_at(&SourceError::NothingToFetch, None, one_am), FINDS_ONLY);
+        assert_eq!(down_text_at(&SourceError::Unreachable("dns".into()), None, one_am), "Не отвечает");
+    }
+
+    /// «пропускаю до 02:07» while the source is set aside; once that time
+    /// passed (no time left), the line says only what it does.
+    #[test]
+    fn the_time_a_source_is_skipped_until_goes_once_it_passed() {
+        let e = SourceError::Http { status: 403 };
+        let now = fetch_down_text(&e, Some(30 * MIN)).unwrap();
+        assert!(now.starts_with("Находит, но не скачивает — пропускаю до "), "{now}");
+        assert_eq!(fetch_down_text(&e, None).as_deref(), Some(FINDS_ONLY));
+        assert_eq!(fetch_down_text(&SourceError::Io("disk".into()), None), None);
+        // Set aside in «Источники» only while it is.
+        let mut r = Refusals::default();
+        let t0 = Instant::now();
+        r.refused(SourceKey::Tidal, &e, t0);
+        let until = r.refused(SourceKey::Tidal, &e, t0).unwrap();
+        assert!(r.aside(SourceKey::Tidal, t0).is_some());
+        assert_eq!(r.aside(SourceKey::Tidal, until), None, "past its time: told without it");
+    }
+
+    /// A state is logged once, not at every search: how long is left does
+    /// not make it another.
+    #[test]
+    fn the_same_state_is_not_logged_again() {
+        let a = SourceError::RateLimited { retry_after: Some(MIN) };
+        let b = SourceError::RateLimited { retry_after: Some(30 * MIN) };
+        assert!(same_state(&a, &b));
+        assert!(!same_state(&SourceError::Http { status: 400 }, &SourceError::Http { status: 429 }));
+        assert!(!same_state(&a, &SourceError::Blocked("a bot check".into())));
     }
 
     /// One line says it all: what is here, why, when and whom it asks.
