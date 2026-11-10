@@ -434,7 +434,10 @@ impl Md3eUi {
         self.np_motion = state.prefs.np_motion;
         if !self.chrome.np_loaded {
             self.chrome.np_loaded = true;
-            self.chrome.np_slot = state.prefs.np_slot;
+            // The track's info is a look-up opened from a menu, never what
+            // Now Playing opens with: prefs that kept it open nothing (and
+            // are put right below).
+            self.chrome.np_slot = if state.prefs.np_slot == NpSlot::Info { NpSlot::None } else { state.prefs.np_slot };
             self.chrome.np_saved = Some(state.prefs.np_slot);
         }
         self.chrome.np_covering = self.np_anim.value(anim::now(ctx)) > 0.01;
@@ -698,7 +701,9 @@ impl Md3eUi {
                 self.back(ctx, out);
             }
         }
-        if self.chrome.np_saved != Some(self.chrome.np_slot) {
+        // Kept between openings: the lyrics or the queue, not the track's
+        // info (while it is up, what was kept stays as it is).
+        if self.chrome.np_slot != NpSlot::Info && self.chrome.np_saved != Some(self.chrome.np_slot) {
             self.chrome.np_saved = Some(self.chrome.np_slot);
             // Preserve any other preference edited during this frame.
             if let Some(Command::SetPrefs(prefs)) = out[first_cmd..].iter_mut().rev().find(|c| matches!(c, Command::SetPrefs(_))) {
@@ -1590,16 +1595,51 @@ mod tests {
                 ui.set_now_playing(&ctx, true);
                 let t = 10.0 + i as f64 * 5.0;
                 frame(&ctx, &mut ui, &mut state, t, width, None);
-                assert_eq!(ui.chrome.np_slot, slot);
+                // The track's info is never restored: prefs that kept it
+                // open nothing.
+                let shown = if slot == NpSlot::Info { NpSlot::None } else { slot };
+                assert_eq!(ui.chrome.np_slot, shown);
                 frame(&ctx, &mut ui, &mut state, t + 1.0, width, None);
                 frame(&ctx, &mut ui, &mut state, t + 2.0, width, Some(Key::Escape));
                 assert_eq!(state.prefs.np_slot, NpSlot::None);
-                assert_eq!(ui.now_playing, slot != NpSlot::None);
-                if slot != NpSlot::None {
+                assert_eq!(ui.now_playing, shown != NpSlot::None);
+                if shown != NpSlot::None {
                     frame(&ctx, &mut ui, &mut state, t + 3.0, width, Some(Key::Escape));
                     assert!(!ui.now_playing);
                 }
             }
+        }
+    }
+
+    /// «Источник и качество» of Now Playing's ⋮: Esc puts it away and the
+    /// player stays; it is never saved, so closing the player with it open
+    /// and opening it again shows what was kept before, not the info.
+    #[test]
+    fn track_info_is_a_look_up_that_is_never_kept() {
+        for width in [380.0, 800.0, 1440.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = ViewState::default();
+            state.prefs.np_slot = NpSlot::Lyrics;
+            ui.set_now_playing(&ctx, true);
+            frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Lyrics);
+            ui.chrome.np_slot = NpSlot::Info;
+            frame(&ctx, &mut ui, &mut state, 1.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Info);
+            assert_eq!(state.prefs.np_slot, NpSlot::Lyrics, "the info is not saved");
+            ui.set_now_playing(&ctx, false);
+            frame(&ctx, &mut ui, &mut state, 2.0, width, None);
+            ui.set_now_playing(&ctx, true);
+            frame(&ctx, &mut ui, &mut state, 3.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Lyrics, "what was kept comes back, not the info");
+
+            ui.chrome.np_slot = NpSlot::Info;
+            frame(&ctx, &mut ui, &mut state, 4.0, width, None);
+            frame(&ctx, &mut ui, &mut state, 5.0, width, Some(Key::Escape));
+            assert_eq!(ui.chrome.np_slot, NpSlot::None);
+            assert_eq!(state.prefs.np_slot, NpSlot::None);
+            assert!(ui.now_playing, "Esc put the info away, not the player");
         }
     }
 
@@ -1632,6 +1672,8 @@ mod tests {
                 state.prefs.np_slot = slot;
                 ui.set_now_playing(&ctx, true);
                 frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+                // The info is opened from the ⋮ menu, never restored.
+                ui.chrome.np_slot = slot;
                 frame(&ctx, &mut ui, &mut state, 1.0, width, None);
                 for (i, pos) in [pos2(width * 0.75, 400.0), pos2(20.0, 40.0)].into_iter().enumerate() {
                     let mut commands = Vec::new();
