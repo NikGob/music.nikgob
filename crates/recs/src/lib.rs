@@ -42,6 +42,7 @@ pub mod graph;
 pub mod index;
 pub mod junk;
 pub mod listening;
+pub mod mix_names;
 pub mod mixes;
 pub mod model;
 pub mod mood;
