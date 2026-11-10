@@ -7,6 +7,14 @@
 //! the epoch before's, the lineups shown before, the salts of «Другой
 //! состав» and the blends of the day): a start of the app or the next
 //! part of the day draws them again ([`crate::home_v2::Epoch`]).
+//!
+//! Before the moments stand the mixes that are always there — «Любимые»
+//! and the mix of the part of the day ([`Builder::pinned`]), the epoch's
+//! as the moments are. «Миксы дня» ([`Builder::daily`]) are the day's:
+//! seeded by the day and kept for it in `recs.day_mixes` (their lineup,
+//! each one's songs, yesterday's to draw other ones), whatever is played
+//! meanwhile and however often the app starts; a new day, a history that
+//! appeared and «Только скачанное» switched draw them again.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use super::{BuildInput, CoverRef, Snapshot, cache_read, cache_write};
 
 const MIXES_KEY: &str = "recs.mixes";
+const DAY_MIXES_KEY: &str = "recs.day_mixes";
 /// A song shorter than this is an interlude: no mix picks it.
 const INTERLUDE_MS: u32 = 75_000;
 /// About two hours of «На повторе».
@@ -121,8 +130,35 @@ pub(crate) fn engine_key(k: v::MixKey) -> Option<MixKey> {
         v::MixKey::Background { profile, card, cards } => MixKey::Background { profile, card, cards },
         v::MixKey::Blend(p) => MixKey::Blend(p),
         v::MixKey::Kind(c) => MixKey::Kind(c),
+        v::MixKey::Liked => MixKey::Liked,
+        v::MixKey::Part(p) => MixKey::Part(p),
+        v::MixKey::Daily(n) => MixKey::Daily(n),
         v::MixKey::OnRepeat | v::MixKey::World(_) => return None,
     })
+}
+
+/// A moment of the epoch's lottery (or a blend): what «Миксы для тебя»
+/// shows [`nikgob_recs::mixes::MOMENTS`] of; the mixes that are always
+/// there, «На повторе» and the mixes of the day are beside them.
+pub(crate) fn is_moment(k: v::MixKey) -> bool {
+    !matches!(k, v::MixKey::Liked | v::MixKey::Part(_) | v::MixKey::Daily(_) | v::MixKey::OnRepeat | v::MixKey::World(_))
+}
+
+/// Where a blend made now stands among `lanes`: after the mixes that are
+/// always there, before the moments.
+pub(crate) fn blend_place(lanes: &[LaneHome]) -> usize {
+    lanes.iter().position(|l| is_moment(l.key) || l.key == v::MixKey::OnRepeat).unwrap_or(lanes.len())
+}
+
+/// What the cache keeps of the mixes of the day: the day they are for,
+/// what they were drawn under and the day's mixes.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DayMixesCache {
+    day: String,
+    /// Something was played, liked or kept when they were drawn.
+    history: bool,
+    local_only: bool,
+    kept: Kept,
 }
 
 fn view_key(k: MixKey) -> v::MixKey {
@@ -134,6 +170,9 @@ fn view_key(k: MixKey) -> v::MixKey {
         MixKey::Background { profile, card, cards } => v::MixKey::Background { profile, card, cards },
         MixKey::Blend(p) => v::MixKey::Blend(p),
         MixKey::Kind(c) => v::MixKey::Kind(c),
+        MixKey::Liked => v::MixKey::Liked,
+        MixKey::Part(p) => v::MixKey::Part(p),
+        MixKey::Daily(n) => v::MixKey::Daily(n),
     }
 }
 
@@ -239,14 +278,21 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         tiles.facts.contains_key(&t.id) && (t.local || !snap.local_only)
     };
     let names = |a: ArtistId| tiles.artist_names.get(&a).cloned();
-    let (mut mixes, lineup, blendable) = with_builder(snap, prefs, &snap.background, &ok, &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
+    let (mixes, lineup, blendable, pinned) = with_builder(snap, prefs, &snap.background, &ok, &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
+        let pinned = b.pinned(&cache.kept);
         let (mut mixes, lineup) = b.lineup(&cache.kept);
         b.named(&mut mixes, &names);
-        (mixes, lineup, blend_profiles(snap, b, &names))
+        (mixes, lineup, blend_profiles(snap, b, &names), pinned)
     });
     cache.kept.lineup = lineup;
     cache.kept.keep(&mixes, &snap.model);
+    cache.kept.keep(&pinned, &snap.model);
     cache_write(lib, MIXES_KEY, input.now, &cache);
+    let daily = day_mixes(snap, input, &ok);
+    let days = daily.len();
+    // The mixes of the day, then «Любимые» and the part of the day's, then
+    // the moments: a new song of «С новым» goes to the first that fits it.
+    let mut mixes: Vec<Mix> = daily.into_iter().chain(pinned).chain(mixes).collect();
     log_lineup(snap, tiles, &mixes);
 
     let seed = input.epoch.seed;
@@ -257,12 +303,16 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         .enumerate()
         .map(|(k, m)| {
             let mut lane = lane_of(snap, tiles, &m);
-            if !snap.local_only && !matches!(m.key, MixKey::Background { .. }) {
+            // «Фон» and «Любимые» are what they are: no new songs.
+            if !snap.local_only && !matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
                 lane.new = new_for(snap, input, &log, &m, seed.wrapping_add(k as u64), &mut used_new);
             }
             lane
         })
         .collect();
+    // «Миксы для тебя» first, as they stand in their row; the mixes of the
+    // day after them (each row takes its own by the key).
+    out.rotate_left(days);
     if prefs.on_repeat
         && snap.model.taste.has_history()
         && let Some(tracks) = on_repeat(snap, tiles)
@@ -284,6 +334,33 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         });
     }
     (out, blendable)
+}
+
+/// «Миксы дня»: the day's as they were drawn, else drawn now and kept for
+/// the day (see the module docs). «Другой состав» of one draws it again.
+fn day_mixes(snap: &Snapshot, input: &BuildInput, ok: &dyn Fn(usize) -> bool) -> Vec<Mix> {
+    let lib = &input.lib;
+    let history = snap.model.taste.has_history();
+    let mut cache: DayMixesCache = cache_read(lib, DAY_MIXES_KEY).unwrap_or_default();
+    if cache.day != input.day || (history && !cache.history) || cache.local_only != snap.local_only {
+        // Another day's songs are the songs before: today's are others.
+        let kept = std::mem::take(&mut cache.kept).next_epoch(false);
+        cache = DayMixesCache { day: input.day.clone(), history, local_only: snap.local_only, kept };
+    }
+    if let Some(key @ MixKey::Daily(_)) = input.refresh_mix.and_then(engine_key) {
+        let salt = fastrand::u64(1..);
+        match cache.kept.salts.iter_mut().find(|s| s.0 == key) {
+            Some(s) => s.1 = salt,
+            None => cache.kept.salts.push((key, salt)),
+        }
+    }
+    // The day's seed, not the epoch's: a start of the app changes nothing.
+    let seed = super::day_seed(&input.day);
+    let (mixes, lineup) = with_builder(snap, &input.mix_prefs, &snap.background, ok, &Session::default(), input.now, input.utc_offset_min, seed, |b| b.daily(&cache.kept));
+    cache.kept.lineup = lineup;
+    cache.kept.keep(&mixes, &snap.model);
+    cache_write(lib, DAY_MIXES_KEY, input.now, &cache);
+    mixes
 }
 
 /// A blend of `profiles` (the card's first), now, from the snapshot: it
@@ -361,8 +438,8 @@ fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
         artists,
         new: Vec::new(),
         blend_base: m.key.blend_base(),
-        // A blend is the user's own.
-        why: if matches!(m.key, MixKey::Blend(_)) { None } else { snap.recs().why_moment(&m.tracks, &m.title) },
+        // A blend is the user's own, «Любимые» says what it is.
+        why: if matches!(m.key, MixKey::Blend(_) | MixKey::Liked) { None } else { snap.recs().why_moment(&m.tracks, &m.title) },
     }
 }
 
@@ -532,6 +609,20 @@ fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, m: &M
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «Любимые», the mix of a part of the day and a mix of the day keep
+    /// their keys both ways and are no moments of the lottery.
+    #[test]
+    fn the_mixes_beside_the_moments_keep_their_keys() {
+        for k in [v::MixKey::Liked, v::MixKey::Part(2), v::MixKey::Daily(3), v::MixKey::Calm, v::MixKey::Profile(7)] {
+            assert_eq!(engine_key(k).map(view_key), Some(k));
+        }
+        assert!(is_moment(v::MixKey::Calm) && is_moment(v::MixKey::Blend([1, 2, 0])) && is_moment(v::MixKey::Profile(1)));
+        for k in [v::MixKey::Liked, v::MixKey::Part(0), v::MixKey::Daily(1), v::MixKey::OnRepeat] {
+            assert!(!is_moment(k), "{k:?}");
+        }
+        assert!(v::MixKey::Daily(2).is_daily() && !v::MixKey::Liked.is_daily());
+    }
 
     /// A library where one franchise is the most loved (as MADE IN ABYSS
     /// among soundtracks): no mix plays it more than twice running nor

@@ -1037,6 +1037,30 @@ fn every_lane_names_its_artists() {
     }
 }
 
+/// «Миксы дня» stand beside «Миксы для тебя»: named by their places, no
+/// song in two of them, and another build of the same day shows the same
+/// ones (they are kept for the day in the library's cache).
+#[test]
+fn the_mixes_of_the_day_stay_for_the_day() {
+    let l = library(3, 6, 12, &[]);
+    let dir = std::env::temp_dir();
+    let daily = |h: &nikgob_view::HomeView| -> Vec<(nikgob_view::MixKey, String, Vec<TrackId>)> {
+        h.lanes.iter().filter(|c| c.key.is_daily()).map(|c| (c.key, c.title.clone(), c.tracks.iter().map(|t| t.id).collect())).collect()
+    };
+    let first = daily(&nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home);
+    assert!(!first.is_empty(), "a library with a history has its mixes of the day");
+    let mut seen = std::collections::HashSet::new();
+    for (k, (key, title, tracks)) in first.iter().enumerate() {
+        assert_eq!(*title, format!("Микс дня {}", k + 1), "{key:?}");
+        assert!(tracks.len() >= 12, "«{title}»: {}", tracks.len());
+        for t in tracks {
+            assert!(seen.insert(*t), "«{title}»: a song of another mix of the day");
+        }
+    }
+    let again = daily(&nikgob_runtime::preview_home(&l.lib, &dir).unwrap().home);
+    assert_eq!(again, first);
+}
+
 /// Autoplay after an album played from its page as streams (tracks the
 /// library does not hold): the service's radio of its last track brings the
 /// album's other tracks first, and none of them joins the queue as new
