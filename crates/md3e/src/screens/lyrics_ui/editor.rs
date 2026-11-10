@@ -139,7 +139,8 @@ fn body(ui: &mut Ui, inner: Rect, track: TrackId, head: bool, state: &ViewState,
     let here = state.player.current.as_ref().is_some_and(|t| t.id == track);
     let pos = state.player.position_now();
     if ui.is_enabled() {
-        ctx.data_mut(|x| x.insert_temp(Id::new(DRAWN), ctx.cumulative_frame_nr()));
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|x| x.insert_temp(Id::new(DRAWN), frame));
         keys(&ctx, &mut d, here, pos);
     }
     if here && state.player.status == Status::Playing {
