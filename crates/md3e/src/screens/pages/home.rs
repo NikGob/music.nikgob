@@ -331,20 +331,31 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
         name_prompt(ui, grid, pages, out);
     }
 
-    let shown = arrange(sections(h, local_only), &order_of(&state.prefs));
-    for (k, section) in shown.iter().enumerate() {
+    let available = sections(h, local_only);
+    let order = order_of(&state.prefs);
+    let drawn: Vec<(Section, f32)> = if stage.live {
+        arrange(available.clone(), &order).into_iter().map(|s| (s, 1.0)).collect()
+    } else {
+        fading_sections(ui, stage, &available, &order)
+    };
+    for (k, (section, opacity)) in drawn.iter().enumerate() {
         ui.add_space(if k == 0 { 16.0 } else { SECTION_GAP });
         let i = n + k;
         let top = ui.cursor().top();
-        let r = match section {
-            Section::Shortcuts => shortcuts(ui, grid, i, state, out),
-            Section::Mixes => mixes(ui, grid, i, state, out),
-            Section::ListenAgain => listen_again(ui, grid, i, state, pages, out),
-            Section::OfDay => of_day(ui, grid, i, state, out),
-            Section::FromLibrary => from_library(ui, grid, i, state, out),
-            Section::New => new_music(ui, grid, i, state, pages, out),
-            Section::Releases => releases(ui, grid, i, state, out),
-        };
+        let r = ui.scope(|ui| {
+            if *opacity < 0.999 {
+                ui.multiply_opacity(*opacity);
+            }
+            match section {
+                Section::Shortcuts => shortcuts(ui, grid, i, state, out),
+                Section::Mixes => mixes(ui, grid, i, state, out),
+                Section::ListenAgain => listen_again(ui, grid, i, state, pages, out),
+                Section::OfDay => of_day(ui, grid, i, state, out),
+                Section::FromLibrary => from_library(ui, grid, i, state, out),
+                Section::New => new_music(ui, grid, i, state, pages, out),
+                Section::Releases => releases(ui, grid, i, state, out),
+            }
+        }).inner;
         let bottom = ui.min_rect().bottom().max(top);
         stage.part(ui.ctx(), Part::Home(*section), Rect::from_x_y_ranges(grid.left..=grid.left + grid.width, top..=bottom));
         nav = r.or(nav);
@@ -353,6 +364,34 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
         blend_sheet(ui.ctx(), state, out);
     }
     nav
+}
+
+/// On the stage, a section that was just turned on or off fades instead of
+/// popping. The real page keeps the instant cut.
+fn fading_sections(ui: &Ui, stage: &Stage, available: &[Section], order: &[(Section, bool)]) -> Vec<(Section, f32)> {
+    if order.is_empty() {
+        return available.iter().copied().map(|s| (s, 1.0)).collect();
+    }
+    let ctx = ui.ctx();
+    let motion = Theme::get(ctx).motion.fast_spatial.without_bounce();
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for (s, on) in order {
+        if !available.contains(s) {
+            continue;
+        }
+        seen.push(*s);
+        let k = anim::fraction(ctx, stage.id("home-sec").with(*s), if *on { 1.0 } else { 0.0 }, motion);
+        if k > 0.02 {
+            out.push((*s, k));
+        }
+    }
+    for s in available {
+        if !seen.contains(s) {
+            out.push((*s, 1.0));
+        }
+    }
+    out
 }
 
 /// The header of the page: «Доброй ночи, Ник» and at the right «Только

@@ -8,8 +8,8 @@
 //! the rows of «Тексты» and «Вид» stands the live stage (screens/stage.rs
 //! draws it where the page asks): on the right of a wide page, as a strip
 //! over the rows of a narrow one, none in mini mode. It follows the row
-//! under the pointer (its screen, its part outlined, the option under the
-//! pointer shown before it is picked) and the row just changed.
+//! under the pointer at once (the option under the pointer shown before it
+//! is picked) and restores the frame the pointer leaves the rows.
 //!
 //! Every change is sent as a whole new `Prefs` (the recommendations' rows
 //! and the presets as their patches); Ctrl+Z steps back through this
@@ -51,13 +51,11 @@ pub(super) struct Scrolled {
 pub(crate) struct Memory {
     /// The screen each stage tab showed last (Тексты, Вид).
     scenes: [Option<Scene>; 2],
-    /// The row (and its option) under the pointer, and since when.
-    hover: Option<(Id, Option<usize>, f64)>,
-    /// What the stage shows for a row: kept until the pointer rests on
-    /// something else, so passing between options and rows never flicks
-    /// the stage back and forth.
+    /// What the stage shows for a row: kept across a gap between rows, so
+    /// moving to the next one does not flash the saved settings, and dropped
+    /// the frame the pointer leaves the rows.
     shown: Option<Shown>,
-    /// The row changed last, and when: the stage stays on it a moment.
+    /// The row a drag started on.
     changed: Option<(Id, f64)>,
     /// The prefs before each change of this visit, for Ctrl+Z.
     undo: Vec<Prefs>,
@@ -80,14 +78,8 @@ struct Shown {
     at: f64,
 }
 
-/// The stage keeps what it shows this long after the pointer leaves the
-/// rows (settings v2 §2.3), so crossing a gap between rows does not blink.
-const HOLD_S: f64 = 0.4;
-
 /// Ctrl+Z goes back this many changes at most.
 const UNDO: usize = 20;
-/// The stage stays on a changed row this long (its part glowing).
-const CHANGED_S: f64 = 0.9;
 
 /// The page's parts under the tabs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -283,6 +275,8 @@ pub(super) fn page(
             req.scene = Scene::ALL[n];
             req.parts.clear();
             req.script = Script::None;
+            req.fit_home = false;
+            req.beat = false;
             pages.settings_memory.scenes[stage_index(tab)] = Some(req.scene);
         }
         stage::request(&ctx, req);
@@ -319,10 +313,11 @@ fn option_prefs(id: Id, p: &Prefs, i: usize) -> Option<Prefs> {
     }
 }
 
-/// What the stage shows this frame (settings v2 §2.3), by priority: the row
-/// being changed (a slider dragged, a field typed; a moment after too), the
-/// option or preset the pointer rests on (shown, not picked), the row the
-/// pointer rests on, else the tab's last screen with nothing outlined.
+/// What the stage shows this frame, by priority: the row being dragged, the
+/// option or preset under the pointer (shown, not picked, the same frame it
+/// is entered), the row under the pointer, else the tab's last screen.
+/// Leaving the rows restores at once. A gap between neighbouring options or
+/// rows keeps the last preview, so nothing flashes the saved values on the way.
 #[allow(clippy::too_many_arguments)]
 fn follow(
     ctx: &egui::Context,
@@ -340,17 +335,22 @@ fn follow(
     // The row and option under the pointer: an open menu's item first (it
     // lies over other rows), then the row's own buttons.
     let in_menu = pointer.and_then(|at| rows.iter().find_map(|r| r.menu.iter().position(|m| m.contains(at)).map(|i| (r.id, Some(i)))));
-    let on_row = || {
+    let on_row = |mem: &Memory| {
         let r = rows.iter().find(|r| r.hovered && pointer.is_some_and(|at| r.clip.contains(at)))?;
-        let opt = pointer.and_then(|at| r.choices.iter().position(|c| c.contains(at)));
+        let hit = pointer.and_then(|at| r.choices.iter().position(|c| c.contains(at)));
+        // Between two options of this row, the one just shown stays.
+        let opt = hit.or_else(|| {
+            let line = r.choices.iter().copied().reduce(|a, b| a.union(b))?;
+            let held = mem.shown.as_ref().filter(|s| s.id == r.id && s.offer.is_none()).and_then(|s| s.opt);
+            pointer.is_some_and(|at| line.expand2(vec2(4.0, 6.0)).contains(at)).then_some(held).flatten()
+        });
         Some((r.id, opt))
     };
     // Keyboard focus counts as the pointer while the pointer is on no row.
     let focused = || rows.iter().find(|r| r.focused).map(|r| (r.id, None));
-    let under = in_menu.or_else(on_row).or_else(focused);
+    let under = in_menu.or_else(|| on_row(mem)).or_else(focused);
     if changed {
-        // A drag stays the row it started on, wherever the pointer goes.
-        let dragging = down && mem.changed.is_some_and(|(_, at)| now - at < 0.5);
+        let dragging = down && mem.changed.is_some();
         match (dragging, under) {
             (true, _) => {
                 if let Some(c) = mem.changed.as_mut() {
@@ -360,21 +360,6 @@ fn follow(
             (false, Some((id, _))) => mem.changed = Some((id, now)),
             (false, None) => {}
         }
-    }
-    // The pointer must rest a moment: passing over rows shows nothing.
-    let rested = match (under, mem.hover) {
-        (Some((id, opt)), Some((h, o, since))) if h == id && o == opt => now - since >= preset::DWELL,
-        (Some((id, opt)), _) => {
-            mem.hover = Some((id, opt, now));
-            false
-        }
-        (None, _) => {
-            mem.hover = None;
-            false
-        }
-    };
-    if under.is_some() && !rested {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(preset::DWELL + 0.01));
     }
     let slot = stage_index(tab);
     let mut req = StageRequest::new(rect, mem.scenes[slot].unwrap_or_else(|| tab_scene(tab)), p.clone());
@@ -388,53 +373,35 @@ fn follow(
         // In the look that has what the row tunes (the wave for a jump).
         let prefs = id.staged(&prefs);
         req.script = id.script(&prefs);
-        req.prefs = prefs;
+        req.prefs = prefs.clone();
         req.zoom = false;
+        req.beat = id.needs_beat(&prefs);
+        req.fit_home = id == Id::HomeSections;
     };
-    if let Some((id, at)) = mem.changed
-        && (down || now - at < CHANGED_S)
+    // A drag stays on the row it started on. The pointer up, the row under
+    // it shows at once.
+    if let Some((id, _)) = mem.changed
+        && down
         && id.part().is_some()
     {
-        // The values are applied already: the stage shows them.
         show(&mut req, &mut *mem, id, p.clone());
         mem.shown = None;
         ctx.request_repaint();
         return req;
     }
-    // What the pointer rests on becomes what is shown: a preset (the whole
-    // of it), an option (shown before it is picked), a row (its screen); a
-    // row not on the stage shows the tab's last screen as it is.
+    let in_rows = pointer.is_some_and(|at| rows.iter().any(|r| r.clip.contains(at)));
     if let Some(o) = offer {
         mem.shown = Some(Shown { id: o.id, opt: None, offer: Some(o.prefs), at: now });
-    } else if rested && let Some((id, opt)) = under {
-        mem.shown = id.part().is_some().then_some(Shown { id, opt, offer: None, at: now });
-    }
-    // Until then the last one stays, and a moment after the pointer leaves.
-    if under.is_some() || still_held(&mem.shown, now) {
-        if let Some(s) = mem.shown.as_mut()
-            && under.is_some()
-        {
-            s.at = now;
-        }
-    } else {
+    } else if let Some((id, opt)) = under {
+        mem.shown = id.part().is_some().then(|| Shown { id, opt, offer: None, at: now });
+    } else if !in_rows {
         mem.shown = None;
-    }
-    if under.is_none()
-        && let Some(s) = &mem.shown
-    {
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64((s.at + HOLD_S - now).max(0.0) + 0.01));
     }
     if let Some(s) = mem.shown.clone() {
         let prefs = s.offer.or_else(|| s.opt.and_then(|i| option_prefs(s.id, p, i))).unwrap_or_else(|| p.clone());
         show(&mut req, &mut *mem, s.id, prefs);
     }
     req
-}
-
-/// Whether what the stage shows is still held after the pointer left the
-/// rows.
-fn still_held(shown: &Option<Shown>, now: f64) -> bool {
-    shown.as_ref().is_some_and(|s| now - s.at < HOLD_S)
 }
 
 /// Ctrl+Z: one step back through this visit's changes (a slider's drag is
@@ -818,10 +785,8 @@ mod tests {
         };
         let progress = [row(Id::ProgressWave, Vec::new())];
         let first = step(&progress, &mut mem);
-        assert!(first.parts.is_empty(), "passing over shows nothing yet");
-        let _ = step(&progress, &mut mem);
-        let rest = step(&progress, &mut mem);
-        assert_eq!((rest.scene, rest.parts.clone(), rest.zoom), (Scene::Track, Vec::new(), false));
+        assert_eq!((first.scene, first.parts.clone(), first.zoom), (Scene::Track, Vec::new(), false), "the row shows the frame it is entered");
+        assert!(!first.beat, "a wave is not a beat");
 
         let volume = [row(Id::NpVolume, vec![Rect::from_min_size(pos2(200.0, 0.0), vec2(10.0, 10.0)), here])];
         for _ in 0..3 {

@@ -2,7 +2,7 @@
 //! itself, and the models that listen to the voice. The stage beside the
 //! rows shows the lyrics.
 
-use egui::Ui;
+use egui::{ScrollArea, Ui};
 use nikgob_view::{Command, LYRICS_BY_LETTERS, Prefs, ViewState};
 
 use super::super::settings_help::SettingId as Id;
@@ -11,10 +11,13 @@ use super::rows::{self, Num, child, dimmed, group, menu, segments, switch};
 use super::{out_push, size_label, take_pushed};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, IconButton, Style},
+    components::{Button, Dialog, IconButton, Size, Style},
 };
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
+    group(ui, "Модели");
+    models(ui, state, out);
+
     look(ui, p);
 
     group(ui, "Поиск текста");
@@ -29,9 +32,6 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<
     let streams = p.lyrics_streams;
     child(ui, !streams, |ui| segments(ui, Id::LyricsStreamKeep, p));
     switch(ui, Id::LyricsRecognize, &mut p.lyrics_recognize);
-
-    group(ui, "Модели");
-    models(ui, state, out);
 }
 
 /// «Вид текста»: the animation and how it moves, the size and lead, the
@@ -113,48 +113,62 @@ fn look(ui: &mut Ui, p: &mut Prefs) {
     }
 }
 
-/// «Модели»: each with its size and «Скачать» / delete (or how far its
-/// download is); a failed download says why, the one text here.
+/// «Модели»: a compact row (how many are here, how much they weigh) that
+/// opens the list. The list used to sit at the bottom of the tab.
 fn models(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let a = &state.align;
-    let s = Theme::get(ui.ctx()).scheme;
+    let open_id = egui::Id::new("lyrics-models-open");
+    let ready = a.models.iter().filter(|m| m.state == nikgob_view::ModelState::Ready).count();
+    let bytes: u64 = a.models.iter().map(|m| m.size).sum();
+    let summary = format!("{ready} из {} · {}", a.models.len(), size_label(bytes));
     rows::titled(ui, Id::LyricsModels, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(TypeRole::BodyLarge.style().rich(summary, Theme::get(ui.ctx()).scheme.on_surface));
+            if ui.add(Button::new("Открыть").style(Style::Outlined).size(Size::S).id_salt("lyrics-models-open")).clicked() {
+                ui.ctx().data_mut(|d| d.insert_temp(open_id, true));
+            }
+        });
         if let Some(e) = &a.error {
-            ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
+            ui.label(TypeRole::BodyMedium.style().rich(e, Theme::get(ui.ctx()).scheme.error));
         }
-        ui.add_space(4.0);
-        crate::components::segmented_list(ui, a.models.len(), |i| {
-            let m = &a.models[i];
-            let key = m.key.clone();
-            let state = m.state;
-            let item = crate::components::ListItem::new(m.label.clone()).supporting(size_label(m.size)).id_salt(("align-model", i));
-            item.trailing(move |ui: &mut Ui| match state {
-                nikgob_view::ModelState::Ready => {
-                    if ui.add(IconButton::new(Icon::Delete).tooltip("Удалить").id_salt(("align-model-del", key.clone()))).clicked() {
-                        out_push(ui, Command::AlignModel { key: key.clone(), download: false });
-                    }
-                }
-                // How far it is: the bar, no words.
-                nikgob_view::ModelState::Downloading(f) => {
-                    crate::components::wavy_progress(ui, ("align-model-dl", key.clone()), f, 96.0);
-                }
-                nikgob_view::ModelState::Missing => {
-                    if ui
-                        .add(
-                            Button::new("Скачать")
-                                .style(Style::Tonal)
-                                .size(crate::components::Size::Xs)
-                                .id_salt(("align-model-get", key.clone())),
-                        )
-                        .clicked()
-                    {
-                        out_push(ui, Command::AlignModel { key: key.clone(), download: true });
-                    }
-                }
-            })
+    });
+    if ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false) {
+        let mut open = true;
+        let s = Theme::get(ui.ctx()).scheme;
+        let r = Dialog::new("lyrics-models", "Модели").max_width(560.0).action("Закрыть").show_with(ui.ctx(), &mut open, |ui| {
+            if let Some(e) = &state.align.error {
+                ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
+                ui.add_space(8.0);
+            }
+            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                crate::components::segmented_list(ui, state.align.models.len(), |i| {
+                    let m = &state.align.models[i];
+                    let key = m.key.clone();
+                    let model_state = m.state;
+                    let item = crate::components::ListItem::new(m.label.clone()).supporting(size_label(m.size)).id_salt(("align-model", i));
+                    item.trailing(move |ui: &mut Ui| match model_state {
+                        nikgob_view::ModelState::Ready => {
+                            if ui.add(IconButton::new(Icon::Delete).tooltip("Удалить").id_salt(("align-model-del", key.clone()))).clicked() {
+                                out_push(ui, Command::AlignModel { key: key.clone(), download: false });
+                            }
+                        }
+                        nikgob_view::ModelState::Downloading(f) => {
+                            crate::components::wavy_progress(ui, ("align-model-dl", key.clone()), f, 96.0);
+                        }
+                        nikgob_view::ModelState::Missing => {
+                            if ui.add(Button::new("Скачать").style(Style::Tonal).size(Size::Xs).id_salt(("align-model-get", key.clone()))).clicked() {
+                                out_push(ui, Command::AlignModel { key: key.clone(), download: true });
+                            }
+                        }
+                    })
+                });
+            });
         });
         for c in take_pushed(ui) {
             out.push(c);
         }
-    });
+        if r.action.is_some() || r.dismissed || !open {
+            ui.ctx().data_mut(|d| d.remove::<bool>(open_id));
+        }
+    }
 }

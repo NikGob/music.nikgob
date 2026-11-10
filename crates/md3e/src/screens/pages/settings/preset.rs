@@ -3,11 +3,10 @@
 //! the track screen; «Свои» after them while there are values of the
 //! user's own.
 //!
-//! The preset under the pointer is shown before it is applied: the stage
-//! draws it, and the rows it would change take their future values on a
-//! tonal underlay (in «Просто» a chevron opens those rows in place, until
-//! the page is left). A click sends the preset as its own patch, so the
-//! values kept for «Свои» are the runtime's, not the page's copy.
+//! The preset under the pointer is shown at once, before it is applied: the
+//! stage draws it, and the rows it would change take their future values
+//! (nothing of them is kept). A click sends the preset as its own patch, so
+//! the values kept for «Свои» are the runtime's, not the page's copy.
 
 use egui::{Rect, Sense, Stroke, Ui, vec2};
 use nikgob_view::presets::{Area, CUSTOM};
@@ -23,9 +22,6 @@ use crate::{
     tokens::shape,
 };
 
-/// The pointer must rest this long on a preset before it is shown (passing
-/// over the buttons shows nothing).
-pub(super) const DWELL: f64 = 0.12;
 
 /// What the preset row offers this pass while the pointer rests on one of
 /// its presets: the settings it would give.
@@ -61,27 +57,6 @@ pub(super) fn close_all(ctx: &egui::Context) {
     ctx.data_mut(|d| d.remove::<Vec<Area>>(open_key()));
 }
 
-/// Since when the pointer rests on option `at` of `id`'s row.
-fn dwelt(ui: &Ui, id: Id, at: Option<usize>) -> bool {
-    let key = egui::Id::new(("settings-preset-dwell", id));
-    let now = anim::now(ui.ctx());
-    let Some(at) = at else {
-        ui.ctx().data_mut(|d| d.remove::<(usize, f64)>(key));
-        return false;
-    };
-    let since = match ui.ctx().data(|d| d.get_temp::<(usize, f64)>(key)) {
-        Some((i, t)) if i == at => t,
-        _ => {
-            ui.ctx().data_mut(|d| d.insert_temp(key, (at, now)));
-            now
-        }
-    };
-    if now - since < DWELL {
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(DWELL - (now - since) + 0.01));
-        return false;
-    }
-    true
-}
 
 /// The settings option `i` of `area`'s row gives: a preset, or «Свои» (the
 /// values kept, or the current ones when none were).
@@ -146,25 +121,22 @@ pub(super) fn row(ui: &mut Ui, area: Area, p: &Prefs) -> Option<Prefs> {
         Some(_) if p.custom_presets.contains_key(&area) => rows::send(&ctx, PrefPatch::PresetCustom(area)),
         _ => {}
     }
-    // The preset under the pointer; in a gap between two, the one shown
-    // last stays (the stage and the rows do not flick back to the current
-    // values on the way to the next one).
+    // The preset under the pointer, the frame it is entered. In a gap
+    // between two, the one shown last stays, so the rows do not flick back
+    // to the current values on the way to the next one. Leaving the row
+    // restores at once.
     let held_key = egui::Id::new(("settings-preset-held", id));
     let line = rects.iter().fold(Rect::NOTHING, |a, r| a.union(*r));
     let mut under = rects.iter().position(|r| ui.rect_contains_pointer(*r));
-    if under.is_none() && ui.rect_contains_pointer(line) {
+    if under.is_none() && ui.rect_contains_pointer(line.expand2(vec2(4.0, 6.0))) {
         under = ctx.data(|d| d.get_temp::<usize>(held_key)).filter(|i| *i < rects.len());
     }
-    if !dwelt(ui, id, under) {
-        if under.is_none() {
-            ctx.data_mut(|d| d.remove::<usize>(held_key));
-        }
+    let Some(i) = under else {
+        ctx.data_mut(|d| d.remove::<usize>(held_key));
         return None;
-    }
-    let i = under?;
+    };
     ctx.data_mut(|d| d.insert_temp(held_key, i));
     let shown = offered(area, p, i);
-    settings_help::set_future(&ctx, settings_help::preset_changes(area, p, &shown));
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.insert_temp(offer_key(), (pass, Offer { id, prefs: shown.clone() })));
     Some(shown)

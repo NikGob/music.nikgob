@@ -19,7 +19,7 @@ use egui::{Sense, Stroke, Ui, vec2};
 use nikgob_view::{PrefPatch, Prefs};
 
 use super::super::settings_help::{self, Level, SettingId as Id};
-use super::super::{brand, connected};
+use super::super::{brand, connected_shown};
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, Menu, MenuItem, Slider, Style, Switch},
@@ -53,7 +53,6 @@ pub(super) fn set_mode(ctx: &egui::Context, mode: Mode) {
         d.insert_temp(mode_key(), mode);
         d.remove::<bool>(expanded_key());
     });
-    settings_help::clear_future(ctx);
 }
 
 fn expanded_key() -> egui::Id {
@@ -118,7 +117,6 @@ pub(crate) fn group(ui: &mut Ui, title: &str) {
         d.insert_temp(pending_key(), Pending { group: Some(title.to_owned()), sub: None });
         d.remove::<bool>(expanded_key());
     });
-    settings_help::clear_future(ui.ctx());
 }
 
 /// A subtitle inside a big group: «Подробно» only (in «Просто» the few
@@ -381,30 +379,63 @@ pub(crate) fn menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
     row(ui, id, |ui| choice_menu(ui, id, p));
 }
 
-/// Segmented buttons for a choice row (labels and values from
-/// [`Id::choices`]); their rects go to the ⓘ card (and the stage).
+/// Segmented buttons for a choice row ([`Id::choices`]); their rects go to
+/// the ⓘ card and the stage. The option under the pointer is painted
+/// selected the same frame it is entered, and restored the frame it is left.
 pub(crate) fn choice(ui: &mut Ui, id: Id, p: &mut Prefs) {
     let labels: Vec<&str> = id.choices().iter().map(|c| c.label).collect();
-    let (pick, rects) = connected(ui, egui::Id::new(("set-choice", id)), &labels, id.chosen(p), &[]);
-    settings_help::report_choices(ui.ctx(), rects);
+    let saved = id.chosen(p);
+    let shown = hovered_choice(ui, id).unwrap_or(saved);
+    let (pick, rects) = connected_shown(ui, egui::Id::new(("set-choice", id)), &labels, saved, &[], shown);
+    settings_help::report_choices(ui.ctx(), rects.clone());
+    ui.ctx().data_mut(|d| d.insert_temp(choice_rects_key(id), rects));
     if let Some(n) = pick {
         id.choose(p, n);
     }
 }
 
-/// A menu chip for a choice row with long labels.
+/// A menu chip for a choice row with long labels. An open menu paints the
+/// item under the pointer as the current one.
 pub(crate) fn choice_menu(ui: &mut Ui, id: Id, p: &mut Prefs) {
     let cur = id.chosen(p);
-    let options: Vec<(String, bool)> = id.choices().iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == cur)).collect();
+    let shown = hovered_choice(ui, id).unwrap_or(cur);
+    let options: Vec<(String, bool)> = id.choices().iter().enumerate().map(|(i, c)| (c.label.to_owned(), i == shown)).collect();
     let salt = format!("set-menu-{id:?}");
-    let pick = dropdown(ui, &salt, id.choices()[cur].label, &options);
-    // The open menu's items, for the ⓘ card (and the stage).
+    let pick = dropdown(ui, &salt, id.choices()[shown].label, &options);
     if let Some(rects) = Menu::item_rects(ui.ctx(), (salt.as_str(), "menu")) {
-        settings_help::report_menu(ui.ctx(), rects);
+        settings_help::report_menu(ui.ctx(), rects.clone());
+        ui.ctx().data_mut(|d| d.insert_temp(choice_rects_key(id), rects));
+    } else {
+        ui.ctx().data_mut(|d| d.remove::<Vec<egui::Rect>>(choice_rects_key(id)));
     }
     if let Some(n) = pick {
         id.choose(p, n);
     }
+}
+
+fn choice_rects_key(id: Id) -> egui::Id {
+    egui::Id::new(("settings-choice-rects", id))
+}
+
+fn choice_held_key(id: Id) -> egui::Id {
+    egui::Id::new(("settings-choice-held", id))
+}
+
+/// The option under the pointer, from the rects laid out last frame (this
+/// frame's are not known yet). A gap between neighbours keeps the last one.
+fn hovered_choice(ui: &Ui, id: Id) -> Option<usize> {
+    let rects: Vec<egui::Rect> = ui.ctx().data(|d| d.get_temp(choice_rects_key(id))).unwrap_or_default();
+    let pointer = ui.input(|i| i.pointer.hover_pos())?;
+    if let Some(i) = rects.iter().position(|r| r.contains(pointer)) {
+        ui.ctx().data_mut(|d| d.insert_temp(choice_held_key(id), i));
+        return Some(i);
+    }
+    let line = rects.into_iter().reduce(|a, b| a.union(b))?;
+    if line.expand2(vec2(4.0, 6.0)).contains(pointer) {
+        return ui.ctx().data(|d| d.get_temp(choice_held_key(id)));
+    }
+    ui.ctx().data_mut(|d| d.remove::<usize>(choice_held_key(id)));
+    None
 }
 
 /// A chip that opens a menu of `options` (label, selected). Returns the pick.

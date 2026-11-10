@@ -796,7 +796,7 @@ impl SettingId {
             LyricsSeparate => "Перед сверкой голос отделяется от музыки: слова ложатся точнее. На процессоре это долго, около двух минут на песню.",
             LyricsDeep => "Подсветка делается моделями крупнее: голос отделяется чище, слова слушаются дважды. Модели скачиваются при первом включении; на видеокарте песня занимает до минуты, на процессоре — несколько минут.",
             LyricsGpu => "Где считают модели. На видеокарте (через DirectML) в десятки раз быстрее; если она не справится, плеер сам перейдёт на процессор.",
-            LyricsModelsAuto => "Нужные модели скачиваются сами, когда понадобятся. Выключено — только вручную, в списке моделей.",
+            LyricsModelsAuto => "Нужные модели скачиваются сами, когда понадобятся. Выключено — только вручную, в «Моделях».",
             LyricsGenius => "Если подходящего текста со временем нет, плеер берёт простой текст с genius.com. Найденный текст хранится в библиотеке, второй раз его не ищут.",
             LyricsStreams => "Подсветку по словам можно сделать и для песни, которая играет с YouTube: плеер на время скачивает её звук, слушает голос и удаляет звук. Только для песен, где ясно, кто и что поёт.",
             LyricsStreamKeep => "Что «Сохранить текст» кладёт в папку исполнителя в библиотеке для песни без файла.",
@@ -1453,6 +1453,26 @@ impl SettingId {
             _ => Script::None,
         }
     }
+
+    /// Whether the stage should pulse on a beat while this row is shown.
+    /// Cover shape, ring style and the rest stay calm, so the shape can be
+    /// judged; only a row whose change is the beat itself pulses.
+    pub fn needs_beat(self, p: &Prefs) -> bool {
+        use SettingId::*;
+        match self {
+            Ambient | AmbientStrength => p.ambient == v::Ambient::Reactive,
+            RingBeat => p.ring_beat,
+            CoverPulse | CoverPulseStrength => p.cover_pulse,
+            BgReact => p.bg_shapes != v::BgShapes::Off,
+            Preset(v::presets::Area::Track) => {
+                p.cover_pulse
+                    || p.ring_beat
+                    || p.ambient == v::Ambient::Reactive
+                    || (p.bg_shapes != v::BgShapes::Off && p.bg_shapes_react > 0.02)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// The rows that show a field a preset owns (where its future value is
@@ -1627,8 +1647,6 @@ struct Span {
 struct Parts {
     button: Option<Rect>,
     control: Option<Rect>,
-    /// The part of the control a preset changes, when not all of it.
-    future: Option<Rect>,
     choices: Vec<Rect>,
     menu: Vec<Rect>,
 }
@@ -1715,19 +1733,6 @@ fn pinned_key() -> Id {
     Id::new("settings-help-pinned")
 }
 
-fn future_key() -> Id {
-    Id::new("settings-help-future")
-}
-
-/// While a preset is under the pointer, the rows it would change: drawn
-/// with their future values on a tonal underlay, until [`clear_future`].
-pub fn set_future(ctx: &egui::Context, rows: Vec<SettingId>) {
-    ctx.data_mut(|d| d.insert_temp(future_key(), rows));
-}
-
-pub fn clear_future(ctx: &egui::Context) {
-    ctx.data_mut(|d| d.remove::<Vec<SettingId>>(future_key()));
-}
 
 fn pinned(ctx: &egui::Context) -> Option<Pinned> {
     ctx.data(|d| d.get_temp::<Option<Pinned>>(pinned_key())).flatten()
@@ -1873,7 +1878,6 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
         ctx.data_mut(|d| d.insert_temp(focus_key(), f));
     }
     let parts = ctx.data_mut(|d| d.remove_temp::<Parts>(parts_key())).unwrap_or_default();
-    future_pill(ui, id, bg, parts.future.or(parts.control));
     let button = parts.button.unwrap_or_else(|| {
         // Blocks of fields: beside the first field, on its centre line.
         let r = Rect::from_min_size(pos2(rect.right() + 8.0, rect.top() + 17.0), Vec2::splat(BTN));
@@ -1910,30 +1914,6 @@ pub fn item<R>(ui: &mut Ui, id: SettingId, label: &str, add: impl FnOnce(&mut Ui
     inner.inner
 }
 
-/// While a preset under the pointer would change the row of `id`, its
-/// control shows the future value (drawn from the preset) on a soft tonal
-/// pill just behind it, in the reserved shape `bg`: no band across the row,
-/// nothing moves; the pill fades in and out on the effects spring, so
-/// passing from preset to preset never blinks.
-fn future_pill(ui: &Ui, id: SettingId, bg: egui::layers::ShapeIdx, control: Option<Rect>) {
-    let ctx = ui.ctx();
-    let theme = Theme::get(ctx);
-    let future = ctx.data(|d| d.get_temp::<Vec<SettingId>>(future_key())).is_some_and(|f| f.contains(&id));
-    let k = anim::fraction(ctx, Id::new(("settings-future", id)), if future { 1.0 } else { 0.0 }, theme.motion.fast_effects);
-    let Some(control) = control.filter(|_| k > 0.001) else { return };
-    let r = control.expand2(vec2(8.0, 4.0));
-    // A link's glow on the row has the shape.
-    if ctx.data(|d| d.get_temp::<Focus>(focus_key())).is_some_and(|f| f.id == id && !f.group) {
-        return;
-    }
-    ui.painter().set(bg, Shape::rect_filled(r, r.height() * 0.5, theme.scheme.primary.gamma_multiply(0.16 * k)));
-}
-
-/// The part of the item's control a preset changes (a switch among the
-/// row's other buttons), for its pill.
-pub fn report_future(ctx: &egui::Context, rect: Rect) {
-    ctx.data_mut(|d| d.get_temp_mut_or_default::<Parts>(parts_key()).future = Some(rect));
-}
 
 /// Size of the ⓘ button.
 pub const BTN: f32 = 22.0;
@@ -2930,6 +2910,13 @@ mod tests {
         assert_eq!(S::LyricsDim.staged(&karaoke), karaoke, "a row the look has is shown as it is");
         assert_eq!(S::Preset(v::presets::Area::Track).parts().len(), 4);
         assert!(S::Theme.parts().is_empty(), "the whole screen: nothing outlined");
+        let calm = Prefs::default();
+        assert!(!S::CoverShape.needs_beat(&calm) && !S::RingStyle.needs_beat(&calm), "a shape stays calm");
+        assert!(S::CoverPulse.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
+        assert!(!S::CoverPulse.needs_beat(&calm));
+        assert!(S::RingBeat.needs_beat(&Prefs { ring_beat: true, ..calm.clone() }));
+        assert!(S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Reactive, ..calm.clone() }));
+        assert!(!S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Glow, ..calm }));
     }
 
     #[test]
