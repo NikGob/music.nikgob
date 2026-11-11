@@ -432,7 +432,7 @@ fn text_of(html: &str) -> String {
             continue;
         }
         if r.starts_with('&')
-            && let Some(semi) = r[..r.len().min(12)].find(';')
+            && let Some(semi) = r.as_bytes()[..r.len().min(12)].iter().position(|&b| b == b';')
             && let Some(c) = entity(&r[1..semi])
         {
             out.push(c);
@@ -491,6 +491,13 @@ mod tests {
         <div data-lyrics-container="true" class="Lyrics__Container"><div data-exclude-from-selection="true"><span>3 Contributors</span><div>Translations</div></div>[Куплет 1]<br/>Я <a href="/1"><span>смотрю</span></a> в небо,<br/>там&#x27;s космоцветок &amp; звёзды<br/><br/>[Припев]<br/>Лети</div>
         <div>Embed</div>
         <div data-lyrics-container="true">Второй <i>блок</i></div></body></html>"#;
+
+    #[test]
+    fn an_ampersand_before_cyrillic_is_text() {
+        // A bare «&» with Cyrillic within its first 12 bytes: no entity, no panic.
+        assert_eq!(text_of("Рок &Слово и Сердце"), "Рок &Слово и Сердце");
+        assert_eq!(text_of("&amp;Сердце"), "&Сердце");
+    }
 
     #[test]
     fn page_text_without_headers_and_labels() {
