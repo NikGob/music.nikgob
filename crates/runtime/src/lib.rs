@@ -1372,6 +1372,9 @@ impl Worker {
             }
             Command::WrongFile(track) => self.wrong_file(track, None),
             Command::UndoWrongFile(track) => self.undo_wrong_file(track),
+            Command::FindBetter(track) => self.find_better(track),
+            Command::FakeToMp3(track) => self.fake_to_mp3(track),
+            Command::UndoFakeToMp3(track) => self.undo_fake_to_mp3(track),
             Command::RecordingApart(track) => self.recording_apart(track),
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),

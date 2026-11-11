@@ -57,6 +57,9 @@ pub(crate) enum Msg {
     Converted { done: usize, failed: usize },
     /// «Вернуть FLAC»: how many came back, and how many could not.
     Restored { done: usize, failed: usize },
+    /// The fake file of a track the user turned into an MP3 by hand: the
+    /// track's title, the codec the original had, and what came of it.
+    OneConverted { track: TrackId, title: String, codec: String, result: Result<(), String> },
 }
 
 /// What the settings allow, set by the worker.
@@ -598,6 +601,80 @@ impl Worker {
         self.publish_fake_offers();
     }
 
+    /// «Превратить в MP3» of `track` (its menu, «Источник и качество»):
+    /// its lossless file that surely holds an MP3 becomes that MP3 with its
+    /// tags, cover and lyrics, the original goes to the library's Trash,
+    /// and «Отменить» on the toast brings it back. One file, on this click
+    /// only; a doubt is never converted.
+    pub(crate) fn fake_to_mp3(&mut self, track: TrackId) {
+        if self.quality.busy {
+            log::info!("quality: a conversion runs, {track} waits for the next click");
+            return;
+        }
+        let src = self
+            .lib
+            .active_source(track)
+            .ok()
+            .flatten()
+            .filter(|s| s.kind.is_local() && s.available && s.trashed_at.is_none());
+        let check = src.as_ref().and_then(|s| self.lib.quality_check(s.id).ok().flatten());
+        let (Some(src), Some(check)) = (src, check) else {
+            log::warn!("quality: {track} has no checked file to turn into an MP3");
+            return;
+        };
+        if !nikgob_core::quality::mp3_inside(&src.codec, &check.summary()) {
+            log::warn!("quality: {} is not surely made from an MP3, left as it is", src.locator);
+            return;
+        }
+        let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
+        let codec = nikgob_core::quality::codec_name(&src.codec);
+        let Some(svc) = &self.import else {
+            self.toast("Импорт недоступен", None);
+            return;
+        };
+        let Some(enc) = Mp3Encoder::find() else {
+            self.toast("Нужен ffmpeg, чтобы сделать MP3", None);
+            return;
+        };
+        let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
+        log::info!("quality: the user turns {} into an MP3", src.locator);
+        svc.spawn_blocking(move || {
+            crate::quiet::lower_priority();
+            let result = convert_fake(&lib, &trash, &enc, &src, &check).map(|_| ()).map_err(|e| e.to_string());
+            let _ = tx.send(Internal::Quality(Msg::OneConverted { track, title, codec, result }));
+        });
+        self.quality.busy = true;
+        self.publish_fake_offers();
+    }
+
+    /// «Отменить» on the toast of [`Self::fake_to_mp3`]: the original comes
+    /// back from the Trash to its place and plays again, the MP3 goes to
+    /// the Trash, and the original is not offered as an MP3 again.
+    pub(crate) fn undo_fake_to_mp3(&mut self, track: TrackId) {
+        if self.quality.busy {
+            log::info!("quality: a conversion runs, the undo of {track} waits for the next click");
+            return;
+        }
+        let Some(c) = self.lib.conversions().unwrap_or_default().into_iter().find(|c| c.track_id == track) else {
+            log::info!("quality: {track} has no MP3 to take back");
+            return;
+        };
+        let Some(svc) = &self.import else { return };
+        let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
+        svc.spawn_blocking(move || {
+            let (done, failed) = match restore_conversion(&lib, &trash, &c) {
+                Ok(()) => (1, 0),
+                Err(e) => {
+                    log::warn!("quality: {} stays in the Trash: {e}", c.trash_path);
+                    (0, 1)
+                }
+            };
+            let _ = tx.send(Internal::Quality(Msg::Restored { done, failed }));
+        });
+        self.quality.busy = true;
+        self.publish_fake_offers();
+    }
+
     /// «Вернуть FLAC из корзины»: every conversion is undone (one that was
     /// undone already is left as it is).
     pub(crate) fn restore_converted_flac(&mut self) {
@@ -651,6 +728,24 @@ impl Worker {
                     (false, d, f) => format!("Сделал MP3: {d}, не получилось: {f}"),
                 };
                 self.toast(text, None);
+                self.reload_after_import();
+                self.publish_fake_offers();
+            }
+            Msg::OneConverted { track, title, codec, result } => {
+                self.quality.busy = false;
+                match result {
+                    Ok(()) => {
+                        log::info!("quality: {track} plays its MP3 now, the {codec} is in the Trash");
+                        self.toast(
+                            format!("«{title}»: сделал MP3 · {codec} в Корзине"),
+                            Some(("Отменить".into(), v::Command::UndoFakeToMp3(track))),
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("quality: turning {track} into an MP3: {e}");
+                        self.toast(format!("Не получилось сделать MP3 из «{title}»"), None);
+                    }
+                }
                 self.reload_after_import();
                 self.publish_fake_offers();
             }

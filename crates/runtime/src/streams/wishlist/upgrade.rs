@@ -23,6 +23,8 @@ use nikgob_view::{self as v, UpgradeBar, UpgradeEvery};
 use super::{Next, RETRY_AFTER, offers_of_json};
 use crate::Worker;
 
+/// What a better copy asked for by hand looks for, in its row's words.
+const ASKED_WANTED: &str = "качество лучше";
 /// Searches for better copies that start in an hour at most…
 const PER_HOUR: usize = 4;
 /// …and how many of them search or download at once.
@@ -211,15 +213,23 @@ impl Worker {
         self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| i.origin == WishlistOrigin::Upgrade)
     }
 
-    /// An offer for `item` must be better than this to count: the bar less
-    /// one, for an item that looks for a better copy.
-    pub(super) fn upgrade_floor(&self, item: &WishlistItem) -> Option<i32> {
-        (item.origin == WishlistOrigin::Upgrade).then(|| self.upgrade_prefs().1.score() - 1)
+    /// The quality a file of `item` needs nothing better from: the bar,
+    /// or anything above the file a better copy was asked for by hand.
+    fn upgrade_line(&self, item: &WishlistItem) -> i32 {
+        item.better_than.map_or_else(|| self.upgrade_prefs().1.score(), |q| q.saturating_add(1))
     }
 
-    /// A found copy replaces the item's file only once the user says so.
+    /// An offer for `item` must be better than this to count: the bar less
+    /// one, for an item that looks for a better copy (the file's own
+    /// quality, for one asked for by hand).
+    pub(super) fn upgrade_floor(&self, item: &WishlistItem) -> Option<i32> {
+        (item.origin == WishlistOrigin::Upgrade).then(|| self.upgrade_line(item) - 1)
+    }
+
+    /// A found copy replaces the item's file only once the user says so
+    /// (always, for one asked for by hand).
     pub(super) fn upgrade_asks(&self, item: &WishlistItem) -> bool {
-        item.origin == WishlistOrigin::Upgrade && !self.upgrade_prefs().2
+        item.origin == WishlistOrigin::Upgrade && (item.better_than.is_some() || !self.upgrade_prefs().2)
     }
 
     /// The one place that says whether a track's file is looked for in
@@ -298,7 +308,7 @@ impl Worker {
 
     /// Every file of the item is good enough now.
     pub(super) fn upgrade_reached(&self, item: &WishlistItem) -> bool {
-        let bar = self.upgrade_prefs().1.score();
+        let bar = self.upgrade_line(item);
         let files = self.upgrade_files(item);
         !files.is_empty() && files.iter().all(|s| s.quality_score >= bar)
     }
@@ -306,7 +316,7 @@ impl Worker {
     /// The worst of the item's files below the bar, in words: what a copy
     /// that comes replaces.
     fn upgrade_worst(&self, item: &WishlistItem) -> Option<String> {
-        let bar = self.upgrade_prefs().1.score();
+        let bar = self.upgrade_line(item);
         self.upgrade_files(item)
             .iter()
             .filter(|s| s.quality_score < bar)
@@ -321,7 +331,7 @@ impl Worker {
         if let Some(have) = self.streaming.wish.upgrade_have.get(&item.id) {
             return have.clone();
         }
-        let bar = self.upgrade_prefs().1.score();
+        let bar = self.upgrade_line(item);
         let files = self.upgrade_files(item);
         let below: Vec<&Source> = files.iter().filter(|s| s.quality_score < bar).collect();
         let have = below.iter().min_by_key(|s| s.quality_score).map(|worst| {
@@ -346,7 +356,7 @@ impl Worker {
             WishlistStatus::Done => None,
             _ => self.upgrade_have(item),
         };
-        let wanted = self.upgrade_prefs().1.wanted();
+        let wanted = if item.better_than.is_some() { ASKED_WANTED } else { self.upgrade_prefs().1.wanted() };
         upgrade_words(item.status, files_wait, have.as_deref(), wanted, next, item.note.as_deref())
     }
 
@@ -387,7 +397,8 @@ impl Worker {
             let Some(item) = due.or_else(|| self.upgrade_new(bar)) else { break };
             // Good enough already (a download meanwhile, a lower bar): nothing
             // to look for.
-            if !self.upgrade_files(&item).iter().any(|s| s.quality_score < bar.score()) {
+            let line = self.upgrade_line(&item);
+            if !self.upgrade_files(&item).iter().any(|s| s.quality_score < line) {
                 log::info!("upgrade: {} needs nothing better now", item.title.as_deref().unwrap_or("?"));
                 self.upgrade_drop(item.id);
                 continue;
@@ -484,17 +495,128 @@ impl Worker {
     }
 
     /// Nothing better this time (or the user kept the file): searched again
-    /// when the schedule says.
-    pub(super) fn upgrade_none(&mut self, id: WishlistId) {
+    /// when the schedule says. One the user asked for by hand looks on as
+    /// any other from now on, and a search of it that found nothing
+    /// (`tell`) answers the click, whatever the toasts of the downloads
+    /// running by themselves are set to.
+    pub(super) fn upgrade_none(&mut self, id: WishlistId, tell: bool) {
         let now = Self::now();
         let next = next_search(self.upgrade_prefs().0, now).unwrap_or(now + RETRY_AFTER.as_millis() as i64);
+        let mut asked = false;
         self.set_item(id, |i| {
             i.status = WishlistStatus::NoTorrent;
             i.next_try_at = Some(next);
             i.note = Some("Лучше пока нет".into());
+            asked = i.better_than.take().is_some();
         });
         self.streaming.wish.upgrade_from.remove(&id);
+        self.streaming.wish.upgrade_have.remove(&id);
         self.wish_line_drop(id);
+        if asked && tell {
+            let title = self.item_title(id);
+            log::info!("upgrade: nothing better than the file of {title}");
+            self.toast(format!("Лучше не нашёл: {title}"), None);
+        }
+        self.publish_wishlist();
+    }
+
+    /// «Найти качество лучше…» of `track`: a copy better than its file is
+    /// looked for now, by the sources the wishlist asks in the user's order,
+    /// and waits in «Подтверди» for the user's word whatever the prefs say.
+    /// A track with no file goes to «Хочу скачать» as «Скачать» sends it;
+    /// one with only audio saved from a stream has its own item look again.
+    pub(crate) fn find_better(&mut self, track: TrackId) {
+        let file = self
+            .lib
+            .active_source(track)
+            .ok()
+            .flatten()
+            .filter(|s| s.kind.is_local() && s.available && s.trashed_at.is_none());
+        let Some(file) = file else {
+            self.download_tracks(&[track]);
+            return;
+        };
+        let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
+        let items = self.lib.wishlist_for_track(track).unwrap_or_default();
+        if file.quality_score <= score::SAVED_STREAM {
+            // Its item looks for a real file already.
+            let open = |i: &&WishlistItem| {
+                i.scope == WishlistScope::Track && !matches!(i.status, WishlistStatus::Done | WishlistStatus::Dismissed)
+            };
+            match items.iter().find(open) {
+                Some(i) => {
+                    let (id, what) = (i.id, i.title.as_ref().map(|t| format!("«{t}»")));
+                    self.wish_retry(id);
+                    self.download_toast(1, 0, what);
+                }
+                None => self.download_tracks(&[track]),
+            }
+            return;
+        }
+        if self.import.is_none() {
+            self.toast("Импорт недоступен", None);
+            return;
+        }
+        if !self.can_download() {
+            self.toast_open("Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
+            return;
+        }
+        // A better copy of it on its way or waiting in «Подтверди» (its
+        // own, or its album's).
+        let busy = |i: &WishlistItem| {
+            i.origin == WishlistOrigin::Upgrade
+                && matches!(i.status, WishlistStatus::Searching | WishlistStatus::Downloading | WishlistStatus::Confirm)
+        };
+        let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
+        let album_busy = release.is_some_and(|r| {
+            self.lib
+                .wishlist_for_release(r)
+                .unwrap_or_default()
+                .iter()
+                .any(|i| i.scope == WishlistScope::Album && busy(i))
+        });
+        if album_busy || items.iter().any(|i| i.scope == WishlistScope::Track && busy(i)) {
+            self.download_toast(0, 1, None);
+            return;
+        }
+        let above = file.quality_score;
+        // Its item that waits for the schedule, or that the user turned
+        // down before: asked for again, it looks now.
+        let again = items
+            .into_iter()
+            .find(|i| i.scope == WishlistScope::Track && i.origin == WishlistOrigin::Upgrade && i.status != WishlistStatus::Done);
+        let item = match again {
+            Some(i) => {
+                self.upgrade_forget(i.id);
+                self.set_item(i.id, |i| {
+                    i.status = WishlistStatus::New;
+                    i.next_try_at = None;
+                    i.note = None;
+                    i.better_than = Some(above);
+                })
+            }
+            None => {
+                let made = self.item_for(Some(track), release);
+                made.map(|mut i| {
+                    i.scope = WishlistScope::Track;
+                    i.origin = WishlistOrigin::Upgrade;
+                    i.status = WishlistStatus::New;
+                    i.better_than = Some(above);
+                    i
+                })
+            }
+        };
+        let Some(item) = item else { return };
+        self.put_item(&item);
+        log::info!(
+            "upgrade: the user asks for better than {} ({above}) for {}",
+            file_label(&file),
+            item.title.as_deref().unwrap_or("?")
+        );
+        let what = item.title.clone().unwrap_or_default();
+        self.toast_open(format!("Ищу качество лучше: «{what}»"), "Открыть", wishlist);
+        self.streaming.wish.upgrade_runs.push(Instant::now());
+        self.wish_search(item);
         self.publish_wishlist();
     }
 
