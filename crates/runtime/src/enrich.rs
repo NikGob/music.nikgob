@@ -425,10 +425,13 @@ impl Worker {
                     };
                     s.library.artists.iter_mut().for_each(fix);
                     s.search.artists.iter_mut().for_each(fix);
-                    s.home.artist_mixes.iter_mut().for_each(fix);
                     if let Some(a) = s.artist.as_mut() {
                         fix(&mut a.card);
                     }
+                });
+                // Kept for a home page on its way too.
+                self.patch_home(move |home| {
+                    home.artist_mixes.iter_mut().filter(|a| a.id == id).for_each(|a| a.image = image.clone());
                 });
             }
             Event::PhotosDone => {

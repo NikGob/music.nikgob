@@ -15,8 +15,10 @@ mod convert;
 mod enrich;
 mod hd_covers;
 mod home;
+mod home_build;
 mod home_v2;
 mod import;
+mod library_search;
 mod lyrics;
 mod lyrics_keep;
 mod playlist_cover;
@@ -650,6 +652,32 @@ struct Worker {
     wishes_made: usize,
     /// The worker's own inbox (for threads started later).
     internal_tx: Sender<Internal>,
+    /// The turn of the loop going on, timed: its parts are marked with
+    /// [`Turn::lap`] wherever they are ([`SLOW_TURN`]).
+    turn: Turn,
+    /// The home page's builder thread ([`home_build`]).
+    home_build: home_build::HomeBuild,
+    /// Work background threads hand back to the loop ([`Later`]).
+    later_tx: Sender<Later>,
+    later_rx: Receiver<Later>,
+    /// The file of the next track whose tags are read off the loop
+    /// ([`Worker::read_facts_ahead`]).
+    reading_ahead: Option<PathBuf>,
+    /// The library's part of the search, read off the loop ([`library_search`]).
+    library_search: library_search::LibrarySearch,
+}
+
+/// Work a background thread hands back to the worker's loop: what it is
+/// (a slow turn names it) and what it does there.
+pub(crate) struct Later {
+    what: &'static str,
+    run: Box<dyn FnOnce(&mut Worker) + Send>,
+}
+
+impl Later {
+    pub(crate) fn new(what: &'static str, run: impl FnOnce(&mut Worker) + Send + 'static) -> Self {
+        Self { what, run: Box::new(run) }
+    }
 }
 
 impl Worker {
@@ -707,8 +735,12 @@ impl Worker {
         let sources_mtime = config.settings_path.as_ref().and_then(|p| {
             std::fs::metadata(nikgob_sources::config::beside(p)).and_then(|m| m.modified()).ok()
         });
+        let res = Resolver::new(config.library.clone(), config.library_dir);
+        let home_build = home_build::HomeBuild::start(&res);
+        let (later_tx, later_rx) = crossbeam_channel::unbounded();
+        let library_search = library_search::LibrarySearch::start(&res, later_tx.clone());
         Self {
-            res: Resolver::new(config.library.clone(), config.library_dir),
+            res,
             lib: config.library,
             playback,
             state,
@@ -779,12 +811,23 @@ impl Worker {
             wishes_later: Default::default(),
             wishes_made: 0,
             internal_tx,
+            turn: Turn::default(),
+            home_build,
+            later_tx,
+            later_rx,
+            reading_ahead: None,
+            library_search,
         }
     }
 
     fn run(&mut self, rx: Receiver<Msg>, pb: Receiver<PlaybackEvent>, internal: Receiver<Internal>) {
         let ticker = tick(self.streaming.schedule.tick);
         let fast = tick(Duration::from_secs(1));
+        let homes = self.home_build.done.clone();
+        let later = self.later_rx.clone();
+        // The home page is built while the rest below starts (the command
+        // the start sent builds it again once the loop runs).
+        self.load_home();
         // Once each, after a backup: doubles of a song, an artist or an
         // album become one, and every album has a line per place it counts.
         self.lib.repair_catalog();
@@ -812,24 +855,24 @@ impl Worker {
         self.start_align();
         self.dislikes_load(false);
         loop {
-            // What this turn of the loop does, for [`slow_turn`].
-            let mut turn = Turn::default();
+            // What this turn of the loop does, for [`SLOW_TURN`].
+            self.turn = Turn::default();
             select! {
                 recv(rx) -> m => match m {
                     Ok(Msg::Cmd(c)) => {
-                        turn.begin(|| format!("command {}", head_of(&c)));
+                        self.turn.begin(|| format!("command {}", head_of(&c)));
                         self.command(c);
                     }
                     Ok(Msg::Service(s)) => self.services.push(s),
                     Ok(Msg::Indexer(i)) => {
-                        turn.begin(|| "the indexer".to_owned());
+                        self.turn.begin(|| "the indexer".to_owned());
                         self.indexer = Some(i);
                         self.publish_sources();
                         self.wish_sources_ready();
                         self.wish_tick();
                     }
                     Ok(Msg::Source(s)) => {
-                        turn.begin(|| "a source".to_owned());
+                        self.turn.begin(|| "a source".to_owned());
                         // One per kind: a new one of a kind replaces the old.
                         self.sources.retain(|x| x.key() != s.key());
                         self.sources.push(s);
@@ -851,33 +894,49 @@ impl Worker {
                     }
                 },
                 recv(pb) -> e => if let Ok(e) = e {
-                    turn.begin(|| format!("playback {}", head_of(&e)));
+                    self.turn.begin(|| format!("playback {}", head_of(&e)));
                     self.playback_event(e);
                 },
                 recv(internal) -> m => if let Ok(m) = m {
-                    turn.begin(|| m.turn_name());
+                    self.turn.begin(|| m.turn_name());
                     self.internal(m);
                 },
+                recv(homes) -> m => if let Ok(done) = m {
+                    self.turn.begin(|| "a home page came".to_owned());
+                    self.home_built(done);
+                },
+                recv(later) -> m => if let Ok(l) = m {
+                    let what = l.what;
+                    self.turn.begin(|| what.to_owned());
+                    (l.run)(self);
+                },
                 recv(fast) -> _ => {
-                    turn.begin(|| "the second's poll".to_owned());
+                    self.turn.begin(|| "the second's poll".to_owned());
                     self.soloist_poll();
+                    self.turn.lap("soloist");
                     self.poll_torrents();
+                    self.turn.lap("torrents");
                     self.poll_share();
+                    self.turn.lap("sharing");
                     self.wish_poll_direct();
+                    self.turn.lap("wishes");
                     self.reload_sources_file();
+                    self.turn.lap("sources file");
                 },
                 recv(ticker) -> _ => {
-                    turn.begin(|| "the tick".to_owned());
+                    self.turn.begin(|| "the tick".to_owned());
                     self.expire_toasts();
                     self.maybe_export(false);
+                    self.turn.lap("export");
                     self.save_session();
+                    self.turn.lap("session");
                     self.stream_tick();
-                    turn.lap("streams");
+                    self.turn.lap("streams");
                     self.recs_tick();
-                    turn.lap("recs");
+                    self.turn.lap("recs");
                 }
             }
-            turn.end();
+            std::mem::take(&mut self.turn).end();
             self.analysis.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.quality.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
             self.same_audio.set_playing(matches!(self.status, Status::Playing | Status::Buffering));
@@ -1008,6 +1067,7 @@ impl Worker {
             Command::Pause => self.pause(),
             Command::Next => {
                 self.record_end(true, EndReason::UserNext);
+                self.turn.lap("end recorded");
                 match self.queue.skip_forward() {
                     Some(e) => self.start(e),
                     None => self.stop(),
@@ -1080,11 +1140,13 @@ impl Worker {
                     .ok()
                     .flatten()
                     .map(|r| format!("альбома «{}»", r.title));
+                self.turn.lap("album read");
                 self.play_list(ids, start, shuffle, title, EventContext::Album, Some(format!("release:{id}")));
                 // An album known in part plays at once; the rest of its
                 // tracklist joins the queue when the services tell it.
                 self.album_queue = Some((id, self.queue.generation()));
                 self.complete_tracklist(id);
+                self.turn.lap("tracklist");
             }
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id, start);
@@ -1542,16 +1604,27 @@ impl Worker {
     }
 
     /// What to hand the engine for `e`: its best source that is usable and
-    /// not in `skip` (local > Spotify > YouTube, then quality). A stream
-    /// source needs its service registered. A stream copy set aside earlier
-    /// (its details or its video refused once) is tried again when nothing
-    /// else plays, unless it was refused in the last hours (`REFUSED_TTL`).
+    /// not in `skip` ([`Self::pick_source`]), with its gain and speed.
     /// Returns the source too; says in the log why nothing plays.
     fn request_skipping(
         &mut self,
         e: Entry,
         skip: &[SourceId],
     ) -> Option<(PlayRequest, SourceId, SourceKind)> {
+        let src = self.pick_source(e, skip)?;
+        self.turn.lap("source");
+        let req = self.request_from(e, &src);
+        self.turn.lap("gain");
+        Some((req, src.id, src.kind))
+    }
+
+    /// The best source of `e` that is usable and not in `skip` (local >
+    /// Spotify > YouTube, then quality). A stream source needs its service
+    /// registered. A stream copy set aside earlier (its details or its
+    /// video refused once) is tried again when nothing else plays, unless
+    /// it was refused in the last hours (`REFUSED_TTL`). Says in the log
+    /// why nothing plays.
+    fn pick_source(&mut self, e: Entry, skip: &[SourceId]) -> Option<nikgob_core::model::Source> {
         let mut sources = match self.lib.sources_of_track(e.track) {
             Ok(s) => s,
             Err(err) => {
@@ -1594,6 +1667,12 @@ impl Worker {
         if !src.available {
             log::info!("{}: trying its {} copy {} set aside earlier", e.track, src.kind.as_str(), src.locator);
         }
+        Some(src)
+    }
+
+    /// The request of `e` from `src`: a file's gain read from its tags
+    /// (once per file, [`convert::FactsCache`]), the length, the speed.
+    fn request_from(&mut self, e: Entry, src: &nikgob_core::model::Source) -> PlayRequest {
         let duration = self
             .lib
             .get_track(e.track)
@@ -1604,7 +1683,7 @@ impl Worker {
         let (source, gain_db) = match src.kind.service() {
             None => {
                 let path = self.res.path(&src.locator);
-                let gain = import::file_gain_db(&path);
+                let gain = self.res.facts().of(&path).gain_db;
                 (PlaySource::File(path), gain)
             }
             Some(service) => (
@@ -1616,15 +1695,14 @@ impl Worker {
             ),
         };
         let (speed, keep_timbre) = self.fx_of(e.track);
-        let req = PlayRequest {
+        PlayRequest {
             id: e.id,
             source,
             gain_db,
             duration,
             speed,
             keep_timbre,
-        };
-        Some((req, src.id, src.kind))
+        }
     }
 
     /// The version `track` plays as now, and whether it keeps its timbre.
@@ -1796,6 +1874,7 @@ impl Worker {
         }
         let start_idx = start.and_then(|s| ids.iter().position(|&t| t == s));
         self.user_switch(EventOrigin::Manual);
+        self.turn.lap("switch");
         // «Перемешать» turns shuffle on; a plain play keeps it as the user
         // set it (on: the list plays shuffled, from a random track unless
         // one was picked) or turns it off, as the setting says.
@@ -1804,6 +1883,7 @@ impl Worker {
             self.queue.shuffle = true;
         }
         self.queue.set_from(&ids, start_idx, context);
+        self.turn.lap("queue");
         // The new queue's own context, never the one before it (a mix's,
         // a playlist's) carried over.
         self.play_context = ctx;
@@ -1871,27 +1951,82 @@ impl Worker {
     /// actually plays, for a stream).
     fn start_with(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
         self.play_request(e, req, source, kind);
+        self.turn.lap("play");
         self.position = Duration::ZERO;
         self.position_at = Instant::now();
         self.rate = self.speed;
         self.jumped_at = Instant::now();
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
+        self.turn.lap("next");
         // What only YouTube Music may have is looked up ahead, gapless or not.
         self.resolve_ahead();
+        self.turn.lap("ahead");
         self.publish_now_playing();
+        self.turn.lap("now playing");
         self.likes_if_stale();
+        self.turn.lap("likes");
     }
 
     fn preload_next(&mut self) {
+        self.prepare_next(true);
+    }
+
+    /// [`Self::preload_next`]; `ahead`: a file whose tags were not read yet
+    /// is read on another thread first.
+    fn prepare_next(&mut self, ahead: bool) {
         // Gapless off: nothing is prepared, the next track starts after `Ended`.
-        if !self.state.read().prefs.gapless {
+        let next = if self.state.read().prefs.gapless { self.queue.peek_auto_next() } else { None };
+        let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
+            self.reading_ahead = None;
             self.playback.set_next(None);
             return;
+        };
+        // A file whose tags were not read yet is read off the loop; the
+        // engine gets the next track when they are.
+        if ahead && src.kind.service().is_none() {
+            let path = self.res.path(&src.locator);
+            if self.res.facts().get(&path).is_none() && self.read_facts_ahead(path) {
+                self.playback.set_next(None);
+                return;
+            }
         }
-        let next = self.queue.peek_auto_next();
-        let req = next.and_then(|n| self.request(n));
-        self.playback.set_next(req);
+        // Prepared here: a read still on its way prepares nothing again.
+        self.reading_ahead = None;
+        let req = self.request_from(next, &src);
+        self.playback.set_next(Some(req));
+    }
+
+    /// Reads the tags of `path` (the next track's file) on a thread of its
+    /// own, then prepares the next track (whatever it is by then, never
+    /// reading ahead again). False when no thread could start (it is read
+    /// here then).
+    fn read_facts_ahead(&mut self, path: PathBuf) -> bool {
+        if self.reading_ahead.as_ref() == Some(&path) {
+            return true;
+        }
+        let facts = self.res.facts().clone();
+        let later = self.later_tx.clone();
+        let file = path.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-facts".into()).spawn(move || {
+            facts.of(&file);
+            let _ = later.send(Later::new("the next track's tags", move |w| {
+                if w.reading_ahead.as_ref() == Some(&file) {
+                    w.reading_ahead = None;
+                    w.prepare_next(false);
+                }
+            }));
+        });
+        match spawned {
+            Ok(_) => {
+                self.reading_ahead = Some(path);
+                true
+            }
+            Err(e) => {
+                log::warn!("the next track's tags are read on the loop: {e}");
+                false
+            }
+        }
     }
 
     fn pause(&mut self) {
@@ -1996,7 +2131,10 @@ impl Worker {
         self.heard.reset();
         let meta = EventMeta { origin: Some(origin), context_id, ..EventMeta::default() };
         let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
+        self.turn.lap("start recorded");
         self.recs_started(e.track, origin);
+        self.turn.lap("recs session");
+        self.home_input_changed();
     }
 
     /// The playing track's [`Heard`] counts the time since its last tick,
@@ -2863,19 +3001,6 @@ impl Worker {
         }
     }
 
-    fn load_home(&mut self) {
-        let visit = self.visit();
-        let home = home::build_with(&self.lib, &visit);
-        let parts = self.recs_home_parts();
-        let mut view = self.res.home(&home);
-        parts.apply(&mut view, &mut self.res);
-        let stages: Vec<_> = view.worlds.iter().filter_map(|w| w.release).collect();
-        self.publish(|s| {
-            s.home = view;
-        });
-        self.kick_hd_covers(stages);
-    }
-
     /// A world's page ([`Command::LoadWorld`]).
     fn load_world(&mut self, key: &str) {
         let visit = self.visit();
@@ -2890,61 +3015,6 @@ impl Worker {
         let stage = view.world.release;
         self.publish(|s| s.world = Some(view));
         self.kick_hd_covers(stage);
-    }
-
-    fn search(&mut self, q: String) {
-        let trimmed = q.trim().to_owned();
-        let sources = self.streaming.search.sources;
-        if trimmed.is_empty() {
-            self.search_streams("", Vec::new());
-            self.publish(|s| {
-                s.search = nikgob_view::SearchView {
-                    sources,
-                    ..Default::default()
-                };
-            });
-            return;
-        }
-        // Library first (at once), then the services as they answer.
-        let started = Instant::now();
-        let r = if sources.library {
-            self.lib.search(&trimmed, 20).unwrap_or_default()
-        } else {
-            nikgob_library::SearchResults::default()
-        };
-        log::debug!(
-            target: "nikgob_runtime::streams",
-            "search «{trimmed}»: library {} tracks, {} albums in {} ms",
-            r.tracks.len(),
-            r.releases.len(),
-            started.elapsed().as_millis()
-        );
-        let lib_tracks = r.tracks.clone();
-        let res = &mut self.res;
-        let tracks = r.tracks.iter().map(|t| res.track(t)).collect();
-        let releases = r.releases.iter().map(|x| res.release(x)).collect();
-        let artists = r.artists.iter().map(|a| res.artist(a)).collect();
-        let playlists = r.playlists.iter().map(|p| res.playlist(p)).collect();
-        self.publish(|s| {
-            s.search = nikgob_view::SearchView {
-                query: q,
-                tracks,
-                releases,
-                artists,
-                playlists,
-                searching: false,
-                sources,
-                // The services' sections and the merged answer stay until
-                // their new answers.
-                streams: std::mem::take(&mut s.search.streams),
-                answer: std::mem::take(&mut s.search.answer),
-                torrents: std::mem::take(&mut s.search.torrents),
-            };
-        });
-        self.search_streams(&trimmed, lib_tracks);
-        if sources.torrents && self.state.read().search.torrents.query != trimmed {
-            self.search_torrents(trimmed);
-        }
     }
 
     /// Liking an album saves it; when album likes like the tracks too
@@ -3007,17 +3077,9 @@ impl Worker {
             s.queue.next.iter_mut().for_each(|e| fix(&mut e.track));
             s.library.tracks.iter_mut().for_each(fix);
             s.search.tracks.iter_mut().for_each(fix);
-            for r in [&mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
-                r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
-            }
-            for c in &mut s.home.continue_listening {
-                if let nikgob_view::ContinueCard::Release(c) = c
-                    && c.id == id
-                {
-                    c.liked = on;
-                }
-            }
+            s.search.releases.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
         });
+        self.patch_home(move |home| release_liked_on_home(home, id, on));
         self.after_like_change(before, vec![id]);
     }
 
@@ -3046,17 +3108,9 @@ impl Worker {
         };
         self.toast(text, Some(("Отменить".into(), Command::Like(LikeTarget::Release(id), !on))));
         self.publish(|s| {
-            for r in [&mut s.home.long_unplayed, &mut s.home.recently_added, &mut s.search.releases] {
-                r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
-            }
-            for c in &mut s.home.continue_listening {
-                if let nikgob_view::ContinueCard::Release(c) = c
-                    && c.id == id
-                {
-                    c.liked = on;
-                }
-            }
+            s.search.releases.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
         });
+        self.patch_home(move |home| release_liked_on_home(home, id, on));
         self.after_like_change(before, vec![id]);
     }
 
@@ -3175,6 +3229,7 @@ impl Worker {
     /// library, one unliked leaves it), or the library was never loaded,
     /// all of it is read again.
     fn library_edited(&mut self, before: Held, releases: Vec<nikgob_core::model::ReleaseId>) {
+        self.home_input_changed();
         let same = match before {
             Held::Same => true,
             Held::Tracks(Some(n)) => self.library_tracks() == Held::Tracks(Some(n)),
@@ -3265,20 +3320,20 @@ impl Worker {
             };
             s.library.releases.iter_mut().for_each(fix_release);
             s.search.releases.iter_mut().for_each(fix_release);
-            for c in &mut s.home.continue_listening {
-                if let nikgob_view::ContinueCard::Release(c) = c {
-                    fix_release(c);
-                }
-            }
-            s.home.long_unplayed.iter_mut().for_each(fix_release);
-            s.home.recently_added.iter_mut().for_each(fix_release);
             if let Some(r) = s.release.as_mut() {
                 fix_release(&mut r.card);
             }
             s.library.artists.iter_mut().for_each(fix_artist);
             s.search.artists.iter_mut().for_each(fix_artist);
-            s.home.artist_mixes.iter_mut().for_each(fix_artist);
         });
+        // The home's cards: kept for a page on its way too.
+        match target {
+            LikeTarget::Release(id) => self.patch_home(move |home| release_liked_on_home(home, id, on)),
+            LikeTarget::Artist(id) => self.patch_home(move |home| {
+                home.artist_mixes.iter_mut().filter(|a| a.id == id).for_each(|a| a.liked = on);
+            }),
+            _ => self.home_input_changed(),
+        }
         if let LikeTarget::Track(t) = target {
             let releases = self.releases_of(&[t]);
             self.after_like_change(before, releases);
@@ -3608,6 +3663,20 @@ fn context_page(id: &str) -> Option<nikgob_view::Route> {
         "playlist" => id.parse().ok().map(Route::Playlist),
         "artist" => id.parse().ok().map(Route::Artist),
         _ => None,
+    }
+}
+
+/// The hearts of album `id` on the home page's cards say `on`.
+fn release_liked_on_home(home: &mut nikgob_view::HomeView, id: nikgob_core::model::ReleaseId, on: bool) {
+    for r in [&mut home.long_unplayed, &mut home.recently_added] {
+        r.iter_mut().filter(|c| c.id == id).for_each(|c| c.liked = on);
+    }
+    for c in &mut home.continue_listening {
+        if let nikgob_view::ContinueCard::Release(c) = c
+            && c.id == id
+        {
+            c.liked = on;
+        }
     }
 }
 

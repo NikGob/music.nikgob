@@ -1465,18 +1465,6 @@ impl Worker {
     }
 }
 
-/// Track gain from the file's tags, normalized to −18 LUFS (ReplayGain 2.0
-/// reference; R128 gains are relative to −23 LUFS).
-pub(crate) fn file_gain_db(path: &Path) -> f32 {
-    let Ok((t, _)) = nikgob_import::tags::read_tags(path) else {
-        return 0.0;
-    };
-    t.r128_track_gain
-        .map(|q| f32::from(q) / 256.0 + 5.0)
-        .or(t.replaygain_track_gain_db)
-        .unwrap_or(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

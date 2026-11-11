@@ -276,12 +276,16 @@ impl Worker {
     pub(crate) fn hd_cover_found(&mut self, id: ReleaseId) {
         let Some(url) = cached(&self.lib, id) else { return };
         let cover = nikgob_view::Cover::web(url);
-        self.publish(|s| {
-            for w in &mut s.home.worlds {
+        // Kept for a home page on its way too.
+        let on_home = cover.clone();
+        self.patch_home(move |home| {
+            for w in &mut home.worlds {
                 if w.release == Some(id) {
-                    w.cover_hd = Some(cover.clone());
+                    w.cover_hd = Some(on_home.clone());
                 }
             }
+        });
+        self.publish(|s| {
             if let Some(w) = s.world.as_mut().filter(|w| w.world.release == Some(id)) {
                 w.world.cover_hd = Some(cover.clone());
             }

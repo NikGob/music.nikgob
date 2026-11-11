@@ -54,6 +54,7 @@ use crate::import::Internal;
 
 pub(crate) use cold::{IMPORT_DEVICE, STREAM_JOB, plural};
 pub(crate) use export::music_video_title;
+pub(crate) use pages::{album_card_of, stream_row_of};
 pub(crate) use replace::shown_title;
 pub(crate) use wishlist::{WISH_ID, upgrade_job_words};
 pub(crate) use schedule::wake_jitter;

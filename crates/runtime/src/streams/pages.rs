@@ -133,6 +133,70 @@ impl PageCache {
     }
 }
 
+/// The row of a service's track `t`, `track` its library track if it has
+/// one (it reads only the library: the home's builder makes rows too).
+pub(crate) fn stream_row_of(lib: &nikgob_library::Library, t: &StreamTrack, track: Option<TrackId>) -> v::StreamTrackRow {
+    let row = track.and_then(|id| lib.get_track_row(id).ok().flatten());
+    let album = t.album.as_ref();
+    v::StreamTrackRow {
+        remote: t.id.clone(),
+        title: t.title.clone(),
+        artist: t.artist_line(),
+        artists: t.artists.as_slice().into(),
+        album: album.map(|a| a.title.clone()),
+        album_id: album.and_then(|a| a.id.clone()),
+        duration: t.duration_ms.map(Duration::from_millis),
+        disc_no: t.disc_no.unwrap_or(1),
+        track_no: t.track_no.unwrap_or(0),
+        cover_url: t.cover_url.clone(),
+        kind: t.kind,
+        playable: t.playable,
+        in_library: track
+            .and_then(|id| lib.track_in_library(id).ok().flatten())
+            .unwrap_or(false),
+        liked: row.as_ref().is_some_and(|r| r.liked),
+        has_local: row.as_ref().is_some_and(|r| r.has_local),
+        elsewhere: None,
+        track,
+        also_on: Vec::new(),
+    }
+}
+
+/// How much of a service's album `a` the library has ([`Worker::album_have`]),
+/// `theirs` the service's track count ([`Worker::album_theirs`]).
+pub(crate) fn album_have_of(
+    lib: &nikgob_library::Library,
+    a: &StreamAlbum,
+    theirs: u32,
+) -> (Option<nikgob_core::model::ReleaseId>, v::AlbumHave) {
+    let release = lib.release_by_remote(&a.id).ok().flatten();
+    let p = release.and_then(|r| lib.release_progress(r).ok().flatten());
+    let have = v::AlbumHave {
+        local: p.map_or(0, |p| p.local),
+        in_library: p.map_or(0, |p| p.in_library),
+        total: p.map_or(0, |p| p.total).max(theirs),
+    };
+    (release, have)
+}
+
+/// The card of a service's album `a` ([`album_have_of`] says how much of it
+/// the library has).
+pub(crate) fn album_card_of(lib: &nikgob_library::Library, a: &StreamAlbum, theirs: u32) -> v::StreamAlbumCard {
+    let (release, have) = album_have_of(lib, a, theirs);
+    v::StreamAlbumCard {
+        remote: a.id.clone(),
+        title: a.title.clone(),
+        artist: join_names(&a.artists),
+        artists: a.artists.as_slice().into(),
+        year: a.year,
+        release_type: a.release_type,
+        cover_url: a.cover_url.clone(),
+        total_tracks: a.total_tracks,
+        release,
+        have,
+    }
+}
+
 impl Worker {
     pub(crate) fn load_stream(&mut self, page: v::StreamPage) {
         let remote = page.remote().clone();
@@ -316,30 +380,7 @@ impl Worker {
     }
 
     pub(crate) fn stream_row(&self, t: &StreamTrack, track: Option<TrackId>) -> v::StreamTrackRow {
-        let row = track.and_then(|id| self.lib.get_track_row(id).ok().flatten());
-        let album = t.album.as_ref();
-        v::StreamTrackRow {
-            remote: t.id.clone(),
-            title: t.title.clone(),
-            artist: t.artist_line(),
-            artists: t.artists.as_slice().into(),
-            album: album.map(|a| a.title.clone()),
-            album_id: album.and_then(|a| a.id.clone()),
-            duration: t.duration_ms.map(Duration::from_millis),
-            disc_no: t.disc_no.unwrap_or(1),
-            track_no: t.track_no.unwrap_or(0),
-            cover_url: t.cover_url.clone(),
-            kind: t.kind,
-            playable: t.playable,
-            in_library: track
-                .and_then(|id| self.lib.track_in_library(id).ok().flatten())
-                .unwrap_or(false),
-            liked: row.as_ref().is_some_and(|r| r.liked),
-            has_local: row.as_ref().is_some_and(|r| r.has_local),
-            elsewhere: None,
-            track,
-            also_on: Vec::new(),
-        }
+        stream_row_of(&self.lib, t, track)
     }
 
     /// How much of a service's album the library has: the one count its
@@ -348,17 +389,15 @@ impl Worker {
     /// is the larger of the service's track count (of the full album when
     /// it was fetched) and the library's.
     pub(crate) fn album_have(&self, a: &StreamAlbum) -> (Option<nikgob_core::model::ReleaseId>, v::AlbumHave) {
-        let release = self.lib.release_by_remote(&a.id).ok().flatten();
+        album_have_of(&self.lib, a, self.album_theirs(a))
+    }
+
+    /// The service's track count of `a`: of the full album when it was
+    /// fetched ([`Self::album_have`]).
+    pub(crate) fn album_theirs(&self, a: &StreamAlbum) -> u32 {
         let full = self.streaming.pages.album(&a.id).unwrap_or(a);
         let listed = (!full.tracks.is_empty()).then_some(full.tracks.len() as u32);
-        let theirs = full.total_tracks.max(a.total_tracks).max(listed).unwrap_or(0);
-        let p = release.and_then(|r| self.lib.release_progress(r).ok().flatten());
-        let have = v::AlbumHave {
-            local: p.map_or(0, |p| p.local),
-            in_library: p.map_or(0, |p| p.in_library),
-            total: p.map_or(0, |p| p.total).max(theirs),
-        };
-        (release, have)
+        full.total_tracks.max(a.total_tracks).max(listed).unwrap_or(0)
     }
 
     /// Rows whose library track is on another album than `release` name it.
@@ -387,19 +426,7 @@ impl Worker {
     }
 
     pub(crate) fn album_card(&self, a: &StreamAlbum) -> v::StreamAlbumCard {
-        let (release, have) = self.album_have(a);
-        v::StreamAlbumCard {
-            remote: a.id.clone(),
-            title: a.title.clone(),
-            artist: join_names(&a.artists),
-            artists: a.artists.as_slice().into(),
-            year: a.year,
-            release_type: a.release_type,
-            cover_url: a.cover_url.clone(),
-            total_tracks: a.total_tracks,
-            release,
-            have,
-        }
+        album_card_of(&self.lib, a, self.album_theirs(a))
     }
 
     pub(crate) fn artist_card(&self, a: &StreamArtist) -> v::StreamArtistCard {
