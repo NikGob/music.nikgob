@@ -624,6 +624,15 @@ fn last_heard(recs: &Recs<'_>, model: &UserModel, n: usize) -> Vec<Option<UnixMs
         .collect()
 }
 
+/// The track at `i` was never played here and is not loved otherwise (a
+/// like, a playlist, a play imported from a service, the library's prior):
+/// what a mix counts as never played (its rule, the offline evaluation's
+/// «unheard»).
+pub fn never_heard(model: &UserModel, i: usize) -> bool {
+    let s = &model.tracks[i];
+    s.starts == 0 && s.aff_long(model.now()) <= 0.0 && model.taste.affinity_at(i) <= 0.0 && model.prior_mass(i) <= 0.0
+}
+
 /// How much of a love last heard `age` before the user's latest listening
 /// counts now.
 fn freshness(age: i64) -> f32 {

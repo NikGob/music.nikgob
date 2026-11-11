@@ -378,7 +378,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let seed = input.epoch.seed;
     let log = super::novelty::keyed(input.new_log.clone(), snap);
     let mut used_new: HashSet<String> = HashSet::new();
-    let cands = if snap.local_only { Vec::new() } else { candidates(snap, input, seed) };
+    let cands = if snap.local_only { Vec::new() } else { candidates(snap, &input.new_pool, &input.new_sources, &input.new_log, seed) };
     let mut out: Vec<LaneHome> = mixes
         .drain(..)
         .enumerate()
@@ -681,9 +681,9 @@ const GRAPH_WEIGHT: f32 = 0.5;
 /// are YouTube Music's radios, times the source's trust); its kind of song
 /// told by its preview where it was analysed, the library's tracks the
 /// graph links it to.
-fn candidates(snap: &Snapshot, input: &BuildInput, seed: u64) -> Vec<NewCandidate> {
+pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap<String, nikgob_recs::Source>, log: &nikgob_recs::NewLog, seed: u64) -> Vec<NewCandidate> {
     use nikgob_recs::{GraphSource, Source, stream_song_key};
-    let shares = input.new_log.source_shares(&mut nikgob_recs::rng::Rng::new(seed ^ 0x736f_7572_6365));
+    let shares = log.source_shares(&mut nikgob_recs::rng::Rng::new(seed ^ 0x736f_7572_6365));
     let share = |s: Option<Source>| s.and_then(|s| shares.get(&s).copied()).unwrap_or(1.0 / nikgob_recs::novelty::SOURCES.len() as f32);
     let graph: HashMap<String, &super::graph::GraphFind> = snap.graph_new.iter().map(|f| (stream_song_key(&f.track), f)).collect();
     let near = |key: &str| -> Vec<usize> { graph.get(key).map(|f| f.near.iter().filter_map(|(t, _)| snap.model.position(*t)).collect()).unwrap_or_default() };
@@ -702,7 +702,7 @@ fn candidates(snap: &Snapshot, input: &BuildInput, seed: u64) -> Vec<NewCandidat
     };
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    let found: Vec<&StreamTrack> = input.new_pool.iter().filter(|t| snap.is_new(t)).collect();
+    let found: Vec<&StreamTrack> = pool.iter().filter(|t| snap.is_new(t)).collect();
     let len = found.len().max(1) as f32;
     for (k, t) in found.into_iter().enumerate() {
         let key = stream_song_key(t);
@@ -710,7 +710,7 @@ fn candidates(snap: &Snapshot, input: &BuildInput, seed: u64) -> Vec<NewCandidat
             continue;
         }
         // The best found first.
-        let weight = (1.0 - 0.5 * k as f32 / len) * share(input.new_sources.get(&key).copied());
+        let weight = (1.0 - 0.5 * k as f32 / len) * share(sources.get(&key).copied());
         out.push(candidate(t, near(&key), weight));
     }
     let trust = share(Some(Source::YoutubeRadio)) * GraphSource::YoutubeRadio.trust();

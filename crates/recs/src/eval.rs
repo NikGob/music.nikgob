@@ -24,7 +24,12 @@
 //!   - **the mixes of the home** ([`crate::mixes::row`]: «Микс дня», the
 //!     genre and cluster mixes, the part of the day, the moments) at
 //!     sampled mornings: the share of their songs listened to within a week
-//!     and the same spread, novelty and skips;
+//!     and the same spread, novelty (never played by the mixes' own rule,
+//!     [`crate::mixes::never_heard`]) and skips; the share of the songs
+//!     they play that are new songs of the services («С новым» over the
+//!     discoveries and the graph's finds the dataset carries,
+//!     [`Dataset::new`]);
+//!   - for both, the share of picks by an artist never played before;
 //!   - the share of the catalog all lists ever held, and for a synthetic
 //!     listener how high the hidden taste rates what was picked (0.5 is a
 //!     random pick);
@@ -34,12 +39,14 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use nikgob_core::model::{ArtistId, EndReason, EventContext, EventOrigin, EventType, ReleaseId, TrackId, UnixMs};
+use nikgob_core::streaming::StreamTrack;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
 use crate::graph::{Edge, GraphInput, GraphSource};
 use crate::index::{VectorIndex, euclid};
-use crate::mixes::{Builder, Kept, Mix, Settings as MixSettings, row};
+use crate::mix_new::{self, NewCandidate};
+use crate::mixes::{Builder, Kept, Mix, MixKey, Settings as MixSettings, never_heard, row};
 use crate::model::{Hits, Live, ModelInput, ReplayReport, UserModel, replay};
 use crate::pick::{Item, Recs};
 use crate::radio::{RadioParams, RadioSeed, RadioState};
@@ -108,6 +115,20 @@ impl From<&DPlay> for Play {
 /// An edge of the collective graph: from, to, its place, of how many, the source.
 pub type DEdge<T> = (T, T, u32, u32, GraphSource);
 
+/// A new song of the services a [`Dataset`] carries: a discovery or a song
+/// the graph found beside the library's, what «С новым» of the mixes draws
+/// from ([`crate::mix_new`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DNew {
+    pub track: StreamTrack,
+    /// Its analysed preview (raw), if any.
+    pub vector: Option<Vec<f32>>,
+    /// The library's tracks the graph links it to.
+    pub near: Vec<TrackId>,
+    /// [`crate::mix_new::NewCandidate::weight`].
+    pub weight: f32,
+}
+
 /// Everything the engine reads of a library (see the module docs).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Dataset {
@@ -136,6 +157,9 @@ pub struct Dataset {
     /// A synthetic listener's hidden taste of each track (0…1).
     #[serde(default)]
     pub truth: Vec<(TrackId, f32)>,
+    /// The new songs of the services the library's mixes could take.
+    #[serde(default)]
+    pub new: Vec<DNew>,
 }
 
 /// A [`Dataset`] as the engine takes it.
@@ -146,6 +170,8 @@ pub struct Parts {
     pub input: TasteInput,
     pub graph: GraphInput,
     pub truth: HashMap<TrackId, f32>,
+    /// [`Dataset::new`].
+    pub new: Vec<DNew>,
 }
 
 impl Dataset {
@@ -191,6 +217,7 @@ impl Dataset {
             tags: graph.map(|g| g.tags.clone()).unwrap_or_default(),
             popular: graph.map(|g| g.popular.clone()).unwrap_or_default(),
             truth: Vec::new(),
+            new: Vec::new(),
         }
     }
 
@@ -239,6 +266,7 @@ impl Dataset {
                 popular: self.popular.clone(),
             },
             truth: self.truth.iter().copied().collect(),
+            new: self.new.clone(),
         }
     }
 }
@@ -319,8 +347,15 @@ pub struct ListStats {
     pub world_run: f32,
     /// The mean distance between two picks, in median distances.
     pub spread: f32,
-    /// The share of picks never started before.
+    /// The share of picks never heard before: for the mixes by their own
+    /// rule ([`crate::mixes::never_heard`]: never started and not loved
+    /// otherwise), for autoplay never started.
     pub unheard: f32,
+    /// The share of picks by an artist never played before.
+    pub unheard_artists: f32,
+    /// The mixes: the share of what they play that is new songs of the
+    /// services («С новым» placed between their songs).
+    pub new_service: f32,
     /// The share of the picks heard before that were listened to within
     /// the window (what a list knows the user loves, without its novelty).
     pub known: f32,
@@ -449,6 +484,9 @@ struct Lists {
     spread: f32,
     spread_n: usize,
     unheard: f32,
+    unheard_artists: f32,
+    new_service: f32,
+    new_n: usize,
     known: f32,
     known_n: usize,
     skips: f32,
@@ -463,8 +501,10 @@ struct Truth<'a> {
     listened: &'a HashSet<TrackId>,
     session: Option<&'a HashSet<TrackId>>,
     next: Option<TrackId>,
-    /// Started before the moment.
+    /// Heard before the moment (see [`ListStats::unheard`]).
     heard: &'a dyn Fn(usize) -> bool,
+    /// Its main artist was played before the moment.
+    artist_heard: &'a dyn Fn(usize) -> bool,
 }
 
 impl Lists {
@@ -515,6 +555,7 @@ impl Lists {
             self.spread_n += 1;
         }
         self.unheard += list.iter().filter(|&&i| !(truth.heard)(i)).count() as f32 / k;
+        self.unheard_artists += list.iter().filter(|&&i| !(truth.artist_heard)(i)).count() as f32 / k;
         let known: Vec<TrackId> = list.iter().filter(|&&i| (truth.heard)(i)).map(|&i| ctx.catalog.tracks()[i].id).collect();
         if !known.is_empty() {
             self.known += known.iter().filter(|id| truth.listened.contains(id)).count() as f32 / known.len() as f32;
@@ -533,6 +574,16 @@ impl Lists {
         self.seen.extend(list.iter().copied());
     }
 
+    /// A mix of `len` songs that plays `placed` new songs of the services
+    /// between them.
+    fn add_new(&mut self, len: usize, placed: usize) {
+        if len + placed == 0 {
+            return;
+        }
+        self.new_service += placed as f32 / (len + placed) as f32;
+        self.new_n += 1;
+    }
+
     fn stats(&self, catalog: usize) -> ListStats {
         let n = self.n.max(1) as f32;
         ListStats {
@@ -548,6 +599,8 @@ impl Lists {
             world_run: self.world_run / n,
             spread: self.spread / self.spread_n.max(1) as f32,
             unheard: self.unheard / n,
+            unheard_artists: self.unheard_artists / n,
+            new_service: self.new_service / self.new_n.max(1) as f32,
             known: self.known / self.known_n.max(1) as f32,
             skips: self.skips / self.skips_n.max(1) as f32,
             truth: (self.truth_n > 0).then(|| self.truth / self.truth_n as f32),
@@ -598,6 +651,56 @@ pub fn home_mixes(parts: &Parts, model: &UserModel, suits: &[bool], epoch: u64) 
     let (daily, _) = b.daily(&kept);
     let (moments, _) = b.lineup(&kept);
     row(daily, pinned.into_iter().next(), moments)
+}
+
+/// The user's share of new music the evaluation takes («Новое в радио и
+/// миксах» as it comes, «Немного»).
+pub const USER_NEW_SHARE: f32 = 0.2;
+
+/// How many new songs of the services each of `mixes` (a home's row of
+/// `model`) plays: [`Parts::new`] through «С новым» as the runtime takes
+/// them ([`crate::mix_new`]: each mix of the row in turn, a song in one mix
+/// only, «Фон» and «Любимые» none, nothing new heard yet) and places them.
+pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<usize> {
+    let cands: Vec<NewCandidate> = parts
+        .new
+        .iter()
+        .map(|d| {
+            let v: Option<Vector> = d.vector.as_ref().and_then(|v| <[f32; DIM]>::try_from(v.as_slice()).ok());
+            let voice = v.as_ref().and_then(|v| mix_new::voice_near(model, &parts.index, v));
+            NewCandidate {
+                track: d.track.clone(),
+                lane: mix_new::lane_of_new(&parts.types, voice, &d.track),
+                soundtrack: d.track.album.as_ref().is_some_and(|a| crate::tiles::franchise(&a.title).is_some()),
+                profile: v.map(|v| model.embed(&v)).and_then(|e| model.regions.of(&e, None)),
+                near: d.near.iter().filter_map(|t| model.position(*t)).collect(),
+                weight: d.weight,
+            }
+        })
+        .collect();
+    let mut used: HashSet<String> = HashSet::new();
+    mixes
+        .iter()
+        .map(|m| {
+            if matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
+                return 0;
+            }
+            let want = mix_new::want(m.tracks.len(), None, USER_NEW_SHARE);
+            let chosen = mix_new::choose(model, m, &cands, want, &mut used);
+            mix_new::places(&m.anchors, chosen.len()).len()
+        })
+        .collect()
+}
+
+/// The main artists of the tracks `model` saw started: whether the track at
+/// `i` is by one of them.
+fn artist_heard(catalog: &Catalog, model: &UserModel) -> impl Fn(usize) -> bool {
+    let played: HashSet<ArtistId> = (0..catalog.len().min(model.tracks.len()))
+        .filter(|&i| model.tracks[i].starts > 0)
+        .filter_map(|i| catalog.tracks()[i].main_artist())
+        .collect();
+    let mains: Vec<Option<ArtistId>> = catalog.tracks().iter().map(|t| t.main_artist()).collect();
+    move |i: usize| mains.get(i).copied().flatten().is_some_and(|a| played.contains(&a))
 }
 
 /// The autoplay after the session `session` (its last track the seed) of
@@ -696,7 +799,8 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         let rest: HashSet<TrackId> = starts.list[k..].iter().take_while(|s| s.3 == sess).filter(|s| s.2 != Ended::Early).map(|s| s.1).collect();
         let listened = starts.listened(t, t + opts.window_ms);
         let heard = |i: usize| model.tracks[i].starts > 0;
-        auto.add(&ctx, &picks, &Truth { listened: &listened, session: Some(&rest), next: Some(next), heard: &heard });
+        let artist = artist_heard(&parts.catalog, &model);
+        auto.add(&ctx, &picks, &Truth { listened: &listened, session: Some(&rest), next: Some(next), heard: &heard, artist_heard: &artist });
     }
     report.autoplay = auto.stats(n);
 
@@ -721,12 +825,17 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
             let t = day * DAY_MS + 9 * HOUR_MS - offset;
             let model = parts.model_at(t);
             let listened = starts.listened(t, t + opts.window_ms);
-            let heard = |i: usize| model.tracks[i].starts > 0;
+            // Never played by the mixes' own rule: never started and not
+            // loved otherwise (a like, a playlist, an imported play).
+            let heard = |i: usize| !never_heard(&model, i);
+            let artist = artist_heard(&parts.catalog, &model);
             let home = home_mixes(parts, &model, &suits, day as u64);
+            let placed = home_new(parts, &model, &home);
             homes_n += 1;
             per_home += home.len();
-            for m in &home {
-                mixes.add(&ctx, &m.tracks, &Truth { listened: &listened, session: None, next: None, heard: &heard });
+            for (m, new) in home.iter().zip(placed) {
+                mixes.add(&ctx, &m.tracks, &Truth { listened: &listened, session: None, next: None, heard: &heard, artist_heard: &artist });
+                mixes.add_new(m.tracks.len(), new);
             }
         }
     }
@@ -742,8 +851,24 @@ fn hits_row(h: &Hits) -> String {
 fn list_row(s: &ListStats) -> String {
     let truth = s.truth.map_or_else(String::new, |t| format!("  truth {t:.3}"));
     format!(
-        "lists {:>3} len {:>4.1}  prec@7d {:.3}  sess {:.3}  hit {:.3}  first {:.3}  artists {:.2}  worlds {:.2}  top-world {:.2}  run {:.2}  spread {:.2}  unheard {:.3}  known {:.3}  skips {:.3}  coverage {:.3}{truth}",
-        s.lists, s.len, s.precision, s.session, s.hit, s.first, s.artists, s.worlds, s.world_top, s.world_run, s.spread, s.unheard, s.known, s.skips, s.coverage
+        "lists {:>3} len {:>4.1}  prec@7d {:.3}  sess {:.3}  hit {:.3}  first {:.3}  artists {:.2}  worlds {:.2}  top-world {:.2}  run {:.2}  spread {:.2}  unheard {:.3}  unheard-artists {:.3}  new-service {:.3}  known {:.3}  skips {:.3}  coverage {:.3}{truth}",
+        s.lists,
+        s.len,
+        s.precision,
+        s.session,
+        s.hit,
+        s.first,
+        s.artists,
+        s.worlds,
+        s.world_top,
+        s.world_run,
+        s.spread,
+        s.unheard,
+        s.unheard_artists,
+        s.new_service,
+        s.known,
+        s.skips,
+        s.coverage
     )
 }
 
@@ -832,6 +957,34 @@ mod tests {
         assert!(r.autoplay.lists > 0 && r.mixes.lists > 0, "{}", r.table());
         assert!(r.mixes.truth.unwrap() > 0.6 && r.autoplay.truth.unwrap() > 0.6, "{}", r.table());
         eprintln!("{}", r.table());
+    }
+
+    /// A listener who brought a long history of an older taste from
+    /// another service and listens to other music here: the home's mixes
+    /// are not the import's old songs (a third of them at most over the
+    /// row; a mix keeps its quarter, a short one fills to its least length)
+    /// and they bring songs never heard.
+    #[test]
+    fn an_imported_history_does_not_take_the_mixes_over() {
+        let d = synthetic::user(synthetic::Kind::Imported, 4);
+        assert!(d.events.iter().filter(|e| e.origin == Some(EventOrigin::Import)).count() > 3_000, "a long imported history");
+        let p = d.parts();
+        let last = p.input.events.iter().filter(|e| e.origin != Some(EventOrigin::Import)).map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let home = home_mixes(&p, &model, &suits, 1);
+        assert!(!home.is_empty());
+        let recs = Recs::new(&p.catalog, &model.taste, &p.index).with_model(&model).with_background(&suits);
+        let fit = |i: usize| suits.get(i).copied().unwrap_or(false);
+        let b = Builder::new(&recs, &model, &|_| true, &fit, 1, DayPart::Day, Live::default(), MixSettings::default());
+        let (mut old, mut never, mut all) = (0usize, 0usize, 0usize);
+        for m in home.iter().filter(|m| m.key != MixKey::Liked) {
+            old += m.tracks.iter().filter(|&&i| b.stale_at(i)).count();
+            never += m.tracks.iter().filter(|&&i| never_heard(&model, i)).count();
+            all += m.tracks.len();
+        }
+        assert!(old * 3 <= all, "{old} old songs of {all}");
+        assert!(never > 0, "nothing never heard in {all} songs");
     }
 
     /// Every synthetic listener, measured (`cargo test -p nikgob-recs

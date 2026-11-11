@@ -199,6 +199,14 @@ pub(crate) fn cached_found(lib: &Library) -> (Vec<StreamTrack>, usize) {
     found.map_or((Vec::new(), 0), |f| (f.tracks.into_iter().take(DISCOVERIES).collect(), f.releases.len()))
 }
 
+/// Every discovery the last pass kept, best first, and where each came
+/// from (by [`stream_song_key`]): what the cards of «Миксы для тебя» draw
+/// from (the offline evaluation's dataset).
+pub(crate) fn cached_pool(lib: &Library) -> (Vec<StreamTrack>, HashMap<String, Source>) {
+    let found: Option<Found> = lib.cache_get(FOUND_KEY).ok().flatten().and_then(|(_, j)| serde_json::from_str(&j).ok());
+    found.map_or_else(Default::default, |f| (f.tracks, f.sources.into_iter().collect()))
+}
+
 /// Every song the last pass found, before ranking (the preview tools).
 pub(crate) fn cached_finds(lib: &Library) -> Vec<StreamTrack> {
     let found: Option<Found> = lib.cache_get(FOUND_KEY).ok().flatten().and_then(|(_, j)| serde_json::from_str(&j).ok());

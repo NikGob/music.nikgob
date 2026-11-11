@@ -11,7 +11,8 @@
 //! through; whether a start is heard out or skipped early follows its
 //! appeal. A listener who keeps music on in the background has long runs
 //! of autoplay heard out with no action. Likes follow songs heard out
-//! often.
+//! often. One listener brought a history from another service: imported
+//! plays and likes of an older taste.
 
 use std::collections::HashMap;
 
@@ -39,10 +40,14 @@ pub enum Kind {
     Cold,
     /// A big library and 135 000 events over two years (the timing).
     Big,
+    /// Brought a long history from another service (some 5 000 imported
+    /// events of an older taste and 300 of its songs liked at once at the
+    /// import) and listens to other music here.
+    Imported,
 }
 
 impl Kind {
-    pub const ALL: [Self; 6] = [Self::OneGenre, Self::Omnivore, Self::Background, Self::Skipper, Self::Cold, Self::Big];
+    pub const ALL: [Self; 7] = [Self::OneGenre, Self::Omnivore, Self::Background, Self::Skipper, Self::Cold, Self::Big, Self::Imported];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -52,6 +57,7 @@ impl Kind {
             Self::Skipper => "synthetic: skipper",
             Self::Cold => "synthetic: cold start (10 events)",
             Self::Big => "synthetic: big (135k events)",
+            Self::Imported => "synthetic: imported history",
         }
     }
 }
@@ -416,6 +422,14 @@ pub fn user(kind: Kind, seed: u64) -> Dataset {
             v[2] = 0.3;
             (v, [0.0; GENRES], flat)
         }
+        Kind::Imported => {
+            // Now: Japanese songs, English rock, some ambient.
+            let mut v = [0.05; GENRES];
+            v[1] = 1.0;
+            v[3] = 0.7;
+            v[AMBIENT] = 0.4;
+            (v, [0.0; GENRES], flat)
+        }
     };
     let t = taste(&mut rng, &lib, genres, background, hours);
     let who = match kind {
@@ -429,7 +443,27 @@ pub fn user(kind: Kind, seed: u64) -> Dataset {
         Kind::Big => (730, 67_500),
         _ => (60, usize::MAX),
     };
-    let (events, like_times, playlists) = history(&mut rng, &lib, &t, &who, days, end, max_starts);
+    let (mut events, mut like_times, playlists) = history(&mut rng, &lib, &t, &who, days, end, max_starts);
+    if kind == Kind::Imported {
+        // The other service's history: an older taste (Russian and English
+        // songs, soundtracks) over five months before, imported the day before
+        // the own listening began, its 300 favourites liked at once then.
+        let mut before = [0.05; GENRES];
+        before[0] = 1.0;
+        before[2] = 0.8;
+        before[OST] = 0.5;
+        let past = taste(&mut rng, &lib, before, [0.0; GENRES], flat);
+        let at = end - (days + 1) * DAY_MS;
+        let (old, _, _) = history(&mut rng, &lib, &past, &who, 150, at, 2_500);
+        events.extend(old.into_iter().filter(|e| e.kind != EventType::Like).map(|e| DPlay { origin: Some(EventOrigin::Import), ..e }));
+        let mut fav: Vec<usize> = (0..lib.songs.len()).collect();
+        fav.sort_by(|a, b| past.appeal[*b].total_cmp(&past.appeal[*a]).then(a.cmp(b)));
+        let liked: std::collections::HashSet<TrackId> = like_times.iter().map(|l| l.0).collect();
+        for (k, &i) in fav.iter().filter(|&&i| !liked.contains(&lib.songs[i].id)).take(300).enumerate() {
+            like_times.push((lib.songs[i].id, at + k as i64 * 1_000));
+        }
+        events.sort_by_key(|e| e.ts);
+    }
     let mut by_track: HashMap<TrackId, SongType> = HashMap::new();
     for s in &lib.songs {
         let voice = VOICE[s.genre];

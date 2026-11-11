@@ -2034,6 +2034,9 @@ pub struct ModelPreview {
     history: TasteInput,
     /// The graph of similar music it was built with.
     graph: nikgob_recs::GraphInput,
+    /// The last pass's discoveries and where each came from.
+    new: Vec<StreamTrack>,
+    new_sources: HashMap<String, nikgob_recs::Source>,
 }
 
 impl ModelPreview {
@@ -2046,7 +2049,10 @@ impl ModelPreview {
         let index = SoundIndex::default();
         crate::analysis::load_index(lib, &index);
         let (_, utc_offset_min) = local_day();
-        let extra = ReadExtra::of(Vec::new(), prefs);
+        // The last pass's finds: their analysed previews come with the
+        // snapshot.
+        let (new, new_sources) = discover::cached_pool(lib);
+        let extra = ReadExtra::of(new.clone(), prefs);
         let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &extra)?;
         let graph = if extra.graph {
             let rows = lib.rec_tracks().map_err(|e| e.to_string())?;
@@ -2054,15 +2060,28 @@ impl ModelPreview {
         } else {
             nikgob_recs::GraphInput::default()
         };
-        Ok(Self { snap, history, graph })
+        Ok(Self { snap, history, graph, new, new_sources })
     }
 
     /// What the snapshot was built of, for the offline evaluation
     /// ([`nikgob_recs::eval`]): the catalog, its sound and song types, the
-    /// history and the graph.
+    /// history and the graph, and the new songs of the services the cards
+    /// of «Миксы для тебя» could take (the discoveries and the graph's
+    /// finds, weighed as a build weighs them).
     pub fn dataset(&self, name: &str) -> nikgob_recs::eval::Dataset {
         let graph = (!self.graph.is_empty()).then_some(&self.graph);
-        nikgob_recs::eval::Dataset::of(name, &self.snap.catalog, &self.snap.index, &self.snap.types, &self.history, graph)
+        let mut d = nikgob_recs::eval::Dataset::of(name, &self.snap.catalog, &self.snap.index, &self.snap.types, &self.history, graph);
+        let snap = &self.snap;
+        d.new = lanes::candidates(snap, &self.new, &self.new_sources, &nikgob_recs::NewLog::default(), 1)
+            .into_iter()
+            .map(|c| nikgob_recs::eval::DNew {
+                vector: snap.new_vectors.get(&stream_song_key(&c.track)).map(|v| v.to_vec()),
+                near: c.near.iter().map(|&i| snap.model.id(i)).collect(),
+                weight: c.weight,
+                track: c.track,
+            })
+            .collect();
+        d
     }
 
     /// The edges of tracks and of artists of the graph of similar music in
