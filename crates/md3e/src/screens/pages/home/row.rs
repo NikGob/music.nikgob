@@ -332,7 +332,7 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
             state.release(pitch, max, per, now);
         }
         if !by_hand && state.loose() && !state.settle(now, pitch, max) {
-            // Comes back to rest it once the touchpad has stopped.
+            // A frame to bring it to rest once the touchpad has stopped.
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(SETTLE_AFTER));
         }
     }
