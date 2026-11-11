@@ -354,8 +354,8 @@ impl Worker {
             self.log_err("лайки", self.lib.take_remote_likes_with(&adds, songs, &gone, now))
                 .unwrap_or_default()
         };
-        for &t in new.iter().filter(|_| !import) {
-            self.wish_for_like(t, origin);
+        if !import {
+            self.wish_for_likes(&new, origin);
         }
         for &t in &unliked {
             self.wish_drop_unstarted(t);

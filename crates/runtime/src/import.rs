@@ -36,6 +36,7 @@ impl Internal {
     pub(crate) fn turn_name(&self) -> String {
         match self {
             Self::Import(_) => "an import event".into(),
+            Self::WishesLater => "the imported likes' wishes".into(),
             Self::Stream(_) => "a streaming answer".into(),
             Self::Analysis(_) => "the sound analysis".into(),
             Self::Recs(m) => format!("the recommendations ({})", m.turn_name()),
@@ -59,6 +60,8 @@ pub(crate) enum Internal {
     /// From the lyrics aligner's thread.
     Align(crate::align::Msg),
     Enrich(crate::enrich::Event),
+    /// The next likes of a large import take their wishlist items.
+    WishesLater,
     TagSuggestions(TrackId, Result<Vec<(String, v::TagEdit)>, String>),
     Retagged(TrackId, Result<(), String>),
     /// An uploader's song took its performer's names.
@@ -727,6 +730,7 @@ impl Worker {
     pub(crate) fn internal(&mut self, msg: Internal) {
         match msg {
             Internal::Import(ev) => self.import_event(ev),
+            Internal::WishesLater => self.wishes_later_step(),
             Internal::Resolved { item, wishlist, error } => {
                 if let Some(svc) = &mut self.import {
                     svc.resolving = svc.resolving.saturating_sub(1);

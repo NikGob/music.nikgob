@@ -40,7 +40,7 @@ pub const CRASH: &str = "crash.log";
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
 // RustyPipe's own records are its tracing spans at level ERROR (noise that
 // reads like failures); the youtube crate logs every request and failure.
-const FILTER: &str = "info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runtime::streams=debug,nikgob::streams=debug,nikgob::audio=debug,rustypipe=off";
+const FILTER: &str = "info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runtime::streams=debug,nikgob::streams=debug,nikgob::audio=debug,rustypipe=off,zbus=warn,tracing::span=warn,symphonia=warn";
 /// Targets whose records repeat without telling more: each message once.
 const ONCE: &[&str] = &["rustls_platform_verifier"];
 /// Records that say whose account it is: target, how the text starts, and
