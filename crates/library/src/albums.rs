@@ -17,6 +17,11 @@
 //!   edition of «El Camino», YouTube Music gives 11) is the service's
 //!   edition: the count is its rows, the MusicBrainz id goes; other albums
 //!   short of their count are asked for their tracklist again.
+//!
+//! And one that changes nothing of the catalog (no backup):
+//! `album_years_asked.v1`, the albums without a year whose tracklist was
+//! found before the year was kept from it are asked again
+//! ([`Library::ask_album_years_again`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -29,12 +34,13 @@ use crate::catalog::{merge_track_in, upsert_artist_in, write_credit_links};
 use crate::db::Library;
 use crate::error::Result;
 use crate::streams::{albums_agree, parse, song_key};
-use crate::util::credit_columns;
+use crate::util::{credit_columns, meta_get, meta_set, now_ms};
 
 pub(crate) const VARIOUS_KEY: &str = "various_artists_unbound.v1";
 pub(crate) const PLACES_KEY: &str = "edition_places_fixed.v1";
 pub(crate) const EDITIONS_KEY: &str = "album_editions_folded.v1";
 pub(crate) const TRACKLISTS_KEY: &str = "tracklists_reidentified.v1";
+pub(crate) const YEARS_KEY: &str = "album_years_asked.v1";
 
 /// MusicBrainz id of «Various Artists».
 pub(crate) const VARIOUS_ARTISTS_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
@@ -416,11 +422,30 @@ impl Library {
         Ok(self.repair(TRACKLISTS_KEY, reidentify)?.is_some())
     }
 
+    /// Once (`album_years_asked.v1`): the found-tracklist marks of the
+    /// albums without a year go, so the background pass asks them again
+    /// and keeps the service's year. Returns how many.
+    pub fn ask_album_years_again(&self) -> Result<usize> {
+        self.write(|tx| {
+            if meta_get(tx, YEARS_KEY)?.is_some() {
+                return Ok(0);
+            }
+            let n = tx.execute(
+                "DELETE FROM meta
+                  WHERE key IN (SELECT 'cache.tracklist.' || r.id FROM release r WHERE r.year IS NULL)
+                    AND substr(value, instr(value, '|') + 1) = 'found'",
+                [],
+            )?;
+            meta_set(tx, YEARS_KEY, &now_ms().to_string())?;
+            Ok(n)
+        })
+    }
+
     /// Every one-time repair of the catalog, in order: what went first,
     /// then credits and artists, then duplicates, places and editions.
     /// A repair that fails is logged and the next one runs.
     pub fn repair_catalog(&self) {
-        let steps: [(&str, &dyn Fn() -> Result<usize>); 11] = [
+        let steps: [(&str, &dyn Fn() -> Result<usize>); 12] = [
             ("orphans", &|| self.drop_orphans()),
             ("combined credits", &|| self.split_combined_credits()),
             ("various artists", &|| self.unbind_various_artists().map(usize::from)),
@@ -430,6 +455,7 @@ impl Library {
             ("edition places", &|| self.fix_edition_places().map(usize::from)),
             ("album editions", &|| self.fold_album_editions().map(usize::from)),
             ("tracklists", &|| self.reidentify_tracklists().map(usize::from)),
+            ("album years", &|| self.ask_album_years_again()),
             ("downloaded wishes", &|| self.settle_downloaded_wishes()),
             ("event contexts", &|| self.fix_event_contexts()),
         ];

@@ -7,11 +7,19 @@
 //!   ([`EVERY`]) for albums with a file; each album at most once per
 //!   [`MISS_TTL_MS`] when nothing was found (an hour after an error), never
 //!   again once found (the library cache).
+//! * An album without a year (one of streams only too) is asked the same
+//!   way for it; a whole one only for its year: the same title or one of
+//!   its songs' ISRCs, never another edition. A found album without its
+//!   day (YouTube Music gives the year only) asks the Deezer catalogue for
+//!   the day.
 //! * The album in a service: the id linked to the release first; else a
 //!   search for «artist title» on YouTube Music, then the Deezer catalogue,
 //!   taking an album of the same title (folded, or its Cyrillic for a
 //!   transliterated one) by an artist of the same name, else one whose
-//!   title extends the other («Discovery» and «Discovery Bonus Mix»).
+//!   title extends the other («Discovery» and «Discovery Bonus Mix»), else
+//!   (a title in another script: «夏子» is «Natsuko») the one of that
+//!   artist the service puts one of the album's ISRCs on, or, when its
+//!   songs have no ISRC, the one of the same track count and year.
 //! * Its tracks the release lacks become stream tracks of it, outside the
 //!   library ([`nikgob_library::Library::adopt_stream_album`]): the page
 //!   shows them muted with ▶ and ↓, the cards say «1 из 15». Found is
@@ -93,28 +101,98 @@ fn same_artist(a: &str, b: &str) -> bool {
     (!x.is_empty() && x == y) || same_translit(a, b)
 }
 
-/// The album in one service: by its id, else by a search.
-async fn find(
-    svc: Arc<dyn StreamService>,
-    linked: Option<String>,
+/// What a library album is looked up by in a service.
+#[derive(Clone, Debug, Default)]
+struct Wanted {
     artist: String,
     title: String,
-) -> Result<Option<StreamAlbum>, StreamError> {
+    /// The ISRCs of its tracks.
+    isrcs: Vec<String>,
+    /// Its track count and year, when known.
+    count: Option<u32>,
+    year: Option<i32>,
+    /// Its tracklist is whole, only its year is asked: no other edition
+    /// will do (one with more words, one by count).
+    year_only: bool,
+}
+
+/// ISRCs of an album looked up in a service, at most.
+const ISRC_ASKS: usize = 2;
+
+/// The album in one service: by its id, else by a search.
+async fn find(svc: Arc<dyn StreamService>, linked: Option<String>, w: &Wanted) -> Result<Option<StreamAlbum>, StreamError> {
     if let Some(id) = linked {
         return svc.album(&id).await.map(Some);
     }
-    let hits = svc.search_kind(&format!("{artist} {title}"), SearchKind::Albums).await?.albums;
+    let hits = svc.search_kind(&format!("{} {}", w.artist, w.title), SearchKind::Albums).await?.albums;
     let by: Vec<_> = hits
         .into_iter()
         .take(CANDIDATES)
-        .filter(|a| a.artists.iter().any(|x| same_artist(&x.name, &artist)))
+        .filter(|a| a.artists.iter().any(|x| same_artist(&x.name, &w.artist)))
         .collect();
     // The same title first; an edition with more words only without one.
-    let hit = by.iter().find(|a| same_album(&a.title, &title)).or_else(|| by.iter().find(|a| extends_album(&a.title, &title)));
+    let mut hit = by.iter().find(|a| same_album(&a.title, &w.title)).map(|a| a.id.id.clone());
+    if hit.is_none() && !w.year_only {
+        hit = by.iter().find(|a| extends_album(&a.title, &w.title)).map(|a| a.id.id.clone());
+    }
+    // No title alike (one in another script: «夏子» is «Natsuko»): the
+    // album one of its songs is on, by the song's ISRC; without ISRCs one
+    // of the same count and year.
+    if hit.is_none() && !by.is_empty() {
+        hit = album_of_isrcs(svc.as_ref(), &by, &w.isrcs).await?;
+        if hit.is_none() && w.isrcs.is_empty() && !w.year_only {
+            hit = by.iter().find(|a| same_count_and_year(a, w)).map(|a| a.id.id.clone());
+        }
+    }
     match hit {
-        Some(a) => svc.album(&a.id.id).await.map(Some),
+        Some(id) => svc.album(&id).await.map(Some),
         None => Ok(None),
     }
+}
+
+/// The candidate of `by` the service puts a song of `isrcs` on (each ISRC
+/// asked once, at most [`ISRC_ASKS`]). A rate limit stops the lookup.
+async fn album_of_isrcs(svc: &dyn StreamService, by: &[StreamAlbum], isrcs: &[String]) -> Result<Option<String>, StreamError> {
+    for isrc in isrcs.iter().take(ISRC_ASKS) {
+        match svc.find_isrc(isrc).await {
+            Ok(Some(t)) => {
+                let on = t.album.and_then(|a| a.id);
+                if let Some(a) = by.iter().find(|a| on.as_ref() == Some(&a.id)) {
+                    return Ok(Some(a.id.id.clone()));
+                }
+            }
+            Ok(None) => {}
+            Err(e @ StreamError::RateLimited { .. }) => return Err(e),
+            Err(e) => log::debug!("tracklist: ISRC {isrc}: {e}"),
+        }
+    }
+    Ok(None)
+}
+
+/// The day `a` came out (and its year, when it has none) from the same
+/// album in `svc` (the Deezer catalogue): the same title or one of its
+/// songs, by the same artist, of the same year when both tell one.
+async fn date_from(svc: Arc<dyn StreamService>, a: &mut StreamAlbum, w: &Wanted) {
+    let want = Wanted { year_only: true, ..w.clone() };
+    match find(svc, None, &want).await {
+        Ok(Some(d)) => {
+            let agree = match (a.year, d.year) {
+                (Some(x), Some(y)) => x == y,
+                _ => true,
+            };
+            if agree && d.release_date.is_some() {
+                a.release_date = d.release_date;
+                a.year = a.year.or(d.year);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => log::debug!("tracklist: the day of «{}»: {e}", w.title),
+    }
+}
+
+/// A candidate with the album's track count and year, both known.
+fn same_count_and_year(a: &StreamAlbum, w: &Wanted) -> bool {
+    w.count.is_some() && a.total_tracks == w.count && w.year.is_some() && a.year == w.year
 }
 
 /// What a found tracklist leaves in the cache: found once every place the
@@ -127,6 +205,13 @@ fn found_mark(lib: &nikgob_library::Library, release: ReleaseId) -> &'static str
 }
 
 impl Worker {
+    /// Every place the library album counts has a track.
+    fn release_whole(&self, release: ReleaseId) -> bool {
+        let Some(r) = self.lib.get_release(release).ok().flatten() else { return false };
+        let known = self.lib.tracks_of_release_all(release).map(|t| t.len()).unwrap_or(0) as u32;
+        r.total_tracks.is_some_and(|t| known >= t)
+    }
+
     /// Keeps the day the service's `album` came out for the library album
     /// `release` (its page shows it when no file of it tells the day).
     pub(crate) fn keep_released(&self, release: ReleaseId, album: &StreamAlbum) {
@@ -150,11 +235,6 @@ impl Worker {
     /// Asks the services for the whole tracklist of a library album that
     /// lacks it (see the module docs).
     pub(crate) fn complete_tracklist(&mut self, release: ReleaseId) {
-        let Some(r) = self.lib.get_release(release).ok().flatten() else { return };
-        let known = self.lib.tracks_of_release_all(release).map(|t| t.len()).unwrap_or(0) as u32;
-        if known == 0 || r.total_tracks.is_some_and(|t| known >= t) {
-            return;
-        }
         let now = nikgob_library::now_ms();
         if let Some((at, what)) = self.lib.cache_get(&cache_key(release)).ok().flatten() {
             let fresh = match what.as_str() {
@@ -165,6 +245,14 @@ impl Worker {
             if fresh {
                 return;
             }
+        }
+        let Some(r) = self.lib.get_release(release).ok().flatten() else { return };
+        let rows = self.lib.tracks_of_release_all(release).unwrap_or_default();
+        let known = rows.len() as u32;
+        // A whole album is asked only for the year it lacks.
+        let whole = r.total_tracks.is_some_and(|t| known >= t);
+        if known == 0 || (whole && r.year.is_some()) {
+            return;
         }
         let linked = self.lib.external_ids(EntityKind::Album, *release.as_uuid()).unwrap_or_default();
         let mut asks = Vec::new();
@@ -177,26 +265,42 @@ impl Worker {
         }
         // A linked album first.
         asks.sort_by_key(|(_, id)| id.is_none());
-        self.ask_tracklist(release, &r, asks);
+        let mut isrcs: Vec<String> = rows
+            .iter()
+            .filter_map(|t| self.lib.get_track(t.id).ok().flatten().and_then(|t| t.isrc))
+            .collect();
+        isrcs.dedup();
+        let w = Wanted {
+            artist: r.artist_credit.display(),
+            title: r.title.clone(),
+            isrcs,
+            count: r.total_tracks,
+            year: r.year,
+            year_only: whole,
+        };
+        // A found album without its day (YouTube Music gives the year
+        // only): the Deezer catalogue is asked for it.
+        let dates = if r.year.is_none() { self.service(Service::Deezer) } else { None };
+        self.ask_tracklist(release, w, asks, dates);
     }
 
     /// Asks the services `asks` (each with the album's id there, if linked)
-    /// for the tracklist of `r`, in order; the answer comes as a
-    /// [`TracklistMsg`].
+    /// for the tracklist of the album `w`, in order; a found album without
+    /// its day asks `dates` for it. The answer comes as a [`TracklistMsg`].
     fn ask_tracklist(
         &mut self,
         release: ReleaseId,
-        r: &nikgob_core::model::Release,
+        w: Wanted,
         asks: Vec<(Arc<dyn StreamService>, Option<String>)>,
+        dates: Option<Arc<dyn StreamService>>,
     ) {
         if asks.is_empty() || !self.streaming.tracklist.asking.insert(release) {
             return;
         }
-        let (artist, title) = (r.artist_credit.display(), r.title.clone());
         self.streaming.spawn(async move {
             let mut last = Ok(None);
             for (svc, id) in asks {
-                match find(svc, id, artist.clone(), title.clone()).await {
+                match find(svc, id, &w).await {
                     Ok(Some(a)) if !a.tracks.is_empty() => {
                         last = Ok(Some(a));
                         break;
@@ -204,6 +308,12 @@ impl Worker {
                     Ok(_) => {}
                     Err(e) => last = Err(e),
                 }
+            }
+            if let Ok(Some(a)) = &mut last
+                && a.release_date.is_none()
+                && let Some(dz) = dates.filter(|d| d.service() != a.id.service)
+            {
+                date_from(dz, a, &w).await;
             }
             Msg::Tracklist(TracklistMsg { release, result: last })
         });
@@ -219,6 +329,20 @@ impl Worker {
         let now = nikgob_library::now_ms();
         let key = cache_key(m.release);
         match m.result {
+            // A whole album asked for its year: only the year is taken.
+            Ok(Some(album)) if self.release_whole(m.release) => {
+                match self.lib.fill_release_year(m.release, album.year) {
+                    Ok(true) => log::info!("album {}: its year from {}", m.release, album.id),
+                    Ok(false) => {}
+                    Err(e) => log::warn!("album {}: year not stored: {e}", m.release),
+                }
+                let _ = self.lib.cache_put(&key, now, "found");
+                self.keep_released(m.release, &album);
+                self.load_library();
+                if self.state.read().release.as_ref().is_some_and(|r| r.card.id == m.release) {
+                    self.load_release(m.release);
+                }
+            }
             Ok(Some(album)) => {
                 match self.lib.adopt_stream_album(m.release, &album) {
                     Ok(n) => log::info!("album {}: {n} more tracks from {}", m.release, album.id),
@@ -282,7 +406,10 @@ impl Worker {
         }
         let releases = self.lib.releases(0, 100_000, nikgob_library::ReleaseSort::asc(Default::default())).unwrap_or_default();
         for r in releases {
-            if r.local_tracks == 0 || r.release.total_tracks.is_some_and(|t| r.known_tracks >= t) {
+            // Short of its count with a file, or without a year (one of
+            // streams only too: its page shows no date).
+            let short = r.local_tracks > 0 && !r.release.total_tracks.is_some_and(|t| r.known_tracks >= t);
+            if !short && r.release.year.is_some() {
                 continue;
             }
             self.complete_tracklist(r.release.id);
@@ -336,7 +463,12 @@ impl Worker {
                 continue;
             }
             self.streaming.tracklist.placing = Some(release);
-            self.ask_tracklist(release, &r, asks);
+            let w = Wanted {
+                artist: r.artist_credit.display(),
+                title: r.title.clone(),
+                ..Wanted::default()
+            };
+            self.ask_tracklist(release, w, asks, None);
             if self.streaming.tracklist.asking.contains(&release) {
                 return true;
             }
@@ -413,6 +545,42 @@ mod tests {
         assert!(extends_album("Discovery Bonus Mix", "Discovery"));
         assert!(!extends_album("Discoveryland", "Discovery"));
         assert!(!extends_album("Mercury – Act 1", "Mercury : Acts 1 & 2"));
+    }
+
+    /// A self-titled album of «Big Band» whose service album is called
+    /// otherwise («夏子» and «Natsuko»): its search finds the album, the
+    /// titles do not match.
+    fn natsuko() -> (Arc<dyn StreamService>, Wanted) {
+        let svc: Arc<dyn StreamService> = Arc::new(nikgob_core::streaming::FakeService::deezer().with_album("natsuko", "Natsuko", 3));
+        let w = Wanted {
+            artist: "Big Band".into(),
+            title: "Big Band".into(),
+            isrcs: vec!["ZZBIG0000001".into()],
+            count: Some(3),
+            year: Some(2020),
+            year_only: false,
+        };
+        (svc, w)
+    }
+
+    #[tokio::test]
+    async fn an_album_titled_otherwise_is_found_by_the_isrc_of_its_song() {
+        let (svc, w) = natsuko();
+        let a = find(svc.clone(), None, &w).await.unwrap().expect("found by ISRC");
+        assert_eq!(a.title, "Natsuko");
+        assert_eq!(a.tracks.len(), 3);
+        // Asked for its year only: the ISRC is exact enough.
+        let a = find(svc.clone(), None, &Wanted { year_only: true, ..w.clone() }).await.unwrap();
+        assert!(a.is_some());
+        // An ISRC of no song of it: no album, whatever the count says.
+        let other = Wanted { isrcs: vec!["ZZNONE0000001".into()], ..w.clone() };
+        assert!(find(svc.clone(), None, &other).await.unwrap().is_none());
+        // Without ISRCs: the same count and year.
+        let bare = Wanted { isrcs: Vec::new(), ..w.clone() };
+        assert!(find(svc.clone(), None, &bare).await.unwrap().is_some());
+        assert!(find(svc.clone(), None, &Wanted { count: Some(2), ..bare.clone() }).await.unwrap().is_none());
+        assert!(find(svc.clone(), None, &Wanted { year: None, ..bare.clone() }).await.unwrap().is_none());
+        assert!(find(svc, None, &Wanted { year_only: true, ..bare }).await.unwrap().is_none());
     }
 
     #[test]
