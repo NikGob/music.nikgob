@@ -622,6 +622,12 @@ pub(crate) fn sound_details(
         }),
         // Only lossless files are checked.
         pending: local && src.codec.is_lossless() && check.is_none(),
+        // A live file that surely holds an MP3; a doubt is offered only
+        // the search for a better copy.
+        to_mp3: local
+            && src.trashed_at.is_none()
+            && check.is_some_and(|c| nikgob_core::quality::mp3_inside(&src.codec, &c.summary())),
+        better: local && src.trashed_at.is_none(),
     }
 }
 
@@ -789,6 +795,7 @@ mod tests {
         let plot = d.spectrum.unwrap();
         assert_eq!((plot.nyquist_hz, plot.cutoff_hz), (22_050.0, Some(16_000.0)));
         assert!(!d.pending);
+        assert!(d.to_mp3 && d.better, "a sure fake: its MP3 and a better copy");
 
         // A real one: no warning, the full band; not checked yet: pending.
         let real = sound_details(&flac, Some(Path::new("x.flac")), None, None, Some(&check(Verdict::Genuine, 22_050.0, None)));
@@ -798,6 +805,8 @@ mod tests {
         let doubt = sound_details(&flac, Some(Path::new("x.flac")), None, None, Some(&check(Verdict::Transcoded, 20_155.0, None)));
         assert!(!doubt.warning);
         assert!(doubt.verdict.as_deref().unwrap().starts_with("Возможно, сделан из MP3 ~320"));
+        assert!(!doubt.to_mp3 && doubt.better, "a doubt: only the search");
+        assert!(!real.to_mp3 && real.better);
         let unchecked = sound_details(&flac, Some(Path::new("x.flac")), None, None, None);
         assert!(unchecked.pending && unchecked.verdict.is_none() && unchecked.spectrum.is_none());
 
@@ -808,6 +817,12 @@ mod tests {
         assert!(conv.warning);
         assert!(conv.verdict.as_deref().unwrap().starts_with("Сделан из поддельного FLAC"));
         assert_eq!(conv.band.as_deref(), Some("до 16,0 кГц (у исходника)"));
+        assert!(!conv.to_mp3, "an MP3 already");
+        // The original in the Trash (it may still be playing): nothing to do.
+        let mut gone = flac.clone();
+        gone.trashed_at = Some(1);
+        let gone = sound_details(&gone, Some(Path::new("x.flac")), None, None, Some(&fake));
+        assert!(!gone.to_mp3 && !gone.better);
         // A lossy file is never checked: nothing pending, no verdict.
         let plain = sound_details(&mp3, Some(Path::new("RuLe.mp3")), None, None, None);
         assert!(!plain.pending && plain.verdict.is_none());
@@ -817,6 +832,7 @@ mod tests {
         yt.bitrate = Some(160);
         let s = sound_details(&yt, None, None, Some(200_000), None);
         assert!(!s.pending && s.verdict.is_none());
+        assert!(!s.to_mp3 && !s.better, "nothing to do with a stream's file");
         assert!(s.facts.contains(&("Откуда".into(), "Поток YouTube Music".into())));
         assert!(!s.facts.iter().any(|(k, _)| k == "Размер" || k == "Контейнер"));
     }
