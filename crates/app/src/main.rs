@@ -276,6 +276,7 @@ impl Resident for Core {
         self.report_window(false, false);
         self.geometry.flush();
         self.wants_show = false;
+        memory::log_now("tray");
     }
 
     fn headless_frame(&mut self, _ctx: &egui::Context) -> Headless {
@@ -381,6 +382,9 @@ impl eframe::App for Window {
             self.showing = None;
             core.geometry.flush();
             log::info!("window hidden to the tray (kept)");
+            // Hidden, only the playing cover stays on the card.
+            nikgob_md3e::covers::trim_to_current(ctx);
+            memory::log_now("tray");
         }
         let shown = !minimized && !core.hidden;
         core.report_window(shown, focused && shown);
