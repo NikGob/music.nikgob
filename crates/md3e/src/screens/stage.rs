@@ -340,7 +340,18 @@ fn take(ctx: &Context) -> Option<StageRequest> {
 /// [`CANVAS_MIN_H`] tall (a low, wide stage gets a canvas wider than the
 /// window: the screen's layout stays real), never larger than real.
 pub fn canvas(size: Vec2) -> (Vec2, f32) {
-    let scale = (size.x / CANVAS_W).min(size.y / CANVAS_MIN_H).clamp(1e-3, 1.0);
+    canvas_for(size, None)
+}
+
+/// [`canvas`] for a screen that fills a `window` this big (Now Playing):
+/// the canvas is the window, so whatever is sized in points there (the
+/// lyrics' size, the buttons, the margins) stands to the screen on the
+/// stage as it does on the real one; a stage of other proportions gets
+/// the rest of the canvas on its long side. Never less than [`canvas`]'s.
+pub fn canvas_for(size: Vec2, window: Option<Vec2>) -> (Vec2, f32) {
+    let least = (size.x / CANVAS_W).min(size.y / CANVAS_MIN_H);
+    let real = window.filter(|w| w.x >= 1.0 && w.y >= 1.0).map_or(least, |w| (size.x / w.x).min(size.y / w.y));
+    let scale = real.min(least).clamp(1e-3, 1.0);
     (size / scale, scale)
 }
 
@@ -1022,7 +1033,10 @@ impl StageUi {
         if k <= 0.001 {
             self.focus = None;
         }
-        let (size, _) = canvas(req.rect.size());
+        // Now Playing on the stage is the window's, smaller: what is sized
+        // in points there (the lyrics) takes the same share of it.
+        let window = matches!(scene, Scene::Track | Scene::Lyrics).then(|| ctx.content_rect().size());
+        let (size, _) = canvas_for(req.rect.size(), window);
         let home_bottom = self
             .rects
             .iter()
@@ -1045,7 +1059,7 @@ impl StageUi {
         );
         // Главная on the stage scrolls with the wheel over it (not while the
         // whole page is fitted in): the rest of the page can be looked at.
-        let (_, scale) = canvas(req.rect.size());
+        let (_, scale) = canvas_for(req.rect.size(), window);
         let room = (home_bottom + 24.0 - size.y).max(0.0);
         if scene == Scene::Home && !fitting {
             if let Some(p) = ctx.pointer_hover_pos()
@@ -1354,6 +1368,29 @@ mod tests {
         // A low, wide band: the canvas is wider than the window, not cut.
         let (c, _) = canvas(vec2(760.0, 250.0));
         assert!((c.y - CANVAS_MIN_H).abs() < 0.01 && c.x > 1500.0, "{c:?}");
+    }
+
+    /// Now Playing's canvas is the window: lyrics of 40 points take the same
+    /// share of the stage's height as of the window's (and of its width,
+    /// at the window's proportions); a stage of other proportions widens
+    /// the canvas, and a small window keeps the least canvas.
+    #[test]
+    fn now_playing_on_the_stage_is_the_window_smaller() {
+        let window = vec2(1920.0, 1080.0);
+        let stage = vec2(600.0, 600.0 * 1080.0 / 1920.0);
+        let (c, scale) = canvas_for(stage, Some(window));
+        assert!((c - window).length() < 0.5, "{c:?}");
+        let lyrics = 40.0;
+        assert!((lyrics * scale / stage.y - lyrics / window.y).abs() < 1e-5);
+        assert!(scale < canvas(stage).1, "smaller than the least canvas shows it");
+        // A low strip: as high as the window, wider than it.
+        let (c, _) = canvas_for(vec2(700.0, 250.0), Some(window));
+        assert!((c.y - window.y).abs() < 0.5 && c.x > window.x, "{c:?}");
+        assert!((c.x / c.y - 700.0 / 250.0).abs() < 1e-3);
+        // A window smaller than the least canvas: the least canvas.
+        let small = vec2(800.0, 500.0);
+        assert_eq!(canvas_for(stage, Some(small)), canvas(stage));
+        assert_eq!(canvas_for(stage, None), canvas(stage));
     }
 
     /// The card keeps its 28 corner on screen at every scale the stage is

@@ -154,13 +154,15 @@ const RECS: [RecsRow; 3] = [
     (false, RadioNewShare::More, true, RadioExplore::Sometimes, RadioUnheard::More),
 ];
 
-/// «Откуда качать»: which presets switch a source on («Законное»,
-/// «Обычно», «Всё»).
-const fn source_row(k: SourceKey) -> [bool; 3] {
+/// «Откуда качать»: which presets switch a source on («Обычно», «Всё»).
+/// Values that match neither (the old «Законное»: Bandcamp and Internet
+/// Archive alone) are «Свои».
+const fn source_row(k: SourceKey) -> [bool; 2] {
     match k {
-        SourceKey::Bandcamp | SourceKey::Archive => [true, true, true],
-        SourceKey::Torrents | SourceKey::Khinsider | SourceKey::Qobuz | SourceKey::Tidal => [false, true, true],
-        SourceKey::Soulseek | SourceKey::Squidify => [false, false, true],
+        SourceKey::Bandcamp | SourceKey::Archive | SourceKey::Torrents | SourceKey::Khinsider | SourceKey::Qobuz | SourceKey::Tidal => {
+            [true, true]
+        }
+        SourceKey::Soulseek | SourceKey::Squidify => [false, true],
     }
 }
 
@@ -187,7 +189,7 @@ impl Area {
             Self::Recs => &["Только моё", "Сбалансировано", "Больше нового"],
             Self::Lyrics => &[],
             Self::Track => &["Строго", "Живо", "Максимум"],
-            Self::Sources => &["Законное", "Обычно", "Всё"],
+            Self::Sources => &["Обычно", "Всё"],
             Self::Seeding => &["Не раздавать", "Обычно", "Щедро"],
             Self::Load => &["Тихо", "Обычно", "Быстро"],
         }
@@ -244,7 +246,7 @@ impl Area {
                 ]);
             }
             Self::Sources => {
-                if n < 3 {
+                if n < 2 {
                     out.extend(SOURCE_FIELDS.iter().map(|&f| {
                         let Field::Source(k) = f else { unreachable!("only sources here") };
                         (f, V::Bool(source_row(k)[n]))
@@ -513,7 +515,7 @@ mod tests {
         let p = Prefs::first_start();
         assert_eq!(Area::Recs.current(&p), Some(1), "Сбалансировано");
         assert_eq!(Area::Track.current(&p), Some(2), "Максимум");
-        assert_eq!(Area::Sources.current(&p), Some(1), "Обычно");
+        assert_eq!(Area::Sources.current(&p), Some(0), "Обычно");
         assert_eq!(Area::Seeding.current(&p), Some(1), "Обычно");
         assert_eq!(Area::Load.current(&p), Some(2), "Быстро");
         for area in Area::ALL {
@@ -525,7 +527,7 @@ mod tests {
     fn the_old_defaults_are_where_the_plan_says() {
         let p = Prefs::default();
         assert_eq!(Area::Track.current(&p), Some(1), "Живо");
-        assert_eq!(Area::Sources.current(&p), Some(1), "Обычно");
+        assert_eq!(Area::Sources.current(&p), Some(0), "Обычно");
         assert_eq!(Area::Recs.current(&p), None, "mixes without new music");
         assert_eq!(Area::Seeding.current(&p), None, "ratio 2.0");
         assert_eq!(Area::Load.current(&p), None, "60 frames");
@@ -637,13 +639,32 @@ mod tests {
         ];
         let p = Prefs { download_sources: order, ..Prefs::default() };
         let keys = |p: &Prefs| p.source_order().iter().map(|s| s.key).collect::<Vec<_>>();
-        for n in 0..3 {
+        for n in 0..Area::Sources.names().len() {
             let q = Area::Sources.with(&p, n);
             assert_eq!(keys(&q), keys(&p));
         }
-        let lawful = Area::Sources.with(&p, 0);
-        assert!(lawful.source_on(SourceKey::Archive) && lawful.source_on(SourceKey::Bandcamp));
-        assert!(!lawful.source_on(SourceKey::Torrents) && !lawful.source_on(SourceKey::Soulseek));
+        let usual = Area::Sources.with(&p, 0);
+        assert!(usual.source_on(SourceKey::Archive) && usual.source_on(SourceKey::Torrents));
+        assert!(!usual.source_on(SourceKey::Soulseek) && !usual.source_on(SourceKey::Squidify));
+    }
+
+    /// The switches of the old «Законное» (Bandcamp and Internet Archive
+    /// alone) stay as they are and read as «Свои»; «Обычно» from there
+    /// keeps them for «Свои».
+    #[test]
+    fn the_old_lawful_preset_is_custom() {
+        let mut p = Prefs::first_start();
+        for k in SourceKey::ALL {
+            let on = matches!(k, SourceKey::Bandcamp | SourceKey::Archive);
+            Field::Source(k).set(&mut p, &FieldValue::Bool(on));
+        }
+        assert_eq!(Area::Sources.current(&p), None);
+        assert!(Area::Sources.custom_shown(&p));
+        let lawful = p.clone();
+        Area::Sources.apply(&mut p, 0);
+        assert_eq!(Area::Sources.current(&p), Some(0));
+        let back = Area::Sources.custom(&p).expect("kept for «Свои»");
+        assert_eq!(Area::Sources.snapshot(&back), Area::Sources.snapshot(&lawful));
     }
 
     #[test]

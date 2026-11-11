@@ -914,7 +914,9 @@ pub fn show_on(
             let rows = Chrome::player_rows(&ctx, t, state, &[Act::Visualizer], true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
-        if ui.add(
+        // Q and L work with the buttons hidden (Settings → Вид).
+        let buttons = state.prefs.player_buttons;
+        if buttons.queue && ui.add(
             IconButton::new(Icon::QueueMusic)
                 .style(Style::Tonal)
                 .selected(chrome.np_slot == NpSlot::Queue)
@@ -923,7 +925,7 @@ pub fn show_on(
         ).clicked() {
             chrome.np_slot.toggle(NpSlot::Queue);
         }
-        if ui.add(
+        if buttons.lyrics && ui.add(
             IconButton::new(Icon::Lyrics)
                 .style(Style::Tonal)
                 .selected(chrome.np_slot == NpSlot::Lyrics)
@@ -1730,10 +1732,13 @@ fn info(
     // Controls: standard button group, hero play in the middle.
     // The largest sizes whose row fits the column (a narrow window steps
     // the side buttons down first, so play stays the biggest).
+    // Shuffle and repeat only where Settings → Вид shows them.
+    let buttons = state.prefs.player_buttons;
+    let side = f32::from(2 + u8::from(buttons.shuffle) + u8::from(buttons.repeat));
     let row_w = |button: Size, hero: Size| {
-        4.0 * IconButton::new(Icon::Shuffle).size(button).natural_width()
+        side * IconButton::new(Icon::Shuffle).size(button).natural_width()
             + IconButton::new(Icon::PlayArrow).size(hero).natural_width()
-            + 4.0 * button.group_gap()
+            + side * button.group_gap()
     };
     let tiers: &[(Size, Size)] = if compact {
         &[(Size::S, Size::M), (Size::Xs, Size::S)]
@@ -1777,36 +1782,39 @@ fn info(
             border: Color32::TRANSPARENT,
         })
         .tooltip("Играть / пауза (Space)");
-    let r = ButtonGroup::new("np-group", button_size).show(
-        &mut cui,
-        vec![
-            Item::from(tonal(Icon::Shuffle).selected(p.shuffle).tooltip("Перемешать")),
-            Item::from(tonal(Icon::SkipPrevious).tooltip("Назад (Ctrl+←)")),
-            Item::from(hero),
-            Item::from(tonal(Icon::SkipNext).tooltip("Далее (Ctrl+→)")),
-            Item::from(
-                tonal(repeat_icon)
-                    .selected(p.repeat != Repeat::Off)
-                    .tooltip(super::player_bar::repeat_tip(p.repeat)),
-            ),
-        ],
-    );
-    if r[0].clicked() {
+    let mut items = Vec::with_capacity(5);
+    if buttons.shuffle {
+        items.push(Item::from(tonal(Icon::Shuffle).selected(p.shuffle).tooltip("Перемешать")));
+    }
+    // Where «Назад» stands; play and «Далее» follow it.
+    let prev = items.len();
+    items.push(Item::from(tonal(Icon::SkipPrevious).tooltip("Назад (Ctrl+←)")));
+    items.push(Item::from(hero));
+    items.push(Item::from(tonal(Icon::SkipNext).tooltip("Далее (Ctrl+→)")));
+    if buttons.repeat {
+        items.push(Item::from(
+            tonal(repeat_icon)
+                .selected(p.repeat != Repeat::Off)
+                .tooltip(super::player_bar::repeat_tip(p.repeat)),
+        ));
+    }
+    let r = ButtonGroup::new("np-group", button_size).show(&mut cui, items);
+    if buttons.shuffle && r[0].clicked() {
         out.push(Command::ToggleShuffle);
     }
-    if r[1].clicked() {
+    if r[prev].clicked() {
         chrome::press_previous(&ctx, state, out);
     }
     if p.status == Status::Buffering {
-        common::buffering_overlay(ui, r[2].rect, s.primary, s.on_primary);
+        common::buffering_overlay(ui, r[prev + 1].rect, s.primary, s.on_primary);
     }
-    if r[2].clicked() {
+    if r[prev + 1].clicked() {
         out.push(Command::TogglePlay);
     }
-    if r[3].clicked() {
+    if r[prev + 2].clicked() {
         out.push(Command::Next);
     }
-    if r[4].clicked() {
+    if buttons.repeat && r[prev + 3].clicked() {
         out.push(Command::CycleRepeat);
     }
     if compact {
@@ -1819,7 +1827,7 @@ fn info(
             UiBuilder::new().max_rect(ends).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("np-compact-like"),
         );
         let like_tip = format!("{} (Ctrl+L)", super::pages::like_label(t.liked));
-        if lui.add(IconButton::new(Icon::Favorite).selected(t.liked).tooltip(like_tip).id_salt("np-like-compact")).clicked() {
+        if buttons.like && lui.add(IconButton::new(Icon::Favorite).selected(t.liked).tooltip(like_tip).id_salt("np-like-compact")).clicked() {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
         if state.prefs.dislike_button {
@@ -1847,23 +1855,27 @@ fn info(
             .id_salt("np-actions"),
     );
     if let Some(t) = current {
-        if aui
-            .add(
-                IconButton::new(Icon::Favorite)
-                    .selected(t.liked)
-                    .tooltip(format!("{} (Ctrl+L)", super::pages::like_label(t.liked)))
-                    .id_salt("np-like"),
-            )
-            .clicked()
+        if buttons.like
+            && aui
+                .add(
+                    IconButton::new(Icon::Favorite)
+                        .selected(t.liked)
+                        .tooltip(format!("{} (Ctrl+L)", super::pages::like_label(t.liked)))
+                        .id_salt("np-like"),
+                )
+                .clicked()
         {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
-        let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист…").id_salt("np-add"));
-        pages.playlist_menu(&add, vec![t.id]);
+        if buttons.add_to_playlist {
+            let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист…").id_salt("np-add"));
+            pages.playlist_menu(&add, vec![t.id]);
+        }
     }
     // The sound of the track (its speed and the equalizer), by the volume.
     // Lit while either changes what is heard.
-    let sound_changed = current.map(|t| state.prefs.eq_on || state.speeds.of(t.id) != nikgob_view::SpeedVariant::Normal);
+    let sound_changed =
+        current.filter(|_| buttons.sound).map(|t| state.prefs.eq_on || state.speeds.of(t.id) != nikgob_view::SpeedVariant::Normal);
     let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
     let volume_row = aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };

@@ -122,8 +122,14 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     let lyrics_rev = value.get("lyrics_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     // Prefs from before the presets keep the values of their own once.
     let settings_rev = value.get("settings_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
+    // «Перемешивание остаётся включённым» became a rule by the kind of
+    // list: off, every kind keeps playing in order.
+    let keep_shuffle = value.get("list_shuffle").is_none().then(|| value.get("keep_shuffle").and_then(|v| v.as_bool())).flatten();
     let mut prefs: Prefs = serde_json::from_value(value)?;
     if legacy { prefs.np_slot = slot; }
+    if let Some(keep) = keep_shuffle {
+        prefs.list_shuffle = nikgob_view::ListShuffles::from_keep(keep);
+    }
     prefs.upgrade_lyrics(lyrics_rev);
     // The owner's own build opens the settings in «Подробно» the first
     // time; a handout build in «Просто».
@@ -1056,6 +1062,27 @@ mod prefs_tests {
         assert_eq!(parse_prefs(br#"{"lyrics_style":3}"#).unwrap().lyrics_unit, LYRICS_BY_WORDS);
         assert_eq!(parse_prefs(br#"{"lyrics_unit":0,"lyrics_rev":4}"#).unwrap().lyrics_unit, LYRICS_BY_LETTERS);
         assert_eq!(prefs_of(None).lyrics_unit, LYRICS_BY_SYLLABLES);
+    }
+
+    /// «Перемешивание остаётся включённым» off becomes every kind of list
+    /// in order; on (or never written), each kind's default; a rule written
+    /// since stays.
+    #[test]
+    fn the_old_shuffle_switch_becomes_the_kinds_once() {
+        use nikgob_view::{ListKind, ListShuffle, ListShuffles};
+        let off = parse_prefs(br#"{"keep_shuffle":false}"#).unwrap();
+        for kind in ListKind::ALL {
+            assert_eq!(off.list_shuffle.of(kind), ListShuffle::InOrder, "{kind:?}");
+        }
+        assert_eq!(parse_prefs(br#"{"keep_shuffle":true}"#).unwrap().list_shuffle, ListShuffles::default());
+        assert_eq!(parse_prefs(br#"{"theme":"Dark"}"#).unwrap().list_shuffle, ListShuffles::default());
+        let mut p = off.clone();
+        p.list_shuffle.set(ListKind::Mix, ListShuffle::Shuffled);
+        let mut written = serde_json::to_value(&p).unwrap();
+        written.as_object_mut().unwrap().insert("keep_shuffle".into(), serde_json::Value::Bool(false));
+        let again = parse_prefs(&serde_json::to_vec(&written).unwrap()).unwrap();
+        assert_eq!(again.list_shuffle, p.list_shuffle);
+        assert!(!serde_json::to_value(&again).unwrap().as_object().unwrap().contains_key("keep_shuffle"));
     }
 
     /// «Настройки текста…» is offered under the lyrics until it is picked

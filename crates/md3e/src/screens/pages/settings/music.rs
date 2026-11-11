@@ -3,26 +3,31 @@
 
 use egui::Ui;
 use nikgob_view::presets::Area;
-use nikgob_view::{Command, Prefs, RadioKind, RadioNewShare, ViewState};
+use nikgob_view::{ListKind, Prefs, RadioKind, RadioNewShare, Route, ViewState};
 
 use super::super::settings_help::SettingId as Id;
 use super::preset;
-use super::rows::{self, Num, child, dimmed, group, menu, row, switch, switch_enabled};
-use crate::components::{Button, Style, Switch};
+use super::rows::{self, Num, child, dimmed, group, menu, row, sub, switch, switch_enabled};
+use super::super::PageState;
+use crate::components::{Button, Size, Style, Switch};
 
-pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
+pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState) {
     sound(ui, state, p);
 
     group(ui, "Очередь");
     switch(ui, Id::Autoplay, &mut p.autoplay);
     let autoplay = p.autoplay;
     child(ui, !autoplay, |ui| switch(ui, Id::AutoplayWorld, &mut p.autoplay_continue_world));
-    switch(ui, Id::KeepShuffle, &mut p.keep_shuffle);
-    switch(ui, Id::ShuffleRadio, &mut p.shuffle_radio);
     menu(ui, Id::RadioNoRepeat, p);
+    // How a new list starts, by its kind; radio and autoplay on their own.
+    sub(ui, "Перемешивание");
+    for kind in ListKind::ALL {
+        menu(ui, Id::ListShuffle(kind), p);
+    }
+    switch(ui, Id::ShuffleRadio, &mut p.shuffle_radio);
 
     recommendations(ui, p);
-    dislikes(ui, state, p, out);
+    dislikes(ui, p, pages);
 }
 
 /// «Звук»: the device, gaps, crossfade, loudness, the equalizer, the speed
@@ -103,30 +108,16 @@ fn recommendations(ui: &mut Ui, p: &mut Prefs) {
     switch(ui, Id::GraphUse, &mut p.graph_use);
 }
 
-/// «Не нравится»: the button, the skips, and the marks (only while there
-/// are some).
-fn dislikes(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<Command>) {
+/// «Не нравится»: the button, the skips, and the page of the marks (the
+/// speeds of tracks too).
+fn dislikes(ui: &mut Ui, p: &mut Prefs, pages: &mut PageState) {
     group(ui, "Не нравится");
     switch(ui, Id::DislikeButton, &mut p.dislike_button);
     switch(ui, Id::DislikeSkips, &mut p.dislike_skips);
     switch(ui, Id::DislikeSkipEverywhere, &mut p.dislike_skip_everywhere);
-    let d = &state.dislikes;
-    if !d.artists.is_empty() {
-        rows::titled(ui, Id::DislikedArtists, |ui| {
-            for (id, name) in &d.artists {
-                rows::mark_row(ui, egui::Id::new(("set-unban", *id)), name, None, "Снять", || {
-                    out.push(Command::RecFeedback { target: nikgob_view::RecTarget::Artist(*id), dislike: false });
-                });
-            }
-        });
-    }
-    if !d.tracks.is_empty() {
-        rows::titled(ui, Id::DislikedTracks, |ui| {
-            for t in &d.tracks {
-                rows::mark_row(ui, egui::Id::new(("set-undislike", t.id)), &t.title, Some(&t.artist), "Снять", || {
-                    out.push(Command::Dislike { track: t.id, dislike: false, sure: true, relike: false });
-                });
-            }
-        });
-    }
+    row(ui, Id::Marks, |ui| {
+        if ui.add(Button::new("Открыть").style(Style::Outlined).size(Size::S).id_salt("set-marks")).clicked() {
+            pages.pending_nav = Some(Route::Marks);
+        }
+    });
 }

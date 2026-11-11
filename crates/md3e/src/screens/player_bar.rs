@@ -100,19 +100,23 @@ pub fn show(
         // Toggles sit on a tinted disc while on: the pill's flat item
         // colours alone look the same either way.
         let toggle_colors = |on_: bool| if on_ { Colors { container: on.gamma_multiply(0.24), ..item } } else { item };
-        if ui
-            .add(
-                IconButton::new(Icon::Shuffle)
-                    .selected(p.shuffle)
-                    .colors(toggle_colors(p.shuffle))
-                    .tooltip(if p.shuffle {
-                        "Очередь перемешана — нажми, чтобы вернуть порядок"
-                    } else {
-                        "Перемешать очередь"
-                    })
-                    .id_salt("bar-shuffle"),
-            )
-            .clicked()
+        // The optional buttons only where Settings → Вид shows them (their
+        // keys work anyway).
+        let buttons = state.prefs.player_buttons;
+        if buttons.shuffle
+            && ui
+                .add(
+                    IconButton::new(Icon::Shuffle)
+                        .selected(p.shuffle)
+                        .colors(toggle_colors(p.shuffle))
+                        .tooltip(if p.shuffle {
+                            "Очередь перемешана — нажми, чтобы вернуть порядок"
+                        } else {
+                            "Перемешать очередь"
+                        })
+                        .id_salt("bar-shuffle"),
+                )
+                .clicked()
         {
             out.push(Command::ToggleShuffle);
         }
@@ -149,15 +153,16 @@ pub fn show(
         {
             out.push(Command::Next);
         }
-        if ui
-            .add(
-                IconButton::new(repeat_icon(p.repeat))
-                    .selected(p.repeat != Repeat::Off)
-                    .colors(toggle_colors(p.repeat != Repeat::Off))
-                    .tooltip(repeat_tip(p.repeat))
-                    .id_salt("bar-repeat"),
-            )
-            .clicked()
+        if buttons.repeat
+            && ui
+                .add(
+                    IconButton::new(repeat_icon(p.repeat))
+                        .selected(p.repeat != Repeat::Off)
+                        .colors(toggle_colors(p.repeat != Repeat::Off))
+                        .tooltip(repeat_tip(p.repeat))
+                        .id_salt("bar-repeat"),
+                )
+                .clicked()
         {
             out.push(Command::CycleRepeat);
         }
@@ -166,8 +171,9 @@ pub fn show(
         // The pane's buttons only for its parts turned on in Settings; the
         // room of those that are off goes to the slider.
         let (queue_on, lyrics_on) = (PaneTab::Queue.on(&state.prefs), PaneTab::Lyrics.on(&state.prefs));
-        let (show_like, show_lyrics, show_volume) = (!compact, wide && lyrics_on, wide);
-        let trailing = [show_like, queue_on, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
+        let show_queue = queue_on && buttons.queue;
+        let (show_like, show_lyrics, show_volume) = (!compact && buttons.like, wide && lyrics_on && buttons.lyrics, wide);
+        let trailing = [show_like, show_queue, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
 
         // Progress: label, slider, label; a bare slider when narrower; a
         // line under the title when there is no room at all.
@@ -226,7 +232,7 @@ pub fn show(
                 out.push(Command::Like(LikeTarget::Track(t.id), !liked));
             }
         }
-        if queue_on
+        if show_queue
             && ui
                 .add(
                     IconButton::new(Icon::QueueMusic)

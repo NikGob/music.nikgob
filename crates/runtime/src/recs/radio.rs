@@ -358,7 +358,8 @@ impl Worker {
         self.radio_fetch_new();
         match first {
             Some(t) => {
-                self.new_list();
+                // A radio keeps the shuffle button as it is.
+                self.new_list(None);
                 self.queue.set_ordered(&[t], 0, Some(context));
                 self.play_context = ctx;
                 self.play_context_id = self.recs.radio.run.as_ref().map(|r| seed_context_id(&r.state.seed, false));
@@ -813,9 +814,8 @@ impl Worker {
                 let (context, ctx) = (context_of(&run.title), run.ctx);
                 // A radio's picks are a path: they keep their order (or play
                 // shuffled under shuffle with «Перемешивать радио и
-                // автовоспроизведение»); shuffle stays or goes off as the
-                // setting says.
-                self.new_list();
+                // автовоспроизведение»); the shuffle button stays as it is.
+                self.new_list(None);
                 let shuffled = self.shuffle_radio();
                 self.queue.set_path(&ids, Some(context), shuffled);
                 self.play_context = ctx;

@@ -1,7 +1,7 @@
 //! The app's mark: the NikGob sun over «Made by NikGob». It closes
-//! Настройки (a click opens the author's GitHub), with the version at the
-//! page's right, and stands in for Главная while the page is built at the
-//! start of a run.
+//! Настройки (a click opens the author's GitHub), the build's version
+//! under it in one centred group, and stands in for Главная while the page
+//! is built at the start of a run.
 
 use egui::{Align2, Color32, CursorIcon, Image, ImageSource, Rangef, Rect, Sense, Ui, pos2, vec2};
 
@@ -15,6 +15,8 @@ const SMALL: f32 = 40.0;
 const LARGE: f32 = 96.0;
 /// Between the sun and the label.
 const GAP: f32 = 8.0;
+/// Between the label and the version under it.
+const VERSION_GAP: f32 = 4.0;
 /// One breath of the loading mark (seconds).
 const BREATH: f64 = 1.8;
 
@@ -26,6 +28,12 @@ pub fn version() -> &'static str {
         Some(_) => env!("CARGO_PKG_VERSION"),
         None => "admin",
     }
+}
+
+/// The version as the foot of Настройки names it: «Версия 0.0.5»,
+/// «Версия admin».
+pub fn version_label() -> String {
+    format!("Версия {}", version())
 }
 
 /// The owner's own build (not a handout one): developer rows show.
@@ -47,15 +55,16 @@ fn height(side: f32) -> f32 {
     side + GAP + TypeRole::LabelLarge.style().line_height
 }
 
-/// The foot of Настройки across the page's width `page`: the mark in its
-/// middle (a click opens GitHub), the version at its right on the label's
-/// line.
+/// The foot of Настройки, centred on the column `page`: the mark (a click
+/// opens GitHub) and the version under it, one group.
 pub fn made_by(ui: &mut Ui, page: Rangef) {
     let s = Theme::get(ui.ctx()).scheme;
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), height(SMALL) + 24.0), Sense::hover());
+    let version = TypeRole::LabelSmall.style();
+    let block = height(SMALL) + VERSION_GAP + version.line_height;
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), block + 24.0), Sense::hover());
     let row = Rect::from_x_y_ranges(page, row.y_range());
     let g = crate::typography::layout(ui.painter(), TypeRole::LabelLarge.style().job(LABEL, s.on_surface_variant));
-    let top = row.center().y - height(SMALL) / 2.0;
+    let top = row.center().y - block / 2.0;
     let hit = Rect::from_center_size(pos2(row.center().x, top + height(SMALL) / 2.0), vec2(g.size().x.max(SMALL), height(SMALL)));
     let resp = ui
         .interact(hit, ui.id().with("made-by-nikgob"), Sense::click())
@@ -63,12 +72,11 @@ pub fn made_by(ui: &mut Ui, page: Rangef) {
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
     let color = lerp(s.on_surface_variant, s.on_surface, hover);
     paint(ui, Rect::from_min_max(pos2(row.left(), top), row.max), SMALL, color, 0.85 + 0.15 * hover);
-    let line = top + SMALL + GAP + TypeRole::LabelLarge.style().line_height / 2.0;
     ui.painter().text(
-        pos2(row.right() - 16.0, line),
-        Align2::RIGHT_CENTER,
-        version(),
-        TypeRole::LabelSmall.style().font_id(),
+        pos2(row.center().x, top + height(SMALL) + VERSION_GAP),
+        Align2::CENTER_TOP,
+        version_label(),
+        version.font_id(),
         s.on_surface_variant,
     );
     if resp.clicked() {

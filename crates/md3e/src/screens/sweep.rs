@@ -194,6 +194,8 @@ impl Value {
     }
 }
 
+use v::ListKind as L;
+use v::PlayerButton as B;
 use v::RadioKind as K;
 use v::SourceKey as Src;
 const KINDS: [K; 4] = [K::Track, K::Artist, K::Mix, K::Autoplay];
@@ -203,11 +205,10 @@ pub const ALL: &[SettingId] = {
     use SettingId::*;
     &[
         // Музыка.
-        OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, KeepShuffle,
-        ShuffleRadio, RadioNoRepeat,
+        OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, RadioNoRepeat,
+        ListShuffle(L::Mix), ListShuffle(L::OwnPlaylist), ListShuffle(L::Album), ListShuffle(L::ReadyPlaylist), ShuffleRadio,
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
-        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, DislikedArtists,
-        DislikedTracks, RadioSource,
+        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, RadioSource,
         // Тексты.
         LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsScale, LyricsLead, LyricsDim, LyricsCascade,
         LyricsGlow, LyricsSoftEdges, LyricsSoftDepth, LyricsSoftStrength, LyricsSoftFade, LyricsGap, LyricsGapWaves, LyricsGapHeight,
@@ -217,8 +218,10 @@ pub const ALL: &[SettingId] = {
         Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
         CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle, RingSpin, RingDir, RingSpinSpeed, RingBeat, RingPause,
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
-        NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
-        LikedAlbumsPlace, RailCompact, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
+        NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
+        PlayerButton(B::Like), PlayerButton(B::AddToPlaylist), PlayerButton(B::Queue), PlayerButton(B::Lyrics), PlayerButton(B::Sound),
+        HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
+        LikedAlbumsPlace, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
         YouTubeCookies, ImportYouTube, SoundCloudEnabled, SoundCloud, SoundCloudToken, ImportSoundCloud, DeezerEnabled, PushLikes,
@@ -277,7 +280,6 @@ fn spec(id: SettingId) -> Spec {
     const ACCOUNT: &str = "a service account (sign-in); shown with whatever the data dir has";
     const SECRET: &str = "kept in settings.toml, not in the prefs; typed in, never set by the sweep";
     const BUTTONS: &str = "buttons only; the sweep never presses them (they open folders, sign in or change files)";
-    const LIST: &str = "a list of what was marked elsewhere; nothing to set here";
     match id {
         S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingDir | S::RingStyle | S::Ambient | S::BgColors
         | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu | S::LyricsStreamKeep
@@ -286,7 +288,7 @@ fn spec(id: SettingId) -> Spec {
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
         S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
-        | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac => Spec::Choice(Menu),
+        | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac | S::ListShuffle(_) => Spec::Choice(Menu),
         S::RadioSource => Spec::Fixed(Segments, "chosen in the queue's radio header; no row in Settings"),
         // A preset: its presets as choices (no «Свои»: it only takes back).
         S::Preset(a) if a.names().is_empty() => Spec::Fixed(Segments, "no presets yet (TODO 36); the row is not drawn"),
@@ -356,7 +358,6 @@ fn spec(id: SettingId) -> Spec {
         S::LyricsGenius => Spec::Switch(|p| &mut p.lyrics_genius),
         S::LyricsStreams => Spec::Switch(|p| &mut p.lyrics_streams),
         S::LyricsModels => Spec::Fixed(List, "a «Модели» row that opens the list; the sweep never opens it and never presses «Скачать» / delete"),
-        S::KeepShuffle => Spec::Switch(|p| &mut p.keep_shuffle),
         S::ShuffleRadio => Spec::Switch(|p| &mut p.shuffle_radio),
         S::OutputDevice => Spec::OutputDevice,
         S::Gapless => Spec::Switch(|p| &mut p.gapless),
@@ -386,7 +387,15 @@ fn spec(id: SettingId) -> Spec {
         S::DislikeSkips => Spec::Switch(|p| &mut p.dislike_skips),
         S::DislikeSkipEverywhere => Spec::Switch(|p| &mut p.dislike_skip_everywhere),
         S::DislikeInRecs => Spec::Switch(|p| &mut p.dislike_in_recs),
-        S::DislikedTracks | S::DislikedArtists => Spec::Fixed(List, LIST),
+        S::Marks => Spec::Fixed(Action, "a row whose button opens the page of the marks; the sweep never opens it"),
+        S::PlayerButton(B::Sound) => Spec::Switch(|p| &mut p.player_buttons.sound),
+        S::PlayerButton(B::Shuffle) => Spec::Switch(|p| &mut p.player_buttons.shuffle),
+        S::PlayerButton(B::Repeat) => Spec::Switch(|p| &mut p.player_buttons.repeat),
+        S::PlayerButton(B::Like) => Spec::Switch(|p| &mut p.player_buttons.like),
+        S::PlayerButton(B::AddToPlaylist) => Spec::Switch(|p| &mut p.player_buttons.add_to_playlist),
+        S::PlayerButton(B::Queue) => Spec::Switch(|p| &mut p.player_buttons.queue),
+        S::PlayerButton(B::Lyrics) => Spec::Switch(|p| &mut p.player_buttons.lyrics),
+        S::NavRoot => Spec::Switch(|p| &mut p.nav_root),
         S::TrackMenu => Spec::Fixed(Action, "a row that opens the list of the track menu's items; the sweep never opens it"),
         S::HiddenMixes => Spec::Fixed(List, "shown only while a mix is hidden from Главная (⋮ → «Не предлагать этот микс»)"),
         S::GraphUse => Spec::Switch(|p| &mut p.graph_use),
@@ -684,7 +693,7 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
     match id {
         S::Theme | S::Contrast | S::Scheme => vec![Home, Album, Np, NpLyrics],
         S::ProgressWave => vec![Np, NpPaused, Home],
-        S::NpVolume | S::NpVolumeHold | S::FpsLimit | S::DislikeButton => vec![Np],
+        S::NpVolume | S::NpVolumeHold | S::FpsLimit | S::DislikeButton | S::PlayerButton(_) => vec![Np],
         S::CoverShape | S::Ring | S::RingStyle | S::CoverPauseMorph => vec![Np, NpPaused, NpLyrics],
         S::AlbumDate => vec![Album],
         S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength | S::RingPause => vec![Np, NpPaused],
@@ -889,11 +898,11 @@ mod tests {
         let pos = |id: SettingId| ALL.iter().position(|x| *x == id).unwrap_or(usize::MAX);
         match id {
             S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Equalizer | S::TrackSpeed | S::KeepTimbre
-            | S::Autoplay | S::AutoplayWorld | S::KeepShuffle
+            | S::Autoplay | S::AutoplayWorld | S::ListShuffle(_) | S::Marks | S::PlayerButton(_) | S::NavRoot
 
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
             | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
-            | S::DislikedArtists | S::DislikedTracks | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth
+            | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth
             | S::LightSpeed | S::WaveJump | S::JumpSpeed | S::LyricsScale | S::LyricsLead | S::LyricsDim | S::LyricsCascade
             | S::LyricsGlow | S::LyricsSoftEdges | S::LyricsSoftDepth | S::LyricsSoftStrength | S::LyricsSoftFade | S::LyricsGap
             | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize | S::LyricsCountdown | S::WaveFallback | S::LyricsReturn
@@ -927,6 +936,8 @@ mod tests {
     fn the_list_covers_every_setting_once() {
         let mut every: Vec<SettingId> = ALL.to_vec();
         every.extend(KINDS.iter().map(|k| SettingId::NewShareBy(*k)));
+        every.extend(v::ListKind::ALL.iter().map(|k| SettingId::ListShuffle(*k)));
+        every.extend(v::PlayerButton::ALL.iter().map(|b| SettingId::PlayerButton(*b)));
         every.extend(v::SourceKey::ALL.iter().map(|k| SettingId::DownloadSource(*k)));
         every.extend(Area::ALL.iter().filter(|a| !a.names().is_empty()).map(|a| SettingId::Preset(*a)));
         for id in every {

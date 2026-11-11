@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 mod credit;
 pub mod dev;
+mod player_prefs;
 pub mod presets;
 mod recs;
 mod sound;
@@ -20,6 +21,7 @@ pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
 pub use credit::*;
+pub use player_prefs::*;
 pub use recs::*;
 pub use sound::*;
 pub use streams::*;
@@ -1414,10 +1416,10 @@ pub struct Prefs {
     /// «Сохранять тембр голоса»: a track played faster or slower keeps the
     /// character of its voices (the pitch still moves with the speed).
     pub keep_timbre: bool,
-    /// «Перемешивание остаётся включённым»: a new album, playlist, mix,
-    /// radio or search result keeps shuffle as it was (off: it turns
-    /// shuffle off, «Перемешать» turns it on).
-    pub keep_shuffle: bool,
+    /// «Перемешивание»: how a new list of each kind starts — shuffled, in
+    /// its order, or as the shuffle button is ([`ListShuffles`]).
+    /// «Перемешать» shuffles anyway; other lists follow the button.
+    pub list_shuffle: ListShuffles,
     /// «Перемешивать радио и автовоспроизведение»: with shuffle on, the
     /// picks of a radio, autoplay and the daylist play shuffled too (off:
     /// they keep their own order).
@@ -1652,6 +1654,11 @@ pub struct Prefs {
     pub pane_queue: bool,
     pub pane_lyrics: bool,
     pub pane_info: bool,
+    /// The optional buttons of Now Playing and the player bar that show.
+    pub player_buttons: PlayerButtons,
+    /// «Главная» and «Библиотека» of the rail open the section's first page
+    /// (the library's «Всё»), not the one left there.
+    pub nav_root: bool,
     /// Deleting moves tracks into the Trash for 30 days; off: they are
     /// deleted for good at once (after a confirmation).
     pub use_trash: bool,
@@ -2713,6 +2720,9 @@ pub struct ViewState {
     pub find_song: Option<FindSongView>,
     /// How far the background sound analysis is.
     pub analysis: AnalysisProgress,
+    /// The names of the tracks with a speed of their own
+    /// ([`TrackSpeeds::chosen`]), for «Не нравится и скорость».
+    pub speed_names: std::sync::Arc<std::collections::HashMap<TrackId, DislikedTrack>>,
     /// Disliked tracks and artists not to recommend («Не нравится»,
     /// «Не рекомендовать исполнителя»).
     pub dislikes: DislikesView,
@@ -2823,6 +2833,10 @@ pub enum Route {
     Mix { key: MixKey, world: Option<String> },
     /// «Новые релизы» of Главная, all of them ([`HomeView::new_releases`]).
     NewReleases,
+    /// «Не нравится и скорость» (from Settings → Музыка): the disliked
+    /// tracks, the artists not recommended and the tracks with a speed of
+    /// their own, each taken back there.
+    Marks,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -2866,6 +2880,9 @@ pub enum Command {
     /// «Скорость» of a track: the version it plays as from now on
     /// (remembered with the track; the playing one changes at once).
     SetTrackSpeed { track: TrackId, variant: SpeedVariant },
+    /// «Сбросить» of a track's speed on «Не нравится и скорость»: as
+    /// recorded again, with «Отменить» in the snackbar.
+    ResetTrackSpeed(TrackId),
 
     /// «Включить с YouTube» (the developer profile, [`dev::profile`]): the
     /// playing track goes on from where it is on its YouTube Music copy,
@@ -3300,7 +3317,7 @@ impl Default for Prefs {
             eq_gains: [0.0; EQ_BANDS],
             speed_enabled: true,
             keep_timbre: false,
-            keep_shuffle: true,
+            list_shuffle: ListShuffles::default(),
             shuffle_radio: false,
             opus_bitrate: 160,
             check_fake_lossless: true,
@@ -3402,6 +3419,8 @@ impl Default for Prefs {
             pane_queue: false,
             pane_lyrics: false,
             pane_info: false,
+            player_buttons: PlayerButtons::default(),
+            nav_root: true,
             use_trash: true,
             kept_editions: Vec::new(),
             spotify_enabled: true,

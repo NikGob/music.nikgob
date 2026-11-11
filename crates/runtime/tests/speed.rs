@@ -309,3 +309,29 @@ fn a_speed_of_the_listeners_own_is_read_back_at_the_start() {
     assert_eq!(r.plays(), vec![(id, SpeedVariant::Custom(70), false)]);
     wait_for("the view", || r.speed() == 0.7);
 }
+
+/// «Сбросить» on «Не нравится и скорость»: the track plays as recorded, its
+/// name leaves the list, and the snackbar's «Отменить» brings the speed
+/// (and the name) back.
+#[test]
+fn a_speed_reset_from_the_marks_can_be_undone() {
+    let r = rig(Prefs::default(), &[(0, "nightcore")]);
+    let track = r.tracks[0];
+    wait_for("the name of the chosen track", || r.view(|s| s.speed_names.get(&track).map(|n| n.title.clone())) == Some("one".into()));
+    r.rt.send(Command::ResetTrackSpeed(track));
+    wait_for("as recorded", || r.version_of(track) == SpeedVariant::Normal);
+    assert!(r.view(|s| s.speed_names.is_empty()));
+    assert!(r.lib.track_fx().unwrap().is_empty());
+    let undo = r.view(|s| s.toasts.iter().rev().find_map(|t| t.action.clone()));
+    let Some((label, command)) = undo else { panic!("no «Отменить»") };
+    assert_eq!(label, "Отменить");
+    assert_eq!(command, Command::SetTrackSpeed { track, variant: SpeedVariant::Nightcore });
+    r.rt.send(command);
+    wait_for("the speed back", || r.version_of(track) == SpeedVariant::Nightcore);
+    assert!(r.view(|s| s.speed_names.contains_key(&track)));
+    // A track without a speed of its own: nothing to reset, no snackbar.
+    r.rt.send(Command::ResetTrackSpeed(r.tracks[1]));
+    r.rt.send(Command::SetTrackSpeed { track: r.tracks[1], variant: SpeedVariant::Fast });
+    wait_for("the second track's speed", || r.version_of(r.tracks[1]) == SpeedVariant::Fast);
+    assert!(r.view(|s| !s.toasts.iter().any(|t| t.text.contains("two"))));
+}

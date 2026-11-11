@@ -32,6 +32,7 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
 
     group(ui, "Окно");
     switch(ui, Id::RailCompact, &mut p.rail_compact);
+    switch(ui, Id::NavRoot, &mut p.nav_root);
     switch(ui, Id::ReducedMotion, &mut p.reduced_motion);
     switch(ui, Id::Tooltips, &mut p.tooltips);
     track_menu(ui, p);
@@ -42,7 +43,7 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
 }
 
 /// «Экран трека», in «Подробно» under its subtitles: Обложка · Кольцо ·
-/// Фон · Полоса и громкость · Управление.
+/// Фон · Полоса и громкость · Управление · Кнопки.
 fn track_screen(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Экран трека");
     // Строго · Живо · Максимум · Свои: while one is under the pointer the
@@ -120,6 +121,12 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
         }
     });
     segments(ui, Id::NpMotion, p);
+
+    // Play, previous and next always stay; the keys work whatever is off.
+    sub(ui, "Кнопки");
+    for b in v::PlayerButton::ALL {
+        switch(ui, Id::PlayerButton(b), p.player_buttons.of_mut(b));
+    }
 }
 
 /// The grid of shapes under «Форма обложки»: the random one's pool, or the

@@ -470,7 +470,7 @@ impl Worker {
             .and_then(|r| known.iter().position(|k| *k == r))
             .unwrap_or(0);
         self.user_switch(nikgob_core::model::EventOrigin::Manual);
-        self.new_list();
+        self.new_list(None);
         self.queue.set(&ids, start, Some(context));
         self.play_context = EventContext::Search;
         self.play_context_id = None;
@@ -508,7 +508,7 @@ impl Worker {
             return;
         }
         self.user_switch(nikgob_core::model::EventOrigin::Manual);
-        self.new_list();
+        self.new_list(None);
         self.queue.set(&ids, start_at, Some(context));
         self.play_context = EventContext::Search;
         self.play_context_id = None;
@@ -617,7 +617,9 @@ impl Worker {
                     (_, Some(p)) => self.lib.playlist_by_remote(p).ok().flatten().map(|l| format!("playlist:{}", l.playlist_id)),
                     _ => None,
                 };
-                self.play_list(ids, start, shuffle, Some(title), ctx, context_id);
+                // A service's album, or a service's playlist (a ready one).
+                let kind = if album.is_some() { v::ListKind::Album } else { v::ListKind::ReadyPlaylist };
+                self.play_list(ids, start, shuffle, kind, Some(title), ctx, context_id);
                 self.after_stream_play();
             }
             Then::Download => {

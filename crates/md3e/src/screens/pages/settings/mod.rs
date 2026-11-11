@@ -224,10 +224,9 @@ pub(super) fn page(
     let before = p.clone();
     let o = area.show(&mut rui, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        let page_x = ui.max_rect().x_range();
         ui.set_max_width(at.content_w);
         match tab {
-            settings_help::TAB_MUSIC => music::show(ui, state, &mut p, out),
+            settings_help::TAB_MUSIC => music::show(ui, state, &mut p, pages),
             settings_help::TAB_LYRICS => lyrics::show(ui, state, &mut p, out),
             settings_help::TAB_LOOK => look::show(ui, &mut p, out),
             settings_help::TAB_SERVICES => services::show(ui, state, &mut p, pages, out),
@@ -239,7 +238,8 @@ pub(super) fn page(
         ui.add_space(16.0);
         ui.add(Divider::new());
         ui.add_space(16.0);
-        brand::made_by(ui, page_x);
+        // Centred on the rows' column, under the divider's middle.
+        brand::made_by(ui, ui.max_rect().x_range());
         ui.add_space(8.0);
         ui.add_space(bottom_inset);
     });
