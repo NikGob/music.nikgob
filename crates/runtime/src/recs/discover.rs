@@ -533,6 +533,10 @@ impl Worker {
         let mut artist_steps = Vec::new();
         for (a, _) in &artists {
             let Some(name) = self.lib.get_artist(*a).ok().flatten().map(|a| a.name) else { continue };
+            // A cut list's tail an older import took for an artist.
+            if nikgob_core::streaming::more_artists_note(&name) {
+                continue;
+            }
             pass.topped.insert(artist_key(&name));
             let known = self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
             for (on, service) in [(yt, Service::Youtube), (dz, Service::Deezer)] {
@@ -572,6 +576,11 @@ impl Worker {
         if dz {
             let now = now_ms();
             for a in release_artists {
+                // «и ещё 1 исполнитель» (a cut list's tail an older import
+                // took for an artist) would find somebody's single.
+                if self.lib.get_artist(a).ok().flatten().is_some_and(|x| nikgob_core::streaming::more_artists_note(&x.name)) {
+                    continue;
+                }
                 let cached: Option<(UnixMs, Vec<StreamAlbum>)> = self
                     .lib
                     .cache_get(&releases_key(a))
@@ -948,10 +957,13 @@ impl DiscoverInput {
             .into_iter()
             .map(|t| crate::streams::stream_row_of(lib, t, lib.track_for_stream(t).ok().flatten()))
             .collect();
+        // Nor what was found for «и ещё 1 исполнитель», a cut list's tail an
+        // older import took for an artist (somebody else's single).
+        let note = |a: &ArtistId| lib.get_artist(*a).ok().flatten().is_some_and(|x| nikgob_core::streaming::more_artists_note(&x.name));
         let albums = self
             .releases
             .iter()
-            .filter(|(a, _, _)| !disliked("artist", &a.to_string()))
+            .filter(|(a, _, _)| !disliked("artist", &a.to_string()) && !note(a))
             .map(|(_, album, theirs)| crate::streams::album_card_of(lib, album, *theirs))
             .collect();
         (rows, albums, shown)

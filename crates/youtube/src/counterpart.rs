@@ -152,6 +152,8 @@ fn panel_track(r: &Value) -> Option<StreamTrack> {
                 t.artists.push(ArtistRef::new(Some(convert::rid(bid)), text));
             }
             _ if text.trim() == "•" => in_artists = false,
+            // The tail of a cut list («и ещё 1 исполнитель»): no artist.
+            _ if in_artists && !t.artists.is_empty() && nikgob_core::streaming::more_artists_note(text) => {}
             _ if in_artists && !matches!(text.trim(), "" | "," | "&") => {
                 t.artists.push(ArtistRef::new(None, text.trim()));
             }
