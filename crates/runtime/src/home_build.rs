@@ -591,6 +591,7 @@ mod tests {
             covers: vec![v::Cover::web("https://fake.invalid/a.jpg")],
             new_cover: None,
             tracks: Vec::new(),
+            new_tracks: Vec::new(),
             blend_base: Some(1),
             queue: None,
             why: None,

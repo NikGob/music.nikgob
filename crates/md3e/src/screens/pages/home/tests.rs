@@ -173,6 +173,7 @@ fn lane(title: &str) -> LaneCard {
         covers: Vec::new(),
         new_cover: None,
         tracks: Vec::new(),
+        new_tracks: Vec::new(),
         blend_base: None,
         queue: None,
         why: None,

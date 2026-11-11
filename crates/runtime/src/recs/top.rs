@@ -405,6 +405,7 @@ mod tests {
             new_share: 0.0,
             local_only: false,
             new: Vec::new(),
+            new_at: 0,
             suggested: Vec::new(),
             rerank: false,
             refresh_mix: None,

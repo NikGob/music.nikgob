@@ -352,7 +352,10 @@ fn releases_key(artist: ArtistId) -> String {
 }
 
 impl Worker {
-    fn discover_load(&mut self) {
+    /// The last pass's finds and the pass under way, from the library's
+    /// cache, once a run (before the run's first build: its mixes take
+    /// them).
+    pub(super) fn discover_load(&mut self) {
         let d = &mut self.recs.discover;
         if d.loaded {
             return;
@@ -857,6 +860,15 @@ impl Worker {
         self.publish_recs_home();
         // The daily mix of a new day takes the new discoveries.
         self.radio_snapshot_ready();
+        // The mixes take them now: «С новым» of the cards, «Твой микс» and
+        // the daylist of the day (their day's caches know the finds were
+        // older).
+        self.recs_dirty(Duration::ZERO);
+    }
+
+    /// When the finds the mixes take were made (0: none yet).
+    pub(super) fn discoveries_at(&self) -> UnixMs {
+        self.recs.discover.found.as_ref().map_or(0, |f| f.at)
     }
 
     /// The services' suggestions changed: the last pass's finds are ranked
