@@ -22,6 +22,7 @@ use nikgob_view::{
 use super::{PageState, cards, widgets, worlds};
 use crate::screens::stage::{Part, Stage};
 
+mod refresh;
 mod row;
 use crate::{
     Icon, Theme, TypeRole,
@@ -375,7 +376,7 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
                 ui.multiply_opacity(*opacity);
             }
             match section {
-                Section::Shortcuts => shortcuts(ui, grid, i, state, out),
+                Section::Shortcuts => shortcuts(ui, grid, i, stage.live, state, out),
                 Section::Mixes => mixes(ui, grid, i, stage.live, state, out),
                 Section::ListenAgain => listen_again(ui, grid, i, stage.live, state, pages, out),
                 Section::OfDay => of_day(ui, grid, i, stage.live, state, out),
@@ -516,20 +517,36 @@ fn section_header(ui: &mut Ui, grid: Grid, rect: Rect, title: &str, action: Opti
 
 // ---- Shortcuts.
 
-fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let per = grid.rows_per_line();
     let count = state.home.shortcuts.len().min(shortcuts_shown(per));
     let items = &state.home.shortcuts[..count];
     let h = lines(count, per) as f32 * (SHORTCUT_H + 8.0) - 8.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let mut nav = None;
+    let keys = items.iter().map(shortcut_key).collect();
+    let changes = refresh::track(ui.ctx(), Id::new("home-shortcuts"), live, keys, || items.to_vec());
     entering(ui, rect, n, "shortcuts", |ui| {
         for (i, sc) in items.iter().enumerate() {
             let cell = grid.cell(i, per, rect.top(), SHORTCUT_H, 8.0);
-            nav = cards::shortcut(ui, cell, sc, state, i, out).or(nav.take());
+            changes.card(ui, i, cell, i, |ui, old| match old {
+                Some(old) => {
+                    let _ = cards::shortcut(ui, cell, old, state, i, &mut Vec::new());
+                }
+                None => nav = cards::shortcut(ui, cell, sc, state, i, out).or(nav.take()),
+            });
         }
     });
     nav
+}
+
+/// What a shortcut shows ([`refresh`]).
+fn shortcut_key(sc: &Shortcut) -> u64 {
+    match sc {
+        Shortcut::Release(a) => refresh::key(("release", a.id, &a.title, &a.cover)),
+        Shortcut::Playlist(p, covers) => refresh::key(("playlist", p.id, &p.name, covers)),
+        Shortcut::Artist(a) => refresh::key(("artist", a.id, &a.name, &a.image)),
+    }
 }
 
 // ---- «Миксы для тебя».
@@ -571,6 +588,11 @@ fn mix_row(
     let opens = state.prefs.mix_click_opens_list;
     let mut nav = None;
     let first = usize::from(liked.is_some());
+    let keys = liked.iter().map(|p| refresh::key(("liked", p.id, &p.name))).chain(lanes.iter().map(|l| lane_key(l))).collect();
+    let changes = refresh::track(ui.ctx(), Id::new(("home-row", name)), live, keys, || {
+        liked.iter().map(|p| MixItem::Liked((*p).clone())).chain(lanes.iter().map(|l| MixItem::Lane((*l).clone()))).collect()
+    });
+    let pitch = grid.span(12 / per) + GUTTER;
     let at = row::Row {
         name,
         top: rect.top() + HEADER_H + HEADER_GAP,
@@ -582,16 +604,41 @@ fn mix_row(
         bleed: 0.0,
     };
     row::show(ui, grid, at, |ui, i, cell| {
-        if let Some(p) = liked.filter(|_| i == 0) {
-            nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, out).or(nav.take());
-            return;
-        }
-        let l = lanes[i - first];
-        // «Смешать с…»: another profile to mix it with.
-        let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
-        nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
+        changes.card(ui, i, cell, refresh::place(cell, grid.left, pitch), |ui, old| {
+            match old {
+                Some(MixItem::Liked(p)) => {
+                    let _ = cards::liked_playlist(ui, cell, p, false, state.player.status, &mut Vec::new());
+                    return;
+                }
+                Some(MixItem::Lane(l)) => {
+                    let _ = cards::mix(ui, cell, l, with_new, false, false, state.player.status, opens, None, &mut Vec::new());
+                    return;
+                }
+                None => {}
+            }
+            if let Some(p) = liked.filter(|_| i == 0) {
+                nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, out).or(nav.take());
+                return;
+            }
+            let l = lanes[i - first];
+            // «Смешать с…»: another profile to mix it with.
+            let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
+            nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
+        });
     });
     nav
+}
+
+/// A card of the row of mixes as it was ([`refresh`]).
+#[derive(Clone)]
+enum MixItem {
+    Liked(PlaylistCard),
+    Lane(LaneCard),
+}
+
+/// What a mix's card shows ([`refresh`]).
+fn lane_key(l: &LaneCard) -> u64 {
+    refresh::key((l.key, &l.title, &l.artists, l.covers.first(), &l.new_cover))
 }
 
 fn mixes(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
@@ -704,17 +751,28 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
             out.push(Command::PlayAll { tracks: rows.iter().map(|t| t.id).collect(), context: "Слушать снова".into() });
         }
         let at = row::Row { name: "again", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
+        let keys = rows.chunks(SONG_LINES).map(|c| refresh::key(c.iter().map(|t| (t.id, &t.title, &t.cover)).collect::<Vec<_>>())).collect();
+        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "again")), live, keys, || rows.chunks(SONG_LINES).map(<[TrackRow]>::to_vec).collect());
+        let pitch = grid.span(12 / per) + GUTTER;
         row::show(ui, grid, at, |ui, column, cell| {
-            for k in 0..SONG_LINES {
-                let i = column * SONG_LINES + k;
-                let Some(t) = rows.get(i) else { break };
-                let playing = state.player.current.as_ref().is_some_and(|c| c.id == t.id);
-                let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
-                if o.clicked {
-                    out.push(play_again(rows, i));
+            changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<TrackRow>>| {
+                if let Some(old) = old {
+                    for (k, t) in old.iter().enumerate() {
+                        let _ = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), false, None, ("again", column * SONG_LINES + k));
+                    }
+                    return;
                 }
-                nav = pages.track_context_menu(&o.response, t, state, out).or(nav.take());
-            }
+                for k in 0..SONG_LINES {
+                    let i = column * SONG_LINES + k;
+                    let Some(t) = rows.get(i) else { break };
+                    let playing = state.player.current.as_ref().is_some_and(|c| c.id == t.id);
+                    let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
+                    if o.clicked {
+                        out.push(play_again(rows, i));
+                    }
+                    nav = pages.track_context_menu(&o.response, t, state, out).or(nav.take());
+                }
+            });
         });
     });
     nav
@@ -749,11 +807,20 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
             live,
             bleed: 0.0,
         };
+        let keys = tiles.iter().map(|m| refresh::key((m.id, &m.title, &m.subtitle, m.covers.first()))).collect();
+        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "of-day")), live, keys, || tiles.to_vec());
+        let pitch = grid.span(12 / per) + GUTTER;
         row::show(ui, grid, at, |ui, i, cell| {
-            let m = &tiles[i];
-            let artist = matches!(m.id, MixId::Tile(TileKind::ArtistOfDay | TileKind::Comeback));
-            let photo = artist.then(|| artist_photo(state, &m.title)).flatten();
-            cards::of_day(ui, cell, m, photo.as_deref(), i, out);
+            changes.card(ui, i, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&MixCard>| {
+                let m = old.unwrap_or(&tiles[i]);
+                let artist = matches!(m.id, MixId::Tile(TileKind::ArtistOfDay | TileKind::Comeback));
+                let photo = artist.then(|| artist_photo(state, &m.title)).flatten();
+                if old.is_some() {
+                    cards::of_day(ui, cell, m, photo.as_deref(), i, &mut Vec::new());
+                } else {
+                    cards::of_day(ui, cell, m, photo.as_deref(), i, out);
+                }
+            });
         });
     });
     None
@@ -805,24 +872,31 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
     entering(ui, rect, n, "shelf", |ui| {
         section_header(ui, grid, rect, title, None);
         let at = row::Row { name: "shelf", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live, bleed: 0.0 };
+        let keys = albums.iter().map(|a| refresh::key((a.card.id, &a.card.title, &a.card.cover, a.heard, a.total))).collect();
+        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "shelf")), live, keys, || albums.to_vec());
         row::show(ui, grid, at, |ui, i, cell| {
-            let a = &albums[i];
-            let c = &a.card;
-            let o = cards::album(
-                ui,
-                cell,
-                &c.title,
-                &c.artist,
-                &shelf_tail(a, h.history),
-                c.cover.as_ref().map(|c| c.uri()),
-                ("shelf", i),
-            );
-            if o.play {
-                out.push(Command::PlayRelease { id: c.id, start: None, shuffle: false });
-            } else if o.clicked {
-                nav = Some(Route::Release(c.id));
-            }
-            nav = widgets::release_menus(&o.response, o.more.as_ref(), c, out).or(nav.take());
+            changes.card(ui, i, cell, refresh::place(cell, grid.left, w + GUTTER), |ui, old: Option<&ShelfAlbum>| {
+                let a = old.unwrap_or(&albums[i]);
+                let c = &a.card;
+                let o = cards::album(
+                    ui,
+                    cell,
+                    &c.title,
+                    &c.artist,
+                    &shelf_tail(a, h.history),
+                    c.cover.as_ref().map(|c| c.uri()),
+                    ("shelf", i),
+                );
+                if old.is_some() {
+                    return;
+                }
+                if o.play {
+                    out.push(Command::PlayRelease { id: c.id, start: None, shuffle: false });
+                } else if o.clicked {
+                    nav = Some(Route::Release(c.id));
+                }
+                nav = widgets::release_menus(&o.response, o.more.as_ref(), c, out).or(nav.take());
+            });
         });
     });
     nav
@@ -843,27 +917,38 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
             out.push(Command::PlayMix { id: MixId::Discover });
         }
         let at = row::Row { name: "new", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
+        let keys = rows.chunks(SONG_LINES).map(|c| refresh::key(c.iter().map(|t| (&t.remote, &t.title, &t.cover_url)).collect::<Vec<_>>())).collect();
+        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "new")), live, keys, || rows.chunks(SONG_LINES).map(<[StreamTrackRow]>::to_vec).collect());
+        let pitch = grid.span(12 / per) + GUTTER;
         row::show(ui, grid, at, |ui, column, cell| {
-            for k in 0..SONG_LINES {
-                let i = column * SONG_LINES + k;
-                let Some(t) = rows.get(i) else { break };
-                let playing = state.player.current.as_ref().is_some_and(|c| t.track == Some(c.id));
-                let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
-                if o.liked {
-                    out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
-                } else if o.clicked && t.playable {
-                    out.push(play_discover(&h.discover, i));
+            changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<StreamTrackRow>>| {
+                if let Some(old) = old {
+                    for (k, t) in old.iter().enumerate() {
+                        let _ = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover_url.clone(), false, Some(t.liked), ("new", column * SONG_LINES + k));
+                    }
+                    return;
                 }
-                // A service song's one list (its ♥ is on the row).
-                if !crate::components::Menu::context_idle(&o.response, ("discover-menu", o.response.id)) {
-                    let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
-                    let wished = (!t.has_local).then(|| wish.of_track(t.track, None)).flatten();
-                    let rows = super::placed(super::streams::stream_track_rows(t, wished, &state.dislikes), &state.prefs.track_menu, |a| a.menu_item(false));
-                    let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), rows);
-                    let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
-                    nav = super::streams::track_pick(&o.response.ctx, act, t, None, pages, out).or(nav.take());
+                for k in 0..SONG_LINES {
+                    let i = column * SONG_LINES + k;
+                    let Some(t) = rows.get(i) else { break };
+                    let playing = state.player.current.as_ref().is_some_and(|c| t.track == Some(c.id));
+                    let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
+                    if o.liked {
+                        out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
+                    } else if o.clicked && t.playable {
+                        out.push(play_discover(&h.discover, i));
+                    }
+                    // A service song's one list (its ♥ is on the row).
+                    if !crate::components::Menu::context_idle(&o.response, ("discover-menu", o.response.id)) {
+                        let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
+                        let wished = (!t.has_local).then(|| wish.of_track(t.track, None)).flatten();
+                        let rows = super::placed(super::streams::stream_track_rows(t, wished, &state.dislikes), &state.prefs.track_menu, |a| a.menu_item(false));
+                        let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), rows);
+                        let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
+                        nav = super::streams::track_pick(&o.response.ctx, act, t, None, pages, out).or(nav.take());
+                    }
                 }
-            }
+            });
         });
     });
     nav
@@ -902,16 +987,23 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
             nav = Some(Route::NewReleases);
         }
         let at = row::Row { name: "releases", top: rect.top() + HEADER_H + HEADER_GAP, card_h, arrows_at: w / 2.0, per, n: albums.len(), live, bleed: 0.0 };
+        let keys = albums.iter().map(|a| refresh::key((&a.remote, &a.title, &a.cover_url))).collect();
+        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "releases")), live, keys, || albums.to_vec());
         row::show(ui, grid, at, |ui, i, cell| {
-            let a = &albums[i];
-            let (artist, tail) = release_line(a);
-            let o = cards::album(ui, cell, &a.title, &artist, &tail, a.cover_url.clone(), ("release", i));
-            if o.play {
-                out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
-            } else if o.clicked {
-                nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
-            }
-            nav = super::streams::album_menus(&o.response, o.more.as_ref(), a, &state.downloads.wishlist, out).or(nav.take());
+            changes.card(ui, i, cell, refresh::place(cell, grid.left, w + GUTTER), |ui, old: Option<&StreamAlbumCard>| {
+                let a = old.unwrap_or(&albums[i]);
+                let (artist, tail) = release_line(a);
+                let o = cards::album(ui, cell, &a.title, &artist, &tail, a.cover_url.clone(), ("release", i));
+                if old.is_some() {
+                    return;
+                }
+                if o.play {
+                    out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
+                } else if o.clicked {
+                    nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
+                }
+                nav = super::streams::album_menus(&o.response, o.more.as_ref(), a, &state.downloads.wishlist, out).or(nav.take());
+            });
         });
     });
     nav
