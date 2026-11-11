@@ -742,8 +742,8 @@ mod tests {
     }
 }
 
-/// An artist avatar card with a ▶ on hover (plays the mix) and a right-click
-/// menu. A click opens the artist.
+/// An artist avatar card with a ▶ (plays the mix) and a ⋮ on hover; ⋮ and
+/// a right click open its menu. A click opens the artist.
 pub fn artist_avatar(
     ui: &mut Ui,
     a: &ArtistCard,
