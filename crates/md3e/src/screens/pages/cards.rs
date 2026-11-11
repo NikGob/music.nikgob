@@ -263,7 +263,9 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
                 Command::PlayPlaylist { id: p.id, start: None, shuffle: false },
             )
         }
-        Shortcut::Artist(a) => (a.name.clone(), "Исполнитель".to_owned(), Route::Artist(a.id), Command::PlayArtist { id: a.id, shuffle: false }),
+        Shortcut::Artist(a) => {
+            (a.name.clone(), super::widgets::artist_kind(a), Route::Artist(a.id), Command::PlayArtist { id: a.id, shuffle: false })
+        }
     };
     let cover = Rect::from_min_size(cell.min, vec2(cell.height(), cell.height()));
     let clicked_play = scaled(ui, cell.center(), squish, |ui| {
