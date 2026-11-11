@@ -553,17 +553,45 @@ async fn tail_answers(http: &reqwest::Client, url: &str, len: u64) -> Result<boo
     }
 }
 
+/// Runs `fut`, turning a panic inside it into `Err` with the panic's
+/// message. RustyPipe 0.11.4 unwraps a failed visitor data request
+/// (`VisitorDataCache::new_visitor_data`): a network drop would end the
+/// task without an answer instead of failing one request.
+pub(crate) async fn no_panic<T>(fut: impl Future<Output = T>) -> Result<T, String> {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::task::Poll;
+    let mut fut = Box::pin(fut);
+    std::future::poll_fn(move |cx| match catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+        Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
+        Ok(Poll::Pending) => Poll::Pending,
+        Err(payload) => Poll::Ready(Err(panic_message(&*payload))),
+    })
+    .await
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".into())
+}
+
 /// Asks route `i` of [`ROUTES`] for `id`, with fresh visitor data once if
 /// the player suspects a bot.
 async fn answer(rp: &RustyPipe, http: &reqwest::Client, id: &str, gl: &str, i: usize) -> Answer {
     let route = ROUTES[i];
     let mut fresh = false;
     loop {
-        let vd = match tokio::time::timeout(PLAYER_TIMEOUT, rp.query().get_visitor_data(fresh)).await {
-            Ok(Ok(vd)) => vd,
+        let vd = match tokio::time::timeout(PLAYER_TIMEOUT, no_panic(rp.query().get_visitor_data(fresh))).await {
+            Ok(Ok(Ok(vd))) => vd,
             // Without: the player mostly answers all the same.
-            Ok(Err(e)) => {
+            Ok(Ok(Err(e))) => {
                 log::debug!("youtube: no visitor data: {e}");
+                String::new()
+            }
+            Ok(Err(panic)) => {
+                log::info!("youtube: no visitor data: RustyPipe failed: {panic}");
                 String::new()
             }
             Err(_) => {
@@ -719,8 +747,12 @@ pub(crate) async fn resolve(
         return Err(first_err);
     }
     log::info!("youtube: {id}: no route gave a stream ({first_err}), trying RustyPipe's player");
-    match tokio::time::timeout(left, rustypipe_stream(rp, http, id, login_only, &first_err)).await {
-        Ok(r) => r,
+    match tokio::time::timeout(left, no_panic(rustypipe_stream(rp, http, id, login_only, &first_err))).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(panic)) => {
+            log::info!("youtube: {id}: RustyPipe's player failed: {panic}");
+            Err(first_err)
+        }
         Err(_) => {
             log::info!("youtube: {id}: RustyPipe's player out of time");
             Err(first_err)
@@ -731,6 +763,24 @@ pub(crate) async fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panic_inside_is_an_error() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let down = std::hint::black_box(true);
+        let r = rt.block_on(no_panic(async move {
+            if down {
+                panic!("network down");
+            }
+            1
+        }));
+        assert_eq!(r, Err("network down".to_owned()));
+        let r = rt.block_on(no_panic(async { format!("{}", 2) }));
+        assert_eq!(r, Ok("2".to_owned()));
+        let n = 3;
+        let r: Result<(), String> = rt.block_on(no_panic(async move { panic!("lost {n}") }));
+        assert_eq!(r, Err("lost 3".to_owned()));
+    }
 
     #[test]
     fn gain_turns_loud_tracks_down_only() {

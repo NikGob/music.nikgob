@@ -745,7 +745,7 @@ fn even_repeats(
         let Some(spots) = run.iter().map(|(li, _)| place[*li]).collect::<Option<Vec<_>>>() else { continue };
         let (from, to) = (spots[0].0, spots[spots.len() - 1].1 + 1);
         let n = run.len();
-        let share = (to - from) as f32 / n as f32;
+        let share = to.saturating_sub(from) as f32 / n as f32;
         // Each line's length, start to the next line's start.
         let lens: Vec<f32> = (0..n).map(|i| (if i + 1 < n { spots[i + 1].0 } else { to }) as f32 - spots[i].0 as f32).collect();
         if !lens.iter().any(|l| *l > share * 1.5 || *l < share * 0.5) {
@@ -793,7 +793,8 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
     let frame = |s: f32| ((s * em.fps).round().max(0.0) as usize).min(n);
     let mut covered = vec![false; n];
     for (a, b) in placed.iter().filter_map(|p| p.span) {
-        covered[frame(a - 0.3)..frame(b + 0.3)].iter_mut().for_each(|c| *c = true);
+        let (from, to) = (frame(a - 0.3), frame(b + 0.3));
+        covered[from.min(to)..to].iter_mut().for_each(|c| *c = true);
     }
     // Each line's place, for the lines around a stretch.
     let mut place: Vec<Option<(f32, f32)>> = vec![None; lines.len()];
@@ -858,7 +859,8 @@ fn repeats(em: &Emissions, vocab: &Vocab, lines: &[LyricLine], placed: &[Placed]
                 }
                 path.push(Tok::Filler, None);
                 owner.push(None);
-                let v = crate::ctc::Voice { voiced: &voiced[at..(at + slice.frames()).min(voiced.len())], onset: &[], ..Default::default() };
+                let till = (at + slice.frames()).min(voiced.len());
+                let v = crate::ctc::Voice { voiced: &voiced[at.min(till)..till], onset: &[], ..Default::default() };
                 let Some(spans) = align_path(&slice, &path, Some(v)) else { continue };
                 let heard = spans
                     .iter()
@@ -1141,7 +1143,9 @@ pub fn spread_collapsed(letters: &mut [(usize, usize)], vowel: &[bool], voiced: 
     let from = letters[first - 1].1 + 1;
     let end = letters[n - 1].1;
     let gap = letters[first].0.saturating_sub(from);
-    if gap < COLLAPSED_AFTER || end + 1 - from < k {
+    // Letters out of order (the last before the run ending past the word's
+    // end) leave nothing to spread.
+    if gap < COLLAPSED_AFTER || (end + 1).saturating_sub(from) < k {
         return;
     }
     let sung = (from..letters[first].0).filter(|t| voiced.get(*t).copied().unwrap_or(false)).count();
@@ -1975,6 +1979,70 @@ mod tests {
         let out = repeats(&em, &v, &lines, &placed, &voiced, &[false], Duration::ZERO);
         assert!(out.is_empty());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Every pass of the fit over `lines`: timed or not, with the voice
+    /// (the repeat search, voice-held words) and without.
+    fn fit_all_ways(em: &Emissions, v: &Vocab, lines: &[LyricLine]) -> Vec<Option<Fit>> {
+        let voiced = vec![true; em.frames()];
+        let voice = Voice { voiced: &voiced, ..Default::default() };
+        let mut out = Vec::new();
+        for timed in [false, true] {
+            out.push(fit_text(em, v, lines, timed));
+            out.push(fit_text_with(em, v, &[], lines, timed, Some(voice), &Tuning::default()));
+        }
+        out
+    }
+
+    #[test]
+    fn lyrics_longer_than_the_audio_do_not_fit_and_do_not_panic() {
+        let (v, em) = setup("аб");
+        let lines: Vec<LyricLine> = (0..12).map(|i| line(i as f32 * 0.5, "абв вба ббб")).collect();
+        for fit in fit_all_ways(&em, &v, &lines) {
+            assert!(fit.as_ref().is_none_or(|f| !f.fits()), "{fit:?}");
+        }
+        // No audio at all.
+        let none = Emissions { logp: Vec::new(), vocab: 5, fps: 10.0, blank: 0 };
+        for fit in fit_all_ways(&none, &v, &lines) {
+            assert!(fit.as_ref().is_none_or(|f| !f.fits()), "{fit:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_line_keeps_its_place_without_words() {
+        let (v, em) = setup("ааа ббб ввв ааа");
+        let lines = [line(0.1, "ааа"), line(0.6, ""), line(1.3, "ббб"), line(2.5, "ввв"), line(2.9, "  "), line(3.7, "ааа")];
+        for fit in fit_all_ways(&em, &v, &lines) {
+            let fit = fit.expect("the text fits");
+            assert!(fit.lines.len() >= lines.len(), "{:?}", fit.lines);
+            assert!(fit.lines.iter().filter(|l| l.text.trim().is_empty()).all(|l| l.words.is_empty()), "{:?}", fit.lines);
+        }
+    }
+
+    #[test]
+    fn a_line_with_no_audio_under_it_does_not_panic() {
+        // The last line's source time is long past the recording's end, and
+        // its letters are heard nowhere.
+        let (v, em) = setup("ааа ббб ввв");
+        let lines = [line(0.1, "ааа"), line(1.3, "ббб"), line(2.5, "ввв"), line(60.0, "вв"), line(61.0, "б")];
+        for fit in fit_all_ways(&em, &v, &lines) {
+            let fit = fit.expect("a fit");
+            assert!(fit.lines.len() >= lines.len());
+            for l in &fit.lines {
+                for w in &l.words {
+                    assert!(w.start <= w.end || w.end.is_zero(), "{l:?}");
+                }
+            }
+        }
+    }
+
+    /// Letters out of order (the run ends before the letter before it) are
+    /// left as they are.
+    #[test]
+    fn letters_out_of_order_are_not_spread() {
+        let mut letters = vec![(0, 30), (45, 45), (2, 2)];
+        spread_collapsed(&mut letters, &[false, true, false], &[true; 50]);
+        assert_eq!(letters, [(0, 30), (45, 45), (2, 2)]);
     }
 
     #[test]
