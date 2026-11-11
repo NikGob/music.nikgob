@@ -261,9 +261,13 @@ impl Worker {
     }
 
     /// A found copy replaces the item's file only once the user says so
-    /// (always, for one asked for by hand).
+    /// (always, for one asked for by hand). An album asked for by hand
+    /// asks once its copy came, with each file it replaces
+    /// ([`super::album_better`]): its best offer downloads without a word.
     pub(super) fn upgrade_asks(&self, item: &WishlistItem) -> bool {
-        item.origin == WishlistOrigin::Upgrade && (item.better_than.is_some() || !self.upgrade_prefs().2)
+        item.origin == WishlistOrigin::Upgrade
+            && !super::album_better::hand_album(item)
+            && (item.better_than.is_some() || !self.upgrade_prefs().2)
     }
 
     /// The one place that says whether a track's file is looked for in
@@ -551,7 +555,7 @@ impl Worker {
 
     /// The item goes: it needs nothing any more, or the user turned the
     /// search off.
-    fn upgrade_drop(&mut self, id: WishlistId) {
+    pub(super) fn upgrade_drop(&mut self, id: WishlistId) {
         let _ = self.lib.delete_wishlist_item(id);
         self.upgrade_forget(id);
         self.wish_line_drop(id);
@@ -559,7 +563,7 @@ impl Worker {
     }
 
     /// What the pipeline kept of the item.
-    fn upgrade_forget(&mut self, id: WishlistId) {
+    pub(super) fn upgrade_forget(&mut self, id: WishlistId) {
         let w = &mut self.streaming.wish;
         w.cands.remove(&id);
         w.doubtful.remove(&id);
@@ -869,6 +873,10 @@ impl Worker {
     /// ~128 — оставил прежний файл»), and the item waits for its schedule
     /// rather than asking again in minutes the sources that said «wait».
     pub(super) fn upgrade_settle(&mut self, item: &WishlistItem) {
+        // The import after «Заменить» of an album asked for by hand.
+        if self.album_replaced(item) {
+            return;
+        }
         let id = item.id;
         let partial = self.streaming.wish.partial.remove(&id);
         let dup = self.streaming.wish.upgrade_dups.remove(&id);
@@ -909,6 +917,10 @@ impl Worker {
 
     /// «Подтверди» of a better copy: what each offer improves.
     pub(super) fn upgrade_confirm_view(&mut self, item: &WishlistItem, id: u64) -> v::Confirm {
+        // A copy of an album that came and waits: one card of its tracks.
+        if let Some(card) = self.album_better_card(item, id) {
+            return card;
+        }
         let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
         let have = self.upgrade_worst(item);
         let what = match (&item.artist, &item.title) {

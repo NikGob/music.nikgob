@@ -231,6 +231,7 @@ mod tests {
             total_tracks: Some(1),
             liked: false,
             added_at,
+            better: false,
         }
     }
 

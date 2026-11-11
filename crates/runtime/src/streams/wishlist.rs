@@ -53,6 +53,7 @@ use nikgob_view::{self as v, Command};
 use super::Msg;
 use crate::Worker;
 
+pub(super) mod album_better;
 mod backoff;
 mod upgrade;
 
@@ -121,6 +122,20 @@ pub(crate) enum WishMsg {
         item: WishlistId,
         track: TrackId,
         result: Result<PathBuf, StreamError>,
+    },
+    /// The files of a better copy of an album asked for by hand, read
+    /// ([`album_better`]).
+    AlbumCame {
+        item: WishlistId,
+        origin: SourceOrigin,
+        files: Vec<album_better::CameFile>,
+    },
+    /// «Отменить» of such a copy ran: `left` could not come back.
+    AlbumRestored {
+        release: ReleaseId,
+        done: usize,
+        failed: usize,
+        left: Vec<nikgob_import::Replacement>,
     },
 }
 
@@ -198,6 +213,8 @@ pub(crate) struct WishState {
     /// Items a file of which held another song's audio: once its import
     /// ends, the item looks again without that place.
     wrong: HashSet<WishlistId>,
+    /// Better copies of albums asked for by hand ([`album_better`]).
+    album: album_better::AlbumBetter,
 }
 
 /// «Не качать» (or a cancelled download) on an item the user's own
@@ -1572,6 +1589,8 @@ impl Worker {
                 result,
             } => self.wish_inspected(item, *offer, payload, result),
             WishMsg::Saved { item, track, result } => self.wish_saved(item, track, result),
+            WishMsg::AlbumCame { item, origin, files } => self.album_staged(item, origin, files),
+            WishMsg::AlbumRestored { release, done, failed, left } => self.album_restored(release, done, failed, left),
         }
     }
 
@@ -1936,6 +1955,13 @@ impl Worker {
             if files.is_empty() {
                 self.wish_next_candidate(id);
             }
+            return;
+        }
+        // A better copy of an album asked for by hand: matched and asked
+        // about first, nothing imported yet.
+        if album_better::hand_album(&item) {
+            self.album_came(id, files, SourceOrigin::Inbox);
+            self.publish_wishlist();
             return;
         }
         let one = files.len() == 1 && item.scope == WishlistScope::Track && self.targets_of(&item).len() == 1;
@@ -2434,6 +2460,7 @@ impl Worker {
             w.upgrade_dups.remove(&id);
             w.from.remove(&id);
             w.live.lock().remove(&id);
+            self.album_dismissed(id);
             // A torrent on its way goes with what it downloaded (a better
             // copy's always: it must never replace a file); a seeding one
             // of an item done stays.
@@ -2581,6 +2608,10 @@ impl Worker {
         else {
             return;
         };
+        // A copy of an album that came: «Заменить» or «Оставить как есть».
+        if self.album_better_answer(id, option) {
+            return;
+        }
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return };
         let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
         match option.and_then(|i| offers.get(i).cloned()) {
@@ -3132,6 +3163,8 @@ impl Worker {
     /// pauses of the sources, the retries in a row, the day's searches.
     pub(crate) fn wish_restart(&mut self) {
         self.load_backoff();
+        // Copies of albums that waited for «Заменить» (their folders stay).
+        let albums = self.album_waiting();
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Searching).unwrap_or_default() {
             self.set_item(i.id, |i| i.status = WishlistStatus::New);
         }
@@ -3145,7 +3178,8 @@ impl Worker {
         }
         if let Some(svc) = &self.import {
             let root = svc.config().downloads_dir.join(SOURCES_DIR);
-            let waiting: Vec<String> = svc.pending().iter().filter_map(|p| p.wishlist.map(|w| w.to_string())).collect();
+            let mut waiting: Vec<String> = svc.pending().iter().filter_map(|p| p.wishlist.map(|w| w.to_string())).collect();
+            waiting.extend(albums.iter().map(ToString::to_string));
             for dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
                 let name = dir.file_name().to_string_lossy().into_owned();
                 if !waiting.contains(&name) {
@@ -3156,6 +3190,9 @@ impl Worker {
         // Files that waited in «Подтверди» may be gone since.
         let probed = self.lib.cache_get(PROBED_KEY).ok().flatten().is_some();
         for i in self.lib.list_wishlist_by_status(WishlistStatus::Confirm).unwrap_or_default() {
+            if albums.contains(&i.id) {
+                continue;
+            }
             if i.note.as_deref() == Some(FILES_WAIT) {
                 if !self.files_wait(i.id) {
                     self.wish_settle(i.id);
@@ -3182,6 +3219,9 @@ impl Worker {
         }
         if !probed {
             let _ = self.lib.cache_put(PROBED_KEY, Self::now(), "1");
+        }
+        for id in albums {
+            self.album_restage(id);
         }
     }
 

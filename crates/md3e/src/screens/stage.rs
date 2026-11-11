@@ -814,6 +814,7 @@ fn album_of(v: &ViewState) -> Album {
                     total_tracks: Some(12),
                     liked: false,
                     added_at: 0,
+                    better: false,
                 },
                 released: None,
                 count: 12,

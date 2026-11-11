@@ -149,6 +149,10 @@ pub struct ReleaseCard {
     /// When it came into the library (Unix ms): «Недавно добавлено» and the
     /// group headers of that sort.
     pub added_at: i64,
+    /// A file of it a genuine lossless copy would really be better than
+    /// (an MP3, a fake FLAC): its menus offer «Найти качество лучше».
+    #[serde(default)]
+    pub better: bool,
 }
 
 impl ReleaseCard {
@@ -3037,6 +3041,14 @@ pub enum Command {
     /// sources look for a copy better than it, which waits in «Подтверди»;
     /// a track with no file goes to «Хочу скачать».
     FindBetter(nikgob_core::model::TrackId),
+    /// «Найти качество лучше» of an album: a better copy of the album is
+    /// looked for and downloaded, and waits as one card in «Подтверди»
+    /// (each track and what replaces its file) for «Заменить»; tracks with
+    /// the best file there is are left alone.
+    FindBetterAlbum(ReleaseId),
+    /// Takes the files [`Self::FindBetterAlbum`] replaced back, the whole
+    /// album at once: the old files from the Trash, the new ones into it.
+    UndoBetterAlbum(ReleaseId),
     /// «Превратить в MP3» of a track whose lossless file surely holds an
     /// MP3: its MP3 with the tags, cover and lyrics takes its place, the
     /// original goes to the Trash.

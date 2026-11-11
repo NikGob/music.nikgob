@@ -340,6 +340,7 @@ impl Resolver {
             total_tracks: total,
             liked,
             added_at: r.added_at,
+            better: local > 0 && self.lib.release_can_get_better(r.id).unwrap_or(false),
         }
     }
 

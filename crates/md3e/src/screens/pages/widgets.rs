@@ -208,6 +208,8 @@ pub enum ReleaseAct {
     Share,
     /// «Скачать недостающие»: the tracks it lacks to «Хочу скачать».
     Download,
+    /// «Найти качество лучше»: a better copy of its files that can get one.
+    Better,
     Trash,
     Purge,
 }
@@ -236,9 +238,16 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
         rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
-    if !on_page && progress_badge(r).is_some() {
+    let download = !on_page && progress_badge(r).is_some();
+    let better = r.better && r.local_tracks > 0;
+    if download || better {
         rows.push(Row::Divider);
+    }
+    if download {
         rows.push(Row::Item(A::Download, MenuItem::new("Скачать недостающие").icon(Icon::Download)));
+    }
+    if better {
+        rows.push(Row::Item(A::Better, MenuItem::new(super::FIND_BETTER).icon(Icon::Search)));
     }
     rows.push(Row::Divider);
     rows.push(Row::Item(A::Trash, MenuItem::new("Удалить альбом").icon(Icon::Delete)));
@@ -260,6 +269,7 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
         ReleaseAct::Artist => return artist_links::go_to(ctx, artist_links::library(&r.artists)),
         ReleaseAct::Share => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
         ReleaseAct::Download => out.push(Command::DownloadRelease(r.id)),
+        ReleaseAct::Better => out.push(Command::FindBetterAlbum(r.id)),
         ReleaseAct::Trash => super::request_release_delete(ctx, r.id, &r.title, false),
         ReleaseAct::Purge => super::request_release_delete(ctx, r.id, &r.title, true),
         ReleaseAct::Playlist => {
@@ -1780,6 +1790,7 @@ mod menu_tests {
             total_tracks: Some(1),
             liked: false,
             added_at: 0,
+            better: false,
         };
         let card = row_acts(&release_rows(&r, false));
         let page = row_acts(&release_rows(&r, true));
@@ -1806,6 +1817,15 @@ mod menu_tests {
         let stream = ReleaseCard { local_tracks: 0, ..part };
         let acts = row_acts(&release_rows(&stream, false));
         assert!(acts.contains(&ReleaseAct::Trash) && !acts.contains(&ReleaseAct::Purge) && !acts.contains(&ReleaseAct::Artist));
+        // An album with a file that can get better: on its card and its page.
+        let mp3 = ReleaseCard { better: true, ..r.clone() };
+        for on_page in [false, true] {
+            let acts = row_acts(&release_rows(&mp3, on_page));
+            assert_eq!(&acts[acts.len() - 3..], [ReleaseAct::Better, ReleaseAct::Trash, ReleaseAct::Purge], "{on_page}");
+        }
+        assert!(!row_acts(&release_rows(&r, false)).contains(&ReleaseAct::Better));
+        let gone = ReleaseCard { local_tracks: 0, ..mp3 };
+        assert!(!row_acts(&release_rows(&gone, false)).contains(&ReleaseAct::Better));
     }
 
     /// The artist's right-click menu and its page's ⋮: one list, the page

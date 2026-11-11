@@ -732,6 +732,12 @@ impl Worker {
             log::info!("{}: its better copy was turned down, nothing imported", t.name);
             return;
         }
+        // A better copy of an album asked for by hand: asked about first.
+        if let Some(i) = item
+            && self.album_better_torrent(i, &files, &t.info_hash)
+        {
+            return;
+        }
         let targets = item.map(|item| self.wish_targets(item)).unwrap_or_default();
         self.import_for(
             files,
@@ -776,7 +782,13 @@ impl Worker {
             return;
         }
         let Some(cfg) = self.import.as_ref().map(|s| s.config().clone()) else { return };
+        let mut held = Vec::new();
         for (hash, files) in std::mem::take(&mut self.torrents.cleanup) {
+            // Files of a better copy that wait for «Заменить»: kept.
+            if self.album_better_holds(&hash) {
+                held.push((hash, files));
+                continue;
+            }
             let masters = self.lib.masters_of_torrent(&hash).unwrap_or_default();
             for f in files {
                 let rel = f
@@ -804,6 +816,7 @@ impl Worker {
                 }
             }
         }
+        self.torrents.cleanup.extend(held);
     }
 
     pub(crate) fn torrent_prefs(&mut self, p: &v::Prefs) {
