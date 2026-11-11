@@ -1615,13 +1615,16 @@ pub fn auc(rows: &[(f32, bool)]) -> Option<f32> {
 }
 
 /// Hits of a replay: how many of the real next starts were first, in the
-/// first ten, and the mean reciprocal rank.
+/// first ten, in the first fifty, the mean reciprocal rank and the NDCG of
+/// the first ten (one relevant track: `1 / log2(rank + 1)` within ten).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Hits {
     pub n: usize,
     pub hit1: f32,
     pub hit10: f32,
+    pub hit50: f32,
     pub mrr: f32,
+    pub ndcg10: f32,
 }
 
 impl Hits {
@@ -1631,7 +1634,9 @@ impl Hits {
             n: ranks.len(),
             hit1: ranks.iter().filter(|r| **r <= 1.0).count() as f32 / n,
             hit10: ranks.iter().filter(|r| **r <= 10.0).count() as f32 / n,
+            hit50: ranks.iter().filter(|r| **r <= 50.0).count() as f32 / n,
             mrr: ranks.iter().map(|r| 1.0 / r).sum::<f32>() / n,
+            ndcg10: ranks.iter().filter(|r| **r <= 10.0).map(|r| 1.0 / (r + 1.0).log2()).sum::<f32>() / n,
         }
     }
 }
@@ -1651,6 +1656,9 @@ pub struct ReplayReport {
     pub weights: Weights,
     /// The share of the catalog the learnt model's first ten ever held.
     pub coverage: f32,
+    /// The share of the scored starts whose track was among the candidates
+    /// of the moment ([`UserModel::candidates`]: what a radio ranks).
+    pub cand_recall: f32,
 }
 
 impl ReplayReport {
@@ -1725,6 +1733,7 @@ pub fn replay_with(
     let mut shown: HashSet<usize> = HashSet::new();
     let mut ranks: HashMap<(&'static str, &'static str), Vec<f32>> = HashMap::new();
     let mut skips: Vec<(f32, f32, f32, bool)> = Vec::new();
+    let mut held: Vec<bool> = Vec::new();
     let mut k_of: HashMap<*const Play, usize> = HashMap::new();
     for (k, p) in events.iter().enumerate() {
         k_of.insert(*p as *const Play, k);
@@ -1759,6 +1768,17 @@ pub fn replay_with(
             if p.ts >= mid {
                 splits.push(if free { "free:second_half" } else { "album_next:second_half" });
             }
+            // Listened: not skipped early (what the user went on with).
+            if ended != Ended::Early {
+                splits.push("listened");
+                if free {
+                    splits.push("listened_free");
+                }
+                if p.ts >= mid {
+                    splits.push("listened:second_half");
+                }
+            }
+            held.push(model.candidates(mo, &|_| true).binary_search(&target).is_ok());
             let feats: Vec<[f32; F]> = (0..model.len()).map(|c| model.features(mo, c)).collect();
             let hand = Model::default();
             // A disliked track is out, its neighbours a little lower.
@@ -1801,6 +1821,7 @@ pub fn replay_with(
         skip_test: skips.len(),
         weights: m.weights,
         coverage: shown.len() as f32 / m.len().max(1) as f32,
+        cand_recall: held.iter().filter(|h| **h).count() as f32 / held.len().max(1) as f32,
     }
 }
 
