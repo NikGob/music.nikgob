@@ -943,6 +943,7 @@ impl Worker {
             self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
+        self.recs_flush_weights(true);
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
@@ -2622,9 +2623,11 @@ impl Worker {
     }
 
     fn load_library(&mut self) {
+        self.home_input_changed();
         self.stream_analysis_changed();
         self.recs_library_changed();
         self.publish_recordings();
+        self.turn.lap("recordings");
         let sort = self.state.read().library.release_sort;
         let key = match sort {
             nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
@@ -2635,13 +2638,16 @@ impl Worker {
         let releases = self
             .log_err("библиотека", self.lib.releases(0, 20_000, key))
             .unwrap_or_default();
+        self.turn.lap("albums");
         let (playlists, liked_albums) = self.shelf();
+        self.turn.lap("shelf");
         let artists = self
             .log_err(
                 "исполнители",
                 self.lib.artists(0, 20_000, Sort::asc(nikgob_library::ArtistSortKey::Name)),
             )
             .unwrap_or_default();
+        self.turn.lap("artists");
         // The inconspicuous "только скачанное": what has a file.
         let only_local = self.state.read().prefs.library_only_downloaded;
         let (releases, artists) = if only_local {
@@ -2668,6 +2674,7 @@ impl Worker {
         recent.truncate(12);
         let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
         let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
+        self.turn.lap("overview");
         let res = &mut self.res;
         // By when they came, the albums only an import's playlists brought
         // stay out, as in «Недавно добавлено».
@@ -2686,6 +2693,7 @@ impl Worker {
             .collect();
         let recent: Vec<_> = recent.iter().map(|r| res.release(r)).collect();
         let often: Vec<_> = often.iter().map(|r| res.release(r)).collect();
+        self.turn.lap("cards");
         self.publish(|s| {
             s.library.releases = releases;
             s.library.playlists = playlists;
@@ -2698,6 +2706,7 @@ impl Worker {
         });
         let sort = self.state.read().library.track_sort;
         self.load_tracks(0, 200, sort);
+        self.turn.lap("tracks");
     }
 
     /// The library filter on «Треки»: what the library search finds,

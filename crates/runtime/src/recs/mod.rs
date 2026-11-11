@@ -97,6 +97,8 @@ const COVERS: usize = 4;
 const COVER_CANDIDATES: usize = 8;
 /// Top tracks of a mood looked at for its covers.
 const MOOD_COVER_POOL: usize = 60;
+/// The weights learnt online are written at most this often.
+const KEEP_WEIGHTS_EVERY: Duration = Duration::from_secs(30);
 
 /// `rec_feedback` target kinds beyond the library's `track` and `artist`:
 /// a song of the services by [`song_key`], an artist of the services by
@@ -354,6 +356,10 @@ pub(crate) struct RecsState {
     pub(crate) session: Session,
     /// The weights learnt since the snapshot's (`None`: the snapshot's).
     pub(crate) weights: Option<Weights>,
+    /// When they were last written, and whether some learnt since wait
+    /// ([`Worker::recs_keep_weights`]).
+    weights_kept: Option<Instant>,
+    weights_unkept: bool,
     /// The skip model's features of the playing track at its start.
     skip_x: Option<(TrackId, [f32; nikgob_recs::model::G])>,
     /// The mixes of the world's page open.
@@ -403,6 +409,8 @@ impl RecsState {
             discover_rerank: false,
             session: Session::default(),
             weights: None,
+            weights_kept: None,
+            weights_unkept: false,
             skip_x: None,
             world: None,
             why: HashMap::new(),
@@ -2332,8 +2340,21 @@ impl Worker {
         self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).map_or(track, |t| t.id)
     }
 
-    /// The weights learnt online, into `recs.model`.
-    fn recs_keep_weights(&self) {
+    /// The weights learnt online, into `recs.model`: at most every
+    /// [`KEEP_WEIGHTS_EVERY`] (a start and an end write nothing more on the
+    /// loop); what is learnt between goes with the next write, a tick or
+    /// the app's close ([`Self::recs_flush_weights`]).
+    fn recs_keep_weights(&mut self) {
+        if self.recs.weights_kept.is_some_and(|t| t.elapsed() < KEEP_WEIGHTS_EVERY) {
+            self.recs.weights_unkept = true;
+            return;
+        }
+        self.recs_write_weights();
+    }
+
+    fn recs_write_weights(&mut self) {
+        self.recs.weights_kept = Some(Instant::now());
+        self.recs.weights_unkept = false;
         if let Some(w) = &self.recs.weights
             && let Ok(json) = serde_json::to_string(w)
             && let Err(e) = self.lib.cache_put(MODEL_KEY, now_ms(), &json)
@@ -2342,8 +2363,17 @@ impl Worker {
         }
     }
 
+    /// Writes the weights learnt since the last write (`now`: whenever they
+    /// wait; else once [`KEEP_WEIGHTS_EVERY`] is over).
+    pub(crate) fn recs_flush_weights(&mut self, now: bool) {
+        if self.recs.weights_unkept && (now || self.recs.weights_kept.is_none_or(|t| t.elapsed() >= KEEP_WEIGHTS_EVERY)) {
+            self.recs_write_weights();
+        }
+    }
+
     /// Every tick: a build when one is due, the discovery job.
     pub(crate) fn recs_tick(&mut self) {
+        self.recs_flush_weights(false);
         let now = Instant::now();
         let every = self.streaming.schedule.recs_every;
         let (day, utc_offset_min) = local_day();
@@ -2368,6 +2398,19 @@ impl Worker {
         self.discover_tick();
         self.suggest_tick();
         self.graph_tick();
+    }
+
+    /// The run's first build at once, once the sound vectors are in memory
+    /// (no network pass with it: those wait for the tick), so the mixes do
+    /// not wait for the first tick. Only in a run that keeps its state (the
+    /// app's; a test's builds keep to its ticks), and not while a game is in
+    /// front.
+    pub(crate) fn recs_first_build(&mut self) {
+        if self.prefs_path.is_none() || self.recs.built_at.is_some() || self.recs.building || crate::quiet::busy() {
+            return;
+        }
+        log::info!("recs: the run's first build, before the first tick");
+        self.recs_build();
     }
 
     fn recs_build(&mut self) {

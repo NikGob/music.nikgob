@@ -455,6 +455,9 @@ impl Worker {
                 if self.state.read().analysis != p {
                     self.publish(|s| s.analysis = p);
                 }
+                // The sound vectors are in memory by the first report: the
+                // run's first mixes need not wait for the first tick.
+                self.recs_first_build();
             }
         }
     }

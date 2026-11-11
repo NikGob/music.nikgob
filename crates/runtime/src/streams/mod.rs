@@ -550,25 +550,35 @@ impl Worker {
         // Unattended passes wait while a game is in front.
         let quiet = crate::quiet::busy();
         self.sync_tick(!idle);
+        self.turn.lap("sync");
         if !idle {
             if !quiet {
                 self.tracklist_tick();
+                self.turn.lap("tracklists");
                 self.enrich_tick();
+                self.turn.lap("enrich");
             }
             self.likes_tick();
+            self.turn.lap("likes");
             if !quiet {
                 self.clips_tick();
+                self.turn.lap("clips");
             }
         }
         self.stream_analysis_tick();
+        self.turn.lap("stream analysis");
         self.publish_accounts();
+        self.turn.lap("accounts");
         let every = self.streaming.schedule.wish_every;
         if self.streaming.last_wish_tick.is_none_or(|t| t.elapsed() >= every) {
             self.streaming.last_wish_tick = Some(Instant::now());
             self.publish_stream_cache();
+            self.turn.lap("stream cache");
             self.wish_tick();
+            self.turn.lap("wishes");
             if !quiet {
                 self.upgrade_tick();
+                self.turn.lap("upgrades");
             }
         }
     }
