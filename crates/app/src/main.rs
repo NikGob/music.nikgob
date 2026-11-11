@@ -834,6 +834,7 @@ fn main() -> eframe::Result {
     stage("desktop");
     Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
         let covers_dir = covers_dir.clone();
+        let covers_wake = waker.clone();
         let mut viewport = lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()));
         if shot::offscreen() {
             viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
@@ -863,7 +864,7 @@ fn main() -> eframe::Result {
                 ctx.set_fonts(fonts);
                 stage("fonts");
                 nikgob_md3e::icons::install(&ctx);
-                web_images::WebImages::install(&ctx, covers_dir);
+                web_images::WebImages::install(&ctx, covers_dir, covers_wake);
                 stage("web covers");
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);
