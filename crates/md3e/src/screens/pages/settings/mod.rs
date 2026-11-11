@@ -25,7 +25,7 @@ mod rows;
 mod services;
 mod system;
 
-use egui::{Align2, Key, Modifiers, Rect, Sense, Ui, UiBuilder, Vec2, emath::GuiRounding as _, pos2, vec2};
+use egui::{Align2, Key, Modifiers, Rangef, Rect, Sense, Ui, UiBuilder, Vec2, emath::GuiRounding as _, pos2, vec2};
 use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
 pub(super) use rows::fmt_speed;
@@ -36,7 +36,7 @@ use super::{PageState, brand, connected};
 use crate::screens::stage::{self, Scene, Script, StageRequest};
 use crate::{
     Theme, TypeRole,
-    components::{Divider, Size, anim},
+    components::{Size, anim},
 };
 
 /// How far the page's rows are scrolled, for the history's scroll restore.
@@ -236,10 +236,12 @@ pub(super) fn page(
         // Beside the stage the ⓘ cards have no sample of their own.
         settings_help::finish(ui, &mut p, at.stage.is_none());
         ui.add_space(16.0);
-        ui.add(Divider::new());
+        // The divider and the foot span the page, not only the rows' column.
+        let page = Rangef::new(ui.max_rect().left(), (ui.clip_rect().right() - 16.0).max(ui.max_rect().right()));
+        let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+        ui.painter().hline(page, line.center().y, egui::Stroke::new(1.0, Theme::get(ui.ctx()).scheme.outline_variant));
         ui.add_space(16.0);
-        // Centred on the rows' column, under the divider's middle.
-        brand::made_by(ui, ui.max_rect().x_range());
+        brand::made_by(ui, page);
         ui.add_space(8.0);
         ui.add_space(bottom_inset);
     });
