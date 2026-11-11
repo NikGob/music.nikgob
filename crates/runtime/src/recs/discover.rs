@@ -533,6 +533,10 @@ impl Worker {
         let mut artist_steps = Vec::new();
         for (a, _) in &artists {
             let Some(name) = self.lib.get_artist(*a).ok().flatten().map(|a| a.name) else { continue };
+            // A cut list's tail an older import took for an artist.
+            if nikgob_core::streaming::more_artists_note(&name) {
+                continue;
+            }
             pass.topped.insert(artist_key(&name));
             let known = self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
             for (on, service) in [(yt, Service::Youtube), (dz, Service::Deezer)] {
@@ -572,6 +576,11 @@ impl Worker {
         if dz {
             let now = now_ms();
             for a in release_artists {
+                // «и ещё 1 исполнитель» (a cut list's tail an older import
+                // took for an artist) would find somebody's single.
+                if self.lib.get_artist(a).ok().flatten().is_some_and(|x| nikgob_core::streaming::more_artists_note(&x.name)) {
+                    continue;
+                }
                 let cached: Option<(UnixMs, Vec<StreamAlbum>)> = self
                     .lib
                     .cache_get(&releases_key(a))
@@ -878,22 +887,31 @@ impl Worker {
     /// without what is disliked or in the library since; each discovery
     /// on the home counts as shown once a day.
     pub(crate) fn discover_rows(&mut self) -> (Vec<v::StreamTrackRow>, Vec<v::StreamAlbumCard>) {
+        let (rows, albums, shown) = self.discover_input().rows(&self.lib);
+        self.discover_shown(&shown);
+        (rows, albums)
+    }
+
+    /// What [`Self::discover_rows`] makes its rows of, taken here so the
+    /// rows can be made on another thread ([`DiscoverInput::rows`]).
+    pub(crate) fn discover_input(&mut self) -> DiscoverInput {
         self.discover_load();
-        let Some(found) = self.recs.discover.found.clone() else { return (Vec::new(), Vec::new()) };
-        let lib = &self.lib;
-        let disliked = |kind: &str, id: &str| lib.is_rec_disliked(kind, id).unwrap_or(false);
-        let tracks: Vec<&StreamTrack> = found
-            .tracks
+        let Some(found) = self.recs.discover.found.as_ref() else { return DiscoverInput::default() };
+        let releases = found
+            .releases
             .iter()
-            .filter(|t| {
-                !disliked(SONG, &stream_song_key(t))
-                    && !t.artists.iter().any(|a| disliked(ARTIST_NAME, &artist_key(&a.name)))
-            })
+            .map(|(artist, album)| (*artist, album.clone(), self.album_theirs(album)))
             .collect();
+        DiscoverInput { tracks: found.tracks.clone(), releases }
+    }
+
+    /// The discoveries of `keys` (by [`stream_song_key`]) were on the home:
+    /// each counts as shown once a day.
+    pub(crate) fn discover_shown(&mut self, keys: &[String]) {
         let (day, _) = local_day();
         let mut counted = false;
-        for t in &tracks {
-            let e = self.recs.discover.shown.entry(stream_song_key(t)).or_insert((0, String::new()));
+        for key in keys {
+            let e = self.recs.discover.shown.entry(key.clone()).or_insert((0, String::new()));
             if e.1 != day {
                 e.0 += 1;
                 e.1.clone_from(&day);
@@ -909,15 +927,50 @@ impl Worker {
                 let _ = self.lib.cache_put(SHOWN_KEY, now_ms(), &json);
             }
         }
-        let rows = tracks.into_iter().map(|t| self.stream_row_auto(t)).collect();
-        let albums = found
+    }
+}
+
+/// The home's «Новое для тебя» and «Новые релизы» before their rows are
+/// made: the last pass's discoveries, and its new releases with their
+/// artist and the service's track count ([`Worker::album_theirs`]).
+#[derive(Default)]
+pub(crate) struct DiscoverInput {
+    tracks: Vec<StreamTrack>,
+    releases: Vec<(ArtistId, StreamAlbum, u32)>,
+}
+
+impl DiscoverInput {
+    /// The rows, without what is disliked (it reads only the library), and
+    /// the keys of the discoveries among them ([`Worker::discover_shown`]).
+    pub(crate) fn rows(&self, lib: &Library) -> (Vec<v::StreamTrackRow>, Vec<v::StreamAlbumCard>, Vec<String>) {
+        let disliked = |kind: &str, id: &str| lib.is_rec_disliked(kind, id).unwrap_or(false);
+        let tracks: Vec<&StreamTrack> = self
+            .tracks
+            .iter()
+            .filter(|t| {
+                !disliked(SONG, &stream_song_key(t))
+                    && !t.artists.iter().any(|a| disliked(ARTIST_NAME, &artist_key(&a.name)))
+            })
+            .collect();
+        let shown = tracks.iter().map(|t| stream_song_key(t)).collect();
+        let rows = tracks
+            .into_iter()
+            .map(|t| crate::streams::stream_row_of(lib, t, lib.track_for_stream(t).ok().flatten()))
+            .collect();
+        // Nor what was found for «и ещё 1 исполнитель», a cut list's tail an
+        // older import took for an artist (somebody else's single).
+        let note = |a: &ArtistId| lib.get_artist(*a).ok().flatten().is_some_and(|x| nikgob_core::streaming::more_artists_note(&x.name));
+        let albums = self
             .releases
             .iter()
-            .filter(|(a, _)| !self.lib.is_rec_disliked("artist", &a.to_string()).unwrap_or(false))
-            .map(|(_, album)| self.album_card(album))
+            .filter(|(a, _, _)| !disliked("artist", &a.to_string()) && !note(a))
+            .map(|(_, album, theirs)| crate::streams::album_card_of(lib, album, *theirs))
             .collect();
-        (rows, albums)
+        (rows, albums, shown)
     }
+}
+
+impl Worker {
 }
 
 #[cfg(test)]

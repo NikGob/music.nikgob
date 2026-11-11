@@ -134,6 +134,12 @@ fn the_home_of_a_real_library() {
     for r in &h.recently_added {
         println!("  {}", r.title);
     }
+    // The page kept for the next start (`home.json`) reads back as it was.
+    let started = std::time::Instant::now();
+    let kept = serde_json::to_vec(h).unwrap();
+    let back: nikgob_view::HomeView = serde_json::from_slice(&kept).unwrap();
+    println!("the kept page: {} KB, written and read in {:?}", kept.len() / 1024, started.elapsed());
+    assert!(back == *h, "the kept page reads back as it was");
 
     // «Миксы только из скачанного»: the same library, files only.
     let prefs = nikgob_view::Prefs {

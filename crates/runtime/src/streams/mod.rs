@@ -54,6 +54,7 @@ use crate::import::Internal;
 
 pub(crate) use cold::{IMPORT_DEVICE, STREAM_JOB, plural};
 pub(crate) use export::music_video_title;
+pub(crate) use pages::{album_card_of, stream_row_of};
 pub(crate) use replace::shown_title;
 pub(crate) use wishlist::{WISH_ID, upgrade_job_words};
 pub(crate) use schedule::wake_jitter;
@@ -549,25 +550,35 @@ impl Worker {
         // Unattended passes wait while a game is in front.
         let quiet = crate::quiet::busy();
         self.sync_tick(!idle);
+        self.turn.lap("sync");
         if !idle {
             if !quiet {
                 self.tracklist_tick();
+                self.turn.lap("tracklists");
                 self.enrich_tick();
+                self.turn.lap("enrich");
             }
             self.likes_tick();
+            self.turn.lap("likes");
             if !quiet {
                 self.clips_tick();
+                self.turn.lap("clips");
             }
         }
         self.stream_analysis_tick();
+        self.turn.lap("stream analysis");
         self.publish_accounts();
+        self.turn.lap("accounts");
         let every = self.streaming.schedule.wish_every;
         if self.streaming.last_wish_tick.is_none_or(|t| t.elapsed() >= every) {
             self.streaming.last_wish_tick = Some(Instant::now());
             self.publish_stream_cache();
+            self.turn.lap("stream cache");
             self.wish_tick();
+            self.turn.lap("wishes");
             if !quiet {
                 self.upgrade_tick();
+                self.turn.lap("upgrades");
             }
         }
     }

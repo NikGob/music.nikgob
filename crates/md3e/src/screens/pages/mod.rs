@@ -1279,7 +1279,7 @@ pub fn search_bar(
     focus: &mut bool,
     torrents: bool,
     out: &mut Vec<Command>,
-) -> bool {
+) -> SearchBarOutput {
     let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
     let before = query.clone();
     let o = SearchBar::new("main-search")
@@ -1295,7 +1295,14 @@ pub fn search_bar(
     if o.submitted && torrents && !query.trim().is_empty() {
         out.push(Command::SearchTorrents(query.trim().to_owned()));
     }
-    *query != before
+    SearchBarOutput { edited: *query != before, submitted: o.submitted }
+}
+
+/// What the search bar did this frame: the text changed (sent once typing
+/// pauses), Enter (sent at once).
+pub struct SearchBarOutput {
+    pub edited: bool,
+    pub submitted: bool,
 }
 
 /// The page for `route`, inside a vertical scroll area that leaves room

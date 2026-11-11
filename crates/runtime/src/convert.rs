@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use nikgob_core::model::{ArtistId, Codec, PlaylistId, Release, ReleaseId, Source, SourceKind};
@@ -28,6 +30,96 @@ pub struct Resolver {
     seeds: Option<HashMap<ReleaseId, u32>>,
     /// Artist photos on disk; loaded on first use.
     photos: Option<HashMap<ArtistId, v::Cover>>,
+    /// How many times the covers and the photos were invalidated, shared
+    /// with every resolver forked from this one ([`Self::fork`]): one
+    /// invalidated anywhere drops its caches before it reads them next.
+    stale: Arc<Stale>,
+    /// The counts of `stale` this resolver's caches are of.
+    seen: (u64, u64),
+    /// What the files played lately say of their sound (shared with the
+    /// forks and with the threads that read them ahead).
+    facts: FactsCache,
+}
+
+/// See [`Resolver::stale`].
+#[derive(Default)]
+struct Stale {
+    covers: AtomicU64,
+    photos: AtomicU64,
+}
+
+/// What playing a file needs of its tags, read once with them: its track
+/// gain (R128 or ReplayGain, dB; 0 without one), its channels and the tags
+/// themselves without the cover picture (the info panel and the embedded
+/// lyrics read them when it starts).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct FileFacts {
+    pub gain_db: f32,
+    pub channels: Option<u8>,
+    pub tags: Option<Arc<nikgob_import::tags::TagSet>>,
+}
+
+/// [`FileFacts`] kept this many files at most (then forgotten at once).
+const FACTS_KEPT: usize = 256;
+
+/// The [`FileFacts`] of the files played lately, each with the file's
+/// modification time then (a file written since is read again). A start
+/// reads its file's tags here at most once: the gain for the engine, the
+/// channels for «Источник и качество», the tags for the info panel and the
+/// lyrics; the next track's are read ahead off the loop.
+#[derive(Clone, Default)]
+pub(crate) struct FactsCache(Arc<parking_lot::Mutex<HashMap<PathBuf, (Option<std::time::SystemTime>, FileFacts)>>>);
+
+impl FactsCache {
+    /// The facts of `path` if they are kept and the file is as it was.
+    pub(crate) fn get(&self, path: &Path) -> Option<FileFacts> {
+        let (at, facts) = self.0.lock().get(path).cloned()?;
+        (at == modified(path)).then_some(facts)
+    }
+
+    /// The facts of `path`: kept, or read now and kept.
+    pub(crate) fn of(&self, path: &Path) -> FileFacts {
+        if let Some(f) = self.get(path) {
+            return f;
+        }
+        let at = modified(path);
+        let facts = read_facts(path);
+        let mut kept = self.0.lock();
+        if kept.len() >= FACTS_KEPT {
+            kept.clear();
+        }
+        kept.insert(path.to_owned(), (at, facts.clone()));
+        facts
+    }
+
+    /// The tags of `path` (without the cover picture): kept, or read now.
+    pub(crate) fn tags(&self, path: &Path) -> Option<nikgob_import::tags::TagSet> {
+        self.of(path).tags.map(|t| (*t).clone())
+    }
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Reads the [`FileFacts`] of `path` from its tags (none when it does not
+/// read). The gain is normalized to −18 LUFS (the ReplayGain 2.0
+/// reference; R128 gains are relative to −23 LUFS).
+fn read_facts(path: &Path) -> FileFacts {
+    let Ok((mut tags, info)) = nikgob_import::tags::read_tags(path) else {
+        return FileFacts::default();
+    };
+    // The picture is large and nobody here wants it.
+    tags.cover = None;
+    FileFacts {
+        gain_db: tags
+            .r128_track_gain
+            .map(|q| f32::from(q) / 256.0 + 5.0)
+            .or(tags.replaygain_track_gain_db)
+            .unwrap_or(0.0),
+        channels: info.channels,
+        tags: Some(Arc::new(tags)),
+    }
 }
 
 impl Resolver {
@@ -38,7 +130,52 @@ impl Resolver {
             covers: HashMap::new(),
             seeds: None,
             photos: None,
+            stale: Arc::new(Stale::default()),
+            seen: (0, 0),
+            facts: FactsCache::default(),
         }
+    }
+
+    /// A resolver with caches of its own for another thread (the home's
+    /// builder): an invalidation of either drops the caches of both.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            lib: self.lib.clone(),
+            root: self.root.clone(),
+            covers: HashMap::new(),
+            seeds: None,
+            photos: None,
+            stale: self.stale.clone(),
+            seen: self.stale_now(),
+            facts: self.facts.clone(),
+        }
+    }
+
+    /// The library this resolver reads.
+    pub(crate) fn library(&self) -> &Library {
+        &self.lib
+    }
+
+    /// What the files played lately say of their sound ([`FactsCache`]).
+    pub(crate) fn facts(&self) -> &FactsCache {
+        &self.facts
+    }
+
+    fn stale_now(&self) -> (u64, u64) {
+        (self.stale.covers.load(Ordering::Acquire), self.stale.photos.load(Ordering::Acquire))
+    }
+
+    /// Drops what an invalidation (here or in a fork) made stale.
+    fn sync(&mut self) {
+        let now = self.stale_now();
+        if now.0 != self.seen.0 {
+            self.covers.clear();
+            self.seeds = None;
+        }
+        if now.1 != self.seen.1 {
+            self.photos = None;
+        }
+        self.seen = now;
     }
 
     /// The library root relative locators are under.
@@ -58,6 +195,7 @@ impl Resolver {
 
     fn cover_for(&mut self, release: Option<ReleaseId>, cover_ref: Option<&str>) -> Option<v::Cover> {
         let id = release?;
+        self.sync();
         if let Some(c) = self.covers.get(&id) {
             return c.clone();
         }
@@ -102,6 +240,7 @@ impl Resolver {
 
     /// The photo of an artist, if one was downloaded and is still on disk.
     pub fn photo(&mut self, id: ArtistId) -> Option<v::Cover> {
+        self.sync();
         if self.photos.is_none() {
             let stored = self.lib.artist_photos().unwrap_or_default();
             let map = stored
@@ -115,15 +254,16 @@ impl Resolver {
         self.photos.as_ref().and_then(|m| m.get(&id)).cloned()
     }
 
-    /// Reload artist photos from the library on next use.
+    /// Reload artist photos from the library on next use (in the forks too).
     pub fn invalidate_photos(&mut self) {
-        self.photos = None;
+        self.stale.photos.fetch_add(1, Ordering::AcqRel);
+        self.sync();
     }
 
-    /// Forget cached covers (after an import changed them).
+    /// Forget cached covers (after an import changed them), in the forks too.
     pub fn invalidate(&mut self) {
-        self.covers.clear();
-        self.seeds = None;
+        self.stale.covers.fetch_add(1, Ordering::AcqRel);
+        self.sync();
     }
 
     /// The cover of a release (its file, or a service's https url).
@@ -427,10 +567,8 @@ impl Resolver {
         });
         let sound = src.map(|s| {
             let path = (s.kind == SourceKind::LocalFile).then(|| self.path(&s.locator));
-            let channels = path
-                .as_deref()
-                .and_then(|p| nikgob_import::tags::probe_info(p).ok())
-                .and_then(|i| i.channels);
+            // Read with its gain when it started (once per file).
+            let channels = path.as_deref().and_then(|p| self.facts.of(p).channels);
             sound_details(s, path.as_deref(), channels, row.duration_ms, check.as_ref())
         });
         v::TrackInfo {
@@ -748,6 +886,29 @@ mod tests {
         let row = ArtistRow { artist: a, release_count: 0, local_track_count: 0, liked: false };
         let image = res.artist(&row).image.unwrap();
         assert_eq!(image.web_url(), Some("https://fake.invalid/kino.jpg"));
+    }
+
+    /// The home's builder has a resolver of its own: a cover changed by an
+    /// import and invalidated on the worker is read again there too.
+    #[test]
+    fn an_invalidation_drops_the_caches_of_a_fork_too() {
+        use nikgob_core::model::{ArtistCredit, Release};
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Release::new("A", ArtistCredit::single("X", None));
+        r.cover_ref = Some("https://fake.invalid/a.jpg".into());
+        let r = lib.upsert_release(&r).unwrap();
+        let mut res = Resolver::new(lib.clone(), dir.path().to_owned());
+        let mut fork = res.fork();
+        let url = |res: &mut Resolver| res.release_cover(r.id).and_then(|c| c.web_url().map(str::to_owned));
+        assert_eq!(url(&mut fork).as_deref(), Some("https://fake.invalid/a.jpg"));
+        let mut changed = r.clone();
+        changed.cover_ref = Some("https://fake.invalid/b.jpg".into());
+        lib.upsert_release(&changed).unwrap();
+        assert_eq!(url(&mut fork).as_deref(), Some("https://fake.invalid/a.jpg"), "cached");
+        res.invalidate();
+        assert_eq!(url(&mut fork).as_deref(), Some("https://fake.invalid/b.jpg"));
+        assert_eq!(url(&mut res).as_deref(), Some("https://fake.invalid/b.jpg"));
     }
 
     fn check(verdict: nikgob_core::quality::Verdict, cutoff: f32, made_from: Option<Codec>) -> nikgob_core::quality::QualityCheck {

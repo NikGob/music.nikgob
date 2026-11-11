@@ -379,6 +379,16 @@ pub fn join_names(artists: &[ArtistRef]) -> String {
         .join(", ")
 }
 
+/// The tail of a collapsed list of artists that a service writes where the
+/// names go on («и ещё 1 исполнитель», «and 2 more», «& 3 more»): never an
+/// artist. Told by its shape in any language: three words or more with a
+/// number standing alone between the first and the last («Maroon 5», «The
+/// 1975» and «5 Seconds of Summer» are names).
+pub fn more_artists_note(name: &str) -> bool {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    words.len() >= 3 && words[1..words.len() - 1].iter().any(|w| w.chars().all(|c| c.is_ascii_digit()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamAlbum {
     pub id: RemoteId,
@@ -1190,6 +1200,16 @@ impl fmt::Debug for SoloistAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_tail_is_no_artist_and_a_name_with_a_number_is() {
+        for note in ["и ещё 1 исполнитель", "и еще 12 исполнителей", "and 2 more", "& 3 more"] {
+            assert!(more_artists_note(note), "{note}");
+        }
+        for name in ["Maroon 5", "The 1975", "5 Seconds of Summer", "Blink-182", "5'nizza", "Кино", "Sum 41", ""] {
+            assert!(!more_artists_note(name), "{name}");
+        }
+    }
 
     #[test]
     fn service_maps_to_source_kind_and_back() {

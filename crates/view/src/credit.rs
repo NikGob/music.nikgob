@@ -4,7 +4,7 @@ use std::ops::Range;
 
 /// One credited name, the artist it links to (if any) and the text that
 /// follows it (`", "`, `" feat. "`; empty for the last).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreditName<Id> {
     pub name: String,
     pub id: Option<Id>,
@@ -13,7 +13,7 @@ pub struct CreditName<Id> {
 
 /// The credited artists of a line, in order. `Id` is a library
 /// [`crate::ArtistId`] or a service's [`crate::RemoteId`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Credit<Id>(pub Vec<CreditName<Id>>);
 
 impl<Id> Default for Credit<Id> {

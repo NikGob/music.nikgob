@@ -262,8 +262,9 @@ impl SearchState {
 
 impl Worker {
     /// The stream part of [`Command::Search`](nikgob_view::Command::Search):
-    /// `library` are the library hits already published.
-    pub(crate) fn search_streams(&mut self, query: &str, library: Vec<nikgob_library::TrackRow>) {
+    /// `library` are the library hits already published, each track with
+    /// its ISRC (read off the loop with them).
+    pub(crate) fn search_streams(&mut self, query: &str, library: Vec<(nikgob_library::TrackRow, Option<String>)>) {
         let st = &mut self.streaming.search;
         st.seq += 1;
         let stale = st.tasks.iter().filter(|t| !t.is_finished()).count();
@@ -284,13 +285,7 @@ impl Worker {
         st.settling = false;
         st.frozen_top = None;
         st.frozen_tracks.clear();
-        st.lib_tracks = library
-            .into_iter()
-            .map(|r| {
-                let isrc = self.lib.get_track(r.id).ok().flatten().and_then(|t| t.isrc);
-                (r, isrc)
-            })
-            .collect();
+        st.lib_tracks = library;
         let seq = st.seq;
         let sources = st.sources;
         if query.is_empty() {

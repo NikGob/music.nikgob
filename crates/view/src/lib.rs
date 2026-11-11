@@ -25,7 +25,7 @@ pub use sound::*;
 pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Cover {
     pub path: PathBuf,
     /// ARGB seed for the colour scheme, if the cover is colourful enough.
@@ -103,7 +103,7 @@ impl Levels for NoLevels {
 }
 
 /// One row of a track list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrackRow {
     pub id: TrackId,
     pub title: String,
@@ -133,7 +133,7 @@ impl TrackRow {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseCard {
     pub id: ReleaseId,
     pub title: String,
@@ -222,7 +222,7 @@ pub enum ReleaseLine {
     Hole { disc: u32, no: u32 },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistCard {
     pub id: ArtistId,
     pub name: String,
@@ -246,7 +246,7 @@ pub struct ArtistDetail {
     pub discography: DiscographyView,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistCard {
     pub id: PlaylistId,
     pub name: String,
@@ -261,7 +261,7 @@ pub struct PlaylistCard {
 }
 
 /// How a playlist's cover is chosen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PlaylistCoverMode {
     /// A collage when the tracks have 4+ different album covers, else the most
     /// common cover, else a generated gradient.
@@ -708,7 +708,7 @@ pub struct SpectrumPlot {
 /// One card of «Продолжить»: an album of the library, or an album of a
 /// service that was streamed without joining the library (it opens the
 /// service's page).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ContinueCard {
     Release(ReleaseCard),
     Stream(StreamAlbumCard),
@@ -717,7 +717,7 @@ pub enum ContinueCard {
 /// A shortcut at the top of Главная: what the user is into now (an album,
 /// a playlist or an artist), by plays that fade with a half-life of three
 /// days. A click opens it, ▶ plays it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Shortcut {
     Release(ReleaseCard),
     /// The playlist and up to four covers of its albums (a 2×2 mosaic).
@@ -727,7 +727,7 @@ pub enum Shortcut {
 
 /// An album of «Из твоей библиотеки» (or «С чего начать» without a
 /// history): how many of its tracks were ever played.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShelfAlbum {
     pub card: ReleaseCard,
     pub heard: u32,
@@ -738,7 +738,7 @@ pub struct ShelfAlbum {
 /// music to travel through and finish — a soundtrack franchise across all
 /// its albums, or an artist's whole discography in the library — with how
 /// far the user got.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct World {
     /// Stable across builds: the franchise's key, or `artist:` and its id.
     pub key: String,
@@ -779,7 +779,7 @@ pub struct World {
 }
 
 /// What a world is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorldKind {
     /// A game's or an anime's music across its albums.
     #[default]
@@ -799,7 +799,7 @@ impl WorldKind {
 }
 
 /// The main button of a world.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorldStart {
     /// «Дослушать»: something of it was heard, something is left.
     #[default]
@@ -844,7 +844,7 @@ pub struct WorldView {
 }
 
 /// One of the three cards under a world's stage: one click each.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorldCard {
     pub icon: WorldIcon,
     /// «Продолжить», «По порядку», «Новый альбом».
@@ -854,7 +854,7 @@ pub struct WorldCard {
     pub go: WorldGo,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorldIcon {
     NowPlaying,
     Play,
@@ -865,7 +865,7 @@ pub enum WorldIcon {
 }
 
 /// What a world's card does.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum WorldGo {
     /// The player (what plays now).
     Player,
@@ -877,7 +877,7 @@ pub enum WorldGo {
     Stream(RemoteId),
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HomeView {
     /// Главная is not built yet (the start of a run): the page shows the
     /// app's mark instead of an empty library.

@@ -1430,10 +1430,8 @@ impl Worker {
             .flatten()
             .filter(|s| s.kind.is_local());
         let path = src.as_ref().map(|s| self.res.path(&s.locator));
-        let tags = path
-            .as_deref()
-            .and_then(|p| nikgob_import::tags::read_tags(p).ok())
-            .map(|(t, _)| t);
+        // Read when the track started (or ahead of it, off the loop).
+        let tags = path.as_deref().and_then(|p| self.res.facts().tags(p));
 
         // Info tab: what the file says beyond the basics.
         if let Some(t) = &tags {
@@ -1463,18 +1461,6 @@ impl Worker {
 
         self.load_lyrics(track, path, tags.as_ref());
     }
-}
-
-/// Track gain from the file's tags, normalized to −18 LUFS (ReplayGain 2.0
-/// reference; R128 gains are relative to −23 LUFS).
-pub(crate) fn file_gain_db(path: &Path) -> f32 {
-    let Ok((t, _)) = nikgob_import::tags::read_tags(path) else {
-        return 0.0;
-    };
-    t.r128_track_gain
-        .map(|q| f32::from(q) / 256.0 + 5.0)
-        .or(t.replaygain_track_gain_db)
-        .unwrap_or(0.0)
 }
 
 #[cfg(test)]

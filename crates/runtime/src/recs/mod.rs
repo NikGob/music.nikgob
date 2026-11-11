@@ -69,6 +69,7 @@ use crate::quiet::lower_priority;
 use crate::import::Internal;
 
 pub(crate) use radio::RadioSave;
+pub(crate) use discover::DiscoverInput;
 pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
 
 /// Plays after which the taste is built again.
@@ -96,6 +97,8 @@ const COVERS: usize = 4;
 const COVER_CANDIDATES: usize = 8;
 /// Top tracks of a mood looked at for its covers.
 const MOOD_COVER_POOL: usize = 60;
+/// The weights learnt online are written at most this often.
+const KEEP_WEIGHTS_EVERY: Duration = Duration::from_secs(30);
 
 /// `rec_feedback` target kinds beyond the library's `track` and `artist`:
 /// a song of the services by [`song_key`], an artist of the services by
@@ -353,6 +356,10 @@ pub(crate) struct RecsState {
     pub(crate) session: Session,
     /// The weights learnt since the snapshot's (`None`: the snapshot's).
     pub(crate) weights: Option<Weights>,
+    /// When they were last written, and whether some learnt since wait
+    /// ([`Worker::recs_keep_weights`]).
+    weights_kept: Option<Instant>,
+    weights_unkept: bool,
     /// The skip model's features of the playing track at its start.
     skip_x: Option<(TrackId, [f32; nikgob_recs::model::G])>,
     /// The mixes of the world's page open.
@@ -402,6 +409,8 @@ impl RecsState {
             discover_rerank: false,
             session: Session::default(),
             weights: None,
+            weights_kept: None,
+            weights_unkept: false,
             skip_x: None,
             world: None,
             why: HashMap::new(),
@@ -1422,15 +1431,19 @@ struct LaneParts {
     new_artists: Vec<String>,
     covers: Vec<CoverRef>,
     new_cover: Option<String>,
-    rows: Vec<nikgob_library::TrackRow>,
+    /// Its tracks, read when the parts are resolved.
+    rows: Vec<TrackId>,
     blend_base: Option<u32>,
     why: Option<String>,
 }
 
-/// The recommendation parts of the home view, ready to be drawn.
+/// The recommendation parts of the home view, ready to be drawn: owned
+/// copies of the build's picks, so they can be resolved on another thread
+/// (the home's builder, [`crate::home_build`]).
 pub(crate) struct HomeParts {
     hero: Option<(String, String, Vec<CoverRef>)>,
-    mix: Vec<nikgob_library::TrackRow>,
+    /// The library tracks of «Твой микс», read when resolved.
+    mix: Vec<TrackId>,
     /// Kicker, title, subtitle, covers.
     daylist: Option<(String, String, String, Vec<CoverRef>)>,
     /// Id, kicker, title, subtitle, covers.
@@ -1450,9 +1463,9 @@ pub(crate) struct HomeParts {
 }
 
 impl HomeParts {
-    /// The parts of `home` (none before the first build).
-    fn of(
-        lib: &Library,
+    /// The parts of `home` (none before the first build). It reads nothing:
+    /// the rows are read when the parts are resolved.
+    pub(crate) fn of(
         home: Option<&RecHome>,
         discover: Vec<v::StreamTrackRow>,
         new_releases: Vec<v::StreamAlbumCard>,
@@ -1487,7 +1500,7 @@ impl HomeParts {
             .daily
             .iter()
             .filter_map(|p| match p.item {
-                Item::Track(id) => lib.get_track_row(id).ok().flatten(),
+                Item::Track(id) => Some(id),
                 Item::Stream(_) => None,
             })
             .collect();
@@ -1513,7 +1526,7 @@ impl HomeParts {
                     }
                 }
                 let new_cover = l.new.iter().find_map(|t| t.cover_url.clone());
-                let rows = l.tracks.iter().filter_map(|id| lib.get_track_row(*id).ok().flatten()).collect();
+                let rows = l.tracks.clone();
                 LaneParts {
                     key: l.key,
                     title: l.title.clone(),
@@ -1557,15 +1570,29 @@ impl HomeParts {
 
     /// Fills the recommendation fields of `home`.
     pub(crate) fn apply(self, home: &mut v::HomeView, res: &mut crate::Resolver) {
-        self.resolve(res)(home);
+        self.resolve(res).apply(home);
     }
 
-    /// Resolves covers and rows now and returns what fills `home` with them
-    /// (it touches neither the library nor the resolver, so it can run
-    /// under the state lock).
-    pub(crate) fn resolve(self, res: &mut crate::Resolver) -> impl FnOnce(&mut v::HomeView) + use<> {
+    /// The new-music rows, made after the parts were taken (the home's
+    /// builder makes them, [`super::discover::DiscoverInput::rows`]).
+    pub(crate) fn with_discover(mut self, discover: Vec<v::StreamTrackRow>, new_releases: Vec<v::StreamAlbumCard>) -> Self {
+        self.discover = discover;
+        self.new_releases = new_releases;
+        self
+    }
+
+    /// Reads the rows and resolves the covers now, into what fills `home`
+    /// with them ([`RecsFill::apply`] touches neither the library nor the
+    /// resolver, so it can run under the state lock).
+    pub(crate) fn resolve(self, res: &mut crate::Resolver) -> RecsFill {
         let local_only = self.local_only;
         let card = self.card;
+        let lib = res.library().clone();
+        let rows = |ids: &[TrackId]| -> Vec<nikgob_library::TrackRow> {
+            ids.iter().filter_map(|id| lib.get_track_row(*id).ok().flatten()).collect()
+        };
+        let mix_rows = rows(self.mix.as_slice());
+        let lane_rows: Vec<Vec<nikgob_library::TrackRow>> = self.lanes.iter().map(|l| rows(l.rows.as_slice())).collect();
         let mut covers = |c: Vec<CoverRef>| -> Vec<v::Cover> {
             c.into_iter()
                 .filter_map(|c| match c {
@@ -1629,7 +1656,8 @@ impl HomeParts {
             .lanes
             .into_iter()
             .zip(lane_covers)
-            .map(|(l, covers)| v::LaneCard {
+            .zip(lane_rows)
+            .map(|((l, covers), rows)| v::LaneCard {
                 key: l.key,
                 title: l.title,
                 short_titles: l.short,
@@ -1637,7 +1665,7 @@ impl HomeParts {
                 new_artists: l.new_artists,
                 covers,
                 new_cover: l.new_cover.map(v::Cover::web),
-                tracks: l.rows.iter().map(|t| res.track(t)).collect(),
+                tracks: rows.iter().map(|t| res.track(t)).collect(),
                 blend_base: l.blend_base,
                 queue: None,
                 why: l.why,
@@ -1645,29 +1673,69 @@ impl HomeParts {
             .collect();
         let blend_profiles = self.blend_profiles;
         let history = self.history;
-        let mix: Option<Vec<_>> = (!self.mix.is_empty()).then(|| self.mix.iter().map(|t| res.track(t)).collect());
+        let mix: Option<Vec<_>> = (!mix_rows.is_empty()).then(|| mix_rows.iter().map(|t| res.track(t)).collect());
         let (discover, new_releases) = (self.discover, self.new_releases);
-        move |home: &mut v::HomeView| {
-            home.hero = hero;
-            home.daylist = daylist;
-            home.tiles = tiles;
-            home.moods = moods;
-            home.style_mixes = style_mixes;
-            if let Some(mix) = mix {
-                home.mix = mix;
-            }
-            home.discover = discover;
-            home.new_releases = new_releases;
-            home.lanes = lanes;
-            home.blend_profiles = blend_profiles;
-            home.history |= history;
-            if local_only {
-                only_downloaded(home);
-            }
-            dedupe_rows(home);
-            if card {
-                card_first(home);
-            }
+        RecsFill {
+            hero,
+            daylist,
+            tiles,
+            moods,
+            style_mixes,
+            mix,
+            discover,
+            new_releases,
+            lanes,
+            blend_profiles,
+            history,
+            local_only,
+            card,
+        }
+    }
+}
+
+/// The recommendation parts of the home view resolved ([`HomeParts::resolve`]):
+/// what fills the page, made off the state lock and, by the home's builder,
+/// off the worker's thread.
+pub(crate) struct RecsFill {
+    hero: Option<v::MixCard>,
+    daylist: Option<v::MixCard>,
+    tiles: Vec<v::MixCard>,
+    moods: Vec<v::MixCard>,
+    style_mixes: Vec<v::MixCard>,
+    /// `None`: no library track of «Твой микс» (the page keeps its own).
+    mix: Option<Vec<v::TrackRow>>,
+    discover: Vec<v::StreamTrackRow>,
+    new_releases: Vec<v::StreamAlbumCard>,
+    lanes: Vec<v::LaneCard>,
+    blend_profiles: Vec<v::BlendProfile>,
+    history: bool,
+    local_only: bool,
+    card: bool,
+}
+
+impl RecsFill {
+    /// Fills the recommendation fields of `home` (and drops what «Только
+    /// скачанное», the rows' doubles and the card at the top leave out).
+    pub(crate) fn apply(self, home: &mut v::HomeView) {
+        home.hero = self.hero;
+        home.daylist = self.daylist;
+        home.tiles = self.tiles;
+        home.moods = self.moods;
+        home.style_mixes = self.style_mixes;
+        if let Some(mix) = self.mix {
+            home.mix = mix;
+        }
+        home.discover = self.discover;
+        home.new_releases = self.new_releases;
+        home.lanes = self.lanes;
+        home.blend_profiles = self.blend_profiles;
+        home.history |= self.history;
+        if self.local_only {
+            only_downloaded(home);
+        }
+        dedupe_rows(home);
+        if self.card {
+            card_first(home);
         }
     }
 }
@@ -1855,7 +1923,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     visit.epoch = epoch;
 
     let mut home = res.home(&crate::home::build_with(lib, &visit));
-    HomeParts::of(lib, Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown()).apply(&mut home, &mut res);
+    HomeParts::of(Some(h), Vec::new(), Vec::new(), prefs.mixes_downloaded_only, prefs.home_card_shown()).apply(&mut home, &mut res);
     Ok(HomePreview {
         catalog: built.snap.catalog.len(),
         vectors,
@@ -2140,21 +2208,21 @@ impl Worker {
         crate::home_v2::Epoch::of(self.recs.run, recs_now(), local_day().1)
     }
 
-    /// The recommendation parts of the home page as they stand.
-    pub(crate) fn recs_home_parts(&mut self) -> HomeParts {
-        let (discover, new_releases) = self.discover_rows();
+    /// The recommendation parts of the home page as they stand, without
+    /// their rows: the home's builder reads those, resolves the covers and
+    /// makes the new-music rows ([`Self::discover_input`]).
+    pub(crate) fn recs_home_parts(&self) -> HomeParts {
         let (local_only, card) = {
             let p = &self.state.read().prefs;
             (p.mixes_downloaded_only, p.home_card_shown())
         };
-        HomeParts::of(&self.lib, self.recs.home.as_ref(), discover, new_releases, local_only, card)
+        HomeParts::of(self.recs.home.as_ref(), Vec::new(), Vec::new(), local_only, card)
     }
 
-    /// Draws the recommendation parts of the home page again.
+    /// Draws the recommendation parts of the home page again (built off
+    /// the loop, [`crate::home_build`]).
     pub(crate) fn publish_recs_home(&mut self) {
-        let parts = self.recs_home_parts();
-        let fill = parts.resolve(&mut self.res);
-        self.publish(|s| fill(&mut s.home));
+        self.ask_home(false);
     }
 
     /// «Не предлагать этот микс»: its card goes at once (another takes its
@@ -2163,7 +2231,8 @@ impl Worker {
         if let Some(h) = self.recs.home.as_mut() {
             h.lanes.retain(|l| l.key != m.key);
         }
-        self.publish(|s| s.home.lanes.retain(|l| l.key != m.key));
+        let key = m.key;
+        self.patch_home(move |home| home.lanes.retain(|l| l.key != key));
         self.toast(format!("Не буду предлагать «{}»", m.title), Some(("Отменить".into(), Command::SetPref(v::PrefPatch::ShowMix(m.key)))));
     }
 
@@ -2271,8 +2340,21 @@ impl Worker {
         self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).map_or(track, |t| t.id)
     }
 
-    /// The weights learnt online, into `recs.model`.
-    fn recs_keep_weights(&self) {
+    /// The weights learnt online, into `recs.model`: at most every
+    /// [`KEEP_WEIGHTS_EVERY`] (a start and an end write nothing more on the
+    /// loop); what is learnt between goes with the next write, a tick or
+    /// the app's close ([`Self::recs_flush_weights`]).
+    fn recs_keep_weights(&mut self) {
+        if self.recs.weights_kept.is_some_and(|t| t.elapsed() < KEEP_WEIGHTS_EVERY) {
+            self.recs.weights_unkept = true;
+            return;
+        }
+        self.recs_write_weights();
+    }
+
+    fn recs_write_weights(&mut self) {
+        self.recs.weights_kept = Some(Instant::now());
+        self.recs.weights_unkept = false;
         if let Some(w) = &self.recs.weights
             && let Ok(json) = serde_json::to_string(w)
             && let Err(e) = self.lib.cache_put(MODEL_KEY, now_ms(), &json)
@@ -2281,8 +2363,17 @@ impl Worker {
         }
     }
 
+    /// Writes the weights learnt since the last write (`now`: whenever they
+    /// wait; else once [`KEEP_WEIGHTS_EVERY`] is over).
+    pub(crate) fn recs_flush_weights(&mut self, now: bool) {
+        if self.recs.weights_unkept && (now || self.recs.weights_kept.is_none_or(|t| t.elapsed() >= KEEP_WEIGHTS_EVERY)) {
+            self.recs_write_weights();
+        }
+    }
+
     /// Every tick: a build when one is due, the discovery job.
     pub(crate) fn recs_tick(&mut self) {
+        self.recs_flush_weights(false);
         let now = Instant::now();
         let every = self.streaming.schedule.recs_every;
         let (day, utc_offset_min) = local_day();
@@ -2307,6 +2398,19 @@ impl Worker {
         self.discover_tick();
         self.suggest_tick();
         self.graph_tick();
+    }
+
+    /// The run's first build at once, once the sound vectors are in memory
+    /// (no network pass with it: those wait for the tick), so the mixes do
+    /// not wait for the first tick. Only in a run that keeps its state (the
+    /// app's; a test's builds keep to its ticks), and not while a game is in
+    /// front.
+    pub(crate) fn recs_first_build(&mut self) {
+        if self.prefs_path.is_none() || self.recs.built_at.is_some() || self.recs.building || crate::quiet::busy() {
+            return;
+        }
+        log::info!("recs: the run's first build, before the first tick");
+        self.recs_build();
     }
 
     fn recs_build(&mut self) {
@@ -2383,11 +2487,18 @@ impl Worker {
                 // and «Слушать снова» come with its mixes (the first drawn
                 // again with the taste profiles they were drawn without).
                 let fresh = self.recs.home.as_ref().is_none_or(|h| h.epoch != b.home.epoch);
-                self.recs.snap = Some(b.snap);
-                self.recs.home = Some(b.home);
+                // The build before is let go of off the loop (a large
+                // catalog takes a while to free).
+                let old = (self.recs.snap.replace(b.snap), self.recs.home.replace(b.home));
+                self.drop_off_loop(old);
+                self.turn.lap("swap");
+                // The whole page with its mixes, or the mixes on the page.
                 if fresh {
                     self.load_home();
+                } else {
+                    self.publish_recs_home();
                 }
+                self.turn.lap("home asked");
                 rerank
             }
             Err(e) => {
@@ -2395,16 +2506,20 @@ impl Worker {
                 return;
             }
         };
-        self.publish_recs_home();
         self.world_mixes_again();
+        self.turn.lap("world");
         if let Some(id) = self.recs.pending_play.take() {
             self.play_mix(id);
+            self.turn.lap("pending mix");
         }
         self.radio_snapshot_ready();
+        self.turn.lap("radio");
         if rerank {
             self.discover_rerank();
+            self.turn.lap("rerank");
         }
         self.discover_tick();
+        self.turn.lap("discover");
     }
 
     /// Test hook: the online metadata the graph's pass asks.

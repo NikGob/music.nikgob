@@ -49,8 +49,14 @@ pub(crate) fn artist_ref(a: &ArtistId) -> ArtistRef {
     ArtistRef::new(a.id.as_deref().map(rid), a.name.clone())
 }
 
+/// The artists of a list, without the tail YouTube Music writes where it
+/// cuts a long one («и ещё 1 исполнитель»: no link, never an artist).
 fn artist_refs(artists: &[ArtistId]) -> Vec<ArtistRef> {
-    artists.iter().map(artist_ref).collect()
+    artists
+        .iter()
+        .filter(|a| !(a.id.is_none() && artists.len() > 1 && nikgob_core::streaming::more_artists_note(&a.name)))
+        .map(artist_ref)
+        .collect()
 }
 
 /// ATV songs are [`TrackKind::Song`], music videos [`TrackKind::Video`].

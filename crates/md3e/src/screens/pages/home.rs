@@ -539,6 +539,12 @@ pub(super) fn lane_playing(state: &ViewState, l: &LaneCard) -> bool {
     state.player.status == Status::Playing && state.player.context.as_deref() == Some(l.context().as_str())
 }
 
+/// The queue plays from «Любимые» (its page is the queue's), as a mix's
+/// card says of its own ([`lane_playing`]).
+fn liked_playing(state: &ViewState, p: &PlaylistCard) -> bool {
+    state.player.status == Status::Playing && state.player.context_page == Some(Route::Playlist(p.id))
+}
+
 /// A mix card's height on `grid`: its cover and the lines under it.
 fn mix_card_h(grid: Grid) -> f32 {
     grid.span(12 / grid.cards_per_line()) + cards::MIX_TEXT_H
@@ -577,7 +583,7 @@ fn mix_row(
     };
     row::show(ui, grid, at, |ui, i, cell| {
         if let Some(p) = liked.filter(|_| i == 0) {
-            nav = cards::liked_playlist(ui, cell, p, out).or(nav.take());
+            nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, out).or(nav.take());
             return;
         }
         let l = lanes[i - first];

@@ -448,15 +448,20 @@ fn mix_look(l: &LaneCard, s: &crate::ColorScheme) -> (nikgob_shapes::MaterialSha
 
 /// «Любимые» in «Миксы для тебя»: the playlist of every liked song itself,
 /// a heart on a container of the scheme, its name and its length under it.
-/// A click opens the playlist, ▶ plays it.
-pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, out: &mut Vec<Command>) -> Option<Route> {
+/// A click opens the playlist, ▶ plays it; under the pointer ⋮ at the top
+/// grows in as on a mix (the playlist's own actions, the right click too);
+/// while it plays the name is primary and ⏸ stays in its square.
+pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, playing: bool, status: Status, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with("home-liked-playlist");
     let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
+    let hover = hover || menu_open;
     let r = shape::LARGE;
+    let mut more: Option<Response> = None;
     let play = scaled(ui, art.center(), squish, |ui| {
         paint::container(ui.painter(), art, Radii::all(r), s.primary_container, egui::Stroke::NONE);
         let size = (art.width() * 0.4).clamp(24.0, 96.0);
@@ -464,20 +469,47 @@ pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, out: &mut Vec<C
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &format!("Слушать «{}»", p.name), id.with("play-btn")))
-            .is_some_and(|r| r.clicked())
+        let tip = if playing { "Пауза".to_owned() } else { format!("Слушать «{}»", p.name) };
+        let clicked = grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, &tip, id.with("play-btn")))
+            .is_some_and(|r| r.clicked());
+        let m = Size::S.height();
+        let slot = Rect::from_min_size(pos2(art.right() - 8.0 - m, art.top() + 8.0), vec2(m, m));
+        let colors = Colors { container: s.surface_container_high, content: s.on_surface, border: Color32::TRANSPARENT };
+        let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
+        more = grow_button(ui, id.with("more"), hover, slot, button);
+        clicked
     });
-    let name = text(ui, &p.name, TypeRole::TitleMedium.style(), s.on_surface, cell.width(), 1);
-    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, s.on_surface);
+    let name_c = if playing { s.primary } else { s.on_surface };
+    let name = text(ui, &p.name, TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, name_c);
     let n = u64::from(p.track_count);
     let count = format!("{n} {}", crate::screens::common::plural(n, "трек", "трека", "треков"));
     let line = text(ui, &count, TypeRole::BodyMedium.style(), s.on_surface_variant, cell.width(), 1);
     ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0 + TITLE_LINE), line, s.on_surface_variant);
-    if play {
-        out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: false });
+    // ⋮ and the right click: what a playlist's card offers.
+    let rows = || super::widgets::playlist_rows(super::widgets::PlaylistMenuOf::default());
+    let (menu, acts) = super::widgets::menu_of(id.with("ctx"), rows());
+    let mut picked = menu.context_menu(&resp).and_then(|i| acts.get(i).copied());
+    if let Some(m) = &more {
+        let (menu, acts) = super::widgets::menu_of(id.with("more-menu"), rows());
+        picked = picked.or(menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied()));
+    }
+    let open = Menu::item_rects(ui.ctx(), id.with("more-menu")).is_some();
+    ui.ctx().data_mut(|d| d.insert_temp(id.with("more-open"), open));
+    if let Some(act) = picked {
+        out.extend(super::widgets::playlist_command(act, p.id));
         return None;
     }
-    resp.clicked().then_some(Route::Playlist(p.id))
+    if play {
+        if playing && status == Status::Playing {
+            out.push(Command::Pause);
+        } else {
+            out.push(Command::PlayPlaylist { id: p.id, start: None, shuffle: false });
+        }
+        return None;
+    }
+    let card = resp.clicked() && more.as_ref().is_none_or(|m| !m.clicked());
+    card.then_some(Route::Playlist(p.id))
 }
 
 /// The page of mix `l` (of the world `world`'s page, if any).

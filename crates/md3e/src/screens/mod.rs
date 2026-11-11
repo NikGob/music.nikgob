@@ -678,8 +678,11 @@ impl Md3eUi {
                 self.set_now_playing(ctx, false);
             }
             self.search = q.clone();
-            self.search_sent = q.clone();
-            out.push(Command::Search(q));
+            // Enter in the bar sent it already.
+            if self.search_sent != q {
+                self.search_sent = q.clone();
+                out.push(Command::Search(q));
+            }
         }
 
         // Esc last: open dialogs, menus and sheets take it first. Order:
@@ -924,8 +927,13 @@ impl Md3eUi {
         if std::mem::take(&mut self.pages.focus_search) {
             self.search_focus = true;
         }
-        if pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, state.prefs.prowlarr_configured, out) {
+        let bar = pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, state.prefs.prowlarr_configured, out);
+        if bar.edited {
             self.search_edited = Some(std::time::Instant::now());
+        }
+        // Enter: sent at once, without waiting for the pause.
+        if bar.submitted {
+            self.search_edited = None;
         }
         self.flush_search(&ctx, out);
 
