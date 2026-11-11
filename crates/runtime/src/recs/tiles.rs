@@ -23,8 +23,12 @@ const DAY_KEY: &str = "recs.tiles";
 /// What the last days showed.
 const SHOWN_KEY: &str = "recs.tiles.shown";
 
-/// «Подборки дня» shows this many tiles a day.
-pub(crate) const HOME_TILES: usize = 4;
+/// «Подборки дня» shows this many tiles a day at most: more than fit in a
+/// row, which goes on sideways.
+pub(crate) const HOME_TILES: usize = 8;
+/// The day's board is drawn this large: the kinds the home leaves out
+/// («На повторе», the lottery, the languages) leave [`HOME_TILES`].
+const HOME_BOARD: usize = HOME_TILES + 3;
 
 /// A tile of the home.
 pub(crate) struct TileHome {
@@ -65,6 +69,10 @@ struct TilesDay {
     /// changes.
     #[serde(default)]
     local_only: bool,
+    /// How many tiles it was drawn for: a board of another size (an older
+    /// one, drawn for fewer) is drawn again.
+    #[serde(default)]
+    size: usize,
 }
 
 /// What the tiles read besides the snapshot: the facts of every track,
@@ -130,12 +138,12 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let lib = &input.lib;
     let history = snap.model.taste.has_history();
     let kept = cache_read::<TilesDay>(lib, DAY_KEY)
-        .filter(|c| c.day == input.day && (c.history || !history) && c.local_only == snap.local_only);
+        .filter(|c| c.day == input.day && (c.history || !history) && c.local_only == snap.local_only && c.size == HOME_BOARD);
     let board = match kept {
         Some(c) => c.tiles,
         None => {
             let mut shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
-            let board = snap.recs().tiles_of_day(tiles, &shown, TILES_PER_DAY);
+            let board = snap.recs().tiles_of_day(tiles, &shown, HOME_BOARD);
             shown.record(snap.recs().local_day(), &board);
             cache_write(lib, SHOWN_KEY, input.now, &shown);
             let day = TilesDay {
@@ -143,6 +151,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
                 history,
                 tiles: board.clone(),
                 local_only: snap.local_only,
+                size: HOME_BOARD,
             };
             cache_write(lib, DAY_KEY, input.now, &day);
             board
@@ -151,7 +160,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let today = snap.recs().local_day();
     // «На повторе» and the languages are mixes of their own now and
     // «Наугад» is gone from the home (home v2 §1): the day shows the
-    // others, at most four.
+    // others, at most [`HOME_TILES`].
     board
         .into_iter()
         .filter(|t| !matches!(t.kind, TileKind::OnRepeat | TileKind::Lottery | TileKind::Language))
