@@ -75,9 +75,9 @@ pub const FOUR_FROM: f32 = 1488.0;
 /// Below this width the rows go two to a row and the tiles of the day two.
 pub const NARROW_BELOW: f32 = 1000.0;
 /// Below this width (the page of a window under M3's expanded class: 840
-/// less the rail and the margins) a row has three mix or album cards, as
-/// wide as they come out.
-pub const CARDS_CAPPED_FROM: f32 = 712.0;
+/// less the rail, 96, and the margins, 2 × 24) a row has three mix or
+/// album cards, as wide as they come out.
+pub const CARDS_CAPPED_FROM: f32 = 696.0;
 /// From [`CARDS_CAPPED_FROM`] a mix or an album card is at most this wide:
 /// a wider page shows more of them.
 pub const CARD_MAX: f32 = 200.0;

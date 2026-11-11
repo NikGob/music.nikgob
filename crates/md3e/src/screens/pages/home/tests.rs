@@ -349,10 +349,10 @@ fn the_tiles_of_the_day_fill_their_row() {
     assert_eq!(of_day_per(4, 0), 1);
 }
 
-/// The page of a window `w` wide with the compact rail (80) and the
+/// The page of a window `w` wide with the collapsed rail (96) and the
 /// window's margins (2 × 24) off.
 fn page_of(window: f32) -> Grid {
-    Grid::new(0.0, window - 80.0 - 48.0)
+    Grid::new(0.0, window - 96.0 - 48.0)
 }
 
 /// A narrow page keeps three cards a row as before; from the expanded
@@ -360,7 +360,7 @@ fn page_of(window: f32) -> Grid {
 /// more of them.
 #[test]
 fn cards_keep_their_size_on_a_wide_window() {
-    for width in [360.0, 572.0, 711.0] {
+    for width in [360.0, 572.0, 695.0] {
         let g = Grid::new(0.0, width);
         assert_eq!(g.cards_per_line(), 3, "{width}");
         assert_eq!(g.rows_per_line(), 2, "{width}");
@@ -368,7 +368,7 @@ fn cards_keep_their_size_on_a_wide_window() {
         assert_eq!(g.of_day_least(), 1, "{width}");
     }
     // (window, mix and album cards in a row, their width)
-    for (window, n, w) in [(1280.0, 6, 178.67), (1920.0, 9, 184.89), (2560.0, 12, 188.0), (3840.0, 12, 198.67)] {
+    for (window, n, w) in [(1280.0, 6, 176.0), (1920.0, 9, 183.11), (2560.0, 12, 186.67), (3840.0, 12, 198.67)] {
         let g = page_of(window);
         assert_eq!(g.cards_per_line(), n, "{window}");
         let tile = g.tile(n);
@@ -399,7 +399,7 @@ fn list_rows_add_columns_on_a_wide_window() {
     // (window, song columns, shortcuts, tiles of the day, fewest tiles)
     for (window, songs, shortcuts, tiles, least) in [
         (1000.0, 2, 2, 2, 1),
-        (1280.0, 3, 3, 4, 3),
+        (1280.0, 3, 3, 4, 2),
         (1920.0, 4, 4, 4, 4),
         (2560.0, 6, 4, 6, 5),
     ] {
