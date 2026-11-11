@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nikgob_core::model::{Master, SourceId, Track, TrackId};
+use nikgob_core::model::{Master, Source, SourceId, Track, TrackId};
 use nikgob_library::Library;
 
 use crate::error::{ImportError, Result};
@@ -26,19 +26,50 @@ pub struct Replacement {
     pub new: SourceId,
     /// The track's master before (`None`: it had none).
     pub master_before: Option<Master>,
+    /// Where the replaced file's lyrics went in the Trash (`None`: it had
+    /// none), as the import put them there ([`replaced_lyrics`]).
+    pub old_lrc: Option<PathBuf>,
+}
+
+fn lyrics_key(old: SourceId) -> String {
+    format!("replaced_lrc.{old}")
+}
+
+/// An import of confirmed files ([`crate::ImportTargets::pinned`]) moved
+/// the lyrics of the file of source `old` it replaced to `in_trash`: kept
+/// for [`replaced_lyrics`].
+pub(crate) fn keep_replaced_lyrics(lib: &Library, old: SourceId, in_trash: &Path) {
+    if let Err(e) = lib.cache_put(&lyrics_key(old), nikgob_library::now_ms(), &in_trash.to_string_lossy()) {
+        log::warn!("where the lyrics of {} went is not kept: {e}", in_trash.display());
+    }
+}
+
+/// Where the import put the lyrics of the replaced file of source `old`
+/// (an import of confirmed files only); asked once, then forgotten.
+pub fn replaced_lyrics(lib: &Library, old: SourceId) -> Option<PathBuf> {
+    let (_, path) = lib.cache_get(&lyrics_key(old)).ok().flatten()?;
+    let _ = lib.cache_forget(&lyrics_key(old), &path);
+    Some(PathBuf::from(path))
 }
 
 /// Takes `r` back. The new file goes to the Trash first: whatever fails
 /// after it is undone step by step, so the track never plays two live
-/// files, never loses both, and a failed undo can be tried again. Done
-/// already (the old file plays): nothing to do.
+/// files, never loses both, and a failed undo can be tried again. The
+/// track's tags, master and lyrics are then put back as they were; any of
+/// them that cannot be is an error too (tried again with the undo, the
+/// files staying as they are by then).
 pub fn undo_replacement(lib: &Library, trash_dir: &Path, r: &Replacement) -> Result<()> {
     let old = lib
         .get_source(r.old)?
         .ok_or_else(|| ImportError::Other(format!("the replaced file of {} is not known any more", r.track)))?;
-    if old.trashed_at.is_none() {
-        return Ok(());
+    if old.trashed_at.is_some() {
+        files_back(lib, trash_dir, r, &old)?;
     }
+    rest_back(lib, r, &PathBuf::from(&old.locator))
+}
+
+/// The old file back from the Trash, the new one there.
+fn files_back(lib: &Library, trash_dir: &Path, r: &Replacement, old: &Source) -> Result<()> {
     let in_trash = lib
         .trash_path_of(r.old)?
         .map(PathBuf::from)
@@ -88,41 +119,63 @@ pub fn undo_replacement(lib: &Library, trash_dir: &Path, r: &Replacement) -> Res
         new_back(e)
     };
     lib.restore_source(r.old).map_err(|e| put_back(e.into()))?;
-    // The track's tags and place as they were.
-    if let Err(e) = lib.upsert_track(&r.before) {
-        log::warn!("{} keeps the tags of the new file: {e}", r.before.title);
-    }
-    // Its master as it was: one the new file brought goes from the library
-    // (its file stays where it is, it may be another track's too).
-    match &r.master_before {
-        Some(m) => {
-            if let Err(e) = lib.put_master(m) {
-                log::warn!("the master of {} is not put back: {e}", r.track);
-            }
-        }
-        None => match lib.delete_master(r.track) {
-            Ok(true) => log::info!("the master the better copy of {} brought is no longer the track's", r.track),
-            Ok(false) => {}
-            Err(e) => log::warn!("the master of {} stays: {e}", r.track),
-        },
-    }
-    // Its lyrics file: the old one from the Trash, else the new one's.
-    let back = original.with_extension("lrc");
-    if !long_path(&back).exists() {
-        let old_lrc = in_trash.with_extension("lrc");
-        let new_lrc = new_path.as_ref().map(|p| p.with_extension("lrc")).filter(|l| *l != back);
-        if long_path(&old_lrc).exists() {
-            let _ = fsutil::move_file(&old_lrc, &back);
-        } else if let Some(l) = new_lrc.filter(|l| long_path(l).exists()) {
-            let _ = fsutil::move_file(&l, &back);
-        }
-    }
     log::info!(
         "better copy taken back: {} is back from the Trash, {} went there",
         original.display(),
         new_trash.as_ref().map_or_else(|| "nothing".to_owned(), |t| t.display().to_string())
     );
     Ok(())
+}
+
+/// The track's tags, master and lyrics as they were, once its old file
+/// plays again. Each is tried; what fails is said in the error.
+fn rest_back(lib: &Library, r: &Replacement, original: &Path) -> Result<()> {
+    let mut failed: Vec<String> = Vec::new();
+    // The track's tags and place as they were, exactly.
+    if let Err(e) = lib.put_track_back(&r.before) {
+        failed.push(format!("tags: {e}"));
+    }
+    // Its master as it was: one the new file brought goes from the library
+    // (its file stays where it is, it may be another track's too).
+    let master = match &r.master_before {
+        Some(m) => lib.put_master(m),
+        None => lib.delete_master(r.track).map(|gone| {
+            if gone {
+                log::info!("the master the better copy of {} brought is no longer the track's", r.track);
+            }
+        }),
+    };
+    if let Err(e) = master {
+        failed.push(format!("master: {e}"));
+    }
+    // Its lyrics file: the old one from the very place in the Trash the
+    // import put it, else the new file's.
+    let back = original.with_extension("lrc");
+    if !long_path(&back).exists() {
+        let from = match &r.old_lrc {
+            Some(l) if long_path(l).exists() => Some(l.clone()),
+            Some(l) => {
+                failed.push(format!("lyrics: {} is not in the Trash any more", l.display()));
+                None
+            }
+            None => lib
+                .get_source(r.new)
+                .ok()
+                .flatten()
+                .map(|s| PathBuf::from(&s.locator).with_extension("lrc"))
+                .filter(|l| *l != back && long_path(l).exists()),
+        };
+        if let Some(l) = from
+            && let Err(e) = fsutil::move_file(&l, &back)
+        {
+            failed.push(format!("lyrics: {e}"));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(ImportError::Other(format!("{} is back, but not all of it: {}", original.display(), failed.join("; "))))
+    }
 }
 
 #[cfg(test)]
@@ -147,7 +200,12 @@ mod tests {
         mp3.quality_score = 700;
         let mp3 = lib.add_source(&mp3).unwrap();
         let in_trash = trash_file(&trash, &mp3_path).unwrap();
-        trash_file(&trash, &mp3_path.with_extension("lrc")).unwrap();
+        // A lyrics file of the same name was in the Trash already: this
+        // one's name there is not the audio's.
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(in_trash.with_extension("lrc"), b"[00:01]stranger").unwrap();
+        let old_lrc = trash_file(&trash, &mp3_path.with_extension("lrc")).unwrap();
+        assert_ne!(old_lrc, in_trash.with_extension("lrc"));
         lib.trash_source(mp3.id, Some(&in_trash.to_string_lossy())).unwrap();
         let new_path = if same_place { mp3_path.clone() } else { music.join("07 - Молли.opus") };
         std::fs::write(&new_path, b"opus").unwrap();
@@ -156,8 +214,9 @@ mod tests {
         let opus = lib.add_source(&opus).unwrap();
         let mut retagged = before.clone();
         retagged.title = "Молли (Remastered)".into();
+        retagged.isrc = Some("RUA1D0700001".into());
         lib.upsert_track(&retagged).unwrap();
-        let r = Replacement { track: before.id, before, old: mp3.id, new: opus.id, master_before: None };
+        let r = Replacement { track: before.id, before, old: mp3.id, new: opus.id, master_before: None, old_lrc: Some(old_lrc) };
         (dir, lib, r, trash, mp3_path, new_path)
     }
 
@@ -168,7 +227,7 @@ mod tests {
             assert_eq!(lib.active_source(r.track).unwrap().unwrap().id, r.new);
             undo_replacement(&lib, &trash, &r).unwrap();
             assert_eq!(std::fs::read(&mp3_path).unwrap(), b"mp3", "{same_place}");
-            assert!(mp3_path.with_extension("lrc").exists(), "its lyrics too");
+            assert_eq!(std::fs::read(mp3_path.with_extension("lrc")).unwrap(), b"[00:01]a", "its own lyrics too");
             if !same_place {
                 assert!(!new_path.exists());
             }
@@ -176,7 +235,9 @@ mod tests {
             assert!(lib.get_source(r.new).unwrap().unwrap().trashed_at.is_some());
             let in_trash = lib.trash_path_of(r.new).unwrap().unwrap();
             assert_eq!(std::fs::read(&in_trash).unwrap(), b"opus", "the new file waits in the Trash");
-            assert_eq!(lib.get_track(r.track).unwrap().unwrap().title, "Молли", "the tags as they were");
+            let track = lib.get_track(r.track).unwrap().unwrap();
+            assert_eq!(track.title, "Молли", "the tags as they were");
+            assert_eq!(track.isrc, None, "an ISRC the new file brought goes too");
             // Again: nothing more to do.
             undo_replacement(&lib, &trash, &r).unwrap();
             assert_eq!(lib.active_source(r.track).unwrap().unwrap().id, r.old);

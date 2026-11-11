@@ -564,7 +564,7 @@ impl Importer {
             let (p, o, i) = (path.to_path_buf(), origin, inner.clone());
             blocking(move || analyze(&i.cfg, &p, o)).await?
         };
-        analyzed.force_track = ctx.targets.forced();
+        analyzed.force_track = ctx.targets.track_of(path);
         analyzed.targets = ctx.targets.clone();
         analyzed.job_started = ctx.started;
         ctx.stage(path, Stage::QualityCheck);
@@ -707,9 +707,10 @@ impl Importer {
         // A better copy of the job's tracks is one of them or nothing: the
         // rest of the folder (another album that came under the same
         // name) is left out, never imported as an album of its own.
-        if ctx.targets.only_targets {
+        // A job of confirmed files takes those alone, each as its track.
+        if ctx.targets.only_targets || !ctx.targets.pinned.is_empty() {
             for i in (0..read.len()).rev() {
-                if ids[i].is_none() && !read[i].known {
+                if ctx.targets.unpinned(&read[i].analyzed.path) || (ids[i].is_none() && !read[i].known) {
                     let p = read.remove(i);
                     ids.remove(i);
                     log::info!("import: {} is none of the tracks it was fetched for, left out", p.analyzed.path.display());
@@ -978,7 +979,7 @@ impl Importer {
                     let (inner, p, o) = (self.inner.clone(), path.clone(), parked.origin.clone());
                     let mut a = blocking(move || analyze(&inner.cfg, &p, o)).await?;
                     a.targets = parked.targets.clone();
-                    a.force_track = parked.targets.forced();
+                    a.force_track = parked.targets.track_of(&path);
                     a.job_started = ctx.started;
                     let mut base = identity_from_tags(&a.tags, &path);
                     if let Some(t) = a.force_track
@@ -1561,6 +1562,9 @@ struct Undo {
     /// A master file it put in the masters folder (not one that was there).
     master_file: Option<PathBuf>,
     master_hash: Option<String>,
+    /// The track's master record before this import registered its own
+    /// (`None`: it had none), put back when [`Self::master_hash`] is set.
+    master_before: Option<Master>,
     replaced: Replaced,
 }
 
@@ -1584,7 +1588,15 @@ fn roll_back(inner: &Inner, journal: Vec<Undo>) -> usize {
         }
         if let Some(hash) = &u.master_hash {
             let _ = lib.delete_master(u.track);
-            let _ = fsutil::remove_file(&cfg.masters_dir().join(format!("{hash}.json")));
+            // The sidecar is the one before's too when it is the same file.
+            if u.master_before.as_ref().is_none_or(|m| m.file_hash != *hash) {
+                let _ = fsutil::remove_file(&cfg.masters_dir().join(format!("{hash}.json")));
+            }
+            if let Some(m) = &u.master_before
+                && let Err(e) = lib.put_master(m)
+            {
+                log::warn!("import cancelled: the master of {} before is not put back: {e}", u.track);
+            }
         }
         if let Err(e) = lib.forget_source(u.source) {
             log::warn!("import cancelled: the row of {} stays: {e}", u.dest.display());
@@ -1592,7 +1604,7 @@ fn roll_back(inner: &Inner, journal: Vec<Undo>) -> usize {
         u.replaced.undo(lib);
         match &u.before {
             Some(t) => {
-                if let Err(e) = lib.upsert_track(t) {
+                if let Err(e) = lib.put_track_back(t) {
                     log::warn!("import cancelled: {} keeps its new tags: {e}", t.title);
                 }
             }
@@ -2064,6 +2076,11 @@ fn commit_locked(
             if long_path(&lrc).exists()
                 && let Ok(lrc_dest) = trash_file(&cfg.trash_dir, &lrc)
             {
+                // Confirmed files (an album's better copy) can be taken back
+                // later: where the lyrics went is kept for that.
+                if !a.targets.pinned.is_empty() {
+                    crate::replaced::keep_replaced_lyrics(lib, old.id, &lrc_dest);
+                }
                 replaced.lrc = Some((lrc, lrc_dest));
             }
             Some(dest.to_string_lossy().into_owned())
@@ -2088,6 +2105,12 @@ fn commit_locked(
     }
 
     let finish = (|| -> Result<Done> {
+        // The master the track had, for a cancel (this import may register
+        // its own over it).
+        let master_before = match existing {
+            Some(e) => lib.get_master(e.track.id)?,
+            None => None,
+        };
         let out_info = tags::probe_info(&dest)?;
         let file_hash = fsutil::hash_file(&dest)?;
         let size = fsutil::file_size(&dest)?;
@@ -2236,6 +2259,7 @@ fn commit_locked(
                 dest: dest.clone(),
                 master_file,
                 master_hash: None,
+                master_before,
                 replaced: Replaced::default(),
             }),
         })
@@ -2308,5 +2332,49 @@ mod cover_tests {
         // A frame without bars stays as it is.
         let still = process_cover(&crate::cover::testimg::solid_jpeg([90, 90, 90], 640, 360), 1200).unwrap();
         assert_eq!((cut_bars(still.clone()).width, still.height), (640, 360));
+    }
+}
+
+#[cfg(test)]
+mod roll_back_tests {
+    use nikgob_core::model::ArtistCredit;
+
+    use super::*;
+
+    fn master(track: TrackId, hash: &str) -> Master {
+        Master { track_id: track, codec: Codec::Flac, file_hash: hash.into(), size_bytes: 1, origin: None, replicas: Vec::new() }
+    }
+
+    /// What a cancelled upgrade of `track` that registered the master
+    /// `new` over `before` left to take back.
+    fn undo(dir: &Path, track: &Track, new: &str, before: Option<Master>) -> Undo {
+        Undo {
+            track: track.id,
+            before: Some(track.clone()),
+            source: SourceId::new(),
+            dest: dir.join("Music").join("gone.opus"),
+            master_file: None,
+            master_hash: Some(new.into()),
+            master_before: before,
+            replaced: Replaced::default(),
+        }
+    }
+
+    /// A cancelled replacement that brought its own master gives the track
+    /// its master record as it was: the one before, or none at all.
+    #[test]
+    fn a_cancelled_replacement_gives_back_the_master_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let importer = Importer::new(ImportConfig::with_root(dir.path()), lib.clone(), None);
+        let track = lib.upsert_track(&Track::new("Песня", ArtistCredit::single("Кто-то", None))).unwrap();
+        let old = master(track.id, "old");
+        lib.put_master(&master(track.id, "new")).unwrap();
+        roll_back(&importer.inner, vec![undo(dir.path(), &track, "new", Some(old.clone()))]);
+        assert_eq!(lib.get_master(track.id).unwrap(), Some(old));
+
+        lib.put_master(&master(track.id, "new")).unwrap();
+        roll_back(&importer.inner, vec![undo(dir.path(), &track, "new", None)]);
+        assert_eq!(lib.get_master(track.id).unwrap(), None);
     }
 }

@@ -21,7 +21,7 @@
 //! (the track id stays), equal or lower is a duplicate.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use nikgob_core::clip_title::same_dual_title;
 use nikgob_core::model::{ReleaseId, Source, Track, TrackId, WishlistId};
@@ -116,6 +116,12 @@ pub struct ImportTargets {
     /// place one that is not taken for its track again.
     #[serde(default)]
     pub from: Option<String>,
+    /// The track each file is, as the user confirmed it (the card of an
+    /// album's better copy): the file attaches to that track whatever its
+    /// tags (an embedded track id of another track included) or the album
+    /// matching say. When any is given, a file not listed is left out.
+    #[serde(default)]
+    pub pinned: Vec<(PathBuf, TrackId)>,
 }
 
 impl ImportTargets {
@@ -132,6 +138,17 @@ impl ImportTargets {
             [one] if self.force => Some(one),
             _ => None,
         }
+    }
+
+    /// The track `path` is: [`Self::forced`], or its [`Self::pinned`] one.
+    pub fn track_of(&self, path: &Path) -> Option<TrackId> {
+        self.forced()
+            .or_else(|| self.pinned.iter().find(|(p, _)| p == path).map(|(_, t)| *t))
+    }
+
+    /// A file of a job with [`Self::pinned`] files that is none of them.
+    pub fn unpinned(&self, path: &Path) -> bool {
+        !self.pinned.is_empty() && !self.pinned.iter().any(|(p, _)| p == path)
     }
 }
 

@@ -545,3 +545,44 @@ async fn the_repair_files_a_track_of_another_edition_at_its_place_and_finds_a_go
     assert_eq!(lib.tracks_of_release_all(deluxe).unwrap().len(), 2);
     assert_eq!(lib.get_wishlist_item(item.id).unwrap().unwrap().release_id, Some(standard), "the item found its album again");
 }
+
+/// A better copy of an album the user confirmed file by file: each file
+/// goes to the track the card showed, even when it carries the embedded id
+/// of another track of the library, and a file not on the card is left out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_copy_imports_each_file_as_the_track_it_was_shown_for() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let one = album_track(&lib, 1, "Me, Myself & I", 3);
+    let three = album_track(&lib, 3, "Cash Machine", 4);
+    let release = lib.get_track(one).unwrap().unwrap().release_id.unwrap();
+    let files = [(1, "Me, Myself & I", 3.0), (2, "1993", 5.0)];
+    let dir = torrent_folder(&root, "Oliver Tree - Ugly Is Beautiful (2020) [FLAC]", &files, |no, title| TagSet {
+        title: Some(title.into()),
+        artist: Some("Oliver Tree".into()),
+        album: Some("Ugly Is Beautiful".into()),
+        track_no: Some(no),
+        // Its embedded id says another track of the library.
+        track_id: Some(three),
+        ..TagSet::default()
+    });
+    let first = dir.join("1. Me, Myself & I.wav");
+    let targets = ImportTargets {
+        tracks: vec![one],
+        release: Some(release),
+        only_targets: true,
+        pinned: vec![(first, one)],
+        ..ImportTargets::default()
+    };
+    let events = importer.import_paths_for(vec![dir], torrent(), targets).wait().await;
+    assert_eq!(imported(&events), vec![one], "{events:?}");
+    assert!(lib.active_source(one).unwrap().unwrap().kind.is_local());
+    assert!(
+        lib.active_source(three).unwrap().is_none_or(|s| !s.kind.is_local()),
+        "the track named by the embedded id is not touched"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, ImportEvent::Finished { left_out: 1, .. })),
+        "the file not on the card is left out: {events:?}"
+    );
+}

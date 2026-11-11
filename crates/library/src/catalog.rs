@@ -893,6 +893,26 @@ impl Library {
         self.write(|tx| upsert_track_in(tx, track))
     }
 
+    /// Puts a track back exactly as `track` was (an undo of a replaced
+    /// file): unlike [`Self::upsert_track`], an identifier or a length it
+    /// lacked is cleared, not kept from what replaced it.
+    pub fn put_track_back(&self, track: &Track) -> Result<Track> {
+        self.write(|tx| {
+            let stored = upsert_track_in(tx, track)?;
+            tx.execute(
+                "UPDATE track SET recording_mbid = ?2, isrc = ?3, acoustid = ?4, duration_ms = ?5 WHERE id = ?1",
+                params![stored.id.to_string(), track.recording_mbid, track.isrc, track.acoustid, track.duration_ms],
+            )?;
+            Ok(Track {
+                recording_mbid: track.recording_mbid.clone(),
+                isrc: track.isrc.clone(),
+                acoustid: track.acoustid.clone(),
+                duration_ms: track.duration_ms,
+                ..stored
+            })
+        })
+    }
+
     // ---- sources
 
     /// Adds a source, or updates the existing one with the same `id` or the
