@@ -284,8 +284,16 @@ fn play_mix_plays_and_records_the_home_context() {
     wait_for(&s.rt, "its queue", |st| st.queue.next.len() == 29);
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
     assert!(s.rt.state().queue.radio.is_none(), "the daily mix is not endless");
-    let first = hero_mix(&s.rt.state())[0];
-    assert_eq!(s.rt.state().player.current.as_ref().map(|t| t.id), Some(first));
+    // Mixes play shuffled by default («Перемешивание» of mixes): the mix's
+    // songs, from any of them.
+    let (mut mix, mut queued) = {
+        let st = s.rt.state();
+        let queued: Vec<TrackId> = st.player.current.iter().map(|t| t.id).chain(st.queue.next.iter().map(|e| e.track.id)).collect();
+        (hero_mix(&st), queued)
+    };
+    mix.sort();
+    queued.sort();
+    assert_eq!(queued, mix, "the queue is the mix");
 
     s.rt.send(Command::PlayMix { id: MixId::Mood(Mood::Calm) });
     wait_for(&s.rt, "the mood's radio", |st| {
