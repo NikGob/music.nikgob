@@ -84,6 +84,26 @@ async fn get_404_is_none() {
 }
 
 #[tokio::test]
+async fn duration_out_of_the_api_range_is_not_sent() {
+    for secs in [0, 4000] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/get"))
+            .respond_with(json_body(404, fixture!("lrclib_not_found.json")))
+            .mount(&server)
+            .await;
+        let found = client(&server)
+            .get("Nobody", "Nothing", None, Some(Duration::from_secs(secs)))
+            .await
+            .unwrap();
+        assert!(found.is_none());
+        let requests = server.received_requests().await.unwrap();
+        let query = requests[0].url.query().unwrap();
+        assert!(!query.contains("duration"), "{secs} s: {query}");
+    }
+}
+
+#[tokio::test]
 async fn search_parses_the_array() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

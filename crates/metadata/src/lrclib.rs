@@ -17,6 +17,15 @@ const DURATION_WINDOW_SECS: f64 = 3.0;
 /// Minimum text similarity (0..=1, see `text::similarity`) of a search hit.
 const MIN_TITLE_SIMILARITY: f64 = 0.85;
 const MIN_ARTIST_SIMILARITY: f64 = 0.7;
+/// LRCLIB rejects a `duration` outside this range (whole seconds) with
+/// HTTP 400, so such a value is never sent.
+const DURATION_RANGE_SECS: std::ops::RangeInclusive<f64> = 1.0..=3600.0;
+
+/// The duration as LRCLIB takes it, or `None` when it is unknown or out of the
+/// range the API accepts (a stream without a length, a long mix).
+fn usable_duration(duration: Option<Duration>) -> Option<Duration> {
+    duration.filter(|d| DURATION_RANGE_SECS.contains(&d.as_secs_f64().round()))
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -78,7 +87,7 @@ impl Lrclib {
         album: Option<&str>,
         duration: Option<Duration>,
     ) -> Result<Option<Lyrics>> {
-        let secs = duration.map(|d| d.as_secs_f64().round().to_string());
+        let secs = usable_duration(duration).map(|d| d.as_secs_f64().round().to_string());
         let mut params = vec![("artist_name", artist), ("track_name", track)];
         if let Some(a) = album.map(str::trim).filter(|a| !a.is_empty()) {
             params.push(("album_name", a));
@@ -125,6 +134,8 @@ impl Lrclib {
         album: Option<&str>,
         duration: Option<Duration>,
     ) -> Result<Option<Lyrics>> {
+        // An unusable length would also filter out every search hit.
+        let duration = usable_duration(duration);
         if let Some(found) = self.get(artist, track, album, duration).await? {
             return Ok(Some(found));
         }
@@ -187,4 +198,21 @@ fn pick_best(
         .collect();
     scored.sort_by(|(da, a), (db, b)| b.has_synced().cmp(&a.has_synced()).then(da.total_cmp(db)));
     scored.into_iter().next().map(|(_, l)| l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duration_outside_the_api_range_is_dropped() {
+        assert_eq!(usable_duration(None), None);
+        assert_eq!(usable_duration(Some(Duration::ZERO)), None);
+        assert_eq!(usable_duration(Some(Duration::from_millis(400))), None);
+        assert_eq!(usable_duration(Some(Duration::from_secs(4000))), None);
+        let hour = Some(Duration::from_millis(3_600_400));
+        assert_eq!(usable_duration(hour), hour);
+        assert_eq!(usable_duration(Some(Duration::from_secs(1))), Some(Duration::from_secs(1)));
+        assert_eq!(usable_duration(Some(Duration::from_secs(233))), Some(Duration::from_secs(233)));
+    }
 }

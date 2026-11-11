@@ -98,7 +98,11 @@ pub(crate) async fn fetch_and_store(
     lib: &Library,
     row: &TrackRow,
 ) -> Result<StoredLyrics, MetadataError> {
-    let duration = row.duration_ms.map(|ms| Duration::from_millis(ms.into()));
+    // A stream row without a known length carries 0: that is "unknown".
+    let duration = row
+        .duration_ms
+        .filter(|&ms| ms > 0)
+        .map(|ms| Duration::from_millis(ms.into()));
     let lookup = tokio::time::timeout(
         crate::lyrics::LOOKUP_TIMEOUT,
         lrclib.find(&row.artist, &row.title, row.album.as_deref(), duration),
