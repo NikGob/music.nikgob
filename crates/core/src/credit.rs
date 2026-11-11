@@ -244,6 +244,13 @@ fn voice_opener(s: &str) -> Option<(usize, usize)> {
     None
 }
 
+/// The join phrase after a character's name in a stored voice credit:
+/// `(CV:`, `（CV：`, ` (CV: ` (the part before it is a role, the one after
+/// it the actor who voices it).
+pub fn is_voice_join(join: &str) -> bool {
+    voice_opener(join).is_some_and(|(at, _)| join[..at].trim().is_empty())
+}
+
 /// What glues voice credits together (`白(CV:A)&ジブリール(CV:B)`).
 const VOICE_SEPARATORS: &[&str] = &["&", "＆", "、", ",", "，", "/", "／"];
 
@@ -399,6 +406,11 @@ mod tests {
             assert_eq!(format!("{}{tail}", glue(&parts)), line, "{line}");
         }
         assert_eq!(split_credit("リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)")[2].0, ")、");
+        // The text after a role is its voice opener.
+        let parts = split_credit("リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)");
+        assert!(is_voice_join(&parts[1].0) && is_voice_join(&parts[3].0));
+        assert!(!is_voice_join(&parts[2].0) && !is_voice_join(&parts[0].0));
+        assert!(is_voice_join(" （CV：") && !is_voice_join(" feat. ") && !is_voice_join(")、"));
         // Brackets that are no voice credit stay in the name.
         assert_eq!(names("Kevin Penkin (composer)"), ["Kevin Penkin (composer)"]);
         assert_eq!(names("Cover (CVS)"), ["Cover (CVS)"]);

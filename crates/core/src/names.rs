@@ -157,6 +157,33 @@ pub fn is_native(name: &str) -> bool {
     width_fold(name).chars().any(|c| c.is_alphabetic() && (c as u32) >= 0x250)
 }
 
+/// Written in a script a reader of the Russian interface may not read:
+/// letters that are neither Latin (accents and modifier letters included)
+/// nor Cyrillic: kana, kanji, hangul, Greek, Arabic… Such an artist gets a
+/// Latin name shown beside its own.
+pub fn foreign_script(name: &str) -> bool {
+    width_fold(name).chars().any(|c| {
+        let k = c as u32;
+        c.is_alphabetic() && k >= 0x250 && !(0x2B0..=0x36F).contains(&k) && !(0x400..=0x52F).contains(&k) && !(0x1E00..=0x1EFF).contains(&k)
+    })
+}
+
+/// A name written in kana only as a Latin name to show: its romaji with
+/// each word capitalised (`リコ` → `Riko`, `ナナホシ` → `Nanahoshi`). `None`
+/// for anything else: kanji have no reading without a dictionary.
+pub fn romaji_name(name: &str) -> Option<String> {
+    let romaji = kana_romaji(name)?;
+    let words: Vec<String> = romaji
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
 /// Hepburn romaji of one kana (katakana folded to hiragana).
 fn romaji(c: char) -> Option<&'static str> {
     let k = c as u32;
@@ -408,6 +435,28 @@ mod tests {
         assert_eq!(kana_romaji("きゃりーぱみゅぱみゅ").as_deref(), Some("kyaripamyupamyu"));
         assert_eq!(kana_romaji("大原ゆい子"), None, "kanji");
         assert_eq!(kana_romaji("ーー"), None);
+    }
+
+    #[test]
+    fn a_romaji_name_only_for_kana() {
+        assert_eq!(romaji_name("リコ").as_deref(), Some("Riko"));
+        assert_eq!(romaji_name("ナナホシ").as_deref(), Some("Nanahoshi"));
+        assert_eq!(romaji_name("ｼﾙﾌｨｴｯﾄ").as_deref(), Some("Shirufietto"));
+        assert_eq!(romaji_name("ジブリール・ブラン").as_deref(), Some("Jiburiru Buran"));
+        assert_eq!(romaji_name("佐宗綾子"), None, "kanji");
+        assert_eq!(romaji_name("大原ゆい子"), None, "kanji with kana");
+        assert_eq!(romaji_name("YOASOBI"), None);
+        assert_eq!(romaji_name("Кино"), None);
+    }
+
+    #[test]
+    fn foreign_scripts_are_neither_latin_nor_cyrillic() {
+        for name in ["佐宗綾子", "リコ", "ヨルシカ", "아이유", "Βασίλης", "大原ゆい子 & Ohara"] {
+            assert!(foreign_script(name), "{name}");
+        }
+        for name in ["Кино", "Beyoncé", "Sigur Rós", "Zhitʼ", "Phạm Quỳnh Anh", "Ｙ Ｏ Ａ", "", "123"] {
+            assert!(!foreign_script(name), "{name}");
+        }
     }
 
     #[test]
