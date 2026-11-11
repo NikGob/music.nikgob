@@ -347,6 +347,22 @@ pub fn plain_fake(codec: &Codec, check: &CheckSummary) -> bool {
     check_counts(codec, check.made_from.as_ref()) && (check.fake(codec) || check.from_fake(codec)) && check.sure()
 }
 
+/// The file itself is lossless with a lossy file inside, and the check is
+/// sure of it (cut below [`HIGHEST_CLEAR_CUT_HZ`]): the one a user may
+/// turn into an MP3 by hand. A doubt, or a lossy file made from a fake,
+/// is not.
+pub fn mp3_inside(codec: &Codec, check: &CheckSummary) -> bool {
+    check.fake(codec) && plain_fake(codec, check)
+}
+
+/// A row's label ([`row_label`]) says what [`mp3_inside`] does: «FLAC из
+/// MP3 ~192», «FLAC из сжатого». For a list that has only the label.
+pub fn row_label_mp3_inside(label: &str) -> bool {
+    [Codec::Flac, Codec::Alac, Codec::Wav]
+        .iter()
+        .any(|c| label.strip_prefix(codec_name(c).as_str()).is_some_and(|rest| rest.starts_with(" из ")))
+}
+
 /// The full label of the quality panel and of the import's questions, with
 /// the bitrate where it says something and a doubt worded as one: «MP3 320
 /// из поддельного FLAC», «MP3 320 из FLAC, возможно поддельного», «FLAC из
@@ -583,6 +599,28 @@ mod tests {
         // A real file and an unknown one are never «возможно».
         assert_eq!(row_label(&Codec::Flac, Some(&check(Verdict::Genuine, 22_050.0, None).summary())), "FLAC");
         assert_eq!(row_label(&Codec::Flac, Some(&check(Verdict::Upsampled, 21_000.0, None).summary())), "FLAC");
+    }
+
+    /// Only a lossless file the check is sure holds an MP3 may be turned
+    /// into one by hand; its row label says so too.
+    #[test]
+    fn only_a_sure_fake_has_an_mp3_inside() {
+        let plain = check(Verdict::Transcoded, 16_100.0, None).summary();
+        assert!(mp3_inside(&Codec::Flac, &plain));
+        assert!(row_label_mp3_inside(&row_label(&Codec::Flac, Some(&plain))));
+        let maybe = check(Verdict::Transcoded, 20_186.0, None).summary();
+        assert!(!mp3_inside(&Codec::Flac, &maybe), "a doubt");
+        assert!(!row_label_mp3_inside(&row_label(&Codec::Flac, Some(&maybe))));
+        let made = check(Verdict::Transcoded, 16_100.0, Some(Codec::Flac)).summary();
+        assert!(!mp3_inside(&Codec::Mp3, &made), "an MP3 already");
+        assert!(!row_label_mp3_inside(&row_label(&Codec::Mp3, Some(&made))));
+        assert!(!row_label_mp3_inside(&label(&Codec::Mp3, Some(320), Some(&made))));
+        let real = check(Verdict::Genuine, 22_050.0, None).summary();
+        assert!(!mp3_inside(&Codec::Flac, &real));
+        assert!(!row_label_mp3_inside(&row_label(&Codec::Flac, Some(&real))));
+        assert!(!mp3_inside(&Codec::Mp3, &plain), "a lossy file's own lowpass");
+        assert!(row_label_mp3_inside(&row_label(&Codec::Wav, Some(&plain))));
+        assert!(!row_label_mp3_inside("FLACиз"));
     }
 
     #[test]
