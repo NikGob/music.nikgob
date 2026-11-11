@@ -3,16 +3,20 @@
 //! line chart and its cutoff marked. Quieter than the info above it.
 
 use egui::{Pos2, Rect, Stroke, Ui, pos2, vec2};
-use nikgob_view::{SoundDetails, SpectrumPlot};
+use nikgob_view::{Command, SoundDetails, SpectrumPlot, TrackId};
 
-use crate::{Theme, TypeRole};
+use crate::{
+    Icon, Theme, TypeRole,
+    components::{Button, Size, Style},
+};
 
 /// Height of the chart, without its axis labels.
 const CHART_H: f32 = 112.0;
 /// The chart shows this many dB below its loudest band.
 const RANGE_DB: f32 = 90.0;
 
-pub(super) fn section(ui: &mut Ui, d: &SoundDetails) {
+/// The section of `track`'s file, with what can be done about it.
+pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     ui.add_space(20.0);
     ui.label(TypeRole::TitleSmall.style().rich("Качество", s.on_surface_variant));
@@ -27,6 +31,23 @@ pub(super) fn section(ui: &mut Ui, d: &SoundDetails) {
     }
     if let Some(b) = &d.band {
         fact(ui, "Реальная полоса", b);
+    }
+    // Under the verdict: the MP3 a sure fake holds, and a better copy (a
+    // doubt gets only the search).
+    if let Some(track) = track.filter(|_| d.to_mp3 || d.better) {
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            let mp3 = Button::new(super::pages::TO_MP3).icon(Icon::Sync).style(Style::Tonal).size(Size::S);
+            if d.to_mp3 && ui.add(mp3.id_salt("quality-to-mp3")).clicked() {
+                out.push(Command::FakeToMp3(track));
+            }
+            let better = Button::new("Найти качество лучше").icon(Icon::Search).style(Style::Outlined).size(Size::S);
+            if d.better && ui.add(better.id_salt("quality-better")).clicked() {
+                out.push(Command::FindBetter(track));
+            }
+        });
+        ui.add_space(4.0);
     }
     if let Some(p) = &d.spectrum {
         ui.add_space(8.0);

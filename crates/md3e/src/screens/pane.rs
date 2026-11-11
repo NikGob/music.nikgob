@@ -680,7 +680,7 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
             }
         }
         if let Some(d) = &i.sound {
-            super::sound_quality::section(ui, d);
+            super::sound_quality::section(ui, d, i.track, out);
             ui.add_space(8.0);
         }
     });

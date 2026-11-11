@@ -1092,6 +1092,12 @@ pub struct WishlistItem {
     /// Free text for the user (why it failed, what was chosen).
     #[serde(default)]
     pub note: Option<String>,
+    /// A better copy the user asked for by hand («Найти качество лучше…»):
+    /// only what is better than this quality score counts, and a found copy
+    /// waits for the user's word whatever the prefs say. `None`: a wish, or
+    /// a better copy looked for on the schedule (better than the bar).
+    #[serde(default)]
+    pub better_than: Option<i32>,
 }
 
 impl WishlistItem {
@@ -1116,6 +1122,7 @@ impl WishlistItem {
             attempts: 0,
             next_try_at: None,
             note: None,
+            better_than: None,
         }
     }
 }

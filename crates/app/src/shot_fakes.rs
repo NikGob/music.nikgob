@@ -488,6 +488,8 @@ fn sound_quality(s: &mut ViewState, fake: bool) {
             cutoff_hz: fake.then_some(cutoff),
         }),
         pending: false,
+        to_mp3: fake,
+        better: true,
     });
 }
 

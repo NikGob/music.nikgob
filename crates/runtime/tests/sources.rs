@@ -825,3 +825,63 @@ fn a_miss_is_not_retried_soon() {
     assert_eq!(status.as_deref(), Some("Находит, но не скачивает"));
     assert!(!history(&r.rt).iter().any(|l| l.contains("не отдаёт")));
 }
+
+/// A file of `track` in `dir` the library plays: `codec`, ranked `quality`.
+fn own_file(lib: &Library, dir: &Path, track: TrackId, codec: Codec, quality: i32) -> nikgob_core::model::Source {
+    let path = dir.join(format!("own.{}", codec.as_str()));
+    write_wav(&path, 3.0);
+    let mut s = nikgob_core::model::Source::new(track, nikgob_core::model::SourceKind::LocalFile, path.to_string_lossy(), codec);
+    s.quality_score = quality;
+    let s = lib.add_source(&s).unwrap();
+    lib.set_active_source(track).unwrap();
+    s
+}
+
+/// «Найти качество лучше…» on an MP3 128: the sources find a FLAC, and it
+/// waits in «Подтверди» even though found copies may replace files by
+/// themselves; nothing downloads and the file stays.
+#[test]
+fn a_better_copy_asked_for_by_hand_waits_for_the_users_word() {
+    let lib = Library::open_in_memory().unwrap();
+    let (track, artist, title) = gruppa(&lib);
+    let prefs = Prefs { upgrade_auto: true, ..Prefs::default() };
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], prefs);
+    let mp3 = own_file(&lib, r._dir.path(), track, Codec::Mp3, 500);
+    let qobuz = FakeSource::new(SourceKey::Qobuz);
+    qobuz.offers(&artist, &title, 3_000, flac());
+    r.rt.add_source(qobuz.clone());
+    wait_for(&r.rt, "the source", |s| s.downloads.sources.iter().any(|v| v.available));
+
+    r.rt.send(Command::FindBetter(track));
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text.starts_with("Ищу качество лучше")));
+    wait_until("the copy in «Подтверди»", || wish_status(&lib, track) == Some(WishlistStatus::Confirm));
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    assert_eq!(item.origin, nikgob_core::model::WishlistOrigin::Upgrade);
+    assert_eq!(item.better_than, Some(500));
+    assert!(item.candidates_json.as_deref().is_some_and(|j| j.contains("qobuz-1")));
+    assert_eq!(*qobuz.fetched.lock().unwrap(), 0, "nothing downloads before the user's word");
+    assert_eq!(lib.active_source(track).unwrap().unwrap().id, mp3.id, "the file stays");
+}
+
+/// Nothing better than a CD FLAC: the click is answered, and the item
+/// looks on as any other (here: never, the file is good enough).
+#[test]
+fn a_better_copy_not_found_says_so() {
+    let lib = Library::open_in_memory().unwrap();
+    let (track, artist, title) = gruppa(&lib);
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+    let cd = nikgob_core::model::quality_score(&Codec::Flac, None, Some(44_100), Some(16), false);
+    own_file(&lib, r._dir.path(), track, Codec::Flac, cd);
+    let tidal = FakeSource::new(SourceKey::Tidal);
+    tidal.offers(&artist, &title, 3_000, flac());
+    r.rt.add_source(tidal.clone());
+    wait_for(&r.rt, "the source", |s| s.downloads.sources.iter().any(|v| v.available));
+
+    r.rt.send(Command::FindBetter(track));
+    wait_for(&r.rt, "the answer", |s| s.toasts.iter().any(|t| t.text.starts_with("Лучше не нашёл")));
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    assert_eq!(item.status, WishlistStatus::NoTorrent);
+    assert_eq!(item.better_than, None, "asked once");
+    assert!(*tidal.searched.lock().unwrap() >= 1);
+    assert_eq!(*tidal.fetched.lock().unwrap(), 0);
+}

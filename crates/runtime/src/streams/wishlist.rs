@@ -2320,7 +2320,7 @@ impl Worker {
 
     fn no_torrent(&mut self, id: WishlistId, tell: bool) {
         if self.is_upgrade(id) {
-            self.upgrade_none(id);
+            self.upgrade_none(id, tell);
             return;
         }
         let copy = self.lib.get_wishlist_item(id).ok().flatten().is_some_and(|i| self.copy_quality(&i).is_some());
