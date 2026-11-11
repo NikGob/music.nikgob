@@ -2007,6 +2007,9 @@ impl Worker {
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
         self.turn.lap("next");
+        // From YouTube Music while Spotify plays: its Spotify copy is
+        // looked up for the next time (before the lookups ahead: one at a time).
+        self.spotify_copy_for(e, kind);
         // What only YouTube Music may have is looked up ahead, gapless or not.
         self.resolve_ahead();
         self.turn.lap("ahead");

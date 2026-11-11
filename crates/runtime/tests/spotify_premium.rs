@@ -125,3 +125,37 @@ fn a_login_without_premium_ends_signed_out_with_the_message() {
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(sp.calls("liked_head") + sp.calls("liked"), 0, "no likes pulled");
 }
+
+#[test]
+fn a_login_switches_the_service_on() {
+    // A fresh install ships Spotify off; connecting it is turning it on.
+    let lib = Library::open_in_memory().unwrap();
+    let sp = Arc::new(FakeService::spotify().logged_out());
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib.clone(),
+            streams: vec![sp.clone() as Arc<dyn StreamService>],
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs {
+                spotify_enabled: false,
+                ..Prefs::default()
+            },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(Recorder(Arc::new(Mutex::new(Vec::new())))),
+        Arc::new(|| {}),
+    );
+    wait_for("the account views", || rt.state().accounts.len() == Service::ALL.len());
+    assert!(!account(&rt.state(), Service::Spotify).enabled);
+    rt.send(Command::StreamLogin {
+        service: Service::Spotify,
+        input: LoginInput::Browser,
+    });
+    wait_for("Spotify switched on", || {
+        let s = rt.state();
+        s.prefs.spotify_enabled && account(&s, Service::Spotify).usable
+    });
+    assert!(account(&rt.state(), Service::Spotify).audio, "it plays at once");
+}

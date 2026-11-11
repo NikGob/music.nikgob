@@ -445,3 +445,54 @@ fn a_stream_without_details_takes_the_heard_length_and_its_video_picture() {
     assert_eq!(rig.rt.state().player.duration, Some(Duration::from_millis(149_521)));
     assert_eq!(lib.get_track(track).unwrap().unwrap().duration_ms, Some(149_521));
 }
+
+#[test]
+fn a_track_from_youtube_gains_its_spotify_copy_for_the_next_play() {
+    // A song known only from YouTube Music (a radio, a search): it plays
+    // from there, and Spotify is asked for it meanwhile, by its ISRC.
+    let lib = Library::open_in_memory().unwrap();
+    let mut yt = find(&FakeService::youtube(), "yt-homogenic-3");
+    yt.isrc = Some("ZZFAK9700003".into());
+    let track = lib.upsert_stream_track(&yt).unwrap();
+    let spotify = Arc::new(FakeService::spotify());
+    let streams: Vec<Arc<dyn StreamService>> = vec![
+        spotify.clone() as Arc<dyn StreamService>,
+        Arc::new(FakeService::youtube()),
+    ];
+    let rig = Rig::start(lib.clone(), streams);
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-homogenic-3"));
+    wait_for("the Spotify copy", || {
+        lib.sources_of_track(track)
+            .unwrap()
+            .iter()
+            .any(|s| s.kind == SourceKind::Spotify && s.locator == "sp-homogenic-3")
+    });
+    assert!(spotify.calls("find_isrc") >= 1, "{:?}", spotify.all_calls());
+    // The play goes on from YouTube Music: nothing restarts it.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.asked.lock().unwrap().len(), 1);
+    // The next play is Spotify's.
+    rig.play(track);
+    assert_eq!(rig.asked(1).source, stream(Service::Spotify, "sp-homogenic-3"));
+}
+
+#[test]
+fn a_track_from_youtube_is_not_looked_up_on_a_spotify_without_sound() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib
+        .upsert_stream_track(&find(&FakeService::youtube(), "yt-homogenic-3"))
+        .unwrap();
+    let streams: Vec<Arc<dyn StreamService>> = vec![
+        Arc::new(FakeService::spotify().without_audio()),
+        Arc::new(FakeService::youtube()),
+    ];
+    let rig = Rig::start(lib.clone(), streams);
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-homogenic-3"));
+    // Spotify would find it by name: nothing joins the track.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !lib.sources_of_track(track).unwrap().iter().any(|s| s.kind == SourceKind::Spotify)
+    );
+}

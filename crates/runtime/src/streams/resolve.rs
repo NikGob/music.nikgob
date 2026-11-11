@@ -21,8 +21,10 @@
 //! While YouTube Music is off (or gives no sound) and Spotify plays, the
 //! track being played and the ones ahead are looked up on Spotify the same
 //! way instead (ISRC, then "artist title", songs only), and the hit is
-//! attached as a Spotify source. The stream analysis and saving from
-//! YouTube Music only ever ask YouTube Music.
+//! attached as a Spotify source. A track that starts from YouTube Music
+//! while Spotify plays is looked up on Spotify too, in the background: the
+//! play goes on, the next one is from Spotify. The stream analysis and
+//! saving from YouTube Music only ever ask YouTube Music.
 //!
 //! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
 //! for the pause to end, and a track that waits for its lookup (Buffering)
@@ -670,6 +672,20 @@ impl Worker {
         }
         if let Some(via) = self.play_lookup(track, Duration::ZERO) {
             self.begin_resolve_on(track, via);
+        }
+    }
+
+    /// A track started from YouTube Music while Spotify plays: when it has
+    /// no Spotify copy yet (and did not miss there lately), Spotify is
+    /// asked in the background (ISRC first), and the hit joins the same
+    /// track. This play goes on; the next one is from Spotify.
+    pub(crate) fn spotify_copy_for(&mut self, e: Entry, kind: SourceKind) {
+        if kind != SourceKind::Youtube {
+            return;
+        }
+        let ttl = self.streaming.schedule.miss_ttl;
+        if self.can_resolve_on(e.track, ttl, Service::Spotify) {
+            self.begin_resolve_on(e.track, Service::Spotify);
         }
     }
 
