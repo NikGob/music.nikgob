@@ -895,8 +895,12 @@ fn an_album_of_one_song_of_the_users_plays_that_song() {
     wait_for(&rt, "the whole album once", |s| queued(s).len() == 2);
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: true });
     wait_for(&rt, "the user's song, shuffled", |s| queued(s) == [song.id]);
+    // Without a service the instrumental cannot play: that it was tried
+    // says the whole album started from it.
     rt.send(Command::PlayRelease { id: release.id, start: Some(inst.id), shuffle: false });
-    wait_for(&rt, "the whole album from the instrumental", |s| queued(s).len() == 2);
+    wait_for(&rt, "the whole album from the instrumental", |s| s.toasts.iter().any(|t| t.text.contains("не подключён")));
+    rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the whole album once more", |s| queued(s).len() == 2);
     rt.send(Command::PlayReleaseMine { id: release.id, start: None, shuffle: false });
     wait_for(&rt, "«Мои треки»", |s| queued(s) == [song.id]);
     rt.send(Command::AddWholeAlbum { id: release.id, on: true });
@@ -964,14 +968,16 @@ fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
     wait_for(&rt, "none of the single the user's", |s| {
         s.release.as_ref().is_some_and(|r| r.card.id == release.id && r.partial && r.card.mine == Some(0))
     });
-    rt.send(Command::PlayTracks { tracks: vec![inst.id], start: 0, context: "q".into() });
-    wait_for(&rt, "something else playing", |s| queued(s) == [inst.id]);
+    // The song on its own (it has a file): a queue of another list.
+    rt.send(Command::PlayTracks { tracks: vec![song.id], start: 0, context: "q".into() });
+    wait_for(&rt, "the song on its own", |s| queued(s) == [song.id] && s.player.context.as_deref() == Some("q"));
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
     rt.send(Command::DownloadRelease(release.id));
     // Done in order: once the page loads again, both were handled.
     rt.send(Command::AddWholeAlbum { id: release.id, on: true });
     wait_for(&rt, "the single added whole", |s| s.release.as_ref().is_some_and(|r| r.card.id == release.id && !r.partial));
-    assert_eq!(queued(&rt.state()), [inst.id], "an album of none of the user's songs plays nothing");
+    assert_eq!(queued(&rt.state()), [song.id], "an album of none of the user's songs plays nothing");
+    assert_eq!(rt.state().player.context.as_deref(), Some("q"));
     assert!(rt.state().downloads.wishlist.items.is_empty(), "nor downloads anything");
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
     wait_for(&rt, "the whole single, the song left out before too", |s| queued(s).len() == 2);

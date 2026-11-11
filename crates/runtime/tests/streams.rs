@@ -332,9 +332,9 @@ fn a_copy_set_aside_is_tried_again_and_counts_once_it_plays() {
     wait_for("the copy to count again", || lib.get_source(source).unwrap().unwrap().available);
 }
 
-/// ▶ on an album the library knows one song of plays that song at once;
-/// the rest of the album joins the queue when the service tells its
-/// tracklist.
+/// «Слушать весь альбом» of an album the library knows one song of plays
+/// that song at once; the rest of the album joins the queue when the
+/// service tells its tracklist.
 #[test]
 fn an_album_known_in_part_plays_at_once_and_its_tracklist_joins_the_queue() {
     let lib = Library::open_in_memory().unwrap();
@@ -343,7 +343,9 @@ fn an_album_known_in_part_plays_at_once_and_its_tracklist_joins_the_queue() {
         .unwrap();
     let release = lib.get_track(track).unwrap().unwrap().release_id.unwrap();
     let rig = Rig::start(lib.clone(), vec![Arc::new(FakeService::youtube())]);
-    rig.rt.send(Command::PlayRelease { id: release, start: None, shuffle: false });
+    // One song of it is the user's: «Слушать весь альбом» asks for all of
+    // it (a plain «Слушать» plays that song alone).
+    rig.rt.send(Command::PlayReleaseWhole { id: release, start: None, shuffle: false });
     assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-discovery-1"));
     wait_for("the album's other songs in the queue", || rig.rt.state().queue.next.len() == 3);
     assert_eq!(rig.asked.lock().unwrap().len(), 1, "the playing song goes on");
