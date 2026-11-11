@@ -689,6 +689,10 @@ pub struct SoundDetails {
     pub spectrum: Option<SpectrumPlot>,
     /// A file not checked yet: the background check comes to it.
     pub pending: bool,
+    /// The file is lossless with an MP3 inside, surely: «Превратить в MP3».
+    pub to_mp3: bool,
+    /// A file a better copy may be looked for: «Найти качество лучше».
+    pub better: bool,
 }
 
 /// The averaged spectrum the check judged, for a simple chart.
@@ -2991,6 +2995,17 @@ pub enum Command {
     WrongFile(nikgob_core::model::TrackId),
     /// Takes [`Self::WrongFile`] back: the file plays again.
     UndoWrongFile(nikgob_core::model::TrackId),
+    /// «Найти качество лучше…» of a track with a file: the download
+    /// sources look for a copy better than it, which waits in «Подтверди»;
+    /// a track with no file goes to «Хочу скачать».
+    FindBetter(nikgob_core::model::TrackId),
+    /// «Превратить в MP3» of a track whose lossless file surely holds an
+    /// MP3: its MP3 with the tags, cover and lyrics takes its place, the
+    /// original goes to the Trash.
+    FakeToMp3(nikgob_core::model::TrackId),
+    /// Takes [`Self::FakeToMp3`] back: the original comes back from the
+    /// Trash and plays again.
+    UndoFakeToMp3(nikgob_core::model::TrackId),
     /// «Разные песни» on a track of one song on two albums
     /// ([`ViewState::also_on`]): it is another song than the tracks it was
     /// linked with, and never linked with them again.
