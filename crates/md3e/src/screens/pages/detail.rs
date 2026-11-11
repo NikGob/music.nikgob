@@ -887,8 +887,10 @@ pub fn mix(
                 covers.push(c.uri());
             }
         }
-        let n = l.tracks.len() as u64;
-        let total: std::time::Duration = l.tracks.iter().filter_map(|t| t.duration).sum();
+        // «С новым»: the new songs it plays are its rows too.
+        let new_rows: &[nikgob_view::StreamTrackRow] = if with_new { &l.new_tracks } else { &[] };
+        let n = (l.tracks.len() + new_rows.len()) as u64;
+        let total: std::time::Duration = l.tracks.iter().filter_map(|t| t.duration).chain(new_rows.iter().filter_map(|t| t.duration)).sum();
         header_with(
             ui,
             size,
@@ -938,7 +940,7 @@ pub fn mix(
             }
         }
         ui.add_space(16.0);
-        if l.tracks.is_empty() {
+        if l.tracks.is_empty() && new_rows.is_empty() {
             let body = if local_only {
                 "Включено «Только скачанное», а скачанных треков для него нет."
             } else {
@@ -949,7 +951,13 @@ pub fn mix(
         }
         let ids = l.tracks.iter().map(|t| t.id).collect();
         let from = PlayFrom::Tracks(ids, l.context());
-        widgets::track_list_ext(ui, "mix", &l.tracks, Lead::Cover, &from, TrackListOpts::default(), state, pages, out).or(nav)
+        let nav = widgets::track_list_ext(ui, "mix", &l.tracks, Lead::Cover, &from, TrackListOpts::default(), state, pages, out).or(nav);
+        if new_rows.is_empty() {
+            return nav;
+        }
+        // The new songs under its own, in the order they play.
+        let from = super::streams::StreamFrom::Rows(l.context());
+        super::streams::track_rows(ui, "mix-new", new_rows, false, &from, state, pages, out).or(nav)
     });
     if world.is_none() {
         super::home::blend_sheet(ui.ctx(), state, out);

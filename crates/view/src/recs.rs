@@ -156,6 +156,10 @@ pub struct LaneCard {
     pub new_cover: Option<Cover>,
     /// What it plays, in order.
     pub tracks: Vec<crate::TrackRow>,
+    /// «С новым»: the new songs of the services it mixes in, in the order
+    /// they play between its tracks.
+    #[serde(default)]
+    pub new_tracks: Vec<crate::StreamTrackRow>,
     /// The taste profile «Смешать с…» starts from (a profile's mix, «Фон»).
     pub blend_base: Option<u32>,
     /// The name the queue says when the title alone is not enough (a

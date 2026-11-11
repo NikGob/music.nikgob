@@ -144,6 +144,9 @@ pub(crate) struct Snapshot {
     pub profiles: Arc<TrackProfiles>,
     /// Whether each catalog track suits the background ([`background_fit`]).
     pub background: Vec<bool>,
+    /// Songs the graph of similar music found beside the library's that it
+    /// lacks, new indeed, the strongest first ([`graph::finds`]).
+    pub graph_new: Vec<graph::GraphFind>,
 }
 
 /// The taste profiles as the home reads them.
@@ -295,6 +298,10 @@ struct DailyCache {
     /// changes.
     #[serde(default)]
     local_only: bool,
+    /// When the new music it took was found ([`BuildInput::new_at`]): a
+    /// later pass picks it again.
+    #[serde(default)]
+    new_at: UnixMs,
 }
 
 /// The daylist of a part of the day as the library's cache keeps it.
@@ -310,6 +317,15 @@ struct DaylistCache {
     /// [`DailyCache::local_only`].
     #[serde(default)]
     local_only: bool,
+    /// [`DailyCache::new_at`].
+    #[serde(default)]
+    new_at: UnixMs,
+}
+
+/// A day's pick kept in the cache still stands: the new music it took is
+/// as new as the build's (under «Миксы только из скачанного» none counts).
+fn new_kept(kept_at: UnixMs, new_at: UnixMs, local_only: bool) -> bool {
+    local_only || kept_at >= new_at
 }
 
 /// The worker's recommendation state.
@@ -606,6 +622,14 @@ struct BuildInput {
     local_only: bool,
     /// New music for the daily mix (the discoveries).
     new: Vec<StreamTrack>,
+    /// When the pass that found them ended (0: none): the day's «Твой
+    /// микс» and daylist of older finds are picked again.
+    new_at: UnixMs,
+    /// Every discovery the pass kept, best first: «С новым» of the cards
+    /// draws from them all (and from the graph's finds).
+    new_pool: Vec<StreamTrack>,
+    /// Where each of them came from, by [`stream_song_key`].
+    new_sources: HashMap<String, nikgob_recs::Source>,
     /// The services' suggestions, of the services switched on.
     suggested: Vec<suggest::Kept>,
     /// They changed: the discoveries are ranked again after this build.
@@ -963,7 +987,15 @@ fn read_parts(
     // The artists beyond the library the graph links to the loved ones:
     // their new music counts as a little known.
     let artist_affinity = graph::with_votes(artist_affinity, &similar.votes, &|a| (model.taste.artist_affinity(a).max(0.0) / 3.0).tanh());
+    // The songs the graph found beside the library's: new music, by how
+    // loved the tracks whose radios hold them are.
+    let graph_new = graph::finds(
+        &similar.beyond,
+        &|t| is_new(&filter, t) && nikgob_recs::junk(t, None).is_none(),
+        &|t| model.position(t).map(|i| (model.taste.affinity_at(i).max(0.0) / 3.0).tanh()),
+    );
     let mut snap = Snapshot {
+        graph_new,
         background: Vec::new(),
         profiles: Arc::new(TrackProfiles::from_model(&model)),
         new_vectors,
@@ -1259,6 +1291,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
                 && !input.refresh_daily
                 && (c.history || !snap.model.taste.has_history())
                 && c.local_only == input.local_only
+                && new_kept(c.new_at, input.new_at, input.local_only)
         });
     let (picks, streams) = match cached {
         Some(c) => (c.picks, c.streams),
@@ -1285,6 +1318,7 @@ fn build_home(snap: &Snapshot, input: &BuildInput, tiles_input: &nikgob_recs::Ti
                 streams: streams.clone(),
                 history: snap.model.taste.has_history(),
                 local_only: input.local_only,
+                new_at: input.new_at,
             };
             if let Ok(json) = serde_json::to_string(&cache)
                 && let Err(e) = lib.cache_put(DAILY_KEY, input.now, &json)
@@ -1379,7 +1413,7 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
     let history = snap.model.taste.has_history();
     let (part, day, key) = daylist_key(input.now, input.utc_offset_min);
     let cached = cache_read::<DaylistCache>(lib, DAYLIST_KEY)
-        .filter(|c| c.key == key && !input.refresh_daylist && (c.history || !history) && c.local_only == input.local_only);
+        .filter(|c| c.key == key && !input.refresh_daylist && (c.history || !history) && c.local_only == input.local_only && new_kept(c.new_at, input.new_at, input.local_only));
     let c = match cached {
         Some(c) => c,
         None => {
@@ -1404,6 +1438,7 @@ fn build_daylist(snap: &Snapshot, input: &BuildInput) -> (String, Option<Daylist
                 streams,
                 history,
                 local_only: input.local_only,
+                new_at: input.new_at,
             };
             cache_write(lib, DAYLIST_KEY, input.now, &c);
             c
@@ -1441,6 +1476,8 @@ struct LaneParts {
     new_cover: Option<String>,
     /// Its tracks, read when the parts are resolved.
     rows: Vec<TrackId>,
+    /// «С новым»: the new songs it mixes in, in the order they play.
+    new_rows: Vec<StreamTrack>,
     blend_base: Option<u32>,
     why: Option<String>,
 }
@@ -1535,6 +1572,15 @@ impl HomeParts {
                 }
                 let new_cover = l.new.iter().find_map(|t| t.cover_url.clone());
                 let rows = l.tracks.clone();
+                // What «Слушать» plays of them: those that find a place.
+                let new_rows: Vec<StreamTrack> = l
+                    .picks(true)
+                    .into_iter()
+                    .filter_map(|p| match p.item {
+                        Item::Stream(r) => l.new.iter().find(|t| t.id == r).cloned(),
+                        Item::Track(_) => None,
+                    })
+                    .collect();
                 LaneParts {
                     key: l.key,
                     title: l.title.clone(),
@@ -1544,6 +1590,7 @@ impl HomeParts {
                     covers: l.covers.clone(),
                     new_cover,
                     rows,
+                    new_rows,
                     blend_base: l.blend_base,
                     why: l.why.clone(),
                 }
@@ -1601,6 +1648,11 @@ impl HomeParts {
         };
         let mix_rows = rows(self.mix.as_slice());
         let lane_rows: Vec<Vec<nikgob_library::TrackRow>> = self.lanes.iter().map(|l| rows(l.rows.as_slice())).collect();
+        let lane_new: Vec<Vec<v::StreamTrackRow>> = self
+            .lanes
+            .iter()
+            .map(|l| l.new_rows.iter().map(|t| crate::streams::stream_row_of(&lib, t, lib.track_for_stream(t).ok().flatten())).collect())
+            .collect();
         let mut covers = |c: Vec<CoverRef>| -> Vec<v::Cover> {
             c.into_iter()
                 .filter_map(|c| match c {
@@ -1665,7 +1717,8 @@ impl HomeParts {
             .into_iter()
             .zip(lane_covers)
             .zip(lane_rows)
-            .map(|((l, covers), rows)| v::LaneCard {
+            .zip(lane_new)
+            .map(|(((l, covers), rows), new_tracks)| v::LaneCard {
                 key: l.key,
                 title: l.title,
                 short_titles: l.short,
@@ -1674,6 +1727,7 @@ impl HomeParts {
                 covers,
                 new_cover: l.new_cover.map(v::Cover::web),
                 tracks: rows.iter().map(|t| res.track(t)).collect(),
+                new_tracks,
                 blend_base: l.blend_base,
                 queue: None,
                 why: l.why,
@@ -1780,6 +1834,7 @@ pub(crate) fn only_downloaded(home: &mut v::HomeView) {
         l.tracks.retain(|t| t.has_local);
         l.new_artists.clear();
         l.new_cover = None;
+        l.new_tracks.clear();
     }
     for w in &mut home.worlds {
         w.cards.retain(|c| !matches!(c.go, v::WorldGo::Stream(_)));
@@ -1913,6 +1968,9 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         new_share: new_share(prefs, v::RadioKind::Mix),
         local_only: prefs.mixes_downloaded_only,
         new: discoveries.clone(),
+        new_at: 0,
+        new_pool: discoveries.clone(),
+        new_sources: HashMap::new(),
         suggested: suggest::cached(lib),
         rerank: false,
         refresh_mix: None,
@@ -1976,6 +2034,9 @@ pub struct ModelPreview {
     history: TasteInput,
     /// The graph of similar music it was built with.
     graph: nikgob_recs::GraphInput,
+    /// The last pass's discoveries and where each came from.
+    new: Vec<StreamTrack>,
+    new_sources: HashMap<String, nikgob_recs::Source>,
 }
 
 impl ModelPreview {
@@ -1988,7 +2049,10 @@ impl ModelPreview {
         let index = SoundIndex::default();
         crate::analysis::load_index(lib, &index);
         let (_, utc_offset_min) = local_day();
-        let extra = ReadExtra::of(Vec::new(), prefs);
+        // The last pass's finds: their analysed previews come with the
+        // snapshot.
+        let (new, new_sources) = discover::cached_pool(lib);
+        let extra = ReadExtra::of(new.clone(), prefs);
         let (snap, _, _, history) = read_parts(lib, &index, recs_now(), utc_offset_min, &[], false, &extra)?;
         let graph = if extra.graph {
             let rows = lib.rec_tracks().map_err(|e| e.to_string())?;
@@ -1996,15 +2060,28 @@ impl ModelPreview {
         } else {
             nikgob_recs::GraphInput::default()
         };
-        Ok(Self { snap, history, graph })
+        Ok(Self { snap, history, graph, new, new_sources })
     }
 
     /// What the snapshot was built of, for the offline evaluation
     /// ([`nikgob_recs::eval`]): the catalog, its sound and song types, the
-    /// history and the graph.
+    /// history and the graph, and the new songs of the services the cards
+    /// of «Миксы для тебя» could take (the discoveries and the graph's
+    /// finds, weighed as a build weighs them).
     pub fn dataset(&self, name: &str) -> nikgob_recs::eval::Dataset {
         let graph = (!self.graph.is_empty()).then_some(&self.graph);
-        nikgob_recs::eval::Dataset::of(name, &self.snap.catalog, &self.snap.index, &self.snap.types, &self.history, graph)
+        let mut d = nikgob_recs::eval::Dataset::of(name, &self.snap.catalog, &self.snap.index, &self.snap.types, &self.history, graph);
+        let snap = &self.snap;
+        d.new = lanes::candidates(snap, &self.new, &self.new_sources, &nikgob_recs::NewLog::default(), 1)
+            .into_iter()
+            .map(|c| nikgob_recs::eval::DNew {
+                vector: snap.new_vectors.get(&stream_song_key(&c.track)).map(|v| v.to_vec()),
+                near: c.near.iter().map(|&i| snap.model.id(i)).collect(),
+                weight: c.weight,
+                track: c.track,
+            })
+            .collect();
+        d
     }
 
     /// The edges of tracks and of artists of the graph of similar music in
@@ -2447,6 +2524,8 @@ impl Worker {
     }
 
     fn recs_build(&mut self) {
+        // The last pass's finds, before the run's first build takes them.
+        self.discover_load();
         let (day, utc_offset_min) = local_day();
         let prefs = self.state.read().prefs.clone();
         self.recs.blends.retain(|b| b.0 == day);
@@ -2463,6 +2542,9 @@ impl Worker {
             new_share: new_share(&prefs, v::RadioKind::Mix),
             local_only: prefs.mixes_downloaded_only,
             new: self.discoveries(),
+            new_at: self.discoveries_at(),
+            new_pool: self.discoveries_all(),
+            new_sources: self.discovery_sources(),
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
             refresh_mix: self.recs.refresh_mix.take(),
@@ -2470,7 +2552,7 @@ impl Worker {
             blends,
             session: self.recs.session.clone(),
             mix_prefs: lanes::MixPrefs::of(&prefs),
-            extra: ReadExtra::of(self.discoveries(), &prefs),
+            extra: ReadExtra::of(self.discoveries_all(), &prefs),
             new_log: {
                 self.new_log_load();
                 self.recs.newlog.log.clone()
@@ -2747,6 +2829,7 @@ impl Worker {
                 covers,
                 new_cover: None,
                 tracks: rows.iter().map(|t| self.res.track(t)).collect(),
+                new_tracks: Vec::new(),
                 blend_base: None,
                 queue: Some(queue),
                 why,
@@ -3017,6 +3100,69 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «Твой микс» and the daylist kept for the day are picked again once
+    /// a later pass found new music (not under «Только скачанное», where
+    /// they take none).
+    #[test]
+    fn a_later_pass_redraws_the_days_picks() {
+        assert!(new_kept(500, 500, false));
+        assert!(new_kept(600, 500, false));
+        assert!(!new_kept(0, 500, false), "kept before any pass");
+        assert!(!new_kept(400, 500, false));
+        assert!(new_kept(0, 500, true));
+        assert!(new_kept(0, 0, false), "no pass yet");
+    }
+
+    /// The page of a mix lists the new songs «Слушать» plays, in their
+    /// order, and only those that find a place between loved ones.
+    #[test]
+    fn a_mix_page_lists_its_new_songs() {
+        use nikgob_core::streaming::Service;
+        let new: Vec<StreamTrack> = (0..3).map(|k| StreamTrack::new(RemoteId::new(Service::Youtube, format!("v{k}")), format!("New {k}"))).collect();
+        let lane = lanes::LaneHome {
+            key: v::MixKey::Calm,
+            title: "Спокойное".into(),
+            short: Vec::new(),
+            tracks: (0..12).map(|_| TrackId::new()).collect(),
+            // Two gaps between loved ones only: two of the three play.
+            anchors: (0..12).map(|k| !matches!(k, 0 | 1 | 4 | 5 | 6 | 7 | 10 | 11)).collect(),
+            artists: Vec::new(),
+            covers: Vec::new(),
+            new,
+            blend_base: None,
+            why: None,
+        };
+        let home = RecHome {
+            day: String::new(),
+            epoch: String::new(),
+            daily: Vec::new(),
+            daily_streams: HashMap::new(),
+            daily_covers: Vec::new(),
+            history: true,
+            moods: Vec::new(),
+            styles: Vec::new(),
+            daylist_key: String::new(),
+            daylist: None,
+            tiles: Vec::new(),
+            lanes: vec![lane],
+            blend_profiles: Vec::new(),
+            top: Vec::new(),
+        };
+        let parts = HomeParts::of(Some(&home), Vec::new(), Vec::new(), false, false);
+        let played: Vec<RemoteId> = home.lanes[0]
+            .picks(true)
+            .into_iter()
+            .filter_map(|p| match p.item {
+                Item::Stream(r) => Some(r),
+                Item::Track(_) => None,
+            })
+            .collect();
+        assert_eq!(played.len(), 2, "{played:?}");
+        let rows: Vec<RemoteId> = parts.lanes[0].new_rows.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(rows, played);
+    }
+
     /// Cards of one row lead with different pictures while they have them.
     #[test]
     fn the_cards_of_a_row_lead_with_different_covers() {

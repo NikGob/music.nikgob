@@ -205,6 +205,12 @@ const WORLD_SHARE: f32 = 0.25;
 pub const UNHEARD_SHARE: f32 = 0.15;
 /// …of «Фон».
 const BG_UNHEARD_SHARE: f32 = 0.1;
+/// «Преимущественно новые песни» ([`Settings::unheard`]): a mix takes at
+/// least this share of songs never played while it has them — «Больше
+/// новых», «Только новые» (each between two loved ones: not much more
+/// fits).
+pub const UNHEARD_MORE: f32 = 0.25;
+pub const UNHEARD_MOST: f32 = 0.4;
 /// The calm side is the loved songs below this percentile of their energy,
 /// the lively one above `1 −` it.
 const SIDE: f32 = 0.45;
@@ -421,11 +427,23 @@ pub struct Settings {
     pub names: NameStyle,
     /// «Не предлагать этот микс»: the moments left out.
     pub hidden: Vec<MixKey>,
+    /// «Преимущественно новые песни»: the share of songs never played a
+    /// mix takes at least while it has them (0: only what their value
+    /// brings, at most [`UNHEARD_SHARE`]). «Фон» and «Любимые» keep theirs.
+    pub unheard: f32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { profiles: true, everything: true, moods: true, background_cards: crate::profiles::BG_CARDS, names: NameStyle::Kind, hidden: Vec::new() }
+        Self {
+            profiles: true,
+            everything: true,
+            moods: true,
+            background_cards: crate::profiles::BG_CARDS,
+            names: NameStyle::Kind,
+            hidden: Vec::new(),
+            unheard: 0.0,
+        }
     }
 }
 
@@ -526,6 +544,13 @@ struct Pool {
     len: usize,
     max_ms: u64,
     unheard: f32,
+    /// The share of songs never played it takes at least, while it has
+    /// them ([`Settings::unheard`]).
+    floor: f32,
+    /// What the songs heard now and the old ones' share leave empty goes to
+    /// more of the never played ([`Builder::unheard_and_stale`]); not once a
+    /// draw showed how many of them find a place.
+    widen: bool,
     /// Songs of each profile («Всё вперемешку», a blend).
     quota: Option<HashMap<usize, usize>>,
     /// Joined in blocks of this many of a profile (0: one per profile's
@@ -597,6 +622,15 @@ fn last_heard(recs: &Recs<'_>, model: &UserModel, n: usize) -> Vec<Option<UnixMs
             [recs.taste.last_played_at(i), s.last_start, s.last_complete, liked].into_iter().flatten().max()
         })
         .collect()
+}
+
+/// The track at `i` was never played here and is not loved otherwise (a
+/// like, a playlist, a play imported from a service, the library's prior):
+/// what a mix counts as never played (its rule, the offline evaluation's
+/// «unheard»).
+pub fn never_heard(model: &UserModel, i: usize) -> bool {
+    let s = &model.tracks[i];
+    s.starts == 0 && s.aff_long(model.now()) <= 0.0 && model.taste.affinity_at(i) <= 0.0 && model.prior_mass(i) <= 0.0
 }
 
 /// How much of a love last heard `age` before the user's latest listening
@@ -942,6 +976,8 @@ impl<'a> Builder<'a> {
                     if round > 0 {
                         let fit = order.iter().filter(|&&i| self.unheard(i)).count();
                         left.unheard = fit as f32 / pool.len.max(1) as f32;
+                        left.floor = left.floor.min(left.unheard);
+                        left.widen = false;
                     }
                 }
                 if order.len() < MIN_SONGS {
@@ -967,13 +1003,25 @@ impl<'a> Builder<'a> {
 
     /// What `key` draws from and how.
     fn pool(&self, key: MixKey) -> Option<Pool> {
-        let plain =
-            |tracks: Vec<usize>| Pool { tracks, len: MIX_LEN, max_ms: MIX_MS, unheard: UNHEARD_SHARE, quota: None, blocks: None, arc: Arc::of(self.part), cross: false, stale: STALE_SHARE };
+        let floor = self.settings.unheard.clamp(0.0, 1.0);
+        let plain = |tracks: Vec<usize>| Pool {
+            tracks,
+            len: MIX_LEN,
+            max_ms: MIX_MS,
+            unheard: UNHEARD_SHARE,
+            floor,
+            widen: true,
+            quota: None,
+            blocks: None,
+            arc: Arc::of(self.part),
+            cross: false,
+            stale: STALE_SHARE,
+        };
         let pool = match key {
             MixKey::Profile(k) => plain(self.profile_tracks(self.profile_index(k)?)),
             MixKey::Liked => {
                 let liked: Vec<usize> = (0..self.value.len()).filter(|&i| self.pickable(i) && self.liked(i)).collect();
-                Pool { len: LIKED_LEN, max_ms: LIKED_MS, cross: true, stale: LIKED_STALE_SHARE, ..plain(liked) }
+                Pool { len: LIKED_LEN, max_ms: LIKED_MS, cross: true, stale: LIKED_STALE_SHARE, floor: 0.0, ..plain(liked) }
             }
             MixKey::Part(p) => {
                 let part = DayPart::ALL.get(usize::from(p)).copied()?;
@@ -1048,7 +1096,7 @@ impl<'a> Builder<'a> {
                     suited.retain(|x| (lo..=hi).contains(&x.1));
                 }
                 let tracks: Vec<usize> = background_cards(&suited, usize::from(cards)).get(usize::from(card))?.clone();
-                Pool { tracks, len: BG_LEN, max_ms: BG_MS, unheard: BG_UNHEARD_SHARE, quota: None, blocks: None, arc: Arc::Focus, cross: false, stale: STALE_SHARE }
+                Pool { tracks, len: BG_LEN, max_ms: BG_MS, unheard: BG_UNHEARD_SHARE, floor: 0.0, widen: false, quota: None, blocks: None, arc: Arc::Focus, cross: false, stale: STALE_SHARE }
             }
             MixKey::Blend(keys) => {
                 let sides: Vec<usize> = keys.iter().filter(|k| **k != 0).filter_map(|k| self.profile_index(*k)).collect();
@@ -1482,6 +1530,10 @@ impl<'a> Builder<'a> {
             v
         };
         let n = pool.len;
+        // «Преимущественно новые песни»: this many never played at least.
+        let floor = if self.history && pool.floor > 0.0 { ((n as f32 * pool.floor).ceil() as usize).min(n) } else { 0 };
+        let liked = key == MixKey::Liked;
+        let (unheard, stale) = self.unheard_and_stale(pool, n, floor, liked);
         let caps = Caps {
             artist: n.div_ceil(3).max(1),
             // Two in ten would allow six of 28, too tight a weave for an order.
@@ -1489,15 +1541,28 @@ impl<'a> Builder<'a> {
             // One world (a franchise) is a quarter at most, also of a pool
             // of it alone: that makes no mix.
             world: ((n as f32 * WORLD_SHARE).ceil() as usize).max(2),
-            unheard: if self.history { ((n as f32 * pool.unheard).ceil() as usize).max(1) } else { usize::MAX },
-            // Old songs: their share, or what the songs loved and heard
-            // now leave empty (never the place of a song nobody loves).
-            stale: {
-                let heard_now = pool.tracks.iter().filter(|&&i| !self.stale[i] && self.a[i] > 0.0).count();
-                ((n as f32 * pool.stale).ceil() as usize).max(n.saturating_sub(heard_now))
-            },
+            unheard,
+            stale,
         };
         let mut pick = Picking::new(self, caps, pool.quota.clone(), pool.max_ms);
+        // The floor first: the best never played by value (the nearest the
+        // loved), the epoch before's after the others; the sandwich of the
+        // order still decides which of them stay.
+        if floor > 0 {
+            let mut fresh: Vec<(f32, usize)> = pool.tracks.iter().filter(|&&i| self.unheard(i)).map(|&i| (value(i), i)).collect();
+            fresh.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            for strict in [true, false] {
+                for &(_, i) in &fresh {
+                    if pick.unheard >= floor || pick.full(n) {
+                        break;
+                    }
+                    if strict && away.contains(&i) {
+                        continue;
+                    }
+                    pick.take(i);
+                }
+            }
+        }
         // The core: drawn from the best by value (Gumbel keys over a third
         // of their spread), the epoch before's less likely; then the rest of
         // the pool by value, for what the rules held back.
@@ -1560,12 +1625,16 @@ impl<'a> Builder<'a> {
                 pick.take(i);
             }
         }
-        // Still short (the rules held back what is heard now): old songs
-        // fill in rather than leave the mix short.
-        if !pick.full(n) && pick.caps.stale != usize::MAX {
+        // Still short (the rules held back what is heard now, or nothing
+        // else is there): old songs fill in up to a mix's least length
+        // rather than leave no mix, past their share no further — an
+        // imported history or a library liked at once is no listening of
+        // now. «Любимые» to its length.
+        let least = if liked { n } else { MIN_SONGS.min(n) };
+        if pick.len() < least && !pick.full(n) && pick.caps.stale != usize::MAX {
             pick.caps.stale = usize::MAX;
             for &(_, i) in &rest {
-                if pick.full(n) {
+                if pick.len() >= least || pick.full(n) {
                     break;
                 }
                 pick.take(i);
@@ -1646,6 +1715,33 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+    }
+
+    /// How many songs never played and how many old songs a mix of `n` from
+    /// `pool` takes at most. The never played: their share, at least the
+    /// `floor`, and what the songs heard now and the old ones' share leave
+    /// empty while there are more of them. The old ones: their share, also
+    /// when nearly everything loved is old (a history imported from a
+    /// service, a library liked at once): what is left empty then stays so
+    /// down to a mix's least length ([`Self::compose`]). «Любимые» are the
+    /// likes whatever their age: its old songs fill what the others leave.
+    fn unheard_and_stale(&self, pool: &Pool, n: usize, floor: usize, liked: bool) -> (usize, usize) {
+        let quarter = ((n as f32 * pool.stale).ceil() as usize).min(n);
+        let heard_now = pool.tracks.iter().filter(|&&i| !self.stale[i] && self.a[i] > 0.0).count();
+        if liked {
+            let unheard = if self.history { ((n as f32 * pool.unheard).ceil() as usize).max(1) } else { usize::MAX };
+            return (unheard, quarter.max(n.saturating_sub(heard_now)));
+        }
+        if !self.history {
+            return (usize::MAX, quarter);
+        }
+        let cap = ((n as f32 * pool.unheard).ceil() as usize).max(1).max(floor);
+        let never = pool.tracks.iter().filter(|&&i| self.unheard(i)).count();
+        if !pool.widen {
+            return (cap, quarter);
+        }
+        let empty = n.saturating_sub(heard_now + quarter + never.min(cap));
+        (cap + empty.min(never.saturating_sub(cap)), quarter)
     }
 
     /// Familiar and loved: above the lowest quarter of the mix's familiar
@@ -2748,6 +2844,37 @@ mod tests {
         assert!(seen > 0, "the mixes bring something never played");
     }
 
+    /// «Преимущественно новые песни»: the mixes take more songs never
+    /// played, still each between two loved familiar ones.
+    #[test]
+    fn more_new_songs_when_asked() {
+        let l = lib(40, &[]);
+        let m = model(&l, T0);
+        let count = |settings: Settings| {
+            let recs = Recs::new(&l.catalog, &m.taste, &l.index).with_model(&m);
+            let no = |_: usize| false;
+            let b = Builder::new(&recs, &m, &|_| true, &no, m.now().div_euclid(DAY_MS) as u64, DayPart::Day, Live::default(), settings);
+            let (mixes, _) = b.lineup(&Kept::default());
+            let (mut unheard, mut all) = (0usize, 0usize);
+            for mix in &mixes {
+                for (k, &i) in mix.tracks.iter().enumerate() {
+                    all += 1;
+                    if m.tracks[i].starts > 0 {
+                        continue;
+                    }
+                    unheard += 1;
+                    assert!(k >= 2 && k + 1 < mix.tracks.len(), "{}: unheard at {k}", mix.title);
+                    assert!(mix.anchors[k - 1] && mix.anchors[k + 1], "{}: unheard at {k} not between loved ones", mix.title);
+                }
+            }
+            (unheard, all)
+        };
+        let (usual, _) = count(Settings::default());
+        let (more, all) = count(Settings { unheard: UNHEARD_MOST, ..Settings::default() });
+        assert!(more > usual, "{more} never played asked for, {usual} as usual");
+        assert!(more as f32 >= UNHEARD_SHARE * all as f32, "{more} of {all}");
+    }
+
     /// Later in the epoch, after more plays, the lineup, its order and the
     /// songs of each mix in theirs are the same.
     #[test]
@@ -2934,6 +3061,64 @@ mod tests {
                 assert!(!b.stale_at(i) && b.fresh_at(i) == 1.0, "{i}");
             }
         });
+    }
+
+    /// Everything loved of a kind is old (heard half a year before what is
+    /// heard now) and the kind has songs never played: the old songs keep
+    /// their quarter, the never played take the room (each still between
+    /// two loved ones, the mix shorter if need be); «Любимые» are the likes
+    /// whatever their age.
+    #[test]
+    fn old_songs_keep_their_quarter_when_all_loved_is_old() {
+        let per = 110usize;
+        let fav = per * 3 / 5;
+        let mut extra = Vec::new();
+        // Russian favourites heard now, Japanese ones half a year ago.
+        for d in 0..20usize {
+            for k in 0..6usize {
+                let x = (d * 6 + k) % fav;
+                extra.push((T0 - (d as i64 + 1) * DAY_MS + k as i64 * 600_000, x));
+                extra.push((T0 - (200 + d as i64) * DAY_MS + k as i64 * 600_000, per + x));
+            }
+        }
+        let l = lib(0, &extra);
+        let m = model(&l, T0);
+        let ja = MixKey::Kind(lane_code(LaneKey::Sung(Lang::Japanese)));
+        let quarter = (STALE_SHARE * MIX_LEN as f32).ceil() as usize;
+        with(&l, &m, DayPart::Day, |b| {
+            let old: HashSet<usize> = (per..per + fav).filter_map(|i| m.position(tid(i as u128))).collect();
+            assert!(old.iter().all(|&i| b.stale_at(i)), "half a year before what is heard now is old");
+            let pool = b.pool(ja).expect("a pool of the kind");
+            let (unheard, stale) = b.unheard_and_stale(&pool, MIX_LEN, 0, false);
+            assert_eq!(stale, quarter, "the quarter holds");
+            assert!(unheard > (UNHEARD_SHARE * MIX_LEN as f32).ceil() as usize, "the never played take the room: {unheard}");
+            let (_, liked) = b.unheard_and_stale(&pool, MIX_LEN, 0, true);
+            assert_eq!(liked, MIX_LEN, "«Любимые» take their old likes");
+            if let Some(mix) = b.mix(ja, &Kept::default()) {
+                let n = mix.tracks.iter().filter(|i| old.contains(i)).count();
+                assert!(n <= quarter.max(MIN_SONGS), "{n} old songs of {}", mix.tracks.len());
+            }
+        });
+    }
+
+    /// A fresh import of another service's history (plays of the last
+    /// days) does not take the taste profiles' shares over beside the
+    /// user's own plays: what is listened to here leads.
+    #[test]
+    fn a_fresh_import_does_not_lead_the_shares() {
+        let per = 110usize;
+        let mut l = lib(40, &[]);
+        for k in 0..240usize {
+            let at = T0 - 10 * DAY_MS + k as i64 * 2_000_000;
+            let i = (per + k % (per * 3 / 5)) as u128;
+            l.input.events.push(Play { origin: Some(EventOrigin::Import), ..Play::new(tid(i), at, EventType::Start, Some(0)) });
+            l.input.events.push(Play { origin: Some(EventOrigin::Import), ..Play::new(tid(i), at + 180_000, EventType::Complete, Some(180_000)) });
+        }
+        l.input.events.sort_by_key(|p| p.ts);
+        let m = model(&l, T0);
+        let share = |lane: LaneKey| -> f32 { m.profiles.list.iter().zip(&m.profile_share).filter(|(p, _)| p.lane == lane).map(|(_, s)| *s).sum() };
+        let (ru, ja) = (share(LaneKey::Sung(Lang::Russian)), share(LaneKey::Sung(Lang::Japanese)));
+        assert!(ru > ja, "the own listening leads: ru {ru}, ja {ja}");
     }
 
     /// The day's mixes: one «Микс дня» of every profile listened to now,

@@ -888,6 +888,7 @@ mod tests {
             covers: Vec::new(),
             new_cover: None,
             tracks: vec![song(true), song(false)],
+            new_tracks: Vec::new(),
             blend_base: None,
             queue: None,
             why: None,

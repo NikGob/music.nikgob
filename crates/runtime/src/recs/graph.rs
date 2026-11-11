@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{ArtistId, TrackId};
-use nikgob_core::streaming::{EntityKind, SearchKind, Service, StreamArtist, StreamError, StreamService, StreamTrack};
+use nikgob_core::streaming::{ArtistRef, EntityKind, RemoteId, SearchKind, Service, StreamArtist, StreamError, StreamService, StreamTrack};
 use nikgob_library::{GraphEntry, GraphFetch, GraphRow, GraphTag, Library, now_ms};
 use nikgob_metadata::{Metadata, MetadataError};
 use nikgob_recs::graph::{Edge, GraphInput, GraphSource, rank_weight};
@@ -366,6 +366,54 @@ pub(crate) struct Resolved {
     /// Similar artists the library lacks, by [`artist_key`]: the library's
     /// artists that point at them, by the edge's weight.
     pub votes: HashMap<String, Vec<(ArtistId, f32)>>,
+    /// Songs the library lacks in YouTube Music's radios of its tracks:
+    /// the track, the song (its video id there) and the edge's weight.
+    /// New music ([`finds`]).
+    pub beyond: Vec<(TrackId, GraphEntry, f32)>,
+}
+
+/// The songs of [`Resolved::beyond`] kept at most, the strongest.
+pub(crate) const GRAPH_FINDS: usize = 300;
+/// What a song of the radio of a track nobody loves counts, of what one
+/// of a loved track does.
+const UNLOVED: f32 = 0.25;
+
+/// A song the graph found beside the library's that the library lacks
+/// (docs/recs-graph.md §2): new music the services can play at once.
+#[derive(Clone, Debug)]
+pub(crate) struct GraphFind {
+    pub track: StreamTrack,
+    /// The library's tracks whose radios hold it, by the edge's weight.
+    pub near: Vec<(TrackId, f32)>,
+    /// The weights of its edges, each by how loved its track is.
+    pub score: f32,
+}
+
+/// The songs of `beyond` new indeed (`new`: not in the library, not
+/// disliked, no junk), each once (by [`stream_song_key`]), scored by the
+/// weights of their edges to the catalog's tracks, each times how loved
+/// its track is (`love`, 0…1; `None`: not the catalog's); the best
+/// [`GRAPH_FINDS`].
+pub(crate) fn finds(beyond: &[(TrackId, GraphEntry, f32)], new: &dyn Fn(&StreamTrack) -> bool, love: &dyn Fn(TrackId) -> Option<f32>) -> Vec<GraphFind> {
+    let mut by_song: HashMap<String, GraphFind> = HashMap::new();
+    for (from, e, w) in beyond {
+        let Some(id) = e.remote_id.as_ref().filter(|id| !id.is_empty()) else { continue };
+        if e.artist.trim().is_empty() || e.name.trim().is_empty() {
+            continue;
+        }
+        let Some(l) = love(*from) else { continue };
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id.clone()), e.name.clone());
+        t.artists.push(ArtistRef::new(None, e.artist.clone()));
+        let f = by_song.entry(stream_song_key(&t)).or_insert_with(|| GraphFind { track: t, near: Vec::new(), score: 0.0 });
+        f.score += w * (UNLOVED + (1.0 - UNLOVED) * l.clamp(0.0, 1.0));
+        if !f.near.iter().any(|n| n.0 == *from) {
+            f.near.push((*from, *w));
+        }
+    }
+    let mut out: Vec<GraphFind> = by_song.into_values().filter(|f| new(&f.track)).collect();
+    out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.track.id.id.cmp(&b.track.id.id)));
+    out.truncate(GRAPH_FINDS);
+    out
 }
 
 /// The library's ways to name its own tracks and artists.
@@ -415,8 +463,13 @@ pub(crate) fn resolve(rows: &[GraphRow], tags: &[GraphTag], names: &Names) -> Re
         match (r.subject_kind.as_str(), r.entry.kind.as_str()) {
             ("track", "track") => {
                 let (Some(source), Ok(from)) = (source, r.subject_id.parse::<TrackId>()) else { continue };
-                if let Some(to) = names.track(&r.source, &r.entry) {
-                    out.input.tracks.push(Edge { from, to, rank: r.rank, of: r.total, source });
+                match names.track(&r.source, &r.entry) {
+                    Some(to) => out.input.tracks.push(Edge { from, to, rank: r.rank, of: r.total, source }),
+                    // A song the library lacks with its video: new music.
+                    None if source == GraphSource::YoutubeRadio && r.entry.remote_id.is_some() => {
+                        out.beyond.push((from, r.entry.clone(), rank_weight(r.rank, r.total) * source.trust()));
+                    }
+                    None => {}
                 }
             }
             ("artist", "artist") => {
@@ -471,12 +524,13 @@ pub(crate) fn read(lib: &Library, rows: &[nikgob_library::RecTrack], artist_keys
     }
     let resolved = resolve(&edges, &tags, &names);
     log::info!(
-        "graph: {} track edges, {} artist edges, {} tags, {} popular, {} artists beyond the library",
+        "graph: {} track edges, {} artist edges, {} tags, {} popular, {} artists and {} songs beyond the library",
         resolved.input.tracks.len(),
         resolved.input.artists.len(),
         resolved.input.tags.len(),
         resolved.input.popular.len(),
-        resolved.votes.len()
+        resolved.votes.len(),
+        resolved.beyond.len()
     );
     resolved
 }
@@ -992,6 +1046,42 @@ mod tests {
         let known = with_votes(HashMap::new(), &r.votes, &|x| if x == a(1) { 1.0 } else { 0.0 });
         let v = known[&artist_key("New Band")];
         assert!(v > 0.0 && v <= VOTE_CAP);
+    }
+
+    /// A song of YouTube Music's radio of a track that the library lacks
+    /// is new music with its video: one find for the radios that hold it,
+    /// the radios of loved tracks first; what is not new is left out.
+    #[test]
+    fn songs_beyond_the_library_are_new_music() {
+        let t = |i: u128| TrackId(Uuid::from_u128(i));
+        let track = |name: &str, artist: &str, remote: Option<&str>| GraphEntry { kind: "track".into(), name: name.into(), artist: artist.into(), remote_id: remote.map(Into::into) };
+        let (s1, s2) = (t(1).to_string(), t(2).to_string());
+        let rows = vec![
+            row("track", &s1, "youtube_radio", 0, track("New Song", "New Band", Some("vid1"))),
+            row("track", &s2, "youtube_radio", 3, track("New Song", "New Band", Some("vid1"))),
+            row("track", &s1, "youtube_radio", 1, track("Other", "Band", Some("vid2"))),
+            row("track", &s1, "youtube_radio", 2, track("Karaoke", "Band", Some("vid3"))),
+            row("track", &s1, "listenbrainz", 0, track("By mbid", "Band", Some("mb-1"))),
+            row("track", &s1, "youtube_radio", 4, track("No id", "Band", None)),
+        ];
+        let r = resolve(&rows, &[], &Names::default());
+        assert!(r.input.tracks.is_empty());
+        assert_eq!(r.beyond.len(), 4, "YouTube Music's songs with a video only");
+        let love = |id: TrackId| {
+            if id == t(1) {
+                Some(1.0)
+            } else if id == t(2) {
+                Some(0.0)
+            } else {
+                None
+            }
+        };
+        let found = finds(&r.beyond, &|s: &StreamTrack| s.title != "Karaoke", &love);
+        let titles: Vec<&str> = found.iter().map(|f| f.track.title.as_str()).collect();
+        assert_eq!(titles, ["New Song", "Other"], "two radios hold the first");
+        assert_eq!(found[0].near.len(), 2);
+        assert_eq!(found[0].track.id, RemoteId::new(Service::Youtube, "vid1"));
+        assert_eq!(found[0].track.artists[0].name, "New Band");
     }
 
     #[test]
