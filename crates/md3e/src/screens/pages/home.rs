@@ -15,7 +15,7 @@
 
 use egui::{Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    Command, HomeView, LaneCard, MixCard, MixId, PlaylistCard, Route, ShelfAlbum, Shortcut, Status,
+    Command, HomeRow, HomeView, LaneCard, MixCard, MixId, PlaylistCard, Route, ShelfAlbum, Shortcut, Status,
     StreamAlbumCard, StreamPage, StreamTrackRow, TileKind, TrackRow, ViewState,
 };
 
@@ -603,7 +603,7 @@ fn mix_row(
         live,
         bleed: 0.0,
     };
-    row::show(ui, grid, at, |ui, i, cell| {
+    let near = row::show(ui, grid, at, |ui, i, cell| {
         changes.card(ui, i, cell, refresh::place(cell, grid.left, pitch), |ui, old| {
             match old {
                 Some(MixItem::Liked(p)) => {
@@ -626,7 +626,21 @@ fn mix_row(
             nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
         });
     });
+    if near {
+        ask_more(ui.ctx(), HomeRow::Mixes, first + lanes.len(), out);
+    }
     nav
+}
+
+/// A row scrolled near its end showing `n` cards asks for more of it,
+/// once for each length: a row whose source has no more stays as it is
+/// and asks no more.
+fn ask_more(ctx: &egui::Context, row: HomeRow, n: usize, out: &mut Vec<Command>) {
+    let id = Id::new(("home-row-more", row));
+    if ctx.data(|d| d.get_temp::<usize>(id)) != Some(n) {
+        ctx.data_mut(|d| d.insert_temp(id, n));
+        out.push(Command::HomeMore(row));
+    }
 }
 
 /// A card of the row of mixes as it was ([`refresh`]).
@@ -754,7 +768,7 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
         let keys = rows.chunks(SONG_LINES).map(|c| refresh::key(c.iter().map(|t| (t.id, &t.title, &t.cover)).collect::<Vec<_>>())).collect();
         let changes = refresh::track(ui.ctx(), Id::new(("home-row", "again")), live, keys, || rows.chunks(SONG_LINES).map(<[TrackRow]>::to_vec).collect());
         let pitch = grid.span(12 / per) + GUTTER;
-        row::show(ui, grid, at, |ui, column, cell| {
+        let near = row::show(ui, grid, at, |ui, column, cell| {
             changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<TrackRow>>| {
                 if let Some(old) = old {
                     for (k, t) in old.iter().enumerate() {
@@ -774,6 +788,9 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
                 }
             });
         });
+        if near {
+            ask_more(ui.ctx(), HomeRow::ListenAgain, rows.len(), out);
+        }
     });
     nav
 }
@@ -920,7 +937,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
         let keys = rows.chunks(SONG_LINES).map(|c| refresh::key(c.iter().map(|t| (&t.remote, &t.title, &t.cover_url)).collect::<Vec<_>>())).collect();
         let changes = refresh::track(ui.ctx(), Id::new(("home-row", "new")), live, keys, || rows.chunks(SONG_LINES).map(<[StreamTrackRow]>::to_vec).collect());
         let pitch = grid.span(12 / per) + GUTTER;
-        row::show(ui, grid, at, |ui, column, cell| {
+        let near = row::show(ui, grid, at, |ui, column, cell| {
             changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<StreamTrackRow>>| {
                 if let Some(old) = old {
                     for (k, t) in old.iter().enumerate() {
@@ -950,6 +967,9 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                 }
             });
         });
+        if near {
+            ask_more(ui.ctx(), HomeRow::New, rows.len(), out);
+        }
     });
     nav
 }

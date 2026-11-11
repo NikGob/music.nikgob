@@ -174,10 +174,12 @@ impl Scroll {
         self.offset < max - 0.5
     }
 
-    /// Less than [`NEAR_END`] views of cards are left to the right of the
-    /// view `view` wide (a row that does not scroll is never near it).
+    /// The row was scrolled, and less than [`NEAR_END`] views of cards
+    /// are left to the right of the view `view` wide (a row that does not
+    /// scroll, or that stands at its start, is never near it: the page asks
+    /// for more only when the user goes for it).
     pub fn near_end(&self, max: f32, view: f32) -> bool {
-        max > 0.0 && max - self.offset < NEAR_END * view
+        max > 0.0 && self.offset > 0.5 && max - self.offset < NEAR_END * view
     }
 
     /// The button went down on the row at `x`.
@@ -587,5 +589,10 @@ mod tests {
         s.offset = max;
         assert!(s.near_end(max, VIEW));
         assert!(!Scroll::default().near_end(0.0, VIEW), "a row that fits asks for nothing");
+        // A row a few cards longer than the view: near its end once it was
+        // scrolled, not at its start.
+        let short = Scroll::max(9, PITCH, 16.0, VIEW);
+        assert!(!Scroll::default().near_end(short, VIEW));
+        assert!(Scroll { offset: PITCH, ..Scroll::default() }.near_end(short, VIEW));
     }
 }

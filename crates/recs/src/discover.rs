@@ -621,6 +621,18 @@ fn model_score(t: &StreamTrack, key: &str, via_seeds: &HashMap<SeedRef, f32>, se
 
 /// [`rank_discoveries`] scored with the user model too (`scoring`).
 pub fn rank_discoveries_with(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &DiscoveryFilter, scoring: Option<&NewScoring<'_>>) -> Vec<Discovery> {
+    rank_discoveries_upto(seeds, finds, filter, scoring, DISCOVERIES)
+}
+
+/// [`rank_discoveries_with`] keeping the best `keep` (the home shows the
+/// first [`DISCOVERIES`] and more of them at the end of its row).
+pub fn rank_discoveries_upto(
+    seeds: &DiscoverySeeds,
+    finds: &[SeedFinds],
+    filter: &DiscoveryFilter,
+    scoring: Option<&NewScoring<'_>>,
+    keep: usize,
+) -> Vec<Discovery> {
     let all_tracks: Vec<&StreamTrack> = finds.iter().flat_map(|f| f.tracks.iter()).collect();
     let mut by_isrc: HashMap<String, String> = HashMap::new();
     let max_aff = seeds
@@ -722,7 +734,7 @@ pub fn rank_discoveries_with(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter
         && !sc.model.profile_share.is_empty()
     {
         let items: Vec<((Discovery, usize), Option<usize>)> = out.iter().map(|d| (d.clone(), d.0.profile)).collect();
-        let n = items.len().min(DISCOVERIES * 2);
+        let n = items.len().min(keep * 2);
         out = crate::regions::spread(&items, &sc.model.profile_share, n);
     }
 
@@ -738,8 +750,8 @@ pub fn rank_discoveries_with(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter
             pool.push(d);
         }
     }
-    let mut result: Vec<Discovery> = Vec::with_capacity(DISCOVERIES);
-    while result.len() < DISCOVERIES && !pool.is_empty() {
+    let mut result: Vec<Discovery> = Vec::with_capacity(keep);
+    while result.len() < keep && !pool.is_empty() {
         let recent: Vec<String> = result
             .iter()
             .rev()
@@ -844,6 +856,19 @@ mod tests {
         assert!(!keys.contains(&"Ignored"));
         assert!(out.iter().any(|d| d.track.title == "filler" && d.new_artist));
         assert!(!out[0].new_artist);
+    }
+
+    #[test]
+    fn more_discoveries_keep_the_first_ones_in_their_order() {
+        let tracks: Vec<StreamTrack> = (0..60).map(|k| st(Service::Youtube, &format!("t{k}"), &format!("Song {k}"), &format!("Artist {k}"))).collect();
+        let finds = vec![SeedFinds { seed: SeedRef::Artist(aid(1)), tracks }];
+        let filter = DiscoveryFilter::default();
+        let first = rank_discoveries(&seeds(), &finds, &filter);
+        assert_eq!(first.len(), DISCOVERIES);
+        let more = rank_discoveries_upto(&seeds(), &finds, &filter, None, 2 * DISCOVERIES);
+        assert_eq!(more.len(), 2 * DISCOVERIES);
+        let titles = |d: &[Discovery]| d.iter().map(|d| d.track.title.clone()).collect::<Vec<_>>();
+        assert_eq!(titles(&more[..DISCOVERIES]), titles(&first));
     }
 
     #[test]

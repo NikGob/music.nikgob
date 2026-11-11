@@ -69,7 +69,7 @@ use crate::quiet::lower_priority;
 use crate::import::Internal;
 
 pub(crate) use radio::RadioSave;
-pub(crate) use discover::DiscoverInput;
+pub(crate) use discover::{DiscoverInput, HOME_NEW_MORE};
 pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
 
 /// Plays after which the taste is built again.
@@ -99,6 +99,8 @@ const COVER_CANDIDATES: usize = 8;
 const MOOD_COVER_POOL: usize = 60;
 /// The weights learnt online are written at most this often.
 const KEEP_WEIGHTS_EVERY: Duration = Duration::from_secs(30);
+/// «Миксы для тебя» gets this many more cards at its row's end.
+const ROW_MORE: usize = 6;
 
 /// `rec_feedback` target kinds beyond the library's `track` and `artist`:
 /// a song of the services by [`song_key`], an artist of the services by
@@ -339,6 +341,9 @@ pub(crate) struct RecsState {
     /// «Другой состав»: the next build draws this mix of «Миксы для тебя»
     /// again.
     refresh_mix: Option<v::MixKey>,
+    /// Cards of «Миксы для тебя» asked for past its ten (the row scrolled
+    /// to its end, [`Worker::recs_more_mixes`]).
+    row_more: usize,
     /// The blends made, with the day they are for: they stand first in
     /// «Миксы для тебя» until its end.
     blends: Vec<(String, v::MixKey)>,
@@ -399,6 +404,7 @@ impl RecsState {
             refresh_daylist: false,
             pending_play: None,
             refresh_mix: None,
+            row_more: 0,
             blends: Vec::new(),
             radio: radio::RadioState::default(),
             discover: discover::DiscoverState::default(),
@@ -606,6 +612,8 @@ struct BuildInput {
     rerank: bool,
     /// [`RecsState::refresh_mix`].
     refresh_mix: Option<v::MixKey>,
+    /// [`RecsState::row_more`].
+    row_more: usize,
     /// The blends made today.
     blends: Vec<v::MixKey>,
     /// The session of the moment: the order of the mixes follows it.
@@ -1908,6 +1916,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         suggested: suggest::cached(lib),
         rerank: false,
         refresh_mix: None,
+        row_more: 0,
         blends: Vec::new(),
         session: Session::default(),
         mix_prefs: lanes::MixPrefs::of(prefs),
@@ -2244,6 +2253,22 @@ impl Worker {
         self.toast(format!("Не буду предлагать «{}»", m.title), Some(("Отменить".into(), Command::SetPref(v::PrefPatch::ShowMix(m.key)))));
     }
 
+    /// «Миксы для тебя» scrolled to its end: [`ROW_MORE`] more cards, built
+    /// now, while the last build filled the row it was asked for (else
+    /// there are no more).
+    pub(crate) fn recs_more_mixes(&mut self) {
+        let Some(home) = self.recs.home.as_ref() else { return };
+        let shown = home.lanes.iter().filter(|l| l.key != v::MixKey::OnRepeat).count();
+        if shown < nikgob_recs::mixes::ROW_MIXES + self.recs.row_more {
+            return;
+        }
+        self.recs.row_more += ROW_MORE;
+        self.recs_dirty(Duration::ZERO);
+        if !self.recs.building {
+            self.recs_build();
+        }
+    }
+
     /// A build is due after `after` (sooner if one is due already).
     pub(crate) fn recs_dirty(&mut self, after: Duration) {
         let at = Instant::now() + after;
@@ -2441,6 +2466,7 @@ impl Worker {
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
             refresh_mix: self.recs.refresh_mix.take(),
+            row_more: self.recs.row_more,
             blends,
             session: self.recs.session.clone(),
             mix_prefs: lanes::MixPrefs::of(&prefs),

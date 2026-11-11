@@ -50,7 +50,7 @@ const AGAIN_POWER: f64 = 1.5;
 /// What the epochs showed, in the library's cache.
 const SHOWN_KEY: &str = "home.shown";
 /// «Слушать снова»: songs kept, at most this many of one artist.
-const LISTEN_AGAIN: usize = 12;
+pub(crate) const LISTEN_AGAIN: usize = 12;
 const PER_ARTIST: usize = 2;
 /// A favourite comes back after this many days without a play (two weeks
 /// once the history is a year long).
@@ -227,6 +227,9 @@ pub struct Visit {
     pub profiles: Option<std::sync::Arc<crate::recs::TrackProfiles>>,
     /// The home's epoch (none: nothing kept, the seed 0).
     pub epoch: Epoch,
+    /// Songs of «Слушать снова» asked for past [`LISTEN_AGAIN`] (its row
+    /// scrolled to the end): the epoch's draw goes on.
+    pub again_more: usize,
 }
 
 impl Visit {
@@ -240,6 +243,7 @@ impl Visit {
             sound: None,
             profiles: None,
             epoch: Epoch::default(),
+            again_more: 0,
         }
     }
 
@@ -317,6 +321,9 @@ pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
     let exposure = Exposure::of(if ours { &shown[1..] } else { &shown[..] });
     let shelved: HashSet<ReleaseId> = from_library.iter().take(SHORTCUTS_NARROW).map(|a| a.0.release.id).collect();
     let draw = |exposure: &Exposure| shortcuts(lib, &f, &releases, &places, visit, history, &shelved, exposure);
+    let again_n = LISTEN_AGAIN + visit.again_more;
+    // The songs the epoch keeps, when more were drawn for it now.
+    let mut grown: Option<Vec<TrackId>> = None;
     let (shortcuts, listen_again) = match &kept {
         Some(k) => {
             let mut sc: Vec<(Key, ShortcutRef)> = k.shortcuts.iter().filter_map(|key| Some((*key, places.get(*key)?))).collect();
@@ -327,11 +334,30 @@ pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
                 sc.extend(more.into_iter().take(k.shortcuts.len() - sc.len()));
             }
             let fits = |t: &TrackId| f.rows.get(t).is_some_and(|r| r.in_library && (r.has_local || !visit.local_only));
-            let again = k.again.iter().filter(|t| fits(t)).filter_map(|t| lib.get_track_row(*t).ok().flatten()).collect();
+            let mut again: Vec<TrackRow> = k.again.iter().filter(|t| fits(t)).filter_map(|t| lib.get_track_row(*t).ok().flatten()).collect();
+            if k.again.len() < again_n {
+                // More asked for: the epoch's draw goes on past what it
+                // showed, which stays as it was.
+                let had: HashSet<TrackId> = k.again.iter().copied().collect();
+                let more: Vec<TrackRow> =
+                    listen_again(lib, &f, visit, &exposure, again_n).into_iter().filter(|t| !had.contains(&t.id)).take(again_n - k.again.len()).collect();
+                if !more.is_empty() {
+                    grown = Some(k.again.iter().copied().chain(more.iter().map(|t| t.id)).collect());
+                    again.extend(more);
+                }
+            }
             (sc, again)
         }
-        None => (draw(&exposure), listen_again(lib, &f, visit, &exposure)),
+        None => (draw(&exposure), listen_again(lib, &f, visit, &exposure, again_n)),
     };
+    if let (Some(k), Some(again)) = (&kept, grown) {
+        shown[0] = Shown { again, ..k.clone() };
+        if let Ok(json) = serde_json::to_string(&shown)
+            && let Err(e) = lib.cache_put(SHOWN_KEY, visit.now, &json)
+        {
+            log::warn!("home: keeping what it shows: {e}");
+        }
+    }
     if keyed && kept.is_none() {
         let now = Shown {
             epoch: visit.epoch.key.clone(),
@@ -595,7 +621,7 @@ fn offered(f: &Facts, places: &Places<'_>, visit: &Visit, shelved: &HashSet<Rele
 /// showed less likely ([`SHOWN`]); two of one artist at most, spread over
 /// the listener's taste profiles by their shares (each active one at least
 /// once, [`nikgob_recs::regions::spread`]).
-fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure) -> Vec<TrackRow> {
+fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure, limit: usize) -> Vec<TrackRow> {
     let first = f.starts.first().map_or(visit.now, |s| s.0);
     let days = if visit.now - first >= 365 * DAY_MS { AGAIN_DAYS_LONG } else { AGAIN_DAYS };
     let night_now = is_night(visit.now, visit.utc_offset_min);
@@ -638,7 +664,7 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure) ->
     let mut songs = HashSet::new();
     let mut eligible: Vec<(TrackId, Option<usize>)> = Vec::new();
     for t in drawn {
-        if eligible.len() == LISTEN_AGAIN * 4 {
+        if eligible.len() == limit * 4 {
             break;
         }
         let Some(row) = f.rows.get(&t) else { continue };
@@ -650,8 +676,8 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure) ->
         eligible.push((t, visit.profiles.as_ref().and_then(|p| p.of.get(&t).copied())));
     }
     let picked: Vec<TrackId> = match &visit.profiles {
-        Some(p) => nikgob_recs::regions::spread(&eligible, &p.shares, LISTEN_AGAIN),
-        None => eligible.into_iter().take(LISTEN_AGAIN).map(|e| e.0).collect(),
+        Some(p) => nikgob_recs::regions::spread(&eligible, &p.shares, limit),
+        None => eligible.into_iter().take(limit).map(|e| e.0).collect(),
     };
     picked.into_iter().filter_map(|t| lib.get_track_row(t).ok().flatten()).collect()
 }
@@ -1739,6 +1765,40 @@ mod tests {
 
     fn picks(h: &HomeV2) -> (Vec<String>, Vec<TrackId>) {
         (h.shortcuts.iter().map(sc_key).collect(), h.listen_again.iter().map(|t| t.id).collect())
+    }
+
+    /// «Слушать снова» scrolled to its end: the epoch's draw goes on after
+    /// the songs it showed, which stay where they were, and the epoch
+    /// keeps the longer row.
+    #[test]
+    fn more_of_listen_again_comes_after_what_the_epoch_shows() {
+        let lib = Library::open_in_memory().unwrap();
+        let ids = synth(&lib, 12, 2, 6);
+        let now = 400 * DAY_MS + 13 * 3_600_000;
+        let mut k = 0i64;
+        for artist in &ids[4..10] {
+            for round in 0..4 {
+                for t in &artist[0] {
+                    k += 1;
+                    play(&lib, *t, now - 60 * DAY_MS + round * DAY_MS - k * 1000);
+                }
+            }
+        }
+        for artist in &ids[..10] {
+            lib.like(artist[0][5]).unwrap();
+        }
+        let profiles = one_profile(&lib);
+        let visit = Visit { now, utc_offset_min: 0, epoch: Epoch::of(1, now, 0), profiles: Some(profiles), ..Visit::default() };
+        let again: Vec<TrackId> = build(&lib, &visit).listen_again.iter().map(|t| t.id).collect();
+        assert_eq!(again.len(), LISTEN_AGAIN, "{again:?}");
+        let more = Visit { again_more: 6, ..visit.clone() };
+        let grown: Vec<TrackId> = build(&lib, &more).listen_again.iter().map(|t| t.id).collect();
+        assert_eq!(&grown[..LISTEN_AGAIN], &again[..], "the songs shown stay where they were");
+        assert!(grown.len() > LISTEN_AGAIN && grown.len() <= LISTEN_AGAIN + 6, "{grown:?}");
+        assert_eq!(grown.iter().collect::<HashSet<_>>().len(), grown.len(), "no song twice");
+        // The next build of the epoch keeps the longer row.
+        let next: Vec<TrackId> = build(&lib, &visit).listen_again.iter().map(|t| t.id).collect();
+        assert_eq!(next, grown);
     }
 
     /// An omnivore with a history: twelve artists of two albums; four of

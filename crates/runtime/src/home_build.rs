@@ -49,6 +49,38 @@ const KEEP_EVERY: Duration = Duration::from_secs(20);
 const KEPT_VERSION: u32 = 1;
 /// The kept page's file, beside the prefs.
 const KEPT_FILE: &str = "home.json";
+/// «Слушать снова» gets this many more songs at its row's end.
+const AGAIN_MORE: usize = 12;
+
+/// What the rows of the page were asked for past their own length (each
+/// scrolled to its end, [`v::Command::HomeMore`]), for this run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct More {
+    /// Songs of «Слушать снова».
+    pub(crate) again: usize,
+    /// Songs of «Новое для тебя».
+    pub(crate) new: usize,
+}
+
+impl More {
+    /// The row `row` was scrolled to its end showing `shown` of the
+    /// `source` its source has (`None`: it does not know before it draws):
+    /// true when that asks for more of it now. A row that shows less than
+    /// it was asked for has no more.
+    fn ask(&mut self, row: v::HomeRow, shown: usize, source: Option<usize>) -> bool {
+        let (field, base, step) = match row {
+            v::HomeRow::ListenAgain => (&mut self.again, crate::home_v2::LISTEN_AGAIN, AGAIN_MORE),
+            v::HomeRow::New => (&mut self.new, nikgob_recs::discover::DISCOVERIES, crate::recs::HOME_NEW_MORE),
+            v::HomeRow::Mixes => return false,
+        };
+        let asked = base + *field;
+        if shown < asked || source.is_some_and(|n| n <= asked) {
+            return false;
+        }
+        *field += step;
+        true
+    }
+}
 
 /// What a build of the page is asked for, gathered on the worker.
 pub(crate) struct Job {
@@ -150,6 +182,8 @@ pub(crate) struct HomeBuild {
     came: u64,
     /// The input generation (see the module docs).
     generation: u64,
+    /// More of a row asked for.
+    pub(crate) more: More,
     /// The changes of the shown page made while builds were on their way,
     /// each with the generation it came at.
     patches: Vec<(u64, Patch)>,
@@ -182,6 +216,7 @@ impl HomeBuild {
             asked: 0,
             came: 0,
             generation: 0,
+            more: More::default(),
             patches: Vec::new(),
             keep: prefs.map(|p| p.with_file_name(KEPT_FILE)),
             kept_at: None,
@@ -301,12 +336,14 @@ impl Worker {
     /// Asks the builder for the whole page (`full`) or for the
     /// recommendations' parts on the page as it is.
     pub(crate) fn ask_home(&mut self, full: bool) {
+        let mut visit = self.visit();
+        visit.again_more = self.home_build.more.again;
         let job = Job {
             seq: self.home_build.asked + 1,
             generation: self.home_build.generation,
             full,
             mixes: self.snapshot().is_some(),
-            visit: self.visit(),
+            visit,
             parts: self.recs_home_parts(),
             discover: self.discover_input(),
         };
@@ -378,6 +415,33 @@ impl Worker {
             self.ask_home(done.full);
         } else if !waiting {
             self.keep_home(false);
+        }
+    }
+
+    /// A row of the page was scrolled near its end: more of it where its
+    /// source has more («Слушать снова» draws on, «Новое для тебя» shows
+    /// more of the pass's discoveries, «Миксы для тебя» builds the cards
+    /// its ten left out), built off the loop as any page.
+    pub(crate) fn home_more(&mut self, row: v::HomeRow) {
+        let (again, new) = {
+            let s = self.state.read();
+            (s.home.listen_again.len(), s.home.discover.len())
+        };
+        match row {
+            v::HomeRow::Mixes => self.recs_more_mixes(),
+            v::HomeRow::ListenAgain => {
+                if self.home_build.more.ask(row, again, None) {
+                    log::debug!("home: more of «Слушать снова» ({} songs)", crate::home_v2::LISTEN_AGAIN + self.home_build.more.again);
+                    self.ask_home(true);
+                }
+            }
+            v::HomeRow::New => {
+                let kept = self.discoveries_kept();
+                if self.home_build.more.ask(row, new, Some(kept)) {
+                    log::debug!("home: more of «Новое для тебя» ({kept} kept)");
+                    self.ask_home(false);
+                }
+            }
         }
     }
 
@@ -477,6 +541,29 @@ mod tests {
             parts: HomeParts::of(None, Vec::new(), Vec::new(), false, false),
             discover: DiscoverInput::default(),
         })
+    }
+
+    #[test]
+    fn a_row_gets_more_while_its_source_has_more() {
+        let again = crate::home_v2::LISTEN_AGAIN;
+        let new = nikgob_recs::discover::DISCOVERIES;
+        let mut more = More::default();
+        // «Слушать снова» showing all it was asked for: more.
+        assert!(more.ask(v::HomeRow::ListenAgain, again, None));
+        assert_eq!(more.again, AGAIN_MORE);
+        // Asked again before the page came, or the draw had no more: no.
+        assert!(!more.ask(v::HomeRow::ListenAgain, again, None));
+        assert!(!more.ask(v::HomeRow::ListenAgain, again + 3, None));
+        assert!(more.ask(v::HomeRow::ListenAgain, again + AGAIN_MORE, None));
+        // «Новое для тебя»: only while the pass kept more than is shown.
+        assert!(!more.ask(v::HomeRow::New, new, Some(new)), "the pass kept no more");
+        assert!(more.ask(v::HomeRow::New, new, Some(new + 1)));
+        assert_eq!(more.new, crate::recs::HOME_NEW_MORE);
+        // Disliked songs make the row shorter than it was asked for: no.
+        assert!(!more.ask(v::HomeRow::New, new + 2, Some(3 * new)));
+        // The mixes are the recommendations' to count.
+        assert!(!more.ask(v::HomeRow::Mixes, 100, Some(1000)));
+        assert_eq!(more, More { again: 2 * AGAIN_MORE, new: crate::recs::HOME_NEW_MORE });
     }
 
     #[test]
