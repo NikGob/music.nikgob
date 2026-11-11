@@ -201,9 +201,9 @@ mod tests {
     #[test]
     fn causes_are_short_once_each_and_fit_a_csv_column() {
         let all = [
-            cause("crates\md3e\src\components\anim.rs", 44, ""),
+            cause(r"crates\md3e\src\components\anim.rs", 44, ""),
             cause("/home/u/.cargo/git/egui/crates/egui/src/context.rs", 12, "pointer moved, again"),
-            cause("crates\md3e\src\components\anim.rs", 44, ""),
+            cause(r"crates\md3e\src\components\anim.rs", 44, ""),
             cause("main.rs", 7, ""),
         ];
         assert_eq!(causes(&all), "components/anim.rs:44 src/context.rs:12(pointer_moved__again) main.rs:7");
