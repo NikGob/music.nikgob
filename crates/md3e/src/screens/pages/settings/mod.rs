@@ -11,9 +11,11 @@
 //! under the pointer at once (the option under the pointer shown before it
 //! is picked) and restores the frame the pointer leaves the rows.
 //!
-//! Every change is sent as a whole new `Prefs` (the recommendations' rows
-//! and the presets as their patches); Ctrl+Z steps back through this
-//! visit's changes.
+//! Every change is sent as an edit of the page's copy of the prefs
+//! ([`PrefPatch::Edit`]: only the fields it changed reach the prefs; the
+//! recommendations' rows and the presets as their own patches), and the
+//! page keeps showing it until the runtime has it ([`Pending`]); Ctrl+Z
+//! steps back through this visit's changes.
 
 mod dev;
 mod downloads;
@@ -63,6 +65,41 @@ pub(crate) struct Memory {
     held: bool,
     /// The mode just picked, until the prefs bring it back.
     deep_sent: Option<bool>,
+    /// The page's changes the runtime has not shown yet.
+    pending: Option<Pending>,
+}
+
+/// What the page changed and sent, laid over the runtime's prefs until
+/// they have it: the runtime applies commands on its own thread and is
+/// often some frames behind (a slider's drag sends a change a frame), and
+/// without this a slider let go of sprang back to the old value and came
+/// back to the new one only later, and the next change was made on the old
+/// prefs.
+struct Pending {
+    /// The runtime's prefs the page drew on when it made the change.
+    before: Prefs,
+    /// The page's prefs after it.
+    after: Prefs,
+    /// When it was last added to.
+    at: f64,
+}
+
+/// Seconds a change waits for the runtime to show it at most: one it
+/// stores otherwise (a value it corrects) is the runtime's after that.
+const PENDING_S: f64 = 3.0;
+
+/// The prefs the page shows: the runtime's `now` with the page's own
+/// changes on their way laid over them; those the runtime has (or that
+/// waited [`PENDING_S`]) are let go of.
+fn with_pending(mem: &mut Memory, now: &Prefs, t: f64) -> Prefs {
+    let Some(pending) = &mem.pending else { return now.clone() };
+    let mut shown = now.clone();
+    shown.merge_edit(&pending.before, &pending.after);
+    if shown == *now || t - pending.at > PENDING_S {
+        mem.pending = None;
+        return now.clone();
+    }
+    shown
 }
 
 /// What the stage was last asked to show for a row.
@@ -220,7 +257,9 @@ pub(super) fn page(
     if let Some(y) = restore {
         area = area.vertical_scroll_offset(y);
     }
-    let mut p: Prefs = state.prefs.clone();
+    // The page's own changes the runtime has not shown yet stay on it.
+    let shown = with_pending(&mut pages.settings_memory, &state.prefs, anim::now(&ctx));
+    let mut p: Prefs = shown.clone();
     let before = p.clone();
     let o = area.show(&mut rui, |ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
@@ -258,14 +297,18 @@ pub(super) fn page(
     let changed = !patches.is_empty() || p != patched || !sent.is_empty();
     out.extend(patches.into_iter().map(Command::SetPref));
     if p != patched {
-        out.push(Command::SetPrefs(Box::new(p.clone())));
+        out.push(Command::SetPref(PrefPatch::Edit { before: Box::new(patched.clone()), after: Box::new(p.clone()) }));
     }
-    // After the whole prefs, so they do not undo them.
+    if p != before {
+        // Shown as sent until the runtime has it.
+        pages.settings_memory.pending = Some(Pending { before: state.prefs.clone(), after: p.clone(), at: anim::now(&ctx) });
+    }
+    // After the page's edit, so it does not undo them.
     out.extend(sent.into_iter().map(Command::SetPref));
     if let Some(d) = picked_mode {
         out.push(Command::SetPref(PrefPatch::SettingsDeep(d)));
     }
-    undo(&ctx, state, &mut pages.settings_memory, changed, out);
+    undo(&ctx, &shown, &mut pages.settings_memory, changed, out);
 
     if let (Some(rect), Some(buttons)) = (at.stage, at.buttons) {
         let drawn = settings_help::drawn_rows(&ctx);
@@ -416,14 +459,15 @@ fn follow(
 }
 
 /// Ctrl+Z: one step back through this visit's changes (a slider's drag is
-/// one step). The runtime's own fields stay as they are now.
-fn undo(ctx: &egui::Context, state: &ViewState, mem: &mut Memory, changed: bool, out: &mut Vec<Command>) {
+/// one step), from the prefs the page shows (`now`). The runtime's own
+/// fields stay as they are now.
+fn undo(ctx: &egui::Context, now: &Prefs, mem: &mut Memory, changed: bool, out: &mut Vec<Command>) {
     let down = ctx.input(|i| i.pointer.any_down());
     // A slider lets go of its value on the frame the button comes up.
     let pressed = down || ctx.input(|i| i.pointer.any_released());
     if changed {
         if !(pressed && mem.held) {
-            mem.undo.push(state.prefs.clone());
+            mem.undo.push(now.clone());
             if mem.undo.len() > UNDO {
                 mem.undo.remove(0);
             }
@@ -437,7 +481,9 @@ fn undo(ctx: &egui::Context, state: &ViewState, mem: &mut Memory, changed: bool,
         return;
     }
     if let Some(before) = mem.undo.pop() {
-        out.push(Command::SetPrefs(Box::new(restored(&before, &state.prefs))));
+        let back = restored(&before, now);
+        out.push(Command::SetPref(PrefPatch::Edit { before: Box::new(now.clone()), after: Box::new(back.clone()) }));
+        mem.pending = Some(Pending { before: now.clone(), after: back, at: anim::now(ctx) });
     }
 }
 
@@ -959,7 +1005,7 @@ mod tests {
             let mut out = Vec::new();
             let mut done = ctx.run_ui(input, |ui| {
                 let c = ui.ctx().clone();
-                undo(&c, state, mem, changed, &mut out);
+                undo(&c, &state.prefs, mem, changed, &mut out);
             });
             done.textures_delta.clear();
             out
@@ -971,7 +1017,7 @@ mod tests {
         let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
         let z = egui::Event::Key { key: Key::Z, physical_key: None, pressed: true, repeat: false, modifiers: ctrl };
         let out = frame(&state, &mut mem, false, vec![z.clone()]);
-        let [Command::SetPrefs(back)] = out.as_slice() else { panic!("{out:?}") };
+        let [Command::SetPref(PrefPatch::Edit { after: back, .. })] = out.as_slice() else { panic!("{out:?}") };
         assert_eq!(back.ring, was);
         assert_eq!(back.output_devices, state.prefs.output_devices, "the runtime's own stay");
         assert!(frame(&state, &mut mem, false, vec![z]).is_empty(), "nothing more to take back");
@@ -987,6 +1033,57 @@ mod tests {
             frame(&state, &mut mem, true, Vec::new());
         }
         assert_eq!(mem.undo.len(), UNDO);
+    }
+
+    /// The runtime a few frames behind the page (the size the user set a
+    /// moment before still on its way): a row changed meanwhile reaches the
+    /// prefs without taking that size back — the page used to send its
+    /// whole copy, which had the old size — and the page keeps showing its
+    /// change until the runtime has it, sending nothing twice.
+    #[test]
+    fn a_change_made_while_the_runtime_is_behind_keeps_the_size() {
+        let ctx = context();
+        let state = crate::screens::sweep::survey_state();
+        let mut pages = PageState::default();
+        pages.settings_tab = settings_help::TAB_LYRICS;
+        pages.settings_deep = Some(true);
+        let mut t = 0.0;
+        for _ in 0..3 {
+            t += 0.1;
+            run(&ctx, &state, &mut pages, t, None, Vec::new());
+        }
+        let rows = settings_help::drawn_rows(&ctx).1;
+        let unit = rows.iter().find(|r| r.id == Id::LyricsUnit).expect("«Шаг подсветки»");
+        let i = (Id::LyricsUnit.chosen(&state.prefs) + 1) % Id::LyricsUnit.choices().len();
+        let at = unit.choices[i].center();
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let mut sent = Vec::new();
+        for pressed in [true, false] {
+            t += 0.1;
+            sent.extend(run(&ctx, &state, &mut pages, t, Some(at), vec![press(pressed)]));
+        }
+        let mut runtime = Prefs { lyrics_scale: 0.9, ..state.prefs.clone() };
+        for c in &sent {
+            match c {
+                Command::SetPrefs(p) => runtime = (**p).clone(),
+                Command::SetPref(patch) => patch.apply(&mut runtime),
+                _ => {}
+            }
+        }
+        assert_eq!(Id::LyricsUnit.chosen(&runtime), i, "the click is made: {sent:?}");
+        assert_eq!(runtime.lyrics_scale, 0.9, "the size set before stays");
+        // Drawn again on the runtime's old prefs: its change shows, and is
+        // not sent again.
+        t += 0.1;
+        let again = run(&ctx, &state, &mut pages, t, Some(at), Vec::new());
+        assert!(again.is_empty(), "{again:?}");
+        let req = stage::requested(&ctx).expect("a stage beside the rows");
+        assert_eq!(Id::LyricsUnit.chosen(&req.prefs), i);
+        // The runtime has it: the page shows the runtime's prefs again.
+        let caught_up = ViewState { prefs: runtime.clone(), ..state.clone() };
+        t += 0.1;
+        assert!(run(&ctx, &caught_up, &mut pages, t, None, Vec::new()).is_empty());
+        assert!(pages.settings_memory.pending.is_none());
     }
 
     /// Every field a preset owns has its row on the preset's tab, and every

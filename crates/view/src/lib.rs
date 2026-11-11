@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 mod credit;
 pub mod dev;
 mod player_prefs;
+mod prefs_edit;
 pub mod presets;
 mod recs;
 mod sound;
@@ -2345,6 +2346,11 @@ pub enum PrefPatch {
     SettingsDeep(bool),
     /// «Разделы главной»: the order and switches of every section.
     HomeSections(Vec<HomeSectionSwitch>),
+    /// What the settings page changed on its copy of the prefs: every
+    /// field `after` has unlike `before`, laid over the prefs as they are
+    /// when it comes ([`Prefs::merge_edit`]), so a copy older than a change
+    /// still on its way never takes that change back.
+    Edit { before: Box<Prefs>, after: Box<Prefs> },
 }
 
 impl PrefPatch {
@@ -2422,6 +2428,7 @@ impl PrefPatch {
                 // Each section once, every one there, in the order given.
                 p.home_sections = HomeSectionSwitch::complete(list);
             }
+            Self::Edit { before, after } => p.merge_edit(before, after),
         }
     }
 }
@@ -3540,7 +3547,6 @@ impl Prefs {
             lyrics_light_speed: 0.9,
             lyrics_smooth: 0.85,
             lyrics_dim: 0.75,
-            lyrics_scale: 0.9,
             lyrics_lead: 0.2,
             lyrics_glow: true,
             lyrics_return_s: 2.0,

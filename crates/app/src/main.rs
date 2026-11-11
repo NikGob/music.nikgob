@@ -125,7 +125,8 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     // «Перемешивание остаётся включённым» became a rule by the kind of
     // list: off, every kind keeps playing in order.
     let keep_shuffle = value.get("list_shuffle").is_none().then(|| value.get("keep_shuffle").and_then(|v| v.as_bool())).flatten();
-    let mut prefs: Prefs = serde_json::from_value(value)?;
+    // A field this build cannot read takes its default, not the whole file.
+    let mut prefs = Prefs::from_json_lenient(value)?;
     if legacy { prefs.np_slot = slot; }
     if let Some(keep) = keep_shuffle {
         prefs.list_shuffle = nikgob_view::ListShuffles::from_keep(keep);
