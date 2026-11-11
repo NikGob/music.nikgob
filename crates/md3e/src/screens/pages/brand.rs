@@ -1,17 +1,16 @@
-//! The app's mark: the NikGob sun over «Made by NikGob». It closes
-//! Настройки (a click opens the author's GitHub), the build's version
-//! under it in one centred group, and stands in for Главная while the page
-//! is built at the start of a run.
+//! The app's mark: the NikGob sun with «Made by NikGob». It closes
+//! Настройки (beside the label, the build's version in a pill under it; a
+//! click opens the author's GitHub), and stands in for Главная, the sun over
+//! the label, while the page is built at the start of a run.
 
-use egui::{Align2, Color32, CursorIcon, Image, ImageSource, Rangef, Rect, Sense, Ui, pos2, vec2};
+use egui::{Color32, CursorIcon, Image, ImageSource, Rangef, Rect, Sense, Ui, pos2, vec2};
 
 use crate::{Theme, TypeRole, components::anim};
 
 const MARK: ImageSource<'static> = egui::include_image!("../../../../../assets/brand/nikgob-mark.svg");
 const LABEL: &str = "Made by NikGob";
 const GITHUB: &str = "https://github.com/NikGob";
-/// The sun's side at the foot of Настройки, and on the loading page.
-const SMALL: f32 = 40.0;
+/// The sun's side on the loading page.
 const LARGE: f32 = 96.0;
 /// Between the sun and the label.
 const GAP: f32 = 8.0;
@@ -55,30 +54,40 @@ fn height(side: f32) -> f32 {
     side + GAP + TypeRole::LabelLarge.style().line_height
 }
 
-/// The foot of Настройки, centred on the column `page`: the mark (a click
-/// opens GitHub) and the version under it, one group.
+/// The sun's side at the foot of Настройки, beside the label.
+const FOOT: f32 = 56.0;
+/// Between the sun and the label beside it.
+const FOOT_GAP: f32 = 16.0;
+/// The version pill's padding around its text.
+const PILL_PAD: egui::Vec2 = vec2(10.0, 3.0);
+
+/// The foot of Настройки, centred on `page`: the sun with «Made by NikGob»
+/// beside it and the version under the label in a tonal pill, one row (a
+/// click opens GitHub).
 pub fn made_by(ui: &mut Ui, page: Rangef) {
     let s = Theme::get(ui.ctx()).scheme;
-    let version = TypeRole::LabelSmall.style();
-    let block = height(SMALL) + VERSION_GAP + version.line_height;
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), block + 24.0), Sense::hover());
+    let name = crate::typography::layout(ui.painter(), TypeRole::TitleMedium.style().job(LABEL, s.on_surface));
+    let ver = crate::typography::layout(ui.painter(), TypeRole::LabelSmall.style().job(&version_label(), s.on_secondary_container));
+    let pill = ver.size() + PILL_PAD * 2.0;
+    let text_w = name.size().x.max(pill.x);
+    let text_h = name.size().y + VERSION_GAP + pill.y;
+    let group = vec2(FOOT + FOOT_GAP + text_w, FOOT.max(text_h));
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), group.y + 24.0), Sense::hover());
     let row = Rect::from_x_y_ranges(page, row.y_range());
-    let g = crate::typography::layout(ui.painter(), TypeRole::LabelLarge.style().job(LABEL, s.on_surface_variant));
-    let top = row.center().y - block / 2.0;
-    let hit = Rect::from_center_size(pos2(row.center().x, top + height(SMALL) / 2.0), vec2(g.size().x.max(SMALL), height(SMALL)));
+    let rect = Rect::from_center_size(row.center(), group);
     let resp = ui
-        .interact(hit, ui.id().with("made-by-nikgob"), Sense::click())
+        .interact(rect, ui.id().with("made-by-nikgob"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let hover = ui.ctx().animate_bool(resp.id, resp.hovered());
+    let sun = Rect::from_min_size(pos2(rect.left(), rect.center().y - FOOT / 2.0), vec2(FOOT, FOOT));
+    Image::new(MARK).tint(Color32::WHITE.gamma_multiply(0.85 + 0.15 * hover)).paint_at(ui, sun);
+    let x = sun.right() + FOOT_GAP;
+    let top = rect.center().y - text_h / 2.0;
     let color = lerp(s.on_surface_variant, s.on_surface, hover);
-    paint(ui, Rect::from_min_max(pos2(row.left(), top), row.max), SMALL, color, 0.85 + 0.15 * hover);
-    ui.painter().text(
-        pos2(row.center().x, top + height(SMALL) + VERSION_GAP),
-        Align2::CENTER_TOP,
-        version_label(),
-        version.font_id(),
-        s.on_surface_variant,
-    );
+    ui.painter().galley(pos2(x, top), name, color);
+    let pill = Rect::from_min_size(pos2(x, top + text_h - pill.y), pill);
+    ui.painter().rect_filled(pill, pill.height() / 2.0, s.secondary_container);
+    ui.painter().galley(pill.min + PILL_PAD, ver, s.on_secondary_container);
     if resp.clicked() {
         super::sources::open_url(GITHUB);
     }
