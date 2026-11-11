@@ -47,7 +47,7 @@ use nikgob_core::model::{ArtistId, TrackId, UnixMs};
 use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamAlbum, StreamArtist, StreamError, StreamService, StreamTrack};
 use nikgob_library::{Library, now_ms};
 use nikgob_recs::suggest::SUGGESTION_SEEDS;
-use nikgob_recs::discover::{NewScoring, rank_discoveries_with};
+use nikgob_recs::discover::{DISCOVERIES, NewScoring, rank_discoveries_upto};
 use nikgob_recs::{DiscoverySeeds, NewLog, SeedFinds, SeedRef, Source, artist_key, song_key, stream_song_key, suggestion_finds};
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,12 @@ pub(crate) const RELEASE_BUDGET: u32 = 60;
 pub(crate) const RELEASES_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Similar artists whose tops are read, per list.
 const TOPS_PER_LIST: usize = 2;
+/// The discoveries a pass keeps, best first: the mixes and the radio take
+/// the first [`DISCOVERIES`], «Новое для тебя» shows them and more at its
+/// row's end ([`HOME_NEW_MORE`] at a time).
+const DISCOVER_POOL: usize = 3 * DISCOVERIES;
+/// «Новое для тебя» gets this many more songs at its row's end.
+pub(crate) const HOME_NEW_MORE: usize = 12;
 /// New songs heard out lately that seed a pass.
 const HEARD_SEEDS: usize = 5;
 
@@ -187,7 +193,7 @@ pub(crate) fn cached_found(lib: &Library) -> (Vec<StreamTrack>, usize) {
         .ok()
         .flatten()
         .and_then(|(_, j)| serde_json::from_str(&j).ok());
-    found.map_or((Vec::new(), 0), |f| (f.tracks, f.releases.len()))
+    found.map_or((Vec::new(), 0), |f| (f.tracks.into_iter().take(DISCOVERIES).collect(), f.releases.len()))
 }
 
 /// Every song the last pass found, before ranking (the preview tools).
@@ -269,7 +275,7 @@ fn ranked(
         now: super::recs_now(),
         types: Some(&snap.types),
     };
-    rank_discoveries_with(seeds, &all, filter, Some(&scoring)).into_iter().map(|d| d.track).collect()
+    rank_discoveries_upto(seeds, &all, filter, Some(&scoring), DISCOVER_POOL).into_iter().map(|d| d.track).collect()
 }
 
 /// Where the songs of `finds` came from (by [`stream_song_key`]): a seed
@@ -367,9 +373,15 @@ impl Worker {
         d.shown = shown;
     }
 
-    /// The discoveries as found (the home filters out the disliked).
+    /// The best discoveries as found (the home filters out the disliked;
+    /// «Новое для тебя» shows more of them, [`DiscoverInput`]).
     pub(crate) fn discoveries(&self) -> Vec<StreamTrack> {
-        self.recs.discover.found.as_ref().map(|f| f.tracks.clone()).unwrap_or_default()
+        self.recs.discover.found.as_ref().map(|f| f.tracks.iter().take(DISCOVERIES).cloned().collect()).unwrap_or_default()
+    }
+
+    /// How many discoveries the last pass kept ([`DISCOVER_POOL`] at most).
+    pub(crate) fn discoveries_kept(&self) -> usize {
+        self.recs.discover.found.as_ref().map_or(0, |f| f.tracks.len())
     }
 
     /// Why discovery `t` is offered: the seed of the pass that found it
@@ -405,7 +417,7 @@ impl Worker {
     /// best first, none analysed or tried yet), as its track and video.
     pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>) -> Option<(TrackId, String)> {
         let found = self.recs.discover.found.clone()?;
-        for t in found.tracks.iter().filter(|t| t.id.service == Service::Youtube) {
+        for t in found.tracks.iter().take(DISCOVERIES).filter(|t| t.id.service == Service::Youtube) {
             let id = match self.lib.track_by_remote(&t.id).ok().flatten() {
                 Some(id) => id,
                 None => *self.upsert_streams(std::slice::from_ref(t)).first()?,
@@ -902,7 +914,8 @@ impl Worker {
             .iter()
             .map(|(artist, album)| (*artist, album.clone(), self.album_theirs(album)))
             .collect();
-        DiscoverInput { tracks: found.tracks.clone(), releases }
+        let limit = DISCOVERIES + self.home_build.more.new;
+        DiscoverInput { tracks: found.tracks.clone(), releases, limit }
     }
 
     /// The discoveries of `keys` (by [`stream_song_key`]) were on the home:
@@ -937,6 +950,9 @@ impl Worker {
 pub(crate) struct DiscoverInput {
     tracks: Vec<StreamTrack>,
     releases: Vec<(ArtistId, StreamAlbum, u32)>,
+    /// The songs the row shows at most (more once it was scrolled to its
+    /// end).
+    limit: usize,
 }
 
 impl DiscoverInput {
@@ -951,6 +967,7 @@ impl DiscoverInput {
                 !disliked(SONG, &stream_song_key(t))
                     && !t.artists.iter().any(|a| disliked(ARTIST_NAME, &artist_key(&a.name)))
             })
+            .take(self.limit)
             .collect();
         let shown = tracks.iter().map(|t| stream_song_key(t)).collect();
         let rows = tracks

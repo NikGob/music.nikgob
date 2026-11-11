@@ -345,7 +345,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // The row: «Микс дня», the genre mixes, the part of the day's, a
     // named mix or two, the moments, no two alike. A new song of «С
     // новым» goes to the first that fits it.
-    let mut mixes: Vec<Mix> = nikgob_recs::mixes::row(daily, pinned.into_iter().next(), mixes);
+    let mut mixes: Vec<Mix> = nikgob_recs::mixes::row_upto(daily, pinned.into_iter().next(), mixes, input.row_more);
     log_lineup(snap, tiles, &mixes);
 
     let seed = input.epoch.seed;

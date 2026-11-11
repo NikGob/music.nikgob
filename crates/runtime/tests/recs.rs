@@ -569,11 +569,11 @@ fn the_home_gets_a_daylist_and_tiles_that_play() {
     assert!(daylist.subtitle.ends_with(" трек") || daylist.subtitle.ends_with(" трека") || daylist.subtitle.ends_with(" треков"), "{}", daylist.subtitle);
     assert!(!daylist.subtitle.contains(" · "), "the number of songs alone: {}", daylist.subtitle);
     assert!(!daylist.covers.is_empty());
-    // Up to four kinds of the day, each once, each with its kicker, its
+    // Up to eight kinds of the day, each once, each with its kicker, its
     // length and covers; «На повторе», the lottery and the languages are
     // not among them (they are mixes of the home, home v2 §3.5).
     let tiles: Vec<MixId> = st.tiles.iter().map(|t| t.id).collect();
-    assert!((1..=4).contains(&tiles.len()), "{tiles:?}");
+    assert!((1..=8).contains(&tiles.len()), "{tiles:?}");
     assert!(
         tiles.iter().all(|t| !matches!(t, MixId::Tile(TileKind::OnRepeat | TileKind::Lottery | TileKind::Language))),
         "{tiles:?}"

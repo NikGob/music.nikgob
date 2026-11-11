@@ -2035,6 +2035,17 @@ impl Prefs {
     }
 }
 
+/// A row of Главная that gets more cards at its end ([`Command::HomeMore`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HomeRow {
+    /// «Миксы для тебя».
+    Mixes,
+    /// «Слушать снова».
+    ListenAgain,
+    /// «Новое для тебя».
+    New,
+}
+
 /// A section of Главная («Разделы главной»).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HomeSection {
@@ -3009,6 +3020,9 @@ pub enum Command {
     LoadWorld(String),
     LoadPlaylist(PlaylistId),
     LoadHome,
+    /// A row of Главная was scrolled near its end: more of it, where its
+    /// source has more.
+    HomeMore(HomeRow),
     Search(String),
 
     // Tags

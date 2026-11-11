@@ -2233,6 +2233,14 @@ pub fn part_title(p: u8) -> &'static str {
 ///
 /// A blend is the user's own and always stays.
 pub fn row(daily: Vec<Mix>, part: Option<Mix>, moments: Vec<Mix>) -> Vec<Mix> {
+    row_upto(daily, part, moments, 0)
+}
+
+/// [`row`], then up to `more` of the cards it left out for want of room
+/// (past [`ROW_MIXES`], the named mixes past their share), in their
+/// order, none alike: the row scrolled to its end asks for them, and the
+/// cards it shows stay where they are.
+pub fn row_upto(daily: Vec<Mix>, part: Option<Mix>, moments: Vec<Mix>, more: usize) -> Vec<Mix> {
     let side = |m: &Mix| matches!(m.key, MixKey::Calm | MixKey::Lively);
     let name = |m: &Mix| m.title.trim().to_lowercase();
     let alike = |a: &Mix, b: &Mix| {
@@ -2261,14 +2269,19 @@ pub fn row(daily: Vec<Mix>, part: Option<Mix>, moments: Vec<Mix>) -> Vec<Mix> {
     }
     let mut out: Vec<Mix> = Vec::new();
     let mut fill = 0;
+    // What the row leaves out for want of room: the cards asked for past
+    // it (`more`), in their order.
+    let mut left: Vec<Mix> = Vec::new();
     for m in day.into_iter().chain(genres).chain(part).chain(named).chain(moments) {
         if out.len() >= ROW_MIXES {
-            break;
+            left.push(m);
+            continue;
         }
         if m.key.is_cluster() {
             let many = out.iter().filter(|c| c.key.is_genre()).count() >= GENRE_MANY;
             let room = if many { ROW_NAMED_FEW } else { ROW_NAMED };
             if fill >= room {
+                left.push(m);
                 continue;
             }
         }
@@ -2276,6 +2289,15 @@ pub fn row(daily: Vec<Mix>, part: Option<Mix>, moments: Vec<Mix>) -> Vec<Mix> {
             continue;
         }
         fill += usize::from(m.key.is_cluster());
+        out.push(m);
+    }
+    for m in left {
+        if out.len() >= ROW_MIXES + more {
+            break;
+        }
+        if !matches!(m.key, MixKey::Blend(_)) && out.iter().any(|c| alike(c, &m)) {
+            continue;
+        }
         out.push(m);
     }
     out
@@ -3301,6 +3323,38 @@ mod tests {
         let blend = MixKey::Blend([1, 2, 0]);
         let r = row(vec![card(Daily(0), "Микс дня", at(0))], None, vec![card(blend, "Микс дня", at(0))]);
         assert_eq!(keys(&r), [Daily(0), blend]);
+    }
+
+    /// More cards asked for at the row's end: the row as it was, then
+    /// what it left out for want of room (the named mixes past their
+    /// share, the cards past ten), none alike.
+    #[test]
+    fn more_cards_come_after_the_row_as_it_was() {
+        use MixKey::{Daily, Genre, Part, Profile};
+        let n = 20usize;
+        let at = |k: usize| k * n..(k + 1) * n;
+        let daily = || -> Vec<Mix> {
+            let mut d = vec![card(Daily(0), "Микс дня", at(0))];
+            d.extend((1..=4u8).map(|g| card(Genre(g), crate::mix_names::family_title(g).unwrap(), at(usize::from(g)))));
+            d.extend((1..=5u8).map(|c| card(Daily(c), &format!("Микс: артист {c}"), at(10 + usize::from(c)))));
+            d
+        };
+        let part = || Some(card(Part(2), part_title(2), at(9)));
+        let moments = || -> Vec<Mix> {
+            let mut m: Vec<Mix> = (1..=6u32).map(|p| card(Profile(p), &format!("Профиль {p}"), at(20 + p as usize))).collect();
+            // One alike to a card of the row: it never comes.
+            m[5].title = "Микс дня".into();
+            m
+        };
+        let keys = |r: &[Mix]| r.iter().map(|m| m.key).collect::<Vec<_>>();
+        let base = row(daily(), part(), moments());
+        assert_eq!(keys(&row_upto(daily(), part(), moments(), 0)), keys(&base));
+        let more = row_upto(daily(), part(), moments(), 4);
+        assert_eq!(keys(&more[..ROW_MIXES]), keys(&base), "the row stays as it was");
+        assert_eq!(keys(&more[ROW_MIXES..]), [Daily(2), Daily(3), Daily(4), Daily(5)]);
+        // All it has: the rest of the moments, not the look-alike.
+        let all = row_upto(daily(), part(), moments(), 100);
+        assert_eq!(keys(&all[ROW_MIXES..]), [Daily(2), Daily(3), Daily(4), Daily(5), Profile(4), Profile(5)]);
     }
 
     /// The day's genre mixes stay the day's: after more plays, at another

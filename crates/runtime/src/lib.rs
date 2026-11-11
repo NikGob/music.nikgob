@@ -1512,6 +1512,7 @@ impl Worker {
                 self.sync_on_open(id);
             }
             Command::LoadHome => self.load_home(),
+            Command::HomeMore(row) => self.home_more(row),
             Command::Search(q) => self.search(q),
             Command::SetPrefs(p) => self.set_prefs(p),
             Command::SetPref(patch) => {

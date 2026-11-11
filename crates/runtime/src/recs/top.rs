@@ -408,6 +408,7 @@ mod tests {
             suggested: Vec::new(),
             rerank: false,
             refresh_mix: None,
+            row_more: 0,
             blends: Vec::new(),
             session: nikgob_recs::Session::default(),
             mix_prefs: super::super::lanes::MixPrefs::of(&nikgob_view::Prefs::default()),
