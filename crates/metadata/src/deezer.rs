@@ -26,6 +26,17 @@ const MAX_DURATION_DIFF_SECS: u64 = 5;
 /// How many same-named artists are checked against the local titles.
 const MAX_VERIFIED_CANDIDATES: usize = 5;
 
+/// What [`Deezer::verified_artist_lookup`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtistPicture {
+    /// The photo of an artist proved to be this one.
+    Found(String),
+    /// Deezer has no artist of this name with a photo.
+    Missing,
+    /// Same-named artists with photos, none proved to be this one.
+    Unverified,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct DeezerArtist {
@@ -251,6 +262,9 @@ impl Deezer {
     /// Photo URL of the artist who recorded the given local track. The track is
     /// searched on Deezer and only a confident match (artist, title and, when
     /// both are known, duration) lends its `artist.id`: immune to name clashes.
+    /// When the structured search (`artist:"…" track:"…"`) finds nothing,
+    /// the plain one is asked with the same checks: Deezer's field search
+    /// misses songs its plain search has.
     pub async fn artist_picture_by_track(
         &self,
         artist: &str,
@@ -262,9 +276,13 @@ impl Deezer {
         if want_artist.is_empty() || want_title.is_empty() {
             return Ok(None);
         }
-        let hits = self
+        let mut hits = self
             .search_track(Some(&search_artist(artist)), &search_title(title), 10)
             .await?;
+        if hits.is_empty() {
+            let plain = format!("{} {}", search_artist(artist), search_title(title));
+            hits = self.search_raw(&plain, 10).await?;
+        }
         let found = hits.into_iter().find(|t| {
             let Some(a) = t.artist.as_ref().filter(|a| a.id != 0) else {
                 return false;
@@ -294,6 +312,20 @@ impl Deezer {
         name: &str,
         known_titles: &[String],
     ) -> Result<Option<String>> {
+        Ok(match self.verified_artist_lookup(name, known_titles).await? {
+            ArtistPicture::Found(url) => Some(url),
+            ArtistPicture::Missing | ArtistPicture::Unverified => None,
+        })
+    }
+
+    /// [`Self::verified_artist_picture`] telling «Deezer has no such artist
+    /// with a photo» ([`ArtistPicture::Missing`]) from «same-named artists
+    /// with photos, none proved this one» ([`ArtistPicture::Unverified`]).
+    pub async fn verified_artist_lookup(
+        &self,
+        name: &str,
+        known_titles: &[String],
+    ) -> Result<ArtistPicture> {
         let want = artist_key(name);
         let known: Vec<String> = known_titles
             .iter()
@@ -301,7 +333,7 @@ impl Deezer {
             .filter(|k| !k.is_empty())
             .collect();
         if want.is_empty() || known.is_empty() {
-            return Ok(None);
+            return Ok(ArtistPicture::Missing);
         }
         let mut candidates: Vec<DeezerArtistHit> = self
             .search_artist(name, 10)
@@ -311,6 +343,9 @@ impl Deezer {
             .filter(|h| similarity(&want, &artist_key(&h.name)) >= MIN_ARTIST_SIMILARITY)
             .collect();
         candidates.sort_by_key(|h| std::cmp::Reverse(h.nb_fan.unwrap_or(0)));
+        if candidates.is_empty() {
+            return Ok(ArtistPicture::Missing);
+        }
         for hit in candidates.into_iter().take(MAX_VERIFIED_CANDIDATES) {
             let mut theirs: Vec<String> = Vec::new();
             match self.artist_albums(hit.id, 100).await {
@@ -329,11 +364,11 @@ impl Deezer {
                         .iter()
                         .any(|k| similarity(k, &t) >= MIN_TITLE_SIMILARITY)
             });
-            if overlaps {
-                return Ok(hit.best_picture().map(str::to_owned));
+            if overlaps && let Some(url) = hit.best_picture() {
+                return Ok(ArtistPicture::Found(url.to_owned()));
             }
         }
-        Ok(None)
+        Ok(ArtistPicture::Unverified)
     }
 
     /// Downloads an image URL from Deezer's CDN (photos, covers).

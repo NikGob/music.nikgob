@@ -1867,3 +1867,80 @@ fn a_file_taken_back_takes_its_stream_track_out_of_the_library() {
     assert_eq!(listed(&lib), (0, 0, 0, 0));
     assert_eq!(lib.active_source(id).unwrap().unwrap().kind, SourceKind::Spotify);
 }
+
+#[test]
+fn the_active_source_follows_the_kind_priority() {
+    // The active source (the track's «стрим · …» label) is ranked the way
+    // playback ranks sources: YouTube > SoundCloud > Deezer.
+    let lib = lib();
+    let id = lib
+        .upsert_stream_track(&find(&FakeService::youtube(), "yt-gruppa-1"))
+        .unwrap();
+    let youtube = lib.active_source(id).unwrap().unwrap();
+    assert_eq!(youtube.kind, SourceKind::Youtube);
+    for (kind, locator) in [(SourceKind::Deezer, "dz-1"), (SourceKind::Soundcloud, "sc-1")] {
+        let mut s = nikgob_core::model::Source::new(id, kind, locator, Codec::Flac);
+        s.quality_score = 1_000;
+        lib.add_source(&s).unwrap();
+    }
+    lib.set_active_source(id).unwrap();
+    assert_eq!(lib.active_source(id).unwrap().unwrap().kind, SourceKind::Youtube);
+    lib.set_source_available(youtube.id, false).unwrap();
+    lib.set_active_source(id).unwrap();
+    assert_eq!(lib.active_source(id).unwrap().unwrap().kind, SourceKind::Soundcloud);
+}
+
+#[test]
+fn an_adopted_tracklist_brings_the_albums_year() {
+    use nikgob_core::model::{ArtistCredit, Release, Track};
+    let lib = lib();
+    let album = FakeService::youtube()
+        .albums()
+        .into_iter()
+        .find(|a| a.id.id == "yt-alb-gruppa")
+        .unwrap();
+    let release = |title: &str, year: Option<i32>| {
+        let mut r = Release::new(title, ArtistCredit::single("Кино", None));
+        r.year = year;
+        let r = lib.upsert_release(&r).unwrap();
+        let mut t = Track::new("Группа крови", ArtistCredit::single("Кино", None));
+        t.release_id = Some(r.id);
+        t.track_no = 1;
+        lib.upsert_track(&t).unwrap();
+        r.id
+    };
+    let bare = release("Группа крови", None);
+    lib.adopt_stream_album(bare, &album).unwrap();
+    assert_eq!(lib.get_release(bare).unwrap().unwrap().year, Some(1988));
+    // A year the album has stays.
+    let dated = release("Группа крови (1990)", Some(1990));
+    lib.adopt_stream_album(dated, &album).unwrap();
+    assert_eq!(lib.get_release(dated).unwrap().unwrap().year, Some(1990));
+    assert!(!lib.fill_release_year(dated, Some(1988)).unwrap());
+    let other = release("Другой", None);
+    assert!(lib.fill_release_year(other, Some(2001)).unwrap());
+    assert_eq!(lib.get_release(other).unwrap().unwrap().year, Some(2001));
+    assert!(!lib.fill_release_year(other, None).unwrap());
+}
+
+#[test]
+fn found_tracklists_of_albums_without_a_year_are_asked_again_once() {
+    use nikgob_core::model::{ArtistCredit, Release};
+    let lib = lib();
+    let bare = lib.upsert_release(&Release::new("A", ArtistCredit::single("X", None))).unwrap();
+    let mut r = Release::new("B", ArtistCredit::single("X", None));
+    r.year = Some(2020);
+    let dated = lib.upsert_release(&r).unwrap();
+    let missed = lib.upsert_release(&Release::new("C", ArtistCredit::single("X", None))).unwrap();
+    let now = crate::now_ms();
+    lib.cache_put(&format!("tracklist.{}", bare.id), now, "found").unwrap();
+    lib.cache_put(&format!("tracklist.{}", dated.id), now, "found").unwrap();
+    lib.cache_put(&format!("tracklist.{}", missed.id), now, "miss").unwrap();
+    assert_eq!(lib.ask_album_years_again().unwrap(), 1);
+    assert!(lib.cache_get(&format!("tracklist.{}", bare.id)).unwrap().is_none());
+    assert!(lib.cache_get(&format!("tracklist.{}", dated.id)).unwrap().is_some());
+    assert!(lib.cache_get(&format!("tracklist.{}", missed.id)).unwrap().is_some());
+    // Once.
+    lib.cache_put(&format!("tracklist.{}", bare.id), now, "found").unwrap();
+    assert_eq!(lib.ask_album_years_again().unwrap(), 0);
+}

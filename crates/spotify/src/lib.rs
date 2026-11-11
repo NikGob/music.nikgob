@@ -1595,6 +1595,23 @@ impl StreamService for Spotify {
         lock(&self.state).keys_refused() && !self.soloist_ready()
     }
 
+    fn audio_refused_until(&self) -> Option<std::time::SystemTime> {
+        if !self.audio_refused() {
+            return None;
+        }
+        let at = lock(&self.state).saved.keys_refused_at?;
+        Some(std::time::UNIX_EPOCH + Duration::from_secs(at) + KEYS_RETRY)
+    }
+
+    fn retry_audio(&self) {
+        let mut st = lock(&self.state);
+        st.key_refusals = 0;
+        if st.saved.keys_refused_at.take().is_some() {
+            log::info!("spotify: audio keys asked again now");
+            self.persist(&st);
+        }
+    }
+
     fn account(&self) -> Account {
         let st = lock(&self.state);
         if let Some(prompt) = &st.prompt {

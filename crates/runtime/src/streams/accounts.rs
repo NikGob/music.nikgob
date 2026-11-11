@@ -42,6 +42,11 @@ impl Worker {
                     registered: registered.is_some(),
                     enabled,
                     audio: registered.is_some() && enabled && self.has_audio(service),
+                    audio_refused_until_hm: registered
+                        .filter(|_| enabled)
+                        .and_then(|s| s.audio_refused_until())
+                        .map(minute_up)
+                        .and_then(local_hm),
                     usable: registered.is_some() && enabled && super::usable(service, &account),
                     account,
                     busy: self.streaming.busy.contains(&service),
@@ -113,6 +118,7 @@ impl Worker {
                     LoginInput::Cookies(_) => {}
                     LoginInput::Browser | LoginInput::Playback => {}
                 }
+                self.switch_on(service);
                 self.login_toast(service, &input);
                 self.pull_likes(service);
                 self.discover_signed_in(service);
@@ -135,6 +141,23 @@ impl Worker {
         self.publish_accounts();
         // Sound may have come (Premium) or gone: the next track resolves anew.
         self.preload_next();
+    }
+
+    /// A service just connected is switched on (a fresh install ships
+    /// Spotify off): what the user connected is what plays and searches.
+    fn switch_on(&mut self, service: Service) {
+        let mut prefs = self.state.read().prefs.clone();
+        if prefs.service_enabled(service) {
+            return;
+        }
+        log::info!("{service}: switched on by its login");
+        match service {
+            Service::Spotify => prefs.spotify_enabled = true,
+            Service::Youtube => prefs.youtube_enabled = true,
+            Service::Deezer => prefs.deezer_enabled = true,
+            Service::Soundcloud => prefs.soundcloud_enabled = true,
+        }
+        self.set_prefs(Box::new(prefs));
     }
 
     /// What a finished login says. A Spotify account without the playback
@@ -172,6 +195,16 @@ impl Worker {
         self.streaming.web_state.remove(&service);
         self.forget_web_login(service);
         self.streaming.errors.remove(&service);
+        self.publish_accounts();
+        self.preload_next();
+    }
+
+    /// [`v::Command::RetryStreamAudio`]: the service is asked for sound
+    /// again at once; what plays next may come from it.
+    pub(crate) fn retry_stream_audio(&mut self, service: Service) {
+        if let Some(s) = self.streams.iter().find(|s| s.service() == service) {
+            s.retry_audio();
+        }
         self.publish_accounts();
         self.preload_next();
     }

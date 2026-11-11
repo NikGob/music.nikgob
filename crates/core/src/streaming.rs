@@ -831,6 +831,15 @@ pub trait StreamService: Send + Sync {
         false
     }
 
+    /// Until when [`Self::audio_refused`] holds, if it does.
+    fn audio_refused_until(&self) -> Option<std::time::SystemTime> {
+        None
+    }
+
+    /// Asks for the sound again now instead of waiting out
+    /// [`Self::audio_refused`]. No network.
+    fn retry_audio(&self) {}
+
     /// Current account state. Cheap, no network.
     fn account(&self) -> Account;
 

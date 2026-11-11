@@ -884,6 +884,12 @@ impl Library {
                     params![rid, total],
                 )?;
             }
+            // The service's year for an album that has none (its page
+            // shows the date).
+            tx.execute(
+                "UPDATE release SET year = coalesce(year, ?2) WHERE id = ?1",
+                params![rid, album.year.filter(|y| *y > 0)],
+            )?;
             let better = nikgob_core::translit::prefer_cyrillic(&title, &album.title);
             if better != title {
                 let key = sort_key(better);
@@ -891,6 +897,18 @@ impl Library {
                 tx.execute("UPDATE track SET album_key = ?2 WHERE release_id = ?1", params![rid, key])?;
             }
             Ok((known(tx)? - before).max(0) as usize)
+        })
+    }
+
+    /// The year of a library album that has none, from a service. Returns
+    /// whether it changed.
+    pub fn fill_release_year(&self, release: ReleaseId, year: Option<i32>) -> Result<bool> {
+        let Some(year) = year.filter(|y| *y > 0) else { return Ok(false) };
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE release SET year = ?2 WHERE id = ?1 AND year IS NULL",
+                params![release.to_string(), year],
+            )? > 0)
         })
     }
 

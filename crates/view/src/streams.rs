@@ -44,6 +44,11 @@ pub struct AccountView {
     /// The account can play sound now (Spotify needs Premium and the
     /// playback login; otherwise its tracks play from YouTube Music).
     pub audio: bool,
+    /// The service keeps refusing this account's sound (Spotify refused
+    /// its audio keys): its tracks play from YouTube Music until this
+    /// local time, «14:05», unless asked again
+    /// ([`crate::Command::RetryStreamAudio`]). `None` when it plays.
+    pub audio_refused_until_hm: Option<String>,
     /// The service asked us to slow down: its calls are paused until then
     /// (unix ms, rounded up to the minute), e.g. «YouTube Music просит
     /// подождать до 14:05». `None` when not paused.
