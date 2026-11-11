@@ -124,6 +124,7 @@ fn spotify(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState,
             login_prompt(ui, a, out);
             login_error(ui, a);
             paused_line(ui, a);
+            refused_line(ui, a, !busy, out);
         }
         if !signed {
             setup_steps(ui, p, pages, registered && !busy, out);
@@ -446,6 +447,25 @@ fn paused_line(ui: &mut Ui, a: &AccountView) {
         });
         ui.add_space(8.0);
     }
+}
+
+/// The service keeps refusing this account's sound (Spotify's audio keys):
+/// until when (an error), and «Повторить» to ask again now.
+fn refused_line(ui: &mut Ui, a: &AccountView, can: bool, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    let Some(hm) = &a.audio_refused_until_hm else { return };
+    ui.horizontal(|ui| {
+        Icon::Error.widget(false, s.error, 18.0).ui(ui);
+        let text = format!("{} не отдаёт звук до {hm}", a.service.display_name());
+        ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich_para(text, s.error)).wrap());
+        if ui
+            .add(Button::new("Повторить").style(Style::Text).size(Size::S).enabled(can).id_salt(("retry-audio", a.service.as_str())))
+            .clicked()
+        {
+            out.push(Command::RetryStreamAudio(a.service));
+        }
+    });
+    ui.add_space(8.0);
 }
 
 /// A feed of the service's suggestions that needs a new sign-in: why (a

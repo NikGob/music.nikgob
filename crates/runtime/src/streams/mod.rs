@@ -621,6 +621,7 @@ impl Worker {
         match c {
             Command::StreamLogin { service, input } => self.stream_login(service, input),
             Command::StreamLogout(service) => self.stream_logout(service),
+            Command::RetryStreamAudio(service) => self.retry_stream_audio(service),
             Command::Soloist(action) => self.soloist_act(action),
             Command::SetStreamSecrets {
                 spotify_client_id,

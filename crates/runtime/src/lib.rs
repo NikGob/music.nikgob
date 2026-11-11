@@ -1547,6 +1547,7 @@ impl Worker {
             }
             c @ (Command::StreamLogin { .. }
             | Command::StreamLogout(_)
+            | Command::RetryStreamAudio(_)
             | Command::Soloist(_)
             | Command::SetStreamSecrets { .. }
             | Command::SetSearchSources(_)

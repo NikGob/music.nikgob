@@ -3097,6 +3097,9 @@ pub enum Command {
     /// saved to settings.toml on success.
     StreamLogin { service: Service, input: LoginInput },
     StreamLogout(Service),
+    /// The service's sound is asked for again now instead of after its
+    /// pause ([`AccountView::audio_refused_until_hm`]).
+    RetryStreamAudio(Service),
     /// A step of Spotify Soloist's setup ([`AccountView::soloist`]).
     Soloist(SoloistAction),
     /// Secrets → settings.toml (never into prefs): `None` keeps the value,

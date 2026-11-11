@@ -42,6 +42,11 @@ impl Worker {
                     registered: registered.is_some(),
                     enabled,
                     audio: registered.is_some() && enabled && self.has_audio(service),
+                    audio_refused_until_hm: registered
+                        .filter(|_| enabled)
+                        .and_then(|s| s.audio_refused_until())
+                        .map(minute_up)
+                        .and_then(local_hm),
                     usable: registered.is_some() && enabled && super::usable(service, &account),
                     account,
                     busy: self.streaming.busy.contains(&service),
@@ -190,6 +195,16 @@ impl Worker {
         self.streaming.web_state.remove(&service);
         self.forget_web_login(service);
         self.streaming.errors.remove(&service);
+        self.publish_accounts();
+        self.preload_next();
+    }
+
+    /// [`v::Command::RetryStreamAudio`]: the service is asked for sound
+    /// again at once; what plays next may come from it.
+    pub(crate) fn retry_stream_audio(&mut self, service: Service) {
+        if let Some(s) = self.streams.iter().find(|s| s.service() == service) {
+            s.retry_audio();
+        }
         self.publish_accounts();
         self.preload_next();
     }
