@@ -19,6 +19,7 @@ mod geometry;
 mod logfile;
 mod pacing;
 mod profile;
+mod quit;
 mod shot;
 mod shot_fakes;
 mod streams;
@@ -28,6 +29,7 @@ mod titlebar;
 mod scwidget;
 mod khpage;
 mod web_images;
+mod windowing;
 mod ytlogin;
 
 use std::path::PathBuf;
@@ -299,6 +301,10 @@ impl Resident for Core {
 /// The largest texture side the app asks of egui (the font atlas's width).
 const MAX_TEXTURE_SIDE: usize = 8192;
 
+/// How long a window brought back from the tray asks for frames until one
+/// is drawn.
+const SHOW_TRIES: Duration = Duration::from_secs(1);
+
 struct Window {
     core: fastframe_shell::Held<Core>,
     scrolling: fastframe_scroll::Scrolling,
@@ -306,6 +312,16 @@ struct Window {
     /// When the system animation setting was last read.
     motion_checked: Option<Instant>,
     titlebar: titlebar::TitleBar,
+    /// Whether this window can hide in the tray and come back
+    /// ([`windowing::can_hide`]: not on Wayland), asked on its first frame.
+    hides: Option<bool>,
+    /// The window hid in this pass: its frame is still drawn whole, so it
+    /// shows that, not an empty one, when it comes back.
+    hiding: bool,
+    /// When the window was asked back from the tray, until it has drawn.
+    showing: Option<Instant>,
+    /// Windows' cloaking (another virtual desktop).
+    cloak: windowing::Cloak,
 }
 
 impl eframe::App for Window {
@@ -325,6 +341,7 @@ impl eframe::App for Window {
         self.core.pacer.begin();
         if let Some(f) = self.core.frames.as_mut() {
             f.begin();
+            f.caused_by(ctx);
         }
         // A screenshot run stays off the screen on purpose.
         if !std::mem::replace(&mut self.recovery_checked, true) && !shot::offscreen() {
@@ -334,6 +351,14 @@ impl eframe::App for Window {
             self.motion_checked = Some(Instant::now());
             self.core.ui.set_system_reduced_motion(sysmotion::reduced());
         }
+        let hides = match self.hides {
+            Some(h) => h,
+            None => {
+                let h = windowing::can_hide(frame);
+                self.hides = Some(h);
+                h
+            }
+        };
         let core = &mut *self.core;
         if !core.hidden {
             core.geometry.observe(ctx);
@@ -344,11 +369,14 @@ impl eframe::App for Window {
         });
         // «Быстрое открытие из трея»: the window hides instead of closing.
         // Hidden, eframe runs only this logic (no drawing, no animation),
-        // and only when something wakes it: the tray, the runtime.
-        if close && !core.quit && !core.reopen && core.desktop.can_hide() && core.runtime.state().prefs.tray_keep_window {
+        // and only when something wakes it: the tray, the runtime. Where a
+        // window cannot hide (Wayland) it closes and is made again on show.
+        if close && !core.quit && !core.reopen && hides && core.desktop.can_hide() && core.runtime.state().prefs.tray_keep_window {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             core.hidden = true;
+            self.hiding = true;
+            self.showing = None;
             core.geometry.flush();
             log::info!("window hidden to the tray (kept)");
         }
@@ -362,12 +390,26 @@ impl eframe::App for Window {
             // Tray "show/hide" while the window exists: bring it forward.
             if std::mem::take(&mut core.hidden) {
                 core.show_at = Some(Instant::now());
-                // Drawn at once with what it had: no rebuild.
-                ctx.request_repaint();
+                // Drawn with what it had (no rebuild), once it is shown.
+                self.showing = Some(Instant::now());
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        // Frames until the window brought back has drawn one: `Visible(true)`
+        // takes effect only after this pass, X11 maps the window a moment
+        // later still, and until then eframe runs only this logic (a few
+        // times a second for a hidden window), so one request made before
+        // the window is up could be spent on a pass that draws nothing.
+        // A window that stays covered draws nothing either: asked for a
+        // second at most.
+        if let Some(at) = self.showing {
+            if at.elapsed() < SHOW_TRIES {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else {
+                self.showing = None;
+            }
         }
     }
 
@@ -375,9 +417,13 @@ impl eframe::App for Window {
         // Kept in the tray: eframe still calls this for a hidden window
         // (about ten times a second while something asks for frames), so
         // nothing is drawn and nothing animates until it is shown again.
-        if self.core.hidden {
+        // The pass that hides it still draws, so the window's last frame is
+        // the interface and it comes back with that, not an empty frame.
+        if self.core.hidden && !std::mem::take(&mut self.hiding) {
             return;
         }
+        self.hiding = false;
+        self.showing = None;
         self.scrolling.apply(ui.ctx());
         let core = &mut *self.core;
         let levels = nikgob_md3e::prof::scope("levels");
@@ -440,7 +486,15 @@ impl eframe::App for Window {
         }
 
         // Frame limit: only matters while something animates continuously.
-        let wait = core.pacer.wait(frame, fps, core.last_frame.elapsed());
+        // A window Windows keeps out of sight (cloaked: on another virtual
+        // desktop) draws a few frames a second; one in sight, focused or
+        // not, keeps its full rate.
+        let wait = if self.cloak.cloaked(frame) {
+            core.pacer.idle();
+            windowing::CLOAKED_FRAME
+        } else {
+            core.pacer.wait(frame, fps, core.last_frame.elapsed())
+        };
         if !ui.ctx().has_requested_repaint() {
             core.pacer.idle();
         } else if !wait.is_zero() {
@@ -506,20 +560,10 @@ fn main() -> eframe::Result {
     let profile = profile::requested();
     let slot = if profile { profile::slot() } else { fastframe_instance::Slot::new("music.nikgob") };
     // `--quit`: the running player (or profile) quits as from the tray's
-    // «Выход» (its session saved), so a script can restart it; nothing
-    // else starts.
-    if std::env::args().any(|a| a == "--quit") {
-        match slot.send("quit") {
-            Ok(_) => std::process::exit(0),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
-                eprintln!("music.nikgob is not running");
-                std::process::exit(0);
-            }
-            Err(e) => {
-                eprintln!("music.nikgob did not take the request: {e}");
-                std::process::exit(1);
-            }
-        }
+    // «Выход» (its session saved) and this launch waits until it is gone,
+    // so a script can replace the exe or restart it; nothing else starts.
+    if quit::requested() {
+        quit::run(&slot);
     }
     logfile::init();
     stage("log");
@@ -587,7 +631,10 @@ fn main() -> eframe::Result {
         match slot.claim("show", move |request| {
             let flag = match request {
                 "show" => &asked,
-                "quit" => &quit,
+                "quit" => {
+                    log::info!("another launch asked to quit (--quit)");
+                    &quit
+                }
                 // «Сбросить» waits for the profile to be gone.
                 "ping" => return Some("ok".to_owned()),
                 _ => return None,
@@ -872,6 +919,10 @@ fn main() -> eframe::Result {
                     recovery_checked: false,
                     motion_checked: None,
                     titlebar: titlebar::TitleBar::default(),
+                    hides: None,
+                    hiding: false,
+                    showing: None,
+                    cloak: windowing::Cloak::default(),
                 }))
             }),
         )
