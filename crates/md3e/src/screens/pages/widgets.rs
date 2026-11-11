@@ -158,7 +158,8 @@ pub fn release_subtitle(r: &ReleaseCard) -> String {
     }
 }
 
-/// An album card; navigates on click, plays on ▶, right click opens the menu.
+/// An album card; navigates on click, plays on ▶; right click and its ⋮
+/// open the menu.
 pub fn release_card(
     ui: &mut Ui,
     r: &ReleaseCard,
@@ -170,10 +171,11 @@ pub fn release_card(
         .subtitle(release_subtitle(r))
         .cover_opt(r.cover.as_ref().map(|c| c.uri()))
         .badge_opt(card_badge(r))
+        .menu_button(true)
         .width(width)
         .id_salt(("release-card", row, r.id))
         .show(ui);
-    let menu = release_menu(&o.response, r, out);
+    let menu = release_menus(&o.response, o.menu.as_ref(), r, out);
     if o.play_clicked {
         out.push(Command::PlayRelease {
             id: r.id,
@@ -190,7 +192,7 @@ pub fn release_card(
 
 /// The like of an album: into (or out of) «Любимые альбомы».
 pub fn album_like_label(liked: bool) -> &'static str {
-    if liked { "Убрать из любимого" } else { "В любимое" }
+    super::like_label(liked)
 }
 
 //// What the menu of an album does.
@@ -204,13 +206,17 @@ pub enum ReleaseAct {
     Like,
     Artist,
     Share,
+    /// «Скачать недостающие»: the tracks it lacks to «Хочу скачать».
+    Download,
     Trash,
     Purge,
 }
 
-/// The one list of an album's actions, for its right-click menu (card or
-/// row) and the ⋮ of its page. On the page (`on_page`) «Слушать»,
-/// «Перемешать» and the like are buttons beside it and are left out.
+/// The one list of an album's actions, for its right-click menu and ⋮
+/// (card or row) and the ⋮ of its page: play │ the like, a playlist │ the
+/// artist, share │ what it lacks │ the deletes. On the page (`on_page`)
+/// «Слушать», «Перемешать», the like and the download are buttons beside
+/// it and are left out; «…навсегда» only while it has files.
 pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     use ReleaseAct as A;
     let mut rows = Vec::new();
@@ -218,18 +224,27 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
     }
-    rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     if !on_page {
         rows.push(Row::Item(A::Like, MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked)));
     }
-    rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person).enabled(!r.artists.linked().is_empty())));
+    rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    rows.push(Row::Divider);
+    if !r.artists.linked().is_empty() {
+        rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
+    }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    if !on_page && progress_badge(r).is_some() {
+        rows.push(Row::Divider);
+        rows.push(Row::Item(A::Download, MenuItem::new("Скачать недостающие").icon(Icon::Download)));
+    }
     rows.push(Row::Divider);
     rows.push(Row::Item(A::Trash, MenuItem::new("Удалить альбом").icon(Icon::Delete)));
-    rows.push(Row::Item(A::Purge, MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete)));
+    if r.local_tracks > 0 {
+        rows.push(Row::Item(A::Purge, MenuItem::new("Удалить альбом навсегда").icon(Icon::Delete)));
+    }
     rows
 }
 
@@ -244,6 +259,7 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
         // Several artists: a chooser.
         ReleaseAct::Artist => return artist_links::go_to(ctx, artist_links::library(&r.artists)),
         ReleaseAct::Share => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
+        ReleaseAct::Download => out.push(Command::DownloadRelease(r.id)),
         ReleaseAct::Trash => super::request_release_delete(ctx, r.id, &r.title, false),
         ReleaseAct::Purge => super::request_release_delete(ctx, r.id, &r.title, true),
         ReleaseAct::Playlist => {
@@ -256,12 +272,22 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
 
 /// Right-click menu of an album (card or row): [`release_rows`].
 pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
-    if Menu::context_idle(resp, ("release-menu", resp.id)) {
-        return None;
+    release_menus(resp, None, r, out)
+}
+
+/// The menu of an album on a right click on `resp` and on its ⋮ (`more`):
+/// the same [`release_rows`].
+pub fn release_menus(resp: &Response, more: Option<&Response>, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
+    let mut act = None;
+    if let Some(m) = more {
+        let (menu, acts) = menu_of(("release-more", m.id), release_rows(r, false));
+        act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
     }
-    let (menu, acts) = menu_of(("release-menu", resp.id), release_rows(r, false));
-    let act = menu.context_menu(resp).and_then(|i| acts.get(i).copied())?;
-    release_apply(&resp.ctx, act, r, out)
+    if !Menu::context_idle(resp, ("release-menu", resp.id)) {
+        let (menu, acts) = menu_of(("release-menu", resp.id), release_rows(r, false));
+        act = act.or(menu.context_menu(resp).and_then(|i| acts.get(i).copied()));
+    }
+    release_apply(&resp.ctx, act?, r, out)
 }
 
 /// A playlist card; with `pages` its right-click menu can rename and delete.
@@ -286,10 +312,11 @@ pub fn playlist_card_with(
         .subtitle(subtitle)
         .cover_opt(p.cover.as_ref().map(|c| c.uri()))
         .placeholder_icon(if p.pinned { Icon::Favorite } else { Icon::QueueMusic })
+        .menu_button(true)
         .width(width)
         .id_salt(("playlist-card", row, p.id))
         .show(ui);
-    playlist_menu_at(&o.response, p, pages, out);
+    playlist_menus(&o.response, o.menu.as_ref(), p, pages, out);
     if o.play_clicked {
         out.push(Command::PlayPlaylist {
             id: p.id,
@@ -478,8 +505,10 @@ pub fn sync_state_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
     }
 }
 
-/// The one list of a playlist's actions, for its right-click menu (card or
-/// row) and the ⋮ of its page: play, next, queue; edit; sync; delete.
+/// The one list of a playlist's actions, for its right-click menu and ⋮
+/// (card or row) and the ⋮ of its page: play, next, queue │ edit │ sync │
+/// what cannot simply be taken back, last: the link to a service (asked
+/// first) and the delete.
 pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
     use PlaylistAct as A;
     let mut rows = Vec::new();
@@ -487,8 +516,8 @@ pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
     }
-    rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     if o.editable {
         rows.push(Row::Divider);
         // The page edits the name and the cover; a card renames.
@@ -501,30 +530,37 @@ pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
         for &m in nikgob_view::PlaylistSyncMode::ALL {
             rows.push(Row::Item(A::Sync(m), MenuItem::new(sync_menu_label(m)).icon(Icon::Sync).selected(m == mode)));
         }
-    } else if o.can_link {
+    }
+    let link = o.sync.is_none() && o.can_link;
+    if link || o.editable {
+        rows.push(Row::Divider);
+    }
+    if link {
         rows.push(Row::Item(A::Link, MenuItem::new("Связать с сервисом…").icon(Icon::Sync)));
     }
     if o.editable {
-        rows.push(Row::Divider);
         rows.push(Row::Item(A::Delete, MenuItem::new("Удалить плейлист").icon(Icon::Delete)));
     }
     rows
 }
 
-/// The command of a playlist action that needs no dialog (not «Изменить»
-/// or «Удалить»).
+/// The command of a playlist action that needs no dialog (not «Изменить»,
+/// «Связать с сервисом…» or «Удалить»).
 pub fn playlist_command(act: PlaylistAct, id: PlaylistId) -> Option<Command> {
-    use nikgob_view::PlaylistSyncMode as M;
     Some(match act {
         PlaylistAct::Play => Command::PlayPlaylist { id, start: None, shuffle: false },
         PlaylistAct::Shuffle => Command::PlayPlaylist { id, start: None, shuffle: true },
         PlaylistAct::Next => Command::PlayPlaylistNext(id),
         PlaylistAct::Queue => Command::EnqueuePlaylist(id),
         PlaylistAct::Sync(mode) => Command::SetPlaylistSync { playlist: id, mode },
-        // Not linked: it is made in a service, synced both ways.
-        PlaylistAct::Link => Command::SetPlaylistSync { playlist: id, mode: M::TwoWay },
-        PlaylistAct::Edit | PlaylistAct::Delete => return None,
+        PlaylistAct::Edit | PlaylistAct::Link | PlaylistAct::Delete => return None,
     })
+}
+
+/// «Связать с сервисом…» once it is confirmed: the playlist is made in a
+/// service and synced both ways.
+pub fn playlist_link_command(id: PlaylistId) -> Command {
+    Command::SetPlaylistSync { playlist: id, mode: nikgob_view::PlaylistSyncMode::TwoWay }
 }
 
 /// Right-click menu of a playlist (card or row): [`playlist_rows`]; with
@@ -536,13 +572,29 @@ pub fn playlist_menu_at(
     pages: Option<&mut PageState>,
     out: &mut Vec<Command>,
 ) {
-    if Menu::context_idle(resp, ("playlist-menu", resp.id)) {
-        return;
-    }
+    playlist_menus(resp, None, p, pages, out);
+}
+
+/// [`playlist_menu_at`] on a right click on `resp` and on its ⋮ (`more`).
+pub fn playlist_menus(
+    resp: &Response,
+    more: Option<&Response>,
+    p: &PlaylistCard,
+    pages: Option<&mut PageState>,
+    out: &mut Vec<Command>,
+) {
     let editable = pages.is_some() && !p.pinned && p.id != LIKED_PLAYLIST;
     let of = PlaylistMenuOf { editable, ..Default::default() };
-    let (menu, acts) = menu_of(("playlist-menu", resp.id), playlist_rows(of));
-    let Some(act) = menu.context_menu(resp).and_then(|i| acts.get(i).copied()) else { return };
+    let mut act = None;
+    if let Some(m) = more {
+        let (menu, acts) = menu_of(("playlist-more", m.id), playlist_rows(of));
+        act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
+    }
+    if !Menu::context_idle(resp, ("playlist-menu", resp.id)) {
+        let (menu, acts) = menu_of(("playlist-menu", resp.id), playlist_rows(of));
+        act = act.or(menu.context_menu(resp).and_then(|i| acts.get(i).copied()));
+    }
+    let Some(act) = act else { return };
     match act {
         PlaylistAct::Edit => {
             if let Some(pages) = pages {
@@ -698,20 +750,10 @@ pub fn artist_avatar(
     size: f32,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    artist_impl(ui, a, size, false, out)
-}
-
-/// How tall [`artist_avatar`] is for `a` at `size` (the name, and in the
-/// library the track count under it).
-pub fn artist_avatar_height(a: &ArtistCard, size: f32) -> f32 {
-    size + if a.track_count == 0 { 28.0 } else { 48.0 }
-}
-
-fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
     // In the library the name has the track count under it.
-    let caption = if radio { String::new() } else { artist_tracks(a) };
+    let caption = artist_tracks(a);
     let text_h = if caption.is_empty() { 28.0 } else { 48.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size + text_h), Sense::click());
     // A row holds every artist of the library: the ones scrolled out of
@@ -720,7 +762,9 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
         return None;
     }
     let img = Rect::from_min_size(rect.min, vec2(size, size));
-    let hover = resp.contains_pointer();
+    let id = ui.id().with(("artist-card", a.id));
+    let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
+    let hover = resp.contains_pointer() || menu_open;
     let grow = anim::f32(
         ui.ctx(),
         ui.id().with(("artist-hover", a.id)),
@@ -738,13 +782,6 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
         pos2(rect.center().x, img.bottom() + 6.0 + galley.size().y * 0.5),
         galley.size(),
     );
-    // On a mix the name is the way to the page: a link under the pointer.
-    let name = radio.then(|| {
-        ui.interact(name_rect.expand2(vec2(4.0, 2.0)), ui.id().with(("artist-name", a.id)), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Открыть исполнителя")
-    });
-    let underline = name.as_ref().is_some_and(Response::hovered);
     ui.painter().galley(name_rect.min, galley, s.on_surface);
     if !caption.is_empty() {
         let mut job = egui::text::LayoutJob::single_section(caption, TypeRole::BodySmall.style().text_format(s.on_surface_variant));
@@ -753,16 +790,12 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
         let at = pos2(rect.center().x - g.size().x * 0.5, name_rect.bottom() + 2.0);
         ui.painter().galley(at, g, s.on_surface_variant);
     }
-    if underline {
-        let y = name_rect.bottom() - 1.0;
-        ui.painter().line_segment([pos2(name_rect.left(), y), pos2(name_rect.right(), y)], Stroke::new(1.0, s.on_surface));
-    }
 
     // ▶ over the avatar, fading in with the pointer (fast effects).
     let k = anim::fraction(
         ui.ctx(),
         ui.id().with(("artist-play", a.id)),
-        if hover && !underline { 1.0 } else { 0.0 },
+        if hover { 1.0 } else { 0.0 },
         theme.motion.fast_effects,
     )
     .clamp(0.0, 1.0);
@@ -779,24 +812,33 @@ fn artist_impl(ui: &mut Ui, a: &ArtistCard, size: f32, radio: bool, out: &mut Ve
                     .size(Size::M)
                     .style(Style::Filled)
                     .filled_icon(true)
-                    .tooltip(if radio { "Радио исполнителя" } else { "Слушать микс" })
+                    .tooltip("Слушать микс")
                     .id_salt(("artist-play-btn", a.id)),
             )
             .clicked();
     }
-    let name_clicked = name.as_ref().is_some_and(Response::clicked);
-    let menu = artist_menu_with(&resp, a, radio, out);
+    // ⋮ at the avatar's top right, as on the other cards.
+    let more = super::cards::more_button(ui, id, hover, card_more_slot(img));
+    super::cards::keep_more_open(ui.ctx(), id, more.as_ref());
+    let menu = artist_menus(&resp, more.as_ref(), a, out);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if radio {
-        if (play || resp.clicked()) && !name_clicked {
-            out.push(Command::PlayMix { id: nikgob_view::MixId::Artist(a.id) });
-        }
-        return name_clicked.then_some(Route::Artist(a.id)).or(menu);
-    }
     if play {
         out.push(Command::PlayArtist { id: a.id, shuffle: false });
     }
-    (resp.clicked() && !play).then_some(Route::Artist(a.id)).or(menu)
+    let more_clicked = more.as_ref().is_some_and(Response::clicked);
+    (resp.clicked() && !play && !more_clicked).then_some(Route::Artist(a.id)).or(menu)
+}
+
+/// How tall [`artist_avatar`] is for `a` at `size` (the name, and in the
+/// library the track count under it).
+pub fn artist_avatar_height(a: &ArtistCard, size: f32) -> f32 {
+    size + if a.track_count == 0 { 28.0 } else { 48.0 }
+}
+
+/// Where a round or square cover's ⋮ stands: inside its top right.
+pub fn card_more_slot(cover: Rect) -> Rect {
+    let m = Size::S.height();
+    Rect::from_min_size(pos2(cover.right() - 4.0 - m, cover.top() + 4.0), vec2(m, m))
 }
 
 /// What the menu of an artist does.
@@ -821,12 +863,12 @@ pub fn artist_rows(a: &ArtistCard, on_page: bool, marks: &nikgob_view::DislikesV
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
         rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
     }
-    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     if !on_page {
         rows.push(Row::Item(A::Follow, MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite)));
     }
-    rows.push(Row::Item(A::Ban, super::ban_item(Some(a.id), marks)));
+    rows.push(Row::Item(A::Ban, super::ban_item(a.id, marks)));
     rows
 }
 
@@ -844,41 +886,23 @@ pub fn artist_apply(act: ArtistAct, a: &ArtistCard, marks: &nikgob_view::Dislike
 
 /// Right-click menu of an artist (card or row): [`artist_rows`].
 pub fn artist_menu(resp: &Response, a: &ArtistCard, out: &mut Vec<Command>) {
-    artist_menu_with(resp, a, false, out);
+    artist_menus(resp, None, a, out);
 }
 
-/// [`artist_menu`]; on a mix card (`radio`) the radio comes first and the
-/// artist's page can be opened from it.
-fn artist_menu_with(resp: &Response, a: &ArtistCard, radio: bool, out: &mut Vec<Command>) -> Option<Route> {
-    if Menu::context_idle(resp, ("artist-menu", resp.id)) {
-        return None;
-    }
-    let follow = MenuItem::new(if a.liked { "Отписаться" } else { "Подписаться" }).icon(Icon::Favorite);
-    let radio_cmd = Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a.id) };
+/// The menu of an artist on a right click on `resp` and on its ⋮
+/// (`more`): the same [`artist_rows`].
+fn artist_menus(resp: &Response, more: Option<&Response>, a: &ArtistCard, out: &mut Vec<Command>) -> Option<Route> {
     let marks = super::marks(&resp.ctx);
-    let ban = super::ban_item(Some(a.id), &marks);
-    if radio {
-        match Menu::new(("artist-menu", resp.id))
-            .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio))
-            .item(MenuItem::new("Перемешать его треки").icon(Icon::Shuffle))
-            .item(MenuItem::new("Открыть исполнителя").icon(Icon::Person))
-            .divider()
-            .item(follow)
-            .item(ban)
-            .context_menu(resp)?
-        {
-            0 => out.push(radio_cmd),
-            1 => out.push(Command::PlayArtist { id: a.id, shuffle: true }),
-            2 => return Some(Route::Artist(a.id)),
-            3 => out.push(Command::Like(LikeTarget::Artist(a.id), !a.liked)),
-            4 => out.push(super::ban_command(a.id, &marks)),
-            _ => {}
-        }
-        return None;
+    let mut act = None;
+    if let Some(m) = more {
+        let (menu, acts) = menu_of(("artist-more", m.id), artist_rows(a, false, &marks));
+        act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
     }
-    let (menu, acts) = menu_of(("artist-menu", resp.id), artist_rows(a, false, &marks));
-    let act = menu.context_menu(resp).and_then(|i| acts.get(i).copied())?;
-    artist_apply(act, a, &marks, out);
+    if !Menu::context_idle(resp, ("artist-menu", resp.id)) {
+        let (menu, acts) = menu_of(("artist-menu", resp.id), artist_rows(a, false, &marks));
+        act = act.or(menu.context_menu(resp).and_then(|i| acts.get(i).copied()));
+    }
+    artist_apply(act?, a, &marks, out);
     None
 }
 
@@ -1013,14 +1037,14 @@ pub fn track_list_ext(
         match opts.playlist {
             Some(pl) => {
                 if let Some(m) = &o.more {
-                    let (menu, acts) = playlist_track_menu(menu_key, t, pl, state);
+                    let (menu, acts) = playlist_track_menu(menu_key, t, pl, state, &wish);
                     let act = menu.attach(m).and_then(|i| acts.get(i).copied());
                     *nav = playlist_track_pick(&m.ctx, act, t, pl, Some(m.rect), pages, state, out).or(nav.take());
                 }
                 let act = if Menu::context_idle(&o.response, menu_key.with("ctx")) {
                     None
                 } else {
-                    let (menu, acts) = playlist_track_menu(menu_key.with("ctx"), t, pl, state);
+                    let (menu, acts) = playlist_track_menu(menu_key.with("ctx"), t, pl, state, &wish);
                     menu.context_menu(&o.response).and_then(|i| acts.get(i).copied())
                 };
                 *nav = playlist_track_pick(&o.response.ctx, act, t, pl, None, pages, state, out).or(nav.take());
@@ -1215,7 +1239,7 @@ fn track_row(
                         IconButton::new(Icon::Favorite)
                             .size(Size::Xs)
                             .selected(liked)
-                            .tooltip(if liked { "Убрать из любимого" } else { "В любимое" })
+                            .tooltip(super::like_label(liked))
                             .id_salt(("track-like", id, i)),
                     )
                     .clicked()
@@ -1305,6 +1329,13 @@ impl WishIndex {
         {
             return ix;
         }
+        let ix = std::sync::Arc::new(Self::build(w));
+        ctx.data_mut(|d| d.insert_temp(key, (pass, ix.clone())));
+        ix
+    }
+
+    /// The index of `w` without the frame's cache (a menu built once).
+    pub fn build(w: &WishlistView) -> Self {
         let mut ix = Self::default();
         for r in &w.items {
             if matches!(r.status, WishlistStatus::Done | WishlistStatus::Dismissed) {
@@ -1323,8 +1354,6 @@ impl WishIndex {
                 _ => {}
             }
         }
-        let ix = std::sync::Arc::new(ix);
-        ctx.data_mut(|d| d.insert_temp(key, (pass, ix.clone())));
         ix
     }
 
@@ -1361,23 +1390,20 @@ pub fn wish_mark(ui: &mut Ui, st: WishlistStatus, torrents: bool, salt: impl std
 }
 
 /// ⋮ / right-click menu of a playlist row: the library track's
-/// [`super::library_track_rows`], then «Убрать из плейлиста».
-pub(crate) fn playlist_track_rows(
-    track: &TrackRow,
-    playlist: PlaylistId,
-    marks: &nikgob_view::DislikesView,
-    info: bool,
-    also: Option<&(ReleaseId, String)>,
-) -> Vec<Row<super::TrackAct>> {
-    let mut rows = super::library_track_rows(track, marks, info, also);
-    rows.push(Row::Divider);
-    let remove = if playlist == LIKED_PLAYLIST { "Убрать из любимого" } else { "Убрать из плейлиста" };
+/// [`super::library_track_rows`], then «Убрать из плейлиста» last, with
+/// «Разные песни» when the track has it.
+pub(crate) fn playlist_track_rows(track: &TrackRow, playlist: PlaylistId, of: super::LibraryRowsOf<'_>) -> Vec<Row<super::TrackAct>> {
+    let mut rows = super::library_track_rows(track, of);
+    if !matches!(rows.last(), Some(Row::Item(super::TrackAct::Apart, _))) {
+        rows.push(Row::Divider);
+    }
+    let remove = if playlist == LIKED_PLAYLIST { super::UNLIKE } else { "Убрать из плейлиста" };
     rows.push(Row::Item(super::TrackAct::Remove, MenuItem::new(remove).icon(Icon::Delete)));
     rows
 }
 
-fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, state: &ViewState) -> (Menu, Vec<super::TrackAct>) {
-    let rows = playlist_track_rows(track, playlist, &state.dislikes, state.prefs.pane_info, state.also_on.get(&track.id));
+fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, state: &ViewState, wish: &WishIndex) -> (Menu, Vec<super::TrackAct>) {
+    let rows = playlist_track_rows(track, playlist, super::LibraryRowsOf::of(state, track, wish));
     let rows = super::placed(super::with_speed_row(rows, &state.speeds), &state.prefs.track_menu, |a| a.menu_item(track.has_local));
     let (menu, acts) = menu_of(key, rows);
     (menu.align_right(true), acts)
@@ -1700,6 +1726,7 @@ mod menu_tests {
         // The liked playlist: no edit, no delete, still next and queue.
         let liked = row_acts(&playlist_rows(PlaylistMenuOf::default()));
         assert_eq!(liked, [PlaylistAct::Play, PlaylistAct::Shuffle, PlaylistAct::Next, PlaylistAct::Queue]);
+        assert_eq!(&labels(&playlist_rows(PlaylistMenuOf::default()))[2..], ["Сыграть следующим", "В очередь"]);
         let id = PlaylistId::new();
         assert_eq!(playlist_command(PlaylistAct::Next, id), Some(Command::PlayPlaylistNext(id)));
         assert_eq!(playlist_command(PlaylistAct::Queue, id), Some(Command::EnqueuePlaylist(id)));
@@ -1726,10 +1753,15 @@ mod menu_tests {
             playlist_command(PlaylistAct::Sync(PlaylistSyncMode::Once), id),
             Some(Command::SetPlaylistSync { playlist: id, mode: PlaylistSyncMode::Once })
         );
-        // Not linked: the way to link it instead of the modes.
-        let unlinked = row_acts(&playlist_rows(PlaylistMenuOf { on_page: true, editable: true, can_link: true, ..Default::default() }));
-        assert!(unlinked.contains(&PlaylistAct::Link));
+        // Not linked: the way to link it instead of the modes, last with
+        // the delete after their divider; asked first, so no command yet.
+        let rows = playlist_rows(PlaylistMenuOf { on_page: true, editable: true, can_link: true, ..Default::default() });
+        let unlinked = row_acts(&rows);
+        assert_eq!(&unlinked[unlinked.len() - 2..], [PlaylistAct::Link, PlaylistAct::Delete]);
+        assert!(matches!(rows[rows.len() - 3], Row::Divider));
         assert!(!unlinked.iter().any(|a| matches!(a, PlaylistAct::Sync(_))));
+        assert_eq!(playlist_command(PlaylistAct::Link, id), None);
+        assert_eq!(super::playlist_link_command(id), Command::SetPlaylistSync { playlist: id, mode: PlaylistSyncMode::TwoWay });
     }
 
     /// The album's right-click menu and its page's ⋮ are one list in one
@@ -1758,12 +1790,22 @@ mod menu_tests {
                 .collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(&card[..5], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
+        assert_eq!(&card[..6], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Like, ReleaseAct::Playlist]);
         assert_eq!(&page[..3], [ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
-        assert_eq!(&labels(&release_rows(&r, false))[3..5], ["В конец очереди", "В плейлист…"]);
+        assert_eq!(&labels(&release_rows(&r, false))[2..6], ["Сыграть следующим", "В очередь", "Нравится", "В плейлист…"]);
         for acts in [&card, &page] {
             assert_eq!(&acts[acts.len() - 2..], [ReleaseAct::Trash, ReleaseAct::Purge]);
         }
+        // Not all of it here: what it lacks can be downloaded from the card.
+        let part = ReleaseCard { local_tracks: 3, total_tracks: Some(12), ..r.clone() };
+        let acts = row_acts(&release_rows(&part, false));
+        assert_eq!(&acts[acts.len() - 3..], [ReleaseAct::Download, ReleaseAct::Trash, ReleaseAct::Purge]);
+        assert!(!row_acts(&release_rows(&part, true)).contains(&ReleaseAct::Download), "a button on its page");
+        // A stream-only album has no files to delete for good, and an
+        // album with no known artist no way to one.
+        let stream = ReleaseCard { local_tracks: 0, ..part };
+        let acts = row_acts(&release_rows(&stream, false));
+        assert!(acts.contains(&ReleaseAct::Trash) && !acts.contains(&ReleaseAct::Purge) && !acts.contains(&ReleaseAct::Artist));
     }
 
     /// The artist's right-click menu and its page's ⋮: one list, the page
@@ -1787,6 +1829,7 @@ mod menu_tests {
             .collect();
         assert_eq!(shared, page);
         assert_eq!(page, [ArtistAct::Queue, ArtistAct::Ban]);
+        assert_eq!(labels(&artist_rows(&a, true, &marks))[0], "В очередь");
     }
 
     fn track(has_local: bool) -> nikgob_view::TrackRow {
@@ -1796,7 +1839,7 @@ mod menu_tests {
             artist: "Artist".into(),
             album: Some("Album".into()),
             release_id: Some(ReleaseId::new()),
-            artists: Default::default(),
+            artists: nikgob_view::Credit::single("Artist", Some(nikgob_view::ArtistId::new())),
             disc_no: 1,
             track_no: 1,
             duration: None,
@@ -1809,19 +1852,23 @@ mod menu_tests {
         }
     }
 
-    /// The three track menus (a library row, a playlist row, a service's
-    /// song) share one list: the same common actions in one order, then
-    /// what only the place adds (the deletes, «Убрать из плейлиста»).
+    fn of(marks: &nikgob_view::DislikesView) -> crate::screens::pages::LibraryRowsOf<'_> {
+        crate::screens::pages::LibraryRowsOf { marks, info: false, also: None, torrents: false, wished: None }
+    }
+
+    /// The track menus (a library row, a playlist row, a service's song)
+    /// share one list: the same common actions in one order, then what
+    /// only the place adds («Убрать из плейлиста», last).
     #[test]
     fn every_track_menu_has_the_common_actions_in_one_order() {
-        use crate::screens::pages::{TrackAct as A, library_track_rows};
+        use crate::screens::pages::{LibraryRowsOf, TrackAct as A, library_track_rows};
         let marks = nikgob_view::DislikesView::default();
         let t = track(true);
-        let library = row_acts(&library_track_rows(&t, &marks, false, None));
-        let playlist = row_acts(&super::playlist_track_rows(&t, PlaylistId::new(), &marks, false, None));
+        let library = row_acts(&library_track_rows(&t, of(&marks)));
+        let playlist = row_acts(&super::playlist_track_rows(&t, PlaylistId::new(), of(&marks)));
         assert_eq!(&playlist[..library.len()], &library[..]);
         assert_eq!(playlist.last(), Some(&A::Remove));
-        let head = [A::Next, A::Queue, A::Playlist, A::Radio, A::Album, A::Artist, A::Share];
+        let head = [A::Next, A::Queue, A::Radio, A::Playlist, A::Album, A::Artist, A::Share];
         assert_eq!(&library[..head.len()], head);
         assert_eq!(&library[library.len() - 2..], [A::Dislike, A::Ban]);
         // The service's song: the same head and tail around its downloads.
@@ -1829,23 +1876,28 @@ mod menu_tests {
             playable: true,
             has_album: true,
             has_artists: true,
+            has_file: false,
             also_on: None,
             info: false,
-            fetch: crate::components::MenuItem::new("Скачать"),
-            torrents: None,
+            fetch: Some(crate::components::MenuItem::new("Скачать")),
+            better: false,
+            pick_release: false,
             find_song: None,
             wrong_file: false,
             dislike: crate::components::MenuItem::new("Не нравится"),
-            ban: crate::components::MenuItem::new("Не рекомендовать исполнителя"),
+            ban: Some(crate::components::MenuItem::new("Не рекомендовать исполнителя")),
         }));
         assert_eq!(&stream[..head.len()], head);
         assert_eq!(&stream[head.len()..], [A::Fetch, A::AlbumDownload, A::Dislike, A::Ban]);
-        // The other album of the song sits right after «К альбому».
+        // The other album of the song sits right after «К альбому»; «Разные
+        // песни» and «Убрать из плейлиста» close the menu in one group.
         let also = (ReleaseId::new(), "Other".to_owned());
-        let rows = library_track_rows(&t, &marks, true, Some(&also));
+        let with_also = LibraryRowsOf { also: Some(&also), ..of(&marks) };
+        let rows = library_track_rows(&t, with_also);
         let acts = row_acts(&rows);
-        assert_eq!(&acts[4..8], [A::Album, A::AlsoOn, A::Apart, A::Artist]);
-        assert_eq!(&acts[8..10], [A::Share, A::Info]);
+        assert_eq!(&acts[4..7], [A::Album, A::AlsoOn, A::Artist]);
         assert!(labels(&rows).iter().any(|l| l == "Есть и на альбоме «Other»"));
+        let rows = super::playlist_track_rows(&t, PlaylistId::new(), with_also);
+        assert!(matches!(&rows[rows.len() - 3..], [Row::Divider, Row::Item(A::Apart, _), Row::Item(A::Remove, _)]));
     }
 }

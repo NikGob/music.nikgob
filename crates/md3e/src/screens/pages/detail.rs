@@ -257,17 +257,20 @@ pub fn release(
             Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
             widgets::shuffle_member(ui),
         ];
-        if missing {
+        // By hand, through the indexer: only with a torrent source set up.
+        let torrents = state.prefs.prowlarr_configured;
+        if missing && torrents {
             members.push(
                 SplitButton::new("rel-download", &dl_label)
                     .icon(Icon::Download)
                     .size(Size::M)
                     .style(Style::Tonal)
-                    .item(MenuItem::new("Все недостающие").icon(Icon::Download))
-                    .item(MenuItem::new("Выбрать раздачу…").icon(Icon::Search))
+                    .item(MenuItem::new(super::PICK_RELEASE).icon(Icon::Search))
                     .item(MenuItem::new("Заменить на FLAC…").icon(Icon::Search))
                     .into(),
             );
+        } else if missing {
+            members.push(Button::new(&dl_label).icon(Icon::Download).size(Size::M).style(Style::Tonal).into());
         }
         members.push(
             IconButton::new(Icon::Favorite).size(Size::M).style(Style::Tonal).selected(r.liked).tooltip(widgets::album_like_label(r.liked)).into(),
@@ -294,9 +297,8 @@ pub fn release(
             }
         }
         match row.picked {
-            Some((2, 0)) => out.push(Command::DownloadRelease(id)),
-            Some((2, 1)) => out.push(Command::SearchTorrents(query.clone())),
-            Some((2, 2)) => out.push(Command::SearchTorrents(format!("{query} FLAC"))),
+            Some((2, 0)) => out.push(Command::SearchTorrents(query.clone())),
+            Some((2, 1)) => out.push(Command::SearchTorrents(format!("{query} FLAC"))),
             _ => {}
         }
         if resp[2 + off].clicked() {
@@ -480,10 +482,6 @@ fn discography(
         return None;
     }
     widgets::section_header(ui, "Нет в библиотеке", false);
-    ui.label(TypeRole::BodyMedium.style().rich_para(
-        "Есть в Spotify или YouTube Music, а у тебя нет — играют из стрима.",
-        s.on_surface_variant,
-    ));
     ui.add_space(8.0);
     // Albums, then singles and EPs, then compilations (newest first each).
     let kinds: [(&str, fn(ReleaseType) -> bool); 3] = [
@@ -808,6 +806,8 @@ pub fn playlist(
                     EditState { open: true, shown: false, name: p.card.name.clone(), cover: None, mode: None },
                 ),
                 Some(widgets::PlaylistAct::Delete) => pages.confirm_delete = Some(id),
+                // Made in a service at once: asked first.
+                Some(widgets::PlaylistAct::Link) => pages.confirm_link = Some(id),
                 Some(a) => out.extend(widgets::playlist_command(a, id)),
                 None => {}
             }
@@ -818,7 +818,7 @@ pub fn playlist(
                 ui,
                 Icon::QueueMusic,
                 "Плейлист пуст",
-                "Добавляй треки через ⋮ → «В плейлист…» или правой кнопкой по треку.",
+                "",
                 None,
             );
             return None;
@@ -929,7 +929,7 @@ pub fn mix(
         if r[1].clicked() {
             super::cards::mix_do(ui.ctx(), l, super::cards::MixItem::Shuffle, world, out);
         }
-        let items = super::cards::mix_items(l, can_blend, false);
+        let items = super::cards::mix_items(l, can_blend, false, true);
         if let Some(k) = super::cards::mix_menu(Id::new("mix-more"), l, &items).attach(&r[2]) {
             nav = super::cards::mix_do(ui.ctx(), l, items[k], world, out);
             // Left out: back to where it was offered.

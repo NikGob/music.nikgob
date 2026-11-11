@@ -190,7 +190,7 @@ fn track_row(
                         IconButton::new(Icon::Favorite)
                             .size(Size::Xs)
                             .selected(t.liked)
-                            .tooltip(if t.liked { "Убрать из любимого" } else { "В любимое" })
+                            .tooltip(super::like_label(t.liked))
                             .id_salt(("st-like", id, i)),
                     )
                     .clicked()
@@ -234,30 +234,27 @@ fn track_row(
 }
 
 /// [`super::track_rows`] of a service's song: the common rows in the
-/// library track's order, its download for the files.
+/// library track's order, its download for the files (none once it has a
+/// file or while it is on its way: the row's mark says so).
 pub(crate) fn stream_track_rows(
     t: &StreamTrackRow,
     wished: Option<WishlistStatus>,
     marks: &nikgob_view::DislikesView,
 ) -> Vec<widgets::Row<super::TrackAct>> {
-    let (download, can) = match (t.has_local, wished) {
-        (true, _) => ("Уже скачан", false),
-        (false, Some(WishlistStatus::Waiting | WishlistStatus::NoTorrent | WishlistStatus::Failed)) => ("Скачать сейчас", true),
-        (false, Some(_)) => ("Уже в «Хочу скачать»", false),
-        (false, None) => ("Скачать", true),
-    };
     super::track_rows(super::TrackMenuOf {
         playable: t.playable,
         has_album: t.album_id.is_some(),
         has_artists: !t.artists.linked().is_empty(),
+        has_file: t.has_local,
         also_on: None,
         info: false,
-        fetch: MenuItem::new(download).icon(Icon::Download).enabled(can),
-        torrents: None,
+        fetch: if t.has_local { None } else { super::download_item(wished) },
+        better: false,
+        pick_release: false,
         find_song: None,
         wrong_file: false,
         dislike: super::dislike_item(t.track.is_some_and(|id| marks.track(id))),
-        ban: MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block),
+        ban: (!t.artist.is_empty()).then(|| MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block)),
     })
 }
 
@@ -272,6 +269,25 @@ fn track_menu(
     let rows = super::placed(stream_track_rows(t, wished, marks), slots, |a| a.menu_item(false));
     let (menu, acts) = widgets::menu_of(key, rows);
     (menu.align_right(true), acts)
+}
+
+/// A service song's menu on a right click on `resp` (a card that stands
+/// for it, as search's top one).
+pub(super) fn track_context_menu(
+    resp: &egui::Response,
+    t: &StreamTrackRow,
+    state: &ViewState,
+    pages: &mut PageState,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let key = egui::Id::new(("st-menu-card", resp.id));
+    if Menu::context_idle(resp, key) {
+        return None;
+    }
+    let wish = widgets::WishIndex::of(&resp.ctx, &state.downloads.wishlist);
+    let (menu, acts) = track_menu(key, t, wish_of(t, &wish), &state.dislikes, &state.prefs.track_menu);
+    let act = menu.context_menu(resp).and_then(|k| acts.get(k).copied());
+    track_pick(&resp.ctx, act, t, None, pages, out)
 }
 
 /// «Не нравится» of a service's track: its library track's mark when it
@@ -312,8 +328,8 @@ pub(super) fn track_pick(
         A::Dislike => out.push(stream_dislike(t, &super::marks(ctx))),
         A::Ban => out.push(Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(t.artist.clone()), dislike: true }),
         // Only a library track has these.
-        A::AlsoOn | A::Apart | A::Info | A::Speed | A::Equalizer | A::Torrents | A::ToMp3 | A::FindSong | A::WrongFile | A::Remove
-        | A::Trash | A::Purge => {}
+        A::AlsoOn | A::Apart | A::Info | A::Speed | A::Equalizer | A::Better | A::PickRelease | A::ToMp3 | A::FindSong | A::WrongFile
+        | A::Remove | A::Trash | A::Purge => {}
     }
     None
 }
@@ -388,13 +404,7 @@ pub fn album_card(
     if o.download_clicked {
         out.push(Command::DownloadStreamAlbum(a.remote.clone()));
     }
-    let mut nav = None;
-    if let Some(m) = &o.menu {
-        let (menu, acts) = widgets::menu_of(("st-album-more", m.id), stream_album_rows(album_of(a, can_download)));
-        nav = album_pick(ui, menu.align_right(true).attach(m), &acts, a, out);
-    }
-    let (menu, acts) = widgets::menu_of(("st-album-menu", o.response.id), stream_album_rows(album_of(a, can_download)));
-    nav = album_pick(ui, menu.context_menu(&o.response), &acts, a, out).or(nav);
+    let nav = album_menus(&o.response, o.menu.as_ref(), a, wishlist, out);
     if o.play_clicked {
         out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
         None
@@ -403,6 +413,23 @@ pub fn album_card(
     } else {
         nav
     }
+}
+
+/// The menu of a service's album card on a right click on `resp` and on
+/// its ⋮ (`more`): [`stream_album_rows`]. For every card of such an album
+/// (search, an artist, «Новые релизы», a world's «Новое»).
+pub fn album_menus(resp: &egui::Response, more: Option<&egui::Response>, a: &StreamAlbumCard, wishlist: &WishlistView, out: &mut Vec<Command>) -> Option<Route> {
+    let of = || album_of(a, album_status(a, wishlist) == CoverStatus::None);
+    let mut act = None;
+    if let Some(m) = more {
+        let (menu, acts) = widgets::menu_of(("st-album-more", m.id), stream_album_rows(of()));
+        act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
+    }
+    if !Menu::context_idle(resp, ("st-album-menu", resp.id)) {
+        let (menu, acts) = widgets::menu_of(("st-album-menu", resp.id), stream_album_rows(of()));
+        act = act.or(menu.context_menu(resp).and_then(|i| acts.get(i).copied()));
+    }
+    stream_album_apply(&resp.ctx, act?, &a.remote, &a.artists, a.release, out)
 }
 
 /// What the menu of a service's album does.
@@ -417,7 +444,6 @@ pub enum StreamAlbumAct {
     Artist,
     Share,
     Download,
-    Open,
     Library,
 }
 
@@ -429,17 +455,17 @@ pub struct StreamAlbumMenuOf {
     pub has_artists: bool,
     /// Linked to a library album.
     pub in_library: bool,
-    /// The library has all of it.
-    pub complete: bool,
+    /// Nothing downloads it yet and the library lacks some of it.
     pub can_download: bool,
 }
 
 /// The one list of a service album's actions, in the order of the library
 /// album's ([`widgets::release_rows`]): its card's right click and ⋮ and
-/// the ⋮ of its page. The page leaves out its buttons (play, shuffle, the
-/// like, «Скачать»); on the card playing next, the queue and «В плейлист…»
-/// go by the album's id (the runtime fetches its tracks). The service's
-/// own rows come last.
+/// the ⋮ of its page. Play │ the like, a playlist │ the artist, its
+/// library copy, share │ the download. The page leaves out its buttons
+/// (play, shuffle, the like, the download); on the card playing next, the
+/// queue and «В плейлист…» go by the album's id (the runtime fetches its
+/// tracks).
 pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAct>> {
     use StreamAlbumAct as A;
     use widgets::Row;
@@ -448,23 +474,26 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
     }
-    rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
-    rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Divider);
+    if !o.on_page {
+        // Liking is not downloading: there whatever the library has of it.
+        rows.push(Row::Item(A::Like, MenuItem::new(super::LIKE).icon(Icon::Favorite)));
+    }
     rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
     rows.push(Row::Divider);
-    if !o.on_page {
-        // The like also downloads (as the settings say): nothing to do
-        // once the library has it all.
-        rows.push(Row::Item(A::Like, MenuItem::new("В любимое").icon(Icon::Favorite).enabled(!o.complete)));
+    if o.has_artists {
+        rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
     }
-    rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person).enabled(o.has_artists)));
+    if o.in_library {
+        rows.push(Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic)));
+    }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
-    rows.push(Row::Divider);
-    if !o.on_page {
-        rows.push(Row::Item(A::Download, MenuItem::new("Скачать").icon(Icon::Download).enabled(o.can_download)));
-        rows.push(Row::Item(A::Open, MenuItem::new("Открыть").icon(Icon::Album)));
+    if !o.on_page && o.can_download {
+        rows.push(Row::Divider);
+        rows.push(Row::Item(A::Download, MenuItem::new("Скачать альбом").icon(Icon::Download)));
     }
-    rows.push(Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic).enabled(o.in_library)));
     rows
 }
 
@@ -487,7 +516,6 @@ fn stream_album_apply(
         A::Like => out.push(Command::LikeStreamAlbum { album: id.clone(), on: true }),
         A::Share => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),
         A::Artist => return artist_links::go_to(ctx, artist_links::stream(artists)),
-        A::Open => return Some(Route::Stream(StreamPage::Album(id.clone()))),
         A::Library => return release.map(Route::Release),
         A::Next => out.push(Command::PlayStreamAlbumNext(id.clone())),
         A::Queue => out.push(Command::EnqueueStreamAlbum(id.clone())),
@@ -504,19 +532,14 @@ fn album_of(a: &StreamAlbumCard, can_download: bool) -> StreamAlbumMenuOf {
         on_page: false,
         has_artists: !a.artists.linked().is_empty(),
         in_library: a.release.is_some(),
-        complete: a.have.complete(),
         can_download,
     }
 }
 
-fn album_pick(ui: &Ui, picked: Option<usize>, acts: &[StreamAlbumAct], a: &StreamAlbumCard, out: &mut Vec<Command>) -> Option<Route> {
-    let act = picked.and_then(|i| acts.get(i).copied())?;
-    stream_album_apply(ui.ctx(), act, &a.remote, &a.artists, a.release, out)
-}
-
-/// An artist of a service: the photo (or initials) in a shape, the name.
-/// A library artist opens the library page, anyone else the service's.
-pub fn artist_card(ui: &mut Ui, a: &StreamArtistCard, size: f32) -> Option<Route> {
+/// An artist of a service: the photo (or initials) in a shape, the name;
+/// ⋮ under the pointer and the right click: [`stream_artist_rows`]. A
+/// library artist opens the library page, anyone else the service's.
+pub fn artist_card(ui: &mut Ui, a: &StreamArtistCard, size: f32, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size + 28.0), Sense::click());
     let img = Rect::from_min_size(rect.min, vec2(size, size));
@@ -528,14 +551,84 @@ pub fn artist_card(ui: &mut Ui, a: &StreamArtistCard, size: f32) -> Option<Route
     widgets::shape_image(ui, a.image_url.as_deref(), &widgets::initials(&a.name), img, shape);
     let g = common_line(ui, &a.name, size);
     ui.painter().galley(pos2(rect.center().x - g.size().x * 0.5, img.bottom() + 6.0), g, s.on_surface);
-    if resp.hovered() {
+    let id = ui.id().with(("st-artist", &a.remote));
+    let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
+    let hover = resp.hovered() || menu_open;
+    if hover {
         ui.painter().circle_filled(img.center(), size * 0.5, s.on_surface.gamma_multiply(0.06));
     }
+    let more = super::cards::more_button(ui, id, hover, widgets::card_more_slot(img));
+    super::cards::keep_more_open(ui.ctx(), id, more.as_ref());
+    artist_menus(&resp, more.as_ref(), a, out);
+    let more_clicked = more.as_ref().is_some_and(egui::Response::clicked);
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    resp.clicked().then(|| match a.artist {
+    (resp.clicked() && !more_clicked).then(|| match a.artist {
         Some(id) => Route::Artist(id),
         None => Route::Stream(StreamPage::Artist(a.remote.clone())),
     })
+}
+
+/// The menu of a service's artist on a right click on `resp` and on its
+/// ⋮ (`more`): [`stream_artist_rows`].
+pub fn artist_menus(resp: &egui::Response, more: Option<&egui::Response>, a: &StreamArtistCard, out: &mut Vec<Command>) {
+    let marks = super::marks(&resp.ctx);
+    let mut act = None;
+    if let Some(m) = more {
+        let (menu, acts) = widgets::menu_of(("st-artist-more", m.id), stream_artist_rows(a, &marks));
+        act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
+    }
+    if !Menu::context_idle(resp, ("st-artist-menu", resp.id)) {
+        let (menu, acts) = widgets::menu_of(("st-artist-menu", resp.id), stream_artist_rows(a, &marks));
+        act = act.or(menu.context_menu(resp).and_then(|i| acts.get(i).copied()));
+    }
+    if let Some(act) = act {
+        out.push(stream_artist_command(act, a, &marks));
+    }
+}
+
+/// What the menu of a service's artist does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamArtistAct {
+    Play,
+    Shuffle,
+    Radio,
+    Queue,
+    Ban,
+}
+
+/// The menu of a service's artist: a library artist's play, shuffle,
+/// radio and queue (as [`widgets::artist_rows`]), and for anyone
+/// «Не рекомендовать исполнителя».
+pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesView) -> Vec<widgets::Row<StreamArtistAct>> {
+    use StreamArtistAct as A;
+    use widgets::Row;
+    let mut rows = Vec::new();
+    if a.artist.is_some() {
+        rows.push(Row::Item(A::Play, MenuItem::new("Слушать микс").icon(Icon::PlayArrow)));
+        rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+        rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+        rows.push(Row::Divider);
+    }
+    let ban = match a.artist {
+        Some(id) => super::ban_item(id, marks),
+        None => MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block),
+    };
+    rows.push(Row::Item(A::Ban, ban));
+    rows
+}
+
+fn stream_artist_command(act: StreamArtistAct, a: &StreamArtistCard, marks: &nikgob_view::DislikesView) -> Command {
+    use StreamArtistAct as A;
+    match (act, a.artist) {
+        (A::Play, Some(id)) => Command::PlayArtist { id, shuffle: false },
+        (A::Shuffle, Some(id)) => Command::PlayArtist { id, shuffle: true },
+        (A::Radio, Some(id)) => Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(id) },
+        (A::Queue, Some(id)) => Command::EnqueueArtist(id),
+        (A::Ban, Some(id)) => super::ban_command(id, marks),
+        // Not in the library: the name on every service.
+        _ => Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(a.name.clone()), dislike: true },
+    }
 }
 
 fn common_line(ui: &Ui, text: &str, width: f32) -> std::sync::Arc<egui::Galley> {
@@ -556,21 +649,21 @@ pub enum StreamPlaylistAct {
     Playlist,
     Follow,
     Library,
-    Open,
 }
 
 /// The one list of a service playlist's actions, in the order of the
 /// library playlist's ([`widgets::playlist_rows`]): its card's right click
-/// and the ⋮ of its page. The page leaves out its buttons (play, shuffle,
-/// «В библиотеку»); playing next, the queue and «В плейлист…» need the
-/// tracks only the page has. The service's own rows come last.
+/// and ⋮ and the ⋮ of its page. The page leaves out its buttons (play,
+/// shuffle, «В библиотеку»); playing next, the queue and «В плейлист…»
+/// need the tracks only the page has.
 pub fn stream_playlist_rows(on_page: bool, followed: bool) -> Vec<widgets::Row<StreamPlaylistAct>> {
     use StreamPlaylistAct as A;
     use widgets::Row;
     let mut rows = Vec::new();
     if on_page {
-        rows.push(Row::Item(A::Next, MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Queue, MenuItem::new("В конец очереди").icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+        rows.push(Row::Divider);
         rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
     } else {
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
@@ -581,13 +674,12 @@ pub fn stream_playlist_rows(on_page: bool, followed: bool) -> Vec<widgets::Row<S
         } else {
             Row::Item(A::Follow, MenuItem::new("В библиотеку").icon(Icon::LibraryMusic))
         });
-        rows.push(Row::Item(A::Open, MenuItem::new("Открыть").icon(Icon::QueueMusic)));
     }
     rows
 }
 
 /// A playlist of a service as a card: opens its page, ▶ plays it; right
-/// click: [`stream_playlist_rows`].
+/// click and ⋮: [`stream_playlist_rows`].
 pub fn playlist_card(ui: &mut Ui, p: &StreamPlaylistCard, width: f32, row: &str, out: &mut Vec<Command>) -> Option<Route> {
     let mut sub = p.owner.clone().unwrap_or_default();
     if let Some(n) = p.total_tracks {
@@ -599,20 +691,26 @@ pub fn playlist_card(ui: &mut Ui, p: &StreamPlaylistCard, width: f32, row: &str,
         .subtitle(sub)
         .cover_opt(p.cover_url.clone())
         .placeholder_icon(Icon::QueueMusic)
+        .menu_button(true)
         .width(width)
         .id_salt(("st-playlist", row, &p.remote))
         .show(ui);
     let mut nav = None;
+    let mut act = None;
+    if let Some(m) = &o.menu {
+        let (menu, acts) = widgets::menu_of(("st-pl-more", m.id), stream_playlist_rows(false, p.playlist.is_some()));
+        act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
+    }
     if !Menu::context_idle(&o.response, ("st-pl-menu", o.response.id)) {
         let (menu, acts) = widgets::menu_of(("st-pl-menu", o.response.id), stream_playlist_rows(false, p.playlist.is_some()));
-        match menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()) {
-            Some(StreamPlaylistAct::Play) => out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: false }),
-            Some(StreamPlaylistAct::Shuffle) => out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: true }),
-            Some(StreamPlaylistAct::Follow) => out.push(Command::FollowStreamPlaylist(p.remote.clone())),
-            Some(StreamPlaylistAct::Library) => nav = p.playlist.map(Route::Playlist),
-            Some(StreamPlaylistAct::Open) => nav = Some(Route::Stream(StreamPage::Playlist(p.remote.clone()))),
-            Some(StreamPlaylistAct::Next | StreamPlaylistAct::Queue | StreamPlaylistAct::Playlist) | None => {}
-        }
+        act = act.or(menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()));
+    }
+    match act {
+        Some(StreamPlaylistAct::Play) => out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: false }),
+        Some(StreamPlaylistAct::Shuffle) => out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: true }),
+        Some(StreamPlaylistAct::Follow) => out.push(Command::FollowStreamPlaylist(p.remote.clone())),
+        Some(StreamPlaylistAct::Library) => nav = p.playlist.map(Route::Playlist),
+        Some(StreamPlaylistAct::Next | StreamPlaylistAct::Queue | StreamPlaylistAct::Playlist) | None => {}
     }
     if o.play_clicked {
         out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: false });
@@ -712,7 +810,7 @@ fn album_download(v: &StreamPageView, wish: &widgets::WishIndex, all_local: bool
         return ("Скачан", false);
     }
     match v.release.and_then(|r| wish.of_release(r)) {
-        None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => ("Скачать", true),
+        None | Some(WishlistStatus::Waiting | WishlistStatus::Dismissed | WishlistStatus::Done) => ("Скачать альбом", true),
         Some(WishlistStatus::Downloading) => ("Качается", false),
         Some(WishlistStatus::NoTorrent | WishlistStatus::Failed) => ("Не нашлось", false),
         Some(_) if !torrents => ("Ждёт торренты", false),
@@ -776,7 +874,7 @@ fn album_page(
             .size(Size::M)
             .style(Style::Tonal)
             .selected(v.liked)
-            .tooltip(if v.liked { "Убрать из любимого" } else { "В любимое" })
+            .tooltip(super::like_label(v.liked))
             .into(),
         IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into(),
     ];
@@ -806,13 +904,7 @@ fn album_page(
         out.push(Command::LikeStreamAlbum { album: id.clone(), on: !v.liked });
     }
     let more = &r[4];
-    let of = StreamAlbumMenuOf {
-        on_page: true,
-        has_artists: !artists.is_empty(),
-        in_library: v.release.is_some(),
-        complete: all_local,
-        can_download: dl_can,
-    };
+    let of = StreamAlbumMenuOf { on_page: true, has_artists: !artists.is_empty(), in_library: v.release.is_some(), can_download: dl_can };
     let (menu, acts) = widgets::menu_of("st-album-more", stream_album_rows(of));
     match menu.attach(more).and_then(|i| acts.get(i).copied()) {
         Some(StreamAlbumAct::Next) => out.push(Command::PlayStreamNext(remotes.clone())),
@@ -885,7 +977,7 @@ fn playlist_page(
     }
     ui.add_space(16.0);
     if v.tracks.is_empty() {
-        widgets::empty_state(ui, Icon::QueueMusic, "Плейлист пуст", "В сервисе в нём пока ничего нет.", None);
+        widgets::empty_state(ui, Icon::QueueMusic, "Плейлист пуст", "", None);
         return nav;
     }
     track_rows(ui, "st-playlist", &v.tracks, false, &StreamFrom::Playlist(id.clone()), state, pages, out).or(nav)
@@ -960,7 +1052,7 @@ fn artist_page(
         ui.add_space(widgets::SECTION_GAP);
     }
     if v.albums.is_empty() {
-        widgets::empty_state(ui, Icon::Album, "Релизов нет", "Сервис не знает релизов этого исполнителя.", None);
+        widgets::empty_state(ui, Icon::Album, "Релизов нет", "", None);
     }
     nav
 }
@@ -981,7 +1073,8 @@ mod menu_tests {
 
     /// A service album's right click and its page's ⋮ are one list in the
     /// library album's order: the card adds play / shuffle / the like /
-    /// «Скачать» / «Открыть»; both play next, queue and add to a playlist.
+    /// «Скачать альбом»; both play next, queue and add to a playlist. What
+    /// the card's click does («Открыть») is not in it.
     #[test]
     fn a_service_album_offers_the_same_actions_by_right_click_and_by_more() {
         use StreamAlbumAct as A;
@@ -989,22 +1082,18 @@ mod menu_tests {
         let card = row_acts(&stream_album_rows(of));
         let page = row_acts(&stream_album_rows(StreamAlbumMenuOf { on_page: true, ..of }));
         let shared = |acts: &[A]| -> Vec<A> {
-            acts.iter()
-                .copied()
-                .filter(|a| {
-                    !matches!(a, A::Play | A::Shuffle | A::Like | A::Download | A::Open)
-                })
-                .collect()
+            acts.iter().copied().filter(|a| !matches!(a, A::Play | A::Shuffle | A::Like | A::Download)).collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(shared(&card), [A::Next, A::Queue, A::Playlist, A::Artist, A::Share, A::Library]);
-        assert_eq!(
-            card,
-            [A::Play, A::Shuffle, A::Next, A::Queue, A::Playlist, A::Like, A::Artist, A::Share, A::Download, A::Open, A::Library]
-        );
+        assert_eq!(shared(&card), [A::Next, A::Queue, A::Playlist, A::Artist, A::Library, A::Share]);
+        assert_eq!(card, [A::Play, A::Shuffle, A::Next, A::Queue, A::Like, A::Playlist, A::Artist, A::Library, A::Share, A::Download]);
         assert_eq!(&page[..3], [A::Next, A::Queue, A::Playlist]);
-        assert_eq!(labels(&stream_album_rows(StreamAlbumMenuOf { on_page: true, ..of }))[2], "В плейлист…");
-        assert_eq!(&labels(&stream_album_rows(of))[2..5], ["Сыграть следующим", "В конец очереди", "В плейлист…"]);
+        assert_eq!(&labels(&stream_album_rows(of))[2..6], ["Сыграть следующим", "В очередь", "Нравится", "В плейлист…"]);
+        assert_eq!(labels(&stream_album_rows(of)).last().map(String::as_str), Some("Скачать альбом"));
+        // Not linked, nothing to download, no artist known: none of those.
+        let bare = row_acts(&stream_album_rows(StreamAlbumMenuOf::default()));
+        assert!(!bare.iter().any(|a| matches!(a, A::Library | A::Download | A::Artist)));
+        assert!(bare.contains(&A::Like), "liking is not downloading");
     }
 
     /// A service playlist's right click and its page's ⋮: one list, the
@@ -1012,9 +1101,9 @@ mod menu_tests {
     #[test]
     fn a_service_playlist_offers_its_actions_by_right_click_and_by_more() {
         use StreamPlaylistAct as A;
-        assert_eq!(row_acts(&stream_playlist_rows(false, false)), [A::Play, A::Shuffle, A::Follow, A::Open]);
-        assert_eq!(row_acts(&stream_playlist_rows(false, true)), [A::Play, A::Shuffle, A::Library, A::Open]);
+        assert_eq!(row_acts(&stream_playlist_rows(false, false)), [A::Play, A::Shuffle, A::Follow]);
+        assert_eq!(row_acts(&stream_playlist_rows(false, true)), [A::Play, A::Shuffle, A::Library]);
         assert_eq!(row_acts(&stream_playlist_rows(true, true)), [A::Next, A::Queue, A::Playlist]);
-        assert_eq!(labels(&stream_playlist_rows(true, false)), ["Сыграть следующим", "В конец очереди", "В плейлист…"]);
+        assert_eq!(labels(&stream_playlist_rows(true, false)), ["Сыграть следующим", "В очередь", "В плейлист…"]);
     }
 }

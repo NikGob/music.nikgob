@@ -67,6 +67,23 @@ pub fn grow_button(ui: &mut Ui, id: Id, shown: bool, slot: Rect, button: IconBut
 }
 
 /// ▶ (⏸ in a square while it plays) in primary.
+/// The ⋮ of a card under the pointer (`shown`): a small filled button at
+/// `slot` that grows in, as on the mix cards.
+pub fn more_button(ui: &mut Ui, id: Id, shown: bool, slot: Rect) -> Option<Response> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let colors = Colors { container: s.surface_container_high, content: s.on_surface, border: Color32::TRANSPARENT };
+    let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
+    grow_button(ui, id.with("more"), shown, slot, button)
+}
+
+/// Keeps whether the menu of the card `id`'s ⋮ (`more`) is open, for the
+/// card to stay as under the pointer (its ⋮ shown) while it is: read next
+/// frame from `id.with("more-open")`.
+pub fn keep_more_open(ctx: &egui::Context, id: Id, more: Option<&Response>) {
+    let open = more.is_some_and(|m| ctx.data(|d| d.get_temp::<bool>(m.id.with("md3e-menu-open"))).unwrap_or(false));
+    ctx.data_mut(|d| d.insert_temp(id.with("more-open"), open));
+}
+
 fn play_button(playing: bool, size: Size, tip: &str, salt: impl egui::AsId) -> IconButton {
     let s_icon = if playing { Icon::Pause } else { Icon::PlayArrow };
     let mut b = IconButton::new(s_icon).size(size).style(Style::Filled).filled_icon(true).tooltip(tip).id_salt(salt);
@@ -312,7 +329,10 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
             super::widgets::artist_menu(&resp, a, out);
             None
         }
-        Shortcut::Playlist(..) => None,
+        Shortcut::Playlist(p, _) => {
+            super::widgets::playlist_menu_at(&resp, p, None, out);
+            None
+        }
     };
     if clicked_play {
         out.push(play);
@@ -390,9 +410,7 @@ pub fn mix(
         }
         let m = Size::S.height();
         let slot = Rect::from_min_size(pos2(art.right() - 8.0 - m, art.top() + 8.0), vec2(m, m));
-        let colors = Colors { container: s.surface_container_high, content: s.on_surface, border: Color32::TRANSPARENT };
-        let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
-        more = grow_button(ui, id.with("more"), hover, slot, button);
+        more = more_button(ui, id, hover, slot);
     });
     let title_c = if playing { s.primary } else { s.on_surface };
     let name = text(ui, title, title_role, title_c, cell.width(), 1);
@@ -412,7 +430,7 @@ pub fn mix(
     let g = text(ui, &line, role, s.on_surface_variant, cell.width(), 1);
     ui.painter().galley(pos2(cell.left(), name_rect.bottom()), g, s.on_surface_variant);
 
-    let items = mix_items(l, can_blend, !opens_list);
+    let items = mix_items(l, can_blend, !opens_list, false);
     let mut picked = mix_menu(id.with("ctx"), l, &items).context_menu(&resp);
     if let Some(m) = &more {
         picked = picked.or(mix_menu(id.with("more-menu"), l, &items).align_right(true).attach(m));
@@ -474,9 +492,7 @@ pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, playing: bool, 
             .is_some_and(|r| r.clicked());
         let m = Size::S.height();
         let slot = Rect::from_min_size(pos2(art.right() - 8.0 - m, art.top() + 8.0), vec2(m, m));
-        let colors = Colors { container: s.surface_container_high, content: s.on_surface, border: Color32::TRANSPARENT };
-        let button = IconButton::new(Icon::MoreVert).size(Size::S).style(Style::Filled).colors(colors).tooltip("Ещё").id_salt(id.with("more-btn"));
-        more = grow_button(ui, id.with("more"), hover, slot, button);
+        more = more_button(ui, id, hover, slot);
         clicked
     });
     let name_c = if playing { s.primary } else { s.on_surface };
@@ -521,22 +537,29 @@ pub fn mix_route(l: &LaneCard, world: Option<&str>) -> Route {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MixItem {
     List,
+    Play,
     Shuffle,
     PlayNext,
     Enqueue,
     Save,
+    /// «Скачать недостающие»: its songs without a file to «Хочу скачать».
+    Download,
     Redraw,
     Blend,
     Hide,
 }
 
-/// The items of mix `l`'s ⋮ in order, «Список треков» first with `list`.
-/// «На повторе» is what played: no other draw of it, and its switch is in
-/// Settings; a blend is the user's own for the day; a world's mix is of
-/// its page, the world's own; a mix of the day is another one tomorrow
-/// (its row is switched off in «Разделы главной»). With `can_blend` it
-/// offers «Смешать с…».
-pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool) -> Vec<MixItem> {
+/// The items of mix `l`'s ⋮ in the order of the other collections' menus:
+/// «Список треков» first with `list`, then play, shuffle, next, the queue
+/// │ «Сохранить как плейлист» │ what it lacks │ its own («Другой состав»,
+/// «Смешать с…») │ «Не предлагать этот микс». On its page (`on_page`)
+/// «Слушать» and «Перемешать» are buttons and are left out. «На повторе»
+/// is what played: no other draw of it, and its switch is in Settings; a
+/// blend is the user's own for the day; a world's mix is of its page, the
+/// world's own; a mix of the day is another one tomorrow (its row is
+/// switched off in «Разделы главной»). With `can_blend` it offers «Смешать
+/// с…».
+pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool, on_page: bool) -> Vec<MixItem> {
     let world = matches!(l.key, nikgob_view::MixKey::World(_));
     let redraw = l.key != nikgob_view::MixKey::OnRepeat && !world;
     let blend = can_blend && l.blend_base.is_some();
@@ -545,7 +568,13 @@ pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool) -> Vec<MixItem> {
     if list {
         items.push(MixItem::List);
     }
-    items.extend([MixItem::Shuffle, MixItem::PlayNext, MixItem::Enqueue, MixItem::Save]);
+    if !on_page {
+        items.extend([MixItem::Play, MixItem::Shuffle]);
+    }
+    items.extend([MixItem::PlayNext, MixItem::Enqueue, MixItem::Save]);
+    if l.tracks.iter().any(|t| !t.has_local) {
+        items.push(MixItem::Download);
+    }
     if redraw {
         items.push(MixItem::Redraw);
     }
@@ -558,21 +587,32 @@ pub fn mix_items(l: &LaneCard, can_blend: bool, list: bool) -> Vec<MixItem> {
     items
 }
 
+/// The group of a mix's item: a divider stands between two groups.
+fn mix_group(item: MixItem) -> u8 {
+    match item {
+        MixItem::List | MixItem::Play | MixItem::Shuffle | MixItem::PlayNext | MixItem::Enqueue => 0,
+        MixItem::Save => 1,
+        MixItem::Download => 2,
+        MixItem::Redraw | MixItem::Blend => 3,
+        MixItem::Hide => 4,
+    }
+}
+
 /// The menu of `items` (of [`mix_items`]).
 pub fn mix_menu(key: Id, l: &LaneCard, items: &[MixItem]) -> Menu {
     let mut m = Menu::new(key);
     for (k, item) in items.iter().enumerate() {
-        let prev = k.checked_sub(1).map(|p| items[p]);
-        let group = |i: MixItem| matches!(i, MixItem::Redraw | MixItem::Blend);
-        if (group(*item) && prev.is_some_and(|p| !group(p))) || (*item == MixItem::Hide && k > 0) {
+        if k > 0 && mix_group(items[k - 1]) != mix_group(*item) {
             m = m.divider();
         }
         m = m.item(match item {
             MixItem::List => MenuItem::new("Список треков").icon(Icon::QueueMusic).shortcut(l.tracks.len().to_string()),
+            MixItem::Play => MenuItem::new("Слушать").icon(Icon::PlayArrow),
             MixItem::Shuffle => MenuItem::new("Перемешать").icon(Icon::Shuffle),
-            MixItem::PlayNext => MenuItem::new("Сыграть следующим").icon(Icon::QueueMusic),
-            MixItem::Enqueue => MenuItem::new("В очередь").icon(Icon::QueueMusic),
+            MixItem::PlayNext => MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic),
+            MixItem::Enqueue => MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic),
             MixItem::Save => MenuItem::new("Сохранить как плейлист").icon(Icon::PlaylistAdd),
+            MixItem::Download => MenuItem::new("Скачать недостающие").icon(Icon::Download),
             MixItem::Redraw => MenuItem::new("Другой состав").icon(Icon::Refresh),
             MixItem::Blend => MenuItem::new("Смешать с…").icon(Icon::Add),
             MixItem::Hide => MenuItem::new("Не предлагать этот микс").icon(Icon::Block),
@@ -586,6 +626,7 @@ pub fn mix_do(ctx: &egui::Context, l: &LaneCard, item: MixItem, world: Option<&s
     let tracks = || l.tracks.iter().map(|t| t.id).collect::<Vec<nikgob_view::TrackId>>();
     match item {
         MixItem::List => return Some(mix_route(l, world)),
+        MixItem::Play => out.push(Command::PlayMix { id: l.id() }),
         MixItem::Shuffle => {
             let mut t = tracks();
             shuffle(&mut t);
@@ -594,6 +635,7 @@ pub fn mix_do(ctx: &egui::Context, l: &LaneCard, item: MixItem, world: Option<&s
         MixItem::PlayNext => out.push(Command::PlayNext(tracks())),
         MixItem::Enqueue => out.push(Command::Enqueue(tracks())),
         MixItem::Save => out.push(Command::SaveTracksAsPlaylist { name: l.title.clone(), tracks: tracks() }),
+        MixItem::Download => out.push(Command::DownloadTracks(l.tracks.iter().filter(|t| !t.has_local).map(|t| t.id).collect())),
         MixItem::Redraw => out.push(Command::RefreshMix { id: l.id() }),
         MixItem::Blend => {
             if let Some(base) = l.blend_base {
@@ -656,7 +698,7 @@ pub fn song_row(
                 .style(Style::Standard)
                 .filled_icon(on)
                 .selected(on)
-                .tooltip(if on { "Убрать из любимого" } else { "В любимое" })
+                .tooltip(super::like_label(on))
                 .id_salt(id.with("like"));
             like = ui.put(slot, b).clicked();
         }
@@ -669,16 +711,20 @@ pub fn song_row(
 /// A tile of «Подборки дня» (§3.5): 112 high on surface_container, the
 /// cover flush with the edge (an artist: a circle 88 inset 12), the kicker,
 /// the title in up to two lines and the length. A click plays; ▶ 40 grows
-/// in over the cover. True when it should play.
-pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usize) -> bool {
+/// in over the cover, ⋮ at the top right; ⋮ and the right click:
+/// [`of_day_rows`].
+pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usize, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with(("home-of-day", i));
     let cell = on_pixels(ui, cell);
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.98);
+    let hover = hover || menu_open;
     let r = shape::LARGE;
     let cover = Rect::from_min_size(cell.min, vec2(cell.height(), cell.height()));
     let first = m.covers.first().map(|c| c.uri());
+    let mut more = None;
     let play = scaled(ui, cell.center(), squish, |ui| {
         paint::container(ui.painter(), cell, Radii::all(r), s.surface_container, egui::Stroke::NONE);
         if let Some(p) = photo {
@@ -702,10 +748,48 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
         y += tth;
         ui.painter().galley(pos2(left, y), d, s.on_surface_variant);
         let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
-        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{}»", m.title), id.with("play-btn")))
-            .is_some_and(|r| r.clicked())
+        let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{}»", m.title), id.with("play-btn")))
+            .is_some_and(|r| r.clicked());
+        let d = Size::S.height();
+        more = more_button(ui, id, hover, Rect::from_min_size(pos2(cell.right() - 8.0 - d, cell.top() + 8.0), vec2(d, d)));
+        clicked
     });
-    play || resp.clicked()
+    keep_more_open(ui.ctx(), id, more.as_ref());
+    let mut picked = None;
+    if let Some(b) = &more {
+        picked = of_day_menu(id.with("more-menu")).align_right(true).attach(b);
+    }
+    if !Menu::context_idle(&resp, id.with("ctx")) {
+        picked = picked.or(of_day_menu(id.with("ctx")).context_menu(&resp));
+    }
+    let more_clicked = more.as_ref().is_some_and(Response::clicked);
+    match picked.and_then(|k| of_day_rows().get(k).copied()) {
+        Some(OfDayItem::Play) => out.push(Command::PlayMix { id: m.id }),
+        Some(OfDayItem::Download) => out.push(Command::DownloadMix { id: m.id }),
+        None if play || (resp.clicked() && !more_clicked) => out.push(Command::PlayMix { id: m.id }),
+        None => {}
+    }
+}
+
+/// An item of a tile of the day's menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OfDayItem {
+    Play,
+    /// «Скачать недостающие»: its songs without a file to «Хочу скачать».
+    Download,
+}
+
+/// The menu of a tile of the day: what its click does, and what it lacks
+/// (the runtime knows which of its songs those are).
+pub fn of_day_rows() -> [OfDayItem; 2] {
+    [OfDayItem::Play, OfDayItem::Download]
+}
+
+fn of_day_menu(key: Id) -> Menu {
+    Menu::new(key)
+        .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
+        .divider()
+        .item(MenuItem::new("Скачать недостающие").icon(Icon::Download))
 }
 
 // ---- Album.
@@ -714,27 +798,38 @@ pub struct AlbumOutput {
     pub response: Response,
     pub clicked: bool,
     pub play: bool,
+    /// Its ⋮ under the pointer, for the album's menu (the same as its
+    /// right click).
+    pub more: Option<Response>,
 }
 
 /// An album card (§3.6, §3.8): the cover r16 without a container, the
 /// title in two lines and «Artist · tail» where the tail («слушал 5 из 52»,
-/// «8 окт.») is never cut. A click opens it; ▶ 56 on the cover plays it.
+/// «8 окт.») is never cut. A click opens it; ▶ 56 on the cover plays it;
+/// ⋮ grows in at its top right.
 pub fn album(ui: &mut Ui, cell: Rect, title: &str, artist: &str, tail: &str, cover: Option<String>, salt: impl std::hash::Hash + std::fmt::Debug) -> AlbumOutput {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with(("home-album", salt));
     let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
+    let hover = hover || menu_open;
     let r = shape::LARGE;
+    let mut more = None;
     let play = scaled(ui, art.center(), squish, |ui| {
         cover_in(ui, art, cover.as_deref(), Radii::all(r), Icon::Album, 1.0);
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
-        grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &format!("Слушать «{title}»"), id.with("play-btn")))
-            .is_some_and(|r| r.clicked())
+        let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::M, &format!("Слушать «{title}»"), id.with("play-btn")))
+            .is_some_and(|r| r.clicked());
+        let m = Size::S.height();
+        more = more_button(ui, id, hover, Rect::from_min_size(pos2(art.right() - 8.0 - m, art.top() + 8.0), vec2(m, m)));
+        clicked
     });
+    keep_more_open(ui.ctx(), id, more.as_ref());
     let w = cell.width();
     let t = text(ui, title, TypeRole::TitleSmall.style(), s.on_surface, w, 2);
     // The line under the title follows it: right under a one-line title.
@@ -754,7 +849,8 @@ pub fn album(ui: &mut Ui, cell: Rect, title: &str, artist: &str, tail: &str, cov
         let tg = text(ui, &tail, role, s.on_surface_variant, tw + 1.0, 1);
         ui.painter().galley(pos2(cell.left() + aw, y), tg, s.on_surface_variant);
     }
-    AlbumOutput { clicked: resp.clicked() && !play, play, response: resp }
+    let more_clicked = more.as_ref().is_some_and(Response::clicked);
+    AlbumOutput { clicked: resp.clicked() && !play && !more_clicked, play, response: resp, more }
 }
 
 /// Shuffles `items` in place (a xorshift seeded by the clock: a menu's
@@ -772,6 +868,38 @@ pub fn shuffle<T>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mix's ⋮ is in the order of the other collections' menus:
+    /// «Слушать» first on the card, «В очередь», «Скачать недостающие»
+    /// while a song has no file; on its page without its buttons.
+    #[test]
+    fn a_mix_menu_is_in_the_order_of_the_other_menus() {
+        let song = |has_local: bool| nikgob_view::TrackRow {
+            id: nikgob_view::TrackId::new(), title: "Song".into(), artist: "Artist".into(),
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false,
+        };
+        let l = LaneCard {
+            key: nikgob_view::MixKey::OnRepeat,
+            title: "Mix".into(),
+            short_titles: Vec::new(),
+            artists: Vec::new(),
+            new_artists: Vec::new(),
+            covers: Vec::new(),
+            new_cover: None,
+            tracks: vec![song(true), song(false)],
+            blend_base: None,
+            queue: None,
+            why: None,
+        };
+        let card = mix_items(&l, false, false, false);
+        assert_eq!(card, [MixItem::Play, MixItem::Shuffle, MixItem::PlayNext, MixItem::Enqueue, MixItem::Save, MixItem::Download]);
+        let page = mix_items(&l, false, false, true);
+        assert_eq!(page, [MixItem::PlayNext, MixItem::Enqueue, MixItem::Save, MixItem::Download]);
+        let all_here = LaneCard { tracks: vec![song(true)], ..l };
+        assert!(!mix_items(&all_here, false, true, false).contains(&MixItem::Download));
+        assert_eq!(mix_items(&all_here, false, true, false)[0], MixItem::List);
+    }
 
     #[test]
     fn names_are_whole_and_a_long_one_is_skipped() {

@@ -4,7 +4,7 @@
 //! them, paged by its chevrons; the one chosen stands on a stage in the
 //! colours of its own cover — what it is, its name (a link to its page),
 //! how far the user got and the buttons that always mean the same
-//! («Дослушать» / «Начать», «Вперемешку»), three one-click cards under them
+//! («Дослушать» / «Начать», «Перемешать»), three one-click cards under them
 //! and the cover itself flush with the card's right end. With one world
 //! there is no row (it is «Серия», A).
 //!
@@ -634,7 +634,7 @@ fn text_block(
     // How far: «Ты слышал 36 из 134» after the player's wavy progress.
     progress_line(ui, pos2(stage.left(), y), stage.width(), w, s, live);
     y += 24.0 + if tight { 16.0 } else { 24.0 };
-    // [▶ Дослушать] [⤨ Вперемешку] ⋮
+    // [▶ Дослушать] [⤨ Перемешать] ⋮
     let row = Rect::from_min_size(pos2(stage.left(), y), vec2(stage.width(), Size::M.height()));
     let mut b = ui.new_child(UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt(("home-world-buttons", &w.key)));
     b.spacing_mut().item_spacing.x = 8.0;
@@ -648,26 +648,60 @@ fn text_block(
     if primary.clicked() {
         out.push(play_primary(w));
     }
-    if b.add(Button::new("Вперемешку").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt(("home-world-shuffle", &w.key))).clicked() {
+    if b.add(Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt(("home-world-shuffle", &w.key))).clicked() {
         out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: format!("мира «{}»", w.title) });
     }
     let more = b.add(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Standard).tooltip("Ещё").id_salt(("home-world-more", &w.key)));
-    let picked = Menu::new(("home-world-menu", &w.key))
-        .item(MenuItem::new("Открыть мир").icon(Icon::Album))
-        .item(MenuItem::new("В очередь").icon(Icon::QueueMusic))
-        .item(MenuItem::new("Убрать из ряда").icon(Icon::Block).enabled(state.home.worlds.len() > 1))
-        .divider()
-        .item(MenuItem::new("Скрыть карточку").icon(Icon::Close))
-        .align_right(false)
-        .attach(&more);
-    match picked {
-        Some(0) => return Some(route(w)),
-        Some(1) => out.push(Command::Enqueue(w.primary.clone())),
-        Some(2) => out.push(Command::SetPref(nikgob_view::PrefPatch::HideWorld(w.key.clone()))),
-        Some(3) => out.push(Command::HideHomeCard),
-        _ => {}
+    let items = world_items(state.home.worlds.len());
+    let picked = world_menu(("home-world-menu", &w.key), &items).align_right(false).attach(&more);
+    match picked.and_then(|k| items.get(k).copied()) {
+        Some(WorldItem::Open) => return Some(route(w)),
+        Some(WorldItem::PlayNext) => out.push(Command::PlayNext(w.primary.clone())),
+        Some(WorldItem::Enqueue) => out.push(Command::Enqueue(w.primary.clone())),
+        Some(WorldItem::HideWorld) => out.push(Command::SetPref(nikgob_view::PrefPatch::HideWorld(w.key.clone()))),
+        Some(WorldItem::HideCard) => out.push(Command::HideHomeCard),
+        None => {}
     }
     nav
+}
+
+/// An item of the worlds card's ⋮.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorldItem {
+    Open,
+    PlayNext,
+    Enqueue,
+    HideWorld,
+    HideCard,
+}
+
+/// The worlds card's ⋮: «Открыть мир», what «Дослушать» plays next or to
+/// the queue │ «Убрать из ряда» (while there is another world to show) and
+/// «Скрыть карточку».
+pub fn world_items(worlds: usize) -> Vec<WorldItem> {
+    let mut items = vec![WorldItem::Open, WorldItem::PlayNext, WorldItem::Enqueue];
+    if worlds > 1 {
+        items.push(WorldItem::HideWorld);
+    }
+    items.push(WorldItem::HideCard);
+    items
+}
+
+fn world_menu(key: impl egui::AsId, items: &[WorldItem]) -> Menu {
+    let mut m = Menu::new(key);
+    for (k, item) in items.iter().enumerate() {
+        if k > 0 && matches!(item, WorldItem::HideWorld | WorldItem::HideCard) && !matches!(items[k - 1], WorldItem::HideWorld) {
+            m = m.divider();
+        }
+        m = m.item(match item {
+            WorldItem::Open => MenuItem::new("Открыть мир").icon(Icon::Album),
+            WorldItem::PlayNext => MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic),
+            WorldItem::Enqueue => MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic),
+            WorldItem::HideWorld => MenuItem::new("Убрать из ряда").icon(Icon::Block),
+            WorldItem::HideCard => MenuItem::new("Скрыть карточку").icon(Icon::Close),
+        });
+    }
+    m
 }
 
 /// «Ты слышал 36 из 134», «Ты слышал все 134», «Ты ещё не слышал ни одного
@@ -806,6 +840,15 @@ fn world_card(ui: &mut Ui, rect: Rect, c: &WorldCard, s: &ColorScheme, salt: imp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The worlds card's ⋮ can play the world next or queue it, and offers
+    /// «Убрать из ряда» only while there is another world to show.
+    #[test]
+    fn the_worlds_menu_plays_next_and_hides_what_cannot_work() {
+        use WorldItem as W;
+        assert_eq!(world_items(3), [W::Open, W::PlayNext, W::Enqueue, W::HideWorld, W::HideCard]);
+        assert_eq!(world_items(1), [W::Open, W::PlayNext, W::Enqueue, W::HideCard]);
+    }
 
     #[test]
     fn the_card_takes_seventy_percent_under_the_search() {

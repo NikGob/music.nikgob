@@ -1,6 +1,6 @@
 //! A world's page (home-v2 §15.3, «Открыть мир»): its name in the large
 //! app bar, the header in the colours of the world's cover — the cover,
-//! when it was heard, its facts, how far the user got and «Дослушать» / «Вперемешку» — then
+//! when it was heard, its facts, how far the user got and «Дослушать» / «Перемешать» — then
 //! its mixes («Миксы»: «Лучшее», «Ещё не слышал», «В дорогу», its calm and
 //! its lively side), its albums in order with how much of each was heard,
 //! its new album of the services («Новое») and its liked tracks
@@ -53,6 +53,7 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
         }
         ui.add_space(widgets::SECTION_GAP);
         nav = albums(ui, grid, v, out).or(nav);
+        let wishlist = &state.downloads.wishlist;
         if let Some(a) = &v.new_album {
             ui.add_space(widgets::SECTION_GAP);
             section(ui, grid, "Новое");
@@ -61,9 +62,12 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
             let cell = Rect::from_min_size(pos2(grid.left, row.top()), vec2(w, w + cards::ALBUM_TEXT_H));
             let year = a.year.map(|y| y.to_string()).unwrap_or_default();
             let o = cards::album(ui, cell, &a.title, &a.artist, &year, a.cover_url.clone(), ("world-new", &a.remote));
-            if o.clicked || o.play {
+            if o.play {
+                out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
+            } else if o.clicked {
                 nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
             }
+            nav = super::streams::album_menus(&o.response, o.more.as_ref(), a, wishlist, out).or(nav);
         }
         if v.liked.len() >= 3 {
             ui.add_space(widgets::SECTION_GAP);
@@ -162,7 +166,7 @@ fn header(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut V
     {
         out.push(worlds::play_primary(w));
     }
-    if b.add(Button::new("Вперемешку").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt("world-shuffle")).clicked() {
+    if b.add(Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).style(Style::Outlined).id_salt("world-shuffle")).clicked() {
         out.push(Command::PlayTracks { tracks: w.shuffled.clone(), start: 0, context: format!("мира «{}»", w.title) });
     }
     Theme::set(&ctx, page_theme);
@@ -192,6 +196,7 @@ fn albums(ui: &mut Ui, grid: Grid, v: &WorldView, out: &mut Vec<Command>) -> Opt
         } else if o.clicked {
             nav = Some(Route::Release(a.card.id));
         }
+        nav = widgets::release_menus(&o.response, o.more.as_ref(), &a.card, out).or(nav);
         // The thin linear progress: indicator, a gap of 4, the track.
         let y = card.bottom() + 4.0;
         let f = if a.total == 0 { 0.0 } else { a.heard as f32 / a.total as f32 };

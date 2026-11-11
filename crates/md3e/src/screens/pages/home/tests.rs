@@ -221,32 +221,29 @@ fn an_empty_home_is_one_line_and_its_buttons() {
     assert!(!page.contains("Найди песню") && !page.contains("Здесь соберётся"));
 }
 
-/// A discovery's menu is a service song's one list (the same rows in the
-/// same order), then its own «В любимое».
+/// A discovery's menu is a service song's one list, in its order, with no
+/// like of its own: the row's ♥ is the like.
 #[test]
-fn a_discovery_has_the_service_song_menu_and_its_like() {
+fn a_discovery_has_the_service_song_menu_without_a_like() {
     use crate::screens::pages::{TrackAct as A, TrackMenuOf, track_rows, widgets::row_acts};
     use crate::components::MenuItem;
-    let song = || {
-        track_rows(TrackMenuOf {
-            playable: true,
-            has_album: true,
-            has_artists: true,
-            also_on: None,
-            info: false,
-            fetch: MenuItem::new("Скачать"),
-            torrents: None,
-            find_song: None,
-            wrong_file: false,
-            dislike: MenuItem::new("Не нравится"),
-            ban: MenuItem::new("Не рекомендовать исполнителя"),
-        })
-    };
-    let list: Vec<DiscoverAct> = row_acts(&song()).into_iter().map(DiscoverAct::Track).collect();
-    let menu = row_acts(&with_like(song(), false));
-    assert_eq!(&menu[..list.len()], &list[..]);
-    assert_eq!(menu.last(), Some(&DiscoverAct::Like));
-    assert_eq!(&menu[..4], [A::Next, A::Queue, A::Playlist, A::Radio].map(DiscoverAct::Track));
+    let menu = row_acts(&track_rows(TrackMenuOf {
+        playable: true,
+        has_album: true,
+        has_artists: true,
+        has_file: false,
+        also_on: None,
+        info: false,
+        fetch: Some(MenuItem::new("Скачать")),
+        better: false,
+        pick_release: false,
+        find_song: None,
+        wrong_file: false,
+        dislike: MenuItem::new("Не нравится"),
+        ban: Some(MenuItem::new("Не рекомендовать исполнителя")),
+    }));
+    assert_eq!(&menu[..4], [A::Next, A::Queue, A::Radio, A::Playlist]);
+    assert_eq!(&menu[menu.len() - 2..], [A::Dislike, A::Ban]);
 }
 
 /// «Разделы главной»: its order first, the sections it turns off gone, a

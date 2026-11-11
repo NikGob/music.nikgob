@@ -25,7 +25,7 @@ use crate::screens::stage::{Part, Stage};
 mod row;
 use crate::{
     Icon, Theme, TypeRole,
-    components::{Button, FilterChip, MenuItem, Size, Style, anim},
+    components::{Button, FilterChip, Size, Style, anim},
 };
 
 pub(super) fn greeting(hour: u8) -> &'static str {
@@ -753,9 +753,7 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
             let m = &tiles[i];
             let artist = matches!(m.id, MixId::Tile(TileKind::ArtistOfDay | TileKind::Comeback));
             let photo = artist.then(|| artist_photo(state, &m.title)).flatten();
-            if cards::of_day(ui, cell, m, photo.as_deref(), i) {
-                out.push(Command::PlayMix { id: m.id });
-            }
+            cards::of_day(ui, cell, m, photo.as_deref(), i, out);
         });
     });
     None
@@ -824,7 +822,7 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
             } else if o.clicked {
                 nav = Some(Route::Release(c.id));
             }
-            nav = widgets::release_menu(&o.response, c, out).or(nav.take());
+            nav = widgets::release_menus(&o.response, o.more.as_ref(), c, out).or(nav.take());
         });
     });
     nav
@@ -856,13 +854,15 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                 } else if o.clicked && t.playable {
                     out.push(play_discover(&h.discover, i));
                 }
-                let rows = super::placed(discover_rows(t, &state.dislikes), &state.prefs.track_menu, |a| match a {
-                    DiscoverAct::Track(a) => a.menu_item(false),
-                    DiscoverAct::Like => None,
-                });
-                let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), rows);
-                let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
-                nav = discover_pick(&o.response.ctx, act, t, pages, out).or(nav.take());
+                // A service song's one list (its ♥ is on the row).
+                if !crate::components::Menu::context_idle(&o.response, ("discover-menu", o.response.id)) {
+                    let wish = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
+                    let wished = (!t.has_local).then(|| wish.of_track(t.track, None)).flatten();
+                    let rows = super::placed(super::streams::stream_track_rows(t, wished, &state.dislikes), &state.prefs.track_menu, |a| a.menu_item(false));
+                    let (menu, acts) = widgets::menu_of(("discover-menu", o.response.id), rows);
+                    let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
+                    nav = super::streams::track_pick(&o.response.ctx, act, t, None, pages, out).or(nav.take());
+                }
             }
         });
     });
@@ -876,46 +876,6 @@ fn play_discover(rows: &[StreamTrackRow], i: usize) -> Command {
         tracks: rows.iter().map(|r| r.remote.clone()).collect(),
         start: i,
         context: "Новое для тебя".into(),
-    }
-}
-
-/// What a discovery's menu does: a service song's action, or its like.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DiscoverAct {
-    Track(super::TrackAct),
-    Like,
-}
-
-/// A discovery's menu: a service song's one list
-/// ([`super::streams::stream_track_rows`]), then «В любимое».
-fn discover_rows(t: &StreamTrackRow, marks: &nikgob_view::DislikesView) -> Vec<widgets::Row<DiscoverAct>> {
-    with_like(super::streams::stream_track_rows(t, None, marks), t.liked)
-}
-
-/// A service song's `rows`, then the discovery's own «В любимое».
-fn with_like(rows: Vec<widgets::Row<super::TrackAct>>, liked: bool) -> Vec<widgets::Row<DiscoverAct>> {
-    let mut rows: Vec<widgets::Row<DiscoverAct>> = rows.into_iter().map(|r| r.map(&mut DiscoverAct::Track)).collect();
-    rows.push(widgets::Row::Divider);
-    rows.push(widgets::Row::Item(
-        DiscoverAct::Like,
-        MenuItem::new(if liked { "Убрать из любимого" } else { "В любимое" }).icon(Icon::Favorite).selected(liked),
-    ));
-    rows
-}
-
-fn discover_pick(
-    ctx: &egui::Context,
-    act: Option<DiscoverAct>,
-    t: &StreamTrackRow,
-    pages: &mut PageState,
-    out: &mut Vec<Command>,
-) -> Option<Route> {
-    match act? {
-        DiscoverAct::Track(a) => super::streams::track_pick(ctx, Some(a), t, None, pages, out),
-        DiscoverAct::Like => {
-            out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
-            None
-        }
     }
 }
 
@@ -951,6 +911,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
             } else if o.clicked {
                 nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
             }
+            nav = super::streams::album_menus(&o.response, o.more.as_ref(), a, &state.downloads.wishlist, out).or(nav.take());
         });
     });
     nav
@@ -958,7 +919,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
 
 /// «Новые релизы» → «Все» ([`Route::NewReleases`]): every new album the
 /// row has, in its order, as cards of the same grid; a click opens one, ▶
-/// plays it.
+/// plays it, ⋮ and the right click: a service album's menu.
 pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     super::detail::with_bar(ui, "Новые релизы", pages, |ui, _| {
         let albums = &state.home.new_releases;
@@ -982,6 +943,7 @@ pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: 
             } else if o.clicked {
                 nav = Some(Route::Stream(StreamPage::Album(a.remote.clone())));
             }
+            nav = super::streams::album_menus(&o.response, o.more.as_ref(), a, &state.downloads.wishlist, out).or(nav.take());
         }
         ui.add_space(widgets::SECTION_GAP);
         nav

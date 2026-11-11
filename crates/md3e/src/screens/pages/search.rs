@@ -345,11 +345,8 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     let stale = t.query.trim() != q;
     section_head(ui, "Торренты", t.searching, false);
 
+    // The section's own mark says it is looking.
     if t.searching {
-        ui.label(TypeRole::BodyMedium.style().rich_para(
-            format!("Ищу раздачи «{}»… Prowlarr отвечает не сразу.", t.query),
-            s.on_surface_variant,
-        ));
         return None;
     }
 
@@ -366,15 +363,12 @@ fn torrents(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
 
     // Not searched for this text yet: offer the search.
     if stale && !q.is_empty() {
-        ui.horizontal(|ui| {
-            if ui
-                .add(Button::new("Искать раздачи").style(Style::Tonal).icon(Icon::Search).id_salt("tor-search"))
-                .clicked()
-            {
-                out.push(Command::SearchTorrents(q.to_owned()));
-            }
-            ui.label(TypeRole::BodySmall.style().rich("или Enter в строке поиска", s.on_surface_variant));
-        });
+        if ui
+            .add(Button::new("Искать раздачи").style(Style::Tonal).icon(Icon::Search).id_salt("tor-search"))
+            .clicked()
+        {
+            out.push(Command::SearchTorrents(q.to_owned()));
+        }
     }
 
     if let Some(err) = &t.error {
@@ -617,7 +611,7 @@ fn results(
                 part_label(ui, "Исполнители");
                 widgets::card_row(ui, &format!("sv-artists-{salt}"), |ui| {
                     for a in &x.artists {
-                        nav = streams::artist_card(ui, a, 120.0).or(nav.take());
+                        nav = streams::artist_card(ui, a, 120.0, out).or(nav.take());
                     }
                 });
             }
@@ -707,7 +701,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         let rrect = Rect::from_min_size(pos2(top.x + left + gap, top.y), vec2(w - left - gap, 40.0 + top_h));
         let mut lui = ui.new_child(UiBuilder::new().max_rect(lrect).id_salt("sa-top-col"));
         part_head(&mut lui, "Лучший результат", loading && a.top_pending);
-        nav = top_card(&mut lui, a.top.as_ref(), top_h, true, &picks, &context, state, out).or(nav.take());
+        nav = top_card(&mut lui, a.top.as_ref(), top_h, true, &picks, &context, state, pages, out).or(nav.take());
         let mut rui = ui.new_child(UiBuilder::new().max_rect(rrect).id_salt("sa-tracks-col"));
         rui.spacing_mut().item_spacing.y = 8.0;
         if first > 0 {
@@ -720,7 +714,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     } else {
         if show_top {
             part_head(ui, "Лучший результат", loading && a.top_pending);
-            nav = top_card(ui, a.top.as_ref(), TOP_H_NARROW, false, &picks, &context, state, out).or(nav.take());
+            nav = top_card(ui, a.top.as_ref(), TOP_H_NARROW, false, &picks, &context, state, pages, out).or(nav.take());
             ui.add_space(8.0);
         }
         if first > 0 {
@@ -770,7 +764,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
             for x in &a.artists {
                 nav = match x {
                     SearchArtist::Library(c) => widgets::artist_avatar(ui, c, 120.0, out),
-                    SearchArtist::Stream(c) => streams::artist_card(ui, c, 120.0),
+                    SearchArtist::Stream(c) => streams::artist_card(ui, c, 120.0, out),
                 }
                 .or(nav.take());
             }
@@ -929,8 +923,9 @@ fn album_line(artist: &str, year: Option<i32>) -> String {
 }
 
 /// «Лучший результат»: a large card (picture, name, what it is) with ▶;
-/// `tall` beside the tracks, else a row-shaped card above them. While the
-/// top is not settled yet its room is kept, empty.
+/// `tall` beside the tracks, else a row-shaped card above them; a right
+/// click opens the menu of what it is. While the top is not settled yet its
+/// room is kept, empty.
 #[allow(clippy::too_many_arguments)]
 fn top_card(
     ui: &mut Ui,
@@ -940,6 +935,7 @@ fn top_card(
     picks: &[SearchPick],
     context: &str,
     state: &ViewState,
+    pages: &mut PageState,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
     let theme = Theme::get(ui.ctx());
@@ -1019,9 +1015,24 @@ fn top_card(
             )
             .clicked();
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // The same menu as the rows and cards of what it is.
+    let menu = match top {
+        TopResult::Track(SearchTrack::Library(t)) => pages.track_context_menu(&resp, t, state, out),
+        TopResult::Track(SearchTrack::Stream(t)) => streams::track_context_menu(&resp, t, state, pages, out),
+        TopResult::Album(SearchAlbum::Library(r)) => widgets::release_menu(&resp, r, out),
+        TopResult::Album(SearchAlbum::Stream(a)) => streams::album_menus(&resp, None, a, &state.downloads.wishlist, out),
+        TopResult::Artist(SearchArtist::Library(c)) => {
+            widgets::artist_menu(&resp, c, out);
+            None
+        }
+        TopResult::Artist(SearchArtist::Stream(c)) => {
+            streams::artist_menus(&resp, None, c, out);
+            None
+        }
+    };
     if play || (resp.clicked() && v.open.is_none()) {
         out.push(if playing_now { Command::TogglePlay } else { v.play.clone().unwrap_or(Command::TogglePlay) });
         return None;
     }
-    if resp.clicked() { v.open } else { None }
+    if resp.clicked() { v.open } else { menu }
 }

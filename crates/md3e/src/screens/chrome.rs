@@ -8,9 +8,7 @@ use egui::{
     Area, Context, Id, Key, Modifiers, Order, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2,
     pos2, vec2,
 };
-use nikgob_view::{
-    Command, LIKED_PLAYLIST, LikeTarget, NpSlot, Route, TrackId, TrackRow, ViewState,
-};
+use nikgob_view::{Command, LikeTarget, NpSlot, Route, TrackRow, ViewState};
 
 use super::{
     PaneTab,
@@ -21,7 +19,7 @@ use super::{
 use crate::{
     Elevation, Icon, Theme, TypeRole,
     components::{
-        Dialog, IconButton, Menu, MenuItem, Size, TextInputDialog, Radii, anim,
+        IconButton, Menu, MenuItem, Size, TextInputDialog, Radii, anim,
         dialog::TextInputResult, paint,
     },
     tokens::shape,
@@ -61,18 +59,10 @@ pub enum Where {
     Np,
 }
 
-/// What the "В плейлист" picker is for.
-#[derive(Clone)]
-struct Picker {
-    tracks: Vec<TrackId>,
-    anchor: Rect,
-}
-
 /// Which text-input dialog is open.
 #[derive(Clone)]
 enum Ask {
     SaveQueue,
-    NewPlaylist(Vec<TrackId>),
 }
 
 const POPOVER: Vec2 = vec2(52.0, 164.0);
@@ -135,11 +125,8 @@ pub struct Chrome {
     /// Open Settings at this row (it also closes Now Playing).
     pub setting: Option<super::pages::SettingId>,
     pub tag: TagEditorUi,
-    picker: Option<Picker>,
     ask: Option<Ask>,
     ask_text: String,
-    add_after_create: Option<(String, Vec<TrackId>)>,
-    trash: Option<(TrackId, String)>,
     vol: Volume,
 }
 
@@ -162,8 +149,9 @@ impl Chrome {
 
     fn item(act: Act, t: &TrackRow, state: &ViewState) -> MenuItem {
         match act {
-            Act::Like => MenuItem::new(if t.liked { "Убрать из любимого" } else { "В любимое" })
+            Act::Like => MenuItem::new(super::pages::like_label(t.liked))
                 .icon(Icon::Favorite)
+                .selected(t.liked)
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
             Act::Volume => MenuItem::new("Громкость…")
@@ -172,8 +160,8 @@ impl Chrome {
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
             Act::EditLyrics => MenuItem::new("Изменить текст…").icon(Icon::Lyrics),
-            // Only what is in the library (a file, or a like) can leave it.
-            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete).enabled(t.has_local || t.liked),
+            // Only what is in the library (a file, or a like) is offered.
+            Act::Trash => MenuItem::new("Удалить из библиотеки").icon(Icon::Delete),
             Act::Youtube => MenuItem::new("Включить с YouTube")
                 .icon(Icon::PlayArrow)
                 .shortcut("Y"),
@@ -182,7 +170,7 @@ impl Chrome {
 
     /// The rows of the playing track's ⋮: the player's own rows `top`, then
     /// the one list of a library track ([`super::pages::library_track_rows`])
-    /// without «Сыграть следующим» / «В конец очереди» (it is playing). Its
+    /// without «Сыграть следующим» / «В очередь» (it is playing). Its
     /// sound is one row, «Скорость и эквалайзер» (the sound window on its
     /// first tab), and after it, when `top` names it, «Визуализатор»; its
     /// «Файл» has «Изменить текст…» after the tags while the shown lyrics
@@ -196,8 +184,15 @@ impl Chrome {
         let mut rows: Vec<Row<PlayerAct>> =
             youtube.iter().chain(top).filter(|a| **a != Act::Visualizer).map(|&a| own(a)).collect();
         rows.push(Row::Divider);
-        let also = state.also_on.get(&t.id);
-        for r in super::pages::library_track_rows(t, &state.dislikes, info, also) {
+        let wish = super::pages::widgets::WishIndex::build(&state.downloads.wishlist);
+        let of = super::pages::LibraryRowsOf {
+            marks: &state.dislikes,
+            info,
+            also: state.also_on.get(&t.id),
+            torrents: state.prefs.prowlarr_configured,
+            wished: (!t.has_local).then(|| wish.of_track(Some(t.id), t.release_id)).flatten(),
+        };
+        for r in super::pages::library_track_rows(t, of) {
             if !matches!(r, Row::Item(TrackAct::Next | TrackAct::Queue, _)) {
                 rows.push(r.map(&mut PlayerAct::Track));
             }
@@ -221,7 +216,7 @@ impl Chrome {
                     .map_or(file.len(), |i| i + 1);
                 file.insert(at, own(Act::EditLyrics));
             }
-            if trash && (t.has_local || t.liked) {
+            if trash && super::pages::can_trash(t) {
                 file.push(Row::Divider);
                 file.push(own(Act::Trash));
             }
@@ -249,16 +244,56 @@ impl Chrome {
     ) {
         let (menu, picks) = super::pages::widgets::menu_of(("md3e-track-menu", salt), rows);
         if let Some(act) = menu.align_right(true).attach(anchor).and_then(|i| picks.get(i).copied()) {
-            match act {
-                PlayerAct::Own(Act::EditLyrics) => super::lyrics_ui::open_editor(&anchor.ctx, state),
-                PlayerAct::Own(a) => self.apply(a, track, anchor.rect, wh, out),
-                PlayerAct::Track(a) => self.apply_track(&anchor.ctx, a, track, state, anchor.rect, wh, out),
-            }
+            self.pick(&anchor.ctx, act, track, state, anchor.rect, wh, out);
+        }
+    }
+
+    /// The same menu of `rows` on a right click on `row` (the bar's track,
+    /// the queue's playing row); `rows` is built only while it shows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn track_context_menu(
+        &mut self,
+        row: &Response,
+        salt: &'static str,
+        rows: impl FnOnce() -> Vec<Row<PlayerAct>>,
+        track: &TrackRow,
+        state: &ViewState,
+        wh: Where,
+        out: &mut Vec<Command>,
+    ) {
+        let key = ("md3e-track-ctx", salt);
+        if Menu::context_idle(row, key) {
+            return;
+        }
+        let (menu, picks) = super::pages::widgets::menu_of(key, rows());
+        if let Some(act) = menu.context_menu(row).and_then(|i| picks.get(i).copied()) {
+            let at = Rect::from_center_size(row.ctx.pointer_latest_pos().unwrap_or(row.rect.center()), vec2(1.0, 1.0));
+            self.pick(&row.ctx, act, track, state, at, wh, out);
+        }
+    }
+
+    /// Does what a row of the playing track's menu stands for.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pick(
+        &mut self,
+        ctx: &Context,
+        act: PlayerAct,
+        track: &TrackRow,
+        state: &ViewState,
+        anchor: Rect,
+        wh: Where,
+        out: &mut Vec<Command>,
+    ) {
+        match act {
+            PlayerAct::Own(Act::EditLyrics) => super::lyrics_ui::open_editor(ctx, state),
+            PlayerAct::Own(a) => self.apply(ctx, a, track, anchor, wh, out),
+            PlayerAct::Track(a) => self.apply_track(ctx, a, track, state, anchor, wh, out),
         }
     }
 
     pub(super) fn apply(
         &mut self,
+        ctx: &Context,
         act: Act,
         t: &TrackRow,
         anchor: Rect,
@@ -272,7 +307,7 @@ impl Chrome {
             Act::Visualizer => self.visualizer = true,
             // Opened by the menu itself ([`Self::track_menu`]).
             Act::EditLyrics => {}
-            Act::Trash => self.trash = Some((t.id, t.title.clone())),
+            Act::Trash => super::pages::request_delete(ctx, super::pages::Doomed::Tracks(vec![t.id]), format!("«{}»", t.title), false),
             Act::Youtube => out.push(Command::PlayFromYoutube),
         }
     }
@@ -302,11 +337,16 @@ impl Chrome {
         match act {
             A::Next => out.push(Command::PlayNext(vec![t.id])),
             A::Queue => out.push(Command::Enqueue(vec![t.id])),
-            A::Playlist => self.picker = Some(Picker { tracks: vec![t.id], anchor }),
+            A::Playlist => super::pages::request_tracks_to_playlist(ctx, vec![t.id], Some(anchor)),
             A::Radio => out.push(super::pages::radio_by_track(t.id)),
             A::Album => self.nav = t.release_id.map(Route::Release),
             A::AlsoOn => self.nav = state.also_on.get(&t.id).map(|(r, _)| Route::Release(*r)),
-            A::Apart => out.push(Command::RecordingApart(t.id)),
+            // For good: asked first.
+            A::Apart => {
+                if let Some((_, album)) = state.also_on.get(&t.id) {
+                    super::pages::request_apart(ctx, t.id, &t.title, album);
+                }
+            }
             // Several artists: which one.
             A::Artist => self.nav = super::artist_links::go_to(ctx, super::artist_links::library(&t.artists)),
             A::Info => self.show(PaneTab::Info, wh),
@@ -317,14 +357,10 @@ impl Chrome {
             A::Fetch => out.push(Command::DownloadTracks(vec![t.id])),
             // The whole album the track is from, the files it lacks.
             A::AlbumDownload => out.extend(t.release_id.map(Command::DownloadRelease)),
-            // A file: a better copy through the download sources, as the
-            // wishlist looks; no file: the indexer's search page.
-            A::Torrents if t.has_local => out.push(Command::FindBetter(t.id)),
-            A::Torrents => out.push(Command::SearchTorrents(format!(
-                "{} {}",
-                t.artist,
-                t.album.as_deref().unwrap_or(&t.title)
-            ))),
+            // A better copy through the download sources, as the wishlist
+            // looks; no file: the indexer's search page, by hand.
+            A::Better => out.push(Command::FindBetter(t.id)),
+            A::PickRelease => out.push(super::pages::pick_release_command(t)),
             A::ToMp3 => out.push(Command::FakeToMp3(t.id)),
             A::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(t.id)),
@@ -345,44 +381,12 @@ impl Chrome {
 
     /// Menus, dialogs and popovers that float above the screens.
     pub fn overlays(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
-        self.picker_ui(ctx, state, out);
-        self.dialogs(ctx, state, out);
+        self.dialogs(ctx, out);
         self.tag.show(ctx, state, out);
         self.volume_ui(ctx, state, out);
     }
 
-    fn picker_ui(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
-
-        let Some(p) = self.picker.clone() else { return };
-        let user: Vec<_> = state.library.playlists.iter().filter(|p| !p.pinned).collect();
-        let mut menu = Menu::new("md3e-playlist-picker")
-            .item(MenuItem::new("Любимые").icon(Icon::Favorite));
-        for pl in &user {
-            menu = menu.item(MenuItem::new(&pl.name).icon(Icon::QueueMusic));
-        }
-        menu = menu
-            .divider()
-            .item(MenuItem::new("Новый плейлист…").icon(Icon::Add))
-            .align_right(true);
-        let mut open = true;
-        let picked = menu.popup(ctx, p.anchor, &mut open);
-        match picked {
-            Some(0) => out.push(Command::AddToPlaylist(LIKED_PLAYLIST, p.tracks.clone())),
-            Some(i) if i <= user.len() => {
-                out.push(Command::AddToPlaylist(user[i - 1].id, p.tracks.clone()));
-            }
-            Some(_) => {
-                self.ask_text.clear();
-                self.ask = Some(Ask::NewPlaylist(p.tracks.clone()));
-            }
-            None => {}
-        }
-        if picked.is_some() || !open {
-            self.picker = None;
-        }
-    }
-
-    fn dialogs(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+    fn dialogs(&mut self, ctx: &Context, out: &mut Vec<Command>) {
         if let Some(ask) = self.ask.clone() {
             let mut open = true;
             let dialog = match &ask {
@@ -391,11 +395,6 @@ impl Chrome {
                         .icon(Icon::PlaylistAdd)
                         .buttons("Сохранить", "Отмена")
                 }
-                Ask::NewPlaylist(_) => {
-                    TextInputDialog::new("md3e-new-playlist", "Новый плейлист", "Название")
-                        .icon(Icon::PlaylistAdd)
-                        .buttons("Создать", "Отмена")
-                }
             }
             .validate(|t| t.trim().is_empty().then(|| "Введи название".to_owned()));
             match dialog.show(ctx, &mut open, &mut self.ask_text) {
@@ -403,48 +402,12 @@ impl Chrome {
                     let name = self.ask_text.trim().to_owned();
                     match ask {
                         Ask::SaveQueue => out.push(Command::SaveQueueAsPlaylist(name)),
-                        Ask::NewPlaylist(tracks) => {
-                            out.push(Command::CreatePlaylist(name.clone()));
-                            self.add_after_create = Some((name, tracks));
-                        }
                     }
                     self.ask = None;
                 }
                 Some(TextInputResult::Cancelled) => self.ask = None,
                 None if !open => self.ask = None,
                 None => {}
-            }
-        }
-        // Tracks waiting for the playlist we just created.
-        if let Some((name, tracks)) = self.add_after_create.clone()
-            && let Some(p) = state
-                .library
-                .playlists
-                .iter()
-                .find(|p| p.name == name && !p.pinned)
-        {
-            out.push(Command::AddToPlaylist(p.id, tracks));
-            self.add_after_create = None;
-        }
-
-        if let Some((id, title)) = self.trash.clone() {
-            let mut open = true;
-            let trash = state.prefs.use_trash;
-            let r = Dialog::new("md3e-confirm-trash", if trash { "Удалить из библиотеки?" } else { "Удалить навсегда?" })
-                .icon(Icon::Delete)
-                .supporting(if trash {
-                    format!("«{title}» вместе с файлами уйдёт в корзину на 30 дней.")
-                } else {
-                    format!("«{title}»: файлы будут стёрты с диска. Корзина выключена, отменить нельзя.")
-                })
-                .action("Отмена")
-                .action(if trash { "Удалить" } else { "Удалить навсегда" })
-                .show(ctx, &mut open);
-            if r.action == Some(1) {
-                out.push(Command::TrashTrack(id));
-            }
-            if r.action.is_some() || r.dismissed || !open {
-                self.trash = None;
             }
         }
     }
@@ -756,7 +719,9 @@ fn paint_vslider(ui: &Ui, rect: Rect, value: f32, pressed: bool) {
 mod tests {
     use super::*;
 
-    use crate::screens::pages::{FILE, TrackAct as A, library_track_rows, widgets::{row_acts, row_items, sub_rows}};
+    use nikgob_view::TrackId;
+
+    use crate::screens::pages::{FILE, LibraryRowsOf, TrackAct as A, library_track_rows, widgets::{row_acts, row_items, sub_rows}};
 
     fn track(has_local: bool, liked: bool) -> TrackRow {
         TrackRow {
@@ -766,15 +731,26 @@ mod tests {
         }
     }
 
+    /// A track with its album and artist known.
+    fn full(has_local: bool) -> TrackRow {
+        TrackRow {
+            album: Some("Album".into()),
+            release_id: Some(nikgob_view::ReleaseId::new()),
+            artists: nikgob_view::Credit::single("Artist", Some(nikgob_view::ArtistId::new())),
+            ..track(has_local, false)
+        }
+    }
+
     /// The Now Playing and bar ⋮ are a library row's one list without
-    /// «Сыграть следующим» / «В конец очереди» (the track is playing): the
+    /// «Сыграть следующим» / «В очередь» (the track is playing): the
     /// player's own rows before it, the sound's row and Now Playing's
     /// «Визуализатор» right before «Файл», Now Playing's delete last in it.
     #[test]
     fn the_player_menus_are_the_track_list_with_their_own_rows() {
         let state = ViewState::default();
-        let t = track(true, false);
-        let list: Vec<PlayerAct> = row_acts(&library_track_rows(&t, &state.dislikes, true, None))
+        let t = full(true);
+        let of = LibraryRowsOf { marks: &state.dislikes, info: true, also: None, torrents: false, wished: None };
+        let list: Vec<PlayerAct> = row_acts(&library_track_rows(&t, of))
             .into_iter()
             .filter(|a| !matches!(a, A::Next | A::Queue))
             .map(PlayerAct::Track)
@@ -795,7 +771,7 @@ mod tests {
         let bar = Chrome::player_rows(&t, &state, &top, true, false);
         assert_eq!(&row_acts(&bar)[..3], top.map(PlayerAct::Own));
         assert_eq!(&less(&bar, &[eq])[3..], &list[..]);
-        assert_eq!(&list[..6], [A::Playlist, A::Radio, A::Album, A::Artist, A::Share, A::Info].map(PlayerAct::Track));
+        assert_eq!(&list[..6], [A::Radio, A::Playlist, A::Album, A::Artist, A::Share, A::Info].map(PlayerAct::Track));
         // Not in the library (no file, no like): nothing to delete.
         let stream = row_acts(&Chrome::player_rows(&track(false, false), &state, &[], true, true));
         assert!(!stream.contains(&PlayerAct::Own(Act::Trash)));
@@ -872,17 +848,18 @@ mod tests {
     }
 
     /// One song on two albums: the Now Playing and bar ⋮ offer the other
-    /// album and «Разные песни» right after «К альбому», like the track
-    /// menu of a list.
+    /// album right after «К альбому» and «Разные песни» last, like the
+    /// track menu of a list.
     #[test]
     fn the_other_album_of_a_song_is_in_the_player_menus() {
-        let t = track(true, false);
+        let t = full(true);
         let mut state = ViewState::default();
         let other = nikgob_view::ReleaseId::new();
         state.also_on = std::sync::Arc::new([(t.id, (other, "Live".to_owned()))].into_iter().collect());
         let rows = Chrome::player_rows(&t, &state, &[], false, false);
         let acts = row_acts(&rows);
-        assert_eq!(&acts[2..5], [A::Album, A::AlsoOn, A::Apart].map(PlayerAct::Track));
+        assert_eq!(&acts[2..5], [A::Album, A::AlsoOn, A::Artist].map(PlayerAct::Track));
+        assert_eq!(acts.last(), Some(&PlayerAct::Track(A::Apart)));
         let labels: Vec<String> = rows
             .iter()
             .filter_map(|r| match r {
