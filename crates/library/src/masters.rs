@@ -93,7 +93,7 @@ fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Download> {
 
 const WISHLIST_COLS: &str = "id, title, artist, recording_mbid, isrc, spotify_id, youtube_id, \
     status, candidates_json, created_at, updated_at, track_id, release_id, scope, origin, \
-    attempts, next_try_at, note";
+    attempts, next_try_at, note, better_than";
 
 fn wishlist_from_row(row: &Row<'_>) -> rusqlite::Result<WishlistItem> {
     Ok(WishlistItem {
@@ -115,6 +115,7 @@ fn wishlist_from_row(row: &Row<'_>) -> rusqlite::Result<WishlistItem> {
         attempts: row.get::<_, i64>(15)?.max(0) as u32,
         next_try_at: row.get(16)?,
         note: row.get(17)?,
+        better_than: row.get(18)?,
     })
 }
 
@@ -546,9 +547,9 @@ impl Library {
                 "INSERT INTO wishlist(id, title, artist, recording_mbid, isrc, spotify_id,
                                       youtube_id, status, candidates_json, created_at, updated_at,
                                       track_id, release_id, scope, origin, attempts, next_try_at,
-                                      note)
+                                      note, better_than)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18)
+                         ?17, ?18, ?19)
                  ON CONFLICT(id) DO UPDATE SET
                     title = excluded.title, artist = excluded.artist,
                     recording_mbid = excluded.recording_mbid, isrc = excluded.isrc,
@@ -557,7 +558,8 @@ impl Library {
                     updated_at = excluded.updated_at, track_id = excluded.track_id,
                     release_id = excluded.release_id, scope = excluded.scope,
                     origin = excluded.origin, attempts = excluded.attempts,
-                    next_try_at = excluded.next_try_at, note = excluded.note",
+                    next_try_at = excluded.next_try_at, note = excluded.note,
+                    better_than = excluded.better_than",
                 params![
                     w.id.to_string(),
                     w.title,
@@ -576,7 +578,8 @@ impl Library {
                     w.origin.as_str(),
                     w.attempts,
                     w.next_try_at,
-                    w.note
+                    w.note,
+                    w.better_than
                 ],
             )?;
             Ok(())
@@ -981,6 +984,15 @@ mod tests {
             (got.status, got.created_at, got.updated_at),
             (WishlistStatus::Done, 1, 60)
         );
+        // A better copy asked for by hand keeps what it must beat.
+        assert_eq!(got.better_than, None);
+        let mut a3 = got.clone();
+        a3.better_than = Some(640);
+        lib.put_wishlist_item(&a3).unwrap();
+        assert_eq!(lib.get_wishlist_item(a.id).unwrap().unwrap().better_than, Some(640));
+        a3.better_than = None;
+        lib.put_wishlist_item(&a3).unwrap();
+        assert_eq!(lib.get_wishlist_item(a.id).unwrap().unwrap().better_than, None);
         assert_eq!(
             lib.list_wishlist_by_status(WishlistStatus::Done)
                 .unwrap()
