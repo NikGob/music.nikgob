@@ -617,6 +617,9 @@ impl Worker {
     /// After a restart: a copy that waited is read again and asks again;
     /// one whose files are gone is looked for again.
     pub(super) fn album_restage(&mut self, id: WishlistId) {
+        if self.import.is_none() {
+            return;
+        }
         let Some(k) = self.album_kept(id) else { return };
         if k.files.is_empty() || !k.files.iter().all(|f| f.exists()) {
             log::info!("upgrade: the copy that waited for {id} is gone, it looks again");
