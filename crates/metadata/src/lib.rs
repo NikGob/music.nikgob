@@ -20,6 +20,7 @@ pub mod lrclib;
 pub mod matcher;
 pub mod musicbrainz;
 pub mod odesli;
+pub mod pause;
 pub mod lyricsplus;
 pub mod lrcred;
 pub mod betterlyrics;
@@ -45,6 +46,7 @@ pub use matcher::{
 };
 pub use musicbrainz::{ArtistTags, MusicBrainz, RecordingQuery};
 pub use odesli::{Odesli, OdesliPage};
+pub use pause::{Pauses, Verdict};
 pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;
@@ -71,6 +73,9 @@ pub struct Metadata {
     pub listenbrainz: ListenBrainz,
     /// `None` without the user's Last.fm key.
     pub lastfm: Option<LastFm>,
+    /// Lyrics sources sitting out after refusals in a row (shared by the
+    /// clones).
+    pub lyrics_pauses: Pauses,
 }
 
 impl Metadata {
@@ -91,6 +96,7 @@ impl Metadata {
             itunes: Itunes::new(http.clone()),
             listenbrainz: ListenBrainz::new(http.clone()).with_token(config.listenbrainz_token.as_deref()),
             lastfm: config.lastfm_key.as_deref().and_then(|k| LastFm::new(http, k)),
+            lyrics_pauses: Pauses::new(),
         })
     }
 }

@@ -859,6 +859,50 @@ async fn fetch_online(
     Ok(text)
 }
 
+/// One source's lookup of `row` (LRCLIB through its own cache), noted in
+/// the sources' pauses ([`nikgob_metadata::pause`]): refusals in a row make
+/// the source sit out, logged once when the pause starts.
+async fn ask_source(meta: Metadata, lib: Library, row: TrackRow, source: LyricsSource) -> Result<Option<Text>, MetadataError> {
+    let pauses = meta.lyrics_pauses.clone();
+    let got = if source == LyricsSource::Lrclib {
+        crate::enrich::fetch_and_store(&meta.lrclib, &lib, &row).await
+            .map(|st| Text::from_lrc(st.synced.as_deref(), st.plain.as_deref()))
+    } else {
+        fetch_online(meta, lib, row, source).await
+    };
+    let verdict = nikgob_metadata::Verdict::of(&got);
+    if let Some(pause) = pauses.note(source.key(), verdict, std::time::Instant::now())
+        && let Err(e) = &got
+    {
+        log::warn!("lyrics ({}): {e}; not asked for {} min", source.key(), pause.as_secs() / 60);
+    }
+    got
+}
+
+/// Sitting out ([`ask_source`]): taken out of `tl`'s lookups as a failure
+/// (not a miss: asked again when the song is shown after the pause).
+fn sitting_out(meta: &Metadata, source: LyricsSource) -> bool {
+    meta.lyrics_pauses.paused_for(source.key(), std::time::Instant::now()).is_some()
+}
+
+/// `tl`'s next lookups without the sources sitting out; those are taken
+/// out of its lookups as failures, and the ones after them come up.
+fn next_asked(tl: &mut TrackLyrics, meta: &Metadata) -> Vec<LyricsSource> {
+    loop {
+        let (held, ask): (Vec<LyricsSource>, Vec<LyricsSource>) = tl.next_lookups().into_iter().partition(|s| sitting_out(meta, *s));
+        if held.is_empty() {
+            return ask;
+        }
+        for s in &held {
+            tl.pending.remove(s);
+        }
+        tl.failed = true;
+        if !ask.is_empty() {
+            return ask;
+        }
+    }
+}
+
 /// A text cached by [`fetch_online`]: a list of lines, a weak text or a
 /// plain one.
 pub(crate) fn stored_lines(body: &str) -> Option<Text> {
@@ -998,15 +1042,10 @@ pub(crate) async fn fetch_track_lyrics(meta: Metadata, lib: Library, row: TrackR
     let tags = path.as_deref().and_then(|p| nikgob_import::tags::read_tags(p).ok()).map(|(t, _)| t);
     let mut tl = cached_lyrics(&lib, row.id, path.as_deref(), tags.as_ref(), genius, kept.as_deref());
     loop {
-        let sources = tl.next_lookups();
+        let sources = next_asked(&mut tl, &meta);
         if sources.is_empty() { break }
         for source in sources {
-            let result = if source == LyricsSource::Lrclib {
-                crate::enrich::fetch_and_store(&meta.lrclib, &lib, &row).await
-                    .map(|st| Text::from_lrc(st.synced.as_deref(), st.plain.as_deref()))
-            } else {
-                fetch_online(meta.clone(), lib.clone(), row.clone(), source).await
-            };
+            let result = ask_source(meta.clone(), lib.clone(), row.clone(), source).await;
             match result {
                 Ok(text) => tl.found(source, text),
                 Err(e) => {
@@ -1162,7 +1201,7 @@ impl Worker {
         let Some(svc) = self.import.as_mut() else { return };
         let Some(meta) = svc.metadata() else { return };
         let Some(tl) = svc.lyrics_cache.get_mut(&track) else { return };
-        let sources = tl.next_lookups();
+        let sources = next_asked(tl, &meta);
         for source in sources {
             // Already on its way: its answer asks for the next ones.
             if !svc.lyrics_asking.insert((track, source)) {
@@ -1170,12 +1209,7 @@ impl Worker {
             }
             let (meta, lib, row, tx) = (meta.clone(), self.lib.clone(), row.clone(), svc.internal());
             svc.spawn(async move {
-                let got = if source == LyricsSource::Lrclib {
-                    crate::enrich::fetch_and_store(&meta.lrclib, &lib, &row).await
-                        .map(|st| Text::from_lrc(st.synced.as_deref(), st.plain.as_deref()))
-                } else {
-                    fetch_online(meta, lib, row, source).await
-                };
+                let got = ask_source(meta, lib, row, source).await;
                 let _ = tx.send(Internal::LyricsFetched(track, source, got.map_err(|e| e.to_string())));
             });
         }
@@ -2062,6 +2096,31 @@ People pleasing planet"));
         // Off in the settings: never.
         tl.genius = false;
         assert!(!tl.genius_wanted());
+    }
+
+    /// Sources sitting out are not asked: they count as failures and the
+    /// ones after them come up.
+    #[test]
+    fn sources_sitting_out_are_skipped_as_failures() {
+        use nikgob_metadata::{MetadataConfig, Verdict};
+        let meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+        let now = std::time::Instant::now();
+        let mut tl = TrackLyrics::default();
+        tl.pending.extend([LyricsSource::LyricsPlus, LyricsSource::LrcRed, LyricsSource::BetterLyrics, LyricsSource::Lrclib]);
+        assert_eq!(next_asked(&mut tl.clone(), &meta), [LyricsSource::LyricsPlus, LyricsSource::LrcRed]);
+        meta.lyrics_pauses.note(LyricsSource::LyricsPlus.key(), Verdict::NeedsKey, now);
+        let mut one = tl.clone();
+        assert_eq!(next_asked(&mut one, &meta), [LyricsSource::LrcRed]);
+        assert!(one.failed && !one.pending.contains(&LyricsSource::LyricsPlus));
+        meta.lyrics_pauses.note(LyricsSource::LrcRed.key(), Verdict::NeedsKey, now);
+        let mut both = tl.clone();
+        assert_eq!(next_asked(&mut both, &meta), [LyricsSource::Lrclib]);
+        assert!(both.failed);
+        // A clone of the clients shares the pauses.
+        meta.clone().lyrics_pauses.note(LyricsSource::Lrclib.key(), Verdict::NeedsKey, now);
+        let mut all = tl.clone();
+        assert!(next_asked(&mut all, &meta).is_empty());
+        assert!(all.pending.is_empty() && all.failed);
     }
 
     /// «Summer 15/16»: LRCLIB's lines and lrc.red's text are in the
