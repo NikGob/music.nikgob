@@ -10,6 +10,7 @@ mod bg_shapes;
 mod chrome;
 mod common;
 mod find_song;
+mod info_window;
 mod lyrics;
 mod lyrics_front;
 pub mod lyrics_ui;
@@ -1682,7 +1683,10 @@ mod tests {
             duration: None, quality: None, source: None, has_local: true, liked: false, cover: None, clip: false,
         };
         let mut out = Vec::new();
-        let (ctx, state) = (egui::Context::default(), ViewState::default());
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        state.player.current = Some(track.clone());
+        state.prefs.pane_info = true;
         let info = crate::screens::pages::TrackAct::Info;
         chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Np, &mut out);
         assert_eq!(chrome.np_slot, NpSlot::Info);
@@ -1690,6 +1694,20 @@ mod tests {
         chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Bar, &mut out);
         assert_eq!(chrome.open_pane, Some(PaneTab::Info));
         assert_eq!(chrome.np_slot, NpSlot::Info);
+        assert!(out.is_empty(), "{out:?}");
+
+        // Another track (a queue row): its own window, never the pane.
+        chrome.open_pane = None;
+        let other = nikgob_view::TrackRow { id: nikgob_view::TrackId::new(), ..track.clone() };
+        chrome.apply_track(&ctx, info, &other, &state, Rect::NOTHING, chrome::Where::Bar, &mut out);
+        assert_eq!(chrome.open_pane, None);
+        assert_eq!(out, vec![Command::TrackInfo(Some(other.id))]);
+        assert_eq!(info_window::shown_track(&ctx), Some(other.id));
+        // The playing one with the pane off: the window too.
+        out.clear();
+        state.prefs.pane_info = false;
+        chrome.apply_track(&ctx, info, &track, &state, Rect::NOTHING, chrome::Where::Bar, &mut out);
+        assert_eq!((chrome.open_pane, out), (None, vec![Command::TrackInfo(Some(track.id))]));
     }
 
     #[test]

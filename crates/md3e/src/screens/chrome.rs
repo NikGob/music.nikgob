@@ -223,6 +223,13 @@ impl Chrome {
                 file.push(own(Act::Trash));
             }
         }
+        // Nothing that leads back to the page on screen (none under Now
+        // Playing, which covers it).
+        let also = state.also_on.get(&t.id).map(|(r, _)| *r);
+        let rows = super::pages::here(ctx).trim(rows, t, also, |a| match a {
+            PlayerAct::Track(a) => Some(a),
+            PlayerAct::Own(_) => None,
+        });
         // «Меню трека»: the bar's own rows and the delete stay as they are.
         super::pages::placed(rows, &state.prefs.track_menu, |a| match a {
             PlayerAct::Track(a) => a.menu_item(t.has_local),
@@ -349,9 +356,24 @@ impl Chrome {
                     super::pages::request_apart(ctx, t.id, &t.title, album);
                 }
             }
-            // Several artists: which one.
-            A::Artist => self.nav = super::artist_links::go_to(ctx, super::artist_links::library(&t.artists)),
-            A::Info => self.show(PaneTab::Info, wh),
+            // Several artists: which one (not the one whose page is on
+            // screen under the bar).
+            A::Artist => {
+                let here = match wh {
+                    Where::Np => super::pages::Here::default(),
+                    Where::Bar => super::pages::here(ctx),
+                };
+                self.nav = super::artist_links::go_to(ctx, here.artists(&t.artists));
+            }
+            // Now Playing's sheet; the side pane for the playing track when
+            // it is on; any other track's in a window of its own.
+            A::Info => match wh {
+                Where::Np => self.show(PaneTab::Info, Where::Np),
+                Where::Bar if super::pages::is_playing(state, t.id) && PaneTab::Info.on(&state.prefs) => {
+                    self.show(PaneTab::Info, Where::Bar);
+                }
+                Where::Bar => super::info_window::open(ctx, t.id, Some(t.clone()), out),
+            },
             A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
             // The playing track's own speed (a queue row opens its own).
             A::Speed => super::pages::sound::open(ctx, super::pages::sound::Tab::Speed, None),
@@ -779,6 +801,37 @@ mod tests {
         // Not in the library (no file, no like): nothing to delete.
         let stream = row_acts(&Chrome::player_rows(&ctx, &track(false, false), &state, &[], true, true));
         assert!(!stream.contains(&PlayerAct::Own(Act::Trash)));
+    }
+
+    /// The bar's ⋮ over the page of the playing track's album has no «К
+    /// альбому» (nor «К исполнителю» over its artist's); with no page under
+    /// it (Now Playing) both are there.
+    #[test]
+    fn the_player_menu_leaves_out_the_page_under_it() {
+        use crate::screens::pages::{Here, set_here};
+        let ctx = egui::Context::default();
+        let state = ViewState::default();
+        let t = full(true);
+        let acts_on = |route: Option<Route>| {
+            let mut acts = Vec::new();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                if let Some(r) = &route {
+                    set_here(ui.ctx(), Here::of(r));
+                }
+                acts = row_acts(&Chrome::player_rows(ui.ctx(), &t, &state, &[], true, false));
+            });
+            acts
+        };
+        let album = PlayerAct::Track(A::Album);
+        let artist = PlayerAct::Track(A::Artist);
+        let on_album = acts_on(Some(Route::Release(t.release_id.unwrap())));
+        assert!(!on_album.contains(&album) && on_album.contains(&artist));
+        let on_artist = acts_on(Some(Route::Artist(*t.artists.main().unwrap())));
+        assert!(on_artist.contains(&album) && !on_artist.contains(&artist));
+        // Two frames with no page: Now Playing covers it.
+        acts_on(None);
+        let covered = acts_on(None);
+        assert!(covered.contains(&album) && covered.contains(&artist));
     }
 
     /// The sound of the playing track is one row of its menu, never

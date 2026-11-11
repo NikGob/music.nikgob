@@ -15,10 +15,10 @@ const CHART_H: f32 = 112.0;
 /// The chart shows this many dB below its loudest band.
 const RANGE_DB: f32 = 90.0;
 
-/// The section of `track`'s file, with what can be done about it.
+/// The section of `track`'s file, with what can be done about it (the
+/// caller leaves the room above it).
 pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
-    ui.add_space(20.0);
     ui.label(TypeRole::TitleSmall.style().rich("Качество", s.on_surface_variant));
     ui.add_space(8.0);
     if let Some(v) = &d.verdict {

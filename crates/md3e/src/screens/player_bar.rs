@@ -283,11 +283,12 @@ pub fn show(
             top.extend((!show_volume).then_some(Act::Volume));
             // Placed by «Меню трека» like Now Playing's (F12 anyway).
             top.push(Act::Visualizer);
-            let info_on = PaneTab::Info.on(&state.prefs);
-            let rows = Chrome::player_rows(ui.ctx(), t, state, &top, info_on, false);
+            // «Источник и качество»: the side pane when it is on, else its
+            // own window.
+            let rows = Chrome::player_rows(ui.ctx(), t, state, &top, true, false);
             chrome.track_menu(&more, "bar-more", rows, t, state, Where::Bar, out);
             // A right click on the track (its cover and title): the same.
-            chrome.track_context_menu(&info, "bar-track", || Chrome::player_rows(ui.ctx(), t, state, &top, info_on, false), t, state, Where::Bar, out);
+            chrome.track_context_menu(&info, "bar-track", || Chrome::player_rows(ui.ctx(), t, state, &top, true, false), t, state, Where::Bar, out);
         }
     });
     // A click on the pill between the controls opens Now Playing too.

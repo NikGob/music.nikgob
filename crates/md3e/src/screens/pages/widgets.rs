@@ -278,13 +278,16 @@ pub fn release_menu(resp: &Response, r: &ReleaseCard, out: &mut Vec<Command>) ->
 /// The menu of an album on a right click on `resp` and on its ⋮ (`more`):
 /// the same [`release_rows`].
 pub fn release_menus(resp: &Response, more: Option<&Response>, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<Route> {
+    // On its artist's page «К исполнителю» leads nowhere.
+    let here = super::here(&resp.ctx);
+    let rows = || super::retain_rows(release_rows(r, false), &|a: ReleaseAct| a != ReleaseAct::Artist || !here.artists(&r.artists).is_empty());
     let mut act = None;
     if let Some(m) = more {
-        let (menu, acts) = menu_of(("release-more", m.id), release_rows(r, false));
+        let (menu, acts) = menu_of(("release-more", m.id), rows());
         act = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied());
     }
     if !Menu::context_idle(resp, ("release-menu", resp.id)) {
-        let (menu, acts) = menu_of(("release-menu", resp.id), release_rows(r, false));
+        let (menu, acts) = menu_of(("release-menu", resp.id), rows());
         act = act.or(menu.context_menu(resp).and_then(|i| acts.get(i).copied()));
     }
     release_apply(&resp.ctx, act?, r, out)
@@ -1037,14 +1040,14 @@ pub fn track_list_ext(
         match opts.playlist {
             Some(pl) => {
                 if let Some(m) = &o.more {
-                    let (menu, acts) = playlist_track_menu(menu_key, t, pl, state, &wish);
+                    let (menu, acts) = playlist_track_menu(&m.ctx, menu_key, t, pl, state, &wish);
                     let act = menu.attach(m).and_then(|i| acts.get(i).copied());
                     *nav = playlist_track_pick(&m.ctx, act, t, pl, Some(m.rect), pages, state, out).or(nav.take());
                 }
                 let act = if Menu::context_idle(&o.response, menu_key.with("ctx")) {
                     None
                 } else {
-                    let (menu, acts) = playlist_track_menu(menu_key.with("ctx"), t, pl, state, &wish);
+                    let (menu, acts) = playlist_track_menu(&o.response.ctx, menu_key.with("ctx"), t, pl, state, &wish);
                     menu.context_menu(&o.response).and_then(|i| acts.get(i).copied())
                 };
                 *nav = playlist_track_pick(&o.response.ctx, act, t, pl, None, pages, state, out).or(nav.take());
@@ -1402,9 +1405,19 @@ pub(crate) fn playlist_track_rows(track: &TrackRow, playlist: PlaylistId, of: su
     rows
 }
 
-fn playlist_track_menu(key: Id, track: &TrackRow, playlist: PlaylistId, state: &ViewState, wish: &WishIndex) -> (Menu, Vec<super::TrackAct>) {
+fn playlist_track_menu(
+    ctx: &egui::Context,
+    key: Id,
+    track: &TrackRow,
+    playlist: PlaylistId,
+    state: &ViewState,
+    wish: &WishIndex,
+) -> (Menu, Vec<super::TrackAct>) {
     let rows = playlist_track_rows(track, playlist, super::LibraryRowsOf::of(state, track, wish));
-    let rows = super::placed(super::with_speed_row(rows, &state.speeds), &state.prefs.track_menu, |a| a.menu_item(track.has_local));
+    let rows = super::with_speed_row(rows, &state.speeds, super::is_playing(state, track.id));
+    let also = state.also_on.get(&track.id).map(|(r, _)| *r);
+    let rows = super::here(ctx).trim(rows, track, also, Some);
+    let rows = super::placed(rows, &state.prefs.track_menu, |a| a.menu_item(track.has_local));
     let (menu, acts) = menu_of(key, rows);
     (menu.align_right(true), acts)
 }
@@ -1424,7 +1437,7 @@ fn playlist_track_pick(
             out.push(Command::RemoveFromPlaylist(playlist, track.id));
             None
         }
-        act => pages.track_apply(ctx, act, track, &state.dislikes, state.also_on.get(&track.id), anchor, out),
+        act => pages.track_apply(ctx, act, track, state, anchor, out),
     }
 }
 

@@ -222,11 +222,18 @@ fn track_row(
     }
     let mut nav = None;
     if let Some(m) = &menu_resp {
-        let (menu, acts) = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx), &super::track_menu_slots(&m.ctx));
+        let (menu, acts) = track_menu(egui::Id::new(("st-menu", id, i)), t, wished, &super::marks(&m.ctx), &super::track_menu_slots(&m.ctx), &super::here(&m.ctx));
         let act = menu.attach(m).and_then(|k| acts.get(k).copied());
         nav = track_pick(&m.ctx, act, t, Some(m.rect), pages, out);
     }
-    let (menu, acts) = track_menu(egui::Id::new(("st-menu-ctx", id, i)), t, wished, &super::marks(&o.response.ctx), &super::track_menu_slots(&o.response.ctx));
+    let (menu, acts) = track_menu(
+        egui::Id::new(("st-menu-ctx", id, i)),
+        t,
+        wished,
+        &super::marks(&o.response.ctx),
+        &super::track_menu_slots(&o.response.ctx),
+        &super::here(&o.response.ctx),
+    );
     let act = menu.context_menu(&o.response).and_then(|k| acts.get(k).copied());
     let nav = track_pick(&o.response.ctx, act, t, None, pages, out).or(nav);
     // An artist name or the album of the line: its page.
@@ -247,7 +254,8 @@ pub(crate) fn stream_track_rows(
         has_artists: !t.artists.linked().is_empty(),
         has_file: t.has_local,
         also_on: None,
-        info: false,
+        // The file of its library track.
+        info: t.track.is_some() && t.has_local,
         fetch: if t.has_local { None } else { super::download_item(wished) },
         better: false,
         pick_release: false,
@@ -264,9 +272,12 @@ fn track_menu(
     wished: Option<WishlistStatus>,
     marks: &nikgob_view::DislikesView,
     slots: &[nikgob_view::TrackMenuSlot],
+    here: &super::Here,
 ) -> (Menu, Vec<super::TrackAct>) {
+    // Nothing that leads back to the page it is on.
+    let rows = super::retain_rows(stream_track_rows(t, wished, marks), &|a: super::TrackAct| here.keeps_stream(a, t));
     // Its «Скачать» is the download, never the tags.
-    let rows = super::placed(stream_track_rows(t, wished, marks), slots, |a| a.menu_item(false));
+    let rows = super::placed(rows, slots, |a| a.menu_item(false));
     let (menu, acts) = widgets::menu_of(key, rows);
     (menu.align_right(true), acts)
 }
@@ -285,7 +296,7 @@ pub(super) fn track_context_menu(
         return None;
     }
     let wish = widgets::WishIndex::of(&resp.ctx, &state.downloads.wishlist);
-    let (menu, acts) = track_menu(key, t, wish_of(t, &wish), &state.dislikes, &state.prefs.track_menu);
+    let (menu, acts) = track_menu(key, t, wish_of(t, &wish), &state.dislikes, &state.prefs.track_menu, &super::here(&resp.ctx));
     let act = menu.context_menu(resp).and_then(|k| acts.get(k).copied());
     track_pick(&resp.ctx, act, t, None, pages, out)
 }
@@ -314,8 +325,14 @@ pub(super) fn track_pick(
         A::Playlist => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
         A::Radio => out.push(radio_by_stream(t)),
         A::Album => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
-        // Several artists: a chooser.
-        A::Artist => return artist_links::go_to(ctx, artist_links::stream(&t.artists)),
+        // Several artists: a chooser (not of the artist whose page this is).
+        A::Artist => return artist_links::go_to(ctx, super::here(ctx).stream_artists(&t.artists)),
+        // The file of its library track, in a window of its own.
+        A::Info => {
+            if let Some(id) = t.track {
+                crate::screens::info_window::open(ctx, id, None, out);
+            }
+        }
         A::Share => out.push(Command::Share(ShareTarget::StreamTrack(t.remote.clone()))),
         // Download without a like: the like stays the ♡'s.
         A::Fetch => out.push(Command::DownloadStream { tracks: vec![t.remote.clone()] }),
@@ -328,7 +345,7 @@ pub(super) fn track_pick(
         A::Dislike => out.push(stream_dislike(t, &super::marks(ctx))),
         A::Ban => out.push(Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(t.artist.clone()), dislike: true }),
         // Only a library track has these.
-        A::AlsoOn | A::Apart | A::Info | A::Speed | A::Equalizer | A::Better | A::PickRelease | A::ToMp3 | A::FindSong | A::WrongFile
+        A::AlsoOn | A::Apart | A::Speed | A::Equalizer | A::Better | A::PickRelease | A::ToMp3 | A::FindSong | A::WrongFile
         | A::Remove | A::Trash | A::Purge => {}
     }
     None

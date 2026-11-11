@@ -910,10 +910,8 @@ pub fn show_on(
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
         if let Some(t) = p.current.as_ref() {
             // The track's one list, the visualizer before it, the delete
-            // last; with the content open the volume has no room on the
-            // screen and is here.
-            let top: &[Act] = if chrome.np_slot != NpSlot::None { &[Act::Volume, Act::Visualizer] } else { &[Act::Visualizer] };
-            let rows = Chrome::player_rows(&ctx, t, state, top, true, true);
+            // last.
+            let rows = Chrome::player_rows(&ctx, t, state, &[Act::Visualizer], true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
         if ui.add(
@@ -1215,7 +1213,8 @@ pub fn show_on(
         }
         for (slot, alpha) in [NpSlot::Lyrics, NpSlot::Queue, NpSlot::Info].into_iter().zip(content_alpha) {
             if alpha <= 0.001 { continue; }
-            let width = if slot == NpSlot::Lyrics { content.width() } else { content.width().min(720.0) };
+            // The info lays itself out in columns over the whole width.
+            let width = if matches!(slot, NpSlot::Lyrics | NpSlot::Info) { content.width() } else { content.width().min(720.0) };
             // The lyrics take the air above the content too, up to just
             // under the header (or the small cover's row).
             let lift = if slot == NpSlot::Lyrics { mega.lyrics_lift } else { 0.0 };

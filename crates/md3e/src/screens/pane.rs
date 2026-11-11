@@ -1,7 +1,7 @@
 //! The supporting pane: Очередь | Текст | Инфо (md3e-player.md §2.4).
 
 use egui::{Rect, Ui};
-use nikgob_view::{Command, QueueEntry, TrackRow, ViewState};
+use nikgob_view::{Command, QueueEntry, TrackId, TrackInfo, TrackRow, ViewState};
 
 use super::{
     PaneTab,
@@ -122,8 +122,9 @@ enum QueueAct {
 /// The menu of a queue row (its ⋮ and a right click): «Слушать» and
 /// «Сыграть следующим» (moved right after the track playing, unless it is
 /// there already), then the track's one list as every list has it (less
-/// its own «Сыграть следующим» / «В очередь»: it is in the queue), and
-/// «Убрать из очереди» last. The playing row has the player's menu.
+/// its own «Сыграть следующим» / «В очередь»: it is in the queue, and of
+/// the speed: it does not play), and «Убрать из очереди» last. The playing
+/// row has the player's menu.
 fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Vec<Row<QueueAct>> {
     use super::pages as p;
     let t = &e.track;
@@ -134,7 +135,10 @@ fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Ve
     }
     rows.push(Row::Divider);
     let wish = p::widgets::WishIndex::of(ctx, &state.downloads.wishlist);
-    let track = p::with_speed_row(p::library_track_rows(t, p::LibraryRowsOf::of(state, t, &wish)), &state.speeds);
+    let track = p::library_track_rows(t, p::LibraryRowsOf::of(state, t, &wish));
+    // Nothing that leads back to the page beside the pane.
+    let also = state.also_on.get(&t.id).map(|(r, _)| *r);
+    let track = p::here(ctx).trim(track, t, also, Some);
     let track = p::placed(track, &state.prefs.track_menu, |a| a.menu_item(t.has_local));
     rows.extend(track.into_iter().filter(|r| !matches!(r, Row::Item(TrackAct::Next | TrackAct::Queue, _))).map(|r| r.map(&mut QueueAct::Track)));
     // With «Разные песни»: one last group.
@@ -163,10 +167,8 @@ fn queue_apply(
             }
         }
         QueueAct::Remove => out.push(Command::RemoveFromQueue(e.entry)),
-        // The row's own speed, not the playing track's.
-        QueueAct::Track(TrackAct::Speed) => {
-            super::pages::sound::open(ctx, super::pages::sound::Tab::Speed, Some((e.track.id, e.track.title.clone())));
-        }
+        // «Источник и качество» of a row that is not playing: its own
+        // window ([`Chrome::apply_track`]).
         QueueAct::Track(a) => chrome.apply_track(ctx, a, &e.track, state, anchor, Where::Bar, out),
     }
 }
@@ -329,7 +331,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 // The player's menu (the same as the bar's ⋮). Done after
                 // the rows: they hold `chrome` and `out` meanwhile.
                 if !Menu::context_idle(&o.response, "q-ctx-current") {
-                    let rows = Chrome::player_rows(ui.ctx(), t, state, &[], PaneTab::Info.on(&state.prefs), false);
+                    let rows = Chrome::player_rows(ui.ctx(), t, state, &[], true, false);
                     let (menu, acts) = super::pages::widgets::menu_of("q-ctx-current", rows);
                     current_pick = menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()).map(|a: PlayerAct| (a, t));
                 }
@@ -642,7 +644,8 @@ pub(super) fn lyrics(ui: &mut Ui, state: &ViewState, bass: f32, out: &mut Vec<Co
 }
 
 /// The track's info as Now Playing shows it: its headline with a close
-/// button, then [`info`]. True when the button was pressed.
+/// button, then [`info_body`] under it (two columns on a wide panel). True
+/// when the button was pressed.
 pub(super) fn info_sheet(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) -> bool {
     let s = Theme::get(ui.ctx()).scheme;
     let close_w = Size::S.height();
@@ -664,79 +667,146 @@ pub(super) fn info_sheet(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>)
         .clicked();
     ui.advance_cursor_after_rect(row);
     ui.add_space(12.0);
-    info(ui, state, out);
+    info_scroll(ui, "info-sheet", state.info.track, |ui| {
+        info_body(ui, &state.info, state.player.current.as_ref(), out);
+    });
     closed
 }
 
+/// The playing track's info in the side pane: [`info_body`].
 pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
+    if state.player.current.is_none() {
+        let s = Theme::get(ui.ctx()).scheme;
+        common::label(ui, "Ничего не играет", TypeRole::BodyMedium, s.on_surface_variant);
+        return;
+    }
+    info_scroll(ui, "info", state.info.track, |ui| {
+        info_body(ui, &state.info, state.player.current.as_ref(), out);
+    });
+}
+
+/// From this width on the info stands in two columns: the file and its
+/// tags | the quality and its check.
+pub(super) const INFO_TWO_COLUMNS: f32 = 600.0;
+/// Between the two columns.
+const INFO_COLUMN_GAP: f32 = 32.0;
+/// Above the quality when it stands under the rest.
+const INFO_QUALITY_GAP: f32 = 20.0;
+
+/// A scroll area for the info that is at its top whenever it shows another
+/// track or comes up again; it scrolls only what does not fit. Returns how
+/// tall its content is.
+pub(super) fn info_scroll(ui: &mut Ui, salt: &str, track: Option<TrackId>, add: impl FnOnce(&mut Ui)) -> f32 {
+    let key = ui.id().with((salt, "info-shown"));
+    let pass = ui.ctx().cumulative_pass_nr();
+    let seen = ui.ctx().data(|d| d.get_temp::<(u64, Option<TrackId>)>(key));
+    let fresh = seen.is_none_or(|(at, shown)| at + 1 < pass || shown != track);
+    ui.ctx().data_mut(|d| d.insert_temp(key, (pass, track)));
+    let mut area = egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false, true]);
+    if fresh {
+        area = area.vertical_scroll_offset(0.0);
+    }
+    area.show(ui, add).content_size.y
+}
+
+/// A track's info `i`, in the pane, Now Playing's sheet and the window of
+/// any track alike: where it comes from, its file, its tags and what can be
+/// done with them ([`about`]), then the quality and its check. `track`:
+/// its row, when there is one (a service's song has none).
+pub(super) fn info_body(ui: &mut Ui, i: &TrackInfo, track: Option<&TrackRow>, out: &mut Vec<Command>) {
+    let width = ui.available_width();
+    let Some(d) = i.sound.as_ref() else {
+        about(ui, i, track, out);
+        return;
+    };
+    if width < INFO_TWO_COLUMNS {
+        about(ui, i, track, out);
+        ui.add_space(INFO_QUALITY_GAP);
+        super::sound_quality::section(ui, d, i.track, out);
+        ui.add_space(8.0);
+        return;
+    }
+    // Side by side, both from the same top.
+    let col = ((width - INFO_COLUMN_GAP) * 0.5).floor();
+    let top = ui.cursor().min;
+    let column = |ui: &mut Ui, left: f32, salt: &str| {
+        ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(egui::pos2(left, top.y), egui::vec2(col, f32::INFINITY)))
+                .layout(egui::Layout::top_down(egui::Align::Min))
+                .id_salt(("info-column", salt)),
+        )
+    };
+    let mut a = column(ui, top.x, "about");
+    about(&mut a, i, track, out);
+    let mut q = column(ui, top.x + col + INFO_COLUMN_GAP, "quality");
+    super::sound_quality::section(&mut q, d, i.track, out);
+    let bottom = a.min_rect().bottom().max(q.min_rect().bottom());
+    ui.advance_cursor_after_rect(Rect::from_min_max(top, egui::pos2(top.x + width, bottom)));
+    ui.add_space(8.0);
+}
+
+/// Where a track comes from, its file (with the way to it), its tags, and
+/// what can be done: a file's tags edited, a stream downloaded, a clip's
+/// song found.
+fn about(ui: &mut Ui, i: &TrackInfo, track: Option<&TrackRow>, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
-    let i = &state.info;
-    egui::ScrollArea::vertical().id_salt("info").show(ui, |ui| {
-        let row = |ui: &mut Ui, k: &str, v: &str| {
-            ui.label(TypeRole::LabelMedium.style().rich(k, s.on_surface_variant));
-            ui.label(TypeRole::BodyMedium.style().rich(v, s.on_surface));
-            ui.add_space(6.0);
-        };
-        if let Some(src) = &i.source {
-            row(ui, "Источник", src);
-        }
-        // A line like the others: there is nothing to press.
-        if let Some(q) = &i.quality {
-            row(ui, "Качество", q);
-        }
-        if let Some(p) = &i.path {
-            ui.label(TypeRole::LabelMedium.style().rich("Файл", s.on_surface_variant));
-            ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(p.display().to_string(), s.on_surface)).selectable(true));
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(Button::new("Показать в папке").icon(Icon::Folder).style(Style::Tonal).size(Size::Xs).id_salt("info-reveal"))
-                    .clicked()
-                {
-                    reveal(p);
-                }
-                if ui
-                    .add(Button::new("Скопировать путь").style(Style::Text).size(Size::Xs).id_salt("info-copy-path"))
-                    .clicked()
-                {
-                    ui.ctx().copy_text(p.display().to_string());
-                }
-            });
-            ui.add_space(10.0);
-        }
-        for (k, v) in &i.tags {
-            row(ui, k, v);
-        }
-        match &state.player.current {
-            None => {
-                common::label(ui, "Ничего не играет", TypeRole::BodyMedium, s.on_surface_variant);
+    let row = |ui: &mut Ui, k: &str, v: &str| {
+        ui.label(TypeRole::LabelMedium.style().rich(k, s.on_surface_variant));
+        ui.label(TypeRole::BodyMedium.style().rich(v, s.on_surface));
+        ui.add_space(6.0);
+    };
+    if let Some(src) = &i.source {
+        row(ui, "Источник", src);
+    }
+    // A line like the others: there is nothing to press.
+    if let Some(q) = &i.quality {
+        row(ui, "Качество", q);
+    }
+    if let Some(p) = &i.path {
+        ui.label(TypeRole::LabelMedium.style().rich("Файл", s.on_surface_variant));
+        ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(p.display().to_string(), s.on_surface)).selectable(true));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(Button::new("Показать в папке").icon(Icon::Folder).style(Style::Tonal).size(Size::Xs).id_salt("info-reveal"))
+                .clicked()
+            {
+                reveal(p);
             }
-            Some(t) => {
-                ui.add_space(12.0);
-                // A file has tags to edit; a stream can be downloaded.
-                let (label, icon) = if t.has_local { ("Редактировать теги…", Icon::Edit) } else { ("Скачать", Icon::Download) };
-                if ui
-                    .add(Button::new(label).icon(icon).style(Style::Outlined).size(Size::S).id_salt("info-tags"))
-                    .clicked()
-                {
-                    out.push(if t.has_local { Command::OpenTagEditor(t.id) } else { Command::DownloadTracks(vec![t.id]) });
-                }
-                // A clip: its song by hand; a stream from YouTube: another version.
-                if let Some(find) = super::find_song::label(t) {
-                    ui.add_space(8.0);
-                    if ui
-                        .add(Button::new(find).icon(Icon::MusicNote).style(Style::Outlined).size(Size::S).id_salt("info-find-song"))
-                        .clicked()
-                    {
-                        out.push(Command::FindSong { track: t.id, query: None });
-                    }
-                }
-                ui.add_space(8.0);
+            if ui
+                .add(Button::new("Скопировать путь").style(Style::Text).size(Size::Xs).id_salt("info-copy-path"))
+                .clicked()
+            {
+                ui.ctx().copy_text(p.display().to_string());
             }
+        });
+        ui.add_space(10.0);
+    }
+    for (k, v) in &i.tags {
+        row(ui, k, v);
+    }
+    let Some(id) = track.map(|t| t.id).or(i.track) else { return };
+    // A file has tags to edit; a stream can be downloaded.
+    let file = track.map_or(i.path.is_some(), |t| t.has_local);
+    // A clip: its song by hand; a stream from YouTube: another version.
+    let find = track.and_then(super::find_song::label);
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        let (label, icon) = if file { ("Редактировать теги…", Icon::Edit) } else { ("Скачать", Icon::Download) };
+        if ui
+            .add(Button::new(label).icon(icon).style(Style::Outlined).size(Size::S).id_salt("info-tags"))
+            .clicked()
+        {
+            out.push(if file { Command::OpenTagEditor(id) } else { Command::DownloadTracks(vec![id]) });
         }
-        if let Some(d) = &i.sound {
-            super::sound_quality::section(ui, d, i.track, out);
-            ui.add_space(8.0);
+        if let Some(find) = find
+            && ui
+                .add(Button::new(find).icon(Icon::MusicNote).style(Style::Outlined).size(Size::S).id_salt("info-find-song"))
+                .clicked()
+        {
+            out.push(Command::FindSong { track: id, query: None });
         }
     });
 }
@@ -851,6 +921,11 @@ mod tests {
         // Already next: nothing to move.
         let acts = crate::screens::pages::widgets::row_acts(&queue_menu_rows(&ctx, &first, &state));
         assert!(!acts.contains(&QueueAct::Next));
+        // A row that does not play: no speed of its own, but its info.
+        state.speeds.enabled = true;
+        let acts = crate::screens::pages::widgets::row_acts(&queue_menu_rows(&ctx, &later, &state));
+        assert!(!acts.contains(&QueueAct::Track(TrackAct::Speed)));
+        assert!(acts.contains(&QueueAct::Track(TrackAct::Info)));
 
         let mut chrome = Chrome::default();
         let mut out = Vec::new();
