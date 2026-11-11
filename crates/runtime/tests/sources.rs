@@ -965,3 +965,30 @@ fn a_track_on_its_way_is_not_looked_for_twice() {
         assert_eq!(*qobuz.searched.lock().unwrap(), 0, "{quality}");
     }
 }
+
+/// Our Opus of a genuine FLAC (ranked as the FLAC): nothing is better.
+/// The click is answered at once, no source is asked, and the track
+/// leaves the search for better copies (an item the schedule made goes).
+#[test]
+fn our_opus_of_a_flac_gets_nothing_better() {
+    let lib = Library::open_in_memory().unwrap();
+    let (track, artist, title) = gruppa(&lib);
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+    own_file(&lib, r._dir.path(), track, Codec::Opus, score::CD_LOSSLESS);
+    let qobuz = FakeSource::new(SourceKey::Qobuz);
+    qobuz.offers(&artist, &title, 3_000, flac());
+    r.rt.add_source(qobuz.clone());
+    wait_for(&r.rt, "the source", |s| s.downloads.sources.iter().any(|v| v.available));
+    let mut old = nikgob_core::model::WishlistItem::new(WishlistStatus::NoTorrent, nikgob_library::now_ms());
+    old.track_id = Some(track);
+    old.title = Some(title.clone());
+    old.scope = nikgob_core::model::WishlistScope::Track;
+    old.origin = nikgob_core::model::WishlistOrigin::Upgrade;
+    lib.put_wishlist_item(&old).unwrap();
+
+    r.rt.send(Command::FindBetter(track));
+    wait_for(&r.rt, "the answer", |s| s.toasts.iter().any(|t| t.text.starts_with("Лучше не нашёл")));
+    assert!(lib.wishlist_for_track(track).unwrap().is_empty(), "out of the search for better copies");
+    assert_eq!(*qobuz.searched.lock().unwrap(), 0);
+    assert_eq!(*qobuz.fetched.lock().unwrap(), 0);
+}

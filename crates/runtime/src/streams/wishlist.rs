@@ -1595,6 +1595,10 @@ impl Worker {
         // A better copy of a file the library has: only what is at least as
         // good as the user wants.
         let copy = self.copy_quality(&item).or_else(|| self.upgrade_floor(&item));
+        // …and really better than one of the item's files at least
+        // ([`nikgob_core::quality::really_better`]): nothing is better than
+        // our Opus of a genuine FLAC, or a genuine FLAC.
+        let ranks = self.upgrade_ranks(&item);
         // A source set aside (its downloads kept failing) is not picked;
         // the item may wait for it.
         let now = Instant::now();
@@ -1630,6 +1634,7 @@ impl Worker {
             .into_iter()
             // With a copy, only what is better than it.
             .filter(|r| copy.is_none_or(|q| r.offer.quality() > q))
+            .filter(|r| upgrade::offer_counts(ranks.as_deref(), r.offer.quality()))
             // A torrent whose list had no file of it before: never again.
             .filter(|r| {
                 let missed = self.missed_before(&item, &r.offer);
