@@ -148,6 +148,11 @@ pub struct AlbumHave {
     pub local: u32,
     pub in_library: u32,
     pub total: u32,
+    /// Only some songs of the linked library album are the user's: how
+    /// many. The album is shown whole; the badge says these songs, never
+    /// «1 из 13».
+    #[serde(default)]
+    pub mine: Option<u32>,
 }
 
 impl AlbumHave {
@@ -157,9 +162,12 @@ impl AlbumHave {
     }
 
     /// The badge of a service's album card: "у тебя", "3 из 12", "в
-    /// библиотеке" or nothing.
+    /// библиотеке", «2 песни у тебя» of an album only some songs of which
+    /// are the user's, or nothing.
     pub fn label(&self) -> Option<String> {
-        if self.complete() {
+        if let Some(n) = self.mine {
+            Some(songs_yours(n))
+        } else if self.complete() {
             Some("у тебя".to_owned())
         } else if self.local > 0 {
             Some(format!("{} из {}", self.local, self.total))
@@ -173,7 +181,9 @@ impl AlbumHave {
     /// The chip of a service's album page: "у тебя", "3 из 12 у тебя", or
     /// nothing (files only; "В библиотеке" is a chip of its own).
     pub fn files_label(&self) -> Option<String> {
-        if self.complete() {
+        if let Some(n) = self.mine {
+            Some(songs_yours(n))
+        } else if self.complete() {
             Some("у тебя".to_owned())
         } else if self.local > 0 {
             Some(format!("{} из {} у тебя", self.local, self.total))
@@ -181,6 +191,18 @@ impl AlbumHave {
             None
         }
     }
+}
+
+/// «1 песня у тебя», «2 песни у тебя», «5 песен у тебя».
+fn songs_yours(n: u32) -> String {
+    let word = if n % 10 == 1 && n % 100 != 11 {
+        "песня"
+    } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
+        "песни"
+    } else {
+        "песен"
+    };
+    format!("{n} {word} у тебя")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

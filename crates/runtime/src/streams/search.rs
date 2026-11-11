@@ -871,6 +871,16 @@ impl Worker {
             let Some(sec) = sections.iter().find(|x| x.service == *service) else { continue };
             for (i, a) in sec.albums.iter().enumerate() {
                 let key = (album_key(&a.title), main_artist(&a.artist));
+                // An album searched for is shown whole: a library album
+                // only some songs of which are the user's gives its place
+                // to the service's (its badge says the user's songs).
+                let partial = albums.iter().position(|x| {
+                    matches!(&x.0, v::SearchAlbum::Library(c) if c.mine.is_some() && (a.release == Some(c.id) || x.4 == key))
+                });
+                if let Some(at) = partial {
+                    albums[at].0 = v::SearchAlbum::Stream(a.clone());
+                    continue;
+                }
                 if a.release.is_some_and(|r| lib_release_ids.contains(&r)) || albums.iter().any(|x| x.4 == key) {
                     continue;
                 }

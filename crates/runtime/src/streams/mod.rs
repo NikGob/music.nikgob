@@ -661,6 +661,7 @@ impl Worker {
             Command::DownloadStreamAlbum(album) => self.with_album(album, pages::Then::Download),
             Command::DownloadTracks(tracks) => self.download_tracks(&tracks),
             Command::DownloadRelease(release) => self.download_release(release),
+            Command::DownloadWholeRelease(release) => self.download_whole_release(release),
             Command::FollowStreamPlaylist(playlist) => self.with_playlist(playlist, pages::Then::Follow),
             Command::AddStreamToPlaylist(playlist, tracks) => {
                 let ids = self.seen_tracks(&tracks);

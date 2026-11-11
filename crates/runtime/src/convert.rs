@@ -374,7 +374,19 @@ impl Resolver {
             liked,
             added_at: r.added_at,
             better: local > 0 && self.lib.release_can_get_better(r.id).unwrap_or(false),
+            mine: None,
+            mine_local: local,
+            whole: false,
         }
+    }
+
+    /// [`Self::release_card`] with the user's songs of it counted.
+    fn release_card_of(&mut self, r: &Release, p: &ReleaseProgress, liked: bool) -> v::ReleaseCard {
+        let mut card = self.release_card(r, p.local, Some(p.total), liked);
+        card.mine = p.partial().then_some(p.wanted);
+        card.mine_local = p.wanted_local;
+        card.whole = p.whole;
+        card
     }
 
     /// A streamed album outside the library as a card of its service.
@@ -388,6 +400,7 @@ impl Resolver {
             local: p.local,
             in_library: p.in_library,
             total: p.total.max(r.total_tracks.unwrap_or(0)),
+            mine: p.partial().then_some(p.wanted),
         });
         v::StreamAlbumCard {
             remote: remote.clone(),
@@ -408,7 +421,7 @@ impl Resolver {
 
     pub fn release(&mut self, r: &ReleaseRow) -> v::ReleaseCard {
         let p = r.progress();
-        self.release_card(&r.release, p.local, Some(p.total), r.liked)
+        self.release_card_of(&r.release, &p, r.liked)
     }
 
     pub fn artist(&mut self, a: &ArtistRow) -> v::ArtistCard {
@@ -479,14 +492,30 @@ impl Resolver {
         }
     }
 
+    /// The page of an album: `versions` tells other versions of its songs
+    /// apart ([`v::Prefs::album_versions`]), `opens_whole` the setting of
+    /// what an album only some songs of which are the user's opens on
+    /// ([`v::Prefs::album_opens_whole`]; the album's own choice wins).
     pub fn release_detail(
         &mut self,
         r: &Release,
         listing: &ReleaseListing,
         liked: bool,
+        versions: bool,
+        opens_whole: bool,
     ) -> v::ReleaseDetail {
-        let (local, total) = (listing.progress.local, Some(listing.progress.total));
+        let p = listing.progress;
         let tracks: Vec<v::TrackRow> = listing.tracks().map(|t| self.track(t)).collect();
+        let membership = listing.membership(versions);
+        let marks: Vec<v::AlbumMark> = listing
+            .tracks()
+            .map(|t| match membership.get(&t.id) {
+                Some(nikgob_library::Membership::Wanted) | None => v::AlbumMark::Mine,
+                Some(nikgob_library::Membership::Variant) => v::AlbumMark::Version,
+                Some(nikgob_library::Membership::Excluded) => v::AlbumMark::Left,
+                Some(nikgob_library::Membership::Undecided) => v::AlbumMark::Catalog,
+            })
+            .collect();
         let mut at = 0;
         let lines = listing
             .entries
@@ -501,8 +530,9 @@ impl Resolver {
             .collect();
         let total_duration = tracks.iter().filter_map(|t| t.duration).sum();
         let quality = summarize_quality(&tracks);
+        let partial = p.partial();
         v::ReleaseDetail {
-            card: self.release_card(r, local, total, liked),
+            card: self.release_card_of(r, &p, liked),
             tracks,
             total_duration,
             quality,
@@ -511,6 +541,9 @@ impl Resolver {
             // From the files' tags, filled by the page's load.
             released: None,
             label: None,
+            marks,
+            partial,
+            open_whole: partial && listing.view.unwrap_or(opens_whole),
         }
     }
 

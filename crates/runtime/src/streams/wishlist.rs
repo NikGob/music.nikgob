@@ -801,7 +801,9 @@ impl Worker {
     }
 
     /// `track` to «Хочу скачать» now (no like): its item starts, or a new
-    /// track item is made for it.
+    /// track item is made for it. An item of its whole album on its way
+    /// brings it already; one that waits is not woken for it (it would
+    /// fetch the whole album, more than the one song asked for).
     fn wish_track_now(&mut self, track: TrackId) -> Wished {
         let has_file = self.lib.get_track_row(track).ok().flatten().is_some_and(|r| r.has_local);
         if has_file || self.have_recording(track) {
@@ -813,14 +815,15 @@ impl Worker {
         }
         let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
         if let Some(r) = release
-            && let Some(i) = self
-                .lib
-                .wishlist_for_release(r)
-                .unwrap_or_default()
-                .iter()
-                .find(|i| i.scope == WishlistScope::Album && !matches!(i.status, WishlistStatus::Done))
+            && self.lib.wishlist_for_release(r).unwrap_or_default().iter().any(|i| {
+                i.scope == WishlistScope::Album
+                    && matches!(
+                        i.status,
+                        WishlistStatus::New | WishlistStatus::Searching | WishlistStatus::Confirm | WishlistStatus::Downloading
+                    )
+            })
         {
-            return self.start_again(i);
+            return Wished::Already;
         }
         let Some(mut item) = self.item_for(Some(track), release) else { return Wished::Nothing };
         item.scope = WishlistScope::Track;
@@ -930,9 +933,33 @@ impl Worker {
         self.refresh_stream_page();
     }
 
-    /// `Command::DownloadRelease` and the album of a service once fetched
-    /// (`Command::DownloadStreamAlbum`): one album item.
+    /// `Command::DownloadRelease`, «Скачать недостающие»: of an album only
+    /// some songs of which are the user's, their songs without a file, a
+    /// track item each (never the album: the songs the user did not choose
+    /// stay where they are); of any other album its missing files
+    /// ([`Self::download_whole_release`]).
     pub(crate) fn download_release(&mut self, release: ReleaseId) {
+        if let Some(l) = self.lib.release_listing(release).ok().flatten()
+            && l.progress.partial()
+        {
+            let missing: Vec<TrackId> = l.tracks().filter(|t| !t.has_local && l.wanted.contains(&t.id)).map(|t| t.id).collect();
+            self.download_tracks(&missing);
+            return;
+        }
+        self.download_whole_release(release);
+    }
+
+    /// `Command::DownloadWholeRelease` («Скачать весь альбом») and the album
+    /// of a service once fetched (`Command::DownloadStreamAlbum`): one album
+    /// item. An album only some songs of which were the user's is added
+    /// whole to the library first: its files will be.
+    pub(crate) fn download_whole_release(&mut self, release: ReleaseId) {
+        if self.lib.release_progress(release).ok().flatten().is_some_and(|p| p.partial())
+            && self.lib.set_release_whole(release, true).is_ok()
+        {
+            self.load_library();
+            self.album_changed(release);
+        }
         let title = self.lib.get_release(release).ok().flatten().map(|r| format!("альбом «{}»", r.title));
         match self.wish_release_now(release) {
             Wished::Started => self.download_toast(1, 0, title),

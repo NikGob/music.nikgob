@@ -175,6 +175,8 @@ pub(crate) fn album_have_of(
         local: p.map_or(0, |p| p.local),
         in_library: p.map_or(0, |p| p.in_library),
         total: p.map_or(0, |p| p.total).max(theirs),
+        // The album is shown whole; only some songs of it are the user's.
+        mine: p.filter(|p| p.partial()).map(|p| p.wanted),
     };
     (release, have)
 }
@@ -347,6 +349,7 @@ impl Worker {
                         local: rows.iter().filter(|t| t.has_local).count() as u32,
                         in_library: rows.iter().filter(|t| t.in_library).count() as u32,
                         total: rows.len() as u32,
+                        mine: view.have.mine,
                     };
                 }
                 view.liked = !view.tracks.is_empty() && view.tracks.iter().all(|t| t.liked);
@@ -414,7 +417,7 @@ impl Worker {
     fn library_have(&self, release: nikgob_core::model::ReleaseId) -> Option<(String, v::AlbumHave)> {
         let r = self.lib.get_release(release).ok().flatten()?;
         let p = self.lib.release_progress(release).ok().flatten()?;
-        Some((r.title, v::AlbumHave { local: p.local, in_library: p.in_library, total: p.total }))
+        Some((r.title, v::AlbumHave { local: p.local, in_library: p.in_library, total: p.total, mine: p.partial().then_some(p.wanted) }))
     }
 
     /// The linked library album learns the track count and cover.
@@ -632,7 +635,7 @@ impl Worker {
                             .and_then(|t| t.release_id)
                     });
                 match release {
-                    Some(r) => self.download_release(r),
+                    Some(r) => self.download_whole_release(r),
                     None => self.toast("Не получилось скачать альбом", None),
                 }
             }

@@ -230,6 +230,20 @@ pub struct Visit {
     /// Songs of «Слушать снова» asked for past [`LISTEN_AGAIN`] (its row
     /// scrolled to the end): the epoch's draw goes on.
     pub again_more: usize,
+    /// An album only some songs of which are the user's shows among the
+    /// albums too ([`v::Prefs::partial_albums_on_home`]); off, only its
+    /// songs do.
+    pub partial_albums: bool,
+}
+
+impl Visit {
+    /// The album shows among Главная's albums: the user's as an album
+    /// (all of it, or added whole), or any album with
+    /// [`Self::partial_albums`]. A song or a few of an OST, a single put
+    /// out with its instrumental, are the user's songs, not their album.
+    pub fn album_shows(&self, r: &ReleaseRow) -> bool {
+        self.partial_albums || !r.progress().partial()
+    }
 }
 
 impl Visit {
@@ -244,6 +258,7 @@ impl Visit {
             profiles: None,
             epoch: Epoch::default(),
             again_more: 0,
+            partial_albums: prefs.partial_albums_on_home,
         }
     }
 
@@ -307,8 +322,12 @@ pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
     let history = !f.starts.is_empty() || !f.liked.is_empty();
     let releases: Vec<ReleaseRow> = lib.releases(0, 20_000, Sort::desc(ReleaseSortKey::Added)).unwrap_or_default();
     let worlds = worlds(&f, &releases, visit);
-    let from_library = shelf(&f, &releases, visit, history);
-    let places = Places::read(lib, &releases, visit.local_only);
+    // The shelves and the shortcuts offer the user's albums: not an album
+    // only a song or a few of which are theirs (those songs are on the
+    // songs' rows).
+    let albums: Vec<ReleaseRow> = releases.iter().filter(|r| visit.album_shows(r)).cloned().collect();
+    let from_library = shelf(&f, &albums, visit, history);
+    let places = Places::read(lib, &albums, visit.local_only);
     // The epoch's shortcuts and «Слушать снова», kept; drawn at its first
     // visit (again once the taste profiles are read), by what the epochs
     // before showed.
@@ -320,7 +339,7 @@ pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
     let kept = shown.first().filter(|s| ours && (provisional || !s.provisional)).cloned();
     let exposure = Exposure::of(if ours { &shown[1..] } else { &shown[..] });
     let shelved: HashSet<ReleaseId> = from_library.iter().take(SHORTCUTS_NARROW).map(|a| a.0.release.id).collect();
-    let draw = |exposure: &Exposure| shortcuts(lib, &f, &releases, &places, visit, history, &shelved, exposure);
+    let draw = |exposure: &Exposure| shortcuts(lib, &f, &albums, &places, visit, history, &shelved, exposure);
     let again_n = LISTEN_AGAIN + visit.again_more;
     // The songs the epoch keeps, when more were drawn for it now.
     let mut grown: Option<Vec<TrackId>> = None;
@@ -1539,7 +1558,17 @@ mod tests {
     fn rel(title: &str, artist: &str, id: ArtistId, local: u32, kind: nikgob_core::model::ReleaseType) -> ReleaseRow {
         let mut r = nikgob_core::model::Release::new(title, nikgob_core::model::ArtistCredit::single(artist, Some(id)));
         r.release_type = kind;
-        ReleaseRow { release: r, local_tracks: local, known_tracks: local, liked: false, rows: local }
+        ReleaseRow {
+            release: r,
+            local_tracks: local,
+            known_tracks: local,
+            liked: false,
+            rows: local,
+            wanted: local,
+            wanted_local: local,
+            whole: false,
+            view: None,
+        }
     }
 
     fn album(title: &str, artist: &str, id: ArtistId, local: u32) -> ReleaseRow {

@@ -589,14 +589,16 @@ fn an_album_says_the_same_count_on_its_card_its_page_and_in_the_library() {
     wait_for(&r.rt, "the section", |s| s.search.streams.iter().any(|x| !x.searching && !x.albums.is_empty()));
     let card = r.rt.state().search.streams[0].albums[0].clone();
     assert_eq!(card.title, "Discovery");
-    assert_eq!(card.have, nikgob_view::AlbumHave { local: 1, in_library: 2, total: 4 });
-    assert_eq!(card.have.label().as_deref(), Some("1 из 4"));
+    // Two of its songs are the user's (a file, a like): the album is shown
+    // whole, its badge says those songs, never «1 из 4».
+    assert_eq!(card.have, nikgob_view::AlbumHave { local: 1, in_library: 2, total: 4, mine: Some(2) });
+    assert_eq!(card.have.label().as_deref(), Some("2 песни у тебя"));
 
     r.rt.send(Command::LoadStream(nikgob_view::StreamPage::Album(card.remote.clone())));
     wait_for(&r.rt, "the page", |s| s.stream_page.as_ref().is_some_and(|p| !p.loading && !p.tracks.is_empty()));
     let page = r.rt.state().stream_page.clone().unwrap();
     assert_eq!(page.have, card.have, "page and card agree");
-    assert_eq!(page.have.files_label().as_deref(), Some("1 из 4 у тебя"));
+    assert_eq!(page.have.files_label().as_deref(), Some("2 песни у тебя"));
     assert_eq!(page.tracks.iter().filter(|t| t.has_local).count(), 1);
 
     // The library card of the linked album counts the same.

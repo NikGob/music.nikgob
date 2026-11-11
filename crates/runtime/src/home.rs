@@ -61,7 +61,11 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
             continue;
         }
         if let Some(r) = by_id.get(&rid) {
-            continue_listening.push(Continue::Release((*r).clone()));
+            // A song or a few of an album are the user's songs, not an
+            // album to go on with.
+            if visit.album_shows(r) {
+                continue_listening.push(Continue::Release((*r).clone()));
+            }
         } else if let Some(remote) = lib
             .external_ids(EntityKind::Album, *rid.as_uuid())
             .unwrap_or_default()
@@ -139,7 +143,7 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
     let mut long_unplayed: Vec<(i64, ReleaseRow)> = last_by_release
         .iter()
         .filter(|(_, lp)| now - **lp > 60 * DAY_MS)
-        .filter_map(|(rid, lp)| by_id.get(rid).map(|r| (*lp, (*r).clone())))
+        .filter_map(|(rid, lp)| by_id.get(rid).filter(|r| visit.album_shows(r)).map(|r| (*lp, (*r).clone())))
         .collect();
     long_unplayed.sort_by_key(|(lp, _)| *lp);
 
@@ -169,7 +173,7 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
         continue_listening,
         artists,
         long_unplayed: long_unplayed.into_iter().take(12).map(|(_, r)| r).collect(),
-        recently_added: recently_added(lib, releases, 12),
+        recently_added: recently_added(lib, releases.into_iter().filter(|r| visit.album_shows(r)), 12),
     }
 }
 

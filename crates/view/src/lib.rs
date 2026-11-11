@@ -156,6 +156,19 @@ pub struct ReleaseCard {
     /// (an MP3, a fake FLAC): its menus offer «Найти качество лучше».
     #[serde(default)]
     pub better: bool,
+    /// Only some of the album is the user's (a song or a few of it, not
+    /// added whole): how many of its songs are theirs. The card counts them
+    /// («2 песни»), never the songs it lacks; ▶ plays them (or the whole
+    /// album, as the album's page is set to open).
+    #[serde(default)]
+    pub mine: Option<u32>,
+    /// Of the user's songs, the ones with a file.
+    #[serde(default)]
+    pub mine_local: u32,
+    /// The whole album was added to the library («Добавить весь альбом в
+    /// библиотеку») or saved.
+    #[serde(default)]
+    pub whole: bool,
 }
 
 impl ReleaseCard {
@@ -181,6 +194,55 @@ pub struct ReleaseDetail {
     pub released: Option<ReleaseDay>,
     /// The record label, when its files' tags name one.
     pub label: Option<String>,
+    /// What each of [`Self::tracks`] is to the user, in their order (empty:
+    /// every row is theirs).
+    pub marks: Vec<AlbumMark>,
+    /// Only some of the album is the user's ([`ReleaseCard::mine`]): the
+    /// page has «Мои треки» and «Весь альбом».
+    pub partial: bool,
+    /// The page opens on «Весь альбом» (the album's own choice, else the
+    /// setting); «Слушать» on a card plays it whole.
+    pub open_whole: bool,
+}
+
+impl ReleaseDetail {
+    /// The lines of «Мои треки»: the user's songs, in the album's order.
+    pub fn mine_lines(&self) -> Vec<ReleaseLine> {
+        (0..self.tracks.len())
+            .filter(|&i| self.marks.get(i).is_none_or(|m| *m == AlbumMark::Mine))
+            .map(ReleaseLine::Track)
+            .collect()
+    }
+
+    /// The lines of «Весь альбом»: every place of the album; other versions
+    /// of its songs the user did not choose go last (`versions`, their
+    /// first index), as a group of their own.
+    pub fn all_lines(&self) -> (Vec<ReleaseLine>, Option<usize>) {
+        let every: Vec<ReleaseLine> =
+            if self.lines.is_empty() { (0..self.tracks.len()).map(ReleaseLine::Track).collect() } else { self.lines.clone() };
+        let version = |l: &ReleaseLine| matches!(l, ReleaseLine::Track(i) if self.marks.get(*i) == Some(&AlbumMark::Version));
+        let (versions, mut lines): (Vec<ReleaseLine>, Vec<ReleaseLine>) = every.into_iter().partition(|l| version(l));
+        if versions.is_empty() {
+            return (lines, None);
+        }
+        let at = lines.len();
+        lines.extend(versions);
+        (lines, Some(at))
+    }
+}
+
+/// What a row of an album's page is to the user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AlbumMark {
+    /// One of the user's songs of the album.
+    Mine,
+    /// Another version of one of its songs («(Instrumental)», «(Off
+    /// Vocal)», «(Remix)»), not chosen.
+    Version,
+    /// Left out of the user's songs of the album by hand.
+    Left,
+    /// Only in the album's tracklist.
+    Catalog,
 }
 
 /// The day an album came out, or its month when the day is not known.
@@ -1704,6 +1766,18 @@ pub struct Prefs {
     pub liked_albums_with_playlists: bool,
     /// A like of a single's song saves the single as an album too.
     pub single_like_saves: bool,
+    /// «Песни из альбомов → Альбом открывается»: an album only some songs
+    /// of which are the user's opens on «Весь альбом» and «Слушать» plays
+    /// all of it. Off (the default): «Мои треки», the user's songs.
+    pub album_opens_whole: bool,
+    /// «Распознавать другие версии»: an album's «(Instrumental)», «(Off
+    /// Vocal)», «(Remix)» of one of its songs, not chosen, is grouped apart
+    /// on «Весь альбом» (a chosen one stays the user's song).
+    pub album_versions: bool,
+    /// «Частичные альбомы на полках главной»: an album only some songs of
+    /// which are the user's shows among Главная's albums too. Off (the
+    /// default): its songs show on the songs' rows only.
+    pub partial_albums_on_home: bool,
     /// An import of export files reads the songs saved in the music library
     /// (Takeout's «music library songs»): they teach the taste only, no
     /// likes, no downloads, not in the library. Off: that file is skipped.
@@ -2952,7 +3026,13 @@ pub enum Command {
     ToggleMute,
     ToggleShuffle,
     CycleRepeat,
+    /// An album as its page is set to open: of an album only some songs of
+    /// which are the user's, those songs («Мои треки», a song picked
+    /// outside them plays the whole album from it) or all of it.
     PlayRelease { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
+    /// «Слушать весь альбом»: every song of an album, once; nothing is
+    /// added to the library or downloaded.
+    PlayReleaseWhole { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
     PlayPlaylist { id: PlaylistId, start: Option<TrackId>, shuffle: bool },
     PlayArtist { id: ArtistId, shuffle: bool },
     /// These tracks from the one at `start` (the user picked it).
@@ -3007,6 +3087,21 @@ pub enum Command {
     UndoTrash(TrackId),
     /// Delete every track of an album (like [`Command::TrashTrack`]).
     TrashRelease(ReleaseId),
+    /// «Добавить весь альбом в библиотеку» (`on`): every song of the album
+    /// becomes a library track (the ones that only stream too), nothing
+    /// downloads; off, the songs chosen one by one stay.
+    AddWholeAlbum { id: ReleaseId, on: bool },
+    /// What an album only some songs of which are the user's opens on and
+    /// plays: the whole album (`whole`) or the user's songs.
+    AlbumOpensWhole { id: ReleaseId, whole: bool },
+    /// A song of an album into the user's songs of it (`mine`: a library
+    /// track from then on) or out of them (its file, like and playlists
+    /// stay), with «Отменить».
+    AlbumTrackMine { release: ReleaseId, track: TrackId, mine: bool },
+    /// The stored choice of a song of an album put back as it was
+    /// (`Some(true)` added, `Some(false)` left out, `None` none): the undo
+    /// of [`Command::AlbumTrackMine`].
+    AlbumTrackChoice { release: ReleaseId, track: TrackId, choice: Option<bool> },
     /// Take deleted tracks back out of the Trash.
     RestoreTracks(Vec<TrackId>),
     /// Delete tracks for good: files, master and rows.
@@ -3231,9 +3326,14 @@ pub enum Command {
     DownloadStreamAlbum(RemoteId),
     /// Library tracks without a file → «Хочу скачать» (no like).
     DownloadTracks(Vec<TrackId>),
-    /// The missing files of a library album → one album item of «Хочу
-    /// скачать».
+    /// «Скачать недостающие» of a library album: of an album only some
+    /// songs of which are the user's, their songs without a file (a track
+    /// item each); of any other, its missing files (one album item of «Хочу
+    /// скачать»).
     DownloadRelease(ReleaseId),
+    /// «Скачать весь альбом»: the whole album (one album item); it is added
+    /// whole to the library too, as its files will be.
+    DownloadWholeRelease(ReleaseId),
     /// Stream tracks into a library playlist (they join the library).
     AddStreamToPlaylist(PlaylistId, Vec<RemoteId>),
     /// The tracks of an album of a service into a library playlist.
@@ -3479,6 +3579,9 @@ impl Default for Prefs {
             album_like_tracks: false,
             liked_albums_with_playlists: false,
             single_like_saves: false,
+            album_opens_whole: false,
+            album_versions: true,
+            partial_albums_on_home: false,
             import_saved_songs: true,
             library_only_downloaded: false,
             auto_download_limit: 2,

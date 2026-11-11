@@ -1056,11 +1056,11 @@ fn album_statuses(albums: &mut [StreamAlbumCard], rows: &mut Vec<WishlistRow>) {
                 r.scope = WishlistScope::Album;
                 rows.push(r);
                 if i == 1 {
-                    a.have = AlbumHave { local: 3, in_library: 10, total: 10 };
+                    a.have = AlbumHave { local: 3, in_library: 10, total: 10, mine: None };
                 }
             }
-            2 => a.have = AlbumHave { local: 9, in_library: 9, total: 9 },
-            _ => a.have = AlbumHave { local: 4, in_library: 4, total: 12 },
+            2 => a.have = AlbumHave { local: 9, in_library: 9, total: 9, mine: None },
+            _ => a.have = AlbumHave { local: 4, in_library: 4, total: 12, mine: Some(4) },
         }
     }
 }

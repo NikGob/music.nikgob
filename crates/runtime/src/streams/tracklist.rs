@@ -373,14 +373,19 @@ impl Worker {
     /// The queue still plays `release` (replaced by nothing since): its
     /// tracks the queue lacks join it in album order, and the first of
     /// them plays when nothing could. They only stream: each is looked up
-    /// when it comes up, as playing the album does.
+    /// when it comes up, as playing the album does. A queue of the user's
+    /// songs of the album takes only a new one of them (an album added
+    /// whole takes in its new songs): a song of the tracklist the user
+    /// never chose does not join it.
     pub(crate) fn extend_album_queue(&mut self, release: ReleaseId) {
-        if self.album_queue != Some((release, self.queue.generation())) {
+        let Some((r, generation, whole)) = self.album_queue else { return };
+        if r != release || generation != self.queue.generation() {
             return;
         }
         let have: HashSet<_> = self.queue.tracks().into_iter().collect();
-        let rows = self.lib.tracks_of_release_all(release).unwrap_or_default();
-        let more: Vec<_> = rows.iter().map(|r| r.id).filter(|t| !have.contains(t)).collect();
+        let Some(listing) = self.lib.release_listing(release).ok().flatten() else { return };
+        let rows = if whole { listing.track_ids() } else { listing.wanted_ids() };
+        let more: Vec<_> = rows.into_iter().filter(|t| !have.contains(t)).collect();
         if more.is_empty() {
             return;
         }
