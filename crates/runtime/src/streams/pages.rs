@@ -170,7 +170,12 @@ pub(crate) fn album_have_of(
     theirs: u32,
 ) -> (Option<nikgob_core::model::ReleaseId>, v::AlbumHave) {
     let release = lib.release_by_remote(&a.id).ok().flatten();
-    let p = release.and_then(|r| lib.release_progress(r).ok().flatten());
+    // The service's count when the library knows fewer of its places: a
+    // few songs of the user's are a few of all of them.
+    let p = release.and_then(|r| lib.release_progress(r).ok().flatten()).map(|mut p| {
+        p.total = p.total.max(theirs);
+        p
+    });
     let have = v::AlbumHave {
         local: p.map_or(0, |p| p.local),
         in_library: p.map_or(0, |p| p.in_library),
