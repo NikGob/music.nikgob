@@ -1,6 +1,6 @@
 //! Memory accounting: whose the process's memory is.
 //!
-//! The global allocator is the system's, wrapped to count the bytes the
+//! The global allocator is mimalloc, wrapped to count the bytes the
 //! program holds (`live`), the most it held since the last line (`peak`)
 //! and every allocation made: three relaxed atomic operations per
 //! allocation, nothing else. Once a minute (and when the window goes to the
@@ -12,22 +12,27 @@
 //! memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (held 331), working set 552 MB, allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0 MB), lyrics 12 tracks ~2.1 MB, stream buffers 2 / 14 MB
 //! ```
 //!
-//! `held` is private bytes minus `live`: memory the system heap keeps after
+//! `held` is private bytes minus `live`: memory the allocator keeps after
 //! it was freed (and the few private allocations that are not the heap's:
-//! thread stacks, the GPU driver's). A large `held` that stays large says
-//! the heap does not give memory back; a large `live` says something holds
+//! thread stacks, the GPU driver's). mimalloc gives unused pages back to the
+//! system after a short delay, where the system heaps (Windows' and glibc's)
+//! kept them for good after a peak. A large `held` that stays large says
+//! memory is not given back; a large `live` says something holds
 //! it. On Linux the process's numbers are the anonymous resident memory and
 //! the resident set.
 
 // The allocator and the system's process counters are unsafe calls.
 #![allow(unsafe_code)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 
-/// The system allocator, counted.
+/// mimalloc, counted.
 pub struct Counting;
+
+/// What [`Counting`] hands every call to.
+static INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -57,13 +62,13 @@ fn shrank(by: usize) {
     LIVE.fetch_sub(by, Relaxed);
 }
 
-// SAFETY: every call goes to the system allocator with the caller's own
+// SAFETY: every call goes to mimalloc with the caller's own
 // arguments; the counting only reads the layout and the result.
 unsafe impl GlobalAlloc for Counting {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: as the caller promised for this call.
-        let ptr = unsafe { System.alloc(layout) };
+        let ptr = unsafe { INNER.alloc(layout) };
         if !ptr.is_null() {
             ALLOCATIONS.fetch_add(1, Relaxed);
             grew(layout.size());
@@ -74,7 +79,7 @@ unsafe impl GlobalAlloc for Counting {
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         // SAFETY: as the caller promised for this call.
-        let ptr = unsafe { System.alloc_zeroed(layout) };
+        let ptr = unsafe { INNER.alloc_zeroed(layout) };
         if !ptr.is_null() {
             ALLOCATIONS.fetch_add(1, Relaxed);
             grew(layout.size());
@@ -85,14 +90,14 @@ unsafe impl GlobalAlloc for Counting {
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         // SAFETY: as the caller promised for this call.
-        unsafe { System.dealloc(ptr, layout) };
+        unsafe { INNER.dealloc(ptr, layout) };
         shrank(layout.size());
     }
 
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         // SAFETY: as the caller promised for this call.
-        let moved = unsafe { System.realloc(ptr, layout, new_size) };
+        let moved = unsafe { INNER.realloc(ptr, layout, new_size) };
         if !moved.is_null() {
             ALLOCATIONS.fetch_add(1, Relaxed);
             if new_size >= layout.size() {
