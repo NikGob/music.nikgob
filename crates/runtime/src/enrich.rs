@@ -493,7 +493,7 @@ impl Worker {
         let session = session_start();
         let first = first.and_then(|id| {
             let due = lib.artist_photo_due(id, now_ms() - PHOTO_RETRY_MS, session).ok()?;
-            let artist = lib.get_artist(id).ok().flatten().filter(|_| due)?;
+            let artist = lib.get_artist(id).ok().flatten().filter(|a| due && !nikgob_core::names::is_various_artists(&a.name))?;
             Some((id, artist.name))
         });
         let Some(svc) = &mut self.import else { return };

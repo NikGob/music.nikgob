@@ -192,7 +192,8 @@ impl Library {
     /// Artists with a local track or a library track (a stream one too) and
     /// no photo: never tried, a miss older than `retry_before`, or an
     /// unverified one older than `unverified_before` (unix ms). Never-tried
-    /// first, artists with files first, most tracks first.
+    /// first, artists with files first, most tracks first. A compilation's
+    /// «Various Artists» is nobody and has no photo to look up.
     pub fn artists_needing_photo(
         &self,
         retry_before: UnixMs,
@@ -205,6 +206,7 @@ impl Library {
                   WHERE EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
                                  WHERE ta.artist_id = a.id
                                    AND (t.has_local = 1 OR (t.in_library = 1 AND t.deleted_at IS NULL)))
+                    AND NOT various_artists(a.name)
                     AND (p.artist_id IS NULL
                          OR (p.path IS NULL AND p.photo_locked = 0
                              AND (p.fetched_at < ?1 OR (p.source = ?4 AND p.fetched_at < ?3))))
@@ -257,6 +259,10 @@ mod tests {
         // A stream song outside the library: its artist is not asked.
         let heard = nikgob_core::streaming::FakeService::youtube().tracks()[4].clone();
         lib.upsert_stream_track(&heard).unwrap();
+        // A compilation's artist line names nobody: never asked (Deezer
+        // would give its generic picture).
+        artist_with_file(&lib, "Various Artists", true);
+        artist_with_file(&lib, "Разные исполнители", false);
 
         lib.set_artist_photo(with.id, Some("artists/kino.jpg")).unwrap();
         lib.set_artist_photo(missed.id, None).unwrap();

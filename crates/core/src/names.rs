@@ -110,6 +110,33 @@ pub fn name_key(name: &str) -> String {
         .collect()
 }
 
+/// The artist line of a compilation, which names nobody: «Various
+/// Artists», «Разные исполнители», «VA», «Сборник» and their spellings in
+/// other languages.
+pub fn is_various_artists(name: &str) -> bool {
+    const VARIOUS: &[&str] = &[
+        "variousartists",
+        "variousartist",
+        "various",
+        "va",
+        "разныеисполнители",
+        "разныеартисты",
+        "различныеисполнители",
+        "сборник",
+        "verschiedeneinterpreten",
+        "verschiedenekünstler",
+        "variosartistas",
+        "variosinterpretes",
+        "variosintérpretes",
+        "váriosartistas",
+        "artistesdivers",
+        "artistivari",
+        "różniwykonawcy",
+        "різнівиконавці",
+    ];
+    VARIOUS.contains(&name_key(name).as_str())
+}
+
 fn is_kana(c: char) -> bool {
     matches!(c, '\u{3041}'..='\u{3096}' | '\u{30A1}'..='\u{30FA}' | 'ー' | '・')
 }
@@ -334,6 +361,16 @@ pub fn same_name(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compilation_artist_names_nobody() {
+        for name in ["Various Artists", "VARIOUS ARTISTS", "V.A.", "Разные исполнители", "Сборник", "Various", "Varios Artistas"] {
+            assert!(is_various_artists(name), "{name}");
+        }
+        for name in ["Various Cruelties", "Artists", "Кино", "Vanessa"] {
+            assert!(!is_various_artists(name), "{name}");
+        }
+    }
 
     #[test]
     fn widths_and_marks_fold() {

@@ -94,12 +94,20 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The functions the library's SQL calls: `album_likes_tracks()`, the
-/// mode of [`Library::set_album_likes_tracks`].
+/// mode of [`Library::set_album_likes_tracks`]; `various_artists(name)`,
+/// a compilation's artist line ([`nikgob_core::names::is_various_artists`]).
 fn add_functions(conn: &Connection, album_likes_tracks: &Arc<AtomicBool>) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
     let flag = Arc::clone(album_likes_tracks);
-    conn.create_scalar_function("album_likes_tracks", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |_| {
+    conn.create_scalar_function("album_likes_tracks", 0, FunctionFlags::SQLITE_UTF8, move |_| {
         Ok(flag.load(Ordering::Relaxed))
     })?;
+    conn.create_scalar_function(
+        "various_artists",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(nikgob_core::names::is_various_artists(&ctx.get::<String>(0)?)),
+    )?;
     Ok(())
 }
 
