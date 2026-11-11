@@ -2004,17 +2004,25 @@ impl Prefs {
 
     /// Puts `item` at `place`; only what differs from the default is kept.
     pub fn set_track_menu_place(&mut self, item: TrackMenuItem, place: TrackMenuPlace) {
-        // «Выбрать раздачу…» set apart from «Найти качество лучше»: the
-        // place it took after that one is kept as its own first.
+        // «Найти качество лучше» placed while «Выбрать раздачу…» has no
+        // line of its own: the latter keeps where it stands now (where a
+        // layout saved before the split put both, or its default) on a line
+        // of its own, so moving one never moves the other. Only a layout
+        // saved before the split has a `torrents` line without a
+        // `pick_release` one, and only there does [`TrackMenuSlot::place_of`]
+        // fall back.
         if item == TrackMenuItem::Torrents && !self.track_menu.iter().any(|s| s.item == TrackMenuItem::PickRelease) {
-            let before = self.track_menu_place(TrackMenuItem::PickRelease);
-            if before != TrackMenuItem::PickRelease.default_place() {
-                self.track_menu.push(TrackMenuSlot { item: TrackMenuItem::PickRelease, place: before });
-            }
+            let now = self.track_menu_place(TrackMenuItem::PickRelease);
+            self.track_menu.push(TrackMenuSlot { item: TrackMenuItem::PickRelease, place: now });
         }
         self.track_menu.retain(|s| s.item != item);
         if place != item.default_place() || (item == TrackMenuItem::PickRelease && self.track_menu.iter().any(|s| s.item == TrackMenuItem::Torrents)) {
             self.track_menu.push(TrackMenuSlot { item, place });
+        }
+        // With no `torrents` line nothing falls back: a `pick_release` line
+        // at its default says nothing.
+        if !self.track_menu.iter().any(|s| s.item == TrackMenuItem::Torrents) {
+            self.track_menu.retain(|s| !(s.item == TrackMenuItem::PickRelease && s.place == TrackMenuItem::PickRelease.default_place()));
         }
     }
 }
@@ -3743,9 +3751,14 @@ mod track_menu_tests {
         assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Menu, P::Hidden));
         p.set_track_menu_place(I::PickRelease, P::File);
         assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Menu, P::File));
-        // Nothing saved: both in «Файл».
-        let p = Prefs::default();
+        // Nothing saved: both in «Файл»; placing «Найти качество лучше»
+        // after the split leaves «Выбрать раздачу…» where it is.
+        let mut p = Prefs::default();
         assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::File, P::File));
+        p.set_track_menu_place(I::Torrents, P::Menu);
+        assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Menu, P::File));
+        p.set_track_menu_place(I::Torrents, P::Hidden);
+        assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Hidden, P::File));
     }
 
     /// Prefs saved before «Меню трека» have no such field: the default.

@@ -913,7 +913,7 @@ pub fn show_on(
             // last; with the content open the volume has no room on the
             // screen and is here.
             let top: &[Act] = if chrome.np_slot != NpSlot::None { &[Act::Volume, Act::Visualizer] } else { &[Act::Visualizer] };
-            let rows = Chrome::player_rows(t, state, top, true, true);
+            let rows = Chrome::player_rows(&ctx, t, state, top, true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
         if ui.add(

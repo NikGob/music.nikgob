@@ -176,7 +176,7 @@ impl Chrome {
     /// «Файл» has «Изменить текст…» after the tags while the shown lyrics
     /// are this track's and can be edited, and the delete last when `trash`
     /// and the track is in the library.
-    pub fn player_rows(t: &TrackRow, state: &ViewState, top: &[Act], info: bool, trash: bool) -> Vec<Row<PlayerAct>> {
+    pub fn player_rows(ctx: &Context, t: &TrackRow, state: &ViewState, top: &[Act], info: bool, trash: bool) -> Vec<Row<PlayerAct>> {
         use super::pages::sound;
         // The developer profile's tracks have no files: the real song first.
         let youtube = nikgob_view::dev::profile().then_some(Act::Youtube);
@@ -184,7 +184,9 @@ impl Chrome {
         let mut rows: Vec<Row<PlayerAct>> =
             youtube.iter().chain(top).filter(|a| **a != Act::Visualizer).map(|&a| own(a)).collect();
         rows.push(Row::Divider);
-        let wish = super::pages::widgets::WishIndex::build(&state.downloads.wishlist);
+        // The frame's index: the bar and Now Playing build these rows every
+        // frame for their ⋮.
+        let wish = super::pages::widgets::WishIndex::of(ctx, &state.downloads.wishlist);
         let of = super::pages::LibraryRowsOf {
             marks: &state.dislikes,
             info,
@@ -351,6 +353,7 @@ impl Chrome {
             A::Artist => self.nav = super::artist_links::go_to(ctx, super::artist_links::library(&t.artists)),
             A::Info => self.show(PaneTab::Info, wh),
             A::Share => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
+            // The playing track's own speed (a queue row opens its own).
             A::Speed => super::pages::sound::open(ctx, super::pages::sound::Tab::Speed, None),
             A::Equalizer => super::pages::sound::open(ctx, super::pages::sound::Tab::Equalizer, None),
             A::Fetch if t.has_local => out.push(Command::OpenTagEditor(t.id)),
@@ -747,6 +750,7 @@ mod tests {
     /// «Визуализатор» right before «Файл», Now Playing's delete last in it.
     #[test]
     fn the_player_menus_are_the_track_list_with_their_own_rows() {
+        let ctx = egui::Context::default();
         let state = ViewState::default();
         let t = full(true);
         let of = LibraryRowsOf { marks: &state.dislikes, info: true, also: None, torrents: false, wished: None };
@@ -759,7 +763,7 @@ mod tests {
             row_acts(rows).into_iter().filter(|a| !extra.contains(a)).collect()
         };
         let (eq, viz) = (PlayerAct::Track(A::Equalizer), PlayerAct::Own(Act::Visualizer));
-        let np = Chrome::player_rows(&t, &state, &[Act::Visualizer], true, true);
+        let np = Chrome::player_rows(&ctx, &t, &state, &[Act::Visualizer], true, true);
         assert_eq!(less(&np, &[eq, viz, PlayerAct::Own(Act::Trash)]), list);
         let acts = row_acts(&np);
         let info = acts.iter().position(|a| *a == PlayerAct::Track(A::Info)).unwrap();
@@ -768,12 +772,12 @@ mod tests {
         assert_eq!(file[0], PlayerAct::Track(A::Fetch));
         assert_eq!(file.last(), Some(&PlayerAct::Own(Act::Trash)));
         let top = [Act::Like, Act::Lyrics, Act::Volume];
-        let bar = Chrome::player_rows(&t, &state, &top, true, false);
+        let bar = Chrome::player_rows(&ctx, &t, &state, &top, true, false);
         assert_eq!(&row_acts(&bar)[..3], top.map(PlayerAct::Own));
         assert_eq!(&less(&bar, &[eq])[3..], &list[..]);
         assert_eq!(&list[..6], [A::Radio, A::Playlist, A::Album, A::Artist, A::Share, A::Info].map(PlayerAct::Track));
         // Not in the library (no file, no like): nothing to delete.
-        let stream = row_acts(&Chrome::player_rows(&track(false, false), &state, &[], true, true));
+        let stream = row_acts(&Chrome::player_rows(&ctx, &track(false, false), &state, &[], true, true));
         assert!(!stream.contains(&PlayerAct::Own(Act::Trash)));
     }
 
@@ -782,10 +786,11 @@ mod tests {
     /// and a track playing the speed first, with both keys.
     #[test]
     fn the_player_menus_open_the_sound_sheet() {
+        let ctx = egui::Context::default();
         let t = track(true, false);
         let mut state = ViewState::default();
         let sound = |state: &ViewState| -> Vec<(PlayerAct, String, Option<String>, bool)> {
-            let rows = Chrome::player_rows(&t, state, &[], true, false);
+            let rows = Chrome::player_rows(&ctx, &t, state, &[], true, false);
             row_items(&rows)
                 .into_iter()
                 .filter(|(a, _)| matches!(a, PlayerAct::Track(A::Speed | A::Equalizer)))
@@ -806,16 +811,17 @@ mod tests {
     /// «Файл», the sound's row hidden, «Изменить текст…» in the menu.
     #[test]
     fn the_settings_place_the_items_of_the_player_menus() {
+        let ctx = egui::Context::default();
         use nikgob_view::{TrackMenuItem as I, TrackMenuPlace as P};
         let t = track(true, false);
         let mut state = ViewState::default();
         state.lyrics.track = Some(t.id);
         state.lyrics.source = Some(nikgob_view::LyricsSource::File);
-        let plain = row_acts(&Chrome::player_rows(&t, &state, &[Act::Like, Act::Visualizer], false, true));
+        let plain = row_acts(&Chrome::player_rows(&ctx, &t, &state, &[Act::Like, Act::Visualizer], false, true));
         state.prefs.set_track_menu_place(I::Visualizer, P::File);
         state.prefs.set_track_menu_place(I::Sound, P::Hidden);
         state.prefs.set_track_menu_place(I::LyricsEdit, P::Menu);
-        let rows = Chrome::player_rows(&t, &state, &[Act::Like, Act::Visualizer], false, true);
+        let rows = Chrome::player_rows(&ctx, &t, &state, &[Act::Like, Act::Visualizer], false, true);
         let acts = row_acts(&rows);
         assert_eq!(acts.len(), plain.len() - 1);
         assert_eq!(acts[0], PlayerAct::Own(Act::Like));
@@ -831,11 +837,12 @@ mod tests {
     /// after the tags, while the shown lyrics are its own and have a text.
     #[test]
     fn the_lyrics_editor_opens_from_the_player_menus() {
+        let ctx = egui::Context::default();
         let t = track(true, false);
         let mut state = ViewState::default();
         let edit = PlayerAct::Own(Act::EditLyrics);
         let file = |state: &ViewState| {
-            let rows = Chrome::player_rows(&t, state, &[], false, false);
+            let rows = Chrome::player_rows(&ctx, &t, state, &[], false, false);
             row_acts(sub_rows(&rows, FILE).unwrap())
         };
         assert!(!file(&state).contains(&edit));
@@ -852,11 +859,12 @@ mod tests {
     /// track menu of a list.
     #[test]
     fn the_other_album_of_a_song_is_in_the_player_menus() {
+        let ctx = egui::Context::default();
         let t = full(true);
         let mut state = ViewState::default();
         let other = nikgob_view::ReleaseId::new();
         state.also_on = std::sync::Arc::new([(t.id, (other, "Live".to_owned()))].into_iter().collect());
-        let rows = Chrome::player_rows(&t, &state, &[], false, false);
+        let rows = Chrome::player_rows(&ctx, &t, &state, &[], false, false);
         let acts = row_acts(&rows);
         assert_eq!(&acts[2..5], [A::Album, A::AlsoOn, A::Artist].map(PlayerAct::Track));
         assert_eq!(acts.last(), Some(&PlayerAct::Track(A::Apart)));

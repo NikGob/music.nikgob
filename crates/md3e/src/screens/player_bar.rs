@@ -284,10 +284,10 @@ pub fn show(
             // Placed by «Меню трека» like Now Playing's (F12 anyway).
             top.push(Act::Visualizer);
             let info_on = PaneTab::Info.on(&state.prefs);
-            let rows = Chrome::player_rows(t, state, &top, info_on, false);
+            let rows = Chrome::player_rows(ui.ctx(), t, state, &top, info_on, false);
             chrome.track_menu(&more, "bar-more", rows, t, state, Where::Bar, out);
             // A right click on the track (its cover and title): the same.
-            chrome.track_context_menu(&info, "bar-track", || Chrome::player_rows(t, state, &top, info_on, false), t, state, Where::Bar, out);
+            chrome.track_context_menu(&info, "bar-track", || Chrome::player_rows(ui.ctx(), t, state, &top, info_on, false), t, state, Where::Bar, out);
         }
     });
     // A click on the pill between the controls opens Now Playing too.

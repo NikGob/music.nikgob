@@ -544,8 +544,9 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
     rows
 }
 
-/// Whether a track can leave the library: only what is in it (a file, or
-/// a like).
+/// Whether the playing track's menu offers its delete: what is in the
+/// library by a file or a like (a list's row is in the library anyway: a
+/// stream track in a playlist is too, and its row always offers it).
 pub(crate) fn can_trash(track: &TrackRow) -> bool {
     track.has_local || track.liked
 }
@@ -553,9 +554,6 @@ pub(crate) fn can_trash(track: &TrackRow) -> bool {
 /// The library's deletes, last in «Файл» of a library row's
 /// [`library_track_rows`]: «Удалить навсегда» only for a file.
 fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
-    if !can_trash(track) {
-        return;
-    }
     let mut deletes = vec![
         widgets::Row::Divider,
         widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)),
@@ -1727,8 +1725,9 @@ mod speed_tests {
 
     /// What cannot work for a track is not in its menu at all: no album,
     /// no artist, a song that cannot play, «Удалить навсегда» without a
-    /// file, the delete of what is not in the library, «Скачать» of a
-    /// track already on its way.
+    /// file, «Скачать» of a track already on its way. A list's row always
+    /// offers «Удалить из библиотеки» (a stream track in a playlist is in
+    /// the library too).
     #[test]
     fn what_cannot_work_is_left_out() {
         let marks = nikgob_view::DislikesView::default();
@@ -1739,12 +1738,8 @@ mod speed_tests {
         }
         let mut rows = library_track_rows(&bare, of(&marks, false));
         push_deletes(&mut rows, &bare);
-        assert!(!row_acts(&rows).iter().any(|a| matches!(a, TrackAct::Trash | TrackAct::Purge)), "not in the library");
-        let liked = TrackRow { liked: true, ..bare.clone() };
-        let mut rows = library_track_rows(&liked, of(&marks, false));
-        push_deletes(&mut rows, &liked);
         let acts = row_acts(&rows);
-        assert!(acts.contains(&TrackAct::Trash) && !acts.contains(&TrackAct::Purge), "a like, no file");
+        assert!(acts.contains(&TrackAct::Trash) && !acts.contains(&TrackAct::Purge), "no file: no delete for good");
         let unplayable = row_acts(&track_rows(TrackMenuOf { playable: false, ..of_stream() }));
         assert!(!unplayable.contains(&TrackAct::Next) && !unplayable.contains(&TrackAct::Queue));
         // On its way: no «Скачать»; waiting or not found: «Скачать».

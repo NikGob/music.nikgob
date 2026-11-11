@@ -163,6 +163,10 @@ fn queue_apply(
             }
         }
         QueueAct::Remove => out.push(Command::RemoveFromQueue(e.entry)),
+        // The row's own speed, not the playing track's.
+        QueueAct::Track(TrackAct::Speed) => {
+            super::pages::sound::open(ctx, super::pages::sound::Tab::Speed, Some((e.track.id, e.track.title.clone())));
+        }
         QueueAct::Track(a) => chrome.apply_track(ctx, a, &e.track, state, anchor, Where::Bar, out),
     }
 }
@@ -325,7 +329,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 // The player's menu (the same as the bar's ⋮). Done after
                 // the rows: they hold `chrome` and `out` meanwhile.
                 if !Menu::context_idle(&o.response, "q-ctx-current") {
-                    let rows = Chrome::player_rows(t, state, &[], PaneTab::Info.on(&state.prefs), false);
+                    let rows = Chrome::player_rows(ui.ctx(), t, state, &[], PaneTab::Info.on(&state.prefs), false);
                     let (menu, acts) = super::pages::widgets::menu_of("q-ctx-current", rows);
                     current_pick = menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()).map(|a: PlayerAct| (a, t));
                 }

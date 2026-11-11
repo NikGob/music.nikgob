@@ -380,7 +380,10 @@ impl MediaCard {
         let (rect, _) = ui.allocate_exact_size(vec2(w, Self::height(w)), Sense::hover());
         let response = ui.interact(rect, id, Sense::click());
         let radii = Radii::all(shape::MEDIUM);
-        let hover = response.contains_pointer() || common::focused(&response);
+        // While the menu of its ⋮ is open (below the card, so the pointer
+        // leaves it) the card stays as under the pointer and keeps its ⋮.
+        let more_open = self.menu_button && ctx.data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
+        let hover = response.contains_pointer() || common::focused(&response) || more_open;
         // Playful feedback: the picture leans in under the pointer and the
         // whole card squishes on press, both on springs.
         let squish = anim::f32(
@@ -549,6 +552,12 @@ impl MediaCard {
                     k > 0.5,
                     IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt((id, "more-btn")),
                 ));
+            }
+        }
+        if self.menu_button {
+            let open = menu.as_ref().is_some_and(|m| ctx.data(|d| d.get_temp::<bool>(m.id.with("md3e-menu-open"))).unwrap_or(false));
+            if open != more_open {
+                ctx.data_mut(|d| d.insert_temp(id.with("more-open"), open));
             }
         }
         let extra_clicked = download_clicked || menu.as_ref().is_some_and(Response::clicked);
