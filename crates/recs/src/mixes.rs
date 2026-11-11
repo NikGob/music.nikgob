@@ -2387,8 +2387,11 @@ pub fn row_upto(daily: Vec<Mix>, part: Option<Mix>, moments: Vec<Mix>, more: usi
         fill += usize::from(m.key.is_cluster());
         out.push(m);
     }
+    // The row as it was (it may be short of ten when the named mixes are
+    // past their share), then at most `more` of what it left out.
+    let end = out.len() + more;
     for m in left {
-        if out.len() >= ROW_MIXES + more {
+        if out.len() >= end {
             break;
         }
         if !matches!(m.key, MixKey::Blend(_)) && out.iter().any(|c| alike(c, &m)) {
