@@ -1,5 +1,5 @@
-//! Background enrichment from the network: lyrics for tracks that have none and
-//! artist photos. Both are cached in the library (including "nothing found"
+//! Background enrichment from the network: lyrics for tracks that have none,
+//! artist photos and readable artist names ([`crate::artist_names`]). All are cached in the library (including "nothing found"
 //! markers, so the services are not asked again and again) and both stay off
 //! when the app is offline (`ImportService::metadata` is `None`).
 //!
@@ -17,6 +17,7 @@ use nikgob_metadata::{ArtistPicture, Deezer, Lrclib, Lyrics, Metadata, MetadataE
 use nikgob_view as v;
 
 use crate::Worker;
+use crate::artist_names::After;
 use crate::import::Internal;
 
 /// A lyrics lookup that found nothing is repeated after this long.
@@ -25,7 +26,7 @@ pub(crate) const LYRICS_RETRY_MS: i64 = 7 * 86_400_000;
 const PHOTO_RETRY_MS: i64 = 14 * 86_400_000;
 const BATCH: u32 = 25;
 /// Consecutive network failures after which a background job gives up until the next trigger.
-const MAX_FAILURES: u32 = 3;
+pub(crate) const MAX_FAILURES: u32 = 3;
 
 /// Delays of the background jobs (zero in tests).
 #[derive(Clone, Copy, Debug)]
@@ -47,10 +48,23 @@ impl Pace {
     };
 }
 
+/// What a photo or names run found, for the worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// A new photo of the artist.
+    Photo(ArtistId),
+    /// The artist's readable name, or that it is a role.
+    Name(ArtistId),
+    /// Artist rows merged into one, or roles marked: the library's artists
+    /// are read again.
+    Reload,
+}
+
 /// Results of the background jobs on their way to the worker.
 pub(crate) enum Event {
-    ArtistPhoto(ArtistId),
+    Found(Found),
     PhotosDone,
+    NamesDone,
     BackfillDone,
     LyricsReady(nikgob_core::model::TrackId, crate::lyrics::TrackLyrics),
     /// A larger cover of this album was found ([`crate::hd_covers`]).
@@ -62,6 +76,7 @@ pub(crate) enum Event {
 #[derive(Default)]
 pub(crate) struct Enrich {
     photos_running: bool,
+    names_running: bool,
     backfill_running: bool,
     /// Artists whose pages were opened: fetched before the rest.
     priority: Arc<Mutex<Vec<(ArtistId, String)>>>,
@@ -250,7 +265,7 @@ fn forget_gone_photos(lib: &Library) -> usize {
     })
 }
 
-fn looks_like_image(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_image(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(&[0x89, b'P', b'N', b'G'])
 }
 
@@ -321,34 +336,66 @@ pub(crate) async fn fetch_artist_photo(
         }
         Err(_) => return PhotoOutcome::Failed,
     };
+    save_photo(lib, id, name, dir, &bytes, "deezer")
+}
+
+/// Writes the photo `bytes` of `id` into `dir` and records it as from
+/// `source`.
+fn save_photo(lib: &Library, id: ArtistId, name: &str, dir: &Path, bytes: &[u8], source: &str) -> PhotoOutcome {
     let path = dir.join(format!("{id}.jpg"));
     let tmp = path.with_extension("part");
     let saved = std::fs::create_dir_all(dir)
-        .and_then(|()| std::fs::write(&tmp, &bytes))
+        .and_then(|()| std::fs::write(&tmp, bytes))
         .and_then(|()| std::fs::rename(&tmp, &path));
     if let Err(e) = saved {
         log::warn!("saving the photo of {name}: {e}");
         return PhotoOutcome::Failed;
     }
-    if let Err(e) = lib.set_artist_photo(id, Some(&path.display().to_string())) {
+    if let Err(e) = lib.set_artist_photo_from(id, Some(&path.display().to_string()), source) {
         log::warn!("recording the photo of {name}: {e}");
         return PhotoOutcome::Failed;
     }
     PhotoOutcome::Saved(path)
 }
 
+/// [`fetch_artist_photo`], then the sources after Deezer when Deezer has
+/// no photo it could prove this artist's ([`crate::artist_names`]): the
+/// connected services, then Wikimedia Commons. Deezer's verdict stands
+/// when none of them has one.
+pub(crate) async fn fetch_photo(
+    deezer: &Deezer,
+    after: &After,
+    lib: &Library,
+    id: ArtistId,
+    name: &str,
+    dir: &Path,
+    found: &impl Fn(Found),
+) -> PhotoOutcome {
+    let first = fetch_artist_photo(deezer, lib, id, name, dir).await;
+    if !matches!(first, PhotoOutcome::NotFound | PhotoOutcome::Unverified) || lib.artist_photo_locked(id).unwrap_or(false) {
+        return first;
+    }
+    let more = crate::artist_names::photo_after_deezer(after, lib, id, name, found);
+    match tokio::time::timeout(Duration::from_secs(90), more).await {
+        Ok(Some((bytes, source))) => save_photo(lib, id, name, dir, &bytes, source),
+        Ok(None) | Err(_) => first,
+    }
+}
+
 /// Fetches photos for artists that have none (artists whose pages were opened
 /// first), calling `saved` for each new one; an unverified one recorded
 /// before `unverified_before` is asked again, a photo whose file is gone
 /// too. Says in one log line what the run did.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_photos(
     deezer: Deezer,
+    after: After,
     lib: Library,
     dir: PathBuf,
     unverified_before: i64,
     priority: Arc<Mutex<Vec<(ArtistId, String)>>>,
     pace: Pace,
-    saved: impl Fn(ArtistId),
+    found: impl Fn(Found),
 ) {
     tokio::time::sleep(pace.start).await;
     crate::quiet::free().await;
@@ -361,7 +408,7 @@ pub(crate) async fn run_photos(
         unverified_before,
         pace,
     };
-    photo_batches(&deezer, &lib, &dir, &queue, &saved, &mut tally).await;
+    photo_batches(&deezer, &after, &lib, &dir, &queue, &found, &mut tally).await;
     tally.log();
 }
 
@@ -404,10 +451,11 @@ struct PhotoQueue<'a> {
 /// [`MAX_FAILURES`] times in a row).
 async fn photo_batches(
     deezer: &Deezer,
+    after: &After,
     lib: &Library,
     dir: &Path,
     q: &PhotoQueue<'_>,
-    saved: &impl Fn(ArtistId),
+    found: &impl Fn(Found),
     tally: &mut PhotoTally,
 ) {
     let mut failures = 0;
@@ -427,11 +475,11 @@ async fn photo_batches(
                 break;
             };
             did_any = true;
-            match fetch_artist_photo(deezer, lib, id, &name, dir).await {
+            match fetch_photo(deezer, after, lib, id, &name, dir, found).await {
                 PhotoOutcome::Saved(_) => {
                     failures = 0;
                     tally.saved += 1;
-                    saved(id);
+                    found(Found::Photo(id));
                 }
                 PhotoOutcome::NotFound => {
                     failures = 0;
@@ -486,10 +534,17 @@ impl Worker {
         });
     }
 
-    /// Looks for artist photos in the background; `first` (an artist page that
-    /// was just opened) goes ahead of the queue.
+    /// Looks for artist photos in the background, then for the readable
+    /// names of the artists that need one ([`crate::artist_names`]); `first`
+    /// (an artist page that was just opened) goes ahead of the photo queue.
     pub(crate) fn kick_photos(&mut self, first: Option<ArtistId>) {
         let lib = self.lib.clone();
+        // The connected services are photo sources after Deezer.
+        let services: Vec<Arc<dyn nikgob_core::streaming::StreamService>> =
+            [nikgob_core::streaming::Service::Youtube, nikgob_core::streaming::Service::Spotify]
+                .into_iter()
+                .filter_map(|k| self.service(k))
+                .collect();
         let session = session_start();
         let first = first.and_then(|id| {
             let due = lib.artist_photo_due(id, now_ms() - PHOTO_RETRY_MS, session).ok()?;
@@ -507,6 +562,32 @@ impl Worker {
         {
             p.push(first);
         }
+        let tx = svc.internal();
+        let found_tx = tx.clone();
+        let found = move |f: Found| {
+            let _ = found_tx.send(Internal::Enrich(Event::Found(f)));
+        };
+        // The roles of voice credits are marked by whichever run starts
+        // first: they get no photo lookups.
+        let mark = |lib: &Library, found: &dyn Fn(Found)| {
+            let roles = lib.mark_voice_roles().unwrap_or_else(|e| {
+                log::warn!("marking the roles of voice credits: {e}");
+                0
+            });
+            if roles > 0 {
+                found(Found::Reload);
+            }
+            roles
+        };
+        if !svc.enrich.names_running {
+            svc.enrich.names_running = true;
+            let (meta, services, lib, tx, found) = (meta.clone(), services.clone(), lib.clone(), tx.clone(), found.clone());
+            svc.spawn(async move {
+                let roles = mark(&lib, &found);
+                crate::artist_names::run_names(meta, services, lib, Pace::PHOTOS, roles, &found).await;
+                let _ = tx.send(Internal::Enrich(Event::NamesDone));
+            });
+        }
         if svc.enrich.photos_running {
             return;
         }
@@ -518,42 +599,73 @@ impl Worker {
             .unwrap_or(&cfg.library_dir)
             .join("Artists");
         let priority = svc.enrich.priority.clone();
-        let tx = svc.internal();
         svc.spawn(async move {
-            let saved_tx = tx.clone();
-            run_photos(meta.deezer, lib, dir, session, priority, Pace::PHOTOS, move |id| {
-                let _ = saved_tx.send(Internal::Enrich(Event::ArtistPhoto(id)));
-            })
-            .await;
+            mark(&lib, &found);
+            let deezer = meta.deezer.clone();
+            let after = After { meta: Some(meta), services };
+            run_photos(deezer, after, lib, dir, session, priority, Pace::PHOTOS, &found).await;
             let _ = tx.send(Internal::Enrich(Event::PhotosDone));
+        });
+    }
+
+    /// A new photo or readable name of `id`: its cards everywhere show it.
+    fn artist_card_changed(&mut self, id: ArtistId) {
+        self.res.invalidate_photos();
+        let image = self.res.photo(id);
+        let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name).unwrap_or_default();
+        let (latin, character) = self.res.latin_name(id, &name);
+        self.publish(|s| {
+            let fix = |a: &mut v::ArtistCard| {
+                if a.id == id {
+                    if image.is_some() {
+                        a.image = image.clone();
+                    }
+                    a.latin = latin.clone();
+                    a.character = character;
+                }
+            };
+            s.library.artists.iter_mut().for_each(fix);
+            s.search.artists.iter_mut().for_each(fix);
+            if let Some(a) = s.artist.as_mut() {
+                fix(&mut a.card);
+            }
+        });
+        // Kept for a home page on its way too.
+        self.patch_home(move |home| {
+            let fix = |a: &mut v::ArtistCard| {
+                if a.id == id {
+                    if image.is_some() {
+                        a.image = image.clone();
+                    }
+                    a.latin = latin.clone();
+                    a.character = character;
+                }
+            };
+            home.artist_mixes.iter_mut().for_each(fix);
+            for sc in &mut home.shortcuts {
+                if let v::Shortcut::Artist(a) = sc {
+                    fix(a);
+                }
+            }
         });
     }
 
     pub(crate) fn enrich_event(&mut self, ev: Event) {
         match ev {
-            Event::ArtistPhoto(id) => {
+            Event::Found(Found::Photo(id) | Found::Name(id)) => self.artist_card_changed(id),
+            Event::Found(Found::Reload) => {
                 self.res.invalidate_photos();
-                let image = self.res.photo(id);
-                self.publish(|s| {
-                    let fix = |a: &mut v::ArtistCard| {
-                        if a.id == id {
-                            a.image = image.clone();
-                        }
-                    };
-                    s.library.artists.iter_mut().for_each(fix);
-                    s.search.artists.iter_mut().for_each(fix);
-                    if let Some(a) = s.artist.as_mut() {
-                        fix(&mut a.card);
-                    }
-                });
-                // Kept for a home page on its way too.
-                self.patch_home(move |home| {
-                    home.artist_mixes.iter_mut().filter(|a| a.id == id).for_each(|a| a.image = image.clone());
-                });
+                self.home_input_changed();
+                self.load_library();
             }
             Event::PhotosDone => {
                 if let Some(svc) = &mut self.import {
                     svc.enrich.photos_running = false;
+                }
+            }
+            Event::NamesDone => {
+                if let Some(svc) = &mut self.import {
+                    svc.enrich.names_running = false;
                 }
             }
             Event::LyricsReady(track, tl) => self.lyrics_backfilled(track, tl),
@@ -778,6 +890,7 @@ mod tests {
         let counter = saved.clone();
         run_photos(
             deezer.clone(),
+            After::default(),
             lib.clone(),
             dir.path().to_owned(),
             now_ms(),
@@ -797,7 +910,7 @@ mod tests {
         assert!(lib.artist_photo_lookup(nobody.id).unwrap().is_some(), "miss is recorded");
 
         // A second pass has nothing to do (the mock expects a single download).
-        run_photos(deezer, lib.clone(), dir.path().to_owned(), now_ms() + 1, Arc::default(), NO_WAIT, |_| {
+        run_photos(deezer, After::default(), lib.clone(), dir.path().to_owned(), now_ms() + 1, Arc::default(), NO_WAIT, |_| {
             panic!("no new photos expected")
         })
         .await;
@@ -925,6 +1038,67 @@ mod tests {
         let retry = now_ms() - PHOTO_RETRY_MS;
         assert!(!lib.artist_photo_due(fresh.id, retry, now_ms() - 60_000).unwrap(), "not again this session");
         assert!(lib.artist_photo_due(fresh.id, retry, now_ms() + 1).unwrap(), "again the next one");
+    }
+
+    /// Deezer has no photo of a seiyuu: her MusicBrainz artist (the id her
+    /// files carry) links a Wikidata item whose Commons picture is hers,
+    /// and her English alias becomes the name shown beside her own.
+    #[tokio::test]
+    async fn a_photo_deezer_lacks_comes_from_wikimedia_through_musicbrainz() {
+        const MBID: &str = "0b2f0b5a-0000-4000-8000-000000000001";
+        let server = MockServer::start().await;
+        for p in ["/search", "/search/track", "/search/artist"] {
+            Mock::given(method("GET")).and(path(p)).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("/artist/{MBID}")))
+            .respond_with(json(&format!(
+                r#"{{"id": "{MBID}", "name": "佐宗綾子", "sort-name": "Saso, Ayako", "type": "Person",
+                    "aliases": [{{"name": "Ayako Saso", "locale": "en", "type": "Artist name", "primary": true}}],
+                    "relations": [{{"type": "wikidata", "url": {{"resource": "https://www.wikidata.org/wiki/Q11"}}}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/w/api.php"))
+            .respond_with(json(&format!(
+                r#"{{"entities": {{"Q11": {{"labels": {{"en": {{"value": "Ayako Saso"}}}},
+                    "claims": {{"P18": [{{"mainsnak": {{"datavalue": {{"value": "Saso.jpg"}}}}}}],
+                                "P434": [{{"mainsnak": {{"datavalue": {{"value": "{MBID}"}}}}}}]}}}}}}}}"#
+            )))
+            .mount(&server)
+            .await;
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 7];
+        Mock::given(method("GET"))
+            .and(path("/wiki/Special:FilePath/Saso.jpg"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(jpeg.clone(), "image/jpeg"))
+            .mount(&server)
+            .await;
+        let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+        meta.deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        meta.musicbrainz = nikgob_metadata::MusicBrainz::with_base_url(http(), &server.uri()).unwrap();
+        meta.wikidata =
+            nikgob_metadata::Wikidata::with_base_urls(http(), &format!("{}/w/", server.uri()), &format!("{}/wiki/", server.uri()))
+                .unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let mut saso = Artist::new("佐宗綾子");
+        saso.mbid = Some(MBID.into());
+        let saso = lib.upsert_artist(&saso).unwrap();
+        let t = lib.upsert_track(&Track::new("Song", ArtistCredit::single("佐宗綾子", Some(saso.id)))).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "/nonexistent/song.flac", Codec::Flac).with_quality(false)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Deezer alone has nothing.
+        let alone = fetch_photo(&meta.deezer, &After::default(), &lib, saso.id, "佐宗綾子", dir.path(), &|_| {}).await;
+        assert_eq!(alone, PhotoOutcome::NotFound);
+        let found = Mutex::new(Vec::new());
+        let after = After { meta: Some(meta.clone()), services: Vec::new() };
+        let out = fetch_photo(&meta.deezer, &after, &lib, saso.id, "佐宗綾子", dir.path(), &|f| found.lock().unwrap().push(f)).await;
+        let PhotoOutcome::Saved(saved) = out else { panic!("{out:?}") };
+        assert_eq!(std::fs::read(saved).unwrap(), jpeg);
+        assert_eq!(found.lock().unwrap().as_slice(), [Found::Name(saso.id)]);
+        let row = lib.artist_latin(saso.id).unwrap().unwrap();
+        assert_eq!((row.name.as_deref(), row.wikidata.as_deref()), (Some("Ayako Saso"), Some("Q11")));
     }
 
     #[tokio::test]

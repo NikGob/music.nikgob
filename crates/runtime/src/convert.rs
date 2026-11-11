@@ -30,6 +30,9 @@ pub struct Resolver {
     seeds: Option<HashMap<ReleaseId, u32>>,
     /// Artist photos on disk; loaded on first use.
     photos: Option<HashMap<ArtistId, v::Cover>>,
+    /// Readable names of artists and their roles (`artist_latin`), loaded
+    /// on first use and dropped with `photos`.
+    names: Option<HashMap<ArtistId, (Option<String>, bool)>>,
     /// How many times the covers and the photos were invalidated, shared
     /// with every resolver forked from this one ([`Self::fork`]): one
     /// invalidated anywhere drops its caches before it reads them next.
@@ -163,6 +166,7 @@ impl Resolver {
             covers: HashMap::new(),
             seeds: None,
             photos: None,
+            names: None,
             stale: Arc::new(Stale::default()),
             seen: (0, 0),
             facts: FactsCache::default(),
@@ -178,6 +182,7 @@ impl Resolver {
             covers: HashMap::new(),
             seeds: None,
             photos: None,
+            names: None,
             stale: self.stale.clone(),
             seen: self.stale_now(),
             facts: self.facts.clone(),
@@ -207,6 +212,7 @@ impl Resolver {
         }
         if now.1 != self.seen.1 {
             self.photos = None;
+            self.names = None;
         }
         self.seen = now;
     }
@@ -287,7 +293,20 @@ impl Resolver {
         self.photos.as_ref().and_then(|m| m.get(&id)).cloned()
     }
 
-    /// Reload artist photos from the library on next use (in the forks too).
+    /// The Latin name to show beside `name` (only a name in a foreign
+    /// script has one) and whether the artist is a role.
+    pub fn latin_name(&mut self, id: ArtistId, name: &str) -> (Option<String>, bool) {
+        self.sync();
+        let names = self.names.get_or_insert_with(|| self.lib.artist_latin_names().unwrap_or_default());
+        let Some((latin, role)) = names.get(&id) else { return (None, false) };
+        let shown = latin
+            .clone()
+            .filter(|l| nikgob_core::names::foreign_script(name) && nikgob_core::names::name_key(l) != nikgob_core::names::name_key(name));
+        (shown, *role)
+    }
+
+    /// Reload artist photos (and readable names) from the library on next
+    /// use (in the forks too).
     pub fn invalidate_photos(&mut self) {
         self.stale.photos.fetch_add(1, Ordering::AcqRel);
         self.sync();
@@ -412,12 +431,15 @@ impl Resolver {
     }
 
     pub fn artist(&mut self, a: &ArtistRow) -> v::ArtistCard {
+        let (latin, character) = self.latin_name(a.artist.id, &a.artist.name);
         v::ArtistCard {
             id: a.artist.id,
             name: a.artist.name.clone(),
             image: self.photo(a.artist.id).or_else(|| web_image(&a.artist.images)),
             liked: a.liked,
             track_count: a.local_track_count,
+            latin,
+            character,
         }
     }
 
@@ -531,6 +553,7 @@ impl Resolver {
                 _ => albums.push(card),
             }
         }
+        let (latin, character) = self.latin_name(a.id, &a.name);
         v::ArtistDetail {
             card: v::ArtistCard {
                 id: a.id,
@@ -538,6 +561,8 @@ impl Resolver {
                 image: self.photo(a.id).or_else(|| web_image(&a.images)),
                 liked,
                 track_count: 0,
+                latin,
+                character,
             },
             top_tracks: top.iter().map(|t| self.track(t)).collect(),
             albums,

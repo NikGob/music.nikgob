@@ -7,6 +7,7 @@
 
 mod align;
 mod analysis;
+mod artist_names;
 mod quality;
 mod same_audio;
 mod better_covers;

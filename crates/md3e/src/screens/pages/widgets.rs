@@ -1851,6 +1851,8 @@ mod menu_tests {
             image: None,
             liked: false,
             track_count: 0,
+            latin: None,
+            character: false,
         };
         let marks = nikgob_view::DislikesView::default();
         let card = row_acts(&artist_rows(&a, false, &marks));
