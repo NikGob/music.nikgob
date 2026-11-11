@@ -746,9 +746,7 @@ fn playlist_grid(
     new: bool,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
-    let width = ui.available_width();
-    let cols = widgets::columns(width, widgets::CARD_W);
-    let w = ((width - widgets::CARD_GAP * (cols - 1) as f32) / cols as f32).floor();
+    let (_, w) = widgets::grid_fit(ui.available_width(), widgets::CARD_W);
     let mut nav = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(widgets::CARD_GAP, widgets::CARD_GAP);

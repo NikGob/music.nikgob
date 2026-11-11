@@ -19,6 +19,7 @@
 pub mod color;
 pub mod components;
 pub mod covers;
+pub mod fit;
 pub mod screens;
 pub mod icons;
 pub mod prof;

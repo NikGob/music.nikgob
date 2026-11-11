@@ -251,7 +251,7 @@ pub struct Row<'a> {
     /// middle of its cover).
     pub card_h: f32,
     pub arrows_at: f32,
-    /// Cards that fit (each `12 / per` columns).
+    /// Cards that fit, sharing the grid's width.
     pub per: usize,
     /// Cards in all.
     pub n: usize,
@@ -281,7 +281,7 @@ fn arrow(ui: &mut Ui, id: Id, shown: bool, slot: Rect, button: IconButton) -> Op
 /// end ([`Scroll::near_end`]).
 pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui, usize, Rect)) -> bool {
     let per = row.per.max(1);
-    let card_w = grid.span(12 / per);
+    let card_w = grid.tile(per);
     let pitch = card_w + GUTTER;
     let view = Rect::from_min_size(pos2(grid.left, row.top), vec2(grid.width, row.card_h));
     let max = Scroll::max(row.n, pitch, GUTTER, grid.width);
