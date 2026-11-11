@@ -2964,7 +2964,7 @@ impl Worker {
             };
             self.toast(text, Some(("Отменить".into(), Command::RecFeedback { target, dislike: false })));
         } else {
-            self.toast(format!("«{name}» снова в рекомендациях"), None);
+            self.toast(format!("«{name}» снова в рекомендациях"), Some(("Отменить".into(), Command::RecFeedback { target, dislike: true })));
         }
         // Discoveries follow at once; the mixes after the next build.
         self.dislikes_load(true);

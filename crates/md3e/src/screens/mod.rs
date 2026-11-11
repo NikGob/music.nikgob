@@ -1092,7 +1092,7 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         // left meanwhile is loaded by the page itself.
         Route::Mix { .. } | Route::NewReleases => {}
         Route::Downloads(_) => out.push(Command::LoadWishlist),
-        Route::Settings | Route::Lyrics => {}
+        Route::Settings | Route::Lyrics | Route::Marks => {}
     }
 }
 
@@ -1243,7 +1243,7 @@ impl Md3eUi {
             "autoplay" => S::Autoplay,
             "mixes" => S::MixesProfiles,
             "dislikes" => S::DislikeButton,
-            "blacklist" => S::DislikedArtists,
+            "blacklist" => S::Marks,
             "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Theme,
             "pane" => S::PaneQueue,
@@ -1345,7 +1345,7 @@ impl Md3eUi {
                 Some(1)
             }
             Route::Downloads(_) => Some(2),
-            Route::Settings | Route::Stream(_) | Route::Lyrics => None,
+            Route::Settings | Route::Marks | Route::Stream(_) | Route::Lyrics => None,
         };
         // A service's page belongs where it was opened from (the search
         // over Главная, an artist of the library…).
@@ -1373,7 +1373,7 @@ impl Md3eUi {
                     items: &items,
                     bottom: &bottom,
                     selected,
-                    bottom_selected: (*self.route() == Route::Settings).then_some(0),
+                    bottom_selected: matches!(self.route(), Route::Settings | Route::Marks).then_some(0),
                 }
                 .show(ui)
             })

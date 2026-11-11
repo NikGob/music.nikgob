@@ -2716,6 +2716,9 @@ pub struct ViewState {
     pub find_song: Option<FindSongView>,
     /// How far the background sound analysis is.
     pub analysis: AnalysisProgress,
+    /// The names of the tracks with a speed of their own
+    /// ([`TrackSpeeds::chosen`]), for «Не нравится и скорость».
+    pub speed_names: std::sync::Arc<std::collections::HashMap<TrackId, DislikedTrack>>,
     /// Disliked tracks and artists not to recommend («Не нравится»,
     /// «Не рекомендовать исполнителя»).
     pub dislikes: DislikesView,
@@ -2826,6 +2829,10 @@ pub enum Route {
     Mix { key: MixKey, world: Option<String> },
     /// «Новые релизы» of Главная, all of them ([`HomeView::new_releases`]).
     NewReleases,
+    /// «Не нравится и скорость» (from Settings → Музыка): the disliked
+    /// tracks, the artists not recommended and the tracks with a speed of
+    /// their own, each taken back there.
+    Marks,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -2869,6 +2876,9 @@ pub enum Command {
     /// «Скорость» of a track: the version it plays as from now on
     /// (remembered with the track; the playing one changes at once).
     SetTrackSpeed { track: TrackId, variant: SpeedVariant },
+    /// «Сбросить» of a track's speed on «Не нравится и скорость»: as
+    /// recorded again, with «Отменить» in the snackbar.
+    ResetTrackSpeed(TrackId),
 
     /// «Включить с YouTube» (the developer profile, [`dev::profile`]): the
     /// playing track goes on from where it is on its YouTube Music copy,

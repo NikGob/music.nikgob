@@ -160,7 +160,10 @@ impl Worker {
             if relike {
                 self.like_quietly(track, true);
             }
-            self.toast(format!("«{title}» снова в рекомендациях"), None);
+            // Taken back by hand (not the undo of a dislike): «Отменить»
+            // marks it again.
+            let undo = (!relike).then(|| ("Отменить".to_owned(), Command::Dislike { track, dislike: true, sure: true, relike: false }));
+            self.toast(format!("«{title}» снова в рекомендациях"), undo);
             self.dislikes_changed();
             return;
         }

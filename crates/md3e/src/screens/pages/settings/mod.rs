@@ -227,7 +227,7 @@ pub(super) fn page(
         let page_x = ui.max_rect().x_range();
         ui.set_max_width(at.content_w);
         match tab {
-            settings_help::TAB_MUSIC => music::show(ui, state, &mut p, out),
+            settings_help::TAB_MUSIC => music::show(ui, state, &mut p, pages),
             settings_help::TAB_LYRICS => lyrics::show(ui, state, &mut p, out),
             settings_help::TAB_LOOK => look::show(ui, &mut p, out),
             settings_help::TAB_SERVICES => services::show(ui, state, &mut p, pages, out),

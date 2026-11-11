@@ -111,6 +111,11 @@ pub enum SettingId {
     PaneInfo,
     /// «Меню трека»: where each item of a track's menu stands.
     TrackMenu,
+    /// The switch of an optional button of Now Playing and the player bar.
+    PlayerButton(v::PlayerButton),
+    /// «Разделы открываются с начала»: «Главная» and «Библиотека» of the
+    /// rail open the section's first page.
+    NavRoot,
     NpMotion,
     ReducedMotion,
     Tooltips,
@@ -146,8 +151,9 @@ pub enum SettingId {
     /// What a song without a file keeps once its text is saved.
     LyricsStreamKeep,
     LyricsModels,
-    /// «Перемешивание остаётся включённым».
-    KeepShuffle,
+    /// «Перемешивание» of a new list of one kind: shuffled, in order, or
+    /// as the button is.
+    ListShuffle(v::ListKind),
     /// «Перемешивать радио и автовоспроизведение».
     ShuffleRadio,
     OutputDevice,
@@ -225,10 +231,10 @@ pub enum SettingId {
     DislikeSkipEverywhere,
     /// «Учитывать в рекомендациях».
     DislikeInRecs,
-    /// The disliked tracks, with «Снять».
-    DislikedTracks,
-    /// The artists not recommended, with «Снять».
-    DislikedArtists,
+    /// «Не нравится и скорость»: the button of the page with the disliked
+    /// tracks, the artists not recommended and the tracks with a speed of
+    /// their own, each taken back there.
+    Marks,
     /// The mixes of «Миксы для тебя» left out, with «Вернуть».
     HiddenMixes,
     /// «Разделы главной»: the order of Главная's sections and which show.
@@ -449,9 +455,9 @@ impl SettingId {
             Preset(Area::Sources | Area::Seeding) => TAB_DOWNLOADS,
             Preset(Area::Load) => TAB_SYSTEM,
             OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | KeepTimbre | Autoplay | AutoplayWorld
-            | KeepShuffle | ShuffleRadio
+            | ListShuffle(_) | ShuffleRadio
             | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
-            | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | DislikedArtists | DislikedTracks => {
+            | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | Marks => {
                 TAB_MUSIC
             }
             LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsScale | LyricsLead | LyricsDim
@@ -465,7 +471,7 @@ impl SettingId {
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
             | MixClickOpensList | HiddenMixes | AlbumDate | LikedAlbumsPlace | RailCompact | ReducedMotion | Tooltips | PaneQueue
-            | PaneLyrics | PaneInfo | TrackMenu => TAB_LOOK,
+            | PaneLyrics | PaneInfo | TrackMenu | PlayerButton(_) | NavRoot => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
             | DeezerEnabled | PushLikes | AlbumLike | SingleLike | PlaylistSync | ImportFiles | ImportSavedSongs | StreamCache => {
@@ -498,8 +504,8 @@ impl SettingId {
         use SettingId::*;
         match self {
             // Музыка.
-            OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | Autoplay | KeepShuffle | DislikeButton
-            | DislikeSkips | DislikedArtists | DislikedTracks
+            OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | Autoplay | ListShuffle(_) | DislikeButton
+            | DislikeSkips | Marks
             // Тексты: the animation and its step, the size and the lead, each
             // effect's switch, what lights up by itself.
             | LyricsStyle | LyricsUnit | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsGap
@@ -529,6 +535,7 @@ impl SettingId {
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
             | ProfileNames | MixClickOpensList | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
+            | PlayerButton(_) | NavRoot
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
             | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
@@ -617,6 +624,14 @@ impl SettingId {
             PaneLyrics => "Текст песни",
             PaneInfo => "Источник и качество",
             TrackMenu => "Меню трека",
+            PlayerButton(v::PlayerButton::Sound) => "Скорость и эквалайзер",
+            PlayerButton(v::PlayerButton::Shuffle) => "Перемешивание",
+            PlayerButton(v::PlayerButton::Repeat) => "Повтор",
+            PlayerButton(v::PlayerButton::Like) => "Нравится",
+            PlayerButton(v::PlayerButton::AddToPlaylist) => "В плейлист",
+            PlayerButton(v::PlayerButton::Queue) => "Очередь",
+            PlayerButton(v::PlayerButton::Lyrics) => "Текст песни",
+            NavRoot => "Разделы открываются с начала",
             NpMotion => "Открытие экрана",
             ReducedMotion => "Меньше движения",
             Tooltips => "Подсказки при наведении",
@@ -644,7 +659,10 @@ impl SettingId {
             LyricsStreams => "Песни с YouTube",
             LyricsStreamKeep => "Сохранять с YouTube",
             LyricsModels => "Модели",
-            KeepShuffle => "Перемешивание остаётся включённым",
+            ListShuffle(v::ListKind::Mix) => "Миксы",
+            ListShuffle(v::ListKind::OwnPlaylist) => "Свои плейлисты",
+            ListShuffle(v::ListKind::Album) => "Альбомы",
+            ListShuffle(v::ListKind::ReadyPlaylist) => "Готовые плейлисты",
             ShuffleRadio => "Перемешивать радио и автовоспроизведение",
             OutputDevice => "Устройство вывода",
             Gapless => "Без пауз между треками",
@@ -690,8 +708,7 @@ impl SettingId {
             DislikeSkips => "Пропускать сразу",
             DislikeSkipEverywhere => "Пропускать везде",
             DislikeInRecs => "Дизлайк в рекомендациях",
-            DislikedTracks => "Треки с «Не нравится»",
-            DislikedArtists => "Не рекомендовать исполнителей",
+            Marks => "Не нравится и скорость",
             HiddenMixes => "Скрытые миксы",
             GraphUse => "Похожее по слушателям",
             GraphServices => "Спрашивать YouTube Music и Deezer",
@@ -814,6 +831,14 @@ impl SettingId {
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
             PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
             TrackMenu => "Где стоит каждый пункт меню трека: в самом меню, в подменю «Файл» или скрыт. «Сбросить» возвращает меню как было.",
+            PlayerButton(v::PlayerButton::Sound) => "Кнопка скорости трека и эквалайзера на экране трека. Без неё окно звука открывается клавишей E и из меню трека.",
+            PlayerButton(v::PlayerButton::Shuffle) => "Кнопка перемешивания на экране трека и в нижней панели. Перемешивание работает и без неё.",
+            PlayerButton(v::PlayerButton::Repeat) => "Кнопка повтора на экране трека и в нижней панели.",
+            PlayerButton(v::PlayerButton::Like) => "Сердце на экране трека и в нижней панели. Ctrl+L и меню трека работают и без него.",
+            PlayerButton(v::PlayerButton::AddToPlaylist) => "Кнопка «В плейлист…» на экране трека. Это же есть в меню трека.",
+            PlayerButton(v::PlayerButton::Queue) => "Кнопка очереди на экране трека и в нижней панели. Очередь открывается и клавишей Q.",
+            PlayerButton(v::PlayerButton::Lyrics) => "Кнопка текста песни на экране трека и в нижней панели. Текст открывается и клавишей L.",
+            NavRoot => "«Главная» и «Библиотека» в боковой панели открывают начало раздела. Выключи — откроется страница раздела, на которой ты был.",
             NpMotion => "Как экран трека открывается из плеера внизу и закрывается обратно.",
             ReducedMotion => "Убирает подпрыгивания, вращения и волны во всём приложении.",
             Tooltips => "Короткие подсказки, когда задерживаешь курсор на кнопке.",
@@ -842,7 +867,10 @@ impl SettingId {
             LyricsStreamKeep => "Что «Сохранить текст» кладёт в папку исполнителя в библиотеке для песни без файла.",
             LyricsModels => "Модели, которыми плеер слушает голос и ставит строки и слова. Хранятся рядом с библиотекой; для песни скачиваются только нужные.",
             OutputDevice => "Через что играет звук: колонки, наушники и т. д. Переключается без паузы.",
-            KeepShuffle => "Новый альбом, плейлист, микс, радио или поиск играет вперемешку, если перемешивание было включено. Выключи — новый список сам выключает перемешивание и играет по порядку, а «Перемешать» включает его.",
+            ListShuffle(v::ListKind::Mix) => "Как играет микс главной, «Микс дня», смесь профилей и «Слушать микс» исполнителя. «Перемешать» всегда перемешивает.",
+            ListShuffle(v::ListKind::OwnPlaylist) => "Как играют плейлисты, сделанные здесь, и «Любимые». «Перемешать» всегда перемешивает.",
+            ListShuffle(v::ListKind::Album) => "Как играет альбом — из библиотеки или из сервиса. «Перемешать» всегда перемешивает.",
+            ListShuffle(v::ListKind::ReadyPlaylist) => "Как играют плейлисты сервисов: открытые там, подключённые или перенесённые оттуда. «Перемешать» всегда перемешивает.",
             ShuffleRadio => "При включённом перемешивании радио, автовоспроизведение и дейлист тоже играют вперемешку. Выключи — они идут в своём порядке.",
             Gapless => "Треки альбома идут друг за другом без тишины, как на диске.",
             Crossfade => "Конец трека плавно затихает, пока начинается следующий. 0 — без кроссфейда.",
@@ -941,8 +969,7 @@ impl SettingId {
             DislikeSkips => "Трек, которому поставили «Не нравится», сразу пропускается.",
             DislikeSkipEverywhere => "Треки с «Не нравится» и исполнители, которых не рекомендовать, пропускаются и в твоих альбомах и плейлистах. Выключено — только в миксах, радио и автовоспроизведении; трек, выбранный тобой, играет всегда.",
             DislikeInRecs => "«Не нравится» чуть опускает и самые похожие по звуку треки. Выключено — уходит только сам трек. Исполнителя дизлайк не трогает.",
-            DislikedTracks => "Треки с «Не нравится». «Снять» возвращает трек в рекомендации.",
-            DislikedArtists => "Исполнители, которых не рекомендовать: их нет в миксах, радио и новом. «Снять» возвращает.",
+            Marks => "Треки с «Не нравится», исполнители, которых не рекомендовать, и треки со своей скоростью. Там же их можно снять или сбросить.",
             HiddenMixes => "Миксы, убранные с главной через ⋮ → «Не предлагать этот микс». «Вернуть» снова показывает микс.",
             GraphUse => "Радио, миксы и новое учитывают, что другие люди слушают вместе: радио YouTube Music, похожих исполнителей Deezer, ListenBrainz и Last.fm. Так рекомендации работают и без истории, по одним твоим файлам. Выключи — остаются звук, твоя история и тип песни.",
             GraphServices => "Понемногу и в фоне спрашивать у YouTube Music радио твоих треков, а у YouTube Music и Deezer — похожих исполнителей. Ответы хранятся у тебя и работают без сети.",
@@ -970,7 +997,6 @@ impl SettingId {
                 c!("Максимум", "Случайные фигуры, кольцо, свечение под звук и фигуры на фоне."),
             ],
             Self::Preset(Area::Sources) => &[
-                c!("Законное", "Только Bandcamp и Internet Archive."),
                 c!("Обычно", "Всё, кроме Soulseek и Squidify."),
                 c!("Всё", "Все источники."),
             ],
@@ -1183,6 +1209,11 @@ impl SettingId {
                 c!("Спрашивать", "Явный ненастоящий FLAC (MP3 внутри, резкий срез) ждёт в «Подтверди»: можно превратить его в MP3 320 (или V0, если исходник был слабее) — звук тот же, места меньше — или оставить. Теги, обложка и текст остаются, FLAC уходит в Корзину на 30 дней. Нужен ffmpeg."),
                 c!("Менять на MP3 сам", "Явный ненастоящий FLAC сразу становится MP3, без вопроса. FLAC 30 дней лежит в Корзине."),
             ],
+            Self::ListShuffle(_) => &[
+                c!("Вперемешку", "Новый список играет вперемешку: перемешивание включается."),
+                c!("По порядку", "Новый список играет по порядку: перемешивание выключается."),
+                c!("По кнопке", "Как стоит кнопка перемешивания в плеере."),
+            ],
             Self::OpusBitrate => &[
                 c!("128", "Файлы поменьше; на слух почти как оригинал."),
                 c!("160", "Хороший звук при разумном размере файлов."),
@@ -1276,6 +1307,7 @@ impl SettingId {
             Self::RadioNoRepeat => NO_REPEAT.iter().position(|h| *h >= p.radio_no_repeat_hours).unwrap_or(NO_REPEAT.len() - 1),
             Self::RadioExplore => v::RadioExplore::ALL.iter().position(|e| *e == p.radio_explore).unwrap_or(1),
             Self::RadioUnheard => v::RadioUnheard::ALL.iter().position(|u| *u == p.radio_unheard).unwrap_or(0),
+            Self::ListShuffle(kind) => v::ListShuffle::ALL.iter().position(|r| *r == p.list_shuffle.of(kind)).unwrap_or(2),
             _ => 0,
         }
     }
@@ -1369,6 +1401,7 @@ impl SettingId {
             Self::RadioNoRepeat => p.radio_no_repeat_hours = NO_REPEAT[i.min(NO_REPEAT.len() - 1)],
             Self::RadioExplore => p.radio_explore = v::RadioExplore::ALL[i.min(v::RadioExplore::ALL.len() - 1)],
             Self::RadioUnheard => p.radio_unheard = v::RadioUnheard::ALL[i.min(v::RadioUnheard::ALL.len() - 1)],
+            Self::ListShuffle(kind) => p.list_shuffle.set(kind, v::ListShuffle::ALL[i.min(v::ListShuffle::ALL.len() - 1)]),
             _ => {}
         }
     }
@@ -1416,7 +1449,7 @@ impl SettingId {
     pub fn scene(self) -> Option<Scene> {
         use SettingId::*;
         match self {
-            NpMotion | Preset(v::presets::Area::Track) => Some(Scene::Track),
+            NpMotion | Preset(v::presets::Area::Track) | PlayerButton(_) => Some(Scene::Track),
             Preset(v::presets::Area::Lyrics) => Some(Scene::Lyrics),
             HomeSections => Some(Scene::Home),
             LikedAlbumsPlace => Some(Scene::Album),
@@ -1429,7 +1462,7 @@ impl SettingId {
     pub fn part(self) -> Option<Part> {
         use SettingId::*;
         Some(match self {
-            Theme | Contrast | Scheme | ReducedMotion | NpMotion | HomeSections => Part::Whole,
+            Theme | Contrast | Scheme | ReducedMotion | NpMotion | HomeSections | PlayerButton(_) => Part::Whole,
             Preset(v::presets::Area::Track | v::presets::Area::Lyrics) => Part::Whole,
             CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverSpinSpeed | CoverPulse | CoverPulseStrength
             | CoverPauseMorph | CoverClickPause | DblClickShape | TapWait => Part::Cover,
@@ -2863,6 +2896,10 @@ mod tests {
             (S::RadioSource, TAB_MUSIC),
             (S::NewShareBy(v::RadioKind::Mix), TAB_MUSIC),
             (S::DislikeButton, TAB_MUSIC),
+            (S::Marks, TAB_MUSIC),
+            (S::ListShuffle(v::ListKind::OwnPlaylist), TAB_MUSIC),
+            (S::PlayerButton(v::PlayerButton::Sound), TAB_LOOK),
+            (S::NavRoot, TAB_LOOK),
         ] {
             assert_eq!(id.tab(), tab, "{id:?}");
         }
@@ -2913,7 +2950,8 @@ mod tests {
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
-            S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto, S::FakeFlac,
+            S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto, S::FakeFlac, S::ListShuffle(v::ListKind::Mix),
+            S::ListShuffle(v::ListKind::Album),
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {

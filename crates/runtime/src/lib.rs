@@ -729,9 +729,13 @@ impl Worker {
                 .into_iter()
                 .filter_map(|(track, key)| Some((track, nikgob_view::SpeedVariant::from_key(&key)?)))
                 .collect();
+            // Their names, for «Не нравится и скорость».
+            let names: std::collections::HashMap<TrackId, nikgob_view::DislikedTrack> =
+                chosen.keys().filter_map(|t| speed_name(&config.library, *t).map(|n| (*t, n))).collect();
             let mut st = state.write();
             let enabled = st.prefs.speed_enabled;
             st.speeds = nikgob_view::TrackSpeeds { enabled, chosen: Arc::new(chosen) };
+            st.speed_names = Arc::new(names);
 
         }
         config.library.set_album_likes_tracks(config.prefs.album_like_tracks);
@@ -1113,6 +1117,7 @@ impl Worker {
                 self.seek(Duration::from_millis(p.max(0) as u64));
             }
             Command::SetTrackSpeed { track, variant } => self.set_track_speed(track, variant),
+            Command::ResetTrackSpeed(track) => self.reset_track_speed(track),
             Command::SetVolume(v) => {
                 let v = v.clamp(0.0, 1.0);
                 if v == self.volume && !self.muted {
@@ -1782,13 +1787,36 @@ impl Worker {
             return;
         }
         let mut chosen = (*self.state.read().speeds.chosen).clone();
+        let mut names = (*self.state.read().speed_names).clone();
         if key.is_some() {
             chosen.insert(track, variant);
+            if !names.contains_key(&track)
+                && let Some(n) = speed_name(&self.lib, track)
+            {
+                names.insert(track, n);
+            }
         } else {
             chosen.remove(&track);
+            names.remove(&track);
         }
-        self.publish(|s| s.speeds.chosen = Arc::new(chosen));
+        self.publish(|s| {
+            s.speeds.chosen = Arc::new(chosen);
+            s.speed_names = Arc::new(names);
+        });
         self.apply_speed(Some(track));
+    }
+
+    /// `Command::ResetTrackSpeed`: as recorded again, and «Отменить»
+    /// brings its speed back.
+    fn reset_track_speed(&mut self, track: TrackId) {
+        let Some(was) = self.state.read().speeds.chosen.get(&track).copied() else { return };
+        let title = self.state.read().speed_names.get(&track).map(|n| n.title.clone());
+        self.set_track_speed(track, nikgob_view::SpeedVariant::Normal);
+        let text = match title {
+            Some(t) => format!("«{t}» снова как записан"),
+            None => "Скорость сброшена".to_owned(),
+        };
+        self.toast(text, Some(("Отменить".into(), Command::SetTrackSpeed { track, variant: was })));
     }
 
     /// The speed of `changed` (or of everything: the settings) changed: the
@@ -3773,6 +3801,12 @@ enum Held {
 }
 
 /// Crossfade length from prefs; `None` means gapless back-to-back.
+/// The name of `track` as «Не нравится и скорость» lists it.
+fn speed_name(lib: &Library, track: TrackId) -> Option<nikgob_view::DislikedTrack> {
+    let t = lib.get_track(track).ok().flatten()?;
+    Some(nikgob_view::DislikedTrack { id: track, title: t.title, artist: t.artist_credit.display() })
+}
+
 fn crossfade(p: &nikgob_view::Prefs) -> Option<Duration> {
     (p.crossfade_s > 0.0).then(|| Duration::from_secs_f32(p.crossfade_s))
 }
