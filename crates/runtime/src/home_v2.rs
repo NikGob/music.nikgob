@@ -1567,6 +1567,7 @@ mod tests {
             wanted: local,
             wanted_local: local,
             whole: false,
+            left_out: false,
             view: None,
         }
     }

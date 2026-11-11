@@ -1439,7 +1439,12 @@ macro_rules! release_row_cols {
                     ",
             release_whole_expr!(),
             ",
-                    (SELECT s.view FROM release_selection s WHERE s.release_id = r.id AND s.deleted = 0)"
+                    (SELECT s.view FROM release_selection s WHERE s.release_id = r.id AND s.deleted = 0),
+                    EXISTS (SELECT 1 FROM track t WHERE t.release_id = r.id AND ",
+            excluded_expr!(),
+            " AND ",
+            page_row!(),
+            ")"
         )
     };
 }
@@ -1458,7 +1463,7 @@ const RELEASE_ROW_SELECT_ALL: &str = concat!(release_row_cols!(), " FROM release
 
 /// How many columns [`release_row`] reads: a query that adds its own puts
 /// them after.
-pub(crate) const RELEASE_ROW_COLS: usize = 18;
+pub(crate) const RELEASE_ROW_COLS: usize = 19;
 
 pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
     Ok(ReleaseRow {
@@ -1475,6 +1480,7 @@ pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
             "mine" => Some(false),
             _ => None,
         }),
+        left_out: row.get(18)?,
     })
 }
 

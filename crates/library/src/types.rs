@@ -139,6 +139,9 @@ pub struct ReleaseRow {
     /// The whole album is the user's: added whole or saved (its own like).
     #[serde(default)]
     pub whole: bool,
+    /// A row of its page was left out of the user's songs by hand.
+    #[serde(default)]
+    pub left_out: bool,
     /// What its page shows while only some of it is the user's:
     /// `Some(true)` the whole album, `Some(false)` the user's songs, `None`
     /// the setting ([`crate::Library::set_release_view`]).
@@ -151,7 +154,7 @@ impl ReleaseRow {
     /// user's songs of it.
     pub fn progress(&self) -> ReleaseProgress {
         ReleaseProgress::new(self.local_tracks, self.known_tracks, self.rows, self.release.total_tracks)
-            .mine(self.wanted, self.wanted_local, self.whole)
+            .mine(self.wanted, self.wanted_local, self.whole, self.left_out)
     }
 }
 
@@ -252,7 +255,7 @@ impl ReleaseListing {
         view: Option<bool>,
     ) -> Self {
         let local = self.tracks().filter(|t| t.has_local && wanted.contains(&t.id)).count() as u32;
-        self.progress = self.progress.mine(wanted.len() as u32, local, whole);
+        self.progress = self.progress.mine(wanted.len() as u32, local, whole, !excluded.is_empty());
         self.wanted = wanted;
         self.excluded = excluded;
         self.view = view;
@@ -341,6 +344,10 @@ pub struct ReleaseProgress {
     /// The whole album is the user's ([`ReleaseRow::whole`]).
     #[serde(default)]
     pub whole: bool,
+    /// A row of it was left out of the user's songs by hand
+    /// ([`ReleaseRow::left_out`]).
+    #[serde(default)]
+    pub left_out: bool,
 }
 
 impl ReleaseProgress {
@@ -354,12 +361,13 @@ impl ReleaseProgress {
             wanted: known,
             wanted_local: local.min(known),
             whole: false,
+            left_out: false,
         }
     }
 
     /// With the user's songs of the album counted.
-    pub(crate) fn mine(self, wanted: u32, wanted_local: u32, whole: bool) -> Self {
-        Self { wanted, wanted_local, whole, ..self }
+    pub(crate) fn mine(self, wanted: u32, wanted_local: u32, whole: bool, left_out: bool) -> Self {
+        Self { wanted, wanted_local, whole, left_out, ..self }
     }
 
     /// Lines of the page without a file: «1 нет».
@@ -370,9 +378,11 @@ impl ReleaseProgress {
     /// Only some of the album is the user's: some of its songs, not all
     /// of its places (a place without a row counts), not added whole.
     /// Its page shows and plays the user's songs, nothing of the rest is
-    /// owed; an album with none of them is a plain catalog page.
+    /// owed; an album with none of them is a plain catalog page, unless
+    /// the user left songs of it out by hand (then it stays theirs to
+    /// choose from, with none of its songs to play or download).
     pub fn partial(&self) -> bool {
-        !self.whole && self.wanted > 0 && self.wanted < self.total
+        !self.whole && (self.wanted > 0 || self.left_out) && self.wanted < self.total
     }
 
     /// The user's songs of the album without a file.

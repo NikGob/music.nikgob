@@ -166,7 +166,7 @@ impl AlbumHave {
     /// are the user's, or nothing.
     pub fn label(&self) -> Option<String> {
         if let Some(n) = self.mine {
-            Some(songs_yours(n))
+            (n > 0).then(|| songs_yours(n))
         } else if self.complete() {
             Some("у тебя".to_owned())
         } else if self.local > 0 {
@@ -182,7 +182,7 @@ impl AlbumHave {
     /// nothing (files only; "В библиотеке" is a chip of its own).
     pub fn files_label(&self) -> Option<String> {
         if let Some(n) = self.mine {
-            Some(songs_yours(n))
+            (n > 0).then(|| songs_yours(n))
         } else if self.complete() {
             Some("у тебя".to_owned())
         } else if self.local > 0 {
