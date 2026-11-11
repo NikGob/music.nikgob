@@ -36,7 +36,7 @@ const CLIP_NOISE: &[&str] = &[
 const VERSION_WORDS: &[&str] = &[
     "remix", "mix", "live", "acoustic", "instrumental", "inst", "karaoke", "cover", "edit", "tv",
     "size", "off", "vocal", "unplugged", "demo", "piano", "orchestra", "slowed", "sped", "nightcore",
-    "reprise", "extended", "ライブ", "カバー", "弾き語り",
+    "reprise", "extended", "ライブ", "カバー", "弾き語り", "カラオケ", "オフボーカル", "インスト",
 ];
 
 /// Words a clip's tail may consist of («Title Official Music Video»).
@@ -312,6 +312,45 @@ fn is_latin(c: char) -> bool {
     c.is_ascii_alphabetic() || matches!(c, '\u{C0}'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}')
 }
 
+/// A track title that names another version of a song: the title without
+/// that version and the version as written («SugaRiddle (Instrumental)» →
+/// «SugaRiddle», «Instrumental»; «Song - Off Vocal Ver.» → «Song», «Off
+/// Vocal Ver.»). The last bracket with a version word («remix», «inst»,
+/// «カラオケ»…) counts (a guest, «feat. X», is no version), else a « - »
+/// tail with one. `None` when the title names no version or nothing is
+/// left of it without one.
+/// A word inside another word is no mark («Instinct» is not «Inst»).
+pub fn version_split(title: &str) -> Option<(String, String)> {
+    let mut found: Option<(usize, usize, String)> = None;
+    let mut at = 0;
+    while let Some(off) = title[at..].find(OPEN) {
+        let open = at + off;
+        let ch = title[open..].chars().next().unwrap_or('(');
+        let body_at = open + ch.len_utf8();
+        let close = closing(ch);
+        let Some(c) = title[body_at..].find(close) else { break };
+        let body = &title[body_at..body_at + c];
+        let end = body_at + c + close.len_utf8();
+        if !is_feat(body) && is_version(body) {
+            found = Some((open, end, squash(body)));
+        }
+        at = end;
+    }
+    if let Some((start, end, version)) = found {
+        let base = squash(&format!("{} {}", &title[..start], &title[end..]));
+        return (!fold(&base).is_empty()).then_some((base, version));
+    }
+    for sep in [" - ", " – ", " — "] {
+        if let Some(i) = title.rfind(sep) {
+            let (base, tail) = (squash(&title[..i]), squash(&title[i + sep.len()..]));
+            if is_version(&tail) && !fold(&base).is_empty() {
+                return Some((base, tail));
+            }
+        }
+    }
+    None
+}
+
 /// The « - » parts of a title, without empty ones.
 fn dash_parts(title: &str) -> Vec<String> {
     let mut parts = vec![squash(title)];
@@ -350,6 +389,21 @@ pub fn same_dual_title<K: PartialEq>(a: &str, b: &str, key: impl Fn(&str) -> K) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_version_of_a_song_is_told_by_its_bracket_or_tail() {
+        let split = version_split;
+        assert_eq!(split("SugaRiddle (Instrumental)"), Some(("SugaRiddle".into(), "Instrumental".into())));
+        assert_eq!(split("Song - Off Vocal Ver."), Some(("Song".into(), "Off Vocal Ver.".into())));
+        assert_eq!(split("夏の歌（カラオケ）"), Some(("夏の歌".into(), "カラオケ".into())));
+        assert_eq!(split("Light of Hope [Inst.]"), Some(("Light of Hope".into(), "Inst.".into())));
+        assert_eq!(split("Sunflower (feat. X) (Remix)"), Some(("Sunflower (feat. X)".into(), "Remix".into())));
+        assert_eq!(split("Sunflower (feat. X)"), None);
+        assert_eq!(split("Song (From the Movie)"), None);
+        assert_eq!(split("Instinct"), None);
+        assert_eq!(split("Instinct (Remastered 2011)"), None);
+        assert_eq!(split("(Instrumental)"), None);
+    }
 
     #[test]
     fn clip_titles_lose_what_clips_add() {
