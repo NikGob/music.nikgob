@@ -78,7 +78,8 @@ mod tests {
     /// One frame at `t` with `events`: what it sent and the zoom after it.
     fn frame(ctx: &Context, prefs: &Prefs, events: Vec<Event>, t: f64) -> (Vec<Command>, f32) {
         let mut out = Vec::new();
-        let _ = ctx.run_ui(RawInput { time: Some(t), events, ..Default::default() }, |ui| apply(ui.ctx(), prefs, &mut out));
+        let mut frame = ctx.run_ui(RawInput { time: Some(t), events, ..Default::default() }, |ui| apply(ui.ctx(), prefs, &mut out));
+        frame.textures_delta.clear();
         (out, ctx.zoom_factor())
     }
 
@@ -153,11 +154,12 @@ mod tests {
         let mut run = |events: Vec<Event>, t: f64| {
             let mut out = Vec::new();
             let mut left = 0;
-            let _ = ctx.run_ui(RawInput { time: Some(t), events, ..Default::default() }, |ui| {
+            let mut frame = ctx.run_ui(RawInput { time: Some(t), events, ..Default::default() }, |ui| {
                 apply(ui.ctx(), &prefs, &mut out);
                 left = ui.ctx().input(|i| i.events.iter().filter(|e| matches!(e, Event::Key { key: Key::Equals, .. })).count());
                 ui.add(egui::TextEdit::singleline(&mut text).id(Id::new("zoom-test-field"))).request_focus();
             });
+            frame.textures_delta.clear();
             (out, left)
         };
         run(Vec::new(), 0.0);
