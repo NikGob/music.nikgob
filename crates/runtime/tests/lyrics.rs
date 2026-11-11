@@ -113,7 +113,11 @@ fn setting_and_manual_pick_embed_tags_without_sidecars_or_duplicate_tracks() {
             library: lib.clone(),
             streams: Vec::new(),
             library_dir: cfg.library_dir.clone(),
-            prefs: Prefs::default(),
+            // With a prefs file the run builds its recommendations at once,
+            // and autoplay would queue the song again after the other one
+            // (the library has only these two): a file queued next is
+            // written only once it is not.
+            prefs: Prefs { autoplay: false, ..Prefs::default() },
             prefs_path: Some(prefs_path.clone()),
             settings_path: None,
             import: Some(ImportSetup {
