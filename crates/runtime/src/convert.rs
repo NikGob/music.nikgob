@@ -28,8 +28,12 @@ pub struct Resolver {
     /// Palette seeds of every release, read in one query on the first cover
     /// miss and dropped with `covers`.
     seeds: Option<HashMap<ReleaseId, u32>>,
-    /// Artist photos on disk; loaded on first use.
-    photos: Option<HashMap<ArtistId, v::Cover>>,
+    /// Artist photos on disk, and whether the user chose each; loaded on
+    /// first use.
+    photos: Option<HashMap<ArtistId, (v::Cover, bool)>>,
+    /// Readable names of artists and their roles (`artist_latin`), loaded
+    /// on first use and dropped with `photos`.
+    names: Option<HashMap<ArtistId, (Option<String>, bool)>>,
     /// How many times the covers and the photos were invalidated, shared
     /// with every resolver forked from this one ([`Self::fork`]): one
     /// invalidated anywhere drops its caches before it reads them next.
@@ -163,6 +167,7 @@ impl Resolver {
             covers: HashMap::new(),
             seeds: None,
             photos: None,
+            names: None,
             stale: Arc::new(Stale::default()),
             seen: (0, 0),
             facts: FactsCache::default(),
@@ -178,6 +183,7 @@ impl Resolver {
             covers: HashMap::new(),
             seeds: None,
             photos: None,
+            names: None,
             stale: self.stale.clone(),
             seen: self.stale_now(),
             facts: self.facts.clone(),
@@ -207,6 +213,7 @@ impl Resolver {
         }
         if now.1 != self.seen.1 {
             self.photos = None;
+            self.names = None;
         }
         self.seen = now;
     }
@@ -272,22 +279,55 @@ impl Resolver {
     }
 
     /// The photo of an artist, if one was downloaded and is still on disk.
+    /// A role (an anime character) shows only a photo the user chose.
     pub fn photo(&mut self, id: ArtistId) -> Option<v::Cover> {
         self.sync();
         if self.photos.is_none() {
             let stored = self.lib.artist_photos().unwrap_or_default();
+            let locked = self.lib.locked_artist_photos().unwrap_or_default();
             let map = stored
                 .into_iter()
                 .map(|(id, p)| (id, self.path(&p)))
                 .filter(|(_, p)| p.exists())
-                .map(|(id, path)| (id, v::Cover { path, seed: None, ambient: None }))
+                .map(|(id, path)| (id, (v::Cover { path, seed: None, ambient: None }, locked.contains(&id))))
                 .collect();
             self.photos = Some(map);
         }
-        self.photos.as_ref().and_then(|m| m.get(&id)).cloned()
+        let (cover, chosen) = self.photos.as_ref().and_then(|m| m.get(&id)).cloned()?;
+        (chosen || !self.is_role(id)).then_some(cover)
     }
 
-    /// Reload artist photos from the library on next use (in the forks too).
+    /// The artist is a role ([`nikgob_library::Library::mark_voice_roles`]).
+    fn is_role(&mut self, id: ArtistId) -> bool {
+        self.sync();
+        let names = self.names.get_or_insert_with(|| self.lib.artist_latin_names().unwrap_or_default());
+        names.get(&id).is_some_and(|(_, role)| *role)
+    }
+
+    /// What an artist's card shows: its photo, else a service's image —
+    /// never an automatic one for a role.
+    fn artist_image(&mut self, id: ArtistId, images: &[String]) -> Option<v::Cover> {
+        let photo = self.photo(id);
+        if photo.is_some() || self.is_role(id) {
+            return photo;
+        }
+        web_image(images)
+    }
+
+    /// The Latin name to show beside `name` (only a name in a foreign
+    /// script has one) and whether the artist is a role.
+    pub fn latin_name(&mut self, id: ArtistId, name: &str) -> (Option<String>, bool) {
+        self.sync();
+        let names = self.names.get_or_insert_with(|| self.lib.artist_latin_names().unwrap_or_default());
+        let Some((latin, role)) = names.get(&id) else { return (None, false) };
+        let shown = latin
+            .clone()
+            .filter(|l| nikgob_core::names::foreign_script(name) && nikgob_core::names::name_key(l) != nikgob_core::names::name_key(name));
+        (shown, *role)
+    }
+
+    /// Reload artist photos (and readable names) from the library on next
+    /// use (in the forks too).
     pub fn invalidate_photos(&mut self) {
         self.stale.photos.fetch_add(1, Ordering::AcqRel);
         self.sync();
@@ -425,12 +465,15 @@ impl Resolver {
     }
 
     pub fn artist(&mut self, a: &ArtistRow) -> v::ArtistCard {
+        let (latin, character) = self.latin_name(a.artist.id, &a.artist.name);
         v::ArtistCard {
             id: a.artist.id,
             name: a.artist.name.clone(),
-            image: self.photo(a.artist.id).or_else(|| web_image(&a.artist.images)),
+            image: self.artist_image(a.artist.id, &a.artist.images),
             liked: a.liked,
             track_count: a.local_track_count,
+            latin,
+            character,
         }
     }
 
@@ -566,13 +609,16 @@ impl Resolver {
                 _ => albums.push(card),
             }
         }
+        let (latin, character) = self.latin_name(a.id, &a.name);
         v::ArtistDetail {
             card: v::ArtistCard {
                 id: a.id,
                 name: a.name.clone(),
-                image: self.photo(a.id).or_else(|| web_image(&a.images)),
+                image: self.artist_image(a.id, &a.images),
                 liked,
                 track_count: 0,
+                latin,
+                character,
             },
             top_tracks: top.iter().map(|t| self.track(t)).collect(),
             albums,
@@ -987,6 +1033,30 @@ mod tests {
         let row = ArtistRow { artist: a, release_count: 0, local_track_count: 0, liked: false };
         let image = res.artist(&row).image.unwrap();
         assert_eq!(image.web_url(), Some("https://fake.invalid/kino.jpg"));
+    }
+
+    /// A role (an anime character) never shows an automatic photo or a
+    /// service's image, only one the user chose.
+    #[test]
+    fn a_role_shows_no_automatic_photo() {
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let a = lib.upsert_artist(&Artist::new("リコ")).unwrap();
+        let photo = dir.path().join("riko.jpg");
+        std::fs::write(&photo, [0xFF, 0xD8, 0xFF]).unwrap();
+        lib.set_artist_photo_from(a.id, Some(&photo.display().to_string()), "youtube").unwrap();
+        lib.set_stream_artist_image(a.id, "https://fake.invalid/riko.jpg").unwrap();
+        let row = || ArtistRow { artist: lib.get_artist(a.id).unwrap().unwrap(), release_count: 0, local_track_count: 0, liked: false };
+        let mut res = Resolver::new(lib.clone(), dir.path().to_owned());
+        assert!(res.artist(&row()).image.is_some(), "a person shows it");
+        let role = nikgob_library::LatinFound { character: true, ..nikgob_library::LatinFound::default() };
+        lib.set_artist_latin(a.id, &role).unwrap();
+        res.invalidate_photos();
+        let card = res.artist(&row());
+        assert!(card.character && card.image.is_none());
+        let mine = lib.set_custom_artist_photo(a.id, dir.path(), &[0xFF, 0xD8, 0xFF, 1]).unwrap();
+        res.invalidate_photos();
+        assert_eq!(res.artist(&row()).image.map(|c| c.path), Some(mine), "one the user chose");
     }
 
     /// The home's builder has a resolver of its own: a cover changed by an

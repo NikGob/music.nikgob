@@ -459,7 +459,12 @@ pub fn artist(
             a.card.image.as_ref(),
             Some(&a.card),
             |ui| {
-                ui.label(TypeRole::LabelLarge.style().rich("ИСПОЛНИТЕЛЬ", s.primary));
+                ui.label(TypeRole::LabelLarge.style().rich(if a.card.character { "ПЕРСОНАЖ" } else { "ИСПОЛНИТЕЛЬ" }, s.primary));
+                // The name in Latin letters, when its own is in a script
+                // the user may not read.
+                if let Some(latin) = &a.card.latin {
+                    ui.label(TypeRole::TitleMedium.style().rich(latin.as_str(), s.on_surface));
+                }
                 let n = (a.albums.len() + a.singles_eps.len()) as u64;
                 ui.label(TypeRole::TitleMedium.style().rich(
                     format!("{n} {} в библиотеке", common::plural(n, "релиз", "релиза", "релизов")),

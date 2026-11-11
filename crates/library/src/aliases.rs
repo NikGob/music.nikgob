@@ -33,6 +33,11 @@ use crate::util::credit_columns;
 /// `meta` key of [`Library::merge_artist_doubles`].
 pub(crate) const DOUBLES_KEY: &str = "artist_aliases_merged.v1";
 
+/// `artist_alias.source` of a name search finds the artist by but that
+/// never makes another credit of that spelling this artist: the readable
+/// Latin name of [`crate::latin`] (`Riko` may well be someone else).
+pub(crate) const READING: &str = "reading";
+
 /// Records `name` as another spelling of `artist` (nothing for its own name).
 pub(crate) fn add_alias(conn: &Connection, artist: &str, name: &str, source: &str) -> Result<()> {
     let key = name_key(name);
@@ -59,8 +64,8 @@ pub(crate) fn alias_of(conn: &Connection, name: &str) -> Result<Option<String>> 
     Ok(conn
         .query_row(
             "SELECT al.artist_id FROM artist_alias al JOIN artist a ON a.id = al.artist_id
-              WHERE al.key = ?1 ORDER BY a.seq LIMIT 1",
-            [key],
+              WHERE al.key = ?1 AND al.source <> ?2 ORDER BY a.seq LIMIT 1",
+            params![key, READING],
             |r| r.get(0),
         )
         .optional()?)
@@ -179,6 +184,9 @@ pub(crate) fn merge_artists_in(conn: &Connection, from: &str, into: &str, device
         conn.execute("UPDATE OR IGNORE artist_photo SET artist_id = ?2 WHERE artist_id = ?1", params![from, into])?;
     }
     conn.execute("DELETE FROM artist_photo WHERE artist_id = ?1", [from])?;
+    // Its readable name when `into` has none.
+    conn.execute("UPDATE OR IGNORE artist_latin SET artist_id = ?2 WHERE artist_id = ?1", params![from, into])?;
+    conn.execute("DELETE FROM artist_latin WHERE artist_id = ?1", [from])?;
     if into_images == "[]" && from_images != "[]" {
         conn.execute("UPDATE artist SET images = ?2 WHERE id = ?1", params![into, from_images])?;
     }
@@ -358,12 +366,18 @@ fn apart(conn: &Connection, a: &Who, b: &Who) -> Result<bool> {
     {
         return Ok(true);
     }
+    credited_together(conn, &a.id, &b.id)
+}
+
+/// The artists `a` and `b` are both named in the credit of one track or
+/// one album: two people.
+pub(crate) fn credited_together(conn: &Connection, a: &str, b: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM track_artist x JOIN track_artist y ON y.track_id = x.track_id
                         WHERE x.artist_id = ?1 AND y.artist_id = ?2)
              OR EXISTS(SELECT 1 FROM release_artist x JOIN release_artist y ON y.release_id = x.release_id
                         WHERE x.artist_id = ?1 AND y.artist_id = ?2)",
-        params![a.id, b.id],
+        params![a, b],
         |r| r.get(0),
     )?)
 }
@@ -446,11 +460,14 @@ impl Library {
         self.write(|tx| merge_artists_in(tx, &from.to_string(), &into.to_string(), device.as_str(), now))
     }
 
-    /// Every alias: `(artist, name)`.
+    /// Every alias that names the artist wherever it is credited (a
+    /// role's Latin name and a romaji reading only find it in search):
+    /// `(artist, name)`.
     pub fn artist_aliases(&self) -> Result<Vec<(ArtistId, String)>> {
         self.read(|c| {
-            let mut stmt = c.prepare_cached("SELECT artist_id, name FROM artist_alias ORDER BY artist_id, name")?;
-            let rows = stmt.query_map([], |r| Ok((crate::util::get_id(r, 0)?, r.get(1)?)))?;
+            let mut stmt =
+                c.prepare_cached("SELECT artist_id, name FROM artist_alias WHERE source <> ?1 ORDER BY artist_id, name")?;
+            let rows = stmt.query_map([READING], |r| Ok((crate::util::get_id(r, 0)?, r.get(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }

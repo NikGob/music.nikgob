@@ -42,9 +42,17 @@ impl Library {
 
     /// The artist's photo is to be looked up: never tried, a miss older than
     /// `retry_before`, or an unverified one older than `unverified_before`
-    /// (see [`Library::artists_needing_photo`]).
+    /// (see [`Library::artists_needing_photo`]). Never for a role.
     pub fn artist_photo_due(&self, artist: ArtistId, retry_before: UnixMs, unverified_before: UnixMs) -> Result<bool> {
         self.read(|c| {
+            let role: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM artist_latin WHERE artist_id = ?1 AND character = 1)",
+                [artist.to_string()],
+                |r| r.get(0),
+            )?;
+            if role {
+                return Ok(false);
+            }
             let row = c
                 .query_row(
                     "SELECT path IS NULL AND photo_locked = 0, fetched_at, source = ?2 FROM artist_photo WHERE artist_id = ?1",
@@ -71,16 +79,33 @@ impl Library {
         })
     }
 
+    /// The artists whose photo the user chose ([`Library::set_custom_artist_photo`]):
+    /// the only photo a role shows.
+    pub fn locked_artist_photos(&self) -> Result<std::collections::HashSet<ArtistId>> {
+        self.read(|c| {
+            let mut stmt =
+                c.prepare_cached("SELECT artist_id FROM artist_photo WHERE path IS NOT NULL AND photo_locked = 1")?;
+            let rows = stmt.query_map([], |r| get_id::<ArtistId>(r, 0))?;
+            Ok(rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?)
+        })
+    }
+
     /// Records the photo of an artist; `None` records "looked up, none found".
     /// A photo the user locked is never touched (see [`Library::set_custom_artist_photo`]).
     pub fn set_artist_photo(&self, artist: ArtistId, path: Option<&str>) -> Result<()> {
+        self.set_artist_photo_from(artist, path, "deezer")
+    }
+
+    /// [`Library::set_artist_photo`] of a photo from `source` (`deezer`,
+    /// `youtube`, `spotify`, `wikimedia`).
+    pub fn set_artist_photo_from(&self, artist: ArtistId, path: Option<&str>, source: &str) -> Result<()> {
         self.write(|tx| {
             tx.execute(
-                "INSERT INTO artist_photo(artist_id, path, fetched_at) VALUES (?1, ?2, ?3)
+                "INSERT INTO artist_photo(artist_id, path, source, fetched_at) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(artist_id) DO UPDATE SET path = excluded.path,
-                    source = 'deezer', fetched_at = excluded.fetched_at
+                    source = excluded.source, fetched_at = excluded.fetched_at
                  WHERE photo_locked = 0",
-                params![artist.to_string(), path, now_ms()],
+                params![artist.to_string(), path, source, now_ms()],
             )?;
             Ok(())
         })
@@ -193,7 +218,8 @@ impl Library {
     /// no photo: never tried, a miss older than `retry_before`, or an
     /// unverified one older than `unverified_before` (unix ms). Never-tried
     /// first, artists with files first, most tracks first. A compilation's
-    /// «Various Artists» is nobody and has no photo to look up.
+    /// «Various Artists» is nobody and has no photo to look up, a role (an
+    /// anime character, [`Library::mark_voice_roles`]) no photo of its own.
     pub fn artists_needing_photo(
         &self,
         retry_before: UnixMs,
@@ -207,6 +233,7 @@ impl Library {
                                  WHERE ta.artist_id = a.id
                                    AND (t.has_local = 1 OR (t.in_library = 1 AND t.deleted_at IS NULL)))
                     AND NOT various_artists(a.name)
+                    AND NOT EXISTS (SELECT 1 FROM artist_latin l WHERE l.artist_id = a.id AND l.character = 1)
                     AND (p.artist_id IS NULL
                          OR (p.path IS NULL AND p.photo_locked = 0
                              AND (p.fetched_at < ?1 OR (p.source = ?4 AND p.fetched_at < ?3))))
@@ -299,6 +326,23 @@ mod tests {
         // A real miss after that waits its days, even for a new session.
         lib.set_artist_photo(a.id, None).unwrap();
         assert!(lib.artists_needing_photo(week_ago, now_ms() + 1000, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_role_gets_no_photo_lookups() {
+        let lib = Library::open_in_memory().unwrap();
+        let riko = artist_with_file(&lib, "リコ", true);
+        let person = artist_with_file(&lib, "富田美憂", true);
+        let found = crate::LatinFound { character: true, ..crate::LatinFound::default() };
+        lib.set_artist_latin(riko.id, &found).unwrap();
+        let week_ago = now_ms() - 7 * 86_400_000;
+        let due: Vec<ArtistId> = lib.artists_needing_photo(week_ago, week_ago, 10).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(due, vec![person.id]);
+        assert!(!lib.artist_photo_due(riko.id, week_ago, week_ago).unwrap());
+        assert!(lib.artist_photo_due(person.id, week_ago, week_ago).unwrap());
+        // Another source is recorded as such.
+        lib.set_artist_photo_from(person.id, Some("p.jpg"), "wikimedia").unwrap();
+        assert_eq!(lib.artist_photo(person.id).unwrap().as_deref(), Some("p.jpg"));
     }
 
     #[test]

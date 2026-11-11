@@ -138,6 +138,10 @@ pub struct RateLimits {
     pub lastfm: Duration,
     /// Genius's public pages: a request a second.
     pub genius: Duration,
+    /// Wikidata and Wikimedia Commons (an artist's item and picture).
+    pub wikimedia: Duration,
+    /// Pictures on the services' CDNs (an artist's image).
+    pub web_images: Duration,
 }
 
 impl Default for RateLimits {
@@ -159,6 +163,8 @@ impl Default for RateLimits {
             listenbrainz: Duration::from_millis(1000),
             lastfm: Duration::from_millis(1000),
             genius: Duration::from_millis(1000),
+            wikimedia: Duration::from_millis(500),
+            web_images: Duration::from_millis(200),
         }
     }
 }
@@ -179,6 +185,8 @@ impl RateLimits {
             listenbrainz: Duration::ZERO,
             lastfm: Duration::ZERO,
             genius: Duration::ZERO,
+            wikimedia: Duration::ZERO,
+            web_images: Duration::ZERO,
         }
     }
 }
@@ -224,6 +232,8 @@ pub(crate) enum Service {
     ListenBrainz,
     LastFm,
     Genius,
+    Wikimedia,
+    WebImages,
 }
 
 #[derive(Debug)]
@@ -241,6 +251,8 @@ struct Limiters {
     listenbrainz: RateLimiter,
     lastfm: RateLimiter,
     genius: RateLimiter,
+    wikimedia: RateLimiter,
+    web_images: RateLimiter,
 }
 
 impl Limiters {
@@ -259,6 +271,8 @@ impl Limiters {
             listenbrainz: RateLimiter::new(l.listenbrainz),
             lastfm: RateLimiter::new(l.lastfm),
             genius: RateLimiter::new(l.genius),
+            wikimedia: RateLimiter::new(l.wikimedia),
+            web_images: RateLimiter::new(l.web_images),
         }
     }
 
@@ -277,6 +291,8 @@ impl Limiters {
             Service::ListenBrainz => &self.listenbrainz,
             Service::LastFm => &self.lastfm,
             Service::Genius => &self.genius,
+            Service::Wikimedia => &self.wikimedia,
+            Service::WebImages => &self.web_images,
         }
     }
 }

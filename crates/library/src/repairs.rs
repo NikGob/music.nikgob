@@ -150,6 +150,7 @@ pub(crate) fn drop_orphan_artist_in(conn: &Connection, artist: &str) -> Result<b
     conn.execute("DELETE FROM artist_photo WHERE artist_id = ?1", [artist])?;
     conn.execute("DELETE FROM external_id WHERE kind = 'artist' AND local_id = ?1", [artist])?;
     conn.execute("DELETE FROM artist_alias WHERE artist_id = ?1", [artist])?;
+    conn.execute("DELETE FROM artist_latin WHERE artist_id = ?1", [artist])?;
     conn.execute("DELETE FROM meta WHERE key = ?1", [format!("cache.discography.{artist}")])?;
     conn.execute("DELETE FROM artist WHERE id = ?1", [artist])?;
     note!("library: artist «{name}» {artist} has nothing left, removed");

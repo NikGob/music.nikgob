@@ -224,7 +224,7 @@ fn artist_for(conn: &Connection, a: &ArtistRef) -> Result<(ArtistId, String)> {
     let own = |id: &str| -> Result<String> {
         let name: Option<String> = conn.query_row("SELECT name FROM artist WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         let aliased: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM artist_alias WHERE artist_id = ?1 AND key = ?2)",
+            "SELECT EXISTS(SELECT 1 FROM artist_alias WHERE artist_id = ?1 AND key = ?2 AND source <> 'reading')",
             params![id, nikgob_core::names::name_key(&a.name)],
             |r| r.get(0),
         )?;

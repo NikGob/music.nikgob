@@ -815,6 +815,28 @@ pub fn artist_tracks(a: &ArtistCard) -> String {
     }
 }
 
+/// The line under an artist's name: its Latin name when its own is in a
+/// script the user may not read, then «12 треков» in the library
+/// («Ayako Saso · 12 треков»); empty when it has neither.
+pub fn artist_caption(a: &ArtistCard) -> String {
+    let tracks = artist_tracks(a);
+    match &a.latin {
+        Some(l) if tracks.is_empty() => l.clone(),
+        Some(l) => format!("{l} · {tracks}"),
+        None => tracks,
+    }
+}
+
+/// What an artist is on a tile and in a search's top result, with its
+/// Latin name: «Исполнитель · Ayako Saso», a role «Персонаж · Riko».
+pub fn artist_kind(a: &ArtistCard) -> String {
+    let kind = if a.character { "Персонаж" } else { "Исполнитель" };
+    match &a.latin {
+        Some(l) => format!("{kind} · {l}"),
+        None => kind.to_owned(),
+    }
+}
+
 /// "Boards of Canada" → "BC": first letters of the first and last words,
 /// skipping lowercase particles (of, the, и) when there are capitalised ones.
 pub fn initials(name: &str) -> String {
@@ -888,8 +910,8 @@ pub fn artist_avatar(
 ) -> Option<Route> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    // In the library the name has the track count under it.
-    let caption = artist_tracks(a);
+    // Under the name: its Latin name, and in the library the track count.
+    let caption = artist_caption(a);
     let text_h = if caption.is_empty() { 28.0 } else { 48.0 };
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size + text_h), Sense::click());
     // A row holds every artist of the library: the ones scrolled out of
@@ -965,10 +987,10 @@ pub fn artist_avatar(
     (resp.clicked() && !play && !more_clicked).then_some(Route::Artist(a.id)).or(menu)
 }
 
-/// How tall [`artist_avatar`] is for `a` at `size` (the name, and in the
-/// library the track count under it).
+/// How tall [`artist_avatar`] is for `a` at `size` (the name, and the
+/// line under it when it has one: [`artist_caption`]).
 pub fn artist_avatar_height(a: &ArtistCard, size: f32) -> f32 {
-    size + if a.track_count == 0 { 28.0 } else { 48.0 }
+    size + if artist_caption(a).is_empty() { 28.0 } else { 48.0 }
 }
 
 /// Where a round or square cover's ⋮ stands: inside its top right.
@@ -2114,6 +2136,8 @@ mod menu_tests {
             image: None,
             liked: false,
             track_count: 0,
+            latin: None,
+            character: false,
         };
         let marks = nikgob_view::DislikesView::default();
         let card = row_acts(&artist_rows(&a, false, &marks));

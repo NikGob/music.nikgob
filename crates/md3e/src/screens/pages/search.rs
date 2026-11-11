@@ -853,7 +853,7 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
     match top {
         TopResult::Artist(SearchArtist::Library(a)) => TopView {
             title: a.name.clone(),
-            line: "Исполнитель · в библиотеке".into(),
+            line: format!("{} · в библиотеке", widgets::artist_kind(a)),
             image: a.image.as_ref().map(|c| c.uri()),
             shape: MaterialShape::Circle,
             open: Some(Route::Artist(a.id)),

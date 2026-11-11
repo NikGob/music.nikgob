@@ -283,6 +283,49 @@ pub fn album_key(raw: &str) -> String {
     title_key(raw).base
 }
 
+/// Titles that many artists share and that prove nobody: too short, only
+/// digits, or a word like «Intro», «Love», «Best», «Remix», «Theme»
+/// (compared by their keys, so «Интро» and «INTRO» too).
+pub fn generic_title(key: &str) -> bool {
+    const GENERIC: &[&str] = &[
+        "intro", "outro", "interlude", "prologue", "epilogue", "opening", "ending", "overture", "finale",
+        "theme", "main theme", "love", "love song", "best", "the best", "best of", "greatest hits", "hits",
+        "remix", "remixes", "instrumental", "inst", "off vocal", "karaoke", "live", "demo", "untitled",
+        "bonus track", "single", "ep", "album", "home", "hello", "goodbye", "op", "ed", "tv size",
+        "original soundtrack", "soundtrack", "ost", "collection", "complete", "medley", "reprise",
+        "acoustic", "piano", "christmas", "silent night", "happy birthday",
+    ];
+    let letters = key.chars().filter(|c| c.is_alphanumeric()).count();
+    let cjk = key.chars().any(|c| c as u32 >= 0x2E80);
+    letters < if cjk { 2 } else { 4 }
+        || key.chars().all(|c| c.is_ascii_digit() || c == ' ')
+        || GENERIC.iter().any(|g| album_key(g) == key)
+}
+
+/// How many distinct titles of `ours` (album or track titles of the
+/// library's artist) one of `theirs` is (compared by their keys at a
+/// similarity of 0.9), generic titles ([`generic_title`]) not counted.
+/// Two or more are the proof that an artist found by name in a service is
+/// the library's; one is not (two artists may share «Best» or a
+/// compilation's title).
+pub fn titles_shared(ours: &[String], theirs: &[String]) -> usize {
+    let theirs: Vec<String> = theirs.iter().map(|t| album_key(t)).filter(|k| !generic_title(k)).collect();
+    let mut seen: Vec<String> = Vec::new();
+    for k in ours.iter().map(|t| album_key(t)) {
+        if generic_title(&k) || seen.contains(&k) {
+            continue;
+        }
+        if theirs.iter().any(|t| similarity(&k, t) >= 0.9) {
+            seen.push(k);
+        }
+    }
+    seen.len()
+}
+
+/// [`titles_shared`] enough to take an artist found by name for the
+/// library's.
+pub const SHARED_TITLES_PROOF: usize = 2;
+
 /// Core normalization on already lowercased text: no brackets handling.
 fn fold_text(s: &str) -> String {
     let mut latin = String::with_capacity(s.len() + 8);
@@ -545,6 +588,17 @@ mod tests {
         assert_eq!(artist_key("Дмитри\u{0438}\u{0306}"), artist_key("Дмитрий"));
         assert_eq!(title_key("Е\u{0308}лка").base, title_key("Ёлка").base);
         assert_eq!(artist_key("Bjo\u{0308}rk"), artist_key("Björk"));
+    }
+
+    #[test]
+    fn two_distinct_titles_that_are_not_generic_are_shared() {
+        let ours = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<String>>();
+        let theirs = ours(&["Группа крови", "Кукушка (Remastered)", "Intro", "Love", "Best"]);
+        assert_eq!(titles_shared(&ours(&["Группа крови", "Кукушка"]), &theirs), 2);
+        assert_eq!(titles_shared(&ours(&["Группа крови", "ГРУППА КРОВИ"]), &theirs), 1, "one title twice");
+        assert_eq!(titles_shared(&ours(&["Intro", "Love", "Best", "Группа крови"]), &theirs), 1, "generic titles prove nothing");
+        assert!(generic_title(&album_key("Интро")) && generic_title("12") && generic_title("a"));
+        assert!(!generic_title(&album_key("群青")) && !generic_title(&album_key("Кукушка")));
     }
 
     #[test]

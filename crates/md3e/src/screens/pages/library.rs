@@ -899,9 +899,9 @@ fn playlist_row(ui: &mut Ui, p: &PlaylistCard, pages: &mut PageState, out: &mut 
 /// List view: an artist row (the avatar as in the grid, ▶ over it).
 fn artist_row(ui: &mut Ui, a: &ArtistCard, out: &mut Vec<Command>) -> Option<Route> {
     let mut item = ListItem::new(&a.name).leading(widgets::artist_leading(ui, a)).hover_play(true);
-    let tracks = widgets::artist_tracks(a);
-    if !tracks.is_empty() {
-        item = item.supporting(tracks);
+    let caption = widgets::artist_caption(a);
+    if !caption.is_empty() {
+        item = item.supporting(caption);
     }
     let o = item.id_salt(("ar-row", a.id)).show(ui);
     widgets::artist_menu(&o.response, a, out);

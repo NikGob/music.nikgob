@@ -304,6 +304,13 @@ pub struct ArtistCard {
     /// Their tracks in the library («12 треков» under the avatar); 0 when
     /// not counted.
     pub track_count: u32,
+    /// Its name in Latin letters when its own is in a script the user may
+    /// not read («Ayako Saso» for 佐宗綾子): shown beside the name.
+    #[serde(default)]
+    pub latin: Option<String>,
+    /// A role (an anime character a voice actor sings as), not a person.
+    #[serde(default)]
+    pub character: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
