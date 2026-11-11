@@ -814,12 +814,13 @@ mod tests {
         let t = full(true);
         let acts_on = |route: Option<Route>| {
             let mut acts = Vec::new();
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
                 if let Some(r) = &route {
                     set_here(ui.ctx(), Here::of(r));
                 }
                 acts = row_acts(&Chrome::player_rows(ui.ctx(), &t, &state, &[], true, false));
             });
+            out.textures_delta.clear();
             acts
         };
         let album = PlayerAct::Track(A::Album);

@@ -2134,12 +2134,13 @@ mod speed_tests {
         let album = ReleaseId::new();
         let frame = |set: bool| {
             let mut seen = Here::default();
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
                 if set {
                     set_here(ui.ctx(), Here::of(&Route::Release(album)));
                 }
                 seen = here(ui.ctx());
             });
+            out.textures_delta.clear();
             seen
         };
         assert_eq!(frame(true).album, Some(album));
