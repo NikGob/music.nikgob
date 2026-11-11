@@ -376,9 +376,14 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
     };
 
     // The cards, cut at the grid's edges (a little room above and below
-    // for what a card paints around itself).
+    // for what a card paints around itself). Sideways the row's own bleed
+    // may pass the page's clip, which ends at the grid: a highlight that
+    // stands out of its card is whole at both ends of the row.
     let mut child = ui.new_child(UiBuilder::new().max_rect(view).id_salt(("home-row-ui", row.name)));
-    child.set_clip_rect(view.expand2(vec2(row.bleed, 8.0)).intersect(ui.clip_rect()));
+    let outer = ui.clip_rect();
+    let wide = view.expand2(vec2(row.bleed, 8.0));
+    let clip = Rect::from_x_y_ranges(wide.x_range(), wide.y_range().intersection(outer.y_range()));
+    child.set_clip_rect(clip.intersect(ui.ctx().content_rect()));
     for i in 0..row.n {
         let cell = Rect::from_min_size(pos2(grid.left + i as f32 * pitch - shown, row.top), vec2(card_w, row.card_h));
         if cell.right() <= view.left() || cell.left() >= view.right() {
