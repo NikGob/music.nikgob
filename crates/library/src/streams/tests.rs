@@ -1851,3 +1851,25 @@ fn versions_clips_and_other_artists_never_merge() {
         assert!(lib.get_track(t).unwrap().is_some(), "{t} stays");
     }
 }
+
+#[test]
+fn the_active_source_follows_the_kind_priority() {
+    // The active source (the track's «стрим · …» label) is ranked the way
+    // playback ranks sources: YouTube > SoundCloud > Deezer.
+    let lib = lib();
+    let id = lib
+        .upsert_stream_track(&find(&FakeService::youtube(), "yt-gruppa-1"))
+        .unwrap();
+    let youtube = lib.active_source(id).unwrap().unwrap();
+    assert_eq!(youtube.kind, SourceKind::Youtube);
+    for (kind, locator) in [(SourceKind::Deezer, "dz-1"), (SourceKind::Soundcloud, "sc-1")] {
+        let mut s = nikgob_core::model::Source::new(id, kind, locator, Codec::Flac);
+        s.quality_score = 1_000;
+        lib.add_source(&s).unwrap();
+    }
+    lib.set_active_source(id).unwrap();
+    assert_eq!(lib.active_source(id).unwrap().unwrap().kind, SourceKind::Youtube);
+    lib.set_source_available(youtube.id, false).unwrap();
+    lib.set_active_source(id).unwrap();
+    assert_eq!(lib.active_source(id).unwrap().unwrap().kind, SourceKind::Soundcloud);
+}

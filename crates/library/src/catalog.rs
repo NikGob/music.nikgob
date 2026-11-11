@@ -213,15 +213,17 @@ pub(crate) fn write_credit_links(
 /// Picks the best usable source of the track and records it as active, both on
 /// the source rows and in the track's denormalised columns.
 ///
-/// Usable = not trashed and `available`. Order: local file, then Spotify, then
-/// YouTube; within a kind the higher `quality_score` wins, then the older one.
+/// Usable = not trashed and `available`. Order: [`nikgob_core::model::SourceKind::priority`]
+/// (local file, Spotify, YouTube, SoundCloud, Deezer); within a kind the
+/// higher `quality_score` wins, then the older one.
 pub(crate) fn refresh_active(conn: &Connection, track: TrackId) -> Result<Option<SourceId>> {
     let tid = track.to_string();
     let best: Option<(String, String, String, i64)> = conn
         .query_row(
             "SELECT id, kind, codec, quality_score FROM source
               WHERE track_id = ?1 AND trashed_at IS NULL AND available = 1
-              ORDER BY CASE kind WHEN 'local_file' THEN 0 WHEN 'spotify' THEN 1 ELSE 2 END,
+              ORDER BY CASE kind WHEN 'local_file' THEN 0 WHEN 'spotify' THEN 1 WHEN 'youtube' THEN 2
+                                 WHEN 'soundcloud' THEN 3 WHEN 'deezer' THEN 4 ELSE 5 END,
                        quality_score DESC, added_at ASC, id ASC
               LIMIT 1",
             [&tid],
