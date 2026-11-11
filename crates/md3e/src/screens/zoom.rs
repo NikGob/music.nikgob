@@ -34,13 +34,19 @@ pub fn apply(ctx: &Context, prefs: &Prefs, out: &mut Vec<Command>) {
     let saved = nikgob_view::ui_scale(prefs.ui_scale);
     let mut pending = ctx.data(|d| d.get_temp::<Pending>(id())).filter(|p| p.scale != saved && now - p.at < PENDING_FOR);
     let current = pending.map_or(saved, |p| p.scale);
-    let (up, down, reset) = ctx.input_mut(|i| {
-        (
-            i.count_and_consume_key(Modifiers::COMMAND, Key::Equals) + i.count_and_consume_key(Modifiers::COMMAND, Key::Plus),
-            i.count_and_consume_key(Modifiers::COMMAND, Key::Minus),
-            i.count_and_consume_key(Modifiers::COMMAND, Key::Num0),
-        )
-    });
+    // A text field being typed in keeps its keys (the scale stays as set).
+    let typing = ctx.egui_wants_keyboard_input();
+    let (up, down, reset) = if typing {
+        (0, 0, 0)
+    } else {
+        ctx.input_mut(|i| {
+            (
+                i.count_and_consume_key(Modifiers::COMMAND, Key::Equals) + i.count_and_consume_key(Modifiers::COMMAND, Key::Plus),
+                i.count_and_consume_key(Modifiers::COMMAND, Key::Minus),
+                i.count_and_consume_key(Modifiers::COMMAND, Key::Num0),
+            )
+        })
+    };
     if up + down + reset > 0 {
         let next = if reset > 0 { 1.0 } else { nikgob_view::ui_scale_step(current, up as i32 - down as i32) };
         if next != current {
@@ -130,5 +136,31 @@ mod tests {
         frame(&ctx, &prefs, Vec::new(), 0.6 + PENDING_FOR + 0.1);
         let (_, zoom) = frame(&ctx, &prefs, Vec::new(), 0.6 + PENDING_FOR + 0.2);
         assert_eq!(zoom, 0.8);
+    }
+
+    /// While a text field is typed in, the zoom keys are its own: the
+    /// scale stays and the key is left for the field.
+    #[test]
+    fn a_focused_text_field_keeps_the_keys() {
+        let ctx = Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        let prefs = Prefs::default();
+        let mut text = String::new();
+        let mut run = |events: Vec<Event>, t: f64| {
+            let mut out = Vec::new();
+            let mut left = 0;
+            let _ = ctx.run_ui(RawInput { time: Some(t), events, ..Default::default() }, |ui| {
+                apply(ui.ctx(), &prefs, &mut out);
+                left = ui.ctx().input(|i| i.events.iter().filter(|e| matches!(e, Event::Key { key: Key::Equals, .. })).count());
+                ui.add(egui::TextEdit::singleline(&mut text).id(Id::new("zoom-test-field"))).request_focus();
+            });
+            (out, left)
+        };
+        run(Vec::new(), 0.0);
+        let (out, left) = run(vec![press(Key::Equals)], 0.1);
+        assert!(scales(&out).is_empty(), "no scale change while typing");
+        assert_eq!(left, 1, "the key is left for the field");
     }
 }
