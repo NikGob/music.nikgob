@@ -1488,6 +1488,8 @@ impl Worker {
             Command::UndoWrongFile(track) => self.undo_wrong_file(track),
             Command::FindBetter(track) => self.find_better(track),
             Command::TrackInfo(track) => self.track_info(track),
+            Command::FindBetterAlbum(release) => self.find_better_album(release),
+            Command::UndoBetterAlbum(release) => self.undo_better_album(release),
             Command::FakeToMp3(track) => self.fake_to_mp3(track),
             Command::UndoFakeToMp3(track) => self.undo_fake_to_mp3(track),
             Command::RecordingApart(track) => self.recording_apart(track),

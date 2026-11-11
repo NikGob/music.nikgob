@@ -355,6 +355,40 @@ pub fn mp3_inside(codec: &Codec, check: &CheckSummary) -> bool {
     check.fake(codec) && plain_fake(codec, check)
 }
 
+/// A library file there is nothing better than: an Opus (any lossy copy)
+/// the import made from a lossless original it did not find fake (ranked
+/// as that original, [`score::CD_LOSSLESS`] and up), or a lossless file
+/// whose check found it genuine. `rank` is the file's `quality_score`,
+/// `check` its check (or the check of the original it was made from). A
+/// lossless file not checked yet may still be a fake: not this.
+pub fn nothing_better(codec: &Codec, rank: i32, check: Option<&CheckSummary>) -> bool {
+    if rank < score::CD_LOSSLESS {
+        return false;
+    }
+    if !codec.is_lossless() {
+        // Only the import's copy of a lossless original ranks this high.
+        return check.is_none_or(|c| c.verdict != Verdict::Transcoded);
+    }
+    check.is_some_and(|c| c.made_from.is_none() && c.verdict == Verdict::Genuine)
+}
+
+/// The one rule of «really better»: a copy of quality `offer` (a
+/// `quality_score`) is better than the library's file (`codec`, `rank`,
+/// `check`) only when the file is not one there is nothing better than
+/// ([`nothing_better`]) and the copy ranks above it. An MP3 gets a
+/// genuine lossless copy; a fake FLAC too; our Opus of a genuine FLAC and
+/// a genuine FLAC get nothing.
+pub fn really_better(codec: &Codec, rank: i32, check: Option<&CheckSummary>, offer: i32) -> bool {
+    !nothing_better(codec, rank, check) && offer > rank
+}
+
+/// A genuine CD-quality lossless copy would really be better than the
+/// file ([`really_better`]): what «Найти качество лучше» of an album
+/// looks for. A file ranked as lossless already is never one.
+pub fn can_get_better(codec: &Codec, rank: i32, check: Option<&CheckSummary>) -> bool {
+    really_better(codec, rank, check, score::CD_LOSSLESS)
+}
+
 /// A row's label ([`row_label`]) says what [`mp3_inside`] does: «FLAC из
 /// MP3 ~192», «FLAC из сжатого». For a list that has only the label.
 pub fn row_label_mp3_inside(label: &str) -> bool {
@@ -724,5 +758,52 @@ mod tests {
         let back = spectrum_from_blob(&spectrum_to_blob(&[-12.34, -110.0, 0.0]));
         assert_eq!(back, vec![-12.3, -110.0, 0.0]);
         assert!(downsample_db(&[], 10).is_empty());
+    }
+
+    /// «Really better» in one place: an MP3 gets a genuine lossless copy,
+    /// a fake FLAC too; our Opus of a genuine FLAC and a genuine FLAC get
+    /// nothing, whatever is offered.
+    #[test]
+    fn really_better_is_one_rule() {
+        let mp3_320 = quality_score(&Codec::Mp3, Some(320), None, None, false);
+        assert!(really_better(&Codec::Mp3, mp3_320, None, score::CD_LOSSLESS), "MP3 → genuine lossless");
+        assert!(really_better(&Codec::Mp3, 500, None, score::HI_RES_LOSSLESS));
+        assert!(!really_better(&Codec::Mp3, mp3_320, None, mp3_320), "the same is not better");
+        assert!(can_get_better(&Codec::Mp3, 500, None));
+
+        // Our Opus of a genuine FLAC: ranked as the FLAC, its check of it.
+        let genuine = check(Verdict::Genuine, 22_050.0, Some(Codec::Flac)).summary();
+        for (rank, check) in [(score::CD_LOSSLESS, Some(&genuine)), (score::HI_RES_LOSSLESS, Some(&genuine)), (score::CD_LOSSLESS, None)] {
+            assert!(nothing_better(&Codec::Opus, rank, check));
+            for offer in [score::MP3_320, score::CD_LOSSLESS, score::HI_RES_LOSSLESS, i32::MAX] {
+                assert!(!really_better(&Codec::Opus, rank, check, offer), "Opus of a FLAC → {offer}");
+            }
+            assert!(!can_get_better(&Codec::Opus, rank, check));
+        }
+        // An Opus at its own bitrate is a lossy file like any other.
+        assert!(really_better(&Codec::Opus, score::OPUS_160, None, score::CD_LOSSLESS));
+
+        // A fake FLAC (ranked as what it holds) → genuine lossless: better.
+        let fake = check(Verdict::Transcoded, 16_000.0, None).summary();
+        let fake_rank = fake_score(SoundOrigin::Lossy { kbps: 128 }, 16_000.0);
+        assert!(really_better(&Codec::Flac, fake_rank, Some(&fake), score::CD_LOSSLESS));
+        assert!(can_get_better(&Codec::Flac, fake_rank, Some(&fake)));
+        // A doubt (ranked as an MP3 320) still gets a genuine one.
+        let doubt = check(Verdict::Transcoded, 20_186.0, None).summary();
+        assert!(really_better(&Codec::Flac, score::MP3_320, Some(&doubt), score::CD_LOSSLESS));
+        // An MP3 made from a fake FLAC too.
+        let from_fake = check(Verdict::Transcoded, 16_000.0, Some(Codec::Flac)).summary();
+        assert!(really_better(&Codec::Mp3, fake_rank, Some(&from_fake), score::CD_LOSSLESS));
+
+        // A genuine FLAC: nothing, not even hi-res.
+        let clean = check(Verdict::Genuine, 22_050.0, None).summary();
+        assert!(nothing_better(&Codec::Flac, score::CD_LOSSLESS, Some(&clean)));
+        assert!(!really_better(&Codec::Flac, score::CD_LOSSLESS, Some(&clean), score::HI_RES_LOSSLESS));
+        assert!(!can_get_better(&Codec::Flac, score::CD_LOSSLESS, Some(&clean)));
+        // One not checked yet may be a fake: only a higher rank beats it.
+        assert!(!nothing_better(&Codec::Flac, score::CD_LOSSLESS, None));
+        assert!(really_better(&Codec::Flac, score::CD_LOSSLESS, None, score::HI_RES_LOSSLESS));
+        assert!(!really_better(&Codec::Flac, score::CD_LOSSLESS, None, score::CD_LOSSLESS));
+        assert!(!can_get_better(&Codec::Flac, score::CD_LOSSLESS, None));
     }
 }

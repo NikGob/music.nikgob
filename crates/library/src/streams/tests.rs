@@ -1851,3 +1851,19 @@ fn versions_clips_and_other_artists_never_merge() {
         assert!(lib.get_track(t).unwrap().is_some(), "{t} stays");
     }
 }
+
+/// «Скачать» on a stream track, then the import cancelled: its file came
+/// and was taken back. The track leaves the library again, no row of it
+/// is left there without a file.
+#[test]
+fn a_file_taken_back_takes_its_stream_track_out_of_the_library() {
+    let lib = lib();
+    let id = lib.upsert_stream_track(&sp(0)).unwrap();
+    assert_eq!(lib.track_in_library(id).unwrap(), Some(false));
+    let file = lib.add_source(&Source::new(id, SourceKind::LocalFile, "Music/Кино/01 Группа крови.flac", Codec::Flac)).unwrap();
+    assert_eq!(lib.track_in_library(id).unwrap(), Some(true), "a file brings it in");
+    lib.forget_source(file.id).unwrap();
+    assert_eq!(lib.track_in_library(id).unwrap(), Some(false), "out again with its file");
+    assert_eq!(listed(&lib), (0, 0, 0, 0));
+    assert_eq!(lib.active_source(id).unwrap().unwrap().kind, SourceKind::Spotify);
+}

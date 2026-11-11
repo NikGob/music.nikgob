@@ -679,6 +679,27 @@ impl Library {
         })
     }
 
+    /// Some track of the album plays a file of its own a genuine lossless
+    /// copy would really be better than: ranked below
+    /// [`score::CD_LOSSLESS`](nikgob_core::model::score::CD_LOSSLESS) (an
+    /// MP3, a fake FLAC, an Opus of a fake), and above audio saved from a
+    /// stream. Our Opus of a genuine FLAC ranks as the FLAC: never one
+    /// (see `nikgob_core::quality::can_get_better`).
+    pub fn release_can_get_better(&self, release: ReleaseId) -> Result<bool> {
+        self.read(|c| {
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM track t
+                   JOIN source s ON s.track_id = t.id AND s.is_active = 1
+                  WHERE t.release_id = ?1 AND t.deleted_at IS NULL AND s.kind = 'local_file'
+                    AND s.trashed_at IS NULL AND s.available = 1
+                    AND s.quality_score > {} AND s.quality_score < {})",
+                nikgob_core::model::score::SAVED_STREAM,
+                nikgob_core::model::score::CD_LOSSLESS
+            );
+            Ok(c.prepare_cached(&sql)?.query_row([release.to_string()], |r| r.get::<_, bool>(0))?)
+        })
+    }
+
     fn wishlist_where(
         &self,
         filter: &str,
@@ -1237,5 +1258,26 @@ mod tests {
         assert_eq!(all[0].scope, WishlistScope::Track);
         assert_eq!(all[0].origin, WishlistOrigin::Manual);
         assert_eq!(all[0].attempts, 0);
+    }
+
+    /// «Найти качество лучше» of an album is there while a file of it is
+    /// below lossless; a lossless file (or our Opus of one, ranked as it)
+    /// and audio saved from a stream are not.
+    #[test]
+    fn an_album_can_get_better_while_a_file_of_it_is_below_lossless() {
+        let lib = lib();
+        let (release, tracks) = album(&lib, "Сахарный", 3);
+        assert!(!lib.release_can_get_better(release).unwrap(), "no files");
+        file(&lib, tracks[0], score::CD_LOSSLESS);
+        file(&lib, tracks[1], score::HI_RES_LOSSLESS);
+        assert!(!lib.release_can_get_better(release).unwrap());
+        file(&lib, tracks[2], score::MP3_320);
+        assert!(lib.release_can_get_better(release).unwrap());
+        file(&lib, tracks[2], score::SAVED_STREAM);
+        assert!(!lib.release_can_get_better(release).unwrap(), "its item looks already");
+        file(&lib, tracks[2], score::FAKE_LOSSLESS);
+        assert!(lib.release_can_get_better(release).unwrap(), "a fake FLAC");
+        file(&lib, tracks[2], score::CD_LOSSLESS);
+        assert!(!lib.release_can_get_better(release).unwrap());
     }
 }

@@ -12,11 +12,13 @@
 //! goes to the library's Trash. Nothing better this time: the next search
 //! when the schedule says.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{
     ReleaseId, Source, TrackId, WishlistId, WishlistItem, WishlistOrigin, WishlistScope, WishlistStatus, score,
 };
+use nikgob_core::quality::CheckSummary;
 use nikgob_core::source::{Format, Offer};
 use nikgob_view::{self as v, UpgradeBar, UpgradeEvery};
 
@@ -211,6 +213,29 @@ pub(crate) fn upgrade_words(
     }
 }
 
+/// A library file as the rule of a better copy reads it
+/// ([`nikgob_core::quality::really_better`]).
+#[derive(Clone, Debug)]
+pub(crate) struct FileRank {
+    pub(crate) codec: nikgob_core::model::Codec,
+    pub(crate) rank: i32,
+    pub(crate) check: Option<CheckSummary>,
+}
+
+impl FileRank {
+    /// A copy of quality `offer` would really be better than this file.
+    pub(crate) fn beaten_by(&self, offer: i32) -> bool {
+        nikgob_core::quality::really_better(&self.codec, self.rank, self.check.as_ref(), offer)
+    }
+}
+
+/// An offer of quality `offer` counts for an item whose files are `ranks`
+/// (`None`: an item of any other kind, which takes it): it is really
+/// better than one of them at least.
+pub(crate) fn offer_counts(ranks: Option<&[FileRank]>, offer: i32) -> bool {
+    ranks.is_none_or(|files| files.iter().any(|f| f.beaten_by(offer)))
+}
+
 impl Worker {
     fn upgrade_prefs(&self) -> (UpgradeEvery, UpgradeBar, bool) {
         let p = &self.state.read().prefs;
@@ -236,9 +261,13 @@ impl Worker {
     }
 
     /// A found copy replaces the item's file only once the user says so
-    /// (always, for one asked for by hand).
+    /// (always, for one asked for by hand). An album asked for by hand
+    /// asks once its copy came, with each file it replaces
+    /// ([`super::album_better`]): its best offer downloads without a word.
     pub(super) fn upgrade_asks(&self, item: &WishlistItem) -> bool {
-        item.origin == WishlistOrigin::Upgrade && (item.better_than.is_some() || !self.upgrade_prefs().2)
+        item.origin == WishlistOrigin::Upgrade
+            && !super::album_better::hand_album(item)
+            && (item.better_than.is_some() || !self.upgrade_prefs().2)
     }
 
     /// The one place that says whether a track's file is looked for in
@@ -246,10 +275,70 @@ impl Worker {
     /// query leaves out `deleted_at` already); a song the user left out of
     /// a wished album is not either: that check belongs here, beside this
     /// one, so every path of the search (new items, an album's files, what
-    /// is good enough) goes by it.
-    fn upgrade_wants(&self, track: TrackId) -> bool {
+    /// is good enough) goes by it. A file there is nothing better than
+    /// (our Opus of a genuine FLAC, a genuine FLAC) is never looked for:
+    /// [`Self::nothing_better`], beside the offers' own rule
+    /// ([`FileRank::beaten_by`]).
+    pub(super) fn upgrade_wants(&self, track: TrackId) -> bool {
         // A song the user deleted from its album stays gone.
         self.lib.get_track(track).ok().flatten().is_some() && !self.lib.is_track_unwanted(track).unwrap_or(false)
+    }
+
+    /// The check of a library file as the rule of a better copy reads it:
+    /// only while it is of the file there now.
+    pub(super) fn file_check(&self, src: &Source) -> Option<CheckSummary> {
+        let check = self.lib.quality_check(src.id).ok().flatten()?;
+        let p = Path::new(&src.locator);
+        let path = if p.is_absolute() { p.to_owned() } else { self.res.root().join(p) };
+        crate::quality::check_fresh(&path, &check).then(|| check.summary())
+    }
+
+    /// There is nothing better than the file
+    /// ([`nikgob_core::quality::nothing_better`]).
+    pub(crate) fn nothing_better(&self, src: &Source) -> bool {
+        src.quality_score >= score::CD_LOSSLESS
+            && nikgob_core::quality::nothing_better(&src.codec, src.quality_score, self.file_check(src).as_ref())
+    }
+
+    /// What the item's files are as the rule of a better copy reads them
+    /// ([`FileRank`]); `None` for an item of any other kind.
+    pub(super) fn upgrade_ranks(&self, item: &WishlistItem) -> Option<Vec<FileRank>> {
+        (item.origin == WishlistOrigin::Upgrade).then(|| self.upgrade_files(item).iter().map(|s| self.file_rank(s)).collect())
+    }
+
+    /// A file as the rule of a better copy reads it.
+    pub(super) fn file_rank(&self, src: &Source) -> FileRank {
+        FileRank { codec: src.codec.clone(), rank: src.quality_score, check: self.file_check(src) }
+    }
+
+    /// Every file of the item is one there is nothing better than (none
+    /// is left to look for).
+    fn upgrade_settled(&self, item: &WishlistItem) -> bool {
+        let tracks: Vec<TrackId> = match item.scope {
+            WishlistScope::Track => item.track_id.into_iter().collect(),
+            WishlistScope::Album => self.album_tracks(item),
+        };
+        let files: Vec<Source> = tracks
+            .into_iter()
+            .filter_map(|t| self.lib.active_source(t).ok().flatten())
+            .filter(|s| s.kind.is_local() && s.available && s.trashed_at.is_none())
+            .collect();
+        !files.is_empty() && files.iter().all(|s| self.nothing_better(s))
+    }
+
+    /// The open «Качество лучше» items of `track` (not one that searches,
+    /// downloads or asks) go: its file needs nothing better.
+    fn upgrade_drop_track(&mut self, track: TrackId) {
+        for i in self.lib.wishlist_for_track(track).unwrap_or_default() {
+            let open = !matches!(
+                i.status,
+                WishlistStatus::Searching | WishlistStatus::Downloading | WishlistStatus::Confirm | WishlistStatus::Done
+            );
+            if i.origin == WishlistOrigin::Upgrade && i.scope == WishlistScope::Track && open {
+                log::info!("upgrade: {} needs nothing better, its item goes", i.title.as_deref().unwrap_or("?"));
+                self.upgrade_drop(i.id);
+            }
+        }
     }
 
     /// The tracks of an album item as a folder must have them to be its
@@ -407,7 +496,8 @@ impl Worker {
             // Good enough already (a download meanwhile, a lower bar): nothing
             // to look for.
             let line = self.upgrade_line(&item);
-            if !self.upgrade_files(&item).iter().any(|s| s.quality_score < line) {
+            let ranks = self.upgrade_ranks(&item).unwrap_or_default();
+            if !ranks.iter().any(|f| f.rank < line && f.beaten_by(line)) {
                 log::info!("upgrade: {} needs nothing better now", item.title.as_deref().unwrap_or("?"));
                 self.upgrade_drop(item.id);
                 continue;
@@ -426,7 +516,9 @@ impl Worker {
             .upgrade_candidates(bar.score(), CANDIDATES)
             .ok()?
             .into_iter()
-            .find(|(t, ..)| self.upgrade_wants(*t))?;
+            .find(|(t, ..)| {
+                self.upgrade_wants(*t) && !self.lib.active_source(*t).ok().flatten().is_some_and(|s| self.nothing_better(&s))
+            })?;
         let album: Option<ReleaseId> = release.filter(|r| {
             let below = self
                 .lib
@@ -435,7 +527,7 @@ impl Worker {
                 .iter()
                 .filter(|t| self.upgrade_wants(t.id))
                 .filter_map(|t| self.lib.active_source(t.id).ok().flatten())
-                .filter(|s| s.kind.is_local() && below_bar(s.quality_score, bar))
+                .filter(|s| s.kind.is_local() && below_bar(s.quality_score, bar) && !self.nothing_better(s))
                 .count();
             below >= ALBUM_FROM
         });
@@ -464,7 +556,7 @@ impl Worker {
 
     /// The item goes: it needs nothing any more, or the user turned the
     /// search off.
-    fn upgrade_drop(&mut self, id: WishlistId) {
+    pub(super) fn upgrade_drop(&mut self, id: WishlistId) {
         let _ = self.lib.delete_wishlist_item(id);
         self.upgrade_forget(id);
         self.wish_line_drop(id);
@@ -472,7 +564,7 @@ impl Worker {
     }
 
     /// What the pipeline kept of the item.
-    fn upgrade_forget(&mut self, id: WishlistId) {
+    pub(super) fn upgrade_forget(&mut self, id: WishlistId) {
         let w = &mut self.streaming.wish;
         w.cands.remove(&id);
         w.doubtful.remove(&id);
@@ -510,6 +602,20 @@ impl Worker {
     /// any other. Anything else (a download that failed, a source that
     /// kept saying no) keeps it asking before it replaces the file.
     pub(super) fn upgrade_none(&mut self, id: WishlistId, found_nothing: bool) {
+        // Nothing can be better than its files (our Opus of a genuine FLAC,
+        // a genuine FLAC): it leaves the search for better copies for good.
+        if found_nothing
+            && let Some(item) = self.lib.get_wishlist_item(id).ok().flatten()
+            && self.upgrade_settled(&item)
+        {
+            let title = self.item_title(id);
+            log::info!("upgrade: nothing can be better than the files of {title}, its item goes");
+            self.upgrade_drop(id);
+            if item.better_than.is_some() {
+                self.toast(format!("Лучше не нашёл: {title}"), None);
+            }
+            return;
+        }
         let now = Self::now();
         let next = next_search(self.upgrade_prefs().0, now).unwrap_or(now + RETRY_AFTER.as_millis() as i64);
         let mut asked = false;
@@ -598,6 +704,21 @@ impl Worker {
                 }
                 None => self.download_tracks(&[track]),
             }
+            return;
+        }
+        // Nothing is better than it (our Opus of a genuine FLAC, a genuine
+        // FLAC): said at once, and it leaves the search for better copies.
+        if self.nothing_better(&file) {
+            let title = self
+                .lib
+                .get_track(track)
+                .ok()
+                .flatten()
+                .map(|t| format!("{} — {}", t.artist_credit.display(), t.title))
+                .unwrap_or_default();
+            log::info!("upgrade: the user asks for better than {} of {title}: there is none", file_label(&file));
+            self.upgrade_drop_track(track);
+            self.toast(format!("Лучше не нашёл: {title}"), None);
             return;
         }
         if self.import.is_none() {
@@ -753,6 +874,10 @@ impl Worker {
     /// ~128 — оставил прежний файл»), and the item waits for its schedule
     /// rather than asking again in minutes the sources that said «wait».
     pub(super) fn upgrade_settle(&mut self, item: &WishlistItem) {
+        // The import after «Заменить» of an album asked for by hand.
+        if self.album_replaced(item) {
+            return;
+        }
         let id = item.id;
         let partial = self.streaming.wish.partial.remove(&id);
         let dup = self.streaming.wish.upgrade_dups.remove(&id);
@@ -793,6 +918,10 @@ impl Worker {
 
     /// «Подтверди» of a better copy: what each offer improves.
     pub(super) fn upgrade_confirm_view(&mut self, item: &WishlistItem, id: u64) -> v::Confirm {
+        // A copy of an album that came and waits: one card of its tracks.
+        if let Some(card) = self.album_better_card(item, id) {
+            return card;
+        }
         let offers = item.candidates_json.as_deref().map(offers_of_json).unwrap_or_default();
         let have = self.upgrade_worst(item);
         let what = match (&item.artist, &item.title) {

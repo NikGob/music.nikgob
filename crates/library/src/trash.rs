@@ -72,14 +72,28 @@ impl Library {
 
     /// Takes a source out of the library altogether (the import that added
     /// it was cancelled): its row and its check go, and the track's active
-    /// source is chosen again. The caller moves its file.
+    /// source is chosen again. The caller moves its file. A stream track
+    /// the file had brought into the library leaves it again (it was never
+    /// the user's).
     pub fn forget_source(&self, source: SourceId) -> Result<()> {
         self.write(|tx| {
             let Some(src) = source_by_id(tx, source)? else { return Ok(()) };
             tx.execute("DELETE FROM source_quality WHERE source_id = ?1", [source.to_string()])?;
             tx.execute("DELETE FROM source WHERE id = ?1", [source.to_string()])?;
             refresh_active(tx, src.track_id)?;
+            refresh_in_library(tx, &src.track_id.to_string())?;
             Ok(())
+        })
+    }
+
+    /// Where a trashed source's file is in `Trash/`, when the import told.
+    pub fn trash_path_of(&self, source: SourceId) -> Result<Option<String>> {
+        self.read(|c| {
+            Ok(c.query_row("SELECT trash_path FROM source WHERE id = ?1", [source.to_string()], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten())
         })
     }
 
