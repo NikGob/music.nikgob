@@ -45,7 +45,9 @@ fn likes_key(service: Service) -> String {
 /// song added to the user's songs of its album, and every song of an album
 /// added whole (but the ones left out of it and a stream twin at the place
 /// of a file, see `page_row!`), are library tracks too
-/// ([`crate::selection`]).
+/// ([`crate::selection`]). A saved album's like keeps its songs in, unless
+/// it stands for the user's songs only (mode `mine`: it came with the like
+/// of one of them).
 const IN_LIBRARY_EXPR: &str = "(
     EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind = 'local_file')
     OR (NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind != 'local_file')
@@ -53,8 +55,10 @@ const IN_LIBRARY_EXPR: &str = "(
                                                       AND x.service = 'seen'))
     OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = track.id
                                        AND l.deleted = 0)
-    OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = track.release_id
-                                       AND l.deleted = 0)
+    OR (EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = track.release_id
+                                        AND l.deleted = 0)
+        AND NOT EXISTS (SELECT 1 FROM release_selection rs WHERE rs.release_id = track.release_id
+                           AND rs.mode = 'mine' AND rs.deleted = 0))
     OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
                 WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0)
     OR EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id

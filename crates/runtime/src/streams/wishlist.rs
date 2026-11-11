@@ -955,7 +955,7 @@ impl Worker {
     /// whole to the library first: its files will be.
     pub(crate) fn download_whole_release(&mut self, release: ReleaseId) {
         if self.lib.release_progress(release).ok().flatten().is_some_and(|p| p.partial())
-            && self.lib.set_release_whole(release, true).is_ok()
+            && self.lib.add_release_whole(release).is_ok()
         {
             self.load_library();
             self.album_changed(release);

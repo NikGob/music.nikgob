@@ -45,12 +45,16 @@ macro_rules! excluded_expr {
 }
 
 /// The whole of an album (alias `r`) is the user's: added whole
-/// ([`crate::Library::set_release_whole`]) or saved (its own like row; a
-/// heart only worked out from its tracks' likes does not count).
+/// ([`crate::Library::add_release_whole`]) or saved (its own like row; a
+/// heart only worked out from its tracks' likes does not count, nor a like
+/// that came with a like of one of its songs or after which the user kept
+/// only their songs: mode `mine`).
 macro_rules! release_whole_expr {
     () => {
         "(EXISTS (SELECT 1 FROM release_selection s WHERE s.release_id = r.id AND s.mode = 'whole' AND s.deleted = 0)
-          OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = r.id AND l.deleted = 0))"
+          OR (EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = r.id AND l.deleted = 0)
+              AND NOT EXISTS (SELECT 1 FROM release_selection s WHERE s.release_id = r.id AND s.mode = 'mine'
+                                 AND s.deleted = 0)))"
     };
 }
 

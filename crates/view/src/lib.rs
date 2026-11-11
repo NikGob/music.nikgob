@@ -3098,6 +3098,11 @@ pub enum Command {
     /// becomes a library track (the ones that only stream too), nothing
     /// downloads; off, the songs chosen one by one stay.
     AddWholeAlbum { id: ReleaseId, on: bool },
+    /// «Отменить» of «Добавить весь альбом в библиотеку»: the album is the
+    /// songs chosen one by one again, its like standing for them only
+    /// (`mine`) as before, and the songs left out of it by hand before
+    /// (`excluded`) out again.
+    UndoWholeAlbum { id: ReleaseId, mine: bool, excluded: Vec<TrackId> },
     /// What an album only some songs of which are the user's opens on and
     /// plays: the whole album (`whole`) or the user's songs.
     AlbumOpensWhole { id: ReleaseId, whole: bool },

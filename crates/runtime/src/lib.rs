@@ -1457,6 +1457,14 @@ impl Worker {
                 self.delete_tracks(ids, "Альбом");
             }
             Command::AddWholeAlbum { id, on } => self.add_whole_album(id, on),
+            Command::UndoWholeAlbum { id, mine, excluded } => {
+                let before = self.library_tracks();
+                let undo = nikgob_library::WholeUndo { mine, excluded };
+                if self.log_err("альбом", self.lib.undo_release_whole(id, &undo)).is_some() {
+                    self.library_edited(before, vec![id]);
+                    self.album_changed(id);
+                }
+            }
             Command::AlbumOpensWhole { id, whole } => {
                 // The same as the setting: the album follows the setting.
                 let view = (whole != self.state.read().prefs.album_opens_whole).then_some(whole);
@@ -3169,8 +3177,9 @@ impl Worker {
         if !single || self.lib.is_liked(LikeTarget::Release(release)).unwrap_or(false) == on {
             return None;
         }
-        let r = if on { self.lib.like(LikeTarget::Release(release)) } else { self.lib.unlike(LikeTarget::Release(release)) };
-        self.log_err("лайк", r)
+        // Saved with its song: no choice of the whole single (its other
+        // songs, an instrumental, stay out of the user's songs).
+        self.log_err("лайк", self.lib.save_release_with_song(release, on))
     }
 
     /// Track likes changed: album hearts and "Любимые" follow.
@@ -3256,23 +3265,32 @@ impl Worker {
         let opens_whole = self.state.read().prefs.album_opens_whole;
         let all = listing.track_ids();
         let mine = listing.wanted_ids();
-        let whole = scope.unwrap_or_else(|| listing.progress.partial() && listing.view.unwrap_or(opens_whole));
-        if whole || mine.is_empty() || start.is_some_and(|s| !mine.contains(&s)) {
+        let partial = listing.progress.partial();
+        let whole = scope.unwrap_or_else(|| partial && listing.view.unwrap_or(opens_whole));
+        // None of the songs of an album the user chose from (all left out
+        // by hand): nothing of it plays but what is asked for.
+        if whole || (mine.is_empty() && !partial) || start.is_some_and(|s| !mine.contains(&s)) {
             (all, true)
         } else {
             (mine, false)
         }
     }
 
-    /// «Добавить весь альбом в библиотеку» (or back to the songs chosen one
-    /// by one), with «Отменить»; nothing downloads.
+    /// «Добавить весь альбом в библиотеку» (the songs left out of it by
+    /// hand too; «Отменить» puts back the choice as it was) or back to the
+    /// songs chosen one by one; nothing downloads.
     fn add_whole_album(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
         let before = self.library_tracks();
-        if self.log_err("альбом", self.lib.set_release_whole(id, on)).is_none() {
-            return;
+        if on {
+            let Some(undo) = self.log_err("альбом", self.lib.add_release_whole(id)) else { return };
+            let back = undo.map(|u| ("Отменить".into(), Command::UndoWholeAlbum { id, mine: u.mine, excluded: u.excluded }));
+            self.toast("Весь альбом в библиотеке", back);
+        } else {
+            if self.log_err("альбом", self.lib.set_release_whole(id, false)).is_none() {
+                return;
+            }
+            self.toast("В библиотеке только твои треки альбома", Some(("Отменить".into(), Command::AddWholeAlbum { id, on: true })));
         }
-        let text = if on { "Весь альбом в библиотеке" } else { "В библиотеке только твои треки альбома" };
-        self.toast(text, Some(("Отменить".into(), Command::AddWholeAlbum { id, on: !on })));
         self.library_edited(before, vec![id]);
         self.album_changed(id);
     }
@@ -3316,6 +3334,12 @@ impl Worker {
     /// [`Command::PlayReleaseMine`]).
     fn play_release(&mut self, id: nikgob_core::model::ReleaseId, start: Option<TrackId>, shuffle: bool, scope: Option<bool>) {
         let (ids, whole) = self.release_tracks_for(id, scope, start);
+        if ids.is_empty() && !whole {
+            // Nothing of it to play (none of its songs the user's): the
+            // queue that plays stays, no tracklist joins it.
+            self.toast("Нечего играть", None);
+            return;
+        }
         let title = self
             .lib
             .get_release(id)

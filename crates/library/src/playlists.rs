@@ -595,11 +595,16 @@ impl Library {
         let device = self.device_id();
         let now = self.tick();
         if !self.album_likes_tracks() {
-            self.write(|tx| set_like_in(tx, LikeTarget::Release(release), !on, now, &device))?;
+            self.write(|tx| {
+                // Saved by hand: the like stands for the whole album.
+                crate::selection::liked_by_hand_in(tx, &release.to_string(), now, device.as_str())?;
+                set_like_in(tx, LikeTarget::Release(release), !on, now, &device)
+            })?;
             return Ok(Vec::new());
         }
         self.write(|tx| {
             let rid = release.to_string();
+            crate::selection::liked_by_hand_in(tx, &rid, now, device.as_str())?;
             let ids: Vec<String> = {
                 let mut stmt = tx.prepare_cached(
                     "SELECT t.id FROM track t
