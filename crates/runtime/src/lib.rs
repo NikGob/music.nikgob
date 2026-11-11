@@ -568,6 +568,9 @@ struct Worker {
     editions: Vec<nikgob_import::EditionGroup>,
     services: Vec<Box<dyn Service>>,
     toast_id: u64,
+    /// What «Очистить» last took out of the queue, for its «Отменить»: the
+    /// entry playing then, what was before it and what came after it.
+    cleared_queue: Option<(Option<u64>, Vec<TrackId>, Vec<TrackId>)>,
     revision: u64,
     play_context: EventContext,
     /// What the queue plays (`release:<id>`, `playlist:<id>`, a mix, a
@@ -768,6 +771,7 @@ impl Worker {
             editions: Vec::new(),
             services: Vec::new(),
             toast_id: 0,
+            cleared_queue: None,
             revision: 0,
             play_context: EventContext::Other,
             play_context_id: None,
@@ -1248,9 +1252,27 @@ impl Worker {
                 self.publish_player();
             }
             Command::ClearQueue => {
+                let before: Vec<TrackId> = self.queue.history().iter().map(|e| e.track).collect();
+                let after: Vec<TrackId> = self.queue.upcoming().iter().map(|e| e.track).collect();
+                let playing = self.queue.current().map(|e| e.id);
                 self.queue.clear_upcoming();
                 self.preload_next();
                 self.publish_player();
+                if !before.is_empty() || !after.is_empty() {
+                    self.cleared_queue = Some((playing, before, after));
+                    self.toast("Очередь очищена", Some(("Отменить".into(), Command::UndoClearQueue)));
+                }
+            }
+            Command::UndoClearQueue => {
+                // Only onto the queue it was taken from: another list since
+                // then is not this one's to fill.
+                if let Some((playing, before, after)) = self.cleared_queue.take()
+                    && self.queue.current().map(|e| e.id) == playing
+                {
+                    self.queue.restore_around(&before, &after);
+                    self.preload_next();
+                    self.publish_player();
+                }
             }
             Command::SaveTracksAsPlaylist { name, tracks } => {
                 let before = self.library_tracks();
@@ -1374,17 +1396,34 @@ impl Worker {
             }
             Command::RemoveFromPlaylist(id, track) => {
                 let before = self.library_tracks();
+                // The way back, in its toast.
+                let mut undo = None;
                 if id == LIKED_PLAYLIST {
-                    let _ = self.lib.unlike(track);
+                    if self.log_err("лайк", self.lib.unlike(track)).is_some() {
+                        undo = Some(("Убрано из Любимых".to_owned(), Command::Like(LikeTarget::Track(track), true)));
+                    }
                 } else if let Ok(entries) = self.lib.playlist_entries(id, 0, u32::MAX)
-                    && let Some(e) = entries.iter().find(|e| e.track.id == track)
+                    && let Some(at) = entries.iter().position(|e| e.track.id == track)
+                    && self.log_err("плейлист", self.lib.playlist_remove(entries[at].entry.id)).is_some()
                 {
-                        let _ = self.log_err("плейлист", self.lib.playlist_remove(e.entry.id));
+                    let name = self.lib.get_playlist(id).ok().flatten().map_or_else(String::new, |p| p.name);
+                    undo = Some((format!("Убрано из «{name}»"), Command::RestoreToPlaylist { playlist: id, track, at }));
                 }
                 self.load_playlist(id);
                 let releases = if id == LIKED_PLAYLIST { self.releases_of(&[track]) } else { Vec::new() };
                 self.library_edited(before, releases);
                 self.playlist_edited(id);
+                if let Some((text, cmd)) = undo {
+                    self.toast(text, Some(("Отменить".into(), cmd)));
+                }
+            }
+            Command::RestoreToPlaylist { playlist, track, at } => {
+                let before = self.library_tracks();
+                if self.log_err("плейлист", self.lib.playlist_insert(playlist, track, at)).is_some() {
+                    self.load_playlist(playlist);
+                    self.library_edited(before, Vec::new());
+                    self.playlist_edited(playlist);
+                }
             }
             Command::MoveInPlaylist {
                 playlist,

@@ -393,6 +393,32 @@ impl Queue {
         }
     }
 
+    /// Puts back what [`Self::clear_upcoming`] took out (fresh entry ids):
+    /// `before` ahead of the current item, `after` behind it, each in its
+    /// order; the current item keeps its entry. With nothing current they
+    /// are the whole queue again.
+    pub fn restore_around(&mut self, before: &[TrackId], after: &[TrackId]) {
+        let b: Vec<Entry> = before.iter().map(|&t| self.entry(t)).collect();
+        let a: Vec<Entry> = after.iter().map(|&t| self.entry(t)).collect();
+        match self.current() {
+            Some(c) => {
+                let p = self.pos.unwrap_or(0);
+                self.items.splice(p..p, b.iter().copied());
+                let p = p + b.len();
+                self.pos = Some(p);
+                self.items.splice(p + 1..p + 1, a.iter().copied());
+                let o = self.original.iter().position(|e| e.id == c.id).unwrap_or(0);
+                self.original.splice(o..o, b.iter().copied());
+                let o = (o + b.len() + 1).min(self.original.len());
+                self.original.splice(o..o, a);
+            }
+            None => {
+                self.items.extend(b.iter().chain(&a).copied());
+                self.original.extend(b.into_iter().chain(a));
+            }
+        }
+    }
+
     /// Shuffle on: what plays now stays current, what has played stays
     /// behind it, the rest is shuffled. Off: the order the queue was
     /// started with comes back, the current track stays current and "next"
@@ -847,5 +873,26 @@ mod tests {
         q.clear_upcoming();
         assert!(q.upcoming().is_empty());
         assert_eq!(q.current().map(|e| e.track), Some(t[0]));
+    }
+
+    /// «Отменить» after «Очистить»: what was before and after the current
+    /// track comes back in its order, the current one stays current.
+    #[test]
+    fn a_cleared_queue_comes_back() {
+        let t = ids(5);
+        let mut q = Queue::default();
+        q.set(&t, 2, None);
+        let cur = q.current().map(|e| e.id);
+        let before: Vec<TrackId> = q.history().iter().map(|e| e.track).collect();
+        let after: Vec<TrackId> = q.upcoming().iter().map(|e| e.track).collect();
+        q.clear_upcoming();
+        q.restore_around(&before, &after);
+        assert_eq!(q.current().map(|e| e.id), cur);
+        assert_eq!(q.tracks(), t);
+        assert_eq!(q.upcoming().iter().map(|e| e.track).collect::<Vec<_>>(), &t[3..]);
+        // Shuffle off later keeps them in their places too.
+        q.set_shuffle(true);
+        q.set_shuffle(false);
+        assert_eq!(q.tracks(), t);
     }
 }

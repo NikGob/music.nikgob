@@ -1893,10 +1893,14 @@ pub enum TrackMenuItem {
     Tags,
     /// «Изменить текст…».
     LyricsEdit,
-    /// «Скачать альбом», and «Скачать» of a track with no file.
+    /// «Скачать» of a track with no file, and «Скачать альбом».
     Download,
-    /// «Найти качество лучше…» / «Искать раздачу…».
+    /// «Найти качество лучше» of a track with a file.
     Torrents,
+    /// «Выбрать раздачу…» of a track with no file (the indexer's search).
+    /// Until it is placed it stands where [`Self::Torrents`] does: the two
+    /// were one item before.
+    PickRelease,
     /// «В файле другая песня».
     WrongFile,
     Dislike,
@@ -1906,7 +1910,7 @@ pub enum TrackMenuItem {
 
 impl TrackMenuItem {
     /// Every item, in the order of the menu.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Radio,
         Self::Album,
         Self::Artist,
@@ -1916,9 +1920,10 @@ impl TrackMenuItem {
         Self::Visualizer,
         Self::Tags,
         Self::LyricsEdit,
-        Self::Download,
         Self::Torrents,
         Self::WrongFile,
+        Self::Download,
+        Self::PickRelease,
         Self::Dislike,
         Self::Ban,
     ];
@@ -1935,8 +1940,9 @@ impl TrackMenuItem {
             Self::Visualizer => "Визуализатор",
             Self::Tags => "Редактировать теги…",
             Self::LyricsEdit => "Изменить текст…",
-            Self::Download => "Скачать, скачать альбом",
-            Self::Torrents => "Найти качество лучше…",
+            Self::Download => "Скачать",
+            Self::Torrents => "Найти качество лучше",
+            Self::PickRelease => "Выбрать раздачу…",
             Self::WrongFile => "В файле другая песня",
             Self::Dislike => "Не нравится",
             Self::Ban => "Не рекомендовать исполнителя",
@@ -1946,7 +1952,9 @@ impl TrackMenuItem {
     /// Where the item stands until the settings say otherwise.
     pub fn default_place(self) -> TrackMenuPlace {
         match self {
-            Self::Tags | Self::LyricsEdit | Self::Download | Self::Torrents | Self::WrongFile => TrackMenuPlace::File,
+            Self::Tags | Self::LyricsEdit | Self::Download | Self::Torrents | Self::PickRelease | Self::WrongFile => {
+                TrackMenuPlace::File
+            }
             _ => TrackMenuPlace::Menu,
         }
     }
@@ -1977,7 +1985,14 @@ pub struct TrackMenuSlot {
 impl TrackMenuSlot {
     /// Where `item` stands by `slots` (the last line about it counts).
     pub fn place_of(slots: &[Self], item: TrackMenuItem) -> TrackMenuPlace {
-        slots.iter().rev().find(|s| s.item == item).map_or(item.default_place(), |s| s.place)
+        let own = |item: TrackMenuItem| slots.iter().rev().find(|s| s.item == item).map(|s| s.place);
+        match (own(item), item) {
+            (Some(place), _) => place,
+            // Saved while «Выбрать раздачу…» and «Найти качество лучше»
+            // were one item: it goes where that one went.
+            (None, TrackMenuItem::PickRelease) => own(TrackMenuItem::Torrents).unwrap_or(item.default_place()),
+            (None, _) => item.default_place(),
+        }
     }
 }
 
@@ -1989,8 +2004,16 @@ impl Prefs {
 
     /// Puts `item` at `place`; only what differs from the default is kept.
     pub fn set_track_menu_place(&mut self, item: TrackMenuItem, place: TrackMenuPlace) {
+        // «Выбрать раздачу…» set apart from «Найти качество лучше»: the
+        // place it took after that one is kept as its own first.
+        if item == TrackMenuItem::Torrents && !self.track_menu.iter().any(|s| s.item == TrackMenuItem::PickRelease) {
+            let before = self.track_menu_place(TrackMenuItem::PickRelease);
+            if before != TrackMenuItem::PickRelease.default_place() {
+                self.track_menu.push(TrackMenuSlot { item: TrackMenuItem::PickRelease, place: before });
+            }
+        }
         self.track_menu.retain(|s| s.item != item);
-        if place != item.default_place() {
+        if place != item.default_place() || (item == TrackMenuItem::PickRelease && self.track_menu.iter().any(|s| s.item == TrackMenuItem::Torrents)) {
             self.track_menu.push(TrackMenuSlot { item, place });
         }
     }
@@ -2899,6 +2922,10 @@ pub enum Command {
     /// Puts queue `entry` right after (or before) the `anchor` entry.
     MoveInQueue { entry: u64, anchor: u64, after: bool },
     ClearQueue,
+    /// The undo of [`Command::ClearQueue`] (its toast's «Отменить»): what
+    /// it took out comes back around the track playing, if that still is
+    /// the one that played then.
+    UndoClearQueue,
     SaveQueueAsPlaylist(String),
     /// A new playlist named so with these tracks («Сохранить как плейлист»
     /// of a mix).
@@ -2914,6 +2941,9 @@ pub enum Command {
     /// playlist (as [`Command::AddToPlaylist`]; «Любимые» likes each).
     AddAlbumToPlaylist(PlaylistId, ReleaseId),
     RemoveFromPlaylist(PlaylistId, TrackId),
+    /// The undo of [`Command::RemoveFromPlaylist`]: the track back at its
+    /// place `at` in the playlist.
+    RestoreToPlaylist { playlist: PlaylistId, track: TrackId, at: usize },
     MoveInPlaylist { playlist: PlaylistId, track: TrackId, to: usize },
     /// Delete a track: into the Trash (30 days), or for good when
     /// [`Prefs::use_trash`] is off.
@@ -3699,6 +3729,23 @@ mod track_menu_tests {
         p.set_track_menu_place(I::Share, P::Menu);
         p.set_track_menu_place(I::Tags, P::File);
         assert_eq!(p.track_menu, [TrackMenuSlot { item: I::Ban, place: P::Hidden }]);
+    }
+
+    /// A layout saved while «Выбрать раздачу…» was part of «Найти
+    /// качество лучше» (one item, `torrents`) keeps working: the new item
+    /// goes where that one went until it is placed itself, and placing
+    /// either later leaves the other where it stood.
+    #[test]
+    fn a_layout_saved_before_the_split_places_both_torrent_items() {
+        let mut p = Prefs { track_menu: vec![TrackMenuSlot { item: I::Torrents, place: P::Hidden }], ..Prefs::default() };
+        assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Hidden, P::Hidden));
+        p.set_track_menu_place(I::Torrents, P::Menu);
+        assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Menu, P::Hidden));
+        p.set_track_menu_place(I::PickRelease, P::File);
+        assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::Menu, P::File));
+        // Nothing saved: both in «Файл».
+        let p = Prefs::default();
+        assert_eq!((p.track_menu_place(I::Torrents), p.track_menu_place(I::PickRelease)), (P::File, P::File));
     }
 
     /// Prefs saved before «Меню трека» have no such field: the default.
