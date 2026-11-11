@@ -43,6 +43,12 @@ impl Geometry {
     }
 }
 
+/// `rect` in egui's points at `zoom` as the system's logical points.
+fn unzoom(rect: egui::Rect, zoom: f32) -> egui::Rect {
+    let k = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+    egui::Rect::from_min_max((rect.min.to_vec2() * k).to_pos2(), (rect.max.to_vec2() * k).to_pos2())
+}
+
 /// Watches the window every frame and writes changes once they settle.
 pub struct Keeper {
     /// None: nothing is remembered (screenshot runs).
@@ -77,9 +83,13 @@ impl Keeper {
         if self.path.is_none() {
             return;
         }
+        // egui gives the window in its own points, which «Масштаб
+        // интерфейса» (the zoom) makes larger; kept and restored in the
+        // system's logical points, as the window is made before the zoom.
+        let zoom = ctx.zoom_factor();
         let (inner, outer, minimized, maximized, fullscreen) = ctx.input(|i| {
             let v = i.viewport();
-            (v.inner_rect, v.outer_rect, v.minimized, v.maximized, v.fullscreen)
+            (v.inner_rect.map(|r| unzoom(r, zoom)), v.outer_rect.map(|r| unzoom(r, zoom)), v.minimized, v.maximized, v.fullscreen)
         });
         if minimized == Some(true) || fullscreen == Some(true) {
             return;
@@ -139,5 +149,15 @@ mod tests {
         assert_eq!(small, Geometry { size: MIN_SIZE, pos: None, maximized: false });
         assert_eq!(Geometry::parse(b"garbage"), None);
         assert_eq!(Geometry::parse(br#"{"pos":[1,2]}"#), None);
+    }
+
+    /// A window seen at a zoom of 1.5 (its points a third fewer) is kept at
+    /// the size and place the system gives it.
+    #[test]
+    fn the_zoom_is_taken_out_of_the_kept_size() {
+        let seen = egui::Rect::from_min_size(egui::pos2(100.0, 40.0), egui::vec2(800.0, 500.0));
+        assert_eq!(unzoom(seen, 1.5), egui::Rect::from_min_size(egui::pos2(150.0, 60.0), egui::vec2(1200.0, 750.0)));
+        assert_eq!(unzoom(seen, 1.0), seen);
+        assert_eq!(unzoom(seen, f32::NAN), seen);
     }
 }

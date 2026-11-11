@@ -22,6 +22,7 @@ pub(crate) mod stage;
 pub mod sweep;
 mod tag_editor;
 mod visualizer;
+mod zoom;
 
 pub mod now_playing;
 
@@ -395,6 +396,8 @@ impl Md3eUi {
         let theme_scope = crate::prof::scope("theme");
         self.update_theme(ctx, state);
         drop(theme_scope);
+        // «Масштаб интерфейса» and its keys (Ctrl+=, Ctrl+-, Ctrl+0).
+        zoom::apply(ctx, &state.prefs, out);
         pages::set_marks(ctx, &state.dislikes);
         pages::set_track_menu(ctx, &state.prefs.track_menu);
         pages::set_window_can_hide(ctx, self.window_can_hide);

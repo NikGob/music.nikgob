@@ -31,6 +31,11 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     segments(ui, Id::LikedAlbumsPlace, p);
 
     group(ui, "Окно");
+    // Taken when let go: the window grows or shrinks under the pointer.
+    let scale = Num::pct(*v::UI_SCALE_RANGE.start(), *v::UI_SCALE_RANGE.end(), v::UI_SCALE_STEP);
+    if let Some(s) = rows::slider_on_release(ui, Id::UiScale, v::ui_scale(p.ui_scale), scale) {
+        p.ui_scale = v::ui_scale(s);
+    }
     switch(ui, Id::RailCompact, &mut p.rail_compact);
     switch(ui, Id::NavRoot, &mut p.nav_root);
     switch(ui, Id::ReducedMotion, &mut p.reduced_motion);
