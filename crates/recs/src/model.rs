@@ -97,6 +97,9 @@ const MANUAL_EARLY: f32 = 0.6;
 const AUTO_EARLY: f32 = 1.3;
 /// Track → track pairs kept per track.
 pub const CO_TOP: usize = 50;
+/// A play imported from another service counts this much in the taste
+/// profiles' shares beside the user's own plays ([`UserModel::settle`]).
+pub const IMPORT_SHARE: f32 = 0.25;
 /// Tracks of one session this many steps apart at most are listened
 /// together ([`F_SESS_CO`]), `1 / k` for k steps.
 const BAG_WINDOW: usize = 10;
@@ -944,10 +947,22 @@ impl UserModel {
         let k = self.profiles.len();
         // Their shares of the recent plays (an early skip is no choice of it)
         // and how much of each one's plays is background.
+        // A play imported from another service is the long taste: beside
+        // the user's own plays here it counts [`IMPORT_SHARE`] (a fresh
+        // import of a whole history would take the shares over as if it
+        // were today's listening); alone, it is all there is.
+        let own_listening = own.iter().any(|&k| starts[k].pos.is_some() && starts[k].ended != Ended::Early);
         let share_play = |x: usize| {
             let s = &starts[x];
             let i = s.pos?;
-            Some(SharePlay { ts: s.ts, profile: self.profile_at(i), p_bg: p_bg[x], weight: if s.ended == Ended::Early { 0.0 } else { 1.0 } })
+            let weight = if s.ended == Ended::Early {
+                0.0
+            } else if s.import && own_listening {
+                IMPORT_SHARE
+            } else {
+                1.0
+            };
+            Some(SharePlay { ts: s.ts, profile: self.profile_at(i), p_bg: p_bg[x], weight })
         };
         let all: Vec<SharePlay> = (0..starts.len()).filter_map(share_play).collect();
         let own_plays: Vec<SharePlay> = own.iter().filter_map(|&x| share_play(x)).collect();
