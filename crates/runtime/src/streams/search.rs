@@ -262,9 +262,8 @@ impl SearchState {
 
 impl Worker {
     /// The stream part of [`Command::Search`](nikgob_view::Command::Search):
-    /// `library` are the library hits already published.
-    /// Asks the services for `query`; `library` is what the library found
-    /// for it, each track with its ISRC (read off the loop with it).
+    /// `library` are the library hits already published, each track with
+    /// its ISRC (read off the loop with them).
     pub(crate) fn search_streams(&mut self, query: &str, library: Vec<(nikgob_library::TrackRow, Option<String>)>) {
         let st = &mut self.streaming.search;
         st.seq += 1;
