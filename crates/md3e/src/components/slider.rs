@@ -191,10 +191,8 @@ impl Slider {
             // it without a pop where a bar would replace the wave.
             let left_end = (x - gap - handle_w * 0.5).max(rect.left());
             if left_end - rect.left() > 0.5 {
-                let thickness = t + (WAVE_THICKNESS.min(t) - t) * wave_k;
-                let amp = self.wave.amplitude * wave_k;
-                // 2 dp inner corner as a bar, a round cap as a wave.
-                let end_r = 2.0 + (thickness * 0.5 - 2.0) * wave_k;
+                let ActiveTrack { thickness, amplitude: amp, end_radius: end_r } =
+                    active_track(left_end - rect.left(), t, wave_k, self.wave);
                 if amp > 0.05 {
                     wave_path(
                         ui,
@@ -259,6 +257,39 @@ impl Slider {
             committed,
         }
     }
+}
+
+/// The active track's shape in the `span` left of the handle (the gap
+/// taken off already): its thickness, the wave's amplitude and the radius
+/// of its corners by the handle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ActiveTrack {
+    thickness: f32,
+    amplitude: f32,
+    end_radius: f32,
+}
+
+/// [`ActiveTrack`] of a slider whose track is `track` thick, `wave_k` of the
+/// way from a bar to a wave.
+///
+/// Near the start of a song the played part is shorter than the bar is
+/// thick: the shape is a dot as wide as the span, so it never reaches into
+/// the gap or past the handle, and it shrinks to a point with the span.
+/// Shorter than half a wavelength, the wave flattens with the span, so a
+/// few pixels of it are never a full crest on a dot. Every value is
+/// continuous in the span and in `wave_k`: pausing and playing again morph
+/// it, whatever the span.
+fn active_track(span: f32, track: f32, wave_k: f32, wave: Wave) -> ActiveTrack {
+    let span = span.max(0.0);
+    let k = wave_k.clamp(0.0, 1.0);
+    let thickness = (track + (WAVE_THICKNESS.min(track) - track) * k).min(span);
+    // Between the centres of the two caps: where the wave has room.
+    let room = span - thickness;
+    let flat = (room / (wave.wavelength * 0.5).max(1.0)).clamp(0.0, 1.0);
+    let amplitude = wave.amplitude * k * flat;
+    // 2 dp inner corner as a bar, a round cap as a wave.
+    let end_radius = (2.0 + (thickness * 0.5 - 2.0) * k).clamp(0.0, thickness * 0.5);
+    ActiveTrack { thickness, amplitude, end_radius }
 }
 
 /// A sine polyline from `x0` to `x1` around `cy`, with round caps. The wave
@@ -455,6 +486,120 @@ mod tests {
             last = a;
         }
         assert!((last - full).abs() < 0.2, "{last} vs {full}");
+    }
+
+    #[test]
+    fn the_played_part_stays_left_of_the_gap_whatever_its_length() {
+        let wave = Wave::default();
+        for track in [8.0_f32, 16.0] {
+            for s in 0..=160 {
+                let span = s as f32 * 0.5;
+                for k in 0..=20 {
+                    let a = active_track(span, track, k as f32 / 20.0, wave);
+                    assert!(a.thickness <= span + 1e-4, "{a:?} in {span}");
+                    assert!(a.thickness >= 0.0 && a.amplitude >= 0.0, "{a:?}");
+                    assert!(a.end_radius <= a.thickness * 0.5 + 1e-4, "{a:?}");
+                    // The wave's crests stay within the bar's own height.
+                    assert!(a.amplitude <= wave.amplitude + 1e-4);
+                }
+            }
+        }
+        // Mid-song the shape is as it was: a full wave, a full bar.
+        let a = active_track(300.0, 16.0, 1.0, wave);
+        assert_eq!((a.thickness, a.amplitude), (WAVE_THICKNESS, wave.amplitude));
+        let a = active_track(300.0, 16.0, 0.0, wave);
+        assert_eq!((a.thickness, a.amplitude, a.end_radius), (16.0, 0.0, 2.0));
+    }
+
+    #[test]
+    fn the_start_of_the_played_part_morphs_without_a_jump() {
+        let wave = Wave::default();
+        let (dk, ds) = (0.01_f32, 0.25_f32);
+        for track in [8.0_f32, 16.0] {
+            for s in 0..=200 {
+                let span = s as f32 * ds;
+                for k in 0..100 {
+                    let k = k as f32 * dk;
+                    let a = active_track(span, track, k, wave);
+                    let b = active_track(span, track, k + dk, wave);
+                    let c = active_track(span + ds, track, k, wave);
+                    // A step of the morph or of the song moves every part a
+                    // little: no pop between a bar, a dot and a wave.
+                    for (x, y, step) in [(a, b, 0.2), (a, c, 0.3)] {
+                        assert!((x.thickness - y.thickness).abs() <= step + 1e-4, "{x:?} -> {y:?}");
+                        assert!((x.amplitude - y.amplitude).abs() <= step + 1e-4, "{x:?} -> {y:?}");
+                        assert!((x.end_radius - y.end_radius).abs() <= step + 1e-4, "{x:?} -> {y:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The horizontal extents of what one frame paints in the active
+    /// colour, the handle (as tall as the slider) left out, and the
+    /// slider's rect.
+    fn active_extents(ctx: &Context, time: f64, value: f32, wavy: bool, track: f32) -> (Vec<(f32, f32)>, Rect) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 100.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut rect = Rect::NOTHING;
+        let mut out = ctx.run_ui(input, |ui| {
+            rect = Slider::new("t", value)
+                .width(400.0)
+                .track(track)
+                .wavy(wavy)
+                .colors(Color32::RED, Color32::BLUE)
+                .show(ui)
+                .response
+                .rect;
+        });
+        out.textures_delta.clear();
+        let red = |c: Color32| c == Color32::RED;
+        let mut found = Vec::new();
+        for s in &out.shapes {
+            match &s.shape {
+                Shape::Circle(c) if red(c.fill) => found.push((c.center.x - c.radius, c.center.x + c.radius)),
+                Shape::Path(p) => {
+                    let (top, bottom) = p.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), q| (lo.min(q.y), hi.max(q.y)));
+                    if bottom - top > 30.0 {
+                        continue;
+                    }
+                    let stroked = matches!(p.stroke.color, egui::epaint::ColorMode::Solid(c) if red(c));
+                    if red(p.fill) || stroked {
+                        let half = if stroked { p.stroke.width * 0.5 } else { 0.0 };
+                        let (lo, hi) = p.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), q| (lo.min(q.x), hi.max(q.x)));
+                        found.push((lo - half, hi + half));
+                    }
+                }
+                _ => {}
+            }
+        }
+        (found, rect)
+    }
+
+    #[test]
+    fn play_and_pause_in_a_row_at_the_start_keep_the_shape_by_the_handle() {
+        for track in [8.0_f32, 16.0] {
+            let ctx = context();
+            let dt = 1.0 / 60.0;
+            let mut t = 0.0;
+            // 0:00 to 0:20 of 3:13 on a 400 px bar, play and pause every
+            // fifth of a second.
+            for f in 0..240 {
+                let value = 0.1 * f as f32 / 240.0;
+                let wavy = (f / 12) % 2 == 0;
+                let (found, rect) = active_extents(&ctx, t, value, wavy, track);
+                let x = rect.left() + value * rect.width();
+                // The stop dot at the far end is the active colour too.
+                for (lo, hi) in found.into_iter().filter(|(lo, _)| *lo < x) {
+                    assert!(hi <= x - 6.0 + 0.01, "frame {f}: the played part reaches {hi}, the handle's gap starts at {}", x - 6.0);
+                    assert!(lo >= rect.left() - 0.01, "frame {f}: {lo} left of {}", rect.left());
+                }
+                t += dt;
+            }
+        }
     }
 
     #[test]
