@@ -68,7 +68,7 @@ fn speed_rows(state: &ViewState) -> Vec<(TrackId, String, String)> {
 
 /// One mark: its name, under it the artists (and the speed), and the button
 /// that takes it back. True when that button was clicked.
-fn mark(ui: &mut Ui, salt: impl std::hash::Hash, title: &str, sub: Option<&str>, label: &str) -> bool {
+fn mark(ui: &mut Ui, salt: impl egui::AsId, title: &str, sub: Option<&str>, label: &str) -> bool {
     let salt = egui::Id::new(salt);
     let mut item = ListItem::new(title).id_salt(salt);
     if let Some(sub) = sub {
