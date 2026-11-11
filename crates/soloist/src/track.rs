@@ -36,6 +36,10 @@ use crate::route::Feed;
 
 /// How long Soloist may take to start a track.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// With nothing of ours playing this long after the request, it is asked
+/// once more (and the device made the active one again): a first `play`
+/// after Soloist signed in can go nowhere.
+const ASK_AGAIN: Duration = Duration::from_secs(6);
 /// How long a seek may take to show in Soloist's position.
 const SEEK_TIMEOUT: Duration = Duration::from_secs(4);
 /// With no sign that Soloist started our request, the state counts as
@@ -69,7 +73,7 @@ pub trait Link: Captured + 'static {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Unrequested,
-    Requested { at: Instant, changes: u64 },
+    Requested { at: Instant, changes: u64, again: bool },
     Playing,
     Seeking { target_ms: u64, at: Instant },
     Ended,
@@ -97,6 +101,18 @@ fn now_ms() -> u64 {
 
 fn err(text: &str) -> PcmError {
     text.to_owned().into()
+}
+
+/// What Soloist says of itself, for the log of a track that does not start.
+fn said(view: &LiveView, ours: bool) -> String {
+    format!(
+        "status {:?}, {} item, device {}, position {}, last refusal {}",
+        view.status,
+        if ours { "our" } else if view.uri.is_some() { "another" } else { "no" },
+        if view.active { "active" } else { "not active" },
+        view.anchor_at.map_or_else(|| "never".to_owned(), |t| format!("{} ms ago", t.elapsed().as_millis())),
+        view.error.as_ref().map_or_else(|| "none".to_owned(), |(m, t)| format!("«{m}» {} ms ago", t.elapsed().as_millis())),
+    )
 }
 
 /// The refusal that answers our `play` asked at `at`: a refusal of another
@@ -232,10 +248,10 @@ impl PcmSource for SoloistTrack {
                 self.link.clear_captured();
                 self.link.playing(1);
                 self.counted = true;
-                self.phase = Phase::Requested { at: Instant::now(), changes: view.track_changes };
+                self.phase = Phase::Requested { at: Instant::now(), changes: view.track_changes, again: false };
                 return Ok(PcmRead::Pending);
             }
-            Phase::Requested { at, changes } => {
+            Phase::Requested { at, changes, again } => {
                 self.link.prepare_output();
                 if !view.ready {
                     return Err(err("Spotify Soloist отключился"));
@@ -251,8 +267,17 @@ impl PcmSource for SoloistTrack {
                     log::info!("soloist: the track plays {} ms after it was asked for", at.elapsed().as_millis());
                     self.start_playing(&view);
                 } else if at.elapsed() > START_TIMEOUT {
+                    log::warn!("soloist: the track did not start in {} s: {}", START_TIMEOUT.as_secs(), said(&view, self.ours(&view)));
                     return Err(err("Spotify Soloist не начал трек"));
                 } else {
+                    if !again && at.elapsed() > ASK_AGAIN {
+                        log::info!("soloist: nothing plays {} s after the request, asking again: {}", ASK_AGAIN.as_secs(), said(&view, self.ours(&view)));
+                        if !view.active {
+                            self.link.send(Command::Activate);
+                        }
+                        self.link.send(Command::Play(Some(self.uri.clone())));
+                        self.phase = Phase::Requested { at, changes, again: true };
+                    }
                     return Ok(PcmRead::Pending);
                 }
             }

@@ -529,6 +529,11 @@ fn status_rank(s: WishlistStatus) -> u8 {
     }
 }
 
+/// New likes up to this many take their wishlist items at once.
+const WISHES_AT_ONCE: usize = 48;
+/// How long the loop gives the waiting likes in one turn.
+const WISHES_SLICE: std::time::Duration = std::time::Duration::from_millis(15);
+
 impl Worker {
     fn now() -> i64 {
         nikgob_library::now_ms()
@@ -683,9 +688,49 @@ impl Worker {
         if item.scope == WishlistScope::Track && self.open_twin(&item).is_some() {
             return false;
         }
-        log::info!("wishlist: {} ({:?}, {:?})", item.title.as_deref().unwrap_or("?"), item.scope, origin);
+        // An import brings hundreds at once: counted, not listed.
+        if origin != WishlistOrigin::Import {
+            log::info!("wishlist: {} ({:?}, {:?})", item.title.as_deref().unwrap_or("?"), item.scope, origin);
+        }
         self.put_item(&item);
         true
+    }
+
+    /// [`Self::wish_for_like`] for every track of `tracks`: at once for a
+    /// few, a slice at a time between the loop's other turns for an import
+    /// of hundreds (each item is a write of its own, and all of them in
+    /// one turn held the loop for seconds).
+    pub(crate) fn wish_for_likes(&mut self, tracks: &[TrackId], origin: WishlistOrigin) {
+        if tracks.len() <= WISHES_AT_ONCE && self.wishes_later.is_empty() {
+            for &t in tracks {
+                self.wish_for_like(t, origin);
+            }
+            return;
+        }
+        let idle = self.wishes_later.is_empty();
+        self.wishes_later.extend(tracks.iter().map(|&t| (t, origin)));
+        if idle {
+            let _ = self.internal_tx.send(crate::import::Internal::WishesLater);
+        }
+    }
+
+    /// One slice of the likes that wait ([`Self::wish_for_likes`]); the
+    /// wishlist is shown and searched once they are all in.
+    pub(crate) fn wishes_later_step(&mut self) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < WISHES_SLICE {
+            let Some((track, origin)) = self.wishes_later.pop_front() else { break };
+            if self.wish_for_like(track, origin) {
+                self.wishes_made += 1;
+            }
+        }
+        if self.wishes_later.is_empty() {
+            log::info!("wishlist: {} items from the imported likes", std::mem::take(&mut self.wishes_made));
+            self.publish_wishlist();
+            self.wish_tick();
+        } else {
+            let _ = self.internal_tx.send(crate::import::Internal::WishesLater);
+        }
     }
 
     /// A new like of an album: one album item, when some of it has no file

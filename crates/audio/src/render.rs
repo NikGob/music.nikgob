@@ -38,8 +38,10 @@ const LIMITER_KNEE: f32 = 0.89;
 /// Ramp out when the ring is about to run dry, and back in when audio
 /// returns, so a dropout is a short gap instead of a click.
 const DROPOUT_FADE_US: u64 = 1500;
-/// A callback this long after the previous one is late: with a 10 ms device
-/// period most of the device buffer has been played meanwhile.
+/// A callback this much later than the audio the previous one gave lasts is
+/// late: with a 10 ms device period most of the device buffer has been
+/// played meanwhile. A device that takes its whole buffer at a time
+/// (PulseAudio: 90 ms every 90 ms) is on time at its own period.
 const LATE_CALLBACK: Duration = Duration::from_millis(25);
 
 /// Which item starts playing, and where in it.
@@ -139,8 +141,12 @@ pub(crate) struct Renderer {
     dropout: bool,
     /// A flush started the current item and none of it has sounded yet.
     fresh: bool,
-    /// When the previous callback of steady playback came.
-    last_callback: Option<Instant>,
+    /// When the previous callback of steady playback came, and the frames
+    /// it took.
+    last_callback: Option<(Instant, usize)>,
+    /// The device has asked for less than its whole buffer: one that asks
+    /// for all of it then had drained.
+    asks_in_parts: bool,
     eq: Eq,
     /// The pause fade is done but the device was not told yet.
     pause_ready_due: bool,
@@ -190,6 +196,7 @@ impl Renderer {
             dropout: false,
             fresh: false,
             last_callback: None,
+            asks_in_parts: false,
             eq: Eq::new(),
             pause_ready_due: false,
         }
@@ -479,12 +486,18 @@ impl Renderer {
         if !steady {
             return;
         }
-        self.last_callback = Some(now);
-        let Some(previous) = previous else { return };
-        let gap = now.saturating_duration_since(previous);
+        self.last_callback = Some((now, frames));
         let buffer = self.device_buffer_frames;
-        let drained = buffer > 0 && frames as u64 * 10 >= buffer * 9;
-        if gap > LATE_CALLBACK || drained {
+        let whole = buffer > 0 && frames as u64 * 10 >= buffer * 9;
+        if !whole {
+            self.asks_in_parts = true;
+        }
+        let Some((previous, given)) = previous else { return };
+        let gap = now.saturating_duration_since(previous);
+        // What the previous callback gave plays for this long.
+        let period = Duration::from_secs_f64(given as f64 / f64::from(self.rate.max(1)));
+        let drained = whole && self.asks_in_parts;
+        if gap > period + LATE_CALLBACK || drained {
             self.sh.late_callbacks.fetch_add(1, Ordering::Relaxed);
         }
         let gap_us = u64::try_from(gap.as_micros()).unwrap_or(u64::MAX);
@@ -574,6 +587,7 @@ impl Render for Renderer {
         self.pause_frames = self.pause_frames.max(1);
         self.resume_frames = self.resume_frames.max(1);
         self.last_callback = None;
+        self.asks_in_parts = false;
         self.device_buffer_frames =
             ns_to_frames(self.sh.device_buffer_ns.load(Ordering::Relaxed), rate);
         self.vol_k = 1.0 - (-1.0 / (rate as f32 * VOLUME_TAU_MS / 1000.0)).exp();
@@ -922,11 +936,28 @@ mod tests {
         r.note_timing(t0 + Duration::from_millis(70), 480);
         assert_eq!(late(), 2);
 
+        // A device that takes its whole buffer every time (PulseAudio) is
+        // on time at its own period, and late past it.
+        r.update_control();
+        r.last_callback = None;
+        r.asks_in_parts = false;
+        let rate = u64::from(r.rate);
+        let whole = (4320 * rate / 48_000) as usize;
+        r.device_buffer_frames = whole as u64;
+        let t1 = t0 + Duration::from_secs(1);
+        for i in 0..5 {
+            r.note_timing(t1 + Duration::from_millis(91 * i), whole);
+        }
+        assert_eq!(late(), 2, "91 ms apart with a 90 ms buffer");
+        r.note_timing(t1 + Duration::from_millis(91 * 4 + 130), whole);
+        assert_eq!(late(), 3, "40 ms past its period");
+        r.device_buffer_frames = 4320;
+
         // A pause in between is no lateness.
         sh.pause_req.store(true, Ordering::Release);
         r.update_control();
-        r.note_timing(t0 + Duration::from_millis(500), 480);
-        assert_eq!(late(), 2);
+        r.note_timing(t0 + Duration::from_secs(3), 480);
+        assert_eq!(late(), 3);
     }
 
     #[test]

@@ -642,9 +642,7 @@ impl Worker {
         let pid = created.id;
         let ids = self.upsert_streams(&p.tracks);
         let _ = self.log_err("плейлист", self.lib.playlist_add_many(pid, &ids));
-        for &t in &ids {
-            self.wish_for_like(t, nikgob_core::model::WishlistOrigin::Import);
-        }
+        self.wish_for_likes(&ids, nikgob_core::model::WishlistOrigin::Import);
         // A catalogue (Deezer) is not synced with: its playlist is a
         // snapshot.
         let catalogue = self.service(p.id.service).is_none_or(|s| s.catalogue_only());

@@ -70,6 +70,13 @@ impl Live {
         }
         match e {
             Event::Auth { logged_in, active, device_name } => {
+                if logged_in != self.logged_in || active != self.active {
+                    log::info!(
+                        "soloist: {}, its device is {}",
+                        if logged_in { "signed in" } else { "not signed in" },
+                        if active { "the active one" } else { "not the active one" }
+                    );
+                }
                 self.logged_in = logged_in;
                 self.active = active;
                 if !device_name.is_empty() {

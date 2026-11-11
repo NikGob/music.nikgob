@@ -644,6 +644,10 @@ struct Worker {
     /// Where its models are downloaded.
     models_dir: Option<PathBuf>,
     align_was_playing: bool,
+    /// New likes of a large import that wait for their wishlist items
+    /// ([`Worker::wish_for_likes`]), and how many items they made so far.
+    wishes_later: std::collections::VecDeque<(TrackId, nikgob_core::model::WishlistOrigin)>,
+    wishes_made: usize,
     /// The worker's own inbox (for threads started later).
     internal_tx: Sender<Internal>,
 }
@@ -772,6 +776,8 @@ impl Worker {
             align: Default::default(),
             models_dir,
             align_was_playing: false,
+            wishes_later: Default::default(),
+            wishes_made: 0,
             internal_tx,
         }
     }

@@ -2007,11 +2007,11 @@ const LIGHT_FLOOR: f32 = 0.05;
 /// Focus brightens words this many times slower than the others light them.
 const FOCUS_CALM: f32 = 2.2;
 /// How lit (0..1 from the unsung tone to the lit one) the whole current
-/// line is under Focus by syllables or words; only the piece being sung is
-/// lit in full.
-const FOCUS_LINE: f32 = 0.7;
+/// line is under Focus by syllables or words: readable, and plainly dimmer
+/// than the piece being sung, which alone is lit in full.
+const FOCUS_LINE: f32 = 0.3;
 /// Seconds a piece takes to go back to the line's tone once it is sung.
-const FOCUS_FALL: f32 = 0.6;
+const FOCUS_FALL: f32 = 0.25;
 /// A piece stands out for at least this long, however short it is sung.
 const FOCUS_HOLD: f32 = 0.25;
 
@@ -2175,7 +2175,9 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
 {
     let style = look.style;
     let pace = Pace::of(prefs);
-    let rise = pace.rise(style);
+    // A piece under Focus lights as fast as any other (the calm rise is the
+    // whole line's, by letters).
+    let rise = pace.rise(if style == Style::Focus { Style::Wave } else { style });
     let window = smooth_window(look, pace);
     let p = pos.as_secs_f32();
     // Karaoke: each run of pieces is lit up to its own soft front, whatever
@@ -2214,6 +2216,8 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         // drift apart (that read as broken text), a word with a held note
         // too (it glows instead). Reduced motion keeps the wave down as
         // well (it only lights up).
+        // How much (0..1) of the wave's crest this glyph is on.
+        let mut crest = 0.0;
         let lift = match onset {
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
                 // The jump's speed scales its smoothing window too; with
@@ -2224,12 +2228,20 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
                     Some(s) => timing.word_jump(s, p, pace.jump, spread),
                     None => (jump_over(p - at, pace.jump, spread), p - at),
                 };
-                let lift = height * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
+                // Up while it is sung, then down to where sung text rests:
+                // the crest goes along the line with the voice, and a held
+                // note stays up for as long as it is held.
+                let sinks = wave_end(timing, k, look).map_or(f32::INFINITY, |end| end + WAVE_STAY);
+                let sunk = smoothstep((p - sinks) / WAVE_FALL);
+                crest = 1.0 - sunk;
+                let lift = height * (1.0 - (1.0 - WAVE_REST) * sunk) * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
                 // At rest on whole pixels, so a raised word is as crisp as
                 // the rest; in motion to the fraction, so it never steps.
                 // It eases between the two, so it never steps onto or off
-                // the pixel either.
-                let crisp = crisp_lift(t + ONSET_LEAD - (JUMP_SETTLE / pace.jump + spread), hold);
+                // the pixel either: off them before it sinks, onto them
+                // again once it is down.
+                let up = crisp_lift(t + ONSET_LEAD - (JUMP_SETTLE / pace.jump + spread), hold) * smoothstep((sinks - p) / WAVE_STAY);
+                let crisp = up.max(crisp_lift(p - (sinks + WAVE_FALL), hold));
                 lift + ((lift * ppp).round() / ppp - lift) * crisp
             }
             _ => 0.0,
@@ -2262,6 +2274,8 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         let strength = focus * (0.1 + 0.06 * swell);
         let glow_ink = |strength: f32| glow_color.gamma_multiply(strength.clamp(0.0, 1.0));
         glows.push(match (on, style) {
+            // The wave's light is strongest on its crest.
+            (Some(on), Style::Wave) => Ink::solid(glow_ink(strength * on * (WAVE_GLOW_REST + (WAVE_GLOW_CREST - WAVE_GLOW_REST) * crest)), lift),
             (Some(on), _) => Ink::solid(glow_ink(strength * on), lift),
             (None, Style::Karaoke) => swept(Color32::TRANSPARENT, glow_ink(strength)),
             (None, Style::Focus) if !look.words() => Ink::solid(glow_ink(strength), lift),
@@ -2294,6 +2308,33 @@ fn piece_end(timing: &Timing, k: usize, look: Look) -> Option<f32> {
         timing.glyphs.get(k).copied().flatten().map(|s| timing.syllables[s].end)
     }
 }
+
+/// When the piece glyph `k` rises with in the wave is sung: its letter's
+/// syllable by letters, its whole written word by syllables (the word goes
+/// up with them) and by words.
+fn wave_end(timing: &Timing, k: usize, look: Look) -> Option<f32> {
+    let s = timing.glyphs.get(k).copied().flatten();
+    match look.by {
+        By::Letters => s.map(|s| timing.syllables[s].end),
+        By::Words => piece_end(timing, k, look).or_else(|| s.map(|s| timing.syllables[s].end)),
+        By::Syllables => s.map(|s| {
+            let w = timing.syllables[s].word;
+            let first = timing.words[w];
+            let end = timing.words.get(w + 1).copied().unwrap_or(timing.syllables.len()).max(first + 1);
+            timing.syllables[end - 1].end
+        }),
+    }
+}
+
+/// A sung wave piece stays on the crest this long after it is sung.
+const WAVE_STAY: f32 = 0.08;
+/// Seconds it takes to come down from the crest to where sung text rests.
+const WAVE_FALL: f32 = 0.45;
+/// Where sung text rests, as a share of the crest's height.
+const WAVE_REST: f32 = 0.35;
+/// The glow of sung text at rest and on the crest, against the other looks'.
+const WAVE_GLOW_REST: f32 = 0.6;
+const WAVE_GLOW_CREST: f32 = 1.8;
 
 /// Where the glow's copies of a line go.
 const GLOW: [egui::Vec2; 3] = [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0)];
