@@ -532,6 +532,10 @@ impl Playback for Engine {
         self.player.set_eq(on, gains);
     }
 
+    fn set_gain(&mut self, id: u64, gain_db: f32) {
+        self.player.set_gain(id, gain_db);
+    }
+
     fn set_speed(&mut self, id: u64, speed: nikgob_view::SpeedVariant, keep_timbre: bool) {
         if self.on_live.is_none() {
             self.player.set_fx(id, item_fx(speed, keep_timbre));

@@ -83,7 +83,12 @@ impl FactsCache {
             return f;
         }
         let at = modified(path);
-        let facts = read_facts(path);
+        // A file that breaks the tag reader is kept as one without tags,
+        // not read again and again (nor left half read by its thread).
+        let facts = std::panic::catch_unwind(|| read_facts(path)).unwrap_or_else(|_| {
+            log::warn!("{}: its tags could not be read", path.display());
+            FileFacts::default()
+        });
         let mut kept = self.0.lock();
         if kept.len() >= FACTS_KEPT {
             kept.clear();
@@ -96,6 +101,34 @@ impl FactsCache {
     pub(crate) fn tags(&self, path: &Path) -> Option<nikgob_import::tags::TagSet> {
         self.of(path).tags.map(|t| (*t).clone())
     }
+
+    /// A guess at the gain of `path` before its tags are read: the middle
+    /// one of the gains of the files beside it read lately (an album's
+    /// tracks are mastered alike), else of every file read lately, else
+    /// none (0 dB). Files whose tags did not read do not count.
+    pub(crate) fn guess_gain(&self, path: &Path) -> f32 {
+        let kept = self.0.lock();
+        let read = kept.iter().filter(|(_, (_, f))| f.tags.is_some());
+        let dir = path.parent();
+        let beside: Vec<f32> = read
+            .clone()
+            .filter(|(p, _)| p.parent() == dir)
+            .map(|(_, (_, f))| f.gain_db)
+            .collect();
+        let gains = if beside.is_empty() { read.map(|(_, (_, f))| f.gain_db).collect() } else { beside };
+        median(gains).unwrap_or(0.0)
+    }
+}
+
+/// The middle value of `values` (the mean of the two middle ones for an
+/// even count); none of none.
+fn median(mut values: Vec<f32>) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f32::total_cmp);
+    let m = values.len() / 2;
+    Some(if values.len() % 2 == 0 { (values[m - 1] + values[m]) / 2.0 } else { values[m] })
 }
 
 fn modified(path: &Path) -> Option<std::time::SystemTime> {
@@ -568,8 +601,9 @@ impl Resolver {
         });
         let sound = src.map(|s| {
             let path = (s.kind == SourceKind::LocalFile).then(|| self.path(&s.locator));
-            // Read with its gain when it started (once per file).
-            let channels = path.as_deref().and_then(|p| self.facts.of(p).channels);
+            // Read with its gain when it started (once per file, off the
+            // loop: until then without its channels).
+            let channels = path.as_deref().and_then(|p| self.facts.get(p)).and_then(|f| f.channels);
             let mut d = sound_details(s, path.as_deref(), channels, row.duration_ms, check.as_ref());
             // A check of another file than the one there now: no MP3 until
             // the file is checked again.
@@ -794,6 +828,31 @@ mod tests {
     use nikgob_core::model::Artist;
 
     use super::*;
+
+    #[test]
+    fn a_gain_is_guessed_from_the_files_beside_it_then_from_all() {
+        let cache = FactsCache::default();
+        assert_eq!(cache.guess_gain(Path::new("m/a/01.flac")), 0.0);
+        let keep = |path: &str, gain_db: f32, read: bool| {
+            let facts = FileFacts {
+                gain_db,
+                channels: None,
+                tags: read.then(|| Arc::new(nikgob_import::tags::TagSet::default())),
+            };
+            cache.0.lock().insert(PathBuf::from(path), (None, facts));
+        };
+        keep("m/a/02.flac", -8.0, true);
+        keep("m/a/03.flac", -6.0, true);
+        keep("m/a/04.flac", -7.0, true);
+        keep("m/b/01.flac", 2.0, true);
+        keep("m/b/02.flac", 4.0, true);
+        // A file whose tags did not read says nothing.
+        keep("m/a/05.flac", 0.0, false);
+        assert_eq!(cache.guess_gain(Path::new("m/a/01.flac")), -7.0);
+        assert_eq!(cache.guess_gain(Path::new("m/b/03.flac")), 3.0);
+        // Nothing beside it: the middle of all of them.
+        assert_eq!(cache.guess_gain(Path::new("m/c/01.flac")), -6.0);
+    }
 
     #[test]
     fn artist_cards_carry_the_stored_photo_when_the_file_exists() {

@@ -13,6 +13,7 @@ mod better_covers;
 mod stream_covers;
 mod convert;
 mod enrich;
+mod gain;
 mod hd_covers;
 mod home;
 mod home_build;
@@ -147,6 +148,10 @@ pub trait Playback: Send {
     /// from now on, going on from where it is. Positions stay the track's
     /// own time: at 1.2 the position moves 1.2 s a second.
     fn set_speed(&mut self, _id: u64, _speed: nikgob_view::SpeedVariant, _keep_timbre: bool) {}
+    /// Item `id` (playing, preloaded or still opening) takes `gain_db` as
+    /// its gain after all: its file's tags were read after it was handed
+    /// over. One already sounding glides to it, never jumps.
+    fn set_gain(&mut self, _id: u64, _gain_db: f32) {}
     /// Switches the output device (None = system default). Returns true if
     /// the engine was restarted and lost what it was playing.
     fn set_device(&mut self, _device: Option<String>) -> bool {
@@ -668,6 +673,11 @@ struct Worker {
     /// The file of the next track whose tags are read off the loop
     /// ([`Worker::read_facts_ahead`]).
     reading_ahead: Option<PathBuf>,
+    /// Files' tags read off the loop ([`gain`]).
+    facts_reads: gain::FactsReads,
+    /// The playing track whose details wait for its file's tags, and that
+    /// file ([`Worker::details_after_read`]).
+    details_waiting: Option<(PathBuf, TrackId)>,
     /// The library's part of the search, read off the loop ([`library_search`]).
     library_search: library_search::LibrarySearch,
     /// The library's pages, read off the loop ([`library_load`]).
@@ -829,6 +839,8 @@ impl Worker {
             later_tx,
             later_rx,
             reading_ahead: None,
+            facts_reads: gain::FactsReads::default(),
+            details_waiting: None,
             library_search,
             library_load,
         }
@@ -1737,7 +1749,8 @@ impl Worker {
     }
 
     /// The request of `e` from `src`: a file's gain read from its tags
-    /// (once per file, [`convert::FactsCache`]), the length, the speed.
+    /// (once per file, [`convert::FactsCache`]; off the loop when that is
+    /// slow, [`Self::file_gain`]), the length, the speed.
     fn request_from(&mut self, e: Entry, src: &nikgob_core::model::Source) -> PlayRequest {
         let duration = self
             .lib
@@ -1749,7 +1762,7 @@ impl Worker {
         let (source, gain_db) = match src.kind.service() {
             None => {
                 let path = self.res.path(&src.locator);
-                let gain = self.res.facts().of(&path).gain_db;
+                let gain = self.file_gain(e.id, &path);
                 (PlaySource::File(path), gain)
             }
             Some(service) => (
@@ -2111,28 +2124,11 @@ impl Worker {
         if self.reading_ahead.as_ref() == Some(&path) {
             return true;
         }
-        let facts = self.res.facts().clone();
-        let later = self.later_tx.clone();
-        let file = path.clone();
-        let spawned = std::thread::Builder::new().name("nikgob-facts".into()).spawn(move || {
-            facts.of(&file);
-            let _ = later.send(Later::new("the next track's tags", move |w| {
-                if w.reading_ahead.as_ref() == Some(&file) {
-                    w.reading_ahead = None;
-                    w.prepare_next(false);
-                }
-            }));
-        });
-        match spawned {
-            Ok(_) => {
-                self.reading_ahead = Some(path);
-                true
-            }
-            Err(e) => {
-                log::warn!("the next track's tags are read on the loop: {e}");
-                false
-            }
+        if !self.read_facts_off_loop(&path) {
+            return false;
         }
+        self.reading_ahead = Some(path);
+        true
     }
 
     fn pause(&mut self) {

@@ -1440,8 +1440,20 @@ impl Worker {
             .flatten()
             .filter(|s| s.kind.is_local());
         let path = src.as_ref().map(|s| self.res.path(&s.locator));
-        // Read when the track started (or ahead of it, off the loop).
-        let tags = path.as_deref().and_then(|p| self.res.facts().tags(p));
+        // Read when the track started (or ahead of it, off the loop); a
+        // read still on its way brings them when it is done.
+        let tags = match path.as_deref() {
+            Some(p) => match self.res.facts().get(p) {
+                Some(f) => f.tags.map(|t| (*t).clone()),
+                None if self.details_after_read(p, track) => {
+                    // Meanwhile not the text of the track before it.
+                    self.publish(|s| s.lyrics = v::LyricsView { track: Some(track), loading: true, ..Default::default() });
+                    return;
+                }
+                None => self.res.facts().tags(p),
+            },
+            None => None,
+        };
 
         // Info tab: what the file says beyond the basics.
         if let Some(t) = &tags {
@@ -1466,11 +1478,13 @@ impl Worker {
         };
         let row = self.lib.get_track_row(track).ok().flatten();
         let src = self.lib.active_source(track).ok().flatten();
+        // Read first: the info takes the file's channels from them.
+        let path = src.as_ref().filter(|s| s.kind.is_local()).map(|s| self.res.path(&s.locator));
+        let tags = path.as_deref().and_then(|p| self.res.facts().tags(p));
         let mut info = self.res.info(row.as_ref(), src.as_ref());
         // A track that is gone is answered too: with nothing to show.
         info.track = Some(track);
-        let path = src.as_ref().filter(|s| s.kind.is_local()).map(|s| self.res.path(&s.locator));
-        if let Some(t) = path.as_deref().and_then(|p| self.res.facts().tags(p)) {
+        if let Some(t) = tags {
             info.tags.extend(extra_tags(&t));
         }
         self.publish(|s| s.track_info = Some(info));
