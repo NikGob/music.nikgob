@@ -208,7 +208,8 @@ pub const ALL: &[SettingId] = {
         OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, RadioNoRepeat,
         ListShuffle(L::Mix), ListShuffle(L::OwnPlaylist), ListShuffle(L::Album), ListShuffle(L::ReadyPlaylist), ShuffleRadio,
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
-        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, RadioSource,
+        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, AlbumOpens,
+        AlbumVersions, PartialAlbumsOnHome, RadioSource,
         // Тексты.
         Preset(Area::Lyrics), LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsLift, LyricsScale, LyricsLead,
         LyricsDim, LyricsCascade,
@@ -284,7 +285,7 @@ fn spec(id: SettingId) -> Spec {
     match id {
         S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingDir | S::RingStyle | S::Ambient | S::BgColors
         | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu | S::LyricsStreamKeep
-        | S::OpusBitrate | S::RadioNewShare | S::ProfileNames | S::LikeDownload | S::AlbumLike | S::SingleLike
+        | S::OpusBitrate | S::RadioNewShare | S::ProfileNames | S::LikeDownload | S::AlbumLike | S::SingleLike | S::AlbumOpens
         | S::LikedAlbumsPlace | S::UpgradeBar | S::UpgradeAuto | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
@@ -398,6 +399,8 @@ fn spec(id: SettingId) -> Spec {
         S::PlayerButton(B::Queue) => Spec::Switch(|p| &mut p.player_buttons.queue),
         S::PlayerButton(B::Lyrics) => Spec::Switch(|p| &mut p.player_buttons.lyrics),
         S::NavRoot => Spec::Switch(|p| &mut p.nav_root),
+        S::AlbumVersions => Spec::Switch(|p| &mut p.album_versions),
+        S::PartialAlbumsOnHome => Spec::Switch(|p| &mut p.partial_albums_on_home),
         S::TrackMenu => Spec::Fixed(Action, "a row that opens the list of the track menu's items; the sweep never opens it"),
         S::HiddenMixes => Spec::Fixed(List, "shown only while a mix is hidden from Главная (⋮ → «Не предлагать этот микс»)"),
         S::GraphUse => Spec::Switch(|p| &mut p.graph_use),
@@ -904,6 +907,7 @@ mod tests {
         match id {
             S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Equalizer | S::TrackSpeed | S::KeepTimbre
             | S::Autoplay | S::AutoplayWorld | S::ListShuffle(_) | S::Marks | S::PlayerButton(_) | S::NavRoot
+            | S::AlbumOpens | S::AlbumVersions | S::PartialAlbumsOnHome
 
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
             | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere

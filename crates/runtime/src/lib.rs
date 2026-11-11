@@ -1166,8 +1166,9 @@ impl Worker {
                 self.preload_next();
                 self.publish_player();
             }
-            Command::PlayRelease { id, start, shuffle } => self.play_release(id, start, shuffle, false),
-            Command::PlayReleaseWhole { id, start, shuffle } => self.play_release(id, start, shuffle, true),
+            Command::PlayRelease { id, start, shuffle } => self.play_release(id, start, shuffle, None),
+            Command::PlayReleaseWhole { id, start, shuffle } => self.play_release(id, start, shuffle, Some(true)),
+            Command::PlayReleaseMine { id, start, shuffle } => self.play_release(id, start, shuffle, Some(false)),
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id, start);
                 let name = format!("плейлиста «{name}»");
@@ -2783,6 +2784,7 @@ impl Worker {
             (p.album_versions, p.album_opens_whole)
         };
         let mut detail = self.res.release_detail(&release, &listing, liked, versions, opens_whole);
+        detail.added_whole = self.lib.release_choice(id).is_ok_and(|(whole, _)| whole);
         (detail.released, detail.label) = self.release_facts(&release, &detail.tracks);
         self.publish(|s| {
             s.release = Some(detail);
@@ -3228,13 +3230,14 @@ impl Worker {
     /// The tracks an album plays as its page is set to open
     /// ([`Self::release_tracks_for`]).
     fn release_tracks(&mut self, id: nikgob_core::model::ReleaseId) -> Vec<TrackId> {
-        self.release_tracks_for(id, false, None).0
+        self.release_tracks_for(id, None, None).0
     }
 
     /// The tracks an album plays, in its order, and whether that is all of
     /// it. Of an album only some songs of which are the user's: those songs
-    /// («Мои треки»), unless the whole album is asked for (`whole`, «Слушать
-    /// весь альбом»), the album opens whole (its own choice, else
+    /// («Мои треки»), unless the whole album is asked for (`scope`
+    /// `Some(true)`, «Слушать весь альбом»), the album opens whole and
+    /// nothing else is asked for (`None`; its own choice, else
     /// [`nikgob_view::Prefs::album_opens_whole`]) or `start` is a song
     /// outside them (then all of it, from there). Of any other album its
     /// songs (all of them; an album added whole without the ones left out
@@ -3244,7 +3247,7 @@ impl Worker {
     fn release_tracks_for(
         &mut self,
         id: nikgob_core::model::ReleaseId,
-        whole: bool,
+        scope: Option<bool>,
         start: Option<TrackId>,
     ) -> (Vec<TrackId>, bool) {
         let Some(listing) = self.log_err("альбом", self.lib.release_listing(id)).flatten() else {
@@ -3253,8 +3256,8 @@ impl Worker {
         let opens_whole = self.state.read().prefs.album_opens_whole;
         let all = listing.track_ids();
         let mine = listing.wanted_ids();
-        let open_whole = listing.progress.partial() && listing.view.unwrap_or(opens_whole);
-        if whole || open_whole || mine.is_empty() || start.is_some_and(|s| !mine.contains(&s)) {
+        let whole = scope.unwrap_or_else(|| listing.progress.partial() && listing.view.unwrap_or(opens_whole));
+        if whole || mine.is_empty() || start.is_some_and(|s| !mine.contains(&s)) {
             (all, true)
         } else {
             (mine, false)
@@ -3308,10 +3311,11 @@ impl Worker {
         }
     }
 
-    /// Plays an album ([`Command::PlayRelease`]; `whole`:
-    /// [`Command::PlayReleaseWhole`]).
-    fn play_release(&mut self, id: nikgob_core::model::ReleaseId, start: Option<TrackId>, shuffle: bool, whole: bool) {
-        let (ids, whole) = self.release_tracks_for(id, whole, start);
+    /// Plays an album ([`Command::PlayRelease`]; `scope` `Some(true)`:
+    /// [`Command::PlayReleaseWhole`], `Some(false)`:
+    /// [`Command::PlayReleaseMine`]).
+    fn play_release(&mut self, id: nikgob_core::model::ReleaseId, start: Option<TrackId>, shuffle: bool, scope: Option<bool>) {
+        let (ids, whole) = self.release_tracks_for(id, scope, start);
         let title = self
             .lib
             .get_release(id)

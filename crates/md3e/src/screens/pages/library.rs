@@ -579,7 +579,12 @@ fn albums_tab(
         .filter(|r| match pages.release_source {
             _ if state.prefs.library_only_downloaded => true,
             1 => r.local_tracks > 0,
-            2 => r.total_tracks.map_or(r.local_tracks == 0, |t| r.local_tracks < t),
+            // An album only some songs of which are the user's lacks only
+            // those without a file.
+            2 => match r.mine {
+                Some(n) => r.mine_local < n,
+                None => r.total_tracks.map_or(r.local_tracks == 0, |t| r.local_tracks < t),
+            },
             _ => true,
         })
         .filter(|r| shelf::release_matches(words, r))
@@ -828,7 +833,8 @@ fn release_row(ui: &mut Ui, r: &ReleaseCard, out: &mut Vec<Command>) -> Option<R
     let s = Theme::get(ui.ctx()).scheme;
     let badge = widgets::card_badge(r);
     let wide = ui.available_width() >= 640.0;
-    let tracks = r.total_tracks.unwrap_or(r.local_tracks);
+    // An album only some songs of which are the user's: those songs.
+    let tracks = r.mine.unwrap_or(r.total_tracks.unwrap_or(r.local_tracks));
     let o = ListItem::new(&r.title)
         .supporting(&r.artist)
         .leading(Leading::Image(r.cover.as_ref().map(|c| c.uri()), Icon::Album))

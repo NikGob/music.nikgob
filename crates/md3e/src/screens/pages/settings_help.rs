@@ -237,6 +237,13 @@ pub enum SettingId {
     /// tracks, the artists not recommended and the tracks with a speed of
     /// their own, each taken back there.
     Marks,
+    /// «Песни из альбомов → Альбом открывается»: «Мои треки» or «Весь
+    /// альбом» of an album only some songs of which are the user's.
+    AlbumOpens,
+    /// «Распознавать другие версии».
+    AlbumVersions,
+    /// «Такие альбомы на главной».
+    PartialAlbumsOnHome,
     /// The mixes of «Миксы для тебя» left out, with «Вернуть».
     HiddenMixes,
     /// «Разделы главной»: the order of Главная's sections and which show.
@@ -459,9 +466,8 @@ impl SettingId {
             OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | KeepTimbre | Autoplay | AutoplayWorld
             | ListShuffle(_) | ShuffleRadio
             | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
-            | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | Marks => {
-                TAB_MUSIC
-            }
+            | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | Marks | AlbumOpens | AlbumVersions
+            | PartialAlbumsOnHome => TAB_MUSIC,
             LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsScale | LyricsLead
             | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade | LyricsGap
             | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | WaveFallback | LyricsReturn | LyricsGenius
@@ -528,6 +534,9 @@ impl SettingId {
             | DislikeInRecs | DemoProfile => Level::Dev,
             KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
             | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere
+            // Songs of albums: how an album only some songs of which are the
+            // user's shows.
+            | AlbumOpens | AlbumVersions | PartialAlbumsOnHome
             // How strong, how fast, how long.
             | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsDim | LyricsSoftDepth | LyricsSoftStrength
             | LyricsSoftFade | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsReturn | CoverDir | CoverSpinSpeed
@@ -712,6 +721,9 @@ impl SettingId {
             DislikeSkipEverywhere => "Пропускать везде",
             DislikeInRecs => "Дизлайк в рекомендациях",
             Marks => "Не нравится и скорость",
+            AlbumOpens => "Альбом открывается",
+            AlbumVersions => "Распознавать другие версии",
+            PartialAlbumsOnHome => "Такие альбомы на главной",
             HiddenMixes => "Скрытые миксы",
             GraphUse => "Похожее по слушателям",
             GraphServices => "Спрашивать YouTube Music и Deezer",
@@ -974,6 +986,9 @@ impl SettingId {
             DislikeSkipEverywhere => "Треки с «Не нравится» и исполнители, которых не рекомендовать, пропускаются и в твоих альбомах и плейлистах. Выключено — только в миксах, радио и автовоспроизведении; трек, выбранный тобой, играет всегда.",
             DislikeInRecs => "«Не нравится» чуть опускает и самые похожие по звуку треки. Выключено — уходит только сам трек. Исполнителя дизлайк не трогает.",
             Marks => "Треки с «Не нравится», исполнители, которых не рекомендовать, и треки со своей скоростью. Там же их можно снять или сбросить.",
+            AlbumOpens => "Альбом, из которого у тебя только часть песен (одна песня из саундтрека, сингл с инструменталом), открывается и играет как твои треки или целиком. «Весь альбом» на его странице — в один клик; у каждого альбома можно выбрать своё в ⋮.",
+            AlbumVersions => "Инструментал, караоке, off vocal и ремикс песни из того же альбома, которые ты не выбирал, стоят на странице «Весь альбом» отдельно, после остальных. Выбранная версия остаётся твоей песней.",
+            PartialAlbumsOnHome => "Альбом, из которого у тебя только часть песен, стоит на полках альбомов главной («Продолжить», «Из твоей библиотеки», «Недавно добавлено»). Выключено — на главной только его песни.",
             HiddenMixes => "Миксы, убранные с главной через ⋮ → «Не предлагать этот микс». «Вернуть» снова показывает микс.",
             GraphUse => "Радио, миксы и новое учитывают, что другие люди слушают вместе: радио YouTube Music, похожих исполнителей Deezer, ListenBrainz и Last.fm. Так рекомендации работают и без истории, по одним твоим файлам. Выключи — остаются звук, твоя история и тип песни.",
             GraphServices => "Понемногу и в фоне спрашивать у YouTube Music радио твоих треков, а у YouTube Music и Deezer — похожих исполнителей. Ответы хранятся у тебя и работают без сети.",
@@ -1152,6 +1167,10 @@ impl SettingId {
                 c!("Только песня", "Лайк песни — только лайк песни."),
                 c!("И сам сингл", "Лайк песни из сингла кладёт сингл в «Любимые альбомы», снятый лайк убирает."),
             ],
+            Self::AlbumOpens => &[
+                c!("Мои треки", "Страница показывает твои песни этого альбома, «Слушать» играет их."),
+                c!("Весь альбом", "Страница показывает весь альбом, «Слушать» играет его целиком. В библиотеку ничего не добавляется."),
+            ],
             Self::LikedAlbumsPlace => &[
                 c!("Отдельно", "Своя полка «Любимые альбомы» в библиотеке."),
                 c!("С плейлистами", "Альбомы стоят среди плейлистов, по времени лайка."),
@@ -1305,6 +1324,7 @@ impl SettingId {
             Self::UpgradeAuto => usize::from(p.upgrade_auto),
             Self::PlaylistSync => sync_index(p.playlist_sync_default),
             Self::AlbumLike => usize::from(p.album_like_tracks),
+            Self::AlbumOpens => usize::from(p.album_opens_whole),
             Self::SingleLike => usize::from(p.single_like_saves),
             Self::LikedAlbumsPlace => usize::from(p.liked_albums_with_playlists),
             Self::RadioSource if p.mixes_downloaded_only => 0,
@@ -1392,6 +1412,7 @@ impl SettingId {
             Self::UpgradeAuto => p.upgrade_auto = i == 1,
             Self::PlaylistSync => p.playlist_sync_default = v::PlaylistSyncMode::ALL[i.min(2)],
             Self::AlbumLike => p.album_like_tracks = i == 1,
+            Self::AlbumOpens => p.album_opens_whole = i == 1,
             Self::SingleLike => p.single_like_saves = i == 1,
             Self::LikedAlbumsPlace => p.liked_albums_with_playlists = i == 1,
             Self::RadioSource => {
@@ -2946,6 +2967,8 @@ mod tests {
             (S::DislikeButton, TAB_MUSIC),
             (S::Marks, TAB_MUSIC),
             (S::ListShuffle(v::ListKind::OwnPlaylist), TAB_MUSIC),
+            (S::AlbumOpens, TAB_MUSIC),
+            (S::PartialAlbumsOnHome, TAB_MUSIC),
             (S::PlayerButton(v::PlayerButton::Sound), TAB_LOOK),
             (S::NavRoot, TAB_LOOK),
         ] {
@@ -2999,7 +3022,7 @@ mod tests {
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
             S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto, S::FakeFlac, S::ListShuffle(v::ListKind::Mix),
-            S::ListShuffle(v::ListKind::Album),
+            S::ListShuffle(v::ListKind::Album), S::AlbumOpens,
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {

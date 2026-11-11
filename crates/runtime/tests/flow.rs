@@ -844,6 +844,66 @@ fn only_downloaded_still_plays_an_album_whole() {
     wait_for(&rt, "the whole album again", |s| playing(s, 0, 3, true));
 }
 
+/// An album only one song of which is the user's (a file; its
+/// instrumental only streams from the album's tracklist): «Слушать» and
+/// «Перемешать» play that song, «Слушать весь альбом» both, «Мои треки»
+/// the song again, a pick of the instrumental the whole album from it;
+/// added whole, the album plays all of it.
+#[test]
+fn an_album_of_one_song_of_the_users_plays_that_song() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Song", credit.clone())).unwrap();
+    let mut song = Track::new("Song", credit.clone());
+    song.release_id = Some(release.id);
+    song.track_no = 1;
+    let song = lib.upsert_track(&song).unwrap();
+    let file = dir.path().join("song.wav");
+    write_wav(&file, 2.0);
+    lib.add_source(&Source::new(song.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+    let mut inst = Track::new("Song (Instrumental)", credit.clone());
+    inst.release_id = Some(release.id);
+    inst.track_no = 2;
+    let inst = lib.upsert_track(&inst).unwrap();
+    lib.add_source(&Source::new(inst.id, SourceKind::Spotify, "spotify:track:inst", Codec::Vorbis)).unwrap();
+    assert!(lib.get_release_row(release.id).unwrap().unwrap().progress().partial());
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let queued = |s: &ViewState| {
+        let mut ids: Vec<_> = s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect();
+        ids.extend(s.queue.prev.iter().map(|e| e.track.id));
+        ids
+    };
+    // Each step changes the queue, so a state of the step before never
+    // passes for it.
+    rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the whole album once", |s| queued(s).len() == 2);
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: true });
+    wait_for(&rt, "the user's song, shuffled", |s| queued(s) == [song.id]);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(inst.id), shuffle: false });
+    wait_for(&rt, "the whole album from the instrumental", |s| queued(s).len() == 2);
+    rt.send(Command::PlayReleaseMine { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "«Мои треки»", |s| queued(s) == [song.id]);
+    rt.send(Command::AddWholeAlbum { id: release.id, on: true });
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the album added whole", |s| queued(s).len() == 2);
+}
+
 /// «Сыграть следующим» of an album while a track plays: the whole album in
 /// its order right after the current track, then the rest of the queue;
 /// under «Только скачанное» too, as playing it.

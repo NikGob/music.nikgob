@@ -826,6 +826,9 @@ fn album_of(v: &ViewState) -> Album {
                     liked: false,
                     added_at: 0,
                     better: false,
+                    mine: None,
+                    mine_local: 12,
+                    whole: false,
                 },
                 released: None,
                 count: 12,
@@ -1301,6 +1304,8 @@ fn paint_scene(
                 released: a.released,
                 album_date: v.prefs.album_date,
                 count: a.count,
+                local: a.card.local_tracks,
+                counts: true,
                 total: a.total,
                 facts: a.facts.iter().map(String::as_str).collect(),
             };

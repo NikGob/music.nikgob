@@ -544,6 +544,8 @@ impl Resolver {
             marks,
             partial,
             open_whole: partial && listing.view.unwrap_or(opens_whole),
+            // The page's load asks the library.
+            added_whole: false,
         }
     }
 

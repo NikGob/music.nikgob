@@ -26,6 +26,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     }
     switch(ui, Id::ShuffleRadio, &mut p.shuffle_radio);
 
+    albums(ui, p);
     recommendations(ui, p);
     dislikes(ui, p, pages);
 }
@@ -67,6 +68,17 @@ fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     child(ui, !speed, |ui| switch(ui, Id::KeepTimbre, &mut p.keep_timbre));
 }
 
+
+/// «Песни из альбомов»: an album only some songs of which are the user's
+/// (one song of an OST, a single with its instrumental): what it opens on
+/// and plays, other versions of its songs apart, Главная's shelves. All
+/// «Подробно»; an album's own choice (its ⋮) wins.
+fn albums(ui: &mut Ui, p: &mut Prefs) {
+    group(ui, "Песни из альбомов");
+    rows::segments(ui, Id::AlbumOpens, p);
+    switch(ui, Id::AlbumVersions, &mut p.album_versions);
+    switch(ui, Id::PartialAlbumsOnHome, &mut p.partial_albums_on_home);
+}
 
 /// «Рекомендации»: how much new music, from where, how much of it at
 /// random, the unheard, the listeners' graph.

@@ -8,7 +8,7 @@ use nikgob_shapes::MaterialShape;
 use std::collections::HashMap;
 
 use nikgob_view::{
-    ArtistCard, Command, LIKED_PLAYLIST, LikeTarget, PlaylistCard, PlaylistId, ReleaseCard, ReleaseId,
+    AlbumMark, ArtistCard, Command, LIKED_PLAYLIST, LikeTarget, PlaylistCard, PlaylistId, ReleaseCard, ReleaseId,
     ReleaseLine, Route, SourceKind, Status, TrackId, TrackRow, ViewState, WishlistScope, WishlistStatus, WishlistView,
 };
 
@@ -133,8 +133,12 @@ pub fn wrapped(ui: &Ui, text: &str, role: crate::TypeStyle, color: Color32, widt
     crate::typography::layout(ui.painter(), job)
 }
 
-/// "3 из 12" when a release is incomplete locally.
+/// "3 из 12" when a release is incomplete locally. Never for an album only
+/// some songs of which are the user's: the rest is not theirs to lack.
 pub fn progress_badge(r: &ReleaseCard) -> Option<String> {
+    if r.mine.is_some() {
+        return None;
+    }
     match r.total_tracks {
         Some(t) if r.local_tracks < t => Some(format!("{} из {}", r.local_tracks, t)),
         _ => None,
@@ -142,9 +146,13 @@ pub fn progress_badge(r: &ReleaseCard) -> Option<String> {
 }
 
 /// The badge on an album card: "стрим" when the library has none of its
-/// files (it is liked or in a playlist from a service), else "3 из 12".
+/// files (it is liked or in a playlist from a service), else "3 из 12";
+/// of an album only some songs of which are the user's, "стрим" while none
+/// of those songs has a file, else nothing.
 pub fn card_badge(r: &ReleaseCard) -> Option<String> {
-    if r.local_tracks == 0 {
+    if r.mine.is_some() {
+        (r.mine_local == 0).then(|| "стрим".to_owned())
+    } else if r.local_tracks == 0 {
         Some("стрим".to_owned())
     } else {
         progress_badge(r)
@@ -190,6 +198,51 @@ pub fn release_card(
     }
 }
 
+/// [`release_card`] of an album looked for (search): one only some songs of
+/// which are the user's opens on «Весь альбом» and plays whole.
+pub fn release_card_whole(
+    ui: &mut Ui,
+    r: &ReleaseCard,
+    width: f32,
+    row: &str,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let from = out.len();
+    let route = release_card(ui, r, width, row, out);
+    whole_album(ui.ctx(), r, from, out, route)
+}
+
+/// What a card of an album looked for did, as the whole album: its plays
+/// pushed since `from` play all of it, and its page opens on «Весь альбом».
+pub fn whole_album(ctx: &egui::Context, r: &ReleaseCard, from: usize, out: &mut [Command], route: Option<Route>) -> Option<Route> {
+    if r.mine.is_none() {
+        return route;
+    }
+    for c in out.iter_mut().skip(from) {
+        if let Command::PlayRelease { id, start, shuffle } = *c
+            && id == r.id
+        {
+            *c = Command::PlayReleaseWhole { id, start, shuffle };
+        }
+    }
+    if route == Some(Route::Release(r.id)) {
+        show_whole(ctx, r.id, true);
+    }
+    route
+}
+
+/// The key of what the page of album `id` shows this time: «Весь альбом»
+/// (true) or «Мои треки».
+pub fn whole_key(id: ReleaseId) -> Id {
+    Id::new(("rel-view", id))
+}
+
+/// The page of album `id` shows «Весь альбом» (or «Мои треки») until
+/// switched.
+pub fn show_whole(ctx: &egui::Context, id: ReleaseId, whole: bool) {
+    ctx.data_mut(|d| d.insert_temp(whole_key(id), whole));
+}
+
 /// The like of an album: into (or out of) «Любимые альбомы».
 pub fn album_like_label(liked: bool) -> &'static str {
     super::like_label(liked)
@@ -206,8 +259,23 @@ pub enum ReleaseAct {
     Like,
     Artist,
     Share,
-    /// «Скачать недостающие»: the tracks it lacks to «Хочу скачать».
+    /// «Слушать весь альбом» of an album only some songs of which are the
+    /// user's: once, nothing added.
+    PlayWhole,
+    /// «Добавить весь альбом в библиотеку»: nothing downloads.
+    AddWhole,
+    /// «Оставить только мои треки»: the album added whole goes back to the
+    /// songs chosen one by one (its page).
+    KeepMine,
+    /// What the album opens on and plays: the whole album (true) or the
+    /// user's songs (its page).
+    OpensWhole(bool),
+    /// «Скачать недостающие»: the tracks it lacks to «Хочу скачать» (of an
+    /// album only some songs of which are the user's, those songs).
     Download,
+    /// «Скачать весь альбом» of an album only some songs of which are the
+    /// user's.
+    DownloadWhole,
     /// «Найти качество лучше»: a better copy of its files that can get one.
     Better,
     Trash,
@@ -222,9 +290,13 @@ pub enum ReleaseAct {
 pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     use ReleaseAct as A;
     let mut rows = Vec::new();
+    let partial = r.mine.is_some();
     if !on_page {
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
+    }
+    if partial {
+        rows.push(Row::Item(A::PlayWhole, MenuItem::new("Слушать весь альбом").icon(Icon::Album)));
     }
     rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
@@ -233,18 +305,26 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
         rows.push(Row::Item(A::Like, MenuItem::new(album_like_label(r.liked)).icon(Icon::Favorite).selected(r.liked)));
     }
     rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    if partial {
+        rows.push(Row::Item(A::AddWhole, MenuItem::new("Добавить весь альбом в библиотеку").icon(Icon::LibraryMusic)));
+    }
     rows.push(Row::Divider);
     if !r.artists.linked().is_empty() {
         rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
-    let download = !on_page && progress_badge(r).is_some();
+    // An album only some songs of which are the user's lacks only those
+    // without a file; the whole of it is a download of its own.
+    let download = !on_page && (progress_badge(r).is_some() || r.mine.is_some_and(|n| r.mine_local < n));
     let better = r.better && r.local_tracks > 0;
-    if download || better {
+    if download || better || partial {
         rows.push(Row::Divider);
     }
     if download {
         rows.push(Row::Item(A::Download, MenuItem::new("Скачать недостающие").icon(Icon::Download)));
+    }
+    if partial {
+        rows.push(Row::Item(A::DownloadWhole, MenuItem::new("Скачать весь альбом").icon(Icon::Download)));
     }
     if better {
         rows.push(Row::Item(A::Better, MenuItem::new(super::FIND_BETTER).icon(Icon::Search)));
@@ -268,7 +348,15 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
         // Several artists: a chooser.
         ReleaseAct::Artist => return artist_links::go_to(ctx, artist_links::library(&r.artists)),
         ReleaseAct::Share => out.push(Command::Share(nikgob_view::ShareTarget::Release(r.id))),
+        ReleaseAct::PlayWhole => out.push(Command::PlayReleaseWhole { id: r.id, start: None, shuffle: false }),
+        ReleaseAct::AddWhole => out.push(Command::AddWholeAlbum { id: r.id, on: true }),
+        ReleaseAct::KeepMine => out.push(Command::AddWholeAlbum { id: r.id, on: false }),
+        ReleaseAct::OpensWhole(whole) => {
+            show_whole(ctx, r.id, whole);
+            out.push(Command::AlbumOpensWhole { id: r.id, whole });
+        }
         ReleaseAct::Download => out.push(Command::DownloadRelease(r.id)),
+        ReleaseAct::DownloadWhole => out.push(Command::DownloadWholeRelease(r.id)),
         ReleaseAct::Better => out.push(Command::FindBetterAlbum(r.id)),
         ReleaseAct::Trash => super::request_release_delete(ctx, r.id, &r.title, false),
         ReleaseAct::Purge => super::request_release_delete(ctx, r.id, &r.title, true),
@@ -923,6 +1011,9 @@ fn artist_menus(resp: &Response, more: Option<&Response>, a: &ArtistCard, out: &
 #[derive(Clone, Debug)]
 pub enum PlayFrom {
     Release(nikgob_view::ReleaseId),
+    /// The page of an album only some songs of which are the user's:
+    /// «Весь альбом» (true) or «Мои треки».
+    ReleaseAs(nikgob_view::ReleaseId, bool),
     Playlist(nikgob_view::PlaylistId),
     Tracks(Vec<nikgob_view::TrackId>, String),
     /// The merged «Всё» search: a queue of library and stream tracks,
@@ -957,6 +1048,16 @@ pub struct TrackListOpts<'a> {
     /// The lines to draw, in order (an album page: its tracks and the
     /// places no track has); none: every track.
     pub lines: Option<&'a [ReleaseLine]>,
+    /// «Весь альбом» of an album only some songs of which are the user's:
+    /// what each track is to them; a row puts its song in (+) or takes it
+    /// out (✓) of their songs.
+    pub album_marks: Option<&'a [AlbumMark]>,
+    /// The line other versions of the album's songs start at: a «Другие
+    /// версии» header above it.
+    pub versions_at: Option<usize>,
+    /// A place without a track has no ⬇ (its album is not the user's
+    /// whole).
+    pub no_hole_download: bool,
 }
 
 /// Tracks of different artists on one release (a compilation).
@@ -1017,15 +1118,19 @@ pub fn track_list_ext(
     // An album on several discs numbers each disc from 1: a "Диск N" line
     // above each, or the numbers would read as broken.
     let discs = lead == Lead::Number && lines.iter().any(|l| disc_of(l) != disc_of(&lines[0]));
+    let versions_at = opts.versions_at.filter(|&at| at < lines.len());
     let wish = WishIndex::of(ui.ctx(), &state.downloads.wishlist);
     let album = match from {
-        PlayFrom::Release(r) => Some(*r),
+        PlayFrom::Release(r) | PlayFrom::ReleaseAs(r, _) => Some(*r),
         _ => None,
     };
     let mut row = |ui: &mut Ui, j: usize, nav: &mut Option<Route>| -> Option<Response> {
         let i = match lines[j] {
             ReleaseLine::Track(i) => i,
-            ReleaseLine::Hole { no, .. } => return Some(hole_row(ui, id, j, no, album, &wish, state, out)),
+            ReleaseLine::Hole { no, .. } => {
+                let album = album.filter(|_| !opts.no_hole_download);
+                return Some(hole_row(ui, id, j, no, album, &wish, state, out));
+            }
         };
         let t = &tracks[i];
         let o = track_row(ui, id, i, t, lead, two_line, opts, &wish, state, out);
@@ -1072,15 +1177,22 @@ pub fn track_list_ext(
         }
         Some(o.response)
     };
-    let rects: Vec<Rect> = if discs {
+    let rects: Vec<Rect> = if discs || versions_at.is_some() {
         let mut rects = Vec::with_capacity(lines.len());
         for j in 0..lines.len() {
             let disc = disc_of(&lines[j]);
-            if j == 0 || disc_of(&lines[j - 1]) != disc {
+            let head = if versions_at == Some(j) {
+                Some("Другие версии".to_owned())
+            } else if discs && versions_at.is_none_or(|at| j < at) && (j == 0 || disc_of(&lines[j - 1]) != disc) {
+                Some(format!("Диск {disc}"))
+            } else {
+                None
+            };
+            if let Some(head) = head {
                 ui.add_space(if j == 0 { 4.0 } else { 16.0 });
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(TypeRole::TitleSmall.style().rich(format!("Диск {disc}"), s.on_surface_variant));
+                    ui.label(TypeRole::TitleSmall.style().rich(head, s.on_surface_variant));
                 });
                 ui.add_space(4.0);
             }
@@ -1213,6 +1325,9 @@ fn track_row(
     let streams = matches!(t.source, Some(SourceKind::Spotify | SourceKind::Youtube));
     let wished = (!t.has_local).then(|| wish.of_track(Some(t.id), t.release_id)).flatten();
     let track_id = t.id;
+    // «Весь альбом»: the song is one of the user's (✓, a click takes it out)
+    // or not (+, a click puts it in).
+    let mark = opts.album_marks.and_then(|m| m.get(i).copied()).zip(t.release_id);
     let (liked, has_local) = (t.liked, t.has_local);
     let mut menu_resp: Option<Response> = None;
     let mut item = ListItem::new(&t.title)
@@ -1225,6 +1340,17 @@ fn track_row(
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let m = ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("track-more", id, i)));
                 menu_resp = Some(m);
+                if let Some((mark, release)) = mark {
+                    let mine = mark == AlbumMark::Mine;
+                    let b = IconButton::new(if mine { Icon::Check } else { Icon::Add })
+                        .size(Size::Xs)
+                        .selected(mine)
+                        .tooltip(if mine { "Убрать из моих треков" } else { "Добавить в мои треки" })
+                        .id_salt(("track-mine", id, i));
+                    if ui.add(b).clicked() {
+                        out.push(Command::AlbumTrackMine { release, track: track_id, mine: !mine });
+                    }
+                }
                 if !has_local {
                     match wished {
                         Some(st) => {
@@ -1503,6 +1629,16 @@ fn play_from(from: &PlayFrom, tracks: &[TrackRow], i: usize) -> Command {
             start: Some(tracks[i].id),
             shuffle: false,
         },
+        PlayFrom::ReleaseAs(id, true) => Command::PlayReleaseWhole {
+            id: *id,
+            start: Some(tracks[i].id),
+            shuffle: false,
+        },
+        PlayFrom::ReleaseAs(id, false) => Command::PlayReleaseMine {
+            id: *id,
+            start: Some(tracks[i].id),
+            shuffle: false,
+        },
         PlayFrom::Playlist(id) => Command::PlayPlaylist {
             id: *id,
             start: Some(tracks[i].id),
@@ -1718,8 +1854,8 @@ pub fn edition_offers(ui: &mut Ui, state: &ViewState, artist: Option<&str>, out:
 #[cfg(test)]
 mod menu_tests {
     use super::{
-        ArtistAct, PlaylistAct, PlaylistMenuOf, ReleaseAct, Row, artist_rows, playlist_command, playlist_rows, release_rows,
-        row_acts,
+        ArtistAct, PlaylistAct, PlaylistMenuOf, ReleaseAct, Row, artist_rows, card_badge, playlist_command, playlist_rows,
+        progress_badge, release_apply, release_rows, row_acts,
     };
     use nikgob_view::{ArtistLinks, Command, PlaylistId, PlaylistSyncMode, ReleaseCard, ReleaseId, ReleaseType};
 
@@ -1804,6 +1940,9 @@ mod menu_tests {
             liked: false,
             added_at: 0,
             better: false,
+            mine: None,
+            mine_local: 1,
+            whole: false,
         };
         let card = row_acts(&release_rows(&r, false));
         let page = row_acts(&release_rows(&r, true));
@@ -1839,6 +1978,49 @@ mod menu_tests {
         assert!(!row_acts(&release_rows(&r, false)).contains(&ReleaseAct::Better));
         let gone = ReleaseCard { local_tracks: 0, ..mp3 };
         assert!(!row_acts(&release_rows(&gone, false)).contains(&ReleaseAct::Better));
+    }
+
+    /// An album only some songs of which are the user's: its card counts
+    /// those songs (no «1 из 13»), its menus play it whole once, add it
+    /// whole, download the user's songs it lacks or the whole of it.
+    #[test]
+    fn an_album_of_a_few_songs_of_the_users_owes_nothing_else() {
+        let r = ReleaseCard {
+            id: ReleaseId::new(),
+            title: "OST".into(),
+            artist: "Artist".into(),
+            artists: ArtistLinks::default(),
+            year: None,
+            release_type: ReleaseType::Album,
+            cover: None,
+            local_tracks: 1,
+            total_tracks: Some(13),
+            liked: false,
+            added_at: 0,
+            better: false,
+            mine: Some(1),
+            mine_local: 1,
+            whole: false,
+        };
+        assert_eq!(progress_badge(&r), None);
+        assert_eq!(card_badge(&r), None);
+        let streams = ReleaseCard { mine_local: 0, ..r.clone() };
+        assert_eq!(card_badge(&streams).as_deref(), Some("стрим"));
+        let acts = row_acts(&release_rows(&r, false));
+        for a in [ReleaseAct::PlayWhole, ReleaseAct::AddWhole, ReleaseAct::DownloadWhole] {
+            assert!(acts.contains(&a), "{a:?}");
+        }
+        assert!(!acts.contains(&ReleaseAct::Download), "nothing of the user's lacks a file");
+        let lacking = ReleaseCard { mine: Some(2), ..r.clone() };
+        assert!(row_acts(&release_rows(&lacking, false)).contains(&ReleaseAct::Download));
+        let mut out = Vec::new();
+        let ctx = egui::Context::default();
+        release_apply(&ctx, ReleaseAct::PlayWhole, &r, &mut out);
+        release_apply(&ctx, ReleaseAct::AddWhole, &r, &mut out);
+        assert_eq!(
+            out,
+            [Command::PlayReleaseWhole { id: r.id, start: None, shuffle: false }, Command::AddWholeAlbum { id: r.id, on: true }]
+        );
     }
 
     /// The artist's right-click menu and its page's ⋮: one list, the page

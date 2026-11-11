@@ -203,6 +203,9 @@ pub struct ReleaseDetail {
     /// The page opens on «Весь альбом» (the album's own choice, else the
     /// setting); «Слушать» on a card plays it whole.
     pub open_whole: bool,
+    /// The whole album was added to the library («Добавить весь альбом в
+    /// библиотеку»): its ⋮ takes it back to the user's songs.
+    pub added_whole: bool,
 }
 
 impl ReleaseDetail {
@@ -3033,6 +3036,10 @@ pub enum Command {
     /// «Слушать весь альбом»: every song of an album, once; nothing is
     /// added to the library or downloaded.
     PlayReleaseWhole { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
+    /// «Мои треки» of an album only some songs of which are the user's:
+    /// those songs, whatever the album opens on (a song picked outside them
+    /// plays the whole album from it).
+    PlayReleaseMine { id: ReleaseId, start: Option<TrackId>, shuffle: bool },
     PlayPlaylist { id: PlaylistId, start: Option<TrackId>, shuffle: bool },
     PlayArtist { id: ArtistId, shuffle: bool },
     /// These tracks from the one at `start` (the user picked it).

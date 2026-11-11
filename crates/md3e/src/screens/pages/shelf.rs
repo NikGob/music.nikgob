@@ -232,6 +232,9 @@ mod tests {
             liked: false,
             added_at,
             better: false,
+            mine: None,
+            mine_local: 1,
+            whole: false,
         }
     }
 
