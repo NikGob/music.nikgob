@@ -3242,6 +3242,10 @@ pub enum Command {
     /// Take dismissed items back: they wait again (imported ones) or are
     /// searched for at once.
     WishlistRestore(Vec<WishlistId>),
+    /// «Отменить» of a «Не качать» on items of several kinds: the turned
+    /// down ones come back ([`Self::WishlistRestore`]), and the tracks and
+    /// albums whose own «Скачать» items left are asked for again.
+    WishlistUndoDismiss { restore: Vec<WishlistId>, tracks: Vec<TrackId>, albums: Vec<ReleaseId> },
     /// Search a torrent for this item now (instead of next week).
     WishlistRetry(WishlistId),
     /// Search again now for every item nothing was found for (a new source

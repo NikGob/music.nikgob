@@ -1590,6 +1590,7 @@ impl Worker {
             | Command::WishlistDownload(_)
             | Command::WishlistDismiss(_)
             | Command::WishlistRestore(_)
+            | Command::WishlistUndoDismiss { .. }
             | Command::WishlistRetry(_)
             | Command::WishlistRetryAll
             | Command::WishlistSaveFromYoutube(_)
@@ -2751,6 +2752,8 @@ impl Worker {
             nikgob_view::TrackSort::Added => Sort::desc(TrackSortKey::Added),
             nikgob_view::TrackSort::Duration => Sort::asc(TrackSortKey::Duration),
         };
+        // A library load on its way leaves these rows be.
+        self.library_load.tracks_asked += 1;
         let filter = track_filter(self.state.read().prefs.library_only_downloaded);
         let rows = self
             .log_err("треки", self.lib.tracks_filtered(offset as u32, limit as u32, key, filter))

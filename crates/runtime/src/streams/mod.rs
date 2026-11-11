@@ -676,6 +676,7 @@ impl Worker {
             Command::WishlistDownload(select) => self.wish_download(&select),
             Command::WishlistDismiss(ids) => self.wish_dismiss(&ids),
             Command::WishlistRestore(ids) => self.wish_restore(&ids),
+            Command::WishlistUndoDismiss { restore, tracks, albums } => self.wish_undo_dismiss(&restore, &tracks, &albums),
             Command::WishlistRetry(id) => self.wish_retry(id),
             Command::WishlistRetryAll => self.wish_retry_all(),
             Command::WishlistSaveFromYoutube(id) => self.wish_save_from_youtube(id),

@@ -1086,6 +1086,7 @@ impl Worker {
             // came (another album under the same word) is never imported.
             only_targets: item.origin == WishlistOrigin::Upgrade,
             from: self.streaming.wish.offer_keys.get(&item.id).cloned(),
+            pinned: Vec::new(),
         }
     }
 
@@ -2465,11 +2466,13 @@ impl Worker {
             // copy's always: it must never replace a file); a seeding one
             // of an item done stays.
             let on_its_way = matches!(item.status, WishlistStatus::Downloading | WishlistStatus::Searching | WishlistStatus::Confirm);
-            if item.origin == WishlistOrigin::Upgrade || on_its_way {
-                self.cancel_wish_torrent(id);
-            }
+            // Its imports stop first; the torrent's files go only once they
+            // took back what they added ([`Self::cancel_wish_torrent`]).
             if on_its_way {
                 self.cancel_imports_of(id);
+            }
+            if item.origin == WishlistOrigin::Upgrade || on_its_way {
+                self.cancel_wish_torrent(id);
             }
             self.wish_line_drop(id);
             n += 1;
@@ -2500,14 +2503,28 @@ impl Worker {
             // «Отменить» brings back what was turned down, or asks again
             // for what left.
             let undo = match (dismissed.is_empty(), tracks.is_empty(), albums.as_slice()) {
-                (false, true, []) => Some(Command::WishlistRestore(dismissed)),
-                (true, false, []) => Some(Command::DownloadTracks(tracks)),
-                (true, true, [r]) => Some(Command::DownloadRelease(*r)),
-                _ => None,
+                (false, true, []) => Command::WishlistRestore(dismissed),
+                (true, false, []) => Command::DownloadTracks(tracks),
+                (true, true, [r]) => Command::DownloadRelease(*r),
+                // Of several kinds: all of it at once.
+                _ => Command::WishlistUndoDismiss { restore: dismissed, tracks, albums },
             };
-            self.toast(text, undo.map(|c| ("Отменить".to_owned(), c)));
+            self.toast(text, Some(("Отменить".to_owned(), undo)));
         }
         self.publish_wishlist();
+    }
+
+    /// `Command::WishlistUndoDismiss`: a «Не качать» of items of several
+    /// kinds taken back at once.
+    pub(crate) fn wish_undo_dismiss(&mut self, restore: &[WishlistId], tracks: &[TrackId], albums: &[ReleaseId]) {
+        for &r in albums {
+            let _ = self.wish_release_now(r);
+        }
+        for &t in tracks {
+            let _ = self.wish_track_now(t);
+        }
+        self.wish_restore(restore);
+        self.refresh_stream_page();
     }
 
     /// `Command::WishlistRestore`: dismissed items come back; an imported
@@ -3129,7 +3146,9 @@ impl Worker {
         self.lib.list_downloads().unwrap_or_default().iter().any(|d| d.wishlist_id == Some(id))
     }
 
-    /// The torrent of a turned-down item stops, with what it downloaded.
+    /// The torrent of a turned-down item stops; what it downloaded goes
+    /// through the stopped payloads' cleanup ([`Worker::drop_torrent`]),
+    /// which keeps the library's masters and waits for the importer.
     fn cancel_wish_torrent(&mut self, id: WishlistId) {
         let hashes: Vec<String> = self
             .lib
@@ -3145,12 +3164,7 @@ impl Worker {
         log::info!("wishlist: {id} turned down, its torrent goes");
         self.with_client(Box::new(move |w, c| {
             for h in hashes {
-                let _ = w.lib.delete_download(&h);
-                if let Some(t) = c.list().into_iter().find(|t| t.info_hash == h) {
-                    let tid = t.id;
-                    let c = c.clone();
-                    w.spawn_torrent_op(async move { c.remove(tid, true).await.map_err(|e| e.to_string()) });
-                }
+                w.drop_torrent(&c, &h);
             }
         }));
     }

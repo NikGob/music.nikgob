@@ -1013,3 +1013,37 @@ fn a_cancelled_download_of_a_click_leaves_the_wishlist() {
     let undo = r.rt.state().toasts.iter().find(|t| t.text.starts_with("Не буду качать")).and_then(|t| t.action.clone());
     assert!(matches!(undo, Some((_, Command::DownloadTracks(ref t))) if t == &vec![track]), "{undo:?}");
 }
+
+/// «Не качать ничего отсюда» on a group of a «Скачать» click and a like's
+/// item: one «Отменить» brings both back (the like's item as it was, the
+/// click asked again).
+#[test]
+fn a_mixed_dismissal_is_taken_back_at_once() {
+    use nikgob_core::model::{WishlistItem, WishlistOrigin, WishlistScope};
+    let lib = Library::open_in_memory().unwrap();
+    let (track, ..) = gruppa(&lib);
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+    r.rt.send(Command::DownloadTracks(vec![track]));
+    wait_until("the item", || wish_status(&lib, track).is_some());
+    let click = lib.wishlist_for_track(track).unwrap().pop().unwrap().id;
+    let mut liked = WishlistItem::new(WishlistStatus::Waiting, nikgob_library::now_ms());
+    liked.scope = WishlistScope::Track;
+    liked.origin = WishlistOrigin::Like;
+    liked.title = Some("Звезда по имени Солнце".into());
+    lib.put_wishlist_item(&liked).unwrap();
+
+    r.rt.send(Command::WishlistDismiss(vec![click, liked.id]));
+    wait_until("the click gone", || lib.wishlist_for_track(track).unwrap().is_empty());
+    wait_until("the like turned down", || {
+        lib.get_wishlist_item(liked.id).unwrap().is_some_and(|i| i.status == WishlistStatus::Dismissed)
+    });
+    wait_for(&r.rt, "the toast", |s| s.toasts.iter().any(|t| t.text == "Не буду качать: 2"));
+    let undo = r.rt.state().toasts.iter().find(|t| t.text == "Не буду качать: 2").and_then(|t| t.action.clone());
+    let Some((_, cmd)) = undo else { panic!("no «Отменить»") };
+    assert_eq!(cmd, Command::WishlistUndoDismiss { restore: vec![liked.id], tracks: vec![track], albums: Vec::new() });
+    r.rt.send(cmd);
+    wait_until("the click asked again", || wish_status(&lib, track).is_some());
+    wait_until("the like back", || {
+        lib.get_wishlist_item(liked.id).unwrap().is_some_and(|i| i.status != WishlistStatus::Dismissed)
+    });
+}

@@ -92,6 +92,8 @@ struct Replacing {
 
 #[derive(Default)]
 pub(crate) struct AlbumBetter {
+    /// Copies whose files are being read, before their card.
+    reading: std::collections::HashSet<WishlistId>,
     /// Copies that came and wait in «Подтверди», by item.
     staged: HashMap<WishlistId, Staged>,
     /// Copies being imported after «Заменить», by item.
@@ -155,6 +157,21 @@ pub(crate) fn plan_of(slots: &[Slot], files: &[CameFile]) -> Vec<PlanRow> {
             })
         })
         .collect()
+}
+
+/// What «Заменить» imports: each file of the plan as the very track the
+/// card showed it replacing ([`ImportTargets::pinned`]), whatever its own
+/// tags say; nothing else of the folder.
+pub(crate) fn replace_targets(plan: &[PlanRow], release: ReleaseId, item: WishlistId, from: Option<String>) -> ImportTargets {
+    ImportTargets {
+        tracks: plan.iter().map(|r| r.track).collect(),
+        release: Some(release),
+        wishlist: Some(item),
+        only_targets: true,
+        from,
+        pinned: plan.iter().map(|r| (r.path.clone(), r.track)).collect(),
+        ..ImportTargets::default()
+    }
 }
 
 /// The «Подтверди» card of a copy that waits: every track it replaces the
@@ -281,24 +298,19 @@ impl Worker {
         true
     }
 
-    /// The files of a torrent wait for «Заменить» (or are being imported
-    /// after it): its cleanup leaves them.
+    /// The files of a torrent are a copy of an album taken for its card:
+    /// being read, waiting for «Заменить» (after a restart too, until read
+    /// again), or being imported after it. Its cleanup leaves them.
     pub(crate) fn album_better_holds(&self, info_hash: &str) -> bool {
         let a = &self.streaming.wish.album;
-        if a.staged.is_empty() && a.replacing.is_empty() {
-            return false;
-        }
-        self.lib
-            .get_download(info_hash)
-            .ok()
-            .flatten()
-            .and_then(|d| d.wishlist_id)
-            .is_some_and(|w| a.staged.contains_key(&w) || a.replacing.contains_key(&w))
+        let Some(w) = self.lib.get_download(info_hash).ok().flatten().and_then(|d| d.wishlist_id) else { return false };
+        a.reading.contains(&w) || a.staged.contains_key(&w) || a.replacing.contains_key(&w) || self.album_kept(w).is_some()
     }
 
     /// A copy of the album came for `id`: kept where it is, its files read.
     pub(super) fn album_came(&mut self, id: WishlistId, files: Vec<PathBuf>, origin: SourceOrigin) {
         self.streaming.wish.partial.remove(&id);
+        self.streaming.wish.album.reading.insert(id);
         let kept = Kept { origin: origin.clone(), files: files.clone() };
         if let Ok(json) = serde_json::to_string(&kept)
             && let Err(e) = self.lib.cache_put(&kept_key(id), Self::now(), &json)
@@ -327,6 +339,7 @@ impl Worker {
     /// «Подтверди» as one card. None is better: they go, and the next
     /// offer is tried (or the click is answered «Лучше не нашёл»).
     pub(super) fn album_staged(&mut self, id: WishlistId, origin: SourceOrigin, files: Vec<CameFile>) {
+        self.streaming.wish.album.reading.remove(&id);
         let item = self.lib.get_wishlist_item(id).ok().flatten();
         let Some(item) = item.filter(|i| !matches!(i.status, WishlistStatus::Dismissed | WishlistStatus::Done)) else {
             self.album_files_go(id, &origin);
@@ -441,23 +454,25 @@ impl Worker {
             self.wish_retry(id);
             return;
         }
+        // Only rows whose track is as it was when the card was made: what
+        // each was is kept for «Отменить», and nothing else is touched.
         let mut before = Vec::new();
-        for r in &plan {
+        let mut rows = Vec::new();
+        for r in plan {
             let Some(track) = self.lib.get_track(r.track).ok().flatten() else { continue };
             let Some(src) = self.lib.active_source(r.track).ok().flatten().filter(|s| s.kind.is_local()) else { continue };
             log::info!("upgrade: replacing «{}» {} ({}) with {} ({})", r.title, r.have, src.locator, r.to, r.path.display());
             before.push(Before { track, old: src.id, master: self.lib.get_master(r.track).ok().flatten() });
+            rows.push(r);
         }
-        let targets = ImportTargets {
-            tracks: plan.iter().map(|r| r.track).collect(),
-            release: Some(st.release),
-            wishlist: Some(id),
-            only_targets: true,
-            from: self.streaming.wish.offer_keys.get(&id).cloned(),
-            ..ImportTargets::default()
-        };
+        if rows.is_empty() {
+            self.album_files_go(id, &st.origin);
+            self.upgrade_none(id, true);
+            return;
+        }
+        let targets = replace_targets(&rows, st.release, id, self.streaming.wish.offer_keys.get(&id).cloned());
         let title = format!("Качество лучше: {}", self.item_title(id));
-        let files: Vec<PathBuf> = plan.iter().map(|r| r.path.clone()).collect();
+        let files: Vec<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
         if self.import_for(files, title, st.origin, targets) {
             self.streaming.wish.album.replacing.insert(id, Replacing { release: st.release, before });
             self.set_item(id, |i| {
@@ -475,10 +490,13 @@ impl Worker {
         let Some(rep) = self.streaming.wish.album.replacing.remove(&item.id) else { return false };
         let mut done: Vec<Replacement> = Vec::new();
         for b in rep.before {
+            // Where the import put the old file's lyrics (asked of every
+            // track, so none is left behind).
+            let old_lrc = nikgob_import::replaced_lyrics(&self.lib, b.old);
             match self.lib.active_source(b.track.id).ok().flatten() {
                 Some(s) if s.id != b.old && s.kind.is_local() => {
                     log::info!("upgrade: «{}» now plays {}, the old file is in the Trash", b.track.title, s.locator);
-                    done.push(Replacement { track: b.track.id, old: b.old, new: s.id, master_before: b.master, before: b.track });
+                    done.push(Replacement { track: b.track.id, old: b.old, new: s.id, master_before: b.master, before: b.track, old_lrc });
                 }
                 _ => log::info!("upgrade: «{}» kept its file", b.track.title),
             }
@@ -563,20 +581,13 @@ impl Worker {
     }
 
     /// The files of a copy that will not be imported go: a torrent with
-    /// what it downloaded (its files stay when they are masters of the
-    /// library), a direct download's folder.
+    /// what it downloaded (masters of the library among them are moved
+    /// out, not deleted), a direct download's folder.
     fn album_files_go(&mut self, id: WishlistId, origin: &SourceOrigin) {
         self.album_forget_kept(id);
         match origin {
-            SourceOrigin::Torrent { info_hash, .. } => {
-                let keep = !self.lib.masters_of_torrent(info_hash).unwrap_or_default().is_empty();
-                if keep {
-                    log::info!("upgrade: the torrent of {id} holds masters of the library, its files stay");
-                    let _ = self.lib.delete_download(info_hash);
-                } else {
-                    self.cancel_wish_torrent(id);
-                }
-            }
+            // Its masters of the library stay (the cleanup moves them out).
+            SourceOrigin::Torrent { .. } => self.cancel_wish_torrent(id),
             _ => self.drop_direct(id),
         }
     }
@@ -599,7 +610,13 @@ impl Worker {
         if let Some(st) = self.streaming.wish.album.staged.remove(&id) {
             log::info!("upgrade: {id} turned down, the copy that waited goes");
             self.album_files_go(id, &st.origin);
+        } else if let Some(k) = self.album_kept(id) {
+            // Still being read: it goes all the same.
+            log::info!("upgrade: {id} turned down while its copy was read, the copy goes");
+            self.album_files_go(id, &k.origin);
         }
+        // Its import is cancelled with it and takes back what it replaced.
+        self.streaming.wish.album.replacing.remove(&id);
     }
 
     /// After a restart, the items whose copies waited in «Подтверди»

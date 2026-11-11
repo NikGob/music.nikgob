@@ -31,6 +31,8 @@ use crate::{Later, Worker, home};
 /// What a load reads.
 struct Job {
     seq: u64,
+    /// [`LibraryLoad::tracks_asked`] when the load was asked.
+    tracks_asked: u64,
     release_sort: v::ReleaseSort,
     track_sort: v::TrackSort,
     only_local: bool,
@@ -39,6 +41,7 @@ struct Job {
 /// The library's pages of load `seq`.
 pub(crate) struct Loaded {
     seq: u64,
+    tracks_asked: u64,
     releases: Vec<v::ReleaseCard>,
     playlists: Vec<v::PlaylistCard>,
     liked_albums: Vec<(usize, v::ReleaseCard)>,
@@ -62,6 +65,9 @@ pub(crate) struct LibraryLoad {
     seq: u64,
     /// The newest load shown.
     shown: u64,
+    /// Rows of «Треки» asked by themselves (a scroll, a sort): a load
+    /// asked before the newest of them does not put its older rows back.
+    pub(crate) tracks_asked: u64,
 }
 
 impl LibraryLoad {
@@ -78,7 +84,7 @@ impl LibraryLoad {
                 None
             }
         };
-        Self { jobs, seq: 0, shown: 0 }
+        Self { jobs, seq: 0, shown: 0, tracks_asked: 0 }
     }
 }
 
@@ -212,6 +218,7 @@ fn read(res: &mut Resolver, job: &Job) -> Loaded {
     }
     Loaded {
         seq: job.seq,
+        tracks_asked: job.tracks_asked,
         releases: release_cards,
         playlists,
         liked_albums,
@@ -243,6 +250,7 @@ impl Worker {
             let s = self.state.read();
             Job {
                 seq: self.library_load.seq,
+                tracks_asked: self.library_load.tracks_asked,
                 release_sort: s.library.release_sort,
                 track_sort: s.library.track_sort,
                 only_local: s.prefs.library_only_downloaded,
@@ -280,6 +288,8 @@ impl Worker {
         for what in &l.errors {
             self.toast(format!("Ошибка: {what}"), None);
         }
+        // Rows of «Треки» asked since this load was: they are newer.
+        let tracks_fresh = l.tracks_asked == self.library_load.tracks_asked;
         let Loaded { releases, playlists, liked_albums, mut artists, recent, often, count, tracks, track_sort, .. } = l;
         // A photo saved while the cards were made.
         for a in artists.iter_mut().filter(|a| a.image.is_none()) {
@@ -293,9 +303,11 @@ impl Worker {
             s.library.recently_added = recent;
             s.library.often_played = often;
             s.library.track_count = count;
-            s.library.tracks_offset = 0;
-            s.library.tracks = tracks;
-            s.library.track_sort = track_sort;
+            if tracks_fresh {
+                s.library.tracks_offset = 0;
+                s.library.tracks = tracks;
+                s.library.track_sort = track_sort;
+            }
             s.library.loaded = true;
         });
         self.turn.lap("shown");

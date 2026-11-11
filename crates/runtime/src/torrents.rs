@@ -282,10 +282,12 @@ impl Worker {
                 // A torrent of a «Хочу скачать» item: its item is cancelled
                 // with it, not left «качается» for ever.
                 let item = hash.as_deref().and_then(|h| w.lib.get_download(h).ok().flatten()).and_then(|d| d.wishlist_id);
-                if let Some(h) = &hash {
-                    let _ = w.lib.delete_download(h);
+                // Its files go once nothing needs them (a cancelled import
+                // took back what it added, masters of the library moved out).
+                match &hash {
+                    Some(h) => w.drop_torrent(&c, h),
+                    None => w.spawn_torrent_op(async move { c.remove(id, true).await.map_err(|e| e.to_string()) }),
                 }
-                w.spawn_torrent_op(async move { c.remove(id, true).await.map_err(|e| e.to_string()) });
                 if let Some(item) = item
                     && w
                         .lib
@@ -776,6 +778,21 @@ impl Worker {
         self.poll_torrents();
     }
 
+    /// A torrent whose files nobody wants (its item turned down, a copy not
+    /// taken, its «Отменить»): out of the client at once, its files kept
+    /// until the stopped payloads' cleanup ([`Self::run_cleanup`]) takes
+    /// them, once the importer is quiet: an import cancelled with it has
+    /// taken back what it added by then, and a master of the library among
+    /// them is moved out, never deleted.
+    pub(crate) fn drop_torrent(&mut self, c: &TorrentClient, hash: &str) {
+        let _ = self.lib.delete_download(hash);
+        let Some(t) = c.list().into_iter().find(|t| t.info_hash == hash) else { return };
+        log::info!("{}: leaves the client, its files go once nothing needs them", t.name);
+        self.torrents.cleanup.push((t.info_hash, t.selected_files));
+        let (tid, c) = (t.id, c.clone());
+        self.spawn_torrent_op(async move { c.remove(tid, false).await.map_err(|e| e.to_string()) });
+    }
+
     /// Deletes stopped payloads once the importer has taken what it wants.
     fn run_cleanup(&mut self) {
         if self.torrents.cleanup.is_empty() || !self.import.as_ref().is_some_and(|s| s.quiet()) {
@@ -789,7 +806,15 @@ impl Worker {
                 held.push((hash, files));
                 continue;
             }
-            let masters = self.lib.masters_of_torrent(&hash).unwrap_or_default();
+            // Which files are masters must be known before any goes.
+            let masters = match self.lib.masters_of_torrent(&hash) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("the masters of torrent {hash} are not read, its files stay for now: {e}");
+                    held.push((hash, files));
+                    continue;
+                }
+            };
             for f in files {
                 let rel = f
                     .strip_prefix(&cfg.downloads_dir)
