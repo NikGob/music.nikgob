@@ -102,6 +102,8 @@ pub(crate) fn request_release_delete(ctx: &Context, id: nikgob_view::ReleaseId, 
 pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
 /// The menu item of a track whose file holds another song.
 pub(crate) const WRONG_FILE: &str = "В файле другая песня";
+/// «Файл ▸» of a track whose lossless file surely holds an MP3.
+pub(crate) const TO_MP3: &str = "Превратить в MP3";
 /// The submenu of a track's menu ([`track_rows`]).
 pub(crate) const FILE: &str = "Файл";
 
@@ -187,7 +189,11 @@ pub enum TrackAct {
     /// A file: its tags; no file: download it (no like).
     Fetch,
     AlbumDownload,
+    /// A file: a better copy through the download sources; no file: to
+    /// «Хочу скачать».
     Torrents,
+    /// The lossless file surely holds an MP3: that MP3 takes its place.
+    ToMp3,
     FindSong,
     WrongFile,
     Dislike,
@@ -216,8 +222,8 @@ impl TrackAct {
             Self::WrongFile => I::WrongFile,
             Self::Dislike => I::Dislike,
             Self::Ban => I::Ban,
-            Self::Next | Self::Queue | Self::Playlist | Self::AlsoOn | Self::Apart | Self::FindSong | Self::Remove
-            | Self::Trash | Self::Purge => return None,
+            Self::Next | Self::Queue | Self::Playlist | Self::AlsoOn | Self::Apart | Self::FindSong | Self::ToMp3
+            | Self::Remove | Self::Trash | Self::Purge => return None,
         })
     }
 }
@@ -382,7 +388,7 @@ pub(crate) fn library_track_rows(
     } else {
         MenuItem::new("Скачать").icon(Icon::Download)
     };
-    track_rows(TrackMenuOf {
+    let mut rows = track_rows(TrackMenuOf {
         playable: true,
         has_album: track.release_id.is_some(),
         has_artists: !track.artists.linked().is_empty(),
@@ -394,7 +400,18 @@ pub(crate) fn library_track_rows(
         wrong_file: track.has_local,
         dislike: dislike_item(marks.track(track.id)),
         ban: ban_item(track.artist_id(), marks),
-    })
+    });
+    // A lossless file the check is sure holds an MP3 (its row says «FLAC
+    // из MP3»): that MP3, right after the better copy. A doubt has none.
+    let mp3 = track.has_local && track.quality.as_deref().is_some_and(nikgob_core::quality::row_label_mp3_inside);
+    if mp3 && let Some(file) = widgets::sub_rows_mut(&mut rows, FILE) {
+        let at = file
+            .iter()
+            .position(|r| matches!(r, widgets::Row::Item(TrackAct::Torrents, _)))
+            .map_or(file.len(), |i| i + 1);
+        file.insert(at, widgets::Row::Item(TrackAct::ToMp3, MenuItem::new(TO_MP3).icon(Icon::Sync)));
+    }
+    rows
 }
 
 /// The library's deletes, last in «Файл» of a library row's
@@ -747,12 +764,9 @@ impl PageState {
                     out.push(Command::DownloadRelease(r));
                 }
             }
-            A::Torrents => out.push(Command::SearchTorrents(format!(
-                "{} {}{}",
-                track.artist,
-                track.album.as_deref().unwrap_or(&track.title),
-                if track.has_local { " FLAC" } else { "" }
-            ))),
+            // Through the download sources, as the wishlist looks.
+            A::Torrents => out.push(Command::FindBetter(track.id)),
+            A::ToMp3 => out.push(Command::FakeToMp3(track.id)),
             A::FindSong => out.push(Command::FindSong { track: track.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(track.id)),
             A::Dislike => out.push(dislike_command(track.id, marks)),
@@ -1523,6 +1537,24 @@ mod speed_tests {
         assert_eq!(&top[share + 1..share + 3], ["Источник и качество", FILE]);
         let acts = row_acts(&library);
         assert_eq!(&acts[acts.len() - 2..], [TrackAct::Dislike, TrackAct::Ban]);
+    }
+
+    /// «Превратить в MP3» is in «Файл», right after «Найти качество
+    /// лучше…», only for a file whose row says it surely holds an MP3.
+    #[test]
+    fn only_a_sure_fake_offers_its_mp3() {
+        let row = |quality: Option<&str>, has_local: bool| TrackRow {
+            id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
+            album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
+            duration: None, quality: quality.map(str::to_owned), source: None, has_local, liked: false, cover: None, clip: false,
+        };
+        let file = |t: &TrackRow| row_acts(sub_rows(&library_track_rows(t, &nikgob_view::DislikesView::default(), true, None), FILE).unwrap());
+        let fake = file(&row(Some("FLAC из MP3 ~128"), true));
+        let at = fake.iter().position(|a| *a == TrackAct::Torrents).unwrap();
+        assert_eq!(fake[at + 1], TrackAct::ToMp3);
+        for (q, local) in [(Some("FLAC"), true), (None, true), (Some("MP3 320 из поддельного FLAC"), true), (Some("FLAC из MP3 ~128"), false)] {
+            assert!(!file(&row(q, local)).contains(&TrackAct::ToMp3), "{q:?} {local}");
+        }
     }
 
     /// «Меню трека»: an item sent to «Файл» joins the submenu in the menu's

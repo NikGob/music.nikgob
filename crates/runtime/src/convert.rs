@@ -627,7 +627,9 @@ pub(crate) fn sound_details(
         to_mp3: local
             && src.trashed_at.is_none()
             && check.is_some_and(|c| nikgob_core::quality::mp3_inside(&src.codec, &c.summary())),
-        better: local && src.trashed_at.is_none(),
+        // The track's file, whichever plays now (the one in the Trash
+        // after its MP3 took its place, until the next track).
+        better: local,
     }
 }
 
@@ -822,7 +824,7 @@ mod tests {
         let mut gone = flac.clone();
         gone.trashed_at = Some(1);
         let gone = sound_details(&gone, Some(Path::new("x.flac")), None, None, Some(&fake));
-        assert!(!gone.to_mp3 && !gone.better);
+        assert!(!gone.to_mp3 && gone.better);
         // A lossy file is never checked: nothing pending, no verdict.
         let plain = sound_details(&mp3, Some(Path::new("RuLe.mp3")), None, None, None);
         assert!(!plain.pending && plain.verdict.is_none());

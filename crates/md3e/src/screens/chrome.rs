@@ -143,11 +143,6 @@ pub struct Chrome {
     vol: Volume,
 }
 
-/// "<artist> <album> FLAC": the torrent search for a better copy.
-pub fn replace_query(t: &TrackRow) -> String {
-    format!("{} {} FLAC", t.artist, t.album.as_deref().unwrap_or(&t.title))
-}
-
 /// ⏮: a second press within 400 ms of one that restarted the track goes to
 /// the previous track (the runtime restarts first when past 3 s).
 pub fn press_previous(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
@@ -322,12 +317,9 @@ impl Chrome {
             A::Fetch => out.push(Command::DownloadTracks(vec![t.id])),
             // The whole album the track is from, the files it lacks.
             A::AlbumDownload => out.extend(t.release_id.map(Command::DownloadRelease)),
-            A::Torrents if t.has_local => out.push(Command::SearchTorrents(replace_query(t))),
-            A::Torrents => out.push(Command::SearchTorrents(format!(
-                "{} {}",
-                t.artist,
-                t.album.as_deref().unwrap_or(&t.title)
-            ))),
+            // Through the download sources, as the wishlist looks.
+            A::Torrents => out.push(Command::FindBetter(t.id)),
+            A::ToMp3 => out.push(Command::FakeToMp3(t.id)),
             A::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(t.id)),
             A::Dislike => out.push(super::pages::dislike_command(t.id, &state.dislikes)),
