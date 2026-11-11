@@ -50,6 +50,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
 pub use import::ImportSetup;
+pub use lyrics::memory as lyrics_memory;
 pub use nikgob_sources::khinsider::PageBrowser;
 pub use recs::{
     HomePreview, ModelPreview, PreviewTile, preview_home, preview_home_with, preview_ready_tiles, preview_replay, preview_replay_with,
