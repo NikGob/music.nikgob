@@ -738,6 +738,8 @@ fn with_likes_that_download_nothing_a_like_is_only_a_like() {
     wait_until("the item", || wish_status(&lib, track) == Some(WishlistStatus::New));
 }
 
+/// A «Скачать» turned down leaves «Хочу скачать»; its «Отменить» asks for
+/// the track again.
 #[test]
 fn a_dismissed_download_comes_back_with_its_undo() {
     let lib = Library::open_in_memory().unwrap();
@@ -748,10 +750,10 @@ fn a_dismissed_download_comes_back_with_its_undo() {
     let id = lib.wishlist_for_track(track).unwrap()[0].id;
     r.rt.send(Command::WishlistDismiss(vec![id]));
     wait_for(&r.rt, "the undo", |s| {
-        s.toasts.iter().any(|t| t.action.as_ref().is_some_and(|(_, c)| *c == Command::WishlistRestore(vec![id])))
+        s.toasts.iter().any(|t| t.action.as_ref().is_some_and(|(_, c)| *c == Command::DownloadTracks(vec![track])))
     });
-    assert_eq!(wish_status(&lib, track), Some(WishlistStatus::Dismissed));
-    r.rt.send(Command::WishlistRestore(vec![id]));
+    assert_eq!(wish_status(&lib, track), None, "out of «Хочу скачать»");
+    r.rt.send(Command::DownloadTracks(vec![track]));
     wait_until("back", || wish_status(&lib, track) == Some(WishlistStatus::New));
 }
 
