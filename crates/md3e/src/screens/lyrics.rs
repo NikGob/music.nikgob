@@ -1401,6 +1401,12 @@ fn between(g: Arc<Galley>, from: &Galley, to: &Galley, t: f32) -> Arc<Galley> {
 /// between two resting ones, painted by the real line painter under `prefs`
 /// (animation, glow, dimming, size, letter jump).
 pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
+    preview_at(ui, rect, prefs, None);
+}
+
+/// [`preview`] standing at `still` seconds into its loop (a preset's tile
+/// at rest), or running with the clock.
+pub(crate) fn preview_at(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64>) {
     let s = Theme::get(ui.ctx()).scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
     let look = Look::of(prefs);
@@ -1412,7 +1418,7 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     const BACK: f32 = 3.2;
     const PAD: f32 = 10.0;
     const TEXTS: [&str; 3] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня"];
-    let pos = Duration::from_secs_f64(anim::now(ui.ctx()).rem_euclid(LOOP));
+    let pos = Duration::from_secs_f64(still.unwrap_or_else(|| anim::now(ui.ctx())).rem_euclid(LOOP));
     let mut at = 0.3;
     let words = ["Слы", "шишь ", "э", "тот ", "ритм"]
         .iter()
@@ -2189,6 +2195,14 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
     let glow_color = crate::lerp_color(lit, theme.scheme.primary, 0.3);
     let ppp = super::stage::ppp(painter.ctx());
     let hold = hold.clamp(0.0, 1.0);
+    // Karaoke: the sung words float up as the light comes to them
+    // («Подъём спетого»), a whole number of pixels once lit, and go down
+    // with the line's hold. Reduced motion keeps them on the line.
+    let float_up = if sweeping && !theme.reduced_motion {
+        (KARAOKE_RISE * size * prefs.lyrics_lift.clamp(0.0, 1.0) * ppp).round() / ppp * hold
+    } else {
+        0.0
+    };
     let n = timing.glyphs.len();
     let mut inks = Vec::with_capacity(n);
     let mut glows = Vec::with_capacity(n);
@@ -2218,6 +2232,9 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         // well (it only lights up).
         // How much (0..1) of the wave's crest this glyph is on.
         let mut crest = 0.0;
+        // How much bigger the glyph is drawn: a wave piece swells a little
+        // on its pop.
+        let mut grow = 0.0;
         let lift = match onset {
             Some(at) if style == Style::Wave && !theme.reduced_motion => {
                 // The jump's speed scales its smoothing window too; with
@@ -2231,17 +2248,22 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
                 // Up while it is sung, then down to where sung text rests:
                 // the crest goes along the line with the voice, and a held
                 // note stays up for as long as it is held.
+                // It comes down on a spring that lands a touch below where
+                // sung text rests and bounces back ([`land`]).
                 let sinks = wave_end(timing, k, look).map_or(f32::INFINITY, |end| end + WAVE_STAY);
-                let sunk = smoothstep((p - sinks) / WAVE_FALL);
-                crest = 1.0 - sunk;
+                let sunk = land(p - sinks, pace.jump);
+                crest = (1.0 - sunk).clamp(0.0, 1.0);
                 let lift = height * (1.0 - (1.0 - WAVE_REST) * sunk) * RISE * size * prefs.lyrics_wave_jump.max(0.0) * hold;
+                // The piece's own pop over the top swells it a little.
+                let pop = (jump_over(p - at, pace.jump, spread) - 1.0).max(0.0);
+                grow = (JUMP_SWELL * pop).min(SWELL_MAX) * crest * hold * prefs.lyrics_wave_jump.clamp(0.0, 1.0);
                 // At rest on whole pixels, so a raised word is as crisp as
                 // the rest; in motion to the fraction, so it never steps.
                 // It eases between the two, so it never steps onto or off
                 // the pixel either: off them before it sinks, onto them
                 // again once it is down.
                 let up = crisp_lift(t + ONSET_LEAD - (JUMP_SETTLE / pace.jump + spread), hold) * smoothstep((sinks - p) / WAVE_STAY);
-                let crisp = up.max(crisp_lift(p - (sinks + WAVE_FALL), hold));
+                let crisp = up.max(crisp_lift(p - (sinks + WAVE_FALL / pace.jump), hold));
                 lift + ((lift * ppp).round() / ppp - lift) * crisp
             }
             _ => 0.0,
@@ -2255,32 +2277,36 @@ fn timed_line(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, timing: &Tim
         // A glyph of the line the front goes along: in `ahead` until its
         // run's front comes to it and in `behind` once the front is past.
         let head = run.1;
+        // Lit, it has floated up by the whole `float_up`; under the front's
+        // soft edge by as much as the light at its middle.
         let swept = |ahead: Color32, behind: Color32| {
             if head == f32::INFINITY {
-                Ink::solid(behind, lift)
+                Ink::solid(behind, lift + float_up)
             } else if head == f32::NEG_INFINITY {
                 Ink::solid(ahead, lift)
             } else {
-                Ink { lift, base: ahead, lit: behind, head, feather: front.edge }
+                Ink { lift, base: ahead, lit: behind, head, feather: front.edge, rise: float_up, grow: 0.0 }
             }
         };
-        inks.push(match on {
+        let ink = match on {
             Some(on) => Ink::solid(crate::lerp_color(base, lit, on * hold), lift),
             // A held note warms up ahead of the front, and only ever gets
             // brighter: the front lights it whole as it goes through.
             None if sweeping => swept(crate::lerp_color(base, lit, HELD_WARM * held), lit),
             None => Ink::solid(lit, lift),
-        });
+        };
+        inks.push(Ink { grow, ..ink });
         let strength = focus * (0.1 + 0.06 * swell);
         let glow_ink = |strength: f32| glow_color.gamma_multiply(strength.clamp(0.0, 1.0));
-        glows.push(match (on, style) {
+        let glow_of = match (on, style) {
             // The wave's light is strongest on its crest.
             (Some(on), Style::Wave) => Ink::solid(glow_ink(strength * on * (WAVE_GLOW_REST + (WAVE_GLOW_CREST - WAVE_GLOW_REST) * crest)), lift),
             (Some(on), _) => Ink::solid(glow_ink(strength * on), lift),
             (None, Style::Karaoke) => swept(Color32::TRANSPARENT, glow_ink(strength)),
             (None, Style::Focus) if !look.words() => Ink::solid(glow_ink(strength), lift),
             _ => Ink::solid(Color32::TRANSPARENT, lift),
-        });
+        };
+        glows.push(Ink { grow, ..glow_of });
     }
     // Every glyph is drawn once, whole, in its own place and colour: no clip
     // edge between pieces, so no seam, cut overhang or second copy shows.
@@ -2335,6 +2361,30 @@ const WAVE_REST: f32 = 0.35;
 /// The glow of sung text at rest and on the crest, against the other looks'.
 const WAVE_GLOW_REST: f32 = 0.6;
 const WAVE_GLOW_CREST: f32 = 1.8;
+/// How much a wave piece swells for each rest height its pop goes over
+/// the top (the pop goes some 0.6 over), and at most.
+const JUMP_SWELL: f32 = 0.12;
+const SWELL_MAX: f32 = 0.08;
+/// How high sung karaoke text floats at «Подъём спетого» 100 %, in text
+/// sizes: two or three pixels.
+const KARAOKE_RISE: f32 = 0.06;
+
+/// How far (0..1, a little past 1 on its bounce) a wave piece has come
+/// down from its crest `t` seconds after it starts down: on a spring with
+/// the expressive spatial springs' bounce (fast spatial damping, default
+/// spatial stiffness), which lands a touch below where sung text rests and
+/// settles back within [`WAVE_FALL`]; `speed` times faster or slower.
+fn land(t: f32, speed: f32) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    let k = speed.clamp(0.25, 4.0);
+    let spring = Spring::new(
+        nikgob_motion::tokens::EXPRESSIVE_FAST_SPATIAL.damping_ratio,
+        nikgob_motion::tokens::EXPRESSIVE_DEFAULT_SPATIAL.stiffness * k * k,
+    );
+    1.0 + spring.solve(-1.0, 0.0, t).0
+}
 
 /// Where the glow's copies of a line go.
 const GLOW: [egui::Vec2; 3] = [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0)];
@@ -2362,7 +2412,9 @@ fn glyph_count(g: &Galley) -> usize {
 
 /// How one glyph is painted: raised by `lift` px and lit along the line: in
 /// `lit` up to `head - feather` px of its advances (rows flattened), fading
-/// to `base` at `head` (a hard edge when `feather` is 0).
+/// to `base` at `head` (a hard edge when `feather` is 0). It floats up
+/// `rise` px more as lit as its middle is, and is drawn `grow` bigger
+/// about the middle of its foot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Ink {
     lift: f32,
@@ -2370,11 +2422,13 @@ struct Ink {
     lit: Color32,
     head: f32,
     feather: f32,
+    rise: f32,
+    grow: f32,
 }
 
 impl Ink {
     fn solid(color: Color32, lift: f32) -> Self {
-        Ink { lift, base: color, lit: color, head: f32::INFINITY, feather: 0.0 }
+        Ink { lift, base: color, lit: color, head: f32::INFINITY, feather: 0.0, rise: 0.0, grow: 0.0 }
     }
 
     fn uniform(self) -> bool {
@@ -2453,6 +2507,10 @@ fn inked(g: &Galley, ink: impl Fn(usize) -> Ink) -> Arc<Galley> {
 /// vertex colours draw the gradient exactly.
 fn ink_quad(mesh: &mut egui::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink: Ink) {
     let (left, right) = (q[2].pos.x, q[3].pos.x);
+    // The whole glyph goes up together: its line's lift and its rise by the
+    // light at its middle.
+    let lift = if ink.rise == 0.0 { ink.lift } else { ink.lift + ink.rise * ink.light(along + 0.5 * (left + right)) };
+    let foot = q[2].pos.lerp(q[3].pos, 0.5);
     let mut cuts = [0.0f32; 4];
     let mut n = 0;
     if !ink.uniform() && right > left {
@@ -2469,8 +2527,10 @@ fn ink_quad(mesh: &mut egui::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink
     // Each piece's colour is taken just inside it, so a hard edge stays hard.
     let point = |t: f32, top: bool, inward: f32| {
         let (a, b) = if top { (q[0], q[1]) } else { (q[2], q[3]) };
+        let at = a.pos.lerp(b.pos, t);
+        let at = if ink.grow == 0.0 { at } else { foot + (at - foot) * (1.0 + ink.grow) };
         egui::epaint::Vertex {
-            pos: a.pos.lerp(b.pos, t) - vec2(0.0, ink.lift),
+            pos: at - vec2(0.0, lift),
             uv: a.uv.lerp(b.uv, t),
             color: ink.at(along + left + (right - left) * t + inward),
         }
@@ -2491,7 +2551,7 @@ fn karaoke(painter: &egui::Painter, g: &Arc<Galley>, line: Rect, head: f32, feat
         painter.galley_with_override_text_color(line.min, g.clone(), lit);
         return;
     }
-    painter.galley(line.min, inked(g, |_| Ink { lift: 0.0, base, lit, head, feather }), lit);
+    painter.galley(line.min, inked(g, |_| Ink { lift: 0.0, base, lit, head, feather, rise: 0.0, grow: 0.0 }), lit);
 }
 
 /// The room a wait opens between lines, at the pane's text size: taller for
@@ -3931,7 +3991,7 @@ mod tests {
             for (a, b) in plain.rows[0].row.visuals.mesh.vertices.iter().zip(&lifted.rows[0].row.visuals.mesh.vertices) {
                 assert!((a.pos.y - b.pos.y - 3.0).abs() < 1e-4 && a.pos.x == b.pos.x && a.uv == b.uv);
             }
-            let front = Ink { lift: 0.0, base: Color32::BLACK, lit: Color32::WHITE, head: 70.0, feather: 9.0 };
+            let front = Ink { lift: 0.0, base: Color32::BLACK, lit: Color32::WHITE, head: 70.0, feather: 9.0, rise: 0.0, grow: 0.0 };
             let lit = inked(&g, |_| front);
             let v = &lit.rows[0].row.visuals.mesh.vertices;
             assert!(v.len() > 4 * quads, "the front splits the glyphs it crosses");
@@ -3965,6 +4025,81 @@ mod tests {
             let hard = inked(&g, |_| Ink { feather: 0.0, ..front });
             assert!(hard.rows[0].row.visuals.mesh.vertices.iter().all(|v| v.color == Color32::WHITE || v.color == Color32::BLACK));
         });
+    }
+
+    /// Karaoke's sung words float up whole by the light at their middle (a
+    /// lit glyph by all of its rise, one ahead of the front not at all, none
+    /// leaning), and a swelling glyph grows about the middle of its foot.
+    #[test]
+    fn sung_glyphs_float_up_whole_and_a_swell_grows_from_the_foot() {
+        with_painter(|painter| {
+            let g = fixed_layout(painter, "Слышишь этот ритм", 26.0);
+            let plain = inked(&g, |_| Ink::solid(Color32::WHITE, 0.0));
+            let front = Ink { lift: 0.0, base: Color32::BLACK, lit: Color32::WHITE, head: 70.0, feather: 9.0, rise: 3.0, grow: 0.0 };
+            let floated = inked(&g, |_| front);
+            let pv = &plain.rows[0].row.visuals.mesh.vertices;
+            let fv = &floated.rows[0].row.visuals.mesh.vertices;
+            let drawn: Vec<_> = g.rows[0]
+                .row
+                .glyphs
+                .iter()
+                .zip(&floated.rows[0].row.glyphs)
+                .zip(&plain.rows[0].row.glyphs)
+                .filter(|((gl, _), _)| !gl.uv_rect.is_nothing())
+                .map(|((_, f), p)| (f, p))
+                .collect();
+            let (mut lit, mut ahead) = (0, 0);
+            for (i, (f, p)) in drawn.iter().enumerate() {
+                let start = f.first_vertex as usize;
+                let end = drawn.get(i + 1).map_or(fv.len(), |(n, _)| n.first_vertex as usize);
+                let up = pv[p.first_vertex as usize].pos.y - fv[start].pos.y;
+                // Every piece of the glyph at one height.
+                for v in &fv[start..end] {
+                    let top = (v.pos.y - fv[start].pos.y).abs() < 1e-3;
+                    let bottom = (v.pos.y - fv[start + 2].pos.y).abs() < 1e-3;
+                    assert!(top || bottom, "glyph {i} leans");
+                }
+                if p.pos.x + p.advance_width < front.head - front.feather - 2.0 {
+                    assert!((up - 3.0).abs() < 1e-3, "glyph {i} lit: {up}");
+                    lit += 1;
+                } else if p.pos.x > front.head + 2.0 {
+                    assert!(up.abs() < 1e-3, "glyph {i} ahead: {up}");
+                    ahead += 1;
+                } else {
+                    assert!((-1e-3..=3.001).contains(&up), "glyph {i} under the front: {up}");
+                }
+            }
+            assert!(lit > 0 && ahead > 0);
+            // Grown by half: the foot's middle stays, the glyph is half as
+            // wide and tall again.
+            let grown = inked(&g, |_| Ink { grow: 0.5, ..Ink::solid(Color32::WHITE, 0.0) });
+            let gv = &grown.rows[0].row.visuals.mesh.vertices;
+            let (a, b) = (&pv[0..4], &gv[0..4]);
+            assert!(((a[2].pos.x + a[3].pos.x) - (b[2].pos.x + b[3].pos.x)).abs() < 1e-3);
+            assert!((a[2].pos.y - b[2].pos.y).abs() < 1e-3);
+            assert!(((b[3].pos.x - b[2].pos.x) - 1.5 * (a[3].pos.x - a[2].pos.x)).abs() < 1e-3);
+            assert!(((b[2].pos.y - b[0].pos.y) - 1.5 * (a[2].pos.y - a[0].pos.y)).abs() < 1e-3);
+        });
+    }
+
+    /// A wave piece comes down from its crest on a spring: no step in a
+    /// frame, a little past where it rests and back, settled within its
+    /// fall at any jump speed.
+    #[test]
+    fn a_wave_piece_lands_on_a_bounce_and_settles() {
+        assert_eq!(land(-0.1, 1.0), 0.0);
+        assert_eq!(land(0.0, 1.0), 0.0);
+        let (mut top, mut was) = (0.0f32, 0.0f32);
+        for f in 1..=240 {
+            let v = land(f as f32 / 240.0, 1.0);
+            assert!((v - was).abs() < 0.08, "frame {f}: {was} → {v}");
+            top = top.max(v);
+            was = v;
+        }
+        assert!(top > 1.03 && top < 1.15, "a little past its rest: {top}");
+        for speed in [0.5, 1.0, 2.0] {
+            assert!((land(WAVE_FALL / speed, speed) - 1.0).abs() < 0.01, "{speed}");
+        }
     }
 
     /// A timing slip (a piece timed before one written ahead of it) waits

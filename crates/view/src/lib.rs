@@ -1494,6 +1494,10 @@ pub struct Prefs {
     pub lyrics_cascade: bool,
     /// The sung part glows a little.
     pub lyrics_glow: bool,
+    /// «Подъём спетого»: under karaoke the sung words float up a little as
+    /// the light comes to them (0 none .. 1 about a twentieth of the text
+    /// size). Prefs from before it read 0: the look they had.
+    pub lyrics_lift: f32,
     /// Seconds after a manual scroll before the view returns to the song.
     pub lyrics_return_s: f32,
     /// The pause indicator between lines: 0 flat thin, 1 wavy thin,
@@ -3392,6 +3396,7 @@ impl Default for Prefs {
             lyrics_lead: LYRICS_LEAD,
             lyrics_cascade: true,
             lyrics_glow: false,
+            lyrics_lift: 0.0,
             lyrics_return_s: 4.0,
             lyrics_gap_style: 1,
             lyrics_gap_waves: 6.0,
@@ -3542,18 +3547,24 @@ impl Prefs {
             fps_limit: 142,
             normalization: false,
             seed_ratio: 3.5,
-            lyrics_wave_jump: 0.5,
-            lyrics_jump_speed: 2.0,
-            lyrics_light_speed: 0.9,
-            lyrics_smooth: 0.85,
-            lyrics_dim: 0.75,
-            lyrics_lead: 0.2,
+            // The look of the lyrics is the «Караоке» preset
+            // (`presets::Area::Lyrics`): the sung part fills syllable by
+            // syllable behind a soft front and floats up a little, the
+            // other lines dimmed. The wave's jump keeps its defaults.
+            lyrics_style: 0,
+            lyrics_unit: LYRICS_BY_SYLLABLES,
+            lyrics_light_speed: 0.55,
+            lyrics_smooth: 0.6,
+            lyrics_dim: 0.7,
             lyrics_glow: true,
+            lyrics_cascade: true,
+            lyrics_soft_edges: true,
+            lyrics_lift: 1.0,
+            lyrics_lead: 0.2,
             lyrics_return_s: 2.0,
             lyrics_gap_waves: 7.0,
             lyrics_gap_height: 0.5,
             lyrics_countdown: false,
-            lyrics_soft_edges: false,
             lyrics_soft_strength: 0.25,
             lyrics_soft_depth: 0.29,
             save_found_lyrics: true,

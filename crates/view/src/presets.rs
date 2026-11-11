@@ -26,7 +26,8 @@ pub const SETTINGS_REV: u8 = 1;
 pub enum Area {
     /// «Музыка → Рекомендации».
     Recs,
-    /// «Тексты → Вид текста»: no presets yet (TODO 36), only its rows.
+    /// «Тексты → Вид текста»: how the line being sung moves and lights,
+    /// and how the rest stands around it.
     Lyrics,
     /// «Вид → Экран трека» (tiles).
     Track,
@@ -73,12 +74,25 @@ pub enum Field {
     StreamAnalysis,
     LyricsSeparate,
     LyricsDeep,
+    // «Вид текста».
+    LyricsStyle,
+    LyricsUnit,
+    LyricsLightSpeed,
+    LyricsSmooth,
+    LyricsWaveJump,
+    LyricsJumpSpeed,
+    LyricsLift,
+    LyricsDim,
+    LyricsGlow,
+    LyricsCascade,
+    LyricsSoftEdges,
 }
 
 /// The value of a [`Field`].
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FieldValue {
     Bool(bool),
+    U8(u8),
     U32(u32),
     F32(f32),
     Shape(CoverShape),
@@ -136,6 +150,95 @@ const LOAD_FIELDS: [Field; 6] = [
     Field::LyricsDeep,
 ];
 
+const LYRICS_FIELDS: [Field; 11] = [
+    Field::LyricsStyle,
+    Field::LyricsUnit,
+    Field::LyricsLightSpeed,
+    Field::LyricsSmooth,
+    Field::LyricsWaveJump,
+    Field::LyricsJumpSpeed,
+    Field::LyricsLift,
+    Field::LyricsDim,
+    Field::LyricsGlow,
+    Field::LyricsCascade,
+    Field::LyricsSoftEdges,
+];
+
+/// «Вид текста»: one whole look each, not a pile of values.
+struct LyricsRow {
+    /// [`Prefs::lyrics_style`]: 0 karaoke, 1 focus, 2 wave.
+    style: u8,
+    /// [`Prefs::lyrics_unit`].
+    unit: u8,
+    /// «Скорость подсветки» and «Плавность» (`None`: «—», the line lights
+    /// whole and has neither).
+    light: Option<(f32, f32)>,
+    /// The wave's jump: its height and speed (`None`: not the wave).
+    jump: Option<(f32, f32)>,
+    /// «Подъём спетого» (`None`: not karaoke).
+    lift: Option<f32>,
+    dim: f32,
+    glow: bool,
+    cascade: bool,
+    soft_edges: bool,
+}
+
+const LYRICS: [LyricsRow; 4] = [
+    // «Караоке»: the sung part fills syllable by syllable behind a soft
+    // front a letter or so wide and floats up a little; the other lines
+    // dimmed, the edges of the text soft. Calm, the default.
+    LyricsRow {
+        style: 0,
+        unit: crate::LYRICS_BY_SYLLABLES,
+        light: Some((0.55, 0.6)),
+        jump: None,
+        lift: Some(1.0),
+        dim: 0.7,
+        glow: true,
+        cascade: true,
+        soft_edges: true,
+    },
+    // «Спокойно»: the line being sung brightens whole, nothing moves in
+    // it; for reading along.
+    LyricsRow {
+        style: 1,
+        unit: crate::LYRICS_BY_LETTERS,
+        light: None,
+        jump: None,
+        lift: None,
+        dim: 0.8,
+        glow: false,
+        cascade: true,
+        soft_edges: true,
+    },
+    // «Прыжок»: each syllable springs up as it is sung, a little over the
+    // top and back, and its word lands on a soft bounce.
+    LyricsRow {
+        style: 2,
+        unit: crate::LYRICS_BY_SYLLABLES,
+        light: Some((0.7, 0.3)),
+        jump: Some((1.0, 1.0)),
+        lift: None,
+        dim: 0.6,
+        glow: true,
+        cascade: true,
+        soft_edges: true,
+    },
+    // «Чётко»: a sharp front letter by letter on the times exactly,
+    // nothing floats or glows, the other lines plainly readable.
+    LyricsRow {
+        style: 0,
+        unit: crate::LYRICS_BY_LETTERS,
+        light: Some((0.95, 0.0)),
+        jump: None,
+        lift: Some(0.0),
+        dim: 0.4,
+        glow: false,
+        cascade: false,
+        soft_edges: false,
+    },
+];
+
 /// «Экран трека»: shape, spin, pulse, ring, ring in time, ring spin
 /// (`None`: «—», the ring is off), glow, background shapes, wave.
 type TrackRow = (CoverShape, bool, bool, bool, Option<bool>, Option<bool>, Ambient, BgShapes, bool);
@@ -187,7 +290,7 @@ impl Area {
     pub fn names(self) -> &'static [&'static str] {
         match self {
             Self::Recs => &["Только моё", "Сбалансировано", "Больше нового"],
-            Self::Lyrics => &[],
+            Self::Lyrics => &["Караоке", "Спокойно", "Прыжок", "Чётко"],
             Self::Track => &["Строго", "Живо", "Максимум"],
             Self::Sources => &["Обычно", "Всё"],
             Self::Seeding => &["Не раздавать", "Обычно", "Щедро"],
@@ -204,7 +307,7 @@ impl Area {
     pub fn fields(self) -> &'static [Field] {
         match self {
             Self::Recs => &RECS_FIELDS,
-            Self::Lyrics => &[],
+            Self::Lyrics => &LYRICS_FIELDS,
             Self::Track => &TRACK_FIELDS,
             Self::Sources => &SOURCE_FIELDS,
             Self::Seeding => &SEED_FIELDS,
@@ -275,7 +378,23 @@ impl Area {
                     (Field::LyricsDeep, V::Bool(deep)),
                 ]);
             }
-            Self::Lyrics => {}
+            Self::Lyrics => {
+                let Some(r) = LYRICS.get(n) else { return out };
+                out.extend([(Field::LyricsStyle, V::U8(r.style)), (Field::LyricsUnit, V::U8(r.unit))]);
+                if let Some((light, smooth)) = r.light {
+                    out.extend([(Field::LyricsLightSpeed, V::F32(light)), (Field::LyricsSmooth, V::F32(smooth))]);
+                }
+                if let Some((height, speed)) = r.jump {
+                    out.extend([(Field::LyricsWaveJump, V::F32(height)), (Field::LyricsJumpSpeed, V::F32(speed))]);
+                }
+                out.extend(r.lift.map(|l| (Field::LyricsLift, V::F32(l))));
+                out.extend([
+                    (Field::LyricsDim, V::F32(r.dim)),
+                    (Field::LyricsGlow, V::Bool(r.glow)),
+                    (Field::LyricsCascade, V::Bool(r.cascade)),
+                    (Field::LyricsSoftEdges, V::Bool(r.soft_edges)),
+                ]);
+            }
         }
         out
     }
@@ -356,6 +475,17 @@ impl Field {
             | Self::StreamAnalysis
             | Self::LyricsSeparate
             | Self::LyricsDeep => Area::Load,
+            Self::LyricsStyle
+            | Self::LyricsUnit
+            | Self::LyricsLightSpeed
+            | Self::LyricsSmooth
+            | Self::LyricsWaveJump
+            | Self::LyricsJumpSpeed
+            | Self::LyricsLift
+            | Self::LyricsDim
+            | Self::LyricsGlow
+            | Self::LyricsCascade
+            | Self::LyricsSoftEdges => Area::Lyrics,
         }
     }
 
@@ -389,6 +519,17 @@ impl Field {
             Self::StreamAnalysis => V::Bool(p.stream_analysis),
             Self::LyricsSeparate => V::Bool(p.lyrics_separate),
             Self::LyricsDeep => V::Bool(p.lyrics_deep),
+            Self::LyricsStyle => V::U8(p.lyrics_style),
+            Self::LyricsUnit => V::U8(p.lyrics_unit),
+            Self::LyricsLightSpeed => V::F32(p.lyrics_light_speed),
+            Self::LyricsSmooth => V::F32(p.lyrics_smooth),
+            Self::LyricsWaveJump => V::F32(p.lyrics_wave_jump),
+            Self::LyricsJumpSpeed => V::F32(p.lyrics_jump_speed),
+            Self::LyricsLift => V::F32(p.lyrics_lift),
+            Self::LyricsDim => V::F32(p.lyrics_dim),
+            Self::LyricsGlow => V::Bool(p.lyrics_glow),
+            Self::LyricsCascade => V::Bool(p.lyrics_cascade),
+            Self::LyricsSoftEdges => V::Bool(p.lyrics_soft_edges),
         }
     }
 
@@ -430,6 +571,17 @@ impl Field {
             (Self::StreamAnalysis, V::Bool(b)) => p.stream_analysis = *b,
             (Self::LyricsSeparate, V::Bool(b)) => p.lyrics_separate = *b,
             (Self::LyricsDeep, V::Bool(b)) => p.lyrics_deep = *b,
+            (Self::LyricsStyle, V::U8(n)) => p.lyrics_style = *n,
+            (Self::LyricsUnit, V::U8(n)) => p.lyrics_unit = *n,
+            (Self::LyricsLightSpeed, V::F32(x)) => p.lyrics_light_speed = *x,
+            (Self::LyricsSmooth, V::F32(x)) => p.lyrics_smooth = *x,
+            (Self::LyricsWaveJump, V::F32(x)) => p.lyrics_wave_jump = *x,
+            (Self::LyricsJumpSpeed, V::F32(x)) => p.lyrics_jump_speed = *x,
+            (Self::LyricsLift, V::F32(x)) => p.lyrics_lift = *x,
+            (Self::LyricsDim, V::F32(x)) => p.lyrics_dim = *x,
+            (Self::LyricsGlow, V::Bool(b)) => p.lyrics_glow = *b,
+            (Self::LyricsCascade, V::Bool(b)) => p.lyrics_cascade = *b,
+            (Self::LyricsSoftEdges, V::Bool(b)) => p.lyrics_soft_edges = *b,
             _ => {}
         }
     }
@@ -453,6 +605,11 @@ impl Field {
             Self::RingBeat | Self::SpinRing => p.ring,
             Self::SeedLimitGb | Self::SeedDays | Self::SeedRatio => !p.no_seed,
             Self::RadioExplore => p.radio_new_share != RadioNewShare::None,
+            // A line that lights whole (Focus by letters) has no speed and
+            // no smoothing; only the wave jumps; only karaoke floats up.
+            Self::LyricsLightSpeed | Self::LyricsSmooth => !(p.lyrics_style == 1 && p.lyrics_unit == crate::LYRICS_BY_LETTERS),
+            Self::LyricsWaveJump | Self::LyricsJumpSpeed => p.lyrics_style == 2,
+            Self::LyricsLift => p.lyrics_style == 0,
             _ => true,
         }
     }
@@ -518,6 +675,7 @@ mod tests {
         assert_eq!(Area::Sources.current(&p), Some(0), "Обычно");
         assert_eq!(Area::Seeding.current(&p), Some(1), "Обычно");
         assert_eq!(Area::Load.current(&p), Some(2), "Быстро");
+        assert_eq!(Area::Lyrics.current(&p), Some(0), "Караоке");
         for area in Area::ALL {
             assert!(!area.custom_shown(&p), "{area:?}");
         }
@@ -531,8 +689,8 @@ mod tests {
         assert_eq!(Area::Recs.current(&p), None, "mixes without new music");
         assert_eq!(Area::Seeding.current(&p), None, "ratio 2.0");
         assert_eq!(Area::Load.current(&p), None, "60 frames");
-        assert_eq!(Area::Lyrics.current(&p), None);
-        assert!(!Area::Lyrics.custom_shown(&p), "no presets, no «Свои»");
+        assert_eq!(Area::Lyrics.current(&p), None, "the look before the presets");
+        assert!(Area::Lyrics.custom_shown(&p));
     }
 
     #[test]
@@ -699,7 +857,7 @@ mod tests {
         upgrade(&mut p, 0, false);
         assert_eq!(p.settings_rev, SETTINGS_REV);
         let kept: Vec<_> = p.custom_presets.keys().copied().collect();
-        assert_eq!(kept, vec![Area::Recs, Area::Seeding, Area::Load]);
+        assert_eq!(kept, vec![Area::Recs, Area::Lyrics, Area::Seeding, Area::Load]);
         // Read again (revision 1 now) after a change: the snapshot stays.
         p.fps_limit = 30;
         let before = p.custom_presets.clone();

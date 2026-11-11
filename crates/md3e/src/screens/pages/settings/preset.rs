@@ -1,7 +1,7 @@
 //! A group's presets (settings-v2-concept.md §1.2, §2.4): the group's first
 //! row, in «Просто» too. Buttons where there is no stage, live tiles for
-//! the track screen; «Свои» after them while there are values of the
-//! user's own.
+//! the track screen and the look of the lyrics; «Свои» after them while
+//! there are values of the user's own.
 //!
 //! The preset under the pointer is shown at once, before it is applied: the
 //! stage draws it, and the rows it changes show the preset's values (nothing
@@ -15,7 +15,7 @@ use nikgob_view::{PrefPatch, Prefs};
 use super::super::connected;
 use super::super::settings_help::{self, Level, SettingId as Id};
 use super::rows;
-use crate::screens::{ambient, bg_shapes, now_playing};
+use crate::screens::{ambient, bg_shapes, lyrics, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
     components::{IconButton, Size, anim},
@@ -271,10 +271,19 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
     (picked, rects)
 }
 
+/// Where a still lyrics tile stands in its sample's loop: the line half
+/// sung, its front (and lift, or jump) in the middle of it.
+const LYRICS_STILL_AT: f64 = 1.25;
+
 /// The tile's sample: the glow, the shapes, the cover with its ring under
-/// `shown`; on a made-up beat while `moving`, else at rest.
+/// `shown` (the line being sung for the lyrics' looks); on a made-up beat
+/// while `moving`, else at rest.
 fn sample(ui: &Ui, area: Area, i: usize, card: Rect, shown: &Prefs, moving: bool) {
     let ctx = ui.ctx();
+    if area == Area::Lyrics {
+        lyrics::preview_at(ui, card, shown, (!moving).then_some(LYRICS_STILL_AT));
+        return;
+    }
     let app = Theme::get(ctx);
     Theme::set(ctx, app.with_reduced_motion(app.reduced_motion || !moving));
     let t = anim::now(ctx) as f32;
