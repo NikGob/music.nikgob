@@ -278,13 +278,30 @@ pub const EQ_MAX_DB: f32 = 12.0;
 /// The farthest a band's bell is driven to hold the curve, dB.
 const EQ_BELL_MAX_DB: f64 = 24.0;
 
-/// The equalizer's ready curves, by name. The first is flat.
-pub const EQ_PRESETS: [(&str, [f32; EQ_BANDS]); 5] = [
+/// The equalizer's ready curves, by name. The first is flat. Gains at
+/// 32, 64, 125, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz. Nothing clips: the
+/// engine lowers the whole sound by the curve's highest point before the
+/// bands (its preamp) and a soft limiter follows, so a boost costs loudness
+/// elsewhere, not distortion.
+pub const EQ_PRESETS: [(&str, [f32; EQ_BANDS]); 8] = [
     ("Ровно", [0.0; EQ_BANDS]),
-    ("Бас", [0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-    ("Вокал", [0.0, 0.0, 0.0, -1.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0]),
-    ("Наушники", [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0]),
-    ("Тёплый", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -2.0, -3.0, 0.0]),
+    // A bass you hear: +7 dB around 60 Hz, sloping gently to the low mids,
+    // which dip a little so the bass stays clean.
+    ("Бас", [5.5, 7.0, 5.0, 1.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    // Deeper and stronger still, for small speakers and quiet rooms.
+    ("Мощный бас", [7.5, 9.0, 6.5, 2.0, -1.5, -0.5, 0.0, 0.0, 0.0, 0.0]),
+    // The voice forward: presence at 1–4 kHz, the boom below it down.
+    ("Вокал", [-2.0, -2.0, -1.0, 0.0, 1.0, 2.5, 3.5, 2.5, 1.0, 0.0]),
+    // Air and detail: the highs up from 2 kHz.
+    ("Яркость", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0]),
+    // Loudness for listening quietly: the lows and highs the ear loses
+    // at a low volume brought back.
+    ("Ночью", [5.0, 6.0, 3.5, 0.5, -1.0, 0.0, 0.0, 1.5, 3.0, 3.5]),
+    // A light correction for most headphones: some bass, a little presence,
+    // the harsh top eased.
+    ("Наушники", [3.0, 4.0, 2.5, 0.5, -1.0, 0.0, 1.0, 1.5, 0.0, -1.0]),
+    // Soft and full: the lows warm, the highs rolled off.
+    ("Тёплый", [1.5, 2.0, 2.0, 1.0, 0.0, 0.0, -1.0, -2.0, -3.0, -3.5]),
 ];
 
 /// The preset these gains are, if any.
@@ -515,8 +532,9 @@ mod tests {
         }
         assert_eq!(eq_filter_gains(&[0.0; EQ_BANDS]), [0.0; EQ_BANDS]);
         assert_eq!(eq_filter_gains(&[f32::NAN; EQ_BANDS]), [0.0; EQ_BANDS]);
-        // The numbers the engine's own fit is held to as well.
-        let bass = eq_filter_gains(&EQ_PRESETS[1].1);
+        // The numbers the engine's own fit is held to as well (the old
+        // bass curve).
+        let bass = eq_filter_gains(&[0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         for (bell, expected) in bass.iter().zip([-0.76, 3.89, 1.33, -0.38, -0.01]) {
             assert!((bell - expected).abs() < 0.03, "{bass:?}");
         }
@@ -524,5 +542,31 @@ mod tests {
         lone[5] = 6.0;
         let lone = eq_filter_gains(&lone);
         assert!(lone[5] > 6.2 && lone[5] < 6.7 && lone[4] < -1.0 && lone[4] > -1.4, "{lone:?}");
+    }
+
+    /// The ready curves are what their names say: «Бас» lifts 60 Hz by
+    /// 6 dB and more over 1 kHz and keeps the low mids from booming,
+    /// «Мощный бас» more, «Вокал» puts 2 kHz over the bass, «Яркость» and
+    /// «Ночью» lift the highs, and no two are the same.
+    #[test]
+    fn the_ready_curves_do_what_they_are_called() {
+        let heard = |name: &str, freq: f32| {
+            let (_, curve) = EQ_PRESETS.iter().find(|(n, _)| *n == name).expect(name);
+            eq_curve_db(&eq_filter_gains(curve), freq)
+        };
+        let bass = heard("Бас", 60.0) - heard("Бас", 1000.0);
+        assert!(bass >= 6.0, "{bass}");
+        assert!(heard("Бас", 40.0) > 4.0, "the sub-bass too");
+        assert!(heard("Бас", 500.0) <= 0.0, "the low mids stay clean");
+        assert!(heard("Мощный бас", 60.0) > heard("Бас", 60.0) + 1.5);
+        assert!(heard("Вокал", 2000.0) - heard("Вокал", 60.0) >= 5.0);
+        assert!(heard("Яркость", 8000.0) - heard("Яркость", 1000.0) >= 4.0);
+        assert!(heard("Ночью", 60.0) >= 5.0 && heard("Ночью", 8000.0) >= 2.5 && heard("Ночью", 1000.0).abs() < 0.5);
+        assert_eq!(EQ_PRESETS[0].1, [0.0; EQ_BANDS]);
+        for (i, (name, curve)) in EQ_PRESETS.iter().enumerate() {
+            assert_eq!(eq_preset_of(curve), Some(i), "{name}");
+            assert!(curve.iter().all(|g| g.abs() <= EQ_MAX_DB), "{name}");
+            assert!(name.chars().count() <= 12, "{name}: a short name");
+        }
     }
 }
