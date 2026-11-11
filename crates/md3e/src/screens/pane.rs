@@ -687,7 +687,7 @@ pub(super) fn info(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
 
 /// From this width on the info stands in two columns: the file and its
 /// tags | the quality and its check.
-pub(super) const INFO_TWO_COLUMNS: f32 = 600.0;
+pub(super) const INFO_TWO_COLUMNS: f32 = 520.0;
 /// Between the two columns.
 const INFO_COLUMN_GAP: f32 = 32.0;
 /// Above the quality when it stands under the rest.
