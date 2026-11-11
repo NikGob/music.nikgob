@@ -383,7 +383,7 @@ pub(crate) async fn fetch_photo(
 }
 
 /// Fetches photos for artists that have none (artists whose pages were opened
-/// first), calling `saved` for each new one; an unverified one recorded
+/// first), telling `found` of each new one; an unverified one recorded
 /// before `unverified_before` is asked again, a photo whose file is gone
 /// too. Says in one log line what the run did.
 #[allow(clippy::too_many_arguments)]
@@ -507,6 +507,19 @@ async fn photo_batches(
     }
 }
 
+/// Marks the roles of the voice credits ([`Library::mark_voice_roles`]):
+/// they get no photo lookups. Returns how many were new.
+fn mark_roles(lib: &Library, found: &dyn Fn(Found)) -> usize {
+    let roles = lib.mark_voice_roles().unwrap_or_else(|e| {
+        log::warn!("marking the roles of voice credits: {e}");
+        0
+    });
+    if roles > 0 {
+        found(Found::Reload);
+    }
+    roles
+}
+
 // ------------------------------------------------------------------- worker
 
 impl Worker {
@@ -568,22 +581,12 @@ impl Worker {
             let _ = found_tx.send(Internal::Enrich(Event::Found(f)));
         };
         // The roles of voice credits are marked by whichever run starts
-        // first: they get no photo lookups.
-        let mark = |lib: &Library, found: &dyn Fn(Found)| {
-            let roles = lib.mark_voice_roles().unwrap_or_else(|e| {
-                log::warn!("marking the roles of voice credits: {e}");
-                0
-            });
-            if roles > 0 {
-                found(Found::Reload);
-            }
-            roles
-        };
+        // first ([`mark_roles`]).
         if !svc.enrich.names_running {
             svc.enrich.names_running = true;
             let (meta, services, lib, tx, found) = (meta.clone(), services.clone(), lib.clone(), tx.clone(), found.clone());
             svc.spawn(async move {
-                let roles = mark(&lib, &found);
+                let roles = mark_roles(&lib, &found);
                 crate::artist_names::run_names(meta, services, lib, Pace::PHOTOS, roles, &found).await;
                 let _ = tx.send(Internal::Enrich(Event::NamesDone));
             });
@@ -600,7 +603,7 @@ impl Worker {
             .join("Artists");
         let priority = svc.enrich.priority.clone();
         svc.spawn(async move {
-            mark(&lib, &found);
+            mark_roles(&lib, &found);
             let deezer = meta.deezer.clone();
             let after = After { meta: Some(meta), services };
             run_photos(deezer, after, lib, dir, session, priority, Pace::PHOTOS, &found).await;

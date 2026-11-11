@@ -231,7 +231,7 @@ pub(crate) async fn identify(
     if foreign_script(name) && latin.as_ref().is_none_or(|(_, s)| *s == ROMAJI) {
         let names = [name.to_owned()];
         for svc in in_order(services) {
-            let Some((_, theirs)) = service_artist(svc.as_ref(), lib, id, &names, &titles).await else { continue };
+            let Some((_, theirs)) = service_artist(&**svc, lib, id, &names, &titles).await else { continue };
             if let Some(found) = choose_latin(name, None, None, Some((theirs, svc.service().as_str())))
                 && found.1 != ROMAJI
             {
@@ -319,7 +319,7 @@ pub(crate) async fn photo_after_deezer(
         match source {
             PhotoSource::Service(kind) => {
                 let Some(svc) = after.services.iter().find(|s| s.service() == kind) else { continue };
-                let Some((Some(url), _)) = service_artist(svc.as_ref(), lib, id, &names, &titles).await else { continue };
+                let Some((Some(url), _)) = service_artist(&**svc, lib, id, &names, &titles).await else { continue };
                 match meta.web_images.download(&url).await {
                     Ok(bytes) if crate::enrich::looks_like_image(&bytes) => return Some((bytes, kind.as_str())),
                     Ok(_) => {}
