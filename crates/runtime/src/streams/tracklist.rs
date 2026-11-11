@@ -196,10 +196,13 @@ fn same_count_and_year(a: &StreamAlbum, w: &Wanted) -> bool {
 }
 
 /// What a found tracklist leaves in the cache: found once every place the
-/// album counts has a line, else a miss, asked again later.
+/// album counts has a line and the album has its year, else a miss, asked
+/// again later.
 fn found_mark(lib: &nikgob_library::Library, release: ReleaseId) -> &'static str {
+    let yearless = lib.get_release(release).ok().flatten().is_some_and(|r| r.year.is_none());
     match lib.release_listing(release) {
         Ok(Some(l)) if l.holes() > 0 => "miss",
+        _ if yearless => "miss",
         _ => "found",
     }
 }
@@ -336,7 +339,8 @@ impl Worker {
                     Ok(false) => {}
                     Err(e) => log::warn!("album {}: year not stored: {e}", m.release),
                 }
-                let _ = self.lib.cache_put(&key, now, "found");
+                // Still without a year: asked again later.
+                let _ = self.lib.cache_put(&key, now, found_mark(&self.lib, m.release));
                 self.keep_released(m.release, &album);
                 self.load_library();
                 if self.state.read().release.as_ref().is_some_and(|r| r.card.id == m.release) {
@@ -589,6 +593,7 @@ mod tests {
         let lib = nikgob_library::Library::open_in_memory().unwrap();
         let mut r = Release::new("Album", ArtistCredit::single("A", None));
         r.total_tracks = Some(3);
+        r.year = Some(2001);
         let r = lib.upsert_release(&r).unwrap();
         for no in [1, 2] {
             let mut t = Track::new(format!("Song {no}"), ArtistCredit::single("A", None));
@@ -602,5 +607,14 @@ mod tests {
         t.track_no = 3;
         lib.upsert_track(&t).unwrap();
         assert_eq!(found_mark(&lib, r.id), "found");
+        // Whole, but the service gave no year: asked again later.
+        let mut yearless = Release::new("Other", ArtistCredit::single("A", None));
+        yearless.total_tracks = Some(1);
+        let yearless = lib.upsert_release(&yearless).unwrap();
+        let mut t = Track::new("Song", ArtistCredit::single("A", None));
+        t.release_id = Some(yearless.id);
+        t.track_no = 1;
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(found_mark(&lib, yearless.id), "miss");
     }
 }
