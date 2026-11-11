@@ -983,7 +983,12 @@ impl<'a> Builder<'a> {
                 if order.len() < MIN_SONGS {
                     return None;
                 }
-                self.order(&order, &pool, pool.arc, steady, false)
+                // On the part's own arc, unless that leaves a song never
+                // played outside a gap between loved ones (more of them
+                // when the user asks for new songs): then the order of the
+                // day, where each found its gap.
+                let on_arc = self.order(&order, &pool, pool.arc, steady, false);
+                if self.sandwiched(&on_arc) { on_arc } else { order }
             }
         };
         if tracks.len() < MIN_SONGS {
@@ -1742,6 +1747,13 @@ impl<'a> Builder<'a> {
         }
         let empty = n.saturating_sub(heard_now + quarter + never.min(cap));
         (cap + empty.min(never.saturating_sub(cap)), quarter)
+    }
+
+    /// Every song never played of `tracks` stands between two loved
+    /// familiar ones ([`Builder::anchors`]), not in the first two places.
+    fn sandwiched(&self, tracks: &[usize]) -> bool {
+        let anchors = self.anchors(tracks);
+        (0..tracks.len()).all(|k| !self.unheard(tracks[k]) || (k >= 2 && k + 1 < tracks.len() && anchors[k - 1] && anchors[k + 1]))
     }
 
     /// Familiar and loved: above the lowest quarter of the mix's familiar
