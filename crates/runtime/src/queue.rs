@@ -4,7 +4,7 @@
 //! or drag a specific occurrence of a track that appears twice.
 
 use nikgob_core::model::TrackId;
-use nikgob_view::Repeat;
+use nikgob_view::{ListShuffle, Repeat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,12 +137,10 @@ impl Queue {
     }
 
     /// A new list is about to replace the queue (an album, a playlist, a
-    /// mix, a radio, a search result): shuffle stays as the user set it
-    /// when `keep` («Перемешивание остаётся включённым»), else it goes off.
-    pub fn new_list(&mut self, keep: bool) {
-        if !keep {
-            self.shuffle = false;
-        }
+    /// mix, a radio, a search result): shuffle turns on or off as `rule`
+    /// says for its kind, or stays as the button is.
+    pub fn new_list(&mut self, rule: ListShuffle) {
+        self.shuffle = rule.apply(self.shuffle);
     }
 
     /// Replaces the queue with a radio's picks (a radio, the daylist):
@@ -783,35 +781,46 @@ mod tests {
     }
 
     #[test]
-    fn a_new_list_keeps_shuffle_only_with_the_setting() {
+    fn a_new_list_shuffles_as_its_kind_says() {
         let t = ids(30);
-        // «Перемешивание остаётся включённым» (the default): on stays on.
+        // «По кнопке»: on stays on.
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.new_list(true);
+        q.new_list(ListShuffle::Button);
         q.set_from(&t, None, None);
         assert!(q.shuffle);
         assert!(same_tracks(&q.tracks(), &t));
-        // Off: a new list turns shuffle off and plays from the first track.
-        q.new_list(false);
+        // «По порядку»: shuffle goes off and the list plays from its first track.
+        q.new_list(ListShuffle::InOrder);
         q.set_from(&t, None, None);
         assert!(!q.shuffle);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[0]));
-        // «Перемешать» still turns it on (as `play_list` does).
-        q.new_list(false);
+        // «По кнопке» with the button off: in order too.
+        q.new_list(ListShuffle::Button);
+        q.set_from(&t, Some(4), None);
+        assert!(!q.shuffle);
+        assert_eq!(q.tracks(), t);
+        assert_eq!(q.current().map(|e| e.track), Some(t[4]));
+        // «Вперемешку»: on, whatever the button was; a picked track first.
+        q.new_list(ListShuffle::Shuffled);
+        q.set_from(&t, Some(7), None);
+        assert!(q.shuffle);
+        assert_eq!(q.current().map(|e| e.track), Some(t[7]));
+        assert!(same_tracks(&q.tracks(), &t));
+        assert_ne!(q.tracks(), t, "the list is shuffled");
+        // «Перемешать» on a list played in order (as `play_list` does).
+        q.new_list(ListShuffle::InOrder);
         q.shuffle = true;
         q.set_from(&t, None, None);
         assert!(q.shuffle);
         assert!(same_tracks(&q.tracks(), &t));
-        assert_ne!(q.tracks(), t, "the list is shuffled");
-        // Turned off by hand, the list's order comes back in both modes.
+        // Turned off by hand, the list's order comes back.
         let cur = q.current().unwrap();
         q.set_shuffle(false);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current(), Some(cur));
-        q.new_list(true);
-        q.set_shuffle(true);
+        q.new_list(ListShuffle::Shuffled);
         q.set(&t, 3, None);
         q.set_shuffle(false);
         assert_eq!(q.tracks(), t);

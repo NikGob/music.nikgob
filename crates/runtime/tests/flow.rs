@@ -1038,11 +1038,12 @@ fn a_service_album_plays_next_queues_and_goes_to_a_playlist_by_its_id() {
     });
 }
 
-/// «Перемешивание остаётся включённым»: on (the default), a new album keeps
-/// shuffle on; off, it turns shuffle off and plays in order, «Перемешать»
-/// still turns it on, and shuffle off by hand brings the order back.
+/// «Перемешивание» by the kind of list: an album plays in its order by
+/// default (shuffle goes off), «Перемешать» still turns it on, shuffle off
+/// by hand brings the order back; set to «По кнопке» an album keeps the
+/// button as it is, and the library's own lists always do.
 #[test]
-fn a_new_album_keeps_shuffle_as_the_setting_says() {
+fn a_new_album_shuffles_as_its_kind_says() {
     use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
 
     let dir = tempfile::tempdir().unwrap();
@@ -1085,15 +1086,11 @@ fn a_new_album_keeps_shuffle_as_the_setting_says() {
     };
     let current = |s: &ViewState| s.queue.current.as_ref().map(|t| t.id);
     let same = |a: &[nikgob_core::model::TrackId]| a.len() == ids.len() && ids.iter().all(|t| a.contains(t));
-    assert!(rt.state().prefs.keep_shuffle && !rt.state().prefs.shuffle_radio);
+    use nikgob_view::{ListKind, ListShuffle};
+    assert_eq!(rt.state().prefs.list_shuffle.of(ListKind::Album), ListShuffle::InOrder);
+    assert!(!rt.state().prefs.shuffle_radio);
     rt.send(Command::ToggleShuffle);
     wait_for(&rt, "shuffle on", |s| s.player.shuffle);
-    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
-    wait_for(&rt, "the album under shuffle", |s| current(s) == Some(ids[1]) && s.player.shuffle && same(&order(s)));
-
-    let prefs = Prefs { keep_shuffle: false, ..rt.state().prefs.clone() };
-    rt.send(Command::SetPrefs(Box::new(prefs)));
-    wait_for(&rt, "the setting off", |s| !s.prefs.keep_shuffle);
     rt.send(Command::PlayRelease { id: release.id, start: Some(ids[2]), shuffle: false });
     wait_for(&rt, "the album in order, shuffle off", |s| current(s) == Some(ids[2]) && !s.player.shuffle && order(s) == ids);
     // «Перемешать» turns it on all the same.
@@ -1103,20 +1100,23 @@ fn a_new_album_keeps_shuffle_as_the_setting_says() {
     rt.send(Command::ToggleShuffle);
     wait_for(&rt, "the order back", |s| !s.player.shuffle && order(s) == ids && current(s) == playing);
 
-    // The library's own lists (downloaded, «Слушать снова», worlds) go the
-    // same way: with the setting off, shuffle goes off and they play in order.
+    // «По кнопке»: the album keeps shuffle on.
+    let mut prefs = rt.state().prefs.clone();
+    prefs.list_shuffle.set(ListKind::Album, ListShuffle::Button);
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "the album by the button", |s| s.prefs.list_shuffle.of(ListKind::Album) == ListShuffle::Button);
     rt.send(Command::ToggleShuffle);
     wait_for(&rt, "shuffle on again", |s| s.player.shuffle);
-    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 1, context: "скачанного".into() });
-    wait_for(&rt, "the downloaded in order, shuffle off", |s| {
-        current(s) == Some(ids[1]) && !s.player.shuffle && order(s) == ids
-    });
-    // With it on, «Слушать всё» under shuffle plays the whole list shuffled.
-    let prefs = Prefs { keep_shuffle: true, ..rt.state().prefs.clone() };
-    rt.send(Command::SetPrefs(Box::new(prefs)));
-    wait_for(&rt, "the setting on", |s| s.prefs.keep_shuffle);
-    rt.send(Command::ToggleShuffle);
-    wait_for(&rt, "shuffle on", |s| s.player.shuffle);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[1]), shuffle: false });
+    wait_for(&rt, "the album under shuffle", |s| current(s) == Some(ids[1]) && s.player.shuffle && same(&order(s)));
+
+    // The library's own lists (downloaded, «Слушать снова», worlds) keep
+    // the button: under shuffle «Слушать всё» plays the whole list shuffled…
     rt.send(Command::PlayAll { tracks: ids.clone(), context: "Слушать снова".into() });
     wait_for(&rt, "the whole list under shuffle", |s| s.player.shuffle && s.queue.prev.is_empty() && same(&order(s)));
+    // …and with the button off, in order.
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle off", |s| !s.player.shuffle);
+    rt.send(Command::PlayTracks { tracks: ids.clone(), start: 1, context: "скачанного".into() });
+    wait_for(&rt, "the downloaded in order", |s| current(s) == Some(ids[1]) && !s.player.shuffle && order(s) == ids);
 }

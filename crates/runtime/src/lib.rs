@@ -1151,7 +1151,7 @@ impl Worker {
                     .flatten()
                     .map(|r| format!("альбома «{}»", r.title));
                 self.turn.lap("album read");
-                self.play_list(ids, start, shuffle, title, EventContext::Album, Some(format!("release:{id}")));
+                self.play_list(ids, start, shuffle, nikgob_view::ListKind::Album, title, EventContext::Album, Some(format!("release:{id}")));
                 // An album known in part plays at once; the rest of its
                 // tracklist joins the queue when the services tell it.
                 self.album_queue = Some((id, self.queue.generation()));
@@ -1161,7 +1161,8 @@ impl Worker {
             Command::PlayPlaylist { id, start, shuffle } => {
                 let (ids, name) = self.playlist_tracks(id, start);
                 let name = format!("плейлиста «{name}»");
-                self.play_list(ids, start, shuffle, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
+                let kind = self.playlist_kind(id);
+                self.play_list(ids, start, shuffle, kind, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
             }
             Command::PlayArtist { id, shuffle } => {
                 let rows = self
@@ -1169,7 +1170,8 @@ impl Worker {
                     .unwrap_or_default();
                 let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name);
                 let ids = self.playable(&rows, None);
-                self.play_list(ids, None, shuffle, name, EventContext::Artist, Some(format!("artist:{id}")));
+                // Without «Перемешать» it is the artist's «Слушать микс».
+                self.play_list(ids, None, shuffle, nikgob_view::ListKind::Mix, name, EventContext::Artist, Some(format!("artist:{id}")));
             }
             Command::PlayTracks {
                 tracks,
@@ -1879,11 +1881,23 @@ impl Worker {
     }
 
     /// A new list (an album, a playlist, a mix, a radio, a search result)
-    /// is about to replace the queue: shuffle stays, or goes off without
-    /// «Перемешивание остаётся включённым».
-    pub(crate) fn new_list(&mut self) {
-        let keep = self.state.read().prefs.keep_shuffle;
-        self.queue.new_list(keep);
+    /// is about to replace the queue: shuffle turns on or off as the
+    /// setting of its `kind` says («Перемешивание»); a list of no kind (the
+    /// library's tracks, a search, a radio) keeps the button as it is.
+    pub(crate) fn new_list(&mut self, kind: Option<nikgob_view::ListKind>) {
+        let rule = kind.map_or(nikgob_view::ListShuffle::Button, |k| self.state.read().prefs.list_shuffle.of(k));
+        self.queue.new_list(rule);
+    }
+
+    /// The kind of the library playlist `id` for [`Self::new_list`]: one of
+    /// a service (followed, synced or imported from it) is a ready one;
+    /// «Любимые» and those made here are the user's own.
+    fn playlist_kind(&self, id: PlaylistId) -> nikgob_view::ListKind {
+        if id != LIKED_PLAYLIST && self.lib.playlist_remote(id).ok().flatten().is_some() {
+            nikgob_view::ListKind::ReadyPlaylist
+        } else {
+            nikgob_view::ListKind::OwnPlaylist
+        }
     }
 
     /// «Перемешивать радио и автовоспроизведение»: a radio's, autoplay's
@@ -1894,11 +1908,11 @@ impl Worker {
 
     /// A list of tracks of the library's pages (downloaded, «Слушать
     /// снова», worlds, cards) from `start`, or from the first (a random one
-    /// under shuffle) when the user picked none; shuffle stays or goes off
-    /// as for any new list.
+    /// under shuffle) when the user picked none; shuffle stays as the
+    /// button is.
     fn play_tracks(&mut self, tracks: &[TrackId], start: Option<usize>, context: String) {
         self.user_switch(EventOrigin::Manual);
-        self.new_list();
+        self.new_list(None);
         self.queue.set_from(tracks, start, Some(context));
         self.play_context = EventContext::Library;
         self.play_context_id = None;
@@ -1907,11 +1921,13 @@ impl Worker {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn play_list(
         &mut self,
         ids: Vec<TrackId>,
         start: Option<TrackId>,
         shuffle: bool,
+        kind: nikgob_view::ListKind,
         context: Option<String>,
         ctx: EventContext,
         context_id: Option<String>,
@@ -1923,10 +1939,10 @@ impl Worker {
         let start_idx = start.and_then(|s| ids.iter().position(|&t| t == s));
         self.user_switch(EventOrigin::Manual);
         self.turn.lap("switch");
-        // «Перемешать» turns shuffle on; a plain play keeps it as the user
-        // set it (on: the list plays shuffled, from a random track unless
-        // one was picked) or turns it off, as the setting says.
-        self.new_list();
+        // «Перемешать» turns shuffle on; a plain play shuffles or not as
+        // the setting of the list's kind says (shuffled: from a random
+        // track unless one was picked).
+        self.new_list(Some(kind));
         if shuffle {
             self.queue.shuffle = true;
         }
