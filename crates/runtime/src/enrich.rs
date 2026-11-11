@@ -55,8 +55,8 @@ pub(crate) enum Found {
     Photo(ArtistId),
     /// The artist's readable name, or that it is a role.
     Name(ArtistId),
-    /// Artist rows merged into one, or roles marked: the library's artists
-    /// are read again.
+    /// Roles of voice credits newly marked: the library's artists are
+    /// read again.
     Reload,
 }
 
@@ -274,22 +274,23 @@ const ANCHOR_TRACKS: usize = 3;
 /// Local track / album titles handed to the name-search verification.
 const VERIFY_TITLES: u32 = 60;
 
-/// Finds the artist on Deezer, downloads the photo into `dir` and records it.
+/// What Deezer says of an artist's photo, before anything is recorded.
+enum Verdict {
+    Image(Vec<u8>),
+    /// Deezer has no usable photo.
+    Missing,
+    /// Same-named artists with photos, none proved this one.
+    Unverified,
+    /// No network or an unexpected answer.
+    Failed,
+}
+
+/// Finds the artist on Deezer and downloads its photo; records nothing.
 ///
 /// A photo is only taken from a Deezer artist known to be this one: first via
 /// one of the artist's own tracks (its `artist.id`), then by name search whose
 /// albums / top tracks must overlap the local titles. No proof, no photo.
-/// A photo locked by the user is left alone.
-pub(crate) async fn fetch_artist_photo(
-    deezer: &Deezer,
-    lib: &Library,
-    id: ArtistId,
-    name: &str,
-    dir: &Path,
-) -> PhotoOutcome {
-    if lib.artist_photo_locked(id).unwrap_or(false) {
-        return PhotoOutcome::NotFound;
-    }
+async fn deezer_verdict(deezer: &Deezer, lib: &Library, id: ArtistId, name: &str) -> Verdict {
     let tracks = lib.tracks_of_artist(id, 0, VERIFY_TITLES).unwrap_or_default();
     let work = async {
         // 1. Anchor on the artist's own tracks (local ones first).
@@ -319,29 +320,61 @@ pub(crate) async fn fetch_artist_photo(
         };
         deezer.download_image(&url).await.map(Fetched::Image)
     };
-    let bytes = match tokio::time::timeout(Duration::from_secs(45), work).await {
-        Ok(Ok(Fetched::Image(b))) if looks_like_image(&b) => b,
+    match tokio::time::timeout(Duration::from_secs(45), work).await {
+        Ok(Ok(Fetched::Image(b))) if looks_like_image(&b) => Verdict::Image(b),
         // Not proved this artist's: not «Deezer has no photo».
-        Ok(Ok(Fetched::Unverified)) => {
-            let _ = lib.set_artist_photo_unverified(id);
-            return PhotoOutcome::Unverified;
-        }
-        Ok(Ok(Fetched::Image(_) | Fetched::Missing) | Err(MetadataError::NotFound)) => {
-            let _ = lib.set_artist_photo(id, None);
-            return PhotoOutcome::NotFound;
-        }
+        Ok(Ok(Fetched::Unverified)) => Verdict::Unverified,
+        Ok(Ok(Fetched::Image(_) | Fetched::Missing) | Err(MetadataError::NotFound)) => Verdict::Missing,
         Ok(Err(e)) => {
             log::debug!("photo of {name}: {e}");
-            return PhotoOutcome::Failed;
+            Verdict::Failed
         }
-        Err(_) => return PhotoOutcome::Failed,
-    };
-    save_photo(lib, id, name, dir, &bytes, "deezer")
+        Err(_) => Verdict::Failed,
+    }
+}
+
+/// Records a verdict without a photo: a miss of days, or an unverified one
+/// asked again by the next session.
+fn record_verdict(lib: &Library, id: ArtistId, verdict: &Verdict) -> PhotoOutcome {
+    match verdict {
+        Verdict::Missing => {
+            let _ = lib.set_artist_photo(id, None);
+            PhotoOutcome::NotFound
+        }
+        Verdict::Unverified => {
+            let _ = lib.set_artist_photo_unverified(id);
+            PhotoOutcome::Unverified
+        }
+        Verdict::Image(_) | Verdict::Failed => PhotoOutcome::Failed,
+    }
+}
+
+/// Deezer's photo of the artist, downloaded into `dir` and recorded (see
+/// [`deezer_verdict`]). A photo locked by the user is left alone.
+pub(crate) async fn fetch_artist_photo(
+    deezer: &Deezer,
+    lib: &Library,
+    id: ArtistId,
+    name: &str,
+    dir: &Path,
+) -> PhotoOutcome {
+    if lib.artist_photo_locked(id).unwrap_or(false) {
+        return PhotoOutcome::NotFound;
+    }
+    match deezer_verdict(deezer, lib, id, name).await {
+        Verdict::Image(bytes) => save_photo(lib, id, name, dir, &bytes, "deezer"),
+        v => record_verdict(lib, id, &v),
+    }
 }
 
 /// Writes the photo `bytes` of `id` into `dir` and records it as from
-/// `source`.
+/// `source`; never for a role (checked again right before) nor over a
+/// photo the user chose.
 fn save_photo(lib: &Library, id: ArtistId, name: &str, dir: &Path, bytes: &[u8], source: &str) -> PhotoOutcome {
+    let role = lib.artist_latin(id).ok().flatten().is_some_and(|r| r.character);
+    if role || lib.artist_photo_locked(id).unwrap_or(false) {
+        return PhotoOutcome::NotFound;
+    }
     let path = dir.join(format!("{id}.jpg"));
     let tmp = path.with_extension("part");
     let saved = std::fs::create_dir_all(dir)
@@ -358,10 +391,16 @@ fn save_photo(lib: &Library, id: ArtistId, name: &str, dir: &Path, bytes: &[u8],
     PhotoOutcome::Saved(path)
 }
 
-/// [`fetch_artist_photo`], then the sources after Deezer when Deezer has
-/// no photo it could prove this artist's ([`crate::artist_names`]): the
-/// connected services, then Wikimedia Commons. Deezer's verdict stands
-/// when none of them has one.
+/// The photo of an artist from every source ([`crate::artist_names`]):
+///
+/// 1. who it is is settled first: a role gets no lookup at all, and when
+///    that cannot be settled now (MusicBrainz busy) nothing is asked or
+///    recorded;
+/// 2. Deezer;
+/// 3. when Deezer has no photo it could prove this artist's: the
+///    connected services, then Wikimedia Commons. Deezer's verdict is
+///    recorded when none has one; when one of them could not answer for
+///    now, the artist is asked again by the next session, not after days.
 pub(crate) async fn fetch_photo(
     deezer: &Deezer,
     after: &After,
@@ -371,14 +410,26 @@ pub(crate) async fn fetch_photo(
     dir: &Path,
     found: &impl Fn(Found),
 ) -> PhotoOutcome {
-    let first = fetch_artist_photo(deezer, lib, id, name, dir).await;
-    if !matches!(first, PhotoOutcome::NotFound | PhotoOutcome::Unverified) || lib.artist_photo_locked(id).unwrap_or(false) {
-        return first;
+    if lib.artist_photo_locked(id).unwrap_or(false) {
+        return PhotoOutcome::NotFound;
     }
-    let more = crate::artist_names::photo_after_deezer(after, lib, id, name, found);
+    let known = match crate::artist_names::known(after, lib, id, name, found).await {
+        Ok(k) => k,
+        Err(_) => return PhotoOutcome::Failed,
+    };
+    if known.character {
+        return PhotoOutcome::NotFound;
+    }
+    let verdict = match deezer_verdict(deezer, lib, id, name).await {
+        Verdict::Image(bytes) => return save_photo(lib, id, name, dir, &bytes, "deezer"),
+        Verdict::Failed => return PhotoOutcome::Failed,
+        v => v,
+    };
+    let more = crate::artist_names::photo_after_deezer(after, lib, id, name, &known);
     match tokio::time::timeout(Duration::from_secs(90), more).await {
-        Ok(Some((bytes, source))) => save_photo(lib, id, name, dir, &bytes, source),
-        Ok(None) | Err(_) => first,
+        Ok(Ok(Some((bytes, source)))) => save_photo(lib, id, name, dir, &bytes, source),
+        Ok(Ok(None)) => record_verdict(lib, id, &verdict),
+        Ok(Err(_)) | Err(_) => record_verdict(lib, id, &Verdict::Unverified),
     }
 }
 
@@ -605,7 +656,7 @@ impl Worker {
         svc.spawn(async move {
             mark_roles(&lib, &found);
             let deezer = meta.deezer.clone();
-            let after = After { meta: Some(meta), services };
+            let after = After { meta: Some(meta), services, gate: Arc::default() };
             run_photos(deezer, after, lib, dir, session, priority, Pace::PHOTOS, &found).await;
             let _ = tx.send(Internal::Enrich(Event::PhotosDone));
         });
@@ -620,7 +671,8 @@ impl Worker {
         self.publish(|s| {
             let fix = |a: &mut v::ArtistCard| {
                 if a.id == id {
-                    if image.is_some() {
+                    // A role shows no automatic photo.
+                    if image.is_some() || character {
                         a.image = image.clone();
                     }
                     a.latin = latin.clone();
@@ -637,7 +689,8 @@ impl Worker {
         self.patch_home(move |home| {
             let fix = |a: &mut v::ArtistCard| {
                 if a.id == id {
-                    if image.is_some() {
+                    // A role shows no automatic photo.
+                    if image.is_some() || character {
                         a.image = image.clone();
                     }
                     a.latin = latin.clone();
@@ -1095,13 +1148,116 @@ mod tests {
         let alone = fetch_photo(&meta.deezer, &After::default(), &lib, saso.id, "佐宗綾子", dir.path(), &|_| {}).await;
         assert_eq!(alone, PhotoOutcome::NotFound);
         let found = Mutex::new(Vec::new());
-        let after = After { meta: Some(meta.clone()), services: Vec::new() };
+        let after = After { meta: Some(meta.clone()), ..After::default() };
         let out = fetch_photo(&meta.deezer, &after, &lib, saso.id, "佐宗綾子", dir.path(), &|f| found.lock().unwrap().push(f)).await;
         let PhotoOutcome::Saved(saved) = out else { panic!("{out:?}") };
         assert_eq!(std::fs::read(saved).unwrap(), jpeg);
         assert_eq!(found.lock().unwrap().as_slice(), [Found::Name(saso.id)]);
         let row = lib.artist_latin(saso.id).unwrap().unwrap();
         assert_eq!((row.name.as_deref(), row.wikidata.as_deref()), (Some("Ayako Saso"), Some("Q11")));
+    }
+
+    /// The artist a photo is looked up for, with its MusicBrainz id, and
+    /// clients pointed at `server`.
+    fn tagged(server: &MockServer, name: &str) -> (Metadata, Library, ArtistId) {
+        let mut meta = Metadata::new(&MetadataConfig::new("tests@example.invalid")).unwrap();
+        meta.deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        meta.musicbrainz = nikgob_metadata::MusicBrainz::with_base_url(http(), &server.uri()).unwrap();
+        meta.wikidata =
+            nikgob_metadata::Wikidata::with_base_urls(http(), &format!("{}/w/", server.uri()), &format!("{}/wiki/", server.uri()))
+                .unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = Artist::new(name);
+        a.mbid = Some(TAGGED.into());
+        let a = lib.upsert_artist(&a).unwrap();
+        let t = lib.upsert_track(&Track::new("Song", ArtistCredit::single(name, Some(a.id)))).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "/nonexistent/song.flac", Codec::Flac).with_quality(false)).unwrap();
+        (meta, lib, a.id)
+    }
+
+    const TAGGED: &str = "0b2f0b5a-0000-4000-8000-000000000003";
+
+    /// A role is known before any photo lookup: MusicBrainz says Character,
+    /// so Deezer and the rest are never asked and nothing is saved.
+    #[tokio::test]
+    async fn a_role_is_settled_before_any_photo_lookup() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/artist/{TAGGED}")))
+            .respond_with(json(&format!(r#"{{"id": "{TAGGED}", "name": "ナナチ", "type": "Character"}}"#)))
+            .mount(&server)
+            .await;
+        let (meta, lib, id) = tagged(&server, "ナナチ");
+        let dir = tempfile::tempdir().unwrap();
+        let after = After { meta: Some(meta.clone()), ..After::default() };
+        let out = fetch_photo(&meta.deezer, &after, &lib, id, "ナナチ", dir.path(), &|_| {}).await;
+        assert_eq!(out, PhotoOutcome::NotFound);
+        let asked: Vec<String> = server.received_requests().await.unwrap().iter().map(|r| r.url.path().to_owned()).collect();
+        assert_eq!(asked, vec![format!("/artist/{TAGGED}")], "only who it is");
+        assert!(lib.artist_latin(id).unwrap().unwrap().character);
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+        assert!(!lib.artist_photo_due(id, 0, now_ms() + 1).unwrap(), "never queued again");
+    }
+
+    /// MusicBrainz busy: who it is cannot be settled, so no photo lookup and
+    /// nothing recorded.
+    #[tokio::test]
+    async fn a_busy_identity_lookup_records_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503)).mount(&server).await;
+        let (meta, lib, id) = tagged(&server, "佐宗綾子");
+        let dir = tempfile::tempdir().unwrap();
+        let after = After { meta: Some(meta.clone()), ..After::default() };
+        let out = fetch_photo(&meta.deezer, &after, &lib, id, "佐宗綾子", dir.path(), &|_| {}).await;
+        assert_eq!(out, PhotoOutcome::Failed);
+        assert_eq!(lib.artist_photo_lookup(id).unwrap(), None, "no miss");
+        assert_eq!(lib.artist_latin(id).unwrap(), None);
+    }
+
+    /// A recent identity: its Wikidata item is read again for the picture
+    /// and checked against the MusicBrainz id. Wikidata busy: asked again by
+    /// the next session, not a miss of days. An item that names another
+    /// MusicBrainz artist: no photo.
+    #[tokio::test]
+    async fn a_cached_wikidata_item_is_checked_and_a_busy_one_is_no_miss() {
+        let server = MockServer::start().await;
+        for p in ["/search/track", "/search/artist"] {
+            Mock::given(method("GET")).and(path(p)).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
+        }
+        Mock::given(method("GET")).and(path("/w/api.php")).respond_with(ResponseTemplate::new(503)).mount(&server).await;
+        let (meta, lib, id) = tagged(&server, "佐宗綾子");
+        let known = nikgob_library::LatinFound {
+            mbid: Some(TAGGED.into()),
+            wikidata: Some("Q11".into()),
+            complete: true,
+            ..nikgob_library::LatinFound::default()
+        };
+        lib.set_artist_latin(id, &known).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let after = After { meta: Some(meta.clone()), ..After::default() };
+        let out = fetch_photo(&meta.deezer, &after, &lib, id, "佐宗綾子", dir.path(), &|_| {}).await;
+        assert_eq!(out, PhotoOutcome::Unverified);
+        assert!(!lib.artist_photo_due(id, now_ms() - PHOTO_RETRY_MS, now_ms() - 60_000).unwrap(), "not again this session");
+        assert!(lib.artist_photo_due(id, now_ms() - PHOTO_RETRY_MS, now_ms() + 1).unwrap(), "again the next one");
+
+        server.reset().await;
+        for p in ["/search/track", "/search/artist"] {
+            Mock::given(method("GET")).and(path(p)).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/w/api.php"))
+            .respond_with(json(
+                r#"{"entities": {"Q11": {"claims": {
+                    "P18": [{"mainsnak": {"datavalue": {"value": "Someone.jpg"}}}],
+                    "P434": [{"mainsnak": {"datavalue": {"value": "0b2f0b5a-0000-4000-8000-000000000009"}}}]}}}}"#,
+            ))
+            .mount(&server)
+            .await;
+        let after = After { meta: Some(meta.clone()), ..After::default() };
+        let out = fetch_photo(&meta.deezer, &after, &lib, id, "佐宗綾子", dir.path(), &|_| {}).await;
+        assert_eq!(out, PhotoOutcome::NotFound);
+        let asked = server.received_requests().await.unwrap();
+        assert!(asked.iter().all(|r| !r.url.path().contains("FilePath")), "another artist's picture is not fetched");
     }
 
     #[tokio::test]

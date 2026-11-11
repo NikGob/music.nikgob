@@ -36,6 +36,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0022_recordings.sql"),
     include_str!("../migrations/0023_track_fx.sql"),
     include_str!("../migrations/0024_wishlist_better_than.sql"),
+    // Migration 26: 0025_album_selection.sql (r29-albums) is registered
+    // before it when the branches are merged.
     include_str!("../migrations/0026_artist_latin.sql"),
 
 ];

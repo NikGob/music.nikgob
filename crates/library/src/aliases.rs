@@ -34,8 +34,8 @@ use crate::util::credit_columns;
 pub(crate) const DOUBLES_KEY: &str = "artist_aliases_merged.v1";
 
 /// `artist_alias.source` of a name search finds the artist by but that
-/// does not make another credit of that spelling this artist: a role's
-/// Latin name or a kana name's romaji (`Riko` may well be someone else).
+/// never makes another credit of that spelling this artist: the readable
+/// Latin name of [`crate::latin`] (`Riko` may well be someone else).
 pub(crate) const READING: &str = "reading";
 
 /// Records `name` as another spelling of `artist` (nothing for its own name).

@@ -686,11 +686,13 @@ impl MusicBrainz {
         self.get(&format!("artist/{mbid}"), &[("inc", "aliases+url-rels")]).await
     }
 
-    /// The artist `mbid` has a recording or a release group called one of
-    /// `titles` (the library's titles of an artist found by name): the
-    /// proof that it is the library's. A recording search for up to eight
-    /// of the titles, then the first page of its release groups.
-    pub async fn artist_has_titles(&self, mbid: &str, titles: &[String]) -> Result<bool> {
+    /// How many distinct titles of `titles` (the library's titles of an
+    /// artist found by name) the artist `mbid` has as recordings or
+    /// release groups, generic ones not counted ([`crate::text::titles_shared`]):
+    /// two are the proof that it is the library's. A recording search for
+    /// up to eight of the titles, then the first page of its release
+    /// groups when that is not enough.
+    pub async fn artist_shared_titles(&self, mbid: &str, titles: &[String]) -> Result<usize> {
         #[derive(Deserialize)]
         struct Raw {
             #[serde(default, deserialize_with = "null_default")]
@@ -700,7 +702,7 @@ impl MusicBrainz {
         let mut asked: Vec<String> = Vec::new();
         for t in titles {
             let t = crate::text::search_title(t);
-            if !t.trim().is_empty() && !asked.contains(&t) {
+            if !t.trim().is_empty() && !crate::text::generic_title(&crate::text::album_key(&t)) && !asked.contains(&t) {
                 asked.push(t);
             }
             if asked.len() == 8 {
@@ -708,18 +710,19 @@ impl MusicBrainz {
             }
         }
         if asked.is_empty() {
-            return Ok(false);
+            return Ok(0);
         }
         let any = asked.iter().map(|t| format!("recording:{}", phrase(t))).collect::<Vec<_>>().join(" OR ");
         let query = format!("arid:{mbid} AND ({any})");
         let raw: Raw = self.get("recording", &[("query", query.as_str()), ("limit", "25")]).await?;
-        let theirs: Vec<String> = raw.recordings.into_iter().map(|r| r.title).collect();
-        if crate::text::titles_overlap(titles, &theirs) {
-            return Ok(true);
+        let mut theirs: Vec<String> = raw.recordings.into_iter().map(|r| r.title).collect();
+        let shared = crate::text::titles_shared(titles, &theirs);
+        if shared >= crate::text::SHARED_TITLES_PROOF {
+            return Ok(shared);
         }
         let groups = self.browse_artist_release_groups(mbid, PAGE_MAX, 0).await?;
-        let theirs: Vec<String> = groups.items.into_iter().map(|g| g.title).collect();
-        Ok(crate::text::titles_overlap(titles, &theirs))
+        theirs.extend(groups.items.into_iter().map(|g| g.title));
+        Ok(crate::text::titles_shared(titles, &theirs))
     }
 
     /// The tags and genres of the artist `mbid`.

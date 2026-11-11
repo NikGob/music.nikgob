@@ -79,6 +79,17 @@ impl Library {
         })
     }
 
+    /// The artists whose photo the user chose ([`Library::set_custom_artist_photo`]):
+    /// the only photo a role shows.
+    pub fn locked_artist_photos(&self) -> Result<std::collections::HashSet<ArtistId>> {
+        self.read(|c| {
+            let mut stmt =
+                c.prepare_cached("SELECT artist_id FROM artist_photo WHERE path IS NOT NULL AND photo_locked = 1")?;
+            let rows = stmt.query_map([], |r| get_id::<ArtistId>(r, 0))?;
+            Ok(rows.collect::<rusqlite::Result<std::collections::HashSet<_>>>()?)
+        })
+    }
+
     /// Records the photo of an artist; `None` records "looked up, none found".
     /// A photo the user locked is never touched (see [`Library::set_custom_artist_photo`]).
     pub fn set_artist_photo(&self, artist: ArtistId, path: Option<&str>) -> Result<()> {
