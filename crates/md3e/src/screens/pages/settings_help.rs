@@ -242,7 +242,7 @@ pub enum SettingId {
     AlbumOpens,
     /// «Распознавать другие версии».
     AlbumVersions,
-    /// «Такие альбомы на главной».
+    /// «Частичные альбомы на главной».
     PartialAlbumsOnHome,
     /// The mixes of «Миксы для тебя» left out, with «Вернуть».
     HiddenMixes,
@@ -723,7 +723,7 @@ impl SettingId {
             Marks => "Не нравится и скорость",
             AlbumOpens => "Альбом открывается",
             AlbumVersions => "Распознавать другие версии",
-            PartialAlbumsOnHome => "Такие альбомы на главной",
+            PartialAlbumsOnHome => "Частичные альбомы на главной",
             HiddenMixes => "Скрытые миксы",
             GraphUse => "Похожее по слушателям",
             GraphServices => "Спрашивать YouTube Music и Deezer",
