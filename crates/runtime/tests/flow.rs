@@ -811,20 +811,26 @@ fn only_downloaded_still_plays_an_album_whole() {
         let q = queued(s);
         s.queue.current.as_ref().is_some_and(|c| c.id == ids[t]) && q.len() == n && q.contains(&ids[1]) == stream
     };
+    // An artist plays as a mix and a playlist as the user's own, both
+    // shuffled by default: from either song with a file.
+    let downloaded_two = |s: &ViewState| {
+        let q = queued(s);
+        s.queue.current.as_ref().is_some_and(|c| c.id == ids[0] || c.id == ids[2]) && q.len() == 2 && !q.contains(&ids[1])
+    };
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
     wait_for(&rt, "the whole album", |s| playing(s, 0, 3, true));
     rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
-    wait_for(&rt, "the artist's downloaded songs", |s| playing(s, 0, 2, false));
+    wait_for(&rt, "the artist's downloaded songs", downloaded_two);
     rt.send(Command::PlayRelease { id: release.id, start: Some(ids[2]), shuffle: false });
     wait_for(&rt, "the whole album from a song", |s| playing(s, 2, 3, true));
     rt.send(Command::PlayPlaylist { id: playlist.id, start: None, shuffle: false });
-    wait_for(&rt, "the playlist's downloaded songs", |s| playing(s, 2, 2, false));
+    wait_for(&rt, "the playlist's downloaded songs", downloaded_two);
     // Picked in the playlist, the song that only streams joins (it cannot
     // play here: no service, so the next one plays).
     rt.send(Command::PlayPlaylist { id: playlist.id, start: Some(ids[1]), shuffle: false });
     wait_for(&rt, "the picked stream song", |s| queued(s).len() == 3);
     rt.send(Command::PlayArtist { id: artist.id, shuffle: false });
-    wait_for(&rt, "the artist's downloaded songs again", |s| playing(s, 0, 2, false));
+    wait_for(&rt, "the artist's downloaded songs again", downloaded_two);
     rt.send(Command::EnqueueRelease(release.id));
     wait_for(&rt, "the whole album after them", |s| {
         let q = queued(s);
