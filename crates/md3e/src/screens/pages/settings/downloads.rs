@@ -16,7 +16,7 @@ use crate::{
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageState, out: &mut Vec<Command>) {
     group(ui, "Откуда качать");
-    // Законное · Обычно · Всё · Свои: the one under the pointer tints the
+    // Обычно · Всё · Свои: the one under the pointer tints the
     // sources it would switch and shows where their switches would go.
     let mut preview = preset::row(ui, v::presets::Area::Sources, p);
     download_sources(ui, state, preview.as_mut().unwrap_or(&mut *p));
