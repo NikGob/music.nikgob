@@ -17,6 +17,7 @@ mod fallback_fonts;
 mod frames;
 mod geometry;
 mod logfile;
+mod memory;
 mod pacing;
 mod profile;
 mod quit;
@@ -290,6 +291,7 @@ impl Resident for Core {
     }
 
     fn shutdown(&mut self) {
+        memory::log_now("exit");
         self.geometry.flush();
         self.runtime.send(Command::Pause);
         // Soloist would also go with the process (its job object); stopping
@@ -567,6 +569,7 @@ fn main() -> eframe::Result {
     }
     logfile::init();
     stage("log");
+    memory::start();
     // `--sweep-list out.json`: the settings sweep's list of every row, from
     // the code and the prefs of `NIKGOB_DATA` (or the defaults); no window.
     if let Some(path) = sweep::list_path() {
@@ -878,6 +881,7 @@ fn main() -> eframe::Result {
     stage("desktop");
     Shell::new(core, &waker).start_hidden(start_hidden).run(|lease| {
         let covers_dir = covers_dir.clone();
+        let covers_wake = waker.clone();
         let mut viewport = lease.peek(|core| core.geometry.apply(egui::ViewportBuilder::default()));
         if shot::offscreen() {
             viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
@@ -907,7 +911,7 @@ fn main() -> eframe::Result {
                 ctx.set_fonts(fonts);
                 stage("fonts");
                 nikgob_md3e::icons::install(&ctx);
-                web_images::WebImages::install(&ctx, covers_dir);
+                web_images::WebImages::install(&ctx, covers_dir, covers_wake);
                 stage("web covers");
                 nikgob_md3e::Theme::new(nikgob_md3e::ColorScheme::baseline(true), true).install(&ctx);
                 let mut core = lease.take(&ctx);

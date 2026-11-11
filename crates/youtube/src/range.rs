@@ -19,9 +19,14 @@
 //! offset. A final
 //! failure reaches the reader as a [`StreamError`] inside the I/O error, so
 //! a refusal is not taken for a lost connection.
+//!
+//! Once everything is downloaded the buffer is shared with the disk cache's
+//! writer (an `Arc`), not copied: nothing writes into it any more. The
+//! buffers alive are counted ([`buffers`]) for the app's memory line.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -145,9 +150,60 @@ impl RangeSet {
     }
 }
 
+/// Stream buffers alive and their bytes ([`buffers`]).
+static BUFFERS: AtomicUsize = AtomicUsize::new(0);
+static BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// How many stream buffers are alive and the bytes they take (a buffer is
+/// as large as its whole resource from the moment it resolves).
+pub fn buffers() -> (usize, u64) {
+    (BUFFERS.load(Ordering::Relaxed), BUFFER_BYTES.load(Ordering::Relaxed))
+}
+
+/// A stream's whole resource in memory, counted in [`buffers`] while it
+/// lives. Shared (not copied) with the disk cache's writer once complete.
+#[derive(Default)]
+struct Buffer(Arc<Vec<u8>>);
+
+impl Buffer {
+    fn new(len: usize) -> Self {
+        // Counted as `Drop` uncounts it: an empty one is not.
+        if len > 0 {
+            BUFFERS.fetch_add(1, Ordering::Relaxed);
+            BUFFER_BYTES.fetch_add(len as u64, Ordering::Relaxed);
+        }
+        Self(Arc::new(vec![0; len]))
+    }
+
+    /// The bytes to write into. Nothing shares them while the download
+    /// writes (they are shared only once complete); were they shared, the
+    /// write would go into a copy of its own.
+    fn write(&mut self) -> &mut [u8] {
+        Arc::make_mut(&mut self.0).as_mut_slice()
+    }
+}
+
+impl std::ops::Deref for Buffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        // The default (empty) buffer was never counted.
+        if !self.0.is_empty() {
+            BUFFERS.fetch_sub(1, Ordering::Relaxed);
+            BUFFER_BYTES.fetch_sub(self.0.len() as u64, Ordering::Relaxed);
+        }
+    }
+}
+
 struct State {
     resolved: Option<Resolved>,
-    data: Vec<u8>,
+    data: Buffer,
     have: RangeSet,
     /// Where the reader is (the next byte it wants).
     want: u64,
@@ -190,7 +246,7 @@ impl HttpStream {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 resolved: None,
-                data: Vec::new(),
+                data: Buffer::default(),
                 have: RangeSet::default(),
                 want: 0,
                 error: None,
@@ -366,7 +422,7 @@ async fn download(
     );
     {
         let mut st = shared.lock();
-        st.data = vec![0; resolved.len as usize];
+        st.data = Buffer::new(resolved.len as usize);
         st.resolved = Some(resolved.clone());
     }
     shared.arrived.notify_all();
@@ -392,9 +448,10 @@ async fn download(
                     "youtube: stream downloaded in {} ms",
                     started.elapsed().as_millis()
                 );
-                let data = shared.lock().data.clone();
+                // The same bytes, not a second copy of the resource.
+                let data = Arc::clone(&shared.lock().data.0);
                 let r = resolved.clone();
-                let _ = tokio::task::spawn_blocking(move || done(&r, &data)).await;
+                let _ = tokio::task::spawn_blocking(move || done(&r, &data[..])).await;
             }
             moved.await;
             if shared.lock().closed {
@@ -536,7 +593,7 @@ async fn fetch(
             if st.closed {
                 return Ok(Stop::Closed);
             }
-            st.data[at as usize..at as usize + n].copy_from_slice(&bytes[..n]);
+            st.data.write()[at as usize..at as usize + n].copy_from_slice(&bytes[..n]);
             st.have.insert(at..at + n as u64);
             st.want
         };
@@ -786,6 +843,19 @@ mod tests {
         assert!(matches!(stream_error(&other), StreamError::Network(_)));
         // Seeking before the start is refused.
         assert!(s.seek(SeekFrom::Current(-1)).is_err());
+    }
+
+    #[test]
+    fn a_complete_buffer_is_shared_not_copied() {
+        let mut b = Buffer::new(16);
+        b.write()[..4].copy_from_slice(&[1, 2, 3, 4]);
+        let at = b.as_ptr();
+        assert_eq!(b.write().as_ptr(), at, "written in place while not shared");
+        let cache = Arc::clone(&b.0);
+        assert_eq!(cache.as_ptr(), at, "the cache writer gets the same bytes");
+        assert_eq!(&cache[..4], &[1, 2, 3, 4]);
+        assert_eq!(&b[..4], &[1, 2, 3, 4]);
+        assert!(Buffer::default().is_empty());
     }
 
     #[test]

@@ -161,6 +161,46 @@ struct Snapshot {
     /// Where its card was then.
     at: egui::Pos2,
     shapes: Vec<egui::Shape>,
+    /// The textures the shapes draw (an icon rasterized at its size, a
+    /// cover), held while the shapes are kept: their loaders free a texture
+    /// no frame asks for, and a kept tile asks for none, so it drew freed
+    /// textures (`Failed to find texture` in the log, a blank where the
+    /// icon was).
+    _textures: Vec<egui::TextureHandle>,
+}
+
+/// Holds every texture `shapes` draw that egui still has (the font atlas
+/// aside): each handle keeps its texture alive until it is dropped.
+fn hold_textures(ctx: &egui::Context, shapes: &[egui::Shape]) -> Vec<egui::TextureHandle> {
+    fn ids(shape: &egui::Shape, out: &mut Vec<egui::TextureId>) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| ids(s, out)),
+            s => {
+                let id = s.texture_id();
+                if id != egui::TextureId::default() && !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    let mut wanted = Vec::new();
+    shapes.iter().for_each(|s| ids(s, &mut wanted));
+    let manager = ctx.tex_manager();
+    let mut held = Vec::with_capacity(wanted.len());
+    for id in wanted {
+        let alive = {
+            let mut m = manager.write();
+            let alive = m.meta(id).is_some();
+            if alive {
+                m.retain(id);
+            }
+            alive
+        };
+        if alive {
+            held.push(egui::TextureHandle::new(std::sync::Arc::clone(&manager), id));
+        }
+    }
+    held
 }
 
 /// The presets as live tiles: a small sample of the track screen (glow,
@@ -280,6 +320,33 @@ fn still(ui: &Ui, area: Area, i: usize, card: Rect, shown: &Prefs) {
     }
     let shapes: Vec<egui::Shape> =
         ctx.graphics(|g| g.get(layer).map(|l| l.all_entries().skip(start).map(|c| c.shape.clone()).collect()).unwrap_or_default());
-    let snap = Snapshot { prefs: shown.clone(), size: card.size(), scheme, at: card.min, shapes };
+    let _textures = hold_textures(ctx, &shapes);
+    let snap = Snapshot { prefs: shown.clone(), size: card.size(), scheme, at: card.min, shapes, _textures };
     ctx.data_mut(|d| d.insert_temp(key, std::sync::Arc::new(snap)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A kept tile holds the textures its shapes draw: the loader that made
+    /// one may forget it, the texture lives while the tile is kept.
+    #[test]
+    fn kept_shapes_hold_their_textures() {
+        let ctx = egui::Context::default();
+        // The font atlas takes the first texture.
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        let icon = ctx.load_texture("icon", egui::ColorImage::new([2, 2], vec![egui::Color32::WHITE; 4]), egui::TextureOptions::LINEAR);
+        let id = icon.id();
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(8.0, 8.0));
+        let mut mesh = egui::Mesh::with_texture(id);
+        mesh.add_rect_with_uv(rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        let shapes = vec![egui::Shape::Vec(vec![egui::Shape::mesh(mesh), egui::Shape::rect_filled(rect, 0.0, egui::Color32::RED)])];
+        let held = hold_textures(&ctx, &shapes);
+        assert_eq!(held.iter().map(egui::TextureHandle::id).collect::<Vec<_>>(), vec![id]);
+        drop(icon);
+        assert!(ctx.tex_manager().read().meta(id).is_some(), "freed while a kept tile draws it");
+        drop(held);
+        assert!(ctx.tex_manager().read().meta(id).is_none());
+    }
 }

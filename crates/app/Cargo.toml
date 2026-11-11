@@ -55,7 +55,9 @@ tempfile = "3"
 workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Globalization", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }
+# The process's private bytes and working set for the memory line
+# (ProcessStatus, Threading, Foundation).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 # The winit eframe runs on (patched to the fork); for the caption colours.
 winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
 # The YouTube Music sign-in window (system WebView2, see ytlogin.rs).

@@ -70,14 +70,34 @@ struct Inner {
     state: Mutex<State>,
     http: reqwest::Client,
     disk: Option<DiskCache>,
-    ctx: egui::Context,
+    /// Repaints the window there is. Not the window's `egui::Context`: the
+    /// context owns this loader, and a context held here was never dropped,
+    /// so every window made again from the tray left the old one alive
+    /// (fonts, caches, loaders) with this loader's threads.
+    wake: fastframe_shell::Waker,
     /// A repaint is already asked for the covers that finished.
     repaint_asked: AtomicBool,
 }
 
 pub struct WebImages {
     inner: Arc<Inner>,
-    rt: tokio::runtime::Runtime,
+    rt: tokio::runtime::Handle,
+}
+
+/// The downloads' runtime: one for the process, shared by every window's
+/// loader (a window made again from the tray does not start new threads).
+fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RT: std::sync::OnceLock<Option<tokio::runtime::Runtime>> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("web-images")
+            .enable_all()
+            .build()
+            .map_err(|e| log::warn!("no runtime for web covers: {e}"))
+            .ok()
+    })
+    .as_ref()
 }
 
 fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -88,20 +108,11 @@ impl WebImages {
     pub const ID: &'static str = egui::generate_loader_id!(WebImages);
 
     /// Registers the loader with `ctx`, caching covers in `cache_dir`;
-    /// without a runtime or a client covers simply stay placeholders.
-    pub fn install(ctx: &egui::Context, cache_dir: PathBuf) {
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("web-images")
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                log::warn!("no runtime for web covers: {e}");
-                return;
-            }
-        };
+    /// finished covers repaint through `wake` (the shell's, which follows
+    /// the window there is). Without a runtime or a client covers simply
+    /// stay placeholders.
+    pub fn install(ctx: &egui::Context, cache_dir: PathBuf, wake: fastframe_shell::Waker) {
+        let Some(rt) = runtime() else { return };
         let http = match reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(20))
@@ -125,7 +136,7 @@ impl WebImages {
             state: Mutex::default(),
             http,
             disk,
-            ctx: ctx.clone(),
+            wake,
             repaint_asked: AtomicBool::new(false),
         });
         // The folder is counted (and cleaned up) off the UI thread.
@@ -139,7 +150,7 @@ impl WebImages {
         let me = Arc::clone(&inner);
         ctx.on_begin_pass("web-images", Arc::new(move |_| me.repaint_asked.store(false, Ordering::Relaxed)));
         nikgob_md3e::covers::set_web_sizer(ctx, sized_url);
-        ctx.add_bytes_loader(Arc::new(Self { inner, rt }));
+        ctx.add_bytes_loader(Arc::new(Self { inner, rt: rt.handle().clone() }));
     }
 }
 
@@ -147,7 +158,7 @@ impl Inner {
     /// One repaint for every cover that finishes before the next pass.
     fn repaint(&self) {
         if !self.repaint_asked.swap(true, Ordering::Relaxed) {
-            self.ctx.request_repaint_after(REPAINT_BATCH);
+            self.wake.wake_after(REPAINT_BATCH);
         }
     }
 
@@ -292,7 +303,7 @@ impl BytesLoader for WebImages {
         if inner.disk.is_some() {
             s.slots.insert(uri.clone(), Slot::Reading);
             drop(s);
-            let (me, h) = (Arc::clone(inner), self.rt.handle().clone());
+            let (me, h) = (Arc::clone(inner), self.rt.clone());
             self.rt.spawn_blocking(move || {
                 let hit = me.disk.as_ref().and_then(|d| d.get(&uri));
                 let mut s = lock(&me.state);
@@ -320,7 +331,7 @@ impl BytesLoader for WebImages {
             s.slots.insert(uri.clone(), Slot::Queued { seen: Instant::now() });
             s.queue.push(uri);
             drop(s);
-            inner.pump(self.rt.handle());
+            inner.pump(&self.rt);
         }
         Ok(BytesPoll::Pending { size: None })
     }

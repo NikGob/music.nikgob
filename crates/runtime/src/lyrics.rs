@@ -21,8 +21,9 @@
 //! first whatever the sources found; nothing fetched or made in the
 //! background ever takes its place, and only the user removes it.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use nikgob_core::lyrics::{LyricLine, LyricsSource, LyricsSync};
@@ -40,6 +41,45 @@ pub(crate) const LOOKUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// text down to syllables is kept per track, and the background backfill
 /// goes through the whole library; the library rebuilds an entry on demand.
 pub(crate) const LYRICS_KEPT: usize = 16;
+
+/// Tracks whose lyrics are in memory and their estimated bytes, as of the
+/// last change of the cache ([`memory`]).
+static CACHED: AtomicUsize = AtomicUsize::new(0);
+static CACHED_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// How many tracks' lyrics are in memory and about how many bytes they
+/// take (every source's text with its words, what the aligner made), for
+/// the app's memory line.
+pub fn memory() -> (usize, usize) {
+    (CACHED.load(Ordering::Relaxed), CACHED_BYTES.load(Ordering::Relaxed))
+}
+
+/// Notes the cache's size for [`memory`].
+fn note_memory(cache: &HashMap<TrackId, TrackLyrics>) {
+    CACHED.store(cache.len(), Ordering::Relaxed);
+    CACHED_BYTES.store(cache.values().map(TrackLyrics::approx_bytes).sum(), Ordering::Relaxed);
+}
+
+/// About how many bytes `lines` take: the lines, their words and texts.
+fn lines_bytes(lines: &[LyricLine]) -> usize {
+    let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+    lines
+        .iter()
+        .map(|l| {
+            std::mem::size_of::<LyricLine>()
+                + l.text.len()
+                + text(&l.translation)
+                + text(&l.romanization)
+                + l.words.iter().map(|w| std::mem::size_of_val(w) + w.text.len()).sum::<usize>()
+        })
+        .sum()
+}
+
+/// Marks `track` as the latest used in `order` (least recently used first).
+fn touch(order: &mut VecDeque<TrackId>, track: TrackId) {
+    order.retain(|t| *t != track);
+    order.push_back(track);
+}
 
 /// One source's text.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -272,6 +312,19 @@ pub(crate) struct TrackLyrics {
 }
 
 impl TrackLyrics {
+    /// About how many bytes the entry takes (see [`memory`]).
+    fn approx_bytes(&self) -> usize {
+        let texts: usize = self.texts.values().map(|t| lines_bytes(&t.lines) + t.plain.as_ref().map_or(0, String::len)).sum();
+        let aligned: usize = self.aligned.values().map(|a| lines_bytes(&a.lines) + a.hash.len()).sum();
+        let checking: usize = self.checking.iter().flatten().map(String::len).sum();
+        std::mem::size_of::<Self>()
+            + texts
+            + aligned
+            + checking
+            + self.last_embed.as_ref().map_or(0, String::len)
+            + self.names.iter().map(String::len).sum::<usize>()
+    }
+
     /// What the aligner made of `source`'s current text.
     pub(crate) fn aligned(&self, source: LyricsSource) -> Option<&Aligned> {
         let text = self.texts.get(&source)?;
@@ -1076,9 +1129,10 @@ fn evict(order: &mut VecDeque<TrackId>, cap: usize, spare: impl Fn(TrackId) -> b
 }
 
 impl Worker {
-    /// Stores `track`'s lyrics, then forgets the oldest ones past
-    /// [`LYRICS_KEPT`]: not the shown, playing or next track, and not one
-    /// with a lookup or a write still to come back.
+    /// Stores `track`'s lyrics, then forgets the least recently used ones
+    /// past [`LYRICS_KEPT`]: not the shown, playing or next track, and not
+    /// one with a lookup or a write still to come back. A forgotten one is
+    /// read from the library again when it is wanted ([`cached_lyrics`]).
     fn cache_lyrics(&mut self, track: TrackId, tl: TrackLyrics) {
         let keep = [
             Some(track),
@@ -1091,8 +1145,7 @@ impl Worker {
         let folder = self.lyrics_folder(track);
         let Some(svc) = self.import.as_mut() else { return };
         svc.lyrics_cache.insert(track, TrackLyrics { show, place, folder, ..tl });
-        svc.lyrics_order.retain(|t| *t != track);
-        svc.lyrics_order.push_back(track);
+        touch(&mut svc.lyrics_order, track);
         let (cache, later) = (&svc.lyrics_cache, &svc.embed_later);
         let spare = |t: TrackId| {
             keep.contains(&Some(t)) || later.contains(&t) || cache.get(&t).is_some_and(TrackLyrics::busy)
@@ -1102,6 +1155,7 @@ impl Worker {
             // Rebuilt from the library next time; what it lacks is asked again.
             svc.lyrics_asking.retain(|(asked, _)| *asked != t);
         }
+        note_memory(&svc.lyrics_cache);
     }
 
     pub(crate) fn lyrics_backfilled(&mut self, track: TrackId, mut tl: TrackLyrics) {
@@ -1138,6 +1192,10 @@ impl Worker {
             && (!tl.failed || !tl.pending.is_empty())
         {
             let view = tl.view(track);
+            // Used again: the last to be forgotten.
+            if let Some(svc) = self.import.as_mut() {
+                touch(&mut svc.lyrics_order, track);
+            }
             self.publish(|s| s.lyrics = view);
             self.embed_lyrics(track);
             self.check_if_playing(track);
@@ -1277,6 +1335,7 @@ impl Worker {
         }
         self.start_lyrics_lookups(track);
         let view = self.import.as_ref().unwrap().lyrics_cache[&track].view(track);
+        note_memory(&self.import.as_ref().unwrap().lyrics_cache);
         self.embed_lyrics(track);
         self.publish(|s| {
             if s.lyrics.track == Some(track) {
@@ -1406,6 +1465,34 @@ mod tests {
         assert!(gone.is_empty());
         assert_eq!(order.len(), 3);
         assert!(evict(&mut order, 5, |_| false).is_empty());
+    }
+
+    /// Lyrics shown again are the last to go: the cache forgets the least
+    /// recently used, not the least recently stored.
+    #[test]
+    fn lyrics_used_again_are_forgotten_last() {
+        let ids: Vec<TrackId> = (0..4).map(|_| TrackId::new()).collect();
+        let mut order: VecDeque<TrackId> = ids.iter().copied().collect();
+        touch(&mut order, ids[0]);
+        assert_eq!(order, VecDeque::from(vec![ids[1], ids[2], ids[3], ids[0]]));
+        assert_eq!(evict(&mut order, 2, |_| false), vec![ids[1], ids[2]]);
+        touch(&mut order, ids[1]);
+        assert_eq!(order, VecDeque::from(vec![ids[3], ids[0], ids[1]]));
+    }
+
+    #[test]
+    fn an_entry_is_counted_by_its_texts_and_words() {
+        let empty = TrackLyrics::default().approx_bytes();
+        let mut tl = TrackLyrics::default();
+        tl.insert(LyricsSource::Lrclib, Text::from_lrc(Some("[00:01.00]one line\n[00:02.00]another line"), None));
+        let lines = tl.approx_bytes();
+        assert!(lines > empty + 2 * std::mem::size_of::<LyricLine>(), "{empty} → {lines}");
+        let mut words = tl.clone();
+        let text = words.texts.get_mut(&LyricsSource::Lrclib).unwrap();
+        text.lines[0].words = vec![nikgob_core::lyrics::LyricWord { text: "one ".into(), ..Default::default() }; 50];
+        assert!(words.approx_bytes() > lines + 50 * 4);
+        let cache = HashMap::from([(TrackId::new(), tl), (TrackId::new(), words)]);
+        note_memory(&cache);
     }
 
     #[test]

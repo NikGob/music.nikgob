@@ -4,12 +4,22 @@
 //!
 //! Draw covers through [`texture`]. It picks a size tier (`#128` to `#2048`
 //! after the URI, or the full file), marks the cover as used in this
-//! pass and, while the wanted tier decodes, shows a tier of the same file that
-//! is already loaded. At the end of every pass the covers that were not drawn
-//! in this or the previous pass and are not [pinned](pin) are forgotten,
-//! oldest first, until the textures fit the [budget](DEFAULT_BUDGET). The
-//! loader hands every decoded image to egui's texture loader and keeps no
-//! copy, and it reads files itself, so a cover costs only its texture.
+//! frame and, while the wanted tier decodes, shows a tier of the same file
+//! that is already loaded. At the end of every frame (the last pass of it:
+//! a pass egui discards ends nothing) the covers that were not drawn in this
+//! or the previous frame and are not [pinned](pin) are forgotten, oldest
+//! first, until the textures fit the [budget](DEFAULT_BUDGET); egui frees
+//! their textures after that frame is painted, so a texture is never freed
+//! while a frame still draws it. The loader hands every decoded image to
+//! egui's texture loader and keeps no copy, and it reads files itself, so a
+//! cover costs only its texture. Decoding runs on a few threads and within
+//! [`DECODE_BUDGET`] bytes of pixels at once. [`memory`] says what covers
+//! hold; [`trim_to_current`] lets a window hidden in the tray keep only the
+//! playing track's cover.
+//!
+//! Whatever keeps a painted shape across frames instead of drawing the cover
+//! again (a still tile's kept shapes) must hold its texture itself (a
+//! [`egui::TextureHandle`] of the id): the loader frees what is not drawn.
 //!
 //! Web covers (`https://`) are fetched by the app's bytes loader; with a
 //! [web sizer](set_web_sizer) the url is asked at the size it is drawn at.
@@ -36,6 +46,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use egui::load::{
@@ -56,6 +67,47 @@ const FULL: u32 = 4096;
 
 /// Decoding threads at most.
 const WORKERS: usize = 3;
+
+/// Bytes of pixels the decoding threads may hold at once (see
+/// [`decode_cost`]); one decode runs whatever it costs.
+pub const DECODE_BUDGET: usize = 64 << 20;
+
+/// What decoding a size at `tier` may hold at its peak: the decoded
+/// picture, its RGBA copy and the image handed to egui.
+fn decode_cost(tier: Option<u32>) -> usize {
+    let side = tier.unwrap_or(FULL) as usize;
+    side * side * 4 * 3
+}
+
+/// Texture bytes, loaded sizes and the budget at the end of the last frame,
+/// and the pixel bytes being decoded now (for [`memory`]).
+static TEXTURE_BYTES: AtomicUsize = AtomicUsize::new(0);
+static SIZES: AtomicUsize = AtomicUsize::new(0);
+static BUDGET: AtomicUsize = AtomicUsize::new(DEFAULT_BUDGET);
+static DECODING: AtomicUsize = AtomicUsize::new(0);
+
+/// What covers hold, for the app's memory line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Memory {
+    /// Texture bytes of the loaded sizes (RGBA plus mipmaps, estimated).
+    pub textures: usize,
+    /// Sizes loaded or decoding.
+    pub sizes: usize,
+    /// The texture budget.
+    pub budget: usize,
+    /// Pixel bytes the decoding threads may hold right now.
+    pub decoding: usize,
+}
+
+/// What covers hold now (as of the last frame). Costs a few atomic reads.
+pub fn memory() -> Memory {
+    Memory {
+        textures: TEXTURE_BYTES.load(Ordering::Relaxed),
+        sizes: SIZES.load(Ordering::Relaxed),
+        budget: BUDGET.load(Ordering::Relaxed),
+        decoding: DECODING.load(Ordering::Relaxed),
+    }
+}
 
 enum Slot {
     Pending,
@@ -99,6 +151,15 @@ struct Check {
 struct Jobs {
     queue: Vec<Job>,
     workers: usize,
+    /// [`decode_cost`] of the decodes running now.
+    in_flight: usize,
+}
+
+impl Jobs {
+    /// Whether a decode costing `cost` may start now.
+    fn fits(&self, cost: usize) -> bool {
+        self.in_flight == 0 || self.in_flight + cost <= DECODE_BUDGET
+    }
 }
 
 struct Use {
@@ -107,7 +168,7 @@ struct Use {
     origin: String,
     /// The tier it is (`None`: the full file, or a web url as it is).
     tier: Option<u32>,
-    /// Pass it was last drawn in.
+    /// Frame it was last drawn in ([`Shared::frame`]).
     last: u64,
     /// Texture bytes; 0 while decoding.
     bytes: usize,
@@ -117,6 +178,8 @@ struct Lru {
     used: HashMap<String, Use>,
     /// Files (URIs without a tier) kept loaded off screen.
     pinned: HashSet<String>,
+    /// The first of them: the playing track's ([`trim_to_current`]).
+    current: Option<String>,
     budget: usize,
 }
 
@@ -141,9 +204,13 @@ struct Shared {
     check: Mutex<Check>,
     /// A video thumbnail's url → the real art found for it.
     real: Mutex<Arc<HashMap<String, String>>>,
-    /// Video thumbnails drawn so far with the pass each was last drawn in,
-    /// and those not handed to the app yet.
+    /// Video thumbnails drawn lately with the frame each was last drawn
+    /// in, and those not handed to the app yet.
     thumbnails: Mutex<(HashMap<String, u64>, Vec<String>)>,
+    /// The frame being drawn: counts frames, not egui's passes (a frame
+    /// whose first pass is discarded runs two), and moves on only at the end
+    /// of a frame's last pass.
+    frame: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -179,6 +246,7 @@ pub fn install(ctx: &Context) {
         lru: Mutex::new(Lru {
             used: HashMap::new(),
             pinned: HashSet::new(),
+            current: None,
             budget: DEFAULT_BUDGET,
         }),
         stamps: Mutex::default(),
@@ -186,6 +254,7 @@ pub fn install(ctx: &Context) {
         check: Mutex::default(),
         real: Mutex::default(),
         thumbnails: Mutex::default(),
+        frame: AtomicU64::new(0),
     });
     ctx.add_image_loader(Arc::new(CoverLoader(Arc::clone(&shared))));
     ctx.data_mut(|d| d.insert_temp(data_id(), Covers(Arc::clone(&shared))));
@@ -213,11 +282,50 @@ pub fn set_web_sizer(ctx: &Context, sizer: WebSizer) {
 }
 
 /// Keeps every tier of these covers loaded while off screen (the current and
-/// the next track). Replaces the previous set.
+/// the next track, the current one first). Replaces the previous set.
 pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
     if let Some(s) = shared(ctx) {
-        lock(&s.lru).pinned = uris.into_iter().map(|u| base(u).to_owned()).collect();
+        let pinned: Vec<String> = uris.into_iter().map(|u| base(u).to_owned()).collect();
+        let mut lru = lock(&s.lru);
+        lru.current = pinned.first().cloned();
+        lru.pinned = pinned.into_iter().collect();
     }
+}
+
+/// Forgets every loaded size of every cover but the playing track's (the
+/// first one [`pin`] was given), with the decodes still queued for them:
+/// for a window hidden in the tray, which draws nothing until it is shown
+/// and then reads its covers again. Call it before anything of the frame
+/// is drawn (in the app's logic) or while the window draws nothing; a cover
+/// drawn later in the same frame is read again, never drawn dead.
+pub fn trim_to_current(ctx: &Context) {
+    let Some(s) = shared(ctx) else { return };
+    let forget: Vec<String> = {
+        let mut lru = lock(&s.lru);
+        let current = lru.current.clone();
+        let mut gone = Vec::new();
+        lru.used.retain(|uri, u| {
+            let keep = current.as_deref() == Some(u.origin.as_str());
+            if !keep {
+                gone.push(uri.clone());
+            }
+            keep
+        });
+        TEXTURE_BYTES.store(lru.used.values().map(|u| u.bytes).sum(), Ordering::Relaxed);
+        SIZES.store(lru.used.len(), Ordering::Relaxed);
+        gone
+    };
+    lock(&s.thumbnails).0.clear();
+    if forget.is_empty() {
+        return;
+    }
+    {
+        let gone: HashSet<&str> = forget.iter().map(String::as_str).collect();
+        lock(&s.jobs).queue.retain(|j| !gone.contains(j.uri.as_str()));
+    }
+    let n = forget.len();
+    s.forget_sizes(ctx, forget);
+    log::debug!("covers: {n} sizes forgotten, the playing track's kept");
 }
 
 /// Looks at the files of every loaded cover again (on a thread) and forgets
@@ -317,7 +425,7 @@ pub fn texture(ctx: &Context, uri: &str, size: Vec2, zoom: f32) -> Option<SizedT
     if is_web(uri) && is_thumbnail(uri) {
         match shared.real_of(uri) {
             Some(real) => return sized_texture(ctx, &shared, &real, size, zoom).or_else(|| sized_texture(ctx, &shared, uri, size, zoom)),
-            None => shared.thumbnail_drawn(uri, ctx.cumulative_pass_nr()),
+            None => shared.thumbnail_drawn(uri, shared.frame()),
         }
     }
     sized_texture(ctx, &shared, uri, size, zoom)
@@ -328,7 +436,7 @@ fn sized_texture(ctx: &Context, shared: &Shared, uri: &str, size: Vec2, zoom: f3
     let px = size.max_elem() * ctx.pixels_per_point() * zoom.max(1.0);
     let tier = TIERS.iter().find(|t| px <= **t as f32).copied();
     let (wanted, origin) = sized(shared, uri, tier);
-    let pass = ctx.cumulative_pass_nr();
+    let pass = shared.frame();
     match load(ctx, &wanted) {
         Ok(Some(texture)) => {
             shared.used(&wanted, &origin, tier, pass, texture_bytes(texture.size));
@@ -359,7 +467,7 @@ pub fn prefetch_like(ctx: &Context, current: &str, next: &str) {
     if base(current) == base(next) || parse(next).is_none() {
         return;
     }
-    let pass = ctx.cumulative_pass_nr();
+    let pass = shared.frame();
     let (_, origin) = sized(&shared, current, None);
     let tiers: Vec<Option<u32>> = {
         let lru = lock(&shared.lru);
@@ -489,13 +597,18 @@ fn scaled_jpeg(bytes: &[u8], side: u32) -> Option<image::DynamicImage> {
 }
 
 impl Shared {
+    /// The frame being drawn.
+    fn frame(&self) -> u64 {
+        self.frame.load(Ordering::Relaxed)
+    }
+
     /// The real art found for the web cover `url`, if it is a thumbnail.
     fn real_of(&self, url: &str) -> Option<String> {
         lock(&self.real).get(url).cloned()
     }
 
-    /// Remembers the thumbnail `url` drawn in `pass`: handed to the app when
-    /// it was not drawn in the pass before (it came on screen).
+    /// Remembers the thumbnail `url` drawn in frame `pass`: handed to the
+    /// app when it was not drawn in the frame before (it came on screen).
     fn thumbnail_drawn(&self, url: &str, pass: u64) {
         let mut t = lock(&self.thumbnails);
         let before = t.0.insert(url.to_owned(), pass);
@@ -526,8 +639,11 @@ impl Shared {
 
     fn enqueue(self: &Arc<Self>, ctx: &Context, job: Job) {
         let mut jobs = lock(&self.jobs);
+        let cost = decode_cost(job.tier);
         jobs.queue.push(job);
-        if jobs.workers < WORKERS {
+        // Over the decode budget a new thread would only leave again: the
+        // ones decoding take the job when they are done.
+        if jobs.workers < WORKERS && jobs.fits(cost) {
             jobs.workers += 1;
             let (me, ctx) = (Arc::clone(self), ctx.clone());
             let spawned = std::thread::Builder::new()
@@ -540,21 +656,35 @@ impl Shared {
     }
 
     /// Decodes queued covers, newest first (what was just scrolled to),
-    /// until the queue is empty.
+    /// until the queue is empty. A decode that would take the pixels held
+    /// at once past [`DECODE_BUDGET`] is left to the thread decoding now
+    /// (there is one: something is in flight), and this one ends.
     fn work(&self, ctx: &Context) {
         loop {
-            let job = {
+            let (job, cost) = {
                 let mut jobs = lock(&self.jobs);
-                match jobs.queue.pop() {
-                    Some(j) => j,
-                    None => {
-                        jobs.workers -= 1;
-                        return;
-                    }
+                let Some(job) = jobs.queue.pop() else {
+                    jobs.workers -= 1;
+                    return;
+                };
+                let cost = decode_cost(job.tier);
+                if !jobs.fits(cost) {
+                    jobs.queue.push(job);
+                    jobs.workers -= 1;
+                    return;
                 }
+                jobs.in_flight += cost;
+                DECODING.store(jobs.in_flight, Ordering::Relaxed);
+                (job, cost)
+            };
+            let release = || {
+                let mut jobs = lock(&self.jobs);
+                jobs.in_flight -= cost;
+                DECODING.store(jobs.in_flight, Ordering::Relaxed);
             };
             // Forgotten (scrolled away) before its turn.
             if !matches!(lock(&self.slots).get(&job.uri), Some(Slot::Pending)) {
+                release();
                 continue;
             }
             // Before reading: a file rewritten in between is seen as changed
@@ -567,6 +697,7 @@ impl Shared {
                 Ok(img) => Slot::Ready(Arc::new(img)),
                 Err(e) => Slot::Failed(e),
             };
+            release();
             if let (Source::Web(..), Slot::Ready(img)) = (&job.source, &slot) {
                 self.seed_web(&job.uri, img);
             }
@@ -667,10 +798,15 @@ impl Shared {
         }
     }
 
-    /// Cancels covers no longer drawn that are still decoding, then forgets
-    /// the least recently drawn ones off screen until the budget fits.
+    /// At the end of a frame: cancels covers no longer drawn that are still
+    /// decoding, then forgets the least recently drawn ones off screen until
+    /// the budget fits. A pass egui discards (another follows in the same
+    /// frame) forgets nothing: only a frame that is painted ends.
     fn evict(&self, ctx: &Context) {
-        let pass = ctx.cumulative_pass_nr();
+        if ctx.will_discard() {
+            return;
+        }
+        let pass = self.frame.fetch_add(1, Ordering::Relaxed);
         let shown = |u: &Use| u.last + 1 >= pass;
         // Read from a file that changed: forgotten even on screen, so the
         // next pass reads it again.
@@ -680,7 +816,7 @@ impl Shared {
             for uri in &forget {
                 lru.used.remove(uri);
             }
-            let Lru { used, pinned, budget } = &mut *lru;
+            let Lru { used, pinned, budget, .. } = &mut *lru;
             used.retain(|uri, u| {
                 let keep = u.bytes > 0 || shown(u);
                 if !keep {
@@ -705,9 +841,26 @@ impl Shared {
                     forget.push(uri);
                 }
             }
+            TEXTURE_BYTES.store(total, Ordering::Relaxed);
+            SIZES.store(used.len(), Ordering::Relaxed);
+            BUDGET.store(*budget, Ordering::Relaxed);
         }
-        // A web cover none of whose tiers is kept any more also leaves the
-        // bytes loader (and its download queue if it still waits there).
+        // Thumbnails not drawn lately: forgetting them changes nothing (one
+        // drawn again is new on screen either way), and the map stays small.
+        {
+            let mut t = lock(&self.thumbnails);
+            if t.0.len() > 256 {
+                t.0.retain(|_, p| *p + 1 >= pass);
+            }
+        }
+        self.forget_sizes(ctx, forget);
+    }
+
+    /// Forgets these sizes in egui's loaders (their textures are freed
+    /// after the frame is painted); a web cover none of whose sizes is kept
+    /// any more also leaves the bytes loader (and its download queue if it
+    /// still waits there).
+    fn forget_sizes(&self, ctx: &Context, forget: Vec<String>) {
         let mut urls: Vec<&str> =
             forget.iter().filter(|u| is_web(u) && base(u) != u.as_str()).map(|u| base(u)).collect();
         if !urls.is_empty() {
@@ -1174,5 +1327,67 @@ mod tests {
             assert!(kept.contains(&format!("{u}#128")), "{u} was forgotten");
         }
         assert_eq!(decoded(&ctx), 0);
+    }
+
+    /// Hidden in the tray, only the playing track's cover stays; shown
+    /// again, the others are read again.
+    #[test]
+    fn trimming_keeps_only_the_playing_cover() {
+        let ctx = ctx();
+        let uris = covers("trim", 3, 300);
+        pin(&ctx, [uris[0].as_str(), uris[1].as_str()]);
+        show(&ctx, &uris, 64.0);
+        assert_eq!(loaded(&ctx).len(), 3);
+        trim_to_current(&ctx);
+        assert_eq!(loaded(&ctx), vec![format!("{}#128", uris[0])]);
+        assert_eq!(show(&ctx, &uris, 64.0).len(), 3);
+    }
+
+    /// A frame egui runs twice (its first pass discarded) is one frame: a
+    /// cover drawn in the frame before is not forgotten in it, however
+    /// small the budget, and is drawn with the same texture after it.
+    #[test]
+    fn a_discarded_pass_forgets_nothing() {
+        let ctx = ctx();
+        set_budget(&ctx, 0);
+        let uris = covers("discard", 1, 300);
+        let first = show(&ctx, &uris, 64.0)[0].id;
+        let mut passes = 0;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            if passes == 0 {
+                ui.ctx().request_discard("test");
+            }
+            passes += 1;
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(passes, 2);
+        assert!(loaded(&ctx).contains(&format!("{}#128", uris[0])), "forgotten in a discarded pass");
+        assert_eq!(pass(&ctx, &uris, 64.0)[0].map(|t| t.id), Some(first));
+        // Two frames without it: gone.
+        pass(&ctx, &[], 64.0);
+        pass(&ctx, &[], 64.0);
+        assert!(loaded(&ctx).is_empty());
+    }
+
+    #[test]
+    fn decodes_stay_within_their_budget_and_give_it_back() {
+        assert!(decode_cost(Some(1024)) * 3 <= DECODE_BUDGET, "three middle sizes at once");
+        assert!(decode_cost(None) > DECODE_BUDGET, "a full size decodes alone");
+        let busy = Jobs { in_flight: decode_cost(Some(2048)), ..Jobs::default() };
+        assert!(busy.fits(decode_cost(Some(512))));
+        assert!(!busy.fits(decode_cost(None)));
+        assert!(Jobs::default().fits(decode_cost(None)), "one decode runs whatever it costs");
+        let ctx = ctx();
+        let uris = covers("budget", 6, 300);
+        show(&ctx, &uris, 64.0);
+        let s = shared(&ctx).unwrap();
+        for _ in 0..5000 {
+            if lock(&s.jobs).workers == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let jobs = lock(&s.jobs);
+        assert_eq!((jobs.workers, jobs.in_flight), (0, 0));
     }
 }
