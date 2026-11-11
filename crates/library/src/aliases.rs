@@ -184,6 +184,9 @@ pub(crate) fn merge_artists_in(conn: &Connection, from: &str, into: &str, device
         conn.execute("UPDATE OR IGNORE artist_photo SET artist_id = ?2 WHERE artist_id = ?1", params![from, into])?;
     }
     conn.execute("DELETE FROM artist_photo WHERE artist_id = ?1", [from])?;
+    // Its readable name when `into` has none.
+    conn.execute("UPDATE OR IGNORE artist_latin SET artist_id = ?2 WHERE artist_id = ?1", params![from, into])?;
+    conn.execute("DELETE FROM artist_latin WHERE artist_id = ?1", [from])?;
     if into_images == "[]" && from_images != "[]" {
         conn.execute("UPDATE artist SET images = ?2 WHERE id = ?1", params![into, from_images])?;
     }
