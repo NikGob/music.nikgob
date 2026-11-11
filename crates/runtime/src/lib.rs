@@ -1480,6 +1480,7 @@ impl Worker {
             Command::WrongFile(track) => self.wrong_file(track, None),
             Command::UndoWrongFile(track) => self.undo_wrong_file(track),
             Command::FindBetter(track) => self.find_better(track),
+            Command::TrackInfo(track) => self.track_info(track),
             Command::FakeToMp3(track) => self.fake_to_mp3(track),
             Command::UndoFakeToMp3(track) => self.undo_fake_to_mp3(track),
             Command::RecordingApart(track) => self.recording_apart(track),
@@ -2643,6 +2644,8 @@ impl Worker {
             self.complete_playing(t);
         }
         self.publish_player();
+        // The info window of another track follows the library too.
+        self.refresh_track_info();
     }
 
     // ---------------------------------------------------------------- loads

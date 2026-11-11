@@ -1435,23 +1435,7 @@ impl Worker {
 
         // Info tab: what the file says beyond the basics.
         if let Some(t) = &tags {
-            let mut extra = Vec::new();
-            let mut add = |k: &str, v: Option<String>| {
-                if let Some(v) = v.filter(|v| !v.trim().is_empty()) {
-                    extra.push((k.to_owned(), v));
-                }
-            };
-            add("Исполнитель альбома", t.album_artist.clone());
-            add("Год", t.year.map(|y| y.to_string()));
-            add("Жанр", t.genre.clone());
-            add("ISRC", t.isrc.clone());
-            add("MusicBrainz", t.recording_mbid.clone());
-            add(
-                "Громкость",
-                t.r128_track_gain
-                    .map(|q| format!("R128 {:+.1} dB", f32::from(q) / 256.0))
-                    .or_else(|| t.replaygain_track_gain_db.map(|g| format!("ReplayGain {g:+.1} dB"))),
-            );
+            let extra = extra_tags(t);
             self.publish(|s| {
                 if s.info.track == Some(track) {
                     s.info.tags.extend(extra);
@@ -1461,6 +1445,57 @@ impl Worker {
 
         self.load_lyrics(track, path, tags.as_ref());
     }
+
+    /// «Источник и качество» of `track`, whichever plays, into
+    /// [`v::ViewState::track_info`] (the file's own tags too); `None`
+    /// forgets it.
+    pub(crate) fn track_info(&mut self, track: Option<TrackId>) {
+        let Some(track) = track else {
+            self.publish(|s| s.track_info = None);
+            return;
+        };
+        let row = self.lib.get_track_row(track).ok().flatten();
+        let src = self.lib.active_source(track).ok().flatten();
+        let mut info = self.res.info(row.as_ref(), src.as_ref());
+        // A track that is gone is answered too: with nothing to show.
+        info.track = Some(track);
+        let path = src.as_ref().filter(|s| s.kind.is_local()).map(|s| self.res.path(&s.locator));
+        if let Some(t) = path.as_deref().and_then(|p| self.res.facts().tags(p)) {
+            info.tags.extend(extra_tags(&t));
+        }
+        self.publish(|s| s.track_info = Some(info));
+    }
+
+    /// [`Self::track_info`] again for the track it shows: its file may have
+    /// been replaced, converted, retagged or checked since.
+    pub(crate) fn refresh_track_info(&mut self) {
+        let shown = self.state.read().track_info.as_ref().and_then(|i| i.track);
+        if shown.is_some() {
+            self.track_info(shown);
+        }
+    }
+}
+
+/// What a file's tags say beyond the basics the info has from the library.
+fn extra_tags(t: &nikgob_import::tags::TagSet) -> Vec<(String, String)> {
+    let mut extra = Vec::new();
+    let mut add = |k: &str, v: Option<String>| {
+        if let Some(v) = v.filter(|v| !v.trim().is_empty()) {
+            extra.push((k.to_owned(), v));
+        }
+    };
+    add("Исполнитель альбома", t.album_artist.clone());
+    add("Год", t.year.map(|y| y.to_string()));
+    add("Жанр", t.genre.clone());
+    add("ISRC", t.isrc.clone());
+    add("MusicBrainz", t.recording_mbid.clone());
+    add(
+        "Громкость",
+        t.r128_track_gain
+            .map(|q| format!("R128 {:+.1} dB", f32::from(q) / 256.0))
+            .or_else(|| t.replaygain_track_gain_db.map(|g| format!("ReplayGain {g:+.1} dB"))),
+    );
+    extra
 }
 
 #[cfg(test)]

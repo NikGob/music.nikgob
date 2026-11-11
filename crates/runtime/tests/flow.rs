@@ -103,6 +103,17 @@ fn import_retag_trash_undo() {
     assert!(expected.is_file());
     assert_eq!(lib.get_track(track).unwrap().unwrap().title, "Новое имя");
 
+    // «Источник и качество» of a track that is not playing: its own file.
+    rt.send(Command::TrackInfo(Some(track)));
+    wait_for(&rt, "the track's info", |s| s.track_info.as_ref().is_some_and(|i| i.track == Some(track)));
+    let info = rt.state().track_info.clone().unwrap();
+    assert_eq!(info.path.as_deref(), Some(expected.as_path()));
+    assert!(info.tags.contains(&("Название".to_owned(), "Новое имя".to_owned())), "{:?}", info.tags);
+    assert!(info.sound.is_some() && info.source.is_some());
+    assert!(rt.state().info.track.is_none(), "nothing plays: the player's info stays empty");
+    rt.send(Command::TrackInfo(None));
+    wait_for(&rt, "the info let go", |s| s.track_info.is_none());
+
     rt.send(Command::TrashTrack(track));
     wait_for(&rt, "the trash", |_| !expected.exists());
     assert!(lib.active_source(track).unwrap().is_none());

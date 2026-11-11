@@ -660,7 +660,8 @@ pub enum LyricsAvail {
     Ready(LyricsSync),
 }
 
-/// Technical details of the current track ("Инфо" tab).
+/// Technical details of a track: the playing one ("Инфо" tab) or one
+/// asked for ([`ViewState::track_info`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrackInfo {
     pub track: Option<TrackId>,
@@ -2677,6 +2678,9 @@ pub struct ViewState {
     pub lyrics: LyricsView,
     pub align: AlignView,
     pub info: TrackInfo,
+    /// The info of a track that need not be the one playing, asked for by
+    /// [`Command::TrackInfo`] (its own window).
+    pub track_info: Option<TrackInfo>,
     pub home: HomeView,
     pub library: LibraryView,
     pub release: Option<ReleaseDetail>,
@@ -3037,6 +3041,10 @@ pub enum Command {
     /// sources look for a copy better than it, which waits in «Подтверди»;
     /// a track with no file goes to «Хочу скачать».
     FindBetter(nikgob_core::model::TrackId),
+    /// «Источник и качество» of any track: its info into
+    /// [`ViewState::track_info`], kept up to date while it is asked for;
+    /// `None`: no longer.
+    TrackInfo(Option<nikgob_core::model::TrackId>),
     /// «Превратить в MP3» of a track whose lossless file surely holds an
     /// MP3: its MP3 with the tags, cover and lyrics takes its place, the
     /// original goes to the Trash.
