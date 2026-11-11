@@ -92,6 +92,13 @@ pub(crate) enum Doomed {
     Release(nikgob_view::ReleaseId),
 }
 
+// For egui's temp data (taken out with `remove_temp`).
+impl Default for Doomed {
+    fn default() -> Self {
+        Self::Tracks(Vec::new())
+    }
+}
+
 fn delete_request_key() -> egui::Id {
     egui::Id::new("delete-request")
 }
