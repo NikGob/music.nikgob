@@ -321,6 +321,9 @@ pub struct ListStats {
     pub spread: f32,
     /// The share of picks never started before.
     pub unheard: f32,
+    /// The share of the picks heard before that were listened to within
+    /// the window (what a list knows the user loves, without its novelty).
+    pub known: f32,
     /// The mean share of early skips of the picks' plays over the whole
     /// history (of the picks with at least two plays).
     pub skips: f32,
@@ -446,6 +449,8 @@ struct Lists {
     spread: f32,
     spread_n: usize,
     unheard: f32,
+    known: f32,
+    known_n: usize,
     skips: f32,
     skips_n: usize,
     truth: f32,
@@ -510,6 +515,11 @@ impl Lists {
             self.spread_n += 1;
         }
         self.unheard += list.iter().filter(|&&i| !(truth.heard)(i)).count() as f32 / k;
+        let known: Vec<TrackId> = list.iter().filter(|&&i| (truth.heard)(i)).map(|&i| ctx.catalog.tracks()[i].id).collect();
+        if !known.is_empty() {
+            self.known += known.iter().filter(|id| truth.listened.contains(id)).count() as f32 / known.len() as f32;
+            self.known_n += 1;
+        }
         for &i in list {
             if let Some(r) = ctx.skip_rate[i] {
                 self.skips += r;
@@ -538,6 +548,7 @@ impl Lists {
             world_run: self.world_run / n,
             spread: self.spread / self.spread_n.max(1) as f32,
             unheard: self.unheard / n,
+            known: self.known / self.known_n.max(1) as f32,
             skips: self.skips / self.skips_n.max(1) as f32,
             truth: (self.truth_n > 0).then(|| self.truth / self.truth_n as f32),
             coverage: self.seen.len() as f32 / catalog.max(1) as f32,
@@ -693,7 +704,11 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
     let offset = i64::from(parts.input.utc_offset_min) * 60_000;
     let first_day = (mid + offset).div_euclid(DAY_MS) + 1;
     let last_day = (last + offset).div_euclid(DAY_MS) - 1;
-    let days: Vec<i64> = (first_day..=last_day).collect();
+    let mut days: Vec<i64> = (first_day..=last_day).collect();
+    // A history of a day or two (a cold start): the morning after it.
+    if days.is_empty() {
+        days.push((last + offset).div_euclid(DAY_MS) + 1);
+    }
     let mut mixes = Lists::default();
     let mut per_home = 0usize;
     let mut homes_n = 0usize;
@@ -727,8 +742,8 @@ fn hits_row(h: &Hits) -> String {
 fn list_row(s: &ListStats) -> String {
     let truth = s.truth.map_or_else(String::new, |t| format!("  truth {t:.3}"));
     format!(
-        "lists {:>3} len {:>4.1}  prec@7d {:.3}  sess {:.3}  hit {:.3}  first {:.3}  artists {:.2}  worlds {:.2}  top-world {:.2}  run {:.2}  spread {:.2}  unheard {:.3}  skips {:.3}  coverage {:.3}{truth}",
-        s.lists, s.len, s.precision, s.session, s.hit, s.first, s.artists, s.worlds, s.world_top, s.world_run, s.spread, s.unheard, s.skips, s.coverage
+        "lists {:>3} len {:>4.1}  prec@7d {:.3}  sess {:.3}  hit {:.3}  first {:.3}  artists {:.2}  worlds {:.2}  top-world {:.2}  run {:.2}  spread {:.2}  unheard {:.3}  known {:.3}  skips {:.3}  coverage {:.3}{truth}",
+        s.lists, s.len, s.precision, s.session, s.hit, s.first, s.artists, s.worlds, s.world_top, s.world_run, s.spread, s.unheard, s.known, s.skips, s.coverage
     )
 }
 
@@ -749,6 +764,8 @@ impl Report {
                 }
             }
             out += &format!("  next: candidates hold the target {:.3}, first ten cover {:.3} of the catalog\n", r.cand_recall, r.coverage);
+            let w: Vec<String> = crate::model::FEATURES.iter().zip(r.weights.next.w).map(|(n, w)| format!("{n} {w:.2}")).collect();
+            out += &format!("  next: learnt {}\n", w.join(", "));
             if let (Some(a), Some(b)) = (r.skip_auc, r.skip_auc_history) {
                 out += &format!("  early skip AUC: model {a:.3}, history {b:.3} ({} starts)\n", r.skip_test);
             }
@@ -822,13 +839,20 @@ mod tests {
     #[test]
     #[ignore = "a report, minutes"]
     fn synthetic_report() {
+        // `NIKGOB_EVAL_QUICK`: the lists only (no replay, no big listener);
+        // `NIKGOB_EVAL_NEXT`: the replay only.
+        let quick = std::env::var_os("NIKGOB_EVAL_QUICK").is_some();
+        let next_only = std::env::var_os("NIKGOB_EVAL_NEXT").is_some();
         for kind in synthetic::Kind::ALL {
+            if (quick || next_only) && kind == synthetic::Kind::Big {
+                continue;
+            }
             let d = synthetic::user(kind, 7);
             let p = d.parts();
             let opts = if kind == synthetic::Kind::Big {
                 Options { next: false, autoplay_points: 0, mix_days: 0, ..Options::default() }
             } else {
-                Options::default()
+                Options { next: !quick, autoplay_points: if next_only { 0 } else { 40 }, mix_days: if next_only { 0 } else { 8 }, ..Options::default() }
             };
             println!("{}", evaluate(&d.name, &p, &opts).table());
         }

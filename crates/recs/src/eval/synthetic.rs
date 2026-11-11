@@ -225,10 +225,12 @@ fn history(rng: &mut Rng, lib: &Library, t: &Taste, who: &Listener, days: i64, e
     // Sound neighbours within a kind, for picks like the last.
     let near = |i: usize, rng: &mut Rng| -> Vec<usize> {
         let g = lib.songs[i].genre;
-        let mut c: Vec<(f32, usize)> = (0..24)
-            .map(|_| rng.below(n))
-            .chain(lib.albums[lib.songs[i].album].iter().copied())
-            .filter(|&j| j != i && (lib.songs[j].genre == g || rng.f32() < 0.1))
+        let drawn: Vec<(usize, f32)> = (0..24).map(|_| (rng.below(n), rng.f32())).collect();
+        let mut c: Vec<(f32, usize)> = drawn
+            .into_iter()
+            .chain(lib.albums[lib.songs[i].album].iter().map(|&j| (j, 1.0)))
+            .filter(|&(j, chance)| j != i && (lib.songs[j].genre == g || chance < 0.1))
+            .map(|(j, _)| j)
             .map(|j| (crate::index::euclid(&lib.songs[i].vector, &lib.songs[j].vector), j))
             .collect();
         c.sort_by(|a, b| a.0.total_cmp(&b.0));
