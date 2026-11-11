@@ -820,7 +820,7 @@ mod tests {
     use super::AlbumHave;
 
     fn have(local: u32, in_library: u32, total: u32) -> AlbumHave {
-        AlbumHave { local, in_library, total }
+        AlbumHave { local, in_library, total, mine: None }
     }
 
     #[test]
