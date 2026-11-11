@@ -35,6 +35,10 @@ const FILL_TARGET_MS: u64 = 1000;
 const SLOW_STEP: Duration = Duration::from_millis(150);
 /// At most one slow-step warning this often.
 const SLOW_STEP_LOG_EVERY: Duration = Duration::from_secs(10);
+/// How long a gain that changes while its item sounds takes to get there
+/// ([`Player::set_gain`](crate::Player::set_gain)): long enough not to be
+/// heard as a step.
+const GAIN_GLIDE: Duration = Duration::from_millis(400);
 
 /// Commands for the decoder thread.
 pub(crate) enum DecCmd {
@@ -58,6 +62,12 @@ pub(crate) enum DecCmd {
         id: u64,
         fx: ItemFx,
         gen_id: u64,
+    },
+    /// A new loudness correction for item `id` (playing, prepared or
+    /// opening).
+    SetGain {
+        id: u64,
+        gain_db: f32,
     },
     /// An item (a stream, or a file set as next) finished opening on its
     /// opener thread.
@@ -454,6 +464,17 @@ struct Active {
     /// The item is over and its reverb plays out: frames left, and of how
     /// many.
     ring: Option<(u64, u64)>,
+    /// A change of the item's gain gliding in ([`Self::set_gain_db`]).
+    glide: Option<Glide>,
+}
+
+/// A gain change on its way: from `from_db` to the item's own gain over
+/// `len` device frames, `done` of them out so far.
+#[derive(Clone, Copy, Debug)]
+struct Glide {
+    from_db: f32,
+    done: u64,
+    len: u64,
 }
 
 impl Active {
@@ -466,7 +487,57 @@ impl Active {
             fx: None,
             fx_cfg: None,
             ring: None,
+            glide: None,
         }
+    }
+
+    /// The gain in dB `done` frames into the glide (the item's own when
+    /// nothing glides).
+    fn gain_db_at(&self, done: u64) -> f32 {
+        match self.glide {
+            Some(g) => {
+                let t = (done as f32 / g.len.max(1) as f32).min(1.0);
+                g.from_db + (self.item.gain_db - g.from_db) * t
+            }
+            None => self.item.gain_db,
+        }
+    }
+
+    /// The item's gain becomes `gain_db`: at once when `glide` is false
+    /// (nothing of it is out yet), else from where it is now over
+    /// [`GAIN_GLIDE`] at `rate`.
+    fn set_gain_db(&mut self, gain_db: f32, rate: u32, glide: bool) {
+        let now = self.gain_db_at(self.glide.map_or(0, |g| g.done));
+        self.item.gain_db = gain_db;
+        let len = (u128::from(rate.max(1)) * GAIN_GLIDE.as_millis() / 1000) as u64;
+        self.glide = (glide && (now - gain_db).abs() > 0.01).then_some(Glide {
+            from_db: now,
+            done: 0,
+            len: len.max(1),
+        });
+    }
+
+    /// The linear gain at the start and at the end of the next `frames`
+    /// frames (the same unless a change glides); the glide moves on by them.
+    fn gains(&mut self, normalization: bool, frames: usize) -> (f32, f32) {
+        let Some(g) = self.glide else {
+            let gain = self.gain(normalization);
+            return (gain, gain);
+        };
+        let end = g.done + frames as u64;
+        let linear = |db: f32| {
+            if normalization {
+                10f32.powf(db / 20.0)
+            } else {
+                1.0
+            }
+        };
+        let pair = (
+            linear(self.gain_db_at(g.done)),
+            linear(self.gain_db_at(end)),
+        );
+        self.glide = (end < g.len).then_some(Glide { done: end, ..g });
+        pair
     }
 
     fn id(&self) -> u64 {
@@ -654,6 +725,8 @@ pub(crate) struct Decoder {
     /// A change of speed, tone and reverb asked for an item that is still
     /// opening: applied when it is open.
     pending_fx: Option<(u64, ItemFx)>,
+    /// A gain asked for an item that is still opening: its gain when open.
+    pending_gain: Option<(u64, f32)>,
     events: Sender<DecEvent>,
     sh: Arc<Shared>,
     ring: Producer<f32>,
@@ -710,6 +783,7 @@ impl Decoder {
             pending_next_file: false,
             pending_next_id: None,
             pending_fx: None,
+            pending_gain: None,
             events,
             sh,
             ring,
@@ -830,6 +904,7 @@ impl Decoder {
                 self.push_flush(gen_id, None);
             }
             DecCmd::SetFx { id, fx, gen_id } => self.set_fx(id, fx, gen_id),
+            DecCmd::SetGain { id, gain_db } => self.set_gain(id, gain_db),
             DecCmd::Opened { token, result } => self.opened(token, result),
             DecCmd::Shutdown => return false,
         }
@@ -878,6 +953,9 @@ impl Decoder {
                     if let Some((_, fx)) = self.pending_fx.take_if(|(want, _)| *want == id) {
                         item.set_fx(fx);
                     }
+                    if let Some((_, gain)) = self.pending_gain.take_if(|(want, _)| *want == id) {
+                        item.gain_db = gain;
+                    }
                     self.start_item(item, gen_id);
                     if let Some((pos, seek_gen)) = seek {
                         self.seek(pos, id, seek_gen);
@@ -908,6 +986,7 @@ impl Decoder {
         self.pending_play = None;
         self.pending_next = None;
         self.pending_fx = None;
+        self.pending_gain = None;
         self.drop_pending_seek();
         if item.source.is_stream() {
             // Cut what plays now and start the stream once it is open. The
@@ -955,6 +1034,10 @@ impl Decoder {
         {
             self.pending_fx = None;
         }
+        self.pending_gain = self.pending_gain.filter(|(id, _)| {
+            self.pending_play
+                .is_some_and(|(_, _, playing)| playing == *id)
+        });
         // Files open on the opener thread too: probing one (a cold disk, a
         // virus scanner, a big embedded cover) can take longer than the
         // buffered audio, and this runs while the current item plays.
@@ -974,6 +1057,9 @@ impl Decoder {
             Ok(mut item) => {
                 if let Some((_, fx)) = self.pending_fx.take_if(|(want, _)| *want == item.id) {
                     item.set_fx(fx);
+                }
+                if let Some((_, gain)) = self.pending_gain.take_if(|(want, _)| *want == item.id) {
+                    item.gain_db = gain;
                 }
                 let _ = self.events.send(DecEvent::Opened {
                     id: item.id,
@@ -1074,6 +1160,34 @@ impl Decoder {
     /// buffered second of the old one is flushed, with the usual de-click
     /// fades, so the change is heard at once); a prepared next item simply
     /// starts with it.
+    /// A new loudness correction for item `id` (its file's tags were read
+    /// after it was asked to play): an item still opening takes it when
+    /// open, one not started yet at once, one being produced glides to it
+    /// ([`GAIN_GLIDE`]). What the ring already holds plays as it was.
+    fn set_gain(&mut self, id: u64, gain_db: f32) {
+        let gain_db = if gain_db.is_finite() {
+            gain_db.clamp(-60.0, 30.0)
+        } else {
+            0.0
+        };
+        let opening = self.pending_play.is_some_and(|(_, _, want)| want == id)
+            || (self.pending_next.is_some() && self.pending_next_id == Some(id));
+        if opening {
+            self.pending_gain = Some((id, gain_db));
+        }
+        let rate = self.cfg.rate;
+        if let Some(next) = self.next.as_mut().filter(|n| n.id() == id) {
+            next.set_gain_db(gain_db, rate, false);
+        }
+        if let Some(x) = self.xfade.as_mut().filter(|x| x.to.id() == id) {
+            x.to.set_gain_db(gain_db, rate, true);
+        }
+        if let Some(cur) = self.cur.as_mut().filter(|c| c.id() == id) {
+            let out = cur.produced > 0 || cur.start_src > 0;
+            cur.set_gain_db(gain_db, rate, out);
+        }
+    }
+
     fn set_fx(&mut self, id: u64, fx: ItemFx, gen_id: u64) {
         let opening = self.pending_play.is_some_and(|(_, _, want)| want == id)
             || (self.pending_next.is_some() && self.pending_next_id == Some(id));
@@ -1394,7 +1508,6 @@ impl Decoder {
             return Step::Idle;
         };
         let id = cur.id();
-        let gain = cur.gain(normalization);
         let chain = if cross == 0 {
             self.next.as_mut().map(|n| &mut n.item)
         } else {
@@ -1402,7 +1515,9 @@ impl Decoder {
         };
         match cur.read(cfg, want, &mut self.buf, chain) {
             Ok(StreamRead::Frames(_)) => {
-                apply_gain(&mut self.buf, gain);
+                let ch = cfg.channels.max(1);
+                let (from, to) = cur.gains(normalization, self.buf.len() / ch);
+                apply_gain_glide(&mut self.buf, ch, from, to);
                 self.mix_tail(normalization);
                 self.push_samples_buf();
                 Step::Worked
@@ -1522,7 +1637,8 @@ impl Decoder {
             return Step::Idle;
         };
         let want = (x.len - x.done).min(CHUNK_FRAMES as u64).max(1) as usize;
-        let (out_gain, in_gain) = (cur.gain(normalization), x.to.gain(normalization));
+        let (out_from, out_to) = cur.gains(normalization, want);
+        let (in_from, in_to) = x.to.gains(normalization, want);
         let (cur_id, to_id) = (cur.id(), x.to.id());
 
         self.buf.clear();
@@ -1561,6 +1677,9 @@ impl Decoder {
         for i in 0..want {
             let t = (x.done + i as u64) as f32 / len;
             let angle = t * std::f32::consts::FRAC_PI_2;
+            let f = (i + 1) as f32 / want as f32;
+            let out_gain = out_from + (out_to - out_from) * f;
+            let in_gain = in_from + (in_to - in_from) * f;
             let (g_out, g_in) = (angle.cos() * out_gain, angle.sin() * in_gain);
             let base = i * ch;
             for k in base..base + ch {
@@ -1718,6 +1837,23 @@ fn apply_gain(buf: &mut [f32], gain: f32) {
     }
 }
 
+/// [`apply_gain`] going from `from` to `to` across the frames of `buf`
+/// (`channels` samples each), reaching `to` on the last one.
+fn apply_gain_glide(buf: &mut [f32], channels: usize, from: f32, to: f32) {
+    if from == to {
+        apply_gain(buf, to);
+        return;
+    }
+    let channels = channels.max(1);
+    let frames = (buf.len() / channels).max(1) as f32;
+    for (i, frame) in buf.chunks_exact_mut(channels).enumerate() {
+        let gain = from + (to - from) * ((i + 1) as f32 / frames);
+        for s in frame {
+            *s *= gain;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,6 +1916,51 @@ mod tests {
                 StreamRead::Eof => return (out.len() / 2) as u64,
             }
         }
+    }
+
+    fn linear(db: f32) -> f32 {
+        10f32.powf(db / 20.0)
+    }
+
+    #[test]
+    fn a_gain_set_while_sounding_glides_there() {
+        let mut a = Active::new(item(1, 100_000));
+        a.item.gain_db = -3.0;
+        // Nothing of it out yet: the new gain holds at once.
+        a.set_gain_db(-9.0, 48_000, false);
+        assert_eq!(a.gains(true, 1024), (linear(-9.0), linear(-9.0)));
+        // Sounding: from where it is, chunk after chunk, to the new gain.
+        a.set_gain_db(-3.0, 48_000, true);
+        let len = 48_000 * GAIN_GLIDE.as_millis() as usize / 1000;
+        let whole = linear(-3.0) - linear(-9.0);
+        let (mut last, mut done) = (linear(-9.0), 0);
+        while done < len {
+            let (from, to) = a.gains(true, 1024);
+            assert!((from - last).abs() < 1e-6, "a step at frame {done}");
+            assert!(to > from, "not rising at frame {done}");
+            assert!(to - from < whole / 10.0, "too fast at frame {done}");
+            last = to;
+            done += 1024;
+        }
+        assert!((last - linear(-3.0)).abs() < 1e-6);
+        assert_eq!(a.gains(true, 1024), (linear(-3.0), linear(-3.0)));
+        // Normalization off: no gain at all, gliding or not.
+        a.set_gain_db(-12.0, 48_000, true);
+        assert_eq!(a.gains(false, 1024), (1.0, 1.0));
+        // The same gain again starts no glide.
+        let mut b = Active::new(item(2, 100_000));
+        b.set_gain_db(0.0, 48_000, true);
+        assert!(b.glide.is_none());
+    }
+
+    #[test]
+    fn a_gliding_gain_reaches_its_end_on_the_last_frame() {
+        let mut buf = vec![1.0f32; 8];
+        apply_gain_glide(&mut buf, 2, 0.0, 1.0);
+        assert_eq!(buf, vec![0.25, 0.25, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0]);
+        let mut flat = vec![1.0f32; 4];
+        apply_gain_glide(&mut flat, 2, 0.5, 0.5);
+        assert_eq!(flat, vec![0.5; 4]);
     }
 
     #[test]

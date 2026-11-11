@@ -98,6 +98,7 @@ enum Command {
     Stop { gen_id: u64 },
     Seek { pos: Duration, id: u64, gen_id: u64 },
     SetFx { id: u64, fx: ItemFx, gen_id: u64 },
+    SetGain { id: u64, gain_db: f32 },
 }
 
 /// A position the listener asked for that the audio callback has not applied
@@ -196,6 +197,7 @@ impl Player {
                 | Command::Stop { .. }
                 | Command::Seek { .. }
                 | Command::SetFx { .. }
+                | Command::SetGain { .. }
         ) {
             self.inner.sh.inflight.fetch_add(1, Ordering::AcqRel);
         }
@@ -301,6 +303,16 @@ impl Player {
             }));
         }
         self.send(Command::SetFx { id, fx, gen_id });
+    }
+
+    /// Changes the loudness correction of item `id` (the playing one, the
+    /// one prepared as next, or one still opening) to `gain_db`, as when
+    /// its [`PlayItem::gain_db`] is known only after it was handed over.
+    /// One already sounding glides there over a moment, so the change is
+    /// not heard as a step; like a toggle of normalization, it is heard
+    /// after the audio the decoder has ready. An unknown `id` is ignored.
+    pub fn set_gain(&self, id: u64, gain_db: f32) {
+        self.send(Command::SetGain { id, gain_db });
     }
 
     /// Sets the ten-band equalizer: on or off, and the gain of each band
@@ -731,6 +743,9 @@ impl Control {
             }
             Command::SetFx { id, fx, gen_id } => {
                 let _ = self.dec_tx.send(DecCmd::SetFx { id, fx, gen_id });
+            }
+            Command::SetGain { id, gain_db } => {
+                let _ = self.dec_tx.send(DecCmd::SetGain { id, gain_db });
             }
             Command::Seek { pos, id, gen_id } => {
                 let _ = self.dec_tx.send(DecCmd::Seek { pos, id, gen_id });
