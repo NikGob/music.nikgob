@@ -55,7 +55,9 @@ pub fn apply(ctx: &Context, prefs: &Prefs, out: &mut Vec<Command>) {
         }
     }
     ctx.data_mut(|d| match pending {
-        Some(p) => d.insert_temp(id(), p),
+        Some(p) => {
+            d.insert_temp(id(), p);
+        }
         None => d.remove::<Pending>(id()),
     });
     let target = pending.map_or(saved, |p| p.scale);
