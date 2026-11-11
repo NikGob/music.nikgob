@@ -17,6 +17,7 @@ mod fallback_fonts;
 mod frames;
 mod geometry;
 mod logfile;
+mod memory;
 mod pacing;
 mod profile;
 mod shot;
@@ -288,6 +289,7 @@ impl Resident for Core {
     }
 
     fn shutdown(&mut self) {
+        memory::log_now("exit");
         self.geometry.flush();
         self.runtime.send(Command::Pause);
         // Soloist would also go with the process (its job object); stopping
@@ -523,6 +525,7 @@ fn main() -> eframe::Result {
     }
     logfile::init();
     stage("log");
+    memory::start();
     // `--sweep-list out.json`: the settings sweep's list of every row, from
     // the code and the prefs of `NIKGOB_DATA` (or the defaults); no window.
     if let Some(path) = sweep::list_path() {
