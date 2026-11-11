@@ -433,21 +433,28 @@ impl Youtube {
         let inner = Arc::clone(&self.inner);
         self.runtime.handle().spawn(async move {
             let started = std::time::Instant::now();
-            match inner.rp.query().music_search_suggestion("music").await {
-                Ok(_) => log::debug!("youtube: warmed up in {} ms", started.elapsed().as_millis()),
-                Err(e) => log::info!("youtube: warm-up failed: {e}"),
+            match player::no_panic(inner.rp.query().music_search_suggestion("music")).await {
+                Ok(Ok(_)) => log::debug!("youtube: warmed up in {} ms", started.elapsed().as_millis()),
+                Ok(Err(e)) => log::info!("youtube: warm-up failed: {e}"),
+                Err(panic) => log::info!("youtube: warm-up failed: RustyPipe failed: {panic}"),
             }
         });
     }
 
     /// Runs `f` on the service's runtime; the returned future cancels it
-    /// when dropped.
+    /// when dropped. A panic inside RustyPipe (it unwraps a failed visitor
+    /// data request) is a network error of that request.
     fn run<T, F>(&self, f: impl FnOnce(Arc<Inner>) -> F) -> BoxFuture<'_, Result<T, StreamError>>
     where
         T: Send + 'static,
         F: Future<Output = Result<T, StreamError>> + Send + 'static,
     {
-        let task = self.runtime.handle().spawn(f(Arc::clone(&self.inner)));
+        let fut = f(Arc::clone(&self.inner));
+        let task = self.runtime.handle().spawn(async move {
+            player::no_panic(fut)
+                .await
+                .unwrap_or_else(|panic| Err(StreamError::Network(format!("RustyPipe failed: {panic}"))))
+        });
         Box::pin(Joined(task))
     }
 
