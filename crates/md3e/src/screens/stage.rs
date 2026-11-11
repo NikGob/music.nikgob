@@ -1030,7 +1030,10 @@ impl StageUi {
             .map(|(_, r)| r.bottom())
             .fold(0.0, f32::max);
         let fitting = req.fit_home && scene == Scene::Home && home_bottom > size.y + 8.0;
-        if req.fit_home && scene == Scene::Home && !fitting {
+        // Главная not measured yet: one more frame tells whether it fits.
+        // Measured and fitting the stage as it is, nothing moves: asking for
+        // frames here kept the whole window drawing at its full rate.
+        if req.fit_home && scene == Scene::Home && home_bottom <= 0.0 {
             ctx.request_repaint();
         }
         let content = vec2(size.x, if fitting { home_bottom + 24.0 } else { size.y });

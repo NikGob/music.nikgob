@@ -566,9 +566,11 @@ pub(crate) fn chip(ui: &mut Ui, state: &ViewState, open: f32, at: Option<f32>, o
         let lead_rect = Rect::from_center_size(pos2(x + ICON * 0.5, cy), vec2(ICON, ICON));
         match lead {
             Lead::Progress(f) => {
+                // The ring follows the job's share on its spring, which asks
+                // for its own frames; the runtime wakes the window when the
+                // share changes. Between those nothing moves.
                 let f = anim::f32(&ctx, id.with("progress"), f, Spring::new(1.0, 120.0)).clamp(0.0, 1.0);
                 ring(painter, lead_rect.center(), ICON * 0.5 - 1.5, f, s.on_secondary_container, slot_k);
-                ctx.request_repaint();
             }
             Lead::Error => {
                 Icon::Error.widget(false, s.error.gamma_multiply(slot_k), ICON).paint_at(ui, lead_rect);
