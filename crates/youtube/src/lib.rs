@@ -71,6 +71,7 @@ use tokio::task::JoinHandle;
 pub use cache::DEFAULT_LIMIT as DEFAULT_CACHE_LIMIT;
 pub use remux::Tags;
 
+pub use range::buffers as stream_buffers;
 use range::{HttpStream, ResolveFn};
 
 /// Upper bound of tracks fetched for one playlist (YouTube caps listings
