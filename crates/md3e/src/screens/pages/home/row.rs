@@ -22,8 +22,9 @@
 //!
 //! The row's state ([`Scroll`]) is plain numbers, kept in egui's memory by
 //! the row's name; the cards are painted clipped to the grid's width, and
-//! only those in view. [`show`] tells when the row is near its end, so the
-//! page can ask for more cards.
+//! only those in view. [`show`] tells when the row is near its end, or
+//! fits whole with nothing to scroll to, so the page can ask for more
+//! cards. A new width or zoom keeps a row at rest on the same card.
 
 use egui::{Event, Id, MouseWheelUnit, Rect, Response, Ui, UiBuilder, Vec2, pos2, vec2};
 
@@ -66,6 +67,8 @@ pub struct Scroll {
     /// what offset).
     speed: f32,
     moved: Option<(f64, f32)>,
+    /// The pitch of the cards the offset was set for (0: not yet seen).
+    pitch: f32,
 }
 
 /// What the wheel did over a row in a frame: whole notches (cards) and
@@ -182,6 +185,28 @@ impl Scroll {
         max > 0.0 && self.offset > 0.5 && max - self.offset < NEAR_END * view
     }
 
+    /// The page should ask for more of a row of `n` cards: it is near its
+    /// end ([`Self::near_end`]), or all of them fit with nothing to scroll
+    /// to (a wide window: no gesture could get there). The page asks once
+    /// for each length and the runtime knows when its source has no more.
+    pub fn wants_more(&self, n: usize, max: f32, view: f32) -> bool {
+        (n > 0 && max <= 0.0) || self.near_end(max, view)
+    }
+
+    /// The cards are `pitch` apart now (the window or the zoom changed):
+    /// a row at rest stays on the same card's edge, not the same points.
+    /// A drag or a touchpad going on keeps its points (it comes to rest on
+    /// an edge of the new pitch when it ends). True when the offset moved.
+    pub fn repitch(&mut self, pitch: f32, max: f32) -> bool {
+        let old = std::mem::replace(&mut self.pitch, pitch);
+        if old <= 0.0 || pitch <= 0.0 || (old - pitch).abs() < 0.01 || self.dragging || self.loose {
+            return false;
+        }
+        let was = self.offset;
+        self.offset = ((self.offset / old).round() * pitch).clamp(0.0, max.max(0.0));
+        self.offset != was
+    }
+
     /// The button went down on the row at `x`.
     pub fn press(&mut self, x: f32) {
         self.press = Some((x, self.offset));
@@ -251,7 +276,7 @@ pub struct Row<'a> {
     /// middle of its cover).
     pub card_h: f32,
     pub arrows_at: f32,
-    /// Cards that fit (each `12 / per` columns).
+    /// Cards that fit, sharing the grid's width.
     pub per: usize,
     /// Cards in all.
     pub n: usize,
@@ -277,17 +302,19 @@ fn arrow(ui: &mut Ui, id: Id, shown: bool, slot: Rect, button: IconButton) -> Op
 }
 
 /// Lays `row` out on `grid` and calls `card` with the place of each card
-/// in view (see the module docs). True when the row is scrolled near its
-/// end ([`Scroll::near_end`]).
+/// in view (see the module docs). True when the page should ask for more
+/// of it ([`Scroll::wants_more`]).
 pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui, usize, Rect)) -> bool {
     let per = row.per.max(1);
-    let card_w = grid.span(12 / per);
+    let card_w = grid.tile(per);
     let pitch = card_w + GUTTER;
     let view = Rect::from_min_size(pos2(grid.left, row.top), vec2(grid.width, row.card_h));
     let max = Scroll::max(row.n, pitch, GUTTER, grid.width);
     let ctx = ui.ctx().clone();
     let id = Id::new(("home-row", row.name));
     let mut state: Scroll = if row.live { ctx.data(|d| d.get_temp(id)).unwrap_or_default() } else { Scroll::default() };
+    // A new pitch (the window or the zoom changed): on the same card.
+    let repitched = row.live && state.repitch(pitch, max);
     state.clamp(max);
     let now = anim::now(&ctx);
     // What moves the row by hand this frame (a drag, a touchpad) is
@@ -339,7 +366,7 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
     let spring_id = id.with("x");
     let shown = if !row.live {
         0.0
-    } else if by_hand {
+    } else if by_hand || repitched {
         anim::snap_f32(&ctx, spring_id, state.offset);
         state.offset
     } else {
@@ -379,7 +406,7 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
     if row.live {
         ctx.data_mut(|d| d.insert_temp(id, state));
     }
-    row.live && state.near_end(max, grid.width)
+    row.live && state.wants_more(row.n, max, grid.width)
 }
 
 #[cfg(test)]
@@ -594,5 +621,49 @@ mod tests {
         let short = Scroll::max(9, PITCH, 16.0, VIEW);
         assert!(!Scroll::default().near_end(short, VIEW));
         assert!(Scroll { offset: PITCH, ..Scroll::default() }.near_end(short, VIEW));
+    }
+
+    /// A row whose cards all fit (a wide window) asks for more at once:
+    /// no gesture could take it to its end. An empty row asks for nothing.
+    #[test]
+    fn a_row_that_fits_whole_wants_more() {
+        let s = Scroll::default();
+        assert!(s.wants_more(6, Scroll::max(6, PITCH, 16.0, VIEW), VIEW));
+        assert!(s.wants_more(3, Scroll::max(3, PITCH, 16.0, VIEW), VIEW));
+        assert!(!s.wants_more(0, 0.0, VIEW));
+        // Longer than the view: only once scrolled near its end.
+        let max = Scroll::max(20, PITCH, 16.0, VIEW);
+        assert!(!s.wants_more(20, max, VIEW));
+        assert!(Scroll { offset: max, ..Scroll::default() }.wants_more(20, max, VIEW));
+    }
+
+    /// The window or the zoom changed the pitch: a row at rest stays on
+    /// the same card's edge; a drag or a touchpad keeps its points.
+    #[test]
+    fn a_new_pitch_keeps_the_row_on_its_card() {
+        let (old, new) = (192.0, 199.11);
+        let mut s = Scroll::default();
+        assert!(!s.repitch(old, 10_000.0), "the first pitch is only noted");
+        s.step(-3, old, 10_000.0);
+        assert_eq!(s.offset, 3.0 * old);
+        assert!(s.repitch(new, 10_000.0));
+        assert!((s.offset - 3.0 * new).abs() < 0.01, "{}", s.offset);
+        assert!(!s.repitch(new, 10_000.0), "the same pitch changes nothing");
+        // Within the row's new end.
+        s.repitch(old, 2.0 * old);
+        assert_eq!(s.offset, 2.0 * old);
+        // A drag going on: its points stay; let go, it rests on a new edge.
+        s.press(500.0);
+        assert!(s.drag(400.0, 10_000.0, 0.0));
+        let held = s.offset;
+        assert!(!s.repitch(new, 10_000.0));
+        assert_eq!(s.offset, held);
+        s.release(new, 10_000.0, 6, 1.0);
+        assert!((s.offset / new - (s.offset / new).round()).abs() < 1e-4);
+        // A touchpad going on: the same.
+        s.glide(-50.0, 10_000.0, 2.0);
+        let held = s.offset;
+        assert!(!s.repitch(old, 10_000.0));
+        assert_eq!(s.offset, held);
     }
 }

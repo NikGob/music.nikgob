@@ -558,8 +558,20 @@ pub(crate) fn slider(ui: &mut Ui, id: Id, value: f32, num: Num) -> Option<f32> {
     slider_with(ui, id, value, num, 0.0, |_| {})
 }
 
+/// [`slider`] that gives its value only when let go (or clicked): for a
+/// value that moves the slider itself while it is dragged (the interface's
+/// scale).
+pub(crate) fn slider_on_release(ui: &mut Ui, id: Id, value: f32, num: Num) -> Option<f32> {
+    slider_row(ui, id, value, num, 0.0, |_| {}, false)
+}
+
 /// [`slider`] with more controls after it, `extra_w` wide («Очистить»).
 pub(crate) fn slider_with(ui: &mut Ui, id: Id, value: f32, num: Num, extra_w: f32, extra: impl FnOnce(&mut Ui)) -> Option<f32> {
+    slider_row(ui, id, value, num, extra_w, extra, true)
+}
+
+/// A slider row; `live`: its value while dragged too, else only once let go.
+fn slider_row(ui: &mut Ui, id: Id, value: f32, num: Num, extra_w: f32, extra: impl FnOnce(&mut Ui), live: bool) -> Option<f32> {
     let mut dragged = None;
     row_full(
         ui,
@@ -574,7 +586,7 @@ pub(crate) fn slider_with(ui: &mut Ui, id: Id, value: f32, num: Num, extra_w: f3
                     .track(8.0)
                     .value_label(move |v| num.fmt(num.at(v)))
                     .show(ui);
-                dragged = o.committed.or(o.dragging).map(|v| num.at(v));
+                dragged = o.committed.or(o.dragging.filter(|_| live)).map(|v| num.at(v));
                 extra(ui);
             });
         },

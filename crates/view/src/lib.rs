@@ -1718,6 +1718,9 @@ pub struct Prefs {
     pub bg_shapes_hue: u8,
     /// How strong the ambient clouds are (0.25..=2).
     pub ambient_strength: f32,
+    /// «Масштаб интерфейса»: the whole window larger or smaller, on top of
+    /// the system's scale ([`UI_SCALE_RANGE`], 1 = 100 %).
+    pub ui_scale: f32,
     /// The navigation rail always stays narrow (icons only) and its expand
     /// button is gone.
     pub rail_compact: bool,
@@ -1968,6 +1971,27 @@ pub const RING_SPIN_RANGE: std::ops::RangeInclusive<f32> = 10.0..=90.0;
 /// The default of [`Prefs::cover_pulse_strength`] and its range.
 pub const COVER_PULSE: f32 = 0.08;
 pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
+/// The range of [`Prefs::ui_scale`] and its step (80–150 % by 10).
+pub const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.8..=1.5;
+pub const UI_SCALE_STEP: f32 = 0.1;
+
+/// `scale` on a step of [`UI_SCALE_STEP`] inside [`UI_SCALE_RANGE`] (a
+/// value that is not a number: 100 %).
+pub fn ui_scale(scale: f32) -> f32 {
+    if !scale.is_finite() {
+        return 1.0;
+    }
+    // Divided rather than multiplied: 1.1 comes out as the 1.1 written.
+    let per = (1.0 / UI_SCALE_STEP).round();
+    ((scale * per).round() / per).clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end())
+}
+
+/// The scale `steps` steps of [`UI_SCALE_STEP`] from `scale` (Ctrl+= one
+/// up, Ctrl+- one down), inside the range.
+pub fn ui_scale_step(scale: f32, steps: i32) -> f32 {
+    let per = (1.0 / UI_SCALE_STEP).round();
+    ui_scale(((ui_scale(scale) * per).round() + steps as f32) / per)
+}
 
 /// An item of a track's menu whose place «Меню трека» chooses. The names
 /// are kept in the prefs: an item is never renamed.
@@ -2427,6 +2451,9 @@ pub enum PrefPatch {
     SettingsDeep(bool),
     /// «Разделы главной»: the order and switches of every section.
     HomeSections(Vec<HomeSectionSwitch>),
+    /// «Масштаб интерфейса» from the keys (Ctrl+=, Ctrl+-, Ctrl+0); kept
+    /// on a step inside the range ([`ui_scale`]).
+    UiScale(f32),
     /// What the settings page changed on its copy of the prefs: every
     /// field `after` has unlike `before`, laid over the prefs as they are
     /// when it comes ([`Prefs::merge_edit`]), so a copy older than a change
@@ -2509,6 +2536,7 @@ impl PrefPatch {
                 // Each section once, every one there, in the order given.
                 p.home_sections = HomeSectionSwitch::complete(list);
             }
+            Self::UiScale(scale) => p.ui_scale = ui_scale(*scale),
             Self::Edit { before, after } => p.merge_edit(before, after),
         }
     }
@@ -3571,6 +3599,7 @@ impl Default for Prefs {
             bg_shapes_colors: 0,
             bg_shapes_hue: 5,
             ambient_strength: 1.0,
+            ui_scale: 1.0,
             rail_compact: false,
             album_date: AlbumDate::Year,
             pane_queue: false,
@@ -3903,6 +3932,43 @@ mod settings_v2_tests {
             assert!(COVER_SPIN_RANGE.contains(&p.cover_spin_s) && RING_SPIN_RANGE.contains(&p.ring_spin_s));
             assert!(COVER_PULSE_RANGE.contains(&p.cover_pulse_strength));
         }
+    }
+
+    /// «Масштаб интерфейса»: 100 % by default, kept on a step of 10 %
+    /// between 80 and 150 %, the keys a step at a time; the patch writes
+    /// that field alone.
+    #[test]
+    fn the_interface_scale_stays_on_its_steps() {
+        for p in [Prefs::default(), Prefs::first_start()] {
+            assert_eq!(p.ui_scale, 1.0);
+        }
+        assert_eq!(ui_scale(1.0), 1.0);
+        assert_eq!(ui_scale(1.13), 1.1);
+        assert_eq!(ui_scale(0.5), 0.8);
+        assert_eq!(ui_scale(3.0), 1.5);
+        assert_eq!(ui_scale(f32::NAN), 1.0);
+        assert_eq!(ui_scale_step(1.0, 1), 1.1);
+        assert_eq!(ui_scale_step(1.0, -1), 0.9);
+        assert_eq!(ui_scale_step(1.4, 1), 1.5);
+        assert_eq!(ui_scale_step(1.5, 1), 1.5, "not past the end");
+        assert_eq!(ui_scale_step(0.8, -1), 0.8);
+        assert_eq!(ui_scale_step(0.9, -3), 0.8);
+        let mut s = 0.8;
+        for want in [0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5] {
+            s = ui_scale_step(s, 1);
+            assert_eq!(s, want);
+        }
+        let mut p = Prefs::default();
+        let before = p.clone();
+        PrefPatch::UiScale(1.26).apply(&mut p);
+        assert_eq!(p.ui_scale, 1.3);
+        assert_eq!(Prefs { ui_scale: before.ui_scale, ..p.clone() }, before, "nothing else changes");
+        // The settings page's copy: only the scale is laid over.
+        let mut now = Prefs { rail_compact: true, ..Prefs::default() };
+        let after = Prefs { ui_scale: 1.2, ..Prefs::default() };
+        now.merge_edit(&Prefs::default(), &after);
+        assert!(now.rail_compact);
+        assert_eq!(now.ui_scale, 1.2);
     }
 }
 

@@ -22,7 +22,7 @@ use crate::{
 const PAD: f32 = 24.0;
 
 fn cover_side(width: f32) -> f32 {
-    if width > 720.0 { 232.0 } else { 160.0 }
+    widgets::header_cover(width)
 }
 
 /// «слышал 5 из 52», «слышал все 20», «не слушал».
@@ -57,7 +57,7 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
         if let Some(a) = &v.new_album {
             ui.add_space(widgets::SECTION_GAP);
             section(ui, grid, "Новое");
-            let w = grid.span(2);
+            let w = grid.tile(grid.cards_per_line());
             let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), w + cards::ALBUM_TEXT_H), Sense::hover());
             let cell = Rect::from_min_size(pos2(grid.left, row.top()), vec2(w, w + cards::ALBUM_TEXT_H));
             let year = a.year.map(|y| y.to_string()).unwrap_or_default();
@@ -93,12 +93,12 @@ pub fn show(ui: &mut Ui, key: &str, state: &ViewState, pages: &mut PageState, ou
     })
 }
 
-/// «Миксы»: the mix cards of Главная, six to a line (three on a narrow
-/// page), their menus without what only Главная's have.
+/// «Миксы»: the mix cards of Главная, as many to a line as there (three on a
+/// narrow page), their menus without what only Главная's have.
 fn mixes(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     section(ui, grid, "Миксы");
     let per = grid.cards_per_line();
-    let cw = grid.span(12 / per);
+    let cw = grid.tile(per);
     let h = cw + cards::MIX_TEXT_H;
     let lines = v.mixes.len().div_ceil(per.max(1));
     let (block, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines as f32 * (h + 24.0) - 24.0), Sense::hover());
@@ -178,7 +178,7 @@ fn albums(ui: &mut Ui, grid: Grid, v: &WorldView, out: &mut Vec<Command>) -> Opt
     let s = Theme::get(ui.ctx()).scheme;
     section(ui, grid, if v.albums.len() == 1 { "Альбом" } else { "Альбомы" });
     let per = grid.cards_per_line();
-    let cw = grid.span(12 / per);
+    let cw = grid.tile(per);
     let h = cw + cards::ALBUM_TEXT_H + 12.0;
     let lines = v.albums.len().div_ceil(per.max(1));
     let (block, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines as f32 * (h + 16.0) - 16.0), Sense::hover());

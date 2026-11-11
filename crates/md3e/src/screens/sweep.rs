@@ -223,7 +223,7 @@ pub const ALL: &[SettingId] = {
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
         PlayerButton(B::Like), PlayerButton(B::AddToPlaylist), PlayerButton(B::Queue), PlayerButton(B::Lyrics), PlayerButton(B::Sound),
         HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
-        LikedAlbumsPlace, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
+        LikedAlbumsPlace, UiScale, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
         YouTubeCookies, ImportYouTube, SoundCloudEnabled, SoundCloud, SoundCloudToken, ImportSoundCloud, DeezerEnabled, PushLikes,
@@ -401,6 +401,7 @@ fn spec(id: SettingId) -> Spec {
         S::NavRoot => Spec::Switch(|p| &mut p.nav_root),
         S::AlbumVersions => Spec::Switch(|p| &mut p.album_versions),
         S::PartialAlbumsOnHome => Spec::Switch(|p| &mut p.partial_albums_on_home),
+        S::UiScale => Spec::Slider(|p| &mut p.ui_scale, 0.8, 1.5, 0.1),
         S::TrackMenu => Spec::Fixed(Action, "a row that opens the list of the track menu's items; the sweep never opens it"),
         S::HiddenMixes => Spec::Fixed(List, "shown only while a mix is hidden from Главная (⋮ → «Не предлагать этот микс»)"),
         S::GraphUse => Spec::Switch(|p| &mut p.graph_use),
@@ -714,6 +715,7 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::LyricsGap | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize => vec![NpLyricsGap],
         S::LyricsCountdown => vec![NpLyricsCountdown],
         S::RailCompact => vec![Home, Library],
+        S::UiScale => vec![Home, Np],
         S::PaneQueue => vec![Home, Queue],
         S::PaneLyrics => vec![Home, LyricsPane],
         S::PaneInfo | S::UserName => vec![Home],
@@ -906,7 +908,7 @@ mod tests {
         let pos = |id: SettingId| ALL.iter().position(|x| *x == id).unwrap_or(usize::MAX);
         match id {
             S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Equalizer | S::TrackSpeed | S::KeepTimbre
-            | S::Autoplay | S::AutoplayWorld | S::ListShuffle(_) | S::Marks | S::PlayerButton(_) | S::NavRoot
+            | S::Autoplay | S::AutoplayWorld | S::ListShuffle(_) | S::Marks | S::PlayerButton(_) | S::NavRoot | S::UiScale
             | S::AlbumOpens | S::AlbumVersions | S::PartialAlbumsOnHome
 
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew

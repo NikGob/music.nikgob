@@ -1721,7 +1721,20 @@ pub fn empty_state(ui: &mut Ui, icon: Icon, title: &str, body: &str, action: Opt
 
 /// Number of grid columns that fit `width` with `card` cards.
 pub fn columns(width: f32, card: f32) -> usize {
-    (((width + CARD_GAP) / (card + CARD_GAP)).floor() as usize).max(1)
+    crate::fit::Fit::at_least(width, CARD_GAP, card).count
+}
+
+/// The side of the big cover in a page's header (an album, a playlist, a
+/// mix, an artist, a world): 232 beside a wide page, 160 otherwise.
+pub fn header_cover(width: f32) -> f32 {
+    if width > 720.0 { 232.0 } else { 160.0 }
+}
+
+/// The grid of cards at least `card` wide over `width`: how many stand in a
+/// row and how wide each one is (whole points, the row filled).
+pub fn grid_fit(width: f32, card: f32) -> (usize, f32) {
+    let fit = crate::fit::Fit::at_least(width, CARD_GAP, card);
+    (fit.count, fit.size.floor())
 }
 
 /// Which items of a long list are laid out this frame: those that meet
@@ -1771,9 +1784,7 @@ pub fn grid<T>(
     height: impl Fn(&T, f32) -> f32,
     mut draw: impl FnMut(&mut Ui, &T, f32) -> Option<Route>,
 ) -> Option<Route> {
-    let width = ui.available_width();
-    let cols = columns(width, min_card);
-    let card = ((width - CARD_GAP * (cols - 1) as f32) / cols as f32).floor();
+    let (cols, card) = grid_fit(ui.available_width(), min_card);
     let key = ui.next_auto_id().with(("md3e-grid", items.len()));
     let rows: Vec<&[T]> = items.chunks(cols).collect();
     let heights: Vec<f32> = rows

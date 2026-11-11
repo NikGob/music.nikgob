@@ -348,3 +348,88 @@ fn the_tiles_of_the_day_fill_their_row() {
     assert_eq!(of_day_per(2, 1), 1);
     assert_eq!(of_day_per(4, 0), 1);
 }
+
+/// The page of a window `w` wide with the collapsed rail (96) and the
+/// window's margins (2 × 24) off.
+fn page_of(window: f32) -> Grid {
+    Grid::new(0.0, window - 96.0 - 48.0)
+}
+
+/// A narrow page keeps three cards a row as before; from the expanded
+/// class on a card is at most `CARD_MAX` wide and a wider window shows
+/// more of them.
+#[test]
+fn cards_keep_their_size_on_a_wide_window() {
+    for width in [360.0, 572.0, 695.0] {
+        let g = Grid::new(0.0, width);
+        assert_eq!(g.cards_per_line(), 3, "{width}");
+        assert_eq!(g.rows_per_line(), 2, "{width}");
+        assert_eq!(g.of_day_per_line(), 2, "{width}");
+        assert_eq!(g.of_day_least(), 1, "{width}");
+    }
+    // (window, mix and album cards in a row, their width)
+    for (window, n, w) in [(1280.0, 6, 176.0), (1920.0, 9, 183.11), (2560.0, 12, 186.67), (3840.0, 12, 198.67)] {
+        let g = page_of(window);
+        assert_eq!(g.cards_per_line(), n, "{window}");
+        let tile = g.tile(n);
+        assert!((tile - w).abs() < 0.01, "{window}: {tile}");
+        assert!(tile <= CARD_MAX + 0.01, "{window}");
+        // The row fills the page: the last card ends on its right edge.
+        let last = g.cell(n - 1, n, 0.0, 10.0, 0.0);
+        assert!((last.right() - (g.left + g.width)).abs() < 0.01, "{window}");
+        assert!((g.cell(1, n, 0.0, 10.0, 0.0).left() - (g.left + tile + GUTTER)).abs() < 0.01);
+    }
+    // Every page from the expanded class up: no card past the most.
+    let mut width = CARDS_CAPPED_FROM;
+    while width < 3000.0 {
+        let g = Grid::new(0.0, width);
+        assert!(g.tile(g.cards_per_line()) <= CARD_MAX + 0.01, "{width}");
+        width += 7.0;
+    }
+    // A wider window never has fewer cards.
+    let counts: Vec<usize> = (700..2600).step_by(10).map(|w| Grid::new(0.0, w as f32).cards_per_line()).collect();
+    assert!(counts.windows(2).all(|c| c[0] <= c[1]), "{counts:?}");
+}
+
+/// Song columns, shortcuts and the tiles of the day: as before up to four
+/// to a row, then more columns of songs and tiles; the shortcuts stay at
+/// four (the eight the runtime makes, in two rows).
+#[test]
+fn list_rows_add_columns_on_a_wide_window() {
+    // (window, song columns, shortcuts, tiles of the day, fewest tiles)
+    for (window, songs, shortcuts, tiles, least) in [
+        (1000.0, 2, 2, 2, 1),
+        (1280.0, 3, 3, 4, 2),
+        (1920.0, 4, 4, 4, 4),
+        (2560.0, 6, 4, 6, 5),
+    ] {
+        let g = page_of(window);
+        assert_eq!(g.rows_per_line(), songs, "{window}");
+        assert_eq!(g.shortcuts_per_line(), shortcuts, "{window}");
+        assert_eq!(g.of_day_per_line(), tiles, "{window}");
+        assert_eq!(g.of_day_least(), least, "{window}");
+        assert!(g.of_day_least() <= g.of_day_per_line(), "{window}");
+        if g.width >= FOUR_FROM {
+            assert!(g.tile(g.rows_per_line()) <= ROW_MAX + 0.01, "{window}");
+            assert!(g.tile(g.of_day_per_line()) <= OF_DAY_MAX + 0.01, "{window}");
+        }
+    }
+    assert_eq!(shortcuts_shown(page_of(2560.0).shortcuts_per_line()), 8);
+    // Two tiles of the day on a wide page keep a sensible width.
+    let g = page_of(2560.0);
+    let per = of_day_per(g.of_day_per_line(), 2).max(g.of_day_least());
+    assert!(g.tile(per) <= OF_DAY_STRETCH + 0.01);
+    // A narrow page: one tile alone fills the row, as before.
+    let g = page_of(900.0);
+    assert_eq!(of_day_per(g.of_day_per_line(), 1).max(g.of_day_least()), 1);
+}
+
+/// The page runs as wide as the window's content on any usual screen and
+/// is centred past [`MAX_W`].
+#[test]
+fn the_page_is_centred_past_its_widest() {
+    let g = Grid::new(100.0, 1792.0);
+    assert_eq!((g.left, g.width), (100.0, 1792.0));
+    let g = Grid::new(100.0, MAX_W + 400.0);
+    assert_eq!((g.left, g.width), (300.0, MAX_W));
+}

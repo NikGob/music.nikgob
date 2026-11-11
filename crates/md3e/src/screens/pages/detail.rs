@@ -98,7 +98,7 @@ fn header_with(ui: &mut Ui, size: f32, paint: impl FnOnce(&mut Ui, Rect), add_te
 
 /// 232 beside wide pages, 160 otherwise.
 fn cover_size(ui: &Ui) -> f32 {
-    if ui.available_width() > 720.0 { 232.0 } else { 160.0 }
+    widgets::header_cover(ui.available_width())
 }
 
 /// What the header of an album's page shows: the album, how its date is

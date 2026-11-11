@@ -2,7 +2,8 @@
 //! greeting with «Только скачанное», the shortcuts, «Миксы для тебя»
 //! («Любимые», «Микс дня», the named mixes, the moments), «Слушать
 //! снова», «Подборки дня», «Из твоей библиотеки», «Новое для тебя» and
-//! «Новые релизы» — on a grid of 12 columns. Every row under a header
+//! «Новые релизы» — on one [`Grid`]: a wider window shows more cards in a
+//! row, not larger ones ([`CARD_MAX`]). Every row under a header
 //! (the mixes, the songs in columns of two, the tiles of the day, the
 //! albums) with more than fit goes on sideways ([`row`]): Shift + the
 //! wheel or a sideways wheel, a drag, the arrows at its ends under the
@@ -27,6 +28,7 @@ mod row;
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, Size, Style, anim},
+    fit::Fit,
 };
 
 pub(super) fn greeting(hour: u8) -> &'static str {
@@ -49,8 +51,10 @@ pub(super) fn asks_name(p: &nikgob_view::Prefs) -> bool {
     p.name_prompt && p.user_name.trim().is_empty()
 }
 
-/// The widest the page gets; wider windows centre it.
-pub const MAX_W: f32 = 1600.0;
+/// The widest the page gets; wider windows centre it. The cards keep their
+/// size on a wide page ([`CARD_MAX`]): it runs as wide as the search bar
+/// over it on any usual screen.
+pub const MAX_W: f32 = 2560.0;
 /// The space between columns.
 pub const GUTTER: f32 = 16.0;
 /// Sections apart.
@@ -68,8 +72,25 @@ pub const SONG_LINES: usize = 2;
 pub const OF_DAY_H: f32 = 112.0;
 /// The shortcuts and the song rows go four to a row from this width.
 pub const FOUR_FROM: f32 = 1488.0;
-/// Below this width the rows go two to a row and the cards three.
+/// Below this width the rows go two to a row and the tiles of the day two.
 pub const NARROW_BELOW: f32 = 1000.0;
+/// Below this width (the page of a window under M3's expanded class: 840
+/// less the rail, 96, and the margins, 2 × 24) a row has three mix or
+/// album cards, as wide as they come out.
+pub const CARDS_CAPPED_FROM: f32 = 696.0;
+/// From [`CARDS_CAPPED_FROM`] a mix or an album card is at most this wide:
+/// a wider page shows more of them.
+pub const CARD_MAX: f32 = 200.0;
+/// From [`FOUR_FROM`] a column of songs is at most this wide: a wider page
+/// shows more columns.
+pub const ROW_MAX: f32 = 440.0;
+/// A tile of the day is at most this wide in a full row…
+pub const OF_DAY_MAX: f32 = 440.0;
+/// …and at most this wide when a few tiles share a row.
+pub const OF_DAY_STRETCH: f32 = 560.0;
+/// The shortcuts go at most this many to a row (the runtime makes eight:
+/// two rows of four).
+pub const SHORTCUTS_PER_LINE: usize = 4;
 
 /// How many shortcuts the page shows: six in rows of three, eight in rows
 /// of four on a wide window (home v2 §12: one constant to change).
@@ -81,35 +102,27 @@ pub const fn shortcuts_shown(per_row: usize) -> usize {
 /// plays the shelf in order from it (home v2 §12, recommended: the radio).
 pub const LISTEN_AGAIN_RADIO: bool = true;
 
-/// The 12 columns of the page.
+/// The page's column: where it is and how many of each kind of item stand
+/// in a row of it, [`GUTTER`] apart (each row its own count, the same
+/// left edge).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grid {
     pub left: f32,
     pub width: f32,
-    pub col: f32,
 }
 
 impl Grid {
     pub fn new(left: f32, available: f32) -> Self {
         let width = available.min(MAX_W);
         let left = left + ((available - width) / 2.0).max(0.0);
-        Self { left, width, col: (width - 11.0 * GUTTER) / 12.0 }
+        Self { left, width }
     }
 
-    /// The width of `n` columns.
-    pub fn span(&self, n: usize) -> f32 {
-        n as f32 * self.col + (n.saturating_sub(1)) as f32 * GUTTER
-    }
-
-    /// The left edge of column `i`.
-    pub fn x(&self, i: usize) -> f32 {
-        self.left + i as f32 * (self.col + GUTTER)
-    }
-
-    /// Shortcuts and song rows in a row.
+    /// Song columns in a row: two on a narrow page, three, four from
+    /// [`FOUR_FROM`], and more columns of at most [`ROW_MAX`] wider still.
     pub fn rows_per_line(&self) -> usize {
         if self.width >= FOUR_FROM {
-            4
+            Fit::at_most(self.width, GUTTER, ROW_MAX, 4).count
         } else if self.width < NARROW_BELOW {
             2
         } else {
@@ -117,22 +130,41 @@ impl Grid {
         }
     }
 
-    /// Mixes and albums in a row (each two columns; four when narrow).
-    pub fn cards_per_line(&self) -> usize {
-        if self.width < NARROW_BELOW { 3 } else { 6 }
+    /// Shortcuts in a row: as the songs, at most [`SHORTCUTS_PER_LINE`].
+    pub fn shortcuts_per_line(&self) -> usize {
+        self.rows_per_line().min(SHORTCUTS_PER_LINE)
     }
 
-    /// Tiles of the day in a row.
+    /// Mixes and albums in a row: three on a narrow page, else as many as
+    /// keep each at most [`CARD_MAX`] wide.
+    pub fn cards_per_line(&self) -> usize {
+        if self.width < CARDS_CAPPED_FROM { 3 } else { Fit::at_most(self.width, GUTTER, CARD_MAX, 3).count }
+    }
+
+    /// Tiles of the day in a row: two on a narrow page, four, and more of at
+    /// most [`OF_DAY_MAX`] wider still.
     pub fn of_day_per_line(&self) -> usize {
-        if self.width < NARROW_BELOW { 2 } else { 4 }
+        if self.width < NARROW_BELOW { 2 } else { Fit::at_most(self.width, GUTTER, OF_DAY_MAX, 4).count }
+    }
+
+    /// The fewest tiles of the day a row is split into, so that a few that
+    /// share it are at most [`OF_DAY_STRETCH`] wide (a narrow page: one).
+    pub fn of_day_least(&self) -> usize {
+        if self.width < NARROW_BELOW { 1 } else { Fit::at_most(self.width, GUTTER, OF_DAY_STRETCH, 1).count }
+    }
+
+    /// The width of an item of `per_line` sharing the row.
+    pub fn tile(&self, per_line: usize) -> f32 {
+        Fit::even(self.width, GUTTER, per_line).size
     }
 
     /// The rect of item `i` of `per_line` on a row of `h` at `top`, `gap`
     /// between rows.
     pub fn cell(&self, i: usize, per_line: usize, top: f32, h: f32, gap: f32) -> Rect {
-        let span = 12 / per_line;
+        let per_line = per_line.max(1);
+        let w = self.tile(per_line);
         let (row, k) = (i / per_line, i % per_line);
-        Rect::from_min_size(pos2(self.x(k * span), top + row as f32 * (h + gap)), vec2(self.span(span), h))
+        Rect::from_min_size(pos2(self.left + k as f32 * (w + GUTTER), top + row as f32 * (h + gap)), vec2(w, h))
     }
 }
 
@@ -518,7 +550,7 @@ fn section_header(ui: &mut Ui, grid: Grid, rect: Rect, title: &str, action: Opti
 // ---- Shortcuts.
 
 fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
-    let per = grid.rows_per_line();
+    let per = grid.shortcuts_per_line();
     let count = state.home.shortcuts.len().min(shortcuts_shown(per));
     let items = &state.home.shortcuts[..count];
     let h = lines(count, per) as f32 * (SHORTCUT_H + 8.0) - 8.0;
@@ -564,7 +596,7 @@ fn liked_playing(state: &ViewState, p: &PlaylistCard) -> bool {
 
 /// A mix card's height on `grid`: its cover and the lines under it.
 fn mix_card_h(grid: Grid) -> f32 {
-    grid.span(12 / grid.cards_per_line()) + cards::MIX_TEXT_H
+    grid.tile(grid.cards_per_line()) + cards::MIX_TEXT_H
 }
 
 /// The row `name` of «Любимые» (`liked`, first) and the mixes `lanes`
@@ -592,12 +624,12 @@ fn mix_row(
     let changes = refresh::track(ui.ctx(), Id::new(("home-row", name)), live, keys, || {
         liked.iter().map(|p| MixItem::Liked((*p).clone())).chain(lanes.iter().map(|l| MixItem::Lane((*l).clone()))).collect()
     });
-    let pitch = grid.span(12 / per) + GUTTER;
+    let pitch = grid.tile(per) + GUTTER;
     let at = row::Row {
         name,
         top: rect.top() + HEADER_H + HEADER_GAP,
         card_h: mix_card_h(grid),
-        arrows_at: grid.span(12 / per) / 2.0,
+        arrows_at: grid.tile(per) / 2.0,
         per,
         n: first + lanes.len(),
         live,
@@ -767,7 +799,7 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
         let at = row::Row { name: "again", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
         let keys = rows.chunks(SONG_LINES).map(|c| refresh::key(c.iter().map(|t| (t.id, &t.title, &t.cover)).collect::<Vec<_>>())).collect();
         let changes = refresh::track(ui.ctx(), Id::new(("home-row", "again")), live, keys, || rows.chunks(SONG_LINES).map(<[TrackRow]>::to_vec).collect());
-        let pitch = grid.span(12 / per) + GUTTER;
+        let pitch = grid.tile(per) + GUTTER;
         let near = row::show(ui, grid, at, |ui, column, cell| {
             changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<TrackRow>>| {
                 if let Some(old) = old {
@@ -809,8 +841,9 @@ fn play_again(rows: &[TrackRow], i: usize) -> Command {
 fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
     let tiles: &[MixCard] = &state.home.tiles;
     // Tiles that fit share the row (three in thirds rather than leave a
-    // hole); more of them go on sideways.
-    let per = of_day_per(grid.of_day_per_line(), tiles.len());
+    // hole) as long as none grows past `OF_DAY_STRETCH`; more of them go
+    // on sideways.
+    let per = of_day_per(grid.of_day_per_line(), tiles.len()).max(grid.of_day_least());
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + OF_DAY_H), Sense::hover());
     entering(ui, rect, n, "of-day", |ui| {
         section_header(ui, grid, rect, "Подборки дня", None);
@@ -826,7 +859,7 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
         };
         let keys = tiles.iter().map(|m| refresh::key((m.id, &m.title, &m.subtitle, m.covers.first()))).collect();
         let changes = refresh::track(ui.ctx(), Id::new(("home-row", "of-day")), live, keys, || tiles.to_vec());
-        let pitch = grid.span(12 / per) + GUTTER;
+        let pitch = grid.tile(per) + GUTTER;
         row::show(ui, grid, at, |ui, i, cell| {
             changes.card(ui, i, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&MixCard>| {
                 let m = old.unwrap_or(&tiles[i]);
@@ -881,7 +914,7 @@ fn from_library(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
     let h = &state.home;
     let per = grid.cards_per_line();
     let albums: &[ShelfAlbum] = &h.from_library;
-    let w = grid.span(12 / per);
+    let w = grid.tile(per);
     let card_h = w + cards::ALBUM_TEXT_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
     let mut nav = None;
@@ -936,7 +969,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
         let at = row::Row { name: "new", top: rect.top() + HEADER_H + HEADER_GAP, card_h: body, arrows_at: body / 2.0, per, n: columns, live, bleed: 8.0 };
         let keys = rows.chunks(SONG_LINES).map(|c| refresh::key(c.iter().map(|t| (&t.remote, &t.title, &t.cover_url)).collect::<Vec<_>>())).collect();
         let changes = refresh::track(ui.ctx(), Id::new(("home-row", "new")), live, keys, || rows.chunks(SONG_LINES).map(<[StreamTrackRow]>::to_vec).collect());
-        let pitch = grid.span(12 / per) + GUTTER;
+        let pitch = grid.tile(per) + GUTTER;
         let near = row::show(ui, grid, at, |ui, column, cell| {
             changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<StreamTrackRow>>| {
                 if let Some(old) = old {
@@ -998,7 +1031,7 @@ fn releases(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, ou
     let per = grid.cards_per_line();
     let all = &state.home.new_releases;
     let albums: &[StreamAlbumCard] = &all[..all.len().min(RELEASES_ROW)];
-    let w = grid.span(12 / per);
+    let w = grid.tile(per);
     let card_h = w + cards::ALBUM_TEXT_H;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H + HEADER_GAP + card_h), Sense::hover());
     let mut nav = None;
@@ -1043,7 +1076,7 @@ pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: 
         let grid = Grid::new(ui.cursor().left(), ui.available_width());
         ui.add_space(8.0);
         let per = grid.cards_per_line();
-        let card_h = grid.span(12 / per) + cards::ALBUM_TEXT_H;
+        let card_h = grid.tile(per) + cards::ALBUM_TEXT_H;
         let (block, _) = ui.allocate_exact_size(vec2(ui.available_width(), lines(albums.len(), per) as f32 * (card_h + 24.0) - 24.0), Sense::hover());
         let mut nav = None;
         for (i, a) in albums.iter().enumerate() {

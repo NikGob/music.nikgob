@@ -103,6 +103,8 @@ pub enum SettingId {
     /// «Глубина мягких краёв» and «Затухание».
     LyricsSoftDepth,
     LyricsSoftFade,
+    /// «Масштаб интерфейса»: the whole window larger or smaller.
+    UiScale,
     RailCompact,
     /// «Дата альбома»: year, month or the whole date.
     AlbumDate,
@@ -478,7 +480,7 @@ impl SettingId {
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
-            | MixClickOpensList | HiddenMixes | AlbumDate | LikedAlbumsPlace | RailCompact | ReducedMotion | Tooltips | PaneQueue
+            | MixClickOpensList | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
             | PaneLyrics | PaneInfo | TrackMenu | PlayerButton(_) | NavRoot => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
@@ -521,7 +523,7 @@ impl SettingId {
             // Вид: the theme, each part of the track screen and which kind.
             | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverPulse | Ring | RingStyle | RingPause
             | Ambient | BgShapes | ProgressWave | NpVolume | HomeSections | HiddenMixes | AlbumDate | LikedAlbumsPlace
-            | RailCompact | ReducedMotion
+            | UiScale | RailCompact | ReducedMotion
             // Сервисы: the accounts, their sound and their playlists.
             | SpotifyEnabled | Spotify | SpotifyPlayback | ImportSpotify | YouTubeEnabled | YouTube | ImportYouTube
             | SoundCloudEnabled | SoundCloud | ImportSoundCloud | DeezerEnabled | PushLikes
@@ -630,6 +632,7 @@ impl SettingId {
             LyricsSoftStrength => "Сила размытия",
             LyricsSoftDepth => "Глубина",
             LyricsSoftFade => "Затухание",
+            UiScale => "Масштаб интерфейса",
             RailCompact => "Боковая панель всегда компактная",
             AlbumDate => "Дата альбома",
             PaneQueue => "Очередь",
@@ -841,6 +844,7 @@ impl SettingId {
             LyricsSoftStrength => "Насколько сильно расплывается строка у самого края. Размытие нарастает плавно: строка, которая подходит к краю, мягко теряет резкость, а появляющаяся постепенно становится чёткой.",
             LyricsSoftDepth => "Какая часть высоты текста сверху и снизу занята мягкими краями. Текущая строка всегда остаётся в чёткой середине.",
             LyricsSoftFade => "Как рано строка у края становится прозрачной: меньше — тает только у самого края, больше — начинает таять раньше.",
+            UiScale => "Всё окно крупнее или мельче, поверх масштаба системы. Ещё Ctrl+= и Ctrl+- (на шаг), Ctrl+0 (100 %).",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
             AlbumDate => "Что показывать о дате выхода на странице альбома. Если день или месяц неизвестны, показывается то, что есть.",
             PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
