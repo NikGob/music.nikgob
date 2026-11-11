@@ -54,8 +54,8 @@ const KEPT_FILE: &str = "home.json";
 pub(crate) struct Job {
     /// Its number: pages come back in this order.
     seq: u64,
-    /// The input generation it was gathered at ([`HomeBuild::gen`]).
-    gen: u64,
+    /// The input generation it was gathered at ([`HomeBuild::generation`]).
+    generation: u64,
     /// The whole page; else only the recommendations' parts on the page as
     /// it is.
     full: bool,
@@ -121,7 +121,7 @@ fn write_kept(page: &v::HomeView, path: &Path) {
 /// A finished build.
 pub(crate) struct Done {
     seq: u64,
-    gen: u64,
+    generation: u64,
     full: bool,
     mixes: bool,
     /// `None` when the build failed (logged).
@@ -149,7 +149,7 @@ pub(crate) struct HomeBuild {
     asked: u64,
     came: u64,
     /// The input generation (see the module docs).
-    gen: u64,
+    generation: u64,
     /// The changes of the shown page made while builds were on their way,
     /// each with the generation it came at.
     patches: Vec<(u64, Patch)>,
@@ -181,7 +181,7 @@ impl HomeBuild {
             here,
             asked: 0,
             came: 0,
-            gen: 0,
+            generation: 0,
             patches: Vec::new(),
             keep: prefs.map(|p| p.with_file_name(KEPT_FILE)),
             kept_at: None,
@@ -205,10 +205,10 @@ fn run(inbox: &Receiver<ToBuilder>, out: &Sender<Done>, mut res: Resolver) {
         }
         let Some(job) = job else { continue };
         let job = *job;
-        let (seq, gen, full, mixes) = (job.seq, job.gen, job.full, job.mixes);
+        let (seq, generation, full, mixes) = (job.seq, job.generation, job.full, job.mixes);
         let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&mut res, job))).unwrap_or_else(|_| {
             log::error!("home: the build of page {seq} failed");
-            Done { seq, gen, full, mixes, page: None, shown: Vec::new() }
+            Done { seq, generation, full, mixes, page: None, shown: Vec::new() }
         });
         if out.send(done).is_err() {
             return;
@@ -233,7 +233,7 @@ fn take(m: ToBuilder, job: &mut Option<Box<Job>>) {
 /// whole page, the recommendations' parts resolved.
 fn build(res: &mut Resolver, job: Job) -> Done {
     let started = Instant::now();
-    let Job { seq, gen, full, mixes, visit, parts, discover } = job;
+    let Job { seq, generation, full, mixes, visit, parts, discover } = job;
     let lib = res.library().clone();
     let (rows, albums, shown) = discover.rows(&lib);
     let parts = parts.with_discover(rows, albums);
@@ -262,7 +262,7 @@ fn build(res: &mut Resolver, job: Job) -> Done {
         log::debug!("home: the mixes of page {seq} built in {} ms", started.elapsed().as_millis());
         Page::Parts(fill)
     };
-    Done { seq, gen, full, mixes, page: Some(page), shown }
+    Done { seq, generation, full, mixes, page: Some(page), shown }
 }
 
 /// Before the run's first recommendations: the mixes `shown` has (the last
@@ -282,11 +282,11 @@ fn carry_mixes(shown: &mut v::HomeView, into: &mut v::HomeView) {
     into.mix = std::mem::take(&mut shown.mix);
 }
 
-/// Makes again on `home` every change of `patches` that came after `gen`,
+/// Makes again on `home` every change of `patches` that came after `generation`,
 /// in their order.
-fn replay(patches: &[(u64, Patch)], gen: u64, home: &mut v::HomeView) {
+fn replay(patches: &[(u64, Patch)], generation: u64, home: &mut v::HomeView) {
     for (at, patch) in patches {
-        if *at > gen {
+        if *at > generation {
             patch(home);
         }
     }
@@ -303,7 +303,7 @@ impl Worker {
     pub(crate) fn ask_home(&mut self, full: bool) {
         let job = Job {
             seq: self.home_build.asked + 1,
-            gen: self.home_build.gen,
+            generation: self.home_build.generation,
             full,
             mixes: self.snapshot().is_some(),
             visit: self.visit(),
@@ -340,13 +340,13 @@ impl Worker {
         let hb = &mut self.home_build;
         hb.came = hb.came.max(done.seq);
         let waiting = hb.busy();
-        let stale = done.gen < hb.gen;
+        let stale = done.generation < hb.generation;
         let patches = std::mem::take(&mut hb.patches);
         self.discover_shown(&done.shown);
         self.turn.lap("shown");
         match done.page {
             Some(Page::Whole(mut view)) => {
-                replay(&patches, done.gen, &mut view);
+                replay(&patches, done.generation, &mut view);
                 let stages: Vec<_> = view.worlds.iter().filter_map(|w| w.release).collect();
                 let mixes = done.mixes;
                 self.publish(|s| {
@@ -362,7 +362,7 @@ impl Worker {
             Some(Page::Parts(fill)) => {
                 self.publish(|s| {
                     fill.apply(&mut s.home);
-                    replay(&patches, done.gen, &mut s.home);
+                    replay(&patches, done.generation, &mut s.home);
                 });
                 self.turn.lap("swap");
             }
@@ -371,7 +371,7 @@ impl Worker {
         // The pages still on their way may be older than these changes;
         // with none on its way, every change is in what comes next.
         if waiting {
-            self.home_build.patches = patches.into_iter().filter(|(at, _)| *at > done.gen).collect();
+            self.home_build.patches = patches.into_iter().filter(|(at, _)| *at > done.generation).collect();
         }
         if stale && !waiting {
             log::debug!("home: page {} was built of older inputs, building it again", done.seq);
@@ -441,9 +441,9 @@ impl Worker {
     pub(crate) fn patch_home(&mut self, patch: impl Fn(&mut v::HomeView) + 'static) {
         self.publish(|s| patch(&mut s.home));
         let hb = &mut self.home_build;
-        hb.gen += 1;
+        hb.generation += 1;
         if hb.busy() {
-            hb.patches.push((hb.gen, Box::new(patch)));
+            hb.patches.push((hb.generation, Box::new(patch)));
         }
     }
 
@@ -451,7 +451,7 @@ impl Worker {
     /// library edit): a page on its way, built of what was before, is built
     /// again once shown.
     pub(crate) fn home_input_changed(&mut self) {
-        self.home_build.gen += 1;
+        self.home_build.generation += 1;
     }
 
     /// Lets go of `value` on the builder's thread, not on the loop (a large
@@ -470,7 +470,7 @@ mod tests {
     fn job(seq: u64, full: bool) -> Box<Job> {
         Box::new(Job {
             seq,
-            gen: seq,
+            generation: seq,
             full,
             mixes: true,
             visit: Visit::default(),
