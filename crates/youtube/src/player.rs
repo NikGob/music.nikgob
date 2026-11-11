@@ -564,7 +564,7 @@ pub(crate) async fn no_panic<T>(fut: impl Future<Output = T>) -> Result<T, Strin
     std::future::poll_fn(move |cx| match catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
         Ok(Poll::Ready(v)) => Poll::Ready(Ok(v)),
         Ok(Poll::Pending) => Poll::Pending,
-        Err(payload) => Poll::Ready(Err(panic_message(payload.as_ref()))),
+        Err(payload) => Poll::Ready(Err(panic_message(&*payload))),
     })
     .await
 }
