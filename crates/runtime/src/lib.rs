@@ -18,6 +18,7 @@ mod home;
 mod home_build;
 mod home_v2;
 mod import;
+mod library_load;
 mod library_search;
 mod lyrics;
 mod lyrics_keep;
@@ -46,7 +47,7 @@ use nikgob_core::model::{
     EndReason, EventContext, EventMeta, EventOrigin, EventType, LikeTarget, PlaylistId, SourceId, SourceKind, TrackId,
 };
 use nikgob_core::streaming::{Service as StreamKind, StreamService};
-use nikgob_library::{Library, ReleaseSortKey, Sort, TrackSortKey};
+use nikgob_library::{Library, Sort, TrackSortKey};
 use nikgob_view::{Command, LIKED_PLAYLIST, Status, Toast, ViewState};
 use parking_lot::{RwLock, RwLockReadGuard};
 
@@ -669,6 +670,8 @@ struct Worker {
     reading_ahead: Option<PathBuf>,
     /// The library's part of the search, read off the loop ([`library_search`]).
     library_search: library_search::LibrarySearch,
+    /// The library's pages, read off the loop ([`library_load`]).
+    library_load: library_load::LibraryLoad,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -743,6 +746,7 @@ impl Worker {
         let home_build = home_build::HomeBuild::start(&res, config.prefs_path.as_deref());
         let (later_tx, later_rx) = crossbeam_channel::unbounded();
         let library_search = library_search::LibrarySearch::start(&res, later_tx.clone());
+        let library_load = library_load::LibraryLoad::start(&res, later_tx.clone());
         Self {
             res,
             lib: config.library,
@@ -822,6 +826,7 @@ impl Worker {
             later_rx,
             reading_ahead: None,
             library_search,
+            library_load,
         }
     }
 
@@ -2656,108 +2661,13 @@ impl Worker {
     /// «Любимые» staying first; under «только скачанное» the albums with a
     /// file.
     fn shelf(&mut self) -> (Vec<nikgob_view::PlaylistCard>, Vec<(usize, nikgob_view::ReleaseCard)>) {
-        let playlists = self.log_err("плейлисты", self.lib.list_playlists()).unwrap_or_default();
-        let albums = self.log_err("альбомы", self.lib.liked_releases(0, 10_000)).unwrap_or_default();
         let only_local = self.state.read().prefs.library_only_downloaded;
-        let pinned = playlists.iter().take_while(|p| p.id.is_none()).count();
-        let res = &mut self.res;
-        let albums = albums
-            .iter()
-            .filter(|(r, _)| r.liked && (!only_local || r.local_tracks > 0))
-            .map(|(r, at)| {
-                let before = playlists.iter().skip(pinned).position(|p| p.updated_at < *at);
-                (before.map_or(playlists.len(), |i| i + pinned), res.release(r))
-            })
-            .collect();
-        let playlists = playlists.iter().map(|p| res.playlist(p)).collect();
-        (playlists, albums)
-    }
-
-    fn load_library(&mut self) {
-        self.home_input_changed();
-        self.stream_analysis_changed();
-        self.recs_library_changed();
-        self.publish_recordings();
-        self.turn.lap("recordings");
-        let sort = self.state.read().library.release_sort;
-        let key = match sort {
-            nikgob_view::ReleaseSort::Artist => Sort::asc(ReleaseSortKey::Artist),
-            nikgob_view::ReleaseSort::Title => Sort::asc(ReleaseSortKey::Title),
-            nikgob_view::ReleaseSort::Year => Sort::desc(ReleaseSortKey::Year),
-            nikgob_view::ReleaseSort::Added => Sort::desc(ReleaseSortKey::Added),
-        };
-        let releases = self
-            .log_err("библиотека", self.lib.releases(0, 20_000, key))
-            .unwrap_or_default();
-        self.turn.lap("albums");
-        let (playlists, liked_albums) = self.shelf();
-        self.turn.lap("shelf");
-        let artists = self
-            .log_err(
-                "исполнители",
-                self.lib.artists(0, 20_000, Sort::asc(nikgob_library::ArtistSortKey::Name)),
-            )
-            .unwrap_or_default();
-        self.turn.lap("artists");
-        // The inconspicuous "только скачанное": what has a file.
-        let only_local = self.state.read().prefs.library_only_downloaded;
-        let (releases, artists) = if only_local {
-            (
-                releases.into_iter().filter(|r| r.local_tracks > 0).collect(),
-                artists.into_iter().filter(|a| a.local_track_count > 0).collect(),
-            )
-        } else {
-            (releases, artists)
-        };
-        let count = self
-            .lib
-            .count_tracks(track_filter(only_local))
-            .unwrap_or(0) as usize;
-        // The overview's rows: the latest albums in and the most played.
-        let tracks = self.lib.rec_tracks().unwrap_or_default();
-        let stats = self.lib.all_track_stats().unwrap_or_default();
-        let per_artist = home::artist_track_counts(&tracks, only_local);
-        let often = home::often_played(&tracks, &stats, 12);
-        let mut recent: Vec<&nikgob_library::ReleaseRow> = releases.iter().collect();
-        recent.sort_by_key(|r| std::cmp::Reverse(r.release.added_at));
-        let brought = self.lib.releases_of_imported_playlists().unwrap_or_default();
-        recent.retain(|r| !brought.contains(&r.release.id));
-        recent.truncate(12);
-        let by_id: std::collections::HashMap<_, _> = releases.iter().map(|r| (r.release.id, r)).collect();
-        let often: Vec<&nikgob_library::ReleaseRow> = often.iter().filter_map(|id| by_id.get(id).copied()).collect();
-        self.turn.lap("overview");
-        let res = &mut self.res;
-        // By when they came, the albums only an import's playlists brought
-        // stay out, as in «Недавно добавлено».
-        let releases: Vec<_> = releases
-            .iter()
-            .filter(|r| sort != nikgob_view::ReleaseSort::Added || !brought.contains(&r.release.id))
-            .map(|r| res.release(r))
-            .collect();
-        let artists: Vec<_> = artists
-            .iter()
-            .map(|a| {
-                let mut card = res.artist(a);
-                card.track_count = per_artist.get(&a.artist.id).copied().unwrap_or(card.track_count);
-                card
-            })
-            .collect();
-        let recent: Vec<_> = recent.iter().map(|r| res.release(r)).collect();
-        let often: Vec<_> = often.iter().map(|r| res.release(r)).collect();
-        self.turn.lap("cards");
-        self.publish(|s| {
-            s.library.releases = releases;
-            s.library.playlists = playlists;
-            s.library.liked_albums = liked_albums;
-            s.library.artists = artists;
-            s.library.recently_added = recent;
-            s.library.often_played = often;
-            s.library.track_count = count;
-            s.library.loaded = true;
-        });
-        let sort = self.state.read().library.track_sort;
-        self.load_tracks(0, 200, sort);
-        self.turn.lap("tracks");
+        let mut errors = Vec::new();
+        let shelf = library_load::shelf(&self.lib, &mut self.res, only_local, &mut errors);
+        for what in errors {
+            self.toast(format!("Ошибка: {what}"), None);
+        }
+        shelf
     }
 
     /// The library filter on «Треки»: what the library search finds,
@@ -3295,7 +3205,8 @@ impl Worker {
             Held::Tracks(Some(n)) => self.library_tracks() == Held::Tracks(Some(n)),
             Held::Tracks(None) => false,
         };
-        if !same || !self.state.read().library.loaded {
+        // A load on its way would put back what is patched here.
+        if !same || !self.state.read().library.loaded || self.library_load_pending() {
             self.load_library();
             return;
         }
@@ -3397,6 +3308,9 @@ impl Worker {
         if let LikeTarget::Track(t) = target {
             let releases = self.releases_of(&[t]);
             self.after_like_change(before, releases);
+        } else if self.library_load_pending() {
+            // The load on its way may have read the hearts before.
+            self.load_library();
         }
     }
 }
