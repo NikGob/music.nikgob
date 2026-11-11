@@ -223,7 +223,7 @@ pub fn release(
     // lines are those songs) or «Весь альбом» (every place, the versions of
     // its songs the user did not choose as a group of their own), as it
     // opens or as switched here.
-    let whole = r.partial && ui.ctx().data(|d| d.get_temp::<bool>(widgets::whole_key(id))).unwrap_or(r.open_whole);
+    let whole = r.partial && widgets::visit_whole(ui.ctx(), id).unwrap_or(r.open_whole);
     let mine = r.partial && !whole;
     let (lines, versions_at) = if mine { (r.mine_lines(), None) } else { r.all_lines() };
     let shown: Vec<usize> = lines
