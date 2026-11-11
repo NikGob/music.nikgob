@@ -206,6 +206,148 @@ pub struct Artist {
     pub kind: Option<String>,
 }
 
+/// Another name of an artist (`inc=aliases`, and in search results).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct Alias {
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(deserialize_with = "null_default")]
+    pub sort_name: String,
+    /// `en`, `ja`, `ja_Latn`…
+    pub locale: Option<String>,
+    /// `Artist name`, `Legal name`, `Search hint`.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    #[serde(deserialize_with = "null_default")]
+    pub primary: bool,
+    #[serde(deserialize_with = "null_default")]
+    pub ended: bool,
+}
+
+/// A link of an artist (`inc=url-rels`): its Wikidata item, its site…
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct Relation {
+    /// `wikidata`, `official homepage`…
+    #[serde(rename = "type", deserialize_with = "null_default")]
+    pub kind: String,
+    pub url: Option<RelationUrl>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RelationUrl {
+    #[serde(deserialize_with = "null_default")]
+    pub resource: String,
+}
+
+/// An artist with its other names and links: a search hit, or
+/// [`MusicBrainz::artist_info`].
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct ArtistInfo {
+    pub id: Mbid,
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(deserialize_with = "null_default")]
+    pub sort_name: String,
+    /// `Person`, `Group`, `Character`…
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// Search relevance, 0..=100 (search results only).
+    pub score: Option<u32>,
+    #[serde(deserialize_with = "null_default")]
+    pub aliases: Vec<Alias>,
+    #[serde(deserialize_with = "null_default")]
+    pub relations: Vec<Relation>,
+}
+
+impl ArtistInfo {
+    /// A role (an anime character credited for its songs), not a person.
+    pub fn is_character(&self) -> bool {
+        self.kind.as_deref().is_some_and(|k| k.eq_ignore_ascii_case("character"))
+    }
+
+    /// Its Wikidata item (`Q…`), from its links.
+    pub fn wikidata(&self) -> Option<String> {
+        self.relations
+            .iter()
+            .filter(|r| r.kind.eq_ignore_ascii_case("wikidata"))
+            .filter_map(|r| r.url.as_ref())
+            .find_map(|u| wikidata_id(&u.resource))
+    }
+
+    /// Its Latin name ([`latin_alias`]).
+    pub fn latin_name(&self) -> Option<String> {
+        latin_alias(&self.name, &self.sort_name, &self.aliases)
+    }
+
+    /// Its name or one of its aliases is `name` (folded like artist names).
+    pub fn answers_to(&self, name: &str) -> bool {
+        let want = crate::text::artist_key(name);
+        !want.is_empty()
+            && (crate::text::artist_key(&self.name) == want
+                || self.aliases.iter().any(|a| crate::text::artist_key(&a.name) == want))
+    }
+}
+
+/// `https://www.wikidata.org/wiki/Q42` → `Q42`.
+pub fn wikidata_id(url: &str) -> Option<String> {
+    let id = url.trim().trim_end_matches('/').rsplit('/').next()?;
+    let digits = id.strip_prefix('Q')?;
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| id.to_owned())
+}
+
+/// The Latin name of an artist from its MusicBrainz names, best first:
+///
+/// 1. its own name, when MusicBrainz writes it in Latin letters;
+/// 2. an alias in English (`en`) or in a Latin-script locale (`ja-Latn`):
+///    a primary English one, a primary Latin-script one, then the others
+///    in that order;
+/// 3. another primary alias in Latin letters;
+/// 4. any other Latin alias that is an artist or legal name;
+/// 5. its sort name in reading order (`Saso, Ayako` → `Ayako Saso`).
+///
+/// Search hints and ended aliases never count (they are misspellings and
+/// old names).
+pub fn latin_alias(name: &str, sort_name: &str, aliases: &[Alias]) -> Option<String> {
+    let latin = |s: &str| nikgob_core::names::is_latin(s.trim());
+    if latin(name) {
+        return Some(name.trim().to_owned());
+    }
+    let rank = |a: &Alias| -> Option<u8> {
+        let hint = a.kind.as_deref().is_some_and(|k| k.eq_ignore_ascii_case("search hint"));
+        if a.ended || hint || !latin(&a.name) {
+            return None;
+        }
+        let locale = a.locale.as_deref().unwrap_or_default().to_ascii_lowercase().replace('_', "-");
+        let english = locale == "en" || locale.starts_with("en-");
+        let script = locale.ends_with("-latn");
+        Some(match (english, script, a.primary) {
+            (true, _, true) => 0,
+            (false, true, true) => 1,
+            (true, _, false) => 2,
+            (false, true, false) => 3,
+            (false, false, true) => 4,
+            (false, false, false) => 5,
+        })
+    };
+    if let Some((_, best)) = aliases.iter().filter_map(|a| rank(a).map(|r| (r, a))).min_by_key(|(r, _)| *r) {
+        return Some(best.name.trim().to_owned());
+    }
+    let sort = sort_name.trim();
+    if !latin(sort) {
+        return None;
+    }
+    Some(match sort.split_once(", ") {
+        Some((last, first)) if !last.trim().is_empty() && !first.trim().is_empty() && !first.contains(',') => {
+            format!("{} {}", first.trim(), last.trim())
+        }
+        _ => sort.to_owned(),
+    })
+}
+
 /// A page of a browse request.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page<T> {
@@ -519,6 +661,67 @@ impl MusicBrainz {
             .next())
     }
 
+    /// Artists called `name` by their name or one of their aliases (folded
+    /// like artist names), with a score of 90 at least, best first.
+    pub async fn search_artists(&self, name: &str, limit: u32) -> Result<Vec<ArtistInfo>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            artists: Vec<ArtistInfo>,
+        }
+        let p = phrase(name);
+        let query = format!("artist:{p} OR alias:{p}");
+        let limit = limit.clamp(1, PAGE_MAX).to_string();
+        let raw: Raw = self.get("artist", &[("query", query.as_str()), ("limit", limit.as_str())]).await?;
+        Ok(raw
+            .artists
+            .into_iter()
+            .filter(|a| a.score.unwrap_or(0) >= 90 && a.answers_to(name))
+            .collect())
+    }
+
+    /// The artist `mbid` with its aliases and its links (`inc=aliases+url-rels`).
+    pub async fn artist_info(&self, mbid: &str) -> Result<ArtistInfo> {
+        check_mbid(mbid)?;
+        self.get(&format!("artist/{mbid}"), &[("inc", "aliases+url-rels")]).await
+    }
+
+    /// The artist `mbid` has a recording or a release group called one of
+    /// `titles` (the library's titles of an artist found by name): the
+    /// proof that it is the library's. A recording search for up to eight
+    /// of the titles, then the first page of its release groups.
+    pub async fn artist_has_titles(&self, mbid: &str, titles: &[String]) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            recordings: Vec<Recording>,
+        }
+        check_mbid(mbid)?;
+        let mut asked: Vec<String> = Vec::new();
+        for t in titles {
+            let t = crate::text::search_title(t);
+            if !t.trim().is_empty() && !asked.contains(&t) {
+                asked.push(t);
+            }
+            if asked.len() == 8 {
+                break;
+            }
+        }
+        if asked.is_empty() {
+            return Ok(false);
+        }
+        let any = asked.iter().map(|t| format!("recording:{}", phrase(t))).collect::<Vec<_>>().join(" OR ");
+        let query = format!("arid:{mbid} AND ({any})");
+        let raw: Raw = self.get("recording", &[("query", query.as_str()), ("limit", "25")]).await?;
+        let theirs: Vec<String> = raw.recordings.into_iter().map(|r| r.title).collect();
+        if crate::text::titles_overlap(titles, &theirs) {
+            return Ok(true);
+        }
+        let groups = self.browse_artist_release_groups(mbid, PAGE_MAX, 0).await?;
+        let theirs: Vec<String> = groups.items.into_iter().map(|g| g.title).collect();
+        Ok(crate::text::titles_overlap(titles, &theirs))
+    }
+
     /// The tags and genres of the artist `mbid`.
     pub async fn artist_tags(&self, mbid: &str) -> Result<ArtistTags> {
         check_mbid(mbid)?;
@@ -606,4 +809,63 @@ where
     D: Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(d)?.filter(|s| !s.trim().is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alias(name: &str, locale: Option<&str>, kind: &str, primary: bool) -> Alias {
+        Alias {
+            name: name.into(),
+            sort_name: String::new(),
+            locale: locale.map(str::to_owned),
+            kind: Some(kind.into()),
+            primary,
+            ended: false,
+        }
+    }
+
+    #[test]
+    fn the_latin_name_is_the_english_or_latin_script_alias_first() {
+        let aliases = vec![
+            alias("さそう あやこ", Some("ja"), "Artist name", true),
+            alias("Sasou Ayako", Some("ja_Latn"), "Artist name", true),
+            alias("Ayako Saso", Some("en"), "Artist name", true),
+            alias("Ayako Sasō", None, "Legal name", false),
+            alias("Ayaco", None, "Search hint", false),
+        ];
+        assert_eq!(latin_alias("佐宗綾子", "Saso, Ayako", &aliases).as_deref(), Some("Ayako Saso"));
+        // Without an English one, the Latin-script locale.
+        assert_eq!(latin_alias("佐宗綾子", "Saso, Ayako", &aliases[..2]).as_deref(), Some("Sasou Ayako"));
+        // A primary alias beats one that is not.
+        let mixed = vec![alias("Saso", Some("en"), "Artist name", false), alias("Sasou Ayako", Some("ja-Latn"), "Artist name", true)];
+        assert_eq!(latin_alias("佐宗綾子", "", &mixed).as_deref(), Some("Sasou Ayako"));
+        // Search hints and ended names never; then the sort name read in order.
+        let mut ended = alias("Old Name", Some("en"), "Artist name", true);
+        ended.ended = true;
+        let poor = vec![alias("Ayaco", None, "Search hint", false), ended];
+        assert_eq!(latin_alias("佐宗綾子", "Saso, Ayako", &poor).as_deref(), Some("Ayako Saso"));
+        assert_eq!(latin_alias("佐宗綾子", "佐宗綾子", &poor), None);
+        // MusicBrainz's own Latin name stands.
+        assert_eq!(latin_alias("YOASOBI", "YOASOBI", &aliases).as_deref(), Some("YOASOBI"));
+        assert_eq!(latin_alias("ザ・ビートルズ", "Beatles, The", &[]).as_deref(), Some("The Beatles"));
+    }
+
+    #[test]
+    fn an_artist_reads_its_type_aliases_and_wikidata_link() {
+        let json = r#"{"id": "0b2f0b5a-0000-4000-8000-000000000001", "name": "リコ", "sort-name": "Riko",
+            "type": "Character", "disambiguation": null,
+            "aliases": [{"name": "Riko", "sort-name": "Riko", "locale": "en", "type": "Artist name",
+                         "primary": null, "ended": false, "begin": null, "end": null}],
+            "relations": [{"type": "wikidata", "url": {"resource": "https://www.wikidata.org/wiki/Q1234567"}},
+                          {"type": "official homepage", "url": {"resource": "https://example.invalid/"}}]}"#;
+        let a: ArtistInfo = serde_json::from_str(json).unwrap();
+        assert!(a.is_character());
+        assert_eq!(a.wikidata().as_deref(), Some("Q1234567"));
+        assert_eq!(a.latin_name().as_deref(), Some("Riko"));
+        assert!(a.answers_to("リコ") && a.answers_to("riko") && !a.answers_to("Reg"));
+        assert_eq!(wikidata_id("https://www.wikidata.org/wiki/Q42/"), Some("Q42".into()));
+        assert_eq!(wikidata_id("https://www.wikidata.org/wiki/Property:P18"), None);
+    }
 }

@@ -27,6 +27,7 @@ pub mod betterlyrics;
 pub mod genius;
 pub mod text;
 pub mod ttml;
+pub mod wikidata;
 
 pub use acoustid::{AcoustId, AcoustIdRecording, AcoustIdResult};
 pub use config::MetadataConfig;
@@ -44,13 +45,14 @@ pub use matcher::{
     TrackMetadata, candidate_from_deezer, candidates_from_recording, candidates_from_release,
     match_candidates,
 };
-pub use musicbrainz::{ArtistTags, MusicBrainz, RecordingQuery};
+pub use musicbrainz::{ArtistInfo, ArtistTags, MusicBrainz, RecordingQuery};
 pub use odesli::{Odesli, OdesliPage};
 pub use pause::{Pauses, Verdict};
 pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
 pub use betterlyrics::BetterLyrics;
 pub use genius::Genius;
+pub use wikidata::{WebImages, Wikidata, WikidataArtist};
 pub use ttml::{TtmlLyrics, mark_ttml_own, parse_ttml, parse_ttml_plain, serialize_ttml, serialize_ttml_plain, ttml_is_own};
 
 /// Every client, built from one config and sharing one HTTP stack.
@@ -73,6 +75,10 @@ pub struct Metadata {
     pub listenbrainz: ListenBrainz,
     /// `None` without the user's Last.fm key.
     pub lastfm: Option<LastFm>,
+    /// Wikidata and Wikimedia Commons (an artist's Latin label and picture).
+    pub wikidata: Wikidata,
+    /// Pictures on the services' CDNs.
+    pub web_images: WebImages,
     /// Lyrics sources sitting out after refusals in a row (shared by the
     /// clones).
     pub lyrics_pauses: Pauses,
@@ -95,6 +101,8 @@ impl Metadata {
             genius: Genius::new(http.clone()),
             itunes: Itunes::new(http.clone()),
             listenbrainz: ListenBrainz::new(http.clone()).with_token(config.listenbrainz_token.as_deref()),
+            wikidata: Wikidata::new(http.clone()),
+            web_images: WebImages::new(http.clone()),
             lastfm: config.lastfm_key.as_deref().and_then(|k| LastFm::new(http, k)),
             lyrics_pauses: Pauses::new(),
         })

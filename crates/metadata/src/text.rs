@@ -283,6 +283,17 @@ pub fn album_key(raw: &str) -> String {
     title_key(raw).base
 }
 
+/// One of `theirs` is one of `ours` (album or track titles, compared by
+/// their keys at a similarity of 0.9; keys of one letter never): the proof
+/// that an artist found by name in a service is the library's.
+pub fn titles_overlap(ours: &[String], theirs: &[String]) -> bool {
+    let ours: Vec<String> = ours.iter().map(|t| album_key(t)).filter(|k| k.chars().count() > 1).collect();
+    theirs
+        .iter()
+        .map(|t| album_key(t))
+        .any(|t| t.chars().count() > 1 && ours.iter().any(|k| similarity(k, &t) >= 0.9))
+}
+
 /// Core normalization on already lowercased text: no brackets handling.
 fn fold_text(s: &str) -> String {
     let mut latin = String::with_capacity(s.len() + 8);
