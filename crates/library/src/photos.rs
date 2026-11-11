@@ -10,6 +10,10 @@ use crate::db::Library;
 use crate::error::Result;
 use crate::util::{get_id, now_ms};
 
+/// `artist_photo.source` of a lookup that found a photo it could not prove
+/// this artist's.
+const UNVERIFIED: &str = "unverified";
+
 impl Library {
     /// The stored photo path of an artist (`None` = unknown or looked up without luck).
     pub fn artist_photo(&self, artist: ArtistId) -> Result<Option<String>> {
@@ -36,6 +40,25 @@ impl Library {
         })
     }
 
+    /// The artist's photo is to be looked up: never tried, a miss older than
+    /// `retry_before`, or an unverified one older than `unverified_before`
+    /// (see [`Library::artists_needing_photo`]).
+    pub fn artist_photo_due(&self, artist: ArtistId, retry_before: UnixMs, unverified_before: UnixMs) -> Result<bool> {
+        self.read(|c| {
+            let row = c
+                .query_row(
+                    "SELECT path IS NULL AND photo_locked = 0, fetched_at, source = ?2 FROM artist_photo WHERE artist_id = ?1",
+                    params![artist.to_string(), UNVERIFIED],
+                    |r| Ok((r.get::<_, bool>(0)?, r.get::<_, UnixMs>(1)?, r.get::<_, bool>(2)?)),
+                )
+                .optional()?;
+            Ok(match row {
+                None => true,
+                Some((open, at, unverified)) => open && (at < retry_before || (unverified && at < unverified_before)),
+            })
+        })
+    }
+
     /// Every artist that has a photo.
     pub fn artist_photos(&self) -> Result<HashMap<ArtistId, String>> {
         self.read(|c| {
@@ -55,11 +78,46 @@ impl Library {
             tx.execute(
                 "INSERT INTO artist_photo(artist_id, path, fetched_at) VALUES (?1, ?2, ?3)
                  ON CONFLICT(artist_id) DO UPDATE SET path = excluded.path,
-                    fetched_at = excluded.fetched_at
+                    source = 'deezer', fetched_at = excluded.fetched_at
                  WHERE photo_locked = 0",
                 params![artist.to_string(), path, now_ms()],
             )?;
             Ok(())
+        })
+    }
+
+    /// Records "a photo was there but could not be proved this artist's":
+    /// not a miss for days, it is asked again by the next session
+    /// ([`Library::artists_needing_photo`]'s `unverified_before`).
+    pub fn set_artist_photo_unverified(&self, artist: ArtistId) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO artist_photo(artist_id, path, source, fetched_at) VALUES (?1, NULL, ?2, ?3)
+                 ON CONFLICT(artist_id) DO UPDATE SET path = NULL,
+                    source = excluded.source, fetched_at = excluded.fetched_at
+                 WHERE photo_locked = 0",
+                params![artist.to_string(), UNVERIFIED, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Forgets the photos of `artists` (their files are gone): they are
+    /// looked up again as if never tried. A photo the user locked stays.
+    pub fn forget_artist_photos(&self, artists: &[ArtistId]) -> Result<usize> {
+        if artists.is_empty() {
+            return Ok(0);
+        }
+        self.write(|tx| {
+            let mut n = 0;
+            for a in artists {
+                n += tx.execute(
+                    "UPDATE artist_photo SET path = NULL, source = 'deezer', fetched_at = 0
+                      WHERE artist_id = ?1 AND photo_locked = 0",
+                    [a.to_string()],
+                )?;
+            }
+            Ok(n)
         })
     }
 
@@ -131,25 +189,34 @@ impl Library {
         Ok(())
     }
 
-    /// Artists with a local track and no photo: never tried, or a miss older
-    /// than `retry_before` (unix ms). Never-tried first, most tracks first.
+    /// Artists with a local track or a library track (a stream one too) and
+    /// no photo: never tried, a miss older than `retry_before`, or an
+    /// unverified one older than `unverified_before` (unix ms). Never-tried
+    /// first, artists with files first, most tracks first.
     pub fn artists_needing_photo(
         &self,
         retry_before: UnixMs,
+        unverified_before: UnixMs,
         limit: u32,
     ) -> Result<Vec<(ArtistId, String)>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
                 "SELECT a.id, a.name FROM artist a LEFT JOIN artist_photo p ON p.artist_id = a.id
                   WHERE EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
-                                 WHERE ta.artist_id = a.id AND t.has_local = 1)
-                    AND (p.artist_id IS NULL OR (p.path IS NULL AND p.fetched_at < ?1))
-                  ORDER BY p.fetched_at IS NOT NULL, p.fetched_at,
+                                 WHERE ta.artist_id = a.id
+                                   AND (t.has_local = 1 OR (t.in_library = 1 AND t.deleted_at IS NULL)))
+                    AND (p.artist_id IS NULL
+                         OR (p.path IS NULL AND p.photo_locked = 0
+                             AND (p.fetched_at < ?1 OR (p.source = ?4 AND p.fetched_at < ?3))))
+                  ORDER BY p.fetched_at IS NOT NULL,
+                           NOT EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
+                                        WHERE ta.artist_id = a.id AND t.has_local = 1),
+                           p.fetched_at,
                            (SELECT COUNT(*) FROM track_artist ta WHERE ta.artist_id = a.id) DESC,
                            a.seq
                   LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![retry_before, limit], |r| {
+            let rows = stmt.query_map(params![retry_before, limit, unverified_before, UNVERIFIED], |r| {
                 Ok((get_id::<ArtistId>(r, 0)?, r.get::<_, String>(1)?))
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -184,7 +251,12 @@ mod tests {
         let with = artist_with_file(&lib, "Кино", true);
         let missed = artist_with_file(&lib, "Nobody", true);
         let fresh = artist_with_file(&lib, "Земфира", true);
-        let _streaming_only = artist_with_file(&lib, "Remote", false);
+        // In the library without a file (a liked stream song): asked after
+        // the artists with files.
+        let remote = artist_with_file(&lib, "Remote", false);
+        // A stream song outside the library: its artist is not asked.
+        let heard = nikgob_core::streaming::FakeService::youtube().tracks()[4].clone();
+        lib.upsert_stream_track(&heard).unwrap();
 
         lib.set_artist_photo(with.id, Some("artists/kino.jpg")).unwrap();
         lib.set_artist_photo(missed.id, None).unwrap();
@@ -199,12 +271,43 @@ mod tests {
 
         let week_ago = now_ms() - 7 * 86_400_000;
         let ids = |q: Vec<(ArtistId, String)>| q.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-        assert_eq!(ids(lib.artists_needing_photo(week_ago, 10).unwrap()), vec![fresh.id]);
+        assert_eq!(ids(lib.artists_needing_photo(week_ago, week_ago, 10).unwrap()), vec![fresh.id, remote.id]);
         // An old miss is retried after the untried ones.
         assert_eq!(
-            ids(lib.artists_needing_photo(now_ms() + 1000, 10).unwrap()),
-            vec![fresh.id, missed.id]
+            ids(lib.artists_needing_photo(now_ms() + 1000, week_ago, 10).unwrap()),
+            vec![fresh.id, remote.id, missed.id]
         );
+    }
+
+    #[test]
+    fn an_unverified_photo_is_asked_again_by_the_next_session() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = artist_with_file(&lib, "Aminé", true);
+        let session = now_ms() - 1000;
+        lib.set_artist_photo_unverified(a.id).unwrap();
+        let week_ago = now_ms() - 7 * 86_400_000;
+        // Not again in this session, nor as a miss of days.
+        assert!(lib.artists_needing_photo(week_ago, session, 10).unwrap().is_empty());
+        // The next session asks again.
+        assert_eq!(lib.artists_needing_photo(week_ago, now_ms() + 1000, 10).unwrap().len(), 1);
+        // A real miss after that waits its days, even for a new session.
+        lib.set_artist_photo(a.id, None).unwrap();
+        assert!(lib.artists_needing_photo(week_ago, now_ms() + 1000, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_photo_whose_file_is_gone_is_forgotten() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = artist_with_file(&lib, "Кино", true);
+        let b = artist_with_file(&lib, "Земфира", true);
+        lib.set_artist_photo(a.id, Some("gone.jpg")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        lib.set_custom_artist_photo(b.id, dir.path(), &[0xFF, 0xD8, 0xFF]).unwrap();
+        assert_eq!(lib.forget_artist_photos(&[a.id, b.id]).unwrap(), 1, "a locked photo stays");
+        assert_eq!(lib.artist_photo(a.id).unwrap(), None);
+        let week_ago = now_ms() - 7 * 86_400_000;
+        let due: Vec<ArtistId> = lib.artists_needing_photo(week_ago, week_ago, 10).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(due, vec![a.id]);
     }
 
     #[test]
@@ -221,13 +324,13 @@ mod tests {
         lib.set_artist_photo(a.id, Some("deezer.jpg")).unwrap();
         lib.set_artist_photo(a.id, None).unwrap();
         assert_eq!(lib.artist_photo(a.id).unwrap(), Some(path.display().to_string()));
-        assert!(lib.artists_needing_photo(now_ms() + 1000, 10).unwrap().is_empty());
+        assert!(lib.artists_needing_photo(now_ms() + 1000, now_ms() + 1000, 10).unwrap().is_empty());
 
         lib.clear_artist_photo(a.id).unwrap();
         assert!(!path.exists());
         assert!(!lib.artist_photo_locked(a.id).unwrap());
         assert_eq!(lib.artist_photo(a.id).unwrap(), None);
-        assert_eq!(lib.artists_needing_photo(now_ms() - 1000, 10).unwrap().len(), 1);
+        assert_eq!(lib.artists_needing_photo(now_ms() - 1000, now_ms() - 1000, 10).unwrap().len(), 1);
         lib.set_artist_photo(a.id, Some("deezer.jpg")).unwrap();
         assert_eq!(lib.artist_photo(a.id).unwrap().as_deref(), Some("deezer.jpg"));
     }

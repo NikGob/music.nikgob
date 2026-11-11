@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nikgob_core::model::ArtistId;
 use nikgob_library::{Library, StoredLyrics, TrackRow, now_ms};
-use nikgob_metadata::{Deezer, Lrclib, Lyrics, Metadata, MetadataError};
+use nikgob_metadata::{ArtistPicture, Deezer, Lrclib, Lyrics, Metadata, MetadataError};
 use nikgob_view as v;
 
 use crate::Worker;
@@ -209,8 +209,45 @@ pub(crate) enum PhotoOutcome {
     Saved(PathBuf),
     /// Deezer has no usable photo; recorded, retried much later.
     NotFound,
+    /// Deezer has same-named artists with photos, none proved this one;
+    /// recorded, asked again by the next session.
+    Unverified,
     /// No network or an unexpected answer; nothing recorded.
     Failed,
+}
+
+/// What the lookup of a photo brought.
+enum Fetched {
+    Image(Vec<u8>),
+    Missing,
+    Unverified,
+}
+
+/// When this session's first photo run started: an unverified photo
+/// recorded before it is asked again.
+fn session_start() -> i64 {
+    static START: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *START.get_or_init(now_ms)
+}
+
+/// Photos whose file is gone (a deleted «Artists» folder) are looked up
+/// again; not while the folder above theirs is missing too (a drive that
+/// is not there now). Returns how many.
+fn forget_gone_photos(lib: &Library) -> usize {
+    let gone: Vec<ArtistId> = lib
+        .artist_photos()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, p)| {
+            let p = Path::new(p);
+            p.is_absolute() && !p.exists() && p.parent().and_then(Path::parent).is_some_and(Path::exists)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    lib.forget_artist_photos(&gone).unwrap_or_else(|e| {
+        log::warn!("forgetting the photos whose files are gone: {e}");
+        0
+    })
 }
 
 fn looks_like_image(bytes: &[u8]) -> bool {
@@ -256,16 +293,25 @@ pub(crate) async fn fetch_artist_photo(
         if url.is_none() {
             let mut known: Vec<String> = tracks.iter().map(|t| t.title.clone()).collect();
             known.extend(tracks.iter().filter_map(|t| t.album.clone()));
-            url = deezer.verified_artist_picture(name, &known).await?;
+            match deezer.verified_artist_lookup(name, &known).await? {
+                ArtistPicture::Found(u) => url = Some(u),
+                ArtistPicture::Missing => {}
+                ArtistPicture::Unverified => return Ok(Fetched::Unverified),
+            }
         }
         let Some(url) = url else {
-            return Ok(None);
+            return Ok(Fetched::Missing);
         };
-        deezer.download_image(&url).await.map(Some)
+        deezer.download_image(&url).await.map(Fetched::Image)
     };
     let bytes = match tokio::time::timeout(Duration::from_secs(45), work).await {
-        Ok(Ok(Some(b))) if looks_like_image(&b) => b,
-        Ok(Ok(_) | Err(MetadataError::NotFound)) => {
+        Ok(Ok(Fetched::Image(b))) if looks_like_image(&b) => b,
+        // Not proved this artist's: not «Deezer has no photo».
+        Ok(Ok(Fetched::Unverified)) => {
+            let _ = lib.set_artist_photo_unverified(id);
+            return PhotoOutcome::Unverified;
+        }
+        Ok(Ok(Fetched::Image(_) | Fetched::Missing) | Err(MetadataError::NotFound)) => {
             let _ = lib.set_artist_photo(id, None);
             return PhotoOutcome::NotFound;
         }
@@ -292,20 +338,81 @@ pub(crate) async fn fetch_artist_photo(
 }
 
 /// Fetches photos for artists that have none (artists whose pages were opened
-/// first), calling `saved` for each new one.
+/// first), calling `saved` for each new one; an unverified one recorded
+/// before `unverified_before` is asked again, a photo whose file is gone
+/// too. Says in one log line what the run did.
 pub(crate) async fn run_photos(
     deezer: Deezer,
     lib: Library,
     dir: PathBuf,
+    unverified_before: i64,
     priority: Arc<Mutex<Vec<(ArtistId, String)>>>,
     pace: Pace,
     saved: impl Fn(ArtistId),
 ) {
     tokio::time::sleep(pace.start).await;
     crate::quiet::free().await;
+    let mut tally = PhotoTally {
+        gone: forget_gone_photos(&lib),
+        ..PhotoTally::default()
+    };
+    let queue = PhotoQueue {
+        priority: &priority,
+        unverified_before,
+        pace,
+    };
+    photo_batches(&deezer, &lib, &dir, &queue, &saved, &mut tally).await;
+    tally.log();
+}
+
+/// What one photo run did, for its log line.
+#[derive(Default)]
+struct PhotoTally {
+    saved: u32,
+    not_found: u32,
+    unverified: u32,
+    failed: u32,
+    /// Photos whose file was gone, looked up again.
+    gone: usize,
+}
+
+impl PhotoTally {
+    fn log(&self) {
+        if self.saved + self.not_found + self.unverified + self.failed == 0 && self.gone == 0 {
+            return;
+        }
+        let gone = if self.gone > 0 { format!(", {} files gone", self.gone) } else { String::new() };
+        log::info!(
+            "artist photos: {} saved, {} not found, {} unverified, {} failed{gone}",
+            self.saved,
+            self.not_found,
+            self.unverified,
+            self.failed
+        );
+    }
+}
+
+/// Which artists a photo run takes, in what order and at what pace.
+struct PhotoQueue<'a> {
+    /// Artists whose pages were opened: first.
+    priority: &'a Mutex<Vec<(ArtistId, String)>>,
+    unverified_before: i64,
+    pace: Pace,
+}
+
+/// [`run_photos`]' batches until nothing is due (or the network failed
+/// [`MAX_FAILURES`] times in a row).
+async fn photo_batches(
+    deezer: &Deezer,
+    lib: &Library,
+    dir: &Path,
+    q: &PhotoQueue<'_>,
+    saved: &impl Fn(ArtistId),
+    tally: &mut PhotoTally,
+) {
     let mut failures = 0;
     loop {
-        let batch = match lib.artists_needing_photo(now_ms() - PHOTO_RETRY_MS, BATCH) {
+        let batch = match lib.artists_needing_photo(now_ms() - PHOTO_RETRY_MS, q.unverified_before, BATCH) {
             Ok(b) => b,
             Err(e) => {
                 log::warn!("photo queue: {e}");
@@ -315,25 +422,34 @@ pub(crate) async fn run_photos(
         let mut queue = batch.into_iter();
         let mut did_any = false;
         loop {
-            let urgent = priority.lock().ok().and_then(|mut p| p.pop());
+            let urgent = q.priority.lock().ok().and_then(|mut p| p.pop());
             let Some((id, name)) = urgent.or_else(|| queue.next()) else {
                 break;
             };
             did_any = true;
-            match fetch_artist_photo(&deezer, &lib, id, &name, &dir).await {
+            match fetch_artist_photo(deezer, lib, id, &name, dir).await {
                 PhotoOutcome::Saved(_) => {
                     failures = 0;
+                    tally.saved += 1;
                     saved(id);
                 }
-                PhotoOutcome::NotFound => failures = 0,
+                PhotoOutcome::NotFound => {
+                    failures = 0;
+                    tally.not_found += 1;
+                }
+                PhotoOutcome::Unverified => {
+                    failures = 0;
+                    tally.unverified += 1;
+                }
                 PhotoOutcome::Failed => {
                     failures += 1;
+                    tally.failed += 1;
                     if failures >= MAX_FAILURES {
                         return;
                     }
                 }
             }
-            tokio::time::sleep(pace.between).await;
+            tokio::time::sleep(q.pace.between).await;
             // Unattended: waits while a game is in front.
             crate::quiet::free().await;
         }
@@ -374,12 +490,9 @@ impl Worker {
     /// was just opened) goes ahead of the queue.
     pub(crate) fn kick_photos(&mut self, first: Option<ArtistId>) {
         let lib = self.lib.clone();
+        let session = session_start();
         let first = first.and_then(|id| {
-            let due = match lib.artist_photo_lookup(id).ok()? {
-                None => true,
-                Some((Some(_), _)) => false,
-                Some((None, at)) => at < now_ms() - PHOTO_RETRY_MS,
-            };
+            let due = lib.artist_photo_due(id, now_ms() - PHOTO_RETRY_MS, session).ok()?;
             let artist = lib.get_artist(id).ok().flatten().filter(|_| due)?;
             Some((id, artist.name))
         });
@@ -408,7 +521,7 @@ impl Worker {
         let tx = svc.internal();
         svc.spawn(async move {
             let saved_tx = tx.clone();
-            run_photos(meta.deezer, lib, dir, priority, Pace::PHOTOS, move |id| {
+            run_photos(meta.deezer, lib, dir, session, priority, Pace::PHOTOS, move |id| {
                 let _ = saved_tx.send(Internal::Enrich(Event::ArtistPhoto(id)));
             })
             .await;
@@ -667,6 +780,7 @@ mod tests {
             deezer.clone(),
             lib.clone(),
             dir.path().to_owned(),
+            now_ms(),
             Arc::default(),
             NO_WAIT,
             move |_| {
@@ -683,10 +797,16 @@ mod tests {
         assert!(lib.artist_photo_lookup(nobody.id).unwrap().is_some(), "miss is recorded");
 
         // A second pass has nothing to do (the mock expects a single download).
-        run_photos(deezer, lib, dir.path().to_owned(), Arc::default(), NO_WAIT, |_| {
+        run_photos(deezer, lib.clone(), dir.path().to_owned(), now_ms() + 1, Arc::default(), NO_WAIT, |_| {
             panic!("no new photos expected")
         })
         .await;
+
+        // A photo whose file is gone is looked up again.
+        std::fs::remove_file(&stored).unwrap();
+        assert_eq!(forget_gone_photos(&lib), 1);
+        assert_eq!(lib.artist_photo(kino.id).unwrap(), None);
+        assert!(lib.artist_photo_due(kino.id, now_ms() - PHOTO_RETRY_MS, 0).unwrap());
     }
 
     #[tokio::test]
@@ -799,8 +919,12 @@ mod tests {
         let dir2 = tempfile::tempdir().unwrap();
         let (fresh, _) = library_track(&lib, "Another Larkin", "Some Local Rip 2");
         let out = fetch_artist_photo(&deezer, &lib, fresh.id, "Christopher Larkin", dir2.path()).await;
-        assert_eq!(out, PhotoOutcome::NotFound);
+        // Not «Deezer has no photo»: asked again by the next session.
+        assert_eq!(out, PhotoOutcome::Unverified);
         assert_eq!(lib.artist_photo(fresh.id).unwrap(), None);
+        let retry = now_ms() - PHOTO_RETRY_MS;
+        assert!(!lib.artist_photo_due(fresh.id, retry, now_ms() - 60_000).unwrap(), "not again this session");
+        assert!(lib.artist_photo_due(fresh.id, retry, now_ms() + 1).unwrap(), "again the next one");
     }
 
     #[tokio::test]

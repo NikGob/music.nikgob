@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use nikgob_metadata::MetadataError;
-use nikgob_metadata::deezer::Deezer;
+use nikgob_metadata::deezer::{ArtistPicture, Deezer};
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -251,6 +251,18 @@ async fn verified_picture_is_none_when_no_candidate_overlaps() {
         deezer.verified_artist_picture("Кино", &[]).await.unwrap(),
         None
     );
+    // Same-named artists with photos, none proved: not «no photo».
+    assert_eq!(
+        deezer.verified_artist_lookup("Кино", &["Группа крови".to_owned()]).await.unwrap(),
+        ArtistPicture::Unverified
+    );
+    assert_eq!(
+        deezer
+            .verified_artist_lookup("Совсем Другой Исполнитель", &["Группа крови".to_owned()])
+            .await
+            .unwrap(),
+        ArtistPicture::Missing
+    );
 }
 
 #[tokio::test]
@@ -297,6 +309,45 @@ async fn picture_by_track_uses_the_matched_tracks_artist_id() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn picture_by_track_asks_the_plain_search_when_the_structured_one_finds_nothing() {
+    // Deezer's field search misses a song its plain search has.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/track"))
+        .and(query_param("q", r#"artist:"Aminé" track:"Invincible""#))
+        .respond_with(json_body(r#"{"data": [], "total": 0}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/search/track"))
+        .and(query_param("q", "Aminé Invincible"))
+        .respond_with(json_body(
+            r#"{"data": [
+              {"id": 1, "title": "Invincible", "duration": 300, "artist": {"id": 8, "name": "Aminé"}},
+              {"id": 2, "title": "Invincible", "duration": 196, "artist": {"id": 9, "name": "Aminé"}}
+            ]}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/artist/9"))
+        .respond_with(json_body(
+            r#"{"id": 9, "name": "Aminé", "picture_xl": "https://cdn-images.dzcdn.net/images/artist/amine/1000x1000-000000-80-0-0.jpg"}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let url = client(&server)
+        .artist_picture_by_track("Aminé", "Invincible", Some(Duration::from_secs(196)))
+        .await
+        .unwrap()
+        .expect("photo");
+    assert!(url.contains("/artist/amine/"), "{url}");
 }
 
 #[tokio::test]
