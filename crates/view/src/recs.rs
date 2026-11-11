@@ -9,7 +9,7 @@ use crate::{ArtistId, Cover, RemoteId, TrackId};
 
 /// The six moods of «Под настроение» (the engine's own enum stays in the
 /// runtime; this is its name in the view).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Mood {
     /// «Спокойное».
     Calm,
@@ -42,7 +42,7 @@ impl Mood {
 }
 
 /// Which mix a card plays ([`crate::Command::PlayMix`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MixId {
     /// «Твой микс»: the hero, the same all day (until «Обновить»).
     Daily,
@@ -136,7 +136,7 @@ impl WorldMix {
 }
 
 /// A mix of «Миксы для тебя».
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LaneCard {
     pub key: MixKey,
     /// «Русские песни», «Всё вперемешку», «Спокойное», «Фон».
@@ -178,7 +178,7 @@ impl LaneCard {
 }
 
 /// A taste profile «Смешать с…» offers: its key and its name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlendProfile {
     pub key: u32,
     pub title: String,
@@ -187,7 +187,7 @@ pub struct BlendProfile {
 /// The kinds of the bento's smaller tiles (docs/stage4.md §12.9), in four
 /// groups: memory, artists, sound, collection. A day shows «На повторе» and
 /// a few others; the kicker and the title come with the card.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum TileKind {
     /// «На повторе»: the most completed of the last 30 days.
     OnRepeat,
@@ -292,7 +292,7 @@ impl TileKind {
 }
 
 /// One mix card of the home page.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MixCard {
     pub id: MixId,
     /// «Твой микс», «Спокойное», «mzlff, MORGENSHTERN и другие».

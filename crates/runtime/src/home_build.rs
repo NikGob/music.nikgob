@@ -21,10 +21,15 @@
 //!   dislike, a play or a library edit moves the generation on too
 //!   ([`Worker::home_input_changed`]): a page built of older inputs is
 //!   shown, then built again, unless a newer one is on its way already.
+//! * **The last page at the start.** The page shown is kept beside the
+//!   prefs (`home.json`, at most every [`KEEP_EVERY`] and when the app
+//!   closes, written on the builder's thread); the next start shows it at
+//!   once while its own first page is built.
 //!
 //! [`Command::LoadHome`]: nikgob_view::Command::LoadHome
 
 use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -38,6 +43,12 @@ use crate::recs::{DiscoverInput, HomeParts, RecsFill};
 /// A build of the whole page this long is logged with its parts (shorter
 /// ones in the debug log).
 const SLOW_BUILD: Duration = Duration::from_millis(1000);
+/// The page shown is kept for the next start at most this often.
+const KEEP_EVERY: Duration = Duration::from_secs(20);
+/// The kept page's format: one of another is not read.
+const KEPT_VERSION: u32 = 1;
+/// The kept page's file, beside the prefs.
+const KEPT_FILE: &str = "home.json";
 
 /// What a build of the page is asked for, gathered on the worker.
 pub(crate) struct Job {
@@ -48,6 +59,9 @@ pub(crate) struct Job {
     /// The whole page; else only the recommendations' parts on the page as
     /// it is.
     full: bool,
+    /// The recommendations were built when it was asked (before the run's
+    /// first build the page keeps the mixes it shows: the last run's).
+    mixes: bool,
     visit: Visit,
     parts: HomeParts,
     discover: DiscoverInput,
@@ -57,6 +71,51 @@ enum ToBuilder {
     Job(Box<Job>),
     /// Something to let go of off the loop ([`Worker::drop_off_loop`]).
     Drop(Box<dyn Any + Send>),
+    /// The page to keep for the next start, and its file.
+    Keep(Box<v::HomeView>, PathBuf),
+}
+
+/// The kept page as written…
+#[derive(serde::Serialize)]
+struct KeptRef<'a> {
+    version: u32,
+    page: &'a v::HomeView,
+}
+
+/// …and as read.
+#[derive(serde::Deserialize)]
+struct Kept {
+    version: u32,
+    page: v::HomeView,
+}
+
+/// The page the last run kept in `path`, if it reads.
+fn read_kept(path: &Path) -> Option<v::HomeView> {
+    let bytes = std::fs::read(path).ok()?;
+    match serde_json::from_slice::<Kept>(&bytes) {
+        Ok(k) if k.version == KEPT_VERSION => Some(k.page),
+        Ok(_) => None,
+        Err(e) => {
+            log::debug!("home: the kept page does not read: {e}");
+            None
+        }
+    }
+}
+
+/// Keeps `page` in `path` (written aside and renamed: never half a file).
+fn write_kept(page: &v::HomeView, path: &Path) {
+    let json = match serde_json::to_vec(&KeptRef { version: KEPT_VERSION, page }) {
+        Ok(j) => j,
+        Err(e) => {
+            log::warn!("home: the page cannot be kept: {e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path)) {
+        log::warn!("home: the page cannot be kept: {e}");
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// A finished build.
@@ -64,6 +123,7 @@ pub(crate) struct Done {
     seq: u64,
     gen: u64,
     full: bool,
+    mixes: bool,
     /// `None` when the build failed (logged).
     page: Option<Page>,
     /// The discoveries on it ([`Worker::discover_shown`]).
@@ -93,11 +153,17 @@ pub(crate) struct HomeBuild {
     /// The changes of the shown page made while builds were on their way,
     /// each with the generation it came at.
     patches: Vec<(u64, Patch)>,
+    /// Where the page is kept for the next start (`None`: a run that keeps
+    /// nothing, a test's), when it was last, and whether a newer one waits.
+    keep: Option<PathBuf>,
+    kept_at: Option<Instant>,
+    keep_due: bool,
 }
 
 impl HomeBuild {
-    /// Starts the builder's thread with a fork of the worker's resolver.
-    pub(crate) fn start(res: &Resolver) -> Self {
+    /// Starts the builder's thread with a fork of the worker's resolver;
+    /// the page is kept beside `prefs` (the prefs' file) when there is one.
+    pub(crate) fn start(res: &Resolver, prefs: Option<&Path>) -> Self {
         let (jobs, inbox) = crossbeam_channel::unbounded::<ToBuilder>();
         let (out, done) = crossbeam_channel::unbounded::<Done>();
         let fork = res.fork();
@@ -109,7 +175,18 @@ impl HomeBuild {
                 Some(res.fork())
             }
         };
-        Self { jobs, done, here, asked: 0, came: 0, gen: 0, patches: Vec::new() }
+        Self {
+            jobs,
+            done,
+            here,
+            asked: 0,
+            came: 0,
+            gen: 0,
+            patches: Vec::new(),
+            keep: prefs.map(|p| p.with_file_name(KEPT_FILE)),
+            kept_at: None,
+            keep_due: false,
+        }
     }
 
     /// A page is on its way.
@@ -127,10 +204,11 @@ fn run(inbox: &Receiver<ToBuilder>, out: &Sender<Done>, mut res: Resolver) {
             take(more, &mut job);
         }
         let Some(job) = job else { continue };
-        let (seq, gen, full) = (job.seq, job.gen, job.full);
-        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&mut res, *job))).unwrap_or_else(|_| {
+        let job = *job;
+        let (seq, gen, full, mixes) = (job.seq, job.gen, job.full, job.mixes);
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(&mut res, job))).unwrap_or_else(|_| {
             log::error!("home: the build of page {seq} failed");
-            Done { seq, gen, full, page: None, shown: Vec::new() }
+            Done { seq, gen, full, mixes, page: None, shown: Vec::new() }
         });
         if out.send(done).is_err() {
             return;
@@ -143,6 +221,7 @@ fn run(inbox: &Receiver<ToBuilder>, out: &Sender<Done>, mut res: Resolver) {
 fn take(m: ToBuilder, job: &mut Option<Box<Job>>) {
     match m {
         ToBuilder::Drop(garbage) => drop(garbage),
+        ToBuilder::Keep(page, path) => write_kept(&page, &path),
         ToBuilder::Job(mut next) => {
             next.full |= job.as_ref().is_some_and(|j| j.full);
             *job = Some(next);
@@ -154,7 +233,7 @@ fn take(m: ToBuilder, job: &mut Option<Box<Job>>) {
 /// whole page, the recommendations' parts resolved.
 fn build(res: &mut Resolver, job: Job) -> Done {
     let started = Instant::now();
-    let Job { seq, gen, full, visit, parts, discover } = job;
+    let Job { seq, gen, full, mixes, visit, parts, discover } = job;
     let lib = res.library().clone();
     let (rows, albums, shown) = discover.rows(&lib);
     let parts = parts.with_discover(rows, albums);
@@ -183,7 +262,24 @@ fn build(res: &mut Resolver, job: Job) -> Done {
         log::debug!("home: the mixes of page {seq} built in {} ms", started.elapsed().as_millis());
         Page::Parts(fill)
     };
-    Done { seq, gen, full, page: Some(page), shown }
+    Done { seq, gen, full, mixes, page: Some(page), shown }
+}
+
+/// Before the run's first recommendations: the mixes `shown` has (the last
+/// run's, kept) stay on the page built without them, `into`, until the
+/// build brings this run's.
+fn carry_mixes(shown: &mut v::HomeView, into: &mut v::HomeView) {
+    if shown.hero.is_none() && shown.lanes.is_empty() && shown.tiles.is_empty() {
+        return;
+    }
+    into.hero = shown.hero.take();
+    into.daylist = shown.daylist.take();
+    into.tiles = std::mem::take(&mut shown.tiles);
+    into.moods = std::mem::take(&mut shown.moods);
+    into.style_mixes = std::mem::take(&mut shown.style_mixes);
+    into.lanes = std::mem::take(&mut shown.lanes);
+    into.blend_profiles = std::mem::take(&mut shown.blend_profiles);
+    into.mix = std::mem::take(&mut shown.mix);
 }
 
 /// Makes again on `home` every change of `patches` that came after `gen`,
@@ -209,6 +305,7 @@ impl Worker {
             seq: self.home_build.asked + 1,
             gen: self.home_build.gen,
             full,
+            mixes: self.snapshot().is_some(),
             visit: self.visit(),
             parts: self.recs_home_parts(),
             discover: self.discover_input(),
@@ -222,7 +319,7 @@ impl Worker {
                     self.home_build.here = Some(self.res.fork());
                     match e.0 {
                         ToBuilder::Job(job) => *job,
-                        ToBuilder::Drop(_) => return,
+                        _ => return,
                     }
                 }
             }
@@ -251,7 +348,13 @@ impl Worker {
             Some(Page::Whole(mut view)) => {
                 replay(&patches, done.gen, &mut view);
                 let stages: Vec<_> = view.worlds.iter().filter_map(|w| w.release).collect();
-                self.publish(|s| s.home = view);
+                let mixes = done.mixes;
+                self.publish(|s| {
+                    if !mixes {
+                        carry_mixes(&mut s.home, &mut view);
+                    }
+                    s.home = view;
+                });
                 self.turn.lap("swap");
                 self.kick_hd_covers(stages);
                 self.turn.lap("hd covers");
@@ -273,6 +376,62 @@ impl Worker {
         if stale && !waiting {
             log::debug!("home: page {} was built of older inputs, building it again", done.seq);
             self.ask_home(done.full);
+        } else if !waiting {
+            self.keep_home(false);
+        }
+    }
+
+    /// At the start: the page the last run kept, shown while this run's
+    /// first page is built.
+    pub(crate) fn show_kept_home(&mut self) {
+        let Some(path) = self.home_build.keep.clone() else { return };
+        let Some(mut page) = read_kept(&path) else { return };
+        page.loading = false;
+        page.greeting_hour = jiff::Zoned::now().hour() as u8;
+        log::debug!("home: the last run's page is shown while this run's is built");
+        self.publish(|s| {
+            if s.home.loading {
+                s.home = page;
+            }
+        });
+    }
+
+    /// Keeps the page shown for the next start (on the builder's thread):
+    /// at most every [`KEEP_EVERY`], else once the time is over; `now`
+    /// writes it here at once (the app closes).
+    pub(crate) fn keep_home(&mut self, now: bool) {
+        let hb = &mut self.home_build;
+        let Some(path) = hb.keep.clone() else { return };
+        if !now && hb.kept_at.is_some_and(|t| t.elapsed() < KEEP_EVERY) {
+            hb.keep_due = true;
+            return;
+        }
+        if now && hb.kept_at.is_none() && !hb.keep_due {
+            // Nothing of this run was built: the kept page stays as it is.
+            return;
+        }
+        hb.kept_at = Some(Instant::now());
+        hb.keep_due = false;
+        let page = self.state.read().home.clone();
+        if page.loading {
+            return;
+        }
+        if now || self.home_build.here.is_some() {
+            write_kept(&page, &path);
+            return;
+        }
+        if let Err(e) = self.home_build.jobs.send(ToBuilder::Keep(Box::new(page), path))
+            && let ToBuilder::Keep(page, path) = e.0
+        {
+            write_kept(&page, &path);
+        }
+    }
+
+    /// A newer page waits to be kept and its time came (the tick).
+    pub(crate) fn keep_home_due(&mut self) {
+        let hb = &self.home_build;
+        if hb.keep_due && !hb.busy() && hb.kept_at.is_none_or(|t| t.elapsed() >= KEEP_EVERY) {
+            self.keep_home(false);
         }
     }
 
@@ -313,6 +472,7 @@ mod tests {
             seq,
             gen: seq,
             full,
+            mixes: true,
             visit: Visit::default(),
             parts: HomeParts::of(None, Vec::new(), Vec::new(), false, false),
             discover: DiscoverInput::default(),
@@ -334,6 +494,22 @@ mod tests {
         assert_eq!(waiting.map(|j| (j.seq, j.full)), Some((4, false)));
     }
 
+    fn lane(key: v::MixKey) -> v::LaneCard {
+        v::LaneCard {
+            key,
+            title: "Любимые".into(),
+            short_titles: Vec::new(),
+            artists: vec!["Кино".into()],
+            new_artists: Vec::new(),
+            covers: vec![v::Cover::web("https://fake.invalid/a.jpg")],
+            new_cover: None,
+            tracks: Vec::new(),
+            blend_base: Some(1),
+            queue: None,
+            why: None,
+        }
+    }
+
     #[test]
     fn a_page_of_older_inputs_gets_the_changes_made_since_in_their_order() {
         let key = v::MixKey::OnRepeat;
@@ -341,28 +517,39 @@ mod tests {
         patches.push((2, Box::new(|h: &mut v::HomeView| h.history = true)));
         patches.push((3, Box::new(move |h: &mut v::HomeView| h.lanes.retain(|l| l.key != key))));
         patches.push((4, Box::new(|h: &mut v::HomeView| h.history = false)));
-        let lane = v::LaneCard {
-            key,
-            title: String::new(),
-            short_titles: Vec::new(),
-            artists: Vec::new(),
-            new_artists: Vec::new(),
-            covers: Vec::new(),
-            new_cover: None,
-            tracks: Vec::new(),
-            blend_base: None,
-            queue: None,
-            why: None,
-        };
         // Built after the first change: the later two are made again.
-        let mut home = v::HomeView { lanes: vec![lane.clone()], ..Default::default() };
+        let mut home = v::HomeView { lanes: vec![lane(key)], ..Default::default() };
         replay(&patches, 2, &mut home);
         assert!(home.lanes.is_empty());
         assert!(!home.history, "the last change wins");
         // Built after all of them: nothing to make again.
-        let mut home = v::HomeView { lanes: vec![lane], history: true, ..Default::default() };
+        let mut home = v::HomeView { lanes: vec![lane(key)], history: true, ..Default::default() };
         replay(&patches, 4, &mut home);
         assert_eq!(home.lanes.len(), 1);
         assert!(home.history);
+    }
+
+    #[test]
+    fn the_kept_page_reads_back_and_one_of_another_format_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(KEPT_FILE);
+        let page = v::HomeView { greeting_hour: 7, history: true, lanes: vec![lane(v::MixKey::Liked)], ..Default::default() };
+        write_kept(&page, &path);
+        assert_eq!(read_kept(&path), Some(page));
+        std::fs::write(&path, br#"{"version":0,"page":{}}"#).unwrap();
+        assert_eq!(read_kept(&path), None);
+        assert_eq!(read_kept(&dir.path().join("none.json")), None);
+    }
+
+    #[test]
+    fn a_page_built_before_the_first_mixes_keeps_the_ones_shown() {
+        let mut shown = v::HomeView { lanes: vec![lane(v::MixKey::Liked)], ..Default::default() };
+        let mut built = v::HomeView { greeting_hour: 9, ..Default::default() };
+        carry_mixes(&mut shown, &mut built);
+        assert_eq!((built.lanes.len(), built.greeting_hour), (1, 9));
+        // Nothing of the kind shown: the page keeps what it was built with.
+        let mut built = v::HomeView { lanes: vec![lane(v::MixKey::Everything)], ..Default::default() };
+        carry_mixes(&mut v::HomeView::default(), &mut built);
+        assert_eq!(built.lanes.len(), 1);
     }
 }

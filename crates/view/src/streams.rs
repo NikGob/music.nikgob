@@ -64,7 +64,7 @@ pub struct AccountView {
 // ---------------------------------------------------------------- rows
 
 /// A track of a service: a search hit, an album or playlist row.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StreamTrackRow {
     pub remote: RemoteId,
     pub title: String,
@@ -105,7 +105,7 @@ impl StreamTrackRow {
 }
 
 /// An album of a service (search hit, discography, artist page).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StreamAlbumCard {
     pub remote: RemoteId,
     pub title: String,
@@ -138,7 +138,7 @@ impl StreamAlbumCard {
 ///   track is in it while liked or in a playlist): with no file at all the
 ///   album is "в библиотеке" on a service's card, "стрим" on a library card;
 /// * `total` — the larger of the album's track count and the tracks known.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AlbumHave {
     pub local: u32,
     pub in_library: u32,

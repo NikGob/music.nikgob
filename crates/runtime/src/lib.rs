@@ -736,7 +736,7 @@ impl Worker {
             std::fs::metadata(nikgob_sources::config::beside(p)).and_then(|m| m.modified()).ok()
         });
         let res = Resolver::new(config.library.clone(), config.library_dir);
-        let home_build = home_build::HomeBuild::start(&res);
+        let home_build = home_build::HomeBuild::start(&res, config.prefs_path.as_deref());
         let (later_tx, later_rx) = crossbeam_channel::unbounded();
         let library_search = library_search::LibrarySearch::start(&res, later_tx.clone());
         Self {
@@ -825,8 +825,10 @@ impl Worker {
         let fast = tick(Duration::from_secs(1));
         let homes = self.home_build.done.clone();
         let later = self.later_rx.clone();
-        // The home page is built while the rest below starts (the command
-        // the start sent builds it again once the loop runs).
+        // The last run's home page at once; this run's is built while the
+        // rest below starts (the command the start sent builds it again
+        // once the loop runs).
+        self.show_kept_home();
         self.load_home();
         // Once each, after a backup: doubles of a song, an artist or an
         // album become one, and every album has a line per place it counts.
@@ -929,6 +931,7 @@ impl Worker {
                     self.maybe_export(false);
                     self.turn.lap("export");
                     self.save_session();
+                    self.keep_home_due();
                     self.turn.lap("session");
                     self.stream_tick();
                     self.turn.lap("streams");
@@ -944,6 +947,7 @@ impl Worker {
         }
         self.save_session();
         self.recs_flush_weights(true);
+        self.keep_home(true);
         self.maybe_export(true);
         self.playback.stop();
         self.shutdown_torrents();
