@@ -49,28 +49,31 @@ struct Stale {
 }
 
 /// What playing a file needs of its tags, read once with them: its track
-/// gain (R128 or ReplayGain, dB; 0 without one) and its channels.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// gain (R128 or ReplayGain, dB; 0 without one), its channels and the tags
+/// themselves without the cover picture (the info panel and the embedded
+/// lyrics read them when it starts).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FileFacts {
     pub gain_db: f32,
     pub channels: Option<u8>,
+    pub tags: Option<Arc<nikgob_import::tags::TagSet>>,
 }
 
 /// [`FileFacts`] kept this many files at most (then forgotten at once).
-const FACTS_KEPT: usize = 512;
+const FACTS_KEPT: usize = 256;
 
 /// The [`FileFacts`] of the files played lately, each with the file's
 /// modification time then (a file written since is read again). A start
 /// reads its file's tags here at most once: the gain for the engine, the
-/// channels for «Источник и качество»; the next track's are read ahead off
-/// the loop.
+/// channels for «Источник и качество», the tags for the info panel and the
+/// lyrics; the next track's are read ahead off the loop.
 #[derive(Clone, Default)]
 pub(crate) struct FactsCache(Arc<parking_lot::Mutex<HashMap<PathBuf, (Option<std::time::SystemTime>, FileFacts)>>>);
 
 impl FactsCache {
     /// The facts of `path` if they are kept and the file is as it was.
     pub(crate) fn get(&self, path: &Path) -> Option<FileFacts> {
-        let (at, facts) = self.0.lock().get(path).copied()?;
+        let (at, facts) = self.0.lock().get(path).cloned()?;
         (at == modified(path)).then_some(facts)
     }
 
@@ -85,8 +88,13 @@ impl FactsCache {
         if kept.len() >= FACTS_KEPT {
             kept.clear();
         }
-        kept.insert(path.to_owned(), (at, facts));
+        kept.insert(path.to_owned(), (at, facts.clone()));
         facts
+    }
+
+    /// The tags of `path` (without the cover picture): kept, or read now.
+    pub(crate) fn tags(&self, path: &Path) -> Option<nikgob_import::tags::TagSet> {
+        self.of(path).tags.map(|t| (*t).clone())
     }
 }
 
@@ -98,9 +106,11 @@ fn modified(path: &Path) -> Option<std::time::SystemTime> {
 /// read). The gain is normalized to −18 LUFS (the ReplayGain 2.0
 /// reference; R128 gains are relative to −23 LUFS).
 fn read_facts(path: &Path) -> FileFacts {
-    let Ok((tags, info)) = nikgob_import::tags::read_tags(path) else {
+    let Ok((mut tags, info)) = nikgob_import::tags::read_tags(path) else {
         return FileFacts::default();
     };
+    // The picture is large and nobody here wants it.
+    tags.cover = None;
     FileFacts {
         gain_db: tags
             .r128_track_gain
@@ -108,6 +118,7 @@ fn read_facts(path: &Path) -> FileFacts {
             .or(tags.replaygain_track_gain_db)
             .unwrap_or(0.0),
         channels: info.channels,
+        tags: Some(Arc::new(tags)),
     }
 }
 

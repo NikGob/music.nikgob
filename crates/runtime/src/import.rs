@@ -1430,10 +1430,8 @@ impl Worker {
             .flatten()
             .filter(|s| s.kind.is_local());
         let path = src.as_ref().map(|s| self.res.path(&s.locator));
-        let tags = path
-            .as_deref()
-            .and_then(|p| nikgob_import::tags::read_tags(p).ok())
-            .map(|(t, _)| t);
+        // Read when the track started (or ahead of it, off the loop).
+        let tags = path.as_deref().and_then(|p| self.res.facts().tags(p));
 
         // Info tab: what the file says beyond the basics.
         if let Some(t) = &tags {

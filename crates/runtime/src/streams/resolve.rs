@@ -691,7 +691,8 @@ impl Worker {
             if Some(e.track) == current {
                 continue;
             }
-            if self.request(e).is_some() {
+            // Playable as it is (its source only: no file is read here).
+            if self.pick_source(e, &[]).is_some() {
                 continue;
             }
             let ttl = self.streaming.schedule.miss_ttl;
