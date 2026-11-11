@@ -37,6 +37,7 @@ pub mod daylist;
 pub mod discover;
 pub mod dislike;
 pub mod embedding;
+pub mod eval;
 pub mod explain;
 pub mod graph;
 pub mod index;

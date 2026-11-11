@@ -1990,6 +1990,14 @@ impl ModelPreview {
         Ok(Self { snap, history, graph })
     }
 
+    /// What the snapshot was built of, for the offline evaluation
+    /// ([`nikgob_recs::eval`]): the catalog, its sound and song types, the
+    /// history and the graph.
+    pub fn dataset(&self, name: &str) -> nikgob_recs::eval::Dataset {
+        let graph = (!self.graph.is_empty()).then_some(&self.graph);
+        nikgob_recs::eval::Dataset::of(name, &self.snap.catalog, &self.snap.index, &self.snap.types, &self.history, graph)
+    }
+
     /// The edges of tracks and of artists of the graph of similar music in
     /// the model.
     pub fn graph_size(&self) -> (usize, usize) {

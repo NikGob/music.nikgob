@@ -148,3 +148,22 @@ fn the_model_of_a_real_library() {
         println!("distance to the skipped: the rest of the first six {:.2}, after the skips {:.2}", near(&first[2..]), near(&after));
     }
 }
+
+/// What a copy of a real library is built of, written for the offline
+/// evaluation of `nikgob_recs::eval` (its `dataset_report`):
+/// `NIKGOB_REAL_LIBRARY=path/to/library.sqlite NIKGOB_RECS_DATASET=out.json
+/// cargo test -p nikgob-runtime --test real_replay -- --ignored dataset`.
+#[test]
+#[ignore = "needs NIKGOB_REAL_LIBRARY and NIKGOB_RECS_DATASET"]
+fn the_dataset_of_a_real_library() {
+    let (Some(src), Some(out)) = (std::env::var_os("NIKGOB_REAL_LIBRARY"), std::env::var_os("NIKGOB_RECS_DATASET")) else {
+        eprintln!("NIKGOB_REAL_LIBRARY or NIKGOB_RECS_DATASET is not set");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let lib = copy_of(&src, dir.path());
+    let preview = ModelPreview::of(&lib).unwrap();
+    let d = preview.dataset("real library (copy)");
+    println!("{} tracks, {} vectors, {} events, {} graph edges", d.tracks.len(), d.vectors.len(), d.events.len(), d.graph_tracks.len() + d.graph_artists.len());
+    std::fs::write(out, serde_json::to_vec(&d).unwrap()).unwrap();
+}

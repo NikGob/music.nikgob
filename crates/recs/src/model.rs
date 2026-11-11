@@ -18,7 +18,15 @@
 //!   (`w ← w + η(f(target) − E_P[f]) − ηλ(w − w_prior)`, the expectation
 //!   over the 100 best candidates), from the hand weights [`HAND`], the
 //!   step halved for the first [`FULL_STEP_AFTER`] starts. Starts the app
-//!   chose never teach it (the model would learn its own picks).
+//!   chose never teach it (the model would learn its own picks). A build
+//!   learning the weights anew steps on the latest [`TEACH_LAST`] starts
+//!   only (a history of 135 000 events took over two minutes; the oldest
+//!   steps fade under the later ones anyway). Beside the album, the world,
+//!   the sound and the pairs, it sees what was listened together with the
+//!   session's tracks in the sessions before ([`F_SESS_CO`]), the track
+//!   playing now again ([`F_IS_PREV`]: some play one song on repeat) and
+//!   another album's first track ([`F_ALBUM_FIRST`]: an album after an
+//!   album), each weighed by what the user's own choices teach.
 //! * [`SkipModel`]: online logistic regression of an early skip on
 //!   [`SKIP_FEATURES`], a step on every start that completed or was skipped
 //!   early, whoever chose it.
@@ -71,7 +79,7 @@ use crate::taste::{
 
 /// Bumped when a feature changes meaning: cached weights of another
 /// version are learnt again from the history.
-pub const FEATURE_VERSION: u32 = 4;
+pub const FEATURE_VERSION: u32 = 5;
 
 pub const H_LONG_MS: i64 = 45 * DAY_MS;
 pub const H_HOT_MS: i64 = 2 * DAY_MS;
@@ -89,6 +97,9 @@ const MANUAL_EARLY: f32 = 0.6;
 const AUTO_EARLY: f32 = 1.3;
 /// Track → track pairs kept per track.
 pub const CO_TOP: usize = 50;
+/// Tracks of one session this many steps apart at most are listened
+/// together ([`F_SESS_CO`]), `1 / k` for k steps.
+const BAG_WINDOW: usize = 10;
 /// A start shorter than this is an interlude.
 const INTERLUDE_MS: u32 = 75_000;
 /// A track longer than this is long (the skip model).
@@ -127,9 +138,10 @@ pub fn lane_index(l: SongLane) -> usize {
 
 
 /// The features of a candidate for the next start, in this order.
-pub const FEATURES: [&str; 19] = [
+pub const FEATURES: [&str; 22] = [
     "aff_long", "aff_hot", "liked", "sound", "skip_push", "next_album", "same_album", "same_world", "world_trans",
     "cooc", "in_session", "recent3h", "daypart_world", "same_lane", "never", "interlude", "graph", "pgraph", "prior",
+    "sess_co", "is_prev", "album_first",
 ];
 pub const F: usize = FEATURES.len();
 pub const F_SOUND: usize = 3;
@@ -144,12 +156,18 @@ pub const F_SAME_LANE: usize = 13;
 pub const F_GRAPH: usize = 16;
 pub const F_PGRAPH: usize = 17;
 pub const F_PRIOR: usize = 18;
+/// Listened in the same sessions as the session's tracks (either order,
+/// [`BAG_WINDOW`] steps apart at most); the very track playing now again;
+/// the first track of an album other than the one playing.
+pub const F_SESS_CO: usize = 19;
+pub const F_IS_PREV: usize = 20;
+pub const F_ALBUM_FIRST: usize = 21;
 /// The hand weights (`scripts/replay.py`, `HAND`; the graph's from the
 /// synthetic listeners, docs/recs-graph.md): the prior and the start.
-pub const HAND: [f32; F] = [1.0, 1.2, 0.3, 0.8, 1.0, 3.0, 1.0, 0.8, 1.5, 1.5, -2.0, 0.3, 1.0, 0.8, -0.3, -0.5, 1.5, 1.0, 0.5];
+pub const HAND: [f32; F] = [1.0, 1.2, 0.3, 0.8, 1.0, 3.0, 1.0, 0.8, 1.5, 1.5, -2.0, 0.3, 1.0, 0.8, -0.3, -0.5, 1.5, 1.0, 0.5, 0.5, 0.0, 0.3];
 /// What the replay of 15 days learnt from them (`out/replay.json`), for
 /// reference and tests (the graph's were not there then: the hand ones).
-pub const LEARNED: [f32; F] = [0.68, -0.1, 0.94, 1.15, 0.0, 3.62, 0.52, 0.65, 1.64, 1.77, -0.1, 0.7, 0.77, 0.66, -1.1, -0.03, 1.5, 1.0, 0.5];
+pub const LEARNED: [f32; F] = [0.68, -0.1, 0.94, 1.15, 0.0, 3.62, 0.52, 0.65, 1.64, 1.77, -0.1, 0.7, 0.77, 0.66, -1.1, -0.03, 1.5, 1.0, 0.5, 0.5, 0.0, 0.3];
 /// An artist like the session's counts this much of a track like it.
 const GRAPH_ARTIST: f32 = 0.5;
 /// Candidates by the graphs: the neighbours of the session…
@@ -170,6 +188,9 @@ const L2: f32 = 0.01;
 pub const FULL_STEP_AFTER: u32 = 300;
 /// The expectation of a step is taken over this many best candidates.
 pub const EXPECT_OVER: usize = 100;
+/// A build learning the weights anew (none cached, or of another
+/// [`FEATURE_VERSION`]) steps on this many latest starts the user chose.
+pub const TEACH_LAST: usize = 1_500;
 
 /// The features of a start for its early skip, in this order
 /// (`new_service`: new music from a service, recs-v2 §11.2; `background`:
@@ -218,12 +239,9 @@ fn halve(x: f32, from: UnixMs, to: UnixMs, half: i64) -> f32 {
 }
 
 impl TrackStats {
-    fn add(&mut self, ts: UnixMs, r: f32, today: f32) {
-        self.add_as(ts, r, today, true);
-    }
-
-    /// [`Self::add`], the hot affinity left out unless `hot` (an imported
-    /// play is long taste only).
+    /// `r` of an outcome at `ts` (`today` the weight of [`crate::taste`]),
+    /// the hot affinity left out unless `hot` (an imported play is long
+    /// taste only).
     fn add_as(&mut self, ts: UnixMs, r: f32, today: f32, hot: bool) {
         let ts = ts.max(self.t_ref);
         self.a_long = halve(self.a_long, self.t_ref, ts, H_LONG_MS) + r;
@@ -308,6 +326,11 @@ impl CoOccur {
             row.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
             row.truncate(CO_TOP);
         }
+    }
+
+    /// What was kept of `a`'s pairs, in no order.
+    pub fn row(&self, a: usize) -> &[(u32, f32)] {
+        self.next.get(a).map_or(&[], Vec::as_slice)
     }
 
     pub fn get(&self, a: usize, b: usize) -> f32 {
@@ -409,6 +432,23 @@ impl Default for Weights {
     }
 }
 
+/// The time of the [`TEACH_LAST`]-th last start of `events` that teaches
+/// the model of the next start: a build learning the weights anew steps on
+/// those only (a long history would take minutes, and the oldest steps
+/// would fade under the later ones anyway).
+fn teach_from(events: &[Play]) -> UnixMs {
+    let mut ts: Vec<UnixMs> = events
+        .iter()
+        .filter(|p| p.kind == EventType::Start && p.origin != Some(EventOrigin::Import) && teaches(p.origin, p.context))
+        .map(|p| p.ts)
+        .collect();
+    if ts.len() <= TEACH_LAST {
+        return UnixMs::MIN;
+    }
+    let k = ts.len() - TEACH_LAST;
+    *ts.select_nth_unstable(k).1
+}
+
 /// Whether a start teaches the model of the next start: the user chose
 /// it (a history older than origins: anything but a radio's). An imported
 /// play never does.
@@ -458,6 +498,9 @@ pub struct Moment {
     pub graph_artists: HashMap<ArtistId, f32>,
     /// …and the personal graph's.
     pub pgraph_near: HashMap<usize, f32>,
+    /// What was listened in the same sessions as the session's tracks
+    /// ([`F_SESS_CO`]), each of those by `0.8^k` of the k-th from the end.
+    pub bag_near: HashMap<usize, f32>,
 }
 
 /// What a live session is ([`UserModel::live`]): one profile or many,
@@ -513,13 +556,21 @@ pub struct UserModel {
     duration: Vec<Option<u32>>,
     types: Vec<SongType>,
     next_in_album: Vec<Option<u32>>,
+    /// The first track of its album.
+    album_first: Vec<bool>,
     pub worlds: HashMap<u64, WorldStats>,
     part_total: [u32; 4],
     trans: HashMap<u64, HashMap<u64, f32>>,
+    /// The transitions out of each world in all.
+    trans_total: HashMap<u64, f32>,
+    /// The catalog positions of each world.
+    by_world: HashMap<u64, Vec<u32>>,
     /// Song lane → song lane of the starts the user chose, by
     /// [`lane_index`].
     lane_trans: [[f32; LANES]; LANES],
     pub co: CoOccur,
+    /// Tracks listened in the same sessions, either order ([`BAG_WINDOW`]).
+    pub bag: CoOccur,
     /// The collective graph and the personal one ([`crate::graph`]).
     pub graph: SimGraph,
     personal: Vec<Vec<(u32, f32)>>,
@@ -556,6 +607,8 @@ pub struct UserModel {
     streak: u32,
     last_event: Option<UnixMs>,
     learn: bool,
+    /// The walk teaches the weights from this start on ([`TEACH_LAST`]).
+    learn_from: UnixMs,
     /// Imported starts not ended yet, by catalog position.
     import_open: HashMap<usize, UnixMs>,
 }
@@ -591,6 +644,7 @@ impl UserModel {
         let taste = Taste::build(catalog, input, now);
         let mut m = Self::empty(catalog, taste, extra, input.utc_offset_min, now);
         m.learn = extra.weights.is_none_or(|w| w.version != FEATURE_VERSION);
+        m.learn_from = teach_from(&input.events);
         if let Some(w) = extra.weights.filter(|w| w.version == FEATURE_VERSION) {
             m.weights = w;
         }
@@ -974,6 +1028,12 @@ impl UserModel {
                 }
             }
         }
+        let mut album_first = vec![false; n];
+        for list in by_release.values() {
+            if let Some(&i) = list.first() {
+                album_first[i] = true;
+            }
+        }
         let types = ids.iter().map(|id| extra.types.and_then(|t| t.get(*id)).copied().unwrap_or_default()).collect();
         let vs: Vec<&Vector> = emb.iter().flatten().collect();
         let scale = {
@@ -1005,11 +1065,20 @@ impl UserModel {
             duration: catalog.tracks().iter().map(|t| t.duration_ms).collect(),
             types,
             next_in_album,
+            album_first,
             worlds: HashMap::new(),
             part_total: [0; 4],
             trans: HashMap::new(),
+            trans_total: HashMap::new(),
+            by_world: catalog.tracks().iter().enumerate().fold(HashMap::new(), |mut m: HashMap<u64, Vec<u32>>, (i, t)| {
+                if let Some(w) = t.world {
+                    m.entry(w).or_default().push(i as u32);
+                }
+                m
+            }),
             lane_trans: [[0.0; LANES]; LANES],
             co: CoOccur::new(n),
+            bag: CoOccur::new(n),
             graph: extra.graph.filter(|g| !g.is_empty()).map(|g| SimGraph::build(catalog, g)).unwrap_or_default(),
             personal: Vec::new(),
             cold: 1.0,
@@ -1030,6 +1099,7 @@ impl UserModel {
             streak: 0,
             last_event: None,
             learn: false,
+            learn_from: UnixMs::MIN,
             import_open: HashMap::new(),
         }
     }
@@ -1141,6 +1211,13 @@ impl UserModel {
 
     /// The moment of `session` at `now` (at least the session's last start).
     pub fn moment(&self, session: &Session, now: UnixMs) -> Moment {
+        self.moment_with(session, now, true)
+    }
+
+    /// [`Self::moment`]; the neighbours of the session in the graphs and in
+    /// the sessions before only when it will `rank` candidates (the walk of
+    /// the history needs them for a step alone).
+    fn moment_with(&self, session: &Session, now: UnixMs, rank: bool) -> Moment {
         let now = now.max(session.last_ts().unwrap_or(now));
         let sess: Vec<(usize, Ended, EventContext)> =
             session.tracks().filter_map(|p| Some((self.position(p.track)?, p.ended, p.context))).collect();
@@ -1149,7 +1226,14 @@ impl UserModel {
         let mut graph_near: HashMap<usize, f32> = HashMap::new();
         let mut graph_artists: HashMap<ArtistId, f32> = HashMap::new();
         let mut pgraph_near: HashMap<usize, f32> = HashMap::new();
-        let recent: Vec<usize> = sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early).take(3).map(|x| x.0).collect();
+        let recent: Vec<usize> = if rank { sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early).take(3).map(|x| x.0).collect() } else { Vec::new() };
+        let mut bag_near: HashMap<usize, f32> = HashMap::new();
+        for (k, (s, _, _)) in sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early && rank).take(BAG_WINDOW).enumerate() {
+            let f = 0.8f32.powi(k as i32);
+            for &(c, w) in self.bag.row(*s) {
+                *bag_near.entry(c as usize).or_default() += f * w;
+            }
+        }
         let own: HashSet<ArtistId> = recent.iter().filter_map(|&s| self.artist[s]).collect();
         for (k, &s) in recent.iter().enumerate() {
             let f = 0.6f32.powi(k as i32);
@@ -1168,6 +1252,7 @@ impl UserModel {
             }
         }
         Moment {
+            bag_near,
             graph_near,
             graph_artists,
             pgraph_near,
@@ -1210,7 +1295,7 @@ impl UserModel {
             if let (Some(wp), Some(wc)) = (wp, wc)
                 && let Some(out) = self.trans.get(&wp)
             {
-                let total: f32 = out.values().sum();
+                let total = self.trans_total.get(&wp).copied().unwrap_or(0.0);
                 f[8] = out.get(&wc).copied().unwrap_or(0.0) / (total + 2.0);
             }
         }
@@ -1236,6 +1321,9 @@ impl UserModel {
         f[F_GRAPH] = (m.graph_near.get(&c).copied().unwrap_or(0.0) + GRAPH_ARTIST * like_artist).tanh();
         f[F_PGRAPH] = m.pgraph_near.get(&c).copied().unwrap_or(0.0).tanh();
         f[F_PRIOR] = self.graph.prior(c);
+        f[F_SESS_CO] = (m.bag_near.get(&c).copied().unwrap_or(0.0) / 2.0).tanh();
+        f[F_IS_PREV] = f32::from(u8::from(m.prev == Some(c)));
+        f[F_ALBUM_FIRST] = f32::from(u8::from(self.album_first[c] && m.prev.is_none_or(|p| self.release[p] != self.release[c])));
         f
     }
 
@@ -1337,9 +1425,8 @@ impl UserModel {
     pub fn candidates(&self, m: &Moment, ok: &dyn Fn(usize) -> bool) -> Vec<usize> {
         let mut out: HashSet<usize> = HashSet::new();
         if let Some(a) = &m.anchor {
-            let mut near: Vec<(f32, usize)> = self.emb.iter().enumerate().filter_map(|(i, e)| Some((euclid(e.as_ref()?, a), i))).filter(|(_, i)| ok(*i)).collect();
-            near.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)));
-            out.extend(near.into_iter().take(200).map(|(_, i)| i));
+            let near: Vec<(f32, usize)> = self.emb.iter().enumerate().filter_map(|(i, e)| Some((euclid(e.as_ref()?, a), i))).filter(|(_, i)| ok(*i)).collect();
+            out.extend(best_n(near, 200, |x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1))).into_iter().map(|(_, i)| i));
         }
         let mut co: HashMap<usize, f32> = HashMap::new();
         for (k, (s, _, _)) in m.sess.iter().rev().take(3).enumerate() {
@@ -1358,6 +1445,7 @@ impl UserModel {
             v.into_iter().take(GRAPH_CANDIDATES).map(|(c, _)| c).collect::<Vec<usize>>()
         };
         out.extend(strongest(&m.graph_near));
+        out.extend(strongest(&m.bag_near));
         out.extend(strongest(&m.pgraph_near));
         let mut artists: Vec<(ArtistId, f32)> = m.graph_artists.iter().map(|(a, w)| (*a, *w)).collect();
         artists.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
@@ -1369,12 +1457,11 @@ impl UserModel {
         }
         out.extend(m.next_album.filter(|&c| ok(c)));
         if let Some(w) = m.prev.and_then(|p| self.world[p]) {
-            out.extend((0..self.len()).filter(|&i| self.world[i] == Some(w) && ok(i)));
+            out.extend(self.by_world.get(&w).map_or(&[][..], Vec::as_slice).iter().map(|&i| i as usize).filter(|&i| ok(i)));
         }
         let mut top = |key: &dyn Fn(&TrackStats) -> f32, n: usize| {
-            let mut v: Vec<(f32, usize)> = (0..self.len()).filter(|&i| ok(i)).map(|i| (key(&self.tracks[i]), i)).filter(|(k, _)| *k > 0.0).collect();
-            v.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)));
-            out.extend(v.into_iter().take(n).map(|(_, i)| i));
+            let v: Vec<(f32, usize)> = (0..self.len()).filter(|&i| ok(i)).map(|i| (key(&self.tracks[i]), i)).filter(|(k, _)| *k > 0.0).collect();
+            out.extend(best_n(v, n, |x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1))).into_iter().map(|(_, i)| i));
         };
         top(&|t| t.aff_hot(m.now), 100);
         top(&|t| t.aff_long(m.now), 200);
@@ -1463,8 +1550,8 @@ impl UserModel {
                 self.streak = 0;
                 let manual = self.tracks[i].open.take().is_some_and(|(_, o)| o == Some(EventOrigin::Manual));
                 let r = R_COMPLETE * if manual { MANUAL_POSITIVE } else { 1.0 };
+                self.tracks[i].add_as(p.ts, r, W_COMPLETE, true);
                 let t = &mut self.tracks[i];
-                t.add(p.ts, r, W_COMPLETE);
                 t.completes += 1;
                 t.done[part] = t.done[part].saturating_add(1);
                 t.last_complete = Some(p.ts);
@@ -1490,8 +1577,8 @@ impl UserModel {
                             Some(_) => AUTO_EARLY,
                             None => 1.0,
                         };
+                        self.tracks[i].add_as(p.ts, R_EARLY * who * lean, W_SKIP_EARLY * lean, true);
                         let t = &mut self.tracks[i];
-                        t.add(p.ts, R_EARLY * who * lean, W_SKIP_EARLY * lean);
                         t.early = t.early.saturating_add(1);
                         self.walk.end(p.track, Ended::Early);
                         if let Some(x) = self.pending.remove(&i).filter(|_| self.learn) {
@@ -1505,8 +1592,8 @@ impl UserModel {
                             _ => 0.0,
                         };
                         let manual = origin == Some(EventOrigin::Manual);
+                        self.tracks[i].add_as(p.ts, R_LATE * heard * if manual { MANUAL_POSITIVE } else { 1.0 }, W_SKIP_LATE_HEARD * heard, true);
                         let t = &mut self.tracks[i];
-                        t.add(p.ts, R_LATE * heard * if manual { MANUAL_POSITIVE } else { 1.0 }, W_SKIP_LATE_HEARD * heard);
                         t.late = t.late.saturating_add(1);
                         self.walk.end(p.track, Ended::Late);
                         self.pending.remove(&i);
@@ -1524,11 +1611,11 @@ impl UserModel {
         if self.walk.last_ts().is_none_or(|l| ts - l >= SESSION_GAP_MS) {
             self.walk = Session::default();
         }
-        let m = self.moment(&self.walk, ts);
+        let learn = self.learn && teaches(p.origin, p.context) && ts >= self.learn_from;
+        let m = self.moment_with(&self.walk, ts, hook.is_some() || learn);
         let x = self.skip_features(&m, i, p.context);
         self.pending.insert(i, x);
         if m.prev.is_some() {
-            let learn = self.learn && teaches(p.origin, p.context);
             match hook {
                 Some(h) => {
                     h(self, &m, i, p);
@@ -1554,22 +1641,31 @@ impl UserModel {
             && let (Some(wp), Some(wc)) = (self.world[prev], self.world[i])
         {
             *self.trans.entry(wp).or_default().entry(wc).or_default() += 1.0;
+            *self.trans_total.entry(wp).or_default() += 1.0;
         }
         if let Some(prev) = m.prev
             && teaches(p.origin, p.context)
         {
             self.lane_trans[lane_index(self.types[prev].lane())][lane_index(self.types[i].lane())] += 1.0;
         }
+        // Listened together within the session, either order.
+        for (k, (s, e, _)) in m.sess.iter().rev().take(BAG_WINDOW).enumerate() {
+            if *s != i && *e != Ended::Early {
+                let w = 1.0 / (k + 1) as f32;
+                self.bag.add(*s, i, w);
+                self.bag.add(i, *s, w);
+            }
+        }
         let part = self.part_of(ts);
-        let t = &mut self.tracks[i];
-        if let Some((t0, o)) = t.open.take() {
+        if let Some((t0, o)) = self.tracks[i].open.take() {
             // The start before never ended.
             let r = R_OPEN * if o == Some(EventOrigin::Manual) { MANUAL_POSITIVE } else { 1.0 };
-            t.add(t0, r, W_START_ONLY);
+            self.tracks[i].add_as(t0, r, W_START_ONLY, true);
         }
-        if t.last_complete.is_some_and(|c| ts - c <= REPEAT_WITHIN_MS) {
-            t.add(ts, R_REPEAT, W_REPEAT);
+        if self.tracks[i].last_complete.is_some_and(|c| ts - c <= REPEAT_WITHIN_MS) {
+            self.tracks[i].add_as(ts, R_REPEAT, W_REPEAT, true);
         }
+        let t = &mut self.tracks[i];
         t.starts += 1;
         t.last_start = Some(ts);
         t.part[part] = t.part[part].saturating_add(1);
@@ -1585,6 +1681,18 @@ impl UserModel {
         self.part_total[part] += 1;
         self.walk.start(p.track, ts, p.context, p.origin);
     }
+}
+
+/// The best `n` of `v` by `cmp` (a total order, the best first), in no
+/// order: what sorting and taking `n` keeps, in linear time.
+fn best_n<T>(mut v: Vec<T>, n: usize, cmp: impl Fn(&T, &T) -> std::cmp::Ordering) -> Vec<T> {
+    if n == 0 {
+        v.clear();
+    } else if v.len() > n {
+        v.select_nth_unstable_by(n - 1, &cmp);
+        v.truncate(n);
+    }
+    v
 }
 
 /// One step of `next` towards `target` over the [`EXPECT_OVER`] best of
@@ -1615,13 +1723,16 @@ pub fn auc(rows: &[(f32, bool)]) -> Option<f32> {
 }
 
 /// Hits of a replay: how many of the real next starts were first, in the
-/// first ten, and the mean reciprocal rank.
+/// first ten, in the first fifty, the mean reciprocal rank and the NDCG of
+/// the first ten (one relevant track: `1 / log2(rank + 1)` within ten).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Hits {
     pub n: usize,
     pub hit1: f32,
     pub hit10: f32,
+    pub hit50: f32,
     pub mrr: f32,
+    pub ndcg10: f32,
 }
 
 impl Hits {
@@ -1631,7 +1742,9 @@ impl Hits {
             n: ranks.len(),
             hit1: ranks.iter().filter(|r| **r <= 1.0).count() as f32 / n,
             hit10: ranks.iter().filter(|r| **r <= 10.0).count() as f32 / n,
+            hit50: ranks.iter().filter(|r| **r <= 50.0).count() as f32 / n,
             mrr: ranks.iter().map(|r| 1.0 / r).sum::<f32>() / n,
+            ndcg10: ranks.iter().filter(|r| **r <= 10.0).map(|r| 1.0 / (r + 1.0).log2()).sum::<f32>() / n,
         }
     }
 }
@@ -1651,6 +1764,9 @@ pub struct ReplayReport {
     pub weights: Weights,
     /// The share of the catalog the learnt model's first ten ever held.
     pub coverage: f32,
+    /// The share of the scored starts whose track was among the candidates
+    /// of the moment ([`UserModel::candidates`]: what a radio ranks).
+    pub cand_recall: f32,
 }
 
 impl ReplayReport {
@@ -1725,6 +1841,7 @@ pub fn replay_with(
     let mut shown: HashSet<usize> = HashSet::new();
     let mut ranks: HashMap<(&'static str, &'static str), Vec<f32>> = HashMap::new();
     let mut skips: Vec<(f32, f32, f32, bool)> = Vec::new();
+    let mut held: Vec<bool> = Vec::new();
     let mut k_of: HashMap<*const Play, usize> = HashMap::new();
     for (k, p) in events.iter().enumerate() {
         k_of.insert(*p as *const Play, k);
@@ -1759,6 +1876,17 @@ pub fn replay_with(
             if p.ts >= mid {
                 splits.push(if free { "free:second_half" } else { "album_next:second_half" });
             }
+            // Listened: not skipped early (what the user went on with).
+            if ended != Ended::Early {
+                splits.push("listened");
+                if free {
+                    splits.push("listened_free");
+                }
+                if p.ts >= mid {
+                    splits.push("listened:second_half");
+                }
+            }
+            held.push(model.candidates(mo, &|_| true).binary_search(&target).is_ok());
             let feats: Vec<[f32; F]> = (0..model.len()).map(|c| model.features(mo, c)).collect();
             let hand = Model::default();
             // A disliked track is out, its neighbours a little lower.
@@ -1801,6 +1929,7 @@ pub fn replay_with(
         skip_test: skips.len(),
         weights: m.weights,
         coverage: shown.len() as f32 / m.len().max(1) as f32,
+        cand_recall: held.iter().filter(|h| **h).count() as f32 / held.len().max(1) as f32,
     }
 }
 
@@ -1863,6 +1992,78 @@ pub(crate) mod tests {
 
     pub(crate) fn input(idx: &VectorIndex<TrackId>) -> ModelInput<'_> {
         ModelInput { index: idx, types: None, weights: None, graph: None }
+    }
+
+    /// The best of a list in linear time keeps what sorting it does.
+    #[test]
+    fn best_n_keeps_what_sorting_keeps() {
+        let mut rng = Rng::new(5);
+        for n in [0usize, 1, 7, 200, 500] {
+            let v: Vec<(f32, usize)> = (0..300).map(|i| ((rng.below(50) as f32) / 7.0, i)).collect();
+            let cmp = |x: &(f32, usize), y: &(f32, usize)| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1));
+            let mut sorted = v.clone();
+            sorted.sort_by(cmp);
+            let mut want: Vec<usize> = sorted.into_iter().take(n).map(|x| x.1).collect();
+            let mut got: Vec<usize> = best_n(v, n, cmp).into_iter().map(|x| x.1).collect();
+            want.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(got, want, "{n}");
+        }
+    }
+
+    /// A build learning the weights anew steps on the latest
+    /// [`TEACH_LAST`] starts only: a long history does not take minutes;
+    /// a short one teaches whole.
+    #[test]
+    fn a_rebuild_teaches_the_latest_starts() {
+        let (cat, idx, history) = album_listener(150, 6);
+        let starts = history.events.iter().filter(|p| p.kind == EventType::Start).count();
+        assert!(starts > 2 * TEACH_LAST, "{starts}");
+        let m = UserModel::build(&cat, &history, input(&idx), T0);
+        assert!(m.weights.next.seen as usize <= TEACH_LAST && m.weights.next.seen as usize > TEACH_LAST / 2, "{}", m.weights.next.seen);
+        assert!(m.weights.next.w[F_NEXT_ALBUM] > HAND[F_NEXT_ALBUM], "{:?}", m.weights.next.w);
+        // Every start is still in the stats and the pairs.
+        assert_eq!(m.tracks.iter().map(|t| t.starts as usize).sum::<usize>(), starts);
+        let (cat, idx, short) = album_listener(20, 6);
+        let teaching = short.events.iter().filter(|p| p.kind == EventType::Start).count();
+        assert!(teaching < TEACH_LAST);
+        assert_eq!(teach_from(&short.events), UnixMs::MIN);
+        assert!(UserModel::build(&cat, &short, input(&idx), T0).weights.next.seen > 200);
+    }
+
+    /// The features of the session: the track playing now again, the first
+    /// track of another album, what was listened together with the
+    /// session's tracks before.
+    #[test]
+    fn repeats_album_starts_and_listened_together() {
+        let (cat, idx, history) = album_listener(20, 7);
+        let m = UserModel::build(&cat, &history, input(&idx), T0);
+        // Track 5 of album 3 playing.
+        let now = T0 + DAY_MS;
+        let playing = tid(3 * ALBUM + 4);
+        let mut session = Session::default();
+        session.start(playing, now - 100_000, EventContext::Album, Some(EventOrigin::Manual));
+        let mo = m.moment(&session, now);
+        let at = |i: u128| m.position(tid(i)).unwrap();
+        let f = |i: u128| m.features(&mo, at(i));
+        assert_eq!(f(3 * ALBUM + 4)[F_IS_PREV], 1.0);
+        assert_eq!(f(3 * ALBUM + 5)[F_IS_PREV], 0.0);
+        assert_eq!(f(4 * ALBUM)[F_ALBUM_FIRST], 1.0, "another album's first");
+        assert_eq!(f(3 * ALBUM)[F_ALBUM_FIRST], 0.0, "the playing album's own first");
+        assert_eq!(f(4 * ALBUM + 1)[F_ALBUM_FIRST], 0.0);
+        // Listened together, either order: the tracks of its sessions, its
+        // own album's and the favourite pair's; never one of another world
+        // it never shared a session with.
+        let most = (0..m.len()).max_by_key(|&i| (m.bag.row(i).len(), i)).unwrap();
+        let mut session = Session::default();
+        session.start(m.id(most), now - 100_000, EventContext::Album, Some(EventOrigin::Manual));
+        let mo = m.moment(&session, now);
+        let row = m.bag.row(most);
+        assert!(row.len() >= 5, "{row:?}");
+        assert!(row.iter().all(|&(c, w)| w > 0.0 && m.features(&mo, c as usize)[F_SESS_CO] > 0.0));
+        assert!(row.iter().any(|&(c, _)| m.world_at(c as usize) == m.world_at(most)));
+        let never_with = (0..m.len()).find(|&i| i != most && m.bag.get(most, i) == 0.0 && m.world_at(i) != m.world_at(most)).unwrap();
+        assert_eq!(m.features(&mo, never_with)[F_SESS_CO], 0.0);
     }
 
     #[test]
