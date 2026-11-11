@@ -690,7 +690,11 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
     let regions = &snap.model.regions;
     let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| {
         let vector = snap.new_track(t).vector;
-        let voice = vector.as_ref().and_then(|v| mix_new::voice_near(&snap.model, &snap.index, v));
+        // Its voice by its preview, else by the songs whose radios hold it.
+        let voice = match vector.as_ref() {
+            Some(v) => mix_new::voice_near(&snap.model, &snap.index, v),
+            None => mix_new::voice_of(&snap.model, &near),
+        };
         NewCandidate {
             track: t.clone(),
             lane: mix_new::lane_of_new(&snap.types, voice, t),

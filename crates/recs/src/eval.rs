@@ -667,13 +667,17 @@ pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<usize> {
         .iter()
         .map(|d| {
             let v: Option<Vector> = d.vector.as_ref().and_then(|v| <[f32; DIM]>::try_from(v.as_slice()).ok());
-            let voice = v.as_ref().and_then(|v| mix_new::voice_near(model, &parts.index, v));
+            let near: Vec<usize> = d.near.iter().filter_map(|t| model.position(*t)).collect();
+            let voice = match v.as_ref() {
+                Some(v) => mix_new::voice_near(model, &parts.index, v),
+                None => mix_new::voice_of(model, &near),
+            };
             NewCandidate {
                 track: d.track.clone(),
                 lane: mix_new::lane_of_new(&parts.types, voice, &d.track),
                 soundtrack: d.track.album.as_ref().is_some_and(|a| crate::tiles::franchise(&a.title).is_some()),
                 profile: v.map(|v| model.embed(&v)).and_then(|e| model.regions.of(&e, None)),
-                near: d.near.iter().filter_map(|t| model.position(*t)).collect(),
+                near,
                 weight: d.weight,
             }
         })

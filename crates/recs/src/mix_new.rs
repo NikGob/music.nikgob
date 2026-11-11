@@ -9,7 +9,9 @@
 //!   languages of its profiles, songs without words), a candidate's kind
 //!   told by its preview where it was analysed (its nearest songs of the
 //!   library: an instrumental track with a Latin title is no English song,
-//!   [`lane_of_new`]), else by its artist's or title's language, else a
+//!   [`voice_near`]), else by the library's songs the graph links it to
+//!   ([`voice_of`]), then by its artist's or title's language
+//!   ([`lane_of_new`]), else a
 //!   franchise's soundtrack for songs without words. Those the graph of
 //!   similar music links to the mix's own songs first, then those of its
 //!   profiles (by the graph or by the preview), then the rest; each group
@@ -102,13 +104,21 @@ pub fn kinds(model: &UserModel, m: &Mix) -> (HashSet<Lang>, bool) {
 /// The voice of a new song by its analysed preview (`v`, raw): what most of
 /// its nearest songs of the library are, when they agree.
 pub fn voice_near(model: &UserModel, index: &VectorIndex<TrackId>, v: &Vector) -> Option<Voice> {
-    let near = index.nearest(v, VOICE_NEAR, |_| true);
+    let near: Vec<usize> = index.nearest(v, VOICE_NEAR, |_| true).into_iter().filter_map(|(id, _)| model.position(id)).collect();
+    voice_of(model, &near)
+}
+
+/// What most of the library's songs `near` (catalog positions) are, sung or
+/// without words, when they agree: the voice of a new song without a
+/// preview that the graph links to them (YouTube Music's radio of a
+/// soundtrack plays soundtracks).
+pub fn voice_of(model: &UserModel, near: &[usize]) -> Option<Voice> {
     let (mut sung, mut inst) = (0usize, 0usize);
-    for (id, _) in near {
-        match model.position(id).map(|i| model.song_type_at(i).voice) {
-            Some(Voice::Sung) => sung += 1,
-            Some(Voice::Instrumental) => inst += 1,
-            _ => {}
+    for &i in near.iter().filter(|&&i| i < model.len()) {
+        match model.song_type_at(i).voice {
+            Voice::Sung => sung += 1,
+            Voice::Instrumental => inst += 1,
+            Voice::Unknown => {}
         }
     }
     let known = sung + inst;
