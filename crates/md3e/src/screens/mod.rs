@@ -130,6 +130,9 @@ pub struct Md3eUi {
     fullscreen: bool,
     /// Window fullscreen asked for with F11 (the visualizer forces it too).
     user_fullscreen: bool,
+    /// The rail's destination asked for by its key goes to the section's
+    /// first page (`Prefs::nav_root`).
+    section_key: bool,
 }
 
 impl Default for Md3eUi {
@@ -173,6 +176,7 @@ impl Md3eUi {
             window_can_hide: true,
             fullscreen: false,
             user_fullscreen: false,
+            section_key: false,
         }
     }
 
@@ -667,7 +671,11 @@ impl Md3eUi {
                 self.set_now_playing(ctx, false);
             }
             self.search.clear();
-            self.navigate(ctx, route, out);
+            let arrived = self.route() != &route;
+            self.navigate(ctx, route.clone(), out);
+            if std::mem::take(&mut self.section_key) {
+                self.to_section_root(&route, state, arrived);
+            }
         }
         if let Some(tab) = self.chrome.open_pane.take() {
             self.pane = Some(tab);
@@ -815,6 +823,7 @@ impl Md3eUi {
         }
         if let Some(n) = go {
             self.chrome.nav = Some(Self::destinations()[n].clone());
+            self.section_key = state.prefs.nav_root;
         }
         // The mouse's side buttons (and Alt+arrows) walk the history like a
         // browser; back first closes Now Playing.
@@ -1335,6 +1344,25 @@ impl Md3eUi {
         ]
     }
 
+    /// A section of the rail opened by its button (or its key) starts on its
+    /// first page with «Разделы открываются с начала»: the library on «Всё»,
+    /// not on the tab left there (Главная's pages are a stack, and a
+    /// top-level route clears it anyway).
+    /// Called after the navigation: a section `arrived` at anew starts on
+    /// that page as the history's step (no step back to the tab it was
+    /// left on); the section on screen already turns to it as a tab does.
+    fn to_section_root(&mut self, route: &Route, state: &ViewState, arrived: bool) {
+        let all = nikgob_view::LibraryTab::All;
+        if state.prefs.nav_root && matches!(route, Route::Library(_)) && self.pages.library_tab != all {
+            self.pages.library_tab = all;
+            // From its top, not where the tab left was scrolled.
+            self.pages.scroll_to(route.clone(), 0.0);
+            if arrived {
+                self.seen = Some(self.place());
+            }
+        }
+    }
+
     /// Draws the rail in `rail_rect` and handles its clicks. True when a
     /// destination was picked.
     fn rail(&mut self, ui: &mut Ui, rail_rect: Rect, expansion: f32, state: &ViewState, out: &mut Vec<Command>) -> bool {
@@ -1388,7 +1416,9 @@ impl Md3eUi {
             if self.route() == &r {
                 self.search.clear();
             }
-            self.navigate(&ctx, r, out);
+            let arrived = self.route() != &r;
+            self.navigate(&ctx, r.clone(), out);
+            self.to_section_root(&r, state, arrived);
         }
         if let Some(fab) = &rail_out.fab {
             self.pages.add_menu(ui, fab, out);
@@ -1560,6 +1590,35 @@ mod tests {
         assert!(!ui.history_forward(&ctx, &mut out));
         assert!(ui.history_back(&ctx, &mut out));
         assert_eq!(ui.route(), &album);
+    }
+
+    /// «Разделы открываются с начала» (on by default): «Библиотека» of the
+    /// rail opens «Всё» from its top, not the tab left there, with no step
+    /// back to that tab; off, the tab stays.
+    #[test]
+    fn the_rail_opens_the_library_at_its_start() {
+        use nikgob_view::LibraryTab;
+        let ctx = context();
+        let mut out = Vec::new();
+        let mut state = ViewState::default();
+        assert!(state.prefs.nav_root);
+        for on in [true, false] {
+            state.prefs.nav_root = on;
+            let mut ui = Md3eUi::new();
+            ui.navigate(&ctx, Route::Library(LibraryTab::All), &mut out);
+            ui.pages.library_tab = LibraryTab::Tracks;
+            ui.note_tab_switch();
+            ui.navigate(&ctx, Route::Home, &mut out);
+            let library = Route::Library(LibraryTab::All);
+            ui.navigate(&ctx, library.clone(), &mut out);
+            ui.to_section_root(&library, &state, true);
+            let tab = if on { LibraryTab::All } else { LibraryTab::Tracks };
+            assert_eq!(ui.pages.library_tab, tab, "on {on}");
+            ui.note_tab_switch();
+            // Back is Главная, not the library on «Треки».
+            assert!(ui.history_back(&ctx, &mut out));
+            assert_eq!(ui.route(), &Route::Home, "on {on}");
+        }
     }
 
     #[test]
