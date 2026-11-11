@@ -95,7 +95,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The functions the library's SQL calls: `album_likes_tracks()`, the
 /// mode of [`Library::set_album_likes_tracks`]; `various_artists(name)`,
-/// a compilation's artist line ([`nikgob_core::names::is_various_artists`]).
+/// a compilation's artist line ([`nikgob_core::names::is_various_artists`]);
+/// `foreign_script(name)`, a name in a script the user may not read
+/// ([`nikgob_core::names::foreign_script`]).
 fn add_functions(conn: &Connection, album_likes_tracks: &Arc<AtomicBool>) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
     let flag = Arc::clone(album_likes_tracks);
@@ -107,6 +109,12 @@ fn add_functions(conn: &Connection, album_likes_tracks: &Arc<AtomicBool>) -> Res
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| Ok(nikgob_core::names::is_various_artists(&ctx.get::<String>(0)?)),
+    )?;
+    conn.create_scalar_function(
+        "foreign_script",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(nikgob_core::names::foreign_script(&ctx.get::<String>(0)?)),
     )?;
     Ok(())
 }
