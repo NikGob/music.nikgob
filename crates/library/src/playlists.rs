@@ -566,7 +566,7 @@ impl Library {
                   JOIN likes l ON l.target_kind = 'release' AND l.target_id = r.id
                  WHERE l.deleted = 0 ORDER BY l.updated_at DESC, r.seq DESC LIMIT ?1 OFFSET ?2"
             ))?;
-            let rows = stmt.query_map(params![limit, offset], |r| Ok((release_row(r)?, r.get(14)?)))?;
+            let rows = stmt.query_map(params![limit, offset], |r| Ok((release_row(r)?, r.get(crate::catalog::RELEASE_ROW_COLS)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }

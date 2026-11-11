@@ -1456,6 +1456,10 @@ pub(crate) const RELEASE_ROW_SELECT: &str = concat!(
 /// Every release, those of deleted tracks included (the importer's matching).
 const RELEASE_ROW_SELECT_ALL: &str = concat!(release_row_cols!(), " FROM release r");
 
+/// How many columns [`release_row`] reads: a query that adds its own puts
+/// them after.
+pub(crate) const RELEASE_ROW_COLS: usize = 18;
+
 pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
     Ok(ReleaseRow {
         release: release_from_row(row)?,
