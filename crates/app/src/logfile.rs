@@ -2,10 +2,12 @@
 //! in demo mode): a windowed exe has no stderr, and a log file is what the
 //! user can send when something is slow or broken.
 //!
-//! Default level `info`; the streaming code (Spotify, YouTube Music, the
-//! runtime's streaming part, the app's stream bridge) logs at `debug`:
-//! every request with its status and time, search stages, stream opening,
-//! cache hits. `RUST_LOG` overrides the filter. At [`MAX_BYTES`] the file is
+//! Default level `info` for the player's own crates and `warn` for every
+//! other crate (symphonia's stream notes, librqbit's and librespot's
+//! progress); lofty only at `error` (its warnings are about other people's
+//! tags). The streaming code (Spotify, YouTube Music, the runtime's
+//! streaming part, the app's stream bridge) logs at `debug`: every request
+//! with its status and time, search stages, stream opening, cache hits. `RUST_LOG` overrides the filter. At [`MAX_BYTES`] the file is
 //! renamed to `nikgob.log.1` (one old file is kept) and a new one starts.
 //! Secrets never reach the log: tokens, cookies and keys are not logged.
 //!
@@ -38,9 +40,12 @@ pub const FILE: &str = "nikgob.log";
 pub const CRASH: &str = "crash.log";
 /// Size at which the log starts over (the old one becomes `nikgob.log.1`).
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
-// RustyPipe's own records are its tracing spans at level ERROR (noise that
-// reads like failures); the youtube crate logs every request and failure.
-const FILTER: &str = "info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runtime::streams=debug,nikgob::streams=debug,nikgob::audio=debug,rustypipe=off,zbus=warn,tracing::span=warn,symphonia=warn";
+// Other crates' INFO was most of the log (symphonia alone 13 %): only their
+// warnings and errors are kept. `nikgob` covers every crate of the player
+// (a directive is a target prefix). RustyPipe's own records are its tracing
+// spans at level ERROR (noise that reads like failures); the youtube crate
+// logs every request and failure.
+const FILTER: &str = "warn,nikgob=info,nikgob_spotify=debug,nikgob_youtube=debug,nikgob_runtime::streams=debug,nikgob::streams=debug,nikgob::audio=debug,rustypipe=off,lofty=error";
 /// Targets whose records repeat without telling more: each message once.
 const ONCE: &[&str] = &["rustls_platform_verifier"];
 /// Records that say whose account it is: target, how the text starts, and
@@ -670,9 +675,10 @@ mod tests {
     fn the_account_and_the_ids_of_other_crates_stay_out_of_the_log() {
         use log::Log;
         let out = Shared::default();
+        // Their INFO is off by default; `RUST_LOG` can turn it on.
         let logger = Quiet::new(
             env_logger::Builder::new()
-                .parse_filters(FILTER)
+                .parse_filters(&format!("{FILTER},librespot_core=info,librqbit_dht=info"))
                 .target(env_logger::Target::Pipe(Box::new(out.clone())))
                 .build(),
         );
@@ -692,6 +698,36 @@ mod tests {
         assert!(lines[2].ends_with("peer id 2d7251…"), "{text}");
         assert!(lines[3].ends_with("another target's text"), "{text}");
         assert!(!text.contains("iri5cu") && !text.contains("Country"), "{text}");
+    }
+
+    #[test]
+    fn other_crates_log_warnings_only_and_ours_keep_their_level() {
+        use log::Log;
+        let out = Shared::default();
+        let logger = Quiet::new(
+            env_logger::Builder::new()
+                .parse_filters(FILTER)
+                .target(env_logger::Target::Pipe(Box::new(out.clone())))
+                .build(),
+        );
+        let say = |level: log::Level, target: &str, msg: &str| {
+            logger.log(&log::Record::builder().args(format_args!("{msg}")).level(level).target(target).build());
+        };
+        say(log::Level::Info, "symphonia_bundle_mp3::demuxer", "using xing header");
+        say(log::Level::Info, "librqbit::session", "added torrent");
+        say(log::Level::Warn, "lofty::id3::v2::read", "unknown frame");
+        say(log::Level::Warn, "librqbit::session", "a torrent warning");
+        say(log::Level::Info, "nikgob_runtime::lyrics", "our info");
+        say(log::Level::Info, "nikgob::player", "the app's info");
+        say(log::Level::Debug, "nikgob_youtube", "youtube debug");
+        say(log::Level::Debug, "nikgob_library", "library debug");
+        let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text}");
+        assert!(lines[0].ends_with("a torrent warning"), "{text}");
+        assert!(lines[1].ends_with("our info"), "{text}");
+        assert!(lines[2].ends_with("the app's info"), "{text}");
+        assert!(lines[3].ends_with("youtube debug"), "{text}");
     }
 
     fn home() -> Vec<String> {
