@@ -904,6 +904,85 @@ fn an_album_of_one_song_of_the_users_plays_that_song() {
     wait_for(&rt, "the album added whole", |s| queued(s).len() == 2);
 }
 
+/// A single of a song and its instrumental, saved along with the like of
+/// the song: only the song is the user's (the like of the single stands
+/// for it, not for the instrumental), the single still plays that song
+/// alone. The song left out of it by hand too: nothing of the single is
+/// the user's, it stays a single to choose from, «Слушать» plays nothing
+/// and «Скачать недостающие» asks for nothing; «Добавить весь альбом»
+/// takes the song back in with the rest, and «Отменить» leaves it out
+/// again.
+#[test]
+fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, LikeTarget, Release, ReleaseType, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let mut single = Release::new("Song", credit.clone());
+    single.release_type = ReleaseType::Single;
+    let release = lib.upsert_release(&single).unwrap();
+    let mut song = Track::new("Song", credit.clone());
+    song.release_id = Some(release.id);
+    song.track_no = 1;
+    let song = lib.upsert_track(&song).unwrap();
+    let file = dir.path().join("song.wav");
+    write_wav(&file, 2.0);
+    lib.add_source(&Source::new(song.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+    let mut inst = Track::new("Song (Instrumental)", credit.clone());
+    inst.release_id = Some(release.id);
+    inst.track_no = 2;
+    let inst = lib.upsert_track(&inst).unwrap();
+    lib.add_source(&Source::new(inst.id, SourceKind::Spotify, "spotify:track:inst", Codec::Vorbis)).unwrap();
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs { single_like_saves: true, ..Prefs::default() },
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let queued = |s: &ViewState| -> Vec<_> { s.queue.current.iter().map(|t| t.id).chain(s.queue.next.iter().map(|e| e.track.id)).collect() };
+    rt.send(Command::Like(LikeTarget::Track(song.id), true));
+    rt.send(Command::LoadRelease(release.id));
+    wait_for(&rt, "the single saved with its song", |s| {
+        s.release.as_ref().is_some_and(|r| r.card.id == release.id && r.liked && r.partial && r.card.mine == Some(1))
+    });
+    rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the whole single once", |s| queued(s).len() == 2);
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the song alone", |s| queued(s) == [song.id]);
+
+    // The song left out of the single too.
+    rt.send(Command::AlbumTrackMine { release: release.id, track: song.id, mine: false });
+    wait_for(&rt, "none of the single the user's", |s| {
+        s.release.as_ref().is_some_and(|r| r.card.id == release.id && r.partial && r.card.mine == Some(0))
+    });
+    rt.send(Command::PlayTracks { tracks: vec![inst.id], start: 0, context: "q".into() });
+    wait_for(&rt, "something else playing", |s| queued(s) == [inst.id]);
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    rt.send(Command::DownloadRelease(release.id));
+    // Done in order: once the page loads again, both were handled.
+    rt.send(Command::AddWholeAlbum { id: release.id, on: true });
+    wait_for(&rt, "the single added whole", |s| s.release.as_ref().is_some_and(|r| r.card.id == release.id && !r.partial));
+    assert_eq!(queued(&rt.state()), [inst.id], "an album of none of the user's songs plays nothing");
+    assert!(rt.state().downloads.wishlist.items.is_empty(), "nor downloads anything");
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the whole single, the song left out before too", |s| queued(s).len() == 2);
+    let undo = rt.state().toasts.iter().rev().find_map(|t| t.action.as_ref().map(|a| a.1.clone()));
+    let Some(undo @ Command::UndoWholeAlbum { .. }) = undo else { panic!("«Отменить» of the whole single: {undo:?}") };
+    rt.send(undo);
+    wait_for(&rt, "the song left out again", |s| {
+        s.release.as_ref().is_some_and(|r| r.card.id == release.id && r.partial && r.card.mine == Some(0))
+    });
+}
+
 /// «Сыграть следующим» of an album while a track plays: the whole album in
 /// its order right after the current track, then the rest of the queue;
 /// under «Только скачанное» too, as playing it.
