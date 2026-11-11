@@ -313,6 +313,15 @@ impl Shared {
     }
 }
 
+/// The stored check is of the file at `path` as it is now: the same size
+/// and time ([`plan`] checks a file again once they differ).
+pub(crate) fn check_fresh(path: &Path, c: &QualityCheck) -> bool {
+    file_stamp(path) == Some((c.file_size, c.file_mtime))
+}
+
+/// What a click on a conversion says while another one runs.
+const BUSY: &str = "Ещё не закончил с прошлым файлом";
+
 /// Absolute path of a source locator (relative ones are under the library).
 fn file_path(root: &Path, locator: &str) -> PathBuf {
     let p = Path::new(locator);
@@ -577,6 +586,7 @@ impl Worker {
             return;
         };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
+        let root = self.res.root().to_owned();
         log::info!("quality: turning {} ticked fake files into MP3s", sources.len());
         svc.spawn_blocking(move || {
             crate::quiet::lower_priority();
@@ -585,6 +595,12 @@ impl Worker {
                 let src = lib.get_source(id).ok().flatten();
                 let check = lib.quality_check(id).ok().flatten();
                 match (src, check) {
+                    // The file changed since its check: the background check
+                    // looks at it again first.
+                    (Some(src), Some(c)) if src.trashed_at.is_none() && !check_fresh(&file_path(&root, &src.locator), &c) => {
+                        log::warn!("quality: {} changed since its check, left as it is", src.locator);
+                        failed += 1;
+                    }
                     (Some(src), Some(c)) if src.trashed_at.is_none() => match convert_fake(&lib, &trash, &enc, &src, &c) {
                         Ok(_) => done += 1,
                         Err(e) => {
@@ -609,6 +625,7 @@ impl Worker {
     pub(crate) fn fake_to_mp3(&mut self, track: TrackId) {
         if self.quality.busy {
             log::info!("quality: a conversion runs, {track} waits for the next click");
+            self.toast(BUSY, None);
             return;
         }
         let src = self
@@ -624,6 +641,12 @@ impl Worker {
         };
         if !nikgob_core::quality::mp3_inside(&src.codec, &check.summary()) {
             log::warn!("quality: {} is not surely made from an MP3, left as it is", src.locator);
+            return;
+        }
+        if !check_fresh(&file_path(self.res.root(), &src.locator), &check) {
+            log::warn!("quality: {} changed since its check, left as it is", src.locator);
+            self.quality.kick();
+            self.toast("Файл изменился после проверки — проверю его заново", None);
             return;
         }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
@@ -653,6 +676,7 @@ impl Worker {
     pub(crate) fn undo_fake_to_mp3(&mut self, track: TrackId) {
         if self.quality.busy {
             log::info!("quality: a conversion runs, the undo of {track} waits for the next click");
+            self.toast(BUSY, None);
             return;
         }
         let Some(c) = self.lib.conversions().unwrap_or_default().into_iter().find(|c| c.track_id == track) else {
@@ -781,6 +805,22 @@ mod tests {
             checked,
             made_from,
         }
+    }
+
+    /// A conversion goes by a check only while the file at its place is
+    /// the one checked: the same size and time.
+    #[test]
+    fn a_check_is_of_the_file_only_while_its_size_and_time_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.flac");
+        std::fs::write(&path, b"flac").unwrap();
+        let (size, mtime) = file_stamp(&path).unwrap();
+        let mut c = check(Verdict::Transcoded, 16_000.0);
+        (c.file_size, c.file_mtime) = (size, mtime);
+        assert!(check_fresh(&path, &c));
+        std::fs::write(&path, b"another flac").unwrap();
+        assert!(!check_fresh(&path, &c), "another file at its place");
+        assert!(!check_fresh(&dir.path().join("gone.flac"), &c));
     }
 
     #[test]

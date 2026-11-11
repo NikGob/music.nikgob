@@ -885,3 +885,83 @@ fn a_better_copy_not_found_says_so() {
     assert!(*tidal.searched.lock().unwrap() >= 1);
     assert_eq!(*tidal.fetched.lock().unwrap(), 0);
 }
+
+/// The «Подтверди» card of a better copy, once it is shown.
+fn upgrade_card(rt: &Runtime) -> u64 {
+    wait_for(rt, "the card", |s| s.downloads.confirm.iter().any(|c| c.origin == "Качество лучше · трек"));
+    rt.state().downloads.confirm.iter().find(|c| c.origin == "Качество лучше · трек").unwrap().id
+}
+
+/// A track with an MP3 128 whose better copy, a FLAC from Qobuz, waits in
+/// «Подтверди» after «Найти качество лучше…».
+fn asked_and_found(lib: &Library) -> (Rig, TrackId, Arc<FakeSource>) {
+    let (track, artist, title) = gruppa(lib);
+    let r = rig(lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+    own_file(lib, r._dir.path(), track, Codec::Mp3, 500);
+    let qobuz = FakeSource::new(SourceKey::Qobuz);
+    qobuz.offers(&artist, &title, 3_000, flac());
+    r.rt.add_source(qobuz.clone());
+    wait_for(&r.rt, "the source", |s| s.downloads.sources.iter().any(|v| v.available));
+    r.rt.send(Command::FindBetter(track));
+    wait_until("the copy in «Подтверди»", || wish_status(lib, track) == Some(WishlistStatus::Confirm));
+    (r, track, qobuz)
+}
+
+/// The copy the user picked does not come: no «nothing better» is said,
+/// and the item keeps asking before it replaces anything.
+#[test]
+fn a_picked_copy_that_fails_to_come_is_no_nothing_found() {
+    let lib = Library::open_in_memory().unwrap();
+    let (r, track, qobuz) = asked_and_found(&lib);
+    *qobuz.refuse.lock().unwrap() = Some(SourceError::Http { status: 404 });
+    let id = upgrade_card(&r.rt);
+    r.rt.send(Command::ConfirmChoice { id, option: Some(0) });
+    wait_until("the download tried", || *qobuz.fetched.lock().unwrap() == 1);
+    wait_until("the item waits", || wish_status(&lib, track) == Some(WishlistStatus::NoTorrent));
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    assert_eq!(item.better_than, Some(500), "still asks");
+    assert!(!r.rt.state().toasts.iter().any(|t| t.text.starts_with("Лучше не нашёл")));
+}
+
+/// «Оставить как есть» on a copy asked for by hand: turned down, never
+/// handed to the schedule.
+#[test]
+fn keeping_the_file_turns_a_hand_asked_copy_down() {
+    let lib = Library::open_in_memory().unwrap();
+    let (r, track, qobuz) = asked_and_found(&lib);
+    let id = upgrade_card(&r.rt);
+    r.rt.send(Command::ConfirmChoice { id, option: None });
+    wait_until("turned down", || wish_status(&lib, track) == Some(WishlistStatus::Dismissed));
+    let item = lib.wishlist_for_track(track).unwrap().pop().unwrap();
+    assert_eq!(item.better_than, Some(500));
+    assert_eq!(item.next_try_at, None);
+    assert_eq!(*qobuz.fetched.lock().unwrap(), 0);
+}
+
+/// Anything of the track already on its way (here a plain download of
+/// another kind): no second search, whatever the file is.
+#[test]
+fn a_track_on_its_way_is_not_looked_for_twice() {
+    for quality in [500, score::SAVED_STREAM] {
+        let lib = Library::open_in_memory().unwrap();
+        let (track, artist, title) = gruppa(&lib);
+        let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+        own_file(&lib, r._dir.path(), track, Codec::Mp3, quality);
+        let qobuz = FakeSource::new(SourceKey::Qobuz);
+        qobuz.offers(&artist, &title, 3_000, flac());
+        r.rt.add_source(qobuz.clone());
+        wait_for(&r.rt, "the source", |s| s.downloads.sources.iter().any(|v| v.available));
+        let mut busy = nikgob_core::model::WishlistItem::new(WishlistStatus::Downloading, nikgob_library::now_ms());
+        busy.track_id = Some(track);
+        busy.title = Some(title.clone());
+        busy.origin = nikgob_core::model::WishlistOrigin::Like;
+        lib.put_wishlist_item(&busy).unwrap();
+
+        r.rt.send(Command::FindBetter(track));
+        wait_for(&r.rt, "the answer", |s| s.toasts.iter().any(|t| t.text == "Уже в «Хочу скачать»"));
+        let items = lib.wishlist_for_track(track).unwrap();
+        assert_eq!(items.len(), 1, "{quality}: no item of its own");
+        assert_eq!(items[0].status, WishlistStatus::Downloading, "{quality}: not restarted");
+        assert_eq!(*qobuz.searched.lock().unwrap(), 0, "{quality}");
+    }
+}

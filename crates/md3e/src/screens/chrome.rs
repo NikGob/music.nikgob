@@ -317,8 +317,14 @@ impl Chrome {
             A::Fetch => out.push(Command::DownloadTracks(vec![t.id])),
             // The whole album the track is from, the files it lacks.
             A::AlbumDownload => out.extend(t.release_id.map(Command::DownloadRelease)),
-            // Through the download sources, as the wishlist looks.
-            A::Torrents => out.push(Command::FindBetter(t.id)),
+            // A file: a better copy through the download sources, as the
+            // wishlist looks; no file: the indexer's search page.
+            A::Torrents if t.has_local => out.push(Command::FindBetter(t.id)),
+            A::Torrents => out.push(Command::SearchTorrents(format!(
+                "{} {}",
+                t.artist,
+                t.album.as_deref().unwrap_or(&t.title)
+            ))),
             A::ToMp3 => out.push(Command::FakeToMp3(t.id)),
             A::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(t.id)),
