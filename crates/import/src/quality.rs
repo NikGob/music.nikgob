@@ -226,20 +226,28 @@ pub fn convert_fake(
     new.file_hash = Some(hash);
     new.size_bytes = Some(size);
     new.origin = src.origin.clone();
-    let stored = lib
-        .add_source(&new)
-        .and_then(|n| lib.trash_source(src.id, Some(&trashed_at)).map(|()| n));
-    let new = match stored {
+    // Put the old file back; the new one goes.
+    let undo_files = || {
+        if let Err(e) = fsutil::move_file(&trashed, &path) {
+            log::warn!("cannot restore {} from Trash: {e}", path.display());
+        }
+        let _ = fsutil::remove_file(&dest);
+    };
+    let new = match lib.add_source(&new) {
         Ok(n) => n,
         Err(e) => {
-            // Put the old file back; the new one goes.
-            if let Err(e) = fsutil::move_file(&trashed, &path) {
-                log::warn!("cannot restore {} from Trash: {e}", path.display());
-            }
-            let _ = fsutil::remove_file(&dest);
+            undo_files();
             return Err(e.into());
         }
     };
+    if let Err(e) = lib.trash_source(src.id, Some(&trashed_at)) {
+        // The new row would point at a file that is gone.
+        if let Err(f) = lib.forget_source(new.id) {
+            log::warn!("the row of {} stays: {f}", dest.display());
+        }
+        undo_files();
+        return Err(e.into());
+    }
     let lrc = path.with_extension("lrc");
     let new_lrc = dest.with_extension("lrc");
     if lrc != new_lrc && long_path(&lrc).exists() {
@@ -281,15 +289,36 @@ pub fn restore_conversion(lib: &Library, trash_dir: &Path, c: &Conversion) -> Re
     if long_path(&original).exists() {
         return Err(ImportError::Other(format!("{} is taken", original.display())));
     }
+    // The MP3 goes to the Trash first: whatever fails after it is undone
+    // step by step, so the track never plays two live files and a failed
+    // undo can be tried again.
+    let mp3 = PathBuf::from(&c.mp3_locator);
+    let mp3_trash = if long_path(&mp3).exists() { Some(trash_file(trash_dir, &mp3)?) } else { None };
+    let mp3_files_back = |e: ImportError| {
+        if let Some(t) = &mp3_trash
+            && let Err(m) = fsutil::move_file(t, &mp3)
+        {
+            log::warn!("cannot put {} back from the Trash: {m}", mp3.display());
+        }
+        e
+    };
+    let mp3_trash_path = mp3_trash.as_ref().map(|t| t.to_string_lossy().into_owned());
+    lib.trash_source(c.mp3, mp3_trash_path.as_deref()).map_err(|e| mp3_files_back(e.into()))?;
+    let mp3_back = |e: ImportError| {
+        if let Err(m) = lib.restore_source(c.mp3) {
+            log::warn!("the row of {} stays in the Trash: {m}", mp3.display());
+        }
+        mp3_files_back(e)
+    };
     if let Some(dir) = original.parent() {
-        fsutil::create_dir_all(dir)?;
+        fsutil::create_dir_all(dir).map_err(|e| mp3_back(e))?;
     }
-    fsutil::move_file(&in_trash, &original)?;
+    fsutil::move_file(&in_trash, &original).map_err(|e| mp3_back(e))?;
     let put_back = |e: ImportError| {
         if let Err(m) = fsutil::move_file(&original, &in_trash) {
             log::warn!("cannot put {} back into the Trash: {m}", original.display());
         }
-        e
+        mp3_back(e)
     };
     let src = lib.restore_source(c.original).map_err(|e| put_back(e.into()))?;
     let check = lib.quality_check(c.original).ok().flatten();
@@ -305,14 +334,6 @@ pub fn restore_conversion(lib: &Library, trash_dir: &Path, c: &Conversion) -> Re
     if check.is_some() && let Err(e) = lib.set_quality_keep(src.id, true) {
         log::warn!("keeping {}: {e}", original.display());
     }
-    // The MP3 goes where the original was.
-    let mp3 = PathBuf::from(&c.mp3_locator);
-    let mp3_trash = if long_path(&mp3).exists() {
-        Some(trash_file(trash_dir, &mp3)?.to_string_lossy().into_owned())
-    } else {
-        None
-    };
-    lib.trash_source(c.mp3, mp3_trash.as_deref())?;
     // The lyrics file went along with the MP3 when its name differed.
     let lrc = mp3.with_extension("lrc");
     let back = original.with_extension("lrc");
@@ -321,4 +342,79 @@ pub fn restore_conversion(lib: &Library, trash_dir: &Path, c: &Conversion) -> Re
     }
     log::info!("{} is back from the Trash, {} went there", original.display(), mp3.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use nikgob_core::model::{ArtistCredit, Track};
+
+    use super::*;
+
+    fn check(made_from: Option<Codec>) -> QualityCheck {
+        QualityCheck {
+            verdict: Verdict::Transcoded,
+            cutoff_hz: 16_000.0,
+            steepness_db: 60.0,
+            origin: SoundOrigin::estimate(Verdict::Transcoded, 16_000.0),
+            sample_rate: 44_100,
+            spectrum_db: Vec::new(),
+            made_from,
+            file_size: 1,
+            file_mtime: 1,
+            checked_at: 1,
+        }
+    }
+
+    /// A FLAC turned into an MP3: the FLAC in the Trash, the MP3 live.
+    fn converted() -> (tempfile::TempDir, Library, Conversion, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&Track::new("Молли", ArtistCredit::single("Пошлая Молли", None))).unwrap();
+        let music = dir.path().join("Music");
+        std::fs::create_dir_all(&music).unwrap();
+        let trash = dir.path().join("Trash");
+        let flac_path = music.join("07 - Молли.flac");
+        std::fs::write(&flac_path, b"flac").unwrap();
+        let flac = lib
+            .add_source(&Source::new(track.id, SourceKind::LocalFile, flac_path.to_string_lossy(), Codec::Flac))
+            .unwrap();
+        lib.put_quality_check(flac.id, &check(None)).unwrap();
+        let mp3_path = music.join("07 - Молли.mp3");
+        std::fs::write(&mp3_path, b"mp3").unwrap();
+        let mp3 = lib
+            .add_source(&Source::new(track.id, SourceKind::LocalFile, mp3_path.to_string_lossy(), Codec::Mp3))
+            .unwrap();
+        lib.put_quality_check(mp3.id, &check(Some(Codec::Flac))).unwrap();
+        let in_trash = trash_file(&trash, &flac_path).unwrap();
+        lib.trash_source(flac.id, Some(&in_trash.to_string_lossy())).unwrap();
+        let c = lib.conversions().unwrap().into_iter().next().expect("the conversion");
+        (dir, lib, c, trash, mp3_path)
+    }
+
+    #[test]
+    fn an_undo_brings_the_original_back_and_trashes_the_mp3() {
+        let (_dir, lib, c, trash, mp3_path) = converted();
+        restore_conversion(&lib, &trash, &c).unwrap();
+        assert!(Path::new(&c.original_locator).exists());
+        assert!(!mp3_path.exists());
+        assert!(lib.get_source(c.original).unwrap().unwrap().trashed_at.is_none());
+        assert!(lib.get_source(c.mp3).unwrap().unwrap().trashed_at.is_some());
+        assert!(lib.conversions().unwrap().is_empty());
+    }
+
+    /// The original cannot come back (its folder cannot be made): the MP3
+    /// stays live and in its place, and the undo can be tried again.
+    #[test]
+    fn a_failed_undo_leaves_the_mp3_playing_and_can_be_tried_again() {
+        let (dir, lib, mut c, trash, mp3_path) = converted();
+        let blocker = dir.path().join("a file, not a folder");
+        std::fs::write(&blocker, b"x").unwrap();
+        c.original_locator = blocker.join("07 - Молли.flac").to_string_lossy().into_owned();
+        assert!(restore_conversion(&lib, &trash, &c).is_err());
+        assert!(mp3_path.exists(), "the MP3 is back in its place");
+        assert!(lib.get_source(c.mp3).unwrap().unwrap().trashed_at.is_none());
+        assert!(lib.get_source(c.original).unwrap().unwrap().trashed_at.is_some());
+        assert!(Path::new(&c.trash_path).exists(), "the original waits in the Trash");
+        assert_eq!(lib.conversions().unwrap().len(), 1, "still undoable");
+    }
 }

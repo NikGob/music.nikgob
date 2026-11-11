@@ -189,8 +189,8 @@ pub enum TrackAct {
     /// A file: its tags; no file: download it (no like).
     Fetch,
     AlbumDownload,
-    /// A file: a better copy through the download sources; no file: to
-    /// «Хочу скачать».
+    /// A file: a better copy through the download sources; no file: the
+    /// indexer's search page.
     Torrents,
     /// The lossless file surely holds an MP3: that MP3 takes its place.
     ToMp3,
@@ -764,8 +764,14 @@ impl PageState {
                     out.push(Command::DownloadRelease(r));
                 }
             }
-            // Through the download sources, as the wishlist looks.
-            A::Torrents => out.push(Command::FindBetter(track.id)),
+            // A file: a better copy through the download sources, as the
+            // wishlist looks; no file: the indexer's search page.
+            A::Torrents if track.has_local => out.push(Command::FindBetter(track.id)),
+            A::Torrents => out.push(Command::SearchTorrents(format!(
+                "{} {}",
+                track.artist,
+                track.album.as_deref().unwrap_or(&track.title)
+            ))),
             A::ToMp3 => out.push(Command::FakeToMp3(track.id)),
             A::FindSong => out.push(Command::FindSong { track: track.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(track.id)),

@@ -171,6 +171,15 @@ pub(crate) fn done_words(from: Option<&str>, to: Option<&str>) -> String {
     }
 }
 
+/// Something for a track is on its way or waits in «Подтверди»: an item of
+/// the track (`items`, of any kind) or an album item of its album
+/// (`album_items`) that searches, downloads or asks.
+pub(crate) fn on_its_way(items: &[WishlistItem], album_items: &[WishlistItem]) -> bool {
+    let busy = |i: &WishlistItem| matches!(i.status, WishlistStatus::Searching | WishlistStatus::Downloading | WishlistStatus::Confirm);
+    items.iter().any(|i| i.scope == WishlistScope::Track && busy(i))
+        || album_items.iter().any(|i| i.scope == WishlistScope::Album && busy(i))
+}
+
 /// The state of an item that looks for a better copy, for its row in
 /// «Хочу скачать»: `have` what its files are now («MP3 128», «MP3 128 у 6
 /// из 10»), `wanted` what is looked for, `next` when it looks again.
@@ -494,12 +503,13 @@ impl Worker {
         self.publish_wishlist();
     }
 
-    /// Nothing better this time (or the user kept the file): searched again
-    /// when the schedule says. One the user asked for by hand looks on as
-    /// any other from now on, and a search of it that found nothing
-    /// (`tell`) answers the click, whatever the toasts of the downloads
-    /// running by themselves are set to.
-    pub(super) fn upgrade_none(&mut self, id: WishlistId, tell: bool) {
+    /// Nothing better this time: searched again when the schedule says.
+    /// `found_nothing`: the search itself found nothing better; one the
+    /// user asked for by hand then answers the click (whatever the toasts
+    /// of the downloads running by themselves are set to) and looks on as
+    /// any other. Anything else (a download that failed, a source that
+    /// kept saying no) keeps it asking before it replaces the file.
+    pub(super) fn upgrade_none(&mut self, id: WishlistId, found_nothing: bool) {
         let now = Self::now();
         let next = next_search(self.upgrade_prefs().0, now).unwrap_or(now + RETRY_AFTER.as_millis() as i64);
         let mut asked = false;
@@ -507,17 +517,41 @@ impl Worker {
             i.status = WishlistStatus::NoTorrent;
             i.next_try_at = Some(next);
             i.note = Some("Лучше пока нет".into());
-            asked = i.better_than.take().is_some();
+            if found_nothing {
+                asked = i.better_than.take().is_some();
+            }
         });
         self.streaming.wish.upgrade_from.remove(&id);
         self.streaming.wish.upgrade_have.remove(&id);
         self.wish_line_drop(id);
-        if asked && tell {
+        if asked {
             let title = self.item_title(id);
             log::info!("upgrade: nothing better than the file of {title}");
             self.toast(format!("Лучше не нашёл: {title}"), None);
         }
         self.publish_wishlist();
+    }
+
+    /// «Оставить как есть» on a copy the user asked for by hand: it is
+    /// turned down (a click on «Найти качество лучше…» asks again); never
+    /// handed to the schedule, which may replace files without asking.
+    /// False for any other item.
+    pub(super) fn upgrade_kept(&mut self, id: WishlistId) -> bool {
+        let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { return false };
+        if item.origin != WishlistOrigin::Upgrade || item.better_than.is_none() {
+            return false;
+        }
+        log::info!("upgrade: the user keeps the file of {}", item.title.as_deref().unwrap_or("?"));
+        self.upgrade_forget(id);
+        self.streaming.wish.turned.remove(&id);
+        self.set_item(id, |i| {
+            i.status = WishlistStatus::Dismissed;
+            i.next_try_at = None;
+            i.note = Some("Оставил прежний файл".into());
+        });
+        self.wish_line_drop(id);
+        self.publish_wishlist();
+        true
     }
 
     /// «Найти качество лучше…» of `track`: a copy better than its file is
@@ -538,14 +572,27 @@ impl Worker {
         };
         let wishlist = v::Link::Route(v::Route::Downloads(v::DownloadsTab::Wishlist));
         let items = self.lib.wishlist_for_track(track).unwrap_or_default();
+        let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
+        // Something for the track on its way or waiting in «Подтверди»
+        // (its own item of any kind, or its album's): not a second one.
+        let album_items = release.map(|r| self.lib.wishlist_for_release(r).unwrap_or_default()).unwrap_or_default();
+        if on_its_way(&items, &album_items) {
+            self.download_toast(0, 1, None);
+            return;
+        }
         if file.quality_score <= score::SAVED_STREAM {
-            // Its item looks for a real file already.
-            let open = |i: &&WishlistItem| {
-                i.scope == WishlistScope::Track && !matches!(i.status, WishlistStatus::Done | WishlistStatus::Dismissed)
-            };
+            // Its item looks for a real file already: it looks again now.
+            let open = |i: &&WishlistItem| i.scope == WishlistScope::Track && i.status != WishlistStatus::Done;
             match items.iter().find(open) {
                 Some(i) => {
                     let (id, what) = (i.id, i.title.as_ref().map(|t| format!("«{t}»")));
+                    // One the user turned down is asked for again.
+                    self.set_item(id, |i| {
+                        if i.status == WishlistStatus::Dismissed {
+                            i.status = WishlistStatus::New;
+                            i.next_try_at = None;
+                        }
+                    });
                     self.wish_retry(id);
                     self.download_toast(1, 0, what);
                 }
@@ -559,24 +606,6 @@ impl Worker {
         }
         if !self.can_download() {
             self.toast_open("Нужен источник скачивания", "Настроить", v::Link::Setting(v::SettingLink::Torrents));
-            return;
-        }
-        // A better copy of it on its way or waiting in «Подтверди» (its
-        // own, or its album's).
-        let busy = |i: &WishlistItem| {
-            i.origin == WishlistOrigin::Upgrade
-                && matches!(i.status, WishlistStatus::Searching | WishlistStatus::Downloading | WishlistStatus::Confirm)
-        };
-        let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
-        let album_busy = release.is_some_and(|r| {
-            self.lib
-                .wishlist_for_release(r)
-                .unwrap_or_default()
-                .iter()
-                .any(|i| i.scope == WishlistScope::Album && busy(i))
-        });
-        if album_busy || items.iter().any(|i| i.scope == WishlistScope::Track && busy(i)) {
-            self.download_toast(0, 1, None);
             return;
         }
         let above = file.quality_score;
@@ -932,6 +961,22 @@ mod tests {
         assert_eq!(upgrade_job_words(0, 0, 6, 0, None), "скачанное не из этого альбома — ничего не добавил");
         assert_eq!(upgrade_job_words(3, 1, 2, 0, None), "заменено 3 · не лучше прежних 1 · не из этого альбома 2");
         assert!(!upgrade_job_words(0, 1, 0, 0, None).contains("дублей"));
+    }
+
+    /// Any item of the track that searches, downloads or asks (of any
+    /// kind), or such an album item of its album, holds a second search.
+    #[test]
+    fn a_track_is_on_its_way_by_any_item_of_it() {
+        use WishlistStatus as St;
+        let item = |st, scope| WishlistItem { scope, ..WishlistItem::new(st, 1) };
+        for st in [St::Searching, St::Downloading, St::Confirm] {
+            assert!(on_its_way(&[item(st, WishlistScope::Track)], &[]), "{st:?}");
+            assert!(on_its_way(&[], &[item(st, WishlistScope::Album)]), "{st:?}");
+            assert!(!on_its_way(&[], &[item(st, WishlistScope::Track)]), "another track of the album");
+        }
+        for st in [St::New, St::Waiting, St::NoTorrent, St::Failed, St::Dismissed, St::Done] {
+            assert!(!on_its_way(&[item(st, WishlistScope::Track)], &[item(st, WishlistScope::Album)]), "{st:?}");
+        }
     }
 
     /// The row says where the item stands in plain words.

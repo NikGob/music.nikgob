@@ -569,7 +569,13 @@ impl Resolver {
             let path = (s.kind == SourceKind::LocalFile).then(|| self.path(&s.locator));
             // Read with its gain when it started (once per file).
             let channels = path.as_deref().and_then(|p| self.facts.of(p).channels);
-            sound_details(s, path.as_deref(), channels, row.duration_ms, check.as_ref())
+            let mut d = sound_details(s, path.as_deref(), channels, row.duration_ms, check.as_ref());
+            // A check of another file than the one there now: no MP3 until
+            // the file is checked again.
+            if d.to_mp3 && !check.as_ref().zip(path.as_deref()).is_some_and(|(c, p)| crate::quality::check_fresh(p, c)) {
+                d.to_mp3 = false;
+            }
+            d
         });
         v::TrackInfo {
             track: Some(row.id),

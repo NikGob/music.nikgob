@@ -2118,7 +2118,10 @@ impl Worker {
                 } else if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) {
                     self.wish_later(id)
                 } else {
-                    self.no_torrent(id, true);
+                    // A better copy was found but did not come: no «nothing
+                    // better» for it.
+                    let tell = !self.is_upgrade(id);
+                    self.no_torrent(id, tell);
                     Next::NotFound
                 }
             }
@@ -2538,6 +2541,8 @@ impl Worker {
                 self.streaming.wish.doubtful.remove(&id);
                 self.wish_fetch(id, c);
             }
+            // A copy asked for by hand that the user keeps: turned down.
+            None if self.upgrade_kept(id) => {}
             // A source turned the item away: it may give it later.
             None if self.streaming.wish.turned.get(&id).is_some_and(|t| !t.is_empty()) => {
                 self.wish_later(id);
