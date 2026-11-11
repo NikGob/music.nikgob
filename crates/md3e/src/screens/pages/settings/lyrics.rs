@@ -39,8 +39,8 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<
 /// the edges), the pause in the song.
 fn look(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Вид текста");
-    // The tiles of `Area::Lyrics` come with its presets (TODO 36); until
-    // then the area has none and the row draws nothing.
+    // «Караоке · Спокойно · Прыжок · Чётко» (and «Свои»): live tiles; the
+    // one under the pointer is shown in the rows and on the stage.
     let mut preview = preset::row(ui, nikgob_view::presets::Area::Lyrics, p);
     let p: &mut Prefs = preview.as_mut().unwrap_or(p);
 
@@ -65,6 +65,12 @@ fn look(ui: &mut Ui, p: &mut Prefs) {
         }
         if let Some(v) = rows::slider(ui, Id::JumpSpeed, p.lyrics_jump_speed, Num::pct(0.5, 2.0, 0.05)) {
             p.lyrics_jump_speed = v;
+        }
+    });
+    // The sung words float up under karaoke.
+    child(ui, p.lyrics_style != 0, |ui| {
+        if let Some(v) = rows::slider(ui, Id::LyricsLift, p.lyrics_lift, Num::pct(0.0, 1.0, 0.05)) {
+            p.lyrics_lift = v;
         }
     });
     if let Some(v) = rows::slider(ui, Id::LyricsLead, p.lyrics_lead, Num::new(-0.5, 0.5, 0.05, 2, " с").signed()) {

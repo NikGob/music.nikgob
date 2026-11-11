@@ -1,7 +1,7 @@
 //! A group's presets (settings-v2-concept.md §1.2, §2.4): the group's first
 //! row, in «Просто» too. Buttons where there is no stage, live tiles for
-//! the track screen; «Свои» after them while there are values of the
-//! user's own.
+//! the track screen and the look of the lyrics; «Свои» after them while
+//! there are values of the user's own.
 //!
 //! The preset under the pointer is shown at once, before it is applied: the
 //! stage draws it, and the rows it changes show the preset's values (nothing
@@ -15,7 +15,7 @@ use nikgob_view::{PrefPatch, Prefs};
 use super::super::connected;
 use super::super::settings_help::{self, Level, SettingId as Id};
 use super::rows;
-use crate::screens::{ambient, bg_shapes, now_playing};
+use crate::screens::{ambient, bg_shapes, lyrics, now_playing};
 use crate::{
     Icon, Theme, TypeRole,
     components::{IconButton, Size, anim},
@@ -151,6 +151,8 @@ fn buttons(ui: &mut Ui, area: Area, custom: bool, current: usize) -> (Option<usi
 
 /// A tile's card.
 const TILE: egui::Vec2 = vec2(112.0, 72.0);
+/// The narrowest a tile gets where the row has no room for them all.
+const TILE_MIN_W: f32 = 88.0;
 
 /// A still tile as it was last drawn: what it showed, and its shapes.
 struct Snapshot {
@@ -219,13 +221,18 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
     let mut picked = None;
     let mut rects = Vec::with_capacity(n);
     let label_h = TypeRole::LabelLarge.style().line_height;
+    // As wide as the row has room for beside the ⓘ: four presets and
+    // «Свои» would stand past a column beside the stage.
+    let room = ui.available_width() - 8.0 - settings_help::BTN;
+    let gaps = 12.0 * n.saturating_sub(1) as f32;
+    let tile = vec2(((room - gaps) / n.max(1) as f32).clamp(TILE_MIN_W, TILE.x), TILE.y);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         for i in 0..n {
             let name = area.names().get(i).copied().unwrap_or(CUSTOM);
-            let (rect, _) = ui.allocate_exact_size(vec2(TILE.x, TILE.y + 6.0 + label_h), Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(vec2(tile.x, tile.y + 6.0 + label_h), Sense::hover());
             let resp = ui.interact(rect, egui::Id::new(("set-preset-tile", area, i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-            let card = Rect::from_min_size(rect.min, TILE);
+            let card = Rect::from_min_size(rect.min, tile);
             let selected = i == current;
             let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(card));
             painter.rect_filled(card, shape::MEDIUM, s.surface_container_high);
@@ -271,10 +278,19 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
     (picked, rects)
 }
 
+/// Where a still lyrics tile stands in its sample's loop: the line half
+/// sung, its front (and lift, or jump) in the middle of it.
+const LYRICS_STILL_AT: f64 = 1.25;
+
 /// The tile's sample: the glow, the shapes, the cover with its ring under
-/// `shown`; on a made-up beat while `moving`, else at rest.
+/// `shown` (the line being sung for the lyrics' looks); on a made-up beat
+/// while `moving`, else at rest.
 fn sample(ui: &Ui, area: Area, i: usize, card: Rect, shown: &Prefs, moving: bool) {
     let ctx = ui.ctx();
+    if area == Area::Lyrics {
+        lyrics::preview_at(ui, card, shown, (!moving).then_some(LYRICS_STILL_AT));
+        return;
+    }
     let app = Theme::get(ctx);
     Theme::set(ctx, app.with_reduced_motion(app.reduced_motion || !moving));
     let t = anim::now(ctx) as f32;

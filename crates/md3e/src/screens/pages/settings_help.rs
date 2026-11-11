@@ -87,6 +87,8 @@ pub enum SettingId {
     LyricsLead,
     LyricsCascade,
     LyricsGlow,
+    /// «Подъём спетого»: under karaoke the sung words float up a little.
+    LyricsLift,
     LyricsGap,
     LyricsGapWaves,
     /// «Высота волн» and «Размер индикатора» of the pause ring.
@@ -460,8 +462,8 @@ impl SettingId {
             | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | Marks => {
                 TAB_MUSIC
             }
-            LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsScale | LyricsLead | LyricsDim
-            | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade | LyricsGap
+            LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsScale | LyricsLead
+            | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade | LyricsGap
             | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | WaveFallback | LyricsReturn | LyricsGenius
             | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
             | LyricsModels => TAB_LYRICS,
@@ -527,7 +529,7 @@ impl SettingId {
             KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
             | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere
             // How strong, how fast, how long.
-            | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsDim | LyricsSoftDepth | LyricsSoftStrength
+            | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsDim | LyricsSoftDepth | LyricsSoftStrength
             | LyricsSoftFade | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsReturn | CoverDir | CoverSpinSpeed
             | CoverPulseStrength | RingSpin | RingDir | RingSpinSpeed | RingBeat | AmbientStrength | BgCount | BgSize
             | BgOpacity | BgSpeed | BgReact | BgColors | BgHue | NpVolumeHold | TapWait | ToastTime
@@ -609,6 +611,7 @@ impl SettingId {
             LyricsLead => "Опережение подсветки",
             LyricsCascade => "Каскад строк",
             LyricsGlow => "Свечение",
+            LyricsLift => "Подъём спетого",
             LyricsGap => "Индикатор паузы",
             LyricsGapWaves => "Длина волны",
             LyricsGapHeight => "Высота волн",
@@ -784,7 +787,7 @@ impl SettingId {
             RingSpinSpeed => "Сколько секунд занимает один оборот кольца. Меньше — быстрее.",
             HomeSections => "Какие разделы есть на главной и в каком порядке. Стрелки двигают раздел, переключатель убирает его. Раздел, которому нечего показать, не виден и включённым.",
             Preset(v::presets::Area::Recs) => "Сколько новой музыки в радио, миксах и автовоспроизведении — одним выбором. «Свои» возвращает твои значения.",
-            Preset(v::presets::Area::Lyrics) => "Готовые наборы для вида текста. «Свои» возвращает твои значения.",
+            Preset(v::presets::Area::Lyrics) => "Готовые виды текста: как загорается и движется строка, которую поют, и как стоят остальные. Размер текста, опережение и пауза не меняются. «Свои» возвращает твои значения.",
             Preset(v::presets::Area::Track) => "Готовые наборы для экрана трека: обложка, кольцо и фон. Набор фигур, направления, скорости и цвета не меняются. «Свои» возвращает твои значения.",
             Preset(v::presets::Area::Sources) => "Какие источники включены. Порядок не меняется. «Свои» возвращает твои переключатели.",
             Preset(v::presets::Area::Seeding) => "Сколько и как долго раздавать скачанное торрентами. «Свои» возвращает твои значения.",
@@ -806,7 +809,7 @@ impl SettingId {
             BgHue => "Цвет фигур для варианта «Свой». Яркость подстраивается под тему, чтобы фон не спорил с интерфейсом.",
             LyricsStyle => "Как выделяется строка, которую сейчас поют.",
             WaveFallback => "У некоторых текстов известно только, когда начинается строка, а время слов нет. Что делать с такими текстами.",
-            WaveJump => "Как высоко подпрыгивают буквы или слова в анимации «Волна». 0 — они только загораются.",
+            WaveJump => "Как высоко подпрыгивают слоги, буквы или слова в анимации «Волна»: взлетают пружиной чуть выше и опускаются с лёгким отскоком. 0 — они только загораются.",
             JumpSpeed => "Как быстро буква или слово в «Волне» взлетает, когда его начинают петь, и встаёт на место. Больше — резче и короче.",
             LightSpeed => "Как быстро загорается буква или слово, когда его поют: от плавного появления до мгновенного. В караоке — насколько мягкий край у подсветки.",
             LyricsSmooth => "Подсветка идёт по времени слогов и слов. Чем плавнее, тем ровнее она скользит по строке: короткий слог не проскакивает, а протяжный всё равно тянется дольше. В «Волне» соседние буквы поднимаются вместе с поющейся. 0% — строго по времени.",
@@ -815,6 +818,7 @@ impl SettingId {
             LyricsLead => "На сколько подсветка опережает голос. Глаз читает чуть раньше, чем слышит, поэтому подсветка, которая загорается немного заранее, кажется точной. Если она торопится — уменьшите, если отстаёт — увеличьте. Перемотка и время в тексте не меняются.",
             LyricsCascade => "При прокрутке дальние строки догоняют с небольшой задержкой — текст движется мягко, волной.",
             LyricsGlow => "Уже спетая часть строки слегка светится.",
+            LyricsLift => "В караоке спетые слова мягко приподнимаются над строкой, пока подсветка проходит по ним. 0 % — строка стоит ровно.",
             LyricsGap => "Когда в песне долго нет слов, между строками крутится кружок ожидания. Здесь выбирается его вид.",
             LyricsGapWaves => "Сколько волн на кружке ожидания. Больше — волны мельче и чаще.",
             LyricsGapHeight => "Насколько высокие волны на кружке ожидания.",
@@ -991,6 +995,12 @@ impl SettingId {
                 c!("Сбалансировано", "Немного новой музыки в радио и миксах, изредка песня наугад."),
                 c!("Больше нового", "Больше новой и неслышанной музыки, песни наугад чаще."),
             ],
+            Self::Preset(Area::Lyrics) => &[
+                c!("Караоке", "Спетое заливается по слогам мягким краем и чуть приподнимается, остальные строки приглушены, края текста мягкие."),
+                c!("Спокойно", "Строка, которую поют, загорается целиком, внутри ничего не движется. Удобно читать."),
+                c!("Прыжок", "Каждый слог подпрыгивает пружиной, когда его поют, и опускается с лёгким отскоком; спетое светится."),
+                c!("Чётко", "Резкая подсветка буква за буквой точно по времени, без свечения и подъёма; остальные строки хорошо видны."),
+            ],
             Self::Preset(Area::Track) => &[
                 c!("Строго", "Квадратная обложка без кольца, ровное свечение фона."),
                 c!("Живо", "Обложка-фигура вращается и дышит в такт, кольцо, свечение под звук."),
@@ -1096,7 +1106,7 @@ impl SettingId {
             Self::LyricsStyle => &[
                 c!("Караоке", "Строка закрашивается слева направо, как в караоке: буква за буквой или слово за словом."),
                 c!("Фокус", "Строка, которую поют, выходит вперёд, а остальные отходят назад; ярко горит только слово или слог, который поют сейчас."),
-                c!("Волна", "Буквы или слова по очереди загораются и поднимаются гребнем, который идёт по строке за голосом; спетое опускается и остаётся чуть выше."),
+                c!("Волна", "Каждый слог, буква или слово подпрыгивает, когда его поют: взлетает пружиной, чуть набухая, и опускается с лёгким отскоком; спетое остаётся чуть выше строки."),
             ],
             Self::LyricsUnit => &[
                 c!("Буквы", "Караоке закрашивает слова буква за буквой, на протяжном слоге задерживаясь на гласной. В «Волне» прыгает каждая буква, «Фокус» зажигает строку целиком."),
@@ -1418,7 +1428,8 @@ impl SettingId {
             Ring | RingStyle | RingBeat => Preview::Ring,
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
-            LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit => Preview::Lyrics,
+            LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit
+            | LyricsLift => Preview::Lyrics,
             LyricsSoftEdges | LyricsSoftStrength | LyricsSoftDepth | LyricsSoftFade => Preview::Edges,
             LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize => Preview::Gap,
             LyricsCountdown => Preview::Countdown,
@@ -1472,8 +1483,8 @@ impl SettingId {
             }
             ProgressWave => Part::Progress,
             NpVolume | NpVolumeHold => Part::Volume,
-            LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLead | LyricsDim | LyricsGlow
-            | WaveFallback => Part::LyricsLine,
+            LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsLead | LyricsDim
+            | LyricsGlow | WaveFallback => Part::LyricsLine,
             LyricsScale | LyricsCascade | LyricsReturn => Part::LyricsColumn,
             LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade => Part::LyricsEdges,
             LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown => Part::LyricsPause,
@@ -1505,6 +1516,7 @@ impl SettingId {
         let mut q = p.clone();
         match self {
             WaveJump | JumpSpeed if q.lyrics_style != 2 => q.lyrics_style = 2,
+            LyricsLift if q.lyrics_style != 0 => q.lyrics_style = 0,
             LyricsGapWaves | LyricsGapHeight if q.lyrics_gap_style % 2 == 0 => q.lyrics_gap_style += 1,
             LyricsSmooth | LightSpeed if q.lyrics_style == 1 && q.lyrics_unit == v::LYRICS_BY_LETTERS => {
                 q.lyrics_unit = v::LYRICS_BY_SYLLABLES;
@@ -1591,6 +1603,17 @@ pub fn preset_rows(f: v::presets::Field) -> Vec<SettingId> {
         F::StreamAnalysis => vec![S::StreamAnalysis],
         F::LyricsSeparate => vec![S::LyricsSeparate],
         F::LyricsDeep => vec![S::LyricsDeep],
+        F::LyricsStyle => vec![S::LyricsStyle],
+        F::LyricsUnit => vec![S::LyricsUnit],
+        F::LyricsLightSpeed => vec![S::LightSpeed],
+        F::LyricsSmooth => vec![S::LyricsSmooth],
+        F::LyricsWaveJump => vec![S::WaveJump],
+        F::LyricsJumpSpeed => vec![S::JumpSpeed],
+        F::LyricsLift => vec![S::LyricsLift],
+        F::LyricsDim => vec![S::LyricsDim],
+        F::LyricsGlow => vec![S::LyricsGlow],
+        F::LyricsCascade => vec![S::LyricsCascade],
+        F::LyricsSoftEdges => vec![S::LyricsSoftEdges],
     }
 }
 
@@ -1625,6 +1648,17 @@ fn field_label(f: v::presets::Field) -> &'static str {
         F::StreamAnalysis => "Анализ стримов",
         F::LyricsSeparate => "Отделять голос",
         F::LyricsDeep => "Глубокие субтитры",
+        F::LyricsStyle => "Анимация",
+        F::LyricsUnit => "Шаг",
+        F::LyricsLightSpeed => "Скорость подсветки",
+        F::LyricsSmooth => "Плавность",
+        F::LyricsWaveJump => "Высота прыжка",
+        F::LyricsJumpSpeed => "Скорость прыжка",
+        F::LyricsLift => "Подъём спетого",
+        F::LyricsDim => "Приглушение",
+        F::LyricsGlow => "Свечение",
+        F::LyricsCascade => "Каскад",
+        F::LyricsSoftEdges => "Мягкие края",
     }
 }
 
@@ -1649,6 +1683,20 @@ fn field_text(f: v::presets::Field, value: &v::presets::FieldValue) -> String {
             v::presets::Field::SeedDays => format!("{n} дн."),
             _ => n.to_string(),
         },
+        // The look of the lyrics: shares, in percent.
+        V::F32(x)
+            if matches!(
+                f,
+                v::presets::Field::LyricsLightSpeed
+                    | v::presets::Field::LyricsSmooth
+                    | v::presets::Field::LyricsWaveJump
+                    | v::presets::Field::LyricsJumpSpeed
+                    | v::presets::Field::LyricsLift
+                    | v::presets::Field::LyricsDim
+            ) =>
+        {
+            format!("{} %", (x * 100.0).round())
+        }
         V::F32(x) if x.abs() < 1e-3 => "без предела".to_owned(),
         V::F32(x) => format!("{x:.1}").replace('.', ","),
         V::Shape(v::CoverShape::Original) => "Квадрат".to_owned(),
@@ -2837,8 +2885,8 @@ mod tests {
             assert_eq!(id.level(), Level::Simple, "{id:?}");
         }
         for id in [
-            S::LyricsSmooth, S::LightSpeed, S::WaveJump, S::JumpSpeed, S::LyricsDim, S::LyricsSoftDepth, S::LyricsSoftStrength,
-            S::LyricsSoftFade, S::LyricsGapWaves, S::LyricsGapHeight, S::LyricsGapSize, S::LyricsReturn, S::WaveFallback,
+            S::LyricsSmooth, S::LightSpeed, S::WaveJump, S::JumpSpeed, S::LyricsLift, S::LyricsDim, S::LyricsSoftDepth,
+            S::LyricsSoftStrength, S::LyricsSoftFade, S::LyricsGapWaves, S::LyricsGapHeight, S::LyricsGapSize, S::LyricsReturn, S::WaveFallback,
             S::LyricsModels, S::CoverDir, S::CoverSpinSpeed, S::CoverPulseStrength, S::RingSpin, S::RingDir, S::RingSpinSpeed,
             S::RingBeat, S::AmbientStrength, S::BgCount, S::NpVolumeHold, S::TapWait, S::ToastTime, S::StreamCache,
             S::SeedRatio, S::FpsLimit,
@@ -2990,6 +3038,10 @@ mod tests {
         assert_eq!(field_text(Field::SeedRatio, &FieldValue::F32(3.5)), "3,5");
         assert_eq!(field_text(Field::Ambient, &FieldValue::Ambient(v::Ambient::Reactive)), "Под звук");
         assert_eq!(field_text(Field::CoverShape, &FieldValue::Shape(v::CoverShape::Original)), "Квадрат");
+        assert_eq!(field_text(Field::LyricsStyle, &FieldValue::U8(2)), "Волна");
+        assert_eq!(field_text(Field::LyricsUnit, &FieldValue::U8(nikgob_view::LYRICS_BY_SYLLABLES)), "Слоги");
+        assert_eq!(field_text(Field::LyricsLift, &FieldValue::F32(0.0)), "0 %");
+        assert_eq!(field_text(Field::LyricsLightSpeed, &FieldValue::F32(0.55)), "55 %");
     }
 
     /// The new knobs of the track screen know their stage part, and the

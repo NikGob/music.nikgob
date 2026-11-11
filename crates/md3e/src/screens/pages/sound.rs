@@ -203,12 +203,10 @@ pub(crate) fn overlay(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) 
     }
     ctx.data_mut(|d| d.insert_temp(key(), panel));
     if now != was {
-        out.push(Command::SetPrefs(Box::new(Prefs {
-            eq_on: now.0,
-            eq_gains: now.1,
-            keep_timbre: now.2,
-            ..state.prefs.clone()
-        })));
+        // Only what the panel changed: the frame's prefs may be older than
+        // a change still on its way.
+        let after = Prefs { eq_on: now.0, eq_gains: now.1, keep_timbre: now.2, ..state.prefs.clone() };
+        out.push(Command::SetPref(nikgob_view::PrefPatch::Edit { before: Box::new(state.prefs.clone()), after: Box::new(after) }));
     }
 }
 

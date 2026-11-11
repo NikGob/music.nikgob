@@ -537,8 +537,11 @@ mod tests {
 
     #[test]
     fn the_preamp_keeps_a_full_scale_sine_at_full_scale() {
-        let presets: [[f32; EQ_BANDS]; 3] = [
+        let presets: [[f32; EQ_BANDS]; 5] = [
             [0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            // «Бас» and «Мощный бас»: the strongest ready boosts.
+            READY[0],
+            READY[1],
             [12.0; EQ_BANDS],
             [12.0, 12.0, 12.0, 0.0, -12.0, -12.0, 0.0, 12.0, 12.0, 12.0],
         ];
@@ -555,6 +558,31 @@ mod tests {
                 assert!(top <= 1.02, "{gains:?} at {freq} Hz: {top}");
             }
         }
+    }
+
+    /// The strongest bass boost has its headroom: the preamp takes the
+    /// whole boost off first, so a full-scale bass note through it comes out
+    /// at full scale, not clipped, and a mid note is that much quieter.
+    #[test]
+    fn a_strong_bass_boost_comes_with_its_headroom() {
+        let bass = READY[1];
+        let pre = eq_preamp_db(&bass);
+        let top = bass.iter().fold(0.0f32, |m, g| m.max(*g));
+        assert!(pre <= -top + 0.02, "{pre} against +{top} dB");
+        let sh = Shared::new();
+        let mut eq = Eq::new();
+        eq.configure(RATE);
+        set(&sh, true, bass, pre);
+        let out = run(&mut eq, &sh, 60.0, 1.0, 0, RATE as usize * 2);
+        let low = peak(&out[RATE as usize * 2..]);
+        assert!(low <= 1.02 && low > 0.9, "60 Hz: {low}");
+        let sh = Shared::new();
+        let mut eq = Eq::new();
+        eq.configure(RATE);
+        set(&sh, true, bass, pre);
+        let out = run(&mut eq, &sh, 2000.0, 1.0, 0, RATE as usize * 2);
+        let mid = peak(&out[RATE as usize * 2..]);
+        assert!((20.0 * mid.log10() - pre).abs() < 0.3, "2 kHz: {mid}");
     }
 
     #[test]
@@ -579,12 +607,17 @@ mod tests {
             .fold(0.0, f64::max)
     }
 
-    /// The editor's ready curves but the flat one.
-    const READY: [[f32; EQ_BANDS]; 4] = [
-        [0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, -1.0, 0.0, 2.0, 2.0, 0.0, 0.0, 0.0],
-        [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0],
-        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -2.0, -3.0, 0.0],
+    /// The editor's ready curves but the flat one (nikgob-view's
+    /// `EQ_PRESETS`): «Бас», «Мощный бас», «Вокал», «Яркость», «Ночью»,
+    /// «Наушники», «Тёплый».
+    const READY: [[f32; EQ_BANDS]; 7] = [
+        [5.5, 7.0, 5.0, 1.5, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [7.5, 9.0, 6.5, 2.0, -1.5, -0.5, 0.0, 0.0, 0.0, 0.0],
+        [-2.0, -2.0, -1.0, 0.0, 1.0, 2.5, 3.5, 2.5, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 5.0, 6.0],
+        [5.0, 6.0, 3.5, 0.5, -1.0, 0.0, 0.0, 1.5, 3.0, 3.5],
+        [3.0, 4.0, 2.5, 0.5, -1.0, 0.0, 1.0, 1.5, 0.0, -1.0],
+        [1.5, 2.0, 2.0, 1.0, 0.0, 0.0, -1.0, -2.0, -3.0, -3.5],
     ];
 
     fn alternating(db: f32) -> [f32; EQ_BANDS] {
@@ -640,8 +673,9 @@ mod tests {
         assert!(fitted[4] < -1.0 && fitted[4] > -1.4, "{fitted:?}");
         assert!(fitted[6] < -1.0 && fitted[6] > -1.4, "{fitted:?}");
         assert!(fitted[0].abs() < 0.01 && fitted[9].abs() < 0.01, "{fitted:?}");
-        // The numbers the editor's own copy of the fit is held to as well.
-        let bass = eq_filter_gains(&READY[0]);
+        // The numbers the editor's own copy of the fit is held to as well
+        // (the old bass curve).
+        let bass = eq_filter_gains(&[0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         for (bell, expected) in bass.iter().zip([-0.76, 3.89, 1.33, -0.38, -0.01]) {
             assert!((bell - expected).abs() < 0.03, "{bass:?}");
         }
@@ -656,8 +690,9 @@ mod tests {
         for curve in READY {
             let fitted = eq_filter_gains(&curve);
             assert_eq!(fitted, eq_filter_gains(&curve));
+            // A steep shelf pulls its neighbours' bells apart a little more.
             for (bell, set) in fitted.iter().zip(curve) {
-                assert!((bell - set).abs() < 1.0, "{curve:?}: {fitted:?}");
+                assert!((bell - set).abs() < 2.5, "{curve:?}: {fitted:?}");
             }
             assert!(worst_miss(&Layout::new(NOMINAL_RATE), &curve) < 0.02);
             // Nothing stands above the highest band by more than a hair.

@@ -210,7 +210,8 @@ pub const ALL: &[SettingId] = {
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
         MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, RadioSource,
         // Тексты.
-        LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsScale, LyricsLead, LyricsDim, LyricsCascade,
+        Preset(Area::Lyrics), LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsLift, LyricsScale, LyricsLead,
+        LyricsDim, LyricsCascade,
         LyricsGlow, LyricsSoftEdges, LyricsSoftDepth, LyricsSoftStrength, LyricsSoftFade, LyricsGap, LyricsGapWaves, LyricsGapHeight,
         LyricsGapSize, LyricsCountdown, WaveFallback, LyricsReturn, LyricsGenius, SaveLyrics, LyricsCheck, LyricsWordsPlaying,
         LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
@@ -316,6 +317,7 @@ fn spec(id: SettingId) -> Spec {
         S::BgReact => Spec::Slider(|p| &mut p.bg_shapes_react, 0.0, 2.0, 0.05),
         S::WaveJump => Spec::Slider(|p| &mut p.lyrics_wave_jump, 0.0, 2.0, 0.1),
         S::JumpSpeed => Spec::Slider(|p| &mut p.lyrics_jump_speed, 0.5, 2.0, 0.05),
+        S::LyricsLift => Spec::Slider(|p| &mut p.lyrics_lift, 0.0, 1.0, 0.05),
         S::LightSpeed => Spec::Slider(|p| &mut p.lyrics_light_speed, 0.0, 1.0, 0.05),
         S::LyricsSmooth => Spec::Slider(|p| &mut p.lyrics_smooth, 0.0, 1.0, 0.05),
         S::LyricsDim => Spec::Slider(|p| &mut p.lyrics_dim, 0.0, 1.0, 0.05),
@@ -653,6 +655,7 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
             }
         }
         S::WaveJump | S::JumpSpeed => p.lyrics_style = 2,
+        S::LyricsLift => p.lyrics_style = 0,
         S::LyricsSoftStrength | S::LyricsSoftDepth | S::LyricsSoftFade => p.lyrics_soft_edges = true,
         S::LyricsGapWaves | S::LyricsGapHeight => {
             if !matches!(p.lyrics_gap_style, 1 | 3) {
@@ -702,8 +705,8 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::Preset(Area::Track) => vec![Np, NpPaused],
         S::Preset(Area::Recs) | S::HomeSections => vec![Home],
         S::BgShapes | S::BgCount | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue => vec![Np],
-        S::LyricsStyle | S::LyricsUnit | S::WaveFallback | S::WaveJump | S::JumpSpeed | S::LightSpeed | S::LyricsSmooth
-        | S::LyricsDim | S::LyricsScale | S::LyricsLead | S::LyricsGlow | S::LyricsCascade | S::LyricsSoftEdges
+        S::Preset(Area::Lyrics) | S::LyricsStyle | S::LyricsUnit | S::WaveFallback | S::WaveJump | S::JumpSpeed | S::LyricsLift
+        | S::LightSpeed | S::LyricsSmooth | S::LyricsDim | S::LyricsScale | S::LyricsLead | S::LyricsGlow | S::LyricsCascade | S::LyricsSoftEdges
         | S::LyricsSoftStrength | S::LyricsSoftDepth | S::LyricsSoftFade => vec![NpLyrics],
         S::LyricsGap | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize => vec![NpLyricsGap],
         S::LyricsCountdown => vec![NpLyricsCountdown],
@@ -732,6 +735,8 @@ pub fn animated(id: SettingId) -> bool {
             | S::CoverPulseStrength
             | S::RingSpinSpeed
             | S::Preset(Area::Track)
+            | S::Preset(Area::Lyrics)
+            | S::LyricsLift
             | S::CoverSpin
             | S::CoverDir
             | S::CoverPulse
@@ -903,7 +908,7 @@ mod tests {
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
             | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
             | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth
-            | S::LightSpeed | S::WaveJump | S::JumpSpeed | S::LyricsScale | S::LyricsLead | S::LyricsDim | S::LyricsCascade
+            | S::LightSpeed | S::WaveJump | S::JumpSpeed | S::LyricsLift | S::LyricsScale | S::LyricsLead | S::LyricsDim | S::LyricsCascade
             | S::LyricsGlow | S::LyricsSoftEdges | S::LyricsSoftDepth | S::LyricsSoftStrength | S::LyricsSoftFade | S::LyricsGap
             | S::LyricsGapWaves | S::LyricsGapHeight | S::LyricsGapSize | S::LyricsCountdown | S::WaveFallback | S::LyricsReturn
             | S::LyricsGenius | S::SaveLyrics | S::LyricsCheck | S::LyricsWordsPlaying | S::LyricsLinesAuto | S::LyricsStreams

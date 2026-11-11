@@ -125,7 +125,8 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     // «Перемешивание остаётся включённым» became a rule by the kind of
     // list: off, every kind keeps playing in order.
     let keep_shuffle = value.get("list_shuffle").is_none().then(|| value.get("keep_shuffle").and_then(|v| v.as_bool())).flatten();
-    let mut prefs: Prefs = serde_json::from_value(value)?;
+    // A field this build cannot read takes its default, not the whole file.
+    let mut prefs = Prefs::from_json_lenient(value)?;
     if legacy { prefs.np_slot = slot; }
     if let Some(keep) = keep_shuffle {
         prefs.list_shuffle = nikgob_view::ListShuffles::from_keep(keep);
@@ -1019,8 +1020,8 @@ mod prefs_tests {
         assert_eq!(again, old);
         let d = prefs_of(None);
         assert!(d.lyrics_words_playing && (d.lyrics_lead - nikgob_view::LYRICS_LEAD).abs() < 1e-6);
-        // The soft edges come off, with gentle settings for when they are on.
-        assert!(!d.lyrics_soft_edges && d.lyrics_soft_strength < 0.5 && d.lyrics_soft_depth < 0.35 && d.lyrics_soft_fade < 0.6);
+        // The soft edges are on (the «Караоке» look), with gentle settings.
+        assert!(d.lyrics_soft_edges && d.lyrics_soft_strength < 0.5 && d.lyrics_soft_depth < 0.35 && d.lyrics_soft_fade < 0.6);
     }
 
 
@@ -1048,7 +1049,7 @@ mod prefs_tests {
         let p = parse_prefs(br#"{"lyrics_style":2,"lyrics_rev":2}"#).unwrap();
         assert!(!p.lyrics_by_words && p.lyrics_soft_edges && (p.lyrics_soft_strength - 1.0).abs() < 1e-6);
         let d = prefs_of(None);
-        assert!(d.lyrics_style == 0 && !d.lyrics_by_words && !d.lyrics_soft_edges);
+        assert!(d.lyrics_style == 0 && !d.lyrics_by_words && d.lyrics_soft_edges);
     }
 
     /// Revision 4: «По слогам» is the unit of the lyrics' animations; prefs
@@ -1130,7 +1131,7 @@ mod prefs_tests {
         assert_eq!(read.settings_rev, SETTINGS_REV);
         assert_eq!(read.settings_deep, option_env!("NIKGOB_RELEASE").is_none());
         let kept: Vec<_> = read.custom_presets.keys().copied().collect();
-        assert_eq!(kept, [Area::Recs, Area::Track, Area::Sources, Area::Seeding, Area::Load]);
+        assert_eq!(kept, [Area::Recs, Area::Lyrics, Area::Track, Area::Sources, Area::Seeding, Area::Load]);
         // «Свои» gives the same values back.
         assert_eq!(Area::Track.custom(&read).unwrap(), read);
         // Read again, nothing more changes.
