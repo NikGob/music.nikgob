@@ -28,9 +28,10 @@ use std::collections::{HashMap, HashSet};
 use nikgob_core::model::{ArtistId, EventType, TrackId};
 use nikgob_core::streaming::StreamTrack;
 use nikgob_recs::mixes::{Builder, Kept, MIN_SONGS, Mix, MixKey, Settings};
-use nikgob_recs::profiles::{LaneKey, NameStyle};
+use nikgob_recs::mix_new::{self, NewCandidate};
+use nikgob_recs::profiles::NameStyle;
 use nikgob_recs::tiles::franchise;
-use nikgob_recs::{Lang, Live, Session, TilesInput};
+use nikgob_recs::{Live, Session, TilesInput};
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
@@ -53,10 +54,6 @@ pub(super) const LONG_MS: u32 = nikgob_recs::mixes::LONG_MS;
 /// «На повторе» looks this far back (30 once the history is longer).
 const REPEAT_DAYS_SHORT: i64 = 14;
 const REPEAT_DAYS_LONG: i64 = 30;
-/// About every fifth song of a mix is new «С новым» before anything was
-/// heard; then the share its taste profile's appetite draws
-/// ([`nikgob_recs::NewLog::share`], by the profile's key).
-const NEW_EVERY: usize = 5;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -88,19 +85,10 @@ impl LaneHome {
         use nikgob_recs::{Item, Pick, Reason};
         let n = if with_new { self.new.len() } else { 0 };
         let len = self.tracks.len();
-        // The gaps after place k (k ≥ 1): between two anchors.
-        let gaps: Vec<usize> = (1..len.saturating_sub(1)).filter(|&k| self.anchors.get(k) == Some(&true) && self.anchors.get(k + 1) == Some(&true)).collect();
-        let mut after: HashSet<usize> = HashSet::new();
-        let mut placed = 0;
-        for j in 0..n.min(gaps.len()) {
-            // The gap nearest the even spot of the j-th new song, free.
-            let spot = (j + 1) * len / (n + 1);
-            if let Some(&g) = gaps.iter().filter(|g| !after.contains(g) && !after.contains(&(*g - 1)) && !after.contains(&(*g + 1))).min_by_key(|g| g.abs_diff(spot)) {
-                after.insert(g);
-                placed += 1;
-            }
-        }
-        let mut out = Vec::with_capacity(len + placed);
+        // The anchors of every song (a mix kept from before may lack some).
+        let anchors: Vec<bool> = (0..len).map(|k| self.anchors.get(k) == Some(&true)).collect();
+        let after: HashSet<usize> = nikgob_recs::mix_new::places(&anchors, n).into_iter().collect();
+        let mut out = Vec::with_capacity(len + after.len());
         let mut new = self.new.iter();
         for (k, t) in self.tracks.iter().enumerate() {
             out.push(Pick { item: Item::Track(*t), reason: Reason::Favourite });
@@ -174,6 +162,10 @@ struct DayMixesCache {
     history: bool,
     local_only: bool,
     kept: Kept,
+    /// «Преимущественно новые песни» they were drawn under
+    /// ([`MixPrefs::unheard_code`]).
+    #[serde(default)]
+    unheard: u8,
 }
 
 fn view_key(k: MixKey) -> v::MixKey {
@@ -204,6 +196,19 @@ pub(crate) fn settings(prefs: &MixPrefs) -> Settings {
             v::ProfileNames::Artists => NameStyle::Artists,
         },
         hidden: prefs.hidden.clone(),
+        unheard: unheard_share(prefs.unheard),
+    }
+}
+
+/// The share of songs never played a mix takes at least under
+/// «Преимущественно новые песни» (the radio's setting: the same words mean
+/// the same in the mixes; less of it, each such song standing between two
+/// loved ones).
+fn unheard_share(u: v::RadioUnheard) -> f32 {
+    match u {
+        v::RadioUnheard::Usual => 0.0,
+        v::RadioUnheard::More => nikgob_recs::mixes::UNHEARD_MORE,
+        v::RadioUnheard::Only => nikgob_recs::mixes::UNHEARD_MOST,
     }
 }
 
@@ -218,6 +223,8 @@ pub(crate) struct MixPrefs {
     pub names: v::ProfileNames,
     /// «Не предлагать этот микс».
     pub hidden: Vec<MixKey>,
+    /// «Преимущественно новые песни».
+    pub unheard: v::RadioUnheard,
 }
 
 impl MixPrefs {
@@ -230,6 +237,7 @@ impl MixPrefs {
             background_cards: p.background_cards,
             names: p.profile_names,
             hidden: p.home_hidden_mixes.iter().filter_map(|h| engine_key(h.key)).collect(),
+            unheard: p.radio_unheard,
         }
     }
 
@@ -241,8 +249,22 @@ impl MixPrefs {
             | u64::from(self.moods) << 2
             | u64::from(self.background_cards) << 3
             | u64::from(self.names == v::ProfileNames::Artists) << 6
+            | u64::from(self.unheard_code()) << UNHEARD_BITS
+    }
+
+    /// «Преимущественно новые песни» as a number (the cache keeps it: the
+    /// songs chosen under another are chosen again).
+    fn unheard_code(&self) -> u8 {
+        match self.unheard {
+            v::RadioUnheard::Usual => 0,
+            v::RadioUnheard::More => 1,
+            v::RadioUnheard::Only => 2,
+        }
     }
 }
+
+/// Where [`MixPrefs::unheard_code`] stands in the fingerprint.
+const UNHEARD_BITS: u32 = 7;
 
 /// The tags other listeners gave an artist, as the graph of similar music
 /// keeps them: what a genre mix is built by and a named one called by.
@@ -303,6 +325,11 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let prefs = &input.mix_prefs;
     let mut cache = cache_for(lib, prefs, &input.day, &input.epoch.key);
     if cache.settings != prefs.fingerprint() || cache.hidden.iter().any(|k| !prefs.hidden.contains(k)) {
+        // Songs chosen under another «Преимущественно новые песни» are
+        // chosen again (the epoch's mixes keep the lineup's places).
+        if cache.settings >> UNHEARD_BITS != prefs.fingerprint() >> UNHEARD_BITS {
+            cache.kept.songs.clear();
+        }
         cache.settings = prefs.fingerprint();
         cache.kept.lineup.clear();
     }
@@ -351,6 +378,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let seed = input.epoch.seed;
     let log = super::novelty::keyed(input.new_log.clone(), snap);
     let mut used_new: HashSet<String> = HashSet::new();
+    let cands = if snap.local_only { Vec::new() } else { candidates(snap, input) };
     let mut out: Vec<LaneHome> = mixes
         .drain(..)
         .enumerate()
@@ -358,7 +386,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             let mut lane = lane_of(snap, tiles, &m);
             // «Фон» and «Любимые» are what they are: no new songs.
             if !snap.local_only && !matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
-                lane.new = new_for(snap, input, &log, &m, seed.wrapping_add(k as u64), &mut used_new);
+                lane.new = new_for(snap, input, &log, &cands, &m, seed.wrapping_add(k as u64), &mut used_new);
             }
             lane
         })
@@ -392,10 +420,11 @@ fn day_mixes(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput, tags: &Art
     let lib = &input.lib;
     let history = snap.model.taste.has_history();
     let mut cache: DayMixesCache = cache_read(lib, DAY_MIXES_KEY).unwrap_or_default();
-    if cache.v != DAY_MIXES_V || cache.day != input.day || (history && !cache.history) || cache.local_only != snap.local_only {
+    let unheard = input.mix_prefs.unheard_code();
+    if cache.v != DAY_MIXES_V || cache.day != input.day || (history && !cache.history) || cache.local_only != snap.local_only || cache.unheard != unheard {
         // Another day's songs are the songs before: today's are others.
         let kept = std::mem::take(&mut cache.kept).next_epoch(false);
-        cache = DayMixesCache { v: DAY_MIXES_V, day: input.day.clone(), history, local_only: snap.local_only, kept };
+        cache = DayMixesCache { v: DAY_MIXES_V, day: input.day.clone(), history, local_only: snap.local_only, kept, unheard };
     }
     if let Some(key @ (MixKey::Daily(_) | MixKey::Genre(_))) = input.refresh_mix.and_then(engine_key) {
         let salt = fastrand::u64(1..);
@@ -550,11 +579,6 @@ fn profile_of(snap: &Snapshot, tracks: &[TrackId]) -> Option<usize> {
     n.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|x| x.0)
 }
 
-/// How many new songs a mix of `songs` gets at `share` (one at least).
-fn new_count(songs: usize, share: f32) -> usize {
-    ((songs as f32 * share / (1.0 - share)).round() as usize).max(1)
-}
-
 /// «На повторе»: the songs started at least twice over the last two weeks
 /// (a month once the history is that long), what plays on repeat now first
 /// (the hot affinity, then the count).
@@ -645,69 +669,46 @@ fn covers(snap: &Snapshot, tracks: &[TrackId]) -> Vec<CoverRef> {
     out
 }
 
-/// The kinds of song of a mix: the sung languages of its profiles and
-/// whether soundtracks without words are among them.
-fn kinds_of(snap: &Snapshot, m: &Mix) -> (HashSet<Lang>, bool) {
-    let mut langs = HashSet::new();
-    let mut inst = false;
-    let lanes: Vec<LaneKey> = match m.key {
-        MixKey::Kind(_) => m.tracks.iter().map(|&i| LaneKey::of(snap.model.song_type_at(i))).collect(),
-        _ => m.profiles.iter().filter_map(|&j| snap.model.profiles.list.get(j)).map(|p| p.lane).collect(),
-    };
-    for l in lanes {
-        match l {
-            LaneKey::Sung(x) => {
-                langs.insert(x);
+/// The new songs the cards of the row may take ([`NewCandidate`]): the
+/// discoveries in their order, new indeed and no junk, their kind of song
+/// told by their preview where it was analysed.
+fn candidates(snap: &Snapshot, input: &BuildInput) -> Vec<NewCandidate> {
+    let regions = &snap.model.regions;
+    let found: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t)).collect();
+    let len = found.len().max(1) as f32;
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(k, t)| {
+            let vector = snap.new_track(t).vector;
+            let voice = vector.as_ref().and_then(|v| mix_new::voice_near(&snap.model, &snap.index, v));
+            NewCandidate {
+                track: t.clone(),
+                lane: mix_new::lane_of_new(&snap.types, voice, t),
+                soundtrack: t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
+                profile: vector.map(|v| snap.model.embed(&v)).and_then(|e| regions.of(&e, None)),
+                near: Vec::new(),
+                // The best found first.
+                weight: 1.0 - 0.5 * k as f32 / len,
             }
-            LaneKey::Instrumental => inst = true,
-            LaneKey::Unknown => {}
-        }
-    }
-    (langs, inst)
+        })
+        .collect()
 }
 
-/// «С новым»: new songs the services found that fit the mix — of the
-/// languages of its profiles, a soundtrack's where it has soundtracks —
-/// each in one mix only; as many as the share of the mix's taste profile
-/// asks, those whose preview sounds of the profile first. «Фон» takes
-/// none.
-fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, m: &Mix, seed: u64, used: &mut HashSet<String>) -> Vec<StreamTrack> {
-    let regions = &snap.model.regions;
+/// «С новым»: the new songs of `cands` that fit the mix
+/// ([`mix_new::choose`]), each in one mix only, as many as the appetite of
+/// the mix's taste profile asks and the user's share of new music at least
+/// ([`mix_new::want`]). «Фон» takes none.
+fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, cands: &[NewCandidate], m: &Mix, seed: u64, used: &mut HashSet<String>) -> Vec<StreamTrack> {
     let tracks: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
     let profile = profile_of(snap, &tracks);
-    let want = if log.events.is_empty() || snap.model.profiles.is_empty() {
-        (tracks.len() / (NEW_EVERY - 1)).max(1)
-    } else {
+    let appetite = (!log.events.is_empty() && !snap.model.profiles.is_empty()).then(|| {
         let key = profile.and_then(|j| snap.model.profiles.list.get(j)).map(|p| p.key);
         let background = profile.is_some_and(|j| snap.model.is_background_profile(j));
-        let share = log.share(key, background, &mut nikgob_recs::rng::Rng::new(seed));
-        new_count(tracks.len(), share)
-    };
-    let in_profile = |t: &StreamTrack| {
-        let v = snap.new_track(t).vector.map(|v| snap.model.embed(&v));
-        let of = v.and_then(|v| regions.of(&v, None));
-        of.is_some_and(|j| m.profiles.contains(&j))
-    };
-    let (langs, inst) = kinds_of(snap, m);
-    let fits = |t: &StreamTrack| {
-        let artists: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
-        match snap.types.lang_of_new(&t.title, &artists) {
-            Some(l) => langs.contains(&l),
-            None => inst && t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
-        }
-    };
-    let mut candidates: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t) && fits(t)).collect();
-    candidates.sort_by_key(|t| !in_profile(t));
-    let mut out = Vec::new();
-    for t in candidates {
-        if out.len() >= want {
-            break;
-        }
-        if used.insert(t.id.to_string()) {
-            out.push(t.clone());
-        }
-    }
-    out
+        log.share(key, background, &mut nikgob_recs::rng::Rng::new(seed))
+    });
+    let want = mix_new::want(tracks.len(), appetite, input.new_share);
+    mix_new::choose(&snap.model, m, cands, want, used).into_iter().map(|c| c.track.clone()).collect()
 }
 
 #[cfg(test)]
@@ -917,6 +918,7 @@ mod tests {
     fn new_songs_stand_between_loved_ones() {
         use nikgob_core::streaming::{RemoteId, Service};
         use nikgob_recs::Item;
+        use nikgob_recs::mix_new::new_count;
         assert_eq!(new_count(36, 0.1), 4);
         assert_eq!(new_count(36, 0.2), 9);
         assert_eq!(new_count(3, 0.05), 1);

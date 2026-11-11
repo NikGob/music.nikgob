@@ -3091,6 +3091,9 @@ impl Worker {
             || old.graph_use != p.graph_use
             || old.graph_personal != p.graph_personal
             || old.library_as_taste != p.library_as_taste
+            || old.radio_unheard != p.radio_unheard
+            || old.radio_new_share != p.radio_new_share
+            || old.radio_new_share_by != p.radio_new_share_by
         {
             self.recs_prefs_changed();
         }

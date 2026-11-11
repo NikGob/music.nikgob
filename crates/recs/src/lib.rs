@@ -44,6 +44,7 @@ pub mod index;
 pub mod junk;
 pub mod listening;
 pub mod mix_names;
+pub mod mix_new;
 pub mod mixes;
 pub mod model;
 pub mod mood;
