@@ -710,6 +710,16 @@ impl Worker {
         self.toast("Отменяю импорт — добавленное уберу", None);
     }
 
+    /// The imports running for a «Хочу скачать» item stop and take back
+    /// what they added: the item was cancelled.
+    pub(crate) fn cancel_imports_of(&mut self, item: WishlistId) {
+        let Some(svc) = &self.import else { return };
+        for (&job, _) in svc.wish_jobs.iter().filter(|(_, w)| **w == item) {
+            log::info!("import {job} of {item} cancelled with its item");
+            svc.importer.cancel(nikgob_import::JobId(job));
+        }
+    }
+
     pub(crate) fn confirm_choice(&mut self, id: u64, option: Option<usize>) {
         let Some(svc) = &mut self.import else { return };
         let item = id & !IMPORT_ID;

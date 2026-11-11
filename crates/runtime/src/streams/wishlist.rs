@@ -200,6 +200,14 @@ pub(crate) struct WishState {
     wrong: HashSet<WishlistId>,
 }
 
+/// «Не качать» (or a cancelled download) on an item the user's own
+/// «Скачать» made takes it out of «Хочу скачать» altogether: it was there
+/// only for that click. Any other item (a like's, an import's, a better
+/// copy's) is turned down and can come back; one done stays done.
+pub(crate) fn cancel_drops(item: &WishlistItem) -> bool {
+    item.origin == WishlistOrigin::Manual && item.status != WishlistStatus::Done
+}
+
 /// An offer as a place a file comes from (`soulseek:<user\path>`,
 /// `torrents:<id>`): what is not taken again for a track once a file from
 /// it held another song (docs/TODO.md 32).
@@ -2402,10 +2410,20 @@ impl Worker {
         self.publish_wishlist();
     }
 
+    /// «Не качать» on items, and a download of theirs the user cancelled
+    /// (its torrent's or its import's «Отменить»): nothing of them is
+    /// fetched on. What is on its way stops (its torrent with what it
+    /// downloaded, a direct download's folder once it ends, an import
+    /// taking back what it added). An item the user's own «Скачать» made
+    /// leaves «Хочу скачать» altogether ([`cancel_drops`]); any other is
+    /// turned down and can come back.
     pub(crate) fn wish_dismiss(&mut self, ids: &[WishlistId]) {
         let mut title = None;
         let mut n = 0;
+        let mut dismissed: Vec<WishlistId> = Vec::new();
+        let (mut tracks, mut albums): (Vec<TrackId>, Vec<ReleaseId>) = (Vec::new(), Vec::new());
         for &id in ids {
+            let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else { continue };
             let w = &mut self.streaming.wish;
             w.cands.remove(&id);
             w.doubtful.remove(&id);
@@ -2414,27 +2432,53 @@ impl Worker {
             w.retry_only.remove(&id);
             w.later.remove(&id);
             w.upgrade_dups.remove(&id);
-            // A better copy turned down is never fetched on: its torrent
-            // goes with what it downloaded (a direct download's folder goes
-            // once it ends, unimported).
-            if self.is_upgrade(id) {
+            w.from.remove(&id);
+            w.live.lock().remove(&id);
+            // A torrent on its way goes with what it downloaded (a better
+            // copy's always: it must never replace a file); a seeding one
+            // of an item done stays.
+            let on_its_way = matches!(item.status, WishlistStatus::Downloading | WishlistStatus::Searching | WishlistStatus::Confirm);
+            if item.origin == WishlistOrigin::Upgrade || on_its_way {
                 self.cancel_wish_torrent(id);
             }
+            if on_its_way {
+                self.cancel_imports_of(id);
+            }
             self.wish_line_drop(id);
-            if let Some(i) = self.set_item(id, |i| {
+            n += 1;
+            title.clone_from(&item.title);
+            if cancel_drops(&item) {
+                log::info!("wishlist: {} cancelled, it leaves «Хочу скачать»", item.title.as_deref().unwrap_or("?"));
+                let _ = self.lib.delete_wishlist_item(id);
+                self.streaming.wish.confirm_ids.remove(&id);
+                self.drop_direct(id);
+                match (item.scope, item.track_id, item.release_id) {
+                    (WishlistScope::Track, Some(t), _) => tracks.push(t),
+                    (WishlistScope::Album, _, Some(r)) => albums.push(r),
+                    _ => {}
+                }
+                continue;
+            }
+            self.set_item(id, |i| {
                 i.status = WishlistStatus::Dismissed;
                 i.next_try_at = None;
-            }) {
-                n += 1;
-                title = i.title;
-            }
+            });
+            dismissed.push(id);
         }
         if n > 0 {
             let text = match (n, title) {
                 (1, Some(t)) => format!("Не буду качать «{t}»"),
                 (n, _) => format!("Не буду качать: {n}"),
             };
-            self.toast(text, Some(("Отменить".into(), Command::WishlistRestore(ids.to_vec()))));
+            // «Отменить» brings back what was turned down, or asks again
+            // for what left.
+            let undo = match (dismissed.is_empty(), tracks.is_empty(), albums.as_slice()) {
+                (false, true, []) => Some(Command::WishlistRestore(dismissed)),
+                (true, false, []) => Some(Command::DownloadTracks(tracks)),
+                (true, true, [r]) => Some(Command::DownloadRelease(*r)),
+                _ => None,
+            };
+            self.toast(text, undo.map(|c| ("Отменить".to_owned(), c)));
         }
         self.publish_wishlist();
     }
@@ -3535,5 +3579,20 @@ mod tests {
         assert_eq!(candidate_of(&offers[0]).unwrap(), old[0]);
         let new = offers_of_json(&serde_json::to_string(&offers).unwrap());
         assert_eq!(new, offers);
+    }
+
+    /// A cancelled «Скачать» leaves «Хочу скачать»; a like's, an import's
+    /// or a better copy's item is turned down; a done one stays done.
+    #[test]
+    fn a_cancelled_click_leaves_the_wishlist() {
+        use WishlistStatus as St;
+        let item = |origin, status| WishlistItem { origin, ..WishlistItem::new(status, 1) };
+        for st in [St::New, St::Searching, St::Downloading, St::Confirm, St::NoTorrent, St::Waiting] {
+            assert!(cancel_drops(&item(WishlistOrigin::Manual, st)), "{st:?}");
+            for origin in [WishlistOrigin::Like, WishlistOrigin::Import, WishlistOrigin::Upgrade] {
+                assert!(!cancel_drops(&item(origin, st)), "{origin:?} {st:?}");
+            }
+        }
+        assert!(!cancel_drops(&item(WishlistOrigin::Manual, St::Done)));
     }
 }

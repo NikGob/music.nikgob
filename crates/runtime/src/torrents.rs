@@ -279,10 +279,23 @@ impl Worker {
             })),
             Command::CancelJob(id) => self.with_client(Box::new(move |w, c| {
                 let hash = c.list().into_iter().find(|t| t.id == id).map(|t| t.info_hash);
+                // A torrent of a «Хочу скачать» item: its item is cancelled
+                // with it, not left «качается» for ever.
+                let item = hash.as_deref().and_then(|h| w.lib.get_download(h).ok().flatten()).and_then(|d| d.wishlist_id);
                 if let Some(h) = &hash {
                     let _ = w.lib.delete_download(h);
                 }
                 w.spawn_torrent_op(async move { c.remove(id, true).await.map_err(|e| e.to_string()) });
+                if let Some(item) = item
+                    && w
+                        .lib
+                        .get_wishlist_item(item)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|i| i.status != nikgob_core::model::WishlistStatus::Done)
+                {
+                    w.wish_dismiss(&[item]);
+                }
             })),
             Command::CleanSeeding => self.with_client(Box::new(|w, c| {
                 let done: Vec<TorrentStatus> = c.list().into_iter().filter(complete).collect();

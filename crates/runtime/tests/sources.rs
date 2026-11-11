@@ -992,3 +992,24 @@ fn our_opus_of_a_flac_gets_nothing_better() {
     assert_eq!(*qobuz.searched.lock().unwrap(), 0);
     assert_eq!(*qobuz.fetched.lock().unwrap(), 0);
 }
+
+/// «Скачать» on a track not in the library, then cancelled («Не качать»
+/// on its row, as a cancelled torrent or import does): it leaves «Хочу
+/// скачать» and the library has no track of it; «Отменить» asks again.
+#[test]
+fn a_cancelled_download_of_a_click_leaves_the_wishlist() {
+    let lib = Library::open_in_memory().unwrap();
+    let (track, ..) = gruppa(&lib);
+    let r = rig(&lib, vec![Arc::new(FakeService::spotify().logged_out())], Prefs::default());
+    assert_eq!(lib.track_in_library(track).unwrap(), Some(false));
+    r.rt.send(Command::DownloadTracks(vec![track]));
+    wait_until("the item", || wish_status(&lib, track).is_some());
+    let id = lib.wishlist_for_track(track).unwrap().pop().unwrap().id;
+
+    r.rt.send(Command::WishlistDismiss(vec![id]));
+    wait_until("the item gone", || lib.wishlist_for_track(track).unwrap().is_empty());
+    wait_for(&r.rt, "out of the list", |s| !s.downloads.wishlist.items.iter().any(|i| i.id == id));
+    assert_eq!(lib.track_in_library(track).unwrap(), Some(false), "no track of it in the library");
+    let undo = r.rt.state().toasts.iter().find(|t| t.text.starts_with("Не буду качать")).and_then(|t| t.action.clone());
+    assert!(matches!(undo, Some((_, Command::DownloadTracks(ref t))) if t == &vec![track]), "{undo:?}");
+}
