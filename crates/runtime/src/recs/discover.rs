@@ -73,6 +73,9 @@ const DISCOVER_POOL: usize = 3 * DISCOVERIES;
 pub(crate) const HOME_NEW_MORE: usize = 12;
 /// New songs heard out lately that seed a pass.
 const HEARD_SEEDS: usize = 5;
+/// The songs the graph found beside the library's that a pass ranks with
+/// its own finds, the strongest.
+const GRAPH_DISCOVER: usize = 120;
 
 /// Library cache keys.
 const PASS_KEY: &str = "discover.pass";
@@ -338,6 +341,24 @@ fn by_shares(steps: Vec<Step>, shares: &std::collections::BTreeMap<Source, f32>)
     out
 }
 
+/// The songs the graph of similar music found beside the library's
+/// ([`super::Snapshot::graph_new`], the best [`GRAPH_DISCOVER`]) as finds of
+/// a pass: each under the library's track whose radio holds it most, and
+/// those tracks' taste profiles (a find's profile when its preview is not
+/// analysed).
+fn graph_seed_finds(snap: &super::Snapshot) -> (Vec<(Seed, Vec<StreamTrack>)>, Vec<(TrackId, usize)>) {
+    let mut by_seed: Vec<(TrackId, Vec<StreamTrack>)> = Vec::new();
+    for f in snap.graph_new.iter().take(GRAPH_DISCOVER) {
+        let Some(&(from, _)) = f.near.iter().max_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
+        match by_seed.iter_mut().find(|s| s.0 == from) {
+            Some(s) => s.1.push(f.track.clone()),
+            None => by_seed.push((from, vec![f.track.clone()])),
+        }
+    }
+    let profiles = by_seed.iter().filter_map(|(t, _)| Some((*t, snap.model.profile_at(snap.model.position(*t)?)?))).collect();
+    (by_seed.into_iter().map(|(t, list)| (Seed::Track(t), list)).collect(), profiles)
+}
+
 /// The discography of `artist` as just answered, in place of what the
 /// pass read of it before (an older answer kept in the cache).
 fn keep_releases(releases: &mut Vec<(ArtistId, Vec<StreamAlbum>)>, artist: ArtistId, albums: Vec<StreamAlbum>) {
@@ -380,6 +401,17 @@ impl Worker {
     /// «Новое для тебя» shows more of them, [`DiscoverInput`]).
     pub(crate) fn discoveries(&self) -> Vec<StreamTrack> {
         self.recs.discover.found.as_ref().map(|f| f.tracks.iter().take(DISCOVERIES).cloned().collect()).unwrap_or_default()
+    }
+
+    /// Every discovery the last pass kept, best first: the cards of «Миксы
+    /// для тебя» draw from them all.
+    pub(crate) fn discoveries_all(&self) -> Vec<StreamTrack> {
+        self.recs.discover.found.as_ref().map(|f| f.tracks.clone()).unwrap_or_default()
+    }
+
+    /// Where each discovery came from, by [`stream_song_key`].
+    pub(crate) fn discovery_sources(&self) -> HashMap<String, Source> {
+        self.recs.discover.found.as_ref().map(|f| f.sources.iter().cloned().collect()).unwrap_or_default()
     }
 
     /// How many discoveries the last pass kept ([`DISCOVER_POOL`] at most).
@@ -821,13 +853,24 @@ impl Worker {
             .iter()
             .map(|(k, (n, _))| (k.clone(), (*n, snap.played_songs.contains(k))))
             .collect();
+        // The songs the graph found beside the library's join the pass's
+        // finds, each under the track whose radio holds it most.
+        let (graph_finds, graph_profiles) = graph_seed_finds(&snap);
+        let mut finds = pass.finds;
+        finds.extend(graph_finds);
+        let mut seed_profiles = pass.seed_profiles;
+        for p in graph_profiles {
+            if !seed_profiles.iter().any(|s| s.0 == p.0) {
+                seed_profiles.push(p);
+            }
+        }
         let seeds = DiscoverySeeds {
             tracks: pass.seed_tracks.clone(),
             artists: pass.seed_artists.clone(),
-            profiles: pass.seed_profiles.clone(),
+            profiles: seed_profiles.clone(),
         };
         self.new_log_load();
-        let tracks = ranked(&snap, &seeds, &pass.finds, &filter, &self.recs.newlog.log);
+        let tracks = ranked(&snap, &seeds, &finds, &filter, &self.recs.newlog.log);
         let releases = snap
             .recs()
             .new_releases(&pass.releases, &snap.known_albums)
@@ -847,9 +890,9 @@ impl Worker {
             releases,
             seed_tracks: pass.seed_tracks,
             seed_artists: pass.seed_artists,
-            seed_profiles: pass.seed_profiles,
-            sources: sources_of(&pass.finds),
-            finds: pass.finds,
+            seed_profiles,
+            sources: sources_of(&finds),
+            finds,
         };
         self.streaming.learn(&found.tracks);
         if let Ok(json) = serde_json::to_string(&found) {

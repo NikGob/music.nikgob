@@ -406,6 +406,8 @@ mod tests {
             local_only: false,
             new: Vec::new(),
             new_at: 0,
+            new_pool: Vec::new(),
+            new_sources: Default::default(),
             suggested: Vec::new(),
             rerank: false,
             refresh_mix: None,

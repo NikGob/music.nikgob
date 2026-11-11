@@ -378,7 +378,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     let seed = input.epoch.seed;
     let log = super::novelty::keyed(input.new_log.clone(), snap);
     let mut used_new: HashSet<String> = HashSet::new();
-    let cands = if snap.local_only { Vec::new() } else { candidates(snap, input) };
+    let cands = if snap.local_only { Vec::new() } else { candidates(snap, input, seed) };
     let mut out: Vec<LaneHome> = mixes
         .drain(..)
         .enumerate()
@@ -669,30 +669,58 @@ fn covers(snap: &Snapshot, tracks: &[TrackId]) -> Vec<CoverRef> {
     out
 }
 
-/// The new songs the cards of the row may take ([`NewCandidate`]): the
-/// discoveries in their order, new indeed and no junk, their kind of song
-/// told by their preview where it was analysed.
-fn candidates(snap: &Snapshot, input: &BuildInput) -> Vec<NewCandidate> {
+/// What a song the graph found beside the library's weighs against a
+/// discovery of the same rank (the pass ranked those with the user model).
+const GRAPH_WEIGHT: f32 = 0.5;
+
+/// The new songs the cards of the row may take ([`NewCandidate`]): every
+/// discovery the pass kept, then the songs the graph of similar music found
+/// beside the library's (new indeed and no junk, each once), each weighed
+/// by its rank and by how new music of its source is received (one draw of
+/// [`nikgob_recs::NewLog::source_shares`] for the epoch; the graph's songs
+/// are YouTube Music's radios, times the source's trust); its kind of song
+/// told by its preview where it was analysed, the library's tracks the
+/// graph links it to.
+fn candidates(snap: &Snapshot, input: &BuildInput, seed: u64) -> Vec<NewCandidate> {
+    use nikgob_recs::{GraphSource, Source, stream_song_key};
+    let shares = input.new_log.source_shares(&mut nikgob_recs::rng::Rng::new(seed ^ 0x736f_7572_6365));
+    let share = |s: Option<Source>| s.and_then(|s| shares.get(&s).copied()).unwrap_or(1.0 / nikgob_recs::novelty::SOURCES.len() as f32);
+    let graph: HashMap<String, &super::graph::GraphFind> = snap.graph_new.iter().map(|f| (stream_song_key(&f.track), f)).collect();
+    let near = |key: &str| -> Vec<usize> { graph.get(key).map(|f| f.near.iter().filter_map(|(t, _)| snap.model.position(*t)).collect()).unwrap_or_default() };
     let regions = &snap.model.regions;
-    let found: Vec<&StreamTrack> = input.new.iter().filter(|t| snap.is_new(t)).collect();
+    let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| {
+        let vector = snap.new_track(t).vector;
+        let voice = vector.as_ref().and_then(|v| mix_new::voice_near(&snap.model, &snap.index, v));
+        NewCandidate {
+            track: t.clone(),
+            lane: mix_new::lane_of_new(&snap.types, voice, t),
+            soundtrack: t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
+            profile: vector.map(|v| snap.model.embed(&v)).and_then(|e| regions.of(&e, None)),
+            near,
+            weight,
+        }
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::new();
+    let found: Vec<&StreamTrack> = input.new_pool.iter().filter(|t| snap.is_new(t)).collect();
     let len = found.len().max(1) as f32;
-    found
-        .into_iter()
-        .enumerate()
-        .map(|(k, t)| {
-            let vector = snap.new_track(t).vector;
-            let voice = vector.as_ref().and_then(|v| mix_new::voice_near(&snap.model, &snap.index, v));
-            NewCandidate {
-                track: t.clone(),
-                lane: mix_new::lane_of_new(&snap.types, voice, t),
-                soundtrack: t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
-                profile: vector.map(|v| snap.model.embed(&v)).and_then(|e| regions.of(&e, None)),
-                near: Vec::new(),
-                // The best found first.
-                weight: 1.0 - 0.5 * k as f32 / len,
-            }
-        })
-        .collect()
+    for (k, t) in found.into_iter().enumerate() {
+        let key = stream_song_key(t);
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        // The best found first.
+        let weight = (1.0 - 0.5 * k as f32 / len) * share(input.new_sources.get(&key).copied());
+        out.push(candidate(t, near(&key), weight));
+    }
+    let trust = share(Some(Source::YoutubeRadio)) * GraphSource::YoutubeRadio.trust();
+    let rest: Vec<&super::graph::GraphFind> = snap.graph_new.iter().filter(|f| !seen.contains(&stream_song_key(&f.track))).collect();
+    let len = rest.len().max(1) as f32;
+    for (k, f) in rest.into_iter().enumerate() {
+        let weight = GRAPH_WEIGHT * (1.0 - 0.5 * k as f32 / len) * trust;
+        out.push(candidate(&f.track, f.near.iter().filter_map(|(t, _)| snap.model.position(*t)).collect(), weight));
+    }
+    out
 }
 
 /// «С новым»: the new songs of `cands` that fit the mix
@@ -776,6 +804,7 @@ mod tests {
             artist_affinity: HashMap::new(),
             profiles: Default::default(),
             background: Vec::new(),
+            graph_new: Vec::new(),
         };
         let mut tiles = TilesInput::default();
         for (k, id) in ids.iter().enumerate() {

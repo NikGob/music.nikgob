@@ -144,6 +144,9 @@ pub(crate) struct Snapshot {
     pub profiles: Arc<TrackProfiles>,
     /// Whether each catalog track suits the background ([`background_fit`]).
     pub background: Vec<bool>,
+    /// Songs the graph of similar music found beside the library's that it
+    /// lacks, new indeed, the strongest first ([`graph::finds`]).
+    pub graph_new: Vec<graph::GraphFind>,
 }
 
 /// The taste profiles as the home reads them.
@@ -622,6 +625,11 @@ struct BuildInput {
     /// When the pass that found them ended (0: none): the day's «Твой
     /// микс» and daylist of older finds are picked again.
     new_at: UnixMs,
+    /// Every discovery the pass kept, best first: «С новым» of the cards
+    /// draws from them all (and from the graph's finds).
+    new_pool: Vec<StreamTrack>,
+    /// Where each of them came from, by [`stream_song_key`].
+    new_sources: HashMap<String, nikgob_recs::Source>,
     /// The services' suggestions, of the services switched on.
     suggested: Vec<suggest::Kept>,
     /// They changed: the discoveries are ranked again after this build.
@@ -979,7 +987,15 @@ fn read_parts(
     // The artists beyond the library the graph links to the loved ones:
     // their new music counts as a little known.
     let artist_affinity = graph::with_votes(artist_affinity, &similar.votes, &|a| (model.taste.artist_affinity(a).max(0.0) / 3.0).tanh());
+    // The songs the graph found beside the library's: new music, by how
+    // loved the tracks whose radios hold them are.
+    let graph_new = graph::finds(
+        &similar.beyond,
+        &|t| is_new(&filter, t) && nikgob_recs::junk(t, None).is_none(),
+        &|t| model.position(t).map(|i| (model.taste.affinity_at(i).max(0.0) / 3.0).tanh()),
+    );
     let mut snap = Snapshot {
+        graph_new,
         background: Vec::new(),
         profiles: Arc::new(TrackProfiles::from_model(&model)),
         new_vectors,
@@ -1953,6 +1969,8 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
         local_only: prefs.mixes_downloaded_only,
         new: discoveries.clone(),
         new_at: 0,
+        new_pool: discoveries.clone(),
+        new_sources: HashMap::new(),
         suggested: suggest::cached(lib),
         rerank: false,
         refresh_mix: None,
@@ -2506,6 +2524,8 @@ impl Worker {
             local_only: prefs.mixes_downloaded_only,
             new: self.discoveries(),
             new_at: self.discoveries_at(),
+            new_pool: self.discoveries_all(),
+            new_sources: self.discovery_sources(),
             suggested: self.suggestions_kept(),
             rerank: std::mem::take(&mut self.recs.discover_rerank),
             refresh_mix: self.recs.refresh_mix.take(),
@@ -2513,7 +2533,7 @@ impl Worker {
             blends,
             session: self.recs.session.clone(),
             mix_prefs: lanes::MixPrefs::of(&prefs),
-            extra: ReadExtra::of(self.discoveries(), &prefs),
+            extra: ReadExtra::of(self.discoveries_all(), &prefs),
             new_log: {
                 self.new_log_load();
                 self.recs.newlog.log.clone()
