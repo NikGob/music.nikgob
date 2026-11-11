@@ -22,7 +22,7 @@ use crate::{
 const PAD: f32 = 24.0;
 
 fn cover_side(width: f32) -> f32 {
-    if width > 720.0 { 232.0 } else { 160.0 }
+    widgets::header_cover(width)
 }
 
 /// «слышал 5 из 52», «слышал все 20», «не слушал».

@@ -1553,6 +1553,12 @@ pub fn columns(width: f32, card: f32) -> usize {
     crate::fit::Fit::at_least(width, CARD_GAP, card).count
 }
 
+/// The side of the big cover in a page's header (an album, a playlist, a
+/// mix, an artist, a world): 232 beside a wide page, 160 otherwise.
+pub fn header_cover(width: f32) -> f32 {
+    if width > 720.0 { 232.0 } else { 160.0 }
+}
+
 /// The grid of cards at least `card` wide over `width`: how many stand in a
 /// row and how wide each one is (whole points, the row filled).
 pub fn grid_fit(width: f32, card: f32) -> (usize, f32) {

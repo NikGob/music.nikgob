@@ -778,7 +778,7 @@ fn type_label(t: Option<ReleaseType>) -> &'static str {
 
 /// The header: a big web cover and the text column beside it.
 fn header(ui: &mut Ui, v: &StreamPageView, round: bool, add_text: impl FnOnce(&mut Ui)) {
-    let size = if ui.available_width() > 720.0 { 232.0 } else { 160.0 };
+    let size = widgets::header_cover(ui.available_width());
     ui.add_space(8.0);
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
