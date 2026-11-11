@@ -667,7 +667,7 @@ fn artists_tab(
     let shown: Vec<&ArtistCard> = state.library.artists.iter().filter(|a| shelf::artist_matches(words, a)).collect();
     if shown.is_empty() {
         if words.is_empty() {
-            widgets::empty_state(ui, Icon::Person, "Исполнителей пока нет", "Они появятся вместе с первыми треками.", None);
+            widgets::empty_state(ui, Icon::Person, "Исполнителей пока нет", "", None);
         } else {
             no_results(ui, pages);
         }
@@ -916,10 +916,10 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
     let days = &state.library.downloaded;
     let ids: Vec<_> = days.iter().flat_map(|d| d.tracks.iter().map(|t| t.id)).collect();
     if ids.is_empty() {
-        widgets::empty_state(ui, Icon::DownloadDone, "Пока ничего", "Скачанные треки появятся здесь, свежие сверху.", None);
+        widgets::empty_state(ui, Icon::DownloadDone, "Пока ничего", "", None);
         return None;
     }
-    count_line(ui, &format!("{}, свежие сверху", count(ids.len(), "трек", "трека", "треков")), |_| {});
+    count_line(ui, &count(ids.len(), "трек", "трека", "треков"), |_| {});
     let mut nav = None;
     let mut i = 0;
     for day in days {
@@ -958,7 +958,6 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
 /// "Корзина": deleted tracks with "Восстановить" and "Удалить навсегда";
 /// everything goes for good after 30 days.
 fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
     let items = &state.library.trash;
     let n = items.len();
     count_line(ui, &format!("{} в корзине", count(n, "трек", "трека", "треков")), |ui| {
@@ -975,17 +974,9 @@ fn trash(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Co
             out.push(Command::RestoreTracks(items.iter().map(|i| i.track.id).collect()));
         }
     });
-    ui.label(TypeRole::BodyMedium.style().rich_para(
-        if state.prefs.use_trash {
-            "Удалённое не видно в библиотеке и через 30 дней стирается навсегда вместе с файлами."
-        } else {
-            "Корзина выключена в настройках: удаление сразу стирает файлы. Здесь остаётся то, что удалили раньше."
-        },
-        s.on_surface_variant,
-    ));
     ui.add_space(8.0);
     if items.is_empty() {
-        widgets::empty_state(ui, Icon::Delete, "Корзина пуста", "Удалённые треки и альбомы появятся здесь.", None);
+        widgets::empty_state(ui, Icon::Delete, "Корзина пуста", "", None);
         return None;
     }
     for (i, item) in items.iter().enumerate() {
@@ -1139,7 +1130,7 @@ fn tracks(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
     };
     count_line(ui, &summary, |_| {});
     if total == 0 {
-        widgets::empty_state(ui, Icon::MusicNote, "Треков пока нет", "Лайкни трек в поиске или добавь папку с музыкой.", None);
+        widgets::empty_state(ui, Icon::MusicNote, "Треков пока нет", "", None);
         return None;
     }
 

@@ -25,9 +25,6 @@ pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out
         let color = if d.warning { s.error } else { s.on_surface };
         ui.label(TypeRole::BodyMedium.style().rich_para(v, color));
         ui.add_space(4.0);
-    } else if d.pending {
-        ui.label(TypeRole::BodySmall.style().rich("Проверка звука ещё не дошла до этого файла", s.on_surface_variant));
-        ui.add_space(4.0);
     }
     if let Some(b) = &d.band {
         fact(ui, "Реальная полоса", b);
@@ -42,7 +39,7 @@ pub(super) fn section(ui: &mut Ui, d: &SoundDetails, track: Option<TrackId>, out
             if d.to_mp3 && ui.add(mp3.id_salt("quality-to-mp3")).clicked() {
                 out.push(Command::FakeToMp3(track));
             }
-            let better = Button::new("Найти качество лучше").icon(Icon::Search).style(Style::Outlined).size(Size::S);
+            let better = Button::new(super::pages::FIND_BETTER).icon(Icon::Search).style(Style::Outlined).size(Size::S);
             if d.better && ui.add(better.id_salt("quality-better")).clicked() {
                 out.push(Command::FindBetter(track));
             }

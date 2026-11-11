@@ -75,7 +75,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         DownloadsTab::Seeding => nav = seeding(ui, state, pages, out),
         DownloadsTab::History => {
             if d.history.is_empty() {
-                widgets::empty_state(ui, Icon::Check, "История пуста", "Завершённые импорты и загрузки.", None);
+                widgets::empty_state(ui, Icon::Check, "История пуста", "", None);
             }
             for j in &d.history {
                 job(ui, j, out, false);
@@ -93,7 +93,7 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
     if d.confirm.is_empty() {
-        widgets::empty_state(ui, Icon::Check, "Всё подтверждено", "Сомнительные совпадения появятся здесь.", None);
+        widgets::empty_state(ui, Icon::Check, "Всё подтверждено", "", None);
         return;
     }
     Card::filled().id_salt("confirm-help").show(ui, |ui| {

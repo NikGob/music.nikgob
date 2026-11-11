@@ -5,8 +5,9 @@ use nikgob_view::{Command, QueueEntry, TrackRow, ViewState};
 
 use super::{
     PaneTab,
-    chrome::Chrome,
+    chrome::{Chrome, PlayerAct, Where},
     common,
+    pages::{TrackAct, widgets::Row},
 };
 use crate::{
     Icon, Theme, TypeRole,
@@ -106,34 +107,70 @@ fn queue_item<'a>(t: &'a TrackRow, salt: impl egui::AsId) -> ListItem<'a> {
         .id_salt(salt)
 }
 
-/// The menu of a queue row (its ⋮ and a right click): play it now,
-/// «Радио по треку», and take it out of the queue (not the current track,
-/// `entry` None).
-fn queue_menu(key: impl egui::AsId, entry: Option<u64>) -> Menu {
-    let mut m = Menu::new(key).align_right(true);
-    if entry.is_some() {
-        m = m.item(MenuItem::new("Играть сейчас").icon(Icon::PlayArrow));
-    }
-    m = m.item(MenuItem::new(super::pages::RADIO_BY_TRACK).icon(Icon::Radio));
-    if entry.is_some() {
-        m = m.divider().item(MenuItem::new("Убрать из очереди").icon(Icon::Close));
-    }
-    m
+/// What a queue row's menu does: the queue's own rows, or a track's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueueAct {
+    /// «Слушать»: the queue goes on from this row.
+    Play,
+    /// «Сыграть следующим»: the row moves right after the track playing.
+    Next,
+    /// «Убрать из очереди».
+    Remove,
+    Track(TrackAct),
 }
 
-fn queue_pick(picked: Option<usize>, t: &TrackRow, entry: Option<u64>, out: &mut Vec<Command>) {
-    match (picked, entry) {
-        (Some(0), Some(e)) => out.push(Command::PlayQueueEntry(e)),
-        (Some(1), Some(_)) | (Some(0), None) => out.push(super::pages::radio_by_track(t.id)),
-        (Some(2), Some(e)) => out.push(Command::RemoveFromQueue(e)),
-        _ => {}
+/// The menu of a queue row (its ⋮ and a right click): «Слушать» and
+/// «Сыграть следующим» (moved right after the track playing, unless it is
+/// there already), then the track's one list as every list has it (less
+/// its own «Сыграть следующим» / «В очередь»: it is in the queue), and
+/// «Убрать из очереди» last. The playing row has the player's menu.
+fn queue_menu_rows(ctx: &egui::Context, e: &QueueEntry, state: &ViewState) -> Vec<Row<QueueAct>> {
+    use super::pages as p;
+    let t = &e.track;
+    let mut rows = vec![Row::Item(QueueAct::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow))];
+    let first = state.queue.next.first().map(|n| n.entry) == Some(e.entry);
+    if state.queue.current_entry.is_some_and(|c| c != e.entry) && !first {
+        rows.push(Row::Item(QueueAct::Next, MenuItem::new(p::PLAY_NEXT).icon(Icon::QueueMusic)));
+    }
+    rows.push(Row::Divider);
+    let wish = p::widgets::WishIndex::of(ctx, &state.downloads.wishlist);
+    let track = p::with_speed_row(p::library_track_rows(t, p::LibraryRowsOf::of(state, t, &wish)), &state.speeds);
+    let track = p::placed(track, &state.prefs.track_menu, |a| a.menu_item(t.has_local));
+    rows.extend(track.into_iter().filter(|r| !matches!(r, Row::Item(TrackAct::Next | TrackAct::Queue, _))).map(|r| r.map(&mut QueueAct::Track)));
+    // With «Разные песни»: one last group.
+    if !matches!(rows.last(), Some(Row::Item(QueueAct::Track(TrackAct::Apart), _))) {
+        rows.push(Row::Divider);
+    }
+    rows.push(Row::Item(QueueAct::Remove, MenuItem::new("Убрать из очереди").icon(Icon::Close)));
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn queue_apply(
+    ctx: &egui::Context,
+    act: QueueAct,
+    e: &QueueEntry,
+    state: &ViewState,
+    chrome: &mut Chrome,
+    anchor: Rect,
+    out: &mut Vec<Command>,
+) {
+    match act {
+        QueueAct::Play => out.push(Command::PlayQueueEntry(e.entry)),
+        QueueAct::Next => {
+            if let Some(cur) = state.queue.current_entry {
+                out.push(Command::MoveInQueue { entry: e.entry, anchor: cur, after: true });
+            }
+        }
+        QueueAct::Remove => out.push(Command::RemoveFromQueue(e.entry)),
+        QueueAct::Track(a) => chrome.apply_track(ctx, a, &e.track, state, anchor, Where::Bar, out),
     }
 }
 
 /// A movable queue row (a drag handle; ⋮ and ✕ under the pointer, so the
 /// narrow pane keeps the titles whole); played ones are dimmed. Returns its
 /// rect and whether its handle is dragged / was released.
-fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) -> (Rect, bool, bool) {
+fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) -> (Rect, bool, bool) {
     let entry = e.entry;
     // Hovered last frame, or its ⋮ menu is open (the pointer is on the menu).
     let key = ui.id().with(("q-actions", entry));
@@ -172,12 +209,20 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, out: &mut Vec<Command>) 
             o.response.clone().md3_tooltip(why, None);
         }
         let mut menu_open = false;
+        let ctx = ui.ctx().clone();
         if let Some(m) = &more {
-            queue_pick(queue_menu(("q-menu", entry), Some(entry)).attach(m), &e.track, Some(entry), out);
+            let (menu, acts) = super::pages::widgets::menu_of(("q-menu", entry), queue_menu_rows(&ctx, e, state));
+            if let Some(act) = menu.align_right(true).attach(m).and_then(|i| acts.get(i).copied()) {
+                queue_apply(&ctx, act, e, state, chrome, m.rect, out);
+            }
             menu_open = ui.ctx().data(|d| d.get_temp::<bool>(m.id.with("md3e-menu-open"))).unwrap_or(false);
         }
         if !Menu::context_idle(&o.response, ("q-ctx", entry)) {
-            queue_pick(queue_menu(("q-ctx", entry), Some(entry)).context_menu(&o.response), &e.track, Some(entry), out);
+            let (menu, acts) = super::pages::widgets::menu_of(("q-ctx", entry), queue_menu_rows(&ctx, e, state));
+            if let Some(act) = menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()) {
+                let at = Rect::from_center_size(ctx.pointer_latest_pos().unwrap_or(o.rect.center()), egui::vec2(1.0, 1.0));
+                queue_apply(&ctx, act, e, state, chrome, at, out);
+            }
         }
         let now = o.response.contains_pointer() || menu_open;
         if now != show_actions {
@@ -251,7 +296,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             let drag_key = ui.id().with("q-dragged");
             let held = ui.ctx().data(|d| d.get_temp::<u64>(drag_key));
             let mut row = |ui: &mut Ui, e: &QueueEntry, played: bool, rows: &mut Vec<(u64, Rect)>| {
-                let (rect, drag, drop) = queue_row(ui, e, played, out);
+                let (rect, drag, drop) = queue_row(ui, e, played, state, chrome, out);
                 debug_assert_eq!(rect.height(), QUEUE_ROW_H, "queue rows are of one height");
                 if drag {
                     dragging = Some(rows.len());
@@ -277,8 +322,13 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 if let Some(why) = &q.current_why {
                     o.response.clone().md3_tooltip(why, None);
                 }
-                // (Sent after the rows: they hold `out` meanwhile.)
-                current_pick = queue_menu("q-ctx-current", None).context_menu(&o.response).map(|p| (p, t));
+                // The player's menu (the same as the bar's ⋮). Done after
+                // the rows: they hold `chrome` and `out` meanwhile.
+                if !Menu::context_idle(&o.response, "q-ctx-current") {
+                    let rows = Chrome::player_rows(t, state, &[], PaneTab::Info.on(&state.prefs), false);
+                    let (menu, acts) = super::pages::widgets::menu_of("q-ctx-current", rows);
+                    current_pick = menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()).map(|a: PlayerAct| (a, t));
+                }
                 if let Some(entry) = q.current_entry {
                     rows.push((entry, o.rect));
                 }
@@ -311,8 +361,9 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             if q.radio.is_none() {
                 autoplay_block(ui, state, chrome, out);
             }
-            if let Some((p, t)) = current_pick {
-                queue_pick(Some(p), t, None, out);
+            if let Some((act, t)) = current_pick {
+                let at = Rect::from_center_size(ui.ctx().pointer_latest_pos().unwrap_or_default(), egui::vec2(1.0, 1.0));
+                chrome.pick(&ui.ctx().clone(), act, t, state, at, Where::Bar, out);
             }
             if rows.is_empty() {
                 return;
@@ -757,13 +808,17 @@ mod tests {
         assert_eq!(file_uri(std::path::Path::new("/м/1.flac")), "file:///%D0%BC/1.flac");
     }
 
+    /// A queue row's menu is a track's one list with the queue's own rows:
+    /// «Слушать», «Сыграть следующим» (moving it right after the track
+    /// playing, unless it is there), «Убрать из очереди» last; no second
+    /// «В очередь».
     #[test]
-    fn radio_queue_is_named_and_its_menu_starts_a_radio() {
+    fn radio_queue_is_named_and_its_menu_is_the_track_menu() {
         assert_eq!(radio_title("Радио · Кино"), "Радио · Кино");
         assert_eq!(radio_title("Спокойное"), "Микс · Спокойное");
-        let t = TrackRow {
+        let song = |title: &str| TrackRow {
             id: nikgob_view::TrackId::new(),
-            title: "Группа крови".into(),
+            title: title.into(),
             artist: "Кино".into(),
             album: None,
             release_id: None,
@@ -778,17 +833,35 @@ mod tests {
             cover: None,
             clip: false,
         };
-        let radio = Command::StartRadio { seed: nikgob_view::RadioSeed::Track(t.id) };
-        // A row of the queue: play now, the radio, take it out.
+        let mut state = ViewState::default();
+        state.queue.current_entry = Some(1);
+        let first = QueueEntry { entry: 2, track: song("Звезда"), why: None };
+        let later = QueueEntry { entry: 3, track: song("Группа крови"), why: None };
+        state.queue.next = vec![first.clone(), later.clone()];
+        let ctx = egui::Context::default();
+        let acts = crate::screens::pages::widgets::row_acts(&queue_menu_rows(&ctx, &later, &state));
+        assert_eq!(&acts[..3], [QueueAct::Play, QueueAct::Next, QueueAct::Track(TrackAct::Radio)]);
+        assert_eq!(acts.last(), Some(&QueueAct::Remove));
+        assert!(!acts.iter().any(|a| matches!(a, QueueAct::Track(TrackAct::Next | TrackAct::Queue))));
+        assert!(acts.contains(&QueueAct::Track(TrackAct::Playlist)) && acts.contains(&QueueAct::Track(TrackAct::Share)));
+        // Already next: nothing to move.
+        let acts = crate::screens::pages::widgets::row_acts(&queue_menu_rows(&ctx, &first, &state));
+        assert!(!acts.contains(&QueueAct::Next));
+
+        let mut chrome = Chrome::default();
         let mut out = Vec::new();
-        for i in 0..3 {
-            queue_pick(Some(i), &t, Some(9), &mut out);
+        for act in [QueueAct::Play, QueueAct::Next, QueueAct::Remove, QueueAct::Track(TrackAct::Radio)] {
+            queue_apply(&ctx, act, &later, &state, &mut chrome, Rect::NOTHING, &mut out);
         }
-        assert_eq!(out, vec![Command::PlayQueueEntry(9), radio.clone(), Command::RemoveFromQueue(9)]);
-        // The current track: only the radio.
-        let mut out = Vec::new();
-        queue_pick(Some(0), &t, None, &mut out);
-        assert_eq!(out, vec![radio]);
+        assert_eq!(
+            out,
+            vec![
+                Command::PlayQueueEntry(3),
+                Command::MoveInQueue { entry: 3, anchor: 1, after: true },
+                Command::RemoveFromQueue(3),
+                Command::StartRadio { seed: nikgob_view::RadioSeed::Track(later.track.id) },
+            ]
+        );
     }
 
     #[test]

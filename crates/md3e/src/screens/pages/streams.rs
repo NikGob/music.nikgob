@@ -511,7 +511,7 @@ fn stream_album_apply(
     match act {
         A::Play => out.push(Command::PlayStreamAlbum { id: id.clone(), start: None, shuffle: false }),
         A::Shuffle => out.push(Command::PlayStreamAlbum { id: id.clone(), start: None, shuffle: true }),
-        // «Скачать» downloads without a like; «В любимое» is the like.
+        // «Скачать альбом» downloads without a like; «Нравится» is the like.
         A::Download => out.push(Command::DownloadStreamAlbum(id.clone())),
         A::Like => out.push(Command::LikeStreamAlbum { album: id.clone(), on: true }),
         A::Share => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),

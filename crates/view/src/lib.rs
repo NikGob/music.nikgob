@@ -770,7 +770,7 @@ pub struct World {
     pub primary: Vec<TrackId>,
     /// «98 треков, 4 ч 35 мин: что ещё не слышал, по порядку альбомов».
     pub primary_tip: String,
-    /// «Вперемешку»: all its tracks, shuffled.
+    /// «Перемешать»: all its tracks, shuffled.
     pub shuffled: Vec<TrackId>,
     /// Its albums in the library, in order.
     pub albums: Vec<ReleaseId>,
@@ -3025,7 +3025,7 @@ pub enum Command {
     WrongFile(nikgob_core::model::TrackId),
     /// Takes [`Self::WrongFile`] back: the file plays again.
     UndoWrongFile(nikgob_core::model::TrackId),
-    /// «Найти качество лучше…» of a track with a file: the download
+    /// «Найти качество лучше» of a track with a file: the download
     /// sources look for a copy better than it, which waits in «Подтверди»;
     /// a track with no file goes to «Хочу скачать».
     FindBetter(nikgob_core::model::TrackId),

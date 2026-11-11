@@ -217,7 +217,7 @@ pub fn show(
                     IconButton::new(Icon::Favorite)
                         .selected(liked)
                         .colors(item)
-                        .tooltip("Нравится (Ctrl+L)")
+                        .tooltip(format!("{} (Ctrl+L)", super::pages::like_label(liked)))
                         .id_salt("bar-like"),
                 )
                 .clicked()
@@ -245,7 +245,7 @@ pub fn show(
                     IconButton::new(Icon::Lyrics)
                         .selected(pane == Some(PaneTab::Lyrics))
                         .colors(item)
-                        .tooltip("Текст")
+                        .tooltip("Текст песни")
                         .id_salt("bar-lyrics"),
                 )
                 .clicked()
@@ -281,8 +281,13 @@ pub fn show(
             top.extend((!show_like).then_some(Act::Like));
             top.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
             top.extend((!show_volume).then_some(Act::Volume));
-            let rows = Chrome::player_rows(t, state, &top, PaneTab::Info.on(&state.prefs), false);
+            // Placed by «Меню трека» like Now Playing's (F12 anyway).
+            top.push(Act::Visualizer);
+            let info_on = PaneTab::Info.on(&state.prefs);
+            let rows = Chrome::player_rows(t, state, &top, info_on, false);
             chrome.track_menu(&more, "bar-more", rows, t, state, Where::Bar, out);
+            // A right click on the track (its cover and title): the same.
+            chrome.track_context_menu(&info, "bar-track", || Chrome::player_rows(t, state, &top, info_on, false), t, state, Where::Bar, out);
         }
     });
     // A click on the pill between the controls opens Now Playing too.

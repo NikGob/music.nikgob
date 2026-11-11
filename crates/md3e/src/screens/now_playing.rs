@@ -909,8 +909,11 @@ pub fn show_on(
     let right_used = hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let more = ui.add(IconButton::new(Icon::MoreVert).tooltip("Ещё").id_salt("np-more"));
         if let Some(t) = p.current.as_ref() {
-            // The track's one list, the visualizer before it, the delete last.
-            let rows = Chrome::player_rows(t, state, &[Act::Visualizer], true, true);
+            // The track's one list, the visualizer before it, the delete
+            // last; with the content open the volume has no room on the
+            // screen and is here.
+            let top: &[Act] = if chrome.np_slot != NpSlot::None { &[Act::Volume, Act::Visualizer] } else { &[Act::Visualizer] };
+            let rows = Chrome::player_rows(t, state, top, true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
         if ui.add(
@@ -926,7 +929,7 @@ pub fn show_on(
             IconButton::new(Icon::Lyrics)
                 .style(Style::Tonal)
                 .selected(chrome.np_slot == NpSlot::Lyrics)
-                .tooltip("Текст (L)")
+                .tooltip("Текст песни (L)")
                 .id_salt("np-lyrics-btn"),
         ).clicked() {
             chrome.np_slot.toggle(NpSlot::Lyrics);
@@ -1816,7 +1819,8 @@ fn info(
         let mut lui = ui.new_child(
             UiBuilder::new().max_rect(ends).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("np-compact-like"),
         );
-        if lui.add(IconButton::new(Icon::Favorite).selected(t.liked).tooltip("Нравится (Ctrl+L)").id_salt("np-like-compact")).clicked() {
+        let like_tip = format!("{} (Ctrl+L)", super::pages::like_label(t.liked));
+        if lui.add(IconButton::new(Icon::Favorite).selected(t.liked).tooltip(like_tip).id_salt("np-like-compact")).clicked() {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
         if state.prefs.dislike_button {
@@ -1848,16 +1852,15 @@ fn info(
             .add(
                 IconButton::new(Icon::Favorite)
                     .selected(t.liked)
-                    .tooltip("Нравится (Ctrl+L)")
+                    .tooltip(format!("{} (Ctrl+L)", super::pages::like_label(t.liked)))
                     .id_salt("np-like"),
             )
             .clicked()
         {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
-        let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист").id_salt("np-add"));
-
-        pages.playlist_menu(&mut aui, &add, vec![t.id], state, out);
+        let add = aui.add(IconButton::new(Icon::PlaylistAdd).tooltip("В плейлист…").id_salt("np-add"));
+        pages.playlist_menu(&add, vec![t.id]);
     }
     // The sound of the track (its speed and the equalizer), by the volume.
     // Lit while either changes what is heard.

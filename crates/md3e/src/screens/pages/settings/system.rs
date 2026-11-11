@@ -66,7 +66,11 @@ fn load(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     if let Some(v) = rows::slider(ui, Id::FpsLimit, p.fps_limit as f32, Num::new(30.0, 144.0, 1.0, 0, "")) {
         p.fps_limit = v as u32;
     }
-    switch(ui, Id::TrayKeepWindow, &mut p.tray_keep_window);
+    // Where the window cannot hide (Wayland) it always closes to the tray
+    // and is made again: the switch would do nothing.
+    if super::super::window_can_hide(ui.ctx()) {
+        switch(ui, Id::TrayKeepWindow, &mut p.tray_keep_window);
+    }
     let n = p.auto_download_limit.clamp(1, 8) as f32;
     if let Some(v) = rows::slider(ui, Id::AutoDownloads, n, Num::new(1.0, 8.0, 1.0, 0, "")) {
         p.auto_download_limit = v as u32;

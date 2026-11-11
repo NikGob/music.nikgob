@@ -359,6 +359,7 @@ impl eframe::App for Window {
             None => {
                 let h = windowing::can_hide(frame);
                 self.hides = Some(h);
+                self.core.ui.set_window_can_hide(h);
                 h
             }
         };

@@ -125,6 +125,8 @@ pub struct Md3eUi {
     /// «Найти песню…» over everything.
     find_song: find_song::FindSongUi,
     system_reduced_motion: bool,
+    /// The window can hide to the tray and come back (not on Wayland).
+    window_can_hide: bool,
     fullscreen: bool,
     /// Window fullscreen asked for with F11 (the visualizer forces it too).
     user_fullscreen: bool,
@@ -168,6 +170,7 @@ impl Md3eUi {
             stage: stage::StageUi::default(),
             find_song: find_song::FindSongUi::default(),
             system_reduced_motion: false,
+            window_can_hide: true,
             fullscreen: false,
             user_fullscreen: false,
         }
@@ -389,6 +392,7 @@ impl Md3eUi {
         drop(theme_scope);
         pages::set_marks(ctx, &state.dislikes);
         pages::set_track_menu(ctx, &state.prefs.track_menu);
+        pages::set_window_can_hide(ctx, self.window_can_hide);
         crate::components::tooltip::set_enabled(ctx, state.prefs.tooltips);
         root.spacing_mut().scroll = crate::components::scrollbars::apply(ctx);
         // The current and the next cover stay loaded while off screen (set
@@ -1304,6 +1308,12 @@ impl Md3eUi {
     /// The OS asks for less animation (Windows "Показывать анимацию" off).
     pub fn set_system_reduced_motion(&mut self, on: bool) {
         self.system_reduced_motion = on;
+    }
+
+    /// Whether the window can hide to the tray and come back as it was:
+    /// «Быстрое открытие из трея» is shown only then.
+    pub fn set_window_can_hide(&mut self, can: bool) {
+        self.window_can_hide = can;
     }
 
     /// The latest spectrum bands (0..1, low to high) for the visualizer.

@@ -1,6 +1,6 @@
 //! Загрузки → «Хочу скачать» (docs/stage3.md §3.5, §3.7): stream tracks on
 //! their way to a file (likes, «Скачать», imports). One summary line with
-//! «Скачать все» and «Искать заново», filter chips by status, the list
+//! «Скачать все» and «Искать снова», filter chips by status, the list
 //! grouped by album or by artist. A row says where its track is in words (no
 //! coloured pills) and offers the one thing that helps now: «Скачать»,
 //! «Проверить», or for a track nothing was found for «Искать снова ▾» (with
@@ -141,7 +141,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             ui,
             Icon::Download,
             "Пока ничего",
-            "Нажми «Скачать» у трека или альбома из Spotify и YouTube Music — он появится здесь и скачается сам.",
+            "",
             None,
         );
         return None;
@@ -213,7 +213,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
                 && missed > 0
                 && ui
                     .add(
-                        Button::new(format!("Искать заново ({missed})"))
+                        Button::new(format!("Искать снова ({missed})"))
                             .icon(Icon::Refresh)
                             .style(if waiting > 0 { Style::Tonal } else { Style::Filled })
                             .id_salt("wish-retry-all"),
@@ -357,12 +357,13 @@ fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId],
                 (true, _, Some(a)) => WishlistSelect::Artist(a),
                 _ => WishlistSelect::Items(open.to_vec()),
             };
-            let picked = Menu::new(("wish-group-menu", salt))
-                .align_right(true)
-                .item(MenuItem::new("Скачать все").icon(Icon::Download).enabled(waiting > 0))
-                .item(MenuItem::new("Не качать ничего отсюда").icon(Icon::Block))
-                .attach(&more);
-            match picked {
+            // Nothing waiting: nothing to download from here.
+            let mut menu = Menu::new(("wish-group-menu", salt)).align_right(true);
+            if waiting > 0 {
+                menu = menu.item(MenuItem::new(format!("Скачать все ({waiting})")).icon(Icon::Download)).divider();
+            }
+            let picked = menu.item(MenuItem::new("Не качать ничего отсюда").icon(Icon::Block)).attach(&more);
+            match picked.map(|k| if waiting > 0 { k } else { k + 1 }) {
                 Some(0) => out.push(Command::WishlistDownload(select())),
                 Some(1) => out.push(Command::WishlistDismiss(open.to_vec())),
                 _ => {}
@@ -371,7 +372,7 @@ fn group_head(ui: &mut Ui, g: &WishlistGroup, waiting: u32, open: &[WishlistId],
             if waiting >= 2
                 && ui
                     .add(
-                        Button::new(format!("Скачать {waiting}"))
+                        Button::new(format!("Скачать все ({waiting})"))
                             .icon(Icon::Download)
                             .style(Style::Tonal)
                             .size(Size::S)
@@ -506,43 +507,79 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
         attach_pick(i + 3, r, pages, out);
     }
     let menu = |key: &str| {
-        Menu::new((key, id))
-            .align_right(true)
-            .item(MenuItem::new("Скачать сейчас").icon(Icon::Download).enabled(matches!(r.status, St::Waiting | St::NoTorrent | St::Failed)))
-            .item(MenuItem::new("Искать снова").icon(Icon::Refresh).enabled(r.status != St::Downloading))
-            .item(MenuItem::new("Скачать весь альбом").icon(Icon::Album).enabled(r.scope == WishlistScope::Track && r.release.is_some()))
-            .divider()
-            .item(MenuItem::new("Сохранить с YouTube").icon(Icon::Download).enabled(r.can_save_from_youtube))
-            .item(MenuItem::new("Свой .torrent…").icon(Icon::AttachFile))
-            .item(MenuItem::new("Magnet-ссылка…").icon(Icon::Link))
-            .item(MenuItem::new("Свой файл…").icon(Icon::UploadFile))
-            .item(MenuItem::new("Папка с альбомом…").icon(Icon::Folder))
-            .divider()
-            .item(MenuItem::new("Не качать").icon(Icon::Block))
+        let (menu, acts) = widgets::menu_of((key, id), wish_rows(r));
+        (menu.align_right(true), acts)
     };
-    let mut picked = more.as_ref().and_then(|m| menu("wish-menu").attach(m));
-    if r.status != St::Dismissed {
-        picked = picked.or_else(|| menu("wish-ctx").context_menu(&o.response));
+    let mut picked = more.as_ref().and_then(|m| {
+        let (menu, acts) = menu("wish-menu");
+        menu.attach(m).and_then(|k| acts.get(k).copied())
+    });
+    if r.status != St::Dismissed && !Menu::context_idle(&o.response, ("wish-ctx", id)) {
+        let (menu, acts) = menu("wish-ctx");
+        picked = picked.or_else(|| menu.context_menu(&o.response).and_then(|k| acts.get(k).copied()));
     }
     match picked {
-        Some(0) => out.push(Command::WishlistDownload(WishlistSelect::Items(vec![id]))),
-        Some(1) => out.push(Command::WishlistRetry(id)),
-        Some(2) => {
+        Some(WishAct::Download) => out.push(Command::WishlistDownload(WishlistSelect::Items(vec![id]))),
+        Some(WishAct::Retry) => out.push(Command::WishlistRetry(id)),
+        Some(WishAct::Album) => {
             if let Some(rel) = r.release {
                 out.push(Command::DownloadRelease(rel));
             }
         }
-        Some(3) => out.push(Command::WishlistSaveFromYoutube(id)),
-        Some(8) => out.push(Command::WishlistDismiss(vec![id])),
-        // «Скачать весь альбом» sits before the hand-made ways in.
-        Some(i) => attach_pick(i - 1, r, pages, out),
+        Some(WishAct::Youtube) => out.push(Command::WishlistSaveFromYoutube(id)),
+        Some(WishAct::Torrent) => attach_pick(3, r, pages, out),
+        Some(WishAct::Magnet) => attach_pick(4, r, pages, out),
+        Some(WishAct::File) => attach_pick(5, r, pages, out),
+        Some(WishAct::Folder) => attach_pick(6, r, pages, out),
+        Some(WishAct::Dismiss) => out.push(Command::WishlistDismiss(vec![id])),
         None => {}
     }
 }
 
-/// The hand-made ways in, by their place in the ⋮ menu: 3 .torrent, 4
-/// magnet, 5 file, 6 folder; the split button's menu maps onto these and
-/// adds 8 dismiss.
+/// What a wishlist row's ⋮ does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WishAct {
+    Download,
+    Retry,
+    Album,
+    Youtube,
+    Torrent,
+    Magnet,
+    File,
+    Folder,
+    Dismiss,
+}
+
+/// A wishlist row's ⋮: what its status allows (nothing greyed: what
+/// cannot work now is not there) │ the hand-made ways in │ «Не качать».
+fn wish_rows(r: &WishlistRow) -> Vec<widgets::Row<WishAct>> {
+    use WishAct as A;
+    use widgets::Row;
+    let mut rows = Vec::new();
+    if matches!(r.status, St::Waiting | St::NoTorrent | St::Failed) {
+        rows.push(Row::Item(A::Download, MenuItem::new("Скачать").icon(Icon::Download)));
+    }
+    if r.status != St::Downloading {
+        rows.push(Row::Item(A::Retry, MenuItem::new("Искать снова").icon(Icon::Refresh)));
+    }
+    if r.scope == WishlistScope::Track && r.release.is_some() {
+        rows.push(Row::Item(A::Album, MenuItem::new("Скачать альбом").icon(Icon::Album)));
+    }
+    rows.push(Row::Divider);
+    if r.can_save_from_youtube {
+        rows.push(Row::Item(A::Youtube, MenuItem::new("Сохранить с YouTube").icon(Icon::Download)));
+    }
+    rows.push(Row::Item(A::Torrent, MenuItem::new("Свой .torrent…").icon(Icon::AttachFile)));
+    rows.push(Row::Item(A::Magnet, MenuItem::new("Magnet-ссылка…").icon(Icon::Link)));
+    rows.push(Row::Item(A::File, MenuItem::new("Свой файл…").icon(Icon::UploadFile)));
+    rows.push(Row::Item(A::Folder, MenuItem::new("Папка с альбомом…").icon(Icon::Folder)));
+    rows.push(Row::Divider);
+    rows.push(Row::Item(A::Dismiss, MenuItem::new("Не качать").icon(Icon::Block)));
+    rows
+}
+
+/// The hand-made ways in: 3 .torrent, 4 magnet, 5 file, 6 folder, 8
+/// dismiss (the split button's menu maps onto these from 0).
 fn attach_pick(i: usize, r: &WishlistRow, pages: &mut PageState, out: &mut Vec<Command>) {
     let id = r.id;
     match i {
