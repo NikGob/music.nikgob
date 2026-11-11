@@ -188,6 +188,9 @@ pub(crate) fn drop_empty_release_in(conn: &Connection, release: &str, prefer: Op
             )?;
             conn.execute("UPDATE external_id SET local_id = ?2 WHERE kind = 'release' AND local_id = ?1", params![release, t])?;
             conn.execute("UPDATE wishlist SET release_id = ?2 WHERE release_id = ?1", params![release, t])?;
+            // The album taken whole stays whole there (the same album).
+            crate::selection::carry_release_choices_in(conn, release, t, false, now, device)?;
+            crate::streams::refresh_in_library_of_release(conn, t)?;
             conn.execute(
                 "UPDATE likes SET target_id = ?2, updated_at = ?3, updated_by = ?4
                   WHERE target_kind = 'release' AND target_id = ?1
@@ -213,6 +216,7 @@ pub(crate) fn drop_empty_release_in(conn: &Connection, release: &str, prefer: Op
     conn.execute("DELETE FROM release_artist WHERE release_id = ?1", [release])?;
     conn.execute("DELETE FROM palette WHERE release_id = ?1", [release])?;
     conn.execute("DELETE FROM meta WHERE key = ?1", [format!("cache.tracklist.{release}")])?;
+    crate::selection::drop_release_choices_in(conn, release)?;
     conn.execute("DELETE FROM release WHERE id = ?1", [release])?;
     match &target {
         Some(t) => note!("library: album «{title}» {release} is empty, removed; its ids and items go to {t}"),

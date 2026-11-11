@@ -35,6 +35,25 @@ macro_rules! page_row {
     };
 }
 
+/// A row of an album's page (alias `t`) the user left out of their songs
+/// of that album by hand ([`crate::selection`]).
+macro_rules! excluded_expr {
+    () => {
+        "EXISTS (SELECT 1 FROM release_track_selection x WHERE x.release_id = t.release_id
+                    AND x.track_id = t.id AND x.choice = 'exclude' AND x.deleted = 0)"
+    };
+}
+
+/// The whole of an album (alias `r`) is the user's: added whole
+/// ([`crate::Library::set_release_whole`]) or saved (its own like row; a
+/// heart only worked out from its tracks' likes does not count).
+macro_rules! release_whole_expr {
+    () => {
+        "(EXISTS (SELECT 1 FROM release_selection s WHERE s.release_id = r.id AND s.mode = 'whole' AND s.deleted = 0)
+          OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = r.id AND l.deleted = 0))"
+    };
+}
+
 /// Whether an album (alias `r`) counts as liked: it is saved (its own like
 /// row); when album likes like the tracks too
 /// ([`crate::Library::set_album_likes_tracks`]), every one of its live tracks

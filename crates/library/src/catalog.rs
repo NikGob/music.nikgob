@@ -661,6 +661,8 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
     tx.execute("UPDATE remote_like SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("UPDATE wishlist SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     dedupe_wishlist_of_track(tx, &t)?;
+    // Its place among the user's songs of the album `into` is on.
+    crate::selection::carry_track_choices_in(tx, &f, &t)?;
     // What is not taken for the song again follows it.
     tx.execute("UPDATE OR IGNORE wrong_audio SET track_id = ?2 WHERE track_id = ?1", params![f, t])?;
     tx.execute("DELETE FROM wrong_audio WHERE track_id = ?1", [&f])?;
@@ -758,6 +760,7 @@ impl Library {
         if from == to {
             return Ok(0);
         }
+        let device = self.device_id();
         self.write(|tx| {
             let (f, t) = (from.to_string(), to.to_string());
             for (id, rid) in [(&f, from), (&t, to)] {
@@ -778,6 +781,7 @@ impl Library {
             }
             let mbid: Option<String> =
                 tx.query_row("SELECT mbid FROM release WHERE id = ?1", [&f], |r| r.get(0))?;
+            crate::selection::carry_release_choices_in(tx, &f, &t, false, now_ms(), device.as_str())?;
             tx.execute(
                 "UPDATE release SET
                         cover_ref = coalesce(cover_ref, (SELECT cover_ref FROM release WHERE id = ?1)),
@@ -802,6 +806,7 @@ impl Library {
                 params![f, t, now_ms()],
             )?;
             carry_release_links(tx, &f, &t)?;
+            crate::streams::refresh_in_library_of_release(tx, &t)?;
             tx.execute("DELETE FROM release_artist WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM palette WHERE release_id = ?1", [&f])?;
             tx.execute("DELETE FROM release WHERE id = ?1", [&f])?;
@@ -837,6 +842,7 @@ impl Library {
         if from == to {
             return Ok(0);
         }
+        let device = self.device_id();
         self.write(|tx| {
             let (f, t) = (from.to_string(), to.to_string());
             if first_string(tx, "SELECT id FROM release WHERE id = ?1", [&f])?.is_none() {
@@ -853,6 +859,7 @@ impl Library {
                   WHERE id = ?2",
                 params![f, t],
             )?;
+            crate::selection::carry_release_choices_in(tx, &f, &t, true, now_ms(), device.as_str())?;
             let moved = tx.execute(
                 "UPDATE track SET release_id = ?2,
                         album_key = (SELECT title_key FROM release WHERE id = ?2)
@@ -867,6 +874,7 @@ impl Library {
                 params![f, t, now_ms()],
             )?;
             carry_release_links(tx, &f, &t)?;
+            crate::streams::refresh_in_library_of_release(tx, &t)?;
             let artists: Vec<String> = {
                 let mut stmt = tx.prepare_cached("SELECT artist_id FROM release_artist WHERE release_id = ?1")?;
                 let rows = stmt.query_map([&f], |r| r.get(0))?;
@@ -1106,11 +1114,48 @@ impl Library {
     /// `progress.total == entries.len()`, `progress.local` the rows with a
     /// file. With one disc a hole has its number (the first ones free up to
     /// the count); with several the holes come last, unnumbered.
+    ///
+    /// It also says which rows are the user's songs of the album and which
+    /// were left out by hand ([`crate::selection`]); its progress counts
+    /// them as the album's card does.
     pub fn release_listing(&self, release: ReleaseId) -> Result<Option<ReleaseListing>> {
         let Some(r) = self.get_release(release)? else { return Ok(None) };
         let rows = self.tracks_of_release_all(release)?;
-        let unwanted = self.read(|c| crate::unwanted::unwanted_places_in(c, &release.to_string()))?;
-        Ok(Some(ReleaseListing::new(rows, r.total_tracks, &unwanted)))
+        let rid = release.to_string();
+        let unwanted = self.read(|c| crate::unwanted::unwanted_places_in(c, &rid))?;
+        type Mine = (Vec<(TrackId, bool, bool)>, bool, Option<String>);
+        let (marks, whole, view): Mine = self.read(|c| {
+            let mut stmt = c.prepare_cached(concat!(
+                "SELECT t.id, t.in_library, ",
+                excluded_expr!(),
+                " FROM track t WHERE t.release_id = ?1 AND ",
+                page_row!()
+            ))?;
+            let marks = stmt
+                .query_map([&rid], |row| Ok((get_id(row, 0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let whole: bool = c.query_row(
+                concat!("SELECT ", release_whole_expr!(), " FROM release r WHERE r.id = ?1"),
+                [&rid],
+                |row| row.get(0),
+            )?;
+            let view: Option<String> = c
+                .query_row(
+                    "SELECT view FROM release_selection WHERE release_id = ?1 AND deleted = 0",
+                    [&rid],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok((marks, whole, view))
+        })?;
+        let wanted = marks.iter().filter(|m| m.1 && !m.2).map(|m| m.0).collect();
+        let excluded = marks.iter().filter(|m| m.2).map(|m| m.0).collect();
+        let view = match view.as_deref() {
+            Some("all") => Some(true),
+            Some("mine") => Some(false),
+            _ => None,
+        };
+        Ok(Some(ReleaseListing::new(rows, r.total_tracks, &unwanted).with_choices(wanted, excluded, whole, view)))
     }
 
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {
@@ -1355,6 +1400,8 @@ pub(crate) const RELEASE_VISIBLE: &str = release_visible!();
 pub(crate) const ARTIST_VISIBLE: &str = artist_visible!();
 
 /// The columns of a [`ReleaseRow`] (alias `r`); deleted tracks count nowhere.
+/// The user's songs of it ([`crate::selection`]) are its page's rows in the
+/// library and not left out of it.
 /// Its count leaves out the places of the songs the user deleted from it
 /// that no live track takes (`unwanted`): no holes of the album.
 macro_rules! release_row_cols {
@@ -1377,7 +1424,22 @@ macro_rules! release_row_cols {
             ",
                     (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND ",
             page_row!(),
-            ")"
+            "),
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.in_library = 1 AND NOT ",
+            excluded_expr!(),
+            " AND ",
+            page_row!(),
+            "),
+                    (SELECT COUNT(*) FROM track t WHERE t.release_id = r.id AND t.in_library = 1 AND t.has_local = 1
+                        AND NOT ",
+            excluded_expr!(),
+            " AND ",
+            page_row!(),
+            "),
+                    ",
+            release_whole_expr!(),
+            ",
+                    (SELECT s.view FROM release_selection s WHERE s.release_id = r.id AND s.deleted = 0)"
         )
     };
 }
@@ -1401,6 +1463,14 @@ pub(crate) fn release_row(row: &Row<'_>) -> rusqlite::Result<ReleaseRow> {
         known_tracks: row.get::<_, i64>(11)? as u32,
         liked: row.get(12)?,
         rows: row.get::<_, i64>(13)? as u32,
+        wanted: row.get::<_, i64>(14)? as u32,
+        wanted_local: row.get::<_, i64>(15)? as u32,
+        whole: row.get(16)?,
+        view: row.get::<_, Option<String>>(17)?.and_then(|v| match v.as_str() {
+            "all" => Some(true),
+            "mine" => Some(false),
+            _ => None,
+        }),
     })
 }
 

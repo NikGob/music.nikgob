@@ -39,6 +39,7 @@ mod recordings;
 mod recs;
 mod repairs;
 pub mod search;
+mod selection;
 mod streams;
 mod track_fx;
 mod trash;
@@ -64,17 +65,18 @@ pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recordings::{PrintToLink, RecordingSide};
 pub use recs::RecTrack;
+pub use selection::{ReleaseChoice, TrackChoice};
 pub use unwanted::Unwanted;
 pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
 pub use types::{
     AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
-    ListingEntry, RecFeedback, ReleaseListing, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
+    ListingEntry, Membership, RecFeedback, ReleaseListing, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };
 pub use userdata::{
-    EVENTS_FILE, FINGERPRINT_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, RECORDINGS_FILE, SAVED_FILE, STREAMS_FILE,
+    ALBUM_CHOICES_FILE, EVENTS_FILE, FINGERPRINT_FILE, LIKES_FILE, PLAYLISTS_FILE, REC_FEEDBACK_FILE, RECORDINGS_FILE, SAVED_FILE, STREAMS_FILE,
     USERDATA_VERSION,
 };
 pub use util::{fold, now_ms, sort_key};

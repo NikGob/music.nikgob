@@ -129,13 +129,44 @@ pub struct ReleaseRow {
     /// Rows of its page ([`crate::Library::tracks_of_release_all`]: outside
     /// the library too).
     pub rows: u32,
+    /// The user's songs of it: rows of its page that are library tracks and
+    /// not left out of it by hand (`crate::selection`).
+    #[serde(default)]
+    pub wanted: u32,
+    /// Of them, the ones with a file.
+    #[serde(default)]
+    pub wanted_local: u32,
+    /// The whole album is the user's: added whole or saved (its own like).
+    #[serde(default)]
+    pub whole: bool,
+    /// What its page shows while only some of it is the user's:
+    /// `Some(true)` the whole album, `Some(false)` the user's songs, `None`
+    /// the setting ([`crate::Library::set_release_view`]).
+    #[serde(default)]
+    pub view: Option<bool>,
 }
 
 impl ReleaseRow {
-    /// "3 из 12 у тебя", as its page counts ([`ReleaseListing`]).
+    /// "3 из 12 у тебя", as its page counts ([`ReleaseListing`]), and the
+    /// user's songs of it.
     pub fn progress(&self) -> ReleaseProgress {
         ReleaseProgress::new(self.local_tracks, self.known_tracks, self.rows, self.release.total_tracks)
+            .mine(self.wanted, self.wanted_local, self.whole)
     }
+}
+
+/// What a row of an album's page is to the user ([`ReleaseListing::membership`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    /// One of the user's songs of the album.
+    Wanted,
+    /// Another version of one of the album's songs («(Instrumental)»,
+    /// «(Off Vocal)», «(Remix)»…) the user did not choose.
+    Variant,
+    /// Left out of the user's songs of the album by hand.
+    Excluded,
+    /// Only in the album's tracklist: nothing says the user wants it or not.
+    Undecided,
 }
 
 /// One line of an album's page ([`crate::Library::release_listing`]).
@@ -146,11 +177,19 @@ pub enum ListingEntry {
     Hole { disc: u32, no: u32 },
 }
 
-/// An album's page: its rows and holes, and the counts of both.
+/// An album's page: its rows and holes, and the counts of both; which rows
+/// are the user's songs of it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReleaseListing {
     pub entries: Vec<ListingEntry>,
     pub progress: ReleaseProgress,
+    /// The rows that are the user's songs of the album.
+    pub wanted: std::collections::HashSet<TrackId>,
+    /// The rows left out of them by hand.
+    pub excluded: std::collections::HashSet<TrackId>,
+    /// What its page shows while only some of it is the user's (see
+    /// [`ReleaseRow::view`]).
+    pub view: Option<bool>,
 }
 
 impl ReleaseListing {
@@ -193,7 +232,81 @@ impl ReleaseListing {
         while entries.len() < progress.total as usize {
             entries.push(ListingEntry::Hole { disc, no: 0 });
         }
-        Self { entries, progress }
+        Self {
+            entries,
+            progress,
+            wanted: std::collections::HashSet::new(),
+            excluded: std::collections::HashSet::new(),
+            view: None,
+        }
+    }
+
+    /// The user's songs of the album (`wanted`, a subset of its rows), the
+    /// rows left out by hand, whether the whole album is theirs and what
+    /// its page shows: counted into [`Self::progress`].
+    pub(crate) fn with_choices(
+        mut self,
+        wanted: std::collections::HashSet<TrackId>,
+        excluded: std::collections::HashSet<TrackId>,
+        whole: bool,
+        view: Option<bool>,
+    ) -> Self {
+        let local = self.tracks().filter(|t| t.has_local && wanted.contains(&t.id)).count() as u32;
+        self.progress = self.progress.mine(wanted.len() as u32, local, whole);
+        self.wanted = wanted;
+        self.excluded = excluded;
+        self.view = view;
+        self
+    }
+
+    /// The user's songs of the album, in its order.
+    pub fn wanted_ids(&self) -> Vec<TrackId> {
+        self.tracks().filter(|t| self.wanted.contains(&t.id)).map(|t| t.id).collect()
+    }
+
+    /// Every row of the album, in its order.
+    pub fn track_ids(&self) -> Vec<TrackId> {
+        self.tracks().map(|t| t.id).collect()
+    }
+
+    /// What each row is to the user. With `versions` a row that is another
+    /// version of a song of the same album (its title without the version
+    /// mark is that song's title, the artists agree: «SugaRiddle
+    /// (Instrumental)» beside «SugaRiddle») and is not one of the user's
+    /// songs is [`Membership::Variant`]; a version the user chose stays
+    /// theirs, and a mark without its song beside it proves nothing
+    /// (undecided). Without `versions` no row is a variant.
+    pub fn membership(&self, versions: bool) -> std::collections::HashMap<TrackId, Membership> {
+        use nikgob_core::clip_title::{fold, version_split};
+        // The album's songs that are no version: title and artist.
+        let plain: Vec<(String, String)> = if versions {
+            self.tracks()
+                .filter(|t| version_split(&t.title).is_none())
+                .map(|t| (fold(&t.title), fold(&t.artist)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let agree = |a: &str, b: &str| a.is_empty() || b.is_empty() || a.contains(b) || b.contains(a);
+        self.tracks()
+            .map(|t| {
+                let variant = versions
+                    && version_split(&t.title).is_some_and(|(base, _)| {
+                        let (base, artist) = (fold(&base), fold(&t.artist));
+                        plain.iter().any(|(title, a)| *title == base && agree(a, &artist))
+                    });
+                let m = if self.wanted.contains(&t.id) {
+                    Membership::Wanted
+                } else if self.excluded.contains(&t.id) {
+                    Membership::Excluded
+                } else if variant {
+                    Membership::Variant
+                } else {
+                    Membership::Undecided
+                };
+                (t.id, m)
+            })
+            .collect()
     }
 
     pub fn holes(&self) -> usize {
@@ -219,20 +332,58 @@ pub struct ReleaseProgress {
     /// `total_tracks` of the release, or the rows of its page if more or
     /// unknown: the lines of its page ([`ReleaseListing`]).
     pub total: u32,
+    /// The user's songs of it ([`ReleaseRow::wanted`]).
+    #[serde(default)]
+    pub wanted: u32,
+    /// Of them, the ones with a file.
+    #[serde(default)]
+    pub wanted_local: u32,
+    /// The whole album is the user's ([`ReleaseRow::whole`]).
+    #[serde(default)]
+    pub whole: bool,
 }
 
 impl ReleaseProgress {
+    /// The counts of the album; its tracks in the library stand for the
+    /// user's songs until [`Self::mine`] says.
     pub(crate) fn new(local: u32, known: u32, rows: u32, total_tracks: Option<u32>) -> Self {
         Self {
             local,
             in_library: known,
             total: total_tracks.unwrap_or(0).max(rows).max(known),
+            wanted: known,
+            wanted_local: local.min(known),
+            whole: false,
         }
+    }
+
+    /// With the user's songs of the album counted.
+    pub(crate) fn mine(self, wanted: u32, wanted_local: u32, whole: bool) -> Self {
+        Self { wanted, wanted_local, whole, ..self }
     }
 
     /// Lines of the page without a file: «1 нет».
     pub fn missing(&self) -> u32 {
         self.total.saturating_sub(self.local)
+    }
+
+    /// Only some of the album is the user's: some of its songs, not all
+    /// of its places (a place without a row counts), not added whole.
+    /// Its page shows and plays the user's songs, nothing of the rest is
+    /// owed; an album with none of them is a plain catalog page.
+    pub fn partial(&self) -> bool {
+        !self.whole && self.wanted > 0 && self.wanted < self.total
+    }
+
+    /// The user's songs of the album without a file.
+    pub fn wanted_missing(&self) -> u32 {
+        self.wanted.saturating_sub(self.wanted_local)
+    }
+
+    /// What «Скачать недостающие» asks for: of a partial album the user's
+    /// songs without a file, else every place without one.
+    pub fn lacking(&self) -> u32 {
+        if self.partial() { self.wanted_missing() } else { self.missing() }
     }
 
     pub fn is_complete(&self) -> bool {

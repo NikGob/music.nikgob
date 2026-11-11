@@ -36,6 +36,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0022_recordings.sql"),
     include_str!("../migrations/0023_track_fx.sql"),
     include_str!("../migrations/0024_wishlist_better_than.sql"),
+    include_str!("../migrations/0025_album_selection.sql"),
 
 ];
 

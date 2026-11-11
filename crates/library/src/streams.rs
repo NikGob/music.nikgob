@@ -41,7 +41,11 @@ fn likes_key(service: Service) -> String {
     format!("likes_pulled.{}", service.as_str())
 }
 
-/// `in_library` of the track row aliased `track` (see the module docs).
+/// `in_library` of the track row aliased `track` (see the module docs): a
+/// song added to the user's songs of its album, and every song of an album
+/// added whole (but the ones left out of it and a stream twin at the place
+/// of a file, see `page_row!`), are library tracks too
+/// ([`crate::selection`]).
 const IN_LIBRARY_EXPR: &str = "(
     EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind = 'local_file')
     OR (NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind != 'local_file')
@@ -52,7 +56,18 @@ const IN_LIBRARY_EXPR: &str = "(
     OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = track.release_id
                                        AND l.deleted = 0)
     OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
-                WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0))";
+                WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0)
+    OR EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id
+                  AND x.release_id = track.release_id AND x.choice = 'include' AND x.deleted = 0)
+    OR (EXISTS (SELECT 1 FROM release_selection rs WHERE rs.release_id = track.release_id
+                   AND rs.mode = 'whole' AND rs.deleted = 0)
+        AND NOT EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id
+                           AND x.release_id = track.release_id AND x.choice = 'exclude' AND x.deleted = 0)
+        AND NOT (track.has_local = 0 AND track.track_no > 0 AND EXISTS (
+                SELECT 1 FROM track o WHERE o.release_id = track.release_id AND o.id != track.id
+                   AND o.deleted_at IS NULL AND o.has_local = 1
+                   AND o.disc_no = track.disc_no AND o.track_no = track.track_no
+                   AND abs(o.duration_ms - track.duration_ms) <= 2000))))";
 
 /// Recomputes `in_library` of one track (by id text).
 pub(crate) fn refresh_in_library(conn: &Connection, track: &str) -> Result<()> {
@@ -896,6 +911,9 @@ impl Library {
                 tx.execute("UPDATE release SET title = ?2, title_key = ?3 WHERE id = ?1", params![rid, better, key])?;
                 tx.execute("UPDATE track SET album_key = ?2 WHERE release_id = ?1", params![rid, key])?;
             }
+            // An album added whole takes its new songs into the library
+            // (placed now: a stream twin of a file stays out).
+            refresh_in_library_of_release(tx, &rid)?;
             Ok((known(tx)? - before).max(0) as usize)
         })
     }

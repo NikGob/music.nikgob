@@ -24,6 +24,12 @@
 //!   links what the file links (what was said apart stays apart). Written
 //!   only once there is something to write.
 //!
+//! * `album_choices.json` - what the user chose of albums
+//!   (`crate::selection`): albums added whole, what an album's page shows,
+//!   songs added to or left out of the user's songs of an album; resets as
+//!   tombstones, merged by their time like likes. Written only once there
+//!   is something to write.
+//!
 //! * `fingerprint.json` - [`Library::userdata_fingerprint`] of the database
 //!   the files were written from, written last: a database that no longer
 //!   matches it (a backup put back) is exported again
@@ -62,6 +68,7 @@ pub const STREAMS_FILE: &str = "streams.json";
 pub const REC_FEEDBACK_FILE: &str = "rec_feedback.json";
 pub const SAVED_FILE: &str = "saved.json";
 pub const RECORDINGS_FILE: &str = "recordings.json";
+pub const ALBUM_CHOICES_FILE: &str = "album_choices.json";
 pub const FINGERPRINT_FILE: &str = "fingerprint.json";
 
 #[derive(Serialize, Deserialize)]
@@ -121,6 +128,15 @@ struct RecordingsFile {
 }
 
 #[derive(Serialize, Deserialize)]
+struct AlbumChoicesFile {
+    version: u32,
+    #[serde(default)]
+    albums: Vec<crate::selection::ReleaseChoice>,
+    #[serde(default)]
+    tracks: Vec<crate::selection::TrackChoice>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct FingerprintFile {
     version: u32,
     fingerprint: Vec<i64>,
@@ -133,7 +149,7 @@ struct LikesFile {
 }
 
 /// Does the incoming copy of a row replace the stored one?
-fn incoming_wins(new: (i64, bool, &str), old: (i64, bool, &str)) -> bool {
+pub(crate) fn incoming_wins(new: (i64, bool, &str), old: (i64, bool, &str)) -> bool {
     let (new_ts, new_deleted, new_by) = new;
     let (old_ts, old_deleted, old_by) = old;
     if new_ts != old_ts {
@@ -252,8 +268,9 @@ impl Library {
         let events_path = dir.join(EVENTS_FILE);
 
         // One snapshot for everything.
-        let (playlists, likes, streams, feedback, saved, recordings, fingerprint, events_mark, event_count) = self.read(|c| {
+        let (playlists, likes, streams, feedback, saved, recordings, choices, fingerprint, events_mark, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
+            let choices = crate::selection::read_choices(c)?;
             let recordings = crate::recordings::read_recordings(c)?;
             let likes = read_likes(c)?;
             let streams = read_streams(c)?;
@@ -264,7 +281,7 @@ impl Library {
                 c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64;
             let mark = meta_get(c, &marker_key)?.as_deref().and_then(EventsMark::parse);
             let mark = export_events(c, &events_path, mark, event_count)?;
-            Ok((playlists, likes, streams, feedback, saved, recordings, fingerprint, mark, event_count))
+            Ok((playlists, likes, streams, feedback, saved, recordings, choices, fingerprint, mark, event_count))
         })?;
 
         let mut report = ExportReport {
@@ -285,6 +302,15 @@ impl Library {
                 apart: recordings.1,
             })?;
             report.files_written += usize::from(write_atomic(&recordings_path, &json)?);
+        }
+        let choices_path = dir.join(ALBUM_CHOICES_FILE);
+        if !choices.0.is_empty() || !choices.1.is_empty() || choices_path.exists() {
+            let json = serde_json::to_vec_pretty(&AlbumChoicesFile {
+                version: USERDATA_VERSION,
+                albums: choices.0,
+                tracks: choices.1,
+            })?;
+            report.files_written += usize::from(write_atomic(&choices_path, &json)?);
         }
         let saved_path = dir.join(SAVED_FILE);
         if !saved.is_empty() || saved_path.exists() {
@@ -368,6 +394,7 @@ impl Library {
         let feedback: Option<RecFeedbackFile> = read_json(&dir.join(REC_FEEDBACK_FILE))?;
         let saved: Option<SavedFile> = read_json(&dir.join(SAVED_FILE))?;
         let recordings: Option<RecordingsFile> = read_json(&dir.join(RECORDINGS_FILE))?;
+        let choices: Option<AlbumChoicesFile> = read_json(&dir.join(ALBUM_CHOICES_FILE))?;
         for version in [
             playlists.as_ref().map(|f| f.version),
             likes.as_ref().map(|f| f.version),
@@ -375,6 +402,7 @@ impl Library {
             feedback.as_ref().map(|f| f.version),
             saved.as_ref().map(|f| f.version),
             recordings.as_ref().map(|f| f.version),
+            choices.as_ref().map(|f| f.version),
         ]
         .into_iter()
         .flatten()
@@ -441,7 +469,11 @@ impl Library {
             if let Some(f) = &recordings {
                 crate::recordings::merge_recordings_in(tx, &f.links, &f.apart, device.as_str())?;
             }
-            // Likes and entries came in: stream tracks may join or leave.
+            if let Some(f) = &choices {
+                crate::selection::merge_choices_in(tx, &f.albums, &f.tracks, &mut report)?;
+            }
+            // Likes, entries and album choices came in: stream tracks may
+            // join or leave.
             refresh_in_library_all(tx)?;
             Ok(report)
         })
@@ -488,9 +520,12 @@ fn fingerprint_in(c: &Connection) -> Result<Vec<i64>> {
                 (SELECT COUNT(*) FROM track), (SELECT COUNT(*) FROM source),
                 (SELECT COUNT(*) FROM external_id WHERE service = 'saved'),
                 (SELECT COUNT(*) FROM recording_link), (SELECT COUNT(DISTINCT recording) FROM recording_link),
-                (SELECT COUNT(*) FROM recording_apart)",
+                (SELECT COUNT(*) FROM recording_apart),
+                (SELECT COUNT(*) FROM release_selection), (SELECT COALESCE(SUM(updated_at), 0) FROM release_selection),
+                (SELECT COUNT(*) FROM release_track_selection),
+                (SELECT COALESCE(SUM(updated_at), 0) FROM release_track_selection)",
     )?;
-    Ok(stmt.query_row([], |r| (0..16).map(|i| r.get(i)).collect())?)
+    Ok(stmt.query_row([], |r| (0..20).map(|i| r.get(i)).collect())?)
 }
 
 fn read_saved(conn: &Connection) -> Result<Vec<SavedDoc>> {
@@ -501,8 +536,9 @@ fn read_saved(conn: &Connection) -> Result<Vec<SavedDoc>> {
 }
 
 /// Stream-only tracks (no local source row) that a live like, a live
-/// playlist entry or a mark of a song saved in a service's library points
-/// at.
+/// playlist entry, a mark of a song saved in a service's library or a
+/// choice of an album (a song added to the user's songs of it, an album
+/// added whole) points at.
 fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
     let ids: Vec<TrackId> = {
         let mut stmt = conn.prepare_cached(
@@ -516,7 +552,11 @@ fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
                      OR EXISTS (SELECT 1 FROM playlist_entry e WHERE e.track_id = t.id
                                    AND e.deleted = 0)
                      OR EXISTS (SELECT 1 FROM external_id x WHERE x.service = 'saved'
-                                   AND x.kind = 'track' AND x.local_id = t.id))
+                                   AND x.kind = 'track' AND x.local_id = t.id)
+                     OR EXISTS (SELECT 1 FROM release_track_selection c WHERE c.track_id = t.id
+                                   AND c.choice = 'include' AND c.deleted = 0)
+                     OR (t.in_library = 1 AND EXISTS (SELECT 1 FROM release_selection s
+                                   WHERE s.release_id = t.release_id AND s.mode = 'whole' AND s.deleted = 0)))
               ORDER BY t.id",
         )?;
         let rows = stmt.query_map([], |r| crate::util::get_id(r, 0))?;
