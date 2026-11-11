@@ -20,6 +20,7 @@ pub mod resample;
 pub mod repair;
 pub mod retag;
 pub mod rebuild;
+pub mod replaced;
 pub mod same_audio;
 pub mod sanitize;
 pub mod spectrum;
@@ -29,13 +30,14 @@ pub mod trash;
 pub mod watch;
 pub mod wrong_file;
 
-pub use album::{AlbumTrack, folder_has_album};
+pub use album::{AlbumTrack, album_files, folder_has_album};
 pub use config::{ImportConfig, normalize_masters_dir};
 pub use decide::ImportTargets;
 pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncoder};
 pub use error::{ImportError, Result};
 pub use events::{ConfirmItem, ConfirmOption, ImportEvent, ItemId, JobId, Stage};
 pub use importer::{FileOutcome, ImportJob, Importer, RelocateReport, relocate_masters};
+pub use replaced::{Replacement, undo_replacement};
 pub use rebuild::{EditionGroup, RebuildReport, find_release_editions, fold_editions, merge_split_releases, rebuild_from_files};
 pub use repair::{
     ArtistBack, IdentityRepair, Moved, TORRENT_ARTIST_REPAIR, TORRENT_IDENTITY_REPAIR, release_files, wished_release,

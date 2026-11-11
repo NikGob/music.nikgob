@@ -302,6 +302,38 @@ pub fn folder_has_album(tracks: &[AlbumTrack<'_>], files: &[(&str, Option<u32>)]
     found > 0 && found * 2 >= tracks.len()
 }
 
+/// Which downloaded file is which track of an album, by the importer's own
+/// test of a file and a track (the title, or the number and a like title,
+/// the lengths agreeing when both are known): for each of `tracks`, the
+/// index in `files` of its file, `None` when none is. The best pairs go
+/// first, each file and each track taken once, so a bonus song or an
+/// instrumental of the folder never takes an album song's place. `files`:
+/// each file's tags, its path (its name says what tags do not) and its
+/// length in ms.
+pub fn album_files(tracks: &[AlbumTrack<'_>], files: &[(&crate::tags::TagSet, &Path, Option<u32>)]) -> Vec<Option<usize>> {
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (i, (tags, path, duration)) in files.iter().enumerate() {
+        let base = crate::identity::identity_from_tags(tags, path);
+        for (j, t) in tracks.iter().enumerate() {
+            let slot = Slot { title: t.title, disc_no: t.disc_no.max(1), track_no: t.track_no, duration_ms: t.duration_ms };
+            if let Some(score) = file_is_track(&base, *duration, slot) {
+                pairs.push((score, i, j));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut out: Vec<Option<usize>> = vec![None; tracks.len()];
+    let mut file_used = vec![false; files.len()];
+    for (_, i, j) in pairs {
+        if file_used[i] || out[j].is_some() {
+            continue;
+        }
+        file_used[i] = true;
+        out[j] = Some(i);
+    }
+    out
+}
+
 impl Reference {
     /// The release of `targets` (its own, else the one most of its tracks
     /// are on) with every track of it, outside the library too.
@@ -805,5 +837,39 @@ mod tests {
         // Another album's download: the file is left as it is.
         let other = ImportTargets { release: Some(nikgob_core::model::ReleaseId::new()), ..ImportTargets::default() };
         assert_eq!(keep_place(&lib, &other, &track, &base), None);
+    }
+
+    /// A better copy of an album: each downloaded file finds its track by
+    /// its tags, else by its name, the lengths agreeing; an instrumental of
+    /// a song, a bonus song and a stranger's file find none, and two files
+    /// never take one track.
+    #[test]
+    fn the_files_of_a_better_copy_find_their_tracks() {
+        let track = |title, no, secs: u32| AlbumTrack { title, disc_no: 1, track_no: no, duration_ms: Some(secs * 1000) };
+        let tracks = [track("Интро", 1, 60), track("Сахарный", 2, 200), track("Последний", 3, 240)];
+        let tagged = |title: &str, no: u32| TagSet { title: Some(title.into()), track_no: Some(no), ..TagSet::default() };
+        let (last, intro, inst, bonus, stranger, twice) = (
+            tagged("Последний", 3),
+            tagged("Интро", 1),
+            tagged("Сахарный (Instrumental)", 4),
+            tagged("Бонус", 5),
+            tagged("Совсем другая песня", 2),
+            tagged("Последний", 3),
+        );
+        let untagged = TagSet::default();
+        let files = [
+            (&last, Path::new("/dl/Album/03 - Последний.flac"), Some(240_400)),
+            (&inst, Path::new("/dl/Album/04 - Сахарный (Instrumental).flac"), Some(200_000)),
+            (&intro, Path::new("/dl/Album/01 - Интро.flac"), Some(60_000)),
+            (&bonus, Path::new("/dl/Album/05 - Бонус.flac"), Some(180_000)),
+            (&untagged, Path::new("/dl/Album/02 - Сахарный.flac"), Some(199_000)),
+            (&stranger, Path::new("/dl/Other/02 - Совсем другая песня.flac"), Some(320_000)),
+            (&twice, Path::new("/dl/Album/CD2/03 - Последний.flac"), Some(240_000)),
+        ];
+        assert_eq!(album_files(&tracks, &files), [Some(2), Some(4), Some(0)]);
+        // Lengths that disagree: not the track, whatever the title.
+        let short = [(&last, Path::new("/dl/03 - Последний.flac"), Some(90_000))];
+        assert_eq!(album_files(&tracks, &short), [None, None, None]);
+        assert_eq!(album_files(&tracks, &[]), [None, None, None]);
     }
 }
