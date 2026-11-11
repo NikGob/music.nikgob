@@ -275,14 +275,13 @@ impl Worker {
     /// query leaves out `deleted_at` already); a song the user left out of
     /// a wished album is not either: that check belongs here, beside this
     /// one, so every path of the search (new items, an album's files, what
-    /// is good enough) goes by it. Nor is a file there is nothing better
-    /// than (our Opus of a genuine FLAC, a genuine FLAC:
-    /// [`nikgob_core::quality::nothing_better`]).
+    /// is good enough) goes by it. A file there is nothing better than
+    /// (our Opus of a genuine FLAC, a genuine FLAC) is never looked for:
+    /// [`Self::nothing_better`], beside the offers' own rule
+    /// ([`FileRank::beaten_by`]).
     pub(super) fn upgrade_wants(&self, track: TrackId) -> bool {
         // A song the user deleted from its album stays gone.
-        self.lib.get_track(track).ok().flatten().is_some()
-            && !self.lib.is_track_unwanted(track).unwrap_or(false)
-            && !self.lib.active_source(track).ok().flatten().is_some_and(|s| s.kind.is_local() && self.nothing_better(&s))
+        self.lib.get_track(track).ok().flatten().is_some() && !self.lib.is_track_unwanted(track).unwrap_or(false)
     }
 
     /// The check of a library file as the rule of a better copy reads it:
@@ -517,7 +516,9 @@ impl Worker {
             .upgrade_candidates(bar.score(), CANDIDATES)
             .ok()?
             .into_iter()
-            .find(|(t, ..)| self.upgrade_wants(*t))?;
+            .find(|(t, ..)| {
+                self.upgrade_wants(*t) && !self.lib.active_source(*t).ok().flatten().is_some_and(|s| self.nothing_better(&s))
+            })?;
         let album: Option<ReleaseId> = release.filter(|r| {
             let below = self
                 .lib
@@ -526,7 +527,7 @@ impl Worker {
                 .iter()
                 .filter(|t| self.upgrade_wants(t.id))
                 .filter_map(|t| self.lib.active_source(t.id).ok().flatten())
-                .filter(|s| s.kind.is_local() && below_bar(s.quality_score, bar))
+                .filter(|s| s.kind.is_local() && below_bar(s.quality_score, bar) && !self.nothing_better(s))
                 .count();
             below >= ALBUM_FROM
         });
