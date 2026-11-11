@@ -888,9 +888,11 @@ fn an_album_page_with_one_file_shows_the_whole_album_from_a_service() {
     assert_eq!(lib.tracks_of_release_all(release.id).unwrap().len(), 4);
 }
 
-/// Under «Только скачанное» an album with one file still plays whole: the
-/// rest of its tracklist, found on a service after it started, joins the
-/// queue after the file, in album order, and streams when it comes up.
+/// Under «Только скачанное» an album with one file played whole («Слушать
+/// весь альбом»): the rest of its tracklist, found on a service after it
+/// started, joins the queue after the file, in album order, and streams
+/// when it comes up. «Слушать» then plays the user's one song of it: the
+/// rest is not theirs.
 #[test]
 fn only_downloaded_lets_an_albums_tracklist_found_later_join_the_queue() {
     use nikgob_core::model::{Artist, ArtistCredit, Release, Track};
@@ -912,7 +914,7 @@ fn only_downloaded_lets_an_albums_tracklist_found_later_join_the_queue() {
     r.rt.send(Command::SetPrefs(Box::new(prefs)));
     wait_for(&r.rt, "the filter on", |s| s.prefs.library_only_downloaded);
 
-    r.rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    r.rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
     let queued = |s: &ViewState| -> Vec<TrackId> {
         s.queue
             .prev
@@ -928,6 +930,8 @@ fn only_downloaded_lets_an_albums_tracklist_found_later_join_the_queue() {
     assert_eq!(album[0], file.id, "the file is its first song");
     assert_eq!(queued(&r.rt.state()), album, "the whole album, in its order");
     assert_eq!(lib.count_tracks(nikgob_library::TrackFilter::All).unwrap(), 1, "the rest stays outside the library");
+    r.rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&r.rt, "the user's song of it", |s| queued(s) == [file.id]);
 }
 
 /// «Хочу скачать» shows neither a song that has its file already nor the

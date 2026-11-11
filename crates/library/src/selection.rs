@@ -109,26 +109,22 @@ fn track_in(c: &Connection, release: &str, track: &str) -> Result<Option<bool>> 
 }
 
 fn put_track_in(c: &Connection, release: &str, track: &str, choice: Option<bool>, now: UnixMs, device: &str) -> Result<()> {
-    let (text, deleted) = match choice {
-        Some(true) => ("include", false),
-        Some(false) => ("exclude", false),
-        None => ("include", true),
-    };
-    if choice.is_none() {
-        // A reset of nothing stored writes nothing.
+    let Some(include) = choice else {
+        // A reset: a tombstone of what is stored (nothing stored, nothing
+        // written).
         c.execute(
             "UPDATE release_track_selection SET deleted = 1, updated_at = ?3, updated_by = ?4
               WHERE release_id = ?1 AND track_id = ?2 AND deleted = 0",
             params![release, track, now, device],
         )?;
         return Ok(());
-    }
+    };
     c.execute(
         "INSERT INTO release_track_selection(release_id, track_id, choice, updated_at, updated_by, deleted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)
          ON CONFLICT(release_id, track_id) DO UPDATE SET choice = excluded.choice,
-            updated_at = excluded.updated_at, updated_by = excluded.updated_by, deleted = excluded.deleted",
-        params![release, track, text, now, device, deleted],
+            updated_at = excluded.updated_at, updated_by = excluded.updated_by, deleted = 0",
+        params![release, track, if include { "include" } else { "exclude" }, now, device],
     )?;
     Ok(())
 }

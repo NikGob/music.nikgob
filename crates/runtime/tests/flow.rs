@@ -936,6 +936,9 @@ fn an_album_played_next_goes_right_after_the_current_track() {
     let a3 = add("a3", Some(&album), 3, true);
     let a1 = add("a1", Some(&album), 1, true);
     let a2 = add("a2", Some(&album), 2, false);
+    // The song that only streams is the user's too (liked): the album is
+    // all theirs, not a few songs of it.
+    lib.like(a2.id).unwrap();
     let rt = Runtime::start(
         RuntimeConfig {
             library: lib,
