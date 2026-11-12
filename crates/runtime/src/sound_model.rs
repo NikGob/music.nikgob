@@ -8,13 +8,15 @@
 //!   анализ звука» that needs them ([`Effnet::download`]).
 //! * **0 MB idle.** The session is created on the first window of a batch
 //!   with no CPU memory arena and no memory pattern (what a run takes goes
-//!   back at once) and dropped [`KEEP_LOADED`] after its last use
-//!   ([`Effnet::unload_idle`]): out of RAM and VRAM between batches.
+//!   back at once) and dropped [`KEEP_LOADED`] after its last use by a
+//!   watch thread of its own: out of RAM and VRAM between batches, whoever
+//!   loaded it and however long the analysis rests.
 //! * **batch = 1.** Each window's patches (128 frames × 96 mel bands, see
 //!   [`nikgob_recs::embedding::Mel`]) run one by one; the window's vector
 //!   is their mean.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,54 @@ pub(crate) enum ModelState {
 struct Loaded {
     model: Model,
     used: Instant,
+    /// Made with «Только на процессоре» on.
+    cpu_only: bool,
+}
+
+/// The session and whether its idle watch runs.
+#[derive(Default)]
+struct Session {
+    loaded: Mutex<Option<Loaded>>,
+    watched: AtomicBool,
+}
+
+impl Session {
+    /// A thread of its own drops the session [`KEEP_LOADED`] after its last
+    /// use, whatever the analysis threads are doing (resting, waiting for
+    /// work, or another thread loaded it). It never waits for a window
+    /// being computed: it looks again a little later.
+    fn watch(self: &Arc<Self>) {
+        if self.watched.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let s = self.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-sound-model-idle".into()).spawn(move || {
+            loop {
+                let mut wait = Duration::from_secs(1);
+                if let Some(mut guard) = s.loaded.try_lock() {
+                    match guard.as_ref().map(|l| l.used.elapsed()) {
+                        None => break,
+                        Some(idle) if idle >= KEEP_LOADED => {
+                            *guard = None;
+                            log::info!("sound model: unloaded after {} s idle", KEEP_LOADED.as_secs());
+                            break;
+                        }
+                        Some(idle) => wait = KEEP_LOADED - idle + Duration::from_millis(50),
+                    }
+                }
+                std::thread::sleep(wait);
+            }
+            s.watched.store(false, Ordering::Release);
+            // A session loaded just as the watch ended gets a watch again.
+            if s.loaded.try_lock().is_none_or(|g| g.is_some()) {
+                s.watch();
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("sound model: no idle watch: {e}");
+            self.watched.store(false, Ordering::Release);
+        }
+    }
 }
 
 /// Discogs-EffNet, loaded when used and dropped when idle.
@@ -49,7 +99,7 @@ pub(crate) struct Effnet {
     catalog: Catalog,
     mel: Mel,
     cpu_only: AtomicBool,
-    session: Mutex<Option<Loaded>>,
+    session: Arc<Session>,
     /// The last failure, and when.
     failed: Mutex<Option<(Instant, String)>>,
     /// Bytes of a download in flight, as a share.
@@ -62,7 +112,7 @@ impl Effnet {
             catalog: Catalog::new(models),
             mel: Mel::new(),
             cpu_only: AtomicBool::new(false),
-            session: Mutex::new(None),
+            session: Arc::new(Session::default()),
             failed: Mutex::new(None),
             downloading: Mutex::new(None),
         }
@@ -93,11 +143,11 @@ impl Effnet {
         *self.failed.lock() = Some((Instant::now(), what));
     }
 
-    /// «Только на процессоре»: the next session runs on the CPU.
+    /// «Только на процессоре»: the next window runs on a session of that
+    /// kind (a loaded one of the other kind is made again there, on the
+    /// analysis thread; the caller never waits for a window).
     pub(crate) fn set_cpu_only(&self, on: bool) {
-        if self.cpu_only.swap(on, Ordering::Relaxed) != on {
-            self.unload();
-        }
+        self.cpu_only.store(on, Ordering::Relaxed);
     }
 
     /// Downloads what is missing of the runtime and the model; `stop`
@@ -148,20 +198,26 @@ impl Effnet {
 
     /// The session, loaded if it is not.
     fn with_session<T>(&self, f: impl FnOnce(&mut Model) -> Result<T, AnalysisError>) -> Result<T, AnalysisError> {
-        let mut guard = self.session.lock();
+        let mut guard = self.session.loaded.lock();
+        let cpu_only = self.cpu_only.load(Ordering::Relaxed);
+        if guard.as_ref().is_some_and(|l| l.cpu_only != cpu_only) {
+            *guard = None;
+            log::info!("sound model: made again for the new device setting");
+        }
         if guard.is_none() {
             if !self.ready() {
                 return Err(AnalysisError::Model("the model is not downloaded".into()));
             }
             let loaded = engine::load_runtime(&self.catalog.path(ModelId::Runtime)).and_then(|()| {
-                let device = if self.cpu_only.load(Ordering::Relaxed) { Device::Cpu } else { Device::Gpu };
+                let device = if cpu_only { Device::Cpu } else { Device::Gpu };
                 let file = self.catalog.file(ModelId::SoundEffnet, ModelId::SoundEffnet.model_file());
                 Model::load(&file, device, 1)
             });
             match loaded {
                 Ok(model) => {
                     log::info!("sound model: loaded on the {:?}", model.device);
-                    *guard = Some(Loaded { model, used: Instant::now() });
+                    *guard = Some(Loaded { model, used: Instant::now(), cpu_only });
+                    self.session.watch();
                 }
                 Err(e) => {
                     let msg = format!("loading: {e}");
@@ -176,22 +232,16 @@ impl Effnet {
         out
     }
 
-    /// How long until the idle session goes (`None`: none is loaded).
-    pub(crate) fn unload_in(&self) -> Option<Duration> {
-        self.session.lock().as_ref().map(|l| KEEP_LOADED.saturating_sub(l.used.elapsed()))
+    /// A session is in memory (`None`: a window is being computed now).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn loaded(&self) -> Option<bool> {
+        self.session.loaded.try_lock().map(|g| g.is_some())
     }
 
-    /// Drops the session once it has been idle [`KEEP_LOADED`].
-    pub(crate) fn unload_idle(&self) {
-        let mut guard = self.session.lock();
-        if guard.as_ref().is_some_and(|l| l.used.elapsed() >= KEEP_LOADED) {
-            *guard = None;
-            log::info!("sound model: unloaded after {} s idle", KEEP_LOADED.as_secs());
-        }
-    }
-
+    /// Drops the session now. Only the analysis threads call it (it waits
+    /// for a window being computed).
     pub(crate) fn unload(&self) {
-        if self.session.lock().take().is_some() {
+        if self.session.loaded.lock().take().is_some() {
             log::info!("sound model: unloaded");
         }
     }
@@ -262,7 +312,24 @@ mod tests {
         assert_eq!(m.state(), ModelState::Missing);
         assert!(matches!(m.embed(&vec![0.1; 16_000 * 3]), Err(AnalysisError::Model(_))));
         assert!(matches!(m.embed(&[]), Err(AnalysisError::TooShort)));
-        assert_eq!(m.unload_in(), None);
+        assert_eq!(m.loaded(), Some(false));
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none(), "nothing written");
+    }
+
+    /// While a window is being computed (the session held), the worker's
+    /// calls return at once: the device setting and the look at the state
+    /// never wait for it.
+    #[test]
+    fn the_worker_never_waits_for_a_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Effnet::new(dir.path().to_owned());
+        let held = m.session.loaded.lock();
+        let t = Instant::now();
+        m.set_cpu_only(true);
+        assert_eq!(m.loaded(), None, "busy, not waited for");
+        let _ = m.state();
+        assert!(t.elapsed() < Duration::from_millis(500));
+        drop(held);
+        assert_eq!(m.loaded(), Some(false));
     }
 }

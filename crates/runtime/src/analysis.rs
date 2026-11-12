@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use nikgob_core::model::{Analysis, AnalysisSource, TrackId};
 use nikgob_import::ImportError;
-use nikgob_import::decode::{PcmSpec, Span, decode_bytes_windows, decode_file_windows};
+use nikgob_import::decode::{Feed, PcmSpec, Span, Take, decode_bytes_windows, decode_file_windows};
 use nikgob_library::{AnalysisTodo, Library};
 use nikgob_recs::{
     ANALYZED_WITH, Analysed, AnalysisError, Compact, EMBEDDED_WITH, SoundModel, Vector, VectorIndex, Window, WindowedAnalyzer,
@@ -137,7 +137,7 @@ pub(crate) fn analyze_bytes(
 }
 
 type Plan<'a> = &'a mut dyn FnMut(Option<f64>) -> Vec<Span>;
-type Sink<'a> = &'a mut dyn FnMut(usize, &[f32], PcmSpec) -> ControlFlow<()>;
+type Sink<'a> = &'a mut dyn FnMut(Feed<'_>) -> Take;
 
 fn analyze_decoded(
     decode: impl FnOnce(Plan<'_>, Sink<'_>) -> Result<PcmSpec, ImportError>,
@@ -148,21 +148,27 @@ fn analyze_decoded(
     let mut analyzer: Option<WindowedAnalyzer<'_>> = None;
     let mut format: Option<AnalysisError> = None;
     let mut plan = |d: Option<f64>| -> Vec<Span> { windows(d).into_iter().map(|w| Span { start: w.start, len: w.len }).collect() };
-    let mut sink = |window: usize, chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
+    // Audio read past between windows counts as work too: the pace, the
+    // game pause and a stop apply while the heavy turn is held.
+    let mut sink = |feed: Feed<'_>| -> Take {
         if format.is_some() || !pacer.step() {
-            return ControlFlow::Break(());
+            return Take::Stop;
         }
+        let Feed::Audio { span, pcm, spec } = feed else { return Take::More };
         let a = match &mut analyzer {
             Some(a) => a,
             None => match WindowedAnalyzer::new(spec.sample_rate, spec.channels, want.bliss, want.model) {
                 Ok(a) => analyzer.insert(a),
                 Err(e) => {
                     format = Some(e);
-                    return ControlFlow::Break(());
+                    return Take::Stop;
                 }
             },
         };
-        a.push(window, chunk)
+        match a.push(span, pcm) {
+            ControlFlow::Continue(()) => Take::More,
+            ControlFlow::Break(()) => Take::NextSpan,
+        }
     };
     let decoded = decode(&mut plan, &mut sink);
     if pacer.stopped() {
@@ -275,6 +281,18 @@ pub(crate) fn load_embeddings(lib: &Library, index: &SoundIndex) {
     log::info!("analysis: {n} vectors of the sound model in memory");
 }
 
+/// The first [`BATCH`] rows of a queue (`read` with a limit) that are not
+/// `aside`: it reads past the rows set aside, so files that cannot be
+/// opened at the head of the queue never hide the rest (nor the model's
+/// queue and its download behind it).
+fn fresh(
+    read: impl Fn(u32) -> nikgob_library::Result<Vec<AnalysisTodo>>,
+    aside: &HashSet<TrackId>,
+) -> nikgob_library::Result<Vec<AnalysisTodo>> {
+    let limit = BATCH.saturating_add(u32::try_from(aside.len()).unwrap_or(u32::MAX));
+    Ok(read(limit)?.into_iter().filter(|t| !aside.contains(&t.track_id)).take(BATCH as usize).collect())
+}
+
 /// Absolute path of a source locator (relative ones are under the library).
 fn file_path(root: &Path, locator: &str) -> PathBuf {
     let p = Path::new(locator);
@@ -368,9 +386,10 @@ impl Shared {
         }
     }
 
-    /// The library's tracks due now: bliss's queue first, then the model's.
-    fn list(&self) -> nikgob_library::Result<Vec<(AnalysisTodo, Kind)>> {
-        let bliss = self.lib.tracks_needing_analysis(ANALYZED_WITH, BATCH)?;
+    /// The library's tracks due now, without those `aside` (being analysed
+    /// or skipped in this run): bliss's queue first, then the model's.
+    fn list(&self, aside: &HashSet<TrackId>) -> nikgob_library::Result<Vec<(AnalysisTodo, Kind)>> {
+        let bliss = fresh(|limit| self.lib.tracks_needing_analysis(ANALYZED_WITH, limit), aside)?;
         if !bliss.is_empty() {
             return Ok(bliss.into_iter().map(|t| (t, Kind::Bliss)).collect());
         }
@@ -383,7 +402,8 @@ impl Shared {
         if !e.ready() || e.resting() {
             return Ok(Vec::new());
         }
-        Ok(self.lib.tracks_needing_embedding(EMBEDDED_WITH, ANALYZED_WITH, BATCH)?.into_iter().map(|t| (t, Kind::Embed)).collect())
+        let embed = fresh(|limit| self.lib.tracks_needing_embedding(EMBEDDED_WITH, ANALYZED_WITH, limit), aside)?;
+        Ok(embed.into_iter().map(|t| (t, Kind::Embed)).collect())
     }
 
     /// The next file to analyse; waits while there is none. `None` = stop.
@@ -402,9 +422,10 @@ impl Shared {
             // The library is read without the queue lock, so a kick from
             // the worker never waits for it (one arriving meanwhile sets
             // `kicked` again and the wait below is skipped).
+            let aside: HashSet<TrackId> = q.busy.union(&q.skip).copied().collect();
             let listed = parking_lot::MutexGuard::unlocked(&mut q, || {
                 self.sync_embeddings();
-                self.list()
+                self.list(&aside)
             });
             match listed {
                 Ok(list) => {
@@ -420,14 +441,10 @@ impl Shared {
                 Err(e) => log::warn!("analysis: reading the queue: {e}"),
             }
             parking_lot::MutexGuard::unlocked(&mut q, || self.report(true));
+            // (The model's idle session goes by its own watch: nothing here
+            // waits for it while holding the queue.)
             if !q.kicked && !self.stopped() {
-                // An idle model leaves memory on time.
-                let unload = self.effnet.as_deref().and_then(Effnet::unload_in);
-                let wait = unload.map_or(self.idle, |u| self.idle.min(u + Duration::from_millis(200)));
-                self.wake.wait_for(&mut q, wait);
-                if let Some(e) = &self.effnet {
-                    e.unload_idle();
-                }
+                self.wake.wait_for(&mut q, self.idle);
             }
         }
     }
@@ -873,6 +890,30 @@ mod tests {
         // Only the model: bliss is left alone.
         let out = analyze_file(&long, Want { bliss: false, model: Some(&model) }, &mut Pacer::unpaced(&stop)).unwrap();
         assert!(out.bliss.is_none() && out.embedding.is_some());
+    }
+
+    /// Files set aside at the head of the queue (they could not be opened)
+    /// never hide the rest: the read goes past them.
+    #[test]
+    fn the_queue_reads_past_files_set_aside() {
+        let todo = |n: u32| AnalysisTodo {
+            track_id: TrackId::new(),
+            source_id: nikgob_core::model::SourceId::new(),
+            locator: format!("{n}.opus"),
+            file_key: String::new(),
+        };
+        let queue: Vec<AnalysisTodo> = (0..100).map(todo).collect();
+        let read = |limit: u32| Ok(queue.iter().take(limit as usize).cloned().collect::<Vec<_>>());
+        // The whole first batch set aside.
+        let aside: HashSet<TrackId> = queue.iter().take(BATCH as usize).map(|t| t.track_id).collect();
+        let got = fresh(read, &aside).unwrap();
+        assert_eq!(got.len(), BATCH as usize);
+        assert_eq!(got[0].track_id, queue[BATCH as usize].track_id);
+        assert!(got.iter().all(|t| !aside.contains(&t.track_id)));
+        // Nothing left but what is set aside: empty, so the model's queue
+        // (and its download) come next.
+        let all: HashSet<TrackId> = queue.iter().map(|t| t.track_id).collect();
+        assert!(fresh(read, &all).unwrap().is_empty());
     }
 
     #[test]
