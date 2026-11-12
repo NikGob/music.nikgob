@@ -33,9 +33,11 @@
 //!   the cluster as the scene: the library and the open pool ranked
 //!   together, new music by the novelty's share. A cluster that has
 //!   nothing left this round is passed over; with every cluster dry the
-//!   filter itself fills what is left, and when even it has nothing, the
-//!   filter without its scene, then without its character: a chip never
-//!   leaves the queue silent.
+//!   filter itself fills what is left, then its songs played again (those
+//!   heard least lately first, none heard lately); only when even that is
+//!   nothing the scene is let go, and the wave says so (its chip shows
+//!   «Все»). The character and the novelty are never let go: a chip never
+//!   shows a filter that does not hold.
 //!
 //! The bandit lives in the radio's state ([`crate::RadioState`]): a few
 //! numbers a cluster, saved with the queue so a wave goes on after a
@@ -82,6 +84,14 @@ const SESSION_LOOK: usize = 5;
 const SERVED_KEEP: usize = 64;
 /// A block ends at this many rejections of it.
 const BLOCK_REJECTS: u8 = 2;
+/// A library song is played again only past this many picks after it
+/// (the queue's buffer and the song playing)…
+pub const REPEAT_GAP: usize = 6;
+/// …and a new song past this many (about an hour and a half).
+pub const REPEAT_GAP_NEW: usize = 24;
+/// Songs played again are looked for among the this many heard least
+/// lately first, then twice as many, and so on.
+const REPEAT_WINDOW: usize = 8;
 
 /// What a wave plays (see the module docs).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,19 +136,34 @@ pub struct Bandit {
     /// What the arms were found for: the filter and the profiles kept to.
     #[serde(default)]
     built_for: Option<(WaveFilter, Vec<u32>)>,
-    /// The cluster of the block playing.
+    /// The cluster of the block being picked (ahead of the song playing
+    /// by the queue's buffer).
     pub current: Option<usize>,
-    /// Songs of the block still to pick, its length, its rejections.
+    /// The number of the block being picked (each choice a new one).
+    #[serde(default)]
+    block: u32,
+    /// Songs of the block still to pick, and its length.
     block_left: u8,
     block_len: u8,
-    block_rejects: u8,
+    /// The block rejected last (its number) and its rejections: a block's
+    /// songs are rejected as they play, after the next block was picked.
+    #[serde(default)]
+    rejects: (u32, u8),
     /// The next block is not of this cluster.
     avoid: Option<usize>,
-    /// The cluster of each recent pick.
-    served: VecDeque<(Item, usize)>,
+    /// The cluster and the block of each recent pick.
+    served: VecDeque<Served>,
     /// Seeds the draws (the radio's), and how many were drawn.
     seed: u64,
     draws: u64,
+}
+
+/// A pick the bandit remembers: its cluster and its block.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Served {
+    item: Item,
+    arm: usize,
+    block: u32,
 }
 
 /// One draw of Gamma(`shape`, 1) (Marsaglia–Tsang; a shape below one is
@@ -320,9 +345,9 @@ impl Bandit {
             return false;
         };
         self.current = Some(k);
+        self.block = self.block.wrapping_add(1).max(1);
         self.block_len = BLOCK_MIN + rng.below(usize::from(BLOCK_MAX - BLOCK_MIN) + 1) as u8;
         self.block_left = self.block_len;
-        self.block_rejects = 0;
         true
     }
 
@@ -338,8 +363,10 @@ impl Bandit {
 
     /// `item` was picked from arm `k`.
     pub fn note_served(&mut self, item: Item, k: usize) {
-        self.served.retain(|(i, _)| *i != item);
-        self.served.push_back((item, k));
+        self.served.retain(|s| s.item != item);
+        // Of the block being picked when it is of `k` (else of no block).
+        let block = if self.current == Some(k) { self.block } else { 0 };
+        self.served.push_back(Served { item, arm: k, block });
         while self.served.len() > SERVED_KEEP {
             self.served.pop_front();
         }
@@ -348,35 +375,43 @@ impl Bandit {
         }
     }
 
+    fn served_of(&self, item: &Item) -> Option<&Served> {
+        self.served.iter().rev().find(|s| s.item == *item)
+    }
+
     fn arm_of(&self, item: &Item) -> Option<usize> {
-        self.served.iter().rev().find(|(i, _)| i == item).map(|x| x.1)
+        self.served_of(item).map(|s| s.arm)
     }
 
     /// How a served song ended (its verdict): heard out grows α, a
     /// rejection β, and may end the block (see the module docs).
     pub fn feedback(&mut self, item: &Item, verdict: Verdict) {
-        let Some(k) = self.arm_of(item) else { return };
+        let Some(s) = self.served_of(item) else { return };
+        let (k, block) = (s.arm, s.block);
         match verdict {
             Verdict::Approved => {
                 if let Some(a) = self.arms.get_mut(k) {
                     a.alpha += 1.0;
                 }
             }
-            v if v.rejects() => self.rejected(k, if v == Verdict::NotNow { 2 } else { 1 }),
+            v if v.rejects() => self.rejected(k, block, if v == Verdict::NotNow { 2 } else { 1 }),
             _ => {}
         }
     }
 
-    /// A rejection of arm `k`, counting `n`.
-    fn rejected(&mut self, k: usize, n: u8) {
+    /// A rejection of a song of arm `k` from its block `block`, counting
+    /// `n`. The block is the song's own, not the one picked ahead of it
+    /// meanwhile: when the wave leaves the cluster, the block being picked
+    /// ends if it is of that cluster, and the next one is of another.
+    fn rejected(&mut self, k: usize, block: u32, n: u8) {
         if let Some(a) = self.arms.get_mut(k) {
             a.beta += f32::from(n);
         }
-        if self.current != Some(k) {
+        if block == 0 {
             return;
         }
-        self.block_rejects = self.block_rejects.saturating_add(n);
-        let leave = self.block_rejects >= BLOCK_REJECTS || {
+        self.rejects = if self.rejects.0 == block { (block, self.rejects.1.saturating_add(n)) } else { (block, n) };
+        let leave = self.rejects.1 >= BLOCK_REJECTS || {
             // One rejection: a fresh look at every cluster.
             let mut rng = self.rng();
             let draws: Vec<f32> = self.arms.iter().map(|a| beta(&mut rng, a.alpha, a.beta)).collect();
@@ -384,7 +419,9 @@ impl Bandit {
             self.arms.len() > 1 && best != Some(k)
         };
         if leave && self.arms.len() > 1 {
-            self.block_left = 0;
+            if self.current == Some(k) {
+                self.block_left = 0;
+            }
             self.avoid = Some(k);
         }
     }
@@ -398,8 +435,8 @@ impl Bandit {
 
     /// A pick taken out of the queue by hand: a rejection.
     pub fn removed(&mut self, item: &Item) {
-        if let Some(k) = self.arm_of(item) {
-            self.rejected(k, 1);
+        if let Some((k, block)) = self.served_of(item).map(|s| (s.arm, s.block)) {
+            self.rejected(k, block, 1);
         }
     }
 
@@ -407,25 +444,36 @@ impl Bandit {
     /// back.
     pub fn forget(&mut self, items: &[Item]) {
         for item in items {
-            if let Some(k) = self.arm_of(item) {
-                // Not to a block the skips ended.
-                if self.current == Some(k) && self.avoid.is_none() && self.block_left < self.block_len {
+            if let Some(block) = self.served_of(item).map(|s| s.block) {
+                // Only to the block being picked, and not when the skips
+                // ended it.
+                let ended = self.avoid.is_some() && self.avoid == self.current;
+                if block != 0 && block == self.block && !ended && self.block_left < self.block_len {
                     self.block_left += 1;
                 }
-                self.served.retain(|(i, _)| i != item);
+                self.served.retain(|s| s.item != *item);
             }
         }
     }
 
-    /// «↻ Другой вайб»: another cluster at once, nothing counted against
-    /// the one playing. False when there is no other cluster.
-    pub fn other_vibe(&mut self) -> bool {
+    /// «↻ Другой вайб»: another cluster than that of the song `playing`
+    /// at once (and, with three or more, than that of the block picked
+    /// ahead of it), nothing counted against either. False when there is
+    /// no other cluster.
+    pub fn other_vibe(&mut self, playing: Option<&Item>) -> bool {
         if self.arms.len() < 2 {
             self.block_left = 0;
             return false;
         }
-        self.avoid = self.current;
-        self.choose(&[], &[])
+        let from = playing.and_then(|i| self.arm_of(i)).or(self.current);
+        let ahead: Vec<usize> = self.current.filter(|c| Some(*c) != from && self.arms.len() > 2).into_iter().collect();
+        self.avoid = from;
+        self.choose(&[], &ahead)
+    }
+
+    /// The cluster the song `item` was picked from.
+    pub fn scene_of(&self, item: &Item) -> Option<Scene> {
+        self.arm_of(item).and_then(|k| self.arms.get(k)).map(|a| a.scene)
     }
 
     /// The α the session's last songs heard out add to each arm (see the
@@ -464,10 +512,58 @@ fn scene_order(s: Scene) -> (u8, u32) {
     }
 }
 
+/// What [`pick`] picked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Picked {
+    pub picks: Vec<WavePick>,
+    /// The user's scene had nothing left, even to play again: the wave
+    /// went on over every scene (its seed is to say so).
+    pub scene_let_go: bool,
+}
+
+/// What a wave may play again when its filter has nothing new left: the
+/// keys of `served` (oldest first, as [`pick`] takes them) but the last
+/// ones, the queue's: [`REPEAT_GAP`] of the library, [`REPEAT_GAP_NEW`] of
+/// new music (whose plays the model does not know, so they rest by the
+/// picks since).
+pub fn repeatable(served: &[(String, bool)]) -> Vec<String> {
+    let len = served.len();
+    // Each song by its last pick (a song played again is served twice).
+    let mut last: HashMap<&str, (usize, bool)> = HashMap::new();
+    for (k, (key, new)) in served.iter().enumerate() {
+        last.insert(key.as_str(), (k, *new));
+    }
+    let mut out: Vec<(usize, &str)> = last
+        .into_iter()
+        .filter(|(_, (k, new))| len - k > if *new { REPEAT_GAP_NEW } else { REPEAT_GAP })
+        .map(|(key, (k, _))| (k, key))
+        .collect();
+    out.sort_unstable();
+    out.into_iter().map(|(_, key)| key.to_owned()).collect()
+}
+
 /// The next `n` of the wave of `seed` (see the module docs): blocks of
 /// the bandit's clusters, none of `served` (track ids and
 /// [`crate::stream_song_key`]s); each pick noted with its cluster.
-pub fn pick(bandit: &mut Bandit, seed: &WaveSeed, ctx: &WaveContext<'_>, pool: &[OpenCandidate], session: &Session, n: usize, served: &HashSet<String>) -> Vec<WavePick> {
+///
+/// When every cluster is dry: the filter itself; then its songs played
+/// again, from those heard least lately (`repeatable`, oldest first, see
+/// [`repeatable`]), none heard within `cool_ms` (nor within the radio's
+/// rest); then, only when even that is nothing, the scene is let go
+/// ([`Picked::scene_let_go`]). The character and the novelty always hold:
+/// with nothing of them left the wave picks nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn pick(
+    bandit: &mut Bandit,
+    seed: &WaveSeed,
+    ctx: &WaveContext<'_>,
+    pool: &[OpenCandidate],
+    session: &Session,
+    n: usize,
+    served: &HashSet<String>,
+    repeatable: &[String],
+    cool_ms: i64,
+) -> Picked {
     bandit.ensure(ctx, seed);
     let m: &UserModel = ctx.model;
     let user = seed.filter;
@@ -508,22 +604,69 @@ pub fn pick(bandit: &mut Bandit, seed: &WaveSeed, ctx: &WaveContext<'_>, pool: &
             out.push(p);
         }
     }
-    // Every cluster dry: the filter itself; then, rather than silence, the
-    // filter without its scene, then without its character (the novelty
-    // holds).
-    let relaxed = [user, WaveFilter { scene: Scene::All, ..user }, WaveFilter { scene: Scene::All, character: Character::Any, ..user }];
-    for (k, f) in relaxed.iter().enumerate() {
+    // Every cluster dry: the filter itself, then its songs again.
+    let mut scene_let_go = false;
+    let mut stages = vec![user];
+    if user.scene != Scene::All {
+        stages.push(WaveFilter { scene: Scene::All, ..user });
+    }
+    for (stage, f) in stages.iter().enumerate() {
         if out.len() >= n {
             break;
         }
-        if k > 0 && relaxed[k - 1] == *f {
-            continue;
-        }
+        let before = out.len();
         let next = crate::open_world::next(ctx, pool, f, session, n - out.len(), &served);
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
             out.push(p);
         }
+        if out.len() < n {
+            let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms);
+            for p in again {
+                served.insert(served_key(&p.item, &keys));
+                out.push(p);
+            }
+        }
+        scene_let_go |= stage > 0 && out.len() > before;
+    }
+    Picked { picks: out, scene_let_go }
+}
+
+/// Up to `n` songs of `filter` played again (see [`pick`]): `repeatable`
+/// let back in from the oldest, a window doubling until enough are found;
+/// none heard within `cool_ms` (the session's plays included).
+#[allow(clippy::too_many_arguments)]
+fn repeats(
+    ctx: &WaveContext<'_>,
+    pool: &[OpenCandidate],
+    filter: &WaveFilter,
+    session: &Session,
+    n: usize,
+    served: &HashSet<String>,
+    repeatable: &[String],
+    cool_ms: i64,
+) -> Vec<WavePick> {
+    let m = ctx.model;
+    let now = session.tracks().map(|p| p.ts).max().unwrap_or(0).max(m.now());
+    let lately: HashSet<usize> = session.tracks().filter(|p| now - p.ts < cool_ms).filter_map(|p| m.position(p.track)).collect();
+    let ok = |i: usize| (ctx.ok)(i) && !lately.contains(&i) && m.taste.last_played_at(i).is_none_or(|t| now - t >= cool_ms);
+    let cooled = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks };
+    let keys: HashMap<&RemoteId, &str> = pool.iter().map(|c| (&c.track.id, c.key.as_str())).collect();
+    let mut out: Vec<WavePick> = Vec::new();
+    let mut taken: HashSet<String> = HashSet::new();
+    let mut window = REPEAT_WINDOW.min(repeatable.len());
+    while window > 0 && out.len() < n {
+        let free: HashSet<&String> = repeatable[..window].iter().filter(|k| !taken.contains(*k)).collect();
+        let allowed: HashSet<String> = served.iter().filter(|k| !free.contains(k)).cloned().chain(taken.iter().cloned()).collect();
+        let next = crate::open_world::next(&cooled, pool, filter, session, n - out.len(), &allowed);
+        for p in next.picks {
+            taken.insert(served_key(&p.item, &keys));
+            out.push(p);
+        }
+        if window == repeatable.len() {
+            break;
+        }
+        window = (window * 2).min(repeatable.len());
     }
     out
 }
@@ -689,14 +832,97 @@ mod tests {
             let k = b.current.unwrap();
             b.note_served(Item::Track(tid(1)), k);
             let before = b.arms.clone();
-            assert!(b.other_vibe());
+            assert!(b.other_vibe(Some(&Item::Track(tid(1)))));
             assert_ne!(b.current, Some(k));
             assert_eq!(b.arms, before, "no α or β moved");
             assert!((BLOCK_MIN..=BLOCK_MAX).contains(&b.block_left()));
         }
         let mut one = Bandit::with_arms(vec![arm(1, 2.0, 2.0)], 1);
         one.choose(&[], &[]);
-        assert!(!one.other_vibe(), "nowhere else to go");
+        assert!(!one.other_vibe(None), "nowhere else to go");
+    }
+
+    /// A full block of `k` picked: the queue's buffer then picks ahead.
+    fn played_block(b: &mut Bandit, k: usize, from: u128) -> Vec<Item> {
+        b.avoid = None;
+        let others: Vec<usize> = (0..b.arms.len()).filter(|&j| j != k).collect();
+        assert!(b.choose(&[], &others));
+        let items: Vec<Item> = (0..u128::from(b.block_left())).map(|t| Item::Track(tid(from + t))).collect();
+        for i in &items {
+            b.note_served(i.clone(), k);
+        }
+        items
+    }
+
+    /// Two skips of the songs playing leave their cluster though the next
+    /// block was picked ahead already: of another cluster, it goes on and
+    /// the one after avoids theirs; of the same, it ends.
+    #[test]
+    fn skips_leave_the_playing_cluster_past_a_block_boundary() {
+        for s in 1..30 {
+            // The next block of another cluster.
+            let mut b = bandit();
+            b.seed = s;
+            let a = played_block(&mut b, 0, 100);
+            // One song of the next block (of the second cluster) queued.
+            assert!(b.choose(&[], &[0, 2]));
+            b.note_served(Item::Track(tid(200)), 1);
+            let left = b.block_left();
+            b.feedback(&a[a.len() - 2], Verdict::Rejected);
+            b.feedback(&a[a.len() - 1], Verdict::Rejected);
+            assert_eq!(b.block_left(), left, "the block ahead goes on");
+            b.block_left = 0;
+            b.choose(&[], &[]);
+            assert_ne!(b.current, Some(0), "the next block leaves the skipped cluster");
+
+            // The next block of the same cluster again.
+            let mut b = bandit();
+            b.seed = s;
+            let a = played_block(&mut b, 0, 100);
+            played_block(&mut b, 0, 200);
+            b.feedback(&a[a.len() - 2], Verdict::Rejected);
+            b.feedback(&a[a.len() - 1], Verdict::Rejected);
+            assert_eq!(b.block_left(), 0, "the block ahead of the skipped cluster ends");
+            b.choose(&[], &[]);
+            assert_ne!(b.current, Some(0));
+        }
+    }
+
+    /// «↻ Другой вайб» leaves the cluster of the song playing, not that of
+    /// the block picked ahead of it (nor that one, with three clusters).
+    #[test]
+    fn another_vibe_leaves_the_playing_cluster() {
+        for s in 1..40 {
+            let mut b = bandit();
+            b.seed = s;
+            let a = played_block(&mut b, 0, 100);
+            played_block(&mut b, 1, 200);
+            let before = b.arms.clone();
+            assert!(b.other_vibe(a.last()));
+            assert_eq!(b.current, Some(2), "neither the playing nor the ahead");
+            assert_eq!(b.arms, before);
+            // Two clusters: the one ahead is the other.
+            let mut two = Bandit::with_arms(vec![arm(1, 4.0, 1.0), arm(2, 1.0, 4.0)], s);
+            let a = played_block(&mut two, 0, 100);
+            played_block(&mut two, 1, 200);
+            assert!(two.other_vibe(a.last()));
+            assert_eq!(two.current, Some(1));
+        }
+    }
+
+    /// What plays again: each song by its last pick, past the queue's gap
+    /// (longer for new music), heard least lately first.
+    #[test]
+    fn repeatable_is_past_the_gap_oldest_first() {
+        let mut served: Vec<(String, bool)> = (0..10).map(|k| (format!("t{k}"), false)).collect();
+        served.push(("t0".into(), false));
+        served.push(("n0".into(), true));
+        let again = repeatable(&served);
+        // 12 served: the last 6 (t6…t9, t0, n0) wait; t0 was picked again.
+        assert_eq!(again, vec!["t1", "t2", "t3", "t4", "t5"]);
+        let mut long: Vec<(String, bool)> = vec![("n0".into(), true)];
+        long.extend((0..REPEAT_GAP_NEW).map(|k| (format!("t{k}"), false)));
+        assert_eq!(repeatable(&long)[0], "n0");
     }
 
     /// Picks dropped unplayed give the block its places back; a removed

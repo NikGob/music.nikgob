@@ -728,16 +728,26 @@ impl RadioState {
         self.turns += 1;
         // Served: track ids, and the songs of the pool by their keys.
         let by_id: HashMap<&RemoteId, &str> = pool.iter().map(|c| (&c.track.id, c.key.as_str())).collect();
-        let served: HashSet<String> = self
+        let keyed: Vec<(String, bool)> = self
             .served
             .iter()
             .map(|item| match item {
-                Item::Track(t) => t.to_string(),
-                Item::Stream(r) => by_id.get(r).map_or_else(|| r.to_string(), |k| (*k).to_owned()),
+                Item::Track(t) => (t.to_string(), false),
+                Item::Stream(r) => (by_id.get(r).map_or_else(|| r.to_string(), |k| (*k).to_owned()), true),
             })
             .collect();
-        let picks = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served);
-        let out: Vec<Pick> = picks.into_iter().map(|p| Pick { reason: if p.new { Reason::New } else { Reason::Favourite }, item: p.item }).collect();
+        let served: HashSet<String> = keyed.iter().map(|k| k.0.clone()).collect();
+        let again = crate::wave::repeatable(&keyed);
+        let cool = self.no_repeat_ms.max(NO_REPEAT_MS);
+        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool);
+        if picked.scene_let_go {
+            // The chip shows what plays.
+            let mut wave = wave;
+            wave.filter.scene = crate::open_world::Scene::All;
+            wave.only.clear();
+            self.seed = RadioSeed::Wave(wave);
+        }
+        let out: Vec<Pick> = picked.picks.into_iter().map(|p| Pick { reason: if p.new { Reason::New } else { Reason::Favourite }, item: p.item }).collect();
         for p in &out {
             self.served.push_back(p.item.clone());
         }
@@ -771,11 +781,12 @@ impl RadioState {
         }
     }
 
-    /// «↻ Другой вайб»: the wave moves to another cluster from its next
-    /// pick, the song playing counted for nothing. False for a radio that
-    /// is no wave, or a wave of one cluster.
-    pub fn other_vibe(&mut self) -> bool {
-        self.wave.as_mut().is_some_and(crate::wave::Bandit::other_vibe)
+    /// «↻ Другой вайб»: the wave moves from the cluster of the song
+    /// `playing` to another from its next pick, the song counted for
+    /// nothing. False for a radio that is no wave, or a wave of one
+    /// cluster.
+    pub fn other_vibe(&mut self, playing: Option<&Item>) -> bool {
+        self.wave.as_mut().is_some_and(|b| b.other_vibe(playing))
     }
 
     /// Autoplay's trajectory as captured (empty: none yet, or its seed
