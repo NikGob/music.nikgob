@@ -545,6 +545,8 @@ pub struct QueueView {
     /// Why the current track was picked, in its row's tooltip (see
     /// [`QueueEntry::why`]).
     pub current_why: Option<String>,
+    /// The current track is a guest of «✦ С дополнением».
+    pub current_guest: bool,
     /// Upcoming tracks in play order; `entry` ids are stable for drag & drop.
     pub next: Vec<QueueEntry>,
     /// The queue is a radio or an endless mix: its title («Радио · Кино»)
@@ -560,6 +562,8 @@ pub struct QueueEntry {
     /// Why a radio or a mix picked it, in its row's tooltip (recs-v2 §12):
     /// the first pick of a radio and the new ones only.
     pub why: Option<String>,
+    /// A guest of «✦ С дополнением» (marked ✦ in its row).
+    pub guest: bool,
 }
 
 /// Synced lyrics for the current track.
@@ -1769,6 +1773,9 @@ pub struct Prefs {
     pub like_downloads: bool,
     /// Sync mode of a playlist newly linked to a service.
     pub playlist_sync_default: PlaylistSyncMode,
+    /// The playlists (and «Любимые», [`LIKED_PLAYLIST`]) whose chip «✦ С
+    /// дополнением» is on: new songs join them as they play.
+    pub plus_playlists: Vec<PlaylistId>,
     /// Likes and unlikes here go to the services the track is in.
     pub push_likes: bool,
     /// A like of an album likes all its tracks too (into «Любимые» and the
@@ -2471,6 +2478,8 @@ pub enum PrefPatch {
     /// «Масштаб интерфейса» from the keys (Ctrl+=, Ctrl+-, Ctrl+0); kept
     /// on a step inside the range ([`ui_scale`]).
     UiScale(f32),
+    /// The chip «✦ С дополнением» of a playlist on or off.
+    Plus { playlist: PlaylistId, on: bool },
     /// What the settings page changed on its copy of the prefs: every
     /// field `after` has unlike `before`, laid over the prefs as they are
     /// when it comes ([`Prefs::merge_edit`]), so a copy older than a change
@@ -2556,6 +2565,12 @@ impl PrefPatch {
                 p.home_sections = HomeSectionSwitch::complete(list);
             }
             Self::UiScale(scale) => p.ui_scale = ui_scale(*scale),
+            Self::Plus { playlist, on } => {
+                p.plus_playlists.retain(|x| x != playlist);
+                if *on {
+                    p.plus_playlists.push(*playlist);
+                }
+            }
             Self::Edit { before, after } => p.merge_edit(before, after),
         }
     }
@@ -3688,6 +3703,7 @@ impl Default for Prefs {
             like_download_scope: WishlistScope::Track,
             like_downloads: true,
             playlist_sync_default: PlaylistSyncMode::Follow,
+            plus_playlists: Vec::new(),
             push_likes: true,
             album_like_tracks: false,
             liked_albums_with_playlists: false,
