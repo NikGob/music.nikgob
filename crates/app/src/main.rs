@@ -126,11 +126,17 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     // «Перемешивание остаётся включённым» became a rule by the kind of
     // list: off, every kind keeps playing in order.
     let keep_shuffle = value.get("list_shuffle").is_none().then(|| value.get("keep_shuffle").and_then(|v| v.as_bool())).flatten();
+    // «Только на процессоре» became «Процессор» of «На чём считать анализ
+    // звука».
+    let cpu_only = value.get("sound_device").is_none() && value.get("sound_cpu_only").and_then(|v| v.as_bool()) == Some(true);
     // A field this build cannot read takes its default, not the whole file.
     let mut prefs = Prefs::from_json_lenient(value)?;
     if legacy { prefs.np_slot = slot; }
     if let Some(keep) = keep_shuffle {
         prefs.list_shuffle = nikgob_view::ListShuffles::from_keep(keep);
+    }
+    if cpu_only {
+        prefs.sound_device = nikgob_view::SoundDevice::Cpu;
     }
     prefs.upgrade_lyrics(lyrics_rev);
     // The owner's own build opens the settings in «Подробно» the first
@@ -1107,6 +1113,34 @@ mod prefs_tests {
         assert_eq!(parse_prefs(br#"{"lyrics_style":3}"#).unwrap().lyrics_unit, LYRICS_BY_WORDS);
         assert_eq!(parse_prefs(br#"{"lyrics_unit":0,"lyrics_rev":4}"#).unwrap().lyrics_unit, LYRICS_BY_LETTERS);
         assert_eq!(prefs_of(None).lyrics_unit, LYRICS_BY_SYLLABLES);
+    }
+
+    /// «Только на процессоре» became «Процессор» of «На чём считать анализ
+    /// звука»: on, it reads as the CPU; off or never written, «Автоматически»;
+    /// a device written since stays.
+    #[test]
+    fn the_cpu_only_switch_becomes_the_device() {
+        use nikgob_view::SoundDevice;
+        assert_eq!(parse_prefs(br#"{"sound_cpu_only":true}"#).unwrap().sound_device, SoundDevice::Cpu);
+        assert_eq!(parse_prefs(br#"{"sound_cpu_only":false}"#).unwrap().sound_device, SoundDevice::Auto);
+        assert_eq!(parse_prefs(br#"{}"#).unwrap().sound_device, SoundDevice::Auto);
+        assert_eq!(parse_prefs(br#"{"sound_cpu_only":true,"sound_device":"Gpu"}"#).unwrap().sound_device, SoundDevice::Gpu);
+        let p = Prefs { sound_device: SoundDevice::Gpu, ..Prefs::default() };
+        assert_eq!(parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap().sound_device, SoundDevice::Gpu);
+    }
+
+    /// Revision 5: the player's lyrics button is hidden by default; prefs
+    /// from before it hide it once, a button shown since stays.
+    #[test]
+    fn the_lyrics_button_goes_once() {
+        let old = parse_prefs(br#"{"player_buttons":{"lyrics":true,"queue":true},"lyrics_rev":4}"#).unwrap();
+        assert!(!old.player_buttons.lyrics && old.player_buttons.queue);
+        assert_eq!(old.lyrics_rev, nikgob_view::LYRICS_REV);
+        let since = parse_prefs(br#"{"player_buttons":{"lyrics":true},"lyrics_rev":5}"#).unwrap();
+        assert!(since.player_buttons.lyrics, "shown since: stays");
+        assert!(!prefs_of(None).player_buttons.lyrics);
+        let again = parse_prefs(&serde_json::to_vec(&since).unwrap()).unwrap();
+        assert_eq!(again, since);
     }
 
     /// «Перемешивание остаётся включённым» off becomes every kind of list

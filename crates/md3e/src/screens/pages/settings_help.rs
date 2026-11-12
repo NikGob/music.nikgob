@@ -108,9 +108,7 @@ pub enum SettingId {
     RailCompact,
     /// «Дата альбома»: year, month or the whole date.
     AlbumDate,
-    /// The parts of the side pane: «Очередь», «Текст песни», «Источник и
-    /// качество».
-    PaneQueue,
+    /// The parts of the side pane: «Текст песни», «Источник и качество».
     PaneLyrics,
     PaneInfo,
     /// «Меню трека»: where each item of a track's menu stands.
@@ -487,7 +485,7 @@ impl SettingId {
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
-            | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
+            | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips
             | PaneLyrics | PaneInfo | TrackMenu | PlayerButton(_) | NavRoot => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
@@ -554,7 +552,7 @@ impl SettingId {
             // Rare cases, gestures, parts of the window and of Главная.
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
-            | ProfileNames | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
+            | ProfileNames | Tooltips | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
             | PlayerButton(_) | NavRoot
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
@@ -642,7 +640,6 @@ impl SettingId {
             UiScale => "Масштаб интерфейса",
             RailCompact => "Боковая панель всегда компактная",
             AlbumDate => "Дата альбома",
-            PaneQueue => "Очередь",
             PaneLyrics => "Текст песни",
             PaneInfo => "Источник и качество",
             TrackMenu => "Меню трека",
@@ -856,7 +853,6 @@ impl SettingId {
             UiScale => "Всё окно крупнее или мельче, поверх масштаба системы. Ещё Ctrl+= и Ctrl+- (на шаг), Ctrl+0 (100 %).",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
             AlbumDate => "Что показывать о дате выхода на странице альбома. Если день или месяц неизвестны, показывается то, что есть.",
-            PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
             PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
             TrackMenu => "Где стоит каждый пункт меню трека: в самом меню, в подменю «Файл» или скрыт. «Сбросить» возвращает меню как было.",
@@ -994,7 +990,7 @@ impl SettingId {
             RadioExplore => "Как часто радио и автовоспроизведение ставят новую песню наугад, не зная, похожа ли она по звуку на то, что играет. Похожее новое это не ограничивает.",
             RadioUnheard => "Сколько в радио и автовоспроизведении песен, которых ты ещё не слышал: из твоей музыки и новых. Когда таких не остаётся, играет как обычно.",
             SoundNeural => "Нейросеть слушает песни и различает жанр, стиль и вокал — то, чего не слышит обычный анализ, поэтому похожее подбирается точнее. Модель (18 МБ и основа для моделей, если её ещё нет) скачивается один раз, когда выберешь режим. Работает в фоне по очереди с другими тяжёлыми задачами, ждёт, пока идёт игра, и выгружается из памяти, когда не нужна.",
-            SoundDevice => "Где нейросеть считает анализ звука. Видеокарта справляется быстрее; на процессоре анализ идёт в один тихий поток и не занимает видеокарту.",
+            SoundDevice => "Где нейросеть считает анализ звука. Процессор берёт меньше памяти, видеокарта считает быстрее. «Автоматически» выбирает сам перед каждой порцией треков: процессор, пока он свободен, видеокарту, когда процессор занят, и снова процессор, когда занята видеокарта (игра, полная память).",
             MixCardsWave => "Что делает нажатие на карточку микса на главной: запускает «Мою волну» с вайбом этого микса — бесконечно, с новой музыкой и подстройкой под пропуски, — открывает его готовый список песен, как раньше, или сразу его играет. Список всегда есть в ⋮ → «Список треков».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка в конце ряда кнопок на экране трека (♡ — в его начале). «Не нравится» остаётся и в меню ⋮ любого трека.",
@@ -1243,8 +1239,9 @@ impl SettingId {
                 c!("Сразу играют микс", "Нажатие включает готовый список микса, его страница — в ⋮ → «Список треков»."),
             ],
             Self::SoundDevice => &[
-                c!("Автоматически", "На видеокарте, если она подходит, иначе на процессоре."),
-                c!("Только на процессоре", "В один тихий поток; видеокарта не занята."),
+                c!("Автоматически", "На процессоре, пока он свободен; на видеокарте, когда процессор занят, а у видеокарты есть свободная память."),
+                c!("Процессор", "В один тихий поток; видеокарта не занята."),
+                c!("Видеокарта", "Быстрее, но занимает около 300 МБ памяти."),
             ],
             Self::RadioUnheard => &[
                 c!("Как обычно", "Слышанное и неслышанное — по тому, что подходит лучше."),
@@ -1372,7 +1369,7 @@ impl SettingId {
             Self::RadioExplore => v::RadioExplore::ALL.iter().position(|e| *e == p.radio_explore).unwrap_or(1),
             Self::RadioUnheard => v::RadioUnheard::ALL.iter().position(|u| *u == p.radio_unheard).unwrap_or(0),
             Self::SoundNeural => v::SoundNeural::ALL.iter().position(|m| *m == p.sound_neural_or(false)).unwrap_or(0),
-            Self::SoundDevice => usize::from(p.sound_cpu_only),
+            Self::SoundDevice => v::SoundDevice::ALL.iter().position(|d| *d == p.sound_device).unwrap_or(0),
             Self::MixCardsWave => super::cards::MixClick::ALL.iter().position(|c| *c == super::cards::MixClick::chosen(p)).unwrap_or(0),
             Self::ListShuffle(kind) => v::ListShuffle::ALL.iter().position(|r| *r == p.list_shuffle.of(kind)).unwrap_or(2),
             _ => 0,
@@ -1476,7 +1473,7 @@ impl SettingId {
             Self::RadioExplore => p.radio_explore = v::RadioExplore::ALL[i.min(v::RadioExplore::ALL.len() - 1)],
             Self::RadioUnheard => p.radio_unheard = v::RadioUnheard::ALL[i.min(v::RadioUnheard::ALL.len() - 1)],
             Self::SoundNeural => p.sound_neural = Some(v::SoundNeural::ALL[i.min(v::SoundNeural::ALL.len() - 1)]),
-            Self::SoundDevice => p.sound_cpu_only = i == 1,
+            Self::SoundDevice => p.sound_device = v::SoundDevice::ALL[i.min(v::SoundDevice::ALL.len() - 1)],
             Self::MixCardsWave => super::cards::MixClick::ALL[i.min(2)].choose(p),
             Self::ListShuffle(kind) => p.list_shuffle.set(kind, v::ListShuffle::ALL[i.min(v::ListShuffle::ALL.len() - 1)]),
             _ => {}

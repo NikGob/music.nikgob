@@ -623,8 +623,8 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
     {
         out.push(PrefPatch::SoundNeural(m));
     }
-    if p.sound_cpu_only != before.sound_cpu_only {
-        out.push(PrefPatch::SoundCpuOnly(p.sound_cpu_only));
+    if p.sound_device != before.sound_device {
+        out.push(PrefPatch::SoundDevice(p.sound_device));
     }
     out
 }

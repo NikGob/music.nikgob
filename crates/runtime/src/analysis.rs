@@ -666,13 +666,13 @@ impl FileAnalysis {
         }
     }
 
-    /// «Нейросетевой анализ звука» and «Только на процессоре» as the prefs
-    /// say: the thread loads or drops the model's vectors and picks the
-    /// model's queue up.
-    pub(crate) fn set_neural(&mut self, neural: Neural, cpu_only: bool) {
+    /// «Нейросетевой анализ звука» and «На чём считать анализ звука» as the
+    /// prefs say: the thread loads or drops the model's vectors and picks
+    /// the model's queue up.
+    pub(crate) fn set_neural(&mut self, neural: Neural, device: nikgob_view::SoundDevice) {
         self.neural = neural;
         if let Some(e) = &self.effnet {
-            e.set_cpu_only(cpu_only);
+            e.set_device(device);
         }
         if let Some(s) = &self.shared {
             *s.neural.lock() = neural;
@@ -787,7 +787,7 @@ impl Worker {
                 v::SoundNeural::LibraryAndPreviews => "the library and previews",
             });
         }
-        self.analysis.set_neural(neural, p.sound_cpu_only);
+        self.analysis.set_neural(neural, p.sound_device);
     }
 
     pub(crate) fn analysis_msg(&mut self, m: Msg) {

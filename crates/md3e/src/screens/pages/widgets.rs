@@ -295,6 +295,8 @@ pub fn album_like_label(liked: bool) -> &'static str {
 pub enum ReleaseAct {
     Play,
     Shuffle,
+    /// «Радио по альбому».
+    Radio,
     Next,
     Queue,
     Playlist,
@@ -337,6 +339,7 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     if partial {
         rows.push(Row::Item(A::PlayWhole, MenuItem::new("Слушать весь альбом").icon(Icon::Album)));
     }
+    rows.push(Row::Item(A::Radio, MenuItem::new("Радио по альбому").icon(Icon::Radio)));
     rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
@@ -383,6 +386,7 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
     match act {
         ReleaseAct::Play => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false }),
         ReleaseAct::Shuffle => out.push(Command::PlayRelease { id: r.id, start: None, shuffle: true }),
+        ReleaseAct::Radio => out.push(Command::StartRadio { seed: nikgob_view::RadioSeed::Album(r.id) }),
         ReleaseAct::Next => out.push(Command::PlayReleaseNext(r.id)),
         ReleaseAct::Queue => out.push(Command::EnqueueRelease(r.id)),
         ReleaseAct::Like => out.push(Command::Like(LikeTarget::Release(r.id), !r.liked)),
@@ -600,6 +604,8 @@ fn fill<A>(mut menu: Menu, rows: Vec<Row<A>>) -> Menu {
 pub enum PlaylistAct {
     Play,
     Shuffle,
+    /// «Радио по плейлисту».
+    Radio,
     Next,
     Queue,
     Edit,
@@ -654,6 +660,7 @@ pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
     }
+    rows.push(Row::Item(A::Radio, MenuItem::new("Радио по плейлисту").icon(Icon::Radio)));
     rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     if o.editable {
@@ -688,6 +695,7 @@ pub fn playlist_command(act: PlaylistAct, id: PlaylistId) -> Option<Command> {
     Some(match act {
         PlaylistAct::Play => Command::PlayPlaylist { id, start: None, shuffle: false },
         PlaylistAct::Shuffle => Command::PlayPlaylist { id, start: None, shuffle: true },
+        PlaylistAct::Radio => Command::StartRadio { seed: nikgob_view::RadioSeed::Playlist(id) },
         PlaylistAct::Next => Command::PlayPlaylistNext(id),
         PlaylistAct::Queue => Command::EnqueuePlaylist(id),
         PlaylistAct::Sync(mode) => Command::SetPlaylistSync { playlist: id, mode },
@@ -1974,11 +1982,12 @@ mod menu_tests {
         }
         // The liked playlist: no edit, no delete, still next and queue.
         let liked = row_acts(&playlist_rows(PlaylistMenuOf::default()));
-        assert_eq!(liked, [PlaylistAct::Play, PlaylistAct::Shuffle, PlaylistAct::Next, PlaylistAct::Queue]);
-        assert_eq!(&labels(&playlist_rows(PlaylistMenuOf::default()))[2..], ["Сыграть следующим", "В очередь"]);
+        assert_eq!(liked, [PlaylistAct::Play, PlaylistAct::Shuffle, PlaylistAct::Radio, PlaylistAct::Next, PlaylistAct::Queue]);
+        assert_eq!(&labels(&playlist_rows(PlaylistMenuOf::default()))[2..], ["Радио по плейлисту", "Сыграть следующим", "В очередь"]);
         let id = PlaylistId::new();
         assert_eq!(playlist_command(PlaylistAct::Next, id), Some(Command::PlayPlaylistNext(id)));
         assert_eq!(playlist_command(PlaylistAct::Queue, id), Some(Command::EnqueuePlaylist(id)));
+        assert_eq!(playlist_command(PlaylistAct::Radio, id), Some(Command::StartRadio { seed: nikgob_view::RadioSeed::Playlist(id) }));
     }
 
     /// A linked playlist's modes say what they do, and one stops the sync.
@@ -2043,9 +2052,9 @@ mod menu_tests {
                 .collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(&card[..6], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Like, ReleaseAct::Playlist]);
-        assert_eq!(&page[..3], [ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
-        assert_eq!(&labels(&release_rows(&r, false))[2..6], ["Сыграть следующим", "В очередь", "Нравится", "В плейлист…"]);
+        assert_eq!(&card[..7], [ReleaseAct::Play, ReleaseAct::Shuffle, ReleaseAct::Radio, ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Like, ReleaseAct::Playlist]);
+        assert_eq!(&page[..4], [ReleaseAct::Radio, ReleaseAct::Next, ReleaseAct::Queue, ReleaseAct::Playlist]);
+        assert_eq!(&labels(&release_rows(&r, false))[2..7], ["Радио по альбому", "Сыграть следующим", "В очередь", "Нравится", "В плейлист…"]);
         for acts in [&card, &page] {
             assert_eq!(&acts[acts.len() - 2..], [ReleaseAct::Trash, ReleaseAct::Purge]);
         }

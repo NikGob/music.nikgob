@@ -122,10 +122,6 @@ fn sources_side(ui: &mut Ui, w: f32, state: &ViewState, out: &mut Vec<Command>) 
         .filter(|_| busy.is_none())
         .map(|e| (e, s.error))
         .or_else(|| super::no_craft(state).map(|w| (w, s.on_surface_variant)));
-    if busy.is_some() || choice || !actions.is_empty() || why.is_some() {
-        ui.label(TypeRole::TitleSmall.style().rich("Подсветка", s.on_surface));
-        ui.add_space(12.0);
-    }
     if let Some(b) = &busy {
         super::progress(ui, b, w);
         ui.add_space(12.0);

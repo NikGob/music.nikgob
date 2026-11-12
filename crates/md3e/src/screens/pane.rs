@@ -1,4 +1,4 @@
-//! The supporting pane: Очередь | Текст | Инфо (md3e-player.md §2.4).
+//! The supporting pane: Текст | Инфо (md3e-player.md §2.4).
 
 use egui::{Rect, Ui};
 use nikgob_view::{Command, QueueEntry, TrackId, TrackInfo, TrackRow, ViewState};
@@ -30,7 +30,6 @@ pub fn show(
     ui: &mut Ui,
     state: &ViewState,
     tab: &mut PaneTab,
-    chrome: &mut Chrome,
     bass: f32,
     out: &mut Vec<Command>,
 ) -> PaneOutput {
@@ -39,7 +38,6 @@ pub fn show(
     let tabs: Vec<&str> = parts
         .iter()
         .map(|t| match t {
-            PaneTab::Queue => "Очередь",
             PaneTab::Lyrics => "Текст",
             PaneTab::Info => "Инфо",
         })
@@ -85,10 +83,6 @@ pub fn show(
     ui.advance_cursor_after_rect(row);
     ui.add_space(12.0);
     let configure_lyrics = match tab {
-        PaneTab::Queue => {
-            queue(ui, state, chrome, out);
-            false
-        }
         PaneTab::Lyrics => lyrics(ui, state, bass, out),
         PaneTab::Info => {
             info(ui, state, out);
@@ -629,9 +623,10 @@ fn wave_header(ui: &mut Ui, r: &nikgob_view::RadioView, w: &nikgob_view::WaveVie
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
         ui.add_space(16.0);
-        // Each chip shows what is chosen; one off its default is selected.
-        let chip = |ui: &mut Ui, salt: &str, label: &str, on: bool, options: Vec<(&str, bool)>| -> Option<usize> {
-            let resp = ui.add(crate::components::FilterChip::new(label, on).one_of().trailing_icon(Icon::ExpandMore).id_salt(salt));
+        // Each chip always holds a value (the default is one too): all are
+        // drawn the same, as a selected drop-down chip showing it.
+        let chip = |ui: &mut Ui, salt: &str, label: &str, options: Vec<(&str, bool)>| -> Option<usize> {
+            let resp = ui.add(crate::components::FilterChip::new(label, true).one_of().trailing_icon(Icon::ExpandMore).id_salt(salt));
             let mut menu = Menu::new((salt, "menu"));
             for (label, selected) in options {
                 menu = menu.item(MenuItem::new(label).selected(selected));
@@ -639,17 +634,17 @@ fn wave_header(ui: &mut Ui, r: &nikgob_view::RadioView, w: &nikgob_view::WaveVie
             menu.attach(&resp)
         };
         let novelty: Vec<(&str, bool)> = WaveNovelty::ALL.iter().map(|n| (n.title(), *n == f.novelty)).collect();
-        if let Some(i) = chip(ui, "q-wave-novelty", f.novelty.title(), f.novelty != WaveNovelty::Balance, novelty) {
+        if let Some(i) = chip(ui, "q-wave-novelty", f.novelty.title(), novelty) {
             picked = Some(WaveFilter { novelty: WaveNovelty::ALL[i], ..f });
         }
         let character: Vec<(&str, bool)> = WaveCharacter::ALL.iter().map(|c| (c.title(), *c == f.character)).collect();
-        if let Some(i) = chip(ui, "q-wave-character", f.character.title(), f.character != WaveCharacter::Any, character) {
+        if let Some(i) = chip(ui, "q-wave-character", f.character.title(), character) {
             picked = Some(WaveFilter { character: WaveCharacter::ALL[i], ..f });
         }
         let scene_title = w.scenes.iter().find(|c| c.scene == f.scene).map_or("Все", |c| c.title.as_str());
         let mut scenes: Vec<(&str, bool)> = vec![("Все", f.scene == WaveScene::All)];
         scenes.extend(w.scenes.iter().map(|c| (c.title.as_str(), c.scene == f.scene)));
-        if let Some(i) = chip(ui, "q-wave-scene", scene_title, f.scene != WaveScene::All, scenes) {
+        if let Some(i) = chip(ui, "q-wave-scene", scene_title, scenes) {
             let scene = if i == 0 { WaveScene::All } else { w.scenes.get(i - 1).map_or(WaveScene::All, |c| c.scene) };
             picked = Some(WaveFilter { scene, ..f });
         }

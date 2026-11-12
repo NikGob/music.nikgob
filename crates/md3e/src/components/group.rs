@@ -30,7 +30,7 @@ impl From<IconButton> for Item {
 }
 
 impl Item {
-    fn natural_width(&self, ui: &Ui) -> f32 {
+    pub(crate) fn natural_width(&self, ui: &Ui) -> f32 {
         match self {
             Self::Button(b) => b.natural_width(ui),
             Self::Icon(b) => b.natural_width(),

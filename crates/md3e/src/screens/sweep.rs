@@ -103,15 +103,13 @@ pub enum Screen {
     LyricsPane,
     /// What the control under the lyrics opens (menu, window or page).
     LyricsUi,
-    /// A page with the queue in the side pane.
-    Queue,
     Home,
     Library,
     Album,
 }
 
 impl Screen {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::Np,
         Self::NpPaused,
         Self::NpOpening,
@@ -121,7 +119,6 @@ impl Screen {
         Self::NpQueue,
         Self::LyricsPane,
         Self::LyricsUi,
-        Self::Queue,
         Self::Home,
         Self::Library,
         Self::Album,
@@ -138,7 +135,6 @@ impl Screen {
             Self::NpQueue => "np_queue",
             Self::LyricsPane => "lyrics_pane",
             Self::LyricsUi => "lyrics_ui",
-            Self::Queue => "queue",
             Self::Home => "home",
             Self::Library => "library",
             Self::Album => "album",
@@ -161,7 +157,6 @@ impl Screen {
             Self::NpQueue => "Now Playing with the queue beside the cover",
             Self::LyricsPane => "Главная with the lyrics in the right side pane",
             Self::LyricsUi => "Now Playing lyrics with what their control opens (menu, window or page, per «Где делать подсветку»)",
-            Self::Queue => "Главная with the queue in the right side pane",
             Self::Home => "Главная (home page) with the player bar and the navigation rail",
             Self::Library => "Библиотека (library) page",
             Self::Album => "a library album page",
@@ -223,7 +218,7 @@ pub const ALL: &[SettingId] = {
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
         PlayerButton(B::Like), PlayerButton(B::AddToPlaylist), PlayerButton(B::Queue), PlayerButton(B::Lyrics), PlayerButton(B::Sound),
         HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, HiddenMixes, AlbumDate,
-        LikedAlbumsPlace, UiScale, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
+        LikedAlbumsPlace, UiScale, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
         YouTubeCookies, ImportYouTube, SoundCloudEnabled, SoundCloud, SoundCloudToken, ImportSoundCloud, DeezerEnabled, PushLikes,
@@ -338,7 +333,6 @@ fn spec(id: SettingId) -> Spec {
         S::LyricsSoftDepth => Spec::Slider(|p| &mut p.lyrics_soft_depth, 0.08, 0.4, 0.01),
         S::LyricsSoftFade => Spec::Slider(|p| &mut p.lyrics_soft_fade, 0.0, 1.0, 0.05),
         S::RailCompact => Spec::Switch(|p| &mut p.rail_compact),
-        S::PaneQueue => Spec::Switch(|p| &mut p.pane_queue),
         S::PaneLyrics => Spec::Switch(|p| &mut p.pane_lyrics),
         S::PaneInfo => Spec::Switch(|p| &mut p.pane_info),
         S::ReducedMotion => Spec::Switch(|p| &mut p.reduced_motion),
@@ -717,7 +711,6 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::LyricsCountdown => vec![NpLyricsCountdown],
         S::RailCompact => vec![Home, Library],
         S::UiScale => vec![Home, Np],
-        S::PaneQueue => vec![Home, Queue],
         S::PaneLyrics => vec![Home, LyricsPane],
         S::PaneInfo | S::UserName => vec![Home],
         S::NpMotion => vec![NpOpening],
@@ -927,7 +920,7 @@ mod tests {
             | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::ProgressWave | S::NpVolume
             | S::NpVolumeHold | S::CoverClickPause | S::DblClickShape | S::TapWait | S::NpMotion | S::MixesProfiles
             | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames
-            | S::HiddenMixes | S::AlbumDate | S::LikedAlbumsPlace | S::RailCompact | S::ReducedMotion | S::Tooltips | S::PaneQueue
+            | S::HiddenMixes | S::AlbumDate | S::LikedAlbumsPlace | S::RailCompact | S::ReducedMotion | S::Tooltips
             | S::PaneLyrics | S::PaneInfo | S::TrackMenu | S::SpotifyEnabled | S::Spotify | S::SpotifyPersonal | S::SpotifyPlayback
             | S::SpotifySoloist | S::ImportSpotify | S::YouTubeEnabled | S::YouTube | S::YouTubeCookies | S::ImportYouTube
             | S::SoundCloudEnabled | S::SoundCloud | S::SoundCloudToken | S::ImportSoundCloud | S::DeezerEnabled | S::PushLikes

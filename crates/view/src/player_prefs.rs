@@ -125,7 +125,8 @@ impl PlayerButton {
 }
 
 /// Which [`PlayerButton`]s show: all but «Скорость и эквалайзер» (the
-/// owner opens it with E).
+/// owner opens it with E) and the lyrics (the key L opens them whatever
+/// the button does).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PlayerButtons {
@@ -140,7 +141,7 @@ pub struct PlayerButtons {
 
 impl Default for PlayerButtons {
     fn default() -> Self {
-        Self { sound: false, shuffle: true, repeat: true, like: true, add_to_playlist: true, queue: true, lyrics: true }
+        Self { sound: false, shuffle: true, repeat: true, like: true, add_to_playlist: true, queue: true, lyrics: false }
     }
 }
 
@@ -210,10 +211,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_sound_button_is_hidden_at_first() {
+    fn the_sound_and_lyrics_buttons_are_hidden_at_first() {
         let b = PlayerButtons::default();
         for button in PlayerButton::ALL {
-            assert_eq!(b.shows(button), button != PlayerButton::Sound, "{button:?}");
+            assert_eq!(b.shows(button), !matches!(button, PlayerButton::Sound | PlayerButton::Lyrics), "{button:?}");
         }
         let mut c = b;
         for button in PlayerButton::ALL {

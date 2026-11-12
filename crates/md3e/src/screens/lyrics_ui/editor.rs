@@ -7,8 +7,10 @@
 //! (`Command::SaveOwnLyrics`), shown first from then on; «Отмена» gives it
 //! up. Closed any other way, the draft stays for the session ([`Draft`]).
 //!
-//! It opens in a window like the «Окно» look's ([`super::dialog::window`],
-//! also for the «Меню» look) or, in the «Экран» look, in place of the text
+//! It opens in a window ([`super::dialog::window`], also for the «Меню»
+//! look) of the kind of «Скорость | Эквалайзер»: a shell whose head holds
+//! the name, «Отмена» and «Сохранить», over one card with the tools and
+//! the lines or, in the «Экран» look, in place of the text
 //! on the «Текст песни» page ([`page`]).
 
 use std::time::Duration;
@@ -17,7 +19,7 @@ use egui::{Align, Context, CursorIcon, Frame, Id, Key, Layout, Margin, Modifiers
 use nikgob_view::{Command, Status, TrackId, ViewState};
 
 use super::edit::Draft;
-use crate::components::{Button, IconButton, Size, Style};
+use crate::components::{Button, ButtonGroup, IconButton, Item, Size, Style, paint, paint::Radii};
 use crate::tokens::shape;
 use crate::{Icon, Theme, TypeRole};
 
@@ -29,7 +31,8 @@ const SHOWN: &str = "lyrics-edit-track";
 const PAGE: &str = "lyrics-edit-page";
 /// The frame the editor was last drawn in (it takes the keys then).
 const DRAWN: &str = "lyrics-edit-drawn";
-const MAX_W: f32 = 720.0;
+/// Wide enough for both groups of tools in one row.
+const MAX_W: f32 = 800.0;
 const MAX_H: f32 = 760.0;
 /// A line's row.
 const ROW: f32 = 40.0;
@@ -37,6 +40,17 @@ const ROW: f32 = 40.0;
 const TIME_W: f32 = 76.0;
 /// A nudge of a line's start.
 const NUDGE_MS: i64 = 100;
+/// The window's head: the name, «Отмена» and «Сохранить»…
+const HEAD_H: f32 = 40.0;
+/// …and the room between it and the card under it.
+const HEAD_GAP: f32 = 12.0;
+/// The card of the tools and the lines (as the «Скорость | Эквалайзер»
+/// window's): its corners and the room at its edge…
+const CARD_RADIUS: f32 = 24.0;
+const CARD_PAD: f32 = 20.0;
+/// …and how near its sides the lines reach (a start then stands in line
+/// with the tools).
+const LIST_INSET: f32 = 8.0;
 
 fn draft_id(track: TrackId) -> Id {
     Id::new(("lyrics-edit-draft", track))
@@ -112,8 +126,8 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     // Escape while typing a line only stops typing.
     let escape = !ctx.egui_wants_keyboard_input();
     let mut done = false;
-    super::dialog::window(ctx, WINDOW, vec2(MAX_W, MAX_H), escape, |ui, inner| {
-        done = body(ui, inner, track, true, state, out);
+    super::dialog::window(ctx, WINDOW, vec2(MAX_W, MAX_H), escape, true, |ui, inner| {
+        done = window_body(ui, inner, track, state, out);
     });
     if done {
         super::dialog::shut(ctx, WINDOW);
@@ -124,38 +138,108 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
 /// to the text once saved or given up.
 pub(crate) fn page(ui: &mut Ui, rect: Rect, track: TrackId, state: &ViewState, out: &mut Vec<Command>) {
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)).id_salt("lyrics-edit-page"));
-    if body(&mut child, rect, track, false, state, out) {
+    if body(&mut child, rect, track, state, out) {
         ui.ctx().data_mut(|d| d.insert_temp(Id::new(PAGE), None::<TrackId>));
     }
 }
 
-/// The editor in `inner`: its head (`head`: the window's), what can be done
-/// to the selected line, the lines, and «Отмена» / «Сохранить». True once
-/// it is saved or given up (the draft is gone then).
-fn body(ui: &mut Ui, inner: Rect, track: TrackId, head: bool, state: &ViewState, out: &mut Vec<Command>) -> bool {
-    let ctx = ui.ctx().clone();
-    let s = Theme::get(&ctx).scheme;
-    let Some(mut d) = draft(&ctx, track) else { return true };
+/// Where the song is and whether it is the one edited; the keys go to the
+/// editor while it is drawn, and it repaints while that song plays.
+fn live(ui: &Ui, d: &mut Draft, track: TrackId, state: &ViewState) -> (bool, Duration) {
+    let ctx = ui.ctx();
     let here = state.player.current.as_ref().is_some_and(|t| t.id == track);
     let pos = state.player.position_now();
     if ui.is_enabled() {
         let frame = ctx.cumulative_frame_nr();
         ctx.data_mut(|x| x.insert_temp(Id::new(DRAWN), frame));
-        keys(&ctx, &mut d, here, pos);
+        keys(ctx, d, here, pos);
     }
     if here && state.player.status == Status::Playing {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
-    ui.spacing_mut().item_spacing.y = 0.0;
-    if head {
-        ui.allocate_ui_with_layout(vec2(inner.width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.label(TypeRole::HeadlineSmall.style().rich("Изменить текст", s.on_surface));
-        });
-        if !d.title.is_empty() {
-            ui.label(TypeRole::BodyMedium.style().rich(d.title.clone(), s.on_surface_variant));
+    (here, pos)
+}
+
+/// Keeps the draft for the next frame, or drops it once `closed`.
+fn keep(ctx: &Context, track: TrackId, d: Draft, closed: bool) {
+    ctx.data_mut(|x| {
+        if closed {
+            x.remove::<Draft>(draft_id(track));
+        } else {
+            x.insert_temp(draft_id(track), d);
         }
-        ui.add_space(16.0);
-    } else if !here && !d.title.is_empty() {
+    });
+}
+
+/// «Сохранить» and «Отмена», right to left; true when either closed it.
+fn finish(ui: &mut Ui, d: &Draft, track: TrackId, out: &mut Vec<Command>) -> bool {
+    ui.spacing_mut().item_spacing.x = 8.0;
+    let worth = d.changed() && d.lines.iter().any(|l| !l.text.trim().is_empty());
+    let mut closed = false;
+    if ui.add(Button::new("Сохранить").style(Style::Filled).size(Size::S).enabled(worth).id_salt("lyrics-edit-save")).clicked() {
+        out.push(Command::SaveOwnLyrics { track, lines: d.to_lines(), timed: d.timed() });
+        closed = true;
+    }
+    if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt("lyrics-edit-cancel")).clicked() {
+        closed = true;
+    }
+    closed
+}
+
+/// The window: a shell with its head (the name, the song only when it is
+/// not the one playing, «Отмена» and «Сохранить» at its end) and one card
+/// under it with what can be done to the selected line over the lines.
+/// True once it is saved or given up (the draft is gone then).
+fn window_body(ui: &mut Ui, inner: Rect, track: TrackId, state: &ViewState, out: &mut Vec<Command>) -> bool {
+    let ctx = ui.ctx().clone();
+    let s = Theme::get(&ctx).scheme;
+    let Some(mut d) = draft(&ctx, track) else { return true };
+    let (here, pos) = live(ui, &mut d, track, state);
+    ui.spacing_mut().item_spacing.y = 0.0;
+
+    let (row, _) = ui.allocate_exact_size(vec2(inner.width(), HEAD_H), Sense::hover());
+    let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("lyrics-edit-head-right"));
+    let closed = finish(&mut right, &d, track, out);
+    // In line with the card's content under it.
+    let left = Rect::from_min_max(row.min + vec2(CARD_PAD, 0.0), pos2((right.min_rect().left() - 16.0).max(row.left()), row.bottom()));
+    let mut left = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)).id_salt("lyrics-edit-head-left"));
+    left.spacing_mut().item_spacing.x = 12.0;
+    left.label(TypeRole::TitleLarge.style().rich("Изменить текст", s.on_surface));
+    if !here && !d.title.is_empty() {
+        left.add(egui::Label::new(TypeRole::BodyMedium.style().rich(d.title.clone(), s.on_surface_variant)).truncate());
+    }
+    ui.add_space(HEAD_GAP);
+
+    let card = Rect::from_min_max(ui.cursor().min, pos2(inner.right(), inner.bottom().max(ui.cursor().min.y)));
+    paint::container(ui.painter(), card, Radii::all(CARD_RADIUS), s.surface_container_highest, egui::Stroke::NONE);
+    let room = Rect::from_min_max(card.min + vec2(CARD_PAD, CARD_PAD), card.max - vec2(CARD_PAD, LIST_INSET));
+    let mut c = ui.new_child(UiBuilder::new().max_rect(room).layout(Layout::top_down(Align::Min)).id_salt("lyrics-edit-card"));
+    c.set_clip_rect(card.intersect(ui.clip_rect()));
+    c.spacing_mut().item_spacing.y = 0.0;
+    tool_groups(&mut c, &mut d, here, pos);
+    // The lines reach nearly to the card's sides: the selected one is a
+    // band across it, its start in line with the tools above.
+    let top = c.min_rect().bottom() + 12.0;
+    let area = Rect::from_min_max(pos2(card.left() + LIST_INSET, top), pos2(card.right() - LIST_INSET, room.bottom()));
+    if area.height() > 0.0 {
+        let mut l = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Min)).id_salt("lyrics-edit-card-lines"));
+        l.set_clip_rect(area.intersect(ui.clip_rect()));
+        lines(&mut l, &mut d, here, pos, out);
+    }
+    keep(&ctx, track, d, closed);
+    closed
+}
+
+/// The editor on the page in `inner`: the song when it is not the one
+/// playing, what can be done to the selected line, the lines, and
+/// «Отмена» / «Сохранить». True once it is saved or given up.
+fn body(ui: &mut Ui, inner: Rect, track: TrackId, state: &ViewState, out: &mut Vec<Command>) -> bool {
+    let ctx = ui.ctx().clone();
+    let s = Theme::get(&ctx).scheme;
+    let Some(mut d) = draft(&ctx, track) else { return true };
+    let (here, pos) = live(ui, &mut d, track, state);
+    ui.spacing_mut().item_spacing.y = 0.0;
+    if !here && !d.title.is_empty() {
         // On the page, a song other than the one playing says which.
         ui.label(TypeRole::TitleSmall.style().rich(d.title.clone(), s.on_surface));
         ui.add_space(12.0);
@@ -168,23 +252,9 @@ fn body(ui: &mut Ui, inner: Rect, track: TrackId, head: bool, state: &ViewState,
     ui.add_space(16.0);
     let mut closed = false;
     ui.allocate_ui_with_layout(vec2(inner.width(), foot), Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let worth = d.changed() && d.lines.iter().any(|l| !l.text.trim().is_empty());
-        if ui.add(Button::new("Сохранить").style(Style::Filled).size(Size::S).enabled(worth).id_salt("lyrics-edit-save")).clicked() {
-            out.push(Command::SaveOwnLyrics { track, lines: d.to_lines(), timed: d.timed() });
-            closed = true;
-        }
-        if ui.add(Button::new("Отмена").style(Style::Text).size(Size::S).id_salt("lyrics-edit-cancel")).clicked() {
-            closed = true;
-        }
+        closed = finish(ui, &d, track, out);
     });
-    ctx.data_mut(|x| {
-        if closed {
-            x.remove::<Draft>(draft_id(track));
-        } else {
-            x.insert_temp(draft_id(track), d);
-        }
-    });
+    keep(&ctx, track, d, closed);
     closed
 }
 
@@ -258,6 +328,78 @@ fn tools(ui: &mut Ui, d: &mut Draft, here: bool, pos: Duration) {
     });
 }
 
+/// What can be done to the selected line as two button groups: its timing
+/// on the left («Отметить» and the nudges), its text at the right end
+/// (under the first where the width is short).
+fn tool_groups(ui: &mut Ui, d: &mut Draft, here: bool, pos: Duration) {
+    let sel = d.selected.filter(|i| *i < d.lines.len());
+    let timed = sel.is_some_and(|i| d.lines[i].start.is_some());
+    // The cursor inside the selected line's text, not at either end.
+    let cut = d.cursor.filter(|(i, c)| Some(*i) == sel && *c > 0 && *c < d.lines[*i].text.chars().count());
+    let next = sel.is_some_and(|i| i + 1 < d.lines.len());
+    let timing = || -> Vec<Item> {
+        vec![
+            Button::new("Отметить").style(Style::Filled).size(Size::S).enabled(here && sel.is_some()).into(),
+            Button::new("−0,1 с").style(Style::Tonal).size(Size::S).enabled(timed).into(),
+            Button::new("+0,1 с").style(Style::Tonal).size(Size::S).enabled(timed).into(),
+        ]
+    };
+    let text = || -> Vec<Item> {
+        vec![
+            Button::new("Разделить").style(Style::Tonal).size(Size::S).enabled(cut.is_some()).into(),
+            Button::new("Склеить").style(Style::Tonal).size(Size::S).enabled(next).into(),
+            Button::new("Строка ниже").icon(Icon::Add).style(Style::Tonal).size(Size::S).into(),
+            IconButton::new(Icon::Delete).size(Size::S).style(Style::Tonal).tooltip("Удалить строку").enabled(sel.is_some()).into(),
+        ]
+    };
+    // Their natural widths, with the room a pressed member takes.
+    let width = |items: &[Item]| items.iter().map(|i| i.natural_width(ui)).sum::<f32>() + Size::S.group_gap() * (items.len() as f32 - 1.0) + 12.0;
+    let (wt, wx) = (width(&timing()), width(&text()));
+    let full = ui.available_width();
+    let h = Size::S.height();
+    let mut hits: (Vec<egui::Response>, Vec<egui::Response>) = (Vec::new(), Vec::new());
+    if wt + 24.0 + wx <= full {
+        ui.allocate_ui_with_layout(vec2(full, h), Layout::left_to_right(Align::Center), |ui| {
+            ui.allocate_ui(vec2(wt, h), |ui| hits.0 = ButtonGroup::new("lyrics-edit-timing", Size::S).show(ui, timing()));
+            ui.add_space((ui.available_width() - wx).max(0.0));
+            ui.allocate_ui(vec2(wx, h), |ui| hits.1 = ButtonGroup::new("lyrics-edit-text", Size::S).show(ui, text()));
+        });
+    } else {
+        ui.allocate_ui(vec2(full, h), |ui| hits.0 = ButtonGroup::new("lyrics-edit-timing", Size::S).show(ui, timing()));
+        ui.add_space(8.0);
+        ui.allocate_ui(vec2(full, h), |ui| hits.1 = ButtonGroup::new("lyrics-edit-text", Size::S).show(ui, text()));
+    }
+    let hit = |rs: &[egui::Response], i: usize| rs.get(i).is_some_and(egui::Response::clicked);
+    if hit(&hits.0, 0) {
+        d.mark(pos);
+    }
+    for (k, ms) in [(1, -NUDGE_MS), (2, NUDGE_MS)] {
+        if hit(&hits.0, k)
+            && let Some(i) = sel
+        {
+            d.nudge(i, ms);
+        }
+    }
+    if hit(&hits.1, 0)
+        && let Some((i, c)) = cut
+    {
+        d.split(i, c);
+    }
+    if hit(&hits.1, 1)
+        && let Some(i) = sel
+    {
+        d.merge(i);
+    }
+    if hit(&hits.1, 2) {
+        d.add_below(sel);
+    }
+    if hit(&hits.1, 3)
+        && let Some(i) = sel
+    {
+        d.delete(i);
+    }
+}
+
 /// The lines in a card of `size`, each with its start.
 fn list(ui: &mut Ui, size: egui::Vec2, d: &mut Draft, here: bool, pos: Duration, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
@@ -266,9 +408,14 @@ fn list(ui: &mut Ui, size: egui::Vec2, d: &mut Draft, here: bool, pos: Duration,
     let inner = rect.shrink2(vec2(8.0, 8.0));
     let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)).id_salt("lyrics-edit-list"));
     child.set_clip_rect(rect.shrink(1.0).intersect(ui.clip_rect()));
+    lines(&mut child, d, here, pos, out);
+}
+
+/// The lines, scrolling in what `ui` has, each with its start.
+fn lines(ui: &mut Ui, d: &mut Draft, here: bool, pos: Duration, out: &mut Vec<Command>) {
     let now = if here { d.playing(pos) } else { None };
     let mut split = None;
-    egui::ScrollArea::vertical().id_salt("lyrics-edit-scroll").auto_shrink([false, false]).show(&mut child, |ui| {
+    egui::ScrollArea::vertical().id_salt("lyrics-edit-scroll").auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in 0..d.lines.len() {
             if let Some(at) = row(ui, d, i, now, here, out) {
