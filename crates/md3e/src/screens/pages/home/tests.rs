@@ -215,11 +215,26 @@ fn downloaded_only_takes_the_new_music_away_without_a_word() {
 }
 
 #[test]
-fn an_empty_home_is_one_line_and_its_buttons() {
-    let page = texts(&ViewState::default(), 1280.0);
-    assert!(page.contains(EMPTY_LINE));
-    assert!(page.contains("Найти музыку") && page.contains("Добавить папку…"));
-    assert!(!page.contains("Найди песню") && !page.contains("Здесь соберётся"));
+fn an_empty_home_is_one_line_and_the_ways_in() {
+    for width in [1280.0, 720.0] {
+        let page = texts(&ViewState::default(), width);
+        assert!(page.contains(EMPTY_LINE), "{width}");
+        for way in ["Spotify", "YouTube Music", "SoundCloud", "Добавить папку", "Найти музыку"] {
+            assert!(page.contains(way), "«{way}» at {width}");
+        }
+        assert!(!page.contains("Найди песню") && !page.contains("Здесь соберётся"));
+    }
+}
+
+/// «Только скачанное» with nothing downloaded keeps its header (and the
+/// chip that turns it off) and shows the ways in under it, without the line.
+#[test]
+fn downloaded_only_with_nothing_keeps_the_chip_over_the_ways_in() {
+    let mut st = ViewState::default();
+    st.prefs.mixes_downloaded_only = true;
+    let page = texts(&st, 1280.0);
+    assert!(page.contains("Только скачанное") && page.contains("Добавить папку"));
+    assert!(!page.contains(EMPTY_LINE));
 }
 
 /// A discovery's menu is a service song's one list, in its order, with no
