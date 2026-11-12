@@ -11,7 +11,7 @@ use nikgob_motion::tokens;
 use nikgob_shapes::{MaterialShape, paint::stroke_shape};
 
 use super::{signal::Signal, spring_step};
-use crate::{ColorScheme, lerp_color};
+use crate::ColorScheme;
 
 const SHAPE: MaterialShape = MaterialShape::Cookie9Sided;
 const RINGS: usize = 8;
@@ -80,14 +80,15 @@ impl Calm {
         for r in self.rings.iter().filter(|r| r.alive) {
             let k = r.age / LIFE;
             // Quick off the shape, slowing as it spreads.
-            let out = 1.0 - (1.0 - k).powi(3);
+            let out = 1.0 - (1.0 - k).powf(1.6);
             let size = core + (reach * 2.0 - core) * out * 0.75;
             let fade = (1.0 - k).powf(1.6) * r.strength;
-            let color = lerp_color(s.surface, s.secondary, fade);
+            // See-through, so it reads the same over the ambient clouds.
+            let color = s.primary.gamma_multiply(fade);
             let width = 1.0 + 2.5 * r.strength * (1.0 - k);
             stroke_shape(painter, cubics, Rect::from_center_size(c, vec2(size, size)), r.angle, Stroke::new(width, color));
         }
-        nikgob_shapes::paint::fill_shape(painter, cubics, Rect::from_center_size(c, vec2(core, core)), self.angle, s.secondary_container);
+        nikgob_shapes::paint::fill_shape(painter, cubics, Rect::from_center_size(c, vec2(core, core)), self.angle, s.primary_container);
     }
 }
 

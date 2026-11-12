@@ -6,7 +6,7 @@
 
 use std::f32::consts::TAU;
 
-use egui::{Color32, Mesh, Pos2, Rect, Shape, Stroke, Ui, epaint::PathShape, vec2};
+use egui::{Mesh, Pos2, Rect, Shape, Stroke, Ui, epaint::PathShape, vec2};
 use nikgob_motion::tokens;
 use nikgob_shapes::MaterialShape;
 
@@ -82,9 +82,14 @@ impl Cover {
         spring_step(tokens::EXPRESSIVE_DEFAULT_SPATIAL, &mut self.t, &mut self.t_v, 1.0, dt);
         spring_step(tokens::EXPRESSIVE_FAST_SPATIAL, &mut self.scale, &mut self.scale_v, 1.0 + 0.07 * sig.kick, dt);
         self.angle = (self.angle + dt * TAU / (sig.period * 16.0)).rem_euclid(TAU);
+        let mut raw = [0.0f32; DIRS];
+        for (i, r) in raw.iter_mut().enumerate() {
+            *r = Signal::around(&sig.bands, i as f32 / DIRS as f32 * TAU).powf(1.4);
+        }
         for i in 0..DIRS {
-            let theta = i as f32 / DIRS as f32 * TAU;
-            let level = Signal::around(&sig.bands, theta);
+            // Neighbours blended in, so the edge is a line, not teeth.
+            let at = |k: isize| raw[(i as isize + k).rem_euclid(DIRS as isize) as usize];
+            let level = (at(-2) + 2.0 * at(-1) + 3.0 * at(0) + 2.0 * at(1) + at(2)) / 9.0;
             self.shown[i] = level;
             if level >= self.peak[i] {
                 self.peak[i] = level;
@@ -108,7 +113,7 @@ impl Cover {
         };
         let radii = outline.radii();
         let gap = side * 0.018;
-        let amp = side * 0.13;
+        let amp = side * 0.16;
         let base = 2.0;
         let dir = |i: usize| {
             let th = i as f32 / DIRS as f32 * TAU;
@@ -119,15 +124,13 @@ impl Cover {
         // The band: a strip from just off the outline out to the level.
         let mut mesh = Mesh::default();
         let mut edge: Vec<Pos2> = Vec::with_capacity(DIRS);
-        let mut peaks: Vec<Pos2> = Vec::with_capacity(DIRS);
         for i in 0..DIRS {
             let d = dir(i);
             let inner = r_at(i) + gap;
             let outer = inner + base + amp * self.shown[i];
-            mesh.colored_vertex(c + d * inner, s.secondary_container);
-            mesh.colored_vertex(c + d * outer, s.secondary_container);
+            mesh.colored_vertex(c + d * inner, s.primary_container);
+            mesh.colored_vertex(c + d * outer, s.primary_container);
             edge.push(c + d * outer);
-            peaks.push(c + d * (inner + base + amp * self.peak[i] + 6.0));
         }
         for i in 0..DIRS as u32 {
             let j = (i + 1) % DIRS as u32;
@@ -138,16 +141,18 @@ impl Cover {
         painter.add(Shape::mesh(mesh));
         // Soft edges for the strip (the mesh has no anti-aliasing).
         let inner_edge: Vec<Pos2> = (0..DIRS).map(|i| c + dir(i) * (r_at(i) + gap)).collect();
-        painter.add(PathShape::closed_line(inner_edge, Stroke::new(1.0, s.secondary_container)));
-        painter.add(PathShape::closed_line(edge, Stroke::new(2.0, s.secondary)));
-        painter.add(PathShape::closed_line(peaks, Stroke::new(1.5, with_alpha(s.tertiary, 0.8))));
+        painter.add(PathShape::closed_line(inner_edge, Stroke::new(1.0, s.primary_container)));
+        painter.add(PathShape::closed_line(edge, Stroke::new(2.5, s.primary)));
+        // The peaks: a ring of dots (as around the cover in Now Playing)
+        // that the band pushes out and that settles back onto it.
+        let dot = (side * 0.0045).max(2.0);
+        for i in (0..DIRS).step_by(3) {
+            let r = r_at(i) + gap + base + amp * self.peak[i] + 3.0 * dot;
+            painter.circle_filled(c + dir(i) * r, dot, s.tertiary);
+        }
 
         outline.paint(ui, uri);
     }
-}
-
-fn with_alpha(c: Color32, a: f32) -> Color32 {
-    c.gamma_multiply(a)
 }
 
 #[cfg(test)]
@@ -191,6 +196,6 @@ mod tests {
         for _ in 0..180 {
             cover.update(&sig, false);
         }
-        assert!((cover.peak[0] - 0.1).abs() < 1e-3);
+        assert!((cover.peak[0] - cover.shown[0]).abs() < 1e-3);
     }
 }
