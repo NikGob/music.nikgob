@@ -181,38 +181,53 @@ fn join(slot: &mut f32, w: f32) {
 }
 
 /// Co-citation (see the module docs): of `edges` (a subject of the
-/// catalog, the outside node it names, the edge's weight), each pair of
-/// subjects `held` by the sum over the nodes they share of the product of
-/// their weights over `ln(2 + deg)`, as an edge of [`CO_WEIGHT`] at most,
-/// both ways.
-pub fn cocite<K: Copy + Eq + std::hash::Hash + Ord>(edges: &[(K, u32, f32)], held: &dyn Fn(K) -> bool) -> HashMap<K, HashMap<K, f32>> {
+/// catalog, the outside node it names, the edge's weight), each subject
+/// `held` with the best `top` of the others, by the sum over the nodes
+/// they share of the product of their weights over `ln(2 + deg)`, as an
+/// edge of [`CO_WEIGHT`] at most. Each subject's row is summed and cut on
+/// its own, so no table of all pairs is ever held.
+pub fn cocite<K: Copy + Eq + std::hash::Hash + Ord>(edges: &[(K, u32, f32)], held: &dyn Fn(K) -> bool, top: usize) -> Vec<(K, Vec<(K, f32)>)> {
     let mut by_node: HashMap<u32, Vec<(K, f32)>> = HashMap::new();
     for &(k, x, w) in edges {
         if w > 0.0 && held(k) {
             by_node.entry(x).or_default().push((k, w.min(1.0)));
         }
     }
-    let mut sum: HashMap<(K, K), f32> = HashMap::new();
+    // The nodes two to [`CO_MAX_DEG`] subjects name, each subject once
+    // (the best of its edges to the node), with their weight.
+    let mut nodes: Vec<(f32, Vec<(K, f32)>)> = Vec::new();
+    let mut by_subject: HashMap<K, Vec<(u32, f32)>> = HashMap::new();
     for mut citers in by_node.into_values() {
-        // One subject once (the best of its edges to the node).
         citers.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
         citers.dedup_by(|a, b| a.0 == b.0);
         let d = citers.len();
         if !(2..=CO_MAX_DEG).contains(&d) {
             continue;
         }
-        let idf = 1.0 / (2.0 + d as f32).ln();
-        for a in 0..d {
-            for b in a + 1..d {
-                *sum.entry((citers[a].0, citers[b].0)).or_default() += citers[a].1 * citers[b].1 * idf;
+        let at = nodes.len() as u32;
+        for &(k, w) in &citers {
+            by_subject.entry(k).or_default().push((at, w));
+        }
+        nodes.push((1.0 / (2.0 + d as f32).ln(), citers));
+    }
+    let mut subjects: Vec<K> = by_subject.keys().copied().collect();
+    subjects.sort_unstable();
+    let mut out = Vec::with_capacity(subjects.len());
+    let mut sum: HashMap<K, f32> = HashMap::new();
+    for a in subjects {
+        sum.clear();
+        for &(x, wa) in &by_subject[&a] {
+            let (idf, citers) = &nodes[x as usize];
+            for &(b, wb) in citers {
+                if b != a {
+                    *sum.entry(b).or_default() += wa * wb * idf;
+                }
             }
         }
-    }
-    let mut out: HashMap<K, HashMap<K, f32>> = HashMap::new();
-    for ((a, b), s) in sum {
-        let w = CO_WEIGHT * (1.0 - (-s).exp());
-        out.entry(a).or_default().insert(b, w);
-        out.entry(b).or_default().insert(a, w);
+        let mut row: Vec<(K, f32)> = sum.drain().map(|(b, s)| (b, CO_WEIGHT * (1.0 - (-s).exp()))).collect();
+        row.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+        row.truncate(top);
+        out.push((a, row));
     }
     out
 }
@@ -255,7 +270,7 @@ impl SimGraph {
         // Bridges through the songs the catalog lacks.
         let outside: Vec<(u32, u32, f32)> =
             input.outside_tracks.iter().filter_map(|&(t, x, w)| Some((catalog.position(t)? as u32, x, w))).collect();
-        for (a, row) in cocite(&outside, &|_| true) {
+        for (a, row) in cocite(&outside, &|_| true, TRACK_TOP) {
             for (b, w) in row {
                 join(forth.entry(a).or_default().entry(b).or_insert(0.0), w);
             }
@@ -277,7 +292,7 @@ impl SimGraph {
         for (a, b, cos) in tag_likeness(&input.tags, &held) {
             join(forth.entry(a).or_default().entry(b).or_insert(0.0), TAG_WEIGHT * cos);
         }
-        for (a, row) in cocite(&input.outside_artists, &held) {
+        for (a, row) in cocite(&input.outside_artists, &held, ARTIST_TOP) {
             for (b, w) in row {
                 join(forth.entry(a).or_default().entry(b).or_insert(0.0), w);
             }
