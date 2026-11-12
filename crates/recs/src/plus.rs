@@ -167,7 +167,9 @@ pub enum Slot {
 /// after which a guest is missing — every [`EVERY`] own tracks counted
 /// since the last guest — no further than [`AHEAD`] places ahead of the
 /// track playing, the nearest first. A place right after the track playing
-/// counts too (a guest asked late still comes).
+/// counts too, and a place already behind it that got no guest (none was
+/// ranked in time) is owed: the guest comes right after the next own track
+/// that is not behind.
 pub fn due(order: &[Slot], current: usize) -> Vec<usize> {
     let mut out = Vec::new();
     let mut own = 0usize;
@@ -177,12 +179,14 @@ pub fn due(order: &[Slot], current: usize) -> Vec<usize> {
             Slot::Other => {}
             Slot::Own => {
                 own += 1;
-                if own == EVERY {
-                    own = 0;
-                    let next_is_guest = order.get(i + 1) == Some(&Slot::Guest);
-                    if !next_is_guest && i >= current && i < current + AHEAD {
+                let next_is_guest = order.get(i + 1) == Some(&Slot::Guest);
+                // Behind the track playing a missing guest is owed (the
+                // count goes on); from it on the place is filled.
+                if own >= EVERY && !next_is_guest && i >= current {
+                    if i < current + AHEAD {
                         out.push(i);
                     }
+                    own = 0;
                 }
             }
         }
@@ -216,8 +220,12 @@ mod tests {
         assert_eq!(due(&[P, O, P, P, P, P], 2), vec![3]);
         assert_eq!(due(&[P, O, P, P, P, P], 0), Vec::<usize>::new());
         // Never more than the live buffer ahead.
-        assert_eq!(due(&list, 6), vec![8]);
+        assert_eq!(due(&[P, P, P, G, P, P, P, G, P, P, P, P], 9), vec![10]);
         assert!(due(&list, 3).iter().all(|&i| i < 3 + AHEAD));
+        // A place behind that got no guest (ranked too late): owed, right
+        // after the track playing.
+        assert_eq!(due(&list, 3), vec![3]);
+        assert_eq!(due(&list, 6), vec![6]);
         // A skipped guest is a guest that came: the count goes on from it.
         assert_eq!(due(&[P, P, P, G, P, P], 3), Vec::<usize>::new());
     }
