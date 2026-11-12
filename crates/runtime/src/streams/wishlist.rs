@@ -121,7 +121,15 @@ pub(crate) enum WishMsg {
     Saved {
         item: WishlistId,
         track: TrackId,
+        /// The run it was ([`crate::running::Runs::reserve`]): a save
+        /// stopped or replaced meanwhile is dropped.
+        run: u64,
         result: Result<PathBuf, StreamError>,
+    },
+    /// A stopped download's task has ended ([`Worker::stop_run`]).
+    RunStopped {
+        item: WishlistId,
+        token: u64,
     },
     /// The files of a better copy of an album asked for by hand, read
     /// ([`album_better`]).
@@ -195,9 +203,9 @@ pub(crate) struct WishState {
     /// Albums of which a source gave a part: the rest goes on once the
     /// import took what came.
     partial: HashSet<WishlistId>,
-    /// Items that waited in «Подтверди» with nothing to choose and were
-    /// searched again ([`Worker::wish_unstick`]).
-    unstuck: HashSet<WishlistId>,
+    /// Items that waited in «Подтверди» with nothing to choose and search
+    /// again now ([`Worker::wish_unstick`]).
+    unstuck: Unstuck,
     /// The sources an item searched again after being turned away asks.
     retry_only: HashMap<WishlistId, Vec<SourceKey>>,
     /// When each source last answered a search for an item.
@@ -300,6 +308,44 @@ impl Refusals {
     }
 }
 
+/// Items that waited in «Подтверди» with nothing to choose, searching
+/// again once: one recovery each, which ends once the item is answered
+/// (a card with choices), on its way, found or not, or gone.
+#[derive(Default)]
+pub(crate) struct Unstuck(HashSet<WishlistId>);
+
+impl Unstuck {
+    /// An empty card of `id`: true — search again (a recovery starts);
+    /// false — it was searching again already and came back empty, so it is
+    /// not found (and its recovery ends).
+    fn empty(&mut self, id: WishlistId) -> bool {
+        if self.0.insert(id) {
+            true
+        } else {
+            self.0.remove(&id);
+            false
+        }
+    }
+
+    /// The items as they are now (status, and a card with choices): a
+    /// recovery goes on only while its item searches or asks again.
+    fn seen(&mut self, items: &HashMap<WishlistId, (WishlistStatus, bool)>) {
+        self.0.retain(|id| {
+            items.get(id).is_some_and(|(s, answered)| {
+                !answered && matches!(s, WishlistStatus::New | WishlistStatus::Searching | WishlistStatus::Confirm)
+            })
+        });
+    }
+}
+
+/// An item left on its way with nothing bringing it a file (no torrent,
+/// no download, no import, no files waiting in «Подтверди») — after a
+/// restart, say: it is searched for again rather than «качается» for ever.
+fn stalled(status: WishlistStatus, note: Option<&str>, moving: bool) -> bool {
+    !moving
+        && (status == WishlistStatus::Downloading || (status == WishlistStatus::Confirm && note == Some(FILES_WAIT)))
+}
+
 /// What an offer that did not work out led to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Next {
@@ -358,6 +404,9 @@ pub(crate) enum Wished {
     /// Nothing to download (the files are here).
     Nothing,
 }
+
+/// How long a stopped download's folder waits after its task ended.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 
 /// A source that finds but gives no file.
 const FINDS_ONLY: &str = "Находит, но не скачивает";
@@ -1633,7 +1682,8 @@ impl Worker {
                 payload,
                 result,
             } => self.wish_inspected(item, *offer, payload, result),
-            WishMsg::Saved { item, track, result } => self.wish_saved(item, track, result),
+            WishMsg::Saved { item, track, run, result } => self.wish_saved(item, track, run, result),
+            WishMsg::RunStopped { item, token } => self.run_stopped(item, token),
             WishMsg::AlbumCame { item, origin, files } => self.album_staged(item, origin, files),
             WishMsg::AlbumRestored { release, done, failed, left } => self.album_restored(release, done, failed, left),
         }
@@ -1976,6 +2026,7 @@ impl Worker {
         let (title, source_name) = (self.item_title(id), offer.source.display_name().to_owned());
         let from = self.streaming.wish.from.get(&id).cloned().unwrap_or_default();
         let folder = dest.clone();
+        let token = self.streaming.wish.runs.reserve();
         let task = self.streaming.spawn(async move {
             let limit = if torrent { Duration::from_secs(120) } else { FETCH_TIMEOUT };
             let result = match tokio::time::timeout(limit, source.fetch(&offer, &want, &dest, progress)).await {
@@ -1991,7 +2042,7 @@ impl Worker {
         // A torrent's fetch only brings its .torrent: the torrent's own row
         // follows once it is added.
         if !torrent {
-            self.streaming.wish.runs.start(id, title, from, Some(source_name), Some(folder), Some(task.abort_handle()));
+            self.streaming.wish.runs.start(id, token, title, from, Some(source_name), Some(folder), Some(task));
         }
         self.publish_wishlist();
         self.publish_running();
@@ -2517,8 +2568,9 @@ impl Worker {
             w.upgrade_dups.remove(&id);
             w.from.remove(&id);
             w.live.lock().remove(&id);
-            // A download of another source stops (a Soulseek peer is told).
-            w.runs.stop(id);
+            // A download of another source stops (a Soulseek peer is told);
+            // its folder goes once it has.
+            let stopped = self.stop_run(id);
             self.album_dismissed(id);
             // A torrent on its way goes with what it downloaded (a better
             // copy's always: it must never replace a file); a seeding one
@@ -2539,7 +2591,9 @@ impl Worker {
                 log::info!("wishlist: {} cancelled, it leaves «Хочу скачать»", item.title.as_deref().unwrap_or("?"));
                 let _ = self.lib.delete_wishlist_item(id);
                 self.streaming.wish.confirm_ids.remove(&id);
-                self.drop_direct(id);
+                if !stopped {
+                    self.drop_direct(id);
+                }
                 match (item.scope, item.track_id, item.release_id) {
                     (WishlistScope::Track, Some(t), _) => tracks.push(t),
                     (WishlistScope::Album, _, Some(r)) => albums.push(r),
@@ -2739,18 +2793,28 @@ impl Worker {
             i.note = Some("Сохраняю с YouTube…".into());
         });
         let dir = self.save_dir();
+        let run = self.streaming.wish.runs.reserve();
         let task = self.streaming.spawn(async move {
             let result = yt.save_audio(&source.locator, &dir).await;
-            Msg::Wish(WishMsg::Saved { item: id, track, result })
+            Msg::Wish(WishMsg::Saved { item: id, track, run, result })
         });
         self.streaming.wish.from.insert(id, "YouTube".into());
         let title = self.item_title(id);
-        self.streaming.wish.runs.start(id, title, "YouTube".into(), None, None, Some(task.abort_handle()));
+        self.streaming.wish.runs.start(id, run, title, "YouTube".into(), None, None, Some(task));
         self.publish_wishlist();
         self.publish_running();
     }
 
-    fn wish_saved(&mut self, id: WishlistId, track: TrackId, result: Result<PathBuf, StreamError>) {
+    fn wish_saved(&mut self, id: WishlistId, track: TrackId, run: u64, result: Result<PathBuf, StreamError>) {
+        // Stopped (✕, «Не качать») or started again since: what it saved
+        // goes, the item stays as it is now.
+        if !self.streaming.wish.runs.is_current(id, run) {
+            log::info!("wishlist: a save from YouTube of {id} came after it was stopped, dropped");
+            if let Ok(path) = result {
+                let _ = std::fs::remove_file(path);
+            }
+            return;
+        }
         self.streaming.wish.runs.end(id);
         match result {
             Ok(path) => {
@@ -2978,7 +3042,12 @@ impl Worker {
                 // turned it away.
                 _ if partial && self.album_goes_on(id) => return,
                 (have, all) if have > 0 => (WishlistStatus::Done, format!("Скачано {have} из {all}")),
-                // Nothing of the album landed: still on its way, or failed.
+                // Nothing of the album landed: still on its way, or left
+                // with nothing bringing it (searched again).
+                _ if stalled(item.status, item.note.as_deref(), self.moving(id)) => {
+                    self.wish_searchable(id);
+                    return;
+                }
                 _ if item.status == WishlistStatus::Confirm => (WishlistStatus::Downloading, String::new()),
                 _ => return,
             },
@@ -3007,6 +3076,10 @@ impl Worker {
                         && self.streaming.wish.from.remove(&id).is_some()
                     {
                         self.wish_next_candidate(id);
+                    } else if stalled(status, None, self.moving(id)) {
+                        // Nothing brings it a file (its files waited before
+                        // a restart, say): searched for again.
+                        self.wish_searchable(id);
                     }
                     return;
                 }
@@ -3318,6 +3391,9 @@ impl Worker {
         let mut counts: Vec<(WishlistStatus, u32)> = Vec::new();
         let mut confirms = Vec::new();
         let mut empty = Vec::new();
+        // Where the items searching again after an empty card are now.
+        let mut seen: HashMap<WishlistId, (WishlistStatus, bool)> = HashMap::new();
+        let recovering = !self.streaming.wish.unstuck.0.is_empty();
         let mut covers = Vec::new();
         for item in &items {
             let track = item.track_id.and_then(|t| self.lib.get_track(t).ok().flatten());
@@ -3388,10 +3464,16 @@ impl Worker {
             if item.status == WishlistStatus::Confirm && !files_wait && item.note.as_deref() != Some(FILES_WAIT) {
                 let card = self.wish_confirm_view(item);
                 if card.answerable() {
+                    if recovering {
+                        seen.insert(item.id, (item.status, true));
+                    }
                     confirms.push(card);
                 } else if !self.album_copy_waits(item.id) {
                     empty.push(item.id);
                 }
+            }
+            if recovering {
+                seen.entry(item.id).or_insert((item.status, false));
             }
             let missing = match (item.scope, item.status) {
                 (WishlistScope::Album, WishlistStatus::Done) => {
@@ -3458,6 +3540,9 @@ impl Worker {
             s.downloads.confirm.retain(|c| c.id & WISH_ID == 0);
             s.downloads.confirm.extend(confirms);
         });
+        if recovering {
+            self.streaming.wish.unstuck.seen(&seen);
+        }
         for id in empty {
             self.wish_unstick(id);
         }
@@ -3465,23 +3550,69 @@ impl Worker {
 
     /// An item in «Подтверди» with nothing to choose (its offers could not
     /// be read, or none was kept): its card is not shown, and it searches
-    /// again; should that end the same way, it is not found.
+    /// again; should that very search end the same way, it is not found.
     fn wish_unstick(&mut self, id: WishlistId) {
-        let first = self.streaming.wish.unstuck.insert(id);
+        let first = self.streaming.wish.unstuck.empty(id);
         log::warn!("wishlist: {id} waited in «Подтверди» with nothing to choose, {}", if first { "searched again" } else { "not found" });
         if first {
             self.streaming.wish.confirm_ids.remove(&id);
-            self.set_item(id, |i| {
-                i.status = WishlistStatus::New;
-                i.next_try_at = None;
-                i.candidates_json = None;
-                i.note = None;
-            });
-            self.publish_wishlist();
-            self.wish_tick();
+            self.wish_searchable(id);
         } else {
             self.no_torrent(id, false);
         }
+    }
+
+    /// The item searches again from the start (nothing of its last offers
+    /// kept).
+    fn wish_searchable(&mut self, id: WishlistId) {
+        self.set_item(id, |i| {
+            i.status = WishlistStatus::New;
+            i.next_try_at = None;
+            i.candidates_json = None;
+            i.note = None;
+        });
+        self.publish_wishlist();
+        self.wish_tick();
+    }
+
+    /// Something still brings `id` a file: its torrent, a download of
+    /// another source (or its .torrent being fetched), an import, files
+    /// waiting in «Подтверди».
+    fn moving(&self, id: WishlistId) -> bool {
+        self.torrent_of(id)
+            || self.files_wait(id)
+            || self.streaming.wish.runs.runs(id)
+            || self.streaming.wish.from.contains_key(&id)
+            || self.importing_wishes().contains(&id)
+    }
+
+    /// `item`'s download stops: its task is aborted, and once it has
+    /// really stopped (and a Soulseek client let go of the file) its folder
+    /// goes ([`Self::run_stopped`]). True when one ran.
+    pub(crate) fn stop_run(&mut self, item: WishlistId) -> bool {
+        let Some((token, task)) = self.streaming.wish.runs.stop(item) else { return false };
+        self.streaming.wish.live.lock().remove(&item);
+        self.streaming.spawn(async move {
+            if let Some(t) = task {
+                let _ = t.await;
+            }
+            // The embedded client stops writing a cancelled transfer on its
+            // own runtime, a moment later.
+            tokio::time::sleep(STOP_GRACE).await;
+            Msg::Wish(WishMsg::RunStopped { item, token })
+        });
+        true
+    }
+
+    /// A stopped download's task ended: its folder goes (and its place in
+    /// the downloads' folders), unless `item` runs again — a new run took
+    /// the folder over.
+    fn run_stopped(&mut self, item: WishlistId, token: u64) {
+        if self.streaming.wish.runs.runs(item) {
+            log::debug!("wishlist: {item} runs again, the folder of run {token} stays");
+            return;
+        }
+        self.drop_direct(item);
     }
 
     fn wish_confirm_view(&mut self, item: &WishlistItem) -> v::Confirm {
@@ -3534,6 +3665,47 @@ impl Worker {
 mod tests {
     use super::*;
     use nikgob_core::indexer::CandidateHandle;
+
+    /// An empty card searches again once; the recovery ends once the item
+    /// is answered, on its way or gone — a later empty card starts a new
+    /// one — and only an empty card of the very search again is «не нашёл».
+    #[test]
+    fn an_empty_card_recovers_once_per_time() {
+        use WishlistStatus as St;
+        let (a, b) = (WishlistId::new(), WishlistId::new());
+        let mut u = Unstuck::default();
+        let seen = |list: &[(WishlistId, St, bool)]| list.iter().map(|(i, s, ok)| (*i, (*s, *ok))).collect::<HashMap<_, _>>();
+        assert!(u.empty(a), "the first empty card searches again");
+        u.seen(&seen(&[(a, St::Searching, false)]));
+        assert!(!u.empty(a), "its search came back empty: not found");
+        assert!(u.0.is_empty(), "that recovery is over");
+        // Recovered: answered with a real card, then empty again much later.
+        assert!(u.empty(a));
+        u.seen(&seen(&[(a, St::Confirm, true)]));
+        assert!(u.0.is_empty());
+        assert!(u.empty(a), "a later empty card searches again");
+        // On its way, or gone: over too.
+        u.seen(&seen(&[(a, St::Downloading, false)]));
+        assert!(u.empty(b));
+        u.seen(&seen(&[]));
+        assert!(u.0.is_empty(), "gone items leave");
+    }
+
+    /// An item left on its way with nothing bringing it a file searches
+    /// again; one something still moves, or one waiting for an answer of
+    /// its own, stays.
+    #[test]
+    fn an_item_nothing_moves_searches_again() {
+        use WishlistStatus as St;
+        assert!(stalled(St::Downloading, None, false), "after a restart, its download gone");
+        assert!(stalled(St::Confirm, Some(FILES_WAIT), false), "its files no longer wait");
+        assert!(!stalled(St::Downloading, None, true), "a torrent, a download or an import still runs");
+        assert!(!stalled(St::Confirm, Some(FILES_WAIT), true));
+        assert!(!stalled(St::Confirm, Some("Не уверен, что это оно — выбери"), false), "its own card asks");
+        for st in [St::New, St::Searching, St::Waiting, St::NoTorrent, St::Done, St::Dismissed] {
+            assert!(!stalled(st, None, false), "{st:?}");
+        }
+    }
 
     /// «ищу дальше» only for an item that looks again.
     #[test]

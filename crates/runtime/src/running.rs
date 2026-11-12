@@ -59,6 +59,9 @@ pub(crate) fn put_jobs(list: &mut Vec<v::Job>, kind: JobKind, jobs: Vec<v::Job>)
 pub(crate) struct Run {
     /// Its row's number (under [`DIRECT_JOB`]).
     job: u64,
+    /// This run of it (a new start of the item is another): what it
+    /// brings back is taken only while it is the item's run.
+    token: u64,
     /// The item, «Artist — Title».
     title: String,
     /// Who gives it, as its rows say («mugilaw», «Bandcamp»).
@@ -67,8 +70,9 @@ pub(crate) struct Run {
     source: Option<String>,
     /// The folder it writes into: a Soulseek peer's queue is told by it.
     dest: Option<PathBuf>,
-    /// Stops it (✕, «Не качать»).
-    task: Option<tokio::task::AbortHandle>,
+    /// Its task: stopped by ✕ and «Не качать», then waited for before its
+    /// folder goes.
+    task: Option<tokio::task::JoinHandle<()>>,
     /// The bytes at the last poll and when, for the speed.
     sample: Option<(Instant, u64)>,
     bps: u64,
@@ -79,6 +83,7 @@ pub(crate) struct Run {
 pub(crate) struct Runs {
     runs: HashMap<WishlistId, Run>,
     next: u64,
+    tokens: u64,
     /// The rows last published, and their shape (what changes without
     /// the page shown).
     shown: Option<Vec<v::Job>>,
@@ -86,15 +91,33 @@ pub(crate) struct Runs {
 }
 
 impl Runs {
-    /// `item`'s download starts (one in place of the last).
+    /// A new run's token, for its task to bring back with what it got.
+    pub(crate) fn reserve(&mut self) -> u64 {
+        self.tokens += 1;
+        self.tokens
+    }
+
+    /// The run of `token` is still `item`'s (not stopped, not replaced).
+    pub(crate) fn is_current(&self, item: WishlistId, token: u64) -> bool {
+        self.runs.get(&item).is_some_and(|r| r.token == token)
+    }
+
+    /// `item` has a download running.
+    pub(crate) fn runs(&self, item: WishlistId) -> bool {
+        self.runs.contains_key(&item)
+    }
+
+    /// `item`'s download of `token` starts (one in place of the last).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn start(
         &mut self,
         item: WishlistId,
+        token: u64,
         title: String,
         from: String,
         source: Option<String>,
         dest: Option<PathBuf>,
-        task: Option<tokio::task::AbortHandle>,
+        task: Option<tokio::task::JoinHandle<()>>,
     ) {
         let job = match self.runs.remove(&item) {
             Some(old) => {
@@ -114,7 +137,7 @@ impl Runs {
             Some(s) if from.is_empty() || s == from => (s, None),
             s => (from, s),
         };
-        self.runs.insert(item, Run { job, title, from, source, dest, task, sample: None, bps: 0 });
+        self.runs.insert(item, Run { job, token, title, from, source, dest, task, sample: None, bps: 0 });
     }
 
     /// `item`'s download ended (its files came, it failed).
@@ -122,13 +145,14 @@ impl Runs {
         self.runs.remove(&item);
     }
 
-    /// `item`'s download stops now (the item was turned down, ✕).
-    pub(crate) fn stop(&mut self, item: WishlistId) {
-        if let Some(r) = self.runs.remove(&item)
-            && let Some(t) = r.task
-        {
+    /// `item`'s download stops now (the item was turned down, ✕): its
+    /// token and its task, aborted, to wait for before its files go.
+    pub(crate) fn stop(&mut self, item: WishlistId) -> Option<(u64, Option<tokio::task::JoinHandle<()>>)> {
+        let r = self.runs.remove(&item)?;
+        if let Some(t) = &r.task {
             t.abort();
         }
+        Some((r.token, r.task))
     }
 
     #[cfg(test)]
@@ -331,14 +355,39 @@ mod tests {
         let mut runs = Runs::default();
         let a = WishlistId::new();
         let b = WishlistId::new();
-        runs.start(a, "A".into(), "mugilaw".into(), Some("Soulseek".into()), None, None);
-        runs.start(b, "B".into(), "Bandcamp".into(), Some("Bandcamp".into()), None, None);
+        let t1 = runs.reserve();
+        runs.start(a, t1, "A".into(), "mugilaw".into(), Some("Soulseek".into()), None, None);
+        let tb = runs.reserve();
+        runs.start(b, tb, "B".into(), "Bandcamp".into(), Some("Bandcamp".into()), None, None);
         let ja = runs.get(a).unwrap().job;
         assert!(runs.get(b).unwrap().source.is_none(), "the source is not said twice");
-        runs.start(a, "A".into(), "rotted".into(), Some("Soulseek".into()), None, None);
+        let t2 = runs.reserve();
+        runs.start(a, t2, "A".into(), "rotted".into(), Some("Soulseek".into()), None, None);
         assert_eq!(runs.get(a).unwrap().job, ja);
         assert_eq!(runs.item_of(IMPORT_ID | DIRECT_JOB | ja), Some(a));
         runs.end(a);
         assert_eq!(runs.item_of(IMPORT_ID | DIRECT_JOB | ja), None);
+    }
+
+    /// What a run brings back counts only while it is its item's run: a
+    /// save from YouTube that ends after ✕, or after the item started
+    /// again, is dropped.
+    #[test]
+    fn a_stopped_or_replaced_run_brings_nothing_back() {
+        let mut runs = Runs::default();
+        let a = WishlistId::new();
+        let first = runs.reserve();
+        runs.start(a, first, "A".into(), "YouTube".into(), None, None, None);
+        assert!(runs.is_current(a, first));
+        // ✕: stopped.
+        let (token, _) = runs.stop(a).unwrap();
+        assert_eq!(token, first);
+        assert!(!runs.is_current(a, first) && !runs.runs(a));
+        assert!(runs.stop(a).is_none(), "nothing left to stop");
+        // Started again: the first one's result is still not taken.
+        let second = runs.reserve();
+        runs.start(a, second, "A".into(), "YouTube".into(), None, None, None);
+        assert!(runs.is_current(a, second) && !runs.is_current(a, first));
+        assert!(runs.runs(a), "its folder stays for the new run");
     }
 }

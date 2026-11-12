@@ -360,6 +360,14 @@ struct Followed {
     dest: PathBuf,
 }
 
+/// Hands `value` to the task waiting for it; with that task gone, `value`
+/// is dropped here (a [`Followed`] cancels its download).
+fn hand_over<T>(tx: tokio::sync::oneshot::Sender<T>, value: T) {
+    if let Err(value) = tx.send(value) {
+        drop(value);
+    }
+}
+
 impl Drop for Followed {
     fn drop(&mut self) {
         self.phases.lock().remove(&self.dest);
@@ -531,12 +539,21 @@ impl SlskSource {
     /// the files before it brought, of `total`).
     async fn get(&self, file: SearchResult, dest: PathBuf, progress: Progress, before: u64, total: u64) -> Result<PathBuf, SourceError> {
         let slsk = self.slsk.clone();
-        let dir = dest.clone();
-        let download = self.on(async move { slsk.download(&file, &dir).await }).await?.map_err(source_error)?;
-        let mut rx = download.subscribe();
-        // Followed here, not on the client's runtime: a stopped task lets
-        // it go, and the peer is told.
-        let followed = Followed { download, phases: self.phases.clone(), dest };
+        let phases = self.phases.clone();
+        // Made on the client's runtime, handed over here already guarded: a
+        // download made after this task was stopped (✕ while a remote
+        // service was still asked) is let go — and cancelled at the peer —
+        // wherever it is, in the hand-over or on its way to it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.rt.spawn(async move {
+            let made = slsk.download(&file, &dest).await.map(|download| Followed { download, phases, dest });
+            hand_over(tx, made);
+        });
+        let followed = rx
+            .await
+            .map_err(|_| SourceError::Unreachable("the Soulseek client stopped".into()))?
+            .map_err(source_error)?;
+        let mut rx = followed.download.subscribe();
         loop {
             let state = rx.borrow_and_update().clone();
             let phase = match state {
@@ -731,6 +748,39 @@ mod tests {
             duration_ms: Some(194_000),
             ..Want::default()
         }
+    }
+
+    /// A download made for a task that was stopped meanwhile is let go
+    /// (its guard cancels it at the peer): whether the task left before
+    /// the hand-over or after it, before taking it.
+    #[test]
+    fn a_download_made_for_a_stopped_task_is_let_go() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Guard<'a>(&'a AtomicUsize);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let let_go = AtomicUsize::new(0);
+        // Gone before it was made.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx);
+        hand_over(tx, Guard(&let_go));
+        assert_eq!(let_go.load(Ordering::Relaxed), 1);
+        // Gone after the hand-over, before taking it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        hand_over(tx, Guard(&let_go));
+        assert_eq!(let_go.load(Ordering::Relaxed), 1, "waiting in the hand-over");
+        drop(rx);
+        assert_eq!(let_go.load(Ordering::Relaxed), 2);
+        // Taken: it is the caller's now.
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        hand_over(tx, Guard(&let_go));
+        let taken = rx.try_recv().unwrap();
+        assert_eq!(let_go.load(Ordering::Relaxed), 2);
+        drop(taken);
+        assert_eq!(let_go.load(Ordering::Relaxed), 3);
     }
 
     #[test]
