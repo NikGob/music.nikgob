@@ -352,14 +352,27 @@ impl Md3eUi {
     /// The queue lives on Now Playing (the main window has no queue pane):
     /// the player bar's queue button and Ctrl+Q open Now Playing with the
     /// queue beside the cover, and put the queue away where it shows.
-    fn toggle_queue(&mut self, ctx: &Context, now_playing_open: bool) {
+    fn toggle_queue(&mut self, ctx: &Context, now_playing_open: bool, out: &mut Vec<Command>) {
         if now_playing_open && self.chrome.np_slot == NpSlot::Queue {
             self.chrome.np_slot = NpSlot::None;
             return;
         }
+        self.show_queue(ctx, out);
+    }
+
+    /// Now Playing on the queue: a compact window's own page (Settings, an
+    /// artist) goes to its player; the queue holds while Now Playing opens
+    /// (over the slot the prefs keep).
+    fn show_queue(&mut self, ctx: &Context, out: &mut Vec<Command>) {
         self.chrome.np_slot = NpSlot::Queue;
-        if !now_playing_open {
+        let compact = size_class(ctx.content_rect().width()) == SizeClass::Compact;
+        if compact && compact_page(self.route()) {
+            self.navigate(ctx, Route::Home, out);
+        } else if !compact && !self.now_playing {
             self.set_now_playing(ctx, true);
+        }
+        if !self.chrome.np_loaded {
+            self.chrome.np_ask = Some(NpSlot::Queue);
         }
     }
 
@@ -463,7 +476,8 @@ impl Md3eUi {
             // The track's info is a look-up opened from a menu, never what
             // Now Playing opens with: prefs that kept it open nothing (and
             // are put right below).
-            self.chrome.np_slot = if state.prefs.np_slot == NpSlot::Info { NpSlot::None } else { state.prefs.np_slot };
+            let kept = if state.prefs.np_slot == NpSlot::Info { NpSlot::None } else { state.prefs.np_slot };
+            self.chrome.np_slot = self.chrome.np_ask.take().unwrap_or(kept);
             self.chrome.np_saved = Some(state.prefs.np_slot);
         }
         self.chrome.np_covering = self.np_anim.value(anim::now(ctx)) > 0.01;
@@ -848,7 +862,7 @@ impl Md3eUi {
             pages::sound::toggle(ctx, tab, state);
         }
         if queue {
-            self.toggle_queue(ctx, now_playing_open);
+            self.toggle_queue(ctx, now_playing_open, out);
         }
         if let Some(n) = go {
             self.chrome.nav = Some(Self::destinations()[n].clone());
@@ -1045,7 +1059,7 @@ impl Md3eUi {
                 self.pane = if self.pane == Some(tab) { None } else { Some(tab) };
             }
             if bo.open_queue {
-                self.toggle_queue(&ctx, false);
+                self.toggle_queue(&ctx, false, out);
             }
         } else if self.chrome.np_covering && state.player.current.is_some() {
             // The overlay's layers miss a click now and then (an area's first
@@ -1228,11 +1242,8 @@ impl SchemeAnim {
 impl Md3eUi {
     /// Opens the queue: Now Playing with the queue beside the cover
     /// (scripted screenshots).
-    pub fn open_queue(&mut self, ctx: &Context) {
-        self.chrome.np_slot = NpSlot::Queue;
-        if !self.now_playing {
-            self.set_now_playing(ctx, true);
-        }
+    pub fn open_queue(&mut self, ctx: &Context, out: &mut Vec<Command>) {
+        self.show_queue(ctx, out);
     }
 
     /// Opens the side pane on the lyrics (scripted screenshots).
@@ -1734,6 +1745,51 @@ mod tests {
                     frame(&ctx, &mut ui, &mut state, t + 3.0, width, Some(Key::Escape));
                     assert!(!ui.now_playing);
                 }
+            }
+        }
+    }
+
+    /// The queue's button and Ctrl+Q open Now Playing on the queue, not on
+    /// the slot the prefs kept; in a compact window its own page
+    /// (Settings) gives way to the player.
+    #[test]
+    fn the_queue_opens_on_the_queue_from_anywhere() {
+        for width in [380.0, 800.0, 1440.0] {
+            let ctx = context();
+            let mut ui = Md3eUi::new();
+            let mut state = ViewState::default();
+            state.prefs.np_slot = NpSlot::Lyrics;
+            let mut out = Vec::new();
+            frame(&ctx, &mut ui, &mut state, 0.0, width, None);
+            ui.toggle_queue(&ctx, false, &mut out);
+            for t in 1..4 {
+                frame(&ctx, &mut ui, &mut state, f64::from(t), width, None);
+                assert_eq!(ui.chrome.np_slot, NpSlot::Queue, "{width}");
+            }
+            assert_eq!(state.prefs.np_slot, NpSlot::Queue);
+            if width > 400.0 {
+                assert!(ui.now_playing);
+            }
+            // Closed again, then opened on the queue while the prefs keep
+            // the lyrics.
+            ui.set_now_playing(&ctx, false);
+            state.prefs.np_slot = NpSlot::Lyrics;
+            ui.chrome.np_slot = NpSlot::Lyrics;
+            frame(&ctx, &mut ui, &mut state, 5.0, width, None);
+            ui.open_queue(&ctx, &mut out);
+            frame(&ctx, &mut ui, &mut state, 6.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Queue, "{width}");
+            // From Settings.
+            ui.set_now_playing(&ctx, false);
+            ui.navigate(&ctx, Route::Settings, &mut out);
+            frame(&ctx, &mut ui, &mut state, 7.0, width, None);
+            ui.toggle_queue(&ctx, false, &mut out);
+            frame(&ctx, &mut ui, &mut state, 8.0, width, None);
+            assert_eq!(ui.chrome.np_slot, NpSlot::Queue, "{width}");
+            if width < 400.0 {
+                assert_eq!(ui.route(), &Route::Home, "the compact player");
+            } else {
+                assert!(ui.now_playing);
             }
         }
     }

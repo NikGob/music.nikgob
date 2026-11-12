@@ -605,7 +605,7 @@ impl Shot {
                 self.wait = 30;
             }
             "queue" => {
-                ui.open_queue(ctx);
+                ui.open_queue(ctx, out);
                 self.wait = 40;
             }
             "lyrics" => {

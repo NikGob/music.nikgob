@@ -120,6 +120,9 @@ pub struct Chrome {
     pub np_slot: NpSlot,
     pub np_loaded: bool,
     pub np_saved: Option<NpSlot>,
+    /// A slot asked for while Now Playing opens (the queue's button): it
+    /// wins over the one the prefs keep.
+    pub np_ask: Option<NpSlot>,
     /// Now Playing covers the shell: the bar under it must not react.
     pub np_covering: bool,
     /// A navigation for the shell (it also closes Now Playing).
