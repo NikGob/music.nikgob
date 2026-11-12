@@ -4,7 +4,11 @@
 //! had no release (no cover on Now Playing, nothing for the better covers
 //! to look up) and no length (0:00, an empty progress bar). When such a
 //! track starts, its details are asked once a run: the album with its
-//! cover and the length come with them, and Now Playing shows them.
+//! cover and the length come with them, and Now Playing shows them. The
+//! next two tracks of the queue are asked as soon as they are next
+//! ([`Worker::complete_next`]), so the album cover is known (and drawn
+//! ahead) before a skip; a clip is not asked (its song is looked for by
+//! `clips`, and a song has its album).
 
 use std::collections::HashSet;
 
@@ -22,9 +26,22 @@ pub(crate) struct Completing {
 }
 
 impl Worker {
-    /// Asks the service of a stream-only song that plays without its album
-    /// or its length for its details (see the module docs).
+    /// [`Self::complete_playing`] for the next two tracks of the queue.
+    pub(crate) fn complete_next(&mut self) {
+        let mut next: Vec<TrackId> = self.queue.peek_auto_next().map(|e| e.track).into_iter().collect();
+        next.extend(self.queue.upcoming().iter().skip(1).take(1).map(|e| e.track));
+        for t in next {
+            self.complete_playing(t);
+        }
+    }
+
+    /// Asks the service of a stream-only song that plays (or comes next)
+    /// without its album or its length for its details (see the module
+    /// docs).
     pub(crate) fn complete_playing(&mut self, track: TrackId) {
+        if self.streaming.completing.asked.contains(&track) {
+            return;
+        }
         let Some(row) = self.lib.get_track_row(track).ok().flatten() else {
             return;
         };
@@ -79,6 +96,9 @@ impl Worker {
         if shown == Some(track) {
             self.publish_now_playing();
             self.kick_better_covers(Some(track));
+        } else if self.queue.upcoming().iter().take(2).any(|e| e.track == track) {
+            // The queue's rows show its album cover, drawn ahead.
+            self.publish_player();
         }
     }
 }
