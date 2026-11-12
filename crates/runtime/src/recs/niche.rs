@@ -11,8 +11,10 @@
 //!   [`TOPS_PER_LIST`] of each (an artist looked up by name first). The
 //!   graph's own songs beside the niche's need no request: they are among
 //!   the candidates already.
-//! * **Pace**: one niche at a time, [`BUDGET`] requests at most, a day's
-//!   [`DAY_BUDGET`]; one request at a time,
+//! * **Pace**: one niche at a time, [`BUDGET`] requests of a niche in
+//!   [`TTL_MS`] at most (a rate limit's counts too; kept in the library's
+//!   cache), a day's [`DAY_BUDGET`]; a niche with nothing to ask waits
+//!   [`RETRY`]; one request at a time,
 //!   [`crate::StreamSchedule::discover_gap`] apart, never while a search
 //!   is typed or answered, while the window is idle, while a game is in
 //!   front or while the discovery's pass waits for an answer. A rate limit
@@ -20,8 +22,10 @@
 //!   a share of new music above none). Nothing is downloaded.
 //! * **Kept**: each niche's songs (new indeed, no junk, [`KEEP`] at most)
 //!   with the seeds whose lists held them, in the library's cache
-//!   ([`cached`]) for [`TTL_MS`]; the mixes filter them by the niche's
-//!   sound and kinds of song ([`nikgob_recs::open_world::NicheSound`]).
+//!   ([`cached`]) for [`TTL_MS`] — for the niche of those seeds only (a
+//!   later draw of the mix of other songs asks anew); the mixes filter them
+//!   by the niche's sound and kinds of song
+//!   ([`nikgob_recs::open_world::NicheSound`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -41,7 +45,7 @@ use crate::streams::StreamSchedule;
 
 /// A niche's songs stand this long.
 const TTL_MS: i64 = 3 * 24 * 3600 * 1000;
-/// Requests of one niche at most…
+/// Requests of one niche in [`TTL_MS`] at most…
 const BUDGET: u32 = 10;
 /// …and of all of them in a day.
 const DAY_BUDGET: u32 = 40;
@@ -53,14 +57,23 @@ const ARTIST_SEEDS: usize = 2;
 const TOPS_PER_LIST: usize = 2;
 /// Songs a niche keeps.
 const KEEP: usize = 150;
+/// A niche with nothing to ask is planned again after this.
+const RETRY: Duration = Duration::from_secs(6 * 3600);
+/// The share of its seeds a top-up shares with the niche it is for.
+const SAME_SEEDS: f32 = 0.5;
 /// Library cache keys.
 const KEY: &str = "niche.";
 const DAY_KEY: &str = "niche.day";
+/// After a niche's key: its window of requests.
+const REQ: &str = ".req";
 
 /// What a niche's top-up found.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct NicheFound {
     pub at: UnixMs,
+    /// The niche's songs it was found for, sorted.
+    #[serde(default)]
+    pub seeds: Vec<TrackId>,
     /// Each song and the niche's songs whose lists held it.
     pub tracks: Vec<(StreamTrack, Vec<TrackId>)>,
 }
@@ -70,10 +83,27 @@ fn key_of(key: v::MixKey) -> Option<String> {
     super::lanes::engine_key(key).map(|k| format!("{KEY}{}", k.token()))
 }
 
-/// What the last top-up of the niche of `key` found, if it still stands.
-pub(crate) fn cached(lib: &Library, key: v::MixKey) -> Option<NicheFound> {
+/// What the last top-up of the niche of `key` found, if it still stands
+/// and was found for the niche of these `seeds` (most of them).
+pub(crate) fn cached(lib: &Library, key: v::MixKey, seeds: &[TrackId]) -> Option<NicheFound> {
     let found: NicheFound = super::cache_read(lib, &key_of(key)?)?;
-    (now_ms() - found.at < TTL_MS).then_some(found)
+    (now_ms() - found.at < TTL_MS && same_seeds(&found.seeds, seeds)).then_some(found)
+}
+
+/// Whether two sets of seeds are one niche's: [`SAME_SEEDS`] of all of
+/// them in both.
+fn same_seeds(a: &[TrackId], b: &[TrackId]) -> bool {
+    let a: std::collections::HashSet<&TrackId> = a.iter().collect();
+    let b: std::collections::HashSet<&TrackId> = b.iter().collect();
+    let all = a.union(&b).count();
+    all > 0 && a.intersection(&b).count() as f32 >= SAME_SEEDS * all as f32
+}
+
+/// The requests asked for the niche of `key` since the window began
+/// (the window lasts [`TTL_MS`]).
+fn requests_of(lib: &Library, key: &str) -> (UnixMs, u32) {
+    let now = now_ms();
+    super::cache_read::<(UnixMs, u32)>(lib, &format!("{key}{REQ}")).filter(|w| now - w.0 < TTL_MS).unwrap_or((now, 0))
 }
 
 /// One request of a top-up.
@@ -113,6 +143,11 @@ pub(crate) enum NicheMsg {
 /// The niche being topped up.
 struct Open {
     mix: v::MixKey,
+    /// Its cache key's token and its seeds, sorted.
+    token: String,
+    seeds: Vec<TrackId>,
+    /// The niche's window of requests ([`requests_of`]).
+    window: (UnixMs, u32),
     steps: VecDeque<Step>,
     found: Vec<(StreamTrack, Vec<TrackId>)>,
     requests: u32,
@@ -127,8 +162,9 @@ pub(crate) struct NicheState {
     /// The day and its requests (kept in the library's cache).
     day: String,
     day_requests: u32,
-    /// Niches left for this run: nothing to ask of them.
-    spent: Vec<v::MixKey>,
+    /// Niches left for a while: nothing to ask of them, or just topped up
+    /// (planned again after [`RETRY`]).
+    spent: Vec<(v::MixKey, Instant)>,
 }
 
 async fn ask(svc: Arc<dyn StreamService>, step: &Step) -> Result<Answer, StreamError> {
@@ -200,13 +236,19 @@ impl Worker {
         }
         let Some(snap) = self.snapshot() else { return false };
         let Some(home) = self.recs.home.as_ref() else { return false };
+        self.recs.niche.spent.retain(|s| s.1.elapsed() < RETRY);
         let spent = &self.recs.niche.spent;
-        let Some((mix, seeds)) = home
+        let Some((mix, seeds, token, window)) = home
             .lanes
             .iter()
-            .filter(|l| !l.niche.is_empty() && !spent.contains(&l.key))
-            .find(|l| cached(&self.lib, l.key).is_none())
-            .map(|l| (l.key, l.niche.clone()))
+            .filter(|l| !l.niche.is_empty() && !spent.iter().any(|s| s.0 == l.key))
+            .filter(|l| cached(&self.lib, l.key, &l.niche).is_none())
+            .filter_map(|l| {
+                let token = key_of(l.key)?;
+                let window = requests_of(&self.lib, &token);
+                (window.1 < BUDGET).then(|| (l.key, l.niche.clone(), token, window))
+            })
+            .next()
         else {
             return false;
         };
@@ -259,11 +301,13 @@ impl Worker {
             }
         }
         if steps.is_empty() {
-            self.recs.niche.spent.push(mix);
+            self.recs.niche.spent.push((mix, Instant::now()));
             return false;
         }
         log::info!("niche: topping up {mix:?} from {} seeds, {} requests planned", seeds.len(), steps.len());
-        self.recs.niche.open = Some(Open { mix, steps, found: Vec::new(), requests: 0 });
+        let mut seeds = seeds;
+        seeds.sort_unstable();
+        self.recs.niche.open = Some(Open { mix, token, seeds, window, steps, found: Vec::new(), requests: 0 });
         true
     }
 
@@ -293,7 +337,7 @@ impl Worker {
         loop {
             let over = self.recs.niche.day_requests >= DAY_BUDGET;
             let Some(open) = self.recs.niche.open.as_mut() else { return };
-            let next = if open.requests >= BUDGET || over { None } else { open.steps.pop_front() };
+            let next = if open.window.1 >= BUDGET || over { None } else { open.steps.pop_front() };
             let Some(step) = next else {
                 self.niche_finish();
                 return;
@@ -309,6 +353,8 @@ impl Worker {
             }
             if let Some(open) = self.recs.niche.open.as_mut() {
                 open.requests += 1;
+                open.window.1 += 1;
+                super::cache_write(&self.lib, &format!("{}{REQ}", open.token), now_ms(), &open.window);
             }
             let n = &mut self.recs.niche;
             n.day_requests += 1;
@@ -336,8 +382,8 @@ impl Worker {
             Err(StreamError::RateLimited { retry_after }) => {
                 let wait = retry_after.or_else(|| self.pause_left(step.service())).unwrap_or(self.streaming.schedule.rate_limit_unknown);
                 log::info!("niche: rate limited by {}, again in {} s", step.service(), wait.as_secs());
+                // The request counts: it was sent.
                 if let Some(open) = self.recs.niche.open.as_mut() {
-                    open.requests = open.requests.saturating_sub(1);
                     open.steps.push_front(step);
                 }
                 self.niche_wait(wait + crate::streams::wake_jitter());
@@ -383,15 +429,15 @@ impl Worker {
     /// mixes take it at the next build.
     fn niche_finish(&mut self) {
         let Some(open) = self.recs.niche.open.take() else { return };
-        self.recs.niche.spent.push(open.mix);
+        self.recs.niche.spent.push((open.mix, Instant::now()));
         let Some(snap) = self.snapshot() else { return };
         let mut tracks: Vec<(StreamTrack, Vec<TrackId>)> = open.found.into_iter().filter(|(t, _)| snap.is_new(t)).collect();
         // The songs most seeds found first.
         tracks.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
         tracks.truncate(KEEP);
         log::info!("niche: {:?} topped up with {} songs in {} requests", open.mix, tracks.len(), open.requests);
-        let Some(key) = key_of(open.mix) else { return };
-        let found = NicheFound { at: now_ms(), tracks };
+        let found = NicheFound { at: now_ms(), seeds: open.seeds, tracks };
+        let key = open.token;
         self.streaming.learn(&found.tracks.iter().map(|t| t.0.clone()).collect::<Vec<_>>());
         super::cache_write(&self.lib, &key, found.at, &found);
         if !found.tracks.is_empty() {
@@ -421,5 +467,16 @@ mod tests {
         keep(&mut found, vec![st("3", "Calm (Remastered)", "Someone")], &[b]);
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].1, vec![a, b]);
+    }
+
+    /// A top-up is for its niche: most of the seeds the same, not a mix of
+    /// the key drawn of other songs.
+    #[test]
+    fn a_top_up_is_for_its_seeds() {
+        let t: Vec<TrackId> = (0..6).map(|_| TrackId::new()).collect();
+        assert!(same_seeds(&t[..4], &t[..4]));
+        assert!(same_seeds(&t[..4], &t[1..4]));
+        assert!(!same_seeds(&t[..3], &t[3..6]));
+        assert!(!same_seeds(&[], &[]));
     }
 }

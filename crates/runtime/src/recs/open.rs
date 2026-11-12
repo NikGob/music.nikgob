@@ -27,14 +27,37 @@ pub(crate) fn open_pool(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap
     for f in topped {
         cands.extend(super::lanes::niche_candidates(snap, f));
     }
-    let mut seen: HashSet<String> = HashSet::new();
-    cands
-        .into_iter()
-        .filter_map(|c| {
-            let key = stream_song_key(&c.track);
-            seen.insert(key.clone()).then(|| OpenCandidate { key, track: c.track, vector: c.vector, lane: c.lane, near: c.near, weight: c.weight })
-        })
-        .collect()
+    // One song once: its links, preview, kind and the best weight of
+    // every copy (a discovery a niche's radio holds too keeps that link).
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<OpenCandidate> = Vec::new();
+    for c in cands {
+        let key = stream_song_key(&c.track);
+        match at.get(&key) {
+            Some(&k) => merge(&mut out[k], c.near, c.vector, c.lane, c.weight),
+            None => {
+                at.insert(key.clone(), out.len());
+                out.push(OpenCandidate { key, track: c.track, vector: c.vector, lane: c.lane, near: c.near, weight: c.weight });
+            }
+        }
+    }
+    out
+}
+
+/// Another copy of the song `c` joins it.
+fn merge(c: &mut OpenCandidate, near: Vec<usize>, vector: Option<nikgob_recs::Vector>, lane: Option<nikgob_recs::profiles::LaneKey>, weight: f32) {
+    for i in near {
+        if !c.near.contains(&i) {
+            c.near.push(i);
+        }
+    }
+    if c.vector.is_none() {
+        c.vector = vector;
+    }
+    if c.lane.is_none() {
+        c.lane = lane;
+    }
+    c.weight = c.weight.max(weight);
 }
 
 impl Worker {
@@ -48,7 +71,7 @@ impl Worker {
     pub(crate) fn wave_next(&self, filter: &WaveFilter, n: usize, served: &HashSet<String>) -> Option<(WaveNext, HashMap<RemoteId, StreamTrack>)> {
         let snap = self.snapshot()?;
         let topped: Vec<NicheFound> = match self.recs.home.as_ref() {
-            Some(h) if !snap.local_only => h.lanes.iter().filter(|l| !l.niche.is_empty()).filter_map(|l| super::niche::cached(&self.lib, l.key)).collect(),
+            Some(h) if !snap.local_only => h.lanes.iter().filter(|l| !l.niche.is_empty()).filter_map(|l| super::niche::cached(&self.lib, l.key, &l.niche)).collect(),
             _ => Vec::new(),
         };
         let pool = if snap.local_only { Vec::new() } else { open_pool(&snap, &self.discoveries_all(), &self.discovery_sources(), &topped) };
@@ -58,9 +81,28 @@ impl Worker {
         };
         let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
         let artist_tracks = |t: &StreamTrack| super::lanes::artist_tracks(&snap, t);
-        let ctx = WaveContext { model: &snap.model, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks };
+        // The families of genres of the library's artists (the snapshot's).
+        let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
+        let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
         let next = nikgob_recs::open_world::next(&ctx, &pool, filter, &self.recs.session, n, served);
         let streams = pool.into_iter().map(|c| (c.track.id.clone(), c.track)).collect();
         Some((next, streams))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nikgob_core::streaming::Service;
+
+    /// A song the discoveries and a niche's top-up both hold keeps the
+    /// links of both copies and the better weight.
+    #[test]
+    fn a_song_of_two_sources_keeps_both_links() {
+        let track = StreamTrack::new(RemoteId::new(Service::Youtube, "1"), "Calm");
+        let mut c = OpenCandidate { key: stream_song_key(&track), track, vector: None, lane: None, near: vec![1], weight: 0.4 };
+        merge(&mut c, vec![1, 2], None, None, 0.7);
+        assert_eq!(c.near, vec![1, 2]);
+        assert_eq!(c.weight, 0.7);
     }
 }

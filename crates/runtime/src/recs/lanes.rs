@@ -243,6 +243,9 @@ pub(crate) struct MixPrefs {
     pub hidden: Vec<MixKey>,
     /// «Преимущественно новые песни».
     pub unheard: v::RadioUnheard,
+    /// The cards play new music («С новым», not «Только скачанное»): the
+    /// niches get cards of their own.
+    pub with_new: bool,
 }
 
 impl MixPrefs {
@@ -256,6 +259,7 @@ impl MixPrefs {
             names: p.profile_names,
             hidden: p.home_hidden_mixes.iter().filter_map(|h| engine_key(h.key)).collect(),
             unheard: p.radio_unheard,
+            with_new: p.mixes_with_new && !p.mixes_downloaded_only,
         }
     }
 
@@ -373,11 +377,30 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // The genres: a genre mix is built by them, and a moment that is a
     // genre's songs again is told by them.
     let tags = artist_tags(lib);
-    let (mixes, lineup, blendable, pinned) = with_builder(snap, prefs, &snap.background, &ok, Some(&tags), &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
+    let wants_niches = prefs.with_new && !snap.local_only && input.new_share > 0.0;
+    let (mixes, lineup, blendable, pinned, niches) = with_builder(snap, prefs, &snap.background, &ok, Some(&tags), &input.session, input.now, input.utc_offset_min, input.epoch.seed, |b| {
         let pinned = b.pinned(&cache.kept);
         let (mut mixes, lineup) = b.lineup(&cache.kept);
         b.named(&mut mixes, &names);
-        (mixes, lineup, blend_profiles(snap, b, &names), pinned)
+        // The niches the row may hold a card of, with their titles.
+        let niches: Vec<(nikgob_recs::open_world::NicheCard, String, Vec<String>)> = if wants_niches {
+            let genre = |i: usize| b.genre_at(i);
+            let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
+            let none = |_: &StreamTrack| Vec::new();
+            let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none };
+            nikgob_recs::open_world::niches(&ctx)
+                .into_iter()
+                .filter(|c| !prefs.hidden.contains(&c.key))
+                .map(|c| {
+                    let title = b.title(c.key, &c.seeds);
+                    let short = b.short_titles(c.key);
+                    (c, title, short)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (mixes, lineup, blend_profiles(snap, b, &names), pinned, niches)
     });
     cache.kept.lineup = lineup;
     cache.kept.keep(&mixes, &snap.model);
@@ -391,6 +414,9 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // named mix or two, the moments, no two alike. A new song of «С
     // новым» goes to the first that fits it.
     let mut mixes: Vec<Mix> = nikgob_recs::mixes::row_upto(daily, pinned.into_iter().next(), mixes, input.row_more);
+    // The niches: the calm songs in place of the calm side, a small kind or
+    // genre a card of its own (docs/recommendations.md §1.2).
+    mix_new::with_niches(&snap.model, &mut mixes, niches);
     log_lineup(snap, tiles, &mixes);
 
     let seed = input.epoch.seed;
@@ -404,15 +430,18 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             let mut lane = lane_of(snap, tiles, &m);
             // «Фон» and «Любимые» are what they are: no new songs.
             if !snap.local_only && !matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
-                // A niche's top-up joins the candidates of its mix.
-                let topped = super::niche::cached(lib, lane.key).map(|f| niche_candidates(snap, &f)).unwrap_or_default();
+                // A niche's top-up joins the candidates of its mix (the
+                // top-up of these seeds, not of another draw of the key).
+                let seeds: Vec<TrackId> = if m.pool.is_empty() { &m.tracks } else { &m.pool }.iter().map(|&i| snap.model.id(i)).collect();
+                let topped = super::niche::cached(lib, lane.key, &seeds).map(|f| niche_candidates(snap, &f)).unwrap_or_default();
                 let all: Vec<NewCandidate> = if topped.is_empty() { Vec::new() } else { cands.iter().cloned().chain(topped).collect() };
                 let pool = if all.is_empty() { &cands } else { &all };
                 let (new, mode) = new_for(snap, input, &log, pool, &m, seed.wrapping_add(k as u64), &mut used_new);
                 lane.new = new;
                 lane.open = mode.open();
                 if mode == mix_new::NewMode::Niche {
-                    lane.niche.clone_from(&lane.tracks);
+                    // The whole pool seeds the top-up, not the card alone.
+                    lane.niche = seeds;
                 }
             }
             lane
@@ -874,6 +903,7 @@ mod tests {
             profiles: Default::default(),
             background: Vec::new(),
             graph_new: Vec::new(),
+            genres: HashMap::new(),
         };
         let mut tiles = TilesInput::default();
         for (k, id) in ids.iter().enumerate() {

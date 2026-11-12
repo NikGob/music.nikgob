@@ -82,6 +82,8 @@ const HEARD_SEEDS: usize = 5;
 /// The songs the graph found beside the library's that a pass ranks with
 /// its own finds, the strongest.
 const GRAPH_DISCOVER: usize = super::graph::GRAPH_FINDS;
+/// …each under this many of the library's tracks beside it at most.
+const GRAPH_SEEDS: usize = 3;
 
 /// Library cache keys.
 const PASS_KEY: &str = "discover.pass";
@@ -362,16 +364,26 @@ fn by_shares(steps: Vec<Step>, shares: &std::collections::BTreeMap<Source, f32>)
 
 /// The songs the graph of similar music found beside the library's
 /// ([`super::Snapshot::graph_new`], the best [`GRAPH_DISCOVER`]) as finds of
-/// a pass: each under the library's track whose radio holds it most, and
-/// those tracks' taste profiles (a find's profile when its preview is not
-/// analysed).
+/// a pass: each under the library's tracks whose radios hold it most (up
+/// to [`GRAPH_SEEDS`], so the ranking counts its independent seeds,
+/// [`nikgob_recs::discover::multi_seed`]), and those tracks' taste profiles
+/// (a find's profile when its preview is not analysed).
 fn graph_seed_finds(snap: &super::Snapshot) -> (Vec<(Seed, Vec<StreamTrack>)>, Vec<(TrackId, usize)>) {
     let mut by_seed: Vec<(TrackId, Vec<StreamTrack>)> = Vec::new();
     for f in snap.graph_new.iter().take(GRAPH_DISCOVER) {
-        let Some(&(from, _)) = f.near.iter().max_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
-        match by_seed.iter_mut().find(|s| s.0 == from) {
-            Some(s) => s.1.push(f.track.clone()),
-            None => by_seed.push((from, vec![f.track.clone()])),
+        let mut near = f.near.clone();
+        near.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut from: Vec<TrackId> = Vec::new();
+        for (t, _) in near {
+            if from.len() < GRAPH_SEEDS && !from.contains(&t) {
+                from.push(t);
+            }
+        }
+        for t in from {
+            match by_seed.iter_mut().find(|s| s.0 == t) {
+                Some(s) => s.1.push(f.track.clone()),
+                None => by_seed.push((t, vec![f.track.clone()])),
+            }
         }
     }
     let profiles = by_seed.iter().filter_map(|(t, _)| Some((*t, snap.model.profile_at(snap.model.position(*t)?)?))).collect();
@@ -881,7 +893,7 @@ impl Worker {
             .map(|(k, (n, _))| (k.clone(), (*n, snap.played_songs.contains(k))))
             .collect();
         // The songs the graph found beside the library's join the pass's
-        // finds, each under the track whose radio holds it most.
+        // finds, each under the tracks whose radios hold it most.
         let (graph_finds, graph_profiles) = graph_seed_finds(&snap);
         let mut finds = pass.finds;
         finds.extend(graph_finds);

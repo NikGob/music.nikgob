@@ -150,6 +150,9 @@ pub(crate) struct Snapshot {
     /// Songs the graph of similar music found beside the library's that it
     /// lacks, new indeed, the strongest first ([`graph::finds`]).
     pub graph_new: Vec<graph::GraphFind>,
+    /// The family of genres of each library artist the tags tell
+    /// ([`nikgob_recs::mix_names::leading`]): a wave's scene.
+    pub genres: HashMap<ArtistId, u8>,
 }
 
 /// The taste profiles as the home reads them.
@@ -1003,7 +1006,15 @@ fn read_parts(
         &|t| model.position(t).map(|i| (model.taste.affinity_at(i).max(0.0) / 3.0).tanh()),
         &|t| model.position(t).and_then(|i| model.main_artist_at(i)),
     );
+    let genres = {
+        let mut tags: HashMap<ArtistId, Vec<(String, f32)>> = HashMap::new();
+        for (a, t, w) in &similar.input.tags {
+            tags.entry(*a).or_default().push((t.clone(), *w));
+        }
+        tags.into_iter().filter_map(|(a, t)| Some((a, nikgob_recs::mix_names::leading(&t)?))).collect()
+    };
     let mut snap = Snapshot {
+        genres,
         graph_new,
         background: Vec::new(),
         profiles: Arc::new(TrackProfiles::from_model(&model)),
