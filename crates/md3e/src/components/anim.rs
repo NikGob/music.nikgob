@@ -98,6 +98,13 @@ pub fn fraction_starts_at(ctx: &Context, id: Id, from: f32) {
     });
 }
 
+/// Where the animation `id` is now (`None`: it has not started), without
+/// moving it.
+pub fn peek_f32(ctx: &Context, id: Id) -> Option<f32> {
+    let t = now(ctx);
+    ctx.data(|d| d.get_temp::<Animated<f32>>(id).map(|a| a.value(t)))
+}
+
 /// Jump an animation to `value` (e.g. on first show of a screen).
 pub fn snap_f32(ctx: &Context, id: Id, value: f32) {
     ctx.data_mut(|d| {
