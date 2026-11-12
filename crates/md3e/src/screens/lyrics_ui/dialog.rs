@@ -7,16 +7,24 @@
 //! текст». The lyrics editor opens in the same kind of window
 //! ([`window`]).
 
-use egui::{Align, Context, Id, Layout, Rect, Ui, Vec2, vec2};
+use egui::{Align, Context, Id, Layout, Rect, Ui, UiBuilder, Vec2, pos2, vec2};
 use nikgob_view::{Command, LyricsAvail, ViewState};
 
-use crate::components::{Button, ConnectedGroup, FilterChip, IconButton, ModalWindow, Size, Style};
+use crate::components::{Button, ConnectedGroup, FilterChip, IconButton, ModalWindow, Size, Style, paint, paint::Radii};
 use crate::{Icon, Theme, TypeRole};
 
 const OPEN: &str = "lyrics-dialog-open";
 const FROM: &str = "lyrics-dialog-from";
 const MAX_W: f32 = 720.0;
 const MAX_H: f32 = 640.0;
+/// The head: the title, the settings and the close button…
+const HEAD_H: f32 = 40.0;
+/// …and the room between it and the card under it.
+const HEAD_GAP: f32 = 12.0;
+/// The card (as the «Скорость | Эквалайзер» window's): its corners and
+/// the room at its edge.
+const CARD_RADIUS: f32 = 24.0;
+const CARD_PAD: f32 = 20.0;
 /// A row of buttons under «Подсветка».
 const ROW: f32 = 40.0;
 /// The least room between the choice and making timing on one row.
@@ -54,7 +62,7 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     if super::variant(&state.prefs) != super::Variant::Dialog {
         return;
     }
-    window(ctx, OPEN, vec2(MAX_W, MAX_H), true, false, |ui, inner| body(ui, inner, state, out));
+    window(ctx, OPEN, vec2(MAX_W, MAX_H + 40.0), true, true, |ui, inner| body(ui, inner, state, out));
 }
 
 /// The window `key` while it is open or still shrinking back: a modal
@@ -82,20 +90,37 @@ pub(super) fn window(ctx: &Context, key: &str, max: Vec2, escape: bool, shell: b
 
 fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    // The head: the title in line with the card's content, the settings and
+    // the way out at its end (the song is the one in front: no line repeats
+    // it).
+    let (row, _) = ui.allocate_exact_size(vec2(inner.width(), HEAD_H), egui::Sense::hover());
+    let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt("lyrics-dialog-head-right"));
+    right.spacing_mut().item_spacing.x = 4.0;
+    if right.add(IconButton::new(Icon::Close).size(Size::S).style(Style::Standard).tooltip("Закрыть (Esc)").id_salt("lyrics-dialog-close")).clicked() {
+        close(right.ctx());
+    }
+    if right.add(IconButton::new(Icon::Settings).size(Size::S).style(Style::Standard).tooltip("Настройки текста").id_salt("lyrics-dialog-settings")).clicked() {
+        close(right.ctx());
+        super::request(right.ctx(), super::Request::Settings);
+    }
+    let left = Rect::from_min_max(row.min + vec2(CARD_PAD, 0.0), pos2((right.min_rect().left() - 12.0).max(row.left()), row.bottom()));
+    let mut left = ui.new_child(UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center)).id_salt("lyrics-dialog-head-left"));
+    left.label(TypeRole::TitleLarge.style().rich("Текст песни", s.on_surface));
+    ui.add_space(HEAD_GAP);
+    // The card: the sources, the text, its timing and keeping it.
+    let card = Rect::from_min_max(ui.cursor().min, pos2(inner.right(), inner.bottom().max(ui.cursor().min.y)));
+    paint::container(ui.painter(), card, Radii::all(CARD_RADIUS), s.surface_container_highest, egui::Stroke::NONE);
+    let room = card.shrink(CARD_PAD);
+    let mut c = ui.new_child(UiBuilder::new().max_rect(room).layout(Layout::top_down(Align::Min)).id_salt("lyrics-dialog-card"));
+    c.set_clip_rect(card.intersect(ui.clip_rect()));
+    on_card(&mut c, room, state, out);
+}
+
+fn on_card(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
     ui.spacing_mut().item_spacing.y = 0.0;
-    // Headline and the settings (the song is the one in front: no line
-    // repeats it).
-    ui.allocate_ui_with_layout(vec2(inner.width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
-        ui.label(TypeRole::HeadlineSmall.style().rich("Текст песни", s.on_surface));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if ui.add(IconButton::new(Icon::Settings).tooltip("Настройки текста").id_salt("lyrics-dialog-settings")).clicked() {
-                close(ui.ctx());
-                super::request(ui.ctx(), super::Request::Settings);
-            }
-        });
-    });
-    ui.add_space(12.0);
 
     // The sources: one choice, applied at once.
     if let Some(track) = l.track.filter(|_| !l.sources.is_empty()) {
@@ -139,15 +164,19 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         _ => 1,
     };
     let rows = usize::from(choice) + make_rows;
-    let foot_h = 40.0;
+    let save = l.savable && busy.is_none();
+    let reason = super::failed(state).filter(|_| busy.is_none()).map(|e| (e, true)).or_else(|| super::no_craft(state).map(|w| (w, false)));
+    // The foot only for keeping the text or a reason (the head closes it).
+    let foot = save || reason.is_some();
+    let foot_h = if foot { 40.0 } else { 0.0 };
     // Room for the progress (48) with one row; rows of buttons 12 apart.
     let timing_h = if rows <= 1 { 56.0 } else { rows as f32 * ROW + (rows - 1) as f32 * 12.0 };
     // 24 of air above the footer under the timing (no heading: its
     // buttons say what it is).
-    let below = (if timing { 16.0 + timing_h + 24.0 } else { 16.0 }) + foot_h;
+    let air = if foot { 24.0 } else { 0.0 };
+    let below = if timing { 16.0 + timing_h + air + foot_h } else if foot { 16.0 + foot_h } else { 0.0 };
     let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
-    let save = l.savable && busy.is_none();
     // Keeping the text leads for timing the player made, or when there is
     // nothing else to do; else making timing does.
     let save_lead = save && (super::save_first(l) || actions.is_empty());
@@ -205,21 +234,19 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         if used < timing_h {
             ui.add_space(timing_h - used);
         }
-        ui.add_space(24.0);
-    } else {
+        ui.add_space(air);
+    } else if foot {
         ui.add_space(16.0);
     }
+    if !foot {
+        return;
+    }
     ui.allocate_ui_with_layout(vec2(inner.width(), foot_h), Layout::left_to_right(Align::Center), |ui| {
-        if let Some(e) = super::failed(state).filter(|_| busy.is_none()) {
-            ui.label(TypeRole::BodyMedium.style().rich(e, s.error));
-        } else if let Some(why) = super::no_craft(state) {
-            ui.label(TypeRole::BodyMedium.style().rich(why, s.on_surface_variant));
+        if let Some((why, error)) = reason {
+            ui.label(TypeRole::BodyMedium.style().rich(why, if error { s.error } else { s.on_surface_variant }));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add(Button::new("Готово").style(Style::Text).size(Size::S).id_salt("lyrics-dialog-done")).clicked() {
-                close(ui.ctx());
-            }
             // Keeping the text: any text not on the computer yet.
             let style = if save_lead { Style::Filled } else { Style::Tonal };
             if save && ui.add(Button::new(super::save_label(state)).style(style).size(Size::S).id_salt("lyrics-dialog-save")).clicked() {
