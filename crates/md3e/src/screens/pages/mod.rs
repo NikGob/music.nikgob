@@ -6,8 +6,10 @@ mod dialogs;
 mod downloads;
 mod equalizer;
 mod cards;
+pub(crate) mod first_run;
 pub(crate) mod home;
 mod library;
+mod logos;
 mod marks;
 mod search;
 mod shelf;
@@ -836,6 +838,8 @@ pub struct PageState {
     /// playlist to appear.
     pending_add_stream: Option<StreamAdd>,
     stream_after_create: Option<(String, StreamAdd)>,
+    /// The first run, while it is on screen.
+    pub(crate) first_run: first_run::State,
 }
 
 /// The library as a list (true) or a grid.

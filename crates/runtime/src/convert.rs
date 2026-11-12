@@ -733,6 +733,7 @@ impl Resolver {
             long_unplayed: h.long_unplayed.iter().map(|r| self.release(r)).collect(),
             recently_added: h.recently_added.iter().map(|r| self.release(r)).collect(),
             history: h.v2.history,
+            library_empty: h.library_empty,
             shortcuts: h
                 .v2
                 .shortcuts

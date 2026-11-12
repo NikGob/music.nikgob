@@ -358,7 +358,7 @@ impl Fakes {
             bento(&mut s, n, daylist);
         }
         if self.empty_home {
-            s.home = nikgob_view::HomeView { greeting_hour: s.home.greeting_hour, ..Default::default() };
+            s.home = nikgob_view::HomeView { greeting_hour: s.home.greeting_hour, library_empty: true, ..Default::default() };
         }
         if self.no_sound
             && let Some(a) = s.accounts.iter_mut().find(|a| a.service == Service::Spotify)

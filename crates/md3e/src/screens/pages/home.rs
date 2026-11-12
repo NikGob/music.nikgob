@@ -23,8 +23,11 @@ use nikgob_view::{
 use super::{PageState, cards, widgets, worlds};
 use crate::screens::stage::{Part, Stage};
 
+mod empty;
 mod refresh;
 mod row;
+#[cfg(test)]
+pub use empty::EMPTY_LINE;
 use crate::{
     Icon, Theme, TypeRole,
     components::{Button, FilterChip, Size, Style, anim},
@@ -302,17 +305,6 @@ pub fn sections(h: &HomeView, liked: bool, local_only: bool) -> Vec<Section> {
     out
 }
 
-/// Nothing to show at all: no music in the library and nothing heard.
-pub fn is_empty(h: &HomeView) -> bool {
-    h.shortcuts.is_empty()
-        && h.lanes.is_empty()
-        && h.from_library.is_empty()
-        && h.listen_again.is_empty()
-        && h.recently_added.is_empty()
-        && h.continue_listening.is_empty()
-        && h.tiles.is_empty()
-}
-
 /// The section's entrance, once per run: `n` from the top, 30 ms after the
 /// one above (up to four), rising 24 on the default spatial spring and
 /// fading in; reduced motion: a fade only.
@@ -363,13 +355,14 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
         return None;
     }
     ui.add_space(8.0);
-    // With «Только скачанное» on and nothing downloaded the page keeps its
-    // header, so the chip that emptied it can be turned off again.
-    if is_empty(h) && !local_only {
+    // No music at all, as the library counts it: the ways in under one
+    // line. With «Только скачанное» on the page keeps its header, so the
+    // chip that emptied it can be turned off again.
+    if h.library_empty && !local_only {
         if asks_name(&state.prefs) {
             name_prompt(ui, grid, pages, out);
         }
-        empty(ui, grid, pages, out);
+        empty::show(ui, grid, state, pages, true, out);
         return None;
     }
 
@@ -393,6 +386,13 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
     }
 
     let available = sections(h, liked_playlist(state).is_some(), local_only);
+    // Nothing to show of what there is (nothing downloaded under «Только
+    // скачанное», too little music for the rows yet): the ways in under
+    // the header, without the line (its chip stays to turn it off).
+    if available.is_empty() && stage.live {
+        empty::show(ui, grid, state, pages, false, out);
+        return nav;
+    }
     let order = order_of(&state.prefs);
     let drawn: Vec<(Section, f32)> = if stage.live {
         arrange(available.clone(), &order).into_iter().map(|s| (s, 1.0)).collect()
@@ -1179,41 +1179,6 @@ pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: 
 }
 
 // ---- Empty.
-
-/// The one line of an empty home.
-pub const EMPTY_LINE: &str = "Музыки пока нет";
-
-/// An empty library: one line and what to do first.
-fn empty(ui: &mut Ui, grid: Grid, pages: &mut PageState, out: &mut Vec<Command>) {
-    let s = Theme::get(ui.ctx()).scheme;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 420.0), Sense::hover());
-    let mut c = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(pos2(grid.left, rect.top()), vec2(grid.width, 420.0))).id_salt("home-empty"));
-    c.add_space(96.0);
-    c.vertical_centered(|ui| {
-        ui.label(TypeRole::HeadlineSmall.style().rich(EMPTY_LINE, s.on_surface));
-        ui.add_space(24.0);
-        ui.horizontal(|ui| {
-            let total = Button::new("Найти музыку").icon(Icon::Search).natural_width(ui)
-                + Button::new("Добавить папку…").icon(Icon::Folder).natural_width(ui)
-                + 8.0;
-            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if ui.add(Button::new("Найти музыку").icon(Icon::Search).style(Style::Filled).id_salt("home-empty-search")).clicked() {
-                pages.focus_search = true;
-            }
-            if ui.add(Button::new("Добавить папку…").icon(Icon::Folder).style(Style::Tonal).id_salt("home-empty-folder")).clicked() {
-                super::dialogs::folder(|d| d.set_title("Добавить папку"), Command::ImportFolder, out);
-            }
-        });
-        ui.add_space(8.0);
-        if ui
-            .add(Button::new("Перенести историю из Spotify или YouTube Music…").style(Style::Text).id_salt("home-empty-import"))
-            .clicked()
-        {
-            super::dialogs::file(|d| d.set_title("Выгрузка Spotify или Google Takeout"), Command::ImportExportFiles, out);
-        }
-    });
-}
 
 #[cfg(test)]
 mod tests;

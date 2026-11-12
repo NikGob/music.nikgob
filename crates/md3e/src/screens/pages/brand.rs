@@ -50,6 +50,14 @@ fn paint(ui: &Ui, rect: Rect, side: f32, color: Color32, alpha: f32) {
     ui.painter().galley(at, g, color.gamma_multiply(alpha));
 }
 
+/// The sun alone, `side` wide, centred in a row of its own (over the
+/// first run's first question).
+pub(super) fn mark(ui: &mut Ui, side: f32) {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), side), Sense::hover());
+    let sun = Rect::from_center_size(row.center(), vec2(side, side));
+    Image::new(MARK).paint_at(ui, sun);
+}
+
 fn height(side: f32) -> f32 {
     side + GAP + TypeRole::LabelLarge.style().line_height
 }

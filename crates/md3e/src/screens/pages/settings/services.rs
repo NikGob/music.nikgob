@@ -353,60 +353,65 @@ fn soloist_dialogs(ui: &mut Ui, st: &SoloistStatus, pages: &mut PageState, out: 
 /// for Developers (Spotify lets it work only for a Premium owner), its
 /// Client ID, the sign-in in the browser. What it takes is in the ⓘ.
 fn setup_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
-    let s = Theme::get(ui.ctx()).scheme;
     rows::titled(ui, Id::SpotifyPersonal, |ui| {
         ui.set_max_width(ui.available_width().min(640.0));
         ui.add_space(8.0);
-        numbered(ui, 1, 32.0, |ui| {
-            if ui.add(Button::new("Открыть Spotify for Developers").icon(Icon::OpenInNew).style(Style::Tonal).id_salt("sp-dash")).clicked() {
-                open_url(DASHBOARD);
-            }
-        });
-        numbered(ui, 2, 20.0, |ui| {
-            ui.label(TypeRole::BodyMedium.style().rich_para("Создай приложение (Create app), Redirect URI:", s.on_surface));
-            ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                ui.label(TypeRole::BodyMedium.emphasized().rich(REDIRECT_URI, s.on_surface));
-                copy_button(ui, "sp-redirect-copy", REDIRECT_URI);
-            });
-            ui.label(TypeRole::BodyMedium.style().rich_para("Отметь Web API и Web Playback SDK, сохрани.", s.on_surface));
-        });
-        numbered(ui, 3, 20.0, |ui| {
-            ui.label(TypeRole::BodyMedium.style().rich_para("Скопируй Client ID из Settings приложения:", s.on_surface));
-            ui.add_space(4.0);
-            let placeholder = if p.spotify_personal_app { "Сохранён" } else { "32 символа" };
-            TextField::new(&mut pages.sp_client_id, "Client ID")
-                .placeholder(placeholder)
-                .width(ui.available_width().min(420.0))
-                .id_salt("sp-client-id")
-                .show(ui);
-        });
-        let id = pages.sp_client_id.trim().to_owned();
-        let typed = id.len() >= 16;
-        numbered(ui, 4, 40.0, |ui| {
-            if ui
-                .add(
-                    Button::new("Войти через Spotify")
-                        .icon(Icon::Login)
-                        .style(Style::Filled)
-                        .size(Size::M)
-                        .enabled(can && (typed || p.spotify_personal_app))
-                        .id_salt("sp-login"),
-                )
-                .clicked()
-            {
-                // The typed key, else the saved one; it is kept once the
-                // sign-in works.
-                let input = if typed { LoginInput::PersonalApp { client_id: id.clone() } } else { LoginInput::Browser };
-                out.push(Command::StreamLogin { service: Service::Spotify, input });
-            }
-        });
+        spotify_steps(ui, p, pages, can, out);
         ui.add_space(8.0);
     });
 }
 
+/// The steps themselves, numbered (the first run shows them too).
+pub(crate) fn spotify_steps(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    numbered(ui, 1, 32.0, |ui| {
+        if ui.add(Button::new("Открыть Spotify for Developers").icon(Icon::OpenInNew).style(Style::Tonal).id_salt("sp-dash")).clicked() {
+            open_url(DASHBOARD);
+        }
+    });
+    numbered(ui, 2, 20.0, |ui| {
+        ui.label(TypeRole::BodyMedium.style().rich_para("Создай приложение (Create app), Redirect URI:", s.on_surface));
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 36.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(TypeRole::BodyMedium.emphasized().rich(REDIRECT_URI, s.on_surface));
+            copy_button(ui, "sp-redirect-copy", REDIRECT_URI);
+        });
+        ui.label(TypeRole::BodyMedium.style().rich_para("Отметь Web API и Web Playback SDK, сохрани.", s.on_surface));
+    });
+    numbered(ui, 3, 20.0, |ui| {
+        ui.label(TypeRole::BodyMedium.style().rich_para("Скопируй Client ID из Settings приложения:", s.on_surface));
+        ui.add_space(4.0);
+        let placeholder = if p.spotify_personal_app { "Сохранён" } else { "32 символа" };
+        TextField::new(&mut pages.sp_client_id, "Client ID")
+            .placeholder(placeholder)
+            .width(ui.available_width().min(420.0))
+            .id_salt("sp-client-id")
+            .show(ui);
+    });
+    let id = pages.sp_client_id.trim().to_owned();
+    let typed = id.len() >= 16;
+    numbered(ui, 4, 40.0, |ui| {
+        if ui
+            .add(
+                Button::new("Войти через Spotify")
+                    .icon(Icon::Login)
+                    .style(Style::Filled)
+                    .size(Size::M)
+                    .enabled(can && (typed || p.spotify_personal_app))
+                    .id_salt("sp-login"),
+            )
+            .clicked()
+        {
+            // The typed key, else the saved one; it is kept once the
+            // sign-in works.
+            let input = if typed { LoginInput::PersonalApp { client_id: id.clone() } } else { LoginInput::Browser };
+            out.push(Command::StreamLogin { service: Service::Spotify, input });
+        }
+    });
+}
+
 /// A numbered step of text.
-fn step(ui: &mut Ui, n: u32, text: &str) {
+pub(crate) fn step(ui: &mut Ui, n: u32, text: &str) {
     let s = Theme::get(ui.ctx()).scheme;
     numbered(ui, n, 20.0, |ui| {
         ui.label(TypeRole::BodyMedium.style().rich_para(text, s.on_surface));
@@ -415,7 +420,7 @@ fn step(ui: &mut Ui, n: u32, text: &str) {
 
 /// A numbered step: the number in a small tonal circle, centred on the
 /// first line (`line` high), and the step's content beside it.
-fn numbered(ui: &mut Ui, n: u32, line: f32, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn numbered(ui: &mut Ui, n: u32, line: f32, add: impl FnOnce(&mut Ui)) {
     let s = Theme::get(ui.ctx()).scheme;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
@@ -433,7 +438,7 @@ fn numbered(ui: &mut Ui, n: u32, line: f32, add: impl FnOnce(&mut Ui)) {
 
 /// «Spotify просит подождать до 14:05»: the service paused our calls (a
 /// blocker: its search and pages are silent until then).
-fn paused_line(ui: &mut Ui, a: &AccountView) {
+pub(crate) fn paused_line(ui: &mut Ui, a: &AccountView) {
     let s = Theme::get(ui.ctx()).scheme;
     if let Some(hm) = &a.paused_until_hm {
         ui.horizontal(|ui| {
@@ -508,7 +513,7 @@ fn import_row(ui: &mut Ui, state: &ViewState, service: Service, out: &mut Vec<Co
 
 /// The browser step of a running login: the link (the browser may not
 /// have opened by itself) with «Открыть» and «Копировать», or a device code.
-fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>) {
+pub(crate) fn login_prompt(ui: &mut Ui, a: &AccountView, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let Account::LoggingIn(Some(prompt)) = &a.account else { return };
     let salt = a.service.as_str();
@@ -573,7 +578,7 @@ fn window_prompt(ui: &mut Ui, a: &AccountView, text: &str, out: &mut Vec<Command
     ui.add_space(8.0);
 }
 
-fn login_error(ui: &mut Ui, a: &AccountView) {
+pub(crate) fn login_error(ui: &mut Ui, a: &AccountView) {
     let s = Theme::get(ui.ctx()).scheme;
     let text = a.error.clone().or_else(|| match &a.account {
         Account::Failed(m) => Some(m.clone()),
@@ -730,22 +735,30 @@ fn soundcloud(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut PageSta
         if !logged_in(acc) && pages.sc_form {
             let can = registered && !busy && p.soundcloud_enabled;
             item(ui, Id::SoundCloudToken, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    TextField::new(&mut pages.sc_token, "oauth_token").password(true).width(ui.available_width().min(420.0)).id_salt("sc-token").show(ui);
-                    settings_help::help_button(ui, Id::SoundCloudToken);
-                });
-                ui.add_space(8.0);
-                let text = pages.sc_token.trim().to_owned();
-                if ui.add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("sc-token-login")).clicked() {
-                    out.push(Command::StreamLogin { service: Service::Soundcloud, input: LoginInput::Cookies(text) });
-                    pages.sc_token.clear();
-                    pages.sc_form = false;
-                }
+                token_fields(ui, pages, can, true, out);
                 ui.add_space(8.0);
             });
         }
     });
+}
+
+/// SoundCloud's token login: the field (its ⓘ beside it with `help`) and
+/// «Войти» — Настройки' and the first run's.
+pub(crate) fn token_fields(ui: &mut Ui, pages: &mut PageState, can: bool, help: bool, out: &mut Vec<Command>) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        TextField::new(&mut pages.sc_token, "oauth_token").password(true).width(ui.available_width().min(420.0)).id_salt("sc-token").show(ui);
+        if help {
+            settings_help::help_button(ui, Id::SoundCloudToken);
+        }
+    });
+    ui.add_space(8.0);
+    let text = pages.sc_token.trim().to_owned();
+    if ui.add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("sc-token-login")).clicked() {
+        out.push(Command::StreamLogin { service: Service::Soundcloud, input: LoginInput::Cookies(text) });
+        pages.sc_token.clear();
+        pages.sc_form = false;
+    }
 }
 
 /// The cookies login: how to get them, a paste field and a file picker.
@@ -760,54 +773,61 @@ fn cookies_form(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &
                 settings_help::help_button(ui, Id::YouTubeCookies);
             });
             ui.add_space(4.0);
-            step(ui, 1, "Войди на music.youtube.com в браузере.");
-            step(ui, 2, "Расширением вроде «Get cookies.txt LOCALLY» выгрузи cookies.txt для этого сайта.");
-            step(ui, 3, "Выбери файл или вставь его текст (или заголовок Cookie) ниже.");
-            ui.add_space(4.0);
-            let frame = egui::Frame::new()
-                .fill(s.surface_container_low)
-                .stroke(Stroke::new(1.0, s.outline_variant))
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::same(10));
-            frame.show(ui, |ui| {
-                // Saved ones are not shown back: the field says they are there.
-                let hint = if p.youtube_cookies_set { "Cookies сохранены" } else { "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…" };
-                ui.add(
-                    egui::TextEdit::multiline(&mut pages.yt_cookies)
-                        .id_salt("yt-cookies-text")
-                        .hint_text(TypeRole::BodyMedium.style().rich(hint, s.on_surface_variant))
-                        .font(TypeRole::BodySmall.font_id())
-                        .text_color(s.on_surface)
-                        .frame(egui::Frame::NONE)
-                        .desired_rows(4)
-                        .desired_width(f32::INFINITY),
-                );
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                if ui
-                    .add(Button::new("Выбрать cookies.txt…").icon(Icon::UploadFile).style(Style::Outlined).id_salt("yt-cookies-file"))
-                    .clicked()
-                    && let Some(f) = rfd::FileDialog::new().set_title("cookies.txt для music.youtube.com").add_filter("cookies.txt", &["txt"]).pick_file()
-                {
-                    match std::fs::read_to_string(&f) {
-                        Ok(t) => pages.yt_cookies = t,
-                        Err(e) => log::warn!("cannot read {}: {e}", f.display()),
-                    }
-                }
-                let text = pages.yt_cookies.trim().to_owned();
-                if ui.add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("yt-cookies-login")).clicked() {
-                    out.push(Command::StreamLogin { service: Service::Youtube, input: LoginInput::Cookies(text) });
-                    pages.yt_cookies.clear();
-                    pages.yt_form = false;
-                }
-                if p.youtube_cookies_set && ui.add(Button::new("Забыть cookies").style(Style::Text).id_salt("yt-cookies-clear")).clicked() {
-                    out.push(Command::SetStreamSecrets { spotify_client_id: None, youtube_cookies: Some(String::new()) });
-                }
-            });
+            cookies_fields(ui, p, pages, can, out);
         });
         ui.add_space(8.0);
+    });
+}
+
+/// The cookies login's steps, paste field, file picker and «Войти» —
+/// Настройки' card and the first run's.
+pub(crate) fn cookies_fields(ui: &mut Ui, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
+    let s = Theme::get(ui.ctx()).scheme;
+    step(ui, 1, "Войди на music.youtube.com в браузере.");
+    step(ui, 2, "Расширением вроде «Get cookies.txt LOCALLY» выгрузи cookies.txt для этого сайта.");
+    step(ui, 3, "Выбери файл или вставь его текст (или заголовок Cookie) ниже.");
+    ui.add_space(4.0);
+    let frame = egui::Frame::new()
+        .fill(s.surface_container_low)
+        .stroke(Stroke::new(1.0, s.outline_variant))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10));
+    frame.show(ui, |ui| {
+        // Saved ones are not shown back: the field says they are there.
+        let hint = if p.youtube_cookies_set { "Cookies сохранены" } else { "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t…" };
+        ui.add(
+            egui::TextEdit::multiline(&mut pages.yt_cookies)
+                .id_salt("yt-cookies-text")
+                .hint_text(TypeRole::BodyMedium.style().rich(hint, s.on_surface_variant))
+                .font(TypeRole::BodySmall.font_id())
+                .text_color(s.on_surface)
+                .frame(egui::Frame::NONE)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
+        );
+    });
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if ui
+            .add(Button::new("Выбрать cookies.txt…").icon(Icon::UploadFile).style(Style::Outlined).id_salt("yt-cookies-file"))
+            .clicked()
+            && let Some(f) = rfd::FileDialog::new().set_title("cookies.txt для music.youtube.com").add_filter("cookies.txt", &["txt"]).pick_file()
+        {
+            match std::fs::read_to_string(&f) {
+                Ok(t) => pages.yt_cookies = t,
+                Err(e) => log::warn!("cannot read {}: {e}", f.display()),
+            }
+        }
+        let text = pages.yt_cookies.trim().to_owned();
+        if ui.add(Button::new("Войти").style(Style::Filled).enabled(can && !text.is_empty()).id_salt("yt-cookies-login")).clicked() {
+            out.push(Command::StreamLogin { service: Service::Youtube, input: LoginInput::Cookies(text) });
+            pages.yt_cookies.clear();
+            pages.yt_form = false;
+        }
+        if p.youtube_cookies_set && ui.add(Button::new("Забыть cookies").style(Style::Text).id_salt("yt-cookies-clear")).clicked() {
+            out.push(Command::SetStreamSecrets { spotify_client_id: None, youtube_cookies: Some(String::new()) });
+        }
     });
 }
 

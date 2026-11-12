@@ -24,6 +24,8 @@ pub enum Continue {
 
 pub struct Home {
     pub hour: u8,
+    /// No song in the library and none ever played ([`library_empty`]).
+    pub library_empty: bool,
     /// Главная v2's parts read at the visit.
     pub v2: crate::home_v2::HomeV2,
     pub mix: Vec<TrackRow>,
@@ -168,6 +170,7 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
 
     Home {
         hour,
+        library_empty: library_empty(lib),
         v2,
         mix,
         continue_listening,
@@ -175,6 +178,14 @@ pub fn build_with(lib: &Library, visit: &crate::home_v2::Visit) -> Home {
         long_unplayed: long_unplayed.into_iter().take(12).map(|(_, r)| r).collect(),
         recently_added: recently_added(lib, releases.into_iter().filter(|r| visit.album_shows(r)), 12),
     }
+}
+
+/// The library has no song and nothing was ever played, as the library
+/// counts them: the rows built from it leave out partial albums and small
+/// libraries, so their being empty does not say this. A count that fails
+/// says «not empty» (Главная never claims there is no music by mistake).
+pub fn library_empty(lib: &Library) -> bool {
+    lib.count_tracks(nikgob_library::TrackFilter::All).is_ok_and(|n| n == 0) && lib.count_events().is_ok_and(|n| n == 0)
 }
 
 /// «Недавно добавлено»: the latest albums of `releases` (newest first)
@@ -220,6 +231,26 @@ fn local_hour() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «Музыки пока нет» is the library's own count, not the rows': one
+    /// song of an album (a partial album, a library under the rows'
+    /// minimum) is music.
+    #[test]
+    fn the_library_is_empty_by_its_own_count() {
+        use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let visit = crate::home_v2::Visit { now: now_ms(), ..crate::home_v2::Visit::default() };
+        assert!(library_empty(&lib) && build_with(&lib, &visit).library_empty, "a new library");
+        let a = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
+        let credit = ArtistCredit::single("Kevin Penkin", Some(a.id));
+        let r = lib.upsert_release(&Release::new("MADE IN ABYSS ORIGINAL SOUNDTRACK", credit.clone())).unwrap();
+        let mut t = Track::new("Hanezeve Caradhina", credit);
+        t.release_id = Some(r.id);
+        t.track_no = 3;
+        let t = lib.upsert_track(&t).unwrap();
+        lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "x/3.flac", Codec::Flac)).unwrap();
+        assert!(!library_empty(&lib) && !build_with(&lib, &visit).library_empty, "one song of an album is music");
+    }
 
     fn track(release: Option<ReleaseId>, artists: Vec<ArtistId>, in_library: bool, has_local: bool) -> RecTrack {
         RecTrack {

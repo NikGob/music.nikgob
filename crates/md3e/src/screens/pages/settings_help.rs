@@ -185,6 +185,8 @@ pub enum SettingId {
     AcoustId,
     /// «Демо-профиль» in «Для разработчика» (own builds only).
     DemoProfile,
+    /// «Показать первый запуск» in «Для разработчика».
+    FirstRun,
     /// «Как к тебе обращаться».
     UserName,
     /// «Новое в радио и миксах».
@@ -502,7 +504,7 @@ impl SettingId {
             // «Для разработчика».
             | LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
-            | DislikeInRecs | DemoProfile => TAB_SYSTEM,
+            | DislikeInRecs | DemoProfile | FirstRun => TAB_SYSTEM,
         }
     }
 
@@ -540,7 +542,7 @@ impl SettingId {
             | UserName | Autostart | AutostartHidden | DownloadToasts | LibraryDir | Inbox | Trash | Preset(_) => Level::Simple,
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
-            | DislikeInRecs | DemoProfile => Level::Dev,
+            | DislikeInRecs | DemoProfile | FirstRun => Level::Dev,
             KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
             | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere | SoundDevice
             // Songs of albums: how an album only some songs of which are the
@@ -574,7 +576,7 @@ impl SettingId {
             // «Настройки текста…» under the lyrics: the lyrics' own look.
             LyricsUi => LyricsStyle,
             LyricsGpu | LyricsModelsAuto => LyricsModels,
-            MusicBrainz | AcoustId | DemoProfile => LibraryDir,
+            MusicBrainz | AcoustId | DemoProfile | FirstRun => LibraryDir,
             LastfmKey | ListenbrainzToken | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste => GraphUse,
             BackgroundCountsLess | ProfilesSplit => ProfileNames,
             DislikeInRecs => DislikeButton,
@@ -704,6 +706,7 @@ impl SettingId {
             MusicBrainz => "Контакт MusicBrainz",
             AcoustId => "Ключ AcoustID",
             DemoProfile => "Демо-профиль",
+            FirstRun => "Первый запуск",
             UserName => "Как к тебе обращаться",
             RadioNewShare => "Новое в радио и миксах",
             MixesDownloadedOnly => "Только из скачанного",
@@ -923,6 +926,7 @@ impl SettingId {
             MusicBrainz => "Почта или сайт для сервиса MusicBrainz, откуда берутся названия и обложки. Сервис просит его указать.",
             AcoustId => "Ключ сервиса AcoustID: он узнаёт трек по звуку, если у файла нет названий.",
             DemoProfile => "Отдельный плеер со своей библиотекой популярной музыки, настройками и входами в сервисы — для видео и проверки интерфейса. Работает рядом с этим; твоя библиотека и аккаунты в нём не видны. «Сбросить» стирает только его папку и собирает её заново.",
+            FirstRun => "Страницы первого запуска: откуда брать музыку, хранить ли её, вход в сервисы, вид текста. Выбранное там меняет те же настройки, что и здесь.",
             UserName => "Имя в приветствии на главной: «Добрый вечер, Ник». Пустое поле — приветствие без имени. Сохраняется, когда уходишь из поля или жмёшь Enter.",
             Prowlarr => "Адрес и ключ программы Prowlarr — через неё ищутся раздачи с музыкой.",
             Soulseek => "Свой аккаунт в сети Soulseek: новый ник и пароль заводятся сами при первом входе. «В плеере» — клиент работает внутри плеера в фоне; «На сервере» — утилита nikgob-slsk на сервере или Raspberry Pi, плеер забирает у неё скачанное. Хранится в settings.toml.",
