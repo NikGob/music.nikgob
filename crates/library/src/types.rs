@@ -100,6 +100,10 @@ pub struct TrackRow {
     /// from an MP3); `None` until it is checked.
     #[serde(default)]
     pub check: Option<nikgob_core::quality::CheckSummary>,
+    /// A library track (`track.in_library`); a stream song heard only
+    /// is not.
+    #[serde(default)]
+    pub in_library: bool,
 }
 
 impl TrackRow {
@@ -193,6 +197,54 @@ pub struct ReleaseListing {
     /// What its page shows while only some of it is the user's (see
     /// [`ReleaseRow::view`]).
     pub view: Option<bool>,
+    /// The rows that are library tracks for a reason of their own (a file,
+    /// a like, a playlist, added here), not only for the album's: the
+    /// user's songs under «Только мои песни».
+    pub own: std::collections::HashSet<TrackId>,
+    /// The rows the user chose by hand (a like, a playlist, added here): a
+    /// version of a song among them stays theirs on an album added whole.
+    pub picked: std::collections::HashSet<TrackId>,
+    /// Whether its other versions play with it: `Some(on)` for this album
+    /// ([`crate::Library::set_release_versions`]), `None` the setting.
+    pub versions: Option<bool>,
+}
+
+/// What the user set for how albums show and play (Настройки → Музыка →
+/// «Альбомы»).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AlbumRules {
+    pub mode: nikgob_core::model::AlbumMode,
+    /// «Другие версии (инструментал, ремиксы)»: the other versions of an
+    /// album's songs the user did not choose play with it (karaoke only
+    /// when the album itself says so).
+    pub other_versions: bool,
+}
+
+/// What an album's page shows and «Слушать» plays, worked out once for
+/// every place that asks ([`ReleaseListing::plan`]): its page, ▶ of its
+/// cards and menus, the queue its tracklist joins, Главная, search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlbumPlan {
+    /// Only some of it is the user's: its page has «Мои треки» and «Весь
+    /// альбом».
+    pub split: bool,
+    /// Of such an album: its page opens on «Весь альбом» and «Слушать»
+    /// plays it («Всегда весь альбом»).
+    pub opens_whole: bool,
+    /// What each row is to the user.
+    pub membership: std::collections::HashMap<TrackId, Membership>,
+    /// The user's songs, in the album's order («Мои треки»).
+    pub mine: Vec<TrackId>,
+    /// What the whole album plays, in its order: every row but the other
+    /// versions it does not play (and, of an album not split, the songs
+    /// left out of it).
+    pub whole: Vec<TrackId>,
+    /// The other versions of its songs the user did not choose, with their
+    /// kind, in its order.
+    pub versions: Vec<(TrackId, nikgob_core::clip_title::VersionKind)>,
+    /// They play with the album (the album's own choice, else the
+    /// setting): the switch of their group.
+    pub versions_on: bool,
 }
 
 impl ReleaseListing {
@@ -241,7 +293,24 @@ impl ReleaseListing {
             wanted: std::collections::HashSet::new(),
             excluded: std::collections::HashSet::new(),
             view: None,
+            own: std::collections::HashSet::new(),
+            picked: std::collections::HashSet::new(),
+            versions: None,
         }
+    }
+
+    /// The rows with a reason of their own to be the user's, the ones they
+    /// chose by hand, and the album's own choice of its other versions.
+    pub(crate) fn with_own(
+        mut self,
+        own: std::collections::HashSet<TrackId>,
+        picked: std::collections::HashSet<TrackId>,
+        versions: Option<bool>,
+    ) -> Self {
+        self.own = own;
+        self.picked = picked;
+        self.versions = versions;
+        self
     }
 
     /// The user's songs of the album (`wanted`, a subset of its rows), the
@@ -272,44 +341,147 @@ impl ReleaseListing {
         self.tracks().map(|t| t.id).collect()
     }
 
-    /// What each row is to the user. With `versions` a row that is another
-    /// version of a song of the same album (its title without the version
-    /// mark is that song's title, the artists agree: «SugaRiddle
-    /// (Instrumental)» beside «SugaRiddle») and is not one of the user's
-    /// songs is [`Membership::Variant`]; a version the user chose stays
-    /// theirs, and a mark without its song beside it proves nothing
-    /// (undecided). Without `versions` no row is a variant.
-    pub fn membership(&self, versions: bool) -> std::collections::HashMap<TrackId, Membership> {
-        use nikgob_core::clip_title::{fold, version_split};
-        // The album's songs that are no version: title and artist.
-        let plain: Vec<(String, String)> = if versions {
-            self.tracks()
-                .filter(|t| version_split(&t.title).is_none())
-                .map(|t| (fold(&t.title), fold(&t.artist)))
-                .collect()
-        } else {
-            Vec::new()
-        };
+    /// The rows that are another version of a song of the same album: an
+    /// instrumental, off vocal, karaoke or remix ([`version_mark`]) whose
+    /// title without the mark is the title of a plain row of the album, the
+    /// artists agreeing («SugaRiddle (Instrumental)» beside «SugaRiddle»).
+    /// A mark without its song beside it proves nothing: a remix album, an
+    /// instrumental piece of an OST, a single of only the karaoke.
+    ///
+    /// [`version_mark`]: nikgob_core::clip_title::version_mark
+    pub fn version_kinds(&self) -> std::collections::HashMap<TrackId, nikgob_core::clip_title::VersionKind> {
+        use nikgob_core::clip_title::{fold, version_mark};
+        let marks: Vec<(&TrackRow, Option<(String, nikgob_core::clip_title::VersionKind)>)> =
+            self.tracks().map(|t| (t, version_mark(&t.title))).collect();
+        let plain: Vec<(String, String)> =
+            marks.iter().filter(|(_, m)| m.is_none()).map(|(t, _)| (fold(&t.title), fold(&t.artist))).collect();
         let agree = |a: &str, b: &str| a.is_empty() || b.is_empty() || a.contains(b) || b.contains(a);
-        self.tracks()
-            .map(|t| {
-                let variant = versions
-                    && version_split(&t.title).is_some_and(|(base, _)| {
-                        let (base, artist) = (fold(&base), fold(&t.artist));
-                        plain.iter().any(|(title, a)| *title == base && agree(a, &artist))
-                    });
-                let m = if self.wanted.contains(&t.id) {
-                    Membership::Wanted
-                } else if self.excluded.contains(&t.id) {
-                    Membership::Excluded
-                } else if variant {
-                    Membership::Variant
-                } else {
-                    Membership::Undecided
-                };
-                (t.id, m)
+        marks
+            .into_iter()
+            .filter_map(|(t, m)| {
+                let (base, kind) = m?;
+                let (base, artist) = (fold(&base), fold(&t.artist));
+                plain.iter().any(|(title, a)| *title == base && agree(a, &artist)).then_some((t.id, kind))
             })
             .collect()
+    }
+
+    /// What the album's page shows and «Слушать» plays under `rules`: the
+    /// one place that says which songs of an album are the user's.
+    ///
+    /// * The user's songs: under «Автоматически» and «Всегда весь альбом»
+    ///   its rows that are library tracks ([`Self::wanted`]: of an album
+    ///   added to the library, all of them); under «Только мои песни» the
+    ///   rows with a reason of their own ([`Self::own`]: a file, a like, a
+    ///   playlist, added here), whether the album was added or not. Never
+    ///   the rows left out by hand.
+    /// * Split (two views on its page): only some of its places are the
+    ///   user's songs. An album added to the library is whole, unless
+    ///   «Только мои песни» says otherwise.
+    /// * Another version of a song ([`Self::version_kinds`]) the user did
+    ///   not choose is a [`Membership::Variant`]: on an album added whole
+    ///   (or whole by having every song) only a version the user chose by
+    ///   hand ([`Self::picked`]) is theirs; on another album any of their
+    ///   songs is. Variants play with the album only when it says so (its
+    ///   own choice, else [`AlbumRules::other_versions`], never karaoke by
+    ///   the setting alone).
+    pub fn plan(&self, rules: AlbumRules) -> AlbumPlan {
+        use nikgob_core::clip_title::VersionKind;
+        use nikgob_core::model::AlbumMode;
+        let kinds = self.version_kinds();
+        let p = self.progress;
+        let added = p.whole || !p.partial();
+        let mine_set = |id: &TrackId| {
+            !self.excluded.contains(id)
+                && match rules.mode {
+                    AlbumMode::Mine => self.own.contains(id),
+                    AlbumMode::Auto | AlbumMode::Whole => self.wanted.contains(id),
+                }
+        };
+        let split = match rules.mode {
+            AlbumMode::Auto | AlbumMode::Whole => p.partial(),
+            AlbumMode::Mine => {
+                let n = self.tracks().filter(|t| mine_set(&t.id)).count() as u32;
+                (n > 0 || p.left_out) && n < p.total
+            }
+        };
+        let versions_on = self.versions.unwrap_or(rules.other_versions);
+        let plays_kind = |kind: VersionKind| match self.versions {
+            Some(on) => on,
+            None => rules.other_versions && kind != VersionKind::Karaoke,
+        };
+        let mut membership = std::collections::HashMap::new();
+        let (mut mine, mut whole, mut versions) = (Vec::new(), Vec::new(), Vec::new());
+        for t in self.tracks() {
+            let kind = kinds.get(&t.id).copied();
+            let kept = mine_set(&t.id) && (!added || kind.is_none() || self.picked.contains(&t.id));
+            let m = if self.excluded.contains(&t.id) {
+                Membership::Excluded
+            } else if kept {
+                Membership::Wanted
+            } else if kind.is_some() {
+                Membership::Variant
+            } else {
+                Membership::Undecided
+            };
+            membership.insert(t.id, m);
+            if m == Membership::Wanted {
+                mine.push(t.id);
+            }
+            let plays = match (m, kind) {
+                (Membership::Variant, Some(k)) => plays_kind(k),
+                (Membership::Excluded, _) => split,
+                _ => true,
+            };
+            if plays {
+                whole.push(t.id);
+            }
+            if let (Membership::Variant, Some(k)) = (m, kind) {
+                versions.push((t.id, k));
+            }
+        }
+        AlbumPlan {
+            split,
+            opens_whole: rules.mode == AlbumMode::Whole,
+            membership,
+            mine,
+            whole,
+            versions,
+            versions_on,
+        }
+    }
+
+    /// What «Слушать» of the album plays under `rules`, in its order, and
+    /// whether that is the whole album (its tracklist found later joins
+    /// such a queue whole; else only new songs of the user's). `scope`:
+    /// `Some(true)` the whole album («Слушать весь альбом»), `Some(false)`
+    /// the user's songs, `None` as its page opens. A split album plays the
+    /// user's songs (none: nothing); one not split plays as it is the
+    /// user's ([`AlbumPlan::whole`]). A song picked outside what plays
+    /// (`start`) plays the whole album from it, that song too.
+    pub fn plays(&self, rules: AlbumRules, scope: Option<bool>, start: Option<TrackId>) -> (Vec<TrackId>, bool) {
+        let plan = self.plan(rules);
+        let whole = scope.unwrap_or(plan.split && plan.opens_whole);
+        let (list, whole) = match (plan.split, whole) {
+            (_, true) => (plan.whole.clone(), true),
+            (true, false) => (plan.mine.clone(), false),
+            // None of it the user's: a page of the catalog, played whole.
+            (false, false) => (plan.whole.clone(), plan.mine.is_empty()),
+        };
+        match start {
+            Some(s) if !list.contains(&s) && self.tracks().any(|t| t.id == s) => {
+                (self.tracks().filter(|t| t.id == s || plan.whole.contains(&t.id)).map(|t| t.id).collect(), true)
+            }
+            _ => (list, whole),
+        }
+    }
+
+    /// The rows of the album a queue of it takes in when its tracklist
+    /// grows: of a queue of the whole album what the whole album plays,
+    /// else the user's songs ([`Self::plays`]).
+    pub fn joins(&self, rules: AlbumRules, whole: bool) -> Vec<TrackId> {
+        let plan = self.plan(rules);
+        if whole { plan.whole } else { plan.mine }
     }
 
     pub fn holes(&self) -> usize {

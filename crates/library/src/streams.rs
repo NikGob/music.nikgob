@@ -41,6 +41,34 @@ fn likes_key(service: Service) -> String {
     format!("likes_pulled.{}", service.as_str())
 }
 
+/// The reasons of a track (aliased `track`) of its own to be a library
+/// track: a file (a local source, or no stream source and not a song only
+/// seen in a history), or what [`picked_reason!`] says.
+macro_rules! own_reason {
+    () => {
+        "EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind = 'local_file')
+    OR (NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind != 'local_file')
+        AND NOT EXISTS (SELECT 1 FROM external_id x WHERE x.kind = 'track' AND x.local_id = track.id
+                                                      AND x.service = 'seen'))
+    OR "
+    };
+}
+
+/// A track (aliased `track`) the user chose by hand: liked, in a live
+/// playlist, added to their songs of its album, or put into the library
+/// («В библиотеку», table `track_added`).
+macro_rules! picked_reason {
+    () => {
+        "EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = track.id
+                                       AND l.deleted = 0)
+    OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
+                WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0)
+    OR EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id
+                  AND x.release_id = track.release_id AND x.choice = 'include' AND x.deleted = 0)
+    OR EXISTS (SELECT 1 FROM track_added a WHERE a.track_id = track.id AND a.deleted = 0)"
+    };
+}
+
 /// `in_library` of the track row aliased `track` (see the module docs): a
 /// song added to the user's songs of its album, and every song of an album
 /// added whole (but the ones left out of it and a stream twin at the place
@@ -48,21 +76,15 @@ fn likes_key(service: Service) -> String {
 /// ([`crate::selection`]). A saved album's like keeps its songs in, unless
 /// it stands for the user's songs only (mode `mine`: it came with the like
 /// of one of them).
-const IN_LIBRARY_EXPR: &str = "(
-    EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind = 'local_file')
-    OR (NOT EXISTS (SELECT 1 FROM source s WHERE s.track_id = track.id AND s.kind != 'local_file')
-        AND NOT EXISTS (SELECT 1 FROM external_id x WHERE x.kind = 'track' AND x.local_id = track.id
-                                                      AND x.service = 'seen'))
-    OR EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = track.id
-                                       AND l.deleted = 0)
+const IN_LIBRARY_EXPR: &str = concat!(
+    "(",
+    own_reason!(),
+    picked_reason!(),
+    "
     OR (EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'release' AND l.target_id = track.release_id
                                         AND l.deleted = 0)
         AND NOT EXISTS (SELECT 1 FROM release_selection rs WHERE rs.release_id = track.release_id
                            AND rs.mode = 'mine' AND rs.deleted = 0))
-    OR EXISTS (SELECT 1 FROM playlist_entry e JOIN playlist p ON p.id = e.playlist_id
-                WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0)
-    OR EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id
-                  AND x.release_id = track.release_id AND x.choice = 'include' AND x.deleted = 0)
     OR (EXISTS (SELECT 1 FROM release_selection rs WHERE rs.release_id = track.release_id
                    AND rs.mode = 'whole' AND rs.deleted = 0)
         AND NOT EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id
@@ -71,7 +93,16 @@ const IN_LIBRARY_EXPR: &str = "(
                 SELECT 1 FROM track o WHERE o.release_id = track.release_id AND o.id != track.id
                    AND o.deleted_at IS NULL AND o.has_local = 1
                    AND o.disc_no = track.disc_no AND o.track_no = track.track_no
-                   AND abs(o.duration_ms - track.duration_ms) <= 2000))))";
+                   AND abs(o.duration_ms - track.duration_ms) <= 2000))))"
+);
+
+/// A library track (aliased `track`) for a reason of its own, not for its
+/// album's: a file, a like, a playlist, added to the user's songs of the
+/// album ([`crate::Library::release_listing`]: «Только мои песни»).
+pub(crate) const OWN_EXPR: &str = concat!("(", own_reason!(), picked_reason!(), ")");
+
+/// A track (aliased `track`) the user chose by hand ([`picked_reason!`]).
+pub(crate) const PICKED_EXPR: &str = concat!("(", picked_reason!(), ")");
 
 /// Recomputes `in_library` of one track (by id text).
 pub(crate) fn refresh_in_library(conn: &Connection, track: &str) -> Result<()> {
