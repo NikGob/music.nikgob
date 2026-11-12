@@ -463,6 +463,26 @@ impl Menu {
         let id = self.id;
         let entries = &self.entries;
         let expanded = st.open;
+        // While it is open a clear scrim lies under it over the window: a
+        // press outside closes the menu and goes no further. It used to
+        // land on what was under it too: a slider took the value at the
+        // press, a switch flipped, a button acted.
+        if was_open {
+            let screen = ctx.content_rect();
+            let scrim = Area::new(self.id.with("scrim"))
+                .fade_in(false)
+                .order(Order::Tooltip)
+                .fixed_pos(screen.min)
+                .constrain(false)
+                .interactable(true)
+                .show(ctx, |ui| {
+                    ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
+                });
+            let under = scrim.response.layer_id;
+            ctx.move_to_top(under);
+            ctx.set_sublayer(under, layer);
+            ctx.set_sublayer(under, LayerId::new(Order::Tooltip, sub_area));
+        }
         let area = Area::new(area_id)
             .fade_in(false)
             .order(Order::Tooltip)
@@ -571,19 +591,14 @@ impl Menu {
             d.insert_temp(id.with("row-rects"), (pass, out.rects));
         });
 
-        // A press outside closes.
+        // A press outside closes (on its anchor too: the scrim takes the
+        // press, the anchor never sees it to close the menu itself).
         if was_open {
-            let anchor_rect = match placement {
-                Placement::Anchored { rect, .. } => Some(rect),
-                Placement::At(_) => None,
-            };
             let outside_press = ctx.input(|i| {
                 i.pointer.any_pressed()
-                    && i.pointer.interact_pos().is_some_and(|p| {
-                        !menu_rect.contains(p)
-                            && !child_rect.is_some_and(|c| c.contains(p))
-                            && !anchor_rect.is_some_and(|a| a.contains(p))
-                    })
+                    && i.pointer
+                        .interact_pos()
+                        .is_some_and(|p| !menu_rect.contains(p) && !child_rect.is_some_and(|c| c.contains(p)))
             });
             if outside_press {
                 close = true;
@@ -929,6 +944,59 @@ mod tests {
         assert!((m.items[1].top() - m.rows[1].top()).abs() < 0.5);
         assert_eq!(m.click(m.items[2].center()), Some(2));
         assert!(!m.open);
+    }
+
+    /// A press outside an open menu closes it and goes no further: the
+    /// widget under it is not clicked (a slider under a menu took the value
+    /// at the press that closed it). With the menu closed it is.
+    #[test]
+    fn a_press_that_closes_a_menu_does_not_reach_what_is_under_it() {
+        let ctx = Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        crate::icons::install(&ctx);
+        Theme::default().install(&ctx);
+        let target = Rect::from_min_size(pos2(600.0, 500.0), vec2(120.0, 40.0));
+        let anchor = Rect::from_min_size(pos2(100.0, 100.0), vec2(40.0, 40.0));
+        let mut open = true;
+        let mut time = 0.0;
+        let mut frame = |events: Vec<egui::Event>, open: &mut bool| -> bool {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 700.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut clicked = false;
+            let ctx2 = ctx.clone();
+            let mut out = ctx.run_ui(input, |ui| {
+                clicked = ui.interact(target, Id::new("under"), Sense::click()).clicked();
+                cascade().popup(&ctx2, anchor, open);
+            });
+            out.textures_delta.clear();
+            clicked
+        };
+        for _ in 0..24 {
+            frame(Vec::new(), &mut open);
+        }
+        let at = target.center();
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let click = |frame: &mut dyn FnMut(Vec<egui::Event>, &mut bool) -> bool, open: &mut bool| {
+            let mut hit = frame(vec![egui::Event::PointerMoved(at)], open);
+            hit |= frame(Vec::new(), open);
+            hit |= frame(vec![button(true)], open);
+            hit |= frame(vec![button(false)], open);
+            hit | frame(Vec::new(), open)
+        };
+        assert!(open);
+        assert!(!click(&mut frame, &mut open), "the press that closed the menu clicked what was under it");
+        assert!(!open, "it closed");
+        for _ in 0..24 {
+            frame(Vec::new(), &mut open);
+        }
+        assert!(click(&mut frame, &mut open), "closed, a click reaches it");
     }
 
     #[test]

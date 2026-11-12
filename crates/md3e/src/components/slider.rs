@@ -34,6 +34,38 @@ impl Default for Wave {
     }
 }
 
+/// A card that closes on a press outside it (the settings' pinned ⓘ card)
+/// notes, every frame it is up, `keep`: what of the window keeps it open.
+/// A press that begins outside every `keep` noted the frame before only
+/// closes the card: a slider under it takes no value from that press (it
+/// used to, so a click to put a card away moved the slider under the
+/// pointer, «Размер текста» to wherever the click was).
+pub fn note_dismissible(ctx: &Context, keep: Rect) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        let notes = d.get_temp_mut_or_default::<(u64, Vec<Rect>)>(dismissible_id());
+        if notes.0 != pass {
+            *notes = (pass, Vec::new());
+        }
+        notes.1.push(keep);
+    });
+}
+
+fn dismissible_id() -> Id {
+    Id::new("md3e-dismissible")
+}
+
+/// The pointer was pressed this frame outside what keeps a card up (noted
+/// the frame before): the press closes it and is nobody else's.
+pub fn press_dismisses(ctx: &Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    let Some((at, keep)) = ctx.data(|d| d.get_temp::<(u64, Vec<Rect>)>(dismissible_id())) else { return false };
+    if at + 1 < pass || keep.is_empty() {
+        return false;
+    }
+    ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !keep.iter().any(|k| k.contains(p))))
+}
+
 /// Result of a slider frame.
 pub struct SliderOutput {
     pub response: Response,
@@ -122,16 +154,35 @@ impl Slider {
         let to_value = |p: Pos2| ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
         let mut dragging = None;
         let mut committed = None;
-        if let Some(p) = response.interact_pointer_pos()
+        // A press that put a card away is not this slider's, until it is
+        // let go of.
+        let ignored_id = id.with("dismissing-press");
+        let down = ctx.input(|i| i.pointer.any_down());
+        let mut ignored = down && ctx.data(|d| d.get_temp::<bool>(ignored_id)).unwrap_or(false);
+        if response.is_pointer_button_down_on() && press_dismisses(&ctx) {
+            ignored = true;
+        }
+        if ignored {
+            ctx.data_mut(|d| d.insert_temp(ignored_id, true));
+        } else {
+            ctx.data_mut(|d| d.remove::<bool>(ignored_id));
+        }
+        let released = response.drag_stopped() || response.clicked();
+        if !ignored
+            && let Some(p) = response.interact_pointer_pos()
             && (response.dragged() || response.is_pointer_button_down_on())
         {
             dragging = Some(to_value(p));
         }
-        if (response.drag_stopped() || response.clicked())
+        let was_ignored = ctx.data(|d| d.get_temp::<bool>(ignored_id.with("last"))).unwrap_or(false);
+        if released
+            && !ignored
+            && !was_ignored
             && let Some(p) = response.interact_pointer_pos()
         {
             committed = Some(to_value(p));
         }
+        ctx.data_mut(|d| d.insert_temp(ignored_id.with("last"), ignored));
         let value = dragging.or(committed).unwrap_or(self.value);
 
         if ui.is_rect_visible(rect) {
@@ -422,6 +473,49 @@ mod tests {
         crate::typography::install_fonts(&mut fonts);
         ctx.set_fonts(fonts);
         ctx
+    }
+
+    /// A click on a slider that only puts a card away (it was up the frame
+    /// before, the click is outside it) sets nothing; the next click does.
+    #[test]
+    fn a_click_that_puts_a_card_away_sets_no_value() {
+        let ctx = context();
+        let mut time = 0.0;
+        let card = Rect::from_min_size(pos2(500.0, 20.0), vec2(200.0, 100.0));
+        let mut frame = |events: Vec<egui::Event>, card_up: bool| -> (Option<f32>, Option<f32>) {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut got = (None, None);
+            let _ = ctx.run_ui(input, |ui| {
+                let o = Slider::new("s", 0.5).width(400.0).show(ui);
+                got = (o.dragging, o.committed);
+                if card_up {
+                    note_dismissible(ui.ctx(), card);
+                }
+            });
+            got
+        };
+        let at = pos2(380.0, 22.0);
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let click = |frame: &mut dyn FnMut(Vec<egui::Event>, bool) -> (Option<f32>, Option<f32>), card: [bool; 4]| {
+            let mut seen = Vec::new();
+            seen.push(frame(vec![egui::Event::PointerMoved(at)], card[0]));
+            seen.push(frame(vec![button(true)], card[1]));
+            seen.push(frame(vec![button(false)], card[2]));
+            seen.push(frame(Vec::new(), card[3]));
+            seen
+        };
+        frame(Vec::new(), false);
+        // The card is up until the press, which puts it away.
+        let seen = click(&mut frame, [true, false, false, false]);
+        assert!(seen.iter().all(|(d, c)| d.is_none() && c.is_none()), "{seen:?}");
+        let seen = click(&mut frame, [false; 4]);
+        assert!(seen.iter().any(|(_, c)| c.is_some()), "a plain click sets it: {seen:?}");
     }
 
     /// One frame of a 400 px slider at `time`; returns the vertical extent

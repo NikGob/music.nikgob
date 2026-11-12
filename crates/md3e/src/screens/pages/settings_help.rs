@@ -2225,6 +2225,12 @@ pub fn finish(ui: &mut Ui, prefs: &mut Prefs, samples: bool) {
             row.id.choose(prefs, i);
         }
         pin.card = Some(rect);
+        if !out.close {
+            // A press outside the row and the card puts the card away and
+            // reaches no slider under it.
+            crate::components::slider::note_dismissible(&ctx, row.rect);
+            crate::components::slider::note_dismissible(&ctx, rect);
+        }
         set_pinned(&ctx, (!out.close).then_some(pin));
     }
 }
