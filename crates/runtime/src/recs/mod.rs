@@ -2419,9 +2419,9 @@ impl Worker {
         self.recs.session.start(track, now, ctx, Some(origin));
     }
 
-    /// How a start ended (not by closing the app): the session and the
-    /// skip model learn it.
-    pub(crate) fn recs_ended(&mut self, track: TrackId, complete: bool, position_ms: u32) {
+    /// How a start ended (not by closing the app), where, and its length
+    /// when known: the session and the skip model learn it.
+    pub(crate) fn recs_ended(&mut self, track: TrackId, complete: bool, position_ms: u32, duration_ms: Option<u32>) {
         let track = self.recs_song_of(track);
         let ended = if complete {
             Ended::Complete
@@ -2432,7 +2432,7 @@ impl Worker {
         };
         self.new_ended(track, ended);
         let r = &mut self.recs;
-        r.session.end(track, ended);
+        r.session.end_at(track, ended, position_ms, duration_ms, false);
         let Some((t, x)) = r.skip_x.take() else { return };
         if t != track || ended == Ended::Late {
             return;
@@ -2440,6 +2440,21 @@ impl Worker {
         let Some(snap) = r.snap.clone() else { return };
         r.weights.get_or_insert(snap.model.weights).skip.observe(&x, ended == Ended::Early);
         self.recs_keep_weights();
+    }
+
+    /// The bar of the playing `track` was dragged to `to_ms`: a skip after
+    /// it is a scrub-skip ([`nikgob_recs::session::Session::seek`]).
+    pub(crate) fn recs_seeked(&mut self, track: TrackId, to_ms: u32) {
+        let track = self.recs_song_of(track);
+        self.recs.session.seek(track, to_ms);
+    }
+
+    /// The user liked `track`: its start in the session is approved, and a
+    /// radio playing it takes its neighbours in.
+    pub(crate) fn recs_liked(&mut self, track: TrackId) {
+        let song = self.recs_song_of(track);
+        self.recs.session.like(song);
+        self.radio_liked(track);
     }
 
     /// The catalog's track for `track`: itself, or the copy standing for

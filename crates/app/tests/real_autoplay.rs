@@ -156,7 +156,7 @@ fn autoplay_of_a_lone_track_through_the_runtime() {
     loop {
         {
             let st = rt.state();
-            if st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 9 {
+            if st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 3 {
                 break;
             }
         }
@@ -175,11 +175,12 @@ fn autoplay_of_a_lone_track_through_the_runtime() {
     let lane = lanes.into_iter().max_by_key(|(_, n)| *n).map(|(l, _)| l);
     let st = rt.state();
     let mut same = 0;
-    for e in st.queue.next.iter().take(9) {
+    // The radio keeps a short buffer: three ahead.
+    for e in st.queue.next.iter().take(3) {
         let l = m.position(e.track.id).map(|i| format!("{:?}", m.song_type_at(i).lane()));
         same += usize::from(l.is_some() && l == lane);
         println!("{} | {} | {:?}", e.track.title, e.track.artist, l);
     }
-    let min: usize = std::env::var("NIKGOB_AUTOPLAY_MIN").ok().and_then(|m| m.parse().ok()).unwrap_or(8);
-    assert!(same >= min, "{same} of 9 of {lane:?}");
+    let min: usize = std::env::var("NIKGOB_AUTOPLAY_MIN").ok().and_then(|m| m.parse().ok()).unwrap_or(3);
+    assert!(same >= min, "{same} of 3 of {lane:?}");
 }
