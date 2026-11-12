@@ -54,18 +54,20 @@ pub(crate) fn show(ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     if super::variant(&state.prefs) != super::Variant::Dialog {
         return;
     }
-    window(ctx, OPEN, vec2(MAX_W, MAX_H), true, |ui, inner| body(ui, inner, state, out));
+    window(ctx, OPEN, vec2(MAX_W, MAX_H), true, false, |ui, inner| body(ui, inner, state, out));
 }
 
 /// The window `key` while it is open or still shrinking back: a modal
 /// over the dimmed player, as large as `max` allows, that grows out of the
 /// control and back; `body` fills its inner rect (usable once it has
-/// nearly arrived). A click on the scrim closes it, and Escape when
-/// `escape`; true when it was closed so.
-pub(super) fn window(ctx: &Context, key: &str, max: Vec2, escape: bool, body: impl FnOnce(&mut Ui, Rect)) -> bool {
+/// nearly arrived). A `shell` holds cards (as «Скорость | Эквалайзер»).
+/// A click on the scrim closes it, and Escape when `escape`; true when it
+/// was closed so.
+pub(super) fn window(ctx: &Context, key: &str, max: Vec2, escape: bool, shell: bool, body: impl FnOnce(&mut Ui, Rect)) -> bool {
     let id = Id::new(key);
     let open = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
     let window = ModalWindow::new(id, max).escape(escape);
+    let window = if shell { window.shell() } else { window };
     // Back into the control where it is now (it may have moved).
     let from = ctx
         .data(|d| d.get_temp::<(Id, Rect)>(Id::new(super::LAST)).map(|(_, r)| r).or_else(|| d.get_temp::<Rect>(Id::new(FROM))))
