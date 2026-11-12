@@ -156,6 +156,10 @@ pub(crate) fn show(ui: &mut Ui, full: Rect, state: &ViewState, pages: &mut PageS
             st.start = Some(state.prefs.clone());
             st.name = state.prefs.user_name.clone();
             st.dir = 1.0;
+            // On screen: a start after the app quit midway shows it again.
+            if !state.prefs.first_run_started {
+                out.push(Command::SetPref(PrefPatch::FirstRunStarted));
+            }
         }
         if st.since.is_none() {
             st.since = Some(now);

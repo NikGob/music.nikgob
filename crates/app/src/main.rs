@@ -139,23 +139,38 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     Ok(prefs)
 }
 
-/// The first run shows at this start: pending in the prefs (a new install)
-/// and nothing says the player was used before (music or history in the
-/// library, a service signed in). `NIKGOB_FIRST_RUN=1` shows it anyway in a
-/// demo run or the developer profile (`beside`), never in the real player.
-fn first_run_at_start(pending: bool, library: &nikgob_library::Library, streams: &streams::Services, beside: bool) -> bool {
+/// The first run shows at this start ([`nikgob_view::first_run::due`]):
+/// pending in the prefs (a new install), and either already on screen
+/// before (the app quit midway) or nothing says the player was used: no
+/// music or plays in the library, no service signed in, no YouTube Music
+/// cookies or Spotify key in settings.toml (its sign-in comes back from
+/// them only after this). `NIKGOB_FIRST_RUN=1` shows it anyway in a demo
+/// run or the developer profile (`beside`), never in the real player; there
+/// a first run left midway does not come back by itself, so a screenshot's
+/// never leaks into the next run.
+fn first_run_at_start(
+    prefs: &Prefs,
+    library: &nikgob_library::Library,
+    streams: &streams::Services,
+    secrets: &nikgob_core::settings::StreamingSettings,
+    beside: bool,
+) -> bool {
     if beside && std::env::var_os("NIKGOB_FIRST_RUN").is_some() {
         return true;
     }
-    if !pending {
+    if !prefs.first_run {
         return false;
     }
+    let started = prefs.first_run_started && !beside;
     let tracks = library.count_tracks(nikgob_library::TrackFilter::All).unwrap_or(0);
     let events = library.count_events().unwrap_or(0);
     let signed_in = streams.iter().any(|s| s.account().is_logged_in());
-    let due = nikgob_view::first_run::due(pending, tracks > 0 || events > 0, signed_in);
+    let stored = secrets.youtube_cookies.as_deref().is_some_and(|c| !c.trim().is_empty())
+        || secrets.spotify_client_id.as_deref().is_some_and(|c| !c.trim().is_empty());
+    let used = tracks > 0 || events > 0 || signed_in || stored;
+    let due = nikgob_view::first_run::due(true, started, used);
     if !due {
-        log::info!("first run: not shown, the player was used before ({tracks} tracks, {events} plays, signed in: {signed_in})");
+        log::info!("first run: not shown, the player was used before ({tracks} tracks, {events} plays, signed in: {signed_in}, stored sign-in: {stored})");
     }
     due
 }
@@ -770,7 +785,7 @@ fn main() -> eframe::Result {
     };
     let relogin = streams::relogin(&streams, &secrets);
     stage("streams");
-    prefs.first_run = first_run_at_start(prefs.first_run, &library, &streams, beside);
+    prefs.first_run = first_run_at_start(&prefs, &library, &streams, &secrets, beside);
     // Covers of the services, kept on disk between starts.
     let covers_dir = data_dir.join("cache").join("covers");
 
@@ -1169,30 +1184,48 @@ mod prefs_tests {
 
     /// The first run shows on a new install only: not on an upgrade (its
     /// prefs file has no pending first run), not where the player was used
-    /// (a library with music, a service signed in) though the prefs file
-    /// is gone, not once finished; «Показать первый запуск» shows it again.
+    /// (a library with music, a service signed in, YouTube Music cookies
+    /// stored) though the prefs file is gone, not once finished; one left
+    /// midway comes back whatever it brought itself; «Показать первый
+    /// запуск» shows it again.
     #[test]
     fn the_first_run_shows_on_a_new_install_only() {
+        use nikgob_core::settings::StreamingSettings;
         use nikgob_view::PrefPatch;
         let empty = nikgob_library::Library::open_in_memory().unwrap();
         let none: streams::Services = Vec::new();
+        let no_secrets = StreamingSettings::default();
+        let at_start = |p: &Prefs, lib: &nikgob_library::Library, s: &streams::Services, sec: &StreamingSettings| first_run_at_start(p, lib, s, sec, false);
         let new = prefs_of(None);
-        assert!(first_run_at_start(new.first_run, &empty, &none, false), "a new install");
+        assert!(new.first_run && !new.first_run_started);
+        assert!(at_start(&new, &empty, &none, &no_secrets), "a new install");
         let old = prefs_of(Some(br#"{"theme":"Dark","name_prompt":false}"#));
-        assert!(!old.first_run && !first_run_at_start(old.first_run, &empty, &none, false), "an upgrade");
+        assert!(!old.first_run && !at_start(&old, &empty, &none, &no_secrets), "an upgrade");
         let dir = tempfile::tempdir().unwrap();
         let used = nikgob_library::Library::open_in_memory().unwrap();
         demo::seed_with(&used, &dir.path().join("demo"), false);
-        assert!(!first_run_at_start(true, &used, &none, false), "a library with music, its prefs file lost");
+        assert!(!at_start(&new, &used, &none, &no_secrets), "a library with music, its prefs file lost");
         let signed = streams::demo(&dir.path().join("services"), &Default::default());
         assert!(signed.iter().any(|s| s.account().is_logged_in()));
-        assert!(!first_run_at_start(true, &empty, &signed, false), "a service signed in");
-        let mut done = new.clone();
+        assert!(!at_start(&new, &empty, &signed, &no_secrets), "a service signed in");
+        let cookies = StreamingSettings { youtube_cookies: Some("SID=1".into()), ..StreamingSettings::default() };
+        assert!(!at_start(&new, &empty, &none, &cookies), "YouTube Music cookies stored, its sign-in not back yet");
+        // On screen once, then the app quit: its own sign-in and folder do
+        // not end it, through a prefs file written and read again.
+        let mut midway = new.clone();
+        PrefPatch::FirstRunStarted.apply(&mut midway);
+        let midway = prefs_of(Some(&serde_json::to_vec(&midway).unwrap()));
+        assert!(at_start(&midway, &used, &signed, &cookies), "left midway: shown again");
+        assert!(!first_run_at_start(&midway, &used, &none, &no_secrets, true), "not in a demo run or the profile");
+        let mut done = midway.clone();
         PrefPatch::FirstRun(false).apply(&mut done);
-        assert!(!prefs_of(Some(&serde_json::to_vec(&done).unwrap())).first_run, "finished: never again");
-        PrefPatch::FirstRun(true).apply(&mut done);
-        assert!(done.first_run, "the developer's row shows it again");
-        assert!(prefs_of(Some(&serde_json::to_vec(&done).unwrap())).first_run);
+        let done = prefs_of(Some(&serde_json::to_vec(&done).unwrap()));
+        assert!(!done.first_run && !done.first_run_started);
+        assert!(!at_start(&done, &empty, &none, &no_secrets), "finished: never again");
+        let mut again = done.clone();
+        PrefPatch::FirstRun(true).apply(&mut again);
+        assert!(again.first_run, "the developer's row shows it again");
+        assert!(prefs_of(Some(&serde_json::to_vec(&again).unwrap())).first_run);
     }
 
     /// Главная asks for the name on the first start only: not with a prefs

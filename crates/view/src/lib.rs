@@ -1868,6 +1868,10 @@ pub struct Prefs {
     /// closed; a prefs file from before it reads false, so an upgrade never
     /// sees it. Настройки → «Для разработчика» shows it again.
     pub first_run: bool,
+    /// The first run was on screen and is not over: a start after it
+    /// went away (the app quit midway) shows it again, whatever its own
+    /// sign-ins and folder brought ([`first_run::due`]).
+    pub first_run_started: bool,
     /// The worlds taken off the card's row («Убрать из ряда»), by key.
     pub home_hidden_worlds: Vec<String>,
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
@@ -2457,8 +2461,11 @@ pub enum PrefPatch {
     UserName(String),
     /// Главная's question of the name: `false` («Пропустить») asks no more.
     NamePrompt(bool),
-    /// The first run is shown (`true`: «Показать первый запуск») or gone.
+    /// The first run is shown (`true`: «Показать первый запуск») or gone
+    /// (and no more started).
     FirstRun(bool),
+    /// The first run came on screen ([`Prefs::first_run_started`]).
+    FirstRunStarted,
     /// The share of new music of one kind of radio (the source buttons
     /// above the queue).
     RadioNewShareBy(RadioKind, RadioNewShare),
@@ -2542,7 +2549,11 @@ impl PrefPatch {
                 p.name_prompt = false;
             }
             Self::NamePrompt(on) => p.name_prompt = *on,
-            Self::FirstRun(on) => p.first_run = *on,
+            Self::FirstRun(on) => {
+                p.first_run = *on;
+                p.first_run_started &= *on;
+            }
+            Self::FirstRunStarted => p.first_run_started = true,
             Self::RadioNewShareBy(kind, share) => {
                 p.radio_new_share_by.insert(*kind, *share);
             }
@@ -3768,6 +3779,7 @@ impl Default for Prefs {
             user_name: String::new(),
             name_prompt: false,
             first_run: false,
+            first_run_started: false,
             home_hidden_worlds: Vec::new(),
             home_hidden_mixes: Vec::new(),
             stream_analysis: true,

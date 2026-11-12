@@ -2,19 +2,23 @@
 //! write into the prefs. The page itself is the design system's.
 //!
 //! Its choices only ever set what the app already honours: the services'
-//! switches, «Только скачанное», what a like downloads, whether the library
-//! lists streams. Each is written from the prefs the first run started
+//! switches, «Только скачанное» (with «Только локальное» only), whether a
+//! like downloads. Each is written from the prefs the first run started
 //! from, so going back and choosing again undoes the earlier choice, and
-//! what was not chosen keeps its value.
+//! what was not chosen keeps its value; the library's own filter is never
+//! touched.
 
-use crate::{Prefs, Service, UpgradeEvery};
+use crate::{Prefs, Service};
 
 /// The first run is shown at this start: it is still pending in the
-/// prefs, and nothing says the player was used before — no music or
-/// listening history in the library, no service signed in (a prefs file
-/// lost on an old install must not throw its owner into it).
-pub const fn due(pending: bool, has_music: bool, signed_in: bool) -> bool {
-    pending && !has_music && !signed_in
+/// prefs, and either it was already on screen (`started`: the app quit
+/// midway; what its own sign-ins and folder brought must not end it) or
+/// nothing says the player was used before (`used`: music or listening
+/// history in the library, a service signed in or its cookies or key
+/// stored) — a prefs file lost on an old install must not throw its owner
+/// into it.
+pub const fn due(pending: bool, started: bool, used: bool) -> bool {
+    pending && (started || !used)
 }
 
 /// Where the user takes music from: the first step's tiles.
@@ -112,13 +116,13 @@ impl Picks {
     }
 }
 
-/// «Хранить музыку на компьютере?»
+/// «Хранить музыку на компьютере?»: whether a like downloads, nothing
+/// else (which songs the library lists stays its own filter).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Keep {
-    /// «Да»: likes download, the library is the files.
+    /// «Да»: a like downloads the song.
     Files,
-    /// «Нет, только слушать»: nothing is downloaded by itself, the library
-    /// lists the services' songs too (they play from the stream cache).
+    /// «Нет, только слушать»: nothing is downloaded by itself.
     Listen,
 }
 
@@ -149,28 +153,12 @@ pub fn apply(p: &mut Prefs, start: &Prefs, c: &Choices) {
     // Deezer is a catalogue without an account whose songs play from
     // YouTube Music: it goes with the other services.
     p.deezer_enabled = !local && start.deezer_enabled;
-    let listen = c.keep() == Some(Keep::Listen);
-    p.mixes_downloaded_only = local || (start.mixes_downloaded_only && !listen);
-    match c.keep() {
-        Some(Keep::Files) => {
-            p.like_downloads = true;
-            p.library_only_downloaded = true;
-            p.lyrics_stream_keep = start.lyrics_stream_keep;
-            p.upgrade_every = start.upgrade_every;
-        }
-        Some(Keep::Listen) => {
-            p.like_downloads = false;
-            p.library_only_downloaded = false;
-            p.lyrics_stream_keep = 0;
-            p.upgrade_every = UpgradeEvery::Never;
-        }
-        None => {
-            p.like_downloads = start.like_downloads;
-            p.library_only_downloaded = start.library_only_downloaded;
-            p.lyrics_stream_keep = start.lyrics_stream_keep;
-            p.upgrade_every = start.upgrade_every;
-        }
-    }
+    p.mixes_downloaded_only = local || start.mixes_downloaded_only;
+    p.like_downloads = match c.keep() {
+        Some(Keep::Files) => true,
+        Some(Keep::Listen) => false,
+        None => start.like_downloads,
+    };
 }
 
 #[cfg(test)]
@@ -189,8 +177,9 @@ mod tests {
     fn it_is_due_only_for_a_player_never_used() {
         assert!(due(true, false, false), "a new install");
         assert!(!due(false, false, false), "an upgrade: its prefs file has no pending first run");
-        assert!(!due(true, true, false), "a library with music");
-        assert!(!due(true, false, true), "a service signed in");
+        assert!(!due(true, false, true), "used before (music, plays, a sign-in, stored cookies): its prefs file was lost");
+        assert!(due(true, true, true), "quit midway: what it signed in to or imported does not end it");
+        assert!(!due(false, true, true), "finished or closed");
     }
 
     #[test]
@@ -237,15 +226,17 @@ mod tests {
     }
 
     #[test]
-    fn listening_only_downloads_nothing_by_itself() {
-        let start = Prefs { upgrade_every: UpgradeEvery::Week, lyrics_stream_keep: 1, mixes_downloaded_only: true, ..Prefs::first_start() };
-        let mut p = start.clone();
-        apply(&mut p, &start, &Choices { picks: picks(&[Source::YouTube]), keep: Some(Keep::Listen) });
-        assert!(!p.like_downloads && !p.library_only_downloaded && !p.mixes_downloaded_only);
-        assert_eq!((p.lyrics_stream_keep, p.upgrade_every), (0, UpgradeEvery::Never));
-        apply(&mut p, &start, &Choices { picks: picks(&[Source::YouTube]), keep: Some(Keep::Files) });
-        assert!(p.like_downloads && p.library_only_downloaded && p.mixes_downloaded_only);
-        assert_eq!((p.lyrics_stream_keep, p.upgrade_every), (1, UpgradeEvery::Week));
+    fn keeping_or_not_is_the_likes_download_only() {
+        for only in [false, true] {
+            let start = Prefs { library_only_downloaded: only, mixes_downloaded_only: only, like_downloads: !only, ..Prefs::first_start() };
+            let mut p = start.clone();
+            apply(&mut p, &start, &Choices { picks: picks(&[Source::YouTube]), keep: Some(Keep::Listen) });
+            assert!(!p.like_downloads);
+            apply(&mut p, &start, &Choices { picks: picks(&[Source::YouTube]), keep: Some(Keep::Files) });
+            assert!(p.like_downloads);
+            assert_eq!((p.library_only_downloaded, p.mixes_downloaded_only), (only, only), "the filters stay the user's");
+            assert_eq!((p.upgrade_every, p.lyrics_stream_keep), (start.upgrade_every, start.lyrics_stream_keep));
+        }
     }
 
     #[test]
