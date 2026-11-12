@@ -1510,13 +1510,17 @@ impl Worker {
                 }
             }
             Command::AlbumVersions { id, on } => {
-                // The same as the setting: the album follows the setting.
-                let versions = (on != self.state.read().prefs.album_other_versions).then_some(on);
+                // On is kept for the album (karaoke plays only so); off
+                // only against the setting.
+                let versions = self.album_rules().versions_choice(on);
                 if self.log_err("альбом", self.lib.set_release_versions(id, versions)).is_some() {
                     self.album_changed(id);
                 }
             }
-            Command::TrackInLibrary { track, on } => self.track_in_library(track, on),
+            Command::TrackInLibrary { track, on } => self.track_in_library(track, Some(on), None),
+            Command::TrackLibraryRestore { track, put, choice } => {
+                self.track_in_library(track, None, Some(nikgob_library::TrackLibraryWas { put, choice }));
+            }
             Command::AlbumTrackMine { release, track, mine } => self.album_track_mine(release, track, mine),
             Command::AlbumTrackChoice { release, track, choice } => {
                 let before = self.library_tracks();
@@ -3361,17 +3365,27 @@ impl Worker {
     /// «В библиотеку» / «Убрать из библиотеки» of a song
     /// ([`Command::TrackInLibrary`]), with «Отменить». Nothing downloads:
     /// it is no like.
-    fn track_in_library(&mut self, track: TrackId, on: bool) {
+    /// `on`: «В библиотеку» / «Убрать из библиотеки», with «Отменить» that
+    /// puts back exactly what was there (the mark and the song's choice on
+    /// its album); `restore`: that «Отменить».
+    fn track_in_library(&mut self, track: TrackId, on: Option<bool>, restore: Option<nikgob_library::TrackLibraryWas>) {
         let before = self.library_tracks();
-        let Some(now) = self.log_err("библиотека", self.lib.set_track_in_library(track, on)) else { return };
-        let text = match (on, now) {
-            (true, _) => "Трек в библиотеке",
-            (false, false) => "Трек убран из библиотеки",
-            // A like or a playlist keeps it.
-            (false, true) => "Трек остаётся в библиотеке: он в «Любимых» или в плейлисте",
-        };
-        let undo = (on || !now).then(|| ("Отменить".into(), Command::TrackInLibrary { track, on: !on }));
-        self.toast(text, undo);
+        if let Some(on) = on {
+            let Some((now, was)) = self.log_err("библиотека", self.lib.set_track_in_library(track, on)) else { return };
+            let text = match (on, now) {
+                (true, _) => "Трек в библиотеке",
+                (false, false) => "Трек убран из библиотеки",
+                // A like or a playlist keeps it.
+                (false, true) => "Трек остаётся в библиотеке: он в «Любимых» или в плейлисте",
+            };
+            let undo = (on || !now)
+                .then(|| ("Отменить".into(), Command::TrackLibraryRestore { track, put: was.put, choice: was.choice }));
+            self.toast(text, undo);
+        } else if let Some(was) = restore
+            && self.log_err("библиотека", self.lib.restore_track_in_library(track, was)).is_none()
+        {
+            return;
+        }
         let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
         self.library_edited(before, release.into_iter().collect());
         if let Some(r) = release {

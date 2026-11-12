@@ -3249,6 +3249,10 @@ pub enum Command {
     /// no like, nothing downloads; «Убрать из библиотеки» of one without a
     /// file. With «Отменить».
     TrackInLibrary { track: TrackId, on: bool },
+    /// «Отменить» of [`Command::TrackInLibrary`]: the song put into the
+    /// library by hand (`put`) and its choice on its album (`choice`:
+    /// `Some(true)` added, `Some(false)` left out) as they were.
+    TrackLibraryRestore { track: TrackId, put: bool, choice: Option<bool> },
     /// A song of an album into the user's songs of it (`mine`: a library
     /// track from then on) or out of them (its file, like and playlists
     /// stay), with «Отменить».

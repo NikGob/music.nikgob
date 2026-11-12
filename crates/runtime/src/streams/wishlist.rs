@@ -939,10 +939,10 @@ impl Worker {
     /// stay where they are); of any other album its missing files
     /// ([`Self::download_whole_release`]).
     pub(crate) fn download_release(&mut self, release: ReleaseId) {
-        if let Some(l) = self.lib.release_listing(release).ok().flatten()
-            && l.progress.partial()
-        {
-            let missing: Vec<TrackId> = l.tracks().filter(|t| !t.has_local && l.wanted.contains(&t.id)).map(|t| t.id).collect();
+        let listing = self.lib.release_listing(release).ok().flatten();
+        let rules = self.album_rules();
+        if let Some((l, plan)) = listing.as_ref().map(|l| (l, l.plan(rules))).filter(|(_, plan)| plan.split) {
+            let missing: Vec<TrackId> = l.tracks().filter(|t| !t.has_local && plan.mine.contains(&t.id)).map(|t| t.id).collect();
             self.download_tracks(&missing);
             return;
         }

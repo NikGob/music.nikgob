@@ -946,7 +946,7 @@ fn a_stream_song_goes_into_the_library_without_a_like() {
         s.library.track_count == 1 && s.toasts.iter().any(|x| x.text == "Трек в библиотеке")
     });
     let undo = rt.state().toasts.iter().find(|x| x.text == "Трек в библиотеке").and_then(|x| x.action.clone()).map(|a| a.1);
-    assert_eq!(undo, Some(Command::TrackInLibrary { track: t.id, on: false }));
+    assert_eq!(undo, Some(Command::TrackLibraryRestore { track: t.id, put: false, choice: None }));
     assert!(rt.state().downloads.wishlist.items.is_empty(), "nothing downloads");
     rt.send(Command::TrackInLibrary { track: t.id, on: false });
     wait_for(&rt, "the song out of the library", |s| s.library.track_count == 0);

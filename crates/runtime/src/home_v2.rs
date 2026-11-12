@@ -230,20 +230,16 @@ pub struct Visit {
     /// Songs of «Слушать снова» asked for past [`LISTEN_AGAIN`] (its row
     /// scrolled to the end): the epoch's draw goes on.
     pub again_more: usize,
-    /// An album only some songs of which are the user's shows among the
-    /// albums too («Всегда весь альбом», [`v::Prefs::album_mode`]); else
-    /// only albums added to the library (or all of whose songs are the
-    /// user's) do, and the songs of the others.
-    pub partial_albums: bool,
 }
 
 impl Visit {
-    /// The album shows among Главная's albums: the user's as an album
-    /// (all of it, or added whole), or any album with
-    /// [`Self::partial_albums`]. A song or a few of an OST, a single put
+    /// The album shows among Главная's albums only when it is the user's
+    /// as an album, in every mode of «Альбом показывает»: added to the
+    /// library or saved by hand, or all of its known tracklist theirs
+    /// ([`ReleaseRow::is_added`]). A song or a few of an OST, a single put
     /// out with its instrumental, are the user's songs, not their album.
     pub fn album_shows(&self, r: &ReleaseRow) -> bool {
-        self.partial_albums || !r.progress().partial()
+        r.is_added()
     }
 }
 
@@ -259,7 +255,6 @@ impl Visit {
             profiles: None,
             epoch: Epoch::default(),
             again_more: 0,
-            partial_albums: prefs.album_mode == v::AlbumMode::Whole,
         }
     }
 
@@ -1756,6 +1751,7 @@ mod tests {
             for b in 0..albums {
                 let mut r = Release::new(format!("Album {a}.{b}"), credit.clone());
                 r.year = Some(2000 + b as i32);
+                r.total_tracks = Some(tracks as _);
                 let r = lib.upsert_release(&r).unwrap();
                 let mut album = Vec::new();
                 for n in 0..tracks {

@@ -573,8 +573,13 @@ impl Resolver {
         let total_duration = tracks.iter().filter_map(|t| t.duration).sum();
         let quality = summarize_quality(&tracks);
         let partial = plan.split;
+        // The card counts as the page does: the user's songs as the
+        // setting says ([`ReleaseListing::plan`]), not the album's row.
+        let mut card = self.release_card_of(r, &p, liked);
+        card.mine = partial.then_some(plan.mine.len() as u32);
+        card.mine_local = listing.tracks().filter(|t| t.has_local && plan.mine.contains(&t.id)).count() as u32;
         v::ReleaseDetail {
-            card: self.release_card_of(r, &p, liked),
+            card,
             tracks,
             total_duration,
             quality,
