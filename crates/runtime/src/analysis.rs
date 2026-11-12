@@ -95,6 +95,7 @@ pub(crate) struct Want<'m> {
     pub(crate) model: Option<&'m dyn SoundModel>,
 }
 
+#[cfg(test)]
 impl Want<'_> {
     /// bliss alone.
     pub(crate) const BLISS: Want<'static> = Want { bliss: true, model: None };

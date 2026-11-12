@@ -519,7 +519,7 @@ impl SettingId {
         match self {
             // Музыка.
             OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | Autoplay | ListShuffle(_) | DislikeButton
-            | DislikeSkips | Marks
+            | DislikeSkips | Marks | SoundNeural
             // Тексты: the animation and its step, the size and the lead, each
             // effect's switch, what lights up by itself.
             | LyricsStyle | LyricsUnit | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsGap
