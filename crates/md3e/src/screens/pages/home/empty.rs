@@ -47,7 +47,7 @@ pub(super) fn show(ui: &mut Ui, grid: Grid, state: &ViewState, pages: &mut PageS
     let w = ((grid.width - GAP * (per - 1) as f32) / per as f32).min(TILE_W);
     let title_h = if line { TypeRole::HeadlineSmall.style().line_height + 16.0 } else { 0.0 };
     let h = title_h + rows as f32 * (TILE_H + GAP) - GAP;
-    ui.add_space(if line { 16.0 } else { 24.0 });
+    ui.add_space(24.0);
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let area = Rect::from_min_size(pos2(grid.left, rect.top()), vec2(grid.width, h));
     if line {
