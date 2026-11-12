@@ -1,7 +1,7 @@
-//! Главная without music (a new install, the first run skipped): one line
-//! and the ways in as tiles — the services by their own marks (a signed-in
-//! one checked; a click opens its account in Настройки → «Сервисы»), a
-//! folder to add, the search that finds and downloads.
+//! Главная without music (a new install, the first run skipped) or with
+//! nothing to show of it: the ways in as tiles — the services by their own
+//! marks (a signed-in one checked; a click opens its account in Настройки →
+//! «Сервисы»), a folder to add, the search that finds and downloads.
 
 use egui::{Id, Rect, Sense, Ui, pos2, vec2};
 use nikgob_view::{Account, Command, Service, ViewState};
@@ -36,9 +36,10 @@ const WAYS: [(Way, &str); 5] = [
 ];
 
 /// The tiles in rows from the page's left edge, as its sections stand (all
-/// five in one where they fit, else 3 + 2); `line`: the line over them, as
-/// a section's title (not under the header of «Только скачанное», where
-/// the chip says why the page is empty).
+/// five in one where they fit, else 3 + 2); `line`: «Музыки пока нет» over
+/// them, as a section's title, only where the library has nothing at all
+/// (under the header — nothing downloaded under «Только скачанное», too
+/// little music for the rows — they stand without it).
 pub(super) fn show(ui: &mut Ui, grid: Grid, state: &ViewState, pages: &mut PageState, line: bool, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let per = ((grid.width + GAP) / (TILE_MIN_W + GAP)).floor().clamp(1.0, 5.0) as usize;

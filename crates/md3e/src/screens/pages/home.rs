@@ -305,17 +305,6 @@ pub fn sections(h: &HomeView, liked: bool, local_only: bool) -> Vec<Section> {
     out
 }
 
-/// Nothing to show at all: no music in the library and nothing heard.
-pub fn is_empty(h: &HomeView) -> bool {
-    h.shortcuts.is_empty()
-        && h.lanes.is_empty()
-        && h.from_library.is_empty()
-        && h.listen_again.is_empty()
-        && h.recently_added.is_empty()
-        && h.continue_listening.is_empty()
-        && h.tiles.is_empty()
-}
-
 /// The section's entrance, once per run: `n` from the top, 30 ms after the
 /// one above (up to four), rising 24 on the default spatial spring and
 /// fading in; reduced motion: a fade only.
@@ -366,9 +355,10 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
         return None;
     }
     ui.add_space(8.0);
-    // With «Только скачанное» on and nothing downloaded the page keeps its
-    // header, so the chip that emptied it can be turned off again.
-    if is_empty(h) && !local_only {
+    // No music at all, as the library counts it: the ways in under one
+    // line. With «Только скачанное» on the page keeps its header, so the
+    // chip that emptied it can be turned off again.
+    if h.library_empty && !local_only {
         if asks_name(&state.prefs) {
             name_prompt(ui, grid, pages, out);
         }
@@ -396,9 +386,10 @@ pub fn show_on(ui: &mut Ui, state: &ViewState, pages: &mut PageState, stage: &St
     }
 
     let available = sections(h, liked_playlist(state).is_some(), local_only);
-    // «Только скачанное» with nothing downloaded: the ways in under the
-    // header (its chip stays to turn it off).
-    if available.is_empty() && is_empty(h) && stage.live {
+    // Nothing to show of what there is (nothing downloaded under «Только
+    // скачанное», too little music for the rows yet): the ways in under
+    // the header, without the line (its chip stays to turn it off).
+    if available.is_empty() && stage.live {
         empty::show(ui, grid, state, pages, false, out);
         return nav;
     }

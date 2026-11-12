@@ -977,6 +977,11 @@ pub struct HomeView {
     pub greeting_hour: u8,
     /// Something was ever played, liked or put in a playlist.
     pub history: bool,
+    /// No song in the library and none ever played, as the library itself
+    /// counts them (not what the rows below left out): Главная is the ways
+    /// in, under «Музыки пока нет».
+    #[serde(default)]
+    pub library_empty: bool,
     /// The shortcuts at the top (six, eight on a wide window), or the
     /// recently added albums without a history.
     pub shortcuts: Vec<Shortcut>,

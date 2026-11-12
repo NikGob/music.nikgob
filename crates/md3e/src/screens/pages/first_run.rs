@@ -963,6 +963,7 @@ mod tests {
             let mut ui = crate::screens::Md3eUi::new();
             let mut state = ViewState::default();
             state.prefs.first_run = true;
+            state.home.library_empty = true;
             let mut page = String::new();
             for i in 0..30 {
                 page = frame(&ctx, &mut ui, &mut state, f64::from(i) * 0.1, width, None);
