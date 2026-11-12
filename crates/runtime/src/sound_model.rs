@@ -1,7 +1,7 @@
 //! The neural sound model of the recommendations (docs/recommendations.md
 //! §5): Discogs-EffNet on ONNX Runtime, the same runtime the lyrics
-//! alignment loads (DirectML on the GPU with the CPU as fallback, or the
-//! CPU alone on one quiet thread).
+//! alignment loads, on the CPU on one quiet thread whatever the device
+//! setting says ([`AUTO_DEVICE`]).
 //!
 //! * **On demand.** The runtime and the model (`models/discogs-effnet`,
 //!   18 MB) are downloaded only once the user picks a mode of «Нейросетевой
@@ -25,6 +25,26 @@ use nikgob_align::engine::{self, Device, Model};
 use nikgob_recs::embedding::{EFFNET_DIM, EMBED_RATE, MEL_BANDS, Mel, PATCH};
 use nikgob_recs::{AnalysisError, EMBEDDED_WITH, SoundModel};
 use parking_lot::Mutex;
+
+/// Where «Автоматически» runs the model: the CPU. Measured on one 15 s
+/// window (`tests::window_bench`, one thread, a debug build): the CPU takes
+/// 70 ms a window and its session ~37 MB private; DirectML 33 ms, but 3 s to
+/// load and ~300 MB private, ~150 MB of which stay after the session goes
+/// (the DirectML device). Background analysis has no use for the GPU's
+/// speed, and the budget has no room for its memory.
+const AUTO_DEVICE: Device = Device::Cpu;
+
+/// The bench's GPU session (`NIKGOB_BENCH_DEVICE=gpu`), measured against.
+#[cfg(test)]
+static BENCH_GPU: AtomicBool = AtomicBool::new(false);
+
+fn auto_device() -> Device {
+    #[cfg(test)]
+    if BENCH_GPU.load(Ordering::Relaxed) {
+        return Device::Gpu;
+    }
+    AUTO_DEVICE
+}
 
 /// The session goes this long after its last use.
 pub(crate) const KEEP_LOADED: Duration = Duration::from_secs(20);
@@ -209,7 +229,7 @@ impl Effnet {
                 return Err(AnalysisError::Model("the model is not downloaded".into()));
             }
             let loaded = engine::load_runtime(&self.catalog.path(ModelId::Runtime)).and_then(|()| {
-                let device = if cpu_only { Device::Cpu } else { Device::Gpu };
+                let device = if cpu_only { Device::Cpu } else { auto_device() };
                 let file = self.catalog.file(ModelId::SoundEffnet, ModelId::SoundEffnet.model_file());
                 Model::load(&file, device, 1)
             });
@@ -314,6 +334,85 @@ mod tests {
         assert!(matches!(m.embed(&[]), Err(AnalysisError::TooShort)));
         assert_eq!(m.loaded(), Some(false));
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none(), "nothing written");
+    }
+
+    /// The process's private bytes (Windows) or mimalloc's estimate of its
+    /// commit (elsewhere), in MB.
+    #[allow(unsafe_code)]
+    fn private_mb() -> f64 {
+        let (mut rss, mut commit) = (0usize, 0usize);
+        // SAFETY: mimalloc writes the counters it is given and ignores the
+        // null ones.
+        unsafe {
+            libmimalloc_sys::mi_process_info(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut rss,
+                std::ptr::null_mut(),
+                &raw mut commit,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+        commit as f64 / 1_048_576.0
+    }
+
+    /// The model on one window of 15 s, as the analysis runs it: the load
+    /// with the first window, then the time of a window and what the
+    /// session holds. `NIKGOB_MODELS` = a models folder with the runtime
+    /// and the model (never downloaded here), `NIKGOB_BENCH_DEVICE` = `gpu`
+    /// for a DirectML session (the CPU's, as «Автоматически» makes, by
+    /// default):
+    ///
+    /// `NIKGOB_MODELS=… cargo test -p nikgob-runtime --lib sound_model::tests::window_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a bench: needs the model's files"]
+    fn window_bench() {
+        let Some(dir) = std::env::var_os("NIKGOB_MODELS") else {
+            eprintln!("NIKGOB_MODELS is not set: nothing to measure");
+            return;
+        };
+        let m = Effnet::new(PathBuf::from(dir));
+        if !m.ready() {
+            eprintln!("the model is not in that folder: nothing to measure");
+            return;
+        }
+        let gpu = std::env::var("NIKGOB_BENCH_DEVICE").is_ok_and(|d| d == "gpu");
+        BENCH_GPU.store(gpu, Ordering::Relaxed);
+        // Something like music: a few partials and a beat, with noise.
+        let rate = EMBED_RATE as f32;
+        let mut seed = 0x2545_f491_u32;
+        let mono: Vec<f32> = (0..EMBED_RATE as usize * 15)
+            .map(|i| {
+                let t = i as f32 / rate;
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let noise = (seed as f32 / u32::MAX as f32 - 0.5) * 0.05;
+                let beat = if (t * 2.0).fract() < 0.05 { 0.4 } else { 0.0 };
+                0.2 * (std::f32::consts::TAU * 220.0 * t).sin() + 0.1 * (std::f32::consts::TAU * 330.0 * t).sin() + beat + noise
+            })
+            .collect();
+        let before = private_mb();
+        let t = Instant::now();
+        let first = m.embed(&mono).expect("a vector");
+        let load = t.elapsed();
+        let loaded = private_mb();
+        assert_eq!(first.len(), EFFNET_DIM);
+        let runs = 5;
+        let t = Instant::now();
+        for _ in 0..runs {
+            m.embed(&mono).expect("a vector");
+        }
+        let window = t.elapsed() / runs;
+        let device = m.session.loaded.lock().as_ref().map(|l| l.model.device);
+        let running = private_mb();
+        m.unload();
+        let after = private_mb();
+        eprintln!(
+            "sound model on {device:?}: load + first window {load:?}, a window {window:?}; private {before:.0} MB → {loaded:.0} loaded → {running:.0} after {runs} windows → {after:.0} unloaded"
+        );
     }
 
     /// While a window is being computed (the session held), the worker's
