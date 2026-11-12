@@ -1074,6 +1074,20 @@ mod prefs_tests {
         assert_eq!(prefs_of(None).lyrics_unit, LYRICS_BY_SYLLABLES);
     }
 
+    /// «Только на процессоре» became «Процессор» of «На чём считать анализ
+    /// звука»: on, it reads as the CPU; off or never written, «Автоматически»;
+    /// a device written since stays.
+    #[test]
+    fn the_cpu_only_switch_becomes_the_device() {
+        use nikgob_view::SoundDevice;
+        assert_eq!(parse_prefs(br#"{"sound_cpu_only":true}"#).unwrap().sound_device, SoundDevice::Cpu);
+        assert_eq!(parse_prefs(br#"{"sound_cpu_only":false}"#).unwrap().sound_device, SoundDevice::Auto);
+        assert_eq!(parse_prefs(br#"{}"#).unwrap().sound_device, SoundDevice::Auto);
+        assert_eq!(parse_prefs(br#"{"sound_cpu_only":true,"sound_device":"Gpu"}"#).unwrap().sound_device, SoundDevice::Gpu);
+        let p = Prefs { sound_device: SoundDevice::Gpu, ..Prefs::default() };
+        assert_eq!(parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap().sound_device, SoundDevice::Gpu);
+    }
+
     /// Revision 5: the player's lyrics button is hidden by default; prefs
     /// from before it hide it once, a button shown since stays.
     #[test]
