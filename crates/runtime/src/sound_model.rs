@@ -44,30 +44,164 @@ const CPU_CALM: f32 = 0.50;
 const VRAM_ROOM: u64 = 1 << 30;
 /// …and one on it goes back to the CPU below this much (a game took it).
 const VRAM_LOW: u64 = 512 << 20;
+/// The card's busiest engine this busy with other programs' work (0..1;
+/// a windowed game) keeps «Автоматически» off it…
+const GPU_FREE: f32 = 0.25;
+/// …and one on it goes back to the CPU at this much.
+const GPU_BUSY: f32 = 0.50;
 /// «Автоматически» looks again this often while a session is loaded.
 const RECHOOSE: Duration = Duration::from_secs(60);
 
 /// What «Автоматически» looks at: how busy the whole CPU is (0..1), the
-/// card's free memory, and whether there is a card DirectML runs on.
+/// card's free memory, how busy the card is with other programs (its
+/// busiest engine, 0..1), and whether there is a card DirectML runs on.
 /// `None`: not known (Linux knows no card: the CPU then).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Probe {
     pub cpu: Option<f32>,
     pub vram_free: Option<u64>,
+    pub gpu_load: Option<f32>,
     pub gpu: bool,
 }
 
 /// Where «Автоматически» runs the next windows, from the `probe` and the
 /// device of the session loaded now (`now`): the CPU while it is free; the
-/// GPU while the CPU is busy and the card has room; the CPU again once the
-/// card is busy (a game, its memory nearly full) or the CPU calm. Anything
-/// unknown keeps to the CPU.
+/// GPU while the CPU is busy and the card is idle with room; the CPU again
+/// once the card is busy (a game drawing, its memory nearly full) or the
+/// CPU calm. Anything unknown keeps to the CPU.
 pub(crate) fn choose(probe: Probe, now: Option<Device>) -> Device {
-    let (Some(cpu), Some(free), true) = (probe.cpu, probe.vram_free, probe.gpu) else { return Device::Cpu };
+    let (Some(cpu), Some(free), Some(load), true) = (probe.cpu, probe.vram_free, probe.gpu_load, probe.gpu) else {
+        return Device::Cpu;
+    };
     let on_gpu = now == Some(Device::Gpu);
     let busy = if on_gpu { cpu >= CPU_CALM } else { cpu >= CPU_BUSY };
     let room = if on_gpu { free >= VRAM_LOW } else { free >= VRAM_ROOM };
-    if busy && room { Device::Gpu } else { Device::Cpu }
+    let idle = if on_gpu { load < GPU_BUSY } else { load < GPU_FREE };
+    if busy && room && idle { Device::Gpu } else { Device::Cpu }
+}
+
+/// The card's load by other programs from the «GPU Engine» counters'
+/// `(instance, utilization %)`: each engine's (`luid_…_phys_…_eng_…`) sum
+/// over the processes but `own` (this one's work on it), the busiest one
+/// as a share.
+fn engine_load<'a>(items: impl IntoIterator<Item = (&'a str, f64)>, own: u32) -> f32 {
+    let own = format!("pid_{own}_");
+    let mut engines: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for (name, value) in items {
+        if name.starts_with(&own) {
+            continue;
+        }
+        let engine = name.find("luid_").map_or(name, |i| &name[i..]);
+        *engines.entry(engine).or_default() += value;
+    }
+    let top = engines.values().copied().fold(0.0, f64::max);
+    (top / 100.0).clamp(0.0, 1.0) as f32
+}
+
+/// The «GPU Engine» utilization counters, open between looks (a rate
+/// needs two readings).
+#[cfg(windows)]
+struct GpuCounter {
+    query: windows_sys::Win32::System::Performance::PDH_HQUERY,
+    counter: windows_sys::Win32::System::Performance::PDH_HCOUNTER,
+}
+
+// SAFETY: PDH handles may be used from any thread; the counter is used
+// under its lock only.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+unsafe impl Send for GpuCounter {}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+impl GpuCounter {
+    /// Opens the counters and takes their first reading.
+    fn open() -> Option<Self> {
+        use windows_sys::Win32::System::Performance::{PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhOpenQueryW};
+        let path: Vec<u16> = "\\GPU Engine(*)\\Utilization Percentage".encode_utf16().chain(Some(0)).collect();
+        let mut query = std::ptr::null_mut();
+        // SAFETY: out-pointers to our locals; the path is NUL-terminated.
+        unsafe {
+            if PdhOpenQueryW(std::ptr::null(), 0, &mut query) != 0 {
+                return None;
+            }
+            let mut counter = std::ptr::null_mut();
+            if PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) != 0 || PdhCollectQueryData(query) != 0 {
+                PdhCloseQuery(query);
+                return None;
+            }
+            Some(Self { query, counter })
+        }
+    }
+
+    /// The load since the last reading ([`engine_load`]).
+    fn read(&self) -> Option<f32> {
+        use windows_sys::Win32::System::Performance::{
+            PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_MORE_DATA,
+            PdhCollectQueryData, PdhGetFormattedCounterArrayW,
+        };
+        // SAFETY: the handles are open; the buffer is as large and as
+        // aligned as PDH asked, and its names live as long as it.
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return None;
+            }
+            let (mut size, mut count) = (0u32, 0u32);
+            let r = PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut size, &mut count, std::ptr::null_mut());
+            if r != PDH_MORE_DATA {
+                return None;
+            }
+            let mut buf = vec![0u64; (size as usize).div_ceil(8)];
+            let items = buf.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+            if PdhGetFormattedCounterArrayW(self.counter, PDH_FMT_DOUBLE, &mut size, &mut count, items) != 0 || count == 0 {
+                return None;
+            }
+            let items = std::slice::from_raw_parts(items, count as usize);
+            let names: Vec<(String, f64)> = items
+                .iter()
+                .filter(|i| matches!(i.FmtValue.CStatus, PDH_CSTATUS_VALID_DATA | PDH_CSTATUS_NEW_DATA) && !i.szName.is_null())
+                .map(|i| {
+                    let len = (0..).take_while(|k| *i.szName.add(*k) != 0).count();
+                    (String::from_utf16_lossy(std::slice::from_raw_parts(i.szName, len)), i.FmtValue.Anonymous.doubleValue)
+                })
+                .collect();
+            Some(engine_load(names.iter().map(|(n, v)| (n.as_str(), *v)), std::process::id()))
+        }
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+impl Drop for GpuCounter {
+    fn drop(&mut self) {
+        // SAFETY: opened by `open` and closed once.
+        unsafe {
+            windows_sys::Win32::System::Performance::PdhCloseQuery(self.query);
+        }
+    }
+}
+
+/// Elsewhere the card's load is not known.
+#[cfg(not(windows))]
+struct GpuCounter;
+
+#[cfg(not(windows))]
+impl GpuCounter {
+    fn open() -> Option<Self> {
+        None
+    }
+
+    fn read(&self) -> Option<f32> {
+        None
+    }
+}
+
+/// What the last look of «Автоматически» left: the CPU's times and the
+/// card's counters.
+#[derive(Default)]
+struct Seen {
+    cpu: Option<(u64, u64)>,
+    gpu: Option<GpuCounter>,
 }
 
 /// The system's CPU time so far: (idle, all), in the system's units.
@@ -107,24 +241,29 @@ fn load_between(a: (u64, u64), b: (u64, u64)) -> Option<f32> {
     Some(1.0 - idle as f32 / all as f32)
 }
 
-/// What «Автоматически» sees now: the CPU's load since the last look (a
-/// first look waits a quarter of a second for a second reading; the
-/// analysis thread may), the card's free memory.
-fn probe(last: &Mutex<Option<(u64, u64)>>) -> Probe {
-    let mut last = last.lock();
-    let before = match *last {
-        Some(t) => Some(t),
-        None => {
-            let t = cpu_times();
-            std::thread::sleep(Duration::from_millis(250));
-            t
-        }
-    };
+/// What «Автоматически» sees now: the CPU's and the card's load since the
+/// last look (a first look waits a quarter of a second for a second
+/// reading; the analysis thread may), the card's free memory.
+fn probe(seen: &Mutex<Seen>) -> Probe {
+    let mut seen = seen.lock();
+    let mut wait = false;
+    if seen.cpu.is_none() {
+        seen.cpu = cpu_times();
+        wait = true;
+    }
+    if seen.gpu.is_none() {
+        seen.gpu = GpuCounter::open();
+        wait |= seen.gpu.is_some();
+    }
+    if wait {
+        std::thread::sleep(Duration::from_millis(250));
+    }
     let now = cpu_times();
-    *last = now;
-    let cpu = before.zip(now).and_then(|(a, b)| load_between(a, b));
+    let cpu = seen.cpu.zip(now).and_then(|(a, b)| load_between(a, b));
+    seen.cpu = now;
+    let gpu_load = seen.gpu.as_ref().and_then(GpuCounter::read);
     let vram_free = engine::card_free();
-    Probe { cpu, vram_free, gpu: cfg!(windows) && vram_free.is_some() }
+    Probe { cpu, vram_free, gpu_load, gpu: cfg!(windows) && vram_free.is_some() }
 }
 
 /// [`SoundDevice`] as a number (its place in [`SoundDevice::ALL`]).
@@ -213,8 +352,8 @@ pub(crate) struct Effnet {
     mel: Mel,
     /// «На чём считать анализ звука» ([`SoundDevice`] as a number).
     device: AtomicU8,
-    /// The CPU's times at the last look of «Автоматически».
-    cpu_seen: Mutex<Option<(u64, u64)>>,
+    /// What the last look of «Автоматически» left.
+    seen: Mutex<Seen>,
     session: Arc<Session>,
     /// The last failure, and when.
     failed: Mutex<Option<(Instant, String)>>,
@@ -228,7 +367,7 @@ impl Effnet {
             catalog: Catalog::new(models),
             mel: Mel::new(),
             device: AtomicU8::new(0),
-            cpu_seen: Mutex::new(None),
+            seen: Mutex::new(Seen::default()),
             session: Arc::new(Session::default()),
             failed: Mutex::new(None),
             downloading: Mutex::new(None),
@@ -286,10 +425,10 @@ impl Effnet {
             SoundDevice::Auto => match now {
                 Some((d, at)) if at.elapsed() < RECHOOSE => d,
                 _ => {
-                    let p = probe(&self.cpu_seen);
+                    let p = probe(&self.seen);
                     let d = choose(p, now.map(|(d, _)| d));
                     if now.is_none_or(|(was, _)| was != d) {
-                        log::info!("sound model: «Автоматически» picks the {d:?} (CPU {:?}, card free {:?} MB)", p.cpu.map(|c| (c * 100.0).round()), p.vram_free.map(|b| b >> 20));
+                        log::info!("sound model: «Автоматически» picks the {d:?} (CPU {:?}, card {:?}, card free {:?} MB)", p.cpu.map(|c| (c * 100.0).round()), p.gpu_load.map(|c| (c * 100.0).round()), p.vram_free.map(|b| b >> 20));
                     }
                     d
                 }
@@ -575,7 +714,8 @@ mod tests {
     #[test]
     fn automatic_takes_the_cpu_unless_it_is_busy_and_the_card_free() {
         const GB: u64 = 1 << 30;
-        let p = |cpu: f32, free: u64| Probe { cpu: Some(cpu), vram_free: Some(free), gpu: true };
+        let p = |cpu: f32, free: u64| Probe { cpu: Some(cpu), vram_free: Some(free), gpu_load: Some(0.05), gpu: true };
+        let drawing = |cpu: f32, load: f32| Probe { gpu_load: Some(load), ..p(cpu, 6 * GB) };
         // Both free: the CPU (less memory).
         assert_eq!(choose(p(0.2, 6 * GB), None), Device::Cpu);
         // A busy CPU and a card with room: the GPU.
@@ -591,11 +731,43 @@ mod tests {
         assert_eq!(choose(p(0.9, 3 * GB / 4), Some(Device::Cpu)), Device::Cpu);
         // The CPU calm again: back to it.
         assert_eq!(choose(p(0.3, 6 * GB), Some(Device::Gpu)), Device::Cpu);
+        // A windowed game draws on the card (its memory free): the CPU,
+        // and back to it from the card.
+        assert_eq!(choose(drawing(0.9, 0.8), None), Device::Cpu);
+        assert_eq!(choose(drawing(0.9, 0.8), Some(Device::Gpu)), Device::Cpu);
+        assert_eq!(choose(drawing(0.9, 0.35), Some(Device::Cpu)), Device::Cpu);
+        assert_eq!(choose(drawing(0.9, 0.35), Some(Device::Gpu)), Device::Gpu);
+        assert_eq!(choose(drawing(0.9, 0.1), None), Device::Gpu);
         // Not known: the CPU.
-        assert_eq!(choose(Probe { cpu: Some(0.95), vram_free: None, gpu: false }, None), Device::Cpu);
-        assert_eq!(choose(Probe { cpu: Some(0.95), vram_free: Some(6 * GB), gpu: false }, None), Device::Cpu);
-        assert_eq!(choose(Probe { cpu: None, vram_free: Some(6 * GB), gpu: true }, None), Device::Cpu);
+        assert_eq!(choose(Probe { gpu_load: None, ..p(0.95, 6 * GB) }, None), Device::Cpu);
+        assert_eq!(choose(Probe { gpu_load: None, ..p(0.95, 6 * GB) }, Some(Device::Gpu)), Device::Cpu);
+        assert_eq!(choose(Probe { vram_free: None, gpu: false, ..p(0.95, 6 * GB) }, None), Device::Cpu);
+        assert_eq!(choose(Probe { gpu: false, ..p(0.95, 6 * GB) }, None), Device::Cpu);
+        assert_eq!(choose(Probe { cpu: None, ..p(0.95, 6 * GB) }, None), Device::Cpu);
         assert_eq!(choose(Probe::default(), Some(Device::Gpu)), Device::Cpu);
+    }
+
+    /// The card's load is its busiest engine's, summed over the other
+    /// processes (this one's own work left out).
+    #[test]
+    fn the_card_load_is_its_busiest_engine_by_others() {
+        let me = std::process::id();
+        let own = format!("pid_{me}_luid_0x0_0x1_phys_0_eng_0_engtype_3D");
+        let items = [
+            ("pid_10_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 30.0),
+            ("pid_11_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 25.0),
+            ("pid_10_luid_0x0_0x1_phys_0_eng_3_engtype_VideoDecode", 20.0),
+            (own.as_str(), 40.0),
+        ];
+        assert!((engine_load(items, me) - 0.55).abs() < 1e-6);
+        assert_eq!(engine_load([(own.as_str(), 90.0)], me), 0.0);
+        assert_eq!(engine_load([("pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 250.0)], me), 1.0);
+        assert_eq!(engine_load([], me), 0.0);
+        // The counters read on this system (none known elsewhere).
+        if let Some(g) = GpuCounter::open() {
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(g.read().is_none_or(|l| (0.0..=1.0).contains(&l)));
+        }
     }
 
     /// The CPU's load between two readings, and `/proc/stat`'s line read.
