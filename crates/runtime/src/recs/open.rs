@@ -34,10 +34,10 @@ pub(crate) fn open_pool(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap
     for c in cands {
         let key = stream_song_key(&c.track);
         match at.get(&key) {
-            Some(&k) => merge(&mut out[k], c.near, c.vector, c.lane, c.weight),
+            Some(&k) => merge(&mut out[k], c.near, c.vector, c.embedding, c.lane, c.weight),
             None => {
                 at.insert(key.clone(), out.len());
-                out.push(OpenCandidate { key, track: c.track, vector: c.vector, lane: c.lane, near: c.near, weight: c.weight });
+                out.push(OpenCandidate { key, track: c.track, vector: c.vector, embedding: c.embedding, lane: c.lane, near: c.near, weight: c.weight });
             }
         }
     }
@@ -45,7 +45,14 @@ pub(crate) fn open_pool(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap
 }
 
 /// Another copy of the song `c` joins it.
-fn merge(c: &mut OpenCandidate, near: Vec<usize>, vector: Option<nikgob_recs::Vector>, lane: Option<nikgob_recs::profiles::LaneKey>, weight: f32) {
+fn merge(
+    c: &mut OpenCandidate,
+    near: Vec<usize>,
+    vector: Option<nikgob_recs::Vector>,
+    embedding: Option<nikgob_recs::Compact>,
+    lane: Option<nikgob_recs::profiles::LaneKey>,
+    weight: f32,
+) {
     for i in near {
         if !c.near.contains(&i) {
             c.near.push(i);
@@ -53,6 +60,9 @@ fn merge(c: &mut OpenCandidate, near: Vec<usize>, vector: Option<nikgob_recs::Ve
     }
     if c.vector.is_none() {
         c.vector = vector;
+    }
+    if c.embedding.is_none() {
+        c.embedding = embedding;
     }
     if c.lane.is_none() {
         c.lane = lane;
@@ -83,7 +93,7 @@ impl Worker {
         let artist_tracks = |t: &StreamTrack| super::lanes::artist_tracks(&snap, t);
         // The families of genres of the library's artists (the snapshot's).
         let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
-        let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
+        let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index) };
         let next = nikgob_recs::open_world::next(&ctx, &pool, filter, &self.recs.session, n, served);
         let streams = pool.into_iter().map(|c| (c.track.id.clone(), c.track)).collect();
         Some((next, streams))
@@ -100,8 +110,8 @@ mod tests {
     #[test]
     fn a_song_of_two_sources_keeps_both_links() {
         let track = StreamTrack::new(RemoteId::new(Service::Youtube, "1"), "Calm");
-        let mut c = OpenCandidate { key: stream_song_key(&track), track, vector: None, lane: None, near: vec![1], weight: 0.4 };
-        merge(&mut c, vec![1, 2], None, None, 0.7);
+        let mut c = OpenCandidate { key: stream_song_key(&track), track, vector: None, embedding: None, lane: None, near: vec![1], weight: 0.4 };
+        merge(&mut c, vec![1, 2], None, None, None, 0.7);
         assert_eq!(c.near, vec![1, 2]);
         assert_eq!(c.weight, 0.7);
     }

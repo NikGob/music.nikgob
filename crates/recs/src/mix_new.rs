@@ -43,6 +43,7 @@ use nikgob_core::model::TrackId;
 use nikgob_core::streaming::StreamTrack;
 
 use crate::analysis::Vector;
+use crate::embedding::Compact;
 use crate::index::VectorIndex;
 use crate::mixes::{Mix, MixKey};
 use crate::model::UserModel;
@@ -89,6 +90,8 @@ pub struct NewCandidate {
     pub weight: f32,
     /// Its analysed preview (raw), if any.
     pub vector: Option<Vector>,
+    /// The neural sound model's vector of its preview, if the model heard it.
+    pub embedding: Option<Compact>,
     /// The library's songs of its main artist (catalog positions; empty
     /// for a new artist).
     pub artist_tracks: Vec<usize>,
@@ -173,10 +176,11 @@ pub fn kinds(model: &UserModel, m: &Mix) -> (HashSet<Lang>, bool) {
     (langs, inst)
 }
 
-/// The voice of a new song by its analysed preview (`v`, raw): what most of
+/// The voice of a new song by its analysed preview (`v`, raw; `embedding`,
+/// the neural model's vector of it, when the model heard it): what most of
 /// its nearest songs of the library are, when they agree.
-pub fn voice_near(model: &UserModel, index: &VectorIndex<TrackId>, v: &Vector) -> Option<Voice> {
-    let near: Vec<usize> = index.nearest(v, VOICE_NEAR, |_| true).into_iter().filter_map(|(id, _)| model.position(id)).collect();
+pub fn voice_near(model: &UserModel, index: &VectorIndex<TrackId>, v: &Vector, embedding: Option<&Compact>) -> Option<Voice> {
+    let near: Vec<usize> = index.nearest_with(v, embedding, VOICE_NEAR, |_| true).into_iter().filter_map(|(id, _)| model.position(id)).collect();
     voice_of(model, &near)
 }
 
@@ -273,15 +277,24 @@ fn choose_by<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: us
 /// music asked for (`user` 0) a mix is no niche. The size that makes a
 /// niche is the whole pool's ([`Mix::pool_size`]; a card made without one
 /// counts its own songs), its sound the pool's; a calm or lively card's is
-/// a niche of a sound (strict).
-pub fn take<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], appetite: Option<f32>, user: f32, used: &mut HashSet<String>) -> (Vec<&'c NewCandidate>, NewMode) {
+/// a niche of a sound (strict), heard by the library's `index` with the
+/// neural model's vectors when it is given.
+pub fn take<'c>(
+    model: &UserModel,
+    index: Option<&VectorIndex<TrackId>>,
+    m: &Mix,
+    cands: &'c [NewCandidate],
+    appetite: Option<f32>,
+    user: f32,
+    used: &mut HashSet<String>,
+) -> (Vec<&'c NewCandidate>, NewMode) {
     let (tracks, artists) = if m.pool_size.0 > 0 { m.pool_size } else { (m.tracks.len(), m.artists.len()) };
     let mode = if user > 0.0 { NewMode::of(tracks, artists, user) } else { NewMode::Calm };
     let want = want_in(m.tracks.len(), appetite, user, mode);
     let chosen = if mode == NewMode::Niche {
         let seeds = if m.pool.is_empty() { &m.tracks } else { &m.pool };
         let strict = matches!(m.key, MixKey::Calm | MixKey::Lively | MixKey::Background { .. });
-        let sound = crate::open_world::NicheSound::of(model, seeds, strict);
+        let sound = crate::open_world::NicheSound::heard(model, seeds, strict, index);
         choose_by(
             model,
             m,
@@ -290,7 +303,7 @@ pub fn take<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], appetite:
             used,
             &|c| {
                 let energies: Vec<f32> = c.artist_tracks.iter().filter_map(|&i| model.energy_at(i)).collect();
-                sound.fits(model, c.vector.as_ref(), c.lane, &c.near, &energies)
+                sound.fits_heard(model, index, c.vector.as_ref(), c.embedding.as_ref(), c.lane, &c.near, &energies)
             },
             false,
         )
@@ -389,7 +402,7 @@ mod tests {
     use nikgob_core::streaming::{RemoteId, Service};
 
     fn cand(id: &str, lane: Option<LaneKey>, near: Vec<usize>, weight: f32) -> NewCandidate {
-        NewCandidate { track: StreamTrack::new(RemoteId::new(Service::Youtube, id), id), lane, soundtrack: false, profile: None, near, weight, vector: None, artist_tracks: Vec::new() }
+        NewCandidate { track: StreamTrack::new(RemoteId::new(Service::Youtube, id), id), lane, soundtrack: false, profile: None, near, weight, vector: None, embedding: None, artist_tracks: Vec::new() }
     }
 
     /// The share of a mix: the appetite, at least the user's, at most

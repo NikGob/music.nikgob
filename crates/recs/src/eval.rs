@@ -786,7 +786,7 @@ pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch:
     let background = |i: usize| suits.get(i).copied().unwrap_or(false);
     let ok = |_: usize| true;
     let none = |_: &StreamTrack| Vec::new();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: None };
     let cards = crate::open_world::niches(&ctx).into_iter().map(|c| (c, String::new(), Vec::new())).collect();
     mix_new::with_niches(model, &mut home, cards);
     (home, row)
@@ -816,7 +816,7 @@ pub fn new_candidates(parts: &Parts, model: &UserModel) -> Vec<NewCandidate> {
             let v: Option<Vector> = d.vector.as_ref().and_then(|v| <[f32; DIM]>::try_from(v.as_slice()).ok());
             let near: Vec<usize> = d.near.iter().filter_map(|t| model.position(*t)).collect();
             let voice = match v.as_ref() {
-                Some(v) => mix_new::voice_near(model, &parts.index, v),
+                Some(v) => mix_new::voice_near(model, &parts.index, v, None),
                 None => mix_new::voice_of(model, &near),
             };
             NewCandidate {
@@ -827,6 +827,7 @@ pub fn new_candidates(parts: &Parts, model: &UserModel) -> Vec<NewCandidate> {
                 near,
                 weight: d.weight,
                 vector: v,
+                embedding: None,
                 artist_tracks: d.artist.map(|a| model.of_artist(a).iter().map(|&i| i as usize).collect()).unwrap_or_default(),
             }
         })
@@ -848,7 +849,7 @@ pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<HomeNew>
             if matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
                 return HomeNew { placed: 0, niche: false, artists: own.len() };
             }
-            let (chosen, mode) = mix_new::take(model, m, &cands, None, USER_NEW_SHARE, &mut used);
+            let (chosen, mode) = mix_new::take(model, Some(&parts.index), m, &cands, None, USER_NEW_SHARE, &mut used);
             let placed = mix_new::placements(mode, &m.anchors, chosen.len()).len();
             let new_artists: HashSet<String> = chosen.iter().take(placed).filter_map(|c| c.track.artists.first()).map(|a| crate::artist_key(&a.name)).collect();
             HomeNew { placed, niche: mode == mix_new::NewMode::Niche, artists: own.len() + new_artists.len() }
@@ -860,7 +861,7 @@ pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<HomeNew>
 pub fn open_pool(parts: &Parts, model: &UserModel) -> Vec<OpenCandidate> {
     new_candidates(parts, model)
         .into_iter()
-        .map(|c| OpenCandidate { key: crate::stream_song_key(&c.track), track: c.track, vector: c.vector, lane: c.lane, near: c.near, weight: c.weight })
+        .map(|c| OpenCandidate { key: crate::stream_song_key(&c.track), track: c.track, vector: c.vector, embedding: c.embedding, lane: c.lane, near: c.near, weight: c.weight })
         .collect()
 }
 
@@ -873,7 +874,7 @@ pub fn wave(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandid
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None };
     crate::open_world::next(&ctx, pool, filter, session, n, &HashSet::new())
 }
 
@@ -906,7 +907,7 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None };
     let mut run = WaveRun::default();
     for (k, &novelty) in WAVE_NOVELTIES.iter().enumerate() {
         let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(novelty)));
@@ -1466,7 +1467,7 @@ mod tests {
             .map(|(k, i)| {
                 let mut track = StreamTrack::new(RemoteId::new(Service::Youtube, format!("w{k}")), format!("Wave {k}"));
                 track.artists.push(ArtistRef::new(None, format!("New {k}")));
-                OpenCandidate { key: crate::stream_song_key(&track), track, vector: None, lane: None, near: vec![i], weight: 0.8 }
+                OpenCandidate { key: crate::stream_song_key(&track), track, vector: None, embedding: None, lane: None, near: vec![i], weight: 0.8 }
             })
             .collect()
     }
@@ -1504,7 +1505,7 @@ mod tests {
         let background = |i: usize| suits.get(i).copied().unwrap_or(false);
         let ok = |_: usize| true;
         let none = |_: &StreamTrack| Vec::new();
-        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none };
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none, index: None };
         for character in [Character::Any, Character::Calm] {
             let seed = WaveSeed { filter: WaveFilter { novelty: 0.0, character, scene: crate::open_world::Scene::All }, only: Vec::new(), part: None };
             let mut radio = RadioState::new(RadioSeed::Wave(seed.clone()));
@@ -1573,13 +1574,13 @@ mod tests {
         let none = |_: &StreamTrack| Vec::new();
         let rested = |i: usize| model.taste.last_played_at(i).is_none_or(|t| model.now() - t >= 3 * crate::taste::HOUR_MS);
         let all = |_: usize| true;
-        let full = WaveContext { model: &model, ok: &all, genre: None, background: &background, artist_tracks: &none };
+        let full = WaveContext { model: &model, ok: &all, genre: None, background: &background, artist_tracks: &none, index: None };
         let calm = WaveFilter { novelty: 0.0, character: Character::Calm, scene: crate::open_world::Scene::All };
         // Eight calm songs only may play.
         let eight: Vec<usize> = (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &calm, i)).take(8).collect();
         assert_eq!(eight.len(), 8, "a calm side to the omnivore");
         let only_eight = |i: usize| eight.contains(&i) || !crate::open_world::fits_filter(&full, &calm, i);
-        let ctx = WaveContext { model: &model, ok: &only_eight, genre: None, background: &background, artist_tracks: &none };
+        let ctx = WaveContext { model: &model, ok: &only_eight, genre: None, background: &background, artist_tracks: &none, index: None };
         let seed = WaveSeed { filter: calm, only: Vec::new(), part: None };
         let mut radio = RadioState::new(RadioSeed::Wave(seed.clone()));
         radio.attune(Session::default(), Some(model.weights));
@@ -1618,7 +1619,7 @@ mod tests {
         let scene = WaveFilter { scene: crate::open_world::Scene::Profile(k), ..calm };
         let two: Vec<usize> = (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &scene, i)).take(2).collect();
         let only_two = |i: usize| two.contains(&i) || !crate::open_world::fits_filter(&full, &scene, i);
-        let ctx = WaveContext { model: &model, ok: &only_two, genre: None, background: &background, artist_tracks: &none };
+        let ctx = WaveContext { model: &model, ok: &only_two, genre: None, background: &background, artist_tracks: &none, index: None };
         let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed { filter: scene, only: Vec::new(), part: None }));
         radio.attune(Session::default(), Some(model.weights));
         let picks = radio.extend_wave(&ctx, &[], 3, 5);

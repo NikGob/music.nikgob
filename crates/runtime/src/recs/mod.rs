@@ -140,8 +140,11 @@ pub(crate) struct Snapshot {
     pub local_only: bool,
     /// The worlds of the catalog's tracks by their token: key and title.
     pub worlds: HashMap<u64, (String, String)>,
-    /// The analysed previews of the new music found, by [`song_key`].
+    /// The analysed previews of the new music found, by [`song_key`]…
     pub new_vectors: HashMap<String, nikgob_recs::Vector>,
+    /// …and the neural sound model's vectors of those it heard (the index
+    /// keeps the catalog's only; as many as the previews, 260 bytes each).
+    pub new_embeddings: HashMap<String, nikgob_recs::Compact>,
     /// The library artists' affinities by [`artist_key`], 0…1 (a known
     /// artist of new music).
     pub artist_affinity: HashMap<String, f32>,
@@ -203,6 +206,11 @@ impl Snapshot {
     /// A new track as the engine places it: with its analysed preview.
     pub fn new_track(&self, t: &StreamTrack) -> NewTrack {
         NewTrack::from_stream(t, self.new_vectors.get(&stream_song_key(t)).copied())
+    }
+
+    /// The neural sound model's vector of a new track's preview, if heard.
+    pub fn new_embedding(&self, t: &StreamTrack) -> Option<nikgob_recs::Compact> {
+        self.new_embeddings.get(&stream_song_key(t)).copied()
     }
 }
 
@@ -914,18 +922,23 @@ fn read_parts(
     let suggested_new: Vec<(StreamTrack, f32)> =
         matched.unmatched.into_iter().filter(|(t, _)| is_new(&filter, t) && nikgob_recs::junk(t, None).is_none()).collect();
 
-    // The analysed previews of the new music found (their tracks are not
-    // the catalog's).
-    let new_vectors: HashMap<String, nikgob_recs::Vector> = {
+    // The analysed previews of the new music found and the model's vectors
+    // of them (their tracks are not the catalog's: the snapshot's index
+    // drops them below).
+    let (new_vectors, new_embeddings) = {
         let shared = index.read();
-        extra
-            .new
-            .iter()
-            .filter_map(|t| {
-                let id = lib.track_by_remote(&t.id).ok().flatten()?;
-                Some((stream_song_key(t), *shared.get(id)?))
-            })
-            .collect()
+        let mut vectors: HashMap<String, nikgob_recs::Vector> = HashMap::new();
+        let mut embeddings: HashMap<String, nikgob_recs::Compact> = HashMap::new();
+        for t in &extra.new {
+            let Some(id) = lib.track_by_remote(&t.id).ok().flatten() else { continue };
+            let Some(v) = shared.get(id) else { continue };
+            let key = stream_song_key(t);
+            if let Some(c) = shared.embedding(id) {
+                embeddings.insert(key.clone(), c);
+            }
+            vectors.insert(key, *v);
+        }
+        (vectors, embeddings)
     };
     // Vectors of tracks that are gone (or left the library) stay in the
     // shared index until a restart; not in the snapshot.
@@ -1027,6 +1040,7 @@ fn read_parts(
         background: Vec::new(),
         profiles: Arc::new(TrackProfiles::from_model(&model)),
         new_vectors,
+        new_embeddings,
         artist_affinity,
         catalog,
         model,

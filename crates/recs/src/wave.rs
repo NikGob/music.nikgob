@@ -572,7 +572,7 @@ pub fn pick(
     // pool are cut to it when a cluster is another kind of scene.
     let scene_ok = |i: usize| of_scene(ctx, user.scene, i);
     let ok = |i: usize| (ctx.ok)(i) && scene_ok(i);
-    let within = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks };
+    let within = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks, index: ctx.index };
     let in_scene: Vec<OpenCandidate> = if user.scene == Scene::All {
         Vec::new()
     } else {
@@ -650,7 +650,7 @@ fn repeats(
     let now = session.tracks().map(|p| p.ts).max().unwrap_or(0).max(m.now());
     let lately: HashSet<usize> = session.tracks().filter(|p| now - p.ts < cool_ms).filter_map(|p| m.position(p.track)).collect();
     let ok = |i: usize| (ctx.ok)(i) && !lately.contains(&i) && m.taste.last_played_at(i).is_none_or(|t| now - t >= cool_ms);
-    let cooled = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks };
+    let cooled = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks, index: ctx.index };
     let keys: HashMap<&RemoteId, &str> = pool.iter().map(|c| (&c.track.id, c.key.as_str())).collect();
     let mut out: Vec<WavePick> = Vec::new();
     let mut taken: HashSet<String> = HashSet::new();

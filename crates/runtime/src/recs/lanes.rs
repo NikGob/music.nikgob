@@ -387,7 +387,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             let genre = |i: usize| b.genre_at(i);
             let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
             let none = |_: &StreamTrack| Vec::new();
-            let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none };
+            let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: Some(&snap.index) };
             nikgob_recs::open_world::niches(&ctx)
                 .into_iter()
                 .filter(|c| !prefs.hidden.contains(&c.key))
@@ -778,9 +778,10 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
 /// profile, the library's songs of its artist.
 fn new_candidate(snap: &Snapshot, t: &StreamTrack, near: Vec<usize>, weight: f32) -> NewCandidate {
     let vector = snap.new_track(t).vector;
+    let embedding = snap.new_embedding(t);
     // Its voice by its preview, else by the songs whose radios hold it.
     let voice = match vector.as_ref() {
-        Some(v) => mix_new::voice_near(&snap.model, &snap.index, v),
+        Some(v) => mix_new::voice_near(&snap.model, &snap.index, v, embedding.as_ref()),
         None => mix_new::voice_of(&snap.model, &near),
     };
     NewCandidate {
@@ -791,6 +792,7 @@ fn new_candidate(snap: &Snapshot, t: &StreamTrack, near: Vec<usize>, weight: f32
         near,
         weight,
         vector,
+        embedding,
         artist_tracks: artist_tracks(snap, t),
     }
 }
@@ -833,7 +835,7 @@ fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, cands
         let background = profile.is_some_and(|j| snap.model.is_background_profile(j));
         log.share(key, background, &mut nikgob_recs::rng::Rng::new(seed))
     });
-    let (chosen, mode) = mix_new::take(&snap.model, m, cands, appetite, input.new_share, used);
+    let (chosen, mode) = mix_new::take(&snap.model, Some(&snap.index), m, cands, appetite, input.new_share, used);
     (chosen.into_iter().map(|c| c.track.clone()).collect(), mode)
 }
 
@@ -899,6 +901,7 @@ mod tests {
             local_only: false,
             worlds: HashMap::new(),
             new_vectors: HashMap::new(),
+            new_embeddings: HashMap::new(),
             artist_affinity: HashMap::new(),
             profiles: Default::default(),
             background: Vec::new(),

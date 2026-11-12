@@ -76,14 +76,14 @@ pub fn guests(ctx: &WaveContext<'_>, pool: &[OpenCandidate], playlist: &[usize])
     let seeds: Vec<(usize, f32)> = sample.iter().map(|&i| (i, weight)).collect();
     let walk = m.graph.walk(&seeds);
     let own: HashSet<usize> = playlist.iter().copied().collect();
-    let sound = NicheSound::of(m, &sample, false);
+    let sound = NicheSound::heard(m, &sample, false, ctx.index);
     let scale = m.scale().max(1e-6);
     let own_sound: Vec<&Vector> = sample.iter().filter_map(|&i| m.embedded_at(i)).collect();
     let mut out: Vec<Guest> = Vec::new();
     for c in pool {
         let artist_tracks = (ctx.artist_tracks)(&c.track);
         let energies: Vec<f32> = artist_tracks.iter().filter_map(|&i| m.energy_at(i)).collect();
-        if !sound.fits(m, c.vector.as_ref(), c.lane, &c.near, &energies) {
+        if !sound.fits_heard(m, ctx.index, c.vector.as_ref(), c.embedding.as_ref(), c.lane, &c.near, &energies) {
             continue;
         }
         let direct = c.near.iter().filter(|i| own.contains(i)).count() as f32;
@@ -249,7 +249,7 @@ mod tests {
         // The library's songs of a new song's artist, as the runtime tells.
         let artist_of: HashMap<String, ArtistId> = d.new.iter().filter_map(|n| Some((crate::stream_song_key(&n.track), n.artist?))).collect();
         let artist_tracks = |t: &StreamTrack| artist_of.get(&crate::stream_song_key(t)).map(|a| model.of_artist(*a).iter().map(|&i| i as usize).collect()).unwrap_or_default();
-        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &artist_tracks };
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &artist_tracks, index: None };
         let g = guests(&ctx, &pool, &calm);
         assert!(g.len() >= 4, "{}", g.len());
         assert!(g.iter().all(|g| title(g).starts_with("Drift")), "{:?}", g.iter().map(title).collect::<Vec<_>>());

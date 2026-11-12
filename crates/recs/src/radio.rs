@@ -893,7 +893,7 @@ impl RadioState {
             let ok = |i: usize| !recs.blocked(i);
             let background = |i: usize| recs.background.and_then(|b| b.get(i)).copied().unwrap_or(false);
             let artist_tracks = |_: &StreamTrack| Vec::new();
-            let ctx = WaveContext { model: m, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks };
+            let ctx = WaveContext { model: m, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks, index: Some(recs.index) };
             return self.extend_wave(&ctx, &[], n, params.seed);
         }
         // Autoplay's trajectory, once it has the session it continues.
@@ -1573,9 +1573,10 @@ impl RadioState {
             RadioSeed::Stream { vector, .. } => *vector,
             _ => None,
         };
-        // Sound neighbours of the seed.
+        // Sound neighbours of the seed (by the blend with the neural
+        // model's vector when the seed has one).
         if let Some(q) = raw_seed {
-            for (id, _) in recs.index.nearest(&q, SEED_NEIGHBOURS, |id| recs.catalog.position(id).is_some_and(ok)) {
+            for (id, _) in recs.index.nearest_to(seed_track, &q, SEED_NEIGHBOURS, |id| recs.catalog.position(id).is_some_and(ok)) {
                 let i = recs.catalog.position(id).expect("filtered");
                 add(&mut cands, i, seed_track.map_or(Reason::SoundsLikeSeed, Reason::SimilarTo), 0.0);
             }

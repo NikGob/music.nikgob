@@ -31,12 +31,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nikgob_core::model::ArtistId;
+use nikgob_core::model::{ArtistId, TrackId};
 use nikgob_core::streaming::StreamTrack;
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
-use crate::index::euclid;
+use crate::embedding::Compact;
+use crate::index::{NICHE_FITS, NicheProbe, VectorIndex, euclid};
 use crate::model::UserModel;
 use crate::pick::Item;
 use crate::profiles::LaneKey;
@@ -98,6 +99,9 @@ pub struct NicheSound {
     lanes: HashSet<LaneKey>,
     /// A niche of a sound: one link is no evidence (see the module docs).
     strict: bool,
+    /// The niche measured by the library's index, for previews the neural
+    /// sound model heard ([`Self::heard`]).
+    probe: Option<NicheProbe<TrackId>>,
 }
 
 impl NicheSound {
@@ -125,7 +129,16 @@ impl NicheSound {
         e.sort_by(f32::total_cmp);
         let band = (!e.is_empty()).then(|| (e[0] - NICHE_ENERGY_SLACK, e[e.len() - 1] + NICHE_ENERGY_SLACK));
         let lanes = tracks.iter().map(|&i| LaneKey::of(model.song_type_at(i))).collect();
-        Self { tracks: tracks.to_vec(), centre, radius, band, lanes, strict }
+        Self { tracks: tracks.to_vec(), centre, radius, band, lanes, strict, probe: None }
+    }
+
+    /// [`Self::of`], measured by the library's `index` too: a preview with
+    /// the neural model's vector is judged by the blend of its sound
+    /// ([`Self::fits_heard`]).
+    pub fn heard(model: &UserModel, tracks: &[usize], strict: bool, index: Option<&VectorIndex<TrackId>>) -> Self {
+        let mut s = Self::of(model, tracks, strict);
+        s.probe = index.filter(|ix| ix.embedded_len() > 0).and_then(|ix| ix.niche_probe(&tracks.iter().filter(|&&i| i < model.len()).map(|&i| model.id(i)).collect::<Vec<_>>()));
+        s
     }
 
     /// Whether a sung song of `lane` (or one without words) is of the
@@ -142,6 +155,34 @@ impl NicheSound {
     /// by the graph or by the radio that found it) and the energies of its
     /// artist's songs in the library (`artist`, empty for a new artist).
     pub fn fits(&self, model: &UserModel, vector: Option<&Vector>, lane: Option<LaneKey>, near: &[usize], artist: &[f32]) -> bool {
+        self.fits_by(model, vector, None, lane, near, artist)
+    }
+
+    /// [`Self::fits`] with the preview's neural model vector (`embedding`)
+    /// and the library's `index`: a preview the model heard is near the
+    /// niche by the blend of both sounds ([`VectorIndex::probe_fit`])
+    /// rather than by bliss's alone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fits_heard(
+        &self,
+        model: &UserModel,
+        index: Option<&VectorIndex<TrackId>>,
+        vector: Option<&Vector>,
+        embedding: Option<&Compact>,
+        lane: Option<LaneKey>,
+        near: &[usize],
+        artist: &[f32],
+    ) -> bool {
+        let blend = match (index, &self.probe, vector, embedding) {
+            (Some(ix), Some(p), Some(v), Some(e)) => ix.probe_fit(p, v, Some(e)),
+            _ => None,
+        };
+        self.fits_by(model, vector, blend, lane, near, artist)
+    }
+
+    /// [`Self::fits`], the preview near the niche by `blend` when it is
+    /// known.
+    fn fits_by(&self, model: &UserModel, vector: Option<&Vector>, blend: Option<f32>, lane: Option<LaneKey>, near: &[usize], artist: &[f32]) -> bool {
         if !self.kind_fits(lane) {
             return false;
         }
@@ -159,7 +200,10 @@ impl NicheSound {
         match vector {
             Some(v) => {
                 let e = model.embed(v);
-                let near_sound = self.centre.as_ref().is_none_or(|c| euclid(&e, c) <= self.radius);
+                let near_sound = match blend {
+                    Some(fit) => fit >= NICHE_FITS,
+                    None => self.centre.as_ref().is_none_or(|c| euclid(&e, c) <= self.radius),
+                };
                 let energy = self.band.is_none_or(|(lo, hi)| (lo..=hi).contains(&model.energy_of(&e)));
                 near_sound && energy
             }
@@ -227,6 +271,8 @@ pub struct OpenCandidate {
     pub key: String,
     /// Its analysed preview (raw), if any.
     pub vector: Option<Vector>,
+    /// The neural sound model's vector of its preview, if the model heard it.
+    pub embedding: Option<Compact>,
     /// Its kind of song, if told.
     pub lane: Option<LaneKey>,
     /// The library's songs the graph or the radio that found it link it to.
@@ -248,6 +294,9 @@ pub struct WaveContext<'a> {
     /// The library's songs of the main artist of a new song (catalog
     /// positions; empty for a new artist).
     pub artist_tracks: &'a dyn Fn(&StreamTrack) -> Vec<usize>,
+    /// The library's sound index, with the neural model's vectors: a new
+    /// song's preview the model heard is judged by them too.
+    pub index: Option<&'a VectorIndex<TrackId>>,
 }
 
 /// One pick of a wave.
@@ -441,7 +490,7 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
     let seed_set: HashSet<usize> = seeds.iter().map(|s| s.0).chain(loved.iter().copied()).collect();
     let filtered = filter.character != Character::Any || filter.scene != Scene::All;
     let fitting_set: HashSet<usize> = fitting.iter().copied().collect();
-    let sound = (filtered || niche).then(|| NicheSound::of(m, &fitting, filter.character != Character::Any));
+    let sound = (filtered || niche).then(|| NicheSound::heard(m, &fitting, filter.character != Character::Any, ctx.index));
     let anchor = session.anchor(m).map(|a| m.embed(&a));
     let scale = m.scale().max(1e-6);
 
@@ -479,7 +528,7 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
         }
         if let Some(s) = &sound {
             let energies: Vec<f32> = artist_tracks.iter().filter_map(|&i| m.energy_at(i)).collect();
-            if !s.fits(m, c.vector.as_ref(), c.lane, &c.near, &energies) {
+            if !s.fits_heard(m, ctx.index, c.vector.as_ref(), c.embedding.as_ref(), c.lane, &c.near, &energies) {
                 continue;
             }
         }

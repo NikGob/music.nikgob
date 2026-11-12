@@ -18,8 +18,11 @@
 //! genre and the voice, bliss the tempo and the loudness. A track without
 //! one is compared by bliss alone, so new tracks and a library being
 //! analysed mix freely. [`VectorIndex::neighbours`], [`VectorIndex::nearest_to`]
-//! and [`VectorIndex::niche_fit`] use the blend; [`VectorIndex::nearest`]
-//! and [`VectorIndex::distance`] of raw vectors stay bliss's.
+//! and [`VectorIndex::niche_fit`] use the blend, and for a track the index
+//! does not hold (a preview of new music, with its own model vector)
+//! [`VectorIndex::nearest_with`] and [`VectorIndex::probe_fit`];
+//! [`VectorIndex::nearest`] and [`VectorIndex::distance`] of raw vectors
+//! stay bliss's.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -42,6 +45,10 @@ const NICHE_NEAREST: usize = 5;
 /// [`VectorIndex::fits_niche`]: a candidate this close to the niche, by
 /// [`VectorIndex::niche_fit`], fits it.
 pub const NICHE_FITS: f32 = 0.7;
+
+/// A niche's members a [`NicheProbe`] measures (an even sample of a
+/// larger niche).
+const NICHE_SAMPLE: usize = 32;
 
 /// A standard deviation below this counts as "does not vary" (scale 1).
 const MIN_STD: f64 = 1e-4;
@@ -397,7 +404,11 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// Row `i`'s model vector less the mean, made unit length.
     fn centred(&self, i: usize, mean: &[f32; COMPACT_DIM]) -> Option<[f32; COMPACT_DIM]> {
-        let c = self.emb_row(i)?;
+        Self::centred_of(&self.emb_row(i)?, mean)
+    }
+
+    /// A model vector less the mean, made unit length.
+    fn centred_of(c: &Compact, mean: &[f32; COMPACT_DIM]) -> Option<[f32; COMPACT_DIM]> {
         let mut v: [f32; COMPACT_DIM] = std::array::from_fn(|k| f32::from(c.q[k]) * c.scale - mean[k]);
         let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         if !(n > 1e-9) {
@@ -455,16 +466,48 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     /// `query`, nearest first; `key`, when it is stored with the model's
     /// vector, blends the model's distance in for the tracks that have it
     /// (once [`MIN_EMBEDDED`] tracks do). The track itself is not left out.
-    pub fn nearest_to(&self, key: Option<K>, query: &Vector, k: usize, mut keep: impl FnMut(K) -> bool) -> Vec<(K, f32)> {
+    pub fn nearest_to(&self, key: Option<K>, query: &Vector, k: usize, keep: impl FnMut(K) -> bool) -> Vec<(K, f32)> {
         let model = key.filter(|_| self.blended()).and_then(|key| self.pos.get(&key).copied()).and_then(|i| {
             let mean = self.emb_mean();
             let q = self.centred(i, &mean)?;
             let ratio = self.calibration(&mean);
             Some((q, mean, ratio))
         });
-        let Some((q, mean, ratio)) = model else {
-            return self.nearest(query, k, keep);
-        };
+        match model {
+            Some((q, mean, ratio)) => self.nearest_blended(query, &q, &mean, ratio, k, keep),
+            None => self.nearest(query, k, keep),
+        }
+    }
+
+    /// [`Self::nearest_to`] for a track the index does not hold: its bliss
+    /// vector `query` and the model's vector `model` when it has one (a
+    /// preview of new music the model heard).
+    pub fn nearest_with(&self, query: &Vector, model: Option<&Compact>, k: usize, keep: impl FnMut(K) -> bool) -> Vec<(K, f32)> {
+        let blend = model.filter(|_| self.blended()).and_then(|c| {
+            let mean = self.emb_mean();
+            let q = Self::centred_of(c, &mean)?;
+            Some((q, mean))
+        });
+        match blend {
+            Some((q, mean)) => {
+                let ratio = self.calibration(&mean);
+                self.nearest_blended(query, &q, &mean, ratio, k, keep)
+            }
+            None => self.nearest(query, k, keep),
+        }
+    }
+
+    /// The `k` nearest to `query` with the model's centred query `q`
+    /// blended in where a row has the model's vector.
+    fn nearest_blended(
+        &self,
+        query: &Vector,
+        q: &[f32; COMPACT_DIM],
+        mean: &[f32; COMPACT_DIM],
+        ratio: f32,
+        k: usize,
+        mut keep: impl FnMut(K) -> bool,
+    ) -> Vec<(K, f32)> {
         if k == 0 {
             return Vec::new();
         }
@@ -472,7 +515,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
         let mut heap: BinaryHeap<Cand> = BinaryHeap::with_capacity(k + 1);
         for (i, row) in self.data.as_chunks::<DIM>().0.iter().enumerate() {
             let bliss = Self::dist_sq(&f, query, row).sqrt();
-            let d = match self.emb_dist(&q, i, &mean) {
+            let d = match self.emb_dist(q, i, mean) {
                 Some(e) => (1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * ratio * e,
                 None => bliss,
             };
@@ -562,6 +605,91 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     pub fn fits_niche(&self, candidate: K, niche: &[K]) -> Option<bool> {
         self.niche_fit(candidate, niche).map(|f| f >= NICHE_FITS)
     }
+
+    /// The niche of `niche` measured once for many candidates the index
+    /// does not hold ([`Self::probe_fit`]): an even sample of
+    /// [`NICHE_SAMPLE`] of its members at most, how close they are to each
+    /// other. `None` when fewer than two members have a vector.
+    pub fn niche_probe(&self, niche: &[K]) -> Option<NicheProbe<K>> {
+        let held: Vec<usize> = niche.iter().filter_map(|k| self.pos.get(k).copied()).collect();
+        let step = held.len().div_ceil(NICHE_SAMPLE).max(1);
+        let rows: Vec<usize> = held.into_iter().step_by(step).collect();
+        if rows.len() < 2 {
+            return None;
+        }
+        let nearest = NICHE_NEAREST.min(rows.len() - 1);
+        let mean = self.emb_mean();
+        let ratio = if self.blended() { self.calibration(&mean) } else { 1.0 };
+        let f = self.factors();
+        let centred: Vec<Option<[f32; COMPACT_DIM]>> =
+            rows.iter().map(|&i| if self.blended() { self.centred(i, &mean) } else { None }).collect();
+        let mut spread: Vec<f32> = (0..rows.len())
+            .map(|a| {
+                let mut d: Vec<f32> = (0..rows.len())
+                    .filter(|&b| b != a)
+                    .map(|b| {
+                        let bliss = Self::dist_sq(&f, self.row(rows[a]), self.row(rows[b])).sqrt();
+                        match centred[a].as_ref().and_then(|q| self.emb_dist(q, rows[b], &mean)) {
+                            Some(e) => (1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * ratio * e,
+                            None => bliss,
+                        }
+                    })
+                    .collect();
+                d.sort_by(f32::total_cmp);
+                d[..nearest].iter().sum::<f32>() / nearest as f32
+            })
+            .collect();
+        spread.sort_by(f32::total_cmp);
+        let typical = spread[spread.len() / 2];
+        Some(NicheProbe { members: rows.iter().map(|&i| self.keys[i]).collect(), nearest, typical, mean, ratio })
+    }
+
+    /// How well a track the index does not hold fits the niche of `probe`,
+    /// as [`Self::niche_fit`] tells it: its bliss vector `vector` and the
+    /// model's vector `model` when the model heard it (the blend with the
+    /// members that have one). `None` when no member is held any more.
+    pub fn probe_fit(&self, probe: &NicheProbe<K>, vector: &Vector, model: Option<&Compact>) -> Option<f32> {
+        let f = self.factors();
+        let q = model.filter(|_| self.blended()).and_then(|c| Self::centred_of(c, &probe.mean));
+        let mut d: Vec<f32> = probe
+            .members
+            .iter()
+            .filter_map(|k| self.pos.get(k).copied())
+            .map(|j| {
+                let bliss = Self::dist_sq(&f, vector, self.row(j)).sqrt();
+                match q.as_ref().and_then(|q| self.emb_dist(q, j, &probe.mean)) {
+                    Some(e) => (1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * probe.ratio * e,
+                    None => bliss,
+                }
+            })
+            .collect();
+        if d.is_empty() {
+            return None;
+        }
+        d.sort_by(f32::total_cmp);
+        let take = probe.nearest.clamp(1, d.len());
+        let own = d[..take].iter().sum::<f32>() / take as f32;
+        if own <= 1e-9 {
+            return Some(1.0);
+        }
+        Some((probe.typical / own).clamp(0.0, 1.0))
+    }
+}
+
+/// A niche measured once ([`VectorIndex::niche_probe`]) for the
+/// candidates [`VectorIndex::probe_fit`] judges: previews of new music.
+#[derive(Clone, Debug)]
+pub struct NicheProbe<K> {
+    /// The members measured.
+    members: Vec<K>,
+    /// How many nearest members a distance is the mean of.
+    nearest: usize,
+    /// The members' typical distance to their nearest fellow members.
+    typical: f32,
+    /// The library's mean model vector and the model's scale to bliss's
+    /// when the probe was made.
+    mean: [f32; COMPACT_DIM],
+    ratio: f32,
 }
 
 /// An index's normalisation at one moment: z-scores
@@ -882,5 +1010,42 @@ mod tests {
         assert_eq!(idx.niche_fit(500, &niche), None);
         assert_eq!(idx.niche_fit(30, &[1]), None);
         assert!((0.0..=1.0).contains(&fit_out));
+    }
+
+    /// A preview the index does not hold is judged by its own model
+    /// vector: its neighbours and its niche are of its genre, as a held
+    /// track's are; without the model's vector, by bliss alone.
+    #[test]
+    fn a_preview_outside_the_index_is_heard_by_the_model() {
+        let mut rng = Rng(8);
+        let mut idx = VectorIndex::new();
+        let (calm, loud) = (direction(&mut rng), direction(&mut rng));
+        for k in 0..80u32 {
+            idx.insert(k, random(&mut rng));
+            let dir = if k < 40 { &calm } else { &loud };
+            idx.set_embedding(k, compact_near(&mut rng, dir, 0.25));
+        }
+        let bliss = random(&mut rng);
+        let calm_preview = compact_near(&mut rng, &calm, 0.25);
+        let near: Vec<u32> = idx.nearest_with(&bliss, Some(&calm_preview), 10, |_| true).into_iter().map(|(k, _)| k).collect();
+        assert!(near.iter().filter(|k| **k < 40).count() >= 9, "{near:?}");
+        assert_eq!(idx.nearest_with(&bliss, None, 10, |_| true), idx.nearest(&bliss, 10, |_| true));
+        // The same as a held track with the same vectors.
+        idx.insert(500, bliss);
+        idx.set_embedding(500, calm_preview);
+        let held: Vec<(u32, f32)> = idx.nearest_to(Some(500), &bliss, 6, |k| k != 500);
+        let outside: Vec<(u32, f32)> = idx.nearest_with(&bliss, Some(&calm_preview), 6, |k| k != 500);
+        assert_eq!(held.iter().map(|x| x.0).collect::<Vec<_>>(), outside.iter().map(|x| x.0).collect::<Vec<_>>());
+        idx.remove(500);
+
+        let niche: Vec<u32> = (0..12).collect();
+        let probe = idx.niche_probe(&niche).unwrap();
+        let fit_in = idx.probe_fit(&probe, &bliss, Some(&calm_preview)).unwrap();
+        let fit_out = idx.probe_fit(&probe, &bliss, Some(&compact_near(&mut rng, &loud, 0.25))).unwrap();
+        assert!(fit_in >= NICHE_FITS && fit_out < NICHE_FITS, "{fit_in} vs {fit_out}");
+        assert!(idx.niche_probe(&[1]).is_none());
+        // A large niche is sampled.
+        let all: Vec<u32> = (0..80).collect();
+        assert!(idx.niche_probe(&all).unwrap().members.len() <= NICHE_SAMPLE);
     }
 }

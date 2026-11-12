@@ -130,7 +130,7 @@ pub(crate) fn extend(state: &mut Engine, snap: &Snapshot, pool: &[OpenCandidate]
     let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
     let artist_tracks = |t: &nikgob_core::streaming::StreamTrack| super::lanes::artist_tracks(snap, t);
     let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
-    let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
+    let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index) };
     let pool: &[OpenCandidate] = if local_only { &[] } else { pool };
     state.extend_wave(&ctx, pool, n, seed)
 }
