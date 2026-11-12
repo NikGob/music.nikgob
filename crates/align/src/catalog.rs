@@ -39,6 +39,9 @@ pub enum ModelId {
     /// MMS-300m forced aligner fine-tuned on singing (Tune Studio), a
     /// second aligner for English (and romanised letters; deep mode).
     AlignerSung,
+    /// Discogs-EffNet, the neural sound model of the recommendations
+    /// (docs/recommendations.md §5): not a part of the lyrics.
+    SoundEffnet,
 }
 
 /// One file of a part.
@@ -294,7 +297,26 @@ pub const ALIGNER_SUNG: ModelSpec = ModelSpec {
     ],
 };
 
-pub const ALL: [ModelSpec; 10] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER, SEPARATOR_DEEP, ALIGNER_RU_DEEP, ALIGNER_SUNG];
+/// Discogs-EffNet of the Music Technology Group (Universitat Pompeu Fabra),
+/// the ONNX export with a dynamic batch that Essentia publishes
+/// (https://essentia.upf.edu/models.html, «Discogs-EffNet»): input
+/// `[n, 128, 96]` log-mel patches of 16 kHz audio, outputs the 400 Discogs
+/// styles and the 1280-wide embedding. Licensed CC BY-NC-SA 4.0 by MTG
+/// (https://essentia.upf.edu/models/LICENSE); downloaded by the user's
+/// choice in Settings, never bundled.
+pub const SOUND_EFFNET: ModelSpec = ModelSpec {
+    id: ModelId::SoundEffnet,
+    dir: "discogs-effnet",
+    files: &[FileSpec {
+        name: "discogs-effnet-bsdynamic-1.onnx",
+        url: "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx",
+        size: 18_027_718,
+        sha256: "a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c",
+        extract: &[],
+    }],
+};
+
+pub const ALL: [ModelSpec; 11] = [RUNTIME, SEPARATOR, ALIGNER_MMS, ALIGNER_RU, ALIGNER_JA, ALIGNER_EN, WHISPER, SEPARATOR_DEEP, ALIGNER_RU_DEEP, ALIGNER_SUNG, SOUND_EFFNET];
 
 impl ModelId {
     pub fn spec(self) -> ModelSpec {
