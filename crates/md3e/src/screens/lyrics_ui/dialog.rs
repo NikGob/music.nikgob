@@ -2,8 +2,8 @@
 //! control (container transform: its bounds and corners morph on the
 //! default spatial spring, the content fades in once it has room). Inside:
 //! the sources as a choice, the shown text in full following the song,
-//! under it «Подсветка» (how the text is seen and the timing to make, or
-//! its progress), and at the foot where the text is kept with «Сохранить
+//! under it how the text is seen and the timing to make (or its
+//! progress), and at the foot where the text is kept with «Сохранить
 //! текст». The lyrics editor opens in the same kind of window
 //! ([`window`]).
 
@@ -82,7 +82,8 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let l = &state.lyrics;
     ui.spacing_mut().item_spacing.y = 0.0;
-    // Headline, what is playing, and the way out.
+    // Headline and the settings (the song is the one in front: no line
+    // repeats it).
     ui.allocate_ui_with_layout(vec2(inner.width(), 40.0), Layout::left_to_right(Align::Center), |ui| {
         ui.label(TypeRole::HeadlineSmall.style().rich("Текст песни", s.on_surface));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -92,10 +93,7 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
             }
         });
     });
-    if let Some(p) = super::playing(state) {
-        ui.label(TypeRole::BodyMedium.style().rich(p, s.on_surface_variant));
-    }
-    ui.add_space(16.0);
+    ui.add_space(12.0);
 
     // The sources: one choice, applied at once.
     if let Some(track) = l.track.filter(|_| !l.sources.is_empty()) {
@@ -139,11 +137,12 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
         _ => 1,
     };
     let rows = usize::from(choice) + make_rows;
-    let (head_h, foot_h) = (24.0, 40.0);
+    let foot_h = 40.0;
     // Room for the progress (48) with one row; rows of buttons 12 apart.
     let timing_h = if rows <= 1 { 56.0 } else { rows as f32 * ROW + (rows - 1) as f32 * 12.0 };
-    // 24 of air above the footer under «Подсветка».
-    let below = (if timing { 16.0 + head_h + 8.0 + timing_h + 24.0 } else { 16.0 }) + foot_h;
+    // 24 of air above the footer under the timing (no heading: its
+    // buttons say what it is).
+    let below = (if timing { 16.0 + timing_h + 24.0 } else { 16.0 }) + foot_h;
     let text_h = (inner.bottom() - ui.cursor().top() - below).max(120.0);
     super::text_card(ui, vec2(inner.width(), text_h), state, out);
     let save = l.savable && busy.is_none();
@@ -152,10 +151,6 @@ fn body(ui: &mut Ui, inner: Rect, state: &ViewState, out: &mut Vec<Command>) {
     let save_lead = save && (super::save_first(l) || actions.is_empty());
     if timing {
         ui.add_space(16.0);
-        ui.allocate_ui_with_layout(vec2(inner.width(), head_h), Layout::left_to_right(Align::Center), |ui| {
-            ui.label(TypeRole::TitleSmall.style().rich("Подсветка", s.on_surface));
-        });
-        ui.add_space(8.0);
         let top = ui.cursor().top();
         if let Some(b) = &busy {
             // The progress in the whole height (centred in it).
