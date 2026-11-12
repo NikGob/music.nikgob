@@ -483,26 +483,28 @@ impl Worker {
         }
     }
 
-    /// «Радио по альбому», «Радио по плейлисту»: a radio of the list's
-    /// `ids` the catalog has ([`RadioSeed::Tracks`]); a list of songs the
-    /// catalog lacks (a service's album) is the radio of its first song,
-    /// whose `streams` tell its artists and sound.
+    /// «Радио по альбому», «Радио по плейлисту»: a radio grown from the
+    /// list `ids` ([`list_seed`]; `streams` are a service list's songs).
+    /// The list is only the seed: the radio's picks, filtered as any
+    /// radio's, play first.
     pub(crate) fn start_list_radio(&mut self, ids: &[TrackId], streams: &[StreamTrack], of: &str, name: &str) {
         let title = list_title(of, name);
-        let known: Vec<TrackId> = match self.snapshot() {
-            Some(s) => ids.iter().copied().filter(|t| s.catalog.get(*t).is_some()).collect(),
-            None => ids.to_vec(),
+        let snap = self.snapshot();
+        let seed = {
+            let index = self.analysis.index().read();
+            list_seed(
+                ids,
+                streams,
+                |t| snap.as_ref().is_none_or(|s| s.catalog.get(t).is_some()),
+                |t| index.get(t).copied(),
+                |name| snap.as_ref()?.artist_keys.get(&artist_key(name)).copied(),
+            )
         };
-        if !known.is_empty() {
-            self.start_radio(RadioSeed::Tracks(known), title, EventContext::Radio, None);
-            return;
-        }
-        let (Some(&id), Some(t)) = (ids.first(), streams.first()) else {
+        let Some(seed) = seed else {
             self.toast("Нечего играть", None);
             return;
         };
-        let seed = self.stream_seed(id, t);
-        self.start_radio(seed, title, EventContext::Radio, Some(id));
+        self.start_radio(seed, title, EventContext::Radio, None);
     }
 
     /// The seed of a service's song `t` (the library's `id`) the catalog
@@ -1902,6 +1904,34 @@ impl Worker {
     }
 }
 
+/// The seed of a list's radio: the catalog's tracks of a library list
+/// ([`RadioSeed::Tracks`]); a service's list the catalog lacks songs of,
+/// blended whole as a service song's seed ([`RadioSeed::Stream`] under its
+/// first song): the mean sound of its analysed songs and every library
+/// artist its songs match. None: nothing to grow from.
+fn list_seed(
+    ids: &[TrackId],
+    streams: &[StreamTrack],
+    in_catalog: impl Fn(TrackId) -> bool,
+    vector: impl Fn(TrackId) -> Option<nikgob_recs::Vector>,
+    artist: impl Fn(&str) -> Option<ArtistId>,
+) -> Option<RadioSeed> {
+    if streams.is_empty() || ids.iter().all(|t| in_catalog(*t)) {
+        let known: Vec<TrackId> = ids.iter().copied().filter(|t| in_catalog(*t)).collect();
+        return (!known.is_empty()).then_some(RadioSeed::Tracks(known));
+    }
+    let first = streams.first()?;
+    let vs: Vec<nikgob_recs::Vector> = ids.iter().filter_map(|t| vector(*t)).collect();
+    let vector = (!vs.is_empty()).then(|| std::array::from_fn(|k| vs.iter().map(|v| v[k]).sum::<f32>() / vs.len() as f32));
+    let mut artists: Vec<ArtistId> = Vec::new();
+    for a in streams.iter().flat_map(|t| &t.artists).filter_map(|a| artist(&a.name)) {
+        if !artists.contains(&a) {
+            artists.push(a);
+        }
+    }
+    Some(RadioSeed::Stream { id: first.id.clone(), vector, artists })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1948,6 +1978,66 @@ mod tests {
         old.as_object_mut().unwrap().remove("wave_preset");
         let back: RadioSave = serde_json::from_value(old).unwrap();
         assert_eq!(back.wave_preset, None);
+    }
+
+    fn song(id: &str, artist: &str) -> StreamTrack {
+        let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), id);
+        t.artists = vec![nikgob_core::streaming::ArtistRef::new(None, artist)];
+        t
+    }
+
+    fn sound(x: f32) -> nikgob_recs::Vector {
+        let mut v = [0.0; nikgob_recs::DIM];
+        v[0] = x;
+        v
+    }
+
+    /// A service's list the catalog lacks is blended whole: the mean sound
+    /// of every analysed song of it and every library artist it matches,
+    /// not its first song alone; a library list (or a service list the
+    /// catalog has whole) is its catalog tracks.
+    #[test]
+    fn a_service_list_radio_blends_the_whole_list() {
+        let ids: Vec<TrackId> = (0..3).map(|_| TrackId::new()).collect();
+        let streams = vec![song("a", "Кино"), song("b", "Аквариум"), song("c", "Кино")];
+        let (kino, aquarium) = (ArtistId::new(), ArtistId::new());
+        let artist = |name: &str| match name {
+            "Кино" => Some(kino),
+            "Аквариум" => Some(aquarium),
+            _ => None,
+        };
+        let vector = |t: TrackId| (t != ids[0]).then(|| sound(if t == ids[1] { 1.0 } else { 3.0 }));
+        let seed = list_seed(&ids, &streams, |_| false, vector, artist);
+        let Some(RadioSeed::Stream { id, vector, artists }) = seed else { panic!("{seed:?}") };
+        assert_eq!(id, streams[0].id);
+        assert_eq!(vector.map(|v| v[0]), Some(2.0));
+        assert_eq!(artists, vec![kino, aquarium]);
+        // The catalog has some of it: still the whole list.
+        let some = list_seed(&ids, &streams, |t| t == ids[1], |_| None, |_| None);
+        assert!(matches!(some, Some(RadioSeed::Stream { .. })), "{some:?}");
+        // The catalog has all of it, or it is the library's own.
+        assert_eq!(list_seed(&ids, &streams, |_| true, |_| None, |_| None), Some(RadioSeed::Tracks(ids.clone())));
+        assert_eq!(list_seed(&ids, &[], |t| t != ids[0], |_| None, |_| None), Some(RadioSeed::Tracks(ids[1..].to_vec())));
+        assert_eq!(list_seed(&ids, &[], |_| false, |_| None, |_| None), None);
+        assert_eq!(list_seed(&[], &[], |_| true, |_| None, |_| None), None);
+    }
+
+    /// A list's radio plays none of the list's own songs unasked: its
+    /// seed holds no track to play first, and a service list's first song
+    /// counts as served, so what plays is the radio's picks, which keep
+    /// out the disliked, the banned and (under «Миксы только из
+    /// скачанного») the not downloaded.
+    #[test]
+    fn a_list_radio_plays_the_picks_not_the_list() {
+        let ids: Vec<TrackId> = (0..2).map(|_| TrackId::new()).collect();
+        let streams = vec![song("a", "x"), song("b", "y")];
+        let seed = list_seed(&ids, &streams, |_| false, |_| None, |_| None).expect("a seed");
+        assert!(!matches!(seed, RadioSeed::Track(_)));
+        let engine = Engine::new(seed);
+        assert!(engine.served().any(|i| *i == Item::Stream(streams[0].id.clone())));
+        assert!(!engine.served().any(|i| matches!(i, Item::Track(_))));
+        let library = Engine::new(list_seed(&ids, &[], |_| true, |_| None, |_| None).expect("a seed"));
+        assert_eq!(library.served().count(), 0);
     }
 
     #[test]
