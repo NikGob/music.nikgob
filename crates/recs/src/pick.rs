@@ -8,7 +8,9 @@
 //! the picks in the normalised, weighted bliss space, where a track without
 //! a vector stands as close to another as their shared artist, album or
 //! co-listening says, mended by swaps wherever the path cornered itself
-//! into breaking a rule ([`repair`]).
+//! into breaking a rule ([`repair`]). Each step of the path also costs what
+//! a DJ would mind ([`dj_cost`]): a jump in tempo (half or double tempo
+//! is a smooth step) and a clash of harmony.
 
 use std::collections::{HashMap, HashSet};
 
@@ -525,10 +527,92 @@ fn relation_distance(recs: &Recs<'_>, a: &Slot, b: &Slot, m: f32) -> f32 {
 }
 
 fn distance(recs: &Recs<'_>, a: &Slot, b: &Slot, m: f32) -> f32 {
-    match (&a.vec, &b.vec) {
+    let d = match (&a.vec, &b.vec) {
         (Some(x), Some(y)) => euclid(x, y),
         _ => relation_distance(recs, a, b, m),
+    };
+    d + W_DJ * m * dj_between(recs, a, b)
+}
+
+/// A DJ's step against a step in sound: this many typical distances for
+/// the worst one ([`dj_cost`]).
+const W_DJ: f32 = 0.35;
+
+/// [`dj_cost`] of two slots' tracks (0 when either sound is unknown: new
+/// music keeps its sound embedded only).
+fn dj_between(recs: &Recs<'_>, a: &Slot, b: &Slot) -> f32 {
+    let raw = |s: &Slot| match &s.item {
+        Item::Track(id) => recs.index.get(*id).map(Dj::of),
+        Item::Stream(_) => None,
+    };
+    match (raw(a), raw(b)) {
+        (Some(x), Some(y)) => dj_cost(&x, &y),
+        _ => 0.0,
     }
+}
+
+/// What a DJ hears of a track's bliss vector (features version 2): its
+/// tempo (feature 0, normalised over 0…206 BPM) and its harmony — the six
+/// interval classes and the shares of major and minor triads of its 13
+/// chroma features (10…22).
+///
+/// bliss's chroma features are interval features: they do not depend on
+/// the key, so the key itself (the Camelot number) cannot be read from
+/// them. What can is the Camelot letter (minor A, major B, by the balance
+/// of minor and major triads) and how alike two harmonies are: a step
+/// within one letter of alike harmony is the wheel's step to a neighbour,
+/// a change of letter with alike intervals is the relative major or minor,
+/// both smooth; a change of letter and of harmony is a clash.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Dj {
+    /// Beats per minute, when bliss found beats.
+    pub bpm: Option<f32>,
+    /// Major triads less minor ones (−2…2): the Camelot letter.
+    pub mode: f32,
+    /// The interval classes IC1…IC6 (−1…1 each).
+    pub intervals: [f32; 6],
+}
+
+/// bliss's tempo feature spans this many BPM.
+const BLISS_BPM: f32 = 206.0;
+/// Tempo steps up to this ratio are free…
+const TEMPO_FREE: f32 = 1.04;
+/// …and from this one cost all a tempo step can.
+const TEMPO_FULL: f32 = 1.16;
+/// Half or double tempo costs this much besides its step.
+const TEMPO_FOLD: f32 = 0.05;
+
+impl Dj {
+    pub(crate) fn of(v: &Vector) -> Self {
+        let bpm = (v[0] + 1.0) / 2.0 * BLISS_BPM;
+        let at = |k: usize| v.get(k).copied().unwrap_or(0.0);
+        Self {
+            bpm: (v[0] > -0.99 && (40.0..=240.0).contains(&bpm)).then_some(bpm),
+            mode: at(16) - at(17),
+            intervals: std::array::from_fn(|k| at(10 + k)),
+        }
+    }
+}
+
+/// How much a DJ would mind going from `a` to `b` (0 a seamless step, 1 a
+/// jarring one): half the tempo step (a change of up to 4 % free, 16 % and
+/// more all of it, half or double tempo a little more than its step), half
+/// the harmony (the change of letter weighed by how unlike the intervals
+/// are, besides how unlike they are). An unknown tempo costs nothing.
+pub(crate) fn dj_cost(a: &Dj, b: &Dj) -> f32 {
+    let tempo = match (a.bpm, b.bpm) {
+        (Some(x), Some(y)) => {
+            let r = (y / x).ln().abs();
+            let fold = (r - std::f32::consts::LN_2).abs() + TEMPO_FOLD;
+            let step = r.min(fold);
+            ((step - TEMPO_FREE.ln()) / (TEMPO_FULL.ln() - TEMPO_FREE.ln())).clamp(0.0, 1.0)
+        }
+        _ => 0.0,
+    };
+    let unlike = (a.intervals.iter().zip(&b.intervals).map(|(x, y)| (x - y) * (x - y)).sum::<f32>() / 6.0).sqrt().min(1.0);
+    let flip = ((a.mode - b.mode).abs() / 2.0).min(1.0);
+    let harmony = (0.5 * unlike + 0.5 * flip * unlike.max(0.25) * 2.0).min(1.0);
+    0.5 * tempo + 0.5 * harmony
 }
 
 /// The median distance between consecutive vectored slots (1.0 without).
@@ -794,6 +878,36 @@ mod tests {
         // One world only: no cap.
         let alone = select_diverse(slots(0..30), 20, &rules, &mut HashSet::new());
         assert_eq!(alone.len(), 20);
+    }
+
+    /// A DJ's step: a little tempo change is free, half or double tempo a
+    /// small step, a jump costly, an unknown tempo free; a change of letter
+    /// with alike intervals (the relative key) is smooth, with unlike ones
+    /// a clash.
+    #[test]
+    fn a_djs_step() {
+        let v = |bpm: f32, mode: f32, ic: f32| -> Vector {
+            let mut v = [0.0; crate::DIM];
+            v[0] = bpm / BLISS_BPM * 2.0 - 1.0;
+            for x in &mut v[10..16] {
+                *x = ic;
+            }
+            v[16] = mode / 2.0;
+            v[17] = -mode / 2.0;
+            v
+        };
+        let a = Dj::of(&v(120.0, 1.0, 0.2));
+        assert!((a.bpm.unwrap() - 120.0).abs() < 0.01);
+        let near = dj_cost(&a, &Dj::of(&v(122.0, 1.0, 0.2)));
+        let double = dj_cost(&a, &Dj::of(&v(240.0, 1.0, 0.2)));
+        let jump = dj_cost(&a, &Dj::of(&v(150.0, 1.0, 0.2)));
+        assert!(near < 0.01, "{near}");
+        assert!(double < 0.1 && double < jump, "{double} {jump}");
+        assert!((jump - 0.5).abs() < 1e-3, "{jump}");
+        assert_eq!(dj_cost(&a, &Dj::of(&v(0.0, 1.0, 0.2))), 0.0, "no beats found");
+        let relative = dj_cost(&a, &Dj::of(&v(120.0, -1.0, 0.2)));
+        let clash = dj_cost(&a, &Dj::of(&v(120.0, -1.0, -0.8)));
+        assert!(relative < 0.2 && clash > 0.4, "{relative} {clash}");
     }
 
     #[test]

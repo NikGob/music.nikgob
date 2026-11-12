@@ -1105,6 +1105,9 @@ impl Worker {
                 self.turn.lap("end recorded");
                 match self.queue.skip_forward() {
                     Some(e) => self.start(e),
+                    // The radio replaced its tail: its picks play when
+                    // they come.
+                    None if self.radio_holds() => self.wait_for_radio(),
                     None => self.stop(),
                 }
             }
@@ -1257,7 +1260,11 @@ impl Worker {
                 }
             }
             Command::RemoveFromQueue(entry) => {
+                let track = self.queue.upcoming().iter().find(|e| e.id == entry).map(|e| e.track);
                 self.queue.remove(entry);
+                if let Some(t) = track {
+                    self.radio_removed(entry, t);
+                }
                 self.preload_next();
                 self.publish_player();
             }
@@ -1334,6 +1341,7 @@ impl Worker {
                         if on {
                             self.liked_undislikes(t);
                             self.new_liked(t);
+                            self.recs_liked(t);
                         }
                         let _ = self.lib.record_event(
                             t,
@@ -2187,6 +2195,17 @@ impl Worker {
         self.publish_now_playing();
     }
 
+    /// The skipped track stops and the player waits, buffering, for what
+    /// the radio is picking ([`Self::radio_holds`]).
+    fn wait_for_radio(&mut self) {
+        // Nothing current: the first pick that comes is (repeat is off,
+        // or «Дальше» would have wrapped).
+        let _ = self.queue.advance_auto();
+        self.stop();
+        self.status = Status::Buffering;
+        self.publish_player();
+    }
+
     fn seek(&mut self, p: Duration) {
         if self.playing.is_none() {
             // The restored track: play will start from here.
@@ -2210,6 +2229,7 @@ impl Worker {
                 Some(p.as_millis() as u32),
                 self.play_context,
             );
+            self.recs_seeked(e.track, p.as_millis() as u32);
         }
         self.publish_player();
     }
@@ -2302,9 +2322,10 @@ impl Worker {
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
         let position_ms = pos.as_millis() as u32;
         if reason != EndReason::AppClosed {
-            self.radio_feedback(e.track, complete, position_ms);
             self.recs_played();
-            self.recs_ended(e.track, complete, position_ms);
+            self.recs_ended(e.track, complete, position_ms, dur);
+            // After the session: the radio reads its verdict.
+            self.radio_feedback(e.track, complete, position_ms, dur);
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();

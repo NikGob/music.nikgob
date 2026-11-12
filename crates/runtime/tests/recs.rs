@@ -297,14 +297,14 @@ fn play_mix_plays_and_records_the_home_context() {
 
     s.rt.send(Command::PlayMix { id: MixId::Mood(Mood::Calm) });
     wait_for(&s.rt, "the mood's radio", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.title == "Спокойное") && st.queue.next.len() >= 9
+        st.queue.radio.as_ref().is_some_and(|r| r.title == "Спокойное") && st.queue.next.len() >= 3
     });
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::HomeSection);
     assert_eq!(s.rt.state().player.context_line(), "Играет из микса «Спокойное»");
 
     s.rt.send(Command::PlayMix { id: MixId::Style(0) });
     wait_for(&s.rt, "the style's radio", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.title.contains(" и другие")) && st.queue.next.len() >= 9
+        st.queue.radio.as_ref().is_some_and(|r| r.title.contains(" и другие")) && st.queue.next.len() >= 3
     });
 
     // Playing anything else ends the radio (a lone track goes on by
@@ -332,7 +332,7 @@ fn autoplay_goes_on_after_the_last_track_with_nothing_the_queue_had() {
     end_current(&s);
     // The last track plays: similar ones join the queue behind it.
     wait_for(&s.rt, "autoplay", |st| {
-        st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 10
+        st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 3
     });
     let st = s.rt.state();
     assert_eq!(st.queue.radio.as_ref().unwrap().title, format!("Похожее на «{}»", st.player.current.as_ref().unwrap().title));
@@ -359,13 +359,13 @@ fn a_radio_switched_to_downloaded_only_drops_what_streams_and_picks_again() {
     let s = start(&l.lib, Vec::new(), Prefs::default(), None);
     wait_for(&s.rt, "the home", home_ready);
     s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[1]) });
-    wait_for(&s.rt, "the stream's radio", |st| st.queue.radio.is_some() && st.queue.next.len() >= 8);
+    wait_for(&s.rt, "the stream's radio", |st| st.queue.radio.is_some() && st.queue.next.len() >= 3);
     let streamed = |st: &ViewState| st.queue.next.iter().filter(|e| streams.contains(&e.track.id)).count();
     assert!(streamed(&s.rt.state()) > 0, "the radio of a streamed song plays its neighbours");
 
     let prefs = Prefs { mixes_downloaded_only: true, ..s.rt.state().prefs.clone() };
     s.rt.send(Command::SetPrefs(Box::new(prefs)));
-    wait_for(&s.rt, "only files ahead", |st| streamed(st) == 0 && st.queue.next.len() >= 4);
+    wait_for(&s.rt, "only files ahead", |st| streamed(st) == 0 && st.queue.next.len() >= 2);
     assert!(s.rt.state().queue.next.iter().all(|e| e.track.has_local));
 }
 
@@ -391,16 +391,16 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     s.rt.send(Command::StartRadio { seed: RadioSeed::Track(seed) });
     wait_until("the seed plays", || !s.asked.lock().unwrap().is_empty());
     assert_eq!(s.rt.state().player.current.as_ref().map(|t| t.id), Some(seed));
-    wait_for(&s.rt, "ten more", |st| st.queue.next.len() == 10);
+    wait_for(&s.rt, "three ahead", |st| st.queue.next.len() == 3);
     let title = s.rt.state().queue.radio.clone().unwrap().title;
     assert!(title.starts_with("Радио · "), "{title}");
     assert_eq!(current_start(&l.lib, &s.rt).context, EventContext::Radio);
 
-    // Down to three left: ten more come by themselves.
+    // Two left: the short buffer fills up to three again by itself.
     for _ in 0..7 {
         end_current(&s);
     }
-    wait_for(&s.rt, "the queue to extend", |st| st.queue.next.len() == 13);
+    wait_for(&s.rt, "the queue to extend", |st| st.queue.next.len() == 3 && st.queue.prev.len() == 7);
     let upcoming: Vec<TrackId> = s.rt.state().queue.next.iter().map(|e| e.track.id).collect();
     let played: Vec<TrackId> = s.rt.state().queue.prev.iter().map(|e| e.track.id).collect();
     assert!(upcoming.iter().all(|t| !played.contains(t)), "nothing served twice");
@@ -410,13 +410,22 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     let s = start(&l.lib, Vec::new(), Prefs::default(), Some(&prefs_path));
     wait_for(&s.rt, "the radio back", |st| st.queue.radio.as_ref().is_some_and(|r| r.title == title));
     let left = s.rt.state().queue.next.len();
-    assert_eq!(left, 13);
+    assert_eq!(left, 3);
+    let restored: Vec<u64> = s.rt.state().queue.next.iter().map(|e| e.entry).collect();
     s.rt.send(Command::TogglePlay);
     wait_until("the restored track plays", || !s.asked.lock().unwrap().is_empty());
+    // The restored tail is still the radio's: a skip picks it again.
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "the restored tail picked again", |st| {
+        st.queue.current_entry == Some(restored[0])
+            && st.queue.radio.as_ref().is_some_and(|r| !r.extending)
+            && st.queue.next.len() == 3
+            && !st.queue.next.iter().any(|e| restored[1..].contains(&e.entry))
+    });
     for _ in 0..10 {
         end_current(&s);
     }
-    wait_for(&s.rt, "the restored radio to extend", |st| st.queue.next.len() == 13);
+    wait_for(&s.rt, "the restored radio to extend", |st| st.queue.next.len() == 3 && st.queue.prev.len() >= 17);
 }
 
 /// Every start says who chose it and what plays it, every end why it
@@ -549,7 +558,7 @@ fn an_early_skip_teaches_the_radio() {
     let s = start(&l.lib, Vec::new(), Prefs::default(), Some(&prefs_path));
     wait_for(&s.rt, "the home", home_ready);
     s.rt.send(Command::StartRadio { seed: RadioSeed::Artist(l.artists[0]) });
-    wait_for(&s.rt, "the artist's radio", |st| st.queue.next.len() >= 9 && st.player.current.is_some());
+    wait_for(&s.rt, "the artist's radio", |st| st.queue.next.len() >= 3 && st.player.current.is_some());
     let skipped = s.rt.state().player.current.as_ref().unwrap().id;
     s.rt.send(Command::Next);
     wait_for(&s.rt, "the next one", |st| st.player.current.as_ref().is_some_and(|t| t.id != skipped));
@@ -558,6 +567,75 @@ fn an_early_skip_teaches_the_radio() {
         serde_json::from_slice(&std::fs::read(dir.path().join("session.json")).unwrap()).unwrap();
     let lessons = &session["radio"]["state"]["skipped"];
     assert_eq!(lessons[0]["Track"], serde_json::json!(skipped.to_string()), "{lessons}");
+}
+
+/// The radio's short tail follows what the user does (recs-v2.0 §3.1):
+/// an early skip keeps the next track (it is preloaded) and picks the rest
+/// again; a second one running replaces the whole tail, and playback waits
+/// for the new picks; a pick taken out by hand replaces the radio's tail
+/// too, and what the user queued stays where it is.
+#[test]
+fn the_radio_tail_follows_skips_and_removals() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(l.tracks[3]) });
+    wait_until("the seed plays", || !s.asked.lock().unwrap().is_empty());
+    let settled = |st: &ViewState| st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() == 3;
+    wait_for(&s.rt, "three ahead", settled);
+    let entries = |st: &ViewState| st.queue.next.iter().map(|e| e.entry).collect::<Vec<u64>>();
+    let before = entries(&s.rt.state());
+
+    // One early skip: the next one plays, the two after it are picked again.
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "the tail picked again", |st| {
+        st.queue.current_entry == Some(before[0]) && settled(st) && !entries(st).iter().any(|e| before[1..].contains(e))
+    });
+
+    // A second one running: the whole tail, the next one too.
+    let before = entries(&s.rt.state());
+    let asked = s.asked.lock().unwrap().len();
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "a new tail", |st| {
+        st.queue.current_entry.is_some_and(|e| !before.contains(&e)) && settled(st) && !entries(st).iter().any(|e| before.contains(e))
+    });
+    assert!(s.asked.lock().unwrap().len() > asked, "a new pick plays");
+
+    // Two left, the extension on its way, two skips running at once: the
+    // old tail goes at once, none of it plays, the new picks do.
+    let before = entries(&s.rt.state());
+    let (id, mark) = {
+        let asked = s.asked.lock().unwrap();
+        (asked.last().unwrap().id, asked.len())
+    };
+    s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
+    // At once, the extension it starts still on its way.
+    while s.asked.lock().unwrap().len() == mark {
+        std::hint::spin_loop();
+    }
+    s.rt.send(Command::Next);
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "a new tail after the extension", |st| {
+        st.queue.current_entry.is_some_and(|e| !before.contains(&e)) && settled(st) && !entries(st).iter().any(|e| before.contains(e))
+    });
+    let played: Vec<u64> = s.asked.lock().unwrap()[mark + 1..].iter().map(|r| r.id).collect();
+    assert!(!played.contains(&before[2]), "the replaced tail never plays: {played:?} of {before:?}");
+
+    // The user's own track behind the radio's; one of the radio's taken
+    // out: the radio's others go, the user's stays.
+    let queued: Vec<TrackId> = queued(&s.rt.state());
+    let own = *l.tracks.iter().find(|t| !queued.contains(t)).unwrap();
+    s.rt.send(Command::Enqueue(vec![own]));
+    wait_for(&s.rt, "the user's track", |st| st.queue.next.iter().any(|e| e.track.id == own));
+    let radios: Vec<u64> = s.rt.state().queue.next.iter().filter(|e| e.track.id != own).map(|e| e.entry).collect();
+    s.rt.send(Command::RemoveFromQueue(radios[0]));
+    wait_for(&s.rt, "the radio's tail replaced", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| !r.extending)
+            && st.queue.next.len() == 3
+            && st.queue.next[0].track.id == own
+            && !entries(st).iter().any(|e| radios.contains(e))
+    });
 }
 
 fn daylist_picks(lib: &Library) -> serde_json::Value {
@@ -617,7 +695,7 @@ fn the_home_gets_a_daylist_and_tiles_that_play() {
     for _ in 0..27 {
         end_current(&s);
     }
-    wait_for(&s.rt, "the daylist to extend", |st| st.queue.next.len() == 12);
+    wait_for(&s.rt, "the daylist to extend", |st| st.queue.next.len() == 3 && st.queue.prev.len() == 27);
     let upcoming: Vec<TrackId> = s.rt.state().queue.next.iter().map(|e| e.track.id).collect();
     let played: Vec<TrackId> = s.rt.state().queue.prev.iter().map(|e| e.track.id).collect();
     assert!(upcoming.iter().all(|t| !played.contains(t)), "nothing served twice");
@@ -699,7 +777,7 @@ fn downloaded_only_keeps_every_mix_to_files_at_once() {
     for id in mixes {
         let before = queued(&s.rt.state());
         s.rt.send(Command::PlayMix { id });
-        wait_for(&s.rt, &format!("{id:?} plays"), |st| queued(st).len() >= 8 && queued(st) != before);
+        wait_for(&s.rt, &format!("{id:?} plays"), |st| queued(st).len() >= 4 && queued(st) != before);
         let q = queued(&s.rt.state());
         assert_eq!(streamed(&q), 0, "{id:?} plays a stream");
     }
@@ -707,7 +785,8 @@ fn downloaded_only_keeps_every_mix_to_files_at_once() {
     // a service), then only files.
     s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[0]) });
     let radio = |st: &ViewState| st.queue.radio.as_ref().is_some_and(|r| r.title == "Радио · Stream song 0");
-    wait_for(&s.rt, "the stream's radio", |st| radio(st) && queued(st).len() >= 8);
+    // The song cannot play: the radio's three picks wait.
+    wait_for(&s.rt, "the stream's radio", |st| radio(st) && queued(st).len() >= 3);
     let q: Vec<TrackId> = queued(&s.rt.state()).into_iter().filter(|t| *t != streams[0]).collect();
     assert_eq!(streamed(&q), 0);
 }
@@ -1114,6 +1193,55 @@ fn autoplay_brings_back_nothing_the_queue_played_as_new_music() {
     assert!(st.queue.next.iter().all(|e| !ids.contains(&e.track.id)), "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
 }
 
+/// New music the service's radio brings after the queue was picked joins
+/// the three ahead in the place of the radio's own picks: never more than
+/// three.
+#[test]
+fn new_music_keeps_the_radio_to_three_ahead() {
+    let l = library(0, 0, 0, KNOWN);
+    let (yt, dz) = fakes();
+    let prefs = Prefs {
+        graph_services: false,
+        graph_open_data: false,
+        radio_new_share: nikgob_view::RadioNewShare::None,
+        // Its album going on first is another rule.
+        autoplay_continue_world: false,
+        ..Prefs::default()
+    };
+    let album = tokio::runtime::Runtime::new().unwrap().block_on(yt.album("yt-alb-firstlove")).unwrap();
+    // One song of the album: the rest of it is new music.
+    let ids = l.lib.upsert_stream_tracks(&album.tracks[..1]).unwrap();
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
+    wait_for(&s.rt, "the hero", |st| st.home.hero.is_some());
+    s.rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Трек".into() });
+    wait_until("the first plays", || !s.asked.lock().unwrap().is_empty());
+    wait_for(&s.rt, "autoplay of the library", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 3
+    });
+    // New music on: the service's radio answers after the three were
+    // picked, its share owed.
+    // (The fake's songs have no sound: they come in as blind picks.)
+    let prefs = Prefs {
+        radio_new_share: nikgob_view::RadioNewShare::More,
+        radio_explore: nikgob_view::RadioExplore::Often,
+        ..s.rt.state().prefs.clone()
+    };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    let (mut most, mut joined) = (0, None);
+    let t = Instant::now();
+    while joined.is_none_or(|at: Instant| at.elapsed() < Duration::from_secs(1)) {
+        assert!(t.elapsed() < Duration::from_secs(60), "no new music joined the queue");
+        let st = s.rt.state();
+        most = most.max(st.queue.next.len());
+        if joined.is_none() && st.queue.next.iter().any(|e| !ids.contains(&e.track.id) && !e.track.has_local) {
+            joined = Some(Instant::now());
+        }
+        drop(st);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(most <= 3, "{most} ahead");
+}
+
 /// A lone stream the library does not hold (played from its album's page),
 /// started before the first build of the recommendations: autoplay still
 /// knows it by its artist and keeps to that artist's sound, not to the
@@ -1136,10 +1264,19 @@ fn autoplay_of_a_lone_stream_before_the_first_build_keeps_to_its_artist() {
     };
     let s = start(&l.lib, vec![yt.clone()], prefs, None);
     s.rt.send(Command::PlayTracks { tracks: vec![seed], start: 0, context: "Трек".into() });
-    wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 10);
-    let st = s.rt.state();
+    // Its first ten picks, three at a time as they play.
+    let mut seen: Vec<String> = Vec::new();
+    while seen.len() < 10 {
+        wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() >= 3);
+        for e in s.rt.state().queue.next.iter() {
+            if !seen.contains(&e.track.title) {
+                seen.push(e.track.title.clone());
+            }
+        }
+        end_current(&s);
+    }
     // Titles are `Artist {style}-{a} song {n}` (the stream's album may lend
     // the artist its own name).
-    let of_style = st.queue.next.iter().take(10).filter(|e| e.track.title.starts_with(&format!("Artist {style}-"))).count();
-    assert!(of_style >= 8, "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
+    let of_style = seen.iter().take(10).filter(|t| t.starts_with(&format!("Artist {style}-"))).count();
+    assert!(of_style >= 8, "{seen:?}");
 }

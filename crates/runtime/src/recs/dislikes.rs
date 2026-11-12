@@ -184,7 +184,9 @@ impl Worker {
             Some(("Отменить".into(), Command::Dislike { track, dislike: false, sure: true, relike: liked })),
         );
         self.dislikes_changed();
-        if self.playing.is_some_and(|e| e.track == track) && self.state.read().prefs.dislike_skips {
+        let skips = self.state.read().prefs.dislike_skips;
+        self.radio_disliked(track, skips);
+        if self.playing.is_some_and(|e| e.track == track) && skips {
             self.command(Command::Next);
         }
         // A few of one artist: offer to leave the artist out.
