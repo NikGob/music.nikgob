@@ -25,6 +25,8 @@
 //!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.
 //! * [`world_mixes`]: the mixes of a world's page; [`explain`]: why a mix
 //!   or a pick, in one line.
+//! * [`open_world`]: new music beyond the library — the niches, their
+//!   sound, the next of a wave (docs/recommendations.md §1).
 //! * [`graph`]: the graph of similar music other listeners know (the
 //!   services' radios and similar artists, ListenBrainz, Last.fm, the tags
 //!   of MusicBrainz) and the user's own (an imported history, the
@@ -49,6 +51,7 @@ pub mod mixes;
 pub mod model;
 pub mod mood;
 pub mod novelty;
+pub mod open_world;
 pub mod pick;
 pub mod profiles;
 pub mod radio;

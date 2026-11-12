@@ -20,7 +20,11 @@
 //! over the distinct seeds that found it of the seed's weight (0.75…1 by
 //! its affinity, a little more when the song stood high in the seed's
 //! list; a service suggesting it itself, [`SeedRef::Service`], weighs
-//! [`crate::suggest::SERVICE_VOTE`]), plus [`NEW_ARTIST_BONUS`] for an
+//! [`crate::suggest::SERVICE_VOTE`]), times [`multi_seed`] of the
+//! independent seeds (docs/recommendations.md §1.3: a song two or three
+//! of the user's seeds lead to stands far above a lone answer of one
+//! request; the services' own suggestions count as one), plus
+//! [`NEW_ARTIST_BONUS`] for an
 //! artist the library does not
 //! know, times [`CLIP_FACTOR`] for a music video. Known songs, disliked
 //! songs and artists, junk ([`crate::junk`], against the canonical
@@ -40,7 +44,9 @@
 //! artist, and leaves an artist skipped twice in a month out. The best
 //! [`DISCOVERIES`], spread over the profiles by their shares
 //! ([`crate::regions::spread`]), at most [`PER_ARTIST`] per artist, no
-//! artist twice in a row of three.
+//! artist twice in a row of three; a larger pool (the open world's,
+//! §1.1) goes on past them with [`POOL_PER_ARTIST`] of an artist at most,
+//! the first [`DISCOVERIES`] what they were.
 //!
 //! **«Новые релизы».** For the artists with affinity
 //! ([`Recs::release_artists`]) the runtime fetches discographies; albums
@@ -84,6 +90,10 @@ pub const ELSEWHERE_SEEDS: usize = 4;
 pub const SEED_RECENT_MS: i64 = 30 * DAY_MS;
 pub const DISCOVERIES: usize = 30;
 pub const PER_ARTIST: usize = 2;
+/// An artist's songs at most in a pool past the first [`DISCOVERIES`].
+pub const POOL_PER_ARTIST: usize = 4;
+/// What each independent seed past the first adds to a song's votes.
+pub const MULTI_SEED: f32 = 0.75;
 pub const NEW_ARTIST_BONUS: f32 = 0.25;
 pub const CLIP_FACTOR: f32 = 0.7;
 /// A song's place in a seed's list adds up to this share of the seed.
@@ -522,6 +532,12 @@ fn better_version(a: &StreamTrack, b: &StreamTrack) -> bool {
     rank(b) > rank(a)
 }
 
+/// The factor of a song `seeds` independent seeds lead to: 1 for one, then
+/// [`MULTI_SEED`] more for each of the second and the third.
+pub fn multi_seed(seeds: usize) -> f32 {
+    1.0 + MULTI_SEED * (seeds.clamp(1, 3) - 1) as f32
+}
+
 /// The discoveries of a pass (see the module docs), best first.
 pub fn rank_discoveries(seeds: &DiscoverySeeds, finds: &[SeedFinds], filter: &DiscoveryFilter) -> Vec<Discovery> {
     rank_discoveries_with(seeds, finds, filter, None)
@@ -695,7 +711,10 @@ pub fn rank_discoveries_upto(
         .filter_map(|(key, c)| {
             let artist = c.track.artists.first().map(|a| artist_key(&a.name)).unwrap_or_default();
             let new_artist = !filter.known_artists.contains(&artist);
-            let mut score: f32 = c.seeds.values().sum();
+            // The services' own suggestions count as one seed.
+            let services = c.seeds.keys().any(|s| matches!(s, SeedRef::Service(_)));
+            let independent = c.seeds.keys().filter(|s| !matches!(s, SeedRef::Service(_))).count() + usize::from(services);
+            let mut score: f32 = c.seeds.values().sum::<f32>() * multi_seed(independent);
             if new_artist {
                 score += NEW_ARTIST_BONUS;
             }
@@ -739,18 +758,31 @@ pub fn rank_discoveries_upto(
     }
 
 
-    // At most two per artist; no artist twice within three.
+    // At most two per artist; no artist twice within three. A pool past
+    // the first ones takes more of an artist after every artist's first.
+    let cap = if keep > DISCOVERIES { POOL_PER_ARTIST } else { PER_ARTIST };
     let mut per: HashMap<String, usize> = HashMap::new();
     let mut pool: Vec<Discovery> = Vec::new();
+    let mut more: Vec<Discovery> = Vec::new();
     for (d, _) in out {
         let a = artist_key(&d.track.artists[0].name);
         let c = per.entry(a).or_default();
         if *c < PER_ARTIST {
-            *c += 1;
             pool.push(d);
+        } else if *c < cap {
+            more.push(d);
         }
+        *c += 1;
     }
-    let mut result: Vec<Discovery> = Vec::with_capacity(keep);
+    let mut result: Vec<Discovery> = Vec::with_capacity(keep.min(pool.len() + more.len()));
+    pick_spread(&mut result, pool, keep);
+    pick_spread(&mut result, more, keep);
+    result
+}
+
+/// Moves `pool` (best first) onto `result` up to `keep`, never an artist
+/// within three.
+fn pick_spread(result: &mut Vec<Discovery>, mut pool: Vec<Discovery>, keep: usize) {
     while result.len() < keep && !pool.is_empty() {
         let recent: Vec<String> = result
             .iter()
@@ -764,7 +796,6 @@ pub fn rank_discoveries_upto(
             .unwrap_or(0);
         result.push(pool.remove(i));
     }
-    result
 }
 
 #[cfg(test)]
@@ -869,6 +900,53 @@ mod tests {
         assert_eq!(more.len(), 2 * DISCOVERIES);
         let titles = |d: &[Discovery]| d.iter().map(|d| d.track.title.clone()).collect::<Vec<_>>();
         assert_eq!(titles(&more[..DISCOVERIES]), titles(&first));
+    }
+
+    /// A song three seeds lead to stands far above the lone answers of the
+    /// most loved seed; the services' suggestions count as one seed.
+    #[test]
+    fn independent_seeds_multiply() {
+        assert_eq!(multi_seed(1), 1.0);
+        assert!(multi_seed(3) > multi_seed(2) && multi_seed(2) > 1.0);
+        assert_eq!(multi_seed(9), multi_seed(3));
+        let mut finds = vec![SeedFinds {
+            seed: SeedRef::Track(tid(1)),
+            tracks: (0..5).map(|k| st(Service::Youtube, &format!("l{k}"), &format!("Lone {k}"), &format!("Lone {k}"))).collect(),
+        }];
+        for s in [2, 3] {
+            finds.push(SeedFinds { seed: SeedRef::Track(tid(s)), tracks: vec![st(Service::Youtube, "x", "Shared", "Bridge")] });
+        }
+        finds[0].tracks.push(st(Service::Youtube, "x", "Shared", "Bridge"));
+        let out = rank_discoveries(&seeds(), &finds, &DiscoveryFilter::default());
+        assert_eq!(out[0].track.title, "Shared");
+        assert!(out[0].score > 3.0 * out[1].score, "{} vs {}", out[0].score, out[1].score);
+        // Two services suggesting a song are one seed.
+        let two = vec![
+            SeedFinds { seed: SeedRef::Service(Service::Youtube), tracks: vec![st(Service::Youtube, "s", "Suggested", "S")] },
+            SeedFinds { seed: SeedRef::Service(Service::Deezer), tracks: vec![st(Service::Deezer, "9", "Suggested", "S")] },
+        ];
+        let out = rank_discoveries(&seeds(), &two, &DiscoveryFilter::default());
+        assert!((out[0].score - 2.0 * (1.0 + RANK_BONUS) * crate::suggest::SERVICE_VOTE - NEW_ARTIST_BONUS).abs() < 1e-4, "{}", out[0].score);
+    }
+
+    /// A pool larger than the home's row goes on past it with up to four
+    /// songs of an artist, after every artist's first two.
+    #[test]
+    fn a_large_pool_takes_more_of_an_artist_after_the_others() {
+        let mut tracks = Vec::new();
+        for a in 0..10 {
+            for k in 0..6 {
+                tracks.push(st(Service::Youtube, &format!("{a}-{k}"), &format!("Song {a} {k}"), &format!("Artist {a}")));
+            }
+        }
+        let finds = vec![SeedFinds { seed: SeedRef::Artist(aid(1)), tracks }];
+        let out = rank_discoveries_upto(&seeds(), &finds, &DiscoveryFilter::default(), None, 400);
+        assert_eq!(out.len(), 40, "four of each of ten artists");
+        let firsts: HashSet<String> = out[..20].iter().map(|d| d.track.artists[0].name.clone()).collect();
+        assert_eq!(firsts.len(), 10, "every artist's first two before anyone's third");
+        let head = rank_discoveries(&seeds(), &finds, &DiscoveryFilter::default());
+        assert_eq!(head.len(), 20);
+        assert_eq!(head.iter().map(|d| &d.key).collect::<Vec<_>>(), out[..20].iter().map(|d| &d.key).collect::<Vec<_>>());
     }
 
     #[test]

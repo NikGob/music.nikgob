@@ -12,6 +12,20 @@
 //!   keeps the best [`TRACK_TOP`] of each track, artist → artist the best
 //!   [`ARTIST_TOP`] of each artist, with the likeness of the artists' tags
 //!   ([`TAG_WEIGHT`] of their IDF cosine) joining the lists.
+//! * **Bridges through the music the library lacks** (docs/recommendations.md
+//!   §1.3): two of the library's tracks (or artists) whose lists name the
+//!   same songs (artists) the library does not hold are linked by them —
+//!   co-citation `A → X ← B` — each shared node weighing as Adamic–Adar
+//!   says, `1 / ln(2 + deg X)` (a hit every list names says little, a
+//!   niche song two lists share says much); the sum joins the lists at
+//!   [`CO_WEIGHT`] at most. A node named by more than [`CO_MAX_DEG`] of
+//!   them is left out (its pairs would cost much and weigh nothing).
+//! * **The walk** ([`SimGraph::walk`]): three steps of a random walk with
+//!   restart from the session's tracks — the first step the edges
+//!   themselves (what one hop always said), the next two each
+//!   [`WALK_DAMP`] of the step before spread over the neighbours by their
+//!   edges — so a track two or three hops from what plays is linked too,
+//!   without a matrix: the strongest [`WALK_KEEP`] of each step go on.
 //! * **The prior** of each track ([`SimGraph::prior`]): how much of the
 //!   graph of the rest of the library meets on it and where it stands in
 //!   its artist's popularity, ranked within the catalog to 0…1 — the
@@ -49,6 +63,17 @@ const TAG_POSTINGS: usize = 2_000;
 /// weigh beside the track's own centrality.
 const PRIOR_ARTIST: f32 = 0.5;
 const PRIOR_POPULAR: f32 = 0.7;
+/// Co-citation through nodes the library lacks joins at this weight at
+/// most…
+pub const CO_WEIGHT: f32 = 0.6;
+/// …a node named by more of the library's tracks or artists than this is
+/// left out.
+pub const CO_MAX_DEG: usize = 80;
+/// The walk: its steps, the share each step past the first passes on, and
+/// the strongest tracks of a step that go on.
+pub const WALK_STEPS: usize = 3;
+pub const WALK_DAMP: f32 = 0.5;
+pub const WALK_KEEP: usize = 200;
 /// A pause this long ends a session of an imported history.
 pub const IMPORT_GAP_MS: i64 = 30 * 60_000;
 
@@ -122,11 +147,22 @@ pub struct GraphInput {
     /// A track's place in its artist's popularity (0 the best known) of
     /// how many listed.
     pub popular: Vec<(TrackId, u32, u32)>,
+    /// Edges to songs the catalog lacks: the library's track, the song (a
+    /// number the runtime gives each song it names) and the edge's weight
+    /// ([`rank_weight`] times the source's trust): co-citation.
+    pub outside_tracks: Vec<(TrackId, u32, f32)>,
+    /// The same of artists the library lacks.
+    pub outside_artists: Vec<(ArtistId, u32, f32)>,
 }
 
 impl GraphInput {
     pub fn is_empty(&self) -> bool {
-        self.tracks.is_empty() && self.artists.is_empty() && self.tags.is_empty() && self.popular.is_empty()
+        self.tracks.is_empty()
+            && self.artists.is_empty()
+            && self.tags.is_empty()
+            && self.popular.is_empty()
+            && self.outside_tracks.is_empty()
+            && self.outside_artists.is_empty()
     }
 }
 
@@ -142,6 +178,43 @@ pub struct SimGraph {
 /// Noisy or of `w` into `slot`.
 fn join(slot: &mut f32, w: f32) {
     *slot = 1.0 - (1.0 - *slot) * (1.0 - w.clamp(0.0, 1.0));
+}
+
+/// Co-citation (see the module docs): of `edges` (a subject of the
+/// catalog, the outside node it names, the edge's weight), each pair of
+/// subjects `held` by the sum over the nodes they share of the product of
+/// their weights over `ln(2 + deg)`, as an edge of [`CO_WEIGHT`] at most,
+/// both ways.
+pub fn cocite<K: Copy + Eq + std::hash::Hash + Ord>(edges: &[(K, u32, f32)], held: &dyn Fn(K) -> bool) -> HashMap<K, HashMap<K, f32>> {
+    let mut by_node: HashMap<u32, Vec<(K, f32)>> = HashMap::new();
+    for &(k, x, w) in edges {
+        if w > 0.0 && held(k) {
+            by_node.entry(x).or_default().push((k, w.min(1.0)));
+        }
+    }
+    let mut sum: HashMap<(K, K), f32> = HashMap::new();
+    for mut citers in by_node.into_values() {
+        // One subject once (the best of its edges to the node).
+        citers.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)));
+        citers.dedup_by(|a, b| a.0 == b.0);
+        let d = citers.len();
+        if !(2..=CO_MAX_DEG).contains(&d) {
+            continue;
+        }
+        let idf = 1.0 / (2.0 + d as f32).ln();
+        for a in 0..d {
+            for b in a + 1..d {
+                *sum.entry((citers[a].0, citers[b].0)).or_default() += citers[a].1 * citers[b].1 * idf;
+            }
+        }
+    }
+    let mut out: HashMap<K, HashMap<K, f32>> = HashMap::new();
+    for ((a, b), s) in sum {
+        let w = CO_WEIGHT * (1.0 - (-s).exp());
+        out.entry(a).or_default().insert(b, w);
+        out.entry(b).or_default().insert(a, w);
+    }
+    out
 }
 
 /// Rows of `forth` with the edges back at [`BACK`], the best `top` of each.
@@ -179,6 +252,14 @@ impl SimGraph {
             }
             join(forth.entry(a as u32).or_default().entry(b as u32).or_insert(0.0), rank_weight(e.rank, e.of) * e.source.trust());
         }
+        // Bridges through the songs the catalog lacks.
+        let outside: Vec<(u32, u32, f32)> =
+            input.outside_tracks.iter().filter_map(|&(t, x, w)| Some((catalog.position(t)? as u32, x, w))).collect();
+        for (a, row) in cocite(&outside, &|_| true) {
+            for (b, w) in row {
+                join(forth.entry(a).or_default().entry(b).or_insert(0.0), w);
+            }
+        }
         let rows = symmetric(forth, TRACK_TOP);
         let mut track = vec![Vec::new(); n];
         for (a, row) in rows {
@@ -195,6 +276,11 @@ impl SimGraph {
         }
         for (a, b, cos) in tag_likeness(&input.tags, &held) {
             join(forth.entry(a).or_default().entry(b).or_insert(0.0), TAG_WEIGHT * cos);
+        }
+        for (a, row) in cocite(&input.outside_artists, &held) {
+            for (b, w) in row {
+                join(forth.entry(a).or_default().entry(b).or_insert(0.0), w);
+            }
         }
         let artist = symmetric(forth, ARTIST_TOP);
         let mut g = Self { track, artist, prior: Vec::new() };
@@ -230,6 +316,62 @@ impl SimGraph {
     /// The edge of artists `a` and `b`.
     pub fn artist(&self, a: ArtistId, b: ArtistId) -> f32 {
         self.similar_artists(a).iter().find(|(c, _)| *c == b).map_or(0.0, |e| e.1)
+    }
+
+    /// The walk from `seeds` (catalog positions and their weights; see the
+    /// module docs): how much of it reaches each track, by catalog
+    /// position. The first step is the edges times the seeds' weights, as
+    /// the neighbours of each seed always counted.
+    pub fn walk(&self, seeds: &[(usize, f32)]) -> HashMap<usize, f32> {
+        let n = self.track.len();
+        // Dense sums with the lists of what they touched: no hashing on
+        // the way, a map of the reached tracks at the end.
+        let mut out = vec![0.0f32; n];
+        let mut reached: Vec<u32> = Vec::new();
+        let (mut cur, mut next) = (vec![0.0f32; n], vec![0.0f32; n]);
+        let (mut cur_at, mut next_at): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        let add = |sum: &mut [f32], at: &mut Vec<u32>, c: u32, x: f32| {
+            if sum[c as usize] == 0.0 {
+                at.push(c);
+            }
+            sum[c as usize] += x;
+        };
+        for &(s, f) in seeds {
+            for &(c, w) in self.near(s) {
+                add(&mut cur, &mut cur_at, c, f * w);
+            }
+        }
+        for step in 0..WALK_STEPS {
+            for &c in &cur_at {
+                add(&mut out, &mut reached, c, cur[c as usize]);
+            }
+            if step + 1 == WALK_STEPS || cur_at.is_empty() {
+                break;
+            }
+            let mut list: Vec<(u32, f32)> = cur_at.iter().map(|&c| (c, cur[c as usize])).collect();
+            for &c in &cur_at {
+                cur[c as usize] = 0.0;
+            }
+            cur_at.clear();
+            if list.len() > WALK_KEEP {
+                list.select_nth_unstable_by(WALK_KEEP - 1, |a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+                list.truncate(WALK_KEEP);
+            }
+            for (c, p) in list {
+                let row = self.near(c as usize);
+                let total: f32 = row.iter().map(|x| x.1).sum();
+                if total <= 0.0 {
+                    continue;
+                }
+                let pass = WALK_DAMP * p / total;
+                for &(d, w) in row {
+                    add(&mut next, &mut next_at, d, pass * w);
+                }
+            }
+            std::mem::swap(&mut cur, &mut next);
+            std::mem::swap(&mut cur_at, &mut next_at);
+        }
+        reached.into_iter().map(|c| (c as usize, out[c as usize])).collect()
     }
 
     /// The prior of the track at `i`, 0…1 (0 with no graph around it).
@@ -441,6 +583,65 @@ mod tests {
         // The list and the tags together beat the list alone.
         assert!(g.artist(aid(2), aid(3)) > rank_weight(0, 20) * GraphSource::DeezerArtists.trust());
         assert_eq!(g.similar_artists(aid(1))[0].0, aid(0));
+    }
+
+    /// Two tracks whose radios name the same songs the library lacks are
+    /// linked; a niche song two share links more than a hit every list
+    /// names; a node named by too many is left out. Artists the same way.
+    #[test]
+    fn songs_the_library_lacks_bridge_its_tracks() {
+        let cat = Catalog::new((0..120u128).map(|i| info(i, &[i as u32], None)));
+        let mut outside = Vec::new();
+        // 0 and 1 share two niche songs (100, 101).
+        for x in [100, 101] {
+            outside.push((tid(0), x, 0.9));
+            outside.push((tid(1), x, 0.9));
+        }
+        // 2 and 3 share a hit (200) twenty tracks name.
+        for t in 2..22u128 {
+            outside.push((tid(t), 200, 0.9));
+        }
+        // Everyone names 300.
+        for t in 0..100u128 {
+            outside.push((tid(t), 300, 0.9));
+        }
+        // Not in the catalog: nothing.
+        outside.push((tid(999), 100, 0.9));
+        let input = GraphInput { outside_tracks: outside, ..GraphInput::default() };
+        let g = SimGraph::build(&cat, &input);
+        let niche = g.track(0, 1);
+        let hit = g.track(2, 3);
+        assert!(niche > hit && hit > 0.0, "niche {niche} vs hit {hit}");
+        assert!(niche <= CO_WEIGHT);
+        assert_eq!(g.track(0, 50), 0.0, "a node of a hundred says nothing");
+        assert!((g.track(1, 0) - niche).abs() < 1e-6, "both ways alike");
+
+        let a = |i: u32| aid(i);
+        let input = GraphInput { outside_artists: vec![(a(0), 7, 1.0), (a(1), 7, 1.0), (a(5), 8, 1.0)], ..GraphInput::default() };
+        let g = SimGraph::build(&cat, &input);
+        assert!(g.artist(a(0), a(1)) > 0.0);
+        assert_eq!(g.artist(a(0), a(5)), 0.0);
+    }
+
+    /// The walk's first step is the edges; a track two hops away is reached
+    /// at less, three hops less again; nothing beyond.
+    #[test]
+    fn the_walk_reaches_two_and_three_hops() {
+        let cat = Catalog::new((0..6u128).map(|i| info(i, &[i as u32], None)));
+        // A chain 0 – 1 – 2 – 3 – 4, 5 alone.
+        let input = GraphInput {
+            tracks: (0..4u128).map(|i| Edge { from: tid(i), to: tid(i + 1), rank: 0, of: 10, source: GraphSource::YoutubeRadio }).collect(),
+            ..GraphInput::default()
+        };
+        let g = SimGraph::build(&cat, &input);
+        let w = g.walk(&[(0, 1.0)]);
+        // The first step is the edge itself; the walk comes back to it a
+        // little.
+        assert!(w[&1] >= g.track(0, 1) - 1e-6 && w[&1] < g.track(0, 1) + WALK_DAMP, "{w:?}");
+        assert!(w[&2] > 0.0 && w[&2] < w[&1]);
+        assert!(w[&3] > 0.0 && w[&3] < w[&2]);
+        assert!(!w.contains_key(&4) && !w.contains_key(&5), "{w:?}");
+        assert!(g.walk(&[(5, 1.0)]).is_empty());
     }
 
     #[test]

@@ -1213,6 +1213,22 @@ impl UserModel {
         crate::mood::Axes::of(&self.norm.z_of_embedded(v)).energy
     }
 
+    /// The loudness of the track at `i` as bliss gives it (absolute, −1
+    /// silence … 1 full scale), when it has a sound.
+    pub fn loudness_at(&self, i: usize) -> Option<f32> {
+        self.emb[i].and_then(|e| self.norm.raw_of_embedded(&e, crate::mood::LOUDNESS))
+    }
+
+    /// The track at `i` on the mood axes, when it has a sound.
+    pub fn axes_at(&self, i: usize) -> Option<crate::mood::Axes> {
+        self.emb[i].map(|e| self.axes_of(&e))
+    }
+
+    /// An embedded sound `v` on the mood axes.
+    pub fn axes_of(&self, v: &Vector) -> crate::mood::Axes {
+        crate::mood::Axes::of(&self.norm.z_of_embedded(v))
+    }
+
     /// The share of the user's starts in `part` of the day ([`DayPart::index`]);
     /// a quarter without a history.
     pub fn part_share(&self, part: usize) -> f32 {
@@ -1250,11 +1266,14 @@ impl UserModel {
             }
         }
         let own: HashSet<ArtistId> = recent.iter().filter_map(|&s| self.artist[s]).collect();
+        // The walk of the collective graph from them (its first step the
+        // neighbours of each, as one hop always counted).
+        let seeds: Vec<(usize, f32)> = recent.iter().enumerate().map(|(k, &s)| (s, 0.6f32.powi(k as i32))).collect();
+        if !seeds.is_empty() {
+            graph_near = self.graph.walk(&seeds);
+        }
         for (k, &s) in recent.iter().enumerate() {
             let f = 0.6f32.powi(k as i32);
-            for &(c, w) in self.graph.near(s) {
-                *graph_near.entry(c as usize).or_default() += f * w;
-            }
             if let Some(a) = self.artist[s] {
                 for &(b, w) in self.graph.similar_artists(a) {
                     if !own.contains(&b) {

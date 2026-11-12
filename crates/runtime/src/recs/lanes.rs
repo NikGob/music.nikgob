@@ -22,6 +22,13 @@
 //! What of all that the row shows, in which order and how many, is
 //! [`nikgob_recs::mixes::row`]'s: ten cards at most, no two alike. «Любимые»
 //! is the playlist's own tile before the row (the page's).
+//!
+//! «С новым» goes by the open world (docs/recommendations.md §1,
+//! [`nikgob_recs::mix_new::take`]): between loved songs and a third at most
+//! under «Сбалансировано»; as much as asked, anywhere after the first song,
+//! under «Больше нового»; a niche (a mix of few songs or artists) takes
+//! mostly new music of its sound, its songs the seeds of its top-up
+//! ([`super::niche`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -71,6 +78,11 @@ pub(crate) struct LaneHome {
     pub covers: Vec<CoverRef>,
     /// «С новым»: new songs of the services that fit it.
     pub new: Vec<StreamTrack>,
+    /// They stand anywhere after the first song (the open world), not only
+    /// between two loved ones.
+    pub open: bool,
+    /// A niche: its songs, the seeds of its top-up (empty for the others).
+    pub niche: Vec<TrackId>,
     /// The profile «Смешать с…» starts from.
     pub blend_base: Option<u32>,
     /// Why it is offered ([`nikgob_recs::explain`]).
@@ -80,22 +92,28 @@ pub(crate) struct LaneHome {
 impl LaneHome {
     /// What it plays: its songs, with «С новым» its new ones each between
     /// two loved familiar songs (recs-v2 §5.4), never in the first two
-    /// places nor two running, spread as evenly as such places allow.
+    /// places nor two running, spread as evenly as such places allow; in
+    /// the open world evenly anywhere after the first song, runs of them
+    /// where the share asks ([`nikgob_recs::mix_new::spread`]).
     pub fn picks(&self, with_new: bool) -> Vec<nikgob_recs::Pick> {
         use nikgob_recs::{Item, Pick, Reason};
         let n = if with_new { self.new.len() } else { 0 };
         let len = self.tracks.len();
         // The anchors of every song (a mix kept from before may lack some).
         let anchors: Vec<bool> = (0..len).map(|k| self.anchors.get(k) == Some(&true)).collect();
-        let after: HashSet<usize> = nikgob_recs::mix_new::places(&anchors, n).into_iter().collect();
-        let mut out = Vec::with_capacity(len + after.len());
+        let mode = if self.open { mix_new::NewMode::Open } else { mix_new::NewMode::Calm };
+        let mut after: HashMap<usize, usize> = HashMap::new();
+        for k in mix_new::placements(mode, &anchors, n) {
+            *after.entry(k).or_default() += 1;
+        }
+        let mut out = Vec::with_capacity(len + n);
         let mut new = self.new.iter();
         for (k, t) in self.tracks.iter().enumerate() {
             out.push(Pick { item: Item::Track(*t), reason: Reason::Favourite });
-            if after.contains(&k)
-                && let Some(s) = new.next()
-            {
-                out.push(Pick { item: Item::Stream(s.id.clone()), reason: Reason::New });
+            for _ in 0..after.get(&k).copied().unwrap_or(0) {
+                if let Some(s) = new.next() {
+                    out.push(Pick { item: Item::Stream(s.id.clone()), reason: Reason::New });
+                }
             }
         }
         out
@@ -386,7 +404,16 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             let mut lane = lane_of(snap, tiles, &m);
             // «Фон» and «Любимые» are what they are: no new songs.
             if !snap.local_only && !matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
-                lane.new = new_for(snap, input, &log, &cands, &m, seed.wrapping_add(k as u64), &mut used_new);
+                // A niche's top-up joins the candidates of its mix.
+                let topped = super::niche::cached(lib, lane.key).map(|f| niche_candidates(snap, &f)).unwrap_or_default();
+                let all: Vec<NewCandidate> = if topped.is_empty() { Vec::new() } else { cands.iter().cloned().chain(topped).collect() };
+                let pool = if all.is_empty() { &cands } else { &all };
+                let (new, mode) = new_for(snap, input, &log, pool, &m, seed.wrapping_add(k as u64), &mut used_new);
+                lane.new = new;
+                lane.open = mode.open();
+                if mode == mix_new::NewMode::Niche {
+                    lane.niche.clone_from(&lane.tracks);
+                }
             }
             lane
         })
@@ -407,6 +434,8 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             anchors,
             tracks,
             new: Vec::new(),
+            open: false,
+            niche: Vec::new(),
             blend_base: None,
             why: nikgob_recs::explain::on_repeat(starts as u32),
         });
@@ -495,6 +524,8 @@ pub(crate) fn blend_now(snap: &Snapshot, prefs: &MixPrefs, profiles: &[u32], nam
         tracks,
         artists: dedupe(artists),
         new: Vec::new(),
+        open: false,
+        niche: Vec::new(),
         why: None,
         blend_base: None,
     })
@@ -547,6 +578,8 @@ fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
         tracks,
         artists,
         new: Vec::new(),
+        open: false,
+        niche: Vec::new(),
         blend_base: m.key.blend_base(),
         // A blend is the user's own, «Любимые» says what it is.
         why: if matches!(m.key, MixKey::Blend(_) | MixKey::Liked) { None } else { snap.recs().why_moment(&m.tracks, &m.title) },
@@ -687,23 +720,7 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
     let share = |s: Option<Source>| s.and_then(|s| shares.get(&s).copied()).unwrap_or(1.0 / nikgob_recs::novelty::SOURCES.len() as f32);
     let graph: HashMap<String, &super::graph::GraphFind> = snap.graph_new.iter().map(|f| (stream_song_key(&f.track), f)).collect();
     let near = |key: &str| -> Vec<usize> { graph.get(key).map(|f| f.near.iter().filter_map(|(t, _)| snap.model.position(*t)).collect()).unwrap_or_default() };
-    let regions = &snap.model.regions;
-    let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| {
-        let vector = snap.new_track(t).vector;
-        // Its voice by its preview, else by the songs whose radios hold it.
-        let voice = match vector.as_ref() {
-            Some(v) => mix_new::voice_near(&snap.model, &snap.index, v),
-            None => mix_new::voice_of(&snap.model, &near),
-        };
-        NewCandidate {
-            track: t.clone(),
-            lane: mix_new::lane_of_new(&snap.types, voice, t),
-            soundtrack: t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
-            profile: vector.map(|v| snap.model.embed(&v)).and_then(|e| regions.of(&e, None)),
-            near,
-            weight,
-        }
-    };
+    let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| new_candidate(snap, t, near, weight);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     let found: Vec<&StreamTrack> = pool.iter().filter(|t| snap.is_new(t)).collect();
@@ -727,11 +744,59 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
     out
 }
 
-/// «С новым»: the new songs of `cands` that fit the mix
-/// ([`mix_new::choose`]), each in one mix only, as many as the appetite of
-/// the mix's taste profile asks and the user's share of new music at least
-/// ([`mix_new::want`]). «Фон» takes none.
-fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, cands: &[NewCandidate], m: &Mix, seed: u64, used: &mut HashSet<String>) -> Vec<StreamTrack> {
+/// A new song as a card may take it: its kind of song told by its preview
+/// where it was analysed, else by the library's songs `near` it, its
+/// profile, the library's songs of its artist.
+fn new_candidate(snap: &Snapshot, t: &StreamTrack, near: Vec<usize>, weight: f32) -> NewCandidate {
+    let vector = snap.new_track(t).vector;
+    // Its voice by its preview, else by the songs whose radios hold it.
+    let voice = match vector.as_ref() {
+        Some(v) => mix_new::voice_near(&snap.model, &snap.index, v),
+        None => mix_new::voice_of(&snap.model, &near),
+    };
+    NewCandidate {
+        track: t.clone(),
+        lane: mix_new::lane_of_new(&snap.types, voice, t),
+        soundtrack: t.album.as_ref().is_some_and(|a| franchise(&a.title).is_some()),
+        profile: vector.map(|v| snap.model.embed(&v)).and_then(|e| snap.model.regions.of(&e, None)),
+        near,
+        weight,
+        vector,
+        artist_tracks: artist_tracks(snap, t),
+    }
+}
+
+/// The library's songs of the main artist of the new song `t` (catalog
+/// positions).
+pub(super) fn artist_tracks(snap: &Snapshot, t: &StreamTrack) -> Vec<usize> {
+    t.artists
+        .first()
+        .and_then(|a| snap.artist_keys.get(&nikgob_recs::artist_key(&a.name)))
+        .map(|a| snap.model.of_artist(*a).iter().map(|&i| i as usize).collect())
+        .unwrap_or_default()
+}
+
+/// The songs a niche's top-up found as candidates of its mix: linked to
+/// the niche's songs whose lists held them, the most seeds first.
+pub(super) fn niche_candidates(snap: &Snapshot, found: &super::niche::NicheFound) -> Vec<NewCandidate> {
+    let len = found.tracks.len().max(1) as f32;
+    found
+        .tracks
+        .iter()
+        .filter(|(t, _)| snap.is_new(t))
+        .enumerate()
+        .map(|(k, (t, seeds))| {
+            let near = seeds.iter().filter_map(|s| snap.model.position(*s)).collect();
+            new_candidate(snap, t, near, 0.8 * (1.0 - 0.5 * k as f32 / len))
+        })
+        .collect()
+}
+
+/// «С новым»: the new songs of `cands` that fit the mix as the open world
+/// has it ([`mix_new::take`]), each in one mix only, as many as the
+/// appetite of the mix's taste profile asks and the user's share of new
+/// music at least; and the mode it took them in. «Фон» takes none.
+fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, cands: &[NewCandidate], m: &Mix, seed: u64, used: &mut HashSet<String>) -> (Vec<StreamTrack>, mix_new::NewMode) {
     let tracks: Vec<TrackId> = m.tracks.iter().map(|&i| snap.model.id(i)).collect();
     let profile = profile_of(snap, &tracks);
     let appetite = (!log.events.is_empty() && !snap.model.profiles.is_empty()).then(|| {
@@ -739,8 +804,8 @@ fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, cands
         let background = profile.is_some_and(|j| snap.model.is_background_profile(j));
         log.share(key, background, &mut nikgob_recs::rng::Rng::new(seed))
     });
-    let want = mix_new::want(tracks.len(), appetite, input.new_share);
-    mix_new::choose(&snap.model, m, cands, want, used).into_iter().map(|c| c.track.clone()).collect()
+    let (chosen, mode) = mix_new::take(&snap.model, m, cands, appetite, input.new_share, used);
+    (chosen.into_iter().map(|c| c.track.clone()).collect(), mode)
 }
 
 #[cfg(test)]
@@ -968,6 +1033,8 @@ mod tests {
             artists: Vec::new(),
             covers: Vec::new(),
             new,
+            open: false,
+            niche: Vec::new(),
             blend_base: None,
             why: None,
         };
@@ -984,5 +1051,12 @@ mod tests {
             assert!(w[1] - w[0] >= 4, "spread: {at:?}");
         }
         assert_eq!(lane.picks(false).len(), 28);
+        // The open world: as many as there are, evenly after the first.
+        let many: Vec<StreamTrack> = (0..20).map(|k| StreamTrack::new(RemoteId { service: Service::Youtube, id: format!("w{k}") }, format!("Wide {k}"))).collect();
+        let open = LaneHome { open: true, new: many, tracks: lane.tracks[..10].to_vec(), anchors: vec![false; 10], ..lane };
+        let picks = open.picks(true);
+        assert_eq!(picks.len(), 30);
+        assert!(matches!(picks[0].item, Item::Track(_)));
+        assert_eq!(picks.iter().filter(|p| matches!(p.item, Item::Stream(_))).count(), 20);
     }
 }

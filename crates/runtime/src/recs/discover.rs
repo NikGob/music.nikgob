@@ -30,7 +30,12 @@
 //!   and never played, it is left out; the songs the services suggest
 //!   vote as the services' own seeds, [`nikgob_recs::suggestion_finds`]),
 //!   and
-//!   [`nikgob_recs::Recs::new_releases`]; both kept in the cache
+//!   [`nikgob_recs::Recs::new_releases`]. The pass keeps [`DISCOVER_POOL`]
+//!   ranked discoveries (the open world's pool, docs/recommendations.md
+//!   §1.1: new music that does not run out in a quarter of an hour), each
+//!   with the taste profile it fits, spread over the profiles by their
+//!   shares; the home's row and the radio take the first [`DISCOVERIES`].
+//!   Both kept in the cache
 //!   (`discover.found`, with the pass's seeds and finds, so new
 //!   suggestions rank them again at once) until the next pass. With only
 //!   YouTube Music, only
@@ -65,17 +70,18 @@ pub(crate) const RELEASE_BUDGET: u32 = 60;
 pub(crate) const RELEASES_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Similar artists whose tops are read, per list.
 const TOPS_PER_LIST: usize = 2;
-/// The discoveries a pass keeps, best first: the mixes and the radio take
-/// the first [`DISCOVERIES`], «Новое для тебя» shows them and more at its
-/// row's end ([`HOME_NEW_MORE`] at a time).
-const DISCOVER_POOL: usize = 3 * DISCOVERIES;
+/// The discoveries a pass keeps, best first (the open world's pool): the
+/// radio takes the first [`DISCOVERIES`], «Новое для тебя» shows them and
+/// more at its row's end ([`HOME_NEW_MORE`] at a time), the cards of «Миксы
+/// для тебя» and the waves draw from them all.
+pub(crate) const DISCOVER_POOL: usize = 400;
 /// «Новое для тебя» gets this many more songs at its row's end.
 pub(crate) const HOME_NEW_MORE: usize = 12;
 /// New songs heard out lately that seed a pass.
 const HEARD_SEEDS: usize = 5;
 /// The songs the graph found beside the library's that a pass ranks with
 /// its own finds, the strongest.
-const GRAPH_DISCOVER: usize = 120;
+const GRAPH_DISCOVER: usize = super::graph::GRAPH_FINDS;
 
 /// Library cache keys.
 const PASS_KEY: &str = "discover.pass";
@@ -184,6 +190,10 @@ pub(crate) struct Found {
     /// Where each song found came from (by [`stream_song_key`]).
     #[serde(default)]
     sources: Vec<(String, Source)>,
+    /// The taste profile (its key) each of `tracks` fits, when one: the
+    /// pool split by cluster.
+    #[serde(default)]
+    profiles: Vec<Option<u32>>,
     #[serde(default)]
     finds: Vec<(Seed, Vec<StreamTrack>)>,
 }
@@ -265,14 +275,14 @@ async fn ask(svc: Arc<dyn StreamService>, step: &Step) -> Result<Answer, StreamE
 }
 
 /// The discoveries of a pass's `finds` and of the songs the services
-/// suggest now.
+/// suggest now, each with the key of the taste profile it fits.
 fn ranked(
     snap: &super::Snapshot,
     seeds: &DiscoverySeeds,
     finds: &[(Seed, Vec<StreamTrack>)],
     filter: &nikgob_recs::DiscoveryFilter,
     log: &NewLog,
-) -> Vec<StreamTrack> {
+) -> (Vec<StreamTrack>, Vec<Option<u32>>) {
     let mut all: Vec<SeedFinds> = finds
         .iter()
         .map(|(seed, tracks)| SeedFinds { seed: seed.engine(), tracks: tracks.clone() })
@@ -286,7 +296,8 @@ fn ranked(
         now: super::recs_now(),
         types: Some(&snap.types),
     };
-    rank_discoveries_upto(seeds, &all, filter, Some(&scoring), DISCOVER_POOL).into_iter().map(|d| d.track).collect()
+    let key = |j: Option<usize>| j.and_then(|j| snap.model.profiles.list.get(j)).map(|p| p.key);
+    rank_discoveries_upto(seeds, &all, filter, Some(&scoring), DISCOVER_POOL).into_iter().map(|d| (d.track, key(d.profile))).unzip()
 }
 
 /// Where the songs of `finds` came from (by [`stream_song_key`]): a seed
@@ -415,6 +426,14 @@ impl Worker {
     /// для тебя» draw from them all.
     pub(crate) fn discoveries_all(&self) -> Vec<StreamTrack> {
         self.recs.discover.found.as_ref().map(|f| f.tracks.clone()).unwrap_or_default()
+    }
+
+    /// The discoveries of the taste profile of `key` (the pool by
+    /// cluster), best first.
+    #[allow(dead_code)]
+    pub(crate) fn discoveries_of_profile(&self, key: u32) -> Vec<StreamTrack> {
+        let Some(f) = self.recs.discover.found.as_ref() else { return Vec::new() };
+        f.tracks.iter().zip(&f.profiles).filter(|(_, p)| **p == Some(key)).map(|(t, _)| t.clone()).collect()
     }
 
     /// Where each discovery came from, by [`stream_song_key`].
@@ -878,7 +897,7 @@ impl Worker {
             profiles: seed_profiles.clone(),
         };
         self.new_log_load();
-        let tracks = ranked(&snap, &seeds, &finds, &filter, &self.recs.newlog.log);
+        let (tracks, profiles) = ranked(&snap, &seeds, &finds, &filter, &self.recs.newlog.log);
         let releases = snap
             .recs()
             .new_releases(&pass.releases, &snap.known_albums)
@@ -900,6 +919,7 @@ impl Worker {
             seed_artists: pass.seed_artists,
             seed_profiles,
             sources: sources_of(&finds),
+            profiles,
             finds,
         };
         self.streaming.learn(&found.tracks);
@@ -944,12 +964,13 @@ impl Worker {
             artists: found.seed_artists.clone(),
             profiles: found.seed_profiles.clone(),
         };
-        let tracks = ranked(&snap, &seeds, &found.finds, &filter, &self.recs.newlog.log);
+        let (tracks, profiles) = ranked(&snap, &seeds, &found.finds, &filter, &self.recs.newlog.log);
         if tracks == found.tracks {
             return;
         }
         log::info!("discover: {} discoveries with the services' suggestions", tracks.len());
         found.tracks = tracks;
+        found.profiles = profiles;
         let found = found.clone();
         self.streaming.learn(&found.tracks);
         if let Ok(json) = serde_json::to_string(&found) {

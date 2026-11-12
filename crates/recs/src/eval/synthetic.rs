@@ -12,13 +12,17 @@
 //! appeal. A listener who keeps music on in the background has long runs
 //! of autoplay heard out with no action. Likes follow songs heard out
 //! often. One listener brought a history from another service: imported
-//! plays and likes of an older taste.
+//! plays and likes of an older taste. One listens to rap and has three calm
+//! songs of one artist (docs/recommendations.md §1.2): the open pool it
+//! carries holds calm new songs linked to them, rap new songs (some of them
+//! on the calm songs' radios) and songs of one of its rappers.
 
 use std::collections::HashMap;
 
 use nikgob_core::model::{ArtistId, EventContext, EventOrigin, EventType, ReleaseId, TrackId, UnixMs, Uuid};
 
-use super::{DPlay, DTrack, Dataset};
+use super::{DNew, DPlay, DTrack, Dataset};
+use nikgob_core::streaming::{ArtistRef, RemoteId, Service, StreamTrack};
 use crate::analysis::DIM;
 use crate::rng::Rng;
 use crate::songtype::{Lang, SongType, SongTypes, Voice, VoiceSource};
@@ -44,10 +48,12 @@ pub enum Kind {
     /// events of an older taste and 300 of its songs liked at once at the
     /// import) and listens to other music here.
     Imported,
+    /// Rap, and a calm niche of three songs of one artist (the open world).
+    NicheCalm,
 }
 
 impl Kind {
-    pub const ALL: [Self; 7] = [Self::OneGenre, Self::Omnivore, Self::Background, Self::Skipper, Self::Cold, Self::Big, Self::Imported];
+    pub const ALL: [Self; 8] = [Self::OneGenre, Self::Omnivore, Self::Background, Self::Skipper, Self::Cold, Self::Big, Self::Imported, Self::NicheCalm];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -58,6 +64,7 @@ impl Kind {
             Self::Cold => "synthetic: cold start (10 events)",
             Self::Big => "synthetic: big (135k events)",
             Self::Imported => "synthetic: imported history",
+            Self::NicheCalm => "synthetic: rap and a calm niche of three songs",
         }
     }
 }
@@ -422,6 +429,13 @@ pub fn user(kind: Kind, seed: u64) -> Dataset {
             v[2] = 0.3;
             (v, [0.0; GENRES], flat)
         }
+        Kind::NicheCalm => {
+            // Russian rap, some Japanese songs; the calm songs set below.
+            let mut v = [0.02; GENRES];
+            v[0] = 1.0;
+            v[1] = 0.3;
+            (v, [0.0; GENRES], flat)
+        }
         Kind::Imported => {
             // Now: Japanese songs, English rock, some ambient.
             let mut v = [0.05; GENRES];
@@ -431,7 +445,17 @@ pub fn user(kind: Kind, seed: u64) -> Dataset {
             (v, [0.0; GENRES], flat)
         }
     };
-    let t = taste(&mut rng, &lib, genres, background, hours);
+    let mut lib = lib;
+    let mut t = taste(&mut rng, &lib, genres, background, hours);
+    // The calm niche: the first ambient artist's first three songs, far
+    // quieter than anything else, loved.
+    let calm: Vec<usize> = if kind == Kind::NicheCalm { lib.albums[lib.artist_albums[AMBIENT * 10][0]].iter().take(3).copied().collect() } else { Vec::new() };
+    for &i in &calm {
+        for (d, x) in lib.songs[i].vector.iter_mut().enumerate() {
+            *x -= CALM_SHIFT * (1.0 + 0.1 * d as f32 / DIM as f32);
+        }
+        t.appeal[i] = 0.9;
+    }
     let who = match kind {
         Kind::Skipper => Listener { threshold: 0.5, sharp: 9.0, leaf: 0.25, modes: [0.15, 0.35, 0.5], per_day: 1.6, length: 14.0, background: 0.0, parts: [0.2, 0.4, 0.3, 0.1] },
         Kind::Background => Listener { threshold: 0.3, sharp: 7.0, leaf: 0.05, modes: [0.35, 0.5, 0.15], per_day: 1.8, length: 9.0, background: 0.4, parts: [0.2, 0.4, 0.3, 0.1] },
@@ -464,6 +488,9 @@ pub fn user(kind: Kind, seed: u64) -> Dataset {
         }
         events.sort_by_key(|e| e.ts);
     }
+    if kind == Kind::NicheCalm {
+        return niche_calm(&mut rng, lib, &t, &calm, events, like_times, playlists, end);
+    }
     let mut by_track: HashMap<TrackId, SongType> = HashMap::new();
     for s in &lib.songs {
         let voice = VOICE[s.genre];
@@ -494,6 +521,128 @@ pub fn user(kind: Kind, seed: u64) -> Dataset {
         library_prior: true,
         dislike_neighbours: true,
         truth: lib.songs.iter().enumerate().map(|(i, s)| (s.id, t.appeal[i].max(t.background[i]))).collect(),
+        ..Dataset::default()
+    }
+}
+
+/// How much quieter the calm niche's songs and new songs are than their
+/// kind (raw units of each feature).
+const CALM_SHIFT: f32 = 2.5;
+/// Where bliss keeps the loudness.
+const LOUDNESS: usize = 8;
+
+/// The song types of `songs` by their kinds.
+fn types_of<'a>(songs: impl Iterator<Item = &'a Song>) -> HashMap<TrackId, SongType> {
+    songs
+        .map(|s| {
+            let voice = VOICE[s.genre];
+            (
+                s.id,
+                SongType {
+                    voice,
+                    voice_conf: if voice == Voice::Unknown { 0.0 } else { 0.9 },
+                    voice_by: if voice == Voice::Unknown { VoiceSource::Nothing } else { VoiceSource::Lyrics },
+                    lang: SUNG[s.genre],
+                    ost: s.genre == OST,
+                    ..SongType::default()
+                },
+            )
+        })
+        .collect()
+}
+
+/// The listener of rap with a calm niche of three songs ([`Kind::NicheCalm`]):
+/// the library without the other calm kinds, and the open pool.
+#[allow(clippy::too_many_arguments)]
+fn niche_calm(
+    rng: &mut Rng,
+    lib: Library,
+    t: &Taste,
+    calm: &[usize],
+    events: Vec<DPlay>,
+    like_times: Vec<(TrackId, UnixMs)>,
+    playlists: Vec<Vec<TrackId>>,
+    end: UnixMs,
+) -> Dataset {
+    // Loudness as bliss gives it: mastered songs loud, the calm ones quiet.
+    let mut lib = lib;
+    for (i, s) in lib.songs.iter_mut().enumerate() {
+        s.vector[LOUDNESS] = if calm.contains(&i) { 0.5 + 0.03 * gauss(rng) } else { 0.76 + 0.02 * gauss(rng) };
+    }
+    let quiet = |g: usize| matches!(g, OST | AMBIENT | 7);
+    let keep: Vec<bool> = (0..lib.songs.len()).map(|i| !quiet(lib.songs[i].genre) || calm.contains(&i)).collect();
+    let kept: std::collections::HashSet<TrackId> = lib.songs.iter().zip(&keep).filter(|(_, k)| **k).map(|(s, _)| s.id).collect();
+    let mean = |idx: &[usize]| -> [f32; DIM] {
+        let mut c = [0.0f32; DIM];
+        for &i in idx {
+            for (a, b) in c.iter_mut().zip(lib.songs[i].vector.iter()) {
+                *a += b / idx.len() as f32;
+            }
+        }
+        c
+    };
+    let rap: Vec<usize> = (0..lib.songs.len()).filter(|&i| lib.songs[i].genre == 0).collect();
+    let (calm_c, rap_c) = (mean(calm), mean(&rap));
+    let id = |i: usize| lib.songs[i].id;
+    let new = |rng: &mut Rng, k: usize, title: String, artist: String, centre: Option<&[f32; DIM]>, near: Vec<TrackId>, weight: f32, by: Option<ArtistId>| {
+        let mut track = StreamTrack::new(RemoteId::new(Service::Youtube, format!("n{k}")), title);
+        track.artists.push(ArtistRef::new(None, artist));
+        track.duration_ms = Some(200_000);
+        let vector = centre.map(|c| {
+            let mut v: Vec<f32> = c.iter().map(|x| x + 0.45 * gauss(rng)).collect();
+            v[LOUDNESS] = c[LOUDNESS] + 0.02 * gauss(rng);
+            v
+        });
+        DNew { track, vector, near, weight, artist: by }
+    };
+    let mut pool = Vec::new();
+    // Calm new songs of eight new artists, linked to the calm songs.
+    for k in 0..40 {
+        let near = vec![id(calm[k % 3]), id(calm[(k + 1) % 3])].into_iter().take(1 + k % 2).collect();
+        pool.push(new(rng, k, format!("Drift {k}"), format!("Still Water {}", k % 8), Some(&calm_c), near, 0.9 - 0.005 * k as f32, None));
+    }
+    // Rap new songs, believed more, linked to the rap.
+    for k in 0..30 {
+        let near = vec![id(rap[rng.below(rap.len())]), id(rap[rng.below(rap.len())])];
+        pool.push(new(rng, 100 + k, format!("Улица {k}"), format!("МС {}", k % 10), Some(&rap_c), near, 0.95 - 0.005 * k as f32, None));
+    }
+    // Rap on the calm songs' radios.
+    for k in 0..6 {
+        pool.push(new(rng, 200 + k, format!("Район {k}"), format!("Бит {k}"), Some(&rap_c), vec![id(calm[k % 3])], 0.97, None));
+    }
+    // A rapper of the library's songs on them, without a preview.
+    let rapper = ArtistId(uuid(2, 0));
+    for k in 0..4 {
+        pool.push(new(rng, 300 + k, format!("Night {k}"), "Rapper".into(), None, vec![id(calm[k % 3])], 0.97, Some(rapper)));
+    }
+    // The radios of the calm songs name the same songs the library lacks;
+    // the rap's name theirs.
+    let mut outside = Vec::new();
+    for (n, &i) in calm.iter().enumerate() {
+        for x in 0..6u32 {
+            outside.push((id(i), x + n as u32 % 2, 0.9));
+        }
+    }
+    for (n, &i) in rap.iter().enumerate() {
+        outside.push((id(i), 1_000 + (n % 40) as u32, 0.8));
+    }
+    Dataset {
+        name: Kind::NicheCalm.name().to_owned(),
+        vectors: lib.songs.iter().filter(|s| kept.contains(&s.id)).map(|s| (s.id, s.vector.to_vec())).collect(),
+        tracks: lib.tracks.iter().filter(|x| kept.contains(&x.id)).cloned().collect(),
+        types: SongTypes { by_track: types_of(lib.songs.iter().filter(|s| kept.contains(&s.id))), artist_langs: HashMap::new() },
+        likes: like_times.iter().filter(|l| kept.contains(&l.0)).map(|l| l.0).collect(),
+        like_times: like_times.into_iter().filter(|l| kept.contains(&l.0)).collect(),
+        playlist_entries: playlists.iter().flatten().filter(|id| kept.contains(id)).map(|id| (*id, end - 61 * DAY_MS)).collect(),
+        playlists: playlists.into_iter().map(|p| p.into_iter().filter(|id| kept.contains(id)).collect()).collect(),
+        events: events.into_iter().filter(|e| kept.contains(&e.track)).collect(),
+        utc_offset_min: 0,
+        personal_graph: true,
+        library_prior: true,
+        dislike_neighbours: true,
+        truth: lib.songs.iter().enumerate().filter(|(_, s)| kept.contains(&s.id)).map(|(i, s)| (s.id, t.appeal[i])).collect(),
+        graph_outside_tracks: outside,
+        new: pool,
         ..Dataset::default()
     }
 }

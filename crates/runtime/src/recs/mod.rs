@@ -26,7 +26,8 @@
 //!   ([`discover`]), **the services' own suggestions** as a signal of taste
 //!   ([`suggest`]: matched against the library here, a bonus of affinity
 //!   for its tracks and artists, discovery votes for the rest),
-//!   **«Не рекомендовать»** with its undo (below).
+//!   **«Не рекомендовать»** with its undo (below), **the niches' top-up**
+//!   ([`niche`]) and **the open pool of the waves** ([`open`]).
 //! * **The session and the model online.** Every start and its end go on
 //!   in the [`Session`] of the moment (what a track's radio reads); a start
 //!   the user chose teaches the model of the next start, and every one the
@@ -40,7 +41,9 @@ mod discover;
 mod dislikes;
 mod graph;
 mod lanes;
+mod niche;
 mod novelty;
+mod open;
 mod radio;
 mod suggest;
 mod tiles;
@@ -268,6 +271,7 @@ pub(crate) enum Msg {
     Discover(discover::DiscoverMsg),
     Suggest(suggest::SuggestMsg),
     Graph(graph::GraphMsg),
+    Niche(niche::NicheMsg),
 }
 
 impl Msg {
@@ -278,6 +282,7 @@ impl Msg {
             Self::Discover(_) => "new music",
             Self::Suggest(_) => "suggestions",
             Self::Graph(_) => "the graph",
+            Self::Niche(_) => "the niches",
         }
     }
 }
@@ -367,6 +372,8 @@ pub(crate) struct RecsState {
     pub(crate) discover: discover::DiscoverState,
     /// The background pass of the graph of similar music.
     pub(crate) graph: graph::GraphState,
+    /// The top-up of the niches of «Миксы для тебя».
+    pub(crate) niche: niche::NicheState,
     pub(crate) suggest: suggest::SuggestState,
     pub(crate) dislikes: dislikes::Dislikes,
     pub(crate) newlog: novelty::NewState,
@@ -425,6 +432,7 @@ impl RecsState {
             radio: radio::RadioState::default(),
             discover: discover::DiscoverState::default(),
             graph: graph::GraphState::default(),
+            niche: niche::NicheState::default(),
             suggest: suggest::SuggestState::default(),
             dislikes: dislikes::Dislikes::default(),
             newlog: novelty::NewState::default(),
@@ -2078,6 +2086,7 @@ impl ModelPreview {
                 vector: snap.new_vectors.get(&stream_song_key(&c.track)).map(|v| v.to_vec()),
                 near: c.near.iter().map(|&i| snap.model.id(i)).collect(),
                 weight: c.weight,
+                artist: c.artist_tracks.first().and_then(|&i| snap.model.main_artist_at(i)),
                 track: c.track,
             })
             .collect();
@@ -2508,6 +2517,7 @@ impl Worker {
         self.discover_tick();
         self.suggest_tick();
         self.graph_tick();
+        self.niche_tick();
     }
 
     /// The run's first build at once, once the sound vectors are in memory
@@ -2584,6 +2594,7 @@ impl Worker {
             Msg::Discover(m) => self.discover_msg(m),
             Msg::Suggest(m) => self.suggest_msg(m),
             Msg::Graph(m) => self.graph_msg(m),
+            Msg::Niche(m) => self.niche_msg(m),
         }
     }
 
@@ -3130,6 +3141,8 @@ mod tests {
             artists: Vec::new(),
             covers: Vec::new(),
             new,
+            open: false,
+            niche: Vec::new(),
             blend_base: None,
             why: None,
         };

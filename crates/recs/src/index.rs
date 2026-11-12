@@ -284,6 +284,12 @@ impl Normalizer {
         std::array::from_fn(|i| (v[i] - self.mean[i]) * self.inv_scale[i] * self.sqrt_w[i])
     }
 
+    /// Feature `i` of an [`Self::embed`]ded vector as bliss gave it (none
+    /// for a feature weighed 0 or flat over the library).
+    pub fn raw_of_embedded(&self, e: &Vector, i: usize) -> Option<f32> {
+        (self.sqrt_w[i] > 0.0 && self.inv_scale[i] > 0.0).then(|| e[i] / self.sqrt_w[i] / self.inv_scale[i] + self.mean[i])
+    }
+
     /// The z-scores of an [`Self::embed`]ded vector (a feature weighed 0
     /// comes back 0).
     pub fn z_of_embedded(&self, e: &Vector) -> Vector {

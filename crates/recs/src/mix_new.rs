@@ -21,6 +21,17 @@
 //! * **Where** ([`places`]): each between two loved familiar songs, never in
 //!   the first two places nor two running, spread as evenly as such places
 //!   allow; what finds no place is not played.
+//!
+//! The open world (docs/recommendations.md §1.1, §1.2, [`NewMode`]): the
+//! cap and the places between loved songs hold for the calm default
+//! («Сбалансировано», [`NewMode::Calm`]). With «Больше нового»
+//! ([`NewMode::Open`]) a mix takes as much as the share asks, up to
+//! [`OPEN_MAX_SHARE`], spread evenly anywhere after its first song
+//! ([`spread`]). A niche ([`NewMode::Niche`]: a mix of fewer than
+//! [`crate::open_world::NICHE_TRACKS`] songs or
+//! [`crate::open_world::NICHE_ARTISTS`] artists) takes [`NICHE_SHARE`] at
+//! least, of the songs that fit the niche's sound
+//! ([`crate::open_world::NicheSound`]), the same way ([`take`]).
 
 use std::collections::HashSet;
 
@@ -39,6 +50,13 @@ pub const NEW_EVERY: usize = 5;
 /// The user's share of new music a mix takes at most (more finds no places
 /// between loved songs anyway).
 pub const CARD_MAX_SHARE: f32 = 0.3;
+/// The open modes' share at most…
+pub const OPEN_MAX_SHARE: f32 = 0.9;
+/// …a niche's at least…
+pub const NICHE_SHARE: f32 = 0.8;
+/// …and the user's share from which the open world's rules hold
+/// («Больше нового» is 0.4, «Немного» 0.2).
+pub const OPEN_FROM: f32 = 0.35;
 /// A preview's kind of song is told by this many of its nearest songs of
 /// the library…
 const VOICE_NEAR: usize = 7;
@@ -62,6 +80,42 @@ pub struct NewCandidate {
     /// its source draws ([`crate::NewLog::source_shares`]) or the source's
     /// trust ([`crate::GraphSource::trust`]).
     pub weight: f32,
+    /// Its analysed preview (raw), if any.
+    pub vector: Option<Vector>,
+    /// The library's songs of its main artist (catalog positions; empty
+    /// for a new artist).
+    pub artist_tracks: Vec<usize>,
+}
+
+/// How a mix takes new music (see the module docs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NewMode {
+    /// Between loved songs, [`CARD_MAX_SHARE`] at most.
+    #[default]
+    Calm,
+    /// As much as asked, anywhere after the first song.
+    Open,
+    /// A niche: [`NICHE_SHARE`] at least, of its sound.
+    Niche,
+}
+
+impl NewMode {
+    /// The mode of a mix of `tracks` songs by `artists` artists at the
+    /// user's share `user`.
+    pub fn of(tracks: usize, artists: usize, user: f32) -> Self {
+        if crate::open_world::is_niche(tracks, artists) {
+            Self::Niche
+        } else if user >= OPEN_FROM {
+            Self::Open
+        } else {
+            Self::Calm
+        }
+    }
+
+    /// The new songs stand anywhere after the first.
+    pub const fn open(self) -> bool {
+        !matches!(self, Self::Calm)
+    }
 }
 
 /// How many new songs a mix of `songs` gets at `share` of the whole (one
@@ -77,6 +131,17 @@ pub fn new_count(songs: usize, share: f32) -> usize {
 pub fn want(songs: usize, appetite: Option<f32>, user: f32) -> usize {
     let base = appetite.unwrap_or(1.0 / NEW_EVERY as f32);
     new_count(songs, base.max(user.min(CARD_MAX_SHARE)))
+}
+
+/// How many new songs a mix of `songs` asks for in `mode` ([`want`] for the
+/// calm one).
+pub fn want_in(songs: usize, appetite: Option<f32>, user: f32, mode: NewMode) -> usize {
+    let base = appetite.unwrap_or(1.0 / NEW_EVERY as f32);
+    match mode {
+        NewMode::Calm => want(songs, appetite, user),
+        NewMode::Open => new_count(songs, base.max(user).min(OPEN_MAX_SHARE)),
+        NewMode::Niche => new_count(songs, base.max(user).max(NICHE_SHARE).min(OPEN_MAX_SHARE)),
+    }
 }
 
 /// The kinds of song of a mix: the sung languages of its profiles (of its
@@ -156,6 +221,11 @@ pub fn fits(c: &NewCandidate, langs: &HashSet<Lang>, inst: bool) -> bool {
 /// The new songs `m` takes of `cands`, `want` at most, none another mix
 /// took (`used`, by their remote ids): see the module docs.
 pub fn choose<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: usize, used: &mut HashSet<String>) -> Vec<&'c NewCandidate> {
+    choose_where(model, m, cands, want, used, &|_| true)
+}
+
+/// [`choose`] of the candidates `keep` lets through.
+pub fn choose_where<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: usize, used: &mut HashSet<String>, keep: &dyn Fn(&NewCandidate) -> bool) -> Vec<&'c NewCandidate> {
     let (langs, inst) = kinds(model, m);
     let own: HashSet<usize> = m.tracks.iter().copied().collect();
     let of_mix = |j: usize| m.profiles.contains(&j);
@@ -168,7 +238,8 @@ pub fn choose<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: u
             0
         }
     };
-    let mut order: Vec<(u8, f32, usize)> = cands.iter().enumerate().filter(|(_, c)| fits(c, &langs, inst)).map(|(k, c)| (group(c), c.weight, k)).collect();
+    let mut order: Vec<(u8, f32, usize)> =
+        cands.iter().enumerate().filter(|(_, c)| fits(c, &langs, inst) && keep(c)).map(|(k, c)| (group(c), c.weight, k)).collect();
     order.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut out = Vec::new();
     for (_, _, k) in order {
@@ -180,6 +251,42 @@ pub fn choose<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: u
         }
     }
     out
+}
+
+/// The new songs `m` takes of `cands` (none another mix took, `used`) as
+/// the open world has it: its mode by its size and the user's share, as
+/// many as the mode asks, a niche's only of its sound (see the module
+/// docs). `appetite` is the share the mix's profile draws. Without new
+/// music asked for (`user` 0) a mix is no niche.
+pub fn take<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], appetite: Option<f32>, user: f32, used: &mut HashSet<String>) -> (Vec<&'c NewCandidate>, NewMode) {
+    let mode = if user > 0.0 { NewMode::of(m.tracks.len(), m.artists.len(), user) } else { NewMode::Calm };
+    let want = want_in(m.tracks.len(), appetite, user, mode);
+    let chosen = if mode == NewMode::Niche {
+        let sound = crate::open_world::NicheSound::of(model, &m.tracks);
+        choose_where(model, m, cands, want, used, &|c| {
+            let energies: Vec<f32> = c.artist_tracks.iter().filter_map(|&i| model.energy_at(i)).collect();
+            sound.fits(model, c.vector.as_ref(), c.lane, &c.near, &energies)
+        })
+    } else {
+        choose(model, m, cands, want, used)
+    };
+    (chosen, mode)
+}
+
+/// After which places of a mix `n` new songs stand in `mode`: between
+/// loved ones ([`places`]) in the calm one, else evenly ([`spread`]).
+pub fn placements(mode: NewMode, anchors: &[bool], n: usize) -> Vec<usize> {
+    if mode.open() { spread(anchors.len(), n) } else { places(anchors, n) }
+}
+
+/// After which places of a mix of `len` songs `n` new songs stand in the
+/// open modes, in order: evenly from after the first song on, as many
+/// after one place as the share needs (a place repeated).
+pub fn spread(len: usize, n: usize) -> Vec<usize> {
+    if len == 0 {
+        return Vec::new();
+    }
+    (0..n).map(|j| ((j * len) / n.max(1)).min(len - 1)).collect()
 }
 
 /// After which places of a mix of `anchors` (familiar and loved) `n` new
@@ -207,7 +314,7 @@ mod tests {
     use nikgob_core::streaming::{RemoteId, Service};
 
     fn cand(id: &str, lane: Option<LaneKey>, near: Vec<usize>, weight: f32) -> NewCandidate {
-        NewCandidate { track: StreamTrack::new(RemoteId::new(Service::Youtube, id), id), lane, soundtrack: false, profile: None, near, weight }
+        NewCandidate { track: StreamTrack::new(RemoteId::new(Service::Youtube, id), id), lane, soundtrack: false, profile: None, near, weight, vector: None, artist_tracks: Vec::new() }
     }
 
     /// The share of a mix: the appetite, at least the user's, at most
@@ -242,6 +349,28 @@ mod tests {
         t.artists.push(nikgob_core::streaming::ArtistRef::new(None, "Yuki Kajiura"));
         assert_eq!(lane_of_new(&types, Some(Voice::Instrumental), &t), Some(LaneKey::Instrumental));
         assert_ne!(lane_of_new(&types, None, &t), Some(LaneKey::Instrumental));
+    }
+
+    /// The modes: a small mix is a niche, «Больше нового» opens the rest;
+    /// the open modes take more and place them evenly, runs where needed.
+    #[test]
+    fn the_open_modes_take_more_anywhere() {
+        assert_eq!(NewMode::of(28, 10, 0.2), NewMode::Calm);
+        assert_eq!(NewMode::of(28, 10, 0.4), NewMode::Open);
+        assert_eq!(NewMode::of(14, 10, 0.2), NewMode::Niche);
+        assert_eq!(NewMode::of(28, 3, 0.0), NewMode::Niche);
+        assert_eq!(want_in(28, None, 0.4, NewMode::Calm), want(28, None, 0.4));
+        assert_eq!(want_in(28, None, 0.4, NewMode::Open), new_count(28, 0.4));
+        assert!(want_in(28, None, 0.4, NewMode::Open) > want(28, None, 0.4), "over the calm cap");
+        assert_eq!(want_in(12, None, 0.2, NewMode::Niche), new_count(12, NICHE_SHARE));
+        let at = spread(12, 48);
+        assert_eq!(at.len(), 48);
+        assert!(at.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(at.iter().filter(|&&k| k == 0).count(), 4, "four after each song: {at:?}");
+        assert_eq!(*at.last().unwrap(), 11);
+        assert_eq!(spread(28, 4), vec![0, 7, 14, 21]);
+        assert!(spread(0, 3).is_empty());
+        assert_eq!(placements(NewMode::Calm, &[true; 10], 2), places(&[true; 10], 2));
     }
 
     /// New songs stand between two anchors, never in the first two places

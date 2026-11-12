@@ -43,7 +43,7 @@ const ZCR: usize = 1;
 const CENTROID: usize = 2;
 const CENTROID_STD: usize = 3;
 const ROLLOFF: usize = 4;
-const LOUDNESS: usize = 8;
+pub(crate) const LOUDNESS: usize = 8;
 const LOUDNESS_STD: usize = 9;
 /// The features the energy is the mean of (tests).
 #[cfg(test)]

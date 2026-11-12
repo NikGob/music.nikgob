@@ -33,9 +33,11 @@
 //!   with the user's key; one log line a run says so.
 //! * **Resolution** ([`resolve`]): an entry is the library's track or artist
 //!   by the service's id, by its MusicBrainz id, else by its song or artist
-//!   key; what the library lacks is left out of the graph, and the similar
-//!   artists it lacks vote for the new music of their artists
-//!   ([`Resolved::votes`]).
+//!   key; the similar artists the library lacks vote for the new music of
+//!   their artists ([`Resolved::votes`]), and every song and artist it
+//!   lacks is a node of its own (by its song or artist key) its tracks and
+//!   artists bridge through ([`GraphInput::outside_tracks`],
+//!   docs/recommendations.md §1.3).
 //!
 //! [`StreamSchedule::graph_gap_youtube`]: crate::StreamSchedule::graph_gap_youtube
 //! [`StreamSchedule::graph_chunk`]: crate::StreamSchedule::graph_chunk
@@ -458,6 +460,13 @@ impl Names {
 /// The graph of `rows` and `tags` over the library `names` knows.
 pub(crate) fn resolve(rows: &[GraphRow], tags: &[GraphTag], names: &Names) -> Resolved {
     let mut out = Resolved::default();
+    // The songs and artists the library lacks, each a number.
+    let mut songs: HashMap<String, u32> = HashMap::new();
+    let mut artists: HashMap<String, u32> = HashMap::new();
+    let node = |map: &mut HashMap<String, u32>, key: String| {
+        let n = map.len() as u32;
+        *map.entry(key).or_insert(n)
+    };
     for r in rows {
         let source = GraphSource::parse(&r.source);
         match (r.subject_kind.as_str(), r.entry.kind.as_str()) {
@@ -465,18 +474,32 @@ pub(crate) fn resolve(rows: &[GraphRow], tags: &[GraphTag], names: &Names) -> Re
                 let (Some(source), Ok(from)) = (source, r.subject_id.parse::<TrackId>()) else { continue };
                 match names.track(&r.source, &r.entry) {
                     Some(to) => out.input.tracks.push(Edge { from, to, rank: r.rank, of: r.total, source }),
-                    // A song the library lacks with its video: new music.
-                    None if source == GraphSource::YoutubeRadio && r.entry.remote_id.is_some() => {
-                        out.beyond.push((from, r.entry.clone(), rank_weight(r.rank, r.total) * source.trust()));
+                    None => {
+                        let w = rank_weight(r.rank, r.total) * source.trust();
+                        if !r.entry.artist.trim().is_empty() && !r.entry.name.trim().is_empty() {
+                            let x = node(&mut songs, song_key(&r.entry.name, &r.entry.artist));
+                            out.input.outside_tracks.push((from, x, w));
+                        }
+                        // A song the library lacks with its video: new music.
+                        if source == GraphSource::YoutubeRadio && r.entry.remote_id.is_some() {
+                            out.beyond.push((from, r.entry.clone(), w));
+                        }
                     }
-                    None => {}
                 }
             }
             ("artist", "artist") => {
                 let (Some(source), Ok(from)) = (source, r.subject_id.parse::<ArtistId>()) else { continue };
                 match names.artist(&r.source, &r.entry) {
                     Some(to) => out.input.artists.push(Edge { from, to, rank: r.rank, of: r.total, source }),
-                    None => out.votes.entry(artist_key(&r.entry.name)).or_default().push((from, rank_weight(r.rank, r.total) * source.trust())),
+                    None => {
+                        let w = rank_weight(r.rank, r.total) * source.trust();
+                        let key = artist_key(&r.entry.name);
+                        if !key.is_empty() {
+                            let x = node(&mut artists, key.clone());
+                            out.input.outside_artists.push((from, x, w));
+                        }
+                        out.votes.entry(key).or_default().push((from, w));
+                    }
                 }
             }
             ("artist", "track") if [S_POPULARITY, S_DEEZER_TOP, S_LASTFM_TOP].contains(&r.source.as_str()) => {
@@ -524,13 +547,15 @@ pub(crate) fn read(lib: &Library, rows: &[nikgob_library::RecTrack], artist_keys
     }
     let resolved = resolve(&edges, &tags, &names);
     log::info!(
-        "graph: {} track edges, {} artist edges, {} tags, {} popular, {} artists and {} songs beyond the library",
+        "graph: {} track edges, {} artist edges, {} tags, {} popular, {} artists and {} songs beyond the library, {} and {} edges to what it lacks",
         resolved.input.tracks.len(),
         resolved.input.artists.len(),
         resolved.input.tags.len(),
         resolved.input.popular.len(),
         resolved.votes.len(),
-        resolved.beyond.len()
+        resolved.beyond.len(),
+        resolved.input.outside_tracks.len(),
+        resolved.input.outside_artists.len()
     );
     resolved
 }
@@ -1042,6 +1067,11 @@ mod tests {
         assert_eq!(r.input.popular, vec![(t(4), 0, 10), (t(5), 0, 10), (t(4), 1, 10), (t(3), 0, 10)]);
         assert_eq!(r.input.tags.len(), 1);
         assert_eq!(r.votes.keys().collect::<Vec<_>>(), vec![&artist_key("New Band")]);
+        // What the library lacks is a node to bridge through: the song of
+        // two sources one node, the new band another.
+        assert_eq!(r.input.outside_tracks.len(), 1, "{:?}", r.input.outside_tracks);
+        assert_eq!(r.input.outside_tracks[0].0, t(1));
+        assert_eq!(r.input.outside_artists.len(), 1);
         // The new band counts as known by its loved neighbour, capped.
         let known = with_votes(HashMap::new(), &r.votes, &|x| if x == a(1) { 1.0 } else { 0.0 });
         let v = known[&artist_key("New Band")];
@@ -1067,6 +1097,11 @@ mod tests {
         let r = resolve(&rows, &[], &Names::default());
         assert!(r.input.tracks.is_empty());
         assert_eq!(r.beyond.len(), 4, "YouTube Music's songs with a video only");
+        // Every song the library lacks bridges, «New Song» of two tracks
+        // one node.
+        assert_eq!(r.input.outside_tracks.len(), 6);
+        let new_song: Vec<u32> = r.input.outside_tracks.iter().take(2).map(|e| e.1).collect();
+        assert_eq!(new_song[0], new_song[1]);
         let love = |id: TrackId| {
             if id == t(1) {
                 Some(1.0)

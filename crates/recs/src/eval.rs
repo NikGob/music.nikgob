@@ -30,10 +30,18 @@
 //!     discoveries and the graph's finds the dataset carries,
 //!     [`Dataset::new`]);
 //!   - for both, the share of picks by an artist never played before;
+//!   - the open world (docs/recommendations.md §1): the mixes that are
+//!     niches ([`crate::open_world::is_niche`]), the share of new songs
+//!     they play and how many artists they are of (a niche stuck on two
+//!     artists is what the open world is for), the share of mixes mostly
+//!     new; and the wave of a filter ([`crate::open_world::next`]: «Спокойное»
+//!     and any music) at the same mornings — its share of new music, its
+//!     artists, whether it was a niche;
 //!   - the share of the catalog all lists ever held, and for a synthetic
 //!     listener how high the hidden taste rates what was picked (0.5 is a
 //!     random pick);
-//!   - how long a build of the model takes over the whole history.
+//!   - how long a build of the model takes over the whole history, the
+//!     graph of similar music alone, and a walk of it from a session.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -47,6 +55,7 @@ use crate::graph::{Edge, GraphInput, GraphSource};
 use crate::index::{VectorIndex, euclid};
 use crate::mix_new::{self, NewCandidate};
 use crate::mixes::{Builder, Kept, Mix, MixKey, Settings as MixSettings, never_heard, row};
+use crate::open_world::{Character, OpenCandidate, WaveContext, WaveFilter};
 use crate::model::{Hits, Live, ModelInput, ReplayReport, UserModel, replay};
 use crate::pick::{Item, Recs};
 use crate::radio::{RadioParams, RadioSeed, RadioState};
@@ -127,6 +136,9 @@ pub struct DNew {
     pub near: Vec<TrackId>,
     /// [`crate::mix_new::NewCandidate::weight`].
     pub weight: f32,
+    /// Its main artist when the library has them.
+    #[serde(default)]
+    pub artist: Option<ArtistId>,
 }
 
 /// Everything the engine reads of a library (see the module docs).
@@ -154,6 +166,11 @@ pub struct Dataset {
     pub graph_artists: Vec<DEdge<ArtistId>>,
     pub tags: Vec<(ArtistId, String, f32)>,
     pub popular: Vec<(TrackId, u32, u32)>,
+    /// The edges to songs and artists the library lacks (co-citation).
+    #[serde(default)]
+    pub graph_outside_tracks: Vec<(TrackId, u32, f32)>,
+    #[serde(default)]
+    pub graph_outside_artists: Vec<(ArtistId, u32, f32)>,
     /// A synthetic listener's hidden taste of each track (0…1).
     #[serde(default)]
     pub truth: Vec<(TrackId, f32)>,
@@ -216,6 +233,8 @@ impl Dataset {
             graph_artists: graph.map(|g| artist_edges(&g.artists)).unwrap_or_default(),
             tags: graph.map(|g| g.tags.clone()).unwrap_or_default(),
             popular: graph.map(|g| g.popular.clone()).unwrap_or_default(),
+            graph_outside_tracks: graph.map(|g| g.outside_tracks.clone()).unwrap_or_default(),
+            graph_outside_artists: graph.map(|g| g.outside_artists.clone()).unwrap_or_default(),
             truth: Vec::new(),
             new: Vec::new(),
         }
@@ -264,6 +283,8 @@ impl Dataset {
                 artists: self.graph_artists.iter().map(artist_edge).collect(),
                 tags: self.tags.clone(),
                 popular: self.popular.clone(),
+                outside_tracks: self.graph_outside_tracks.clone(),
+                outside_artists: self.graph_outside_artists.clone(),
             },
             truth: self.truth.iter().copied().collect(),
             new: self.new.clone(),
@@ -367,6 +388,29 @@ pub struct ListStats {
     pub truth: Option<f32>,
     /// The share of the catalog the lists ever held.
     pub coverage: f32,
+    /// The mixes: the niches of a home, the share of new songs they play,
+    /// their distinct artists (their songs' and the new songs'), the share
+    /// of them of two artists or fewer; the share of the mixes that are
+    /// mostly (60 % or more) new.
+    pub niches: f32,
+    pub niche_new: f32,
+    pub niche_artists: f32,
+    pub niche_stuck: f32,
+    pub mostly_new: f32,
+}
+
+/// How the waves of a filter did ([`crate::open_world::next`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaveStats {
+    pub lists: usize,
+    /// The share of new songs of the pool, and of lists that were niches.
+    pub new: f32,
+    pub niche: f32,
+    /// Distinct artists per list, and per pick.
+    pub artists: f32,
+    pub artists_per_pick: f32,
+    /// The library tracks fitting the filter.
+    pub fitting: f32,
 }
 
 /// What [`evaluate`] measured.
@@ -382,6 +426,13 @@ pub struct Report {
     pub mixes: ListStats,
     /// The mixes of a home and how many songs each.
     pub mixes_per_home: f32,
+    /// The waves of «Спокойное» and of any music (the user's share).
+    pub wave_calm: WaveStats,
+    pub wave_any: WaveStats,
+    /// A build of the graph of similar music alone (ms) and a walk of it
+    /// from three tracks (µs).
+    pub graph_ms: f32,
+    pub walk_us: f32,
     /// A build of the model over the whole history, learning the weights
     /// and with them cached; the home's mixes and an autoplay of ten over it.
     pub build_ms: f32,
@@ -494,6 +545,11 @@ struct Lists {
     truth: f32,
     truth_n: usize,
     seen: HashSet<usize>,
+    niches: usize,
+    niche_new: f32,
+    niche_artists: f32,
+    niche_stuck: usize,
+    mostly_new: usize,
 }
 
 /// What a list is scored against.
@@ -574,14 +630,22 @@ impl Lists {
         self.seen.extend(list.iter().copied());
     }
 
-    /// A mix of `len` songs that plays `placed` new songs of the services
-    /// between them.
-    fn add_new(&mut self, len: usize, placed: usize) {
-        if len + placed == 0 {
+    /// A mix of `len` songs that plays `new.placed` new songs of the
+    /// services between them.
+    fn add_new(&mut self, len: usize, new: &HomeNew) {
+        if len + new.placed == 0 {
             return;
         }
-        self.new_service += placed as f32 / (len + placed) as f32;
+        let share = new.placed as f32 / (len + new.placed) as f32;
+        self.new_service += share;
         self.new_n += 1;
+        self.mostly_new += usize::from(share >= 0.6);
+        if new.niche {
+            self.niches += 1;
+            self.niche_new += share;
+            self.niche_artists += new.artists as f32;
+            self.niche_stuck += usize::from(new.artists <= 2);
+        }
     }
 
     fn stats(&self, catalog: usize) -> ListStats {
@@ -605,6 +669,11 @@ impl Lists {
             skips: self.skips / self.skips_n.max(1) as f32,
             truth: (self.truth_n > 0).then(|| self.truth / self.truth_n as f32),
             coverage: self.seen.len() as f32 / catalog.max(1) as f32,
+            niches: self.niches as f32,
+            niche_new: self.niche_new / self.niches.max(1) as f32,
+            niche_artists: self.niche_artists / self.niches.max(1) as f32,
+            niche_stuck: self.niche_stuck as f32 / self.niches.max(1) as f32,
+            mostly_new: self.mostly_new as f32 / self.new_n.max(1) as f32,
         }
     }
 }
@@ -657,12 +726,20 @@ pub fn home_mixes(parts: &Parts, model: &UserModel, suits: &[bool], epoch: u64) 
 /// миксах» as it comes, «Немного»).
 pub const USER_NEW_SHARE: f32 = 0.2;
 
-/// How many new songs of the services each of `mixes` (a home's row of
-/// `model`) plays: [`Parts::new`] through «С новым» as the runtime takes
-/// them ([`crate::mix_new`]: each mix of the row in turn, a song in one mix
-/// only, «Фон» and «Любимые» none, nothing new heard yet) and places them.
-pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<usize> {
-    let cands: Vec<NewCandidate> = parts
+/// What a mix of the home plays of new music ([`home_new`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HomeNew {
+    /// The new songs placed.
+    pub placed: usize,
+    /// It is a niche ([`crate::mix_new::NewMode::Niche`]).
+    pub niche: bool,
+    /// Its distinct artists, its songs' and the placed new songs'.
+    pub artists: usize,
+}
+
+/// The new songs of the services a dataset carries as the mixes take them.
+pub fn new_candidates(parts: &Parts, model: &UserModel) -> Vec<NewCandidate> {
+    parts
         .new
         .iter()
         .map(|d| {
@@ -679,22 +756,89 @@ pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<usize> {
                 profile: v.map(|v| model.embed(&v)).and_then(|e| model.regions.of(&e, None)),
                 near,
                 weight: d.weight,
+                vector: v,
+                artist_tracks: d.artist.map(|a| model.of_artist(a).iter().map(|&i| i as usize).collect()).unwrap_or_default(),
             }
         })
-        .collect();
+        .collect()
+}
+
+/// How many new songs of the services each of `mixes` (a home's row of
+/// `model`) plays: [`Parts::new`] through «С новым» as the runtime takes
+/// them ([`crate::mix_new::take`]: each mix of the row in turn, a song in
+/// one mix only, «Фон» and «Любимые» none, nothing new heard yet) and
+/// places them; whether each is a niche and how many artists it is of.
+pub fn home_new(parts: &Parts, model: &UserModel, mixes: &[Mix]) -> Vec<HomeNew> {
+    let cands = new_candidates(parts, model);
     let mut used: HashSet<String> = HashSet::new();
     mixes
         .iter()
         .map(|m| {
+            let own: HashSet<ArtistId> = m.tracks.iter().filter_map(|&i| model.main_artist_at(i)).collect();
             if matches!(m.key, MixKey::Background { .. } | MixKey::Liked) {
-                return 0;
+                return HomeNew { placed: 0, niche: false, artists: own.len() };
             }
-            let want = mix_new::want(m.tracks.len(), None, USER_NEW_SHARE);
-            let chosen = mix_new::choose(model, m, &cands, want, &mut used);
-            mix_new::places(&m.anchors, chosen.len()).len()
+            let (chosen, mode) = mix_new::take(model, m, &cands, None, USER_NEW_SHARE, &mut used);
+            let placed = mix_new::placements(mode, &m.anchors, chosen.len()).len();
+            let new_artists: HashSet<String> = chosen.iter().take(placed).filter_map(|c| c.track.artists.first()).map(|a| crate::artist_key(&a.name)).collect();
+            HomeNew { placed, niche: mode == mix_new::NewMode::Niche, artists: own.len() + new_artists.len() }
         })
         .collect()
 }
+
+/// The open pool of a dataset ([`Parts::new`]) as a wave takes it.
+pub fn open_pool(parts: &Parts, model: &UserModel) -> Vec<OpenCandidate> {
+    new_candidates(parts, model)
+        .into_iter()
+        .map(|c| OpenCandidate { key: crate::stream_song_key(&c.track), track: c.track, vector: c.vector, lane: c.lane, near: c.near, weight: c.weight })
+        .collect()
+}
+
+/// The next `n` of a wave of `filter` at `model`'s moment after `session`,
+/// over the dataset's open pool.
+pub fn wave(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], filter: &WaveFilter, session: &Session, n: usize) -> crate::open_world::WaveNext {
+    let artist_of: HashMap<String, ArtistId> = parts.new.iter().filter_map(|d| Some((crate::stream_song_key(&d.track), d.artist?))).collect();
+    let artist_tracks = |t: &StreamTrack| artist_of.get(&crate::stream_song_key(t)).map(|a| model.of_artist(*a).iter().map(|&i| i as usize).collect()).unwrap_or_default();
+    let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+    let ok = |_: usize| true;
+    let ctx = WaveContext { model, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks };
+    crate::open_world::next(&ctx, pool, filter, session, n, &HashSet::new())
+}
+
+/// Accumulates [`WaveStats`].
+#[derive(Default)]
+struct Waves {
+    n: usize,
+    new: f32,
+    niche: usize,
+    artists: f32,
+    per_pick: f32,
+    fitting: f32,
+}
+
+impl Waves {
+    fn add(&mut self, w: &crate::open_world::WaveNext) {
+        if w.picks.is_empty() {
+            return;
+        }
+        let k = w.picks.len() as f32;
+        self.n += 1;
+        self.new += w.picks.iter().filter(|p| p.new).count() as f32 / k;
+        self.niche += usize::from(w.niche);
+        let artists: HashSet<&str> = w.picks.iter().map(|p| p.artist.as_str()).collect();
+        self.artists += artists.len() as f32;
+        self.per_pick += artists.len() as f32 / k;
+        self.fitting += w.fitting as f32;
+    }
+
+    fn stats(&self) -> WaveStats {
+        let n = self.n.max(1) as f32;
+        WaveStats { lists: self.n, new: self.new / n, niche: self.niche as f32 / n, artists: self.artists / n, artists_per_pick: self.per_pick / n, fitting: self.fitting / n }
+    }
+}
+
+/// Picks of a wave the evaluation asks.
+pub const WAVE_LEN: usize = 20;
 
 /// The main artists of the tracks `model` saw started: whether the track at
 /// `i` is by one of them.
@@ -747,6 +891,20 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
     let t0 = Instant::now();
     let _ = autoplay(parts, &cached, &suits, session_before(events, last + 1), opts.autoplay_len);
     report.autoplay_ms = t0.elapsed().as_secs_f32() * 1e3;
+    let t0 = Instant::now();
+    let graph = crate::graph::SimGraph::build(&parts.catalog, &parts.graph);
+    report.graph_ms = t0.elapsed().as_secs_f32() * 1e3;
+    // A walk from the three tracks of the graph with most neighbours.
+    let mut busy: Vec<(usize, usize)> = (0..parts.catalog.len()).map(|i| (graph.near(i).len(), i)).collect();
+    busy.sort_by(|a, b| b.cmp(a));
+    let seeds: Vec<(usize, f32)> = busy.iter().take(3).enumerate().map(|(k, x)| (x.1, 0.6f32.powi(k as i32))).collect();
+    let t0 = Instant::now();
+    let rounds = 50;
+    for _ in 0..rounds {
+        std::hint::black_box(graph.walk(&seeds));
+    }
+    report.walk_us = t0.elapsed().as_secs_f32() * 1e6 / rounds as f32;
+    drop(graph);
     drop(homes);
     let n = parts.catalog.len();
     let mut early = vec![0u32; n];
@@ -818,6 +976,8 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         days.push((last + offset).div_euclid(DAY_MS) + 1);
     }
     let mut mixes = Lists::default();
+    let mut calm = Waves::default();
+    let mut any = Waves::default();
     let mut per_home = 0usize;
     let mut homes_n = 0usize;
     if !days.is_empty() && opts.mix_days > 0 {
@@ -839,12 +999,19 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
             per_home += home.len();
             for (m, new) in home.iter().zip(placed) {
                 mixes.add(&ctx, &m.tracks, &Truth { listened: &listened, session: None, next: None, heard: &heard, artist_heard: &artist });
-                mixes.add_new(m.tracks.len(), new);
+                mixes.add_new(m.tracks.len(), &new);
             }
+            let pool = open_pool(parts, &model);
+            let session = Session::default();
+            calm.add(&wave(parts, &model, &suits, &pool, &WaveFilter { novelty: USER_NEW_SHARE, character: Character::Calm, ..WaveFilter::default() }, &session, WAVE_LEN));
+            any.add(&wave(parts, &model, &suits, &pool, &WaveFilter { novelty: USER_NEW_SHARE, ..WaveFilter::default() }, &session, WAVE_LEN));
         }
     }
     report.mixes = mixes.stats(n);
     report.mixes_per_home = per_home as f32 / homes_n.max(1) as f32;
+    report.mixes.niches /= homes_n.max(1) as f32;
+    report.wave_calm = calm.stats();
+    report.wave_any = any.stats();
     report
 }
 
@@ -901,9 +1068,20 @@ impl Report {
         }
         out += &format!("  autoplay: {}\n", list_row(&self.autoplay));
         out += &format!("  mixes:    {}  ({:.1} mixes a home)\n", list_row(&self.mixes), self.mixes_per_home);
+        let m = &self.mixes;
         out += &format!(
-            "  time: build {:.0} ms (learning) / {:.0} ms (cached weights), home mixes {:.0} ms, autoplay of ten {:.0} ms\n",
-            self.build_ms, self.build_cached_ms, self.mixes_ms, self.autoplay_ms
+            "  open world: niches {:.1} a home  niche-new {:.3}  niche-artists {:.1}  stuck-on-2 {:.3}  mostly-new {:.3}\n",
+            m.niches, m.niche_new, m.niche_artists, m.niche_stuck, m.mostly_new
+        );
+        for (name, w) in [("calm", &self.wave_calm), ("any", &self.wave_any)] {
+            out += &format!(
+                "  wave {name:>4}: lists {:>3}  new {:.3}  niche {:.3}  artists {:.1} ({:.2} a pick)  fitting {:.0}\n",
+                w.lists, w.new, w.niche, w.artists, w.artists_per_pick, w.fitting
+            );
+        }
+        out += &format!(
+            "  time: build {:.0} ms (learning) / {:.0} ms (cached weights), home mixes {:.0} ms, autoplay of ten {:.0} ms, graph {:.1} ms, walk {:.0} µs\n",
+            self.build_ms, self.build_cached_ms, self.mixes_ms, self.autoplay_ms, self.graph_ms, self.walk_us
         );
         out
     }
@@ -989,6 +1167,36 @@ mod tests {
         }
         assert!(old * 3 <= all, "{old} old songs of {all}");
         assert!(never > 0, "nothing never heard in {all} songs");
+    }
+
+    /// A listener of rap with three calm songs of one artist: «Спокойное»
+    /// is a niche, its wave plays mostly new calm songs of several artists
+    /// — none of the rap, not the rap its calm songs' radios hold, not the
+    /// songs of its own rapper — and the wave of any music stays the
+    /// user's share of new.
+    #[test]
+    fn a_calm_niche_of_three_songs_opens_to_the_world() {
+        let d = synthetic::user(synthetic::Kind::NicheCalm, 5);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let pool = open_pool(&p, &model);
+        let calm = wave(&p, &model, &suits, &pool, &WaveFilter { novelty: USER_NEW_SHARE, character: Character::Calm, ..WaveFilter::default() }, &Session::default(), WAVE_LEN);
+        assert!(calm.niche, "fitting {} of {} artists", calm.fitting, calm.artists);
+        let new: Vec<&crate::open_world::WavePick> = calm.picks.iter().filter(|p| p.new).collect();
+        assert!(new.len() as f32 >= 0.7 * calm.picks.len() as f32, "{} new of {}", new.len(), calm.picks.len());
+        let title = |p: &crate::open_world::WavePick| match &p.item {
+            Item::Stream(r) => d.new.iter().find(|n| n.track.id == *r).map(|n| n.track.title.clone()).unwrap_or_default(),
+            Item::Track(_) => String::new(),
+        };
+        assert!(new.iter().all(|p| title(p).starts_with("Drift")), "{:?}", new.iter().map(|p| title(p)).collect::<Vec<_>>());
+        let artists: HashSet<&str> = calm.picks.iter().map(|p| p.artist.as_str()).collect();
+        assert!(artists.len() >= 4, "{artists:?}");
+        let any = wave(&p, &model, &suits, &pool, &WaveFilter::default(), &Session::default(), WAVE_LEN);
+        assert!(!any.niche);
+        let share = any.picks.iter().filter(|p| p.new).count() as f32 / any.picks.len() as f32;
+        assert!(share <= USER_NEW_SHARE + 0.1, "{share}");
     }
 
     /// Every synthetic listener, measured (`cargo test -p nikgob-recs
