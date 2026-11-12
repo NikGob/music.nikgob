@@ -577,8 +577,16 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, o
     let h = lines(count, per) as f32 * (SHORTCUT_H + 8.0) - 8.0;
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let mut nav = None;
-    let keys = items.iter().map(shortcut_key).collect();
-    let changes = refresh::track(ui.ctx(), Id::new("home-shortcuts"), live, keys, || items.to_vec());
+    // Every shortcut the page has, not only the ones that fit: a page
+    // that narrows and widens again shows the same cards, not new ones.
+    let all = &state.home.shortcuts;
+    let keys = all.iter().map(shortcut_key).collect();
+    let changes = refresh::track(ui.ctx(), Id::new("home-shortcuts"), live, keys, || all.to_vec());
+    if live {
+        // Back from another page, the tiles are there at once.
+        let uris: Vec<String> = items.iter().flat_map(shortcut_pictures).collect();
+        crate::covers::hold(ui.ctx(), uris.iter().map(String::as_str));
+    }
     entering(ui, rect, n, "shortcuts", |ui| {
         for (i, sc) in items.iter().enumerate() {
             let cell = grid.cell(i, per, rect.top(), SHORTCUT_H, 8.0);
@@ -593,12 +601,27 @@ fn shortcuts(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, o
     nav
 }
 
-/// What a shortcut shows ([`refresh`]).
-fn shortcut_key(sc: &Shortcut) -> u64 {
+/// The pictures a shortcut draws (as [`cards::shortcut`] picks them).
+pub(super) fn shortcut_pictures(sc: &Shortcut) -> Vec<String> {
     match sc {
-        Shortcut::Release(a) => refresh::key(("release", a.id, &a.title, &a.cover)),
-        Shortcut::Playlist(p, covers) => refresh::key(("playlist", p.id, &p.name, covers)),
-        Shortcut::Artist(a) => refresh::key(("artist", a.id, &a.name, &a.image)),
+        Shortcut::Release(a) => a.cover.iter().map(|c| c.uri()).collect(),
+        Shortcut::Playlist(_, covers) if covers.len() >= 4 => covers.iter().take(4).map(|c| c.uri()).collect(),
+        Shortcut::Playlist(p, covers) => p.cover.as_ref().or(covers.first()).map(|c| c.uri()).into_iter().collect(),
+        Shortcut::Artist(a) => a.image.iter().map(|c| c.uri()).collect(),
+    }
+}
+
+/// What a shortcut shows ([`refresh`]): its name and the pictures it
+/// draws, not what else its cover carries (its colour seed, its ambient
+/// picture), which a page built again may have found meanwhile.
+pub(super) fn shortcut_key(sc: &Shortcut) -> u64 {
+    let uri = |c: &Option<nikgob_view::Cover>| c.as_ref().map(|c| c.uri());
+    match sc {
+        Shortcut::Release(a) => refresh::key(("release", a.id, &a.title, &a.artist, uri(&a.cover))),
+        Shortcut::Playlist(p, covers) => {
+            refresh::key(("playlist", p.id, &p.name, uri(&p.cover), covers.iter().map(|c| c.uri()).collect::<Vec<_>>()))
+        }
+        Shortcut::Artist(a) => refresh::key(("artist", a.id, &a.name, uri(&a.image))),
     }
 }
 

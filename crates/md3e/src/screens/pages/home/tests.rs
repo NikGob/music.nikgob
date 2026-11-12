@@ -437,3 +437,31 @@ fn the_page_is_centred_past_its_widest() {
     let g = Grid::new(100.0, MAX_W + 400.0);
     assert_eq!((g.left, g.width), (300.0, MAX_W));
 }
+
+/// A shortcut built again with what its cover carries besides the picture
+/// (a colour seed found since, its ambient picture) is the same card: it
+/// does not come in anew; another picture is another card.
+#[test]
+fn a_shortcut_is_new_only_when_its_picture_or_name_is() {
+    use nikgob_view::{ArtistCard, ArtistId, Cover, Shortcut};
+    let cover = |path: &str, seed: Option<u32>, ambient: Option<&str>| Cover { path: path.into(), seed, ambient: ambient.map(Into::into) };
+    let id = ArtistId::new();
+    let artist = |name: &str, image: Option<Cover>, latin: Option<&str>| {
+        Shortcut::Artist(ArtistCard {
+            id,
+            name: name.into(),
+            image,
+            liked: false,
+            track_count: 3,
+            latin: latin.map(Into::into),
+            character: false,
+        })
+    };
+    let before = shortcut_key(&artist("Lida", Some(cover("C:/a/lida.jpg", None, None)), None));
+    let again = shortcut_key(&artist("Lida", Some(cover("C:/a/lida.jpg", Some(0xff10_2030), Some("C:/a/ambient.png"))), Some("Lida")));
+    assert_eq!(before, again);
+    assert_ne!(before, shortcut_key(&artist("Lida", Some(cover("C:/a/other.jpg", None, None)), None)));
+    assert_ne!(before, shortcut_key(&artist("Лида", Some(cover("C:/a/lida.jpg", None, None)), None)));
+    assert_eq!(shortcut_pictures(&artist("Lida", Some(cover("C:/a/lida.jpg", None, None)), None)).len(), 1);
+    assert!(shortcut_pictures(&artist("Lida", None, None)).is_empty());
+}

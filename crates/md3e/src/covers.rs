@@ -7,8 +7,9 @@
 //! frame and, while the wanted tier decodes, shows a tier of the same file
 //! that is already loaded. At the end of every frame (the last pass of it:
 //! a pass egui discards ends nothing) the covers that were not drawn in this
-//! or the previous frame and are not [pinned](pin) are forgotten, oldest
-//! first, until the textures fit the [budget](DEFAULT_BUDGET); egui frees
+//! or the previous frame and are not [pinned](pin) or [held](hold) are
+//! forgotten, oldest first, until the textures fit the
+//! [budget](DEFAULT_BUDGET); egui frees
 //! their textures after that frame is painted, so a texture is never freed
 //! while a frame still draws it. The loader hands every decoded image to
 //! egui's texture loader and keeps no copy, and it reads files itself, so a
@@ -61,6 +62,10 @@ pub const DEFAULT_BUDGET: usize = 64 << 20;
 /// file (at most [`FULL`]). A big Now Playing cover drawn from a 3000 px
 /// file kept 48 MB of texture for 600 px on screen; 1024 is enough for it.
 const TIERS: [u32; 5] = [128, 256, 512, 1024, 2048];
+
+/// [Held](hold) covers stay loaded off screen at the tiers up to this one
+/// (the small pictures of a page's tiles, not a large copy drawn elsewhere).
+pub const HELD_TIER: u32 = 256;
 
 /// The longest side a cover is decoded at, even drawn larger.
 const FULL: u32 = 4096;
@@ -180,6 +185,9 @@ struct Lru {
     pinned: HashSet<String>,
     /// The first of them: the playing track's ([`trim_to_current`]).
     current: Option<String>,
+    /// Files (URIs without a tier) kept loaded off screen at the small
+    /// tiers ([`hold`]).
+    held: HashSet<String>,
     budget: usize,
 }
 
@@ -247,6 +255,7 @@ pub fn install(ctx: &Context) {
             used: HashMap::new(),
             pinned: HashSet::new(),
             current: None,
+            held: HashSet::new(),
             budget: DEFAULT_BUDGET,
         }),
         stamps: Mutex::default(),
@@ -289,6 +298,17 @@ pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
         let mut lru = lock(&s.lru);
         lru.current = pinned.first().cloned();
         lru.pinned = pinned.into_iter().collect();
+    }
+}
+
+/// Keeps these covers loaded while off screen at the tiers up to
+/// [`HELD_TIER`]: a few small pictures a page shows every time it is back
+/// (Главная's quick access), so they are there at once instead of read
+/// again after another page filled the budget. Replaces the previous set.
+pub fn hold<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
+    if let Some(s) = shared(ctx) {
+        let held: HashSet<String> = uris.into_iter().map(|u| base(u).to_owned()).collect();
+        lock(&s.lru).held = held;
     }
 }
 
@@ -816,7 +836,8 @@ impl Shared {
             for uri in &forget {
                 lru.used.remove(uri);
             }
-            let Lru { used, pinned, budget, .. } = &mut *lru;
+            let Lru { used, pinned, held, budget, .. } = &mut *lru;
+            let kept = |u: &Use| pinned.contains(&u.origin) || (u.tier.is_some_and(|t| t <= HELD_TIER) && held.contains(&u.origin));
             used.retain(|uri, u| {
                 let keep = u.bytes > 0 || shown(u);
                 if !keep {
@@ -828,7 +849,7 @@ impl Shared {
             if total > *budget {
                 let mut old: Vec<(u64, String, usize)> = used
                     .iter()
-                    .filter(|(_, u)| !shown(u) && !pinned.contains(&u.origin))
+                    .filter(|(_, u)| !shown(u) && !kept(u))
                     .map(|(uri, u)| (u.last, uri.clone(), u.bytes))
                     .collect();
                 old.sort_unstable();
@@ -1058,6 +1079,40 @@ mod tests {
         let s = shared(ctx).unwrap();
         let lru = lock(&s.lru);
         lru.used.iter().filter(|(_, u)| u.bytes > 0).map(|(k, _)| k.clone()).collect()
+    }
+
+    #[test]
+    fn held_covers_stay_loaded_while_another_page_fills_the_budget() {
+        let ctx = ctx();
+        let home = covers("held", 2, 300);
+        let other = covers("held-other", 6, 300);
+        let small = texture_bytes(vec2(128.0, 128.0));
+        set_budget(&ctx, 3 * small);
+        hold(&ctx, home.iter().map(String::as_str));
+        show(&ctx, &home, 72.0);
+        // Another page, more than the budget on its own.
+        show(&ctx, &other, 72.0);
+        pass(&ctx, &other, 72.0);
+        pass(&ctx, &other, 72.0);
+        let has = |uris: &[String]| {
+            let now = loaded(&ctx);
+            uris.iter().all(|u| now.iter().any(|l| base(l) == u))
+        };
+        assert!(has(&home), "the held covers were forgotten");
+        assert!(has(&other), "the visible ones stay too");
+        // A large copy of a held cover is not held.
+        show(&ctx, &home[..1], 400.0);
+        pass(&ctx, &other, 72.0);
+        pass(&ctx, &other, 72.0);
+        let now = loaded(&ctx);
+        assert!(!now.iter().any(|l| l.ends_with("#512")), "{now:?}");
+        assert!(has(&home));
+        // Held no longer: they go like any cover off screen.
+        hold(&ctx, std::iter::empty());
+        pass(&ctx, &other, 72.0);
+        pass(&ctx, &other, 72.0);
+        let now = loaded(&ctx);
+        assert!(home.iter().all(|u| !now.iter().any(|l| base(l) == u)), "{now:?}");
     }
 
     #[test]
