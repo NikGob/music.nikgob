@@ -353,13 +353,24 @@ fn a_kept_guest_still_counts() {
 #[test]
 fn shuffle_and_a_drag_keep_one_guest_ahead() {
     let (lib, id, tracks) = library();
-    let s = start(&lib, Prefs { plus_playlists: vec![id], ..prefs() }, None);
+    // The playlist from its first track: shuffle turned off later goes back
+    // to it with the whole playlist ahead. (Started shuffled, it would go
+    // back to wherever the random first track is in the playlist, and near
+    // its end no place for a guest is ahead at all.)
+    let in_order = nikgob_view::ListShuffles::all(nikgob_view::ListShuffle::InOrder);
+    let s = start(&lib, Prefs { plus_playlists: vec![id], list_shuffle: in_order, ..prefs() }, None);
     wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
     play(&s, id, tracks.len());
     wait_for(&s.rt, "a guest", |st| guest_place(st) == Some(2));
-    for _ in 0..4 {
+    for k in 0..4 {
+        let shuffled = k % 2 == 0;
         s.rt.send(Command::ToggleShuffle);
-        std::thread::sleep(Duration::from_millis(150));
+        // The guest goes back to its place in the same step as the shuffle
+        // (never two ahead, never none, whenever looked at).
+        wait_for(&s.rt, "the shuffle", |st| {
+            assert_eq!(guests_ahead(st).len(), 1, "{:?}", rows(&st.queue.next));
+            st.player.shuffle == shuffled
+        });
         let st = s.rt.state();
         assert_eq!(guests_ahead(&st).len(), 1, "{:?}", rows(&st.queue.next));
         assert_eq!(guest_place(&st), Some(2), "{:?}", rows(&st.queue.next));
