@@ -343,7 +343,8 @@ pub struct NicheCard {
 /// The niches the home may hold a card of (see the module docs): the calm
 /// songs ([`Character::Calm`]), each kind of song, each family of genres
 /// `ctx` tells — those with [`NICHE_MIN_SEEDS`] songs and two loved but a
-/// niche's worth only ([`is_niche`]), the most loved first, every song
+/// niche's worth only ([`is_niche`]; a kind or genre below a mix's least
+/// length, [`crate::mixes::MIN_SONGS`]), the most loved first, every song
 /// once (a calm niche first), [`NICHE_CARDS`] at most.
 pub fn niches(ctx: &WaveContext<'_>) -> Vec<NicheCard> {
     use crate::mixes::{MixKey, lane_code};
@@ -370,6 +371,12 @@ pub fn niches(ctx: &WaveContext<'_>) -> Vec<NicheCard> {
         let artists: HashSet<ArtistId> = seeds.iter().filter_map(|&i| m.main_artist_at(i)).collect();
         let loved = seeds.iter().filter(|&&i| m.tracks[i].aff_long(now) > 0.0).count();
         if seeds.len() < NICHE_MIN_SEEDS || loved < 2 || !is_niche(seeds.len(), artists.len()) {
+            continue;
+        }
+        // A kind or a genre of a mix's length is the row's to draw (judged
+        // a niche by its pool then): only one too small for a card is
+        // given one. The calm songs take the calm card's place whatever.
+        if !strict && seeds.len() >= crate::mixes::MIN_SONGS {
             continue;
         }
         seeds.sort_by(|a, b| m.tracks[*b].aff_long(now).total_cmp(&m.tracks[*a].aff_long(now)).then(a.cmp(b)));
