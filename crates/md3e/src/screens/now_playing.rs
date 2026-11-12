@@ -240,7 +240,7 @@ impl Outline {
     /// clockwise from the top. The shapes are star-shaped around their
     /// centre, so each direction meets the outline once; each segment of
     /// the flattened path fills the bins its two ends span.
-    fn radii(&self) -> Vec<f32> {
+    pub(crate) fn radii(&self) -> Vec<f32> {
         let c = self.rect.center();
         let path = shape_paint::shape_path(&self.cubics, self.rect, self.rotation, 0.5);
         let mut out = vec![0.0f32; BINS];

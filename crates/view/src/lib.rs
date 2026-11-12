@@ -1682,6 +1682,11 @@ pub struct Prefs {
     pub ring_on_pause: bool,
     /// What the ring is made of and where it sits.
     pub ring_style: RingStyle,
+    /// The visualizer's picture (chosen in the visualizer itself).
+    pub viz_concept: VizConcept,
+    /// The visualizer takes the whole screen (F11 or its button inside it
+    /// switch it); off, it fills the window.
+    pub viz_fullscreen: bool,
     /// The ring turns counter-clockwise.
     pub ring_ccw: bool,
     /// The cover's outline turns counter-clockwise.
@@ -2444,6 +2449,10 @@ pub enum PrefPatch {
     AlbumDate(AlbumDate),
     /// What stands beside the Now Playing cover.
     NpSlot(NpSlot),
+    /// The visualizer's picture.
+    VizConcept(VizConcept),
+    /// The visualizer on the whole screen or in the window.
+    VizFullscreen(bool),
     /// Windows starts the app at sign-in (as the system says).
     Autostart(bool),
     /// «Как к тебе обращаться» ([`user_name`] keeps it tidy); Главная asks
@@ -2528,6 +2537,8 @@ impl PrefPatch {
             Self::CoverPauseMorph(on) => p.cover_pause_morph = *on,
             Self::AlbumDate(d) => p.album_date = *d,
             Self::NpSlot(s) => p.np_slot = *s,
+            Self::VizConcept(c) => p.viz_concept = *c,
+            Self::VizFullscreen(on) => p.viz_fullscreen = *on,
             Self::Autostart(on) => p.autostart = *on,
             Self::UserName(name) => {
                 p.user_name = user_name(name);
@@ -2774,6 +2785,25 @@ pub enum RingStyle {
     /// Dots around the outline that grow into bars with the spectrum
     /// (caelestia's cover visualiser).
     Bars,
+}
+
+/// What the visualizer draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VizConcept {
+    /// The cover in its shape: it swells and changes shape on the beat,
+    /// the spectrum stands around its outline.
+    #[default]
+    Cover,
+    /// Mirrored bars of the spectrum with falling peaks.
+    Spectrum,
+    /// A morphing core with satellites, one per part of the spectrum.
+    Shapes,
+    /// Slow outlines spreading from a breathing shape, one per beat.
+    Calm,
+}
+
+impl VizConcept {
+    pub const ALL: [Self; 4] = [Self::Cover, Self::Spectrum, Self::Shapes, Self::Calm];
 }
 
 /// How much of an album's release date its page shows
@@ -3691,6 +3721,8 @@ impl Default for Prefs {
             // Prefs written before the switch keep the dimmed ring.
             ring_on_pause: true,
             ring_style: RingStyle::default(),
+            viz_concept: VizConcept::default(),
+            viz_fullscreen: true,
             ring_ccw: false,
             cover_ccw: true,
             np_volume: false,

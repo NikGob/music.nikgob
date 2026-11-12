@@ -10,6 +10,7 @@ mod bg_shapes;
 mod chrome;
 mod common;
 mod find_song;
+mod fullscreen;
 mod info_window;
 mod lyrics;
 mod lyrics_front;
@@ -130,9 +131,16 @@ pub struct Md3eUi {
     system_reduced_motion: bool,
     /// The window can hide to the tray and come back (not on Wayland).
     window_can_hide: bool,
-    fullscreen: bool,
-    /// Window fullscreen asked for with F11 (the visualizer forces it too).
-    user_fullscreen: bool,
+    /// The window's full screen: F11's and the visualizer's.
+    fullscreen: fullscreen::Fullscreen,
+    /// F11 pressed this frame.
+    f11: bool,
+    /// The visualizer was up last frame.
+    viz_was_open: bool,
+    /// The window may go full screen (not in an off-screen screenshot run).
+    fullscreen_allowed: bool,
+    /// Levels from a made-up song instead of the analyzer (screenshot runs).
+    synthetic_levels: bool,
     /// The rail's destination asked for by its key goes to the section's
     /// first page (`Prefs::nav_root`).
     section_key: bool,
@@ -177,8 +185,11 @@ impl Md3eUi {
             find_song: find_song::FindSongUi::default(),
             system_reduced_motion: false,
             window_can_hide: true,
-            fullscreen: false,
-            user_fullscreen: false,
+            fullscreen: fullscreen::Fullscreen::default(),
+            f11: false,
+            viz_was_open: false,
+            fullscreen_allowed: true,
+            synthetic_levels: false,
             section_key: false,
         }
     }
@@ -446,6 +457,10 @@ impl Md3eUi {
             }
         }
         self.np_motion = state.prefs.np_motion;
+        if self.synthetic_levels {
+            let t = anim::now(ctx);
+            self.pages.levels_bass = visualizer::synth::levels(t, &mut self.chrome.bands);
+        }
         if !self.chrome.np_loaded {
             self.chrome.np_loaded = true;
             // The track's info is a look-up opened from a menu, never what
@@ -660,15 +675,7 @@ impl Md3eUi {
             self.navigate(ctx, route, out);
         }
 
-        if self.chrome.visualizer && self.chrome.viz.show(ctx, state, &self.chrome.bands) {
-            self.chrome.visualizer = false;
-        }
-        // The visualizer takes the whole screen, not just the window.
-        let want = self.chrome.visualizer || self.user_fullscreen;
-        if want != self.fullscreen {
-            self.fullscreen = want;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
-        }
+        self.visualizer_and_fullscreen(ctx, state, out);
 
         // Requests from menus: navigate (closing Now Playing), show a pane tab.
         if let Some(route) = self.chrome.nav.take() {
@@ -750,7 +757,7 @@ impl Md3eUi {
                 }
             }
             if i.consume_key(Modifiers::NONE, Key::F11) {
-                self.user_fullscreen = !self.user_fullscreen;
+                self.f11 = true;
             }
             if i.consume_key(Modifiers::NONE, Key::F12) {
                 self.chrome.visualizer = !self.chrome.visualizer;
@@ -1317,6 +1324,48 @@ impl Md3eUi {
 }
 
 impl Md3eUi {
+    /// The visualizer (F12) and the window's full screen (F11, or the
+    /// visualizer's own choice while it is up).
+    fn visualizer_and_fullscreen(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        let now = anim::now(ctx);
+        let open = self.chrome.visualizer;
+        if open && !self.viz_was_open {
+            self.fullscreen.open_viz(state.prefs.viz_fullscreen);
+        }
+        self.viz_was_open = open;
+        let mut toggle = std::mem::take(&mut self.f11);
+        if open {
+            let full = self.fullscreen.want(true);
+            match self.chrome.viz.show(ctx, state, &self.chrome.bands, self.pages.levels_bass, full, out) {
+                visualizer::VizAction::Close => self.chrome.visualizer = false,
+                visualizer::VizAction::ToggleFullscreen => toggle = true,
+                visualizer::VizAction::None => {}
+            }
+        }
+        if toggle && let Some(choice) = self.fullscreen.toggle(open) {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::VizFullscreen(choice)));
+        }
+        let open = self.chrome.visualizer;
+        if self.fullscreen_allowed {
+            self.fullscreen.observe(ctx.input(|i| i.viewport().fullscreen), open, now);
+            if let Some(full) = self.fullscreen.command(open, now) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
+            }
+        }
+    }
+
+    /// Whether the window may go full screen (an off-screen screenshot run
+    /// must not cover the user's screen).
+    pub fn set_fullscreen_allowed(&mut self, on: bool) {
+        self.fullscreen_allowed = on;
+    }
+
+    /// Levels from a made-up song instead of the analyzer
+    /// (`NIKGOB_VIZ_SYNTH`, for screenshots of the visualizer).
+    pub fn set_synthetic_levels(&mut self, on: bool) {
+        self.synthetic_levels = on;
+    }
+
     /// Whether the ambient glow is on screen and wants audio levels (Now
     /// Playing, the visualizer, the pane's lyrics, the settings' stage).
     pub fn wants_levels(&self) -> bool {
