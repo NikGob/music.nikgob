@@ -284,8 +284,12 @@ pub struct Window {
 
 /// The windows of a track `duration` seconds long (docs/recommendations.md
 /// §5.1.2): three of [`WINDOW_SECONDS`] at [`WINDOW_AT`] of its length,
-/// pushed apart so they never overlap; a track shorter than the three is
-/// one piece from its start, and one of unknown length its first 45 s.
+/// pushed apart so they never overlap. A track shorter than the three gets
+/// one window of [`WINDOW_SECONDS`] around 45 % of it (or all of it when
+/// shorter still). A track of unknown length (a container that does not
+/// say) gets three back to back from its start: with no length to place
+/// them by, the head is the only part known to be there, and it is the
+/// same 45 s of audio and three vectors of the model as any other track.
 pub fn windows(duration: Option<f64>) -> Vec<Window> {
     let n = WINDOW_AT.len();
     let total = WINDOW_SECONDS * n as f64;
@@ -301,7 +305,11 @@ pub fn windows(duration: Option<f64>) -> Vec<Window> {
             }
             out
         }
-        _ => vec![Window { start: 0.0, len: total }],
+        Some(d) if d.is_finite() && d > 0.0 => {
+            let start = (WINDOW_AT[1] * d - WINDOW_SECONDS / 2.0).min(d - WINDOW_SECONDS).max(0.0);
+            vec![Window { start, len: WINDOW_SECONDS }]
+        }
+        _ => (0..n).map(|i| Window { start: WINDOW_SECONDS * i as f64, len: WINDOW_SECONDS }).collect(),
     }
 }
 
@@ -648,10 +656,18 @@ pub(crate) mod tests {
             }
             assert!(w[2].start + w[2].len <= d + 1e-9, "{d}: {w:?}");
         }
-        // Short or unknown: one piece from the start.
-        assert_eq!(windows(Some(30.0)), [Window { start: 0.0, len: 45.0 }]);
-        assert_eq!(windows(None), [Window { start: 0.0, len: 45.0 }]);
-        assert_eq!(windows(Some(f64::NAN)).len(), 1);
+        // Short: one window of 15 s around 45 %, inside the track.
+        for (d, start) in [(30.0, 6.0), (44.0, 12.3), (16.0, 0.0), (8.0, 0.0)] {
+            let w = windows(Some(d));
+            assert_eq!(w.len(), 1, "{d}");
+            assert!((w[0].start - start).abs() < 1e-9 && w[0].len == WINDOW_SECONDS, "{d}: {w:?}");
+            assert!(w[0].start + WINDOW_SECONDS <= d.max(WINDOW_SECONDS) + 1e-9, "{d}: {w:?}");
+        }
+        // Unknown: three back to back from the start.
+        let starts = |w: Vec<Window>| w.iter().map(|w| w.start).collect::<Vec<_>>();
+        assert_eq!(starts(windows(None)), [0.0, 15.0, 30.0]);
+        assert_eq!(starts(windows(Some(f64::NAN))), [0.0, 15.0, 30.0]);
+        assert!(windows(None).iter().all(|w| w.len == WINDOW_SECONDS));
         assert_eq!(preview_windows(Some(200.0)), [Window { start: PREVIEW_START, len: PREVIEW_SECONDS }]);
         assert_eq!(preview_windows(Some(30.0))[0].start, 0.0);
         assert_eq!(preview_windows(None)[0].start, PREVIEW_START);
