@@ -386,6 +386,9 @@ impl Md3eUi {
     /// artist) goes to its player; the queue holds while Now Playing opens
     /// (over the slot the prefs keep).
     fn show_queue(&mut self, ctx: &Context, out: &mut Vec<Command>) {
+        // The visualizer covers Now Playing: the queue asked for comes out
+        // from under it.
+        self.chrome.visualizer = false;
         self.chrome.np_slot = NpSlot::Queue;
         let compact = size_class(ctx.content_rect().width()) == SizeClass::Compact;
         if compact && compact_page(self.route()) {

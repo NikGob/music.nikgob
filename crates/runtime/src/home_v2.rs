@@ -342,11 +342,14 @@ pub fn build(lib: &Library, visit: &Visit) -> HomeV2 {
     let (shortcuts, listen_again) = match &kept {
         Some(k) => {
             let mut sc: Vec<(Key, ShortcutRef)> = k.shortcuts.iter().filter_map(|key| Some((*key, places.get(*key)?))).collect();
-            if sc.len() < k.shortcuts.len() {
-                // Something of it gone: the epoch's draw fills its place.
+            // Something of it gone, or slots the epoch left empty while
+            // the library had too little (a first run's empty Главная):
+            // the epoch's draw fills them, the kept ones stay where they are.
+            let want = k.shortcuts.len().max(SHORTCUTS);
+            if sc.len() < want {
                 let taken: HashSet<Key> = sc.iter().map(|x| x.0).collect();
                 let more: Vec<(Key, ShortcutRef)> = draw(&exposure).into_iter().filter(|x| !taken.contains(&x.0)).collect();
-                sc.extend(more.into_iter().take(k.shortcuts.len() - sc.len()));
+                sc.extend(more.into_iter().take(want - sc.len()));
             }
             let fits = |t: &TrackId| f.rows.get(t).is_some_and(|r| r.in_library && (r.has_local || !visit.local_only));
             let mut again: Vec<TrackRow> = k.again.iter().filter(|t| fits(t)).filter_map(|t| lib.get_track_row(*t).ok().flatten()).collect();
