@@ -804,7 +804,8 @@ impl Md3eUi {
             // «Таймер сна»: 15, 30, 45, 60, 90 minutes, then off.
             if i.consume_key(Modifiers::NONE, Key::T) {
                 let p = &state.player;
-                let left = p.sleep.as_ref().map(|t| t.left(p, std::time::Instant::now()));
+                // A timer whose end is not known yet steps on as a short one.
+                let left = p.sleep.as_ref().map(|t| t.left(p, std::time::Instant::now()).unwrap_or_default());
                 out.push(Command::SleepTimer(nikgob_view::sleep_key_step(left)));
             }
             // The developer profile: the playing track from YouTube Music.
@@ -1000,7 +1001,9 @@ impl Md3eUi {
 
         drop(_page_scope);
         // Floating player.
-        let bar_w = (content.width() - 32.0).min(960.0);
+        // A running sleep timer's chip widens the pill by its own room
+        // (where the window has it), so it takes nothing from the rest.
+        let bar_w = (content.width() - 32.0).min(960.0 + sleep_ui::chip_width(ui, state, "bar-sleep", false));
         let bar = Rect::from_center_size(
             pos2(content.center().x, content.bottom() - 16.0 - 32.0),
             vec2(bar_w, 64.0),

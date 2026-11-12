@@ -112,10 +112,13 @@ fn count(lib: &Library, root: &Path, library_dir: &Path, masters_dir: &Path) -> 
     // The originals inside the library's folder are not its files either:
     // the walk counts them wherever they are.
     let masters = if masters_dir.as_os_str().is_empty() { 0 } else { folder_size(masters_dir) };
-    let mut places = vec![library_dir];
+    let mut places = vec![library_dir.to_owned()];
     if masters > 0 {
-        places.push(masters_dir);
+        places.push(masters_dir.to_owned());
     }
+    // Files kept outside the library's folder may be on other disks: their
+    // folders, each once.
+    places.extend(outside_folders(&sizes.absolute, library_dir, masters_dir));
     let disks = disks_of(&places);
     log::debug!(
         "storage: {} files ({} looked at), originals {masters} B, {} disks, in {:?}",
@@ -162,27 +165,36 @@ fn is_sidecar(path: &Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "json" | "tmp" | "part"))
 }
 
-/// The disks `places` are on, each once, in the order of the places.
-fn disks_of(places: &[&Path]) -> Vec<v::DiskSpace> {
-    let found: Vec<(String, v::DiskSpace)> = places
-        .iter()
-        .filter_map(|p| {
-            let at = existing(p)?;
-            let (free, total) = space(&at)?;
-            Some((disk_key(&at)?, v::DiskSpace { name: disk_name(p), free, total }))
-        })
-        .collect();
-    unique_disks(found)
+/// The folders of the files at `absolute` that are not under the library
+/// or the originals, each once.
+fn outside_folders(absolute: &[String], library_dir: &Path, masters_dir: &Path) -> Vec<PathBuf> {
+    let mut folders = std::collections::BTreeSet::new();
+    for l in absolute {
+        let p = Path::new(l);
+        if p.starts_with(library_dir) || (!masters_dir.as_os_str().is_empty() && p.starts_with(masters_dir)) {
+            continue;
+        }
+        if let Some(dir) = p.parent() {
+            folders.insert(dir.to_owned());
+        }
+    }
+    folders.into_iter().collect()
 }
 
-/// Each disk once (by its key), the first place's name for it.
-fn unique_disks(found: Vec<(String, v::DiskSpace)>) -> Vec<v::DiskSpace> {
+/// The disks `places` are on, each once (by [`disk_key`]), in the order of
+/// the places and named by the first of each; one free-space call a disk.
+fn disks_of(places: &[PathBuf]) -> Vec<v::DiskSpace> {
     let mut seen: Vec<String> = Vec::new();
     let mut disks = Vec::new();
-    for (key, disk) in found {
-        if !seen.contains(&key) {
-            seen.push(key);
-            disks.push(disk);
+    for p in places {
+        let Some(at) = existing(p) else { continue };
+        let Some(key) = disk_key(&at) else { continue };
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        if let Some((free, total)) = space(&at) {
+            disks.push(v::DiskSpace { name: disk_name(p), free, total });
         }
     }
     disks
@@ -226,7 +238,23 @@ fn disk_key(at: &Path) -> Option<String> {
 
 #[cfg(not(unix))]
 fn disk_key(at: &Path) -> Option<String> {
-    drive_of(at).map(|d| d.to_lowercase()).or_else(|| Some(at.to_string_lossy().into_owned()))
+    volume_of(at).or_else(|| Some(at.to_string_lossy().into_owned()))
+}
+
+/// The volume of a path on Windows as a key: the drive (`c:`), or the
+/// whole share (`\\server\share`: shares of the same name on two servers
+/// are two disks).
+#[cfg_attr(unix, allow(dead_code))]
+fn volume_of(path: &Path) -> Option<String> {
+    use std::path::Prefix;
+    let Component::Prefix(p) = path.components().next()? else { return None };
+    Some(match p.kind() {
+        Prefix::Disk(l) | Prefix::VerbatimDisk(l) => format!("{}:", char::from(l).to_ascii_lowercase()),
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+            format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy()).to_lowercase()
+        }
+        _ => p.as_os_str().to_string_lossy().to_lowercase(),
+    })
 }
 
 /// Free (for this user) and total bytes of the disk `at` is on.
@@ -308,10 +336,31 @@ mod tests {
     }
 
     #[test]
-    fn disks_are_listed_once_with_the_first_name() {
-        let d = |name: &str, free| v::DiskSpace { name: name.into(), free, total: 100 };
-        let disks = unique_disks(vec![("c".into(), d("C:", 1)), ("d".into(), d("D:", 2)), ("c".into(), d("C:", 3))]);
-        assert_eq!(disks, vec![d("C:", 1), d("D:", 2)]);
+    fn files_outside_the_library_bring_their_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("Music");
+        let other = dir.path().join("Other");
+        let abs = |p: PathBuf| p.to_string_lossy().into_owned();
+        let files = [abs(lib.join("A").join("1.flac")), abs(other.join("x").join("2.flac")), abs(other.join("x").join("3.flac"))];
+        assert_eq!(outside_folders(&files, &lib, Path::new("")), vec![other.join("x")]);
+        // On the same disk as the library: one disk still.
+        std::fs::create_dir_all(other.join("x")).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        assert_eq!(disks_of(&[lib.clone(), other.join("x")]).len(), 1);
+    }
+
+    #[test]
+    fn shares_of_one_name_on_two_servers_are_two_disks() {
+        let a = volume_of(Path::new(r"\\server-a\music\x.flac"));
+        let b = volume_of(Path::new(r"\\server-b\music\x.flac"));
+        #[cfg(windows)]
+        {
+            assert_eq!(a.as_deref(), Some(r"\\server-a\music"));
+            assert_ne!(a, b);
+            assert_eq!(volume_of(Path::new(r"C:\Music")), volume_of(Path::new(r"\\?\c:\x")));
+        }
+        #[cfg(unix)]
+        assert_eq!((a, b), (None, None));
     }
 
     #[test]

@@ -90,12 +90,18 @@ impl Rig {
 
 /// Plays an album of `n` tracks of 200 s; returns the first entry's id.
 fn playing_album(n: usize) -> (Rig, u64) {
+    playing_lengths(&vec![Some(200_000); n])
+}
+
+/// Plays tracks of these lengths (None: unknown, as a stream's).
+fn playing_lengths(lengths: &[Option<u32>]) -> (Rig, u64) {
+    let n = lengths.len();
     let lib = Library::open_in_memory().unwrap();
     let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
     let tracks: Vec<_> = (0..n)
         .map(|i| {
             let mut t = Track::new(format!("t{i}"), ArtistCredit::single("A", Some(artist.id)));
-            t.duration_ms = Some(200_000);
+            t.duration_ms = lengths[i];
             let t = lib.upsert_track(&t).unwrap();
             lib.add_source(&Source::new(t.id, SourceKind::LocalFile, format!("t{i}.opus"), Codec::Opus)).unwrap();
             t.id
@@ -184,10 +190,10 @@ fn time_left_counts_the_rest_of_the_album() {
     rig.rt.send(Command::SleepTimer(SleepChoice::ContextEnd));
     // Counted on the next second's poll.
     wait_for("what follows to be counted", || {
-        rig.rt.state().player.sleep.as_ref().is_some_and(|s| s.after_current == Duration::from_secs(400))
+        rig.rt.state().player.sleep.as_ref().is_some_and(|s| s.after_current == Some(Duration::from_secs(400)))
     });
     let s = rig.rt.state();
-    let left = s.player.sleep.as_ref().unwrap().left(&s.player, Instant::now());
+    let left = s.player.sleep.as_ref().unwrap().left(&s.player, Instant::now()).unwrap();
     assert!(left > Duration::from_secs(590) && left <= Duration::from_secs(600), "{left:?}");
 }
 
@@ -222,4 +228,101 @@ fn minutes_show_their_deadline_and_a_pause_keeps_counting() {
     rig.rt.send(Command::SleepTimer(SleepChoice::Off));
     wait_for("the timer to go", || rig.rt.state().player.sleep.is_none());
     assert!(!rig.calls().iter().any(|c| matches!(c, Call::Fade(..))), "no fade far from the end");
+}
+
+fn fades(rig: &Rig) -> Vec<f32> {
+    rig.calls().into_iter().filter_map(|c| if let Call::Fade(l, _) = c { Some(l) } else { None }).collect()
+}
+
+/// Review 1: repeat-one never reaches the album's last entry; the album
+/// timer ends with the playing track then.
+#[test]
+fn under_repeat_one_the_album_timer_ends_with_the_track() {
+    let (rig, first) = playing_album(3);
+    rig.rt.send(Command::SleepTimer(SleepChoice::ContextEnd));
+    rig.rt.send(Command::CycleRepeat); // off -> all
+    rig.rt.send(Command::CycleRepeat); // all -> one
+    wait_for("repeat one", || rig.rt.state().player.repeat == nikgob_view::Repeat::One);
+    wait_for("no preload after the looping track", || rig.last_next() == Some(None));
+    rig.rt.playback_sender().send(PlaybackEvent::Ended { id: first }).unwrap();
+    wait_for("the timer to end", || rig.rt.state().player.sleep.is_none());
+    assert_eq!(rig.rt.state().player.status, Status::Paused);
+    assert_eq!(rig.played().len(), 1, "nothing else was started");
+}
+
+/// Review 2: the engine had already gone on to the next track (a
+/// crossfade or a preload taken before the timer cleared it): that is the
+/// boundary, the next track is paused at its start and silent.
+#[test]
+fn a_transition_the_engine_made_anyway_is_the_boundary() {
+    let (rig, _) = playing_album(3);
+    let Some(Some(second)) = rig.last_next() else { panic!("no preload") };
+    rig.rt.send(Command::SleepTimer(SleepChoice::TrackEnd));
+    wait_for("the timer to show", || rig.rt.state().player.sleep.is_some());
+    rig.rt.playback_sender().send(PlaybackEvent::TrackChanged { to: second }).unwrap();
+    wait_for("paused on the next track", || {
+        let s = rig.rt.state();
+        s.player.status == Status::Paused && s.player.sleep.is_none()
+    });
+    assert_eq!(rig.title().as_deref(), Some("t1"));
+    let calls = rig.calls();
+    let pause = calls.iter().rposition(|c| *c == Call::Pause).expect("paused in the engine");
+    assert!(calls[..pause].contains(&Call::Fade(0.0, Duration::ZERO)), "{calls:?}");
+    // Played again: full sound.
+    rig.rt.send(Command::TogglePlay);
+    wait_for("full sound", || fades(&rig).last() == Some(&1.0));
+}
+
+/// Review 3: a skip in the fade to a track whose length is unknown gets the
+/// full sound back, not the old track's faded level.
+#[test]
+fn a_skip_in_the_fade_to_a_track_of_unknown_length_sounds_full() {
+    let (rig, first) = playing_lengths(&[Some(200_000), None, Some(200_000)]);
+    rig.rt.send(Command::SleepTimer(SleepChoice::TrackEnd));
+    rig.rt.playback_sender().send(PlaybackEvent::Position { id: first, position: Duration::from_secs(195) }).unwrap();
+    wait_for("a deep fade", || fades(&rig).iter().any(|l| *l < 0.3));
+    rig.rt.send(Command::Next);
+    wait_for("the next track", || rig.played().len() == 2);
+    let calls = rig.calls();
+    let play = calls.iter().rposition(|c| matches!(c, Call::Play(_))).unwrap();
+    let before = calls[..play].iter().rev().find_map(|c| if let Call::Fade(l, _) = c { Some(*l) } else { None });
+    assert_eq!(before, Some(1.0), "{calls:?}");
+    let id = rig.played()[1];
+    rig.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(fades(&rig).last(), Some(&1.0), "{:?}", rig.calls());
+    let s = rig.rt.state();
+    assert_eq!(s.player.sleep.as_ref().unwrap().left(&s.player, Instant::now()), None);
+}
+
+/// Review 4: a move in the queue counts the album's rest again.
+#[test]
+fn a_move_in_the_queue_counts_the_rest_again() {
+    let (rig, _) = playing_album(3);
+    rig.rt.send(Command::SleepTimer(SleepChoice::ContextEnd));
+    wait_for("counted", || {
+        rig.rt.state().player.sleep.as_ref().is_some_and(|s| s.after_current == Some(Duration::from_secs(400)))
+    });
+    let (second, third) = {
+        let s = rig.rt.state();
+        (s.queue.next[0].entry, s.queue.next[1].entry)
+    };
+    // The second goes after the album's last: one track to its end.
+    rig.rt.send(Command::MoveInQueue { entry: second, anchor: third, after: true });
+    wait_for("counted again", || {
+        rig.rt.state().player.sleep.as_ref().is_some_and(|s| s.after_current == Some(Duration::from_secs(200)))
+    });
+}
+
+/// Review 5: a track without a length before the end: how far the end is
+/// is unknown, so nothing fades yet.
+#[test]
+fn an_unknown_length_on_the_way_fades_nothing_yet() {
+    let (rig, first) = playing_lengths(&[Some(200_000), None, Some(200_000)]);
+    rig.rt.send(Command::SleepTimer(SleepChoice::ContextEnd));
+    wait_for("the timer to show", || rig.rt.state().player.sleep.is_some());
+    rig.rt.playback_sender().send(PlaybackEvent::Position { id: first, position: Duration::from_secs(195) }).unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(fades(&rig).iter().all(|l| *l >= 1.0), "{:?}", rig.calls());
+    assert_eq!(rig.rt.state().player.sleep.as_ref().unwrap().after_current, None);
 }

@@ -57,22 +57,21 @@ pub struct SleepView {
     /// A timer of minutes: when it ends.
     pub deadline: Option<Instant>,
     /// A timer until a track or the queue ends: how long what plays after
-    /// the current track until then lasts.
-    pub after_current: Duration,
+    /// the current track until then lasts (None: not known, one of those
+    /// tracks has no length).
+    pub after_current: Option<Duration>,
 }
 
 impl SleepView {
     /// How long until the timer pauses, as of `now` (the current track's
-    /// rest as the player has it now).
-    pub fn left(&self, player: &PlayerView, now: Instant) -> Duration {
+    /// rest as the player has it now); None when a length on the way is not
+    /// known.
+    pub fn left(&self, player: &PlayerView, now: Instant) -> Option<Duration> {
         match self.deadline {
-            Some(deadline) => deadline.saturating_duration_since(now),
+            Some(deadline) => Some(deadline.saturating_duration_since(now)),
             None => {
-                let rest = player
-                    .duration
-                    .map(|d| heard_time(d.saturating_sub(player.position_now()), player.speed))
-                    .unwrap_or_default();
-                rest + self.after_current
+                let rest = heard_time(player.duration?.saturating_sub(player.position_now()), player.speed);
+                Some(rest + self.after_current?)
             }
         }
     }
@@ -128,19 +127,23 @@ mod tests {
     #[test]
     fn time_left_counts_the_clock_or_the_music() {
         let now = Instant::now();
-        let minutes = SleepView { choice: SleepChoice::Minutes(15), deadline: Some(now + Duration::from_secs(600)), after_current: Duration::ZERO };
-        assert_eq!(minutes.left(&PlayerView::default(), now), Duration::from_secs(600));
-        assert_eq!(minutes.left(&PlayerView::default(), now + Duration::from_secs(700)), Duration::ZERO);
+        let minutes = SleepView { choice: SleepChoice::Minutes(15), deadline: Some(now + Duration::from_secs(600)), after_current: Some(Duration::ZERO) };
+        assert_eq!(minutes.left(&PlayerView::default(), now), Some(Duration::from_secs(600)));
+        assert_eq!(minutes.left(&PlayerView::default(), now + Duration::from_secs(700)), Some(Duration::ZERO));
         let player = PlayerView {
             duration: Some(Duration::from_secs(200)),
             position: Duration::from_secs(50),
             ..PlayerView::default()
         };
-        let album = SleepView { choice: SleepChoice::ContextEnd, deadline: None, after_current: Duration::from_secs(300) };
-        assert_eq!(album.left(&player, now), Duration::from_secs(450));
+        let album = SleepView { choice: SleepChoice::ContextEnd, deadline: None, after_current: Some(Duration::from_secs(300)) };
+        assert_eq!(album.left(&player, now), Some(Duration::from_secs(450)));
         // At twice the speed the rest of the track is heard in half.
-        let fast = PlayerView { speed: 2.0, ..player };
-        assert_eq!(album.left(&fast, now), Duration::from_secs(375));
+        let fast = PlayerView { speed: 2.0, ..player.clone() };
+        assert_eq!(album.left(&fast, now), Some(Duration::from_secs(375)));
+        // A track on the way without a length, or the current one: unknown.
+        let unknown = SleepView { after_current: None, ..album.clone() };
+        assert_eq!(unknown.left(&player, now), None);
+        assert_eq!(album.left(&PlayerView { duration: None, ..player }, now), None);
     }
 
     #[test]

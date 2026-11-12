@@ -69,17 +69,20 @@ pub fn submenu<A>(state: &ViewState, wrap: impl Fn(SleepChoice) -> A) -> Row<A> 
     Row::Sub(item, rows(state, wrap))
 }
 
-/// What the chip says now, while a timer runs.
+/// What the chip says now, while a timer runs (empty: not known how far
+/// its end is; the moon alone then).
 fn left_label(state: &ViewState) -> Option<String> {
     let s = state.player.sleep.as_ref()?;
-    Some(sleep_left_label(s.left(&state.player, Instant::now())))
+    Some(s.left(&state.player, Instant::now()).map(sleep_left_label).unwrap_or_default())
 }
 
 /// The chip's room in the row now (it grows in on a spring when a timer
 /// starts and shrinks away when it ends): what a row lays out around it.
-pub fn chip_width(ui: &Ui, state: &ViewState, salt: &str) -> f32 {
+/// `collapsed`: the moon alone (the time in its tooltip), for a row short
+/// of room.
+pub fn chip_width(ui: &Ui, state: &ViewState, salt: &str, collapsed: bool) -> f32 {
     let (k, label) = presence(ui, state, salt);
-    if k <= 0.0 { 0.0 } else { full_width(ui, &label) * k + GAP * k.min(1.0) }
+    if k <= 0.0 { 0.0 } else { full_width(ui, &label, collapsed) * k + GAP * k.min(1.0) }
 }
 
 /// How far in the chip is (0 gone, 1 in, a little over on the spring) and
@@ -105,14 +108,28 @@ fn galley(ui: &Ui, text: &str, color: Color32) -> std::sync::Arc<egui::Galley> {
     ui.painter().layout_job(job)
 }
 
-fn full_width(ui: &Ui, label: &str) -> f32 {
-    PAD + ICON + GAP + galley(ui, label, Color32::WHITE).size().x + PAD
+fn full_width(ui: &Ui, label: &str, collapsed: bool) -> f32 {
+    if collapsed || label.is_empty() {
+        CHIP_H
+    } else {
+        PAD + ICON + GAP + galley(ui, label, Color32::WHITE).size().x + PAD
+    }
 }
 
 /// The chip of a running timer in `container` / `content` colours (the
 /// player's own); a click opens the choices. Nothing while no timer runs
-/// (once it has shrunk away).
-pub fn chip(ui: &mut Ui, state: &ViewState, salt: &str, container: Color32, content: Color32, out: &mut Vec<Command>) {
+/// (once it has shrunk away). `collapsed`: the moon alone, the time left in
+/// its tooltip ([`chip_width`]).
+#[allow(clippy::too_many_arguments)]
+pub fn chip(
+    ui: &mut Ui,
+    state: &ViewState,
+    salt: &str,
+    container: Color32,
+    content: Color32,
+    collapsed: bool,
+    out: &mut Vec<Command>,
+) {
     let (k, label) = presence(ui, state, salt);
     if k <= 0.001 && state.player.sleep.is_none() {
         return;
@@ -120,7 +137,7 @@ pub fn chip(ui: &mut Ui, state: &ViewState, salt: &str, container: Color32, cont
     let ctx = ui.ctx().clone();
     // The time left changes by itself, paused or not.
     ctx.request_repaint_after(Duration::from_secs(1));
-    let full = full_width(ui, &label);
+    let full = full_width(ui, &label, collapsed);
     let (slot, resp) = ui.allocate_exact_size(vec2(full * k + GAP * k.min(1.0), CHIP_H), Sense::click());
     let alpha = anim::fraction(&ctx, Id::new(("md3e-sleep-chip", salt, "a")), if state.player.sleep.is_some() { 1.0 } else { 0.0 }, Theme::get(&ctx).motion.fast_effects);
     // Grows from its centre; the room it takes follows the same spring.
@@ -133,7 +150,10 @@ pub fn chip(ui: &mut Ui, state: &ViewState, salt: &str, container: Color32, cont
         paint::state_layer(&painter, rect, radii, content, 0.08 * alpha);
     }
     let fg = content.gamma_multiply(alpha);
-    if scale > 0.5 {
+    if scale > 0.5 && (collapsed || label.is_empty()) {
+        let icon = Rect::from_center_size(rect.center(), vec2(ICON, ICON));
+        Icon::Bedtime.widget(true, fg, ICON).paint_at(ui, icon);
+    } else if scale > 0.5 {
         let text = galley(ui, &label, fg);
         let left = rect.center().x - (ICON + GAP + text.size().x) / 2.0;
         let icon = Rect::from_min_size(egui::pos2(left, rect.center().y - ICON / 2.0), vec2(ICON, ICON));
@@ -143,7 +163,8 @@ pub fn chip(ui: &mut Ui, state: &ViewState, salt: &str, container: Color32, cont
     if state.player.sleep.is_none() {
         return;
     }
-    let resp = tooltip(resp, MENU_LABEL, Some(KEY));
+    let tip = if collapsed && !label.is_empty() { format!("{MENU_LABEL}: {label}") } else { MENU_LABEL.to_owned() };
+    let resp = tooltip(resp, &tip, Some(KEY));
     menu(&resp, state, salt, out);
 }
 
@@ -201,7 +222,7 @@ mod tests {
             cover: None,
             clip: false,
         });
-        state.player.sleep = Some(SleepView { choice: SleepChoice::TrackEnd, deadline: None, after_current: Duration::ZERO });
+        state.player.sleep = Some(SleepView { choice: SleepChoice::TrackEnd, deadline: None, after_current: Some(Duration::ZERO) });
         let rows = rows(&state, |c| c);
         let names = labels(&rows);
         assert_eq!(names[5..], ["До конца трека", "До конца очереди", "Выключить таймер"]);

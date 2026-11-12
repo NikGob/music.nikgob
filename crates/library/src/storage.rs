@@ -10,6 +10,9 @@ pub struct LocalFileSizes {
     pub known: u64,
     /// The locators of those without one (to be looked at on disk).
     pub unknown: Vec<String>,
+    /// The absolute locators (files that may be on other disks than the
+    /// library's).
+    pub absolute: Vec<String>,
 }
 
 impl Library {
@@ -28,7 +31,13 @@ impl Library {
                  WHERE kind = 'local_file' AND trashed_at IS NULL AND available = 1 AND size_bytes IS NULL",
             )?;
             let unknown = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(LocalFileSizes { known: u64::try_from(known).unwrap_or(0), unknown })
+            let mut stmt = c.prepare(
+                "SELECT locator FROM source
+                 WHERE kind = 'local_file' AND trashed_at IS NULL AND available = 1
+                   AND (substr(locator, 1, 1) IN ('/', '\\') OR substr(locator, 2, 1) = ':')",
+            )?;
+            let absolute = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(LocalFileSizes { known: u64::try_from(known).unwrap_or(0), unknown, absolute })
         })
     }
 }
@@ -54,12 +63,17 @@ mod tests {
         source("2", SourceKind::LocalFile, "a/2.flac", Some(2_500));
         source("3", SourceKind::LocalFile, "a/3.flac", None);
         source("4", SourceKind::Youtube, "vid", Some(9_999));
+        source("7", SourceKind::LocalFile, "E:\\Music\\7.flac", Some(10));
+        source("8", SourceKind::LocalFile, "/mnt/data/8.flac", Some(20));
         let gone = source("5", SourceKind::LocalFile, "a/5.flac", Some(7_000));
         lib.trash_source(gone.id, Some("Trash/5.flac")).unwrap();
         let missing = source("6", SourceKind::LocalFile, "a/6.flac", Some(4_000));
         lib.set_source_available(missing.id, false).unwrap();
         let sizes = lib.local_file_sizes().unwrap();
-        assert_eq!(sizes.known, 3_500);
+        assert_eq!(sizes.known, 3_530);
         assert_eq!(sizes.unknown, vec!["a/3.flac".to_owned()]);
+        let mut absolute = sizes.absolute.clone();
+        absolute.sort();
+        assert_eq!(absolute, ["/mnt/data/8.flac", "E:\\Music\\7.flac"]);
     }
 }

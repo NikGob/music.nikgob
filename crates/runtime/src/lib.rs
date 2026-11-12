@@ -2407,6 +2407,8 @@ impl Worker {
                     log::debug!("backend changed to {to}, not the queued next");
                     return;
                 }
+                // The sleep timer ended with the one that ended.
+                let sleep_boundary = self.sleep_ends_with_playing();
                 self.record_end(false, EndReason::Ended);
                 if let Some(e) = self.queue.advance_auto() {
                     self.playing = Some(e);
@@ -2425,6 +2427,9 @@ impl Worker {
                     self.record_start(e, kind);
                     self.preload_next();
                     self.publish_now_playing();
+                    if sleep_boundary {
+                        self.sleep_crossed();
+                    }
                 }
             }
             PlaybackEvent::Position { id, position } => {

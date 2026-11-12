@@ -19,9 +19,9 @@
 
 use std::time::{Duration, Instant};
 
-use nikgob_view::{self as v, SLEEP_FADE, SleepChoice, Status};
+use nikgob_view::{self as v, Repeat, SLEEP_FADE, SleepChoice, Status};
 
-use crate::Worker;
+use crate::{Later, Worker};
 
 /// Each second the fade is given where it should be a little later; the
 /// engine glides there, so the next step finds it on its way.
@@ -46,17 +46,38 @@ pub(crate) struct Sleep {
     choice: SleepChoice,
     /// The fade level the engine was last given (1: no fade).
     level: f32,
-    /// What [`Self::after_current`] was counted for: the playing entry,
-    /// the timer's entry, the queue's generation and length.
-    counted: Option<(Option<u64>, u64, u64, usize)>,
-    /// How long the entries after the playing one, up to the timer's, last.
-    after_current: Duration,
+    /// What [`Self::after_current`] was counted for ([`order_key`]).
+    counted: Option<u64>,
+    /// How long the entries after the playing one, up to the timer's, last
+    /// (None: not counted yet, or one of them has no known length).
+    after_current: Option<Duration>,
 }
 
 impl Default for Sleep {
     fn default() -> Self {
-        Self { timer: None, choice: SleepChoice::Off, level: 1.0, counted: None, after_current: Duration::ZERO }
+        Self { timer: None, choice: SleepChoice::Off, level: 1.0, counted: None, after_current: None }
     }
+}
+
+/// What the length of the entries after `current` up to `target` depends
+/// on: the entries themselves, in their order (a move in the queue changes
+/// it as a new queue does).
+pub(crate) fn order_key(current: Option<u64>, target: u64, upcoming: &[u64]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (current, target).hash(&mut h);
+    for id in upcoming {
+        id.hash(&mut h);
+        if *id == target {
+            break;
+        }
+    }
+    h.finish()
+}
+
+/// The whole length of `lengths` (None when one is unknown).
+pub(crate) fn total(lengths: impl IntoIterator<Item = Option<u32>>) -> Option<Duration> {
+    lengths.into_iter().try_fold(Duration::ZERO, |sum, ms| Some(sum + Duration::from_millis(u64::from(ms?))))
 }
 
 /// The fade level with `left` to go: down from 1 over the last
@@ -129,6 +150,8 @@ impl Worker {
         match self.sleep.timer? {
             Timer::At(_) => None,
             Timer::TrackEnd => self.queue.current().map(|e| e.id),
+            // Repeat-one never gets past the playing track: it is the end.
+            Timer::After(_) if self.queue.repeat == Repeat::One => self.queue.current().map(|e| e.id),
             Timer::After(e) => Some(e),
         }
     }
@@ -147,8 +170,8 @@ impl Worker {
         }
     }
 
-    /// How long until the timer pauses, as of `now` (None: no timer, or
-    /// its entry is not ahead).
+    /// How long until the timer pauses, as of `now` (None: no timer, its
+    /// entry is not ahead, or a length on the way is unknown).
     fn sleep_left(&self, now: Instant) -> Option<Duration> {
         match self.sleep.timer? {
             Timer::At(t) => Some(t.saturating_duration_since(now)),
@@ -158,10 +181,11 @@ impl Worker {
                 if current.id != target && !self.queue.upcoming().iter().any(|e| e.id == target) {
                     return None;
                 }
+                let after = if current.id == target { Duration::ZERO } else { self.sleep.after_current? };
                 let duration = self.state.read().player.duration?;
                 let rest = duration.saturating_sub(self.position_at_instant(now));
                 let rest = if self.speed > 0.0 { rest.div_f64(self.speed) } else { rest };
-                Some(rest + self.sleep.after_current)
+                Some(rest + after)
             }
         }
     }
@@ -203,8 +227,13 @@ impl Worker {
             },
             Some(_) => {
                 self.sleep_count_after();
-                if playing && let Some(left) = self.sleep_left(now) {
-                    self.sleep_fade(fade_level(left.saturating_sub(STEP)), STEP);
+                if playing {
+                    match self.sleep_left(now) {
+                        Some(left) => self.sleep_fade(fade_level(left.saturating_sub(STEP)), STEP),
+                        // Not known how far the end is (a stream without a
+                        // length): no fade yet, a faded sound comes back.
+                        None => self.sleep_fade(1.0, BACK),
+                    }
                 }
             }
         }
@@ -212,23 +241,41 @@ impl Worker {
     }
 
     /// Recounts how long the entries after the playing one last, up to
-    /// the timer's, when the queue moved.
+    /// the timer's, when they changed: read off the loop, unknown meanwhile.
     fn sleep_count_after(&mut self) {
         let Some(target) = self.sleep_target() else { return };
         let current = self.queue.current().map(|e| e.id);
-        let key = (current, target, self.queue.generation(), self.queue.len());
+        let upcoming = self.queue.upcoming();
+        let ids: Vec<u64> = upcoming.iter().map(|e| e.id).collect();
+        let key = order_key(current, target, &ids);
         if self.sleep.counted == Some(key) {
             return;
         }
         self.sleep.counted = Some(key);
-        let upcoming = self.queue.upcoming();
-        let ids: Vec<_> = match upcoming.iter().position(|e| e.id == target) {
-            Some(i) if current != Some(target) => upcoming[..=i].iter().take(2000).map(|e| e.track).collect(),
-            _ => Vec::new(),
+        self.sleep.after_current = None;
+        let tracks: Vec<_> = match upcoming.iter().position(|e| e.id == target) {
+            Some(i) if current != Some(target) => upcoming[..=i].iter().map(|e| e.track).collect(),
+            _ => {
+                self.sleep.after_current = Some(Duration::ZERO);
+                return;
+            }
         };
-        let rows = self.lib.get_track_rows(&ids).unwrap_or_default();
-        let ms: u64 = ids.iter().filter_map(|t| rows.get(t)?.duration_ms).map(u64::from).sum();
-        self.sleep.after_current = Duration::from_millis(ms);
+        let lib = self.lib.clone();
+        let later = self.later_tx.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-sleep".into()).spawn(move || {
+            let rows = lib.get_track_rows(&tracks).unwrap_or_default();
+            let after = total(tracks.iter().map(|t| rows.get(t).and_then(|r| r.duration_ms)));
+            let _ = later.send(Later::new("the sleep timer's lengths", move |w| {
+                // Only for the queue it was asked for.
+                if w.sleep.counted == Some(key) {
+                    w.sleep.after_current = after;
+                    w.sleep_publish();
+                }
+            }));
+        });
+        if let Err(e) = spawned {
+            log::warn!("sleep timer: the lengths were not read: {e}");
+        }
     }
 
     /// Gives the engine a fade level (only when it is another one).
@@ -256,11 +303,34 @@ impl Worker {
         }
     }
 
-    /// Before a play or a resume: the sound as loud as it should be now
-    /// (full, unless the play lands inside a fade), at once.
+    /// Before a play or a resume: the sound as loud as it should be now,
+    /// at once. A timer of minutes inside its fade: the fade's level; one
+    /// waiting for the music: full (the track's own position and length are
+    /// not set yet; the next poll fades from there if its end is near).
     pub(crate) fn sleep_before_play(&mut self) {
-        let want = self.sleep_level_now();
+        let want = match self.sleep.timer {
+            Some(Timer::At(_)) => self.sleep_level_now(),
+            _ => 1.0,
+        };
         self.sleep_fade(want, Duration::ZERO);
+    }
+
+    /// The engine went on from the timer's last entry into the next one by
+    /// itself (a crossfade, or a preload it had taken before the timer
+    /// cleared it): the boundary is crossed, so the next one is paused at
+    /// its start, silent until played again.
+    pub(crate) fn sleep_crossed(&mut self) {
+        log::info!("sleep timer: the next track had begun, paused at its start");
+        self.sleep.timer = None;
+        self.sleep.choice = SleepChoice::Off;
+        self.sleep_fade(0.0, Duration::ZERO);
+        self.pause();
+        self.playback.seek(Duration::ZERO);
+        self.position = Duration::ZERO;
+        self.position_at = Instant::now();
+        self.publish_player();
+        self.sleep_publish();
+        self.sleep_preload();
     }
 
     /// The engine finished entry `id`: when the timer ends with it, the
@@ -299,7 +369,11 @@ impl Worker {
                 Timer::At(at) => Some(at),
                 _ => None,
             },
-            after_current: self.sleep.after_current,
+            after_current: match t {
+                Timer::At(_) => Some(Duration::ZERO),
+                _ if self.sleep_target() == self.queue.current().map(|e| e.id) => Some(Duration::ZERO),
+                _ => self.sleep.after_current,
+            },
         });
         if self.state.read().player.sleep == view {
             return;
@@ -311,6 +385,21 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_in_the_queue_changes_what_was_counted() {
+        let before = order_key(Some(1), 4, &[2, 3, 4, 5]);
+        assert_eq!(before, order_key(Some(1), 4, &[2, 3, 4, 9]), "after the target: the same");
+        assert_ne!(before, order_key(Some(1), 4, &[3, 4, 2, 5]), "one moved past the target");
+        assert_ne!(before, order_key(Some(1), 4, &[3, 2, 4, 5]), "the order before it");
+    }
+
+    #[test]
+    fn an_unknown_length_makes_the_whole_unknown() {
+        assert_eq!(total([Some(1000), Some(2500)]), Some(Duration::from_millis(3500)));
+        assert_eq!(total([Some(1000), None, Some(2500)]), None);
+        assert_eq!(total([]), Some(Duration::ZERO));
+    }
 
     #[test]
     fn the_fade_takes_the_last_twenty_seconds() {
