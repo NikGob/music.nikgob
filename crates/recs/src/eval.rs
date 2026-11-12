@@ -29,6 +29,11 @@
 //!     they play that are new songs of the services («С новым» over the
 //!     discoveries and the graph's finds the dataset carries,
 //!     [`Dataset::new`]);
+//!   - what two early skips do to autoplay ([`two_skips`]): at the same
+//!     moments its first two picks skipped early, autoplay picked again;
+//!     how often its next pick is of another taste profile than both, and
+//!     how often its next picks sound farther from the skipped two than the
+//!     ones it had queued after them;
 //!   - for both, the share of picks by an artist never played before;
 //!   - the share of the catalog all lists ever held, and for a synthetic
 //!     listener how high the hidden taste rates what was picked (0.5 is a
@@ -388,6 +393,10 @@ pub struct Report {
     pub build_cached_ms: f32,
     pub mixes_ms: f32,
     pub autoplay_ms: f32,
+    /// [`two_skips`]: the moments measured, the share whose next pick is of
+    /// another profile (of those where all three have one) and the share
+    /// whose next picks sound farther from the skipped two.
+    pub skips2: (usize, f32, f32),
 }
 
 /// The outcome of every start of `events`, in their order of time.
@@ -721,6 +730,51 @@ pub fn autoplay(parts: &Parts, model: &UserModel, suits: &[bool], session: Sessi
     positions(&parts.catalog, picks.into_iter().map(|p| p.item))
 }
 
+/// Picks after two skips are measured by this many.
+const AFTER_SKIPS: usize = 3;
+
+/// Two early skips of autoplay's first two `picks` after `session`:
+/// autoplay picks [`AFTER_SKIPS`] again (its queue replaced, as the runtime
+/// does). Whether the first of them is of another taste profile than both
+/// skipped (`None` when one of the three has none), and whether they sound
+/// farther from the skipped two (their middle) than the picks it had queued
+/// after them. `None` without enough picks or sound.
+pub fn two_skips(parts: &Parts, model: &UserModel, suits: &[bool], session: &Session, picks: &[usize]) -> Option<(Option<bool>, bool)> {
+    if picks.len() < 2 + AFTER_SKIPS {
+        return None;
+    }
+    let seed = session.last()?.track;
+    let ids: Vec<TrackId> = picks.iter().map(|&i| parts.catalog.tracks()[i].id).collect();
+    let mut s = session.clone();
+    let mut ts = s.last_ts()?;
+    for &t in &ids[..2] {
+        ts += 20_000;
+        s.start(t, ts, EventContext::Radio, Some(EventOrigin::Autoplay));
+        s.end(t, Ended::Early);
+    }
+    let recs = Recs::new(&parts.catalog, &model.taste, &parts.index).with_model(model).with_background(suits);
+    let mut radio = RadioState::new(RadioSeed::Track(seed)).continuing();
+    radio.attune(s, Some(model.weights));
+    radio.set_no_repeat_ms(3 * HOUR_MS);
+    radio.set_explore(Some(0.1));
+    radio.set_unheard(0.0);
+    radio.mark_served(ids[..2].iter().map(|t| Item::Track(*t)));
+    let again = positions(&parts.catalog, radio.extend(&recs, AFTER_SKIPS, &RadioParams { new_share: 0.0, seed: 1 }).into_iter().map(|p| p.item));
+    let first = *again.first()?;
+    let other = match (model.profile_at(first), model.profile_at(picks[0]), model.profile_at(picks[1])) {
+        (Some(a), Some(b), Some(c)) => Some(a != b && a != c),
+        _ => None,
+    };
+    let (a, b) = (model.embedded_at(picks[0])?, model.embedded_at(picks[1])?);
+    let mid: Vector = std::array::from_fn(|k| (a[k] + b[k]) / 2.0);
+    let far = |list: &[usize]| -> Option<f32> {
+        let d: Vec<f32> = list.iter().filter_map(|&i| model.embedded_at(i)).map(|v| euclid(v, &mid)).collect();
+        (!d.is_empty()).then(|| d.iter().sum::<f32>() / d.len() as f32)
+    };
+    let away = far(&again)? > far(&picks[2..2 + AFTER_SKIPS])?;
+    Some((other, away))
+}
+
 /// Evaluates the engine on `parts` (see the module docs).
 pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
     let events = &parts.input.events;
@@ -789,6 +843,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         .collect();
     let step = (moments.len() as f32 / opts.autoplay_points.max(1) as f32).max(1.0);
     let mut auto = Lists::default();
+    let (mut skips_n, mut skips_other, mut skips_other_n, mut skips_away) = (0usize, 0usize, 0usize, 0usize);
     let mut x = 0.0f32;
     while (x as usize) < moments.len() && opts.autoplay_points > 0 {
         let k = moments[x as usize];
@@ -799,7 +854,15 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         if session.is_empty() {
             continue;
         }
-        let picks = autoplay(parts, &model, &suits, session, opts.autoplay_len);
+        let picks = autoplay(parts, &model, &suits, session.clone(), opts.autoplay_len);
+        if let Some((other, away)) = two_skips(parts, &model, &suits, &session, &picks) {
+            skips_n += 1;
+            skips_away += usize::from(away);
+            if let Some(o) = other {
+                skips_other_n += 1;
+                skips_other += usize::from(o);
+            }
+        }
         let rest: HashSet<TrackId> = starts.list[k..].iter().take_while(|s| s.3 == sess).filter(|s| s.2 != Ended::Early).map(|s| s.1).collect();
         let listened = starts.listened(t, t + opts.window_ms);
         let heard = |i: usize| model.tracks[i].starts > 0;
@@ -807,6 +870,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         auto.add(&ctx, &picks, &Truth { listened: &listened, session: Some(&rest), next: Some(next), heard: &heard, artist_heard: &artist });
     }
     report.autoplay = auto.stats(n);
+    report.skips2 = (skips_n, skips_other as f32 / skips_other_n.max(1) as f32, skips_away as f32 / skips_n.max(1) as f32);
 
     // Mixes: mornings of the second half with a week after them.
     let offset = i64::from(parts.input.utc_offset_min) * 60_000;
@@ -900,6 +964,10 @@ impl Report {
             }
         }
         out += &format!("  autoplay: {}\n", list_row(&self.autoplay));
+        out += &format!(
+            "  2 skips:  n {:>3}  next of another profile {:.3}  farther from the skipped {:.3}\n",
+            self.skips2.0, self.skips2.1, self.skips2.2
+        );
         out += &format!("  mixes:    {}  ({:.1} mixes a home)\n", list_row(&self.mixes), self.mixes_per_home);
         out += &format!(
             "  time: build {:.0} ms (learning) / {:.0} ms (cached weights), home mixes {:.0} ms, autoplay of ten {:.0} ms\n",
