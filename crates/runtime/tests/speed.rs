@@ -202,7 +202,9 @@ fn a_choice_for_the_next_track_reaches_it_in_the_engine_and_leaves_the_playing_o
     let r = rig(Prefs::default(), &[]);
     let id = r.play();
     let nexts = |r: &Rig| r.asked().into_iter().filter(|a| matches!(a, Asked::Next(_))).count();
-    wait_for("the preload", || nexts(&r) >= 1);
+    // The preload asks twice (cleared while the tags are read, then the
+    // item): wait for the item itself.
+    wait_for("the preload", || r.asked().contains(&Asked::Next(Some((SpeedVariant::Normal, false)))));
     let before = nexts(&r);
     r.rt.send(Command::SetTrackSpeed { track: r.tracks[1], variant: SpeedVariant::Fast });
     wait_for("the engine to be told", || !r.speeds().is_empty());
