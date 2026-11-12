@@ -523,12 +523,23 @@ pub fn wave(ui: &mut Ui, cell: Rect, playing: bool, ours: bool, status: Status, 
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
     let r = shape::LARGE;
-    // The wave runs while it plays and settles when it stops.
-    let run = anim::fraction(ui.ctx(), id.with("run"), f32::from(u8::from(playing && !theme.reduced_motion)), theme.motion.default_effects);
+    // The wave runs while it plays (and drifts slowly under the pointer),
+    // and settles when it stops.
+    let pointed = resp.hovered() && !playing;
+    let target = if theme.reduced_motion {
+        0.0
+    } else if playing {
+        1.0
+    } else if pointed {
+        0.35
+    } else {
+        0.0
+    };
+    let run = anim::fraction(ui.ctx(), id.with("run"), target, theme.motion.default_effects);
     let now = anim::now(ui.ctx());
     let phase = ui.ctx().data_mut(|d| {
         let (t, p) = d.get_temp::<(f64, f32)>(id.with("phase")).unwrap_or((now, 0.0));
-        let p = p + run * ((now - t) as f32).min(0.1) * std::f32::consts::TAU * 0.35;
+        let p = p + run * ((now - t) as f32).min(0.1) * std::f32::consts::TAU * 0.8;
         d.insert_temp(id.with("phase"), (now, p % std::f32::consts::TAU));
         p
     });
@@ -540,7 +551,9 @@ pub fn wave(ui: &mut Ui, cell: Rect, playing: bool, ours: bool, status: Status, 
         // Two periods of a sine across the middle, its swell a little
         // higher while it plays.
         let w = art.width() * 0.62;
-        let amp = art.height() * (0.07 + 0.025 * run);
+        // The swell breathes a little while it plays.
+        let breath = 0.5 + 0.5 * (now as f32 * std::f32::consts::TAU * 0.25).sin();
+        let amp = art.height() * (0.07 + run * (0.02 + 0.02 * breath));
         let left = art.center().x - w / 2.0;
         let points: Vec<Pos2> = (0..=48)
             .map(|k| {

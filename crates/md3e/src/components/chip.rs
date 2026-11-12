@@ -175,7 +175,13 @@ fn chip(ui: &mut Ui, spec: Spec) -> Painted {
             galley.clone(),
             content,
         );
-        if let Some(icon) = spec.trailing {
+        // An input chip's remove button is a target of its own; any other
+        // trailing icon (a dropdown arrow) is part of the chip, which takes
+        // the hover and the click as one.
+        if let Some(icon) = spec.trailing.filter(|_| spec.kind != Kind::Input) {
+            let c = pos2(visual.right() - 8.0 - ICON * 0.5, visual.center().y);
+            icon.widget(false, icon_color, ICON).paint_at(ui, Rect::from_center_size(c, Vec2::splat(ICON)));
+        } else if let Some(icon) = spec.trailing {
             let c = pos2(visual.right() - 8.0 - ICON * 0.5, visual.center().y);
             let r = Rect::from_center_size(c, Vec2::splat(ICON));
             let hit = Rect::from_center_size(c, Vec2::splat(32.0));

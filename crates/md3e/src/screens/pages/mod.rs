@@ -1627,8 +1627,15 @@ pub fn page(
     if let Some(y) = restore {
         area = area.vertical_scroll_offset(y);
     }
+    // The bar's gutter is kept while nothing scrolls too, so what sits at
+    // the right edge does not move when the page grows long enough to scroll.
+    let full = ui.available_width();
     let o = area
         .show(ui, |ui| {
+            let room = full - crate::components::scrollbars::GUTTER;
+            if ui.available_width() > room {
+                ui.set_max_width(room);
+            }
             ui.spacing_mut().item_spacing.y = 8.0;
             let r = match route {
                 Route::Home => home::show(ui, state, pages, out),

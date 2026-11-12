@@ -58,19 +58,15 @@ fn height(side: f32) -> f32 {
 const FOOT: f32 = 56.0;
 /// Between the sun and the label beside it.
 const FOOT_GAP: f32 = 16.0;
-/// The version pill's padding around its text.
-const PILL_PAD: egui::Vec2 = vec2(10.0, 3.0);
-
 /// The foot of Настройки, centred on `page`: the sun with «Made by NikGob»
-/// beside it and the version under the label in a tonal pill, one row (a
+/// beside it and the version as plain text under the label, one row (a
 /// click opens GitHub).
 pub fn made_by(ui: &mut Ui, page: Rangef) {
     let s = Theme::get(ui.ctx()).scheme;
     let name = crate::typography::layout(ui.painter(), TypeRole::TitleMedium.style().job(LABEL, s.on_surface));
-    let ver = crate::typography::layout(ui.painter(), TypeRole::LabelSmall.style().job(&version_label(), s.on_secondary_container));
-    let pill = ver.size() + PILL_PAD * 2.0;
-    let text_w = name.size().x.max(pill.x);
-    let text_h = name.size().y + VERSION_GAP + pill.y;
+    let ver = crate::typography::layout(ui.painter(), TypeRole::BodySmall.style().job(&version_label(), s.on_surface_variant));
+    let text_w = name.size().x.max(ver.size().x);
+    let text_h = name.size().y + VERSION_GAP + ver.size().y;
     let group = vec2(FOOT + FOOT_GAP + text_w, FOOT.max(text_h));
     let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), group.y + 24.0), Sense::hover());
     let row = Rect::from_x_y_ranges(page, row.y_range());
@@ -85,9 +81,8 @@ pub fn made_by(ui: &mut Ui, page: Rangef) {
     let top = rect.center().y - text_h / 2.0;
     let color = lerp(s.on_surface_variant, s.on_surface, hover);
     ui.painter().galley(pos2(x, top), name, color);
-    let pill = Rect::from_min_size(pos2(x, top + text_h - pill.y), pill);
-    ui.painter().rect_filled(pill, pill.height() / 2.0, s.secondary_container);
-    ui.painter().galley(pill.min + PILL_PAD, ver, s.on_secondary_container);
+    let at = pos2(x, top + text_h - ver.size().y);
+    ui.painter().galley(at, ver, s.on_surface_variant);
     if resp.clicked() {
         super::sources::open_url(GITHUB);
     }
