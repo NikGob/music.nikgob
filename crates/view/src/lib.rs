@@ -1460,8 +1460,9 @@ impl ToastKind {
 /// line timing for plain texts on; 2 made «Окно» the look of the lyrics
 /// control; 3 turned word timing for the playing song on and moved the
 /// lead from [`OLD_LYRICS_LEAD`] to [`LYRICS_LEAD`]; 4 made «По слогам»
-/// the unit of the lyrics' animations ([`Prefs::lyrics_unit`]).
-pub const LYRICS_REV: u8 = 4;
+/// the unit of the lyrics' animations ([`Prefs::lyrics_unit`]); 5 hid the
+/// player's lyrics button (the key L stays).
+pub const LYRICS_REV: u8 = 5;
 
 /// [`Prefs::lyrics_unit`]: letter by letter («По буквам») …
 pub const LYRICS_BY_LETTERS: u8 = 0;
@@ -2362,6 +2363,11 @@ impl Prefs {
             // «По слогам» became the default unit: «По буквам» (the old
             // default) moves to it, «По словам» chosen stays.
             self.lyrics_unit = if self.lyrics_by_words || self.lyrics_style == 3 { LYRICS_BY_WORDS } else { LYRICS_BY_SYLLABLES };
+        }
+        if stored < 5 {
+            // The player's lyrics button is hidden by default now (the key
+            // L opens the lyrics): it goes once; shown again since, it stays.
+            self.player_buttons.lyrics = false;
         }
 
         self.lyrics_rev = LYRICS_REV;

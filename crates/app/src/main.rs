@@ -1068,6 +1068,20 @@ mod prefs_tests {
         assert_eq!(prefs_of(None).lyrics_unit, LYRICS_BY_SYLLABLES);
     }
 
+    /// Revision 5: the player's lyrics button is hidden by default; prefs
+    /// from before it hide it once, a button shown since stays.
+    #[test]
+    fn the_lyrics_button_goes_once() {
+        let old = parse_prefs(br#"{"player_buttons":{"lyrics":true,"queue":true},"lyrics_rev":4}"#).unwrap();
+        assert!(!old.player_buttons.lyrics && old.player_buttons.queue);
+        assert_eq!(old.lyrics_rev, nikgob_view::LYRICS_REV);
+        let since = parse_prefs(br#"{"player_buttons":{"lyrics":true},"lyrics_rev":5}"#).unwrap();
+        assert!(since.player_buttons.lyrics, "shown since: stays");
+        assert!(!prefs_of(None).player_buttons.lyrics);
+        let again = parse_prefs(&serde_json::to_vec(&since).unwrap()).unwrap();
+        assert_eq!(again, since);
+    }
+
     /// «Перемешивание остаётся включённым» off becomes every kind of list
     /// in order; on (or never written), each kind's default; a rule written
     /// since stays.
