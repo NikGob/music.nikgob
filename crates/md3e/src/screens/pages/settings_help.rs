@@ -209,8 +209,9 @@ pub enum SettingId {
     SoundNeural,
     /// «На чём считать анализ звука».
     SoundDevice,
-    /// «Карточки в „Миксах для тебя“»: they start «Моя волна» or open
-    /// their list.
+    /// «Карточки в „Миксах для тебя“»: they start «Моя волна», open their
+    /// list or play it (one choice: the older «Нажатие на микс открывает
+    /// его страницу» is one of its answers now).
     MixCardsWave,
     /// «Моя волна» in the header of Главная.
     HomeWaveChip,
@@ -234,8 +235,6 @@ pub enum SettingId {
     MixesOnRepeat,
     /// «Фон».
     BackgroundCards,
-    /// «Нажатие на микс открывает его страницу».
-    MixClickOpensList,
     /// «Кнопка «Не нравится»».
     DislikeButton,
     /// «Пропускать по дизлайку».
@@ -489,7 +488,7 @@ impl SettingId {
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
-            | MixClickOpensList | HomeWaveChip | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
+            | HomeWaveChip | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
             | PaneLyrics | PaneInfo | TrackMenu | PlayerButton(_) | NavRoot => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
@@ -556,7 +555,7 @@ impl SettingId {
             // Rare cases, gestures, parts of the window and of Главная.
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
-            | ProfileNames | MixClickOpensList | HomeWaveChip | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
+            | ProfileNames | HomeWaveChip | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
             | PlayerButton(_) | NavRoot
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
@@ -731,7 +730,6 @@ impl SettingId {
             MixesMoods => "Спокойное и погромче",
             MixesOnRepeat => "На повторе",
             BackgroundCards => "Миксы для фона",
-            MixClickOpensList => "Нажатие на микс открывает его страницу",
             DislikeButton => "Кнопка на экране трека",
             DislikeSkips => "Пропускать сразу",
             DislikeSkipEverywhere => "Пропускать везде",
@@ -998,9 +996,8 @@ impl SettingId {
             RadioUnheard => "Сколько в радио и автовоспроизведении песен, которых ты ещё не слышал: из твоей музыки и новых. Когда таких не остаётся, играет как обычно.",
             SoundNeural => "Нейросеть слушает песни и различает жанр, стиль и вокал — то, чего не слышит обычный анализ, поэтому похожее подбирается точнее. Модель (18 МБ и основа для моделей, если её ещё нет) скачивается один раз, когда выберешь режим. Работает в фоне по очереди с другими тяжёлыми задачами, ждёт, пока идёт игра, и выгружается из памяти, когда не нужна.",
             SoundDevice => "Где нейросеть считает анализ звука. Видеокарта справляется быстрее; на процессоре анализ идёт в один тихий поток и не занимает видеокарту.",
-            MixCardsWave => "Что делает нажатие на карточку микса на главной: запускает «Мою волну» с вайбом этого микса — бесконечно, с новой музыкой и подстройкой под пропуски, — или открывает его готовый список песен, как раньше. Список всегда есть в ⋮ → «Список треков».",
+            MixCardsWave => "Что делает нажатие на карточку микса на главной: запускает «Мою волну» с вайбом этого микса — бесконечно, с новой музыкой и подстройкой под пропуски, — открывает его готовый список песен, как раньше, или сразу его играет. Список всегда есть в ⋮ → «Список треков».",
             HomeWaveChip => "Кнопка «Моя волна» рядом с «Только скачанное» в приветствии главной. Волна запускается и с карточки в «Миксах для тебя».",
-            MixClickOpensList => "Нажатие на карточку микса открывает его страницу с песнями, а играет он по кнопке ▶. Выключи — микс будет играть сразу по нажатию на карточку, а страница откроется из ⋮ → «Список треков».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка в конце ряда кнопок на экране трека (♡ — в его начале). «Не нравится» остаётся и в меню ⋮ любого трека.",
             DislikeSkips => "Трек, которому поставили «Не нравится», сразу пропускается.",
@@ -1245,6 +1242,7 @@ impl SettingId {
             Self::MixCardsWave => &[
                 c!("Запускают Волну с этим вайбом", "Бесконечный поток в духе микса: подстраивается под пропуски и приносит новое. Рекомендуется."),
                 c!("Открывают готовый список треков", "Как раньше: нажатие открывает страницу микса с песнями, ▶ играет его."),
+                c!("Сразу играют микс", "Нажатие включает готовый список микса, его страница — в ⋮ → «Список треков»."),
             ],
             Self::SoundDevice => &[
                 c!("Автоматически", "На видеокарте, если она подходит, иначе на процессоре."),
@@ -1373,7 +1371,7 @@ impl SettingId {
             Self::RadioUnheard => v::RadioUnheard::ALL.iter().position(|u| *u == p.radio_unheard).unwrap_or(0),
             Self::SoundNeural => v::SoundNeural::ALL.iter().position(|m| *m == p.sound_neural_or(false)).unwrap_or(0),
             Self::SoundDevice => usize::from(p.sound_cpu_only),
-            Self::MixCardsWave => usize::from(!p.mix_cards_wave),
+            Self::MixCardsWave => super::cards::MixClick::ALL.iter().position(|c| *c == super::cards::MixClick::chosen(p)).unwrap_or(0),
             Self::ListShuffle(kind) => v::ListShuffle::ALL.iter().position(|r| *r == p.list_shuffle.of(kind)).unwrap_or(2),
             _ => 0,
         }
@@ -1471,7 +1469,7 @@ impl SettingId {
             Self::RadioUnheard => p.radio_unheard = v::RadioUnheard::ALL[i.min(v::RadioUnheard::ALL.len() - 1)],
             Self::SoundNeural => p.sound_neural = Some(v::SoundNeural::ALL[i.min(v::SoundNeural::ALL.len() - 1)]),
             Self::SoundDevice => p.sound_cpu_only = i == 1,
-            Self::MixCardsWave => p.mix_cards_wave = i == 0,
+            Self::MixCardsWave => super::cards::MixClick::ALL[i.min(2)].choose(p),
             Self::ListShuffle(kind) => p.list_shuffle.set(kind, v::ListShuffle::ALL[i.min(v::ListShuffle::ALL.len() - 1)]),
             _ => {}
         }
@@ -1549,7 +1547,7 @@ impl SettingId {
             LyricsScale | LyricsCascade | LyricsReturn => Part::LyricsColumn,
             LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade => Part::LyricsEdges,
             LyricsGap | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown => Part::LyricsPause,
-            MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames | MixClickOpensList
+            MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
             | HiddenMixes => Part::Home(Section::Mixes),
             AlbumDate => Part::AlbumDate,
             _ => return None,

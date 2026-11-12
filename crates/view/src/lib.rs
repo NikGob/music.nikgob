@@ -1921,12 +1921,14 @@ pub struct Prefs {
     pub mixes_moods: bool,
     /// «На повторе».
     pub mixes_on_repeat: bool,
-    /// A click on a mix's card opens its page ([`Route::Mix`]; its ▶ plays
-    /// it); off: the click plays it.
+    /// «Карточки в „Миксах для тебя“» is one choice kept in these two (the
+    /// settings' row reads and writes both): off here is «Сразу играют
+    /// микс», a click plays the mix (its page from ⋮); on, a click opens
+    /// its page ([`Route::Mix`]; its ▶ plays it) or starts its wave…
     pub mix_click_opens_list: bool,
-    /// «Карточки в „Миксах для тебя“» → «Запускают Волну с этим вайбом»: a
-    /// card of the row starts «Моя волна» with its own filter (its list
-    /// stays in ⋮); off: «Открывают готовый список треков» as before.
+    /// …«Запускают Волну с этим вайбом» when this is on too: a card of the
+    /// row starts «Моя волна» with its own filter (its list stays in ⋮);
+    /// off: «Открывают готовый список треков».
     pub mix_cards_wave: bool,
     /// «▶ Моя волна» in the header of Главная beside «Только скачанное».
     pub home_wave_chip: bool,

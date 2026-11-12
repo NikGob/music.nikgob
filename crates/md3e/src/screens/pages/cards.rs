@@ -368,18 +368,42 @@ pub enum MixClick {
 }
 
 impl MixClick {
-    /// How a card of mix `key` of «Миксы для тебя» answers under `prefs`:
-    /// a wave preset when the cards start the wave (what played and a
-    /// world's mixes are no wave), else as the click is set.
-    pub fn of(prefs: &nikgob_view::Prefs, key: nikgob_view::MixKey) -> Self {
-        let preset = !matches!(key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::World(_));
-        if prefs.mix_cards_wave && preset {
-            Self::Wave
-        } else if prefs.mix_click_opens_list {
-            Self::List
-        } else {
+    /// The choices of «Карточки в „Миксах для тебя“», in its order.
+    pub const ALL: [Self; 3] = [Self::Wave, Self::List, Self::Play];
+
+    /// What «Карточки в „Миксах для тебя“» is set to. The one choice is kept
+    /// in two prefs ([`nikgob_view::Prefs::mix_cards_wave`] and the older
+    /// [`nikgob_view::Prefs::mix_click_opens_list`]): the older switch
+    /// turned off, a click that plays, was the user's own choice and stays.
+    pub fn chosen(prefs: &nikgob_view::Prefs) -> Self {
+        if !prefs.mix_click_opens_list {
             Self::Play
+        } else if prefs.mix_cards_wave {
+            Self::Wave
+        } else {
+            Self::List
         }
+    }
+
+    /// Sets the choice: both prefs at once, so they never disagree.
+    pub fn choose(self, prefs: &mut nikgob_view::Prefs) {
+        prefs.mix_cards_wave = self == Self::Wave;
+        prefs.mix_click_opens_list = self != Self::Play;
+    }
+
+    /// How a card that starts no wave answers (what played, a world's
+    /// mixes): it opens its list when the cards start waves.
+    pub fn listed(prefs: &nikgob_view::Prefs) -> Self {
+        match Self::chosen(prefs) {
+            Self::Wave => Self::List,
+            c => c,
+        }
+    }
+
+    /// How a card of mix `key` of «Миксы для тебя» answers under `prefs`:
+    /// as the choice says; what played and a world's mixes are no wave.
+    pub fn of(prefs: &nikgob_view::Prefs, key: nikgob_view::MixKey) -> Self {
+        if matches!(key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::World(_)) { Self::listed(prefs) } else { Self::chosen(prefs) }
     }
 }
 
@@ -972,21 +996,41 @@ mod tests {
     use super::*;
 
     /// «Карточки в „Миксах для тебя“»: by default a card starts its wave;
-    /// what played and a world's mix never do; the old choice keeps the
-    /// click as it was set.
+    /// what played and a world's mix never do (they open their list).
     #[test]
     fn mix_cards_start_waves_by_default() {
         use nikgob_view::MixKey as K;
-        let mut p = nikgob_view::Prefs::default();
+        let p = nikgob_view::Prefs::default();
         assert!(p.mix_cards_wave && p.home_wave_chip);
+        assert_eq!(MixClick::chosen(&p), MixClick::Wave);
         assert_eq!(MixClick::of(&p, K::Calm), MixClick::Wave);
         assert_eq!(MixClick::of(&p, K::Genre(2)), MixClick::Wave);
         assert_eq!(MixClick::of(&p, K::OnRepeat), MixClick::List);
         assert_eq!(MixClick::of(&p, K::World(nikgob_view::WorldMix::Best)), MixClick::List);
-        p.mix_cards_wave = false;
-        assert_eq!(MixClick::of(&p, K::Calm), MixClick::List);
-        p.mix_click_opens_list = false;
-        assert_eq!(MixClick::of(&p, K::Calm), MixClick::Play);
+    }
+
+    /// The one choice: what it shows is what every card does, whatever the
+    /// two prefs it is kept in held before; the older switch turned off (a
+    /// click that plays) is kept as that choice.
+    #[test]
+    fn the_mix_card_choice_is_what_the_cards_do() {
+        use nikgob_view::MixKey as K;
+        for (wave, list) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut p = nikgob_view::Prefs { mix_cards_wave: wave, mix_click_opens_list: list, ..Default::default() };
+            let shown = MixClick::chosen(&p);
+            assert_eq!(MixClick::of(&p, K::Calm), shown, "{wave} {list}");
+            assert_eq!(MixClick::of(&p, K::OnRepeat), MixClick::listed(&p));
+            if !list {
+                assert_eq!(shown, MixClick::Play, "the older switch off plays");
+            }
+            for c in MixClick::ALL {
+                c.choose(&mut p);
+                assert_eq!(MixClick::chosen(&p), c);
+                assert_eq!(MixClick::of(&p, K::Calm), c);
+                let no_wave = if c == MixClick::Wave { MixClick::List } else { c };
+                assert_eq!(MixClick::of(&p, K::World(nikgob_view::WorldMix::Best)), no_wave);
+            }
+        }
     }
 
     /// A mix's ⋮ is in the order of the other collections' menus:
