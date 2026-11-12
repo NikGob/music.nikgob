@@ -1024,11 +1024,15 @@ fn read_parts(
     // their new music counts as a little known.
     let artist_affinity = graph::with_votes(artist_affinity, &similar.votes, &|a| (model.taste.artist_affinity(a).max(0.0) / 3.0).tanh());
     // The songs the graph found beside the library's: new music, by how
-    // loved the tracks whose radios hold them are. The graph keeps no kind
-    // of a track: each is judged as a video too.
+    // loved the tracks whose radios hold them are. A track whose kind the
+    // source did not say (lists kept before it was) is judged as a video
+    // too, unless its channel is an official one.
     let graph_new = graph::finds(
         &similar.beyond,
-        &|t| is_new(&filter, t) && nikgob_recs::junk::junk_any_kind(t, None).is_none(),
+        &|t, known| {
+            is_new(&filter, t)
+                && if known { nikgob_recs::junk(t, None).is_none() } else { nikgob_recs::junk::junk_any_kind(t, None).is_none() }
+        },
         &|t| model.position(t).map(|i| (model.taste.affinity_at(i).max(0.0) / 3.0).tanh()),
         &|t| model.position(t).and_then(|i| model.main_artist_at(i)),
     );

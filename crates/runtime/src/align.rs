@@ -65,10 +65,33 @@ const KEEP_LOADED: Duration = Duration::from_secs(25);
 const HEAVY_RETRY: Duration = Duration::from_secs(5);
 /// CPU threads of the models.
 const THREADS: usize = 3;
-/// How often, and how many times, the check of a clip looks for its
-/// whole audio in the stream cache (it comes a few seconds into the play).
+/// How often, and how many times a round, the check of a clip looks for
+/// its whole audio in the stream cache (it is there once the download
+/// ends); rounds go on while the clip is the current track.
 const CLIP_AUDIO_EVERY: Duration = Duration::from_secs(3);
-const CLIP_AUDIO_TRIES: u32 = 40;
+const CLIP_AUDIO_TRIES: u32 = 10;
+
+/// What the end of a round of looking for a clip's cached audio leads to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClipAudioNext {
+    /// Checked from the file.
+    Check,
+    /// Another round: the clip still plays, its download is not done.
+    Again,
+    /// The check is dropped (another song is current, or the clip's texts
+    /// changed and were asked again).
+    Drop,
+}
+
+/// [`ClipAudioNext`] for `track`: whether it is the current track, its
+/// texts are still the ones asked, and the file came.
+pub(crate) fn clip_audio_next(current: bool, still_asked: bool, cached: bool) -> ClipAudioNext {
+    match (current && still_asked, cached) {
+        (false, _) => ClipAudioNext::Drop,
+        (true, true) => ClipAudioNext::Check,
+        (true, false) => ClipAudioNext::Again,
+    }
+}
 
 /// One text to check.
 #[derive(Clone, Debug, PartialEq)]
@@ -1060,17 +1083,28 @@ impl Worker {
         });
     }
 
-    /// The audio of a clip whose texts wait for the check came (or not).
+    /// A round of looking for a clip's cached audio ended: checked when it
+    /// came and the clip is still the current track (never a check of a
+    /// song skipped past: it would call off the current one's), another
+    /// round while it plays and downloads, else dropped.
     fn clip_audio_came(&mut self, track: TrackId, path: Option<PathBuf>, texts: Vec<AlignText>) {
         let hashes: Vec<String> = texts.iter().map(|t| t.hash.clone()).collect();
-        // Asked again meanwhile (other texts), or dropped.
-        if self.align.asked.get(&track) != Some(&hashes) {
-            return;
-        }
-        match path {
-            Some(path) => self.align.check(Req::Check { track, path, texts, recognise: false }),
-            None => {
-                log::info!("align: no cached audio of the clip {track} to check its lyrics with");
+        let still_asked = self.align.asked.get(&track) == Some(&hashes);
+        let current = self.queue.current().is_some_and(|e| e.track == track);
+        match clip_audio_next(current, still_asked, path.is_some()) {
+            ClipAudioNext::Check => {
+                if let Some(path) = path {
+                    self.align.check(Req::Check { track, path, texts, recognise: false });
+                }
+            }
+            ClipAudioNext::Again => match self.clip_audio(track) {
+                Some(video) => self.check_clip_when_cached(track, video, texts),
+                None => self.align_msg(Msg::CheckDropped(track)),
+            },
+            // Its own texts asked again: that ask goes on by itself.
+            ClipAudioNext::Drop if !still_asked => {}
+            ClipAudioNext::Drop => {
+                log::info!("align: the clip {track} is no longer playing: its lyrics are checked when it plays again");
                 self.align_msg(Msg::CheckDropped(track));
             }
         }
@@ -1306,6 +1340,18 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// The cached audio of a clip skipped past never goes to the aligner
+    /// (it would call off the current song's check); a clip still playing
+    /// whose download is not done looks again.
+    #[test]
+    fn a_skipped_clip_s_audio_does_not_check() {
+        assert_eq!(clip_audio_next(true, true, true), ClipAudioNext::Check);
+        assert_eq!(clip_audio_next(false, true, true), ClipAudioNext::Drop, "skipped past");
+        assert_eq!(clip_audio_next(true, false, true), ClipAudioNext::Drop, "its texts asked again");
+        assert_eq!(clip_audio_next(true, true, false), ClipAudioNext::Again, "still downloading");
+        assert_eq!(clip_audio_next(false, true, false), ClipAudioNext::Drop);
+    }
 
     fn fit(spelled: f32, timing: Timing) -> Fit {
         Fit {

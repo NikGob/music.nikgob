@@ -22,9 +22,10 @@
 //!   (its name as written, «RusLyrics»), and a user's upload is never a
 //!   release.
 //! * **Unknown kind**: a YouTube track known only by its id, title and
-//!   channel (the graph of similar music keeps no kind) is judged as a
-//!   video ([`junk_any_kind`]): a song YouTube Music lists is never told
-//!   from an upload there. Names match in either script («Борислав Славов» is
+//!   channel (graph lists kept before their kind was) is judged as a video
+//!   too ([`junk_any_kind`]), unless its channel is official (a «- Topic»
+//!   channel, a label's): a song YouTube Music lists is not told from an
+//!   upload there. A track whose kind is known is judged by it. Names match in either script («Борислав Славов» is
 //!   «Borislav Slavov») and without a channel's «VEVO», «Official» or
 //!   «Music»; a channel of the canonical artist is the artist's own.
 //! * **Length**: more than [`DURATION_SLACK`] off the canonical length
@@ -360,6 +361,12 @@ fn channel_words(channel: &str) -> String {
     spaced(&out)
 }
 
+/// A «- Topic» channel (YouTube Music's own for an artist's releases) or
+/// a label's.
+fn official_channel(channel: &str) -> bool {
+    channel.trim_end().to_lowercase().ends_with("- topic") || label(channel)
+}
+
 /// A channel named after what reuploads others' songs ([`CHANNEL_WORDS`]):
 /// as a word of its name, or a word that ends in «lyrics» («ruslyrics»).
 fn junk_channel(channel: &str) -> bool {
@@ -439,12 +446,12 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
 }
 
 /// [`junk`] of a track whose kind is not known (see the module docs): a
-/// YouTube one is judged as a video too.
+/// YouTube one is judged as a video too, unless its channel is official.
 pub fn junk_any_kind(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
     if let Some(j) = junk(t, canonical) {
         return Some(j);
     }
-    if t.id.service != Service::Youtube || t.kind != TrackKind::Song {
+    if t.id.service != Service::Youtube || t.kind != TrackKind::Song || official_channel(channel(t)) {
         return None;
     }
     let video = StreamTrack { kind: TrackKind::Video, ..t.clone() };
@@ -693,6 +700,12 @@ mod tests {
         assert!(junk_any_kind(&unknown, None).is_some());
         let unknown = yt("FACE - ЮМОРИСТ", "RusLyrics", TrackKind::Song, 144);
         assert_eq!(junk_any_kind(&unknown, None), Some(Junk::Channel));
+        // Known as a song: an official remix or cover stays.
+        assert_eq!(junk(&yt("Song (Remix)", "Artist", TrackKind::Song, 200), None), None);
+        assert_eq!(junk(&yt("Hurt (Cover)", "Artist", TrackKind::Song, 200), None), None);
+        // Unknown kind from an official channel: judged as the song it is.
+        assert_eq!(junk_any_kind(&yt("Song (Remix)", "Artist - Topic", TrackKind::Song, 200), None), None);
+        assert_eq!(junk_any_kind(&yt("Song (Remix)", "Warner Records", TrackKind::Song, 200), None), None);
         // The artist's own songs stay, a version tail too.
         for (title, channel) in [("ЮМОРИСТ", "FACE"), ("Starboy", "The Weeknd"), ("Numb - Remastered 2011", "Linkin Park"), ("Song - Radio Edit", "Band")] {
             assert_eq!(junk_any_kind(&yt(title, channel, TrackKind::Song, 200), None), None, "{title} by {channel}");

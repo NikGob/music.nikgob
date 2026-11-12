@@ -431,6 +431,38 @@ async fn song_of_clip(
     Ok(reupload_song(&r.tracks, &q, video))
 }
 
+/// The track may become its clip's song: a track the app picked and the
+/// user never kept, as the library says now (not liked, in no playlist,
+/// not in the library in any way, not replaced by hand). A library track
+/// is the user's: it is never merged or rewritten from a queue.
+pub(crate) fn queue_clip_convertible(lib: &nikgob_library::Library, track: TrackId) -> bool {
+    lib.track_in_library(track).ok().flatten() == Some(false)
+        && lib.is_liked(track).ok() == Some(false)
+        && lib.cache_get(&super::replace::replaced_key(track)).ok().flatten().is_none()
+}
+
+/// What the end of a clip's wait for its song does with the entry that
+/// waited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AfterWait {
+    /// Nothing: another entry plays (or none waits).
+    Nothing,
+    /// It starts.
+    Start,
+    /// It is prepared and stays paused (the user paused while it waited).
+    StartPaused,
+}
+
+/// [`AfterWait`] for the waiting entry: still the one playing and nothing
+/// started for it, and whether the user paused meanwhile.
+pub(crate) fn after_wait(waits: bool, status: nikgob_view::Status) -> AfterWait {
+    match (waits, status) {
+        (false, _) | (true, nikgob_view::Status::Stopped) => AfterWait::Nothing,
+        (true, nikgob_view::Status::Paused) => AfterWait::StartPaused,
+        (true, _) => AfterWait::Start,
+    }
+}
+
 impl Worker {
     /// The app picked the queue entry `e` (a radio, the wave, autoplay, a
     /// mix of the home, a guest of «✦ С дополнением»), not the user.
@@ -453,12 +485,13 @@ impl Worker {
         if src.kind != SourceKind::Youtube || src.quality_score != score::STREAM_YOUTUBE_CLIP {
             return None;
         }
-        if self.streaming.queue_clips.holds(&src.locator) || self.clip_settled(&src.locator) || self.replaced_by_hand(e.track) {
+        if self.streaming.queue_clips.holds(&src.locator) || self.clip_settled(&src.locator) {
             return None;
         }
         // A clip of the library (liked, in a playlist) is the user's: the
-        // likes' repair asks for liked ones.
-        if self.snapshot().is_some_and(|s| s.catalog.get(e.track).is_some()) {
+        // likes' repair asks for liked ones. Read live, not from the recs'
+        // snapshot (it may be older than a like a moment ago).
+        if !queue_clip_convertible(&self.lib, e.track) {
             return None;
         }
         let remote = RemoteId::new(Service::Youtube, src.locator.clone());
@@ -551,8 +584,20 @@ impl Worker {
         let waits = self.playing.is_some_and(|p| p.id == entry) && self.playing_source.is_none();
         // The queue's own entry: a song that took a merged track's place
         // is retargeted there.
-        if let Some(e) = self.queue.current().filter(|c| c.id == entry && waits) {
-            self.start(e);
+        let Some(e) = self.queue.current().filter(|c| c.id == entry) else { return };
+        match after_wait(waits, self.status) {
+            AfterWait::Nothing => {}
+            AfterWait::Start => self.start(e),
+            AfterWait::StartPaused => {
+                // Paused while it waited: ready to go on, still paused.
+                self.start(e);
+                if self.playing.is_some_and(|p| p.id == entry) && self.playing_source.is_some() {
+                    self.playback.pause();
+                    self.position = self.position_now();
+                    self.status = nikgob_view::Status::Paused;
+                    self.publish_player();
+                }
+            }
         }
     }
 
@@ -578,7 +623,9 @@ impl Worker {
         match clip_verdict(&video, &result) {
             ClipVerdict::Song(song) => {
                 self.streaming.learn(std::slice::from_ref(&song));
-                let mine = self.lib.track_by_remote(&video.id).ok().flatten() == Some(track);
+                // Still the clip's track, and still no track of the user's
+                // (liked or put in a playlist while the song was asked).
+                let mine = self.lib.track_by_remote(&video.id).ok().flatten() == Some(track) && queue_clip_convertible(&self.lib, track);
                 if playing || !mine || !self.convert_clip(track, &video, &song) {
                     self.streaming.queue_clips.hold(&video.id.id);
                 }
@@ -647,6 +694,37 @@ mod tests {
         assert_eq!(clip_verdict(&clip, &Ok(Some(gone))), ClipVerdict::NoSong);
         let limited: Result<Option<StreamTrack>, StreamError> = Err(StreamError::RateLimited { retry_after: None });
         assert_eq!(clip_verdict(&clip, &limited), ClipVerdict::Later);
+    }
+
+    /// A clip of the user's (liked, in a playlist, replaced by hand) is
+    /// never turned into a song from a queue; a seen one is.
+    #[test]
+    fn only_a_clip_the_user_never_kept_becomes_its_song() {
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let seen = lib.upsert_stream_track(&video("seen", "Song (Official Video)", "Band", 200)).unwrap();
+        assert!(queue_clip_convertible(&lib, seen));
+        let liked = lib.upsert_stream_track(&video("liked", "Other (Official Video)", "Band", 200)).unwrap();
+        lib.like(liked).unwrap();
+        assert!(!queue_clip_convertible(&lib, liked), "liked");
+        let listed = lib.upsert_stream_track(&video("listed", "Third (Official Video)", "Band", 200)).unwrap();
+        let p = lib.create_playlist("Mine").unwrap();
+        lib.playlist_add(p.id, listed).unwrap();
+        assert!(!queue_clip_convertible(&lib, listed), "in a playlist");
+        lib.cache_put(&super::super::replace::replaced_key(seen), 1, "").unwrap();
+        assert!(!queue_clip_convertible(&lib, seen), "replaced by hand");
+        assert!(!queue_clip_convertible(&lib, TrackId::new()), "unknown");
+    }
+
+    /// Paused while the clip waited: it is prepared and stays paused; an
+    /// entry that no longer waits is left alone.
+    #[test]
+    fn a_pause_during_the_wait_is_kept() {
+        use nikgob_view::Status;
+        assert_eq!(after_wait(true, Status::Buffering), AfterWait::Start);
+        assert_eq!(after_wait(true, Status::Paused), AfterWait::StartPaused);
+        assert_eq!(after_wait(true, Status::Stopped), AfterWait::Nothing);
+        assert_eq!(after_wait(false, Status::Buffering), AfterWait::Nothing);
+        assert_eq!(after_wait(false, Status::Paused), AfterWait::Nothing);
     }
 
     /// A lyrics channel's upload is looked up as the song its title names:

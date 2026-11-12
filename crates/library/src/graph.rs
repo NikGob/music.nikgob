@@ -18,6 +18,9 @@ pub struct GraphEntry {
     pub artist: String,
     /// What the source calls it: a service's id, a MusicBrainz id.
     pub remote_id: Option<String>,
+    /// A track's kind as the source said it (`song`, `video`, `upload`);
+    /// `None` when it does not say (or the list was kept before it was).
+    pub item_kind: Option<String>,
 }
 
 /// One kept entry with what it belongs to.
@@ -76,11 +79,11 @@ impl Library {
                     params![subject_kind, subject_id, source],
                 )?;
                 let mut ins = tx.prepare_cached(
-                    "INSERT INTO graph_edge(subject_kind, subject_id, source, rank, total, kind, name, artist, remote_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO graph_edge(subject_kind, subject_id, source, rank, total, kind, name, artist, remote_id, item_kind)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )?;
                 for (rank, e) in entries.iter().enumerate() {
-                    ins.execute(params![subject_kind, subject_id, source, rank as i64, entries.len() as i64, e.kind, e.name, e.artist, e.remote_id])?;
+                    ins.execute(params![subject_kind, subject_id, source, rank as i64, entries.len() as i64, e.kind, e.name, e.artist, e.remote_id, e.item_kind])?;
                 }
                 if !tags.is_empty() || source == "musicbrainz" {
                     tx.execute("DELETE FROM graph_tag WHERE subject_kind = ?1 AND subject_id = ?2", params![subject_kind, subject_id])?;
@@ -125,7 +128,7 @@ impl Library {
     pub fn graph_edges(&self) -> Result<Vec<GraphRow>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT subject_kind, subject_id, source, rank, total, kind, name, artist, remote_id FROM graph_edge
+                "SELECT subject_kind, subject_id, source, rank, total, kind, name, artist, remote_id, item_kind FROM graph_edge
                   ORDER BY subject_kind, subject_id, source, rank",
             )?;
             let rows = stmt.query_map([], |r| {
@@ -135,7 +138,7 @@ impl Library {
                     source: r.get(2)?,
                     rank: r.get(3)?,
                     total: r.get(4)?,
-                    entry: GraphEntry { kind: r.get(5)?, name: r.get(6)?, artist: r.get(7)?, remote_id: r.get(8)? },
+                    entry: GraphEntry { kind: r.get(5)?, name: r.get(6)?, artist: r.get(7)?, remote_id: r.get(8)?, item_kind: r.get(9)? },
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -186,7 +189,7 @@ mod tests {
     use super::*;
 
     fn entry(name: &str) -> GraphEntry {
-        GraphEntry { kind: "track".into(), name: name.into(), artist: "A".into(), remote_id: Some(format!("yt-{name}")) }
+        GraphEntry { kind: "track".into(), name: name.into(), artist: "A".into(), remote_id: Some(format!("yt-{name}")), item_kind: Some("video".into()) }
     }
 
     /// A list takes the place of the one before, an error keeps it, tags
@@ -199,6 +202,7 @@ mod tests {
         let rows = lib.graph_edges().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].entry.name.as_str(), rows[0].rank, rows[0].total), ("c", 0, 1));
+        assert_eq!(rows[0].entry.item_kind.as_deref(), Some("video"), "the kind the source said is kept");
         lib.graph_put("track", "t1", "youtube_radio", "error", None, &[], &[], 30).unwrap();
         assert_eq!(lib.graph_edges().unwrap().len(), 1);
         let f = lib.graph_fetches().unwrap();
