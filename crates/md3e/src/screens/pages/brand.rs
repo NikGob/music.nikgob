@@ -55,9 +55,9 @@ fn height(side: f32) -> f32 {
 }
 
 /// The sun's side at the foot of Настройки, beside the label.
-const FOOT: f32 = 56.0;
+const FOOT: f32 = 76.0;
 /// Between the sun and the label beside it.
-const FOOT_GAP: f32 = 16.0;
+const FOOT_GAP: f32 = 20.0;
 /// The foot of Настройки, centred on `page`: the sun with «Made by NikGob»
 /// beside it and the version as plain text under the label, one row (a
 /// click opens GitHub).
