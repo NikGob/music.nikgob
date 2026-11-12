@@ -36,6 +36,28 @@ pub struct Span {
     pub len: f64,
 }
 
+/// What [`decode_file_windows`] hands its sink.
+#[derive(Debug)]
+pub enum Feed<'a> {
+    /// Audio of span number `span`, interleaved.
+    Audio { span: usize, pcm: &'a [f32], spec: PcmSpec },
+    /// A packet before the next span was decoded and dropped (a container
+    /// that cannot seek is read past the gap): a moment for the caller's
+    /// pacing and stop.
+    Skipped,
+}
+
+/// The sink's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Take {
+    /// Go on.
+    More,
+    /// This span has enough; the next one follows.
+    NextSpan,
+    /// Stop the whole decode.
+    Stop,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PcmSpec {
     pub sample_rate: u32,
@@ -85,12 +107,15 @@ pub fn decode_file(
 
 /// Decodes only the spans `plan` asks for, given the track's length in
 /// seconds when the container knows it; `sink` gets each span's chunks with
-/// the span's number and may stop a span early (the next one follows).
-/// Spans are taken in order; one past the end gives nothing.
+/// the span's number ([`Feed::Audio`]), and [`Feed::Skipped`] for each
+/// packet read past between spans, and may end a span early or stop it
+/// all ([`Take`]). Spans are taken in order; one past the end gives
+/// nothing. A packet that runs over into the next span gives that span its
+/// tail, so back-to-back spans lose no sample.
 pub fn decode_file_windows(
     path: &Path,
     plan: &mut dyn FnMut(Option<f64>) -> Vec<Span>,
-    sink: &mut dyn FnMut(usize, &[f32], PcmSpec) -> ControlFlow<()>,
+    sink: &mut dyn FnMut(Feed<'_>) -> Take,
 ) -> Result<PcmSpec> {
     let file = File::open(crate::sanitize::long_path(path)).map_err(|e| ImportError::io(path, e))?;
     let ext = path.extension().and_then(|e| e.to_str());
@@ -105,7 +130,7 @@ pub fn decode_bytes_windows(
     ext: &str,
     name: &str,
     plan: &mut dyn FnMut(Option<f64>) -> Vec<Span>,
-    sink: &mut dyn FnMut(usize, &[f32], PcmSpec) -> ControlFlow<()>,
+    sink: &mut dyn FnMut(Feed<'_>) -> Take,
 ) -> Result<PcmSpec> {
     let ext = ext.trim_start_matches('.');
     let mut opened = Opened::new(Box::new(std::io::Cursor::new(bytes)), (!ext.is_empty()).then_some(ext), Path::new(name))?;
@@ -331,13 +356,12 @@ impl<'p> Opened<'p> {
     }
 
     /// Decodes the spans of `plan` (see [`decode_file_windows`]).
-    fn windows(
-        &mut self,
-        plan: &mut dyn FnMut(Option<f64>) -> Vec<Span>,
-        sink: &mut dyn FnMut(usize, &[f32], PcmSpec) -> ControlFlow<()>,
-    ) -> Result<PcmSpec> {
+    fn windows(&mut self, plan: &mut dyn FnMut(Option<f64>) -> Vec<Span>, sink: &mut dyn FnMut(Feed<'_>) -> Take) -> Result<PcmSpec> {
         let spans = plan(self.duration);
         let mut scratch: Vec<f32> = Vec::new();
+        // The part of the last packet past the span it served, and the
+        // frame it starts at: the next span begins with it.
+        let mut carry: Option<(u64, Vec<f32>)> = None;
         'spans: for (i, span) in spans.iter().enumerate() {
             // Past the end there is nothing (and some demuxers fail a seek there).
             if self.duration.is_some_and(|d| span.start >= d) {
@@ -345,33 +369,50 @@ impl<'p> Opened<'p> {
             }
             if self.rate > 0 {
                 let here = self.pos as f64 / f64::from(self.rate);
-                if span.start - SEEK_LEAD > here + 1.0 {
-                    self.seek(span.start - SEEK_LEAD);
+                if span.start - SEEK_LEAD > here + 1.0 && self.seek(span.start - SEEK_LEAD) {
+                    carry = None;
                 }
             }
             let mut need: Option<u64> = None;
             loop {
-                if !self.next(&mut scratch)? {
-                    break 'spans;
-                }
-                if scratch.is_empty() || self.channels == 0 || self.rate == 0 {
-                    continue;
-                }
+                let chunk_start = match carry.take() {
+                    Some((at, pcm)) => {
+                        scratch = pcm;
+                        at
+                    }
+                    None => {
+                        if !self.next(&mut scratch)? {
+                            break 'spans;
+                        }
+                        if scratch.is_empty() || self.channels == 0 || self.rate == 0 {
+                            continue;
+                        }
+                        self.pos - (scratch.len() / self.channels) as u64
+                    }
+                };
                 let ch = self.channels;
                 let rate = f64::from(self.rate);
                 let frames = (scratch.len() / ch) as u64;
-                let chunk_start = self.pos - frames;
                 let first = (span.start.max(0.0) * rate) as u64;
-                if self.pos <= first {
+                if chunk_start + frames <= first {
+                    if sink(Feed::Skipped) == Take::Stop {
+                        break 'spans;
+                    }
                     continue;
                 }
                 let left = need.get_or_insert((span.len.max(0.0) * rate) as u64);
                 let skip = first.saturating_sub(chunk_start) as usize;
                 let take = ((frames as usize - skip) as u64).min(*left) as usize;
+                let rest = skip + take;
+                if (rest as u64) < frames {
+                    carry = Some((chunk_start + rest as u64, scratch[rest * ch..].to_vec()));
+                }
                 if take > 0 {
                     *left -= take as u64;
-                    if sink(i, &scratch[skip * ch..(skip + take) * ch], self.spec()).is_break() {
-                        break;
+                    match sink(Feed::Audio { span: i, pcm: &scratch[skip * ch..rest * ch], spec: self.spec() }) {
+                        Take::More => {}
+                        Take::NextSpan => break,
+                        Take::Stop => break 'spans,
                     }
                 }
                 if *left == 0 {
@@ -407,17 +448,19 @@ mod tests {
     /// Each span starts where it was asked (the container seeks there or
     /// the decode reads past what lies before) and is as long as asked; a
     /// span past the end gives nothing; the plan sees the track's length.
-    fn check_spans(decode: impl FnOnce(&mut dyn FnMut(Option<f64>) -> Vec<Span>, &mut dyn FnMut(usize, &[f32], PcmSpec) -> ControlFlow<()>) -> Result<PcmSpec>, secs: f64, rate: u32, channels: usize) {
+    fn check_spans(decode: impl FnOnce(&mut dyn FnMut(Option<f64>) -> Vec<Span>, &mut dyn FnMut(Feed<'_>) -> Take) -> Result<PcmSpec>, secs: f64, rate: u32, channels: usize) {
         let mut seen_len = None;
         let mut plan = |d: Option<f64>| {
             seen_len = d;
             vec![Span { start: 20.0, len: 3.0 }, Span { start: 70.0, len: 2.0 }, Span { start: secs + 10.0, len: 5.0 }]
         };
         let mut got: Vec<Vec<f32>> = vec![Vec::new(); 3];
-        let mut sink = |w: usize, chunk: &[f32], spec: PcmSpec| {
-            assert_eq!(spec.channels, channels);
-            got[w].extend(chunk.chunks_exact(channels).map(|f| f[0]));
-            ControlFlow::Continue(())
+        let mut sink = |feed: Feed<'_>| {
+            if let Feed::Audio { span, pcm, spec } = feed {
+                assert_eq!(spec.channels, channels);
+                got[span].extend(pcm.chunks_exact(channels).map(|f| f[0]));
+            }
+            Take::More
         };
         let spec = decode(&mut plan, &mut sink).unwrap();
         assert_eq!(spec.sample_rate, rate);
@@ -444,7 +487,78 @@ mod tests {
         check_spans(|plan, sink| decode_bytes_windows(bytes, "wav", "ramp", plan, sink), secs, rate, 2);
     }
 
-    /// A sink that stops a span early moves on to the next one.
+    /// Mono 16-bit samples that count frames (exactly, modulo 30 000;
+    /// positive, so the writer's truncation keeps every step).
+    fn counter(rate: u32, secs: f64) -> Vec<f32> {
+        (0..(f64::from(rate) * secs) as usize).map(|i| ((i % 30_000) as f32 + 0.5) / 32_767.0).collect()
+    }
+
+    fn frame_of(sample: f32) -> i64 {
+        (f64::from(sample) * 32_768.0).round() as i64
+    }
+
+    /// Back-to-back spans (a 45 s track's windows at 0, 15 and 30 s) lose
+    /// no sample where one ends inside a packet: the next starts with the
+    /// packet's tail.
+    #[test]
+    fn back_to_back_spans_lose_no_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("count.wav");
+        // 27 000 frames: the counter never wraps.
+        let rate = 600;
+        write_wav(&wav, &counter(rate, 45.0), rate, 1);
+        let mut plan = |_: Option<f64>| (0..3).map(|i| Span { start: 15.0 * f64::from(i), len: 15.0 }).collect();
+        let mut got: Vec<Vec<f32>> = vec![Vec::new(); 3];
+        let mut sink = |feed: Feed<'_>| {
+            if let Feed::Audio { span, pcm, .. } = feed {
+                got[span].extend_from_slice(pcm);
+            }
+            Take::More
+        };
+        decode_file_windows(&wav, &mut plan, &mut sink).unwrap();
+        for g in &got {
+            assert_eq!(g.len(), 15 * rate as usize);
+        }
+        let all: Vec<i64> = got.concat().into_iter().map(frame_of).collect();
+        for (i, pair) in all.windows(2).enumerate() {
+            assert_eq!(pair[1] - pair[0], 1, "a gap after frame {i}");
+        }
+    }
+
+    /// Packets read past before a span are told to the sink (its pacing
+    /// and stop run there too), and a stop there ends the decode.
+    #[test]
+    fn reading_past_a_gap_is_paced_and_stoppable() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("count.wav");
+        write_wav(&wav, &counter(8_000, 10.0), 8_000, 1);
+        // Gaps shorter than a seek is worth: read past.
+        let mut plan = |_: Option<f64>| vec![Span { start: 1.0, len: 0.5 }, Span { start: 2.4, len: 0.5 }];
+        let (mut skipped, mut audio) = (0, [0usize; 2]);
+        let mut sink = |feed: Feed<'_>| {
+            match feed {
+                Feed::Skipped => skipped += 1,
+                Feed::Audio { span, pcm, .. } => audio[span] += pcm.len(),
+            }
+            Take::More
+        };
+        decode_file_windows(&wav, &mut plan, &mut sink).unwrap();
+        assert!(skipped >= 2, "{skipped}");
+        assert_eq!(audio, [4_000, 4_000]);
+
+        let mut audio = [0usize; 2];
+        let mut sink = |feed: Feed<'_>| match feed {
+            Feed::Skipped => Take::Stop,
+            Feed::Audio { span, pcm, .. } => {
+                audio[span] += pcm.len();
+                Take::More
+            }
+        };
+        decode_file_windows(&wav, &mut plan, &mut sink).unwrap();
+        assert_eq!(audio, [0, 0], "stopped in the first gap");
+    }
+
+    /// A sink that ends a span early moves on to the next one.
     #[test]
     fn a_stopped_span_leaves_the_next() {
         let dir = tempfile::tempdir().unwrap();
@@ -452,9 +566,10 @@ mod tests {
         write_wav(&wav, &ramp(8_000, 60.0, 1), 8_000, 1);
         let mut counts = [0usize; 2];
         let mut plan = |_: Option<f64>| vec![Span { start: 5.0, len: 10.0 }, Span { start: 30.0, len: 1.0 }];
-        let mut sink = |w: usize, chunk: &[f32], _: PcmSpec| {
-            counts[w] += chunk.len();
-            if w == 0 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        let mut sink = |feed: Feed<'_>| {
+            let Feed::Audio { span, pcm, .. } = feed else { return Take::More };
+            counts[span] += pcm.len();
+            if span == 0 { Take::NextSpan } else { Take::More }
         };
         decode_file_windows(&wav, &mut plan, &mut sink).unwrap();
         assert!(counts[0] > 0 && counts[0] < 80_000);
