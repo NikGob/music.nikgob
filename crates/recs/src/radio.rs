@@ -68,6 +68,14 @@
 //! keeps to the profiles the trajectory had. A trajectory of one track is
 //! that track's radio.
 //!
+//! A list's radio («Радио по альбому», «Радио по плейлисту»,
+//! [`RadioSeed::Tracks`]) goes the same way from the start: its tracks
+//! ([`BLEND_MAX`] of them at most, spread over the list) are its
+//! trajectory, so it blends their sounds and what the graph links to
+//! several of them; their artists make its scene, one artist among the
+//! rest, and the diversity rules hold as in any radio. It keeps to the
+//! profile most of the list is of, or to the list's profiles.
+//!
 //! Every radio the runtime plays ranks by the user model once it has one:
 //! a track's radio and autoplay pick by it alone; an artist's, a service's
 //! song's, a mood's, a style's and the daylist's gather their candidates
@@ -210,6 +218,8 @@ const TRAJECTORY_DRIFT: f32 = 0.6;
 /// A track the graph links to more than one track of the trajectory gains
 /// this much of its link for each more.
 const TRAJECTORY_MEET: f32 = 0.5;
+/// A list's radio blends this many of its tracks at most.
+pub const BLEND_MAX: usize = 24;
 /// What played to the end many times in the last days scores this much
 /// less in a stream, worn through ([`crate::Taste::saturation_at`]).
 const COOL: f32 = 0.4;
@@ -241,6 +251,9 @@ pub enum RadioSeed {
     },
     /// An artist's radio («Миксы исполнителей», «Радио» on the artist page).
     Artist(ArtistId),
+    /// A list's radio («Радио по альбому», «Радио по плейлисту»): catalog
+    /// tracks of the list ([`RadioState::of_list`] takes a sample).
+    Tracks(Vec<TrackId>),
     /// A mood card.
     Mood(Mood),
     /// A style mix («Твои миксы»): see [`crate::style::StyleMix::seed`].
@@ -382,6 +395,35 @@ pub struct SeedFacts {
     pub lane: Option<SongLane>,
 }
 
+/// The taste profile more than half of a list's tracks the model knows
+/// are of.
+fn list_profile(model: &UserModel, tracks: &[TrackId]) -> Option<usize> {
+    let mut count: HashMap<usize, usize> = HashMap::new();
+    let mut known = 0usize;
+    for i in tracks.iter().filter_map(|t| model.position(*t)) {
+        known += 1;
+        if let Some(j) = model.profile_at(i) {
+            *count.entry(j).or_default() += 1;
+        }
+    }
+    count.into_iter().find(|(_, c)| 2 * c > known).map(|(j, _)| j)
+}
+
+/// Up to `max` of `items` (each once), spread evenly over them in their
+/// order.
+fn spread<T: PartialEq + Copy>(items: &[T], max: usize) -> Vec<T> {
+    let mut once: Vec<T> = Vec::with_capacity(items.len().min(4 * max));
+    for x in items {
+        if !once.contains(x) {
+            once.push(*x);
+        }
+    }
+    if once.len() <= max {
+        return once;
+    }
+    (0..max).map(|k| once[k * once.len() / max]).collect()
+}
+
 fn push_capped<T: PartialEq>(v: &mut Vec<T>, x: T, cap: usize) {
     v.retain(|y| *y != x);
     v.push(x);
@@ -427,9 +469,21 @@ impl RadioState {
             RadioSeed::Stream { id, .. } => {
                 s.served.push_back(Item::Stream(id.clone()));
             }
+            // A list: up to [`BLEND_MAX`] of its tracks (each once), spread
+            // evenly over it, are its trajectory from the start.
+            RadioSeed::Tracks(tracks) => {
+                let sample = spread(tracks, BLEND_MAX);
+                s.trajectory = Some(sample.clone());
+                s.seed = RadioSeed::Tracks(sample);
+            }
             _ => {}
         }
         s
+    }
+
+    /// A list's radio ([`RadioSeed::Tracks`]).
+    pub fn of_list(tracks: &[TrackId]) -> Self {
+        Self::new(RadioSeed::Tracks(tracks.to_vec()))
     }
 
     /// The listening session to continue and the weights learnt since the
@@ -490,7 +544,7 @@ impl RadioState {
     /// The knobs hold for a radio of a track or an artist: a mix, a
     /// service's song and «Новое для тебя» go by their own share.
     fn knobs_hold(&self) -> bool {
-        matches!(self.seed, RadioSeed::Track(_) | RadioSeed::Artist(_))
+        matches!(self.seed, RadioSeed::Track(_) | RadioSeed::Artist(_) | RadioSeed::Tracks(_))
     }
 
     /// The share of blind new music allowed, when limited.
@@ -861,6 +915,10 @@ impl RadioState {
                 }
                 (w_total > 0.0).then(|| sum.map(|s| s / w_total))
             }
+            RadioSeed::Tracks(tracks) => {
+                let vs: Vec<Vector> = tracks.iter().filter_map(|t| recs.embedded(*t)).collect();
+                (!vs.is_empty()).then(|| std::array::from_fn(|k| vs.iter().map(|v| v[k]).sum::<f32>() / vs.len() as f32))
+            }
             RadioSeed::Style { centroid, .. } => <[f32; DIM]>::try_from(centroid.as_slice()).ok(),
             RadioSeed::Daylist { centre, .. } => recs.daylist_point(Axes::from_array(*centre)),
             RadioSeed::Mood(_) | RadioSeed::Discover | RadioSeed::Wave(_) => None,
@@ -877,6 +935,16 @@ impl RadioState {
                 .unwrap_or_default(),
             RadioSeed::Stream { artists, .. } => artists.clone(),
             RadioSeed::Artist(a) => vec![*a],
+            // Every artist of the list, once.
+            RadioSeed::Tracks(tracks) => {
+                let mut out: Vec<ArtistId> = Vec::new();
+                for a in tracks.iter().filter_map(|t| recs.catalog.get(*t)).flat_map(|t| t.artists.iter()) {
+                    if !out.contains(a) {
+                        out.push(*a);
+                    }
+                }
+                out
+            }
             _ => Vec::new(),
         }
     }
@@ -919,7 +987,7 @@ impl RadioState {
         // its session: in the background new music comes late and seldom,
         // focused more of it.
         let plan = match (&self.seed, recs.model) {
-            (RadioSeed::Track(_), Some(m)) => Some(self.plan(m)),
+            (RadioSeed::Track(_) | RadioSeed::Tracks(_), Some(m)) => Some(self.plan(m)),
             _ => None,
         };
         let share = match &plan {
@@ -1128,6 +1196,11 @@ impl RadioState {
         let recent: HashSet<&Item> = self.recent.iter().collect();
         let seed = match &self.seed {
             RadioSeed::Track(t) => Some(*t),
+            // A list with one track the model knows: that track's radio.
+            RadioSeed::Tracks(tracks) => {
+                let mut known = tracks.iter().copied().filter(|t| model.position(*t).is_some());
+                known.next().filter(|_| known.next().is_none())
+            }
             _ => None,
         };
         // What the session played, and what played lately, rest while
@@ -1480,6 +1553,12 @@ impl RadioState {
                 }
             }
             count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(j, _)| j)
+        });
+        // A list: the profile most of it is of (more than half), else none
+        // (it keeps to the list's profiles).
+        let own = own.or_else(|| {
+            let RadioSeed::Tracks(tracks) = &self.seed else { return None };
+            list_profile(model, tracks)
         });
         // The session's profile only if the seed is of it: a seed of
         // another kind (picked after a mix) is followed by its own.
@@ -3046,6 +3125,46 @@ pub(crate) mod tests {
         assert!(alone.iter().filter(|t| kind_of(**t) == ROCK.0).count() >= 8, "{alone:?}");
         let (_, traj) = autoplay(false, Some(2));
         assert_eq!(traj, 5, "a track skipped at 60% is out of the trajectory");
+    }
+
+    /// A list's radio («Радио по альбому», «Радио по плейлисту») blends its
+    /// tracks from the start: a list of Japanese pop and rock brings both
+    /// and nothing it never had, without its own tracks over and over; a
+    /// list of one kind keeps to it; a long list is spread to
+    /// [`BLEND_MAX`] tracks; a list of one track is that track's radio.
+    #[test]
+    fn a_list_radio_blends_its_tracks() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx, input, types) = listener(true);
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+        let play = |list: &[u128]| -> Vec<u128> {
+            let ids: Vec<TrackId> = list.iter().map(|t| tid(*t)).collect();
+            let mut radio = RadioState::of_list(&ids);
+            let picks = radio.extend(&recs, 12, &RadioParams { new_share: 0.0, seed: 5 });
+            picks
+                .iter()
+                .filter_map(|p| match p.item {
+                    Item::Track(t) => Some(t.0.as_u128()),
+                    Item::Stream(_) => None,
+                })
+                .collect()
+        };
+        let both = play(&[JPOP.0 + 1, JPOP.0 + 13, JPOP.0 + 25, ROCK.0 + 2, ROCK.0 + 14, ROCK.0 + 26]);
+        let kinds: Vec<u128> = both.iter().map(|t| kind_of(*t)).collect();
+        assert!(kinds.len() >= 10, "{both:?}");
+        assert!(kinds.iter().all(|k| *k == JPOP.0 || *k == ROCK.0), "{kinds:?}");
+        assert!(kinds.contains(&JPOP.0) && kinds.contains(&ROCK.0), "{kinds:?}");
+        let rock = play(&[ROCK.0 + 2, ROCK.0 + 14, ROCK.0 + 26]);
+        assert!(rock.iter().all(|t| kind_of(*t) == ROCK.0), "{rock:?}");
+        let one = play(&[ROCK.0 + 2]);
+        assert!(!one.is_empty() && !one.contains(&(ROCK.0 + 2)), "{one:?}");
+        let long: Vec<TrackId> = (0..100).map(|k| tid(JPOP.0 + k % 40)).collect();
+        let RadioSeed::Tracks(sample) = RadioState::of_list(&long).seed else { panic!() };
+        assert_eq!(sample.len(), BLEND_MAX);
+        assert_eq!(sample[0], tid(JPOP.0));
+        assert!(sample.windows(2).all(|w| w[0] != w[1]));
     }
 
     const JP: (u128, u128, f32) = (2_000, 150, 10.0);

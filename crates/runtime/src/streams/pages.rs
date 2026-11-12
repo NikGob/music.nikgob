@@ -46,6 +46,8 @@ pub(crate) enum Then {
     Enqueue,
     /// Into a library playlist ([`Command::AddStreamAlbumToPlaylist`]).
     AddToPlaylist(v::PlaylistId),
+    /// «Радио по альбому» / «Радио по плейлисту» of it.
+    Radio,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -534,6 +536,12 @@ impl Worker {
         self.rebuild_sections();
     }
 
+    /// «Радио по альбому» (`album`) or «Радио по плейлисту» of a service's
+    /// list: once its tracks are here.
+    pub(crate) fn stream_list_radio(&mut self, id: RemoteId, album: bool) {
+        self.with_page((if album { Kind::Album } else { Kind::Playlist }, id), Then::Radio);
+    }
+
     pub(crate) fn with_album(&mut self, id: RemoteId, then: Then) {
         self.with_page((Kind::Album, id), then);
     }
@@ -613,6 +621,11 @@ impl Worker {
                 if !ids.is_empty() {
                     self.command(Command::AddToPlaylist(pid, ids));
                 }
+            }
+            Then::Radio => {
+                let ids = self.upsert_streams(&playable);
+                let of = if album.is_some() { "альбому" } else { "плейлисту" };
+                self.start_list_radio(&ids, &playable, of, &name);
             }
             Then::Play { start, shuffle } => {
                 let ids = self.upsert_streams(&playable);

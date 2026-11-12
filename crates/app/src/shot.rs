@@ -32,7 +32,8 @@
 //! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
 //! (the first mood or style mix, the bento's daylist, its first tile;
 //! `play_mix:tile:artist_of_day` the tile of that kind); `radio` starts «Радио по треку» from the first
-//! library track (`radio:artist` the first artist's radio).
+//! library track (`radio:artist` the first artist's radio, `radio:album` the first
+//! album's, `radio:playlist` the first playlist's).
 //! `libfilter:text` types into the library's filter, `liblist:1` shows it
 //! as a list, `sort:artist|title|year|added` sorts its albums.
 //! `reopen` closes the window and opens a new one, as the tray does.
@@ -750,6 +751,8 @@ impl Shot {
             "radio" => {
                 let seed = match arg {
                     "artist" => state.library.artists.first().map(|a| nikgob_view::RadioSeed::Artist(a.id)),
+                    "album" => state.library.releases.first().map(|r| nikgob_view::RadioSeed::Album(r.id)),
+                    "playlist" => state.library.playlists.iter().find(|p| !p.pinned).map(|p| nikgob_view::RadioSeed::Playlist(p.id)),
                     _ => (state.library.tracks.first())
                         .or(state.home.mix.first())
                         .map(|t| nikgob_view::RadioSeed::Track(t.id)),

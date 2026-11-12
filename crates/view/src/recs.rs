@@ -314,12 +314,17 @@ pub struct MixCard {
 
 /// What a radio grows from ([`crate::Command::StartRadio`]): «Радио по
 /// треку» from a library track or a service's track, «Радио» on an artist
-/// page.
+/// page; «Радио по альбому» and «Радио по плейлисту» from a list of the
+/// library or of a service.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RadioSeed {
     Track(TrackId),
     Stream(RemoteId),
     Artist(ArtistId),
+    Album(crate::ReleaseId),
+    Playlist(crate::PlaylistId),
+    StreamAlbum(RemoteId),
+    StreamPlaylist(RemoteId),
 }
 
 /// What «Не рекомендовать» is about ([`crate::Command::RecFeedback`]).
