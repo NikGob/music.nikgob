@@ -248,6 +248,10 @@ fn run(inbox: &Receiver<ToBuilder>, out: &Sender<Done>, mut res: Resolver) {
         if out.send(done).is_err() {
             return;
         }
+        // No build waits: what this one left goes back.
+        if inbox.is_empty() {
+            crate::release_thread_memory();
+        }
     }
 }
 

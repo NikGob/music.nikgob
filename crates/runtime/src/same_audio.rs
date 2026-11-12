@@ -378,7 +378,10 @@ impl Shared {
             self.wake.lock().kicked = false;
             let heard = self.pass(&mut skip, &mut pacer);
             let compared = !self.stopped() && self.link_pass(&mut pacer);
-            if !heard && !compared {
+            if heard || compared {
+                // A pass's decoding and prints: what it left goes back.
+                crate::release_thread_memory();
+            } else {
                 self.pause(self.idle);
             }
         }

@@ -187,7 +187,7 @@ impl StreamAnalysis {
 fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal>, off: Arc<AtomicBool>) {
     lower_priority();
     let mut pacer = Pacer::heavy(&off, "stream analysis");
-    for job in jobs {
+    for job in &jobs {
         // While a game runs the job waits; switched off, it stops at once.
         pacer.begin();
         let started = Instant::now();
@@ -205,6 +205,10 @@ fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal
         };
         if tx.send(Internal::Stream(Msg::Analysed(done))).is_err() {
             break;
+        }
+        // No stream waits: what the decoding and the analysis left goes back.
+        if jobs.is_empty() {
+            crate::release_thread_memory();
         }
         pacer.rest();
     }

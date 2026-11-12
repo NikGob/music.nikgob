@@ -97,6 +97,10 @@ fn run(inbox: &Receiver<Job>, later: &Sender<Later>, mut res: Resolver) {
         if later.send(Later::new("the library's pages", move |w| w.library_loaded(loaded))).is_err() {
             return;
         }
+        // No read waits: what this one left goes back.
+        if inbox.is_empty() {
+            crate::release_thread_memory();
+        }
     }
 }
 

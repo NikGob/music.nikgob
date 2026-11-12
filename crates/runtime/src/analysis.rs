@@ -440,7 +440,11 @@ impl Shared {
                 }
                 Err(e) => log::warn!("analysis: reading the queue: {e}"),
             }
-            parking_lot::MutexGuard::unlocked(&mut q, || self.report(true));
+            parking_lot::MutexGuard::unlocked(&mut q, || {
+                self.report(true);
+                // Nothing to do: what the last tracks left goes back.
+                crate::release_thread_memory();
+            });
             // (The model's idle session goes by its own watch: nothing here
             // waits for it while holding the queue.)
             if !q.kicked && !self.stopped() {
@@ -589,12 +593,20 @@ impl Shared {
         self.report(true);
         self.pause(start);
         let mut pacer = Pacer::heavy(&self.stop, "sound analysis");
+        let mut since_release = 0;
         while let Some((todo, kind)) = self.next() {
             if !pacer.begin() {
                 self.done(todo.track_id, false);
                 break;
             }
             self.work(todo, kind, &mut pacer);
+            // A batch's worth of decoding and bliss's threads: this
+            // thread's heap gives back what they left.
+            since_release += 1;
+            if since_release >= BATCH {
+                since_release = 0;
+                crate::release_thread_memory();
+            }
             pacer.rest();
         }
         if let Some(e) = &self.effnet {
