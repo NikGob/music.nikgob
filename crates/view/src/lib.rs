@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 mod credit;
 pub mod dev;
+pub mod first_run;
 mod player_prefs;
 mod prefs_edit;
 pub mod presets;
@@ -1862,6 +1863,11 @@ pub struct Prefs {
     /// Главная asks for the name once: set on the first start (no prefs
     /// file before), gone with «Готово» or «Пропустить».
     pub name_prompt: bool,
+    /// The first run is still to be shown ([`first_run`]): set on the
+    /// first start (no prefs file before), gone when it is finished or
+    /// closed; a prefs file from before it reads false, so an upgrade never
+    /// sees it. Настройки → «Для разработчика» shows it again.
+    pub first_run: bool,
     /// The worlds taken off the card's row («Убрать из ряда»), by key.
     pub home_hidden_worlds: Vec<String>,
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
@@ -2451,6 +2457,8 @@ pub enum PrefPatch {
     UserName(String),
     /// Главная's question of the name: `false` («Пропустить») asks no more.
     NamePrompt(bool),
+    /// The first run is shown (`true`: «Показать первый запуск») or gone.
+    FirstRun(bool),
     /// The share of new music of one kind of radio (the source buttons
     /// above the queue).
     RadioNewShareBy(RadioKind, RadioNewShare),
@@ -2534,6 +2542,7 @@ impl PrefPatch {
                 p.name_prompt = false;
             }
             Self::NamePrompt(on) => p.name_prompt = *on,
+            Self::FirstRun(on) => p.first_run = *on,
             Self::RadioNewShareBy(kind, share) => {
                 p.radio_new_share_by.insert(*kind, *share);
             }
@@ -3758,6 +3767,7 @@ impl Default for Prefs {
             home_card: true,
             user_name: String::new(),
             name_prompt: false,
+            first_run: false,
             home_hidden_worlds: Vec::new(),
             home_hidden_mixes: Vec::new(),
             stream_analysis: true,
@@ -3873,6 +3883,7 @@ impl Prefs {
             stream_cache_mb: 700,
             mixes_with_new: true,
             name_prompt: true,
+            first_run: true,
             ..Self::default()
         }
     }
