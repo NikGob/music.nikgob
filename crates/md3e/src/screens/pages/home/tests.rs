@@ -465,3 +465,25 @@ fn a_shortcut_is_new_only_when_its_picture_or_name_is() {
     assert_eq!(shortcut_pictures(&artist("Lida", Some(cover("C:/a/lida.jpg", None, None)), None)).len(), 1);
     assert!(shortcut_pictures(&artist("Lida", None, None)).is_empty());
 }
+
+/// A tile of the day plays while the queue started from it plays (the
+/// queue names it); a mix card plays while its wave or its list does,
+/// whatever its click does.
+#[test]
+fn a_playing_tile_and_mix_are_told() {
+    let mut st = ViewState::default();
+    let tile = MixCard { id: MixId::Daylist, title: "Утро".into(), kicker: String::new(), subtitle: String::new(), covers: Vec::new() };
+    assert!(!tile_playing(&st, &tile));
+    st.player.status = Status::Playing;
+    st.player.context = Some("микса «Утро»".into());
+    assert!(tile_playing(&st, &tile));
+    st.player.context = Some("микса «Утро 2»".into());
+    assert!(!tile_playing(&st, &tile));
+    st.player.context = Some("микса «Утро»".into());
+    st.player.status = Status::Paused;
+    assert!(!tile_playing(&st, &tile), "paused: at rest");
+    let l = lane("Всё вперемешку");
+    st.player.status = Status::Playing;
+    st.player.context = Some(l.context());
+    assert!(lane_playing(&st, &l), "started from its page, it plays though its click starts a wave");
+}

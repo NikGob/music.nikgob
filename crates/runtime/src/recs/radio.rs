@@ -352,7 +352,7 @@ fn origin_of(state: &Engine, autoplay: bool) -> EventOrigin {
 }
 
 /// The queue's context line: «Играет из радио «Кино»» / «… микса «Спокойное»».
-fn context_of(title: &str) -> String {
+pub(super) fn context_of(title: &str) -> String {
     match title.strip_prefix("Радио · ") {
         Some(rest) => format!("радио «{rest}»"),
         None => format!("микса «{title}»"),

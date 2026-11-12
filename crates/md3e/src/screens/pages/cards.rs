@@ -122,11 +122,18 @@ fn line_w(ui: &Ui, s: &str, role: TypeStyle) -> f32 {
 }
 
 /// `rect` with its edges on whole pixels, so a card and the cover flush
-/// with its edge start on the same pixel in every column of the grid.
+/// with its edge start on the same pixel in every column of the grid. Its
+/// size is rounded on its own: rounding both edges made a card a pixel
+/// wider or narrower as a row scrolled (its cover and its text's wrap
+/// shook).
 pub fn on_pixels(ui: &Ui, rect: Rect) -> Rect {
-    let ppp = ui.ctx().pixels_per_point().max(0.01);
+    pixel_rect(rect, ui.ctx().pixels_per_point())
+}
+
+fn pixel_rect(rect: Rect, ppp: f32) -> Rect {
+    let ppp = ppp.max(0.01);
     let f = |v: f32| (v * ppp).round() / ppp;
-    Rect::from_min_max(pos2(f(rect.min.x), f(rect.min.y)), pos2(f(rect.max.x), f(rect.max.y)))
+    Rect::from_min_size(pos2(f(rect.min.x), f(rect.min.y)), vec2(f(rect.width()), f(rect.height())))
 }
 
 /// A cover in `rect` cut to the outline a container of `radii` has there
@@ -456,20 +463,9 @@ pub fn mix(
         .unwrap_or(&l.title);
     let mut play = false;
     let mut more: Option<Response> = None;
-    // While the mix plays its outline turns slowly, as the player's cover
-    // does (the picture stays upright), and comes to rest when it stops.
-    let turning = playing && status == Status::Playing && !theme.reduced_motion;
-    let run = anim::fraction(ui.ctx(), id.with("spin-run"), f32::from(u8::from(turning)), theme.motion.default_effects);
-    let now = anim::now(ui.ctx());
-    let spin = ui.ctx().data_mut(|d| {
-        let (t, a) = d.get_temp::<(f64, f32)>(id.with("spin")).unwrap_or((now, 0.0));
-        let a = (a + run * ((now - t) as f32).min(0.1) * std::f32::consts::TAU / 24.0) % std::f32::consts::TAU;
-        d.insert_temp(id.with("spin"), (now, a));
-        a
-    });
-    if run > 0.001 {
-        ui.ctx().request_repaint();
-    }
+    // While the mix plays its outline turns, as the player's cover does
+    // (the picture stays upright), and comes to rest when it stops.
+    let spin = turn_while(ui.ctx(), id, playing && status == Status::Playing);
     scaled(ui, art.center(), squish, |ui| {
         paint::container(ui.painter(), art, Radii::all(r), tile, egui::Stroke::NONE);
         let inner = Rect::from_center_size(art.center(), art.size() * 0.82 * zoom);
@@ -525,6 +521,40 @@ pub fn mix(
         }
     }
     nav
+}
+
+/// One turn of a playing mix's outline takes this long.
+pub const MIX_TURN_S: f32 = 14.0;
+
+/// The angle of the outline of the card `id` that turns while `turning`
+/// (its mix plays): it speeds up and slows down on the effects spring and
+/// stays where it stopped; still with less motion.
+pub fn turn_while(ctx: &egui::Context, id: Id, turning: bool) -> f32 {
+    let theme = Theme::get(ctx);
+    let on = turning && !theme.reduced_motion;
+    let run = anim::fraction(ctx, id.with("spin-run"), f32::from(u8::from(on)), theme.motion.default_effects);
+    let now = anim::now(ctx);
+    let spin = ctx.data_mut(|d| {
+        let (t, a) = d.get_temp::<(f64, f32)>(id.with("spin")).unwrap_or((now, 0.0));
+        let a = (a + run.max(0.0) * ((now - t) as f32).clamp(0.0, 0.1) * std::f32::consts::TAU / MIX_TURN_S) % std::f32::consts::TAU;
+        d.insert_temp(id.with("spin"), (now, a));
+        a
+    });
+    if run > 0.001 {
+        ctx.request_repaint();
+    }
+    spin
+}
+
+/// How much bigger the heart of «Любимые» is at `t` seconds of the song: a
+/// calm heartbeat (66 a minute), a beat and a softer one after it, 0 at
+/// rest between them.
+pub fn heartbeat(t: f32) -> f32 {
+    const PERIOD: f32 = 60.0 / 66.0;
+    const WIDTH: f32 = 0.2;
+    let bump = |x: f32| if (0.0..WIDTH).contains(&x) { (std::f32::consts::PI * x / WIDTH).sin().powi(2) } else { 0.0 };
+    let x = t.rem_euclid(PERIOD);
+    bump(x) + 0.55 * bump(x - 0.24)
 }
 
 /// «Моя волна» in «Миксы для тебя», right after «Любимые» (recs §2.1): its
@@ -625,10 +655,30 @@ fn mix_look(l: &LaneCard, s: &crate::ColorScheme) -> (nikgob_shapes::MaterialSha
 /// a heart on a container of the scheme, its name and its length under it.
 /// A click opens the playlist, ▶ plays it; under the pointer ⋮ at the top
 /// grows in as on a mix (the playlist's own actions, the right click too);
-/// while it plays the name is primary and ⏸ stays in its square.
-pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, playing: bool, status: Status, out: &mut Vec<Command>) -> Option<Route> {
-    let s = Theme::get(ui.ctx()).scheme;
+/// while it plays the name is primary, ⏸ stays in its square and the heart
+/// beats softly with the song (`song_s`: where the song is, so it rests on
+/// a pause and goes on with it), the beat fading in and out.
+#[allow(clippy::too_many_arguments)]
+pub fn liked_playlist(
+    ui: &mut Ui,
+    cell: Rect,
+    p: &PlaylistCard,
+    playing: bool,
+    status: Status,
+    song_s: f32,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
     let id = ui.id().with("home-liked-playlist");
+    let beating = playing && status == Status::Playing && !theme.reduced_motion;
+    let beat_k = anim::fraction(ui.ctx(), id.with("beat"), f32::from(u8::from(beating)), theme.motion.default_effects).clamp(0.0, 1.0);
+    let beat = if beat_k > 0.001 {
+        ui.ctx().request_repaint();
+        beat_k * heartbeat(song_s)
+    } else {
+        0.0
+    };
     let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -640,7 +690,10 @@ pub fn liked_playlist(ui: &mut Ui, cell: Rect, p: &PlaylistCard, playing: bool, 
     let play = scaled(ui, art.center(), squish, |ui| {
         paint::container(ui.painter(), art, Radii::all(r), s.primary_container, egui::Stroke::NONE);
         let size = (art.width() * 0.4).clamp(24.0, 96.0);
-        Icon::Favorite.widget(true, s.on_primary_container, size).paint_at(ui, Rect::from_center_size(art.center(), vec2(size, size)));
+        let heart = Rect::from_center_size(art.center(), vec2(size, size));
+        // The icon is drawn at its size and scaled, so it stays crisp at
+        // rest and its raster is not made again on every beat.
+        scaled(ui, art.center(), 1.0 + 0.08 * beat, |ui| Icon::Favorite.widget(true, s.on_primary_container, size).paint_at(ui, heart));
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
@@ -869,8 +922,9 @@ pub fn song_row(
 /// cover flush with the edge (an artist: a circle 88 inset 12), the kicker,
 /// the title in up to two lines and the length. A click plays; ▶ 40 grows
 /// in over the cover, ⋮ at the top right; ⋮ and the right click:
-/// [`of_day_rows`].
-pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usize, out: &mut Vec<Command>) {
+/// [`of_day_rows`]. While it plays (`playing`) its title is primary and
+/// the equalizer moves at its right, as on a shortcut.
+pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usize, playing: bool, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with(("home-of-day", i));
     let cell = on_pixels(ui, cell);
@@ -892,18 +946,24 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
         }
         paint::state_layer(ui.painter(), cell, Radii::all(r), s.on_surface, layer);
         let left = cover.right() + 16.0;
-        let w = (cell.right() - 16.0 - left).max(10.0);
+        let trail = if playing { 48.0 } else { 16.0 };
+        let w = (cell.right() - trail - left).max(10.0);
+        let title_c = if playing { s.primary } else { s.on_surface };
         let k = text(ui, &m.kicker, TypeRole::LabelMedium.style(), s.on_surface_variant, w, 1);
-        let t = text(ui, &m.title, TypeRole::TitleMedium.style(), s.on_surface, w, 2);
+        let t = text(ui, &m.title, TypeRole::TitleMedium.style(), title_c, w, 2);
         let d = text(ui, &m.subtitle, TypeRole::BodyMedium.style(), s.on_surface_variant, w, 1);
         let h = k.size().y + 4.0 + t.size().y + d.size().y;
         let mut y = cell.center().y - h / 2.0;
         let (kh, tth) = (k.size().y, t.size().y);
         ui.painter().galley(pos2(left, y), k, s.on_surface_variant);
         y += kh + 4.0;
-        ui.painter().galley(pos2(left, y), t, s.on_surface);
+        ui.painter().galley(pos2(left, y), t, title_c);
         y += tth;
         ui.painter().galley(pos2(left, y), d, s.on_surface_variant);
+        if playing {
+            let slot = Rect::from_center_size(pos2(cell.right() - 16.0 - 16.0, cell.center().y), vec2(32.0, 32.0));
+            crate::components::Equalizer::new(id.with("eq"), s.primary).size(20.0).playing(true).paint_at(ui, slot);
+        }
         let slot = Rect::from_center_size(cover.center(), vec2(40.0, 40.0));
         let clicked = grow_button(ui, id.with("play"), hover, slot, play_button(false, Size::S, &format!("Слушать «{}»", m.title), id.with("play-btn")))
             .is_some_and(|r| r.clicked());
@@ -1025,6 +1085,38 @@ pub fn shuffle<T>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The heart beats twice a period (the second softer), rests between
+    /// the beats, and never shrinks.
+    #[test]
+    fn the_heart_beats_and_rests() {
+        let period = 60.0 / 66.0;
+        let samples: Vec<f32> = (0..1000).map(|k| heartbeat(k as f32 * period / 1000.0)).collect();
+        assert!(samples.iter().all(|v| (0.0..=1.0).contains(v)), "between 0 and 1");
+        assert!(samples.iter().cloned().fold(0.0, f32::max) > 0.95, "a full beat");
+        let rest = samples.iter().filter(|v| **v < 1e-6).count();
+        assert!(rest > 400, "it rests most of the period: {rest}");
+        assert_eq!(heartbeat(0.0), heartbeat(period * 3.0), "the same every period");
+        let second = heartbeat(0.24 + 0.1);
+        assert!(second > 0.3 && second < 0.7, "a softer second beat: {second}");
+    }
+
+    /// A card sliding along a row by fractions of a pixel keeps its size on
+    /// whole pixels; only where it starts moves.
+    #[test]
+    fn a_sliding_card_keeps_its_size() {
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let mut sizes = Vec::new();
+            for k in 0..40 {
+                let x = 100.0 + k as f32 * 0.137;
+                let r = pixel_rect(Rect::from_min_size(pos2(x, 50.3), vec2(199.11, 260.6)), ppp);
+                sizes.push((r.width(), r.height()));
+                assert!(((r.min.x * ppp) - (r.min.x * ppp).round()).abs() < 1e-3);
+            }
+            sizes.dedup();
+            assert_eq!(sizes.len(), 1, "at {ppp}: {sizes:?}");
+        }
+    }
 
     /// «Карточки в „Миксах для тебя“»: by default a card starts its wave;
     /// what played and a world's mix never do (they open their list).
