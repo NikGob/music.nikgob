@@ -1850,6 +1850,7 @@ People pleasing planet"));
             active_kind: Some(nikgob_core::model::SourceKind::Youtube),
             has_local: false,
             liked: false,
+            in_library: false,
             credit: Default::default(),
             youtube_id: Some("34Na4j8AVgA".into()),
             check: None,
