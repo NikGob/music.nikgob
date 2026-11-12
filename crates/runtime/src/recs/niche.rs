@@ -16,7 +16,8 @@
 //!   [`crate::StreamSchedule::discover_gap`] apart, never while a search
 //!   is typed or answered, while the window is idle, while a game is in
 //!   front or while the discovery's pass waits for an answer. A rate limit
-//!   waits its pause. Nothing is downloaded.
+//!   waits its pause. Only while the mixes play new music («С новым» and
+//!   a share of new music above none). Nothing is downloaded.
 //! * **Kept**: each niche's songs (new indeed, no junk, [`KEEP`] at most)
 //!   with the seeds whose lists held them, in the library's cache
 //!   ([`cached`]) for [`TTL_MS`]; the mixes filter them by the niche's
@@ -167,7 +168,12 @@ impl Worker {
     /// Every tick: the next niche to top up when none is under way, its
     /// next request when it is time.
     pub(crate) fn niche_tick(&mut self) {
-        if crate::quiet::busy() || self.state.read().prefs.mixes_downloaded_only {
+        // Only while the mixes play new music at all.
+        let wanted = {
+            let p = &self.state.read().prefs;
+            p.mixes_with_new && super::new_share(p, v::RadioKind::Mix) > 0.0
+        };
+        if crate::quiet::busy() || !wanted {
             return;
         }
         let (day, _) = local_day();

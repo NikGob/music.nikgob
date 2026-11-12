@@ -1001,6 +1001,7 @@ fn read_parts(
         &similar.beyond,
         &|t| is_new(&filter, t) && nikgob_recs::junk(t, None).is_none(),
         &|t| model.position(t).map(|i| (model.taste.affinity_at(i).max(0.0) / 3.0).tanh()),
+        &|t| model.position(t).and_then(|i| model.main_artist_at(i)),
     );
     let mut snap = Snapshot {
         graph_new,

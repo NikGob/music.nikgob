@@ -394,9 +394,17 @@ pub(crate) struct GraphFind {
 /// The songs of `beyond` new indeed (`new`: not in the library, not
 /// disliked, no junk), each once (by [`stream_song_key`]), scored by the
 /// weights of their edges to the catalog's tracks, each times how loved
-/// its track is (`love`, 0…1; `None`: not the catalog's); the best
-/// [`GRAPH_FINDS`].
-pub(crate) fn finds(beyond: &[(TrackId, GraphEntry, f32)], new: &dyn Fn(&StreamTrack) -> bool, love: &dyn Fn(TrackId) -> Option<f32>) -> Vec<GraphFind> {
+/// its track is (`love`, 0…1; `None`: not the catalog's), times
+/// [`nikgob_recs::discover::multi_seed`] of the distinct artists of those
+/// tracks (`artist`: a song the radios of two or three independent loved
+/// tracks hold stands far above a lone one, docs/recommendations.md §1.3);
+/// the best [`GRAPH_FINDS`].
+pub(crate) fn finds(
+    beyond: &[(TrackId, GraphEntry, f32)],
+    new: &dyn Fn(&StreamTrack) -> bool,
+    love: &dyn Fn(TrackId) -> Option<f32>,
+    artist: &dyn Fn(TrackId) -> Option<ArtistId>,
+) -> Vec<GraphFind> {
     let mut by_song: HashMap<String, GraphFind> = HashMap::new();
     for (from, e, w) in beyond {
         let Some(id) = e.remote_id.as_ref().filter(|id| !id.is_empty()) else { continue };
@@ -413,6 +421,13 @@ pub(crate) fn finds(beyond: &[(TrackId, GraphEntry, f32)], new: &dyn Fn(&StreamT
         }
     }
     let mut out: Vec<GraphFind> = by_song.into_values().filter(|f| new(&f.track)).collect();
+    for f in &mut out {
+        // Two tracks of one artist are one seed (no artist: each its own).
+        let mut seeds: Vec<Result<ArtistId, TrackId>> = f.near.iter().map(|(t, _)| artist(*t).ok_or(*t)).collect();
+        seeds.sort();
+        seeds.dedup();
+        f.score *= nikgob_recs::discover::multi_seed(seeds.len());
+    }
     out.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.track.id.id.cmp(&b.track.id.id)));
     out.truncate(GRAPH_FINDS);
     out
@@ -1111,10 +1126,14 @@ mod tests {
                 None
             }
         };
-        let found = finds(&r.beyond, &|s: &StreamTrack| s.title != "Karaoke", &love);
+        let found = finds(&r.beyond, &|s: &StreamTrack| s.title != "Karaoke", &love, &|_| None);
         let titles: Vec<&str> = found.iter().map(|f| f.track.title.as_str()).collect();
         assert_eq!(titles, ["New Song", "Other"], "two radios hold the first");
         assert_eq!(found[0].near.len(), 2);
+        // Two radios of one artist's tracks are one seed: no more than one
+        // radio of a loved track.
+        let one = finds(&r.beyond, &|s: &StreamTrack| s.title != "Karaoke", &love, &|_| Some(ArtistId(Uuid::from_u128(7))));
+        assert!(one[0].score < found[0].score, "{} vs {}", one[0].score, found[0].score);
         assert_eq!(found[0].track.id, RemoteId::new(Service::Youtube, "vid1"));
         assert_eq!(found[0].track.artists[0].name, "New Band");
     }
