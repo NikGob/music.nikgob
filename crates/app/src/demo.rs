@@ -341,6 +341,7 @@ pub(crate) fn seed_with(lib: &Library, root: &Path, files: bool) {
         }
     }
     one_song_of_an_album(lib, root, files);
+    some_songs_of_an_album(lib, root, files);
     history(lib, &all, &Plan::demo());
     // Photos for some artists; the rest are marked as looked up, so the
     // demo never asks a service for them.
@@ -397,6 +398,48 @@ fn one_song_of_an_album(lib: &Library, root: &Path, files: bool) {
     s.bitrate = Some(705);
     s.size_bytes = t.duration_ms.map(demo_file_size);
     let _ = lib.add_source(&s);
+}
+
+/// «Kaikai Kitan / Ao No Waltz»: one song of four with a file and liked,
+/// the other song and both instrumentals only in the tracklist (stream
+/// rows outside the library): an album only some songs of which are the
+/// user's, with other versions of its songs.
+fn some_songs_of_an_album(lib: &Library, root: &Path, files: bool) {
+    let artist = "Eve";
+    let Ok(a) = lib.upsert_artist(&Artist::new(artist)) else { return };
+    let credit = ArtistCredit::single(artist, Some(a.id));
+    let dir = root.join(artist).join("2020 - Kaikai Kitan");
+    let cover = dir.join("cover.jpg");
+    if files {
+        let _ = std::fs::create_dir_all(&dir);
+        make_cover(&cover, [200, 60, 90], 77);
+    }
+    let mut r = Release::new("Kaikai Kitan / Ao No Waltz", credit.clone());
+    r.year = Some(2020);
+    r.cover_ref = Some(cover.display().to_string());
+    r.total_tracks = Some(4);
+    let Ok(r) = lib.upsert_release(&r) else { return };
+    let songs = [("Kaikai Kitan", 221_000), ("Ao No Waltz", 236_000), ("Kaikai Kitan (Instrumental)", 221_000), ("Ao No Waltz (Instrumental)", 236_000)];
+    for (n, (title, ms)) in songs.into_iter().enumerate() {
+        let mut t = Track::new(title, credit.clone());
+        t.release_id = Some(r.id);
+        t.track_no = n as u32 + 1;
+        t.duration_ms = Some(ms);
+        let Ok(t) = lib.upsert_track(&t) else { continue };
+        if n == 0 {
+            let path = dir.join(format!("01 - {title}.wav"));
+            if files {
+                write_tone(&path, 247.0, 24.0);
+            }
+            let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), Codec::Wav);
+            s.bitrate = Some(705);
+            s.size_bytes = Some(demo_file_size(ms));
+            let _ = lib.add_source(&s);
+            let _ = lib.like(nikgob_core::model::LikeTarget::Track(t.id));
+        } else {
+            let _ = lib.add_source(&Source::new(t.id, SourceKind::Youtube, format!("demo-eve-{n}"), Codec::Opus));
+        }
+    }
 }
 
 /// The size of a lossless file `ms` long (about 1000 kbit/s; the demo's

@@ -278,6 +278,13 @@ pub fn visit_whole(ctx: &egui::Context, id: ReleaseId) -> Option<bool> {
     })
 }
 
+/// «Добавить в библиотеку» of an album: the whole album, nothing
+/// downloads.
+pub const ADD_ALBUM: &str = "Добавить в библиотеку";
+/// The album added to the library back to the user's songs of it (they
+/// stay).
+pub const KEEP_MINE: &str = "Оставить только мои треки";
+
 /// The like of an album: into (or out of) «Любимые альбомы».
 pub fn album_like_label(liked: bool) -> &'static str {
     super::like_label(liked)
@@ -297,14 +304,11 @@ pub enum ReleaseAct {
     /// «Слушать весь альбом» of an album only some songs of which are the
     /// user's: once, nothing added.
     PlayWhole,
-    /// «Добавить весь альбом в библиотеку»: nothing downloads.
+    /// «Добавить в библиотеку»: the whole album, nothing downloads.
     AddWhole,
     /// «Оставить только мои треки»: the album added whole goes back to the
-    /// songs chosen one by one (its page).
+    /// songs chosen one by one.
     KeepMine,
-    /// What the album opens on and plays: the whole album (true) or the
-    /// user's songs (its page).
-    OpensWhole(bool),
     /// «Скачать недостающие»: the tracks it lacks to «Хочу скачать» (of an
     /// album only some songs of which are the user's, those songs).
     Download,
@@ -341,7 +345,9 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
     }
     rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
     if partial {
-        rows.push(Row::Item(A::AddWhole, MenuItem::new("Добавить весь альбом в библиотеку").icon(Icon::LibraryMusic)));
+        rows.push(Row::Item(A::AddWhole, MenuItem::new(ADD_ALBUM).icon(Icon::LibraryMusic)));
+    } else if r.whole && !on_page {
+        rows.push(Row::Item(A::KeepMine, MenuItem::new(KEEP_MINE).icon(Icon::LibraryMusic)));
     }
     rows.push(Row::Divider);
     if !r.artists.linked().is_empty() {
@@ -386,10 +392,6 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
         ReleaseAct::PlayWhole => out.push(Command::PlayReleaseWhole { id: r.id, start: None, shuffle: false }),
         ReleaseAct::AddWhole => out.push(Command::AddWholeAlbum { id: r.id, on: true }),
         ReleaseAct::KeepMine => out.push(Command::AddWholeAlbum { id: r.id, on: false }),
-        ReleaseAct::OpensWhole(whole) => {
-            show_whole(ctx, r.id, whole);
-            out.push(Command::AlbumOpensWhole { id: r.id, whole });
-        }
         ReleaseAct::Download => out.push(Command::DownloadRelease(r.id)),
         ReleaseAct::DownloadWhole => out.push(Command::DownloadWholeRelease(r.id)),
         ReleaseAct::Better => out.push(Command::FindBetterAlbum(r.id)),
@@ -1112,6 +1114,9 @@ pub struct TrackListOpts<'a> {
     /// The line other versions of the album's songs start at: a «Другие
     /// версии» header above it.
     pub versions_at: Option<usize>,
+    /// The switch of that header: whether they play with the album
+    /// (`Command::AlbumVersions`).
+    pub versions_on: bool,
     /// A place without a track has no ⬇ (its album is not the user's
     /// whole).
     pub no_hole_download: bool,
@@ -1234,11 +1239,13 @@ pub fn track_list_ext(
         }
         Some(o.response)
     };
+    let mut versions_toggle = None;
     let rects: Vec<Rect> = if discs || versions_at.is_some() {
         let mut rects = Vec::with_capacity(lines.len());
         for j in 0..lines.len() {
             let disc = disc_of(&lines[j]);
-            let head = if versions_at == Some(j) {
+            let versions_head = versions_at == Some(j);
+            let head = if versions_head {
                 Some("Другие версии".to_owned())
             } else if discs && versions_at.is_none_or(|at| j < at) && (j == 0 || disc_of(&lines[j - 1]) != disc) {
                 Some(format!("Диск {disc}"))
@@ -1250,6 +1257,18 @@ pub fn track_list_ext(
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
                     ui.label(TypeRole::TitleSmall.style().rich(head, s.on_surface_variant));
+                    // Whether they play with the album, on its row's right
+                    // (under the ⋮ column of the tracks).
+                    if versions_head && let Some(id) = album {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(16.0);
+                            let mut on = opts.versions_on;
+                            let sw = ui.add(crate::components::Switch::new(&mut on).id_salt(("rel-versions", id)));
+                            if sw.changed() {
+                                versions_toggle = Some((id, on));
+                            }
+                        });
+                    }
                 });
                 ui.add_space(4.0);
             }
@@ -1264,6 +1283,9 @@ pub fn track_list_ext(
             row(ui, j, &mut nav);
         })
     };
+    if let Some((id, on)) = versions_toggle {
+        out.push(Command::AlbumVersions { id, on });
+    }
     if let Some(pl) = opts.playlist.filter(|_| opts.reorder)
         && let Some(i) = dragging.or(dropped)
     {
@@ -2169,6 +2191,7 @@ mod menu_tests {
             liked: false,
             cover: None,
             clip: false,
+            in_library: true,
         }
     }
 
@@ -2206,6 +2229,7 @@ mod menu_tests {
             wrong_file: false,
             dislike: crate::components::MenuItem::new("Не нравится"),
             ban: Some(crate::components::MenuItem::new("Не рекомендовать исполнителя")),
+            library: None,
         }));
         assert_eq!(&stream[..head.len()], head);
         assert_eq!(&stream[head.len()..], [A::Fetch, A::AlbumDownload, A::Dislike, A::Ban]);

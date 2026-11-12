@@ -709,6 +709,24 @@ impl Worker {
         self.toast_open(format!("«{}» в библиотеке", p.name), "Открыть", open(pid));
     }
 
+    /// «В библиотеку» of a song of a service: its track is made, then put
+    /// into the library ([`Command::TrackInLibrary`]: no like, nothing
+    /// downloads).
+    pub(crate) fn stream_in_library(&mut self, remote: &RemoteId, on: bool) {
+        let Some(t) = self.streaming.known.get(remote).cloned() else {
+            self.toast("Трек устарел — найди его заново", None);
+            return;
+        };
+        let Some(id) = self.upsert_streams(std::slice::from_ref(&t)).first().copied() else {
+            return;
+        };
+        self.command(Command::TrackInLibrary { track: id, on });
+        self.refresh_stream_page();
+        // A library track is a library hit now: the sections merge again.
+        self.streaming.search.forget_links();
+        self.rebuild_sections();
+    }
+
     pub(crate) fn like_stream(&mut self, remote: &RemoteId, on: bool) {
         let Some(t) = self.streaming.known.get(remote).cloned() else {
             self.toast("Трек устарел — найди его заново", None);

@@ -134,6 +134,9 @@ struct AlbumChoicesFile {
     albums: Vec<crate::selection::ReleaseChoice>,
     #[serde(default)]
     tracks: Vec<crate::selection::TrackChoice>,
+    /// Songs put into the library by hand («В библиотеку»).
+    #[serde(default)]
+    added: Vec<crate::selection::TrackAdded>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -271,6 +274,8 @@ impl Library {
         let (playlists, likes, streams, feedback, saved, recordings, choices, fingerprint, events_mark, event_count) = self.read(|c| {
             let playlists = read_playlists(c)?;
             let choices = crate::selection::read_choices(c)?;
+            let added = crate::selection::read_added(c)?;
+            let choices = (choices.0, choices.1, added);
             let recordings = crate::recordings::read_recordings(c)?;
             let likes = read_likes(c)?;
             let streams = read_streams(c)?;
@@ -304,11 +309,12 @@ impl Library {
             report.files_written += usize::from(write_atomic(&recordings_path, &json)?);
         }
         let choices_path = dir.join(ALBUM_CHOICES_FILE);
-        if !choices.0.is_empty() || !choices.1.is_empty() || choices_path.exists() {
+        if !choices.0.is_empty() || !choices.1.is_empty() || !choices.2.is_empty() || choices_path.exists() {
             let json = serde_json::to_vec_pretty(&AlbumChoicesFile {
                 version: USERDATA_VERSION,
                 albums: choices.0,
                 tracks: choices.1,
+                added: choices.2,
             })?;
             report.files_written += usize::from(write_atomic(&choices_path, &json)?);
         }
@@ -471,6 +477,7 @@ impl Library {
             }
             if let Some(f) = &choices {
                 crate::selection::merge_choices_in(tx, &f.albums, &f.tracks, &mut report)?;
+                crate::selection::merge_added_in(tx, &f.added, &mut report)?;
             }
             // Likes, entries and album choices came in: stream tracks may
             // join or leave.
@@ -523,9 +530,10 @@ fn fingerprint_in(c: &Connection) -> Result<Vec<i64>> {
                 (SELECT COUNT(*) FROM recording_apart),
                 (SELECT COUNT(*) FROM release_selection), (SELECT COALESCE(SUM(updated_at), 0) FROM release_selection),
                 (SELECT COUNT(*) FROM release_track_selection),
-                (SELECT COALESCE(SUM(updated_at), 0) FROM release_track_selection)",
+                (SELECT COALESCE(SUM(updated_at), 0) FROM release_track_selection),
+                (SELECT COUNT(*) FROM track_put), (SELECT COALESCE(SUM(updated_at), 0) FROM track_put)",
     )?;
-    Ok(stmt.query_row([], |r| (0..20).map(|i| r.get(i)).collect())?)
+    Ok(stmt.query_row([], |r| (0..22).map(|i| r.get(i)).collect())?)
 }
 
 fn read_saved(conn: &Connection) -> Result<Vec<SavedDoc>> {
@@ -555,6 +563,7 @@ fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
                                    AND x.kind = 'track' AND x.local_id = t.id)
                      OR EXISTS (SELECT 1 FROM release_track_selection c WHERE c.track_id = t.id
                                    AND c.choice = 'include' AND c.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM track_put a WHERE a.track_id = t.id AND a.deleted = 0)
                      OR (t.in_library = 1 AND EXISTS (SELECT 1 FROM release_selection s
                                    WHERE s.release_id = t.release_id AND s.mode = 'whole' AND s.deleted = 0)))
               ORDER BY t.id",

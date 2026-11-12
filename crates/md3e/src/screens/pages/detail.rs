@@ -254,9 +254,9 @@ pub fn release(
 
         // Actions: standard button group, "Слушать" is the only filled button.
         // «Весь альбом» of an album only some songs of which are the user's
-        // lacks nothing: it can be added whole instead.
+        // lacks nothing; such an album can be added to the library whole.
         let missing = lacking > 0 && !(r.partial && whole);
-        let add_whole = r.partial && whole;
+        let add_whole = r.partial;
         let query = format!("{} {}", c.artist, c.title);
         let index = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
         // The album's «Хочу скачать» item, if it is on its way; of the
@@ -294,7 +294,7 @@ pub fn release(
         // (a search for the whole album: not of the user's songs alone).
         let torrents = state.prefs.prowlarr_configured && !mine;
         if add_whole {
-            let label = if ui.available_width() < 640.0 { "Добавить" } else { "Добавить весь альбом" };
+            let label = if ui.available_width() < 640.0 { "Добавить" } else { widgets::ADD_ALBUM };
             members.push(Button::new(label).icon(Icon::LibraryMusic).size(Size::M).style(Style::Tonal).into());
         }
         if missing && torrents {
@@ -361,13 +361,9 @@ pub fn release(
         // what the album opens on, and an album added whole back to the
         // user's songs.
         let mut rows = widgets::release_rows(c, true);
-        if r.partial {
-            let label = if r.open_whole { "Открывать мои треки" } else { "Открывать весь альбом" };
-            rows.insert(0, widgets::Row::Item(widgets::ReleaseAct::OpensWhole(!r.open_whole), MenuItem::new(label).icon(Icon::Album)));
-        }
         if r.added_whole {
             let at = rows.iter().position(|x| matches!(x, widgets::Row::Item(widgets::ReleaseAct::Playlist, _))).map_or(rows.len(), |p| p + 1);
-            rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new("Оставить только мои треки").icon(Icon::LibraryMusic)));
+            rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new(widgets::KEEP_MINE).icon(Icon::LibraryMusic)));
         }
         let (menu, acts) = widgets::menu_of("rel-more", rows);
         match menu.attach(more).and_then(|i| acts.get(i).copied()) {
@@ -407,7 +403,7 @@ pub fn release(
         } else {
             only = false;
         }
-        let versions_at = versions_at.filter(|_| !only && state.prefs.album_versions);
+        let versions_at = versions_at.filter(|_| !only);
         let lines: Vec<ReleaseLine> = if only {
             lines
                 .into_iter()
@@ -429,6 +425,7 @@ pub fn release(
             lines: Some(&lines),
             album_marks: (r.partial && whole).then_some(r.marks.as_slice()),
             versions_at,
+            versions_on: r.versions_on,
             no_hole_download: r.partial,
             ..Default::default()
         };

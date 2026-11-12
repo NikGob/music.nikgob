@@ -720,6 +720,7 @@ fn placeholder(id: TrackId) -> TrackRow {
         liked: false,
         cover: None,
         clip: false,
+        in_library: true,
     }
 }
 

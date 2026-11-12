@@ -384,7 +384,7 @@ impl Worker {
         }
         let have: HashSet<_> = self.queue.tracks().into_iter().collect();
         let Some(listing) = self.lib.release_listing(release).ok().flatten() else { return };
-        let rows = if whole { listing.track_ids() } else { listing.wanted_ids() };
+        let rows = listing.joins(self.album_rules(), whole);
         let more: Vec<_> = rows.into_iter().filter(|t| !have.contains(t)).collect();
         if more.is_empty() {
             return;

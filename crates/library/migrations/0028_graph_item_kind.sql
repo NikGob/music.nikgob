@@ -1,4 +1,4 @@
--- Migration 28 (r35-clip; renumber on merge if another 0028 lands first).
+-- Migration 28.
 --
 -- What a track entry of a source's list is, as the source said it:
 -- `song`, `video` or `upload` (YouTube Music's radios hold all three);

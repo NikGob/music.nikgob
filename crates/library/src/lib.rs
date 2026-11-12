@@ -69,11 +69,11 @@ pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recordings::{PrintToLink, RecordingSide};
 pub use recs::RecTrack;
-pub use selection::{ReleaseChoice, TrackChoice, WholeUndo};
+pub use selection::{ReleaseChoice, TrackChoice, TrackLibraryWas, WholeUndo};
 pub use unwanted::Unwanted;
 pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
 pub use types::{
-    AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
+    AlbumPlan, AlbumRules, AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
     ListingEntry, Membership, RecFeedback, ReleaseListing, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,

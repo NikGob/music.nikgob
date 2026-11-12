@@ -208,6 +208,21 @@ impl Default for ReleaseType {
     }
 }
 
+/// How albums show and play (Настройки → Музыка → «Альбомы»).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlbumMode {
+    /// An album added to the library is the whole album; one not added is
+    /// the user's songs of it, the whole one tap away.
+    #[default]
+    Auto,
+    /// Every album opens and plays whole.
+    Whole,
+    /// Every album opens and plays the user's songs: the ones they have, liked
+    /// or chose, not the ones that came with the album.
+    Mine,
+}
+
 str_enum!(
     pub enum SourceKind {
         LocalFile = "local_file",

@@ -69,15 +69,14 @@ fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
 }
 
 
-/// «Песни из альбомов»: an album only some songs of which are the user's
-/// (one song of an OST, a single with its instrumental): what it opens on
-/// and plays, other versions of its songs apart, Главная's shelves. All
-/// «Подробно»; an album's own choice (its ⋮) wins.
+/// «Песни из альбомов»: what an album shows and plays (added to the library: whole,
+/// not added: the user's songs of it, or always one of them), and whether
+/// the other versions of its songs play with it. All «Подробно»; the
+/// switch of an album's «Другие версии» wins.
 fn albums(ui: &mut Ui, p: &mut Prefs) {
     group(ui, "Песни из альбомов");
-    rows::segments(ui, Id::AlbumOpens, p);
-    switch(ui, Id::AlbumVersions, &mut p.album_versions);
-    switch(ui, Id::PartialAlbumsOnHome, &mut p.partial_albums_on_home);
+    menu(ui, Id::AlbumOpens, p);
+    switch(ui, Id::AlbumVersions, &mut p.album_other_versions);
 }
 
 /// «Рекомендации»: how much new music, from where, how much of it at

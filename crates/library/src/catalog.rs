@@ -26,7 +26,7 @@ pub(crate) fn track_row(row: &Row<'_>) -> rusqlite::Result<TrackRow> {
     track_row_at(row, 0)
 }
 
-/// Maps the 17 columns of `track_row_cols!()` starting at column `base`.
+/// Maps the 18 columns of `track_row_cols!()` starting at column `base`.
 pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<TrackRow> {
     Ok(TrackRow {
         id: get_id(row, base)?,
@@ -50,6 +50,7 @@ pub(crate) fn track_row_at(row: &Row<'_>, base: usize) -> rusqlite::Result<Track
         check: row
             .get::<_, Option<String>>(base + 16)?
             .and_then(|c| nikgob_core::quality::CheckSummary::decode(&c)),
+        in_library: row.get(base + 17)?,
     })
 }
 
@@ -1155,7 +1156,35 @@ impl Library {
             Some("mine") => Some(false),
             _ => None,
         };
-        Ok(Some(ReleaseListing::new(rows, r.total_tracks, &unwanted).with_choices(wanted, excluded, whole, view)))
+        // The rows with a reason of their own to be the user's, and the
+        // ones chosen by hand (`streams::OWN_EXPR`, `PICKED_EXPR`).
+        let (own, picked, versions) = self.read(|c| {
+            let ids = |expr: &str| -> Result<std::collections::HashSet<TrackId>> {
+                let mut stmt = c.prepare_cached(&format!(
+                    "SELECT track.id FROM track WHERE track.release_id = ?1 AND track.deleted_at IS NULL AND {expr}"
+                ))?;
+                let rows = stmt.query_map([&rid], |row| get_id(row, 0))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            };
+            let versions: Option<String> = c
+                .query_row(
+                    "SELECT versions FROM release_selection WHERE release_id = ?1 AND deleted = 0",
+                    [&rid],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let versions = match versions.as_deref() {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                _ => None,
+            };
+            Ok((ids(crate::streams::OWN_EXPR)?, ids(crate::streams::PICKED_EXPR)?, versions))
+        })?;
+        Ok(Some(
+            ReleaseListing::new(rows, r.total_tracks, &unwanted)
+                .with_choices(wanted, excluded, whole, view)
+                .with_own(own, picked, versions),
+        ))
     }
 
     fn tracks_of_release_impl(&self, release: ReleaseId, deleted: bool) -> Result<Vec<TrackRow>> {

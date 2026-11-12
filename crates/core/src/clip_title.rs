@@ -37,7 +37,39 @@ const VERSION_WORDS: &[&str] = &[
     "remix", "mix", "live", "acoustic", "instrumental", "inst", "karaoke", "cover", "edit", "tv",
     "size", "off", "vocal", "unplugged", "demo", "piano", "orchestra", "slowed", "sped", "nightcore",
     "reprise", "extended", "ライブ", "カバー", "弾き語り", "カラオケ", "オフボーカル", "インスト",
+    "インストゥルメンタル", "リミックス", "offvocal", "instr", "rmx", "минус", "минусовка", "инструментал",
+    "караоке", "ремикс",
 ];
+
+/// What kind of other version of a song a title names
+/// ([`version_mark`]): the ones an album does not play unless asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum VersionKind {
+    Remix,
+    Instrumental,
+    OffVocal,
+    Karaoke,
+}
+
+/// The kind a version as written names (the strongest when several:
+/// «Remix (Instrumental)» is an instrumental), none for the other
+/// versions («Live», «Acoustic», «TV Size»).
+fn kind_of(version: &str) -> Option<VersionKind> {
+    let ws = words(version);
+    let any = |list: &[&str]| ws.iter().any(|w| list.contains(&w.as_str()));
+    let ja = |marks: &[&str]| marks.iter().any(|m| has_kana_mark(version, m));
+    if any(&["karaoke", "караоке"]) || ja(&["カラオケ"]) {
+        Some(VersionKind::Karaoke)
+    } else if any(&["offvocal"]) || any(&["off"]) && any(&["vocal"]) || ja(&["オフボーカル", "オフ・ボーカル"]) {
+        Some(VersionKind::OffVocal)
+    } else if any(&["instrumental", "inst", "instr", "минус", "минусовка", "инструментал"]) || ja(&["インスト"]) {
+        Some(VersionKind::Instrumental)
+    } else if any(&["remix", "rmx", "ремикс"]) || ja(&["リミックス"]) {
+        Some(VersionKind::Remix)
+    } else {
+        None
+    }
+}
 
 /// Words a clip's tail may consist of («Title Official Music Video»).
 const TAIL_NOISE: &[&str] = &[
@@ -95,6 +127,28 @@ fn is_feat(body: &str) -> bool {
 
 fn is_version(body: &str) -> bool {
     words(body).iter().any(|w| VERSION_WORDS.contains(&w.as_str()))
+        || KANA_MARKS.iter().any(|m| has_kana_mark(body, m))
+}
+
+/// Japanese marks of a version, written inside a longer word without a
+/// space («オリジナルカラオケ», «インストゥルメンタルバージョン»).
+const KANA_MARKS: &[&str] = &["カラオケ", "オフボーカル", "オフ・ボーカル", "インスト", "リミックス"];
+
+/// `text` has the katakana `mark` inside a run of katakana, the mark not
+/// a part of another word: «インスト» of «インストール» (install) is none.
+fn has_kana_mark(text: &str, mark: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(mark) {
+        let end = from + at + mark.len();
+        let next = text[end..].chars().next();
+        // «インスト» goes on as «インストゥルメンタル», never as «インストール».
+        let word_goes_on = mark == "インスト" && next.is_some_and(|c| c == 'ー' || c == 'ラ');
+        if !word_goes_on {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 const OPEN: &[char] = &['(', '[', '【', '「', '『', '〔', '（', '［', '〈', '《'];
@@ -386,9 +440,64 @@ pub fn same_dual_title<K: PartialEq>(a: &str, b: &str, key: impl Fn(&str) -> K) 
         })
 }
 
+/// A track title that names an instrumental, an off vocal, a karaoke or a
+/// remix of a song: the song's title without those marks and the kind
+/// («SugaRiddle (Instrumental)» → «SugaRiddle», instrumental; «夏の歌
+/// （off vocal ver.）», «Песня (минус)», «Song - Remix», «Song (Remix)
+/// [Inst.]» → «Song», instrumental). Marks are taken from the end while
+/// they are of these kinds: «Song (Live) (Instrumental)» is the
+/// instrumental of «Song (Live)». `None` for a plain title and for the
+/// other versions («(Live)», «(Acoustic)»).
+pub fn version_mark(title: &str) -> Option<(String, VersionKind)> {
+    let mut base = title.to_owned();
+    let mut kind: Option<VersionKind> = None;
+    while let Some((rest, version)) = version_split(&base) {
+        let Some(k) = kind_of(&version) else { break };
+        kind = Some(kind.map_or(k, |was| was.max(k)));
+        base = rest;
+    }
+    kind.map(|k| (base, k))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instrumentals_karaoke_and_remixes_are_told_in_any_language() {
+        use VersionKind::*;
+        let mark = |t: &str| version_mark(t);
+        assert_eq!(mark("SugaRiddle (Instrumental)"), Some(("SugaRiddle".into(), Instrumental)));
+        assert_eq!(mark("Light of Hope [Inst.]"), Some(("Light of Hope".into(), Instrumental)));
+        assert_eq!(mark("夏の歌（off vocal ver.）"), Some(("夏の歌".into(), OffVocal)));
+        assert_eq!(mark("夏の歌 (オフボーカル)"), Some(("夏の歌".into(), OffVocal)));
+        assert_eq!(mark("ファイトソング (インスト)"), Some(("ファイトソング".into(), Instrumental)));
+        assert_eq!(mark("ファイトソング（オリジナル・カラオケ）"), Some(("ファイトソング".into(), Karaoke)));
+        assert_eq!(mark("Песня (минус)"), Some(("Песня".into(), Instrumental)));
+        assert_eq!(mark("Песня - Инструментал"), Some(("Песня".into(), Instrumental)));
+        assert_eq!(mark("Песня (Караоке версия)"), Some(("Песня".into(), Karaoke)));
+        assert_eq!(mark("Песня (Ремикс)"), Some(("Песня".into(), Remix)));
+        assert_eq!(mark("Scared of the Dark (Remix)"), Some(("Scared of the Dark".into(), Remix)));
+        assert_eq!(mark("Dayvan Cowboy (Odd Nosdam Remix)"), Some(("Dayvan Cowboy".into(), Remix)));
+        assert_eq!(mark("Song - Off Vocal Ver."), Some(("Song".into(), OffVocal)));
+        assert_eq!(mark("Song (Remix) [Instrumental]"), Some(("Song".into(), Instrumental)));
+        assert_eq!(mark("Song (Live) (Instrumental)"), Some(("Song (Live)".into(), Instrumental)));
+        assert_eq!(mark("Song (Karaoke Version)"), Some(("Song".into(), Karaoke)));
+        // Japanese marks inside a longer word, no space or dot.
+        assert_eq!(mark("歌 (オリジナルカラオケ)"), Some(("歌".into(), Karaoke)));
+        assert_eq!(mark("歌（インストゥルメンタルバージョン）"), Some(("歌".into(), Instrumental)));
+        assert_eq!(mark("歌 [オフボーカルver.]"), Some(("歌".into(), OffVocal)));
+        assert_eq!(mark("歌 (テクノリミックス)"), Some(("歌".into(), Remix)));
+        assert_eq!(mark("歌 (インストール)"), None);
+        // No mark of these kinds, a word inside another, nothing left.
+        assert_eq!(mark("Song (Live)"), None);
+        assert_eq!(mark("Song (TV Size)"), None);
+        assert_eq!(mark("Instinct"), None);
+        assert_eq!(mark("Remixed Feelings"), None);
+        assert_eq!(mark("Минусинск"), None);
+        assert_eq!(mark("(Instrumental)"), None);
+        assert_eq!(mark("Sunflower (feat. X)"), None);
+    }
 
     #[test]
     fn a_version_of_a_song_is_told_by_its_bracket_or_tail() {

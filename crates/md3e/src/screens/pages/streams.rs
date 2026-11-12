@@ -263,6 +263,8 @@ pub(crate) fn stream_track_rows(
         wrong_file: false,
         dislike: super::dislike_item(t.track.is_some_and(|id| marks.track(id))),
         ban: (!t.artist.is_empty()).then(|| MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block)),
+        // Out of the library only through its library track.
+        library: super::library_item(t.in_library, t.has_local, t.liked).filter(|on| *on || t.track.is_some()),
     })
 }
 
@@ -323,6 +325,8 @@ pub(super) fn track_pick(
         A::Next => out.push(Command::PlayStreamNext(vec![t.remote.clone()])),
         A::Queue => out.push(Command::EnqueueStream(vec![t.remote.clone()])),
         A::Playlist => pages.add_stream_to_playlist(vec![t.remote.clone()], anchor),
+        A::ToLibrary => out.push(Command::StreamInLibrary { track: t.remote.clone(), on: true }),
+        A::OutOfLibrary => out.extend(t.track.map(|track| Command::TrackInLibrary { track, on: false })),
         A::Radio => out.push(radio_by_stream(t)),
         A::Album => return t.album_id.clone().map(|a| Route::Stream(StreamPage::Album(a))),
         // Several artists: a chooser (not of the artist whose page this is).
