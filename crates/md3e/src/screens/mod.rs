@@ -1282,6 +1282,9 @@ impl Md3eUi {
             "lyrics-check" => S::LyricsCheck,
             "lyrics-lead" => S::LyricsLead,
             "lyrics-streams" => S::LyricsStreamKeep,
+            "lyrics-presets" => S::Preset(nikgob_view::presets::Area::Lyrics),
+            "home-sections" => S::HomeSections,
+            "source-presets" => S::Preset(nikgob_view::presets::Area::Sources),
             _ => S::CoverClickPause,
         });
     }
