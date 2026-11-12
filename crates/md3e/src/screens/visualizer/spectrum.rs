@@ -65,8 +65,7 @@ impl Spectrum {
                 *t = t.max(k);
             }
         }
-        for i in 0..n {
-            let t = target[i];
+        for (i, &t) in target.iter().enumerate().take(n) {
             if t >= self.shown[i] {
                 self.shown[i] = t;
                 self.fall[i] = 0.0;

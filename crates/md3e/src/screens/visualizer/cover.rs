@@ -73,7 +73,7 @@ impl Cover {
             self.peak = self.shown;
             return;
         }
-        if sig.beat && sig.beats % 4 == 0 && self.t > 0.8 {
+        if sig.beat && sig.beats.is_multiple_of(4) && self.t > 0.8 {
             self.from = self.to;
             self.to = (self.to + 1) % WALK.len();
             self.t = 0.0;

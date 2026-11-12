@@ -73,8 +73,8 @@ impl Signal {
         let lo = self.floor * 0.85;
         let span = (self.peak - lo).max(0.15);
         let quiet = max < 0.05;
-        for i in 0..n {
-            let b = if live { bands[i] } else { 0.0 };
+        for (i, &band) in bands.iter().enumerate() {
+            let b = if live { band } else { 0.0 };
             let target = if quiet { 0.0 } else { ((b - lo) / span).clamp(0.0, 1.0) };
             // The analyzer smooths already; a short follow only hides
             // frame-to-frame steps of the auto-gain.
