@@ -349,5 +349,105 @@ pub struct RadioView {
     pub autoplay: bool,
     /// What it grows from (the share of new music it remembers).
     pub kind: crate::RadioKind,
+    /// «Моя волна» (or a card of «Миксы для тебя» started as one): its
+    /// filters and the user's scenes to choose from.
+    pub wave: Option<WaveView>,
+}
+
+/// «Новизна» of «Моя волна»: how much of it is new music.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum WaveNovelty {
+    /// «Баланс».
+    #[default]
+    Balance,
+    /// «Больше нового».
+    More,
+    /// «Только новое».
+    OnlyNew,
+    /// «Знакомое»: the library alone.
+    Familiar,
+}
+
+impl WaveNovelty {
+    pub const ALL: [Self; 4] = [Self::Balance, Self::More, Self::OnlyNew, Self::Familiar];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Balance => "Баланс",
+            Self::More => "Больше нового",
+            Self::OnlyNew => "Только новое",
+            Self::Familiar => "Знакомое",
+        }
+    }
+}
+
+/// «Характер» of «Моя волна».
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum WaveCharacter {
+    /// «Любой».
+    #[default]
+    Any,
+    /// «Бодрое».
+    Lively,
+    /// «Спокойное».
+    Calm,
+    /// «Мрачное».
+    Dark,
+    /// «Фон».
+    Background,
+}
+
+impl WaveCharacter {
+    pub const ALL: [Self; 5] = [Self::Any, Self::Lively, Self::Calm, Self::Dark, Self::Background];
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Any => "Любой",
+            Self::Lively => "Бодрое",
+            Self::Calm => "Спокойное",
+            Self::Dark => "Мрачное",
+            Self::Background => "Фон",
+        }
+    }
+}
+
+/// «Сцена» of «Моя волна»: everything, or one of the user's own scenes —
+/// a taste profile by its key, a kind of song by its number (as
+/// [`MixKey::Kind`]), a family of genres by its number (as
+/// [`MixKey::Genre`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum WaveScene {
+    /// «Все».
+    #[default]
+    All,
+    Profile(u32),
+    Kind(u8),
+    Genre(u8),
+}
+
+/// What «Моя волна» plays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct WaveFilter {
+    pub novelty: WaveNovelty,
+    pub character: WaveCharacter,
+    pub scene: WaveScene,
+}
+
+/// One of the user's scenes «Моя волна» offers: «Хип-хоп», «Саундтреки»,
+/// «Русские песни».
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaveSceneCard {
+    pub scene: WaveScene,
+    pub title: String,
+}
+
+/// «Моя волна» playing ([`RadioView::wave`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WaveView {
+    pub filter: WaveFilter,
+    /// The user's scenes, the largest first («Все» is not among them).
+    pub scenes: Vec<WaveSceneCard>,
+    /// The card of «Миксы для тебя» it was started from, if any.
+    pub preset: Option<MixKey>,
 }
 
