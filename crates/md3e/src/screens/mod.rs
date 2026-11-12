@@ -478,6 +478,11 @@ impl Md3eUi {
         // surface: the pages are not laid out for nothing (with the side
         // pane's lyrics they cost more than Now Playing itself).
         let covered = self.now_playing && self.np_anim.value(anim::now(ctx)) >= 0.999;
+        // So does the visualizer once it has faded in (open since the
+        // frame before: the frame it opens on still draws the shell under
+        // its fade). Keys and the state still go through.
+        let viz_covers = self.viz_was_open && self.chrome.visualizer && self.chrome.viz.covers(anim::now(ctx));
+        let covered = covered || viz_covers;
         // Shown again only if the page lays out and asks for it.
         self.stage.visible = false;
 
@@ -486,6 +491,10 @@ impl Md3eUi {
             .show(root, |ui| {
                 let full = ui.max_rect();
                 let class = size_class(full.width());
+                if viz_covers {
+                    self.flush_search(ctx, out);
+                    return;
+                }
                 if class == SizeClass::Compact {
                     if compact_page(self.route()) {
                         self.content_rect = full;
@@ -560,7 +569,7 @@ impl Md3eUi {
         if !self.np_anim.is_settled(t) {
             ctx.request_repaint();
         }
-        if k > 0.001 {
+        if k > 0.001 && !viz_covers {
             let full = ctx.content_rect();
             if size_class(full.width()) != SizeClass::Compact {
                 let from = if self.bar_rect.is_positive() {
@@ -1331,6 +1340,7 @@ impl Md3eUi {
         let open = self.chrome.visualizer;
         if open && !self.viz_was_open {
             self.fullscreen.open_viz(state.prefs.viz_fullscreen);
+            self.chrome.viz.open(now);
         }
         self.viz_was_open = open;
         let mut toggle = std::mem::take(&mut self.f11);
@@ -1347,7 +1357,11 @@ impl Md3eUi {
         }
         let open = self.chrome.visualizer;
         if self.fullscreen_allowed {
-            self.fullscreen.observe(ctx.input(|i| i.viewport().fullscreen), open, now);
+            // The window manager's own change, inside the visualizer, is
+            // its new choice too.
+            if let Some(choice) = self.fullscreen.observe(ctx.input(|i| i.viewport().fullscreen), open, now) {
+                out.push(Command::SetPref(nikgob_view::PrefPatch::VizFullscreen(choice)));
+            }
             if let Some(full) = self.fullscreen.command(open, now) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
             }

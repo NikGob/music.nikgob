@@ -10,7 +10,10 @@ use egui::{Painter, Rect, Stroke, vec2};
 use nikgob_motion::tokens;
 use nikgob_shapes::{MaterialShape, paint::stroke_shape};
 
-use super::{signal::Signal, spring_step};
+use super::{
+    signal::{REST, Signal},
+    spring_step,
+};
 use crate::ColorScheme;
 
 const SHAPE: MaterialShape = MaterialShape::Cookie9Sided;
@@ -48,13 +51,15 @@ impl Calm {
             return;
         }
         spring_step(tokens::EXPRESSIVE_SLOW_SPATIAL, &mut self.breath, &mut self.breath_v, sig.calm, dt);
-        self.angle = (self.angle + dt * TAU / 60.0 * (0.5 + sig.calm)).rem_euclid(TAU);
-        self.since += dt;
+        // A pause stops the rings where they are, as it stops the music.
+        let run = dt * sig.drive;
+        self.angle = (self.angle + run * TAU / 60.0 * (0.5 + sig.calm)).rem_euclid(TAU);
+        self.since += run;
         for r in &mut self.rings {
             if r.alive {
-                r.age += dt;
+                r.age += run;
                 r.alive = r.age < LIFE;
-                r.angle += dt * TAU / 90.0;
+                r.angle += run * TAU / 90.0;
             }
         }
         let due = (sig.beat && self.since >= GAP) || (live && sig.calm > 0.08 && self.since >= IDLE);
@@ -69,6 +74,17 @@ impl Calm {
                 self.rings[i] = Ring { age: 0.0, strength: (0.35 + 0.65 * sig.level).clamp(0.0, 1.0), angle: self.angle, alive: true };
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn angle(&self) -> f32 {
+        self.angle
+    }
+
+    /// Settled: nothing would change in the next frame of a pause (with
+    /// the signal still: no drive, no loudness).
+    pub fn still(&self) -> bool {
+        self.breath.abs() < REST && self.breath_v.abs() < REST
     }
 
     pub fn paint(&self, painter: &Painter, rect: Rect, s: &ColorScheme) {
@@ -98,7 +114,7 @@ mod tests {
 
     fn sig(beat: bool, calm: f32) -> Signal {
         let mut s = Signal::default();
-        (s.dt, s.beat, s.calm, s.level) = (0.1, beat, calm, calm);
+        (s.dt, s.beat, s.calm, s.level, s.drive) = (0.1, beat, calm, calm, 1.0);
         s
     }
 

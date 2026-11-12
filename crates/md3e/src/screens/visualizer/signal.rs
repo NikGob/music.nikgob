@@ -42,7 +42,14 @@ pub struct Signal {
     pub level: f32,
     /// Seconds since the previous frame (0..0.1).
     pub dt: f32,
+    /// How much the pictures' own motion (turning, rings travelling)
+    /// runs: 1 while playing, easing to exactly 0 on a pause, so a paused
+    /// picture comes to rest and needs no more frames.
+    pub drive: f32,
 }
+
+/// Below this everything counts as at rest.
+pub const REST: f32 = 0.01;
 
 impl Signal {
     /// One step at `now` (seconds) from the analyzer's `bands` and `bass`.
@@ -83,6 +90,11 @@ impl Signal {
             let jump = ((b - self.band_avg[i]) * 4.0).clamp(0.0, 1.0);
             self.hits[i] = jump.max(self.hits[i] * (-dt / 0.12).exp());
         }
+        let drive = if live { 1.0 } else { 0.0 };
+        self.drive += (drive - self.drive) * ease(0.35);
+        if !live && self.drive < 0.002 {
+            self.drive = 0.0;
+        }
         let level = if quiet { 0.0 } else { ((mean - lo) / span * 1.6).clamp(0.0, 1.0) };
         self.level += (level - self.level) * ease(0.08);
         self.calm += (level - self.calm) * ease(1.0);
@@ -114,6 +126,15 @@ impl Signal {
         if !live {
             self.kick *= (-dt / 0.1).exp();
         }
+    }
+
+    /// Nothing left to move: paused and every level faded out.
+    pub fn still(&self) -> bool {
+        self.drive == 0.0
+            && self.kick < REST
+            && self.level < REST
+            && self.calm < REST
+            && self.bands.iter().chain(&self.hits).all(|b| *b < REST)
     }
 
     /// The level of direction `theta` (radians, clockwise from the top):
@@ -195,6 +216,18 @@ mod tests {
         assert!(sig.calm > 0.1);
         assert_eq!(run(&mut sig, 0.5, 4.0, false), 0);
         assert!(sig.kick < 0.01 && sig.level < 0.01 && sig.bands.iter().all(|b| *b < 0.01));
+    }
+
+    #[test]
+    fn a_pause_comes_to_rest_and_play_does_not() {
+        let mut sig = Signal::default();
+        run(&mut sig, 0.5, 4.0, true);
+        assert!(!sig.still() && sig.drive > 0.99);
+        // The slow loudness takes the longest: about five seconds.
+        run(&mut sig, 0.5, 6.0, false);
+        assert!(sig.still(), "drive {} calm {}", sig.drive, sig.calm);
+        run(&mut sig, 0.5, 0.2, true);
+        assert!(!sig.still());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use egui::{CornerRadius, Painter, Rect, pos2, vec2};
 
-use super::signal::Signal;
+use super::signal::{REST, Signal};
 use crate::ColorScheme;
 
 /// Most bars on one side of the centre.
@@ -84,6 +84,11 @@ impl Spectrum {
                 self.peak[i] = (self.peak[i] - self.peak_v[i] * dt).max(self.shown[i]);
             }
         }
+    }
+
+    /// Settled: every bar and peak down.
+    pub fn still(&self) -> bool {
+        self.shown.iter().chain(&self.peak).all(|v| *v < REST)
     }
 
     pub fn paint(&self, painter: &Painter, rect: Rect, s: &ColorScheme) {

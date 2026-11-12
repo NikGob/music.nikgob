@@ -10,7 +10,10 @@ use egui::{Mesh, Pos2, Rect, Shape, Stroke, Ui, epaint::PathShape, vec2};
 use nikgob_motion::tokens;
 use nikgob_shapes::MaterialShape;
 
-use super::{signal::Signal, spring_step};
+use super::{
+    signal::{REST, Signal},
+    spring_step,
+};
 use crate::ColorScheme;
 use crate::screens::now_playing::Outline;
 
@@ -81,7 +84,7 @@ impl Cover {
         }
         spring_step(tokens::EXPRESSIVE_DEFAULT_SPATIAL, &mut self.t, &mut self.t_v, 1.0, dt);
         spring_step(tokens::EXPRESSIVE_FAST_SPATIAL, &mut self.scale, &mut self.scale_v, 1.0 + 0.07 * sig.kick, dt);
-        self.angle = (self.angle + dt * TAU / (sig.period * 16.0)).rem_euclid(TAU);
+        self.angle = (self.angle + dt * sig.drive * TAU / (sig.period * 16.0)).rem_euclid(TAU);
         let mut raw = [0.0f32; DIRS];
         for (i, r) in raw.iter_mut().enumerate() {
             *r = Signal::around(&sig.bands, i as f32 / DIRS as f32 * TAU).powf(1.4);
@@ -99,6 +102,20 @@ impl Cover {
                 self.peak[i] = (self.peak[i] - self.peak_fall[i] * dt).max(level);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub fn angle(&self) -> f32 {
+        self.angle
+    }
+
+    /// Settled: nothing would change in the next frame of a pause.
+    pub fn still(&self) -> bool {
+        (self.t - 1.0).abs() < 1e-3
+            && self.t_v.abs() < 1e-3
+            && (self.scale - 1.0).abs() < 1e-3
+            && self.scale_v.abs() < 1e-3
+            && self.shown.iter().chain(&self.peak).all(|v| *v < REST)
     }
 
     pub fn paint(&self, ui: &Ui, rect: Rect, s: &ColorScheme, uri: Option<&str>) {

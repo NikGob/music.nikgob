@@ -51,21 +51,25 @@ impl Fullscreen {
         }
     }
 
-    /// The window's real state (`None`: unknown) at `now`.
-    pub fn observe(&mut self, actual: Option<bool>, viz_open: bool, now: f64) {
-        let Some(actual) = actual else { return };
+    /// The window's real state (`None`: unknown) at `now`. A change made
+    /// outside while the visualizer is up returns its new choice to
+    /// remember, as [`toggle`](Self::toggle) does.
+    pub fn observe(&mut self, actual: Option<bool>, viz_open: bool, now: f64) -> Option<bool> {
+        let actual = actual?;
         if actual == self.sent || now - self.sent_at < SETTLE {
-            return;
+            return None;
         }
+        self.sent = actual;
         if viz_open {
             self.viz = actual;
             if !actual {
                 self.user = false;
             }
+            Some(actual)
         } else {
             self.user = actual;
+            None
         }
-        self.sent = actual;
     }
 
     /// The state to send the window this frame, if it changed.
@@ -136,5 +140,24 @@ mod tests {
         // F11 then goes full screen again at once.
         f.toggle(false);
         assert_eq!(f.command(false, 3.0), Some(true));
+    }
+
+    #[test]
+    fn a_change_from_outside_inside_the_visualizer_is_remembered() {
+        let mut f = Fullscreen::default();
+        f.open_viz(true);
+        assert_eq!(f.command(true, 0.0), Some(true));
+        assert_eq!(f.observe(Some(true), true, 2.0), None, "as asked");
+        // The window manager took it out of full screen: remember the window.
+        assert_eq!(f.observe(Some(false), true, 3.0), Some(false));
+        assert!(!f.want(true));
+        assert_eq!(f.command(true, 3.0), None);
+        // And back in.
+        assert_eq!(f.observe(Some(true), true, 4.0), Some(true));
+        assert!(f.want(true));
+        // Outside the visualizer it is only F11's state, nothing to save.
+        assert_eq!(f.command(false, 5.0), Some(false));
+        assert_eq!(f.observe(Some(true), false, 7.0), None);
+        assert!(f.want(false));
     }
 }

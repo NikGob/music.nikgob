@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use egui::{Painter, Rect, pos2, vec2};
 use nikgob_shapes::{MaterialShape, Morph, paint::fill_shape};
 
-use super::signal::Signal;
+use super::signal::{REST, Signal};
 use crate::{ColorScheme, lerp_color};
 
 const RING: usize = 12;
@@ -94,7 +94,17 @@ impl Shapes {
             self.progress = 0.0;
         }
         self.progress += (1.0 - self.progress) * (1.0 - (-dt * 7.0).exp());
-        self.angle += dt * 0.25 * (1.0 + self.bass);
+        self.angle += dt * sig.drive * 0.25 * (1.0 + self.bass);
+    }
+
+    #[cfg(test)]
+    pub fn angle(&self) -> f32 {
+        self.angle
+    }
+
+    /// Settled: nothing would change in the next frame of a pause.
+    pub fn still(&self) -> bool {
+        self.progress > 0.999 && self.bass < REST && self.levels.iter().all(|l| *l < REST)
     }
 
     pub fn paint(&self, painter: &Painter, rect: Rect, s: &ColorScheme) {

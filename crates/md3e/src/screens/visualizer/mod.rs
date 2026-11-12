@@ -27,6 +27,8 @@ use crate::{
 
 /// Seconds the pointer may rest before the toolbar steps aside.
 const IDLE_HIDE: f64 = 2.5;
+/// Seconds of the fade in on opening.
+const OPEN_FADE: f32 = 0.3;
 /// Seconds of the cross-fade between two pictures.
 const SWITCH: f64 = 0.35;
 
@@ -49,7 +51,6 @@ pub enum VizAction {
 /// Animation state of the visualizer.
 #[derive(Default)]
 pub struct Viz {
-    last: f64,
     opened: f64,
     signal: signal::Signal,
     /// The picture chosen here, ahead of the prefs coming back.
@@ -83,6 +84,32 @@ impl Viz {
         }
     }
 
+    /// The picture has settled (meaningful on a pause, once the signal is
+    /// still too).
+    fn still(&self, concept: VizConcept) -> bool {
+        match concept {
+            VizConcept::Cover => self.cover.still(),
+            VizConcept::Spectrum => self.spectrum.still(),
+            VizConcept::Shapes => self.shapes.still(),
+            VizConcept::Calm => self.calm.still(),
+        }
+    }
+
+    /// The visualizer was opened at `now`: the prefs' picture, the
+    /// toolbar shown, a fade in.
+    pub fn open(&mut self, now: f64) {
+        self.opened = now;
+        self.moved_at = now;
+        self.concept = None;
+        self.previous = None;
+    }
+
+    /// Whether the visualizer hides everything under it at `now` (opened
+    /// and faded in), so the shell need not lay it out.
+    pub fn covers(&self, now: f64) -> bool {
+        now - self.opened >= OPEN_FADE as f64
+    }
+
     fn paint(&self, concept: VizConcept, ui: &Ui, rect: Rect, s: &crate::ColorScheme, uri: Option<&str>) {
         let painter = ui.painter();
         match concept {
@@ -109,14 +136,6 @@ impl Viz {
         let s = theme.scheme;
         let reduced = theme.reduced_motion;
         let now = anim::now(ctx);
-        if now - self.last > 0.5 {
-            // Opened again: the prefs' picture, the toolbar shown.
-            self.opened = now;
-            self.moved_at = now;
-            self.concept = None;
-            self.previous = None;
-        }
-        self.last = now;
         let concept = *self.concept.get_or_insert(state.prefs.viz_concept);
         let playing = state.player.status == Status::Playing;
         let screen = ctx.content_rect();
@@ -130,7 +149,7 @@ impl Viz {
                 self.update(prev, screen.width(), playing, reduced);
             }
         }
-        let fade = ((now - self.opened) as f32 / 0.3).clamp(0.0, 1.0);
+        let fade = ((now - self.opened) as f32 / OPEN_FADE).clamp(0.0, 1.0);
 
         // The pointer resting hides the toolbar (and the pointer).
         let pointer = ctx.input(|i| i.pointer.latest_pos());
@@ -139,6 +158,13 @@ impl Viz {
             self.moved_at = now;
         }
         let mut action = VizAction::None;
+        // The toolbar: the picture, the screen, close.
+        let bar = Rect::from_center_size(
+            pos2(screen.center().x, screen.bottom() - 24.0 - 32.0),
+            vec2(8.0 + GROUP_W + 16.0 + 40.0 + 4.0 + 40.0 + 8.0, 64.0),
+        );
+        let hovered = pointer.is_some_and(|p| bar.expand(16.0).contains(p));
+        let shown = hovered || now - self.moved_at < IDLE_HIDE;
 
         Area::new(Id::new("md3e-visualizer"))
             .fade_in(false)
@@ -196,13 +222,6 @@ impl Viz {
                     common::label(&mut tui, &t.artist, TypeRole::BodyMedium, s.on_surface_variant);
                 }
 
-                // The toolbar: the picture, the screen, close.
-                let bar = Rect::from_center_size(
-                    pos2(rect.center().x, rect.bottom() - 24.0 - 32.0),
-                    vec2(8.0 + GROUP_W + 16.0 + 40.0 + 4.0 + 40.0 + 8.0, 64.0),
-                );
-                let hovered = pointer.is_some_and(|p| bar.expand(16.0).contains(p));
-                let shown = hovered || now - self.moved_at < IDLE_HIDE;
                 let k = anim::fraction(ctx, Id::new("viz-toolbar"), if shown { 1.0 } else { 0.0 }, theme.motion.default_effects);
                 if !shown && pointer.is_some_and(|p| rect.contains(p)) {
                     ctx.set_cursor_icon(CursorIcon::None);
@@ -248,10 +267,19 @@ impl Viz {
                     });
                 }
             });
-        if reduced {
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
-        } else {
+        // Frames: while the music plays, while a pause settles, a switch
+        // or the fade in runs (the toolbar's own spring asks for its
+        // frames); input and the music coming back wake it again.
+        let still = !playing && self.signal.still() && (reduced || self.still(concept));
+        let busy = fade < 1.0 || self.previous.is_some();
+        if busy || (!still && !reduced) {
             ctx.request_repaint();
+        } else if !still {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        } else if shown && !hovered {
+            // The toolbar steps aside when the rest is over.
+            let left = (IDLE_HIDE - (now - self.moved_at)).max(0.0) + 0.02;
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
         }
         action
     }
@@ -292,4 +320,49 @@ fn glyph_calm(p: &Painter, r: Rect, c: Color32) {
     p.circle_filled(r.center(), r.width() * 0.14, c);
     p.circle_stroke(r.center(), r.width() * 0.3, Stroke::new(1.5, c));
     p.circle_stroke(r.center(), r.width() * 0.46, Stroke::new(1.0, c.gamma_multiply(0.6)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs `seconds` of frames at 60 fps of the made-up song, playing or
+    /// paused; returns the second (from the start of the run) the picture
+    /// first came to rest, if it did.
+    fn run(viz: &mut Viz, concept: VizConcept, t: &mut f64, seconds: f64, playing: bool) -> Option<f64> {
+        let mut bands = Vec::new();
+        let start = *t;
+        let end = *t + seconds;
+        while *t < end {
+            *t += 1.0 / 60.0;
+            let bass = synth::levels(*t, &mut bands);
+            viz.signal.update(*t, &bands, bass, playing);
+            viz.update(concept, 1280.0, playing, false);
+            if !playing && viz.signal.still() && viz.still(concept) {
+                return Some(*t - start);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_picture_comes_to_rest_on_a_pause_and_turns_no_more() {
+        for concept in VizConcept::ALL {
+            let mut viz = Viz::default();
+            let mut t = 1.0;
+            run(&mut viz, concept, &mut t, 6.0, true);
+            assert!(!(viz.signal.still() && viz.still(concept)), "{concept:?} moves while playing");
+            let rest = run(&mut viz, concept, &mut t, 10.0, false);
+            assert!(rest.is_some_and(|s| s < 7.0), "{concept:?} rests after {rest:?}");
+            // At rest nothing turns any more.
+            let angles = |v: &Viz| (v.cover.angle(), v.shapes.angle(), v.calm.angle());
+            let before = angles(&viz);
+            for _ in 0..30 {
+                t += 1.0 / 60.0;
+                viz.signal.update(t, &[], 0.0, false);
+                viz.update(concept, 1280.0, false, false);
+            }
+            assert_eq!(angles(&viz), before, "{concept:?}");
+        }
+    }
 }
