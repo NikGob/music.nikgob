@@ -622,8 +622,10 @@ impl Shot {
                 self.wait = arg.parse().unwrap_or(30);
             }
             "lyrics_edit" => {
-                // The lyrics editor where the look has it.
-                nikgob_md3e::screens::lyrics_ui::open_editor(ctx, state);
+                // The lyrics editor where the look has it, of the text shown
+                // (a `fake:lyrics-state` one too).
+                let shown = self.overlay(state);
+                nikgob_md3e::screens::lyrics_ui::open_editor(ctx, shown.as_ref().unwrap_or(state));
                 self.wait = arg.parse().unwrap_or(60);
             }
             "search" => {
