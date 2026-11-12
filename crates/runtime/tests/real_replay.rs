@@ -124,7 +124,7 @@ fn the_model_of_a_real_library() {
         let first = preview.extend(&mut radio, 6);
         println!("radio of {}:\n{}", line(&lib, *seed), picks(&lib, &first));
         for p in first.iter().take(2) {
-            radio.feedback(p.item.clone(), Outcome::Skip { position_ms: 8_000 });
+            radio.feedback(p.item.clone(), Outcome::skip(8_000));
         }
         let after = preview.extend(&mut radio, 6);
         println!("after two early skips:\n{}", picks(&lib, &after));

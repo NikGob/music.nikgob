@@ -83,6 +83,11 @@ const NEW_TTL_MS: i64 = 24 * 3600 * 1000;
 const REFILL_AT: usize = 6;
 /// …from this many of its last tracks at a time.
 const REFILL_FROM: usize = 2;
+/// The radio's tracks heard out remembered (new music is asked around the
+/// last few)…
+const HEARD_KEEP: usize = 20;
+/// …and the songs asked around already.
+const ASKED_KEEP: usize = 200;
 
 /// One radio playing.
 pub(crate) struct RadioRun {
@@ -126,8 +131,10 @@ pub(crate) struct RadioRun {
     /// again ([`Worker::radio_redo`])…
     redo: Option<usize>,
     /// …and the extension on its way was asked before that: its picks go
-    /// unplayed.
+    /// unplayed…
     stale: bool,
+    /// …and its state forgets what left the queue meanwhile.
+    forgotten: Vec<Item>,
 }
 
 /// What the user did to a track of the radio besides playing it.
@@ -158,6 +165,18 @@ pub(crate) struct RadioSave {
     pool: Vec<StreamTrack>,
     #[serde(default)]
     autoplay: bool,
+    /// The queue places (play order) of the entries it added, and their
+    /// tracks: entry ids are a run's own, places survive a restart.
+    #[serde(default)]
+    added_at: Vec<(usize, TrackId)>,
+}
+
+/// Every entry of the queue in play order (played, current, upcoming).
+fn queue_order(q: &crate::queue::Queue) -> Vec<Entry> {
+    let mut out = q.history().to_vec();
+    out.extend(q.current());
+    out.extend_from_slice(q.upcoming());
+    out
 }
 
 #[derive(Default)]
@@ -391,6 +410,7 @@ impl Worker {
             via: HashMap::new(),
             redo: None,
             stale: false,
+            forgotten: Vec::new(),
         };
         log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
         let context = context_of(&run.title);
@@ -460,6 +480,7 @@ impl Worker {
             via: HashMap::new(),
             redo: None,
             stale: false,
+            forgotten: Vec::new(),
         });
         log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
         self.radio_add_discoveries();
@@ -577,6 +598,7 @@ impl Worker {
             via: HashMap::new(),
             redo: None,
             stale: false,
+            forgotten: Vec::new(),
         });
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
@@ -783,11 +805,16 @@ impl Worker {
         if !alive {
             return;
         }
-        // Asked to pick again while these were picked: they go unplayed.
+        // Asked to pick again while these were picked: they go unplayed,
+        // and the tail dropped meanwhile is forgotten by their state too.
+        let forgotten = std::mem::take(&mut run.forgotten);
+        run.state.forget(&forgotten);
         if std::mem::take(&mut run.stale) && run.queue_gen.is_some() {
             let items: Vec<Item> = picks.into_iter().map(|p| p.item).collect();
             run.state.forget(&items);
+            self.radio_extend();
             self.radio_redo();
+            self.publish_player();
             return;
         }
         // Stream picks play as "seen" tracks of their service.
@@ -918,6 +945,7 @@ impl Worker {
         }
         self.radio_splice_new();
         self.radio_refill();
+        self.radio_prune();
     }
 
     /// New music the radio's queue lacks (it came after the queue was
@@ -959,7 +987,46 @@ impl Worker {
                 ids.push((tid, r));
             }
         }
+        // The buffer holds three: new music takes the place of the
+        // radio's farthest picks of the library (never the next one, it
+        // is preloaded, never the user's), else waits for a free place.
+        let room = EXTEND_BY.saturating_sub(self.queue.upcoming().len());
+        let mut gone: Vec<Entry> = Vec::new();
+        if let Some(run) = self.recs.radio.run.as_ref() {
+            let movable: Vec<Entry> =
+                self.queue.upcoming().iter().skip(1).filter(|e| run.added.contains(&e.id) && !run.streams.contains_key(&e.track)).copied().collect();
+            gone = movable.into_iter().rev().take(ids.len().saturating_sub(room)).collect();
+        }
+        ids.truncate(room + gone.len());
         if ids.is_empty() {
+            return;
+        }
+        if let Some(run) = self.recs.radio.run.as_mut() {
+            let items: Vec<Item> = gone.iter().map(|e| Item::Track(e.track)).collect();
+            run.state.forget(&items);
+            for e in &gone {
+                run.added.remove(&e.id);
+                run.queued.0 = run.queued.0.saturating_sub(1);
+            }
+        }
+        for e in &gone {
+            self.queue.remove(e.id);
+            self.recs.why.remove(&e.id);
+        }
+        let up: Vec<u64> = self.queue.upcoming().iter().filter(|e| self.recs.radio.run.as_ref().is_some_and(|r| r.added.contains(&e.id))).map(|e| e.id).collect();
+        if up.is_empty() {
+            // Nothing of the radio's ahead to go between: after the queue.
+            for (tid, r) in &ids {
+                let added = self.queue.enqueue(&[*tid]);
+                if let Some(run) = self.recs.radio.run.as_mut() {
+                    run.added.extend(added.iter().map(|e| e.id));
+                    run.streams.insert(*tid, r.clone());
+                    run.queued.1 += 1;
+                    run.queued.0 += 1;
+                }
+            }
+            self.preload_next();
+            self.publish_player();
             return;
         }
         let every = (up.len() / (ids.len() + 1)).max(1);
@@ -1078,6 +1145,8 @@ impl Worker {
         if complete {
             run.heard.retain(|t| *t != track);
             run.heard.push(track);
+            let over = run.heard.len().saturating_sub(HEARD_KEEP);
+            run.heard.drain(..over);
         }
         run.state.feedback(item.clone(), outcome);
         if run.extending {
@@ -1112,19 +1181,20 @@ impl Worker {
             return;
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
-        let Some(keep) = run.redo else { return };
+        let Some(keep) = run.redo.take() else { return };
         if run.queue_gen.is_none() {
-            run.redo = None;
             return;
         }
-        if run.extending {
-            run.stale = true;
-            return;
-        }
-        run.redo = None;
         let gone: Vec<Entry> = self.queue.upcoming().iter().skip(keep).filter(|e| run.added.contains(&e.id)).copied().collect();
         let items: Vec<Item> = gone.iter().map(|e| run.streams.get(&e.track).map_or(Item::Track(e.track), |r| Item::Stream(r.clone()))).collect();
         run.state.forget(&items);
+        // Picks on their way were picked before this: they go unplayed
+        // when they come, and what left the queue now is forgotten by the
+        // state they come with too.
+        if run.extending {
+            run.stale = true;
+            run.forgotten.extend(items);
+        }
         for e in &gone {
             run.added.remove(&e.id);
         }
@@ -1267,6 +1337,30 @@ impl Worker {
             run.pending_new.extend(new.iter().cloned());
         }
         run.state.add_new(new);
+        self.radio_prune();
+    }
+
+    /// The radio's bookkeeping stays bounded however long it plays: the
+    /// candidates as the engine keeps them (its pool is capped) and the
+    /// stream picks the queue still holds, where each was found, the songs
+    /// asked around lately.
+    fn radio_prune(&mut self) {
+        let in_queue: HashSet<TrackId> = queue_order(&self.queue).iter().map(|e| e.track).collect();
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        // Picks on their way may hold stream candidates not queued yet.
+        if run.extending {
+            return;
+        }
+        let heard: HashSet<TrackId> = run.heard.iter().copied().collect();
+        run.streams.retain(|t, _| in_queue.contains(t) || heard.contains(t));
+        let playing: HashSet<RemoteId> = run.streams.values().cloned().collect();
+        let state = &run.state;
+        run.pool.retain(|id, _| playing.contains(id) || state.has_new(id));
+        let pool = &run.pool;
+        run.via.retain(|id, _| pool.contains_key(id));
+        if run.asked.len() > ASKED_KEEP {
+            run.asked.clear();
+        }
     }
 
     /// The mixes (and «Новое для тебя») take the discoveries as new music.
@@ -1429,11 +1523,21 @@ impl Worker {
             streams: run.streams.iter().map(|(t, r)| (*t, r.clone())).collect(),
             pool: run.pool.values().cloned().collect(),
             autoplay: run.autoplay,
+            added_at: queue_order(&self.queue)
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| run.added.contains(&e.id))
+                .map(|(k, e)| (k, e.track))
+                .collect(),
         })
     }
 
     /// The radio of the restored queue goes on.
     pub(crate) fn radio_restore(&mut self, save: RadioSave) {
+        // Its own entries again, by their places (a track that moved is
+        // the user's now).
+        let order = queue_order(&self.queue);
+        let added: HashSet<u64> = save.added_at.iter().filter_map(|(k, t)| order.get(*k).filter(|e| e.track == *t).map(|e| e.id)).collect();
         let r = &mut self.recs.radio;
         r.seq += 1;
         log::info!("radio «{}» goes on", save.title);
@@ -1454,13 +1558,14 @@ impl Worker {
             pending_new: Vec::new(),
             resume: false,
             autoplay: save.autoplay,
-            added: HashSet::new(),
+            added,
             heard: Vec::new(),
             asked: HashSet::new(),
             queued: (0, 0),
             via: HashMap::new(),
             redo: None,
             stale: false,
+            forgotten: Vec::new(),
         });
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
     }

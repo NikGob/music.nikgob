@@ -2423,22 +2423,18 @@ impl Worker {
     /// when known: the session and the skip model learn it.
     pub(crate) fn recs_ended(&mut self, track: TrackId, complete: bool, position_ms: u32, duration_ms: Option<u32>) {
         let track = self.recs_song_of(track);
-        let ended = if complete {
-            Ended::Complete
-        } else if position_ms < nikgob_recs::taste::EARLY_SKIP_MS {
-            Ended::Early
-        } else {
-            Ended::Late
-        };
+        // A short track's outro is no early skip.
+        let ended = if complete { Ended::Complete } else { nikgob_recs::session::skip_ended(position_ms, duration_ms) };
         self.new_ended(track, ended);
         let r = &mut self.recs;
         r.session.end_at(track, ended, position_ms, duration_ms, false);
         let Some((t, x)) = r.skip_x.take() else { return };
-        if t != track || ended == Ended::Late {
-            return;
-        }
         let Some(snap) = r.snap.clone() else { return };
-        r.weights.get_or_insert(snap.model.weights).skip.observe(&x, ended == Ended::Early);
+        // What it teaches the skip model («not now» of a loved track:
+        // nothing, it was the mood).
+        let lesson = r.session.last_of(track).and_then(|p| Session::skip_lesson(p, &snap.model));
+        let Some(skipped) = lesson.filter(|_| t == track) else { return };
+        r.weights.get_or_insert(snap.model.weights).skip.observe(&x, skipped);
         self.recs_keep_weights();
     }
 

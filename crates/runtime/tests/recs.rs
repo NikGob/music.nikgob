@@ -411,8 +411,17 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     wait_for(&s.rt, "the radio back", |st| st.queue.radio.as_ref().is_some_and(|r| r.title == title));
     let left = s.rt.state().queue.next.len();
     assert_eq!(left, 3);
+    let restored: Vec<u64> = s.rt.state().queue.next.iter().map(|e| e.entry).collect();
     s.rt.send(Command::TogglePlay);
     wait_until("the restored track plays", || !s.asked.lock().unwrap().is_empty());
+    // The restored tail is still the radio's: a skip picks it again.
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "the restored tail picked again", |st| {
+        st.queue.current_entry == Some(restored[0])
+            && st.queue.radio.as_ref().is_some_and(|r| !r.extending)
+            && st.queue.next.len() == 3
+            && !st.queue.next.iter().any(|e| restored[1..].contains(&e.entry))
+    });
     for _ in 0..10 {
         end_current(&s);
     }
@@ -591,6 +600,27 @@ fn the_radio_tail_follows_skips_and_removals() {
         st.queue.current_entry.is_some_and(|e| !before.contains(&e)) && settled(st) && !entries(st).iter().any(|e| before.contains(e))
     });
     assert!(s.asked.lock().unwrap().len() > asked, "a new pick plays");
+
+    // Two left, the extension on its way, two skips running at once: the
+    // old tail goes at once, none of it plays, the new picks do.
+    let before = entries(&s.rt.state());
+    let (id, mark) = {
+        let asked = s.asked.lock().unwrap();
+        (asked.last().unwrap().id, asked.len())
+    };
+    s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
+    // At once, the extension it starts still on its way.
+    while s.asked.lock().unwrap().len() == mark {
+        std::hint::spin_loop();
+    }
+    s.rt.send(Command::Next);
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "a new tail after the extension", |st| {
+        st.queue.current_entry.is_some_and(|e| !before.contains(&e)) && settled(st) && !entries(st).iter().any(|e| before.contains(e))
+    });
+    let played: Vec<u64> = s.asked.lock().unwrap()[mark + 1..].iter().map(|r| r.id).collect();
+    assert!(!played.contains(&before[2]), "the replaced tail never plays: {played:?} of {before:?}");
 
     // The user's own track behind the radio's; one of the radio's taken
     // out: the radio's others go, the user's stays.
@@ -1161,6 +1191,55 @@ fn autoplay_brings_back_nothing_the_queue_played_as_new_music() {
     std::thread::sleep(Duration::from_millis(500));
     let st = s.rt.state();
     assert!(st.queue.next.iter().all(|e| !ids.contains(&e.track.id)), "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
+}
+
+/// New music the service's radio brings after the queue was picked joins
+/// the three ahead in the place of the radio's own picks: never more than
+/// three.
+#[test]
+fn new_music_keeps_the_radio_to_three_ahead() {
+    let l = library(0, 0, 0, KNOWN);
+    let (yt, dz) = fakes();
+    let prefs = Prefs {
+        graph_services: false,
+        graph_open_data: false,
+        radio_new_share: nikgob_view::RadioNewShare::None,
+        // Its album going on first is another rule.
+        autoplay_continue_world: false,
+        ..Prefs::default()
+    };
+    let album = tokio::runtime::Runtime::new().unwrap().block_on(yt.album("yt-alb-firstlove")).unwrap();
+    // One song of the album: the rest of it is new music.
+    let ids = l.lib.upsert_stream_tracks(&album.tracks[..1]).unwrap();
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
+    wait_for(&s.rt, "the hero", |st| st.home.hero.is_some());
+    s.rt.send(Command::PlayTracks { tracks: ids.clone(), start: 0, context: "Трек".into() });
+    wait_until("the first plays", || !s.asked.lock().unwrap().is_empty());
+    wait_for(&s.rt, "autoplay of the library", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 3
+    });
+    // New music on: the service's radio answers after the three were
+    // picked, its share owed.
+    // (The fake's songs have no sound: they come in as blind picks.)
+    let prefs = Prefs {
+        radio_new_share: nikgob_view::RadioNewShare::More,
+        radio_explore: nikgob_view::RadioExplore::Often,
+        ..s.rt.state().prefs.clone()
+    };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    let (mut most, mut joined) = (0, None);
+    let t = Instant::now();
+    while joined.is_none_or(|at: Instant| at.elapsed() < Duration::from_secs(1)) {
+        assert!(t.elapsed() < Duration::from_secs(60), "no new music joined the queue");
+        let st = s.rt.state();
+        most = most.max(st.queue.next.len());
+        if joined.is_none() && st.queue.next.iter().any(|e| !ids.contains(&e.track.id) && !e.track.has_local) {
+            joined = Some(Instant::now());
+        }
+        drop(st);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(most <= 3, "{most} ahead");
 }
 
 /// A lone stream the library does not hold (played from its album's page),
