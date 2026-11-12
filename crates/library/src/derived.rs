@@ -244,6 +244,101 @@ impl Library {
         })
     }
 
+    // ---- The neural sound model's vectors (docs/recommendations.md §5)
+
+    /// Stores a track's sound-model vector (`vector`: its 260 bytes; `None`:
+    /// the model cannot make one of this audio, not tried again with this
+    /// `embedded_with`). A stream's never replaces a file's of the same
+    /// model; returns whether it was stored.
+    pub fn put_embedding(&self, track: TrackId, vector: Option<&[u8]>, embedded_with: &str, source: AnalysisSource) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO sound_embedding(track_id, vector, embedded_with, source, embedded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(track_id) DO UPDATE SET vector = excluded.vector,
+                    embedded_with = excluded.embedded_with, source = excluded.source,
+                    embedded_at = excluded.embedded_at
+                  WHERE NOT (sound_embedding.source = 'file' AND excluded.source <> 'file'
+                             AND sound_embedding.embedded_with = excluded.embedded_with
+                             AND sound_embedding.vector IS NOT NULL)",
+                params![track.to_string(), vector, embedded_with, source.as_str(), now_ms()],
+            )? > 0)
+        })
+    }
+
+    /// The track has a row of `embedded_with` (a vector, or the mark that
+    /// it cannot have one).
+    pub fn has_embedding(&self, track: TrackId, embedded_with: &str) -> Result<bool> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT 1 FROM sound_embedding WHERE track_id = ?1 AND embedded_with = ?2",
+                params![track.to_string(), embedded_with],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+        })
+    }
+
+    /// Every vector of `embedded_with` of tracks that are not deleted: what
+    /// the in-memory index takes at start.
+    pub fn embedding_vectors(&self, embedded_with: &str) -> Result<Vec<(TrackId, Vec<u8>)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT e.track_id, e.vector FROM sound_embedding e JOIN track t ON t.id = e.track_id
+                  WHERE e.embedded_with = ?1 AND e.vector IS NOT NULL AND t.deleted_at IS NULL",
+            )?;
+            let mut rows = stmt.query([embedded_with])?;
+            let mut out = Vec::new();
+            while let Some(r) = rows.next()? {
+                out.push((get_id(r, 0)?, r.get(1)?));
+            }
+            Ok(out)
+        })
+    }
+
+    /// Tracks with a file whose bliss analysis (`analyzed_with`, from the
+    /// file) is current but whose sound-model vector of `embedded_with` is
+    /// missing, of another model or a stream's: the model's own queue once
+    /// bliss's is done. Newest first.
+    pub fn tracks_needing_embedding(&self, embedded_with: &str, analyzed_with: &str, limit: u32) -> Result<Vec<AnalysisTodo>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT t.id, s.id, s.locator, {FILE_KEY} FROM track t
+                   JOIN source s ON s.track_id = t.id AND s.is_active = 1 AND s.kind = 'local_file'
+                   JOIN analysis a ON a.track_id = t.id AND a.analyzed_with = ?2 AND a.source = 'file'
+                   LEFT JOIN sound_embedding e ON e.track_id = t.id
+                  WHERE t.has_local = 1 AND t.deleted_at IS NULL
+                    AND (e.track_id IS NULL OR e.embedded_with <> ?1 OR e.source <> 'file')
+                  ORDER BY t.seq DESC LIMIT ?3"
+            ))?;
+            let rows = stmt.query_map(params![embedded_with, analyzed_with, limit], |r| {
+                Ok(AnalysisTodo { track_id: get_id(r, 0)?, source_id: get_id(r, 1)?, locator: r.get(2)?, file_key: r.get(3)? })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Files with a sound-model vector of `embedded_with` (or its mark) and
+    /// files in all, as [`Self::analysis_counts`] counts them.
+    pub fn embedding_counts(&self, embedded_with: &str) -> Result<(u32, u32)> {
+        self.read(|c| {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT coalesce(sum(e.embedded_with = ?1 AND e.source = 'file'), 0), count(*)
+                       FROM track t
+                       JOIN source s ON s.track_id = t.id AND s.is_active = 1 AND s.kind = 'local_file'
+                       LEFT JOIN sound_embedding e ON e.track_id = t.id
+                       LEFT JOIN analysis_failed f ON f.track_id = t.id
+                      WHERE t.has_local = 1 AND t.deleted_at IS NULL
+                        AND (f.track_id IS NULL OR f.file_key <> {FILE_KEY})"
+                ),
+                [embedded_with],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+    }
+
     // ---- «Не рекомендовать»
 
     /// Marks (`dislike`) or clears «не рекомендовать» for a target

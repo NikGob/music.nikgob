@@ -299,7 +299,8 @@ impl Shared {
             }
             Err(e) => log::warn!("quality: putting the checks right: {e}"),
         }
-        let mut pacer = Pacer::new(&self.stop);
+        // A heavy job: never beside the sound analysis or the lyrics pass.
+        let mut pacer = Pacer::heavy(&self.stop, "quality check");
         // Not tried again in this run (could not be opened).
         let mut skip = HashSet::new();
         while !self.stopped() {

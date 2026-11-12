@@ -60,6 +60,9 @@ const RETRY_MS: i64 = 7 * 86_400_000;
 /// Models stay loaded this long without work (an aligner and its few
 /// hundred megabytes; the separator and Whisper go after each use).
 const KEEP_LOADED: Duration = Duration::from_secs(25);
+/// The library pass looks for the heavy jobs' turn again this often while
+/// another heavy job holds it.
+const HEAVY_RETRY: Duration = Duration::from_secs(5);
 /// CPU threads of the models.
 const THREADS: usize = 3;
 
@@ -302,6 +305,7 @@ pub(crate) fn label(id: ModelId) -> &'static str {
         ModelId::SeparatorDeep => "Глубокое создание: отделение голоса",
         ModelId::AlignerRuDeep => "Глубокое создание: русский",
         ModelId::AlignerSung => "Глубокое создание: английский и другие языки",
+        ModelId::SoundEffnet => "Нейросетевой анализ звука",
     }
 }
 
@@ -317,6 +321,7 @@ pub(crate) fn key(id: ModelId) -> &'static str {
         ModelId::SeparatorDeep => "separator-deep",
         ModelId::AlignerRuDeep => "ru-deep",
         ModelId::AlignerSung => "sung",
+        ModelId::SoundEffnet => "sound",
     }
 }
 
@@ -556,16 +561,26 @@ impl Thread {
                 continue;
             }
             // While a game is in front the pass waits (the models it kept go
-            // after `KEEP_LOADED` as ever).
-            if Instant::now() >= self.pass_at && self.pass_wanted() && !crate::quiet::busy() {
+            // after `KEEP_LOADED` as ever); it is a heavy job, so it also
+            // waits while the sound analysis or the quality check has the
+            // turn (docs/recommendations.md §5.1.3).
+            let due = Instant::now() >= self.pass_at && self.pass_wanted() && !crate::quiet::busy();
+            let turn = if due { crate::quiet::heavy().try_acquire("lyrics alignment") } else { None };
+            if due && turn.is_none() {
+                self.pass_at = Instant::now() + HEAVY_RETRY;
+            }
+            if let Some(turn) = turn {
                 let started = Instant::now();
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.pass_step())) {
+                let stepped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.pass_step()));
+                // The duty cycle: a rest K times the track's work (times the
+                // model threads on the CPU), for the next heavy job too.
+                let cores = if self.settings.gpu { 1 } else { THREADS };
+                let rest = crate::quiet::rest_for(started.elapsed(), cores);
+                turn.release(if matches!(stepped, Ok(true)) { rest } else { Duration::ZERO });
+                match stepped {
                     Ok(true) => {
                         self.last_work = Instant::now();
-                        // The duty cycle: a rest K times the track's work
-                        // (times the model threads on the CPU).
-                        let cores = if self.settings.gpu { 1 } else { THREADS };
-                        self.pass_at = Instant::now() + crate::quiet::rest_for(started.elapsed(), cores);
+                        self.pass_at = Instant::now() + rest;
                         continue;
                     }
                     Ok(false) => {}

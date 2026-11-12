@@ -680,7 +680,7 @@ pub(crate) fn merge_track_in(tx: &Connection, from: TrackId, into: TrackId, devi
         first_string(tx, "SELECT release_id FROM track WHERE id = ?1 AND release_id IS NOT NULL", [&f])?,
         first_string(tx, "SELECT release_id FROM track WHERE id = ?1 AND release_id IS NOT NULL", [&t])?,
     );
-    for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "master"] {
+    for table in ["track_artist", "lyrics", "lyrics_text", "lyrics_pick", "analysis", "analysis_failed", "sound_embedding", "master"] {
         tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&f])?;
     }
     tx.execute("DELETE FROM track WHERE id = ?1", [&f])?;

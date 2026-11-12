@@ -35,6 +35,7 @@ mod torrents;
 pub mod queue;
 mod session;
 mod sharing;
+mod sound_model;
 mod editions;
 mod streams;
 #[cfg(test)]
@@ -3009,6 +3010,9 @@ impl Worker {
         }
         if old.stream_analysis != p.stream_analysis {
             self.stream_analysis_pref(p.stream_analysis);
+        }
+        if (old.sound_neural, old.sound_cpu_only) != (p.sound_neural, p.sound_cpu_only) {
+            self.sound_neural_prefs();
         }
         if old.mixes_downloaded_only != p.mixes_downloaded_only {
             // The rows it hides go (or come back) at once; the

@@ -178,6 +178,19 @@ impl Model {
         Ok(data.to_vec())
     }
 
+    /// One float input, every output back with its shape (a model with
+    /// several heads, as Discogs-EffNet's styles and embedding).
+    pub fn run_f32_outputs(&mut self, shape: Vec<usize>, data: Vec<f32>) -> Result<Vec<(Vec<i64>, Vec<f32>)>, Error> {
+        let input = Tensor::from_array((shape, data)).map_err(|e| Error::Model(e.to_string()))?;
+        let out = self.session.run(ort::inputs![input]).map_err(|e| Error::Model(e.to_string()))?;
+        (0..out.len())
+            .map(|i| {
+                let (shape, data) = out[i].try_extract_tensor::<f32>().map_err(|e| Error::Model(e.to_string()))?;
+                Ok((shape.to_vec(), data.to_vec()))
+            })
+            .collect()
+    }
+
     /// [`Self::run_f32`] with the output's shape.
     pub fn run_f32_shaped(&mut self, shape: Vec<usize>, data: Vec<f32>) -> Result<(Vec<i64>, Vec<f32>), Error> {
         let input = Tensor::from_array((shape, data)).map_err(|e| Error::Model(e.to_string()))?;

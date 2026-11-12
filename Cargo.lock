@@ -5175,6 +5175,7 @@ version = "0.0.5"
 dependencies = [
  "bliss-audio",
  "nikgob-core",
+ "realfft",
  "rubato 5.0.1",
  "serde",
  "serde_json",

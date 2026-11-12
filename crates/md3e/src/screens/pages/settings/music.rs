@@ -7,7 +7,7 @@ use nikgob_view::{ListKind, Prefs, RadioKind, RadioNewShare, Route, ViewState};
 
 use super::super::settings_help::SettingId as Id;
 use super::preset;
-use super::rows::{self, Num, child, dimmed, group, menu, row, sub, switch, switch_enabled};
+use super::rows::{self, Note, Num, child, dimmed, group, menu, row, row_note, sub, switch, switch_enabled};
 use super::super::PageState;
 use crate::components::{Button, Size, Style, Switch};
 
@@ -27,7 +27,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     switch(ui, Id::ShuffleRadio, &mut p.shuffle_radio);
 
     albums(ui, p);
-    recommendations(ui, p);
+    recommendations(ui, state, p);
     dislikes(ui, p, pages);
 }
 
@@ -82,7 +82,7 @@ fn albums(ui: &mut Ui, p: &mut Prefs) {
 
 /// «Рекомендации»: how much new music, from where, how much of it at
 /// random, the unheard, the listeners' graph.
-fn recommendations(ui: &mut Ui, p: &mut Prefs) {
+fn recommendations(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     group(ui, "Рекомендации");
     // While a preset is under the pointer the rows show what it would give.
     let mut preview = preset::row(ui, Area::Recs, p);
@@ -118,6 +118,35 @@ fn recommendations(ui: &mut Ui, p: &mut Prefs) {
     });
     menu(ui, Id::RadioUnheard, p);
     switch(ui, Id::GraphUse, &mut p.graph_use);
+    sound_model(ui, state, p);
+}
+
+/// «Нейросетевой анализ звука» and where it runs: the download's (or the
+/// library's) progress under the menu while it goes, an error when the
+/// model could not be had.
+fn sound_model(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
+    let m = &state.sound_model;
+    let mode = p.sound_neural_or(m.ready);
+    let progress = match m.downloading {
+        Some(pct) => Some(f32::from(pct) / 100.0),
+        None => (mode.library() && m.ready && m.total > 0 && m.done < m.total).then(|| m.done as f32 / m.total as f32),
+    };
+    let note = (mode.library() && m.failed).then_some(Note::Error("Не получилось загрузить модель"));
+    row_note(ui, Id::SoundNeural, note, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            rows::choice_menu(ui, Id::SoundNeural, p);
+            if let Some(f) = progress {
+                crate::components::wavy_progress(ui, ("set-progress", Id::SoundNeural), f, 96.0);
+            }
+        });
+    });
+    let off = !mode.library();
+    dimmed(ui, off, |ui| {
+        row(ui, Id::SoundDevice, |ui| {
+            ui.add_enabled_ui(!off, |ui| rows::choice_menu(ui, Id::SoundDevice, p));
+        });
+    });
 }
 
 /// «Не нравится»: the button, the skips, and the page of the marks (the

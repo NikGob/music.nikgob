@@ -74,6 +74,7 @@ const TRACK_TABLES: &[(&str, &str)] = &[
     ("lyrics_text", "track_id = ?1"),
     ("lyrics_pick", "track_id = ?1"),
     ("analysis", "track_id = ?1"),
+    ("sound_embedding", "track_id = ?1"),
 ];
 
 impl Library {
@@ -114,7 +115,7 @@ impl Library {
                     [&tid, service.as_str()],
                 )?;
             }
-            for table in ["lyrics", "lyrics_text", "lyrics_pick", "analysis"] {
+            for table in ["lyrics", "lyrics_text", "lyrics_pick", "analysis", "sound_embedding"] {
                 tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&tid])?;
             }
             let mut meta = meta.clone();
