@@ -14,6 +14,9 @@
 //!   unit (a decode) rests between its chunks.
 //! * **Lowest priority** ([`lower_priority`]) for every thread of such a
 //!   pass.
+//! * **One heavy job at a time** ([`Heavy`]): the sound analysis, the
+//!   lyrics alignment's library pass and the quality check's spectra take
+//!   turns, each waiting for the last one's rest.
 //!
 //! Playback, and what the user asks for the playing song, never wait here.
 
@@ -21,7 +24,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 
 /// While busy, the passes look again this often.
 pub(crate) const POLL: Duration = Duration::from_secs(5);
@@ -190,11 +193,111 @@ pub(crate) async fn free() {
     }
 }
 
+/// The heavy background jobs take turns (docs/recommendations.md §5.1.3):
+/// the sound analysis (bliss and the neural model), the lyrics
+/// alignment's pass over the library and the quality check's spectra
+/// never run at once, and after one's unit of work the next starts only
+/// when its rest ([`K`] times the work) is over, so together they keep to
+/// the duty cycle of one. What the user asks for (the playing song's
+/// lyrics) does not take a turn.
+pub(crate) struct Heavy {
+    state: Mutex<HeavyState>,
+    wake: Condvar,
+}
+
+struct HeavyState {
+    /// The job holding the turn.
+    holder: Option<&'static str>,
+    /// No turn before this (the last unit's rest).
+    free_at: Option<Instant>,
+}
+
+/// The turn of one heavy job; released (with its rest) when dropped.
+pub(crate) struct HeavyTurn<'a> {
+    heavy: &'a Heavy,
+    since: Instant,
+    rest: Option<Duration>,
+}
+
+impl HeavyTurn<'_> {
+    /// Gives the turn back; the next job starts after `rest`.
+    pub(crate) fn release(mut self, rest: Duration) {
+        self.rest = Some(rest);
+    }
+}
+
+impl Drop for HeavyTurn<'_> {
+    fn drop(&mut self) {
+        let rest = self.rest.unwrap_or_else(|| rest_for(self.since.elapsed(), 1));
+        let mut s = self.heavy.state.lock();
+        s.holder = None;
+        s.free_at = Some(Instant::now() + rest);
+        self.heavy.wake.notify_all();
+    }
+}
+
+impl Heavy {
+    pub(crate) const fn new() -> Self {
+        Self { state: Mutex::new(HeavyState { holder: None, free_at: None }), wake: Condvar::new() }
+    }
+
+    fn take(&self, s: &mut HeavyState, who: &'static str) -> Option<HeavyTurn<'_>> {
+        if s.holder.is_some() || s.free_at.is_some_and(|t| Instant::now() < t) {
+            return None;
+        }
+        s.holder = Some(who);
+        Some(HeavyTurn { heavy: self, since: Instant::now(), rest: None })
+    }
+
+    /// The turn now, if no other heavy job holds it and the last one's
+    /// rest is over.
+    pub(crate) fn try_acquire(&self, who: &'static str) -> Option<HeavyTurn<'_>> {
+        let mut s = self.state.lock();
+        self.take(&mut s, who)
+    }
+
+    /// Waits for the turn; `None` when `stop` was set meanwhile.
+    pub(crate) fn acquire(&self, who: &'static str, stop: &AtomicBool) -> Option<HeavyTurn<'_>> {
+        let mut s = self.state.lock();
+        let mut logged = false;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(turn) = self.take(&mut s, who) {
+                return Some(turn);
+            }
+            if let (Some(other), false) = (s.holder, logged) {
+                log::debug!("quiet: {who} waits for {other}");
+                logged = true;
+            }
+            let wait = s.free_at.map_or(STEP, |t| t.saturating_duration_since(Instant::now()).clamp(Duration::from_millis(1), STEP));
+            self.wake.wait_for(&mut s, wait);
+        }
+    }
+
+    /// The job holding the turn now.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn holder(&self) -> Option<&'static str> {
+        self.state.lock().holder
+    }
+}
+
+static HEAVY: Heavy = Heavy::new();
+
+/// The app's turn of heavy jobs.
+pub(crate) fn heavy() -> &'static Heavy {
+    &HEAVY
+}
+
 /// The pace of one background thread: [`Self::begin`] before a unit of
 /// work, [`Self::step`] between its chunks, [`Self::rest`] after it.
 pub(crate) struct Pacer<'a> {
     /// None: never rests nor waits (tests, work the user asked for).
     gate: Option<&'a Gate>,
+    /// A heavy job: each unit takes the turn of [`Heavy`] (and its name).
+    heavy: Option<(&'a Heavy, &'static str)>,
+    turn: Option<HeavyTurn<'a>>,
     stop: &'a AtomicBool,
     cores: usize,
     slice: Duration,
@@ -215,8 +318,15 @@ impl<'a> Pacer<'a> {
         Self::with(None, stop, 1, SLICE)
     }
 
+    /// [`Self::new`] for a heavy job (`who` names it in the log): each
+    /// unit, from [`Self::begin`] to [`Self::rest`], holds the app's turn
+    /// of heavy jobs ([`heavy`]).
+    pub(crate) fn heavy(stop: &'a AtomicBool, who: &'static str) -> Self {
+        Self { heavy: Some((heavy(), who)), ..Self::new(stop) }
+    }
+
     pub(crate) fn with(gate: Option<&'a Gate>, stop: &'a AtomicBool, cores: usize, slice: Duration) -> Self {
-        Self { gate, stop, cores, slice, since: Instant::now() }
+        Self { gate, heavy: None, turn: None, stop, cores, slice, since: Instant::now() }
     }
 
     pub(crate) fn stopped(&self) -> bool {
@@ -226,10 +336,17 @@ impl<'a> Pacer<'a> {
     /// Before a unit: waits while busy, and the work is counted from now
     /// (what came before was no work of ours). False when stopped.
     pub(crate) fn begin(&mut self) -> bool {
-        let ok = match self.gate {
+        let mut ok = match self.gate {
             Some(g) => g.wait_free(self.stop),
             None => !self.stopped(),
         };
+        if ok
+            && self.turn.is_none()
+            && let Some((h, who)) = self.heavy
+        {
+            self.turn = h.acquire(who, self.stop);
+            ok = self.turn.is_some();
+        }
         self.since = Instant::now();
         ok
     }
@@ -238,14 +355,24 @@ impl<'a> Pacer<'a> {
     /// rest and the wait while busy. False when stopped.
     pub(crate) fn step(&mut self) -> bool {
         if self.gate.is_some() && self.since.elapsed() >= self.slice {
-            return self.rest();
+            return self.pause();
         }
         !self.stopped()
     }
 
     /// After a unit: [`K`] times the work since the last rest, then the
-    /// wait while busy. False when stopped.
+    /// wait while busy; a heavy job's turn goes back first (the next heavy
+    /// job starts after the same rest). False when stopped.
     pub(crate) fn rest(&mut self) -> bool {
+        let d = rest_for(self.since.elapsed(), self.cores);
+        if let Some(turn) = self.turn.take() {
+            turn.release(if self.gate.is_some() { d } else { Duration::ZERO });
+        }
+        self.pause()
+    }
+
+    /// The rest of the work since the last one, keeping the turn.
+    fn pause(&mut self) -> bool {
         let Some(g) = self.gate else { return !self.stopped() };
         let d = rest_for(self.since.elapsed(), self.cores);
         let ok = sleep_unless(self.stop, d) && g.wait_free(self.stop);
@@ -447,5 +574,72 @@ mod tests {
         assert!(t.elapsed() < Duration::from_millis(10));
         stop.store(true, Ordering::Relaxed);
         assert!(!p.step());
+    }
+
+    /// Heavy jobs never overlap, whoever asks; a stop ends the wait.
+    #[test]
+    fn heavy_jobs_take_turns() {
+        let heavy = Arc::new(Heavy::new());
+        let inside = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = ["analysis", "align", "quality"]
+            .into_iter()
+            .map(|who| {
+                let (heavy, inside, most) = (heavy.clone(), inside.clone(), most.clone());
+                std::thread::spawn(move || {
+                    let stop = AtomicBool::new(false);
+                    for _ in 0..5 {
+                        let turn = heavy.acquire(who, &stop).unwrap();
+                        let now = inside.fetch_add(1, Ordering::SeqCst) + 1;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(3));
+                        inside.fetch_sub(1, Ordering::SeqCst);
+                        turn.release(Duration::ZERO);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(most.load(Ordering::SeqCst), 1, "two heavy jobs ran at once");
+        assert_eq!(heavy.holder(), None);
+
+        let held = heavy.try_acquire("analysis").unwrap();
+        assert_eq!(heavy.holder(), Some("analysis"));
+        assert!(heavy.try_acquire("align").is_none());
+        let stop = AtomicBool::new(true);
+        assert!(heavy.acquire("quality", &stop).is_none(), "a stop ends the wait");
+        held.release(Duration::ZERO);
+        assert!(heavy.try_acquire("align").is_some());
+    }
+
+    /// After a unit the next heavy job waits out its rest.
+    #[test]
+    fn the_next_heavy_job_waits_for_the_rest() {
+        let heavy = Heavy::new();
+        heavy.try_acquire("analysis").unwrap().release(Duration::from_millis(80));
+        assert!(heavy.try_acquire("align").is_none(), "within the rest");
+        let t = Instant::now();
+        let stop = AtomicBool::new(false);
+        let turn = heavy.acquire("align", &stop).unwrap();
+        assert!(t.elapsed() >= Duration::from_millis(60), "{:?}", t.elapsed());
+        drop(turn);
+    }
+
+    /// A heavy pacer holds the turn from `begin` to `rest`.
+    #[test]
+    fn a_heavy_pacer_holds_the_turn_for_its_unit() {
+        let gate = Gate::new(|| false, Duration::ZERO, Duration::from_millis(1));
+        let heavy = Heavy::new();
+        let stop = AtomicBool::new(false);
+        let mut p = Pacer::with(Some(&gate), &stop, 1, Duration::from_secs(3600));
+        p.heavy = Some((&heavy, "analysis"));
+        assert!(p.begin());
+        assert_eq!(heavy.holder(), Some("analysis"));
+        assert!(p.step(), "between chunks the turn stays");
+        assert_eq!(heavy.holder(), Some("analysis"));
+        assert!(p.rest());
+        assert_eq!(heavy.holder(), None);
     }
 }
