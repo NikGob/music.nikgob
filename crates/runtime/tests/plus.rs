@@ -266,3 +266,200 @@ fn the_chip_is_remembered() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(!s.rt.state().queue.next.iter().any(|e| e.guest));
 }
+
+/// Starts the playlist `id` and waits for its first track to be asked for
+/// (a queue of `n` entries at least).
+fn play(s: &Started, id: PlaylistId, n: usize) {
+    let asked = s.asked.lock().unwrap().len();
+    s.rt.send(Command::PlayPlaylist { id, start: None, shuffle: false });
+    wait_until("the playlist plays", || s.asked.lock().unwrap().len() > asked);
+    wait_for(&s.rt, "the playlist's queue", |st| st.queue.prev.is_empty() && st.queue.next.len() + 1 >= n);
+}
+
+/// The guests ahead.
+fn guests_ahead(st: &ViewState) -> Vec<u64> {
+    st.queue.next.iter().filter(|e| e.guest).map(|e| e.entry).collect()
+}
+
+/// The place of the first guest ahead: the guest after the third own track
+/// (the one playing the first) is at 2.
+fn guest_place(st: &ViewState) -> Option<usize> {
+    st.queue.next.iter().position(|e| e.guest)
+}
+
+/// Each guest keeps being a guest after a restart and after «Очистить» →
+/// «Отменить»: the chip off still takes it out, and no second comes.
+#[test]
+fn a_guest_stays_a_guest_after_a_restart_and_an_undo() {
+    let (lib, id, tracks) = library();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prefs.json");
+    // (Without autoplay: a cleared queue would go on with a radio.)
+    let s = start(&lib, Prefs { plus_playlists: vec![id], autoplay: false, ..prefs() }, Some(&path));
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
+    play(&s, id, tracks.len());
+    wait_for(&s.rt, "a guest", |st| guest_place(st) == Some(2));
+    let guest = guests_ahead(&s.rt.state())[0];
+
+    // «Очистить» → «Отменить»: the guest is marked again, alone.
+    s.rt.send(Command::ClearQueue);
+    wait_for(&s.rt, "the queue cleared", |st| st.queue.next.is_empty());
+    s.rt.send(Command::UndoClearQueue);
+    wait_for(&s.rt, "the queue back", |st| st.queue.next.len() == tracks.len());
+    std::thread::sleep(Duration::from_millis(300));
+    let st = s.rt.state();
+    assert_eq!(guest_place(&st), Some(2), "{:?}", rows(&st.queue.next));
+    assert_eq!(guests_ahead(&st).len(), 1, "{:?}", rows(&st.queue.next));
+    assert_ne!(guests_ahead(&st)[0], guest, "a fresh entry");
+    drop(st);
+    drop(s);
+
+    // A restart: the same.
+    let s = start(&lib, Prefs { plus_playlists: vec![id], autoplay: false, ..prefs() }, Some(&path));
+    wait_for(&s.rt, "the queue restored", |st| st.queue.next.len() == tracks.len());
+    std::thread::sleep(Duration::from_millis(500));
+    let st = s.rt.state();
+    assert_eq!(guest_place(&st), Some(2), "{:?}", rows(&st.queue.next));
+    assert_eq!(guests_ahead(&st).len(), 1, "{:?}", rows(&st.queue.next));
+    drop(st);
+    s.rt.send(Command::SetPref(PrefPatch::Plus { playlist: id, on: false }));
+    wait_for(&s.rt, "the guest out after the restart", |st| guests_ahead(st).is_empty() && st.queue.next.len() == tracks.len() - 1);
+}
+
+/// ♡ on the guest ahead keeps it where it is: no second guest comes beside
+/// it, and the chip off leaves it.
+#[test]
+fn a_kept_guest_still_counts() {
+    let (lib, id, tracks) = library();
+    let s = start(&lib, Prefs { plus_playlists: vec![id], ..prefs() }, None);
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
+    play(&s, id, tracks.len());
+    wait_for(&s.rt, "a guest", |st| guest_place(st) == Some(2));
+    let track = s.rt.state().queue.next[2].track.id;
+    s.rt.send(Command::Like(nikgob_view::LikeTarget::Track(track), true));
+    std::thread::sleep(Duration::from_millis(300));
+    let st = s.rt.state();
+    assert_eq!(guests_ahead(&st).len(), 1, "{:?}", rows(&st.queue.next));
+    assert_eq!(st.queue.next[2].track.id, track);
+    drop(st);
+    s.rt.send(Command::SetPref(PrefPatch::Plus { playlist: id, on: false }));
+    wait_for(&s.rt, "the chip off", |st| !st.prefs.plus_playlists.contains(&id));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(s.rt.state().queue.next[2].track.id, track, "kept");
+}
+
+/// Shuffled, the guest ahead goes back to its place (one ahead, never two);
+/// dragged by the user, it stays where it was put and none other comes.
+#[test]
+fn shuffle_and_a_drag_keep_one_guest_ahead() {
+    let (lib, id, tracks) = library();
+    let s = start(&lib, Prefs { plus_playlists: vec![id], ..prefs() }, None);
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
+    play(&s, id, tracks.len());
+    wait_for(&s.rt, "a guest", |st| guest_place(st) == Some(2));
+    for _ in 0..4 {
+        s.rt.send(Command::ToggleShuffle);
+        std::thread::sleep(Duration::from_millis(150));
+        let st = s.rt.state();
+        assert_eq!(guests_ahead(&st).len(), 1, "{:?}", rows(&st.queue.next));
+        assert_eq!(guest_place(&st), Some(2), "{:?}", rows(&st.queue.next));
+    }
+    let st = s.rt.state();
+    let guest = guests_ahead(&st)[0];
+    let last = st.queue.next.last().unwrap().entry;
+    drop(st);
+    s.rt.send(Command::MoveInQueue { entry: guest, anchor: last, after: true });
+    wait_for(&s.rt, "the guest at the end", |st| st.queue.next.last().map(|e| e.entry) == Some(guest));
+    std::thread::sleep(Duration::from_millis(300));
+    let st = s.rt.state();
+    assert_eq!(guests_ahead(&st), vec![guest], "{:?}", rows(&st.queue.next));
+}
+
+/// «Дальше» on a guest is a skip whatever its position: no more guests.
+#[test]
+fn next_late_in_a_guest_is_a_skip() {
+    let (lib, id, tracks) = library();
+    let s = start(&lib, Prefs { plus_playlists: vec![id], ..prefs() }, None);
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
+    play(&s, id, tracks.len());
+    wait_for(&s.rt, "a guest", |st| guest_place(st) == Some(2));
+    for _ in 0..3 {
+        end_current(&s);
+    }
+    wait_for(&s.rt, "the guest plays", |st| st.queue.current_guest);
+    let req = s.asked.lock().unwrap().last().unwrap().id;
+    s.rt.playback_sender().send(PlaybackEvent::Started { id: req }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Position { id: req, position: Duration::from_secs(10_000) }).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    s.rt.send(Command::Next);
+    wait_for(&s.rt, "the next own track", |st| !st.queue.current_guest);
+    for _ in 0..3 {
+        end_current(&s);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(guests_ahead(&s.rt.state()).is_empty(), "{:?}", rows(&s.rt.state().queue.next));
+}
+
+/// Tracks queued by hand are not the playlist's even when they are its
+/// songs: a playlist of two with three of them queued after it gets no
+/// guest when the chip goes on.
+#[test]
+fn hand_queued_tracks_are_not_the_playlists() {
+    let (lib, _, tracks) = library();
+    let two = lib.create_playlist("Два").unwrap();
+    lib.playlist_add_many(two.id, &tracks[..2]).unwrap();
+    let s = start(&lib, prefs(), None);
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
+    play(&s, two.id, 2);
+    s.rt.send(Command::Enqueue(tracks[..3].to_vec()));
+    wait_for(&s.rt, "the hand-queued tracks", |st| st.queue.next.len() == 4);
+    s.rt.send(Command::SetPref(PrefPatch::Plus { playlist: two.id, on: true }));
+    wait_for(&s.rt, "the chip on", |st| st.prefs.plus_playlists.contains(&two.id));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(guests_ahead(&s.rt.state()).is_empty(), "{:?}", rows(&s.rt.state().queue.next));
+}
+
+/// A place passed without a guest (none could come then) is owed: the
+/// guest comes right after the track playing as soon as one can.
+#[test]
+fn a_missed_place_is_owed() {
+    let (lib, id, tracks) = library();
+    let s = start(&lib, Prefs { plus_playlists: vec![id], mixes_downloaded_only: true, ..prefs() }, None);
+    wait_for(&s.rt, "the home", |st| st.home.hero.is_some());
+    play(&s, id, tracks.len());
+    for _ in 0..4 {
+        end_current(&s);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(guests_ahead(&s.rt.state()).is_empty());
+    s.rt.send(Command::SetPref(PrefPatch::MixesDownloadedOnly(false)));
+    wait_for(&s.rt, "the owed guest", |st| guest_place(st) == Some(0));
+    assert_eq!(guests_ahead(&s.rt.state()).len(), 1);
+}
+
+/// Repeat one plays no guest; the chip off takes out the guests that
+/// played too (repeat all would bring them back).
+#[test]
+fn repeat_and_the_guests_that_played() {
+    let (lib, id, tracks) = library();
+    let s = start(&lib, Prefs { plus_playlists: vec![id], ..prefs() }, None);
+    wait_for(&s.rt, "discoveries", |st| !st.home.discover.is_empty());
+    play(&s, id, tracks.len());
+    wait_for(&s.rt, "a guest", |st| guest_place(st) == Some(2));
+    for _ in 0..4 {
+        end_current(&s);
+    }
+    wait_for(&s.rt, "the guest played", |st| st.queue.prev.iter().any(|e| e.guest));
+    s.rt.send(Command::SetPref(PrefPatch::Plus { playlist: id, on: false }));
+    wait_for(&s.rt, "the played guest out", |st| !st.queue.prev.iter().any(|e| e.guest) && guests_ahead(st).is_empty());
+    assert_eq!(s.rt.state().queue.prev.len(), 3, "the own ones stay");
+
+    // Repeat one: nothing joins.
+    s.rt.send(Command::CycleRepeat);
+    s.rt.send(Command::CycleRepeat);
+    wait_for(&s.rt, "repeat one", |st| st.player.repeat == nikgob_view::Repeat::One);
+    s.rt.send(Command::SetPref(PrefPatch::Plus { playlist: id, on: true }));
+    play(&s, id, tracks.len());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(guests_ahead(&s.rt.state()).is_empty(), "{:?}", rows(&s.rt.state().queue.next));
+}

@@ -1178,7 +1178,12 @@ impl Worker {
                 let (ids, name) = self.playlist_tracks(id, start);
                 let name = format!("плейлиста «{name}»");
                 let kind = self.playlist_kind(id);
+                let n = ids.len();
                 self.play_list(ids, start, shuffle, kind, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
+                // Its entries are its own («✦ С дополнением» counts them).
+                if n > 0 {
+                    self.plus_queued(id);
+                }
             }
             Command::PlayArtist { id, shuffle } => {
                 let rows = self
@@ -1270,6 +1275,7 @@ impl Worker {
             }
             Command::MoveInQueue { entry, anchor, after } => {
                 self.queue.move_next_to(entry, anchor, after);
+                self.plus_moved(entry);
                 self.preload_next();
                 self.publish_player();
             }
@@ -1277,6 +1283,7 @@ impl Worker {
                 let before: Vec<TrackId> = self.queue.history().iter().map(|e| e.track).collect();
                 let after: Vec<TrackId> = self.queue.upcoming().iter().map(|e| e.track).collect();
                 let playing = self.queue.current().map(|e| e.id);
+                self.plus_cleared();
                 self.queue.clear_upcoming();
                 self.preload_next();
                 self.publish_player();
@@ -1292,6 +1299,7 @@ impl Worker {
                     && self.queue.current().map(|e| e.id) == playing
                 {
                     self.queue.restore_around(&before, &after);
+                    self.plus_uncleared();
                     self.preload_next();
                     self.publish_player();
                 }
@@ -2070,7 +2078,9 @@ impl Worker {
                 return;
             }
             log::warn!("no playable source for {}", e.track);
-            if attempt == 0 {
+            // A guest of «✦ С дополнением» is passed over without a word.
+            let guest = self.plus_failed(e.id);
+            if attempt == 0 && !guest {
                 // A stream track's last way to the sound is YouTube Music:
                 // when it is off, that is the reason, not a missing file.
                 let streamed = self
@@ -2333,7 +2343,8 @@ impl Worker {
             self.recs_ended(e.track, complete, position_ms, dur);
             // After the session: the radio reads its verdict.
             self.radio_feedback(e.track, complete, position_ms, dur);
-            self.plus_ended(e.id, complete);
+            // «Дальше» on a guest is a skip at any point of it.
+            self.plus_ended(e.id, reason == EndReason::UserNext || (by_user && !complete));
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();

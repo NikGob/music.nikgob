@@ -72,6 +72,7 @@ use crate::analysis::SoundIndex;
 use crate::quiet::lower_priority;
 use crate::import::Internal;
 
+pub(crate) use plus::PlusSave;
 pub(crate) use radio::RadioSave;
 pub(crate) use discover::{DiscoverInput, HOME_NEW_MORE};
 pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
