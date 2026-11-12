@@ -890,9 +890,13 @@ fn an_album_of_one_song_of_the_users_plays_that_song() {
         ids
     };
     // Each step changes the queue, so a state of the step before never
-    // passes for it.
+    // passes for it. The whole album leaves its instrumental out until
+    // the album's switch says it plays.
     rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
-    wait_for(&rt, "the whole album once", |s| queued(s).len() == 2);
+    wait_for(&rt, "the whole album once, its instrumental apart", |s| queued(s) == [song.id]);
+    rt.send(Command::AlbumVersions { id: release.id, on: true });
+    rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the whole album with its instrumental", |s| queued(s).len() == 2);
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: true });
     wait_for(&rt, "the user's song, shuffled", |s| queued(s) == [song.id]);
     // Without a service the instrumental cannot play: that it was tried
@@ -905,7 +909,47 @@ fn an_album_of_one_song_of_the_users_plays_that_song() {
     wait_for(&rt, "«Мои треки»", |s| queued(s) == [song.id]);
     rt.send(Command::AddWholeAlbum { id: release.id, on: true });
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
-    wait_for(&rt, "the album added whole", |s| queued(s).len() == 2);
+    wait_for(&rt, "the album added whole, its versions on", |s| queued(s).len() == 2);
+    rt.send(Command::AlbumVersions { id: release.id, on: false });
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the album added whole, its versions off", |s| queued(s) == [song.id]);
+}
+
+/// «В библиотеку» of a stream song nobody liked: a library track, no like,
+/// nothing to download; «Убрать из библиотеки» takes it out, «Отменить»
+/// puts it back.
+#[test]
+fn a_stream_song_goes_into_the_library_without_a_like() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Source, SourceKind, Track};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let t = lib.upsert_track(&Track::new("Heard", ArtistCredit::single("A", Some(artist.id)))).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::Spotify, "spotify:track:heard", Codec::Vorbis)).unwrap();
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    wait_for(&rt, "the library", |s| s.library.loaded && s.library.track_count == 0);
+    rt.send(Command::TrackInLibrary { track: t.id, on: true });
+    wait_for(&rt, "the song in the library", |s| {
+        s.library.track_count == 1 && s.toasts.iter().any(|x| x.text == "Трек в библиотеке")
+    });
+    let undo = rt.state().toasts.iter().find(|x| x.text == "Трек в библиотеке").and_then(|x| x.action.clone()).map(|a| a.1);
+    assert_eq!(undo, Some(Command::TrackInLibrary { track: t.id, on: false }));
+    assert!(rt.state().downloads.wishlist.is_empty(), "nothing downloads");
+    rt.send(Command::TrackInLibrary { track: t.id, on: false });
+    wait_for(&rt, "the song out of the library", |s| s.library.track_count == 0);
 }
 
 /// A single of a song and its instrumental, saved along with the like of

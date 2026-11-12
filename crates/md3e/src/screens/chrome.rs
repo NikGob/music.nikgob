@@ -364,6 +364,8 @@ impl Chrome {
             A::Next => out.push(Command::PlayNext(vec![t.id])),
             A::Queue => out.push(Command::Enqueue(vec![t.id])),
             A::Playlist => super::pages::request_tracks_to_playlist(ctx, vec![t.id], Some(anchor)),
+            A::ToLibrary => out.push(Command::TrackInLibrary { track: t.id, on: true }),
+            A::OutOfLibrary => out.push(Command::TrackInLibrary { track: t.id, on: false }),
             A::Radio => out.push(super::pages::radio_by_track(t.id)),
             A::Album => self.nav = t.release_id.map(Route::Release),
             A::AlsoOn => self.nav = state.also_on.get(&t.id).map(|(r, _)| Route::Release(*r)),

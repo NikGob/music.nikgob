@@ -1509,13 +1509,14 @@ impl Worker {
                     self.album_changed(id);
                 }
             }
-            Command::AlbumOpensWhole { id, whole } => {
+            Command::AlbumVersions { id, on } => {
                 // The same as the setting: the album follows the setting.
-                let view = (whole != self.state.read().prefs.album_opens_whole).then_some(whole);
-                if self.log_err("альбом", self.lib.set_release_view(id, view)).is_some() {
+                let versions = (on != self.state.read().prefs.album_other_versions).then_some(on);
+                if self.log_err("альбом", self.lib.set_release_versions(id, versions)).is_some() {
                     self.album_changed(id);
                 }
             }
+            Command::TrackInLibrary { track, on } => self.track_in_library(track, on),
             Command::AlbumTrackMine { release, track, mine } => self.album_track_mine(release, track, mine),
             Command::AlbumTrackChoice { release, track, choice } => {
                 let before = self.library_tracks();
@@ -1649,6 +1650,7 @@ impl Worker {
             | Command::PlayStreamAlbumNext(_)
             | Command::EnqueueStreamAlbum(_)
             | Command::LikeStream { .. }
+            | Command::StreamInLibrary { .. }
             | Command::LikeStreamAlbum { .. }
             | Command::DownloadStream { .. }
             | Command::DownloadStreamAlbum(_)
@@ -2874,11 +2876,8 @@ impl Worker {
             return;
         };
         let liked = self.lib.release_liked(id).unwrap_or(false);
-        let (versions, opens_whole) = {
-            let p = &self.state.read().prefs;
-            (p.album_versions, p.album_opens_whole)
-        };
-        let mut detail = self.res.release_detail(&release, &listing, liked, versions, opens_whole);
+        let rules = self.album_rules();
+        let mut detail = self.res.release_detail(&release, &listing, liked, rules);
         detail.added_whole = self.lib.release_choice(id).is_ok_and(|(whole, _)| whole);
         (detail.released, detail.label) = self.release_facts(&release, &detail.tracks);
         self.publish(|s| {
@@ -3060,13 +3059,13 @@ impl Worker {
         if old.library_only_downloaded != p.library_only_downloaded {
             self.load_library();
         }
-        if old.album_versions != p.album_versions || old.album_opens_whole != p.album_opens_whole {
+        if old.album_mode != p.album_mode || old.album_other_versions != p.album_other_versions {
             let release = self.state.read().release.as_ref().map(|r| r.card.id);
             if let Some(r) = release {
                 self.load_release(r);
             }
         }
-        if old.partial_albums_on_home != p.partial_albums_on_home {
+        if old.album_mode != p.album_mode {
             self.load_home();
         }
         if old.auto_download_limit != p.auto_download_limit {
@@ -3332,17 +3331,21 @@ impl Worker {
         self.release_tracks_for(id, None, None).0
     }
 
+    /// How albums show and play, as the settings say.
+    pub(crate) fn album_rules(&self) -> nikgob_library::AlbumRules {
+        let p = &self.state.read().prefs;
+        nikgob_library::AlbumRules { mode: p.album_mode, other_versions: p.album_other_versions }
+    }
+
     /// The tracks an album plays, in its order, and whether that is all of
-    /// it. Of an album only some songs of which are the user's: those songs
-    /// («Мои треки»), unless the whole album is asked for (`scope`
-    /// `Some(true)`, «Слушать весь альбом»), the album opens whole and
-    /// nothing else is asked for (`None`; its own choice, else
-    /// [`nikgob_view::Prefs::album_opens_whole`]) or `start` is a song
-    /// outside them (then all of it, from there). Of any other album its
-    /// songs (all of them; an album added whole without the ones left out
-    /// of it). The ones that only stream too, under «Только скачанное» as
-    /// well (a song without a file is looked up when it comes up, and one
-    /// not found is skipped with a notice).
+    /// it ([`nikgob_library::ReleaseListing::plays`]): of an album only some
+    /// songs of which are the user's, those songs («Мои треки») unless the
+    /// whole album is asked for (`scope` `Some(true)`, «Слушать весь
+    /// альбом»), the settings open it whole or `start` is a song outside
+    /// them; of an album added to the library all of it but the other
+    /// versions it does not play. The ones that only stream too, under
+    /// «Только скачанное» as well (a song without a file is looked up when
+    /// it comes up, and one not found is skipped with a notice).
     fn release_tracks_for(
         &mut self,
         id: nikgob_core::model::ReleaseId,
@@ -3352,21 +3355,32 @@ impl Worker {
         let Some(listing) = self.log_err("альбом", self.lib.release_listing(id)).flatten() else {
             return (Vec::new(), true);
         };
-        let opens_whole = self.state.read().prefs.album_opens_whole;
-        let all = listing.track_ids();
-        let mine = listing.wanted_ids();
-        let partial = listing.progress.partial();
-        let whole = scope.unwrap_or_else(|| partial && listing.view.unwrap_or(opens_whole));
-        // None of the songs of an album the user chose from (all left out
-        // by hand): nothing of it plays but what is asked for.
-        if whole || (mine.is_empty() && !partial) || start.is_some_and(|s| !mine.contains(&s)) {
-            (all, true)
-        } else {
-            (mine, false)
-        }
+        listing.plays(self.album_rules(), scope, start)
     }
 
-    /// «Добавить весь альбом в библиотеку» (the songs left out of it by
+    /// «В библиотеку» / «Убрать из библиотеки» of a song
+    /// ([`Command::TrackInLibrary`]), with «Отменить». Nothing downloads:
+    /// it is no like.
+    fn track_in_library(&mut self, track: TrackId, on: bool) {
+        let before = self.library_tracks();
+        let Some(now) = self.log_err("библиотека", self.lib.set_track_in_library(track, on)) else { return };
+        let text = match (on, now) {
+            (true, _) => "Трек в библиотеке",
+            (false, false) => "Трек убран из библиотеки",
+            // A like or a playlist keeps it.
+            (false, true) => "Трек остаётся в библиотеке: он в «Любимых» или в плейлисте",
+        };
+        let undo = (on || !now).then(|| ("Отменить".into(), Command::TrackInLibrary { track, on: !on }));
+        self.toast(text, undo);
+        let release = self.lib.get_track(track).ok().flatten().and_then(|t| t.release_id);
+        self.library_edited(before, release.into_iter().collect());
+        if let Some(r) = release {
+            self.album_changed(r);
+        }
+        self.publish_player();
+    }
+
+    /// «Добавить в библиотеку» (the songs left out of it by
     /// hand too; «Отменить» puts back the choice as it was) or back to the
     /// songs chosen one by one; nothing downloads.
     fn add_whole_album(&mut self, id: nikgob_core::model::ReleaseId, on: bool) {
@@ -3374,7 +3388,7 @@ impl Worker {
         if on {
             let Some(undo) = self.log_err("альбом", self.lib.add_release_whole(id)) else { return };
             let back = undo.map(|u| ("Отменить".into(), Command::UndoWholeAlbum { id, mine: u.mine, excluded: u.excluded }));
-            self.toast("Весь альбом в библиотеке", back);
+            self.toast("Альбом в библиотеке", back);
         } else {
             if self.log_err("альбом", self.lib.set_release_whole(id, false)).is_none() {
                 return;

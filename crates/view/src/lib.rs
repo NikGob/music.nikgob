@@ -20,6 +20,7 @@ mod storage;
 mod streams;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
+pub use nikgob_core::model::AlbumMode;
 pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
@@ -131,6 +132,10 @@ pub struct TrackRow {
     pub cover: Option<Cover>,
     /// What plays is a YouTube music video, not the song («· клип»).
     pub clip: bool,
+    /// A library track: a song heard only (the wave, a radio, a find of
+    /// Главная) is not, its menu offers «В библиотеку».
+    #[serde(default)]
+    pub in_library: bool,
 }
 
 impl TrackRow {
@@ -169,8 +174,8 @@ pub struct ReleaseCard {
     /// Of the user's songs, the ones with a file.
     #[serde(default)]
     pub mine_local: u32,
-    /// The whole album was added to the library («Добавить весь альбом в
-    /// библиотеку») or saved.
+    /// The whole album was added to the library («Добавить в библиотеку»)
+    /// or saved.
     #[serde(default)]
     pub whole: bool,
 }
@@ -207,9 +212,11 @@ pub struct ReleaseDetail {
     /// The page opens on «Весь альбом» (the album's own choice, else the
     /// setting); «Слушать» on a card plays it whole.
     pub open_whole: bool,
-    /// The whole album was added to the library («Добавить весь альбом в
-    /// библиотеку»): its ⋮ takes it back to the user's songs.
+    /// The whole album was added to the library («Добавить в библиотеку»):
+    /// its ⋮ takes it back to the user's songs.
     pub added_whole: bool,
+    /// Its other versions play with it (the switch of «Другие версии»).
+    pub versions_on: bool,
 }
 
 impl ReleaseDetail {
@@ -1796,18 +1803,14 @@ pub struct Prefs {
     pub liked_albums_with_playlists: bool,
     /// A like of a single's song saves the single as an album too.
     pub single_like_saves: bool,
-    /// «Песни из альбомов → Альбом открывается»: an album only some songs
-    /// of which are the user's opens on «Весь альбом» and «Слушать» plays
-    /// all of it. Off (the default): «Мои треки», the user's songs.
-    pub album_opens_whole: bool,
-    /// «Распознавать другие версии»: an album's «(Instrumental)», «(Off
-    /// Vocal)», «(Remix)» of one of its songs, not chosen, is grouped apart
-    /// on «Весь альбом» (a chosen one stays the user's song).
-    pub album_versions: bool,
-    /// «Частичные альбомы на полках главной»: an album only some songs of
-    /// which are the user's shows among Главная's albums too. Off (the
-    /// default): its songs show on the songs' rows only.
-    pub partial_albums_on_home: bool,
+    /// «Альбомы → Песни альбома»: an album added to the library is whole,
+    /// one not added the user's songs («Автоматически»); every album whole;
+    /// every album the user's songs only.
+    pub album_mode: AlbumMode,
+    /// «Другие версии (инструментал, ремиксы)»: the other versions of an
+    /// album's songs the user did not choose play with it (karaoke only
+    /// when the album's own switch says so). Off by default.
+    pub album_other_versions: bool,
     /// An import of export files reads the songs saved in the music library
     /// (Takeout's «music library songs»): they teach the taste only, no
     /// likes, no downloads, not in the library. Off: that file is skipped.
@@ -3229,18 +3232,23 @@ pub enum Command {
     UndoTrash(TrackId),
     /// Delete every track of an album (like [`Command::TrashTrack`]).
     TrashRelease(ReleaseId),
-    /// «Добавить весь альбом в библиотеку» (`on`): every song of the album
+    /// «Добавить в библиотеку» (`on`): every song of the album
     /// becomes a library track (the ones that only stream too), nothing
     /// downloads; off, the songs chosen one by one stay.
     AddWholeAlbum { id: ReleaseId, on: bool },
-    /// «Отменить» of «Добавить весь альбом в библиотеку»: the album is the
+    /// «Отменить» of «Добавить в библиотеку»: the album is the
     /// songs chosen one by one again, its like standing for them only
     /// (`mine`) as before, and the songs left out of it by hand before
     /// (`excluded`) out again.
     UndoWholeAlbum { id: ReleaseId, mine: bool, excluded: Vec<TrackId> },
-    /// What an album only some songs of which are the user's opens on and
-    /// plays: the whole album (`whole`) or the user's songs.
-    AlbumOpensWhole { id: ReleaseId, whole: bool },
+    /// Whether the other versions of an album (instrumentals, karaoke,
+    /// remixes the user did not choose) play with it: the switch of their
+    /// group on its page.
+    AlbumVersions { id: ReleaseId, on: bool },
+    /// «В библиотеку» (`on`) of a song outside the library: a library track,
+    /// no like, nothing downloads; «Убрать из библиотеки» of one without a
+    /// file. With «Отменить».
+    TrackInLibrary { track: TrackId, on: bool },
     /// A song of an album into the user's songs of it (`mine`: a library
     /// track from then on) or out of them (its file, like and playlists
     /// stay), with «Отменить».
@@ -3463,6 +3471,9 @@ pub enum Command {
     /// goes to the services ([`Prefs::push_likes`]) and, without a file, a
     /// wishlist item downloads it ([`Prefs::like_download_scope`]).
     LikeStream { track: RemoteId, on: bool },
+    /// [`Command::TrackInLibrary`] of a song of a service (its track is
+    /// made first).
+    StreamInLibrary { track: RemoteId, on: bool },
     /// Like every track of an album of a service (the wishlist downloads
     /// the whole album).
     LikeStreamAlbum { album: RemoteId, on: bool },
@@ -3737,9 +3748,8 @@ impl Default for Prefs {
             album_like_tracks: false,
             liked_albums_with_playlists: false,
             single_like_saves: false,
-            album_opens_whole: false,
-            album_versions: true,
-            partial_albums_on_home: false,
+            album_mode: AlbumMode::Auto,
+            album_other_versions: false,
             import_saved_songs: true,
             library_only_downloaded: false,
             auto_download_limit: 2,

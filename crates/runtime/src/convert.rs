@@ -397,6 +397,7 @@ impl Resolver {
                 Some(v::Cover::web(art.unwrap_or_else(|| format!("https://i.ytimg.com/vi/{video}/hqdefault.jpg"))))
             }),
             clip: r.is_clip(),
+            in_library: r.in_library,
         }
     }
 
@@ -535,21 +536,19 @@ impl Resolver {
         }
     }
 
-    /// The page of an album: `versions` tells other versions of its songs
-    /// apart ([`v::Prefs::album_versions`]), `opens_whole` the setting of
-    /// what an album only some songs of which are the user's opens on
-    /// ([`v::Prefs::album_opens_whole`]; the album's own choice wins).
+    /// The page of an album as `rules` say ([`ReleaseListing::plan`]: what
+    /// is the user's, what opens, the other versions).
     pub fn release_detail(
         &mut self,
         r: &Release,
         listing: &ReleaseListing,
         liked: bool,
-        versions: bool,
-        opens_whole: bool,
+        rules: nikgob_library::AlbumRules,
     ) -> v::ReleaseDetail {
         let p = listing.progress;
         let tracks: Vec<v::TrackRow> = listing.tracks().map(|t| self.track(t)).collect();
-        let membership = listing.membership(versions);
+        let plan = listing.plan(rules);
+        let membership = &plan.membership;
         let marks: Vec<v::AlbumMark> = listing
             .tracks()
             .map(|t| match membership.get(&t.id) {
@@ -573,7 +572,7 @@ impl Resolver {
             .collect();
         let total_duration = tracks.iter().filter_map(|t| t.duration).sum();
         let quality = summarize_quality(&tracks);
-        let partial = p.partial();
+        let partial = plan.split;
         v::ReleaseDetail {
             card: self.release_card_of(r, &p, liked),
             tracks,
@@ -586,9 +585,10 @@ impl Resolver {
             label: None,
             marks,
             partial,
-            open_whole: partial && listing.view.unwrap_or(opens_whole),
+            open_whole: partial && plan.opens_whole,
             // The page's load asks the library.
             added_whole: false,
+            versions_on: plan.versions_on,
         }
     }
 

@@ -1272,6 +1272,7 @@ impl Md3eUi {
             "mixes" => S::MixesProfiles,
             "dislikes" => S::DislikeButton,
             "blacklist" => S::Marks,
+            "albums" => S::AlbumOpens,
             "stream-analysis" => S::StreamAnalysis,
             "appearance" => S::Theme,
             "pane" => S::PaneQueue,

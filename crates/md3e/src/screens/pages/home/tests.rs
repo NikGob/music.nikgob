@@ -28,6 +28,7 @@ fn song(title: &str) -> TrackRow {
         liked: false,
         cover: None,
         clip: false,
+        in_library: true,
     }
 }
 
@@ -242,6 +243,7 @@ fn a_discovery_has_the_service_song_menu_without_a_like() {
         wrong_file: false,
         dislike: MenuItem::new("Не нравится"),
         ban: Some(MenuItem::new("Не рекомендовать исполнителя")),
+        library: None,
     }));
     assert_eq!(&menu[..4], [A::Next, A::Queue, A::Radio, A::Playlist]);
     assert_eq!(&menu[menu.len() - 2..], [A::Dislike, A::Ban]);

@@ -656,6 +656,7 @@ impl Worker {
             Command::PlayStreamAlbumNext(album) => self.with_album(album, pages::Then::Next),
             Command::EnqueueStreamAlbum(album) => self.with_album(album, pages::Then::Enqueue),
             Command::LikeStream { track, on } => self.like_stream(&track, on),
+            Command::StreamInLibrary { track, on } => self.stream_in_library(&track, on),
             Command::LikeStreamAlbum { album, on } => self.with_album(album, pages::Then::Like(on)),
             Command::DownloadStream { tracks } => self.download_stream(&tracks),
             Command::DownloadStreamAlbum(album) => self.with_album(album, pages::Then::Download),

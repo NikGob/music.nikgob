@@ -231,8 +231,9 @@ pub struct Visit {
     /// scrolled to the end): the epoch's draw goes on.
     pub again_more: usize,
     /// An album only some songs of which are the user's shows among the
-    /// albums too ([`v::Prefs::partial_albums_on_home`]); off, only its
-    /// songs do.
+    /// albums too («Всегда весь альбом», [`v::Prefs::album_mode`]); else
+    /// only albums added to the library (or all of whose songs are the
+    /// user's) do, and the songs of the others.
     pub partial_albums: bool,
 }
 
@@ -258,7 +259,7 @@ impl Visit {
             profiles: None,
             epoch: Epoch::default(),
             again_more: 0,
-            partial_albums: prefs.partial_albums_on_home,
+            partial_albums: prefs.album_mode == v::AlbumMode::Whole,
         }
     }
 

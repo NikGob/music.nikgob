@@ -964,6 +964,7 @@ mod tests {
             liked: false,
             cover: None,
             clip: false,
+            in_library: true,
         };
         let mut state = ViewState::default();
         state.queue.current_entry = Some(1);

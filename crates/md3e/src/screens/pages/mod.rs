@@ -142,6 +142,10 @@ pub(crate) const RADIO_BY_TRACK: &str = "Радио по треку";
 pub(crate) const PLAY_NEXT: &str = "Сыграть следующим";
 /// To the end of the queue.
 pub(crate) const TO_QUEUE: &str = "В очередь";
+/// A song outside the library into it (no like, nothing downloads).
+pub(crate) const TO_LIBRARY: &str = "В библиотеку";
+/// A song in the library without a file or a like out of it.
+pub(crate) const OUT_OF_LIBRARY: &str = "Убрать из библиотеки";
 /// The like of a track or an album, and its undo.
 pub(crate) const LIKE: &str = "Нравится";
 pub(crate) const UNLIKE: &str = "Убрать из любимого";
@@ -355,6 +359,11 @@ pub enum TrackAct {
     Next,
     Queue,
     Playlist,
+    /// «В библиотеку» of a song outside the library: no like, nothing
+    /// downloads.
+    ToLibrary,
+    /// «Убрать из библиотеки» of a song without a file, not liked.
+    OutOfLibrary,
     Radio,
     Album,
     AlsoOn,
@@ -405,7 +414,7 @@ impl TrackAct {
             Self::WrongFile => I::WrongFile,
             Self::Dislike => I::Dislike,
             Self::Ban => I::Ban,
-            Self::Next | Self::Queue | Self::Playlist | Self::AlsoOn | Self::Apart | Self::FindSong | Self::ToMp3
+            Self::Next | Self::Queue | Self::Playlist | Self::ToLibrary | Self::OutOfLibrary | Self::AlsoOn | Self::Apart | Self::FindSong | Self::ToMp3
             | Self::Remove | Self::Trash | Self::Purge => return None,
         })
     }
@@ -438,6 +447,10 @@ pub struct TrackMenuOf {
     pub dislike: MenuItem,
     /// «Не рекомендовать исполнителя», for a track whose artist is known.
     pub ban: Option<MenuItem>,
+    /// «В библиотеку» (`Some(true)`: a song outside it) or «Убрать из
+    /// библиотеки» (`Some(false)`: in it without a file or a like); none
+    /// where it gives nothing.
+    pub library: Option<bool>,
 }
 
 /// The one list of a track's actions, in groups: play next / the queue /
@@ -459,6 +472,11 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     rows.push(Row::Item(A::Radio, MenuItem::new(RADIO_BY_TRACK).icon(Icon::Radio)));
     rows.push(Row::Divider);
     rows.push(Row::Item(A::Playlist, MenuItem::new("В плейлист…").icon(Icon::PlaylistAdd)));
+    match o.library {
+        Some(true) => rows.push(Row::Item(A::ToLibrary, MenuItem::new(TO_LIBRARY).icon(Icon::LibraryMusic))),
+        Some(false) => rows.push(Row::Item(A::OutOfLibrary, MenuItem::new(OUT_OF_LIBRARY).icon(Icon::LibraryMusic))),
+        None => {}
+    }
     rows.push(Row::Divider);
     if o.has_album {
         rows.push(Row::Item(A::Album, MenuItem::new("К альбому").icon(Icon::Album)));
@@ -636,6 +654,20 @@ pub(crate) fn download_item(wished: Option<nikgob_view::WishlistStatus>) -> Opti
     matches!(wished, None | Some(St::Waiting | St::NoTorrent | St::Failed)).then(|| MenuItem::new("Скачать").icon(Icon::Download))
 }
 
+/// «В библиотеку» of a track menu: what the item of a song does
+/// ([`TrackMenuOf::library`]): put a song outside the library in it, take
+/// one in it without a file or a like out (a like takes it out with the
+/// heart); none for a file.
+pub(crate) fn library_item(in_library: bool, has_local: bool, liked: bool) -> Option<bool> {
+    if !in_library {
+        Some(true)
+    } else if !has_local && !liked {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// [`track_rows`] of a library track (in the library or in a playlist).
 pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<widgets::Row<TrackAct>> {
     // A file: its tags and a better copy; no file: download it (no like)
@@ -655,6 +687,7 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
         wrong_file: track.has_local,
         dislike: dislike_item(o.marks.track(track.id)),
         ban: track.artist_id().map(|a| ban_item(a, o.marks)),
+        library: library_item(track.in_library, track.has_local, track.liked),
     });
     // A lossless file the check is sure holds an MP3 (its row says «FLAC
     // из MP3»): that MP3, right after the better copy. A doubt has none.
@@ -679,6 +712,11 @@ pub(crate) fn can_trash(track: &TrackRow) -> bool {
 /// The library's deletes, last in «Файл» of a library row's
 /// [`library_track_rows`]: «Удалить навсегда» only for a file.
 fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
+    // A song only streamed: «Убрать из библиотеки» above says it, nothing
+    // of it to delete.
+    if library_item(track.in_library, track.has_local, track.liked).is_some() {
+        return;
+    }
     let mut deletes = vec![
         widgets::Row::Divider,
         widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)),
@@ -1021,6 +1059,8 @@ impl PageState {
                 self.pending_add = Some(vec![track.id]);
                 self.pending_add_anchor = anchor;
             }
+            A::ToLibrary => out.push(Command::TrackInLibrary { track: track.id, on: true }),
+            A::OutOfLibrary => out.push(Command::TrackInLibrary { track: track.id, on: false }),
             A::Radio => out.push(radio_by_track(track.id)),
             A::Album => return track.release_id.map(Route::Release),
             A::AlsoOn => return also.map(|(release, _)| Route::Release(*release)),
@@ -1774,6 +1814,7 @@ mod speed_tests {
             wrong_file: false,
             dislike: MenuItem::new("Не нравится"),
             ban: Some(MenuItem::new("Не рекомендовать исполнителя")),
+            library: None,
         })
     }
 
@@ -1912,6 +1953,7 @@ mod speed_tests {
             wrong_file: false,
             dislike: MenuItem::new("Не нравится"),
             ban: None,
+            library: None,
         }
     }
 
