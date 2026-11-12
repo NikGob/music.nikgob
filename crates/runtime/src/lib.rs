@@ -16,6 +16,8 @@ mod convert;
 mod enrich;
 mod gain;
 mod hd_covers;
+mod heap;
+pub use heap::release_thread_memory;
 mod home;
 mod home_build;
 mod home_v2;

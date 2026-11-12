@@ -306,7 +306,10 @@ impl Shared {
         while !self.stopped() {
             self.wake.lock().kicked = false;
             let worked = self.settings.lock().check && self.pass(&mut skip, &mut pacer);
-            if !worked {
+            if worked {
+                // A pass's decoding: what it left goes back.
+                crate::release_thread_memory();
+            } else {
                 self.pause(self.idle);
             }
         }

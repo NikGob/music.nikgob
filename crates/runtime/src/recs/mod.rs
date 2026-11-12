@@ -44,6 +44,7 @@ mod lanes;
 mod niche;
 mod novelty;
 mod open;
+mod picker;
 mod plus;
 mod radio;
 mod suggest;
@@ -352,6 +353,8 @@ fn new_kept(kept_at: UnixMs, new_at: UnixMs, local_only: bool) -> bool {
 /// The worker's recommendation state.
 pub(crate) struct RecsState {
     tx: Sender<Internal>,
+    /// The radio's picks and the guests, on one thread of their own.
+    picker: picker::Picker,
     snap: Option<Arc<Snapshot>>,
     home: Option<RecHome>,
     building: bool,
@@ -430,6 +433,7 @@ impl RecsState {
     pub(crate) fn new(tx: Sender<Internal>) -> Self {
         Self {
             tx,
+            picker: picker::Picker::default(),
             snap: None,
             home: None,
             building: false,
@@ -2619,6 +2623,8 @@ impl Worker {
             lower_priority();
             let built = build(input);
             let _ = tx.send(Internal::Recs(Msg::Built(Box::new(built))));
+            // What the build left free goes back with the thread's heap.
+            crate::release_thread_memory();
         });
         match spawned {
             Ok(_) => {
