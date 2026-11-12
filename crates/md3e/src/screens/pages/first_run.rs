@@ -665,6 +665,9 @@ fn service_card(ui: &mut Ui, service: Service, state: &ViewState, pages: &mut Pa
     if let Some(a) = acc {
         account_parts(ui, a, out);
     }
+    if name.is_none() && registered && matches!(service, Service::Youtube | Service::Soundcloud) {
+        manual(ui, service, &state.prefs, pages, enabled && !busy, out);
+    }
     if steps {
         ui.add_space(8.0);
         settings::spotify_steps(ui, &state.prefs, pages, registered && !busy, out);
@@ -677,6 +680,41 @@ fn service_card(ui: &mut Ui, service: Service, state: &ViewState, pages: &mut Pa
         }
         ui.add_space(4.0);
     }
+}
+
+/// The way in without the sign-in window, as in Настройки → «Сервисы»
+/// (where the system has no web view for it, as Linux without WebKitGTK,
+/// or it did not help): «Вставить cookies…» / «Вставить токен…» under the
+/// name, opening the same fields.
+fn manual(ui: &mut Ui, service: Service, p: &Prefs, pages: &mut PageState, can: bool, out: &mut Vec<Command>) {
+    let youtube = service == Service::Youtube;
+    let open = if youtube { pages.yt_form } else { pages.sc_form };
+    let (label, salt) = if youtube { ("Вставить cookies…", "first-run-yt-cookies") } else { ("Вставить токен…", "first-run-sc-token") };
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), Size::S.height()), Sense::hover());
+    // The text under the name (the mark's 40 and its 16), the button's
+    // own padding out of the way.
+    let at = Rect::from_min_max(pos2(row.left() + 56.0 - Size::S.side_padding(), row.top()), row.max);
+    let mut c = ui.new_child(UiBuilder::new().max_rect(at).layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt(salt));
+    if c.add(Button::new(label).style(Style::Text).size(Size::S).selected(open).id_salt(salt)).clicked() {
+        if youtube {
+            pages.yt_form = !open;
+        } else {
+            pages.sc_form = !open;
+        }
+    }
+    if !open {
+        return;
+    }
+    ui.add_space(8.0);
+    if youtube {
+        settings::cookies_fields(ui, p, pages, can, out);
+    } else {
+        settings::step(ui, 1, "Войди на soundcloud.com в браузере.");
+        settings::step(ui, 2, "Открой инструменты разработчика → Application → Cookies и скопируй значение oauth_token.");
+        ui.add_space(4.0);
+        settings::token_fields(ui, pages, can, false, out);
+    }
+    ui.add_space(4.0);
 }
 
 /// The running sign-in's prompt, its error and a pause, as Настройки
