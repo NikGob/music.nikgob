@@ -23,7 +23,7 @@ use fastframe_audio::Render;
 use rtrb::{Consumer, Producer};
 
 use crate::eq::Eq;
-use crate::shared::{CursorSnapshot, PlayClock, Shared, frames_to_ns, ns_to_frames};
+use crate::shared::{CursorSnapshot, PlayClock, Shared, frames_to_ns, ns_to_frames, volume_curve};
 use crate::types::Speed;
 
 /// Length of the de-click ramps around flushes.
@@ -131,6 +131,12 @@ pub(crate) struct Renderer {
 
     vol: f32,
     vol_k: f32,
+    /// The fade's level now (see [`Shared::fade_level`]), where it glides
+    /// to, by how much a frame, and the `fade_gen` seen last.
+    fade: f32,
+    fade_target: f32,
+    fade_step: f32,
+    fade_gen: u32,
     declick_frames: u64,
     pause_frames: u64,
     resume_frames: u64,
@@ -188,6 +194,10 @@ impl Renderer {
             pending: None,
             vol,
             vol_k: 1.0,
+            fade: 1.0,
+            fade_target: 1.0,
+            fade_step: 1.0,
+            fade_gen: 0,
             declick_frames: 1,
             pause_frames: 1,
             resume_frames: 1,
@@ -453,7 +463,25 @@ impl Renderer {
         // The visualizer sees the music before the user's volume.
         self.sh.tap.write_interleaved(seg, ch);
 
-        let target = self.sh.volume_gain();
+        self.take_fade();
+        if self.fade != self.fade_target {
+            // The fade glides frame by frame; the volume follows it.
+            let volume = self.sh.volume_gain();
+            for frame in seg.chunks_exact_mut(ch) {
+                self.fade = if self.fade < self.fade_target {
+                    (self.fade + self.fade_step).min(self.fade_target)
+                } else {
+                    (self.fade - self.fade_step).max(self.fade_target)
+                };
+                let target = volume * volume_curve(self.fade);
+                self.vol += (target - self.vol) * self.vol_k;
+                for s in frame {
+                    *s = soft_limit(*s * self.vol);
+                }
+            }
+            return;
+        }
+        let target = self.sh.volume_gain() * volume_curve(self.fade);
         if (target - self.vol).abs() > 1e-6 {
             for frame in seg.chunks_exact_mut(ch) {
                 self.vol += (target - self.vol) * self.vol_k;
@@ -469,6 +497,24 @@ impl Renderer {
             for s in seg.iter_mut() {
                 *s = soft_limit(*s * target);
             }
+        }
+    }
+
+    /// A new fade asked for ([`Shared::fade_level`]): where it goes and at
+    /// what pace from where it is.
+    fn take_fade(&mut self) {
+        let fade_gen = self.sh.fade_gen.load(Ordering::Acquire);
+        if fade_gen == self.fade_gen {
+            return;
+        }
+        self.fade_gen = fade_gen;
+        let level = f32::from_bits(self.sh.fade_level.load(Ordering::Relaxed));
+        self.fade_target = if level.is_finite() { level.clamp(0.0, 1.0) } else { 1.0 };
+        let frames = ns_to_frames(self.sh.fade_over_ns.load(Ordering::Relaxed), self.rate.max(1));
+        if frames == 0 {
+            self.fade = self.fade_target;
+        } else {
+            self.fade_step = ((self.fade_target - self.fade).abs() / frames as f32).max(f32::MIN_POSITIVE);
         }
     }
 

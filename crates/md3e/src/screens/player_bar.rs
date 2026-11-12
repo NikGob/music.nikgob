@@ -188,9 +188,18 @@ pub fn show(
 
         // Progress: label, slider, label; a bare slider when narrower; a
         // line under the title when there is no room at all.
-        let trailing_w = trailing as f32 * 44.0;
+        // A running sleep timer's chip before the ⋮: with its time while
+        // the slider keeps its room, else the moon alone (never a button
+        // less).
+        let buttons_w = trailing as f32 * 44.0;
+        let slider_min = if compact { 112.0 } else { 160.0 };
+        let sleep_full = super::sleep_ui::chip_width(ui, state, "bar-sleep", false);
+        let sleep_small = !wide || ui.available_width() - buttons_w - sleep_full - 8.0 < slider_min;
+        let trailing_w = buttons_w + if sleep_small { super::sleep_ui::chip_width(ui, state, "bar-sleep", true) } else { sleep_full };
         let avail = ui.available_width() - trailing_w - 8.0;
-        if compact && avail >= 112.0 {
+        // Too narrow for the times beside it (a sleep timer's moon took
+        // the room): the bare slider too.
+        if (compact || avail <= 160.0) && avail >= 112.0 {
             let dur = p.duration.unwrap_or_default();
             let speed = p.speed;
             let out_s = Slider::new("bar-progress", p.fraction_now())
@@ -285,6 +294,7 @@ pub fn show(
                 out.push(Command::ToggleMute);
             }
         }
+        super::sleep_ui::chip(ui, state, "bar-sleep", on.gamma_multiply(0.24), on, sleep_small, out);
         let more = ui.add(
             IconButton::new(Icon::MoreVert)
                 .colors(item)
@@ -300,6 +310,7 @@ pub fn show(
             top.extend((!show_volume).then_some(Act::Volume));
             // Placed by «Меню трека» like Now Playing's (F12 anyway).
             top.push(Act::Visualizer);
+            top.push(Act::SleepMenu);
             // «Источник и качество»: the side pane when it is on, else its
             // own window.
             let rows = Chrome::player_rows(ui.ctx(), t, state, &top, true, false);

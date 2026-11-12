@@ -153,6 +153,8 @@ material_icons! {
     Refresh => "refresh",
     Block => "block",
     HourglassEmpty => "hourglass_empty",
+    /// «Таймер сна».
+    Bedtime => "bedtime",
     /// «Радио по треку», «Радио» of an artist.
     Radio => "radio",
     /// A check over a line: what is on disk already.

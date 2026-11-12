@@ -14,7 +14,9 @@ mod player_prefs;
 mod prefs_edit;
 pub mod presets;
 mod recs;
+mod sleep;
 mod sound;
+mod storage;
 mod streams;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
@@ -24,7 +26,9 @@ pub use nikgob_core::model::{
 pub use credit::*;
 pub use player_prefs::*;
 pub use recs::*;
+pub use sleep::*;
 pub use sound::*;
+pub use storage::*;
 pub use streams::*;
 
 /// A cover image on disk plus the palette seed computed at import.
@@ -449,6 +453,8 @@ pub struct PlayerView {
     /// The track plays through Spotify Soloist (a live stream of another
     /// player: crossfade and gapless do not apply).
     pub soloist: bool,
+    /// «Таймер сна», while one runs.
+    pub sleep: Option<SleepView>,
 }
 
 impl Default for PlayerView {
@@ -470,6 +476,7 @@ impl Default for PlayerView {
             audio_service: None,
             soloist: false,
             audio_quality: None,
+            sleep: None,
         }
     }
 }
@@ -1281,6 +1288,9 @@ pub struct DownloadsView {
     pub soulseek: SoulseekView,
     /// What «Раздача» says about both kinds of sharing.
     pub sharing: SharingView,
+    /// How much the music takes and what is left of its disks (the
+    /// page's header).
+    pub storage: StorageView,
 }
 
 /// «Загрузки → Раздача»: how much the network is used and how much was
@@ -3103,6 +3113,8 @@ pub enum Command {
     Previous,
     Seek(Duration),
     SeekBy(i64),
+    /// «Таймер сна»: set, change or turn off.
+    SleepTimer(SleepChoice),
     /// «Скорость» of a track: the version it plays as from now on
     /// (remembered with the track; the playing one changes at once).
     SetTrackSpeed { track: TrackId, variant: SpeedVariant },

@@ -240,6 +240,7 @@ impl Worker {
     /// told at once, the pages are read off the loop and shown together
     /// ([`Self::library_loaded`]).
     pub(crate) fn load_library(&mut self) {
+        self.storage_changed();
         self.home_input_changed();
         self.stream_analysis_changed();
         self.recs_library_changed();

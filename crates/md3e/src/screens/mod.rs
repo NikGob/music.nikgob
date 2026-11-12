@@ -17,6 +17,7 @@ pub mod lyrics_ui;
 mod pages;
 mod pane;
 mod player_bar;
+mod sleep_ui;
 mod sound_quality;
 pub(crate) mod stage;
 pub mod sweep;
@@ -800,6 +801,13 @@ impl Md3eUi {
             if i.consume_key(Modifiers::NONE, Key::E) {
                 sound = Some(pages::sound::Tab::Equalizer);
             }
+            // «Таймер сна»: 15, 30, 45, 60, 90 minutes, then off.
+            if i.consume_key(Modifiers::NONE, Key::T) {
+                let p = &state.player;
+                // A timer whose end is not known yet steps on as a short one.
+                let left = p.sleep.as_ref().map(|t| t.left(p, std::time::Instant::now()).unwrap_or_default());
+                out.push(Command::SleepTimer(nikgob_view::sleep_key_step(left)));
+            }
             // The developer profile: the playing track from YouTube Music.
             if nikgob_view::dev::profile() && state.player.current.is_some() && i.consume_key(Modifiers::NONE, Key::Y) {
                 out.push(Command::PlayFromYoutube);
@@ -993,7 +1001,9 @@ impl Md3eUi {
 
         drop(_page_scope);
         // Floating player.
-        let bar_w = (content.width() - 32.0).min(960.0);
+        // A running sleep timer's chip widens the pill by its own room
+        // (where the window has it), so it takes nothing from the rest.
+        let bar_w = (content.width() - 32.0).min(960.0 + sleep_ui::chip_width(ui, state, "bar-sleep", false));
         let bar = Rect::from_center_size(
             pos2(content.center().x, content.bottom() - 16.0 - 32.0),
             vec2(bar_w, 64.0),

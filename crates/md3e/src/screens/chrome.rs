@@ -40,6 +40,10 @@ pub enum Act {
     Trash,
     /// «Включить с YouTube» (the developer profile only).
     Youtube,
+    /// «Таймер сна ▸»: the player puts its submenu of choices here.
+    SleepMenu,
+    /// A choice of «Таймер сна».
+    Sleep(nikgob_view::SleepChoice),
 }
 
 /// What a row of the playing track's ⋮ stands for.
@@ -165,6 +169,8 @@ impl Chrome {
             Act::Youtube => MenuItem::new("Включить с YouTube")
                 .icon(Icon::PlayArrow)
                 .shortcut("Y"),
+            Act::SleepMenu => MenuItem::new(super::sleep_ui::MENU_LABEL).icon(Icon::Bedtime),
+            Act::Sleep(c) => MenuItem::new(super::sleep_ui::choice_label(c, nikgob_view::SleepContext::of(&state.player))),
         }
     }
 
@@ -181,8 +187,16 @@ impl Chrome {
         // The developer profile's tracks have no files: the real song first.
         let youtube = nikgob_view::dev::profile().then_some(Act::Youtube);
         let own = |a: Act| Row::Item(PlayerAct::Own(a), Self::item(a, t, state));
-        let mut rows: Vec<Row<PlayerAct>> =
-            youtube.iter().chain(top).filter(|a| **a != Act::Visualizer).map(|&a| own(a)).collect();
+        let mut rows: Vec<Row<PlayerAct>> = youtube
+            .iter()
+            .chain(top)
+            .filter(|a| !matches!(a, Act::Visualizer | Act::SleepMenu))
+            .map(|&a| own(a))
+            .collect();
+        // «Таймер сна ▸» after the player's own rows.
+        if top.contains(&Act::SleepMenu) {
+            rows.push(super::sleep_ui::submenu(state, |c| PlayerAct::Own(Act::Sleep(c))));
+        }
         rows.push(Row::Divider);
         // The frame's index: the bar and Now Playing build these rows every
         // frame for their ⋮.
@@ -318,6 +332,9 @@ impl Chrome {
             Act::EditLyrics => {}
             Act::Trash => super::pages::request_delete(ctx, super::pages::Doomed::Tracks(vec![t.id]), format!("«{}»", t.title), false),
             Act::Youtube => out.push(Command::PlayFromYoutube),
+            Act::Sleep(c) => out.push(Command::SleepTimer(c)),
+            // A submenu, never picked itself.
+            Act::SleepMenu => {}
         }
     }
 

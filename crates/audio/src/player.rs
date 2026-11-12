@@ -360,6 +360,26 @@ impl Player {
             .store(volume_curve(v).to_bits(), Ordering::Relaxed);
     }
 
+    /// Fades the sound to `level` (0..1, on the same perceptual curve as
+    /// the volume) over `over`, from wherever an earlier fade got to; zero
+    /// `over` jumps there. A fade of its own over the volume (the sleep
+    /// timer's): [`volume`](Self::volume) stays what the listener set, and
+    /// a level of 1 leaves the sound as the volume makes it.
+    pub fn set_fade(&self, level: f32, over: Duration) {
+        let level = if level.is_finite() {
+            level.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let sh = &self.inner.sh;
+        sh.fade_level.store(level.to_bits(), Ordering::Relaxed);
+        sh.fade_over_ns.store(
+            u64::try_from(over.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        sh.fade_gen.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// The last value given to [`set_volume`](Self::set_volume).
     #[must_use]
     pub fn volume(&self) -> f32 {

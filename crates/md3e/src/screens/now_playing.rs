@@ -911,9 +911,10 @@ pub fn show_on(
         if let Some(t) = p.current.as_ref() {
             // The track's one list, the visualizer before it, the delete
             // last.
-            let rows = Chrome::player_rows(&ctx, t, state, &[Act::Visualizer], true, true);
+            let rows = Chrome::player_rows(&ctx, t, state, &[Act::Visualizer, Act::SleepMenu], true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
+        super::sleep_ui::chip(ui, state, "np-sleep", s.secondary_container, s.on_secondary_container, class == crate::tokens::SizeClass::Compact, out);
         // Q and L work with the buttons hidden (Settings → Вид).
         let buttons = state.prefs.player_buttons;
         if buttons.queue && ui.add(
