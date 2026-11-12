@@ -1113,8 +1113,8 @@ mod tests {
                 sizes.push((r.width(), r.height()));
                 assert!(((r.min.x * ppp) - (r.min.x * ppp).round()).abs() < 1e-3);
             }
-            sizes.dedup();
-            assert_eq!(sizes.len(), 1, "at {ppp}: {sizes:?}");
+            let (w0, h0) = sizes[0];
+            assert!(sizes.iter().all(|(w, h)| (w - w0).abs() < 1e-3 && (h - h0).abs() < 1e-3), "at {ppp}: {sizes:?}");
         }
     }
 

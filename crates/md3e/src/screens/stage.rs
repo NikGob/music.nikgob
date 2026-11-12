@@ -355,6 +355,17 @@ pub fn canvas_for(size: Vec2, window: Option<Vec2>) -> (Vec2, f32) {
     (size / scale, scale)
 }
 
+/// The canvas of a page (Главная, an album) on a stage `size` big, in a
+/// window `window_w` wide: the stage's width at the page's own scale (the
+/// window's width at most, never larger than real), as tall as the stage
+/// shows of it; the rest of the page is scrolled to. A low stage (the strip
+/// over the rows) laid the page out as wide as the window was tall, a tiny
+/// page in the middle of the strip.
+pub fn page_canvas(size: Vec2, window_w: f32) -> (Vec2, f32) {
+    let scale = (size.x / window_w.max(CANVAS_W)).clamp(1e-3, 1.0);
+    (size / scale, scale)
+}
+
 /// Canvas → screen: the whole canvas over `rect`, or brought in on `focus`
 /// by `k` (0..1): no closer than 1:1 (a part too big for that just fits),
 /// and the window onto the canvas never past its edges.
@@ -1080,7 +1091,10 @@ impl StageUi {
         // Now Playing on the stage is the window's, smaller: what is sized
         // in points there (the lyrics) takes the same share of it.
         let window = matches!(scene, Scene::Track | Scene::Lyrics).then(|| ctx.content_rect().size());
-        let (size, _) = canvas_for(req.rect.size(), window);
+        let (size, scale) = match scene {
+            Scene::Home | Scene::Album => page_canvas(req.rect.size(), ctx.content_rect().width()),
+            _ => canvas_for(req.rect.size(), window),
+        };
         let home_bottom = self
             .rects
             .iter()
@@ -1099,7 +1113,6 @@ impl StageUi {
         // section shows at a size that reads; the wheel takes over (and the
         // tour waits a moment after it). It used to fit the whole page into
         // the card, a tiny column in an empty frame.
-        let (_, scale) = canvas_for(req.rect.size(), window);
         let room = (home_bottom + 24.0 - size.y).max(0.0);
         if scene == Scene::Home {
             if let Some(p) = ctx.pointer_hover_pos()
@@ -1293,6 +1306,9 @@ impl StageUi {
     }
 }
 
+/// Above a page on the stage (Главная, an album).
+const PAGE_TOP: f32 = 16.0;
+
 /// Paints `scene` from `v` over the canvas `virt`.
 #[allow(clippy::too_many_arguments)]
 fn paint_scene(
@@ -1337,15 +1353,16 @@ fn paint_scene(
             stage.part(&ctx, Part::Whole, rect);
         }
         Scene::Home => {
-            // The page's margins and the search bar's room above it.
-            let page = Rect::from_min_max(virt.min + vec2(24.0, 88.0), virt.max - vec2(24.0, 0.0));
+            // The page's margins; the search bar is not drawn here, so its
+            // room above the page is left out (an empty band on the card).
+            let page = Rect::from_min_max(virt.min + vec2(24.0, PAGE_TOP), virt.max - vec2(24.0, 0.0));
             let mut hui = ui.new_child(UiBuilder::new().max_rect(page).id_salt("stage-home"));
             hui.spacing_mut().item_spacing.y = 8.0;
             pages::home::show_on(&mut hui, v, pages, stage, out);
         }
         Scene::Album => {
             let Some(a) = album else { return };
-            let page = Rect::from_min_max(virt.min + vec2(24.0, 88.0), virt.max - vec2(24.0, 0.0));
+            let page = Rect::from_min_max(virt.min + vec2(24.0, PAGE_TOP), virt.max - vec2(24.0, 0.0));
             let mut aui = ui.new_child(UiBuilder::new().max_rect(page).id_salt("stage-album"));
             aui.spacing_mut().item_spacing.y = 8.0;
             let header = pages::detail::ReleaseHeader {
@@ -1464,6 +1481,18 @@ mod tests {
                 assert!(radius * 2.0 <= window.width().min(window.height()), "{size:?}: the corners fit");
             }
         }
+    }
+
+    /// A page fills the stage's width at the window's scale, whatever the
+    /// stage's shape: the strip over the rows too.
+    #[test]
+    fn a_page_fills_the_stage_at_the_windows_scale() {
+        for (stage, window) in [(vec2(700.0, 440.0), 1440.0), (vec2(955.0, 180.0), 1100.0), (vec2(620.0, 380.0), 1265.0)] {
+            let (c, scale) = page_canvas(stage, window);
+            assert!((c.x - window).abs() < 0.5, "{stage:?}: {c:?}");
+            assert!((c.x * scale - stage.x).abs() < 0.01 && (c.y * scale - stage.y).abs() < 0.01);
+        }
+        assert_eq!(page_canvas(vec2(1800.0, 900.0), 1200.0).1, 1.0, "never larger than real");
     }
 
     /// «Разделы главной»: the stage tours Главная, a rest at the top, down

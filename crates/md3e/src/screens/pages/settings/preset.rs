@@ -178,7 +178,7 @@ fn rest_key(id: Id) -> egui::Id {
 
 /// The pointer came onto a button at `since` and stays: rested at `now`.
 fn rested(since: f64, now: f64) -> bool {
-    now - since >= REST_S
+    now - since >= REST_S - 1e-6
 }
 
 /// The presets as a connected group of buttons, «Свои» last.

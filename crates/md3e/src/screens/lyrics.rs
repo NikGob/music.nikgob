@@ -1451,7 +1451,10 @@ pub(crate) fn tile_preview(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64
     let clip = t.inverse().mul_rect(ui.clip_rect().intersect(rect));
     let layer = ui.layer_id();
     let first = ctx.graphics(|g| g.get(layer).map_or(egui::layers::ShapeIdx(0), |l| l.next_idx()));
-    let painter = ui.painter().with_clip_rect(clip);
+    // Set, not intersected with the tile's clip: that one is on screen,
+    // this one in the scene's points (scaled down with it).
+    let mut painter = ui.painter().clone();
+    painter.set_clip_rect(clip);
     sample(ctx, &painter, virt, prefs, still, &TILE_TEXT, big, small, gap, MARGIN / k);
     ctx.graphics_mut(|g| {
         let list = g.entry(layer);
@@ -2884,6 +2887,46 @@ mod tests {
             DisplayLine::Interlude { start, end, duet } => Some((start.as_secs_f32(), end.as_secs_f32(), duet)),
             _ => None,
         }).collect()
+    }
+
+    /// A preset's tile, still or moving, paints its sample inside the tile:
+    /// every shape and its clip are on the tile after the scene is scaled
+    /// down to it, and the sung line spans most of it.
+    #[test]
+    fn a_tile_sample_is_scaled_into_its_tile() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        Theme::default().install(&ctx);
+        let tile = Rect::from_min_size(pos2(200.0, 100.0), vec2(112.0, 72.0));
+        for (k, prefs) in [Prefs::first_start(), Prefs { lyrics_style: 2, ..Prefs::first_start() }].into_iter().enumerate() {
+            for still in [Some(1.25), None] {
+                let mut clips = Vec::new();
+                let mut bounds = Rect::NOTHING;
+                for f in 0..3 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0))),
+                        time: Some(1.0 + f64::from(f) * 0.3),
+                        ..Default::default()
+                    };
+                    let out = ctx.run_ui(input, |ui| {
+                        let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(tile));
+                        tui.set_clip_rect(ui.clip_rect().intersect(tile));
+                        tile_preview(&tui, tile, &prefs, still);
+                    });
+                    let mut out = out;
+                    out.textures_delta.clear();
+                    clips = out.shapes.iter().filter(|c| !matches!(c.shape, egui::Shape::Noop)).map(|c| c.clip_rect).collect();
+                    bounds = out.shapes.iter().filter(|c| matches!(c.shape, egui::Shape::Text(_))).fold(Rect::NOTHING, |b, c| b.union(c.shape.visual_bounding_rect()));
+                }
+                assert!(!clips.is_empty(), "{k} {still:?}: nothing painted");
+                for c in &clips {
+                    assert!((c.min - tile.min).length() < 1.0 && (c.max - tile.max).length() < 1.0, "{k} {still:?}: clip {c:?} is not the tile {tile:?}");
+                }
+                assert!(bounds.width() > tile.width() * 0.6 && bounds.width() < tile.width() * 1.05, "{k} {still:?}: text {bounds:?}");
+            }
+        }
     }
 
     /// «Волна» with the calm fallback showed a word-timed text as karaoke:

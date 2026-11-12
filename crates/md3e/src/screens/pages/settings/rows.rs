@@ -315,9 +315,22 @@ pub(crate) const VALUE_W: f32 = 60.0;
 /// Between a control and the value's field.
 const VALUE_GAP: f32 = 12.0;
 
+/// The rows' column ends at `right` this frame (beside the stage: where the
+/// stage begins, less its gap). A row lays itself out within it even when
+/// something wider before it has stretched the column's ui: a slider then
+/// reached under the stage.
+pub(crate) fn set_column_right(ctx: &egui::Context, right: f32) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-column-right"), right));
+}
+
+fn column_room(ui: &Ui) -> f32 {
+    let right = ui.ctx().data(|d| d.get_temp::<f32>(egui::Id::new("settings-column-right"))).unwrap_or(f32::INFINITY);
+    ui.available_width().min(right - ui.cursor().left()).max(0.0)
+}
+
 fn row_body(ui: &mut Ui, id: Id, note: Option<Note<'_>>, control: impl FnOnce(&mut Ui), value: Option<&mut dyn FnMut(&mut Ui)>) {
     let indent = indent(ui.ctx());
-    let full = ui.available_width();
+    let full = column_room(ui);
     let label_w = label_column(full);
     // A control wider than the room beside the name goes under it, as in a
     // narrow page (three segments do not fit beside the name at 480 px).

@@ -491,13 +491,14 @@ mod tests {
                 ..Default::default()
             };
             let mut got = (None, None);
-            let _ = ctx.run_ui(input, |ui| {
+            let mut out = ctx.run_ui(input, |ui| {
                 let o = Slider::new("s", 0.5).width(400.0).show(ui);
                 got = (o.dragging, o.committed);
                 if card_up {
                     note_dismissible(ui.ctx(), card);
                 }
             });
+            out.textures_delta.clear();
             got
         };
         let at = pos2(380.0, 22.0);

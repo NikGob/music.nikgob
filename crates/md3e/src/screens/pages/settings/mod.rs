@@ -260,6 +260,7 @@ pub(super) fn page(
     // The page's own changes the runtime has not shown yet stay on it.
     let shown = with_pending(&mut pages.settings_memory, &state.prefs, anim::now(&ctx));
     let beside = at.stage.is_some_and(|s| s.left() >= at.rows.right());
+    rows::set_column_right(&ctx, if beside { at.rows.left() + at.content_w } else { f32::INFINITY });
     let mut p: Prefs = shown.clone();
     let before = p.clone();
     let o = area.show(&mut rui, |ui| {
@@ -280,7 +281,7 @@ pub(super) fn page(
         // beside the stage, the rows' column (the stage and its buttons
         // stand still over the rest: the foot scrolled up under them).
         let page = if beside {
-            Rangef::new(ui.max_rect().left(), ui.max_rect().right())
+            Rangef::new(ui.max_rect().left(), ui.max_rect().left() + at.content_w)
         } else {
             Rangef::new(ui.max_rect().left(), (ui.clip_rect().right() - 16.0).max(ui.max_rect().right()))
         };
