@@ -467,15 +467,46 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
             .layout(egui::Layout::right_to_left(egui::Align::Center))
             .id_salt("home-header-right"),
     );
-    let chip = right.add(chip);
+    right.spacing_mut().item_spacing.x = 8.0;
+    let mut chip = right.add(chip);
+    let downloaded_clicked = chip.clicked();
+    // «▶ Моя волна» beside it (hidden in the view settings of Главная).
+    if state.prefs.home_wave_chip {
+        let (ours, playing) = wave_playing(state, None);
+        let wave = FilterChip::new("Моя волна", playing).icon(if playing { Icon::Pause } else { Icon::PlayArrow }).one_of().id_salt("home-wave-chip");
+        let resp = right.add(wave);
+        if resp.clicked() {
+            out.push(wave_command(ours, playing, None));
+        }
+        chip = chip.union(resp);
+    }
     let mut job = TypeRole::HeadlineMedium
         .style()
         .job(greeting_line(state.home.greeting_hour, &state.prefs.user_name), s.on_surface);
     job.wrap = egui::text::TextWrapping::truncate_at_width((chip.rect.left() - row.left() - 16.0).max(48.0));
     let g = crate::typography::layout(ui.painter(), job);
     ui.painter().galley(pos2(row.left(), row.center().y - g.size().y / 2.0), g, s.on_surface);
-    if chip.clicked() {
+    if downloaded_clicked {
         out.push(downloaded_only(!on));
+    }
+}
+
+/// Whether the queue plays «Моя волна» started from `preset` (`None`: the
+/// plain one), and whether it plays now.
+pub(super) fn wave_playing(state: &ViewState, preset: Option<nikgob_view::MixKey>) -> (bool, bool) {
+    let ours = state.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).is_some_and(|w| w.preset == preset);
+    (ours, ours && state.player.status == Status::Playing)
+}
+
+/// What a click on the wave's chip asks: pause it while it plays, play it
+/// on when it is the queue's, else start it.
+fn wave_command(ours: bool, playing: bool, preset: Option<nikgob_view::MixKey>) -> Command {
+    if playing {
+        Command::Pause
+    } else if ours {
+        Command::TogglePlay
+    } else {
+        Command::PlayWave { preset }
     }
 }
 
@@ -617,12 +648,23 @@ fn mix_row(
     let h = &state.home;
     let per = grid.cards_per_line();
     let with_new = state.prefs.mixes_with_new && !state.prefs.mixes_downloaded_only;
-    let opens = state.prefs.mix_click_opens_list;
     let mut nav = None;
-    let first = usize::from(liked.is_some());
-    let keys = liked.iter().map(|p| refresh::key(("liked", p.id, &p.name))).chain(lanes.iter().map(|l| lane_key(l))).collect();
+    // «Любимые», then «Моя волна», then the mixes.
+    let first = usize::from(liked.is_some()) + 1;
+    let wave_at = first - 1;
+    let keys = liked
+        .iter()
+        .map(|p| refresh::key(("liked", p.id, &p.name)))
+        .chain(std::iter::once(refresh::key("wave")))
+        .chain(lanes.iter().map(|l| lane_key(l)))
+        .collect();
     let changes = refresh::track(ui.ctx(), Id::new(("home-row", name)), live, keys, || {
-        liked.iter().map(|p| MixItem::Liked((*p).clone())).chain(lanes.iter().map(|l| MixItem::Lane((*l).clone()))).collect()
+        liked
+            .iter()
+            .map(|p| MixItem::Liked((*p).clone()))
+            .chain(std::iter::once(MixItem::Wave))
+            .chain(lanes.iter().map(|l| MixItem::Lane((*l).clone())))
+            .collect()
     });
     let pitch = grid.tile(per) + GUTTER;
     let at = row::Row {
@@ -643,7 +685,12 @@ fn mix_row(
                     return;
                 }
                 Some(MixItem::Lane(l)) => {
-                    let _ = cards::mix(ui, cell, l, with_new, false, false, state.player.status, opens, None, &mut Vec::new());
+                    let click = cards::MixClick::of(&state.prefs, l.key);
+                    let _ = cards::mix(ui, cell, l, with_new, false, false, state.player.status, click, None, &mut Vec::new());
+                    return;
+                }
+                Some(MixItem::Wave) => {
+                    cards::wave(ui, cell, false, false, state.player.status, &mut Vec::new());
                     return;
                 }
                 None => {}
@@ -652,10 +699,21 @@ fn mix_row(
                 nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, out).or(nav.take());
                 return;
             }
+            if i == wave_at {
+                let (ours, playing) = wave_playing(state, None);
+                cards::wave(ui, cell, playing, ours, state.player.status, out);
+                return;
+            }
             let l = lanes[i - first];
             // «Смешать с…»: another profile to mix it with.
             let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
-            nav = cards::mix(ui, cell, l, with_new, can_blend, lane_playing(state, l), state.player.status, opens, None, out).or(nav.take());
+            let click = cards::MixClick::of(&state.prefs, l.key);
+            // A card started as a wave plays as long as its wave does.
+            let playing = match click {
+                cards::MixClick::Wave => wave_playing(state, Some(l.key)).1,
+                _ => lane_playing(state, l),
+            };
+            nav = cards::mix(ui, cell, l, with_new, can_blend, playing, state.player.status, click, None, out).or(nav.take());
         });
     });
     if near {
@@ -679,6 +737,7 @@ fn ask_more(ctx: &egui::Context, row: HomeRow, n: usize, out: &mut Vec<Command>)
 #[derive(Clone)]
 enum MixItem {
     Liked(PlaylistCard),
+    Wave,
     Lane(LaneCard),
 }
 

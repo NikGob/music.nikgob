@@ -105,8 +105,9 @@ fn mixes(ui: &mut Ui, grid: Grid, v: &WorldView, state: &ViewState, out: &mut Ve
     let mut nav = None;
     for (i, l) in v.mixes.iter().enumerate() {
         let cell = grid.cell(i, per, block.top(), h, 24.0);
-        let (playing, opens) = (super::home::lane_playing(state, l), state.prefs.mix_click_opens_list);
-        nav = cards::mix(ui, cell, l, false, false, playing, state.player.status, opens, Some(&v.world.key), out).or(nav);
+        let playing = super::home::lane_playing(state, l);
+        let click = if state.prefs.mix_click_opens_list { cards::MixClick::List } else { cards::MixClick::Play };
+        nav = cards::mix(ui, cell, l, false, false, playing, state.player.status, click, Some(&v.world.key), out).or(nav);
     }
     nav
 }

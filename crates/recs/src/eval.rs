@@ -42,6 +42,11 @@
 //!     new; and the wave of a filter ([`crate::open_world::next`]: «Спокойное»
 //!     and any music) at the same mornings — its share of new music, its
 //!     artists, whether it was a niche;
+//!   - a session of «Моя волна» ([`wave_session`], [`crate::wave`]) at
+//!     the same mornings: the share of new music it plays at each novelty
+//!     (heard out song by song, three at a time as the queue asks), and
+//!     how often two early skips of a block's first songs move it to
+//!     another cluster;
 //!   - the share of the catalog all lists ever held, and for a synthetic
 //!     listener how high the hidden taste rates what was picked (0.5 is a
 //!     random pick);
@@ -418,6 +423,21 @@ pub struct WaveStats {
     pub fitting: f32,
 }
 
+/// How sessions of «Моя волна» did ([`wave_session`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaveSessionStats {
+    pub sessions: usize,
+    /// The share of new music played at «Знакомое», «Баланс», «Больше
+    /// нового», «Только новое».
+    pub new: [f32; 4],
+    /// Clusters the wave weighed, on average.
+    pub clusters: f32,
+    /// Sessions of two clusters or more where two early skips were
+    /// measured, and the share of them whose next block was of another.
+    pub skips_n: usize,
+    pub skips_moved: f32,
+}
+
 /// What [`evaluate`] measured.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
@@ -437,6 +457,8 @@ pub struct Report {
     /// The waves of «Спокойное» and of any music (the user's share).
     pub wave_calm: WaveStats,
     pub wave_any: WaveStats,
+    /// Sessions of «Моя волна».
+    pub wave_sessions: WaveSessionStats,
     /// A build of the graph of similar music alone (ms) and a walk of it
     /// from three tracks (µs).
     pub graph_ms: f32,
@@ -855,6 +877,112 @@ pub fn wave(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandid
     crate::open_world::next(&ctx, pool, filter, session, n, &HashSet::new())
 }
 
+/// The novelties of a wave session ([`crate::wave`]).
+pub const WAVE_NOVELTIES: [f32; 4] = [crate::wave::NOVELTY_FAMILIAR, crate::wave::NOVELTY_BALANCE, crate::wave::NOVELTY_MORE, crate::wave::NOVELTY_ONLY_NEW];
+
+/// What one session of «Моя волна» did ([`wave_session`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WaveRun {
+    /// The share of new music of each novelty of [`WAVE_NOVELTIES`]
+    /// (`None`: nothing played).
+    pub new: [Option<f32>; 4],
+    /// The clusters it weighed.
+    pub clusters: usize,
+    /// Two early skips of a block's first songs: whether the next block
+    /// was of another cluster (`None` with one cluster).
+    pub moved: Option<bool>,
+}
+
+/// A session of «Моя волна» after `session` over the dataset's open
+/// `pool`: [`WAVE_LEN`] songs at each novelty, three at a time, each heard
+/// out; then at «Баланс» a fresh wave whose first two songs are skipped
+/// early, and the cluster its next block is of.
+pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], session: &Session) -> WaveRun {
+    use crate::radio::Outcome;
+    use crate::wave::WaveSeed;
+    let artist_of: HashMap<String, ArtistId> = parts.new.iter().filter_map(|d| Some((crate::stream_song_key(&d.track), d.artist?))).collect();
+    let artist_tracks = |t: &StreamTrack| artist_of.get(&crate::stream_song_key(t)).map(|a| model.of_artist(*a).iter().map(|&i| i as usize).collect()).unwrap_or_default();
+    let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+    let ok = |_: usize| true;
+    let genre_of = genres(parts);
+    let genre = |i: usize| genre_of.get(i).copied().flatten();
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
+    let mut run = WaveRun::default();
+    for (k, &novelty) in WAVE_NOVELTIES.iter().enumerate() {
+        let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(novelty)));
+        radio.attune(session.clone(), Some(model.weights));
+        let (mut played, mut new) = (0usize, 0usize);
+        while played < WAVE_LEN {
+            let picks = radio.extend_wave(&ctx, pool, 3, 11);
+            if picks.is_empty() {
+                break;
+            }
+            for p in picks {
+                played += 1;
+                new += usize::from(matches!(p.item, Item::Stream(_)));
+                radio.feedback(p.item, Outcome::Complete);
+            }
+        }
+        run.new[k] = (played > 0).then(|| new as f32 / played as f32);
+        if k == 1 {
+            run.clusters = radio.wave_bandit().map_or(0, |b| b.arms.len());
+        }
+    }
+    // Two early skips of a fresh block.
+    let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(crate::wave::NOVELTY_BALANCE)));
+    radio.attune(session.clone(), Some(model.weights));
+    let first = radio.extend_wave(&ctx, pool, 3, 13);
+    let skipped = radio.wave_bandit().and_then(|b| b.current_scene());
+    if first.len() >= 2 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
+        for p in first.iter().take(2) {
+            radio.feedback(p.item.clone(), Outcome::skip(8_000));
+        }
+        radio.forget(&first[2..].iter().map(|p| p.item.clone()).collect::<Vec<_>>());
+        let again = radio.extend_wave(&ctx, pool, 3, 13);
+        let now = radio.wave_bandit().and_then(|b| b.current_scene());
+        if !again.is_empty() {
+            run.moved = Some(now != skipped);
+        }
+    }
+    run
+}
+
+/// Accumulates [`WaveSessionStats`].
+#[derive(Default)]
+struct WaveSessions {
+    n: usize,
+    new: [(f32, usize); 4],
+    clusters: usize,
+    skips: (usize, usize),
+}
+
+impl WaveSessions {
+    fn add(&mut self, r: &WaveRun) {
+        self.n += 1;
+        for (acc, x) in self.new.iter_mut().zip(r.new) {
+            if let Some(x) = x {
+                acc.0 += x;
+                acc.1 += 1;
+            }
+        }
+        self.clusters += r.clusters;
+        if let Some(m) = r.moved {
+            self.skips.0 += 1;
+            self.skips.1 += usize::from(m);
+        }
+    }
+
+    fn stats(&self) -> WaveSessionStats {
+        WaveSessionStats {
+            sessions: self.n,
+            new: self.new.map(|(s, n)| s / n.max(1) as f32),
+            clusters: self.clusters as f32 / self.n.max(1) as f32,
+            skips_n: self.skips.0,
+            skips_moved: self.skips.1 as f32 / self.skips.0.max(1) as f32,
+        }
+    }
+}
+
 /// Accumulates [`WaveStats`].
 #[derive(Default)]
 struct Waves {
@@ -1084,6 +1212,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
     let mut mixes_row = Lists::default();
     let mut calm = Waves::default();
     let mut any = Waves::default();
+    let mut sessions = WaveSessions::default();
     let mut per_home = 0usize;
     let mut homes_n = 0usize;
     if !days.is_empty() && opts.mix_days > 0 {
@@ -1116,6 +1245,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
             let session = Session::default();
             calm.add(&wave(parts, &model, &suits, &pool, &WaveFilter { novelty: USER_NEW_SHARE, character: Character::Calm, ..WaveFilter::default() }, &session, WAVE_LEN));
             any.add(&wave(parts, &model, &suits, &pool, &WaveFilter { novelty: USER_NEW_SHARE, ..WaveFilter::default() }, &session, WAVE_LEN));
+            sessions.add(&wave_session(parts, &model, &suits, &pool, &session_before(events, t)));
         }
     }
     report.mixes = mixes.stats(n);
@@ -1124,6 +1254,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
     report.mixes.niches /= homes_n.max(1) as f32;
     report.wave_calm = calm.stats();
     report.wave_any = any.stats();
+    report.wave_sessions = sessions.stats();
     report
 }
 
@@ -1196,6 +1327,11 @@ impl Report {
                 w.lists, w.new, w.niche, w.artists, w.artists_per_pick, w.fitting
             );
         }
+        let w = &self.wave_sessions;
+        out += &format!(
+            "  wave session: n {:>3}  new familiar {:.3} balance {:.3} more {:.3} only-new {:.3}  clusters {:.1}  2 skips: n {:>3} moved {:.3}\n",
+            w.sessions, w.new[0], w.new[1], w.new[2], w.new[3], w.clusters, w.skips_n, w.skips_moved
+        );
         out += &format!(
             "  time: build {:.0} ms (learning) / {:.0} ms (cached weights), home mixes {:.0} ms, autoplay of ten {:.0} ms, graph {:.1} ms, walk {:.0} µs\n",
             self.build_ms, self.build_cached_ms, self.mixes_ms, self.autoplay_ms, self.graph_ms, self.walk_us
@@ -1314,6 +1450,184 @@ mod tests {
         assert!(!any.niche);
         let share = any.picks.iter().filter(|p| p.new).count() as f32 / any.picks.len() as f32;
         assert!(share <= USER_NEW_SHARE + 0.1, "{share}");
+    }
+
+    /// A session of «Моя волна» on a listener of several clusters: its new
+    /// music follows the novelty (none at «Знакомое», all it can at «Только
+    /// новое»), it weighs several clusters, and two early skips of a block
+    /// move it to another.
+    /// An open pool for a listener who has none: a new song of a new
+    /// artist beside each of `every`-th library tracks, linked to it.
+    fn linked_pool(model: &UserModel, every: usize) -> Vec<OpenCandidate> {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service};
+        (0..model.len())
+            .step_by(every)
+            .enumerate()
+            .map(|(k, i)| {
+                let mut track = StreamTrack::new(RemoteId::new(Service::Youtube, format!("w{k}")), format!("Wave {k}"));
+                track.artists.push(ArtistRef::new(None, format!("New {k}")));
+                OpenCandidate { key: crate::stream_song_key(&track), track, vector: None, lane: None, near: vec![i], weight: 0.8 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wave_session_follows_novelty_and_skips() {
+        let d = synthetic::user(synthetic::Kind::Omnivore, 5);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let pool = linked_pool(&model, 2);
+        assert!(pool.len() > 40);
+        let r = wave_session(&p, &model, &suits, &pool, &Session::default());
+        let new = r.new.map(Option::unwrap);
+        assert_eq!(new[0], 0.0, "«Знакомое» plays no new song: {new:?}");
+        assert!(new[1] > 0.0 && new[1] < new[2] + 0.05 && new[2] < new[3] + 0.05, "{new:?}");
+        assert!(new[3] >= 0.9, "«Только новое»: {new:?}");
+        assert!(r.clusters >= 2, "{}", r.clusters);
+        assert_eq!(r.moved, Some(true), "two skips change the cluster");
+    }
+
+    /// Blocks of one cluster: a wave's picks come four to six of one
+    /// cluster at a time, and each library pick is of its cluster and of
+    /// the filter's character.
+    #[test]
+    fn a_wave_plays_blocks_of_its_filter() {
+        use crate::radio::Outcome;
+        use crate::wave::{BLOCK_MIN, WaveSeed};
+        let d = synthetic::user(synthetic::Kind::Omnivore, 6);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+        let ok = |_: usize| true;
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none };
+        for character in [Character::Any, Character::Calm] {
+            let seed = WaveSeed { filter: WaveFilter { novelty: 0.0, character, scene: crate::open_world::Scene::All }, only: Vec::new(), part: None };
+            let mut radio = RadioState::new(RadioSeed::Wave(seed.clone()));
+            radio.attune(Session::default(), Some(model.weights));
+            let mut runs: Vec<(Option<crate::open_world::Scene>, usize)> = Vec::new();
+            let (mut fits, mut played) = (0usize, 0usize);
+            let mut heard: Vec<TrackId> = Vec::new();
+            let mut first_again: Option<usize> = None;
+            for _ in 0..8 {
+                let picks = radio.extend_wave(&ctx, &[], 3, 5);
+                let scene = radio.wave_bandit().and_then(|b| b.current_scene());
+                for pk in picks {
+                    let Item::Track(t) = pk.item else { panic!("«Знакомое» is the library") };
+                    let i = model.position(t).unwrap();
+                    if first_again.is_none() && heard.contains(&t) {
+                        first_again = Some(heard.len());
+                    }
+                    heard.push(t);
+                    played += 1;
+                    let fit = crate::open_world::fits_filter(&ctx, &seed.filter, i);
+                    fits += usize::from(fit);
+                    if let (true, Some(crate::open_world::Scene::Profile(k))) = (fit, scene) {
+                        assert_eq!(model.profile_at(i).map(|j| model.profiles.list[j].key), Some(k), "a pick of its block's cluster");
+                    }
+                    match runs.last_mut() {
+                        Some((s, n)) if *s == scene => *n += 1,
+                        _ => runs.push((scene, 1)),
+                    }
+                    radio.feedback(pk.item, Outcome::Complete);
+                }
+            }
+            // Every pick is of the filter (its character never lets go), and
+            // every rested track of it played before one plays again.
+            assert_eq!(fits, played, "{character:?}: {fits} of {played} fit");
+            assert!(played > 0);
+            let rested = (0..model.len())
+                .filter(|&i| crate::open_world::fits_filter(&ctx, &seed.filter, i))
+                .filter(|&i| model.taste.last_played_at(i).is_none_or(|t| model.now() - t >= 3 * crate::taste::HOUR_MS))
+                .count();
+            if let Some(at) = first_again {
+                assert_eq!(at, rested, "{character:?}: played again after {at} of {rested}");
+            }
+            // Every run of one cluster but the last is a whole block.
+            // (A calm cluster of a few songs may run dry within its block.)
+            if character == Character::Any && radio.wave_bandit().is_some_and(|b| b.arms.len() > 1) {
+                for (_, n) in &runs[..runs.len() - 1] {
+                    assert!(*n >= usize::from(BLOCK_MIN), "{runs:?}");
+                }
+            }
+        }
+    }
+
+    /// A filter run dry plays its songs again, those heard least lately
+    /// first, before anything else; its character never lets go; its scene
+    /// lets go only when even that is nothing, and the wave says so.
+    #[test]
+    fn a_dry_wave_plays_its_own_again_before_letting_its_scene_go() {
+        use crate::radio::Outcome;
+        use crate::wave::{REPEAT_GAP, WaveSeed};
+        let d = synthetic::user(synthetic::Kind::Omnivore, 6);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+        let none = |_: &StreamTrack| Vec::new();
+        let rested = |i: usize| model.taste.last_played_at(i).is_none_or(|t| model.now() - t >= 3 * crate::taste::HOUR_MS);
+        let all = |_: usize| true;
+        let full = WaveContext { model: &model, ok: &all, genre: None, background: &background, artist_tracks: &none };
+        let calm = WaveFilter { novelty: 0.0, character: Character::Calm, scene: crate::open_world::Scene::All };
+        // Eight calm songs only may play.
+        let eight: Vec<usize> = (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &calm, i)).take(8).collect();
+        assert_eq!(eight.len(), 8, "a calm side to the omnivore");
+        let only_eight = |i: usize| eight.contains(&i) || !crate::open_world::fits_filter(&full, &calm, i);
+        let ctx = WaveContext { model: &model, ok: &only_eight, genre: None, background: &background, artist_tracks: &none };
+        let seed = WaveSeed { filter: calm, only: Vec::new(), part: None };
+        let mut radio = RadioState::new(RadioSeed::Wave(seed.clone()));
+        radio.attune(Session::default(), Some(model.weights));
+        let mut heard: Vec<usize> = Vec::new();
+        for _ in 0..8 {
+            // (The call that runs dry may come short: its own picks are
+            // in the queue's gap.)
+            let picks = radio.extend_wave(&ctx, &[], 3, 5);
+            assert!(!picks.is_empty(), "never silent while its own can play again");
+            for pk in picks {
+                let Item::Track(t) = pk.item else { panic!() };
+                let i = model.position(t).unwrap();
+                assert!(eight.contains(&i), "only calm songs: {i}");
+                heard.push(i);
+                radio.feedback(pk.item, Outcome::Complete);
+            }
+        }
+        assert!(heard.len() >= 16, "{heard:?}");
+        let distinct: HashSet<usize> = heard[..8].iter().copied().collect();
+        assert_eq!(distinct.len(), 8, "all eight before one again: {heard:?}");
+        // The first played again is of those heard least lately, and none
+        // within the queue's gap.
+        assert!(heard[..8 - REPEAT_GAP].contains(&heard[8]), "{heard:?}");
+        for (k, i) in heard.iter().enumerate() {
+            assert!(!heard[k.saturating_sub(REPEAT_GAP)..k].contains(i), "{i} again within {REPEAT_GAP}: {heard:?}");
+        }
+        assert_eq!(radio.wave_seed().map(|s| s.filter), Some(calm));
+
+        // A scene of two calm songs: they, then every scene, and the
+        // wave's scene says «Все»; the character still holds.
+        let k = model.profiles.list.iter().map(|p| p.key).find(|&k| {
+            let scene = WaveFilter { scene: crate::open_world::Scene::Profile(k), ..calm };
+            (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &scene, i)).count() >= 2
+        });
+        let Some(k) = k else { panic!("a profile with calm songs") };
+        let scene = WaveFilter { scene: crate::open_world::Scene::Profile(k), ..calm };
+        let two: Vec<usize> = (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &scene, i)).take(2).collect();
+        let only_two = |i: usize| two.contains(&i) || !crate::open_world::fits_filter(&full, &scene, i);
+        let ctx = WaveContext { model: &model, ok: &only_two, genre: None, background: &background, artist_tracks: &none };
+        let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed { filter: scene, only: Vec::new(), part: None }));
+        radio.attune(Session::default(), Some(model.weights));
+        let picks = radio.extend_wave(&ctx, &[], 3, 5);
+        assert_eq!(picks.len(), 3);
+        let at: Vec<usize> = picks.iter().map(|pk| match pk.item { Item::Track(t) => model.position(t).unwrap(), _ => panic!() }).collect();
+        assert!(two.contains(&at[0]) && two.contains(&at[1]), "its scene first: {at:?}");
+        assert!(!two.contains(&at[2]));
+        assert!(at.iter().all(|&i| crate::open_world::fits_filter(&full, &calm, i)), "calm throughout");
+        assert_eq!(radio.wave_seed().map(|s| s.filter), Some(calm), "the chip shows «Все»");
     }
 
     /// The calm niche of three songs is a card of the home (below a mix's

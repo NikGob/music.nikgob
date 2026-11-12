@@ -208,7 +208,7 @@ pub const ALL: &[SettingId] = {
         OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, RadioNoRepeat,
         ListShuffle(L::Mix), ListShuffle(L::OwnPlaylist), ListShuffle(L::Album), ListShuffle(L::ReadyPlaylist), ShuffleRadio,
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
-        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, SoundNeural, SoundDevice, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, AlbumOpens,
+        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, SoundNeural, SoundDevice, MixCardsWave, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, AlbumOpens,
         AlbumVersions, PartialAlbumsOnHome, RadioSource,
         // Тексты.
         Preset(Area::Lyrics), LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsLift, LyricsScale, LyricsLead,
@@ -222,7 +222,7 @@ pub const ALL: &[SettingId] = {
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
         PlayerButton(B::Like), PlayerButton(B::AddToPlaylist), PlayerButton(B::Queue), PlayerButton(B::Lyrics), PlayerButton(B::Sound),
-        HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HiddenMixes, AlbumDate,
+        HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, MixClickOpensList, HomeWaveChip, HiddenMixes, AlbumDate,
         LikedAlbumsPlace, UiScale, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
@@ -293,6 +293,7 @@ fn spec(id: SettingId) -> Spec {
         | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac | S::ListShuffle(_) => Spec::Choice(Menu),
         S::SoundNeural => Spec::Fixed(Menu, "a mode downloads the neural sound model; the sweep leaves it as it is"),
         S::SoundDevice => Spec::Fixed(Menu, "open only with the neural sound analysis on, which downloads its model"),
+        S::MixCardsWave => Spec::Choice(Menu),
         S::RadioSource => Spec::Fixed(Segments, "chosen in the queue's radio header; no row in Settings"),
         // A preset: its presets as choices (no «Свои»: it only takes back).
         S::Preset(a) if a.names().is_empty() => Spec::Fixed(Segments, "no presets yet (TODO 36); the row is not drawn"),
@@ -388,6 +389,7 @@ fn spec(id: SettingId) -> Spec {
         S::MixesMoods => Spec::Switch(|p| &mut p.mixes_moods),
         S::MixesOnRepeat => Spec::Switch(|p| &mut p.mixes_on_repeat),
         S::MixClickOpensList => Spec::Switch(|p| &mut p.mix_click_opens_list),
+        S::HomeWaveChip => Spec::Switch(|p| &mut p.home_wave_chip),
         S::DislikeButton => Spec::Switch(|p| &mut p.dislike_button),
         S::DislikeSkips => Spec::Switch(|p| &mut p.dislike_skips),
         S::DislikeSkipEverywhere => Spec::Switch(|p| &mut p.dislike_skip_everywhere),
@@ -914,7 +916,7 @@ mod tests {
             | S::AlbumOpens | S::AlbumVersions | S::PartialAlbumsOnHome
 
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
-            | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::SoundNeural | S::SoundDevice | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
+            | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::SoundNeural | S::SoundDevice | S::MixCardsWave | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
             | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth
             | S::LightSpeed | S::WaveJump | S::JumpSpeed | S::LyricsLift | S::LyricsScale | S::LyricsLead | S::LyricsDim | S::LyricsCascade
             | S::LyricsGlow | S::LyricsSoftEdges | S::LyricsSoftDepth | S::LyricsSoftStrength | S::LyricsSoftFade | S::LyricsGap
@@ -925,7 +927,7 @@ mod tests {
             | S::RingStyle | S::RingSpin | S::RingDir | S::RingBeat | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount
             | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::ProgressWave | S::NpVolume
             | S::NpVolumeHold | S::CoverClickPause | S::DblClickShape | S::TapWait | S::NpMotion | S::MixesProfiles
-            | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames | S::MixClickOpensList
+            | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames | S::MixClickOpensList | S::HomeWaveChip
             | S::HiddenMixes | S::AlbumDate | S::LikedAlbumsPlace | S::RailCompact | S::ReducedMotion | S::Tooltips | S::PaneQueue
             | S::PaneLyrics | S::PaneInfo | S::TrackMenu | S::SpotifyEnabled | S::Spotify | S::SpotifyPersonal | S::SpotifyPlayback
             | S::SpotifySoloist | S::ImportSpotify | S::YouTubeEnabled | S::YouTube | S::YouTubeCookies | S::ImportYouTube

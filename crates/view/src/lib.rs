@@ -1907,6 +1907,14 @@ pub struct Prefs {
     /// A click on a mix's card opens its page ([`Route::Mix`]; its ▶ plays
     /// it); off: the click plays it.
     pub mix_click_opens_list: bool,
+    /// «Карточки в „Миксах для тебя“» → «Запускают Волну с этим вайбом»: a
+    /// card of the row starts «Моя волна» with its own filter (its list
+    /// stays in ⋮); off: «Открывают готовый список треков» as before.
+    pub mix_cards_wave: bool,
+    /// «▶ Моя волна» in the header of Главная beside «Только скачанное».
+    pub home_wave_chip: bool,
+    /// The novelty «Моя волна» starts with: the last one chosen.
+    pub wave_novelty: WaveNovelty,
     /// «Фон» cards at most (0: none), for a user who listens in the
     /// background.
     pub background_cards: u8,
@@ -3547,6 +3555,15 @@ pub enum Command {
     /// card's first) plays and stands first in «Миксы для тебя» until
     /// 06:00.
     PlayBlend { profiles: Vec<u32> },
+    /// «Моя волна» starts: plain, or with the filter of a card of «Миксы
+    /// для тебя» (`preset`).
+    PlayWave { preset: Option<MixKey> },
+    /// A chip of the wave's header in the queue: the wave plays `filter`
+    /// from its next tracks (the one playing goes on).
+    SetWave(WaveFilter),
+    /// «↻ Другой вайб»: the wave moves to another of the user's clusters
+    /// at once, the track playing counted as no skip.
+    OtherVibe,
     /// «Скрыть карточку»: switches «Карточка наверху главной» off and says
     /// how to bring it back (the snackbar's «Вернуть»).
     HideHomeCard,
@@ -3733,6 +3750,9 @@ impl Default for Prefs {
             mixes_moods: true,
             mixes_on_repeat: true,
             mix_click_opens_list: true,
+            mix_cards_wave: true,
+            home_wave_chip: true,
+            wave_novelty: WaveNovelty::Balance,
             background_cards: 3,
             graph_use: true,
             graph_services: true,

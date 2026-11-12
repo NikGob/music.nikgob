@@ -1111,6 +1111,11 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
 
 type SchemeKey = (u32, bool, SchemeVariant, Contrast);
 
+/// «Моя волна» (or a card started as one) is what the queue plays.
+pub(crate) fn wave_plays(state: &nikgob_view::ViewState) -> bool {
+    state.queue.radio.as_ref().is_some_and(|r| r.wave.is_some())
+}
+
 /// Where [`Md3eUi`] keeps the seed the scheme is made from.
 pub(crate) fn scheme_seed_id() -> egui::Id {
     egui::Id::new("md3e-scheme-seed")
