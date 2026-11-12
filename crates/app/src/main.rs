@@ -546,6 +546,8 @@ fn stage(name: &str) {
 }
 
 fn main() -> eframe::Result {
+    // The allocator's options before anything else allocates much.
+    memory::tune();
     LAUNCHED.get_or_init(Instant::now);
     // `--youtube-login` / `--soundcloud-login`: this run is only a sign-in
     // window; `--khinsider-page`: a hidden page read; `--sc-widget`: only

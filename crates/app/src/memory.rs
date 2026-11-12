@@ -9,17 +9,22 @@
 //! known caches:
 //!
 //! ```text
-//! memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (held 331), working set 552 MB, allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0 MB), lyrics 12 tracks ~2.1 MB, stream buffers 2 / 14 MB
+//! memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (held 331), working set 552 MB, mimalloc 260 MB (peak 900), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0 MB), lyrics 12 tracks ~2.1 MB, stream buffers 2 / 14 MB
 //! ```
 //!
 //! `held` is private bytes minus `live`: memory the allocator keeps after
-//! it was freed (and the few private allocations that are not the heap's:
-//! thread stacks, the GPU driver's). mimalloc gives unused pages back to the
-//! system after a short delay, where the system heaps (Windows' and glibc's)
-//! kept them for good after a peak. A large `held` that stays large says
-//! memory is not given back; a large `live` says something holds
-//! it. On Linux the process's numbers are the anonymous resident memory and
-//! the resident set.
+//! it was freed (and the private allocations that are not the heap's:
+//! thread stacks, the GPU driver's, ONNX Runtime's). `mimalloc` is what the
+//! allocator itself has committed now and at most since the start: private
+//! bytes beyond it are not the Rust heap's. A large `held` that stays large
+//! says memory is not given back; a large `live` says something holds it.
+//! On Linux the process's numbers are the anonymous resident memory and the
+//! resident set.
+//!
+//! [`tune`] sets mimalloc to commit pages as they are written and to give
+//! freed memory back at once (its defaults commit whole pages up front and
+//! keep freed memory a second or more); the workers that do bursts collect
+//! their own heap after them (`nikgob_runtime::release_thread_memory`).
 
 // The allocator and the system's process counters are unsafe calls.
 #![allow(unsafe_code)]
@@ -110,13 +115,118 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+/// mimalloc 3's options by their place in its `mi_option_t` (the Rust
+/// bindings name only the first few), each with its default. [`tune`] sets
+/// none of them unless the version is 3.x and every one still reads its
+/// default, so another mimalloc (v2, or a 3.x that moved one) is left as
+/// it is.
+mod option {
+    use std::ffi::c_long;
+
+    /// Freed arena memory is decommitted after this many ms (1000).
+    pub const PURGE_DELAY: (i32, c_long) = (15, 1000);
+    /// Every N generic allocations a thread collects its heap (10000).
+    pub const GENERIC_COLLECT: (i32, c_long) = (34, 10_000);
+    /// Full small pages a heap keeps per size class (2).
+    pub const PAGE_FULL_RETAIN: (i32, c_long) = (36, 2);
+    /// 0: a page is committed whole when taken; 1: as it is written; 2: as
+    /// it is written, except where the system overcommits (Linux) (0).
+    pub const PAGE_COMMIT_ON_DEMAND: (i32, c_long) = (40, 0);
+    /// The major version these places are of (`MI_MALLOC_VERSION` / 10000).
+    pub const MAJOR: i32 = 3;
+}
+
+/// What [`tune`] did, for the log once there is one.
+static TUNED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The options [`tune`] sets, with their values.
+const TUNING: [((i32, std::ffi::c_long), std::ffi::c_long); 4] = [
+    (option::PAGE_COMMIT_ON_DEMAND, 2),
+    (option::PURGE_DELAY, 0),
+    (option::PAGE_FULL_RETAIN, 0),
+    (option::GENERIC_COLLECT, 1_000),
+];
+
+/// mimalloc's options, set first thing in `main` (before the threads):
+///
+/// * a page is committed as it is written (on Windows; Linux commits
+///   lazily anyway): a burst over many sizes and threads no longer commits
+///   gigabytes it never touches;
+/// * freed arena memory is decommitted at once, not a second later and
+///   only when the arena is used again;
+/// * no full pages kept per size class, and each thread collects its heap
+///   every 1 000 generic allocations instead of 10 000.
+///
+/// [`start`] logs what was done. Returns whether the options were set.
+pub fn tune() -> bool {
+    use libmimalloc_sys as mi;
+    // SAFETY: plain calls into the linked mimalloc with option places
+    // inside its range (`_mi_option_last` is 47 in 3.x, checked by the
+    // version first); reading and setting an option is thread safe.
+    let (set, said) = unsafe {
+        let version = mi::mi_version();
+        if version / 10_000 != option::MAJOR {
+            (false, format!("mimalloc {version}: options left as they are (these are {}.x's)", option::MAJOR))
+        } else if !TUNING.iter().all(|((at, default), _)| mi::mi_option_get(*at) == *default) {
+            (false, format!("mimalloc {version}: options left as they are (one is not at its default)"))
+        } else {
+            for ((at, _), value) in TUNING {
+                mi::mi_option_set(at, value);
+            }
+            (true, format!("mimalloc {version}: pages committed on demand, purged at once, no full pages kept, collected every 1000"))
+        }
+    };
+    let _ = TUNED.set(said);
+    set
+}
+
+/// What mimalloc has committed itself, now and at most (bytes), from its
+/// statistics. (Its `mi_process_info` is the whole process's on Windows:
+/// the same numbers [`process`] reads.)
+fn mimalloc_committed() -> Option<(u64, u64)> {
+    use libmimalloc_sys as mi;
+    // SAFETY: with no buffer mimalloc allocates the text itself (null on
+    // failure), NUL-terminated; it is read once and handed back to
+    // mimalloc's own free.
+    unsafe {
+        let text = mi::mi_stats_get_json(0, std::ptr::null_mut());
+        if text.is_null() {
+            return None;
+        }
+        let got = committed_of(&std::ffi::CStr::from_ptr(text).to_string_lossy());
+        mi::mi_free(text.cast());
+        got
+    }
+}
+
+/// `"committed": { "total": T, "peak": P, "current": C }` of mimalloc's
+/// statistics as (C, P).
+fn committed_of(json: &str) -> Option<(u64, u64)> {
+    let rest = &json[json.find("\"committed\":")?..];
+    let entry = &rest[..rest.find('}')?];
+    let field = |key: &str| -> Option<u64> {
+        let label = format!("\"{key}\":");
+        let from = entry.find(&label)? + label.len();
+        let digits: String = entry[from..].trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+        u64::try_from(digits.parse::<i64>().ok()?).ok()
+    };
+    Some((field("current")?, field("peak")?))
+}
+
 /// Starts the line once a minute (on a thread of its own that sleeps in
 /// between).
 pub fn start() {
+    if let Some(t) = TUNED.get() {
+        log::info!("memory: {t}");
+    }
     let started = std::thread::Builder::new().name("memory-log".into()).spawn(|| {
         loop {
             std::thread::sleep(Duration::from_secs(60));
             log_now("minute");
+            // Freed arena memory not given back yet goes now (the collect
+            // of this thread's own heap visits every arena).
+            // SAFETY: a plain call; mimalloc's collect is thread safe.
+            unsafe { libmimalloc_sys::mi_collect(true) };
         }
     });
     if let Err(e) = started {
@@ -148,6 +258,8 @@ struct Sample {
     allocations: u64,
     allocations_since: u64,
     process: Option<Process>,
+    /// What mimalloc has committed, now and at most.
+    mimalloc: Option<(u64, u64)>,
     covers: nikgob_md3e::covers::Memory,
     /// Tracks and estimated bytes.
     lyrics: (usize, usize),
@@ -170,6 +282,7 @@ impl Sample {
             allocations,
             allocations_since: allocations.saturating_sub(before),
             process: process(),
+            mimalloc: mimalloc_committed(),
             covers: nikgob_md3e::covers::memory(),
             lyrics: nikgob_runtime::lyrics_memory(),
             streams: nikgob_youtube::stream_buffers(),
@@ -199,6 +312,9 @@ fn line(at: &str, s: &Sample) -> String {
         let (private, resident) = if cfg!(windows) { ("private", "working set") } else { ("anon", "resident") };
         let held = p.private.saturating_sub(s.live as u64);
         out += &format!(", {private} {} MB (held {}), {resident} {} MB", mb(p.private), mb(held), mb(p.resident));
+    }
+    if let Some((now, most)) = s.mimalloc {
+        out += &format!(", mimalloc {} MB (peak {})", mb(now), mb(most));
     }
     out += &format!(", allocations {} (+{})", count(s.allocations), count(s.allocations_since));
     let c = s.covers;
@@ -268,6 +384,7 @@ mod tests {
             allocations: 12_345_678,
             allocations_since: 45_200,
             process: Some(Process { private: 543 << 20, resident: 552 << 20 }),
+            mimalloc: Some((260 << 20, 900 << 20)),
             covers: nikgob_md3e::covers::Memory { textures: 41 << 20, sizes: 37, budget: 64 << 20, decoding: 0 },
             lyrics: (12, 2_200_000),
             streams: (2, 14 << 20),
@@ -277,12 +394,57 @@ mod tests {
             line("minute", &s),
             format!(
                 "memory (minute): live 212 MB, peak 480 MB (most 512), {private} 543 MB (held 331), {resident} 552 MB, \
-                 allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0.0 MB), lyrics 12 tracks ~2.1 MB, \
+                 mimalloc 260 MB (peak 900), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0.0 MB), lyrics 12 tracks ~2.1 MB, \
                  stream buffers 2 / 14 MB"
             )
         );
-        let none = Sample { process: None, ..s };
+        let none = Sample { process: None, mimalloc: None, ..s };
         assert!(!line("exit", &none).contains("held"));
+        assert!(!line("exit", &none).contains("mimalloc"));
+    }
+
+    /// mimalloc's own statistics give its committed bytes, read from the
+    /// text as mimalloc writes it.
+    #[test]
+    fn mimalloc_says_what_it_committed() {
+        let json = r#"{
+  "reserved": { "total": 9, "peak": 9, "current": 9 },
+  "committed": { "total": 5000, "peak": 4000, "current": 1234 },
+  "reset": 0,
+}"#;
+        assert_eq!(committed_of(json), Some((1234, 4000)));
+        assert_eq!(committed_of("{}"), None);
+        let (now, most) = mimalloc_committed().expect("mimalloc's statistics");
+        assert!(now > 0 && most >= now, "{now} {most}");
+    }
+
+    /// The option places are mimalloc 3's: before the options are set each
+    /// reads its default, after it the value set. (One test, so that no
+    /// other sets them meanwhile.)
+    #[test]
+    fn the_options_are_set_where_they_are() {
+        use libmimalloc_sys as mi;
+        // SAFETY: plain option reads and a collect of this thread's heap.
+        unsafe {
+            assert_eq!(mi::mi_version() / 10_000, option::MAJOR, "the linked mimalloc is 3.x");
+            for ((at, default), _) in TUNING {
+                assert_eq!(mi::mi_option_get(at), default, "option {at} at its default");
+            }
+        }
+        assert!(tune(), "{:?}", TUNED.get());
+        // SAFETY: as above.
+        unsafe {
+            for ((at, _), value) in TUNING {
+                assert_eq!(libmimalloc_sys::mi_option_get(at), value, "option {at} set");
+            }
+        }
+        // Allocation goes on as before, and a collect after it is fine.
+        let v: Vec<Vec<u8>> = (0..1000).map(|i| vec![1u8; 64 + i * 37]).collect();
+        assert_eq!(v.iter().map(Vec::len).sum::<usize>(), 64 * 1000 + 37 * 999 * 1000 / 2);
+        drop(v);
+        // SAFETY: a plain call.
+        unsafe { libmimalloc_sys::mi_collect(true) };
+        assert!(!tune(), "a second time finds them set and leaves them");
     }
 
     #[test]
