@@ -229,7 +229,7 @@ fn duration_of(album: usize, n: usize) -> u32 {
 
 /// The demo library; `files` writes the covers, tones and lyrics files
 /// next to it (tests seed without them).
-fn seed_with(lib: &Library, root: &Path, files: bool) {
+pub(crate) fn seed_with(lib: &Library, root: &Path, files: bool) {
     if lib.count_releases().unwrap_or(0) > 0 {
         // Existing demo library: refresh the generated covers only.
         for (i, (artist, album, year, _, rgb, _)) in ALBUMS.iter().enumerate() {

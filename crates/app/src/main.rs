@@ -139,6 +139,27 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     Ok(prefs)
 }
 
+/// The first run shows at this start: pending in the prefs (a new install)
+/// and nothing says the player was used before (music or history in the
+/// library, a service signed in). `NIKGOB_FIRST_RUN=1` shows it anyway in a
+/// demo run or the developer profile (`beside`), never in the real player.
+fn first_run_at_start(pending: bool, library: &nikgob_library::Library, streams: &streams::Services, beside: bool) -> bool {
+    if beside && std::env::var_os("NIKGOB_FIRST_RUN").is_some() {
+        return true;
+    }
+    if !pending {
+        return false;
+    }
+    let tracks = library.count_tracks(nikgob_library::TrackFilter::All).unwrap_or(0);
+    let events = library.count_events().unwrap_or(0);
+    let signed_in = streams.iter().any(|s| s.account().is_logged_in());
+    let due = nikgob_view::first_run::due(pending, tracks > 0 || events > 0, signed_in);
+    if !due {
+        log::info!("first run: not shown, the player was used before ({tracks} tracks, {events} plays, signed in: {signed_in})");
+    }
+    due
+}
+
 /// The prefs file with what the settings file and the system add: `settings`
 /// as read once at the start, `devices` the audio outputs (enumerated on
 /// their own thread meanwhile).
@@ -749,6 +770,7 @@ fn main() -> eframe::Result {
     };
     let relogin = streams::relogin(&streams, &secrets);
     stage("streams");
+    prefs.first_run = first_run_at_start(prefs.first_run, &library, &streams, beside);
     // Covers of the services, kept on disk between starts.
     let covers_dir = data_dir.join("cache").join("covers");
 
@@ -1143,6 +1165,34 @@ mod prefs_tests {
         // A first start keeps nothing and opens in «Просто».
         let first = prefs_of(None);
         assert!(first.custom_presets.is_empty() && !first.settings_deep);
+    }
+
+    /// The first run shows on a new install only: not on an upgrade (its
+    /// prefs file has no pending first run), not where the player was used
+    /// (a library with music, a service signed in) though the prefs file
+    /// is gone, not once finished; «Показать первый запуск» shows it again.
+    #[test]
+    fn the_first_run_shows_on_a_new_install_only() {
+        use nikgob_view::PrefPatch;
+        let empty = nikgob_library::Library::open_in_memory().unwrap();
+        let none: streams::Services = Vec::new();
+        let new = prefs_of(None);
+        assert!(first_run_at_start(new.first_run, &empty, &none, false), "a new install");
+        let old = prefs_of(Some(br#"{"theme":"Dark","name_prompt":false}"#));
+        assert!(!old.first_run && !first_run_at_start(old.first_run, &empty, &none, false), "an upgrade");
+        let dir = tempfile::tempdir().unwrap();
+        let used = nikgob_library::Library::open_in_memory().unwrap();
+        demo::seed_with(&used, &dir.path().join("demo"), false);
+        assert!(!first_run_at_start(true, &used, &none, false), "a library with music, its prefs file lost");
+        let signed = streams::demo(&dir.path().join("services"), &Default::default());
+        assert!(signed.iter().any(|s| s.account().is_logged_in()));
+        assert!(!first_run_at_start(true, &empty, &signed, false), "a service signed in");
+        let mut done = new.clone();
+        PrefPatch::FirstRun(false).apply(&mut done);
+        assert!(!prefs_of(Some(&serde_json::to_vec(&done).unwrap())).first_run, "finished: never again");
+        PrefPatch::FirstRun(true).apply(&mut done);
+        assert!(done.first_run, "the developer's row shows it again");
+        assert!(prefs_of(Some(&serde_json::to_vec(&done).unwrap())).first_run);
     }
 
     /// Главная asks for the name on the first start only: not with a prefs
