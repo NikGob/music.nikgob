@@ -21,6 +21,10 @@ use crate::{
 };
 use widgets::{Lead, PlayFrom, TrackListOpts};
 
+/// The chip of a playlist's page that brings new songs into it as it
+/// plays (docs/recommendations.md §4).
+pub const PLUS_CHIP: &str = "✦ С дополнением";
+
 fn type_label(t: ReleaseType) -> &'static str {
     match t {
         ReleaseType::Album => "АЛЬБОМ",
@@ -847,6 +851,13 @@ pub fn playlist(
                 if let Some(e) = &l.error {
                     ui.label(TypeRole::BodySmall.style().rich(e, s.on_surface_variant));
                 }
+            }
+            // «✦ С дополнением»: new songs join the playlist as it plays
+            // (in the header's free height, no band of its own).
+            ui.add_space(12.0);
+            let plus = state.prefs.plus_playlists.contains(&id);
+            if ui.add(FilterChip::new(PLUS_CHIP, plus).id_salt(("pl-plus", id))).clicked() {
+                out.push(Command::SetPref(nikgob_view::PrefPatch::Plus { playlist: id, on: !plus }));
             }
         });
         ui.add_space(16.0);

@@ -19,7 +19,8 @@
 //! `lyrics_ui` opens where timing is made in the look
 //! `NIKGOB_LYRICS_UI` picks (the control's menu, the dialog or the page);
 //! `lyrics_menu` opens the control's own menu in any look.
-//! `liked` opens «Любимые»; `play_clip` plays the first clip of the open
+//! `liked` opens «Любимые»; `play_playlist` plays the open playlist from
+//! its start; `play_clip` plays the first clip of the open
 //! playlist (`play_clip:song` its first stream song).
 //! `find_song` opens «Найти песню…» for the first clip of the open
 //! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
@@ -412,6 +413,13 @@ impl Shot {
             "liked" => {
                 // «Любимые».
                 ui.navigate(ctx, Route::Playlist(nikgob_view::LIKED_PLAYLIST), out);
+                self.wait = 30;
+            }
+            "play_playlist" => {
+                // The open playlist from its start, as «Слушать» does.
+                if let Some(p) = &state.playlist {
+                    out.push(Command::PlayPlaylist { id: p.card.id, start: None, shuffle: false });
+                }
                 self.wait = 30;
             }
             "play_clip" => {
