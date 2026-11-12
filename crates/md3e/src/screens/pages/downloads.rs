@@ -12,8 +12,8 @@ use super::{PageState, SettingId, connected, fmt_size, widgets};
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        Button, Card, ConnectedGroup, IconButton, LoadingIndicator, ListItem, Radii, Size, Style, Switch, badge,
-        paint, segmented_list, wavy_progress,
+        Button, Card, ConnectedGroup, IconButton, ListItem, Radii, Size, Style, Switch, badge,
+        paint, segmented_list, wavy_progress, wavy_progress_indeterminate,
     },
     screens::common::plural,
     tokens::shape,
@@ -52,23 +52,18 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
             out.push(Command::LoadWishlist);
         }
     }
-    if !d.confirm.is_empty()
+    let asks = d.confirm.iter().filter(|c| c.answerable()).count();
+    if asks > 0
         && let Some(r) = rects.get(tab_index(DownloadsTab::Confirm))
     {
-        badge::count(ui.painter(), badge::large_anchor(*r), d.confirm.len() as u32);
+        badge::count(ui.painter(), badge::large_anchor(*r), asks as u32);
     }
     ui.add_space(16.0);
     match TABS[tab].0 {
         DownloadsTab::Wishlist => nav = super::wishlist::show(ui, state, pages, out),
         DownloadsTab::Active => {
             if d.active.is_empty() {
-                widgets::empty_state(
-                    ui,
-                    Icon::Download,
-                    "Ничего не качается",
-                    "Импорт файлов и торренты будут видны здесь.",
-                    None,
-                );
+                widgets::empty_state(ui, Icon::Download, "Ничего не качается", "", None);
             }
             for j in &d.active {
                 job(ui, j, out, true);
@@ -136,53 +131,50 @@ fn storage(ui: &mut Ui, st: &nikgob_view::StorageView) {
     });
 }
 
-/// "Подтверди": imports whose tags the matcher was not sure about. Each
-/// card asks which found release the file is (or to keep the file's own
-/// tags); the header says what this is about and can accept every
-/// recommended match at once.
+/// What a card's accept button takes: the option chosen, when there is
+/// one (a choice kept from before the list changed is no answer).
+fn accepted(c: &Confirm, choice: usize) -> Option<usize> {
+    if c.yes_no {
+        return (!c.options.is_empty()).then_some(0);
+    }
+    (choice < c.options.len()).then_some(choice)
+}
+
+/// "Подтверди": imports whose tags the matcher was not sure about, and
+/// downloads with several likely offers. Each card asks which one it is;
+/// over them, every recommended match can be taken at once.
 fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let d = &state.downloads;
-    if d.confirm.is_empty() {
+    let cards: Vec<&Confirm> = d.confirm.iter().filter(|c| c.answerable()).collect();
+    if cards.is_empty() {
         widgets::empty_state(ui, Icon::Check, "Всё подтверждено", "", None);
         return;
     }
-    Card::filled().id_salt("confirm-help").show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(TypeRole::TitleMedium.style().rich("Проверь, что это за треки", s.on_surface));
-        ui.add_space(4.0);
-        ui.label(
-            TypeRole::BodyMedium.style().rich_para(
-                "Для этих файлов нашлось несколько похожих релизов, и уверенности нет. Выбери правильный вариант — название, альбом, номер и обложка возьмутся из него. Первый вариант — теги, которые уже записаны в файле.",
-                s.on_surface_variant,
-            ),
-        );
-        ui.add_space(12.0);
-        // A card ticked song by song is never answered from here.
-        let recommended: Vec<(u64, usize)> = d
-            .confirm
-            .iter()
-            .filter(|c| c.pick.is_none())
-            .filter_map(|c| c.options.iter().position(|o| o.recommended).map(|i| (c.id, i)))
-            .collect();
-        if !recommended.is_empty()
-            && ui
-                .add(
-                    Button::new(format!("Принять все рекомендованные ({})", recommended.len()))
-                        .icon(Icon::Check)
-                        .style(Style::Tonal)
-                        .id_salt("cf-all"),
-                )
-                .clicked()
+    // A card ticked song by song is never answered from here.
+    let recommended: Vec<(u64, usize)> = cards
+        .iter()
+        .filter(|c| c.pick.is_none())
+        .filter_map(|c| c.options.iter().position(|o| o.recommended).map(|i| (c.id, i)))
+        .collect();
+    if !recommended.is_empty() {
+        if ui
+            .add(
+                Button::new(format!("Принять все рекомендованные ({})", recommended.len()))
+                    .icon(Icon::Check)
+                    .style(Style::Tonal)
+                    .id_salt("cf-all"),
+            )
+            .clicked()
         {
             for (id, option) in recommended {
                 out.push(Command::ConfirmChoice { id, option: Some(option) });
             }
         }
-    });
-    ui.add_space(12.0);
+        ui.add_space(12.0);
+    }
 
-    for c in &d.confirm {
+    for c in cards {
         if let Some(pick) = &c.pick {
             pick_card(ui, c, pick, out);
             ui.add_space(12.0);
@@ -259,12 +251,19 @@ fn confirm(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
                 ui.add_space(6.0);
             }
             ui.add_space(8.0);
+            let take = accepted(c, choice);
             ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(Button::new(c.accept_label.as_str()).style(Style::Filled).id_salt(("cf-ok", c.id)))
+                    .add(
+                        Button::new(c.accept_label.as_str())
+                            .style(Style::Filled)
+                            .enabled(take.is_some())
+                            .id_salt(("cf-ok", c.id)),
+                    )
                     .clicked()
+                    && let Some(option) = take
                 {
-                    out.push(Command::ConfirmChoice { id: c.id, option: Some(choice) });
+                    out.push(Command::ConfirmChoice { id: c.id, option: Some(option) });
                 }
                 // No second way out when the file's own tags are an option.
                 if !c.skip_label.is_empty()
@@ -710,8 +709,13 @@ fn job(ui: &mut Ui, j: &Job, out: &mut Vec<Command>, active: bool) {
                     Some(p) => {
                         wavy_progress(ui, ("job", j.id), p, w);
                     }
+                    // In a peer's queue: no bar (the line says the place),
+                    // its room kept so the rows stay aligned.
+                    None if j.queued => {
+                        ui.allocate_exact_size(vec2(w, 10.0), egui::Sense::hover());
+                    }
                     None => {
-                        ui.add(LoadingIndicator::new().size(32.0));
+                        wavy_progress_indeterminate(ui, w);
                     }
                 }
             }

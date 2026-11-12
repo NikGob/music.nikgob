@@ -500,6 +500,36 @@ async fn details_or_page(i: &Inner, id: &str) -> Result<StreamTrack, StreamError
 }
 
 /// A spawned task, aborted when dropped.
+/// What a save stopped by its caller ends with.
+const CANCELLED: &str = "cancelled";
+
+/// Raises its flag when dropped: the caller of a blocking job went away.
+struct StopOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// All of `r`, a chunk at a time, unless `cancel` is raised meanwhile
+/// (then an error, and what was read is let go).
+fn read_unless(r: &mut impl Read, cancel: &std::sync::atomic::AtomicBool) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other(CANCELLED));
+        }
+        match r.read(&mut chunk) {
+            Ok(0) => return Ok(bytes),
+            Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 struct Joined<T>(JoinHandle<Result<T, StreamError>>);
 
 impl<T> Future for Joined<T> {
@@ -1248,11 +1278,14 @@ impl StreamService for Youtube {
                 }
                 None => Box::new(stream(&inner, handle, &id, true)),
             };
+            // The save stops with its caller: a stopped task (✕ on its row)
+            // drops this guard, and the blocking part below sees the flag.
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let _stop = StopOnDrop(Arc::clone(&cancel));
             let task = tokio::task::spawn_blocking(move || -> Result<PathBuf, StreamError> {
                 let io = |e: std::io::Error| StreamError::Network(e.to_string());
-                let mut bytes = Vec::new();
                 // A stream refused is not a lost connection (see `range`).
-                s.read_to_end(&mut bytes).map_err(|e| range::stream_error(&e))?;
+                let bytes = read_unless(&mut s, &cancel).map_err(|e| range::stream_error(&e))?;
                 let ext = if s.format_hint() == format::WEBM {
                     "opus"
                 } else {
@@ -1273,7 +1306,18 @@ impl StreamService for Youtube {
                         .and_then(|()| std::io::Write::flush(&mut file))
                         .map_err(io)
                 };
-                if let Err(e) = written.and_then(|()| std::fs::rename(&part, &path).map_err(io)) {
+                // Stopped while it wrote: the part goes, nothing is kept.
+                let stopped = || {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        Err(StreamError::Network(CANCELLED.into()))
+                    } else {
+                        Ok(())
+                    }
+                };
+                if let Err(e) = written
+                    .and_then(|()| stopped())
+                    .and_then(|()| std::fs::rename(&part, &path).map_err(io))
+                {
                     let _ = std::fs::remove_file(&part);
                     return Err(e);
                 }
@@ -1388,6 +1432,47 @@ impl StreamService for Youtube {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A save stopped by its caller stops reading at the next chunk; one
+    /// let be reads to the end.
+    #[test]
+    fn a_stopped_save_stops_reading() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Slow<'a> {
+            left: usize,
+            reads: usize,
+            stop_after: usize,
+            cancel: &'a AtomicBool,
+        }
+        impl Read for Slow<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.left == 0 {
+                    return Ok(0);
+                }
+                self.reads += 1;
+                if self.reads == self.stop_after {
+                    self.cancel.store(true, Ordering::Relaxed);
+                }
+                let n = buf.len().min(self.left).min(1000);
+                self.left -= n;
+                Ok(n)
+            }
+        }
+        let cancel = AtomicBool::new(false);
+        let mut r = Slow { left: 10_000, reads: 0, stop_after: 3, cancel: &cancel };
+        let e = read_unless(&mut r, &cancel).unwrap_err();
+        assert_eq!(e.to_string(), CANCELLED);
+        assert_eq!(r.reads, 3, "no read after the flag");
+
+        let free = AtomicBool::new(false);
+        let mut r = Slow { left: 10_000, reads: 0, stop_after: usize::MAX, cancel: &free };
+        assert_eq!(read_unless(&mut r, &free).unwrap().len(), 10_000);
+
+        // The guard raises the flag when its task goes.
+        let flag = Arc::new(AtomicBool::new(false));
+        drop(StopOnDrop(Arc::clone(&flag)));
+        assert!(flag.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn errors_map_to_stream_errors() {

@@ -160,6 +160,7 @@ pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::J
         rate: None,
         eta: None,
         paused: false,
+        queued: false,
         controllable: false,
         pausable: false,
         error: e.error.clone(),
@@ -452,16 +453,17 @@ impl ImportService {
             .map(|(&id, p)| {
                 let subtitle = match &p.current {
                     Some((file, stage)) => format!("{} · {}", stage_label(*stage), file),
-                    None => "Подготовка…".to_owned(),
+                    None => "готовлю файлы".to_owned(),
                 };
                 v::Job {
                     id: IMPORT_ID | id,
-                    title: format!("{} · {} из {}", p.title, p.done, p.files.max(p.done)),
+                    title: import_title(&p.title, p.done, p.files),
                     subtitle,
-                    progress: (p.files > 0).then(|| p.done as f32 / p.files as f32),
+                    progress: import_progress(p.done, p.files),
                     rate: None,
                     eta: None,
                     paused: false,
+                    queued: false,
                     // Cancelled, what it added goes back; never paused.
                     controllable: true,
                     pausable: false,
@@ -559,18 +561,32 @@ impl ImportService {
     }
 }
 
+/// What the import does with a file now, as its row says it.
 fn stage_label(s: Stage) -> &'static str {
     match s {
-        Stage::Probing => "Чтение",
-        Stage::Fingerprinting => "Отпечаток",
-        Stage::Identifying => "Опознание",
-        Stage::QualityCheck => "Проверка качества",
-        Stage::Deciding => "Решение",
-        Stage::Converting => "Конвертация",
-        Stage::Tagging => "Теги",
-        Stage::Placing => "Раскладка",
-        Stage::Deriving => "Палитра",
+        Stage::Probing => "читаю файл",
+        Stage::Fingerprinting => "снимаю отпечаток",
+        Stage::Identifying => "узнаю трек",
+        Stage::QualityCheck => "проверяю качество",
+        Stage::Deciding => "сверяю с библиотекой",
+        Stage::Converting => "конвертирую",
+        Stage::Tagging => "пишу теги",
+        Stage::Placing => "кладу в библиотеку",
+        Stage::Deriving => "беру цвета обложки",
     }
+}
+
+/// An import's row title: its name, and how many of its files are in
+/// when it has several («Альбом · 3 из 12»); one file is not counted.
+fn import_title(title: &str, done: usize, files: usize) -> String {
+    let all = files.max(done);
+    if all > 1 { format!("{title} · {done} из {all}") } else { title.to_owned() }
+}
+
+/// An import's bar: the files taken of several; one file has no steps to
+/// fill (a moving bar, not an empty one).
+fn import_progress(done: usize, files: usize) -> Option<f32> {
+    (files > 1).then(|| done as f32 / files as f32)
 }
 
 fn fmt_duration(d: Duration) -> String {
@@ -591,8 +607,7 @@ impl Worker {
         self.publish(|s| {
             // Cold-start jobs of the streaming part share the id space.
             let others = |id: u64| id & IMPORT_ID == 0 || id & crate::streams::STREAM_JOB != 0;
-            s.downloads.active.retain(|j| others(j.id));
-            s.downloads.active.extend(active);
+            crate::running::put_jobs(&mut s.downloads.active, crate::running::JobKind::Import, active);
             s.downloads.confirm.retain(|c| c.id & IMPORT_ID == 0);
             s.downloads.confirm.extend(confirm);
             s.downloads.history.retain(|j| others(j.id));
@@ -645,6 +660,7 @@ impl Worker {
             rate: None,
             eta: None,
             paused: false,
+            queued: false,
             controllable: false,
             pausable: false,
             error,
@@ -708,6 +724,11 @@ impl Worker {
         }
         svc.importer.cancel(nikgob_import::JobId(job));
         self.toast("Отменяю импорт — добавленное уберу", None);
+    }
+
+    /// The «Хочу скачать» items whose files are being imported.
+    pub(crate) fn importing_wishes(&self) -> std::collections::HashSet<WishlistId> {
+        self.import.as_ref().map(|svc| svc.wish_jobs.values().copied().collect()).unwrap_or_default()
     }
 
     /// The imports running for a «Хочу скачать» item stop and take back
@@ -831,6 +852,7 @@ impl Worker {
                                 rate: None,
                                 eta: None,
                                 paused: false,
+                                queued: false,
                                 controllable: false,
                                 pausable: false,
                                 error: None,
@@ -1032,6 +1054,7 @@ impl Worker {
                     rate: None,
                     eta: None,
                     paused: false,
+                    queued: false,
                     controllable: false,
                     pausable: false,
                     error,

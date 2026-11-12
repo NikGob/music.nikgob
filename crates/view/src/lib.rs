@@ -19,6 +19,7 @@ mod sleep;
 mod sound;
 mod storage;
 mod streams;
+mod transfer;
 
 pub use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource, LyricsSync};
 pub use nikgob_core::model::AlbumMode;
@@ -32,6 +33,7 @@ pub use sleep::*;
 pub use sound::*;
 pub use storage::*;
 pub use streams::*;
+pub use transfer::*;
 
 /// A cover image on disk plus the palette seed computed at import.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -1213,6 +1215,9 @@ pub struct Job {
     pub rate: Option<String>,
     pub eta: Option<String>,
     pub paused: bool,
+    /// It waits its turn at the sharer (a Soulseek peer's queue): no bar,
+    /// the subtitle says the place.
+    pub queued: bool,
     /// It can be cancelled (a torrent, an import: what it added goes back).
     pub controllable: bool,
     /// It can be paused too (a torrent).
@@ -1246,6 +1251,15 @@ pub struct Confirm {
     /// the two songs): they are shown without a choice, the accept button
     /// answers yes (`option: Some(0)`) and the other no (`None`).
     pub yes_no: bool,
+}
+
+impl Confirm {
+    /// It has something to answer: options to choose from, songs to tick,
+    /// or the songs a yes or no is about. A card without is never shown
+    /// (its accept button would take nothing).
+    pub fn answerable(&self) -> bool {
+        !self.options.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

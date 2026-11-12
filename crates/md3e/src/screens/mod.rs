@@ -1492,7 +1492,7 @@ impl Md3eUi {
             .find(|r| !matches!(r, Route::Stream(_)))
             .filter(|_| matches!(self.route(), Route::Stream(_)))
             .map_or_else(|| of(self.route()), of);
-        let pending = state.downloads.confirm.len() as u32;
+        let pending = state.downloads.confirm.iter().filter(|c| c.answerable()).count() as u32;
         let items = [
             RailItem { icon: Icon::Home, label: "Главная", badge: None },
             RailItem { icon: Icon::LibraryMusic, label: "Библиотека", badge: None },

@@ -43,7 +43,21 @@ pub(crate) struct SoulseekService {
     state_dir: Option<PathBuf>,
     /// Counts the clients started (a new one counts its uploads from 0).
     generation: u64,
+    /// Where each download of «Хочу скачать» is at its peer, by the folder
+    /// it downloads into (the row of «Активные» says it).
+    phases: Phases,
 }
+
+/// Where a download is at its peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SlskPhase {
+    /// In the peer's queue, at this place when the peer told it.
+    Queued(Option<u32>),
+    Connecting,
+    Transferring { bps: u64 },
+}
+
+type Phases = Arc<parking_lot::Mutex<std::collections::HashMap<PathBuf, SlskPhase>>>;
 
 fn share_of(s: &SoulseekSettings) -> ShareSettings {
     ShareSettings { enabled: s.share, upload_limit_kbps: s.upload_limit_kbps, upload_slots: s.upload_slots.max(1) }
@@ -63,7 +77,7 @@ fn same_session(a: &SoulseekSettings, b: &SoulseekSettings) -> bool {
 
 impl SoulseekService {
     pub(crate) fn new(library_dir: PathBuf, state_dir: Option<PathBuf>) -> Self {
-        Self { running: None, applied: None, library_dir, state_dir, generation: 0 }
+        Self { running: None, applied: None, library_dir, state_dir, generation: 0, phases: Phases::default() }
     }
 
     /// Which client runs: changes whenever one is started.
@@ -79,7 +93,12 @@ impl SoulseekService {
     /// The download source over the running client, if any.
     pub(crate) fn download_source(&self) -> Option<SlskSource> {
         let rt = self.running.as_ref()?.rt.clone();
-        Some(SlskSource { slsk: self.source()?, rt })
+        Some(SlskSource { slsk: self.source()?, rt, phases: self.phases.clone() })
+    }
+
+    /// Where the downloads are at their peers, by their folders.
+    pub(crate) fn phases(&self) -> std::collections::HashMap<PathBuf, SlskPhase> {
+        self.phases.lock().clone()
     }
 
     /// Runs `f` on the source's runtime.
@@ -328,6 +347,34 @@ const AUDIO: &[&str] = &["FLAC", "MP3", "OGG", "OPUS", "M4A", "AAC", "WAV", "ALA
 pub(crate) struct SlskSource {
     slsk: Soulseek,
     rt: tokio::runtime::Handle,
+    phases: Phases,
+}
+
+/// A download being followed: its state is told under its folder while it
+/// runs; once it is let go (it ended, or the item was turned down and its
+/// task stopped), its place goes and an unfinished one is cancelled at the
+/// peer.
+struct Followed {
+    download: nikgob_soulseek::Download,
+    phases: Phases,
+    dest: PathBuf,
+}
+
+/// Hands `value` to the task waiting for it; with that task gone, `value`
+/// is dropped here (a [`Followed`] cancels its download).
+fn hand_over<T>(tx: tokio::sync::oneshot::Sender<T>, value: T) {
+    if let Err(value) = tx.send(value) {
+        drop(value);
+    }
+}
+
+impl Drop for Followed {
+    fn drop(&mut self) {
+        self.phases.lock().remove(&self.dest);
+        if !self.download.state().is_finished() {
+            self.download.cancel();
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -492,24 +539,38 @@ impl SlskSource {
     /// the files before it brought, of `total`).
     async fn get(&self, file: SearchResult, dest: PathBuf, progress: Progress, before: u64, total: u64) -> Result<PathBuf, SourceError> {
         let slsk = self.slsk.clone();
-        self.on(async move {
-            let d = slsk.download(&file, &dest).await?;
-            let mut rx = d.subscribe();
-            loop {
-                let state = rx.borrow_and_update().clone();
-                match state {
-                    DownloadState::Done { path } => return Ok(path),
-                    DownloadState::Failed { reason } => return Err(nikgob_soulseek::Error::Denied(reason)),
-                    DownloadState::Transferring { received, .. } => progress(before + received, Some(total)),
-                    DownloadState::Queued { .. } | DownloadState::Connecting => {}
+        let phases = self.phases.clone();
+        // Made on the client's runtime, handed over here already guarded: a
+        // download made after this task was stopped (✕ while a remote
+        // service was still asked) is let go — and cancelled at the peer —
+        // wherever it is, in the hand-over or on its way to it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.rt.spawn(async move {
+            let made = slsk.download(&file, &dest).await.map(|download| Followed { download, phases, dest });
+            hand_over(tx, made);
+        });
+        let followed = rx
+            .await
+            .map_err(|_| SourceError::Unreachable("the Soulseek client stopped".into()))?
+            .map_err(source_error)?;
+        let mut rx = followed.download.subscribe();
+        loop {
+            let state = rx.borrow_and_update().clone();
+            let phase = match state {
+                DownloadState::Done { path } => return Ok(path),
+                DownloadState::Failed { reason } => return Err(source_error(nikgob_soulseek::Error::Denied(reason))),
+                DownloadState::Transferring { received, bytes_per_sec, .. } => {
+                    progress(before + received, Some(total));
+                    SlskPhase::Transferring { bps: bytes_per_sec }
                 }
-                if rx.changed().await.is_err() {
-                    return Err(nikgob_soulseek::Error::Cancelled);
-                }
+                DownloadState::Queued { place } => SlskPhase::Queued(place),
+                DownloadState::Connecting => SlskPhase::Connecting,
+            };
+            followed.phases.lock().insert(followed.dest.clone(), phase);
+            if rx.changed().await.is_err() {
+                return Err(source_error(nikgob_soulseek::Error::Cancelled));
             }
-        })
-        .await?
-        .map_err(source_error)
+        }
     }
 }
 
@@ -687,6 +748,39 @@ mod tests {
             duration_ms: Some(194_000),
             ..Want::default()
         }
+    }
+
+    /// A download made for a task that was stopped meanwhile is let go
+    /// (its guard cancels it at the peer): whether the task left before
+    /// the hand-over or after it, before taking it.
+    #[test]
+    fn a_download_made_for_a_stopped_task_is_let_go() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Guard<'a>(&'a AtomicUsize);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let let_go = AtomicUsize::new(0);
+        // Gone before it was made.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx);
+        hand_over(tx, Guard(&let_go));
+        assert_eq!(let_go.load(Ordering::Relaxed), 1);
+        // Gone after the hand-over, before taking it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        hand_over(tx, Guard(&let_go));
+        assert_eq!(let_go.load(Ordering::Relaxed), 1, "waiting in the hand-over");
+        drop(rx);
+        assert_eq!(let_go.load(Ordering::Relaxed), 2);
+        // Taken: it is the caller's now.
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        hand_over(tx, Guard(&let_go));
+        let taken = rx.try_recv().unwrap();
+        assert_eq!(let_go.load(Ordering::Relaxed), 2);
+        drop(taken);
+        assert_eq!(let_go.load(Ordering::Relaxed), 3);
     }
 
     #[test]

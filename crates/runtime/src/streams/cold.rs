@@ -1407,6 +1407,7 @@ impl Worker {
             rate: None,
             eta: None,
             paused: false,
+            queued: false,
             controllable: false,
             pausable: false,
             error,
@@ -1437,6 +1438,7 @@ impl Worker {
                 rate: None,
                 eta: None,
                 paused: false,
+                queued: false,
                 controllable: false,
                 pausable: false,
                 error: None,
@@ -1445,8 +1447,7 @@ impl Worker {
             .collect();
         let history: Vec<v::Job> = self.streaming.cold.history.iter().cloned().collect();
         self.publish(|s| {
-            s.downloads.active.retain(|j| j.id & STREAM_JOB == 0);
-            s.downloads.active.extend(active);
+            crate::running::put_jobs(&mut s.downloads.active, crate::running::JobKind::Cold, active);
             s.downloads.history.retain(|j| j.id & STREAM_JOB == 0);
             s.downloads.history.extend(history);
             crate::import::sort_history(&mut s.downloads.history);

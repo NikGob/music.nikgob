@@ -1,7 +1,8 @@
 //! Загрузки → «Хочу скачать» (docs/stage3.md §3.5, §3.7): stream tracks on
-//! their way to a file (likes, «Скачать», imports). One summary line with
-//! «Скачать все» and «Искать снова», filter chips by status, the list
-//! grouped by album or by artist. A row says where its track is in words (no
+//! their way to a file (likes, «Скачать», imports). Filter chips by status
+//! (their counts are the only numbers said), the grouping with «Скачать
+//! все» and «Искать снова» on its line, the list grouped by album or by
+//! artist. A row says where its track is in words (no
 //! coloured pills) and offers the one thing that helps now: «Скачать»,
 //! «Проверить», or for a track nothing was found for «Искать снова ▾» (with
 //! no source on, «Сохранить с YouTube ▾») with the ways to bring a file in
@@ -12,8 +13,8 @@ use std::collections::HashMap;
 
 use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
-    Command, Route, ViewState, WishlistAttach, WishlistGroup, WishlistId, WishlistRow, WishlistScope, WishlistSelect,
-    WishlistStatus as St,
+    Command, Route, Transfer, TransferPhase, ViewState, WishlistAttach, WishlistGroup, WishlistId, WishlistRow,
+    WishlistScope, WishlistSelect, WishlistStatus as St,
 };
 
 use super::{Ask, PageState, connected, widgets};
@@ -23,7 +24,6 @@ use crate::{
         Button, Card, FilterChip, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Radii, Size,
         SplitButton, Style, paint,
     },
-    screens::common,
     tokens::shape,
 };
 
@@ -74,6 +74,26 @@ impl Filter {
     }
 }
 
+/// How many items each chip takes, counted once over the items: the chips
+/// and the buttons say the same numbers.
+struct Counts([usize; Filter::CHIPS.len()]);
+
+impl Counts {
+    fn of(items: &[WishlistRow], torrents: bool) -> Self {
+        let mut n = [0; Filter::CHIPS.len()];
+        for r in items {
+            for (i, (f, _)) in Filter::CHIPS.iter().enumerate() {
+                n[i] += usize::from(f.takes(r.status, torrents));
+            }
+        }
+        Self(n)
+    }
+
+    fn get(&self, f: Filter) -> usize {
+        Filter::CHIPS.iter().position(|(c, _)| *c == f).map_or(0, |i| self.0[i])
+    }
+}
+
 /// The status of an item in words, for its supporting line.
 fn status_text(r: &WishlistRow, torrents: bool) -> String {
     // A file the library has, looked for in better quality: the runtime
@@ -87,12 +107,8 @@ fn status_text(r: &WishlistRow, torrents: bool) -> String {
         St::New | St::Searching => "ищу…".into(),
         St::Confirm if r.confirm_files => "файлы ждут подтверждения".into(),
         St::Confirm => "нужно выбрать, что скачать".into(),
-        St::Downloading => match (r.progress, &r.source) {
-            (Some(p), Some(from)) => format!("качается · {from} · {p}%"),
-            (Some(p), None) => format!("качается · {p}%"),
-            (None, Some(from)) => format!("качается · {from}"),
-            (None, None) => "качается".into(),
-        },
+        // The same transfer its row in «Активные» shows.
+        St::Downloading => r.transfer.unwrap_or_default().status(r.source.as_deref()),
         St::NoTorrent | St::Failed if r.has_copy => match &r.next_try {
             Some(next) => format!("есть копия с YouTube · ищу лучше, {next}"),
             None => "есть копия с YouTube · ищу лучше".into(),
@@ -165,84 +181,24 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     }
 
     let by_id: HashMap<WishlistId, &WishlistRow> = w.items.iter().map(|r| (r.id, r)).collect();
-    let count = |f: Filter| w.items.iter().filter(|r| f.takes(r.status, torrents)).count();
-    // What «Скачать все» starts, and what waits (without torrents: all of
-    // what is queued).
-    let waiting = w.count(St::Waiting);
-    let idle = count(Filter::Waiting) as u64;
-    // What is on its way: «3 трека, 1 альбом».
-    let (tracks, albums) = w
-        .items
-        .iter()
-        .filter(|r| Filter::All.takes(r.status, torrents))
-        .fold((0u64, 0u64), |(t, a), r| if r.scope == WishlistScope::Album { (t, a + 1) } else { (t + 1, a) });
-    let mut parts = Vec::new();
-    if tracks > 0 || albums == 0 {
-        parts.push(format!("{tracks} {}", common::plural(tracks, "трек", "трека", "треков")));
-    }
-    if albums > 0 {
-        parts.push(format!("{albums} {}", common::plural(albums, "альбом", "альбома", "альбомов")));
-    }
-
-    // Summary and «Скачать все».
-    ui.allocate_ui_with_layout(vec2(ui.available_width(), 48.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        let mut line = parts.join(", ");
-        if idle > 0 {
-            line = format!("{line} · {idle} {}", common::plural(idle, "ждёт", "ждут", "ждут"));
-        }
-        ui.label(TypeRole::TitleMedium.style().rich(line, s.on_surface));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if waiting > 0 {
-                let b = ui
-                    .add(
-                        Button::new(format!("Скачать все ({waiting})"))
-                            .icon(Icon::Download)
-                            .style(Style::Filled)
-                            .enabled(torrents)
-                            .id_salt("wish-all"),
-                    )
-                    .on_disabled_hover_text("Сначала подключи торренты");
-                if b.clicked() {
-                    out.push(Command::WishlistDownload(WishlistSelect::AllWaiting));
-                }
-            }
-            // A source added since: what was not found is searched for in
-            // all of them again.
-            let missed = count(Filter::NoTorrent);
-            if torrents
-                && missed > 0
-                && ui
-                    .add(
-                        Button::new(format!("Искать снова ({missed})"))
-                            .icon(Icon::Refresh)
-                            .style(if waiting > 0 { Style::Tonal } else { Style::Filled })
-                            .id_salt("wish-retry-all"),
-                    )
-                    .clicked()
-            {
-                out.push(Command::WishlistRetryAll);
-            }
-        });
-    });
-    if torrents {
-        let auto = if state.prefs.like_downloads { "; новые лайки качаются сами" } else { "" };
-        ui.label(TypeRole::BodySmall.style().rich(
-            format!("Одновременно качается до {}{auto}.", state.prefs.auto_download_limit.max(1)),
-            s.on_surface_variant,
-        ));
-    }
-    ui.add_space(8.0);
+    // One count for the chips and the buttons.
+    let counts = Counts::of(&w.items, torrents);
+    // What «Скачать все» starts.
+    let waiting = if torrents { counts.get(Filter::Waiting) } else { 0 };
+    // A source added since: what was not found is searched for in all of
+    // them again.
+    let missed = if torrents { counts.get(Filter::NoTorrent) } else { 0 };
 
     // Filter chips (the ones with something in them) and the grouping.
     let mut f: Filter = ui.ctx().data(|d| d.get_temp(Filter::key())).unwrap_or_default();
-    if f != Filter::All && count(f) == 0 {
+    if f != Filter::All && counts.get(f) == 0 {
         f = Filter::All;
     }
     let artist_view = by_artist(ui.ctx());
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         for (chip, label) in Filter::CHIPS {
-            let n = count(chip);
+            let n = counts.get(chip);
             if n == 0 && chip != Filter::All {
                 continue;
             }
@@ -253,12 +209,44 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     });
     ui.ctx().data_mut(|d| d.insert_temp(Filter::key(), f));
     let grouped = !matches!(f, Filter::Done | Filter::Dismissed);
-    if grouped {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if let (Some(i), _) = connected(ui, Id::new("wish-group"), &["По альбомам", "По исполнителям"], usize::from(artist_view), &[]) {
+    // The grouping, and on the same line what starts the waiting items or
+    // searches again for the missed ones.
+    if grouped || waiting > 0 || missed > 0 {
+        ui.add_space(8.0);
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            if grouped
+                && let (Some(i), _) =
+                    connected(ui, Id::new("wish-group"), &["По альбомам", "По исполнителям"], usize::from(artist_view), &[])
+            {
                 ui.ctx().data_mut(|d| d.insert_temp(Id::new("wish-by-artist"), i == 1));
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if waiting > 0
+                    && ui
+                        .add(
+                            Button::new(format!("Скачать все ({waiting})"))
+                                .icon(Icon::Download)
+                                .style(Style::Filled)
+                                .id_salt("wish-all"),
+                        )
+                        .clicked()
+                {
+                    out.push(Command::WishlistDownload(WishlistSelect::AllWaiting));
+                }
+                if missed > 0
+                    && ui
+                        .add(
+                            Button::new(format!("Искать снова ({missed})"))
+                                .icon(Icon::Refresh)
+                                .style(if waiting > 0 { Style::Tonal } else { Style::Filled })
+                                .id_salt("wish-retry-all"),
+                        )
+                        .clicked()
+                {
+                    out.push(Command::WishlistRetryAll);
+                }
+            });
         });
     }
     ui.add_space(8.0);
@@ -291,14 +279,6 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     } else {
         lines.extend(w.items.iter().filter(|r| f.takes(r.status, torrents)).map(|r| Line::Item(r, Under::Nothing)));
     }
-    if f == Filter::Dismissed {
-        ui.label(TypeRole::BodySmall.style().rich(
-            "Их больше не предлагаю — ни при импорте, ни из лайков в сервисах. «Вернуть» — и снова качаются.",
-            s.on_surface_variant,
-        ));
-        ui.add_space(4.0);
-    }
-
     // Laid out at their heights; drawn only where they meet the viewport.
     let gap = 4.0;
     let mut tops = Vec::with_capacity(lines.len());
@@ -441,7 +421,7 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
                             pages.downloads_tab = super::downloads::tab_index(nikgob_view::DownloadsTab::Confirm);
                         }
                     }
-                    St::Downloading => progress(ui, r.progress),
+                    St::Downloading => progress(ui, r.transfer.unwrap_or_default()),
                     St::NoTorrent | St::Failed => {
                         // With a source on: search again (a new one may have
                         // it). Without one, YouTube's audio is the way out.
@@ -619,13 +599,18 @@ fn save_button(ui: &mut Ui, id: WishlistId, out: &mut Vec<Command>) {
     }
 }
 
-/// A thin bar with the percent, for an item that downloads.
-fn progress(ui: &mut Ui, p: Option<u8>) {
+/// A thin bar of the item's download: filled as far as its bytes (the
+/// percent its line says), none while it waits in a peer's queue, a moving
+/// piece while how much is not known yet.
+fn progress(ui: &mut Ui, t: Transfer) {
     let s = Theme::get(ui.ctx()).scheme;
     let (rect, _) = ui.allocate_exact_size(vec2(96.0, 24.0), Sense::hover());
+    if matches!(t.phase, TransferPhase::Queued(_)) {
+        return;
+    }
     let bar = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
     paint::container(ui.painter(), bar, Radii::all(shape::FULL), s.secondary_container, Stroke::NONE);
-    match p {
+    match t.percent() {
         Some(p) => {
             let fill = Rect::from_min_size(bar.min, vec2(bar.width() * f32::from(p.min(100)) / 100.0, bar.height()));
             if fill.width() > 0.5 {
@@ -640,5 +625,80 @@ fn progress(ui: &mut Ui, p: Option<u8>) {
             paint::container(ui.painter(), fill, Radii::all(shape::FULL), s.primary, Stroke::NONE);
             ui.ctx().request_repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nikgob_view::WishlistOrigin;
+
+    fn row(n: u128, status: St, scope: WishlistScope) -> WishlistRow {
+        WishlistRow {
+            id: WishlistId(nikgob_core::model::Uuid::from_u128(n)),
+            title: format!("t{n}"),
+            artist: "a".into(),
+            album: None,
+            track: None,
+            release: None,
+            artist_id: None,
+            status,
+            scope,
+            origin: WishlistOrigin::Like,
+            note: None,
+            next_try: None,
+            attempts: 0,
+            can_save_from_youtube: false,
+            cover: None,
+            transfer: None,
+            confirm_files: false,
+            missing: 0,
+            has_copy: false,
+            source: None,
+            upgrade: None,
+        }
+    }
+
+    /// «Все» is the sum of the chips of the statuses on their way, whatever
+    /// is a track and whatever an album: one count, no second number.
+    #[test]
+    fn the_chips_add_up_to_all() {
+        let items = vec![
+            row(1, St::Downloading, WishlistScope::Track),
+            row(2, St::Downloading, WishlistScope::Track),
+            row(3, St::Downloading, WishlistScope::Track),
+            row(4, St::Searching, WishlistScope::Track),
+            row(5, St::New, WishlistScope::Track),
+            row(6, St::Searching, WishlistScope::Album),
+            row(7, St::Waiting, WishlistScope::Track),
+            row(8, St::Done, WishlistScope::Track),
+            row(9, St::Dismissed, WishlistScope::Track),
+            row(10, St::NoTorrent, WishlistScope::Track),
+            row(11, St::Confirm, WishlistScope::Album),
+        ];
+        for torrents in [true, false] {
+            let c = Counts::of(&items, torrents);
+            let parts = [Filter::Waiting, Filter::Searching, Filter::Downloading, Filter::Confirm, Filter::NoTorrent];
+            assert_eq!(parts.iter().map(|f| c.get(*f)).sum::<usize>(), c.get(Filter::All), "torrents: {torrents}");
+            assert_eq!(c.get(Filter::All), 9);
+            assert_eq!((c.get(Filter::Done), c.get(Filter::Dismissed)), (1, 1));
+        }
+        let c = Counts::of(&items, true);
+        assert_eq!((c.get(Filter::Downloading), c.get(Filter::Searching), c.get(Filter::Waiting)), (3, 3, 1));
+        let c = Counts::of(&items, false);
+        assert_eq!((c.get(Filter::Searching), c.get(Filter::Waiting)), (0, 4), "without a source nothing searches");
+    }
+
+    /// A downloading item says what its transfer says: the same percent as
+    /// «Активные», a peer's queue as a queue.
+    #[test]
+    fn a_downloading_line_is_its_transfer() {
+        let mut r = row(1, St::Downloading, WishlistScope::Track);
+        r.source = Some("mugilaw".into());
+        assert_eq!(status_text(&r, true), "качается · mugilaw");
+        r.transfer = Some(Transfer { phase: TransferPhase::Going, done: 37, total: Some(100), bps: 0 });
+        assert_eq!(status_text(&r, true), "качается · mugilaw · 37%");
+        r.transfer = Some(Transfer { phase: TransferPhase::Queued(Some(3)), ..Transfer::default() });
+        assert_eq!(status_text(&r, true), "в очереди у mugilaw · 3-й");
     }
 }

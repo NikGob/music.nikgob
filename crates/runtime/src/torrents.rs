@@ -115,47 +115,28 @@ pub(crate) fn human_bytes(b: u64) -> String {
     }
 }
 
-fn eta_label(d: Duration) -> String {
-    let s = d.as_secs();
-    if s >= 3600 {
-        format!("{} ч {} мин", s / 3600, s % 3600 / 60)
-    } else if s >= 60 {
-        format!("{} мин", s / 60)
-    } else {
-        format!("{s} с")
-    }
-}
-
 fn complete(t: &TorrentStatus) -> bool {
     t.completed_at.is_some()
 }
 
+/// Where a torrent is: the one [`v::Transfer`] its row and its wished
+/// item's line both show.
+fn transfer(t: &TorrentStatus) -> v::Transfer {
+    let phase = match t.state {
+        TorrentState::Paused => v::TransferPhase::Paused,
+        TorrentState::Initializing => v::TransferPhase::Connecting,
+        _ if t.total == 0 => v::TransferPhase::Starting,
+        _ => v::TransferPhase::Going,
+    };
+    v::Transfer { phase, done: t.downloaded, total: (t.total > 0).then_some(t.total), bps: t.down_bps }
+}
+
 fn job(t: &TorrentStatus) -> v::Job {
-    let mut subtitle = format!(
-        "{} из {} · {:.0}%",
-        human_bytes(t.downloaded),
-        human_bytes(t.total),
-        t.progress * 100.0
-    );
-    if matches!(t.state, TorrentState::Initializing) {
-        subtitle = "Проверка и поиск пиров…".into();
+    let mut job = transfer(t).job(t.id, t.name.clone(), None, None, true, true);
+    if let TorrentState::Error(e) = &t.state {
+        job.error = Some(e.clone());
     }
-    v::Job {
-        id: t.id,
-        title: t.name.clone(),
-        subtitle,
-        progress: (t.total > 0).then_some(t.progress),
-        rate: (t.down_bps > 0).then(|| format!("{}/с", human_bytes(t.down_bps))),
-        eta: t.eta.map(eta_label),
-        paused: matches!(t.state, TorrentState::Paused),
-        controllable: true,
-        pausable: true,
-        error: match &t.state {
-            TorrentState::Error(e) => Some(e.clone()),
-            _ => None,
-        },
-        at: 0,
-    }
+    job
 }
 
 impl Worker {
@@ -268,6 +249,10 @@ impl Worker {
             // Import jobs (folders, files) are never paused; a cancel stops
             // one and takes back what it added. Their ids are not torrent
             // ids and must never reach the torrent client.
+            // A download of another source is never paused here (its row
+            // has no pause); a cancel turns its item down.
+            Command::PauseJob(id, _) if crate::running::job_kind(id) == crate::running::JobKind::Direct => {}
+            Command::CancelJob(id) if crate::running::job_kind(id) == crate::running::JobKind::Direct => self.cancel_run(id),
             Command::PauseJob(id, _) if id & crate::IMPORT_ID != 0 => {
                 self.toast("Импорт нельзя поставить на паузу — его можно только отменить", None);
             }
@@ -588,6 +573,7 @@ impl Worker {
                     rate: None,
                     eta: None,
                     paused: false,
+                    queued: false,
                     controllable: false,
                     pausable: false,
                     error: None,
@@ -597,24 +583,13 @@ impl Worker {
             }
         }
 
-        // How far the torrents of wishlist items are, for their rows.
-        let wish: HashMap<nikgob_core::model::WishlistId, u8> = list
+        // Where the torrents of wishlist items are, for their lines (put
+        // out with the other sources' at the second's poll).
+        self.streaming.wish.torrent_transfers = list
             .iter()
             .filter(|t| !complete(t))
-            .filter_map(|t| {
-                let item = downloads.get(&t.info_hash)?.wishlist_id?;
-                Some((item, (t.progress.clamp(0.0, 1.0) * 100.0) as u8))
-            })
-            .chain(self.streaming.wish.direct_progress())
+            .filter_map(|t| Some((downloads.get(&t.info_hash)?.wishlist_id?, transfer(t))))
             .collect();
-        if wish != self.streaming.wish.progress {
-            self.streaming.wish.progress = wish.clone();
-            self.publish(|s| {
-                for r in &mut s.downloads.wishlist.items {
-                    r.progress = wish.get(&r.id).copied().filter(|_| r.status == nikgob_view::WishlistStatus::Downloading);
-                }
-            });
-        }
 
         let seed_days = self.state.read().prefs.seed_days;
         let active: Vec<v::Job> = list.iter().filter(|t| !complete(t)).map(job).collect();
@@ -659,8 +634,7 @@ impl Worker {
             self.torrents.last_view = Some(view);
             let history: Vec<v::Job> = self.torrents.history.iter().cloned().collect();
             self.publish(|s| {
-                s.downloads.active.retain(|j| j.id & crate::IMPORT_ID != 0);
-                s.downloads.active.splice(0..0, active);
+                crate::running::put_jobs(&mut s.downloads.active, crate::running::JobKind::Torrent, active);
                 s.downloads.seeding = seeding;
                 s.downloads.seeded_bytes = seeded;
                 s.downloads.history.retain(|j| j.id & crate::IMPORT_ID != 0);
@@ -714,6 +688,7 @@ impl Worker {
             rate: None,
             eta: None,
             paused: false,
+            queued: false,
             controllable: false,
             pausable: false,
             error: None,

@@ -28,6 +28,7 @@ mod lyrics;
 mod lyrics_keep;
 mod playlist_cover;
 mod recs;
+mod running;
 mod search;
 mod soulseek;
 mod quiet;
