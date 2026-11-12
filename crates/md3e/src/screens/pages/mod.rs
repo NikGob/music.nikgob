@@ -712,11 +712,6 @@ pub(crate) fn can_trash(track: &TrackRow) -> bool {
 /// The library's deletes, last in «Файл» of a library row's
 /// [`library_track_rows`]: «Удалить навсегда» only for a file.
 fn push_deletes(rows: &mut Vec<widgets::Row<TrackAct>>, track: &TrackRow) {
-    // A song only streamed: «Убрать из библиотеки» above says it, nothing
-    // of it to delete.
-    if library_item(track.in_library, track.has_local, track.liked).is_some() {
-        return;
-    }
     let mut deletes = vec![
         widgets::Row::Divider,
         widgets::Row::Item(TrackAct::Trash, MenuItem::new("Удалить из библиотеки").icon(Icon::Delete)),
@@ -1824,7 +1819,7 @@ mod speed_tests {
             id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
             album: Some("Album".into()), release_id: Some(ReleaseId::new()),
             artists: nikgob_view::Credit::single("Artist", Some(nikgob_view::ArtistId::new())), disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false,
+            duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false, in_library: true,
         }
     }
 
@@ -1929,6 +1924,18 @@ mod speed_tests {
         push_deletes(&mut rows, &bare);
         let acts = row_acts(&rows);
         assert!(acts.contains(&TrackAct::Trash) && !acts.contains(&TrackAct::Purge), "no file: no delete for good");
+        // «В библиотеку» of a song outside it, right after «В плейлист…»;
+        // «Убрать из библиотеки» of one in it without a file or a like;
+        // neither for a file or a liked song.
+        let at = |acts: &[TrackAct], a| acts.iter().position(|x| *x == a);
+        assert!(acts.contains(&TrackAct::OutOfLibrary) && !acts.contains(&TrackAct::ToLibrary));
+        let heard = row_acts(&library_track_rows(&TrackRow { in_library: false, ..bare.clone() }, of(&marks, false)));
+        assert_eq!(at(&heard, TrackAct::ToLibrary), at(&heard, TrackAct::Playlist).map(|p| p + 1));
+        assert!(!heard.contains(&TrackAct::OutOfLibrary));
+        for t in [track(true), TrackRow { liked: true, ..track(false) }] {
+            let acts = row_acts(&library_track_rows(&t, of(&marks, false)));
+            assert!(!acts.contains(&TrackAct::ToLibrary) && !acts.contains(&TrackAct::OutOfLibrary));
+        }
         let unplayable = row_acts(&track_rows(TrackMenuOf { playable: false, ..of_stream() }));
         assert!(!unplayable.contains(&TrackAct::Next) && !unplayable.contains(&TrackAct::Queue));
         // On its way: no «Скачать»; waiting or not found: «Скачать».

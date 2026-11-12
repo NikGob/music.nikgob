@@ -246,7 +246,7 @@ pub enum SettingId {
     /// tracks, the artists not recommended and the tracks with a speed of
     /// their own, each taken back there.
     Marks,
-    /// «Альбомы → Песни альбома»: «Автоматически», «Всегда весь альбом»,
+    /// «Песни из альбомов → Альбом показывает»: «Автоматически», «Всегда весь альбом»,
     /// «Только мои песни».
     AlbumOpens,
     /// «Другие версии (инструментал, ремиксы)».
@@ -731,7 +731,7 @@ impl SettingId {
             DislikeSkipEverywhere => "Пропускать везде",
             DislikeInRecs => "Дизлайк в рекомендациях",
             Marks => "Не нравится и скорость",
-            AlbumOpens => "Песни альбома",
+            AlbumOpens => "Альбом показывает",
             AlbumVersions => "Другие версии (инструментал, ремиксы)",
             HiddenMixes => "Скрытые миксы",
             GraphUse => "Похожее по слушателям",

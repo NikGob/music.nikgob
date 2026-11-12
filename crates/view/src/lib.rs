@@ -1803,7 +1803,7 @@ pub struct Prefs {
     pub liked_albums_with_playlists: bool,
     /// A like of a single's song saves the single as an album too.
     pub single_like_saves: bool,
-    /// «Альбомы → Песни альбома»: an album added to the library is whole,
+    /// «Песни из альбомов → Альбом показывает»: an album added to the library is whole,
     /// one not added the user's songs («Автоматически»); every album whole;
     /// every album the user's songs only.
     pub album_mode: AlbumMode,

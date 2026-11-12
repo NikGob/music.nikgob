@@ -1072,7 +1072,7 @@ mod tests {
         let song = |has_local: bool| nikgob_view::TrackRow {
             id: nikgob_view::TrackId::new(), title: "Song".into(), artist: "Artist".into(),
             album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false,
+            duration: None, quality: None, source: None, has_local, liked: false, cover: None, clip: false, in_library: true,
         };
         let l = LaneCard {
             key: nikgob_view::MixKey::OnRepeat,

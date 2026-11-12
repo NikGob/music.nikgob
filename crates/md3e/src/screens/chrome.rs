@@ -771,7 +771,7 @@ mod tests {
         TrackRow {
             id: TrackId::new(), title: "Track".into(), artist: "Artist".into(),
             album: None, release_id: None, artists: Default::default(), disc_no: 1, track_no: 1,
-            duration: None, quality: None, source: None, has_local, liked, cover: None, clip: false,
+            duration: None, quality: None, source: None, has_local, liked, cover: None, clip: false, in_library: true,
         }
     }
 

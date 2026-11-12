@@ -69,12 +69,12 @@ fn sound(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
 }
 
 
-/// «Альбомы»: what an album shows and plays (added to the library: whole,
+/// «Песни из альбомов»: what an album shows and plays (added to the library: whole,
 /// not added: the user's songs of it, or always one of them), and whether
 /// the other versions of its songs play with it. All «Подробно»; the
 /// switch of an album's «Другие версии» wins.
 fn albums(ui: &mut Ui, p: &mut Prefs) {
-    group(ui, "Альбомы");
+    group(ui, "Песни из альбомов");
     menu(ui, Id::AlbumOpens, p);
     switch(ui, Id::AlbumVersions, &mut p.album_other_versions);
 }
