@@ -1404,23 +1404,99 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     preview_at(ui, rect, prefs, None);
 }
 
-/// [`preview`] standing at `still` seconds into its loop (a preset's tile
-/// at rest), or running with the clock.
+/// The text of a sample: the resting lines above and below the sung one,
+/// and the sung one by its syllables.
+struct SampleText {
+    above: &'static str,
+    below: &'static str,
+    sung: &'static [&'static str],
+}
+
+/// The ⓘ card's sample.
+const CARD_TEXT: SampleText = SampleText { above: "Где-то рядом", below: "Он ведёт меня", sung: &["Слы", "шишь ", "э", "тот ", "ритм"] };
+/// A preset tile's: short lines, so the sung one can be large in a small
+/// tile.
+const TILE_TEXT: SampleText = SampleText { above: "Где-то рядом", below: "Он ведёт", sung: &["Слы", "шишь ", "ритм"] };
+
+/// [`preview`] standing at `still` seconds into its loop, or running with
+/// the clock.
 pub(crate) fn preview_at(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64>) {
-    let s = Theme::get(ui.ctx()).scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-    let look = Look::of(prefs);
     let scale = prefs.lyrics_scale.clamp(0.8, 1.4);
-    let (mut big, mut small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
+    let (big, small) = (PANE.big * 0.8 * scale, PANE.small * 0.8 * scale);
+    // Fit the three lines into the sample (a small card shrinks the text;
+    // the size setting still shows, relative to the others): fitted at the
+    // largest size.
+    let (w, h) = sample_extent(&painter, &CARD_TEXT, big / scale * 1.4, small / scale * 1.4);
+    let fit = ((rect.width() - 2.0 * 10.0) / w).min((rect.height() - 2.0 * 6.0) / h).min(1.0);
+    sample(ui.ctx(), &painter, rect, prefs, still, &CARD_TEXT, big * fit, small * fit, 6.0 * fit, 10.0);
+}
+
+/// A preset's tile (`rect`, small): the sample drawn as the lyrics view
+/// draws it, at the view's own size, and the whole scene scaled down to the
+/// tile — the jump, the lift, the glow and the gaps shrink with the text,
+/// so the motion reads as it does on the real screen. Standing at `still`
+/// seconds into its loop (a tile at rest), or running with the clock. The
+/// size setting is not a preset's and is left out.
+pub(crate) fn tile_preview(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64>) {
+    let ctx = ui.ctx();
+    let probe = ui.painter();
+    let (big, small, gap) = (PANE.big, PANE.small, 8.0);
+    let (w, h) = sample_extent(probe, &TILE_TEXT, big, small);
+    // The sung line spans the tile but for a margin; the three rows fit.
+    const MARGIN: f32 = 10.0;
+    let k = ((rect.width() - 2.0 * MARGIN) / w).min((rect.height() - 8.0) / (h + 2.0 * gap)).clamp(0.05, 1.0);
+    let t = egui::emath::TSTransform::new(rect.center().to_vec2() * (1.0 - k), k);
+    let virt = t.inverse().mul_rect(rect);
+    let clip = t.inverse().mul_rect(ui.clip_rect().intersect(rect));
+    let layer = ui.layer_id();
+    let first = ctx.graphics(|g| g.get(layer).map_or(egui::layers::ShapeIdx(0), |l| l.next_idx()));
+    let painter = ui.painter().with_clip_rect(clip);
+    sample(ctx, &painter, virt, prefs, still, &TILE_TEXT, big, small, gap, MARGIN / k);
+    ctx.graphics_mut(|g| {
+        let list = g.entry(layer);
+        let end = list.next_idx();
+        list.transform_range(first, end, t);
+    });
+}
+
+/// How wide the widest line of `text` is and how tall its three rows
+/// stand (with the wave's jump above), at `big` for the sung line and
+/// `small` for the others.
+fn sample_extent(painter: &egui::Painter, text: &SampleText, big: f32, small: f32) -> (f32, f32) {
+    let sung: String = text.sung.concat();
+    let rows = [(text.above, small), (sung.as_str(), big), (text.below, small)];
+    let w = rows.iter().map(|(t, z)| fixed_layout(painter, t, *z).size().x).fold(0.0, f32::max);
+    let h: f32 = rows.iter().map(|(t, z)| fixed_layout(painter, t, *z).size().y).sum();
+    (w, h + 2.0 * 6.0 + big * 0.25)
+}
+
+/// The looping sample over `rect`: `text`'s sung line at `big` between its
+/// resting lines at `small`, `gap` apart, `pad` in from the left, painted by
+/// the real line painter under `prefs`.
+#[allow(clippy::too_many_arguments)]
+fn sample(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    rect: Rect,
+    prefs: &Prefs,
+    still: Option<f64>,
+    text: &SampleText,
+    big: f32,
+    small: f32,
+    gap: f32,
+    pad: f32,
+) {
+    let s = Theme::get(ctx).scheme;
+    let look = Look::of(prefs);
     // Sung by ~2.9 s, held lit, then eased back to unsung before the loop
     // starts over (a snap back read as a glitch).
     const LOOP: f64 = 3.7;
     const BACK: f32 = 3.2;
-    const PAD: f32 = 10.0;
-    const TEXTS: [&str; 3] = ["Где-то рядом", "Слышишь этот ритм", "Он ведёт меня"];
-    let pos = Duration::from_secs_f64(still.unwrap_or_else(|| anim::now(ui.ctx())).rem_euclid(LOOP));
+    let pos = Duration::from_secs_f64(still.unwrap_or_else(|| anim::now(ctx)).rem_euclid(LOOP));
     let mut at = 0.3;
-    let words = ["Слы", "шишь ", "э", "тот ", "ритм"]
+    let words = text
+        .sung
         .iter()
         .map(|w| {
             let d = 0.16 * w.trim().chars().count() as f32;
@@ -1437,42 +1513,25 @@ pub(crate) fn preview_at(ui: &Ui, rect: Rect, prefs: &Prefs, still: Option<f64>)
     let rest = 1.0 - (1.0 - 0.42) * prefs.lyrics_dim.clamp(0.0, 1.0);
     let dim = s.on_surface.gamma_multiply(rest);
     let lit = s.on_surface;
-    // Fit the three lines into the sample (a small tile shrinks the text;
-    // the size setting still shows, relative to the others): the widest
-    // line with padding, and the three rows with the wave's jump above.
-    let measure = |big: f32, small: f32| {
-        let sizes = [small, big, small];
-        let w = TEXTS.iter().zip(sizes).map(|(t, z)| fixed_layout(&painter, t, z).size().x).fold(0.0, f32::max);
-        let h: f32 = TEXTS.iter().zip(sizes).map(|(t, z)| fixed_layout(&painter, t, z).size().y).sum();
-        (w, h + 2.0 * 6.0 + big * 0.25)
-    };
-    // Fitted at the largest size, so the size setting still shows.
-    let (w, h) = measure(big / scale * 1.4, small / scale * 1.4);
-    let fit = ((rect.width() - 2.0 * PAD) / w).min((rect.height() - 2.0 * 6.0) / h).min(1.0);
-    if fit < 1.0 {
-        big *= fit;
-        small *= fit;
-    }
-    let gap = 6.0 * fit.min(1.0);
-    let g = fixed_layout(&painter, &line.text, big);
+    let g = fixed_layout(painter, &line.text, big);
     // On whole pixels, as a line at rest in the view is.
     let ppp = painter.pixels_per_point();
     let top = ((rect.center().y - g.size().y * 0.5 + big * 0.1) * ppp).round() / ppp;
-    let cur = Rect::from_min_size(pos2(rect.left() + PAD, top), g.size());
-    for (text, y) in [(TEXTS[0], cur.top() - gap), (TEXTS[2], cur.bottom() + gap)] {
-        let sg = fixed_layout(&painter, text, small);
+    let cur = Rect::from_min_size(pos2(rect.left() + pad, top), g.size());
+    for (t, y) in [(text.above, cur.top() - gap), (text.below, cur.bottom() + gap)] {
+        let sg = fixed_layout(painter, t, small);
         let top = if y < cur.top() { y - sg.size().y } else { y };
         painter.galley_with_override_text_color(pos2(cur.left(), top), sg, dim);
     }
     let base = s.on_surface.gamma_multiply(rest.min(UNSUNG));
-    if let Some(timing) = timing_of(ui.ctx(), &line, &g, look, Pace::of(prefs), big) {
+    if let Some(timing) = timing_of(ctx, &line, &g, look, Pace::of(prefs), big) {
         // Past the end the line is drawn as no longer current, its light
         // (and the wave's lift) easing out with `focus`.
         let back = ((pos.as_secs_f32() - BACK) / 0.4).clamp(0.0, 1.0);
         let back = back * back * (3.0 - 2.0 * back);
         let (current, focus) = if back > 0.0 { (false, 1.0 - back) } else { (true, 1.0) };
         let color = crate::lerp_color(base, lit, focus);
-        timed_line(&painter, &g, cur, &timing, pos, focus, if current { 1.0 } else { focus }, big, look, base, color, prefs, None);
+        timed_line(painter, &g, cur, &timing, pos, focus, if current { 1.0 } else { focus }, big, look, base, color, prefs, None);
     }
 }
 
