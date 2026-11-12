@@ -12,8 +12,11 @@
 //!
 //! What a start says ([`Verdict`]): it is approved when it played to the
 //! end, was skipped only at its outro ([`APPROVED_SHARE`] of its length or
-//! later, the bar untouched), was liked, or still plays; only those make
-//! the anchor. A skip in its first half, or after the bar was dragged (a
+//! later, the bar untouched), or was liked; only those make the anchor (the
+//! track still playing has said nothing yet: a radio's seed leads its own
+//! picks, not the session's anchor). With the length known a skip is
+//! judged by its share, however soon it came (a short track's outro may
+//! come before 30 s). A skip in its first half, or after the bar was dragged (a
 //! scrub-skip: the drop heard, then off), rejects it: its sound pushes the
 //! picks away. A fast skip ([`NOT_NOW_MS`]) of a long-loved track in a
 //! stream is «not now»: a strong turn of the session (it counts twice in a
@@ -91,8 +94,10 @@ pub struct Played {
 /// What a start says of its track (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// Played to the end or to its outro, liked, or still playing.
+    /// Played to the end or to its outro, or liked.
     Approved,
+    /// Still playing (or the app closed on it): nothing yet.
+    Playing,
     /// Skipped past its half, the bar untouched.
     Neutral,
     /// Skipped in its first half, or after the bar was dragged.
@@ -114,7 +119,7 @@ impl Verdict {
         match self {
             Self::Rejected | Self::NotNow => 1.0,
             Self::Missed => MISSED_PUSH,
-            Self::Approved | Self::Neutral => 0.0,
+            Self::Approved | Self::Playing | Self::Neutral => 0.0,
         }
     }
 
@@ -124,29 +129,39 @@ impl Verdict {
         match self {
             Self::NotNow => 2,
             Self::Rejected | Self::Missed => 1,
-            Self::Approved | Self::Neutral => 0,
+            Self::Approved | Self::Playing | Self::Neutral => 0,
         }
     }
 }
 
-/// What an end says of its track, whoever it is: approved, neutral or
-/// rejected ([`Session::verdict`] tells the rejections apart).
+/// What an end says of its track, whoever it is: approved, playing,
+/// neutral or rejected ([`Session::verdict`] tells the rejections apart).
+/// A skip of a known length is judged by its share, however soon it came;
+/// of an unknown one, an early skip rejects and a later one says nothing.
 pub fn judge(ended: Ended, position_ms: Option<u32>, duration_ms: Option<u32>, scrubbed: bool) -> Verdict {
     let share = match (position_ms, duration_ms) {
         (Some(at), Some(d)) if d > 0 => Some(at as f32 / d as f32),
         _ => None,
     };
     let rejected = match ended {
-        Ended::Open | Ended::Complete => return Verdict::Approved,
-        Ended::Early => true,
-        Ended::Late if scrubbed => true,
-        Ended::Late => match share {
+        Ended::Complete => return Verdict::Approved,
+        Ended::Open => return Verdict::Playing,
+        Ended::Early | Ended::Late if scrubbed => true,
+        Ended::Early | Ended::Late => match share {
             Some(s) if s >= APPROVED_SHARE => return Verdict::Approved,
             Some(s) => s < REJECTED_SHARE,
-            None => false,
+            None => ended == Ended::Early,
         },
     };
     if rejected { Verdict::Rejected } else { Verdict::Neutral }
+}
+
+/// A skip at `position_ms` of a track `duration_ms` long (when known):
+/// early (a skip in its first 30 s) unless it came at the outro of a short
+/// track ([`APPROVED_SHARE`] of it heard).
+pub fn skip_ended(position_ms: u32, duration_ms: Option<u32>) -> Ended {
+    let outro = duration_ms.is_some_and(|d| d > 0 && position_ms as f32 >= APPROVED_SHARE * d as f32);
+    if position_ms < crate::taste::EARLY_SKIP_MS && !outro { Ended::Early } else { Ended::Late }
 }
 
 /// A start a radio, autoplay or a mix chose (not the user's queue).
@@ -324,6 +339,24 @@ impl Session {
         out
     }
 
+    /// What the start `p` teaches the early-skip model, which lives on past
+    /// the session: a complete «not skipped», an early skip «skipped» unless
+    /// it was «not now» (a mood, not the track); anything else nothing.
+    pub fn skip_lesson(p: &Played, look: &impl TrackLookup) -> Option<bool> {
+        match p.ended {
+            Ended::Complete => Some(false),
+            Ended::Early if Self::verdict(p, look) == Verdict::NotNow => None,
+            Ended::Early => Some(true),
+            Ended::Late | Ended::Open => None,
+        }
+    }
+
+    /// The start `p` was not skipped: it played through (to the end or its
+    /// outro), was liked, or plays still. A skip past the half was a skip.
+    pub fn played_through(p: &Played, look: &impl TrackLookup) -> bool {
+        matches!(Self::verdict(p, look), Verdict::Approved | Verdict::Playing)
+    }
+
     /// One track twice running (Greymoor five times in a night).
     pub fn repeat_one(&self) -> bool {
         let mut last = self.tracks.iter().rev();
@@ -349,7 +382,7 @@ impl Session {
     }
 
     /// The sound to continue: the last [`ANCHOR_TRACKS`] approved, weighted
-    /// 1, 0.6, 0.36 from the last; else the last one not rejected.
+    /// 1, 0.6, 0.36 from the last; none before one was approved.
     pub fn anchor(&self, look: &impl TrackLookup) -> Option<Vector> {
         self.anchor_of(look, ANCHOR_TRACKS)
     }
@@ -373,10 +406,7 @@ impl Session {
                 break;
             }
         }
-        if w_total > 0.0 {
-            return Some(sum.map(|s| s / w_total));
-        }
-        self.tracks.iter().rev().filter(|p| !Self::verdict(p, look).rejects()).find_map(|p| look.vector(p.track))
+        (w_total > 0.0).then(|| sum.map(|s| s / w_total))
     }
 
     /// The sounds the session rejected and how hard each pushes (the last
@@ -485,7 +515,9 @@ mod tests {
         s.start(tid(3), T + 20_000, EventContext::Playlist, None);
         assert_eq!(s.skip_streak(&Look), 0, "the third still plays");
         assert_eq!(s.pushes(&Look), vec![(line(1.0), 1.0), (line(2.0), 1.0)]);
-        assert_eq!(s.anchor(&Look), Some(line(3.0)), "skips are no anchor");
+        assert_eq!(s.anchor(&Look), None, "skips are no anchor, nor the track still playing");
+        s.end(tid(3), Ended::Complete);
+        assert_eq!(s.anchor(&Look), Some(line(3.0)));
         assert!(s.start(tid(4), T + 20_000 + SESSION_GAP_MS, EventContext::Album, None));
         assert_eq!(s.len(), 1);
     }
@@ -529,6 +561,20 @@ mod tests {
         assert_eq!(Session::verdict(s.last().unwrap(), &Look), Verdict::Approved);
     }
 
+    /// A short track skipped at its outro, before 30 s, is approved; the
+    /// skip is not early either.
+    #[test]
+    fn a_short_tracks_outro_approves() {
+        assert_eq!(skip_ended(17_000, Some(20_000)), Ended::Late);
+        assert_eq!(skip_ended(17_000, Some(200_000)), Ended::Early);
+        assert_eq!(skip_ended(17_000, None), Ended::Early);
+        assert_eq!(judge(Ended::Early, Some(17_000), Some(20_000), false), Verdict::Approved, "an old label, judged by its share");
+        assert_eq!(judge(Ended::Early, Some(12_000), Some(20_000), false), Verdict::Neutral);
+        assert_eq!(judge(Ended::Early, Some(17_000), Some(20_000), true), Verdict::Rejected, "a scrub-skip");
+        assert_eq!(judge(Ended::Early, Some(17_000), None, false), Verdict::Rejected, "length unknown: early rejects");
+        assert_eq!(judge(Ended::Open, None, None, false), Verdict::Playing);
+    }
+
     /// A fast skip of a loved track in a stream is «not now» (two in the
     /// run); a skip of an unfamiliar one pushes half as hard.
     #[test]
@@ -542,6 +588,8 @@ mod tests {
         s.end_at(tid(800), Ended::Early, 15_000, None, false);
         assert_eq!(s.pushes(&Look), vec![(line(900.0), 1.0), (line(800.0), MISSED_PUSH)]);
         assert_eq!(s.skip_streak(&Look), 3);
+        assert_eq!(Session::skip_lesson(s.last_of(tid(900)).unwrap(), &Look), None, "«not now» teaches no skip");
+        assert_eq!(Session::skip_lesson(s.last_of(tid(800)).unwrap(), &Look), Some(true));
         // The same fast skip from the user's own playlist is a rejection.
         let mut own = Session::default();
         own.start(tid(901), T, EventContext::Playlist, Some(EventOrigin::Manual));
@@ -580,6 +628,10 @@ mod tests {
         s.start(tid(140), T + 3, EventContext::Radio, None);
         assert_eq!(s.world_session(&Look), Some(1));
         assert_eq!(s.lane(&Look), Some(SongLane::Russian), "a tie: the earlier");
+        assert_eq!(s.anchor(&Look), None, "nothing heard out yet");
+        for t in [11, 12, 130, 140] {
+            s.end(tid(t), Ended::Complete);
+        }
         let a = s.anchor(&Look).unwrap()[0];
         let want = (140.0 + 0.6 * 130.0 + 0.36 * 12.0) / (1.0 + 0.6 + 0.36);
         assert!((a - want).abs() < 1e-3, "{a}");

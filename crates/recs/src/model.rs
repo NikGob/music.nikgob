@@ -70,7 +70,7 @@ use crate::profiles::{
     shares,
 };
 use crate::regions::Regions;
-use crate::session::{Ended, Familiarity, NOT_NOW_MS, Session, TrackLookup, in_stream};
+use crate::session::{Ended, Familiarity, NOT_NOW_MS, Session, TrackLookup, in_stream, skip_ended};
 use crate::songtype::{SongLane, SongType, SongTypes, sigmoid};
 use crate::taste::{
     Catalog, DAY_MS, DayPart, EARLY_SKIP_MS, HOUR_MS, Play, REPEAT_WITHIN_MS, SESSION_GAP_MS, SKIP_STREAK_FACTOR,
@@ -1625,7 +1625,8 @@ impl UserModel {
                 }
                 let origin = opened.and_then(|(_, o)| o);
                 match p.position_ms {
-                    Some(pos) if pos < EARLY_SKIP_MS => {
+                    // A short track's outro is no early skip.
+                    Some(pos) if skip_ended(pos, self.duration[i]) == Ended::Early => {
                         self.streak += 1;
                         let leafing = self.streak >= SKIP_STREAK_FROM && matches!(p.context, EventContext::Playlist | EventContext::Library);
                         let lean = if leafing { SKIP_STREAK_FACTOR } else { 1.0 };
@@ -1646,7 +1647,8 @@ impl UserModel {
                             t.early = t.early.saturating_add(1);
                         }
                         self.walk.end_at(p.track, Ended::Early, pos, self.duration[i], false);
-                        if let Some(x) = self.pending.remove(&i).filter(|_| self.learn) {
+                        // «Not now» teaches the skip model nothing either.
+                        if let Some(x) = self.pending.remove(&i).filter(|_| self.learn && !not_now) {
                             self.weights.skip.observe(&x, true);
                         }
                     }
@@ -2041,11 +2043,20 @@ pub(crate) mod tests {
                 Play { context, ..Play::new(tid(t), ts + 4_000, EventType::Skip, Some(4_000)) },
             ]
         };
-        events.extend(skip(0, EventOrigin::Radio, EventContext::Radio, T0 - DAY_MS));
-        events.extend(skip(1, EventOrigin::Manual, EventContext::Playlist, T0 - DAY_MS + 600_000));
-        let m = UserModel::build(&cat, &TasteInput { events, ..TasteInput::default() }, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
+        events.extend(skip(1, EventOrigin::Manual, EventContext::Playlist, T0 - DAY_MS));
+        events.extend(skip(0, EventOrigin::Radio, EventContext::Radio, T0 - DAY_MS / 2));
+        let build = |events: Vec<Play>| {
+            UserModel::build(&cat, &TasteInput { events, ..TasteInput::default() }, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0)
+        };
+        let m = build(events.clone());
         assert!(m.tracks[0].aff_long(T0) > m.tracks[1].aff_long(T0) + 0.005, "{} {}", m.tracks[0].aff_long(T0), m.tracks[1].aff_long(T0));
         assert_eq!((m.tracks[0].early, m.tracks[1].early), (0, 1));
+        // The skip model learns from the user's own skip, not from «not now»:
+        // as if that skip never was.
+        let without: Vec<Play> = events.iter().filter(|p| !(p.track == tid(0) && p.kind == EventType::Skip)).cloned().collect();
+        let w = build(without);
+        assert_eq!(m.weights.skip.seen, w.weights.skip.seen);
+        assert_eq!(m.weights.skip.w, w.weights.skip.w);
     }
 
     /// A listener of albums: 30 albums of ten tracks in ten worlds of three

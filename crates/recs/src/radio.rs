@@ -58,8 +58,9 @@
 //! turns the radio as two skips do.
 //!
 //! Autoplay goes on by the session's trajectory (recs-v2.0 §3.4): the last
-//! [`TRAJECTORY_MAX`] tracks it did not reject, back to the user's own last
-//! pick, captured when autoplay starts. Its anchor drifts elastically:
+//! [`TRAJECTORY_MAX`] tracks not skipped (played through, liked, or still
+//! playing), back to the user's own last pick, captured when autoplay
+//! starts. Its anchor drifts elastically:
 //! [`TRAJECTORY_DRIFT`] the last [`TRAJECTORY_RECENT`] approved (its own
 //! picks among them as they play), the rest the trajectory itself (the
 //! context it came from); what the graph links to several of the
@@ -272,8 +273,7 @@ impl Outcome {
     fn ended(self) -> Ended {
         match self {
             Self::Complete => Ended::Complete,
-            Self::Skip { position_ms, .. } if position_ms < crate::taste::EARLY_SKIP_MS => Ended::Early,
-            Self::Skip { .. } => Ended::Late,
+            Self::Skip { position_ms, duration_ms, .. } => crate::session::skip_ended(position_ms, duration_ms),
         }
     }
 
@@ -601,6 +601,11 @@ impl RadioState {
             self.served.push_back(s.item.clone());
         }
         picked.into_iter().map(Slot::pick).collect()
+    }
+
+    /// `id` is among the new-music candidates kept.
+    pub fn has_new(&self, id: &RemoteId) -> bool {
+        self.new_pool.iter().any(|t| t.id == *id)
     }
 
     /// New-music candidates not served yet.
@@ -1959,12 +1964,14 @@ fn radius_around(model: &UserModel, sv: &Vector) -> f32 {
 }
 
 /// Autoplay's trajectory in `session`: the last [`TRAJECTORY_MAX`] tracks
-/// it did not reject, back to the user's own last pick (where the context
-/// it goes on from began); fewer than [`TRAJECTORY_MIN`]: none.
+/// not skipped ([`Session::played_through`]: to the end or to the outro,
+/// liked, or still playing; a skip past the half was a skip all the same),
+/// back to the user's own last pick (where the context it goes on from
+/// began); fewer than [`TRAJECTORY_MIN`]: none.
 fn trajectory_of(session: &Session, model: &UserModel) -> Vec<TrackId> {
     let mut out: Vec<TrackId> = Vec::new();
     for p in session.tracks().rev() {
-        if !Session::verdict(p, model).rejects() && !out.contains(&p.track) {
+        if Session::played_through(p, model) && !out.contains(&p.track) {
             out.push(p.track);
         }
         if out.len() == TRAJECTORY_MAX || p.origin == Some(nikgob_core::model::EventOrigin::Manual) {
@@ -2902,14 +2909,19 @@ pub(crate) mod tests {
         let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
         let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
         let list = [JPOP.0 + 1, JPOP.0 + 13, JPOP.0 + 25, ROCK.0 + 2, ROCK.0 + 14, ROCK.0 + 26];
-        let autoplay = |last_by_hand: bool| -> (Vec<u128>, usize) {
+        let autoplay = |last_by_hand: bool, skipped: Option<usize>| -> (Vec<u128>, usize) {
             let mut session = Session::default();
             let mut ts = now - 30 * 60_000;
             for (k, &t) in list.iter().enumerate() {
                 let by_hand = k == 0 || (last_by_hand && k + 1 == list.len());
                 session.start(tid(t), ts, EventContext::Playlist, Some(if by_hand { EventOrigin::Manual } else { EventOrigin::Queue }));
                 ts += 200_000;
-                session.end(tid(t), Ended::Complete);
+                if skipped == Some(k) {
+                    // Skipped past its half: not rejected, not played through.
+                    session.end_at(tid(t), Ended::Late, 120_000, Some(200_000), false);
+                } else {
+                    session.end(tid(t), Ended::Complete);
+                }
             }
             let mut radio = RadioState::new(RadioSeed::Track(tid(list[5]))).continuing();
             radio.mark_served(list.iter().map(|t| Item::Track(tid(*t))));
@@ -2921,14 +2933,16 @@ pub(crate) mod tests {
             });
             (ids.collect(), radio.trajectory().len())
         };
-        let (picks, traj) = autoplay(false);
+        let (picks, traj) = autoplay(false, None);
         assert_eq!(traj, 6, "the whole list");
         let kinds: Vec<u128> = picks.iter().map(|t| kind_of(*t)).collect();
         assert!(kinds.iter().all(|k| *k == JPOP.0 || *k == ROCK.0), "{kinds:?}");
         assert!(kinds.contains(&JPOP.0) && kinds.contains(&ROCK.0), "{kinds:?}");
-        let (alone, traj) = autoplay(true);
+        let (alone, traj) = autoplay(true, None);
         assert_eq!(traj, 0, "the user's own pick began a list of one");
         assert!(alone.iter().filter(|t| kind_of(**t) == ROCK.0).count() >= 8, "{alone:?}");
+        let (_, traj) = autoplay(false, Some(2));
+        assert_eq!(traj, 5, "a track skipped at 60% is out of the trajectory");
     }
 
     const JP: (u128, u128, f32) = (2_000, 150, 10.0);
