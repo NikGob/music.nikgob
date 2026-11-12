@@ -78,7 +78,7 @@ pub use model::{FEATURE_VERSION, HomeProfiles, Live, Model, ModelInput, Moment, 
 pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{NO_REPEAT_MS, Outcome, RadioParams, RadioSeed, RadioState, SeedFacts};
-pub use session::{Ended, Session};
+pub use session::{Ended, Familiarity, Session, TrackLookup, Verdict};
 pub use songtype::{Lang, SONGTYPE_RULES, SongInput, SongLane, SongType, SongTypes, Voice, song_types};
 pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};

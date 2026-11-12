@@ -91,6 +91,12 @@ pub const CO_WINDOW: usize = 8;
 const DAYPART_MIN_PLAYS: u16 = 3;
 /// «На повторе» and «Свежие лайки» look this far back.
 pub const ON_REPEAT_MS: i64 = 30 * DAY_MS;
+/// A track played to the end more than [`SATURATED_FROM`] times within
+/// this is worn: the streams let it cool a little ([`Taste::saturation_at`])…
+pub const SATURATION_MS: i64 = 4 * DAY_MS;
+pub const SATURATED_FROM: u8 = 3;
+/// …all they do from this many completes more.
+const SATURATED_SPAN: f32 = 4.0;
 /// «Год назад»: this long before now…
 pub const YEAR_MS: i64 = 365 * DAY_MS;
 /// …give or take this much.
@@ -567,6 +573,8 @@ pub struct Taste {
     history: bool,
     /// Completes within [`ON_REPEAT_MS`].
     recent_completes: Vec<u16>,
+    /// Completes within [`SATURATION_MS`].
+    saturated: Vec<u8>,
     /// Plays within [`YEAR_AGO_SPAN_MS`] of now − [`YEAR_MS`].
     year_ago: Vec<u16>,
     artist_affinity: HashMap<ArtistId, f32>,
@@ -605,6 +613,7 @@ impl Taste {
         let mut liked = vec![false; n];
         let mut daypart = vec![[0u16; 4]; n];
         let mut recent_completes = vec![0u16; n];
+        let mut saturated = vec![0u8; n];
         let mut year_ago = vec![0u16; n];
         let mut hot = vec![0.0f32; n];
 
@@ -651,6 +660,9 @@ impl Taste {
             if kind == EventType::Complete {
                 if now - ts < ON_REPEAT_MS {
                     recent_completes[i] = recent_completes[i].saturating_add(1);
+                }
+                if now - ts < SATURATION_MS {
+                    saturated[i] = saturated[i].saturating_add(1);
                 }
                 count(i, ts, false);
             }
@@ -814,6 +826,7 @@ impl Taste {
             suggested,
             history,
             recent_completes,
+            saturated,
             year_ago,
             artist_affinity,
             elsewhere_artists,
@@ -888,6 +901,15 @@ impl Taste {
     /// Completes of the track at `i` within [`ON_REPEAT_MS`].
     pub fn recent_completes_at(&self, i: usize) -> u32 {
         self.recent_completes.get(i).map_or(0, |c| u32::from(*c))
+    }
+
+    /// How worn the track at `i` is (0…1): its completes within
+    /// [`SATURATION_MS`] beyond [`SATURATED_FROM`], all of it four more on.
+    /// Only the streams (radio, autoplay, the endless mixes) let a worn
+    /// track cool; the user's own lists never do.
+    pub fn saturation_at(&self, i: usize) -> f32 {
+        let c = self.saturated.get(i).copied().unwrap_or(0);
+        (f32::from(c.saturating_sub(SATURATED_FROM)) / SATURATED_SPAN).min(1.0)
     }
 
     /// Plays of the track at `i` around this day a year ago.
@@ -989,6 +1011,22 @@ mod tests {
 
     fn play(track: TrackId, ts: UnixMs, kind: EventType, pos: Option<u32>) -> Play {
         Play::new(track, ts, kind, pos)
+    }
+
+    /// A track played to the end five times in the last four days is worn
+    /// (two past three of four more), one played so a week ago is not.
+    #[test]
+    fn worn_tracks() {
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new((0..2).map(|i| info(i, &[1], Some(i))));
+        let mut events = Vec::new();
+        for k in 0..5 {
+            events.push(play(tid(0), now - DAY_MS - k * 10 * HOUR_MS, EventType::Complete, None));
+            events.push(play(tid(1), now - 7 * DAY_MS - k * HOUR_MS, EventType::Complete, None));
+        }
+        let taste = Taste::build(&cat, &TasteInput { events, ..TasteInput::default() }, now);
+        assert!((taste.saturation_at(0) - 0.5).abs() < 1e-6, "{}", taste.saturation_at(0));
+        assert_eq!(taste.saturation_at(1), 0.0);
     }
 
     #[test]

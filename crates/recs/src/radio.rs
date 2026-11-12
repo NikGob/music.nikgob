@@ -40,10 +40,11 @@
 //! [`SEED_HOLD`] and the session's for the rest, so affinity only orders
 //! what is near. The diversity rules always hold (artist, album, world);
 //! the next one on the album goes on only right after the user's own start
-//! from an album. After two early skips running the model weighs the
-//! skipped sounds' push and the session's lane twice ([`SKIP_SHIFT`]):
-//! the radio turns to another part of X's neighbourhood, never out of it.
-//! A seed with few neighbours of its own scene (its artists, what the
+//! from an album. After two rejections running (a «not now» counts as
+//! two) the model weighs the rejected sounds' push and the session's lane
+//! twice ([`SKIP_SHIFT`]) and the radio leaves the taste profile they were
+//! of for another of a kind of song that goes with X, while there is one:
+//! two skips change the cluster. A seed with few neighbours of its own scene (its artists, what the
 //! graph links to them, its language) keeps to that scene before anything
 //! else: its artists' and their graph neighbours' tracks of any sound,
 //! then its language of any sound, and only then the rest. A track seed
@@ -51,7 +52,34 @@
 //! what the runtime tells of it ([`SeedFacts`]: its artists, sound and
 //! language).
 //! The session is the runtime's own, handed to the radio before it picks
-//! ([`RadioState::attune`]), else the radio's tracks.
+//! ([`RadioState::attune`]), else the radio's tracks. Only what the session
+//! approved leads the anchor ([`crate::session::Verdict`]): a skip in a
+//! track's first half or after a scrub pushes, a fast skip of a loved one
+//! turns the radio as two skips do.
+//!
+//! Autoplay goes on by the session's trajectory (recs-v2.0 §3.4): the last
+//! [`TRAJECTORY_MAX`] tracks it did not reject, back to the user's own last
+//! pick, captured when autoplay starts. Its anchor drifts elastically:
+//! [`TRAJECTORY_DRIFT`] the last [`TRAJECTORY_RECENT`] approved (its own
+//! picks among them as they play), the rest the trajectory itself (the
+//! context it came from); what the graph links to several of the
+//! trajectory gains ([`TRAJECTORY_MEET`]), and after a mixed session it
+//! keeps to the profiles the trajectory had. A trajectory of one track is
+//! that track's radio.
+//!
+//! Every radio the runtime plays ranks by the user model once it has one:
+//! a track's radio and autoplay pick by it alone; an artist's, a service's
+//! song's, a mood's, a style's and the daylist's gather their candidates
+//! by their seed and add the model's value of each ([`W_MODEL`]: the model
+//! of the next start at the session's moment, the chance of an early skip),
+//! so a skip turns them too. In every one what played to the end many
+//! times in the last days cools a little ([`COOL`],
+//! [`crate::Taste::saturation_at`]) — the user's own lists never — and the
+//! next pick of a model radio minds what a DJ would ([`DJ_VALUE`]). A like
+//! of a track while it plays makes the next extension start with the best
+//! of its neighbours ([`RadioState::liked`]); a pick taken out of the queue
+//! pushes as one that did not land ([`RadioState::removed`]); picks dropped
+//! unplayed are forgotten ([`RadioState::forget`]).
 //!
 //! Two of the user's knobs hold for a radio of a track or an artist (and
 //! autoplay, which is one); neither ever stops a radio:
@@ -100,12 +128,12 @@ use crate::analysis::{DIM, Vector};
 use crate::index::euclid;
 use crate::model::{F_COOC, F_GRAPH, F_NEXT_ALBUM, F_PGRAPH, F_SAME_LANE, F_SKIP_PUSH, F_SOUND, HAND, UserModel, Weights};
 use crate::mood::Mood;
-use crate::pick::{Diversity, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, new_count, select_diverse, select_more, take, token_of_artist};
+use crate::pick::{Diversity, Dj, Item, NewTrack, Pick, Placed, Reason, Recs, Seen, Slot, arrange, dj_cost, new_count, select_diverse, select_more, take, token_of_artist};
 use crate::rng::Rng;
 use crate::mood::Axes;
 use crate::listening::Mode;
 use crate::profiles::LaneKey;
-use crate::session::{Ended, Session};
+use crate::session::{Ended, MISSED_PUSH, Session, Verdict, judge};
 use crate::songtype::{SongLane, SongType, Voice};
 
 use crate::taste::{DayPart, HOUR_MS};
@@ -168,6 +196,33 @@ const W_DAYPART: f32 = 0.3;
 /// The day part's weight in a daylist.
 const W_DAYLIST_DAYPART: f32 = 0.6;
 const JITTER: f32 = 0.4;
+/// Autoplay's trajectory: the last this many tracks of the session it did
+/// not reject, back to the user's own last pick…
+const TRAJECTORY_MAX: usize = 8;
+/// …at least this many (fewer: the last track alone is the seed)…
+const TRAJECTORY_MIN: usize = 2;
+/// …the last this many approved of the session lead the anchor…
+const TRAJECTORY_RECENT: usize = 4;
+/// …by this share, the trajectory (the context it came from) the rest.
+const TRAJECTORY_DRIFT: f32 = 0.6;
+/// A track the graph links to more than one track of the trajectory gains
+/// this much of its link for each more.
+const TRAJECTORY_MEET: f32 = 0.5;
+/// What played to the end many times in the last days scores this much
+/// less in a stream, worn through ([`crate::Taste::saturation_at`]).
+const COOL: f32 = 0.4;
+/// A model pick costs this much for the worst step a DJ could take from
+/// the track before ([`crate::pick::dj_cost`]).
+const DJ_VALUE: f32 = 0.25;
+/// A pick taken out of the queue by hand pushes the picks as hard as one
+/// that did not land.
+const REMOVED_PUSH: f32 = MISSED_PUSH;
+/// The user model's part of the score of a radio picked by its seed (an
+/// artist, a service's song, a mood, a style, the daylist).
+const W_MODEL: f32 = 0.5;
+/// A liked track's neighbours: within this share of the radius of a radio
+/// of it.
+const PULL_RADIUS: f32 = 0.5;
 
 /// What a radio or an endless mix grows from.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -203,7 +258,32 @@ pub enum RadioSeed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Complete,
-    Skip { position_ms: u32 },
+    /// Skipped at `position_ms` of its `duration_ms` (when known), the bar
+    /// dragged before (`scrubbed`).
+    Skip { position_ms: u32, duration_ms: Option<u32>, scrubbed: bool },
+}
+
+impl Outcome {
+    /// A skip at `position_ms`, nothing else known.
+    pub fn skip(position_ms: u32) -> Self {
+        Self::Skip { position_ms, duration_ms: None, scrubbed: false }
+    }
+
+    fn ended(self) -> Ended {
+        match self {
+            Self::Complete => Ended::Complete,
+            Self::Skip { position_ms, .. } if position_ms < crate::taste::EARLY_SKIP_MS => Ended::Early,
+            Self::Skip { .. } => Ended::Late,
+        }
+    }
+
+    /// What it says of the track ([`crate::session::judge`]).
+    pub fn verdict(self) -> Verdict {
+        match self {
+            Self::Complete => Verdict::Approved,
+            Self::Skip { position_ms, duration_ms, scrubbed } => judge(self.ended(), Some(position_ms), duration_ms, scrubbed),
+        }
+    }
 }
 
 /// Settings of one extension.
@@ -266,6 +346,20 @@ pub struct RadioState {
     /// least that the user has not heard, while there are.
     #[serde(default)]
     unheard: f32,
+    /// Autoplay's trajectory, captured at its first extension (empty: its
+    /// seed alone).
+    #[serde(default)]
+    trajectory: Option<Vec<TrackId>>,
+    /// Liked while it played (and its sound, raw, for one the catalog
+    /// lacks): the next extension starts with the best of its neighbours.
+    #[serde(default)]
+    pull: Option<(Item, Option<Vector>)>,
+    /// Taken out of the queue by hand (push).
+    #[serde(default)]
+    removed: Vec<Item>,
+    /// The runtime handed it a session: it ranks by the user model.
+    #[serde(skip)]
+    attuned: bool,
 }
 
 fn no_repeat_default() -> i64 {
@@ -311,6 +405,10 @@ impl RadioState {
             no_repeat_ms: NO_REPEAT_MS,
             explore: None,
             unheard: 0.0,
+            trajectory: None,
+            pull: None,
+            removed: Vec::new(),
+            attuned: false,
             seed,
         };
         match &s.seed {
@@ -331,6 +429,7 @@ impl RadioState {
     pub fn attune(&mut self, session: Session, learned: Option<Weights>) {
         self.session = session;
         self.learned = learned;
+        self.attuned = true;
     }
 
     /// The radio continues a queue («Автовоспроизведение»): it keeps to the
@@ -521,10 +620,11 @@ impl RadioState {
         matches!(self.seed, RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. })
     }
 
-    /// How a served track ended: an early skip (< 30 s) pushes later picks
-    /// away from its sound, a complete pulls them towards it; a late skip
-    /// teaches nothing. A radio's track played twice running plays once
-    /// more next.
+    /// How a served track ended: a rejection (a skip in its first half or
+    /// after a scrub) pushes later picks away from its sound, an approval
+    /// (to the end, or to its outro) pulls them towards it; a skip past the
+    /// half teaches nothing. A radio's track played twice running plays
+    /// once more next.
     pub fn feedback(&mut self, item: Item, outcome: Outcome) {
         if !self.is_mix() && self.recent.last() == Some(&item) && outcome == Outcome::Complete {
             self.again = Some(item.clone());
@@ -535,27 +635,67 @@ impl RadioState {
                 let ts = self.session.last_ts().map_or(0, |l| l + SIM_MS);
                 self.session.start(*t, ts, nikgob_core::model::EventContext::Radio, None);
             }
-            let ended = match outcome {
-                Outcome::Complete => Ended::Complete,
-                Outcome::Skip { position_ms } if position_ms < crate::taste::EARLY_SKIP_MS => Ended::Early,
-                Outcome::Skip { .. } => Ended::Late,
-            };
-            self.session.end(*t, ended);
+            match outcome {
+                Outcome::Complete => self.session.end(*t, Ended::Complete),
+                Outcome::Skip { position_ms, duration_ms, scrubbed } => {
+                    self.session.end_at(*t, outcome.ended(), position_ms, duration_ms, scrubbed);
+                }
+            }
         }
         self.recent.push(item.clone());
         let over = self.recent.len().saturating_sub(REPEAT_AFTER);
         self.recent.drain(..over);
-        match outcome {
-            Outcome::Complete => {
+        match outcome.verdict() {
+            Verdict::Approved => {
                 self.skipped.retain(|x| *x != item);
                 push_capped(&mut self.liked, item, LESSONS);
             }
-            Outcome::Skip { position_ms } if position_ms < crate::taste::EARLY_SKIP_MS => {
+            v if v.rejects() => {
                 self.liked.retain(|x| *x != item);
                 push_capped(&mut self.skipped, item, LESSONS);
             }
-            Outcome::Skip { .. } => {}
+            _ => {}
         }
+    }
+
+    /// `item` was liked while it played (`vector`: its raw sound, for a
+    /// track the catalog lacks): it is approved, and the next extension
+    /// starts with the best of its neighbours (recs-v2.0 §3.1).
+    pub fn liked(&mut self, item: Item, vector: Option<Vector>) {
+        if let Item::Track(t) = &item {
+            self.session.like(*t);
+        }
+        self.skipped.retain(|x| *x != item);
+        self.removed.retain(|x| *x != item);
+        push_capped(&mut self.liked, item.clone(), LESSONS);
+        self.pull = Some((item, vector));
+    }
+
+    /// `item` was taken out of the queue by hand: its sound pushes the
+    /// picks away ([`REMOVED_PUSH`]); it is never picked again (served).
+    pub fn removed(&mut self, item: Item) {
+        self.liked.retain(|x| *x != item);
+        push_capped(&mut self.removed, item, LESSONS);
+    }
+
+    /// The picks `items` left the queue unplayed (its tail replaced): they
+    /// are not served, and the radio goes on from what is still queued.
+    pub fn forget(&mut self, items: &[Item]) {
+        if items.is_empty() {
+            return;
+        }
+        let before = self.served.len();
+        self.served.retain(|x| !items.contains(x));
+        let gone = before - self.served.len();
+        let keep = self.tail.len().saturating_sub(gone);
+        self.tail.truncate(keep);
+        self.last = self.served.back().cloned();
+    }
+
+    /// Autoplay's trajectory as captured (empty: none yet, or its seed
+    /// alone).
+    pub fn trajectory(&self) -> &[TrackId] {
+        self.trajectory.as_deref().unwrap_or(&[])
     }
 
     fn vector_of(&self, recs: &Recs<'_>, item: &Item) -> Option<Vector> {
@@ -578,6 +718,28 @@ impl RadioState {
             Item::Track(id) => recs.catalog.position(*id).map(|i| recs.slot(i, Reason::SoundsLikeSeed, 0.0)),
             Item::Stream(id) => self.new_pool.iter().find(|t| t.id == *id).map(|t| recs.new_slot(t, 0.0)),
         }
+    }
+
+    /// The user model's ranker of a radio the runtime plays (none before
+    /// there is a model).
+    fn ranker<'a>(&self, recs: &Recs<'a>) -> Option<Ranker<'a>> {
+        let model = recs.model.filter(|_| self.attuned)?;
+        let mut m = model.moment(&self.session, recs.now());
+        m.pushes.extend(self.removed.iter().filter_map(|x| self.model_vector(model, x)).map(|v| (v, REMOVED_PUSH)));
+        Some(Ranker { model, m, weights: self.learned.unwrap_or(model.weights) })
+    }
+
+    /// The sound of `item` as the model embeds it.
+    fn model_vector(&self, model: &UserModel, item: &Item) -> Option<Vector> {
+        match item {
+            Item::Track(id) => model.position(*id).and_then(|i| model.embedded_at(i).copied()),
+            Item::Stream(id) => self.new_pool.iter().find(|t| t.id == *id).and_then(|t| t.vector).map(|v| model.embed(&v)),
+        }
+    }
+
+    /// A liked track's sound, embedded: its own, else what the runtime told.
+    fn pull_vector(&self, recs: &Recs<'_>, pull: &(Item, Option<Vector>)) -> Option<Vector> {
+        self.vector_of(recs, &pull.0).or_else(|| pull.1.map(|v| recs.norm.embed(&v)))
     }
 
     /// The seed's own point in the weighted space.
@@ -627,6 +789,16 @@ impl RadioState {
         if n == 0 {
             return Vec::new();
         }
+        // Autoplay's trajectory, once it has the session it continues.
+        if self.follow
+            && self.trajectory.is_none()
+            && !self.session.is_empty()
+            && let Some(m) = recs.model
+        {
+            self.trajectory = Some(trajectory_of(&self.session, m));
+        }
+        let pull = self.pull.take();
+        let pull_vec = pull.as_ref().and_then(|p| self.pull_vector(recs, p));
         let mut rng = Rng::derive(params.seed, self.turns);
         self.turns += 1;
         let share = match self.seed {
@@ -652,7 +824,7 @@ impl RadioState {
         };
         let seed_vec = self.seed_vector(recs);
         let liked: Vec<Vector> = self.liked.iter().filter_map(|x| self.vector_of(recs, x)).collect();
-        let skipped: Vec<Vector> = self.skipped.iter().filter_map(|x| self.vector_of(recs, x)).collect();
+        let skipped: Vec<Vector> = self.skipped.iter().chain(&self.removed).filter_map(|x| self.vector_of(recs, x)).collect();
         let exempt = match self.seed {
             RadioSeed::Artist(a) => Some(token_of_artist(a)),
             _ => None,
@@ -714,10 +886,10 @@ impl RadioState {
         // 2-4. The library: a track's radio by the user model, in its order.
         let want_lib = n - new_slots.len();
         if let (Some(plan), Some(model)) = (&plan, recs.model) {
-            let (mut lib, wide) = self.by_model(recs, model, plan, want_lib, &served, &rules, &mut rng, &mut taken, again.as_ref());
+            let (mut lib, wide) = self.by_model(recs, model, plan, want_lib, &served, &rules, &mut rng, &mut taken, again.as_ref(), pull.as_ref());
             self.wide |= wide;
             if lib.len() < want_lib {
-                let more = self.library(recs, want_lib - lib.len(), &sound, &served, false, &rules, &mut rng, &mut taken);
+                let more = self.library(recs, want_lib - lib.len(), &sound, &served, false, &rules, &mut rng, &mut taken, None);
                 lib.extend(more);
             }
             make_way(recs, &mut lib, &mut new_slots, reserve, &rules, &mut taken);
@@ -734,11 +906,11 @@ impl RadioState {
             out.extend(new);
             return self.serve(out);
         }
-        let mut lib = self.library(recs, want_lib, &sound, &served, true, &rules, &mut rng, &mut taken);
+        let mut lib = self.library(recs, want_lib, &sound, &served, true, &rules, &mut rng, &mut taken, pull_vec.as_ref());
         if lib.len() < want_lib {
             let keep_out = RELAXED_SERVED.min(recs.catalog.len() / 3);
             let recent: HashSet<Item> = self.served.iter().rev().take(keep_out).cloned().collect();
-            let more = self.library(recs, want_lib - lib.len(), &sound, &recent, false, &rules, &mut rng, &mut taken);
+            let more = self.library(recs, want_lib - lib.len(), &sound, &recent, false, &rules, &mut rng, &mut taken, pull_vec.as_ref());
             lib.extend(more);
         }
         make_way(recs, &mut lib, &mut new_slots, reserve, &rules, &mut taken);
@@ -747,7 +919,7 @@ impl RadioState {
         all.extend(lib);
         let mut tail = self.tail.clone();
         let mut out: Vec<Slot> = Vec::with_capacity(n + 1);
-        let start = match again {
+        let mut start = match again {
             Some(s) => {
                 tail.push(Placed::of(&s));
                 out.push(s.clone());
@@ -755,6 +927,15 @@ impl RadioState {
             }
             None => self.last.as_ref().and_then(|x| self.slot_of(recs, x)),
         };
+        // A liked track's nearest neighbour first.
+        if let Some(pv) = &pull_vec
+            && let Some(k) = all.iter().enumerate().filter_map(|(k, s)| Some((k, euclid(s.vec.as_ref()?, pv)))).min_by(|a, b| a.1.total_cmp(&b.1)).map(|x| x.0)
+        {
+            let s = all.remove(k);
+            tail.push(Placed::of(&s));
+            out.push(s.clone());
+            start = Some(s);
+        }
         out.extend(arrange(recs, all, &tail, start.as_ref(), &rules));
         self.serve(out)
     }
@@ -791,6 +972,7 @@ impl RadioState {
         rng: &mut Rng,
         taken: &mut HashSet<Item>,
         again: Option<&Slot>,
+        pull: Option<&(Item, Option<Vector>)>,
     ) -> (Vec<Slot>, bool) {
         let weights = self.learned.unwrap_or(model.weights);
         // A focused session's radio: a world a fifth at most.
@@ -798,7 +980,18 @@ impl RadioState {
         let mut sim = self.session.clone();
         // A run of early skips turns the whole batch away (the simulated
         // plays after it would end the run at once).
-        let shifted = sim.skip_streak() >= SKIP_SHIFT;
+        let shifted = sim.skip_streak(model) >= SKIP_SHIFT;
+        // The taste profiles of the rejections running: two of them leave
+        // their profile while another that goes with the seed is left.
+        let left: HashSet<usize> = if shifted {
+            sim.tracks()
+                .rev()
+                .take_while(|p| Session::verdict(p, model).rejects())
+                .filter_map(|p| model.position(p.track).and_then(|i| model.profile_at(i)))
+                .collect()
+        } else {
+            HashSet::new()
+        };
         // The session goes on from its last start (a session of the radio's
         // own tracks has no clock: it starts from 0).
         let mut ts = sim.last_ts().unwrap_or(recs.now());
@@ -843,17 +1036,48 @@ impl RadioState {
                 && !recent.contains(&item)
         };
         let ok = |i: usize| base(i) && !in_session.contains(&recs.info(i).id) && !recs.played_within(i, self.no_repeat_ms);
+        // Autoplay's trajectory (none: the seed alone).
+        let traj: Vec<usize> = self.trajectory().iter().filter_map(|t| model.position(*t)).collect();
+        let traj = if traj.len() >= TRAJECTORY_MIN { traj } else { Vec::new() };
         // «Похоже на X» stays near X: within its sound radius and of a
         // kind of song that goes with it; the session only leans it.
-        let anchor = SeedAnchor::of(model, seed, self.seed_facts.as_ref());
+        // Autoplay stays near its trajectory so.
+        let anchor = if traj.is_empty() { SeedAnchor::of(model, seed, self.seed_facts.as_ref()) } else { SeedAnchor::of_trajectory(model, &traj, seed) };
         // What the collective graph links to the seed goes too, beyond the
-        // radius of its sound (a kind of song that goes with it).
-        let linked = seed_links(model, seed);
+        // radius of its sound (a kind of song that goes with it); to the
+        // trajectory, the more of it the more.
+        let linked = if traj.is_empty() { seed_links(model, seed) } else { trajectory_links(model, &traj) };
+        // A liked track's neighbours lead the first pick: near it in sound
+        // (closer than a radio of it goes), or linked to it.
+        let pulled: Option<(SeedAnchor, HashMap<usize, f32>)> = pull.and_then(|(item, raw)| {
+            let t = match item {
+                Item::Track(t) => model.position(*t).map(|_| *t),
+                Item::Stream(_) => None,
+            };
+            let raw = raw.or_else(|| match item {
+                Item::Stream(id) => self.new_pool.iter().find(|x| x.id == *id).and_then(|x| x.vector),
+                Item::Track(_) => None,
+            });
+            let facts = SeedFacts { vector: raw, ..SeedFacts::default() };
+            let mut a = SeedAnchor::of(model, t, Some(&facts));
+            a.point?;
+            a.radius *= PULL_RADIUS;
+            Some((a, seed_links(model, t)))
+        });
+        let removed: Vec<Vector> = self.removed.iter().filter_map(|x| self.model_vector(model, x)).collect();
         let near = |i: usize| anchor.holds(model, i) || (linked.get(&i).is_some_and(|w| *w >= LINKED) && anchor.goes(model, i));
         // The seed's scene: its artists' tracks and what the graph links to
         // them, and its language. A seed with few unheard tracks of it near
         // keeps to it first, of any sound, before it crosses to another.
-        let kin = scene_of(model, seed, &self.seed_artists(recs), &linked);
+        let mut artists = self.seed_artists(recs);
+        for &i in &traj {
+            if let Some(a) = model.main_artist_at(i)
+                && !artists.contains(&a)
+            {
+                artists.push(a);
+            }
+        }
+        let kin = scene_of(model, seed, &artists, &linked);
         let lane = anchor.lane.filter(|l| *l != SongLane::Unknown);
         let same_lane = |i: usize| lane.is_some_and(|l| model.song_type_at(i).lane() == l);
         let in_scene = |i: usize| kin.contains_key(&i) || same_lane(i);
@@ -881,7 +1105,13 @@ impl RadioState {
                 .unzip(),
             None => (Vec::new(), Vec::new()),
         };
-        let own = |i: usize| plan.profile.is_none() || m_own[i] >= MEMBER;
+        // After a mixed session autoplay keeps to the profiles of its
+        // trajectory.
+        let traj_profiles: HashSet<usize> = if plan.profile.is_none() { traj.iter().filter_map(|&i| model.profile_at(i)).collect() } else { HashSet::new() };
+        let own = |i: usize| match plan.profile {
+            Some(_) => m_own[i] >= MEMBER,
+            None => traj_profiles.is_empty() || model.profile_at(i).is_none_or(|p| traj_profiles.contains(&p)),
+        };
         let fresh = || (0..model.len()).filter(|&i| m_own[i] >= MEMBER && ok(i) && anchor.goes(model, i)).count();
         let wide = neighbour.is_some() && (self.wide || shifted || fresh() < UNHEARD_MIN);
         // Widened, the profile beyond the seed's neighbourhood joins too.
@@ -909,7 +1139,12 @@ impl RadioState {
             let mut m = model.moment(&sim, ts);
             m.album_session &= continuing;
             m.world_session = None;
-            m.anchor = anchor.lean(m.anchor);
+            m.anchor = if traj.is_empty() { anchor.lean(m.anchor) } else { anchor.drift(sim.anchor_of(model, TRAJECTORY_RECENT)) };
+            m.pushes.extend(removed.iter().map(|v| (*v, REMOVED_PUSH)));
+            let first_pull = pulled.as_ref().filter(|_| out.is_empty());
+            if let Some((pa, _)) = first_pull {
+                m.anchor = pa.point;
+            }
             // What the session played lately rests: back once
             // [`REPEAT_AFTER`] others played since it, at once when it
             // played twice running.
@@ -934,7 +1169,18 @@ impl RadioState {
             };
             // A sparse scene first: what is near of it, then its artists'
             // and their neighbours' tracks of any sound, then its language.
-            let mut cands = if sparse {
+            let mut cands = match first_pull {
+                Some((pa, links)) => {
+                    gather(&|i| ok(i) && free(i) && quiet(i) && (pa.holds(model, i) || links.get(&i).is_some_and(|w| *w >= LINKED)))
+                }
+                None => Vec::new(),
+            };
+            if cands.is_empty() && !left.is_empty() {
+                cands = gather(&|i| {
+                    ok(i) && free(i) && quiet(i) && (own(i) || next(i)) && anchor.goes(model, i) && model.profile_at(i).is_some_and(|p| !left.contains(&p))
+                });
+            }
+            if cands.is_empty() && sparse {
                 let mut c = gather(&|i| ok(i) && free(i) && quiet(i) && in_scene(i) && near(i));
                 if c.is_empty() {
                     c = kin.keys().copied().filter(|&i| ok(i) && free(i) && quiet(i)).collect();
@@ -946,10 +1192,8 @@ impl RadioState {
                 if c.is_empty() {
                     c = gather(&|i| ok(i) && free(i) && quiet(i) && same_lane(i));
                 }
-                c
-            } else {
-                Vec::new()
-            };
+                cands = c;
+            }
             if cands.is_empty() {
                 cands = gather(&|i| ok(i) && free(i) && quiet(i) && ((own(i) && near(i)) || next(i)));
             }
@@ -1008,6 +1252,12 @@ impl RadioState {
                 (None, 0)
             };
             let seq: Vec<Seen<'_>> = tail.iter().map(|p| (p.artists.as_slice(), p.album, p.world)).collect();
+            // What a DJ would mind of the step from the track before.
+            let prev_dj: Option<Dj> = m.prev.and_then(|p| recs.index.get(model.id(p))).map(Dj::of);
+            let dj_step = |c: usize| match (&prev_dj, recs.index.get(model.id(c))) {
+                (Some(a), Some(v)) => dj_cost(a, &Dj::of(v)),
+                _ => 0.0,
+            };
             let best_of = |cands: Vec<usize>| -> Option<((usize, f32), Slot, bool)> {
                 let mut best: Option<((usize, f32), Slot, bool)> = None;
                 for c in cands {
@@ -1029,6 +1279,8 @@ impl RadioState {
                     };
                     let value = relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested + joins
                         - recs.taste.dislike_near_at(c)
+                        - COOL * recs.taste.saturation_at(c)
+                        - DJ_VALUE * dj_step(c)
                         + MODEL_JITTER * Rng::derive(jitter, c as u64).f32();
                     let reason = if parts[F_NEXT_ALBUM] > 0.0 && parts[F_NEXT_ALBUM] >= parts[F_COOC] {
                         Reason::NextOnAlbum
@@ -1170,6 +1422,7 @@ impl RadioState {
         rules: &Diversity,
         rng: &mut Rng,
         taken: &mut HashSet<Item>,
+        pull: Option<&Vector>,
     ) -> Vec<Slot> {
         if n == 0 {
             return Vec::new();
@@ -1235,6 +1488,14 @@ impl RadioState {
                 for (nid, _) in recs.index.neighbours(*id, LIKED_NEIGHBOURS, |k| recs.catalog.position(k).is_some_and(ok)) {
                     add(&mut cands, recs.catalog.position(nid).expect("filtered"), Reason::SoundsLikeSeed, 0.0);
                 }
+            }
+        }
+        // A liked track's neighbours.
+        let mut pulled: HashSet<usize> = HashSet::new();
+        if let Some(pv) = pull {
+            for (i, _) in nearest_embedded(recs, pv, LIKED_NEIGHBOURS, &ok) {
+                add(&mut cands, i, Reason::SoundsLikeSeed, 1.0);
+                pulled.insert(i);
             }
         }
         // The seed's artists and the artists co-listened with them.
@@ -1324,6 +1585,10 @@ impl RadioState {
             _ => (recs.taste.day_part(), W_DAYPART),
         };
         let rest = if mix { MIX_REST } else { RADIO_REST };
+        // A radio the runtime plays: the user model's say, and what is worn
+        // cools.
+        let ranker = self.ranker(recs);
+        let cool = if self.attuned { COOL } else { 0.0 };
         // Each track its own draw, whatever else is a candidate.
         let jitter = rng.next_u64();
         let mut keys: Vec<usize> = cands.keys().copied().collect();
@@ -1345,6 +1610,8 @@ impl RadioState {
                     + w_daypart * recs.taste.daypart_bonus_at(i, part)
                     - rest * lately
                     - recs.taste.dislike_near_at(i)
+                    - cool * recs.taste.saturation_at(i)
+                    + ranker.as_ref().map_or(0.0, |r| r.value(i))
                     + Rng::derive(jitter, i as u64).f32() * JITTER;
 
                 s
@@ -1371,6 +1638,11 @@ impl RadioState {
             return out;
         }
         sort_by_score(&mut slots);
+        // The best of a liked track's neighbours is taken first.
+        if let Some(k) = slots.iter().position(|s| matches!(s.item, Item::Track(id) if recs.catalog.position(id).is_some_and(|i| pulled.contains(&i)))) {
+            let s = slots.remove(k);
+            slots.insert(0, s);
+        }
         select_unheard(recs, slots, n, self.unheard_share(), rules, taken)
     }
 }
@@ -1556,6 +1828,11 @@ struct SeedAnchor {
     lane: Option<SongLane>,
     world: Option<u64>,
     artist: Option<ArtistId>,
+    /// Autoplay's trajectory: its tracks' sounds (a track may follow
+    /// within the radius of any of them, not only of the middle)…
+    points: Vec<Vector>,
+    /// …and the other kinds of song it had twice or more.
+    lanes: Vec<SongLane>,
 }
 
 impl SeedAnchor {
@@ -1588,14 +1865,7 @@ impl SeedAnchor {
             .and_then(|p| model.embedded_at(p).copied())
             .or_else(|| facts.and_then(|f| f.vector).map(|v| model.embed(&v)))
             .or_else(|| if pos.is_none() { middle() } else { None });
-        let radius = point.map_or(f32::INFINITY, |sv| {
-            let mut d: Vec<f32> = (0..model.len()).filter_map(|i| model.embedded_at(i)).map(|v| euclid(v, &sv)).collect();
-            d.sort_by(f32::total_cmp);
-            let last = d.len().saturating_sub(1);
-            let share = d.get((d.len() / SEED_SHARE).min(last)).copied().unwrap_or(f32::INFINITY);
-            let floor = d.get(SEED_AT_LEAST.min(last)).copied().unwrap_or(f32::INFINITY);
-            share.min(SEED_RADIUS * model.scale()).max(floor)
-        });
+        let radius = point.map_or(f32::INFINITY, |sv| radius_around(model, &sv));
         let (lane, world, artist) = match pos {
             Some(p) => (Some(model.song_type_at(p).lane()), model.world_at(p), model.main_artist_at(p)),
             None => (
@@ -1604,12 +1874,14 @@ impl SeedAnchor {
                 facts.and_then(|f| f.artists.iter().copied().find(|a| !model.of_artist(*a).is_empty())),
             ),
         };
-        Self { point, radius, lane, world, artist }
+        Self { point, radius, lane, world, artist, points: Vec::new(), lanes: Vec::new() }
     }
 
-    /// Track `i` is of a kind of song that goes with the seed's.
+    /// Track `i` is of a kind of song that goes with the seed's (or with
+    /// another kind the trajectory had).
     fn goes(&self, model: &UserModel, i: usize) -> bool {
-        self.lane.is_none_or(|a| model.lanes_go(a, model.song_type_at(i).lane()))
+        let l = model.song_type_at(i).lane();
+        self.lane.is_none_or(|a| model.lanes_go(a, l)) || self.lanes.iter().any(|a| model.lanes_go(*a, l))
     }
 
     /// Track `i` may follow.
@@ -1618,7 +1890,8 @@ impl SeedAnchor {
             return false;
         }
         match (&self.point, model.embedded_at(i)) {
-            (Some(p), Some(v)) => euclid(p, v) <= self.radius,
+            (Some(p), Some(v)) if self.points.is_empty() => euclid(p, v) <= self.radius,
+            (Some(_), Some(v)) => self.points.iter().any(|q| euclid(q, v) <= self.radius),
             (Some(_), None) => {
                 (self.world.is_some() && model.world_at(i) == self.world) || (self.artist.is_some() && model.main_artist_at(i) == self.artist)
             }
@@ -1634,6 +1907,93 @@ impl SeedAnchor {
             (None, s) => s,
         }
     }
+
+    /// Where autoplay may go after the trajectory `traj` (catalog
+    /// positions) that ends in `seed`: near any of its tracks, as far as a
+    /// radio of the seed goes, songs of a kind that goes with the kind most
+    /// of it is (or with another it had twice or more); its middle is the
+    /// context the anchor drifts from; the seed's world and artist for a
+    /// track without a sound.
+    fn of_trajectory(model: &UserModel, traj: &[usize], seed: Option<TrackId>) -> Self {
+        let base = Self::of(model, seed, None);
+        let points: Vec<Vector> = traj.iter().filter_map(|&i| model.embedded_at(i).copied()).collect();
+        if points.is_empty() {
+            return base;
+        }
+        let point: Vector = std::array::from_fn(|k| points.iter().map(|v| v[k]).sum::<f32>() / points.len() as f32);
+        let radius = radius_around(model, base.point.as_ref().unwrap_or(&point));
+        let mut count: HashMap<SongLane, usize> = HashMap::new();
+        for &i in traj {
+            *count.entry(model.song_type_at(i).lane()).or_default() += 1;
+        }
+        let best = count.values().copied().max().unwrap_or(0);
+        let lane = match base.lane {
+            Some(l) if count.get(&l) == Some(&best) => Some(l),
+            _ => count.iter().filter(|(_, c)| **c == best).map(|(l, _)| *l).min_by_key(|l| crate::model::lane_index(*l)),
+        };
+        let mut lanes: Vec<SongLane> = count.iter().filter(|(l, c)| **c >= 2 && Some(**l) != lane && **l != SongLane::Unknown).map(|(l, _)| *l).collect();
+        lanes.sort_by_key(|l| crate::model::lane_index(*l));
+        Self { point: Some(point), radius, lane, world: base.world, artist: base.artist, points, lanes }
+    }
+
+    /// The anchor of autoplay's moment: [`TRAJECTORY_DRIFT`] the session's
+    /// last approved (`recent`), the trajectory's middle the rest.
+    fn drift(&self, recent: Option<Vector>) -> Option<Vector> {
+        match (self.point, recent) {
+            (Some(p), Some(r)) => Some(std::array::from_fn(|k| TRAJECTORY_DRIFT * r[k] + (1.0 - TRAJECTORY_DRIFT) * p[k])),
+            (p, r) => r.or(p),
+        }
+    }
+}
+
+/// How far a radio of a track sounding `sv` (embedded) may go: its nearest
+/// eighth of the library or [`SEED_RADIUS`] median distances, the nearer,
+/// but as far as its nearest [`SEED_AT_LEAST`].
+fn radius_around(model: &UserModel, sv: &Vector) -> f32 {
+    let mut d: Vec<f32> = (0..model.len()).filter_map(|i| model.embedded_at(i)).map(|v| euclid(v, sv)).collect();
+    d.sort_by(f32::total_cmp);
+    let last = d.len().saturating_sub(1);
+    let share = d.get((d.len() / SEED_SHARE).min(last)).copied().unwrap_or(f32::INFINITY);
+    let floor = d.get(SEED_AT_LEAST.min(last)).copied().unwrap_or(f32::INFINITY);
+    share.min(SEED_RADIUS * model.scale()).max(floor)
+}
+
+/// Autoplay's trajectory in `session`: the last [`TRAJECTORY_MAX`] tracks
+/// it did not reject, back to the user's own last pick (where the context
+/// it goes on from began); fewer than [`TRAJECTORY_MIN`]: none.
+fn trajectory_of(session: &Session, model: &UserModel) -> Vec<TrackId> {
+    let mut out: Vec<TrackId> = Vec::new();
+    for p in session.tracks().rev() {
+        if !Session::verdict(p, model).rejects() && !out.contains(&p.track) {
+            out.push(p.track);
+        }
+        if out.len() == TRAJECTORY_MAX || p.origin == Some(nikgob_core::model::EventOrigin::Manual) {
+            break;
+        }
+    }
+    out.reverse();
+    if out.len() < TRAJECTORY_MIN {
+        out.clear();
+    }
+    out
+}
+
+/// What the collective graph links to the trajectory `traj` (catalog
+/// positions): each one's links ([`seed_links`]), the strongest, gaining
+/// [`TRAJECTORY_MEET`] for each more track of the trajectory linking it.
+fn trajectory_links(model: &UserModel, traj: &[usize]) -> HashMap<usize, f32> {
+    let mut best: HashMap<usize, (f32, usize)> = HashMap::new();
+    for &t in traj {
+        for (c, w) in seed_links(model, Some(model.id(t))) {
+            let e = best.entry(c).or_insert((0.0, 0));
+            e.0 = e.0.max(w);
+            e.1 += 1;
+        }
+    }
+    best.into_iter()
+        .filter(|(c, _)| !traj.contains(c))
+        .map(|(c, (w, k))| (c, (w * (1.0 + TRAJECTORY_MEET * (k - 1) as f32)).min(1.0)))
+        .collect()
 }
 
 
@@ -1765,6 +2125,25 @@ impl Sound {
     }
 }
 
+/// The user model's say in a pick of a radio by its seed (one ranker for
+/// every radio): [`W_MODEL`] of its model of the next start at the
+/// session's moment and of the chance of an early skip.
+struct Ranker<'a> {
+    model: &'a UserModel,
+    m: crate::model::Moment,
+    weights: Weights,
+}
+
+impl Ranker<'_> {
+    fn value(&self, c: usize) -> f32 {
+        let relevance = self.weights.next.score(&self.model.features(&self.m, c));
+        let mut x = self.model.skip_features(&self.m, c, nikgob_core::model::EventContext::Radio);
+        x[0] = 1.0;
+        let p = self.weights.skip.p(&x).min(0.99);
+        W_MODEL * ((relevance / 2.0).tanh() + 0.5 * SKIP_VALUE * (1.0 - p).ln())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1796,6 +2175,107 @@ pub(crate) mod tests {
 
     fn in_a(p: &Pick) -> bool {
         matches!(&p.item, Item::Track(id) if (1..=60).contains(&id.0.as_u128()))
+    }
+
+    /// What an end says, and picks dropped unplayed are not served: the
+    /// radio goes on from what is queued.
+    #[test]
+    fn what_an_end_says_and_dropped_picks_are_forgotten() {
+        assert_eq!(Outcome::Complete.verdict(), Verdict::Approved);
+        assert_eq!(Outcome::skip(5_000).verdict(), Verdict::Rejected);
+        assert_eq!(Outcome::skip(120_000).verdict(), Verdict::Neutral, "length unknown: past 30 s says nothing");
+        let at = |s: u32, scrubbed| Outcome::Skip { position_ms: s, duration_ms: Some(200_000), scrubbed }.verdict();
+        assert_eq!(at(45_000, false), Verdict::Rejected, "the first half");
+        assert_eq!(at(120_000, false), Verdict::Neutral);
+        assert_eq!(at(170_000, false), Verdict::Approved, "the outro");
+        assert_eq!(at(170_000, true), Verdict::Rejected, "a scrub-skip");
+        let (cat, idx) = two_regions();
+        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        let picks = radio.extend(&recs, 3, &RadioParams { new_share: 0.0, seed: 1 });
+        let dropped: Vec<Item> = picks[1..].iter().map(|p| p.item.clone()).collect();
+        radio.forget(&dropped);
+        assert!(radio.served().all(|x| !dropped.contains(x)));
+        assert_eq!(radio.served().last(), Some(&picks[0].item));
+    }
+
+    /// A like while a radio plays: its next extension starts with the best
+    /// of the liked track's neighbours, by the model or by sound alone.
+    #[test]
+    fn a_like_brings_its_neighbours_first() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx) = two_regions();
+        let input = TasteInput::default();
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, NOW);
+        let taste = Taste::build(&cat, &input, NOW);
+        let params = RadioParams { new_share: 0.0, seed: 3 };
+        for with_model in [true, false] {
+            let recs = Recs::new(&cat, &taste, &idx);
+            let recs = if with_model { recs.with_model(&model) } else { recs };
+            // A radio gone into A…
+            let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+            radio.feedback(Item::Track(tid(9)), Outcome::Complete);
+            radio.feedback(Item::Track(tid(12)), Outcome::Complete);
+            assert!(in_a(&radio.clone().extend(&recs, 1, &params)[0]), "{with_model}");
+            // …and a track of B liked: B's first.
+            radio.liked(Item::Track(tid(100)), None);
+            let picks = radio.extend(&recs, 3, &params);
+            assert!(!in_a(&picks[0]), "{with_model}: {:?}", picks[0]);
+        }
+    }
+
+    /// A pick taken out of the queue by hand pushes the radio away from
+    /// its sound.
+    #[test]
+    fn a_removed_pick_pushes() {
+        use crate::model::{ModelInput, UserModel};
+        let (cat, idx) = two_regions();
+        let input = TasteInput::default();
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, NOW);
+        let taste = Taste::build(&cat, &input, NOW);
+        let params = RadioParams { new_share: 0.0, seed: 3 };
+        for with_model in [true, false] {
+            let recs = Recs::new(&cat, &taste, &idx);
+            let recs = if with_model { recs.with_model(&model) } else { recs };
+            let in_a_of = |removed: &[u128]| {
+                let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+                radio.feedback(Item::Track(tid(9)), Outcome::Complete);
+                for t in removed {
+                    radio.removed(Item::Track(tid(*t)));
+                }
+                radio.extend(&recs, 10, &params).iter().filter(|p| in_a(p)).count()
+            };
+            let (plain, pushed) = (in_a_of(&[]), in_a_of(&[5, 7, 11]));
+            assert!(pushed < plain, "{with_model}: {plain} → {pushed}");
+        }
+    }
+
+    /// A radio picked by its seed ranks by the user model once the runtime
+    /// hands it the session: what the session rejected turns it.
+    #[test]
+    fn a_seed_radio_ranks_by_the_model() {
+        use crate::model::{ModelInput, UserModel};
+        use nikgob_core::model::{EventContext, EventOrigin};
+        let (cat, idx) = two_regions();
+        let input = TasteInput::default();
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, NOW);
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+        let seed = RadioSeed::Style { index: 0, centroid: point(0.0, 0.0).to_vec(), artists: Vec::new() };
+        let in_a_of = |attuned: bool| {
+            let mut radio = RadioState::new(seed.clone());
+            if attuned {
+                let mut s = Session::default();
+                for (k, t) in [3u128, 6, 9].into_iter().enumerate() {
+                    s.start(tid(t), NOW - 600_000 + k as i64 * 20_000, EventContext::Radio, Some(EventOrigin::Mix));
+                    s.end(tid(t), Ended::Early);
+                }
+                radio.attune(s, None);
+            }
+            radio.extend(&recs, 10, &RadioParams { new_share: 0.0, seed: 2 }).iter().filter(|p| in_a(p)).count()
+        };
+        let (plain, turned) = (in_a_of(false), in_a_of(true));
+        assert!(turned < plain, "{plain} → {turned}");
     }
 
     /// The kinds of songs of [`listener`]: first id, count, x of the sound.
@@ -1886,7 +2366,7 @@ pub(crate) mod tests {
                 session.start(t, ts, nikgob_core::model::EventContext::Radio, None);
                 let early = b == 0 && skipped < skip;
                 session.end(t, if early { Ended::Early } else { Ended::Complete });
-                radio.feedback(p.item.clone(), if early { Outcome::Skip { position_ms: 5_000 } } else { Outcome::Complete });
+                radio.feedback(p.item.clone(), if early { Outcome::skip(5_000) } else { Outcome::Complete });
                 skipped += usize::from(early);
                 out.push(t.0.as_u128());
                 if early && skipped == skip {
@@ -2051,7 +2531,7 @@ pub(crate) mod tests {
         bg.background = true;
         bg.wordless = true;
         let mut taken = HashSet::new();
-        let (picks, wide) = radio.by_model(&recs, &model, &bg, 10, &HashSet::new(), &Diversity::default(), &mut Rng::new(1), &mut taken, None);
+        let (picks, wide) = radio.by_model(&recs, &model, &bg, 10, &HashSet::new(), &Diversity::default(), &mut Rng::new(1), &mut taken, None, None);
         assert!(!wide, "a background radio never widens");
         assert_eq!(picks.len(), 10);
         for p in &picks {
@@ -2122,7 +2602,7 @@ pub(crate) mod tests {
         assert!((5..=15).contains(&a), "both regions without lessons: {a}");
 
         let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
-        radio.feedback(Item::Track(tid(5)), Outcome::Skip { position_ms: 10_000 });
+        radio.feedback(Item::Track(tid(5)), Outcome::skip(10_000));
         let picks = radio.extend(&recs, 10, &params);
         let a = picks.iter().filter(|p| in_a(p)).count();
         assert!(a <= 1, "an early skip in A moves away from A: {a}");
@@ -2135,7 +2615,7 @@ pub(crate) mod tests {
 
         // A late skip teaches nothing (it only counts as played).
         let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
-        radio.feedback(Item::Track(tid(5)), Outcome::Skip { position_ms: 120_000 });
+        radio.feedback(Item::Track(tid(5)), Outcome::skip(120_000));
         let mut fresh = RadioState::new(RadioSeed::Track(tid(0)));
         fresh.recent.push(Item::Track(tid(5)));
         fresh.session = radio.session.clone();
@@ -2261,8 +2741,8 @@ pub(crate) mod tests {
         // …unless two of A were skipped early since.
         let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
         radio.feedback(Item::Track(tid(9)), Outcome::Complete);
-        radio.feedback(Item::Track(tid(5)), Outcome::Skip { position_ms: 8_000 });
-        radio.feedback(Item::Track(tid(7)), Outcome::Skip { position_ms: 6_000 });
+        radio.feedback(Item::Track(tid(5)), Outcome::skip(8_000));
+        radio.feedback(Item::Track(tid(7)), Outcome::skip(6_000));
         let a = radio.extend(&recs, 10, &params).iter().filter(|p| in_a(p)).count();
         assert!(a <= 2, "two skips in A move away from A: {a}");
     }
@@ -2409,6 +2889,48 @@ pub(crate) mod tests {
     /// Russian rap artist [`SEED_ARTIST`] of three tracks sounding like it,
     /// one more artist the graph links to it, and a little other Russian
     /// music far in sound. The user also goes on from Russian to Japanese.
+    /// Autoplay after a list of Japanese pop and then rock (one pick of
+    /// the user's, the queue going on) goes on by the list's trajectory:
+    /// both of its sounds and nothing it never had. A list the user's own
+    /// pick began at its last track goes on as that track's radio.
+    #[test]
+    fn autoplay_goes_on_by_the_trajectory() {
+        use crate::model::{ModelInput, UserModel};
+        use nikgob_core::model::{EventContext, EventOrigin};
+        let (cat, idx, input, types) = listener(true);
+        let now = crate::model::tests::T0;
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, now);
+        let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
+        let list = [JPOP.0 + 1, JPOP.0 + 13, JPOP.0 + 25, ROCK.0 + 2, ROCK.0 + 14, ROCK.0 + 26];
+        let autoplay = |last_by_hand: bool| -> (Vec<u128>, usize) {
+            let mut session = Session::default();
+            let mut ts = now - 30 * 60_000;
+            for (k, &t) in list.iter().enumerate() {
+                let by_hand = k == 0 || (last_by_hand && k + 1 == list.len());
+                session.start(tid(t), ts, EventContext::Playlist, Some(if by_hand { EventOrigin::Manual } else { EventOrigin::Queue }));
+                ts += 200_000;
+                session.end(tid(t), Ended::Complete);
+            }
+            let mut radio = RadioState::new(RadioSeed::Track(tid(list[5]))).continuing();
+            radio.mark_served(list.iter().map(|t| Item::Track(tid(*t))));
+            radio.attune(session, None);
+            let picks = radio.extend(&recs, 10, &RadioParams { new_share: 0.0, seed: 3 });
+            let ids = picks.iter().filter_map(|p| match p.item {
+                Item::Track(t) => Some(t.0.as_u128()),
+                Item::Stream(_) => None,
+            });
+            (ids.collect(), radio.trajectory().len())
+        };
+        let (picks, traj) = autoplay(false);
+        assert_eq!(traj, 6, "the whole list");
+        let kinds: Vec<u128> = picks.iter().map(|t| kind_of(*t)).collect();
+        assert!(kinds.iter().all(|k| *k == JPOP.0 || *k == ROCK.0), "{kinds:?}");
+        assert!(kinds.contains(&JPOP.0) && kinds.contains(&ROCK.0), "{kinds:?}");
+        let (alone, traj) = autoplay(true);
+        assert_eq!(traj, 0, "the user's own pick began a list of one");
+        assert!(alone.iter().filter(|t| kind_of(**t) == ROCK.0).count() >= 8, "{alone:?}");
+    }
+
     const JP: (u128, u128, f32) = (2_000, 150, 10.0);
     const SEED_ARTIST: u32 = 900;
     const LINKED_ARTIST: u32 = 901;

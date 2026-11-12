@@ -70,7 +70,7 @@ use crate::profiles::{
     shares,
 };
 use crate::regions::Regions;
-use crate::session::{Ended, Session, TrackLookup};
+use crate::session::{Ended, Familiarity, NOT_NOW_MS, Session, TrackLookup, in_stream};
 use crate::songtype::{SongLane, SongType, SongTypes, sigmoid};
 use crate::taste::{
     Catalog, DAY_MS, DayPart, EARLY_SKIP_MS, HOUR_MS, Play, REPEAT_WITHIN_MS, SESSION_GAP_MS, SKIP_STREAK_FACTOR,
@@ -89,6 +89,10 @@ const R_EARLY: f32 = -0.8;
 const R_OPEN: f32 = 0.1;
 const R_REPEAT: f32 = 0.7;
 const R_LIKE: f32 = 2.0;
+/// A track is loved for long with this much long affinity (about three
+/// completes of late) over this many completes, or a like.
+const LOVED_AFF: f32 = 0.75;
+const LOVED_COMPLETES: u32 = 3;
 /// A song saved in a service's library, not liked (an import's «music
 /// library songs»): long taste without decay.
 const R_SAVED: f32 = 1.0;
@@ -251,6 +255,27 @@ impl TrackStats {
         self.a_hot = halve(self.a_hot, self.t_ref, ts, H_HOT_MS) + if hot { r } else { 0.0 };
         self.a_today = halve(self.a_today, self.t_ref, ts, crate::taste::HALF_LIFE_MS) + today;
         self.t_ref = ts;
+    }
+
+    /// `r` of an outcome at `ts` on the hot affinity alone: the session's
+    /// mood, nothing in the long run («not now», [`crate::session::Verdict::NotNow`]).
+    fn add_hot(&mut self, ts: UnixMs, r: f32) {
+        let ts = ts.max(self.t_ref);
+        self.a_long = halve(self.a_long, self.t_ref, ts, H_LONG_MS);
+        self.a_hot = halve(self.a_hot, self.t_ref, ts, H_HOT_MS) + r;
+        self.a_today = halve(self.a_today, self.t_ref, ts, crate::taste::HALF_LIFE_MS);
+        self.t_ref = ts;
+    }
+
+    /// Loved for long at `now`: liked, or [`LOVED_AFF`] of long affinity
+    /// over [`LOVED_COMPLETES`] completes at least.
+    pub fn loved(&self, now: UnixMs) -> bool {
+        self.liked(now) || (self.completes >= LOVED_COMPLETES && self.aff_long(now) >= LOVED_AFF)
+    }
+
+    /// Never heard before, or this once only.
+    pub fn unfamiliar(&self, now: UnixMs) -> bool {
+        !self.liked(now) && !self.saved && self.completes == 0 && self.starts <= 1
     }
 
     /// The long affinity at `now`, `tanh(A / 3)`.
@@ -485,7 +510,8 @@ pub struct Moment {
     pub prev: Option<usize>,
     pub next_album: Option<usize>,
     pub anchor: Option<Vector>,
-    pub pushes: Vec<Vector>,
+    /// The sounds the session rejected and how hard each pushes.
+    pub pushes: Vec<(Vector, f32)>,
     pub lane: Option<SongLane>,
     pub part: usize,
     pub skip_streak: u8,
@@ -629,6 +655,21 @@ impl TrackLookup for UserModel {
     }
     fn lane(&self, id: TrackId) -> Option<SongLane> {
         self.pos.get(&id).map(|&i| self.types[i].lane())
+    }
+    fn duration(&self, id: TrackId) -> Option<u32> {
+        self.pos.get(&id).and_then(|&i| self.duration[i])
+    }
+    /// New music the catalog lacks is unfamiliar.
+    fn familiarity(&self, id: TrackId) -> Familiarity {
+        let Some(&i) = self.pos.get(&id) else { return Familiarity::Unfamiliar };
+        let t = &self.tracks[i];
+        if t.loved(self.now) {
+            Familiarity::Loved
+        } else if t.unfamiliar(self.now) {
+            Familiarity::Unfamiliar
+        } else {
+            Familiarity::Known
+        }
     }
 }
 
@@ -1279,7 +1320,7 @@ impl UserModel {
             pushes: session.pushes(self),
             lane: session.lane(self),
             part: self.part_of(now),
-            skip_streak: session.skip_streak(),
+            skip_streak: session.skip_streak(self),
             album_session: session.album_session(self),
             world_session: session.world_session(self),
             repeat_one: session.repeat_one(),
@@ -1300,7 +1341,7 @@ impl UserModel {
             _ => -1.0,
         };
         if let Some(e) = e {
-            f[F_SKIP_PUSH] = -m.pushes.iter().map(|p| (1.0 - euclid(e, p) / self.scale).max(0.0)).sum::<f32>();
+            f[F_SKIP_PUSH] = -m.pushes.iter().map(|(p, w)| w * (1.0 - euclid(e, p) / self.scale).max(0.0)).sum::<f32>();
         }
         f[F_NEXT_ALBUM] = f32::from(u8::from(m.next_album == Some(c)));
         if let Some(p) = m.prev {
@@ -1558,6 +1599,7 @@ impl UserModel {
         match p.kind {
             EventType::Like => {
                 self.tracks[i].liked = Some(p.ts);
+                self.walk.like(p.track);
             }
             EventType::Unlike => self.tracks[i].liked = None,
             EventType::Complete => {
@@ -1592,10 +1634,18 @@ impl UserModel {
                             Some(_) => AUTO_EARLY,
                             None => 1.0,
                         };
-                        self.tracks[i].add_as(p.ts, R_EARLY * who * lean, W_SKIP_EARLY * lean, true);
-                        let t = &mut self.tracks[i];
-                        t.early = t.early.saturating_add(1);
-                        self.walk.end(p.track, Ended::Early);
+                        // A fast skip of a long-loved track in a stream is
+                        // «not now»: the session's mood, nothing against the
+                        // track in the long run.
+                        let not_now = pos < NOT_NOW_MS && in_stream(p.context, origin) && self.tracks[i].loved(p.ts);
+                        if not_now {
+                            self.tracks[i].add_hot(p.ts, R_EARLY * who * lean);
+                        } else {
+                            self.tracks[i].add_as(p.ts, R_EARLY * who * lean, W_SKIP_EARLY * lean, true);
+                            let t = &mut self.tracks[i];
+                            t.early = t.early.saturating_add(1);
+                        }
+                        self.walk.end_at(p.track, Ended::Early, pos, self.duration[i], false);
                         if let Some(x) = self.pending.remove(&i).filter(|_| self.learn) {
                             self.weights.skip.observe(&x, true);
                         }
@@ -1610,13 +1660,21 @@ impl UserModel {
                         self.tracks[i].add_as(p.ts, R_LATE * heard * if manual { MANUAL_POSITIVE } else { 1.0 }, W_SKIP_LATE_HEARD * heard, true);
                         let t = &mut self.tracks[i];
                         t.late = t.late.saturating_add(1);
-                        self.walk.end(p.track, Ended::Late);
+                        match pos {
+                            Some(pos) => self.walk.end_at(p.track, Ended::Late, pos, self.duration[i], false),
+                            None => self.walk.end(p.track, Ended::Late),
+                        }
                         self.pending.remove(&i);
                     }
                 }
             }
             EventType::Start => self.start(i, p, hook),
-            EventType::Seek | EventType::AddToPlaylist => {}
+            EventType::Seek => {
+                if let Some(to) = p.position_ms {
+                    self.walk.seek(p.track, to);
+                }
+            }
+            EventType::AddToPlaylist => {}
         }
     }
 
@@ -1959,6 +2017,36 @@ pub(crate) mod tests {
 
     pub(crate) const T0: UnixMs = 20_000 * DAY_MS;
     const ALBUM: u128 = 10;
+
+    /// A fast skip of a loved track in a radio is «not now»: nothing
+    /// against it in the long run; the same skip of the user's own pick
+    /// counts.
+    #[test]
+    fn not_now_costs_a_loved_track_nothing_in_the_long_run() {
+        let cat = Catalog::new((0..2u128).map(|i| info(i, &[1], Some(i)).with_duration(Some(200_000))));
+        let idx = VectorIndex::new();
+        let mut events = Vec::new();
+        let mut ts = T0 - 10 * DAY_MS;
+        for _ in 0..5 {
+            for t in 0..2u128 {
+                events.push(Play::new(tid(t), ts, EventType::Start, Some(0)));
+                ts += 200_000;
+                events.push(Play::new(tid(t), ts, EventType::Complete, Some(200_000)));
+            }
+            ts += HOUR_MS;
+        }
+        let skip = |t: u128, origin: EventOrigin, context: EventContext, ts: UnixMs| {
+            [
+                Play { context, origin: Some(origin), ..Play::new(tid(t), ts, EventType::Start, Some(0)) },
+                Play { context, ..Play::new(tid(t), ts + 4_000, EventType::Skip, Some(4_000)) },
+            ]
+        };
+        events.extend(skip(0, EventOrigin::Radio, EventContext::Radio, T0 - DAY_MS));
+        events.extend(skip(1, EventOrigin::Manual, EventContext::Playlist, T0 - DAY_MS + 600_000));
+        let m = UserModel::build(&cat, &TasteInput { events, ..TasteInput::default() }, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
+        assert!(m.tracks[0].aff_long(T0) > m.tracks[1].aff_long(T0) + 0.005, "{} {}", m.tracks[0].aff_long(T0), m.tracks[1].aff_long(T0));
+        assert_eq!((m.tracks[0].early, m.tracks[1].early), (0, 1));
+    }
 
     /// A listener of albums: 30 albums of ten tracks in ten worlds of three
     /// (each world its own sound), sessions of one world's albums in order,

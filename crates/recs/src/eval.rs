@@ -466,11 +466,14 @@ fn session_before(events: &[Play], t: UnixMs) -> Session {
     }
     let mut s = Session::default();
     for p in &sorted[from..] {
-        match p.kind {
-            EventType::Start => {
+        match (p.kind, p.position_ms) {
+            (EventType::Start, _) => {
                 s.start(p.track, p.ts, p.context, p.origin);
             }
-            EventType::Complete | EventType::Skip => s.end(p.track, ended_of(p)),
+            (EventType::Complete | EventType::Skip, Some(at)) => s.end_at(p.track, ended_of(p), at, None, false),
+            (EventType::Complete | EventType::Skip, None) => s.end(p.track, ended_of(p)),
+            (EventType::Seek, Some(to)) => s.seek(p.track, to),
+            (EventType::Like, _) => s.like(p.track),
             _ => {}
         }
     }
