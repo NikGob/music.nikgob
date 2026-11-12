@@ -428,6 +428,63 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     wait_for(&s.rt, "the restored radio to extend", |st| st.queue.next.len() == 3 && st.queue.prev.len() >= 17);
 }
 
+/// «Моя волна»: it starts from nothing, keeps three ahead, a chip of its
+/// header and «↻ Другой вайб» replace its whole tail while the track
+/// playing goes on (no skip recorded), the novelty chosen is kept, and a
+/// card of «Миксы для тебя» starts it with the card's filter.
+#[test]
+fn the_wave_plays_and_turns_without_a_skip() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_until("the wave plays", || !s.asked.lock().unwrap().is_empty());
+    let settled = |st: &ViewState| st.queue.radio.as_ref().is_some_and(|r| !r.extending && r.wave.is_some()) && st.queue.next.len() == 3;
+    wait_for(&s.rt, "three ahead", settled);
+    let st = s.rt.state();
+    let radio = st.queue.radio.clone().unwrap();
+    assert_eq!(radio.title, "Моя волна");
+    let wave = radio.wave.unwrap();
+    assert_eq!(wave.filter, nikgob_view::WaveFilter::default());
+    assert_eq!(wave.preset, None);
+    let entries = |st: &ViewState| st.queue.next.iter().map(|e| e.entry).collect::<Vec<u64>>();
+
+    // «Другой вайб»: a new tail at once, the same track playing, no end
+    // recorded for it.
+    let current = st.queue.current_entry;
+    let before = entries(&st);
+    // The worker publishes under the lock: no guard held while it works.
+    drop(st);
+    let events = l.lib.recent_events(100).unwrap().len();
+    s.rt.send(Command::OtherVibe);
+    wait_for(&s.rt, "a new tail", |st| st.queue.current_entry == current && settled(st) && !entries(st).iter().any(|e| before.contains(e)));
+    assert_eq!(l.lib.recent_events(100).unwrap().len(), events, "nothing ended");
+
+    // A chip: the filter is the wave's, the tail new, the novelty kept.
+    let before = entries(&s.rt.state());
+    let calm = nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::Familiar, character: nikgob_view::WaveCharacter::Calm, scene: nikgob_view::WaveScene::All };
+    let t0 = Instant::now();
+    s.rt.send(Command::SetWave(calm));
+    wait_for(&s.rt, "the calm tail", |st| {
+        st.queue.current_entry == current
+            && settled(st)
+            && !entries(st).iter().any(|e| before.contains(e))
+            && st.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).is_some_and(|w| w.filter == calm)
+    });
+    eprintln!("a chip rebuilt the tail in {:?}", t0.elapsed());
+    assert_eq!(s.rt.state().prefs.wave_novelty, nikgob_view::WaveNovelty::Familiar);
+
+    // A card of the row: its own filter.
+    s.rt.send(Command::PlayWave { preset: Some(nikgob_view::MixKey::Everything) });
+    wait_for(&s.rt, "the card's wave", |st| {
+        settled(st)
+            && st.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).is_some_and(|w| {
+                w.preset == Some(nikgob_view::MixKey::Everything)
+                    && w.filter == nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::Familiar, ..Default::default() }
+            })
+    });
+}
+
 /// Every start says who chose it and what plays it, every end why it
 /// ended, and closing the app ends the track that plays.
 #[test]

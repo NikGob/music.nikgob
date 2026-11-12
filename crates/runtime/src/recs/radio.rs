@@ -52,6 +52,11 @@
 //!   queue, album by album, and the radio comes past the world's end: a
 //!   radio of the taste profile the session was pure in (any profile after
 //!   a mixed one, [`Engine::continuing`]).
+//! * «Моя волна» ([`RadioSeed::Wave`], [`super::wave`]) is a radio too:
+//!   its picks come from the wave's bandit over the open pool, its novelty
+//!   is its own (no splice of new music, no services asked around it), and
+//!   a chip of its header or «↻ Другой вайб» replaces its whole tail at
+//!   once while the track playing goes on, counted as no skip.
 //! * Where its tracks come from is a hard rule: under «Миксы только из
 //!   скачанного» nothing without a file is queued, without new music no
 //!   stream pick is; switching either drops the radio's upcoming tracks
@@ -143,6 +148,8 @@ enum Mark {
     Liked(Item, Option<nikgob_recs::Vector>),
     /// Taken out of the queue, or «Не нравится».
     Removed(Item),
+    /// The wave's filter changed (`Some`) or «↻ Другой вайб» (`None`).
+    Wave(Option<nikgob_recs::wave::WaveSeed>),
 }
 
 impl Mark {
@@ -150,6 +157,10 @@ impl Mark {
         match self {
             Self::Liked(item, vector) => state.liked(item, vector),
             Self::Removed(item) => state.removed(item),
+            Self::Wave(Some(seed)) => state.set_wave(seed),
+            Self::Wave(None) => {
+                state.other_vibe();
+            }
         }
     }
 }
@@ -186,6 +197,24 @@ pub(crate) struct RadioState {
     /// The queue generation autoplay found nothing for: not tried again
     /// until the queue is replaced.
     autoplay_dry: Option<u64>,
+    /// The card «Моя волна» was started from, by the run it started.
+    pub(crate) wave_preset: Option<(u64, Option<v::MixKey>)>,
+    /// The user's scenes for the wave's header, of a snapshot.
+    pub(crate) scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
+    /// The wave's open pool, of a snapshot.
+    wave_pool: Option<super::wave::WavePool>,
+}
+
+impl RadioState {
+    /// The number of the radio playing.
+    pub(crate) fn run_id(&self) -> Option<u64> {
+        self.run.as_ref().map(|r| r.id)
+    }
+
+    /// The engine of the radio playing.
+    pub(crate) fn engine(&self) -> Option<&Engine> {
+        self.run.as_ref().map(|r| &r.state)
+    }
 }
 
 pub(crate) enum RadioMsg {
@@ -193,6 +222,8 @@ pub(crate) enum RadioMsg {
         id: u64,
         state: Box<Engine>,
         picks: Vec<Pick>,
+        /// A wave's open pool, built or kept for its snapshot.
+        wave_pool: Option<super::wave::WavePool>,
     },
     NewFound {
         id: u64,
@@ -261,7 +292,12 @@ impl RadioRun {
 
 /// The radio is about new music whatever «Новое в радио» says.
 fn new_seed(seed: &RadioSeed) -> bool {
-    matches!(seed, RadioSeed::Discover | RadioSeed::Stream { .. })
+    matches!(seed, RadioSeed::Discover | RadioSeed::Stream { .. } | RadioSeed::Wave(_))
+}
+
+/// A wave: its new music is its own.
+fn is_wave(seed: &RadioSeed) -> bool {
+    matches!(seed, RadioSeed::Wave(_))
 }
 
 /// What a radio of `seed` plays, as the history's `context_id`.
@@ -274,6 +310,7 @@ fn seed_context_id(seed: &RadioSeed, autoplay: bool) -> String {
         RadioSeed::Style { index, .. } => format!("style:{index}"),
         RadioSeed::Discover => "discover".to_owned(),
         RadioSeed::Daylist { part, .. } => format!("daylist:{part:?}"),
+        RadioSeed::Wave(_) => "wave".to_owned(),
     };
     format!("{}:{what}", if autoplay { "autoplay" } else { "radio" })
 }
@@ -489,7 +526,7 @@ impl Worker {
     }
 
     /// The radio still plays its queue (any other playback ended it).
-    fn radio_alive(&mut self) -> bool {
+    pub(super) fn radio_alive(&mut self) -> bool {
         let generation = self.queue.generation();
         let r = &mut self.recs.radio;
         match &r.run {
@@ -497,6 +534,8 @@ impl Worker {
             Some(run) => {
                 log::info!("radio «{}» ends: the queue was replaced", run.title);
                 r.run = None;
+                // A wave's pool goes with it.
+                r.wave_pool = None;
                 false
             }
             None => false,
@@ -511,11 +550,13 @@ impl Worker {
         // The short buffer is topped up after every track: only picks the
         // queue waits for (nothing ahead) show.
         let nothing_ahead = self.queue.upcoming().is_empty();
+        let wave = self.wave_view();
         self.recs.radio.run.as_ref().map(|r| v::RadioView {
             title: r.title.clone(),
             extending: (r.extending || r.want) && nothing_ahead,
             autoplay: r.autoplay,
             kind: r.kind(),
+            wave,
         })
     }
 
@@ -736,6 +777,11 @@ impl Worker {
         let params = RadioParams { new_share, seed: run.seed };
         let n = if run.queue_gen.is_none() { EXTEND_BY } else { EXTEND_BY.saturating_sub(ahead).max(1) };
         let tx = self.recs.tx.clone();
+        if is_wave(&state.seed) {
+            self.wave_extend(id, state, snap, local_only, n, params.seed);
+            return;
+        }
+        self.recs.radio.wave_pool = None;
         let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
             // The prefs as they are now, even before the snapshot follows.
             let picks = state.extend(&snap.recs().local_only(local_only), n, &params);
@@ -743,6 +789,7 @@ impl Worker {
                 id,
                 state: Box::new(state),
                 picks,
+                wave_pool: None,
             };
             let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
         });
@@ -752,6 +799,93 @@ impl Worker {
                 run.extending = false;
             }
         }
+    }
+
+    /// A wave's extension (see the module docs): its open pool kept for the
+    /// snapshot, or the inputs to build it on the radio's thread.
+    fn wave_extend(&mut self, id: u64, mut state: Engine, snap: Arc<super::Snapshot>, local_only: bool, n: usize, seed: u64) {
+        let kept = self.discoveries_kept();
+        let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept));
+        // What a new pool is built from (only when it is needed).
+        let inputs = match (&pool, local_only) {
+            (None, false) => {
+                let topped: Vec<super::niche::NicheFound> = match self.recs.home.as_ref() {
+                    Some(h) if !snap.local_only => h
+                        .lanes
+                        .iter()
+                        .filter(|l| !l.niche.is_empty())
+                        .filter_map(|l| super::niche::cached(&self.lib, l.key, &l.niche))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Some((self.discoveries_all(), self.discovery_sources(), topped))
+            }
+            _ => None,
+        };
+        let tx = self.recs.tx.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-wave".into()).spawn(move || {
+            let t0 = std::time::Instant::now();
+            let pool = match (pool, inputs) {
+                (Some(p), _) => Some(p),
+                (None, Some((found, sources, topped))) => {
+                    let cands = super::open::open_pool(&snap, &found, &sources, &topped);
+                    Some(super::wave::WavePool::new(&snap, kept, cands))
+                }
+                (None, None) => None,
+            };
+            let cands: &[nikgob_recs::open_world::OpenCandidate] = pool.as_ref().map_or(&[], |p| p.cands.as_slice());
+            let picks = super::wave::extend(&mut state, &snap, cands, local_only, n, seed);
+            log::info!(
+                "wave: {} picked in {:.1} ms from a pool of {} (cluster {:?})",
+                picks.len(),
+                t0.elapsed().as_secs_f32() * 1e3,
+                cands.len(),
+                state.wave_bandit().and_then(|b| b.current_scene())
+            );
+            let msg = RadioMsg::Extended { id, state: Box::new(state), picks, wave_pool: pool };
+            let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
+        });
+        if let Err(e) = spawned {
+            log::warn!("wave: cannot pick: {e}");
+            if let Some(run) = self.recs.radio.run.as_mut() {
+                run.extending = false;
+            }
+        }
+    }
+
+    /// The playing wave's filter is now `seed` (`None`: «↻ Другой вайб»,
+    /// another cluster): its whole tail is picked again, the track playing
+    /// goes on and counts as no skip.
+    pub(crate) fn radio_wave_changed(&mut self, seed: Option<nikgob_recs::wave::WaveSeed>) {
+        if !self.radio_alive() {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        let Some(old) = run.state.wave_seed().cloned() else { return };
+        let seed = match seed {
+            Some(s) => Some(s),
+            // One cluster only: «Другой вайб» leaves the scene chosen for
+            // every scene (another cluster then), else it starts afresh.
+            None if !run.state.other_vibe() && old.filter.scene != nikgob_recs::open_world::Scene::All => {
+                let mut s = old.clone();
+                s.filter.scene = nikgob_recs::open_world::Scene::All;
+                s.only.clear();
+                Some(s)
+            }
+            None => {
+                if run.extending {
+                    run.marks.push(Mark::Wave(None));
+                }
+                None
+            }
+        };
+        if let Some(s) = seed {
+            run.state.set_wave(s.clone());
+            if run.extending {
+                run.marks.push(Mark::Wave(Some(s)));
+            }
+        }
+        self.radio_repick(0);
     }
 
     /// The first snapshot is here: a radio waiting for it goes on.
@@ -764,7 +898,22 @@ impl Worker {
 
     pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
         match m {
-            RadioMsg::Extended { id, state, picks } => self.radio_extended(id, *state, picks),
+            RadioMsg::Extended { id, state, picks, wave_pool } => {
+                if let Some(pool) = wave_pool {
+                    // The wave's new picks play from the pool's tracks.
+                    if let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) {
+                        for p in &picks {
+                            if let Item::Stream(r) = &p.item
+                                && let Some(c) = pool.cands.iter().find(|c| c.track.id == *r)
+                            {
+                                run.pool.insert(r.clone(), c.track.clone());
+                            }
+                        }
+                    }
+                    self.recs.radio.wave_pool = Some(pool);
+                }
+                self.radio_extended(id, *state, picks);
+            }
             RadioMsg::NewFound {
                 id,
                 tracks,
@@ -960,7 +1109,7 @@ impl Worker {
         let Some(snap) = self.snapshot() else { return };
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let share = super::new_share(&prefs, run.kind());
-        if run.extending || run.queue_gen.is_none() || !streams_allowed(new_seed(&run.state.seed), &prefs, run.kind()) || share <= 0.0 {
+        if is_wave(&run.state.seed) || run.extending || run.queue_gen.is_none() || !streams_allowed(new_seed(&run.state.seed), &prefs, run.kind()) || share <= 0.0 {
             return;
         }
         let up: Vec<u64> = self.queue.upcoming().iter().filter(|e| run.added.contains(&e.id)).map(|e| e.id).collect();
@@ -1058,7 +1207,7 @@ impl Worker {
     fn radio_refill(&mut self) {
         let prefs = self.state.read().prefs.clone();
         let Some(run) = self.recs.radio.run.as_ref() else { return };
-        if super::new_share(&prefs, run.kind()) <= 0.0 || prefs.mixes_downloaded_only {
+        if is_wave(&run.state.seed) || super::new_share(&prefs, run.kind()) <= 0.0 || prefs.mixes_downloaded_only {
             return;
         }
         if run.state.new_left() >= REFILL_AT {
@@ -1252,7 +1401,7 @@ impl Worker {
             Some(_) => None,
             None => self.lib.stream_refs(track).unwrap_or_default().into_iter().find(|r| r.id.service == Service::Youtube).map(|r| Call::Radio(r.id.id)),
         };
-        let wants_new = self.recs.radio.run.as_ref().is_some_and(|r| super::new_share(&self.state.read().prefs, r.kind()) > 0.0);
+        let wants_new = self.recs.radio.run.as_ref().is_some_and(|r| !is_wave(&r.state.seed) && super::new_share(&self.state.read().prefs, r.kind()) > 0.0);
         if let Some(call) = call.filter(|_| wants_new && !self.state.read().prefs.mixes_downloaded_only) {
             let key = match &call {
                 Call::Radio(v) | Call::Related(_, v) => v.clone(),
@@ -1380,7 +1529,7 @@ impl Worker {
     /// module docs); what the cache has is used at once.
     fn radio_fetch_new(&mut self) {
         let Some(run) = &self.recs.radio.run else { return };
-        if super::new_share(&self.state.read().prefs, run.kind()) <= 0.0 {
+        if is_wave(&run.state.seed) || super::new_share(&self.state.read().prefs, run.kind()) <= 0.0 {
             return;
         }
         let id = run.id;
@@ -1423,7 +1572,7 @@ impl Worker {
                 Service::Spotify => {}
             },
             RadioSeed::Artist(a) => calls.extend(artist_call(self, a, &[Service::Deezer, Service::Youtube])),
-            RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. } => {}
+            RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. } | RadioSeed::Wave(_) => {}
         }
         for (c, _) in &calls {
             if let Call::Radio(v) | Call::Related(_, v) = c

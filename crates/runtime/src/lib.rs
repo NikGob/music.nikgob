@@ -1652,6 +1652,9 @@ impl Worker {
             | Command::Dislike { .. }
             | Command::RefreshMix { .. }
             | Command::PlayBlend { .. }
+            | Command::PlayWave { .. }
+            | Command::SetWave(_)
+            | Command::OtherVibe
             | Command::DownloadMix { .. }) => {
                 if let Some(c) = self.recs_command(c) {
                     log::warn!("unhandled {c:?}");

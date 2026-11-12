@@ -47,6 +47,7 @@ mod open;
 mod radio;
 mod suggest;
 mod tiles;
+mod wave;
 mod top;
 
 use std::collections::{HashMap, HashSet};
@@ -2691,6 +2692,9 @@ impl Worker {
             Command::Dislike { track, dislike, sure, relike } => self.dislike(track, dislike, sure, relike),
             Command::RefreshMix { id } => self.refresh_mix(id),
             Command::PlayBlend { profiles } => self.play_blend(&profiles),
+            Command::PlayWave { preset } => self.play_wave(preset),
+            Command::SetWave(filter) => self.set_wave(filter),
+            Command::OtherVibe => self.other_vibe(),
             Command::DownloadMix { id } => self.download_mix(id),
             other => return Some(other),
         }
