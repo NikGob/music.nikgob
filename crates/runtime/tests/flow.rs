@@ -947,7 +947,7 @@ fn a_stream_song_goes_into_the_library_without_a_like() {
     });
     let undo = rt.state().toasts.iter().find(|x| x.text == "Трек в библиотеке").and_then(|x| x.action.clone()).map(|a| a.1);
     assert_eq!(undo, Some(Command::TrackInLibrary { track: t.id, on: false }));
-    assert!(rt.state().downloads.wishlist.is_empty(), "nothing downloads");
+    assert!(rt.state().downloads.wishlist.items.is_empty(), "nothing downloads");
     rt.send(Command::TrackInLibrary { track: t.id, on: false });
     wait_for(&rt, "the song out of the library", |s| s.library.track_count == 0);
 }
@@ -1002,6 +1002,8 @@ fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
     wait_for(&rt, "the single saved with its song", |s| {
         s.release.as_ref().is_some_and(|r| r.card.id == release.id && r.liked && r.partial && r.card.mine == Some(1))
     });
+    // Its instrumental plays with it only by the album's switch.
+    rt.send(Command::AlbumVersions { id: release.id, on: true });
     rt.send(Command::PlayReleaseWhole { id: release.id, start: None, shuffle: false });
     wait_for(&rt, "the whole single once", |s| queued(s).len() == 2);
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
