@@ -1048,6 +1048,14 @@ pub trait StreamService: Send + Sync {
         None
     }
 
+    /// The file of [`Self::cached_audio`], to be read where it lies (the
+    /// lyrics check of a clip reads the audio that played); never deleted
+    /// by the reader. Same rules: no network, off the UI thread.
+    fn cached_file(&self, id: &str) -> Option<std::path::PathBuf> {
+        let _ = id;
+        None
+    }
+
     // Discovery (docs/stage4.md §5). Background work: each call goes
     // through the service's limits in its background lane, answers
     // [`StreamError::RateLimited`] while the service is paused, and is kept

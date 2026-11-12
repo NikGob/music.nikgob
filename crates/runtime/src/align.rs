@@ -25,7 +25,7 @@ use nikgob_align::fit::{Fit, Timing};
 use nikgob_align::pipeline::{Route, fallback};
 use nikgob_align::{Aligner, Catalog, Device, Error, Prepared, Stage};
 use nikgob_core::lyrics::{LyricLine, LyricsSource, LyricsSync};
-use nikgob_core::model::TrackId;
+use nikgob_core::model::{SourceKind, TrackId, score};
 use nikgob_library::{AlignCounts, AlignedLyrics, Library};
 use nikgob_view as v;
 
@@ -65,6 +65,10 @@ const KEEP_LOADED: Duration = Duration::from_secs(25);
 const HEAVY_RETRY: Duration = Duration::from_secs(5);
 /// CPU threads of the models.
 const THREADS: usize = 3;
+/// How often, and how many times, the check of a clip looks for its
+/// whole audio in the stream cache (it comes a few seconds into the play).
+const CLIP_AUDIO_EVERY: Duration = Duration::from_secs(3);
+const CLIP_AUDIO_TRIES: u32 = 40;
 
 /// One text to check.
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +147,9 @@ pub(crate) enum Msg {
     KeptOwn { track: TrackId, result: Result<Text, String> },
     /// A stream was saved as a file for its text («Песню и текст»).
     SongSaved { track: TrackId, result: Result<PathBuf, String> },
+    /// The cached audio of a clip whose texts wait for the check (`None`:
+    /// it did not come).
+    ClipAudio { track: TrackId, path: Option<PathBuf>, texts: Vec<AlignText> },
     Counts(AlignCounts),
     Device(bool),
     Error(String),
@@ -978,18 +985,36 @@ impl Worker {
         }
     }
 
+    /// The video id when what `track` plays is a music video (a YouTube
+    /// clip without a file).
+    pub(crate) fn clip_audio(&self, track: TrackId) -> Option<String> {
+        self.lib
+            .active_source(track)
+            .ok()
+            .flatten()
+            .filter(|s| s.kind == SourceKind::Youtube && s.quality_score == score::STREAM_YOUTUBE_CLIP)
+            .map(|s| s.locator)
+    }
+
     /// Sends the track's unchecked texts to the aligner once its lookups
-    /// settled (a file only): every text with the check or word timing on,
-    /// else only a plain text when no source has line timing (to time its
-    /// lines); with no text anywhere, asks for one heard from scratch.
+    /// settled (a file): every text with the check or word timing on, else
+    /// only a plain text when no source has line timing (to time its
+    /// lines); with no text anywhere, asks for one heard from scratch. A
+    /// music video's timed texts are always checked (their timing is the
+    /// record's, [`crate::lyrics::TrackLyrics::clip`]), from the video's
+    /// audio in the stream cache once it is all there.
     pub(crate) fn check_lyrics(&mut self, track: TrackId) {
         let prefs = self.state.read().prefs.clone();
         let every = prefs.lyrics_check || prefs.lyrics_words_playing || prefs.lyrics_words_all;
-        if !self.align.running() || !(every || prefs.lyrics_lines_auto || prefs.lyrics_recognize) {
+        let clip = self.clip_audio(track);
+        if !self.align.running() || !(every || prefs.lyrics_lines_auto || prefs.lyrics_recognize || clip.is_some()) {
             return;
         }
-        let Some(src) = self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) else { return };
-        let path = self.res.path(&src.locator);
+        let path = match self.lib.active_source(track).ok().flatten().filter(|s| s.kind.is_local()) {
+            Some(src) => Some(self.res.path(&src.locator)),
+            None if clip.is_some() => None,
+            None => return,
+        };
         let Some(tl) = self.import.as_mut().and_then(|s| s.lyrics_cache.get_mut(&track)) else { return };
         if !tl.settled() {
             return;
@@ -997,16 +1022,58 @@ impl Worker {
         let mut texts = tl.unchecked();
         if !every {
             let wanted = prefs.lyrics_lines_auto && !tl.has_timed();
-            texts.retain(|t| wanted && !t.timed);
+            texts.retain(|t| (clip.is_some() && t.timed) || (wanted && !t.timed));
         }
-        let recognise = prefs.lyrics_recognize && tl.nothing_found();
+        // Nothing is heard from scratch in a video.
+        let recognise = path.is_some() && prefs.lyrics_recognize && tl.nothing_found();
         let hashes: Vec<String> = texts.iter().map(|t| t.hash.clone()).collect();
         if (texts.is_empty() && !recognise) || self.align.asked.get(&track) == Some(&hashes) {
             return;
         }
         tl.checking = Some(hashes.clone());
         self.align.asked.insert(track, hashes);
-        self.align.check(Req::Check { track, path, texts, recognise });
+        match (path, clip) {
+            (Some(path), _) => self.align.check(Req::Check { track, path, texts, recognise }),
+            (None, Some(video)) => self.check_clip_when_cached(track, video, texts),
+            (None, None) => {}
+        }
+    }
+
+    /// The check of a clip's texts waits (off the loop) for the video's
+    /// whole audio in the stream cache, read where it lies; none in time
+    /// (the cache off, the song skipped early) drops the check.
+    fn check_clip_when_cached(&mut self, track: TrackId, video: String, texts: Vec<AlignText>) {
+        let Some(yt) = self.service(nikgob_core::streaming::Service::Youtube) else {
+            self.align_msg(Msg::CheckDropped(track));
+            return;
+        };
+        self.streaming.spawn_internal(async move {
+            let mut path = None;
+            for _ in 0..CLIP_AUDIO_TRIES {
+                path = yt.cached_file(&video);
+                if path.is_some() {
+                    break;
+                }
+                tokio::time::sleep(CLIP_AUDIO_EVERY).await;
+            }
+            Internal::Align(Msg::ClipAudio { track, path, texts })
+        });
+    }
+
+    /// The audio of a clip whose texts wait for the check came (or not).
+    fn clip_audio_came(&mut self, track: TrackId, path: Option<PathBuf>, texts: Vec<AlignText>) {
+        let hashes: Vec<String> = texts.iter().map(|t| t.hash.clone()).collect();
+        // Asked again meanwhile (other texts), or dropped.
+        if self.align.asked.get(&track) != Some(&hashes) {
+            return;
+        }
+        match path {
+            Some(path) => self.align.check(Req::Check { track, path, texts, recognise: false }),
+            None => {
+                log::info!("align: no cached audio of the clip {track} to check its lyrics with");
+                self.align_msg(Msg::CheckDropped(track));
+            }
+        }
     }
 
     pub(crate) fn align_msg(&mut self, m: Msg) {
@@ -1035,6 +1102,7 @@ impl Worker {
             Msg::Kept { track, result } => self.lyrics_kept(track, result),
             Msg::KeptOwn { track, result } => self.own_lyrics_kept(track, result),
             Msg::SongSaved { track, result } => self.song_saved(track, result),
+            Msg::ClipAudio { track, path, texts } => self.clip_audio_came(track, path, texts),
         }
     }
 

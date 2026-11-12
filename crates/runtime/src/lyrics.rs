@@ -309,6 +309,11 @@ pub(crate) struct TrackLyrics {
     /// The track's artists, to tell a line of a fetched text that only
     /// credits them from a sung one ([`nikgob_core::lyrics::drop_credits`]).
     pub(crate) names: Vec<String>,
+    /// What plays is a music video: a found text's timing is the song's
+    /// record's, not the video's (an intro moves it), so its lines show
+    /// without highlighting until the check heard them in the video (and
+    /// moved them when they are one steady shift off).
+    pub(crate) clip: bool,
 }
 
 impl TrackLyrics {
@@ -365,6 +370,15 @@ impl TrackLyrics {
             (LyricsSync::Plain, _) if !self.show.lines => (text.lines.clone(), false),
             _ => (crate::align::to_lines(&a.lines), true),
         }
+    }
+
+    /// `source`'s timing is a found one of a clip's text that the check has
+    /// not heard in the video yet (see [`Self::clip`]).
+    pub(crate) fn unverified(&self, source: LyricsSource) -> bool {
+        self.clip
+            && !matches!(source, LyricsSource::Own | LyricsSource::File | LyricsSource::Recognized)
+            && self.texts.get(&source).is_some_and(|t| t.sync() > LyricsSync::Plain)
+            && !self.aligned(source).is_some_and(|a| a.fits)
     }
 
     /// Some source has line timing (or finer) that is not another song's.
@@ -590,7 +604,11 @@ impl TrackLyrics {
         let source = self.chosen();
         let text = source.and_then(|s| self.texts.get(&s)).cloned().unwrap_or_default();
         let (_, made) = source.map(|s| self.shown(s)).unwrap_or_default();
-        let (lines, made_shown) = source.map(|s| self.displayed(s)).unwrap_or_default();
+        let (mut lines, made_shown) = source.map(|s| self.displayed(s)).unwrap_or_default();
+        // A clip's found timing not checked yet: its lines without timing.
+        if source.is_some_and(|s| self.unverified(s)) && !made_shown {
+            lines.clear();
+        }
         // Seen without timing: the text's lines as plain text.
         let plain = text.plain.clone().or_else(|| {
             (lines.is_empty() && !text.lines.is_empty()).then(|| text.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"))
@@ -912,10 +930,26 @@ async fn fetch_online(
     Ok(text)
 }
 
+/// What the lyrics of `row` are looked up by: a music video (a clip that
+/// stays one) by its song's title, without what clips add («Starboy ft.
+/// Daft Punk (Official Video)» → «Starboy ft. Daft Punk»), and with no
+/// length (the video's is not the song's: an exact match by it finds a
+/// text timed for another cut). Its timing is unverified until the check
+/// ([`TrackLyrics::clip`]).
+pub(crate) fn lookup_row(mut row: TrackRow) -> TrackRow {
+    if row.is_clip() {
+        let artist = row.credit.primary().map_or_else(|| row.artist.clone(), |p| p.name.clone());
+        row.title = nikgob_core::clip_title::display_title(&row.title, &artist);
+        row.duration_ms = None;
+    }
+    row
+}
+
 /// One source's lookup of `row` (LRCLIB through its own cache), noted in
 /// the sources' pauses ([`nikgob_metadata::pause`]): refusals in a row make
 /// the source sit out, logged once when the pause starts.
 async fn ask_source(meta: Metadata, lib: Library, row: TrackRow, source: LyricsSource) -> Result<Option<Text>, MetadataError> {
+    let row = lookup_row(row);
     let pauses = meta.lyrics_pauses.clone();
     let got = if source == LyricsSource::Lrclib {
         crate::enrich::fetch_and_store(&meta.lrclib, &lib, &row).await
@@ -1143,8 +1177,9 @@ impl Worker {
         let show = Shown::of(&self.state.read().prefs);
         let place = self.lyrics_place(track);
         let folder = self.lyrics_folder(track);
+        let clip = self.clip_audio(track).is_some();
         let Some(svc) = self.import.as_mut() else { return };
-        svc.lyrics_cache.insert(track, TrackLyrics { show, place, folder, ..tl });
+        svc.lyrics_cache.insert(track, TrackLyrics { show, place, folder, clip, ..tl });
         touch(&mut svc.lyrics_order, track);
         let (cache, later) = (&svc.lyrics_cache, &svc.embed_later);
         let spare = |t: TrackId| {
@@ -1206,6 +1241,7 @@ impl Worker {
         let mut tl = cached_lyrics(&self.lib, track, path.as_deref(), tags, genius, kept.as_deref());
         tl.show = Shown::of(&self.state.read().prefs);
         tl.place = self.lyrics_place(track);
+        tl.clip = self.clip_audio(track).is_some();
         if let Some(svc) = self.import.as_mut() {
             if svc.metadata().is_none() {
                 tl.pending.clear();
@@ -1791,6 +1827,58 @@ People pleasing planet"));
             saved: false,
             current: true,
         }
+    }
+
+    /// A clip that stays one: its lyrics are asked by its song's title with
+    /// no length; the found timing shows no highlighting until the check
+    /// heard it, then moves by the steady shift of the video's intro.
+    #[test]
+    fn a_clip_asks_by_its_song_title_and_waits_for_the_check() {
+        use nikgob_align::fit::Timing;
+        let clip = TrackRow {
+            id: TrackId::new(),
+            title: "Starboy ft. Daft Punk (Official Video) (feat. Daft Punk)".into(),
+            artist: "The Weeknd".into(),
+            album: None,
+            release_id: None,
+            cover_ref: None,
+            disc_no: 0,
+            track_no: 0,
+            duration_ms: Some(274_000),
+            quality: Some(nikgob_core::model::score::STREAM_YOUTUBE_CLIP),
+            codec: None,
+            active_kind: Some(nikgob_core::model::SourceKind::Youtube),
+            has_local: false,
+            liked: false,
+            credit: Default::default(),
+            youtube_id: Some("34Na4j8AVgA".into()),
+            check: None,
+        };
+        let asked = lookup_row(clip.clone());
+        assert_eq!(asked.title, "Starboy ft. Daft Punk");
+        assert_eq!(asked.duration_ms, None, "the video's length is not the song's");
+        let song = TrackRow { quality: Some(nikgob_core::model::score::STREAM_YOUTUBE), ..clip.clone() };
+        assert_eq!(lookup_row(song.clone()), song, "a song is asked as it is");
+
+        let mut tl = TrackLyrics { clip: true, ..TrackLyrics::default() };
+        let lrc = Text::from_lrc(Some("[00:10.00]I'm tryna put you in the worst mood\n[00:14.00]P1 cleaner than your church shoes"), None).unwrap();
+        tl.insert(LyricsSource::Lrclib, Some(lrc.clone()));
+        let v = tl.view(TrackId::new());
+        assert!(v.lines.is_empty(), "no highlighting before the check");
+        assert!(v.plain.as_deref().is_some_and(|p| p.contains("worst mood")), "the lines show as text");
+        assert_eq!(tl.unchecked().len(), 1);
+        // The check heard it 41 s later: shown moved by the intro.
+        let heard = made(&[(51_000, "I'm tryna put you in the worst mood"), (55_000, "P1 cleaner than your church shoes")]);
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, true, Timing::Shifted, -41_000, heard));
+        let v = tl.view(TrackId::new());
+        assert_eq!(v.lines.first().map(|l| l.start), Some(Duration::from_millis(51_000)));
+        // Not this song's text: still no highlighting.
+        tl.set_aligned(LyricsSource::Lrclib, aligned(&lrc, false, Timing::Elsewhere, 0, Vec::new()));
+        assert!(tl.view(TrackId::new()).lines.is_empty());
+        // A song plays: its found timing shows at once.
+        let mut tl = TrackLyrics::default();
+        tl.insert(LyricsSource::Lrclib, Some(lrc));
+        assert_eq!(tl.view(TrackId::new()).lines.len(), 2);
     }
 
     #[test]

@@ -1602,6 +1602,30 @@ mod tests {
         assert_eq!(fit_text(&em, &v, &lines, true).unwrap().timing, Timing::Elsewhere);
     }
 
+    /// A clip's video plays 41 s of intro before the song: a text timed for
+    /// the record is one steady shift of -41 s off, found as such (the
+    /// lines then move by it), not as another version.
+    #[test]
+    fn a_clip_intro_of_41_seconds_is_one_steady_shift() {
+        let (v, short) = setup("ааа ббб ввв");
+        // 410 frames (41 s at 10 a second) of the intro, then the song.
+        let intro = 410 * 5;
+        let mut logp = Vec::with_capacity(intro + short.logp.len());
+        for _ in 0..410 {
+            for i in 0..5 {
+                logp.push(if i == 0 { 0.9f32.ln() } else { 0.025f32.ln() });
+            }
+        }
+        logp.extend_from_slice(&short.logp);
+        let em = Emissions { logp, vocab: 5, fps: 10.0, blank: 0 };
+        // The record's times: heard at 41.1, 42.3 and 43.5 s in the video.
+        let lines = [line(0.1, "ааа"), line(1.3, "ббб"), line(2.5, "ввв")];
+        let fit = fit_text(&em, &v, &lines, true).unwrap();
+        assert!(fit.fits(), "{}", fit.score);
+        assert_eq!(fit.timing, Timing::Shifted, "{fit:?}");
+        assert!((fit.offset + 41.0).abs() < 0.15, "{}", fit.offset);
+    }
+
     /// Emissions over a 5-letter vocabulary (0 blank) from the best letter
     /// of each frame, at 10 frames a second.
     fn frames(best: &[usize]) -> Emissions {
