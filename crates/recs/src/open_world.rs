@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 
 use nikgob_core::model::ArtistId;
 use nikgob_core::streaming::StreamTrack;
+use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
 use crate::index::euclid;
@@ -179,7 +180,7 @@ impl NicheSound {
 }
 
 /// The character of a wave («Характер»).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Character {
     #[default]
     Any,
@@ -190,7 +191,7 @@ pub enum Character {
 }
 
 /// The scene of a wave («Сцена / Жанр»).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Scene {
     #[default]
     All,
@@ -203,7 +204,7 @@ pub enum Scene {
 }
 
 /// What a wave plays.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WaveFilter {
     /// The share of new music asked for (0 «Знакомое» … 1 «Только новое»).
     pub novelty: f32,
@@ -309,7 +310,7 @@ fn character_of_new(m: &UserModel, character: Character, v: Option<&Vector>) -> 
 /// by its preview's region, else by the library's songs it is linked to;
 /// for a family of genres by its artist's songs in the library, else by
 /// the songs it is linked to (most of them of the family).
-fn scene_of_new(ctx: &WaveContext<'_>, scene: Scene, c: &OpenCandidate, artist_tracks: &[usize]) -> bool {
+pub(crate) fn scene_of_new(ctx: &WaveContext<'_>, scene: Scene, c: &OpenCandidate, artist_tracks: &[usize]) -> bool {
     let m = ctx.model;
     let most = |of: &dyn Fn(usize) -> bool, list: &[usize]| !list.is_empty() && 2 * list.iter().filter(|&&i| of(i)).count() > list.len();
     match scene {

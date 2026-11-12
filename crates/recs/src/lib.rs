@@ -33,6 +33,8 @@
 //!   services' radios and similar artists, ListenBrainz, Last.fm, the tags
 //!   of MusicBrainz) and the user's own (an imported history, the
 //!   playlists), and the prior of each track of the library.
+//! * [`wave`]: «Моя волна» — its filters and the bandit of the user's
+//!   clusters that leads it.
 
 pub mod analysis;
 pub mod background;
@@ -66,6 +68,7 @@ pub mod style;
 pub mod suggest;
 pub mod taste;
 pub mod tiles;
+pub mod wave;
 pub mod world_mixes;
 
 pub use analysis::{

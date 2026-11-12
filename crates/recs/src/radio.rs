@@ -122,7 +122,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use nikgob_core::model::{ArtistId, TrackId};
-use nikgob_core::streaming::RemoteId;
+use nikgob_core::streaming::{RemoteId, StreamTrack};
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
@@ -134,6 +134,7 @@ use crate::rng::Rng;
 use crate::mood::Axes;
 use crate::listening::Mode;
 use crate::profiles::LaneKey;
+use crate::open_world::{OpenCandidate, WaveContext};
 use crate::session::{Ended, MISSED_PUSH, Session, Verdict, judge};
 use crate::songtype::{SongLane, SongType, Voice};
 
@@ -253,6 +254,9 @@ pub enum RadioSeed {
     /// «Дейлист» of a part of the day, around its centre on the mood axes
     /// (energy, brightness, steadiness): see [`crate::daylist`].
     Daylist { part: DayPart, centre: [f32; 3] },
+    /// «Моя волна» and the cards that start it with a filter of their own:
+    /// see [`crate::wave`].
+    Wave(crate::wave::WaveSeed),
 }
 
 /// How a served track ended (session learning).
@@ -360,6 +364,9 @@ pub struct RadioState {
     /// The runtime handed it a session: it ranks by the user model.
     #[serde(skip)]
     attuned: bool,
+    /// «Моя волна»: the bandit of the user's clusters ([`crate::wave`]).
+    #[serde(default)]
+    wave: Option<crate::wave::Bandit>,
 }
 
 fn no_repeat_default() -> i64 {
@@ -409,6 +416,7 @@ impl RadioState {
             pull: None,
             removed: Vec::new(),
             attuned: false,
+            wave: matches!(seed, RadioSeed::Wave(_)).then(crate::wave::Bandit::default),
             seed,
         };
         match &s.seed {
@@ -622,7 +630,7 @@ impl RadioState {
     /// Whether the seed is a mix (a mood, a style, a daylist, «Новое для
     /// тебя»): a mix lets what played rest; a radio may bring it back.
     pub fn is_mix(&self) -> bool {
-        matches!(self.seed, RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. })
+        matches!(self.seed, RadioSeed::Mood(_) | RadioSeed::Style { .. } | RadioSeed::Discover | RadioSeed::Daylist { .. } | RadioSeed::Wave(_))
     }
 
     /// How a served track ended: a rejection (a skip in its first half or
@@ -650,6 +658,9 @@ impl RadioState {
         self.recent.push(item.clone());
         let over = self.recent.len().saturating_sub(REPEAT_AFTER);
         self.recent.drain(..over);
+        if let Some(b) = &mut self.wave {
+            b.feedback(&item, outcome.verdict());
+        }
         match outcome.verdict() {
             Verdict::Approved => {
                 self.skipped.retain(|x| *x != item);
@@ -672,6 +683,9 @@ impl RadioState {
         }
         self.skipped.retain(|x| *x != item);
         self.removed.retain(|x| *x != item);
+        if let Some(b) = &mut self.wave {
+            b.liked(&item);
+        }
         push_capped(&mut self.liked, item.clone(), LESSONS);
         self.pull = Some((item, vector));
     }
@@ -679,6 +693,9 @@ impl RadioState {
     /// `item` was taken out of the queue by hand: its sound pushes the
     /// picks away ([`REMOVED_PUSH`]); it is never picked again (served).
     pub fn removed(&mut self, item: Item) {
+        if let Some(b) = &mut self.wave {
+            b.removed(&item);
+        }
         self.liked.retain(|x| *x != item);
         push_capped(&mut self.removed, item, LESSONS);
     }
@@ -689,12 +706,76 @@ impl RadioState {
         if items.is_empty() {
             return;
         }
+        if let Some(b) = &mut self.wave {
+            b.forget(items);
+        }
         let before = self.served.len();
         self.served.retain(|x| !items.contains(x));
         let gone = before - self.served.len();
         let keep = self.tail.len().saturating_sub(gone);
         self.tail.truncate(keep);
         self.last = self.served.back().cloned();
+    }
+
+    /// The next `n` of a wave ([`RadioSeed::Wave`], see [`crate::wave`])
+    /// over `ctx` and the open `pool`; the state moves on (served, the
+    /// bandit). Nothing for another seed.
+    pub fn extend_wave(&mut self, ctx: &WaveContext<'_>, pool: &[OpenCandidate], n: usize, seed: u64) -> Vec<Pick> {
+        let RadioSeed::Wave(wave) = &self.seed else { return Vec::new() };
+        let wave = wave.clone();
+        let bandit = self.wave.get_or_insert_with(crate::wave::Bandit::default);
+        bandit.seed_once(seed);
+        self.turns += 1;
+        // Served: track ids, and the songs of the pool by their keys.
+        let by_id: HashMap<&RemoteId, &str> = pool.iter().map(|c| (&c.track.id, c.key.as_str())).collect();
+        let served: HashSet<String> = self
+            .served
+            .iter()
+            .map(|item| match item {
+                Item::Track(t) => t.to_string(),
+                Item::Stream(r) => by_id.get(r).map_or_else(|| r.to_string(), |k| (*k).to_owned()),
+            })
+            .collect();
+        let picks = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served);
+        let out: Vec<Pick> = picks.into_iter().map(|p| Pick { reason: if p.new { Reason::New } else { Reason::Favourite }, item: p.item }).collect();
+        for p in &out {
+            self.served.push_back(p.item.clone());
+        }
+        while self.served.len() > SERVED_CAP {
+            self.served.pop_front();
+        }
+        if let Some(p) = out.last() {
+            self.last = Some(p.item.clone());
+        }
+        out
+    }
+
+    /// The wave's filter, when it is a wave.
+    pub fn wave_seed(&self) -> Option<&crate::wave::WaveSeed> {
+        match &self.seed {
+            RadioSeed::Wave(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    /// The wave's bandit, once it picked.
+    pub fn wave_bandit(&self) -> Option<&crate::wave::Bandit> {
+        self.wave.as_ref()
+    }
+
+    /// The wave plays `seed` from its next picks (a chip of the queue's
+    /// header): its clusters are found again for it.
+    pub fn set_wave(&mut self, seed: crate::wave::WaveSeed) {
+        if matches!(self.seed, RadioSeed::Wave(_)) {
+            self.seed = RadioSeed::Wave(seed);
+        }
+    }
+
+    /// «↻ Другой вайб»: the wave moves to another cluster from its next
+    /// pick, the song playing counted for nothing. False for a radio that
+    /// is no wave, or a wave of one cluster.
+    pub fn other_vibe(&mut self) -> bool {
+        self.wave.as_mut().is_some_and(crate::wave::Bandit::other_vibe)
     }
 
     /// Autoplay's trajectory as captured (empty: none yet, or its seed
@@ -771,7 +852,7 @@ impl RadioState {
             }
             RadioSeed::Style { centroid, .. } => <[f32; DIM]>::try_from(centroid.as_slice()).ok(),
             RadioSeed::Daylist { centre, .. } => recs.daylist_point(Axes::from_array(*centre)),
-            RadioSeed::Mood(_) | RadioSeed::Discover => None,
+            RadioSeed::Mood(_) | RadioSeed::Discover | RadioSeed::Wave(_) => None,
         }
     }
 
@@ -793,6 +874,16 @@ impl RadioState {
     pub fn extend(&mut self, recs: &Recs<'_>, n: usize, params: &RadioParams) -> Vec<Pick> {
         if n == 0 {
             return Vec::new();
+        }
+        // A wave without its open pool: the library's side of it.
+        if matches!(self.seed, RadioSeed::Wave(_))
+            && let Some(m) = recs.model
+        {
+            let ok = |i: usize| !recs.blocked(i);
+            let background = |i: usize| recs.background.and_then(|b| b.get(i)).copied().unwrap_or(false);
+            let artist_tracks = |_: &StreamTrack| Vec::new();
+            let ctx = WaveContext { model: m, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks };
+            return self.extend_wave(&ctx, &[], n, params.seed);
         }
         // Autoplay's trajectory, once it has the session it continues.
         if self.follow

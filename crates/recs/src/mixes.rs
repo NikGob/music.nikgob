@@ -359,7 +359,7 @@ pub fn lane_code(l: LaneKey) -> u8 {
     }
 }
 
-fn lane_of_code(c: u8) -> LaneKey {
+pub fn lane_of_code(c: u8) -> LaneKey {
     match c {
         0 => LaneKey::Instrumental,
         1 => LaneKey::Unknown,
