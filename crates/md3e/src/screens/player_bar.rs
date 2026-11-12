@@ -103,7 +103,18 @@ pub fn show(
         // The optional buttons only where Settings → Вид shows them (their
         // keys work anyway).
         let buttons = state.prefs.player_buttons;
+        // While «Моя волна» plays, shuffling means nothing: the same slot
+        // turns the wave to another of the user's clusters.
         if buttons.shuffle
+            && super::wave_plays(state)
+            && ui
+                .add(IconButton::new(Icon::Refresh).colors(item).tooltip("Сменить направление волны").id_salt("bar-vibe"))
+                .clicked()
+        {
+            out.push(Command::OtherVibe);
+        }
+        if buttons.shuffle
+            && !super::wave_plays(state)
             && ui
                 .add(
                     IconButton::new(Icon::Shuffle)

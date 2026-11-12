@@ -1783,7 +1783,11 @@ fn info(
         })
         .tooltip("Играть / пауза (Space)");
     let mut items = Vec::with_capacity(5);
-    if buttons.shuffle {
+    // «Моя волна» turns to another cluster in the shuffle's slot.
+    let wave = super::wave_plays(state);
+    if buttons.shuffle && wave {
+        items.push(Item::from(tonal(Icon::Refresh).tooltip("Сменить направление волны")));
+    } else if buttons.shuffle {
         items.push(Item::from(tonal(Icon::Shuffle).selected(p.shuffle).tooltip("Перемешать")));
     }
     // Where «Назад» stands; play and «Далее» follow it.
@@ -1800,7 +1804,7 @@ fn info(
     }
     let r = ButtonGroup::new("np-group", button_size).show(&mut cui, items);
     if buttons.shuffle && r[0].clicked() {
-        out.push(Command::ToggleShuffle);
+        out.push(if wave { Command::OtherVibe } else { Command::ToggleShuffle });
     }
     if r[prev].clicked() {
         chrome::press_previous(&ctx, state, out);

@@ -118,6 +118,7 @@ fn recommendations(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
     });
     menu(ui, Id::RadioUnheard, p);
     switch(ui, Id::GraphUse, &mut p.graph_use);
+    menu(ui, Id::MixCardsWave, p);
     sound_model(ui, state, p);
 }
 

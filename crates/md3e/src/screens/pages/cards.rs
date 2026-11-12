@@ -355,14 +355,42 @@ fn rows_at(ui: &Ui, t: &str, role: TypeStyle, width: f32) -> usize {
     crate::typography::layout(ui.painter(), job).rows.len()
 }
 
+/// What a click on a mix's card does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MixClick {
+    /// Opens its page (▶ plays it).
+    List,
+    /// Plays it.
+    Play,
+    /// Starts «Моя волна» with the card's filter (▶ too); its list stays
+    /// in ⋮ («Карточки в „Миксах для тебя“»).
+    Wave,
+}
+
+impl MixClick {
+    /// How a card of mix `key` of «Миксы для тебя» answers under `prefs`:
+    /// a wave preset when the cards start the wave (what played and a
+    /// world's mixes are no wave), else as the click is set.
+    pub fn of(prefs: &nikgob_view::Prefs, key: nikgob_view::MixKey) -> Self {
+        let preset = !matches!(key, nikgob_view::MixKey::OnRepeat | nikgob_view::MixKey::World(_));
+        if prefs.mix_cards_wave && preset {
+            Self::Wave
+        } else if prefs.mix_click_opens_list {
+            Self::List
+        } else {
+            Self::Play
+        }
+    }
+}
+
 /// A mix of «Миксы для тебя» (§3.3, §4): the cover of its leading artist's
 /// album cut to a Material shape of the mix's own on a tonal tile, its name
 /// and its artists in a line each under it, as «Любимые» has them. A click
-/// opens its page (`opens_list`; of the world `world`'s page for its
-/// mixes) or plays it; under the pointer ⋮ at the top and ▶ at the bottom
-/// grow in and the cover comes a little closer; while it plays the name is
-/// primary and ⏸ stays in a square. With `can_blend` ⋮ offers «Смешать
-/// с…» (the sheet of the other profiles).
+/// opens its page (of the world `world`'s page for its mixes), plays it or
+/// starts its wave (`click`); under the pointer ⋮ at the top and ▶ at the
+/// bottom grow in and the cover comes a little closer; while it plays the
+/// name is primary and ⏸ stays in a square. With `can_blend` ⋮ offers
+/// «Смешать с…» (the sheet of the other profiles).
 #[allow(clippy::too_many_arguments)]
 pub fn mix(
     ui: &mut Ui,
@@ -372,10 +400,11 @@ pub fn mix(
     can_blend: bool,
     playing: bool,
     status: Status,
-    opens_list: bool,
+    click: MixClick,
     world: Option<&str>,
     out: &mut Vec<Command>,
 ) -> Option<Route> {
+    let opens_list = click == MixClick::List;
     let s = Theme::get(ui.ctx()).scheme;
     let theme = Theme::get(ui.ctx());
     let id = ui.id().with(("home-mix", l.key));
@@ -433,6 +462,7 @@ pub fn mix(
     ui.painter().galley(pos2(cell.left(), name_rect.bottom()), g, s.on_surface_variant);
 
     let items = mix_items(l, can_blend, !opens_list, false);
+    let wave = click == MixClick::Wave;
     let mut picked = mix_menu(id.with("ctx"), l, &items).context_menu(&resp);
     if let Some(m) = &more {
         picked = picked.or(mix_menu(id.with("more-menu"), l, &items).align_right(true).attach(m));
@@ -446,11 +476,80 @@ pub fn mix(
     } else if play || card {
         if playing && status == Status::Playing {
             out.push(Command::Pause);
+        } else if wave {
+            out.push(Command::PlayWave { preset: Some(l.key) });
         } else {
             out.push(Command::PlayMix { id: l.id() });
         }
     }
     nav
+}
+
+/// «Моя волна» in «Миксы для тебя», right after «Любимые» (recs §2.1): its
+/// own tertiary container (the mixes' tiles never take it), a wave across
+/// it that runs while the wave plays, its name under it. A click starts
+/// the wave (⏸ while it plays, ▶ again after); ▶ grows in under the
+/// pointer as on a mix.
+pub fn wave(ui: &mut Ui, cell: Rect, playing: bool, ours: bool, status: Status, out: &mut Vec<Command>) {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let id = ui.id().with("home-wave");
+    let cell = on_pixels(ui, cell);
+    let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
+    let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
+    let r = shape::LARGE;
+    // The wave runs while it plays and settles when it stops.
+    let run = anim::fraction(ui.ctx(), id.with("run"), f32::from(u8::from(playing && !theme.reduced_motion)), theme.motion.default_effects);
+    let now = anim::now(ui.ctx());
+    let phase = ui.ctx().data_mut(|d| {
+        let (t, p) = d.get_temp::<(f64, f32)>(id.with("phase")).unwrap_or((now, 0.0));
+        let p = p + run * ((now - t) as f32).min(0.1) * std::f32::consts::TAU * 0.35;
+        d.insert_temp(id.with("phase"), (now, p % std::f32::consts::TAU));
+        p
+    });
+    if run > 0.001 {
+        ui.ctx().request_repaint();
+    }
+    let play = scaled(ui, art.center(), squish, |ui| {
+        paint::container(ui.painter(), art, Radii::all(r), s.tertiary_container, egui::Stroke::NONE);
+        // Two periods of a sine across the middle, its swell a little
+        // higher while it plays.
+        let w = art.width() * 0.62;
+        let amp = art.height() * (0.07 + 0.025 * run);
+        let left = art.center().x - w / 2.0;
+        let points: Vec<Pos2> = (0..=48)
+            .map(|k| {
+                let x = k as f32 / 48.0;
+                pos2(left + x * w, art.center().y + amp * (x * std::f32::consts::TAU * 2.0 + phase).sin())
+            })
+            .collect();
+        let stroke = (art.width() * 0.045).clamp(4.0, 10.0);
+        ui.painter().add(egui::Shape::line(points, egui::Stroke::new(stroke, s.on_tertiary_container)));
+        let dot = stroke * 0.5;
+        for x in [left, left + w] {
+            let k = (x - left) / w;
+            let y = art.center().y + amp * (k * std::f32::consts::TAU * 2.0 + phase).sin();
+            ui.painter().circle_filled(pos2(x, y), dot, s.on_tertiary_container);
+        }
+        paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
+        let d = Size::M.height();
+        let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
+        let tip = if playing { "Пауза" } else { "Слушать «Моя волна»" };
+        grow_button(ui, id.with("play"), hover || playing, slot, play_button(playing, Size::M, tip, id.with("play-btn"))).is_some_and(|b| b.clicked())
+    });
+    let name_c = if playing { s.primary } else { s.on_surface };
+    let name = text(ui, "Моя волна", TypeRole::TitleMedium.style(), name_c, cell.width(), 1);
+    ui.painter().galley(pos2(cell.left(), art.bottom() + 8.0), name, name_c);
+    if play || resp.clicked() {
+        out.push(if playing && status == Status::Playing {
+            Command::Pause
+        } else if ours {
+            Command::TogglePlay
+        } else {
+            Command::PlayWave { preset: None }
+        });
+    }
 }
 
 /// The shape a mix's cover is cut to and its tile's colour: its own by
@@ -462,7 +561,8 @@ fn mix_look(l: &LaneCard, s: &crate::ColorScheme) -> (nikgob_shapes::MaterialSha
     let mut h = std::collections::hash_map::DefaultHasher::new();
     l.key.hash(&mut h);
     let n = h.finish();
-    let tile = [s.secondary_container, s.tertiary_container, s.surface_container_highest][(n / 16 % 3) as usize];
+    // The tertiary container is «Моя волна»'s alone.
+    let tile = [s.secondary_container, s.surface_container_highest][(n / 16 % 2) as usize];
     (CUTS[(n % CUTS.len() as u64) as usize], tile)
 }
 
@@ -870,6 +970,24 @@ pub fn shuffle<T>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// «Карточки в „Миксах для тебя“»: by default a card starts its wave;
+    /// what played and a world's mix never do; the old choice keeps the
+    /// click as it was set.
+    #[test]
+    fn mix_cards_start_waves_by_default() {
+        use nikgob_view::MixKey as K;
+        let mut p = nikgob_view::Prefs::default();
+        assert!(p.mix_cards_wave && p.home_wave_chip);
+        assert_eq!(MixClick::of(&p, K::Calm), MixClick::Wave);
+        assert_eq!(MixClick::of(&p, K::Genre(2)), MixClick::Wave);
+        assert_eq!(MixClick::of(&p, K::OnRepeat), MixClick::List);
+        assert_eq!(MixClick::of(&p, K::World(nikgob_view::WorldMix::Best)), MixClick::List);
+        p.mix_cards_wave = false;
+        assert_eq!(MixClick::of(&p, K::Calm), MixClick::List);
+        p.mix_click_opens_list = false;
+        assert_eq!(MixClick::of(&p, K::Calm), MixClick::Play);
+    }
 
     /// A mix's ⋮ is in the order of the other collections' menus:
     /// «Слушать» first on the card, «В очередь», «Скачать недостающие»

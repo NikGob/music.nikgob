@@ -277,8 +277,13 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
     // A radio says so above the list, and where it picks from; autoplay
     // can be switched off right there.
     if let Some(r) = &q.radio {
-        if radio_header(ui, r, state, chrome, out) {
-            out.push(Command::SetPref(nikgob_view::PrefPatch::Autoplay(false)));
+        match &r.wave {
+            Some(w) => wave_header(ui, r, w, state, chrome, out),
+            None => {
+                if radio_header(ui, r, state, chrome, out) {
+                    out.push(Command::SetPref(nikgob_view::PrefPatch::Autoplay(false)));
+                }
+            }
         }
         ui.add_space(8.0);
     }
@@ -599,6 +604,48 @@ fn radio_header(
         salt: "q-radio",
     };
     header(ui, head, state, chrome, out) == Some(false)
+}
+
+/// «Моя волна» above the queue: its title, and under it its filters as
+/// drop-down chips (novelty, character, the user's scene); a chip changed
+/// rebuilds the tail, the track playing goes on.
+fn wave_header(ui: &mut Ui, r: &nikgob_view::RadioView, w: &nikgob_view::WaveView, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+    use nikgob_view::{WaveCharacter, WaveFilter, WaveNovelty, WaveScene};
+    let head = Header { title: &r.title, hover: "Подстраивается под тебя, пока играет", switch: None, source: None, salt: "q-wave" };
+    header(ui, head, state, chrome, out);
+    let f = w.filter;
+    let mut picked: Option<WaveFilter> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        ui.add_space(16.0);
+        // Each chip shows what is chosen; one off its default is selected.
+        let chip = |ui: &mut Ui, salt: &str, label: &str, on: bool, options: Vec<(&str, bool)>| -> Option<usize> {
+            let resp = ui.add(crate::components::FilterChip::new(label, on).one_of().trailing_icon(Icon::ExpandMore).id_salt(salt));
+            let mut menu = Menu::new((salt, "menu"));
+            for (label, selected) in options {
+                menu = menu.item(MenuItem::new(label).selected(selected));
+            }
+            menu.attach(&resp)
+        };
+        let novelty: Vec<(&str, bool)> = WaveNovelty::ALL.iter().map(|n| (n.title(), *n == f.novelty)).collect();
+        if let Some(i) = chip(ui, "q-wave-novelty", f.novelty.title(), f.novelty != WaveNovelty::Balance, novelty) {
+            picked = Some(WaveFilter { novelty: WaveNovelty::ALL[i], ..f });
+        }
+        let character: Vec<(&str, bool)> = WaveCharacter::ALL.iter().map(|c| (c.title(), *c == f.character)).collect();
+        if let Some(i) = chip(ui, "q-wave-character", f.character.title(), f.character != WaveCharacter::Any, character) {
+            picked = Some(WaveFilter { character: WaveCharacter::ALL[i], ..f });
+        }
+        let scene_title = w.scenes.iter().find(|c| c.scene == f.scene).map_or("Все", |c| c.title.as_str());
+        let mut scenes: Vec<(&str, bool)> = vec![("Все", f.scene == WaveScene::All)];
+        scenes.extend(w.scenes.iter().map(|c| (c.title.as_str(), c.scene == f.scene)));
+        if let Some(i) = chip(ui, "q-wave-scene", scene_title, f.scene != WaveScene::All, scenes) {
+            let scene = if i == 0 { WaveScene::All } else { w.scenes.get(i - 1).map_or(WaveScene::All, |c| c.scene) };
+            picked = Some(WaveFilter { scene, ..f });
+        }
+    });
+    if let Some(p) = picked.filter(|p| *p != f) {
+        out.push(Command::SetWave(p));
+    }
 }
 
 /// «Подбираю ещё…» at the end of a radio queue while it extends, lined up
