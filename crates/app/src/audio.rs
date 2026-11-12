@@ -163,6 +163,9 @@ pub struct Engine {
     on_live: Option<Live>,
     /// ... and its player is heard itself (no capture): the engine is at 0.
     live_direct: bool,
+    /// The sleep timer's fade level (1: none). The engine fades by itself;
+    /// a live player heard directly is turned down with it.
+    fade: f32,
 }
 
 /// A player whose sound a live track hands the engine.
@@ -236,6 +239,7 @@ impl Engine {
                 volume: 1.0,
                 on_live: None,
                 live_direct: false,
+                fade: 1.0,
             },
             links,
         ))
@@ -452,7 +456,7 @@ impl Playback for Engine {
         }
         let direct = live.as_ref().is_some_and(|l| !l.routed());
         if let Some(l) = &live {
-            l.set_volume(self.volume);
+            l.set_volume(if direct { self.volume * self.fade } else { self.volume });
         }
         if direct {
             // The player is heard itself; the engine's copy only moves the
@@ -536,6 +540,18 @@ impl Playback for Engine {
         self.player.set_gain(id, gain_db);
     }
 
+    fn set_sleep_fade(&mut self, level: f32, over: Duration) {
+        self.fade = if level.is_finite() { level.clamp(0.0, 1.0) } else { 1.0 };
+        self.player.set_fade(self.fade, over);
+        // A live player heard by itself steps down with the engine's fade
+        // (its volume on the same perceptual curve).
+        if self.live_direct
+            && let Some(l) = &self.on_live
+        {
+            l.set_volume(self.volume * self.fade);
+        }
+    }
+
     fn set_speed(&mut self, id: u64, speed: nikgob_view::SpeedVariant, keep_timbre: bool) {
         if self.on_live.is_none() {
             self.player.set_fx(id, item_fx(speed, keep_timbre));
@@ -556,6 +572,7 @@ impl Playback for Engine {
             Ok(p) => {
                 self.player = p;
                 self.player.set_volume(self.volume);
+                self.player.set_fade(self.fade, Duration::ZERO);
                 self.on_live = None;
                 self.live_direct = false;
                 true

@@ -38,7 +38,10 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     let d = &state.downloads;
     let mut nav = None;
     ui.add_space(8.0);
-    ui.label(TypeRole::HeadlineMedium.style().rich("Загрузки", s.on_surface));
+    ui.horizontal(|ui| {
+        ui.label(TypeRole::HeadlineMedium.style().rich("Загрузки", s.on_surface));
+        storage(ui, &d.storage);
+    });
     ui.add_space(8.0);
     let labels = TABS.map(|(_, l)| l);
     let tab = pages.downloads_tab.min(TABS.len() - 1);
@@ -83,6 +86,54 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
         }
     }
     nav
+}
+
+/// The header's right end: how much the music takes and what is left of
+/// its disk(s), over a thin bar of how full the disk is when there is one
+/// (in the error colour once it is nearly full). The details on hover.
+fn storage(ui: &mut Ui, st: &nikgob_view::StorageView) {
+    let Some(line) = st.line() else { return };
+    let s = Theme::get(ui.ctx()).scheme;
+    let format = TypeRole::BodyMedium.style().text_format(s.on_surface_variant);
+    let layout = |text: String| ui.painter().layout_job(egui::text::LayoutJob::single_section(text, format.clone()));
+    let mut text = layout(line);
+    // No room for the free space: the music alone.
+    let room = ui.available_width() - 24.0;
+    if text.size().x > room {
+        text = layout(format!("Музыка {}", nikgob_view::size_ru(st.music())));
+        if text.size().x > room {
+            return;
+        }
+    }
+    let disk = match st.disks.as_slice() {
+        [one] if one.total > 0 => Some(one.used_fraction()),
+        _ => None,
+    };
+    const BAR: f32 = 4.0;
+    const BAR_GAP: f32 = 6.0;
+    let size = vec2(text.size().x, text.size().y + disk.map_or(0.0, |_| BAR_GAP + BAR));
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().galley(rect.min, text, s.on_surface_variant);
+        if let Some(used) = disk {
+            // M3 linear progress: the indicator, a gap, the track, the stop.
+            let bar = Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - BAR), rect.max);
+            let x = bar.left() + bar.width() * used;
+            let active = if used >= 0.95 { s.error } else { s.primary };
+            let round = egui::CornerRadius::same((BAR / 2.0) as u8);
+            if used > 0.0 {
+                let w = (x - bar.left()).max(BAR);
+                ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(w, BAR)), round, active);
+            }
+            let track = x + 4.0;
+            if track + BAR < bar.right() {
+                let r = Rect::from_min_max(egui::pos2(track, bar.top()), bar.max);
+                ui.painter().rect_filled(r, round, s.secondary_container);
+                ui.painter().circle_filled(egui::pos2(bar.right() - BAR / 2.0, bar.center().y), BAR / 2.0, active);
+            }
+        }
+        crate::components::tooltip(resp, &st.details(), None);
+    });
 }
 
 /// "Подтверди": imports whose tags the matcher was not sure about. Each

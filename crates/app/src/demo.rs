@@ -314,6 +314,8 @@ fn seed_with(lib: &Library, root: &Path, files: bool) {
                 s.bitrate = Some(705);
                 s.sample_rate = Some(44_100);
                 s.bit_depth = Some(16);
+                // As large as a lossless file of its length («Загрузки»' header).
+                s.size_bytes = t.duration_ms.map(demo_file_size);
                 let _ = lib.add_source(&s);
                 if !NO_LYRICS.contains(&i) {
                     let _ = lib.put_lyrics(t.id, Some(DEMO_LRC), None, false);
@@ -393,7 +395,14 @@ fn one_song_of_an_album(lib: &Library, root: &Path, files: bool) {
     }
     let mut s = Source::new(t.id, SourceKind::LocalFile, path.display().to_string(), Codec::Wav);
     s.bitrate = Some(705);
+    s.size_bytes = t.duration_ms.map(demo_file_size);
     let _ = lib.add_source(&s);
+}
+
+/// The size of a lossless file `ms` long (about 1000 kbit/s; the demo's
+/// files are short tones or none at all).
+fn demo_file_size(ms: u32) -> u64 {
+    u64::from(ms) * 125
 }
 
 /// A number in −1..1 from the inputs (the same on every run).

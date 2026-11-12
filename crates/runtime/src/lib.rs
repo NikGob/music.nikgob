@@ -35,6 +35,8 @@ mod torrents;
 pub mod queue;
 mod session;
 mod sharing;
+mod sleep;
+mod storage;
 mod sound_model;
 mod editions;
 mod streams;
@@ -154,6 +156,10 @@ pub trait Playback: Send {
     /// its gain after all: its file's tags were read after it was handed
     /// over. One already sounding glides to it, never jumps.
     fn set_gain(&mut self, _id: u64, _gain_db: f32) {}
+    /// The sleep timer's fade: the sound glides to `level` (0..1, on the
+    /// volume's perceptual curve) over `over` (zero: at once), whatever
+    /// plays; the volume stays as the user set it.
+    fn set_sleep_fade(&mut self, _level: f32, _over: Duration) {}
     /// Switches the output device (None = system default). Returns true if
     /// the engine was restarted and lost what it was playing.
     fn set_device(&mut self, _device: Option<String>) -> bool {
@@ -686,6 +692,10 @@ struct Worker {
     library_search: library_search::LibrarySearch,
     /// The library's pages, read off the loop ([`library_load`]).
     library_load: library_load::LibraryLoad,
+    /// «Таймер сна» ([`sleep`]).
+    sleep: sleep::Sleep,
+    /// How much the music takes («Загрузки», [`storage`]).
+    storage: storage::Storage,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -847,6 +857,8 @@ impl Worker {
             details_waiting: None,
             library_search,
             library_load,
+            sleep: Default::default(),
+            storage: Default::default(),
         }
     }
 
@@ -954,6 +966,9 @@ impl Worker {
                     self.turn.lap("wishes");
                     self.reload_sources_file();
                     self.turn.lap("sources file");
+                    self.sleep_poll();
+                    self.storage_poll();
+                    self.turn.lap("sleep and storage");
                 },
                 recv(ticker) -> _ => {
                     self.turn.begin(|| "the tick".to_owned());
@@ -1120,6 +1135,7 @@ impl Worker {
                 }
             }
             Command::Seek(p) => self.seek(p),
+            Command::SleepTimer(choice) => self.sleep_set(choice),
             // The app opens and resets the developer profile itself.
             Command::DevProfile(_) => {}
             Command::PickLyricsSource(t, src) => self.pick_lyrics_source(t, src),
@@ -1909,6 +1925,7 @@ impl Worker {
     fn play_request(&mut self, e: Entry, req: PlayRequest, source: SourceId, kind: SourceKind) {
         self.playing_fx = (req.speed, req.keep_timbre);
         self.speed = f64::from(req.speed.speed());
+        self.sleep_before_play();
         self.playback.play(req);
         self.restarted = Some(e.id);
         self.playing = Some(e);
@@ -2119,7 +2136,8 @@ impl Worker {
     /// is read on another thread first.
     fn prepare_next(&mut self, ahead: bool) {
         // Gapless off: nothing is prepared, the next track starts after `Ended`.
-        let next = if self.state.read().prefs.gapless { self.queue.peek_auto_next() } else { None };
+        // Nor when the sleep timer ends with the playing track.
+        let next = if self.state.read().prefs.gapless && !self.sleep_ends_with_playing() { self.queue.peek_auto_next() } else { None };
         let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
             self.reading_ahead = None;
             self.playback.set_next(None);
@@ -2173,6 +2191,7 @@ impl Worker {
                 self.position_at = Instant::now();
                 self.rate = self.speed;
                 self.status = Status::Playing;
+                self.sleep_before_play();
                 self.playback.resume();
                 self.publish_player();
             }
@@ -2511,6 +2530,9 @@ impl Worker {
             PlaybackEvent::Ended { id } => {
                 if self.playing.map(|e| e.id) == Some(id) {
                     self.record_end(false, EndReason::Ended);
+                    if self.sleep_ended(id) {
+                        return;
+                    }
                     // Repeat-one with no preload (or preload failed): restart.
                     match self.queue.advance_auto() {
                         Some(e) => self.start(e),

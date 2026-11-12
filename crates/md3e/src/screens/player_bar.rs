@@ -177,7 +177,8 @@ pub fn show(
 
         // Progress: label, slider, label; a bare slider when narrower; a
         // line under the title when there is no room at all.
-        let trailing_w = trailing as f32 * 44.0;
+        // A running sleep timer's chip before the ⋮.
+        let trailing_w = trailing as f32 * 44.0 + super::sleep_ui::chip_width(ui, state, "bar-sleep");
         let avail = ui.available_width() - trailing_w - 8.0;
         if compact && avail >= 112.0 {
             let dur = p.duration.unwrap_or_default();
@@ -274,6 +275,7 @@ pub fn show(
                 out.push(Command::ToggleMute);
             }
         }
+        super::sleep_ui::chip(ui, state, "bar-sleep", on.gamma_multiply(0.24), on, out);
         let more = ui.add(
             IconButton::new(Icon::MoreVert)
                 .colors(item)
@@ -289,6 +291,7 @@ pub fn show(
             top.extend((!show_volume).then_some(Act::Volume));
             // Placed by «Меню трека» like Now Playing's (F12 anyway).
             top.push(Act::Visualizer);
+            top.push(Act::SleepMenu);
             // «Источник и качество»: the side pane when it is on, else its
             // own window.
             let rows = Chrome::player_rows(ui.ctx(), t, state, &top, true, false);

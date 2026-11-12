@@ -17,6 +17,7 @@ pub mod lyrics_ui;
 mod pages;
 mod pane;
 mod player_bar;
+mod sleep_ui;
 mod sound_quality;
 pub(crate) mod stage;
 pub mod sweep;
@@ -799,6 +800,12 @@ impl Md3eUi {
             }
             if i.consume_key(Modifiers::NONE, Key::E) {
                 sound = Some(pages::sound::Tab::Equalizer);
+            }
+            // «Таймер сна»: 15, 30, 45, 60, 90 minutes, then off.
+            if i.consume_key(Modifiers::NONE, Key::T) {
+                let p = &state.player;
+                let left = p.sleep.as_ref().map(|t| t.left(p, std::time::Instant::now()));
+                out.push(Command::SleepTimer(nikgob_view::sleep_key_step(left)));
             }
             // The developer profile: the playing track from YouTube Music.
             if nikgob_view::dev::profile() && state.player.current.is_some() && i.consume_key(Modifiers::NONE, Key::Y) {
