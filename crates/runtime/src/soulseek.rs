@@ -43,7 +43,21 @@ pub(crate) struct SoulseekService {
     state_dir: Option<PathBuf>,
     /// Counts the clients started (a new one counts its uploads from 0).
     generation: u64,
+    /// Where each download of «Хочу скачать» is at its peer, by the folder
+    /// it downloads into (the row of «Активные» says it).
+    phases: Phases,
 }
+
+/// Where a download is at its peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SlskPhase {
+    /// In the peer's queue, at this place when the peer told it.
+    Queued(Option<u32>),
+    Connecting,
+    Transferring { bps: u64 },
+}
+
+type Phases = Arc<parking_lot::Mutex<std::collections::HashMap<PathBuf, SlskPhase>>>;
 
 fn share_of(s: &SoulseekSettings) -> ShareSettings {
     ShareSettings { enabled: s.share, upload_limit_kbps: s.upload_limit_kbps, upload_slots: s.upload_slots.max(1) }
@@ -63,7 +77,7 @@ fn same_session(a: &SoulseekSettings, b: &SoulseekSettings) -> bool {
 
 impl SoulseekService {
     pub(crate) fn new(library_dir: PathBuf, state_dir: Option<PathBuf>) -> Self {
-        Self { running: None, applied: None, library_dir, state_dir, generation: 0 }
+        Self { running: None, applied: None, library_dir, state_dir, generation: 0, phases: Phases::default() }
     }
 
     /// Which client runs: changes whenever one is started.
@@ -79,7 +93,12 @@ impl SoulseekService {
     /// The download source over the running client, if any.
     pub(crate) fn download_source(&self) -> Option<SlskSource> {
         let rt = self.running.as_ref()?.rt.clone();
-        Some(SlskSource { slsk: self.source()?, rt })
+        Some(SlskSource { slsk: self.source()?, rt, phases: self.phases.clone() })
+    }
+
+    /// Where the downloads are at their peers, by their folders.
+    pub(crate) fn phases(&self) -> std::collections::HashMap<PathBuf, SlskPhase> {
+        self.phases.lock().clone()
     }
 
     /// Runs `f` on the source's runtime.
@@ -328,6 +347,26 @@ const AUDIO: &[&str] = &["FLAC", "MP3", "OGG", "OPUS", "M4A", "AAC", "WAV", "ALA
 pub(crate) struct SlskSource {
     slsk: Soulseek,
     rt: tokio::runtime::Handle,
+    phases: Phases,
+}
+
+/// A download being followed: its state is told under its folder while it
+/// runs; once it is let go (it ended, or the item was turned down and its
+/// task stopped), its place goes and an unfinished one is cancelled at the
+/// peer.
+struct Followed {
+    download: nikgob_soulseek::Download,
+    phases: Phases,
+    dest: PathBuf,
+}
+
+impl Drop for Followed {
+    fn drop(&mut self) {
+        self.phases.lock().remove(&self.dest);
+        if !self.download.state().is_finished() {
+            self.download.cancel();
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -492,24 +531,29 @@ impl SlskSource {
     /// the files before it brought, of `total`).
     async fn get(&self, file: SearchResult, dest: PathBuf, progress: Progress, before: u64, total: u64) -> Result<PathBuf, SourceError> {
         let slsk = self.slsk.clone();
-        self.on(async move {
-            let d = slsk.download(&file, &dest).await?;
-            let mut rx = d.subscribe();
-            loop {
-                let state = rx.borrow_and_update().clone();
-                match state {
-                    DownloadState::Done { path } => return Ok(path),
-                    DownloadState::Failed { reason } => return Err(nikgob_soulseek::Error::Denied(reason)),
-                    DownloadState::Transferring { received, .. } => progress(before + received, Some(total)),
-                    DownloadState::Queued { .. } | DownloadState::Connecting => {}
+        let dir = dest.clone();
+        let download = self.on(async move { slsk.download(&file, &dir).await }).await?.map_err(source_error)?;
+        let mut rx = download.subscribe();
+        // Followed here, not on the client's runtime: a stopped task lets
+        // it go, and the peer is told.
+        let followed = Followed { download, phases: self.phases.clone(), dest };
+        loop {
+            let state = rx.borrow_and_update().clone();
+            let phase = match state {
+                DownloadState::Done { path } => return Ok(path),
+                DownloadState::Failed { reason } => return Err(source_error(nikgob_soulseek::Error::Denied(reason))),
+                DownloadState::Transferring { received, bytes_per_sec, .. } => {
+                    progress(before + received, Some(total));
+                    SlskPhase::Transferring { bps: bytes_per_sec }
                 }
-                if rx.changed().await.is_err() {
-                    return Err(nikgob_soulseek::Error::Cancelled);
-                }
+                DownloadState::Queued { place } => SlskPhase::Queued(place),
+                DownloadState::Connecting => SlskPhase::Connecting,
+            };
+            followed.phases.lock().insert(followed.dest.clone(), phase);
+            if rx.changed().await.is_err() {
+                return Err(source_error(nikgob_soulseek::Error::Cancelled));
             }
-        })
-        .await?
-        .map_err(source_error)
+        }
     }
 }
 

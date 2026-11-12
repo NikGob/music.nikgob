@@ -593,6 +593,12 @@ impl Worker {
     }
 
     /// Where the files of a copy wait, as the cache keeps it.
+    /// A copy of the album came for `id` and waits for «Заменить» (shown
+    /// now, or kept over a restart to be shown again).
+    pub(super) fn album_copy_waits(&self, id: WishlistId) -> bool {
+        self.streaming.wish.album.staged.contains_key(&id) || self.album_kept(id).is_some()
+    }
+
     fn album_kept(&self, id: WishlistId) -> Option<Kept> {
         let (_, json) = self.lib.cache_get(&kept_key(id)).ok().flatten()?;
         serde_json::from_str(&json).ok()

@@ -575,8 +575,9 @@ pub struct WishlistRow {
     pub can_save_from_youtube: bool,
     /// The album's cover (a file or a service's https url).
     pub cover: Option<crate::Cover>,
-    /// While downloading: how much of its torrent is here, 0..=100.
-    pub progress: Option<u8>,
+    /// While its download runs: where it is, the same [`crate::Transfer`]
+    /// its row in «Активные» shows.
+    pub transfer: Option<crate::Transfer>,
     /// [`WishlistStatus::Confirm`] because downloaded files wait in
     /// «Подтверди» (not a torrent to choose).
     pub confirm_files: bool,

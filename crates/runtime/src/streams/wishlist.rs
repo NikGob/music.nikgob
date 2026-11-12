@@ -150,13 +150,20 @@ pub(crate) struct WishState {
     next_confirm: u64,
     /// Audio saved from YouTube that the importer is taking, by file.
     saving: HashMap<PathBuf, WishlistId>,
-    /// How much of an item's download is here (0..=100), while it downloads.
-    pub(crate) progress: HashMap<WishlistId, u8>,
+    /// Where each item's running download is (its torrent's, its other
+    /// source's, its import's), as the last poll found it: «Хочу скачать»
+    /// and «Активные» both show these ([`crate::running`]).
+    pub(crate) transfers: HashMap<WishlistId, v::Transfer>,
+    /// The torrents' part of them, from the torrent client's last poll.
+    pub(crate) torrent_transfers: HashMap<WishlistId, v::Transfer>,
+    /// The downloads of the other sources (and saves from YouTube) running.
+    pub(crate) runs: crate::running::Runs,
     /// Folders of the downloads of sources other than torrents, by item;
     /// they go once the import took the files.
     direct: HashMap<WishlistId, PathBuf>,
-    /// How far those downloads are, as their tasks write it.
-    live: Arc<parking_lot::Mutex<HashMap<WishlistId, u8>>>,
+    /// How far those downloads are, as their tasks write it: the bytes
+    /// here and of the whole.
+    live: Arc<parking_lot::Mutex<HashMap<WishlistId, (u64, Option<u64>)>>>,
     /// Sources that could not answer their last search, and why.
     pub(crate) down: HashMap<SourceKey, SourceError>,
     /// Sources whose last download failed though they found it, and why.
@@ -188,6 +195,9 @@ pub(crate) struct WishState {
     /// Albums of which a source gave a part: the rest goes on once the
     /// import took what came.
     partial: HashSet<WishlistId>,
+    /// Items that waited in «Подтверди» with nothing to choose and were
+    /// searched again ([`Worker::wish_unstick`]).
+    unstuck: HashSet<WishlistId>,
     /// The sources an item searched again after being turned away asks.
     retry_only: HashMap<WishlistId, Vec<SourceKey>>,
     /// When each source last answered a search for an item.
@@ -332,8 +342,8 @@ const MISS_KEY: &str = "wish_torrent_miss.v1";
 const PROBED_KEY: &str = "wish_confirm_probed.v1";
 
 impl WishState {
-    /// The direct downloads' progress, for the rows.
-    pub(crate) fn direct_progress(&self) -> HashMap<WishlistId, u8> {
+    /// The direct downloads' bytes, for the rows.
+    pub(crate) fn direct_bytes(&self) -> HashMap<WishlistId, (u64, Option<u64>)> {
         self.live.lock().clone()
     }
 }
@@ -532,12 +542,18 @@ fn later_line(have: Option<(usize, usize)>, why: &[String], wait: Duration, next
     capitalised(&parts.join(" · "))
 }
 
-/// Offers saved in an item before stage 4.5 were the indexer's candidates.
+/// The offers saved in an item, each on its own: one this build cannot
+/// read (a source it no longer has) leaves out only itself, not the list.
+/// Offers saved before stage 4.5 were the indexer's candidates.
 fn offers_of_json(json: &str) -> Vec<Offer> {
-    serde_json::from_str::<Vec<Offer>>(json)
-        .ok()
-        .or_else(|| serde_json::from_str::<Vec<Candidate>>(json).ok().map(|c| c.into_iter().map(offer_of).collect()))
-        .unwrap_or_default()
+    let Ok(all) = serde_json::from_str::<Vec<serde_json::Value>>(json) else { return Vec::new() };
+    all.into_iter()
+        .filter_map(|o| {
+            serde_json::from_value::<Offer>(o.clone())
+                .ok()
+                .or_else(|| serde_json::from_value::<Candidate>(o).ok().map(offer_of))
+        })
+        .collect()
 }
 
 fn status_rank(s: WishlistStatus) -> u8 {
@@ -1599,6 +1615,7 @@ impl Worker {
                         self.publish_sources();
                     }
                     self.streaming.wish.live.lock().remove(&item);
+                    self.streaming.wish.runs.end(item);
                     self.drop_direct(item);
                     let refused = e.is_refusal() && offer.source != SourceKey::Torrents;
                     if refused {
@@ -1940,7 +1957,7 @@ impl Worker {
                 return;
             }
             self.streaming.wish.direct.insert(id, dest.clone());
-            self.streaming.wish.live.lock().insert(id, 0);
+            self.streaming.wish.live.lock().insert(id, (0, offer.size_bytes));
             let note = format!("{} · {}", offer.detail(), offer.title);
             self.set_item(id, |i| {
                 i.status = WishlistStatus::Downloading;
@@ -1950,12 +1967,16 @@ impl Worker {
         let live = self.streaming.wish.live.clone();
         let size = offer.size_bytes;
         let progress: nikgob_core::source::Progress = Arc::new(move |done, total| {
-            if let Some(t) = total.or(size).filter(|t| *t > 0) {
-                let pct = (done.saturating_mul(100) / t).min(99) as u8;
-                live.lock().insert(id, pct);
+            let mut l = live.lock();
+            // Only while it runs: a late call of a stopped one adds nothing.
+            if let Some(at) = l.get_mut(&id) {
+                *at = (done, total.or(size).filter(|t| *t > 0));
             }
         });
-        self.streaming.spawn(async move {
+        let (title, source_name) = (self.item_title(id), offer.source.display_name().to_owned());
+        let from = self.streaming.wish.from.get(&id).cloned().unwrap_or_default();
+        let folder = dest.clone();
+        let task = self.streaming.spawn(async move {
             let limit = if torrent { Duration::from_secs(120) } else { FETCH_TIMEOUT };
             let result = match tokio::time::timeout(limit, source.fetch(&offer, &want, &dest, progress)).await {
                 Ok(r) => r,
@@ -1967,13 +1988,20 @@ impl Worker {
                 result,
             })
         });
+        // A torrent's fetch only brings its .torrent: the torrent's own row
+        // follows once it is added.
+        if !torrent {
+            self.streaming.wish.runs.start(id, title, from, Some(source_name), Some(folder), Some(task.abort_handle()));
+        }
         self.publish_wishlist();
+        self.publish_running();
     }
 
     /// A source other than torrents brought its files: the import takes
     /// them for the item, as a file the user handed in would be.
     fn wish_files(&mut self, id: WishlistId, offer: Offer, files: Vec<PathBuf>) {
         self.streaming.wish.live.lock().remove(&id);
+        self.streaming.wish.runs.end(id);
         let Some(item) = self.lib.get_wishlist_item(id).ok().flatten() else {
             self.drop_direct(id);
             return;
@@ -1994,7 +2022,8 @@ impl Worker {
         }
         let one = files.len() == 1 && item.scope == WishlistScope::Track && self.targets_of(&item).len() == 1;
         let targets = self.item_targets(&item, one);
-        let title = format!("{}: {}", offer.provider, item.title.clone().unwrap_or_default());
+        // Its row in «Активные» goes on under the same name.
+        let title = self.item_title(id);
         let note = format!("{} · {}", offer.detail(), offer.title);
         if self.import_for(files, title, SourceOrigin::Inbox, targets) {
             self.set_item(id, |i| {
@@ -2488,6 +2517,8 @@ impl Worker {
             w.upgrade_dups.remove(&id);
             w.from.remove(&id);
             w.live.lock().remove(&id);
+            // A download of another source stops (a Soulseek peer is told).
+            w.runs.stop(id);
             self.album_dismissed(id);
             // A torrent on its way goes with what it downloaded (a better
             // copy's always: it must never replace a file); a seeding one
@@ -2708,14 +2739,19 @@ impl Worker {
             i.note = Some("Сохраняю с YouTube…".into());
         });
         let dir = self.save_dir();
-        self.streaming.spawn(async move {
+        let task = self.streaming.spawn(async move {
             let result = yt.save_audio(&source.locator, &dir).await;
             Msg::Wish(WishMsg::Saved { item: id, track, result })
         });
+        self.streaming.wish.from.insert(id, "YouTube".into());
+        let title = self.item_title(id);
+        self.streaming.wish.runs.start(id, title, "YouTube".into(), None, None, Some(task.abort_handle()));
         self.publish_wishlist();
+        self.publish_running();
     }
 
     fn wish_saved(&mut self, id: WishlistId, track: TrackId, result: Result<PathBuf, StreamError>) {
+        self.streaming.wish.runs.end(id);
         match result {
             Ok(path) => {
                 self.streaming.wish.saving.insert(path.clone(), id);
@@ -3149,23 +3185,11 @@ impl Worker {
         }
     }
 
-    /// How far the downloads of sources other than torrents are, on their
-    /// rows (each second; the torrents' come with theirs).
+    /// Each second: the sources' told times, and where every running
+    /// download is ([`crate::running`]).
     pub(crate) fn wish_poll_direct(&mut self) {
         self.sources_expire();
-        let live = self.streaming.wish.direct_progress();
-        let mut next = self.streaming.wish.progress.clone();
-        next.retain(|k, _| !self.streaming.wish.direct.contains_key(k) || live.contains_key(k));
-        next.extend(live);
-        if next == self.streaming.wish.progress {
-            return;
-        }
-        self.streaming.wish.progress = next.clone();
-        self.publish(|s| {
-            for r in &mut s.downloads.wishlist.items {
-                r.progress = next.get(&r.id).copied().filter(|_| r.status == WishlistStatus::Downloading);
-            }
-        });
+        self.publish_running();
     }
 
     /// The item downloads through a torrent of the torrent client.
@@ -3293,6 +3317,7 @@ impl Worker {
         let mut by_artist: Vec<v::WishlistGroup> = Vec::new();
         let mut counts: Vec<(WishlistStatus, u32)> = Vec::new();
         let mut confirms = Vec::new();
+        let mut empty = Vec::new();
         let mut covers = Vec::new();
         for item in &items {
             let track = item.track_id.and_then(|t| self.lib.get_track(t).ok().flatten());
@@ -3358,8 +3383,15 @@ impl Worker {
             let source = (item.status == WishlistStatus::Downloading)
                 .then(|| self.streaming.wish.from.get(&item.id).cloned())
                 .flatten();
-            if item.status == WishlistStatus::Confirm && !files_wait {
-                confirms.push(self.wish_confirm_view(item));
+            // An item whose files waited there and do no more asks nothing
+            // of its own (its import settles it).
+            if item.status == WishlistStatus::Confirm && !files_wait && item.note.as_deref() != Some(FILES_WAIT) {
+                let card = self.wish_confirm_view(item);
+                if card.answerable() {
+                    confirms.push(card);
+                } else if !self.album_copy_waits(item.id) {
+                    empty.push(item.id);
+                }
             }
             let missing = match (item.scope, item.status) {
                 (WishlistScope::Album, WishlistStatus::Done) => {
@@ -3397,15 +3429,8 @@ impl Worker {
                     && item.origin != WishlistOrigin::Upgrade
                     && !matches!(item.status, WishlistStatus::Done | WishlistStatus::Dismissed),
                 cover: None,
-                progress: (item.status == WishlistStatus::Downloading)
-                    .then(|| {
-                        self.streaming
-                            .wish
-                            .progress
-                            .get(&item.id)
-                            .copied()
-                            .or_else(|| self.streaming.wish.live.lock().get(&item.id).copied())
-                    })
+                transfer: (item.status == WishlistStatus::Downloading)
+                    .then(|| self.streaming.wish.transfers.get(&item.id).copied())
                     .flatten(),
                 confirm_files: files_wait,
                 missing,
@@ -3433,6 +3458,30 @@ impl Worker {
             s.downloads.confirm.retain(|c| c.id & WISH_ID == 0);
             s.downloads.confirm.extend(confirms);
         });
+        for id in empty {
+            self.wish_unstick(id);
+        }
+    }
+
+    /// An item in «Подтверди» with nothing to choose (its offers could not
+    /// be read, or none was kept): its card is not shown, and it searches
+    /// again; should that end the same way, it is not found.
+    fn wish_unstick(&mut self, id: WishlistId) {
+        let first = self.streaming.wish.unstuck.insert(id);
+        log::warn!("wishlist: {id} waited in «Подтверди» with nothing to choose, {}", if first { "searched again" } else { "not found" });
+        if first {
+            self.streaming.wish.confirm_ids.remove(&id);
+            self.set_item(id, |i| {
+                i.status = WishlistStatus::New;
+                i.next_try_at = None;
+                i.candidates_json = None;
+                i.note = None;
+            });
+            self.publish_wishlist();
+            self.wish_tick();
+        } else {
+            self.no_torrent(id, false);
+        }
     }
 
     fn wish_confirm_view(&mut self, item: &WishlistItem) -> v::Confirm {
@@ -3458,10 +3507,8 @@ impl Worker {
             yes_no: false,
             id,
             title: what,
-            origin: match item.scope {
-                WishlistScope::Track => "Хочу скачать · трек".into(),
-                WishlistScope::Album => "Хочу скачать · альбом".into(),
-            },
+            // The question says a track or an album; the tab, what for.
+            origin: String::new(),
             options: offers
                 .iter()
                 .enumerate()
@@ -3660,6 +3707,31 @@ mod tests {
         assert_eq!(candidate_of(&offers[0]).unwrap(), old[0]);
         let new = offers_of_json(&serde_json::to_string(&offers).unwrap());
         assert_eq!(new, offers);
+    }
+
+    /// An offer this build cannot read (a source it no longer has) leaves
+    /// out only itself: the card keeps the others to choose from.
+    #[test]
+    fn an_unreadable_offer_leaves_the_others() {
+        let old = Candidate {
+            id: "1".into(),
+            title: "Gorillaz - Plastic Beach (2010) [FLAC]".into(),
+            indexer_name: "RuTracker".into(),
+            size_bytes: Some(400 << 20),
+            seeders: Some(9),
+            leechers: None,
+            published: None,
+            categories: vec![3040],
+            info_url: None,
+            info_hash: None,
+            handle: CandidateHandle("{}".into()),
+        };
+        let good = offer_of(old);
+        let mut gone = serde_json::to_value(&good).unwrap();
+        gone["source"] = serde_json::Value::String("a_source_long_gone".into());
+        let json = serde_json::to_string(&vec![gone, serde_json::to_value(&good).unwrap()]).unwrap();
+        assert_eq!(offers_of_json(&json), vec![good]);
+        assert!(offers_of_json("not json").is_empty());
     }
 
     /// A cancelled «Скачать» leaves «Хочу скачать»; a like's, an import's
