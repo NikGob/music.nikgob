@@ -6,9 +6,16 @@
 //!   paused then, the timer just ends.
 //! * **Until the track ends** follows the playing track (after a skip, the
 //!   new one); **until the album ends** waits for the last entry of the
-//!   queue as it was when the timer was set (what autoplay added after it
-//!   does not count; another queue started meanwhile: its own end). Both
-//!   wait for the music: paused, they wait too. The last track is not
+//!   queue as it was when the timer was set (what «Автовоспроизведение»
+//!   added after it does not count, its radio's picks nor the next albums
+//!   of the world it continues; another queue started meanwhile: its own
+//!   end; that entry taken out by hand: the one before it). In a radio or
+//!   «Моя волна» it is the end of what is queued when set: when the
+//!   radio's picks are replaced under it («↻ Другой вайб», a chip, a skip)
+//!   the boundary stays at its place in the play order, as many tracks
+//!   away, and the picks that come take that place
+//!   ([`Worker::sleep_replacing`]): it never moves on to the queue's new
+//!   end. Both wait for the music: paused, they wait too. The last track is not
 //!   preloaded, so nothing follows it; it fades out over its last
 //!   [`v::SLEEP_FADE`] and, once it ends, the next entry waits paused at its
 //!   start (the queue stays).
@@ -38,6 +45,11 @@ pub(crate) enum Timer {
     TrackEnd,
     /// Pauses when this queue entry ends.
     After(u64),
+    /// Pauses when the entry at this place of the play order (history,
+    /// current, upcoming) of the queue of `generation` ends: the radio
+    /// replaced the entry the timer waited for, and its new picks take the
+    /// place (nothing there yet: they are on their way).
+    Place { at: usize, generation: u64 },
 }
 
 /// The timer and what the engine was told.
@@ -131,8 +143,9 @@ impl Worker {
         self.sleep_publish();
     }
 
-    /// The last entry of the queue that autoplay did not add (the playing
-    /// one when it is the last).
+    /// The last entry of the queue that autoplay did not add, neither its
+    /// radio nor the world it continues (the playing one when it is the
+    /// last).
     fn sleep_context_end(&self) -> Option<u64> {
         let current = self.queue.current()?;
         Some(
@@ -140,9 +153,52 @@ impl Worker {
                 .upcoming()
                 .iter()
                 .rev()
-                .find(|e| !self.autoplay_entries.contains(&e.id))
+                .find(|e| !self.autoplay_owns(e.id))
                 .map_or(current.id, |e| e.id),
         )
+    }
+
+    /// The entry at place `at` of the play order of the queue of
+    /// `generation`, when it is the playing one or ahead.
+    fn sleep_place(&self, at: usize, generation: u64) -> Option<u64> {
+        if self.queue.generation() != generation {
+            return None;
+        }
+        let current = self.queue.current()?;
+        match at.checked_sub(self.queue.history().len())? {
+            0 => Some(current.id),
+            i => self.queue.upcoming().get(i - 1).map(|e| e.id),
+        }
+    }
+
+    /// The radio is about to take the entries `gone` out of the queue and
+    /// pick others for their places: a timer that waits for one of them
+    /// waits for the entry at its place instead (see the module docs).
+    pub(crate) fn sleep_replacing(&mut self, gone: &[u64]) {
+        let Some(Timer::After(e)) = self.sleep.timer else { return };
+        if !gone.contains(&e) {
+            return;
+        }
+        let Some(i) = self.queue.upcoming().iter().position(|u| u.id == e) else { return };
+        let at = self.queue.history().len() + 1 + i;
+        log::info!("sleep timer: its entry is picked again, it waits for the place {at}");
+        self.sleep.timer = Some(Timer::Place { at, generation: self.queue.generation() });
+        self.sleep.counted = None;
+        self.sleep.after_current = None;
+    }
+
+    /// The user is taking `entry` out of the queue: a timer that waits for
+    /// it ends with the entry before it.
+    pub(crate) fn sleep_removing(&mut self, entry: u64) {
+        if self.sleep.timer != Some(Timer::After(entry)) {
+            return;
+        }
+        let Some(current) = self.queue.current() else { return };
+        let upcoming = self.queue.upcoming();
+        let Some(i) = upcoming.iter().position(|u| u.id == entry) else { return };
+        let before = if i == 0 { current.id } else { upcoming[i - 1].id };
+        self.sleep.timer = Some(Timer::After(before));
+        self.sleep.counted = None;
     }
 
     /// The entry after which the timer pauses, when it waits for one.
@@ -151,8 +207,9 @@ impl Worker {
             Timer::At(_) => None,
             Timer::TrackEnd => self.queue.current().map(|e| e.id),
             // Repeat-one never gets past the playing track: it is the end.
-            Timer::After(_) if self.queue.repeat == Repeat::One => self.queue.current().map(|e| e.id),
+            Timer::After(_) | Timer::Place { .. } if self.queue.repeat == Repeat::One => self.queue.current().map(|e| e.id),
             Timer::After(e) => Some(e),
+            Timer::Place { at, generation } => self.sleep_place(at, generation),
         }
     }
 
@@ -175,7 +232,7 @@ impl Worker {
     fn sleep_left(&self, now: Instant) -> Option<Duration> {
         match self.sleep.timer? {
             Timer::At(t) => Some(t.saturating_duration_since(now)),
-            Timer::TrackEnd | Timer::After(_) => {
+            Timer::TrackEnd | Timer::After(_) | Timer::Place { .. } => {
                 let target = self.sleep_target()?;
                 let current = self.queue.current()?;
                 if current.id != target && !self.queue.upcoming().iter().any(|e| e.id == target) {
@@ -198,12 +255,19 @@ impl Worker {
             && self.queue.current().is_none_or(|c| c.id != e)
             && !self.queue.upcoming().iter().any(|u| u.id == e)
         {
-            // Another queue (or the entry taken out): its own end.
-            match self.sleep_context_end() {
-                Some(end) => self.sleep.timer = Some(Timer::After(end)),
-                None => self.sleep.timer = None,
+            // Another queue (or the entry gone otherwise): its own end.
+            self.sleep_to_context_end();
+        }
+        if let Timer::Place { at, generation } = timer {
+            match self.sleep_place(at, generation) {
+                // The new picks are there: the entry at the place it is.
+                Some(e) => self.sleep.timer = Some(Timer::After(e)),
+                // Another queue, the place passed, or no pick to come.
+                None if self.queue.generation() != generation || self.queue.history().len() >= at || !self.radio_picking() => {
+                    self.sleep_to_context_end();
+                }
+                None => {}
             }
-            self.sleep_preload();
         }
         let now = Instant::now();
         let playing = self.status == Status::Playing;
@@ -238,6 +302,15 @@ impl Worker {
             }
         }
         self.sleep_publish();
+    }
+
+    /// The timer waits for the end of the queue's own context now.
+    fn sleep_to_context_end(&mut self) {
+        match self.sleep_context_end() {
+            Some(end) => self.sleep.timer = Some(Timer::After(end)),
+            None => self.sleep.timer = None,
+        }
+        self.sleep_preload();
     }
 
     /// Recounts how long the entries after the playing one last, up to

@@ -186,6 +186,10 @@ pub(crate) struct RadioSave {
     /// tracks: entry ids are a run's own, places survive a restart.
     #[serde(default)]
     added_at: Vec<(usize, TrackId)>,
+    /// The card of «Миксы для тебя» a wave was started from (none: the
+    /// plain «Моя волна»).
+    #[serde(default)]
+    wave_preset: Option<v::MixKey>,
 }
 
 /// Every entry of the queue in play order (played, current, upcoming).
@@ -194,6 +198,18 @@ fn queue_order(q: &crate::queue::Queue) -> Vec<Entry> {
     out.extend(q.current());
     out.extend_from_slice(q.upcoming());
     out
+}
+
+/// The places in `order` of the entries `of` and their tracks, as
+/// `session.json` keeps them (entry ids are a run's own).
+pub(crate) fn places_of(order: &[Entry], of: &HashSet<u64>) -> Vec<(usize, TrackId)> {
+    order.iter().enumerate().filter(|(_, e)| of.contains(&e.id)).map(|(k, e)| (k, e.track)).collect()
+}
+
+/// The entries of `order` at `places` that still hold their tracks (a
+/// track that moved is the user's now).
+pub(crate) fn entries_at(order: &[Entry], places: &[(usize, TrackId)]) -> HashSet<u64> {
+    places.iter().filter_map(|(k, t)| order.get(*k).filter(|e| e.track == *t).map(|e| e.id)).collect()
 }
 
 #[derive(Default)]
@@ -375,6 +391,39 @@ impl Worker {
         }
         let run = self.recs.radio.run.as_ref()?;
         run.added.contains(&entry).then(|| origin_of(&run.state, run.autoplay))
+    }
+
+    /// «Автовоспроизведение» added the queue entry `entry` to the queue
+    /// playing: the next albums of the world it continues, or its radio's
+    /// picks.
+    pub(crate) fn autoplay_owns(&self, entry: u64) -> bool {
+        let generation = self.queue.generation();
+        (self.autoplay_gen == Some(generation) && self.autoplay_entries.contains(&entry))
+            || self.recs.radio.run.as_ref().is_some_and(|r| r.autoplay && r.queue_gen == Some(generation) && r.added.contains(&entry))
+    }
+
+    /// The radio of the queue playing is picking (or about to pick) more.
+    pub(crate) fn radio_picking(&self) -> bool {
+        let generation = self.queue.generation();
+        self.recs
+            .radio
+            .run
+            .as_ref()
+            .is_some_and(|r| r.queue_gen.is_none_or(|g| g == generation) && (r.extending || r.want || r.redo.is_some()))
+    }
+
+    /// The world's next album that autoplay added, as `session.json` keeps it.
+    pub(crate) fn autoplay_save(&self) -> Vec<(usize, TrackId)> {
+        if self.autoplay_gen != Some(self.queue.generation()) {
+            return Vec::new();
+        }
+        places_of(&queue_order(&self.queue), &self.autoplay_entries)
+    }
+
+    /// The world's next album that autoplay added, of the restored queue.
+    pub(crate) fn autoplay_restore(&mut self, places: &[(usize, TrackId)]) {
+        self.autoplay_entries = entries_at(&queue_order(&self.queue), places);
+        self.autoplay_gen = Some(self.queue.generation());
     }
 
     /// Where the queue entry `entry` plays and what plays it, when the
@@ -614,6 +663,10 @@ impl Worker {
                 log::info!("autoplay: the world goes on with {} tracks of its next album", next.len());
                 let shuffled = self.shuffle_radio();
                 let added = self.queue.enqueue_path(&next, shuffled);
+                if self.autoplay_gen != Some(generation) {
+                    self.autoplay_entries.clear();
+                    self.autoplay_gen = Some(generation);
+                }
                 self.autoplay_entries.extend(added.iter().map(|e| e.id));
                 self.preload_next();
                 self.publish_player();
@@ -746,6 +799,7 @@ impl Worker {
             .map(|e| e.id)
             .collect();
         log::info!("radio «{}»: the source changed, {} upcoming go", run.title, drop.len());
+        self.sleep_replacing(&drop);
         for id in drop {
             self.queue.remove(id);
         }
@@ -1208,6 +1262,7 @@ impl Worker {
                 run.queued.0 = run.queued.0.saturating_sub(1);
             }
         }
+        self.sleep_replacing(&gone.iter().map(|e| e.id).collect::<Vec<_>>());
         for e in &gone {
             self.queue.remove(e.id);
             self.recs.why.remove(&e.id);
@@ -1397,6 +1452,7 @@ impl Worker {
         for e in &gone {
             run.added.remove(&e.id);
         }
+        self.sleep_replacing(&gone.iter().map(|e| e.id).collect::<Vec<_>>());
         for e in &gone {
             self.queue.remove(e.id);
             self.recs.why.remove(&e.id);
@@ -1723,8 +1779,10 @@ impl Worker {
         if !self.radio_alive() {
             return None;
         }
-        let run = self.recs.radio.run.as_ref()?;
+        let r = &self.recs.radio;
+        let run = r.run.as_ref()?;
         run.queue_gen?;
+        let wave_preset = r.wave_preset.filter(|(id, _)| *id == run.id).and_then(|(_, k)| k);
         Some(RadioSave {
             state: run.state.clone(),
             title: run.title.clone(),
@@ -1733,12 +1791,8 @@ impl Worker {
             streams: run.streams.iter().map(|(t, r)| (*t, r.clone())).collect(),
             pool: run.pool.values().cloned().collect(),
             autoplay: run.autoplay,
-            added_at: queue_order(&self.queue)
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| run.added.contains(&e.id))
-                .map(|(k, e)| (k, e.track))
-                .collect(),
+            added_at: places_of(&queue_order(&self.queue), &run.added),
+            wave_preset,
         })
     }
 
@@ -1746,10 +1800,11 @@ impl Worker {
     pub(crate) fn radio_restore(&mut self, save: RadioSave) {
         // Its own entries again, by their places (a track that moved is
         // the user's now).
-        let order = queue_order(&self.queue);
-        let added: HashSet<u64> = save.added_at.iter().filter_map(|(k, t)| order.get(*k).filter(|e| e.track == *t).map(|e| e.id)).collect();
+        let added = entries_at(&queue_order(&self.queue), &save.added_at);
         let r = &mut self.recs.radio;
         r.seq += 1;
+        // A wave keeps the card it was started from.
+        r.wave_preset = matches!(save.state.seed, RadioSeed::Wave(_)).then_some((r.seq, save.wave_preset));
         log::info!("radio «{}» goes on", save.title);
         self.streaming.learn(&save.pool);
         r.run = Some(RadioRun {
@@ -1785,6 +1840,50 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(id: u64) -> Entry {
+        Entry { id, track: TrackId::new() }
+    }
+
+    /// What autoplay and a radio added comes back by its places after a
+    /// restart (new entry ids); a place that holds another track now does
+    /// not.
+    #[test]
+    fn added_entries_come_back_by_their_places() {
+        let before: Vec<Entry> = (1..=5).map(entry).collect();
+        let places = places_of(&before, &HashSet::from([2, 4, 5]));
+        assert_eq!(places, vec![(1, before[1].track), (3, before[3].track), (4, before[4].track)]);
+        // The next run: the same tracks under new ids, the last one moved.
+        let mut after: Vec<Entry> = before.iter().map(|e| Entry { id: e.id + 100, track: e.track }).collect();
+        after.swap(3, 4);
+        assert_eq!(entries_at(&after, &places), HashSet::from([102]));
+        // An older session (no places): nothing.
+        assert!(entries_at(&after, &[]).is_empty());
+    }
+
+    /// A wave's card is saved with it, and a session from before it was
+    /// saved reads as the plain wave.
+    #[test]
+    fn a_wave_keeps_its_card_in_the_session() {
+        let save = RadioSave {
+            state: Engine::new(RadioSeed::Wave(nikgob_recs::wave::WaveSeed::plain(0.25))),
+            title: "Моя волна".into(),
+            context: EventContext::HomeSection,
+            seed: 1,
+            streams: Vec::new(),
+            pool: Vec::new(),
+            autoplay: false,
+            added_at: Vec::new(),
+            wave_preset: Some(v::MixKey::Calm),
+        };
+        let json = serde_json::to_value(&save).unwrap();
+        let back: RadioSave = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.wave_preset, Some(v::MixKey::Calm));
+        let mut old = json;
+        old.as_object_mut().unwrap().remove("wave_preset");
+        let back: RadioSave = serde_json::from_value(old).unwrap();
+        assert_eq!(back.wave_preset, None);
+    }
 
     #[test]
     fn contexts_read_as_phrases() {

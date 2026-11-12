@@ -34,6 +34,10 @@ pub(crate) struct Session {
     /// What each entry of a playlist's queue is to «✦ С дополнением».
     #[serde(default)]
     pub plus: Option<crate::recs::PlusSave>,
+    /// The places (play order) and tracks of the entries «Автовоспроизведение»
+    /// added to continue an album's world (its radio's are the radio's).
+    #[serde(default)]
+    pub autoplay_at: Vec<(usize, nikgob_core::model::TrackId)>,
 }
 
 impl Session {
@@ -83,6 +87,7 @@ impl Worker {
         }
         self.queue.restore(&saved.queue);
         self.restored_page = saved.page.map(|p| (self.queue.generation(), p));
+        self.autoplay_restore(&saved.autoplay_at);
         if let Some(radio) = saved.radio {
             self.radio_restore(radio);
         }
@@ -114,10 +119,12 @@ impl Worker {
         let Some(path) = self.session_path.clone() else { return };
         let radio = self.radio_save();
         let plus = self.plus_save();
+        let autoplay_at = self.autoplay_save();
         let page = self.context_page_id().filter(|id| crate::context_page(id).is_some()).map(str::to_owned);
         let session = Session {
             radio,
             plus,
+            autoplay_at,
             page,
             volume: Some(self.volume),
             muted: self.muted,
@@ -158,5 +165,17 @@ mod tests {
         assert_eq!(Session::load(&path), session(0.25));
         std::fs::remove_file(&path).unwrap();
         assert_eq!(Session::load(&path), session(0.25));
+    }
+
+    /// What autoplay added to continue an album's world is kept by its
+    /// places; a file from before it was kept reads as none.
+    #[test]
+    fn autoplay_places_are_kept_and_old_files_read() {
+        let track = nikgob_core::model::TrackId::new();
+        let s = Session { autoplay_at: vec![(3, track)], ..session(0.5) };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Session>(&json).unwrap(), s);
+        let old: Session = serde_json::from_str(r#"{"volume":0.5,"muted":false}"#).unwrap();
+        assert!(old.autoplay_at.is_empty());
     }
 }

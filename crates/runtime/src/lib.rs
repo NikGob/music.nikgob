@@ -604,8 +604,10 @@ struct Worker {
     /// How the playing entry is heard so far (its end's attention and
     /// volume).
     heard: Heard,
-    /// Entries «Автовоспроизведение» added to continue an album's world.
+    /// Entries «Автовоспроизведение» added to continue an album's world…
     autoplay_entries: std::collections::HashSet<u64>,
+    /// …in the queue of this generation (saved with the queue).
+    autoplay_gen: Option<u64>,
     prefs_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     exported_rev: u64,
@@ -813,6 +815,7 @@ impl Worker {
             ended: true,
             heard: Heard::default(),
             autoplay_entries: Default::default(),
+            autoplay_gen: None,
             prefs_path: config.prefs_path,
             settings_path: config.settings_path.clone(),
             exported_rev: 0,
@@ -1282,6 +1285,7 @@ impl Worker {
             }
             Command::RemoveFromQueue(entry) => {
                 let track = self.queue.upcoming().iter().find(|e| e.id == entry).map(|e| e.track);
+                self.sleep_removing(entry);
                 self.queue.remove(entry);
                 if let Some(t) = track {
                     self.radio_removed(entry, t);
@@ -2280,7 +2284,7 @@ impl Worker {
         let generation = self.queue.generation();
         let new_queue = self.origin_gen != Some(generation);
         self.origin_gen = Some(generation);
-        if new_queue {
+        if new_queue && self.autoplay_gen != Some(generation) {
             self.autoplay_entries.clear();
         }
         if let Some(o) = self.next_origin.take() {
@@ -2289,7 +2293,7 @@ impl Worker {
         if let Some(o) = self.radio_origin(e.id) {
             return o;
         }
-        if self.autoplay_entries.contains(&e.id) {
+        if self.autoplay_owns(e.id) {
             return EventOrigin::Autoplay;
         }
         if new_queue { EventOrigin::Manual } else { EventOrigin::Queue }

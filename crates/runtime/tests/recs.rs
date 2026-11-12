@@ -1416,3 +1416,91 @@ fn autoplay_of_a_lone_stream_before_the_first_build_keeps_to_its_artist() {
     let of_style = seen.iter().take(10).filter(|t| t.starts_with(&format!("Artist {style}-"))).count();
     assert!(of_style >= 8, "{seen:?}");
 }
+
+/// The wave is settled: three ahead, no picks on their way.
+fn wave_settled(st: &ViewState) -> bool {
+    st.queue.radio.as_ref().is_some_and(|r| !r.extending && r.wave.is_some()) && st.queue.next.len() == 3
+}
+
+/// Ends the playing item where the sleep timer stops: it waits paused and
+/// nothing else starts.
+fn ends_with_the_timer(s: &Started) {
+    let (id, n) = {
+        let asked = s.asked.lock().unwrap();
+        (asked.last().unwrap().id, asked.len())
+    };
+    s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
+    wait_for(&s.rt, "the timer to end", |st| st.player.sleep.is_none());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(s.asked.lock().unwrap().len(), n, "nothing after the boundary started");
+    assert_eq!(s.rt.state().player.status, nikgob_view::Status::Paused);
+}
+
+/// «До конца очереди» in «Моя волна»: «↻ Другой вайб» replaces the
+/// picks the timer waited for, and the boundary stays as many tracks away
+/// (the new pick at its place), never the queue's new end.
+#[test]
+fn a_new_vibe_keeps_the_sleep_timer_where_it_was() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_until("the wave plays", || !s.asked.lock().unwrap().is_empty());
+    wait_for(&s.rt, "three ahead", wave_settled);
+    // The third ahead is the end.
+    s.rt.send(Command::SleepTimer(nikgob_view::SleepChoice::ContextEnd));
+    wait_for(&s.rt, "the timer", |st| st.player.sleep.is_some());
+    // One on: two to the end, the buffer topped up behind them.
+    end_current(&s);
+    wait_for(&s.rt, "topped up", wave_settled);
+    let entries = |st: &ViewState| st.queue.next.iter().map(|e| e.entry).collect::<Vec<u64>>();
+    let st = s.rt.state();
+    let (current, before) = (st.queue.current_entry, entries(&st));
+    drop(st);
+    s.rt.send(Command::OtherVibe);
+    wait_for(&s.rt, "a new tail", |st| st.queue.current_entry == current && wave_settled(st) && !entries(st).iter().any(|e| before.contains(e)));
+    // The timer's poll (once a second) has seen the new tail.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(s.rt.state().player.sleep.is_some());
+    end_current(&s);
+    end_current(&s);
+    // The second of the new tail is the end.
+    ends_with_the_timer(&s);
+}
+
+/// «До конца альбома» on an album's last track once autoplay has queued
+/// its radio's picks: the album's end is the boundary, not the radio's.
+#[test]
+fn the_album_timer_ends_with_the_album_not_with_autoplay() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayTracks { tracks: vec![l.tracks[0], l.tracks[1]], start: 0, context: "Альбом".into() });
+    wait_until("the first plays", || !s.asked.lock().unwrap().is_empty());
+    end_current(&s);
+    wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && st.queue.next.len() == 3);
+    s.rt.send(Command::SleepTimer(nikgob_view::SleepChoice::ContextEnd));
+    // Nothing after the playing track counts.
+    wait_for(&s.rt, "the timer", |st| st.player.sleep.as_ref().is_some_and(|t| t.after_current == Some(Duration::ZERO)));
+    assert_eq!(s.rt.state().player.current.as_ref().map(|t| t.id), Some(l.tracks[1]));
+    ends_with_the_timer(&s);
+}
+
+/// A wave started from a card of «Миксы для тебя» comes back after a
+/// restart as that card's, not as the plain «Моя волна».
+#[test]
+fn a_card_wave_comes_back_as_its_card() {
+    let l = library(3, 6, 5, &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let prefs_path = dir.path().join("prefs.json");
+    let s = start(&l.lib, Vec::new(), Prefs::default(), Some(&prefs_path));
+    wait_for(&s.rt, "the home", home_ready);
+    let card = nikgob_view::MixKey::Everything;
+    let of_card = |st: &ViewState| st.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).is_some_and(|w| w.preset == Some(card));
+    s.rt.send(Command::PlayWave { preset: Some(card) });
+    wait_for(&s.rt, "the card's wave", |st| wave_settled(st) && of_card(st));
+    drop(s);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), Some(&prefs_path));
+    wait_for(&s.rt, "the card's wave back", of_card);
+}

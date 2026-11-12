@@ -98,7 +98,7 @@ impl Worker {
         }
         let everywhere = self.state.read().prefs.dislike_skip_everywhere;
         let picked_by_app = matches!(self.play_context, EventContext::HomeSection | EventContext::Radio)
-            || self.autoplay_entries.contains(&e.id)
+            || self.autoplay_owns(e.id)
             || self.radio_origin(e.id).is_some();
         everywhere || picked_by_app
     }
