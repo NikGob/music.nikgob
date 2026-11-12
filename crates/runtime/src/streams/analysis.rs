@@ -23,10 +23,18 @@
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
 //! - **Previews of new music.** When the library's queue is empty, the
-//!   discoveries found for «Новое для тебя» get a preview analysed: the
-//!   first [`PREVIEW_BYTES`] of the song (about two minutes), at most
+//!   discoveries found for «Новое для тебя» (and the candidates asked for
+//!   by [`Worker::want_preview`]) get a preview analysed: the first
+//!   [`PREVIEW_BYTES`] of the song (about the first minute), its 30 s from
+//!   the 15th second ([`nikgob_recs::preview_windows`]), at most
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
-//!   music is placed by its sound (recs-v2 §11.3).
+//!   music is placed by its sound (recs-v2 §11.3). With «Библиотека и
+//!   превью новых песен» the neural sound model hears the preview too, and
+//!   [`nikgob_recs::VectorIndex::niche_fit`] can tell whether it fits a
+//!   niche before it joins a mix (docs/recommendations.md §5.1.6).
+//! - **The neural sound model** ([`crate::sound_model`]): with «Нейросетевой
+//!   анализ звука» on, the library's stream tracks get its vector from the
+//!   same windows as bliss's.
 //!
 //! Both run on one thread of their own at the lowest priority, paced like the
 //! file job ([`crate::quiet`]: nothing new starts while a game runs); the
@@ -48,13 +56,14 @@ use crossbeam_channel::{Receiver, Sender};
 use nikgob_core::model::{AnalysisSource, SourceId, SourceKind, TrackId};
 use nikgob_core::streaming::{AudioStream, Service, StreamError, StreamService};
 use nikgob_library::{Library, now_ms};
-use nikgob_recs::ANALYZED_WITH;
+use nikgob_recs::{ANALYZED_WITH, EMBEDDED_WITH, SoundModel};
 use nikgob_view as v;
 
 use super::Msg;
 use super::resolve::Lookup;
 use crate::Worker;
-use crate::analysis::{FileError, SoundIndex, analyze_bytes, store_vector};
+use crate::analysis::{FileError, SoundIndex, Want, analyze_bytes, store_embedding, store_vector};
+use crate::sound_model::Effnet;
 use crate::quiet::{self, Pacer, lower_priority};
 use crate::import::Internal;
 
@@ -69,10 +78,14 @@ const BATCH: u32 = 16;
 /// (UTC days since the epoch).
 const DAY_KEY: &str = "stream_analysis.day";
 const DAY_MS: i64 = 86_400_000;
-/// Bytes of a new song's preview (about two minutes of YouTube's Opus).
-const PREVIEW_BYTES: usize = 3 << 20;
+/// Bytes of a new song's preview (about the first minute of YouTube's
+/// Opus, held in memory only).
+const PREVIEW_BYTES: usize = 1 << 20;
 /// Previews of new music analysed a day.
-const PREVIEW_DAILY: u32 = 30;
+const PREVIEW_DAILY: u32 = 60;
+/// Candidates asked for by [`Worker::want_preview`] waiting at most.
+#[allow(dead_code)]
+const WANTED_MAX: usize = 64;
 /// Library cache key of the previews analysed today: `day:count`.
 const PREVIEW_DAY_KEY: &str = "stream_analysis.preview_day";
 
@@ -116,6 +129,8 @@ struct Job {
     video: String,
     origin: Origin,
     youtube: Arc<dyn StreamService>,
+    /// The neural sound model, when it hears this job's audio.
+    model: Option<Arc<Effnet>>,
 }
 
 /// What the background job is waiting for.
@@ -148,6 +163,9 @@ pub(crate) struct StreamAnalysis {
     day: Option<(i64, u32)>,
     /// Today and the previews of new music analysed.
     preview_day: Option<(i64, u32)>,
+    /// Candidates whose preview was asked for ([`Worker::want_preview`]),
+    /// first come first served, before the discoveries.
+    wanted: std::collections::VecDeque<(TrackId, String)>,
     /// New songs whose preview was tried in this run.
     previewed: HashSet<TrackId>,
     /// The progress is counted again on the next tick.
@@ -168,7 +186,7 @@ impl StreamAnalysis {
 /// by [`crate::quiet`] (none of its jobs is one the user waits for).
 fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal>, off: Arc<AtomicBool>) {
     lower_priority();
-    let mut pacer = Pacer::new(&off);
+    let mut pacer = Pacer::heavy(&off, "stream analysis");
     for job in jobs {
         // While a game runs the job waits; switched off, it stops at once.
         pacer.begin();
@@ -210,11 +228,24 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &
         Ok(b) => b,
         Err(o) => return o,
     };
-    match analyze_bytes(bytes, ext, &format!("youtube:{}", job.video), pacer) {
-        Ok(vector) => match store_vector(lib, index, job.track, vector, AnalysisSource::Youtube) {
-            Ok(stored) => Outcome::Stored(stored),
-            Err(e) => Outcome::Transient(format!("storing: {e}")),
-        },
+    let model = job.model.as_deref().filter(|m| m.ready() && !m.resting()).map(|m| m as &dyn SoundModel);
+    let want = Want { bliss: true, model };
+    let preview = job.origin == Origin::Preview;
+    match analyze_bytes(bytes, ext, &format!("youtube:{}", job.video), preview, want, pacer) {
+        Ok(out) => {
+            let Some(Ok(vector)) = out.bliss else { return Outcome::Failed("no vector".into()) };
+            match store_vector(lib, index, job.track, vector, AnalysisSource::Youtube) {
+                Ok(stored) => {
+                    if let Some(e) = &out.embedding
+                        && let Err(err) = store_embedding(lib, index, job.track, e, AnalysisSource::Youtube)
+                    {
+                        log::warn!("stream analysis: storing the sound model's vector of {}: {err}", job.track);
+                    }
+                    Outcome::Stored(stored)
+                }
+                Err(e) => Outcome::Transient(format!("storing: {e}")),
+            }
+        }
         Err(FileError::Stopped) => Outcome::Stopped,
         Err(FileError::Unavailable(e)) => Outcome::Transient(e),
         Err(FileError::Undecodable(e)) => Outcome::Failed(e),
@@ -266,8 +297,12 @@ impl Worker {
         self.state.read().prefs.stream_analysis
     }
 
-    /// Hands a job to the analysis thread (started on the first one).
-    fn analysis_job(&mut self, job: Job) -> bool {
+    /// Hands a job to the analysis thread (started on the first one); the
+    /// neural model goes along where its mode hears this kind of job.
+    fn analysis_job(&mut self, mut job: Job) -> bool {
+        let neural = self.analysis.neural();
+        let hears = if job.origin == Origin::Preview { neural.previews } else { neural.library };
+        job.model = if hears { self.analysis.effnet() } else { None };
         let a = &mut self.streaming.analysis;
         if a.jobs.is_none() {
             let (tx, rx) = crossbeam_channel::unbounded();
@@ -288,13 +323,34 @@ impl Worker {
     }
 
     /// The track has an analysis of the current version (a file's or a
-    /// stream's).
+    /// stream's), and the neural model's vector when the model hears the
+    /// library.
     fn analysed(&self, track: TrackId) -> bool {
-        self.lib
-            .get_analysis(track)
-            .ok()
-            .flatten()
-            .is_some_and(|a| a.analyzed_with == ANALYZED_WITH)
+        let bliss = self.lib.get_analysis(track).ok().flatten().is_some_and(|a| a.analyzed_with == ANALYZED_WITH);
+        let model = self.analysis.effnet().is_some_and(|m| m.ready());
+        bliss && (!(self.analysis.neural().library && model) || self.lib.has_embedding(track, EMBEDDED_WITH).unwrap_or(true))
+    }
+
+    /// Asks for the preview of a new song (`track`, its YouTube Music
+    /// `video`) to be analysed soon, before the discoveries' own: the niche
+    /// expansion's candidates get their sound vector (and, with «Библиотека
+    /// и превью новых песен», the neural model's) so
+    /// [`nikgob_recs::VectorIndex::niche_fit`] can judge them. Previews keep
+    /// to the day's limit; a track analysed already or asked for twice is
+    /// left out, and the queue holds [`WANTED_MAX`] at most (the oldest go).
+    // Called by the niche expansion (r30-world) once it lands.
+    #[allow(dead_code)]
+    pub(crate) fn want_preview(&mut self, track: TrackId, video: String) {
+        let a = &mut self.streaming.analysis;
+        if a.previewed.contains(&track) || a.wanted.iter().any(|(t, _)| *t == track) || self.analysis.index().read().contains(track) {
+            return;
+        }
+        let a = &mut self.streaming.analysis;
+        a.wanted.push_back((track, video));
+        while a.wanted.len() > WANTED_MAX {
+            a.wanted.pop_front();
+        }
+        a.idle_until = None;
     }
 
     /// The playing entry of `track` ended (or was skipped) while it played
@@ -314,6 +370,7 @@ impl Worker {
             video: src.locator,
             origin: Origin::Played,
             youtube,
+            model: None,
         };
         if self.analysis_job(job) {
             self.streaming.analysis.played.insert(track);
@@ -564,7 +621,13 @@ impl Worker {
             return false;
         }
         let tried = self.streaming.analysis.previewed.clone();
-        let Some((track, video)) = self.discovery_preview_next(&tried) else { return false };
+        let wanted = loop {
+            match self.streaming.analysis.wanted.pop_front() {
+                Some((t, _)) if tried.contains(&t) || self.analysis.index().read().contains(t) => continue,
+                other => break other,
+            }
+        };
+        let Some((track, video)) = wanted.or_else(|| self.discovery_preview_next(&tried)) else { return false };
         let Some(youtube) = self.service(Service::Youtube) else { return false };
         log::info!("stream analysis: a preview of new music {track} from YouTube {video}");
         self.streaming.analysis.previewed.insert(track);
@@ -573,6 +636,7 @@ impl Worker {
             video,
             origin: Origin::Preview,
             youtube,
+            model: None,
         };
         if !self.analysis_job(job) {
             return false;
@@ -591,6 +655,7 @@ impl Worker {
             video,
             origin: Origin::Background,
             youtube,
+            model: None,
         };
         if self.analysis_job(job) {
             self.count_download();

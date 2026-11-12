@@ -205,6 +205,10 @@ pub enum SettingId {
     RadioExplore,
     /// «Преимущественно новые песни» in the radio and autoplay.
     RadioUnheard,
+    /// «Нейросетевой анализ звука».
+    SoundNeural,
+    /// «На чём считать анализ звука».
+    SoundDevice,
     /// The share of new music of one kind of radio.
     NewShareBy(v::RadioKind),
     /// «Миксы для тебя» with «С новым».
@@ -469,7 +473,7 @@ impl SettingId {
             | ListShuffle(_) | ShuffleRadio
             | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
             | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | Marks | AlbumOpens | AlbumVersions
-            | PartialAlbumsOnHome => TAB_MUSIC,
+            | PartialAlbumsOnHome | SoundNeural | SoundDevice => TAB_MUSIC,
             LyricsStyle | LyricsUnit | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsScale | LyricsLead
             | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade | LyricsGap
             | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | WaveFallback | LyricsReturn | LyricsGenius
@@ -535,7 +539,7 @@ impl SettingId {
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile => Level::Dev,
             KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
-            | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere
+            | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere | SoundDevice
             // Songs of albums: how an album only some songs of which are the
             // user's shows.
             | AlbumOpens | AlbumVersions | PartialAlbumsOnHome
@@ -706,6 +710,8 @@ impl SettingId {
             RadioNoRepeat => "Не повторять сыгранное",
             RadioExplore => "Случайные песни",
             RadioUnheard => "Неслышанные песни",
+            SoundNeural => "Нейросетевой анализ звука",
+            SoundDevice => "На чём считать анализ звука",
             NewShareBy(v::RadioKind::Track) => "Радио по треку",
             NewShareBy(v::RadioKind::Artist) => "Радио по исполнителю",
             NewShareBy(v::RadioKind::Mix) => "Бесконечные миксы",
@@ -983,6 +989,8 @@ impl SettingId {
             RadioNoRepeat => "Радио и автовоспроизведение не ставят то, что уже играло за это время или в этом сеансе, пока есть что-то ещё.",
             RadioExplore => "Как часто радио и автовоспроизведение ставят новую песню наугад, не зная, похожа ли она по звуку на то, что играет. Похожее новое это не ограничивает.",
             RadioUnheard => "Сколько в радио и автовоспроизведении песен, которых ты ещё не слышал: из твоей музыки и новых. Когда таких не остаётся, играет как обычно.",
+            SoundNeural => "Нейросеть слушает песни и различает жанр, стиль и вокал — то, чего не слышит обычный анализ, поэтому похожее подбирается точнее. Модель (18 МБ и основа для моделей, если её ещё нет) скачивается один раз, когда выберешь режим. Работает в фоне по очереди с другими тяжёлыми задачами, ждёт, пока идёт игра, и выгружается из памяти, когда не нужна.",
+            SoundDevice => "Где нейросеть считает анализ звука. Видеокарта справляется быстрее; на процессоре анализ идёт в один тихий поток и не занимает видеокарту.",
             MixClickOpensList => "Нажатие на карточку микса открывает его страницу с песнями, а играет он по кнопке ▶. Выключи — микс будет играть сразу по нажатию на карточку, а страница откроется из ⋮ → «Список треков».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка в конце ряда кнопок на экране трека (♡ — в его начале). «Не нравится» остаётся и в меню ⋮ любого трека.",
@@ -1220,6 +1228,15 @@ impl SettingId {
                 c!("Иногда", "Примерно одна песня из пяти."),
                 c!("Часто", "Примерно три песни из десяти, если в «Новом в радио и миксах» выбрано «Побольше»."),
             ],
+            Self::SoundNeural => &[
+                c!("Выключен", "Только базовый анализ: ничего не скачивается."),
+                c!("Только моя библиотека", "Тихо слушает в фоне твои песни."),
+                c!("Библиотека и превью новых песен", "Ещё и слушает превью новых песен, прежде чем они попадут в миксы. Рекомендуется."),
+            ],
+            Self::SoundDevice => &[
+                c!("Автоматически", "На видеокарте, если она подходит, иначе на процессоре."),
+                c!("Только на процессоре", "В один тихий поток; видеокарта не занята."),
+            ],
             Self::RadioUnheard => &[
                 c!("Как обычно", "Слышанное и неслышанное — по тому, что подходит лучше."),
                 c!("Больше новых", "Не меньше половины песен — те, что ты ещё не слышал."),
@@ -1341,6 +1358,8 @@ impl SettingId {
             Self::RadioNoRepeat => NO_REPEAT.iter().position(|h| *h >= p.radio_no_repeat_hours).unwrap_or(NO_REPEAT.len() - 1),
             Self::RadioExplore => v::RadioExplore::ALL.iter().position(|e| *e == p.radio_explore).unwrap_or(1),
             Self::RadioUnheard => v::RadioUnheard::ALL.iter().position(|u| *u == p.radio_unheard).unwrap_or(0),
+            Self::SoundNeural => v::SoundNeural::ALL.iter().position(|m| *m == p.sound_neural_or(false)).unwrap_or(0),
+            Self::SoundDevice => usize::from(p.sound_cpu_only),
             Self::ListShuffle(kind) => v::ListShuffle::ALL.iter().position(|r| *r == p.list_shuffle.of(kind)).unwrap_or(2),
             _ => 0,
         }
@@ -1436,6 +1455,8 @@ impl SettingId {
             Self::RadioNoRepeat => p.radio_no_repeat_hours = NO_REPEAT[i.min(NO_REPEAT.len() - 1)],
             Self::RadioExplore => p.radio_explore = v::RadioExplore::ALL[i.min(v::RadioExplore::ALL.len() - 1)],
             Self::RadioUnheard => p.radio_unheard = v::RadioUnheard::ALL[i.min(v::RadioUnheard::ALL.len() - 1)],
+            Self::SoundNeural => p.sound_neural = Some(v::SoundNeural::ALL[i.min(v::SoundNeural::ALL.len() - 1)]),
+            Self::SoundDevice => p.sound_cpu_only = i == 1,
             Self::ListShuffle(kind) => p.list_shuffle.set(kind, v::ListShuffle::ALL[i.min(v::ListShuffle::ALL.len() - 1)]),
             _ => {}
         }
@@ -3024,7 +3045,7 @@ mod tests {
             S::BgShapes, S::BgColors, S::LyricsStyle, S::LyricsUnit, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
-            S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
+            S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::SoundNeural, S::SoundDevice, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
             S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto, S::FakeFlac, S::ListShuffle(v::ListKind::Mix),
             S::ListShuffle(v::ListKind::Album), S::AlbumOpens,
         ] {

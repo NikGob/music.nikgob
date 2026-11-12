@@ -1850,6 +1850,14 @@ pub struct Prefs {
     /// «Анализ звука стримов»: liked and playlist tracks without a file are
     /// analysed from YouTube Music in the background.
     pub stream_analysis: bool,
+    /// «Нейросетевой анализ звука» as the user picked it; `None` until
+    /// then, which means [`SoundNeural::LibraryAndPreviews`] when the model
+    /// is already downloaded and [`SoundNeural::Off`] when it is not (no
+    /// download without a choice): [`Self::sound_neural_or`].
+    pub sound_neural: Option<SoundNeural>,
+    /// «На чём считать анализ звука» → «Только на процессоре»: the neural
+    /// sound model runs on one quiet CPU thread, never on the GPU.
+    pub sound_cpu_only: bool,
     /// «Автовоспроизведение»: when the queue's last track plays, it goes on
     /// with similar tracks by itself (a radio of that track, from where
     /// [`Self::mixes_downloaded_only`] and [`Self::radio_new_share`] say).
@@ -2447,6 +2455,8 @@ pub enum PrefPatch {
     RadioNoRepeat(u8),
     RadioExplore(RadioExplore),
     RadioUnheard(RadioUnheard),
+    SoundNeural(SoundNeural),
+    SoundCpuOnly(bool),
     /// «Настройки текста…» was picked from the lyrics control's menu.
     LyricsSettingsSeen,
     /// A preset of an area by its number ([`presets::Area::apply`]: the
@@ -2532,6 +2542,8 @@ impl PrefPatch {
             Self::RadioNoRepeat(h) => p.radio_no_repeat_hours = *h,
             Self::RadioExplore(e) => p.radio_explore = *e,
             Self::RadioUnheard(u) => p.radio_unheard = *u,
+            Self::SoundNeural(m) => p.sound_neural = Some(*m),
+            Self::SoundCpuOnly(on) => p.sound_cpu_only = *on,
             Self::Preset(area, n) => area.apply(p, *n),
             Self::PresetCustom(area) => {
                 if let Some(back) = area.custom(p) {
@@ -2610,6 +2622,57 @@ impl RadioExplore {
             Self::Often => 0.3,
         }
     }
+}
+
+/// «Нейросетевой анализ звука» (docs/recommendations.md §5.2): what the
+/// neural sound model hears.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SoundNeural {
+    /// «Выключен»: bliss alone, nothing downloaded, nothing loaded.
+    #[default]
+    Off,
+    /// «Только моя библиотека»: the library's tracks in the background.
+    Library,
+    /// «Библиотека и превью новых песен»: and the previews of new music
+    /// before it joins the mixes.
+    LibraryAndPreviews,
+}
+
+impl SoundNeural {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Library, Self::LibraryAndPreviews];
+
+    /// The library's tracks get the model's vector.
+    pub const fn library(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Previews of new music get it too.
+    pub const fn previews(self) -> bool {
+        matches!(self, Self::LibraryAndPreviews)
+    }
+}
+
+impl Prefs {
+    /// [`Self::sound_neural`], or what it is before the user picks it:
+    /// the full mode when the model is on disk already (`model_ready`),
+    /// off otherwise.
+    pub fn sound_neural_or(&self, model_ready: bool) -> SoundNeural {
+        self.sound_neural.unwrap_or(if model_ready { SoundNeural::LibraryAndPreviews } else { SoundNeural::Off })
+    }
+}
+
+/// The neural sound model as the settings show it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SoundModelView {
+    /// Its files are on disk.
+    pub ready: bool,
+    /// Its download, in percent, while one runs.
+    pub downloading: Option<u8>,
+    /// Its download or load failed lately.
+    pub failed: bool,
+    /// Library files with the model's vector, and files in all.
+    pub done: u32,
+    pub total: u32,
 }
 
 /// «Преимущественно новые песни»: how much of a radio of a track or an
@@ -2858,6 +2921,8 @@ pub struct ViewState {
     pub find_song: Option<FindSongView>,
     /// How far the background sound analysis is.
     pub analysis: AnalysisProgress,
+    /// The neural sound model: its files and how far it is.
+    pub sound_model: SoundModelView,
     /// The names of the tracks with a speed of their own
     /// ([`TrackSpeeds::chosen`]), for «Не нравится и скорость».
     pub speed_names: std::sync::Arc<std::collections::HashMap<TrackId, DislikedTrack>>,
@@ -3651,6 +3716,8 @@ impl Default for Prefs {
             home_hidden_worlds: Vec::new(),
             home_hidden_mixes: Vec::new(),
             stream_analysis: true,
+            sound_neural: None,
+            sound_cpu_only: false,
             autoplay: true,
             autoplay_continue_world: true,
             radio_new_share_by: std::collections::BTreeMap::new(),

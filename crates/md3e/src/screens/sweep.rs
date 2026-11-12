@@ -208,7 +208,7 @@ pub const ALL: &[SettingId] = {
         OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, RadioNoRepeat,
         ListShuffle(L::Mix), ListShuffle(L::OwnPlaylist), ListShuffle(L::Album), ListShuffle(L::ReadyPlaylist), ShuffleRadio,
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
-        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, AlbumOpens,
+        MixesWithNew, RadioExplore, RadioUnheard, GraphUse, SoundNeural, SoundDevice, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, AlbumOpens,
         AlbumVersions, PartialAlbumsOnHome, RadioSource,
         // Тексты.
         Preset(Area::Lyrics), LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsLift, LyricsScale, LyricsLead,
@@ -291,6 +291,8 @@ fn spec(id: SettingId) -> Spec {
         S::BgHue => Spec::Choice(Segments),
         S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
         | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac | S::ListShuffle(_) => Spec::Choice(Menu),
+        S::SoundNeural => Spec::Fixed(Menu, "a mode downloads the neural sound model; the sweep leaves it as it is"),
+        S::SoundDevice => Spec::Fixed(Menu, "open only with the neural sound analysis on, which downloads its model"),
         S::RadioSource => Spec::Fixed(Segments, "chosen in the queue's radio header; no row in Settings"),
         // A preset: its presets as choices (no «Свои»: it only takes back).
         S::Preset(a) if a.names().is_empty() => Spec::Fixed(Segments, "no presets yet (TODO 36); the row is not drawn"),
@@ -912,7 +914,7 @@ mod tests {
             | S::AlbumOpens | S::AlbumVersions | S::PartialAlbumsOnHome
 
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew
-            | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
+            | S::RadioExplore | S::RadioUnheard | S::GraphUse | S::SoundNeural | S::SoundDevice | S::DislikeButton | S::DislikeSkips | S::DislikeSkipEverywhere
             | S::RadioSource | S::LyricsStyle | S::LyricsUnit | S::LyricsSmooth
             | S::LightSpeed | S::WaveJump | S::JumpSpeed | S::LyricsLift | S::LyricsScale | S::LyricsLead | S::LyricsDim | S::LyricsCascade
             | S::LyricsGlow | S::LyricsSoftEdges | S::LyricsSoftDepth | S::LyricsSoftStrength | S::LyricsSoftFade | S::LyricsGap

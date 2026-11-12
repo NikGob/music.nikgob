@@ -608,6 +608,14 @@ fn recs_patches(before: &Prefs, p: &Prefs) -> Vec<PrefPatch> {
     if p.radio_unheard != before.radio_unheard {
         out.push(PrefPatch::RadioUnheard(p.radio_unheard));
     }
+    if p.sound_neural != before.sound_neural
+        && let Some(m) = p.sound_neural
+    {
+        out.push(PrefPatch::SoundNeural(m));
+    }
+    if p.sound_cpu_only != before.sound_cpu_only {
+        out.push(PrefPatch::SoundCpuOnly(p.sound_cpu_only));
+    }
     out
 }
 

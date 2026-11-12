@@ -1,24 +1,35 @@
-//! Background sound analysis of the library's files (docs/stage4.md §2).
+//! Background sound analysis of the library's files (docs/stage4.md §2,
+//! docs/recommendations.md §5).
 //!
 //! One thread at the lowest priority, paced by [`crate::quiet`] (it rests
-//! five times what it worked, and waits while a game runs), takes batches
-//! of [`Library::tracks_needing_analysis`]: tracks with a file
-//! and no current analysis, an analysis of an older bliss, or one of a
-//! stream. Each file is decoded with the importer's decoder straight into
-//! [`PcmAnalyzer`] (only its first 8 minutes, as 22 050 Hz mono), and the
-//! vector goes to the library and into the in-memory [`SoundIndex`] the
-//! recommendations query. A file that cannot be decoded is marked and not
-//! tried again until it changes; one that cannot be opened (a drive that is
-//! not there) is only skipped until the next start. Imports wake the job up
-//! ([`FileAnalysis::kick`]); without work it looks again now and then. The
-//! worker thread never waits for any of it: progress comes back as
-//! [`Msg::Progress`].
+//! five times what it worked, waits while a game runs, and takes the turn
+//! of heavy jobs so it never runs beside the lyrics alignment's pass or
+//! the quality check), takes batches of [`Library::tracks_needing_analysis`]:
+//! tracks with a file and no current analysis, an analysis of an older
+//! bliss, or one of a stream. Each file is decoded with the importer's
+//! decoder only in its three windows ([`nikgob_recs::windows`]: 15 s at
+//! 20, 45 and 70 % of its length, seeking to each) straight into a
+//! [`WindowedAnalyzer`], and the vector goes to the library and into the
+//! in-memory [`SoundIndex`] the recommendations query. A file that cannot be
+//! decoded is marked and not tried again until it changes; one that cannot
+//! be opened (a drive that is not there) is only skipped until the next
+//! start. Imports wake the job up ([`FileAnalysis::kick`]); without work it
+//! looks again now and then. The worker thread never waits for any of it:
+//! progress comes back as [`Msg::Progress`].
+//!
+//! With «Нейросетевой анализ звука» on ([`Neural`]), the same windows also
+//! go through the neural sound model ([`crate::sound_model::Effnet`]) and
+//! its compact vector is kept beside bliss's; the files analysed before get
+//! theirs from a queue of their own ([`Library::tracks_needing_embedding`])
+//! once bliss's is empty. The model is downloaded here when a mode needs it
+//! and dropped from memory [`crate::sound_model::KEEP_LOADED`] after the
+//! last window.
 //!
 //! bliss computes its descriptors on a few scoped threads of its own, which
 //! run at normal priority for the second or so the features of one track
-//! take; decoding and resampling, the bulk of the time, run on ours. Only
-//! one such feature pass runs at a time (see `nikgob_recs`), and the rest
-//! after each track counts it too.
+//! take; decoding and resampling run on ours. Only one such feature pass
+//! runs at a time (see `nikgob_recs`), and the rest after each track counts
+//! it too.
 
 use std::collections::{HashSet, VecDeque};
 use std::ops::ControlFlow;
@@ -30,15 +41,18 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 use nikgob_core::model::{Analysis, AnalysisSource, TrackId};
 use nikgob_import::ImportError;
-use nikgob_import::decode::{PcmSpec, decode_bytes, decode_file};
+use nikgob_import::decode::{PcmSpec, Span, decode_bytes_windows, decode_file_windows};
 use nikgob_library::{AnalysisTodo, Library};
-use nikgob_recs::{ANALYZED_WITH, AnalysisError, PcmAnalyzer, Vector, VectorIndex};
+use nikgob_recs::{
+    ANALYZED_WITH, Analysed, AnalysisError, Compact, EMBEDDED_WITH, SoundModel, Vector, VectorIndex, Window, WindowedAnalyzer,
+};
 use nikgob_view as v;
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::Worker;
 use crate::import::Internal;
 use crate::quiet::{Pacer, lower_priority};
+use crate::sound_model::{Effnet, ModelState};
 
 /// Every analysed track's vector, by track (files and streams alike).
 pub(crate) type SoundIndex = Arc<RwLock<VectorIndex<TrackId>>>;
@@ -53,6 +67,37 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 /// From the analysis thread to the worker.
 pub(crate) enum Msg {
     Progress(v::AnalysisProgress),
+    SoundModel(v::SoundModelView),
+}
+
+/// What the neural sound model hears now: «Нейросетевой анализ звука» as
+/// the prefs say ([`v::Prefs::sound_neural_or`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Neural {
+    /// The library's tracks.
+    pub(crate) library: bool,
+    /// The previews of new music.
+    pub(crate) previews: bool,
+}
+
+impl Neural {
+    pub(crate) fn of(mode: v::SoundNeural) -> Self {
+        Self { library: mode.library(), previews: mode.previews() }
+    }
+}
+
+/// What a pass over a track computes.
+#[derive(Clone, Copy)]
+pub(crate) struct Want<'m> {
+    /// bliss's vector.
+    pub(crate) bliss: bool,
+    /// The neural sound model's.
+    pub(crate) model: Option<&'m dyn SoundModel>,
+}
+
+impl Want<'_> {
+    /// bliss alone.
+    pub(crate) const BLISS: Want<'static> = Want { bliss: true, model: None };
 }
 
 /// Why a file has no vector.
@@ -68,33 +113,47 @@ pub(crate) enum FileError {
     Undecodable(String),
 }
 
-/// Decodes `path` and analyses its first 8 minutes, at `pacer`'s pace (its
+/// Decodes the windows of `path` and analyses them, at `pacer`'s pace (its
 /// stop aborts the decode).
-pub(crate) fn analyze_file(path: &Path, pacer: &mut Pacer<'_>) -> Result<Vector, FileError> {
-    analyze_decoded(|sink| decode_file(path, sink), pacer)
+pub(crate) fn analyze_file(path: &Path, want: Want<'_>, pacer: &mut Pacer<'_>) -> Result<Analysed, FileError> {
+    analyze_decoded(|plan, sink| decode_file_windows(path, plan, sink), nikgob_recs::windows, want, pacer)
 }
 
 /// [`analyze_file`] for encoded audio in memory (a stream's; `ext` is its
-/// container as a file extension, `name` names it in the log).
-pub(crate) fn analyze_bytes(bytes: Vec<u8>, ext: &str, name: &str, pacer: &mut Pacer<'_>) -> Result<Vector, FileError> {
-    analyze_decoded(|sink| decode_bytes(bytes, ext, name, sink), pacer)
+/// container as a file extension, `name` names it in the log); a
+/// `preview` (the head of a stream) is analysed in its one window
+/// ([`nikgob_recs::preview_windows`]).
+pub(crate) fn analyze_bytes(
+    bytes: Vec<u8>,
+    ext: &str,
+    name: &str,
+    preview: bool,
+    want: Want<'_>,
+    pacer: &mut Pacer<'_>,
+) -> Result<Analysed, FileError> {
+    let plan = if preview { nikgob_recs::preview_windows } else { nikgob_recs::windows };
+    analyze_decoded(|p, sink| decode_bytes_windows(bytes, ext, name, p, sink), plan, want, pacer)
 }
 
-type Sink<'a> = &'a mut dyn FnMut(&[f32], PcmSpec) -> ControlFlow<()>;
+type Plan<'a> = &'a mut dyn FnMut(Option<f64>) -> Vec<Span>;
+type Sink<'a> = &'a mut dyn FnMut(usize, &[f32], PcmSpec) -> ControlFlow<()>;
 
 fn analyze_decoded(
-    decode: impl FnOnce(Sink<'_>) -> Result<PcmSpec, ImportError>,
+    decode: impl FnOnce(Plan<'_>, Sink<'_>) -> Result<PcmSpec, ImportError>,
+    windows: fn(Option<f64>) -> Vec<Window>,
+    want: Want<'_>,
     pacer: &mut Pacer<'_>,
-) -> Result<Vector, FileError> {
-    let mut analyzer: Option<PcmAnalyzer> = None;
+) -> Result<Analysed, FileError> {
+    let mut analyzer: Option<WindowedAnalyzer<'_>> = None;
     let mut format: Option<AnalysisError> = None;
-    let mut sink = |chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
-        if !pacer.step() {
+    let mut plan = |d: Option<f64>| -> Vec<Span> { windows(d).into_iter().map(|w| Span { start: w.start, len: w.len }).collect() };
+    let mut sink = |window: usize, chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
+        if format.is_some() || !pacer.step() {
             return ControlFlow::Break(());
         }
         let a = match &mut analyzer {
             Some(a) => a,
-            None => match PcmAnalyzer::new(spec.sample_rate, spec.channels) {
+            None => match WindowedAnalyzer::new(spec.sample_rate, spec.channels, want.bliss, want.model) {
                 Ok(a) => analyzer.insert(a),
                 Err(e) => {
                     format = Some(e);
@@ -102,9 +161,9 @@ fn analyze_decoded(
                 }
             },
         };
-        a.push(chunk)
+        a.push(window, chunk)
     };
-    let decoded = decode(&mut sink);
+    let decoded = decode(&mut plan, &mut sink);
     if pacer.stopped() {
         return Err(FileError::Stopped);
     }
@@ -117,7 +176,11 @@ fn analyze_decoded(
         return Err(FileError::Undecodable(e.to_string()));
     }
     let analyzer = analyzer.ok_or_else(|| FileError::Undecodable("no audio".into()))?;
-    analyzer.finish().map_err(|e| FileError::Undecodable(e.to_string()))
+    let out = analyzer.finish().map_err(|e| FileError::Undecodable(e.to_string()))?;
+    if let Some(Err(e)) = &out.bliss {
+        return Err(FileError::Undecodable(e.to_string()));
+    }
+    Ok(out)
 }
 
 /// Stores a track's vector in the library and, if it was stored (a
@@ -141,6 +204,33 @@ pub(crate) fn store_vector(
     Ok(stored)
 }
 
+/// Stores the neural model's vector of a track (after its bliss vector:
+/// the index keeps it only beside one). A track the model cannot hear (too
+/// short) is marked so; a failure of the model itself stores nothing
+/// (`Ok(None)`: tried again later).
+pub(crate) fn store_embedding(
+    lib: &Library,
+    index: &SoundIndex,
+    track: TrackId,
+    embedding: &Result<Vec<f32>, AnalysisError>,
+    source: AnalysisSource,
+) -> nikgob_library::Result<Option<bool>> {
+    match embedding {
+        Ok(raw) => match Compact::of_raw(raw) {
+            Some(c) => {
+                let stored = lib.put_embedding(track, Some(&c.to_bytes()), EMBEDDED_WITH, source)?;
+                if stored {
+                    index.write().set_embedding(track, c);
+                }
+                Ok(Some(stored))
+            }
+            None => Ok(Some(lib.put_embedding(track, None, EMBEDDED_WITH, source)?)),
+        },
+        Err(AnalysisError::Model(_)) => Ok(None),
+        Err(_) => Ok(Some(lib.put_embedding(track, None, EMBEDDED_WITH, source)?)),
+    }
+}
+
 /// Fills `index` with every current vector of the library.
 pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
     let rows = match lib.analysis_vectors(ANALYZED_WITH) {
@@ -162,15 +252,46 @@ pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
     log::info!("analysis: {} vectors in memory", idx.len());
 }
 
+/// Puts every stored vector of the neural model into `index` (beside the
+/// bliss vectors already there).
+pub(crate) fn load_embeddings(lib: &Library, index: &SoundIndex) {
+    let rows = match lib.embedding_vectors(EMBEDDED_WITH) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::warn!("analysis: loading the sound model's vectors: {e}");
+            return;
+        }
+    };
+    let mut idx = index.write();
+    let mut n = 0;
+    for (track, bytes) in rows {
+        if let Some(c) = Compact::from_bytes(&bytes)
+            && idx.set_embedding(track, c)
+        {
+            n += 1;
+        }
+    }
+    log::info!("analysis: {n} vectors of the sound model in memory");
+}
+
 /// Absolute path of a source locator (relative ones are under the library).
 fn file_path(root: &Path, locator: &str) -> PathBuf {
     let p = Path::new(locator);
     if p.is_absolute() { p.to_owned() } else { root.join(p) }
 }
 
+/// What a queued track needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Its bliss vector (and the model's, when it is on).
+    Bliss,
+    /// Only the neural model's vector (bliss's is current).
+    Embed,
+}
+
 #[derive(Default)]
 struct Queue {
-    todo: VecDeque<AnalysisTodo>,
+    todo: VecDeque<(AnalysisTodo, Kind)>,
     /// Being analysed right now (by either thread).
     busy: HashSet<TrackId>,
     /// Not tried again in this run (could not be opened, or not stored).
@@ -189,15 +310,50 @@ struct Shared {
     wake: Condvar,
     /// The progress last sent, and when.
     sent: Mutex<(Option<v::AnalysisProgress>, Instant)>,
+    /// The model's state last sent.
+    model_sent: Mutex<Option<v::SoundModelView>>,
     /// Without work, the library is looked at again this often.
     idle: Duration,
     /// Music is playing (said in the log).
     playing: AtomicBool,
+    /// The neural model (none without a models folder: tests).
+    effnet: Option<Arc<Effnet>>,
+    neural: Mutex<Neural>,
+    /// The model's vectors are in the index.
+    embeddings_loaded: AtomicBool,
 }
 
 impl Shared {
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    fn neural(&self) -> Neural {
+        *self.neural.lock()
+    }
+
+    /// The model, when the library's tracks get its vector and it can run.
+    fn model(&self) -> Option<&Effnet> {
+        let e = self.effnet.as_deref()?;
+        (self.neural().library && e.ready() && !e.resting()).then_some(e)
+    }
+
+    /// The index holds the model's vectors exactly while the mode wants
+    /// them (loaded here, off the worker's loop).
+    fn sync_embeddings(&self) {
+        let want = self.neural().library && self.effnet.is_some();
+        if want != self.embeddings_loaded.load(Ordering::Relaxed) {
+            if want {
+                load_embeddings(&self.lib, &self.index);
+            } else {
+                self.index.write().clear_embeddings();
+                if let Some(e) = &self.effnet {
+                    e.unload();
+                }
+                log::info!("analysis: the sound model's vectors left memory");
+            }
+            self.embeddings_loaded.store(want, Ordering::Relaxed);
+        }
     }
 
     /// Sleeps `d` unless stopped or kicked meanwhile.
@@ -211,15 +367,33 @@ impl Shared {
         }
     }
 
+    /// The library's tracks due now: bliss's queue first, then the model's.
+    fn list(&self) -> nikgob_library::Result<Vec<(AnalysisTodo, Kind)>> {
+        let bliss = self.lib.tracks_needing_analysis(ANALYZED_WITH, BATCH)?;
+        if !bliss.is_empty() {
+            return Ok(bliss.into_iter().map(|t| (t, Kind::Bliss)).collect());
+        }
+        let Some(e) = self.effnet.as_deref().filter(|_| self.neural().library) else { return Ok(Vec::new()) };
+        // The mode wants the model: fetched once (resumed if cut off).
+        if !e.ready() && !e.resting() {
+            e.download(&self.stop, &mut || self.report_model());
+            self.report_model();
+        }
+        if !e.ready() || e.resting() {
+            return Ok(Vec::new());
+        }
+        Ok(self.lib.tracks_needing_embedding(EMBEDDED_WITH, ANALYZED_WITH, BATCH)?.into_iter().map(|t| (t, Kind::Embed)).collect())
+    }
+
     /// The next file to analyse; waits while there is none. `None` = stop.
-    fn next(&self) -> Option<AnalysisTodo> {
+    fn next(&self) -> Option<(AnalysisTodo, Kind)> {
         let mut q = self.queue.lock();
         loop {
             if self.stopped() {
                 return None;
             }
             while let Some(t) = q.todo.pop_front() {
-                if q.busy.insert(t.track_id) {
+                if q.busy.insert(t.0.track_id) {
                     return Some(t);
                 }
             }
@@ -227,13 +401,15 @@ impl Shared {
             // The library is read without the queue lock, so a kick from
             // the worker never waits for it (one arriving meanwhile sets
             // `kicked` again and the wait below is skipped).
-            let listed =
-                parking_lot::MutexGuard::unlocked(&mut q, || self.lib.tracks_needing_analysis(ANALYZED_WITH, BATCH));
+            let listed = parking_lot::MutexGuard::unlocked(&mut q, || {
+                self.sync_embeddings();
+                self.list()
+            });
             match listed {
                 Ok(list) => {
                     let fresh: Vec<_> = list
                         .into_iter()
-                        .filter(|t| !q.busy.contains(&t.track_id) && !q.skip.contains(&t.track_id))
+                        .filter(|t| !q.busy.contains(&t.0.track_id) && !q.skip.contains(&t.0.track_id))
                         .collect();
                     if !fresh.is_empty() {
                         q.todo.extend(fresh);
@@ -244,7 +420,13 @@ impl Shared {
             }
             parking_lot::MutexGuard::unlocked(&mut q, || self.report(true));
             if !q.kicked && !self.stopped() {
-                self.wake.wait_for(&mut q, self.idle);
+                // An idle model leaves memory on time.
+                let unload = self.effnet.as_deref().and_then(Effnet::unload_in);
+                let wait = unload.map_or(self.idle, |u| self.idle.min(u + Duration::from_millis(200)));
+                self.wake.wait_for(&mut q, wait);
+                if let Some(e) = &self.effnet {
+                    e.unload_idle();
+                }
             }
         }
     }
@@ -257,30 +439,33 @@ impl Shared {
         }
     }
 
-    fn work(&self, todo: AnalysisTodo, pacer: &mut Pacer<'_>) {
+    fn work(&self, todo: AnalysisTodo, kind: Kind, pacer: &mut Pacer<'_>) {
         let path = file_path(&self.root, &todo.locator);
         let started = Instant::now();
+        let model = self.model();
+        if kind == Kind::Embed && model.is_none() {
+            self.done(todo.track_id, false);
+            return;
+        }
         // At info, so a dropout in the log can be set against the analysis.
         log::info!(
-            "analysis: starting {}{}",
+            "analysis: starting {}{}{}",
             path.display(),
+            if kind == Kind::Embed { " (sound model only)" } else { "" },
             if self.playing.load(Ordering::Relaxed) { " (music playing)" } else { "" }
         );
-        let skip = match analyze_file(&path, pacer) {
-            Ok(vector) => match store_vector(&self.lib, &self.index, todo.track_id, vector, AnalysisSource::File) {
-                Ok(_) => {
-                    log::info!("analysis: {} done in {:?}", path.display(), started.elapsed());
-                    false
-                }
-                Err(e) => {
-                    log::warn!("analysis: storing {}: {e}", todo.track_id);
-                    true
-                }
-            },
+        let want = Want { bliss: kind == Kind::Bliss, model: model.map(|m| m as &dyn SoundModel) };
+        let skip = match analyze_file(&path, want, pacer) {
+            Ok(out) => self.keep(todo.track_id, &path, out, started),
             Err(FileError::Stopped) => false,
             Err(FileError::Unavailable(e)) => {
                 log::info!("analysis: skipping {}: {e}", path.display());
                 true
+            }
+            Err(FileError::Undecodable(e)) if kind == Kind::Embed => {
+                log::info!("analysis: the sound model cannot hear {}: {e}", path.display());
+                let failed = Err(AnalysisError::TooShort);
+                store_embedding(&self.lib, &self.index, todo.track_id, &failed, AnalysisSource::File).is_err()
             }
             Err(FileError::Undecodable(e)) => {
                 log::info!("analysis: cannot analyse {}: {e}", path.display());
@@ -297,6 +482,57 @@ impl Shared {
         self.report(false);
     }
 
+    /// Stores what a pass gave; true when the track is to be skipped in
+    /// this run (it could not be stored).
+    fn keep(&self, track: TrackId, path: &Path, out: Analysed, started: Instant) -> bool {
+        if let Some(Ok(vector)) = out.bliss
+            && let Err(e) = store_vector(&self.lib, &self.index, track, vector, AnalysisSource::File)
+        {
+            log::warn!("analysis: storing {track}: {e}");
+            return true;
+        }
+        let embedded = match &out.embedding {
+            None => "",
+            Some(result) => match store_embedding(&self.lib, &self.index, track, result, AnalysisSource::File) {
+                Ok(Some(_)) if result.is_ok() => " with the sound model",
+                Ok(Some(_)) => " (the sound model cannot hear it)",
+                Ok(None) => " (the sound model failed)",
+                Err(e) => {
+                    log::warn!("analysis: storing the sound model's vector of {track}: {e}");
+                    return true;
+                }
+            },
+        };
+        log::info!("analysis: {} done{embedded} in {:?} ({:.0} s of audio)", path.display(), started.elapsed(), out.seconds);
+        false
+    }
+
+    fn model_view(&self) -> v::SoundModelView {
+        let Some(e) = &self.effnet else { return v::SoundModelView::default() };
+        let state = e.state();
+        let (done, total) = if self.neural().library { self.lib.embedding_counts(EMBEDDED_WITH).unwrap_or((0, 0)) } else { (0, 0) };
+        v::SoundModelView {
+            ready: e.ready(),
+            downloading: match state {
+                ModelState::Downloading(f) => Some((f * 100.0).round().clamp(0.0, 100.0) as u8),
+                _ => None,
+            },
+            failed: state == ModelState::Failed,
+            done,
+            total,
+        }
+    }
+
+    /// Sends the model's state if it changed.
+    fn report_model(&self) {
+        let m = self.model_view();
+        let mut sent = self.model_sent.lock();
+        if *sent != Some(m) {
+            *sent = Some(m);
+            let _ = self.tx.send(Internal::Analysis(Msg::SoundModel(m)));
+        }
+    }
+
     /// Sends the progress if it changed (and, unless `now`, at most every
     /// [`PROGRESS_EVERY`]).
     fn report(&self, now: bool) {
@@ -306,6 +542,7 @@ impl Shared {
                 return;
             }
         }
+        self.report_model();
         let counts = match self.lib.analysis_counts(ANALYZED_WITH) {
             Ok(c) => c,
             Err(e) => {
@@ -330,16 +567,20 @@ impl Shared {
     fn run(self: &Arc<Self>, start: Duration, alive: Sender<()>) {
         lower_priority();
         load_index(&self.lib, &self.index);
+        self.sync_embeddings();
         self.report(true);
         self.pause(start);
-        let mut pacer = Pacer::new(&self.stop);
-        while let Some(todo) = self.next() {
+        let mut pacer = Pacer::heavy(&self.stop, "sound analysis");
+        while let Some((todo, kind)) = self.next() {
             if !pacer.begin() {
                 self.done(todo.track_id, false);
                 break;
             }
-            self.work(todo, &mut pacer);
+            self.work(todo, kind, &mut pacer);
             pacer.rest();
+        }
+        if let Some(e) = &self.effnet {
+            e.unload();
         }
         drop(alive);
     }
@@ -352,6 +593,9 @@ pub(crate) struct FileAnalysis {
     shared: Option<Arc<Shared>>,
     /// Disconnects when the analysis thread has ended.
     gone: Option<crossbeam_channel::Receiver<()>>,
+    /// The neural model (made with the first start that has a models folder).
+    effnet: Option<Arc<Effnet>>,
+    neural: Neural,
 }
 
 impl FileAnalysis {
@@ -361,6 +605,8 @@ impl FileAnalysis {
             tx,
             shared: None,
             gone: None,
+            effnet: None,
+            neural: Neural::default(),
         }
     }
 
@@ -371,12 +617,49 @@ impl FileAnalysis {
         &self.index
     }
 
+    /// The neural sound model, for the stream analysis's previews.
+    pub(crate) fn effnet(&self) -> Option<Arc<Effnet>> {
+        self.effnet.clone()
+    }
+
+    /// What the neural model hears now.
+    pub(crate) fn neural(&self) -> Neural {
+        self.neural
+    }
+
+    /// The model's files are on disk (`false` without a models folder).
+    pub(crate) fn model_ready(&self, models: Option<&Path>) -> bool {
+        match (&self.effnet, models) {
+            (Some(e), _) => e.ready(),
+            (None, Some(dir)) => Effnet::new(dir.to_owned()).ready(),
+            (None, None) => false,
+        }
+    }
+
+    /// «Нейросетевой анализ звука» and «Только на процессоре» as the prefs
+    /// say: the thread loads or drops the model's vectors and picks the
+    /// model's queue up.
+    pub(crate) fn set_neural(&mut self, neural: Neural, cpu_only: bool) {
+        self.neural = neural;
+        if let Some(e) = &self.effnet {
+            e.set_cpu_only(cpu_only);
+        }
+        if let Some(s) = &self.shared {
+            *s.neural.lock() = neural;
+        }
+        self.kick();
+    }
+
     /// Loads the index and starts analysing after `start` (playback and the
     /// first screens go first); `idle` is how often the library is looked
-    /// at again when there is nothing to do.
-    pub(crate) fn start(&mut self, lib: Library, root: PathBuf, start: Duration, idle: Duration) {
+    /// at again when there is nothing to do; `models` is where the neural
+    /// model lives.
+    pub(crate) fn start(&mut self, lib: Library, root: PathBuf, models: Option<PathBuf>, start: Duration, idle: Duration) {
         if self.shared.is_some() {
             return;
+        }
+        if self.effnet.is_none() {
+            self.effnet = models.map(|m| Arc::new(Effnet::new(m)));
         }
         let shared = Arc::new(Shared {
             lib,
@@ -387,8 +670,12 @@ impl FileAnalysis {
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
             sent: Mutex::new((None, Instant::now())),
+            model_sent: Mutex::new(None),
             idle,
             playing: AtomicBool::new(false),
+            effnet: self.effnet.clone(),
+            neural: Mutex::new(self.neural),
+            embeddings_loaded: AtomicBool::new(false),
         });
         let (alive, gone) = crossbeam_channel::bounded::<()>(0);
         let s = shared.clone();
@@ -446,7 +733,31 @@ impl Worker {
     pub(crate) fn start_analysis(&mut self) {
         let root = self.res.root().to_owned();
         let (start, idle) = (self.streaming.schedule.analysis_start, self.streaming.schedule.analysis_idle);
-        self.analysis.start(self.lib.clone(), root, start, idle);
+        self.analysis.start(self.lib.clone(), root, self.models_dir.clone(), start, idle);
+        self.sound_neural_prefs();
+    }
+
+    /// «Нейросетевой анализ звука» and «На чём считать анализ звука» to the
+    /// analysis. Before the user picks a mode it is the full one when the
+    /// model is on disk already, and that is written into the prefs so the
+    /// settings show what runs (never a download without a choice).
+    pub(crate) fn sound_neural_prefs(&mut self) {
+        let p = self.state.read().prefs.clone();
+        let ready = self.analysis.model_ready(self.models_dir.as_deref());
+        let mode = p.sound_neural_or(ready);
+        if p.sound_neural.is_none() && mode != v::SoundNeural::Off {
+            self.publish(|s| s.prefs.sound_neural = Some(mode));
+            self.save_prefs();
+        }
+        let neural = Neural::of(mode);
+        if neural != self.analysis.neural() {
+            log::info!("analysis: the sound model hears {}", match mode {
+                v::SoundNeural::Off => "nothing",
+                v::SoundNeural::Library => "the library",
+                v::SoundNeural::LibraryAndPreviews => "the library and previews",
+            });
+        }
+        self.analysis.set_neural(neural, p.sound_cpu_only);
     }
 
     pub(crate) fn analysis_msg(&mut self, m: Msg) {
@@ -458,6 +769,11 @@ impl Worker {
                 // The sound vectors are in memory by the first report: the
                 // run's first mixes need not wait for the first tick.
                 self.recs_first_build();
+            }
+            Msg::SoundModel(m) => {
+                if self.state.read().sound_model != m {
+                    self.publish(|s| s.sound_model = m);
+                }
             }
         }
     }
@@ -490,6 +806,10 @@ mod tests {
         w.finalize().unwrap();
     }
 
+    fn bliss(path: &Path, pacer: &mut Pacer<'_>) -> Result<Vector, FileError> {
+        analyze_file(path, Want::BLISS, pacer).map(|out| out.bliss.unwrap().unwrap())
+    }
+
     #[test]
     fn a_wav_file_analyses_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,26 +818,60 @@ mod tests {
         write_wav(&low, 44_100, 6.0, 220.0);
         write_wav(&high, 48_000, 6.0, 1760.0);
         let stop = AtomicBool::new(false);
-        let a = analyze_file(&low, &mut Pacer::unpaced(&stop)).unwrap();
-        let b = analyze_file(&high, &mut Pacer::unpaced(&stop)).unwrap();
+        let a = bliss(&low, &mut Pacer::unpaced(&stop)).unwrap();
+        let b = bliss(&high, &mut Pacer::unpaced(&stop)).unwrap();
         assert!(a.iter().chain(&b).all(|x| x.is_finite()));
         assert_ne!(a, b);
-        assert_eq!(analyze_file(&low, &mut Pacer::unpaced(&stop)).unwrap(), a, "deterministic");
+        assert_eq!(bliss(&low, &mut Pacer::unpaced(&stop)).unwrap(), a, "deterministic");
 
         // Not a sound: marked as undecodable; missing: only unavailable.
         let junk = dir.path().join("junk.flac");
         std::fs::write(&junk, b"not audio at all").unwrap();
-        assert!(matches!(analyze_file(&junk, &mut Pacer::unpaced(&stop)), Err(FileError::Undecodable(_))));
-        assert!(matches!(
-            analyze_file(&dir.path().join("gone.opus"), &mut Pacer::unpaced(&stop)),
-            Err(FileError::Unavailable(_))
-        ));
+        assert!(matches!(bliss(&junk, &mut Pacer::unpaced(&stop)), Err(FileError::Undecodable(_))));
+        assert!(matches!(bliss(&dir.path().join("gone.opus"), &mut Pacer::unpaced(&stop)), Err(FileError::Unavailable(_))));
         // Too short to say anything.
         let blip = dir.path().join("blip.wav");
         write_wav(&blip, 44_100, 0.3, 440.0);
-        assert!(matches!(analyze_file(&blip, &mut Pacer::unpaced(&stop)), Err(FileError::Undecodable(_))));
+        assert!(matches!(bliss(&blip, &mut Pacer::unpaced(&stop)), Err(FileError::Undecodable(_))));
         stop.store(true, Ordering::Relaxed);
-        assert!(matches!(analyze_file(&low, &mut Pacer::unpaced(&stop)), Err(FileError::Stopped)));
+        assert!(matches!(bliss(&low, &mut Pacer::unpaced(&stop)), Err(FileError::Stopped)));
+    }
+
+    /// A long file is read only in its three windows: 45 s of audio reach
+    /// the analysis whatever its length; a model gets them too.
+    #[test]
+    fn a_long_file_is_read_in_three_windows() {
+        struct Count(Mutex<Vec<usize>>);
+        impl SoundModel for Count {
+            fn name(&self) -> &str {
+                "count"
+            }
+            fn dim(&self) -> usize {
+                1
+            }
+            fn sample_rate(&self) -> u32 {
+                16_000
+            }
+            fn embed(&self, mono: &[f32]) -> Result<Vec<f32>, AnalysisError> {
+                self.0.lock().push(mono.len());
+                Ok(vec![1.0])
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let long = dir.path().join("long.wav");
+        write_wav(&long, 22_050, 200.0, 330.0);
+        let stop = AtomicBool::new(false);
+        let model = Count(Mutex::new(Vec::new()));
+        let out = analyze_file(&long, Want { bliss: true, model: Some(&model) }, &mut Pacer::unpaced(&stop)).unwrap();
+        assert!((out.seconds - 45.0).abs() < 0.1, "{}", out.seconds);
+        assert!(out.bliss.unwrap().is_ok());
+        assert_eq!(out.embedding.unwrap().unwrap(), vec![1.0]);
+        let windows = model.0.lock().clone();
+        assert_eq!(windows.len(), 3, "{windows:?}");
+        assert!(windows.iter().all(|n| n.abs_diff(15 * 16_000) < 400), "{windows:?}");
+        // Only the model: bliss is left alone.
+        let out = analyze_file(&long, Want { bliss: false, model: Some(&model) }, &mut Pacer::unpaced(&stop)).unwrap();
+        assert!(out.bliss.is_none() && out.embedding.is_some());
     }
 
     #[test]
@@ -535,5 +889,18 @@ mod tests {
         let other: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
         load_index(&lib, &other);
         assert_eq!(other.read().get(t), Some(&file));
+
+        // The model's vector goes beside it, and comes back after a restart.
+        let raw: Vec<f32> = (0..1280).map(|i| (i as f32 * 0.37).sin()).collect();
+        assert_eq!(store_embedding(&lib, &index, t, &Ok(raw.clone()), AnalysisSource::File).unwrap(), Some(true));
+        assert!(index.read().embedding(t).is_some());
+        load_embeddings(&lib, &other);
+        assert_eq!(other.read().embedding(t), index.read().embedding(t));
+        // A failing model stores nothing; a track it cannot hear is marked.
+        let u = lib.upsert_track(&nikgob_core::model::Track::new("U", nikgob_core::model::ArtistCredit::single(String::from("A"), None))).unwrap().id;
+        assert_eq!(store_embedding(&lib, &index, u, &Err(AnalysisError::Model("x".into())), AnalysisSource::File).unwrap(), None);
+        assert!(!lib.has_embedding(u, EMBEDDED_WITH).unwrap());
+        assert_eq!(store_embedding(&lib, &index, u, &Err(AnalysisError::TooShort), AnalysisSource::File).unwrap(), Some(true));
+        assert!(lib.has_embedding(u, EMBEDDED_WITH).unwrap());
     }
 }
