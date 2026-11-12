@@ -11,6 +11,8 @@ publish.workspace = true
 # Pure Rust analysis only (rustfft); decoding is ours (nikgob-import), no ffmpeg.
 bliss-audio = { version = "0.13", default-features = false, features = ["analysis"] }
 rubato = "5.0.1"
+# The log-mel front end of the neural sound model (embedding.rs).
+realfft = "3.5"
 thiserror = "2"
 nikgob-core.workspace = true
 serde = { version = "1", features = ["derive"] }

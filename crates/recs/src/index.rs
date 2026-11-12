@@ -9,6 +9,17 @@
 //! (the tempo counts a quarter, the 13 chroma features about three features
 //! together), then euclidean. The running sums behind the statistics follow
 //! every insert, update and removal.
+//!
+//! Beside each bliss vector a track may have the neural sound model's
+//! compact vector ([`crate::embedding::Compact`], 260 bytes). Where both
+//! tracks of a pair have one, their distance is a blend
+//! ([`SOUND_MODEL_SHARE`] of the model's, the rest bliss's, the model's
+//! distance brought to bliss's scale over the library): the model hears the
+//! genre and the voice, bliss the tempo and the loudness. A track without
+//! one is compared by bliss alone, so new tracks and a library being
+//! analysed mix freely. [`VectorIndex::neighbours`], [`VectorIndex::nearest_to`]
+//! and [`VectorIndex::niche_fit`] use the blend; [`VectorIndex::nearest`]
+//! and [`VectorIndex::distance`] of raw vectors stay bliss's.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -17,6 +28,20 @@ use std::hash::Hash;
 use bliss_audio::FeaturesVersion;
 
 use crate::analysis::{DIM, Vector};
+use crate::embedding::{COMPACT_DIM, Compact};
+
+/// The model's share of the distance of two tracks that both have its vector.
+pub const SOUND_MODEL_SHARE: f32 = 0.6;
+/// With fewer tracks of the model's vector, distances are bliss's alone
+/// (its scale cannot be matched to bliss's yet).
+pub const MIN_EMBEDDED: usize = 16;
+/// Pairs of tracks sampled to match the model's scale to bliss's.
+const CALIBRATION_PAIRS: usize = 512;
+/// A niche's members a candidate is measured against (its nearest ones).
+const NICHE_NEAREST: usize = 5;
+/// [`VectorIndex::fits_niche`]: a candidate this close to the niche, by
+/// [`VectorIndex::niche_fit`], fits it.
+pub const NICHE_FITS: f32 = 0.7;
 
 /// A standard deviation below this counts as "does not vary" (scale 1).
 const MIN_STD: f64 = 1e-4;
@@ -37,6 +62,14 @@ pub struct VectorIndex<K> {
     sum: [f64; DIM],
     sum_sq: [f64; DIM],
     weights: [f32; DIM],
+    /// The model's vectors row by row beside `data` (`COMPACT_DIM` bytes a
+    /// row; empty until the first one comes).
+    emb: Vec<i8>,
+    /// Each row's scale; 0 = the row has no model vector.
+    emb_scale: Vec<f32>,
+    emb_count: usize,
+    /// Sum of the stored model vectors: their mean centres them.
+    emb_sum: Vec<f64>,
 }
 
 impl<K: Copy + Eq + Hash> Default for VectorIndex<K> {
@@ -84,6 +117,10 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             sum: [0.0; DIM],
             sum_sq: [0.0; DIM],
             weights,
+            emb: Vec::new(),
+            emb_scale: Vec::new(),
+            emb_count: 0,
+            emb_sum: Vec::new(),
         }
     }
 
@@ -136,6 +173,10 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
                 self.pos.insert(key, self.keys.len());
                 self.keys.push(key);
                 self.data.extend_from_slice(&vector);
+                if !self.emb_scale.is_empty() {
+                    self.emb.extend_from_slice(&[0; COMPACT_DIM]);
+                    self.emb_scale.push(0.0);
+                }
             }
         }
         self.account(&vector, 1.0);
@@ -144,7 +185,9 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// Removes `key`; returns its vector.
     pub fn remove(&mut self, key: K) -> Option<Vector> {
-        let i = self.pos.remove(&key)?;
+        let i = *self.pos.get(&key)?;
+        self.remove_embedding(key);
+        self.pos.remove(&key);
         let old = *self.row(i);
         self.account(&old, -1.0);
         let last = self.keys.len() - 1;
@@ -155,6 +198,14 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             self.pos.insert(self.keys[i], i);
         }
         self.data.truncate(last * DIM);
+        if !self.emb_scale.is_empty() {
+            self.emb_scale.swap_remove(i);
+            if i != last {
+                let (head, tail) = self.emb.split_at_mut(last * COMPACT_DIM);
+                head[i * COMPACT_DIM..(i + 1) * COMPACT_DIM].copy_from_slice(&tail[..COMPACT_DIM]);
+            }
+            self.emb.truncate(last * COMPACT_DIM);
+        }
         if self.keys.is_empty() {
             // No drift left over from the running sums.
             self.sum = [0.0; DIM];
@@ -252,13 +303,264 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
         }
     }
 
-    /// The `k` neighbours of a stored `key` (itself excluded); empty when
-    /// `key` has no vector.
+    /// The `k` neighbours of a stored `key` (itself excluded), by the blend
+    /// with the model's distance where both have its vector
+    /// ([`Self::nearest_to`]); empty when `key` has no vector.
     pub fn neighbours(&self, key: K, k: usize, mut keep: impl FnMut(K) -> bool) -> Vec<(K, f32)> {
         let Some(query) = self.get(key).copied() else {
             return Vec::new();
         };
-        self.nearest(&query, k, |other| other != key && keep(other))
+        self.nearest_to(Some(key), &query, k, |other| other != key && keep(other))
+    }
+}
+
+impl<K: Copy + Eq + Hash> VectorIndex<K> {
+    /// Tracks with the model's vector.
+    pub fn embedded_len(&self) -> usize {
+        self.emb_count
+    }
+
+    fn emb_row(&self, i: usize) -> Option<Compact> {
+        let scale = *self.emb_scale.get(i)?;
+        (scale > 0.0).then(|| Compact {
+            scale,
+            q: self.emb[i * COMPACT_DIM..(i + 1) * COMPACT_DIM].try_into().expect("rows are COMPACT_DIM long"),
+        })
+    }
+
+    /// The model's vector of `key`.
+    pub fn embedding(&self, key: K) -> Option<Compact> {
+        self.pos.get(&key).and_then(|&i| self.emb_row(i))
+    }
+
+    fn account_emb(&mut self, c: &Compact, sign: f64) {
+        if self.emb_sum.is_empty() {
+            self.emb_sum = vec![0.0; COMPACT_DIM];
+        }
+        for (s, v) in self.emb_sum.iter_mut().zip(c.values()) {
+            *s += sign * f64::from(v);
+        }
+    }
+
+    /// Sets the model's vector of a track that has a bliss vector (false
+    /// otherwise: a track is always compared by bliss at least).
+    pub fn set_embedding(&mut self, key: K, c: Compact) -> bool {
+        let Some(&i) = self.pos.get(&key) else { return false };
+        if !(c.scale > 0.0 && c.scale.is_finite()) {
+            return false;
+        }
+        if self.emb_scale.is_empty() {
+            self.emb_scale = vec![0.0; self.keys.len()];
+            self.emb = vec![0; self.keys.len() * COMPACT_DIM];
+        }
+        match self.emb_row(i) {
+            Some(old) => self.account_emb(&old, -1.0),
+            None => self.emb_count += 1,
+        }
+        self.account_emb(&c, 1.0);
+        self.emb_scale[i] = c.scale;
+        self.emb[i * COMPACT_DIM..(i + 1) * COMPACT_DIM].copy_from_slice(&c.q);
+        true
+    }
+
+    /// Drops the model's vector of `key`; returns it.
+    pub fn remove_embedding(&mut self, key: K) -> Option<Compact> {
+        let i = *self.pos.get(&key)?;
+        let old = self.emb_row(i)?;
+        self.account_emb(&old, -1.0);
+        self.emb_scale[i] = 0.0;
+        self.emb_count -= 1;
+        if self.emb_count == 0 {
+            self.emb_sum.iter_mut().for_each(|s| *s = 0.0);
+        }
+        Some(old)
+    }
+
+    /// Drops every model vector (the neural analysis was switched off).
+    pub fn clear_embeddings(&mut self) {
+        self.emb = Vec::new();
+        self.emb_scale = Vec::new();
+        self.emb_sum = Vec::new();
+        self.emb_count = 0;
+    }
+
+    /// The model's vectors take part in distances.
+    fn blended(&self) -> bool {
+        self.emb_count >= MIN_EMBEDDED
+    }
+
+    /// The library's mean model vector.
+    fn emb_mean(&self) -> [f32; COMPACT_DIM] {
+        let n = self.emb_count.max(1) as f64;
+        std::array::from_fn(|i| self.emb_sum.get(i).map_or(0.0, |s| (s / n) as f32))
+    }
+
+    /// Row `i`'s model vector less the mean, made unit length.
+    fn centred(&self, i: usize, mean: &[f32; COMPACT_DIM]) -> Option<[f32; COMPACT_DIM]> {
+        let c = self.emb_row(i)?;
+        let mut v: [f32; COMPACT_DIM] = std::array::from_fn(|k| f32::from(c.q[k]) * c.scale - mean[k]);
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !(n > 1e-9) {
+            return None;
+        }
+        v.iter_mut().for_each(|x| *x /= n);
+        Some(v)
+    }
+
+    /// The model's distance of a centred unit query to row `i` (0–2).
+    fn emb_dist(&self, q: &[f32; COMPACT_DIM], i: usize, mean: &[f32; COMPACT_DIM]) -> Option<f32> {
+        let scale = *self.emb_scale.get(i)?;
+        if scale <= 0.0 {
+            return None;
+        }
+        let row = &self.emb[i * COMPACT_DIM..(i + 1) * COMPACT_DIM];
+        let (mut dot, mut nn) = (0f32, 0f32);
+        for k in 0..COMPACT_DIM {
+            let x = f32::from(row[k]) * scale - mean[k];
+            dot += x * q[k];
+            nn += x * x;
+        }
+        if !(nn > 1e-18) {
+            return None;
+        }
+        let cos = (dot / nn.sqrt()).clamp(-1.0, 1.0);
+        Some((2.0 - 2.0 * cos).max(0.0).sqrt())
+    }
+
+    /// Bliss's distance per unit of the model's, over pairs of the
+    /// library's tracks that have both (pairs spread over the library the
+    /// same way every time).
+    fn calibration(&self, mean: &[f32; COMPACT_DIM]) -> f32 {
+        let rows: Vec<usize> = (0..self.emb_scale.len()).filter(|&i| self.emb_scale[i] > 0.0).collect();
+        let n = rows.len();
+        if n < 2 {
+            return 1.0;
+        }
+        let f = self.factors();
+        let (mut sb, mut se) = (0f64, 0f64);
+        for p in 0..CALIBRATION_PAIRS.min(n * (n - 1) / 2) {
+            let a = rows[(p * 7919) % n];
+            let b = rows[(p * 7919 + 1 + p % (n - 1)) % n];
+            if a == b {
+                continue;
+            }
+            let Some(de) = self.centred(a, mean).and_then(|q| self.emb_dist(&q, b, mean)) else { continue };
+            sb += f64::from(Self::dist_sq(&f, self.row(a), self.row(b)).sqrt());
+            se += f64::from(de);
+        }
+        if se > 1e-9 { (sb / se) as f32 } else { 1.0 }
+    }
+
+    /// The `k` stored tracks closest to a track whose bliss vector is
+    /// `query`, nearest first; `key`, when it is stored with the model's
+    /// vector, blends the model's distance in for the tracks that have it
+    /// (once [`MIN_EMBEDDED`] tracks do). The track itself is not left out.
+    pub fn nearest_to(&self, key: Option<K>, query: &Vector, k: usize, mut keep: impl FnMut(K) -> bool) -> Vec<(K, f32)> {
+        let model = key.filter(|_| self.blended()).and_then(|key| self.pos.get(&key).copied()).and_then(|i| {
+            let mean = self.emb_mean();
+            let q = self.centred(i, &mean)?;
+            let ratio = self.calibration(&mean);
+            Some((q, mean, ratio))
+        });
+        let Some((q, mean, ratio)) = model else {
+            return self.nearest(query, k, keep);
+        };
+        if k == 0 {
+            return Vec::new();
+        }
+        let f = self.factors();
+        let mut heap: BinaryHeap<Cand> = BinaryHeap::with_capacity(k + 1);
+        for (i, row) in self.data.as_chunks::<DIM>().0.iter().enumerate() {
+            let bliss = Self::dist_sq(&f, query, row).sqrt();
+            let d = match self.emb_dist(&q, i, &mean) {
+                Some(e) => (1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * ratio * e,
+                None => bliss,
+            };
+            if heap.len() == k && heap.peek().is_some_and(|worst| d >= worst.0) {
+                continue;
+            }
+            if !keep(self.keys[i]) {
+                continue;
+            }
+            heap.push(Cand(d, i));
+            if heap.len() > k {
+                heap.pop();
+            }
+        }
+        heap.into_sorted_vec().into_iter().map(|Cand(d, i)| (self.keys[i], d)).collect()
+    }
+
+    /// The distance of two stored tracks: the blend when both have the
+    /// model's vector, else bliss's.
+    pub fn key_distance(&self, a: K, b: K) -> Option<f32> {
+        let (&i, &j) = (self.pos.get(&a)?, self.pos.get(&b)?);
+        let bliss = Self::dist_sq(&self.factors(), self.row(i), self.row(j)).sqrt();
+        if !self.blended() {
+            return Some(bliss);
+        }
+        let mean = self.emb_mean();
+        match self.centred(i, &mean).and_then(|q| self.emb_dist(&q, j, &mean)) {
+            Some(e) => Some((1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * self.calibration(&mean) * e),
+            None => Some(bliss),
+        }
+    }
+
+    /// How well `candidate` fits a niche of tracks (`niche`: e.g. the
+    /// library's tracks of a mood, a filter or a profile) by sound: the
+    /// niche expansion's check of new music (docs/recommendations.md §1.2,
+    /// §5.1.6). The mean distance from the candidate to its few nearest
+    /// members, against the same of the members among themselves: 1.0 = as
+    /// close as the niche's own tracks are to each other (or closer),
+    /// towards 0 the further away. Uses the blend, so a candidate whose
+    /// preview the model heard is judged by genre and voice too. `None`
+    /// when the candidate has no vector or fewer than two members do.
+    ///
+    /// Cost: `O(n²)` distances in the niche's size `n` (small: a niche is
+    /// expanded below 25 tracks; pass a sample of a large one).
+    pub fn niche_fit(&self, candidate: K, niche: &[K]) -> Option<f32> {
+        if !self.contains(candidate) {
+            return None;
+        }
+        let members: Vec<K> = niche.iter().copied().filter(|k| *k != candidate && self.contains(*k)).collect();
+        if members.len() < 2 {
+            return None;
+        }
+        let m = NICHE_NEAREST.min(members.len() - 1);
+        // One calibration for the whole check.
+        let mean = self.emb_mean();
+        let ratio = if self.blended() { self.calibration(&mean) } else { 1.0 };
+        let f = self.factors();
+        let dist = |a: K, b: K| -> Option<f32> {
+            let (&i, &j) = (self.pos.get(&a)?, self.pos.get(&b)?);
+            let bliss = Self::dist_sq(&f, self.row(i), self.row(j)).sqrt();
+            let model = self.blended().then(|| self.centred(i, &mean).and_then(|q| self.emb_dist(&q, j, &mean))).flatten();
+            Some(match model {
+                Some(e) => (1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * ratio * e,
+                None => bliss,
+            })
+        };
+        let near_mean = |from: K| -> Option<f32> {
+            let mut d: Vec<f32> = members.iter().filter(|k| **k != from).filter_map(|k| dist(from, *k)).collect();
+            if d.is_empty() {
+                return None;
+            }
+            d.sort_by(f32::total_cmp);
+            let take = m.clamp(1, d.len());
+            Some(d[..take].iter().sum::<f32>() / take as f32)
+        };
+        let own = near_mean(candidate)?;
+        let mut spread: Vec<f32> = members.iter().filter_map(|k| near_mean(*k)).collect();
+        spread.sort_by(f32::total_cmp);
+        let typical = *spread.get(spread.len() / 2)?;
+        if own <= 1e-9 {
+            return Some(1.0);
+        }
+        Some((typical / own).clamp(0.0, 1.0))
+    }
+
+    /// [`Self::niche_fit`] at or above [`NICHE_FITS`].
+    pub fn fits_niche(&self, candidate: K, niche: &[K]) -> Option<bool> {
+        self.niche_fit(candidate, niche).map(|f| f >= NICHE_FITS)
     }
 }
 
@@ -461,5 +763,118 @@ mod tests {
             .unwrap();
         assert_eq!(near[0].0, best.0);
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A compact vector near `centre` (a direction of the model's space).
+    fn compact_near(rng: &mut Rng, centre: &[f32; COMPACT_DIM], noise: f32) -> Compact {
+        let v: [f32; COMPACT_DIM] = std::array::from_fn(|i| centre[i] + rng.next_f32() * noise);
+        Compact::of_unit(&v).unwrap()
+    }
+
+    fn direction(rng: &mut Rng) -> [f32; COMPACT_DIM] {
+        std::array::from_fn(|_| rng.next_f32())
+    }
+
+    /// The model's vectors follow their rows through inserts and removals,
+    /// and only tracks with a bliss vector take one.
+    #[test]
+    fn embeddings_follow_their_rows() {
+        let mut rng = Rng(21);
+        let mut idx = VectorIndex::new();
+        for k in 0..10u32 {
+            idx.insert(k, random(&mut rng));
+        }
+        let dir = direction(&mut rng);
+        let c: Vec<Compact> = (0..10).map(|_| compact_near(&mut rng, &dir, 1.0)).collect();
+        assert!(!idx.set_embedding(99, c[0]), "no bliss vector, no model vector");
+        for k in [1u32, 3, 9] {
+            assert!(idx.set_embedding(k, c[k as usize]));
+        }
+        assert_eq!(idx.embedded_len(), 3);
+        // A new track after the first model vector gets an empty row.
+        idx.insert(10, random(&mut rng));
+        assert_eq!(idx.embedding(10), None);
+        // Removing a row moves the last one into its place, with its vector.
+        assert_eq!(idx.remove(1).is_some(), true);
+        assert_eq!(idx.embedded_len(), 2);
+        assert_eq!(idx.embedding(9), Some(c[9]));
+        assert_eq!(idx.embedding(3), Some(c[3]));
+        idx.remove(0);
+        assert_eq!(idx.embedding(9), Some(c[9]));
+        assert_eq!(idx.remove_embedding(9), Some(c[9]));
+        assert_eq!(idx.embedding(9), None);
+        assert_eq!(idx.embedded_len(), 1);
+        // Replacing a vector keeps the count.
+        assert!(idx.set_embedding(3, c[4]));
+        assert_eq!(idx.embedded_len(), 1);
+        assert_eq!(idx.embedding(3), Some(c[4]));
+    }
+
+    /// Two genres bliss cannot tell apart (their bliss vectors are drawn
+    /// alike) but the model can: with the model's vectors a track's
+    /// neighbours are of its genre; a track without one is still found by
+    /// bliss, and below [`MIN_EMBEDDED`] nothing changes.
+    #[test]
+    fn the_model_blends_into_neighbours() {
+        let mut rng = Rng(3);
+        let mut idx = VectorIndex::new();
+        let (rock, rap) = (direction(&mut rng), direction(&mut rng));
+        for k in 0..60u32 {
+            idx.insert(k, random(&mut rng));
+        }
+        let genre = |k: u32| k % 2;
+        let bliss_only: Vec<u32> = idx.neighbours(0, 10, |_| true).into_iter().map(|(k, _)| k).collect();
+        for k in 0..60u32 {
+            let dir = if genre(k) == 0 { &rock } else { &rap };
+            idx.set_embedding(k, compact_near(&mut rng, dir, 0.3));
+        }
+        let near: Vec<u32> = idx.neighbours(0, 10, |_| true).into_iter().map(|(k, _)| k).collect();
+        let same = near.iter().filter(|k| genre(**k) == 0).count();
+        assert!(same >= 9, "{near:?}");
+        let before = bliss_only.iter().filter(|k| genre(**k) == 0).count();
+        assert!(same > before, "{same} vs {before}");
+        // Ordered, and the distances agree with key_distance.
+        let with_d = idx.neighbours(0, 5, |_| true);
+        for w in with_d.windows(2) {
+            assert!(w[0].1 <= w[1].1);
+        }
+        assert!((idx.key_distance(0, with_d[0].0).unwrap() - with_d[0].1).abs() < 1e-3);
+        // A track without the model's vector: bliss alone, still found.
+        idx.insert(100, *idx.get(0).unwrap());
+        let near: Vec<u32> = idx.neighbours(0, 1, |_| true).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(near, [100], "same bliss vector, no model vector: nearest by bliss");
+
+        let mut small = VectorIndex::new();
+        for k in 0..20u32 {
+            small.insert(k, random(&mut rng));
+        }
+        let plain: Vec<(u32, f32)> = small.neighbours(0, 5, |_| true);
+        for k in 0..(MIN_EMBEDDED as u32 - 1) {
+            small.set_embedding(k, compact_near(&mut rng, &rock, 1.0));
+        }
+        assert_eq!(small.neighbours(0, 5, |_| true), plain, "too few model vectors to blend");
+    }
+
+    /// A candidate of the niche's genre fits it, one of another genre does
+    /// not; no vector or too small a niche says nothing.
+    #[test]
+    fn niche_fit_tells_a_fitting_candidate() {
+        let mut rng = Rng(8);
+        let mut idx = VectorIndex::new();
+        let (calm, loud) = (direction(&mut rng), direction(&mut rng));
+        for k in 0..80u32 {
+            idx.insert(k, random(&mut rng));
+            let dir = if k < 40 { &calm } else { &loud };
+            idx.set_embedding(k, compact_near(&mut rng, dir, 0.25));
+        }
+        let niche: Vec<u32> = (0..12).collect();
+        let fit_in = idx.niche_fit(30, &niche).unwrap();
+        let fit_out = idx.niche_fit(70, &niche).unwrap();
+        assert!(fit_in > fit_out, "{fit_in} vs {fit_out}");
+        assert_eq!(idx.fits_niche(30, &niche), Some(true), "{fit_in}");
+        assert_eq!(idx.fits_niche(70, &niche), Some(false), "{fit_out}");
+        assert_eq!(idx.niche_fit(500, &niche), None);
+        assert_eq!(idx.niche_fit(30, &[1]), None);
+        assert!((0.0..=1.0).contains(&fit_out));
     }
 }

@@ -2,8 +2,10 @@
 //! no decoding, no clock; the runtime feeds it samples, library rows and
 //! `now`, and every selection is a function of its inputs and a seed.
 //!
-//! * [`analysis`]: bliss features of a track from its decoded PCM (mono
-//!   22 050 Hz, the first [`MAX_SECONDS`]), tagged [`ANALYZED_WITH`].
+//! * [`analysis`]: bliss features of a track from a few decoded windows of
+//!   it (mono 22 050 Hz), tagged [`ANALYZED_WITH`]; [`embedding`]: the
+//!   neural sound model's input and its compact vectors, tagged
+//!   [`EMBEDDED_WITH`].
 //! * [`index`]: every vector of the library in memory, z-normalised over the
 //!   library itself, with brute-force nearest neighbours.
 //! * [`taste`]: the [`Catalog`] of pickable tracks and the [`Taste`] built
@@ -43,6 +45,7 @@ pub mod graph;
 pub mod index;
 pub mod junk;
 pub mod listening;
+pub mod lyric_valence;
 pub mod mix_names;
 pub mod mix_new;
 pub mod mixes;
@@ -62,7 +65,11 @@ pub mod taste;
 pub mod tiles;
 pub mod world_mixes;
 
-pub use analysis::{ANALYZED_WITH, AnalysisError, DIM, MAX_SECONDS, PcmAnalyzer, SAMPLE_RATE, Vector, analyze_pcm};
+pub use analysis::{
+    ANALYZED_WITH, Analysed, AnalysisError, DIM, MAX_SECONDS, PcmAnalyzer, SAMPLE_RATE, Vector, Window, WindowedAnalyzer,
+    analyze_pcm, analyze_windows, preview_windows, windows,
+};
+pub use embedding::{Compact, EMBEDDED_WITH, SoundModel};
 pub use daily::DailyParams;
 pub use daylist::{Centre, DAYLIST_LEN, daylist_title};
 pub use discover::{
