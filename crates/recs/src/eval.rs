@@ -722,6 +722,37 @@ pub fn home_mixes(parts: &Parts, model: &UserModel, suits: &[bool], epoch: u64) 
     row(daily, pinned.into_iter().next(), moments)
 }
 
+/// The family of genres of each catalog track by its main artist's tags
+/// (what [`Builder::with_genres`] tells).
+pub fn genres(parts: &Parts) -> Vec<Option<u8>> {
+    let mut tags: HashMap<ArtistId, Vec<(String, f32)>> = HashMap::new();
+    for (a, t, w) in &parts.graph.tags {
+        tags.entry(*a).or_default().push((t.clone(), *w));
+    }
+    let mut of: HashMap<ArtistId, Option<u8>> = HashMap::new();
+    parts
+        .catalog
+        .tracks()
+        .iter()
+        .map(|t| t.main_artist().and_then(|a| *of.entry(a).or_insert_with(|| tags.get(&a).and_then(|x| crate::mix_names::leading(x)))))
+        .collect()
+}
+
+/// The home's mixes ([`home_mixes`]) with the niches it holds a card of
+/// while new music plays ([`crate::mix_new::with_niches`]).
+pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch: u64) -> Vec<Mix> {
+    let mut home = home_mixes(parts, model, suits, epoch);
+    let genre_of = genres(parts);
+    let genre = |i: usize| genre_of.get(i).copied().flatten();
+    let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+    let ok = |_: usize| true;
+    let none = |_: &StreamTrack| Vec::new();
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none };
+    let cards = crate::open_world::niches(&ctx).into_iter().map(|c| (c, String::new(), Vec::new())).collect();
+    mix_new::with_niches(model, &mut home, cards);
+    home
+}
+
 /// The user's share of new music the evaluation takes («Новое в радио и
 /// миксах» as it comes, «Немного»).
 pub const USER_NEW_SHARE: f32 = 0.2;
@@ -801,7 +832,9 @@ pub fn wave(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandid
     let artist_tracks = |t: &StreamTrack| artist_of.get(&crate::stream_song_key(t)).map(|a| model.of_artist(*a).iter().map(|&i| i as usize).collect()).unwrap_or_default();
     let background = |i: usize| suits.get(i).copied().unwrap_or(false);
     let ok = |_: usize| true;
-    let ctx = WaveContext { model, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks };
+    let genre_of = genres(parts);
+    let genre = |i: usize| genre_of.get(i).copied().flatten();
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks };
     crate::open_world::next(&ctx, pool, filter, session, n, &HashSet::new())
 }
 
@@ -993,7 +1026,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
             // loved otherwise (a like, a playlist, an imported play).
             let heard = |i: usize| !never_heard(&model, i);
             let artist = artist_heard(&parts.catalog, &model);
-            let home = home_mixes(parts, &model, &suits, day as u64);
+            let home = home_with_niches(parts, &model, &suits, day as u64);
             let placed = home_new(parts, &model, &home);
             homes_n += 1;
             per_home += home.len();
@@ -1197,6 +1230,102 @@ mod tests {
         assert!(!any.niche);
         let share = any.picks.iter().filter(|p| p.new).count() as f32 / any.picks.len() as f32;
         assert!(share <= USER_NEW_SHARE + 0.1, "{share}");
+    }
+
+    /// The calm niche of three songs is a card of the home (below a mix's
+    /// least length), in place of the calm side of everything: its three
+    /// songs and mostly new calm songs of several artists; its pool is its
+    /// three songs (the top-up's seeds).
+    #[test]
+    fn a_calm_niche_of_three_songs_is_a_card_of_the_home() {
+        let d = synthetic::user(synthetic::Kind::NicheCalm, 5);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let home = home_with_niches(&p, &model, &suits, 1);
+        let calm = home.iter().find(|m| m.key == MixKey::Calm).expect("a calm card");
+        assert_eq!(calm.tracks.len(), 3, "its own songs only");
+        assert_eq!(calm.pool, calm.tracks);
+        let at = home.iter().position(|m| m.key == MixKey::Calm).unwrap();
+        let new = home_new(&p, &model, &home);
+        assert!(new[at].niche);
+        let share = new[at].placed as f32 / (new[at].placed + 3) as f32;
+        assert!(share >= 0.7, "{share}");
+        assert!(new[at].artists >= 4, "{:?}", new[at]);
+        // A card drawn short from a large pool is no niche: the pool tells.
+        let mut big = home.iter().find(|m| m.key != MixKey::Calm && m.pool_size.0 >= 25 && m.pool_size.1 >= 4).expect("a large pool").clone();
+        big.tracks.truncate(12);
+        big.artists.truncate(2);
+        assert!(!home_new(&p, &model, &[big])[0].niche);
+    }
+
+    /// The ends of novelty hold: «Знакомое» plays no new song even when
+    /// the library has few, «Только новое» no library song even when the
+    /// pool runs short — fewer songs then.
+    #[test]
+    fn the_ends_of_novelty_hold() {
+        let d = synthetic::user(synthetic::Kind::NicheCalm, 5);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let pool = open_pool(&p, &model);
+        let calm = |novelty: f32| WaveFilter { novelty, character: Character::Calm, ..WaveFilter::default() };
+        let familiar = wave(&p, &model, &suits, &pool, &calm(0.0), &Session::default(), WAVE_LEN);
+        assert!(!familiar.picks.is_empty() && familiar.picks.iter().all(|x| !x.new), "{:?}", familiar.picks);
+        assert!(familiar.picks.len() < WAVE_LEN, "three calm songs only");
+        let only = wave(&p, &model, &suits, &pool[..3], &calm(1.0), &Session::default(), WAVE_LEN);
+        assert!(only.picks.iter().all(|x| x.new), "{:?}", only.picks);
+        assert!(only.picks.len() <= 3);
+    }
+
+    /// A song without a preview a calm song's radio holds is no calm song
+    /// on that word alone (a new rapper's loud song); the lists of two of
+    /// the niche's songs, or its artist's own calm songs, are.
+    #[test]
+    fn one_radio_is_no_proof_of_a_calm_sound() {
+        let d = synthetic::user(synthetic::Kind::NicheCalm, 5);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let calm: Vec<usize> = d.new.iter().filter(|n| n.track.title.starts_with("Drift")).flat_map(|n| n.near.iter().filter_map(|t| model.position(*t))).collect::<HashSet<_>>().into_iter().collect();
+        assert_eq!(calm.len(), 3);
+        let strict = crate::open_world::NicheSound::of(&model, &calm, true);
+        assert!(!strict.fits(&model, None, None, &[calm[0]], &[]), "one radio, a new artist");
+        assert!(strict.fits(&model, None, None, &[calm[0], calm[1]], &[]), "two of the niche's lists");
+        let calm_energy: Vec<f32> = calm.iter().filter_map(|&i| model.energy_at(i)).collect();
+        assert!(strict.fits(&model, None, None, &[calm[0]], &calm_energy), "its artist's calm songs");
+        let loose = crate::open_world::NicheSound::of(&model, &calm, false);
+        assert!(loose.fits(&model, None, None, &[calm[0]], &[]), "a niche of a kind takes the link");
+    }
+
+    /// A scene of a family of genres works through the wave: library songs
+    /// of the family, new songs linked to them or by its artists.
+    #[test]
+    fn a_wave_of_a_genre() {
+        let mut d = synthetic::user(synthetic::Kind::NicheCalm, 5);
+        // The rap's artists tagged hip hop.
+        let rap_artists: HashSet<ArtistId> = d.tracks.iter().filter(|t| d.types.by_track.get(&t.id).is_some_and(|s| s.lang == Some(crate::songtype::Lang::Russian))).flat_map(|t| t.artists.clone()).collect();
+        for a in &rap_artists {
+            d.tags.push((*a, "hip hop".into(), 10.0));
+        }
+        let p = d.parts();
+        let family = genres(&p).into_iter().flatten().next().expect("a family");
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let pool = open_pool(&p, &model);
+        let w = wave(&p, &model, &suits, &pool, &WaveFilter { novelty: 0.5, scene: crate::open_world::Scene::Genre(family), ..WaveFilter::default() }, &Session::default(), WAVE_LEN);
+        assert!(w.fitting > 50, "{}", w.fitting);
+        assert!(w.picks.iter().any(|x| x.new) && w.picks.iter().any(|x| !x.new));
+        let title = |r: &nikgob_core::streaming::RemoteId| d.new.iter().find(|n| n.track.id == *r).map(|n| n.track.title.clone()).unwrap_or_default();
+        for x in &w.picks {
+            match &x.item {
+                Item::Track(t) => assert!(model.position(*t).and_then(|i| model.main_artist_at(i)).is_some_and(|a| rap_artists.contains(&a))),
+                Item::Stream(r) => assert!(!title(r).starts_with("Drift"), "{}", title(r)),
+            }
+        }
     }
 
     /// Every synthetic listener, measured (`cargo test -p nikgob-recs

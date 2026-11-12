@@ -31,7 +31,11 @@
 //! [`crate::open_world::NICHE_TRACKS`] songs or
 //! [`crate::open_world::NICHE_ARTISTS`] artists) takes [`NICHE_SHARE`] at
 //! least, of the songs that fit the niche's sound
-//! ([`crate::open_world::NicheSound`]), the same way ([`take`]).
+//! ([`crate::open_world::NicheSound`]), the same way ([`take`]). Whether a
+//! mix is a niche is told by the whole pool it is drawn from
+//! ([`Mix::pool_size`]), not by the card; the niches the row lacks (a few
+//! calm songs, a small kind or genre: [`crate::open_world::niches`]) get a
+//! card of their own, their songs as few as they are ([`with_niches`]).
 
 use std::collections::HashSet;
 
@@ -57,6 +61,9 @@ pub const NICHE_SHARE: f32 = 0.8;
 /// …and the user's share from which the open world's rules hold
 /// («Больше нового» is 0.4, «Немного» 0.2).
 pub const OPEN_FROM: f32 = 0.35;
+/// A niche's card asks for new music as if it had this many songs at
+/// least (three calm songs still give a card worth playing).
+pub const NICHE_CARD_LEN: usize = 7;
 /// A preview's kind of song is told by this many of its nearest songs of
 /// the library…
 const VOICE_NEAR: usize = 7;
@@ -140,7 +147,7 @@ pub fn want_in(songs: usize, appetite: Option<f32>, user: f32, mode: NewMode) ->
     match mode {
         NewMode::Calm => want(songs, appetite, user),
         NewMode::Open => new_count(songs, base.max(user).min(OPEN_MAX_SHARE)),
-        NewMode::Niche => new_count(songs, base.max(user).max(NICHE_SHARE).min(OPEN_MAX_SHARE)),
+        NewMode::Niche => new_count(songs.max(NICHE_CARD_LEN), base.max(user).max(NICHE_SHARE).min(OPEN_MAX_SHARE)),
     }
 }
 
@@ -226,6 +233,12 @@ pub fn choose<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: u
 
 /// [`choose`] of the candidates `keep` lets through.
 pub fn choose_where<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: usize, used: &mut HashSet<String>, keep: &dyn Fn(&NewCandidate) -> bool) -> Vec<&'c NewCandidate> {
+    choose_by(model, m, cands, want, used, keep, true)
+}
+
+/// [`choose_where`], the mix's kinds of song checked or not (a niche
+/// checks its own, [`crate::open_world::NicheSound`]).
+fn choose_by<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], want: usize, used: &mut HashSet<String>, keep: &dyn Fn(&NewCandidate) -> bool, kind: bool) -> Vec<&'c NewCandidate> {
     let (langs, inst) = kinds(model, m);
     let own: HashSet<usize> = m.tracks.iter().copied().collect();
     let of_mix = |j: usize| m.profiles.contains(&j);
@@ -239,7 +252,7 @@ pub fn choose_where<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], w
         }
     };
     let mut order: Vec<(u8, f32, usize)> =
-        cands.iter().enumerate().filter(|(_, c)| fits(c, &langs, inst) && keep(c)).map(|(k, c)| (group(c), c.weight, k)).collect();
+        cands.iter().enumerate().filter(|(_, c)| (!kind || fits(c, &langs, inst)) && keep(c)).map(|(k, c)| (group(c), c.weight, k)).collect();
     order.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut out = Vec::new();
     for (_, _, k) in order {
@@ -257,20 +270,82 @@ pub fn choose_where<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], w
 /// the open world has it: its mode by its size and the user's share, as
 /// many as the mode asks, a niche's only of its sound (see the module
 /// docs). `appetite` is the share the mix's profile draws. Without new
-/// music asked for (`user` 0) a mix is no niche.
+/// music asked for (`user` 0) a mix is no niche. The size that makes a
+/// niche is the whole pool's ([`Mix::pool_size`]; a card made without one
+/// counts its own songs), its sound the pool's; a calm or lively card's is
+/// a niche of a sound (strict).
 pub fn take<'c>(model: &UserModel, m: &Mix, cands: &'c [NewCandidate], appetite: Option<f32>, user: f32, used: &mut HashSet<String>) -> (Vec<&'c NewCandidate>, NewMode) {
-    let mode = if user > 0.0 { NewMode::of(m.tracks.len(), m.artists.len(), user) } else { NewMode::Calm };
+    let (tracks, artists) = if m.pool_size.0 > 0 { m.pool_size } else { (m.tracks.len(), m.artists.len()) };
+    let mode = if user > 0.0 { NewMode::of(tracks, artists, user) } else { NewMode::Calm };
     let want = want_in(m.tracks.len(), appetite, user, mode);
     let chosen = if mode == NewMode::Niche {
-        let sound = crate::open_world::NicheSound::of(model, &m.tracks);
-        choose_where(model, m, cands, want, used, &|c| {
-            let energies: Vec<f32> = c.artist_tracks.iter().filter_map(|&i| model.energy_at(i)).collect();
-            sound.fits(model, c.vector.as_ref(), c.lane, &c.near, &energies)
-        })
+        let seeds = if m.pool.is_empty() { &m.tracks } else { &m.pool };
+        let strict = matches!(m.key, MixKey::Calm | MixKey::Lively | MixKey::Background { .. });
+        let sound = crate::open_world::NicheSound::of(model, seeds, strict);
+        choose_by(
+            model,
+            m,
+            cands,
+            want,
+            used,
+            &|c| {
+                let energies: Vec<f32> = c.artist_tracks.iter().filter_map(|&i| model.energy_at(i)).collect();
+                sound.fits(model, c.vector.as_ref(), c.lane, &c.near, &energies)
+            },
+            false,
+        )
     } else {
         choose(model, m, cands, want, used)
     };
     (chosen, mode)
+}
+
+/// The niche cards of [`crate::open_world::niches`] in the row `mixes`,
+/// each with its title and short titles: a card of that key already
+/// drawn from a niche's pool stays; the calm side of everything (a third
+/// of the library, whatever it sounds like) gives way to the calm niche's
+/// songs; a niche the row lacks is a card of its own after the others,
+/// its songs as few as they are.
+pub fn with_niches(model: &UserModel, mixes: &mut Vec<Mix>, cards: Vec<(crate::open_world::NicheCard, String, Vec<String>)>) {
+    for (card, title, short) in cards {
+        let artists: Vec<nikgob_core::model::ArtistId> = {
+            let mut seen = HashSet::new();
+            card.seeds.iter().filter_map(|&i| model.main_artist_at(i)).filter(|a| seen.insert(*a)).take(12).collect()
+        };
+        let mut profiles: Vec<usize> = card.seeds.iter().filter_map(|&i| model.profile_at(i)).collect();
+        profiles.sort_unstable();
+        profiles.dedup();
+        let size = (card.seeds.len(), artists.len());
+        match mixes.iter_mut().find(|m| m.key == card.key) {
+            Some(m) if crate::open_world::is_niche(m.pool_size.0, m.pool_size.1) => {}
+            Some(m) if card.key == MixKey::Calm => {
+                m.anchors = vec![true; card.seeds.len()];
+                m.tracks.clone_from(&card.seeds);
+                m.artists = artists;
+                m.profiles = profiles;
+                m.pool_size = size;
+                m.pool = card.seeds;
+            }
+            Some(_) => {}
+            None => {
+                let genre = if let MixKey::Genre(f) = card.key { Some(f) } else { None };
+                mixes.push(Mix {
+                    key: card.key,
+                    title,
+                    short,
+                    anchors: vec![true; card.seeds.len()],
+                    tracks: card.seeds.clone(),
+                    artists,
+                    profiles,
+                    score: 0.0,
+                    kind: None,
+                    genre,
+                    pool_size: size,
+                    pool: card.seeds,
+                });
+            }
+        }
+    }
 }
 
 /// After which places of a mix `n` new songs stand in `mode`: between

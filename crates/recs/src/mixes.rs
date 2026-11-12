@@ -535,6 +535,13 @@ pub struct Mix {
     /// The family of genres it is of: a genre mix's own, another's when
     /// [`GENRE_SAME`] of its songs are of one.
     pub genre: Option<u8>,
+    /// The size of the whole pool it is drawn from: its tracks and their
+    /// main artists (whether the filter is a niche,
+    /// [`crate::open_world::is_niche`], is told by these, not by the card).
+    pub pool_size: (usize, usize),
+    /// That pool when it is a niche (its songs seed the niche's new
+    /// music); empty otherwise.
+    pub pool: Vec<usize>,
 }
 
 /// The pool of a moment and how it is made.
@@ -870,7 +877,7 @@ impl<'a> Builder<'a> {
                     p.dedup();
                     p
                 };
-                let probe = Mix { key, title: String::new(), short: Vec::new(), tracks: pool.tracks, anchors: Vec::new(), artists: Vec::new(), profiles, score: 0.0, kind: None, genre: None };
+                let probe = Mix { key, title: String::new(), short: Vec::new(), tracks: pool.tracks, anchors: Vec::new(), artists: Vec::new(), profiles, score: 0.0, kind: None, genre: None, pool_size: (0, 0), pool: Vec::new() };
                 let mut w = (LOT_FIT * self.context(&probe).clamp(-2.0, 2.0)).exp();
                 if let MixKey::Profile(k) = key
                     && let Some(j) = self.profile_index(k)
@@ -940,6 +947,13 @@ impl<'a> Builder<'a> {
         // since; the others keep the songs their pool still has.
         let whole = matches!(key, MixKey::Daily(_) | MixKey::Genre(_) | MixKey::Part(_));
         let pool = self.pool(key);
+        // The whole pool's size, and the pool itself when it is a niche.
+        let pool_of = |tracks: &[usize]| -> ((usize, usize), Vec<usize>) {
+            let artists: HashSet<ArtistId> = tracks.iter().filter_map(|&i| self.recs.info(i).artists.first().copied()).collect();
+            let size = (tracks.len(), artists.len());
+            (size, if crate::open_world::is_niche(size.0, size.1) { tracks.to_vec() } else { Vec::new() })
+        };
+        let whole_pool = pool.as_ref().map(|p| pool_of(&p.tracks));
         let kept_songs = match kept.songs(key) {
             Some((s, ids)) if s == salt && (whole || pool.is_some()) => {
                 let have: Option<HashSet<usize>> = if whole { None } else { pool.as_ref().map(|p| p.tracks.iter().copied().collect()) };
@@ -999,7 +1013,8 @@ impl<'a> Builder<'a> {
         profiles.dedup();
         let anchors = self.anchors(&tracks);
         let (kind, genre) = (self.kind_of(key, &tracks), self.genre_of(key, &tracks));
-        let mut mix = Mix { key, title: String::new(), short: Vec::new(), artists: self.artists(&tracks), anchors, tracks, profiles, score: 0.0, kind, genre };
+        let (pool_size, pool) = whole_pool.unwrap_or_else(|| pool_of(&tracks));
+        let mut mix = Mix { key, title: String::new(), short: Vec::new(), artists: self.artists(&tracks), anchors, tracks, profiles, score: 0.0, kind, genre, pool_size, pool };
         mix.title = self.title(key, &mix.tracks);
         mix.short = self.short_titles(key);
         mix.score = self.context(&mix);
@@ -3463,7 +3478,7 @@ mod tests {
     /// A card for [`row`]: `tracks` are its songs.
     fn card(key: MixKey, title: &str, tracks: std::ops::Range<usize>) -> Mix {
         let genre = if let MixKey::Genre(f) = key { Some(f) } else { None };
-        Mix { key, title: title.to_owned(), short: Vec::new(), tracks: tracks.collect(), anchors: Vec::new(), artists: Vec::new(), profiles: Vec::new(), score: 0.0, kind: None, genre }
+        Mix { key, title: title.to_owned(), short: Vec::new(), tracks: tracks.collect(), anchors: Vec::new(), artists: Vec::new(), profiles: Vec::new(), score: 0.0, kind: None, genre, pool_size: (0, 0), pool: Vec::new() }
     }
 
     /// The row's order and its ten cards; the named mixes fill it, two of

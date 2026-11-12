@@ -12,7 +12,15 @@
 //!   radio that found it to the niche's songs, of a kind of song the niche
 //!   has (an instrumental niche takes no sung song) and, when its artist is
 //!   in the library, not of an artist whose own songs are far louder (an
-//!   aggressive rap song of a rapper who has one calm song stays out).
+//!   aggressive rap song of a rapper who has one calm song stays out). A
+//!   niche of a sound (calm, lively, dark, the background: `strict`) takes
+//!   no song on one link alone — a calm song's radio holds loud rap too:
+//!   without a preview it needs its artist's own songs in the niche's band,
+//!   or the lists of [`STRICT_LINKS`] of the niche's songs.
+//! * **The niches of the home** ([`niches`]): the calm songs, each kind of
+//!   song and each family of genres the library has a few loved songs of
+//!   ([`NICHE_MIN_SEEDS`]) but a niche's worth only — each a card of its
+//!   own even below a mix's least length, its new music the rest.
 //! * **The next of a wave** ([`next`]): what the coming «Моя волна» asks —
 //!   given a filter (novelty, character, scene) and the session, the next
 //!   `n` of the library and of the open pool ranked together: the walk of
@@ -61,6 +69,13 @@ const WALK_SEEDS: usize = 5;
 const NICHE_SEEDS: usize = 8;
 /// A library track played this recently waits.
 const RESTED_MS: i64 = 3 * HOUR_MS;
+/// A song without a preview joins a niche of a sound when the lists of
+/// this many of its songs hold it.
+pub const STRICT_LINKS: usize = 2;
+/// A niche of the home has this many songs at least, two of them loved…
+pub const NICHE_MIN_SEEDS: usize = 3;
+/// …and the home holds this many of the niches the row lacks at most.
+pub const NICHE_CARDS: usize = 2;
 
 /// Whether a filter with `tracks` fitting library tracks of `artists`
 /// artists is a niche.
@@ -80,11 +95,13 @@ pub struct NicheSound {
     band: Option<(f32, f32)>,
     /// The kinds of song among them.
     lanes: HashSet<LaneKey>,
+    /// A niche of a sound: one link is no evidence (see the module docs).
+    strict: bool,
 }
 
 impl NicheSound {
-    /// The sound of the niche of `tracks`.
-    pub fn of(model: &UserModel, tracks: &[usize]) -> Self {
+    /// The sound of the niche of `tracks`, `strict` for a niche of a sound.
+    pub fn of(model: &UserModel, tracks: &[usize], strict: bool) -> Self {
         let embedded: Vec<&Vector> = tracks.iter().filter_map(|&i| model.embedded_at(i)).collect();
         let centre = (!embedded.is_empty()).then(|| {
             let mut c = [0.0f32; crate::analysis::DIM];
@@ -107,7 +124,7 @@ impl NicheSound {
         e.sort_by(f32::total_cmp);
         let band = (!e.is_empty()).then(|| (e[0] - NICHE_ENERGY_SLACK, e[e.len() - 1] + NICHE_ENERGY_SLACK));
         let lanes = tracks.iter().map(|&i| LaneKey::of(model.song_type_at(i))).collect();
-        Self { tracks: tracks.to_vec(), centre, radius, band, lanes }
+        Self { tracks: tracks.to_vec(), centre, radius, band, lanes, strict }
     }
 
     /// Whether a sung song of `lane` (or one without words) is of the
@@ -127,15 +144,16 @@ impl NicheSound {
         if !self.kind_fits(lane) {
             return false;
         }
-        if let Some((lo, hi)) = self.band
-            && !artist.is_empty()
-        {
+        // The artist's own songs in the library, when it has them: in the
+        // band, or out.
+        let artist_in_band = (!artist.is_empty()).then(|| {
             let mut a = artist.to_vec();
             a.sort_by(f32::total_cmp);
             let median = a[a.len() / 2];
-            if median > hi + ARTIST_LOUDER || median < lo - ARTIST_LOUDER {
-                return false;
-            }
+            self.band.is_none_or(|(lo, hi)| median <= hi + ARTIST_LOUDER && median >= lo - ARTIST_LOUDER)
+        });
+        if artist_in_band == Some(false) {
+            return false;
         }
         match vector {
             Some(v) => {
@@ -144,7 +162,18 @@ impl NicheSound {
                 let energy = self.band.is_none_or(|(lo, hi)| (lo..=hi).contains(&model.energy_of(&e)));
                 near_sound && energy
             }
-            None => near.iter().any(|i| self.tracks.contains(i)),
+            None => {
+                let mut links: Vec<usize> = near.iter().copied().filter(|i| self.tracks.contains(i)).collect();
+                links.sort_unstable();
+                links.dedup();
+                if self.strict {
+                    // A radio's word alone is no sound: its artist's songs
+                    // or several of the niche's lists.
+                    artist_in_band == Some(true) || links.len() >= STRICT_LINKS
+                } else {
+                    !links.is_empty()
+                }
+            }
         }
     }
 }
@@ -276,6 +305,96 @@ fn character_of_new(m: &UserModel, character: Character, v: Option<&Vector>) -> 
     }
 }
 
+/// Whether a new song is of `scene`: by its kind for a kind; for a profile
+/// by its preview's region, else by the library's songs it is linked to;
+/// for a family of genres by its artist's songs in the library, else by
+/// the songs it is linked to (most of them of the family).
+fn scene_of_new(ctx: &WaveContext<'_>, scene: Scene, c: &OpenCandidate, artist_tracks: &[usize]) -> bool {
+    let m = ctx.model;
+    let most = |of: &dyn Fn(usize) -> bool, list: &[usize]| !list.is_empty() && 2 * list.iter().filter(|&&i| of(i)).count() > list.len();
+    match scene {
+        Scene::All => true,
+        Scene::Kind(l) => c.lane == Some(l),
+        Scene::Profile(k) => {
+            let is = |j: Option<usize>| j.and_then(|j| m.profiles.list.get(j)).is_some_and(|p| p.key == k);
+            match &c.vector {
+                Some(v) => is(m.regions.of(&m.embed(v), None)),
+                None => most(&|i| is(m.profile_at(i)), &c.near),
+            }
+        }
+        Scene::Genre(f) => {
+            let Some(g) = ctx.genre else { return false };
+            let of = |i: usize| g(i) == Some(f);
+            if artist_tracks.is_empty() { most(&of, &c.near) } else { most(&of, artist_tracks) }
+        }
+    }
+}
+
+/// A niche the home holds a card of ([`niches`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NicheCard {
+    pub key: crate::mixes::MixKey,
+    /// Its songs, the best loved first: the card's own and its seeds.
+    pub seeds: Vec<usize>,
+    /// A niche of a sound ([`NicheSound`]'s `strict`).
+    pub strict: bool,
+}
+
+/// The niches the home may hold a card of (see the module docs): the calm
+/// songs ([`Character::Calm`]), each kind of song, each family of genres
+/// `ctx` tells — those with [`NICHE_MIN_SEEDS`] songs and two loved but a
+/// niche's worth only ([`is_niche`]), the most loved first, every song
+/// once (a calm niche first), [`NICHE_CARDS`] at most.
+pub fn niches(ctx: &WaveContext<'_>) -> Vec<NicheCard> {
+    use crate::mixes::{MixKey, lane_code};
+    let m = ctx.model;
+    let now = m.now();
+    let mut filters: Vec<(crate::mixes::MixKey, WaveFilter, bool)> = vec![(MixKey::Calm, WaveFilter { character: Character::Calm, ..WaveFilter::default() }, true)];
+    let mut lanes: Vec<LaneKey> = (0..m.len()).map(|i| LaneKey::of(m.song_type_at(i))).filter(|l| *l != LaneKey::Unknown).collect();
+    lanes.sort_by_key(|l| lane_code(*l));
+    lanes.dedup();
+    for l in lanes {
+        filters.push((MixKey::Kind(lane_code(l)), WaveFilter { scene: Scene::Kind(l), ..WaveFilter::default() }, false));
+    }
+    if let Some(g) = ctx.genre {
+        let mut fams: Vec<u8> = (0..m.len()).filter_map(g).collect();
+        fams.sort_unstable();
+        fams.dedup();
+        for f in fams {
+            filters.push((MixKey::Genre(f), WaveFilter { scene: Scene::Genre(f), ..WaveFilter::default() }, false));
+        }
+    }
+    let mut found: Vec<(f32, NicheCard)> = Vec::new();
+    for (key, filter, strict) in filters {
+        let mut seeds: Vec<usize> = (0..m.len()).filter(|&i| (ctx.ok)(i) && fits_filter(ctx, &filter, i)).collect();
+        let artists: HashSet<ArtistId> = seeds.iter().filter_map(|&i| m.main_artist_at(i)).collect();
+        let loved = seeds.iter().filter(|&&i| m.tracks[i].aff_long(now) > 0.0).count();
+        if seeds.len() < NICHE_MIN_SEEDS || loved < 2 || !is_niche(seeds.len(), artists.len()) {
+            continue;
+        }
+        seeds.sort_by(|a, b| m.tracks[*b].aff_long(now).total_cmp(&m.tracks[*a].aff_long(now)).then(a.cmp(b)));
+        let love: f32 = seeds.iter().map(|&i| m.tracks[i].aff_long(now).max(0.0)).sum();
+        // The calm niche before the others whatever its love.
+        let rank = if strict { f32::INFINITY } else { love };
+        found.push((rank, NicheCard { key, seeds, strict }));
+    }
+    found.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut taken: HashSet<usize> = HashSet::new();
+    let mut out = Vec::new();
+    for (_, card) in found {
+        if out.len() == NICHE_CARDS {
+            break;
+        }
+        // A niche the one before already holds is not another.
+        if card.seeds.iter().filter(|i| taken.contains(i)).count() * 2 > card.seeds.len() {
+            continue;
+        }
+        taken.extend(card.seeds.iter().copied());
+        out.push(card);
+    }
+    out
+}
+
 /// The share of new music a wave of `filter` takes: the filter's, at least
 /// a niche's when new music is asked for at all.
 pub fn share_of(filter: &WaveFilter, niche: bool) -> f32 {
@@ -314,7 +433,7 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
     let seed_set: HashSet<usize> = seeds.iter().map(|s| s.0).chain(loved.iter().copied()).collect();
     let filtered = filter.character != Character::Any || filter.scene != Scene::All;
     let fitting_set: HashSet<usize> = fitting.iter().copied().collect();
-    let sound = (filtered || niche).then(|| NicheSound::of(m, &fitting));
+    let sound = (filtered || niche).then(|| NicheSound::of(m, &fitting, filter.character != Character::Any));
     let anchor = session.anchor(m).map(|a| m.embed(&a));
     let scale = m.scale().max(1e-6);
 
@@ -347,6 +466,9 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
             continue;
         }
         let artist_tracks = (ctx.artist_tracks)(&c.track);
+        if !scene_of_new(ctx, filter.scene, c, &artist_tracks) {
+            continue;
+        }
         if let Some(s) = &sound {
             let energies: Vec<f32> = artist_tracks.iter().filter_map(|&i| m.energy_at(i)).collect();
             if !s.fits(m, c.vector.as_ref(), c.lane, &c.near, &energies) {
@@ -365,10 +487,19 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
     }
     ext.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    // As many new as the share asks and the pool has, spread evenly.
-    let want_new = ((n as f32 * share).round() as usize).min(ext.len());
-    let want_lib = (n - want_new).min(lib.len());
-    let want_new = (n - want_lib).min(ext.len());
+    // As many new as the share asks and the pool has, spread evenly; a
+    // side short of its share is made up by the other, except at the ends:
+    // «Знакомое» (0) plays no new song and «Только новое» (1) no library
+    // one, fewer than `n` when that side runs out.
+    let (want_lib, want_new) = if share <= 0.0 {
+        (n.min(lib.len()), 0)
+    } else if share >= 1.0 {
+        (0, n.min(ext.len()))
+    } else {
+        let want_new = ((n as f32 * share).round() as usize).min(ext.len());
+        let want_lib = (n - want_new).min(lib.len());
+        (want_lib, (n - want_lib).min(ext.len()))
+    };
     let lib_artist = |i: usize| m.main_artist_at(i).map_or_else(|| format!("track:{i}"), |a| a.to_string());
     let ext_artist = |k: usize| pool[k].track.artists.first().map_or_else(String::new, |a| crate::artist_key(&a.name));
     let mut picks: Vec<WavePick> = Vec::with_capacity(want_lib + want_new);
