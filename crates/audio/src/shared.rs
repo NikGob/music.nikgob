@@ -135,6 +135,13 @@ pub(crate) struct Shared {
     // --- user settings ---
     /// Linear volume gain (already through the perceptual curve), f32 bits.
     pub volume: AtomicU32,
+    /// A fade over the volume of its own (the sleep timer's): the level it
+    /// glides to (0..1, on the volume's perceptual curve), f32 bits, and
+    /// how long the glide takes (ns, 0 = at once); then `fade_gen`, which
+    /// the callback watches. The volume itself is left as it is.
+    pub fade_level: AtomicU32,
+    pub fade_over_ns: AtomicU64,
+    pub fade_gen: AtomicU32,
     pub normalization: AtomicBool,
     /// Crossfade length in milliseconds; 0 means gapless.
     pub crossfade_ms: AtomicU32,
@@ -187,6 +194,9 @@ impl Shared {
             cfg_channels: AtomicU32::new(0),
             cfg_gen: AtomicU32::new(0),
             volume: AtomicU32::new(volume_curve(1.0).to_bits()),
+            fade_level: AtomicU32::new(1f32.to_bits()),
+            fade_over_ns: AtomicU64::new(0),
+            fade_gen: AtomicU32::new(0),
             normalization: AtomicBool::new(true),
             crossfade_ms: AtomicU32::new(0),
             pause_req: AtomicBool::new(false),

@@ -258,6 +258,37 @@ fn volume_uses_a_cubic_curve_without_steps() {
 }
 
 #[test]
+fn a_fade_glides_to_its_level_and_leaves_the_volume_alone() {
+    let dir = tmp();
+    let data = vec![0.5f32; RATE as usize * 8];
+    let p = path(&dir, "f.wav");
+    write_wav_f32(&p, RATE, 2, &data);
+    let mut rig = rig(RATE);
+    rig.player.play(PlayItem::file(1, &p));
+    rig.device.render(RATE as usize / 4);
+    // To silence over a second: halfway down after half of it, no steps.
+    rig.player.set_fade(0.0, Duration::from_secs(1));
+    let half = rig.device.render(RATE as usize / 2);
+    let mid = half[half.len() - 2];
+    assert!((mid - 0.5 * 0.125).abs() < 0.01, "halfway {mid}");
+    let rest = rig.device.render(RATE as usize / 2 + 480);
+    let max_step = half
+        .iter()
+        .chain(&rest)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0, f32::max);
+    assert!(max_step < 0.01, "zipper step {max_step}");
+    assert!(rest[rest.len() - 2].abs() < 1e-4, "{}", rest[rest.len() - 2]);
+    assert_eq!(rig.player.volume(), 1.0);
+    // Back at once: the volume as it was.
+    rig.player.set_fade(1.0, Duration::ZERO);
+    let out = rig.device.render(RATE as usize / 4);
+    assert!((out[out.len() - 2] - 0.5).abs() < 1e-3, "{}", out[out.len() - 2]);
+}
+
+#[test]
 fn normalization_applies_item_gain_only_when_enabled() {
     let dir = tmp();
     // 4 s of stereo.
