@@ -140,6 +140,10 @@ pub(crate) struct RadioRun {
     stale: bool,
     /// …and its state forgets what left the queue meanwhile.
     forgotten: Vec<Item>,
+    /// A wave whose filter has nothing left (not even to play again) in
+    /// this snapshot: it is not asked again until the filter or the
+    /// snapshot changes.
+    wave_dry: Option<std::sync::Weak<super::Snapshot>>,
 }
 
 /// What the user did to a track of the radio besides playing it.
@@ -148,8 +152,10 @@ enum Mark {
     Liked(Item, Option<nikgob_recs::Vector>),
     /// Taken out of the queue, or «Не нравится».
     Removed(Item),
-    /// The wave's filter changed (`Some`) or «↻ Другой вайб» (`None`).
-    Wave(Option<nikgob_recs::wave::WaveSeed>),
+    /// The wave's filter changed.
+    Wave(nikgob_recs::wave::WaveSeed),
+    /// «↻ Другой вайб» while the item played.
+    Vibe(Option<Item>),
 }
 
 impl Mark {
@@ -157,9 +163,9 @@ impl Mark {
         match self {
             Self::Liked(item, vector) => state.liked(item, vector),
             Self::Removed(item) => state.removed(item),
-            Self::Wave(Some(seed)) => state.set_wave(seed),
-            Self::Wave(None) => {
-                state.other_vibe();
+            Self::Wave(seed) => state.set_wave(seed),
+            Self::Vibe(playing) => {
+                state.other_vibe(playing.as_ref());
             }
         }
     }
@@ -224,6 +230,9 @@ pub(crate) enum RadioMsg {
         picks: Vec<Pick>,
         /// A wave's open pool, built or kept for its snapshot.
         wave_pool: Option<super::wave::WavePool>,
+        /// The user's scenes for the wave's header, found for a snapshot
+        /// on the way.
+        scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
     },
     NewFound {
         id: u64,
@@ -448,6 +457,7 @@ impl Worker {
             redo: None,
             stale: false,
             forgotten: Vec::new(),
+            wave_dry: None,
         };
         log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
         let context = context_of(&run.title);
@@ -518,6 +528,7 @@ impl Worker {
             redo: None,
             stale: false,
             forgotten: Vec::new(),
+            wave_dry: None,
         });
         log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
         self.radio_add_discoveries();
@@ -567,8 +578,14 @@ impl Worker {
             return;
         }
         let left = self.queue.upcoming().len();
+        let snap = self.snapshot();
         let Some(run) = &self.recs.radio.run else { return };
         if run.extending || (run.queue_gen.is_some() && left > EXTEND_AT) {
+            return;
+        }
+        if let (Some(dry), Some(snap)) = (&run.wave_dry, &snap)
+            && std::sync::Weak::ptr_eq(dry, &Arc::downgrade(snap))
+        {
             return;
         }
         self.radio_extend();
@@ -640,6 +657,7 @@ impl Worker {
             redo: None,
             stale: false,
             forgotten: Vec::new(),
+            wave_dry: None,
         });
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
@@ -790,6 +808,7 @@ impl Worker {
                 state: Box::new(state),
                 picks,
                 wave_pool: None,
+                scenes: None,
             };
             let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
         });
@@ -822,6 +841,10 @@ impl Worker {
             }
             _ => None,
         };
+        // The header's scenes, when this snapshot has none yet (they scan
+        // the library: not on the worker).
+        let has_scenes = self.recs.radio.scenes.as_ref().is_some_and(|(w, _)| std::sync::Weak::ptr_eq(w, &Arc::downgrade(&snap)));
+        let profiles = (!has_scenes).then(|| self.recs.home.as_ref().map(|h| h.blend_profiles.clone()).unwrap_or_default());
         let tx = self.recs.tx.clone();
         let spawned = std::thread::Builder::new().name("nikgob-wave".into()).spawn(move || {
             let t0 = std::time::Instant::now();
@@ -842,7 +865,8 @@ impl Worker {
                 cands.len(),
                 state.wave_bandit().and_then(|b| b.current_scene())
             );
-            let msg = RadioMsg::Extended { id, state: Box::new(state), picks, wave_pool: pool };
+            let scenes = profiles.map(|p| (Arc::downgrade(&snap), super::wave::scenes(&snap, &p)));
+            let msg = RadioMsg::Extended { id, state: Box::new(state), picks, wave_pool: pool, scenes };
             let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
         });
         if let Err(e) = spawned {
@@ -860,13 +884,23 @@ impl Worker {
         if !self.radio_alive() {
             return;
         }
+        let playing = self.playing.map(|e| e.track);
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let Some(old) = run.state.wave_seed().cloned() else { return };
+        // The song playing, as the radio served it: «Другой вайб» leaves
+        // its cluster, not that of the picks ahead of it.
+        let playing = playing.map(|t| run.streams.get(&t).map_or(Item::Track(t), |r| Item::Stream(r.clone())));
+        run.wave_dry = None;
+        // Picks on their way for a queue not started yet: they are of
+        // what the user just changed; the newer asks again.
+        if run.extending && run.queue_gen.is_none() {
+            run.stale = true;
+        }
         let seed = match seed {
             Some(s) => Some(s),
             // One cluster only: «Другой вайб» leaves the scene chosen for
             // every scene (another cluster then), else it starts afresh.
-            None if !run.state.other_vibe() && old.filter.scene != nikgob_recs::open_world::Scene::All => {
+            None if !run.state.other_vibe(playing.as_ref()) && old.filter.scene != nikgob_recs::open_world::Scene::All => {
                 let mut s = old.clone();
                 s.filter.scene = nikgob_recs::open_world::Scene::All;
                 s.only.clear();
@@ -874,7 +908,7 @@ impl Worker {
             }
             None => {
                 if run.extending {
-                    run.marks.push(Mark::Wave(None));
+                    run.marks.push(Mark::Vibe(playing));
                 }
                 None
             }
@@ -882,7 +916,7 @@ impl Worker {
         if let Some(s) = seed {
             run.state.set_wave(s.clone());
             if run.extending {
-                run.marks.push(Mark::Wave(Some(s)));
+                run.marks.push(Mark::Wave(s));
             }
         }
         self.radio_repick(0);
@@ -898,7 +932,10 @@ impl Worker {
 
     pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
         match m {
-            RadioMsg::Extended { id, state, picks, wave_pool } => {
+            RadioMsg::Extended { id, state, picks, wave_pool, scenes } => {
+                if scenes.is_some() {
+                    self.recs.radio.scenes = scenes;
+                }
                 if let Some(pool) = wave_pool {
                     // The wave's new picks play from the pool's tracks.
                     if let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) {
@@ -958,7 +995,9 @@ impl Worker {
         // and the tail dropped meanwhile is forgotten by their state too.
         let forgotten = std::mem::take(&mut run.forgotten);
         run.state.forget(&forgotten);
-        if std::mem::take(&mut run.stale) && run.queue_gen.is_some() {
+        // (Before the queue started only a wave's change makes them stale:
+        // the picks for it come instead.)
+        if std::mem::take(&mut run.stale) {
             let items: Vec<Item> = picks.into_iter().map(|p| p.item).collect();
             run.state.forget(&items);
             self.radio_extend();
@@ -1018,6 +1057,17 @@ impl Worker {
                     }
                 }
             }
+        }
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        let mut went_dry = false;
+        if is_wave(&run.state.seed) && run.queue_gen.is_some() {
+            let dry = ids.is_empty();
+            went_dry = dry && run.wave_dry.is_none();
+            run.wave_dry = dry.then(|| snap.as_ref().map(Arc::downgrade)).flatten();
+        }
+        if went_dry {
+            log::info!("wave: its filter has nothing left");
+            self.toast("Нечего играть", None);
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let new_now = ids.iter().filter(|t| run.streams.contains_key(t)).count();
@@ -1386,10 +1436,21 @@ impl Worker {
         let unfamiliar = snap.as_ref().is_none_or(|s| s.model.familiarity(track) == Familiarity::Unfamiliar);
         let vector = self.analysis.index().read().get(track).copied();
         let Some(run) = self.recs.radio.run.as_mut() else { return };
-        if run.queue_gen.is_none() || !unfamiliar {
+        if run.queue_gen.is_none() {
             return;
         }
         let item = run.streams.get(&track).map_or(Item::Track(track), |r| Item::Stream(r.clone()));
+        // A wave learns every like (its cluster's α); the neighbours follow
+        // a track new to the user only.
+        if !unfamiliar {
+            if is_wave(&run.state.seed) {
+                run.state.liked(item.clone(), vector);
+                if run.extending {
+                    run.marks.push(Mark::Liked(item, vector));
+                }
+            }
+            return;
+        }
         run.state.liked(item.clone(), vector);
         if run.extending {
             run.marks.push(Mark::Liked(item.clone(), vector));
@@ -1715,6 +1776,7 @@ impl Worker {
             redo: None,
             stale: false,
             forgotten: Vec::new(),
+            wave_dry: None,
         });
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
     }

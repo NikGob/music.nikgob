@@ -462,17 +462,46 @@ fn the_wave_plays_and_turns_without_a_skip() {
 
     // A chip: the filter is the wave's, the tail new, the novelty kept.
     let before = entries(&s.rt.state());
-    let calm = nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::Familiar, character: nikgob_view::WaveCharacter::Calm, scene: nikgob_view::WaveScene::All };
+    let familiar = nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::Familiar, ..Default::default() };
     let t0 = Instant::now();
-    s.rt.send(Command::SetWave(calm));
-    wait_for(&s.rt, "the calm tail", |st| {
+    s.rt.send(Command::SetWave(familiar));
+    wait_for(&s.rt, "the familiar tail", |st| {
         st.queue.current_entry == current
             && settled(st)
             && !entries(st).iter().any(|e| before.contains(e))
-            && st.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).is_some_and(|w| w.filter == calm)
+            && st.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).is_some_and(|w| w.filter == familiar)
     });
     eprintln!("a chip rebuilt the tail in {:?}", t0.elapsed());
     assert_eq!(s.rt.state().prefs.wave_novelty, nikgob_view::WaveNovelty::Familiar);
+
+    // A character this library has nothing of: it holds (the chip shows
+    // it), the tail is empty, the track playing goes on, and the wave
+    // does not ask again and again.
+    let calm = nikgob_view::WaveFilter { character: nikgob_view::WaveCharacter::Calm, ..familiar };
+    let before = entries(&s.rt.state());
+    s.rt.send(Command::SetWave(calm));
+    wait_for(&s.rt, "the calm answer", |st| {
+        st.toasts.iter().any(|t| t.text == "Нечего играть")
+            || st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() == 3 && !entries(st).iter().any(|e| before.contains(e))
+    });
+    let st = s.rt.state();
+    assert_eq!(st.queue.radio.as_ref().and_then(|r| r.wave.as_ref()).map(|w| w.filter), Some(calm), "the character holds");
+    assert_eq!(st.queue.current_entry, current);
+    if st.queue.next.is_empty() {
+        drop(st);
+        // Not picking again and again: idle whenever looked at.
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(60));
+            let st = s.rt.state();
+            let r = st.queue.radio.as_ref().expect("the wave goes on");
+            assert!(!r.extending, "the dry wave picks again");
+        }
+        // Another chip asks again.
+        s.rt.send(Command::SetWave(familiar));
+        wait_for(&s.rt, "the familiar tail back", settled);
+    } else {
+        drop(st);
+    }
 
     // A card of the row: its own filter.
     s.rt.send(Command::PlayWave { preset: Some(nikgob_view::MixKey::Everything) });
@@ -483,6 +512,56 @@ fn the_wave_plays_and_turns_without_a_skip() {
                     && w.filter == nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::Familiar, ..Default::default() }
             })
     });
+}
+
+/// A chip changed while the wave's first picks are on their way: the
+/// newer filter wins, the picks of the old one never start. («Только
+/// новое» with no new music found: nothing plays at all.)
+#[test]
+fn a_chip_while_the_wave_starts_wins() {
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayWave { preset: None });
+    let only_new = nikgob_view::WaveFilter { novelty: nikgob_view::WaveNovelty::OnlyNew, ..Default::default() };
+    s.rt.send(Command::SetWave(only_new));
+    wait_for(&s.rt, "the newer filter's answer", |st| st.queue.current_entry.is_some() || st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    let st = s.rt.state();
+    assert!(st.queue.current_entry.is_none(), "the library picks of «Баланс» started");
+    assert!(st.queue.radio.is_none());
+}
+
+/// A like of a familiar track teaches the wave its cluster (α), as one of
+/// a new track does; the wave's state is saved with the queue.
+#[test]
+fn a_wave_learns_a_like_of_a_familiar_track() {
+    let l = library(3, 6, 5, &[]);
+    let dir = tempfile::tempdir().unwrap();
+    let prefs_path = dir.path().join("prefs.json");
+    let alphas = || -> f64 {
+        let session: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.path().join("session.json")).unwrap()).unwrap();
+        let arms = session["radio"]["state"]["wave"]["arms"].as_array().cloned().unwrap_or_default();
+        assert!(!arms.is_empty(), "the wave's arms are saved");
+        arms.iter().map(|a| a["alpha"].as_f64().unwrap()).sum()
+    };
+    let s = start(&l.lib, Vec::new(), Prefs::default(), Some(&prefs_path));
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_for(&s.rt, "three ahead", |st| st.queue.radio.as_ref().is_some_and(|r| !r.extending && r.wave.is_some()) && st.queue.next.len() == 3);
+    drop(s);
+    let before = alphas();
+
+    // Back after a restart; every track of this library was heard out.
+    let s = start(&l.lib, Vec::new(), Prefs::default(), Some(&prefs_path));
+    wait_for(&s.rt, "the wave back", |st| st.queue.radio.as_ref().is_some_and(|r| r.wave.is_some()));
+    s.rt.send(Command::TogglePlay);
+    wait_until("it plays", || !s.asked.lock().unwrap().is_empty());
+    let track = s.rt.state().player.current.as_ref().unwrap().id;
+    s.rt.send(Command::Like(nikgob_core::model::LikeTarget::Track(track), true));
+    s.rt.send(Command::SetVolume(0.5));
+    wait_for(&s.rt, "the like", |st| (st.player.volume - 0.5).abs() < 1e-3);
+    drop(s);
+    assert_eq!(alphas(), before + 1.0, "its cluster's α grew");
 }
 
 /// Every start says who chose it and what plays it, every end why it

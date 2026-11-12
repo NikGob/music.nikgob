@@ -158,7 +158,7 @@ pub(crate) fn scenes(snap: &Snapshot, profiles: &[v::BlendProfile]) -> Vec<v::Wa
             found.push((n, v::WaveSceneCard { scene: v::WaveScene::Profile(p.key), title: p.title.clone() }));
         }
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut genres: Vec<(usize, v::WaveSceneCard)> = by_genre
         .into_iter()
         .filter(|(_, n)| *n >= MIN_ARM_TRACKS)
@@ -266,19 +266,11 @@ impl Worker {
     pub(crate) fn wave_view(&mut self) -> Option<v::WaveView> {
         let seed = self.wave_seed()?;
         let snap = self.snapshot();
-        let scenes = match (&snap, self.recs.radio.scenes.as_ref()) {
-            (Some(s), Some((w, list))) if Weak::ptr_eq(w, &Arc::downgrade(s)) => list.clone(),
-            (Some(s), _) => {
-                let profiles = self.recs.home.as_ref().map(|h| h.blend_profiles.clone()).unwrap_or_default();
-                let list = scenes(s, &profiles);
-                self.recs.radio.scenes = Some((Arc::downgrade(s), list.clone()));
-                list
-            }
-            (None, _) => Vec::new(),
-        };
+        // Found on the wave's thread with its picks (of this snapshot or,
+        // until its next picks, of the one before).
+        let mut scenes = self.recs.radio.scenes.as_ref().map(|(_, list)| list.clone()).unwrap_or_default();
         // A card's scene the list lacks (a kind of song, a small family)
         // is offered too, first.
-        let mut scenes = scenes;
         let current = view_scene(seed.filter.scene);
         if current != v::WaveScene::All
             && !scenes.iter().any(|c| c.scene == current)
