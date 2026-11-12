@@ -12,6 +12,9 @@
 //! `snap:path.png` saves a screenshot there and goes on (a sequence of
 //! pictures in one run).
 //! `album` opens the first album of the library (`album:Title` that one).
+//! `first_run:step,picks` opens the first run at `sources`, `keep`,
+//! `connect`, `lyrics` or `more` with the tiles `picks` picked
+//! (`spotify+youtube+soundcloud+folder`, `local`).
 //! `world:Title` chooses that world on the card of Главная,
 //! `world_page:Title` opens its page (`world_page` the first world's).
 //! `mix_page` opens the page of the first mix of Главная (`mix_page:Title`
@@ -348,6 +351,15 @@ impl Shot {
                 }
                 ui.navigate(ctx, r, out);
                 self.wait = 30;
+            }
+            "first_run" => {
+                // `first_run:connect,spotify+youtube+folder`: the first run
+                // at that step with those tiles picked.
+                let (step, picks) = arg.split_once(',').unwrap_or((arg, ""));
+                if !ui.first_run_at(state, step, picks, out) {
+                    log::warn!("shot: no first run step {step:?}");
+                }
+                self.wait = 40;
             }
             "world" | "world_page" => {
                 // A world of the card by its title: chosen on the card, or

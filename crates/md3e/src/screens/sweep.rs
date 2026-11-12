@@ -239,7 +239,7 @@ pub const ALL: &[SettingId] = {
         LyricsWordsAll, ToastTime, DownloadToasts, LibraryDir, MastersDir, Inbox, Trash, ExportData,
         // Для разработчика.
         LyricsUi, LyricsGpu, LyricsModelsAuto, MusicBrainz, AcoustId, LastfmKey, ListenbrainzToken, BackgroundCountsLess,
-        ProfilesSplit, GraphServices, GraphOpenData, GraphPersonal, LibraryAsTaste, DislikeInRecs, DemoProfile,
+        ProfilesSplit, GraphServices, GraphOpenData, GraphPersonal, LibraryAsTaste, DislikeInRecs, DemoProfile, FirstRun,
     ]
 };
 
@@ -373,7 +373,7 @@ fn spec(id: SettingId) -> Spec {
         S::Equalizer => Spec::Switch(|p| &mut p.eq_on),
         S::TrackSpeed => Spec::Switch(|p| &mut p.speed_enabled),
         S::KeepTimbre => Spec::Switch(|p| &mut p.keep_timbre),
-        S::LibraryDir | S::MastersDir | S::Inbox | S::ExportData | S::FakeRestore | S::DemoProfile => Spec::Fixed(Action, BUTTONS),
+        S::LibraryDir | S::MastersDir | S::Inbox | S::ExportData | S::FakeRestore | S::DemoProfile | S::FirstRun => Spec::Fixed(Action, BUTTONS),
         S::Trash => Spec::Switch(|p| &mut p.use_trash),
         S::MusicBrainz | S::AcoustId | S::LastfmKey | S::ListenbrainzToken | S::Prowlarr | S::Soulseek | S::SpotifyPersonal
         | S::YouTubeCookies | S::SoundCloudToken => Spec::Fixed(Field, SECRET),
@@ -865,6 +865,8 @@ impl Survey {
     /// «Подробно».
     pub fn tab(&mut self, prefs: &Prefs, tab: usize) -> Vec<DrawnRow> {
         self.state.prefs = prefs.clone();
+        // A first start's prefs would show the first run over the page.
+        self.state.prefs.first_run = false;
         self.ui.pages.set_settings_deep(true);
         self.ui.pages.open_setting(tab_first(tab));
         let mut rows = Vec::new();
@@ -938,7 +940,7 @@ mod tests {
             | S::LyricsDeep | S::LyricsWordsAll | S::ToastTime | S::DownloadToasts | S::LibraryDir | S::MastersDir | S::Inbox
             | S::Trash | S::ExportData | S::LyricsUi | S::LyricsGpu | S::LyricsModelsAuto | S::MusicBrainz | S::AcoustId
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
-            | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::CoverSpinSpeed
+            | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::FirstRun | S::CoverSpinSpeed
             | S::CoverPulseStrength | S::RingSpinSpeed | S::RingPause | S::HomeSections | S::Preset(_) => pos(id),
         }
     }

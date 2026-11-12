@@ -31,7 +31,7 @@ use egui::{Align2, Key, Modifiers, Rangef, Rect, Sense, Ui, UiBuilder, Vec2, ema
 use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
 pub(super) use rows::fmt_speed;
-pub(crate) use services::{SoloistDialog, open_url};
+pub(crate) use services::{SoloistDialog, login_error, login_prompt, numbered, open_url, paused_line, spotify_steps};
 
 use super::settings_help::{self, DrawnRow, Level, SettingId as Id, TABS};
 use super::{PageState, brand, connected};

@@ -187,6 +187,15 @@ impl Md3eUi {
         self.stack.last().unwrap_or(&Route::Home)
     }
 
+    /// Opens the first run at a step (`sources`, `keep`, `connect`,
+    /// `lyrics`, `more`) with `picks` («spotify+folder») chosen
+    /// (screenshots). False for a step it does not know.
+    pub fn first_run_at(&mut self, state: &ViewState, step: &str, picks: &str, out: &mut Vec<Command>) -> bool {
+        let Some(step) = pages::first_run::Step::named(step) else { return false };
+        pages::first_run::jump(state, &mut self.pages, step, picks, out);
+        true
+    }
+
     /// Chooses a world on the card at the top of Главная (screenshots).
     pub fn choose_world(&self, ctx: &Context, key: &str) {
         pages::choose_world(ctx, key);
@@ -470,6 +479,12 @@ impl Md3eUi {
             .frame(egui::Frame::new().fill(s.surface))
             .show(root, |ui| {
                 let full = ui.max_rect();
+                // The first run takes the whole window, before the shell.
+                if pages::first_run::shown(state, &mut self.pages) {
+                    self.content_rect = full;
+                    pages::first_run::show(ui, full, state, &mut self.pages, out);
+                    return;
+                }
                 let class = size_class(full.width());
                 if class == SizeClass::Compact {
                     if compact_page(self.route()) {

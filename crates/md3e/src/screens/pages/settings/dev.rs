@@ -1,8 +1,8 @@
 //! «Для разработчика»: the owner's own builds, in «Подробно» only (every
 //! row here is [`Level::Dev`](super::super::settings_help::Level)). Where
 //! the lyrics' highlight is made and where the models run, the services'
-//! keys, the taste profiles' and the similar music's switches, and the
-//! separate profile for videos and UI tests.
+//! keys, the taste profiles' and the similar music's switches, the
+//! separate profile for videos and UI tests, and the first run shown again.
 
 use egui::Ui;
 use nikgob_view::{Command, Prefs, ViewState};
@@ -41,6 +41,12 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     if !nikgob_view::dev::profile() {
         demo_profile(ui, out);
     }
+    // «Показать»: the first run over the whole window, as on a new install.
+    row(ui, Id::FirstRun, |ui| {
+        if ui.add(Button::new("Показать").style(Style::Tonal).id_salt("set-dev-first-run")).clicked() {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::FirstRun(true)));
+        }
+    });
 }
 
 /// «Контакт MusicBrainz» and «Ключ AcoustID», saved together.
