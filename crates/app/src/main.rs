@@ -866,8 +866,12 @@ fn main() -> eframe::Result {
         runtime.send(c);
     }
     stage("runtime");
+    let mut ui = Md3eUi::new();
+    // A screenshot run off the screen never covers the user's screen.
+    ui.set_fullscreen_allowed(!shot::offscreen());
+    ui.set_synthetic_levels(std::env::var_os("NIKGOB_VIZ_SYNTH").is_some());
     let core = Core {
-        ui: Md3eUi::new(),
+        ui,
         runtime,
         desktop: desktop::Desktop::start(wake),
         analyzer: links.map(|l| l.analyzer),

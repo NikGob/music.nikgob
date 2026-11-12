@@ -9,7 +9,7 @@ pub mod rail;
 pub mod slider;
 pub mod toolbar;
 
-pub use button::{Button, IconButton, IconWidth, Shape, Size, Style};
+pub use button::{Button, Glyph, IconButton, IconWidth, Shape, Size, Style};
 pub use group::{ButtonGroup, ConnectedGroup, Item};
 pub use paint::Radii;
 pub use rail::{NavRail, RailItem};

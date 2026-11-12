@@ -123,6 +123,7 @@ pub struct ConnectedGroup<'a> {
     size: Size,
     labels: &'a [&'a str],
     icons: Option<&'a [crate::Icon]>,
+    glyphs: Option<&'a [super::button::Glyph]>,
     equal_width: Option<f32>,
     reselect: bool,
     enabled: Option<&'a [bool]>,
@@ -135,6 +136,7 @@ impl<'a> ConnectedGroup<'a> {
             size: Size::S,
             labels,
             icons: None,
+            glyphs: None,
             equal_width: None,
             reselect: false,
             enabled: None,
@@ -165,6 +167,13 @@ impl<'a> ConnectedGroup<'a> {
         self
     }
 
+    /// Icon-only members drawn by these painters (labels then become
+    /// tooltips).
+    pub fn glyphs(mut self, glyphs: &'a [super::button::Glyph]) -> Self {
+        self.glyphs = Some(glyphs);
+        self
+    }
+
     /// Give every member the same width.
     pub fn equal_width(mut self, width: f32) -> Self {
         self.equal_width = Some(width);
@@ -191,8 +200,9 @@ impl<'a> ConnectedGroup<'a> {
                     if i == 0 { shape::FULL } else { pressed_inner },
                     if i + 1 == n { shape::FULL } else { pressed_inner },
                 );
-                let response = if let Some(icons) = self.icons {
-                    let mut b = IconButton::new(icons[i])
+                let response = if self.icons.is_some() || self.glyphs.is_some() {
+                    let icon = self.icons.map_or(crate::Icon::GraphicEq, |icons| icons[i]);
+                    let mut b = IconButton::new(icon)
                         .size(self.size)
                         .style(super::button::Style::Tonal)
                         .selected(sel)
@@ -200,6 +210,9 @@ impl<'a> ConnectedGroup<'a> {
                         .tooltip(self.labels[i])
                         .radii(rest, pressed)
                         .id_salt((self.id, i));
+                    if let Some(glyphs) = self.glyphs {
+                        b = b.glyph(glyphs[i]);
+                    }
                     if let Some(w) = self.equal_width {
                         let natural = b.natural_width();
                         b = b.width_delta(w - natural);

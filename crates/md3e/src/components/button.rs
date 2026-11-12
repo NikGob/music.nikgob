@@ -513,7 +513,12 @@ pub struct IconButton {
     colors: Option<Colors>,
     id_salt: Option<Id>,
     filled_icon: bool,
+    glyph: Option<Glyph>,
 }
+
+/// Paints a button's content in place of an icon: the icon's square and
+/// the content colour.
+pub type Glyph = fn(&egui::Painter, Rect, Color32);
 
 impl IconButton {
     pub fn new(icon: Icon) -> Self {
@@ -533,6 +538,7 @@ impl IconButton {
             colors: None,
             id_salt: None,
             filled_icon: false,
+            glyph: None,
         }
     }
 
@@ -543,6 +549,13 @@ impl IconButton {
 
     pub fn style(mut self, style: Style) -> Self {
         self.style = style;
+        self
+    }
+
+    /// Drawn content instead of the icon (the icon still names the
+    /// button for screen readers when there is no tooltip).
+    pub fn glyph(mut self, glyph: Glyph) -> Self {
+        self.glyph = Some(glyph);
         self
     }
 
@@ -670,8 +683,10 @@ impl Widget for IconButton {
             };
             let s = self.size.icon_button_icon();
             let r = Rect::from_center_size(visual.center(), Vec2::splat(s));
-            icon.widget(selected || self.filled_icon, content, s)
-                .paint_at(ui, r);
+            match self.glyph {
+                Some(glyph) => glyph(ui.painter(), r, content),
+                None => icon.widget(selected || self.filled_icon, content, s).paint_at(ui, r),
+            }
         }
         if let Some(tip) = &self.tooltip {
             response = response.on_hover_text(tip);
