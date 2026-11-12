@@ -189,8 +189,7 @@ impl Scroll {
         }
         self.loose = false;
         if pitch > 0.0 {
-            let lean = if self.parts { 0.49 } else { 0.2 } * self.lean;
-            self.offset = ((self.offset / pitch + lean).round() * pitch).clamp(0.0, max.max(0.0));
+            self.offset = (rest_edge(self.offset / pitch, self.parts, self.lean) * pitch).clamp(0.0, max.max(0.0));
         }
         true
     }
@@ -462,7 +461,10 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
     child.set_clip_rect(clip.intersect(within));
     for i in 0..row.n {
         let cell = Rect::from_min_size(pos2(grid.left + i as f32 * pitch - shown, row.top), vec2(card_w, row.card_h));
-        if cell.right() <= view.left() || cell.left() >= view.right() {
+        // Only the cards in sight: a row below the window (its layout and
+        // its section's height stay) draws none, so a playing card there
+        // asks for no frames.
+        if cell.right() <= view.left() || cell.left() >= view.right() || !child.is_rect_visible(cell) {
             continue;
         }
         card(&mut child, i, cell);
@@ -488,6 +490,22 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         ctx.data_mut(|d| d.insert_temp(id, state));
     }
     row.live && state.wants_more(row.n, max, grid.width)
+}
+
+/// The card's edge a row at `at` cards comes to rest on. Turned by parts
+/// of a notch, the next edge the way it went (`lean`), however little it
+/// went: rounding with a lean took a hundredth of a card back. A touchpad,
+/// the nearest edge, leaning a little the way it went.
+fn rest_edge(at: f32, parts: bool, lean: f32) -> f32 {
+    // Already on an edge (to the float's error): it stays.
+    const ON: f32 = 1e-3;
+    if parts && lean > 0.0 {
+        (at - ON).ceil()
+    } else if parts && lean < 0.0 {
+        (at + ON).floor()
+    } else {
+        (at + 0.2 * lean).round()
+    }
 }
 
 #[cfg(test)]
@@ -618,6 +636,18 @@ mod tests {
         s.nudge(0.25, PITCH, max, 10.0);
         assert!(s.settle(11.0, PITCH, max));
         assert_eq!(s.offset, PITCH);
+        // However small the step, it goes on, either way, and never past
+        // the row's end.
+        for (from, parts, to) in [(0.0, -0.005, 1.0), (3.0, 0.005, 2.0), (2.0, -0.999, 3.0)] {
+            let mut s = Scroll { offset: from * PITCH, ..Scroll::default() };
+            s.nudge(parts, PITCH, max, 0.0);
+            assert!(s.settle(1.0, PITCH, max));
+            assert_eq!(s.offset, (to * PITCH).min(max), "{from} by {parts}");
+        }
+        let mut s = Scroll { offset: max, ..Scroll::default() };
+        s.nudge(-0.005, PITCH, max, 0.0);
+        assert!(s.settle(1.0, PITCH, max));
+        assert_eq!(s.offset, max);
     }
 
     /// A touchpad stopping a little past a card's edge leans the way it

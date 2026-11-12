@@ -963,6 +963,9 @@ pub struct StageUi {
     home_tour: Option<f64>,
     /// Where the parts were last frame.
     rects: Vec<(Part, Rect)>,
+    /// The scene `rects` were measured on (`None`: none drawn yet). Главная
+    /// with no section measures nothing, and is measured all the same.
+    measured: Option<Scene>,
     script: Script,
     script_since: f64,
     /// Seconds into the script last frame (the hand's move is the
@@ -999,6 +1002,7 @@ impl Default for StageUi {
             home_wheel_at: f64::NEG_INFINITY,
             home_tour: None,
             rects: Vec::new(),
+            measured: None,
             script: Script::None,
             script_since: 0.0,
             script_last: 0.0,
@@ -1103,8 +1107,9 @@ impl StageUi {
             .fold(0.0, f32::max);
         // Главная not measured yet: one more frame tells how tall it is.
         // Measured, nothing moves unless the tour does: asking for frames
-        // here kept the whole window drawing at its full rate.
-        if req.fit_home && scene == Scene::Home && home_bottom <= 0.0 {
+        // here kept the whole window drawing at its full rate (so did an
+        // empty Главная, or every section off, measured as no height).
+        if needs_measure(req.fit_home, scene, self.measured) {
             ctx.request_repaint();
         }
         // Главная on the stage is the page at the stage's width (as big as
@@ -1299,11 +1304,19 @@ impl StageUi {
         ctx.set_sublayer(page, layer);
         ctx.set_transform_layer(layer, global);
         self.rects = rects;
+        self.measured = Some(scene);
         self.visible = true;
         self.rect = Some(req.rect);
         let ms = started.elapsed().as_secs_f32() * 1000.0;
         self.cost = self.cost * 0.9 + ms * 0.1;
     }
+}
+
+/// Whether Главная on the stage still waits for a frame to measure it: it
+/// is shown and was not drawn last frame. Measured with no sections it
+/// waits for nothing.
+fn needs_measure(fit_home: bool, scene: Scene, measured: Option<Scene>) -> bool {
+    fit_home && scene == Scene::Home && measured != Some(Scene::Home)
 }
 
 /// Above a page on the stage (Главная, an album).
@@ -1493,6 +1506,17 @@ mod tests {
             assert!((c.x * scale - stage.x).abs() < 0.01 && (c.y * scale - stage.y).abs() < 0.01);
         }
         assert_eq!(page_canvas(vec2(1800.0, 900.0), 1200.0).1, 1.0, "never larger than real");
+    }
+
+    /// Главная waits one frame to be measured, then no more: an empty one
+    /// (or every section off) measures no height and asks for no frames.
+    #[test]
+    fn an_empty_home_is_measured_once() {
+        assert!(needs_measure(true, Scene::Home, None));
+        assert!(needs_measure(true, Scene::Home, Some(Scene::Track)));
+        assert!(!needs_measure(true, Scene::Home, Some(Scene::Home)));
+        assert!(!needs_measure(false, Scene::Home, None));
+        assert!(!needs_measure(true, Scene::Track, None));
     }
 
     /// «Разделы главной»: the stage tours Главная, a rest at the top, down

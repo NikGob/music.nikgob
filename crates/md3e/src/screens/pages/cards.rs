@@ -465,7 +465,7 @@ pub fn mix(
     let mut more: Option<Response> = None;
     // While the mix plays its outline turns, as the player's cover does
     // (the picture stays upright), and comes to rest when it stops.
-    let spin = turn_while(ui.ctx(), id, playing && status == Status::Playing);
+    let spin = turn_while(ui.ctx(), id, playing && status == Status::Playing, ui.is_rect_visible(cell));
     scaled(ui, art.center(), squish, |ui| {
         paint::container(ui.painter(), art, Radii::all(r), tile, egui::Stroke::NONE);
         let inner = Rect::from_center_size(art.center(), art.size() * 0.82 * zoom);
@@ -528,8 +528,9 @@ pub const MIX_TURN_S: f32 = 14.0;
 
 /// The angle of the outline of the card `id` that turns while `turning`
 /// (its mix plays): it speeds up and slows down on the effects spring and
-/// stays where it stopped; still with less motion.
-pub fn turn_while(ctx: &egui::Context, id: Id, turning: bool) -> f32 {
+/// stays where it stopped; still with less motion. Out of sight (`seen`
+/// false: a row below the window) it asks for no frames.
+pub fn turn_while(ctx: &egui::Context, id: Id, turning: bool, seen: bool) -> f32 {
     let theme = Theme::get(ctx);
     let on = turning && !theme.reduced_motion;
     let run = anim::fraction(ctx, id.with("spin-run"), f32::from(u8::from(on)), theme.motion.default_effects);
@@ -540,7 +541,7 @@ pub fn turn_while(ctx: &egui::Context, id: Id, turning: bool) -> f32 {
         d.insert_temp(id.with("spin"), (now, a));
         a
     });
-    if run > 0.001 {
+    if run > 0.001 && seen {
         ctx.request_repaint();
     }
     spin
@@ -674,7 +675,10 @@ pub fn liked_playlist(
     let beating = playing && status == Status::Playing && !theme.reduced_motion;
     let beat_k = anim::fraction(ui.ctx(), id.with("beat"), f32::from(u8::from(beating)), theme.motion.default_effects).clamp(0.0, 1.0);
     let beat = if beat_k > 0.001 {
-        ui.ctx().request_repaint();
+        // Out of sight (below the window) it asks for no frames.
+        if ui.is_rect_visible(cell) {
+            ui.ctx().request_repaint();
+        }
         beat_k * heartbeat(song_s)
     } else {
         0.0

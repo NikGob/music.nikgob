@@ -277,7 +277,10 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
             let selected = i == current;
             let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(card));
             painter.rect_filled(card, shape::MEDIUM, s.surface_container_high);
-            let moving = resp.hovered() || (selected && area == Area::Lyrics);
+            // The tile under the pointer and the chosen lyrics look move,
+            // when in sight (a row scrolled away asks for no frames) and
+            // unless motion is reduced.
+            let moving = (resp.hovered() || (selected && area == Area::Lyrics)) && !app.reduced_motion && ui.is_rect_visible(card);
             let shown = offered(area, p, i);
             let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(card).id_salt(("set-preset-tile-ui", area, i)));
             tui.set_clip_rect(ui.clip_rect().intersect(card));
