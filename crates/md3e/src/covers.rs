@@ -294,7 +294,14 @@ pub fn set_web_sizer(ctx: &Context, sizer: WebSizer) {
 /// the next track, the current one first). Replaces the previous set.
 pub fn pin<'a>(ctx: &Context, uris: impl IntoIterator<Item = &'a str>) {
     if let Some(s) = shared(ctx) {
-        let pinned: Vec<String> = uris.into_iter().map(|u| base(u).to_owned()).collect();
+        // A thumbnail's real art is what is drawn for it: kept too.
+        let pinned: Vec<String> = uris
+            .into_iter()
+            .flat_map(|u| {
+                let real = if is_web(u) && is_thumbnail(u) { s.real_of(u) } else { None };
+                std::iter::once(base(u).to_owned()).chain(real.map(|r| base(&r).to_owned()))
+            })
+            .collect();
         let mut lru = lock(&s.lru);
         lru.current = pinned.first().cloned();
         lru.pinned = pinned.into_iter().collect();
@@ -482,13 +489,23 @@ fn sized_texture(ctx: &Context, shared: &Shared, uri: &str, size: Vec2, zoom: f3
 /// Loads `next` at every size `current` is drawn at now (the next track's
 /// cover in the player bar and Now Playing), so it is decoded and on the
 /// GPU before its track starts, not in the frame the cover morph begins.
+/// A video thumbnail counts as what [`texture`] draws for it: its real art
+/// once found (the thumbnail too, drawn while the art decodes).
 pub fn prefetch_like(ctx: &Context, current: &str, next: &str) {
     let Some(shared) = shared(ctx) else { return };
-    if base(current) == base(next) || parse(next).is_none() {
+    let real = |u: &str| if is_web(u) && is_thumbnail(u) { shared.real_of(u) } else { None };
+    let current = real(current).unwrap_or_else(|| current.to_owned());
+    let next_real = real(next);
+    let drawn = next_real.as_deref().unwrap_or(next);
+    if base(&current) == base(drawn) || parse(drawn).is_none() {
         return;
     }
+    let mut nexts = vec![drawn];
+    if next_real.is_some() && parse(next).is_some() {
+        nexts.push(next);
+    }
     let pass = shared.frame();
-    let (_, origin) = sized(&shared, current, None);
+    let (_, origin) = sized(&shared, &current, None);
     let tiers: Vec<Option<u32>> = {
         let lru = lock(&shared.lru);
         let mut tiers: Vec<Option<u32>> = lru
@@ -502,12 +519,25 @@ pub fn prefetch_like(ctx: &Context, current: &str, next: &str) {
         tiers
     };
     for tier in tiers {
-        let (wanted, origin) = sized(&shared, next, tier);
-        let bytes = match load(ctx, &wanted) {
-            Ok(Some(texture)) => texture_bytes(texture.size),
-            _ => 0,
-        };
-        shared.used(&wanted, &origin, tier, pass, bytes);
+        for next in &nexts {
+            let (wanted, origin) = sized(&shared, next, tier);
+            let bytes = match load(ctx, &wanted) {
+                Ok(Some(texture)) => texture_bytes(texture.size),
+                _ => 0,
+            };
+            shared.used(&wanted, &origin, tier, pass, bytes);
+        }
+    }
+}
+
+/// The next track's cover as if drawn: a video thumbnail without its real
+/// art yet is handed to the app ([`take_thumbnails`], once while asked
+/// for), so the art is looked up while the track waits, not after it
+/// starts.
+pub fn want_real_cover(ctx: &Context, uri: &str) {
+    let Some(shared) = shared(ctx) else { return };
+    if is_web(uri) && is_thumbnail(uri) && shared.real_of(uri).is_none() {
+        shared.thumbnail_drawn(uri, shared.frame());
     }
 }
 
@@ -1223,6 +1253,47 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("the next cover was not loaded ahead");
+    }
+
+    /// A stream track's cover is a video thumbnail whose real art the app
+    /// found: the next one's art is loaded at the sizes the current one's
+    /// art is drawn at.
+    #[test]
+    fn the_next_real_art_of_a_thumbnail_loads_ahead() {
+        let ctx = ctx();
+        let art = covers("next-real", 2, 600);
+        let (current, next) = ("https://i.ytimg.com/vi/cur/hqdefault.jpg", "https://i.ytimg.com/vi/nxt/hqdefault.jpg");
+        let real = Arc::new(HashMap::from([(current.to_owned(), art[0].clone()), (next.to_owned(), art[1].clone())]));
+        set_real_covers(&ctx, &real);
+        for _ in 0..5000 {
+            let mut done = false;
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                let small = texture(ui.ctx(), current, vec2(48.0, 48.0), 1.0);
+                let big = texture(ui.ctx(), current, vec2(400.0, 400.0), 1.0);
+                prefetch_like(ui.ctx(), current, next);
+                let l = loaded(ui.ctx());
+                done = small.is_some() && big.is_some() && l.contains(&format!("{}#128", art[1])) && l.contains(&format!("{}#512", art[1]));
+            })
+            .drop_without_applying_deltas();
+            if done {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the next real art was not loaded ahead");
+    }
+
+    /// The next cover's thumbnail without art is handed over before it is
+    /// drawn; one with art is not.
+    #[test]
+    fn the_next_thumbnail_is_handed_over_ahead() {
+        let ctx = ctx();
+        let (bare, found) = ("https://i.ytimg.com/vi/a/hqdefault.jpg", "https://i.ytimg.com/vi/b/hqdefault.jpg");
+        set_real_covers(&ctx, &Arc::new(HashMap::from([(found.to_owned(), "https://x.invalid/art.jpg".to_owned())])));
+        want_real_cover(&ctx, bare);
+        want_real_cover(&ctx, found);
+        want_real_cover(&ctx, "https://x.invalid/album.jpg");
+        assert_eq!(take_thumbnails(&ctx), vec![bare.to_owned()]);
     }
 
     /// The path of a cover URI made by [`covers`].
