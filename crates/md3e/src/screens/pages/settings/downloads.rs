@@ -19,7 +19,8 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     // Обычно · Всё · Свои: the one under the pointer tints the
     // sources it would switch and shows where their switches would go.
     let mut preview = preset::row(ui, v::presets::Area::Sources, p);
-    download_sources(ui, state, preview.as_mut().unwrap_or(&mut *p));
+    let saved = p.clone();
+    download_sources(ui, state, preview.as_mut().unwrap_or(&mut *p), &saved);
 
     group(ui, "По лайку");
     segments(ui, Id::LikeDownload, p);
@@ -82,7 +83,10 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
 /// does not have is left out (torrents and Soulseek stay: they say what
 /// they need, dimmed until set up). A move slides the rows to their new
 /// places.
-fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
+/// `saved`: the prefs as they are (`p` may be a preset's preview): what a
+/// row says under its name follows them, so a preset under the pointer
+/// changes the switches only and no row grows or shrinks under it.
+fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs, saved: &Prefs) {
     let mut order = p.source_order();
     let shown: Vec<v::SourceKey> = order
         .iter()
@@ -121,7 +125,7 @@ fn download_sources(ui: &mut Ui, state: &ViewState, p: &mut Prefs) {
         let note = match (key, view) {
             (v::SourceKey::Torrents, Some(v)) if !v.available => Some(Note::Blocker("Нужен Prowlarr")),
             (v::SourceKey::Soulseek, _) if !state.downloads.soulseek.configured() => Some(Note::Blocker("Нужен аккаунт")),
-            (v::SourceKey::Soulseek, Some(v)) if order[at].on && !v.available => Some(Note::Error("Не подключился")),
+            (v::SourceKey::Soulseek, Some(v)) if saved.source_on(*key) && !v.available => Some(Note::Error("Не подключился")),
             (_, Some(v)) => v.status.as_deref().map(Note::Error),
             _ => None,
         };

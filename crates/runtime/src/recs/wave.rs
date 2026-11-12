@@ -194,6 +194,11 @@ fn profile_of(snap: &Snapshot, tracks: &[TrackId]) -> Option<u32> {
     n.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|x| x.0)
 }
 
+/// The name a wave plays under: its card's mix (`card`), else «Моя волна».
+fn wave_title(card: Option<String>) -> String {
+    card.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| TITLE.to_owned())
+}
+
 impl Worker {
     /// `Command::PlayWave`: «Моя волна» plain, or as the card `preset`
     /// has it; a card that is no wave plays its list.
@@ -220,7 +225,11 @@ impl Worker {
             return;
         };
         log::info!("wave: starts {:?}", seed);
-        self.start_radio(RadioSeed::Wave(seed), TITLE.to_owned(), EventContext::HomeSection, None);
+        // A card's wave is named after its mix: «Играет из микса
+        // «Хип-хоп микс»», the queue's header, the card that plays. What
+        // the history keeps of it is the seed's (a wave) and the section.
+        let title = wave_title(preset.and_then(|k| self.recs.home.as_ref()?.lanes.iter().find(|l| l.key == k).map(|l| l.title.clone())));
+        self.start_radio(RadioSeed::Wave(seed), title, EventContext::HomeSection, None);
         let id = self.recs.radio.run_id();
         self.recs.radio.wave_preset = id.map(|id| (id, preset));
     }
@@ -287,6 +296,17 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A wave started from a mix's card plays under the mix's name, so the
+    /// queue says «из микса «Хип-хоп микс»», not «Моя волна»; the plain
+    /// wave (or a card without a name) is «Моя волна».
+    #[test]
+    fn a_cards_wave_is_named_after_its_mix() {
+        assert_eq!(wave_title(Some("Хип-хоп микс".into())), "Хип-хоп микс");
+        assert_eq!(super::super::radio::context_of(&wave_title(Some("Хип-хоп микс".into()))), "микса «Хип-хоп микс»");
+        assert_eq!(wave_title(None), TITLE);
+        assert_eq!(wave_title(Some(" ".into())), TITLE);
+    }
 
     /// The view's filters and the engine's go both ways.
     #[test]

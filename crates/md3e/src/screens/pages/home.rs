@@ -638,6 +638,12 @@ fn liked_playing(state: &ViewState, p: &PlaylistCard) -> bool {
     state.player.status == Status::Playing && state.player.context_page == Some(Route::Playlist(p.id))
 }
 
+/// Where the playing song is, in seconds (the heart of «Любимые» beats
+/// with it).
+fn song_s(state: &ViewState) -> f32 {
+    state.player.position_now().as_secs_f32()
+}
+
 /// A mix card's height on `grid`: its cover and the lines under it.
 fn mix_card_h(grid: Grid) -> f32 {
     grid.tile(grid.cards_per_line()) + cards::MIX_TEXT_H
@@ -694,7 +700,7 @@ fn mix_row(
         changes.card(ui, i, cell, refresh::place(cell, grid.left, pitch), |ui, old| {
             match old {
                 Some(MixItem::Liked(p)) => {
-                    let _ = cards::liked_playlist(ui, cell, p, false, state.player.status, &mut Vec::new());
+                    let _ = cards::liked_playlist(ui, cell, p, false, state.player.status, 0.0, &mut Vec::new());
                     return;
                 }
                 Some(MixItem::Lane(l)) => {
@@ -709,7 +715,7 @@ fn mix_row(
                 None => {}
             }
             if let Some(p) = liked.filter(|_| i == 0) {
-                nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, out).or(nav.take());
+                nav = cards::liked_playlist(ui, cell, p, liked_playing(state, p), state.player.status, song_s(state), out).or(nav.take());
                 return;
             }
             if i == wave_at {
@@ -721,11 +727,9 @@ fn mix_row(
             // «Смешать с…»: another profile to mix it with.
             let can_blend = l.blend_base.is_some_and(|b| h.blend_profiles.iter().any(|p| p.key != b));
             let click = cards::MixClick::of(&state.prefs, l.key);
-            // A card started as a wave plays as long as its wave does.
-            let playing = match click {
-                cards::MixClick::Wave => wave_playing(state, Some(l.key)).1,
-                _ => lane_playing(state, l),
-            };
+            // A card plays as long as its wave does or its list (started
+            // from its page or its menu, whatever the click does).
+            let playing = wave_playing(state, Some(l.key)).1 || lane_playing(state, l);
             nav = cards::mix(ui, cell, l, with_new, can_blend, playing, state.player.status, click, None, out).or(nav.take());
         });
     });
@@ -938,14 +942,21 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
                 let artist = matches!(m.id, MixId::Tile(TileKind::ArtistOfDay | TileKind::Comeback));
                 let photo = artist.then(|| artist_photo(state, &m.title)).flatten();
                 if old.is_some() {
-                    cards::of_day(ui, cell, m, photo.as_deref(), i, &mut Vec::new());
+                    cards::of_day(ui, cell, m, photo.as_deref(), i, false, &mut Vec::new());
                 } else {
-                    cards::of_day(ui, cell, m, photo.as_deref(), i, out);
+                    cards::of_day(ui, cell, m, photo.as_deref(), i, tile_playing(state, m), out);
                 }
             });
         });
     });
     None
+}
+
+/// The queue plays the tile of the day `m` (started from it: the queue
+/// says its name, «микса «…»» or «радио «…»»).
+pub(super) fn tile_playing(state: &ViewState, m: &MixCard) -> bool {
+    state.player.status == Status::Playing
+        && state.player.context.as_deref().is_some_and(|c| c.ends_with(&format!("«{}»", m.title)) && !m.title.is_empty())
 }
 
 /// Tiles of the day in view of `n`, `fit` to a row: those that fit share

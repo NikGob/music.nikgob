@@ -59,7 +59,8 @@ impl Equalizer {
             theme.motion.fast_effects,
         )
         .clamp(0.0, 1.0);
-        if live {
+        // Out of sight (a row below the window) it asks for no frames.
+        if live && ui.is_rect_visible(rect) {
             ctx.request_repaint();
         }
         let t = anim::now(ctx) as f32;

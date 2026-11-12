@@ -295,7 +295,7 @@ pub struct StageRequest {
     /// Pulse on the scripted beat while the row depends on it. Otherwise
     /// the stage stays calm, so a shape can be judged.
     pub beat: bool,
-    /// «Разделы главной»: fit the whole of Главная into the stage.
+    /// «Разделы главной»: the stage tours Главная's sections.
     pub fit_home: bool,
 }
 
@@ -355,6 +355,17 @@ pub fn canvas_for(size: Vec2, window: Option<Vec2>) -> (Vec2, f32) {
     (size / scale, scale)
 }
 
+/// The canvas of a page (Главная, an album) on a stage `size` big, in a
+/// window `window_w` wide: the stage's width at the page's own scale (the
+/// window's width at most, never larger than real), as tall as the stage
+/// shows of it; the rest of the page is scrolled to. A low stage (the strip
+/// over the rows) laid the page out as wide as the window was tall, a tiny
+/// page in the middle of the strip.
+pub fn page_canvas(size: Vec2, window_w: f32) -> (Vec2, f32) {
+    let scale = (size.x / window_w.max(CANVAS_W)).clamp(1e-3, 1.0);
+    (size / scale, scale)
+}
+
 /// Canvas → screen: the whole canvas over `rect`, or brought in on `focus`
 /// by `k` (0..1): no closer than 1:1 (a part too big for that just fits),
 /// and the window onto the canvas never past its edges.
@@ -379,17 +390,51 @@ pub fn to_global(rect: Rect, canvas: Vec2, focus: Option<Rect>, k: f32) -> TSTra
     TSTransform::new(rect.min.to_vec2() - min.to_vec2() * scale, scale)
 }
 
-/// Canvas → screen for a page taller than the stage: the whole of `content`
-/// fits in `rect`, top-aligned, one scale.
-pub fn fit_page(rect: Rect, content: Vec2) -> TSTransform {
-    let scale = (rect.width() / content.x.max(1.0)).min(rect.height() / content.y.max(1.0)).max(1e-3);
-    let fitted = content * scale;
-    TSTransform::new(vec2(rect.left() + (rect.width() - fitted.x) * 0.5, rect.top()), scale)
+/// Canvas points a second Главная's tour goes at.
+const TOUR_SPEED: f32 = 140.0;
+/// The tour rests this long at the top and at the bottom.
+const TOUR_HOLD: f32 = 1.6;
+/// After the wheel the tour waits this long before it goes on.
+const TOUR_WAIT: f64 = 2.5;
+
+/// How far down Главная's tour is `t` seconds in over `room` canvas points:
+/// a rest at the top, down eased, a rest at the bottom, back up, again.
+pub fn tour_at(t: f32, room: f32) -> f32 {
+    if room <= 0.0 {
+        return 0.0;
+    }
+    let go = (room / TOUR_SPEED).max(0.5);
+    let cycle = 2.0 * (go + TOUR_HOLD);
+    let x = t.rem_euclid(cycle);
+    let ease = |u: f32| {
+        let u = u.clamp(0.0, 1.0);
+        u * u * (3.0 - 2.0 * u)
+    };
+    if x < TOUR_HOLD {
+        0.0
+    } else if x < TOUR_HOLD + go {
+        room * ease((x - TOUR_HOLD) / go)
+    } else if x < 2.0 * TOUR_HOLD + go {
+        room
+    } else {
+        room * (1.0 - ease((x - 2.0 * TOUR_HOLD - go) / go))
+    }
 }
 
-fn lerp_transform(a: TSTransform, b: TSTransform, k: f32) -> TSTransform {
-    let k = k.clamp(0.0, 1.0);
-    TSTransform::new(a.translation + (b.translation - a.translation) * k, a.scaling + (b.scaling - a.scaling) * k)
+/// The time into the tour it stands at `scroll` on its way down (where a
+/// tour starting there picks up).
+fn tour_time_at(scroll: f32, room: f32) -> f64 {
+    if room <= 0.0 || scroll <= 0.0 {
+        return 0.0;
+    }
+    let go = (room / TOUR_SPEED).max(0.5);
+    // The eased way down, inverted by halving.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if tour_at(TOUR_HOLD + mid * go, room) < scroll { lo = mid } else { hi = mid }
+    }
+    f64::from(TOUR_HOLD + lo * go)
 }
 
 // ---- Scenes acted out ---------------------------------------------------
@@ -912,8 +957,15 @@ pub struct StageUi {
     /// How far down Главная on the stage is scrolled by the wheel (canvas
     /// points).
     home_scroll: f32,
+    /// When the wheel last scrolled Главная on the stage, and when its
+    /// tour through the sections began (`None`: not touring).
+    home_wheel_at: f64,
+    home_tour: Option<f64>,
     /// Where the parts were last frame.
     rects: Vec<(Part, Rect)>,
+    /// The scene `rects` were measured on (`None`: none drawn yet). Главная
+    /// with no section measures nothing, and is measured all the same.
+    measured: Option<Scene>,
     script: Script,
     script_since: f64,
     /// Seconds into the script last frame (the hand's move is the
@@ -947,7 +999,10 @@ impl Default for StageUi {
             held: None,
             focus: None,
             home_scroll: 0.0,
+            home_wheel_at: f64::NEG_INFINITY,
+            home_tour: None,
             rects: Vec::new(),
+            measured: None,
             script: Script::None,
             script_since: 0.0,
             script_last: 0.0,
@@ -1040,52 +1095,59 @@ impl StageUi {
         // Now Playing on the stage is the window's, smaller: what is sized
         // in points there (the lyrics) takes the same share of it.
         let window = matches!(scene, Scene::Track | Scene::Lyrics).then(|| ctx.content_rect().size());
-        let (size, _) = canvas_for(req.rect.size(), window);
+        let (size, scale) = match scene {
+            Scene::Home | Scene::Album => page_canvas(req.rect.size(), ctx.content_rect().width()),
+            _ => canvas_for(req.rect.size(), window),
+        };
         let home_bottom = self
             .rects
             .iter()
             .filter(|(p, _)| matches!(p, Part::Home(_)))
             .map(|(_, r)| r.bottom())
             .fold(0.0, f32::max);
-        let fitting = req.fit_home && scene == Scene::Home && home_bottom > size.y + 8.0;
-        // Главная not measured yet: one more frame tells whether it fits.
-        // Measured and fitting the stage as it is, nothing moves: asking for
-        // frames here kept the whole window drawing at its full rate.
-        if req.fit_home && scene == Scene::Home && home_bottom <= 0.0 {
+        // Главная not measured yet: one more frame tells how tall it is.
+        // Measured, nothing moves unless the tour does: asking for frames
+        // here kept the whole window drawing at its full rate (so did an
+        // empty Главная, or every section off, measured as no height).
+        if needs_measure(req.fit_home, scene, self.measured) {
             ctx.request_repaint();
         }
-        let content = vec2(size.x, if fitting { home_bottom + 24.0 } else { size.y });
-        let fit_k = anim::fraction(
-            ctx,
-            Id::new(SALT).with("fit-home"),
-            if fitting { 1.0 } else { 0.0 },
-            app.motion.fast_spatial.without_bounce(),
-        );
-        // Главная on the stage scrolls with the wheel over it (not while the
-        // whole page is fitted in): the rest of the page can be looked at.
-        let (_, scale) = canvas_for(req.rect.size(), window);
+        // Главная on the stage is the page at the stage's width (as big as
+        // every other screen there) and scrolls with the wheel over it. For
+        // «Разделы главной» it tours its sections, down and back, so every
+        // section shows at a size that reads; the wheel takes over (and the
+        // tour waits a moment after it). It used to fit the whole page into
+        // the card, a tiny column in an empty frame.
         let room = (home_bottom + 24.0 - size.y).max(0.0);
-        if scene == Scene::Home && !fitting {
+        if scene == Scene::Home {
             if let Some(p) = ctx.pointer_hover_pos()
                 && req.rect.contains(p)
             {
                 let dy = ctx.input(|i| i.smooth_scroll_delta.y);
                 if dy != 0.0 {
                     self.home_scroll -= dy / scale.max(0.01);
+                    self.home_wheel_at = now;
                     ctx.input_mut(|i| i.smooth_scroll_delta.y = 0.0);
                 }
             }
+            let touring = req.fit_home && room > 0.0 && !app.reduced_motion && now - self.home_wheel_at > TOUR_WAIT;
+            match (touring, self.home_tour) {
+                (true, None) => self.home_tour = Some(now - tour_time_at(self.home_scroll, room)),
+                (false, Some(_)) => self.home_tour = None,
+                _ => {}
+            }
+            if let Some(since) = self.home_tour {
+                self.home_scroll = tour_at((now - since) as f32, room);
+                ctx.request_repaint();
+            }
             self.home_scroll = self.home_scroll.clamp(0.0, room);
-        } else if scene != Scene::Home {
+        } else {
             self.home_scroll = 0.0;
+            self.home_tour = None;
         }
-        let scrolled = if scene == Scene::Home && !fitting { self.home_scroll } else { 0.0 };
-        let normal = to_global(req.rect, size, self.focus.map(|(_, r)| r), k) * TSTransform::from_translation(vec2(0.0, -scrolled));
-        let global = lerp_transform(normal, fit_page(req.rect, content), fit_k);
-        let virt = Rect::from_min_size(
-            Pos2::ZERO,
-            if fit_k > 0.001 { content } else { vec2(size.x, size.y + scrolled) },
-        );
+        let scrolled = if scene == Scene::Home { self.home_scroll } else { 0.0 };
+        let global = to_global(req.rect, size, self.focus.map(|(_, r)| r), k) * TSTransform::from_translation(vec2(0.0, -scrolled));
+        let virt = Rect::from_min_size(Pos2::ZERO, vec2(size.x, size.y + scrolled));
         let visible = req.rect.intersect(clip);
         let local_clip = global.inverse() * visible;
 
@@ -1210,6 +1272,11 @@ impl StageUi {
             // The page's order (`set_sublayer` wants the same one).
             .order(egui::Order::Background)
             .fixed_pos(Pos2::ZERO)
+            // The area's own hit rect ends at the card. It was the whole
+            // canvas, which reaches below the card for a tall page (Главная,
+            // an album) and covered the scene buttons under it: they took
+            // no click.
+            .constrain_to(local_clip)
             .constrain(false)
             // A picture: neither hover nor clicks.
             .interactable(false)
@@ -1237,12 +1304,23 @@ impl StageUi {
         ctx.set_sublayer(page, layer);
         ctx.set_transform_layer(layer, global);
         self.rects = rects;
+        self.measured = Some(scene);
         self.visible = true;
         self.rect = Some(req.rect);
         let ms = started.elapsed().as_secs_f32() * 1000.0;
         self.cost = self.cost * 0.9 + ms * 0.1;
     }
 }
+
+/// Whether Главная on the stage still waits for a frame to measure it: it
+/// is shown and was not drawn last frame. Measured with no sections it
+/// waits for nothing.
+fn needs_measure(fit_home: bool, scene: Scene, measured: Option<Scene>) -> bool {
+    fit_home && scene == Scene::Home && measured != Some(Scene::Home)
+}
+
+/// Above a page on the stage (Главная, an album).
+const PAGE_TOP: f32 = 16.0;
 
 /// Paints `scene` from `v` over the canvas `virt`.
 #[allow(clippy::too_many_arguments)]
@@ -1288,15 +1366,16 @@ fn paint_scene(
             stage.part(&ctx, Part::Whole, rect);
         }
         Scene::Home => {
-            // The page's margins and the search bar's room above it.
-            let page = Rect::from_min_max(virt.min + vec2(24.0, 88.0), virt.max - vec2(24.0, 0.0));
+            // The page's margins; the search bar is not drawn here, so its
+            // room above the page is left out (an empty band on the card).
+            let page = Rect::from_min_max(virt.min + vec2(24.0, PAGE_TOP), virt.max - vec2(24.0, 0.0));
             let mut hui = ui.new_child(UiBuilder::new().max_rect(page).id_salt("stage-home"));
             hui.spacing_mut().item_spacing.y = 8.0;
             pages::home::show_on(&mut hui, v, pages, stage, out);
         }
         Scene::Album => {
             let Some(a) = album else { return };
-            let page = Rect::from_min_max(virt.min + vec2(24.0, 88.0), virt.max - vec2(24.0, 0.0));
+            let page = Rect::from_min_max(virt.min + vec2(24.0, PAGE_TOP), virt.max - vec2(24.0, 0.0));
             let mut aui = ui.new_child(UiBuilder::new().max_rect(page).id_salt("stage-album"));
             aui.spacing_mut().item_spacing.y = 8.0;
             let header = pages::detail::ReleaseHeader {
@@ -1407,7 +1486,7 @@ mod tests {
         for size in [vec2(700.0, 440.0), vec2(760.0, 250.0), vec2(416.0, 300.0), vec2(1800.0, 1100.0)] {
             let rect = Rect::from_min_size(pos2(500.0, 140.0), size);
             let (c, _) = canvas(size);
-            for t in [to_global(rect, c, None, 0.0), fit_page(rect, vec2(c.x, 1400.0))] {
+            for t in [to_global(rect, c, None, 0.0)] {
                 let (window, radius) = card(t, rect);
                 assert!((radius * t.scaling - CORNER).abs() <= 0.5, "{size:?}: {} on screen", radius * t.scaling);
                 let back = t * window;
@@ -1417,17 +1496,52 @@ mod tests {
         }
     }
 
+    /// A page fills the stage's width at the window's scale, whatever the
+    /// stage's shape: the strip over the rows too.
     #[test]
-    fn a_tall_home_fits_inside_the_stage() {
-        let rect = Rect::from_min_size(pos2(400.0, 120.0), vec2(520.0, 360.0));
-        let content = vec2(960.0, 1800.0);
-        let t = fit_page(rect, content);
-        let fitted = Rect::from_min_size(rect.left_top() + vec2((rect.width() - content.x * t.scaling) * 0.5, 0.0), content * t.scaling);
-        assert!(t.scaling < rect.width() / content.x);
-        assert!(fitted.bottom() <= rect.bottom() + 0.5, "{}", fitted.bottom());
-        assert!(fitted.left() >= rect.left() - 0.5 && fitted.right() <= rect.right() + 0.5);
-        assert!((fitted.top() - rect.top()).abs() < 0.5, "top aligned");
+    fn a_page_fills_the_stage_at_the_windows_scale() {
+        for (stage, window) in [(vec2(700.0, 440.0), 1440.0), (vec2(955.0, 180.0), 1100.0), (vec2(620.0, 380.0), 1265.0)] {
+            let (c, scale) = page_canvas(stage, window);
+            assert!((c.x - window).abs() < 0.5, "{stage:?}: {c:?}");
+            assert!((c.x * scale - stage.x).abs() < 0.01 && (c.y * scale - stage.y).abs() < 0.01);
+        }
+        assert_eq!(page_canvas(vec2(1800.0, 900.0), 1200.0).1, 1.0, "never larger than real");
     }
+
+    /// Главная waits one frame to be measured, then no more: an empty one
+    /// (or every section off) measures no height and asks for no frames.
+    #[test]
+    fn an_empty_home_is_measured_once() {
+        assert!(needs_measure(true, Scene::Home, None));
+        assert!(needs_measure(true, Scene::Home, Some(Scene::Track)));
+        assert!(!needs_measure(true, Scene::Home, Some(Scene::Home)));
+        assert!(!needs_measure(false, Scene::Home, None));
+        assert!(!needs_measure(true, Scene::Track, None));
+    }
+
+    /// «Разделы главной»: the stage tours Главная, a rest at the top, down
+    /// eased, a rest at the bottom, back up; a tour starting part way down
+    /// picks up there.
+    #[test]
+    fn the_home_tour_goes_down_and_back() {
+        let room = 1400.0;
+        assert_eq!(tour_at(0.0, room), 0.0);
+        assert_eq!(tour_at(TOUR_HOLD * 0.9, room), 0.0, "it rests at the top first");
+        let go = room / TOUR_SPEED;
+        assert!((tour_at(TOUR_HOLD + go + 0.1, room) - room).abs() < 1e-3, "then the bottom");
+        let mut last = 0.0;
+        for k in 0..=100 {
+            let y = tour_at(TOUR_HOLD + go * k as f32 / 100.0, room);
+            assert!(y + 1e-3 >= last && (0.0..=room).contains(&y), "down, within the page: {y}");
+            last = y;
+        }
+        let cycle = 2.0 * (go + TOUR_HOLD);
+        assert!(tour_at(cycle - 0.01, room) < 1.0, "and back up");
+        assert_eq!(tour_at(10.0, 0.0), 0.0, "a page that fits stays");
+        let t = tour_time_at(500.0, room);
+        assert!((tour_at(t as f32, room) - 500.0).abs() < 1.0, "{}", tour_at(t as f32, room));
+    }
+
     #[test]
     fn canvas_and_stage_map_onto_each_other_and_back() {
         let rect = Rect::from_min_size(pos2(500.0, 140.0), vec2(700.0, 440.0));

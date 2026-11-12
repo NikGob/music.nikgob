@@ -5,6 +5,7 @@
 //! Synthetic input (logical points): `move:x,y`, `click:x,y`, `rclick:x,y`,
 //! `dblclick:x,y` (`click:x,y,frames` sets the wait after it), `xback:x,y` /
 //! `xforward:x,y` (the mouse's side buttons), `drag:x1,y1,x2,y2`, `wheel:x,y,dy`,
+//! `hwheel:x,y,dx` (a sideways wheel), `swheel:x,y,dy` (Shift + the wheel),
 //! `key:space|escape|l|q|f11|f12` (`key:ctrl+2` and other egui key names too), `toasts` (a few snackbars).
 //! `prefs:{json}` merges into the prefs.
 //! `type:text,frames` types into the search bar one character every
@@ -558,6 +559,23 @@ impl Shot {
                     }]);
                 }
                 self.wait = 20;
+            }
+            // `hwheel:x,y,dx` turns a sideways wheel (`dx` lines; a part of
+            // a line is a thumb wheel's small step), `swheel:x,y,dy` the
+            // wheel with Shift held; `,frames` sets the wait after it.
+            "hwheel" | "swheel" => {
+                let n = nums(arg);
+                if let [x, y, d, ..] = n[..] {
+                    let shift = verb == "swheel";
+                    self.input.push_back(vec![Event::PointerMoved(pos2(x, y))]);
+                    self.input.push_back(vec![Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Line,
+                        delta: if shift { egui::vec2(0.0, d) } else { egui::vec2(d, 0.0) },
+                        phase: egui::TouchPhase::Move,
+                        modifiers: if shift { Modifiers::SHIFT } else { Modifiers::NONE },
+                    }]);
+                }
+                self.wait = n.get(3).map_or(20, |f| *f as u32);
             }
             "key" => {
                 // `key:ctrl+2`: with Ctrl (Cmd on macOS).

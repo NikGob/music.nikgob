@@ -259,6 +259,8 @@ pub(super) fn page(
     }
     // The page's own changes the runtime has not shown yet stay on it.
     let shown = with_pending(&mut pages.settings_memory, &state.prefs, anim::now(&ctx));
+    let beside = at.stage.is_some_and(|s| s.left() >= at.rows.right());
+    rows::set_column_right(&ctx, if beside { at.rows.left() + at.content_w } else { f32::INFINITY });
     let mut p: Prefs = shown.clone();
     let before = p.clone();
     let o = area.show(&mut rui, |ui| {
@@ -275,8 +277,14 @@ pub(super) fn page(
         // Beside the stage the ⓘ cards have no sample of their own.
         settings_help::finish(ui, &mut p, at.stage.is_none());
         ui.add_space(16.0);
-        // The divider and the foot span the page, not only the rows' column.
-        let page = Rangef::new(ui.max_rect().left(), (ui.clip_rect().right() - 16.0).max(ui.max_rect().right()));
+        // The divider and the foot span the page, not only the rows' column;
+        // beside the stage, the rows' column (the stage and its buttons
+        // stand still over the rest: the foot scrolled up under them).
+        let page = if beside {
+            Rangef::new(ui.max_rect().left(), ui.max_rect().left() + at.content_w)
+        } else {
+            Rangef::new(ui.max_rect().left(), (ui.clip_rect().right() - 16.0).max(ui.max_rect().right()))
+        };
         let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
         ui.painter().hline(page, line.center().y, egui::Stroke::new(1.0, Theme::get(ui.ctx()).scheme.outline_variant));
         ui.add_space(16.0);

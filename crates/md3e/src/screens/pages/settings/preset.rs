@@ -131,13 +131,54 @@ pub(super) fn row(ui: &mut Ui, area: Area, p: &Prefs) -> Option<Prefs> {
     }
     let Some(i) = under else {
         ctx.data_mut(|d| d.remove::<usize>(held_key));
+        ctx.data_mut(|d| {
+            d.remove::<(usize, f64)>(rest_key(id));
+            d.remove::<usize>(rest_key(id).with("shown"));
+        });
         return None;
     };
     ctx.data_mut(|d| d.insert_temp(held_key, i));
+    // Buttons show a preset once the pointer rests on it a moment: swept
+    // across the row, the rows under it no longer flip back and forth with
+    // every button it passes (the one shown last stays meanwhile). Tiles
+    // (and the stage beside them) show it at once.
+    let mut i = i;
+    if !area.tiles() {
+        let now = anim::now(&ctx);
+        let since = match ctx.data(|d| d.get_temp::<(usize, f64)>(rest_key(id))) {
+            Some((j, t)) if j == i => t,
+            _ => {
+                ctx.data_mut(|d| d.insert_temp(rest_key(id), (i, now)));
+                now
+            }
+        };
+        let shown_key = rest_key(id).with("shown");
+        if rested(since, now) {
+            ctx.data_mut(|d| d.insert_temp(shown_key, i));
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(REST_S - (now - since) + 0.005));
+            match ctx.data(|d| d.get_temp::<usize>(shown_key)).filter(|j| *j < rects.len()) {
+                Some(j) => i = j,
+                None => return None,
+            }
+        }
+    }
     let shown = offered(area, p, i);
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.insert_temp(offer_key(), (pass, Offer { id, prefs: shown.clone() })));
     Some(shown)
+}
+
+/// How long the pointer rests on a preset button before the rows show it.
+const REST_S: f64 = 0.15;
+
+fn rest_key(id: Id) -> egui::Id {
+    egui::Id::new(("settings-preset-rest", id))
+}
+
+/// The pointer came onto a button at `since` and stays: rested at `now`.
+fn rested(since: f64, now: f64) -> bool {
+    now - since >= REST_S - 1e-6
 }
 
 /// The presets as a connected group of buttons, «Свои» last.
@@ -208,15 +249,15 @@ fn hold_textures(ctx: &egui::Context, shapes: &[egui::Shape]) -> Vec<egui::Textu
 /// The presets as live tiles: a small sample of the track screen (glow,
 /// shapes, the cover with its ring) and the name under it; «Свои» draws the
 /// values kept. A still tile is drawn once and its shapes kept (only moved
-/// with the page), so a row of them costs next to nothing a frame; only
-/// the tile under the pointer moves, and beside the stage none does (the
-/// stage plays the preset under the pointer, big).
+/// with the page), so a row of them costs next to nothing a frame; the tile
+/// under the pointer moves (beside the stage too, which plays it big), and
+/// a look of the lyrics that is chosen keeps moving, so its motion shows
+/// without a hover.
 fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (Option<usize>, Vec<Rect>) {
     let _p = crate::prof::scope("settings.tiles");
     let ctx = ui.ctx().clone();
     let app = Theme::get(&ctx);
     let s = app.scheme;
-    let beside_stage = rows::mode(&ctx).stage;
     let n = area.names().len() + usize::from(custom);
     let mut picked = None;
     let mut rects = Vec::with_capacity(n);
@@ -236,7 +277,10 @@ fn tiles(ui: &mut Ui, area: Area, p: &Prefs, custom: bool, current: usize) -> (O
             let selected = i == current;
             let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(card));
             painter.rect_filled(card, shape::MEDIUM, s.surface_container_high);
-            let moving = resp.hovered() && !beside_stage;
+            // The tile under the pointer and the chosen lyrics look move,
+            // when in sight (a row scrolled away asks for no frames) and
+            // unless motion is reduced.
+            let moving = (resp.hovered() || (selected && area == Area::Lyrics)) && !app.reduced_motion && ui.is_rect_visible(card);
             let shown = offered(area, p, i);
             let mut tui = ui.new_child(egui::UiBuilder::new().max_rect(card).id_salt(("set-preset-tile-ui", area, i)));
             tui.set_clip_rect(ui.clip_rect().intersect(card));
@@ -288,7 +332,7 @@ const LYRICS_STILL_AT: f64 = 1.25;
 fn sample(ui: &Ui, area: Area, i: usize, card: Rect, shown: &Prefs, moving: bool) {
     let ctx = ui.ctx();
     if area == Area::Lyrics {
-        lyrics::preview_at(ui, card, shown, (!moving).then_some(LYRICS_STILL_AT));
+        lyrics::tile_preview(ui, card, shown, (!moving).then_some(LYRICS_STILL_AT));
         return;
     }
     let app = Theme::get(ctx);
@@ -347,6 +391,14 @@ mod tests {
 
     /// A kept tile holds the textures its shapes draw: the loader that made
     /// one may forget it, the texture lives while the tile is kept.
+    /// A preset button shows its preset once the pointer rests on it.
+    #[test]
+    fn a_button_shows_its_preset_after_a_rest() {
+        assert!(!rested(1.0, 1.0));
+        assert!(!rested(1.0, 1.0 + REST_S * 0.5));
+        assert!(rested(1.0, 1.0 + REST_S));
+    }
+
     #[test]
     fn kept_shapes_hold_their_textures() {
         let ctx = egui::Context::default();
