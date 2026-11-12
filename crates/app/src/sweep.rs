@@ -1152,7 +1152,6 @@ impl Run {
                 ui.sweep_page(ctx, Route::Home, Some(PaneTab::Lyrics), out);
                 seek(out);
             }
-            Screen::Queue => ui.sweep_page(ctx, Route::Home, Some(PaneTab::Queue), out),
             // From the lyrics beside the cover: their control opens it
             // (`sweep_lyrics_ui`, once the control is drawn).
             Screen::LyricsUi => {

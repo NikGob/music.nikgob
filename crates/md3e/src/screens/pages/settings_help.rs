@@ -108,9 +108,7 @@ pub enum SettingId {
     RailCompact,
     /// «Дата альбома»: year, month or the whole date.
     AlbumDate,
-    /// The parts of the side pane: «Очередь», «Текст песни», «Источник и
-    /// качество».
-    PaneQueue,
+    /// The parts of the side pane: «Текст песни», «Источник и качество».
     PaneLyrics,
     PaneInfo,
     /// «Меню трека»: where each item of a track's menu stands.
@@ -487,7 +485,7 @@ impl SettingId {
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
-            | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
+            | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips
             | PaneLyrics | PaneInfo | TrackMenu | PlayerButton(_) | NavRoot => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
@@ -554,7 +552,7 @@ impl SettingId {
             // Rare cases, gestures, parts of the window and of Главная.
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
-            | ProfileNames | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
+            | ProfileNames | Tooltips | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
             | PlayerButton(_) | NavRoot
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
@@ -642,7 +640,6 @@ impl SettingId {
             UiScale => "Масштаб интерфейса",
             RailCompact => "Боковая панель всегда компактная",
             AlbumDate => "Дата альбома",
-            PaneQueue => "Очередь",
             PaneLyrics => "Текст песни",
             PaneInfo => "Источник и качество",
             TrackMenu => "Меню трека",
@@ -856,7 +853,6 @@ impl SettingId {
             UiScale => "Всё окно крупнее или мельче, поверх масштаба системы. Ещё Ctrl+= и Ctrl+- (на шаг), Ctrl+0 (100 %).",
             RailCompact => "Левая панель всегда узкая: только значки разделов, без подписей и кнопки раскрытия.",
             AlbumDate => "Что показывать о дате выхода на странице альбома. Если день или месяц неизвестны, показывается то, что есть.",
-            PaneQueue => "Справа от страницы открывается очередь: кнопка в плеере внизу и Ctrl+Q. Выключено — у плеера больше места под полосу перемотки.",
             PaneLyrics => "Справа от страницы открывается текст песни: кнопка в плеере внизу и пункт в меню трека. На экране трека текст есть всегда.",
             PaneInfo => "Справа от страницы открываются источник и качество трека: пункт «Источник и качество» в меню трека. На экране трека они есть всегда.",
             TrackMenu => "Где стоит каждый пункт меню трека: в самом меню, в подменю «Файл» или скрыт. «Сбросить» возвращает меню как было.",

@@ -1749,8 +1749,8 @@ pub struct Prefs {
     /// «Дата альбома»: how much of an album's release date its page shows.
     pub album_date: AlbumDate,
     /// The parts of the side pane by the content, each on its own: none by
-    /// default, and a part that is off has no button, menu item or key.
-    pub pane_queue: bool,
+    /// default, and a part that is off has no button, menu item or key. (The
+    /// queue is on Now Playing only.)
     pub pane_lyrics: bool,
     pub pane_info: bool,
     /// The optional buttons of Now Playing and the player bar that show.
@@ -3724,7 +3724,6 @@ impl Default for Prefs {
             ui_scale: 1.0,
             rail_compact: false,
             album_date: AlbumDate::Year,
-            pane_queue: false,
             pane_lyrics: false,
             pane_info: false,
             player_buttons: PlayerButtons::default(),

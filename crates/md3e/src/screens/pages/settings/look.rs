@@ -42,7 +42,6 @@ pub(super) fn show(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     switch(ui, Id::Tooltips, &mut p.tooltips);
     track_menu(ui, p);
     sub(ui, "Панель справа");
-    switch(ui, Id::PaneQueue, &mut p.pane_queue);
     switch(ui, Id::PaneLyrics, &mut p.pane_lyrics);
     switch(ui, Id::PaneInfo, &mut p.pane_info);
 }

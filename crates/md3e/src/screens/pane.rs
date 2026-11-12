@@ -1,4 +1,4 @@
-//! The supporting pane: Очередь | Текст | Инфо (md3e-player.md §2.4).
+//! The supporting pane: Текст | Инфо (md3e-player.md §2.4).
 
 use egui::{Rect, Ui};
 use nikgob_view::{Command, QueueEntry, TrackId, TrackInfo, TrackRow, ViewState};
@@ -30,7 +30,6 @@ pub fn show(
     ui: &mut Ui,
     state: &ViewState,
     tab: &mut PaneTab,
-    chrome: &mut Chrome,
     bass: f32,
     out: &mut Vec<Command>,
 ) -> PaneOutput {
@@ -39,7 +38,6 @@ pub fn show(
     let tabs: Vec<&str> = parts
         .iter()
         .map(|t| match t {
-            PaneTab::Queue => "Очередь",
             PaneTab::Lyrics => "Текст",
             PaneTab::Info => "Инфо",
         })
@@ -85,10 +83,6 @@ pub fn show(
     ui.advance_cursor_after_rect(row);
     ui.add_space(12.0);
     let configure_lyrics = match tab {
-        PaneTab::Queue => {
-            queue(ui, state, chrome, out);
-            false
-        }
         PaneTab::Lyrics => lyrics(ui, state, bass, out),
         PaneTab::Info => {
             info(ui, state, out);
