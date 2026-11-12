@@ -56,7 +56,7 @@ macro_rules! own_reason {
 
 /// A track (aliased `track`) the user chose by hand: liked, in a live
 /// playlist, added to their songs of its album, or put into the library
-/// («В библиотеку», table `track_added`).
+/// («В библиотеку», table `track_put`).
 macro_rules! picked_reason {
     () => {
         "EXISTS (SELECT 1 FROM likes l WHERE l.target_kind = 'track' AND l.target_id = track.id
@@ -65,7 +65,7 @@ macro_rules! picked_reason {
                 WHERE e.track_id = track.id AND e.deleted = 0 AND p.deleted = 0)
     OR EXISTS (SELECT 1 FROM release_track_selection x WHERE x.track_id = track.id
                   AND x.release_id = track.release_id AND x.choice = 'include' AND x.deleted = 0)
-    OR EXISTS (SELECT 1 FROM track_added a WHERE a.track_id = track.id AND a.deleted = 0)"
+    OR EXISTS (SELECT 1 FROM track_put a WHERE a.track_id = track.id AND a.deleted = 0)"
     };
 }
 

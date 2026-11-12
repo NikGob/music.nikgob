@@ -531,7 +531,7 @@ fn fingerprint_in(c: &Connection) -> Result<Vec<i64>> {
                 (SELECT COUNT(*) FROM release_selection), (SELECT COALESCE(SUM(updated_at), 0) FROM release_selection),
                 (SELECT COUNT(*) FROM release_track_selection),
                 (SELECT COALESCE(SUM(updated_at), 0) FROM release_track_selection),
-                (SELECT COUNT(*) FROM track_added), (SELECT COALESCE(SUM(updated_at), 0) FROM track_added)",
+                (SELECT COUNT(*) FROM track_put), (SELECT COALESCE(SUM(updated_at), 0) FROM track_put)",
     )?;
     Ok(stmt.query_row([], |r| (0..22).map(|i| r.get(i)).collect())?)
 }
@@ -563,7 +563,7 @@ fn read_streams(conn: &Connection) -> Result<Vec<StreamDoc>> {
                                    AND x.kind = 'track' AND x.local_id = t.id)
                      OR EXISTS (SELECT 1 FROM release_track_selection c WHERE c.track_id = t.id
                                    AND c.choice = 'include' AND c.deleted = 0)
-                     OR EXISTS (SELECT 1 FROM track_added a WHERE a.track_id = t.id AND a.deleted = 0)
+                     OR EXISTS (SELECT 1 FROM track_put a WHERE a.track_id = t.id AND a.deleted = 0)
                      OR (t.in_library = 1 AND EXISTS (SELECT 1 FROM release_selection s
                                    WHERE s.release_id = t.release_id AND s.mode = 'whole' AND s.deleted = 0)))
               ORDER BY t.id",

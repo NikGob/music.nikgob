@@ -14,7 +14,7 @@ ALTER TABLE release_selection ADD COLUMN versions TEXT NOT NULL DEFAULT 'auto';
 -- 2. A song put into the library by hand («В библиотеку» of a stream track:
 --    no like, nothing downloads); a reset is a tombstone (`deleted = 1`),
 --    last writer wins on sync as with likes.
-CREATE TABLE track_added (
+CREATE TABLE track_put (
     track_id    TEXT PRIMARY KEY,
     updated_at  INTEGER NOT NULL,
     updated_by  TEXT NOT NULL,

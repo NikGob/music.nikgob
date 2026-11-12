@@ -516,11 +516,11 @@ pub(crate) fn carry_track_choices_in(tx: &Connection, from: &str, into: &str) ->
     // Put into the library by hand: the song that stays is (its own row
     // wins).
     tx.execute(
-        "INSERT OR IGNORE INTO track_added(track_id, updated_at, updated_by, deleted)
-         SELECT ?2, updated_at, updated_by, deleted FROM track_added WHERE track_id = ?1",
+        "INSERT OR IGNORE INTO track_put(track_id, updated_at, updated_by, deleted)
+         SELECT ?2, updated_at, updated_by, deleted FROM track_put WHERE track_id = ?1",
         params![from, into],
     )?;
-    tx.execute("DELETE FROM track_added WHERE track_id = ?1", [from])?;
+    tx.execute("DELETE FROM track_put WHERE track_id = ?1", [from])?;
     Ok(())
 }
 
@@ -535,7 +535,7 @@ pub struct TrackAdded {
 
 /// Every song put into the library by hand, tombstones included.
 pub(crate) fn read_added(c: &Connection) -> Result<Vec<TrackAdded>> {
-    let mut stmt = c.prepare_cached("SELECT track_id, updated_at, updated_by, deleted FROM track_added ORDER BY track_id")?;
+    let mut stmt = c.prepare_cached("SELECT track_id, updated_at, updated_by, deleted FROM track_put ORDER BY track_id")?;
     let rows = stmt.query_map([], |r| {
         Ok(TrackAdded { track_id: crate::util::get_id(r, 0)?, updated_at: r.get(1)?, updated_by: r.get(2)?, deleted: r.get(3)? })
     })?;
@@ -547,7 +547,7 @@ pub(crate) fn merge_added_in(tx: &Connection, added: &[TrackAdded], report: &mut
     for a in added {
         let tid = a.track_id.to_string();
         let old: Option<(i64, bool, String)> = tx
-            .query_row("SELECT updated_at, deleted, updated_by FROM track_added WHERE track_id = ?1", [&tid], |x| {
+            .query_row("SELECT updated_at, deleted, updated_by FROM track_put WHERE track_id = ?1", [&tid], |x| {
                 Ok((x.get(0)?, x.get(1)?, x.get(2)?))
             })
             .optional()?;
@@ -566,7 +566,7 @@ pub(crate) fn merge_added_in(tx: &Connection, added: &[TrackAdded], report: &mut
 
 fn put_added_in(c: &Connection, track: &str, on: bool, now: UnixMs, device: &str) -> Result<()> {
     c.execute(
-        "INSERT INTO track_added(track_id, updated_at, updated_by, deleted) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO track_put(track_id, updated_at, updated_by, deleted) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(track_id) DO UPDATE SET updated_at = excluded.updated_at, updated_by = excluded.updated_by,
             deleted = excluded.deleted",
         params![track, now, device, !on],
