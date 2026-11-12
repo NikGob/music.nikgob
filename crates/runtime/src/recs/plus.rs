@@ -202,7 +202,7 @@ impl Worker {
     }
 
     /// The guests are ranked again when the snapshot or the discoveries
-    /// changed since (on a thread).
+    /// changed since (on the picks' thread, [`super::picker`]).
     fn plus_rank(&mut self) {
         let Some(snap) = self.snapshot() else { return };
         let ranked_for = (Arc::as_ptr(&snap) as usize, self.discoveries_kept());
@@ -217,7 +217,7 @@ impl Worker {
         };
         let (discoveries, sources, seeds) = (self.discoveries_all(), self.discovery_sources(), self.discovery_seeds());
         let tx = self.recs.tx.clone();
-        let spawned = std::thread::Builder::new().name("nikgob-plus".into()).spawn(move || {
+        let spawned = self.recs.picker.send(super::picker::Lane::Plus, move || {
             let mut pool = super::open::open_pool(&snap, &discoveries, &sources, &topped);
             let playlist: Vec<usize> = tracks.iter().filter_map(|t| snap.model.position(*t)).collect();
             // A discovery the radio of one of the playlist's songs (or a

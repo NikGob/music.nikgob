@@ -5,7 +5,7 @@
 //!
 //! * The queue holds the engine's [`Engine`] state and a short live buffer
 //!   (recs-v2.0 §3.1): when [`EXTEND_AT`] tracks or fewer are left, it is
-//!   filled up to [`EXTEND_BY`] ahead, picked on a thread of its own from
+//!   filled up to [`EXTEND_BY`] ahead, picked on the picks' thread from
 //!   the current [`super::Snapshot`] (playback goes on meanwhile; two or
 //!   three ahead are enough for the preload and a gapless step); what
 //!   ended while they were picked is learnt after.
@@ -808,7 +808,8 @@ impl Worker {
         self.publish_player();
     }
 
-    /// Fills the queue up to [`EXTEND_BY`] ahead on a thread of its own.
+    /// Fills the queue up to [`EXTEND_BY`] ahead on the picks' thread
+    /// ([`super::picker`]).
     fn radio_extend(&mut self) {
         let ahead = self.queue.upcoming().len();
         let prefs = self.state.read().prefs.clone();
@@ -854,7 +855,7 @@ impl Worker {
             return;
         }
         self.recs.radio.wave_pool = None;
-        let spawned = std::thread::Builder::new().name("nikgob-radio".into()).spawn(move || {
+        let spawned = self.recs.picker.send(super::picker::Lane::Radio, move || {
             // The prefs as they are now, even before the snapshot follows.
             let picks = state.extend(&snap.recs().local_only(local_only), n, &params);
             let msg = super::radio::RadioMsg::Extended {
@@ -875,7 +876,7 @@ impl Worker {
     }
 
     /// A wave's extension (see the module docs): its open pool kept for the
-    /// snapshot, or the inputs to build it on the radio's thread.
+    /// snapshot, or the inputs to build it on the picks' thread.
     fn wave_extend(&mut self, id: u64, mut state: Engine, snap: Arc<super::Snapshot>, local_only: bool, n: usize, seed: u64) {
         let kept = self.discoveries_kept();
         let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept));
@@ -900,7 +901,7 @@ impl Worker {
         let has_scenes = self.recs.radio.scenes.as_ref().is_some_and(|(w, _)| std::sync::Weak::ptr_eq(w, &Arc::downgrade(&snap)));
         let profiles = (!has_scenes).then(|| self.recs.home.as_ref().map(|h| h.blend_profiles.clone()).unwrap_or_default());
         let tx = self.recs.tx.clone();
-        let spawned = std::thread::Builder::new().name("nikgob-wave".into()).spawn(move || {
+        let spawned = self.recs.picker.send(super::picker::Lane::Radio, move || {
             let t0 = std::time::Instant::now();
             let pool = match (pool, inputs) {
                 (Some(p), _) => Some(p),
