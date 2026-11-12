@@ -24,7 +24,9 @@ CREATE TABLE track_put (
 -- 3. The albums the library already has whole stay whole: every line of
 --    its page (two or more; a twin stream row at the place of a file is no
 --    line, as `page_row!` says) is a library track not left out by hand,
---    and its track count asks for no more. Their tracklist found later then
+--    and its track count is known and asks for no more (an unknown count
+--    proves nothing: such an album stays the user's songs, which shows
+--    exactly the songs it shows today). Their tracklist found later then
 --    joins them, as it does for an album added by hand (a saved album, its
 --    own like, is whole anyway). An album of one song, one with a song left
 --    out, one short of its count stays the user's songs. A choice of the
@@ -45,6 +47,6 @@ SELECT r.id, 'whole', 'auto', 1, coalesce((SELECT value FROM meta WHERE key = 'd
                   AND o.disc_no = t.disc_no AND o.track_no = t.track_no
                   AND abs(o.duration_ms - t.duration_ms) <= 2000))
          GROUP BY t.release_id) c ON c.rid = r.id
- WHERE c.n >= 2 AND c.mine = c.n AND coalesce(r.total_tracks, 0) <= c.n
+ WHERE c.n >= 2 AND c.mine = c.n AND r.total_tracks IS NOT NULL AND r.total_tracks <= c.n
    AND NOT EXISTS (SELECT 1 FROM release_selection s WHERE s.release_id = r.id AND s.deleted = 0 AND s.mode != 'auto')
 ON CONFLICT(release_id) DO UPDATE SET mode = 'whole', deleted = 0;

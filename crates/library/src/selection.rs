@@ -574,40 +574,96 @@ fn put_added_in(c: &Connection, track: &str, on: bool, now: UnixMs, device: &str
     Ok(())
 }
 
+/// What «В библиотеку» / «Убрать из библиотеки» of a song found before it
+/// changed anything, to put back on «Отменить»
+/// ([`Library::restore_track_in_library`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrackLibraryWas {
+    /// It was put into the library by hand (`track_put`).
+    pub put: bool,
+    /// Its choice on its album: `Some(true)` added, `Some(false)` left out.
+    pub choice: Option<bool>,
+}
+
+fn put_live_in(c: &Connection, track: &str) -> Result<bool> {
+    Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM track_put WHERE track_id = ?1 AND deleted = 0)", [track], |r| {
+        r.get(0)
+    })?)
+}
+
+fn release_of_in(c: &Connection, track: &str) -> Result<Option<String>> {
+    Ok(c.query_row("SELECT release_id FROM track WHERE id = ?1", [track], |r| r.get(0)).optional()?.flatten())
+}
+
+fn in_library_in(c: &Connection, track: &str) -> Result<bool> {
+    Ok(c.query_row("SELECT in_library FROM track WHERE id = ?1", [track], |r| r.get(0)).optional()?.unwrap_or(false))
+}
+
 impl Library {
     /// «В библиотеку» (`on`) of a song outside the library (a stream track
     /// of the wave, a radio, the queue, search): a library track from then
     /// on, no like, nothing downloads; one of the user's songs of its
-    /// album. «Убрать из библиотеки» (off) of a song without a file: what
-    /// put it there by hand goes (this mark, its being added to the user's
-    /// songs of its album), and when its album keeps it (added whole, or
-    /// saved) it is left out of the album's songs; a like and playlists
-    /// stay. Returns whether it is a library track now.
-    pub fn set_track_in_library(&self, track: TrackId, on: bool) -> Result<bool> {
+    /// album (a choice that left it out of the album goes). «Убрать из
+    /// библиотеки» (off) of a song without a file: what put it there by
+    /// hand goes (this mark, its being added to the user's songs of its
+    /// album); only when nothing of its own keeps it (a like, a playlist)
+    /// and its album does (added whole, or saved) is it left out of the
+    /// album's songs. Returns whether it is a library track now and what
+    /// was there before, for «Отменить».
+    pub fn set_track_in_library(&self, track: TrackId, on: bool) -> Result<(bool, TrackLibraryWas)> {
         let device = self.device_id();
         let now = self.tick();
         self.write(|tx| {
             let tid = track.to_string();
+            let release = release_of_in(tx, &tid)?;
+            let was = TrackLibraryWas {
+                put: put_live_in(tx, &tid)?,
+                choice: match &release {
+                    Some(rid) => track_in(tx, rid, &tid)?,
+                    None => None,
+                },
+            };
             put_added_in(tx, &tid, on, now, device.as_str())?;
-            let release: Option<String> = tx
-                .query_row("SELECT release_id FROM track WHERE id = ?1", [&tid], |r| r.get(0))
-                .optional()?
-                .flatten();
-            if !on && let Some(rid) = &release {
-                if track_in(tx, rid, &tid)? == Some(true) {
-                    put_track_in(tx, rid, &tid, None, now, device.as_str())?;
+            if let Some(rid) = &release {
+                match (on, was.choice) {
+                    // Put in by hand: no longer left out of its album.
+                    (true, Some(false)) | (false, Some(true)) => put_track_in(tx, rid, &tid, None, now, device.as_str())?,
+                    _ => {}
                 }
-                let album_keeps: bool = tx.query_row(
-                    concat!("SELECT ", release_whole_expr!(), " FROM release r WHERE r.id = ?1"),
-                    [rid],
-                    |r| r.get(0),
-                )?;
-                if album_keeps {
-                    put_track_in(tx, rid, &tid, Some(false), now, device.as_str())?;
+                if !on {
+                    let own: bool = tx.query_row(
+                        &format!("SELECT {} FROM track WHERE track.id = ?1", crate::streams::OWN_EXPR),
+                        [&tid],
+                        |r| r.get(0),
+                    )?;
+                    let album_keeps: bool = tx.query_row(
+                        concat!("SELECT ", release_whole_expr!(), " FROM release r WHERE r.id = ?1"),
+                        [rid],
+                        |r| r.get(0),
+                    )?;
+                    if album_keeps && !own {
+                        put_track_in(tx, rid, &tid, Some(false), now, device.as_str())?;
+                    }
                 }
             }
             refresh_in_library(tx, &tid)?;
-            Ok(tx.query_row("SELECT in_library FROM track WHERE id = ?1", [&tid], |r| r.get(0)).optional()?.unwrap_or(false))
+            Ok((in_library_in(tx, &tid)?, was))
+        })
+    }
+
+    /// «Отменить» of [`Self::set_track_in_library`]: the mark and the
+    /// album's choice of the song as they were.
+    pub fn restore_track_in_library(&self, track: TrackId, was: TrackLibraryWas) -> Result<bool> {
+        let device = self.device_id();
+        let now = self.tick();
+        self.write(|tx| {
+            let tid = track.to_string();
+            put_added_in(tx, &tid, was.put, now, device.as_str())?;
+            if let Some(rid) = release_of_in(tx, &tid)? {
+                put_track_in(tx, &rid, &tid, was.choice, now, device.as_str())?;
+            }
+            refresh_in_library(tx, &tid)?;
+            in_library_in(tx, &tid)
         })
     }
 }
@@ -964,6 +1020,76 @@ mod tests {
         assert_eq!(other.release_choice(r.id).unwrap().0, true);
     }
 
+    /// A version the user owns stays theirs on an album made whole (by the
+    /// migration or by hand): a file, a like, a playlist, put in by hand.
+    /// One that only came with the album waits for the switch.
+    #[test]
+    fn owned_versions_stay_the_users_on_a_whole_album() {
+        use crate::types::Membership;
+        let lib = Library::open_in_memory().unwrap();
+        let r = album(&lib, "Light of Hope");
+        let song_ = song(&lib, &r, 1, "Light of Hope", true);
+        let inst = song(&lib, &r, 2, "Light of Hope (Instrumental)", true);
+        let kara = song(&lib, &r, 3, "Light of Hope (Karaoke)", false);
+        let rmx = song(&lib, &r, 4, "Light of Hope (Remix)", false);
+        let pl = lib.create_playlist("P").unwrap();
+        lib.playlist_add_many(pl.id, &[rmx.id]).unwrap();
+        lib.add_release_whole(r.id).unwrap();
+        let plan = lib.release_listing(r.id).unwrap().unwrap().plan(AlbumRules::default());
+        assert_eq!(plan.membership[&inst.id], Membership::Wanted, "a file of it");
+        assert_eq!(plan.membership[&rmx.id], Membership::Wanted, "in a playlist");
+        assert_eq!(plan.membership[&kara.id], Membership::Variant, "came with the album");
+        assert_eq!(plan.whole, vec![song_.id, inst.id, rmx.id]);
+        // Put into the library by hand: the user's too.
+        lib.set_track_in_library(kara.id, true).unwrap();
+        let plan = lib.release_listing(r.id).unwrap().unwrap().plan(AlbumRules::default());
+        assert_eq!(plan.membership[&kara.id], Membership::Wanted);
+    }
+
+    /// «Только мои песни» of an album added whole with none of its songs
+    /// the user's own: an empty «Мои треки» (nothing plays), not the album.
+    #[test]
+    fn only_my_songs_of_an_added_album_without_any_is_empty() {
+        use nikgob_core::model::AlbumMode;
+        let lib = Library::open_in_memory().unwrap();
+        let r = album(&lib, "Streams");
+        song(&lib, &r, 1, "One", false);
+        song(&lib, &r, 2, "Two", false);
+        lib.add_release_whole(r.id).unwrap();
+        let l = lib.release_listing(r.id).unwrap().unwrap();
+        let mine = AlbumRules { mode: AlbumMode::Mine, ..AlbumRules::default() };
+        let plan = l.plan(mine);
+        assert!(plan.split && plan.mine.is_empty());
+        assert_eq!(l.plays(mine, None, None), (Vec::new(), false));
+        assert_eq!(l.plays(mine, Some(true), None).0.len(), 2);
+        assert_eq!(l.plays(AlbumRules::default(), None, None).0.len(), 2);
+    }
+
+    /// The album's switch on is kept even when the setting is on (karaoke
+    /// plays only by the album's own on); off only against the setting.
+    #[test]
+    fn the_album_switch_is_kept_for_karaoke() {
+        let off = AlbumRules::default();
+        let on = AlbumRules { other_versions: true, ..off };
+        assert_eq!(on.versions_choice(true), Some(true));
+        assert_eq!(off.versions_choice(true), Some(true));
+        assert_eq!(on.versions_choice(false), Some(false));
+        assert_eq!(off.versions_choice(false), None);
+        let lib = Library::open_in_memory().unwrap();
+        let r = album(&lib, "歌");
+        let a = song(&lib, &r, 1, "夏の歌", true);
+        let k = song(&lib, &r, 2, "夏の歌 (オリジナルカラオケ)", false);
+        let lone = song(&lib, &r, 3, "冬 (オリジナルカラオケ)", false);
+        lib.add_release_whole(r.id).unwrap();
+        lib.set_release_versions(r.id, on.versions_choice(true)).unwrap();
+        let l = lib.release_listing(r.id).unwrap().unwrap();
+        // Japanese karaoke without a dot is told; a mark without its song
+        // beside it proves nothing.
+        assert_eq!(l.version_kinds().keys().copied().collect::<Vec<_>>(), vec![k.id]);
+        assert_eq!(l.plan(on).whole, vec![a.id, k.id, lone.id]);
+        assert_eq!(l.plan(on).mine, vec![a.id, lone.id]);
+    }
+
     /// «Всегда весь альбом»: an album only some songs of which are the
     /// user's opens and plays whole. «Только мои песни»: an album added
     /// whole shows the songs the user has or chose, not the ones that came
@@ -1001,10 +1127,24 @@ mod tests {
     /// count asking for more; nothing else is written.
     #[test]
     fn the_migration_keeps_whole_albums_whole() {
+        use nikgob_core::model::LikeTarget;
         let lib = Library::open_in_memory().unwrap();
-        let full = album(&lib, "Full");
+        let counted = |lib: &Library, title: &str, n: u32| {
+            let mut r = album(lib, title);
+            r.total_tracks = Some(n);
+            lib.upsert_release(&r).unwrap()
+        };
+        let full = counted(&lib, "Full", 2);
         song(&lib, &full, 1, "One", true);
         song(&lib, &full, 2, "Two", true);
+        // Every song there, but how many it has is not known.
+        let unknown = album(&lib, "Unknown count");
+        song(&lib, &unknown, 1, "One", true);
+        song(&lib, &unknown, 2, "Two", true);
+        // Saved by hand, count unknown: whole by its like, not written.
+        let saved = album(&lib, "Saved");
+        song(&lib, &saved, 1, "One", true);
+        lib.like(LikeTarget::Release(saved.id)).unwrap();
         let one = album(&lib, "One song");
         song(&lib, &one, 1, "Alone", true);
         let part = album(&lib, "Part");
@@ -1019,7 +1159,7 @@ mod tests {
         let l1 = song(&lib, &left, 1, "A", true);
         song(&lib, &left, 2, "B", true);
         lib.set_track_choice(left.id, l1.id, Some(false)).unwrap();
-        let viewed = album(&lib, "Viewed");
+        let viewed = counted(&lib, "Viewed", 2);
         song(&lib, &viewed, 1, "A", true);
         song(&lib, &viewed, 2, "B", true);
         lib.set_release_view(viewed.id, Some(false)).unwrap();
@@ -1032,7 +1172,16 @@ mod tests {
         assert!(whole(&full));
         assert!(whole(&viewed));
         assert_eq!(lib.release_choice(viewed.id).unwrap().1, Some(false));
-        assert!(!whole(&one) && !whole(&part) && !whole(&short) && !whole(&left));
+        assert!(!whole(&one) && !whole(&part) && !whole(&short) && !whole(&left) && !whole(&unknown));
+        // What the library showed before, it shows now: the album of an
+        // unknown count is all its songs and plays them; the saved one is
+        // whole; only these two of the six are albums on Главная.
+        let row = |r: &Release| lib.get_release_row(r.id).unwrap().unwrap();
+        assert!(!row(&unknown).progress().partial());
+        assert!(row(&saved).whole && row(&saved).is_added());
+        assert!(row(&full).is_added() && !row(&unknown).is_added() && !row(&part).is_added());
+        let l = lib.release_listing(unknown.id).unwrap().unwrap();
+        assert_eq!(l.plays(AlbumRules::default(), None, None).0.len(), 2);
         assert_eq!(lib.count_tracks(crate::types::TrackFilter::All).unwrap(), in_lib);
         // Run twice: nothing more.
         lib.write(|tx| Ok(tx.execute_batch(insert)?)).unwrap();
@@ -1094,7 +1243,7 @@ mod tests {
         let a = song(&lib, &r, 1, "One", true);
         let b = song(&lib, &r, 2, "Two", false);
         let in_lib = |lib: &Library| lib.tracks_of_release(r.id).unwrap().iter().map(|t| t.id).collect::<Vec<_>>();
-        assert!(lib.set_track_in_library(b.id, true).unwrap());
+        assert!(lib.set_track_in_library(b.id, true).unwrap().0);
         assert!(!lib.is_liked(LikeTarget::Track(b.id)).unwrap());
         assert_eq!(in_lib(&lib), vec![a.id, b.id]);
         let l = lib.release_listing(r.id).unwrap().unwrap();
@@ -1106,17 +1255,39 @@ mod tests {
         other.write(|tx| merge_added_in(tx, &added, &mut ImportReport::default())).unwrap();
         assert_eq!(other.read(read_added).unwrap(), added);
 
-        assert!(!lib.set_track_in_library(b.id, false).unwrap());
+        assert!(!lib.set_track_in_library(b.id, false).unwrap().0);
         assert_eq!(in_lib(&lib), vec![a.id]);
-        // Out of an album added whole: left out of it, the album stays.
+        // Out of an album added whole: left out of it, the album stays;
+        // «Отменить» brings the song back into the album's songs.
         lib.add_release_whole(r.id).unwrap();
         assert_eq!(in_lib(&lib), vec![a.id, b.id]);
-        assert!(!lib.set_track_in_library(b.id, false).unwrap());
+        let (now, was) = lib.set_track_in_library(b.id, false).unwrap();
+        assert!(!now);
+        assert_eq!(was, TrackLibraryWas { put: false, choice: None });
         assert_eq!(in_lib(&lib), vec![a.id]);
         assert_eq!(lib.track_choice(r.id, b.id).unwrap(), Some(false));
         assert!(lib.release_choice(r.id).unwrap().0);
-        // A liked song stays: the like keeps it.
+        assert!(lib.restore_track_in_library(b.id, was).unwrap());
+        assert_eq!(lib.track_choice(r.id, b.id).unwrap(), None);
+        assert_eq!(in_lib(&lib), vec![a.id, b.id]);
+        // Left out again, then put in by hand: no longer left out.
+        lib.set_track_in_library(b.id, false).unwrap();
+        let (now, was) = lib.set_track_in_library(b.id, true).unwrap();
+        assert!(now);
+        assert_eq!(was.choice, Some(false));
+        assert_eq!(lib.track_choice(r.id, b.id).unwrap(), None);
+        // In a playlist: taking it out writes no exclusion (the playlist
+        // keeps it), and nothing of the album changes.
+        lib.set_track_in_library(b.id, false).unwrap();
+        lib.restore_track_in_library(b.id, TrackLibraryWas::default()).unwrap();
+        let pl = lib.create_playlist("P").unwrap();
+        lib.playlist_add_many(pl.id, &[b.id]).unwrap();
+        let (now, _) = lib.set_track_in_library(b.id, false).unwrap();
+        assert!(now);
+        assert_eq!(lib.track_choice(r.id, b.id).unwrap(), None);
+        // A liked song stays: the like keeps it, no exclusion either.
         lib.like(LikeTarget::Track(b.id)).unwrap();
-        assert!(lib.set_track_in_library(b.id, false).unwrap());
+        assert!(lib.set_track_in_library(b.id, false).unwrap().0);
+        assert_eq!(lib.track_choice(r.id, b.id).unwrap(), None);
     }
 }

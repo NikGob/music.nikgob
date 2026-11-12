@@ -154,6 +154,16 @@ pub struct ReleaseRow {
 }
 
 impl ReleaseRow {
+    /// The album is the user's as an album: added to the library or saved
+    /// by hand ([`Self::whole`]), or every place of a tracklist of known
+    /// length, two or more, is one of the user's songs (the same positive
+    /// evidence migration 0028 takes; an unknown count proves nothing).
+    pub fn is_added(&self) -> bool {
+        let p = self.progress();
+        self.whole
+            || (self.release.total_tracks.is_some() && p.total >= 2 && p.wanted >= p.total && !p.left_out)
+    }
+
     /// "3 из 12 у тебя", as its page counts ([`ReleaseListing`]), and the
     /// user's songs of it.
     pub fn progress(&self) -> ReleaseProgress {
@@ -218,6 +228,21 @@ pub struct AlbumRules {
     /// album's songs the user did not choose play with it (karaoke only
     /// when the album itself says so).
     pub other_versions: bool,
+}
+
+impl AlbumRules {
+    /// What to store for an album's «Другие версии» switch turned `on`:
+    /// on is always stored (karaoke plays only by the album's own on);
+    /// off is stored only against the setting.
+    pub fn versions_choice(&self, on: bool) -> Option<bool> {
+        if on {
+            Some(true)
+        } else if self.other_versions {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 /// What an album's page shows and «Слушать» plays, worked out once for
@@ -380,9 +405,9 @@ impl ReleaseListing {
     ///   «Только мои песни» says otherwise.
     /// * Another version of a song ([`Self::version_kinds`]) the user did
     ///   not choose is a [`Membership::Variant`]: on an album added whole
-    ///   (or whole by having every song) only a version the user chose by
-    ///   hand ([`Self::picked`]) is theirs; on another album any of their
-    ///   songs is. Variants play with the album only when it says so (its
+    ///   (or whole by having every song) only a version with a reason of
+    ///   its own ([`Self::own`]: a file, a like, a playlist, put in by
+    ///   hand) is theirs; on another album any of their songs is. Variants play with the album only when it says so (its
     ///   own choice, else [`AlbumRules::other_versions`], never karaoke by
     ///   the setting alone).
     pub fn plan(&self, rules: AlbumRules) -> AlbumPlan {
@@ -400,9 +425,11 @@ impl ReleaseListing {
         };
         let split = match rules.mode {
             AlbumMode::Auto | AlbumMode::Whole => p.partial(),
+            // An album added whole with none of its songs the user's own is
+            // an empty «Мои треки», not a page of the catalog.
             AlbumMode::Mine => {
                 let n = self.tracks().filter(|t| mine_set(&t.id)).count() as u32;
-                (n > 0 || p.left_out) && n < p.total
+                (n > 0 || p.left_out || p.whole) && n < p.total
             }
         };
         let versions_on = self.versions.unwrap_or(rules.other_versions);
@@ -414,7 +441,11 @@ impl ReleaseListing {
         let (mut mine, mut whole, mut versions) = (Vec::new(), Vec::new(), Vec::new());
         for t in self.tracks() {
             let kind = kinds.get(&t.id).copied();
-            let kept = mine_set(&t.id) && (!added || kind.is_none() || self.picked.contains(&t.id));
+            // A version the user owns for a reason of its own (a file, a
+            // like, a playlist, put in by hand) stays theirs on an album
+            // added whole too; only the ones that came with the album wait
+            // for the switch.
+            let kept = mine_set(&t.id) && (!added || kind.is_none() || self.own.contains(&t.id));
             let m = if self.excluded.contains(&t.id) {
                 Membership::Excluded
             } else if kept {

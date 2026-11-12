@@ -57,13 +57,14 @@ pub enum VersionKind {
 fn kind_of(version: &str) -> Option<VersionKind> {
     let ws = words(version);
     let any = |list: &[&str]| ws.iter().any(|w| list.contains(&w.as_str()));
-    if any(&["karaoke", "カラオケ", "караоке"]) {
+    let ja = |marks: &[&str]| marks.iter().any(|m| has_kana_mark(version, m));
+    if any(&["karaoke", "караоке"]) || ja(&["カラオケ"]) {
         Some(VersionKind::Karaoke)
-    } else if any(&["offvocal", "オフボーカル"]) || any(&["off"]) && any(&["vocal"]) {
+    } else if any(&["offvocal"]) || any(&["off"]) && any(&["vocal"]) || ja(&["オフボーカル", "オフ・ボーカル"]) {
         Some(VersionKind::OffVocal)
-    } else if any(&["instrumental", "inst", "instr", "インスト", "インストゥルメンタル", "минус", "минусовка", "инструментал"]) {
+    } else if any(&["instrumental", "inst", "instr", "минус", "минусовка", "инструментал"]) || ja(&["インスト"]) {
         Some(VersionKind::Instrumental)
-    } else if any(&["remix", "rmx", "リミックス", "ремикс"]) {
+    } else if any(&["remix", "rmx", "ремикс"]) || ja(&["リミックス"]) {
         Some(VersionKind::Remix)
     } else {
         None
@@ -126,6 +127,28 @@ fn is_feat(body: &str) -> bool {
 
 fn is_version(body: &str) -> bool {
     words(body).iter().any(|w| VERSION_WORDS.contains(&w.as_str()))
+        || KANA_MARKS.iter().any(|m| has_kana_mark(body, m))
+}
+
+/// Japanese marks of a version, written inside a longer word without a
+/// space («オリジナルカラオケ», «インストゥルメンタルバージョン»).
+const KANA_MARKS: &[&str] = &["カラオケ", "オフボーカル", "オフ・ボーカル", "インスト", "リミックス"];
+
+/// `text` has the katakana `mark` inside a run of katakana, the mark not
+/// a part of another word: «インスト» of «インストール» (install) is none.
+fn has_kana_mark(text: &str, mark: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(mark) {
+        let end = from + at + mark.len();
+        let next = text[end..].chars().next();
+        // «インスト» goes on as «インストゥルメンタル», never as «インストール».
+        let word_goes_on = mark == "インスト" && next.is_some_and(|c| c == 'ー' || c == 'ラ');
+        if !word_goes_on {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 const OPEN: &[char] = &['(', '[', '【', '「', '『', '〔', '（', '［', '〈', '《'];
@@ -460,6 +483,12 @@ mod tests {
         assert_eq!(mark("Song (Remix) [Instrumental]"), Some(("Song".into(), Instrumental)));
         assert_eq!(mark("Song (Live) (Instrumental)"), Some(("Song (Live)".into(), Instrumental)));
         assert_eq!(mark("Song (Karaoke Version)"), Some(("Song".into(), Karaoke)));
+        // Japanese marks inside a longer word, no space or dot.
+        assert_eq!(mark("歌 (オリジナルカラオケ)"), Some(("歌".into(), Karaoke)));
+        assert_eq!(mark("歌（インストゥルメンタルバージョン）"), Some(("歌".into(), Instrumental)));
+        assert_eq!(mark("歌 [オフボーカルver.]"), Some(("歌".into(), OffVocal)));
+        assert_eq!(mark("歌 (テクノリミックス)"), Some(("歌".into(), Remix)));
+        assert_eq!(mark("歌 (インストール)"), None);
         // No mark of these kinds, a word inside another, nothing left.
         assert_eq!(mark("Song (Live)"), None);
         assert_eq!(mark("Song (TV Size)"), None);
