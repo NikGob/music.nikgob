@@ -315,12 +315,10 @@ fn the_mixes_are_one_row() {
     assert_eq!(liked_playlist(&st).map(|p| p.track_count), Some(5));
     let page = texts(&st, 1280.0);
     assert!(page.contains("Любимые") && page.contains("5 треков") && page.contains("На вечер"));
-    // «Моя волна» right after it, before the mixes; its chip in the header.
+    // «Моя волна» right after it, before the mixes (no second one in the header).
     let (liked_at, wave_at, mix_at) = (page.find("5 треков").unwrap(), page.rfind("Моя волна").unwrap(), page.find("На вечер").unwrap());
     assert!(liked_at < wave_at && wave_at < mix_at, "{page}");
-    assert_eq!(page.matches("Моя волна").count(), 2, "the card and the header's chip");
-    st.prefs.home_wave_chip = false;
-    assert_eq!(texts(&st, 1280.0).matches("Моя волна").count(), 1, "the chip hidden");
+    assert_eq!(page.matches("Моя волна").count(), 1, "only the card");
 }
 
 /// «Слушать снова» and «Новое для тебя» stand in columns of two songs,

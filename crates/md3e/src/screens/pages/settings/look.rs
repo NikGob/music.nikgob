@@ -236,7 +236,6 @@ fn home(ui: &mut Ui, p: &mut Prefs, out: &mut Vec<Command>) {
     switch(ui, Id::MixesOnRepeat, &mut p.mixes_on_repeat);
     menu(ui, Id::BackgroundCards, p);
     segments(ui, Id::ProfileNames, p);
-    switch(ui, Id::HomeWaveChip, &mut p.home_wave_chip);
     if !p.home_hidden_mixes.is_empty() {
         rows::titled(ui, Id::HiddenMixes, |ui| {
             for m in &p.home_hidden_mixes {

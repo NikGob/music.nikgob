@@ -222,7 +222,7 @@ pub const ALL: &[SettingId] = {
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
         PlayerButton(B::Like), PlayerButton(B::AddToPlaylist), PlayerButton(B::Queue), PlayerButton(B::Lyrics), PlayerButton(B::Sound),
-        HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, HomeWaveChip, HiddenMixes, AlbumDate,
+        HomeSections, MixesProfiles, MixesEverything, MixesMoods, MixesOnRepeat, BackgroundCards, ProfileNames, HiddenMixes, AlbumDate,
         LikedAlbumsPlace, UiScale, RailCompact, NavRoot, ReducedMotion, Tooltips, TrackMenu, PaneQueue, PaneLyrics, PaneInfo,
         // Сервисы.
         SpotifyEnabled, Spotify, SpotifyPersonal, SpotifyPlayback, SpotifySoloist, ImportSpotify, YouTubeEnabled, YouTube,
@@ -388,7 +388,6 @@ fn spec(id: SettingId) -> Spec {
         S::MixesEverything => Spec::Switch(|p| &mut p.mixes_everything),
         S::MixesMoods => Spec::Switch(|p| &mut p.mixes_moods),
         S::MixesOnRepeat => Spec::Switch(|p| &mut p.mixes_on_repeat),
-        S::HomeWaveChip => Spec::Switch(|p| &mut p.home_wave_chip),
         S::DislikeButton => Spec::Switch(|p| &mut p.dislike_button),
         S::DislikeSkips => Spec::Switch(|p| &mut p.dislike_skips),
         S::DislikeSkipEverywhere => Spec::Switch(|p| &mut p.dislike_skip_everywhere),
@@ -926,7 +925,7 @@ mod tests {
             | S::RingStyle | S::RingSpin | S::RingDir | S::RingBeat | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount
             | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::ProgressWave | S::NpVolume
             | S::NpVolumeHold | S::CoverClickPause | S::DblClickShape | S::TapWait | S::NpMotion | S::MixesProfiles
-            | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames | S::HomeWaveChip
+            | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames
             | S::HiddenMixes | S::AlbumDate | S::LikedAlbumsPlace | S::RailCompact | S::ReducedMotion | S::Tooltips | S::PaneQueue
             | S::PaneLyrics | S::PaneInfo | S::TrackMenu | S::SpotifyEnabled | S::Spotify | S::SpotifyPersonal | S::SpotifyPlayback
             | S::SpotifySoloist | S::ImportSpotify | S::YouTubeEnabled | S::YouTube | S::YouTubeCookies | S::ImportYouTube

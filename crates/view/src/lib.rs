@@ -1930,8 +1930,6 @@ pub struct Prefs {
     /// row starts «Моя волна» with its own filter (its list stays in ⋮);
     /// off: «Открывают готовый список треков».
     pub mix_cards_wave: bool,
-    /// «▶ Моя волна» in the header of Главная beside «Только скачанное».
-    pub home_wave_chip: bool,
     /// The novelty «Моя волна» starts with: the last one chosen.
     pub wave_novelty: WaveNovelty,
     /// «Фон» cards at most (0: none), for a user who listens in the
@@ -3781,7 +3779,6 @@ impl Default for Prefs {
             mixes_on_repeat: true,
             mix_click_opens_list: true,
             mix_cards_wave: true,
-            home_wave_chip: true,
             wave_novelty: WaveNovelty::Balance,
             background_cards: 3,
             graph_use: true,

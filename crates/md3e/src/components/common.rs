@@ -157,6 +157,22 @@ pub(crate) fn paint_shape_avatar(
     fill: Color32,
     on: Color32,
 ) {
+    paint_shape_avatar_turned(ui, rect, uri, initials, shape, fill, on, 0.0);
+}
+
+/// [`paint_shape_avatar`] with the outline turned by `rotation` (radians);
+/// the picture itself never turns, as on the player's cover.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_shape_avatar_turned(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    uri: Option<&str>,
+    initials: &str,
+    shape: nikgob_shapes::MaterialShape,
+    fill: Color32,
+    on: Color32,
+    rotation: f32,
+) {
     use nikgob_shapes::paint as shape_paint;
     // The shape is flattened and filled anew each frame: not out of sight.
     if !ui.is_rect_visible(rect) {
@@ -171,13 +187,13 @@ pub(crate) fn paint_shape_avatar(
         Some(t) => shape_paint::texture_mesh(
             cubics,
             rect,
-            0.0,
+            rotation,
             t,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
             &opts,
         ),
-        None => shape_paint::fill_mesh(cubics, rect, 0.0, fill, &opts),
+        None => shape_paint::fill_mesh(cubics, rect, rotation, fill, &opts),
     };
     ui.painter().add(egui::Shape::mesh(mesh));
     if tex.is_none() && !initials.is_empty() {

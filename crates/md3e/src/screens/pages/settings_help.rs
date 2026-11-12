@@ -214,7 +214,6 @@ pub enum SettingId {
     /// его страницу» is one of its answers now).
     MixCardsWave,
     /// «Моя волна» in the header of Главная.
-    HomeWaveChip,
     /// The share of new music of one kind of radio.
     NewShareBy(v::RadioKind),
     /// «Миксы для тебя» with «С новым».
@@ -488,7 +487,7 @@ impl SettingId {
             | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
-            | HomeWaveChip | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
+            | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips | PaneQueue
             | PaneLyrics | PaneInfo | TrackMenu | PlayerButton(_) | NavRoot => TAB_LOOK,
             SpotifyEnabled | Spotify | SpotifyPersonal | SpotifyPlayback | SpotifySoloist | ImportSpotify | YouTubeEnabled
             | YouTube | YouTubeCookies | ImportYouTube | SoundCloudEnabled | SoundCloud | SoundCloudToken | ImportSoundCloud
@@ -555,7 +554,7 @@ impl SettingId {
             // Rare cases, gestures, parts of the window and of Главная.
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
-            | ProfileNames | HomeWaveChip | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
+            | ProfileNames | Tooltips | PaneQueue | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
             | PlayerButton(_) | NavRoot
             // Technical.
             | LyricsModels | SpotifyPersonal | SpotifySoloist | YouTubeCookies | SoundCloudToken | PlaylistSync
@@ -717,7 +716,6 @@ impl SettingId {
             SoundNeural => "Нейросетевой анализ звука",
             SoundDevice => "На чём считать анализ звука",
             MixCardsWave => "Карточки в «Миксах для тебя»",
-            HomeWaveChip => "«Моя волна» в заголовке главной",
             NewShareBy(v::RadioKind::Track) => "Радио по треку",
             NewShareBy(v::RadioKind::Artist) => "Радио по исполнителю",
             NewShareBy(v::RadioKind::Mix) => "Бесконечные миксы",
@@ -997,7 +995,6 @@ impl SettingId {
             SoundNeural => "Нейросеть слушает песни и различает жанр, стиль и вокал — то, чего не слышит обычный анализ, поэтому похожее подбирается точнее. Модель (18 МБ и основа для моделей, если её ещё нет) скачивается один раз, когда выберешь режим. Работает в фоне по очереди с другими тяжёлыми задачами, ждёт, пока идёт игра, и выгружается из памяти, когда не нужна.",
             SoundDevice => "Где нейросеть считает анализ звука. Видеокарта справляется быстрее; на процессоре анализ идёт в один тихий поток и не занимает видеокарту.",
             MixCardsWave => "Что делает нажатие на карточку микса на главной: запускает «Мою волну» с вайбом этого микса — бесконечно, с новой музыкой и подстройкой под пропуски, — открывает его готовый список песен, как раньше, или сразу его играет. Список всегда есть в ⋮ → «Список треков».",
-            HomeWaveChip => "Кнопка «Моя волна» рядом с «Только скачанное» в приветствии главной. Волна запускается и с карточки в «Миксах для тебя».",
             BackgroundCards => "Ровная музыка без слов для фона. Появляется, только если ты так слушаешь.",
             DislikeButton => "Кнопка в конце ряда кнопок на экране трека (♡ — в его начале). «Не нравится» остаётся и в меню ⋮ любого трека.",
             DislikeSkips => "Трек, которому поставили «Не нравится», сразу пропускается.",

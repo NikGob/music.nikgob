@@ -468,18 +468,8 @@ fn header(ui: &mut Ui, row: Rect, state: &ViewState, out: &mut Vec<Command>) {
             .id_salt("home-header-right"),
     );
     right.spacing_mut().item_spacing.x = 8.0;
-    let mut chip = right.add(chip);
+    let chip = right.add(chip);
     let downloaded_clicked = chip.clicked();
-    // «▶ Моя волна» beside it (hidden in the view settings of Главная).
-    if state.prefs.home_wave_chip {
-        let (ours, playing) = wave_playing(state, None);
-        let wave = FilterChip::new("Моя волна", playing).icon(if playing { Icon::Pause } else { Icon::PlayArrow }).one_of().id_salt("home-wave-chip");
-        let resp = right.add(wave);
-        if resp.clicked() {
-            out.push(wave_command(ours, playing, None));
-        }
-        chip = chip.union(resp);
-    }
     let mut job = TypeRole::HeadlineMedium
         .style()
         .job(greeting_line(state.home.greeting_hour, &state.prefs.user_name), s.on_surface);

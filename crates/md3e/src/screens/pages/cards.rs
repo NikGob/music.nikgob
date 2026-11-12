@@ -432,6 +432,10 @@ pub fn mix(
     let s = Theme::get(ui.ctx()).scheme;
     let theme = Theme::get(ui.ctx());
     let id = ui.id().with(("home-mix", l.key));
+    // The texts are fitted to the width before it is put on whole pixels:
+    // snapped, it changes by a pixel as the row scrolls, and a line that
+    // just fits would change its names back and forth.
+    let text_w = cell.width().floor();
     let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -447,15 +451,29 @@ pub fn mix(
     let title_role = TypeRole::TitleMedium.style();
     let title = std::iter::once(&l.title)
         .chain(&l.short_titles)
-        .find(|t| rows_at(ui, t, title_role, cell.width()) <= 1)
+        .find(|t| rows_at(ui, t, title_role, text_w) <= 1)
         .or(l.short_titles.last())
         .unwrap_or(&l.title);
     let mut play = false;
     let mut more: Option<Response> = None;
+    // While the mix plays its outline turns slowly, as the player's cover
+    // does (the picture stays upright), and comes to rest when it stops.
+    let turning = playing && status == Status::Playing && !theme.reduced_motion;
+    let run = anim::fraction(ui.ctx(), id.with("spin-run"), f32::from(u8::from(turning)), theme.motion.default_effects);
+    let now = anim::now(ui.ctx());
+    let spin = ui.ctx().data_mut(|d| {
+        let (t, a) = d.get_temp::<(f64, f32)>(id.with("spin")).unwrap_or((now, 0.0));
+        let a = (a + run * ((now - t) as f32).min(0.1) * std::f32::consts::TAU / 24.0) % std::f32::consts::TAU;
+        d.insert_temp(id.with("spin"), (now, a));
+        a
+    });
+    if run > 0.001 {
+        ui.ctx().request_repaint();
+    }
     scaled(ui, art.center(), squish, |ui| {
         paint::container(ui.painter(), art, Radii::all(r), tile, egui::Stroke::NONE);
         let inner = Rect::from_center_size(art.center(), art.size() * 0.82 * zoom);
-        crate::components::paint_shape_avatar(ui, inner, cover.as_deref(), "", cut, s.surface_container_lowest, s.on_surface);
+        crate::components::paint_shape_avatar_turned(ui, inner, cover.as_deref(), "", cut, s.surface_container_lowest, s.on_surface, spin);
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
@@ -468,7 +486,7 @@ pub fn mix(
         more = more_button(ui, id, hover, slot);
     });
     let title_c = if playing { s.primary } else { s.on_surface };
-    let name = text(ui, title, title_role, title_c, cell.width(), 1);
+    let name = text(ui, title, title_role, title_c, text_w, 1);
     let name_rect = Rect::from_min_size(pos2(cell.left(), art.bottom() + 8.0), vec2(cell.width(), TITLE_LINE));
     ui.painter().galley(name_rect.min, name, title_c);
     // Over the name: the whole of it when it is shortened; elsewhere why
@@ -479,10 +497,10 @@ pub fn mix(
         resp.clone().md3_tooltip(why, None);
     }
     let role = TypeRole::BodyMedium.style();
-    let fits = |t: &str| rows_at(ui, t, role, cell.width()) <= 1;
+    let fits = |t: &str| rows_at(ui, t, role, text_w) <= 1;
     let new: &[String] = if with_new { &l.new_artists } else { &[] };
     let line = names_line(&fits, &l.artists, new);
-    let g = text(ui, &line, role, s.on_surface_variant, cell.width(), 1);
+    let g = text(ui, &line, role, s.on_surface_variant, text_w, 1);
     ui.painter().galley(pos2(cell.left(), name_rect.bottom()), g, s.on_surface_variant);
 
     let items = mix_items(l, can_blend, !opens_list, false);
@@ -1014,7 +1032,7 @@ mod tests {
     fn mix_cards_start_waves_by_default() {
         use nikgob_view::MixKey as K;
         let p = nikgob_view::Prefs::default();
-        assert!(p.mix_cards_wave && p.home_wave_chip);
+        assert!(p.mix_cards_wave);
         assert_eq!(MixClick::chosen(&p), MixClick::Wave);
         assert_eq!(MixClick::of(&p, K::Calm), MixClick::Wave);
         assert_eq!(MixClick::of(&p, K::Genre(2)), MixClick::Wave);
