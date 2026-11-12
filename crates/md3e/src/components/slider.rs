@@ -412,9 +412,63 @@ pub fn wavy_progress_on(ui: &mut Ui, id_salt: impl egui::AsId, fraction: f32, wi
     response
 }
 
+/// The wavy linear progress indicator while how much is not known yet: a
+/// wavy piece runs along the track, with the gaps of the determinate one.
+pub fn wavy_progress_indeterminate(ui: &mut Ui, width: f32) -> Response {
+    let theme = Theme::get(ui.ctx());
+    let s = &theme.scheme;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 10.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let cy = rect.center().y;
+    let thick = 4.0;
+    let (left, right) = (rect.left() + thick * 0.5, rect.right() - thick * 0.5);
+    let (head, tail) = indeterminate_span(anim::now(ui.ctx()), left, right);
+    let track = Stroke::new(thick, s.secondary_container);
+    // The track before the piece and after it, 4 dp away.
+    if tail - 4.0 - thick > left {
+        ui.painter().line_segment([pos2(left, cy), pos2(tail - 4.0 - thick, cy)], track);
+    }
+    if head + 4.0 + thick < right {
+        ui.painter().line_segment([pos2(head + 4.0 + thick, cy), pos2(right, cy)], track);
+    }
+    if head > tail {
+        let amp = if theme.reduced_motion { 0.0 } else { 3.0 };
+        let phase = (anim::now(ui.ctx()) as f32 * 0.6).fract() * TAU;
+        wave_line(ui, tail, head, cy, amp, 40.0, phase, Stroke::new(thick, s.primary));
+    }
+    ui.ctx().request_repaint();
+    response
+}
+
+/// Where the running piece of [`wavy_progress_indeterminate`] is at `now`
+/// (seconds) between `left` and `right`: its head and its tail, clipped.
+fn indeterminate_span(now: f64, left: f32, right: f32) -> (f32, f32) {
+    const PERIOD: f64 = 1.8;
+    let w = right - left;
+    let t = (now / PERIOD).fract() as f32;
+    // Eased: it starts slow, runs, and slows into the end.
+    let e = t * t * (3.0 - 2.0 * t);
+    let head = left + (e * 1.4 - 0.05) * w;
+    let tail = head - 0.35 * w;
+    (head.clamp(left, right), tail.clamp(left, right))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The running piece stays on the track and goes from end to end.
+    #[test]
+    fn the_running_piece_stays_on_the_track() {
+        for i in 0..40 {
+            let (head, tail) = indeterminate_span(f64::from(i) * 0.05, 0.0, 100.0);
+            assert!((0.0..=100.0).contains(&head) && (0.0..=100.0).contains(&tail) && tail <= head);
+        }
+        assert_eq!(indeterminate_span(0.0, 0.0, 100.0).1, 0.0);
+        assert_eq!(indeterminate_span(1.79, 0.0, 100.0).0, 100.0);
+    }
 
     fn context() -> Context {
         let ctx = Context::default();

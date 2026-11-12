@@ -77,14 +77,19 @@
 //!   waiting in «Подтверди» («FLAC вместо MP3 320»), and «Хочу скачать»
 //!   with better copies looked for in each state (`route:confirm`,
 //!   `route:wishlist`).
+//! - `fake:downloads` — downloads of several sources running at once:
+//!   «Активные» with a torrent, Soulseek (one coming, one in a peer's
+//!   queue), Bandcamp, Internet Archive, a save from YouTube and an
+//!   import; «Хочу скачать» with their items, the same numbers; «Подтверди»
+//!   with a card and one without choices (never shown).
 //! - `fake:quality:real` / `fake:quality:fake` — what plays is a FLAC whose
 //!   check found it genuine, or made from an MP3 ~128 (its rows and the
 //!   «Качество» section of «Инфо» say so, with the spectrum and its cut).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
-    DiscographyView, PlaylistSyncView, Status, StreamAlbumCard, ViewState, WishlistGroup, WishlistId,
-    WishlistOrigin, WishlistRow, WishlistScope, WishlistStatus as St, WishlistView,
+    DiscographyView, PlaylistSyncView, Status, StreamAlbumCard, Transfer, TransferPhase, ViewState, WishlistGroup,
+    WishlistId, WishlistOrigin, WishlistRow, WishlistScope, WishlistStatus as St, WishlistView,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -124,6 +129,7 @@ pub struct Fakes {
     fake_flac: bool,
     /// `fake:quality:fake` (true) / `fake:quality:real`.
     quality: Option<bool>,
+    downloads: bool,
 }
 
 impl Fakes {
@@ -173,6 +179,7 @@ impl Fakes {
             "share" => self.share = true,
             "upgrade-offer" => self.upgrade_offer = true,
             "fake-flac" => self.fake_flac = true,
+            "downloads" => self.downloads = true,
             "quality:real" => self.quality = Some(false),
             "quality:fake" => self.quality = Some(true),
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
@@ -216,6 +223,7 @@ impl Fakes {
             || self.upgrade_offer
             || self.fake_flac
             || self.quality.is_some()
+            || self.downloads
     }
 
     /// `state` with the fakes laid over it.
@@ -245,6 +253,9 @@ impl Fakes {
         if self.fake_flac {
             s.downloads.confirm.retain(|c| c.pick.is_none());
             s.downloads.confirm.push(fake_flac_card());
+        }
+        if self.downloads {
+            running_downloads(&mut s);
         }
         if self.keep
             && let Some(t) = s.player.current.clone()
@@ -531,6 +542,7 @@ fn refusals_history() -> Vec<nikgob_view::Job> {
             rate: None,
             eta: None,
             paused: false,
+            queued: false,
             controllable: false,
             pausable: false,
             error: error.map(str::to_owned),
@@ -1087,7 +1099,12 @@ fn row(n: u128, title: &str, artist: &str, album: &str, status: St) -> WishlistR
         attempts: u32::from(status == St::NoTorrent),
         can_save_from_youtube: status == St::NoTorrent,
         cover: None,
-        progress: (status == St::Downloading).then_some(38),
+        transfer: (status == St::Downloading).then_some(Transfer {
+            phase: TransferPhase::Going,
+            done: 38,
+            total: Some(100),
+            bps: 0,
+        }),
         confirm_files: false,
         missing: 0,
         has_copy: false,
@@ -1184,6 +1201,151 @@ fn upgrades() -> WishlistView {
     WishlistView { loaded: true, items, by_album: Vec::new(), by_artist: Vec::new(), counts, can_search: true }
 }
 
+/// Downloads of several sources at once (`fake:downloads`), as the runtime
+/// makes them (runtime/src/running.rs, torrents.rs): each row of
+/// «Активные» and its item's line in «Хочу скачать» from one [`Transfer`].
+fn running_downloads(s: &mut ViewState) {
+    const MB: u64 = 1 << 20;
+    const KB: u64 = 1 << 10;
+    let going = |done: u64, total: Option<u64>, bps: u64| Transfer { phase: TransferPhase::Going, done, total, bps };
+    let direct = |n: u64| (1 << 48) | (1 << 44) | n;
+    // (row id, title, source, from, transfer, pausable; its item: title, artist, album, from)
+    let runs: [(u64, &str, Option<&str>, Option<&str>, Transfer, bool, (&str, &str, &str, &str)); 6] = [
+        (
+            1,
+            "Creepy Nuts - LEGION (BBE VIVA) [FLAC 48kHz / 24bit]",
+            None,
+            None,
+            going(39 * MB, Some(42 * MB), 62 * KB),
+            true,
+            ("オトノケ - Otonoke", "Creepy Nuts", "LEGION", "Knaben"),
+        ),
+        (
+            direct(1),
+            "Jagwar Twin — Happy Face",
+            Some("Soulseek"),
+            Some("mugilaw"),
+            going(12 * MB + 300 * KB, Some(33 * MB), 410 * KB),
+            false,
+            ("Happy Face", "Jagwar Twin", "Happy Face", "mugilaw"),
+        ),
+        (
+            direct(2),
+            "Panic! At The Disco — House of Memories",
+            Some("Soulseek"),
+            Some("rotted"),
+            Transfer { phase: TransferPhase::Queued(Some(12)), done: 0, total: Some(31 * MB), bps: 0 },
+            false,
+            ("House of Memories", "Panic! At The Disco", "Death of a Bachelor", "rotted"),
+        ),
+        (
+            direct(3),
+            "Hiatus Kaiyote — Mood Variant",
+            None,
+            Some("Bandcamp"),
+            going(212 * MB, Some(388 * MB), 2 * MB + 300 * KB),
+            false,
+            ("Mood Variant", "Hiatus Kaiyote", "Mood Variant", "Bandcamp"),
+        ),
+        (
+            direct(4),
+            "Yellow Magic Orchestra — Rydeen",
+            None,
+            Some("Internet Archive"),
+            going(5 * MB + 600 * KB, None, 180 * KB),
+            false,
+            ("Rydeen", "Yellow Magic Orchestra", "Solid State Survivor", "Internet Archive"),
+        ),
+        (
+            direct(5),
+            "Gorillaz — Rhinestone Eyes",
+            None,
+            Some("YouTube"),
+            Transfer::default(),
+            false,
+            ("Rhinestone Eyes", "Gorillaz", "Plastic Beach", "YouTube"),
+        ),
+    ];
+    let mut active: Vec<nikgob_view::Job> = runs
+        .iter()
+        .map(|(id, title, via, from, t, pausable, _)| t.job(*id, (*title).into(), *via, *from, true, *pausable))
+        .collect();
+    // The files of one came: the import takes them, under the item's name.
+    active.push(nikgob_view::Job {
+        id: (1 << 48) | 5,
+        title: "Björk — Jóga".into(),
+        subtitle: "сверяю с библиотекой · Björk - Homogenic - 05 - Jóga.flac".into(),
+        progress: None,
+        rate: None,
+        eta: None,
+        paused: false,
+        queued: false,
+        controllable: true,
+        pausable: false,
+        error: None,
+        at: 0,
+    });
+    s.downloads.active = active;
+
+    let mut items: Vec<WishlistRow> = runs
+        .iter()
+        .enumerate()
+        .map(|(i, (.., t, _, (title, artist, album, from)))| {
+            let mut r = row(60 + i as u128, title, artist, album, St::Downloading);
+            r.transfer = Some(*t);
+            r.source = Some((*from).into());
+            r.note = None;
+            if i == 3 {
+                r.scope = WishlistScope::Album;
+            }
+            r
+        })
+        .collect();
+    let mut joga = row(70, "Jóga", "Björk", "Homogenic", St::Downloading);
+    joga.transfer = Some(Transfer { phase: TransferPhase::Importing, ..Transfer::default() });
+    joga.source = Some("Soulseek".into());
+    items.push(joga);
+    items.push(row(71, "Нам с тобой", "Кино", "Чёрный альбом", St::Searching));
+    items.push(row(72, "Кукушка", "Кино", "Чёрный альбом", St::Waiting));
+    items.push(row(73, "Hyperballad", "Björk", "Post", St::Done));
+    let group = |title: &str, subtitle: &str, ids: &[u128]| WishlistGroup {
+        title: title.into(),
+        subtitle: subtitle.into(),
+        release: None,
+        artist: None,
+        items: ids.iter().map(|n| WishlistId(nikgob_core::model::Uuid::from_u128(*n))).collect(),
+        waiting: u32::from(ids.contains(&72)),
+    };
+    let by_album = vec![
+        group("LEGION", "Creepy Nuts", &[60]),
+        group("Happy Face", "Jagwar Twin", &[61]),
+        group("Death of a Bachelor", "Panic! At The Disco", &[62]),
+        group("Mood Variant", "Hiatus Kaiyote", &[63]),
+        group("Solid State Survivor", "Yellow Magic Orchestra", &[64]),
+        group("Plastic Beach", "Gorillaz", &[65]),
+        group("Homogenic", "Björk", &[70]),
+        group("Чёрный альбом", "Кино", &[71, 72]),
+    ];
+    let mut counts: Vec<(St, u32)> = Vec::new();
+    for r in &items {
+        match counts.iter_mut().find(|(s, _)| *s == r.status) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((r.status, 1)),
+        }
+    }
+    s.downloads.wishlist = WishlistView { loaded: true, items, by_album, by_artist: Vec::new(), counts, can_search: true };
+
+    // A card whose offers could not be read: the runtime never sends it any
+    // more, and the page would not show it.
+    let empty = nikgob_view::Confirm {
+        id: 2,
+        title: "Rhinestone Eyes — Gorillaz".into(),
+        options: Vec::new(),
+        ..confirm()
+    };
+    s.downloads.confirm = vec![confirm(), empty];
+}
+
 /// A track in «Подтверди» with three offers, the first named at length.
 fn confirm() -> nikgob_view::Confirm {
     let option = |label: &str, detail: &str, recommended| nikgob_view::ConfirmOption {
@@ -1195,7 +1357,7 @@ fn confirm() -> nikgob_view::Confirm {
         yes_no: false,
         id: 1,
         title: "Shake It Now. (feat. Ado) — Nakimushi".into(),
-        origin: "Хочу скачать · трек".into(),
+        origin: String::new(),
         question: "Что из этого — этот трек?".into(),
         options: vec![
             option(
