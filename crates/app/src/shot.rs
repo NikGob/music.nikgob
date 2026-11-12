@@ -26,6 +26,8 @@
 //! версия…» for its first stream song); `replace_first` replaces it with the
 //! dialog's first result in the scope the dialog would offer.
 //! `play_track:<id>` plays one track of the library by its id.
+//! `wave` starts «Моя волна» (`wave:card` with the first card of «Миксы
+//! для тебя» as its preset), `vibe` is «↻ Другой вайб».
 //! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
 //! (the first mood or style mix, the bento's daylist, its first tile;
 //! `play_mix:tile:artist_of_day` the tile of that kind); `radio` starts «Радио по треку» from the first
@@ -709,6 +711,17 @@ impl Shot {
                     out.push(Command::SetPrefs(Box::new(p)));
                 }
                 self.wait = 10;
+            }
+            // `wave` starts «Моя волна» (`wave:card` as the first card of
+            // «Миксы для тебя»), `vibe` turns it to another cluster.
+            "wave" => {
+                let preset = if arg == "card" { state.home.lanes.first().map(|l| l.key) } else { None };
+                out.push(Command::PlayWave { preset });
+                self.wait = 60;
+            }
+            "vibe" => {
+                out.push(Command::OtherVibe);
+                self.wait = 30;
             }
             "play_mix" => {
                 let h = &state.home;
