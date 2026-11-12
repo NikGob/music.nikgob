@@ -13,6 +13,7 @@ mod autostart;
 mod cover_cache;
 mod demo;
 mod desktop;
+mod icon_art;
 mod fallback_fonts;
 mod frames;
 mod geometry;

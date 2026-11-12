@@ -82,3 +82,7 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "way
 # window of its own: wry's webview runs in GTK's main loop, not winit's.
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 gtk = "0.18"
+
+[build-dependencies]
+# The icon inside the .exe (Windows resource compiler).
+embed-resource = "3"
