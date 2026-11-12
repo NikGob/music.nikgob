@@ -424,6 +424,9 @@ pub struct Report {
     pub next: Option<ReplayReport>,
     pub autoplay: ListStats,
     pub mixes: ListStats,
+    /// The row's own cards alone (the niches' cards of their own left
+    /// out): the mixes as they were before them.
+    pub mixes_row: ListStats,
     /// The mixes of a home and how many songs each.
     pub mixes_per_home: f32,
     /// The waves of «Спокойное» and of any music (the user's share).
@@ -739,9 +742,11 @@ pub fn genres(parts: &Parts) -> Vec<Option<u8>> {
 }
 
 /// The home's mixes ([`home_mixes`]) with the niches it holds a card of
-/// while new music plays ([`crate::mix_new::with_niches`]).
-pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch: u64) -> Vec<Mix> {
+/// while new music plays ([`crate::mix_new::with_niches`]), and how many
+/// of them are the row's own (the niches' own cards come after).
+pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch: u64) -> (Vec<Mix>, usize) {
     let mut home = home_mixes(parts, model, suits, epoch);
+    let row = home.len();
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
     let background = |i: usize| suits.get(i).copied().unwrap_or(false);
@@ -750,7 +755,7 @@ pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch:
     let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none };
     let cards = crate::open_world::niches(&ctx).into_iter().map(|c| (c, String::new(), Vec::new())).collect();
     mix_new::with_niches(model, &mut home, cards);
-    home
+    (home, row)
 }
 
 /// The user's share of new music the evaluation takes («Новое в радио и
@@ -1009,6 +1014,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         days.push((last + offset).div_euclid(DAY_MS) + 1);
     }
     let mut mixes = Lists::default();
+    let mut mixes_row = Lists::default();
     let mut calm = Waves::default();
     let mut any = Waves::default();
     let mut per_home = 0usize;
@@ -1026,13 +1032,18 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
             // loved otherwise (a like, a playlist, an imported play).
             let heard = |i: usize| !never_heard(&model, i);
             let artist = artist_heard(&parts.catalog, &model);
-            let home = home_with_niches(parts, &model, &suits, day as u64);
+            let (home, row) = home_with_niches(parts, &model, &suits, day as u64);
             let placed = home_new(parts, &model, &home);
             homes_n += 1;
             per_home += home.len();
-            for (m, new) in home.iter().zip(placed) {
-                mixes.add(&ctx, &m.tracks, &Truth { listened: &listened, session: None, next: None, heard: &heard, artist_heard: &artist });
+            for (k, (m, new)) in home.iter().zip(placed).enumerate() {
+                let truth = Truth { listened: &listened, session: None, next: None, heard: &heard, artist_heard: &artist };
+                mixes.add(&ctx, &m.tracks, &truth);
                 mixes.add_new(m.tracks.len(), &new);
+                if k < row {
+                    mixes_row.add(&ctx, &m.tracks, &truth);
+                    mixes_row.add_new(m.tracks.len(), &new);
+                }
             }
             let pool = open_pool(parts, &model);
             let session = Session::default();
@@ -1041,6 +1052,7 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         }
     }
     report.mixes = mixes.stats(n);
+    report.mixes_row = mixes_row.stats(n);
     report.mixes_per_home = per_home as f32 / homes_n.max(1) as f32;
     report.mixes.niches /= homes_n.max(1) as f32;
     report.wave_calm = calm.stats();
@@ -1101,6 +1113,7 @@ impl Report {
         }
         out += &format!("  autoplay: {}\n", list_row(&self.autoplay));
         out += &format!("  mixes:    {}  ({:.1} mixes a home)\n", list_row(&self.mixes), self.mixes_per_home);
+        out += &format!("  mix row:  {}\n", list_row(&self.mixes_row));
         let m = &self.mixes;
         out += &format!(
             "  open world: niches {:.1} a home  niche-new {:.3}  niche-artists {:.1}  stuck-on-2 {:.3}  mostly-new {:.3}\n",
@@ -1243,7 +1256,7 @@ mod tests {
         let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
         let model = p.model_at(last + 1);
         let suits = p.suits();
-        let home = home_with_niches(&p, &model, &suits, 1);
+        let (home, _) = home_with_niches(&p, &model, &suits, 1);
         let calm = home.iter().find(|m| m.key == MixKey::Calm).expect("a calm card");
         assert_eq!(calm.tracks.len(), 3, "its own songs only");
         assert_eq!(calm.pool, calm.tracks);
