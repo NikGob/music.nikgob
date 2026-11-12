@@ -171,6 +171,14 @@ pub(crate) enum Msg {
         clip: Box<nikgob_library::LikedClip>,
         result: Result<Option<StreamTrack>, StreamError>,
     },
+    /// The song of a clip the app queued (see [`clips::QueueClips`]).
+    QueueClipSong {
+        track: TrackId,
+        video: Box<StreamTrack>,
+        result: Result<Option<StreamTrack>, StreamError>,
+    },
+    /// The wait of a queued clip for its song ran out.
+    QueueClipWait(u64),
     /// Time to send the queued likes of a service.
     LikeFlush(Service),
     LikesPushed {
@@ -264,6 +272,8 @@ pub(crate) struct Streams {
     like_queue: likes::LikeQueue,
     /// Liked YouTube clips turning into their songs.
     clips: clips::ClipRepair,
+    /// The songs of the clips the app queued.
+    queue_clips: clips::QueueClips,
     /// «Найти песню…»: its searches, the undo of replacements.
     replace: replace::ReplaceState,
     pub(crate) wish: wishlist::WishState,
@@ -319,6 +329,7 @@ impl Streams {
             likes: HashMap::new(),
             like_queue: likes::LikeQueue::default(),
             clips: clips::ClipRepair::default(),
+            queue_clips: clips::QueueClips::default(),
             replace: replace::ReplaceState::default(),
             wish: wishlist::WishState::default(),
             share_seq: 0,
@@ -730,6 +741,8 @@ impl Worker {
                 partial,
             } => self.likes_converted(service, &liked, &songs, &misses, partial),
             Msg::ClipSong { clip, result } => self.clip_song(*clip, result),
+            Msg::QueueClipSong { track, video, result } => self.queue_clip_song(track, *video, result),
+            Msg::QueueClipWait(entry) => self.queue_clip_wait(entry),
             Msg::LikeFlush(service) => self.flush_likes(service),
             Msg::LikesPushed {
                 service,
