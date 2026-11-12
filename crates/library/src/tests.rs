@@ -1329,6 +1329,46 @@ fn analysis_vectors_and_progress_counts() {
 }
 
 #[test]
+fn sound_model_vectors_queue_store_and_load() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let mut files = Vec::new();
+    for i in 0..3 {
+        let t = track(&lib, &a, None, &format!("F{i}"), i);
+        local(&lib, &t, &format!("f{i}.opus"), Codec::Opus, Some(160));
+        files.push(t);
+    }
+    // Only files with a current bliss analysis wait for the model.
+    lib.put_analysis(&analysis(files[0].id, "b", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(files[1].id, "b", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(files[2].id, "old", AnalysisSource::File, 0.0)).unwrap();
+    let queue = |lib: &Library| {
+        let mut q: Vec<_> = lib.tracks_needing_embedding("m1", "b", 10).unwrap().into_iter().map(|t| t.track_id).collect();
+        q.sort();
+        q
+    };
+    let mut want = vec![files[0].id, files[1].id];
+    want.sort();
+    assert_eq!(queue(&lib), want);
+    assert_eq!(lib.embedding_counts("m1").unwrap(), (0, 3));
+
+    let v = vec![7u8; 260];
+    assert!(lib.put_embedding(files[0].id, Some(&v), "m1", AnalysisSource::File).unwrap());
+    // Cannot be made: marked, out of the queue, not loaded.
+    assert!(lib.put_embedding(files[1].id, None, "m1", AnalysisSource::File).unwrap());
+    assert!(queue(&lib).is_empty());
+    assert!(lib.has_embedding(files[1].id, "m1").unwrap());
+    assert!(!lib.has_embedding(files[1].id, "m2").unwrap());
+    assert_eq!(lib.embedding_counts("m1").unwrap(), (2, 3));
+    assert_eq!(lib.embedding_vectors("m1").unwrap(), vec![(files[0].id, v.clone())]);
+    // A stream's never replaces a file's; another model is due again.
+    assert!(!lib.put_embedding(files[0].id, Some(&[1u8; 260]), "m1", AnalysisSource::Youtube).unwrap());
+    assert_eq!(lib.embedding_vectors("m1").unwrap()[0].1, v);
+    assert_eq!(lib.tracks_needing_embedding("m2", "b", 10).unwrap().len(), 2);
+    assert!(lib.embedding_vectors("m2").unwrap().is_empty());
+}
+
+#[test]
 fn the_stream_analysis_queue_skips_failures_until_they_are_old() {
     let lib = lib();
     let a = artist(&lib, "A");

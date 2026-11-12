@@ -120,7 +120,7 @@ impl Library {
                 None => {
                     if !has_local_source(tx, &cid)? {
                         write_stream_meta(tx, &song, Some(clip), false)?;
-                        for table in ["lyrics", "lyrics_text", "lyrics_pick", "analysis"] {
+                        for table in ["lyrics", "lyrics_text", "lyrics_pick", "analysis", "sound_embedding"] {
                             tx.execute(&format!("DELETE FROM {table} WHERE track_id = ?1"), [&cid])?;
                         }
                     }
