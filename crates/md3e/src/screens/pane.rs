@@ -98,14 +98,19 @@ pub fn show(
     PaneOutput { closed, configure_lyrics }
 }
 
-/// A queue row: cover, title and artist.
-fn queue_item<'a>(t: &'a TrackRow, salt: impl egui::AsId) -> ListItem<'a> {
+/// A queue row: cover, title and artist; a guest of «✦ С дополнением»
+/// has ✦ before its artist.
+fn queue_item<'a>(t: &'a TrackRow, guest: bool, salt: impl egui::AsId) -> ListItem<'a> {
     let uri = t.cover.as_ref().map(|c| c.uri());
+    let artist = if guest { format!("{GUEST_MARK} {}", t.artist) } else { t.artist.clone() };
     ListItem::new(&t.title)
-        .supporting(&t.artist)
+        .supporting(artist)
         .leading(Leading::Image(uri, Icon::MusicNote))
         .id_salt(salt)
 }
+
+/// The mark of a guest of «✦ С дополнением» in its queue row.
+pub(super) const GUEST_MARK: &str = "✦";
 
 /// What a queue row's menu does: the queue's own rows, or a track's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,7 +191,7 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, state: &ViewState, chrom
             ui.multiply_opacity(0.6);
         }
         let mut more = None;
-        let o = queue_item(&e.track, ("q", entry))
+        let o = queue_item(&e.track, e.guest, ("q", entry))
             .muted(played)
             .drag_handle(true)
             .trailing(|ui| {
@@ -329,7 +334,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 let top = ui.cursor().min.y;
                 common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
-                let o = queue_item(t, "q-current").selected(true).show(ui);
+                let o = queue_item(t, q.current_guest, "q-current").selected(true).show(ui);
                 if let Some(why) = &q.current_why {
                     o.response.clone().md3_tooltip(why, None);
                 }
@@ -962,8 +967,8 @@ mod tests {
         };
         let mut state = ViewState::default();
         state.queue.current_entry = Some(1);
-        let first = QueueEntry { entry: 2, track: song("Звезда"), why: None };
-        let later = QueueEntry { entry: 3, track: song("Группа крови"), why: None };
+        let first = QueueEntry { entry: 2, track: song("Звезда"), why: None, guest: false };
+        let later = QueueEntry { entry: 3, track: song("Группа крови"), why: None, guest: false };
         state.queue.next = vec![first.clone(), later.clone()];
         let ctx = egui::Context::default();
         let acts = crate::screens::pages::widgets::row_acts(&queue_menu_rows(&ctx, &later, &state));

@@ -159,6 +159,8 @@ material_icons! {
     DownloadDone => "download_done",
     /// «Не нравится».
     ThumbDown => "thumb_down",
+    /// «С дополнением»: new songs join a playlist as it plays.
+    AutoAwesome => "auto_awesome",
 }
 
 impl Icon {

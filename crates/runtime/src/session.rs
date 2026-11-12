@@ -31,6 +31,9 @@ pub(crate) struct Session {
     /// (`release:<id>`, `playlist:<id>`, `artist:<id>`): the header of Now
     /// Playing links it after a restart too.
     pub page: Option<String>,
+    /// What each entry of a playlist's queue is to «✦ С дополнением».
+    #[serde(default)]
+    pub plus: Option<crate::recs::PlusSave>,
 }
 
 impl Session {
@@ -83,6 +86,9 @@ impl Worker {
         if let Some(radio) = saved.radio {
             self.radio_restore(radio);
         }
+        if let Some(plus) = saved.plus {
+            self.plus_restore(plus);
+        }
         if self.queue.current().is_some() {
             let at = Duration::from_millis(saved.position_ms);
             self.resume_at = Some(at);
@@ -107,9 +113,11 @@ impl Worker {
     pub(crate) fn save_session(&mut self) {
         let Some(path) = self.session_path.clone() else { return };
         let radio = self.radio_save();
+        let plus = self.plus_save();
         let page = self.context_page_id().filter(|id| crate::context_page(id).is_some()).map(str::to_owned);
         let session = Session {
             radio,
+            plus,
             page,
             volume: Some(self.volume),
             muted: self.muted,

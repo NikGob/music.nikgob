@@ -1178,7 +1178,12 @@ impl Worker {
                 let (ids, name) = self.playlist_tracks(id, start);
                 let name = format!("плейлиста «{name}»");
                 let kind = self.playlist_kind(id);
+                let n = ids.len();
                 self.play_list(ids, start, shuffle, kind, Some(name), EventContext::Playlist, Some(format!("playlist:{id}")));
+                // Its entries are its own («✦ С дополнением» counts them).
+                if n > 0 {
+                    self.plus_queued(id);
+                }
             }
             Command::PlayArtist { id, shuffle } => {
                 let rows = self
@@ -1270,6 +1275,7 @@ impl Worker {
             }
             Command::MoveInQueue { entry, anchor, after } => {
                 self.queue.move_next_to(entry, anchor, after);
+                self.plus_moved(entry);
                 self.preload_next();
                 self.publish_player();
             }
@@ -1277,6 +1283,7 @@ impl Worker {
                 let before: Vec<TrackId> = self.queue.history().iter().map(|e| e.track).collect();
                 let after: Vec<TrackId> = self.queue.upcoming().iter().map(|e| e.track).collect();
                 let playing = self.queue.current().map(|e| e.id);
+                self.plus_cleared();
                 self.queue.clear_upcoming();
                 self.preload_next();
                 self.publish_player();
@@ -1292,6 +1299,7 @@ impl Worker {
                     && self.queue.current().map(|e| e.id) == playing
                 {
                     self.queue.restore_around(&before, &after);
+                    self.plus_uncleared();
                     self.preload_next();
                     self.publish_player();
                 }
@@ -1339,6 +1347,7 @@ impl Worker {
                     let mut wished = false;
                     if let LikeTarget::Track(t) = target {
                         if on {
+                            self.plus_kept(t);
                             self.liked_undislikes(t);
                             self.new_liked(t);
                             self.recs_liked(t);
@@ -1387,6 +1396,9 @@ impl Worker {
                 }
             }
             Command::AddToPlaylist(id, tracks) => {
+                for t in &tracks {
+                    self.plus_kept(*t);
+                }
                 let before = self.library_tracks();
                 // Only what it does not have yet: never a track twice.
                 let (mut added, mut already) = (0, 0);
@@ -1561,6 +1573,9 @@ impl Worker {
                 let mut p = self.state.read().prefs.clone();
                 patch.apply(&mut p);
                 self.set_prefs(Box::new(p));
+                if let nikgob_view::PrefPatch::Plus { playlist, on } = &patch {
+                    self.plus_switched(*playlist, *on);
+                }
                 if let nikgob_view::PrefPatch::HideMix(m) = patch {
                     self.mix_hidden(m);
                 }
@@ -2066,7 +2081,9 @@ impl Worker {
                 return;
             }
             log::warn!("no playable source for {}", e.track);
-            if attempt == 0 {
+            // A guest of «✦ С дополнением» is passed over without a word.
+            let guest = self.plus_failed(e.id);
+            if attempt == 0 && !guest {
                 // A stream track's last way to the sound is YouTube Music:
                 // when it is off, that is the reason, not a missing file.
                 let streamed = self
@@ -2329,6 +2346,8 @@ impl Worker {
             self.recs_ended(e.track, complete, position_ms, dur);
             // After the session: the radio reads its verdict.
             self.radio_feedback(e.track, complete, position_ms, dur);
+            // «Дальше» on a guest is a skip at any point of it.
+            self.plus_ended(e.id, reason == EndReason::UserNext || (by_user && !complete));
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();
@@ -2597,7 +2616,10 @@ impl Worker {
                     .and_then(|e| self.lib.get_track(e.track).ok().flatten())
                     .map(|t| t.title);
                 let why = playing.and_then(|e| self.streaming.failures.remove(&e.track));
+                // A guest of «✦ С дополнением» is passed over without a word.
+                let guest = playing.is_some_and(|e| self.plus_failed(e.id));
                 match (title, why) {
+                    _ if guest => {}
                     (Some(t), Some((why, Some(link)))) => {
                         self.toast_open(format!("{t}: {why}"), "Войти", nikgob_view::Link::Setting(link));
                     }
@@ -2624,6 +2646,8 @@ impl Worker {
     }
 
     fn publish_player(&mut self) {
+        // «✦ С дополнением»: a guest for a place that came near.
+        self.plus_top_up();
         // A radio picks more when its queue runs low.
         self.radio_top_up();
         let radio = self.radio_view();
@@ -2647,6 +2671,8 @@ impl Worker {
         let found = self.lib.get_track_rows(&ids).unwrap_or_default();
         let why = &self.recs.why;
         let current_why = current_entry.and_then(|e| why.get(&e).cloned());
+        let guests = self.recs.plus.guests();
+        let current_guest = current_entry.is_some_and(|e| guests.contains(&e));
         let res = &mut self.res;
         let mut rows = |list: &[Entry]| -> Vec<nikgob_view::QueueEntry> {
             list.iter()
@@ -2655,6 +2681,7 @@ impl Worker {
                         entry: e.id,
                         track: res.track(r),
                         why: why.get(&e.id).cloned(),
+                        guest: guests.contains(&e.id),
                     })
                 })
                 .collect()
@@ -2681,6 +2708,7 @@ impl Worker {
             s.queue.prev = prev;
             s.queue.current_entry = current_entry;
             s.queue.current_why = current_why;
+            s.queue.current_guest = current_guest;
             s.queue.radio = radio;
         });
     }

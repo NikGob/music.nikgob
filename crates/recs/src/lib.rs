@@ -58,6 +58,7 @@ pub mod mood;
 pub mod novelty;
 pub mod open_world;
 pub mod pick;
+pub mod plus;
 pub mod profiles;
 pub mod radio;
 pub mod regions;

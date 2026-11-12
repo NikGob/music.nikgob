@@ -482,6 +482,25 @@ impl Worker {
         })
     }
 
+    /// The library's songs and artists whose radios, related lists or
+    /// tops found each discovery (by [`stream_song_key`]): its links to the
+    /// library besides the graph's.
+    pub(crate) fn discovery_seeds(&self) -> HashMap<String, (Vec<TrackId>, Vec<ArtistId>)> {
+        let mut out: HashMap<String, (Vec<TrackId>, Vec<ArtistId>)> = HashMap::new();
+        let Some(found) = self.recs.discover.found.as_ref() else { return out };
+        for (seed, tracks) in &found.finds {
+            for t in tracks {
+                let e = out.entry(stream_song_key(t)).or_default();
+                match seed {
+                    Seed::Track(id) if !e.0.contains(id) => e.0.push(*id),
+                    Seed::Artist(a) if !e.1.contains(a) => e.1.push(*a),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
     /// Where the discovery of song `key` came from.
     pub(crate) fn discovery_source(&self, key: &str) -> Option<Source> {
         self.recs.discover.found.as_ref()?.sources.iter().find(|(k, _)| k == key).map(|(_, s)| *s)
@@ -943,6 +962,7 @@ impl Worker {
         self.publish_recs_home();
         // The daily mix of a new day takes the new discoveries.
         self.radio_snapshot_ready();
+        self.plus_ready();
         // The mixes take them now: «С новым» of the cards, «Твой микс» and
         // the daylist of the day (their day's caches know the finds were
         // older).

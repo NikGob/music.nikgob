@@ -850,15 +850,30 @@ pub fn playlist(
             }
         });
         ui.add_space(16.0);
+        // «Слушать», «Перемешать», «С дополнением» (new songs join the
+        // playlist as it plays: a tonal toggle), «Добавить треки», ⋮ — on
+        // one line: short of room «Добавить треки», then «Слушать», become
+        // icons (the toggle never goes to a line of its own).
+        let plus = state.prefs.plus_playlists.contains(&id);
+        let (compact_add, compact_play) = action_room(ui, !liked);
         let mut members: Vec<Member> = vec![
-            Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
+            if compact_play {
+                IconButton::new(Icon::PlayArrow).size(Size::M).style(Style::Filled).tooltip("Слушать").into()
+            } else {
+                Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into()
+            },
             widgets::shuffle_member(ui),
+            plus_toggle(plus).into(),
         ];
         if !liked {
-            members.push(Button::new("Добавить треки").icon(Icon::Add).size(Size::M).style(Style::Outlined).into());
+            members.push(if compact_add {
+                IconButton::new(Icon::Add).size(Size::M).style(Style::Outlined).tooltip("Добавить треки").into()
+            } else {
+                Button::new("Добавить треки").icon(Icon::Add).size(Size::M).style(Style::Outlined).into()
+            });
         }
         members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
-        let row = ButtonRow::new("pl-actions", Size::M).show(ui, members);
+        let row = ButtonRow::new(("pl-actions", id), Size::M).show(ui, members);
         let r = &row.responses;
         if r[0].clicked() {
             out.push(Command::PlayPlaylist { id, start: None, shuffle: false });
@@ -866,7 +881,10 @@ pub fn playlist(
         if r[1].clicked() {
             out.push(Command::PlayPlaylist { id, start: None, shuffle: true });
         }
-        if !liked && r[2].clicked() {
+        if r[2].clicked() {
+            out.push(Command::SetPref(nikgob_view::PrefPatch::Plus { playlist: id, on: !plus }));
+        }
+        if !liked && r[3].clicked() {
             put(ui.ctx(), add_key, AddState { open: true, ..get(ui.ctx(), add_key) });
         }
         // The same actions as the playlist's right-click menu
@@ -913,6 +931,35 @@ pub fn playlist(
         add_dialog(&ctx, p, state, out);
     }
     nav
+}
+
+/// «С дополнением» of a playlist's page (docs/recommendations.md §4): a
+/// tonal icon toggle, on while new songs join the playlist as it plays.
+fn plus_toggle(on: bool) -> IconButton {
+    IconButton::new(Icon::AutoAwesome).size(Size::M).style(Style::Tonal).selected(on).tooltip("С дополнением")
+}
+
+/// Whether a playlist's actions fit on one line only with «Добавить
+/// треки» (`add`: the playlist has it), then «Слушать» too, as icons:
+/// (`add` as an icon, «Слушать» as an icon).
+fn action_room(ui: &Ui, add: bool) -> (bool, bool) {
+    let avail = ui.available_width();
+    let gap = Size::M.group_gap();
+    let icon = plus_toggle(false).natural_width();
+    // «Перемешать» is an icon below 640 already ([`widgets::shuffle_member`]).
+    let shuffle = if avail < 640.0 { icon } else { Button::new("Перемешать").icon(Icon::Shuffle).size(Size::M).natural_width(ui) };
+    let play = Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).natural_width(ui);
+    let add_w = Button::new("Добавить треки").icon(Icon::Add).size(Size::M).natural_width(ui);
+    let n = if add { 5.0 } else { 4.0 };
+    // «Слушать», «Перемешать», the toggle and ⋮ (and «Добавить треки»).
+    let need = |play: f32, add_w: f32| play + shuffle + 2.0 * icon + if add { add_w } else { 0.0 } + gap * (n - 1.0);
+    if need(play, add_w) <= avail {
+        (false, false)
+    } else if need(play, icon) <= avail {
+        (true, false)
+    } else {
+        (true, true)
+    }
 }
 
 /// A mix's page ([`Route::Mix`]), laid out like a playlist's: the mosaic
@@ -1063,4 +1110,35 @@ fn mix_gone(ui: &mut Ui, key: MixKey, world: Option<&str>, state: &ViewState, pa
         };
         widgets::empty_state(ui, Icon::QueueMusic, "Этого микса больше нет", body, Some(action)).then_some(to)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The actions of a playlist's page shorten «Добавить треки», then
+    /// «Слушать», to icons as the page narrows; «Любимые» (no «Добавить
+    /// треки») keeps «Слушать» longer.
+    #[test]
+    fn the_actions_shorten_as_the_page_narrows() {
+        let ctx = Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        crate::Theme::default().install(&ctx);
+        let at = |width: f32, add: bool| {
+            let mut got = (false, false);
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 700.0))), ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                ui.allocate_ui(vec2(width, 100.0), |ui| got = action_room(ui, add));
+            });
+            out.textures_delta.clear();
+            got
+        };
+        assert_eq!(at(900.0, true), (false, false));
+        assert_eq!(at(450.0, true), (true, false));
+        assert_eq!(at(340.0, true), (true, true));
+        assert_eq!(at(340.0, false), (false, false));
+        assert_eq!(at(300.0, false), (true, true));
+    }
 }

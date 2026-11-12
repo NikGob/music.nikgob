@@ -44,6 +44,7 @@ mod lanes;
 mod niche;
 mod novelty;
 mod open;
+mod plus;
 mod radio;
 mod suggest;
 mod tiles;
@@ -72,6 +73,7 @@ use crate::analysis::SoundIndex;
 use crate::quiet::lower_priority;
 use crate::import::Internal;
 
+pub(crate) use plus::PlusSave;
 pub(crate) use radio::RadioSave;
 pub(crate) use discover::{DiscoverInput, HOME_NEW_MORE};
 pub use tiles::{PreviewTile, preview_ready_tiles, preview_tile_days};
@@ -272,6 +274,7 @@ pub(crate) struct Built {
 pub(crate) enum Msg {
     Built(Box<Result<Built, String>>),
     Radio(radio::RadioMsg),
+    Plus(plus::PlusMsg),
     Discover(discover::DiscoverMsg),
     Suggest(suggest::SuggestMsg),
     Graph(graph::GraphMsg),
@@ -283,6 +286,7 @@ impl Msg {
         match self {
             Self::Built(_) => "a build came",
             Self::Radio(_) => "the radio",
+            Self::Plus(_) => "the guests",
             Self::Discover(_) => "new music",
             Self::Suggest(_) => "suggestions",
             Self::Graph(_) => "the graph",
@@ -373,6 +377,8 @@ pub(crate) struct RecsState {
     /// «Миксы для тебя» until its end.
     blends: Vec<(String, v::MixKey)>,
     pub(crate) radio: radio::RadioState,
+    /// «✦ С дополнением»: the guests of the playlist playing.
+    pub(crate) plus: plus::PlusState,
     pub(crate) discover: discover::DiscoverState,
     /// The background pass of the graph of similar music.
     pub(crate) graph: graph::GraphState,
@@ -434,6 +440,7 @@ impl RecsState {
             row_more: 0,
             blends: Vec::new(),
             radio: radio::RadioState::default(),
+            plus: plus::PlusState::default(),
             discover: discover::DiscoverState::default(),
             graph: graph::GraphState::default(),
             niche: niche::NicheState::default(),
@@ -2615,6 +2622,7 @@ impl Worker {
         match m {
             Msg::Built(b) => self.recs_built(*b),
             Msg::Radio(m) => self.radio_msg(m),
+            Msg::Plus(m) => self.plus_msg(m),
             Msg::Discover(m) => self.discover_msg(m),
             Msg::Suggest(m) => self.suggest_msg(m),
             Msg::Graph(m) => self.graph_msg(m),
@@ -2664,6 +2672,7 @@ impl Worker {
             self.turn.lap("pending mix");
         }
         self.radio_snapshot_ready();
+        self.plus_ready();
         self.turn.lap("radio");
         if rerank {
             self.discover_rerank();
