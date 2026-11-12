@@ -2095,6 +2095,10 @@ impl Worker {
                     _ => break,
                 }
             }
+            // A clip the radio or a mix queued: its song first, if it comes.
+            if self.wait_for_clip_song(e) {
+                return;
+            }
             if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
                 self.start_with(e, req, source, kind);
                 return;
@@ -2156,6 +2160,8 @@ impl Worker {
 
     fn preload_next(&mut self) {
         self.prepare_next(true);
+        // The next streams' album covers, known before they start.
+        self.complete_next();
     }
 
     /// [`Self::preload_next`]; `ahead`: a file whose tags were not read yet
@@ -2164,6 +2170,9 @@ impl Worker {
         // Gapless off: nothing is prepared, the next track starts after `Ended`.
         // Nor when the sleep timer ends with the playing track.
         let next = if self.state.read().prefs.gapless && !self.sleep_ends_with_playing() { self.queue.peek_auto_next() } else { None };
+        // A clip the app queued starts once its song is known (see
+        // `streams::clips::QueueClips`): not handed over ahead.
+        let next = next.filter(|n| !self.clip_not_ready(*n));
         let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
             self.reading_ahead = None;
             self.playback.set_next(None);

@@ -694,6 +694,8 @@ impl Worker {
     /// answered), whatever the gapless setting; none while YouTube Music
     /// asked to wait.
     pub(crate) fn resolve_ahead(&mut self) {
+        // Clips the app queued: their songs first (see `clips::QueueClips`).
+        self.clips_ahead();
         if !self.streaming.resolving.is_empty() {
             return; // one lookup at a time; the playing track's goes first
         }

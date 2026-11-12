@@ -26,7 +26,9 @@
 //! request; the services' own suggestions count as one), plus
 //! [`NEW_ARTIST_BONUS`] for an
 //! artist the library does not
-//! know, times [`CLIP_FACTOR`] for a music video. Known songs, disliked
+//! know, times [`CLIP_FACTOR`] for a music video (a song copy of it wins
+//! the place; a video stays only when no song was found, and the player
+//! asks for its song before it plays). Known songs, disliked
 //! songs and artists, junk ([`crate::junk`], against the canonical
 //! release among the finds) and songs shown [`IGNORED_AFTER`] times and
 //! never played are out; one song by ISRC once. With the user model
@@ -95,7 +97,7 @@ pub const POOL_PER_ARTIST: usize = 4;
 /// What each independent seed past the first adds to a song's votes.
 pub const MULTI_SEED: f32 = 0.75;
 pub const NEW_ARTIST_BONUS: f32 = 0.25;
-pub const CLIP_FACTOR: f32 = 0.7;
+pub const CLIP_FACTOR: f32 = 0.5;
 /// A song's place in a seed's list adds up to this share of the seed.
 const RANK_BONUS: f32 = 0.15;
 /// Shown this many times and never played: ignored.

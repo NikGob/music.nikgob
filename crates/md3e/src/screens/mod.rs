@@ -42,6 +42,8 @@ use crate::{
 
 /// How long the search text must rest before it is searched for.
 const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+/// The next queue entries whose covers are kept and loaded ahead.
+const NEXT_COVERS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PaneTab {
@@ -431,7 +433,7 @@ impl Md3eUi {
         if ctx.data(|d| d.get_temp::<u64>(pinned_id)) != Some(state.revision) {
             ctx.data_mut(|d| d.insert_temp(pinned_id, state.revision));
             let pinned: Vec<String> = (state.player.current.iter())
-                .chain(state.queue.next.first().map(|e| &e.track))
+                .chain(state.queue.next.iter().take(NEXT_COVERS).map(|e| &e.track))
                 .filter_map(|t| t.cover.as_ref().map(|c| c.uri()))
                 .collect();
             crate::covers::pin(ctx, pinned.iter().map(String::as_str));
@@ -453,16 +455,21 @@ impl Md3eUi {
         // is drawn in their place, those drawn since the last frame are
         // looked up.
         crate::covers::set_real_covers(ctx, &state.real_covers);
+        let next_covers: Vec<String> =
+            state.queue.next.iter().take(NEXT_COVERS).filter_map(|e| e.track.cover.as_ref().map(nikgob_view::Cover::uri)).collect();
+        // The next ones' art is looked up while they wait, not as they start.
+        for n in &next_covers {
+            crate::covers::want_real_cover(ctx, n);
+        }
         let thumbnails = crate::covers::take_thumbnails(ctx);
         if !thumbnails.is_empty() {
             out.push(Command::RealCovers(thumbnails));
         }
         // The next one is decoded and uploaded at the sizes the current one
         // is drawn at, while nothing waits for it.
-        if let (Some(current), Some(next)) = (state.player.current.as_ref(), state.queue.next.first()) {
-            let uri = |t: &nikgob_view::TrackRow| t.cover.as_ref().map(nikgob_view::Cover::uri);
-            if let (Some(c), Some(n)) = (uri(current), uri(&next.track)) {
-                crate::covers::prefetch_like(ctx, &c, &n);
+        if let Some(c) = state.player.current.as_ref().and_then(|t| t.cover.as_ref().map(nikgob_view::Cover::uri)) {
+            for n in &next_covers {
+                crate::covers::prefetch_like(ctx, &c, n);
             }
         }
         self.np_motion = state.prefs.np_motion;

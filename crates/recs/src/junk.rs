@@ -16,9 +16,16 @@
 //!   artist's own channel or a label's: a «Name - Song» title naming someone
 //!   else than the channel is a reupload (unless the title names the
 //!   channel, is a title and its translation, or a title and what music it
-//!   is, «Kallipolian Dance - Ancient Greek Music»), a
-//!   channel named after nightcore or lyrics is one too, and a user's upload
-//!   is never a release. Names match in either script («Борислав Славов» is
+//!   is, «Kallipolian Dance - Ancient Greek Music»; a Latin name before a
+//!   title in another script, «FACE - ЮМОРИСТ», is an artist, not a
+//!   translation), a channel named after nightcore or lyrics is one too
+//!   (its name as written, «RusLyrics»), and a user's upload is never a
+//!   release.
+//! * **Unknown kind**: a YouTube track known only by its id, title and
+//!   channel (graph lists kept before their kind was) is judged as a video
+//!   too ([`junk_any_kind`]), unless its channel is official (a «- Topic»
+//!   channel, a label's): a song YouTube Music lists is not told from an
+//!   upload there. A track whose kind is known is judged by it. Names match in either script («Борислав Славов» is
 //!   «Borislav Slavov») and without a channel's «VEVO», «Official» or
 //!   «Music»; a channel of the canonical artist is the artist's own.
 //! * **Length**: more than [`DURATION_SLACK`] off the canonical length
@@ -120,7 +127,10 @@ const UNOFFICIAL: &[&str] = &[
 ];
 
 /// A channel named so uploads others' songs.
-const CHANNEL_WORDS: &[&str] = &["nightcore", "lyrics", "lyric", "slowed", "sped", "8d", "bass boosted", "karaoke", "reverb"];
+const CHANNEL_WORDS: &[&str] = &[
+    "nightcore", "lyrics", "lyric", "slowed", "sped", "8d", "bass boosted", "karaoke", "reverb", "тексты", "текст песен",
+    "караоке",
+];
 
 /// What a label's channel is called by: it uploads its artists' songs.
 const LABEL_WORDS: &[&str] = &[
@@ -312,6 +322,59 @@ fn one_title_twice(head: &str, tail: &str) -> bool {
     shared >= 2 && 2 * shared >= hw.len().min(tw.len())
 }
 
+/// What a « - » tail says when it only names a version of the record
+/// («Song - Remastered 2011», «Song - Radio Edit»), not a song.
+const VERSION_TAIL: &[&str] = &[
+    "remaster", "remastered", "live", "edit", "radio", "version", "ver", "mix", "acoustic", "demo", "mono",
+    "stereo", "original", "single", "album", "deluxe", "edition", "bonus", "track", "mixed", "session",
+];
+
+/// A tail of only [`VERSION_TAIL`] words and numbers.
+fn only_version(tail: &str) -> bool {
+    let words: Vec<String> = spaced(tail).split_whitespace().map(str::to_owned).collect();
+    !words.is_empty()
+        && words.iter().any(|w| VERSION_TAIL.contains(&w.as_str()))
+        && words.iter().all(|w| VERSION_TAIL.contains(&w.as_str()) || w.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `head - tail` is one title in two scripts («暴徒 - Bouto», «Звезда -
+/// Star»): the original first, then its reading or translation. A Latin
+/// head before a title in another script names the artist («FACE -
+/// ЮМОРИСТ»), as Latin names of Russian, Japanese or Korean artists go.
+fn translated(head: &str, tail: &str) -> bool {
+    let (h, t) = (script(head), script(tail));
+    h != t && h != Some(Script::Latin)
+}
+
+/// A channel's name in words: split where it is written as one
+/// («RusLyrics» → «rus lyrics», «NightcoreReality» → «nightcore reality»).
+fn channel_words(channel: &str) -> String {
+    let mut out = String::with_capacity(channel.len() + 4);
+    let mut prev: Option<char> = None;
+    for c in channel.chars() {
+        if c.is_uppercase() && prev.is_some_and(char::is_lowercase) {
+            out.push(' ');
+        }
+        out.push(c);
+        prev = Some(c);
+    }
+    spaced(&out)
+}
+
+/// A «- Topic» channel (YouTube Music's own for an artist's releases) or
+/// a label's.
+fn official_channel(channel: &str) -> bool {
+    channel.trim_end().to_lowercase().ends_with("- topic") || label(channel)
+}
+
+/// A channel named after what reuploads others' songs ([`CHANNEL_WORDS`]):
+/// as a word of its name, or a word that ends in «lyrics» («ruslyrics»).
+fn junk_channel(channel: &str) -> bool {
+    let words = channel_words(channel);
+    CHANNEL_WORDS.iter().any(|w| has_phrase(&words, w))
+        || words.split_whitespace().any(|w| w.ends_with("lyrics"))
+}
+
 /// The channel of a YouTube upload, as the services give it (its first
 /// artist).
 fn channel(t: &StreamTrack) -> &str {
@@ -346,8 +409,7 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
             TrackKind::Upload => return Some(Junk::Channel),
             TrackKind::Video => {
                 let ch = channel(t);
-                let ch_spaced = spaced(ch);
-                if CHANNEL_WORDS.iter().any(|w| has_phrase(&ch_spaced, w)) {
+                if junk_channel(ch) {
                     return Some(Junk::Channel);
                 }
                 // A label uploads its artists' songs.
@@ -369,8 +431,8 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
                 for dash in [" - ", " – ", " — "] {
                     if let Some(at) = t.title.find(dash) {
                         let (head, tail) = (&t.title[..at], &t.title[at + dash.len()..]);
-                        let own = mentions(&t.title, ch) || script(head) != script(tail) || names_the_music(tail)
-                            || one_title_twice(head, tail);
+                        let own = mentions(&t.title, ch) || translated(head, tail) || names_the_music(tail)
+                            || one_title_twice(head, tail) || only_version(tail);
                         if !own && !named(head) && !head.chars().any(|c| matches!(c, '(' | '[' | '「' | '【')) {
                             return Some(Junk::Channel);
                         }
@@ -381,6 +443,19 @@ pub fn junk(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
         }
     }
     duration_junk(t, canonical)
+}
+
+/// [`junk`] of a track whose kind is not known (see the module docs): a
+/// YouTube one is judged as a video too, unless its channel is official.
+pub fn junk_any_kind(t: &StreamTrack, canonical: Option<&Canonical>) -> Option<Junk> {
+    if let Some(j) = junk(t, canonical) {
+        return Some(j);
+    }
+    if t.id.service != Service::Youtube || t.kind != TrackKind::Song || official_channel(channel(t)) {
+        return None;
+    }
+    let video = StreamTrack { kind: TrackKind::Video, ..t.clone() };
+    junk(&video, canonical)
 }
 
 /// A loop, or off the canonical length.
@@ -604,5 +679,38 @@ mod tests {
         assert_eq!(canonical_in(&a, &pool).and_then(|c| c.duration_ms), Some(286_000));
         assert!(same_song(&canon, &yt("Группа крови", "Кино", TrackKind::Video, 286)));
         assert!(same_song(&other, &StreamTrack { isrc: Some("RUA1D8800001".into()), ..yt("x", "y", TrackKind::Song, 1) }));
+    }
+
+    /// The wave played «FACE - ЮМОРИСТ (ТЕКСТ И ПЕСНЯ)» of the channel
+    /// «RusLyrics»: out on every count, and out when its kind is not known
+    /// (the graph of similar music keeps none).
+    #[test]
+    fn a_lyrics_channel_reupload_is_out_on_every_count() {
+        let t = yt("FACE - ЮМОРИСТ (ТЕКСТ И ПЕСНЯ)", "RusLyrics", TrackKind::Video, 144);
+        assert_eq!(junk(&t, None), Some(Junk::Word("текст")));
+        // Each count alone.
+        assert_eq!(junk(&yt("FACE - ЮМОРИСТ", "RusLyrics", TrackKind::Video, 144), None), Some(Junk::Channel));
+        assert_eq!(junk(&yt("FACE - ЮМОРИСТ", "Хиты 2018", TrackKind::Video, 144), None), Some(Junk::Channel));
+        assert_eq!(junk(&yt("ЮМОРИСТ (ТЕКСТ И ПЕСНЯ)", "FACE", TrackKind::Video, 144), None), Some(Junk::Word("текст")));
+        assert!(junk_channel("RusLyrics") && junk_channel("ruslyrics") && junk_channel("Тексты песен"));
+        assert!(!junk_channel("Lyrical Lemonade") && !junk_channel("FACE") && !junk_channel("Контекст"));
+        // Known only by its id, title and channel: judged as a video.
+        let unknown = StreamTrack { kind: TrackKind::Song, ..t.clone() };
+        assert_eq!(junk(&unknown, None), None, "a song of YouTube Music is a release");
+        assert!(junk_any_kind(&unknown, None).is_some());
+        let unknown = yt("FACE - ЮМОРИСТ", "RusLyrics", TrackKind::Song, 144);
+        assert_eq!(junk_any_kind(&unknown, None), Some(Junk::Channel));
+        // Known as a song: an official remix or cover stays.
+        assert_eq!(junk(&yt("Song (Remix)", "Artist", TrackKind::Song, 200), None), None);
+        assert_eq!(junk(&yt("Hurt (Cover)", "Artist", TrackKind::Song, 200), None), None);
+        // Unknown kind from an official channel: judged as the song it is.
+        assert_eq!(junk_any_kind(&yt("Song (Remix)", "Artist - Topic", TrackKind::Song, 200), None), None);
+        assert_eq!(junk_any_kind(&yt("Song (Remix)", "Warner Records", TrackKind::Song, 200), None), None);
+        // The artist's own songs stay, a version tail too.
+        for (title, channel) in [("ЮМОРИСТ", "FACE"), ("Starboy", "The Weeknd"), ("Numb - Remastered 2011", "Linkin Park"), ("Song - Radio Edit", "Band")] {
+            assert_eq!(junk_any_kind(&yt(title, channel, TrackKind::Song, 200), None), None, "{title} by {channel}");
+        }
+        // A title in Cyrillic and its translation stays one title.
+        assert_eq!(junk(&yt("Звезда - Star", "Кино", TrackKind::Video, 200), None), None);
     }
 }

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource};
-use nikgob_core::model::{SourceKind, Track, TrackId, score};
+use nikgob_core::model::{SourceKind, Track, TrackId};
 use nikgob_core::streaming::Service;
 
 use crate::Worker;
@@ -28,26 +28,16 @@ use crate::align::Msg;
 use crate::import::Internal;
 use crate::lyrics::{Place, Text};
 
-/// Why a stream's timing is not made: what plays is a video (an official
-/// clip or anyone's upload: YouTube tells them apart for neither), whose
-/// song is not clear.
-pub(crate) const CLIP: &str = "Подсветку не сделать: в клипе неясно, какая песня";
-/// … the track has no artist or no title to keep its text under.
+/// Why a stream's timing is not made: the track has no artist or no
+/// title to keep its text under.
 pub(crate) const UNNAMED: &str = "Подсветку не сделать: неясно, чья это песня";
 
-/// Where a stream's timing can come from: a song YouTube Music has as a
-/// record (its official audio, a topic upload; with an album or not), or
-/// a clip whose recording the library knows otherwise (an ISRC, a
-/// MusicBrainz id, another service's entry). Covers are songs like any.
-/// `named`: the track has an artist and a title.
-pub(crate) fn stream_place(clip: bool, known: bool, named: bool) -> Place {
-    if !named {
-        Place::Unclear(UNNAMED.into())
-    } else if !clip || known {
-        Place::Stream
-    } else {
-        Place::Unclear(CLIP.into())
-    }
+/// Where a stream's timing can come from: any stream with an artist and a
+/// title (`named`): a song YouTube Music has as a record, a cover like any
+/// song, and a music video that stays one (no song was found for it): its
+/// own audio is what plays, intro and all, so timing made from it fits it.
+pub(crate) fn stream_place(named: bool) -> Place {
+    if named { Place::Stream } else { Place::Unclear(UNNAMED.into()) }
 }
 
 /// The artist whose folder keeps a track's text: the first credited.
@@ -216,15 +206,8 @@ impl Worker {
             return Place::None;
         }
         let t = self.lib.get_track(track).ok().flatten();
-        let elsewhere = self
-            .lib
-            .sources_of_track(track)
-            .unwrap_or_default()
-            .iter()
-            .any(|s| s.kind != SourceKind::Youtube && s.trashed_at.is_none());
-        let known = elsewhere || t.as_ref().is_some_and(|t| t.isrc.is_some() || t.recording_mbid.is_some());
         let named = t.as_ref().is_some_and(|t| !t.title.trim().is_empty() && !artist_of(t).trim().is_empty());
-        stream_place(src.quality_score == score::STREAM_YOUTUBE_CLIP, known, named)
+        stream_place(named)
     }
 
     /// The text of `track` can be kept in its artist's folder of the
@@ -542,11 +525,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stream_is_timed_only_when_its_song_is_clear() {
-        assert_eq!(stream_place(false, false, true), Place::Stream, "a song YouTube Music has as a record, a cover too");
-        assert_eq!(stream_place(true, true, true), Place::Stream, "a clip of a recording the library knows");
-        assert_eq!(stream_place(true, false, true), Place::Unclear(CLIP.into()));
-        assert_eq!(stream_place(false, true, false), Place::Unclear(UNNAMED.into()), "no artist or title to keep it under");
+    fn a_stream_is_timed_when_it_is_named() {
+        assert_eq!(stream_place(true), Place::Stream, "a song, a cover, a named clip: what plays is timed");
+        assert_eq!(stream_place(false), Place::Unclear(UNNAMED.into()), "no artist or title to keep it under");
     }
 
     fn opus(path: &Path) {
@@ -745,8 +726,8 @@ mod tests {
 
     /// A song YouTube Music has as a record is timed from its stream: the
     /// audio is fetched into a temp folder and gone after the aligner
-    /// tried; a clip whose recording is not known says why instead; with
-    /// the setting off nothing is offered.
+    /// tried; a named clip is offered the same; with the setting off
+    /// nothing is offered.
     #[test]
     fn a_stream_is_timed_from_its_audio_fetched_for_a_while() {
         let dir = tempfile::tempdir().unwrap();
@@ -766,8 +747,9 @@ mod tests {
         assert_eq!(files(&cfg.library_dir), Vec::<String>::new(), "nothing kept");
 
         play(&rt, clip);
-        // Its text can still be kept in the artist's folder.
-        wait(&rt, "why not", |s| s.lyrics.craft == nikgob_view::LyricsCraft::No(CLIP.into()) && s.lyrics.stream && s.lyrics.savable);
+        // A clip that stays one is timed from its own audio; its text can
+        // be kept in the artist's folder.
+        wait(&rt, "a clip offered too", |s| s.lyrics.track == Some(clip) && s.lyrics.craft == nikgob_view::LyricsCraft::Ready && s.lyrics.stream && s.lyrics.savable);
 
 
         let mut off = rt.state().prefs.clone();
@@ -836,7 +818,7 @@ mod tests {
         rt.send(nikgob_view::Command::SaveLyrics { track: song, source: LyricsSource::Genius });
         wait_until("the song's file", || file_of(&lib, &cfg, song).is_some());
         let src = lib.active_source(song).unwrap().unwrap();
-        assert_eq!(src.quality_score, score::SAVED_STREAM, "a YouTube copy");
+        assert_eq!(src.quality_score, nikgob_core::model::score::SAVED_STREAM, "a YouTube copy");
         let file = file_of(&lib, &cfg, song).unwrap();
         assert!(file.starts_with(&cfg.library_dir), "{}", file.display());
         wait_until("the text next to it", || file.with_extension("ttml").is_file());

@@ -1298,6 +1298,11 @@ impl StreamService for Youtube {
             .map(|c| Box::new(c) as Box<dyn AudioStream>)
     }
 
+    /// The complete cached file (`{id}.{itag}.webm` / `.m4a`) itself.
+    fn cached_file(&self, id: &str) -> Option<std::path::PathBuf> {
+        self.inner.cache.open(id).map(|c| c.path().to_owned())
+    }
+
     /// The «Вам может понравиться» shelf of the track: two requests.
     fn related(&self, track_id: &str) -> BoxFuture<'_, Result<Vec<StreamTrack>, StreamError>> {
         let id = track_id.to_owned();

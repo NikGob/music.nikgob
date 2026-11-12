@@ -48,7 +48,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{ArtistId, TrackId};
-use nikgob_core::streaming::{ArtistRef, EntityKind, RemoteId, SearchKind, Service, StreamArtist, StreamError, StreamService, StreamTrack};
+use nikgob_core::streaming::{ArtistRef, EntityKind, RemoteId, SearchKind, Service, StreamArtist, StreamError, StreamService, StreamTrack, TrackKind};
 use nikgob_library::{GraphEntry, GraphFetch, GraphRow, GraphTag, Library, now_ms};
 use nikgob_metadata::{Metadata, MetadataError};
 use nikgob_recs::graph::{Edge, GraphInput, GraphSource, rank_weight};
@@ -273,14 +273,33 @@ impl GraphState {
     }
 }
 
-/// One entry of a stream track.
+/// One entry of a stream track, with its kind (a song, a video, an upload).
 fn track_entry(t: &StreamTrack) -> GraphEntry {
     let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
-    GraphEntry { kind: "track".into(), name: t.title.clone(), artist, remote_id: Some(t.id.id.clone()) }
+    GraphEntry { kind: "track".into(), name: t.title.clone(), artist, remote_id: Some(t.id.id.clone()), item_kind: Some(kind_key(t.kind).into()) }
 }
 
 fn artist_entry(a: &StreamArtist) -> GraphEntry {
-    GraphEntry { kind: "artist".into(), name: a.name.clone(), artist: String::new(), remote_id: Some(a.id.id.clone()) }
+    GraphEntry { kind: "artist".into(), name: a.name.clone(), artist: String::new(), remote_id: Some(a.id.id.clone()), item_kind: None }
+}
+
+/// How a track's kind is kept in the graph.
+fn kind_key(k: TrackKind) -> &'static str {
+    match k {
+        TrackKind::Song => "song",
+        TrackKind::Video => "video",
+        TrackKind::Upload => "upload",
+    }
+}
+
+/// A kept kind, if the source said one.
+fn kind_of(key: Option<&str>) -> Option<TrackKind> {
+    match key? {
+        "song" => Some(TrackKind::Song),
+        "video" => Some(TrackKind::Video),
+        "upload" => Some(TrackKind::Upload),
+        _ => None,
+    }
 }
 
 /// What a request asks of its source.
@@ -288,10 +307,10 @@ async fn ask(svc: Option<Arc<dyn StreamService>>, meta: Option<Metadata>, a: Ask
     let svc = || svc.clone().ok_or_else(|| Failed::Other("no service".into()));
     let meta = || meta.clone().ok_or_else(|| Failed::Other("no online metadata".into()));
     let entries = |v: Vec<nikgob_metadata::Similar>, kind: &str| {
-        Answer::Entries(v.into_iter().map(|s| GraphEntry { kind: kind.into(), name: s.name, artist: s.artist, remote_id: Some(s.mbid) }).collect())
+        Answer::Entries(v.into_iter().map(|s| GraphEntry { kind: kind.into(), name: s.name, artist: s.artist, remote_id: Some(s.mbid), item_kind: None }).collect())
     };
     let fm = |v: Vec<nikgob_metadata::LastFmSimilar>, kind: &str| {
-        Answer::Entries(v.into_iter().map(|s| GraphEntry { kind: kind.into(), name: s.name, artist: s.artist, remote_id: s.mbid }).collect())
+        Answer::Entries(v.into_iter().map(|s| GraphEntry { kind: kind.into(), name: s.name, artist: s.artist, remote_id: s.mbid, item_kind: None }).collect())
     };
     Ok(match a {
         Ask::Radio { id, .. } => Answer::Tracks(svc()?.radio(&id).await?),
@@ -342,7 +361,7 @@ async fn ask(svc: Option<Arc<dyn StreamService>>, meta: Option<Metadata>, a: Ask
             let top = m.deezer.artist_top(id, DZ_TOP_LIMIT).await?;
             Answer::Entries(
                 top.into_iter()
-                    .map(|t| GraphEntry { kind: "track".into(), artist: t.artist_name().to_owned(), name: t.title, remote_id: Some(t.id.to_string()) })
+                    .map(|t| GraphEntry { kind: "track".into(), artist: t.artist_name().to_owned(), name: t.title, remote_id: Some(t.id.to_string()), item_kind: None })
                     .collect(),
             )
         }
@@ -389,10 +408,13 @@ pub(crate) struct GraphFind {
     pub near: Vec<(TrackId, f32)>,
     /// The weights of its edges, each by how loved its track is.
     pub score: f32,
+    /// The source said the track's kind (`track.kind`); else it is a guess.
+    pub kind_known: bool,
 }
 
 /// The songs of `beyond` new indeed (`new`: not in the library, not
-/// disliked, no junk), each once (by [`stream_song_key`]), scored by the
+/// disliked, no junk; told whether the source said the track's kind),
+/// each once (by [`stream_song_key`]), scored by the
 /// weights of their edges to the catalog's tracks, each times how loved
 /// its track is (`love`, 0…1; `None`: not the catalog's), times
 /// [`nikgob_recs::discover::multi_seed`] of the distinct artists of those
@@ -401,7 +423,7 @@ pub(crate) struct GraphFind {
 /// the best [`GRAPH_FINDS`].
 pub(crate) fn finds(
     beyond: &[(TrackId, GraphEntry, f32)],
-    new: &dyn Fn(&StreamTrack) -> bool,
+    new: &dyn Fn(&StreamTrack, bool) -> bool,
     love: &dyn Fn(TrackId) -> Option<f32>,
     artist: &dyn Fn(TrackId) -> Option<ArtistId>,
 ) -> Vec<GraphFind> {
@@ -414,13 +436,15 @@ pub(crate) fn finds(
         let Some(l) = love(*from) else { continue };
         let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id.clone()), e.name.clone());
         t.artists.push(ArtistRef::new(None, e.artist.clone()));
-        let f = by_song.entry(stream_song_key(&t)).or_insert_with(|| GraphFind { track: t, near: Vec::new(), score: 0.0 });
+        let kind = kind_of(e.item_kind.as_deref());
+        t.kind = kind.unwrap_or_default();
+        let f = by_song.entry(stream_song_key(&t)).or_insert_with(|| GraphFind { track: t, near: Vec::new(), score: 0.0, kind_known: kind.is_some() });
         f.score += w * (UNLOVED + (1.0 - UNLOVED) * l.clamp(0.0, 1.0));
         if !f.near.iter().any(|n| n.0 == *from) {
             f.near.push((*from, *w));
         }
     }
-    let mut out: Vec<GraphFind> = by_song.into_values().filter(|f| new(&f.track)).collect();
+    let mut out: Vec<GraphFind> = by_song.into_values().filter(|f| new(&f.track, f.kind_known)).collect();
     for f in &mut out {
         // Two tracks of one artist are one seed (no artist: each its own).
         let mut seeds: Vec<Result<ArtistId, TrackId>> = f.near.iter().map(|(t, _)| artist(*t).ok_or(*t)).collect();
@@ -1052,8 +1076,8 @@ mod tests {
         names.artists.insert(artist_key("Other Band"), a(2));
         names.remote.insert(("deezer".into(), "artist".into(), "dz3".into()), a(3).to_string());
         names.remote.insert(("deezer".into(), "track".into(), "dz-t5".into()), t(5).to_string());
-        let track = |name: &str, remote: Option<&str>| GraphEntry { kind: "track".into(), name: name.into(), artist: "Band".into(), remote_id: remote.map(Into::into) };
-        let artist = |name: &str, remote: Option<&str>| GraphEntry { kind: "artist".into(), name: name.into(), artist: String::new(), remote_id: remote.map(Into::into) };
+        let track = |name: &str, remote: Option<&str>| GraphEntry { kind: "track".into(), name: name.into(), artist: "Band".into(), remote_id: remote.map(Into::into), item_kind: None };
+        let artist = |name: &str, remote: Option<&str>| GraphEntry { kind: "artist".into(), name: name.into(), artist: String::new(), remote_id: remote.map(Into::into), item_kind: None };
         let s1 = t(1).to_string();
         let a1 = a(1).to_string();
         let rows = vec![
@@ -1093,13 +1117,44 @@ mod tests {
         assert!(v > 0.0 && v <= VOTE_CAP);
     }
 
+    /// The kind a radio said goes with the find: an official «(Remix)» of
+    /// YouTube Music is judged as the song it is; a list kept before kinds
+    /// were is a guess the filter judges as a video.
+    #[test]
+    fn a_find_carries_the_kind_its_radio_said() {
+        let t = |i: u128| TrackId(Uuid::from_u128(i));
+        let mut song = StreamTrack::new(RemoteId::new(Service::Youtube, "rmx"), "Song (Remix)");
+        song.artists = vec![ArtistRef::new(None, "Artist")];
+        let mut up = StreamTrack::new(RemoteId::new(Service::Youtube, "up"), "FACE - ЮМОРИСТ (ТЕКСТ И ПЕСНЯ)");
+        up.artists = vec![ArtistRef::new(None, "RusLyrics")];
+        up.kind = TrackKind::Video;
+        let (e_song, e_up) = (track_entry(&song), track_entry(&up));
+        assert_eq!((e_song.item_kind.as_deref(), e_up.item_kind.as_deref()), (Some("song"), Some("video")));
+        let old = GraphEntry { item_kind: None, remote_id: Some("old".into()), name: "Other (Remix)".into(), ..e_song.clone() };
+        let s1 = t(1).to_string();
+        let rows = vec![
+            row("track", &s1, "youtube_radio", 0, e_song),
+            row("track", &s1, "youtube_radio", 1, e_up),
+            row("track", &s1, "youtube_radio", 2, old),
+        ];
+        let r = resolve(&rows, &[], &Names::default());
+        // The filter the recs build uses.
+        let keep = |t: &StreamTrack, known: bool| {
+            if known { nikgob_recs::junk(t, None).is_none() } else { nikgob_recs::junk::junk_any_kind(t, None).is_none() }
+        };
+        let found = finds(&r.beyond, &keep, &|_| Some(1.0), &|_| None);
+        let titles: Vec<&str> = found.iter().map(|f| f.track.title.as_str()).collect();
+        assert_eq!(titles, ["Song (Remix)"], "the official remix stays, the reupload and the guess go");
+        assert!(found[0].kind_known && found[0].track.kind == TrackKind::Song);
+    }
+
     /// A song of YouTube Music's radio of a track that the library lacks
     /// is new music with its video: one find for the radios that hold it,
     /// the radios of loved tracks first; what is not new is left out.
     #[test]
     fn songs_beyond_the_library_are_new_music() {
         let t = |i: u128| TrackId(Uuid::from_u128(i));
-        let track = |name: &str, artist: &str, remote: Option<&str>| GraphEntry { kind: "track".into(), name: name.into(), artist: artist.into(), remote_id: remote.map(Into::into) };
+        let track = |name: &str, artist: &str, remote: Option<&str>| GraphEntry { kind: "track".into(), name: name.into(), artist: artist.into(), remote_id: remote.map(Into::into), item_kind: None };
         let (s1, s2) = (t(1).to_string(), t(2).to_string());
         let rows = vec![
             row("track", &s1, "youtube_radio", 0, track("New Song", "New Band", Some("vid1"))),
@@ -1126,13 +1181,13 @@ mod tests {
                 None
             }
         };
-        let found = finds(&r.beyond, &|s: &StreamTrack| s.title != "Karaoke", &love, &|_| None);
+        let found = finds(&r.beyond, &|s: &StreamTrack, _| s.title != "Karaoke", &love, &|_| None);
         let titles: Vec<&str> = found.iter().map(|f| f.track.title.as_str()).collect();
         assert_eq!(titles, ["New Song", "Other"], "two radios hold the first");
         assert_eq!(found[0].near.len(), 2);
         // Two radios of one artist's tracks are one seed: no more than one
         // radio of a loved track.
-        let one = finds(&r.beyond, &|s: &StreamTrack| s.title != "Karaoke", &love, &|_| Some(ArtistId(Uuid::from_u128(7))));
+        let one = finds(&r.beyond, &|s: &StreamTrack, _| s.title != "Karaoke", &love, &|_| Some(ArtistId(Uuid::from_u128(7))));
         assert!(one[0].score < found[0].score, "{} vs {}", one[0].score, found[0].score);
         assert_eq!(found[0].track.id, RemoteId::new(Service::Youtube, "vid1"));
         assert_eq!(found[0].track.artists[0].name, "New Band");
