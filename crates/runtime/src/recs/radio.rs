@@ -1581,12 +1581,15 @@ impl Worker {
     }
 
     /// New-music candidates for the radio (filtered: not in the library,
-    /// not disliked).
+    /// not disliked, never junk, the snapshot there or not).
     fn radio_add_new(&mut self, tracks: Vec<StreamTrack>) {
         let snap = self.snapshot();
         let fresh: Vec<StreamTrack> = tracks
             .into_iter()
-            .filter(|t| snap.as_ref().is_none_or(|s| s.is_new(t)))
+            .filter(|t| match snap.as_ref() {
+                Some(s) => s.is_new(t),
+                None => t.playable && nikgob_recs::junk(t, None).is_none(),
+            })
             .collect();
         if fresh.is_empty() {
             return;
