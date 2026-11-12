@@ -3096,7 +3096,7 @@ impl Worker {
         if old.stream_analysis != p.stream_analysis {
             self.stream_analysis_pref(p.stream_analysis);
         }
-        if (old.sound_neural, old.sound_cpu_only) != (p.sound_neural, p.sound_cpu_only) {
+        if (old.sound_neural, old.sound_device) != (p.sound_neural, p.sound_device) {
             self.sound_neural_prefs();
         }
         if old.mixes_downloaded_only != p.mixes_downloaded_only {

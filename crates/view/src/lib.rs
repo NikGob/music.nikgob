@@ -1873,9 +1873,10 @@ pub struct Prefs {
     /// is already downloaded and [`SoundNeural::Off`] when it is not (no
     /// download without a choice): [`Self::sound_neural_or`].
     pub sound_neural: Option<SoundNeural>,
-    /// «На чём считать анализ звука» → «Только на процессоре»: the neural
-    /// sound model runs on one quiet CPU thread, never on the GPU.
-    pub sound_cpu_only: bool,
+    /// «На чём считать анализ звука» ([`SoundDevice`]). Prefs from before
+    /// it with «Только на процессоре» (`sound_cpu_only`) read as
+    /// [`SoundDevice::Cpu`].
+    pub sound_device: SoundDevice,
     /// «Автовоспроизведение»: when the queue's last track plays, it goes on
     /// with similar tracks by itself (a radio of that track, from where
     /// [`Self::mixes_downloaded_only`] and [`Self::radio_new_share`] say).
@@ -2487,7 +2488,7 @@ pub enum PrefPatch {
     RadioExplore(RadioExplore),
     RadioUnheard(RadioUnheard),
     SoundNeural(SoundNeural),
-    SoundCpuOnly(bool),
+    SoundDevice(SoundDevice),
     /// «Настройки текста…» was picked from the lyrics control's menu.
     LyricsSettingsSeen,
     /// A preset of an area by its number ([`presets::Area::apply`]: the
@@ -2576,7 +2577,7 @@ impl PrefPatch {
             Self::RadioExplore(e) => p.radio_explore = *e,
             Self::RadioUnheard(u) => p.radio_unheard = *u,
             Self::SoundNeural(m) => p.sound_neural = Some(*m),
-            Self::SoundCpuOnly(on) => p.sound_cpu_only = *on,
+            Self::SoundDevice(d) => p.sound_device = *d,
             Self::Preset(area, n) => area.apply(p, *n),
             Self::PresetCustom(area) => {
                 if let Some(back) = area.custom(p) {
@@ -2675,6 +2676,24 @@ pub enum SoundNeural {
     /// «Библиотека и превью новых песен»: and the previews of new music
     /// before it joins the mixes.
     LibraryAndPreviews,
+}
+
+/// «На чём считать анализ звука»: where the neural sound model runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SoundDevice {
+    /// «Автоматически»: the CPU while it is free; the GPU while the CPU
+    /// is busy and the card has free memory; the CPU again once the card
+    /// is busy (decided batch by batch).
+    #[default]
+    Auto,
+    /// «Процессор»: one quiet CPU thread, never the GPU.
+    Cpu,
+    /// «Видеокарта»: the GPU (DirectML), the CPU where there is none.
+    Gpu,
+}
+
+impl SoundDevice {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Cpu, Self::Gpu];
 }
 
 impl SoundNeural {
@@ -3767,7 +3786,7 @@ impl Default for Prefs {
             home_hidden_mixes: Vec::new(),
             stream_analysis: true,
             sound_neural: None,
-            sound_cpu_only: false,
+            sound_device: SoundDevice::Auto,
             autoplay: true,
             autoplay_continue_world: true,
             radio_new_share_by: std::collections::BTreeMap::new(),

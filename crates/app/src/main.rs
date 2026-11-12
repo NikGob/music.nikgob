@@ -126,11 +126,17 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     // «Перемешивание остаётся включённым» became a rule by the kind of
     // list: off, every kind keeps playing in order.
     let keep_shuffle = value.get("list_shuffle").is_none().then(|| value.get("keep_shuffle").and_then(|v| v.as_bool())).flatten();
+    // «Только на процессоре» became «Процессор» of «На чём считать анализ
+    // звука».
+    let cpu_only = value.get("sound_device").is_none() && value.get("sound_cpu_only").and_then(|v| v.as_bool()) == Some(true);
     // A field this build cannot read takes its default, not the whole file.
     let mut prefs = Prefs::from_json_lenient(value)?;
     if legacy { prefs.np_slot = slot; }
     if let Some(keep) = keep_shuffle {
         prefs.list_shuffle = nikgob_view::ListShuffles::from_keep(keep);
+    }
+    if cpu_only {
+        prefs.sound_device = nikgob_view::SoundDevice::Cpu;
     }
     prefs.upgrade_lyrics(lyrics_rev);
     // The owner's own build opens the settings in «Подробно» the first

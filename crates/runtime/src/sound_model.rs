@@ -1,7 +1,7 @@
 //! The neural sound model of the recommendations (docs/recommendations.md
 //! §5): Discogs-EffNet on ONNX Runtime, the same runtime the lyrics
-//! alignment loads, on the CPU on one quiet thread whatever the device
-//! setting says ([`AUTO_DEVICE`]).
+//! alignment loads, on the device «На чём считать анализ звука» says;
+//! «Автоматически» picks it batch by batch ([`choose`]).
 //!
 //! * **On demand.** The runtime and the model (`models/discogs-effnet`,
 //!   18 MB) are downloaded only once the user picks a mode of «Нейросетевой
@@ -17,34 +17,124 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use nikgob_align::catalog::{Catalog, ModelId};
 use nikgob_align::engine::{self, Device, Model};
 use nikgob_recs::embedding::{EFFNET_DIM, EMBED_RATE, MEL_BANDS, Mel, PATCH};
 use nikgob_recs::{AnalysisError, EMBEDDED_WITH, SoundModel};
+use nikgob_view::SoundDevice;
 use parking_lot::Mutex;
 
-/// Where «Автоматически» runs the model: the CPU. Measured on one 15 s
-/// window (`tests::window_bench`, one thread, a debug build): the CPU takes
-/// 70 ms a window and its session ~37 MB private; DirectML 33 ms, but 3 s to
-/// load and ~300 MB private, ~150 MB of which stay after the session goes
-/// (the DirectML device). Background analysis has no use for the GPU's
-/// speed, and the budget has no room for its memory.
-const AUTO_DEVICE: Device = Device::Cpu;
+// «Автоматически» ([`choose`]). Measured on one 15 s window
+// (`tests::window_bench`, one thread, a debug build): the CPU takes 70 ms a
+// window and its session ~37 MB private; DirectML 33 ms, but 3 s to load
+// and ~300 MB private, ~150 MB of which stay after the session goes (the
+// DirectML device). So the CPU while it is free (the memory budget counts
+// more than the speed); the GPU only to keep a busy CPU free.
+
+/// The whole CPU this busy or more (0..1): «Автоматически» moves to a card
+/// that has room…
+const CPU_BUSY: f32 = 0.70;
+/// …and stays there until the CPU is this calm again (no flapping).
+const CPU_CALM: f32 = 0.50;
+/// A card with this much free memory has room for the session (~300 MB)
+/// and the program in front of it…
+const VRAM_ROOM: u64 = 1 << 30;
+/// …and one on it goes back to the CPU below this much (a game took it).
+const VRAM_LOW: u64 = 512 << 20;
+/// «Автоматически» looks again this often while a session is loaded.
+const RECHOOSE: Duration = Duration::from_secs(60);
+
+/// What «Автоматически» looks at: how busy the whole CPU is (0..1), the
+/// card's free memory, and whether there is a card DirectML runs on.
+/// `None`: not known (Linux knows no card: the CPU then).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Probe {
+    pub cpu: Option<f32>,
+    pub vram_free: Option<u64>,
+    pub gpu: bool,
+}
+
+/// Where «Автоматически» runs the next windows, from the `probe` and the
+/// device of the session loaded now (`now`): the CPU while it is free; the
+/// GPU while the CPU is busy and the card has room; the CPU again once the
+/// card is busy (a game, its memory nearly full) or the CPU calm. Anything
+/// unknown keeps to the CPU.
+pub(crate) fn choose(probe: Probe, now: Option<Device>) -> Device {
+    let (Some(cpu), Some(free), true) = (probe.cpu, probe.vram_free, probe.gpu) else { return Device::Cpu };
+    let on_gpu = now == Some(Device::Gpu);
+    let busy = if on_gpu { cpu >= CPU_CALM } else { cpu >= CPU_BUSY };
+    let room = if on_gpu { free >= VRAM_LOW } else { free >= VRAM_ROOM };
+    if busy && room { Device::Gpu } else { Device::Cpu }
+}
+
+/// The system's CPU time so far: (idle, all), in the system's units.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn cpu_times() -> Option<(u64, u64)> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+    // SAFETY: the three structs are ours and written by the call.
+    let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } != 0;
+    let n = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    // Kernel time includes the idle time.
+    ok.then(|| (n(idle), n(kernel) + n(user)))
+}
+
+/// The system's CPU time so far: (idle, all), from `/proc/stat`.
+#[cfg(not(windows))]
+fn cpu_times() -> Option<(u64, u64)> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    proc_stat_times(stat.lines().next()?)
+}
+
+/// (idle, all) of the `cpu` line of `/proc/stat` (idle and iowait idle).
+#[cfg_attr(windows, allow(dead_code))]
+fn proc_stat_times(line: &str) -> Option<(u64, u64)> {
+    let mut it = line.split_whitespace();
+    (it.next()? == "cpu").then_some(())?;
+    let v: Vec<u64> = it.filter_map(|x| x.parse().ok()).collect();
+    (v.len() >= 5).then(|| (v[3] + v[4], v.iter().sum()))
+}
+
+/// How busy the CPU was between two readings of [`cpu_times`].
+fn load_between(a: (u64, u64), b: (u64, u64)) -> Option<f32> {
+    let all = b.1.checked_sub(a.1).filter(|d| *d > 0)?;
+    let idle = b.0.saturating_sub(a.0).min(all);
+    Some(1.0 - idle as f32 / all as f32)
+}
+
+/// What «Автоматически» sees now: the CPU's load since the last look (a
+/// first look waits a quarter of a second for a second reading; the
+/// analysis thread may), the card's free memory.
+fn probe(last: &Mutex<Option<(u64, u64)>>) -> Probe {
+    let mut last = last.lock();
+    let before = match *last {
+        Some(t) => Some(t),
+        None => {
+            let t = cpu_times();
+            std::thread::sleep(Duration::from_millis(250));
+            t
+        }
+    };
+    let now = cpu_times();
+    *last = now;
+    let cpu = before.zip(now).and_then(|(a, b)| load_between(a, b));
+    let vram_free = engine::card_free();
+    Probe { cpu, vram_free, gpu: cfg!(windows) && vram_free.is_some() }
+}
+
+/// [`SoundDevice`] as a number (its place in [`SoundDevice::ALL`]).
+fn device_index(d: SoundDevice) -> u8 {
+    SoundDevice::ALL.iter().position(|x| *x == d).unwrap_or(0) as u8
+}
 
 /// The bench's GPU session (`NIKGOB_BENCH_DEVICE=gpu`), measured against.
 #[cfg(test)]
 static BENCH_GPU: AtomicBool = AtomicBool::new(false);
-
-fn auto_device() -> Device {
-    #[cfg(test)]
-    if BENCH_GPU.load(Ordering::Relaxed) {
-        return Device::Gpu;
-    }
-    AUTO_DEVICE
-}
 
 /// The session goes this long after its last use.
 pub(crate) const KEEP_LOADED: Duration = Duration::from_secs(20);
@@ -64,8 +154,11 @@ pub(crate) enum ModelState {
 struct Loaded {
     model: Model,
     used: Instant,
-    /// Made with «Только на процессоре» on.
-    cpu_only: bool,
+    /// The setting it was made for, the device it was asked on, and when
+    /// that was chosen.
+    setting: SoundDevice,
+    asked: Device,
+    chosen: Instant,
 }
 
 /// The session and whether its idle watch runs.
@@ -118,7 +211,10 @@ impl Session {
 pub(crate) struct Effnet {
     catalog: Catalog,
     mel: Mel,
-    cpu_only: AtomicBool,
+    /// «На чём считать анализ звука» ([`SoundDevice`] as a number).
+    device: AtomicU8,
+    /// The CPU's times at the last look of «Автоматически».
+    cpu_seen: Mutex<Option<(u64, u64)>>,
     session: Arc<Session>,
     /// The last failure, and when.
     failed: Mutex<Option<(Instant, String)>>,
@@ -131,7 +227,8 @@ impl Effnet {
         Self {
             catalog: Catalog::new(models),
             mel: Mel::new(),
-            cpu_only: AtomicBool::new(false),
+            device: AtomicU8::new(0),
+            cpu_seen: Mutex::new(None),
             session: Arc::new(Session::default()),
             failed: Mutex::new(None),
             downloading: Mutex::new(None),
@@ -163,11 +260,41 @@ impl Effnet {
         *self.failed.lock() = Some((Instant::now(), what));
     }
 
-    /// «Только на процессоре»: the next window runs on a session of that
-    /// kind (a loaded one of the other kind is made again there, on the
+    /// «На чём считать анализ звука»: the next window runs on a session of
+    /// that device (a loaded one of another is made again there, on the
     /// analysis thread; the caller never waits for a window).
-    pub(crate) fn set_cpu_only(&self, on: bool) {
-        self.cpu_only.store(on, Ordering::Relaxed);
+    pub(crate) fn set_device(&self, device: SoundDevice) {
+        self.device.store(device_index(device), Ordering::Relaxed);
+    }
+
+    /// The setting as it is now.
+    fn setting(&self) -> SoundDevice {
+        SoundDevice::ALL.get(usize::from(self.device.load(Ordering::Relaxed))).copied().unwrap_or_default()
+    }
+
+    /// The device the setting asks for: for «Автоматически» what
+    /// [`choose`] says, looked at again every [`RECHOOSE`] while a session
+    /// is loaded (`now`: its device and when it was chosen).
+    fn device_for(&self, setting: SoundDevice, now: Option<(Device, Instant)>) -> Device {
+        #[cfg(test)]
+        if BENCH_GPU.load(Ordering::Relaxed) {
+            return Device::Gpu;
+        }
+        match setting {
+            SoundDevice::Cpu => Device::Cpu,
+            SoundDevice::Gpu => Device::Gpu,
+            SoundDevice::Auto => match now {
+                Some((d, at)) if at.elapsed() < RECHOOSE => d,
+                _ => {
+                    let p = probe(&self.cpu_seen);
+                    let d = choose(p, now.map(|(d, _)| d));
+                    if now.is_none_or(|(was, _)| was != d) {
+                        log::info!("sound model: «Автоматически» picks the {d:?} (CPU {:?}, card free {:?} MB)", p.cpu.map(|c| (c * 100.0).round()), p.vram_free.map(|b| b >> 20));
+                    }
+                    d
+                }
+            },
+        }
     }
 
     /// Downloads what is missing of the runtime and the model; `stop`
@@ -219,24 +346,31 @@ impl Effnet {
     /// The session, loaded if it is not.
     fn with_session<T>(&self, f: impl FnOnce(&mut Model) -> Result<T, AnalysisError>) -> Result<T, AnalysisError> {
         let mut guard = self.session.loaded.lock();
-        let cpu_only = self.cpu_only.load(Ordering::Relaxed);
-        if guard.as_ref().is_some_and(|l| l.cpu_only != cpu_only) {
-            *guard = None;
-            log::info!("sound model: made again for the new device setting");
+        let setting = self.setting();
+        // Another setting, or «Автоматически» chose again: on another
+        // device the session is made again.
+        let now = guard.as_ref().filter(|l| l.setting == setting).map(|l| (l.asked, l.chosen));
+        let device = self.device_for(setting, now);
+        if let Some(l) = guard.as_mut() {
+            if l.setting != setting || l.asked != device {
+                *guard = None;
+                log::info!("sound model: made again on the {device:?}");
+            } else if now.is_some_and(|(_, at)| at.elapsed() >= RECHOOSE) {
+                l.chosen = Instant::now();
+            }
         }
         if guard.is_none() {
             if !self.ready() {
                 return Err(AnalysisError::Model("the model is not downloaded".into()));
             }
             let loaded = engine::load_runtime(&self.catalog.path(ModelId::Runtime)).and_then(|()| {
-                let device = if cpu_only { Device::Cpu } else { auto_device() };
                 let file = self.catalog.file(ModelId::SoundEffnet, ModelId::SoundEffnet.model_file());
                 Model::load(&file, device, 1)
             });
             match loaded {
                 Ok(model) => {
                     log::info!("sound model: loaded on the {:?}", model.device);
-                    *guard = Some(Loaded { model, used: Instant::now(), cpu_only });
+                    *guard = Some(Loaded { model, used: Instant::now(), setting, asked: device, chosen: Instant::now() });
                     self.session.watch();
                 }
                 Err(e) => {
@@ -362,8 +496,7 @@ mod tests {
     /// with the first window, then the time of a window and what the
     /// session holds. `NIKGOB_MODELS` = a models folder with the runtime
     /// and the model (never downloaded here), `NIKGOB_BENCH_DEVICE` = `gpu`
-    /// for a DirectML session (the CPU's, as «Автоматически» makes, by
-    /// default):
+    /// for a DirectML session (the CPU's by default):
     ///
     /// `NIKGOB_MODELS=… cargo test -p nikgob-runtime --lib sound_model::tests::window_bench -- --ignored --nocapture`
     #[test]
@@ -380,6 +513,9 @@ mod tests {
         }
         let gpu = std::env::var("NIKGOB_BENCH_DEVICE").is_ok_and(|d| d == "gpu");
         BENCH_GPU.store(gpu, Ordering::Relaxed);
+        if !gpu {
+            m.set_device(SoundDevice::Cpu);
+        }
         // Something like music: a few partials and a beat, with noise.
         let rate = EMBED_RATE as f32;
         let mut seed = 0x2545_f491_u32;
@@ -424,11 +560,58 @@ mod tests {
         let m = Effnet::new(dir.path().to_owned());
         let held = m.session.loaded.lock();
         let t = Instant::now();
-        m.set_cpu_only(true);
+        m.set_device(SoundDevice::Cpu);
         assert_eq!(m.loaded(), None, "busy, not waited for");
         let _ = m.state();
         assert!(t.elapsed() < Duration::from_millis(500));
         drop(held);
         assert_eq!(m.loaded(), Some(false));
+    }
+
+    /// «Автоматически»: the CPU while it is free, the GPU while the CPU is
+    /// busy and the card has room, the CPU again once the card is busy or
+    /// the CPU calm; between the thresholds it stays where it is; anything
+    /// unknown (Linux's card) is the CPU.
+    #[test]
+    fn automatic_takes_the_cpu_unless_it_is_busy_and_the_card_free() {
+        const GB: u64 = 1 << 30;
+        let p = |cpu: f32, free: u64| Probe { cpu: Some(cpu), vram_free: Some(free), gpu: true };
+        // Both free: the CPU (less memory).
+        assert_eq!(choose(p(0.2, 6 * GB), None), Device::Cpu);
+        // A busy CPU and a card with room: the GPU.
+        assert_eq!(choose(p(0.9, 6 * GB), None), Device::Gpu);
+        assert_eq!(choose(p(0.9, 6 * GB), Some(Device::Cpu)), Device::Gpu);
+        // The card busy too (a game, its memory nearly full): the CPU.
+        assert_eq!(choose(p(0.9, GB / 4), None), Device::Cpu);
+        assert_eq!(choose(p(0.9, GB / 4), Some(Device::Gpu)), Device::Cpu);
+        // Between the thresholds each stays where it is.
+        assert_eq!(choose(p(0.6, 6 * GB), Some(Device::Gpu)), Device::Gpu);
+        assert_eq!(choose(p(0.6, 6 * GB), Some(Device::Cpu)), Device::Cpu);
+        assert_eq!(choose(p(0.9, 3 * GB / 4), Some(Device::Gpu)), Device::Gpu);
+        assert_eq!(choose(p(0.9, 3 * GB / 4), Some(Device::Cpu)), Device::Cpu);
+        // The CPU calm again: back to it.
+        assert_eq!(choose(p(0.3, 6 * GB), Some(Device::Gpu)), Device::Cpu);
+        // Not known: the CPU.
+        assert_eq!(choose(Probe { cpu: Some(0.95), vram_free: None, gpu: false }, None), Device::Cpu);
+        assert_eq!(choose(Probe { cpu: Some(0.95), vram_free: Some(6 * GB), gpu: false }, None), Device::Cpu);
+        assert_eq!(choose(Probe { cpu: None, vram_free: Some(6 * GB), gpu: true }, None), Device::Cpu);
+        assert_eq!(choose(Probe::default(), Some(Device::Gpu)), Device::Cpu);
+    }
+
+    /// The CPU's load between two readings, and `/proc/stat`'s line read.
+    #[test]
+    fn cpu_load_is_read_between_two_readings() {
+        assert_eq!(load_between((100, 1_000), (175, 1_100)), Some(0.25));
+        assert_eq!(load_between((100, 1_000), (100, 1_000)), None, "no time passed");
+        assert_eq!(load_between((100, 1_000), (300, 1_100)), Some(0.0), "idle never more than all");
+        assert_eq!(proc_stat_times("cpu  10 0 20 300 5 0 1 0 0 0"), Some((305, 336)));
+        assert_eq!(proc_stat_times("cpu0 10 0 20 300 5"), None);
+        assert!(cpu_times().is_some_and(|(idle, all)| idle <= all));
+        // The setting's numbers round-trip.
+        for d in SoundDevice::ALL {
+            let m = Effnet::new(PathBuf::new());
+            m.set_device(d);
+            assert_eq!(m.setting(), d);
+        }
     }
 }
