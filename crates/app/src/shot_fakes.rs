@@ -120,6 +120,9 @@ pub struct Fakes {
     /// `fake:bento`: how many tiles, and whether there is a daylist.
     bento: Option<(usize, bool)>,
     keep: bool,
+    /// `fake:wish-toast`: «В «Хочу скачать»: «Дай мне всё»», its kind
+    /// guessed as the runtime's toasts are.
+    wish_toast: bool,
     lyrics_texts: bool,
     craft: Option<String>,
     lyrics_home: Option<String>,
@@ -180,6 +183,7 @@ impl Fakes {
             "bento:2" => self.bento = Some((2, true)),
             "bento:no-daylist" => self.bento = Some((3, false)),
             "keep" => self.keep = true,
+            "wish-toast" => self.wish_toast = true,
             "lyrics-texts" => self.lyrics_texts = true,
             "align-models" => self.align_models = true,
             "lyrics-gap" => self.lyrics_gap = Some(false),
@@ -220,6 +224,7 @@ impl Fakes {
             || self.no_recs
             || self.bento.is_some()
             || self.keep
+            || self.wish_toast
             || self.lyrics_texts
             || self.craft.is_some()
             || self.lyrics_home.is_some()
@@ -280,6 +285,20 @@ impl Fakes {
                     nikgob_view::Command::Like(nikgob_core::model::LikeTarget::Track(t.id), true),
                 )),
                 open: None,
+                at: std::time::Instant::now(),
+                long: true,
+                again: 0,
+            });
+        }
+
+        if self.wish_toast && !s.toasts.iter().any(|x| x.id == u64::MAX - 1) {
+            let text = "В «Хочу скачать»: «Дай мне всё»".to_owned();
+            s.toasts.push(nikgob_view::Toast {
+                id: u64::MAX - 1,
+                kind: nikgob_view::ToastKind::guess(&text),
+                text,
+                action: None,
+                open: Some(("Открыть".into(), nikgob_view::Link::Route(nikgob_view::Route::Downloads(nikgob_view::DownloadsTab::Wishlist)))),
                 at: std::time::Instant::now(),
                 long: true,
                 again: 0,

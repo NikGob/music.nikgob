@@ -974,7 +974,7 @@ pub fn show_on(
             // The track's one list, the visualizer before it, the delete
             // last.
             // «Текст песни» while its button is hidden (L opens it too).
-            let lyrics = (!state.prefs.player_buttons.lyrics && super::PaneTab::Lyrics.on(&state.prefs)).then_some(Act::Lyrics);
+            let lyrics = (!state.prefs.player_buttons.lyrics).then_some(Act::Lyrics);
             let top: Vec<Act> = lyrics.into_iter().chain([Act::Visualizer, Act::SleepMenu]).collect();
             let rows = Chrome::player_rows(&ctx, t, state, &top, true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);

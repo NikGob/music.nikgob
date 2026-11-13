@@ -754,7 +754,13 @@ impl Md3eUi {
             }
         }
         if let Some(tab) = self.chrome.open_pane.take() {
-            self.pane = Some(tab);
+            if tab.on(&state.prefs) {
+                self.pane = Some(tab);
+            } else if tab == PaneTab::Lyrics {
+                // No lyrics in the side pane: Now Playing shows them.
+                self.set_now_playing(ctx, true);
+                self.chrome.np_ask = Some(NpSlot::Lyrics);
+            }
         }
         // A torrent search for a better copy shows its results on the search page.
         let query = out[first_cmd..].iter().rev().find_map(|c| match c {

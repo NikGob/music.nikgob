@@ -406,8 +406,11 @@ fn found(
     // Tracks are searched by the runtime: their own tab, the filter kept;
     // beside it the same text looked for everywhere (an empty answer
     // offers that itself).
+    // Under the empty state, centred like its own button; under found
+    // sections, at their start.
+    let layout = if nothing { egui::Layout::top_down(Align::Center) } else { egui::Layout::left_to_right(Align::Center) };
     let (open, all) = ui
-        .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+        .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), layout, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let open = ui
                 .add(
