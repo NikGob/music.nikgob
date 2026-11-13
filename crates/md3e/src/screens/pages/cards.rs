@@ -1008,6 +1008,8 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
     let more_clicked = more.as_ref().is_some_and(Response::clicked);
     match picked.and_then(|k| of_day_rows().get(k).copied()) {
         Some(OfDayItem::Play) => out.push(Command::PlayMix { id: m.id }),
+        Some(OfDayItem::Next) => out.push(Command::PlayMixNext { id: m.id }),
+        Some(OfDayItem::Queue) => out.push(Command::EnqueueMix { id: m.id }),
         Some(OfDayItem::Download) => out.push(Command::DownloadMix { id: m.id }),
         None if play || (resp.clicked() && !more_clicked) => out.push(Command::PlayMix { id: m.id }),
         None => {}
@@ -1018,19 +1020,25 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OfDayItem {
     Play,
+    /// «Сыграть следующим» / «В очередь»: its songs, as a mix card's.
+    Next,
+    Queue,
     /// «Скачать недостающие»: its songs without a file to «Хочу скачать».
     Download,
 }
 
-/// The menu of a tile of the day: what its click does, and what it lacks
-/// (the runtime knows which of its songs those are).
-pub fn of_day_rows() -> [OfDayItem; 2] {
-    [OfDayItem::Play, OfDayItem::Download]
+/// The menu of a tile of the day: what its click does, its songs next or
+/// to the queue (as a mix card's menu has them), and what it lacks (the
+/// runtime knows which of its songs those are).
+pub fn of_day_rows() -> [OfDayItem; 4] {
+    [OfDayItem::Play, OfDayItem::Next, OfDayItem::Queue, OfDayItem::Download]
 }
 
 fn of_day_menu(key: Id) -> Menu {
     Menu::new(key)
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
+        .item(MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic))
+        .item(MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic))
         .divider()
         .item(MenuItem::new("Скачать недостающие").icon(Icon::Download))
 }
@@ -1111,6 +1119,13 @@ pub fn shuffle<T>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tile of the day plays next and to the queue as a mix card does,
+    /// its download last.
+    #[test]
+    fn a_tile_of_the_day_plays_next_and_queues() {
+        assert_eq!(of_day_rows(), [OfDayItem::Play, OfDayItem::Next, OfDayItem::Queue, OfDayItem::Download]);
+    }
 
     /// An all-capital kicker reads in the tiles' case; one in its own case stays.
     #[test]

@@ -947,7 +947,12 @@ const BLUR_SPREAD: f32 = 0.75;
 /// galley's own, so the text is as sharp as ever; a row near the edge also
 /// gets copies of its glyphs spread around them by [`Fade::blur_at`] (on
 /// the same mesh, the opacity shared between the glyph and its copies, so
-/// the row is about as opaque as it would be sharp).
+/// the row is about as opaque as it would be sharp). A row that crosses an
+/// edge of the view has its triangles cut there ([`cut_at_edges`]): the
+/// opacity is set at each vertex where it finally lies, and the GPU blends
+/// it in a straight line between vertices, so without a vertex on the edge
+/// a glyph reaching past it would be cut by the clip at what its inside
+/// vertex blends to there, not at nothing.
 fn faded(g: &Galley, pos: egui::Pos2, color: Option<Color32>, fade: Fade) -> Arc<Galley> {
     let mut out = g.clone();
     let mut reach_all = 0.0_f32;
@@ -955,58 +960,149 @@ fn faded(g: &Galley, pos: egui::Pos2, color: Option<Color32>, fade: Fade) -> Arc
         let top = pos.y + placed.pos.y;
         let mut row = (*placed.row).clone();
         let glyphs = row.visuals.glyph_vertex_range.clone();
+        // The mesh is glyphs only (no background or line under the text):
+        // all of it may be cut and renumbered.
+        let whole = glyphs.start == 0 && glyphs.end == row.visuals.mesh.vertices.len();
         let mesh = &mut row.visuals.mesh;
         let Some(vertices) = mesh.vertices.get(glyphs.clone()) else {
             placed.row = Arc::new(row);
             continue;
         };
         let reach = vertices.iter().map(|v| fade.blur_at(top + v.pos.y)).fold(0.0, f32::max);
-        if reach < BLUR_MIN {
-            for v in &mut mesh.vertices[glyphs] {
-                v.color = color.unwrap_or(v.color).gamma_multiply(fade.at(top + v.pos.y));
-            }
-            placed.row = Arc::new(row);
-            continue;
-        }
-        reach_all = reach_all.max(reach);
-        // The glyphs' triangles, to copy with their vertices.
-        let tris: Vec<u32> = mesh
-            .indices
-            .chunks_exact(3)
-            .filter(|t| t.iter().all(|&i| glyphs.contains(&(i as usize))))
-            .flatten()
-            .copied()
-            .collect();
-        let base: Vec<egui::epaint::Vertex> = mesh.vertices[glyphs.clone()].to_vec();
-        // The glyph's own share of its opacity and each copy's.
-        let share = |y: f32| {
-            let spread = BLUR_SPREAD * (fade.blur_at(y) / fade.blur.max(1e-3)).clamp(0.0, 1.0);
-            (1.0 - spread, spread / BLUR_TAPS.len() as f32)
-        };
+        // Each glyph vertex in its colour, the copies of a blurred row
+        // after them in theirs; the opacity of the fade comes last, where
+        // each vertex finally lies.
         for v in &mut mesh.vertices[glyphs.clone()] {
-            let y = top + v.pos.y;
-            v.color = color.unwrap_or(v.color).gamma_multiply(fade.at(y) * share(y).0);
+            v.color = color.unwrap_or(v.color);
         }
-        mesh.vertices.reserve(base.len() * BLUR_TAPS.len());
-        mesh.indices.reserve(tris.len() * BLUR_TAPS.len());
-        for dir in BLUR_TAPS {
-            let first = mesh.vertices.len() as u32;
-            for v in &base {
-                let y = top + v.pos.y;
-                let mut c = *v;
-                c.pos += dir * fade.blur_at(y);
-                c.color = color.unwrap_or(v.color).gamma_multiply(fade.at(y) * share(y).1);
-                mesh.vertices.push(c);
+        let blurred = reach >= BLUR_MIN;
+        let before = mesh.vertices.len();
+        if blurred {
+            reach_all = reach_all.max(reach);
+            blur_copies(mesh, glyphs.clone(), top, fade);
+        }
+        let (mut thin, mut copies) = (glyphs.clone(), before..mesh.vertices.len());
+        let (lo, hi) = (fade.top - top, fade.bottom - top);
+        if whole && mesh.vertices.iter().any(|v| v.pos.y < lo || v.pos.y > hi) {
+            cut_at_edges(mesh, lo, hi);
+            (thin, copies) = (0..mesh.vertices.len(), 0..0);
+        }
+        for range in [thin, copies] {
+            for v in &mut mesh.vertices[range] {
+                v.color = v.color.gamma_multiply(fade.at(top + v.pos.y));
             }
-            mesh.indices.extend(tris.iter().map(|&i| first + (i - glyphs.start as u32)));
         }
-        row.visuals.mesh_bounds = row.visuals.mesh_bounds.expand(reach);
+        if whole {
+            row.visuals.glyph_vertex_range = 0..row.visuals.mesh.vertices.len();
+        }
+        if blurred {
+            row.visuals.mesh_bounds = row.visuals.mesh_bounds.expand(reach);
+        }
         placed.row = Arc::new(row);
     }
     if reach_all > 0.0 {
         out.mesh_bounds = out.mesh_bounds.expand(reach_all);
     }
     Arc::new(out)
+}
+
+/// Copies of the glyph quads of `mesh` (its vertices `glyphs`, a row at
+/// `top` on screen) spread around them by [`Fade::blur_at`], appended to
+/// it; the glyphs' opacity is shared between each and its copies.
+fn blur_copies(mesh: &mut egui::epaint::Mesh, glyphs: std::ops::Range<usize>, top: f32, fade: Fade) {
+    let tris: Vec<u32> = mesh
+        .indices
+        .chunks_exact(3)
+        .filter(|t| t.iter().all(|&i| glyphs.contains(&(i as usize))))
+        .flatten()
+        .copied()
+        .collect();
+    let base: Vec<egui::epaint::Vertex> = mesh.vertices[glyphs.clone()].to_vec();
+    // The glyph's own share of its opacity and each copy's.
+    let share = |y: f32| {
+        let spread = BLUR_SPREAD * (fade.blur_at(y) / fade.blur.max(1e-3)).clamp(0.0, 1.0);
+        (1.0 - spread, spread / BLUR_TAPS.len() as f32)
+    };
+    for v in &mut mesh.vertices[glyphs.clone()] {
+        v.color = v.color.gamma_multiply(share(top + v.pos.y).0);
+    }
+    mesh.vertices.reserve(base.len() * BLUR_TAPS.len());
+    mesh.indices.reserve(tris.len() * BLUR_TAPS.len());
+    for dir in BLUR_TAPS {
+        let first = mesh.vertices.len() as u32;
+        for v in &base {
+            let y = top + v.pos.y;
+            let mut c = *v;
+            c.pos += dir * fade.blur_at(y);
+            c.color = v.color.gamma_multiply(share(y).1);
+            mesh.vertices.push(c);
+        }
+        mesh.indices.extend(tris.iter().map(|&i| first + (i - glyphs.start as u32)));
+    }
+}
+
+/// `a` to `b` by `t`, every part of the vertex (place, texture, colour).
+fn vertex_between(a: &egui::epaint::Vertex, b: &egui::epaint::Vertex, t: f32) -> egui::epaint::Vertex {
+    let c = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round().clamp(0.0, 255.0) as u8;
+    let (ca, cb) = (a.color, b.color);
+    egui::epaint::Vertex {
+        pos: a.pos + (b.pos - a.pos) * t,
+        uv: a.uv + (b.uv - a.uv) * t,
+        color: Color32::from_rgba_premultiplied(c(ca.r(), cb.r()), c(ca.g(), cb.g()), c(ca.b(), cb.b()), c(ca.a(), cb.a())),
+    }
+}
+
+/// `mesh` (its own coordinates) cut to the heights `lo..=hi`: every
+/// triangle clipped against both lines, with new vertices where it crosses
+/// one, so the edge of the view has a vertex wherever a glyph crosses it;
+/// what lies wholly outside is dropped.
+fn cut_at_edges(mesh: &mut egui::epaint::Mesh, lo: f32, hi: f32) {
+    let old = std::mem::take(&mut mesh.vertices);
+    let indices = std::mem::take(&mut mesh.indices);
+    // One side of a line at a time: keeps the part of `poly` with
+    // `inside(y)`, `at` the line's height.
+    fn clip(poly: &[egui::epaint::Vertex], at: f32, keep_below: bool) -> Vec<egui::epaint::Vertex> {
+        let inside = |y: f32| if keep_below { y <= at } else { y >= at };
+        let mut out = Vec::with_capacity(poly.len() + 2);
+        for (k, a) in poly.iter().enumerate() {
+            let b = &poly[(k + 1) % poly.len()];
+            let (ia, ib) = (inside(a.pos.y), inside(b.pos.y));
+            if ia {
+                out.push(*a);
+            }
+            if ia != ib {
+                let t = (at - a.pos.y) / (b.pos.y - a.pos.y);
+                let mut v = vertex_between(a, b, t);
+                v.pos.y = at;
+                out.push(v);
+            }
+        }
+        out
+    }
+    mesh.vertices.reserve(old.len());
+    mesh.indices.reserve(indices.len());
+    for t in indices.chunks_exact(3) {
+        let tri = [old[t[0] as usize], old[t[1] as usize], old[t[2] as usize]];
+        let ys = tri.map(|v| v.pos.y);
+        if ys.iter().all(|&y| y < lo) || ys.iter().all(|&y| y > hi) {
+            continue;
+        }
+        if ys.iter().all(|&y| (lo..=hi).contains(&y)) {
+            let first = mesh.vertices.len() as u32;
+            mesh.vertices.extend(tri);
+            mesh.indices.extend([first, first + 1, first + 2]);
+            continue;
+        }
+        let poly = clip(&clip(&tri, lo, false), hi, true);
+        if poly.len() < 3 {
+            continue;
+        }
+        let first = mesh.vertices.len() as u32;
+        mesh.vertices.extend(poly.iter().copied());
+        for k in 1..poly.len() as u32 - 1 {
+            mesh.indices.extend([first, first + k, first + k + 1]);
+        }
+    }
 }
 
 /// [`faded`] when `g` at `pos` reaches into one of `fade`'s bands; `None`
@@ -2651,7 +2747,7 @@ fn inked(g: &Galley, ink: impl Fn(usize) -> Ink) -> Arc<Galley> {
     for placed in &mut out.rows {
         let row = &placed.row;
         let src = &row.visuals.mesh;
-        let mut mesh = egui::Mesh::with_texture(src.texture_id);
+        let mut mesh = egui::epaint::Mesh::with_texture(src.texture_id);
         let mut firsts = Vec::with_capacity(row.glyphs.len());
         for gl in &row.glyphs {
             firsts.push(mesh.vertices.len() as u32);
@@ -2692,7 +2788,7 @@ fn inked(g: &Galley, ink: impl Fn(usize) -> Ink) -> Arc<Galley> {
 /// egui lays them out) into `mesh`, raised by `ink.lift`; where the light's
 /// gradient bends inside it, it is split there, so the linearly blended
 /// vertex colours draw the gradient exactly.
-fn ink_quad(mesh: &mut egui::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink: Ink) {
+fn ink_quad(mesh: &mut egui::epaint::Mesh, q: [egui::epaint::Vertex; 4], along: f32, ink: Ink) {
     let (left, right) = (q[2].pos.x, q[3].pos.x);
     // The whole glyph goes up together: its line's lift and its rise by the
     // light at its middle.
@@ -2938,7 +3034,7 @@ fn ribbon(pts: &[egui::Pos2], width: f32, closed: bool, color: Color32, feather:
         let d = (b - a).normalized();
         vec2(-d.y, d.x)
     };
-    let mut mesh = egui::Mesh::default();
+    let mut mesh = egui::epaint::Mesh::default();
     // Per point: outer left, core left, core right, outer right.
     for (i, p) in pts.iter().enumerate() {
         let l = left(i);
@@ -3456,8 +3552,55 @@ mod tests {
             let at = |y: f32, fade: Fade| count(&faded(&g, pos2(0.0, y), Some(Color32::WHITE), fade));
             assert_eq!(at(285.0, fade), base, "the middle");
             assert_eq!(at(fade.band * 0.6, fade), base, "the inner half of the band");
-            assert_eq!(at(2.0, fade), base * (1 + BLUR_TAPS.len()), "at the edge");
-            assert_eq!(at(2.0, Fade::of(rect, Soft { strength: 0.0, ..soft })), base);
+            // At the edge: the copies (some cut at the edge itself).
+            assert!(at(2.0, fade) > base * 5, "at the edge");
+            assert_eq!(at(12.0, Fade::of(rect, Soft { strength: 0.0, ..soft })), base);
+        });
+        output.textures_delta.clear();
+    }
+
+    /// A line crossing an edge of the view is cut there by the mesh itself:
+    /// no vertex lies past the edge, the vertices on it are clear, so the
+    /// opacity the GPU blends between vertices is nothing right at the
+    /// clip, at the top and at the bottom, sharp or blurred. Inside, the
+    /// line is still drawn.
+    #[test]
+    fn a_line_crossing_an_edge_fades_to_nothing_on_it() {
+        let ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        crate::typography::install_fonts(&mut fonts);
+        ctx.set_fonts(fonts);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let g = fixed_layout(ui.painter(), "Строка номер", 30.0);
+            let h = g.size().y;
+            let rect = Rect::from_min_size(pos2(0.0, 100.0), vec2(600.0, 500.0));
+            for strength in [0.0, 1.5] {
+                let fade = Fade::of(rect, Soft { strength, ..Soft::of(&Prefs::default()).text(60.0, 30.0) });
+                // Half above the top edge, half below the bottom one.
+                for (y, edge) in [(rect.top() - h * 0.5, rect.top()), (rect.bottom() - h * 0.5, rect.bottom())] {
+                    let out = faded(&g, pos2(0.0, y), Some(Color32::WHITE), fade);
+                    let mut on_edge = 0;
+                    let mut seen = false;
+                    for r in &out.rows {
+                        let m = &r.row.visuals.mesh;
+                        for t in m.indices.chunks_exact(3) {
+                            let ys: Vec<f32> = t.iter().map(|&i| y + r.pos.y + m.vertices[i as usize].pos.y).collect();
+                            assert!(ys.iter().all(|&v| v >= rect.top() - 1e-3 && v <= rect.bottom() + 1e-3), "{ys:?} past the view");
+                        }
+                        for v in &m.vertices {
+                            let at = y + r.pos.y + v.pos.y;
+                            if (at - edge).abs() < 1e-3 {
+                                on_edge += 1;
+                                assert_eq!(v.color.a(), 0, "a vertex on the edge is clear");
+                            } else if v.color.a() > 0 {
+                                seen = true;
+                            }
+                        }
+                    }
+                    assert!(on_edge > 0, "the glyphs are cut on the edge {edge} (strength {strength})");
+                    assert!(seen, "the part inside is drawn");
+                }
+            }
         });
         output.textures_delta.clear();
     }
@@ -4140,7 +4283,7 @@ mod tests {
     }
 
     /// The meshes a wait paints at `pos` of a ten-second wait, and its texts.
-    fn wait_shapes(ctx: &egui::Context, prefs: &Prefs, pos: f32, appear: f32) -> (Vec<Arc<egui::Mesh>>, usize) {
+    fn wait_shapes(ctx: &egui::Context, prefs: &Prefs, pos: f32, appear: f32) -> (Vec<Arc<egui::epaint::Mesh>>, usize) {
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             waiting(ui.painter(), Rect::from_min_size(pos2(20.0, 20.0), vec2(56.0, 42.0)), 1.0,
                 Duration::ZERO, Duration::from_secs(10), Duration::from_secs_f32(pos), appear, false, 1.0, 1.0, prefs);

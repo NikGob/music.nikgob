@@ -538,3 +538,19 @@ fn the_daylist_leads_the_tiles_of_the_day() {
     let ids: Vec<MixId> = day_tiles(&h).iter().map(|m| m.id).collect();
     assert_eq!(ids, [MixId::Daylist, MixId::Tile(TileKind::OnRepeat)]);
 }
+
+/// A song of «Слушать снова» says its album after its artists, and the
+/// album is a link to its page when the library has it.
+#[test]
+fn a_song_row_of_home_links_its_album() {
+    let mut t = song("Hanezeve Caradhina");
+    let (line, links, routes) = again_line(&t);
+    assert_eq!(line, "Kevin Penkin · Made in Abyss OST");
+    assert!(routes.iter().all(|r| !matches!(r, Route::Release(_))), "no album page to open");
+    let r = ReleaseId::new();
+    t.release_id = Some(r);
+    let (line, links2, routes) = again_line(&t);
+    assert_eq!(links2.len(), links.len() + 1);
+    assert_eq!(&line[links2.last().unwrap().clone()], "Made in Abyss OST");
+    assert_eq!(routes.last(), Some(&Route::Release(r)));
+}

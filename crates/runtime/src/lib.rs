@@ -1670,6 +1670,9 @@ impl Worker {
             | Command::EnqueueStreamAlbum(_)
             | Command::PlayStreamPlaylistNext(_)
             | Command::EnqueueStreamPlaylist(_)
+            | Command::PlayStreamArtist(_)
+            | Command::PlayStreamArtistNext(_)
+            | Command::EnqueueStreamArtist(_)
             | Command::LikeStream { .. }
             | Command::StreamInLibrary { .. }
             | Command::LikeStreamAlbum { .. }
@@ -1715,7 +1718,9 @@ impl Worker {
             | Command::PlayWave { .. }
             | Command::SetWave(_)
             | Command::OtherVibe
-            | Command::DownloadMix { .. }) => {
+            | Command::DownloadMix { .. }
+            | Command::PlayMixNext { .. }
+            | Command::EnqueueMix { .. }) => {
                 if let Some(c) = self.recs_command(c) {
                     log::warn!("unhandled {c:?}");
                 }

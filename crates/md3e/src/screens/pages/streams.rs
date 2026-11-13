@@ -623,8 +623,9 @@ pub enum StreamArtistAct {
 }
 
 /// The menu of a service's artist: a library artist's play, shuffle,
-/// radio and queue (as [`widgets::artist_rows`]), and for anyone
-/// «Не рекомендовать исполнителя».
+/// radio, next and queue (as [`widgets::artist_rows`]); an artist only on
+/// the service plays its newest release (as «Слушать» of its page), next
+/// or to the queue; and for anyone «Не рекомендовать исполнителя».
 pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesView) -> Vec<widgets::Row<StreamArtistAct>> {
     use StreamArtistAct as A;
     use widgets::Row;
@@ -633,10 +634,12 @@ pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesVie
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать микс").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
         rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
-        rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
-        rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
-        rows.push(Row::Divider);
+    } else {
+        rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
     }
+    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
+    rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
+    rows.push(Row::Divider);
     let ban = match a.artist {
         Some(id) => super::ban_item(id, marks),
         None => MenuItem::new("Не рекомендовать исполнителя").icon(Icon::Block),
@@ -654,8 +657,12 @@ fn stream_artist_command(act: StreamArtistAct, a: &StreamArtistCard, marks: &nik
         (A::Next, Some(id)) => Command::PlayArtistNext(id),
         (A::Queue, Some(id)) => Command::EnqueueArtist(id),
         (A::Ban, Some(id)) => super::ban_command(id, marks),
+        // Only on the service: its newest release.
+        (A::Play | A::Shuffle | A::Radio, None) => Command::PlayStreamArtist(a.remote.clone()),
+        (A::Next, None) => Command::PlayStreamArtistNext(a.remote.clone()),
+        (A::Queue, None) => Command::EnqueueStreamArtist(a.remote.clone()),
         // Not in the library: the name on every service.
-        _ => Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(a.name.clone()), dislike: true },
+        (A::Ban, None) => Command::RecFeedback { target: nikgob_view::RecTarget::StreamArtist(a.name.clone()), dislike: true },
     }
 }
 
@@ -1098,7 +1105,7 @@ fn artist_page(
 
 #[cfg(test)]
 mod menu_tests {
-    use super::{StreamAlbumAct, StreamAlbumMenuOf, StreamPlaylistAct, stream_album_rows, stream_playlist_rows};
+    use super::{StreamAlbumAct, StreamAlbumMenuOf, StreamArtistAct, StreamPlaylistAct, stream_album_rows, stream_artist_command, stream_artist_rows, stream_playlist_rows};
     use crate::screens::pages::widgets::{Row, row_acts};
 
     fn labels<A>(rows: &[Row<A>]) -> Vec<String> {
@@ -1133,6 +1140,22 @@ mod menu_tests {
         let bare = row_acts(&stream_album_rows(StreamAlbumMenuOf::default()));
         assert!(!bare.iter().any(|a| matches!(a, A::Library | A::Download | A::Artist)));
         assert!(bare.contains(&A::Like), "liking is not downloading");
+    }
+
+    /// A service artist plays next and to the queue whether the library
+    /// knows it or not: one only on the service by its newest release.
+    #[test]
+    fn a_service_artist_plays_next_with_or_without_the_library() {
+        use StreamArtistAct as A;
+        let remote = nikgob_view::RemoteId::new(nikgob_view::Service::Youtube, "ar");
+        let mut a = nikgob_view::StreamArtistCard { remote: remote.clone(), name: "A".into(), image_url: None, artist: None };
+        let marks = nikgob_view::DislikesView::default();
+        assert_eq!(row_acts(&stream_artist_rows(&a, &marks)), [A::Play, A::Next, A::Queue, A::Ban]);
+        assert_eq!(stream_artist_command(A::Next, &a, &marks), nikgob_view::Command::PlayStreamArtistNext(remote.clone()));
+        assert_eq!(stream_artist_command(A::Queue, &a, &marks), nikgob_view::Command::EnqueueStreamArtist(remote.clone()));
+        assert_eq!(stream_artist_command(A::Play, &a, &marks), nikgob_view::Command::PlayStreamArtist(remote));
+        a.artist = Some(nikgob_view::ArtistId::new());
+        assert_eq!(row_acts(&stream_artist_rows(&a, &marks)), [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Ban]);
     }
 
     /// A service playlist's right click and its page's ⋮: one list, the

@@ -2730,6 +2730,8 @@ impl Worker {
             Command::SetWave(filter) => self.set_wave(filter),
             Command::OtherVibe => self.other_vibe(),
             Command::DownloadMix { id } => self.download_mix(id),
+            Command::PlayMixNext { id } => self.queue_mix(id, true),
+            Command::EnqueueMix { id } => self.queue_mix(id, false),
             other => return Some(other),
         }
         None
@@ -2943,26 +2945,75 @@ impl Worker {
 
     /// `Command::DownloadMix`: every song of a tile (or of the daylist,
     /// which stands among the tiles) without a file goes to «Хочу скачать».
+    /// Its songs of the services too (the daylist's new ones), made tracks
+    /// of their own as playing them does.
     fn download_mix(&mut self, id: v::MixId) {
-        let picks = match id {
-            v::MixId::Tile(kind) => self.home_tile(kind).map(|t| &t.picks),
-            v::MixId::Daylist => self.recs.home.as_ref().and_then(|h| h.daylist.as_ref()).map(|d| &d.picks),
-            _ => return,
-        };
-        let ids: Vec<TrackId> = picks.map_or_else(Vec::new, |picks| {
-            picks
-                .iter()
-                .filter_map(|p| match p.item {
-                    Item::Track(id) => Some(id),
-                    Item::Stream(_) => None,
-                })
-                .collect()
-        });
-        if ids.is_empty() {
+        let Some((picks, streams, _)) = self.day_mix(id) else {
             self.toast("Этой подборки уже нет — главная обновилась", None);
+            return;
+        };
+        let mut ids = Vec::with_capacity(picks.len());
+        for p in pick_tracks(&picks, &streams) {
+            match p {
+                PickTrack::Library(id) => ids.push(id),
+                PickTrack::Stream(t) => {
+                    self.streaming.learn(std::slice::from_ref(t));
+                    ids.extend(self.upsert_streams(std::slice::from_ref(t)));
+                }
+            }
+        }
+        if ids.is_empty() {
+            self.toast("Нечего скачивать", None);
             return;
         }
         self.download_tracks(&ids);
+    }
+
+    /// The picks of a tile of the day or of the daylist, with the details
+    /// of the daylist's songs of the services, and its title; `None` once it
+    /// is gone from Главная.
+    fn day_mix(&self, id: v::MixId) -> Option<(Vec<Pick>, HashMap<RemoteId, StreamTrack>, String)> {
+        match id {
+            v::MixId::Tile(kind) => self.home_tile(kind).map(|t| (t.picks.clone(), HashMap::new(), t.title.clone())),
+            v::MixId::Daylist => {
+                let d = self.recs.home.as_ref()?.daylist.as_ref()?;
+                Some((d.picks.clone(), d.streams.clone(), d.title.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Command::PlayMixNext` / `Command::EnqueueMix` of a tile of the day
+    /// or the daylist: its songs as playing it would take them (not the
+    /// radio the daylist goes on with), after the current track (`next`)
+    /// or at the end of the queue.
+    fn queue_mix(&mut self, id: v::MixId, next: bool) {
+        let Some((picks, streams, _)) = self.day_mix(id) else {
+            self.toast("Этой подборки уже нет — главная обновилась", None);
+            return;
+        };
+        let prefs = self.state.read().prefs.clone();
+        let snap = self.snapshot();
+        let mut ids = Vec::with_capacity(picks.len());
+        for p in pick_tracks(&picks, &streams) {
+            match p {
+                PickTrack::Library(id) => {
+                    if radio::radio_allows(id, false, false, &prefs, snap.as_deref(), v::RadioKind::Mix) {
+                        ids.push(id);
+                    }
+                }
+                PickTrack::Stream(_) if prefs.mixes_downloaded_only => {}
+                PickTrack::Stream(t) => {
+                    self.streaming.learn(std::slice::from_ref(t));
+                    ids.extend(self.upsert_streams(std::slice::from_ref(t)));
+                }
+            }
+        }
+        if ids.is_empty() {
+            self.toast("Нечего играть", None);
+            return;
+        }
+        self.command(if next { Command::PlayNext(ids) } else { Command::Enqueue(ids) });
     }
 
     /// «Твой микс» as it is today: its tracks, not endless.
@@ -3173,9 +3224,45 @@ impl Worker {
     }
 }
 
+/// A pick of a home mix as a track to take: a library one, or a song of
+/// the services by its details.
+#[derive(Debug, PartialEq)]
+enum PickTrack<'a> {
+    Library(TrackId),
+    Stream(&'a StreamTrack),
+}
+
+/// `picks` in their order as tracks: a song of the services by its
+/// details in `streams` (left out without them).
+fn pick_tracks<'a>(picks: &[Pick], streams: &'a HashMap<RemoteId, StreamTrack>) -> Vec<PickTrack<'a>> {
+    picks
+        .iter()
+        .filter_map(|p| match &p.item {
+            Item::Track(id) => Some(PickTrack::Library(*id)),
+            Item::Stream(r) => streams.get(r).map(PickTrack::Stream),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A home mix of library tracks and songs of the services (the
+    /// daylist's new ones) gives both, in its order, for its download and
+    /// its queue; a song without its details is left out.
+    #[test]
+    fn a_mixed_home_mix_gives_its_songs_of_the_services_too() {
+        use nikgob_core::streaming::Service;
+        let (a, b) = (TrackId::new(), TrackId::new());
+        let new = StreamTrack::new(RemoteId::new(Service::Youtube, "new"), "New");
+        let gone = RemoteId::new(Service::Youtube, "gone");
+        let pick = |item| Pick { item, reason: Reason::Random };
+        let picks = vec![pick(Item::Track(a)), pick(Item::Stream(new.id.clone())), pick(Item::Stream(gone)), pick(Item::Track(b))];
+        let streams = HashMap::from([(new.id.clone(), new.clone())]);
+        assert_eq!(pick_tracks(&picks, &streams), vec![PickTrack::Library(a), PickTrack::Stream(&new), PickTrack::Library(b)]);
+        assert!(pick_tracks(&[], &streams).is_empty());
+    }
 
     /// «Твой микс» and the daylist kept for the day are picked again once
     /// a later pass found new music (not under «Только скачанное», where

@@ -1,7 +1,7 @@
 //! The supporting pane: Текст | Инфо (md3e-player.md §2.4).
 
 use egui::{Rect, Ui};
-use nikgob_view::{Command, QueueEntry, TrackId, TrackInfo, TrackRow, ViewState};
+use nikgob_view::{Command, QueueEntry, Route, TrackId, TrackInfo, TrackRow, ViewState};
 
 use super::{
     PaneTab,
@@ -92,15 +92,39 @@ pub fn show(
     PaneOutput { closed, configure_lyrics }
 }
 
-/// A queue row: cover, title and artist; a guest of «✦ С дополнением»
-/// has ✦ before its artist.
-fn queue_item<'a>(t: &'a TrackRow, guest: bool, salt: impl egui::AsId) -> ListItem<'a> {
+/// A queue row: cover, title, the artists and the album, each a link to
+/// its page as in a track row (the pages they open, by link); a guest of
+/// «✦ С дополнением» has ✦ before its artist.
+fn queue_item<'a>(t: &'a TrackRow, guest: bool, salt: impl egui::AsId) -> (ListItem<'a>, Vec<Route>) {
     let uri = t.cover.as_ref().map(|c| c.uri());
-    let artist = if guest { format!("{GUEST_MARK} {}", t.artist) } else { t.artist.clone() };
-    ListItem::new(&t.title)
-        .supporting(artist)
+    let (line, links, routes) = queue_line(t, guest);
+    let item = ListItem::new(&t.title)
+        .supporting(line)
+        .supporting_links(links)
         .leading(Leading::Image(uri, Icon::MusicNote))
-        .id_salt(salt)
+        .id_salt(salt);
+    (item, routes)
+}
+
+/// The second line of a queue row ([`queue_item`]) with its links.
+fn queue_line(t: &TrackRow, guest: bool) -> (String, Vec<std::ops::Range<usize>>, Vec<Route>) {
+    let mut line = t.artist.clone();
+    let (mut links, mut routes) = super::artist_links::library_spans(&t.artists, &t.artist);
+    if let Some(a) = &t.album {
+        let at = super::artist_links::append_source(&mut line, a);
+        if let Some(r) = t.release_id {
+            links.push(at);
+            routes.push(Route::Release(r));
+        }
+    }
+    if guest {
+        let mark = format!("{GUEST_MARK} ");
+        line.insert_str(0, &mark);
+        for l in &mut links {
+            *l = l.start + mark.len()..l.end + mark.len();
+        }
+    }
+    (line, links, routes)
 }
 
 /// The mark of a guest of «✦ С дополнением» in its queue row.
@@ -185,7 +209,8 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, state: &ViewState, chrom
             ui.multiply_opacity(0.6);
         }
         let mut more = None;
-        let o = queue_item(&e.track, e.guest, ("q", entry))
+        let (item, links) = queue_item(&e.track, e.guest, ("q", entry));
+        let o = item
             .muted(played)
             .drag_handle(true)
             .trailing(|ui| {
@@ -206,6 +231,9 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, state: &ViewState, chrom
                 more = Some(ui.add(IconButton::new(Icon::MoreVert).size(Size::Xs).tooltip("Ещё").id_salt(("q-more", entry))));
             })
             .show(ui);
+        if let Some(r) = o.link_clicked.and_then(|k| links.get(k).cloned()) {
+            chrome.nav = Some(r);
+        }
         if o.response.double_clicked() {
             out.push(Command::PlayQueueEntry(entry));
         }
@@ -302,6 +330,7 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             let mut dragging = None;
             let mut dropped = None;
             let mut current_pick = None;
+            let mut current_link = None;
             // The row dragged last frame stays laid out wherever it is.
             let drag_key = ui.id().with("q-dragged");
             let held = ui.ctx().data(|d| d.get_temp::<u64>(drag_key));
@@ -328,7 +357,9 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                 let top = ui.cursor().min.y;
                 common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
                 ui.add_space(4.0);
-                let o = queue_item(t, q.current_guest, "q-current").selected(true).show(ui);
+                let (item, links) = queue_item(t, q.current_guest, "q-current");
+                let o = item.selected(true).show(ui);
+                current_link = o.link_clicked.and_then(|k| links.get(k).cloned());
                 if let Some(why) = &q.current_why {
                     o.response.clone().md3_tooltip(why, None);
                 }
@@ -370,6 +401,9 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             // What comes after a queue that ends: autoplay.
             if q.radio.is_none() {
                 autoplay_block(ui, state, chrome, out);
+            }
+            if let Some(r) = current_link {
+                chrome.nav = Some(r);
             }
             if let Some((act, t)) = current_pick {
                 let at = Rect::from_center_size(ui.ctx().pointer_latest_pos().unwrap_or_default(), egui::vec2(1.0, 1.0));
@@ -927,6 +961,38 @@ fn file_uri(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A queue row says the album after the artists, a link to its page
+    /// when the library has it; a guest's ✦ before them moves no link off
+    /// its name.
+    #[test]
+    fn a_queue_row_links_its_album() {
+        let r = nikgob_view::ReleaseId::new();
+        let t = TrackRow {
+            id: nikgob_view::TrackId::new(),
+            title: "Звезда".into(),
+            artist: "Кино".into(),
+            album: Some("Группа крови".into()),
+            release_id: Some(r),
+            artists: Default::default(),
+            disc_no: 1,
+            track_no: 1,
+            duration: None,
+            quality: None,
+            source: None,
+            has_local: true,
+            liked: false,
+            cover: None,
+            clip: false,
+            in_library: true,
+        };
+        for guest in [false, true] {
+            let (line, links, routes) = queue_line(&t, guest);
+            assert_eq!(&line[links.last().unwrap().clone()], "Группа крови", "{line}");
+            assert_eq!(routes.last(), Some(&Route::Release(r)));
+            assert_eq!(line.starts_with(GUEST_MARK), guest);
+        }
+    }
 
     #[cfg(unix)]
     #[test]

@@ -880,7 +880,7 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
             changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<TrackRow>>| {
                 if let Some(old) = old {
                     for (k, t) in old.iter().enumerate() {
-                        let _ = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), false, None, ("again", column * SONG_LINES + k));
+                        let _ = cards::song_row(ui, song_cell(cell, k), &t.title, &again_line(t).0, t.cover.as_ref().map(|c| c.uri()), false, None, ("again", column * SONG_LINES + k));
                     }
                     return;
                 }
@@ -888,8 +888,8 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
                     let i = column * SONG_LINES + k;
                     let Some(t) = rows.get(i) else { break };
                     let playing = state.player.current.as_ref().is_some_and(|c| c.id == t.id);
-                    let (links, routes) = crate::screens::artist_links::library_spans(&t.artists, &t.artist);
-                    let o = cards::song_row_linked(ui, song_cell(cell, k), &t.title, &t.artist, &links, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
+                    let (line, links, routes) = again_line(t);
+                    let o = cards::song_row_linked(ui, song_cell(cell, k), &t.title, &line, &links, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
                     if let Some(r) = o.link.and_then(|k| routes.get(k).cloned()) {
                         nav = Some(r);
                     }
@@ -1068,7 +1068,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
             changes.card(ui, column, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&Vec<StreamTrackRow>>| {
                 if let Some(old) = old {
                     for (k, t) in old.iter().enumerate() {
-                        let _ = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover_url.clone(), false, Some(t.liked), ("new", column * SONG_LINES + k));
+                        let _ = cards::song_row(ui, song_cell(cell, k), &t.title, &new_line(t).0, t.cover_url.clone(), false, Some(t.liked), ("new", column * SONG_LINES + k));
                     }
                     return;
                 }
@@ -1076,8 +1076,8 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                     let i = column * SONG_LINES + k;
                     let Some(t) = rows.get(i) else { break };
                     let playing = state.player.current.as_ref().is_some_and(|c| t.track == Some(c.id));
-                    let (links, routes) = crate::screens::artist_links::stream_spans(&t.artists, &t.artist);
-                    let o = cards::song_row_linked(ui, song_cell(cell, k), &t.title, &t.artist, &links, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
+                    let (line, links, routes) = new_line(t);
+                    let o = cards::song_row_linked(ui, song_cell(cell, k), &t.title, &line, &links, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
                     if let Some(r) = o.link.and_then(|k| routes.get(k).cloned()) {
                         nav = Some(r);
                     }
@@ -1197,3 +1197,33 @@ pub fn new_releases(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: 
 
 #[cfg(test)]
 mod tests;
+
+/// The second line of a song of «Слушать снова»: its artists, then its
+/// album, each a link to its page (as in a track row).
+fn again_line(t: &TrackRow) -> (String, Vec<std::ops::Range<usize>>, Vec<Route>) {
+    let mut line = t.artist.clone();
+    let (mut links, mut routes) = crate::screens::artist_links::library_spans(&t.artists, &t.artist);
+    if let Some(a) = &t.album {
+        let at = crate::screens::artist_links::append_source(&mut line, a);
+        if let Some(r) = t.release_id {
+            links.push(at);
+            routes.push(Route::Release(r));
+        }
+    }
+    (line, links, routes)
+}
+
+/// [`again_line`] of a song of the services («Новое для тебя»): its album
+/// opens in the service.
+fn new_line(t: &StreamTrackRow) -> (String, Vec<std::ops::Range<usize>>, Vec<Route>) {
+    let mut line = t.artist.clone();
+    let (mut links, mut routes) = crate::screens::artist_links::stream_spans(&t.artists, &t.artist);
+    if let Some(a) = &t.album {
+        let at = crate::screens::artist_links::append_source(&mut line, a);
+        if let Some(id) = &t.album_id {
+            links.push(at);
+            routes.push(Route::Stream(StreamPage::Album(id.clone())));
+        }
+    }
+    (line, links, routes)
+}
