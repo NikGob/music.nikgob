@@ -1,4 +1,4 @@
-//! Files that hold another song's audio (docs/TODO.md 32).
+//! Files that hold another song's audio.
 //!
 //! * The background check: one thread at the lowest priority hears each
 //!   local file that has no stored print yet (its first 120 s only), one at

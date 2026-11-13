@@ -6,7 +6,7 @@
 //! title match — and the hit is attached to the same track id as one more
 //! source. A hit must be the same song of the same artist (any spelling
 //! of its name): never a cover, a karaoke, a remix or another performer's
-//! version (docs/stage4.5.md, «Известные проблемы стриминга YouTube»); no
+//! version; no
 //! such hit is an honest «не нашёл» with «Найти песню…», not a cover. Misses are not asked again for days (kept in the library's
 //! cache, so a restart does not ask either). The lookups ask one category
 //! at a time: songs, videos only when no song fits (2 requests instead of

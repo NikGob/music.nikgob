@@ -1,4 +1,4 @@
-//! Syllable timing on the bench set (docs/lyrics-align.md, «Syllables»).
+//! Syllable timing on the bench set.
 //!
 //! `cargo run -p nikgob-align --release --example syllables -- <models dir> <jobs.json> <cache dir> [name filter]`
 //!

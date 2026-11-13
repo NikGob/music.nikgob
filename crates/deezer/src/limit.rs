@@ -5,7 +5,7 @@
 //! error (`error.code 4`) the whole service pauses for [`QUOTA_PAUSE`]:
 //! every call fails at once with [`StreamError::RateLimited`] meanwhile and
 //! [`Gate::paused_until`] says until when, which is what the runtime's
-//! automatic re-asks wait for (docs/stage3.md §9).
+//! automatic re-asks wait for.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};

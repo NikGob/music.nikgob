@@ -1,5 +1,5 @@
 //! The floating player: a vibrant floating toolbar with cover, title,
-//! transport, progress and quick toggles (md3e-player.md §2.3).
+//! transport, progress and quick toggles.
 
 use std::time::Duration;
 

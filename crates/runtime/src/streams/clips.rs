@@ -1,5 +1,4 @@
-//! Liked YouTube clips become their songs (docs/stage3.md §7 «Клипы в
-//! лайках»).
+//! Liked YouTube clips become their songs.
 //!
 //! A video liked on YouTube (an official clip: intro, outro, another mix)
 //! is a poor library track: no album, no cover, lyrics that drift. Its song

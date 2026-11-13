@@ -1,4 +1,4 @@
-//! Split button (components.md "Split button"): a leading action button and
+//! Split button: a leading action button and
 //! a trailing menu button, 2 dp apart. Outer corners are full, the inner
 //! ones small (XS-M 4, L 8, XL 12); when the menu opens the trailing button
 //! turns fully round and its chevron rotates.

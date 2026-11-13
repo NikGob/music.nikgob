@@ -1,4 +1,4 @@
-//! The graph of similar music in the runtime (docs/recs-graph.md) over a
+//! The graph of similar music in the runtime over a
 //! library of files only, no history at all: the background pass asks the
 //! fake services (YouTube Music's radio of each track after a song search,
 //! the similar artists of YouTube Music and Deezer after an artist search)

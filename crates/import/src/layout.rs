@@ -1,4 +1,4 @@
-//! Folder layout of the managed library (PLAN section 5):
+//! Folder layout of the managed library:
 //!
 //! ```text
 //! Music/<AlbumArtist>/<YYYY - Album>/<NN - Title>.opus      (multi-disc: <D-NN - Title>)

@@ -476,7 +476,7 @@ impl Spotify {
         for slot in saved.slots.clone() {
             if slot == Slot::Shared {
                 // The shared public app is not used any more: its grant is
-                // deleted, quietly (docs/stage3.md §0, 2026-10-17).
+                // deleted, quietly.
                 self.store.clear(Slot::Shared);
                 log::info!("spotify: the shared Web API app's saved grant is removed (no longer used)");
                 continue;
@@ -1422,7 +1422,7 @@ impl Spotify {
             .collect())
     }
 
-    /// One feed of suggestions (docs/stage4.md §12.3): the user's top
+    /// One feed of suggestions: the user's top
     /// tracks or artists of about a month or half a year, or the recently
     /// played. A token from before `user-top-read` was asked gets a 403 on
     /// the tops: that is [`Suggestions::needs_reconnect`], not an error.
@@ -1887,7 +1887,7 @@ impl StreamService for Spotify {
     }
 
     fn save_audio(&self, _id: &str, _dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>> {
-        // Never downloaded from Spotify (docs/stage3.md §0).
+        // Never downloaded from Spotify.
         Box::pin(async { Err(StreamError::Unsupported) })
     }
 

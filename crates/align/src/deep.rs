@@ -1,5 +1,4 @@
-//! Deep mode («Глубокое создание субтитров», docs/lyrics-align.md, «Deep
-//! mode»): what the player does beyond the normal timing when the user
+//! Deep mode («Глубокое создание субтитров»): what the player does beyond the normal timing when the user
 //! turns it on: a stronger voice separator, the song heard twice over
 //! shifted windows, and a second aligner for a language whose letters are
 //! heard with the first one's or instead of them. Only the word timing
@@ -68,8 +67,7 @@ impl Deep {
         weight: 0.5,
     };
 
-    /// What the setting turns on: what measured better (docs/lyrics-align.md,
-    /// «Deep mode»).
+    /// What the setting turns on: what measured better.
     pub const CHOSEN: Self = Self { separator: true, level_russian: true, russian: Second::Fused, english: Second::Fused, ..Self::OFF };
 
     /// The second aligner of aligner `main`, and how it is used.

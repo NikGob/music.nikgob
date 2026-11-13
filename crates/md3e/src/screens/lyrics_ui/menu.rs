@@ -1,4 +1,4 @@
-//! The control's own menu, in every look (docs/lyrics-control.md):
+//! The control's own menu, in every look:
 //! «Автоматически», every source with how its text is timed (picking a
 //! source never needs a window), «Искать текст заново» (every source asked
 //! again, whatever was found before), and «Настройки текста…» until it was

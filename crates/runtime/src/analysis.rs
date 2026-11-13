@@ -1,5 +1,4 @@
-//! Background sound analysis of the library's files (docs/stage4.md §2,
-//! docs/recommendations.md §5).
+//! Background sound analysis of the library's files.
 //!
 //! One thread at the lowest priority, paced by [`crate::quiet`] (it rests
 //! five times what it worked, waits while a game runs, and takes the turn

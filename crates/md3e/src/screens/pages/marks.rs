@@ -1,4 +1,4 @@
-//! «Не нравится и скорость» (Settings → Музыка, TODO 48 and 57): the
+//! «Не нравится и скорость» (Settings → Музыка): the
 //! tracks marked «Не нравится», the artists not to recommend and the tracks
 //! with a speed of their own, each taken back with one button (the
 //! snackbar's «Отменить» puts it back). A part with nothing in it is not

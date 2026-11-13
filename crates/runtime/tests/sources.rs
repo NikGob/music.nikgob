@@ -1,4 +1,4 @@
-//! Stage 4.5 runtime flows (docs/stage4.5.md) on fake download sources:
+//! Stage 4.5 runtime flows on fake download sources:
 //! a wish found in a source other than torrents downloads its file into
 //! the track, the user's order and switches of the sources decide among
 //! offers of one quality, and a copy saved from YouTube keeps its item

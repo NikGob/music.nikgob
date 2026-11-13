@@ -832,7 +832,7 @@ impl Library {
     }
 
     /// The whole tracklist of the library album `release`, as a service has
-    /// it (docs/stage4.md, «Библиотечный альбом знает все свои треки»): the
+    /// it: the
     /// album's id is linked to the release, its tracks the release has no
     /// row for become stream tracks of it (outside the library until liked
     /// or downloaded, like «Хочу скачать» makes them), a track of the
@@ -842,8 +842,7 @@ impl Library {
     /// its track count, and a title in Latin letters takes the album's
     /// Cyrillic. Every place gets a row of this release: a song whose
     /// track is on another album the library has files of (the deluxe
-    /// edition) gets one here, which the stream moves to (docs/stage4.md
-    /// §12.13). An album id linked to another release with tracks is left
+    /// edition) gets one here, which the stream moves to. An album id linked to another release with tracks is left
     /// alone; one linked to an empty release is taken over. A song the
     /// user deleted from the album (`unwanted`) gets no line again.
     /// Returns how many tracks were added.

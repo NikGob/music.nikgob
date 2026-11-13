@@ -1,4 +1,4 @@
-//! Загрузки → «Хочу скачать» (docs/stage3.md §3.5, §3.7): stream tracks on
+//! Загрузки → «Хочу скачать»: stream tracks on
 //! their way to a file (likes, «Скачать», imports). Filter chips by status
 //! (their counts are the only numbers said), the grouping with «Скачать
 //! все» and «Искать снова» on its line, the list grouped by album or by

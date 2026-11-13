@@ -1,4 +1,4 @@
-//! «Не нравится» and «Не рекомендовать исполнителя» (docs/TODO.md §10):
+//! «Не нравится» and «Не рекомендовать исполнителя»:
 //! the `rec_feedback` marks of tracks and artists, kept here as sets for
 //! playback and the view.
 //!

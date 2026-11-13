@@ -1,4 +1,4 @@
-//! Trash: nothing is deleted at once (PLAN section 6, "Удаление").
+//! Trash: nothing is deleted at once.
 //!
 //! Files move to `Trash/<YYYY-MM-DD> <name>`; the library marks the source as
 //! trashed; [`trash_purge`] removes both after the retention period. A track
@@ -18,7 +18,7 @@ use crate::fsutil::{
 };
 use crate::sanitize::{long_path, sanitize_component, truncate_chars};
 
-/// Retention of trashed files, days (PLAN: 30).
+/// Retention of trashed files, days.
 pub const TRASH_DAYS: u32 = 30;
 
 /// Moves `file` into `trash_dir` with a date prefix; returns the new location.

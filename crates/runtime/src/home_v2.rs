@@ -1,4 +1,4 @@
-//! Главная v2 (home-v2 spec §3–§8, §15): the parts read straight from the
+//! Главная v2: the parts read straight from the
 //! library at each visit — the shortcuts, «Слушать снова», «Из твоей
 //! библиотеки» and the worlds of the card at the top. The mixes and the
 //! tiles of the day come from the recommendations (`recs`).
@@ -667,8 +667,7 @@ fn listen_again(lib: &Library, f: &Facts, visit: &Visit, exposure: &Exposure, li
         if f.last_start.get(&t).is_some_and(|ts| visit.now - ts < days * DAY_MS) {
             continue;
         }
-        // What was on repeat lately weighs more (the hot affinity, recs-v2
-        // §4.2: it tells the songs started again the next day better).
+        // What was on repeat lately weighs more (the hot affinity: it tells the songs started again the next day better).
         let hot = (f.hot.get(&t).copied().unwrap_or(0.0) / 2.0).tanh();
         let mut s = if loved { 3.0 } else { 0.0 } + (n as f32).sqrt() + 0.5 * done as f32 + AGAIN_HOT * hot;
         if night_now && n > 0 {

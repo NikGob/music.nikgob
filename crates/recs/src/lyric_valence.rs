@@ -1,4 +1,4 @@
-//! A soft lyrical axis of a song's mood (docs/recommendations.md §6): the
+//! A soft lyrical axis of a song's mood: the
 //! sign of the feeling of its words, `lyric_valence ∈ [-1, +1]`, from a
 //! small local lexicon, so a sad text over a fast dancing beat is told from
 //! a really happy song.

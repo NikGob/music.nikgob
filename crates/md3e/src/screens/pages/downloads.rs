@@ -1,4 +1,4 @@
-//! Загрузки (md3e-player.md §3.7): active jobs with wavy progress, the
+//! Загрузки: active jobs with wavy progress, the
 //! "Подтверди" queue, seeding and history.
 
 use egui::{Rect, Stroke, Ui, vec2};

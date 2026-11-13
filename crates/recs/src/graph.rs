@@ -1,4 +1,4 @@
-//! The graph of similar music (docs/recs-graph.md, TODO 17): what stands in
+//! The graph of similar music: what stands in
 //! for collaborative filtering in a player of one user. Two graphs, kept
 //! apart:
 //!
@@ -12,8 +12,7 @@
 //!   keeps the best [`TRACK_TOP`] of each track, artist → artist the best
 //!   [`ARTIST_TOP`] of each artist, with the likeness of the artists' tags
 //!   ([`TAG_WEIGHT`] of their IDF cosine) joining the lists.
-//! * **Bridges through the music the library lacks** (docs/recommendations.md
-//!   §1.3): two of the library's tracks (or artists) whose lists name the
+//! * **Bridges through the music the library lacks**: two of the library's tracks (or artists) whose lists name the
 //!   same songs (artists) the library does not hold are linked by them —
 //!   co-citation `A → X ← B` — each shared node weighing as Adamic–Adar
 //!   says, `1 / ln(2 + deg X)` (a hit every list names says little, a

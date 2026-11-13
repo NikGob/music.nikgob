@@ -1,5 +1,5 @@
 //! One-time repair of albums a torrent brought in pieces
-//! (`torrent_identity_repair.v1`, docs/stage4.md §12.4).
+//! (`torrent_identity_repair.v1`).
 //!
 //! Before folders were identified as albums, each file of a torrent was
 //! looked up alone, and the confirm queue offered strangers' recordings of
@@ -20,7 +20,7 @@
 //! * a «Хочу скачать» album whose tracks now all have files is «Скачано».
 //!
 //! With `move_files` the files follow their tracks (tags rewritten, moved
-//! where PLAN §5 puts them, through [`Importer::retag`]); without it only
+//! where the library layout puts them, through [`Importer::retag`]); without it only
 //! the database changes (a dry run on a copy of a library).
 
 use std::collections::{BTreeMap, HashSet};
@@ -528,7 +528,7 @@ impl Importer {
 
     /// Rewrites the tags of a track's file from the library (its title,
     /// album, place and the album's count; it stays on its album) and
-    /// moves it where PLAN §5 puts it. Returns whether the file moved.
+    /// moves it where the library layout puts it. Returns whether the file moved.
     pub fn place_track_file(&self, track: TrackId) -> Result<bool> {
         let lib = self.library().clone();
         self.place_file(&lib, track)

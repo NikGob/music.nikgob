@@ -1,4 +1,4 @@
-//! Download sources (docs/stage4.5.md): torrents through an indexer,
+//! Download sources: torrents through an indexer,
 //! khinsider, free FLAC services, Soulseek later. Each is a [`Source`]:
 //! `search` for a track or an album gives [`Offer`]s (format, quality,
 //! size, source, availability), `fetch` brings one into the downloads
@@ -45,7 +45,7 @@ pub enum SourceKey {
 
 impl SourceKey {
     /// Every key, in the default order of «Источники»: the cheap and
-    /// reliable first, the free services last (the poll of docs/stage4.5.md).
+    /// reliable first, the free services last.
     pub const ALL: [Self; 8] = [
         Self::Torrents,
         Self::Khinsider,
@@ -241,7 +241,7 @@ pub struct Offer {
 }
 
 impl Offer {
-    /// The quality policy (PLAN §6): Hi-Res FLAC > CD FLAC > Opus ≥ AAC 256
+    /// The quality policy: Hi-Res FLAC > CD FLAC > Opus ≥ AAC 256
     /// ≈ MP3 320 > MP3 V0 > other; a format nobody named counts as a
     /// mediocre lossy file. A YouTube copy is below all of them
     /// ([`score::SAVED_STREAM`]).

@@ -1,4 +1,4 @@
-//! The sound analysis of stream-only tracks (docs/stage4.md §2) on the fake
+//! The sound analysis of stream-only tracks on the fake
 //! services: a played YouTube track is analysed from the disk cache without
 //! a request; liked tracks are downloaded and analysed in the background one
 //! at a time, a gap apart and within the daily cap (kept over a restart);

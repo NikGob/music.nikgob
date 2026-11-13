@@ -1,4 +1,4 @@
-//! «✦ С дополнением» in the runtime (docs/recommendations.md §4): a
+//! «✦ С дополнением» in the runtime: a
 //! playlist with its chip on plays as it is, shuffled or not, with a new
 //! song after every three of its own, queued only a few ahead; a skip of a
 //! guest or the chip turned off takes the guests out of the queue, never

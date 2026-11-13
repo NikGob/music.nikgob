@@ -1,4 +1,4 @@
-//! The live stage of Settings (settings v2 §2): the real Now Playing, its
+//! The live stage of Settings: the real Now Playing, its
 //! lyrics, the top of Главная or an album's header, drawn a second time by
 //! the same painters, smaller, under the settings being shown. Not a
 //! picture and not a mock-up: the same functions, called again into a layer
@@ -245,7 +245,7 @@ impl Scene {
 }
 
 /// What the stage acts out by itself, on a loop, for what cannot be seen
-/// without doing something (settings v2 §2.3, «Сценки»).
+/// without doing something.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Script {
     #[default]

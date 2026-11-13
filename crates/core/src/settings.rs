@@ -37,8 +37,7 @@ pub struct Settings {
     pub soulseek: SoulseekSettings,
 }
 
-/// Where the download sources other than the indexer live
-/// (docs/stage4.5.md). Public instances, no accounts. Qobuz and Tidal
+/// Where the download sources other than the indexer live. Public instances, no accounts. Qobuz and Tidal
 /// instance lists live in `sources.toml` beside this file (written once
 /// with the built-in addresses). A non-empty list here is copied into that
 /// file only when it is first created.
@@ -78,7 +77,7 @@ impl fmt::Debug for SourcesSettings {
     }
 }
 
-/// Where Soulseek runs (docs/stage4.5.md, poll answer 3).
+/// Where Soulseek runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SoulseekMode {
@@ -149,7 +148,7 @@ impl fmt::Debug for SoulseekSettings {
     }
 }
 
-/// Secrets of the streaming services (docs/stage3.md §0). Tokens and
+/// Secrets of the streaming services. Tokens and
 /// sessions live in each service's own cache in the data folder; this holds
 /// only what the user types in. Never copied into the prefs JSON or logs.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

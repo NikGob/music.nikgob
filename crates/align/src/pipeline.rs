@@ -532,7 +532,7 @@ fn percentile(v: &[f32], q: f32) -> f32 {
     s.get(((s.len() as f32 - 1.0) * q).round() as usize).copied().unwrap_or(0.0)
 }
 
-/// The aligner for a language (docs/lyrics-align.md, «Models chosen»).
+/// The aligner for a language.
 pub fn aligner_for(lang: Lang) -> Option<ModelId> {
     match lang {
         Lang::Russian => Some(ModelId::AlignerRu),
@@ -665,7 +665,7 @@ impl<T> OneLoaded<T> {
 }
 
 /// What deep mode's separator takes of the card while it separates
-/// (5.4 GB measured, docs/lyrics-align.md, «Time and memory»), with room
+/// (5.4 GB measured), with room
 /// left for what is drawn meanwhile.
 const ROFORMER_CARD: u64 = 5_800 << 20;
 
@@ -1098,7 +1098,7 @@ impl Aligner {
         self.runtime()?;
         if self.whisper.is_none() {
             // On the CPU: DirectML's int8 kernels turn this export's
-            // decoder into noise (docs/lyrics-align.md).
+            // decoder into noise.
             self.whisper = Some(Whisper::load(&self.catalog.path(ModelId::Whisper), Device::Cpu, self.threads.max(4))?);
         }
         let spans = whisper::stretches(&prep.voiced_tenths());
@@ -1181,7 +1181,7 @@ impl Aligner {
 /// (Until `align-6` they were cut by the last window's own frames a
 /// second, a little under 50 for a short last window, which stretched the
 /// whole song's times by up to 1 %: «World's Smallest Violin» heard 0.4 s
-/// late at three minutes; docs/lyrics-align.md, «Deep mode».)
+/// late at three minutes.)
 pub fn emissions(model: &mut Model, voice: &[f32], blank: usize, shift: usize, progress: &mut dyn FnMut(f32) -> bool) -> Result<Emissions, Error> {
     emissions_with(&mut |x| model.run_f32_shaped(vec![1, x.len()], x), voice, blank, shift, progress)
 }

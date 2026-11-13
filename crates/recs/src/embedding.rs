@@ -1,4 +1,4 @@
-//! A trained model of sound beside bliss (docs/recommendations.md §5): a
+//! A trained model of sound beside bliss: a
 //! Discogs-EffNet embedding hears the genre and the style bliss does not.
 //!
 //! * [`SoundModel`]: mono PCM of one window at the model's rate in, the

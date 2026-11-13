@@ -1,4 +1,4 @@
-//! Lossless -> Ogg Opus conversion (PLAN section 6, step 5).
+//! Lossless -> Ogg Opus conversion.
 //!
 //! [`RopusEncoder`] is the default: an in-process encoder built on `ropus`, the
 //! pure-Rust port of libopus, with the Ogg container written here (RFC 7845):

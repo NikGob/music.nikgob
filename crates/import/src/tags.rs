@@ -1,4 +1,4 @@
-//! Reading and writing the unified tag set (PLAN section 6, steps 1 and 6) with `lofty`.
+//! Reading and writing the unified tag set with `lofty`.
 //!
 //! Standard fields go through lofty's generic [`Tag`]. Vorbis comments (Opus, Ogg
 //! Vorbis, FLAC) are written directly with their literal keys. The one field lofty

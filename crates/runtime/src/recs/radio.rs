@@ -1,10 +1,10 @@
-//! The radio queue (docs/stage4.md §4): «Радио по треку», an artist's
+//! The radio queue: «Радио по треку», an artist's
 //! radio and the endless mixes (moods, style mixes, «Новое для тебя», the
 //! daylist) play as a queue that extends itself. The daylist starts with
 //! the picks the home shows ([`Worker::start_radio_picked`]).
 //!
-//! * The queue holds the engine's [`Engine`] state and a short live buffer
-//!   (recs-v2.0 §3.1): when [`EXTEND_AT`] tracks or fewer are left, it is
+//! * The queue holds the engine's [`Engine`] state and a short live buffer:
+//!   when [`EXTEND_AT`] tracks or fewer are left, it is
 //!   filled up to [`EXTEND_BY`] ahead, picked on the picks' thread from
 //!   the current [`super::Snapshot`] (playback goes on meanwhile; two or
 //!   three ahead are enough for the preload and a gapless step); what

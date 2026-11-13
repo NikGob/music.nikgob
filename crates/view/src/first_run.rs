@@ -1,4 +1,4 @@
-//! The first run (TODO 51, 57): whether it is due, and what its choices
+//! The first run: whether it is due, and what its choices
 //! write into the prefs. The page itself is the design system's.
 //!
 //! Its choices only ever set what the app already honours: the services'

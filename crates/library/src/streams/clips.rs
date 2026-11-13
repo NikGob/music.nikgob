@@ -1,5 +1,4 @@
-//! Liked YouTube music videos and their songs (docs/stage3.md §7, «Клипы
-//! в лайках»).
+//! Liked YouTube music videos and their songs.
 //!
 //! A clip liked on YouTube plays its video: an intro, an outro, another
 //! mix than the record, no album and no cover. When YouTube Music has the

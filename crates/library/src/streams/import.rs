@@ -1,5 +1,5 @@
 //! What the cold-start imports and the sync of the services need from the
-//! library (docs/stage3.md §3.6): listening history without duplicates,
+//! library: listening history without duplicates,
 //! "seen" tracks, keys that make a second import of the same file a no-op,
 //! the tracks still waiting for their metadata, and a small cache.
 //!
@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(lib.cache_get("disco.x").unwrap(), Some((42, "[1|2]".to_owned())));
     }
 
-    /// TODO 18: videos that are no music stayed in «Save» of an old
+    /// Videos that are no music stayed in «Save» of an old
     /// Takeout import. Only the entries of an imported playlist with
     /// nothing that says they are music go, once; the tracks stay.
     #[test]

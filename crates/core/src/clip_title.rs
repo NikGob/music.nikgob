@@ -3,7 +3,7 @@
 //! A clip's title carries what clips add: «Official Video», «MV», «Music
 //! Video», «(Lyrics)», «【MV】», a leading «Artist - », a trailing «/ Artist».
 //! [`song_titles`] gives the titles its song may have (the YouTube Music
-//! counterpart search, docs/stage3.md §7 «Клипы в лайках»); [`display_title`]
+//! counterpart search); [`display_title`]
 //! is the one a clip without its song is shown with («AIYOU - Eve Music
 //! Video» → «AIYOU»).
 //!
@@ -21,7 +21,7 @@
 //!
 //! A track title may be dual the same way («夏子 - Natsuko»): one song with
 //! or without its romanization or translation is still the song
-//! ([`same_dual_title`], docs/stage3.md §7 «Одна песня — один TrackId»).
+//! ([`same_dual_title`]).
 
 /// Words a bracket or a tail may consist of and still be what clips add.
 const CLIP_NOISE: &[&str] = &[

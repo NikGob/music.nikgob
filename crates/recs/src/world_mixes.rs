@@ -1,4 +1,4 @@
-//! Mixes inside a world (recs-v2 §8): what a world's page offers beside its
+//! Mixes inside a world: what a world's page offers beside its
 //! albums, built when the page opens (a few milliseconds, the world's own
 //! tracks only).
 //!
@@ -13,7 +13,7 @@
 //! * **The world's mood** ([`WorldMixKind::Calm`], [`WorldMixKind::Moving`]):
 //!   its calm and its lively side by the energy of its own tracks, each
 //!   from [`MOOD_MIN`] tracks.
-//! * **«В дорогу»** ([`WorldMixKind::Road`], §8.4): from the world's core
+//! * **«В дорогу»** ([`WorldMixKind::Road`]): from the world's core
 //!   (its liked tracks and the ones heard out, else any it has affinity for,
 //!   else all) to what sounds like it in other worlds of the same taste
 //!   profiles, one world a third at most.
@@ -130,7 +130,7 @@ impl Recs<'_> {
         let core: Vec<Vector> = own.iter().copied().filter(|&i| loved(i)).filter_map(|i| m.embedded_at(i).copied()).collect();
         if let Some(centre) = mean(&core) {
             let scale = m.scale().max(1e-3);
-            // The graphs' neighbours of the loved (docs/recs-graph.md): what
+            // The graphs' neighbours of the loved: what
             // other listeners and the user's playlists put beside them.
             let mut linked: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
             for i in own.iter().copied().filter(|&i| loved(i)) {

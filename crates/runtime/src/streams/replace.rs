@@ -1,5 +1,5 @@
 //! «Найти песню…» / «Другая версия…»: a stream track replaced by hand with
-//! the song the user picked (docs/stage3.md §7 «Клипы в лайках»).
+//! the song the user picked.
 //!
 //! * [`Command::FindSong`] opens [`v::FindSongView`] and searches songs
 //!   only (one songs request to YouTube Music, one to Deezer), the merged

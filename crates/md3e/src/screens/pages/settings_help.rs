@@ -460,7 +460,7 @@ fn share_index(s: v::RadioNewShare) -> usize {
 }
 
 impl SettingId {
-    /// The tab the row lives on (settings-v2-concept.md §1.3).
+    /// The tab the row lives on.
     pub fn tab(self) -> usize {
         use SettingId::*;
         use v::presets::Area;
@@ -1517,7 +1517,7 @@ pub fn preset_title(a: v::presets::Area) -> &'static str {
     }
 }
 
-/// What the live stage shows for a row (settings v2 §2.3).
+/// What the live stage shows for a row.
 impl SettingId {
     /// The screen on the stage while the pointer is on the row; `None`: the
     /// one there already (the theme shows on any).

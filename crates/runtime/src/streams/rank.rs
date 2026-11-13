@@ -1,6 +1,5 @@
 //! How well a search hit matches the query: one local score for the rows of
-//! every source, so the merged «Всё» answer reads as one list (docs/stage3.md
-//! §3.2) instead of each service's own order.
+//! every source, so the merged «Всё» answer reads as one list instead of each service's own order.
 //!
 //! * Text is compared normalised: lower case, `ё` → `е`, no diacritics, no
 //!   punctuation, single spaces — without transliteration, so the script of

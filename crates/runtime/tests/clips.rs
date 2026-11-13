@@ -1,5 +1,4 @@
-//! Liked YouTube clips become their songs (docs/stage3.md §7 «Клипы в
-//! лайках»): a new liked clip is stored as its song with the clip's id kept
+//! Liked YouTube clips become their songs: a new liked clip is stored as its song with the clip's id kept
 //! as the like; the clips already in the library are turned into songs in
 //! the background, one at a time, waiting out a rate limit and never asking
 //! twice; a track with a song and its clip plays the song; an unlike goes

@@ -1,5 +1,4 @@
-//! Where a track's lyrics are made from and kept (docs/lyrics-align.md,
-//! «Keeping a text»): the audio timing is made from (the track's file, or
+//! Where a track's lyrics are made from and kept: the audio timing is made from (the track's file, or
 //! a stream fetched for a while when its artist and song are clear), and
 //! «Сохранить текст», which puts the shown text with its timing (a
 //! source's, or the one the player made; none for a plain text) on the

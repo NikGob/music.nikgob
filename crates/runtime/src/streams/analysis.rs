@@ -1,4 +1,4 @@
-//! Sound analysis of stream-only tracks (docs/stage4.md §2): the liked and
+//! Sound analysis of stream-only tracks: the liked and
 //! playlist tracks without a file get their bliss vector from their song on
 //! YouTube Music, stored as [`AnalysisSource::Youtube`] (a file's analysis
 //! always wins, and a file that arrives later is analysed again by the file
@@ -19,7 +19,7 @@
 //!   the library's cache, so a restart does not start over), only while
 //!   YouTube Music is not paused, the periodic network work is not idle and
 //!   nothing waits for its sound (Buffering). A rate limit is not a failure:
-//!   the job waits for the pause to end (docs/stage3.md §9). A real failure
+//!   the job waits for the pause to end. A real failure
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
 //! - **Previews of new music.** When the library's queue is empty, the
@@ -28,10 +28,10 @@
 //!   [`PREVIEW_BYTES`] of the song (about the first minute), its 30 s from
 //!   the 15th second ([`nikgob_recs::preview_windows`]), at most
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
-//!   music is placed by its sound (recs-v2 §11.3). With «Библиотека и
+//!   music is placed by its sound. With «Библиотека и
 //!   превью новых песен» the neural sound model hears the preview too, and
 //!   [`nikgob_recs::VectorIndex::niche_fit`] can tell whether it fits a
-//!   niche before it joins a mix (docs/recommendations.md §5.1.6).
+//!   niche before it joins a mix.
 //! - **The neural sound model** ([`crate::sound_model`]): with «Нейросетевой
 //!   анализ звука» on, the library's stream tracks get its vector from the
 //!   same windows as bliss's.

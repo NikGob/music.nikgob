@@ -1,4 +1,4 @@
-//! Настройки (settings-v2-concept.md): one page, six tabs — Музыка ·
+//! Настройки: one page, six tabs — Музыка ·
 //! Тексты · Вид · Сервисы · Загрузки · Система — and one switch, Просто ·
 //! Подробно (kept in the prefs). «Подробно» shows the same tabs, groups and
 //! rows in the same order, with the rest of the rows between them; a row

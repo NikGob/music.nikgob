@@ -1,4 +1,4 @@
-//! Rebuilds library rows from the files in `Music/` (PLAN section 4: the track
+//! Rebuilds library rows from the files in `Music/` (the track
 //! id and MBIDs live in the file tags, so the database can be recreated).
 //!
 //! Tracks keep the id from `NIKGOB_TRACK_ID`; files without one get a fresh id,

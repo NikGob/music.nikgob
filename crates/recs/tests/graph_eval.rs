@@ -1,5 +1,4 @@
-//! The graph of similar music on synthetic listeners (docs/recs-graph.md
-//! §8): a world of scenes whose sounds and kinds of song collide in pairs
+//! The graph of similar music on synthetic listeners: a world of scenes whose sounds and kinds of song collide in pairs
 //! (Russian rap and Russian rock, two kinds of soundtracks), a collective
 //! graph with noise, partial coverage and songs beyond the library, and
 //! five listeners — files only and no history, files and 20 plays, streams

@@ -31,8 +31,8 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Slot {
-    /// Legacy: the grant of the shared public Web API app, no longer used
-    /// (docs/stage3.md §0, 2026-10-17). Still read from old state files so
+    /// Legacy: the grant of the shared public Web API app, no longer used.
+    /// Still read from old state files so
     /// that the start can delete it ([`crate::Spotify`]'s restore); never
     /// saved or loaded.
     Shared,

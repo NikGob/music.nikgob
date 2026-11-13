@@ -1,5 +1,5 @@
 //! ListenBrainz: open data of its listeners' sessions (the graph of similar
-//! music, docs/recs-graph.md). The labs need no key; the popularity wants
+//! music). The labs need no key; the popularity wants
 //! the user's own free token since autumn 2026 (it answers 401 without
 //! one), sent as `Authorization: Token …` with every request when set.
 //!

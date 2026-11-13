@@ -1,4 +1,4 @@
-//! «Найти качество лучше» of an album (docs/TODO.md 57): an album that
+//! «Найти качество лучше» of an album: an album that
 //! came as MP3, wanted in good quality. A better copy of the album is
 //! looked for through the wishlist's own search (the sources in the user's
 //! order, the ranking, the waits) as an album item that looks for a better

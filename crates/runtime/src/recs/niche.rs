@@ -1,4 +1,4 @@
-//! The top-up of the niches (docs/recommendations.md §1.2): a mix of «Миксы
+//! The top-up of the niches: a mix of «Миксы
 //! для тебя» the library has few songs or artists for
 //! ([`nikgob_recs::open_world::is_niche`]) plays mostly new music, and its
 //! songs seed it.

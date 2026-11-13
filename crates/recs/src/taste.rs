@@ -1,11 +1,11 @@
-//! The taste model (docs/stage4.md §3): what the listening history, the
+//! The taste model: what the listening history, the
 //! likes and the playlists say about every track and artist of the library.
 //!
 //! * **Track affinity**: the sum of event weights, each decayed with a
 //!   45-day half-life from its moment: a complete +1.0, a start that neither
 //!   completed nor was skipped +0.3, a skip in the first 30 s −0.7 (half of
 //!   it from the third early skip running in a playlist or the library: that
-//!   is leafing through, recs-v2 §4.1), a later skip +0.15 times the share
+//!   is leafing through), a later skip +0.15 times the share
 //!   heard (the song was listened to), a repeat (started again within a day
 //!   of completing) +0.5, a playlist entry +1.5 (decayed from when it was
 //!   added); a like is +3, a state without decay, and a song saved in a
@@ -31,7 +31,7 @@
 //!   similarity for tracks without a sound vector.
 //! * **Day parts**: per track, how many plays fell into the morning (6–11),
 //!   the day (11–18), the evening (18–23) and the night (23–6), local time.
-//! * **Service suggestions** (docs/stage4.md §12.3, [`crate::suggest`]): a
+//! * **Service suggestions** ([`crate::suggest`]): a
 //!   track YouTube Music or Spotify suggests gets up to
 //!   [`crate::suggest::SUGGESTED_CAP`] more affinity, fading out over
 //!   [`crate::suggest::SUGGESTION_FADE_MS`] since it was suggested; a
@@ -63,7 +63,7 @@ pub const HALF_LIFE_MS: i64 = 45 * DAY_MS;
 /// The hot affinity halves every this long.
 pub const HOT_HALF_LIFE_MS: i64 = 2 * DAY_MS;
 /// A mix lets a played track rest about this long ([`Taste::lately_at`]
-/// halves in it, recs-v2 §5.3).
+/// halves in it).
 pub const REST_MS: i64 = 36 * HOUR_MS;
 pub const W_COMPLETE: f32 = 1.0;
 pub const W_START_ONLY: f32 = 0.3;

@@ -1,5 +1,4 @@
-//! One-time repairs of the catalog and what they share (docs/stage4.md
-//! §12.4, §12.13): their `meta` marks, a backup before the first write,
+//! One-time repairs of the catalog and what they share: their `meta` marks, a backup before the first write,
 //! the files of torrents, and dropping what a merge emptied.
 //!
 //! A repair ([`Library::repair`]) runs once per library: it counts what it

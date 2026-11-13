@@ -1,4 +1,4 @@
-//! YouTube Music's own suggestions (docs/stage4.md §12.3), read with the
+//! YouTube Music's own suggestions, read with the
 //! user's cookies: the home (`FEmusic_home`), whose «Быстрый выбор» /
 //! «Quick picks» and «Слушать снова» / «Listen again» shelves say what the
 //! user plays, and the history (`FEmusic_history`). The other shelves of the

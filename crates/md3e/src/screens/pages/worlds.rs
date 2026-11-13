@@ -1,5 +1,4 @@
-//! The card at the top of Главная: «Миры» (home-v2 spec §15.3, placement
-//! and hiding §14). A world is a big body of music to travel through and
+//! The card at the top of Главная: «Миры». A world is a big body of music to travel through and
 //! finish: a soundtrack franchise or an artist's discography. A row of
 //! them, paged by its chevrons; the one chosen stands on a stage in the
 //! colours of its own cover — what it is, its name (a link to its page),

@@ -1,5 +1,4 @@
-//! Dislikes, calibrated so they never break the recommendations
-//! (docs/TODO.md §10).
+//! Dislikes, calibrated so they never break the recommendations.
 //!
 //! * A disliked track is out of every pick ([`crate::Taste::blocks`]): that
 //!   is where a dislike weighs strongly.

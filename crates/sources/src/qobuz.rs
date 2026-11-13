@@ -1,4 +1,4 @@
-//! Qobuz through a public Qobuz-DL instance (docs/stage4.5.md §4): the
+//! Qobuz through a public Qobuz-DL instance: the
 //! free FLAC downloader the user found in the spirit of Lucida, with an
 //! open API and no account of ours. `GET /api/get-music?q=` searches
 //! (Qobuz's own catalogue answer: `data.tracks.items`, `data.albums.items`),

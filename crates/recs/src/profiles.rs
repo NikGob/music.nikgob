@@ -1,4 +1,4 @@
-//! Taste profiles (profiles-v1 §3, §5): a profile is the tracks of one
+//! Taste profiles: a profile is the tracks of one
 //! kind of song that sound alike, with a mass of taste. Nothing here names
 //! a language or a genre of anyone's: the kinds are whatever the library
 //! holds, the number of profiles comes from the data.
@@ -1099,7 +1099,7 @@ pub struct SharePlay {
     pub weight: f32,
 }
 
-/// The shares of `k` profiles in `plays` at `now` (profiles-v1 §5.2): a
+/// The shares of `k` profiles in `plays` at `now`: a
 /// background play counts `1 − (1 − w_bg)·p_bg`, each play halving in
 /// `half_days` (none: all time).
 pub fn shares(plays: &[SharePlay], k: usize, w_bg: f32, half_days: Option<i64>, now: UnixMs) -> Vec<f32> {
@@ -1125,8 +1125,7 @@ pub fn background_shares(plays: &[SharePlay], k: usize) -> Vec<f32> {
     sum.into_iter().map(|(s, n)| if n > 0.0 { s / n } else { 0.0 }).collect()
 }
 
-/// The home's cards of each profile (profiles-v1 §5.3 with the user's
-/// decision 1), a calibrated allocation with a floor: each active profile
+/// The home's cards of each profile, a calibrated allocation with a floor: each active profile
 /// (`shares ≥` [`ACTIVE_SHARE`]) one card while the `slots` allow, the
 /// largest shares first; the rest by share, largest remainders, a
 /// background profile (`background`) at most `bg_slots`.

@@ -1,4 +1,4 @@
-//! The listening session (recs-v2 §5.1): what played since the last pause
+//! The listening session: what played since the last pause
 //! of [`SESSION_GAP_MS`] or more, how each ended, and what that says —
 //! the sound to continue (the anchor), the sounds skipped, an album or a
 //! world being listened through, one track on repeat, a run of skips.
@@ -444,7 +444,7 @@ impl Session {
         self.tracks.iter().filter(|p| p.track == track).count()
     }
 
-    /// What the session is (profiles-v1 §4.2): pure in one taste profile
+    /// What the session is: pure in one taste profile
     /// or mixed, by the profiles (`profile` tells a track's) of what was
     /// not skipped early; `None` before a start of a known profile. A
     /// track of another profile picked by hand makes it mixed; two early

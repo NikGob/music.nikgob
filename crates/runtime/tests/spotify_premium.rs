@@ -1,4 +1,4 @@
-//! Spotify needs Premium (docs/stage3.md §0, 2026-10-17): a Spotify that is
+//! Spotify needs Premium: a Spotify that is
 //! not connected is asked nothing at all, while the library's Spotify
 //! tracks still play from YouTube Music; a login that finds no Premium ends
 //! signed out with the message, and the view says Spotify is not usable.

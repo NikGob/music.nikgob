@@ -3,7 +3,7 @@
 //! suffixes), an album without its "Original Soundtrack" words, and the
 //! queries made of them, most specific first.
 //!
-//! Found in the wishes the indexer had nothing for (docs/stage4.5.md):
+//! Found in the wishes the indexer had nothing for:
 //! queries carried every credited artist («Con Fetti Pesto, David Münnich,
 //! Alexx Grimm …») or the UI's «и ещё 1 исполнитель», a title in two
 //! scripts at once («火星人 - Martian»), upload junk («//speed up//»), and

@@ -23,7 +23,7 @@ pub enum ImportError {
     Unsupported(String),
     #[error("library: {0}")]
     Library(#[from] nikgob_library::LibraryError),
-    /// The file holds another song's audio (docs/TODO.md 32): it is not
+    /// The file holds another song's audio: it is not
     /// imported as `title`; `sounds_like` is the song it holds, when known.
     #[error("в файле «{}» другая песня{}", .title, wrong_tail(.sounds_like))]
     WrongAudio {

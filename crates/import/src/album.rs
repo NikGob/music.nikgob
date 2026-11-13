@@ -1,5 +1,4 @@
-//! A downloaded folder is an album, not a pile of files (docs/stage4.md
-//! §12.4).
+//! A downloaded folder is an album, not a pile of files.
 //!
 //! The files of one folder (one disc) are identified together:
 //! * [`Evidence`]: their tags, the folder's name and the torrent's name vote

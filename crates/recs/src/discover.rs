@@ -1,4 +1,4 @@
-//! New music (docs/stage4.md §5).
+//! New music.
 //!
 //! **«Новое для тебя».** The engine picks the seeds ([`Recs::discovery_seeds`]:
 //! [`SEED_TRACKS_MAX`] tracks shared among the taste profiles by their
@@ -21,7 +21,7 @@
 //! its affinity, a little more when the song stood high in the seed's
 //! list; a service suggesting it itself, [`SeedRef::Service`], weighs
 //! [`crate::suggest::SERVICE_VOTE`]), times [`multi_seed`] of the
-//! independent seeds (docs/recommendations.md §1.3: a song two or three
+//! independent seeds (a song two or three
 //! of the user's seeds lead to stands far above a lone answer of one
 //! request; the services' own suggestions count as one), plus
 //! [`NEW_ARTIST_BONUS`] for an
@@ -32,9 +32,9 @@
 //! songs and artists, junk ([`crate::junk`], against the canonical
 //! release among the finds) and songs shown [`IGNORED_AFTER`] times and
 //! never played are out; one song by ISRC once. With the user model
-//! ([`NewScoring`], recs-v2 §11.2) the score adds [`W_REGION_FIT`] times
+//! ([`NewScoring`]) the score adds [`W_REGION_FIT`] times
 //! how well its sound fits a taste profile (its analysed preview, else
-//! half its seed's). A find is a profile's (profiles-v1 §8) when its
+//! half its seed's). A find is a profile's when its
 //! preview has [`PROFILE_MEMBER`] of it and its kind of song — the
 //! language its artist or title tells — is the profile's; one of a
 //! background profile also must not get in the way: no words told, a
@@ -46,8 +46,8 @@
 //! artist, and leaves an artist skipped twice in a month out. The best
 //! [`DISCOVERIES`], spread over the profiles by their shares
 //! ([`crate::regions::spread`]), at most [`PER_ARTIST`] per artist, no
-//! artist twice in a row of three; a larger pool (the open world's,
-//! §1.1) goes on past them with [`POOL_PER_ARTIST`] of an artist at most,
+//! artist twice in a row of three; a larger pool (the open world's)
+//! goes on past them with [`POOL_PER_ARTIST`] of an artist at most,
 //! the first [`DISCOVERIES`] what they were.
 //!
 //! **«Новые релизы».** For the artists with affinity
@@ -80,7 +80,7 @@ pub const PROFILE_MEMBER: f32 = 0.35;
 /// long at least.
 const QUIET_BAND: (f32, f32) = (0.15, 0.7);
 const QUIET_MS: u64 = 120_000;
-/// The weights of the score with the user model (recs-v2 §11.2).
+/// The weights of the score with the user model.
 pub const W_REGION_FIT: f32 = 1.2;
 pub const W_KNOWN_ARTIST: f32 = 0.6;
 pub const W_SKIP_NEW: f32 = 1.5;
@@ -284,7 +284,7 @@ pub struct DiscoveryFilter {
     pub shown: HashMap<String, (u32, bool)>,
 }
 
-/// What scores a discovery beyond its votes (recs-v2 §11.2): the user
+/// What scores a discovery beyond its votes: the user
 /// model, the analysed previews of candidates (raw bliss, by
 /// [`song_key`]), the log of new music heard, the known artists'
 /// affinities (by [`artist_key`], 0…1).

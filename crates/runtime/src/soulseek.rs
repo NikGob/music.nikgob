@@ -1,4 +1,4 @@
-//! The Soulseek source (docs/stage4.5.md, poll answer 3), run from the
+//! The Soulseek source, run from the
 //! `[soulseek]` part of settings.toml: either the embedded client, on a
 //! thread of its own at the lowest priority with a one-thread Tokio
 //! runtime, sharing the library folder read-only; or a remote `nikgob-slsk`

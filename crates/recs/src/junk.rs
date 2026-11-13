@@ -1,4 +1,4 @@
-//! What new music is never proposed (recs-v2 §11.3): the uploads around a
+//! What new music is never proposed: the uploads around a
 //! song that are not the song. Every candidate the services give for
 //! «Новое для тебя», «С новым», a radio's new music and the services'
 //! suggestions passes [`junk`] first; the library is never filtered (a

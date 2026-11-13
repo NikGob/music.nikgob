@@ -1,4 +1,4 @@
-//! «Подтверди» in the database (docs/stage4.md §12.4): what a parked file
+//! «Подтверди» in the database: what a parked file
 //! is offered, kept as json in `confirm_item` so the queue survives a
 //! restart. The file itself is read again when the user answers.
 

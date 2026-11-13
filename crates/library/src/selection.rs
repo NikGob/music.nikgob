@@ -1,5 +1,5 @@
 //! What the user chose of an album, apart from what the album is (tables
-//! `release_selection`, `release_track_selection`; docs/TODO.md 57).
+//! `release_selection`, `release_track_selection`).
 //!
 //! An album's catalog (its page's rows and holes) says what the album is.
 //! The user's songs of it («Мои треки») are its rows that are library

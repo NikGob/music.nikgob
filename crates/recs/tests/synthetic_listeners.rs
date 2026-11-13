@@ -1,4 +1,4 @@
-//! Synthetic listeners (profiles-v1 §2.4, `scripts/synth.py`): users unlike
+//! Synthetic listeners: users unlike
 //! the real one, the truth known by construction. The general method finds
 //! about as many taste profiles as there are kinds of songs played, tells
 //! the background sessions apart, and keeps the four ways of listening in
@@ -451,8 +451,7 @@ fn background_mixed() {
     assert!(h.background.iter().flatten().flatten().all(|&i| l.style_of[i] == 0));
 }
 
-/// «Миксы для тебя» of the same synthetic listeners (profiles-v1 §15 P5,
-/// recs-v2 §15 phase 3): sensible for each kind of user.
+/// «Миксы для тебя» of the same synthetic listeners: sensible for each kind of user.
 mod mixes {
     use std::collections::{HashMap, HashSet};
 

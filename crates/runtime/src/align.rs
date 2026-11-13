@@ -1,4 +1,4 @@
-//! The lyrics aligner's thread (docs/lyrics-align.md): it checks the
+//! The lyrics aligner's thread: it checks the
 //! playing track's texts against its recording as soon as their lookups
 //! settle, makes the timing the user asks for under the lyrics, goes
 //! through the whole library in the background when that is on (every
@@ -46,11 +46,10 @@ use crate::lyrics::{Aligned, Place, Text};
 /// sung «а» may stand for a written unstressed «о».
 pub(crate) const MADE_BY: &str = "align-8";
 /// A text the recording spells at least this well (over chance) is this
-/// song's (docs/lyrics-align.md, «The check»).
+/// song's.
 pub(crate) const FITS: f32 = 0.08;
 /// Or its letters are heard where they are put this much over chance (MMS
-/// on English songs: right texts 0.58–0.94, other songs' texts 0.44–0.62;
-/// docs/lyrics-align.md, «The check»).
+/// on English songs: right texts 0.58–0.94, other songs' texts 0.44–0.62).
 pub(crate) const HEARD: f32 = 0.6;
 /// The same for the English aligner: right 0.63–0.98, others 0.11–0.40.
 pub(crate) const HEARD_EN: f32 = 0.5;
@@ -163,7 +162,7 @@ pub(crate) struct Settings {
     pub(crate) recognise: bool,
     pub(crate) separate: bool,
     pub(crate) models_auto: bool,
-    /// «Глубокое создание субтитров» (docs/lyrics-align.md, «Deep mode»).
+    /// «Глубокое создание субтитров».
     pub(crate) deep: bool,
 }
 
@@ -412,8 +411,7 @@ pub(crate) fn models_view(catalog: &Catalog, downloading: &HashMap<ModelId, f32>
 /// Whether a checked text is this recording's: the recording spells it
 /// better than chance ([`FITS`]), or its letters are heard where the path
 /// puts them well over chance ([`HEARD`]), or its own line times sit on
-/// the voice (one steady offset), which a stranger's text never does
-/// (docs/lyrics-align.md, «The check»).
+/// the voice (one steady offset), which a stranger's text never does.
 pub(crate) fn fits(f: &Fit) -> bool {
     let heard = match f.aligner {
         Some(ModelId::AlignerJa) => HEARD_JA,
@@ -637,7 +635,7 @@ impl Thread {
             // While a game is in front the pass waits (the models it kept go
             // after `KEEP_LOADED` as ever); it is a heavy job, so it also
             // waits while the sound analysis or the quality check has the
-            // turn (docs/recommendations.md §5.1.3).
+            // turn.
             let due = Instant::now() >= self.pass_at && self.pass_wanted() && !crate::quiet::busy();
             let turn = if due { crate::quiet::heavy().try_acquire("lyrics alignment") } else { None };
             if due && turn.is_none() {

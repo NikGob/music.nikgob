@@ -1,5 +1,5 @@
 //! One song, one track: a stream track without a known remote id or ISRC
-//! lands on the library track of the same song (docs/stage3.md §1), so the
+//! lands on the library track of the same song, so the
 //! song liked on Spotify and on YouTube Music is one track with two
 //! sources, not two.
 //!
@@ -26,10 +26,10 @@
 //! needed (the file says «Ohara Yuiko», the service 大原ゆい子), and a
 //! track there that has the stream's service already is that song too: a
 //! service does give one song twice, under the album's id and the
-//! single's (docs/stage4.md §12.13). A track is its place: candidates on
+//! single's. A track is its place: candidates on
 //! the stream's own release come first.
 //!
-//! A music video is its song's file (docs/stage4.md §12.5): a liked clip
+//! A music video is its song's file: a liked clip
 //! whose title, without what clips add ([`song_titles`]), is the title of a
 //! track with a file, by one of the names the clip credits (its uploader or
 //! a name in its title: [`credited_names`]), and is that long or up to

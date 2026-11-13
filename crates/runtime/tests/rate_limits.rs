@@ -1,4 +1,4 @@
-//! Rate limits are waited out, not shown as failures (docs/stage3.md, the
+//! Rate limits are waited out, not shown as failures (the
 //! rate limits): a search section that a service rate-limited loads and is
 //! asked again when the pause ends (for the current query only, at most
 //! three times); like and playlist checks try again when the pause ends

@@ -1,5 +1,5 @@
 //! One artist under several spellings: what the library compares artist
-//! names by (docs/stage4.md §12.13).
+//! names by.
 //!
 //! * [`name_key`]: the same name in another width or case, with other
 //!   punctuation (`リコ（CV：富田美憂）` and `リコ(CV:富田美憂)`, `HITORIE` and

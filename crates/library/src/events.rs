@@ -35,8 +35,8 @@ pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
 /// `meta` key of [`Library::fix_event_contexts`].
 pub(crate) const CONTEXTS_KEY: &str = "event_contexts_fixed.v1";
 
-/// The plays recorded in a wrong context before each play kept its own
-/// (TODO 21), where the right one is certain:
+/// The plays recorded in a wrong context before each play kept its own,
+/// where the right one is certain:
 /// * an album started from a service's page kept the id of the mix that
 ///   played before it (`album` with `mix:…`): it is the album of the
 ///   track, when the track is on one of the library's albums;

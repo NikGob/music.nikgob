@@ -1,4 +1,4 @@
-//! «С новым» (recs-v2 §5.4): the new songs of the services a mix of
+//! «С новым»: the new songs of the services a mix of
 //! «Миксы для тебя» plays between its own.
 //!
 //! * **How many**: the share the appetite of the mix's taste profile draws
@@ -22,7 +22,7 @@
 //!   the first two places nor two running, spread as evenly as such places
 //!   allow; what finds no place is not played.
 //!
-//! The open world (docs/recommendations.md §1.1, §1.2, [`NewMode`]): the
+//! The open world ([`NewMode`]): the
 //! cap and the places between loved songs hold for the calm default
 //! («Сбалансировано», [`NewMode::Calm`]). With «Больше нового»
 //! ([`NewMode::Open`]) a mix takes as much as the share asks, up to

@@ -1,4 +1,4 @@
-//! The one quality policy over every source (docs/stage4.5.md): offers
+//! The one quality policy over every source: offers
 //! that are the wished track or album ([`crate::matching::judge`]) are
 //! ranked by quality first (Hi-Res FLAC > CD FLAC > … > lossy), then sure
 //! before doubtful, then the user's order of the sources on «Источники»,

@@ -1,4 +1,4 @@
-//! Fake-lossless detection (PLAN section 6, step 3): a "lossless" file whose
+//! Fake-lossless detection: a "lossless" file whose
 //! spectrum is cut like an MP3/AAC lowpass was transcoded from a lossy source.
 //!
 //! # Method

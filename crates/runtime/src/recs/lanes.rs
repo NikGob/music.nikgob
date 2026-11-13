@@ -1,4 +1,4 @@
-//! «Миксы для тебя» (recs-v2 §6, profiles-v1 §6): the five moments of
+//! «Миксы для тебя»: the five moments of
 //! [`nikgob_recs::mixes`] — the profiles' own mixes, «Всё вперемешку», the
 //! calm and the lively side of everything loved, «Фон» for whoever
 //! listens so, the blends the user made today first — and «На повторе».
@@ -23,8 +23,7 @@
 //! [`nikgob_recs::mixes::row`]'s: ten cards at most, no two alike. «Любимые»
 //! is the playlist's own tile before the row (the page's).
 //!
-//! «С новым» goes by the open world (docs/recommendations.md §1,
-//! [`nikgob_recs::mix_new::take`]): between loved songs and a third at most
+//! «С новым» goes by the open world ([`nikgob_recs::mix_new::take`]): between loved songs and a third at most
 //! under «Сбалансировано»; as much as asked, anywhere after the first song,
 //! under «Больше нового»; a niche (a mix of few songs or artists) takes
 //! mostly new music of its sound, its songs the seeds of its top-up
@@ -56,7 +55,7 @@ const MIX_MS: u64 = 2 * 60 * 60 * 1000;
 /// A song of unknown length counts so.
 const GUESS_MS: u32 = 210_000;
 /// A song longer than this is left out (they are skipped early a third of
-/// the time, recs-v2 §2).
+/// the time).
 pub(super) const LONG_MS: u32 = nikgob_recs::mixes::LONG_MS;
 /// «На повторе» looks this far back (30 once the history is longer).
 const REPEAT_DAYS_SHORT: i64 = 14;
@@ -91,7 +90,7 @@ pub(crate) struct LaneHome {
 
 impl LaneHome {
     /// What it plays: its songs, with «С новым» its new ones each between
-    /// two loved familiar songs (recs-v2 §5.4), never in the first two
+    /// two loved familiar songs, never in the first two
     /// places nor two running, spread as evenly as such places allow; in
     /// the open world evenly anywhere after the first song, runs of them
     /// where the share asks ([`nikgob_recs::mix_new::spread`]).
@@ -415,7 +414,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // новым» goes to the first that fits it.
     let mut mixes: Vec<Mix> = nikgob_recs::mixes::row_upto(daily, pinned.into_iter().next(), mixes, input.row_more);
     // The niches: the calm songs in place of the calm side, a small kind or
-    // genre a card of its own (docs/recommendations.md §1.2).
+    // genre a card of its own.
     mix_new::with_niches(&snap.model, &mut mixes, niches);
     log_lineup(snap, tiles, &mixes);
 

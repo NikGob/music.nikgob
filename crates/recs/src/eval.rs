@@ -35,7 +35,7 @@
 //!     how often its next picks sound farther from the skipped two than the
 //!     ones it had queued after them;
 //!   - for both, the share of picks by an artist never played before;
-//!   - the open world (docs/recommendations.md §1): the mixes that are
+//!   - the open world: the mixes that are
 //!     niches ([`crate::open_world::is_niche`]), the share of new songs
 //!     they play and how many artists they are of (a niche stuck on two
 //!     artists is what the open world is for), the share of mixes mostly

@@ -1,4 +1,4 @@
-//! Cold start (docs/stage3.md §0 "Холодный старт", §3.6): the history, likes
+//! Cold start: the history, likes
 //! and playlists of a service brought in from its API
 //! ([`Command::ImportFromService`](nikgob_view::Command::ImportFromService))
 //! or from its export files (`ImportExportFiles`, formats in
@@ -725,7 +725,7 @@ async fn read_export(
     // How a watch history's plays ended: by the gaps between its entries,
     // music or not.
     export::infer_outcomes(&mut data.plays, |_| None);
-    // Its music (profiles-v1 §12.3): what a «- Topic» channel, a known
+    // Its music: what a «- Topic» channel, a known
     // video or an artist the user has says is a song.
     let mut known: HashSet<String> = data
         .likes

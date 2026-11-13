@@ -1,4 +1,4 @@
-//! A world's page (home-v2 §15.3, «Открыть мир»): its name in the large
+//! A world's page: its name in the large
 //! app bar, the header in the colours of the world's cover — the cover,
 //! when it was heard, its facts, how far the user got and «Дослушать» / «Перемешать» — then
 //! its mixes («Миксы»: «Лучшее», «Ещё не слышал», «В дорогу», its calm and

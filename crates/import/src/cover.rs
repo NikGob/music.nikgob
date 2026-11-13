@@ -1,5 +1,4 @@
-//! Cover handling and the visual data derived at import time (PLAN sections 5, 6
-//! step 8 and 10): a JPEG of at most `cover_max_edge` px, the palette seed
+//! Cover handling and the visual data derived at import time: a JPEG of at most `cover_max_edge` px, the palette seed
 //! (quantize + score like Android / `material-color-utilities`), and a 16x16
 //! "ambient" texture, a box-downscaled copy of the cover that the UI blows up
 //! into a soft glow.

@@ -1,5 +1,4 @@
-//! Download sources behind [`nikgob_core::source::Source`]
-//! (docs/stage4.5.md): torrents through the indexer ([`torrent`]),
+//! Download sources behind [`nikgob_core::source::Source`]: torrents through the indexer ([`torrent`]),
 //! khinsider ([`khinsider`]), the free FLAC services ([`qobuz`],
 //! [`tidal`]), a Subsonic server ([`squidify`]), the Internet Archive
 //! ([`archive`]), Bandcamp's free releases ([`bandcamp`]); the query variants

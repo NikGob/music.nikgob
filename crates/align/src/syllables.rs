@@ -1,4 +1,4 @@
-//! Syllable timing from the voice (docs/lyrics-align.md, «Syllables»).
+//! Syllable timing from the voice.
 //!
 //! The timing pass gives each word its start and end; here a word of
 //! several syllables ([`nikgob_core::syllables`]) is cut into them, each a

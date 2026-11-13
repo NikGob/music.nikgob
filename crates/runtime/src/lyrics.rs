@@ -3,7 +3,7 @@
 //! win automatically; online texts compete by sync, then source order.
 //!
 //! A text the aligner checked against the track's own recording
-//! (docs/lyrics-align.md, [`crate::align`]) and found to be another song's
+//! ([`crate::align`]) and found to be another song's
 //! or another version's loses to every text that fits. One that fits is
 //! shown with the word timing made from the recording when word timing is
 //! on ([`Shown`]), which ranks between a source's own word timing and line

@@ -1,4 +1,4 @@
-//! Библиотека (md3e-player.md §3.2, docs/stage4.md §12.6): a header with
+//! Библиотека: a header with
 //! the instant filter, «только скачанное», the view and the sort; «Всё» as
 //! an overview (rows of playlists, the latest and the most played albums,
 //! the first rows of the album grid, artists), each section leading on to
@@ -207,7 +207,7 @@ fn sort_button(ui: &mut Ui, cur: ReleaseSort, narrow: bool, out: &mut Vec<Comman
     }
 }
 
-/// «Только скачанное» (docs/stage3.md §0): a filled toggle icon button,
+/// «Только скачанное»: a filled toggle icon button,
 /// its tooltip saying what it does in either state.
 fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     let on = state.prefs.library_only_downloaded;

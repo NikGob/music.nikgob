@@ -1,4 +1,4 @@
-//! What the recommendations read in one go (docs/stage4.md §3): every
+//! What the recommendations read in one go: every
 //! track with its artists and release, the listening events, the playlist
 //! entries with their times, and the ids the services know the library by.
 //! Plain rows; the runtime turns them into the engine's inputs.

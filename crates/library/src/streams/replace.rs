@@ -1,5 +1,5 @@
-//! A stream track replaced by hand with the song the user picked (docs/
-//! stage3.md §7 «Найти песню…»): a liked clip that has no song found by
+//! A stream track replaced by hand with the song the user picked («Найти
+//! песню…»): a liked clip that has no song found by
 //! itself, a wrong YouTube match of another stream track.
 //!
 //! [`Library::replace_with_song`] makes the track the picked song in place

@@ -1,4 +1,4 @@
-//! Why a mix or a pick (recs-v2 §12): one line, only what can be checked,
+//! Why a mix or a pick: one line, only what can be checked,
 //! by what the pick came from and the facts behind it.
 //!
 //! * **A moment** of «Миксы для тебя» ([`Recs::why_moment`]): «Из того,

@@ -1,5 +1,5 @@
-//! What the bento's tiles read beyond the recommendations' tracks
-//! (docs/stage4.md §12.9), each in one pass: per track its duration, when
+//! What the bento's tiles read beyond the recommendations' tracks, each in
+//! one pass: per track its duration, when
 //! it was added, its release's year and title, its place on the album,
 //! how much lyrics it has and whether it has a file; and the user's
 //! playlists with their tracks.

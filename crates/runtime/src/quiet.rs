@@ -193,7 +193,7 @@ pub(crate) async fn free() {
     }
 }
 
-/// The heavy background jobs take turns (docs/recommendations.md §5.1.3):
+/// The heavy background jobs take turns:
 /// the sound analysis (bliss and the neural model), the lyrics
 /// alignment's pass over the library and the quality check's spectra
 /// never run at once, and after one's unit of work the next starts only

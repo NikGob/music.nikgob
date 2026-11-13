@@ -1,4 +1,4 @@
-//! «Моя волна» in the runtime (docs/recommendations.md §2, §3.3): the
+//! «Моя волна» in the runtime: the
 //! radio of [`RadioSeed::Wave`] the home's card, the header's chip and the
 //! cards of «Миксы для тебя» start; its filters from the queue's header;
 //! «↻ Другой вайб» from the player.

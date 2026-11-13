@@ -1,4 +1,4 @@
-//! The home feed (simple stage-1 version, PLAN §9): built from the event log
+//! The home feed (simple stage-1 version): built from the event log
 //! and the catalog. Recommendations proper arrive in stage 4.
 
 use std::collections::{HashMap, HashSet};

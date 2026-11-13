@@ -17,7 +17,7 @@ impl std::fmt::Display for JobId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub u64);
 
-/// Steps of PLAN section 6, as reported in [`ImportEvent::FileProgress`].
+/// Steps of the import pipeline, as reported in [`ImportEvent::FileProgress`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     Probing,
@@ -110,7 +110,7 @@ pub enum ImportEvent {
         path: PathBuf,
         error: String,
     },
-    /// The file holds another song's audio (docs/TODO.md 32): it was not
+    /// The file holds another song's audio: it was not
     /// imported as `title` (a [`Self::Failed`] follows). `track` is the
     /// track it was taken for; what it is and where it came from are not
     /// taken for that track again.

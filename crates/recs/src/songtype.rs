@@ -1,4 +1,4 @@
-//! «Тип песни» (recs-v2 §10): what a track is beyond its sound — sung or
+//! «Тип песни»: what a track is beyond its sound — sung or
 //! instrumental, in which language, a soundtrack's song or not.
 //!
 //! * **Voice**, the first argument that holds: lyrics of 12 letters or more
@@ -139,8 +139,8 @@ impl Default for SongType {
     }
 }
 
-/// The lane a song type falls in for the session's «same lane» (recs-v2
-/// §5.2): instrumental (or a soundtrack's track of unknown voice), a sung
+/// The lane a song type falls in for the session's «same lane»:
+/// instrumental (or a soundtrack's track of unknown voice), a sung
 /// language, or unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SongLane {

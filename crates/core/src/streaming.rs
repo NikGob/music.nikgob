@@ -4,7 +4,7 @@
 //! The rest of the app talks only to [`StreamService`]; the concrete backends
 //! live in their own crates (`nikgob-spotify`, `nikgob-youtube`) and are held as
 //! `Arc<dyn StreamService>`, like [`crate::indexer::Indexer`]. Everything here
-//! is plain data plus the two traits; see docs/stage3.md §2 for the contract.
+//! is plain data plus the two traits.
 //!
 //! # Threads
 //!
@@ -489,7 +489,7 @@ pub struct Played {
 // Suggestions
 // ---------------------------------------------------------------------------
 
-/// What a service's suggestion is (docs/stage4.md §12.3). The service's
+/// What a service's suggestion is. The service's
 /// own mixes and charts are not suggestions: only what says something
 /// about the user's taste.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -611,7 +611,7 @@ impl Account {
 }
 
 /// What Spotify's account says when it has no Premium: Spotify is not
-/// connected at all then (docs/stage3.md §0, 2026-10-17). The service's
+/// connected at all then. The service's
 /// [`Account::Failed`] and the runtime's login error both read this.
 pub const SPOTIFY_PREMIUM_REQUIRED: &str =
     "Нужен Spotify Premium — без него Spotify не подключить; YouTube Music работает и так";
@@ -1039,7 +1039,7 @@ pub trait StreamService: Send + Sync {
     /// The complete audio of a recently played track, if this service still
     /// has all of it on disk (YouTube: its audio cache); `None` otherwise.
     /// Never touches the network and never starts a download: the sound
-    /// analysis of streams reads what already played (docs/stage4.md §2).
+    /// analysis of streams reads what already played.
     /// Cheap (opens a file), but call it off the UI thread. The stream's
     /// [`AudioStream::format_hint`] says the container ([`format::WEBM`]
     /// for Opus, [`format::M4A`] for AAC).
@@ -1056,7 +1056,7 @@ pub trait StreamService: Send + Sync {
         None
     }
 
-    // Discovery (docs/stage4.md §5). Background work: each call goes
+    // Discovery. Background work: each call goes
     // through the service's limits in its background lane, answers
     // [`StreamError::RateLimited`] while the service is paused, and is kept
     // for an hour in memory where the service keeps answers. Services that
@@ -1097,7 +1097,7 @@ pub trait StreamService: Send + Sync {
         unsupported()
     }
 
-    // Suggestions (docs/stage4.md §12.3): what the service's own
+    // Suggestions: what the service's own
     // recommendations say about the user's taste, read as a signal for our
     // mixes. Background work in the signed-in lane, one request a call.
 

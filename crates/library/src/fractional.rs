@@ -2,7 +2,7 @@
 //!
 //! Playlist entries carry such a key as `position`. Inserting or moving an entry
 //! only rewrites that one entry's key, so concurrent edits from several devices
-//! merge without renumbering (PLAN §11).
+//! merge without renumbering.
 //!
 //! Keys are base-62 strings (`0-9A-Za-z`, which is also ASCII order, so plain
 //! binary string comparison orders them). A key is an *integer part*, whose

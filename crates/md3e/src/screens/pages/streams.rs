@@ -1,4 +1,4 @@
-//! What the streaming services show (docs/stage3.md §3.2–3.4): their
+//! What the streaming services show: their
 //! tracks, albums, artists and playlists as rows and cards, and the album /
 //! playlist / artist page of a service ([`Route::Stream`]), laid out like
 //! the library's release, playlist and artist pages. Where something comes

@@ -1,4 +1,4 @@
-//! Memory of a small background pass (docs/lyrics-align.md, «Memory»).
+//! Memory of a small background pass.
 //!
 //! `cargo run -p nikgob-align --release --example memory -- <models dir> <jobs.json> <keep secs> [cpu]`
 //!

@@ -1,4 +1,4 @@
-//! A group's presets (settings-v2-concept.md §1.2, §2.4): the group's first
+//! A group's presets: the group's first
 //! row, in «Просто» too. Buttons where there is no stage, live tiles for
 //! the track screen and the look of the lyrics; «Свои» after them while
 //! there are values of the user's own.

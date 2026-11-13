@@ -148,8 +148,8 @@ impl ColorScheme {
         Self::from_material(&Scheme::from(scheme))
     }
 
-    /// The static M3 baseline scheme (purple), exactly as tokens.md section
-    /// 1.2 lists it. This is the fallback when there is no seed.
+    /// The static M3 baseline scheme (purple), exactly as
+    /// M3 lists it. This is the fallback when there is no seed.
     ///
     /// It is not `from_seed(BASELINE_SEED, TonalSpot, ..)`: the published
     /// baseline comes from the legacy core palette (primary chroma 48, error
@@ -175,7 +175,7 @@ const fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
-/// tokens.md section 1.2, light column.
+/// The M3 baseline scheme, light.
 const BASELINE_LIGHT: ColorScheme = ColorScheme {
     primary: hex(0x6750A4),
     on_primary: hex(0xFFFFFF),
@@ -224,7 +224,7 @@ const BASELINE_LIGHT: ColorScheme = ColorScheme {
     shadow: hex(0x000000),
 };
 
-/// tokens.md section 1.2, dark column.
+/// The M3 baseline scheme, dark.
 const BASELINE_DARK: ColorScheme = ColorScheme {
     primary: hex(0xD0BCFF),
     on_primary: hex(0x381E72),
@@ -381,7 +381,7 @@ mod tests {
     }
 
     /// Roles where TonalSpot (chroma 36 primary, neutral chroma 6) departs
-    /// from the legacy baseline palette in tokens.md; see `baseline`.
+    /// from the legacy baseline palette; see `baseline`.
     const TONAL_SPOT_DEVIATIONS: &[&str] = &[
         "primary",
         "on_primary",

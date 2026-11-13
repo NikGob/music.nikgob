@@ -1,4 +1,4 @@
-//! «Твой микс» (docs/stage4.md §4): the hero, once a day.
+//! «Твой микс»: the hero, once a day.
 //!
 //! [`DAILY_LEN`] tracks: about half favourites not played for
 //! [`FAVOURITE_REST_MS`], about 30% sound neighbours of favourites that were

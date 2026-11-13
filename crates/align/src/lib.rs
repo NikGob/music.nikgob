@@ -1,4 +1,4 @@
-//! Lyrics against a song's own audio (docs/lyrics-align.md).
+//! Lyrics against a song's own audio.
 //!
 //! * [`separate`]: the voice out of the mix (MDX-Net).
 //! * [`ctc`] and [`text`]: forced alignment of a known text to the voice,

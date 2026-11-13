@@ -1,4 +1,4 @@
-//! Reading the services' export files (docs/stage3.md §3.6, cold start):
+//! Reading the services' export files (cold start):
 //! a folder or a `.zip` (or a folder of `.zip`s, as Google Takeout splits
 //! big exports), recognised by file name and structure rather than by exact
 //! folder names, since Takeout localises those.
@@ -21,8 +21,8 @@
 //! extensions (a game's save, the search history) is skipped.
 //! Entries of plain YouTube (header «YouTube») are read as plays too, and
 //! their videos remembered ([`ExportData::plain_watched`]): the import
-//! keeps of either kind only what is music ([`is_music_play`],
-//! profiles-v1 §12.3) and tells playlists of music from playlists of
+//! keeps of either kind only what is music ([`is_music_play`])
+//! and tells playlists of music from playlists of
 //! videos by them. A history that does not say how a play ended (YouTube's)
 //! gets the end its gap to the next entry tells ([`infer_outcomes`]).
 //!
@@ -799,8 +799,8 @@ pub(crate) const GAP_LATE_MS: i64 = 90_000;
 /// nothing is known).
 pub(crate) const GAP_HEARD_MS: i64 = 30 * 60_000;
 
-/// The ends of the plays of a watch history, which does not say them
-/// (profiles-v1 §12.3), by the gap to the next entry of the history
+/// The ends of the plays of a watch history, which does not say them,
+/// by the gap to the next entry of the history
 /// (music or not): under [`GAP_LATE_MS`] a skip there (an early one under
 /// 30 s), under [`GAP_HEARD_MS`] a complete, later none. When `length` knows the track's length, a gap of 90 % of it is a
 /// complete and a shorter one a skip there.
@@ -870,7 +870,7 @@ pub(crate) fn artist_key(name: &str) -> String {
     fold(&channel_artist(name))
 }
 
-/// Whether a play of an export is music (profiles-v1 §12.3, the same for
+/// Whether a play of an export is music (the same for
 /// any export, no names of folders or playlists): a service's own history
 /// always; an entry of a watch history when its channel is an artist's
 /// «- Topic» one (under either header), when its video is one the music

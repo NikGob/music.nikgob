@@ -59,7 +59,7 @@
 //!   (kept as «Что сохранять» says) or the one it kept, or a clip whose
 //!   song is unclear (timing cannot be made).
 //! - `fake:lyrics-state:<state>[:word|line|plain]` — the lyrics control in
-//!   each state of docs/lyrics-control.md (`none`, `searching`, `plain`,
+//!   each of its states (`none`, `searching`, `plain`,
 //!   `line`, `word`, `made`, `saved`, `making`, `failed`, `stream`, `clip`,
 //!   `no-audio`), seen by words, by lines or without timing when the last
 //!   part says so (`made` has LRCLIB's lines beside it, so the source rows
@@ -835,8 +835,7 @@ fn chip_state(s: &mut ViewState, name: &str) {
     }
 }
 
-/// The lyrics control in one state of docs/lyrics-control.md, as the
-/// runtime would show it (`fake:lyrics-state:<state>[:<seen>]`).
+/// The lyrics control in one of its states, as the runtime would show it (`fake:lyrics-state:<state>[:<seen>]`).
 fn lyrics_state(s: &mut ViewState, arg: &str) {
     use nikgob_core::lyrics::{LyricLine, LyricsSource as Src};
     use nikgob_view::{AlignJob, AlignStage, Craft, LyricsAvail, LyricsCraft, LyricsHome, LyricsOption, LyricsSync, LyricsText};

@@ -1,4 +1,4 @@
-//! «Моя волна» (docs/recommendations.md §2, §3.3): one endless stream of
+//! «Моя волна»: one endless stream of
 //! the library and of the open world, steered by the user's filters and by
 //! what they do while it plays.
 //!

@@ -849,7 +849,7 @@ async fn what_an_app_lacks_is_asked_once_not_on_every_start() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-// ---- Premium only, no shared app (docs/stage3.md §0, 2026-10-17) -------------
+// ---- Premium only, no shared app -------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_start_deletes_the_shared_apps_grant_quietly() {

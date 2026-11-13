@@ -1,4 +1,4 @@
-//! Measures the aligners on real songs (docs/lyrics-align.md, «Measured»).
+//! Measures the aligners on real songs.
 //!
 //! `cargo run -p nikgob-align --release --example measure -- <models dir> <jobs.json> [cpu]`
 //!

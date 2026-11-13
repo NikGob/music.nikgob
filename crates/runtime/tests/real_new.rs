@@ -1,5 +1,4 @@
-//! New music and dislikes on a copy of a real library (recs-v2 §11,
-//! docs/TODO.md §10): the taste profiles found, what the junk filter leaves
+//! New music and dislikes on a copy of a real library: the taste profiles found, what the junk filter leaves
 //! out of the services' answers kept, what one dislike lowers, and the
 //! replay before and after random dislikes: `NIKGOB_REAL_LIBRARY=path/to/
 //! library.sqlite cargo test -p nikgob-runtime --test real_new -- --ignored

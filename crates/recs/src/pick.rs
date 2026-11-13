@@ -1,10 +1,10 @@
-//! What every selection shares (docs/stage4.md §4 «Общее для всех»): the
+//! What every selection shares: the
 //! engine context [`Recs`], picks with their reasons, the exclusion of
 //! disliked tracks and artists, the diversity rules (at most one track of
 //! an artist in any window of three, at most two of an album in any window
 //! of ten, at most two of a world — a soundtrack franchise or an artist's
-//! discography — in any window of three and a quarter of the whole, recs-v2
-//! §1.5) and the smooth order: a greedy nearest-neighbour path through
+//! discography — in any window of three and a quarter of the whole)
+//! and the smooth order: a greedy nearest-neighbour path through
 //! the picks in the normalised, weighted bliss space, where a track without
 //! a vector stands as close to another as their shared artist, album or
 //! co-listening says, mended by swaps wherever the path cornered itself

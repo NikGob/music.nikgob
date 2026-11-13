@@ -1,4 +1,4 @@
-//! Public instances of a free service (docs/stage4.5.md §4): asked in
+//! Public instances of a free service: asked in
 //! order, each at its own pace, the next one taking over when one is down,
 //! turns us away or does not have the track; one that turned us away sits
 //! out a while ([`Breaker`]), and the next call skips it until that pause
