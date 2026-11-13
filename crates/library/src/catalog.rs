@@ -1037,6 +1037,21 @@ impl Library {
         })
     }
 
+    /// How many tracks [`Self::downloaded_tracks`] has without a limit.
+    pub fn downloaded_count(&self) -> Result<usize> {
+        self.read(|c| {
+            let n: i64 = c.query_row(
+                "SELECT count(*) FROM track t
+                   JOIN (SELECT DISTINCT track_id FROM source
+                          WHERE kind = 'local_file' AND trashed_at IS NULL) f ON f.track_id = t.id
+                  WHERE t.deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(usize::try_from(n).unwrap_or(0))
+        })
+    }
+
     /// The rows of `ids` in one query, by id (a missing id has none).
     pub fn get_track_rows(&self, ids: &[TrackId]) -> Result<std::collections::HashMap<TrackId, TrackRow>> {
         if ids.is_empty() {

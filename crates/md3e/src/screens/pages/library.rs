@@ -566,6 +566,12 @@ fn albums_tab(
 ) -> Option<Route> {
     let lib = &state.library;
     widgets::edition_offers(ui, state, None, out);
+    // Looked up once per release, not scanned for each.
+    let liked: std::collections::HashSet<_> = if pages.release_filter == LIKED_FILTER {
+        lib.liked_albums.iter().map(|(_, l)| l.id).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let shown: Vec<&ReleaseCard> = lib
         .releases
         .iter()
@@ -573,7 +579,7 @@ fn albums_tab(
             1 => matches!(r.release_type, ReleaseType::Album | ReleaseType::Compilation),
             2 => r.release_type == ReleaseType::Single,
             3 => r.release_type == ReleaseType::Ep,
-            LIKED_FILTER => lib.liked_albums.iter().any(|(_, l)| l.id == r.id),
+            LIKED_FILTER => liked.contains(&r.id),
             _ => true,
         })
         .filter(|r| match pages.release_source {
@@ -923,7 +929,8 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
         widgets::empty_state(ui, Icon::DownloadDone, "Пока ничего", "", None);
         return None;
     }
-    count_line(ui, &count(ids.len(), "трек", "трека", "треков"), |_| {});
+    let total = state.library.downloaded_total.max(ids.len());
+    count_line(ui, &count(total, "трек", "трека", "треков"), |_| {});
     let mut nav = None;
     let mut i = 0;
     for day in days {
@@ -954,6 +961,19 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
             }
             nav = pages.track_context_menu(&o.response, t, state, out).or(nav);
             i += 1;
+        }
+    }
+    // The older ones a page at a time.
+    if ids.len() < total {
+        ui.add_space(8.0);
+        let more = ui
+            .vertical_centered(|ui| {
+                ui.add(crate::components::Button::new("Показать ещё").style(Style::Tonal).id_salt("downloaded-more"))
+                    .clicked()
+            })
+            .inner;
+        if more {
+            out.push(Command::LoadMoreDownloaded);
         }
     }
     nav

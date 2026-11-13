@@ -133,6 +133,8 @@ pub enum PlaybackEvent {
     /// The item plays at this speed after all, not at its request's (a
     /// live track of another player cannot be sped up).
     Speed { id: u64, speed: f32 },
+    /// The output device did not open: nothing can be heard.
+    DeviceError { message: String },
 }
 
 /// The audio engine as the runtime sees it.
@@ -580,7 +582,7 @@ struct Worker {
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
-    session_saved: String,
+    session_saved: session::Saver,
     /// Editions of one album found last time (see [`editions`]).
     editions: Vec<nikgob_import::EditionGroup>,
     services: Vec<Box<dyn Service>>,
@@ -804,7 +806,7 @@ impl Worker {
             stream_retried: None,
             official_player_tried: None,
             session_path,
-            session_saved: String::new(),
+            session_saved: session::Saver::default(),
             editions: Vec::new(),
             services: Vec::new(),
             toast_id: 0,
@@ -997,6 +999,7 @@ impl Worker {
             self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
+        self.session_saved.flush();
         self.recs_flush_weights(true);
         self.keep_home(true);
         self.maybe_export(true);
@@ -1538,7 +1541,8 @@ impl Worker {
             }
             Command::EmptyTrash => self.empty_trash(),
             Command::LoadTrash => self.load_trash(),
-            Command::LoadDownloaded => self.load_downloaded(),
+            Command::LoadDownloaded => self.load_downloaded(import::DOWNLOADED_PAGE),
+            Command::LoadMoreDownloaded => self.load_downloaded(self.downloaded_shown() + import::DOWNLOADED_PAGE),
             Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
@@ -2545,6 +2549,11 @@ impl Worker {
                     self.rate = speed;
                     self.publish_player();
                 }
+            }
+            PlaybackEvent::DeviceError { message } => {
+                log::error!("audio output: {message}");
+                // The same message while one is up only starts it over.
+                self.toast("Не удалось открыть устройство вывода звука", None);
             }
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
@@ -4004,16 +4013,25 @@ fn crossfade(p: &nikgob_view::Prefs) -> Option<Duration> {
     (p.crossfade_s > 0.0).then(|| Duration::from_secs_f32(p.crossfade_s))
 }
 
+/// Puts `prefs` at `path` through a temporary file.
+fn write_prefs(path: &std::path::Path, prefs: &nikgob_view::Prefs) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(prefs).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 impl Worker {
-    pub(crate) fn save_prefs(&self) {
-        if let Some(path) = &self.prefs_path {
-            let prefs = self.state.read().prefs.clone();
-            if let Ok(json) = serde_json::to_vec_pretty(&prefs) {
-                let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, json).is_ok() {
-                    let _ = std::fs::rename(&tmp, path);
-                }
-            }
+    /// Writes the prefs; a failure is said (the next change writes them
+    /// all again).
+    pub(crate) fn save_prefs(&mut self) {
+        let Some(path) = self.prefs_path.clone() else { return };
+        let prefs = self.state.read().prefs.clone();
+        if let Err(e) = write_prefs(&path, &prefs) {
+            log::error!("cannot save {}: {e}", path.display());
+            self.toast("Не удалось сохранить настройки", None);
         }
     }
 

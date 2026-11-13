@@ -180,6 +180,8 @@ pub(crate) fn sort_history(history: &mut [v::Job]) {
 
 /// Job-log kind of the one line of a «Хочу скачать» item: `wish:<id>`.
 pub(crate) const WISH_KIND: &str = "wish:";
+/// Tracks of «Скачано» loaded at a time.
+pub(crate) const DOWNLOADED_PAGE: usize = 500;
 
 pub(crate) fn wish_kind(id: WishlistId) -> String {
     format!("{WISH_KIND}{id}")
@@ -1131,7 +1133,7 @@ impl Worker {
         }
         // «Скачано» once opened: the new files on top.
         if !self.state.read().library.downloaded.is_empty() {
-            self.load_downloaded();
+            self.load_downloaded(self.downloaded_shown().max(DOWNLOADED_PAGE));
         }
     }
 
@@ -1265,8 +1267,14 @@ impl Worker {
         self.publish(|s| s.library.trash = trash);
     }
 
-    /// The «Скачано» tab: the latest files by the local day they came.
-    pub(crate) fn load_downloaded(&mut self) {
+    /// How many tracks «Скачано» shows now.
+    pub(crate) fn downloaded_shown(&self) -> usize {
+        self.state.read().library.downloaded.iter().map(|d| d.tracks.len()).sum()
+    }
+
+    /// The «Скачано» tab: the latest `limit` files by the local day they
+    /// came, and how many there are in all.
+    pub(crate) fn load_downloaded(&mut self, limit: usize) {
         const MONTHS: [&str; 12] = [
             "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
             "декабря",
@@ -1284,7 +1292,8 @@ impl Worker {
                 format!("{} {} {}", date.day(), MONTHS[date.month() as usize - 1], date.year())
             }
         };
-        let rows = self.lib.downloaded_tracks(500).unwrap_or_default();
+        let rows = self.lib.downloaded_tracks(u32::try_from(limit).unwrap_or(u32::MAX)).unwrap_or_default();
+        let total = self.lib.downloaded_count().unwrap_or(rows.len()).max(rows.len());
         let mut days: Vec<(jiff::civil::Date, v::DownloadedDay)> = Vec::new();
         for (row, at) in &rows {
             let Ok(ts) = jiff::Timestamp::from_millisecond(*at) else { continue };
@@ -1297,7 +1306,10 @@ impl Worker {
             }
         }
         let downloaded = days.into_iter().map(|(_, d)| d).collect();
-        self.publish(|s| s.library.downloaded = downloaded);
+        self.publish(|s| {
+            s.library.downloaded = downloaded;
+            s.library.downloaded_total = total;
+        });
     }
 
     fn after_delete(&mut self) {
