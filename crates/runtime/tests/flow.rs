@@ -1381,7 +1381,18 @@ fn the_shuffle_button_sets_the_rule_of_the_list_playing() {
         q.extend(s.queue.next.iter().map(|e| e.track.id));
         q
     };
-    let saved = || -> Prefs { serde_json::from_slice(&std::fs::read(&prefs_path).unwrap()).unwrap() };
+    // The rule as the prefs file has it, once written (at the next tick).
+    let saved = |k: ListKind, rule: ListShuffle| {
+        let t = Instant::now();
+        loop {
+            let on_disk = std::fs::read(&prefs_path).ok().and_then(|b| serde_json::from_slice::<Prefs>(&b).ok());
+            if on_disk.is_some_and(|p| p.list_shuffle.of(k) == rule) {
+                return;
+            }
+            assert!(t.elapsed() < Duration::from_secs(30), "the prefs file never had {k:?} {rule:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
     let rule = |k| rt.state().prefs.list_shuffle.of(k);
     assert_eq!(rule(ListKind::OwnPlaylist), ListShuffle::Shuffled);
 
@@ -1393,14 +1404,14 @@ fn the_shuffle_button_sets_the_rule_of_the_list_playing() {
     wait_for(&rt, "shuffle off", |s| !s.player.shuffle);
     wait_for(&rt, "own playlists in order", |s| s.prefs.list_shuffle.of(ListKind::OwnPlaylist) == ListShuffle::InOrder);
     assert_eq!(rule(ListKind::Album), ListShuffle::InOrder);
-    assert_eq!(saved().list_shuffle.of(ListKind::OwnPlaylist), ListShuffle::InOrder);
+    saved(ListKind::OwnPlaylist, ListShuffle::InOrder);
     // Shuffle turned on while the album plays: albums start shuffled, the
     // playlist still follows its own rule (in order).
     rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
     wait_for(&rt, "the album in order", |s| !s.player.shuffle && order(s) == ids);
     rt.send(Command::ToggleShuffle);
     wait_for(&rt, "albums shuffled", |s| s.player.shuffle && s.prefs.list_shuffle.of(ListKind::Album) == ListShuffle::Shuffled);
-    assert_eq!(saved().list_shuffle.of(ListKind::Album), ListShuffle::Shuffled);
+    saved(ListKind::Album, ListShuffle::Shuffled);
     rt.send(Command::PlayPlaylist { id: playlist.id, start: Some(ids[0]), shuffle: false });
     wait_for(&rt, "the playlist in order again", |s| !s.player.shuffle && order(s) == ids);
     rt.send(Command::PlayRelease { id: release.id, start: Some(ids[0]), shuffle: false });
