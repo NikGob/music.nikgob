@@ -89,6 +89,14 @@ pub use auth::{PLAYBACK_REDIRECT_PORT, WEB_REDIRECT_PORT};
 pub const WEB_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 /// Where a personal app is created.
 pub const DEVELOPER_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
+/// A playback login of another account than the library's.
+const PLAYBACK_OTHER_ACCOUNT: &str = "Для звука выбран другой аккаунт Spotify";
+
+/// A Spotify username (librespot) and a Web API user id name the same
+/// account (they are the same string, in either case).
+fn same_account(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
 
 /// Playlists change: a sync reads them fresh anyway ([`StreamService::forget`]).
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
@@ -459,6 +467,7 @@ impl Spotify {
 
     async fn restore(self: Arc<Self>, configured_client: Option<String>) {
         let epoch = self.epoch();
+        let generation = self.sessions.generation();
         let mut saved = self.store.load_state().await;
         if saved.personal_client_id.is_none() {
             saved.personal_client_id = configured_client;
@@ -496,6 +505,12 @@ impl Spotify {
         if epoch != self.epoch() {
             return;
         }
+        // Kept from before the check at login: only said, nothing dropped.
+        if let (Some(p), Some(c)) = (&saved.profile, &playback)
+            && !same_account(&p.id, &c.username)
+        {
+            log::warn!("spotify: the saved playback login is another account than the library's; sign in for sound again");
+        }
         self.apply_probes(&saved);
         let has_web = self.web.has_grant();
         // The name and plan were read lately: no `GET /me` on this start.
@@ -526,7 +541,7 @@ impl Spotify {
             (_, Some(false)) => self.premium_required(),
             (Some(c), None) => {
                 // The plan is not known yet; ask the session once.
-                if let Ok(s) = self.sessions.get(c.to_librespot()).await {
+                if let Ok(s) = self.sessions.get(c.to_librespot(), generation).await {
                     self.note_session(&s).await;
                     if lock(&self.state).premium() == Some(false) {
                         self.premium_required();
@@ -537,7 +552,7 @@ impl Spotify {
                 // Premium with the playback login: the session is connected
                 // ahead, so the first play (and the ISRCs of album pages,
                 // read over it without Web API quota) do not wait for it.
-                if let Err(e) = self.sessions.get(c.to_librespot()).await {
+                if let Err(e) = self.sessions.get(c.to_librespot(), generation).await {
                     log::info!("spotify: session not connected ahead: {e}");
                 }
             }
@@ -600,6 +615,10 @@ impl Spotify {
         {
             let mut st = lock(&self.state);
             self.epoch.fetch_add(1, Ordering::SeqCst);
+            // Under the state lock: a credential read before the sign-out
+            // goes with a generation the close voids, so no connect in
+            // flight brings the old account's session back.
+            self.sessions.close();
             self.web.clear();
             for slot in Slot::ALL {
                 self.store.clear(slot);
@@ -618,7 +637,6 @@ impl Spotify {
         if let Some(cancel) = lock(&self.login_cancel).take() {
             let _ = cancel.send(true);
         }
-        self.sessions.close();
         self.clear_caches();
         if let Some(s) = self.soloist.get() {
             s.forget_key();
@@ -772,6 +790,17 @@ impl Spotify {
                 // Another account: what was cached about the old one goes.
                 self.clear_caches();
             }
+            // Sound for one account and the library of another must not
+            // mix: a playback login of another account goes.
+            if st.playback.as_ref().is_some_and(|c| !same_account(&c.username, &me.id)) {
+                log::info!("spotify: the playback login is another account than this one; it is dropped");
+                st.playback = None;
+                st.saved.slots.retain(|s| *s != Slot::Playback);
+                st.saved.playback_username = None;
+                st.saved.session_premium = None;
+                self.store.clear(Slot::Playback);
+                self.sessions.close();
+            }
             st.saved.profile = Some(Profile {
                 name: me
                     .display_name
@@ -805,6 +834,7 @@ impl Spotify {
 
     async fn login_playback(&self) -> Result<(), StreamError> {
         let epoch = self.epoch();
+        let generation = self.sessions.generation();
         let grant = Grant::playback();
         let (code, verifier, _prompt) = self.browser_code(&grant).await?;
         let token_url = self.web.endpoints().token.clone();
@@ -813,7 +843,7 @@ impl Spotify {
             .map_err(|e| self.fail(e))?;
         let session = self
             .sessions
-            .connect(Credentials::with_access_token(response.access_token))
+            .connect(Credentials::with_access_token(response.access_token), generation)
             .await
             .map_err(|e| {
                 self.fail_text(&format!("Spotify не пустил сессию воспроизведения: {e}"))
@@ -823,13 +853,19 @@ impl Spotify {
             auth_data: session.auth_data(),
         };
         if epoch != self.epoch() {
-            self.sessions.close();
+            // Signed out meanwhile: the sign-out closed this session.
+            self.sessions.close_if(&session);
             return Err(StreamError::NotLoggedIn);
         }
         if let Some(id) = self.user_id()
-            && id != credential.username
+            && !same_account(&id, &credential.username)
         {
-            log::warn!("spotify: the playback login is a different account than the Web API one");
+            // The library is one account's, the sound would be another's
+            // (its region, its plan): refused, nothing kept. The playback
+            // login kept from before, if any, stays.
+            log::warn!("spotify: the playback login is a different account than the Web API one; refused");
+            self.sessions.close_if(&session);
+            return Err(self.fail_text(PLAYBACK_OTHER_ACCOUNT));
         }
         let generation = self.store.generation(Slot::Playback);
         {
@@ -897,11 +933,12 @@ impl Spotify {
         lock(&self.access).insert(p.id.clone(), access);
     }
 
-    fn playback_credential(&self) -> Option<Credentials> {
-        lock(&self.state)
-            .playback
-            .as_ref()
-            .map(|c| c.to_librespot())
+    /// The playback credential, with the session generation read together
+    /// with it (under the state lock a sign-out closes the sessions in).
+    fn playback_credential(&self) -> Option<(Credentials, u64)> {
+        let st = lock(&self.state);
+        let generation = self.sessions.generation();
+        st.playback.as_ref().map(|c| (c.to_librespot(), generation))
     }
 
     /// The session if it is up, else a new one when there is a credential
@@ -911,11 +948,11 @@ impl Spotify {
         if let Some(s) = self.sessions.current() {
             return Some(s);
         }
-        let credential = self.playback_credential()?;
+        let (credential, generation) = self.playback_credential()?;
         if lock(&self.connect_failed).is_some_and(|t| t.elapsed() < CONNECT_BACKOFF) {
             return None;
         }
-        match self.sessions.get(credential).await {
+        match self.sessions.get(credential, generation).await {
             Ok(s) => Some(s),
             Err(e) => {
                 log::info!("spotify: no session for reads: {e}");
@@ -1496,16 +1533,18 @@ impl Spotify {
 
     async fn open_track_now(&self, id: &str) -> Result<audio::Opened, StreamError> {
         let id = id.to_owned();
-        let credential = self
+        let (credential, generation) = self
             .playback_credential()
             .ok_or(StreamError::PremiumRequired)?;
         let premium = lock(&self.state).premium();
+        let mut dropped: Option<librespot_core::Session> = None;
         for attempt in 0..2 {
-            let session = if attempt == 0 {
-                self.sessions.get(credential.clone()).await
-            } else {
-                log::info!("spotify: session dropped, reconnecting");
-                self.sessions.connect(credential.clone()).await
+            let session = match &dropped {
+                None => self.sessions.get(credential.clone(), generation).await,
+                Some(old) => {
+                    log::info!("spotify: session dropped, reconnecting");
+                    self.sessions.reconnect(credential.clone(), generation, old).await
+                }
             }
             .map_err(|e| StreamError::Network(e.to_string()))?;
             if let Some(false) = session.get_user_attribute("type").map(|t| t == "premium") {
@@ -1522,7 +1561,7 @@ impl Spotify {
                     }
                     return Ok(opened);
                 }
-                Err(e) if e.retry_with_new_session && attempt == 0 => continue,
+                Err(e) if e.retry_with_new_session && attempt == 0 => dropped = Some(session),
                 Err(e) => {
                     if e.error == StreamError::PremiumRequired {
                         self.set_session_premium(false);
