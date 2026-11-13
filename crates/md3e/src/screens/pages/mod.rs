@@ -410,13 +410,14 @@ impl TrackAct {
             Self::Info => I::Info,
             Self::Speed | Self::Equalizer => I::Sound,
             Self::Fetch if tags => I::Tags,
-            Self::Fetch | Self::AlbumDownload => I::Download,
+            Self::Fetch => I::Download,
             Self::Better => I::Torrents,
             Self::PickRelease => I::PickRelease,
             Self::WrongFile => I::WrongFile,
             Self::Dislike => I::Dislike,
             Self::Ban => I::Ban,
             Self::Next | Self::Queue | Self::Playlist | Self::ToLibrary | Self::OutOfLibrary | Self::AlsoOn | Self::Apart | Self::FindSong | Self::ToMp3
+            | Self::AlbumDownload
             | Self::Remove | Self::Trash | Self::Purge => return None,
         })
     }
@@ -457,9 +458,10 @@ pub struct TrackMenuOf {
 
 /// The one list of a track's actions, in groups: play next / the queue /
 /// radio │ to a playlist │ album (and the other album of the song) /
-/// artist / share │ info, the sound (the speed, and what the player adds:
-/// see [`sound_at`]), «Файл ▸» (the file's actions, or its download, and
-/// the deletes of the place) │ «Не нравится» / «Не рекомендовать
+/// artist / share │ «Скачать» of a track with no file, the sound (the
+/// speed, and what the player adds: see [`sound_at`]), «Файл ▸» (the
+/// info, the file's actions or the other ways to get it, and the deletes
+/// of the place) │ «Не нравится» / «Не рекомендовать
 /// исполнителя» │ «Разные песни», after which the caller puts what takes
 /// the track out of its list. A submenu is shown as [`widgets::shown_rows`]
 /// has it: not at all with no item, its one item in its place.
@@ -493,11 +495,17 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
     rows.push(Row::Divider);
-    if o.info {
-        rows.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
-    }
     let mut file = Vec::new();
-    file.extend(o.fetch.map(|f| Row::Item(A::Fetch, f)));
+    if o.info {
+        file.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
+    }
+    // «Скачать» stands in the menu itself; a file's «Редактировать теги…»
+    // in «Файл».
+    match o.fetch {
+        Some(f) if o.has_file => file.push(Row::Item(A::Fetch, f)),
+        Some(f) => rows.push(Row::Item(A::Fetch, f)),
+        None => {}
+    }
     if o.has_file {
         if o.better {
             file.push(Row::Item(A::Better, MenuItem::new(FIND_BETTER).icon(Icon::Search)));
@@ -798,6 +806,9 @@ pub struct PageState {
     /// artist), and what «Треки» last asked the runtime for.
     library_filter: String,
     track_filter_sent: String,
+    /// The library filter's text asked to be looked for everywhere
+    /// («Искать везде»): the search bar takes it over.
+    pub(crate) search_everywhere: Option<String>,
     release_filter: usize,
     /// Library albums by source: 0 all, 1 with files, 2 stream.
     release_source: usize,
@@ -883,6 +894,20 @@ pub(crate) fn set_library_list(ctx: &Context, list: bool) {
 impl PageState {
     pub(crate) fn set_library_filter(&mut self, text: &str) {
         self.library_filter = text.to_owned();
+    }
+
+    /// On Библиотека (but its «Скачано» and «Корзина», which have no
+    /// filter) the search bar is the library's filter.
+    pub(crate) fn bar_filters_library(&self, route: &Route) -> bool {
+        matches!(route, Route::Library(_)) && !matches!(self.library_tab, LibraryTab::Downloaded | LibraryTab::Trash)
+    }
+
+    /// Esc in the bar while it filters the library: empties the filter;
+    /// false when there was nothing to empty.
+    pub(crate) fn clear_library_filter(&mut self) -> bool {
+        let had = !self.library_filter.is_empty();
+        self.library_filter.clear();
+        had
     }
 
     /// Opens the "В плейлист" picker for stream tracks.
@@ -1629,6 +1654,25 @@ pub fn search_bar(
         out.push(Command::SearchTorrents(query.trim().to_owned()));
     }
     SearchBarOutput { edited: *query != before, submitted: o.submitted }
+}
+
+/// The search bar on Библиотека: the library's instant filter of the tab
+/// shown (placeholder «Найти в библиотеке», …), live as it is typed; Enter
+/// looks for the text everywhere (`pages.search_everywhere`).
+pub fn library_bar(ui: &mut Ui, rect: Rect, pages: &mut PageState, focus: &mut bool) {
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
+    let o = SearchBar::new("main-search")
+        .placeholder(library::filter_hint(pages.library_tab))
+        .width(rect.width())
+        .shortcut(true)
+        .show(&mut cui, &mut pages.library_filter);
+    if std::mem::take(focus) {
+        o.response.request_focus();
+    }
+    let q = pages.library_filter.trim();
+    if o.submitted && !q.is_empty() {
+        pages.search_everywhere = Some(q.to_owned());
+    }
 }
 
 /// What the search bar did this frame: the text changed (sent once typing

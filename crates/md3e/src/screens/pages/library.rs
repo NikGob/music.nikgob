@@ -1,11 +1,11 @@
-//! Библиотека: a header with
-//! the instant filter, «только скачанное», the view and the sort; «Всё» as
+//! Библиотека: a header with «только скачанное», the view and the sort (the
+//! instant filter is the search bar over the page); «Всё» as
 //! an overview (rows of playlists, the latest and the most played albums,
 //! the first rows of the album grid, artists), each section leading on to
 //! its tab; albums under headers that follow the sort; a virtualized track
 //! table on «Треки».
 
-use egui::{Align, Frame, Id, Key, Margin, Rect, RichText, Sense, Stroke, TextEdit, Ui, UiBuilder, Widget as _, pos2, vec2};
+use egui::{Align, Id, Rect, Sense, Stroke, Ui, UiBuilder, Widget as _, pos2, vec2};
 use nikgob_view::{
     ArtistCard, Command, LibraryTab, PlaylistCard, ReleaseCard, ReleaseSort, ReleaseType, Route, TrackRow,
     TrackSort, ViewState,
@@ -121,42 +121,22 @@ fn filter_tracks(pages: &mut PageState, out: &mut Vec<Command>) {
     }
 }
 
-/// The title, then at the end of its row the tools of the tab: the
-/// filter, «только скачанное», the view and the sort, close together.
+/// The title, then at the end of its row the tools of the tab:
+/// «только скачанное», the view and the sort, close together. The filter
+/// is the search bar over the page ([`super::library_bar`]).
 fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let tab = pages.library_tab;
     let lib = &state.library;
-    ui.add_space(8.0);
-    let row = vec2(ui.available_width(), 56.0);
-    let mut filter_below = false;
+    let row = vec2(ui.available_width(), 48.0);
     ui.allocate_ui_with_layout(row, egui::Layout::left_to_right(Align::Center), |ui| {
         ui.label(TypeRole::HeadlineMedium.style().rich("Библиотека", s.on_surface));
-        ui.add_space(24.0);
         if matches!(tab, LibraryTab::Trash | LibraryTab::Downloaded) {
             return;
         }
-        // The filter stays where it is from tab to tab, right after the
-        // title; the tools of the tab come and go at the end of the row.
-        let narrow = ui.available_width() < 640.0;
+        let narrow = ui.available_width() < 480.0;
         let sorts = matches!(tab, LibraryTab::All | LibraryTab::Albums);
         let views = tab != LibraryTab::Tracks;
-        let sort_w = match (sorts, narrow) {
-            (false, _) => 0.0,
-            (true, true) => 48.0,
-            (true, false) => {
-                let label = SORTS.iter().find(|s| s.0 == lib.release_sort).map_or("", |s| s.1);
-                let text = ui.painter().layout_no_wrap(label.to_owned(), TypeRole::LabelLarge.font_id(), s.primary);
-                text.size().x + 72.0
-            }
-        };
-        let tools = 40.0 + if views { 90.0 } else { 0.0 } + sort_w;
-        let w = (ui.available_width() - tools - 16.0).min(480.0);
-        if w >= 200.0 {
-            filter_field(ui, pages, w);
-        } else {
-            filter_below = true;
-        }
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // The sort orders the album grid (the table sorts by its header).
@@ -180,13 +160,6 @@ fn header(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<C
             only_downloaded(ui, state, out);
         });
     });
-    if filter_below {
-        ui.add_space(8.0);
-        let w = ui.available_width();
-        ui.allocate_ui_with_layout(vec2(w, 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
-            filter_field(ui, pages, w);
-        });
-    }
 }
 
 fn sort_button(ui: &mut Ui, cur: ReleaseSort, narrow: bool, out: &mut Vec<Command>) {
@@ -227,82 +200,14 @@ fn only_downloaded(ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
     }
 }
 
-/// What the filter looks through on each tab.
-fn filter_hint(tab: LibraryTab) -> &'static str {
+/// What the filter looks through on each tab (the bar's placeholder).
+pub(super) fn filter_hint(tab: LibraryTab) -> &'static str {
     match tab {
         LibraryTab::Playlists => "Найти плейлист",
         LibraryTab::Albums => "Найти альбом или исполнителя",
         LibraryTab::Artists => "Найти исполнителя",
         LibraryTab::Tracks => "Найти трек, альбом, исполнителя",
         LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => "Найти в библиотеке",
-    }
-}
-
-/// The instant filter: a 40 dp pill (`surface-container-high`, a search
-/// icon, the text, ✕ while there is some). Esc clears it.
-fn filter_field(ui: &mut Ui, pages: &mut PageState, width: f32) {
-    let theme = Theme::get(ui.ctx());
-    let (s, motion) = (theme.scheme, theme.motion);
-    let id = Id::new("lib-filter");
-    let edit_id = id.with("edit");
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
-    let bg = ui.interact(rect, id.with("bg"), Sense::click()).on_hover_cursor(egui::CursorIcon::Text);
-    if bg.clicked() {
-        ui.memory_mut(|m| m.request_focus(edit_id));
-    }
-    let radii = Radii::all(shape::FULL);
-    paint::container(ui.painter(), rect, radii, s.surface_container_high, Stroke::NONE);
-    let layer = anim::fraction(
-        ui.ctx(),
-        id.with("layer"),
-        if bg.contains_pointer() { state_layer::HOVER } else { 0.0 },
-        motion.fast_effects,
-    );
-    paint::state_layer(ui.painter(), rect, radii, s.on_surface, layer);
-    Icon::Search
-        .widget(false, s.on_surface_variant, 20.0)
-        .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(20.0, 20.0)));
-
-    let text = &mut pages.library_filter;
-    let has_text = !text.is_empty();
-    let row_h = ui.ctx().fonts_mut(|f| f.row_height(&TypeRole::BodyLarge.font_id()));
-    let text_rect = Rect::from_min_max(
-        pos2(rect.left() + 44.0, rect.center().y - row_h * 0.5),
-        pos2(rect.right() - if has_text { 44.0 } else { 16.0 }, rect.center().y + row_h * 0.5),
-    );
-    let edit = ui
-        .scope_builder(UiBuilder::new().max_rect(text_rect), |ui| {
-            TextEdit::singleline(text)
-                .id(edit_id)
-                .frame(Frame::NONE)
-                .margin(Margin::ZERO)
-                .font(TypeRole::BodyLarge.font_id())
-                .text_color(s.on_surface)
-                .desired_width(text_rect.width())
-                .vertical_align(Align::Center)
-                .hint_text(
-                    RichText::new(if width < 300.0 { "Найти" } else { filter_hint(pages.library_tab) })
-                        .color(s.on_surface_variant),
-                )
-                .show(ui)
-        })
-        .inner
-        .response
-        .response;
-    // Esc takes the focus away from the field; it also empties it.
-    if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-        text.clear();
-    }
-    if has_text {
-        let slot = Rect::from_center_size(pos2(rect.right() - 22.0, rect.center().y), vec2(32.0, 32.0));
-        let mut child = ui.new_child(UiBuilder::new().max_rect(slot).id_salt("lib-filter-clear"));
-        if child
-            .add(IconButton::new(Icon::Close).size(Size::Xs).tooltip("Сбросить фильтр (Esc)").id_salt("lib-filter-x"))
-            .clicked()
-        {
-            text.clear();
-            edit.request_focus();
-        }
     }
 }
 
@@ -357,15 +262,14 @@ fn no_results(ui: &mut Ui, pages: &mut PageState) {
         LibraryTab::Tracks => "Среди треков",
         LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => "В библиотеке",
     };
-    let body = if q.is_empty() {
-        format!("{among} с этими фильтрами пусто.")
-    } else {
-        format!("{among} нет «{q}». Проверь, как написано, или поищи везде — в строке поиска сверху.")
-    };
-    if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &body, Some("Сбросить")) {
-        pages.library_filter.clear();
-        pages.release_filter = 0;
-        pages.release_source = 0;
+    if q.is_empty() {
+        let body = format!("{among} с этими фильтрами пусто.");
+        if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &body, Some("Сбросить")) {
+            pages.release_filter = 0;
+            pages.release_source = 0;
+        }
+    } else if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &format!("{among} нет «{q}»."), Some("Искать везде")) {
+        pages.search_everywhere = Some(q);
     }
 }
 
@@ -499,20 +403,37 @@ fn found(
         no_results(ui, pages);
         ui.add_space(16.0);
     }
-    // Tracks are searched by the runtime: their own tab, the filter kept.
-    let open = ui
-        .vertical_centered(|ui| {
-            ui.add(
-                crate::components::Button::new("Искать среди треков")
-                    .icon(Icon::MusicNote)
-                    .style(Style::Tonal)
-                    .id_salt("lib-found-tracks"),
-            )
-            .clicked()
+    // Tracks are searched by the runtime: their own tab, the filter kept;
+    // beside it the same text looked for everywhere (an empty answer
+    // offers that itself).
+    let (open, all) = ui
+        .allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let open = ui
+                .add(
+                    crate::components::Button::new("Искать среди треков")
+                        .icon(Icon::MusicNote)
+                        .style(Style::Tonal)
+                        .id_salt("lib-found-tracks"),
+                )
+                .clicked();
+            let all = !nothing
+                && ui
+                    .add(
+                        crate::components::Button::new("Искать везде")
+                            .icon(Icon::Search)
+                            .style(Style::Tonal)
+                            .id_salt("lib-found-all"),
+                    )
+                    .clicked();
+            (open, all)
         })
         .inner;
     if open {
         open_tab(pages, LibraryTab::Tracks, lib.track_sort, out);
+    }
+    if all {
+        pages.search_everywhere = Some(pages.library_filter.trim().to_owned());
     }
     nav
 }

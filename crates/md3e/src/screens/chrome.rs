@@ -810,10 +810,11 @@ mod tests {
         let np = Chrome::player_rows(&ctx, &t, &state, &[Act::Visualizer], true, true);
         assert_eq!(less(&np, &[eq, viz, PlayerAct::Own(Act::Trash)]), list);
         let acts = row_acts(&np);
-        let info = acts.iter().position(|a| *a == PlayerAct::Track(A::Info)).unwrap();
-        assert_eq!(&acts[info - 1..info + 4], [PlayerAct::Track(A::Share), PlayerAct::Track(A::Info), eq, viz, PlayerAct::Track(A::Fetch)]);
+        let share = acts.iter().position(|a| *a == PlayerAct::Track(A::Share)).unwrap();
+        assert_eq!(&acts[share..share + 5], [PlayerAct::Track(A::Share), eq, viz, PlayerAct::Track(A::Info), PlayerAct::Track(A::Fetch)]);
+        // «Источник и качество» first in «Файл», the tags after it.
         let file = row_acts(sub_rows(&np, FILE).unwrap());
-        assert_eq!(file[0], PlayerAct::Track(A::Fetch));
+        assert_eq!(&file[..2], [PlayerAct::Track(A::Info), PlayerAct::Track(A::Fetch)]);
         assert_eq!(file.last(), Some(&PlayerAct::Own(Act::Trash)));
         let top = [Act::Like, Act::Lyrics, Act::Volume];
         let bar = Chrome::player_rows(&ctx, &t, &state, &top, true, false);
@@ -823,6 +824,15 @@ mod tests {
         // Not in the library (no file, no like): nothing to delete.
         let stream = row_acts(&Chrome::player_rows(&ctx, &track(false, false), &state, &[], true, true));
         assert!(!stream.contains(&PlayerAct::Own(Act::Trash)));
+        // No file: «Скачать» in the menu itself (before the sound and
+        // «Файл»), «Источник и качество» in «Файл».
+        let rows = Chrome::player_rows(&ctx, &full(false), &state, &[Act::Visualizer], true, true);
+        let fetch = rows.iter().position(|r| matches!(r, Row::Item(PlayerAct::Track(A::Fetch), _))).expect("«Скачать» on top");
+        let file_at = rows.iter().position(|r| matches!(r, Row::Sub(m, _) if m.label == FILE)).unwrap();
+        assert!(fetch < file_at);
+        let file = row_acts(sub_rows(&rows, FILE).unwrap());
+        assert_eq!(file[0], PlayerAct::Track(A::Info));
+        assert!(!file.contains(&PlayerAct::Track(A::Fetch)));
     }
 
     /// The bar's ⋮ over the page of the playing track's album has no «К
