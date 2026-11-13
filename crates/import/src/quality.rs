@@ -240,19 +240,16 @@ pub fn convert_fake(
             return Err(e.into());
         }
     };
-    if let Err(e) = lib.trash_source(src.id, Some(&trashed_at)) {
-        // The new row would point at a file that is gone.
+    // The new row would point at a file that is gone.
+    let forget_new = || {
         if let Err(f) = lib.forget_source(new.id) {
             log::warn!("the row of {} stays: {f}", dest.display());
         }
-        undo_files();
-        return Err(e.into());
-    }
-    let lrc = path.with_extension("lrc");
-    let new_lrc = dest.with_extension("lrc");
-    if lrc != new_lrc && long_path(&lrc).exists() {
-        let _ = fsutil::move_file(&lrc, &new_lrc);
-    }
+    };
+    // The check moves to the MP3 marked as made from the original before
+    // the original's row goes to the Trash: it is what finds the
+    // conversion to take back («Вернуть FLAC»), so a conversion it could
+    // not be stored for is no conversion at all.
     let moved = QualityCheck {
         made_from: Some(src.codec.clone()),
         ..check.clone()
@@ -262,7 +259,20 @@ pub fn convert_fake(
         None => moved,
     };
     if let Err(e) = lib.put_quality_check(new.id, &moved) {
-        log::warn!("the check of {} is not stored: {e}", dest.display());
+        log::warn!("the check of {} cannot be stored, the conversion is undone: {e}", dest.display());
+        forget_new();
+        undo_files();
+        return Err(e.into());
+    }
+    if let Err(e) = lib.trash_source(src.id, Some(&trashed_at)) {
+        forget_new();
+        undo_files();
+        return Err(e.into());
+    }
+    let lrc = path.with_extension("lrc");
+    let new_lrc = dest.with_extension("lrc");
+    if lrc != new_lrc && long_path(&lrc).exists() {
+        let _ = fsutil::move_file(&lrc, &new_lrc);
     }
     log::info!("fake lossless {} converted to {}", path.display(), dest.display());
     Ok(new)
@@ -416,5 +426,31 @@ mod tests {
         assert!(lib.get_source(c.original).unwrap().unwrap().trashed_at.is_some());
         assert!(Path::new(&c.trash_path).exists(), "the original waits in the Trash");
         assert_eq!(lib.conversions().unwrap().len(), 1, "still undoable");
+    }
+
+    /// Another FLAC of the same track went to the Trash after the
+    /// conversion: «Вернуть FLAC» still pairs the MP3 with the FLAC it was
+    /// made from (at its name), and the exact pair is found by its ids.
+    #[test]
+    fn a_later_trashed_flac_of_the_track_is_not_taken_for_the_original() {
+        let (dir, lib, c, trash, _mp3_path) = converted();
+        let live = dir.path().join("Music").join("Молли (live).flac");
+        std::fs::write(&live, b"live").unwrap();
+        let other = lib
+            .add_source(&Source::new(c.track_id, SourceKind::LocalFile, live.to_string_lossy(), Codec::Flac))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let in_trash = trash_file(&trash, &live).unwrap();
+        lib.trash_source(other.id, Some(&in_trash.to_string_lossy())).unwrap();
+        let all = lib.conversions().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].mp3, all[0].original), (c.mp3, c.original));
+        let exact = lib.conversion(c.mp3, c.original).unwrap().expect("the pair");
+        assert_eq!(exact.trash_path, c.trash_path);
+        assert!(lib.conversion(c.mp3, other.id).unwrap().is_some(), "any trashed pair of the track is answered");
+        restore_conversion(&lib, &trash, &exact).unwrap();
+        assert!(Path::new(&c.original_locator).exists());
+        assert!(in_trash.exists() && !live.exists(), "the other FLAC stays in the Trash");
+        assert!(lib.conversion(c.mp3, c.original).unwrap().is_none(), "taken back");
     }
 }
