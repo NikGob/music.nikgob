@@ -48,11 +48,10 @@ pub struct Snapshot {
 
 impl Queue {
     pub fn snapshot(&self) -> Snapshot {
-        let original = self
-            .original
-            .iter()
-            .filter_map(|o| self.items.iter().position(|e| e.id == o.id))
-            .collect();
+        // Where each entry is, looked up once each (not a scan per entry).
+        let at: std::collections::HashMap<u64, usize> =
+            self.items.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+        let original = self.original.iter().filter_map(|o| at.get(&o.id).copied()).collect();
         Snapshot {
             items: self.items.iter().map(|e| e.track).collect(),
             original,
@@ -590,6 +589,24 @@ mod tests {
         back.set_shuffle(false);
         q.set_shuffle(false);
         assert_eq!(back.tracks(), q.tracks());
+    }
+
+    /// A long shuffled queue saves in time linear in its length (it is
+    /// saved every few seconds on the player's thread) and comes back whole.
+    #[test]
+    fn a_long_queue_snapshots_quickly() {
+        let t = ids(50_000);
+        let mut q = Queue::default();
+        q.set(&t, 0, None);
+        q.set_shuffle(true);
+        let started = std::time::Instant::now();
+        let saved = q.snapshot();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        assert_eq!(saved.original.len(), t.len());
+        let mut back = Queue::default();
+        back.restore(&saved);
+        back.set_shuffle(false);
+        assert_eq!(back.tracks(), t);
     }
 
     fn tracks_of(list: &[Entry]) -> Vec<TrackId> {

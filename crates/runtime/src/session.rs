@@ -74,6 +74,84 @@ fn backup(path: &Path) -> std::path::PathBuf {
     path.with_extension("json.bak")
 }
 
+/// Writes `session.json` on a thread of its own, so the disk (a sync every
+/// few seconds) never holds the player's thread; a newer session waiting
+/// replaces an older one not written yet. [`Self::flush`] (and the drop)
+/// waits until the last one is on disk.
+#[derive(Default)]
+pub(crate) struct Saver {
+    /// The last session handed over.
+    saved: String,
+    tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, String)>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// A write failed: the next save writes even an unchanged session.
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Saver {
+    /// Hands `json` over to be written at `path`, unless it is what was
+    /// handed over last.
+    pub(crate) fn save(&mut self, path: &Path, json: String) {
+        if self.failed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.saved.clear();
+        }
+        if json == self.saved {
+            return;
+        }
+        if self.tx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<(std::path::PathBuf, String)>();
+            let failed = std::sync::Arc::clone(&self.failed);
+            let spawned = std::thread::Builder::new().name("nikgob-session".into()).spawn(move || {
+                while let Ok(mut next) = rx.recv() {
+                    // Only the newest of those waiting.
+                    while let Ok(newer) = rx.try_recv() {
+                        next = newer;
+                    }
+                    let (path, json) = next;
+                    if let Err(e) = Session::write(&path, &json) {
+                        log::warn!("cannot save {}: {e}", path.display());
+                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            });
+            match spawned {
+                Ok(t) => {
+                    self.tx = Some(tx);
+                    self.thread = Some(t);
+                }
+                Err(e) => {
+                    // No thread: written here, as before.
+                    log::warn!("no session writer thread: {e}");
+                    match Session::write(path, &json) {
+                        Ok(()) => self.saved = json,
+                        Err(e) => log::warn!("cannot save {}: {e}", path.display()),
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some(tx) = &self.tx
+            && tx.send((path.to_owned(), json.clone())).is_ok()
+        {
+            self.saved = json;
+        }
+    }
+
+    /// Waits until what was handed over is written.
+    pub(crate) fn flush(&mut self) {
+        self.tx = None;
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for Saver {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 impl Worker {
     /// Brings the last run's queue back, paused on its track.
     pub(crate) fn restore_session(&mut self) {
@@ -132,13 +210,7 @@ impl Worker {
             position_ms: if self.queue.current().is_some() { self.position_now().as_millis() as u64 } else { 0 },
         };
         let Ok(json) = serde_json::to_string_pretty(&session) else { return };
-        if json == self.session_saved {
-            return;
-        }
-        match Session::write(&path, &json) {
-            Ok(()) => self.session_saved = json,
-            Err(e) => log::warn!("cannot save {}: {e}", path.display()),
-        }
+        self.session_saved.save(&path, json);
     }
 }
 
@@ -165,6 +237,30 @@ mod tests {
         assert_eq!(Session::load(&path), session(0.25));
         std::fs::remove_file(&path).unwrap();
         assert_eq!(Session::load(&path), session(0.25));
+    }
+
+    /// The session is written off the caller's thread; a failed write is
+    /// tried again at the next save even when nothing changed.
+    #[test]
+    fn the_saver_writes_on_its_thread_and_retries_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-yet");
+        let path = missing.join("session.json");
+        let json = serde_json::to_string(&session(0.75)).unwrap();
+        let mut saver = Saver::default();
+        saver.save(&path, json.clone());
+        saver.flush();
+        assert!(!path.exists());
+        std::fs::create_dir_all(&missing).unwrap();
+        saver.save(&path, json.clone());
+        saver.flush();
+        assert_eq!(Session::load(&path), session(0.75));
+        // The newest of several waiting is what stays.
+        for v in [0.1, 0.2, 0.3] {
+            saver.save(&path, serde_json::to_string(&session(v)).unwrap());
+        }
+        drop(saver);
+        assert_eq!(Session::load(&path), session(0.3));
     }
 
     /// What autoplay added to continue an album's world is kept by its
