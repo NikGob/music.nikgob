@@ -8,6 +8,7 @@
 //! for a file a power cut still broke.
 
 use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use nikgob_view::Status;
@@ -75,74 +76,116 @@ fn backup(path: &Path) -> std::path::PathBuf {
 }
 
 /// Writes `session.json` on a thread of its own, so the disk (a sync every
-/// few seconds) never holds the player's thread; a newer session waiting
-/// replaces an older one not written yet. [`Self::flush`] (and the drop)
-/// waits until the last one is on disk.
+/// few seconds) never holds the player's thread. One session waits at most:
+/// a newer one replaces it, so a stalled disk never piles snapshots up.
+/// [`Self::flush`] (and the drop) waits until the last one is written and
+/// tries it once more on the caller's thread if that write failed.
 #[derive(Default)]
 pub(crate) struct Saver {
-    /// The last session handed over.
-    saved: String,
-    tx: Option<std::sync::mpsc::Sender<(std::path::PathBuf, String)>>,
+    /// The last session handed over, and where.
+    last: Option<(std::path::PathBuf, Arc<Session>)>,
+    shared: Arc<SaverShared>,
     thread: Option<std::thread::JoinHandle<()>>,
-    /// A write failed: the next save writes even an unchanged session.
-    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[derive(Default)]
+struct SaverShared {
+    slot: Mutex<Slot>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Slot {
+    /// The one session waiting to be written.
+    next: Option<(std::path::PathBuf, Arc<Session>)>,
+    stop: bool,
+    /// The last write failed.
+    failed: bool,
+}
+
+impl SaverShared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Slot> {
+        self.slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Serializes and writes `session`; whether it is on disk.
+fn write_session(path: &Path, session: &Session) -> bool {
+    let written = serde_json::to_string_pretty(session)
+        .map_err(std::io::Error::other)
+        .and_then(|json| Session::write(path, &json));
+    match written {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("cannot save {}: {e}", path.display());
+            false
+        }
+    }
 }
 
 impl Saver {
-    /// Hands `json` over to be written at `path`, unless it is what was
-    /// handed over last.
-    pub(crate) fn save(&mut self, path: &Path, json: String) {
-        if self.failed.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            self.saved.clear();
-        }
-        if json == self.saved {
+    /// Hands `session` over to be written at `path`, unless it is what was
+    /// handed over last and written.
+    pub(crate) fn save(&mut self, path: &Path, session: Session) {
+        let failed = std::mem::take(&mut self.shared.lock().failed);
+        if !failed && self.last.as_ref().is_some_and(|(p, s)| p == path && **s == session) {
             return;
         }
-        if self.tx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<(std::path::PathBuf, String)>();
-            let failed = std::sync::Arc::clone(&self.failed);
-            let spawned = std::thread::Builder::new().name("nikgob-session".into()).spawn(move || {
-                while let Ok(mut next) = rx.recv() {
-                    // Only the newest of those waiting.
-                    while let Ok(newer) = rx.try_recv() {
-                        next = newer;
-                    }
-                    let (path, json) = next;
-                    if let Err(e) = Session::write(&path, &json) {
-                        log::warn!("cannot save {}: {e}", path.display());
-                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            });
-            match spawned {
-                Ok(t) => {
-                    self.tx = Some(tx);
-                    self.thread = Some(t);
-                }
+        let session = Arc::new(session);
+        self.last = Some((path.to_owned(), Arc::clone(&session)));
+        if self.thread.is_none() {
+            let shared = Arc::clone(&self.shared);
+            match std::thread::Builder::new().name("nikgob-session".into()).spawn(move || writer(&shared)) {
+                Ok(t) => self.thread = Some(t),
                 Err(e) => {
                     // No thread: written here, as before.
                     log::warn!("no session writer thread: {e}");
-                    match Session::write(path, &json) {
-                        Ok(()) => self.saved = json,
-                        Err(e) => log::warn!("cannot save {}: {e}", path.display()),
-                    }
+                    self.shared.lock().failed = !write_session(path, &session);
                     return;
                 }
             }
         }
-        if let Some(tx) = &self.tx
-            && tx.send((path.to_owned(), json.clone())).is_ok()
-        {
-            self.saved = json;
-        }
+        self.shared.lock().next = Some((path.to_owned(), session));
+        self.shared.changed.notify_all();
     }
 
-    /// Waits until what was handed over is written.
+    /// Waits until what was handed over is written; a last write that
+    /// failed is tried once more here (the final save at the end of a run
+    /// is not lost to a passing failure).
     pub(crate) fn flush(&mut self) {
-        self.tx = None;
         if let Some(t) = self.thread.take() {
+            self.shared.lock().stop = true;
+            self.shared.changed.notify_all();
             let _ = t.join();
         }
+        let failed = std::mem::take(&mut self.shared.lock().failed);
+        if failed && let Some((path, session)) = &self.last {
+            self.shared.lock().failed = !write_session(path, session);
+        }
+        self.shared.lock().stop = false;
+    }
+}
+
+/// The writing thread: the waiting session, one at a time, until stopped
+/// with nothing left.
+fn writer(shared: &SaverShared) {
+    loop {
+        let (path, session) = {
+            let mut slot = shared.lock();
+            loop {
+                if let Some(next) = slot.next.take() {
+                    break next;
+                }
+                if slot.stop {
+                    return;
+                }
+                slot = shared.changed.wait(slot).unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        };
+        let ok = write_session(&path, &session);
+        let mut slot = shared.lock();
+        slot.failed = !ok;
+        shared.changed.notify_all();
     }
 }
 
@@ -209,8 +252,8 @@ impl Worker {
             queue: self.queue.snapshot(),
             position_ms: if self.queue.current().is_some() { self.position_now().as_millis() as u64 } else { 0 },
         };
-        let Ok(json) = serde_json::to_string_pretty(&session) else { return };
-        self.session_saved.save(&path, json);
+        // Serialized and written on the saver's thread.
+        self.session_saved.save(&path, session);
     }
 }
 
@@ -246,21 +289,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("not-yet");
         let path = missing.join("session.json");
-        let json = serde_json::to_string(&session(0.75)).unwrap();
         let mut saver = Saver::default();
-        saver.save(&path, json.clone());
+        saver.save(&path, session(0.75));
         saver.flush();
         assert!(!path.exists());
         std::fs::create_dir_all(&missing).unwrap();
-        saver.save(&path, json.clone());
+        // Unchanged, but the last write failed: written again.
+        saver.save(&path, session(0.75));
         saver.flush();
         assert_eq!(Session::load(&path), session(0.75));
-        // The newest of several waiting is what stays.
+        // The newest of several is what stays.
         for v in [0.1, 0.2, 0.3] {
-            saver.save(&path, serde_json::to_string(&session(v)).unwrap());
+            saver.save(&path, session(v));
         }
         drop(saver);
         assert_eq!(Session::load(&path), session(0.3));
+    }
+
+    /// The last save of a run fails on its thread after the final save saw
+    /// nothing new to hand over: the flush at the end writes it after all.
+    #[test]
+    fn the_final_session_is_not_lost_to_a_failed_write_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("later");
+        let path = missing.join("session.json");
+        let mut saver = Saver::default();
+        saver.save(&path, session(0.5));
+        let t = std::time::Instant::now();
+        while !saver.shared.lock().failed {
+            assert!(t.elapsed() < Duration::from_secs(10), "the write did not fail");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::create_dir_all(&missing).unwrap();
+        saver.flush();
+        assert_eq!(Session::load(&path), session(0.5));
     }
 
     /// What autoplay added to continue an album's world is kept by its
