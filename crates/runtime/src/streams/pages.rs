@@ -135,6 +135,12 @@ impl PageCache {
     }
 }
 
+/// What playing an artist of a service plays: its newest release (the
+/// discography comes newest first), as «Слушать» of its page does.
+pub(crate) fn newest_release(a: &nikgob_core::streaming::StreamArtist) -> Option<RemoteId> {
+    a.albums.first().map(|al| al.id.clone())
+}
+
 /// The row of a service's track `t`, `track` its library track if it has
 /// one (it reads only the library: the home's builder makes rows too).
 pub(crate) fn stream_row_of(lib: &nikgob_library::Library, t: &StreamTrack, track: Option<TrackId>) -> v::StreamTrackRow {
@@ -546,6 +552,12 @@ impl Worker {
         self.with_page((Kind::Album, id), then);
     }
 
+    /// An artist of a service played, next or to the queue: its newest
+    /// release, as «Слушать» of its page plays.
+    pub(crate) fn with_artist(&mut self, id: RemoteId, then: Then) {
+        self.with_page((Kind::Artist, id), then);
+    }
+
     pub(crate) fn with_playlist(&mut self, id: RemoteId, then: Then) {
         self.with_page((Kind::Playlist, id), then);
     }
@@ -576,6 +588,16 @@ impl Worker {
         };
         if let (Then::Follow, PageData::Playlist(p)) = (&then, &data) {
             self.follow_playlist(p);
+            return;
+        }
+        // An artist ([`Self::with_artist`]): its newest release, fetched in
+        // turn and taken as an album.
+        if let PageData::Artist(a) = &data {
+            match newest_release(a) {
+                Some(album) if matches!(then, Then::Play { .. } | Then::Next | Then::Enqueue) => self.with_album(album, then),
+                Some(_) => {}
+                None => self.toast("Нечего играть", None),
+            }
             return;
         }
         let (tracks, name, title, ctx, album, playlist) = match &data {

@@ -1353,6 +1353,7 @@ impl Md3eUi {
             "lyrics-highlight" => S::LyricsWordsAll,
             "lyrics-check" => S::LyricsCheck,
             "lyrics-lead" => S::LyricsLead,
+            "lyrics-edges" => S::LyricsSoftEdges,
             "lyrics-streams" => S::LyricsStreamKeep,
             "lyrics-presets" => S::Preset(nikgob_view::presets::Area::Lyrics),
             "home-sections" => S::HomeSections,

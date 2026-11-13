@@ -3290,6 +3290,9 @@ pub enum Command {
     /// queue (what «Слушать» would play of it).
     PlayPlaylistNext(PlaylistId),
     EnqueuePlaylist(PlaylistId),
+    /// An artist's tracks right after the current track / to the end of
+    /// the queue (what the queue gets of them).
+    PlayArtistNext(ArtistId),
     EnqueueArtist(ArtistId),
     PlayQueueEntry(u64),
     RemoveFromQueue(u64),
@@ -3560,6 +3563,15 @@ pub enum Command {
     /// [`Command::PlayReleaseNext`] / [`Command::EnqueueRelease`].
     PlayStreamAlbumNext(RemoteId),
     EnqueueStreamAlbum(RemoteId),
+    /// The same for a playlist of a service.
+    PlayStreamPlaylistNext(RemoteId),
+    EnqueueStreamPlaylist(RemoteId),
+    /// An artist of a service the library does not know: its newest
+    /// release played, after the current track or at the end of the queue
+    /// (as «Слушать» of its page plays it).
+    PlayStreamArtist(RemoteId),
+    PlayStreamArtistNext(RemoteId),
+    EnqueueStreamArtist(RemoteId),
     /// «Не нравится» (`dislike`) or its undo for a track: out of every
     /// recommendation, skipped now when it plays ([`Prefs::dislike_skips`]),
     /// its like gone. A track liked or played to the end often is asked
@@ -3708,6 +3720,10 @@ pub enum Command {
     /// «Скачать всё» of a mix whose songs have no file yet («Ещё не
     /// скачано»): every stream song of it goes to «Хочу скачать».
     DownloadMix { id: MixId },
+    /// «Сыграть следующим» / «В очередь» of a tile of the day or the
+    /// daylist: its songs after the current track / at the end of the queue.
+    PlayMixNext { id: MixId },
+    EnqueueMix { id: MixId },
 }
 
 impl Default for Prefs {

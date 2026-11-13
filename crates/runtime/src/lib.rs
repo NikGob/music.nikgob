@@ -1281,6 +1281,20 @@ impl Worker {
                 }
                 self.command(Command::Enqueue(ids));
             }
+            Command::PlayArtistNext(id) => {
+                let rows = self
+                    .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))
+                    .unwrap_or_default();
+                let ids = self.playable(&rows, None);
+                if ids.is_empty() {
+                    return;
+                }
+                self.queue.play_next(&ids);
+                self.preload_next();
+                self.publish_player();
+                let name = self.lib.get_artist(id).ok().flatten().map(|a| a.name).unwrap_or_default();
+                self.toast(if name.is_empty() { "Сыграет следующим".to_owned() } else { format!("Следующим: {name}") }, None);
+            }
             Command::EnqueueArtist(id) => {
                 let rows = self
                     .log_err("исполнитель", self.lib.tracks_of_artist(id, 0, 2000))
@@ -1662,6 +1676,11 @@ impl Worker {
             | Command::EnqueueStream(_)
             | Command::PlayStreamAlbumNext(_)
             | Command::EnqueueStreamAlbum(_)
+            | Command::PlayStreamPlaylistNext(_)
+            | Command::EnqueueStreamPlaylist(_)
+            | Command::PlayStreamArtist(_)
+            | Command::PlayStreamArtistNext(_)
+            | Command::EnqueueStreamArtist(_)
             | Command::LikeStream { .. }
             | Command::StreamInLibrary { .. }
             | Command::LikeStreamAlbum { .. }
@@ -1707,7 +1726,9 @@ impl Worker {
             | Command::PlayWave { .. }
             | Command::SetWave(_)
             | Command::OtherVibe
-            | Command::DownloadMix { .. }) => {
+            | Command::DownloadMix { .. }
+            | Command::PlayMixNext { .. }
+            | Command::EnqueueMix { .. }) => {
                 if let Some(c) = self.recs_command(c) {
                     log::warn!("unhandled {c:?}");
                 }

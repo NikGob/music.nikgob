@@ -868,6 +868,8 @@ pub struct RowOutput {
     pub clicked: bool,
     /// ♡ was clicked.
     pub liked: bool,
+    /// The link of the artist line clicked ([`song_row_linked`]), by index.
+    pub link: Option<usize>,
 }
 
 /// A song row (§3.4, §3.7): 72 high, reaching 8 into the margins so the
@@ -885,12 +887,30 @@ pub fn song_row(
     liked: Option<bool>,
     salt: impl std::hash::Hash + std::fmt::Debug,
 ) -> RowOutput {
+    song_row_linked(ui, cell, title, artist, &[], cover, playing, liked, salt)
+}
+
+/// [`song_row`] with `links` (byte ranges of `artist`) on its artist line:
+/// each artist is a link as in a track row, underlined under the pointer.
+#[allow(clippy::too_many_arguments)]
+pub fn song_row_linked(
+    ui: &mut Ui,
+    cell: Rect,
+    title: &str,
+    artist: &str,
+    links: &[std::ops::Range<usize>],
+    cover: Option<String>,
+    playing: bool,
+    liked: Option<bool>,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+) -> RowOutput {
     let s = Theme::get(ui.ctx()).scheme;
     let id = ui.id().with(("home-row", salt));
     let row = cell.expand2(vec2(8.0, 0.0));
     let resp = ui.interact(row, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let (squish, layer, _) = feedback(ui, id, &resp, 0.98);
     let mut like = false;
+    let mut link = None;
     scaled(ui, row.center(), squish, |ui| {
         paint::state_layer(ui.painter(), row, Radii::all(shape::LARGE), s.on_surface, layer);
         let c = Rect::from_min_size(pos2(cell.left(), cell.top() + 8.0), vec2(56.0, 56.0));
@@ -904,6 +924,8 @@ pub fn song_row(
         let y = cell.center().y - (t.size().y + a.size().y) / 2.0;
         let th = t.size().y;
         ui.painter().galley(pos2(left, y), t, tc);
+        // The artists are links, as in a track row.
+        link = crate::components::links::interact_links(ui, id.with("links"), &a, pos2(left, y + th), links, s.on_surface_variant).0;
         ui.painter().galley(pos2(left, y + th), a, s.on_surface_variant);
         if let Some(on) = liked {
             let slot = Rect::from_center_size(pos2(row.right() - 8.0 - 20.0, cell.center().y), vec2(40.0, 40.0));
@@ -917,7 +939,7 @@ pub fn song_row(
             like = ui.put(slot, b).clicked();
         }
     });
-    RowOutput { clicked: resp.clicked() && !like, liked: like, response: resp }
+    RowOutput { clicked: resp.clicked() && !like && link.is_none(), liked: like, link, response: resp }
 }
 
 // ---- Tile of the day.
@@ -953,7 +975,7 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
         let trail = if playing { 48.0 } else { 16.0 };
         let w = (cell.right() - trail - left).max(10.0);
         let title_c = if playing { s.primary } else { s.on_surface };
-        let k = text(ui, &m.kicker, TypeRole::LabelMedium.style(), s.on_surface_variant, w, 1);
+        let k = text(ui, &kicker_case(&m.kicker), TypeRole::LabelMedium.style(), s.on_surface_variant, w, 1);
         let t = text(ui, &m.title, TypeRole::TitleMedium.style(), title_c, w, 2);
         let d = text(ui, &m.subtitle, TypeRole::BodyMedium.style(), s.on_surface_variant, w, 1);
         let h = k.size().y + 4.0 + t.size().y + d.size().y;
@@ -986,6 +1008,8 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
     let more_clicked = more.as_ref().is_some_and(Response::clicked);
     match picked.and_then(|k| of_day_rows().get(k).copied()) {
         Some(OfDayItem::Play) => out.push(Command::PlayMix { id: m.id }),
+        Some(OfDayItem::Next) => out.push(Command::PlayMixNext { id: m.id }),
+        Some(OfDayItem::Queue) => out.push(Command::EnqueueMix { id: m.id }),
         Some(OfDayItem::Download) => out.push(Command::DownloadMix { id: m.id }),
         None if play || (resp.clicked() && !more_clicked) => out.push(Command::PlayMix { id: m.id }),
         None => {}
@@ -996,19 +1020,25 @@ pub fn of_day(ui: &mut Ui, cell: Rect, m: &MixCard, photo: Option<&str>, i: usiz
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OfDayItem {
     Play,
+    /// «Сыграть следующим» / «В очередь»: its songs, as a mix card's.
+    Next,
+    Queue,
     /// «Скачать недостающие»: its songs without a file to «Хочу скачать».
     Download,
 }
 
-/// The menu of a tile of the day: what its click does, and what it lacks
-/// (the runtime knows which of its songs those are).
-pub fn of_day_rows() -> [OfDayItem; 2] {
-    [OfDayItem::Play, OfDayItem::Download]
+/// The menu of a tile of the day: what its click does, its songs next or
+/// to the queue (as a mix card's menu has them), and what it lacks (the
+/// runtime knows which of its songs those are).
+pub fn of_day_rows() -> [OfDayItem; 4] {
+    [OfDayItem::Play, OfDayItem::Next, OfDayItem::Queue, OfDayItem::Download]
 }
 
 fn of_day_menu(key: Id) -> Menu {
     Menu::new(key)
         .item(MenuItem::new("Слушать").icon(Icon::PlayArrow))
+        .item(MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic))
+        .item(MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic))
         .divider()
         .item(MenuItem::new("Скачать недостающие").icon(Icon::Download))
 }
@@ -1089,6 +1119,22 @@ pub fn shuffle<T>(items: &mut [T]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tile of the day plays next and to the queue as a mix card does,
+    /// its download last.
+    #[test]
+    fn a_tile_of_the_day_plays_next_and_queues() {
+        assert_eq!(of_day_rows(), [OfDayItem::Play, OfDayItem::Next, OfDayItem::Queue, OfDayItem::Download]);
+    }
+
+    /// An all-capital kicker reads in the tiles' case; one in its own case stays.
+    #[test]
+    fn a_kicker_reads_as_the_tiles_write_theirs() {
+        assert_eq!(kicker_case("НА ВЕЧЕР"), "На вечер");
+        assert_eq!(kicker_case("По годам"), "По годам");
+        assert_eq!(kicker_case("Потому что нравится Кино"), "Потому что нравится Кино");
+        assert_eq!(kicker_case(""), "");
+    }
 
     /// The heart beats twice a period (the second softer), rests between
     /// the beats, and never shrinks.
@@ -1223,3 +1269,18 @@ mod tests {
     }
 }
 
+
+/// A tile's kicker as the tiles of the day write theirs: a capital, the
+/// rest small («НА ВЕЧЕР» of the daylist reads «На вечер» beside «По
+/// годам»). One written in its own case (a name in it) stays as it is.
+pub fn kicker_case(kicker: &str) -> String {
+    if kicker.chars().any(char::is_lowercase) {
+        return kicker.to_owned();
+    }
+    let lower = kicker.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}

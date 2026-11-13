@@ -629,13 +629,14 @@ pub struct PlaylistMenuOf<'a> {
 }
 
 /// The sync mode as a choice of a linked playlist's menu: each says what
-/// it does; «Не синхронизировать» (the link stays, nothing syncs) stops it.
+/// it does; «Выключить синхронизацию» (the link stays, the playlist stays
+/// as it is, nothing syncs) stops it.
 pub fn sync_menu_label(m: nikgob_view::PlaylistSyncMode) -> &'static str {
     use nikgob_view::PlaylistSyncMode as M;
     match m {
         M::TwoWay => "Изменения в обе стороны",
         M::Follow => "Только получать изменения",
-        M::Once => "Не синхронизировать",
+        M::Once => "Выключить синхронизацию",
     }
 }
 
@@ -670,10 +671,17 @@ pub fn playlist_rows(o: PlaylistMenuOf<'_>) -> Vec<Row<PlaylistAct>> {
         rows.push(Row::Item(A::Edit, MenuItem::new(edit).icon(Icon::Edit)));
     }
     if let Some((service, mode)) = o.sync {
+        use nikgob_view::PlaylistSyncMode as M;
         rows.push(Row::Divider);
         rows.push(Row::Label(format!("Синхронизация с {service}")));
-        for &m in nikgob_view::PlaylistSyncMode::ALL {
+        // The two ways it can sync, the one on marked; while it is off
+        // neither is, and a pick turns it on again.
+        for m in [M::TwoWay, M::Follow] {
             rows.push(Row::Item(A::Sync(m), MenuItem::new(sync_menu_label(m)).icon(Icon::Sync).selected(m == mode)));
+        }
+        // Off is an action of its own while it syncs, not a third way.
+        if mode != M::Once {
+            rows.push(Row::Item(A::Sync(M::Once), MenuItem::new(sync_menu_label(M::Once)).icon(Icon::Block)));
         }
     }
     let link = o.sync.is_none() && o.can_link;
@@ -1015,6 +1023,7 @@ pub enum ArtistAct {
     Play,
     Shuffle,
     Radio,
+    Next,
     Queue,
     Follow,
     Ban,
@@ -1031,6 +1040,7 @@ pub fn artist_rows(a: &ArtistCard, on_page: bool, marks: &nikgob_view::DislikesV
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
         rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
     }
+    rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
     rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
     rows.push(Row::Divider);
     if !on_page {
@@ -1046,6 +1056,7 @@ pub fn artist_apply(act: ArtistAct, a: &ArtistCard, marks: &nikgob_view::Dislike
         ArtistAct::Play => Command::PlayArtist { id: a.id, shuffle: false },
         ArtistAct::Shuffle => Command::PlayArtist { id: a.id, shuffle: true },
         ArtistAct::Radio => Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(a.id) },
+        ArtistAct::Next => Command::PlayArtistNext(a.id),
         ArtistAct::Queue => Command::EnqueueArtist(a.id),
         ArtistAct::Follow => Command::Like(LikeTarget::Artist(a.id), !a.liked),
         ArtistAct::Ban => super::ban_command(a.id, marks),
@@ -2000,9 +2011,16 @@ mod menu_tests {
             can_link: false,
         });
         let l = labels(&rows);
-        for want in ["Изменения в обе стороны", "Только получать изменения", "Не синхронизировать"] {
+        for want in ["Изменения в обе стороны", "Только получать изменения", "Выключить синхронизацию"] {
             assert!(l.iter().any(|x| x == want), "{want} missing from {l:?}");
         }
+        assert!(rows.iter().any(|r| matches!(r, Row::Item(PlaylistAct::Sync(PlaylistSyncMode::TwoWay), i) if i.selected)));
+        // Off: the two ways to turn it on, neither marked, and no way to
+        // turn it off again.
+        let off = playlist_rows(PlaylistMenuOf { sync: Some(("YouTube Music", PlaylistSyncMode::Once)), ..Default::default() });
+        assert!(!labels(&off).iter().any(|x| x == "Выключить синхронизацию"));
+        assert!(!off.iter().any(|r| matches!(r, Row::Item(PlaylistAct::Sync(_), i) if i.selected)));
+        assert_eq!(off.iter().filter(|r| matches!(r, Row::Item(PlaylistAct::Sync(_), _))).count(), 2);
         assert!(rows.iter().any(|r| matches!(r, Row::Label(t) if t == "Синхронизация с YouTube Music")));
         let acts = row_acts(&rows);
         assert!(!acts.contains(&PlaylistAct::Link));
@@ -2179,8 +2197,8 @@ mod menu_tests {
             .filter(|x| !matches!(x, ArtistAct::Play | ArtistAct::Shuffle | ArtistAct::Radio | ArtistAct::Follow))
             .collect();
         assert_eq!(shared, page);
-        assert_eq!(page, [ArtistAct::Queue, ArtistAct::Ban]);
-        assert_eq!(labels(&artist_rows(&a, true, &marks))[0], "В очередь");
+        assert_eq!(page, [ArtistAct::Next, ArtistAct::Queue, ArtistAct::Ban]);
+        assert_eq!(&labels(&artist_rows(&a, true, &marks))[..2], ["Сыграть следующим", "В очередь"]);
     }
 
     fn track(has_local: bool) -> nikgob_view::TrackRow {

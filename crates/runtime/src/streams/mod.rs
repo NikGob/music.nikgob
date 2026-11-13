@@ -666,6 +666,11 @@ impl Worker {
             }
             Command::PlayStreamAlbumNext(album) => self.with_album(album, pages::Then::Next),
             Command::EnqueueStreamAlbum(album) => self.with_album(album, pages::Then::Enqueue),
+            Command::PlayStreamPlaylistNext(playlist) => self.with_playlist(playlist, pages::Then::Next),
+            Command::EnqueueStreamPlaylist(playlist) => self.with_playlist(playlist, pages::Then::Enqueue),
+            Command::PlayStreamArtist(artist) => self.with_artist(artist, pages::Then::Play { start: None, shuffle: false }),
+            Command::PlayStreamArtistNext(artist) => self.with_artist(artist, pages::Then::Next),
+            Command::EnqueueStreamArtist(artist) => self.with_artist(artist, pages::Then::Enqueue),
             Command::LikeStream { track, on } => self.like_stream(&track, on),
             Command::StreamInLibrary { track, on } => self.stream_in_library(&track, on),
             Command::LikeStreamAlbum { album, on } => self.with_album(album, pages::Then::Like(on)),
