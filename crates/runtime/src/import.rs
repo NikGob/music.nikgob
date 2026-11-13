@@ -149,6 +149,11 @@ pub(crate) fn failed_words(failed: usize, wrong: &[String]) -> Option<String> {
 /// Ids of history entries loaded from the job log (above any job id of
 /// this session).
 pub(crate) const LOGGED_ID: u64 = 1 << 40;
+/// The bit of the job of a move of the masters folder in `jobs`.
+const MOVE_JOB: u64 = 1 << 40;
+/// An import that waits ([`Worker::start_later_imports`]): its files, its
+/// title, where they came from, what they are for.
+pub(crate) type LaterImport = (Vec<PathBuf>, String, SourceOrigin, nikgob_import::ImportTargets);
 
 /// A persisted job as a history row; `kind_bit` is [`IMPORT_ID`] or 0.
 pub(crate) fn logged_job(e: &nikgob_library::JobLogEntry, kind_bit: u64) -> v::Job {
@@ -415,6 +420,12 @@ impl ImportService {
 
     pub(crate) fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
         self.rt.block_on(f)
+    }
+
+    /// A move of the masters folder runs (its job is in `jobs` until its
+    /// end is handled).
+    pub(crate) fn moving_masters(&self) -> bool {
+        self.jobs.keys().any(|id| id & MOVE_JOB != 0)
     }
 
     pub(crate) fn idle(&self) -> bool {
@@ -687,6 +698,24 @@ impl Worker {
         self.publish_downloads();
     }
 
+    /// A stopped-torrent cleanup ([`crate::torrents`]) or a move of the
+    /// masters folder runs: no import starts meanwhile (it could read a
+    /// payload the cleanup deletes, or put a master in the folder being
+    /// moved), and neither starts while the other runs.
+    pub(crate) fn file_jobs_busy(&self) -> bool {
+        self.torrents.cleaning || self.import.as_ref().is_some_and(ImportService::moving_masters)
+    }
+
+    /// The imports that waited for [`Self::file_jobs_busy`], once it is over.
+    pub(crate) fn start_later_imports(&mut self) {
+        if self.file_jobs_busy() {
+            return;
+        }
+        for (paths, title, origin, targets) in std::mem::take(&mut self.torrents.imports_after) {
+            self.import_for(paths, title, origin, targets);
+        }
+    }
+
     /// An import whose files are meant for `targets` (a wishlist item).
     pub(crate) fn import_for(
         &mut self,
@@ -695,13 +724,19 @@ impl Worker {
         origin: SourceOrigin,
         targets: nikgob_import::ImportTargets,
     ) -> bool {
-        let Some(svc) = &mut self.import else {
+        if self.import.is_none() {
             self.toast("Импорт недоступен", None);
             return false;
-        };
+        }
         if paths.is_empty() {
             return false;
         }
+        if self.file_jobs_busy() {
+            log::info!("import «{title}» waits for the cleanup or the masters move");
+            self.torrents.imports_after.push((paths, title, origin, targets));
+            return true;
+        }
+        let Some(svc) = &mut self.import else { return false };
         let wishlist = targets.wishlist;
         let job = {
             let _guard = svc.rt.enter();
@@ -896,6 +931,9 @@ impl Worker {
                         self.toast(format!("Не удалось перенести FLAC: {err}"), None);
                     }
                 }
+                // Imports asked for while it moved start now, into the
+                // folder it moved to.
+                self.start_later_imports();
             }
             Internal::Enrich(ev) => self.enrich_event(ev),
             Internal::LyricsFetched(track, source, got) => self.lyrics_fetched(track, source, got),
@@ -1368,6 +1406,13 @@ impl Worker {
     /// new directory or drive, verifying every file's BLAKE3 hash before
     /// deleting the old copy.
     pub(crate) fn move_masters_dir(&mut self, chosen: PathBuf) {
+        // A cleanup that runs writes the folder it saw when it started: the
+        // move waits for its end, then takes what it put there.
+        if self.torrents.cleaning {
+            log::info!("the masters folder moves to {} once the torrent cleanup ends", chosen.display());
+            self.torrents.move_after = Some(chosen);
+            return;
+        }
         let Some(svc) = &mut self.import else {
             self.toast("Перенос папки FLAC недоступен", None);
             return;
@@ -1404,7 +1449,7 @@ impl Worker {
         svc.apply_reconfigure();
 
         svc.next_move_id += 1;
-        let job_id = (1u64 << 40) | svc.next_move_id;
+        let job_id = MOVE_JOB | svc.next_move_id;
         svc.jobs.insert(
             job_id,
             Progress {

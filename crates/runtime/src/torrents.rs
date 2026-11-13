@@ -49,13 +49,18 @@ pub(crate) struct Torrents {
     /// Finished torrents whose payload waits for the importer to go idle.
     cleanup: Vec<(String, Vec<PathBuf>)>,
     /// A cleanup job runs ([`Worker::run_cleanup`]).
-    cleaning: bool,
+    pub(crate) cleaning: bool,
     /// Payload files a cleanup could not take, for a later one.
     cleanup_retry: Vec<(String, Vec<PathBuf>)>,
     /// Cleanup jobs in a row that left files behind.
     cleanup_failures: u32,
     /// `cleanup_retry` waits for this.
     cleanup_after: Option<Instant>,
+    /// Imports asked for while a cleanup or a move of the masters folder
+    /// ran: started once both are over.
+    pub(crate) imports_after: Vec<crate::import::LaterImport>,
+    /// A move of the masters folder asked for while a cleanup ran.
+    pub(crate) move_after: Option<PathBuf>,
     history: VecDeque<v::Job>,
     last_policy: Instant,
     last_view: Option<(Vec<v::Job>, Vec<v::SeedRow>)>,
@@ -82,6 +87,8 @@ impl Torrents {
             cleaning: false,
             cleanup_retry: Vec::new(),
             cleanup_failures: 0,
+            imports_after: Vec::new(),
+            move_after: None,
             cleanup_after: None,
             history: VecDeque::new(),
             last_policy: Instant::now(),
@@ -825,6 +832,7 @@ impl Worker {
         let due = self.torrents.cleanup_after.is_none_or(|at| Instant::now() >= at);
         if (self.torrents.cleanup.is_empty() && !(due && !self.torrents.cleanup_retry.is_empty()))
             || self.torrents.cleaning
+            || !self.torrents.imports_after.is_empty()
             || !self.import.as_ref().is_some_and(|s| s.quiet())
         {
             return;
@@ -866,6 +874,12 @@ impl Worker {
             self.torrents.cleanup_failures = 0;
             self.torrents.cleanup_after = None;
         }
+        // What waited for it: the move of the masters folder first (its
+        // imports then wait for it in turn), then the imports.
+        if let Some(dir) = self.torrents.move_after.take() {
+            self.move_masters_dir(dir);
+        }
+        self.start_later_imports();
     }
 
     pub(crate) fn torrent_prefs(&mut self, p: &v::Prefs) {
@@ -891,11 +905,15 @@ fn cleanup_retry_delay(failures: u32) -> Duration {
 /// The files of stopped torrents leave `Downloads/`: a lossless master of the
 /// library among them is copied into the masters folder and verified (size
 /// and hash), the masters' rows are pointed at the copy, and only then is the
-/// payload file deleted; every other file is deleted. Runs on a blocking
-/// thread, holding the masters folder ([`nikgob_import::master_writes`]) so
-/// no import or folder move writes there meanwhile. Returns, per torrent,
-/// the files that stay for a later try (masters not read, a master not
-/// copied or not repointed, a file that could not be deleted).
+/// payload file deleted; a master an earlier try repointed is known by its
+/// hash and checked the same way; a cue sheet goes only when its image's
+/// copy of it is the same ([`sheet_kept`]); every other file is deleted.
+/// Runs on a blocking thread, holding the masters folder
+/// ([`nikgob_import::master_writes`]); no import and no move of the masters
+/// folder starts while it runs ([`Worker::file_jobs_busy`]). Returns, per
+/// torrent, the files that stay for a later try (masters not read, a master
+/// not copied or not repointed, a sheet without its copy, a file that could
+/// not be read or deleted).
 pub(crate) fn clean_payloads(
     lib: &nikgob_library::Library,
     cfg: &nikgob_import::ImportConfig,
@@ -913,6 +931,13 @@ pub(crate) fn clean_payloads(
                 continue;
             }
         };
+        // Masters an earlier try pointed at their copy (its payload could
+        // not be deleted then): known again by their hash, never taken for
+        // a file nobody needs.
+        let repointed: Vec<&nikgob_core::model::Master> = masters
+            .iter()
+            .filter(|m| matches!(&m.origin, Some(SourceOrigin::Torrent { path_in_torrent, .. }) if Path::new(path_in_torrent).is_absolute()))
+            .collect();
         let mut kept = Vec::new();
         for f in files {
             let rel = f
@@ -920,18 +945,34 @@ pub(crate) fn clean_payloads(
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             // Every track of a single-file rip has the image as its master.
-            let of_file: Vec<_> = masters
+            let mut of_file: Vec<_> = masters
                 .iter()
                 .filter(|m| {
                     matches!(&m.origin, Some(SourceOrigin::Torrent { path_in_torrent, .. }) if *path_in_torrent == rel)
                 })
                 .collect();
+            let is_sheet = f.extension().is_some_and(|e| e.eq_ignore_ascii_case("cue"));
+            if of_file.is_empty() && !is_sheet && !repointed.is_empty() {
+                match nikgob_import::fsutil::hash_file(&f) {
+                    Ok(h) => of_file = repointed.iter().copied().filter(|m| m.file_hash == h).collect(),
+                    Err(_) if !f.exists() => {}
+                    Err(e) => {
+                        log::warn!("{} is not read, it stays: {e}", f.display());
+                        kept.push(f);
+                        continue;
+                    }
+                }
+            }
             let gone = match of_file.first() {
                 Some(m) => {
                     let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                     let dest = cfg.masters_dir().join(format!("{}.{ext}", m.file_hash));
                     let tracks: Vec<_> = of_file.iter().map(|m| m.track_id).collect();
                     keep_master(lib, &f, &dest, &m.file_hash, &tracks)
+                }
+                None if is_sheet && !sheet_kept(&f, &cfg.masters_dir(), &masters) => {
+                    log::warn!("the cue sheet {} has no verified copy with its image, it stays", f.display());
+                    false
                 }
                 None => match std::fs::remove_file(&f) {
                     Ok(()) => true,
@@ -955,6 +996,27 @@ pub(crate) fn clean_payloads(
         }
     }
     left
+}
+
+/// A cue sheet of the payload may go: the torrent has no disc image among
+/// its masters (an image is the master of two tracks or more), or the
+/// sheet kept with one of its images (`<masters>/<hash>.cue`) is this very
+/// sheet, byte for byte. A sheet whose copy failed or differs stays: it can
+/// be the only copy of the image's track boundaries.
+fn sheet_kept(sheet: &Path, masters_dir: &Path, masters: &[nikgob_core::model::Master]) -> bool {
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for m in masters {
+        *count.entry(m.file_hash.as_str()).or_default() += 1;
+    }
+    let images: Vec<&str> = count.into_iter().filter(|(_, n)| *n >= 2).map(|(h, _)| h).collect();
+    if images.is_empty() {
+        return true;
+    }
+    let bytes = match std::fs::read(sheet) {
+        Ok(b) => b,
+        Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
+    };
+    images.iter().any(|h| std::fs::read(masters_dir.join(format!("{h}.cue"))).is_ok_and(|kept| kept == bytes))
 }
 
 /// A payload file that is the master of `tracks` goes to `dest`: copied and
@@ -1052,6 +1114,9 @@ mod tests {
         let hash = nikgob_import::fsutil::hash_file(&image).unwrap();
         let lib = Library::open_in_memory().unwrap();
         let tracks = [master_of(&lib, "ih", &hash, "Album/CDImage.flac"), master_of(&lib, "ih", &hash, "Album/CDImage.flac")];
+        // The import kept its sheet with it.
+        std::fs::create_dir_all(cfg.masters_dir()).unwrap();
+        std::fs::write(cfg.masters_dir().join(format!("{hash}.cue")), b"FILE").unwrap();
 
         let left = clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone(), album.join("CDImage.cue")])]);
         assert!(left.is_empty(), "{left:?}");
@@ -1089,6 +1154,92 @@ mod tests {
         assert_eq!(cleanup_retry_delay(1), Duration::from_secs(60));
         assert_eq!(cleanup_retry_delay(2), Duration::from_secs(120));
         assert_eq!(cleanup_retry_delay(40), Duration::from_secs(86_400));
+    }
+
+    /// A master an earlier try copied and repointed but could not delete:
+    /// known again by its hash, its copy checked again before the payload
+    /// goes (copied again when the copy went missing or went bad); kept
+    /// when the masters folder cannot take it.
+    #[test]
+    fn a_repointed_master_is_checked_again_before_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let album = cfg.downloads_dir.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let image = album.join("CDImage.flac");
+        std::fs::write(&image, b"the whole disc").unwrap();
+        let hash = nikgob_import::fsutil::hash_file(&image).unwrap();
+        let dest = cfg.masters_dir().join(format!("{hash}.flac"));
+        let lib = Library::open_in_memory().unwrap();
+        let tracks = [master_of(&lib, "ih", &hash, "Album/CDImage.flac"), master_of(&lib, "ih", &hash, "Album/CDImage.flac")];
+        for t in tracks {
+            lib.set_master_origin_path(t, &dest.to_string_lossy()).unwrap();
+        }
+
+        // The masters folder cannot be made (a file is in its way): kept.
+        std::fs::create_dir_all(cfg.masters_dir().parent().unwrap()).unwrap();
+        std::fs::write(cfg.masters_dir(), b"in the way").unwrap();
+        let left = clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone()])]);
+        assert_eq!(left, vec![("ih".to_owned(), vec![image.clone()])]);
+        assert!(image.is_file());
+        std::fs::remove_file(cfg.masters_dir()).unwrap();
+
+        // The copy went bad: written again from the payload, then it goes.
+        std::fs::create_dir_all(cfg.masters_dir()).unwrap();
+        std::fs::write(&dest, b"damaged").unwrap();
+        let left = clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone()])]);
+        assert!(left.is_empty(), "{left:?}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the whole disc");
+        assert!(!image.exists());
+        for t in tracks {
+            assert_eq!(origin_path(&lib, t), dest.to_string_lossy());
+        }
+
+        // The copy is gone: copied again.
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(&image, b"the whole disc").unwrap();
+        std::fs::remove_file(&dest).unwrap();
+        assert!(clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone()])]).is_empty());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the whole disc");
+    }
+
+    /// The cue sheet of a disc image goes only when the copy kept with the
+    /// image is the same sheet; a sheet of a torrent without an image goes.
+    #[test]
+    fn a_cue_sheet_goes_only_with_its_kept_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let album = cfg.downloads_dir.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let image = album.join("CDImage.flac");
+        std::fs::write(&image, b"the whole disc").unwrap();
+        let cue = album.join("CDImage.cue");
+        std::fs::write(&cue, b"FILE CDImage.flac").unwrap();
+        let hash = nikgob_import::fsutil::hash_file(&image).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        master_of(&lib, "ih", &hash, "Album/CDImage.flac");
+        master_of(&lib, "ih", &hash, "Album/CDImage.flac");
+
+        // Its copy was not kept: the sheet stays, the image goes.
+        let left = clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone(), cue.clone()])]);
+        assert_eq!(left, vec![("ih".to_owned(), vec![cue.clone()])]);
+        assert!(cue.is_file() && !image.exists());
+        // A different sheet kept under its name: still stays.
+        std::fs::write(cfg.masters_dir().join(format!("{hash}.cue")), b"another sheet").unwrap();
+        assert_eq!(clean_payloads(&lib, &cfg, vec![("ih".into(), vec![cue.clone()])]).len(), 1);
+        assert!(cue.is_file());
+        // The same sheet kept: it goes.
+        std::fs::write(cfg.masters_dir().join(format!("{hash}.cue")), b"FILE CDImage.flac").unwrap();
+        assert!(clean_payloads(&lib, &cfg, vec![("ih".into(), vec![cue.clone()])]).is_empty());
+        assert!(!album.exists());
+
+        // Track files with a sheet, no image among the masters: it goes.
+        let other = cfg.downloads_dir.join("Other");
+        std::fs::create_dir_all(&other).unwrap();
+        let sheet = other.join("Album.cue");
+        std::fs::write(&sheet, b"FILE 01.flac").unwrap();
+        assert!(clean_payloads(&lib, &cfg, vec![("ih2".into(), vec![sheet.clone()])]).is_empty());
+        assert!(!sheet.exists());
     }
 
     /// The cleanup writes the masters folder only while no one else does

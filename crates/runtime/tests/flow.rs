@@ -225,15 +225,35 @@ fn torrent_download_imports_and_cleans_up() {
     let want = p.normalization;
     rt.send(Command::SetPrefs(Box::new(p)));
     wait_for(&rt, "a command while the cleanup waits", |s| s.prefs.normalization == want);
+    // An import and a move of the masters folder asked for meanwhile wait
+    // for the cleanup: the import could read a payload it deletes, the move
+    // would miss what it writes into the old folder.
+    let more = root.join("more.wav");
+    write_wav(&more, 1.0);
+    rt.send(Command::ImportFiles(vec![more]));
+    let moved_to = root.join("flac-archive");
+    rt.send(Command::MoveMastersDir(moved_to.clone()));
+    std::thread::sleep(Duration::from_millis(500));
+    {
+        let s = rt.state();
+        assert_eq!(s.library.track_count, 2, "no import while the cleanup runs");
+        assert!(s.downloads.active.is_empty(), "{:?}", s.downloads.active);
+    }
+    assert!(!moved_to.exists(), "no move while the cleanup runs");
     assert!(album.join("01 - Song.wav").is_file(), "nothing goes before the masters folder is free");
     drop(held);
     wait_for(&rt, "cleanup", |s| s.downloads.seeding.is_empty() && !album.exists());
-    let masters: Vec<_> = std::fs::read_dir(cfg.masters_dir())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".wav"))
-        .collect();
-    assert_eq!(masters.len(), 2, "{masters:?}: the lossless originals are kept as masters");
+    // The move then takes every master, the waiting import puts its own in
+    // the new folder.
+    wait_for(&rt, "the import after the move", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
+    let wavs = |dir: &Path| -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".wav")).collect())
+            .unwrap_or_default()
+    };
+    assert!(wavs(&cfg.masters_dir()).is_empty(), "{:?} left in the old folder", wavs(&cfg.masters_dir()));
+    let masters = wavs(&moved_to);
+    assert_eq!(masters.len(), 3, "{masters:?}: the lossless originals are kept as masters");
     // One line in the history (not one more from the backfill of older
     // torrents), and it is still there after a restart.
     let album_rows = |s: &ViewState| s.downloads.history.iter().filter(|j| j.title == "Album").count();
