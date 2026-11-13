@@ -80,7 +80,7 @@ pub(crate) enum Internal {
         Box<dyn FnOnce(&mut Worker, nikgob_core::indexer::TorrentPayload) + Send>,
     ),
     TorrentFilesListed(usize, Result<nikgob_torrent::TorrentMeta, String>),
-    TorrentAdded(Result<crate::torrents::Added, String>),
+    TorrentAdded(Result<crate::torrents::Added, crate::torrents::NotAdded>),
     /// Streaming (stage 3), see [`crate::streams`].
     Stream(crate::streams::Msg),
     /// The background sound analysis, see [`crate::analysis`].
@@ -180,6 +180,8 @@ pub(crate) fn sort_history(history: &mut [v::Job]) {
 
 /// Job-log kind of the one line of a «Хочу скачать» item: `wish:<id>`.
 pub(crate) const WISH_KIND: &str = "wish:";
+/// Tracks of «Скачано» loaded at a time.
+pub(crate) const DOWNLOADED_PAGE: usize = 500;
 
 pub(crate) fn wish_kind(id: WishlistId) -> String {
     format!("{WISH_KIND}{id}")
@@ -1131,7 +1133,7 @@ impl Worker {
         }
         // «Скачано» once opened: the new files on top.
         if !self.state.read().library.downloaded.is_empty() {
-            self.load_downloaded();
+            self.load_downloaded(0, self.downloaded_shown().max(DOWNLOADED_PAGE));
         }
     }
 
@@ -1265,39 +1267,51 @@ impl Worker {
         self.publish(|s| s.library.trash = trash);
     }
 
-    /// The «Скачано» tab: the latest files by the local day they came.
-    pub(crate) fn load_downloaded(&mut self) {
-        const MONTHS: [&str; 12] = [
-            "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
-            "декабря",
-        ];
-        let tz = jiff::tz::TimeZone::system();
-        let today = jiff::Zoned::now().date();
-        let label = |date: jiff::civil::Date| {
-            if date == today {
-                "Сегодня".to_owned()
-            } else if today.yesterday().ok() == Some(date) {
-                "Вчера".to_owned()
-            } else if date.year() == today.year() {
-                format!("{} {}", date.day(), MONTHS[date.month() as usize - 1])
-            } else {
-                format!("{} {} {}", date.day(), MONTHS[date.month() as usize - 1], date.year())
-            }
-        };
-        let rows = self.lib.downloaded_tracks(500).unwrap_or_default();
-        let mut days: Vec<(jiff::civil::Date, v::DownloadedDay)> = Vec::new();
-        for (row, at) in &rows {
-            let Ok(ts) = jiff::Timestamp::from_millisecond(*at) else { continue };
-            let date = ts.to_zoned(tz.clone()).date();
-            if days.last().is_none_or(|(d, _)| *d != date) {
-                days.push((date, v::DownloadedDay { label: label(date), tracks: Vec::new() }));
-            }
-            if let Some((_, day)) = days.last_mut() {
-                day.tracks.push(self.res.track(row));
-            }
+    /// How many tracks «Скачано» shows now.
+    pub(crate) fn downloaded_shown(&self) -> usize {
+        self.state.read().library.downloaded.iter().map(|d| d.tracks.len()).sum()
+    }
+
+    /// The «Скачано» tab: `limit` files from the `offset`-th on, the latest
+    /// first, by the local day they came, and how many there are in all.
+    /// Read on a thread of its own; the answer of the newest ask is shown
+    /// ([`Self::downloaded_read`]): offset 0 replaces the list, another
+    /// adds to it.
+    pub(crate) fn load_downloaded(&mut self, offset: usize, limit: usize) {
+        self.library_load.downloaded_seq += 1;
+        let seq = self.library_load.downloaded_seq;
+        let (lib, res, later) = (self.lib.clone(), self.res.fork(), self.later_tx.clone());
+        let spawned = std::thread::Builder::new().name("nikgob-downloaded".into()).spawn(move || {
+            let _ = later.send(read_downloaded(&lib, res, seq, offset, limit));
+        });
+        if spawned.is_err() {
+            // No thread: read here.
+            let page = read_downloaded(&self.lib, self.res.fork(), seq, offset, limit);
+            (page.run)(self);
         }
-        let downloaded = days.into_iter().map(|(_, d)| d).collect();
-        self.publish(|s| s.library.downloaded = downloaded);
+    }
+
+    /// A page of «Скачано» came.
+    fn downloaded_read(&mut self, seq: u64, offset: usize, days: Vec<v::DownloadedDay>, total: usize) {
+        if seq != self.library_load.downloaded_seq {
+            return;
+        }
+        self.publish(|s| {
+            let list = &mut s.library.downloaded;
+            if offset == 0 {
+                *list = days;
+            } else {
+                for day in days {
+                    match list.last_mut() {
+                        // The page goes on with the day the last one ended in.
+                        Some(last) if last.label == day.label => last.tracks.extend(day.tracks),
+                        _ => list.push(day),
+                    }
+                }
+            }
+            let shown: usize = list.iter().map(|d| d.tracks.len()).sum();
+            s.library.downloaded_total = total.max(shown);
+        });
     }
 
     fn after_delete(&mut self) {
@@ -1580,4 +1594,58 @@ mod tests {
         let kept: Vec<i64> = kept_history(entries).iter().map(|e| e.seq).collect();
         assert_eq!(kept, [9, 7, 5, 3, 2, 1]);
     }
+}
+
+/// `limit` downloaded tracks from the `offset`-th on, grouped by the local
+/// day their file came («Сегодня», «Вчера», «28 октября»).
+fn downloaded_page(
+    lib: &nikgob_library::Library,
+    res: &mut crate::convert::Resolver,
+    offset: usize,
+    limit: usize,
+) -> Vec<v::DownloadedDay> {
+    const MONTHS: [&str; 12] = [
+        "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября",
+        "декабря",
+    ];
+    let tz = jiff::tz::TimeZone::system();
+    let today = jiff::Zoned::now().date();
+    let label = |date: jiff::civil::Date| {
+        if date == today {
+            "Сегодня".to_owned()
+        } else if today.yesterday().ok() == Some(date) {
+            "Вчера".to_owned()
+        } else if date.year() == today.year() {
+            format!("{} {}", date.day(), MONTHS[date.month() as usize - 1])
+        } else {
+            format!("{} {} {}", date.day(), MONTHS[date.month() as usize - 1], date.year())
+        }
+    };
+    let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
+    let rows = lib.downloaded_tracks(n(offset), n(limit)).unwrap_or_default();
+    let mut days: Vec<(jiff::civil::Date, v::DownloadedDay)> = Vec::new();
+    for (row, at) in &rows {
+        let Ok(ts) = jiff::Timestamp::from_millisecond(*at) else { continue };
+        let date = ts.to_zoned(tz.clone()).date();
+        if days.last().is_none_or(|(d, _)| *d != date) {
+            days.push((date, v::DownloadedDay { label: label(date), tracks: Vec::new() }));
+        }
+        if let Some((_, day)) = days.last_mut() {
+            day.tracks.push(res.track(row));
+        }
+    }
+    days.into_iter().map(|(_, d)| d).collect()
+}
+
+/// Reads a page of «Скачано» for load `seq`; the answer for the loop.
+fn read_downloaded(
+    lib: &nikgob_library::Library,
+    mut res: crate::convert::Resolver,
+    seq: u64,
+    offset: usize,
+    limit: usize,
+) -> crate::Later {
+    let days = downloaded_page(lib, &mut res, offset, limit);
+    let total = lib.downloaded_count().unwrap_or(0);
+    crate::Later::new("a page of «Скачано»", move |w| w.downloaded_read(seq, offset, days, total))
 }

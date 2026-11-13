@@ -11,7 +11,7 @@
 //! cached file.
 
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
@@ -102,18 +102,29 @@ impl AudioCache {
         })
     }
 
-    /// Keeps a completely downloaded stream.
-    pub(crate) fn store(&self, id: &str, r: &Resolved, bytes: &[u8]) {
+    /// Keeps a completely downloaded stream (`bytes` reads it from the
+    /// start); one shorter or longer than it should be is not kept.
+    pub(crate) fn store(&self, id: &str, r: &Resolved, bytes: &mut dyn Read) {
         let Some(dir) = self.enabled() else { return };
         let Some(id) = safe(id) else { return };
-        if bytes.len() as u64 != r.len || r.len == 0 || r.len > self.limit.load(Ordering::Relaxed) {
+        if r.len == 0 || r.len > self.limit.load(Ordering::Relaxed) {
             return;
         }
-        let write = || -> io::Result<()> {
+        let mut write = || -> io::Result<()> {
             std::fs::create_dir_all(&dir)?;
             let name = format!("{id}.{}.{}", r.itag, ext(r.format));
             let part = dir.join(format!("{name}.part"));
-            std::fs::write(&part, bytes)?;
+            let copied = {
+                let mut out = io::BufWriter::new(File::create(&part)?);
+                // One byte past the length tells a longer one.
+                let n = io::copy(&mut bytes.take(r.len + 1), &mut out)?;
+                out.flush()?;
+                n
+            };
+            if copied != r.len {
+                let _ = std::fs::remove_file(&part);
+                return Err(io::Error::other(format!("{copied} bytes, not {}", r.len)));
+            }
             std::fs::rename(&part, dir.join(&name))?;
             let note = Note {
                 itag: r.itag,
@@ -272,9 +283,9 @@ mod tests {
         c.set_dir(dir.clone());
         c.set_limit(25);
         // A short read is not complete: nothing is kept.
-        c.store("abc", &resolved(10), &[1; 9]);
+        c.store("abc", &resolved(10), &mut &[1; 9][..]);
         assert!(c.open("abc").is_none());
-        c.store("abc", &resolved(10), &[1; 10]);
+        c.store("abc", &resolved(10), &mut &[1; 10][..]);
         let mut s = c.open("abc").expect("cached");
         let mut all = Vec::new();
         s.read_to_end(&mut all).unwrap();
@@ -282,12 +293,12 @@ mod tests {
         assert_eq!(s.quality().as_deref(), Some("Opus ~160 кбит/с"));
         drop(s);
         std::thread::sleep(Duration::from_millis(30));
-        c.store("def", &resolved(10), &[2; 10]);
+        c.store("def", &resolved(10), &mut &[2; 10][..]);
         std::thread::sleep(Duration::from_millis(30));
         // A hit makes "abc" the most recent; "def" goes when "ghi" comes.
         assert!(c.open("abc").is_some());
         std::thread::sleep(Duration::from_millis(30));
-        c.store("ghi", &resolved(10), &[3; 10]);
+        c.store("ghi", &resolved(10), &mut &[3; 10][..]);
         assert!(c.open("def").is_none(), "least recently used went");
         assert!(c.open("abc").is_some() && c.open("ghi").is_some());
         assert_eq!(c.size(), 20);

@@ -49,23 +49,27 @@ impl DiskCache {
         Ok(Self { dir, limit, size: Mutex::new(0) })
     }
 
-    /// Removes the leftovers of interrupted writes, counts the size and
-    /// makes room if it is over the limit.
+    /// Removes the leftovers of interrupted writes (of other runs: this
+    /// one's may be being written right now), counts the size and makes
+    /// room if it is over the limit. Holds the size's lock throughout, so a
+    /// write finishing meanwhile is counted once, after the scan.
     pub fn count(&self) {
-        let mut size = 0;
+        let own = format!(".{}-", std::process::id());
+        let mut size = self.size.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut total = 0;
         for e in fs::read_dir(&self.dir).into_iter().flatten().flatten() {
             let path = e.path();
             match path.extension().and_then(|x| x.to_str()) {
-                Some(EXT) => size += e.metadata().map_or(0, |m| m.len()),
-                Some(TMP) => {
+                Some(EXT) => total += e.metadata().map_or(0, |m| m.len()),
+                Some(TMP) if !e.file_name().to_string_lossy().contains(&own) => {
                     let _ = fs::remove_file(&path);
                 }
                 _ => {}
             }
         }
-        *self.size.lock().unwrap_or_else(PoisonError::into_inner) = size;
-        if size > self.limit {
-            self.evict();
+        *size = total;
+        if total > self.limit {
+            self.evict(&mut size);
         }
     }
 
@@ -114,18 +118,17 @@ impl DiskCache {
             TMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&tmp, bytes)?;
+        // The rename and its count under the size's lock: a scan or an
+        // eviction sees the file and its bytes together.
+        let mut size = self.size.lock().unwrap_or_else(PoisonError::into_inner);
         let old = fs::metadata(&path).map_or(0, |m| m.len());
         if let Err(e) = fs::rename(&tmp, &path) {
             let _ = fs::remove_file(&tmp);
             return Err(e);
         }
-        let over = {
-            let mut size = self.size.lock().unwrap_or_else(PoisonError::into_inner);
-            *size = size.saturating_sub(old) + bytes.len() as u64;
-            *size > self.limit
-        };
-        if over {
-            self.evict();
+        *size = size.saturating_sub(old) + bytes.len() as u64;
+        if *size > self.limit {
+            self.evict(&mut size);
         }
         Ok(())
     }
@@ -137,7 +140,8 @@ impl DiskCache {
 
     /// Deletes the least recently used files until the cache is down to 90 %
     /// of its limit (so it is not scanned again at the very next write).
-    fn evict(&self) {
+    /// Runs with the size's lock held (`size`).
+    fn evict(&self, size: &mut u64) {
         let Ok(dir) = fs::read_dir(&self.dir) else { return };
         let mut files: Vec<(SystemTime, u64, PathBuf)> = dir
             .flatten()
@@ -161,7 +165,7 @@ impl DiskCache {
             }
         }
         log::debug!("cover cache: {removed} old covers removed, {} MB left", total >> 20);
-        *self.size.lock().unwrap_or_else(PoisonError::into_inner) = total;
+        *size = total;
     }
 }
 
@@ -255,5 +259,21 @@ mod tests {
         let c = DiskCache::open(dir.path(), DEFAULT_LIMIT).unwrap();
         assert!(!dir.path().join("abc.1-2.tmp").exists());
         assert_eq!(c.size(), 0);
+    }
+
+    /// The count at start runs while covers are written: a write of this
+    /// run in progress keeps its temporary file and is counted once.
+    #[test]
+    fn the_count_leaves_this_runs_writes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = DiskCache::open_uncounted(dir.path(), DEFAULT_LIMIT).unwrap();
+        let mine = dir.path().join(format!("abc.{}-7.tmp", std::process::id()));
+        fs::write(&mine, b"half").unwrap();
+        c.count();
+        assert!(mine.exists(), "a write of this run lost its file");
+        let img = png(8, 2);
+        c.put("https://x/a", &img).unwrap();
+        c.count();
+        assert_eq!(c.size(), img.len() as u64);
     }
 }

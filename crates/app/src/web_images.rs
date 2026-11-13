@@ -241,11 +241,8 @@ impl Inner {
         if !resp.status().is_success() {
             return Err((format!("HTTP {status}"), matches!(status, 404 | 410)));
         }
-        let bytes = resp.bytes().await.map_err(|e| (e.to_string(), false))?;
-        if bytes.len() > MAX_BYTES {
-            return Err(("too large".to_owned(), true));
-        }
-        Ok(Arc::from(&bytes[..]))
+        let bytes = body_capped(resp, MAX_BYTES).await?;
+        Ok(Arc::from(bytes))
     }
 
     /// A line in the log each time the covers asked so far are all in.
@@ -267,12 +264,37 @@ impl Inner {
     }
 }
 
+/// The body of `resp`, given up on as soon as it grows past `max` bytes (a
+/// server that sends more than it said, or no end at all, is not read to
+/// its end first). The error says the image is gone for good.
+async fn body_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, (String, bool)> {
+    let too_large = || ("too large".to_owned(), true);
+    let said = resp.content_length();
+    if said.is_some_and(|n| n > max as u64) {
+        return Err(too_large());
+    }
+    let mut out = Vec::with_capacity(said.map_or(0, |n| n as usize).min(max));
+    while let Some(chunk) = resp.chunk().await.map_err(|e| (e.to_string(), false))? {
+        if out.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// How long until a failed cover is asked again; `None` for one gone for
+/// good.
+fn retry_in(at: Instant, gone: bool) -> Option<Duration> {
+    (!gone).then(|| RETRY.saturating_sub(at.elapsed()))
+}
+
 impl BytesLoader for WebImages {
     fn id(&self) -> &str {
         Self::ID
     }
 
-    fn load(&self, _ctx: &egui::Context, uri: &str) -> BytesLoadResult {
+    fn load(&self, ctx: &egui::Context, uri: &str) -> BytesLoadResult {
         if !(uri.starts_with("https://") || uri.starts_with("http://")) {
             return Err(LoadError::NotSupported);
         }
@@ -283,6 +305,12 @@ impl BytesLoader for WebImages {
                 return Ok(BytesPoll::Ready { size: None, bytes: Bytes::Shared(Arc::clone(bytes)), mime: None });
             }
             Some(Slot::Failed { error, at, gone }) if *gone || at.elapsed() < RETRY => {
+                // Drawn now (only a drawn cover is loaded): a frame when it
+                // may be asked again, so an idle window does not keep the
+                // placeholder after the network is back.
+                if let Some(wait) = retry_in(*at, *gone) {
+                    ctx.request_repaint_after(wait);
+                }
                 return Err(LoadError::Loading(error.clone()));
             }
             Some(Slot::Queued { seen }) => {
@@ -456,6 +484,71 @@ fn deezer_sized(url: &str, tier: Option<u32>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server answering every request with `head` and then `body_len`
+    /// bytes (or bytes without end); how many it managed to send.
+    fn serve(head: &'static str, body_len: Option<usize>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/cover.jpg", listener.local_addr().unwrap());
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent2 = Arc::clone(&sent);
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { return };
+                let mut req = [0u8; 1024];
+                let _ = conn.read(&mut req);
+                if conn.write_all(head.as_bytes()).is_err() {
+                    continue;
+                }
+                let chunk = [0xAB_u8; 16 * 1024];
+                let mut left = body_len.unwrap_or(usize::MAX);
+                while left > 0 {
+                    let n = left.min(chunk.len());
+                    if conn.write_all(&chunk[..n]).is_err() {
+                        break;
+                    }
+                    sent2.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    left -= n;
+                }
+            }
+        });
+        (url, sent)
+    }
+
+    fn fetch(url: &str, max: usize) -> Result<Vec<u8>, (String, bool)> {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let resp = reqwest::Client::new().get(url).send().await.map_err(|e| (e.to_string(), false))?;
+            tokio::time::timeout(Duration::from_secs(10), body_capped(resp, max))
+                .await
+                .unwrap_or_else(|_| Err(("still reading".to_owned(), false)))
+        })
+    }
+
+    /// A body without an end (or longer than it said) is given up on near
+    /// the limit, not read whole into memory first.
+    #[test]
+    fn a_cover_body_is_cut_at_the_limit() {
+        let (url, sent) = serve("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", None);
+        let err = fetch(&url, 256 * 1024).unwrap_err();
+        assert_eq!(err, ("too large".to_owned(), true));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(sent.load(std::sync::atomic::Ordering::Relaxed) < 64 << 20, "the endless body was read on");
+        // Said too large: not read at all.
+        let (url, _) = serve("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n", Some(0));
+        assert_eq!(fetch(&url, 1024).unwrap_err(), ("too large".to_owned(), true));
+        // Within the limit: all of it.
+        let (url, _) = serve("HTTP/1.1 200 OK\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n", Some(5000));
+        assert_eq!(fetch(&url, 1024 * 1024).unwrap().len(), 5000);
+    }
+
+    #[test]
+    fn a_failed_cover_is_due_again_unless_gone() {
+        let now = Instant::now();
+        assert!(retry_in(now, false).is_some_and(|d| d > RETRY - Duration::from_secs(1) && d <= RETRY));
+        assert_eq!(retry_in(now, true), None);
+    }
 
     #[test]
     fn deezer_covers_are_asked_at_the_size_they_are_drawn_at() {

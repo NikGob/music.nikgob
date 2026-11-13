@@ -22,6 +22,7 @@ mod home;
 mod home_build;
 mod home_v2;
 mod import;
+mod inbox_torrents;
 mod library_load;
 mod library_search;
 mod lyrics;
@@ -138,6 +139,13 @@ pub enum PlaybackEvent {
     /// The item plays at this speed after all, not at its request's (a
     /// live track of another player cannot be sped up).
     Speed { id: u64, speed: f32 },
+    /// The output device of engine `generation` did not open (the one
+    /// heard, or one a device switch started: that one is dropped and the
+    /// one heard plays on).
+    DeviceError { generation: u64, message: String },
+    /// Engine `generation`, started by a device switch, has its device
+    /// open: it can take over ([`Playback::adopt_device`]).
+    DeviceReady { generation: u64 },
 }
 
 /// The audio engine as the runtime sees it.
@@ -169,10 +177,21 @@ pub trait Playback: Send {
     /// plays; the volume stays as the user set it.
     fn set_sleep_fade(&mut self, _level: f32, _over: Duration) {}
     /// Switches the output device (None = system default). Returns true if
-    /// the engine was restarted and lost what it was playing.
+    /// the engine was restarted at once and lost what it was playing; a
+    /// backend whose device opens later says so with
+    /// [`PlaybackEvent::DeviceReady`] and returns false.
     fn set_device(&mut self, _device: Option<String>) -> bool {
         false
     }
+    /// Engine `generation`, started by [`Self::set_device`], has opened its
+    /// device: it replaces the one heard. True when it did (what played is
+    /// lost and played again on it).
+    fn adopt_device(&mut self, _generation: u64) -> bool {
+        false
+    }
+    /// Engine `generation` did not open its device: dropped if it was
+    /// waiting to take over.
+    fn drop_device(&mut self, _generation: u64) {}
 }
 
 /// A backend that plays nothing (tests, or when no device is available).
@@ -585,7 +604,7 @@ struct Worker {
     /// `session.json` (volume and queue between runs) and what was last
     /// written to it.
     session_path: Option<PathBuf>,
-    session_saved: String,
+    session_saved: session::Saver,
     /// Editions of one album found last time (see [`editions`]).
     editions: Vec<nikgob_import::EditionGroup>,
     services: Vec<Box<dyn Service>>,
@@ -812,7 +831,7 @@ impl Worker {
             stream_retried: None,
             official_player_tried: None,
             session_path,
-            session_saved: String::new(),
+            session_saved: session::Saver::default(),
             editions: Vec::new(),
             services: Vec::new(),
             toast_id: 0,
@@ -1008,6 +1027,7 @@ impl Worker {
         }
         self.save_session();
         self.save_prefs_due();
+        self.session_saved.flush();
         self.recs_flush_weights(true);
         self.keep_home(true);
         self.maybe_export(true);
@@ -1564,7 +1584,8 @@ impl Worker {
             }
             Command::EmptyTrash => self.empty_trash(),
             Command::LoadTrash => self.load_trash(),
-            Command::LoadDownloaded => self.load_downloaded(),
+            Command::LoadDownloaded => self.load_downloaded(0, import::DOWNLOADED_PAGE),
+            Command::LoadMoreDownloaded => self.load_downloaded(self.downloaded_shown(), import::DOWNLOADED_PAGE),
             Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
@@ -2615,6 +2636,14 @@ impl Worker {
                     self.publish_player();
                 }
             }
+            PlaybackEvent::DeviceError { generation, message } => {
+                log::error!("audio output: {message}");
+                // A switch whose device did not open: the old one plays on.
+                self.playback.drop_device(generation);
+                // The same message while one is up only starts it over.
+                self.toast("Не удалось открыть устройство вывода звука", None);
+            }
+            PlaybackEvent::DeviceReady { generation } => self.device_ready(generation),
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
                 // without one (a stream whose service did not say).
@@ -3857,11 +3886,25 @@ impl Worker {
 }
 
 impl Worker {
-    /// Moves playback to another device, resuming where it was.
+    /// Moves playback to another device, resuming where it was: at once
+    /// with a backend that switches at once, else when the new device has
+    /// opened ([`PlaybackEvent::DeviceReady`]).
     fn switch_device(&mut self, device: Option<String>) {
-        if !self.playback.set_device(device) {
-            return;
+        if self.playback.set_device(device) {
+            self.resume_on_new_device();
         }
+    }
+
+    /// Engine `generation` on the device asked for has opened: it takes
+    /// over and playback goes on from where it was.
+    fn device_ready(&mut self, generation: u64) {
+        if self.playback.adopt_device(generation) {
+            self.resume_on_new_device();
+        }
+    }
+
+    /// The engine was restarted on another device and lost what it played.
+    fn resume_on_new_device(&mut self) {
         let volume = if self.muted { 0.0 } else { self.volume };
         self.playback.set_volume(volume);
         let prefs = self.state.read().prefs.clone();
@@ -4075,16 +4118,25 @@ fn crossfade(p: &nikgob_view::Prefs) -> Option<Duration> {
     (p.crossfade_s > 0.0).then(|| Duration::from_secs_f32(p.crossfade_s))
 }
 
+/// Puts `prefs` at `path` through a temporary file.
+fn write_prefs(path: &std::path::Path, prefs: &nikgob_view::Prefs) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(prefs).map_err(std::io::Error::other)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 impl Worker {
-    pub(crate) fn save_prefs(&self) {
-        if let Some(path) = &self.prefs_path {
-            let prefs = self.state.read().prefs.clone();
-            if let Ok(json) = serde_json::to_vec_pretty(&prefs) {
-                let tmp = path.with_extension("json.tmp");
-                if std::fs::write(&tmp, json).is_ok() {
-                    let _ = std::fs::rename(&tmp, path);
-                }
-            }
+    /// Writes the prefs; a failure is said (the next change writes them
+    /// all again).
+    pub(crate) fn save_prefs(&mut self) {
+        let Some(path) = self.prefs_path.clone() else { return };
+        let prefs = self.state.read().prefs.clone();
+        if let Err(e) = write_prefs(&path, &prefs) {
+            log::error!("cannot save {}: {e}", path.display());
+            self.toast("Не удалось сохранить настройки", None);
         }
     }
 

@@ -1084,8 +1084,12 @@ pub struct LibraryView {
     /// Deleted tracks ("Корзина"), most recent first; filled by [`Command::LoadTrash`].
     pub trash: Vec<TrashItem>,
     /// «Скачано»: tracks with a file by the day it came, the latest first;
-    /// filled by [`Command::LoadDownloaded`].
+    /// filled by [`Command::LoadDownloaded`] a page at a time
+    /// ([`Command::LoadMoreDownloaded`]).
     pub downloaded: Vec<DownloadedDay>,
+    /// How many tracks «Скачано» has in all (more than loaded while there
+    /// are pages left).
+    pub downloaded_total: usize,
     /// The «Всё» overview's rows: the latest albums in, and the most played.
     pub recently_added: Vec<ReleaseCard>,
     pub often_played: Vec<ReleaseCard>,
@@ -3368,8 +3372,10 @@ pub enum Command {
     EmptyTrash,
     /// Fill [`LibraryView::trash`].
     LoadTrash,
-    /// Fill [`LibraryView::downloaded`].
+    /// Fill [`LibraryView::downloaded`] with its first page.
     LoadDownloaded,
+    /// One more page of [`LibraryView::downloaded`].
+    LoadMoreDownloaded,
     /// Collage / smart cover (a custom one is set by [`Command::SetPlaylistCover`]).
     SetPlaylistCoverMode(PlaylistId, PlaylistCoverMode),
 

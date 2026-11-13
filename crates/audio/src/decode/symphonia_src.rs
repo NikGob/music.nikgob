@@ -21,7 +21,9 @@
 //! Symphonia 0.6's Matroska seek lands (and labels packets) up to a cluster
 //! off when it uses the cues, so Matroska is seeked without them: the
 //! container is opened again and packets are skipped, without decoding, up
-//! to the target.
+//! to the target. A target ahead of what was demuxed skips on from there
+//! without the reopen, so seeking forward costs the distance, not the
+//! position.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -91,6 +93,9 @@ pub(crate) struct SymphoniaSource {
     reopen: Option<Reopen>,
     /// A packet read ahead by such a seek, handed to the next `read`.
     held: Option<Packet>,
+    /// Matroska: timeline end of the last packet of the track the demuxer
+    /// gave, so a seek past it skips on from there instead of reopening.
+    demuxed_end: i64,
 }
 
 /// Opens the container again from its first byte (Matroska seeking).
@@ -207,13 +212,27 @@ impl SymphoniaSource {
         Self::from_format(probe(media, ext)?)
     }
 
-    /// Matroska seek: reopen, then skip whole packets up to the one holding
-    /// timeline frame `from`, which is kept for the next read.
-    fn seek_by_skipping(&mut self, from: i64) -> Result<(), DecodeError> {
+    /// Timeline end of a packet.
+    fn packet_end(&self, packet: &Packet) -> i64 {
+        self.ts_to_frames(packet.pts) + self.dur_to_frames(packet.dur.get() as i64) - self.origin
+            + self.pts_fix
+    }
+
+    /// Matroska seek: skip whole packets up to the one holding timeline
+    /// frame `from`, which is kept for the next read. From where the demuxer
+    /// is when `from` lies ahead of it (`ahead`: it is not at its end), else
+    /// from a reopen at byte 0.
+    fn seek_by_skipping(&mut self, from: i64, ahead: bool) -> Result<(), DecodeError> {
         let Some(reopen) = &self.reopen else {
             return Err(DecodeError::Seek("cannot reopen".into()));
         };
-        self.format = reopen()?;
+        // A millisecond of margin: the first packet's end may be noted
+        // before `pts_fix` is learnt.
+        let margin = i64::from(self.rate / 1000);
+        if !(ahead && from >= self.demuxed_end.saturating_add(margin)) {
+            self.format = reopen()?;
+            self.demuxed_end = i64::MIN;
+        }
         self.held = None;
         loop {
             match self.format.next_packet() {
@@ -221,10 +240,8 @@ impl SymphoniaSource {
                     if packet.track_id != self.track_id {
                         continue;
                     }
-                    let end = self.ts_to_frames(packet.pts)
-                        + self.dur_to_frames(packet.dur.get() as i64)
-                        - self.origin
-                        + self.pts_fix;
+                    let end = self.packet_end(&packet);
+                    self.demuxed_end = end;
                     if end > from {
                         self.held = Some(packet);
                         return Ok(());
@@ -318,6 +335,7 @@ impl SymphoniaSource {
             pts_fix: 0,
             reopen: None,
             held: None,
+            demuxed_end: i64::MIN,
         };
         source.emitted = source.ts_to_frames(start_ts) - origin;
 
@@ -502,6 +520,8 @@ impl FrameSource for SymphoniaSource {
             if packet.track_id != self.track_id {
                 continue;
             }
+            // Every packet, the ones read while learning the format too.
+            self.demuxed_end = self.demuxed_end.max(self.packet_end(&packet));
             let frames = match self.decode_packet(&packet) {
                 Ok(frames) => {
                     self.bad_packets = 0;
@@ -549,8 +569,9 @@ impl FrameSource for SymphoniaSource {
         let target = i64::try_from(frame).unwrap_or(i64::MAX);
         let from = (target - self.preroll as i64).max(0);
         if self.reopen.is_some() {
+            let ahead = !self.eof;
             self.eof = false;
-            self.seek_by_skipping(from)?;
+            self.seek_by_skipping(from, ahead)?;
             self.reset_decoder()?;
             self.resync = true;
             self.skip_to = target;
@@ -613,6 +634,66 @@ mod tests {
         fn format_hint(&self) -> &str {
             "ogg"
         }
+    }
+
+    /// WebM bytes counting the seeks back to byte 0 (the reopens).
+    struct Counted(std::io::Cursor<&'static [u8]>, Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Seek for Counted {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            if pos == SeekFrom::Start(0) {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.0.seek(pos)
+        }
+    }
+
+    impl ByteSource for Counted {
+        fn byte_len(&self) -> Option<u64> {
+            Some(self.0.get_ref().len() as u64)
+        }
+        fn format_hint(&self) -> &str {
+            "webm"
+        }
+    }
+
+    /// The first timeline frame `s` gives after a seek.
+    fn first_after(s: &mut SymphoniaSource) -> i64 {
+        let mut out = Vec::new();
+        assert!(matches!(s.read(&mut out).unwrap(), ReadStatus::Data));
+        s.emitted - (out.len() / s.channels) as i64
+    }
+
+    #[test]
+    fn matroska_seeks_ahead_without_reopening() {
+        let bytes: &'static [u8] = include_bytes!("../../tests/fixtures/tone.webm");
+        let reopens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let src = Counted(std::io::Cursor::new(bytes), Arc::clone(&reopens));
+        let (mut s, _) = SymphoniaSource::open_stream(Box::new(src)).unwrap();
+        assert!(s.is_mkv());
+        let mut out = Vec::new();
+        s.read(&mut out).unwrap();
+        let rate = i64::from(s.rate);
+        let base = reopens.load(std::sync::atomic::Ordering::Relaxed);
+        // Ahead of what was demuxed: no reopen, and it lands where asked.
+        s.seek((rate / 2) as u64).unwrap();
+        assert_eq!(reopens.load(std::sync::atomic::Ordering::Relaxed), base, "reopened to seek ahead");
+        assert_eq!(first_after(&mut s), rate / 2);
+        // Back: a reopen, and it lands as exactly.
+        s.seek((rate / 10) as u64).unwrap();
+        let back = reopens.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(back > base, "a seek back reopens");
+        assert_eq!(first_after(&mut s), rate / 10);
+        // Ahead again from there, still without one.
+        s.seek((rate * 8 / 10) as u64).unwrap();
+        assert_eq!(reopens.load(std::sync::atomic::Ordering::Relaxed), back);
+        assert_eq!(first_after(&mut s), rate * 8 / 10);
     }
 
     #[test]

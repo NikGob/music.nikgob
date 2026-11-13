@@ -379,6 +379,9 @@ pub enum Event {
         /// Human-readable description.
         message: String,
     },
+    /// The output device opened (at the start, or again after it was let
+    /// go or failed): from now on it can be heard.
+    DeviceOpened,
     /// The output moved to another device or stream configuration. What is
     /// playing carries on from the same position.
     DeviceChanged {
