@@ -1,10 +1,11 @@
 //! Shared HTTP plumbing: one `reqwest::Client` with the project `User-Agent`,
 //! per-service rate limiting and retries with backoff on 429/503.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, RETRY_AFTER};
+use reqwest::header::LOCATION;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, sleep, sleep_until};
@@ -128,8 +129,10 @@ pub struct RateLimits {
     pub lyricsplus: Duration,
     pub lrcred: Duration,
     pub betterlyrics: Duration,
-    /// Odesli (song.link): 10 requests a minute without an API key.
+    /// song.link / album.link pages (the share fallback).
     pub odesli: Duration,
+    /// MusicLink: its site and its API (one a second on the free plan).
+    pub musiclink: Duration,
     /// The iTunes Search API: about 20 requests a minute.
     pub itunes: Duration,
     /// ListenBrainz (its labs too): about one a second is polite.
@@ -158,7 +161,8 @@ impl Default for RateLimits {
             lyricsplus: Duration::from_millis(500),
             lrcred: Duration::from_millis(500),
             betterlyrics: Duration::from_millis(500),
-            odesli: Duration::from_secs(6),
+            odesli: Duration::from_millis(1000),
+            musiclink: Duration::from_millis(1000),
             itunes: Duration::from_secs(3),
             listenbrainz: Duration::from_millis(1000),
             lastfm: Duration::from_millis(1000),
@@ -181,6 +185,7 @@ impl RateLimits {
             lrcred: Duration::ZERO,
             betterlyrics: Duration::ZERO,
             odesli: Duration::ZERO,
+            musiclink: Duration::ZERO,
             itunes: Duration::ZERO,
             listenbrainz: Duration::ZERO,
             lastfm: Duration::ZERO,
@@ -228,6 +233,7 @@ pub(crate) enum Service {
     LrcRed,
     BetterLyrics,
     Odesli,
+    MusicLink,
     Itunes,
     ListenBrainz,
     LastFm,
@@ -247,6 +253,7 @@ struct Limiters {
     lrcred: RateLimiter,
     betterlyrics: RateLimiter,
     odesli: RateLimiter,
+    musiclink: RateLimiter,
     itunes: RateLimiter,
     listenbrainz: RateLimiter,
     lastfm: RateLimiter,
@@ -267,6 +274,7 @@ impl Limiters {
             lrcred: RateLimiter::new(l.lrcred),
             betterlyrics: RateLimiter::new(l.betterlyrics),
             odesli: RateLimiter::new(l.odesli),
+            musiclink: RateLimiter::new(l.musiclink),
             itunes: RateLimiter::new(l.itunes),
             listenbrainz: RateLimiter::new(l.listenbrainz),
             lastfm: RateLimiter::new(l.lastfm),
@@ -287,6 +295,7 @@ impl Limiters {
             Service::LrcRed => &self.lrcred,
             Service::BetterLyrics => &self.betterlyrics,
             Service::Odesli => &self.odesli,
+            Service::MusicLink => &self.musiclink,
             Service::Itunes => &self.itunes,
             Service::ListenBrainz => &self.listenbrainz,
             Service::LastFm => &self.lastfm,
@@ -301,6 +310,10 @@ impl Limiters {
 #[derive(Clone, Debug)]
 pub struct Http {
     client: Client,
+    /// The same client that does not follow redirects, made on first use
+    /// (a redirect's target is the answer: MusicLink's share page).
+    no_redirect: Arc<OnceLock<Client>>,
+    user_agent: Arc<str>,
     retry: RetryPolicy,
     limiters: Arc<Limiters>,
     has_contact: bool,
@@ -308,14 +321,17 @@ pub struct Http {
 
 impl Http {
     pub fn new(config: &MetadataConfig) -> Result<Self> {
+        let user_agent = config.user_agent();
         let client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(config.user_agent())
+            .user_agent(user_agent.clone())
             .build()
             .map_err(|e| MetadataError::Network(e.without_url().to_string()))?;
         Ok(Self {
             client,
+            no_redirect: Arc::default(),
+            user_agent: user_agent.into(),
             retry: RetryPolicy::default(),
             limiters: Arc::new(Limiters::new(&RateLimits::default())),
             has_contact: config.has_contact(),
@@ -419,6 +435,38 @@ impl Http {
         }
         let resp = self.send(service, req).await?;
         parse_json(&ok_body(resp).await?)
+    }
+
+    /// [`Self::get_body`] with an `Authorization` header.
+    pub(crate) async fn get_body_auth(&self, service: Service, url: Url, auth: &str) -> Result<Vec<u8>> {
+        let resp = self.send(service, self.client.get(url).header(AUTHORIZATION, auth)).await?;
+        ok_body(resp).await
+    }
+
+    /// A GET that does not follow a redirect: the status and the `Location`
+    /// header. Rate limits and retries as [`Self::send`].
+    pub(crate) async fn get_location(&self, service: Service, url: Url) -> Result<(StatusCode, Option<String>)> {
+        let client = match self.no_redirect.get() {
+            Some(c) => c.clone(),
+            None => {
+                let c = Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    .timeout(REQUEST_TIMEOUT)
+                    .user_agent(self.user_agent.as_ref())
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| MetadataError::Network(e.without_url().to_string()))?;
+                self.no_redirect.get_or_init(|| c).clone()
+            }
+        };
+        let resp = self.send(service, client.get(url)).await?;
+        let status = resp.status();
+        let location = resp
+            .headers()
+            .get(LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        Ok((status, location))
     }
 
     pub(crate) async fn get_body(&self, service: Service, url: Url) -> Result<Vec<u8>> {
