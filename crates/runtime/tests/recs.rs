@@ -560,6 +560,83 @@ fn a_dry_only_new_wave_waits_for_its_refill_then_ends() {
     assert!(day.is_some_and(|d| d.1 >= 1), "{:?} {:?}", yt.all_calls(), dz.all_calls());
 }
 
+/// The same with the window hidden and nothing playing: the top-up a wave
+/// waits for goes on (it is not left for the window to show again).
+#[test]
+fn a_dry_wave_waits_for_its_refill_with_the_window_hidden() {
+    let l = library(3, 6, 5, &[]);
+    let yt = Arc::new(FakeService::youtube());
+    let dz = Arc::new(FakeService::deezer());
+    let prefs = Prefs {
+        mixes_with_new: false,
+        graph_services: false,
+        graph_open_data: false,
+        wave_novelty: nikgob_view::WaveNovelty::OnlyNew,
+        ..Prefs::default()
+    };
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::WindowState { visible: false, focused: false });
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    let day: Option<(String, u32)> = l.lib.cache_get("niche.day").unwrap().and_then(|(_, v)| serde_json::from_str(&v).ok());
+    assert!(day.is_some_and(|d| d.1 >= 1), "{:?} {:?}", yt.all_calls(), dz.all_calls());
+}
+
+/// A wave started after a restart, whose filter has no new songs in the
+/// pool yet but was topped up lately: it plays what that top-up kept, at
+/// once, without asking the services again (not «Нечего играть»).
+#[test]
+fn a_dry_wave_plays_what_its_filter_was_topped_up_with_lately() {
+    let l = library(3, 6, 5, &[]);
+    let yt = Arc::new(
+        FakeService::youtube()
+            .with_track("nw1", "Far Away Song", "Unknown Stranger", 200)
+            .with_track("nw2", "Another Far Song", "Other Stranger", 210),
+    );
+    let dz = Arc::new(FakeService::deezer());
+    let prefs = || Prefs {
+        mixes_with_new: false,
+        graph_services: false,
+        graph_open_data: false,
+        wave_novelty: nikgob_view::WaveNovelty::OnlyNew,
+        ..Prefs::default()
+    };
+    let services = || -> Vec<Arc<dyn StreamService>> { vec![yt.clone(), dz.clone()] };
+    {
+        let s = start(&l.lib, services(), prefs(), None);
+        wait_for(&s.rt, "the home", home_ready);
+        s.rt.send(Command::PlayWave { preset: None });
+        wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    }
+    // What the top-ups of the wave's filters (one a cluster) kept
+    // (nothing): as if each had found two new songs.
+    let keys: Vec<String> = std::iter::once("all".to_owned()).chain((0..12).map(|k| format!("p{k}"))).map(|s| format!("niche.wave.any.{s}")).collect();
+    let mut topped = 0;
+    for key in &keys {
+        let Some((at, json)) = l.lib.cache_get(key).unwrap() else { continue };
+        let mut kept: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let seed = kept["seeds"][0].clone();
+        kept["tracks"] = serde_json::Value::Array(yt.tracks().into_iter().map(|t| serde_json::json!([t, [seed.clone()]])).collect());
+        l.lib.cache_put(key, at, &kept.to_string()).unwrap();
+        topped += 1;
+    }
+    assert!(topped > 0, "the wave's top-ups are kept");
+    let asked = |lib: &Library| -> u32 {
+        lib.cache_get("niche.day").unwrap().and_then(|(_, v)| serde_json::from_str::<(String, u32)>(&v).ok()).map_or(0, |d| d.1)
+    };
+    let before = asked(&l.lib);
+
+    let s = start(&l.lib, services(), prefs(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_for(&s.rt, "the kept songs", |st| st.queue.current_entry.is_some() && st.queue.radio.is_some());
+    let st = s.rt.state();
+    assert!(!st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    drop(st);
+    assert_eq!(asked(&l.lib), before, "nothing asked again");
+}
+
 /// A like of a familiar track teaches the wave its cluster (α), as one of
 /// a new track does; the wave's state is saved with the queue.
 #[test]

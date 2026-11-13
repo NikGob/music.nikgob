@@ -102,7 +102,7 @@ impl Worker {
         let lang = snap.types.lang_of_new(&row.title, &[row.artist.as_str()]);
         Some(Playing {
             track,
-            artist: nikgob_recs::artist_key(&row.artist),
+            artist: nikgob_recs::main_artist_key(&row.artist),
             title: row.title.clone(),
             source: self.discovery_source(&song),
             profile: profile_key(&snap, vector.as_ref(), lang),

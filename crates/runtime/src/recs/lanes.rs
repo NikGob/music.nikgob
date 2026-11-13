@@ -774,12 +774,15 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
     out
 }
 
-/// Whether the artist of the new song `t` is kept out of new music at
-/// `now` by how its songs were received ([`nikgob_recs::NewLog::artist_penalty`]:
-/// two early skips within a month). Every way a new song comes in minds
-/// it: the discoveries, the graph's songs, the niches' top-ups.
+/// Whether an artist of the new song `t` is kept out of new music at
+/// `now` by how their songs were received ([`nikgob_recs::NewLog::artist_penalty`]:
+/// two early skips within a month), its artists keyed as the log keys them
+/// ([`nikgob_recs::credit_keys`]: a collaboration of an artist kept out is
+/// kept out too). Every way a new song comes in minds it: the discoveries,
+/// the graph's songs, the niches' top-ups.
 pub(super) fn banned(log: &nikgob_recs::NewLog, t: &StreamTrack, now: nikgob_core::model::UnixMs) -> bool {
-    t.artists.first().is_some_and(|a| log.artist_penalty(&nikgob_recs::artist_key(&a.name), now).is_infinite())
+    let keys = nikgob_recs::credit_keys(t.artists.iter().map(|a| a.name.as_str()));
+    log.credit_penalty(&keys, now).is_infinite()
 }
 
 /// A new song as a card may take it: its kind of song told by its preview
@@ -885,6 +888,51 @@ mod tests {
         assert!(banned(&log, &song("Somebody"), 13 * day));
         assert!(!banned(&log, &song("Someone else"), 13 * day));
         assert!(!banned(&NewLog::default(), &song("Somebody"), 13 * day));
+    }
+
+    /// The log keeps the artist of a new song heard as the library credits
+    /// it (its row's credit line) and a candidate is checked by the
+    /// service's list of its artists: one key function, so the ban of the
+    /// main artist of a collaboration skipped twice keeps out their own
+    /// songs and the songs they are a guest on, while the guest stays in.
+    #[test]
+    fn a_ban_from_the_log_meets_every_candidate_of_that_artist() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service};
+        use nikgob_recs::{Heard, NewEvent, NewLog};
+        let day = 86_400_000i64;
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = |id: &str, artists: &[&str]| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), format!("Song {id}"));
+            for a in artists {
+                t.artists.push(ArtistRef::new(None, *a));
+            }
+            t
+        };
+        let mut log = NewLog::default();
+        // Two early skips of songs whose credits name «Somebody» first, as
+        // the log keeps them (`novelty::new_song`).
+        for (k, credit) in [["Somebody / Guest"].as_slice(), &["Somebody", "Another"]].into_iter().enumerate() {
+            let id = lib.upsert_stream_tracks(&[song(&format!("h{k}"), credit)]).unwrap()[0];
+            let row = lib.get_track_row(id).unwrap().unwrap();
+            log.push(NewEvent {
+                song: format!("s{k}"),
+                artist: nikgob_recs::main_artist_key(&row.artist),
+                source: None,
+                vector: None,
+                track: Some(id),
+                at: (10 + k as i64) * day,
+                heard: Heard::Early,
+                profile: None,
+                background: false,
+            });
+        }
+        let now = 12 * day;
+        assert!(banned(&log, &song("1", &["Somebody"]), now));
+        assert!(banned(&log, &song("2", &["Somebody feat. Third"]), now));
+        assert!(banned(&log, &song("3", &["Third", "Somebody"]), now), "a guest kept out keeps the song out");
+        assert!(banned(&log, &song("4", &["Third & Somebody, Fourth"]), now));
+        assert!(!banned(&log, &song("5", &["Guest"]), now), "the guest of a skipped song stays in");
+        assert!(!banned(&log, &song("6", &["Third"]), now));
     }
 
     /// The liked songs' mix, the mix of a part of the day, a mix of the

@@ -488,6 +488,9 @@ pub struct Report {
 struct Starts {
     /// (time, track, outcome, its session's number)
     list: Vec<(UnixMs, TrackId, Ended, usize)>,
+    /// When each of `list` ended (`UnixMs::MAX` while open): its outcome
+    /// is known from then on only.
+    ends: Vec<UnixMs>,
 }
 
 impl Starts {
@@ -495,6 +498,7 @@ impl Starts {
         let mut sorted: Vec<&Play> = events.iter().filter(|p| p.origin != Some(EventOrigin::Import)).collect();
         sorted.sort_by_key(|p| (p.ts, p.kind == EventType::Start));
         let mut list: Vec<(UnixMs, TrackId, Ended, usize)> = Vec::new();
+        let mut ends: Vec<UnixMs> = Vec::new();
         let mut open: HashMap<TrackId, usize> = HashMap::new();
         let mut session = 0usize;
         let mut last: Option<UnixMs> = None;
@@ -507,16 +511,18 @@ impl Starts {
                 EventType::Start => {
                     open.insert(p.track, list.len());
                     list.push((p.ts, p.track, Ended::Open, session));
+                    ends.push(UnixMs::MAX);
                 }
                 EventType::Complete | EventType::Skip => {
                     if let Some(k) = open.remove(&p.track) {
                         list[k].2 = ended_of(p);
+                        ends[k] = p.ts;
                     }
                 }
                 _ => {}
             }
         }
-        Self { list }
+        Self { list, ends }
     }
 
     /// The tracks listened to (not skipped early) in `[from, to)`.
@@ -1066,14 +1072,15 @@ pub fn wave_trace(parts: &Parts, novelty: f32, n: usize) -> String {
     out
 }
 
-/// Each catalog track's ended plays and early skips among the starts
-/// before `t`.
+/// Each catalog track's plays ended by `t` and the early skips among them
+/// (a play started before `t` and ended after it is not known yet).
 fn skips_before(starts: &Starts, parts: &Parts, t: UnixMs) -> Vec<(u32, u32)> {
     let mut out = vec![(0u32, 0u32); parts.catalog.len()];
     let upto = starts.list.partition_point(|s| s.0 < t);
-    for s in &starts.list[..upto] {
+    for (s, &end) in starts.list[..upto].iter().zip(&starts.ends) {
         if let Some(i) = parts.catalog.position(s.1)
             && s.2 != Ended::Open
+            && end <= t
         {
             out[i].0 += 1;
             out[i].1 += u32::from(s.2 == Ended::Early);
@@ -1958,18 +1965,26 @@ mod tests {
         assert!(steps.iter().filter(|s| s.track.is_none()).all(|s| !s.skipped), "a new song's end is unknown");
     }
 
-    /// What steers a replayed wave at a moment is only what ended before
-    /// it: an early skip counts from its start on, never before.
+    /// What steers a replayed wave at a moment is only what ended by it: an
+    /// early skip counts from the moment it ended, not from its start — a
+    /// play started before the moment and skipped after it is unknown yet.
     #[test]
     fn the_wave_replay_knows_no_future_skip() {
         let d = synthetic::user(synthetic::Kind::Skipper, 6);
         let p = d.parts();
         let starts = Starts::of(&p.input.events);
-        let (t, track, _, _) = *starts.list.iter().find(|s| s.2 == Ended::Early && p.catalog.position(s.1).is_some()).unwrap();
+        let k = (0..starts.list.len())
+            .find(|&k| starts.list[k].2 == Ended::Early && starts.ends[k] > starts.list[k].0 + 1 && p.catalog.position(starts.list[k].1).is_some())
+            .expect("an early skip that ends after its start");
+        let (start, track, _, _) = starts.list[k];
+        let end = starts.ends[k];
         let i = p.catalog.position(track).unwrap();
-        let at = skips_before(&starts, &p, t);
-        let after = skips_before(&starts, &p, t + 1);
-        assert_eq!(after[i].1, at[i].1 + 1);
+        let before = skips_before(&starts, &p, start);
+        // Started, not ended yet: its skip is not known.
+        assert_eq!(skips_before(&starts, &p, start + 1)[i], before[i]);
+        assert_eq!(skips_before(&starts, &p, end - 1)[i], before[i]);
+        let at = skips_before(&starts, &p, end);
+        assert_eq!(at[i], (before[i].0 + 1, before[i].1 + 1), "known once it ended");
         assert_eq!(skips_before(&starts, &p, starts.list[0].0).iter().map(|x| x.0).sum::<u32>(), 0);
     }
 }

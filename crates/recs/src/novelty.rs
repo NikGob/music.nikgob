@@ -231,6 +231,13 @@ impl NewLog {
         if early.iter().any(|t| now - t < PENALTY_MS) { ARTIST_PENALTY } else { 0.0 }
     }
 
+    /// How much lower a song crediting the artists `keys` stands at `now`
+    /// ([`crate::credit_keys`]): its most kept down artist's
+    /// [`Self::artist_penalty`] (−∞ when any of them is kept out).
+    pub fn credit_penalty(&self, keys: &[String], now: UnixMs) -> f32 {
+        keys.iter().map(|k| self.artist_penalty(k, now)).fold(0.0, f32::max)
+    }
+
     /// Times `song` was played to the end.
     pub fn completes(&self, song: &str) -> u32 {
         self.events.iter().filter(|e| e.song == song && e.heard == Heard::Complete).count() as u32

@@ -144,10 +144,20 @@ pub(crate) struct RadioRun {
     /// this snapshot: it is not asked again until the filter or the
     /// snapshot changes.
     wave_dry: Option<std::sync::Weak<super::Snapshot>>,
-    /// A wave whose first picks found nothing waits for the top-up of its
-    /// filter (its token) instead of ending; `true` once the top-up ended
-    /// with songs (the next empty picks end it).
-    refill: Option<(String, bool)>,
+    /// A wave whose first picks found nothing waits for the top-ups of its
+    /// filters instead of ending ([`Refill`]).
+    refill: Option<Refill>,
+}
+
+/// A wave waiting for the top-ups of its filters (each pick of a wave of
+/// every scene asks for the cluster it is in).
+#[derive(Debug, Default)]
+struct Refill {
+    /// A top-up ended with songs: the next empty picks end the wave.
+    done: bool,
+    /// The filters whose top-ups ended with nothing: not asked again while
+    /// it waits.
+    empty: Vec<String>,
 }
 
 /// What the user did to a track of the radio besides playing it.
@@ -933,7 +943,8 @@ impl Worker {
         let kept = self.discoveries_kept();
         self.new_log_load();
         let bans = self.recs.newlog.bans;
-        let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept, bans));
+        let topped_gen = self.recs.niche.topped_gen;
+        let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept, bans, topped_gen));
         // What a new pool is built from (only when it is needed).
         let inputs = match (&pool, local_only) {
             (None, false) => {
@@ -963,7 +974,7 @@ impl Worker {
                     topped.extend(super::niche::wave_topped(&lib, &waves));
                     let heard = |t: &StreamTrack| super::open::heard_in(&lib, &index, t);
                     let cands = super::open::open_pool(&snap, &found, &sources, &topped, &log, &heard);
-                    Some(super::wave::WavePool::new(&snap, kept, bans, cands))
+                    Some(super::wave::WavePool::new(&snap, kept, bans, topped_gen, cands))
                 }
                 (None, None) => None,
             };
@@ -1215,9 +1226,9 @@ impl Worker {
                 && let Some(token) = refill
             {
                 log::info!("wave: nothing new of its filter yet, it waits for the top-up of {token}");
-                run.refill = Some((token, false));
+                run.refill = Some(Refill::default());
             }
-            if run.refill.as_ref().is_some_and(|r| !r.1) {
+            if run.refill.as_ref().is_some_and(|r| !r.done) {
                 run.want = true;
                 self.publish_player();
                 return;
@@ -1550,24 +1561,48 @@ impl Worker {
         self.radio_alive() && self.recs.radio.run.as_ref().is_some_and(|r| r.resume && (r.extending || r.want))
     }
 
-    /// The top-up of the wave's filter `token` ended with `found` songs: a
-    /// wave waiting for it (nothing to play yet) plays them once the
-    /// snapshot that holds them is built, or ends now when there are none.
+    /// The top-up of the wave's filter `token` ended with `found` songs
+    /// (found now, or kept from a top-up of it lately): a wave waiting for
+    /// its filters' top-ups (nothing to play yet; each pick of a wave of
+    /// every scene asks for the cluster it is in) picks again from its pool
+    /// with them (the pool is built again:
+    /// [`super::niche::NicheState::topped_gen`] moved), or ends when there
+    /// are none and none of its filters is still to be topped up.
     pub(crate) fn wave_refill_ended(&mut self, token: &str, found: usize) {
         let Some(run) = self.recs.radio.run.as_mut() else { return };
-        let Some(refill) = run.refill.as_mut().filter(|r| r.0 == token && !r.1) else { return };
+        let Some(refill) = run.refill.as_mut().filter(|r| !r.done) else { return };
         if found > 0 {
-            refill.1 = true;
-            log::info!("wave: its top-up brought {found} songs");
+            refill.done = true;
+            log::info!("wave: the top-up of {token} brought {found} songs");
+            if run.want {
+                self.radio_extend();
+            }
             return;
         }
-        log::info!("wave: its top-up brought nothing");
+        refill.empty.push(token.to_owned());
+        if self.niche_wave_pending() {
+            log::info!("wave: the top-up of {token} brought nothing, another is under way");
+            return;
+        }
+        log::info!("wave: its top-ups brought nothing");
         self.recs.radio.run = None;
         self.recs.radio.wave_pool = None;
         self.next_origin = None;
         self.toast("Нечего играть", None);
         self.radio_stops_waiting();
         self.publish_player();
+    }
+
+    /// Whether the wave plays nothing yet and waits for the top-ups of its
+    /// filters.
+    pub(crate) fn wave_waits(&self) -> bool {
+        self.recs.radio.run.as_ref().and_then(|r| r.refill.as_ref()).is_some_and(|r| !r.done)
+    }
+
+    /// Whether the waiting wave's filter `token` was topped up with nothing
+    /// while it waits (it is not asked again).
+    pub(crate) fn wave_refill_empty(&self, token: &str) -> bool {
+        self.recs.radio.run.as_ref().and_then(|r| r.refill.as_ref()).is_some_and(|r| !r.done && r.empty.iter().any(|t| t == token))
     }
 
     /// The radio found nothing to play after all: the player waiting for

@@ -205,6 +205,42 @@ pub fn artist_key(name: &str) -> String {
     words(&lower[..end]).collect::<Vec<_>>().join(" ")
 }
 
+/// Every artist a song credits, each by [`artist_key`]: the main one first
+/// (the first artist of the credit line, split as the library splits
+/// credits: [`nikgob_core::credit::split_credit`]), then the others, then
+/// the key of the whole first name as older logs of new music kept it.
+/// `names`: the song's artists as a service lists them, or the library's
+/// credit line. The log of new music keeps the main one ([`main_artist_key`]);
+/// a song is kept down as much as the most kept down of them
+/// ([`NewLog::credit_penalty`]), so a collaboration of an artist kept out is
+/// kept out too.
+pub fn credit_keys<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut whole: Option<String> = None;
+    for name in names {
+        if whole.is_none() {
+            whole = Some(artist_key(name));
+        }
+        let parts = nikgob_core::credit::split_credit(name);
+        let keys: Vec<String> = if parts.is_empty() { vec![artist_key(name)] } else { parts.iter().map(|p| artist_key(&p.1)).collect() };
+        for k in keys {
+            if !k.is_empty() && !out.contains(&k) {
+                out.push(k);
+            }
+        }
+    }
+    if let Some(k) = whole.filter(|k| !k.is_empty() && !out.contains(k)) {
+        out.push(k);
+    }
+    out
+}
+
+/// The main artist of a credit line as the log of new music keeps it (the
+/// first of [`credit_keys`]).
+pub fn main_artist_key(credit: &str) -> String {
+    credit_keys([credit]).into_iter().next().unwrap_or_default()
+}
+
 /// One song across services and versions of its upload: the main artist
 /// and the title, folded. The runtime builds the set of known songs with
 /// the same function from library tracks.
@@ -605,7 +641,7 @@ fn find_profile(sc: &NewScoring<'_>, t: &StreamTrack, v: Option<&Vector>, seed: 
 fn model_score(t: &StreamTrack, key: &str, via_seeds: &HashMap<SeedRef, f32>, seeds: &DiscoverySeeds, sc: &NewScoring<'_>) -> Option<(f32, Option<usize>)> {
     let m = sc.model;
     let artist = t.artists.first().map(|a| artist_key(&a.name)).unwrap_or_default();
-    let penalty = sc.log.artist_penalty(&artist, sc.now);
+    let penalty = sc.log.credit_penalty(&credit_keys(t.artists.iter().map(|a| a.name.as_str())), sc.now);
     if penalty.is_infinite() {
         return None;
     }
@@ -828,6 +864,27 @@ mod tests {
         let mut clip = st(Service::Youtube, "v", "AIYOU - Eve Music Video", "Eve");
         clip.kind = TrackKind::Video;
         assert_eq!(stream_song_key(&clip), song_key("AIYOU", "Eve"));
+    }
+
+    /// One function keys a song's artists for the log of new music and for
+    /// every candidate: the main artist the same from a service's list and
+    /// from the library's credit line of the same song, every other artist
+    /// of a collaboration too, and the whole first name as older logs kept
+    /// it.
+    #[test]
+    fn a_credits_artists_are_keyed_once_for_everything() {
+        assert_eq!(credit_keys(["A, B"]), ["a", "b"]);
+        assert_eq!(credit_keys(["A feat. B"]), credit_keys(["A", "B"]));
+        assert_eq!(main_artist_key("Somebody, Other"), main_artist_key("Somebody"));
+        assert_eq!(main_artist_key("Somebody feat. Other"), "somebody");
+        // A name the credit splits but `artist_key` does not: the main
+        // artist alone, the whole name kept last.
+        assert_eq!(credit_keys(["A / B"]), ["a", "b", "a b"]);
+        assert_eq!(credit_keys(["Simon & Garfunkel"]), [artist_key("Simon & Garfunkel")]);
+        assert_eq!(credit_keys(["Kevin Penkin、immi"]), ["kevin penkin", "immi"]);
+        assert!(credit_keys([""]).is_empty());
+        let none: [&str; 0] = [];
+        assert!(credit_keys(none).is_empty());
     }
 
     fn seeds() -> DiscoverySeeds {

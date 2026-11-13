@@ -32,9 +32,15 @@
 //!   whether the mixes play new music or not — and its pool takes them
 //!   ([`wave_topped`]); [`WAVE_WANTS`] filters at most, while a wave plays.
 //!   A wave whose first picks found nothing waits for its filter's top-up
-//!   ([`Worker::wave_refill_ended`]): it plays what the top-up brings, or
-//!   ends when it brings nothing, cannot be asked or is over its budget.
-//!   The wave only records what it wants; the plan is made on the tick.
+//!   ([`Worker::wave_refill_ended`]): it plays what the top-up brings (or
+//!   what a top-up of that filter kept lately), or ends when it brings
+//!   nothing, cannot be asked or is over its budget. It waits even while
+//!   the window is hidden and nothing plays (the top-up's requests go on
+//!   then for it alone, within the same budgets).
+//! * **Off the worker**: the wave only records what it wants; the plan (the
+//!   cache and the library read) is made on the picks' thread
+//!   ([`super::picker`], its never-dropped lane), and so are the writes of
+//!   the budgets and of what was found, in the order they were made.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -165,10 +171,15 @@ pub(crate) enum Answer {
 pub(crate) enum NicheMsg {
     Answered { step: Step, result: Result<Answer, StreamError> },
     Wake,
+    /// The plan made on the picks' thread ([`plan`]).
+    Planned(Box<Plan>),
+    /// What the niche under way found is kept in the cache: `found` songs
+    /// for the wave's filter `wave`, if it was one.
+    Kept { wave: Option<String>, found: usize },
 }
 
 /// The niche being topped up.
-struct Open {
+pub(crate) struct Open {
     /// What it is, for the log.
     what: String,
     /// The wave's filter it is for (its token), if it is.
@@ -202,6 +213,167 @@ pub(crate) struct NicheState {
     /// The wave's filters asked for lately (planned or not): their top-ups
     /// join its pool.
     pub wave_kept: Vec<(String, Vec<TrackId>)>,
+    /// Moves whenever the top-ups the wave's pool takes change (a filter
+    /// joins `wave_kept`, a top-up of one is kept): its pool is built again
+    /// ([`super::wave::WavePool`]).
+    pub topped_gen: u64,
+    /// A plan is being made on the picks' thread.
+    planning: bool,
+}
+
+/// What a plan of the next top-up is made of: the worker's state, read
+/// with the library's cache and catalog on the picks' thread ([`plan`]).
+struct PlanInput {
+    lib: Library,
+    snap: Arc<super::Snapshot>,
+    /// Today, when its requests are still to be read from the cache.
+    day: Option<String>,
+    day_requests: u32,
+    yt: bool,
+    dz: bool,
+    /// The cache keys left for a while.
+    spent: Vec<String>,
+    /// The wave's filters to plan, the latest last.
+    wave: Vec<(String, Vec<TrackId>)>,
+    /// The home's niches (what, cache key, seeds), when the mixes play new
+    /// music.
+    home: Vec<(String, String, Vec<TrackId>)>,
+}
+
+/// A plan ([`plan`]).
+pub(crate) struct Plan {
+    /// Today and its requests, when they were read.
+    day: Option<(String, u32)>,
+    /// The top-up to open.
+    open: Option<Open>,
+    /// Cache keys with nothing to ask (left for [`RETRY`]).
+    spent: Vec<String>,
+    /// The wave's filters let go, each with the songs a top-up of it kept
+    /// lately (none: nothing is to come for it).
+    ended: Vec<(String, usize)>,
+    /// The wave's filters not planned yet (one is opened first).
+    rest: Vec<(String, Vec<TrackId>)>,
+}
+
+/// Plans the next top-up (see [`Worker::niche_plan`]); the library is read,
+/// never written.
+fn plan(mut i: PlanInput) -> Plan {
+    let mut out = Plan { day: None, open: None, spent: Vec::new(), ended: Vec::new(), rest: Vec::new() };
+    let mut day_requests = i.day_requests;
+    if let Some(day) = i.day.take() {
+        let kept: Option<(String, u32)> = super::cache_read(&i.lib, DAY_KEY);
+        day_requests = kept.filter(|k| k.0 == day).map_or(0, |k| k.1);
+        out.day = Some((day, day_requests));
+    }
+    // Today's budget left, a service to ask.
+    let can_ask = day_requests < DAY_BUDGET && (i.yt || i.dz);
+    // The wave's filters (the latest first), each planned or let go once.
+    while let Some((token, seeds)) = i.wave.pop() {
+        let key = wave_key(&token);
+        if let Some(found) = cached_at(&i.lib, &key, &seeds) {
+            // Topped up lately: what it kept joins the wave's pool.
+            out.ended.push((token, found.tracks.len()));
+            continue;
+        }
+        let window = requests_of(&i.lib, &key);
+        if !can_ask || i.spent.contains(&key) || window.1 >= BUDGET {
+            out.ended.push((token, 0));
+            continue;
+        }
+        match steps_of(&i.lib, &i.snap, &seeds, i.yt, i.dz) {
+            Some(steps) => {
+                out.open = Some(Open::new(format!("the wave's {token}"), Some(token), key, seeds, window, steps));
+                out.rest = i.wave;
+                return out;
+            }
+            None => {
+                out.spent.push(key);
+                out.ended.push((token, 0));
+            }
+        }
+    }
+    if !can_ask {
+        return out;
+    }
+    let spent = |key: &String| i.spent.contains(key);
+    let first = i
+        .home
+        .into_iter()
+        .filter(|(_, key, _)| !spent(key))
+        .filter(|(_, key, seeds)| cached_at(&i.lib, key, seeds).is_none())
+        .find_map(|(what, key, seeds)| {
+            let window = requests_of(&i.lib, &key);
+            (window.1 < BUDGET).then_some((what, key, seeds, window))
+        });
+    if let Some((what, key, seeds, window)) = first {
+        match steps_of(&i.lib, &i.snap, &seeds, i.yt, i.dz) {
+            Some(steps) => out.open = Some(Open::new(what, None, key, seeds, window, steps)),
+            None => out.spent.push(key),
+        }
+    }
+    out
+}
+
+/// The requests of a top-up of `seeds`: the radios of the best loved, the
+/// similar artists of their commonest artists; `None` when there is
+/// nothing to ask.
+fn steps_of(lib: &Library, snap: &super::Snapshot, seeds: &[TrackId], yt: bool, dz: bool) -> Option<VecDeque<Step>> {
+    // The best loved seeds first; their commonest artists.
+    let model = &snap.model;
+    let now = model.now();
+    let mut loved: Vec<(f32, TrackId)> = seeds.iter().map(|t| (model.position(*t).map_or(0.0, |i| model.tracks[i].aff_long(now)), *t)).collect();
+    loved.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut steps = VecDeque::new();
+    for &(_, t) in loved.iter().take(RADIO_SEEDS) {
+        let refs = lib.stream_refs(t).unwrap_or_default();
+        let id_on = |s: Service| refs.iter().find(|r| r.id.service == s).map(|r| r.id.id.clone());
+        let step = match (id_on(Service::Youtube), id_on(Service::Deezer)) {
+            (Some(id), _) if yt => Some(Step::Radio { seed: t, service: Service::Youtube, id }),
+            (_, Some(id)) if dz => Some(Step::Radio { seed: t, service: Service::Deezer, id }),
+            _ => lib.get_track(t).ok().flatten().map(|row| {
+                let artist = row.artist_credit.display();
+                Step::FindSong {
+                    seed: t,
+                    service: if yt { Service::Youtube } else { Service::Deezer },
+                    query: format!("{artist} {}", row.title),
+                    key: song_key(&row.title, &artist),
+                }
+            }),
+        };
+        steps.extend(step);
+    }
+    if dz {
+        let mut by_artist: Vec<(ArtistId, Vec<TrackId>)> = Vec::new();
+        for &(_, t) in &loved {
+            let Some(a) = model.position(t).and_then(|i| model.main_artist_at(i)) else { continue };
+            match by_artist.iter_mut().find(|x| x.0 == a) {
+                Some(x) => x.1.push(t),
+                None => by_artist.push((a, vec![t])),
+            }
+        }
+        by_artist.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        for (a, seeds) in by_artist.into_iter().take(ARTIST_SEEDS) {
+            let known = lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
+            match known.iter().find(|r| r.service == Service::Deezer) {
+                Some(r) => steps.push_back(Step::Similar { seeds, id: r.id.clone() }),
+                None => {
+                    if let Some(name) = lib.get_artist(a).ok().flatten().map(|x| x.name)
+                        && !nikgob_core::streaming::more_artists_note(&name)
+                    {
+                        steps.push_back(Step::FindArtist { artist: a, seeds, name });
+                    }
+                }
+            }
+        }
+    }
+    (!steps.is_empty()).then_some(steps)
+}
+
+impl Open {
+    fn new(what: String, wave: Option<String>, token: String, mut seeds: Vec<TrackId>, window: (UnixMs, u32), steps: VecDeque<Step>) -> Self {
+        seeds.sort_unstable();
+        Self { what, wave, token, seeds, window, steps, found: Vec::new(), requests: 0 }
+    }
 }
 
 async fn ask(svc: Arc<dyn StreamService>, step: &Step) -> Result<Answer, StreamError> {
@@ -248,34 +420,43 @@ impl Worker {
         };
         if self.recs.radio.engine().and_then(|e| e.wave_seed()).is_none() {
             self.recs.niche.wave.clear();
-            self.recs.niche.wave_kept.clear();
+            if !self.recs.niche.wave_kept.is_empty() {
+                self.recs.niche.wave_kept.clear();
+                self.recs.niche.topped_gen += 1;
+            }
         }
-        if crate::quiet::busy() || (!mixes && self.recs.niche.wave.is_empty() && self.recs.niche.open.is_none()) {
+        if crate::quiet::busy() || self.recs.niche.planning || (!mixes && self.recs.niche.wave.is_empty() && self.recs.niche.open.is_none()) {
             return;
         }
+        // A new day starts with none of its requests (today's, read from
+        // the cache with the first plan after a start).
         let (day, _) = local_day();
-        if self.recs.niche.day != day {
-            let kept: Option<(String, u32)> = super::cache_read(&self.lib, DAY_KEY);
-            let n = &mut self.recs.niche;
-            (n.day, n.day_requests) = kept.filter(|k| k.0 == day).unwrap_or((day, 0));
+        if !self.recs.niche.day.is_empty() && self.recs.niche.day != day {
+            (self.recs.niche.day, self.recs.niche.day_requests) = (day, 0);
         }
-        if self.recs.niche.open.is_none() && !self.niche_plan(mixes) {
+        if self.recs.niche.open.is_none() {
+            self.niche_plan(mixes);
             return;
         }
         self.niche_step();
     }
 
     /// The playing wave's filter of `token` has few new songs left: its
-    /// library songs `seeds` (the best loved first) are to be topped up on
-    /// the next tick (see the module docs). The token when a top-up of it
-    /// is under way or to be planned; `None` when none can come (no
-    /// service, today's budget spent, the filter topped up lately).
+    /// library songs `seeds` (the best loved first) are to be topped up —
+    /// planned on the next tick (see the module docs), which tells the wave
+    /// what a top-up of it kept lately, or that none can come (no service,
+    /// a budget spent). The token; `None` without songs to look around.
     pub(crate) fn niche_want_wave(&mut self, token: String, mut seeds: Vec<TrackId>) -> Option<String> {
         if seeds.is_empty() {
             return None;
         }
         seeds.sort_unstable();
         let n = &mut self.recs.niche;
+        // A filter its pool did not take yet (or of other songs): the pool
+        // takes what a top-up of it kept at its next picks.
+        if !n.wave_kept.iter().any(|x| x.0 == token && same_seeds(&x.1, &seeds)) {
+            n.topped_gen += 1;
+        }
         n.wave_kept.retain(|x| x.0 != token);
         n.wave_kept.push((token.clone(), seeds.clone()));
         while n.wave_kept.len() > WAVE_WANTS {
@@ -283,12 +464,6 @@ impl Worker {
         }
         if n.open.as_ref().is_some_and(|o| o.wave.as_deref() == Some(token.as_str())) {
             return Some(token);
-        }
-        let services = self.service(Service::Youtube).is_some() || self.service(Service::Deezer).is_some();
-        let n = &mut self.recs.niche;
-        n.spent.retain(|s| s.1.elapsed() < RETRY);
-        if !services || n.day_requests >= DAY_BUDGET || n.spent.iter().any(|s| s.0 == wave_key(&token)) {
-            return None;
         }
         if !n.wave.iter().any(|x| x.0 == token && x.1 == seeds) {
             n.wave.retain(|x| x.0 != token);
@@ -303,116 +478,104 @@ impl Worker {
 
     /// Plans the top-up of the first niche whose songs are stale — the
     /// wave's filters first, then the home's niches (only when `mixes`
-    /// play new music); false when there is none.
-    fn niche_plan(&mut self, mixes: bool) -> bool {
+    /// play new music) — on the picks' thread ([`plan`]); its answer is
+    /// [`NicheMsg::Planned`]. One plan at a time.
+    fn niche_plan(&mut self, mixes: bool) {
+        let Some(snap) = self.snapshot() else { return };
         let (yt, dz) = (self.service(Service::Youtube).is_some(), self.service(Service::Deezer).is_some());
-        if self.recs.niche.day_requests >= DAY_BUDGET || (!yt && !dz) {
-            // Nothing can be asked today: a wave waiting for it is told.
-            for (token, _) in std::mem::take(&mut self.recs.niche.wave) {
-                self.wave_refill_ended(&token, 0);
-            }
-            return false;
-        }
-        let Some(snap) = self.snapshot() else { return false };
-        self.recs.niche.spent.retain(|s| s.1.elapsed() < RETRY);
-        // The wave's filters (the latest first), each planned or let go
-        // (and its wave told) once.
-        while let Some((token, seeds)) = self.recs.niche.wave.pop() {
-            let key = wave_key(&token);
-            let window = requests_of(&self.lib, &key);
-            let spent = self.recs.niche.spent.iter().any(|s| s.0 == key);
-            if spent || window.1 >= BUDGET || cached_at(&self.lib, &key, &seeds).is_some() {
-                self.wave_refill_ended(&token, 0);
-                continue;
-            }
-            if self.niche_open(&snap, format!("the wave's {token}"), Some(token.clone()), key, seeds, window, yt, dz) {
-                return true;
-            }
-            self.wave_refill_ended(&token, 0);
-        }
-        if !mixes {
-            return false;
-        }
-        let Some(home) = self.recs.home.as_ref() else { return false };
-        let wants: Vec<(String, String, Vec<TrackId>)> =
-            home.lanes.iter().filter(|l| !l.niche.is_empty()).filter_map(|l| Some((format!("{:?}", l.key), key_of(l.key)?, l.niche.clone()))).collect();
-        let spent = &self.recs.niche.spent;
-        let Some((mix, seeds, token, window)) = wants
-            .into_iter()
-            .filter(|(_, key, _)| !spent.iter().any(|s| s.0 == *key))
-            .filter(|(_, key, seeds)| cached_at(&self.lib, key, seeds).is_none())
-            .find_map(|(what, key, seeds)| {
-                let window = requests_of(&self.lib, &key);
-                (window.1 < BUDGET).then_some((what, seeds, key, window))
-            })
-        else {
-            return false;
+        let home: Vec<(String, String, Vec<TrackId>)> = match self.recs.home.as_ref() {
+            Some(h) if mixes => h.lanes.iter().filter(|l| !l.niche.is_empty()).filter_map(|l| Some((format!("{:?}", l.key), key_of(l.key)?, l.niche.clone()))).collect(),
+            _ => Vec::new(),
         };
-        self.niche_open(&snap, mix, None, token, seeds, window, yt, dz)
+        let (today, _) = local_day();
+        let n = &mut self.recs.niche;
+        n.spent.retain(|s| s.1.elapsed() < RETRY);
+        let input = PlanInput {
+            lib: self.lib.clone(),
+            snap,
+            day: (n.day != today).then_some(today),
+            day_requests: n.day_requests,
+            yt,
+            dz,
+            spent: n.spent.iter().map(|s| s.0.clone()).collect(),
+            wave: std::mem::take(&mut n.wave),
+            home,
+        };
+        if input.wave.is_empty() && input.home.is_empty() && input.day.is_none() {
+            return;
+        }
+        n.planning = true;
+        let tx = self.recs.tx.clone();
+        let wave: Vec<String> = input.wave.iter().map(|w| w.0.clone()).collect();
+        let sent = self.recs.picker.send(super::picker::Lane::Niche, move || {
+            let tokens: Vec<String> = input.wave.iter().map(|w| w.0.clone()).collect();
+            // A plan that fails lets its wave's filters go (never a plan
+            // waited for forever).
+            let planned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plan(input))).unwrap_or_else(|_| {
+                log::error!("niche: the plan failed");
+                Plan { day: None, open: None, spent: Vec::new(), ended: tokens.into_iter().map(|t| (t, 0)).collect(), rest: Vec::new() }
+            });
+            let _ = tx.send(Internal::Recs(Msg::Niche(NicheMsg::Planned(Box::new(planned)))));
+        });
+        if let Err(e) = sent {
+            log::warn!("niche: cannot plan: {e}");
+            self.recs.niche.planning = false;
+            for token in wave {
+                self.wave_refill_ended(&token, 0);
+            }
+        }
     }
 
-    /// Opens the top-up `what` (cache key `token`, the wave's filter
-    /// `wave` if it is one) of `seeds` with its requests planned; false
-    /// when there is nothing to ask (it is left for [`RETRY`]).
-    #[allow(clippy::too_many_arguments)]
-    fn niche_open(&mut self, snap: &super::Snapshot, mix: String, wave: Option<String>, token: String, seeds: Vec<TrackId>, window: (UnixMs, u32), yt: bool, dz: bool) -> bool {
-        // The best loved seeds first; their commonest artists.
-        let model = &snap.model;
-        let now = model.now();
-        let mut loved: Vec<(f32, TrackId)> = seeds.iter().map(|t| (model.position(*t).map_or(0.0, |i| model.tracks[i].aff_long(now)), *t)).collect();
-        loved.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        let mut steps = VecDeque::new();
-        for &(_, t) in loved.iter().take(RADIO_SEEDS) {
-            let refs = self.lib.stream_refs(t).unwrap_or_default();
-            let id_on = |s: Service| refs.iter().find(|r| r.id.service == s).map(|r| r.id.id.clone());
-            let step = match (id_on(Service::Youtube), id_on(Service::Deezer)) {
-                (Some(id), _) if yt => Some(Step::Radio { seed: t, service: Service::Youtube, id }),
-                (_, Some(id)) if dz => Some(Step::Radio { seed: t, service: Service::Deezer, id }),
-                _ => self.lib.get_track(t).ok().flatten().map(|row| {
-                    let artist = row.artist_credit.display();
-                    Step::FindSong {
-                        seed: t,
-                        service: if yt { Service::Youtube } else { Service::Deezer },
-                        query: format!("{artist} {}", row.title),
-                        key: song_key(&row.title, &artist),
-                    }
-                }),
-            };
-            steps.extend(step);
+    /// [`NicheMsg::Planned`]: the top-up planned opens and its first
+    /// request goes; the wave's filters let go are told.
+    fn niche_planned(&mut self, p: Plan) {
+        let n = &mut self.recs.niche;
+        n.planning = false;
+        if let Some(day) = p.day {
+            (n.day, n.day_requests) = day;
         }
-        if dz {
-            let mut by_artist: Vec<(ArtistId, Vec<TrackId>)> = Vec::new();
-            for &(_, t) in &loved {
-                let Some(a) = model.position(t).and_then(|i| model.main_artist_at(i)) else { continue };
-                match by_artist.iter_mut().find(|x| x.0 == a) {
-                    Some(x) => x.1.push(t),
-                    None => by_artist.push((a, vec![t])),
-                }
+        let now = Instant::now();
+        n.spent.extend(p.spent.into_iter().map(|k| (k, now)));
+        // Those not planned yet go before the wants since (older).
+        if !p.rest.is_empty() {
+            let since = std::mem::replace(&mut n.wave, p.rest);
+            for w in since {
+                n.wave.retain(|x| x.0 != w.0);
+                n.wave.push(w);
             }
-            by_artist.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-            for (a, seeds) in by_artist.into_iter().take(ARTIST_SEEDS) {
-                let known = self.lib.external_ids(EntityKind::Artist, *a.as_uuid()).unwrap_or_default();
-                match known.iter().find(|r| r.service == Service::Deezer) {
-                    Some(r) => steps.push_back(Step::Similar { seeds, id: r.id.clone() }),
-                    None => {
-                        if let Some(name) = self.lib.get_artist(a).ok().flatten().map(|x| x.name)
-                            && !nikgob_core::streaming::more_artists_note(&name)
-                        {
-                            steps.push_back(Step::FindArtist { artist: a, seeds, name });
-                        }
-                    }
-                }
+            while n.wave.len() > WAVE_WANTS {
+                n.wave.remove(0);
             }
         }
-        if steps.is_empty() {
-            self.recs.niche.spent.push((token, Instant::now()));
-            return false;
+        let opened = p.open.is_some();
+        if let Some(open) = p.open {
+            log::info!("niche: topping up {} from {} seeds, {} requests planned", open.what, open.seeds.len(), open.steps.len());
+            self.recs.niche.open = Some(open);
         }
-        log::info!("niche: topping up {mix} from {} seeds, {} requests planned", seeds.len(), steps.len());
-        let mut seeds = seeds;
-        seeds.sort_unstable();
-        self.recs.niche.open = Some(Open { what: mix, wave, token, seeds, window, steps, found: Vec::new(), requests: 0 });
-        true
+        for (token, kept) in p.ended {
+            if kept > 0 {
+                log::info!("niche: the wave's {token} was topped up lately, with {kept} songs");
+            }
+            self.wave_refill_ended(&token, kept);
+        }
+        if opened {
+            self.niche_step();
+        }
+    }
+
+    /// Whether a top-up of one of the wave's filters is still to come:
+    /// planned or wanted.
+    pub(crate) fn niche_wave_pending(&self) -> bool {
+        let n = &self.recs.niche;
+        n.planning || !n.wave.is_empty() || n.open.as_ref().is_some_and(|o| o.wave.is_some())
+    }
+
+    /// Runs `work` (the library's writes of the top-ups) on the picks'
+    /// thread after what was sent there before.
+    fn niche_write(&self, work: impl FnOnce() + Send + 'static) {
+        if let Err(e) = self.recs.picker.send(super::picker::Lane::Niche, work) {
+            log::warn!("niche: cannot keep: {e}");
+        }
     }
 
     fn niche_wait(&mut self, d: Duration) {
@@ -430,7 +593,10 @@ impl Worker {
         if n.busy || n.next_at.is_some_and(|t| Instant::now() < t) {
             return;
         }
-        if self.streaming.search.active() || self.streams_idle() || self.recs.discover_busy() {
+        // Not while the window is idle — unless a wave waits for this
+        // top-up to play at all.
+        let for_wave = self.recs.niche.open.as_ref().is_some_and(|o| o.wave.is_some()) && self.wave_waits();
+        if self.streaming.search.active() || (self.streams_idle() && !for_wave) || self.recs.discover_busy() {
             return;
         }
         if !std::mem::replace(&mut self.recs.niche.warmed, true) {
@@ -455,15 +621,22 @@ impl Worker {
                 self.niche_wait(left + crate::streams::wake_jitter());
                 return;
             }
+            let mut window = None;
             if let Some(open) = self.recs.niche.open.as_mut() {
                 open.requests += 1;
                 open.window.1 += 1;
-                super::cache_write(&self.lib, &format!("{}{REQ}", open.token), now_ms(), &open.window);
+                window = Some((format!("{}{REQ}", open.token), open.window));
             }
             let n = &mut self.recs.niche;
             n.day_requests += 1;
             n.busy = true;
-            super::cache_write(&self.lib, DAY_KEY, now_ms(), &(n.day.clone(), n.day_requests));
+            let (lib, day) = (self.lib.clone(), (n.day.clone(), n.day_requests));
+            self.niche_write(move || {
+                if let Some((key, window)) = window {
+                    super::cache_write(&lib, &key, now_ms(), &window);
+                }
+                super::cache_write(&lib, DAY_KEY, now_ms(), &day);
+            });
             self.streaming.spawn_internal(async move {
                 let result = ask(svc, &step).await;
                 Internal::Recs(Msg::Niche(NicheMsg::Answered { step, result }))
@@ -477,6 +650,14 @@ impl Worker {
             NicheMsg::Answered { step, result } => (step, result),
             NicheMsg::Wake => {
                 self.niche_tick();
+                return;
+            }
+            NicheMsg::Planned(p) => {
+                self.niche_planned(*p);
+                return;
+            }
+            NicheMsg::Kept { wave, found } => {
+                self.niche_kept(wave, found);
                 return;
             }
         };
@@ -513,7 +694,10 @@ impl Worker {
                 let key = artist_key(&name);
                 if let Some(hit) = hits.iter().find(|h| artist_key(&h.name) == key) {
                     open.steps.push_front(Step::Similar { seeds, id: hit.id.id.clone() });
-                    let _ = self.lib.set_external_id(EntityKind::Artist, &hit.id, *artist.as_uuid());
+                    let (lib, remote) = (self.lib.clone(), hit.id.clone());
+                    self.niche_write(move || {
+                        let _ = lib.set_external_id(EntityKind::Artist, &remote, *artist.as_uuid());
+                    });
                 }
             }
             (Step::Similar { seeds, .. }, Answer::Artists(similar)) => {
@@ -550,13 +734,30 @@ impl Worker {
         let found = NicheFound { at: now_ms(), seeds: open.seeds, tracks };
         let key = open.token;
         self.streaming.learn(&found.tracks.iter().map(|t| t.0.clone()).collect::<Vec<_>>());
-        super::cache_write(&self.lib, &key, found.at, &found);
-        if !found.tracks.is_empty() {
+        // Kept on the picks' thread; the mixes and the wave take it once it
+        // is ([`NicheMsg::Kept`]).
+        let (lib, tx) = (self.lib.clone(), self.recs.tx.clone());
+        let sent = self.recs.picker.send(super::picker::Lane::Niche, move || {
+            super::cache_write(&lib, &key, found.at, &found);
+            let _ = tx.send(Internal::Recs(Msg::Niche(NicheMsg::Kept { wave, found: found_n })));
+        });
+        if let Err(e) = sent {
+            log::warn!("niche: cannot keep: {e}");
+        }
+    }
+
+    /// [`NicheMsg::Kept`]: the songs a top-up found are in the cache — the
+    /// mixes are built again with them, the wave's pool takes them.
+    fn niche_kept(&mut self, wave: Option<String>, found: usize) {
+        if found > 0 {
             let after = self.streaming.schedule.recs_debounce;
             self.recs_dirty(after);
+            if wave.is_some() {
+                self.recs.niche.topped_gen += 1;
+            }
         }
         if let Some(t) = wave {
-            self.wave_refill_ended(&t, found_n);
+            self.wave_refill_ended(&t, found);
         }
     }
 }
@@ -598,6 +799,36 @@ mod tests {
         let old = NicheFound { at: now_ms() - TTL_MS - 1, ..found };
         super::super::cache_write(&lib, &wave_key("calm.all"), old.at, &old);
         assert!(wave_topped(&lib, &[("calm.all".to_owned(), seeds)]).is_empty(), "stale");
+    }
+
+    /// The plan (made off the worker) tells a wave's filter topped up lately
+    /// what it kept, whatever the budgets — not «nothing» — and lets go one
+    /// that cannot be asked (left for a while, over today's budget).
+    #[test]
+    fn a_plan_tells_the_wave_what_its_filter_kept_lately() {
+        let lib = Library::open_in_memory().unwrap();
+        let seeds: Vec<TrackId> = (0..4).map(|_| TrackId::new()).collect();
+        let found = NicheFound { at: now_ms(), seeds: seeds.clone(), tracks: vec![(st("1", "Calm", "Someone"), vec![seeds[0]]), (st("2", "Still", "Else"), vec![seeds[1]])] };
+        super::super::cache_write(&lib, &wave_key("calm.all"), found.at, &found);
+        let input = |day_requests: u32| PlanInput {
+            lib: lib.clone(),
+            snap: super::super::wave::empty_snapshot(),
+            day: Some("2026-11-13".into()),
+            day_requests,
+            yt: true,
+            dz: false,
+            spent: vec![wave_key("lively.all")],
+            wave: vec![("lively.all".into(), seeds.clone()), ("calm.all".into(), seeds.clone())],
+            home: Vec::new(),
+        };
+        let p = plan(input(0));
+        assert_eq!(p.day, Some(("2026-11-13".into(), 0)), "the day's requests read with the plan");
+        assert_eq!(p.ended, vec![("calm.all".to_owned(), 2), ("lively.all".to_owned(), 0)]);
+        assert!(p.open.is_none() && p.rest.is_empty());
+        super::super::cache_write(&lib, DAY_KEY, now_ms(), &("2026-11-13".to_owned(), DAY_BUDGET));
+        let p = plan(input(0));
+        assert_eq!(p.day, Some(("2026-11-13".into(), DAY_BUDGET)));
+        assert_eq!(p.ended, vec![("calm.all".to_owned(), 2), ("lively.all".to_owned(), 0)], "kept songs count over the budget too");
     }
 
     /// A top-up is for its niche: most of the seeds the same, not a mix of

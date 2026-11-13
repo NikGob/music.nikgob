@@ -100,27 +100,60 @@ pub(crate) fn view_filter(f: &WaveFilter) -> v::WaveFilter {
 }
 
 /// The wave's open pool as built for a snapshot ([`super::open::open_pool`]):
-/// kept while the snapshot, the discoveries and the artists kept out
-/// ([`super::novelty::NewState::bans`]) are the same — an artist kept out
-/// after the pool was built leaves it at the next picks (the tail past the
-/// next song is picked again after the skip that kept them out anyway).
+/// kept while the snapshot, the discoveries, the artists kept out
+/// ([`super::novelty::NewState::bans`]) and the top-ups of the wave's
+/// filters ([`super::niche::NicheState::topped_gen`]) are the same — an
+/// artist kept out after the pool was built leaves it at the next picks
+/// (the tail past the next song is picked again after the skip that kept
+/// them out anyway), a filter's top-up joins it.
 #[derive(Clone)]
 pub(crate) struct WavePool {
     snap: Weak<Snapshot>,
     discoveries: usize,
     bans: u64,
+    topped: u64,
     pub cands: Arc<Vec<OpenCandidate>>,
 }
 
 impl WavePool {
-    pub(crate) fn new(snap: &Arc<Snapshot>, discoveries: usize, bans: u64, cands: Vec<OpenCandidate>) -> Self {
-        Self { snap: Arc::downgrade(snap), discoveries, bans, cands: Arc::new(cands) }
+    pub(crate) fn new(snap: &Arc<Snapshot>, discoveries: usize, bans: u64, topped: u64, cands: Vec<OpenCandidate>) -> Self {
+        Self { snap: Arc::downgrade(snap), discoveries, bans, topped, cands: Arc::new(cands) }
     }
 
-    /// Built for `snap` with `discoveries` kept and `bans` artists kept out.
-    pub(crate) fn holds(&self, snap: &Arc<Snapshot>, discoveries: usize, bans: u64) -> bool {
-        self.discoveries == discoveries && self.bans == bans && Weak::ptr_eq(&self.snap, &Arc::downgrade(snap))
+    /// Built for `snap` with `discoveries` kept, `bans` artists kept out and
+    /// the wave's top-ups as they were at `topped`.
+    pub(crate) fn holds(&self, snap: &Arc<Snapshot>, discoveries: usize, bans: u64, topped: u64) -> bool {
+        self.discoveries == discoveries && self.bans == bans && self.topped == topped && Weak::ptr_eq(&self.snap, &Arc::downgrade(snap))
     }
+}
+
+/// A snapshot of nothing, for tests.
+#[cfg(test)]
+pub(crate) fn empty_snapshot() -> Arc<Snapshot> {
+    use nikgob_recs::{Catalog, DiscoveryFilter, ModelInput, SongTypes, TasteInput, UserModel, VectorIndex};
+    let catalog = Catalog::new(Vec::new());
+    let index = VectorIndex::new();
+    let model = UserModel::build(&catalog, &TasteInput::default(), ModelInput { index: &index, types: None, weights: None, graph: None }, 1_000);
+    Arc::new(Snapshot {
+        model,
+        types: SongTypes::default(),
+        catalog,
+        index,
+        filter: DiscoveryFilter::default(),
+        artist_keys: HashMap::new(),
+        known_albums: HashSet::new(),
+        played_songs: HashSet::new(),
+        suggested_new: Vec::new(),
+        local_only: false,
+        worlds: HashMap::new(),
+        new_vectors: HashMap::new(),
+        new_embeddings: HashMap::new(),
+        artist_affinity: HashMap::new(),
+        profiles: Default::default(),
+        background: Vec::new(),
+        graph_new: Vec::new(),
+        genres: HashMap::new(),
+    })
 }
 
 /// What a wave's picks asked ([`nikgob_recs::wave::WaveAsks`]) with its
@@ -282,6 +315,9 @@ impl Worker {
             self.want_preview(track, video);
         }
         let (token, seeds) = asked.short?;
+        if self.wave_refill_empty(&token) {
+            return None;
+        }
         self.niche_want_wave(token, seeds)
     }
 
@@ -380,34 +416,12 @@ mod tests {
     /// was built, as when the snapshot or the discoveries change.
     #[test]
     fn a_new_ban_builds_the_waves_pool_again() {
-        use nikgob_recs::{Catalog, DiscoveryFilter, ModelInput, SongTypes, TasteInput, UserModel, VectorIndex};
-        let catalog = Catalog::new(Vec::new());
-        let index = VectorIndex::new();
-        let model = UserModel::build(&catalog, &TasteInput::default(), ModelInput { index: &index, types: None, weights: None, graph: None }, 1_000);
-        let snap = Arc::new(Snapshot {
-            model,
-            types: SongTypes::default(),
-            catalog,
-            index,
-            filter: DiscoveryFilter::default(),
-            artist_keys: HashMap::new(),
-            known_albums: HashSet::new(),
-            played_songs: HashSet::new(),
-            suggested_new: Vec::new(),
-            local_only: false,
-            worlds: HashMap::new(),
-            new_vectors: HashMap::new(),
-            new_embeddings: HashMap::new(),
-            artist_affinity: HashMap::new(),
-            profiles: Default::default(),
-            background: Vec::new(),
-            graph_new: Vec::new(),
-            genres: HashMap::new(),
-        });
-        let pool = WavePool::new(&snap, 3, 0, Vec::new());
-        assert!(pool.holds(&snap, 3, 0));
-        assert!(!pool.holds(&snap, 3, 1), "an artist kept out since");
-        assert!(!pool.holds(&snap, 4, 0));
+        let snap = empty_snapshot();
+        let pool = WavePool::new(&snap, 3, 0, 0, Vec::new());
+        assert!(pool.holds(&snap, 3, 0, 0));
+        assert!(!pool.holds(&snap, 3, 1, 0), "an artist kept out since");
+        assert!(!pool.holds(&snap, 4, 0, 0));
+        assert!(!pool.holds(&snap, 3, 0, 1), "a filter topped up since");
     }
 
     /// A wave started from a mix's card plays under the mix's name, so the

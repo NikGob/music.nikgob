@@ -80,8 +80,8 @@ pub use embedding::{Compact, EMBEDDED_WITH, SoundModel};
 pub use daily::DailyParams;
 pub use daylist::{Centre, DAYLIST_LEN, daylist_title};
 pub use discover::{
-    Discovery, DiscoveryFilter, DiscoverySeeds, NewRelease, SeedFinds, SeedRef, album_key, artist_key, rank_discoveries,
-    song_key, stream_song_key,
+    Discovery, DiscoveryFilter, DiscoverySeeds, NewRelease, SeedFinds, SeedRef, album_key, artist_key, credit_keys,
+    main_artist_key, rank_discoveries, song_key, stream_song_key,
 };
 pub use graph::{Edge, GraphInput, GraphSource, SimGraph};
 pub use index::{Normalizer, VectorIndex};
