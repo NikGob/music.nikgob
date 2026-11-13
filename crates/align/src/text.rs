@@ -372,15 +372,16 @@ impl Vocab {
 
     /// Letters a singer's vowels are heard as for each other (ids, both
     /// ways; [`crate::ctc::Costs::vowels`]): Russian says an unstressed «о»
-    /// as «а» and an unstressed «е» close to «и», so «о»/«а» and «е»/«и»;
-    /// with `all` also и/ы, е/э, ы/е, а/я, у/ю, о/у. Only for a Russian
-    /// model.
+    /// as «а», so «о»/«а»; with `all` also и/ы, и/е, е/э, ы/е, а/я, у/ю,
+    /// о/у. («е»/«и» too gained marks on a song without line times but
+    /// squeezed two quick words of another under 80 ms: left out.) Only for
+    /// a Russian model.
     pub fn similar(&self, all: bool) -> Vec<(i32, i32)> {
         if !self.cyrillic_only() {
             return Vec::new();
         }
         let pairs: &[(char, char)] =
-            if all { &[('и', 'ы'), ('и', 'е'), ('е', 'э'), ('ы', 'е'), ('а', 'о'), ('а', 'я'), ('у', 'ю'), ('о', 'у')] } else { &[('а', 'о'), ('и', 'е')] };
+            if all { &[('и', 'ы'), ('и', 'е'), ('е', 'э'), ('ы', 'е'), ('а', 'о'), ('а', 'я'), ('у', 'ю'), ('о', 'у')] } else { &[('а', 'о')] };
         pairs.iter().filter_map(|(a, b)| Some((*self.ids.get(a)?, *self.ids.get(b)?))).collect()
     }
 
@@ -1028,10 +1029,10 @@ mod tests {
         assert!(en.similar(true).is_empty());
         let vowels = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"о":6,"и":7,"е":8}"#, Letters::Native).unwrap();
         assert_eq!(vowels.similar(true), [(7, 8), (5, 6)]);
-        // By default only the unstressed vowels said as others.
-        assert_eq!(vowels.similar(false), [(5, 6), (7, 8)]);
-        let no_e = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"о":6,"и":7}"#, Letters::Native).unwrap();
-        assert_eq!(no_e.similar(false), [(5, 6)]);
+        // By default only an unstressed «о» heard as «а».
+        assert_eq!(vowels.similar(false), [(5, 6)]);
+        let no_o = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"и":7,"е":8}"#, Letters::Native).unwrap();
+        assert!(no_o.similar(false).is_empty());
     }
 
     /// Numbers and abbreviations as they are said.

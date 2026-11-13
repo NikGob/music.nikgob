@@ -236,10 +236,9 @@ impl Tuning {
 ///   ([`Tuning::foreign_costs`]);
 /// * numbers and abbreviations in capitals are spelled as said
 ///   ([`Tuning::said`]: «25 ТГК» → «двадцать пять тэгэка»);
-/// * a sung «а» may be heard for a written unstressed «о» and «и» for
-///   «е» ([`Costs::vowels`] 1.5, Russian only: «Мой топор» 2 word starts,
-///   1 end and 1 line better, «Ханнамонтана» without line times 12 marks
-///   better, nothing worse);
+/// * a sung «а» may be heard for a written unstressed «о»
+///   ([`Costs::vowels`] 1.5, Russian only: «Мой топор» 2 word starts, 1 end
+///   and 1 line better, nothing worse, words under 80 ms included);
 /// * a word squeezed to almost nothing takes a fair share from the word
 ///   before it ([`Tuning::squeezed`]; with it on the bench has 40 % fewer
 ///   words lit for under 80 ms and the same word and line starts and ends
