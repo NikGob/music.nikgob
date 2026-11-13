@@ -64,6 +64,13 @@ const KEEP_AHEAD: f64 = 60.0;
 const HEAD_ROUNDS: u32 = 3;
 /// How often the idle download looks at the reader again.
 const IDLE_TICK: Duration = Duration::from_secs(2);
+/// Whole segments are asked again this often while the network is gone,
+/// and for this long at most.
+const OUTAGE_RETRY: Duration = Duration::from_secs(5);
+const OUTAGE_MAX: Duration = Duration::from_secs(120);
+/// A media 429 asking to wait up to this long is waited out; a longer one
+/// fails the stream at once (its `Retry-After` goes with the error).
+const MEDIA_WAIT_MAX: Duration = Duration::from_secs(10);
 
 /// The segments `[lo, hi]` kept around segment `want` (by their seconds).
 fn window(durations: &[f64], want: usize) -> (usize, usize) {
@@ -184,6 +191,29 @@ pub(crate) fn patch_init(buf: &mut [u8], total: Duration) -> bool {
     true
 }
 
+/// SoundCloud's media CDN asked to wait (a 429 with a long `Retry-After`):
+/// until then no stream asks it anything, whichever track it plays. Shared
+/// by the service's streams; apart from the API's pause ([`crate::limit`]).
+#[derive(Clone, Default)]
+pub(crate) struct MediaCooldown(Arc<Mutex<Option<std::time::Instant>>>);
+
+impl MediaCooldown {
+    /// How long media requests must still wait.
+    pub(crate) fn left(&self) -> Option<Duration> {
+        let until = (*self.0.lock().unwrap_or_else(PoisonError::into_inner))?;
+        until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
+    }
+
+    /// No media request for `wait` (a later end already set stays).
+    pub(crate) fn hold(&self, wait: Duration) {
+        let until = std::time::Instant::now() + wait.min(crate::limit::MAX_SERVER_PAUSE);
+        let mut at = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if at.is_none_or(|a| a < until) {
+            *at = Some(until);
+        }
+    }
+}
+
 /// Resolves (again) where the stream is. Called on the download task.
 pub(crate) type ResolveFn = Arc<dyn Fn() -> BoxFuture<'static, Result<Plan, StreamError>> + Send + Sync>;
 
@@ -221,6 +251,9 @@ struct State {
     /// The segment the reader waits for or reads.
     want: usize,
     closed: bool,
+    /// The download is waiting out a network outage: a reader waits with
+    /// it (the download fails the stream when the outage lasts too long).
+    outage: bool,
 }
 
 struct Shared {
@@ -251,10 +284,20 @@ pub(crate) struct HlsStream {
     /// The bitrate of the stream the resolve picked.
     kbps: Arc<AtomicU64>,
     duration: Arc<Mutex<Option<Duration>>>,
+    cooldown: MediaCooldown,
+    /// Longest wait of a read for its bytes ([`READ_TIMEOUT`]; shorter in
+    /// tests), unless the download waits out an outage.
+    read_timeout: Duration,
 }
 
 impl HlsStream {
-    pub(crate) fn new(handle: Handle, http: reqwest::Client, resolve: ResolveFn, kbps: Arc<AtomicU64>) -> Self {
+    pub(crate) fn new(
+        handle: Handle,
+        http: reqwest::Client,
+        resolve: ResolveFn,
+        kbps: Arc<AtomicU64>,
+        cooldown: MediaCooldown,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
@@ -268,6 +311,8 @@ impl HlsStream {
             resolve: Some(resolve),
             kbps,
             duration: Arc::new(Mutex::new(None)),
+            cooldown,
+            read_timeout: READ_TIMEOUT,
         }
     }
 
@@ -282,6 +327,7 @@ impl HlsStream {
             http: self.http.clone(),
             resolve,
             duration: Arc::clone(&self.duration),
+            cooldown: self.cooldown.clone(),
         };
         self.handle.spawn(task.run());
     }
@@ -323,7 +369,7 @@ impl Read for HlsStream {
             return Ok(0);
         }
         let pos = self.pos;
-        let deadline = std::time::Instant::now() + READ_TIMEOUT;
+        let deadline = std::time::Instant::now() + self.read_timeout;
         let shared = Arc::clone(&self.shared);
         let mut st = self.layout_wait()?;
         loop {
@@ -372,10 +418,13 @@ impl Read for HlsStream {
                 shared.wake.notify_one();
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
+            if left.is_zero() && !st.outage {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "SoundCloud: the stream stalled"));
             }
-            st = shared.ready.wait_timeout(st, left).unwrap_or_else(PoisonError::into_inner).0;
+            // Through an outage the download decides: the bytes come, or
+            // its error does once the outage has lasted too long.
+            let wait = if left.is_zero() { Duration::from_secs(1) } else { left };
+            st = shared.ready.wait_timeout(st, wait).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 }
@@ -432,6 +481,7 @@ struct Download {
     http: reqwest::Client,
     resolve: ResolveFn,
     duration: Arc<Mutex<Option<Duration>>>,
+    cooldown: MediaCooldown,
 }
 
 /// What a GET of a piece gave.
@@ -439,6 +489,15 @@ enum Got {
     Bytes(Vec<u8>, Option<u64>),
     /// The signature expired or was refused (403/410).
     Refused,
+}
+
+/// A failure the network coming back can end (not a refusal or a gone file).
+fn transient(e: &StreamError) -> bool {
+    match e {
+        StreamError::Network(_) => true,
+        StreamError::Http { status } => *status >= 500,
+        _ => false,
+    }
 }
 
 fn now_secs() -> u64 {
@@ -457,10 +516,16 @@ impl Download {
         self.shared.lock().closed
     }
 
-    /// One GET (a `Range` when `range` is set), retried on transient errors.
+    /// One GET (a `Range` when `range` is set), retried on transient errors
+    /// (a 429 after its `Retry-After`, if it is short).
     async fn get(&self, url: &str, range: Option<u64>) -> Result<Got, StreamError> {
         let mut attempt = 0;
         loop {
+            // The CDN asked every stream to wait.
+            if let Some(left) = self.cooldown.left() {
+                return Err(StreamError::RateLimited { retry_after: Some(left) });
+            }
+            let mut wait = Duration::ZERO;
             let mut req = self.http.get(url);
             if let Some(n) = range {
                 req = req.header("Range", format!("bytes=0-{}", n - 1));
@@ -490,7 +555,19 @@ impl Download {
                             }
                             Err(e) => StreamError::Network(e.without_url().to_string()),
                         }
-                    } else if status == 429 || status >= 500 {
+                    } else if status == 429 {
+                        let retry_after = resp
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok())
+                            .map(Duration::from_secs);
+                        if let Some(w) = retry_after.filter(|w| *w > MEDIA_WAIT_MAX) {
+                            self.cooldown.hold(w);
+                            return Err(StreamError::RateLimited { retry_after });
+                        }
+                        wait = retry_after.unwrap_or_default();
+                        StreamError::RateLimited { retry_after }
+                    } else if status >= 500 {
                         StreamError::Http { status }
                     } else {
                         return Err(StreamError::Http { status });
@@ -502,7 +579,11 @@ impl Download {
             if attempt >= MAX_ATTEMPTS || self.closed() {
                 return Err(err);
             }
-            tokio::time::sleep(Duration::from_millis(300 * u64::from(attempt))).await;
+            if range.is_none() {
+                // A whole segment is being retried: a reader waits with it.
+                self.shared.lock().outage = true;
+            }
+            tokio::time::sleep(wait.max(Duration::from_millis(300 * u64::from(attempt)))).await;
         }
     }
 
@@ -533,8 +614,28 @@ impl Download {
             log::debug!("soundcloud: init segment without mdhd");
         }
 
-        // Every segment's head (and size), a few at a time.
-        let heads = self.heads(&plan).await?;
+        // Every segment's head (and size), a few at a time. A long track
+        // takes a while: urls about to expire, or refused during the pass,
+        // resolve the stream again (the same segments) and the pass starts
+        // over.
+        let heads = loop {
+            if !ignore_expiry && plan.expires.is_some_and(|e| e <= now_secs() + EXPIRY_MARGIN) {
+                plan = self.resolve_again(&plan).await?;
+                ignore_expiry = plan.expires.is_some_and(|e| e <= now_secs());
+            }
+            match self.heads(&plan).await? {
+                Some(heads) => break heads,
+                None => {
+                    resolves += 1;
+                    if resolves > MAX_RESOLVES {
+                        return Err(StreamError::Http { status: 403 });
+                    }
+                    log::info!("soundcloud: segment heads refused, resolving the stream again");
+                    plan = self.resolve_again(&plan).await?;
+                    ignore_expiry |= plan.expires.is_some_and(|e| e <= now_secs());
+                }
+            }
+        };
         let mut segments = Vec::with_capacity(heads.len());
         let mut at = init.len() as u64;
         for (head, len, whole) in heads {
@@ -556,6 +657,8 @@ impl Download {
         // Whole segments, from the one being read to the end of the window;
         // the ones outside it are dropped.
         let durations: Vec<f64> = plan.segments.iter().map(|(_, d)| *d).collect();
+        // Since when whole segments fail for want of a network.
+        let mut outage: Option<std::time::Instant> = None;
         loop {
             if self.closed() {
                 return Ok(());
@@ -581,7 +684,28 @@ impl Download {
                 plan = self.resolve_again(&plan).await?;
                 ignore_expiry = plan.expires.is_some_and(|e| e <= now_secs());
             }
-            let got = self.get(&plan.segments[i].0, None).await?;
+            let got = match self.get(&plan.segments[i].0, None).await {
+                Ok(got) => {
+                    outage = None;
+                    self.shared.lock().outage = false;
+                    got
+                }
+                // The network went away (or the CDN is down) for longer than
+                // one GET's retries: the reader still plays what is here, so
+                // the segment is asked again, calmly, until the network is
+                // back or the outage has lasted too long.
+                Err(e) if transient(&e) => {
+                    let since = *outage.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= OUTAGE_MAX {
+                        return Err(e);
+                    }
+                    self.shared.lock().outage = true;
+                    log::info!("soundcloud: segment {i} not fetched ({e}); asking again");
+                    let _ = tokio::time::timeout(OUTAGE_RETRY, self.shared.wake.notified()).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             match got {
                 Got::Bytes(mut b, _) => {
                     patch_segment(&mut b);
@@ -589,8 +713,12 @@ impl Download {
                     let mut st = self.shared.lock();
                     if let Some(seg) = st.layout.as_mut().and_then(|l| l.segments.get_mut(i)) {
                         if b.len() as u64 != seg.len {
-                            log::debug!("soundcloud: segment {i} is {} bytes, {} expected", b.len(), seg.len);
-                            b.resize(seg.len as usize, 0);
+                            // Not the file the layout was made of (another
+                            // representation, a cut answer): no bytes are
+                            // made up, the stream fails and the player
+                            // goes on from here with another copy.
+                            log::info!("soundcloud: segment {i} is {} bytes, {} expected", b.len(), seg.len);
+                            return Err(StreamError::Parse("the stream changed while playing".into()));
                         }
                         seg.data = Some(b);
                     }
@@ -619,8 +747,9 @@ impl Download {
         Ok(plan)
     }
 
-    /// `(head, length, head is the whole segment)` of every segment.
-    async fn heads(&self, plan: &Plan) -> Result<Vec<(Vec<u8>, u64, bool)>, StreamError> {
+    /// `(head, length, head is the whole segment)` of every segment;
+    /// `None` when a url was refused (403/410: the signatures expired).
+    async fn heads(&self, plan: &Plan) -> Result<Option<Vec<(Vec<u8>, u64, bool)>>, StreamError> {
         let limit = Arc::new(Semaphore::new(HEADS_IN_FLIGHT));
         let mut set = tokio::task::JoinSet::new();
         for (i, (url, _)) in plan.segments.iter().enumerate() {
@@ -630,6 +759,7 @@ impl Download {
                 http,
                 resolve: Arc::clone(&self.resolve),
                 duration: Arc::clone(&self.duration),
+                cooldown: self.cooldown.clone(),
             };
             set.spawn(async move {
                 let _turn = limit.acquire().await;
@@ -642,6 +772,8 @@ impl Download {
                     }
                     match me.get(&url, Some(HEAD)).await {
                         Ok(got) => return (i, Ok(got)),
+                        // Asked to wait long: asking again makes it worse.
+                        Err(e @ StreamError::RateLimited { .. }) => return (i, Err(e)),
                         Err(e) => last = e,
                     }
                     tokio::time::sleep(Duration::from_secs(u64::from(round) + 1)).await;
@@ -663,11 +795,14 @@ impl Download {
                     patch_segment(&mut b);
                     out[i] = Some((b, len, whole));
                 }
-                // Heads come right after the resolve: a refusal is final.
-                Got::Refused => return Err(StreamError::Http { status: 403 }),
+                // The rest is not waited for: the stream resolves again.
+                Got::Refused => {
+                    set.abort_all();
+                    return Ok(None);
+                }
             }
         }
-        Ok(out.into_iter().map(|h| h.expect("every head joined")).collect())
+        Ok(Some(out.into_iter().map(|h| h.expect("every head joined")).collect()))
     }
 }
 
@@ -730,6 +865,183 @@ mod tests {
         assert_eq!(window(&d, 0), (0, 5));
         assert_eq!(window(&d, 39), (33, 39));
         assert_eq!(window(&[3.0], 5), (0, 0));
+    }
+
+    mod served {
+        //! The download against a local server: refusals during the heads,
+        //! a segment of another size, a media 429.
+        use super::super::*;
+        use std::sync::atomic::AtomicU32;
+        use wiremock::matchers::{header_exists, method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        /// A stream whose resolves hand out signatures 1, 2, … in turn.
+        fn stream(server: &MockServer, segments: usize, resolves: Arc<AtomicU32>) -> HlsStream {
+            stream_with(server, segments, resolves, MediaCooldown::default())
+        }
+
+        fn stream_with(server: &MockServer, segments: usize, resolves: Arc<AtomicU32>, cooldown: MediaCooldown) -> HlsStream {
+            let plan_of = {
+                let uri = server.uri();
+                move |sig: u32| {
+                    let base = uri.clone();
+                    Plan {
+                        init: format!("{base}/init.mp4?sig={sig}"),
+                        segments: (0..segments).map(|i| (format!("{base}/data{i}.m4s?sig={sig}"), 10.0)).collect(),
+                        expires: None,
+                    }
+                }
+            };
+            let resolve: ResolveFn = Arc::new(move || {
+                let sig = resolves.fetch_add(1, Ordering::SeqCst) + 1;
+                let plan = plan_of(sig);
+                Box::pin(async move { Ok(plan) })
+            });
+            HlsStream::new(Handle::current(), reqwest::Client::new(), resolve, Arc::new(AtomicU64::new(160)), cooldown)
+        }
+
+        async fn serve(server: &MockServer, url_path: &str, sig: u32, status: u16, body: Vec<u8>, total: Option<usize>) {
+            let mut r = ResponseTemplate::new(status).set_body_bytes(body.clone());
+            if let Some(t) = total {
+                r = r.insert_header("Content-Range", format!("bytes 0-{}/{t}", body.len().saturating_sub(1)).as_str());
+            }
+            Mock::given(method("GET"))
+                .and(path(url_path))
+                .and(query_param("sig", sig.to_string().as_str()))
+                .respond_with(r)
+                .mount(server)
+                .await;
+        }
+
+        fn read_all(mut s: HlsStream) -> std::io::Result<Vec<u8>> {
+            let mut out = Vec::new();
+            s.read_to_end(&mut out)?;
+            Ok(out)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn heads_refused_during_the_first_pass_resolve_again() {
+            let server = MockServer::start().await;
+            serve(&server, "/init.mp4", 1, 200, vec![1; 50], None).await;
+            serve(&server, "/init.mp4", 2, 200, vec![1; 50], None).await;
+            // The first signatures expired while the heads were asked for.
+            for i in 0..2 {
+                serve(&server, &format!("/data{i}.m4s"), 1, 403, Vec::new(), None).await;
+                serve(&server, &format!("/data{i}.m4s"), 2, 206, vec![7 + i as u8; 100], Some(100)).await;
+            }
+            let resolves = Arc::new(AtomicU32::new(0));
+            let s = stream(&server, 2, resolves.clone());
+            let bytes = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap();
+            assert_eq!(bytes.len(), 250);
+            assert_eq!(&bytes[50..150], &[7u8; 100][..]);
+            assert_eq!(&bytes[150..], &[8u8; 100][..]);
+            assert_eq!(resolves.load(Ordering::SeqCst), 2, "one resolve again");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_segment_of_another_size_fails_instead_of_being_padded() {
+            let server = MockServer::start().await;
+            serve(&server, "/init.mp4", 1, 200, vec![1; 50], None).await;
+            // The head says 10000 bytes; the whole segment comes as 9000.
+            Mock::given(method("GET"))
+                .and(path("/data0.m4s"))
+                .and(header_exists("Range"))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .set_body_bytes(vec![3u8; HEAD as usize])
+                        .insert_header("Content-Range", format!("bytes 0-{}/10000", HEAD - 1).as_str()),
+                )
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/data0.m4s"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![3u8; 9000]))
+                .with_priority(2)
+                .mount(&server)
+                .await;
+            let s = stream(&server, 1, Arc::new(AtomicU32::new(0)));
+            let e = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap_err();
+            assert!(e.to_string().contains("changed"), "{e}");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_segment_failing_for_a_while_is_asked_again_until_it_comes() {
+            let server = MockServer::start().await;
+            serve(&server, "/init.mp4", 1, 200, vec![1; 50], None).await;
+            Mock::given(method("GET"))
+                .and(path("/data0.m4s"))
+                .and(header_exists("Range"))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .set_body_bytes(vec![3u8; HEAD as usize])
+                        .insert_header("Content-Range", format!("bytes 0-{}/10000", HEAD - 1).as_str()),
+                )
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            // One GET's retries all fail (the network is gone), then it is back.
+            Mock::given(method("GET"))
+                .and(path("/data0.m4s"))
+                .respond_with(ResponseTemplate::new(503))
+                .up_to_n_times(MAX_ATTEMPTS as u64)
+                .with_priority(2)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/data0.m4s"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![3u8; 10000]))
+                .with_priority(3)
+                .mount(&server)
+                .await;
+            let mut s = stream(&server, 1, Arc::new(AtomicU32::new(0)));
+            // The reader waits with the download past its own deadline.
+            s.read_timeout = Duration::from_secs(1);
+            let bytes = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap();
+            assert_eq!(bytes.len(), 10_050);
+        }
+
+        #[test]
+        fn only_network_failures_are_waited_out() {
+            assert!(transient(&StreamError::Network("reset".into())));
+            assert!(transient(&StreamError::Http { status: 503 }));
+            assert!(!transient(&StreamError::Http { status: 404 }));
+            assert!(!transient(&StreamError::Unavailable));
+            assert!(!transient(&StreamError::RateLimited { retry_after: Some(Duration::from_secs(60)) }));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_long_media_retry_after_fails_at_once_with_its_time() {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/init.mp4"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1u8; 50]))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/data0.m4s"))
+                .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "120"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let cooldown = MediaCooldown::default();
+            let s = stream_with(&server, 1, Arc::new(AtomicU32::new(0)), cooldown.clone());
+            let started = std::time::Instant::now();
+            let e = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(5), "no retries: {:?}", started.elapsed());
+            let inner = e.into_inner().and_then(|b| b.downcast::<StreamError>().ok()).map(|b| *b);
+            assert_eq!(inner, Some(StreamError::RateLimited { retry_after: Some(Duration::from_secs(120)) }));
+            // Another track's stream asks the CDN nothing meanwhile (the
+            // mocks expect one request each).
+            let s = stream_with(&server, 1, Arc::new(AtomicU32::new(0)), cooldown);
+            let e = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap_err();
+            let inner = e.into_inner().and_then(|b| b.downcast::<StreamError>().ok()).map(|b| *b);
+            assert!(
+                matches!(inner, Some(StreamError::RateLimited { retry_after: Some(w) }) if w > Duration::from_secs(110)),
+                "{inner:?}"
+            );
+        }
     }
 
     #[test]

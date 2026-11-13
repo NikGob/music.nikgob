@@ -156,6 +156,8 @@ struct Inner {
     /// The last full read stopped at [`LIKES_MAX`].
     likes_capped: AtomicBool,
     gate: limit::Gate,
+    /// The media CDN's `Retry-After`, for every stream.
+    media: hls::MediaCooldown,
     searches: TtlCache<StreamSearch>,
     raw: TtlCache<api::Track>,
     tracks: TtlCache<StreamTrack>,
@@ -254,6 +256,7 @@ impl Soundcloud {
                 likes_skew: Mutex::new(None),
                 likes_capped: AtomicBool::new(false),
                 gate: limit::Gate::new(),
+                media: hls::MediaCooldown::default(),
                 searches: TtlCache::new(SEARCH_TTL, 64),
                 raw: TtlCache::new(RAW_TTL, 500),
                 tracks: TtlCache::new(ITEM_TTL, 2_000),
@@ -1479,6 +1482,7 @@ impl StreamService for Soundcloud {
             self.inner.http.clone(),
             resolve,
             kbps,
+            self.inner.media.clone(),
         )))
     }
 

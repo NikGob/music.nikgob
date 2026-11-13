@@ -29,6 +29,9 @@ pub(crate) const MAX_PAUSE: Duration = Duration::from_secs(3600);
 /// A rate limit this long after the last one starts again from
 /// [`FIRST_PAUSE`].
 const CALM_AFTER: Duration = Duration::from_secs(2 * 3600);
+/// The longest `Retry-After` believed (a broken header must not stop the
+/// service for days).
+pub(crate) const MAX_SERVER_PAUSE: Duration = Duration::from_secs(6 * 3600);
 
 /// What kind of call waits for its turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,12 +103,20 @@ impl Gate {
     }
 
     /// SoundCloud said "slow down" (or showed its bot check): the whole
-    /// service pauses.
-    pub(crate) fn trip(&self) {
+    /// service pauses, for its own schedule or the `Retry-After` SoundCloud
+    /// asked for, whichever is longer.
+    pub(crate) fn trip(&self, retry_after: Option<Duration>) {
         let mut p = lock(&self.pause);
         let now = Instant::now();
-        if p.until.is_some_and(|(at, _)| at > now) {
-            return; // already paused: one limit, many answers
+        if let Some((at, _)) = p.until.filter(|(at, _)| *at > now) {
+            // Already paused: one limit, many answers (the schedule does not
+            // step up again), but a later answer asking for longer is heard.
+            let asked = retry_after.unwrap_or_default().min(MAX_SERVER_PAUSE);
+            if now + asked > at {
+                p.until = Some((now + asked, SystemTime::now() + asked));
+                log::warn!("soundcloud: every call pauses for {} min (Retry-After)", asked.as_secs() / 60);
+            }
+            return;
         }
         p.level = match p.last {
             Some(last) if now.duration_since(last) < CALM_AFTER && !p.level.is_zero() => {
@@ -114,17 +125,18 @@ impl Gate {
             _ => FIRST_PAUSE,
         };
         p.last = Some(now);
-        p.until = Some((now + p.level, SystemTime::now() + p.level));
+        let pause = p.level.max(retry_after.unwrap_or_default().min(MAX_SERVER_PAUSE));
+        p.until = Some((now + pause, SystemTime::now() + pause));
         log::warn!(
             "soundcloud: rate limited or bot check; every call pauses for {} min",
-            p.level.as_secs() / 60
+            pause.as_secs() / 60
         );
     }
 
     /// Looks at a result: a rate limit pauses the service.
     pub(crate) fn note<T>(&self, r: &Result<T, StreamError>) {
-        if matches!(r, Err(StreamError::RateLimited { .. })) {
-            self.trip();
+        if let Err(StreamError::RateLimited { retry_after }) = r {
+            self.trip(*retry_after);
         }
     }
 
@@ -209,14 +221,44 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         // The next limit (soon after) pauses twice as long, up to an hour.
         lock(&gate.pause).until = None;
-        gate.trip();
+        gate.trip(None);
         assert!(gate.paused_for().unwrap() > Duration::from_secs(590));
         for _ in 0..6 {
             lock(&gate.pause).until = None;
-            gate.trip();
+            gate.trip(None);
         }
         assert!(gate.paused_for().unwrap() <= MAX_PAUSE);
         assert!(gate.paused_for().unwrap() > MAX_PAUSE - Duration::from_secs(5));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_longer_retry_after_is_honoured_and_a_shorter_one_is_not_less_than_the_schedule() {
+        let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
+        let r = gate
+            .run(Lane::Catalog, async {
+                Err::<(), _>(StreamError::RateLimited { retry_after: Some(Duration::from_secs(3600)) })
+            })
+            .await;
+        assert!(r.is_err());
+        let left = gate.paused_for().unwrap();
+        assert!(left > Duration::from_secs(3590), "the server's hour, not five minutes: {left:?}");
+        // A short one keeps the service's own first pause.
+        let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
+        gate.trip(Some(Duration::from_secs(10)));
+        assert!(gate.paused_for().unwrap() > Duration::from_secs(290));
+        // Answers of calls already in flight: a longer one extends the pause,
+        // a shorter one keeps it, and neither steps the schedule up.
+        let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
+        gate.trip(None);
+        gate.trip(Some(Duration::from_secs(3600)));
+        assert!(gate.paused_for().unwrap() > Duration::from_secs(3590));
+        gate.trip(Some(Duration::from_secs(60)));
+        assert!(gate.paused_for().unwrap() > Duration::from_secs(3590));
+        assert_eq!(lock(&gate.pause).level, FIRST_PAUSE);
+        // A broken one is capped.
+        let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
+        gate.trip(Some(Duration::from_secs(30 * 24 * 3600)));
+        assert!(gate.paused_for().unwrap() <= MAX_SERVER_PAUSE);
     }
 
     #[tokio::test(flavor = "multi_thread")]

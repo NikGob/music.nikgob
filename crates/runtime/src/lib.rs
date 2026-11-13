@@ -124,6 +124,10 @@ pub enum PlaybackEvent {
     PositionAt { id: u64, position: Duration, at: Instant },
     Paused,
     Resumed,
+    /// Item `id` was paused from outside the player (another device took
+    /// Spotify's one stream): the player pauses as if the user had, keeping
+    /// the position, and nothing moves on.
+    PausedElsewhere { id: u64 },
     Ended { id: u64 },
     Error { id: u64, message: String },
     /// What a stream item actually plays ("Opus ~160 кбит/с"), once opened.
@@ -2594,6 +2598,12 @@ impl Worker {
             }
             // Taken as a position above.
             PlaybackEvent::Paused | PlaybackEvent::Resumed | PlaybackEvent::PositionAt { .. } => {}
+            PlaybackEvent::PausedElsewhere { id } => {
+                if self.playing.map(|e| e.id) == Some(id) {
+                    log::info!("item {id} was paused from elsewhere; paused here");
+                    self.pause();
+                }
+            }
             PlaybackEvent::Speed { id, speed } => {
                 let speed = f64::from(speed);
                 if self.playing.map(|e| e.id) == Some(id) && speed.is_finite() && speed > 0.0 && speed != self.speed {

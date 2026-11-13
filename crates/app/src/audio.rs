@@ -313,9 +313,19 @@ impl Engine {
                 let _ = to.send(PlaybackEvent::Quality { id: r.id, label: "Soloist".into() });
             }
             self.plays_live(&r);
+            // Another device took Spotify's one stream (or paused this one):
+            // the player pauses, keeping the position.
+            let events = self.links.events.clone();
+            let item = r.id;
+            let track = s.track(id, r.duration).on_taken(move || {
+                let to = events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                if let Some(to) = to {
+                    let _ = to.send(PlaybackEvent::PausedElsewhere { id: item });
+                }
+            });
             return PlayItem {
                 id: r.id,
-                source: ItemSource::Pcm(Box::new(s.track(id, r.duration))),
+                source: ItemSource::Pcm(Box::new(track)),
                 gain_db: 0.0,
                 duration_hint: r.duration,
                 fx: ItemFx::default(),

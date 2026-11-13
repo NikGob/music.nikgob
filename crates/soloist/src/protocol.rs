@@ -176,6 +176,9 @@ pub enum Command {
     SetRepeatContext(bool),
     SetShuffle(bool),
     Activate,
+    /// Soloist stops being the account's active Connect device, so the
+    /// official apps no longer hand playback to it by themselves.
+    Deactivate,
 }
 
 impl Command {
@@ -197,6 +200,7 @@ impl Command {
             Self::SetRepeatContext(_) => "set_repeat_context",
             Self::SetShuffle(_) => "set_shuffle",
             Self::Activate => "activate",
+            Self::Deactivate => "deactivate",
         }
     }
 

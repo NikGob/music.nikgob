@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -38,10 +39,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// One session at a time: every connect waits for the one before it (so
+/// concurrent callers share one session and a reconnect never shuts down a
+/// newer session), and a connect started before a [`Sessions::close`]
+/// (sign-out, another account) is shut down when it ends instead of being
+/// installed. Callers pass the [`Sessions::generation`] read together with
+/// the credential they connect with.
 pub struct Sessions {
     current: Mutex<Option<Session>>,
     /// Serializes connecting, so concurrent callers share one session.
     connecting: tokio::sync::Mutex<()>,
+    /// Bumped by [`Sessions::close`], under the `current` lock.
+    generation: AtomicU64,
     device_id: String,
     tmp_dir: PathBuf,
     /// librespot's file cache for the next session: its folder and size
@@ -55,6 +64,7 @@ impl Sessions {
         Self {
             current: Mutex::new(None),
             connecting: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
             device_id,
             tmp_dir,
             audio_cache: Mutex::new((None, crate::DEFAULT_CACHE_LIMIT)),
@@ -92,8 +102,15 @@ impl Sessions {
         lock(&self.current).clone().filter(|s| !s.is_invalid())
     }
 
-    /// The session, connecting with `credentials` when none is up.
-    pub async fn get(&self, credentials: Credentials) -> Result<Session, Error> {
+    /// Read with the credential a connect will use: a close after it makes
+    /// that connect void.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// The session, connecting with `credentials` (read at `generation`)
+    /// when none is up.
+    pub async fn get(&self, credentials: Credentials, generation: u64) -> Result<Session, Error> {
         if let Some(s) = self.current() {
             return Ok(s);
         }
@@ -101,11 +118,53 @@ impl Sessions {
         if let Some(s) = self.current() {
             return Ok(s);
         }
-        self.connect(credentials).await
+        self.connect_locked(credentials, generation).await
     }
 
-    /// A new session, replacing any current one.
-    pub async fn connect(&self, credentials: Credentials) -> Result<Session, Error> {
+    /// A new session for a fresh login, replacing the current one only once
+    /// `accept` (run with the connected candidate, nothing else seeing it)
+    /// says so; refused, the candidate is shut down and the current session
+    /// is left as it was.
+    pub async fn connect_checked(
+        &self,
+        credentials: Credentials,
+        generation: u64,
+        accept: impl FnOnce(&Session) -> bool,
+    ) -> Result<Session, Error> {
+        let _serial = self.connecting.lock().await;
+        let candidate = self.candidate(credentials, generation).await?;
+        if !accept(&candidate) {
+            candidate.shutdown();
+            return Err(Error::cancelled("the new session was not accepted"));
+        }
+        self.install(candidate, generation)
+    }
+
+    /// A new session in place of `dropped`, which Spotify dropped; the one
+    /// another caller connected meanwhile, if any (one reconnect, not one
+    /// per waiting track).
+    pub async fn reconnect(&self, credentials: Credentials, generation: u64, dropped: &Session) -> Result<Session, Error> {
+        let _serial = self.connecting.lock().await;
+        if let Some(s) = self.current()
+            && s.session_id() != dropped.session_id()
+        {
+            return Ok(s);
+        }
+        self.connect_locked(credentials, generation).await
+    }
+
+    /// Connects (the caller holds `connecting`) and installs the session,
+    /// unless a close came since `generation`.
+    async fn connect_locked(&self, credentials: Credentials, generation: u64) -> Result<Session, Error> {
+        let session = self.candidate(credentials, generation).await?;
+        self.install(session, generation)
+    }
+
+    /// A connected session nobody sees yet (the caller holds `connecting`).
+    async fn candidate(&self, credentials: Credentials, generation: u64) -> Result<Session, Error> {
+        if self.generation() != generation {
+            return Err(Error::cancelled("signed out before connecting"));
+        }
         let config = SessionConfig {
             device_id: self.device_id.clone(),
             tmp_dir: self.tmp_dir.clone(),
@@ -118,16 +177,33 @@ impl Sessions {
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err(Error::deadline_exceeded("connecting to Spotify")),
         }
+        Ok(session)
+    }
+
+    /// Makes a connected `session` the current one, shutting down the one
+    /// before; a session connected for a `generation` a close has ended is
+    /// shut down instead.
+    fn install(&self, session: Session, generation: u64) -> Result<Session, Error> {
+        let mut current = lock(&self.current);
+        if self.generation() != generation {
+            drop(current);
+            log::info!("spotify: signed out while connecting; the new session is dropped");
+            session.shutdown();
+            return Err(Error::cancelled("signed out while connecting"));
+        }
         log::info!("spotify: session connected");
-        if let Some(old) = lock(&self.current).replace(session.clone()) {
+        if let Some(old) = current.replace(session.clone()) {
             old.shutdown();
         }
         Ok(session)
     }
 
-    /// Drops the session (logout). No network.
+    /// Drops the session (logout, another account) and voids connects in
+    /// flight. No network.
     pub fn close(&self) {
-        if let Some(s) = lock(&self.current).take() {
+        let mut current = lock(&self.current);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        if let Some(s) = current.take() {
             s.shutdown();
         }
     }
@@ -597,6 +673,58 @@ mod tests {
         let found = answers(response);
         assert_eq!(found.len(), 1);
         assert!(found.contains_key(&id_of(1)));
+    }
+
+    fn sessions() -> Sessions {
+        Sessions::new("0".repeat(40), std::env::temp_dir().join("nikgob-spotify-session-test"))
+    }
+
+    /// A session as a connect would hand it over (never connected here).
+    fn session() -> Session {
+        Session::new(SessionConfig::default(), None)
+    }
+
+    #[tokio::test]
+    async fn a_close_voids_connects_in_flight_and_never_a_newer_session() {
+        let s = sessions();
+        let g = s.generation();
+        let first = s.install(session(), g).unwrap();
+        assert_eq!(s.current().unwrap().session_id(), first.session_id());
+        // A later connect replaces it and shuts it down.
+        let second = s.install(session(), g).unwrap();
+        assert!(first.is_invalid());
+        assert_eq!(s.current().unwrap().session_id(), second.session_id());
+        // Sign-out: the session goes, and a connect that started before it
+        // (with the old account's credential) is shut down when it ends.
+        s.close();
+        assert!(second.is_invalid() && s.current().is_none());
+        let late = session();
+        assert!(s.install(late.clone(), g).is_err());
+        assert!(late.is_invalid());
+        assert!(s.current().is_none(), "nothing of the old account comes back");
+        // Nor does one that only starts now with what was read before.
+        let refused = s.get(Credentials::with_access_token("x"), g).await;
+        assert!(matches!(refused, Err(e) if e.kind == librespot_core::error::ErrorKind::Cancelled));
+        // The next login's session (read after the close) is installed.
+        let next = s.install(session(), s.generation()).unwrap();
+        assert!(!next.is_invalid());
+        // A login with what was read before the close is refused before it
+        // connects (no network) and leaves the current session alone.
+        let refused = s.connect_checked(Credentials::with_access_token("x"), g, |_| true).await;
+        assert!(refused.is_err());
+        assert_eq!(s.current().unwrap().session_id(), next.session_id());
+        assert!(!next.is_invalid());
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_uses_a_session_another_caller_connected_meanwhile() {
+        let s = sessions();
+        let g = s.generation();
+        let dropped = session();
+        let fresh = s.install(session(), g).unwrap();
+        // No network: the current session is not the dropped one.
+        let got = s.reconnect(Credentials::with_access_token("x"), g, &dropped).await.unwrap();
+        assert_eq!(got.session_id(), fresh.session_id());
     }
 
     #[test]
