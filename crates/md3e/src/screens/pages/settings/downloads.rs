@@ -1,4 +1,4 @@
-//! «Загрузки» (docs/stage4.5.md): where «Хочу скачать» looks and in what
+//! «Загрузки»: where «Хочу скачать» looks and in what
 //! order, what a like downloads, the quality, Soulseek, the torrents'
 //! Prowlarr and the seeding.
 
@@ -77,7 +77,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     soulseek_upload(ui, state, out);
 }
 
-/// «Откуда качать» (docs/stage4.5.md): where «Хочу скачать» looks, in the
+/// «Откуда качать»: where «Хочу скачать» looks, in the
 /// order it prefers them at one quality, each with its switch and «Выше» /
 /// «Ниже». Lossless comes first whichever source has it; a source the app
 /// does not have is left out (torrents and Soulseek stay: they say what

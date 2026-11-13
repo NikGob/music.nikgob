@@ -229,7 +229,7 @@ str_enum!(
         Spotify = "spotify",
         Youtube = "youtube",
         /// A Deezer catalogue entry: it has no sound of its own, its track
-        /// plays from YouTube Music (docs/stage3.md §0 «Каталог Deezer»).
+        /// plays from YouTube Music.
         Deezer = "deezer",
         /// A SoundCloud track (AAC in HLS; DRM-only tracks play elsewhere).
         Soundcloud = "soundcloud",
@@ -330,7 +330,7 @@ impl Default for EventContext {
 }
 
 str_enum!(
-    /// Where a wishlist item stands (docs/stage3.md §3.7).
+    /// Where a wishlist item stands.
     pub enum WishlistStatus {
         /// Imported, waits for the user's "download" (bulk buttons).
         Waiting = "waiting",
@@ -1036,7 +1036,7 @@ impl Event {
 // ---------------------------------------------------------------------------
 
 str_enum!(
-    /// What a track's sound analysis was computed from (docs/stage4.md §2).
+    /// What a track's sound analysis was computed from.
     /// An analysis of the file always wins over one of a stream.
     pub enum AnalysisSource {
         /// The track's local file.

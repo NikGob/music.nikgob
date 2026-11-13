@@ -1,5 +1,5 @@
 //! «Найти песню…» / «Другая версия…»: a dialog to replace a clip (or a
-//! wrong YouTube match) with a song picked by hand (docs/stage3.md §7).
+//! wrong YouTube match) with a song picked by hand.
 //!
 //! A search field prefilled with the cleaned title and artist, the songs
 //! of YouTube Music and Deezer with their length next to the track's own,

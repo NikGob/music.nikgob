@@ -1,5 +1,4 @@
-//! The graph of similar music on a copy of a real library
-//! (docs/recs-graph.md §8): with `NIKGOB_GRAPH_FETCH=minutes` the runtime
+//! The graph of similar music on a copy of a real library: with `NIKGOB_GRAPH_FETCH=minutes` the runtime
 //! runs its background pass against the real YouTube Music, Deezer,
 //! MusicBrainz and ListenBrainz for that long (their state in a folder next
 //! to the copy), then the copy is measured with the graph and without it:

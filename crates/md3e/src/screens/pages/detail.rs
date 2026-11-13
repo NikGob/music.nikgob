@@ -930,7 +930,7 @@ pub fn playlist(
     nav
 }
 
-/// «С дополнением» of a playlist's page (docs/recommendations.md §4): a
+/// «С дополнением» of a playlist's page: a
 /// tonal icon toggle, on while new songs join the playlist as it plays.
 fn plus_toggle(on: bool) -> IconButton {
     IconButton::new(Icon::AutoAwesome).size(Size::M).style(Style::Tonal).selected(on).tooltip("С дополнением")

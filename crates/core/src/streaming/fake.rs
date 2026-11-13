@@ -26,7 +26,7 @@
 //! track it opened "on disk" for `cached_audio`.
 //! [`FakeService::with_new_release`] adds a fresh single for new releases.
 //!
-//! Suggestions (docs/stage4.md §12.3) come from fixed lists too: the
+//! Suggestions come from fixed lists too: the
 //! YouTube flavour's home (quick picks, listen again) and history, the
 //! Spotify flavour's tops and recently played (each a mix of catalog songs
 //! and songs only discovery leads to); Deezer has none.

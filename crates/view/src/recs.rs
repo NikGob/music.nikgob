@@ -1,4 +1,4 @@
-//! The recommendations part of the view model (stage 4, docs/stage4.md §6):
+//! The recommendations part of the view model (stage 4):
 //! the mix cards of the home page, what plays a mix or a radio, the
 //! «Не рекомендовать» feedback and the radio line of the queue.
 //!
@@ -61,7 +61,7 @@ pub enum MixId {
     /// Endless.
     Daylist,
     /// A smaller tile of the bento: one kind a day, picked anew every day
-    /// ([`TileKind`], docs/stage4.md §12.9); it plays as it is.
+    /// ([`TileKind`]); it plays as it is.
     Tile(TileKind),
     /// «Миксы для тебя»: one moment, about 28 songs, the same all day
     /// (another with «Другой состав»); it plays as it is.
@@ -188,7 +188,7 @@ pub struct BlendProfile {
     pub title: String,
 }
 
-/// The kinds of the bento's smaller tiles (docs/stage4.md §12.9), in four
+/// The kinds of the bento's smaller tiles, in four
 /// groups: memory, artists, sound, collection. A day shows «На повторе» and
 /// a few others; the kicker and the title come with the card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]

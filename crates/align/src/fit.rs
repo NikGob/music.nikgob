@@ -35,8 +35,8 @@ const MARGIN: f32 = 0.3;
 /// Offsets smaller than this are left alone.
 pub const NOTICEABLE: f32 = 0.15;
 /// The aligner puts a word's start this much after the singer starts it
-/// (the median against Apple's word timing on 8 songs, +0.03…+0.11 s;
-/// docs/lyrics-align.md): made times are moved back by it.
+/// (the median against Apple's word timing on 8 songs, +0.03…+0.11 s):
+/// made times are moved back by it.
 pub const LATE: f32 = 0.06;
 /// A word may run this far past where its source ends the line (the
 /// line's own end, else the next line's start, an empty end stamp too).
@@ -56,9 +56,8 @@ const HOLD: f32 = 4.0;
 /// the reverb after «посильней» at 0.3–0.5 of a line sung at 0.9).
 const HELD: f32 = 0.6;
 
-/// How the timing pass places words beyond `align-4`'s rules
-/// (docs/lyrics-align.md, «align-5»). [`Tuning::default`] is what the
-/// player uses; [`Tuning::align4`] turns every addition off.
+/// How the timing pass places words beyond `align-4`'s rules.
+/// [`Tuning::default`] is what the player uses; [`Tuning::align4`] turns every addition off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
     /// What frames of the timing pass cost ([`Costs`]).
@@ -216,7 +215,7 @@ impl Tuning {
 
 }
 
-/// `align-7` (docs/lyrics-align.md, «align-6», «align-7»):
+/// `align-7`:
 /// `align-5`'s blank inside a word where there is no voice, and
 /// * Latin lines of a Russian text by sound ([`Tuning::sound_lines`]; a hook
 ///   sung over and over only with line times, [`Tuning::sound_plain`]);
@@ -304,7 +303,7 @@ pub struct Fit {
     /// for a line sung once more, `None`; see [`source_ends`]).
     pub ends: Vec<Option<f32>>,
     /// The aligner the verdict is from (its measures have their own
-    /// levels: docs/lyrics-align.md, «The check»).
+    /// levels).
     pub aligner: Option<ModelId>,
 }
 

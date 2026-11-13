@@ -1,5 +1,4 @@
-//! The aligner's accuracy on a set of songs, quickly enough to try changes
-//! (docs/lyrics-align.md, «Accuracy»).
+//! The aligner's accuracy on a set of songs, quickly enough to try changes.
 //!
 //! `cargo run -p nikgob-align --release --example bench -- <models dir> <jobs.json> <cache dir> [name filter]`
 //!

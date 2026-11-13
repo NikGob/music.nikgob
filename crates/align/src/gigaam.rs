@@ -1,5 +1,4 @@
-//! GigaAM-v3 CTC, a second Russian aligner for deep mode
-//! (docs/lyrics-align.md, «Deep mode»): a Conformer that hears 64 log-mel
+//! GigaAM-v3 CTC, a second Russian aligner for deep mode: a Conformer that hears 64 log-mel
 //! bands of 16 kHz audio (torchaudio's `MelSpectrogram` as GigaAM's
 //! `FeatureExtractor` sets it: n_fft 320, hop 160, no centring, HTK mel
 //! scale, no band normalisation) and gives the 33 Russian letters without

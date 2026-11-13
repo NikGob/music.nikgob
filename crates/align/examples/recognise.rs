@@ -1,5 +1,4 @@
-//! Recognises songs from scratch and compares the words with a known text
-//! (docs/lyrics-align.md, «Measured»).
+//! Recognises songs from scratch and compares the words with a known text.
 //!
 //! `cargo run -p nikgob-align --example recognise -- <models dir> <jobs.json> [cpu]`
 //! (the jobs of `measure`).

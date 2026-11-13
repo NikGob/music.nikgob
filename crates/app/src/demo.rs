@@ -2,7 +2,7 @@
 //! at the interface without importing music. Files do not exist; playback
 //! goes to the null backend.
 //!
-//! For the recommendations (docs/stage4.md) every track gets a synthetic
+//! For the recommendations every track gets a synthetic
 //! sound vector and the library a listening history of three months: the
 //! albums fall into three styles (Russian rock, electronic, dark and
 //! dreamy), tracks within a style spread over energy and brightness so
@@ -12,7 +12,7 @@
 //! and new releases. For the bento's tiles the history also has a month of
 //! repeats, plays a year ago, two albums loved half a year ago and not
 //! since, the last two songs of every album played only once, and fresh
-//! likes. Beyond them, for the other kinds of tiles (docs/stage4.md §12.9):
+//! likes. Beyond them, for the other kinds of tiles:
 //! a soundtrack album started and left, an artist not heard for two
 //! months, likes over four months, songs never played, long and short
 //! songs, lyrics on the songs with words, a rested playlist and liked
@@ -370,8 +370,7 @@ pub(crate) fn seed_with(lib: &Library, root: &Path, files: bool) {
 }
 
 /// «First Love» with one file (no number) and no track count: its page
-/// asks the (fake) YouTube Music for the rest of the album
-/// (docs/stage4.md §12.8).
+/// asks the (fake) YouTube Music for the rest of the album.
 fn one_song_of_an_album(lib: &Library, root: &Path, files: bool) {
     let artist = "宇多田ヒカル";
     let Ok(a) = lib.upsert_artist(&Artist::new(artist)) else { return };
@@ -733,7 +732,7 @@ mod tile_tests {
     use super::*;
 
     /// A week of the demo's boards: most kinds of tiles show up, and none
-    /// but «На повторе» three days in a row (docs/stage4.md §12.9).
+    /// but «На повторе» three days in a row.
     #[test]
     fn a_week_of_the_demo_shows_most_tiles() {
         let lib = Library::open_in_memory().unwrap();

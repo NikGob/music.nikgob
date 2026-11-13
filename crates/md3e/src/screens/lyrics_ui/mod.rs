@@ -9,7 +9,7 @@
 //! «Вид» picks the look (`Prefs::lyrics_ui`); `NIKGOB_LYRICS_UI` overrides
 //! it for screenshot runs. Each look lives in its own
 //! module; this one has what they share: the words, the control itself and
-//! the progress of timing being made (docs/lyrics-align.md).
+//! the progress of timing being made.
 //!
 //! The control is one tonal button: where the text comes from and how it
 //! is timed («Genius · по словам»). While timing is made it shows its
@@ -264,8 +264,7 @@ pub(crate) struct Action {
     /// Its button under «Подсветка» (the window and the page), where the
     /// heading says what it is about.
     pub button: &'static str,
-    /// Word timing can also be made deep, for this song only
-    /// (docs/lyrics-align.md, «Deep mode»): that row in the control's menu,
+    /// Word timing can also be made deep, for this song only: that row in the control's menu,
     /// right after this one. Under «Подсветка» it is the split button's
     /// menu ([`DEEP`]).
     pub deep: Option<&'static str>,

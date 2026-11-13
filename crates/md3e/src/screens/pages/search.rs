@@ -1,4 +1,4 @@
-//! Поиск (md3e-player.md §3.6, docs/stage3.md §3.2): a docked search view
+//! Поиск (md3e-player.md §3.6): a docked search view
 //! (radius 28, 56 dp header with source filter chips) under the bar.
 //!
 //! «Всё» is one answer ([`nikgob_view::SearchAnswer`]): «Лучший результат»

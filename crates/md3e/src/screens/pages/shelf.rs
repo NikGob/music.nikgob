@@ -1,4 +1,4 @@
-//! The pure side of Библиотека (docs/stage4.md §12.6): the instant filter,
+//! The pure side of Библиотека: the instant filter,
 //! the group headers of the album grid, what the «Всё» overview shows and
 //! how an artist without a photo looks.
 

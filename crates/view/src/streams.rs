@@ -1,4 +1,4 @@
-//! The streaming part of the view model (stage 3, docs/stage3.md): accounts,
+//! The streaming part of the view model (stage 3): accounts,
 //! the stream sections of the unified search, album / playlist / artist pages
 //! of a service, the wishlist, sharing.
 //!
@@ -35,7 +35,7 @@ pub struct AccountView {
     pub account: Account,
     /// The service can be used now: registered, switched on, and (Spotify)
     /// connected. A Spotify that is not connected is asked nothing at all
-    /// (it needs Premium, docs/stage3.md §0); the search can leave it out.
+    /// (it needs Premium); the search can leave it out.
     pub usable: bool,
     /// A login is running ([`crate::Command::StreamLogin`]).
     pub busy: bool,
@@ -56,8 +56,8 @@ pub struct AccountView {
     /// The same as local time, «14:05», for the UI to say.
     pub paused_until_hm: Option<String>,
     /// What the service's own suggestions give our mixes, a quiet line:
-    /// «Подсказки: 48 треков · обновлено в 14:10», or why there are none
-    /// (docs/stage4.md §12.3). `None`: the service has no suggestions.
+    /// «Подсказки: 48 треков · обновлено в 14:10», or why there are none.
+    /// `None`: the service has no suggestions.
     pub suggestions: Option<String>,
     /// A feed of suggestions needs a new sign-in: «Переподключи Spotify,
     /// чтобы брать твой топ».
@@ -584,7 +584,7 @@ pub struct WishlistRow {
     /// A downloaded album: its tracks still without a file.
     pub missing: u32,
     /// The track has a copy saved from YouTube (low quality): the item
-    /// stays to find a better one, it is not «Скачано» (docs/stage4.5.md).
+    /// stays to find a better one, it is not «Скачано».
     pub has_copy: bool,
     /// Where the file comes from while it downloads («Qobuz», «khinsider»,
     /// the tracker of a torrent).
@@ -678,7 +678,7 @@ pub struct WishlistView {
     pub can_search: bool,
 }
 
-/// One download source as «Источники» lists it (docs/stage4.5.md).
+/// One download source as «Источники» lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceView {
     pub key: SourceKey,

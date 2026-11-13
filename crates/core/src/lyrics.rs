@@ -66,7 +66,7 @@ pub enum LyricsSource {
     Lrclib,
     /// genius.com (plain text).
     Genius,
-    /// Heard in the recording itself (docs/lyrics-align.md): the last resort.
+    /// Heard in the recording itself: the last resort.
     Recognized,
 }
 

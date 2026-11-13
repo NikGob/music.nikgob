@@ -3,8 +3,7 @@
 //! resumed after an interruption and checked by SHA-256 before use.
 //!
 //! Every file is pinned to one revision (a model's commit, a wheel's
-//! version), so what is checked is what was measured
-//! (docs/lyrics-align.md).
+//! version), so what is checked is what was measured.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -39,8 +38,8 @@ pub enum ModelId {
     /// MMS-300m forced aligner fine-tuned on singing (Tune Studio), a
     /// second aligner for English (and romanised letters; deep mode).
     AlignerSung,
-    /// Discogs-EffNet, the neural sound model of the recommendations
-    /// (docs/recommendations.md §5): not a part of the lyrics.
+    /// Discogs-EffNet, the neural sound model of the recommendations: not a
+    /// part of the lyrics.
     SoundEffnet,
 }
 
@@ -328,7 +327,7 @@ impl ModelId {
         self.spec().files[0].name
     }
 
-    /// A part only deep mode uses (docs/lyrics-align.md, «Deep mode»).
+    /// A part only deep mode uses.
     pub fn deep(self) -> bool {
         matches!(self, Self::SeparatorDeep | Self::AlignerRuDeep | Self::AlignerSung)
     }

@@ -597,8 +597,8 @@ pub struct LyricsView {
     pub picked: bool,
     /// Every source that has, or may still get, a text for this track.
     pub sources: Vec<LyricsOption>,
-    /// The shown timing was made by the player from the recording
-    /// (docs/lyrics-align.md), not given by the source.
+    /// The shown timing was made by the player from the recording, not
+    /// given by the source.
     pub made: bool,
     /// The texts are being checked against the recording right now.
     pub checking: bool,
@@ -1680,7 +1680,7 @@ pub struct Prefs {
     /// «Отделять голос от музыки» before aligning.
     pub lyrics_separate: bool,
     /// «Глубокое создание субтитров»: timing made with the stronger
-    /// separator and aligners (docs/lyrics-align.md, «Deep mode»), slower.
+    /// separator and aligners, slower.
     pub lyrics_deep: bool,
     /// «Скачивать модели сами» when they are needed.
     pub lyrics_models_auto: bool,
@@ -1850,7 +1850,7 @@ pub struct Prefs {
     /// How many wishlist items search / download at once on their own.
     pub auto_download_limit: u32,
     /// The download sources in the order the wishlist prefers them at one
-    /// quality, each on or off («Источники скачивания», docs/stage4.5.md).
+    /// quality, each on or off («Источники скачивания»).
     /// A source missing here takes its default place, on.
     pub download_sources: Vec<SourceSwitch>,
     /// Toasts about downloads going on by themselves: a release not found, a
@@ -1876,7 +1876,7 @@ pub struct Prefs {
     /// «Только здесь».
     pub replace_in_youtube: bool,
 
-    // ---- Recommendations (stage 4, docs/stage4.md).
+    // ---- Recommendations (stage 4).
     /// «Новое в радио»: how much music new to the user radios and mixes mix
     /// in.
     pub radio_new_share: RadioNewShare,
@@ -1931,7 +1931,7 @@ pub struct Prefs {
     /// here takes [`Self::radio_new_share`].
     pub radio_new_share_by: std::collections::BTreeMap<RadioKind, RadioNewShare>,
 
-    // ---- Dislikes (docs/TODO.md §10).
+    // ---- Dislikes.
     /// «Кнопка «Не нравится»» next to ♡ in Now Playing.
     pub dislike_button: bool,
     /// «Пропускать по дизлайку»: a dislike of the playing track skips it.
@@ -1982,7 +1982,7 @@ pub struct Prefs {
     /// with the name they had (Settings → «Рекомендации» returns them).
     pub home_hidden_mixes: Vec<HiddenMix>,
 
-    // ---- The graph of similar music (docs/recs-graph.md).
+    // ---- The graph of similar music.
     /// «Похожее по слушателям»: what other listeners hear together (the
     /// graph kept in the library) scores the radio, the mixes and the new
     /// music; off, the graph is kept but not used.
@@ -2721,7 +2721,7 @@ impl RadioExplore {
     }
 }
 
-/// «Нейросетевой анализ звука» (docs/recommendations.md §5.2): what the
+/// «Нейросетевой анализ звука»: what the
 /// neural sound model hears.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SoundNeural {
@@ -3691,7 +3691,7 @@ pub enum Command {
     /// too when it went there.
     UndoReplace(u64),
 
-    // Recommendations (stage 4, docs/stage4.md §6)
+    // Recommendations (stage 4)
     /// Plays a mix card: «Твой микс» as it is today, a mood, a style mix,
     /// an artist's radio or the discoveries; everything but «Твой микс» is
     /// endless (the queue becomes a radio, [`QueueView::radio`]).

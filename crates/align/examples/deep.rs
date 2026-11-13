@@ -1,5 +1,4 @@
-//! Deep mode against the normal timing on the shared bench
-//! (docs/lyrics-align.md, «Deep mode»).
+//! Deep mode against the normal timing on the shared bench.
 //!
 //! `cargo run -p nikgob-align --release --example deep -- <models dir> <jobs.json> <cache dir> [name filter]`
 //!

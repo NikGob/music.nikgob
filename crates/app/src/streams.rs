@@ -1,4 +1,4 @@
-//! The streaming services the app runs (docs/stage3.md §1 "app").
+//! The streaming services the app runs.
 //!
 //! Normal start: the real Spotify, YouTube Music and SoundCloud services,
 //! each with its own folder in the app's data dir (`spotify/`, `youtube/`,

@@ -1,4 +1,4 @@
-//! «Сервисы» (docs/stage3.md §0, §3.1, §3.6): Spotify, YouTube Music,
+//! «Сервисы»: Spotify, YouTube Music,
 //! SoundCloud and the Deezer catalogue — each its switch and account, in
 //! «Подробно» also the fallback sign-ins, Spotify's own key and sound, the
 //! import of playlists and history —, the likes sent back, playlist sync,
@@ -86,7 +86,7 @@ fn logged_in(a: Option<&AccountView>) -> bool {
     a.is_some_and(|a| a.account.is_logged_in())
 }
 
-/// Spotify works with Premium only (docs/stage3.md §0): connected, its
+/// Spotify works with Premium only: connected, its
 /// sound, the import and «Выйти»; not connected, the steps to connect it
 /// (the user's own key, then the sign-in) — in «Просто» one «Подключить»
 /// that opens them.
