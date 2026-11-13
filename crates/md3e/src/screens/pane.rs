@@ -1,4 +1,4 @@
-//! The supporting pane: Текст | Инфо (md3e-player.md §2.4).
+//! The supporting pane: Текст | Инфо.
 
 use egui::{Rect, Ui};
 use nikgob_view::{Command, QueueEntry, Route, TrackId, TrackInfo, TrackRow, ViewState};

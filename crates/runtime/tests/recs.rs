@@ -705,7 +705,7 @@ fn an_early_skip_teaches_the_radio() {
     assert_eq!(lessons[0]["Track"], serde_json::json!(skipped.to_string()), "{lessons}");
 }
 
-/// The radio's short tail follows what the user does (recs-v2.0 §3.1):
+/// The radio's short tail follows what the user does:
 /// an early skip keeps the next track (it is preloaded) and picks the rest
 /// again; a second one running replaces the whole tail, and playback waits
 /// for the new picks; a pick taken out by hand replaces the radio's tail
@@ -793,7 +793,7 @@ fn the_home_gets_a_daylist_and_tiles_that_play() {
     assert!(!daylist.covers.is_empty());
     // Up to eight kinds of the day, each once, each with its kicker, its
     // length and covers; «На повторе», the lottery and the languages are
-    // not among them (they are mixes of the home, home v2 §3.5).
+    // not among them (they are mixes of the home).
     let tiles: Vec<MixId> = st.tiles.iter().map(|t| t.id).collect();
     assert!((1..=8).contains(&tiles.len()), "{tiles:?}");
     assert!(

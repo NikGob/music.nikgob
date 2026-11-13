@@ -1,4 +1,4 @@
-//! Torrent downloads (PLAN §7): the embedded client starts only when there is
+//! Torrent downloads: the embedded client starts only when there is
 //! something to download or seed, finished payloads go through the importer,
 //! and the seed policy decides when payloads leave `Downloads/`. Lossless
 //! masters among them move to `.musiclib/masters/` instead of being deleted,

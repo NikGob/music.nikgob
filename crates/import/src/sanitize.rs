@@ -1,4 +1,4 @@
-//! Windows-safe file names and long-path handling (PLAN section 5).
+//! Windows-safe file names and long-path handling.
 //!
 //! Rules for one path component:
 //! * `/ \ |` become `-`, `:` becomes `-` (`": "` becomes `" - "`), `"` becomes `'`,

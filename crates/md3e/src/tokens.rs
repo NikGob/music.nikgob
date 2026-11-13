@@ -4,7 +4,7 @@
 use egui::{CornerRadius, Rect, epaint::Shadow};
 use nikgob_motion::{Spring, tokens as springs};
 
-/// The corner-radius scale in dp (tokens.md section 3.1).
+/// The corner-radius scale in dp.
 pub mod shape {
     pub const NONE: f32 = 0.0;
     pub const EXTRA_SMALL: f32 = 4.0;
@@ -42,7 +42,7 @@ pub fn corner_radius(radius: f32, rect: Rect) -> CornerRadius {
     shape::corner(radius, rect)
 }
 
-/// State-layer and disabled opacities (tokens.md section 5). A state layer is
+/// State-layer and disabled opacities. A state layer is
 /// the content colour at this opacity over the container.
 pub mod state {
     pub const HOVER: f32 = 0.08;

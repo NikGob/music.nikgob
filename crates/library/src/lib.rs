@@ -4,7 +4,7 @@
 //! * [`Library`] is a cheap-to-clone handle: one writer connection plus a small
 //!   pool of read-only connections (WAL), so UI reads never wait behind an
 //!   import transaction.
-//! * The schema (PLAN §4, with the backup/network "tails") is created and
+//! * The schema (with the backup/network "tails") is created and
 //!   migrated by [`migrations`] using `PRAGMA user_version`.
 //! * User data is CRDT-friendly: row-level last-writer-wins with tombstones,
 //!   fractional-index playlist order, append-only events. See [`userdata`] for

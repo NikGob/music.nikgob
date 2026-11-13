@@ -1,7 +1,7 @@
 //! The open world: new music beyond the
 //! library, not a few songs between loved ones.
 //!
-//! * **A niche** ([`is_niche`], §1.2): a filter (a mood, a scene, the
+//! * **A niche** ([`is_niche`]): a filter (a mood, a scene, the
 //!   background, a mix of the home) the library has fewer than
 //!   [`NICHE_TRACKS`] fitting tracks or fewer than [`NICHE_ARTISTS`]
 //!   artists for. Its library tracks are seeds, not a closed list: new

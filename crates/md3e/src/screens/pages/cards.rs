@@ -1,4 +1,4 @@
-//! The pieces of Главная (home-v2 spec §3): a shortcut, a mix with its
+//! The pieces of Главная: a shortcut, a mix with its
 //! cover and its name on it, the tile of «Любимые», a row of a song, a tile of the day and an album card, each laid
 //! out in the rect the page's grid gives it, plus the motion helpers they
 //! share (a picture moved or scaled after it was painted, a button that
@@ -242,7 +242,7 @@ fn shortcut_playing(state: &ViewState, sc: &Shortcut) -> bool {
     }
 }
 
-/// A shortcut (§3.2): 72 high, the cover flush with the edge (a playlist:
+/// A shortcut: 72 high, the cover flush with the edge (a playlist:
 /// a 2×2 mosaic; an artist: a circle 56 inset 8), the name in two lines and
 /// a quiet line; the equalizer while it plays. A click opens it, ▶ on the
 /// cover plays it.
@@ -414,7 +414,7 @@ impl MixClick {
     }
 }
 
-/// A mix of «Миксы для тебя» (§3.3, §4): the cover of its leading artist's
+/// A mix of «Миксы для тебя»: the cover of its leading artist's
 /// album cut to a Material shape of the mix's own on a tonal tile, its name
 /// and its artists in a line each under it, as «Любимые» has them. A click
 /// opens its page (of the world `world`'s page for its mixes), plays it or
@@ -558,7 +558,7 @@ pub fn heartbeat(t: f32) -> f32 {
     bump(x) + 0.55 * bump(x - 0.24)
 }
 
-/// «Моя волна» in «Миксы для тебя», right after «Любимые» (recs §2.1): its
+/// «Моя волна» in «Миксы для тебя», right after «Любимые»: its
 /// own tertiary container (the mixes' tiles never take it), a wave across
 /// it that runs while the wave plays, its name under it. A click starts
 /// the wave (⏸ while it plays, ▶ again after); ▶ grows in under the
@@ -872,7 +872,7 @@ pub struct RowOutput {
     pub link: Option<usize>,
 }
 
-/// A song row (§3.4, §3.7): 72 high, reaching 8 into the margins so the
+/// A song row: 72 high, reaching 8 into the margins so the
 /// covers stand on the grid; the cover 56 r8, the title (primary while it
 /// plays) and the artist; the hover layer r16. With `liked`, ♡ stays at
 /// the right.
@@ -944,7 +944,7 @@ pub fn song_row_linked(
 
 // ---- Tile of the day.
 
-/// A tile of «Подборки дня» (§3.5): 112 high on surface_container, the
+/// A tile of «Подборки дня»: 112 high on surface_container, the
 /// cover flush with the edge (an artist: a circle 88 inset 12), the kicker,
 /// the title in up to two lines and the length. A click plays; ▶ 40 grows
 /// in over the cover, ⋮ at the top right; ⋮ and the right click:
@@ -1054,7 +1054,7 @@ pub struct AlbumOutput {
     pub more: Option<Response>,
 }
 
-/// An album card (§3.6, §3.8): the cover r16 without a container, the
+/// An album card: the cover r16 without a container, the
 /// title in two lines and «Artist · tail» where the tail («слушал 5 из 52»,
 /// «8 окт.») is never cut. A click opens it; ▶ 56 on the cover plays it;
 /// ⋮ grows in at its top right.

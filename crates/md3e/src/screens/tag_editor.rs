@@ -1,4 +1,4 @@
-//! The tag editor (md3e-player.md §4): a dialog up to 560 wide, full screen
+//! The tag editor: a dialog up to 560 wide, full screen
 //! on Compact, with outlined 56 dp fields, a MusicBrainz lookup and its
 //! suggestions. Drawn from [`super::Md3eUi`] while `state.tag_editor.track`
 //! is set.

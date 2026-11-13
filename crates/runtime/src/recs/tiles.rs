@@ -159,7 +159,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     };
     let today = snap.recs().local_day();
     // «На повторе» and the languages are mixes of their own now and
-    // «Наугад» is gone from the home (home v2 §1): the day shows the
+    // «Наугад» is gone from the home: the day shows the
     // others, at most [`HOME_TILES`].
     board
         .into_iter()

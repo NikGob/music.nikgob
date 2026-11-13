@@ -650,7 +650,7 @@ mod tests {
         assert_eq!(lib.cache_get("disco.x").unwrap(), Some((42, "[1|2]".to_owned())));
     }
 
-    /// TODO 18: videos that are no music stayed in «Save» of an old
+    /// Videos that are no music stayed in «Save» of an old
     /// Takeout import. Only the entries of an imported playlist with
     /// nothing that says they are music go, once; the tracks stay.
     #[test]

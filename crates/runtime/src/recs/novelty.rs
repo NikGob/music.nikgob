@@ -1,4 +1,4 @@
-//! How new music is received (recs-v2 §11.4), in the runtime: every start
+//! How new music is received, in the runtime: every start
 //! of a new song of a service (not the library's, picked by a mix, a radio,
 //! autoplay or «Новое для тебя») and how it ended go into the
 //! [`NewLog`] the library's cache keeps (`recs.new_log`), with where it was

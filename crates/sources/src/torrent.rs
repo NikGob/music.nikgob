@@ -558,7 +558,7 @@ mod tests {
         v.iter().map(|o| o.title.clone()).collect()
     }
 
-    /// TODO 23: «怪獣» of sakanaction got the single «さよならはエモーション
+    /// «怪獣» of sakanaction got the single «さよならはエモーション
     /// / 蓮の花» (46 MB, no seeders) as the one to take.
     #[test]
     fn another_single_of_the_artist_is_looked_into_last_and_has_no_file() {
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(pick_files(&files, &w), None);
     }
 
-    /// TODO 23: the clip «SawanoHiroyuki[nZk]:Rei『INERTIA』 Music Video»
+    /// The clip «SawanoHiroyuki[nZk]:Rei『INERTIA』 Music Video»
     /// got three whole «Attack on Titan» soundtracks (1.3–2.4 GB).
     #[test]
     fn a_big_album_that_names_neither_the_song_nor_its_album_comes_last() {

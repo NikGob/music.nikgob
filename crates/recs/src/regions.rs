@@ -1,4 +1,4 @@
-//! Regions of taste in sound (recs-v2 §4.5): k-means over the embedded
+//! Regions of taste in sound: k-means over the embedded
 //! bliss vectors of the tracks with long affinity, every artist free to
 //! fall in several regions, small ones merged into their nearest, and a
 //! soft membership of any vector (`softmax(−d² / τ)`, τ the median squared

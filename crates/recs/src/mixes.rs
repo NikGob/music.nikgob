@@ -1,5 +1,4 @@
-//! «Миксы для тебя» (recs-v2 §5.4, §6; profiles-v1 §6 and the user's
-//! decisions of 2026-10-26 and 2026-10-29): five moments of the user's
+//! «Миксы для тебя»: five moments of the user's
 //! taste, each a mix of about 28 songs fixed for the home's epoch — a run
 //! of the app within one part of the day (the runtime's seed): a start of
 //! the app or a new part of the day draws another lineup and other songs,
@@ -17,7 +16,7 @@
 //!   yet (nothing heard, liked or kept) the library's kinds of songs and
 //!   its two sides stand in.
 //! * **The lineup** ([`Builder::lineup`]): every moment there is — «Фон»
-//!   cards by the balance of the profiles (profiles-v1 §5.3), «Всё
+//!   cards by the balance of the profiles, «Всё
 //!   вперемешку» with two active profiles, each active profile, the lively
 //!   and the calm side — drawn by the epoch's lottery
 //!   ([`Builder::drawn`]): by how well the moment fits now, a profile by
@@ -52,7 +51,7 @@
 //!   Blocks of a profile join by sound and the arc, never the same profile
 //!   twice running while another is left, each ending on its track nearest
 //!   the next block.
-//! * **The names** ([`Builder::title`], recs-v2 §6.3): what is in it — the
+//! * **The names** ([`Builder::title`]): what is in it — the
 //!   profile's name, «Всё вперемешку», «Спокойное» or «Погромче» (of songs,
 //!   without words, or of one language when [`KIND_SHARE`] or
 //!   [`LANG_HOLD`] of it is), «Фон», a blend's profiles joined by « + ».
@@ -195,7 +194,7 @@ pub const MIN_SONGS: usize = 12;
 const REDRAWS: usize = 3;
 /// No song shorter (an interlude)…
 const INTERLUDE_MS: u32 = 75_000;
-/// …or longer (skipped early a third of the time, recs-v2 §2).
+/// …or longer (skipped early a third of the time).
 pub const LONG_MS: u32 = 9 * 60_000;
 /// The first and the last song are not longer than this.
 const EDGE_MS: u32 = 6 * 60_000;
@@ -263,7 +262,7 @@ const C_CROWD: f32 = 1.0;
 /// A song never played out of its place weighs this against the rules of
 /// diversity (a world thrice running weighs more).
 const W_UNHEARD: usize = 3;
-/// «Фон» keeps to this band of its profile's energy (profiles-v1 §6.1),
+/// «Фон» keeps to this band of its profile's energy,
 /// cards of it split this one.
 const BG_BAND: (f32, f32) = (0.15, 0.7);
 const BG_CARDS_BAND: (f32, f32) = (0.1, 0.9);

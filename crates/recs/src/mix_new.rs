@@ -1,4 +1,4 @@
-//! «С новым» (recs-v2 §5.4): the new songs of the services a mix of
+//! «С новым»: the new songs of the services a mix of
 //! «Миксы для тебя» plays between its own.
 //!
 //! * **How many**: the share the appetite of the mix's taste profile draws

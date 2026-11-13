@@ -508,7 +508,7 @@ fn follow_at(ours: Duration, heard: Duration, stalled: bool, rate: f64, speed: f
 /// A toast no snackbar took away is dropped after this long.
 const TOAST_KEPT: Duration = Duration::from_secs(60);
 
-/// How the playing track is heard (profiles-v1 §11): the time it played,
+/// How the playing track is heard: the time it played,
 /// that time weighted by how far the window was from the user (0 focused,
 /// 0.5 in view behind another window, 1 hidden) where that is known, and
 /// by the volume. Counted between the moments anything of it changes.
@@ -4159,8 +4159,8 @@ impl Worker {
         }
     }
 
-    /// Writes playlists, likes and history next to the library (PLAN §4:
-    /// the DB can be rebuilt from files + this export). At most once a
+    /// Writes playlists, likes and history next to the library
+    /// (the DB can be rebuilt from files + this export). At most once a
     /// minute while things change, and once more on shutdown; only when the
     /// user data itself changed (most publishes are playback, downloads and
     /// pages, which leave it alone).

@@ -20,7 +20,7 @@
 //! 4. selects the best under the diversity caps and orders them smoothly
 //!    from the last track served.
 //!
-//! Repeats (recs-v2 §17, decision 3): a radio never serves a pick twice,
+//! Repeats: a radio never serves a pick twice,
 //! and leaves out what played in its session or in the last few hours
 //! («Не повторять сыгранное», [`RadioState::set_no_repeat_ms`], three
 //! hours by default) until nothing else is left; one played twice running
@@ -29,9 +29,9 @@
 //! rest about a day and a half ([`MIX_REST`]).
 //!
 //! A track's radio (and autoplay, which is one) picks by the user model
-//! when the engine has it ([`crate::model`], recs-v2 §5): one track at a
+//! when the engine has it ([`crate::model`]): one track at a
 //! time as if the ones before it played, among the candidates of the
-//! session (§5.2), by its value (§5.3) — the model's relevance, plus
+//! session, by its value — the model's relevance, plus
 //! `1.5·ln(1 − p_skip)`, plus [`RADIO_REST`] times how rested it is (1.5
 //! days to half), minus the dislikes near it, a little seeded chance.
 //! «Похоже на X» stays X's: its candidates are within X's sound radius
@@ -57,7 +57,7 @@
 //! track's first half or after a scrub pushes, a fast skip of a loved one
 //! turns the radio as two skips do.
 //!
-//! Autoplay goes on by the session's trajectory (recs-v2.0 §3.4): the last
+//! Autoplay goes on by the session's trajectory: the last
 //! [`TRAJECTORY_MAX`] tracks not skipped (played through, liked, or still
 //! playing), back to the user's own last pick, captured when autoplay
 //! starts. Its anchor drifts elastically:
@@ -105,7 +105,7 @@
 //!   heard makes way for new music that sounds like the seed, while there
 //!   is; with none left either, the usual picks.
 //!
-//! It keeps to a taste profile (profiles-v1 §4.3, §7): «Похоже на X» to
+//! It keeps to a taste profile: «Похоже на X» to
 //! X's, autoplay ([`RadioState::continuing`]) to the one its session is
 //! pure in if X belongs to it (else X's), to none after a mixed session (then in blocks of three or four
 //! of a profile). A track of the profile is one with [`MEMBER`] of its
@@ -342,7 +342,7 @@ pub struct RadioState {
     #[serde(default)]
     follow: bool,
     /// It left its profile for the neighbouring one: two early skips ran,
-    /// or its own ran out (profiles-v1 §7).
+    /// or its own ran out.
     #[serde(default)]
     wide: bool,
     /// The weights learnt since the engine's model was built.
@@ -730,7 +730,7 @@ impl RadioState {
 
     /// `item` was liked while it played (`vector`: its raw sound, for a
     /// track the catalog lacks): it is approved, and the next extension
-    /// starts with the best of its neighbours (recs-v2.0 §3.1).
+    /// starts with the best of its neighbours.
     pub fn liked(&mut self, item: Item, vector: Option<Vector>) {
         if let Item::Track(t) = &item {
             self.session.like(*t);
@@ -1270,7 +1270,7 @@ impl RadioState {
             }
             of_scene < SPARSE_SCENE || 2 * of_scene < all
         };
-        // The profile it keeps to (profiles-v1 §7): its own tracks, and the
+        // The profile it keeps to: its own tracks, and the
         // neighbouring profile's once two early skips ran or fewer than
         // [`UNHEARD_MIN`] of its own are left; a background radio never
         // widens, takes only what suits the background from a profile
@@ -1531,8 +1531,7 @@ impl RadioState {
         (out, wide)
     }
 
-    /// The profile and the mode a track's radio keeps to (profiles-v1 §4.3,
-    /// §7): «Похоже на X» is pure in X's profile, autoplay in the profile
+    /// The profile and the mode a track's radio keeps to: «Похоже на X» is pure in X's profile, autoplay in the profile
     /// its session is pure in (none in a mixed one); a background session
     /// keeps to its profile in the background, a focused one wanders more.
     fn plan(&self, model: &UserModel) -> Plan {
@@ -1878,8 +1877,7 @@ fn make_way(recs: &Recs<'_>, lib: &mut Vec<Slot>, new: &mut Vec<Slot>, reserve: 
     new.extend(more);
 }
 
-/// A track is of a radio's profile with this membership in it
-/// (profiles-v1 §7)…
+/// A track is of a radio's profile with this membership in it…
 const MEMBER: f32 = 0.35;
 /// …and the radio widens to the neighbouring profile with fewer than this
 /// many of its own left to play.
@@ -1926,7 +1924,7 @@ struct Plan {
 
 impl Plan {
     /// New music sounding `v` (embedded) does not get in the way of a
-    /// background radio (profiles-v1 §8): of its profile by its sound, in
+    /// background radio: of its profile by its sound, in
     /// its band of energy.
     fn quiet_new(&self, model: &UserModel, v: Option<&Vector>) -> bool {
         let (Some(v), Some(j)) = (v, self.profile) else { return false };

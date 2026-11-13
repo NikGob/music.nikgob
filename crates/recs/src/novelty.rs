@@ -1,9 +1,9 @@
-//! How new music is received (recs-v2 §4.7, §11.4, §11.5): every new track
+//! How new music is received: every new track
 //! of a service that started from a mix, a radio or «Новое для тебя» and
 //! how it ended, kept as a short log ([`NewLog`], the library's cache keeps
 //! it) and read four ways.
 //!
-//! * **Taste profiles** (profiles-v1 §8). Each event keeps the key of the
+//! * **Taste profiles**. Each event keeps the key of the
 //!   profile it was heard for ([`NewEvent::profile`]; a log of an older
 //!   [`NOVELTY_VERSION`] has them told again from its sounds,
 //!   [`NewLog::upgrade`]). A complete is `α + 1` of its profile, an early

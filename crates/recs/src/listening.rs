@@ -1,4 +1,4 @@
-//! How the user listens (profiles-v1 §4): in the background or not, one
+//! How the user listens: in the background or not, one
 //! profile or many. Nothing here is a fixed cut of minutes or touches:
 //! each signal of a session is ranked among the user's own sessions.
 //!
@@ -372,7 +372,7 @@ impl Listening {
         k.checked_sub(1).map(|k| &self.sessions[k]).filter(|s| ts <= s.end).map_or(0.0, |s| s.p_bg)
     }
 
-    /// A live session with `s` is focused (profiles-v1 §4.1): hardly
+    /// A live session with `s` is focused: hardly
     /// background (`p_bg` under [`FOCUS_P_BG`]) and touched more than the
     /// user's median session. Never before [`MIN_STARTS`].
     pub fn focused(&self, s: &SessionSignals) -> bool {

@@ -1,4 +1,4 @@
-//! Библиотека (md3e-player.md §3.2): a header with
+//! Библиотека: a header with
 //! the instant filter, «только скачанное», the view and the sort; «Всё» as
 //! an overview (rows of playlists, the latest and the most played albums,
 //! the first rows of the album grid, artists), each section leading on to

@@ -1,4 +1,4 @@
-//! Larger covers for the stage of Главная's worlds (home-v2 §15.3): the
+//! Larger covers for the stage of Главная's worlds: the
 //! stage draws a cover of 568 points, up to 850 pixels at 150 %, and some
 //! albums come with a cover of 300 px or less (Mushoku Tensei's are
 //! 181–400 px). For an album whose own cover is smaller than [`HD_SIDE`],

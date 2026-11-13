@@ -111,7 +111,7 @@ impl MixKey {
     }
 }
 
-/// A mix of a world's page (recs-v2 §8): «Лучшее», «Ещё не слышал», «В
+/// A mix of a world's page: «Лучшее», «Ещё не слышал», «В
 /// дорогу» (to other worlds), its calm and its lively side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum WorldMix {
@@ -165,7 +165,7 @@ pub struct LaneCard {
     /// The name the queue says when the title alone is not enough (a
     /// world's mix: «MADE IN ABYSS: лучшее»).
     pub queue: Option<String>,
-    /// Why it is offered, in its tooltip (recs-v2 §12): «Из того, что ты
+    /// Why it is offered, in its tooltip: «Из того, что ты
     /// дослушиваешь вечером».
     pub why: Option<String>,
 }

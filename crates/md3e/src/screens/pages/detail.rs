@@ -1,4 +1,4 @@
-//! Альбом / Исполнитель / Плейлист (md3e-player.md §3.3–3.4).
+//! Альбом / Исполнитель / Плейлист.
 
 use std::path::PathBuf;
 use std::time::Duration;

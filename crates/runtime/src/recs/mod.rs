@@ -249,7 +249,7 @@ pub(crate) struct RecHome {
     pub lanes: Vec<lanes::LaneHome>,
     /// The taste profiles «Смешать с…» offers.
     pub blend_profiles: Vec<v::BlendProfile>,
-    /// The mix tiles of the card at the top (recs-v2 §7), picked only
+    /// The mix tiles of the card at the top, picked only
     /// while the app has the card ([`v::HOME_CARD`]); not on the page until
     /// the card comes back redesigned.
     #[allow(dead_code)]
@@ -413,7 +413,7 @@ pub(crate) struct RecsState {
     skip_x: Option<(TrackId, [f32; nikgob_recs::model::G])>,
     /// The mixes of the world's page open.
     world: Option<WorldMixes>,
-    /// Why a queue entry was picked (recs-v2 §12), in its row's tooltip.
+    /// Why a queue entry was picked, in its row's tooltip.
     pub(crate) why: HashMap<u64, String>,
     /// The number of this run of the app: the home's epochs are its
     /// ([`crate::home_v2::Epoch`]).
@@ -1156,7 +1156,7 @@ pub(crate) fn play_of(e: &nikgob_core::model::Event) -> nikgob_recs::Play {
     p
 }
 
-/// The taste profiles of a build in the log (profiles-v1 §11.4): a line
+/// The taste profiles of a build in the log: a line
 /// of them all, then each, the largest share first — its name and artists,
 /// its share of the recent plays, how much of it is background, three of
 /// its best loved songs; and how the user listens.
@@ -1895,7 +1895,7 @@ pub(crate) fn only_downloaded(home: &mut v::HomeView) {
 /// With the card at the top: its world gets the new album of the services
 /// as its third card, and what the world opened on shows (its albums on
 /// the tiles and the stage, that new album) do not show again below; the
-/// next in line takes their place (home v2 §14.5, §15.3).
+/// next in line takes their place.
 pub(crate) fn card_first(home: &mut v::HomeView) {
     if home.worlds.is_empty() {
         return;
@@ -2059,7 +2059,7 @@ pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v
     })
 }
 
-/// The prequential replay of a library's history (recs-v2 §13): every
+/// The prequential replay of a library's history: every
 /// start predicted by the model learnt from the starts before it, against
 /// the affinity of phase 1 and the hand weights. The build keeps its
 /// caches in `lib`: run it on a copy.
@@ -2829,7 +2829,7 @@ impl Worker {
         }
     }
 
-    /// The mixes of the page of `world` (recs-v2 §8.5): «Лучшее», «Ещё не
+    /// The mixes of the page of `world`: «Лучшее», «Ещё не
     /// слышал», «В дорогу», then its calm and its lively side, those it has;
     /// none before the first build. Kept for [`v::MixKey::World`] to play.
     pub(crate) fn world_mix_cards(&mut self, world: &v::World) -> Vec<v::LaneCard> {

@@ -28,7 +28,7 @@
 //!   [`PREVIEW_BYTES`] of the song (about the first minute), its 30 s from
 //!   the 15th second ([`nikgob_recs::preview_windows`]), at most
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
-//!   music is placed by its sound (recs-v2 §11.3). With «Библиотека и
+//!   music is placed by its sound. With «Библиотека и
 //!   превью новых песен» the neural sound model hears the preview too, and
 //!   [`nikgob_recs::VectorIndex::niche_fit`] can tell whether it fits a
 //!   niche before it joins a mix.

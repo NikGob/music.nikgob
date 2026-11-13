@@ -21,7 +21,7 @@
 //!   of them.
 //! * [`suggest`]: the services' own suggestions as a signal of taste and
 //!   as discovery votes.
-//! * [`model`]: the user model of recs-v2 — the history's stats of tracks,
+//! * [`model`]: the user model — the history's stats of tracks,
 //!   worlds and track pairs, the online models of the next start and of
 //!   the early skip; [`session`]: the session they score in;
 //!   [`songtype`]: sung or instrumental, the language, a soundtrack's song.

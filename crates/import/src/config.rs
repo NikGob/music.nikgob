@@ -7,7 +7,7 @@ use std::time::Duration;
 /// environment; the app fills it in from its own settings.
 #[derive(Clone, Debug)]
 pub struct ImportConfig {
-    /// `Music/`: the managed library (PLAN section 5).
+    /// `Music/`: the managed library.
     pub library_dir: PathBuf,
     /// `Inbox/`: files and `.torrent` dropped by the user.
     pub inbox_dir: PathBuf,
@@ -89,7 +89,7 @@ impl ImportConfig {
         self.library_dir.join(".musiclib")
     }
 
-    /// Where lossless masters wait for their backup (PLAN section 6, step 9),
+    /// Where lossless masters wait for their backup,
     /// or the custom archive folder/drive chosen by the user.
     pub fn masters_dir(&self) -> PathBuf {
         if self.masters_dir.as_os_str().is_empty() {

@@ -1,5 +1,4 @@
-//! The listener model on a copy of a real library (recs-v2 §13, §15
-//! phase 2): the prequential replay of its history, every start predicted
+//! The listener model on a copy of a real library: the prequential replay of its history, every start predicted
 //! by what was learnt before it, against the affinity of phase 1, and a
 //! track's radio on the model, as an album goes on and after two early
 //! skips: `NIKGOB_REAL_LIBRARY=path/to/library.sqlite cargo test -p

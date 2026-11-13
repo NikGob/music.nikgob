@@ -1,4 +1,4 @@
-//! The mix tiles of the card at the top of Главная (recs-v2 §7): after the
+//! The mix tiles of the card at the top of Главная: after the
 //! world to continue come the mix of the moment (what the user plays at
 //! this part of the day, by its sound) and «После <мир>» (the sound of the
 //! first world's core, from the other worlds), then the other worlds. The

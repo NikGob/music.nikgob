@@ -1,4 +1,4 @@
-//! The visualizer (md3e-player.md §3.5): four pictures of the music drawn
+//! The visualizer: four pictures of the music drawn
 //! from the spectrum, the beat and the loudness, in the scheme's colours
 //! and Material shapes, over the whole window or the whole screen. A
 //! floating toolbar at the bottom picks the picture and the screen, and

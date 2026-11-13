@@ -1,4 +1,4 @@
-//! New, upgrade or duplicate? (PLAN section 6, step 4 and "Апгрейд".)
+//! New, upgrade or duplicate?
 //!
 //! The incoming file is the *same track* as an existing one when, in order:
 //! 1. it carries our own `NIKGOB_TRACK_ID` of a known track (or the job was

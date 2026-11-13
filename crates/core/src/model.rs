@@ -1,4 +1,4 @@
-//! Shared plain data types (PLAN §4).
+//! Shared plain data types.
 //!
 //! Everything here is `serde` + `Clone` + `Debug` and does no I/O. The library
 //! database, the sync layer and the UI all speak these types.
@@ -89,7 +89,7 @@ uuid_id!(EventId);
 uuid_id!(WishlistId);
 
 /// Device / node identity. Opaque string: a random uuid for now, a public key
-/// once the sync layer lands (PLAN §11).
+/// once the sync layer lands.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeviceId(pub String);
@@ -238,7 +238,7 @@ str_enum!(
 
 impl SourceKind {
     /// Lower is better: local file > Spotify > YouTube > SoundCloud >
-    /// Deezer (PLAN §4; a Deezer entry never plays itself).
+    /// Deezer (a Deezer entry never plays itself).
     pub const fn priority(self) -> u8 {
         match self {
             Self::LocalFile => 0,
@@ -282,7 +282,7 @@ str_enum!(
 );
 
 str_enum!(
-    /// Who chose what a start plays (recs-v2 §4.1): the user, or the app
+    /// Who chose what a start plays: the user, or the app
     /// going on by itself.
     pub enum EventOrigin {
         /// A click on a track, an album, an artist, a search result.
@@ -309,7 +309,7 @@ impl EventOrigin {
 }
 
 str_enum!(
-    /// Why a play ended (recs-v2 §15, phase 2).
+    /// Why a play ended.
     pub enum EndReason {
         /// «Дальше».
         UserNext = "user_next",
@@ -529,7 +529,7 @@ pub mod score {
     pub const STREAM_SOUNDCLOUD: i32 = 275;
 }
 
-/// Ranks a source by quality, PLAN §6:
+/// Ranks a source by quality:
 /// Hi-Res FLAC > CD FLAC > Opus >= AAC 256 ~ MP3 320 > MP3 V0 > other.
 ///
 /// * lossless is Hi-Res when `bit_depth > 16` or `sample_rate > 48000`;
@@ -856,7 +856,7 @@ impl Source {
     }
 }
 
-/// Lossless master kept in backup (PLAN §4, §11).
+/// Lossless master kept in backup.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Master {
     pub track_id: TrackId,

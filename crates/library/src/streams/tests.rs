@@ -1347,7 +1347,7 @@ fn an_album_with_one_file_learns_its_whole_tracklist_from_a_service() {
 
 /// «MADE IN ABYSS ORIGINAL SOUNDTRACK 4» (20 songs) as the library had it:
 /// two of its files, and the same two songs as YouTube Music names them,
-/// added as stream tracks of the release at the same places (§12.8):
+/// added as stream tracks of the release at the same places:
 /// `(release, [file 4, file 8], [stream 4, stream 8])`.
 fn abyss(lib: &Library) -> (ReleaseId, [TrackId; 2], [TrackId; 2]) {
     let kevin = lib.upsert_artist(&Artist::new("Kevin Penkin")).unwrap();
@@ -1553,7 +1553,7 @@ fn an_album_page_lists_each_place_once() {
 fn a_tracklist_from_a_service_lands_on_the_files_at_their_places() {
     let lib = lib();
     let (release, files, streams) = abyss(&lib);
-    // As before §12.8 added them: only the files.
+    // As before the whole tracklist was added: only the files.
     for t in streams {
         lib.write(|tx| {
             tx.execute("DELETE FROM source WHERE track_id = ?1", [t.to_string()])?;

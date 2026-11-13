@@ -17,7 +17,7 @@ impl std::fmt::Display for JobId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub u64);
 
-/// Steps of PLAN section 6, as reported in [`ImportEvent::FileProgress`].
+/// Steps of the import pipeline, as reported in [`ImportEvent::FileProgress`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     Probing,

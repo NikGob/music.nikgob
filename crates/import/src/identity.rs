@@ -1,4 +1,4 @@
-//! Who is this file? (PLAN section 6, step 2.)
+//! Who is this file?
 //!
 //! [`Identity`] is the metadata the pipeline works with: first what the tags
 //! say, then, when the matcher is sure (or the user picks an option), the

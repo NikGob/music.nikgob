@@ -241,7 +241,7 @@ pub struct Offer {
 }
 
 impl Offer {
-    /// The quality policy (PLAN §6): Hi-Res FLAC > CD FLAC > Opus ≥ AAC 256
+    /// The quality policy: Hi-Res FLAC > CD FLAC > Opus ≥ AAC 256
     /// ≈ MP3 320 > MP3 V0 > other; a format nobody named counts as a
     /// mediocre lossy file. A YouTube copy is below all of them
     /// ([`score::SAVED_STREAM`]).

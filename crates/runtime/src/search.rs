@@ -1,5 +1,5 @@
 //! Torrent search through the configured [`Indexer`] (Prowlarr) and the
-//! choice of a release for download (PLAN §7: format → release match →
+//! choice of a release for download (format → release match →
 //! seeders → sane size).
 
 use std::sync::Arc;

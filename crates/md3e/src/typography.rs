@@ -294,7 +294,7 @@ pub fn scale_galley(g: &egui::Galley, s: f32) -> Arc<egui::Galley> {
     Arc::new(out)
 }
 
-/// The 15 baseline styles (tokens.md section 2.1).
+/// The 15 baseline styles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TypeRole {
     DisplayLarge,

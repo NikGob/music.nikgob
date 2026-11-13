@@ -970,7 +970,7 @@ impl PageState {
         }
     }
 
-    /// The "Добавить" FAB menu (§2.1): the rail's FAB turns into a close button
+    /// The "Добавить" FAB menu: the rail's FAB turns into a close button
     /// with pills below it. The rail already drew a plain FAB at `fab`; the
     /// menu takes its place so it can morph.
     pub fn add_menu(&mut self, ui: &mut Ui, fab: &Response, out: &mut Vec<Command>) {

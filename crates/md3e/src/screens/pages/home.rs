@@ -1,4 +1,4 @@
-//! Главная (home-v2 spec): the card at the top («Миры», [`worlds`]), the
+//! Главная: the card at the top («Миры», [`worlds`]), the
 //! greeting with «Только скачанное», the shortcuts, «Миксы для тебя»
 //! («Любимые», «Микс дня», the named mixes, the moments), «Слушать
 //! снова», «Подборки дня», «Из твоей библиотеки», «Новое для тебя» and
@@ -9,7 +9,7 @@
 //! wheel or a sideways wheel, a drag, the arrows at its ends under the
 //! pointer; the plain wheel always scrolls the page.
 //!
-//! One rule for clicks (§4): what the app put together (a mix, a tile of
+//! One rule for clicks: what the app put together (a mix, a tile of
 //! the day, a song row) plays; a real thing (an album, a playlist, an
 //! artist, a shortcut) opens; ▶ under the pointer always plays; ⋮ and a
 //! right click open the same menu.
@@ -96,13 +96,13 @@ pub const OF_DAY_STRETCH: f32 = 560.0;
 pub const SHORTCUTS_PER_LINE: usize = 4;
 
 /// How many shortcuts the page shows: six in rows of three, eight in rows
-/// of four on a wide window (home v2 §12: one constant to change).
+/// of four on a wide window (one constant to change).
 pub const fn shortcuts_shown(per_row: usize) -> usize {
     if per_row >= 4 { 8 } else { 6 }
 }
 
 /// A click on a song of «Слушать снова» starts a radio from it (true) or
-/// plays the shelf in order from it (home v2 §12, recommended: the radio).
+/// plays the shelf in order from it (recommended: the radio).
 pub const LISTEN_AGAIN_RADIO: bool = true;
 
 /// The page's column: where it is and how many of each kind of item stand

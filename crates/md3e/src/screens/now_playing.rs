@@ -1,4 +1,4 @@
-//! Now Playing (md3e-player.md §3.5): morphing cover inside a dotted ring
+//! Now Playing: morphing cover inside a dotted ring
 //! that turns and follows the spectrum, wavy progress, the hero play button
 //! in a standard button group, one content slot, and the ambient
 //! background (soft colour clouds following the bass).

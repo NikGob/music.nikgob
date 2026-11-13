@@ -725,7 +725,7 @@ async fn read_export(
     // How a watch history's plays ended: by the gaps between its entries,
     // music or not.
     export::infer_outcomes(&mut data.plays, |_| None);
-    // Its music (profiles-v1 §12.3): what a «- Topic» channel, a known
+    // Its music: what a «- Topic» channel, a known
     // video or an artist the user has says is a song.
     let mut known: HashSet<String> = data
         .likes

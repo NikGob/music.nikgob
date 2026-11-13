@@ -1,6 +1,6 @@
 //! Manual tag edits (the tag editor): new values go into the file, the
-//! library rows follow, and the file moves to where §5 of the PLAN says a
-//! file with these tags belongs. The track id stays the same.
+//! library rows follow, and the file moves to where the library layout
+//! says a file with these tags belongs. The track id stays the same.
 
 use std::path::PathBuf;
 use std::sync::PoisonError;

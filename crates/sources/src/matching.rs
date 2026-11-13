@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(performer_of(&track("Eve", "Underdog - Acoustic", 194), &w), None);
     }
 
-    /// TODO 23: «Я не интроверт» of nyan.mp3 got «Happy Nyan! Days» of
+    /// «Я не интроверт» of nyan.mp3 got «Happy Nyan! Days» of
     /// Love Live, «nyan» in its title and «MP3» in its format tag.
     #[test]
     fn an_artist_named_with_format_words_is_met_only_as_a_whole() {
@@ -551,7 +551,7 @@ mod tests {
         assert!(judge(&torrent("Miku Sawai-chan Anime Hits [FLAC]", 2), &w).is_none(), "not in a row");
     }
 
-    /// TODO 23: «Bâan» of Kevin Penkin (from «Bâan -大人の彊界- Original
+    /// «Bâan» of Kevin Penkin (from «Bâan -大人の彊界- Original
     /// SoundTrack») got his other soundtracks, the song in none.
     #[test]
     fn a_song_of_one_soundtrack_is_not_on_another_one() {

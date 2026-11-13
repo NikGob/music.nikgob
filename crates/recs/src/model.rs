@@ -1,11 +1,11 @@
-//! The user model (recs-v2 §4): what the history says about every track,
+//! The user model: what the history says about every track,
 //! world and pair of tracks, a model of the next start and a model of the
 //! early skip, both learning online.
 //!
 //! * [`TrackStats`]: per track two sums of outcome weights, halving in 45
-//!   days and in 2 days (§4.2), counts of starts and outcomes, the last
-//!   start and complete, starts by part of the day. An outcome weighs
-//!   (§4.1): complete +1, late skip +0.15 × the share heard, early skip
+//!   days and in 2 days, counts of starts and outcomes, the last
+//!   start and complete, starts by part of the day. An outcome weighs:
+//!   complete +1, late skip +0.15 × the share heard, early skip
 //!   −0.8 (×0.6 after the user's own choice, ×1.3 after the app's, ×0.5
 //!   from the third running in a playlist or the library), a start never
 //!   ended +0.1 (0 when the app closed on it), a repeat within a day of a
@@ -113,7 +113,7 @@ const INTERLUDE_MS: u32 = 75_000;
 const LONG_MS: u32 = 6 * 60_000;
 /// Song lanes ([`lane_index`]).
 const LANES: usize = 5;
-/// The mass of the taste profiles (profiles-v1 §3.1): a play's outcome
+/// The mass of the taste profiles: a play's outcome
 /// weighs this, halving in [`H_MASS_MS`]…
 const MASS_COMPLETE: f32 = 1.0;
 const MASS_LATE: f32 = 0.5;
@@ -200,8 +200,8 @@ pub const EXPECT_OVER: usize = 100;
 pub const TEACH_LAST: usize = 1_500;
 
 /// The features of a start for its early skip, in this order
-/// (`new_service`: new music from a service, recs-v2 §11.2; `background`:
-/// the session's `p_bg` so far, profiles-v1 §5.1 — not skipped because not
+/// (`new_service`: new music from a service; `background`: the session's
+/// `p_bg` so far — not skipped because not
 /// listened to).
 pub const SKIP_FEATURES: [&str; 25] = [
     "bias", "aff_today", "aff_long", "aff_hot", "early_rate", "never", "liked", "pos0", "pos_log", "ctx_album",
@@ -316,7 +316,7 @@ impl TrackStats {
     }
 }
 
-/// A world's presence (§4.3).
+/// A world's presence.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorldStats {
     hot: f32,
@@ -726,7 +726,7 @@ impl UserModel {
         m
     }
 
-    /// What a live `session` is (profiles-v1 §4): pure or mixed by the
+    /// What a live `session` is: pure or mixed by the
     /// profiles of its starts, its `p_bg` ranked among the user's own
     /// sessions, the profile of its last start.
     pub fn live(&self, session: &Session) -> Live {
@@ -777,8 +777,7 @@ impl UserModel {
         self.listening.has_background && self.profile_bg.get(j).is_some_and(|b| *b >= 0.5)
     }
 
-    /// The home's cards of the profiles out of `slots` (profiles-v1 §5.3,
-    /// the user's decision 1). A background profile whose tracks suit the
+    /// The home's cards of the profiles out of `slots`. A background profile whose tracks suit the
     /// background (`suits`, see [`crate::background`]) takes up to
     /// `bg_cards` cards by its share, of those tracks only, split by
     /// energy; one with too few (its background is its ordinary songs)
@@ -1493,7 +1492,7 @@ impl UserModel {
     }
 
 
-    /// The candidates of the next start at `m` (§5.2): the nearest to the
+    /// The candidates of the next start at `m`: the nearest to the
     /// anchor, what followed the last three, the next on the album, the
     /// previous track's world, the hot and the long favourites; `ok`
     /// filters them.
@@ -1843,7 +1842,7 @@ impl Hits {
     }
 }
 
-/// What [`replay`] measured (recs-v2 §13.1): the next start among the whole
+/// What [`replay`] measured: the next start among the whole
 /// catalog by the affinity of phase 1, the hand weights and the learnt
 /// ones, on every next start, the free ones (not the next on the album),
 /// the next ones on the album and the completed ones; the early skip on
@@ -2387,7 +2386,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The outcome weights of §4.1: a late skip is a little plus, the app
+    /// The outcome weights: a late skip is a little plus, the app
 
     /// closing on a track adds nothing, an early skip of the app's pick
     /// weighs more than one of the user's own.

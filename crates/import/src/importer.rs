@@ -1,4 +1,4 @@
-//! The import pipeline (PLAN section 6): probe, fingerprint, identify, quality
+//! The import pipeline: probe, fingerprint, identify, quality
 //! check, decide, convert, tag, place, derive, register.
 //!
 //! * Heavy work (decoding, encoding, hashing) runs on blocking threads at the
@@ -1906,8 +1906,7 @@ struct SidecarTracks {
     track_ids: Vec<TrackId>,
 }
 
-/// Registers the lossless original as the track's master (PLAN section 6, step
-/// 9): torrent payloads stay where they are (they keep seeding), Inbox files move
+/// Registers the lossless original as the track's master: torrent payloads stay where they are (they keep seeding), Inbox files move
 /// to `.musiclib/masters/`, anything else is copied there. A track cut out of a
 /// single-file rip has the image as its master, shared with the other tracks
 /// of the image, and its cue sheet is kept next to it as `{hash}.cue`.

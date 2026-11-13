@@ -576,7 +576,7 @@ pub struct QueueView {
 pub struct QueueEntry {
     pub entry: u64,
     pub track: TrackRow,
-    /// Why a radio or a mix picked it, in its row's tooltip (recs-v2 §12):
+    /// Why a radio or a mix picked it, in its row's tooltip:
     /// the first pick of a radio and the new ones only.
     pub why: Option<String>,
     /// A guest of «✦ С дополнением» (marked ✦ in its row).
@@ -939,7 +939,7 @@ pub struct WorldView {
     pub new_album: Option<StreamAlbumCard>,
     /// «Любимое»: its liked tracks (shown from three).
     pub liked: Vec<TrackRow>,
-    /// «Миксы»: its mixes (recs-v2 §8.5), none before the recommendations
+    /// «Миксы»: its mixes, none before the recommendations
     /// are built.
     pub mixes: Vec<LaneCard>,
 }
@@ -1944,7 +1944,7 @@ pub struct Prefs {
     /// neighbours a little too (off: only the track itself is left out).
     pub dislike_in_recs: bool,
 
-    // ---- Taste profiles (profiles-v1).
+    // ---- Taste profiles.
     /// «Фон меньше влияет на рекомендации»: a play of a background session
     /// counts a quarter in the taste profiles' balance (off: fully).
     pub background_counts_less: bool,
@@ -1954,7 +1954,7 @@ pub struct Prefs {
     /// «Названия профилей»: by the kind of song, or by the artists.
     pub profile_names: ProfileNames,
 
-    // ---- «Миксы для тебя» (phase 3).
+    // ---- «Миксы для тебя».
     /// The profiles' own mixes («Русские песни»).
     pub mixes_profiles: bool,
     /// «Всё вперемешку».

@@ -5,7 +5,7 @@
 //!   45-day half-life from its moment: a complete +1.0, a start that neither
 //!   completed nor was skipped +0.3, a skip in the first 30 s −0.7 (half of
 //!   it from the third early skip running in a playlist or the library: that
-//!   is leafing through, recs-v2 §4.1), a later skip +0.15 times the share
+//!   is leafing through), a later skip +0.15 times the share
 //!   heard (the song was listened to), a repeat (started again within a day
 //!   of completing) +0.5, a playlist entry +1.5 (decayed from when it was
 //!   added); a like is +3, a state without decay, and a song saved in a
@@ -63,7 +63,7 @@ pub const HALF_LIFE_MS: i64 = 45 * DAY_MS;
 /// The hot affinity halves every this long.
 pub const HOT_HALF_LIFE_MS: i64 = 2 * DAY_MS;
 /// A mix lets a played track rest about this long ([`Taste::lately_at`]
-/// halves in it, recs-v2 §5.3).
+/// halves in it).
 pub const REST_MS: i64 = 36 * HOUR_MS;
 pub const W_COMPLETE: f32 = 1.0;
 pub const W_START_ONLY: f32 = 0.3;

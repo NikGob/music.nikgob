@@ -44,7 +44,7 @@ use nikgob_md3e::screens::Md3eUi;
 use nikgob_runtime::{NullPlayback, Playback, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs};
 
-/// Where things live on disk (PLAN §5).
+/// Where things live on disk.
 struct Paths {
     db: PathBuf,
     root: PathBuf,
