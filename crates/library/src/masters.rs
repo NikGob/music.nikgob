@@ -412,6 +412,15 @@ impl Library {
         })
     }
 
+    /// How many tracks have the file `file_hash` as their master (the
+    /// image of a single-file rip is the master of all its tracks).
+    pub fn master_users(&self, file_hash: &str) -> Result<usize> {
+        self.read(|c| {
+            let n: i64 = c.query_row("SELECT count(*) FROM master WHERE file_hash = ?1", [file_hash], |r| r.get(0))?;
+            Ok(n.max(0) as usize)
+        })
+    }
+
     /// Inserts or updates one replica.
     pub fn put_replica(&self, replica: &Replica) -> Result<()> {
         self.write(|tx| upsert_replica(tx, replica))
