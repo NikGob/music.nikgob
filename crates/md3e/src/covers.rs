@@ -73,6 +73,9 @@ const FULL: u32 = 4096;
 /// Decoding threads at most.
 const WORKERS: usize = 3;
 
+/// Web cover seeds kept before the ones of covers no longer loaded go.
+const MAX_SEEDS: usize = 512;
+
 /// Bytes of pixels the decoding threads may hold at once (see
 /// [`decode_cost`]); one decode runs whatever it costs.
 pub const DECODE_BUDGET: usize = 64 << 20;
@@ -131,6 +134,9 @@ struct Job {
     uri: String,
     source: Source,
     tier: Option<u32>,
+    /// What decoding it holds at its peak, once its header was read
+    /// ([`source_cost`]); until then the tier's [`decode_cost`].
+    cost: Option<usize>,
 }
 
 /// What a cover file was when a size of it was read.
@@ -589,6 +595,77 @@ fn parse(uri: &str) -> Option<(Parsed, Option<u32>)> {
     Some((Parsed::File(path), tier))
 }
 
+/// Pixels a cover may have at most (8192 × 8192): a larger one is refused
+/// before it is decoded.
+const MAX_SOURCE_PIXELS: u64 = 1 << 26;
+/// A cover file larger than this is not read.
+const MAX_SOURCE_BYTES: u64 = 64 << 20;
+
+/// What decoding `source` for `tier` holds at its peak, from its header
+/// alone: the encoded bytes, the picture as decoded (a JPEG scaled in the
+/// DCT, see [`scaled_jpeg`]; anything else at its full size) and the
+/// tier's own copies ([`decode_cost`]). An error for a source too large to
+/// decode or one whose header does not read.
+fn source_cost(source: &Source, tier: Option<u32>) -> Result<usize, String> {
+    let mut head = Vec::new();
+    let (encoded, header): (u64, &[u8]) = match source {
+        Source::File(path) => {
+            let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+            std::fs::File::open(path)
+                .and_then(|f| std::io::Read::read_to_end(&mut std::io::Read::take(f, 64 << 10), &mut head))
+                .map_err(|e| e.to_string())?;
+            (len, &head)
+        }
+        Source::Web(_, bytes) => (bytes.len() as u64, bytes),
+    };
+    if encoded > MAX_SOURCE_BYTES {
+        return Err(format!("cover file too large ({encoded} bytes)"));
+    }
+    // A JPEG's metadata (an embedded thumbnail, a colour profile) can push
+    // its frame header past the first bytes: then the whole file.
+    let dims = image_dimensions(header).or_else(|| match source {
+        Source::File(path) if (header.len() as u64) < encoded => {
+            std::fs::read(path).ok().and_then(|all| image_dimensions(&all))
+        }
+        _ => None,
+    });
+    // Not readable here: the decode says why.
+    let Some((w, h)) = dims else {
+        return Ok(usize::try_from(encoded).unwrap_or(usize::MAX).saturating_add(decode_cost(tier)));
+    };
+    let pixels = u64::from(w) * u64::from(h);
+    if pixels > MAX_SOURCE_PIXELS {
+        return Err(format!("cover too large ({w}×{h})"));
+    }
+    // A JPEG decodes at 1/2, 1/4 or 1/8 when it is that much larger than
+    // the side wanted (an estimate: one the DCT cannot scale costs more,
+    // and that is what the cap above bounds).
+    let side = u64::from(tier.unwrap_or(FULL));
+    let long = u64::from(w.max(h));
+    let scale = if header.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        [8, 4, 2].into_iter().find(|s| long / s >= side).unwrap_or(1)
+    } else {
+        1
+    };
+    let decoded = pixels / (scale * scale) * 4;
+    Ok(usize::try_from(encoded + decoded).unwrap_or(usize::MAX).saturating_add(decode_cost(tier)))
+}
+
+/// Width and height from an image's first bytes.
+fn image_dimensions(head: &[u8]) -> Option<(u32, u32)> {
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        let mut d = jpeg_decoder::Decoder::new(head);
+        d.read_info().ok()?;
+        let info = d.info()?;
+        return Some((u32::from(info.width), u32::from(info.height)));
+    }
+    image::ImageReader::new(std::io::Cursor::new(head))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 fn decode(source: &Source, tier: Option<u32>) -> Result<ColorImage, String> {
     let file;
     let bytes: &[u8] = match source {
@@ -711,13 +788,13 @@ impl Shared {
     /// (there is one: something is in flight), and this one ends.
     fn work(&self, ctx: &Context) {
         loop {
-            let (job, cost) = {
+            let (mut job, cost) = {
                 let mut jobs = lock(&self.jobs);
                 let Some(job) = jobs.queue.pop() else {
                     jobs.workers -= 1;
                     return;
                 };
-                let cost = decode_cost(job.tier);
+                let cost = job.cost.unwrap_or_else(|| decode_cost(job.tier));
                 if !jobs.fits(cost) {
                     jobs.queue.push(job);
                     jobs.workers -= 1;
@@ -743,7 +820,20 @@ impl Shared {
                 Source::File(path) => file_stamp(path),
                 Source::Web(..) => None,
             };
-            let slot = match decode(&job.source, job.tier) {
+            // What the source really takes to decode, from its header: a
+            // large picture waits for room in the budget like any other.
+            let checked = match job.cost {
+                Some(_) => Ok(()),
+                None => source_cost(&job.source, job.tier).map(|real| {
+                    job.cost = Some(real);
+                }),
+            };
+            if checked.is_ok() && job.cost.is_some_and(|real| real > cost) {
+                release();
+                lock(&self.jobs).queue.push(job);
+                continue;
+            }
+            let slot = match checked.and_then(|()| decode(&job.source, job.tier)) {
                 Ok(img) => Slot::Ready(Arc::new(img)),
                 Err(e) => Slot::Failed(e),
             };
@@ -895,6 +985,14 @@ impl Shared {
             TEXTURE_BYTES.store(total, Ordering::Relaxed);
             SIZES.store(used.len(), Ordering::Relaxed);
             BUDGET.store(*budget, Ordering::Relaxed);
+            // Seeds of web covers none of whose sizes is loaded any more
+            // (and not the playing track's): a cover drawn again is seeded
+            // again when it decodes.
+            let mut seeds = lock(&self.web_seeds);
+            if seeds.len() > MAX_SEEDS {
+                let live: HashSet<&str> = used.values().map(|u| u.origin.as_str()).collect();
+                seeds.retain(|url, _| live.contains(url.as_str()) || pinned.contains(url));
+            }
         }
         // Thumbnails not drawn lately: forgetting them changes nothing (one
         // drawn again is new on screen either way), and the map stays small.
@@ -974,7 +1072,7 @@ impl ImageLoader for CoverLoader {
                 };
                 slots.insert(uri.to_owned(), Slot::Pending);
                 drop(slots);
-                self.0.enqueue(ctx, Job { uri: uri.to_owned(), source, tier });
+                self.0.enqueue(ctx, Job { uri: uri.to_owned(), source, tier, cost: None });
                 Ok(ImagePoll::Pending { size: None })
             }
         }
@@ -1056,6 +1154,77 @@ mod tests {
         shared(&ctx).expect("installed").seed_web("https://x.invalid/c.jpg#128", &red);
         assert!(web_seed(&ctx, "https://x.invalid/c.jpg").is_some());
         assert_eq!(web_seed(&ctx, "https://x.invalid/other.jpg"), None);
+    }
+
+    /// Seeds of covers browsed past do not pile up for the window's life;
+    /// the playing track's stays.
+    #[test]
+    fn web_seeds_of_covers_no_longer_loaded_go() {
+        let ctx = ctx();
+        let s = shared(&ctx).unwrap();
+        {
+            let mut seeds = lock(&s.web_seeds);
+            for i in 0..MAX_SEEDS + 100 {
+                seeds.insert(format!("https://x.invalid/{i}.jpg"), Some(i as u32));
+            }
+        }
+        pin(&ctx, ["https://x.invalid/7.jpg"]);
+        pass(&ctx, &[], 64.0);
+        assert_eq!(lock(&s.web_seeds).len(), 1);
+        assert_eq!(web_seed(&ctx, "https://x.invalid/7.jpg"), Some(7));
+    }
+
+    fn web(bytes: Vec<u8>) -> Source {
+        Source::Web("https://x.invalid/a".into(), egui::load::Bytes::Shared(Arc::from(bytes)))
+    }
+
+    fn encoded(img: &image::DynamicImage, format: image::ImageFormat) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    /// A small PNG whose header claims `w` × `h`.
+    fn png_claiming(w: u32, h: u32) -> Vec<u8> {
+        let mut png = encoded(&image::DynamicImage::new_rgb8(1, 1), image::ImageFormat::Png);
+        // Signature (8), IHDR length (4), "IHDR" (4), width, height.
+        png[16..20].copy_from_slice(&w.to_be_bytes());
+        png[20..24].copy_from_slice(&h.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    /// A small tile of a large PNG costs the decoded picture, not the
+    /// tile; a picture beyond the cap is refused before decoding.
+    #[test]
+    fn the_decode_cost_counts_the_source_picture() {
+        let big = image::DynamicImage::new_rgb8(2048, 2048);
+        let png = web(encoded(&big, image::ImageFormat::Png));
+        let cost = source_cost(&png, Some(128)).unwrap();
+        assert!(cost >= 2048 * 2048 * 4, "{cost}");
+        assert!(cost > decode_cost(Some(128)) * 20);
+        // A JPEG decodes scaled in the DCT: an eighth of the side for a
+        // 128 px tile.
+        let jpeg = web(encoded(&big, image::ImageFormat::Jpeg));
+        let scaled = source_cost(&jpeg, Some(128)).unwrap();
+        assert!(scaled < 2048 * 2048 * 4 / 16, "{scaled}");
+        let err = source_cost(&web(png_claiming(20_000, 20_000)), Some(128)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        assert!(source_cost(&web(png_claiming(64, 64)), Some(128)).is_ok());
+        // Not an image: left to the decode, which says why.
+        assert_eq!(source_cost(&web(b"<html>".to_vec()), Some(128)).unwrap(), 6 + decode_cost(Some(128)));
     }
 
     /// `n` solid PNG covers of `side` pixels in a fresh temp folder.
