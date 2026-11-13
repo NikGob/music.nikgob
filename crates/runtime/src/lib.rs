@@ -42,6 +42,7 @@ mod sleep;
 mod storage;
 mod sound_model;
 mod editions;
+mod engine;
 mod streams;
 #[cfg(test)]
 mod perf;
@@ -537,7 +538,7 @@ impl Heard {
 struct Worker {
     lib: Library,
     res: Resolver,
-    playback: Box<dyn Playback>,
+    playback: engine::Engine,
     state: Arc<RwLock<ViewState>>,
     wake: Arc<dyn Fn() + Send + Sync>,
     queue: Queue,
@@ -783,7 +784,7 @@ impl Worker {
         Self {
             res,
             lib: config.library,
-            playback,
+            playback: engine::Engine::new(playback),
             state,
             wake,
             queue: Queue::default(),
@@ -2453,6 +2454,7 @@ impl Worker {
                 }
             }
             PlaybackEvent::TrackChanged { to } => {
+                self.playback.let_go(to);
                 // `play()` over a playing item also reports a change: that one
                 // we started ourselves. The same entry changing to itself
                 // otherwise is repeat-one looping gaplessly: handled below
@@ -2595,6 +2597,7 @@ impl Worker {
                 }
             }
             PlaybackEvent::Ended { id } => {
+                self.playback.let_go(id);
                 if self.playing.map(|e| e.id) == Some(id) {
                     self.record_end(false, EndReason::Ended);
                     if self.sleep_ended(id) {
@@ -2613,6 +2616,7 @@ impl Worker {
             }
             PlaybackEvent::Error { id, message } => {
                 log::error!("playback error on {id}: {message}");
+                self.playback.let_go(id);
                 let playing = self.playing.filter(|e| e.id == id);
                 if playing.is_none() && self.queue.peek_auto_next().is_some_and(|n| n.id == id) {
                     // The preloaded next track: it is tried again (with
