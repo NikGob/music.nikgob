@@ -95,6 +95,8 @@ pub(crate) enum Internal {
     /// [`crate::stream_covers`].
     StreamCover(crate::stream_covers::Found),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
+    /// A stopped-torrent cleanup job ended: the files it left, by torrent.
+    TorrentCleanupDone(Vec<(String, Vec<PathBuf>)>),
     /// A look at Soulseek for «Раздача».
     Sharing(crate::sharing::SlskPoll),
     MastersMoveProgress {
@@ -810,6 +812,7 @@ impl Worker {
             Internal::Recs(m) => self.recs_msg(m),
             Internal::StreamCover(f) => self.real_cover_found(f),
             Internal::SeedStopped(list) => self.seed_stopped(list),
+            Internal::TorrentCleanupDone(left) => self.torrent_cleanup_done(left),
             Internal::MastersMoveProgress {
                 job,
                 done,

@@ -215,7 +215,18 @@ fn torrent_download_imports_and_cleans_up() {
     assert!(matches!(src.origin, nikgob_core::model::SourceOrigin::Torrent { .. }), "{src:?}");
     wait_for(&rt, "seeding", |s| s.downloads.seeding.len() == 1);
 
+    // The cleanup copies and hashes masters on a job of its own: while it
+    // waits for the masters folder, the player loop goes on.
+    let held = nikgob_import::master_writes();
     rt.send(Command::CleanSeeding);
+    wait_for(&rt, "the seed stopped", |s| s.downloads.seeding.is_empty());
+    let mut p = rt.state().prefs.clone();
+    p.normalization = !p.normalization;
+    let want = p.normalization;
+    rt.send(Command::SetPrefs(Box::new(p)));
+    wait_for(&rt, "a command while the cleanup waits", |s| s.prefs.normalization == want);
+    assert!(album.join("01 - Song.wav").is_file(), "nothing goes before the masters folder is free");
+    drop(held);
     wait_for(&rt, "cleanup", |s| s.downloads.seeding.is_empty() && !album.exists());
     let masters: Vec<_> = std::fs::read_dir(cfg.masters_dir())
         .unwrap()
