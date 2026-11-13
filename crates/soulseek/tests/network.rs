@@ -245,12 +245,14 @@ async fn download_resumes_after_an_interruption_and_from_a_partial_file() {
     let data = pattern(200_000);
     let path = "Shared\\Album\\track.flac".to_owned();
     let out = tempfile::tempdir().unwrap();
+    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path: path.clone(), size: 200_000, ..Default::default() };
     // 30 000 bytes from an earlier run are there already.
+    let part = nikgob_soulseek::partial_path(out.path(), &r);
+    assert_eq!(part.parent().unwrap(), out.path().join("Album"));
     std::fs::create_dir_all(out.path().join("Album")).unwrap();
-    std::fs::write(out.path().join("Album").join("track.flac.part"), &data[..30_000]).unwrap();
+    std::fs::write(&part, &data[..30_000]).unwrap();
     let (tx, mut offsets) = tokio::sync::mpsc::unbounded_channel();
-    tokio::spawn(hand_driven_uploader(listener, downloader, data.clone(), path.clone(), vec![90_000], tx));
-    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path, size: 200_000, ..Default::default() };
+    tokio::spawn(hand_driven_uploader(listener, downloader, data.clone(), path, vec![90_000], tx));
     let mut d = b.download(&r, out.path());
     let got = tokio::time::timeout(Duration::from_secs(20), d.wait()).await.unwrap().unwrap();
     assert_eq!(std::fs::read(&got).unwrap(), data);
@@ -414,4 +416,212 @@ async fn a_queued_download_can_be_cancelled() {
     assert!(matches!(tokio::time::timeout(Duration::from_secs(5), d.wait()).await.unwrap(), Err(Error::Cancelled)));
     assert!(b.downloads()[0].state.is_finished());
     b.shutdown();
+}
+
+/// Another sharer's file of the same name was cut off in the same folder:
+/// its bytes are not taken as the start of this one.
+#[tokio::test]
+async fn a_partial_of_another_sharers_file_is_not_resumed() {
+    let server = MockServer::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let SocketAddr::V4(addr) = listener.local_addr().unwrap() else { unreachable!() };
+    server.add_static_peer("carol", addr);
+    let b = client(config(&server, "bob", None)).await;
+    let downloader = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, b.status().listen_port));
+    let data = pattern(200_000);
+    let path = "Shared\\Album\\track.flac".to_owned();
+    let out = tempfile::tempdir().unwrap();
+    let album = out.path().join("Album");
+    std::fs::create_dir_all(&album).unwrap();
+    let other = nikgob_soulseek::SearchResult { user: "dave".into(), path: path.clone(), size: 250_000, ..Default::default() };
+    // What dave's interrupted download left, under the old shared name and its own.
+    std::fs::write(album.join("track.flac.part"), vec![0xAB; 50_000]).unwrap();
+    std::fs::write(nikgob_soulseek::partial_path(out.path(), &other), vec![0xAB; 50_000]).unwrap();
+    let (tx, mut offsets) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(hand_driven_uploader(listener, downloader, data.clone(), path.clone(), vec![], tx));
+    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path, size: 200_000, ..Default::default() };
+    let mut d = b.download(&r, out.path());
+    let got = tokio::time::timeout(Duration::from_secs(20), d.wait()).await.unwrap().unwrap();
+    assert_eq!(offsets.recv().await, Some(0));
+    assert_eq!(std::fs::read(&got).unwrap(), data);
+    b.shutdown();
+}
+
+/// A sharer that says its file is bigger than any audio file is refused
+/// before a byte is written.
+#[tokio::test]
+async fn an_oversized_transfer_is_refused() {
+    let server = MockServer::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let SocketAddr::V4(addr) = listener.local_addr().unwrap() else { unreachable!() };
+    server.add_static_peer("carol", addr);
+    let path = "Shared\\Album\\huge.flac".to_owned();
+    let (tx, mut answers) = tokio::sync::mpsc::unbounded_channel();
+    let want = path.clone();
+    tokio::spawn(async move {
+        let (mut p, _) = listener.accept().await.unwrap();
+        let _ = read_frame(&mut p, 4096).await.unwrap();
+        while let Ok(frame) = read_frame(&mut p, 1 << 20).await {
+            let (code, body) = split_u32(&frame).unwrap();
+            match PeerMsg::decode(code, body).unwrap() {
+                PeerMsg::QueueUpload(f) => {
+                    assert_eq!(f, want);
+                    let size = Some(nikgob_soulseek::MAX_FILE_BYTES + 1);
+                    let req = PeerMsg::TransferRequest { direction: 1, token: 9, filename: f, size };
+                    write_all(&mut p, &req.encode()).await.unwrap();
+                }
+                PeerMsg::TransferResponse { token, allowed, .. } => {
+                    tx.send((token, allowed)).unwrap();
+                }
+                _ => {}
+            }
+        }
+    });
+    let b = client(config(&server, "bob", None)).await;
+    let out = tempfile::tempdir().unwrap();
+    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path, size: 1000, ..Default::default() };
+    let mut d = b.download(&r, out.path());
+    let end = tokio::time::timeout(Duration::from_secs(10), d.wait()).await.unwrap();
+    assert!(matches!(&end, Err(Error::Denied(m)) if m.contains("too large")), "{end:?}");
+    assert_eq!(tokio::time::timeout(Duration::from_secs(5), answers.recv()).await.unwrap(), Some((9, false)));
+    assert!(!out.path().join("Album").exists(), "nothing was written");
+    // Listed too large already: not even asked for.
+    let r = nikgob_soulseek::SearchResult { path: "Shared\\Album\\other.flac".into(), size: nikgob_soulseek::MAX_FILE_BYTES + 1, ..r };
+    let end = b.download(&r, out.path()).wait().await;
+    assert!(matches!(&end, Err(Error::Denied(m)) if m.contains("too large")), "{end:?}");
+    b.shutdown();
+}
+
+/// The sharer took the request and dropped the connection (it restarted, or
+/// the link broke): the request is made again, and the file comes.
+#[tokio::test]
+async fn a_queued_download_is_asked_for_again_after_the_sharer_drops() {
+    let server = MockServer::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let SocketAddr::V4(addr) = listener.local_addr().unwrap() else { unreachable!() };
+    server.add_static_peer("carol", addr);
+    let b = client(config(&server, "bob", None)).await;
+    let downloader = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, b.status().listen_port));
+    let data = pattern(50_000);
+    let path = "Shared\\Album\\track.flac".to_owned();
+    let (tx, _offsets) = tokio::sync::mpsc::unbounded_channel();
+    let (want, payload) = (path.clone(), data.clone());
+    tokio::spawn(async move {
+        // The first connection: the request arrives, then the sharer is gone.
+        let (mut p, _) = listener.accept().await.unwrap();
+        let _ = read_frame(&mut p, 4096).await.unwrap();
+        loop {
+            let frame = read_frame(&mut p, 1 << 20).await.unwrap();
+            let (code, body) = split_u32(&frame).unwrap();
+            if matches!(PeerMsg::decode(code, body).unwrap(), PeerMsg::QueueUpload(_)) {
+                break;
+            }
+        }
+        drop(p);
+        hand_driven_uploader(listener, downloader, payload, want, vec![], tx).await;
+    });
+    let out = tempfile::tempdir().unwrap();
+    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path, size: 50_000, ..Default::default() };
+    let mut d = b.download(&r, out.path());
+    let got = tokio::time::timeout(Duration::from_secs(20), d.wait()).await.unwrap().unwrap();
+    assert_eq!(std::fs::read(&got).unwrap(), data);
+    b.shutdown();
+}
+
+/// What the fake service answers a request with; `None` holds it unanswered.
+type Answer = dyn Fn(&str, &str) -> Option<(u16, Vec<u8>)> + Send + Sync;
+
+/// A bare HTTP service for the remote client.
+async fn fake_service(answer: std::sync::Arc<Answer>) -> String {
+    let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let answer = answer.clone();
+            tokio::spawn(async move {
+                loop {
+                    let mut head = Vec::new();
+                    while !head.ends_with(b"\r\n\r\n") {
+                        let mut b = [0u8; 1];
+                        if s.read_exact(&mut b).await.is_err() {
+                            return;
+                        }
+                        head.push(b[0]);
+                    }
+                    let head = String::from_utf8_lossy(&head).into_owned();
+                    let mut words = head.split_whitespace();
+                    let method = words.next().unwrap_or("").to_owned();
+                    let path = words.next().unwrap_or("").to_owned();
+                    let len = head
+                        .lines()
+                        .find_map(|l| {
+                            let l = l.to_ascii_lowercase();
+                            l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; len];
+                    if s.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    let Some((status, out)) = answer(&method, &path) else {
+                        std::future::pending::<()>().await;
+                        return;
+                    };
+                    let reply = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n", out.len());
+                    if s.write_all(reply.as_bytes()).await.is_err() || s.write_all(&out).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    base
+}
+
+#[tokio::test]
+async fn a_remote_fetch_never_replaces_a_file_there() {
+    let base = fake_service(std::sync::Arc::new(|method: &str, path: &str| match (method, path) {
+        ("GET", "/api/files/A/x.flac") => Some((200, b"fetched".to_vec())),
+        _ => Some((404, Vec::new())),
+    }))
+    .await;
+    let rc = RemoteClient::new(&base, "").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("A").join("x.flac");
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, b"mine").unwrap();
+    let got = rc.fetch("A/x.flac", &local, None).await.unwrap();
+    assert_eq!(got, dir.path().join("A").join("x (2).flac"));
+    assert_eq!(std::fs::read(&local).unwrap(), b"mine");
+    assert_eq!(std::fs::read(&got).unwrap(), b"fetched");
+}
+
+/// The service takes the download and then stops answering: a cancel ends
+/// it at once instead of waiting on the stalled poll for ever.
+#[tokio::test]
+async fn a_remote_download_cancels_while_the_service_stalls() {
+    let base = fake_service(std::sync::Arc::new(|method: &str, path: &str| {
+        let info = nikgob_soulseek::DownloadInfo {
+            id: 1,
+            user: "carol".into(),
+            path: "A\\x.flac".into(),
+            size: 10,
+            state: DownloadState::Queued { place: None },
+        };
+        match (method, path) {
+            ("POST", "/api/downloads") => Some((200, serde_json::to_vec(&info).unwrap())),
+            ("GET", _) => None,
+            _ => Some((204, Vec::new())),
+        }
+    }))
+    .await;
+    let remote = Soulseek::Remote(RemoteClient::new(&base, "").unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path: "A\\x.flac".into(), size: 10, ..Default::default() };
+    let mut d = remote.download(&r, dir.path()).await.unwrap();
+    // Past the first poll, which hangs.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    d.cancel();
+    let end = tokio::time::timeout(Duration::from_secs(5), d.wait()).await.expect("the cancel was not seen");
+    assert!(matches!(end, Err(Error::Cancelled)), "{end:?}");
 }

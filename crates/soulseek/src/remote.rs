@@ -12,10 +12,14 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::http::{FileInfo, FolderBody, SearchBody};
-use crate::transfer::sanitize;
+use crate::transfer::{MAX_FILE_BYTES, finish_into, sanitize};
 use crate::{Download, DownloadInfo, DownloadState, Error, SearchQuery, SearchResult, ShareSettings, Status};
 
 const POLL: Duration = Duration::from_secs(1);
+/// A poll of a download (or its start) answers within this.
+const POLL_TIMEOUT: Duration = Duration::from_secs(30);
+/// No byte of a fetch for this long: the service stalled.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct RemoteClient {
@@ -127,8 +131,10 @@ impl RemoteClient {
     }
 
     /// Fetches a finished file (`rel` as [`Self::files`] lists it) to
-    /// `local`, resuming from a `.part` there.
-    pub async fn fetch(&self, rel: &str, local: &Path, progress: Option<&watch::Sender<DownloadState>>) -> Result<(), Error> {
+    /// `local`, resuming from a `.part` there; a file already at `local`
+    /// stays and the fetched one takes a free name next to it, which is
+    /// returned.
+    pub async fn fetch(&self, rel: &str, local: &Path, progress: Option<&watch::Sender<DownloadState>>) -> Result<PathBuf, Error> {
         if let Some(d) = local.parent() {
             tokio::fs::create_dir_all(d).await?;
         }
@@ -138,12 +144,16 @@ impl RemoteClient {
         if have > 0 {
             r = r.header(reqwest::header::RANGE, format!("bytes={have}-"));
         }
-        let mut resp = r.send().await.map_err(remote)?;
+        let mut resp = tokio::time::timeout(READ_TIMEOUT, r.send()).await.map_err(|_| Error::Timeout)?.map_err(remote)?;
         if !resp.status().is_success() {
             return Err(Error::Remote(resp.status().to_string()));
         }
         let resumed = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         let total = resp.content_length().unwrap_or(0) + if resumed { have } else { 0 };
+        let too_large = || Error::Remote("the file is too large".into());
+        if total > MAX_FILE_BYTES {
+            return Err(too_large());
+        }
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -152,9 +162,14 @@ impl RemoteClient {
             .open(&part)
             .await?;
         let mut got = if resumed { have } else { 0 };
-        while let Some(chunk) = resp.chunk().await.map_err(remote)? {
-            file.write_all(&chunk).await?;
+        while let Some(chunk) = tokio::time::timeout(READ_TIMEOUT, resp.chunk()).await.map_err(|_| Error::Timeout)?.map_err(remote)? {
             got += chunk.len() as u64;
+            if got > MAX_FILE_BYTES {
+                drop(file);
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(too_large());
+            }
+            file.write_all(&chunk).await?;
             if let Some(p) = progress {
                 p.send_replace(DownloadState::Transferring { received: got, size: total, bytes_per_sec: 0 });
             }
@@ -164,18 +179,19 @@ impl RemoteClient {
         if total > 0 && got != total {
             return Err(Error::Remote(format!("fetched {got} of {total} bytes")));
         }
-        tokio::fs::rename(&part, local).await?;
-        Ok(())
+        let dir = local.parent().unwrap_or(Path::new("."));
+        let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(finish_into(&part, dir, &name).await?)
     }
 
     /// Removes a fetched file from the service.
     pub async fn remove(&self, rel: &str) -> Result<(), Error> {
-        self.send_empty(self.req(reqwest::Method::DELETE, &format!("/api/files/{}", url_path(rel)))).await
+        self.send_empty(self.req(reqwest::Method::DELETE, &format!("/api/files/{}", url_path(rel))).timeout(POLL_TIMEOUT)).await
     }
 
     /// Has the service download `r`, then brings the file into `dir` here.
     pub async fn download(&self, r: &SearchResult, dir: &Path) -> Result<Download, Error> {
-        let info: DownloadInfo = self.send(self.req(reqwest::Method::POST, "/api/downloads").json(r)).await?;
+        let info: DownloadInfo = self.send(self.req(reqwest::Method::POST, "/api/downloads").json(r).timeout(POLL_TIMEOUT)).await?;
         let (tx, rx) = watch::channel(info.state.clone());
         let cancel = CancellationToken::new();
         let me = self.clone();
@@ -183,7 +199,16 @@ impl RemoteClient {
         let stop = cancel.clone();
         let id = info.id;
         tokio::spawn(async move {
-            let end = me.follow(id, &dir, &tx, &stop).await;
+            let end = tokio::select! {
+                end = me.follow(id, &dir, &tx) => end,
+                // Whatever it was doing (a poll, the fetch) stops here; a
+                // partial fetch stays for a resume.
+                _ = stop.cancelled() => {
+                    let del = me.req(reqwest::Method::DELETE, &format!("/api/downloads/{id}")).timeout(POLL_TIMEOUT);
+                    let _ = me.send_empty(del).await;
+                    Err(Error::Cancelled)
+                }
+            };
             if let Err(e) = end {
                 let reason = if stop.is_cancelled() { "Cancelled".to_owned() } else { e.to_string() };
                 tx.send_replace(DownloadState::Failed { reason });
@@ -192,23 +217,12 @@ impl RemoteClient {
         Ok(Download::new(id, rx, cancel))
     }
 
-    async fn follow(
-        &self,
-        id: u64,
-        dir: &Path,
-        tx: &watch::Sender<DownloadState>,
-        stop: &CancellationToken,
-    ) -> Result<(), Error> {
+    async fn follow(&self, id: u64, dir: &Path, tx: &watch::Sender<DownloadState>) -> Result<(), Error> {
         let mut misses = 0;
         let rel = loop {
-            tokio::select! {
-                _ = stop.cancelled() => {
-                    let _ = self.send_empty(self.req(reqwest::Method::DELETE, &format!("/api/downloads/{id}"))).await;
-                    return Err(Error::Cancelled);
-                }
-                _ = tokio::time::sleep(POLL) => {}
-            }
-            let info: DownloadInfo = match self.send(self.req(reqwest::Method::GET, &format!("/api/downloads/{id}"))).await {
+            tokio::time::sleep(POLL).await;
+            let poll = self.req(reqwest::Method::GET, &format!("/api/downloads/{id}")).timeout(POLL_TIMEOUT);
+            let info: DownloadInfo = match self.send(poll).await {
                 Ok(i) => i,
                 // The link to the service can drop for a while.
                 Err(e) if misses < 60 => {
@@ -234,7 +248,7 @@ impl RemoteClient {
         for part in rel.split('/') {
             local.push(sanitize(part));
         }
-        self.fetch(&rel, &local, Some(tx)).await?;
+        let local = self.fetch(&rel, &local, Some(tx)).await?;
         if let Err(e) = self.remove(&rel).await {
             log::debug!("soulseek remote: cannot remove {rel} on the service: {e}");
         }

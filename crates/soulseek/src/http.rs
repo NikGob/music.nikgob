@@ -245,7 +245,7 @@ async fn list_downloads(State(st): Shared) -> impl IntoResponse {
 }
 
 async fn get_download(State(st): Shared, UrlPath(id): UrlPath<u64>) -> Result<impl IntoResponse, ApiError> {
-    let info = st.client.downloads().into_iter().find(|i| i.id == id).ok_or_else(not_found)?;
+    let info = st.client.download_info(id).ok_or_else(not_found)?;
     Ok(axum::Json(api_info(&st.downloads, info)))
 }
 
