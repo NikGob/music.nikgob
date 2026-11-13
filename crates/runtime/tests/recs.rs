@@ -531,6 +531,35 @@ fn a_chip_while_the_wave_starts_wins() {
     assert!(st.queue.radio.is_none());
 }
 
+/// «Только новое» with no new music of its filter yet: the wave does not
+/// give up at once, it waits while its filter is topped up from the
+/// services (even with the mixes playing no new music), and ends cleanly
+/// when the top-up brings nothing.
+#[test]
+fn a_dry_only_new_wave_waits_for_its_refill_then_ends() {
+    let l = library(3, 6, 5, &[]);
+    let yt = Arc::new(FakeService::youtube());
+    let dz = Arc::new(FakeService::deezer());
+    let prefs = Prefs {
+        mixes_with_new: false,
+        graph_services: false,
+        graph_open_data: false,
+        wave_novelty: nikgob_view::WaveNovelty::OnlyNew,
+        ..Prefs::default()
+    };
+    let s = start(&l.lib, vec![yt.clone(), dz.clone()], prefs, None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::PlayWave { preset: None });
+    wait_for(&s.rt, "the wave's end", |st| st.toasts.iter().any(|t| t.text == "Нечего играть"));
+    let st = s.rt.state();
+    assert!(st.queue.current_entry.is_none() && st.queue.radio.is_none());
+    drop(st);
+    // The services were asked for the wave's filter before it ended (the
+    // niches' day budget counts the requests; the home asks none here).
+    let day: Option<(String, u32)> = l.lib.cache_get("niche.day").unwrap().and_then(|(_, v)| serde_json::from_str(&v).ok());
+    assert!(day.is_some_and(|d| d.1 >= 1), "{:?} {:?}", yt.all_calls(), dz.all_calls());
+}
+
 /// A like of a familiar track teaches the wave its cluster (α), as one of
 /// a new track does; the wave's state is saved with the queue.
 #[test]

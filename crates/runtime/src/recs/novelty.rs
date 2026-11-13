@@ -62,6 +62,9 @@ pub(crate) struct NewState {
     loaded: bool,
     pub log: NewLog,
     playing: Option<Playing>,
+    /// Counts the artists kept out since the start: an open pool built
+    /// before a new one is built again ([`super::wave::WavePool`]).
+    pub bans: u64,
 }
 
 impl Worker {
@@ -160,6 +163,8 @@ impl Worker {
     }
 
     fn push_new(&mut self, p: &Playing, heard: Heard) {
+        let now = recs_now();
+        let was_out = self.recs.newlog.log.artist_penalty(&p.artist, now).is_infinite();
         self.recs.newlog.log.push(NewEvent {
             song: p.song.clone(),
             artist: p.artist.clone(),
@@ -171,6 +176,10 @@ impl Worker {
             profile: p.profile,
             background: self.snapshot().is_some_and(|s| s.model.live(&self.recs.session).p_bg >= 0.5),
         });
+        if !was_out && self.recs.newlog.log.artist_penalty(&p.artist, now).is_infinite() {
+            log::info!("new music: {} is kept out now", p.artist);
+            self.recs.newlog.bans += 1;
+        }
         self.new_log_save();
     }
 }

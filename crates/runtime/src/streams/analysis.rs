@@ -22,9 +22,11 @@
 //!   the job waits for the pause to end (docs/stage3.md §9). A real failure
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
-//! - **Previews of new music.** When the library's queue is empty, the
-//!   discoveries found for «Новое для тебя» (and the candidates asked for
-//!   by [`Worker::want_preview`]) get a preview analysed: the first
+//! - **Previews of new music.** The candidates asked for by
+//!   [`Worker::want_preview`] (the songs «Моя волна» is about to play)
+//!   come first, before the library's queue; when the library's queue is
+//!   empty, the discoveries found for «Новое для тебя» get a preview
+//!   analysed: the first
 //!   [`PREVIEW_BYTES`] of the song (about the first minute), its 30 s from
 //!   the 15th second ([`nikgob_recs::preview_windows`]), at most
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
@@ -539,6 +541,13 @@ impl Worker {
         }
         if quiet::busy() {
             self.analysis_held("a game or a fullscreen app is in front");
+            return;
+        }
+        // The previews «Моя волна» asked for are of songs it is about to
+        // play: before the library's backlog (still within their own day's
+        // limit), so they are heard before the wave picks again.
+        if !self.streaming.analysis.wanted.is_empty() && self.preview_step() {
+            self.streaming.analysis.held = None;
             return;
         }
         let daily = self.streaming.schedule.analysis_daily;

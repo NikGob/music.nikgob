@@ -144,6 +144,10 @@ pub(crate) struct RadioRun {
     /// this snapshot: it is not asked again until the filter or the
     /// snapshot changes.
     wave_dry: Option<std::sync::Weak<super::Snapshot>>,
+    /// A wave whose first picks found nothing waits for the top-up of its
+    /// filter (its token) instead of ending; `true` once the top-up ended
+    /// with songs (the next empty picks end it).
+    refill: Option<(String, bool)>,
 }
 
 /// What the user did to a track of the radio besides playing it.
@@ -249,6 +253,8 @@ pub(crate) enum RadioMsg {
         /// The user's scenes for the wave's header, found for a snapshot
         /// on the way.
         scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
+        /// What a wave's picks asked, ready for the worker.
+        wave_asked: Option<super::wave::WaveAsked>,
     },
     NewFound {
         id: u64,
@@ -549,6 +555,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             wave_dry: None,
+            refill: None,
         };
         log::info!("radio «{}» starts ({:?})", run.title, run.state.seed);
         let context = context_of(&run.title);
@@ -620,11 +627,12 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             wave_dry: None,
+            refill: None,
         });
         log::info!("radio «{}» starts from its picks ({:?})", self.recs.radio.run.as_ref().map_or("", |r| &r.title), state.seed);
         self.radio_add_discoveries();
         self.radio_fetch_new();
-        self.radio_extended(id, state, picks);
+        self.radio_extended(id, state, picks, None);
     }
 
     /// The radio still plays its queue (any other playback ended it).
@@ -753,6 +761,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             wave_dry: None,
+            refill: None,
         });
         log::info!("autoplay: the queue goes on with a radio of «{title}»");
         self.radio_fetch_new();
@@ -906,6 +915,7 @@ impl Worker {
                 picks,
                 wave_pool: None,
                 scenes: None,
+                wave_asked: None,
             };
             let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
         });
@@ -921,28 +931,24 @@ impl Worker {
     /// snapshot, or the inputs to build it on the picks' thread.
     fn wave_extend(&mut self, id: u64, mut state: Engine, snap: Arc<super::Snapshot>, local_only: bool, n: usize, seed: u64) {
         let kept = self.discoveries_kept();
-        let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept));
+        self.new_log_load();
+        let bans = self.recs.newlog.bans;
+        let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept, bans));
         // What a new pool is built from (only when it is needed).
         let inputs = match (&pool, local_only) {
             (None, false) => {
-                let mut topped: Vec<super::niche::NicheFound> = match self.recs.home.as_ref() {
-                    Some(h) if !snap.local_only => h
-                        .lanes
-                        .iter()
-                        .filter(|l| !l.niche.is_empty())
-                        .filter_map(|l| super::niche::cached(&self.lib, l.key, &l.niche))
-                        .collect(),
+                // The niches' top-ups are read from the cache on the picks'
+                // thread: the home's niches and the wave's own filters.
+                let niches: Vec<(v::MixKey, Vec<TrackId>)> = match self.recs.home.as_ref() {
+                    Some(h) if !snap.local_only => h.lanes.iter().filter(|l| !l.niche.is_empty()).map(|l| (l.key, l.niche.clone())).collect(),
                     _ => Vec::new(),
                 };
-                // What the wave's own filters were topped up with.
-                if !snap.local_only {
-                    topped.extend(super::niche::wave_topped(&self.lib, &self.recs.niche.wave));
-                }
-                self.new_log_load();
-                Some((self.discoveries_all(), self.discovery_sources(), topped, self.recs.newlog.log.clone(), self.lib.clone(), self.analysis.index().clone()))
+                let waves = if snap.local_only { Vec::new() } else { self.recs.niche.wave_kept.clone() };
+                Some((self.discoveries_all(), self.discovery_sources(), niches, waves, self.recs.newlog.log.clone(), self.analysis.index().clone()))
             }
             _ => None,
         };
+        let lib = self.lib.clone();
         // The header's scenes, when this snapshot has none yet (they scan
         // the library: not on the worker).
         let has_scenes = self.recs.radio.scenes.as_ref().is_some_and(|(w, _)| std::sync::Weak::ptr_eq(w, &Arc::downgrade(&snap)));
@@ -952,10 +958,12 @@ impl Worker {
             let t0 = std::time::Instant::now();
             let pool = match (pool, inputs) {
                 (Some(p), _) => Some(p),
-                (None, Some((found, sources, topped, log, lib, index))) => {
+                (None, Some((found, sources, niches, waves, log, index))) => {
+                    let mut topped: Vec<super::niche::NicheFound> = niches.iter().filter_map(|(k, seeds)| super::niche::cached(&lib, *k, seeds)).collect();
+                    topped.extend(super::niche::wave_topped(&lib, &waves));
                     let heard = |t: &StreamTrack| super::open::heard_in(&lib, &index, t);
                     let cands = super::open::open_pool(&snap, &found, &sources, &topped, &log, &heard);
-                    Some(super::wave::WavePool::new(&snap, kept, cands))
+                    Some(super::wave::WavePool::new(&snap, kept, bans, cands))
                 }
                 (None, None) => None,
             };
@@ -969,7 +977,10 @@ impl Worker {
                 state.wave_bandit().and_then(|b| b.current_scene())
             );
             let scenes = profiles.map(|p| (Arc::downgrade(&snap), super::wave::scenes(&snap, &p)));
-            let msg = RadioMsg::Extended { id, state: Box::new(state), picks, wave_pool: pool, scenes };
+            // What the picks ask, its library work done here.
+            let asks = state.take_wave_asks();
+            let asked = (!local_only).then(|| super::wave::prepare_asks(&lib, cands, asks));
+            let msg = RadioMsg::Extended { id, state: Box::new(state), picks, wave_pool: pool, scenes, wave_asked: asked };
             let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
         });
         if let Err(e) = spawned {
@@ -1035,8 +1046,7 @@ impl Worker {
 
     pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
         match m {
-            RadioMsg::Extended { id, mut state, picks, wave_pool, scenes } => {
-                let asks = state.take_wave_asks();
+            RadioMsg::Extended { id, state, picks, wave_pool, scenes, wave_asked } => {
                 if scenes.is_some() {
                     self.recs.radio.scenes = scenes;
                 }
@@ -1053,8 +1063,8 @@ impl Worker {
                     }
                     self.recs.radio.wave_pool = Some(pool);
                 }
-                self.wave_asked(id, asks);
-                self.radio_extended(id, *state, picks);
+                let refill = wave_asked.and_then(|a| self.wave_asked(id, a));
+                self.radio_extended(id, *state, picks, refill);
             }
             RadioMsg::NewFound {
                 id,
@@ -1081,7 +1091,7 @@ impl Worker {
         }
     }
 
-    fn radio_extended(&mut self, id: u64, mut state: Engine, picks: Vec<Pick>) {
+    fn radio_extended(&mut self, id: u64, mut state: Engine, picks: Vec<Pick>, refill: Option<String>) {
         let alive = self.radio_alive();
         let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) else { return };
         run.extending = false;
@@ -1196,6 +1206,22 @@ impl Worker {
             self.radio_stops_waiting();
             self.publish_player();
             return;
+        }
+        // A wave with nothing yet waits while its filter is topped up
+        // (once; it ends when the top-up brings nothing, see
+        // [`Worker::wave_refill_ended`]).
+        if run.queue_gen.is_none() && ids.is_empty() && is_wave(&run.state.seed) {
+            if run.refill.is_none()
+                && let Some(token) = refill
+            {
+                log::info!("wave: nothing new of its filter yet, it waits for the top-up of {token}");
+                run.refill = Some((token, false));
+            }
+            if run.refill.as_ref().is_some_and(|r| !r.1) {
+                run.want = true;
+                self.publish_player();
+                return;
+            }
         }
         match run.queue_gen {
             None if ids.is_empty() => {
@@ -1524,9 +1550,29 @@ impl Worker {
         self.radio_alive() && self.recs.radio.run.as_ref().is_some_and(|r| r.resume && (r.extending || r.want))
     }
 
+    /// The top-up of the wave's filter `token` ended with `found` songs: a
+    /// wave waiting for it (nothing to play yet) plays them once the
+    /// snapshot that holds them is built, or ends now when there are none.
+    pub(crate) fn wave_refill_ended(&mut self, token: &str, found: usize) {
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
+        let Some(refill) = run.refill.as_mut().filter(|r| r.0 == token && !r.1) else { return };
+        if found > 0 {
+            refill.1 = true;
+            log::info!("wave: its top-up brought {found} songs");
+            return;
+        }
+        log::info!("wave: its top-up brought nothing");
+        self.recs.radio.run = None;
+        self.recs.radio.wave_pool = None;
+        self.next_origin = None;
+        self.toast("Нечего играть", None);
+        self.radio_stops_waiting();
+        self.publish_player();
+    }
+
     /// The radio found nothing to play after all: the player waiting for
     /// it stops.
-    fn radio_stops_waiting(&mut self) {
+    pub(super) fn radio_stops_waiting(&mut self) {
         if self.playing.is_none() && self.status == v::Status::Buffering {
             self.status = v::Status::Stopped;
         }
@@ -1910,6 +1956,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             wave_dry: None,
+            refill: None,
         });
         self.play_context = self.recs.radio.run.as_ref().map_or(self.play_context, |r| r.ctx);
     }
