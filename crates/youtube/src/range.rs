@@ -5,9 +5,10 @@
 //! runtime resolves the stream (the YouTube player request), and fetches the
 //! bytes in `Range` requests: a small first one so playback starts quickly,
 //! then up to [`MAX_REQUEST`] each, from the read position to the end and
-//! then any gaps left before it. The whole resource is kept in memory, so
-//! seeking back (the Matroska demuxer reopens from byte 0 to seek) costs
-//! nothing.
+//! then any gaps left before it. The whole resource is kept, so seeking back
+//! (the Matroska demuxer reopens from byte 0 to seek) costs nothing: in
+//! memory blocks allocated as bytes arrive, or in a temporary file when it
+//! is longer than [`MEMORY_MAX`] (memory never follows the claimed length).
 //!
 //! Reads (on the engine's decoder thread) only copy downloaded bytes and
 //! block while the wanted byte is not there yet. A read far away from the
@@ -20,10 +21,11 @@
 //! failure reaches the reader as a [`StreamError`] inside the I/O error, so
 //! a refusal is not taken for a lost connection.
 //!
-//! Once everything is downloaded the buffer is shared with the disk cache's
-//! writer (an `Arc`), not copied: nothing writes into it any more. The
-//! buffers alive are counted ([`buffers`]) for the app's memory line.
+//! Once everything is downloaded the blocks are shared with the disk cache's
+//! writer (`Arc`s), not copied: nothing writes into them any more. The
+//! stores alive are counted ([`buffers`]) for the app's memory line.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -87,7 +89,7 @@ pub(crate) fn quality_of(itag: u32, opus: bool, bitrate: u32) -> String {
 }
 
 /// Gets the whole resource once it is downloaded (for the disk cache).
-pub(crate) type CompleteFn = Box<dyn FnOnce(&Resolved, &[u8]) + Send>;
+pub(crate) type CompleteFn = Box<dyn FnOnce(&Resolved, &mut dyn Read) + Send>;
 
 /// Resolves (again) where the bytes are; with the resolve whose URL was
 /// refused when there was one. Called on the download task.
@@ -150,60 +152,253 @@ impl RangeSet {
     }
 }
 
-/// Stream buffers alive and their bytes ([`buffers`]).
+/// Stream stores alive and the bytes they hold in memory ([`buffers`]).
 static BUFFERS: AtomicUsize = AtomicUsize::new(0);
 static BUFFER_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// How many stream buffers are alive and the bytes they take (a buffer is
-/// as large as its whole resource from the moment it resolves).
+/// How many stream stores are alive and the bytes they hold in memory (a
+/// store grows with what is downloaded; a long resource lives in a
+/// temporary file and takes none).
 pub fn buffers() -> (usize, u64) {
     (BUFFERS.load(Ordering::Relaxed), BUFFER_BYTES.load(Ordering::Relaxed))
 }
 
-/// A stream's whole resource in memory, counted in [`buffers`] while it
-/// lives. Shared (not copied) with the disk cache's writer once complete.
-#[derive(Default)]
-struct Buffer(Arc<Vec<u8>>);
+/// Bytes of one in-memory block: memory follows what is downloaded, not
+/// the length the resolve claims.
+const BLOCK: u64 = 256 * 1024;
+/// A resource up to this long is kept in memory; a longer one (an hour-long
+/// mix) goes to a temporary file, so memory stays small however long it is.
+pub(crate) const MEMORY_MAX: u64 = 64 * 1024 * 1024;
+/// A length beyond this is not an audio stream (a 12-hour recording at
+/// 256 kbit/s is about 1.3 GB).
+const MAX_LEN: u64 = 4 << 30;
+/// Prefix of the temporary files.
+const TEMP_PREFIX: &str = "nikgob-stream-";
 
-impl Buffer {
-    fn new(len: usize) -> Self {
-        // Counted as `Drop` uncounts it: an empty one is not.
-        if len > 0 {
-            BUFFERS.fetch_add(1, Ordering::Relaxed);
-            BUFFER_BYTES.fetch_add(len as u64, Ordering::Relaxed);
+/// Where a stream's downloaded bytes live: blocks in memory allocated as
+/// bytes arrive, or a temporary file. Only ranges already in
+/// [`State::have`] are ever read.
+enum Store {
+    /// Not resolved yet.
+    None,
+    /// Blocks by index; every block but the last is [`BLOCK`] long. Shared
+    /// (not copied) with the disk cache's writer once complete: nothing
+    /// writes into them any more.
+    Memory {
+        len: u64,
+        blocks: BTreeMap<u64, Arc<Vec<u8>>>,
+    },
+    File(Arc<TempFile>),
+}
+
+impl Store {
+    /// The store for a resource of `len` bytes.
+    fn new(len: u64, memory_max: u64) -> io::Result<Self> {
+        let store = if len > memory_max {
+            Self::File(Arc::new(TempFile::create(len)?))
+        } else {
+            Self::Memory {
+                len,
+                blocks: BTreeMap::new(),
+            }
+        };
+        BUFFERS.fetch_add(1, Ordering::Relaxed);
+        Ok(store)
+    }
+
+    /// The temporary file, written to without holding the state's lock.
+    fn file(&self) -> Option<Arc<TempFile>> {
+        match self {
+            Self::File(f) => Some(Arc::clone(f)),
+            _ => None,
         }
-        Self(Arc::new(vec![0; len]))
     }
 
-    /// The bytes to write into. Nothing shares them while the download
-    /// writes (they are shared only once complete); were they shared, the
-    /// write would go into a copy of its own.
-    fn write(&mut self) -> &mut [u8] {
-        Arc::make_mut(&mut self.0).as_mut_slice()
+    /// Bytes held in memory.
+    fn memory(&self) -> u64 {
+        match self {
+            Self::Memory { blocks, .. } => blocks.values().map(|b| b.len() as u64).sum(),
+            _ => 0,
+        }
+    }
+
+    /// Copies `bytes` in at `at` (memory only; a file is written by
+    /// [`TempFile::write_at`]).
+    fn write(&mut self, mut at: u64, mut bytes: &[u8]) {
+        let Self::Memory { len, blocks } = self else {
+            return;
+        };
+        let len = *len;
+        while !bytes.is_empty() && at < len {
+            let index = at / BLOCK;
+            let block = blocks.entry(index).or_insert_with(|| {
+                let size = BLOCK.min(len - index * BLOCK);
+                BUFFER_BYTES.fetch_add(size, Ordering::Relaxed);
+                Arc::new(vec![0; size as usize])
+            });
+            let off = (at % BLOCK) as usize;
+            let n = bytes.len().min(block.len() - off);
+            // Not shared while the download writes; were it shared, the
+            // write would go into a copy of its own.
+            Arc::make_mut(block)[off..off + n].copy_from_slice(&bytes[..n]);
+            bytes = &bytes[n..];
+            at += n as u64;
+        }
+    }
+
+    /// Reads downloaded bytes at `at` into `buf` (at most up to the end of
+    /// a block); how many.
+    fn read(&self, at: u64, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::None => Ok(0),
+            Self::Memory { blocks, .. } => {
+                let Some(block) = blocks.get(&(at / BLOCK)) else {
+                    return Err(io::Error::other("stream block missing"));
+                };
+                let off = (at % BLOCK) as usize;
+                let n = buf.len().min(block.len().saturating_sub(off));
+                buf[..n].copy_from_slice(&block[off..off + n]);
+                Ok(n)
+            }
+            Self::File(f) => f.read_at(at, buf),
+        }
+    }
+
+    /// The complete resource as a reader for the disk cache (the same
+    /// blocks, or the file opened again).
+    fn reader(&self) -> io::Result<Box<dyn Read + Send>> {
+        match self {
+            Self::None => Ok(Box::new(io::empty())),
+            Self::Memory { blocks, .. } => Ok(Box::new(Blocks {
+                blocks: blocks.values().cloned().collect(),
+                at: (0, 0),
+            })),
+            Self::File(f) => Ok(Box::new(std::fs::File::open(&f.path)?)),
+        }
     }
 }
 
-impl std::ops::Deref for Buffer {
-    type Target = [u8];
-
-    fn deref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Drop for Buffer {
+impl Drop for Store {
     fn drop(&mut self) {
-        // The default (empty) buffer was never counted.
-        if !self.0.is_empty() {
+        if !matches!(self, Self::None) {
             BUFFERS.fetch_sub(1, Ordering::Relaxed);
-            BUFFER_BYTES.fetch_sub(self.0.len() as u64, Ordering::Relaxed);
+            BUFFER_BYTES.fetch_sub(self.memory(), Ordering::Relaxed);
         }
+    }
+}
+
+/// A reader over complete blocks in order.
+struct Blocks {
+    blocks: Vec<Arc<Vec<u8>>>,
+    /// (block, offset in it).
+    at: (usize, usize),
+}
+
+impl Read for Blocks {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while let Some(block) = self.blocks.get(self.at.0) {
+            let rest = &block[self.at.1..];
+            if rest.is_empty() {
+                self.at = (self.at.0 + 1, 0);
+                continue;
+            }
+            let n = rest.len().min(buf.len());
+            buf[..n].copy_from_slice(&rest[..n]);
+            self.at.1 += n;
+            return Ok(n);
+        }
+        Ok(0)
+    }
+}
+
+/// A temporary file of a long stream, removed when dropped. Read and
+/// written at offsets, so the reader and the download never share a cursor.
+struct TempFile {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl TempFile {
+    fn create(len: u64) -> io::Result<Self> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        static SWEPT: std::sync::Once = std::sync::Once::new();
+        let dir = std::env::temp_dir();
+        // Files a crashed run left behind.
+        SWEPT.call_once(|| sweep(&dir));
+        let pid = std::process::id();
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("{TEMP_PREFIX}{pid}-{n}.part"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        log::debug!("youtube: {len} bytes stream kept in {}", path.display());
+        Ok(Self { file, path })
+    }
+
+    fn write_at(&self, mut at: u64, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            let n = positional::write(&self.file, bytes, at)?;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            bytes = &bytes[n..];
+            at += n as u64;
+        }
+        Ok(())
+    }
+
+    fn read_at(&self, at: u64, buf: &mut [u8]) -> io::Result<usize> {
+        positional::read(&self.file, buf, at)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            log::debug!("youtube: cannot remove {}: {e}", self.path.display());
+        }
+    }
+}
+
+/// Removes temporary stream files of other (ended) runs.
+fn sweep(dir: &std::path::Path) {
+    let own = format!("{TEMP_PREFIX}{}-", std::process::id());
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(TEMP_PREFIX) && name.ends_with(".part") && !name.starts_with(&own) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+#[cfg(unix)]
+mod positional {
+    use std::os::unix::fs::FileExt;
+    pub(super) fn read(f: &std::fs::File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+        f.read_at(buf, at)
+    }
+    pub(super) fn write(f: &std::fs::File, buf: &[u8], at: u64) -> std::io::Result<usize> {
+        f.write_at(buf, at)
+    }
+}
+
+#[cfg(windows)]
+mod positional {
+    use std::os::windows::fs::FileExt;
+    pub(super) fn read(f: &std::fs::File, buf: &mut [u8], at: u64) -> std::io::Result<usize> {
+        f.seek_read(buf, at)
+    }
+    pub(super) fn write(f: &std::fs::File, buf: &[u8], at: u64) -> std::io::Result<usize> {
+        f.seek_write(buf, at)
     }
 }
 
 struct State {
     resolved: Option<Resolved>,
-    data: Buffer,
+    store: Store,
     have: RangeSet,
     /// Where the reader is (the next byte it wants).
     want: u64,
@@ -243,10 +438,22 @@ impl HttpStream {
         resolve: ResolveFn,
         on_complete: Option<CompleteFn>,
     ) -> Self {
+        Self::with_memory_max(runtime, http, resolve, on_complete, MEMORY_MAX)
+    }
+
+    /// [Self::new] keeping a resource longer than memory_max in a
+    /// temporary file.
+    pub(crate) fn with_memory_max(
+        runtime: Handle,
+        http: reqwest::Client,
+        resolve: ResolveFn,
+        on_complete: Option<CompleteFn>,
+        memory_max: u64,
+    ) -> Self {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 resolved: None,
-                data: Buffer::default(),
+                store: Store::None,
                 have: RangeSet::default(),
                 want: 0,
                 error: None,
@@ -259,7 +466,7 @@ impl HttpStream {
             shared,
             pos: 0,
             start: Mutex::new(Some(Box::new(move |shared: Arc<Shared>| {
-                runtime.spawn(download(shared, http, resolve, on_complete));
+                runtime.spawn(download(shared, http, resolve, on_complete, memory_max));
             }))),
         }
     }
@@ -323,9 +530,10 @@ impl Read for HttpStream {
         }
         loop {
             if let Some(end) = st.have.run_end(self.pos) {
-                let n = buf.len().min((end - self.pos) as usize);
-                let at = self.pos as usize;
-                buf[..n].copy_from_slice(&st.data[at..at + n]);
+                let n = buf
+                    .len()
+                    .min(usize::try_from(end - self.pos).unwrap_or(usize::MAX));
+                let n = st.store.read(self.pos, &mut buf[..n])?;
                 self.pos += n as u64;
                 st.want = self.pos;
                 return Ok(n);
@@ -408,6 +616,7 @@ async fn download(
     http: reqwest::Client,
     resolve: ResolveFn,
     mut on_complete: Option<CompleteFn>,
+    memory_max: u64,
 ) {
     let started = std::time::Instant::now();
     let mut resolved = match resolve(None).await {
@@ -420,9 +629,26 @@ async fn download(
         resolved.itag,
         resolved.len
     );
+    if resolved.len > MAX_LEN {
+        return fail(
+            &shared,
+            "resolved",
+            StreamError::Parse(format!("stream length {} out of range", resolved.len)),
+        );
+    }
+    let store = match Store::new(resolved.len, memory_max) {
+        Ok(s) => s,
+        Err(e) => {
+            return fail(
+                &shared,
+                "temporary file",
+                StreamError::Network(format!("cannot keep the stream: {e}")),
+            );
+        }
+    };
     {
         let mut st = shared.lock();
-        st.data = Buffer::new(resolved.len as usize);
+        st.store = store;
         st.resolved = Some(resolved.clone());
     }
     shared.arrived.notify_all();
@@ -449,9 +675,14 @@ async fn download(
                     started.elapsed().as_millis()
                 );
                 // The same bytes, not a second copy of the resource.
-                let data = Arc::clone(&shared.lock().data.0);
+                let reader = shared.lock().store.reader();
                 let r = resolved.clone();
-                let _ = tokio::task::spawn_blocking(move || done(&r, &data[..])).await;
+                match reader {
+                    Ok(mut reader) => {
+                        let _ = tokio::task::spawn_blocking(move || done(&r, &mut *reader)).await;
+                    }
+                    Err(e) => log::info!("youtube: cannot read the stream back to cache it: {e}"),
+                }
             }
             moved.await;
             if shared.lock().closed {
@@ -572,6 +803,9 @@ async fn fetch(
     };
     let mut resp = resp;
     let mut at = range.start;
+    // A long stream's file is written without holding the lock (the reader
+    // only reads what is already marked downloaded).
+    let file = shared.lock().store.file();
     while at < range.end {
         let chunk = match resp.chunk().await {
             Ok(Some(c)) => c,
@@ -588,12 +822,17 @@ async fn fetch(
         if n == 0 {
             continue;
         }
+        if let Some(f) = &file {
+            f.write_at(at, &bytes[..n]).map_err(|e| {
+                Fail::Fatal(StreamError::Network(format!("cannot keep the stream: {e}")))
+            })?;
+        }
         let want = {
             let mut st = shared.lock();
             if st.closed {
                 return Ok(Stop::Closed);
             }
-            st.data.write()[at as usize..at as usize + n].copy_from_slice(&bytes[..n]);
+            st.store.write(at, &bytes[..n]);
             st.have.insert(at..at + n as u64);
             st.want
         };
@@ -722,6 +961,17 @@ mod tests {
         len: u64,
         resolves: &Arc<AtomicU32>,
     ) -> HttpStream {
+        open_with(rt, port, len, resolves, None, MEMORY_MAX)
+    }
+
+    fn open_with(
+        rt: &tokio::runtime::Runtime,
+        port: u16,
+        len: u64,
+        resolves: &Arc<AtomicU32>,
+        on_complete: Option<CompleteFn>,
+        memory_max: u64,
+    ) -> HttpStream {
         let resolves = Arc::clone(resolves);
         let own = Arc::new(AtomicU32::new(0));
         let resolve: ResolveFn = Arc::new(move |refused: Option<Resolved>| {
@@ -749,7 +999,13 @@ mod tests {
                 })
             })
         });
-        HttpStream::new(rt.handle().clone(), reqwest::Client::new(), resolve, None)
+        HttpStream::with_memory_max(
+            rt.handle().clone(),
+            reqwest::Client::new(),
+            resolve,
+            on_complete,
+            memory_max,
+        )
     }
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -846,16 +1102,107 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_buffer_is_shared_not_copied() {
-        let mut b = Buffer::new(16);
-        b.write()[..4].copy_from_slice(&[1, 2, 3, 4]);
-        let at = b.as_ptr();
-        assert_eq!(b.write().as_ptr(), at, "written in place while not shared");
-        let cache = Arc::clone(&b.0);
-        assert_eq!(cache.as_ptr(), at, "the cache writer gets the same bytes");
-        assert_eq!(&cache[..4], &[1, 2, 3, 4]);
-        assert_eq!(&b[..4], &[1, 2, 3, 4]);
-        assert!(Buffer::default().is_empty());
+    fn memory_follows_downloaded_bytes_not_the_claimed_length() {
+        // A resolve claiming 60 MB allocates nothing until bytes arrive.
+        let mut s = Store::new(60 << 20, MEMORY_MAX).unwrap();
+        assert_eq!(s.memory(), 0);
+        s.write(BLOCK - 2, &[1, 2, 3, 4]);
+        assert_eq!(s.memory(), 2 * BLOCK, "only the two blocks written");
+        let mut buf = [0; 8];
+        assert_eq!(s.read(BLOCK - 2, &mut buf).unwrap(), 2, "up to the block end");
+        assert_eq!(&buf[..2], &[1, 2]);
+        assert_eq!(s.read(BLOCK, &mut buf).unwrap(), 8);
+        assert_eq!(&buf[..2], &[3, 4]);
+        // The last block is only as long as the resource.
+        let mut s = Store::new(BLOCK + 10, MEMORY_MAX).unwrap();
+        s.write(BLOCK, &[9; 20]);
+        assert_eq!(s.memory(), 10);
+        // Longer than the memory limit: a file, nothing in memory.
+        let s = Store::new(MEMORY_MAX + 1, MEMORY_MAX).unwrap();
+        let path = s.file().unwrap().path.clone();
+        assert!(path.exists());
+        assert_eq!(s.memory(), 0);
+        drop(s);
+        assert!(!path.exists(), "the temporary file goes with the store");
+    }
+
+    #[test]
+    fn complete_blocks_read_back_in_order() {
+        let mut s = Store::new(2 * BLOCK + 5, MEMORY_MAX).unwrap();
+        let data = fixture((2 * BLOCK + 5) as usize);
+        // Written out of order, as a seek makes the download do.
+        s.write(BLOCK, &data[BLOCK as usize..]);
+        s.write(0, &data[..BLOCK as usize]);
+        let mut all = Vec::new();
+        s.reader().unwrap().read_to_end(&mut all).unwrap();
+        assert!(all == *data);
+    }
+
+    /// Reads a whole stream over the test server, keeping more than
+    /// memory_max in a file; what the cache got.
+    fn whole_stream(memory_max: u64) -> (Arc<Vec<u8>>, Vec<u8>, Vec<u8>) {
+        let data = fixture(3 * 1024 * 1024 + 7);
+        let len = data.len() as u64;
+        let server = serve(Arc::clone(&data), |_| Answer::Ok);
+        let rt = runtime();
+        let resolves = Arc::new(AtomicU32::new(0));
+        let cached = Arc::new(Mutex::new(Vec::new()));
+        let cached2 = Arc::clone(&cached);
+        let done: CompleteFn = Box::new(move |_r, bytes| {
+            bytes.read_to_end(&mut cached2.lock().unwrap()).unwrap();
+        });
+        let mut s = open_with(&rt, server.port, len, &resolves, Some(done), memory_max);
+        // A seek ahead first, so the file is written out of order.
+        assert_eq!(read_at(&mut s, 2_000_000, 100), data[2_000_000..2_000_100]);
+        s.seek(SeekFrom::Start(0)).unwrap();
+        let mut all = Vec::new();
+        s.read_to_end(&mut all).unwrap();
+        let in_memory = s.shared.lock().store.memory();
+        let file = s.shared.lock().store.file().map(|f| f.path.clone());
+        if memory_max < len {
+            assert_eq!(in_memory, 0, "a long stream takes no memory");
+            assert!(file.as_ref().is_some_and(|p| p.exists()));
+        } else {
+            assert!(file.is_none() && in_memory == len);
+        }
+        // The cache gets the bytes once the download is done.
+        for _ in 0..200 {
+            if cached.lock().unwrap().len() as u64 == len {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(s);
+        if let Some(p) = file {
+            for _ in 0..100 {
+                if !p.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(!p.exists(), "temporary file removed");
+        }
+        let cached = cached.lock().unwrap().clone();
+        (data, all, cached)
+    }
+
+    #[test]
+    fn a_long_stream_lives_in_a_temporary_file() {
+        let (data, all, cached) = whole_stream(1024 * 1024);
+        assert!(all == *data, "file-backed stream differs");
+        assert!(cached == *data, "cache got other bytes");
+        let (data, all, cached) = whole_stream(MEMORY_MAX);
+        assert!(all == *data && cached == *data);
+    }
+
+    #[test]
+    fn an_impossible_length_fails_without_allocating() {
+        let rt = runtime();
+        let resolves = Arc::new(AtomicU32::new(0));
+        let server = serve(fixture(1000), |_| Answer::Ok);
+        let mut s = open(&rt, server.port, MAX_LEN + 1, &resolves);
+        let e = s.read(&mut [0; 4]).unwrap_err();
+        assert!(matches!(stream_error(&e), StreamError::Parse(_)), "{e}");
     }
 
     #[test]

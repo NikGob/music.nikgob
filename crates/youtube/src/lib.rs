@@ -663,7 +663,7 @@ fn stream(inner: &Arc<Inner>, runtime: tokio::runtime::Handle, id: &str, keep: b
     });
     let on_complete: Option<range::CompleteFn> = keep.then(|| {
         let (inner, id) = (Arc::clone(inner), id.to_owned());
-        Box::new(move |r: &range::Resolved, bytes: &[u8]| inner.cache.store(&id, r, bytes)) as range::CompleteFn
+        Box::new(move |r: &range::Resolved, bytes: &mut dyn std::io::Read| inner.cache.store(&id, r, bytes)) as range::CompleteFn
     });
     HttpStream::new(runtime, inner.http.clone(), resolve, on_complete)
 }
@@ -1557,9 +1557,9 @@ mod tests {
             bitrate: 160_000,
             route: None,
         };
-        yt.inner.cache.store("abc", &r, &[1, 2, 3]);
+        yt.inner.cache.store("abc", &r, &mut &[1, 2, 3][..]);
         assert!(yt.cached_audio("abc").is_none(), "a partial download is not served");
-        yt.inner.cache.store("abc", &r, &[1, 2, 3, 4]);
+        yt.inner.cache.store("abc", &r, &mut &[1, 2, 3, 4][..]);
         let mut a = yt.cached_audio("abc").expect("complete");
         assert_eq!((a.format_hint(), a.byte_len()), (format::WEBM, Some(4)));
         let mut bytes = Vec::new();
