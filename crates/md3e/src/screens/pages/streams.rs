@@ -617,6 +617,7 @@ pub enum StreamArtistAct {
     Play,
     Shuffle,
     Radio,
+    Next,
     Queue,
     Ban,
 }
@@ -632,6 +633,7 @@ pub fn stream_artist_rows(a: &StreamArtistCard, marks: &nikgob_view::DislikesVie
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать микс").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
         rows.push(Row::Item(A::Radio, MenuItem::new("Радио исполнителя").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
         rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
         rows.push(Row::Divider);
     }
@@ -649,6 +651,7 @@ fn stream_artist_command(act: StreamArtistAct, a: &StreamArtistCard, marks: &nik
         (A::Play, Some(id)) => Command::PlayArtist { id, shuffle: false },
         (A::Shuffle, Some(id)) => Command::PlayArtist { id, shuffle: true },
         (A::Radio, Some(id)) => Command::StartRadio { seed: nikgob_view::RadioSeed::Artist(id) },
+        (A::Next, Some(id)) => Command::PlayArtistNext(id),
         (A::Queue, Some(id)) => Command::EnqueueArtist(id),
         (A::Ban, Some(id)) => super::ban_command(id, marks),
         // Not in the library: the name on every service.
@@ -681,8 +684,9 @@ pub enum StreamPlaylistAct {
 /// The one list of a service playlist's actions, in the order of the
 /// library playlist's ([`widgets::playlist_rows`]): its card's right click
 /// and ⋮ and the ⋮ of its page. The page leaves out its buttons (play,
-/// shuffle, «В библиотеку»); playing next, the queue and «В плейлист…»
-/// need the tracks only the page has.
+/// shuffle, «В библиотеку»); «В плейлист…» needs the tracks only the page
+/// has, while the card plays next and queues by the playlist's id (the
+/// runtime fetches its tracks, as for a service album).
 pub fn stream_playlist_rows(on_page: bool, followed: bool) -> Vec<widgets::Row<StreamPlaylistAct>> {
     use StreamPlaylistAct as A;
     use widgets::Row;
@@ -697,6 +701,8 @@ pub fn stream_playlist_rows(on_page: bool, followed: bool) -> Vec<widgets::Row<S
         rows.push(Row::Item(A::Play, MenuItem::new("Слушать").icon(Icon::PlayArrow)));
         rows.push(Row::Item(A::Shuffle, MenuItem::new("Перемешать").icon(Icon::Shuffle)));
         rows.push(Row::Item(A::Radio, MenuItem::new("Радио по плейлисту").icon(Icon::Radio)));
+        rows.push(Row::Item(A::Next, MenuItem::new(super::PLAY_NEXT).icon(Icon::QueueMusic)));
+        rows.push(Row::Item(A::Queue, MenuItem::new(super::TO_QUEUE).icon(Icon::QueueMusic)));
         rows.push(Row::Divider);
         rows.push(if followed {
             Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic))
@@ -740,7 +746,9 @@ pub fn playlist_card(ui: &mut Ui, p: &StreamPlaylistCard, width: f32, row: &str,
         Some(StreamPlaylistAct::Radio) => out.push(Command::StartRadio { seed: nikgob_view::RadioSeed::StreamPlaylist(p.remote.clone()) }),
         Some(StreamPlaylistAct::Follow) => out.push(Command::FollowStreamPlaylist(p.remote.clone())),
         Some(StreamPlaylistAct::Library) => nav = p.playlist.map(Route::Playlist),
-        Some(StreamPlaylistAct::Next | StreamPlaylistAct::Queue | StreamPlaylistAct::Playlist) | None => {}
+        Some(StreamPlaylistAct::Next) => out.push(Command::PlayStreamPlaylistNext(p.remote.clone())),
+        Some(StreamPlaylistAct::Queue) => out.push(Command::EnqueueStreamPlaylist(p.remote.clone())),
+        Some(StreamPlaylistAct::Playlist) | None => {}
     }
     if o.play_clicked {
         out.push(Command::PlayStreamPlaylist { id: p.remote.clone(), start: None, shuffle: false });
@@ -1132,8 +1140,8 @@ mod menu_tests {
     #[test]
     fn a_service_playlist_offers_its_actions_by_right_click_and_by_more() {
         use StreamPlaylistAct as A;
-        assert_eq!(row_acts(&stream_playlist_rows(false, false)), [A::Play, A::Shuffle, A::Radio, A::Follow]);
-        assert_eq!(row_acts(&stream_playlist_rows(false, true)), [A::Play, A::Shuffle, A::Radio, A::Library]);
+        assert_eq!(row_acts(&stream_playlist_rows(false, false)), [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Follow]);
+        assert_eq!(row_acts(&stream_playlist_rows(false, true)), [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Library]);
         assert_eq!(row_acts(&stream_playlist_rows(true, true)), [A::Radio, A::Next, A::Queue, A::Playlist]);
         assert_eq!(labels(&stream_playlist_rows(true, false)), ["Радио по плейлисту", "Сыграть следующим", "В очередь", "В плейлист…"]);
     }
