@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub use client::{Client, SearchHandle};
-pub use transfer::Download;
+pub use transfer::{Download, MAX_FILE_BYTES, partial_path};
 pub use remote::RemoteClient;
 pub use share::ScanOptions;
 pub use types::{
@@ -63,6 +63,9 @@ pub struct Timeouts {
     pub peer_idle: Duration,
     /// The other side of a transfer must answer within this.
     pub transfer: Duration,
+    /// A download waiting in a sharer's queue with no word for this long is
+    /// asked for again (a sharer gone away fails it then).
+    pub queue_check: Duration,
 }
 
 impl Default for Timeouts {
@@ -73,6 +76,7 @@ impl Default for Timeouts {
             reconnect: Duration::from_secs(15),
             peer_idle: Duration::from_secs(120),
             transfer: Duration::from_secs(60),
+            queue_check: Duration::from_secs(300),
         }
     }
 }

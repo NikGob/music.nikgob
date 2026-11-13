@@ -15,6 +15,11 @@ use crate::error::{MetadataError, Result};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A JSON or text answer bigger than this is refused (the biggest a service
+/// sends, a MusicBrainz page or an artist's Wikidata item, is far smaller).
+const MAX_BODY: usize = 16 << 20;
+/// Of an error answer only this much is read: its start goes into the error.
+const MAX_ERROR_BODY: usize = 4 << 10;
 
 /// Which of two requests waiting for one service goes first.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -467,15 +472,18 @@ pub(crate) fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
 
 /// Body of a successful response; 404 and other statuses become errors.
 pub(crate) async fn ok_body(resp: Response) -> Result<Vec<u8>> {
+    ok_body_within(resp, MAX_BODY).await
+}
+
+/// [`ok_body`] refusing a body over `max` bytes, read chunk by chunk (one
+/// copy, and none past the limit).
+async fn ok_body_within(mut resp: Response, max: usize) -> Result<Vec<u8>> {
     let status = resp.status();
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| MetadataError::Network(e.without_url().to_string()))?;
     if status == StatusCode::NOT_FOUND {
         return Err(MetadataError::NotFound);
     }
     if !status.is_success() {
+        let body = read_body(&mut resp, MAX_ERROR_BODY, true).await?;
         let text = String::from_utf8_lossy(&body);
         let snippet: String = text.chars().take(200).collect();
         return Err(MetadataError::Status {
@@ -483,7 +491,31 @@ pub(crate) async fn ok_body(resp: Response) -> Result<Vec<u8>> {
             body: snippet,
         });
     }
-    Ok(body.to_vec())
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return Err(MetadataError::Parse("answer is too large".into()));
+    }
+    read_body(&mut resp, max, false).await
+}
+
+/// Up to `max` bytes of the body: past it the rest is left unread
+/// (`cut`) or the answer refused.
+async fn read_body(resp: &mut Response, max: usize, cut: bool) -> Result<Vec<u8>> {
+    let mut body = Vec::with_capacity(resp.content_length().map_or(0, |n| n.min(max as u64) as usize));
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| MetadataError::Network(e.without_url().to_string()))?
+    {
+        if body.len() + chunk.len() > max {
+            if cut {
+                body.extend_from_slice(&chunk[..max - body.len()]);
+                break;
+            }
+            return Err(MetadataError::Parse("answer is too large".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Parses a base URL and makes sure its path ends with `/` so `join` keeps prefixes.
@@ -518,6 +550,54 @@ pub(crate) fn build_url(base: &Url, path: &str, params: &[(&str, &str)]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_oversized_answer_is_refused() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let server = MockServer::start().await;
+        Mock::given(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b' '; MAX_BODY + 1]))
+            .mount(&server)
+            .await;
+        Mock::given(path("/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        Mock::given(path("/err"))
+            .respond_with(ResponseTemplate::new(500).set_body_bytes(vec![b'x'; 1 << 20]))
+            .mount(&server)
+            .await;
+        let get = |p: &str| reqwest::get(format!("{}{p}", server.uri()));
+        let err = ok_body(get("/big").await.unwrap()).await.unwrap_err();
+        assert!(matches!(err, MetadataError::Parse(_)), "{err:?}");
+        assert_eq!(ok_body(get("/ok").await.unwrap()).await.unwrap(), b"{}");
+        match ok_body(get("/err").await.unwrap()).await.unwrap_err() {
+            MetadataError::Status { status: 500, body } => assert_eq!(body.len(), 200),
+            e => panic!("{e:?}"),
+        }
+    }
+
+    /// A chunked answer has no length to check first: it is cut at the
+    /// limit while reading, not after the server is done.
+    #[tokio::test]
+    async fn an_endless_answer_is_cut_at_the_limit() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+            let chunk = vec![b' '; 64 << 10];
+            let head = format!("{:x}\r\n", chunk.len());
+            while sock.write_all(head.as_bytes()).is_ok() && sock.write_all(&chunk).is_ok() && sock.write_all(b"\r\n").is_ok() {}
+        });
+        let resp = reqwest::get(url).await.unwrap();
+        let read = tokio::time::timeout(Duration::from_secs(20), ok_body_within(resp, 1 << 20)).await;
+        let err = read.expect("the read did not stop at the limit").unwrap_err();
+        assert!(matches!(err, MetadataError::Parse(_)), "{err:?}");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn spaces_requests_by_the_interval() {

@@ -5291,6 +5291,7 @@ dependencies = [
  "axum",
  "env_logger",
  "flate2",
+ "libc",
  "lofty",
  "log",
  "md-5",
@@ -5298,6 +5299,7 @@ dependencies = [
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "socket2",
  "sysinfo",
  "tempfile",
@@ -5306,6 +5308,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

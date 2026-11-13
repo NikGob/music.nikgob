@@ -357,17 +357,14 @@ impl Inner {
                 }
                 continue;
             }
-            let bytes = check_status(resp)?.bytes().await.map_err(unreachable)?;
-            if bytes.len() > MAX_TORRENT_BYTES {
-                return Err(IndexerError::Parse("torrent file is too large".into()));
-            }
+            let bytes = read_capped(check_status(resp)?, MAX_TORRENT_BYTES).await?;
             // A .torrent is a bencoded dictionary; anything else is an HTML error page.
             if bytes.first() != Some(&b'd') {
                 return Err(IndexerError::Parse(
                     "response is not a .torrent file".into(),
                 ));
             }
-            return Ok(TorrentPayload::TorrentFile(bytes.to_vec()));
+            return Ok(TorrentPayload::TorrentFile(bytes));
         }
         Err(IndexerError::Parse("too many redirects".into()))
     }
@@ -390,7 +387,26 @@ fn magnet_of(hash: &str, title: Option<&str>) -> Option<String> {
 }
 
 fn is_magnet(s: &str) -> bool {
-    s.len() >= 7 && s[..7].eq_ignore_ascii_case("magnet:")
+    s.as_bytes()
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"magnet:"))
+}
+
+/// The body read chunk by chunk, refused as soon as it passes `max` bytes
+/// (a declared length over it is refused before reading anything).
+async fn read_capped(mut resp: Response, max: usize) -> Result<Vec<u8>, IndexerError> {
+    let too_large = || IndexerError::Parse("torrent file is too large".into());
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(too_large());
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(unreachable)? {
+        if out.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 fn unreachable(e: reqwest::Error) -> IndexerError {
@@ -438,6 +454,15 @@ mod tests {
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=A+%26+B"
         );
         assert!(magnet_of("not-a-hash", None).is_none());
+    }
+
+    #[test]
+    fn is_magnet_takes_any_text() {
+        assert!(is_magnet("MAGNET:?xt=urn:btih:abc"));
+        assert!(!is_magnet("magnet"));
+        // Byte 7 falls inside the two-byte "é": slicing the str would panic.
+        assert!(!is_magnet("aaaaaa\u{e9}"));
+        assert!(!is_magnet("\u{430}\u{431}\u{432}\u{433}"));
     }
 
     #[test]

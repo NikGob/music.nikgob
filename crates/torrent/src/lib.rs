@@ -177,7 +177,8 @@ struct Inner {
     session: Arc<Session>,
     cfg: Mutex<TorrentConfig>,
     state: Mutex<StateFile>,
-    state_dir: PathBuf,
+    /// Writes the sidecar off the polling thread.
+    saver: state::Saver,
 }
 
 /// Cheap to clone; all clones share one librqbit session.
@@ -233,8 +234,9 @@ impl TorrentClient {
         std::fs::create_dir_all(&cfg.state_dir)?;
 
         let mut state = StateFile::load(&cfg.state_dir, unix_now());
-        if let Err(e) = state.save(&cfg.state_dir) {
-            log::warn!("torrent state file not writable: {e}");
+        let saver = state::Saver::new(cfg.state_dir.clone());
+        if let Err(e) = state.save(&saver) {
+            log::warn!("torrent state not saved: {e}");
         }
 
         let dht = net.dht.then(|| DhtSessionConfig {
@@ -267,9 +269,9 @@ impl TorrentClient {
         Ok(Self {
             inner: Arc::new(Inner {
                 session,
-                state_dir: cfg.state_dir.clone(),
                 cfg: Mutex::new(cfg),
                 state: Mutex::new(state),
+                saver,
             }),
         })
     }
@@ -408,8 +410,11 @@ impl TorrentClient {
             .iter()
             .map(|h| snapshot(h, &cfg, &mut state, now))
             .collect();
-        if state.dirty
-            && let Err(e) = state.save(&self.inner.state_dir)
+        if self.inner.saver.take_failed() {
+            state.dirty = true;
+        }
+        if state.due(std::time::Instant::now())
+            && let Err(e) = state.save(&self.inner.saver)
         {
             log::warn!("cannot save torrent state: {e}");
         }
@@ -417,8 +422,15 @@ impl TorrentClient {
         out
     }
 
+    /// Takes the counters now and writes whatever changed.
     fn flush(&self) {
         let _ = self.snapshots();
+        let mut state = lock(&self.inner.state);
+        if state.dirty
+            && let Err(e) = state.save(&self.inner.saver)
+        {
+            log::warn!("cannot save torrent state: {e}");
+        }
     }
 
     pub async fn pause(&self, id: u64) -> Result<()> {
@@ -455,7 +467,7 @@ impl TorrentClient {
         if state.torrents.remove(hash).is_some() {
             state.dirty = true;
         }
-        if let Err(e) = state.save(&self.inner.state_dir) {
+        if let Err(e) = state.save(&self.inner.saver) {
             log::warn!("cannot save torrent state: {e}");
         }
     }
@@ -515,6 +527,7 @@ impl TorrentClient {
     /// Saves state and stops the session. Torrents resume on the next start.
     pub async fn shutdown(&self) {
         self.flush();
+        self.inner.saver.wait();
         self.inner.session.stop().await;
     }
 }
@@ -557,9 +570,11 @@ fn snapshot(
     if complete && rec.completed_at.is_none() {
         rec.completed_at = Some(now);
         changed = true;
+        state.urgent = true;
     } else if known_state && !complete && rec.completed_at.is_some() {
         rec.completed_at = None;
         changed = true;
+        state.urgent = true;
     }
     let uploaded = rec.uploaded;
     let completed_at = rec.completed_at;

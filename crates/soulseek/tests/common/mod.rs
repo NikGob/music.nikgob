@@ -223,6 +223,7 @@ pub fn timeouts() -> Timeouts {
         reconnect: Duration::from_millis(300),
         peer_idle: Duration::from_secs(30),
         transfer: Duration::from_secs(10),
+        queue_check: Duration::from_secs(1),
     }
 }
 

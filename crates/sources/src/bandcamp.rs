@@ -373,13 +373,50 @@ fn file_name(name: &str) -> String {
     }
 }
 
+/// One file unpacked from a zip at most (a hi-res album's longest track
+/// stays well under it).
+const UNZIP_FILE_MAX: u64 = 2 << 30;
+/// All the files unpacked from one zip at most.
+const UNZIP_TOTAL_MAX: u64 = 6 << 30;
+
 /// Writes the audio files of the zip at `zip` that `keep` takes (by their
-/// name) into `dest`, flat.
+/// name) into `dest`, flat. A zip that unpacks to more than a release can
+/// hold is refused and what it wrote so far removed.
 pub fn unzip_audio(zip: &Path, dest: &Path, keep: impl Fn(&str) -> bool) -> Result<Vec<PathBuf>, SourceError> {
+    unzip_audio_within(zip, dest, keep, UNZIP_FILE_MAX, UNZIP_TOTAL_MAX)
+}
+
+fn unzip_audio_within(
+    zip: &Path,
+    dest: &Path,
+    keep: impl Fn(&str) -> bool,
+    file_max: u64,
+    total_max: u64,
+) -> Result<Vec<PathBuf>, SourceError> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let result = unzip_into(zip, dest, keep, file_max, total_max, &mut out);
+    if result.is_err() {
+        for p in &out {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    result.map(|()| out)
+}
+
+fn unzip_into(
+    zip: &Path,
+    dest: &Path,
+    keep: impl Fn(&str) -> bool,
+    file_max: u64,
+    total_max: u64,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), SourceError> {
     let io = |e: std::io::Error| SourceError::Io(e.to_string());
+    let too_large = || SourceError::Parse("the zip unpacks to too much".into());
     let file = std::fs::File::open(zip).map_err(io)?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|e| SourceError::Parse(format!("a broken zip: {e}")))?;
-    let mut out: Vec<PathBuf> = Vec::new();
+    let mut total = 0u64;
+    let mut seen: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| SourceError::Parse(format!("a broken zip: {e}")))?;
         if entry.is_dir() {
@@ -390,18 +427,49 @@ pub fn unzip_audio(zip: &Path, dest: &Path, keep: impl Fn(&str) -> bool) -> Resu
         if !is_audio(&name) || !keep(&name) {
             continue;
         }
-        let path = dest.join(file_name(&name));
-        if out.contains(&path) {
+        let name = file_name(&name);
+        if seen.contains(&name) {
             continue;
         }
-        let written = std::fs::File::create(&path).and_then(|mut f| std::io::copy(&mut entry, &mut f));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&path);
-            return Err(io(e));
+        seen.push(name.clone());
+        // The sizes the zip states are checked first, then what really
+        // comes out: a lying header gains nothing.
+        let limit = file_max.min(total_max - total);
+        if entry.size() > limit {
+            return Err(too_large());
         }
+        // Always a new file: one in `dest` already stays as it is, and only
+        // what this zip made is removed if it fails.
+        let (path, mut file) = create_fresh(dest, &name).map_err(io)?;
         out.push(path);
+        let written = {
+            use std::io::Read as _;
+            std::io::copy(&mut (&mut entry).take(limit + 1), &mut file)
+        };
+        match written {
+            Ok(n) if n <= limit => total += n,
+            other => return Err(other.map_or_else(io, |_| too_large())),
+        }
     }
-    Ok(out)
+    Ok(())
+}
+
+/// A file made new for `name` in `dir`, or for `name (2)`… when the name is
+/// taken: nothing there is opened, truncated or replaced.
+fn create_fresh(dir: &Path, name: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    for i in 1..1000 {
+        let path = if i == 1 { dir.join(name) } else { dir.join(format!("{stem} ({i}){ext}")) };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("no free name for {name}")))
 }
 
 /// What a fetch needs.
@@ -788,6 +856,55 @@ mod tests {
         let old = stat_result(r#"if ( window.Downloads ) { Downloads.statResult( {"result":"err","retry_url":"https://p5.bandcamp.com/download/album?enc=flac&id=1&ts=3","errortype":"ExpiredFreeDownloadError"} ) };"#).unwrap();
         assert_eq!(old.retry_url.as_deref(), Some("https://p5.bandcamp.com/download/album?enc=flac&id=1&ts=3"));
         assert!(stat_result("nothing").is_none());
+    }
+
+    fn zip_of(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(data).unwrap();
+        }
+        let bytes = w.finish().unwrap().into_inner();
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&bytes).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_zip_that_unpacks_to_too_much_is_refused_and_cleaned_up() {
+        // Zeros pack to almost nothing: a tiny zip, a big file.
+        let big = vec![0u8; 1 << 20];
+        let zip = zip_of(&[("01 a.flac", b"small"), ("02 b.flac", &big)]);
+        let dir = tempfile::tempdir().unwrap();
+        let err = unzip_audio_within(zip.path(), dir.path(), |_| true, 64 << 10, 1 << 30).unwrap_err();
+        assert!(matches!(err, SourceError::Parse(_)), "{err:?}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing stays behind");
+        // Each file fits, all of them do not.
+        let zip = zip_of(&[("01 a.flac", &big), ("02 b.flac", &big)]);
+        let err = unzip_audio_within(zip.path(), dir.path(), |_| true, 2 << 20, (3 << 20) / 2).unwrap_err();
+        assert!(matches!(err, SourceError::Parse(_)), "{err:?}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        // Within the limits it all comes out.
+        let files = unzip_audio_within(zip.path(), dir.path(), |_| true, 2 << 20, 2 << 20).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(std::fs::read(&files[1]).unwrap(), big);
+    }
+
+    #[test]
+    fn a_failed_unzip_leaves_files_that_were_there_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("01 a.flac"), b"mine").unwrap();
+        let big = vec![0u8; 1 << 20];
+        let zip = zip_of(&[("01 a.flac", b"small"), ("02 b.flac", &big)]);
+        unzip_audio_within(zip.path(), dir.path(), |_| true, 64 << 10, 1 << 30).unwrap_err();
+        assert_eq!(std::fs::read(dir.path().join("01 a.flac")).unwrap(), b"mine");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only what the zip made went");
+        // A successful one puts its file next to it, not over it.
+        let zip = zip_of(&[("01 a.flac", b"small")]);
+        let files = unzip_audio_within(zip.path(), dir.path(), |_| true, 64 << 10, 1 << 30).unwrap();
+        assert_eq!(files, vec![dir.path().join("01 a (2).flac")]);
+        assert_eq!(std::fs::read(dir.path().join("01 a.flac")).unwrap(), b"mine");
     }
 
     #[test]

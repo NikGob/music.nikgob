@@ -360,3 +360,59 @@ async fn check_with_a_wrong_key_is_unauthorized() {
     let err = client(&server).check().await.unwrap_err();
     assert!(matches!(err, IndexerError::Unauthorized), "{err:?}");
 }
+
+/// A tracker that streams a "torrent" without end: the fetch must give up
+/// at the size limit instead of buffering until the request timeout.
+#[tokio::test]
+async fn an_endless_torrent_body_is_cut_at_the_limit() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endless = format!("http://{}/endless.torrent", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let Ok((mut sock, _)) = listener.accept() else { return };
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf);
+        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        let chunk = vec![b'd'; 1 << 20];
+        let head = format!("{:x}\r\n", chunk.len());
+        loop {
+            if sock.write_all(head.as_bytes()).is_err()
+                || sock.write_all(&chunk).is_err()
+                || sock.write_all(b"\r\n").is_err()
+            {
+                return;
+            }
+        }
+    });
+    let server = MockServer::start().await;
+    let mut r = release(&server);
+    r["downloadUrl"] = json!(endless);
+    r["infoHash"] = json!(null);
+    let c = first_candidate(&server, r).await;
+    let started = std::time::Instant::now();
+    let err = client(&server).fetch_torrent(&c).await.unwrap_err();
+    assert!(
+        matches!(&err, IndexerError::Parse(m) if m.contains("too large")),
+        "{err:?}"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+}
+
+#[tokio::test]
+async fn a_declared_oversized_torrent_is_refused() {
+    let server = MockServer::start().await;
+    let mut body = vec![b'd'; (16 << 20) + 1];
+    body[1] = b'e';
+    Mock::given(path("/7/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .mount(&server)
+        .await;
+    let mut r = release(&server);
+    r["infoHash"] = json!(null);
+    let c = first_candidate(&server, r).await;
+    let err = client(&server).fetch_torrent(&c).await.unwrap_err();
+    assert!(
+        matches!(&err, IndexerError::Parse(m) if m.contains("too large")),
+        "{err:?}"
+    );
+}
