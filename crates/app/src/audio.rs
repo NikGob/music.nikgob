@@ -567,9 +567,11 @@ impl Playback for Engine {
 
 
     fn set_device(&mut self, device: Option<String>) -> bool {
-        self.player.stop();
+        // The new engine first: one that does not start leaves the old one
+        // playing on.
         match spawn(device, &self.links) {
             Ok(p) => {
+                self.player.stop();
                 self.player = p;
                 self.player.set_volume(self.volume);
                 self.player.set_fade(self.fade, Duration::ZERO);
@@ -611,7 +613,7 @@ fn forward(events: Receiver<Event>, links: Links, generation: u64) {
                     Event::Error { id: Some(id), message } => Some(PlaybackEvent::Error { id, message }),
                     Event::Error { id: None, message } => {
                         log::error!("audio device: {message}");
-                        None
+                        Some(PlaybackEvent::DeviceError { message })
                     }
                     Event::DeviceChanged { device, sample_rate, channels } => {
                         log::info!("audio output: {device} {sample_rate} Hz × {channels}");
