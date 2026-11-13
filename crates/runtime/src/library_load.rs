@@ -68,6 +68,8 @@ pub(crate) struct LibraryLoad {
     /// Rows of «Треки» asked by themselves (a scroll, a sort): a load
     /// asked before the newest of them does not put its older rows back.
     pub(crate) tracks_asked: u64,
+    /// The newest page of «Скачано» asked (an older one's answer is dropped).
+    pub(crate) downloaded_seq: u64,
 }
 
 impl LibraryLoad {
@@ -84,7 +86,7 @@ impl LibraryLoad {
                 None
             }
         };
-        Self { jobs, seq: 0, shown: 0, tracks_asked: 0 }
+        Self { jobs, seq: 0, shown: 0, tracks_asked: 0, downloaded_seq: 0 }
     }
 }
 

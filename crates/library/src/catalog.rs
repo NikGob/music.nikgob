@@ -1023,16 +1023,18 @@ impl Library {
 
     /// Live tracks with a file, the latest file first, each with when its
     /// file came («Скачано»: a song liked long ago is as new as its file).
-    pub fn downloaded_tracks(&self, limit: u32) -> Result<Vec<(TrackRow, UnixMs)>> {
+    /// `limit` of them from the `offset`-th on (the order is total, so pages
+    /// neither skip nor repeat a track).
+    pub fn downloaded_tracks(&self, offset: u32, limit: u32) -> Result<Vec<(TrackRow, UnixMs)>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(concat!(
                 "SELECT f.at, ", track_row_cols!(), " ", track_row_from!(),
                 " JOIN (SELECT track_id, max(added_at) AS at FROM source
                          WHERE kind = 'local_file' AND trashed_at IS NULL GROUP BY track_id) f ON f.track_id = t.id
                   WHERE t.deleted_at IS NULL
-                  ORDER BY f.at DESC, t.album_key, t.disc_no, t.track_no, t.seq LIMIT ?1"
+                  ORDER BY f.at DESC, t.album_key, t.disc_no, t.track_no, t.seq, t.id LIMIT ?2 OFFSET ?1"
             ))?;
-            let rows = stmt.query_map([limit], |r| Ok((track_row_at(r, 1)?, r.get(0)?)))?;
+            let rows = stmt.query_map([offset, limit], |r| Ok((track_row_at(r, 1)?, r.get(0)?)))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }

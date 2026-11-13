@@ -137,7 +137,11 @@ fn silence_for(r: &PlayRequest) -> Option<Silence> {
 pub struct Links {
     pub analyzer: AnalyzerSlot,
     events: Arc<Mutex<Option<Sender<PlaybackEvent>>>>,
+    /// The engine heard now.
     generation: Arc<AtomicU64>,
+    /// The newest engine started (one past `generation` while a device
+    /// switch waits for its device to open).
+    newest: Arc<AtomicU64>,
 }
 
 impl Links {
@@ -149,6 +153,9 @@ impl Links {
 
 pub struct Engine {
     player: Player,
+    /// An engine on another device, waiting for its device to open
+    /// ([`Playback::adopt_device`]); the old one plays on meanwhile.
+    pending: Option<(Player, u64)>,
     links: Links,
     streams: Vec<Arc<dyn StreamService>>,
     soloist: Option<Arc<nikgob_soloist::Soloist>>,
@@ -205,16 +212,24 @@ impl Live {
     }
 }
 
-fn spawn(device: Option<String>, links: &Links) -> Result<Player, String> {
+/// Starts an engine on `device` and forwards its events; not heard until
+/// [`adopt`]ed.
+fn spawn(device: Option<String>, links: &Links) -> Result<(Player, u64), String> {
     let mut options = PlayerOptions::default();
     if let Some(d) = device {
         options.output.device = nikgob_audio::Device::Named(d);
     }
     let (player, events) = Player::spawn(options).map_err(|e| e.to_string())?;
-    let generation = links.generation.fetch_add(1, Ordering::AcqRel) + 1;
-    *links.analyzer.lock().unwrap_or_else(PoisonError::into_inner) = Some(player.analyzer());
+    let generation = links.newest.fetch_add(1, Ordering::AcqRel) + 1;
     forward(events, links.clone(), generation);
-    Ok(player)
+    Ok((player, generation))
+}
+
+/// Makes engine `generation` the one heard: its events go to the runtime,
+/// the visualizer reads it.
+fn adopt(player: &Player, generation: u64, links: &Links) {
+    links.generation.store(generation, Ordering::Release);
+    *links.analyzer.lock().unwrap_or_else(PoisonError::into_inner) = Some(player.analyzer());
 }
 
 impl Engine {
@@ -227,10 +242,12 @@ impl Engine {
         widget: Option<Arc<nikgob_sc_widget::ScWidget>>,
     ) -> Result<(Self, Links), String> {
         let links = Links::default();
-        let player = spawn(device, &links)?;
+        let (player, generation) = spawn(device, &links)?;
+        adopt(&player, generation, &links);
         Ok((
             Self {
                 player,
+                pending: None,
                 links: links.clone(),
                 streams,
                 soloist,
@@ -566,63 +583,120 @@ impl Playback for Engine {
     }
 
 
+    /// Starts an engine on `device` and keeps it waiting: the old one plays
+    /// on until the new device opens ([`Playback::adopt_device`]) and stays
+    /// if it does not ([`Playback::drop_device`]).
     fn set_device(&mut self, device: Option<String>) -> bool {
-        // The new engine first: one that does not start leaves the old one
-        // playing on.
         match spawn(device, &self.links) {
             Ok(p) => {
-                self.player.stop();
-                self.player = p;
-                self.player.set_volume(self.volume);
-                self.player.set_fade(self.fade, Duration::ZERO);
-                self.on_live = None;
-                self.live_direct = false;
-                true
+                if let Some((old, _)) = self.pending.replace(p) {
+                    old.stop();
+                }
             }
-            Err(e) => {
-                log::error!("cannot switch the audio device: {e}");
-                false
-            }
+            Err(e) => log::error!("cannot switch the audio device: {e}"),
+        }
+        false
+    }
+
+    fn adopt_device(&mut self, generation: u64) -> bool {
+        if self.pending.as_ref().is_none_or(|(_, g)| *g != generation) {
+            return false;
+        }
+        let Some((player, generation)) = self.pending.take() else { return false };
+        self.player.stop();
+        self.player = player;
+        adopt(&self.player, generation, &self.links);
+        self.player.set_volume(self.volume);
+        self.player.set_fade(self.fade, Duration::ZERO);
+        self.on_live = None;
+        self.live_direct = false;
+        true
+    }
+
+    fn drop_device(&mut self, generation: u64) {
+        if self.pending.as_ref().is_some_and(|(_, g)| *g == generation)
+            && let Some((player, _)) = self.pending.take()
+        {
+            player.stop();
         }
     }
 }
 
-/// Forwards engine events to the runtime while this engine is the current one.
+/// What one engine event becomes for the runtime.
+#[derive(Debug, PartialEq)]
+enum Routed {
+    /// This event (and the length the engine found, if any).
+    Send(PlaybackEvent, Option<(u64, Duration)>),
+    Skip,
+    /// The engine was replaced: its events are not wanted any more.
+    Stop,
+}
+
+/// Routes event `e` of engine `generation` while engine `current` is heard:
+/// the heard engine's events go on; an engine waiting for its device (a
+/// newer one) says only whether the device opened; an older one stops.
+fn route(e: Event, generation: u64, current: u64) -> Routed {
+    let heard = generation == current;
+    if generation < current {
+        return Routed::Stop;
+    }
+    // The length the engine found goes along (a stream track whose service
+    // did not say has none of its own).
+    let length = match &e {
+        Event::Started { id, duration: Some(d) } if heard => Some((*id, *d)),
+        Event::TrackChanged { to, duration: Some(d), .. } if heard => Some((*to, *d)),
+        _ => None,
+    };
+    let mapped = match e {
+        Event::Error { id: None, message } => {
+            log::error!("audio device: {message}");
+            Some(PlaybackEvent::DeviceError { generation, message })
+        }
+        Event::DeviceOpened => (!heard).then_some(PlaybackEvent::DeviceReady { generation }),
+        _ if !heard => None,
+        Event::Started { id, .. } => Some(PlaybackEvent::Started { id }),
+        Event::TrackChanged { to, .. } => Some(PlaybackEvent::TrackChanged { to }),
+        Event::Position { id, pos, at } => Some(PlaybackEvent::PositionAt { id, position: pos, at }),
+        Event::Paused => Some(PlaybackEvent::Paused),
+        Event::Resumed => Some(PlaybackEvent::Resumed),
+        Event::Ended { id } => Some(PlaybackEvent::Ended { id }),
+        Event::Error { id: Some(id), message } => Some(PlaybackEvent::Error { id, message }),
+        Event::DeviceChanged { device, sample_rate, channels } => {
+            log::info!("audio output: {device} {sample_rate} Hz × {channels}");
+            None
+        }
+        Event::QueueEmpty | Event::Stopped => None,
+    };
+    mapped.map_or(Routed::Skip, |m| Routed::Send(m, length))
+}
+
+/// How long a device event waits for the runtime to be connected (the
+/// engine starts before it, and its device opens at once).
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
+
+/// Forwards engine `generation`'s events to the runtime (see [`route`]).
 fn forward(events: Receiver<Event>, links: Links, generation: u64) {
     std::thread::Builder::new()
         .name("nikgob-audio-events".into())
         .spawn(move || {
             for e in events {
-                if links.generation.load(Ordering::Acquire) != generation {
-                    break;
-                }
-                // The length the engine found goes along (a stream track
-                // whose service did not say has none of its own).
-                let length = match &e {
-                    Event::Started { id, duration: Some(d) } => Some((*id, *d)),
-                    Event::TrackChanged { to, duration: Some(d), .. } => Some((*to, *d)),
-                    _ => None,
+                let current = links.generation.load(Ordering::Acquire);
+                let (m, length) = match route(e, generation, current) {
+                    Routed::Send(m, length) => (m, length),
+                    Routed::Skip => continue,
+                    Routed::Stop => break,
                 };
-                let mapped = match e {
-                    Event::Started { id, .. } => Some(PlaybackEvent::Started { id }),
-                    Event::TrackChanged { to, .. } => Some(PlaybackEvent::TrackChanged { to }),
-                    Event::Position { id, pos, at } => Some(PlaybackEvent::PositionAt { id, position: pos, at }),
-                    Event::Paused => Some(PlaybackEvent::Paused),
-                    Event::Resumed => Some(PlaybackEvent::Resumed),
-                    Event::Ended { id } => Some(PlaybackEvent::Ended { id }),
-                    Event::Error { id: Some(id), message } => Some(PlaybackEvent::Error { id, message }),
-                    Event::Error { id: None, message } => {
-                        log::error!("audio device: {message}");
-                        Some(PlaybackEvent::DeviceError { message })
+                // A device event before the runtime is connected waits for it,
+                // not lost.
+                let device = matches!(m, PlaybackEvent::DeviceError { .. } | PlaybackEvent::DeviceReady { .. });
+                let since = std::time::Instant::now();
+                let to = loop {
+                    let to = links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    if to.is_some() || !device || since.elapsed() > CONNECT_WAIT {
+                        break to;
                     }
-                    Event::DeviceChanged { device, sample_rate, channels } => {
-                        log::info!("audio output: {device} {sample_rate} Hz × {channels}");
-                        None
-                    }
-                    Event::QueueEmpty | Event::Stopped => None,
+                    std::thread::sleep(Duration::from_millis(50));
                 };
-                let Some(m) = mapped else { continue };
-                let to = links.events.lock().unwrap_or_else(PoisonError::into_inner).clone();
                 if let Some(to) = to
                     && (to.send(m).is_err()
                         || length.is_some_and(|(id, duration)| to.send(PlaybackEvent::Duration { id, duration }).is_err()))
@@ -632,4 +706,30 @@ fn forward(events: Receiver<Event>, links: Links, generation: u64) {
             }
         })
         .expect("spawn audio event thread");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_engine_waiting_for_its_device_only_says_how_it_opened() {
+        // Engine 2 waits while engine 1 is heard.
+        assert_eq!(route(Event::DeviceOpened, 2, 1), Routed::Send(PlaybackEvent::DeviceReady { generation: 2 }, None));
+        assert_eq!(
+            route(Event::Error { id: None, message: "busy".into() }, 2, 1),
+            Routed::Send(PlaybackEvent::DeviceError { generation: 2, message: "busy".into() }, None)
+        );
+        assert_eq!(route(Event::Ended { id: 5 }, 2, 1), Routed::Skip);
+        // The heard engine: everything but its own opening.
+        assert_eq!(route(Event::Ended { id: 5 }, 1, 1), Routed::Send(PlaybackEvent::Ended { id: 5 }, None));
+        assert_eq!(route(Event::DeviceOpened, 1, 1), Routed::Skip);
+        let started = Event::Started { id: 3, duration: Some(Duration::from_secs(9)) };
+        assert_eq!(
+            route(started, 1, 1),
+            Routed::Send(PlaybackEvent::Started { id: 3 }, Some((3, Duration::from_secs(9))))
+        );
+        // A replaced engine stops forwarding.
+        assert_eq!(route(Event::Ended { id: 5 }, 1, 2), Routed::Stop);
+    }
 }

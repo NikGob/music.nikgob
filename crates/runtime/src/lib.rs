@@ -22,6 +22,7 @@ mod home;
 mod home_build;
 mod home_v2;
 mod import;
+mod inbox_torrents;
 mod library_load;
 mod library_search;
 mod lyrics;
@@ -133,8 +134,13 @@ pub enum PlaybackEvent {
     /// The item plays at this speed after all, not at its request's (a
     /// live track of another player cannot be sped up).
     Speed { id: u64, speed: f32 },
-    /// The output device did not open: nothing can be heard.
-    DeviceError { message: String },
+    /// The output device of engine `generation` did not open (the one
+    /// heard, or one a device switch started: that one is dropped and the
+    /// one heard plays on).
+    DeviceError { generation: u64, message: String },
+    /// Engine `generation`, started by a device switch, has its device
+    /// open: it can take over ([`Playback::adopt_device`]).
+    DeviceReady { generation: u64 },
 }
 
 /// The audio engine as the runtime sees it.
@@ -166,10 +172,21 @@ pub trait Playback: Send {
     /// plays; the volume stays as the user set it.
     fn set_sleep_fade(&mut self, _level: f32, _over: Duration) {}
     /// Switches the output device (None = system default). Returns true if
-    /// the engine was restarted and lost what it was playing.
+    /// the engine was restarted at once and lost what it was playing; a
+    /// backend whose device opens later says so with
+    /// [`PlaybackEvent::DeviceReady`] and returns false.
     fn set_device(&mut self, _device: Option<String>) -> bool {
         false
     }
+    /// Engine `generation`, started by [`Self::set_device`], has opened its
+    /// device: it replaces the one heard. True when it did (what played is
+    /// lost and played again on it).
+    fn adopt_device(&mut self, _generation: u64) -> bool {
+        false
+    }
+    /// Engine `generation` did not open its device: dropped if it was
+    /// waiting to take over.
+    fn drop_device(&mut self, _generation: u64) {}
 }
 
 /// A backend that plays nothing (tests, or when no device is available).
@@ -1541,8 +1558,8 @@ impl Worker {
             }
             Command::EmptyTrash => self.empty_trash(),
             Command::LoadTrash => self.load_trash(),
-            Command::LoadDownloaded => self.load_downloaded(import::DOWNLOADED_PAGE),
-            Command::LoadMoreDownloaded => self.load_downloaded(self.downloaded_shown() + import::DOWNLOADED_PAGE),
+            Command::LoadDownloaded => self.load_downloaded(0, import::DOWNLOADED_PAGE),
+            Command::LoadMoreDownloaded => self.load_downloaded(self.downloaded_shown(), import::DOWNLOADED_PAGE),
             Command::SetPlaylistCoverMode(id, mode) => self.set_playlist_cover_mode(id, mode),
             Command::ImportFiles(paths) => self.import_paths(paths),
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
@@ -2550,11 +2567,14 @@ impl Worker {
                     self.publish_player();
                 }
             }
-            PlaybackEvent::DeviceError { message } => {
+            PlaybackEvent::DeviceError { generation, message } => {
                 log::error!("audio output: {message}");
+                // A switch whose device did not open: the old one plays on.
+                self.playback.drop_device(generation);
                 // The same message while one is up only starts it over.
                 self.toast("Не удалось открыть устройство вывода звука", None);
             }
+            PlaybackEvent::DeviceReady { generation } => self.device_ready(generation),
             PlaybackEvent::Duration { id, duration } => {
                 // The library's length wins; the engine's is for a track
                 // without one (a stream whose service did not say).
@@ -3795,11 +3815,25 @@ impl Worker {
 }
 
 impl Worker {
-    /// Moves playback to another device, resuming where it was.
+    /// Moves playback to another device, resuming where it was: at once
+    /// with a backend that switches at once, else when the new device has
+    /// opened ([`PlaybackEvent::DeviceReady`]).
     fn switch_device(&mut self, device: Option<String>) {
-        if !self.playback.set_device(device) {
-            return;
+        if self.playback.set_device(device) {
+            self.resume_on_new_device();
         }
+    }
+
+    /// Engine `generation` on the device asked for has opened: it takes
+    /// over and playback goes on from where it was.
+    fn device_ready(&mut self, generation: u64) {
+        if self.playback.adopt_device(generation) {
+            self.resume_on_new_device();
+        }
+    }
+
+    /// The engine was restarted on another device and lost what it played.
+    fn resume_on_new_device(&mut self) {
         let volume = if self.muted { 0.0 } else { self.volume };
         self.playback.set_volume(volume);
         let prefs = self.state.read().prefs.clone();

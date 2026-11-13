@@ -652,8 +652,14 @@ impl Control {
     }
 
     fn open_device(&mut self) -> bool {
+        let was_open = self.backend.is_open();
         match self.backend.ensure_open() {
-            Ok(()) => true,
+            Ok(()) => {
+                if !was_open {
+                    self.emit(Event::DeviceOpened);
+                }
+                true
+            }
             Err(message) => {
                 // Do not spam: one report per ten seconds.
                 let due = self

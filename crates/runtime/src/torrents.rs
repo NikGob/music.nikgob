@@ -27,9 +27,13 @@ pub(crate) struct Added {
     magnet: Option<String>,
     /// The wishlist item it was added for.
     wish: Option<WishlistId>,
-    /// The Inbox .torrent it came from, removed now that it is added.
+    /// The staged Inbox .torrent it came from ([`crate::inbox_torrents`]).
     consume: Option<std::path::PathBuf>,
 }
+
+/// A torrent the client did not take, and the staged Inbox file it came
+/// from.
+pub(crate) type NotAdded = (String, Option<std::path::PathBuf>);
 
 pub(crate) struct Torrents {
     client: Option<TorrentClient>,
@@ -52,6 +56,8 @@ pub(crate) struct Torrents {
     last_shape: Option<(Vec<v::Job>, Vec<v::SeedRow>)>,
     /// «Загрузки» is shown ([`Command::DownloadsShown`](nikgob_view::Command::DownloadsShown)).
     pub(crate) shown: bool,
+    /// The Inbox .torrent files on their way to the client.
+    pub(crate) inbox: crate::inbox_torrents::InboxTorrents,
 }
 
 impl Torrents {
@@ -70,6 +76,7 @@ impl Torrents {
             last_view: None,
             last_shape: None,
             shown: false,
+            inbox: Default::default(),
         }
     }
 }
@@ -160,6 +167,10 @@ impl Worker {
 
     /// Starts the client if there are downloads or seeds left from before.
     pub(crate) fn resume_torrents(&mut self) {
+        // Inbox torrents a cut run left staged go back under their names.
+        if let Some(svc) = &self.import {
+            crate::inbox_torrents::give_back_leftovers(&svc.config().inbox_dir);
+        }
         let unfinished = self
             .lib
             .list_downloads()
@@ -178,6 +189,7 @@ impl Worker {
         let (Some(cfg), Some(svc)) = (self.torrent_config(), self.import.as_ref()) else {
             self.toast("Торренты недоступны", None);
             self.torrents.pending.clear();
+            self.inbox_torrents_not_started(false);
             return;
         };
         self.torrents.starting = true;
@@ -214,6 +226,7 @@ impl Worker {
                 log::error!("torrent client: {e}");
                 self.torrents.pending.clear();
                 self.toast("Не запустился торрент-клиент", None);
+                self.inbox_torrents_not_started(true);
             }
         }
     }
@@ -225,17 +238,15 @@ impl Worker {
             Command::DownloadTorrent { result, files } => self.download_result(result, files),
             Command::ListTorrentFiles(result) => self.list_files(result),
             Command::CloseTorrentFiles => self.publish(|s| s.downloads.files = None),
+            // A .torrent dropped into the Inbox is staged and consumed once
+            // the client took it (see `inbox_torrents`).
+            Command::AddTorrentFile(path)
+                if self.import.as_ref().is_some_and(|svc| path.starts_with(&svc.config().inbox_dir)) =>
+            {
+                self.add_inbox_torrent(path);
+            }
             Command::AddTorrentFile(path) => match std::fs::read(&path) {
-                Ok(bytes) => {
-                    // A .torrent dropped into the Inbox is consumed once the
-                    // client took it; kept for another try if it did not.
-                    let consume = self
-                        .import
-                        .as_ref()
-                        .is_some_and(|svc| path.starts_with(&svc.config().inbox_dir))
-                        .then_some(path);
-                    self.add_payload_inner(TorrentPayload::TorrentFile(bytes), None, None, None, consume);
-                }
+                Ok(bytes) => self.add_payload(TorrentPayload::TorrentFile(bytes), None, None),
                 Err(e) => {
                     log::warn!("{}: {e}", path.display());
                     self.toast("Не получилось прочитать .torrent", None);
@@ -447,7 +458,7 @@ impl Worker {
 
     /// [`Self::add_payload_for`]; `consume` = a file removed once the
     /// client has the torrent (never when adding failed).
-    fn add_payload_inner(
+    pub(crate) fn add_payload_inner(
         &mut self,
         p: TorrentPayload,
         files: Option<Vec<usize>>,
@@ -462,6 +473,7 @@ impl Worker {
                 let r = match c.add(p, files.clone()).await {
                     Ok(id) => {
                         let st = c.list().into_iter().find(|t| t.id == id);
+                        let back = consume.clone();
                         st.map(|t| Added {
                             hash: t.info_hash,
                             name: t.name,
@@ -470,16 +482,16 @@ impl Worker {
                             wish,
                             consume,
                         })
-                        .ok_or_else(|| "торрент пропал из сессии".to_owned())
+                        .ok_or_else(|| ("торрент пропал из сессии".to_owned(), back))
                     }
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err((e.to_string(), consume)),
                 };
                 let _ = tx.send(Internal::TorrentAdded(r));
             });
         }));
     }
 
-    pub(crate) fn torrent_added(&mut self, r: Result<Added, String>) {
+    pub(crate) fn torrent_added(&mut self, r: Result<Added, NotAdded>) {
         match r {
             Ok(Added {
                 hash,
@@ -489,10 +501,8 @@ impl Worker {
                 wish,
                 consume,
             }) => {
-                if let Some(path) = consume
-                    && let Err(e) = std::fs::remove_file(&path)
-                {
-                    log::warn!("{}: not removed from the Inbox: {e}", path.display());
+                if let Some(staging) = consume {
+                    self.inbox_torrent_answered(&staging, true);
                 }
                 let now = std::time::SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -533,8 +543,11 @@ impl Worker {
                 }
                 self.poll_torrents();
             }
-            Err(e) => {
+            Err((e, consume)) => {
                 log::warn!("adding torrent: {e}");
+                if let Some(staging) = consume {
+                    self.inbox_torrent_answered(&staging, false);
+                }
                 self.toast(format!("Не получилось добавить раздачу: {e}"), None);
             }
         }
@@ -848,6 +861,7 @@ impl Worker {
     }
 
     pub(crate) fn shutdown_torrents(&mut self) {
+        self.give_back_inbox_torrents();
         if let (Some(c), Some(svc)) = (self.torrents.client.take(), self.import.as_ref()) {
             svc.block_on(async move { c.shutdown().await });
         }
