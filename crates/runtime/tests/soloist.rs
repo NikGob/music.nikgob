@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::TrackId;
 use nikgob_core::streaming::{FakeService, Service, SoloistAction, SoloistPhase, StreamService};
 use nikgob_library::Library;
-use nikgob_runtime::{PlayRequest, PlaySource, Playback, Runtime, RuntimeConfig};
-use nikgob_view::{Command, Prefs, ViewState};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig};
+use nikgob_view::{Command, Prefs, Status, ViewState};
 
 struct Recorder(Arc<Mutex<Vec<PlayRequest>>>);
 
@@ -95,4 +95,38 @@ fn a_spotify_track_played_while_soloist_is_ready_is_marked() {
         &asked.lock().unwrap()[0].source,
         PlaySource::Stream { service: Service::Spotify, .. }
     ));
+}
+
+#[test]
+fn a_track_paused_from_elsewhere_pauses_here_and_nothing_moves_on() {
+    let lib = Library::open_in_memory().unwrap();
+    let sp = Arc::new(FakeService::spotify().with_soloist(SoloistPhase::Ready, false));
+    let tracks: Vec<TrackId> = sp
+        .tracks()
+        .into_iter()
+        .take(2)
+        .map(|t| lib.upsert_stream_track(&t).unwrap())
+        .collect();
+    let (rt, asked) = start(&lib, vec![sp.clone()]);
+    wait_for(&rt, "the account", |s| phase(s) == Some(SoloistPhase::Ready));
+    rt.send(Command::PlayTracks { tracks, start: 0, context: "test".into() });
+    let t = Instant::now();
+    while asked.lock().unwrap().is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(10), "no play request");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let id = asked.lock().unwrap()[0].id;
+    let events = rt.playback_sender();
+    events.send(PlaybackEvent::Started { id }).unwrap();
+    wait_for(&rt, "playing", |s| s.player.status == Status::Playing);
+    // Another item's report changes nothing.
+    events.send(PlaybackEvent::PausedElsewhere { id: id + 1000 }).unwrap();
+    events.send(PlaybackEvent::PausedElsewhere { id }).unwrap();
+    wait_for(&rt, "paused", |s| s.player.status == Status::Paused);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(asked.lock().unwrap().len(), 1, "the queue does not move on");
+    // The user's Play goes on with the same item.
+    rt.send(Command::Play);
+    wait_for(&rt, "playing again", |s| s.player.status == Status::Playing);
+    assert_eq!(asked.lock().unwrap().len(), 1);
 }

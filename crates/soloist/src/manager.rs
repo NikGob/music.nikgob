@@ -43,6 +43,9 @@ const RENEW_IDLE: Duration = Duration::from_secs(30);
 /// A run this long counts as stable: the restarts begin again from the
 /// first delay.
 const STABLE_RUN: Duration = Duration::from_secs(300);
+/// Soloist stays the account's active Connect device this long after it
+/// last played, then lets go (see [`should_release`]).
+const RELEASE_AFTER: Duration = Duration::from_secs(60);
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -124,6 +127,13 @@ pub struct Soloist {
     busy_at: Mutex<Instant>,
     /// The engine paused Soloist.
     user_paused: std::sync::atomic::AtomicBool,
+    /// The engine's resumes, counted, and when the last one came: a track
+    /// tells the user's Play from Soloist's own state with them.
+    resumes: AtomicU64,
+    resumed_at: Mutex<Option<Instant>>,
+    /// Since when Soloist, the active device, has not been playing, and
+    /// whether it was let go for it.
+    quiet_active: Mutex<(Option<Instant>, bool)>,
     /// The CDN was asked for the download's size (once a run).
     size_asked: AtomicU32,
 }
@@ -197,6 +207,9 @@ impl Soloist {
             on_change: Mutex::new(None),
             busy_at: Mutex::new(Instant::now()),
             user_paused: std::sync::atomic::AtomicBool::new(false),
+            resumes: AtomicU64::new(0),
+            resumed_at: Mutex::new(None),
+            quiet_active: Mutex::new((None, false)),
             size_asked: AtomicU32::new(0),
         });
         let s = me.clone();
@@ -515,6 +528,7 @@ impl Soloist {
                 let me = self.clone();
                 renewal = Some(self.rt.spawn(async move { me.renew().await }));
             }
+            self.release_when_quiet();
             tokio::select! {
                 () = self.wake.notified() => {}
                 () = tokio::time::sleep(TICK) => {}
@@ -719,6 +733,27 @@ impl Soloist {
         self.changed();
     }
 
+    /// Lets go of being the active device once Soloist has not played for
+    /// [`RELEASE_AFTER`] (see [`should_release`]); once per quiet spell.
+    fn release_when_quiet(&self) {
+        let (ready, active, status) = {
+            let l = client::lock(&self.live);
+            (l.connected && l.logged_in, l.active, l.status)
+        };
+        let mut q = lock(&self.quiet_active);
+        if !ready || !active || matches!(status, Status::Playing | Status::Buffering) {
+            *q = (None, false);
+            return;
+        }
+        let since = *q.0.get_or_insert_with(Instant::now);
+        if should_release(ready, active, status, since.elapsed()) && !q.1 {
+            q.1 = true;
+            drop(q);
+            log::info!("soloist: not playing for {} s, no longer the active device", since.elapsed().as_secs());
+            self.send(Command::Deactivate);
+        }
+    }
+
     fn volume_reset_recently(&self) -> bool {
         static LAST: Mutex<Option<Instant>> = Mutex::new(None);
         let mut last = lock(&LAST);
@@ -754,14 +789,27 @@ impl Soloist {
         }
     }
 
+    /// The engine paused. Sent only while Soloist is the active device: a
+    /// Connect device that is not the active one would pause whatever the
+    /// account plays elsewhere.
     pub fn pause(&self) {
         self.user_paused.store(true, Ordering::Release);
-        self.send(Command::Pause);
+        if client::lock(&self.live).active {
+            self.send(Command::Pause);
+        }
     }
 
+    /// The engine resumed. Soloist resumes itself only while it is still
+    /// the active device; otherwise (another device took the stream, or it
+    /// let go while paused) the track asks for itself again from where it
+    /// was ([`crate::track`]), which takes the stream back.
     pub fn resume(&self) {
         self.user_paused.store(false, Ordering::Release);
-        self.send(Command::Play(None));
+        *lock(&self.resumed_at) = Some(Instant::now());
+        self.resumes.fetch_add(1, Ordering::AcqRel);
+        if client::lock(&self.live).active {
+            self.send(Command::Play(None));
+        }
     }
 
     /// A Spotify track (`id`: base62 or a URI) to give the engine.
@@ -812,6 +860,10 @@ impl crate::track::Link for Soloist {
         self.user_paused.load(Ordering::Acquire)
     }
 
+    fn resumes(&self) -> (u64, Option<Instant>) {
+        (self.resumes.load(Ordering::Acquire), *lock(&self.resumed_at))
+    }
+
     fn prepare_output(&self) {
         self.router.prepare_output();
     }
@@ -860,7 +912,34 @@ impl LiveView {
     }
 }
 
+/// Whether Soloist should stop being the account's active Connect device:
+/// signed in, active, not playing for [`RELEASE_AFTER`]. A paused active
+/// device is where the official apps send Play by themselves (from a phone,
+/// a lock screen, headphones), which would play on this computer, unheard
+/// behind our engine. Let go, the account plays where the user pressed Play;
+/// our own Play takes the stream back (the track asks for itself again).
+fn should_release(ready: bool, active: bool, status: Status, quiet: Duration) -> bool {
+    ready && active && !matches!(status, Status::Playing | Status::Buffering) && quiet >= RELEASE_AFTER
+}
+
 fn capitalised(s: &str) -> String {
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_active_device_that_stays_quiet_is_let_go() {
+        let long = RELEASE_AFTER + Duration::from_secs(1);
+        assert!(should_release(true, true, Status::Paused, long));
+        assert!(should_release(true, true, Status::Idle, long));
+        assert!(!should_release(true, true, Status::Paused, Duration::from_secs(5)), "a short pause keeps it");
+        assert!(!should_release(true, true, Status::Playing, long));
+        assert!(!should_release(true, true, Status::Buffering, long));
+        assert!(!should_release(true, false, Status::Paused, long), "not the active device: nothing to let go");
+        assert!(!should_release(false, true, Status::Paused, long), "not signed in");
+    }
 }
