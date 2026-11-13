@@ -43,7 +43,7 @@ use crate::lyrics::{Aligned, Place, Text};
 /// by the voice, never lets lines overlap and adds lines sung once more.
 /// `align-5`: a word is not split over a stretch without voice.
 /// `align-8`: a word squeezed to almost nothing takes a fair share, and a
-/// sung «а» / «и» may stand for a written unstressed «о» / «е».
+/// sung «а» may stand for a written unstressed «о».
 pub(crate) const MADE_BY: &str = "align-8";
 /// A text the recording spells at least this well (over chance) is this
 /// song's (docs/lyrics-align.md, «The check»).
@@ -63,7 +63,7 @@ const RETRY_MS: i64 = 7 * 86_400_000;
 /// under the lyrics (an aligner and its few hundred megabytes, on the GPU
 /// about two gigabytes charged to the process; the separator and Whisper
 /// go after each use). An automatic job frees them at once
-/// ([`free_after`]).
+/// ([`Thread::wants_free`]).
 const KEEP_LOADED: Duration = Duration::from_secs(25);
 /// The library pass looks for the heavy jobs' turn again this often while
 /// another heavy job holds it.
@@ -108,13 +108,21 @@ pub(crate) struct AlignText {
     pub(crate) hash: String,
 }
 
-/// Whether the models go right after a job: an automatic one (the playing
-/// song's check, a track of the library pass) frees them when no other
-/// job waits, so the gigabytes a GPU job holds do not stay for
-/// [`KEEP_LOADED`] after every song; a timing the user asked for keeps
-/// them, for the next one they may ask for while they look.
-pub(crate) fn free_after(automatic: bool, more_waiting: bool) -> bool {
-    automatic && !more_waiting
+/// What a finished job was, for whether its models stay ([`Thread::wants_free`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Done {
+    /// The playing song's check or a track of the library pass.
+    Automatic,
+    /// A timing the user asked for under the lyrics.
+    Asked,
+    /// Anything that loads no model (a download, a part removed).
+    Other,
+}
+
+/// Whether `asked` holds a job that aligns (and would take the models as
+/// they are), not only downloads.
+fn aligning_waits(asked: &VecDeque<Req>) -> bool {
+    asked.iter().any(|r| matches!(r, Req::Check { .. } | Req::Craft { .. }))
 }
 
 /// The log line of one job: what it was, for which track, how it ended,
@@ -470,6 +478,10 @@ struct Thread {
     waiting: Arc<Mutex<Vec<ModelId>>>,
     last_work: Instant,
     playing: bool,
+    /// The models loaded now came from an automatic job (and no timing
+    /// asked for by hand has used them since): they go as soon as no
+    /// aligning job waits ([`Self::wants_free`]).
+    auto_held: bool,
     /// The last download failed: the pass waits for the user.
     offline: bool,
 }
@@ -499,6 +511,7 @@ impl Thread {
             waiting: Arc::default(),
             last_work: Instant::now(),
             playing: false,
+            auto_held: false,
             offline: false,
         }
     }
@@ -593,7 +606,11 @@ impl Thread {
                     Req::Craft { track, text, .. } => Some((*track, Some(text.source))),
                     _ => None,
                 };
-                let automatic = matches!(job, Req::Check { .. });
+                let done = match job {
+                    Req::Check { .. } => Done::Automatic,
+                    Req::Craft { .. } => Done::Asked,
+                    _ => Done::Other,
+                };
                 // A job that breaks off (a bug on one song) says so and
                 // leaves the thread serving the others.
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(job))).is_err() {
@@ -614,7 +631,7 @@ impl Thread {
                     self.send(Msg::Job(None));
                 }
                 self.last_work = Instant::now();
-                self.free_if(automatic);
+                self.after_job(done);
                 continue;
             }
             // While a game is in front the pass waits (the models it kept go
@@ -638,7 +655,7 @@ impl Thread {
                     Ok(true) => {
                         self.last_work = Instant::now();
                         self.pass_at = Instant::now() + rest;
-                        self.free_if(true);
+                        self.after_job(Done::Automatic);
                         continue;
                     }
                     Ok(false) => {}
@@ -651,6 +668,7 @@ impl Thread {
             }
             if self.aligner.loaded() && self.last_work.elapsed() > KEEP_LOADED {
                 self.aligner.unload();
+                self.auto_held = false;
             }
             let mut wait = if Instant::now() < self.pass_at { (self.pass_at - Instant::now()).min(Duration::from_secs(30)) } else { Duration::from_secs(30) };
             if self.aligner.loaded() {
@@ -665,15 +683,37 @@ impl Thread {
         }
     }
 
-    /// Frees the models after a job ([`free_after`]); what came in
-    /// meanwhile is taken first, so a job sent during this one keeps them.
-    fn free_if(&mut self, automatic: bool) {
+    /// After a job: notes whose the models are now ([`Self::note`]) and
+    /// frees them when [`Self::wants_free`] says so; what came in meanwhile
+    /// is taken first, so an aligning job sent during this one keeps them.
+    fn after_job(&mut self, done: Done) {
         while let Ok(r) = self.rx.try_recv() {
             self.take(r);
         }
-        if self.aligner.loaded() && free_after(automatic, !self.asked.is_empty()) {
+        self.note(done);
+        if self.wants_free() && self.aligner.loaded() {
             self.aligner.unload();
+            self.auto_held = false;
         }
+    }
+
+    /// Whose the loaded models are after `done`: an automatic job's, a
+    /// timing asked for by hand (kept for [`KEEP_LOADED`], for the next
+    /// one the user may ask for while they look), or as they were (a
+    /// download loads none).
+    fn note(&mut self, done: Done) {
+        match done {
+            Done::Automatic => self.auto_held = true,
+            Done::Asked => self.auto_held = false,
+            Done::Other => {}
+        }
+    }
+
+    /// The models an automatic job loaded go as soon as no aligning job
+    /// waits (a download waiting does not need them), so the gigabytes a
+    /// GPU job holds do not stay for [`KEEP_LOADED`] after every song.
+    fn wants_free(&self) -> bool {
+        self.auto_held && !aligning_waits(&self.asked)
     }
 
     /// [`job_line`] for a job that started at `started`, as the aligner is now.
@@ -1403,16 +1443,44 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    /// An automatic job's models go once no aligning job waits, a
+    /// download waiting or done in between included; a timing asked for
+    /// by hand keeps them.
     #[test]
-    fn automatic_jobs_free_the_models_unless_more_wait() {
-        use super::free_after;
-        // The playing song's check or a track of the pass, nothing after it.
-        assert!(free_after(true, false));
-        // Another job waits: it takes the models as they are.
-        assert!(!free_after(true, true));
+    fn automatic_jobs_free_the_models_unless_an_aligning_job_waits() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let (_req_tx, req_rx) = crossbeam_channel::unbounded();
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false };
+        let mut t = Thread::new(Library::open_in_memory().unwrap(), dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+        let track = TrackId::new();
+        let check = || Req::Check { track, path: dir.path().join("a.opus"), texts: Vec::new(), recognise: false };
+        let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
+        let craft = Req::Craft { track, path: dir.path().join("a.opus"), text, target: LyricsSync::Word, deep: false, temp: false, seq: 1 };
+        assert!(!t.wants_free(), "nothing loaded by an automatic job yet");
+        // The playing song's check is over, nothing waits: free.
+        t.note(Done::Automatic);
+        assert!(t.wants_free());
+        // A part asked for in Settings waits, then is downloaded: still free.
+        t.take(Req::Download(ModelId::AlignerEn));
+        assert!(t.wants_free(), "a download does not need the aligner");
+        t.asked.clear();
+        t.note(Done::Other);
+        assert!(t.wants_free(), "after the download too");
+        // The next song's check waits: it takes the models as they are.
+        t.take(check());
+        assert!(!t.wants_free());
+        t.asked.clear();
         // A timing asked for by hand keeps them for a while.
-        assert!(!free_after(false, false));
-        assert!(!free_after(false, true));
+        t.note(Done::Asked);
+        assert!(!t.wants_free());
+        t.note(Done::Other);
+        assert!(!t.wants_free());
+        // A craft waiting behind an automatic job keeps them too.
+        t.note(Done::Automatic);
+        t.take(craft);
+        assert!(!t.wants_free());
     }
 
     #[test]
