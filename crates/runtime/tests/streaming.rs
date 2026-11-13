@@ -425,11 +425,16 @@ fn share_copies_a_song_link() {
     let (mock, uri) = server.block_on(async {
         let mock = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/links"))
-            .and(query_param("url", "https://open.spotify.com/track/sp-gruppa-1"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                br#"{"pageUrl":"https://song.link/s/gruppa"}"#.to_vec(),
-                "application/json",
+            .and(path("/resolve"))
+            .and(query_param("q", "https://open.spotify.com/track/sp-gruppa-1"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", "/song/kino/gruppa-krovi"))
+            .mount(&mock)
+            .await;
+        // MusicLink cannot build this one; song.link has it.
+        Mock::given(method("GET"))
+            .and(path("/s/sp-gruppa-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<meta property="og:title" content="Закрой за мной дверь, я ухожу by Кино"/>"#,
             ))
             .mount(&mock)
             .await;
@@ -451,13 +456,33 @@ fn share_copies_a_song_link() {
             nikgob_core::model::ArtistCredit::single("Кино", Some(artist.id)),
         ))
         .unwrap();
+    let isrc_track = |title: &str, isrc: &str| {
+        let mut t = nikgob_core::model::Track::new(
+            title,
+            nikgob_core::model::ArtistCredit::single("Кино", Some(artist.id)),
+        );
+        t.isrc = Some(isrc.into());
+        lib.upsert_track(&t).unwrap()
+    };
+    let on_songlink = isrc_track("Закрой за мной дверь, я ухожу", "ZZFAK8800002");
+    let nowhere_else = isrc_track("Спокойная ночь", "ZZFAK8800004");
     let r = rig(&lib, vec![Arc::new(spotify_without_likes())], false);
-    r.rt.set_odesli_base(uri);
+    r.rt.set_share_base(uri);
     r.rt.send(Command::Share(ShareTarget::Track(t.id)));
     wait_for(&r.rt, "the link", |s| {
-        s.clipboard.as_ref().is_some_and(|c| c.text == "https://song.link/s/gruppa")
+        s.clipboard.as_ref().is_some_and(|c| c.text == "https://musiclink.one/song/kino/gruppa-krovi")
     });
     assert!(r.rt.state().toasts.iter().any(|t| t.text == "Ссылка скопирована"));
+    r.rt.send(Command::Share(ShareTarget::Track(on_songlink.id)));
+    wait_for(&r.rt, "the song.link page", |s| {
+        s.clipboard.as_ref().is_some_and(|c| c.text == "https://song.link/s/sp-gruppa-2")
+    });
+    // Neither has it: the service's own page, and the toast says so.
+    r.rt.send(Command::Share(ShareTarget::Track(nowhere_else.id)));
+    wait_for(&r.rt, "the service page", |s| {
+        s.clipboard.as_ref().is_some_and(|c| c.text == "https://open.spotify.com/track/sp-gruppa-4")
+    });
+    assert!(r.rt.state().toasts.iter().any(|t| t.text == "Скопирована ссылка на Spotify"));
     // Nowhere to be found: the name is copied.
     r.rt.send(Command::Share(ShareTarget::Track(other.id)));
     wait_for(&r.rt, "the text", |s| {

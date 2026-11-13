@@ -220,7 +220,7 @@ enum Msg {
     Service(Box<dyn Service>),
     Indexer(Arc<dyn nikgob_core::indexer::Indexer>),
     Source(Arc<dyn nikgob_core::source::Source>),
-    OdesliBase(String),
+    ShareBase(String),
     GraphMetadata(Box<nikgob_metadata::Metadata>),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
     KhinsiderBrowser(Arc<dyn nikgob_sources::khinsider::PageBrowser>),
@@ -341,10 +341,10 @@ impl Runtime {
         let _ = self.tx.send(Msg::KhinsiderBrowser(browser));
     }
 
-    /// Asks this Odesli base url for share links instead of
-    /// api.song.link (tests).
-    pub fn set_odesli_base(&self, base: impl Into<String>) {
-        let _ = self.tx.send(Msg::OdesliBase(base.into()));
+    /// Asks this server for share pages instead of MusicLink, song.link
+    /// and Deezer (tests).
+    pub fn set_share_base(&self, base: impl Into<String>) {
+        let _ = self.tx.send(Msg::ShareBase(base.into()));
     }
 
     /// The graph of similar music asks this online metadata (tests: its
@@ -939,7 +939,7 @@ impl Worker {
                         self.wish_sources_ready();
                         self.wish_tick();
                     }
-                    Ok(Msg::OdesliBase(base)) => self.set_odesli_base(&base),
+                    Ok(Msg::ShareBase(base)) => self.set_share_base(&base),
                     Ok(Msg::GraphMetadata(m)) => self.set_graph_metadata(*m),
                     Ok(Msg::WebLogin(service, login)) => self.set_web_login(service, login),
                     Ok(Msg::KhinsiderBrowser(browser)) => {

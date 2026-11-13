@@ -19,6 +19,7 @@ pub mod lrc;
 pub mod lrclib;
 pub mod matcher;
 pub mod musicbrainz;
+pub mod musiclink;
 pub mod odesli;
 pub mod pause;
 pub mod lyricsplus;
@@ -46,7 +47,8 @@ pub use matcher::{
     match_candidates,
 };
 pub use musicbrainz::{ArtistInfo, ArtistTags, MusicBrainz, RecordingQuery};
-pub use odesli::{Odesli, OdesliPage};
+pub use musiclink::MusicLink;
+pub use odesli::Odesli;
 pub use pause::{Pauses, Verdict};
 pub use lyricsplus::{LyricsPlus, LyricsPlusText};
 pub use lrcred::LrcRed;
