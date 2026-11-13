@@ -424,6 +424,32 @@ pub fn pick_files(files: &[(usize, String, u64)], w: &Want) -> Option<Vec<usize>
     }
 }
 
+/// The files of a torrent (paths with `/` or `\\`) look like a disc-image
+/// rip of an album of `album_tracks` tracks, by their names alone (the
+/// sheets are not read before the download): a folder with a cue sheet
+/// holds at most half as many audio files as the album has tracks (an
+/// image, maybe with a bonus file beside it). Track files with their
+/// sheets, an album of one track, or an album of unknown length (0) are
+/// not called images here; the sheets are read once the files came
+/// ([`nikgob_import::images_to_cut`] in the runtime).
+pub fn image_rip<'a>(paths: impl IntoIterator<Item = &'a str>, album_tracks: u32) -> bool {
+    if album_tracks < 2 {
+        return false;
+    }
+    let mut dirs: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    for p in paths {
+        let p = p.replace('\\', "/");
+        let dir = p.rsplit_once('/').map_or("", |(d, _)| d).to_owned();
+        let ext = ext_of(&p);
+        if ext == "cue" {
+            dirs.entry(dir).or_default().0 += 1;
+        } else if AUDIO_EXT.contains(&ext.as_str()) {
+            dirs.entry(dir).or_default().1 += 1;
+        }
+    }
+    dirs.values().any(|&(sheets, audio)| sheets > 0 && audio > 0 && audio * 2 <= album_tracks as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +496,26 @@ mod tests {
             (3, "Other/CDImage.cue".into(), 1),
         ];
         assert_eq!(pick_files(&image, &want(WantScope::Album)), Some(vec![0, 1]));
+        assert!(image_rip(["Кино - Группа крови/CDImage.ape", "Кино - Группа крови/CDImage.cue"], 10));
+        assert!(image_rip([r"D:\dl\Кино\CDImage.flac", r"D:\dl\Кино\CDImage.cue"], 10), "Windows paths");
+        // An image with a bonus track beside it.
+        assert!(image_rip(["A/image.flac", "A/bonus.flac", "A/album.cue"], 10));
+        // Track files with their sheet (one, or one per track), a sheet of
+        // another folder, an album of one track or of unknown length: not
+        // called an image before the sheets can be read.
+        assert!(!image_rip(
+            [
+                "Кино - Группа крови/01 - Группа крови.flac",
+                "Кино - Группа крови/02 - Закрой за мной дверь.flac",
+                "Кино - Группа крови/Группа крови.cue",
+            ],
+            2
+        ));
+        assert!(!image_rip(["A/01.flac", "A/01.cue", "A/02.flac", "A/02.cue", "A/03.flac", "A/03.cue"], 3));
+        assert!(!image_rip(["Кино - Группа крови/CDImage.ape", "Other/CDImage.cue"], 10));
+        assert!(!image_rip(["Single/01.flac", "Single/01.cue"], 1));
+        assert!(!image_rip(["A/CDImage.flac", "A/CDImage.cue"], 0));
+        assert!(!image_rip(files.iter().map(|(_, p, _)| p.as_str()), 10));
         let mut w = want(WantScope::Track);
         w.title = Some("Voyna (War)".into());
         assert_eq!(pick_files(&files, &w), Some(vec![2]), "by its number");

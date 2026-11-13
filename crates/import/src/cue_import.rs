@@ -177,6 +177,16 @@ fn covered_by(image: &Image, files: &[&PathBuf]) -> bool {
     })
 }
 
+/// The disc images an import of `paths` (files or folders) would cut by
+/// their cue sheets ([`plan`]): images of two tracks or more whose tracks
+/// are not all there as files of their own. Reads the sheets.
+pub fn images_to_cut(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let found = fsutil::scan_import(paths);
+    let mut given = found.audio;
+    given.extend(found.images);
+    plan(given, &found.cues).images.into_iter().map(|i| i.path).collect()
+}
+
 /// Sorts a job's files into the ones imported as they are and the images
 /// cut by their sheets. `cues` are sheets the job was given (a torrent's
 /// files, a sheet dropped into the Inbox): their images are cut even when
@@ -916,6 +926,42 @@ mod tests {
         let p = plan(Vec::new(), &[b.join("CDImage.cue")]);
         assert_eq!(p.images.len(), 1);
         assert_eq!(p.images[0].path, b.join("CDImage.ape"));
+    }
+
+    /// What a download holds, as the importer would read it: an image with
+    /// a bonus file beside it is cut; an album of track files with its
+    /// sheet, a sheet per track, or a sheet of one track is not.
+    #[test]
+    fn images_to_cut_reads_the_sheets() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A");
+        touch(&a.join("CDImage.flac"));
+        touch(&a.join("Bonus.flac"));
+        std::fs::write(a.join("CDImage.cue"), TWO).unwrap();
+        let files = vec![a.join("CDImage.flac"), a.join("Bonus.flac"), a.join("CDImage.cue")];
+        assert_eq!(images_to_cut(&files), vec![a.join("CDImage.flac")]);
+        assert_eq!(images_to_cut(&[a.clone()]), vec![a.join("CDImage.flac")], "a folder");
+
+        let b = dir.path().join("B");
+        touch(&b.join("01 - One.flac"));
+        touch(&b.join("02 - Two.flac"));
+        let sheet = "FILE \"01 - One.flac\" WAVE
+TRACK 01 AUDIO
+INDEX 01 00:00:00
+            FILE \"02 - Two.flac\" WAVE
+TRACK 02 AUDIO
+INDEX 01 00:00:00
+";
+        std::fs::write(b.join("Album.cue"), sheet).unwrap();
+        assert!(images_to_cut(&[b.join("01 - One.flac"), b.join("02 - Two.flac"), b.join("Album.cue")]).is_empty());
+
+        let c = dir.path().join("C");
+        touch(&c.join("01.flac"));
+        std::fs::write(c.join("01.cue"), "FILE \"01.flac\" WAVE
+TRACK 01 AUDIO
+INDEX 01 00:00:00
+").unwrap();
+        assert!(images_to_cut(&[c.join("01.flac"), c.join("01.cue")]).is_empty());
     }
 
     #[test]

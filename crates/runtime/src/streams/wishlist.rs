@@ -47,7 +47,7 @@ use nikgob_core::streaming::{EntityKind, Service, StreamError};
 use nikgob_import::ImportTargets;
 use nikgob_metadata::text::{artist_key, title_key};
 use nikgob_sources::select::{pick, rank};
-use nikgob_sources::torrent::{candidate_of, look_first, offer_of, pick_files};
+use nikgob_sources::torrent::{candidate_of, image_rip, look_first, offer_of, pick_files};
 use nikgob_view::{self as v, Command};
 
 use super::Msg;
@@ -137,6 +137,8 @@ pub(crate) enum WishMsg {
         item: WishlistId,
         origin: SourceOrigin,
         files: Vec<album_better::CameFile>,
+        /// Disc images among them, as their cue sheets say.
+        images: bool,
     },
     /// «Отменить» of such a copy ran: `left` could not come back.
     AlbumRestored {
@@ -603,6 +605,17 @@ fn offers_of_json(json: &str) -> Vec<Offer> {
                 .or_else(|| serde_json::from_value::<Candidate>(o).ok().map(offer_of))
         })
         .collect()
+}
+
+/// The files picked out of a torrent can serve the item. A better copy of
+/// an album asked for by hand is matched to the album's tracks file by
+/// file ([`album_better`]): a torrent that by its names is a disc-image rip
+/// of the album ([`image_rip`], against the album's track count) is not
+/// taken for it (a release of track files is looked for instead). One the
+/// names cannot tell is downloaded and its sheets read when it came.
+pub(crate) fn picked_fits(item: &WishlistItem, want: &Want, files: &[(usize, String, u64)], picked: &[usize]) -> bool {
+    !album_better::hand_album(item)
+        || !image_rip(files.iter().filter(|(i, ..)| picked.contains(i)).map(|(_, p, _)| p.as_str()), want.album_tracks)
 }
 
 fn status_rank(s: WishlistStatus) -> u8 {
@@ -1684,7 +1697,7 @@ impl Worker {
             } => self.wish_inspected(item, *offer, payload, result),
             WishMsg::Saved { item, track, run, result } => self.wish_saved(item, track, run, result),
             WishMsg::RunStopped { item, token } => self.run_stopped(item, token),
-            WishMsg::AlbumCame { item, origin, files } => self.album_staged(item, origin, files),
+            WishMsg::AlbumCame { item, origin, files, images } => self.album_staged(item, origin, files, images),
             WishMsg::AlbumRestored { release, done, failed, left } => self.album_restored(release, done, failed, left),
         }
     }
@@ -2122,7 +2135,8 @@ impl Worker {
             let found = match &result {
                 Ok(meta) => {
                     let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
-                    let found = pick_files(&files, &want).is_some() && self.torrent_fits(&item, &files);
+                    let found = pick_files(&files, &want).is_some_and(|p| picked_fits(&item, &want, &files, &p))
+                        && self.torrent_fits(&item, &files);
                     if !found {
                         self.note_miss(&item, &offer, Some(meta.info_hash.as_str()));
                     }
@@ -2145,7 +2159,10 @@ impl Worker {
         };
         let files: Vec<(usize, String, u64)> = meta.files.iter().map(|f| (f.index, f.path.clone(), f.size)).collect();
         let want = self.want_of(&item);
-        let Some(picked) = pick_files(&files, &want).filter(|_| self.torrent_fits(&item, &files)) else {
+        let Some(picked) = pick_files(&files, &want)
+            .filter(|p| picked_fits(&item, &want, &files, p))
+            .filter(|_| self.torrent_fits(&item, &files))
+        else {
             log::info!("wishlist: {} has no file of {:?}", offer.title, want.title.as_ref().or(want.album.as_ref()));
             self.note_miss(&item, &offer, Some(meta.info_hash.as_str()));
             self.wish_next_candidate(id);
@@ -3919,5 +3936,52 @@ mod tests {
             }
         }
         assert!(!cancel_drops(&item(WishlistOrigin::Manual, St::Done)));
+    }
+
+    /// A better copy of an album asked for by hand is matched file by file:
+    /// a torrent that has the album only as a disc image with its cue sheet
+    /// is passed over for it (any other item takes it, the importer cuts
+    /// it), and an image that came all the same is never shown as a card.
+    #[test]
+    fn a_hand_album_upgrade_passes_over_a_disc_image() {
+        let mut hand = WishlistItem::new(WishlistStatus::Searching, 1);
+        hand.origin = WishlistOrigin::Upgrade;
+        hand.scope = WishlistScope::Album;
+        hand.better_than = Some(500);
+        assert!(album_better::hand_album(&hand));
+        let mut other = hand.clone();
+        other.origin = WishlistOrigin::Manual;
+        other.better_than = None;
+        let want = Want {
+            artists: vec!["Кино".into()],
+            album: Some("Группа крови".into()),
+            title: None,
+            track_no: 0,
+            disc_no: 1,
+            scope: WantScope::Album,
+            ..Want::default()
+        };
+        let image: Vec<(usize, String, u64)> = vec![
+            (0, "Кино - Группа крови/CDImage.flac".into(), 300),
+            (1, "Кино - Группа крови/CDImage.cue".into(), 1),
+            (2, "Кино - Группа крови/CDImage.log".into(), 1),
+        ];
+        let picked = pick_files(&image, &want).unwrap();
+        assert_eq!(picked, vec![0, 1]);
+        let ten = Want { album_tracks: 10, ..want.clone() };
+        assert!(!picked_fits(&hand, &ten, &image, &picked));
+        assert!(picked_fits(&other, &ten, &image, &picked));
+        // Its length unknown: the names cannot tell, the sheets are read
+        // once it came.
+        assert!(picked_fits(&hand, &want, &image, &picked));
+        let tracks: Vec<(usize, String, u64)> = vec![
+            (0, "Кино - Группа крови/01 - Группа крови.flac".into(), 30),
+            (1, "Кино - Группа крови/02 - Закрой за мной дверь.flac".into(), 30),
+            (2, "Кино - Группа крови/Группа крови.cue".into(), 1),
+        ];
+        let picked = pick_files(&tracks, &want).unwrap();
+        assert_eq!(picked, vec![0, 1, 2]);
+        let two = Want { album_tracks: 2, ..want.clone() };
+        assert!(picked_fits(&hand, &two, &tracks, &picked), "track files with their sheet are taken");
     }
 }

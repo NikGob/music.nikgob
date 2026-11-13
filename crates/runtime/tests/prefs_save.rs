@@ -43,3 +43,55 @@ fn a_failed_prefs_write_is_said() {
     wait_for(&rt, "the error", |s| s.toasts.iter().any(|t| t.text == "Не удалось сохранить настройки"));
     assert!(!path.exists());
 }
+
+fn start(prefs_path: &std::path::Path, library_dir: &std::path::Path) -> Runtime {
+    Runtime::start(
+        RuntimeConfig {
+            library: Library::open_in_memory().unwrap(),
+            streams: Vec::new(),
+            library_dir: library_dir.to_owned(),
+            prefs: Prefs::default(),
+            prefs_path: Some(prefs_path.to_owned()),
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    )
+}
+
+/// A write that failed is not forgotten: once the folder can take it, the
+/// prefs are written with no other change, at the next tick.
+#[test]
+fn a_failed_prefs_write_is_tried_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("later").join("prefs.json");
+    let rt = start(&path, dir.path());
+    let mut p = rt.state().prefs.clone();
+    p.normalization = !p.normalization;
+    let want = p.normalization;
+    rt.send(Command::SetPrefs(Box::new(p)));
+    wait_for(&rt, "the error", |s| s.toasts.iter().any(|t| t.text == "Не удалось сохранить настройки"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    wait_for(&rt, "the write", |_| path.exists());
+    let written: Prefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written.normalization, want);
+}
+
+/// …and at the end at the latest: a write that failed is made at shutdown
+/// when the folder can take it by then.
+#[test]
+fn a_failed_prefs_write_is_made_at_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("later").join("prefs.json");
+    let rt = start(&path, dir.path());
+    let mut p = rt.state().prefs.clone();
+    p.normalization = !p.normalization;
+    let want = p.normalization;
+    rt.send(Command::SetPrefs(Box::new(p)));
+    wait_for(&rt, "the error", |s| s.toasts.iter().any(|t| t.text == "Не удалось сохранить настройки"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    drop(rt);
+    let written: Prefs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written.normalization, want);
+}

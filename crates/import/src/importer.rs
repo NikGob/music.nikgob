@@ -233,6 +233,16 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// One writer of the masters folder at a time: the importer placing a
+/// master, a move of the whole folder, the cleanup of a stopped torrent
+/// taking its masters out of Downloads. Shared by every importer (a new
+/// configuration makes a new one). Only blocking threads take it, never the
+/// player loop: a holder may copy and hash a whole disc image.
+pub fn master_writes() -> MutexGuard<'static, ()> {
+    static WRITES: Mutex<()> = Mutex::new(());
+    lock(&WRITES)
+}
+
 /// Lowers the priority of the current thread for the duration of a scope.
 struct LowPriority(Option<thread_priority::ThreadPriority>);
 
@@ -1917,6 +1927,7 @@ fn register_master(
     track_id: TrackId,
 ) -> Result<Master> {
     let cfg = &inner.cfg;
+    let _writes = master_writes();
     let src = a.master_path();
     let image = a.cue.as_ref().map(|s| &s.image);
     let codec = image.map_or(&a.info.codec, |i| &i.info.codec);
@@ -2045,6 +2056,7 @@ pub fn relocate_masters<F>(
 where
     F: FnMut(usize, usize, &Path),
 {
+    let _writes = master_writes();
     fsutil::create_dir_all(new_dir)?;
     let probe = new_dir.join(".nikgob-write-probe");
     std::fs::write(long_path(&probe), b"ok").map_err(fsutil::io_err(&probe))?;
