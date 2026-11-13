@@ -3638,18 +3638,9 @@ mod tests {
                     if !text.galley.job.text.starts_with("Строка номер") {
                         continue;
                     }
-                    // The glyphs' own ink (a blurred line's copies spread
-                    // a few pixels past it).
-                    let ink = text
-                        .galley
-                        .rows
-                        .iter()
-                        .flat_map(|r| {
-                            let v = &r.row.visuals;
-                            v.mesh.vertices[v.glyph_vertex_range.clone()].iter().map(move |x| x.pos + r.pos.to_vec2())
-                        })
-                        .fold(Rect::NOTHING, |b, p| b.union(Rect::from_min_max(p, p)))
-                        .translate(text.pos.to_vec2());
+                    // Where the line is laid out (its mesh may be cut at an
+                    // edge, or spread by a blur, with the soft edges).
+                    let ink = text.galley.rect.translate(text.pos.to_vec2());
                     if ink.top() < view.top() + 2.0 || ink.bottom() > view.bottom() - 2.0 {
                         continue;
                     }
