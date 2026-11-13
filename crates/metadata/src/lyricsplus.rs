@@ -5,7 +5,9 @@
 //! Chinese, Japanese or Korean is generated (words back to back, lengths in
 //! proportion to the letters), so such a text keeps only its line times
 //! ([`LyricsPlusText::words_dropped`]). Credit lines («Composed by：…»,
-//! «作词 : …») are left out whatever the provider.
+//! «作词 : …») are left out whatever the provider. A timing type it does not
+//! know («Static», «None», …) is read by what the entries carry: syllable
+//! times as word timing, line times as line timing, else a plain text.
 
 use std::time::Duration;
 
@@ -74,7 +76,7 @@ impl LyricsPlus {
             .get_json::<Payload>(Service::LyricsPlus, url)
             .await
         {
-            Ok(payload) => Ok(Some(payload.text()?).filter(|t| !t.lines.is_empty())),
+            Ok(payload) => Ok(Some(payload.text()?).filter(|t| !t.lines.is_empty() || t.plain.is_some())),
             Err(MetadataError::NotFound) => Ok(None),
             Err(e) => Err(e),
         }
@@ -91,6 +93,9 @@ pub struct LyricsPlusText {
     /// not CJK) and was dropped: the lines keep their own times, which are
     /// less trustworthy than another source's line sync.
     pub words_dropped: bool,
+    /// A text without any timing (a timing type LyricsPlus has no times
+    /// for): the lines in order, one per line; `lines` is empty then.
+    pub plain: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -157,8 +162,11 @@ pub fn is_credit_line(text: &str) -> bool {
 
 #[derive(Deserialize)]
 struct Entry {
+    #[serde(default)]
     time: u64,
+    #[serde(default)]
     duration: u64,
+    #[serde(default)]
     text: String,
     #[serde(default)]
     syllabus: Vec<Syllable>,
@@ -187,6 +195,13 @@ struct Syllable {
     background: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Timing {
+    Word,
+    Line,
+    Plain,
+}
+
 impl Payload {
     fn text(mut self) -> Result<LyricsPlusText> {
         let provider = self
@@ -194,6 +209,17 @@ impl Payload {
             .take()
             .and_then(|m| m.source)
             .filter(|p| !p.trim().is_empty());
+        let timing = self.timing();
+        if timing == Timing::Plain {
+            let text: Vec<String> = self
+                .lyrics
+                .into_iter()
+                .map(|e| e.text.trim().to_owned())
+                .filter(|t| !t.is_empty() && !is_credit_line(t))
+                .collect();
+            let plain = (!text.is_empty()).then(|| text.join("\n"));
+            return Ok(LyricsPlusText { lines: Vec::new(), provider, words_dropped: false, plain });
+        }
         let mut lines = self.lines()?;
         lines.retain(|l| !is_credit_line(&l.text));
         let generated = provider.as_deref().is_some_and(is_qq) && !mostly_cjk(&lines);
@@ -203,18 +229,32 @@ impl Payload {
                 l.words.clear();
             }
         }
-        Ok(LyricsPlusText { lines, provider, words_dropped })
+        Ok(LyricsPlusText { lines, provider, words_dropped, plain: None })
+    }
+
+    /// How the entries are timed: by the type, or for a type not known by
+    /// what they carry.
+    fn timing(&self) -> Timing {
+        if self.kind.eq_ignore_ascii_case("word") || self.kind.eq_ignore_ascii_case("syllable") {
+            return Timing::Word;
+        }
+        if self.kind.eq_ignore_ascii_case("line") {
+            return Timing::Line;
+        }
+        if self.lyrics.iter().any(|e| e.syllabus.iter().any(|s| s.time > 0 || s.duration > 0)) {
+            Timing::Word
+        } else if self.lyrics.iter().any(|e| e.time > 0 || e.duration > 0) {
+            Timing::Line
+        } else {
+            Timing::Plain
+        }
     }
 
     fn lines(self) -> Result<Vec<LyricLine>> {
-        let word = if self.kind.eq_ignore_ascii_case("word") {
-            true
-        } else if self.kind.eq_ignore_ascii_case("line") {
-            false
-        } else {
-            return Err(MetadataError::Parse(
-                "unknown LyricsPlus timing type".into(),
-            ));
+        let word = match self.timing() {
+            Timing::Word => true,
+            Timing::Line => false,
+            Timing::Plain => return Err(MetadataError::Parse("LyricsPlus text has no timing".into())),
         };
         let mut entries = self.lyrics;
         entries.sort_by_key(|l| l.time);
@@ -363,6 +403,31 @@ mod tests {
         assert!(!is_credit_line("Producer of my dreams"));
         assert!(is_credit_line("  PRODUCER : X"));
         assert!(is_credit_line("编曲：X"));
+    }
+
+    #[test]
+    fn an_unknown_timing_type_with_line_times_reads_as_line_timing() {
+        let payload: Payload = serde_json::from_str(r#"{"type":"Static","lyrics":[{"time":2000,"duration":1500,"text":"Второй"},{"time":500,"duration":1500,"text":"Первый"}],"metadata":{"source":"Apple"}}"#).unwrap();
+        let t = payload.text().unwrap();
+        assert_eq!(t.plain, None);
+        assert_eq!(t.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Первый", "Второй"]);
+        assert_eq!(t.lines[0].start, Duration::from_millis(500));
+        assert!(t.lines.iter().all(|l| l.words.is_empty()));
+    }
+
+    #[test]
+    fn an_unknown_timing_type_without_times_is_a_plain_text() {
+        let payload: Payload = serde_json::from_str(r#"{"type":"None","lyrics":[{"text":"Раз"},{"time":0,"duration":0,"text":"Два"},{"text":"Composed by：X"},{"text":" "}]}"#).unwrap();
+        let t = payload.text().unwrap();
+        assert!(t.lines.is_empty());
+        assert_eq!(t.plain.as_deref(), Some("Раз\nДва"));
+    }
+
+    #[test]
+    fn an_unknown_timing_type_with_syllables_keeps_the_words() {
+        let payload: Payload = serde_json::from_str(r#"{"type":"Karaoke","lyrics":[{"time":1000,"duration":1000,"text":"ab","syllabus":[{"time":1000,"duration":400,"text":"a"},{"time":1400,"duration":600,"text":"b"}]}]}"#).unwrap();
+        let t = payload.text().unwrap();
+        assert_eq!(t.lines[0].words.len(), 2);
     }
 
     #[test]
