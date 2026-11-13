@@ -9,17 +9,20 @@
 //! known caches:
 //!
 //! ```text
-//! memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (held 331), working set 552 MB, mimalloc 260 MB (peak 900), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0 MB), lyrics 12 tracks ~2.1 MB, stream buffers 2 / 14 MB
+//! memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (allocator 48, outside Rust 283), working set 552 MB, mimalloc 260 MB (peak 900; pages 317, abandoned 32, threads 26), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0 MB), lyrics 12 tracks ~2.1 MB, stream buffers 2 / 14 MB
 //! ```
 //!
-//! `held` is private bytes minus `live`: memory the allocator keeps after
-//! it was freed (and the private allocations that are not the heap's:
-//! thread stacks, the GPU driver's, ONNX Runtime's). `mimalloc` is what the
-//! allocator itself has committed now and at most since the start: private
-//! bytes beyond it are not the Rust heap's. A large `held` that stays large
-//! says memory is not given back; a large `live` says something holds it.
-//! On Linux the process's numbers are the anonymous resident memory and the
-//! resident set.
+//! `mimalloc` is what the allocator itself has committed now and at most
+//! since the start, with its pages in use, the pages of threads that ended
+//! (`abandoned`) and the threads it serves. Of the private bytes,
+//! `allocator` is what mimalloc keeps beyond `live` (freed, not given back)
+//! and `outside Rust` what is not the Rust heap's at all: thread stacks,
+//! the GPU driver's and DirectML's memory charged to the process, the C
+//! heap of ONNX Runtime and the driver. Without mimalloc's numbers the two
+//! are one `held` (private minus `live`). A large `allocator` that stays
+//! large says memory is not given back; a large `live` says something holds
+//! it; a large `outside Rust` is native code's. On Linux the process's
+//! numbers are the anonymous resident memory and the resident set.
 //!
 //! [`tune`] sets mimalloc to commit pages as they are written and to give
 //! freed memory back at once (its defaults commit whole pages up front and
@@ -180,10 +183,23 @@ pub fn tune() -> bool {
     set
 }
 
-/// What mimalloc has committed itself, now and at most (bytes), from its
-/// statistics. (Its `mi_process_info` is the whole process's on Windows:
-/// the same numbers [`process`] reads.)
-fn mimalloc_committed() -> Option<(u64, u64)> {
+/// What mimalloc's statistics say of itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Mimalloc {
+    /// Bytes it has committed now and at most since the start.
+    committed: u64,
+    peak: u64,
+    /// Pages in use now.
+    pages: u64,
+    /// Pages of threads that ended, not yet taken over by another.
+    abandoned: u64,
+    /// Threads with a heap now.
+    threads: u64,
+}
+
+/// mimalloc's statistics. (Its `mi_process_info` is the whole process's on
+/// Windows: the same numbers [`process`] reads.)
+fn mimalloc_stats() -> Option<Mimalloc> {
     use libmimalloc_sys as mi;
     // SAFETY: with no buffer mimalloc allocates the text itself (null on
     // failure), NUL-terminated; it is read once and handed back to
@@ -193,16 +209,16 @@ fn mimalloc_committed() -> Option<(u64, u64)> {
         if text.is_null() {
             return None;
         }
-        let got = committed_of(&std::ffi::CStr::from_ptr(text).to_string_lossy());
+        let got = stats_of(&std::ffi::CStr::from_ptr(text).to_string_lossy());
         mi::mi_free(text.cast());
         got
     }
 }
 
-/// `"committed": { "total": T, "peak": P, "current": C }` of mimalloc's
+/// `"<key>": { "total": T, "peak": P, "current": C }` of mimalloc's
 /// statistics as (C, P).
-fn committed_of(json: &str) -> Option<(u64, u64)> {
-    let rest = &json[json.find("\"committed\":")?..];
+fn entry_of(json: &str, key: &str) -> Option<(u64, u64)> {
+    let rest = &json[json.find(&format!("\"{key}\":"))?..];
     let entry = &rest[..rest.find('}')?];
     let field = |key: &str| -> Option<u64> {
         let label = format!("\"{key}\":");
@@ -211,6 +227,14 @@ fn committed_of(json: &str) -> Option<(u64, u64)> {
         u64::try_from(digits.parse::<i64>().ok()?).ok()
     };
     Some((field("current")?, field("peak")?))
+}
+
+/// [`Mimalloc`] from the statistics' text: the committed bytes must be
+/// there, a count reads 0 when a version leaves it out.
+fn stats_of(json: &str) -> Option<Mimalloc> {
+    let (committed, peak) = entry_of(json, "committed")?;
+    let now = |key: &str| entry_of(json, key).map_or(0, |(c, _)| c);
+    Some(Mimalloc { committed, peak, pages: now("pages"), abandoned: now("pages_abandoned"), threads: now("threads") })
 }
 
 /// Starts the line once a minute (on a thread of its own that sleeps in
@@ -258,8 +282,8 @@ struct Sample {
     allocations: u64,
     allocations_since: u64,
     process: Option<Process>,
-    /// What mimalloc has committed, now and at most.
-    mimalloc: Option<(u64, u64)>,
+    /// What mimalloc says of itself.
+    mimalloc: Option<Mimalloc>,
     covers: nikgob_md3e::covers::Memory,
     /// Tracks and estimated bytes.
     lyrics: (usize, usize),
@@ -282,7 +306,7 @@ impl Sample {
             allocations,
             allocations_since: allocations.saturating_sub(before),
             process: process(),
-            mimalloc: mimalloc_committed(),
+            mimalloc: mimalloc_stats(),
             covers: nikgob_md3e::covers::memory(),
             lyrics: nikgob_runtime::lyrics_memory(),
             streams: nikgob_youtube::stream_buffers(),
@@ -306,15 +330,44 @@ fn count(n: u64) -> String {
 }
 
 fn line(at: &str, s: &Sample) -> String {
+    line_on(at, s, cfg!(windows))
+}
+
+/// Whose the process's bytes beyond `live` are. On Windows both the
+/// private bytes and mimalloc's committed bytes are commit, so they split
+/// into the allocator's own keeping and native code's. Elsewhere the
+/// process figure is resident anonymous memory, which mimalloc's committed
+/// bytes (pages it may never have touched) do not partition: one `held`,
+/// as when mimalloc's numbers are not known.
+fn split(p: Process, live: u64, mimalloc: Option<Mimalloc>, windows: bool) -> String {
+    match mimalloc {
+        Some(m) if windows => format!(
+            "allocator {}, outside Rust {}",
+            mb(m.committed.saturating_sub(live)),
+            mb(p.private.saturating_sub(m.committed))
+        ),
+        _ => format!("held {}", mb(p.private.saturating_sub(live))),
+    }
+}
+
+/// [`line`] with the process figures read as on Windows or not.
+fn line_on(at: &str, s: &Sample, windows: bool) -> String {
     let b = |n: usize| mb(n as u64);
     let mut out = format!("memory ({at}): live {} MB, peak {} MB (most {})", b(s.live), b(s.peak), b(s.most));
     if let Some(p) = s.process {
-        let (private, resident) = if cfg!(windows) { ("private", "working set") } else { ("anon", "resident") };
-        let held = p.private.saturating_sub(s.live as u64);
-        out += &format!(", {private} {} MB (held {}), {resident} {} MB", mb(p.private), mb(held), mb(p.resident));
+        let (private, resident) = if windows { ("private", "working set") } else { ("anon", "resident") };
+        let parts = split(p, s.live as u64, s.mimalloc, windows);
+        out += &format!(", {private} {} MB ({parts}), {resident} {} MB", mb(p.private), mb(p.resident));
     }
-    if let Some((now, most)) = s.mimalloc {
-        out += &format!(", mimalloc {} MB (peak {})", mb(now), mb(most));
+    if let Some(m) = s.mimalloc {
+        out += &format!(
+            ", mimalloc {} MB (peak {}; pages {}, abandoned {}, threads {})",
+            mb(m.committed),
+            mb(m.peak),
+            m.pages,
+            m.abandoned,
+            m.threads
+        );
     }
     out += &format!(", allocations {} (+{})", count(s.allocations), count(s.allocations_since));
     let c = s.covers;
@@ -384,23 +437,52 @@ mod tests {
             allocations: 12_345_678,
             allocations_since: 45_200,
             process: Some(Process { private: 543 << 20, resident: 552 << 20 }),
-            mimalloc: Some((260 << 20, 900 << 20)),
+            mimalloc: Some(Mimalloc { committed: 260 << 20, peak: 900 << 20, pages: 317, abandoned: 32, threads: 26 }),
             covers: nikgob_md3e::covers::Memory { textures: 41 << 20, sizes: 37, budget: 64 << 20, decoding: 0 },
             lyrics: (12, 2_200_000),
             streams: (2, 14 << 20),
         };
-        let (private, resident) = if cfg!(windows) { ("private", "working set") } else { ("anon", "resident") };
         assert_eq!(
-            line("minute", &s),
+            line_on("minute", &s, true),
             format!(
-                "memory (minute): live 212 MB, peak 480 MB (most 512), {private} 543 MB (held 331), {resident} 552 MB, \
-                 mimalloc 260 MB (peak 900), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0.0 MB), lyrics 12 tracks ~2.1 MB, \
+                "memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (allocator 48, outside Rust 283), working set 552 MB, \
+                 mimalloc 260 MB (peak 900; pages 317, abandoned 32, threads 26), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0.0 MB), lyrics 12 tracks ~2.1 MB, \
                  stream buffers 2 / 14 MB"
             )
         );
         let none = Sample { process: None, mimalloc: None, ..s };
         assert!(!line("exit", &none).contains("held"));
         assert!(!line("exit", &none).contains("mimalloc"));
+        // Without mimalloc's numbers the private bytes beyond `live` are one.
+        let unknown = Sample { mimalloc: None, ..s };
+        assert!(line_on("exit", &unknown, true).contains("private 543 MB (held 331)"), "{}", line_on("exit", &unknown, true));
+    }
+
+    /// On Linux the process figure is resident anonymous memory and
+    /// mimalloc's committed bytes may be more than it (pages never
+    /// touched): no split that would call native code's bytes 0, the
+    /// committed bytes stay on their own.
+    #[test]
+    fn resident_bytes_are_not_split_by_committed_ones() {
+        let s = Sample {
+            live: 50 << 20,
+            peak: 80 << 20,
+            most: 90 << 20,
+            allocations: 1_000,
+            allocations_since: 10,
+            process: Some(Process { private: 100 << 20, resident: 130 << 20 }),
+            mimalloc: Some(Mimalloc { committed: 120 << 20, peak: 150 << 20, pages: 40, abandoned: 0, threads: 9 }),
+            covers: nikgob_md3e::covers::Memory { textures: 0, sizes: 0, budget: 64 << 20, decoding: 0 },
+            lyrics: (0, 0),
+            streams: (0, 0),
+        };
+        let l = line_on("minute", &s, false);
+        assert!(l.contains("anon 100 MB (held 50), resident 130 MB"), "{l}");
+        assert!(!l.contains("outside Rust"), "{l}");
+        assert!(l.contains("mimalloc 120 MB (peak 150;"), "{l}");
+        // The same numbers on Windows would be commit on both sides.
+        let w = line_on("minute", &s, true);
+        assert!(w.contains("private 100 MB (allocator 70, outside Rust 0.0)"), "{w}");
     }
 
     /// mimalloc's own statistics give its committed bytes, read from the
@@ -412,10 +494,21 @@ mod tests {
   "committed": { "total": 5000, "peak": 4000, "current": 1234 },
   "reset": 0,
 }"#;
-        assert_eq!(committed_of(json), Some((1234, 4000)));
-        assert_eq!(committed_of("{}"), None);
-        let (now, most) = mimalloc_committed().expect("mimalloc's statistics");
-        assert!(now > 0 && most >= now, "{now} {most}");
+        assert_eq!(stats_of(json), Some(Mimalloc { committed: 1234, peak: 4000, ..Default::default() }));
+        assert_eq!(stats_of("{}"), None);
+        let full = r#"{
+  "pages": { "total": 7884, "peak": 352, "current": 317 },
+  "committed": { "total": 1549991936, "peak": 159645696, "current": 37552128 },
+  "page_committed": { "total": 0, "peak": 0, "current": 0 },
+  "pages_abandoned": { "total": 1147, "peak": 63, "current": 32 },
+  "threads": { "total": 94, "peak": 39, "current": 26 },
+}"#;
+        assert_eq!(
+            stats_of(full),
+            Some(Mimalloc { committed: 37_552_128, peak: 159_645_696, pages: 317, abandoned: 32, threads: 26 })
+        );
+        let m = mimalloc_stats().expect("mimalloc's statistics");
+        assert!(m.committed > 0 && m.peak >= m.committed && m.threads > 0, "{m:?}");
     }
 
     /// The option places are mimalloc 3's: before the options are set each

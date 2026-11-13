@@ -523,6 +523,22 @@ fn main() {
     num("T_END_LEVEL", &mut tuning.end_level);
     num("T_END_GAP", &mut tuning.end_gap);
     flag("T_COMMA_ENDS", &mut tuning.comma_ends);
+    num("T_IN_WORD", &mut tuning.costs.in_word);
+    num("T_IN_WORD_SILENT", &mut tuning.costs.in_word_silent);
+    num("T_ONSET", &mut tuning.costs.onset);
+    num("T_START_SILENT", &mut tuning.costs.start_silent);
+    num("T_VOWELS", &mut tuning.costs.vowels);
+    num("T_LEAD", &mut tuning.costs.lead);
+    num("T_FILL_BASE", &mut tuning.costs.fill_base);
+    num("T_FILL_PROM", &mut tuning.costs.fill_prominence);
+    num("T_GAP_BACKING", &mut tuning.costs.gap_backing);
+    num("T_GAP_LEAD", &mut tuning.costs.gap_lead);
+    num("T_EVEN", &mut tuning.even);
+    num("T_MIX", &mut tuning.mix_ratio);
+    num("T_FAR_END", &mut tuning.far_end);
+    flag("T_FAR_CAP", &mut tuning.far_cap);
+    flag("T_SQUEEZED", &mut tuning.squeezed);
+    flag("T_VOWELS_ALL", &mut tuning.vowels_all);
     aligner.set_tuning(tuning);
     println!("deep {deep:?} on {device:?}, jobs matching {filter:?}");
     if let Ok(dir) = std::env::var("REF") {

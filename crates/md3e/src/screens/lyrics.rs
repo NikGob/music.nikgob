@@ -3831,6 +3831,54 @@ mod tests {
         assert!(commands.iter().any(|c| matches!(c, Command::Seek(t) if *t == Duration::from_secs(2))), "{commands:?}");
     }
 
+    /// Scrolled down by the wheel, then a click on a line far below: the
+    /// song seeks to that line (the view stayed or went back up instead).
+    #[test]
+    fn a_click_after_a_wheel_scroll_seeks_to_the_line_under_it() {
+        let seek_after = |scrolled: bool| -> f32 {
+            let ctx = egui::Context::default();
+            let mut fonts = egui::FontDefinitions::default();
+            crate::typography::install_fonts(&mut fonts);
+            ctx.set_fonts(fonts);
+            let mut state = ViewState::default();
+            state.player.status = Status::Paused;
+            state.player.position = Duration::from_millis(1500);
+            state.lyrics.lines = (0..20).map(|i| line(1.0 + 4.0 * i as f32, Some(4.0 + 4.0 * i as f32), &format!("Строка номер {i}"))).collect();
+            state.prefs.lyrics_soft_edges = false;
+            let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(640.0, 700.0));
+            let (over, below) = (pos2(320.0, 350.0), pos2(200.0, 560.0));
+            let mut commands = Vec::new();
+            for frame in 0..40 {
+                let button = |pressed| egui::Event::PointerButton {
+                    pos: below, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                };
+                let wheel = egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -120.0), phase: egui::TouchPhase::Move, modifiers: egui::Modifiers::NONE,
+                };
+                let events = match frame {
+                    1 => vec![egui::Event::PointerMoved(over)],
+                    2..=4 if scrolled => vec![wheel],
+                    30 => vec![egui::Event::PointerMoved(below), button(true)],
+                    31 => vec![button(false)],
+                    _ => Vec::new(),
+                };
+                let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), time: Some(frame as f64 / 60.0), events, ..Default::default() }, |ui| {
+                    show(ui, &state, 0.0, true, &mut commands);
+                });
+                output.textures_delta.clear();
+            }
+            let seeks: Vec<f32> = commands.iter().filter_map(|c| if let Command::Seek(t) = c { Some(t.as_secs_f32()) } else { None }).collect();
+            assert_eq!(seeks.len(), 1, "{commands:?}");
+            // A line's start.
+            assert!(((seeks[0] - 1.0) / 4.0).fract().abs() < 1e-3, "{seeks:?}");
+            seeks[0]
+        };
+        let (still, scrolled) = (seek_after(false), seek_after(true));
+        // The same point on the screen holds a line further down once the
+        // text was scrolled up under it.
+        assert!(scrolled >= still + 8.0, "{still} {scrolled}");
+    }
+
     /// Where a click seeks: a line's start; a wait's end less a second.
     #[test]
     fn a_click_seeks_to_its_line_or_just_before_the_singing() {

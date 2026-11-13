@@ -371,13 +371,17 @@ impl Vocab {
     }
 
     /// Letters a singer's vowels are heard as for each other (ids, both
-    /// ways): и/ы/е/э, а/о/я, у/ю ([`crate::ctc::Costs::vowels`]). Only for
+    /// ways; [`crate::ctc::Costs::vowels`]): Russian says an unstressed «о»
+    /// as «а», so «о»/«а»; with `all` also и/ы, и/е, е/э, ы/е, а/я, у/ю,
+    /// о/у. («е»/«и» too gained marks on a song without line times but
+    /// squeezed two quick words of another under 80 ms: left out.) Only for
     /// a Russian model.
-    pub fn similar(&self) -> Vec<(i32, i32)> {
+    pub fn similar(&self, all: bool) -> Vec<(i32, i32)> {
         if !self.cyrillic_only() {
             return Vec::new();
         }
-        let pairs = [('и', 'ы'), ('и', 'е'), ('е', 'э'), ('ы', 'е'), ('а', 'о'), ('а', 'я'), ('у', 'ю'), ('о', 'у')];
+        let pairs: &[(char, char)] =
+            if all { &[('и', 'ы'), ('и', 'е'), ('е', 'э'), ('ы', 'е'), ('а', 'о'), ('а', 'я'), ('у', 'ю'), ('о', 'у')] } else { &[('а', 'о')] };
         pairs.iter().filter_map(|(a, b)| Some((*self.ids.get(a)?, *self.ids.get(b)?))).collect()
     }
 
@@ -1022,9 +1026,13 @@ mod tests {
         let mut en = Vocab::from_json(r#"{"<pad>":0,"|":4,"m":5,"i":6}"#, Letters::Native).unwrap();
         en.by_sound = true;
         assert_eq!(en.tokens("mi"), [5, 6]);
-        assert!(en.similar().is_empty());
+        assert!(en.similar(true).is_empty());
         let vowels = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"о":6,"и":7,"е":8}"#, Letters::Native).unwrap();
-        assert_eq!(vowels.similar(), [(7, 8), (5, 6)]);
+        assert_eq!(vowels.similar(true), [(7, 8), (5, 6)]);
+        // By default only an unstressed «о» heard as «а».
+        assert_eq!(vowels.similar(false), [(5, 6)]);
+        let no_o = Vocab::from_json(r#"{"<pad>":0,"|":4,"а":5,"и":7,"е":8}"#, Letters::Native).unwrap();
+        assert!(no_o.similar(false).is_empty());
     }
 
     /// Numbers and abbreviations as they are said.

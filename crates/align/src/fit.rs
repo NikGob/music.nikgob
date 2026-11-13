@@ -152,6 +152,9 @@ pub struct Tuning {
     /// A word before punctuation inside a line ends with its voice once
     /// [`BREATH`] of what follows has none (not [`TAIL`]).
     pub comma_ends: bool,
+    /// [`Costs::vowels`] for every pair of vowels a singer's are heard as
+    /// for each other, not only «о» said as «а» ([`crate::text::Vocab::similar`]).
+    pub vowels_all: bool,
     /// Without line times, [`Self::sound_lines`] leaves out lines sung
     /// again in the next or the line before (a hook: the English aligner
     /// keeps its repeats better there).
@@ -178,6 +181,7 @@ impl Tuning {
                 in_word_silent: 0.0,
                 line_pause: 0.0,
                 onset: 0.0,
+                start_silent: 0.0,
                 vowels: 0.0,
                 lead: 0.0,
                 quiet_vmr: 0.0,
@@ -211,12 +215,13 @@ impl Tuning {
             end_level: 0.0,
             end_gap: 0.0,
             comma_ends: false,
+            vowels_all: false,
         }
     }
 
 }
 
-/// `align-7` (docs/lyrics-align.md, «align-6», «align-7»):
+/// `align-8`:
 /// `align-5`'s blank inside a word where there is no voice, and
 /// * Latin lines of a Russian text by sound ([`Tuning::sound_lines`]; a hook
 ///   sung over and over only with line times, [`Tuning::sound_plain`]);
@@ -230,7 +235,14 @@ impl Tuning {
 /// * lines heard by another aligner keep these costs
 ///   ([`Tuning::foreign_costs`]);
 /// * numbers and abbreviations in capitals are spelled as said
-///   ([`Tuning::said`]: «25 ТГК» → «двадцать пять тэгэка»).
+///   ([`Tuning::said`]: «25 ТГК» → «двадцать пять тэгэка»);
+/// * a sung «а» may be heard for a written unstressed «о»
+///   ([`Costs::vowels`] 1.5, Russian only: «Мой топор» 2 word starts, 1 end
+///   and 1 line better, nothing worse, words under 80 ms included);
+/// * a word squeezed to almost nothing takes a fair share from the word
+///   before it ([`Tuning::squeezed`]; with it on the bench has 40 % fewer
+///   words lit for under 80 ms and the same word and line starts and ends
+///   within 0.3 s on every song).
 ///
 /// Measured on the bench with the hearing cut at whole strides (50 frames a
 /// second), alone and together; none is worse on any song or case of it.
@@ -260,6 +272,8 @@ impl Default for Tuning {
         t.sound_inner = true;
         t.sound_runs = true;
         t.end_level = 0.5;
+        t.squeezed = true;
+        t.costs.vowels = 1.5;
         t
     }
 }
@@ -600,7 +614,7 @@ fn place_on_path(
     // filler would take the text's own voice (Japanese: 93 % of words
     // within 0.3 s without, 81–91 % with one).
     let fill = !vocab.syllabic();
-    let mut path = Path { costs: tuning.costs, similar: vocab.similar(), ..Path::default() };
+    let mut path = Path { costs: tuning.costs, similar: vocab.similar(tuning.vowels_all), ..Path::default() };
     let mut owner: Vec<Option<usize>> = Vec::new();
     // Each line's first token, for lines sung alike.
     let mut heads: Vec<(usize, usize)> = Vec::new();
@@ -1873,6 +1887,8 @@ mod tests {
         let mut keep = vec![c.clone()];
         spread_squeezed(&mut keep);
         assert_eq!(keep[0], c);
+        // The player's timing does it.
+        assert!(Tuning::default().squeezed);
     }
 
     /// A held note is a vowel: a word that ends in a stop is not held on.

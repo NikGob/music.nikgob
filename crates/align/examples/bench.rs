@@ -261,6 +261,19 @@ struct Tally {
     overlaps: usize,
     /// Lines sung once more than the text has them, added.
     extra: usize,
+    /// Made words (sung lines only) and those lit for under [`SHORT`]
+    /// (a flash: squeezed or collapsed letters).
+    made: usize,
+    short: usize,
+}
+
+/// A made word shorter than this (seconds) is only a flash.
+const SHORT: f32 = 0.08;
+
+/// Made words and the ones shorter than [`SHORT`].
+fn short_words(made: &[LyricLine]) -> (usize, usize) {
+    let words = made.iter().filter(|l| !l.background).flat_map(|l| &l.words).filter(|w| w.text.chars().any(char::is_alphanumeric));
+    words.fold((0, 0), |(n, s), w| (n + 1, s + usize::from((w.end.as_secs_f32() - w.start.as_secs_f32()) < SHORT)))
 }
 
 impl Tally {
@@ -270,6 +283,8 @@ impl Tally {
         self.lines.extend(&o.lines);
         self.overlaps += o.overlaps;
         self.extra += o.extra;
+        self.made += o.made;
+        self.short += o.short;
     }
 }
 
@@ -293,7 +308,7 @@ fn plain(lines: &[LyricLine]) -> Vec<LyricLine> {
 
 fn summary(label: &str, t: &Tally) -> String {
     format!(
-        "{label:28} words {:5} start<0.3 {:5.1}% med {:+.3} end<0.3 {:5.1}% med {:+.3} (n {:4}) | lines {:4} start<0.3 {:5.1}% mae {:5.2}s med {:+5.2} | overlaps {} extra {}",
+        "{label:28} words {:5} start<0.3 {:5.1}% med {:+.3} end<0.3 {:5.1}% med {:+.3} (n {:4}) | lines {:4} start<0.3 {:5.1}% mae {:5.2}s med {:+5.2} | overlaps {} extra {} | short {}/{}",
         t.starts.len(),
         within(&t.starts, 0.3),
         median(&t.starts),
@@ -305,7 +320,9 @@ fn summary(label: &str, t: &Tally) -> String {
         mae(&t.lines),
         median(&t.lines),
         t.overlaps,
-        t.extra
+        t.extra,
+        t.short,
+        t.made
     )
 }
 
@@ -414,6 +431,7 @@ fn tuning_from_env() -> Tuning {
     num("T_IN_WORD_SILENT", &mut t.costs.in_word_silent);
     num("T_LINE_PAUSE", &mut t.costs.line_pause);
     num("T_ONSET", &mut t.costs.onset);
+    num("T_START_SILENT", &mut t.costs.start_silent);
     num("T_VOWELS", &mut t.costs.vowels);
     num("T_EVEN", &mut t.even);
     num("T_FAR_END", &mut t.far_end);
@@ -446,6 +464,7 @@ fn tuning_from_env() -> Tuning {
     num("T_END_LEVEL", &mut t.end_level);
     num("T_END_GAP", &mut t.end_gap);
     flag("T_COMMA_ENDS", &mut t.comma_ends);
+    flag("T_VOWELS_ALL", &mut t.vowels_all);
     num("T_HOLD_VMR", &mut t.hold_vmr);
     num("T_HOLD_PROM", &mut t.hold_prominence);
     t
@@ -515,7 +534,8 @@ fn main() {
             };
             let mode = if timed { "timed" } else { "plain" };
             let reference: Vec<LyricLine> = if timed { job.lines.clone() } else { job.lines.iter().filter(|l| !l.text.trim().is_empty()).cloned().collect() };
-            let mut t = Tally { overlaps: overlaps(&fit.lines), extra: fit.lines.len().saturating_sub(lines.len()), ..Tally::default() };
+            let (made, short) = short_words(&fit.lines);
+            let mut t = Tally { overlaps: overlaps(&fit.lines), extra: fit.lines.len().saturating_sub(lines.len()), made, short, ..Tally::default() };
             // The lines as the reference has them (an added repeat left out).
             let mut fit = fit;
             if t.extra > 0 && job.kind != "case" {
@@ -561,7 +581,7 @@ fn main() {
                         mae(&ends),
                         far.join(", ")
                     );
-                    let mut t = Tally { starts, ends, ..Tally::default() };
+                    let mut t = Tally { starts, ends, made, short, ..Tally::default() };
                     t.overlaps = overlaps(&fit.lines);
                     pool(format!("case marks {mode}"), &t);
                 }

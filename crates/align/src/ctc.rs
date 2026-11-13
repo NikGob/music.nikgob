@@ -277,6 +277,10 @@ pub struct Costs {
     /// sharply it comes in, 0..1): short shouted syllables the model
     /// hardly hears still start where they are sung.
     pub onset: f32,
+    /// Starting a word where there is no voice, nor in the two frames
+    /// after, costs this: a word starts on its singing, not in the pause
+    /// before it (0: off).
+    pub start_silent: f32,
     /// A letter may take a frame where the model hears a similar vowel
     /// ([`Path::similar`]) at this under that vowel (0: off).
     pub vowels: f32,
@@ -615,6 +619,9 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
             if st.starts && costs.onset > 0.0 {
                 pull -= costs.onset * voice.and_then(|v| v.onset.get(t)).copied().unwrap_or(0.0);
             }
+            if st.starts && costs.start_silent > 0.0 && (t..(t + 3).min(t_len)).all(|u| quiet[u]) {
+                pull += costs.start_silent;
+            }
             for (i, (p, c)) in st.from.iter().enumerate() {
                 let v = dp[*p] + c - pull;
                 if v > best {
@@ -879,6 +886,23 @@ mod tests {
         let v = Voice { voiced: &voiced, onset: &onset, ..Default::default() };
         p.costs.onset = 2.0;
         assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[0].map(|s| s.0), Some(6));
+    }
+
+    /// With the cost on, a word does not start in the silence before it.
+    #[test]
+    fn a_word_does_not_start_in_silence_when_that_costs() {
+        // A word heard clearly first, then the next word's letter heard a
+        // little in the silence after it (a breath); the voice only from
+        // frame 8 on.
+        let e = em(&[2, 2, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0], 0.5);
+        let mut p = path(&[Tok::Letter(2), Tok::Letter(1)]);
+        p.starts[1] = true;
+        let voiced: Vec<bool> = (0..12).map(|t| t < 2 || t >= 8).collect();
+        let v = Voice { voiced: &voiced, ..Default::default() };
+        assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[1].map(|s| s.0), Some(4));
+        p.costs.start_silent = 5.0;
+        let start = frames(&align_path(&e, &p, Some(v)).unwrap())[1].map(|s| s.0);
+        assert!(start.is_some_and(|f| f >= 6), "{start:?}");
     }
 
     /// A letter may take a frame of a similar vowel, discounted.
