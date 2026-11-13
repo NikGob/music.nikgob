@@ -17,7 +17,10 @@
 //!   `fake:audio:soloist` — a Spotify track Spotify Soloist plays.
 //! - `fake:link` — the open playlist follows a Spotify playlist.
 //! - `fake:lyrics` — word-synced lyrics (LyricsPlus) for whatever plays:
-//!   the demo has no network to fetch any for a stream track.
+//!   the demo has no network to fetch any for a stream track;
+//!   `fake:lyrics:dense` — the same 40 lines a line every 0.55 s, so all
+//!   of them lie within the demo's 24 s tones (a click on any line seeks
+//!   inside the file).
 //! - `fake:paused:youtube` / `fake:paused:spotify` — the service asked to
 //!   wait (until 14:05).
 //! - `fake:search-wait:spotify` / `fake:search-wait:youtube` — the service
@@ -103,6 +106,8 @@ pub struct Fakes {
     soloist: bool,
     link: bool,
     lyrics: bool,
+    /// `fake:lyrics:dense`.
+    lyrics_dense: bool,
     paused: Option<Service>,
     search_wait: Option<(Service, bool)>,
     torrents: bool,
@@ -154,6 +159,10 @@ impl Fakes {
             }
             "link" => self.link = true,
             "lyrics" => self.lyrics = true,
+            "lyrics:dense" => {
+                self.lyrics = true;
+                self.lyrics_dense = true;
+            }
             "paused:youtube" => self.paused = Some(Service::Youtube),
             "paused:spotify" => self.paused = Some(Service::Spotify),
             "search-wait:spotify" => self.search_wait = Some((Service::Spotify, false)),
@@ -393,7 +402,7 @@ impl Fakes {
             }
         }
         if self.lyrics {
-            s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id));
+            s.lyrics = word_lyrics(state.player.current.as_ref().map(|t| t.id), self.lyrics_dense);
         }
         if self.lyrics_texts || self.craft.is_some() || self.lyrics_home.is_some() {
             let track = state.player.current.as_ref().map(|t| t.id);
@@ -552,7 +561,7 @@ fn refusals_history() -> Vec<nikgob_view::Job> {
 }
 
 /// Lines of three words, one word a second, a line every four seconds.
-fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
+fn word_lyrics(track: Option<nikgob_view::TrackId>, dense: bool) -> nikgob_view::LyricsView {
     use nikgob_core::lyrics::{LyricLine, LyricWord, LyricsSource};
     use std::time::Duration;
     let text = [
@@ -564,15 +573,17 @@ fn word_lyrics(track: Option<nikgob_view::TrackId>) -> nikgob_view::LyricsView {
         "Пожелай мне удачи",
     ];
     let ms = Duration::from_millis;
+    // A line every 4 s, or every 0.55 s (`dense`).
+    let (every, first) = if dense { (550, 500) } else { (4000, 1500) };
     let lines = (0..40)
         .map(|i| {
             let line = text[i % text.len()];
-            let start = 1500 + 4000 * i as u64;
+            let start = first + every * i as u64;
             let words: Vec<&str> = line.split(' ').collect();
-            let step = 3200 / words.len() as u64;
+            let step = every * 4 / 5 / words.len() as u64;
             LyricLine {
                 start: ms(start),
-                end: Some(ms(start + 3400)),
+                end: Some(ms(start + every * 17 / 20)),
                 text: line.to_owned(),
                 words: words
                     .iter()
@@ -648,7 +659,7 @@ fn texts_lyrics(track: Option<nikgob_core::model::TrackId>) -> nikgob_view::Lyri
     use nikgob_core::lyrics::{LyricLine, LyricsSource};
     use nikgob_view::{LyricsAvail, LyricsOption, LyricsSync, LyricsText};
     use std::time::Duration;
-    let own = word_lyrics(track);
+    let own = word_lyrics(track, false);
     let lines_of = |shift: u64| -> Vec<LyricLine> {
         own.lines
             .iter()
@@ -686,7 +697,7 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
     use nikgob_view::{LyricsCraft, LyricsHome};
     match name {
         "words" => {
-            l.lines = word_lyrics(l.track).lines;
+            l.lines = word_lyrics(l.track, false).lines;
             if let Some(o) = l.sources.iter_mut().find(|o| o.source == LyricsSource::Genius) {
                 o.state = nikgob_view::LyricsAvail::Ready(nikgob_view::LyricsSync::Word);
             }
@@ -702,7 +713,7 @@ fn lyrics_home(l: &mut nikgob_view::LyricsView, name: &str) {
         "saved" | "stream-saved" => {
             l.stream = name == "stream-saved";
             l.source = Some(LyricsSource::File);
-            l.lines = word_lyrics(l.track).lines;
+            l.lines = word_lyrics(l.track, false).lines;
             l.made = false;
             l.home = LyricsHome::Computer;
             l.savable = false;
@@ -733,7 +744,7 @@ fn craft(s: &mut ViewState, track: nikgob_core::model::TrackId, name: &str) {
     match name {
         "done" => {
             // Applied at once: the words are the shown text, picked.
-            let words = word_lyrics(Some(track)).lines;
+            let words = word_lyrics(Some(track), false).lines;
             s.lyrics.lines = words.clone();
             s.lyrics.picked = true;
             if let Some(t) = s.lyrics.texts.iter_mut().find(|t| t.source == Some(LyricsSource::Genius)) {
@@ -754,7 +765,7 @@ fn chip_state(s: &mut ViewState, name: &str) {
     use nikgob_core::lyrics::{LyricLine, LyricsSource};
     use nikgob_view::{LyricsAvail, LyricsOption, LyricsSync, LyricsText};
     let track = s.player.current.as_ref().map(|t| t.id);
-    let words = word_lyrics(track).lines;
+    let words = word_lyrics(track, false).lines;
     let lines: Vec<LyricLine> = words.iter().map(|l| LyricLine { words: Vec::new(), ..l.clone() }).collect();
     // Syllables: every word cut in two.
     let syllables: Vec<LyricLine> = words
@@ -831,7 +842,7 @@ fn lyrics_state(s: &mut ViewState, arg: &str) {
     use nikgob_view::{AlignJob, AlignStage, Craft, LyricsAvail, LyricsCraft, LyricsHome, LyricsOption, LyricsSync, LyricsText};
     let (name, seen) = arg.split_once(':').map_or((arg, None), |(n, v)| (n, Some(v)));
     let track = s.player.current.as_ref().map(|t| t.id);
-    let words = word_lyrics(track).lines;
+    let words = word_lyrics(track, false).lines;
     let lines: Vec<LyricLine> = words.iter().map(|l| LyricLine { words: Vec::new(), ..l.clone() }).collect();
     let plain = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
     let opt = |source, state| LyricsOption { source, state, fits: None, made: false };
