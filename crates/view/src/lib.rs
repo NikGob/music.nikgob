@@ -3451,9 +3451,10 @@ pub enum Command {
     /// MP3: its MP3 with the tags, cover and lyrics takes its place, the
     /// original goes to the Trash.
     FakeToMp3(nikgob_core::model::TrackId),
-    /// Takes [`Self::FakeToMp3`] back: the original comes back from the
-    /// Trash and plays again.
-    UndoFakeToMp3(nikgob_core::model::TrackId),
+    /// Takes [`Self::FakeToMp3`] back, or what one «Превратить N в MP3»
+    /// of a fakes card made, all at once: the originals of these tracks
+    /// come back from the Trash and play again.
+    UndoFakeToMp3(Vec<nikgob_core::model::TrackId>),
     /// «Разные песни» on a track of one song on two albums
     /// ([`ViewState::also_on`]): it is another song than the tracks it was
     /// linked with, and never linked with them again.

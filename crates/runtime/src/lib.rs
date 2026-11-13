@@ -1573,7 +1573,7 @@ impl Worker {
             Command::FindBetterAlbum(release) => self.find_better_album(release),
             Command::UndoBetterAlbum(release) => self.undo_better_album(release),
             Command::FakeToMp3(track) => self.fake_to_mp3(track),
-            Command::UndoFakeToMp3(track) => self.undo_fake_to_mp3(track),
+            Command::UndoFakeToMp3(tracks) => self.undo_fake_to_mp3(tracks),
             Command::RecordingApart(track) => self.recording_apart(track),
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),

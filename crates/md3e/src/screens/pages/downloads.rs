@@ -341,8 +341,12 @@ fn pick_card(ui: &mut Ui, c: &Confirm, pick: &ConfirmPick, out: &mut Vec<Command
         if n > 1 {
             let all = ticked.len() == n;
             let mixed = !ticked.is_empty() && !all;
+            // One line: on the checkbox's centre line, as the songs' two are.
             let mut words = |ui: &mut Ui| {
-                ui.label(TypeRole::LabelLarge.style().rich("Выбрать все", s.on_surface));
+                let size = vec2(ui.available_width(), crate::components::checkbox::SIZE);
+                ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label(TypeRole::LabelLarge.style().rich("Выбрать все", s.on_surface));
+                });
             };
             if row(ui, (c.id, usize::MAX), all, mixed, false, &mut words) {
                 ticked = if all { Vec::new() } else { sources.to_vec() };
