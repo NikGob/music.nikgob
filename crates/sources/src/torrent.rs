@@ -424,6 +424,25 @@ pub fn pick_files(files: &[(usize, String, u64)], w: &Want) -> Option<Vec<usize>
     }
 }
 
+/// The files of a download (paths with `/` or `\\`) hold a single-file
+/// rip: a folder with a cue sheet and no more audio files than sheets, each
+/// image to be cut into its tracks by its sheet. A release of track files
+/// that keeps its sheet has many more audio files than sheets beside it.
+pub fn image_rip<'a>(paths: impl IntoIterator<Item = &'a str>) -> bool {
+    let mut dirs: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    for p in paths {
+        let p = p.replace('\\', "/");
+        let dir = p.rsplit_once('/').map_or("", |(d, _)| d).to_owned();
+        let ext = ext_of(&p);
+        if ext == "cue" {
+            dirs.entry(dir).or_default().0 += 1;
+        } else if AUDIO_EXT.contains(&ext.as_str()) {
+            dirs.entry(dir).or_default().1 += 1;
+        }
+    }
+    dirs.values().any(|&(sheets, audio)| sheets > 0 && audio > 0 && audio <= sheets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +489,16 @@ mod tests {
             (3, "Other/CDImage.cue".into(), 1),
         ];
         assert_eq!(pick_files(&image, &want(WantScope::Album)), Some(vec![0, 1]));
+        assert!(image_rip(["Кино - Группа крови/CDImage.ape", "Кино - Группа крови/CDImage.cue"]));
+        assert!(image_rip([r"D:\dl\Кино\CDImage.flac", r"D:\dl\Кино\CDImage.cue"]), "Windows paths");
+        // Track files with their sheet, or a sheet of another folder: not an image.
+        assert!(!image_rip([
+            "Кино - Группа крови/01 - Группа крови.flac",
+            "Кино - Группа крови/02 - Закрой за мной дверь.flac",
+            "Кино - Группа крови/Группа крови.cue",
+        ]));
+        assert!(!image_rip(["Кино - Группа крови/CDImage.ape", "Other/CDImage.cue"]));
+        assert!(!image_rip(files.iter().map(|(_, p, _)| p.as_str())));
         let mut w = want(WantScope::Track);
         w.title = Some("Voyna (War)".into());
         assert_eq!(pick_files(&files, &w), Some(vec![2]), "by its number");

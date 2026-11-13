@@ -159,6 +159,14 @@ pub(crate) fn plan_of(slots: &[Slot], files: &[CameFile]) -> Vec<PlanRow> {
         .collect()
 }
 
+/// The files that came are a single-file rip with its cue sheet
+/// ([`nikgob_sources::torrent::image_rip`]): one image of the disc, not the
+/// album's track files the card matches one by one.
+pub(crate) fn came_as_image(files: &[PathBuf]) -> bool {
+    let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    nikgob_sources::torrent::image_rip(paths.iter().map(String::as_str))
+}
+
 /// What «Заменить» imports: each file of the plan as the very track the
 /// card showed it replacing ([`ImportTargets::pinned`]), whatever its own
 /// tags say; nothing else of the folder.
@@ -309,6 +317,18 @@ impl Worker {
 
     /// A copy of the album came for `id`: kept where it is, its files read.
     pub(super) fn album_came(&mut self, id: WishlistId, files: Vec<PathBuf>, origin: SourceOrigin) {
+        // A single-file rip with its cue sheet is no copy for the card: its
+        // image is one file, not the album's tracks (a torrent chosen before
+        // such rips were passed over, or a direct download that is one).
+        if came_as_image(&files) {
+            log::info!("upgrade: the copy that came for {} is a disc image with its cue sheet, not offered", self.item_title(id));
+            self.album_files_go(id, &origin);
+            if matches!(self.wish_next_candidate(id), Next::NotFound) {
+                self.upgrade_none(id, true);
+            }
+            self.publish_wishlist();
+            return;
+        }
         self.streaming.wish.partial.remove(&id);
         self.streaming.wish.album.reading.insert(id);
         let kept = Kept { origin: origin.clone(), files: files.clone() };
