@@ -992,6 +992,15 @@ pub fn wave_counts(steps: &[WaveStep]) -> (usize, usize, usize) {
 /// bandit and the model's session move as they would. A new song's end is
 /// unknown: the wave is told nothing of it (it is counted apart, never as
 /// heard out).
+///
+/// What it does not measure: how new songs are received (the pool is the
+/// dataset's fixed list; its picks are not matched to the history, so no
+/// hit or skip of a new song counts, and «replay-skipped» is a share of all
+/// picks, new ones included, so a larger share of new songs lowers it by
+/// itself); and anything of the runtime — the services' requests, the
+/// top-ups, previews, the log's bans — none of which a replay makes.
+/// «replay-skipped» says what the history predicts of the library's picks
+/// (most of their plays before the moment skipped early), not an outcome.
 #[allow(clippy::too_many_arguments)]
 pub fn wave_replay(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], session: &Session, novelty: f32, n: usize, skipped: &dyn Fn(usize) -> bool) -> Vec<WaveStep> {
     use crate::radio::Outcome;

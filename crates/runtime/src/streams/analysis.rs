@@ -358,6 +358,19 @@ impl Worker {
         a.idle_until = None;
     }
 
+    /// How many previews of new music may still be asked today: none while
+    /// the stream analysis is off or YouTube Music has no audio, else what
+    /// the day's limit leaves beside the previews waiting, within the
+    /// queue.
+    pub(crate) fn preview_room(&mut self) -> usize {
+        if !self.stream_analysis_on() || self.service(Service::Youtube).is_none() || !self.has_audio(Service::Youtube) {
+            return 0;
+        }
+        let waiting = self.streaming.analysis.wanted.len();
+        let today = PREVIEW_DAILY.saturating_sub(self.previews_today()) as usize;
+        today.saturating_sub(waiting).min(WANTED_MAX.saturating_sub(waiting))
+    }
+
     /// The playing entry of `track` ended (or was skipped) while it played
     /// from `source`: a YouTube video whose whole audio is in the disk
     /// cache is analysed from there (no request).

@@ -255,6 +255,24 @@ pub(crate) struct Plan {
     rest: Vec<(String, Vec<TrackId>)>,
 }
 
+/// Keeps the budgets: today's requests `day` and, for the top-up under way,
+/// its window of requests (`window`: its cache key and the window). A count
+/// is never lowered (a write queued before a later one, or before the one
+/// at shutdown, keeps the larger).
+fn keep_budgets(lib: &Library, day: &(String, u32), window: Option<(&str, (UnixMs, u32))>) {
+    let kept: Option<(String, u32)> = super::cache_read(lib, DAY_KEY);
+    if !kept.is_some_and(|k| k.0 == day.0 && k.1 >= day.1) {
+        super::cache_write(lib, DAY_KEY, now_ms(), day);
+    }
+    if let Some((key, w)) = window {
+        let key = format!("{key}{REQ}");
+        let kept: Option<(UnixMs, u32)> = super::cache_read(lib, &key);
+        if !kept.is_some_and(|k| k.0 == w.0 && k.1 >= w.1) {
+            super::cache_write(lib, &key, now_ms(), &w);
+        }
+    }
+}
+
 /// Plans the next top-up (see [`Worker::niche_plan`]); the library is read,
 /// never written.
 fn plan(mut i: PlanInput) -> Plan {
@@ -570,6 +588,17 @@ impl Worker {
         n.planning || !n.wave.is_empty() || n.open.as_ref().is_some_and(|o| o.wave.is_some())
     }
 
+    /// At shutdown: the budgets as they stand, written now (a write still
+    /// waiting on the picks' thread may never run).
+    pub(crate) fn niche_flush(&self) {
+        let n = &self.recs.niche;
+        if n.day.is_empty() {
+            return;
+        }
+        let window = n.open.as_ref().map(|o| (o.token.as_str(), o.window));
+        keep_budgets(&self.lib, &(n.day.clone(), n.day_requests), window);
+    }
+
     /// Runs `work` (the library's writes of the top-ups) on the picks'
     /// thread after what was sent there before.
     fn niche_write(&self, work: impl FnOnce() + Send + 'static) {
@@ -625,18 +654,13 @@ impl Worker {
             if let Some(open) = self.recs.niche.open.as_mut() {
                 open.requests += 1;
                 open.window.1 += 1;
-                window = Some((format!("{}{REQ}", open.token), open.window));
+                window = Some((open.token.clone(), open.window));
             }
             let n = &mut self.recs.niche;
             n.day_requests += 1;
             n.busy = true;
             let (lib, day) = (self.lib.clone(), (n.day.clone(), n.day_requests));
-            self.niche_write(move || {
-                if let Some((key, window)) = window {
-                    super::cache_write(&lib, &key, now_ms(), &window);
-                }
-                super::cache_write(&lib, DAY_KEY, now_ms(), &day);
-            });
+            self.niche_write(move || keep_budgets(&lib, &day, window.as_ref().map(|(k, w)| (k.as_str(), *w))));
             self.streaming.spawn_internal(async move {
                 let result = ask(svc, &step).await;
                 Internal::Recs(Msg::Niche(NicheMsg::Answered { step, result }))
@@ -829,6 +853,24 @@ mod tests {
         let p = plan(input(0));
         assert_eq!(p.day, Some(("2026-11-13".into(), DAY_BUDGET)));
         assert_eq!(p.ended, vec![("calm.all".to_owned(), 2), ("lively.all".to_owned(), 0)], "kept songs count over the budget too");
+    }
+
+    /// The budgets kept are never lowered by a write that comes late (one
+    /// queued before the one at shutdown); a new day or window starts anew.
+    #[test]
+    fn the_budgets_kept_never_go_down() {
+        let lib = Library::open_in_memory().unwrap();
+        let read_day = || super::super::cache_read::<(String, u32)>(&lib, DAY_KEY);
+        let read_window = || super::super::cache_read::<(UnixMs, u32)>(&lib, &format!("niche.x{REQ}"));
+        keep_budgets(&lib, &("d1".into(), 5), Some(("niche.x", (100, 4))));
+        keep_budgets(&lib, &("d1".into(), 3), Some(("niche.x", (100, 2))));
+        assert_eq!(read_day(), Some(("d1".into(), 5)));
+        assert_eq!(read_window(), Some((100, 4)));
+        keep_budgets(&lib, &("d1".into(), 6), None);
+        assert_eq!(read_day(), Some(("d1".into(), 6)));
+        keep_budgets(&lib, &("d2".into(), 1), Some(("niche.x", (200, 1))));
+        assert_eq!(read_day(), Some(("d2".into(), 1)));
+        assert_eq!(read_window(), Some((200, 1)));
     }
 
     /// A top-up is for its niche: most of the seeds the same, not a mix of

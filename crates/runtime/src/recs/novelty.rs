@@ -22,9 +22,31 @@ use crate::Worker;
 
 const LOG_KEY: &str = "recs.new_log";
 
-/// The log as the library keeps it.
+/// The log as the library keeps it, its artists keyed as now
+/// ([`normalised`]).
 pub(super) fn log_of(lib: &nikgob_library::Library) -> NewLog {
-    super::cache_read::<NewLog>(lib, LOG_KEY).unwrap_or_default()
+    normalised(lib, super::cache_read::<NewLog>(lib, LOG_KEY).unwrap_or_default())
+}
+
+/// `log` with each event's artist keyed as the log keys it now
+/// ([`nikgob_recs::main_artist_key`] of its song's credit in the library;
+/// of the key it has when the song is gone): a log kept before keyed some
+/// credits whole («a b» of «A / B»), and its early skips count with the
+/// main artist's since. Read time only: the kept log is not rewritten for
+/// it (the next event's save keeps it as it reads).
+pub(super) fn normalised(lib: &nikgob_library::Library, mut log: NewLog) -> NewLog {
+    let ids: Vec<TrackId> = log.events.iter().filter_map(|e| e.track).collect();
+    let rows = if ids.is_empty() { Default::default() } else { lib.get_track_rows(&ids).unwrap_or_default() };
+    for e in &mut log.events {
+        let main = match e.track.and_then(|t| rows.get(&t)) {
+            Some(row) => nikgob_recs::main_artist_key(&row.artist),
+            None => nikgob_recs::main_artist_key(&e.artist),
+        };
+        if !main.is_empty() {
+            e.artist = main;
+        }
+    }
+    log
 }
 
 /// The key of the taste profile a new song sounding `v` (embedded) of

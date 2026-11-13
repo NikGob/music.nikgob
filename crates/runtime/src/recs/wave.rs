@@ -156,6 +156,16 @@ pub(crate) fn empty_snapshot() -> Arc<Snapshot> {
     })
 }
 
+/// Whether «Моя волна» asks the niches' top-up for more new songs of a
+/// filter that ran short, and a wave whose first picks found nothing waits
+/// for it ([`Worker::wave_asked`], [`Worker::wave_refill_ended`]). Off: a
+/// wave with nothing of its filter ends at once («Нечего играть») and asks
+/// nothing, as before the refill. Kept in the code with its tests (they
+/// turn it on through [`crate::StreamSchedule::wave_refill`]); the owner
+/// decides whether to turn it on (the lead's decision of 2026-11-13: its
+/// open edge cases are in the status of r36-recsbugs).
+pub const WAVE_REFILL: bool = false;
+
 /// What a wave's picks asked ([`nikgob_recs::wave::WaveAsks`]) with its
 /// library work done off the worker: the YouTube Music songs of the pool
 /// without a preview as stream tracks of the library (the track and its
@@ -165,16 +175,20 @@ pub(crate) struct WaveAsked {
     pub short: Option<(String, Vec<TrackId>)>,
 }
 
-/// [`WaveAsked`] of `asks` over the open `pool` (on the picks' thread): a
-/// song the library has no stream track of yet gets one, as a discovery's
-/// preview does.
-pub(crate) fn prepare_asks(lib: &nikgob_library::Library, pool: &[OpenCandidate], asks: nikgob_recs::wave::WaveAsks) -> WaveAsked {
+/// [`WaveAsked`] of `asks` over the open `pool` (on the picks' thread),
+/// `room` previews at most ([`Worker::preview_room`]: none when previews
+/// cannot run today): a song the library has no stream track of yet gets
+/// one, as a discovery's preview does — only for a preview that can be
+/// analysed, so no row is kept for a song that is never heard.
+pub(crate) fn prepare_asks(lib: &nikgob_library::Library, pool: &[OpenCandidate], asks: nikgob_recs::wave::WaveAsks, room: usize) -> WaveAsked {
     let previews = asks
         .previews
         .iter()
         .filter(|r| r.service == nikgob_core::streaming::Service::Youtube)
-        .filter_map(|r| {
-            let c = pool.iter().find(|c| c.track.id == *r && c.vector.is_none())?;
+        .filter_map(|r| pool.iter().find(|c| c.track.id == *r && c.vector.is_none()))
+        .take(room)
+        .filter_map(|c| {
+            let r = &c.track.id;
             let track = match lib.track_by_remote(r).ok().flatten() {
                 Some(t) => t,
                 None => lib.upsert_stream_tracks(std::slice::from_ref(&c.track)).ok()?.first().copied()?,
@@ -315,7 +329,7 @@ impl Worker {
             self.want_preview(track, video);
         }
         let (token, seeds) = asked.short?;
-        if self.wave_refill_empty(&token) {
+        if !self.streaming.schedule.wave_refill || self.wave_refill_empty(&token) {
             return None;
         }
         self.niche_want_wave(token, seeds)
@@ -404,12 +418,30 @@ mod tests {
             previews: pool.iter().map(|c| c.track.id.clone()).collect(),
             short: Some(("any.all".to_owned(), vec![TrackId::new()])),
         };
-        let asked = prepare_asks(&lib, &pool, asks.clone());
+        // No preview can run today: nothing is written.
+        let none = prepare_asks(&lib, &pool, asks.clone(), 0);
+        assert!(none.previews.is_empty());
+        assert_eq!(none.short, asks.short);
+        assert_eq!(lib.track_by_remote(&pool[0].track.id).unwrap(), None, "no row for a preview that cannot run");
+        let asked = prepare_asks(&lib, &pool, asks.clone(), 6);
         assert_eq!(asked.previews.len(), 1);
         assert_eq!(asked.previews[0].1, "a");
         assert_eq!(lib.track_by_remote(&pool[0].track.id).unwrap(), Some(asked.previews[0].0));
         assert_eq!(asked.short, asks.short);
-        assert_eq!(prepare_asks(&lib, &pool, asks).previews, asked.previews);
+        assert_eq!(prepare_asks(&lib, &pool, asks, 6).previews, asked.previews);
+    }
+
+    /// The previews prepared keep to the room the day leaves: one row at
+    /// most for one preview.
+    #[test]
+    fn a_waves_previews_keep_to_the_days_room() {
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let pool = vec![candidate(Service::Youtube, "a", false), candidate(Service::Youtube, "b", false), candidate(Service::Youtube, "c", false)];
+        let asks = nikgob_recs::wave::WaveAsks { previews: pool.iter().map(|c| c.track.id.clone()).collect(), short: None };
+        let asked = prepare_asks(&lib, &pool, asks, 1);
+        assert_eq!(asked.previews.len(), 1);
+        let rows = pool.iter().filter(|c| lib.track_by_remote(&c.track.id).unwrap().is_some()).count();
+        assert_eq!(rows, 1);
     }
 
     /// The wave's pool is built again when an artist is kept out after it

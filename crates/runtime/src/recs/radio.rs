@@ -943,6 +943,9 @@ impl Worker {
         let kept = self.discoveries_kept();
         self.new_log_load();
         let bans = self.recs.newlog.bans;
+        // The previews the picks may ask for (none when they cannot run
+        // today: no row is written for them).
+        let room = if local_only { 0 } else { self.preview_room() };
         let topped_gen = self.recs.niche.topped_gen;
         let pool = self.recs.radio.wave_pool.clone().filter(|p| p.holds(&snap, kept, bans, topped_gen));
         // What a new pool is built from (only when it is needed).
@@ -990,7 +993,7 @@ impl Worker {
             let scenes = profiles.map(|p| (Arc::downgrade(&snap), super::wave::scenes(&snap, &p)));
             // What the picks ask, its library work done here.
             let asks = state.take_wave_asks();
-            let asked = (!local_only).then(|| super::wave::prepare_asks(&lib, cands, asks));
+            let asked = (!local_only).then(|| super::wave::prepare_asks(&lib, cands, asks, room));
             let msg = RadioMsg::Extended { id, state: Box::new(state), picks, wave_pool: pool, scenes, wave_asked: asked };
             let _ = tx.send(Internal::Recs(Msg::Radio(msg)));
         });

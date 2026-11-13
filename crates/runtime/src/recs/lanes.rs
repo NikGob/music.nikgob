@@ -935,6 +935,59 @@ mod tests {
         assert!(!banned(&log, &song("6", &["Third"]), now));
     }
 
+    /// A log kept before the artists were keyed by [`nikgob_recs::credit_keys`]
+    /// keyed a credit whole («somebody guest» of «Somebody / Guest»): read
+    /// now, its early skips count with the main artist's — old and new
+    /// together, and two old ones alone — and keep out their own songs.
+    #[test]
+    fn an_old_logs_whole_credits_count_with_the_main_artist() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service};
+        use nikgob_recs::{Heard, NewEvent, NewLog};
+        let day = 86_400_000i64;
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = |id: &str, artists: &[&str]| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), format!("Song {id}"));
+            for a in artists {
+                t.artists.push(ArtistRef::new(None, *a));
+            }
+            t
+        };
+        let heard = |id: &str, credit: &[&str], old: bool, at: i64| {
+            let track = lib.upsert_stream_tracks(&[song(id, credit)]).unwrap()[0];
+            let row = lib.get_track_row(track).unwrap().unwrap();
+            NewEvent {
+                song: id.into(),
+                // The key of before, or of now.
+                artist: if old { nikgob_recs::artist_key(&row.artist) } else { nikgob_recs::main_artist_key(&row.artist) },
+                source: None,
+                vector: None,
+                track: Some(track),
+                at,
+                heard: Heard::Early,
+                profile: None,
+                background: false,
+            }
+        };
+        let now = 12 * day;
+        let alone = song("x", &["Somebody"]);
+        // One skip of before, one of now.
+        let mut mixed = NewLog::default();
+        mixed.push(heard("o1", &["Somebody / Guest"], true, 10 * day));
+        mixed.push(heard("n1", &["Somebody"], false, 11 * day));
+        assert_ne!(mixed.events[0].artist, mixed.events[1].artist, "the keys of before and now differ");
+        assert!(!banned(&mixed, &alone, now), "as kept, neither key has two skips");
+        assert!(banned(&super::super::novelty::normalised(&lib, mixed), &alone, now));
+        // Two skips of before.
+        let mut old = NewLog::default();
+        old.push(heard("o2", &["Somebody / Guest"], true, 10 * day));
+        old.push(heard("o3", &["Somebody / Other"], true, 11 * day));
+        assert!(banned(&super::super::novelty::normalised(&lib, old), &alone, now));
+        // A song gone from the library keeps its key, the main of it.
+        let mut gone = NewLog::default();
+        gone.push(NewEvent { track: None, ..heard("g1", &["Third"], false, 10 * day) });
+        assert_eq!(super::super::novelty::normalised(&lib, gone).events[0].artist, "third");
+    }
+
     /// The liked songs' mix, the mix of a part of the day, a mix of the
     /// day and a genre mix keep their keys both ways and are no moments of
     /// the lottery, and a genre mix is kept with the day's.
