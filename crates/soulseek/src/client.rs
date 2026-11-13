@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
@@ -38,23 +38,61 @@ const ANSWER_LIMIT: usize = 100;
 /// Search answers being sent at once; more are dropped.
 const ANSWERS_AT_ONCE: usize = 4;
 const SERVER_PING: Duration = Duration::from_secs(120);
+/// Bytes waiting to be sent to one peer at most: a peer that lets more pile
+/// up (it asks and does not read) is cut off. An empty queue takes a message
+/// of any size (our own browse answer can be big).
+const PEER_QUEUE_BYTES: usize = 32 << 20;
 
 type Waiters<T> = Mutex<HashMap<(String, u32), oneshot::Sender<T>>>;
+
+/// A message on its way to a peer: its own bytes, or bytes shared by many
+/// answers (the browse answer).
+enum Out {
+    Own(Vec<u8>),
+    Shared(Arc<[u8]>),
+}
+
+impl Out {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Own(v) => v,
+            Self::Shared(a) => a,
+        }
+    }
+}
 
 /// A connection to a peer for peer messages.
 pub(crate) struct PeerHandle {
     id: u64,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::UnboundedSender<Out>,
+    /// Bytes handed to the writer and not yet written.
+    queued: Arc<AtomicUsize>,
     closed: CancellationToken,
 }
 
 impl PeerHandle {
     pub(crate) fn send(&self, m: &PeerMsg) -> bool {
-        self.tx.send(m.encode()).is_ok()
+        self.push(Out::Own(m.encode()))
     }
 
-    fn send_raw(&self, bytes: Vec<u8>) -> bool {
-        self.tx.send(bytes).is_ok()
+    fn send_raw(&self, bytes: Arc<[u8]>) -> bool {
+        self.push(Out::Shared(bytes))
+    }
+
+    fn push(&self, out: Out) -> bool {
+        let n = out.bytes().len();
+        let before = self.queued.fetch_add(n, Ordering::AcqRel);
+        if before > 0 && before + n > PEER_QUEUE_BYTES {
+            self.queued.fetch_sub(n, Ordering::AcqRel);
+            debug!("soulseek: a peer does not read what it asks for; closing the connection");
+            self.closed.cancel();
+            return false;
+        }
+        if self.tx.send(out).is_err() {
+            self.queued.fetch_sub(n, Ordering::AcqRel);
+            return false;
+        }
+        true
     }
 
     fn live(&self) -> bool {
@@ -334,6 +372,11 @@ impl Client {
 
     pub fn downloads(&self) -> Vec<crate::DownloadInfo> {
         self.inner.downloads.lock().list()
+    }
+
+    /// One download of [`Self::downloads`].
+    pub fn download_info(&self, id: u64) -> Option<crate::DownloadInfo> {
+        self.inner.downloads.lock().info(id)
     }
 
     /// Running and queued uploads, then the last finished ones.
@@ -778,16 +821,30 @@ impl Inner {
 
     fn attach_peer(self: &Arc<Self>, user: &str, s: TcpStream) -> Arc<PeerHandle> {
         let (rd, mut wr) = s.into_split();
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
         let closed = self.shutdown.child_token();
-        let h = Arc::new(PeerHandle { id: self.conn_ids.fetch_add(1, Ordering::Relaxed), tx, closed: closed.clone() });
+        let queued = Arc::new(AtomicUsize::new(0));
+        let h = Arc::new(PeerHandle {
+            id: self.conn_ids.fetch_add(1, Ordering::Relaxed),
+            tx,
+            queued: queued.clone(),
+            closed: closed.clone(),
+        });
         self.peers.lock().insert(user.to_owned(), h.clone());
+        // A peer that stops reading stalls a write; past this it is let go.
+        let write_limit = self.cfg.timeouts.peer_idle;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = closed.cancelled() => break,
                     m = rx.recv() => match m {
-                        Some(b) => if codec::write_all(&mut wr, &b).await.is_err() { break },
+                        Some(b) => {
+                            let written = timeout(write_limit, codec::write_all(&mut wr, b.bytes())).await;
+                            queued.fetch_sub(b.bytes().len(), Ordering::AcqRel);
+                            if !matches!(written, Ok(Ok(()))) {
+                                break;
+                            }
+                        }
                         None => break,
                     },
                 }
@@ -824,7 +881,7 @@ impl Inner {
             PeerMsg::SharedFileListRequest => {
                 if sharing {
                     let share = self.share.read().clone();
-                    h.send_raw(share.browse_message().to_vec());
+                    h.send_raw(share.browse_message());
                 } else {
                     h.send(&PeerMsg::SharedFileListResponse(Vec::new()));
                 }
@@ -1061,6 +1118,37 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_that_does_not_read_is_cut_off() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = PeerHandle { id: 1, tx, queued: Arc::new(AtomicUsize::new(0)), closed: CancellationToken::new() };
+        // An answer bigger than the limit still goes into an empty queue.
+        let big: Arc<[u8]> = vec![0u8; PEER_QUEUE_BYTES + 1].into();
+        assert!(h.send_raw(big.clone()));
+        // A peer asking again and again without reading: no second copy
+        // piles up, and the connection is closed.
+        assert!(!h.send_raw(big.clone()));
+        assert!(h.closed.is_cancelled());
+        assert_eq!(h.queued.load(Ordering::Relaxed), PEER_QUEUE_BYTES + 1);
+        let first = rx.try_recv().unwrap();
+        assert!(matches!(&first, Out::Shared(a) if Arc::ptr_eq(a, &big)), "the bytes are shared, not copied");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn small_messages_fill_the_queue_up_to_the_limit() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let h = PeerHandle { id: 1, tx, queued: Arc::new(AtomicUsize::new(0)), closed: CancellationToken::new() };
+        let chunk: Arc<[u8]> = vec![0u8; 1 << 20].into();
+        let mut sent = 0;
+        while h.send_raw(chunk.clone()) {
+            sent += 1;
+            assert!(sent <= 64, "the queue never filled");
+        }
+        assert_eq!(sent, PEER_QUEUE_BYTES >> 20);
+        assert!(h.closed.is_cancelled());
+    }
 
     #[test]
     fn embedded_search_reads_both_layouts() {

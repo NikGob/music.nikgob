@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use crate::codec::{Reader, Writer};
@@ -122,7 +122,7 @@ pub struct ShareIndex {
     files: Vec<SharedFile>,
     dirs: u32,
     words: HashMap<Box<str>, Vec<u32>>,
-    browse: OnceLock<Vec<u8>>,
+    browse: OnceLock<Arc<[u8]>>,
 }
 
 /// The words of a path or query term, lowercased.
@@ -445,8 +445,9 @@ impl ShareIndex {
     }
 
     /// The encoded browse response, built once per index.
-    pub fn browse_message(&self) -> &[u8] {
-        self.browse.get_or_init(|| PeerMsg::SharedFileListResponse(self.browse()).encode())
+    /// Shared by every answer: each browse request queues the same bytes.
+    pub fn browse_message(&self) -> Arc<[u8]> {
+        self.browse.get_or_init(|| PeerMsg::SharedFileListResponse(self.browse()).encode().into()).clone()
     }
 
     /// A folder with its subfolders.
