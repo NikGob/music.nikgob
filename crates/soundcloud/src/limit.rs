@@ -108,8 +108,15 @@ impl Gate {
     pub(crate) fn trip(&self, retry_after: Option<Duration>) {
         let mut p = lock(&self.pause);
         let now = Instant::now();
-        if p.until.is_some_and(|(at, _)| at > now) {
-            return; // already paused: one limit, many answers
+        if let Some((at, _)) = p.until.filter(|(at, _)| *at > now) {
+            // Already paused: one limit, many answers (the schedule does not
+            // step up again), but a later answer asking for longer is heard.
+            let asked = retry_after.unwrap_or_default().min(MAX_SERVER_PAUSE);
+            if now + asked > at {
+                p.until = Some((now + asked, SystemTime::now() + asked));
+                log::warn!("soundcloud: every call pauses for {} min (Retry-After)", asked.as_secs() / 60);
+            }
+            return;
         }
         p.level = match p.last {
             Some(last) if now.duration_since(last) < CALM_AFTER && !p.level.is_zero() => {
@@ -239,6 +246,15 @@ mod tests {
         let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
         gate.trip(Some(Duration::from_secs(10)));
         assert!(gate.paused_for().unwrap() > Duration::from_secs(290));
+        // Answers of calls already in flight: a longer one extends the pause,
+        // a shorter one keeps it, and neither steps the schedule up.
+        let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
+        gate.trip(None);
+        gate.trip(Some(Duration::from_secs(3600)));
+        assert!(gate.paused_for().unwrap() > Duration::from_secs(3590));
+        gate.trip(Some(Duration::from_secs(60)));
+        assert!(gate.paused_for().unwrap() > Duration::from_secs(3590));
+        assert_eq!(lock(&gate.pause).level, FIRST_PAUSE);
         // A broken one is capped.
         let gate = Gate::with_spacing(Duration::ZERO, Duration::ZERO);
         gate.trip(Some(Duration::from_secs(30 * 24 * 3600)));

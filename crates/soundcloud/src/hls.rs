@@ -191,6 +191,29 @@ pub(crate) fn patch_init(buf: &mut [u8], total: Duration) -> bool {
     true
 }
 
+/// SoundCloud's media CDN asked to wait (a 429 with a long `Retry-After`):
+/// until then no stream asks it anything, whichever track it plays. Shared
+/// by the service's streams; apart from the API's pause ([`crate::limit`]).
+#[derive(Clone, Default)]
+pub(crate) struct MediaCooldown(Arc<Mutex<Option<std::time::Instant>>>);
+
+impl MediaCooldown {
+    /// How long media requests must still wait.
+    pub(crate) fn left(&self) -> Option<Duration> {
+        let until = (*self.0.lock().unwrap_or_else(PoisonError::into_inner))?;
+        until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
+    }
+
+    /// No media request for `wait` (a later end already set stays).
+    pub(crate) fn hold(&self, wait: Duration) {
+        let until = std::time::Instant::now() + wait.min(crate::limit::MAX_SERVER_PAUSE);
+        let mut at = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if at.is_none_or(|a| a < until) {
+            *at = Some(until);
+        }
+    }
+}
+
 /// Resolves (again) where the stream is. Called on the download task.
 pub(crate) type ResolveFn = Arc<dyn Fn() -> BoxFuture<'static, Result<Plan, StreamError>> + Send + Sync>;
 
@@ -228,6 +251,9 @@ struct State {
     /// The segment the reader waits for or reads.
     want: usize,
     closed: bool,
+    /// The download is waiting out a network outage: a reader waits with
+    /// it (the download fails the stream when the outage lasts too long).
+    outage: bool,
 }
 
 struct Shared {
@@ -258,10 +284,20 @@ pub(crate) struct HlsStream {
     /// The bitrate of the stream the resolve picked.
     kbps: Arc<AtomicU64>,
     duration: Arc<Mutex<Option<Duration>>>,
+    cooldown: MediaCooldown,
+    /// Longest wait of a read for its bytes ([`READ_TIMEOUT`]; shorter in
+    /// tests), unless the download waits out an outage.
+    read_timeout: Duration,
 }
 
 impl HlsStream {
-    pub(crate) fn new(handle: Handle, http: reqwest::Client, resolve: ResolveFn, kbps: Arc<AtomicU64>) -> Self {
+    pub(crate) fn new(
+        handle: Handle,
+        http: reqwest::Client,
+        resolve: ResolveFn,
+        kbps: Arc<AtomicU64>,
+        cooldown: MediaCooldown,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
@@ -275,6 +311,8 @@ impl HlsStream {
             resolve: Some(resolve),
             kbps,
             duration: Arc::new(Mutex::new(None)),
+            cooldown,
+            read_timeout: READ_TIMEOUT,
         }
     }
 
@@ -289,6 +327,7 @@ impl HlsStream {
             http: self.http.clone(),
             resolve,
             duration: Arc::clone(&self.duration),
+            cooldown: self.cooldown.clone(),
         };
         self.handle.spawn(task.run());
     }
@@ -330,7 +369,7 @@ impl Read for HlsStream {
             return Ok(0);
         }
         let pos = self.pos;
-        let deadline = std::time::Instant::now() + READ_TIMEOUT;
+        let deadline = std::time::Instant::now() + self.read_timeout;
         let shared = Arc::clone(&self.shared);
         let mut st = self.layout_wait()?;
         loop {
@@ -379,10 +418,13 @@ impl Read for HlsStream {
                 shared.wake.notify_one();
             }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
+            if left.is_zero() && !st.outage {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "SoundCloud: the stream stalled"));
             }
-            st = shared.ready.wait_timeout(st, left).unwrap_or_else(PoisonError::into_inner).0;
+            // Through an outage the download decides: the bytes come, or
+            // its error does once the outage has lasted too long.
+            let wait = if left.is_zero() { Duration::from_secs(1) } else { left };
+            st = shared.ready.wait_timeout(st, wait).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 }
@@ -439,6 +481,7 @@ struct Download {
     http: reqwest::Client,
     resolve: ResolveFn,
     duration: Arc<Mutex<Option<Duration>>>,
+    cooldown: MediaCooldown,
 }
 
 /// What a GET of a piece gave.
@@ -478,6 +521,10 @@ impl Download {
     async fn get(&self, url: &str, range: Option<u64>) -> Result<Got, StreamError> {
         let mut attempt = 0;
         loop {
+            // The CDN asked every stream to wait.
+            if let Some(left) = self.cooldown.left() {
+                return Err(StreamError::RateLimited { retry_after: Some(left) });
+            }
             let mut wait = Duration::ZERO;
             let mut req = self.http.get(url);
             if let Some(n) = range {
@@ -514,7 +561,8 @@ impl Download {
                             .get("retry-after")
                             .and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok())
                             .map(Duration::from_secs);
-                        if retry_after.is_some_and(|w| w > MEDIA_WAIT_MAX) {
+                        if let Some(w) = retry_after.filter(|w| *w > MEDIA_WAIT_MAX) {
+                            self.cooldown.hold(w);
                             return Err(StreamError::RateLimited { retry_after });
                         }
                         wait = retry_after.unwrap_or_default();
@@ -530,6 +578,10 @@ impl Download {
             attempt += 1;
             if attempt >= MAX_ATTEMPTS || self.closed() {
                 return Err(err);
+            }
+            if range.is_none() {
+                // A whole segment is being retried: a reader waits with it.
+                self.shared.lock().outage = true;
             }
             tokio::time::sleep(wait.max(Duration::from_millis(300 * u64::from(attempt)))).await;
         }
@@ -635,6 +687,7 @@ impl Download {
             let got = match self.get(&plan.segments[i].0, None).await {
                 Ok(got) => {
                     outage = None;
+                    self.shared.lock().outage = false;
                     got
                 }
                 // The network went away (or the CDN is down) for longer than
@@ -646,6 +699,7 @@ impl Download {
                     if since.elapsed() >= OUTAGE_MAX {
                         return Err(e);
                     }
+                    self.shared.lock().outage = true;
                     log::info!("soundcloud: segment {i} not fetched ({e}); asking again");
                     let _ = tokio::time::timeout(OUTAGE_RETRY, self.shared.wake.notified()).await;
                     continue;
@@ -705,6 +759,7 @@ impl Download {
                 http,
                 resolve: Arc::clone(&self.resolve),
                 duration: Arc::clone(&self.duration),
+                cooldown: self.cooldown.clone(),
             };
             set.spawn(async move {
                 let _turn = limit.acquire().await;
@@ -822,6 +877,10 @@ mod tests {
 
         /// A stream whose resolves hand out signatures 1, 2, … in turn.
         fn stream(server: &MockServer, segments: usize, resolves: Arc<AtomicU32>) -> HlsStream {
+            stream_with(server, segments, resolves, MediaCooldown::default())
+        }
+
+        fn stream_with(server: &MockServer, segments: usize, resolves: Arc<AtomicU32>, cooldown: MediaCooldown) -> HlsStream {
             let plan_of = {
                 let uri = server.uri();
                 move |sig: u32| {
@@ -838,7 +897,7 @@ mod tests {
                 let plan = plan_of(sig);
                 Box::pin(async move { Ok(plan) })
             });
-            HlsStream::new(Handle::current(), reqwest::Client::new(), resolve, Arc::new(AtomicU64::new(160)))
+            HlsStream::new(Handle::current(), reqwest::Client::new(), resolve, Arc::new(AtomicU64::new(160)), cooldown)
         }
 
         async fn serve(server: &MockServer, url_path: &str, sig: u32, status: u16, body: Vec<u8>, total: Option<usize>) {
@@ -935,7 +994,9 @@ mod tests {
                 .with_priority(3)
                 .mount(&server)
                 .await;
-            let s = stream(&server, 1, Arc::new(AtomicU32::new(0)));
+            let mut s = stream(&server, 1, Arc::new(AtomicU32::new(0)));
+            // The reader waits with the download past its own deadline.
+            s.read_timeout = Duration::from_secs(1);
             let bytes = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap();
             assert_eq!(bytes.len(), 10_050);
         }
@@ -952,19 +1013,34 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn a_long_media_retry_after_fails_at_once_with_its_time() {
             let server = MockServer::start().await;
-            serve(&server, "/init.mp4", 1, 200, vec![1; 50], None).await;
+            Mock::given(method("GET"))
+                .and(path("/init.mp4"))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1u8; 50]))
+                .expect(1)
+                .mount(&server)
+                .await;
             Mock::given(method("GET"))
                 .and(path("/data0.m4s"))
                 .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "120"))
                 .expect(1)
                 .mount(&server)
                 .await;
-            let s = stream(&server, 1, Arc::new(AtomicU32::new(0)));
+            let cooldown = MediaCooldown::default();
+            let s = stream_with(&server, 1, Arc::new(AtomicU32::new(0)), cooldown.clone());
             let started = std::time::Instant::now();
             let e = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap_err();
             assert!(started.elapsed() < Duration::from_secs(5), "no retries: {:?}", started.elapsed());
             let inner = e.into_inner().and_then(|b| b.downcast::<StreamError>().ok()).map(|b| *b);
             assert_eq!(inner, Some(StreamError::RateLimited { retry_after: Some(Duration::from_secs(120)) }));
+            // Another track's stream asks the CDN nothing meanwhile (the
+            // mocks expect one request each).
+            let s = stream_with(&server, 1, Arc::new(AtomicU32::new(0)), cooldown);
+            let e = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap_err();
+            let inner = e.into_inner().and_then(|b| b.downcast::<StreamError>().ok()).map(|b| *b);
+            assert!(
+                matches!(inner, Some(StreamError::RateLimited { retry_after: Some(w) }) if w > Duration::from_secs(110)),
+                "{inner:?}"
+            );
         }
     }
 
