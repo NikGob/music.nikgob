@@ -920,24 +920,43 @@ fn artist_row(ui: &mut Ui, a: &ArtistCard, out: &mut Vec<Command>) -> Option<Rou
 }
 
 /// «Скачано» (experimental): the tracks with a file under the day their
-/// file came, the latest first; a tap plays from there on down.
+/// file came, the latest first; a tap plays from there on down. Only the
+/// rows in sight are laid out: the others take their room (one row's height,
+/// as measured on a row drawn) without being built.
 fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
     let s = Theme::get(ui.ctx()).scheme;
     let days = &state.library.downloaded;
-    let ids: Vec<_> = days.iter().flat_map(|d| d.tracks.iter().map(|t| t.id)).collect();
-    if ids.is_empty() {
+    let loaded: usize = days.iter().map(|d| d.tracks.len()).sum();
+    if loaded == 0 {
         widgets::empty_state(ui, Icon::DownloadDone, "Пока ничего", "", None);
         return None;
     }
-    let total = state.library.downloaded_total.max(ids.len());
+    let total = state.library.downloaded_total.max(loaded);
     count_line(ui, &count(total, "трек", "трека", "треков"), |_| {});
+    let step_key = ui.id().with("downloaded-row-step");
+    let mut step = ui.ctx().data(|d| d.get_temp::<f32>(step_key)).unwrap_or(72.0 + ui.spacing().item_spacing.y);
+    let clip = ui.clip_rect();
     let mut nav = None;
     let mut i = 0;
+    // Room of the rows out of sight not taken yet.
+    let mut skipped = 0.0_f32;
     for day in days {
+        if skipped > 0.0 {
+            ui.add_space(std::mem::take(&mut skipped));
+        }
         ui.add_space(8.0);
         ui.label(TypeRole::TitleSmall.style().rich(&day.label, s.on_surface_variant));
         ui.add_space(4.0);
         for t in &day.tracks {
+            let top = ui.cursor().top() + skipped;
+            if top > clip.bottom() || top + step < clip.top() {
+                skipped += step;
+                i += 1;
+                continue;
+            }
+            if skipped > 0.0 {
+                ui.add_space(std::mem::take(&mut skipped));
+            }
             // Each artist and the album are links to their pages.
             let mut line = t.artist.clone();
             let (mut links, mut routes) = crate::screens::artist_links::library_spans(&t.artists, &t.artist);
@@ -954,17 +973,26 @@ fn downloaded(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut V
                 .leading(Leading::Image(t.cover.as_ref().map(|c| c.uri()), Icon::MusicNote))
                 .id_salt(("downloaded-row", t.id))
                 .show(ui);
+            let drawn = o.response.rect.height() + ui.spacing().item_spacing.y;
+            if (drawn - step).abs() > 0.5 {
+                step = drawn;
+                ui.ctx().data_mut(|d| d.insert_temp(step_key, step));
+            }
             if let Some(r) = o.link_clicked.and_then(|k| routes.get(k).cloned()) {
                 nav = Some(r);
             } else if o.response.clicked() {
-                out.push(Command::PlayTracks { tracks: ids.clone(), start: i, context: "скачанного".into() });
+                let ids = days.iter().flat_map(|d| d.tracks.iter().map(|t| t.id)).collect();
+                out.push(Command::PlayTracks { tracks: ids, start: i, context: "скачанного".into() });
             }
             nav = pages.track_context_menu(&o.response, t, state, out).or(nav);
             i += 1;
         }
     }
+    if skipped > 0.0 {
+        ui.add_space(skipped);
+    }
     // The older ones a page at a time.
-    if ids.len() < total {
+    if loaded < total {
         ui.add_space(8.0);
         let more = ui
             .vertical_centered(|ui| {
