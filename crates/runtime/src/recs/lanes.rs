@@ -386,7 +386,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             let genre = |i: usize| b.genre_at(i);
             let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
             let none = |_: &StreamTrack| Vec::new();
-            let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: Some(&snap.index) };
+            let ctx = nikgob_recs::open_world::WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: Some(&snap.index), learned: None };
             nikgob_recs::open_world::niches(&ctx)
                 .into_iter()
                 .filter(|c| !prefs.hidden.contains(&c.key))
@@ -432,7 +432,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
                 // A niche's top-up joins the candidates of its mix (the
                 // top-up of these seeds, not of another draw of the key).
                 let seeds: Vec<TrackId> = if m.pool.is_empty() { &m.tracks } else { &m.pool }.iter().map(|&i| snap.model.id(i)).collect();
-                let topped = super::niche::cached(lib, lane.key, &seeds).map(|f| niche_candidates(snap, &f)).unwrap_or_default();
+                let topped = super::niche::cached(lib, lane.key, &seeds).map(|f| niche_candidates(snap, &f, &input.new_log)).unwrap_or_default();
                 let all: Vec<NewCandidate> = if topped.is_empty() { Vec::new() } else { cands.iter().cloned().chain(topped).collect() };
                 let pool = if all.is_empty() { &cands } else { &all };
                 let (new, mode) = new_for(snap, input, &log, pool, &m, seed.wrapping_add(k as u64), &mut used_new);
@@ -741,7 +741,7 @@ const GRAPH_WEIGHT: f32 = 0.5;
 /// [`nikgob_recs::NewLog::source_shares`] for the epoch; the graph's songs
 /// are YouTube Music's radios, times the source's trust); its kind of song
 /// told by its preview where it was analysed, the library's tracks the
-/// graph links it to.
+/// graph links it to. None of an artist kept out ([`banned`]).
 pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap<String, nikgob_recs::Source>, log: &nikgob_recs::NewLog, seed: u64) -> Vec<NewCandidate> {
     use nikgob_recs::{GraphSource, Source, stream_song_key};
     let shares = log.source_shares(&mut nikgob_recs::rng::Rng::new(seed ^ 0x736f_7572_6365));
@@ -751,7 +751,8 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
     let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| new_candidate(snap, t, near, weight);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
-    let found: Vec<&StreamTrack> = pool.iter().filter(|t| snap.is_new(t)).collect();
+    let now = snap.model.now();
+    let found: Vec<&StreamTrack> = pool.iter().filter(|t| snap.is_new(t) && !banned(log, t, now)).collect();
     let len = found.len().max(1) as f32;
     for (k, t) in found.into_iter().enumerate() {
         let key = stream_song_key(t);
@@ -763,13 +764,24 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
         out.push(candidate(t, near(&key), weight));
     }
     let trust = share(Some(Source::YoutubeRadio)) * GraphSource::YoutubeRadio.trust();
-    let rest: Vec<&super::graph::GraphFind> = snap.graph_new.iter().filter(|f| !seen.contains(&stream_song_key(&f.track))).collect();
+    let rest: Vec<&super::graph::GraphFind> = snap.graph_new.iter().filter(|f| !seen.contains(&stream_song_key(&f.track)) && !banned(log, &f.track, now)).collect();
     let len = rest.len().max(1) as f32;
     for (k, f) in rest.into_iter().enumerate() {
         let weight = GRAPH_WEIGHT * (1.0 - 0.5 * k as f32 / len) * trust;
         out.push(candidate(&f.track, f.near.iter().filter_map(|(t, _)| snap.model.position(*t)).collect(), weight));
     }
     out
+}
+
+/// Whether an artist of the new song `t` is kept out of new music at
+/// `now` by how their songs were received ([`nikgob_recs::NewLog::artist_penalty`]:
+/// two early skips within a month), its artists keyed as the log keys them
+/// ([`nikgob_recs::credit_keys`]: a collaboration of an artist kept out is
+/// kept out too). Every way a new song comes in minds it: the discoveries,
+/// the graph's songs, the niches' top-ups.
+pub(super) fn banned(log: &nikgob_recs::NewLog, t: &StreamTrack, now: nikgob_core::model::UnixMs) -> bool {
+    let keys = nikgob_recs::credit_keys(t.artists.iter().map(|a| a.name.as_str()));
+    log.credit_penalty(&keys, now).is_infinite()
 }
 
 /// A new song as a card may take it: its kind of song told by its preview
@@ -807,13 +819,15 @@ pub(super) fn artist_tracks(snap: &Snapshot, t: &StreamTrack) -> Vec<usize> {
 }
 
 /// The songs a niche's top-up found as candidates of its mix: linked to
-/// the niche's songs whose lists held them, the most seeds first.
-pub(super) fn niche_candidates(snap: &Snapshot, found: &super::niche::NicheFound) -> Vec<NewCandidate> {
+/// the niche's songs whose lists held them, the most seeds first; none of
+/// an artist kept out ([`banned`]).
+pub(super) fn niche_candidates(snap: &Snapshot, found: &super::niche::NicheFound, log: &nikgob_recs::NewLog) -> Vec<NewCandidate> {
     let len = found.tracks.len().max(1) as f32;
+    let now = snap.model.now();
     found
         .tracks
         .iter()
-        .filter(|(t, _)| snap.is_new(t))
+        .filter(|(t, _)| snap.is_new(t) && !banned(log, t, now))
         .enumerate()
         .map(|(k, (t, seeds))| {
             let near = seeds.iter().filter_map(|s| snap.model.position(*s)).collect();
@@ -841,6 +855,137 @@ fn new_for(snap: &Snapshot, input: &BuildInput, log: &nikgob_recs::NewLog, cands
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An artist two of whose new songs were skipped early within a month
+    /// is kept out of new music whichever way a song of theirs comes in;
+    /// one skip only lowers them, and another artist is untouched.
+    #[test]
+    fn an_artist_kept_out_is_banned_everywhere() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service};
+        use nikgob_recs::{Heard, NewEvent, NewLog};
+        let day = 86_400_000i64;
+        let ev = |song: &str, at: i64| NewEvent {
+            song: song.into(),
+            artist: nikgob_recs::artist_key("Somebody"),
+            source: None,
+            vector: None,
+            track: None,
+            at,
+            heard: Heard::Early,
+            profile: None,
+            background: false,
+        };
+        let song = |artist: &str| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, "x"), "Song");
+            t.artists.push(ArtistRef::new(None, artist));
+            t
+        };
+        let mut log = NewLog::default();
+        log.push(ev("a", 10 * day));
+        assert!(!banned(&log, &song("Somebody"), 11 * day), "one skip lowers only");
+        log.push(ev("b", 12 * day));
+        assert!(banned(&log, &song("Somebody"), 13 * day));
+        assert!(!banned(&log, &song("Someone else"), 13 * day));
+        assert!(!banned(&NewLog::default(), &song("Somebody"), 13 * day));
+    }
+
+    /// The log keeps the artist of a new song heard as the library credits
+    /// it (its row's credit line) and a candidate is checked by the
+    /// service's list of its artists: one key function, so the ban of the
+    /// main artist of a collaboration skipped twice keeps out their own
+    /// songs and the songs they are a guest on, while the guest stays in.
+    #[test]
+    fn a_ban_from_the_log_meets_every_candidate_of_that_artist() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service};
+        use nikgob_recs::{Heard, NewEvent, NewLog};
+        let day = 86_400_000i64;
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = |id: &str, artists: &[&str]| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), format!("Song {id}"));
+            for a in artists {
+                t.artists.push(ArtistRef::new(None, *a));
+            }
+            t
+        };
+        let mut log = NewLog::default();
+        // Two early skips of songs whose credits name «Somebody» first, as
+        // the log keeps them (`novelty::new_song`).
+        for (k, credit) in [["Somebody / Guest"].as_slice(), &["Somebody", "Another"]].into_iter().enumerate() {
+            let id = lib.upsert_stream_tracks(&[song(&format!("h{k}"), credit)]).unwrap()[0];
+            let row = lib.get_track_row(id).unwrap().unwrap();
+            log.push(NewEvent {
+                song: format!("s{k}"),
+                artist: nikgob_recs::main_artist_key(&row.artist),
+                source: None,
+                vector: None,
+                track: Some(id),
+                at: (10 + k as i64) * day,
+                heard: Heard::Early,
+                profile: None,
+                background: false,
+            });
+        }
+        let now = 12 * day;
+        assert!(banned(&log, &song("1", &["Somebody"]), now));
+        assert!(banned(&log, &song("2", &["Somebody feat. Third"]), now));
+        assert!(banned(&log, &song("3", &["Third", "Somebody"]), now), "a guest kept out keeps the song out");
+        assert!(banned(&log, &song("4", &["Third & Somebody, Fourth"]), now));
+        assert!(!banned(&log, &song("5", &["Guest"]), now), "the guest of a skipped song stays in");
+        assert!(!banned(&log, &song("6", &["Third"]), now));
+    }
+
+    /// A log kept before the artists were keyed by [`nikgob_recs::credit_keys`]
+    /// keyed a credit whole («somebody guest» of «Somebody / Guest»): read
+    /// now, its early skips count with the main artist's — old and new
+    /// together, and two old ones alone — and keep out their own songs.
+    #[test]
+    fn an_old_logs_whole_credits_count_with_the_main_artist() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service};
+        use nikgob_recs::{Heard, NewEvent, NewLog};
+        let day = 86_400_000i64;
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let song = |id: &str, artists: &[&str]| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), format!("Song {id}"));
+            for a in artists {
+                t.artists.push(ArtistRef::new(None, *a));
+            }
+            t
+        };
+        let heard = |id: &str, credit: &[&str], old: bool, at: i64| {
+            let track = lib.upsert_stream_tracks(&[song(id, credit)]).unwrap()[0];
+            let row = lib.get_track_row(track).unwrap().unwrap();
+            NewEvent {
+                song: id.into(),
+                // The key of before, or of now.
+                artist: if old { nikgob_recs::artist_key(&row.artist) } else { nikgob_recs::main_artist_key(&row.artist) },
+                source: None,
+                vector: None,
+                track: Some(track),
+                at,
+                heard: Heard::Early,
+                profile: None,
+                background: false,
+            }
+        };
+        let now = 12 * day;
+        let alone = song("x", &["Somebody"]);
+        // One skip of before, one of now.
+        let mut mixed = NewLog::default();
+        mixed.push(heard("o1", &["Somebody / Guest"], true, 10 * day));
+        mixed.push(heard("n1", &["Somebody"], false, 11 * day));
+        assert_ne!(mixed.events[0].artist, mixed.events[1].artist, "the keys of before and now differ");
+        assert!(!banned(&mixed, &alone, now), "as kept, neither key has two skips");
+        assert!(banned(&super::super::novelty::normalised(&lib, mixed), &alone, now));
+        // Two skips of before.
+        let mut old = NewLog::default();
+        old.push(heard("o2", &["Somebody / Guest"], true, 10 * day));
+        old.push(heard("o3", &["Somebody / Other"], true, 11 * day));
+        assert!(banned(&super::super::novelty::normalised(&lib, old), &alone, now));
+        // A song gone from the library keeps its key, the main of it.
+        let mut gone = NewLog::default();
+        gone.push(NewEvent { track: None, ..heard("g1", &["Third"], false, 10 * day) });
+        assert_eq!(super::super::novelty::normalised(&lib, gone).events[0].artist, "third");
+    }
 
     /// The liked songs' mix, the mix of a part of the day, a mix of the
     /// day and a genre mix keep their keys both ways and are no moments of

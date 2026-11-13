@@ -2,7 +2,8 @@
 //! дополнением», on one thread that lives as long as the worker instead of
 //! a thread per request.
 //!
-//! Each kind of request has a lane, and in a lane the newer request wins:
+//! Each kind of request has a lane, and in a lane the newer request wins
+//! (but in the niches' lane, whose requests all run in order):
 //! one still waiting when a newer one comes is dropped unrun. That is safe
 //! because each kind has at most one request on its way per run (the
 //! radio's `extending`, the guests' `ranking`): a newer one in the same
@@ -24,6 +25,10 @@ pub(crate) enum Lane {
     Radio,
     /// The guests of the playlist playing.
     Plus,
+    /// The niches' top-ups: their plans and the library's writes of their
+    /// budgets and finds — every one runs, in the order sent (none is
+    /// replaced).
+    Niche,
 }
 
 struct Job {
@@ -79,9 +84,12 @@ fn run(inbox: &Receiver<Job>) {
     }
 }
 
-/// `job` joins the requests waiting; an older one of its lane goes.
+/// `job` joins the requests waiting; an older one of its lane goes (but
+/// for [`Lane::Niche`]'s).
 fn queue(waiting: &mut VecDeque<Job>, job: Job) {
-    waiting.retain(|w| w.lane != job.lane);
+    if job.lane != Lane::Niche {
+        waiting.retain(|w| w.lane != job.lane);
+    }
     waiting.push_back(job);
 }
 
@@ -109,14 +117,14 @@ mod tests {
             .unwrap();
         has_started.recv_timeout(Duration::from_secs(10)).expect("the first request runs");
         let t = Instant::now();
-        for (lane, name) in [(Lane::Radio, "radio a"), (Lane::Radio, "radio b"), (Lane::Plus, "plus c"), (Lane::Radio, "radio d")] {
+        for (lane, name) in [(Lane::Radio, "radio a"), (Lane::Niche, "niche 1"), (Lane::Radio, "radio b"), (Lane::Plus, "plus c"), (Lane::Niche, "niche 2"), (Lane::Radio, "radio d")] {
             let r = ran.clone();
             picker.send(lane, move || { let _ = r.send(name); }).unwrap();
         }
         assert!(t.elapsed() < Duration::from_millis(500), "sending never waits for the work");
         open.send(()).unwrap();
-        let got: Vec<_> = (0..3).map(|_| done.recv_timeout(Duration::from_secs(10)).expect("a request ran")).collect();
-        assert_eq!(got, ["first", "plus c", "radio d"]);
+        let got: Vec<_> = (0..5).map(|_| done.recv_timeout(Duration::from_secs(10)).expect("a request ran")).collect();
+        assert_eq!(got, ["first", "niche 1", "plus c", "niche 2", "radio d"], "the niches' requests all run, in order");
         assert!(done.recv_timeout(Duration::from_millis(200)).is_err(), "the older ones never run");
     }
 

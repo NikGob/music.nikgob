@@ -249,7 +249,7 @@ mod tests {
         // The library's songs of a new song's artist, as the runtime tells.
         let artist_of: HashMap<String, ArtistId> = d.new.iter().filter_map(|n| Some((crate::stream_song_key(&n.track), n.artist?))).collect();
         let artist_tracks = |t: &StreamTrack| artist_of.get(&crate::stream_song_key(t)).map(|a| model.of_artist(*a).iter().map(|&i| i as usize).collect()).unwrap_or_default();
-        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &artist_tracks, index: None };
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &artist_tracks, index: None, learned: None };
         let g = guests(&ctx, &pool, &calm);
         assert!(g.len() >= 4, "{}", g.len());
         assert!(g.iter().all(|g| title(g).starts_with("Drift")), "{:?}", g.iter().map(title).collect::<Vec<_>>());

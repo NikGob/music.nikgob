@@ -39,6 +39,10 @@
 //!   «Все»). The character and the novelty are never let go: a chip never
 //!   shows a filter that does not hold.
 //!
+//! What the picks ask of the runtime ([`WaveAsks`]): the previews of the
+//! new songs about to play that have none, and more new songs of a filter
+//! whose new songs ran short.
+//!
 //! The bandit lives in the radio's state ([`crate::RadioState`]): a few
 //! numbers a cluster, saved with the queue so a wave goes on after a
 //! restart; nothing else is kept.
@@ -519,6 +523,39 @@ pub struct Picked {
     /// The user's scene had nothing left, even to play again: the wave
     /// went on over every scene (its seed is to say so).
     pub scene_let_go: bool,
+    pub asks: WaveAsks,
+}
+
+/// The new songs whose previews a wave asks for at most at once.
+const PREVIEWS_ASKED: usize = 6;
+
+/// What a wave's picks ask of the runtime.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WaveAsks {
+    /// New songs of the pool without a preview it picked or is about to
+    /// pick ([`crate::open_world::WaveNext::unheard`]), [`PREVIEWS_ASKED`]
+    /// at most: their sound places them before they play.
+    pub previews: Vec<RemoteId>,
+    /// A filter whose new songs ran short
+    /// ([`crate::open_world::WaveNext::short`]): its token
+    /// ([`WaveFilter::token`]) and its library songs to look around, the
+    /// best loved first.
+    pub short: Option<(String, Vec<nikgob_core::model::TrackId>)>,
+}
+
+impl WaveAsks {
+    /// Adds what a call of [`crate::open_world::next`] for `filter` over
+    /// `pool` told.
+    fn add(&mut self, m: &UserModel, pool: &[OpenCandidate], filter: &WaveFilter, next: &crate::open_world::WaveNext) {
+        for &k in &next.unheard {
+            if self.previews.len() < PREVIEWS_ASKED && !self.previews.contains(&pool[k].track.id) {
+                self.previews.push(pool[k].track.id.clone());
+            }
+        }
+        if next.short && self.short.is_none() && !next.seeds.is_empty() {
+            self.short = Some((filter.token(), next.seeds.iter().map(|&i| m.id(i)).collect()));
+        }
+    }
 }
 
 /// What a wave may play again when its filter has nothing new left: the
@@ -572,7 +609,7 @@ pub fn pick(
     // pool are cut to it when a cluster is another kind of scene.
     let scene_ok = |i: usize| of_scene(ctx, user.scene, i);
     let ok = |i: usize| (ctx.ok)(i) && scene_ok(i);
-    let within = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks, index: ctx.index };
+    let within = WaveContext { ok: &ok, ..*ctx };
     let in_scene: Vec<OpenCandidate> = if user.scene == Scene::All {
         Vec::new()
     } else {
@@ -582,6 +619,7 @@ pub fn pick(
     let mut served = served.clone();
     let mut out: Vec<WavePick> = Vec::with_capacity(n);
     let mut dry: Vec<usize> = Vec::new();
+    let mut asks = WaveAsks::default();
     let bonus = bandit.session_bonus(ctx, session);
     while out.len() < n {
         if (bandit.current.is_none() || bandit.block_left == 0 || bandit.current.is_some_and(|k| dry.contains(&k))) && !bandit.choose(&bonus, &dry) {
@@ -593,6 +631,7 @@ pub fn pick(
         let want = (n - out.len()).min(usize::from(bandit.block_left.max(1)));
         let (c, p) = if scene == user.scene { (ctx, pool) } else { (&within, pool_in) };
         let next = crate::open_world::next(c, p, &filter, session, want, &served);
+        asks.add(m, p, &filter, &next);
         if next.picks.is_empty() {
             dry.push(k);
             bandit.block_left = 0;
@@ -616,6 +655,7 @@ pub fn pick(
         }
         let before = out.len();
         let next = crate::open_world::next(ctx, pool, f, session, n - out.len(), &served);
+        asks.add(m, pool, f, &next);
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
             out.push(p);
@@ -629,7 +669,7 @@ pub fn pick(
         }
         scene_let_go |= stage > 0 && out.len() > before;
     }
-    Picked { picks: out, scene_let_go }
+    Picked { picks: out, scene_let_go, asks }
 }
 
 /// Up to `n` songs of `filter` played again (see [`pick`]): `repeatable`
@@ -650,7 +690,7 @@ fn repeats(
     let now = session.tracks().map(|p| p.ts).max().unwrap_or(0).max(m.now());
     let lately: HashSet<usize> = session.tracks().filter(|p| now - p.ts < cool_ms).filter_map(|p| m.position(p.track)).collect();
     let ok = |i: usize| (ctx.ok)(i) && !lately.contains(&i) && m.taste.last_played_at(i).is_none_or(|t| now - t >= cool_ms);
-    let cooled = WaveContext { model: m, ok: &ok, genre: ctx.genre, background: ctx.background, artist_tracks: ctx.artist_tracks, index: ctx.index };
+    let cooled = WaveContext { ok: &ok, ..*ctx };
     let keys: HashMap<&RemoteId, &str> = pool.iter().map(|c| (&c.track.id, c.key.as_str())).collect();
     let mut out: Vec<WavePick> = Vec::new();
     let mut taken: HashSet<String> = HashSet::new();

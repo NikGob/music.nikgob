@@ -216,9 +216,11 @@ impl Worker {
             _ => Vec::new(),
         };
         let (discoveries, sources, seeds) = (self.discoveries_all(), self.discovery_sources(), self.discovery_seeds());
+        self.new_log_load();
+        let log = self.recs.newlog.log.clone();
         let tx = self.recs.tx.clone();
         let spawned = self.recs.picker.send(super::picker::Lane::Plus, move || {
-            let mut pool = super::open::open_pool(&snap, &discoveries, &sources, &topped);
+            let mut pool = super::open::open_pool(&snap, &discoveries, &sources, &topped, &log, &|_| None);
             let playlist: Vec<usize> = tracks.iter().filter_map(|t| snap.model.position(*t)).collect();
             // A discovery the radio of one of the playlist's songs (or a
             // list of one of its artists) found is linked to those songs.
@@ -238,7 +240,7 @@ impl Worker {
             let ok = |_: usize| true;
             let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
             let artist_tracks = |t: &nikgob_core::streaming::StreamTrack| super::lanes::artist_tracks(&snap, t);
-            let ctx = WaveContext { model: &snap.model, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index) };
+            let ctx = WaveContext { model: &snap.model, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index), learned: None };
             let guests = nikgob_recs::plus::guests(&ctx, &pool, &playlist);
             let _ = tx.send(Internal::Recs(Msg::Plus(PlusMsg::Ranked { id, guests, ranked_for })));
         });

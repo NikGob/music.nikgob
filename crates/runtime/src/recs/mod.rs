@@ -50,6 +50,7 @@ mod radio;
 mod suggest;
 mod tiles;
 mod wave;
+pub(crate) use wave::WAVE_REFILL;
 mod top;
 
 use std::collections::{HashMap, HashSet};

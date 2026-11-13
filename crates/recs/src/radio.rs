@@ -167,9 +167,9 @@ pub const NO_REPEAT_MS: i64 = 3 * HOUR_MS;
 /// first.
 const SPARSE_SCENE: usize = 10;
 /// A model pick's value: the early skip's chance weighs this much…
-const SKIP_VALUE: f32 = 1.5;
+pub(crate) const SKIP_VALUE: f32 = 1.5;
 /// …a rest this long halves the bonus of being rested…
-const REST_HALF_MS: i64 = 36 * HOUR_MS;
+pub(crate) const REST_HALF_MS: i64 = 36 * HOUR_MS;
 /// …and chance this much.
 const MODEL_JITTER: f32 = 0.15;
 /// After this many early skips running the radio leaves their sound: the
@@ -183,7 +183,7 @@ const SIM_MS: i64 = 200_000;
 /// half…
 pub const MIX_REST: f32 = 0.8;
 /// …a radio less so.
-const RADIO_REST: f32 = 0.3;
+pub(crate) const RADIO_REST: f32 = 0.3;
 /// Session lessons remembered.
 const LESSONS: usize = 12;
 /// New-music candidates kept.
@@ -222,7 +222,7 @@ const TRAJECTORY_MEET: f32 = 0.5;
 pub const BLEND_MAX: usize = 24;
 /// What played to the end many times in the last days scores this much
 /// less in a stream, worn through ([`crate::Taste::saturation_at`]).
-const COOL: f32 = 0.4;
+pub(crate) const COOL: f32 = 0.4;
 /// A model pick costs this much for the worst step a DJ could take from
 /// the track before ([`crate::pick::dj_cost`]).
 const DJ_VALUE: f32 = 0.25;
@@ -380,6 +380,9 @@ pub struct RadioState {
     /// «Моя волна»: the bandit of the user's clusters ([`crate::wave`]).
     #[serde(default)]
     wave: Option<crate::wave::Bandit>,
+    /// What the wave's last picks asked of the runtime.
+    #[serde(skip)]
+    wave_asks: crate::wave::WaveAsks,
 }
 
 fn no_repeat_default() -> i64 {
@@ -459,6 +462,7 @@ impl RadioState {
             removed: Vec::new(),
             attuned: false,
             wave: matches!(seed, RadioSeed::Wave(_)).then(crate::wave::Bandit::default),
+            wave_asks: crate::wave::WaveAsks::default(),
             seed,
         };
         match &s.seed {
@@ -777,6 +781,10 @@ impl RadioState {
     pub fn extend_wave(&mut self, ctx: &WaveContext<'_>, pool: &[OpenCandidate], n: usize, seed: u64) -> Vec<Pick> {
         let RadioSeed::Wave(wave) = &self.seed else { return Vec::new() };
         let wave = wave.clone();
+        // The library's songs ranked by the model as learnt since the
+        // engine's was built, as the radio's are.
+        let learned = self.learned;
+        let ctx = &WaveContext { learned: learned.as_ref().or(ctx.learned), ..*ctx };
         let bandit = self.wave.get_or_insert_with(crate::wave::Bandit::default);
         bandit.seed_once(seed);
         self.turns += 1;
@@ -794,6 +802,7 @@ impl RadioState {
         let again = crate::wave::repeatable(&keyed);
         let cool = self.no_repeat_ms.max(NO_REPEAT_MS);
         let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool);
+        self.wave_asks = picked.asks;
         if picked.scene_let_go {
             // The chip shows what plays.
             let mut wave = wave;
@@ -812,6 +821,12 @@ impl RadioState {
             self.last = Some(p.item.clone());
         }
         out
+    }
+
+    /// What the wave's last picks asked of the runtime (see
+    /// [`crate::wave::WaveAsks`]), taken once.
+    pub fn take_wave_asks(&mut self) -> crate::wave::WaveAsks {
+        std::mem::take(&mut self.wave_asks)
     }
 
     /// The wave's filter, when it is a wave.
@@ -961,7 +976,7 @@ impl RadioState {
             let ok = |i: usize| !recs.blocked(i);
             let background = |i: usize| recs.background.and_then(|b| b.get(i)).copied().unwrap_or(false);
             let artist_tracks = |_: &StreamTrack| Vec::new();
-            let ctx = WaveContext { model: m, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks, index: Some(recs.index) };
+            let ctx = WaveContext { model: m, ok: &ok, genre: None, background: &background, artist_tracks: &artist_tracks, index: Some(recs.index), learned: None };
             return self.extend_wave(&ctx, &[], n, params.seed);
         }
         // Autoplay's trajectory, once it has the session it continues.

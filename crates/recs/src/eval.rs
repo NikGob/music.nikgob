@@ -459,6 +459,15 @@ pub struct Report {
     pub wave_any: WaveStats,
     /// Sessions of «Моя волна».
     pub wave_sessions: WaveSessionStats,
+    /// «Моя волна» at autoplay's moments, replayed against the history
+    /// ([`wave_replay`], as many picks as autoplay's): at «Знакомое» and at
+    /// «Баланс», its library picks scored as autoplay's are; and for each
+    /// the share of its picks that were new songs and that the replay
+    /// skipped.
+    pub wave_familiar: ListStats,
+    pub wave_balance: ListStats,
+    pub wave_familiar_mix: (f32, f32),
+    pub wave_balance_mix: (f32, f32),
     /// A build of the graph of similar music alone (ms) and a walk of it
     /// from three tracks (µs).
     pub graph_ms: f32,
@@ -479,6 +488,9 @@ pub struct Report {
 struct Starts {
     /// (time, track, outcome, its session's number)
     list: Vec<(UnixMs, TrackId, Ended, usize)>,
+    /// When each of `list` ended (`UnixMs::MAX` while open): its outcome
+    /// is known from then on only.
+    ends: Vec<UnixMs>,
 }
 
 impl Starts {
@@ -486,6 +498,7 @@ impl Starts {
         let mut sorted: Vec<&Play> = events.iter().filter(|p| p.origin != Some(EventOrigin::Import)).collect();
         sorted.sort_by_key(|p| (p.ts, p.kind == EventType::Start));
         let mut list: Vec<(UnixMs, TrackId, Ended, usize)> = Vec::new();
+        let mut ends: Vec<UnixMs> = Vec::new();
         let mut open: HashMap<TrackId, usize> = HashMap::new();
         let mut session = 0usize;
         let mut last: Option<UnixMs> = None;
@@ -498,16 +511,18 @@ impl Starts {
                 EventType::Start => {
                     open.insert(p.track, list.len());
                     list.push((p.ts, p.track, Ended::Open, session));
+                    ends.push(UnixMs::MAX);
                 }
                 EventType::Complete | EventType::Skip => {
                     if let Some(k) = open.remove(&p.track) {
                         list[k].2 = ended_of(p);
+                        ends[k] = p.ts;
                     }
                 }
                 _ => {}
             }
         }
-        Self { list }
+        Self { list, ends }
     }
 
     /// The tracks listened to (not skipped early) in `[from, to)`.
@@ -786,7 +801,7 @@ pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch:
     let background = |i: usize| suits.get(i).copied().unwrap_or(false);
     let ok = |_: usize| true;
     let none = |_: &StreamTrack| Vec::new();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: None, learned: None };
     let cards = crate::open_world::niches(&ctx).into_iter().map(|c| (c, String::new(), Vec::new())).collect();
     mix_new::with_niches(model, &mut home, cards);
     (home, row)
@@ -874,7 +889,7 @@ pub fn wave(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandid
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None, learned: None };
     crate::open_world::next(&ctx, pool, filter, session, n, &HashSet::new())
 }
 
@@ -907,7 +922,7 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None, learned: None };
     let mut run = WaveRun::default();
     for (k, &novelty) in WAVE_NOVELTIES.iter().enumerate() {
         let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(novelty)));
@@ -946,6 +961,141 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
         }
     }
     run
+}
+
+/// One pick of a wave replayed against the history ([`wave_replay`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaveStep {
+    pub item: Item,
+    /// Its catalog position (a library pick).
+    pub track: Option<usize>,
+    /// Its main artist: a library artist's id, or a new one by name.
+    pub artist: String,
+    /// The history before the moment says it is skipped early (at least
+    /// half its plays): the replay ended it so. A new song's end is not
+    /// known: never skipped, and the replay tells the wave nothing of it.
+    pub skipped: bool,
+}
+
+/// The picks of a wave replay that went by, how many were new, how many
+/// skipped (see [`wave_replay`]).
+pub fn wave_counts(steps: &[WaveStep]) -> (usize, usize, usize) {
+    (steps.len(), steps.iter().filter(|s| s.track.is_none()).count(), steps.iter().filter(|s| s.skipped).count())
+}
+
+/// «Моя волна» of `novelty` after `session` over the dataset's open
+/// `pool`, replayed against the history: `n` picks taken three at a time
+/// as the queue asks for them, each library song ended as what was known
+/// of it at the moment says the user ends it — `skipped` (most of its
+/// plays before the moment skipped early; the caller must not tell what
+/// came after) is skipped early, any other heard out — so the wave's
+/// bandit and the model's session move as they would. A new song's end is
+/// unknown: the wave is told nothing of it (it is counted apart, never as
+/// heard out).
+///
+/// What it does not measure: how new songs are received (the pool is the
+/// dataset's fixed list; its picks are not matched to the history, so no
+/// hit or skip of a new song counts, and «replay-skipped» is a share of all
+/// picks, new ones included, so a larger share of new songs lowers it by
+/// itself); and anything of the runtime — the services' requests, the
+/// top-ups, previews, the log's bans — none of which a replay makes.
+/// «replay-skipped» says what the history predicts of the library's picks
+/// (most of their plays before the moment skipped early), not an outcome.
+#[allow(clippy::too_many_arguments)]
+pub fn wave_replay(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], session: &Session, novelty: f32, n: usize, skipped: &dyn Fn(usize) -> bool) -> Vec<WaveStep> {
+    use crate::radio::Outcome;
+    use crate::wave::WaveSeed;
+    let artist_of: HashMap<String, ArtistId> = parts.new.iter().filter_map(|d| Some((crate::stream_song_key(&d.track), d.artist?))).collect();
+    let artist_tracks = |t: &StreamTrack| artist_of.get(&crate::stream_song_key(t)).map(|a| model.of_artist(*a).iter().map(|&i| i as usize).collect()).unwrap_or_default();
+    let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+    let ok = |_: usize| true;
+    let genre_of = genres(parts);
+    let genre = |i: usize| genre_of.get(i).copied().flatten();
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None, learned: None };
+    let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(novelty)));
+    radio.attune(session.clone(), Some(model.weights));
+    let mut out: Vec<WaveStep> = Vec::with_capacity(n);
+    while out.len() < n {
+        let picks = radio.extend_wave(&ctx, pool, 3.min(n - out.len()), 11);
+        if picks.is_empty() {
+            break;
+        }
+        for p in picks {
+            let track = match &p.item {
+                Item::Track(id) => parts.catalog.position(*id),
+                Item::Stream(_) => None,
+            };
+            let artist = match (&p.item, track) {
+                (_, Some(i)) => parts.catalog.tracks()[i].main_artist().map_or_else(|| format!("track:{i}"), |a| a.to_string()),
+                (Item::Stream(r), None) => pool.iter().find(|c| c.track.id == *r).and_then(|c| c.track.artists.first()).map_or_else(String::new, |a| crate::artist_key(&a.name)),
+                (Item::Track(id), None) => id.to_string(),
+            };
+            let skip = track.is_some_and(skipped);
+            if track.is_some() {
+                radio.feedback(p.item.clone(), if skip { Outcome::skip(8_000) } else { Outcome::Complete });
+            }
+            out.push(WaveStep { item: p.item, track, artist, skipped: skip });
+        }
+    }
+    out
+}
+
+/// A session of «Моя волна» of `novelty` replayed against the history
+/// ([`wave_replay`], `n` picks) the morning after the history ends, as
+/// lines: each pick (K known / N new, its artist, «skip» when the replay
+/// skipped it) and what they add up to — known and new, distinct artists,
+/// the most picks of one artist and the longest run of one, the skipped.
+pub fn wave_trace(parts: &Parts, novelty: f32, n: usize) -> String {
+    let events = &parts.input.events;
+    let Some(last) = events.iter().map(|e| e.ts).max() else { return String::new() };
+    let offset = i64::from(parts.input.utc_offset_min) * 60_000;
+    let t = ((last + offset).div_euclid(DAY_MS) + 1) * DAY_MS + 9 * HOUR_MS - offset;
+    let model = parts.model_at(t);
+    let suits = parts.suits();
+    let pool = open_pool(parts, &model);
+    // The whole history is before the morning after it.
+    let plays = skips_before(&Starts::of(events), parts, t);
+    let skipped = |i: usize| plays[i].0 >= 2 && 2 * plays[i].1 >= plays[i].0;
+    let steps = wave_replay(parts, &model, &suits, &pool, &Session::default(), novelty, n, &skipped);
+    let mut out = format!("wave trace at novelty {novelty:.1}, pool {}:\n", pool.len());
+    let mut per: HashMap<&str, usize> = HashMap::new();
+    let (mut run, mut best_run) = (0usize, 0usize);
+    for (k, s) in steps.iter().enumerate() {
+        *per.entry(s.artist.as_str()).or_default() += 1;
+        run = if k > 0 && steps[k - 1].artist == s.artist { run + 1 } else { 1 };
+        best_run = best_run.max(run);
+        let what = match &s.item {
+            Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or_else(String::new, |c| c.track.title.clone()),
+            Item::Track(_) => String::new(),
+        };
+        let short: String = s.artist.chars().rev().take(12).collect::<Vec<char>>().into_iter().rev().collect();
+        out += &format!("  {:>2} {} {:<12} {}{}\n", k + 1, if s.track.is_some() { "K" } else { "N" }, short, if s.skipped { "skip " } else { "" }, what);
+    }
+    let (all, new, skip) = wave_counts(&steps);
+    out += &format!(
+        "  = {all} picks: known {} new {new}, artists {}, most of one artist {}, longest run {best_run}, skipped {skip}\n",
+        all - new,
+        per.len(),
+        per.values().copied().max().unwrap_or(0)
+    );
+    out
+}
+
+/// Each catalog track's plays ended by `t` and the early skips among them
+/// (a play started before `t` and ended after it is not known yet).
+fn skips_before(starts: &Starts, parts: &Parts, t: UnixMs) -> Vec<(u32, u32)> {
+    let mut out = vec![(0u32, 0u32); parts.catalog.len()];
+    let upto = starts.list.partition_point(|s| s.0 < t);
+    for (s, &end) in starts.list[..upto].iter().zip(&starts.ends) {
+        if let Some(i) = parts.catalog.position(s.1)
+            && s.2 != Ended::Open
+            && end <= t
+        {
+            out[i].0 += 1;
+            out[i].1 += u32::from(s.2 == Ended::Early);
+        }
+    }
+    out
 }
 
 /// Accumulates [`WaveSessionStats`].
@@ -1171,6 +1321,9 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         .collect();
     let step = (moments.len() as f32 / opts.autoplay_points.max(1) as f32).max(1.0);
     let mut auto = Lists::default();
+    let mut waves = [Lists::default(), Lists::default()];
+    // Picks, new ones, skipped ones of each.
+    let mut wave_mix = [(0usize, 0usize, 0usize); 2];
     let (mut skips_n, mut skips_other, mut skips_other_n, mut skips_away) = (0usize, 0usize, 0usize, 0usize);
     let mut x = 0.0f32;
     while (x as usize) < moments.len() && opts.autoplay_points > 0 {
@@ -1195,9 +1348,30 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         let listened = starts.listened(t, t + opts.window_ms);
         let heard = |i: usize| model.tracks[i].starts > 0;
         let artist = artist_heard(&parts.catalog, &model);
-        auto.add(&ctx, &picks, &Truth { listened: &listened, session: Some(&rest), next: Some(next), heard: &heard, artist_heard: &artist });
+        let truth = Truth { listened: &listened, session: Some(&rest), next: Some(next), heard: &heard, artist_heard: &artist };
+        auto.add(&ctx, &picks, &truth);
+        let pool = open_pool(parts, &model);
+        // The wave is steered only by what was known at the moment: each
+        // track's ends before it (its score below still reads the whole
+        // history, as autoplay's does).
+        let before = skips_before(&starts, parts, t);
+        let skipped = |i: usize| before.get(i).is_some_and(|&(plays, early)| plays >= 2 && 2 * early >= plays);
+        for (k, novelty) in [crate::wave::NOVELTY_FAMILIAR, crate::wave::NOVELTY_BALANCE].into_iter().enumerate() {
+            let steps = wave_replay(parts, &model, &suits, &pool, &session, novelty, opts.autoplay_len, &skipped);
+            let lib: Vec<usize> = steps.iter().filter_map(|s| s.track).collect();
+            waves[k].add(&ctx, &lib, &truth);
+            let (all, new, skip) = wave_counts(&steps);
+            wave_mix[k].0 += all;
+            wave_mix[k].1 += new;
+            wave_mix[k].2 += skip;
+        }
     }
     report.autoplay = auto.stats(n);
+    report.wave_familiar = waves[0].stats(n);
+    report.wave_balance = waves[1].stats(n);
+    let mix = |m: (usize, usize, usize)| (m.1 as f32 / m.0.max(1) as f32, m.2 as f32 / m.0.max(1) as f32);
+    report.wave_familiar_mix = mix(wave_mix[0]);
+    report.wave_balance_mix = mix(wave_mix[1]);
     report.skips2 = (skips_n, skips_other as f32 / skips_other_n.max(1) as f32, skips_away as f32 / skips_n.max(1) as f32);
 
     // Mixes: mornings of the second half with a week after them.
@@ -1311,6 +1485,9 @@ impl Report {
             }
         }
         out += &format!("  autoplay: {}\n", list_row(&self.autoplay));
+        for (name, s, m) in [("familiar", &self.wave_familiar, self.wave_familiar_mix), ("balance", &self.wave_balance, self.wave_balance_mix)] {
+            out += &format!("  wave {name:>8}: {}  | new (end unknown) {:.3}  replay-skipped {:.3}\n", list_row(s), m.0, m.1);
+        }
         out += &format!(
             "  2 skips:  n {:>3}  next of another profile {:.3}  farther from the skipped {:.3}\n",
             self.skips2.0, self.skips2.1, self.skips2.2
@@ -1505,7 +1682,7 @@ mod tests {
         let background = |i: usize| suits.get(i).copied().unwrap_or(false);
         let ok = |_: usize| true;
         let none = |_: &StreamTrack| Vec::new();
-        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none, index: None };
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
         for character in [Character::Any, Character::Calm] {
             let seed = WaveSeed { filter: WaveFilter { novelty: 0.0, character, scene: crate::open_world::Scene::All }, only: Vec::new(), part: None };
             let mut radio = RadioState::new(RadioSeed::Wave(seed.clone()));
@@ -1574,13 +1751,13 @@ mod tests {
         let none = |_: &StreamTrack| Vec::new();
         let rested = |i: usize| model.taste.last_played_at(i).is_none_or(|t| model.now() - t >= 3 * crate::taste::HOUR_MS);
         let all = |_: usize| true;
-        let full = WaveContext { model: &model, ok: &all, genre: None, background: &background, artist_tracks: &none, index: None };
+        let full = WaveContext { model: &model, ok: &all, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
         let calm = WaveFilter { novelty: 0.0, character: Character::Calm, scene: crate::open_world::Scene::All };
         // Eight calm songs only may play.
         let eight: Vec<usize> = (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &calm, i)).take(8).collect();
         assert_eq!(eight.len(), 8, "a calm side to the omnivore");
         let only_eight = |i: usize| eight.contains(&i) || !crate::open_world::fits_filter(&full, &calm, i);
-        let ctx = WaveContext { model: &model, ok: &only_eight, genre: None, background: &background, artist_tracks: &none, index: None };
+        let ctx = WaveContext { model: &model, ok: &only_eight, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
         let seed = WaveSeed { filter: calm, only: Vec::new(), part: None };
         let mut radio = RadioState::new(RadioSeed::Wave(seed.clone()));
         radio.attune(Session::default(), Some(model.weights));
@@ -1619,7 +1796,7 @@ mod tests {
         let scene = WaveFilter { scene: crate::open_world::Scene::Profile(k), ..calm };
         let two: Vec<usize> = (0..model.len()).filter(|&i| rested(i) && crate::open_world::fits_filter(&full, &scene, i)).take(2).collect();
         let only_two = |i: usize| two.contains(&i) || !crate::open_world::fits_filter(&full, &scene, i);
-        let ctx = WaveContext { model: &model, ok: &only_two, genre: None, background: &background, artist_tracks: &none, index: None };
+        let ctx = WaveContext { model: &model, ok: &only_two, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
         let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed { filter: scene, only: Vec::new(), part: None }));
         radio.attune(Session::default(), Some(model.weights));
         let picks = radio.extend_wave(&ctx, &[], 3, 5);
@@ -1762,6 +1939,61 @@ mod tests {
         };
         let d: Dataset = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let p = d.parts();
+        // `NIKGOB_WAVE_TRACE`: sessions of the wave picked one by one.
+        if std::env::var_os("NIKGOB_WAVE_TRACE").is_some() {
+            for novelty in [crate::wave::NOVELTY_FAMILIAR, crate::wave::NOVELTY_BALANCE, crate::wave::NOVELTY_MORE] {
+                println!("{}", wave_trace(&p, novelty, 60));
+            }
+        }
         println!("{}", evaluate(&d.name, &p, &Options::default()).table());
+    }
+
+    /// The wave replayed against the history: its picks go by as asked,
+    /// a song the history skips is skipped (and the bandit learns it), the
+    /// trace adds them up; at «Знакомое» it plays no new song.
+    #[test]
+    fn a_wave_replays_against_the_history() {
+        let d = synthetic::user(synthetic::Kind::Skipper, 6);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let pool = linked_pool(&model, 3);
+        let skipped = |i: usize| i % 2 == 0;
+        let steps = wave_replay(&p, &model, &suits, &pool, &Session::default(), crate::wave::NOVELTY_BALANCE, 30, &skipped);
+        assert_eq!(steps.len(), 30);
+        let (all, new, skip) = wave_counts(&steps);
+        assert!(new > 0 && new < all, "{new} new of {all}");
+        assert_eq!(skip, steps.iter().filter(|s| s.track.is_some_and(|i| i % 2 == 0)).count());
+        let familiar = wave_replay(&p, &model, &suits, &pool, &Session::default(), crate::wave::NOVELTY_FAMILIAR, 12, &skipped);
+        assert!(familiar.iter().all(|s| s.track.is_some()));
+        let r = evaluate(&d.name, &p, &Options { next: false, autoplay_points: 4, mix_days: 0, ..Options::default() });
+        assert!(r.wave_familiar.lists > 0, "{}", r.table());
+        assert_eq!(r.wave_familiar_mix.0, 0.0, "{}", r.table());
+        assert!(wave_trace(&p, crate::wave::NOVELTY_BALANCE, 20).contains("= "));
+        assert!(steps.iter().filter(|s| s.track.is_none()).all(|s| !s.skipped), "a new song's end is unknown");
+    }
+
+    /// What steers a replayed wave at a moment is only what ended by it: an
+    /// early skip counts from the moment it ended, not from its start — a
+    /// play started before the moment and skipped after it is unknown yet.
+    #[test]
+    fn the_wave_replay_knows_no_future_skip() {
+        let d = synthetic::user(synthetic::Kind::Skipper, 6);
+        let p = d.parts();
+        let starts = Starts::of(&p.input.events);
+        let k = (0..starts.list.len())
+            .find(|&k| starts.list[k].2 == Ended::Early && starts.ends[k] > starts.list[k].0 + 1 && p.catalog.position(starts.list[k].1).is_some())
+            .expect("an early skip that ends after its start");
+        let (start, track, _, _) = starts.list[k];
+        let end = starts.ends[k];
+        let i = p.catalog.position(track).unwrap();
+        let before = skips_before(&starts, &p, start);
+        // Started, not ended yet: its skip is not known.
+        assert_eq!(skips_before(&starts, &p, start + 1)[i], before[i]);
+        assert_eq!(skips_before(&starts, &p, end - 1)[i], before[i]);
+        let at = skips_before(&starts, &p, end);
+        assert_eq!(at[i], (before[i].0 + 1, before[i].1 + 1), "known once it ended");
+        assert_eq!(skips_before(&starts, &p, starts.list[0].0).iter().map(|x| x.0).sum::<u32>(), 0);
     }
 }

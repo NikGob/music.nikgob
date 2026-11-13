@@ -22,9 +22,11 @@
 //!   the job waits for the pause to end. A real failure
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
-//! - **Previews of new music.** When the library's queue is empty, the
-//!   discoveries found for «Новое для тебя» (and the candidates asked for
-//!   by [`Worker::want_preview`]) get a preview analysed: the first
+//! - **Previews of new music.** The candidates asked for by
+//!   [`Worker::want_preview`] (the songs «Моя волна» is about to play)
+//!   come first, before the library's queue; when the library's queue is
+//!   empty, the discoveries found for «Новое для тебя» get a preview
+//!   analysed: the first
 //!   [`PREVIEW_BYTES`] of the song (about the first minute), its 30 s from
 //!   the 15th second ([`nikgob_recs::preview_windows`]), at most
 //!   [`PREVIEW_DAILY`] a day apart from the library's downloads, so new
@@ -84,7 +86,6 @@ const PREVIEW_BYTES: usize = 1 << 20;
 /// Previews of new music analysed a day.
 const PREVIEW_DAILY: u32 = 60;
 /// Candidates asked for by [`Worker::want_preview`] waiting at most.
-#[allow(dead_code)]
 const WANTED_MAX: usize = 64;
 /// Library cache key of the previews analysed today: `day:count`.
 const PREVIEW_DAY_KEY: &str = "stream_analysis.preview_day";
@@ -342,8 +343,8 @@ impl Worker {
     /// [`nikgob_recs::VectorIndex::niche_fit`] can judge them. Previews keep
     /// to the day's limit; a track analysed already or asked for twice is
     /// left out, and the queue holds [`WANTED_MAX`] at most (the oldest go).
-    // Called by the niche expansion (r30-world) once it lands.
-    #[allow(dead_code)]
+    /// «Моя волна» asks for the new songs it is about to play
+    /// ([`Worker::wave_asked`]).
     pub(crate) fn want_preview(&mut self, track: TrackId, video: String) {
         let a = &mut self.streaming.analysis;
         if a.previewed.contains(&track) || a.wanted.iter().any(|(t, _)| *t == track) || self.analysis.index().read().contains(track) {
@@ -355,6 +356,19 @@ impl Worker {
             a.wanted.pop_front();
         }
         a.idle_until = None;
+    }
+
+    /// How many previews of new music may still be asked today: none while
+    /// the stream analysis is off or YouTube Music has no audio, else what
+    /// the day's limit leaves beside the previews waiting, within the
+    /// queue.
+    pub(crate) fn preview_room(&mut self) -> usize {
+        if !self.stream_analysis_on() || self.service(Service::Youtube).is_none() || !self.has_audio(Service::Youtube) {
+            return 0;
+        }
+        let waiting = self.streaming.analysis.wanted.len();
+        let today = PREVIEW_DAILY.saturating_sub(self.previews_today()) as usize;
+        today.saturating_sub(waiting).min(WANTED_MAX.saturating_sub(waiting))
     }
 
     /// The playing entry of `track` ended (or was skipped) while it played
@@ -540,6 +554,13 @@ impl Worker {
         }
         if quiet::busy() {
             self.analysis_held("a game or a fullscreen app is in front");
+            return;
+        }
+        // The previews «Моя волна» asked for are of songs it is about to
+        // play: before the library's backlog (still within their own day's
+        // limit), so they are heard before the wave picks again.
+        if !self.streaming.analysis.wanted.is_empty() && self.preview_step() {
+            self.streaming.analysis.held = None;
             return;
         }
         let daily = self.streaming.schedule.analysis_daily;

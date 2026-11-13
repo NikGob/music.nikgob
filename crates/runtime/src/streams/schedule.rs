@@ -115,6 +115,11 @@ pub struct StreamSchedule {
     pub rate_limit_cap: Duration,
     /// The pause assumed when the service did not say how long it is.
     pub rate_limit_unknown: Duration,
+    /// «Моя волна» asks the niches' top-up for more new songs of a filter
+    /// that ran short, and a wave with nothing new yet waits for it: the
+    /// app runs with [`crate::recs::WAVE_REFILL`] (off); the tests of
+    /// the refill turn it on.
+    pub wave_refill: bool,
 }
 
 impl Default for StreamSchedule {
@@ -156,6 +161,7 @@ impl Default for StreamSchedule {
             jitter: 0.2,
             rate_limit_cap: Duration::from_secs(10 * 60),
             rate_limit_unknown: Duration::from_secs(30),
+            wave_refill: crate::recs::WAVE_REFILL,
         }
     }
 }

@@ -1029,6 +1029,7 @@ impl Worker {
         self.save_prefs_due();
         self.session_saved.flush();
         self.recs_flush_weights(true);
+        self.niche_flush();
         self.keep_home(true);
         self.maybe_export(true);
         self.playback.stop();

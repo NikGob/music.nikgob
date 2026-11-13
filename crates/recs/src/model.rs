@@ -157,6 +157,8 @@ pub const F_NEXT_ALBUM: usize = 5;
 pub const F_SAME_ALBUM: usize = 6;
 pub const F_SAME_WORLD: usize = 7;
 pub const F_COOC: usize = 9;
+/// The track played in the session already.
+pub const F_IN_SESSION: usize = 10;
 pub const F_SAME_LANE: usize = 13;
 /// The collective graph from the session ([`crate::graph`]), the personal
 /// graph, the prior of the library.

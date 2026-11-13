@@ -22,9 +22,31 @@ use crate::Worker;
 
 const LOG_KEY: &str = "recs.new_log";
 
-/// The log as the library keeps it.
+/// The log as the library keeps it, its artists keyed as now
+/// ([`normalised`]).
 pub(super) fn log_of(lib: &nikgob_library::Library) -> NewLog {
-    super::cache_read::<NewLog>(lib, LOG_KEY).unwrap_or_default()
+    normalised(lib, super::cache_read::<NewLog>(lib, LOG_KEY).unwrap_or_default())
+}
+
+/// `log` with each event's artist keyed as the log keys it now
+/// ([`nikgob_recs::main_artist_key`] of its song's credit in the library;
+/// of the key it has when the song is gone): a log kept before keyed some
+/// credits whole («a b» of «A / B»), and its early skips count with the
+/// main artist's since. Read time only: the kept log is not rewritten for
+/// it (the next event's save keeps it as it reads).
+pub(super) fn normalised(lib: &nikgob_library::Library, mut log: NewLog) -> NewLog {
+    let ids: Vec<TrackId> = log.events.iter().filter_map(|e| e.track).collect();
+    let rows = if ids.is_empty() { Default::default() } else { lib.get_track_rows(&ids).unwrap_or_default() };
+    for e in &mut log.events {
+        let main = match e.track.and_then(|t| rows.get(&t)) {
+            Some(row) => nikgob_recs::main_artist_key(&row.artist),
+            None => nikgob_recs::main_artist_key(&e.artist),
+        };
+        if !main.is_empty() {
+            e.artist = main;
+        }
+    }
+    log
 }
 
 /// The key of the taste profile a new song sounding `v` (embedded) of
@@ -62,6 +84,9 @@ pub(crate) struct NewState {
     loaded: bool,
     pub log: NewLog,
     playing: Option<Playing>,
+    /// Counts the artists kept out since the start: an open pool built
+    /// before a new one is built again ([`super::wave::WavePool`]).
+    pub bans: u64,
 }
 
 impl Worker {
@@ -99,7 +124,7 @@ impl Worker {
         let lang = snap.types.lang_of_new(&row.title, &[row.artist.as_str()]);
         Some(Playing {
             track,
-            artist: nikgob_recs::artist_key(&row.artist),
+            artist: nikgob_recs::main_artist_key(&row.artist),
             title: row.title.clone(),
             source: self.discovery_source(&song),
             profile: profile_key(&snap, vector.as_ref(), lang),
@@ -160,6 +185,8 @@ impl Worker {
     }
 
     fn push_new(&mut self, p: &Playing, heard: Heard) {
+        let now = recs_now();
+        let was_out = self.recs.newlog.log.artist_penalty(&p.artist, now).is_infinite();
         self.recs.newlog.log.push(NewEvent {
             song: p.song.clone(),
             artist: p.artist.clone(),
@@ -171,6 +198,10 @@ impl Worker {
             profile: p.profile,
             background: self.snapshot().is_some_and(|s| s.model.live(&self.recs.session).p_bg >= 0.5),
         });
+        if !was_out && self.recs.newlog.log.artist_penalty(&p.artist, now).is_infinite() {
+            log::info!("new music: {} is kept out now", p.artist);
+            self.recs.newlog.bans += 1;
+        }
         self.new_log_save();
     }
 }
