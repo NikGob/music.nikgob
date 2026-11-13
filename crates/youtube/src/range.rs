@@ -265,7 +265,7 @@ impl Store {
     }
 
     /// The complete resource as a reader for the disk cache (the same
-    /// blocks, or the file opened again).
+    /// blocks, or the same file).
     fn reader(&self) -> io::Result<Box<dyn Read + Send>> {
         match self {
             Self::None => Ok(Box::new(io::empty())),
@@ -273,7 +273,7 @@ impl Store {
                 blocks: blocks.values().cloned().collect(),
                 at: (0, 0),
             })),
-            Self::File(f) => Ok(Box::new(std::fs::File::open(&f.path)?)),
+            Self::File(f) => Ok(Box::new(FileReader { file: Arc::clone(f), at: 0 })),
         }
     }
 }
@@ -311,28 +311,34 @@ impl Read for Blocks {
     }
 }
 
-/// A temporary file of a long stream, removed when dropped. Read and
-/// written at offsets, so the reader and the download never share a cursor.
+/// A temporary file of a long stream that the system removes when its last
+/// handle closes (deleted at once on Unix, opened delete-on-close on
+/// Windows): nothing is left after a crash, and no other run's file is ever
+/// touched. Read and written at offsets, so the reader and the download
+/// never share a cursor.
 struct TempFile {
     file: std::fs::File,
+    /// Its name while it had one (for the log and the tests).
     path: std::path::PathBuf,
 }
 
 impl TempFile {
     fn create(len: u64) -> io::Result<Self> {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        static SWEPT: std::sync::Once = std::sync::Once::new();
-        let dir = std::env::temp_dir();
-        // Files a crashed run left behind.
-        SWEPT.call_once(|| sweep(&dir));
         let pid = std::process::id();
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = dir.join(format!("{TEMP_PREFIX}{pid}-{n}.part"));
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
+        let path = std::env::temp_dir().join(format!("{TEMP_PREFIX}{pid}-{n}.part"));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_FLAG_DELETE_ON_CLOSE.
+            options.custom_flags(0x0400_0000);
+        }
+        let file = options.open(&path)?;
+        #[cfg(unix)]
+        std::fs::remove_file(&path)?;
         log::debug!("youtube: {len} bytes stream kept in {}", path.display());
         Ok(Self { file, path })
     }
@@ -354,23 +360,17 @@ impl TempFile {
     }
 }
 
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.path) {
-            log::debug!("youtube: cannot remove {}: {e}", self.path.display());
-        }
-    }
+/// A reader of a whole [`TempFile`] from its start, through the same handle.
+struct FileReader {
+    file: Arc<TempFile>,
+    at: u64,
 }
 
-/// Removes temporary stream files of other (ended) runs.
-fn sweep(dir: &std::path::Path) {
-    let own = format!("{TEMP_PREFIX}{}-", std::process::id());
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let name = e.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.starts_with(TEMP_PREFIX) && name.ends_with(".part") && !name.starts_with(&own) {
-            let _ = std::fs::remove_file(e.path());
-        }
+impl Read for FileReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.file.read_at(self.at, buf)?;
+        self.at += n as u64;
+        Ok(n)
     }
 }
 
@@ -1120,10 +1120,17 @@ mod tests {
         // Longer than the memory limit: a file, nothing in memory.
         let s = Store::new(MEMORY_MAX + 1, MEMORY_MAX).unwrap();
         let path = s.file().unwrap().path.clone();
-        assert!(path.exists());
+        // Nameless from the start on Unix; named until closed on Windows.
+        assert_eq!(path.exists(), cfg!(windows));
         assert_eq!(s.memory(), 0);
         drop(s);
         assert!(!path.exists(), "the temporary file goes with the store");
+        // Another running instance's file is never touched.
+        let other = std::env::temp_dir().join(format!("{TEMP_PREFIX}{}-0.part", std::process::id() + 1));
+        std::fs::write(&other, b"live").unwrap();
+        drop(Store::new(MEMORY_MAX + 1, MEMORY_MAX).unwrap());
+        assert!(other.exists());
+        let _ = std::fs::remove_file(&other);
     }
 
     #[test]
@@ -1161,7 +1168,7 @@ mod tests {
         let file = s.shared.lock().store.file().map(|f| f.path.clone());
         if memory_max < len {
             assert_eq!(in_memory, 0, "a long stream takes no memory");
-            assert!(file.as_ref().is_some_and(|p| p.exists()));
+            assert!(file.is_some());
         } else {
             assert!(file.is_none() && in_memory == len);
         }
