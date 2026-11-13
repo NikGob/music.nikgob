@@ -1185,6 +1185,7 @@ impl Worker {
             Command::ToggleShuffle => {
                 let on = !self.queue.shuffle;
                 self.queue.set_shuffle(on);
+                self.shuffle_rule_from_button(on);
                 self.preload_next();
                 self.publish_player();
             }
@@ -2010,7 +2011,24 @@ impl Worker {
     /// library's tracks, a search, a radio) keeps the button as it is.
     pub(crate) fn new_list(&mut self, kind: Option<nikgob_view::ListKind>) {
         let rule = kind.map_or(nikgob_view::ListShuffle::Button, |k| self.state.read().prefs.list_shuffle.of(k));
-        self.queue.new_list(rule);
+        self.queue.new_list(rule, kind);
+    }
+
+    /// The shuffle button pressed while a list of a kind plays: what the
+    /// user chose is how lists of that kind start from now on (a kind left
+    /// to «По кнопке» stays so). A radio, the wave, a queue of no kind set
+    /// no rule.
+    fn shuffle_rule_from_button(&mut self, on: bool) {
+        use nikgob_view::ListShuffle;
+        let Some(kind) = self.queue.list_kind() else { return };
+        let rule = if on { ListShuffle::Shuffled } else { ListShuffle::InOrder };
+        let now = self.state.read().prefs.list_shuffle.of(kind);
+        if now == ListShuffle::Button || now == rule {
+            return;
+        }
+        log::info!("shuffle {} by the button: {kind:?} lists start so from now on", if on { "on" } else { "off" });
+        self.publish(|s| s.prefs.list_shuffle.set(kind, rule));
+        self.save_prefs();
     }
 
     /// The kind of the library playlist `id` for [`Self::new_list`]: one of
