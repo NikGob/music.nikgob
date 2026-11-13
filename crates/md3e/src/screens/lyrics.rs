@@ -3445,7 +3445,7 @@ mod tests {
         let mut fonts = egui::FontDefinitions::default();
         crate::typography::install_fonts(&mut fonts);
         ctx.set_fonts(fonts);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             let g = fixed_layout(ui.painter(), "Строка номер", 30.0);
             let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 600.0));
             let soft = Soft::of(&Prefs::default()).text(60.0, 30.0);
@@ -3459,6 +3459,7 @@ mod tests {
             assert_eq!(at(2.0, fade), base * (1 + BLUR_TAPS.len()), "at the edge");
             assert_eq!(at(2.0, Fade::of(rect, Soft { strength: 0.0, ..soft })), base);
         });
+        output.textures_delta.clear();
     }
 
     /// With the soft edges on every line in the view is still drawn, with
@@ -3494,7 +3495,18 @@ mod tests {
                     if !text.galley.job.text.starts_with("Строка номер") {
                         continue;
                     }
-                    let ink = text.galley.mesh_bounds.translate(text.pos.to_vec2());
+                    // The glyphs' own ink (a blurred line's copies spread
+                    // a few pixels past it).
+                    let ink = text
+                        .galley
+                        .rows
+                        .iter()
+                        .flat_map(|r| {
+                            let v = &r.row.visuals;
+                            v.mesh.vertices[v.glyph_vertex_range.clone()].iter().map(move |x| x.pos + r.pos.to_vec2())
+                        })
+                        .fold(Rect::NOTHING, |b, p| b.union(Rect::from_min_max(p, p)))
+                        .translate(text.pos.to_vec2());
                     if ink.top() < view.top() + 2.0 || ink.bottom() > view.bottom() - 2.0 {
                         continue;
                     }
