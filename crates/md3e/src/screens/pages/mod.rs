@@ -1905,10 +1905,11 @@ mod speed_tests {
         let on = with_speed_row(rows(), &speeds(true, &[]), true);
         let acts = row_acts(&on);
         assert_eq!(acts.len(), plain.len() + 1);
+        // «Скачать» of a track with no file, then the speed.
         let share = acts.iter().position(|a| *a == TrackAct::Share).unwrap();
-        assert_eq!(acts[share + 1], TrackAct::Speed);
+        assert_eq!(acts[share + 1..share + 3], [TrackAct::Fetch, TrackAct::Speed]);
         let at = on.iter().position(|r| matches!(r, Row::Item(TrackAct::Speed, _))).unwrap();
-        assert!(matches!(on[at - 1], Row::Divider));
+        assert!(matches!(on[at - 1], Row::Item(TrackAct::Fetch, _)));
         assert!(matches!(&on[at + 1], Row::Sub(item, _) if item.label == FILE));
     }
 
@@ -1924,21 +1925,23 @@ mod speed_tests {
     }
 
     /// The menu is in its groups: play next, the queue and the radio, then
-    /// «В плейлист…», then where the track is from; the files are behind
-    /// «Файл»; the info stands right before it.
+    /// «В плейлист…», then where the track is from; «Скачать» of a track
+    /// with no file in the menu itself, the rest of the files and the info
+    /// behind «Файл».
     #[test]
     fn the_menu_is_in_its_groups_and_the_files_are_in_a_submenu() {
         let shown = shown_rows(rows());
         let top = labels(&shown);
         assert_eq!(&top[..4], [PLAY_NEXT, TO_QUEUE, RADIO_BY_TRACK, "В плейлист…"]);
         assert!(matches!(shown[3], Row::Divider) && matches!(shown[5], Row::Divider));
-        assert_eq!(&top[top.len() - 4..], ["Поделиться", FILE, "Не нравится", "Не рекомендовать исполнителя"]);
-        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::Fetch, TrackAct::AlbumDownload]);
+        // «Файл» with «Скачать альбом» alone shows it in its place.
+        assert_eq!(&top[top.len() - 5..], ["Поделиться", "Скачать", "Скачать альбом", "Не нравится", "Не рекомендовать исполнителя"]);
+        assert_eq!(row_acts(sub_rows(&rows(), FILE).unwrap()), [TrackAct::AlbumDownload]);
         // The speed stands in the menu itself, right before «Файл».
-        let shown = shown_rows(with_speed_row(rows(), &speeds(true, &[]), true));
-        let top = labels(&shown);
+        let top = labels(&with_speed_row(rows(), &speeds(true, &[]), true));
         let at = top.iter().position(|l| l == "Скорость…").unwrap();
         assert_eq!(top[at + 1], FILE);
+        let shown = shown_rows(with_speed_row(rows(), &speeds(true, &[]), true));
         // What is shown stands for the same actions in the same order.
         assert_eq!(row_acts(&shown), row_acts(&with_speed_row(rows(), &speeds(true, &[]), true)));
         // A library row's deletes close «Файл».
@@ -1947,10 +1950,10 @@ mod speed_tests {
         let mut library = library_track_rows(&t, of(&marks, true));
         push_deletes(&mut library, &t);
         let file = row_acts(sub_rows(&library, FILE).unwrap());
-        assert_eq!(file, [TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::Trash, TrackAct::Purge]);
+        assert_eq!(file, [TrackAct::Info, TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::Trash, TrackAct::Purge]);
         let top = labels(&library);
         let share = top.iter().position(|l| l == "Поделиться").unwrap();
-        assert_eq!(&top[share + 1..share + 3], ["Источник и качество", FILE]);
+        assert_eq!(top[share + 1], FILE);
         let acts = row_acts(&library);
         assert_eq!(&acts[acts.len() - 2..], [TrackAct::Dislike, TrackAct::Ban]);
     }
@@ -2024,8 +2027,8 @@ mod speed_tests {
         };
         assert!(file(&track(true), true).contains(&TrackAct::Better));
         assert!(!file(&track(true), true).contains(&TrackAct::PickRelease));
-        assert_eq!(file(&track(false), true), [TrackAct::Fetch, TrackAct::AlbumDownload, TrackAct::PickRelease]);
-        assert_eq!(file(&track(false), false), [TrackAct::Fetch, TrackAct::AlbumDownload]);
+        assert_eq!(file(&track(false), true), [TrackAct::AlbumDownload, TrackAct::PickRelease]);
+        assert_eq!(file(&track(false), false), [TrackAct::AlbumDownload]);
         let rows = library_track_rows(&track(false), LibraryRowsOf { torrents: true, ..of(&marks, false) });
         assert!(row_items(&rows).iter().any(|(a, i)| *a == TrackAct::PickRelease && i.label == PICK_RELEASE));
         assert_eq!(TrackAct::PickRelease.menu_item(false), Some(TrackMenuItem::PickRelease));
@@ -2089,14 +2092,14 @@ mod speed_tests {
         let file = |rows: &[Row<A>]| row_acts(sub_rows(rows, FILE).unwrap());
         assert_eq!(row_acts(&with(&[])), row_acts(&library()));
         let plain = (top(&library()), file(&library()));
-        assert_eq!(plain.1[..2], [A::Fetch, A::Better]);
+        assert_eq!(plain.1[..3], [A::Info, A::Fetch, A::Better]);
 
         // Into «Файл»: before its own items, in the menu's order; from
         // below it: after them, before the deletes.
         let rows = with(&[(I::Share, P::File), (I::Radio, P::File), (I::Ban, P::File)]);
         assert!(!top(&rows).contains(&A::Share) && !top(&rows).contains(&A::Radio) && !top(&rows).contains(&A::Ban));
         let f = file(&rows);
-        assert_eq!(f[..3], [A::Radio, A::Share, A::Fetch]);
+        assert_eq!(f[..4], [A::Radio, A::Share, A::Info, A::Fetch]);
         assert_eq!(f[f.len() - 3..], [A::Ban, A::Trash, A::Purge]);
         assert!(matches!(sub_rows(&rows, FILE).unwrap()[f.len() - 2], Row::Divider));
 
@@ -2110,10 +2113,10 @@ mod speed_tests {
         let rows = with(&[(I::Tags, P::Menu)]);
         let at = rows.iter().position(|r| matches!(r, Row::Sub(..))).unwrap();
         assert!(matches!(rows[at - 1], Row::Item(A::Fetch, _)) && matches!(rows[at - 2], Row::Item(A::Speed, _)));
-        assert_eq!(file(&rows)[0], A::Better);
+        assert_eq!(file(&rows)[..2], [A::Info, A::Better]);
 
         // Everything taken out of «Файл»: the deletes alone stay in it.
-        let rows = with(&[(I::Tags, P::Menu), (I::Torrents, P::Menu), (I::WrongFile, P::Hidden)]);
+        let rows = with(&[(I::Info, P::Menu), (I::Tags, P::Menu), (I::Torrents, P::Menu), (I::WrongFile, P::Hidden)]);
         assert!(file(&rows).iter().all(|a| matches!(a, A::Trash | A::Purge)));
         // No divider is doubled or left at an end once the menu is built.
         let (_, acts) = widgets::menu_of("placed-test", rows);
