@@ -145,7 +145,7 @@ static TUNED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// The options [`tune`] sets, with their values.
 const TUNING: [((i32, std::ffi::c_long), std::ffi::c_long); 4] = [
     (option::PAGE_COMMIT_ON_DEMAND, 2),
-    (option::PURGE_DELAY, 0),
+    (option::PURGE_DELAY, 100),
     (option::PAGE_FULL_RETAIN, 0),
     (option::GENERIC_COLLECT, 1_000),
 ];
@@ -155,8 +155,11 @@ const TUNING: [((i32, std::ffi::c_long), std::ffi::c_long); 4] = [
 /// * a page is committed as it is written (on Windows; Linux commits
 ///   lazily anyway): a burst over many sizes and threads no longer commits
 ///   gigabytes it never touches;
-/// * freed arena memory is decommitted at once, not a second later and
-///   only when the arena is used again;
+/// * freed arena memory is decommitted after 100 ms, not a second later
+///   and only when the arena is used again (at once it was committed and
+///   decommitted again some 15 GB in 13 minutes of playback: page faults
+///   and system calls for nothing; the minute line's numbers stay the
+///   same);
 /// * no full pages kept per size class, and each thread collects its heap
 ///   every 1 000 generic allocations instead of 10 000.
 ///
@@ -176,7 +179,7 @@ pub fn tune() -> bool {
             for ((at, _), value) in TUNING {
                 mi::mi_option_set(at, value);
             }
-            (true, format!("mimalloc {version}: pages committed on demand, purged at once, no full pages kept, collected every 1000"))
+            (true, format!("mimalloc {version}: pages committed on demand, purged after 100 ms, no full pages kept, collected every 1000"))
         }
     };
     let _ = TUNED.set(said);
