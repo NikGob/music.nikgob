@@ -208,6 +208,21 @@ impl Deezer {
         Ok(raw.data)
     }
 
+    /// `GET /search/album?q=…` (free-form: Deezer's `artist:"…"` and
+    /// `album:"…"` fields find nothing on this endpoint and on tracks).
+    pub async fn search_album(&self, q: &str, limit: u32) -> Result<Vec<DeezerAlbum>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default, deserialize_with = "null_default")]
+            data: Vec<DeezerAlbum>,
+        }
+        let limit = limit.clamp(1, 100).to_string();
+        let raw: Raw = self
+            .get("search/album", &[("q", q), ("limit", limit.as_str())])
+            .await?;
+        Ok(raw.data)
+    }
+
     /// `GET /search/artist?q=name`.
     pub async fn search_artist(&self, name: &str, limit: u32) -> Result<Vec<DeezerArtistHit>> {
         #[derive(Deserialize)]

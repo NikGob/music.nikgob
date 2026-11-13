@@ -30,6 +30,8 @@ pub const ORIGIN: &str = "https://musiclink.one";
 const API_BASE: &str = "https://api.musiclink.one/";
 /// Answers kept for the session, at most.
 const CACHE_MAX: usize = 256;
+/// An API answer is a small JSON; anything bigger is not one.
+const API_MAX_BYTES: usize = 256 * 1024;
 
 /// The keyless share link of a service page: MusicLink resolves it when
 /// opened (the page itself when [`MusicLink::page`] found one is better).
@@ -143,13 +145,15 @@ impl MusicLink {
     /// The share page through the API with the user's key; builds pages the
     /// keyless way cannot. `None`: nothing matched.
     pub async fn api_page(&self, api_key: &str, service_url: &str) -> Result<Option<String>> {
-        let key = format!("api {service_url}");
+        // The answer depends on the key (another key may match where this
+        // one did not, a revoked one must not hit): its hash scopes the entry.
+        let key = format!("api {:016x} {service_url}", key_hash(api_key.trim()));
         if let Some(hit) = self.cached(&key) {
             return Ok(hit);
         }
         let url = build_url(&self.api, "v2/resolve", &[("q", service_url)])?;
         let auth = format!("Bearer {}", api_key.trim());
-        let found = match self.http.get_body_auth(Service::MusicLink, url, &auth).await {
+        let found = match self.http.get_body_limited(Service::MusicLink, url, Some(&auth), API_MAX_BYTES).await {
             Ok(body) => parse_resolve(&body)?,
             Err(MetadataError::NotFound) => None,
             Err(e) => return Err(e),
@@ -169,6 +173,13 @@ impl MusicLink {
         }
         cache.insert(key, found);
     }
+}
+
+fn key_hash(key: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    h.finish()
 }
 
 #[cfg(test)]

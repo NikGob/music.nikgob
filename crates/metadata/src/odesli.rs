@@ -19,6 +19,8 @@ use crate::http::{Http, Service, base_url};
 
 /// Checks kept for the session, at most.
 const CACHE_MAX: usize = 256;
+/// A song.link page is about 80 KB; anything far bigger is not one.
+const PAGE_MAX_BYTES: usize = 1024 * 1024;
 
 /// The song.link / album.link page of a service page, when Odesli has a
 /// short address for that service and kind.
@@ -115,7 +117,7 @@ impl Odesli {
                 .join(url.path().trim_start_matches('/'))
                 .map_err(|e| crate::error::MetadataError::InvalidArgument(format!("bad path: {e}")))?;
         }
-        let found = match self.http.get_body(Service::Odesli, url).await {
+        let found = match self.http.get_body_limited(Service::Odesli, url, None, PAGE_MAX_BYTES).await {
             Ok(body) => page_has_entity(&body),
             Err(crate::error::MetadataError::NotFound) => false,
             Err(e) => return Err(e),

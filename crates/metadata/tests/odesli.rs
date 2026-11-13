@@ -81,6 +81,47 @@ async fn musiclink_api_builds_with_the_key() {
     assert_eq!(ml.api_page("k1", TRACK).await.unwrap(), None);
     let err = ml.api_page("bad", "https://www.deezer.com/album/1").await.unwrap_err();
     assert!(matches!(err, nikgob_metadata::MetadataError::Status { status: 401, .. }), "{err:?}");
+
+    // Another key is asked again although the first one's miss is cached.
+    Mock::given(method("GET"))
+        .and(path("/v2/resolve"))
+        .and(query_param("q", TRACK))
+        .and(header("authorization", "Bearer k2"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            br#"{"success":true,"data":[{"type":"track","url":"https://musiclink.one/song/mzlff/ostav-sebe"}]}"#.to_vec(),
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    for _ in 0..2 {
+        assert_eq!(
+            ml.api_page("k2", TRACK).await.unwrap().as_deref(),
+            Some("https://musiclink.one/song/mzlff/ostav-sebe")
+        );
+    }
+    assert_eq!(ml.api_page("k1", TRACK).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn oversized_answers_are_errors() {
+    let server = MockServer::start().await;
+    let big = format!(r#"<meta property="og:title" content="x"/>{}"#, " ".repeat(2 * 1024 * 1024));
+    Mock::given(method("GET"))
+        .and(path("/d/9"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(big))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v2/resolve"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("e".repeat(1024 * 1024)))
+        .mount(&server)
+        .await;
+    let odesli = Odesli::with_base_url(common::http(), &server.uri()).unwrap();
+    assert!(odesli.has_page("https://album.link/d/9").await.is_err());
+    let ml = MusicLink::with_base_url(common::http(), &server.uri()).unwrap();
+    let err = ml.api_page("k", TRACK).await.unwrap_err();
+    assert!(matches!(err, nikgob_metadata::MetadataError::Parse(_)), "{err:?}");
 }
 
 #[tokio::test]

@@ -437,10 +437,36 @@ impl Http {
         parse_json(&ok_body(resp).await?)
     }
 
-    /// [`Self::get_body`] with an `Authorization` header.
-    pub(crate) async fn get_body_auth(&self, service: Service, url: Url, auth: &str) -> Result<Vec<u8>> {
-        let resp = self.send(service, self.client.get(url).header(AUTHORIZATION, auth)).await?;
-        ok_body(resp).await
+    /// A GET whose body (an error's too) may be at most `max_bytes`; a
+    /// bigger one is an error. `auth`: an `Authorization` header.
+    pub(crate) async fn get_body_limited(
+        &self,
+        service: Service,
+        url: Url,
+        auth: Option<&str>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let mut req = self.client.get(url);
+        if let Some(a) = auth {
+            req = req.header(AUTHORIZATION, a);
+        }
+        let mut resp = self.send(service, req).await?;
+        let status = resp.status();
+        if resp.content_length().is_some_and(|len| len > max_bytes as u64) {
+            return Err(MetadataError::Parse("response is too large".into()));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| MetadataError::Network(e.without_url().to_string()))?
+        {
+            if body.len() + chunk.len() > max_bytes {
+                return Err(MetadataError::Parse("response is too large".into()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        status_body(status, body)
     }
 
     /// A GET that does not follow a redirect: the status and the `Location`
@@ -520,6 +546,11 @@ pub(crate) async fn ok_body(resp: Response) -> Result<Vec<u8>> {
         .bytes()
         .await
         .map_err(|e| MetadataError::Network(e.without_url().to_string()))?;
+    status_body(status, body.to_vec())
+}
+
+/// The body of a response with `status`; 404 and other failures are errors.
+fn status_body(status: StatusCode, body: Vec<u8>) -> Result<Vec<u8>> {
     if status == StatusCode::NOT_FOUND {
         return Err(MetadataError::NotFound);
     }
@@ -531,7 +562,7 @@ pub(crate) async fn ok_body(resp: Response) -> Result<Vec<u8>> {
             body: snippet,
         });
     }
-    Ok(body.to_vec())
+    Ok(body)
 }
 
 /// Parses a base URL and makes sure its path ends with `/` so `join` keeps prefixes.

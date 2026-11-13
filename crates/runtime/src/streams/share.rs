@@ -2,20 +2,22 @@
 //! link opens in whatever service the friend uses.
 //!
 //! The page is MusicLink's (`musiclink.one/song/…`, `/album/…`), asked
-//! without a key; an album MusicLink cannot build on its server is asked
-//! through its API when the user put a key into the settings, else it gets
-//! album.link's page. A library item without stream ids is first looked up
-//! (Spotify by ISRC, YouTube Music by name and length); a YouTube-only
-//! album is found on Deezer, whose ids album.link understands. No page: the
-//! service link, and the toast says why; nothing at all: "Исполнитель —
-//! Название". The text goes to [`nikgob_view::ViewState::clipboard`]; the
-//! app copies it.
+//! without a key and then through its API when the user put a key into the
+//! settings; else album.link's / song.link's page. A library item without
+//! stream ids is first looked up (Spotify by ISRC, YouTube Music by name
+//! and length). An album known only on YouTube Music (album.link has no page
+//! for those) is looked for on Deezer when Deezer is on, and only taken when
+//! exactly one Deezer album has the same title and artist: a wrong page is
+//! worse than the service link. No page: the service link, and the toast
+//! says why; nothing at all: "Исполнитель — Название". The text goes to
+//! [`nikgob_view::ViewState::clipboard`]; the app copies it.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nikgob_core::streaming::{EntityKind, RemoteId, Service, StreamService};
 use nikgob_metadata::text::{album_key, artist_key};
-use nikgob_metadata::{Deezer, Http, MetadataConfig, MetadataError, MusicLink, Odesli};
+use nikgob_metadata::{Deezer, DeezerAlbum, Http, MetadataConfig, MetadataError, MusicLink, Odesli};
 use nikgob_view as v;
 
 use super::Msg;
@@ -66,11 +68,26 @@ struct Page {
     url: String,
 }
 
+/// An album as the share knows it.
+#[derive(Clone, Debug, Default)]
+struct AlbumInfo {
+    /// The credited artists, each on its own.
+    artists: Vec<String>,
+    title: String,
+    tracks: Option<u32>,
+}
+
+impl AlbumInfo {
+    fn text(&self) -> String {
+        format!("{} — {}", self.artists.join(", "), self.title)
+    }
+}
+
 /// How to find the thing in a service when the library has no id for it.
 #[derive(Clone)]
 enum Lookup {
     Track(ResolveQuery),
-    Album { artist: String, title: String },
+    Album(AlbumInfo),
 }
 
 /// Who did not answer, so the service link was copied.
@@ -79,7 +96,10 @@ enum Failure {
     MusicLink,
     /// The user's MusicLink key was refused.
     MusicLinkKey,
+    Deezer,
     SongLink,
+    /// The album's own service did not give its title and artist.
+    Album(Service),
 }
 
 /// What the providers came to.
@@ -115,7 +135,9 @@ impl Outcome {
                     None => format!("Скопирована ссылка на {name}"),
                     Some(Failure::MusicLink) => format!("MusicLink не ответил — скопирована ссылка на {name}"),
                     Some(Failure::MusicLinkKey) => format!("Ключ MusicLink не подошёл — скопирована ссылка на {name}"),
+                    Some(Failure::Deezer) => format!("Deezer не ответил — скопирована ссылка на {name}"),
                     Some(Failure::SongLink) => format!("song.link не ответил — скопирована ссылка на {name}"),
+                    Some(Failure::Album(s)) => format!("{} не ответил — скопирована ссылка на {name}", s.display_name()),
                 }
             }
             Self::Nothing => "Нет в сервисах — скопировано название".into(),
@@ -142,40 +164,65 @@ fn dedup(pages: Vec<Page>) -> Vec<Page> {
     out
 }
 
-/// Whether album.link can show one of the pages (it has no page for
-/// YouTube Music albums).
+/// Whether album.link / song.link has a page for one of the pages (none
+/// for YouTube Music albums).
 fn has_songlink_page(pages: &[Page]) -> bool {
     pages.iter().any(|p| nikgob_metadata::odesli::page_url(&p.url).is_some())
 }
 
-/// Whether a Deezer album (its title, its artist) is the one asked for.
-/// The credit asked may name more artists than Deezer's main one.
-fn same_album(want_artist: &str, want_title: &str, artist: &str, title: &str) -> bool {
-    let (want, got) = (artist_key(want_artist), artist_key(artist));
-    album_key(title) == album_key(want_title) && !got.is_empty() && (want == got || want.contains(&got))
+/// A title as it reads, edition words included: lower case, letters and
+/// digits, single spaces («Discovery (Live)» stays apart from «Discovery»).
+fn exact_title(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars().flat_map(char::to_lowercase) {
+        let c = if c == 'ё' { 'е' } else { c };
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with(' ') && !out.is_empty() {
+            out.push(' ');
+        }
+    }
+    out.trim_end().to_owned()
+}
+
+/// Whether a Deezer album is the one asked for: the same title as it reads
+/// (edition included), Deezer's artist is one of the credited artists (by
+/// name, not by part of a name), and the track count agrees when both know it.
+fn same_album(want: &AlbumInfo, got: &DeezerAlbum) -> bool {
+    let Some(artist) = got.artist.as_ref().map(|a| artist_key(&a.name)).filter(|a| !a.is_empty()) else {
+        return false;
+    };
+    let title = exact_title(&got.title);
+    !title.is_empty()
+        && title == exact_title(&want.title)
+        && want.artists.iter().any(|a| artist_key(a) == artist)
+        && match (want.tracks, got.nb_tracks) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
+}
+
+/// The one Deezer album among `hits` that is `want`; none when no album or
+/// more than one fits.
+fn the_album(want: &AlbumInfo, hits: &[DeezerAlbum]) -> Option<u64> {
+    let mut ids: Vec<u64> = hits.iter().filter(|a| same_album(want, a)).map(|a| a.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    match ids.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
 }
 
 /// The Deezer page of an album, by its artist and title (Deezer's public
-/// search, no key).
-async fn deezer_album(deezer: &Deezer, artist: &str, title: &str) -> Option<Page> {
-    let clean = |s: &str| s.replace('"', " ");
-    let q = format!("artist:\"{}\" album:\"{}\"", clean(artist), clean(title));
-    let hits = deezer
-        .search_raw(&q, 10)
-        .await
-        .map_err(|e| log::warn!("share: Deezer search: {e}"))
-        .ok()?;
-    hits.iter()
-        .filter_map(|t| {
-            let album = t.album.as_ref()?;
-            let by = album.artist.as_ref().map_or_else(|| t.artist_name(), |a| a.name.as_str());
-            same_album(artist, title, by, &album.title).then_some(album.id)
-        })
-        .next()
-        .map(|id| Page {
-            service: Service::Deezer,
-            url: format!("https://www.deezer.com/album/{id}"),
-        })
+/// album search, no key).
+async fn deezer_album(deezer: &Deezer, want: &AlbumInfo) -> Result<Option<Page>, MetadataError> {
+    let artist = want.artists.first().map_or("", String::as_str);
+    let hits = deezer.search_album(&format!("{artist} {}", want.title), 25).await?;
+    Ok(the_album(want, &hits).map(|id| Page {
+        service: Service::Deezer,
+        url: format!("https://www.deezer.com/album/{id}"),
+    }))
 }
 
 /// Looks `what` up: Spotify by ISRC (tracks), YouTube Music by name.
@@ -198,16 +245,17 @@ async fn look_up(services: &[Arc<dyn StreamService>], what: &Lookup) -> Option<P
                 url: yt.web_url(EntityKind::Track, &hit.id.id),
             })
         }
-        Lookup::Album { artist, title } => {
+        Lookup::Album(info) => {
+            let artist = info.artists.first().map_or("", String::as_str);
             for s in services {
                 let Ok(r) = s
-                    .search_kind(&format!("{artist} {title}"), nikgob_core::streaming::SearchKind::Albums)
+                    .search_kind(&format!("{artist} {}", info.title), nikgob_core::streaming::SearchKind::Albums)
                     .await
                 else {
                     continue;
                 };
                 if let Some(a) = r.albums.iter().find(|a| {
-                    album_key(&a.title) == album_key(title)
+                    album_key(&a.title) == album_key(&info.title)
                         && a.artists.iter().any(|ar| artist_key(&ar.name) == artist_key(artist))
                 }) {
                     return Some(Page {
@@ -224,71 +272,178 @@ async fn look_up(services: &[Arc<dyn StreamService>], what: &Lookup) -> Option<P
 /// How many service pages MusicLink is asked about, at most.
 const MUSICLINK_TRIES: usize = 2;
 
-/// Asks the providers about the pages, best first: MusicLink without a key,
-/// MusicLink's API with the user's key, song.link.
-async fn find_page(clients: &Clients, key: Option<&str>, pages: &[Page]) -> Outcome {
-    let Some(first) = pages.first() else {
-        return Outcome::Nothing;
-    };
-    let mut musiclink_failed = false;
+/// Everything a share needs off the player loop.
+struct Job {
+    clients: Option<Clients>,
+    services: Vec<Arc<dyn StreamService>>,
+    settings_path: Option<PathBuf>,
+    pages: Vec<Page>,
+    lookup: Option<Lookup>,
+    /// A service album whose title and artist are not known yet (shared
+    /// from a card before its page was opened).
+    album_to_fetch: Option<RemoteId>,
+    /// Whether Deezer may be asked (it is switched on).
+    deezer_on: bool,
+    text: String,
+}
+
+/// Who failed on the way.
+#[derive(Default)]
+struct Trouble {
+    musiclink: bool,
+    key_refused: bool,
+    deezer: bool,
+    songlink: bool,
+    album: Option<Service>,
+}
+
+impl Trouble {
+    fn failure(&self) -> Option<Failure> {
+        if self.key_refused {
+            Some(Failure::MusicLinkKey)
+        } else if self.musiclink {
+            Some(Failure::MusicLink)
+        } else if self.deezer {
+            Some(Failure::Deezer)
+        } else if self.songlink {
+            Some(Failure::SongLink)
+        } else {
+            self.album.map(Failure::Album)
+        }
+    }
+}
+
+/// MusicLink without a key on up to [`MUSICLINK_TRIES`] of `pages`.
+async fn musiclink_keyless(clients: &Clients, pages: &[Page], trouble: &mut Trouble) -> Option<String> {
     for p in pages.iter().take(MUSICLINK_TRIES) {
         match clients.musiclink.page(&p.url).await {
-            Ok(Some(url)) => return Outcome::Everywhere { url, key_refused: false },
+            Ok(Some(url)) => return Some(url),
             Ok(None) => {}
             Err(e) => {
                 log::warn!("share: MusicLink: {e}");
-                musiclink_failed = true;
-                break;
+                trouble.musiclink = true;
+                return None;
             }
         }
     }
-    let mut key_refused = false;
-    if let Some(key) = key {
+    None
+}
+
+/// Runs a share: the page to copy and the text.
+async fn run(job: Job) -> (Outcome, String) {
+    let Job {
+        clients,
+        services,
+        settings_path,
+        mut pages,
+        mut lookup,
+        album_to_fetch,
+        deezer_on,
+        mut text,
+    } = job;
+    let mut trouble = Trouble::default();
+    if pages.is_empty()
+        && let Some(l) = &lookup
+        && let Some(p) = look_up(&services, l).await
+    {
+        pages.push(p);
+    }
+    let pages_known = dedup(pages);
+    let Some(first) = pages_known.first().cloned() else {
+        return (Outcome::Nothing, text);
+    };
+    let Some(clients) = clients else {
+        let failed = Some(Failure::MusicLink);
+        return (Outcome::Service { page: first, failed }, text);
+    };
+    // 1. MusicLink, keyless, then with the user's key.
+    if let Some(url) = musiclink_keyless(&clients, &pages_known, &mut trouble).await {
+        return (Outcome::Everywhere { url, key_refused: false }, text);
+    }
+    let key = settings_path
+        .as_deref()
+        .and_then(|p| nikgob_core::settings::Settings::load(p).ok())
+        .and_then(|s| s.metadata.musiclink_key)
+        .map(|k| k.trim().to_owned())
+        .filter(|k| !k.is_empty());
+    if let Some(key) = &key {
         match clients.musiclink.api_page(key, &first.url).await {
-            Ok(Some(url)) => return Outcome::Everywhere { url, key_refused: false },
+            Ok(Some(url)) => return (Outcome::Everywhere { url, key_refused: false }, text),
             Ok(None) => {}
             Err(MetadataError::Status { status: 401 | 403, .. }) => {
                 log::warn!("share: the MusicLink key was refused");
-                key_refused = true;
+                trouble.key_refused = true;
             }
             Err(e) => {
                 log::warn!("share: MusicLink API: {e}");
-                musiclink_failed = true;
+                trouble.musiclink = true;
             }
         }
     }
-    let mut songlink_failed = false;
+    // 2. An album album.link cannot show (YouTube Music): the same album
+    // on Deezer, when Deezer is on and exactly one album fits.
+    let mut pages = pages_known.clone();
+    let is_album = album_to_fetch.is_some() || matches!(lookup, Some(Lookup::Album(_)));
+    if is_album && deezer_on && !has_songlink_page(&pages) {
+        if !matches!(lookup, Some(Lookup::Album(_)))
+            && let Some(r) = &album_to_fetch
+            && let Some(s) = services.iter().find(|s| s.service() == r.service)
+        {
+            match s.album(&r.id).await {
+                Ok(a) => {
+                    let info = AlbumInfo {
+                        artists: a.artists.iter().map(|ar| ar.name.clone()).collect(),
+                        title: a.title.clone(),
+                        tracks: a.total_tracks,
+                    };
+                    if text.is_empty() {
+                        text = info.text();
+                    }
+                    lookup = Some(Lookup::Album(info));
+                }
+                Err(e) => {
+                    log::warn!("share: the album from {}: {e}", r.service.as_str());
+                    trouble.album = Some(r.service);
+                }
+            }
+        }
+        if let Some(Lookup::Album(info)) = &lookup {
+            match deezer_album(&clients.deezer, info).await {
+                Ok(Some(p)) => {
+                    if let Some(url) = musiclink_keyless(&clients, std::slice::from_ref(&p), &mut trouble).await {
+                        return (Outcome::Everywhere { url, key_refused: trouble.key_refused }, text);
+                    }
+                    pages.push(p);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("share: Deezer: {e}");
+                    trouble.deezer = true;
+                }
+            }
+        }
+    }
+    // 3. song.link / album.link.
     for page in pages.iter().filter_map(|p| nikgob_metadata::odesli::page_url(&p.url)).take(2) {
         match clients.odesli.has_page(&page).await {
-            Ok(true) => return Outcome::Everywhere { url: page, key_refused },
+            Ok(true) => return (Outcome::Everywhere { url: page, key_refused: trouble.key_refused }, text),
             Ok(false) => {}
             Err(e) => {
                 log::warn!("share: song.link: {e}");
-                songlink_failed = true;
+                trouble.songlink = true;
                 break;
             }
         }
     }
-    let failed = if key_refused {
-        Some(Failure::MusicLinkKey)
-    } else if musiclink_failed {
-        Some(Failure::MusicLink)
-    } else if songlink_failed {
-        Some(Failure::SongLink)
-    } else {
-        None
-    };
-    Outcome::Service {
-        page: first.clone(),
-        failed,
-    }
+    let failed = trouble.failure();
+    (Outcome::Service { page: first, failed }, text)
 }
 
 impl Worker {
     /// The share clients, made on first use.
-    fn share_clients(&mut self, settings: Option<&nikgob_core::settings::Settings>) -> Option<Clients> {
+    fn share_clients(&mut self) -> Option<Clients> {
         if self.streaming.share_clients.is_none() {
-            let contact = settings.map(|s| s.metadata.contact.clone()).unwrap_or_default();
+            let contact = self.state.read().prefs.metadata_contact.clone();
             self.streaming.share_clients = Http::new(&MetadataConfig::new(contact))
                 .map(Clients::new)
                 .map_err(|e| log::warn!("share: {e}"))
@@ -313,6 +468,7 @@ impl Worker {
             .collect();
         // What to copy when nothing is found, the pages known, and how to
         // look the thing up otherwise.
+        let mut album_to_fetch = None;
         let (text, pages, lookup) = match &target {
             v::ShareTarget::StreamTrack(r) => {
                 let text = self
@@ -324,12 +480,16 @@ impl Worker {
                 (text, page_of(&services, EntityKind::Track, r).into_iter().collect(), None)
             }
             v::ShareTarget::StreamAlbum(r) => {
-                let album = self.streaming.pages.album(r).map(|a| {
-                    (nikgob_core::streaming::join_names(&a.artists), a.title.clone())
+                let info = self.streaming.pages.album(r).map(|a| AlbumInfo {
+                    artists: a.artists.iter().map(|ar| ar.name.clone()).collect(),
+                    title: a.title.clone(),
+                    tracks: a.total_tracks,
                 });
-                let text = album.as_ref().map(|(a, t)| format!("{a} — {t}")).unwrap_or_default();
-                let lookup = album.map(|(artist, title)| Lookup::Album { artist, title });
-                (text, page_of(&services, EntityKind::Album, r).into_iter().collect(), lookup)
+                if info.is_none() {
+                    album_to_fetch = Some(r.clone());
+                }
+                let text = info.as_ref().map(AlbumInfo::text).unwrap_or_default();
+                (text, page_of(&services, EntityKind::Album, r).into_iter().collect(), info.map(Lookup::Album))
             }
             v::ShareTarget::Track(id) => {
                 let Some(t) = self.lib.get_track(*id).ok().flatten() else { return };
@@ -348,17 +508,14 @@ impl Worker {
             }
             v::ShareTarget::Release(id) => {
                 let Some(r) = self.lib.get_release(*id).ok().flatten() else { return };
-                let artist = r.artist_credit.display();
-                let text = format!("{artist} — {}", r.title);
+                let text = format!("{} — {}", r.artist_credit.display(), r.title);
                 let pages = self.pages_of_local(&services, EntityKind::Album, *id.as_uuid());
-                (
-                    text,
-                    pages,
-                    Some(Lookup::Album {
-                        artist,
-                        title: r.title.clone(),
-                    }),
-                )
+                let info = AlbumInfo {
+                    artists: r.artist_credit.0.iter().map(|p| p.name.clone()).collect(),
+                    title: r.title.clone(),
+                    tracks: None,
+                };
+                (text, pages, Some(Lookup::Album(info)))
             }
         };
         self.publish(|s| {
@@ -374,47 +531,19 @@ impl Worker {
         self.drop_share_toast();
         self.toast("Ищу ссылку…", None);
         self.streaming.share_toast = Some(self.toast_id);
-        let settings = self
-            .settings_path
-            .as_deref()
-            .and_then(|p| nikgob_core::settings::Settings::load(p).ok());
-        let key = settings
-            .as_ref()
-            .and_then(|s| s.metadata.musiclink_key.clone())
-            .map(|k| k.trim().to_owned())
-            .filter(|k| !k.is_empty());
-        let clients = self.share_clients(settings.as_ref());
+        let job = Job {
+            clients: self.share_clients(),
+            services,
+            // Read in the task: the key may change while the player runs.
+            settings_path: self.settings_path.clone(),
+            pages,
+            lookup,
+            album_to_fetch,
+            deezer_on: self.state.read().prefs.service_enabled(Service::Deezer),
+            text,
+        };
         self.streaming.spawn(async move {
-            let mut pages = pages;
-            match &lookup {
-                // album.link has no page for a YouTube Music album: find it
-                // on Deezer too.
-                Some(Lookup::Album { artist, title }) if !has_songlink_page(&pages) => {
-                    if let Some(c) = &clients
-                        && let Some(p) = deezer_album(&c.deezer, artist, title).await
-                    {
-                        pages.push(p);
-                    }
-                }
-                _ => {}
-            }
-            if pages.is_empty()
-                && let Some(l) = &lookup
-                && let Some(p) = look_up(&services, l).await
-            {
-                pages.push(p);
-            }
-            let pages = dedup(pages);
-            let outcome = match &clients {
-                Some(c) => find_page(c, key.as_deref(), &pages).await,
-                None => match pages.first() {
-                    Some(p) => Outcome::Service {
-                        page: p.clone(),
-                        failed: Some(Failure::MusicLink),
-                    },
-                    None => Outcome::Nothing,
-                },
-            };
+            let (outcome, text) = run(job).await;
             Msg::Shared {
                 seq,
                 target,
@@ -479,11 +608,35 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nikgob_core::streaming::FakeService;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn page(service: Service, url: &str) -> Page {
         Page {
             service,
             url: url.into(),
+        }
+    }
+
+    fn info(artists: &[&str], title: &str, tracks: Option<u32>) -> AlbumInfo {
+        AlbumInfo {
+            artists: artists.iter().map(|a| (*a).to_owned()).collect(),
+            title: title.into(),
+            tracks,
+        }
+    }
+
+    fn deezer_album(id: u64, artist: &str, title: &str, tracks: Option<u32>) -> DeezerAlbum {
+        DeezerAlbum {
+            id,
+            title: title.into(),
+            nb_tracks: tracks,
+            artist: Some(nikgob_metadata::deezer::DeezerArtist {
+                name: artist.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
         }
     }
 
@@ -505,7 +658,9 @@ mod tests {
             "MusicLink не ответил — скопирована ссылка на YouTube Music"
         );
         assert!(service(Some(Failure::MusicLinkKey)).toast().starts_with("Ключ MusicLink не подошёл"));
+        assert!(service(Some(Failure::Deezer)).toast().starts_with("Deezer не ответил"));
         assert!(service(Some(Failure::SongLink)).toast().starts_with("song.link не ответил"));
+        assert!(service(Some(Failure::Album(Service::Youtube))).toast().starts_with("YouTube Music не ответил"));
         assert_eq!(Outcome::Nothing.link(), None);
         assert_eq!(Outcome::Nothing.toast(), "Нет в сервисах — скопировано название");
     }
@@ -521,11 +676,140 @@ mod tests {
     }
 
     #[test]
-    fn a_deezer_album_matches_by_title_and_artist() {
-        assert!(same_album("mzlff", "Ничего плохого", "Mzlff", "Ничего плохого"));
-        assert!(same_album("mzlff, pyrokinesis", "оставь себе", "Mzlff", "оставь себе"));
-        assert!(!same_album("mzlff", "Ничего плохого", "Mzlff", "ADHD"));
-        assert!(!same_album("mzlff", "Ничего плохого", "CMH", "Ничего плохого"));
-        assert!(!same_album("mzlff", "Ничего плохого", "", "Ничего плохого"));
+    fn only_the_same_album_of_the_same_artist_is_taken() {
+        let want = info(&["Air Supply"], "Lost in Love", Some(10));
+        // «Air» is part of «Air Supply», not the artist.
+        assert!(!same_album(&want, &deezer_album(1, "Air", "Lost in Love", Some(10))));
+        assert!(same_album(&want, &deezer_album(2, "Air Supply", "Lost in Love", Some(10))));
+        assert!(same_album(&want, &deezer_album(2, "air supply", "LOST IN LOVE", None)));
+        // Another edition, another length.
+        assert!(!same_album(&want, &deezer_album(3, "Air Supply", "Lost in Love (Live)", Some(10))));
+        assert!(!same_album(&want, &deezer_album(4, "Air Supply", "Lost in Love (Deluxe Edition)", Some(10))));
+        assert!(!same_album(&want, &deezer_album(5, "Air Supply", "Lost in Love", Some(14))));
+        // One of several credited artists.
+        let duo = info(&["mzlff", "pyrokinesis"], "Ничего плохого", None);
+        assert!(same_album(&duo, &deezer_album(6, "Mzlff", "Ничего плохого", Some(9))));
+        assert!(!same_album(&duo, &deezer_album(7, "", "Ничего плохого", Some(9))));
+        // Exactly one fits, or none is taken.
+        let hits = [deezer_album(1, "Air", "Lost in Love", Some(10)), deezer_album(2, "Air Supply", "Lost in Love", Some(10))];
+        assert_eq!(the_album(&want, &hits), Some(2));
+        let twice = [deezer_album(2, "Air Supply", "Lost in Love", None), deezer_album(8, "Air Supply", "Lost in Love", None)];
+        assert_eq!(the_album(&want, &twice), None);
+        assert_eq!(the_album(&want, &[]), None);
+        assert_eq!(exact_title("  Discovery  (Live) "), "discovery live");
+        assert_eq!(exact_title("Ёлка"), exact_title("елка"));
+    }
+
+    /// The share of a YouTube Music album: `server` stands for MusicLink,
+    /// song.link and Deezer.
+    async fn share_youtube_album(server: &MockServer, deezer_on: bool, known: bool) -> (Outcome, String) {
+        let http = Http::new(&MetadataConfig::new("tests"))
+            .unwrap()
+            .with_rate_limits(nikgob_metadata::RateLimits::unlimited())
+            .with_retry_policy(nikgob_metadata::RetryPolicy {
+                max_attempts: 1,
+                ..Default::default()
+            });
+        let yt: Arc<dyn StreamService> = Arc::new(FakeService::youtube());
+        let r = RemoteId::new(Service::Youtube, "yt-alb-gruppa");
+        let lookup = known.then(|| Lookup::Album(info(&["Кино"], "Группа крови", Some(4))));
+        let job = Job {
+            clients: Clients::at(http, &server.uri()),
+            services: vec![yt.clone()],
+            settings_path: None,
+            pages: vec![page_of(&[yt], EntityKind::Album, &r).unwrap()],
+            album_to_fetch: (!known).then(|| r.clone()),
+            lookup,
+            deezer_on,
+            text: String::new(),
+        };
+        run(job).await
+    }
+
+    fn deezer_answer(body: &'static str) -> Mock {
+        Mock::given(method("GET"))
+            .and(path("/search/album"))
+            .and(query_param("q", "Кино Группа крови"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "application/json"))
+    }
+
+    const DEEZER_HITS: &str = r#"{"data":[
+        {"id":77,"title":"Группа крови","nb_tracks":4,"artist":{"id":1,"name":"Кино"}},
+        {"id":78,"title":"Группа крови (Live)","nb_tracks":4,"artist":{"id":1,"name":"Кино"}},
+        {"id":79,"title":"Группа крови","nb_tracks":4,"artist":{"id":2,"name":"Кинофильм"}}]}"#;
+
+    #[tokio::test]
+    async fn an_unopened_youtube_album_reaches_album_link_through_deezer() {
+        let server = MockServer::start().await;
+        deezer_answer(DEEZER_HITS).expect(1).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/d/77"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"<meta property="og:title" content="Группа крови by Кино"/>"#))
+            .mount(&server)
+            .await;
+        // MusicLink knows neither the YouTube nor the Deezer album (404 from
+        // the mock = not built on its server).
+        let (outcome, text) = share_youtube_album(&server, true, false).await;
+        assert_eq!(
+            outcome,
+            Outcome::Everywhere {
+                url: "https://album.link/d/77".into(),
+                key_refused: false
+            }
+        );
+        assert_eq!(text, "Кино — Группа крови", "the card's album is fetched for the text too");
+    }
+
+    #[tokio::test]
+    async fn musiclink_goes_first_and_deezer_is_not_asked() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/resolve"))
+            .and(query_param("q", "https://music.youtube.com/browse/yt-alb-gruppa"))
+            .respond_with(ResponseTemplate::new(307).insert_header("location", "/album/kino/gruppa-krovi"))
+            .mount(&server)
+            .await;
+        deezer_answer(DEEZER_HITS).expect(0).mount(&server).await;
+        let (outcome, _) = share_youtube_album(&server, true, true).await;
+        assert_eq!(outcome.link().as_deref(), Some("https://musiclink.one/album/kino/gruppa-krovi"));
+    }
+
+    #[tokio::test]
+    async fn a_switched_off_deezer_is_not_asked() {
+        let server = MockServer::start().await;
+        deezer_answer(DEEZER_HITS).expect(0).mount(&server).await;
+        let (outcome, _) = share_youtube_album(&server, false, true).await;
+        assert_eq!(
+            outcome,
+            Outcome::Service {
+                page: page(Service::Youtube, "https://music.youtube.com/browse/yt-alb-gruppa"),
+                failed: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deezer_failure_is_said() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/album"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let (outcome, _) = share_youtube_album(&server, true, true).await;
+        assert!(matches!(outcome, Outcome::Service { failed: Some(Failure::Deezer), .. }), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_deezer_answer_gives_the_service_link() {
+        let server = MockServer::start().await;
+        deezer_answer(
+            r#"{"data":[{"id":77,"title":"Группа крови","artist":{"name":"Кино"}},
+                {"id":80,"title":"Группа крови","artist":{"name":"Кино"}}]}"#,
+        )
+        .mount(&server)
+        .await;
+        let (outcome, _) = share_youtube_album(&server, true, true).await;
+        assert!(matches!(outcome, Outcome::Service { failed: None, .. }), "{outcome:?}");
     }
 }
