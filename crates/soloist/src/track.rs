@@ -129,6 +129,10 @@ pub struct SoloistTrack {
     other_since: Option<Instant>,
     /// The length Soloist gave for our track.
     known_ms: Option<u64>,
+    /// Soloist was the active device since the request (it was asked to
+    /// be, or already was): losing that before the track starts is another
+    /// device taking the stream, not an activation still on its way.
+    activated: bool,
 }
 
 fn now_ms() -> u64 {
@@ -199,6 +203,7 @@ impl SoloistTrack {
             pause_reported: false,
             other_since: None,
             known_ms: None,
+            activated: false,
         }
     }
 
@@ -238,6 +243,7 @@ impl SoloistTrack {
         self.saw_active = false;
         self.pause_reported = false;
         self.other_since = None;
+        self.activated = view.active;
         self.phase = Phase::Requested { at: Instant::now(), changes: view.track_changes, again: false };
         Ok(PcmRead::Pending)
     }
@@ -376,6 +382,20 @@ impl PcmSource for SoloistTrack {
                 }
                 if let Some(m) = refusal(&view, at) {
                     return Err(format!("Spotify Soloist: {m}").into());
+                }
+                if view.active {
+                    self.activated = true;
+                } else if self.activated {
+                    // Another device took the stream before ours started:
+                    // no retry may take it back; the user's Play does.
+                    let pos = self.pending_seek.unwrap_or(0);
+                    log::info!("soloist: another device took the stream before the track started; waiting here");
+                    self.link.clear_captured();
+                    self.phase = Phase::Taken { pos_ms: pos, resumes: self.link.resumes().0 };
+                    if !self.link.paused_by_us() {
+                        self.report_taken();
+                    }
+                    return Ok(PcmRead::Pending);
                 }
                 // The state may still show the track before ours (or ours
                 // from before): it counts once an item came after the
@@ -789,6 +809,45 @@ mod tests {
         assert!(matches!(t.read(&mut buf).unwrap(), PcmRead::Frames(_)));
         assert_eq!(*told.lock().unwrap(), 1);
         assert_eq!(*f.playing.lock().unwrap(), 1, "still one track counted");
+    }
+
+    #[test]
+    fn a_takeover_before_the_track_started_is_not_retried_away() {
+        let f = Fake::new(true);
+        let (mut t, told) = reporter(track(&f));
+        let mut buf = vec![0f32; 960];
+        assert!(t.seek(Duration::from_secs(12)), "a seek before the start is kept");
+        t.read(&mut buf).unwrap();
+        assert_eq!(f.sent(), [Command::Activate, Command::Play(Some(URI.into()))]);
+        // Activated, then the phone takes the stream before ours plays.
+        f.set(|v| v.active = true);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+        taken_elsewhere(&f);
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+        assert_eq!(*told.lock().unwrap(), 1);
+        assert!(matches!(t.phase, Phase::Taken { pos_ms: 12_000, .. }));
+        // Long past the moment a start would be asked again: nothing is sent.
+        for _ in 0..3 {
+            assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+        }
+        assert!(f.sent().is_empty());
+        resume(&f);
+        t.read(&mut buf).unwrap();
+        assert_eq!(f.sent(), [Command::Activate, Command::Play(Some(URI.into()))]);
+        f.plays(URI, 0);
+        t.read(&mut buf).unwrap();
+        assert_eq!(f.sent(), [Command::Seek(12_000)]);
+
+        // Never activated yet (the activation is on its way): the start is
+        // still asked again after a while.
+        let f = Fake::new(true);
+        let mut t = track(&f);
+        t.read(&mut buf).unwrap();
+        f.sent();
+        let Phase::Requested { changes, .. } = t.phase else { panic!() };
+        t.phase = Phase::Requested { at: Instant::now() - ASK_AGAIN - Duration::from_millis(10), changes, again: false };
+        assert_eq!(t.read(&mut buf).unwrap(), PcmRead::Pending);
+        assert_eq!(f.sent(), [Command::Activate, Command::Play(Some(URI.into()))]);
     }
 
     #[test]
