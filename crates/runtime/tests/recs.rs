@@ -1681,3 +1681,60 @@ fn shuffle_in_autoplay_after_an_album_leaves_the_album_rule() {
     s.rt.send(Command::ToggleShuffle);
     wait_for(&s.rt, "albums shuffled", |st| st.player.shuffle && st.prefs.list_shuffle.of(ListKind::Album) == ListShuffle::Shuffled);
 }
+
+/// «Трек из поиска → Радио по треку» (the default): a song started from
+/// the results plays alone and autoplay fills «Далее» from it, never the
+/// other results; with autoplay off it is «Радио по треку» of it. The
+/// header says «Играет из поиска», not the query.
+#[test]
+fn a_song_from_the_search_plays_alone_and_its_radio_goes_on() {
+    use nikgob_view::SearchPick;
+    let l = library(3, 6, 5, &[]);
+    let s = start(&l.lib, Vec::new(), Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    let results = [l.tracks[0], l.tracks[1], l.tracks[2], l.tracks[3]];
+    let picks: Vec<SearchPick> = results.iter().map(|t| SearchPick::Library(*t)).collect();
+    s.rt.send(Command::PlaySearch { tracks: picks.clone(), start: 1, context: "поиска".into() });
+    wait_for(&s.rt, "autoplay from the song", |st| {
+        st.player.current.as_ref().is_some_and(|t| t.id == results[1])
+            && st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending)
+            && st.queue.next.len() == 3
+    });
+    let st = s.rt.state();
+    assert!(st.queue.prev.is_empty(), "the song alone: nothing before it");
+    assert_eq!(st.queue.radio.as_ref().unwrap().title, format!("Похожее на «{}»", st.player.current.as_ref().unwrap().title));
+    assert_eq!(st.player.context_line(), "Играет из поиска");
+    drop(st);
+
+    // Autoplay off: the song's own radio.
+    let prefs = Prefs { autoplay: false, ..s.rt.state().prefs.clone() };
+    s.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&s.rt, "autoplay off", |st| !st.prefs.autoplay);
+    s.rt.send(Command::PlaySearch { tracks: picks, start: 2, context: "поиска".into() });
+    wait_for(&s.rt, "the song's radio", |st| {
+        st.player.current.as_ref().is_some_and(|t| t.id == results[2])
+            && st.queue.radio.as_ref().is_some_and(|r| !r.autoplay && !r.extending)
+            && !st.queue.next.is_empty()
+    });
+}
+
+/// «Трек из поиска → Остальные результаты поиска»: the results shown play
+/// as one queue from the song on, no radio until the last of them.
+#[test]
+fn a_song_from_the_search_can_play_with_the_other_results() {
+    use nikgob_view::SearchPick;
+    let l = library(3, 6, 5, &[]);
+    let prefs = Prefs { search_play: nikgob_view::SearchPlay::Results, ..Prefs::default() };
+    let s = start(&l.lib, Vec::new(), prefs, None);
+    wait_for(&s.rt, "the home", home_ready);
+    let results = [l.tracks[0], l.tracks[1], l.tracks[2], l.tracks[3]];
+    let picks: Vec<SearchPick> = results.iter().map(|t| SearchPick::Library(*t)).collect();
+    s.rt.send(Command::PlaySearch { tracks: picks, start: 1, context: "поиска".into() });
+    wait_for(&s.rt, "the results", |st| {
+        st.player.current.as_ref().is_some_and(|t| t.id == results[1]) && st.queue.next.len() == 2
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let st = s.rt.state();
+    assert_eq!(st.queue.next.iter().map(|e| e.track.id).collect::<Vec<_>>(), [results[2], results[3]]);
+    assert!(st.queue.radio.is_none());
+}

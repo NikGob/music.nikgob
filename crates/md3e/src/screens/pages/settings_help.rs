@@ -195,6 +195,8 @@ pub enum SettingId {
     Autoplay,
     /// «Продолжать мир после альбома».
     AutoplayWorld,
+    /// «Трек из поиска»: «Радио по треку» or «Остальные результаты поиска».
+    SearchPlay,
     /// Where radios pick from: «Только из скачанного» and «Новое в радио и
     /// миксах» as one choice. Only the queue's radio header shows it; it has
     /// no row in Settings.
@@ -471,7 +473,7 @@ impl SettingId {
             Preset(Area::Sources | Area::Seeding) => TAB_DOWNLOADS,
             Preset(Area::Load) => TAB_SYSTEM,
             OutputDevice | Gapless | Crossfade | Normalization | Equalizer | TrackSpeed | KeepTimbre | Autoplay | AutoplayWorld
-            | ListShuffle(_) | ShuffleRadio
+            | SearchPlay | ListShuffle(_) | ShuffleRadio
             | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare | NewShareBy(_) | MixesWithNew | RadioExplore
             | RadioUnheard | GraphUse | DislikeButton | DislikeSkips | DislikeSkipEverywhere | Marks | AlbumOpens | AlbumVersions
             | SoundNeural | SoundDevice | MixCardsWave => TAB_MUSIC,
@@ -539,7 +541,7 @@ impl SettingId {
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile | FirstRun => Level::Dev,
-            KeepTimbre | AutoplayWorld | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
+            KeepTimbre | AutoplayWorld | SearchPlay | ShuffleRadio | RadioNoRepeat | RadioSource | MixesDownloadedOnly | RadioNewShare
             | NewShareBy(_) | MixesWithNew | RadioExplore | RadioUnheard | GraphUse | DislikeSkipEverywhere | SoundDevice
             // Songs of albums: how an album only some songs of which are the
             // user's shows.
@@ -707,6 +709,7 @@ impl SettingId {
             MixesDownloadedOnly => "Только из скачанного",
             Autoplay | NewShareBy(v::RadioKind::Autoplay) => "Автовоспроизведение",
             AutoplayWorld => "Продолжать мир после альбома",
+            SearchPlay => "Трек из поиска",
             RadioSource => "Откуда",
             RadioNoRepeat => "Не повторять сыгранное",
             RadioExplore => "Случайные песни",
@@ -967,6 +970,7 @@ impl SettingId {
             ImportYouTube => "То же из YouTube Music: плейлисты и история. Лайки приходят сами после входа.",
             RadioNewShare => "Радио по треку или исполнителю и бесконечные миксы (настроения, «Твои миксы», «Новое для тебя») подмешивают музыку, которой у тебя ещё нет: похожее из YouTube Music и Deezer. Здесь — сколько. «Твой микс» на главной собирается только из твоего. Пока включено «Только из скачанного», не действует: нового нет нигде.",
             Autoplay => "Когда в очереди играет последний трек, она не кончается: следом сами добавляются похожие треки, как в радио по этому треку, и дальше дописываются по мере игры. Повтор не мешает: при включённом повторе очередь просто начинается заново. Откуда берутся треки — как у радио: только скачанное, вся библиотека или с новым из сервисов (это же переключается прямо в очереди).",
+            SearchPlay => "Что играет после трека, включённого из результатов поиска. Найденные альбом, плейлист и исполнитель играют своим списком в любом случае.",
             AutoplayWorld => "Если в очереди был альбом, после него автовоспроизведение сначала играет следующие треки его мира по порядку альбомов — саундтрека франшизы или дискографии исполнителя, что ещё не слышал, — и только когда мир кончится, похожее, как радио. Выключи — сразу похожее.",
             RadioSource => "Откуда радио, бесконечные миксы и автовоспроизведение берут треки.",
             MixesDownloadedOnly => "Всё, что подбирается для тебя — «Твой микс», дейлист, плитки главной, настроения, «Твои миксы», миксы исполнителей и радио, — берёт только треки, у которых есть файл: ни стримов, ни новой музыки из сервисов. Плитки, которым не хватило таких треков, пропадают, «Ещё не скачано» не показывается. Главная пересобирается сразу. «Новое для тебя» остаётся: это отдельная полка новинок.",
@@ -1243,6 +1247,10 @@ impl SettingId {
                 c!("Процессор", "В один тихий поток; видеокарта не занята."),
                 c!("Видеокарта", "Быстрее, но занимает около 300 МБ памяти."),
             ],
+            Self::SearchPlay => &[
+                c!("Радио по треку", "Трек играет один, дальше — похожие на него, как в автовоспроизведении."),
+                c!("Остальные результаты поиска", "Следом играют остальные найденные треки по порядку."),
+            ],
             Self::RadioUnheard => &[
                 c!("Как обычно", "Слышанное и неслышанное — по тому, что подходит лучше."),
                 c!("Больше новых", "Не меньше половины песен — те, что ты ещё не слышал."),
@@ -1366,6 +1374,7 @@ impl SettingId {
             Self::ProfileNames => usize::from(p.profile_names == v::ProfileNames::Artists),
             Self::BackgroundCards => usize::from(p.background_cards.min(3)),
             Self::RadioNoRepeat => NO_REPEAT.iter().position(|h| *h >= p.radio_no_repeat_hours).unwrap_or(NO_REPEAT.len() - 1),
+            Self::SearchPlay => usize::from(p.search_play == v::SearchPlay::Results),
             Self::RadioExplore => v::RadioExplore::ALL.iter().position(|e| *e == p.radio_explore).unwrap_or(1),
             Self::RadioUnheard => v::RadioUnheard::ALL.iter().position(|u| *u == p.radio_unheard).unwrap_or(0),
             Self::SoundNeural => v::SoundNeural::ALL.iter().position(|m| *m == p.sound_neural_or(false)).unwrap_or(0),
@@ -1470,6 +1479,7 @@ impl SettingId {
             Self::ProfileNames => p.profile_names = if i == 1 { v::ProfileNames::Artists } else { v::ProfileNames::Kind },
             Self::BackgroundCards => p.background_cards = i.min(3) as u8,
             Self::RadioNoRepeat => p.radio_no_repeat_hours = NO_REPEAT[i.min(NO_REPEAT.len() - 1)],
+            Self::SearchPlay => p.search_play = if i == 1 { v::SearchPlay::Results } else { v::SearchPlay::Radio },
             Self::RadioExplore => p.radio_explore = v::RadioExplore::ALL[i.min(v::RadioExplore::ALL.len() - 1)],
             Self::RadioUnheard => p.radio_unheard = v::RadioUnheard::ALL[i.min(v::RadioUnheard::ALL.len() - 1)],
             Self::SoundNeural => p.sound_neural = Some(v::SoundNeural::ALL[i.min(v::SoundNeural::ALL.len() - 1)]),
@@ -3011,6 +3021,7 @@ mod tests {
             (S::StreamAnalysis, TAB_SYSTEM),
             (S::MusicBrainz, TAB_SYSTEM),
             (S::Autoplay, TAB_MUSIC),
+            (S::SearchPlay, TAB_MUSIC),
             (S::RadioSource, TAB_MUSIC),
             (S::NewShareBy(v::RadioKind::Mix), TAB_MUSIC),
             (S::DislikeButton, TAB_MUSIC),
@@ -3071,7 +3082,7 @@ mod tests {
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
             S::RadioNoRepeat, S::RadioExplore, S::RadioUnheard, S::SoundNeural, S::SoundDevice, S::MixCardsWave, S::LyricsGpu, S::LyricsUi, S::ToastTime, S::LyricsStreamKeep,
             S::UpgradeEvery, S::UpgradeBar, S::UpgradeAuto, S::FakeFlac, S::ListShuffle(v::ListKind::Mix),
-            S::ListShuffle(v::ListKind::Album), S::AlbumOpens,
+            S::ListShuffle(v::ListKind::Album), S::AlbumOpens, S::SearchPlay,
         ] {
             assert!(id.choices().len() >= 2, "{id:?}");
             for i in 0..id.choices().len() {

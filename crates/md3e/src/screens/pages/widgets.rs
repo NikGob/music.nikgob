@@ -1094,6 +1094,9 @@ pub enum PlayFrom {
     ReleaseAs(nikgob_view::ReleaseId, bool),
     Playlist(nikgob_view::PlaylistId),
     Tracks(Vec<nikgob_view::TrackId>, String),
+    /// Library rows of the search: the row played is a search's pick
+    /// ([`nikgob_view::Prefs::search_play`] says what follows it).
+    SearchRows(String),
     /// The merged «Всё» search: a queue of library and stream tracks,
     /// started at `at` (the row's own place in it).
     Search {
@@ -1750,6 +1753,11 @@ fn play_from(from: &PlayFrom, tracks: &[TrackRow], i: usize) -> Command {
         PlayFrom::Search { picks, at, context } => Command::PlaySearch {
             tracks: picks.clone(),
             start: *at,
+            context: context.clone(),
+        },
+        PlayFrom::SearchRows(context) => Command::PlaySearch {
+            tracks: tracks.iter().map(|t| nikgob_view::SearchPick::Library(t.id)).collect(),
+            start: i,
             context: context.clone(),
         },
     }

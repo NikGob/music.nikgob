@@ -200,7 +200,7 @@ pub const ALL: &[SettingId] = {
     use SettingId::*;
     &[
         // Музыка.
-        OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, RadioNoRepeat,
+        OutputDevice, Gapless, Crossfade, Normalization, Equalizer, TrackSpeed, KeepTimbre, Autoplay, AutoplayWorld, SearchPlay, RadioNoRepeat,
         ListShuffle(L::Mix), ListShuffle(L::OwnPlaylist), ListShuffle(L::Album), ListShuffle(L::ReadyPlaylist), ShuffleRadio,
         Preset(Area::Recs), MixesDownloadedOnly, RadioNewShare, NewShareBy(K::Track), NewShareBy(K::Artist), NewShareBy(K::Mix), NewShareBy(K::Autoplay),
         MixesWithNew, RadioExplore, RadioUnheard, GraphUse, SoundNeural, SoundDevice, MixCardsWave, DislikeButton, DislikeSkips, DislikeSkipEverywhere, Marks, AlbumOpens,
@@ -285,7 +285,8 @@ fn spec(id: SettingId) -> Spec {
         // Swatches, picked like segments.
         S::BgHue => Spec::Choice(Segments),
         S::Scheme | S::WaveFallback | S::LyricsGap | S::DblClickShape | S::NewShareBy(_) | S::RadioNoRepeat | S::RadioExplore
-        | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac | S::ListShuffle(_) | S::AlbumOpens => Spec::Choice(Menu),
+        | S::RadioUnheard | S::BackgroundCards | S::BgShapes | S::UpgradeEvery | S::FakeFlac | S::ListShuffle(_) | S::AlbumOpens
+        | S::SearchPlay => Spec::Choice(Menu),
         S::SoundNeural => Spec::Fixed(Menu, "a mode downloads the neural sound model; the sweep leaves it as it is"),
         S::SoundDevice => Spec::Fixed(Menu, "open only with the neural sound analysis on, which downloads its model"),
         S::MixCardsWave => Spec::Choice(Menu),
@@ -904,7 +905,7 @@ mod tests {
         let pos = |id: SettingId| ALL.iter().position(|x| *x == id).unwrap_or(usize::MAX);
         match id {
             S::OutputDevice | S::Gapless | S::Crossfade | S::Normalization | S::Equalizer | S::TrackSpeed | S::KeepTimbre
-            | S::Autoplay | S::AutoplayWorld | S::ListShuffle(_) | S::Marks | S::PlayerButton(_) | S::NavRoot | S::UiScale
+            | S::Autoplay | S::AutoplayWorld | S::SearchPlay | S::ListShuffle(_) | S::Marks | S::PlayerButton(_) | S::NavRoot | S::UiScale
             | S::AlbumOpens | S::AlbumVersions
 
             | S::ShuffleRadio | S::RadioNoRepeat | S::MixesDownloadedOnly | S::RadioNewShare | S::NewShareBy(_) | S::MixesWithNew

@@ -45,6 +45,9 @@ fn overline(ui: &mut Ui, parts: &[&str]) {
 pub enum StreamFrom {
     /// The rows themselves, as a queue named `context`.
     Rows(String),
+    /// Rows of a service's search: the row played is a search's pick
+    /// ([`nikgob_view::Prefs::search_play`] says what follows it).
+    SearchRows(String),
     Album(RemoteId),
     Playlist(RemoteId),
     /// The merged «Всё» search: a queue of library and stream tracks,
@@ -60,6 +63,11 @@ fn play_from(from: &StreamFrom, rows: &[StreamTrackRow], i: usize) -> Command {
     match from {
         StreamFrom::Rows(ctx) => Command::PlayStreamTracks {
             tracks: rows.iter().map(|r| r.remote.clone()).collect(),
+            start: i,
+            context: ctx.clone(),
+        },
+        StreamFrom::SearchRows(ctx) => Command::PlaySearch {
+            tracks: rows.iter().map(|r| nikgob_view::SearchPick::Stream(r.remote.clone())).collect(),
             start: i,
             context: ctx.clone(),
         },
