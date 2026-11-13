@@ -416,6 +416,7 @@ fn unzip_into(
     let file = std::fs::File::open(zip).map_err(io)?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).map_err(|e| SourceError::Parse(format!("a broken zip: {e}")))?;
     let mut total = 0u64;
+    let mut seen: Vec<String> = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| SourceError::Parse(format!("a broken zip: {e}")))?;
         if entry.is_dir() {
@@ -426,30 +427,49 @@ fn unzip_into(
         if !is_audio(&name) || !keep(&name) {
             continue;
         }
-        let path = dest.join(file_name(&name));
-        if out.contains(&path) {
+        let name = file_name(&name);
+        if seen.contains(&name) {
             continue;
         }
+        seen.push(name.clone());
         // The sizes the zip states are checked first, then what really
         // comes out: a lying header gains nothing.
         let limit = file_max.min(total_max - total);
         if entry.size() > limit {
             return Err(too_large());
         }
-        let written = std::fs::File::create(&path).and_then(|mut f| {
+        // Always a new file: one in `dest` already stays as it is, and only
+        // what this zip made is removed if it fails.
+        let (path, mut file) = create_fresh(dest, &name).map_err(io)?;
+        out.push(path);
+        let written = {
             use std::io::Read as _;
-            std::io::copy(&mut (&mut entry).take(limit + 1), &mut f)
-        });
+            std::io::copy(&mut (&mut entry).take(limit + 1), &mut file)
+        };
         match written {
             Ok(n) if n <= limit => total += n,
-            other => {
-                let _ = std::fs::remove_file(&path);
-                return Err(other.map_or_else(io, |_| too_large()));
-            }
+            other => return Err(other.map_or_else(io, |_| too_large())),
         }
-        out.push(path);
     }
     Ok(())
+}
+
+/// A file made new for `name` in `dir`, or for `name (2)`… when the name is
+/// taken: nothing there is opened, truncated or replaced.
+fn create_fresh(dir: &Path, name: &str) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
+        _ => (name, String::new()),
+    };
+    for i in 1..1000 {
+        let path = if i == 1 { dir.join(name) } else { dir.join(format!("{stem} ({i}){ext}")) };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => return Ok((path, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("no free name for {name}")))
 }
 
 /// What a fetch needs.
@@ -869,6 +889,22 @@ mod tests {
         let files = unzip_audio_within(zip.path(), dir.path(), |_| true, 2 << 20, 2 << 20).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(std::fs::read(&files[1]).unwrap(), big);
+    }
+
+    #[test]
+    fn a_failed_unzip_leaves_files_that_were_there_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("01 a.flac"), b"mine").unwrap();
+        let big = vec![0u8; 1 << 20];
+        let zip = zip_of(&[("01 a.flac", b"small"), ("02 b.flac", &big)]);
+        unzip_audio_within(zip.path(), dir.path(), |_| true, 64 << 10, 1 << 30).unwrap_err();
+        assert_eq!(std::fs::read(dir.path().join("01 a.flac")).unwrap(), b"mine");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "only what the zip made went");
+        // A successful one puts its file next to it, not over it.
+        let zip = zip_of(&[("01 a.flac", b"small")]);
+        let files = unzip_audio_within(zip.path(), dir.path(), |_| true, 64 << 10, 1 << 30).unwrap();
+        assert_eq!(files, vec![dir.path().join("01 a (2).flac")]);
+        assert_eq!(std::fs::read(dir.path().join("01 a.flac")).unwrap(), b"mine");
     }
 
     #[test]
