@@ -17,7 +17,7 @@ const SHEET: &str = "REM GENRE Rock\r\n\
     REM DATE 1988\r\n\
     PERFORMER \"Кино\"\r\n\
     TITLE \"Группа крови\"\r\n\
-    FILE \"CDImage.wav\" WAVE\r\n\
+    FILE \"Кино - Группа крови.flac\" WAVE\r\n\
     \x20 TRACK 01 AUDIO\r\n\
     \x20   TITLE \"Группа крови\"\r\n\
     \x20   INDEX 01 00:00:00\r\n\
@@ -61,7 +61,8 @@ async fn an_image_with_its_sheet_becomes_tracks_that_share_one_master() {
     let (importer, lib) = importer(&cfg);
     let album = root.inbox("Кино - Группа крови");
     std::fs::create_dir_all(&album).unwrap();
-    // The sheet names `CDImage.wav`; the image is named like the sheet.
+    // The sheet names the `.flac` the rip was packed into; the image here is
+    // the `.wav` of the same name.
     let image = album.join("Кино - Группа крови.wav");
     write_wav(&image, &disc(), RATE);
     let image_hash = blake3::hash(&std::fs::read(&image).unwrap()).to_hex().to_string();
@@ -161,4 +162,105 @@ async fn a_sheet_that_runs_past_its_file_imports_the_file_as_it_is() {
     let t = lib.get_track(tracks[0]).unwrap().unwrap();
     assert!(t.duration_ms.is_some_and(|d| (6_900..7_100).contains(&d)), "the whole file: {t:?}");
     assert!(std::fs::read_dir(&cfg.work_dir).map_or(true, |mut r| r.next().is_none()));
+}
+
+/// One sheet for two files (two images of one disc set) in the Inbox: each
+/// image is kept with its own copy of the sheet, and the Inbox sheet goes
+/// only after both. Deleting every track of one image leaves the other
+/// image's sheet.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_sheet_of_two_images_is_kept_with_each() {
+    let root = Root::new();
+    let mut cfg = root.cfg.clone();
+    cfg.work_dir = root.dir.path().join("work");
+    let (importer, lib) = importer(&cfg);
+    let album = root.inbox("Live");
+    std::fs::create_dir_all(&album).unwrap();
+    let (a, b) = (album.join("part1.wav"), album.join("part2.wav"));
+    let mut one = broadband(RATE, 7.0, 41);
+    one.extend(broadband(RATE, 7.0, 42));
+    let mut two = broadband(RATE, 7.0, 43);
+    two.extend(broadband(RATE, 7.0, 44));
+    write_wav(&a, &one, RATE);
+    write_wav(&b, &two, RATE);
+    let hash = |p: &std::path::Path| blake3::hash(&std::fs::read(p).unwrap()).to_hex().to_string();
+    let (ha, hb) = (hash(&a), hash(&b));
+    let sheet = "PERFORMER \"Band\"\nTITLE \"Live\"\nREM DATE 2001\n\
+        FILE \"part1.wav\" WAVE\n\
+        TRACK 01 AUDIO\nTITLE \"One\"\nINDEX 01 00:00:00\n\
+        TRACK 02 AUDIO\nTITLE \"Two\"\nINDEX 01 00:07:00\n\
+        FILE \"part2.wav\" WAVE\n\
+        TRACK 03 AUDIO\nTITLE \"Three\"\nINDEX 01 00:00:00\n\
+        TRACK 04 AUDIO\nTITLE \"Four\"\nINDEX 01 00:07:00\n";
+    std::fs::write(album.join("Live.cue"), sheet).unwrap();
+
+    let events = importer
+        .import_paths(vec![root.cfg.inbox_dir.clone()], SourceOrigin::Inbox)
+        .wait()
+        .await;
+    let tracks = imported(&events);
+    assert_eq!(tracks.len(), 4, "{events:?}");
+    let masters = root.cfg.masters_dir();
+    for h in [&ha, &hb] {
+        assert!(masters.join(format!("{h}.wav")).is_file());
+        assert_eq!(std::fs::read(masters.join(format!("{h}.cue"))).unwrap(), sheet.as_bytes());
+    }
+    assert!(!album.join("Live.cue").exists(), "the Inbox sheet goes once both images are kept");
+    // Every track of the first image goes: the second keeps its sheet.
+    for t in &tracks {
+        if lib.get_master(*t).unwrap().unwrap().file_hash == ha {
+            purge_track(&lib, &cfg, *t).unwrap();
+        }
+    }
+    assert!(!masters.join(format!("{ha}.wav")).exists());
+    assert!(!masters.join(format!("{ha}.cue")).exists());
+    assert!(masters.join(format!("{hb}.wav")).is_file());
+    assert_eq!(std::fs::read(masters.join(format!("{hb}.cue"))).unwrap(), sheet.as_bytes());
+}
+
+/// The fake-lossless check is the image's: every track of one image gets
+/// the same verdict and the image as its master, whatever its own stretch
+/// of sound looks like.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_track_of_an_image_shares_its_verdict_and_master() {
+    let root = Root::new();
+    let mut cfg = root.cfg.clone();
+    cfg.work_dir = root.dir.path().join("work");
+    cfg.convert_fake_lossless = false;
+    let (importer, lib) = importer(&cfg);
+    let album = root.inbox("Mixed");
+    std::fs::create_dir_all(&album).unwrap();
+    let image = album.join("disc.wav");
+    // A full-band track, then one cut at 16 kHz as an MP3 decode is.
+    let mut pcm = broadband(RATE, 10.0, 51);
+    pcm.extend(lowpassed_noise(RATE, 10.0, 16_000.0, 52));
+    write_wav(&image, &pcm, RATE);
+    let image_hash = blake3::hash(&std::fs::read(&image).unwrap()).to_hex().to_string();
+    std::fs::write(
+        album.join("disc.cue"),
+        "PERFORMER \"P\"\nTITLE \"Mixed\"\nFILE \"disc.wav\" WAVE\n\
+         TRACK 01 AUDIO\nTITLE \"Bright\"\nINDEX 01 00:00:00\n\
+         TRACK 02 AUDIO\nTITLE \"Dull\"\nINDEX 01 00:10:00\n",
+    )
+    .unwrap();
+    let events = importer
+        .import_paths(vec![root.cfg.inbox_dir.clone()], SourceOrigin::Inbox)
+        .wait()
+        .await;
+    let tracks = imported(&events);
+    assert_eq!(tracks.len(), 2, "{events:?}");
+    let mut verdicts = Vec::new();
+    let mut codecs = Vec::new();
+    for t in &tracks {
+        let m = lib.get_master(*t).unwrap().expect("every track has the image as its master");
+        assert_eq!(m.file_hash, image_hash);
+        let src = lib.active_source(*t).unwrap().unwrap();
+        verdicts.push(lib.quality_check(src.id).unwrap().map(|c| c.verdict));
+        codecs.push(src.codec);
+    }
+    assert_eq!(verdicts[0], verdicts[1], "one verdict for the image");
+    assert!(verdicts[0].is_some());
+    assert_eq!(codecs[0], codecs[1], "both tracks made the same way");
+    assert!(root.cfg.masters_dir().join(format!("{image_hash}.cue")).is_file());
+    assert!(!image.exists());
 }

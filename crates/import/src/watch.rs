@@ -89,6 +89,32 @@ fn hidden(path: &std::path::Path) -> bool {
         .is_some_and(|n| n.to_string_lossy().starts_with('.'))
 }
 
+/// Splits the settled paths into the ones imported now and the ones held
+/// back: a path in a folder that has a cue sheet (settled or not) waits
+/// while any other file of that folder is still settling, so a sheet never
+/// pulls in an image that is still being copied, and an image never goes
+/// without its sheet.
+fn split_ready<'a>(ready: Vec<PathBuf>, waiting: impl Iterator<Item = &'a PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let waiting: Vec<&PathBuf> = waiting.collect();
+    let unsettled: std::collections::HashSet<&std::path::Path> = waiting
+        .iter()
+        .filter(|p| !ready.contains(p))
+        .filter_map(|p| p.parent())
+        .collect();
+    let sheets: std::collections::HashSet<&std::path::Path> = waiting
+        .iter()
+        .copied()
+        .chain(ready.iter())
+        .filter(|p| fsutil::is_cue_file(p))
+        .filter_map(|p| p.parent())
+        .collect();
+    let (held, go): (Vec<PathBuf>, Vec<PathBuf>) = ready
+        .iter()
+        .cloned()
+        .partition(|p| p.parent().is_some_and(|d| sheets.contains(d) && unsettled.contains(d)));
+    (go, held)
+}
+
 fn watch_loop(
     importer: Importer,
     runtime: tokio::runtime::Handle,
@@ -111,7 +137,7 @@ fn watch_loop(
     // Files that were there before we started (cue sheets too: an APE
     // image is found through its sheet).
     let found = fsutil::scan_import(std::slice::from_ref(&inbox));
-    for p in found.audio.into_iter().chain(found.torrents).chain(found.cues) {
+    for p in found.audio.into_iter().chain(found.torrents).chain(found.cues).chain(found.images) {
         track(p, &mut waiting);
     }
 
@@ -125,10 +151,14 @@ fn watch_loop(
                         }
                         if p.is_dir() {
                             let found = fsutil::scan_import(std::slice::from_ref(&p));
-                            for f in found.audio.into_iter().chain(found.torrents).chain(found.cues) {
+                            for f in found.audio.into_iter().chain(found.torrents).chain(found.cues).chain(found.images) {
                                 track(f, &mut waiting);
                             }
-                        } else if fsutil::is_audio_file(&p) || fsutil::is_torrent_file(&p) || fsutil::is_cue_file(&p) {
+                        } else if fsutil::is_audio_file(&p)
+                            || fsutil::is_torrent_file(&p)
+                            || fsutil::is_cue_file(&p)
+                            || fsutil::is_sheet_image_file(&p)
+                        {
                             track(p, &mut waiting);
                         }
                     }
@@ -164,6 +194,10 @@ fn watch_loop(
         for p in gone {
             waiting.remove(&p);
         }
+        // A folder with a cue sheet goes as a whole: neither the sheet
+        // nor an image of it is imported while a file next to them is
+        // still being written.
+        let (ready, _held) = split_ready(ready, waiting.keys());
         if ready.is_empty() {
             continue;
         }
@@ -184,5 +218,34 @@ fn watch_loop(
             let _enter = runtime.enter();
             let _job = importer.import_paths(batch, SourceOrigin::Inbox);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sheet_waits_for_the_image_still_being_copied() {
+        let dir = PathBuf::from("Inbox").join("Album");
+        let (cue, wav, other) = (dir.join("a.cue"), dir.join("a.wav"), PathBuf::from("Inbox").join("x.flac"));
+        // The sheet settled, the image did not: the sheet is held, a file
+        // of another folder goes.
+        let waiting = [cue.clone(), wav.clone(), other.clone()];
+        let (go, held) = split_ready(vec![cue.clone(), other.clone()], waiting.iter());
+        assert_eq!(go, vec![other.clone()]);
+        assert_eq!(held, vec![cue.clone()]);
+        // The image settled first: it waits for its sheet.
+        let (go, held) = split_ready(vec![wav.clone()], waiting.iter());
+        assert!(go.is_empty());
+        assert_eq!(held, vec![wav.clone()]);
+        // Both settled: they go together.
+        let (go, _) = split_ready(vec![cue.clone(), wav.clone()], [cue.clone(), wav.clone()].iter());
+        assert_eq!(go, vec![cue, wav]);
+        // A folder without a sheet is not held.
+        let plain = PathBuf::from("Inbox").join("P");
+        let both = [plain.join("1.flac"), plain.join("2.flac")];
+        let (go, _) = split_ready(vec![both[0].clone()], both.iter());
+        assert_eq!(go, vec![both[0].clone()]);
     }
 }

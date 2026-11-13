@@ -25,6 +25,7 @@ use crate::decode::{PcmSpec, decode_file};
 use crate::error::{ImportError, Result};
 use crate::fsutil::{self, is_cue_file};
 use crate::sanitize::{long_path, sanitize_component, truncate_chars};
+use crate::spectrum::{SpectrumCollector, SpectrumReport};
 use crate::tags::{self, FileInfo, TagSet};
 
 /// Lossless containers a sheet's image may be cut from. APE and WavPack
@@ -109,10 +110,10 @@ fn stem_lower(p: &Path) -> String {
 }
 
 /// The file a sheet's `FILE` names in its folder: the name itself (any
-/// case), the same name with another lossless extension (a sheet written
-/// for `.wav` next to the `.flac` it was packed into), or, for a sheet of
-/// one file, the image named like the sheet or the only image there.
-fn resolve(sheet_path: &Path, sheet: &CueSheet, name: &str, folder: &Folder) -> Option<PathBuf> {
+/// case), or the same name with another lossless extension (a sheet written
+/// for `.wav` next to the `.flac` it was packed into). Nothing else is
+/// guessed: a sheet naming a file that is not there does not fit.
+fn resolve(sheet_path: &Path, name: &str, folder: &Folder) -> Option<PathBuf> {
     // A path from the ripper's disk (`C:\rip\CDImage.wav`): its name.
     let name = name.replace('\\', "/");
     let base = name.rsplit('/').next().unwrap_or(&name).trim();
@@ -133,17 +134,47 @@ fn resolve(sheet_path: &Path, sheet: &CueSheet, name: &str, folder: &Folder) -> 
         .filter(|a| IMAGE_EXTENSIONS.contains(&ext_of(a).as_str()))
         .collect();
     let want = Path::new(base).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    if let Some(a) = images.iter().find(|a| stem_lower(a) == want) {
-        return Some((*a).clone());
-    }
-    if sheet.files.len() != 1 {
-        return None;
-    }
-    let cue_stem = stem_lower(sheet_path);
-    if let Some(a) = images.iter().find(|a| stem_lower(a) == cue_stem) {
-        return Some((*a).clone());
-    }
-    (images.len() == 1 && folder.cues.len() == 1).then(|| images[0].clone())
+    images.into_iter().find(|a| stem_lower(a) == want).cloned()
+}
+
+/// Letters and digits only, lowercase: how a title is looked for in a
+/// file name.
+fn folded(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// The leading number of a file name (`03 - Title`, `03.Title`).
+fn leading_number(stem: &str) -> Option<u32> {
+    let digits: String = stem.trim().chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Whether `files` (per-track files of the job, next to the image) cover
+/// every track of `image`: each track is a different file whose name holds
+/// the track's title (or, for a track without one, starts with its number).
+fn covered_by(image: &Image, files: &[&PathBuf]) -> bool {
+    let names: Vec<(String, Option<u32>)> = files
+        .iter()
+        .map(|f| {
+            let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            (folded(&stem), leading_number(&stem))
+        })
+        .collect();
+    let mut used = vec![false; names.len()];
+    image.tracks().iter().all(|t| {
+        let title = t.title.as_deref().map(folded).filter(|t| !t.is_empty());
+        let hit = names.iter().enumerate().position(|(i, (name, no))| {
+            !used[i]
+                && match &title {
+                    Some(title) => name.contains(title.as_str()),
+                    None => *no == Some(t.number),
+                }
+        });
+        if let Some(i) = hit {
+            used[i] = true;
+        }
+        hit.is_some()
+    })
 }
 
 /// Sorts a job's files into the ones imported as they are and the images
@@ -183,7 +214,7 @@ pub(crate) fn plan(files: Vec<PathBuf>, cues: &[PathBuf]) -> Plan {
                 }
             };
             let resolved: Vec<Option<PathBuf>> =
-                sheet.files.iter().map(|f| resolve(cue_path, &sheet, &f.name, &folder)).collect();
+                sheet.files.iter().map(|f| resolve(cue_path, &f.name, &folder)).collect();
             if let Some(i) = resolved.iter().position(Option::is_none) {
                 log::warn!(
                     "cue {}: its FILE «{}» is not next to it; the files import as they are",
@@ -216,36 +247,33 @@ pub(crate) fn plan(files: Vec<PathBuf>, cues: &[PathBuf]) -> Plan {
         if found.is_empty() {
             continue;
         }
-        // Per-track files next to the image (some releases ship both):
-        // those are taken and the image is left alone.
-        let others = folder
+        // Per-track files of this job next to an image (some releases
+        // ship both): when they are every track of it, those are taken
+        // and the image is left alone; else it is cut.
+        let tracks: Vec<&PathBuf> = folder
             .audio
             .iter()
-            .filter(|a| !found.iter().any(|f| f.path == **a))
-            .count();
-        let fewest = found.iter().map(|f| f.tracks().len()).min().unwrap_or(0);
-        if others >= 2 && others * 2 >= fewest {
-            for f in found {
+            .filter(|a| given_files.contains(a) && !found.iter().any(|f| f.path == **a))
+            .collect();
+        for f in found {
+            if covered_by(&f, &tracks) {
                 log::info!(
-                    "cue {}: {} has per-track files next to it ({others}); those are imported, the image is left alone",
+                    "cue {}: the per-track files next to {} are its tracks; those are imported, the image is left alone",
                     f.cue.display(),
                     f.path.display()
                 );
                 leave.insert(f.path);
-            }
-            continue;
-        }
-        for f in found {
-            if given_files.contains(&f.path) || given_cues.contains(&f.cue) {
+            } else if given_files.contains(&f.path) || given_cues.contains(&f.cue) {
                 images.push(f);
             }
         }
     }
     number_discs(&mut images);
     let cut: HashSet<&PathBuf> = images.iter().map(|i| &i.path).collect();
+    // An APE/WavPack file no sheet cuts is not read (as before).
     let files = files
         .iter()
-        .filter(|f| !cut.contains(f) && !leave.contains(*f))
+        .filter(|f| !cut.contains(f) && !leave.contains(*f) && fsutil::is_audio_file(f))
         .cloned()
         .collect();
     Plan { files, images }
@@ -342,6 +370,10 @@ pub(crate) struct CutImage {
     pub size: u64,
     /// What the image is (its codec decides the tracks' rank).
     pub info: FileInfo,
+    /// The fake-lossless check of the whole image, when it ran: every
+    /// track of it is taken for what the image is.
+    pub spectrum: Option<SpectrumReport>,
+    pub spectrum_db: Option<Vec<f32>>,
 }
 
 /// One track cut out of an image.
@@ -527,15 +559,18 @@ pub(crate) type Cut = Vec<(PathBuf, Arc<Segment>)>;
 /// `work` (a folder of this image alone): `NN - Title.wav`. The sheet must
 /// fit the audio (no track starting past its end); on any failure what was
 /// written goes and the error says why.
-pub(crate) fn cut(img: &Image, work: &Path) -> Result<Cut> {
-    let result = cut_inner(img, work);
+///
+/// With `check`, the fake-lossless check runs on the whole image in the
+/// same decode: one verdict for every track of it ([`CutImage::spectrum`]).
+pub(crate) fn cut(img: &Image, work: &Path, check: bool) -> Result<Cut> {
+    let result = cut_inner(img, work, check);
     if result.is_err() {
         let _ = std::fs::remove_dir_all(long_path(work));
     }
     result
 }
 
-fn cut_inner(img: &Image, work: &Path) -> Result<Cut> {
+fn cut_inner(img: &Image, work: &Path, check: bool) -> Result<Cut> {
     let (own, info) = tags::read_tags(&img.path)?;
     if !info.codec.is_lossless() {
         return Err(ImportError::Unsupported(format!("{}: {} is not a lossless image", img.path.display(), info.codec)));
@@ -577,6 +612,7 @@ fn cut_inner(img: &Image, work: &Path) -> Result<Cut> {
         out: Option<WavOut>,
         written: Vec<u64>,
         failure: Option<ImportError>,
+        spectrum: Option<SpectrumCollector>,
     }
     let mut st = State {
         spans: None,
@@ -585,12 +621,17 @@ fn cut_inner(img: &Image, work: &Path) -> Result<Cut> {
         out: None,
         written: vec![0; tracks.len()],
         failure: None,
+        spectrum: None,
     };
+    let duration_s = info.duration.as_secs_f64();
     let file = &img.sheet.files[img.file];
     let depth = info.bit_depth;
     let mut sink = |chunk: &[f32], spec: PcmSpec| -> ControlFlow<()> {
         let ch = spec.channels.max(1);
         if st.spans.is_none() {
+            if check {
+                st.spectrum = Some(SpectrumCollector::new(spec.sample_rate, spec.channels, duration_s));
+            }
             match cue::spans(file, spec.sample_rate, None) {
                 Ok(s) => st.spans = Some(s),
                 Err(e) => {
@@ -598,6 +639,9 @@ fn cut_inner(img: &Image, work: &Path) -> Result<Cut> {
                     return ControlFlow::Break(());
                 }
             }
+        }
+        if let Some(sp) = st.spectrum.as_mut() {
+            sp.push(chunk);
         }
         let spans = st.spans.as_ref().expect("spans");
         let frames = (chunk.len() / ch) as u64;
@@ -674,12 +718,18 @@ fn cut_inner(img: &Image, work: &Path) -> Result<Cut> {
             .to_string(),
         ));
     }
+    let (spectrum, spectrum_db) = match st.spectrum.take().map(SpectrumCollector::finish_with_levels) {
+        Some((report, levels)) => (Some(report), levels),
+        None => (None, None),
+    };
     let image = Arc::new(CutImage {
         path: img.path.clone(),
         cue: img.cue.clone(),
         hash,
         size,
         info,
+        spectrum,
+        spectrum_db,
     });
     Ok(names
         .into_iter()
@@ -710,27 +760,40 @@ pub(crate) fn apply(seg: &Segment, tags: &mut TagSet, info: &mut FileInfo) {
 
 // ------------------------------------------------------------------ masters
 
-/// The sheet kept with an image master: `<masters>/<hash>.cue`, its bytes
-/// as they came. A sheet already there stays (never overwritten); one in
-/// the Inbox moves (an Inbox copy of the very sheet that is kept already
-/// goes), any other is copied. Returns the sheet's place.
-pub(crate) fn keep_sheet(masters_dir: &Path, inbox_dir: &Path, sheet: &Path, hash: &str) -> Result<PathBuf> {
+/// The sheet kept with an image master: `<masters>/<hash>.cue`, a copy of
+/// its bytes as they came (one sheet may serve several images; an Inbox
+/// sheet goes only once every image of it is kept, see [`sheet_done`]).
+/// A sheet already there stays (never overwritten). Returns its place.
+pub(crate) fn keep_sheet(masters_dir: &Path, sheet: &Path, hash: &str) -> Result<PathBuf> {
     let dest = masters_dir.join(format!("{hash}.cue"));
-    if long_path(&dest).exists() {
-        if sheet.starts_with(inbox_dir)
-            && long_path(sheet).exists()
-            && fsutil::hash_file(sheet).ok() == fsutil::hash_file(&dest).ok()
-        {
-            fsutil::remove_file(sheet)?;
-        }
-        return Ok(dest);
-    }
-    if sheet.starts_with(inbox_dir) {
-        fsutil::move_file_verified(sheet, &dest, None)?;
-    } else {
+    if !long_path(&dest).exists() {
         fsutil::copy_file_verified(sheet, &dest, None)?;
     }
     Ok(dest)
+}
+
+/// What became of one image of a sheet when its job's folder was done.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageEnd {
+    /// Kept as a master with its own copy of the sheet.
+    Kept,
+    /// Sent to the Trash (every track of it was a duplicate).
+    Trashed,
+    /// Still where it was (it failed, or the job stopped).
+    Stayed,
+}
+
+/// What to do with a sheet in the Inbox once its images are done: it goes
+/// when every image of it is kept with a copy of it (`Some(false)`: removed,
+/// its copies are in the masters folder) or went to the Trash
+/// (`Some(true)` when all did: to the Trash too); while any image stays, so
+/// does the sheet (`None`).
+pub(crate) fn sheet_done(ends: &[ImageEnd]) -> Option<bool> {
+    if ends.is_empty() || ends.contains(&ImageEnd::Stayed) {
+        None
+    } else {
+        Some(ends.iter().all(|e| *e == ImageEnd::Trashed))
+    }
 }
 
 #[cfg(test)]
@@ -778,7 +841,7 @@ mod tests {
             disc_total: None,
         };
         let work = dir.path().join("work");
-        let cut = cut(&img, &work).unwrap();
+        let cut = cut(&img, &work, true).unwrap();
         assert_eq!(cut.len(), 3);
         let names: Vec<String> = cut.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         assert_eq!(names, vec!["01 - One - a.wav", "02 - Two.wav", "03.wav"]);
@@ -820,7 +883,7 @@ mod tests {
             disc_total: None,
         };
         let work = dir.path().join("work");
-        let err = cut(&img, &work).unwrap_err().to_string();
+        let err = cut(&img, &work, false).unwrap_err().to_string();
         assert!(err.contains("past the end"), "{err}");
         assert!(!work.exists());
     }
@@ -838,7 +901,7 @@ mod tests {
         let a = dir.path().join("A");
         // The sheet names a .wav; the image was packed into .flac.
         touch(&a.join("Artist - Album.flac"));
-        std::fs::write(a.join("Artist - Album.cue"), TWO).unwrap();
+        std::fs::write(a.join("Artist - Album.cue"), TWO.replace("CDImage.wav", "Artist - Album.wav")).unwrap();
         touch(&a.join("cover.jpg"));
         let p = plan(vec![a.join("Artist - Album.flac")], &[]);
         assert!(p.files.is_empty());
@@ -867,6 +930,51 @@ mod tests {
         let p = plan(files, &[]);
         assert!(p.images.is_empty());
         assert_eq!(p.files, vec![a.join("01 - One.flac"), a.join("02 - Two.flac")], "the image is left out");
+        // The image chosen alone is cut: the files next to it are not in the job.
+        let p = plan(vec![a.join("CDImage.flac")], &[]);
+        assert_eq!(p.images.len(), 1);
+    }
+
+    const TITLED: &str = "FILE \"CDImage.wav\" WAVE\n\
+        TRACK 01 AUDIO\nTITLE \"Morning Song\"\nINDEX 01 00:00:00\n\
+        TRACK 02 AUDIO\nTITLE \"Evening\"\nINDEX 01 01:00:00\n\
+        TRACK 03 AUDIO\nTITLE \"Night\"\nINDEX 01 02:00:00\n";
+
+    #[test]
+    fn other_audio_next_to_an_image_leaves_it_out_only_when_it_is_every_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A");
+        touch(&a.join("CDImage.flac"));
+        std::fs::write(a.join("CDImage.cue"), TITLED).unwrap();
+        let image = a.join("CDImage.flac");
+        // Two unrelated bonus tracks: the image is cut, the bonus tracks import.
+        let bonus = vec![a.join("Bonus A.flac"), a.join("Bonus B.flac")];
+        for b in &bonus {
+            touch(b);
+        }
+        let mut files = bonus.clone();
+        files.push(image.clone());
+        let p = plan(files, &[]);
+        assert_eq!(p.images.len(), 1, "unrelated files do not stand for the image");
+        assert_eq!(p.files, bonus);
+        // An incomplete set of its tracks: still cut.
+        let some = vec![a.join("01 - Morning Song.flac"), a.join("02 - Evening.flac")];
+        for f in &some {
+            touch(f);
+        }
+        let mut files = some.clone();
+        files.push(image.clone());
+        assert_eq!(plan(files, &[]).images.len(), 1);
+        // Every track by its title: the per-track files win.
+        let all = a.join("03 Night.flac");
+        touch(&all);
+        let mut files = some.clone();
+        files.push(all.clone());
+        files.push(image.clone());
+        let p = plan(files, &[]);
+        assert!(p.images.is_empty());
+        assert_eq!(p.files.len(), 3);
+        assert!(!p.files.contains(&image));
     }
 
     #[test]
@@ -881,6 +989,17 @@ mod tests {
         let p = plan(files.clone(), &[]);
         assert!(p.images.is_empty());
         assert_eq!(p.files, files);
+        // One image only, of another name: never taken for the missing file.
+        let b = dir.path().join("B");
+        touch(&b.join("unrelated.flac"));
+        std::fs::write(b.join("other-album.cue"), TWO.replace("CDImage.wav", "missing.wav")).unwrap();
+        let p = plan(vec![b.join("unrelated.flac")], &[b.join("other-album.cue")]);
+        assert!(p.images.is_empty(), "a missing FILE is not guessed");
+        assert_eq!(p.files, vec![b.join("unrelated.flac")]);
+        // An APE no sheet names is not read at all.
+        touch(&b.join("lone.ape"));
+        let p = plan(vec![b.join("lone.ape")], &[]);
+        assert!(p.files.is_empty() && p.images.is_empty());
         // A per-track sheet (one track per file) cuts nothing either.
         std::fs::write(
             a.join("x.cue"),
@@ -890,6 +1009,33 @@ mod tests {
         let p = plan(files.clone(), &[]);
         assert!(p.images.is_empty());
         assert_eq!(p.files, files);
+    }
+
+    #[test]
+    fn an_inbox_sheet_goes_only_when_every_image_of_it_is_settled() {
+        use ImageEnd::{Kept, Stayed, Trashed};
+        assert_eq!(sheet_done(&[Kept, Kept]), Some(false), "copies kept with each image: removed");
+        assert_eq!(sheet_done(&[Kept, Trashed]), Some(false));
+        assert_eq!(sheet_done(&[Trashed, Trashed]), Some(true), "all duplicates: to the Trash");
+        assert_eq!(sheet_done(&[Kept, Stayed]), None, "an image still needs it");
+        assert_eq!(sheet_done(&[]), None);
+    }
+
+    #[test]
+    fn a_sheet_kept_for_two_images_is_copied_for_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let sheet = dir.path().join("Inbox").join("a.cue");
+        touch(&sheet);
+        let masters = dir.path().join("masters");
+        std::fs::create_dir_all(&masters).unwrap();
+        keep_sheet(&masters, &sheet, "h1").unwrap();
+        keep_sheet(&masters, &sheet, "h2").unwrap();
+        assert!(masters.join("h1.cue").is_file() && masters.join("h2.cue").is_file());
+        assert!(sheet.is_file(), "the Inbox sheet is not moved by the first image");
+        // A sheet kept before is never overwritten.
+        std::fs::write(masters.join("h1.cue"), b"earlier").unwrap();
+        keep_sheet(&masters, &sheet, "h1").unwrap();
+        assert_eq!(std::fs::read(masters.join("h1.cue")).unwrap(), b"earlier");
     }
 
     #[test]

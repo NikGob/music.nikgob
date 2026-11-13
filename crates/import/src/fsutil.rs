@@ -196,6 +196,8 @@ pub struct Scanned {
     pub torrents: Vec<PathBuf>,
     /// Cue sheets (`.cue`): the index cards of single-file rips.
     pub cues: Vec<PathBuf>,
+    /// APE and WavPack files: imported only as the images of a sheet.
+    pub images: Vec<PathBuf>,
 }
 
 /// [`scan`] that also finds cue sheets.
@@ -204,7 +206,7 @@ pub fn scan_import(roots: &[PathBuf]) -> Scanned {
     for root in roots {
         walk(root, &mut found, 0);
     }
-    for list in [&mut found.audio, &mut found.torrents, &mut found.cues] {
+    for list in [&mut found.audio, &mut found.torrents, &mut found.cues, &mut found.images] {
         list.sort();
         list.dedup();
     }
@@ -213,6 +215,11 @@ pub fn scan_import(roots: &[PathBuf]) -> Scanned {
 
 pub fn is_cue_file(path: &Path) -> bool {
     has_extension(path, &["cue"])
+}
+
+/// APE and WavPack: lossless images the pipeline reads only through a sheet.
+pub fn is_sheet_image_file(path: &Path) -> bool {
+    has_extension(path, &["ape", "wv"])
 }
 
 fn walk(path: &Path, found: &mut Scanned, depth: usize) {
@@ -227,6 +234,8 @@ fn walk(path: &Path, found: &mut Scanned, depth: usize) {
             found.torrents.push(path.to_path_buf());
         } else if is_cue_file(path) {
             found.cues.push(path.to_path_buf());
+        } else if is_sheet_image_file(path) {
+            found.images.push(path.to_path_buf());
         }
         return;
     }
