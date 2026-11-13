@@ -1394,7 +1394,6 @@ fn analyze_track(cfg: &ImportConfig, path: &Path, origin: SourceOrigin, cue: Opt
     let verdict = audio.spectrum.map(|s| s.verdict);
     let fake_lossless = lossless && verdict == Some(Verdict::Transcoded);
     let upsampled = lossless && verdict == Some(Verdict::Upsampled);
-    let mut info = info;
     if info.duration.is_zero() {
         info.duration = audio.duration();
     }

@@ -121,7 +121,7 @@ fn resolve(sheet_path: &Path, sheet: &CueSheet, name: &str, folder: &Folder) -> 
     }
     let dir = sheet_path.parent()?;
     let exact = dir.join(&name);
-    if folder.audio.iter().any(|a| *a == exact) {
+    if folder.audio.contains(&exact) {
         return Some(exact);
     }
     if let Some(a) = folder.audio.iter().find(|a| same_name(a, base)) {
