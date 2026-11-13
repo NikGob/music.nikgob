@@ -113,6 +113,15 @@ impl Library {
 
     /// Everything in Trash, most recently trashed first.
     pub fn list_trash(&self) -> Result<Vec<TrashEntry>> {
+        self.trash_entries("s.trashed_at IS NOT NULL", params![])
+    }
+
+    /// Trash entries matching `filter` (on `source s`), newest first.
+    fn trash_entries(
+        &self,
+        filter: &str,
+        args: impl rusqlite::Params + Copy,
+    ) -> Result<Vec<TrashEntry>> {
         self.read(|c| {
             let cols = SOURCE_COLS
                 .split(", ")
@@ -122,10 +131,10 @@ impl Library {
             let mut stmt = c.prepare_cached(&format!(
                 "SELECT {cols}, s.trash_path, t.title, t.artist_display
                    FROM source s JOIN track t ON t.id = s.track_id
-                  WHERE s.trashed_at IS NOT NULL ORDER BY s.trashed_at DESC, s.id"
+                  WHERE {filter} ORDER BY s.trashed_at DESC, s.id"
             ))?;
             let n = SOURCE_COLS.split(',').count();
-            let rows = stmt.query_map([], |r| {
+            let rows = stmt.query_map(args, |r| {
                 let source = source_from_row(r)?;
                 Ok(TrashEntry {
                     trashed_at: source.trashed_at.unwrap_or_default(),
@@ -248,11 +257,10 @@ impl Library {
         let Some(at) = self.track_deleted_at(track)? else {
             return Ok(Vec::new());
         };
-        Ok(self
-            .list_trash()?
-            .into_iter()
-            .filter(|e| e.source.track_id == track && e.trashed_at == at)
-            .collect())
+        // By the track's index: only its own sources are read, not the
+        // whole Trash.
+        let id = track.to_string();
+        self.trash_entries("s.track_id = ?1 AND s.trashed_at = ?2", (id.as_str(), at))
     }
 
     /// Takes the deleted mark off (the caller restored the files and sources).
