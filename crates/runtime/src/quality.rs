@@ -52,14 +52,14 @@ pub(crate) enum Msg {
     /// These tracks were checked; `changed`: what their rows show changed
     /// (a fake found, a file converted), so the lists reload.
     Checked { tracks: Vec<TrackId>, changed: bool },
-    /// The fakes the user said to turn into MP3s are done: how many, and
-    /// how many failed.
-    Converted { done: usize, failed: usize },
+    /// The fakes the user said to turn into MP3s are done: the `(mp3,
+    /// original)` sources of each one made, and how many failed.
+    Converted { done: Vec<(SourceId, SourceId)>, failed: usize },
     /// «Вернуть FLAC»: how many came back, and how many could not.
     Restored { done: usize, failed: usize },
     /// The fake file of a track the user turned into an MP3 by hand: the
     /// track's title, the codec the original had, and what came of it.
-    OneConverted { track: TrackId, title: String, codec: String, result: Result<(), String> },
+    OneConverted { track: TrackId, title: String, codec: String, result: Result<(SourceId, SourceId), String> },
 }
 
 /// What the settings allow, set by the worker.
@@ -363,13 +363,14 @@ pub(crate) fn fake_cards(offers: Vec<FakeOffer>) -> Vec<(String, String, Vec<Fak
     out
 }
 
-/// A song's row on its card: its title, and what the file really is (only
-/// plain fakes are offered, so said plainly).
+/// A song's row on its card: its title, and what the file likely is (only
+/// a clear cliff below 19.8 kHz is offered, but the bitrate is an estimate
+/// from the cut, never a fact).
 pub(crate) fn fake_option(o: &FakeOffer) -> v::ConfirmOption {
     let from = o.origin.lossy_kbps().map_or_else(|| "из сжатого".to_owned(), |k| format!("из MP3 ~{k}"));
     v::ConfirmOption {
         label: o.title.clone(),
-        detail: format!("FLAC {from} · срез {}", nikgob_core::quality::khz(o.cutoff_hz)),
+        detail: format!("Вероятно, {from} · срез {}", nikgob_core::quality::khz(o.cutoff_hz)),
         recommended: false,
     }
 }
@@ -395,7 +396,7 @@ pub(crate) fn fake_card(id: u64, title: String, offers: &[FakeOffer]) -> v::Conf
         ),
         options: offers.iter().map(fake_option).collect(),
         skip_label: "Оставить FLAC".into(),
-        question: "Внутри этих FLAC — MP3. Отметь, какие превратить в MP3: FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
+        question: "Отметь, какие превратить в MP3: FLAC уйдут в Корзину, «Вернуть FLAC» в настройках вернёт их".into(),
         accept_label: "Превратить в MP3".into(),
         pick: Some(v::ConfirmPick {
             sources: offers.iter().map(|o| o.source_id).collect(),
@@ -403,6 +404,35 @@ pub(crate) fn fake_card(id: u64, title: String, offers: &[FakeOffer]) -> v::Conf
             skip: ("Оставить".into(), "FLAC".into()),
         }),
     }
+}
+
+/// Takes back exactly the conversions `pairs` (`(mp3, original)` sources,
+/// as each was made): `(done, failed)`. One taken back already (its
+/// original out of the Trash) counts as neither. Runs off the player loop.
+pub(crate) fn take_back(lib: &Library, trash: &Path, pairs: &[(SourceId, SourceId)]) -> (usize, usize) {
+    let (mut done, mut failed) = (0, 0);
+    for &(mp3, original) in pairs {
+        let c = match lib.conversion(mp3, original) {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                log::info!("quality: {original} is not in the Trash any more, nothing to take back");
+                continue;
+            }
+            Err(e) => {
+                log::warn!("quality: the conversion of {original}: {e}");
+                failed += 1;
+                continue;
+            }
+        };
+        match restore_conversion(lib, trash, &c) {
+            Ok(()) => done += 1,
+            Err(e) => {
+                log::warn!("quality: {} stays in the Trash: {e}", c.trash_path);
+                failed += 1;
+            }
+        }
+    }
+    (done, failed)
 }
 
 /// The ticked sources a card's answer may act on: those still offered
@@ -594,7 +624,7 @@ impl Worker {
         log::info!("quality: turning {} ticked fake files into MP3s", sources.len());
         svc.spawn_blocking(move || {
             crate::quiet::lower_priority();
-            let (mut done, mut failed) = (0, 0);
+            let (mut done, mut failed) = (Vec::new(), 0);
             for id in sources {
                 let src = lib.get_source(id).ok().flatten();
                 let check = lib.quality_check(id).ok().flatten();
@@ -606,7 +636,7 @@ impl Worker {
                         failed += 1;
                     }
                     (Some(src), Some(c)) if src.trashed_at.is_none() => match convert_fake(&lib, &trash, &enc, &src, &c) {
-                        Ok(_) => done += 1,
+                        Ok(mp3) => done.push((mp3.id, src.id)),
                         Err(e) => {
                             log::warn!("quality: converting {}: {e}", src.locator);
                             failed += 1;
@@ -667,36 +697,28 @@ impl Worker {
         log::info!("quality: the user turns {} into an MP3", src.locator);
         svc.spawn_blocking(move || {
             crate::quiet::lower_priority();
-            let result = convert_fake(&lib, &trash, &enc, &src, &check).map(|_| ()).map_err(|e| e.to_string());
+            let result = convert_fake(&lib, &trash, &enc, &src, &check).map(|mp3| (mp3.id, src.id)).map_err(|e| e.to_string());
             let _ = tx.send(Internal::Quality(Msg::OneConverted { track, title, codec, result }));
         });
         self.quality.busy = true;
         self.publish_fake_offers();
     }
 
-    /// «Отменить» on the toast of [`Self::fake_to_mp3`]: the original comes
-    /// back from the Trash to its place and plays again, the MP3 goes to
-    /// the Trash, and the original is not offered as an MP3 again.
-    pub(crate) fn undo_fake_to_mp3(&mut self, track: TrackId) {
+    /// «Отменить» on the toast of [`Self::fake_to_mp3`] or of a card's
+    /// «Превратить N в MP3»: exactly the conversions that click made
+    /// ([`take_back`], looked up and done on another thread): each original
+    /// comes back from the Trash to its place and plays again, its MP3 goes
+    /// to the Trash, and the original is not offered as an MP3 again.
+    pub(crate) fn undo_fake_to_mp3(&mut self, pairs: Vec<(SourceId, SourceId)>) {
         if self.quality.busy {
-            log::info!("quality: a conversion runs, the undo of {track} waits for the next click");
+            log::info!("quality: a conversion runs, the undo of {} files waits for the next click", pairs.len());
             self.toast(BUSY, None);
             return;
         }
-        let Some(c) = self.lib.conversions().unwrap_or_default().into_iter().find(|c| c.track_id == track) else {
-            log::info!("quality: {track} has no MP3 to take back");
-            return;
-        };
         let Some(svc) = &self.import else { return };
         let (lib, trash, tx) = (self.lib.clone(), svc.config().trash_dir.clone(), svc.internal());
         svc.spawn_blocking(move || {
-            let (done, failed) = match restore_conversion(&lib, &trash, &c) {
-                Ok(()) => (1, 0),
-                Err(e) => {
-                    log::warn!("quality: {} stays in the Trash: {e}", c.trash_path);
-                    (0, 1)
-                }
-            };
+            let (done, failed) = take_back(&lib, &trash, &pairs);
             let _ = tx.send(Internal::Quality(Msg::Restored { done, failed }));
         });
         self.quality.busy = true;
@@ -744,29 +766,39 @@ impl Worker {
     }
 
     pub(crate) fn quality_msg(&mut self, m: Msg) {
-        let restored = matches!(m, Msg::Restored { .. });
         match m {
-            Msg::Converted { done, failed } | Msg::Restored { done, failed } => {
+            Msg::Restored { done, failed } => {
                 self.quality.busy = false;
-                let text = match (restored, done, failed) {
-                    (true, 0, 0) => "Возвращать нечего: все FLAC на месте".to_owned(),
-                    (true, d, 0) => format!("Вернул FLAC: {d}"),
-                    (true, d, f) => format!("Вернул FLAC: {d}, не получилось: {f}"),
-                    (false, d, 0) => format!("Сделал MP3: {d} · FLAC в Корзине"),
-                    (false, d, f) => format!("Сделал MP3: {d}, не получилось: {f}"),
+                let text = match (done, failed) {
+                    (0, 0) => "Возвращать нечего: все FLAC на месте".to_owned(),
+                    (d, 0) => format!("Вернул FLAC: {d}"),
+                    (d, f) => format!("Вернул FLAC: {d}, не получилось: {f}"),
                 };
                 self.toast(text, None);
+                self.reload_after_import();
+                self.publish_fake_offers();
+            }
+            Msg::Converted { done, failed } => {
+                self.quality.busy = false;
+                let d = done.len();
+                let text = match failed {
+                    0 => format!("Сделал MP3: {d} · FLAC в Корзине"),
+                    f => format!("Сделал MP3: {d}, не получилось: {f}"),
+                };
+                // What this answer made, taken back in one step.
+                let undo = (!done.is_empty()).then(|| ("Отменить".to_owned(), v::Command::UndoFakeToMp3(done)));
+                self.toast(text, undo);
                 self.reload_after_import();
                 self.publish_fake_offers();
             }
             Msg::OneConverted { track, title, codec, result } => {
                 self.quality.busy = false;
                 match result {
-                    Ok(()) => {
+                    Ok(pair) => {
                         log::info!("quality: {track} plays its MP3 now, the {codec} is in the Trash");
                         self.toast(
                             format!("«{title}»: сделал MP3 · {codec} в Корзине"),
-                            Some(("Отменить".into(), v::Command::UndoFakeToMp3(track))),
+                            Some(("Отменить".into(), v::Command::UndoFakeToMp3(vec![pair]))),
                         );
                     }
                     Err(e) => {
@@ -918,7 +950,7 @@ mod tests {
         let card = fake_card(QUALITY_ID | 1, cards[0].1.clone(), &cards[0].2);
         assert_eq!(card.origin, "Ненастоящий FLAC · 2 файла");
         assert_eq!(card.options.len(), 2, "a row per song");
-        assert_eq!((card.options[0].label.as_str(), card.options[0].detail.as_str()), ("Молли", "FLAC из MP3 ~128 · срез 16,1 кГц"));
+        assert_eq!((card.options[0].label.as_str(), card.options[0].detail.as_str()), ("Молли", "Вероятно, из MP3 ~128 · срез 16,1 кГц"));
         assert!(card.options.iter().all(|o| !o.recommended), "never accepted with the recommended ones");
         let pick = card.pick.as_ref().expect("ticked song by song");
         assert_eq!(pick.sources, cards[0].2.iter().map(|o| o.source_id).collect::<Vec<_>>());
@@ -947,5 +979,42 @@ mod tests {
         assert_eq!(still_offered(&picked, &album), vec![album[0].source_id, album[5].source_id]);
         assert!(still_offered(&[], &album).is_empty());
         assert!(still_offered(&[gone], &album).is_empty());
+    }
+
+    /// «Отменить» takes back exactly the pair its conversion made: the
+    /// converted FLAC comes back and its MP3 goes, even when another FLAC
+    /// of the same track went to the Trash later; the other one and its
+    /// file stay where they are. Done twice, the second time does nothing.
+    #[test]
+    fn the_undo_takes_back_exactly_the_pair_it_made() {
+        use nikgob_core::model::{ArtistCredit, Codec, Source, SourceKind, Track};
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&Track::new("Молли", ArtistCredit::single("Пошлая Молли", None))).unwrap();
+        let (music, trash) = (dir.path().join("Music"), dir.path().join("Trash"));
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::create_dir_all(&trash).unwrap();
+        // `name` trashed: its row and its file in the Trash.
+        let trashed = |name: &str| {
+            let at = music.join(name);
+            let src = lib.add_source(&Source::new(track.id, SourceKind::LocalFile, at.to_string_lossy(), Codec::Flac)).unwrap();
+            let in_trash = trash.join(name);
+            std::fs::write(&in_trash, name).unwrap();
+            lib.trash_source(src.id, Some(&in_trash.to_string_lossy())).unwrap();
+            (src.id, at, in_trash)
+        };
+        let (original, original_at, _) = trashed("07 - Молли.flac");
+        let mp3_at = music.join("07 - Молли.mp3");
+        std::fs::write(&mp3_at, b"mp3").unwrap();
+        let mp3 = lib.add_source(&Source::new(track.id, SourceKind::LocalFile, mp3_at.to_string_lossy(), Codec::Mp3)).unwrap();
+        let (other, other_at, other_in_trash) = trashed("Молли (live).flac");
+
+        assert_eq!(take_back(&lib, &trash, &[(mp3.id, original)]), (1, 0));
+        assert!(original_at.exists(), "the converted FLAC is back");
+        assert!(lib.get_source(original).unwrap().unwrap().trashed_at.is_none());
+        assert!(lib.get_source(mp3.id).unwrap().unwrap().trashed_at.is_some(), "its MP3 is in the Trash");
+        assert!(!other_at.exists() && other_in_trash.exists(), "the other FLAC stays in the Trash");
+        assert!(lib.get_source(other).unwrap().unwrap().trashed_at.is_some());
+        assert_eq!(take_back(&lib, &trash, &[(mp3.id, original)]), (0, 0), "taken back already");
     }
 }

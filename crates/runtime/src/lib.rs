@@ -42,6 +42,7 @@ mod sleep;
 mod storage;
 mod sound_model;
 mod editions;
+mod engine;
 mod streams;
 #[cfg(test)]
 mod perf;
@@ -537,7 +538,7 @@ impl Heard {
 struct Worker {
     lib: Library,
     res: Resolver,
-    playback: Box<dyn Playback>,
+    playback: engine::Engine,
     state: Arc<RwLock<ViewState>>,
     wake: Arc<dyn Fn() + Send + Sync>,
     queue: Queue,
@@ -611,6 +612,9 @@ struct Worker {
     autoplay_entries: std::collections::HashSet<u64>,
     /// …in the queue of this generation (saved with the queue).
     autoplay_gen: Option<u64>,
+    /// The prefs changed in a way that is written at the next tick (and at
+    /// the end) rather than at once: the shuffle button's rule.
+    prefs_unsaved: bool,
     prefs_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     exported_rev: u64,
@@ -783,7 +787,7 @@ impl Worker {
         Self {
             res,
             lib: config.library,
-            playback,
+            playback: engine::Engine::new(playback),
             state,
             wake,
             queue: Queue::default(),
@@ -819,6 +823,7 @@ impl Worker {
             heard: Heard::default(),
             autoplay_entries: Default::default(),
             autoplay_gen: None,
+            prefs_unsaved: false,
             prefs_path: config.prefs_path,
             settings_path: config.settings_path.clone(),
             exported_rev: 0,
@@ -982,6 +987,7 @@ impl Worker {
                     self.maybe_export(false);
                     self.turn.lap("export");
                     self.save_session();
+                    self.save_prefs_due();
                     self.keep_home_due();
                     self.turn.lap("session");
                     self.stream_tick();
@@ -997,6 +1003,7 @@ impl Worker {
             self.align_playing(matches!(self.status, Status::Playing | Status::Buffering));
         }
         self.save_session();
+        self.save_prefs_due();
         self.recs_flush_weights(true);
         self.keep_home(true);
         self.maybe_export(true);
@@ -1185,6 +1192,7 @@ impl Worker {
             Command::ToggleShuffle => {
                 let on = !self.queue.shuffle;
                 self.queue.set_shuffle(on);
+                self.shuffle_rule_from_button(on);
                 self.preload_next();
                 self.publish_player();
             }
@@ -1571,7 +1579,7 @@ impl Worker {
             Command::FindBetterAlbum(release) => self.find_better_album(release),
             Command::UndoBetterAlbum(release) => self.undo_better_album(release),
             Command::FakeToMp3(track) => self.fake_to_mp3(track),
-            Command::UndoFakeToMp3(track) => self.undo_fake_to_mp3(track),
+            Command::UndoFakeToMp3(pairs) => self.undo_fake_to_mp3(pairs),
             Command::RecordingApart(track) => self.recording_apart(track),
             Command::RestoreConvertedFlac => self.restore_converted_flac(),
             Command::LoadLibrary => self.load_library(),
@@ -2010,7 +2018,36 @@ impl Worker {
     /// library's tracks, a search, a radio) keeps the button as it is.
     pub(crate) fn new_list(&mut self, kind: Option<nikgob_view::ListKind>) {
         let rule = kind.map_or(nikgob_view::ListShuffle::Button, |k| self.state.read().prefs.list_shuffle.of(k));
-        self.queue.new_list(rule);
+        self.queue.new_list(rule, kind);
+    }
+
+    /// The shuffle button pressed while a list of a kind plays: what the
+    /// user chose is how lists of that kind start from now on (a kind left
+    /// to «По кнопке» stays so). A radio, the wave, a queue of no kind, and
+    /// what autoplay added after the list (playing now) set no rule. The
+    /// prefs file is written at the next tick, not on this command.
+    fn shuffle_rule_from_button(&mut self, on: bool) {
+        use nikgob_view::ListShuffle;
+        let Some(kind) = self.queue.list_kind() else { return };
+        if self.queue.current().is_some_and(|e| self.autoplay_owns(e.id)) {
+            return;
+        }
+        let rule = if on { ListShuffle::Shuffled } else { ListShuffle::InOrder };
+        let now = self.state.read().prefs.list_shuffle.of(kind);
+        if now == ListShuffle::Button || now == rule {
+            return;
+        }
+        log::info!("shuffle {} by the button: {kind:?} lists start so from now on", if on { "on" } else { "off" });
+        self.publish(|s| s.prefs.list_shuffle.set(kind, rule));
+        self.prefs_unsaved = true;
+    }
+
+    /// Writes the prefs a command changed without writing them itself
+    /// ([`Self::prefs_unsaved`]).
+    fn save_prefs_due(&mut self) {
+        if std::mem::take(&mut self.prefs_unsaved) {
+            self.save_prefs();
+        }
     }
 
     /// The kind of the library playlist `id` for [`Self::new_list`]: one of
@@ -2435,6 +2472,7 @@ impl Worker {
                 }
             }
             PlaybackEvent::TrackChanged { to } => {
+                self.playback.let_go(to);
                 // `play()` over a playing item also reports a change: that one
                 // we started ourselves. The same entry changing to itself
                 // otherwise is repeat-one looping gaplessly: handled below
@@ -2577,6 +2615,7 @@ impl Worker {
                 }
             }
             PlaybackEvent::Ended { id } => {
+                self.playback.let_go(id);
                 if self.playing.map(|e| e.id) == Some(id) {
                     self.record_end(false, EndReason::Ended);
                     if self.sleep_ended(id) {
@@ -2595,6 +2634,7 @@ impl Worker {
             }
             PlaybackEvent::Error { id, message } => {
                 log::error!("playback error on {id}: {message}");
+                self.playback.let_go(id);
                 let playing = self.playing.filter(|e| e.id == id);
                 if playing.is_none() && self.queue.peek_auto_next().is_some_and(|n| n.id == id) {
                     // The preloaded next track: it is tried again (with

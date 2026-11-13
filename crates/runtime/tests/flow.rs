@@ -1331,3 +1331,111 @@ fn a_new_album_shuffles_as_its_kind_says() {
     rt.send(Command::PlayTracks { tracks: ids.clone(), start: 1, context: "скачанного".into() });
     wait_for(&rt, "the downloaded in order", |s| current(s) == Some(ids[1]) && !s.player.shuffle && order(s) == ids);
 }
+
+/// The shuffle button pressed while a playlist or an album plays is how
+/// lists of that kind start from then on (saved in the prefs); a kind on
+/// «По кнопке» stays so, and a queue of no kind changes no rule.
+#[test]
+fn the_shuffle_button_sets_the_rule_of_the_list_playing() {
+    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+    use nikgob_view::{ListKind, ListShuffle};
+
+    let dir = tempfile::tempdir().unwrap();
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let credit = ArtistCredit::single("A", Some(artist.id));
+    let release = lib.upsert_release(&Release::new("Album", credit.clone())).unwrap();
+    let ids: Vec<_> = (0..6)
+        .map(|i| {
+            let mut t = Track::new(format!("t{i}"), credit.clone());
+            t.release_id = Some(release.id);
+            t.track_no = i + 1;
+            let t = lib.upsert_track(&t).unwrap();
+            let file = dir.path().join(format!("t{i}.wav"));
+            write_wav(&file, 2.0);
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.display().to_string(), Codec::Wav)).unwrap();
+            t.id
+        })
+        .collect();
+    let playlist = lib.create_playlist("P").unwrap();
+    for &t in &ids {
+        lib.playlist_add(playlist.id, t).unwrap();
+    }
+    let prefs_path = dir.path().join("prefs.json");
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: dir.path().to_owned(),
+            prefs: Prefs { autoplay: false, ..Prefs::default() },
+            prefs_path: Some(prefs_path.clone()),
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    let order = |s: &ViewState| {
+        let mut q: Vec<_> = s.queue.prev.iter().map(|e| e.track.id).collect();
+        q.extend(s.queue.current.iter().map(|t| t.id));
+        q.extend(s.queue.next.iter().map(|e| e.track.id));
+        q
+    };
+    // The rule as the prefs file has it, once written (at the next tick).
+    let saved = |k: ListKind, rule: ListShuffle| {
+        let t = Instant::now();
+        loop {
+            let on_disk = std::fs::read(&prefs_path).ok().and_then(|b| serde_json::from_slice::<Prefs>(&b).ok());
+            if on_disk.is_some_and(|p| p.list_shuffle.of(k) == rule) {
+                return;
+            }
+            assert!(t.elapsed() < Duration::from_secs(30), "the prefs file never had {k:?} {rule:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let rule = |k| rt.state().prefs.list_shuffle.of(k);
+    assert_eq!(rule(ListKind::OwnPlaylist), ListShuffle::Shuffled);
+
+    // An own playlist starts shuffled; the button turns it off: own
+    // playlists play in order from now on, and the album rule is untouched.
+    rt.send(Command::PlayPlaylist { id: playlist.id, start: None, shuffle: false });
+    wait_for(&rt, "the playlist shuffled", |s| s.player.shuffle && s.queue.current.is_some());
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle off", |s| !s.player.shuffle);
+    wait_for(&rt, "own playlists in order", |s| s.prefs.list_shuffle.of(ListKind::OwnPlaylist) == ListShuffle::InOrder);
+    assert_eq!(rule(ListKind::Album), ListShuffle::InOrder);
+    saved(ListKind::OwnPlaylist, ListShuffle::InOrder);
+    // Shuffle turned on while the album plays: albums start shuffled, the
+    // playlist still follows its own rule (in order).
+    rt.send(Command::PlayRelease { id: release.id, start: None, shuffle: false });
+    wait_for(&rt, "the album in order", |s| !s.player.shuffle && order(s) == ids);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "albums shuffled", |s| s.player.shuffle && s.prefs.list_shuffle.of(ListKind::Album) == ListShuffle::Shuffled);
+    saved(ListKind::Album, ListShuffle::Shuffled);
+    rt.send(Command::PlayPlaylist { id: playlist.id, start: Some(ids[0]), shuffle: false });
+    wait_for(&rt, "the playlist in order again", |s| !s.player.shuffle && order(s) == ids);
+    rt.send(Command::PlayRelease { id: release.id, start: Some(ids[0]), shuffle: false });
+    wait_for(&rt, "the album shuffled now", |s| s.player.shuffle && s.queue.current.as_ref().map(|t| t.id) == Some(ids[0]));
+
+    // «По кнопке» stays so: the button only changes the queue.
+    let mut prefs = rt.state().prefs.clone();
+    prefs.list_shuffle.set(ListKind::Album, ListShuffle::Button);
+    rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&rt, "albums by the button", |s| s.prefs.list_shuffle.of(ListKind::Album) == ListShuffle::Button);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle off", |s| !s.player.shuffle);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(rule(ListKind::Album), ListShuffle::Button);
+
+    // The library's own lists have no kind: no rule changes.
+    rt.send(Command::PlayAll { tracks: ids.clone(), context: "Слушать снова".into() });
+    wait_for(&rt, "the whole list", |s| s.queue.current.is_some() && !s.player.shuffle);
+    rt.send(Command::ToggleShuffle);
+    wait_for(&rt, "shuffle on", |s| s.player.shuffle);
+    std::thread::sleep(Duration::from_millis(100));
+    let s = rt.state();
+    assert_eq!(s.prefs.list_shuffle.of(ListKind::OwnPlaylist), ListShuffle::InOrder);
+    assert_eq!(s.prefs.list_shuffle.of(ListKind::Album), ListShuffle::Button);
+    assert_eq!(s.prefs.list_shuffle.of(ListKind::Mix), ListShuffle::Shuffled);
+    assert_eq!(s.prefs.list_shuffle.of(ListKind::ReadyPlaylist), ListShuffle::InOrder);
+}

@@ -4,7 +4,7 @@
 //! or drag a specific occurrence of a track that appears twice.
 
 use nikgob_core::model::TrackId;
-use nikgob_view::{ListShuffle, Repeat};
+use nikgob_view::{ListKind, ListShuffle, Repeat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +28,13 @@ pub struct Queue {
     /// Bumped whenever the whole queue is replaced ([`Self::set`],
     /// [`Self::restore`]): a radio knows its queue is gone.
     generation: u64,
+    /// The kind of the list the queue holds (an album, a playlist, a mix),
+    /// none for a radio, a search, the library's own lists: the shuffle
+    /// button pressed while it plays sets the rule of that kind.
+    kind: Option<ListKind>,
+    /// The kind [`Self::new_list`] was told, taken by the queue that
+    /// replaces this one next.
+    next_kind: Option<ListKind>,
 }
 
 /// A queue as saved between runs (entry ids are not kept: they are only
@@ -44,6 +51,8 @@ pub struct Snapshot {
     /// 0 off, 1 all, 2 one.
     pub repeat: u8,
     pub context: Option<String>,
+    /// [`Queue::list_kind`].
+    pub kind: Option<ListKind>,
 }
 
 impl Queue {
@@ -64,6 +73,7 @@ impl Queue {
                 Repeat::One => 2,
             },
             context: self.context.clone(),
+            kind: self.kind,
         }
     }
 
@@ -76,6 +86,8 @@ impl Queue {
         self.pos = s.pos.filter(|&p| p < self.items.len());
         self.restore_modes(s);
         self.context = s.context.clone();
+        self.kind = s.kind;
+        self.next_kind = None;
         self.generation += 1;
     }
 
@@ -93,6 +105,11 @@ impl Queue {
     /// See the field: changes when the queue is replaced.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// See the field: the kind of the list playing, if it has one.
+    pub fn list_kind(&self) -> Option<ListKind> {
+        self.kind
     }
 
     fn entry(&mut self, track: TrackId) -> Entry {
@@ -133,14 +150,17 @@ impl Queue {
         self.items = items;
         self.context = context;
         self.generation += 1;
+        self.kind = self.next_kind.take();
         self.pos = (!self.items.is_empty()).then(|| start.min(self.items.len() - 1));
     }
 
     /// A new list is about to replace the queue (an album, a playlist, a
     /// mix, a radio, a search result): shuffle turns on or off as `rule`
-    /// says for its kind, or stays as the button is.
-    pub fn new_list(&mut self, rule: ListShuffle) {
+    /// says for its `kind`, or stays as the button is. The queue set next
+    /// is of that kind.
+    pub fn new_list(&mut self, rule: ListShuffle, kind: Option<ListKind>) {
         self.shuffle = rule.apply(self.shuffle);
+        self.next_kind = kind;
     }
 
     /// Replaces the queue with a radio's picks (a radio, the daylist):
@@ -781,36 +801,63 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_knows_the_kind_of_its_list_until_another_replaces_it() {
+        let t = ids(5);
+        let mut q = Queue::default();
+        q.new_list(ListShuffle::InOrder, Some(ListKind::OwnPlaylist));
+        q.set_from(&t, None, None);
+        assert_eq!(q.list_kind(), Some(ListKind::OwnPlaylist));
+        // Edits of the queue keep it.
+        q.enqueue(&ids(2));
+        q.set_shuffle(true);
+        assert_eq!(q.list_kind(), Some(ListKind::OwnPlaylist));
+        // Kept between runs.
+        let saved = q.snapshot();
+        let mut back = Queue::default();
+        back.restore(&saved);
+        assert_eq!(back.list_kind(), Some(ListKind::OwnPlaylist));
+        // A radio (no kind) replaces it.
+        q.new_list(ListShuffle::Button, None);
+        q.set_ordered(&t, 0, None);
+        assert_eq!(q.list_kind(), None);
+        // A queue set without a new list has no kind either.
+        q.new_list(ListShuffle::Button, Some(ListKind::Album));
+        q.set_from(&t, None, None);
+        q.set(&t, 0, None);
+        assert_eq!(q.list_kind(), None);
+    }
+
+    #[test]
     fn a_new_list_shuffles_as_its_kind_says() {
         let t = ids(30);
         // «По кнопке»: on stays on.
         let mut q = Queue::default();
         q.set_shuffle(true);
-        q.new_list(ListShuffle::Button);
+        q.new_list(ListShuffle::Button, None);
         q.set_from(&t, None, None);
         assert!(q.shuffle);
         assert!(same_tracks(&q.tracks(), &t));
         // «По порядку»: shuffle goes off and the list plays from its first track.
-        q.new_list(ListShuffle::InOrder);
+        q.new_list(ListShuffle::InOrder, None);
         q.set_from(&t, None, None);
         assert!(!q.shuffle);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[0]));
         // «По кнопке» with the button off: in order too.
-        q.new_list(ListShuffle::Button);
+        q.new_list(ListShuffle::Button, None);
         q.set_from(&t, Some(4), None);
         assert!(!q.shuffle);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[4]));
         // «Вперемешку»: on, whatever the button was; a picked track first.
-        q.new_list(ListShuffle::Shuffled);
+        q.new_list(ListShuffle::Shuffled, None);
         q.set_from(&t, Some(7), None);
         assert!(q.shuffle);
         assert_eq!(q.current().map(|e| e.track), Some(t[7]));
         assert!(same_tracks(&q.tracks(), &t));
         assert_ne!(q.tracks(), t, "the list is shuffled");
         // «Перемешать» on a list played in order (as `play_list` does).
-        q.new_list(ListShuffle::InOrder);
+        q.new_list(ListShuffle::InOrder, None);
         q.shuffle = true;
         q.set_from(&t, None, None);
         assert!(q.shuffle);
@@ -820,7 +867,7 @@ mod tests {
         q.set_shuffle(false);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current(), Some(cur));
-        q.new_list(ListShuffle::Shuffled);
+        q.new_list(ListShuffle::Shuffled, None);
         q.set(&t, 3, None);
         q.set_shuffle(false);
         assert_eq!(q.tracks(), t);

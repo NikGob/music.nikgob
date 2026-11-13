@@ -82,6 +82,21 @@ fn check_from_row(r: &Row<'_>) -> rusqlite::Result<QualityCheck> {
     })
 }
 
+/// The MP3 at `mp3` was made from the file at `original`: the same folder
+/// and name, the MP3 perhaps numbered («07 - Молли (2).mp3») when the name
+/// was taken.
+fn same_name(mp3: &str, original: &str) -> bool {
+    let (m, o) = (std::path::Path::new(mp3), std::path::Path::new(original));
+    if m.parent() != o.parent() {
+        return false;
+    }
+    let (Some(ms), Some(os)) = (m.file_stem().and_then(|s| s.to_str()), o.file_stem().and_then(|s| s.to_str())) else {
+        return false;
+    };
+    ms == os
+        || ms.strip_prefix(os).and_then(|rest| rest.strip_prefix(" (")).and_then(|rest| rest.strip_suffix(')')).is_some_and(|n| n.parse::<u32>().is_ok())
+}
+
 impl Library {
     /// Stores the check of a source (replacing an older one).
     pub fn put_quality_check(&self, source: SourceId, c: &QualityCheck) -> Result<()> {
@@ -326,9 +341,38 @@ impl Library {
         })
     }
 
+    /// The conversion that made the MP3 source `mp3` from the lossless
+    /// source `original`, as it was recorded when it was made: none when the
+    /// original is not in the Trash any more (taken back already) or either
+    /// row is gone.
+    pub fn conversion(&self, mp3: SourceId, original: SourceId) -> Result<Option<Conversion>> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT m.track_id, m.locator, o.locator, o.trash_path
+                   FROM source m JOIN source o ON o.id = ?2 AND o.track_id = m.track_id
+                  WHERE m.id = ?1 AND o.trashed_at IS NOT NULL AND o.trash_path IS NOT NULL",
+                params![mp3.to_string(), original.to_string()],
+                |r| {
+                    Ok(Conversion {
+                        track_id: get_id(r, 0)?,
+                        mp3,
+                        mp3_locator: r.get(1)?,
+                        original,
+                        original_locator: r.get(2)?,
+                        trash_path: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+        })
+    }
+
     /// Every fake lossless file turned into an MP3 whose original is still
     /// in the Trash: the live MP3 made from a lossless file, and the
-    /// trashed lossless source of the same track.
+    /// trashed lossless source of the same track it was made from — the one
+    /// at the MP3's own name (the MP3 is written next to its original under
+    /// the same name, or with a number when that was taken), else the one
+    /// trashed last.
     pub fn conversions(&self) -> Result<Vec<Conversion>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(&format!(
@@ -354,9 +398,12 @@ impl Library {
             let mut out: Vec<Conversion> = Vec::new();
             for c in rows {
                 let c = c?;
-                // One original per MP3: the one trashed last.
-                if !out.iter().any(|o| o.mp3 == c.mp3) {
-                    out.push(c);
+                // One original per MP3: the first at its name, else the one
+                // trashed last (listed first).
+                match out.iter_mut().find(|o| o.mp3 == c.mp3) {
+                    None => out.push(c),
+                    Some(o) if !same_name(&o.mp3_locator, &o.original_locator) && same_name(&c.mp3_locator, &c.original_locator) => *o = c,
+                    Some(_) => {}
                 }
             }
             Ok(out)
