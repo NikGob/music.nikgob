@@ -330,20 +330,33 @@ fn count(n: u64) -> String {
 }
 
 fn line(at: &str, s: &Sample) -> String {
+    line_on(at, s, cfg!(windows))
+}
+
+/// Whose the process's bytes beyond `live` are. On Windows both the
+/// private bytes and mimalloc's committed bytes are commit, so they split
+/// into the allocator's own keeping and native code's. Elsewhere the
+/// process figure is resident anonymous memory, which mimalloc's committed
+/// bytes (pages it may never have touched) do not partition: one `held`,
+/// as when mimalloc's numbers are not known.
+fn split(p: Process, live: u64, mimalloc: Option<Mimalloc>, windows: bool) -> String {
+    match mimalloc {
+        Some(m) if windows => format!(
+            "allocator {}, outside Rust {}",
+            mb(m.committed.saturating_sub(live)),
+            mb(p.private.saturating_sub(m.committed))
+        ),
+        _ => format!("held {}", mb(p.private.saturating_sub(live))),
+    }
+}
+
+/// [`line`] with the process figures read as on Windows or not.
+fn line_on(at: &str, s: &Sample, windows: bool) -> String {
     let b = |n: usize| mb(n as u64);
     let mut out = format!("memory ({at}): live {} MB, peak {} MB (most {})", b(s.live), b(s.peak), b(s.most));
     if let Some(p) = s.process {
-        let (private, resident) = if cfg!(windows) { ("private", "working set") } else { ("anon", "resident") };
-        // Whose the private bytes beyond `live` are: the allocator's own
-        // keeping, or native code's (one `held` when that is not known).
-        let parts = match s.mimalloc {
-            Some(m) => format!(
-                "allocator {}, outside Rust {}",
-                mb(m.committed.saturating_sub(s.live as u64)),
-                mb(p.private.saturating_sub(m.committed))
-            ),
-            None => format!("held {}", mb(p.private.saturating_sub(s.live as u64))),
-        };
+        let (private, resident) = if windows { ("private", "working set") } else { ("anon", "resident") };
+        let parts = split(p, s.live as u64, s.mimalloc, windows);
         out += &format!(", {private} {} MB ({parts}), {resident} {} MB", mb(p.private), mb(p.resident));
     }
     if let Some(m) = s.mimalloc {
@@ -429,11 +442,10 @@ mod tests {
             lyrics: (12, 2_200_000),
             streams: (2, 14 << 20),
         };
-        let (private, resident) = if cfg!(windows) { ("private", "working set") } else { ("anon", "resident") };
         assert_eq!(
-            line("minute", &s),
+            line_on("minute", &s, true),
             format!(
-                "memory (minute): live 212 MB, peak 480 MB (most 512), {private} 543 MB (allocator 48, outside Rust 283), {resident} 552 MB, \
+                "memory (minute): live 212 MB, peak 480 MB (most 512), private 543 MB (allocator 48, outside Rust 283), working set 552 MB, \
                  mimalloc 260 MB (peak 900; pages 317, abandoned 32, threads 26), allocations 12.3 M (+45 k); covers 41/64 MB in 37 sizes (decoding 0.0 MB), lyrics 12 tracks ~2.1 MB, \
                  stream buffers 2 / 14 MB"
             )
@@ -443,7 +455,34 @@ mod tests {
         assert!(!line("exit", &none).contains("mimalloc"));
         // Without mimalloc's numbers the private bytes beyond `live` are one.
         let unknown = Sample { mimalloc: None, ..s };
-        assert!(line("exit", &unknown).contains(&format!("{private} 543 MB (held 331)")), "{}", line("exit", &unknown));
+        assert!(line_on("exit", &unknown, true).contains("private 543 MB (held 331)"), "{}", line_on("exit", &unknown, true));
+    }
+
+    /// On Linux the process figure is resident anonymous memory and
+    /// mimalloc's committed bytes may be more than it (pages never
+    /// touched): no split that would call native code's bytes 0, the
+    /// committed bytes stay on their own.
+    #[test]
+    fn resident_bytes_are_not_split_by_committed_ones() {
+        let s = Sample {
+            live: 50 << 20,
+            peak: 80 << 20,
+            most: 90 << 20,
+            allocations: 1_000,
+            allocations_since: 10,
+            process: Some(Process { private: 100 << 20, resident: 130 << 20 }),
+            mimalloc: Some(Mimalloc { committed: 120 << 20, peak: 150 << 20, pages: 40, abandoned: 0, threads: 9 }),
+            covers: nikgob_md3e::covers::Memory { textures: 0, sizes: 0, budget: 64 << 20, decoding: 0 },
+            lyrics: (0, 0),
+            streams: (0, 0),
+        };
+        let l = line_on("minute", &s, false);
+        assert!(l.contains("anon 100 MB (held 50), resident 130 MB"), "{l}");
+        assert!(!l.contains("outside Rust"), "{l}");
+        assert!(l.contains("mimalloc 120 MB (peak 150;"), "{l}");
+        // The same numbers on Windows would be commit on both sides.
+        let w = line_on("minute", &s, true);
+        assert!(w.contains("private 100 MB (allocator 70, outside Rust 0.0)"), "{w}");
     }
 
     /// mimalloc's own statistics give its committed bytes, read from the
