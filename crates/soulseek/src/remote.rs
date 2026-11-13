@@ -135,6 +135,13 @@ impl RemoteClient {
     /// stays and the fetched one takes a free name next to it, which is
     /// returned.
     pub async fn fetch(&self, rel: &str, local: &Path, progress: Option<&watch::Sender<DownloadState>>) -> Result<PathBuf, Error> {
+        let part = self.fetch_part(rel, local, progress).await?;
+        publish(&part, local).await
+    }
+
+    /// The bytes of [`Self::fetch`] into `<local>.part`, complete; the
+    /// partial is what it gives back.
+    async fn fetch_part(&self, rel: &str, local: &Path, progress: Option<&watch::Sender<DownloadState>>) -> Result<PathBuf, Error> {
         if let Some(d) = local.parent() {
             tokio::fs::create_dir_all(d).await?;
         }
@@ -179,9 +186,7 @@ impl RemoteClient {
         if total > 0 && got != total {
             return Err(Error::Remote(format!("fetched {got} of {total} bytes")));
         }
-        let dir = local.parent().unwrap_or(Path::new("."));
-        let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(finish_into(&part, dir, &name).await?)
+        Ok(part)
     }
 
     /// Removes a fetched file from the service.
@@ -199,25 +204,48 @@ impl RemoteClient {
         let stop = cancel.clone();
         let id = info.id;
         tokio::spawn(async move {
-            let end = tokio::select! {
-                end = me.follow(id, &dir, &tx) => end,
+            let fetched = tokio::select! {
+                f = me.follow(id, &dir, &tx) => f,
                 // Whatever it was doing (a poll, the fetch) stops here; a
-                // partial fetch stays for a resume.
+                // partial fetch stays for a resume. The cancel is told at
+                // once; the service hears of it after.
                 _ = stop.cancelled() => {
+                    tx.send_replace(DownloadState::Failed { reason: "Cancelled".into() });
                     let del = me.req(reqwest::Method::DELETE, &format!("/api/downloads/{id}")).timeout(POLL_TIMEOUT);
                     let _ = me.send_empty(del).await;
-                    Err(Error::Cancelled)
+                    return;
                 }
             };
-            if let Err(e) = end {
-                let reason = if stop.is_cancelled() { "Cancelled".to_owned() } else { e.to_string() };
-                tx.send_replace(DownloadState::Failed { reason });
+            let (rel, part, local) = match fetched {
+                Ok(Some(f)) => f,
+                Ok(None) => return,
+                Err(e) => {
+                    tx.send_replace(DownloadState::Failed { reason: e.to_string() });
+                    return;
+                }
+            };
+            // All the bytes are here: from now on a cancel changes nothing.
+            // The file is published, told done, and only then removed on
+            // the service (a failed publication keeps the service's copy).
+            match publish(&part, &local).await {
+                Ok(path) => {
+                    tx.send_replace(DownloadState::Done { path });
+                    if let Err(e) = me.remove(&rel).await {
+                        log::debug!("soulseek remote: cannot remove {rel} on the service: {e}");
+                    }
+                }
+                Err(e) => {
+                    tx.send_replace(DownloadState::Failed { reason: e.to_string() });
+                }
             }
         });
         Ok(Download::new(id, rx, cancel))
     }
 
-    async fn follow(&self, id: u64, dir: &Path, tx: &watch::Sender<DownloadState>) -> Result<(), Error> {
+    /// Follows the download on the service and fetches its bytes: the
+    /// service's path, the complete partial and where it goes; `None` when
+    /// the service said it failed (told on `tx` already).
+    async fn follow(&self, id: u64, dir: &Path, tx: &watch::Sender<DownloadState>) -> Result<Option<(String, PathBuf, PathBuf)>, Error> {
         let mut misses = 0;
         let rel = loop {
             tokio::time::sleep(POLL).await;
@@ -237,7 +265,7 @@ impl RemoteClient {
                 DownloadState::Done { path } => break path.to_string_lossy().replace('\\', "/"),
                 DownloadState::Failed { reason } => {
                     tx.send_replace(DownloadState::Failed { reason });
-                    return Ok(());
+                    return Ok(None);
                 }
                 s => {
                     tx.send_replace(s);
@@ -248,13 +276,16 @@ impl RemoteClient {
         for part in rel.split('/') {
             local.push(sanitize(part));
         }
-        let local = self.fetch(&rel, &local, Some(tx)).await?;
-        if let Err(e) = self.remove(&rel).await {
-            log::debug!("soulseek remote: cannot remove {rel} on the service: {e}");
-        }
-        tx.send_replace(DownloadState::Done { path: local });
-        Ok(())
+        let part = self.fetch_part(&rel, &local, Some(tx)).await?;
+        Ok(Some((rel, part, local)))
     }
+}
+
+/// The complete `part` moved to `local`'s name, or a free one next to it.
+async fn publish(part: &Path, local: &Path) -> Result<PathBuf, Error> {
+    let dir = local.parent().unwrap_or(Path::new("."));
+    let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(finish_into(part, dir, &name).await?)
 }
 
 #[cfg(test)]

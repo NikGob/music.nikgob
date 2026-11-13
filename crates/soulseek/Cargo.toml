@@ -19,6 +19,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 socket2 = "0.6"
 flate2 = "1"
 md-5 = "0.10"
+sha2 = "0.10"
 lofty = "0.25"
 parking_lot = "0.12"
 thread-priority = "3"
@@ -28,6 +29,12 @@ thiserror = "2"
 toml = "1.1"
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"

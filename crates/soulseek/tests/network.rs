@@ -82,11 +82,14 @@ async fn search_and_download_between_two_clients() {
     let path = tokio::time::timeout(Duration::from_secs(20), d.wait()).await.unwrap().unwrap();
     assert_eq!(path, out.path().join("Daydream").join("01 Insane Dream.flac"));
     assert_eq!(std::fs::read(&path).unwrap(), pattern(300_000));
-    assert!(!out.path().join("Daydream").join("01 Insane Dream.flac.part").exists());
+    assert!(!nikgob_soulseek::partial_path(out.path(), &r).exists());
     assert!(wait(|| a.status().uploaded_bytes == 300_000, Duration::from_secs(5)).await);
-    // Asking again for a file already there finishes at once.
+    // Asking again downloads again (a file of that name there is not taken
+    // for it by its size), next to the first, which stays.
     let mut again = b.download(&r, out.path());
-    assert_eq!(again.wait().await.unwrap(), path);
+    let second = tokio::time::timeout(Duration::from_secs(20), again.wait()).await.unwrap().unwrap();
+    assert_eq!(second, out.path().join("Daydream").join("01 Insane Dream (2).flac"));
+    assert_eq!(std::fs::read(&path).unwrap(), pattern(300_000));
     // The whole folder.
     let files = b.folder("alice", "Music\\Aimer\\Daydream").await.unwrap();
     assert_eq!(files.len(), 3);
@@ -610,8 +613,8 @@ async fn a_remote_download_cancels_while_the_service_stalls() {
         };
         match (method, path) {
             ("POST", "/api/downloads") => Some((200, serde_json::to_vec(&info).unwrap())),
-            ("GET", _) => None,
-            _ => Some((204, Vec::new())),
+            // The poll and the DELETE of the cancel both hang.
+            _ => None,
         }
     }))
     .await;
@@ -622,6 +625,88 @@ async fn a_remote_download_cancels_while_the_service_stalls() {
     // Past the first poll, which hangs.
     tokio::time::sleep(Duration::from_millis(1500)).await;
     d.cancel();
-    let end = tokio::time::timeout(Duration::from_secs(5), d.wait()).await.expect("the cancel was not seen");
+    let end = tokio::time::timeout(Duration::from_secs(2), d.wait()).await.expect("the cancel was not told at once");
     assert!(matches!(end, Err(Error::Cancelled)), "{end:?}");
+}
+
+/// A file of the same name and the same size is there already (another
+/// sharer's recording): it is neither taken for the download nor replaced.
+#[tokio::test]
+async fn a_same_named_same_sized_file_there_is_not_taken_for_the_download() {
+    let server = MockServer::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let SocketAddr::V4(addr) = listener.local_addr().unwrap() else { unreachable!() };
+    server.add_static_peer("carol", addr);
+    let b = client(config(&server, "bob", None)).await;
+    let downloader = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, b.status().listen_port));
+    let data = pattern(40_000);
+    let path = "Shared\\Album\\track.flac".to_owned();
+    let out = tempfile::tempdir().unwrap();
+    let album = out.path().join("Album");
+    std::fs::create_dir_all(&album).unwrap();
+    std::fs::write(album.join("track.flac"), vec![0x55; 40_000]).unwrap();
+    let (tx, _offsets) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(hand_driven_uploader(listener, downloader, data.clone(), path.clone(), vec![], tx));
+    let r = nikgob_soulseek::SearchResult { user: "carol".into(), path, size: 40_000, ..Default::default() };
+    let mut d = b.download(&r, out.path());
+    let got = tokio::time::timeout(Duration::from_secs(20), d.wait()).await.unwrap().unwrap();
+    assert_eq!(got, album.join("track (2).flac"));
+    assert_eq!(std::fs::read(&got).unwrap(), data);
+    assert_eq!(std::fs::read(album.join("track.flac")).unwrap(), vec![0x55; 40_000]);
+    b.shutdown();
+}
+
+/// A sharer that keeps the connection busy (it asks for our user info) but
+/// never says a word about the file: the download is given up, not left
+/// queued for ever. One that answers with its place keeps the download.
+#[tokio::test]
+async fn a_sharer_that_never_answers_about_the_file_is_given_up() {
+    async fn sharer(listener: TcpListener, answer_place: bool) {
+        let (p, _) = listener.accept().await.unwrap();
+        let (mut rd, mut wr) = p.into_split();
+        let _ = read_frame(&mut rd, 4096).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let chatter = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                if chatter.send(PeerMsg::UserInfoRequest.encode()).is_err() {
+                    return;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(b) = rx.recv().await {
+                if write_all(&mut wr, &b).await.is_err() {
+                    return;
+                }
+            }
+        });
+        while let Ok(frame) = read_frame(&mut rd, 1 << 20).await {
+            let (code, body) = split_u32(&frame).unwrap();
+            if let Ok(PeerMsg::PlaceInQueueRequest(filename)) = PeerMsg::decode(code, body)
+                && answer_place
+            {
+                let _ = tx.send(PeerMsg::PlaceInQueueResponse { filename, place: 7 }.encode());
+            }
+        }
+    }
+    let server = MockServer::start().await;
+    let quiet = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let busy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let SocketAddr::V4(quiet_addr) = quiet.local_addr().unwrap() else { unreachable!() };
+    let SocketAddr::V4(busy_addr) = busy.local_addr().unwrap() else { unreachable!() };
+    server.add_static_peer("quiet", quiet_addr);
+    server.add_static_peer("busy", busy_addr);
+    tokio::spawn(sharer(quiet, false));
+    tokio::spawn(sharer(busy, true));
+    let b = client(config(&server, "bob", None)).await;
+    let out = tempfile::tempdir().unwrap();
+    let r = |user: &str| nikgob_soulseek::SearchResult { user: user.into(), path: "Shared\\A\\x.flac".into(), size: 10, ..Default::default() };
+    let mut silent = b.download(&r("quiet"), out.path());
+    let long_queue = b.download(&r("busy"), out.path());
+    let end = tokio::time::timeout(Duration::from_secs(15), silent.wait()).await.expect("still queued");
+    assert!(matches!(&end, Err(Error::Denied(m)) if m.contains("does not answer")), "{end:?}");
+    assert_eq!(long_queue.state(), DownloadState::Queued { place: Some(7) });
+    b.shutdown();
 }
