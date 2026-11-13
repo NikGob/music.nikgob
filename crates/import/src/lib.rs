@@ -34,6 +34,7 @@ pub mod wrong_file;
 
 pub use album::{AlbumTrack, album_files, folder_has_album};
 pub use config::{ImportConfig, normalize_masters_dir};
+pub use cue_import::images_to_cut;
 pub use decide::ImportTargets;
 pub use encode::{EncodeOptions, EncodedInfo, Encoder, FfmpegEncoder, RopusEncoder};
 pub use error::{ImportError, Result};

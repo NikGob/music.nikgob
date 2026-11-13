@@ -159,14 +159,6 @@ pub(crate) fn plan_of(slots: &[Slot], files: &[CameFile]) -> Vec<PlanRow> {
         .collect()
 }
 
-/// The files that came are a single-file rip with its cue sheet
-/// ([`nikgob_sources::torrent::image_rip`]): one image of the disc, not the
-/// album's track files the card matches one by one.
-pub(crate) fn came_as_image(files: &[PathBuf]) -> bool {
-    let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    nikgob_sources::torrent::image_rip(paths.iter().map(String::as_str))
-}
-
 /// What «Заменить» imports: each file of the plan as the very track the
 /// card showed it replacing ([`ImportTargets::pinned`]), whatever its own
 /// tags say; nothing else of the folder.
@@ -317,18 +309,6 @@ impl Worker {
 
     /// A copy of the album came for `id`: kept where it is, its files read.
     pub(super) fn album_came(&mut self, id: WishlistId, files: Vec<PathBuf>, origin: SourceOrigin) {
-        // A single-file rip with its cue sheet is no copy for the card: its
-        // image is one file, not the album's tracks (a torrent chosen before
-        // such rips were passed over, or a direct download that is one).
-        if came_as_image(&files) {
-            log::info!("upgrade: the copy that came for {} is a disc image with its cue sheet, not offered", self.item_title(id));
-            self.album_files_go(id, &origin);
-            if matches!(self.wish_next_candidate(id), Next::NotFound) {
-                self.upgrade_none(id, true);
-            }
-            self.publish_wishlist();
-            return;
-        }
         self.streaming.wish.partial.remove(&id);
         self.streaming.wish.album.reading.insert(id);
         let kept = Kept { origin: origin.clone(), files: files.clone() };
@@ -341,6 +321,9 @@ impl Worker {
         let tx = self.streaming.internal.clone();
         let Some(svc) = &self.import else { return };
         svc.spawn_blocking(move || {
+            // Its cue sheets read as the importer reads them: a disc image
+            // they would cut makes the copy no copy for the card.
+            let images = !nikgob_import::images_to_cut(&files).is_empty();
             let came: Vec<CameFile> = files
                 .into_iter()
                 .filter_map(|path| match nikgob_import::tags::read_tags(&path) {
@@ -351,20 +334,32 @@ impl Worker {
                     }
                 })
                 .collect();
-            let _ = tx.send(crate::import::Internal::Stream(Msg::Wish(WishMsg::AlbumCame { item: id, origin, files: came })));
+            let _ = tx.send(crate::import::Internal::Stream(Msg::Wish(WishMsg::AlbumCame { item: id, origin, files: came, images })));
         });
     }
 
     /// The files of a copy were read: the tracks they replace wait in
     /// «Подтверди» as one card. None is better: they go, and the next
     /// offer is tried (or the click is answered «Лучше не нашёл»).
-    pub(super) fn album_staged(&mut self, id: WishlistId, origin: SourceOrigin, files: Vec<CameFile>) {
+    /// A copy holding a disc image its sheets would cut (`images`) is no
+    /// copy for the card (the card matches the album's tracks file by file):
+    /// it goes like a copy with nothing better.
+    pub(super) fn album_staged(&mut self, id: WishlistId, origin: SourceOrigin, files: Vec<CameFile>, images: bool) {
         self.streaming.wish.album.reading.remove(&id);
         let item = self.lib.get_wishlist_item(id).ok().flatten();
         let Some(item) = item.filter(|i| !matches!(i.status, WishlistStatus::Dismissed | WishlistStatus::Done)) else {
             self.album_files_go(id, &origin);
             return;
         };
+        if images {
+            log::info!("upgrade: the copy that came for {} holds a disc image to cut by its cue sheet, not offered", self.item_title(id));
+            self.album_files_go(id, &origin);
+            if matches!(self.wish_next_candidate(id), Next::NotFound) {
+                self.upgrade_none(id, true);
+            }
+            self.publish_wishlist();
+            return;
+        }
         let release = item
             .release_id
             .or_else(|| nikgob_import::wished_release(&self.lib, &item).ok().flatten().map(|r| r.id));
