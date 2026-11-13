@@ -391,12 +391,12 @@ impl Importer {
             (cue_import::plan(found.audio, &found.cues), found.torrents)
         })
         .await;
-        let (plan, torrents) = scanned.unwrap_or_default();
-        let files = plan.files;
+        let (planned, torrents) = scanned.unwrap_or_default();
+        let files = planned.files;
         // An image another job is cutting is left to it.
         let images: Vec<Image> = {
             let mut active = lock(&self.inner.active);
-            plan.images
+            planned.images
                 .into_iter()
                 .filter(|i| {
                     let free = active.insert(i.path.clone());

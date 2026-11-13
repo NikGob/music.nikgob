@@ -69,7 +69,7 @@ impl CueSheet {
 }
 
 /// Why a sheet cannot be read or does not fit its audio.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CueError {
     /// No `FILE` with an audio track in it.
     NoTracks,
