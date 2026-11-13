@@ -5321,6 +5321,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "windows-native-keyring-store",
+ "wiremock",
  "zbus-secret-service-keyring-store",
 ]
 
