@@ -2941,12 +2941,16 @@ impl Worker {
         self.recs.home.as_ref()?.tiles.iter().find(|t| t.mix_id() == v::MixId::Tile(kind))
     }
 
-    /// `Command::DownloadMix`: every song of a tile without a file goes to
-    /// «Хочу скачать».
+    /// `Command::DownloadMix`: every song of a tile (or of the daylist,
+    /// which stands among the tiles) without a file goes to «Хочу скачать».
     fn download_mix(&mut self, id: v::MixId) {
-        let v::MixId::Tile(kind) = id else { return };
-        let ids: Vec<TrackId> = self.home_tile(kind).map_or_else(Vec::new, |t| {
-            t.picks
+        let picks = match id {
+            v::MixId::Tile(kind) => self.home_tile(kind).map(|t| &t.picks),
+            v::MixId::Daylist => self.recs.home.as_ref().and_then(|h| h.daylist.as_ref()).map(|d| &d.picks),
+            _ => return,
+        };
+        let ids: Vec<TrackId> = picks.map_or_else(Vec::new, |picks| {
+            picks
                 .iter()
                 .filter_map(|p| match p.item {
                     Item::Track(id) => Some(id),

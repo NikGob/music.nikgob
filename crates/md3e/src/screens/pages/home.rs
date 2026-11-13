@@ -290,7 +290,7 @@ pub fn sections(h: &HomeView, liked: bool, local_only: bool) -> Vec<Section> {
     if !h.listen_again.is_empty() {
         out.push(Section::ListenAgain);
     }
-    if !h.tiles.is_empty() {
+    if !h.tiles.is_empty() || h.daylist.is_some() {
         out.push(Section::OfDay);
     }
     if !h.from_library.is_empty() {
@@ -888,7 +888,11 @@ fn listen_again(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState
                     let i = column * SONG_LINES + k;
                     let Some(t) = rows.get(i) else { break };
                     let playing = state.player.current.as_ref().is_some_and(|c| c.id == t.id);
-                    let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
+                    let (links, routes) = crate::screens::artist_links::library_spans(&t.artists, &t.artist);
+                    let o = cards::song_row_linked(ui, song_cell(cell, k), &t.title, &t.artist, &links, t.cover.as_ref().map(|c| c.uri()), playing, None, ("again", i));
+                    if let Some(r) = o.link.and_then(|k| routes.get(k).cloned()) {
+                        nav = Some(r);
+                    }
                     if o.clicked {
                         out.push(play_again(rows, i));
                     }
@@ -915,7 +919,7 @@ fn play_again(rows: &[TrackRow], i: usize) -> Command {
 // ---- «Подборки дня».
 
 fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
-    let tiles: &[MixCard] = &state.home.tiles;
+    let tiles = day_tiles(&state.home);
     // Tiles that fit share the row (three in thirds rather than leave a
     // hole) as long as none grows past `OF_DAY_STRETCH`; more of them go
     // on sideways.
@@ -934,11 +938,11 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
             bleed: 0.0,
         };
         let keys = tiles.iter().map(|m| refresh::key((m.id, &m.title, &m.subtitle, m.covers.first()))).collect();
-        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "of-day")), live, keys, || tiles.to_vec());
+        let changes = refresh::track(ui.ctx(), Id::new(("home-row", "of-day")), live, keys, || tiles.iter().map(|m| (*m).clone()).collect());
         let pitch = grid.tile(per) + GUTTER;
         row::show(ui, grid, at, |ui, i, cell| {
             changes.card(ui, i, cell, refresh::place(cell, grid.left, pitch), |ui, old: Option<&MixCard>| {
-                let m = old.unwrap_or(&tiles[i]);
+                let m = old.unwrap_or(tiles[i]);
                 let artist = matches!(m.id, MixId::Tile(TileKind::ArtistOfDay | TileKind::Comeback));
                 let photo = artist.then(|| artist_photo(state, &m.title)).flatten();
                 if old.is_some() {
@@ -950,6 +954,13 @@ fn of_day(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, out:
         });
     });
     None
+}
+
+/// The cards of «Подборки дня»: the daylist (the playlist of this part of
+/// the day) first, then the tiles of the day. It is a selection of the day
+/// as they are: one tile like them, played on a click like them.
+pub fn day_tiles(h: &HomeView) -> Vec<&MixCard> {
+    h.daylist.iter().chain(h.tiles.iter()).collect()
 }
 
 /// The queue plays the tile of the day `m` (started from it: the queue
@@ -1065,7 +1076,11 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                     let i = column * SONG_LINES + k;
                     let Some(t) = rows.get(i) else { break };
                     let playing = state.player.current.as_ref().is_some_and(|c| t.track == Some(c.id));
-                    let o = cards::song_row(ui, song_cell(cell, k), &t.title, &t.artist, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
+                    let (links, routes) = crate::screens::artist_links::stream_spans(&t.artists, &t.artist);
+                    let o = cards::song_row_linked(ui, song_cell(cell, k), &t.title, &t.artist, &links, t.cover_url.clone(), playing, Some(t.liked), ("new", i));
+                    if let Some(r) = o.link.and_then(|k| routes.get(k).cloned()) {
+                        nav = Some(r);
+                    }
                     if o.liked {
                         out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
                     } else if o.clicked && t.playable {

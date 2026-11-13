@@ -522,3 +522,19 @@ fn a_playing_tile_and_mix_are_told() {
     st.player.context = Some(l.context());
     assert!(lane_playing(&st, &l), "started from its page, it plays though its click starts a wave");
 }
+
+/// The daylist stands first among the tiles of the day, and alone it is
+/// still a section of its own.
+#[test]
+fn the_daylist_leads_the_tiles_of_the_day() {
+    let card = |id, title: &str| MixCard { id, title: title.into(), kicker: String::new(), subtitle: String::new(), covers: Vec::new() };
+    let mut h = HomeView::default();
+    assert!(day_tiles(&h).is_empty());
+    assert!(!sections(&h, false, false).contains(&Section::OfDay));
+    h.daylist = Some(card(MixId::Daylist, "Тягучий вечер четверга"));
+    assert_eq!(day_tiles(&h).len(), 1);
+    assert!(sections(&h, false, false).contains(&Section::OfDay), "the daylist alone shows the section");
+    h.tiles = vec![card(MixId::Tile(TileKind::OnRepeat), "На повторе")];
+    let ids: Vec<MixId> = day_tiles(&h).iter().map(|m| m.id).collect();
+    assert_eq!(ids, [MixId::Daylist, MixId::Tile(TileKind::OnRepeat)]);
+}
