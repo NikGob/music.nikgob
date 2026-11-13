@@ -2495,3 +2495,30 @@ fn an_album_page_counts_its_lines_and_shows_its_holes() {
     assert_eq!(lines(&l), ["1-0", "#1-1", "1-2"]);
     assert_eq!(l.progress.total as usize, l.entries.len());
 }
+
+#[test]
+fn a_master_two_tracks_share_goes_with_the_last_of_them() {
+    let lib = lib();
+    let a = artist(&lib, "Solo");
+    let r = release(&lib, &a, "Disc", None);
+    let one = track(&lib, &a, Some(&r), "One", 1);
+    let two = track(&lib, &a, Some(&r), "Two", 2);
+    for t in [&one, &two] {
+        lib.put_master(&nikgob_core::model::Master {
+            track_id: t.id,
+            codec: Codec::Flac,
+            file_hash: "image".into(),
+            size_bytes: 10,
+            origin: None,
+            replicas: Vec::new(),
+        })
+        .unwrap();
+    }
+    assert_eq!(lib.master_users("image").unwrap(), 2);
+    let first = lib.purge_track(one.id).unwrap();
+    assert_eq!(first.master_hash, None, "the other track still has the image");
+    assert_eq!(lib.master_users("image").unwrap(), 1);
+    let last = lib.purge_track(two.id).unwrap();
+    assert_eq!(last.master_hash.as_deref(), Some("image"));
+    assert_eq!(lib.master_users("image").unwrap(), 0);
+}

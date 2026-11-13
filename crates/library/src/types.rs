@@ -696,8 +696,9 @@ pub struct PurgedTrack {
     /// Where every local file of the track lived in the library (trashed ones
     /// too): the album folders to tidy up.
     pub places: Vec<String>,
-    /// Content hash of the lossless master, when the track had one: its file
-    /// and sidecar in `.musiclib/masters/` go too.
+    /// Content hash of the lossless master, when the track had one and no
+    /// other track has the same file as its master (the image of a
+    /// single-file rip): its file and sidecar in `.musiclib/masters/` go too.
     pub master_hash: Option<String>,
     /// The release went with its last track.
     pub release_removed: bool,

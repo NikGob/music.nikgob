@@ -464,8 +464,14 @@ impl Codec {
         }
     }
 
+    /// FLAC, ALAC, WAV/AIFF, and the APE and WavPack images of
+    /// single-file rips.
     pub fn is_lossless(&self) -> bool {
-        matches!(self, Self::Flac | Self::Alac | Self::Wav)
+        match self {
+            Self::Flac | Self::Alac | Self::Wav => true,
+            Self::Other(s) => matches!(s.as_str(), "ape" | "wavpack"),
+            _ => false,
+        }
     }
 }
 
@@ -1253,7 +1259,7 @@ mod tests {
         let v0 = q(Codec::Mp3, Some(245), None, None, false);
         let mp3_128 = q(Codec::Mp3, Some(128), None, None, false);
         let fake = q(Codec::Flac, None, Some(44_100), Some(16), true);
-        let other = q(Codec::Other("ape".into()), None, None, None, false);
+        let other = q(Codec::Other("wma".into()), None, None, None, false);
 
         assert!(hires > cd);
         assert!(cd > opus);

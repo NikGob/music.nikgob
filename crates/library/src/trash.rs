@@ -387,6 +387,13 @@ impl Library {
                        AND NOT EXISTS (SELECT 1 FROM master WHERE file_hash = ?1)",
                     [hash],
                 )?;
+                // A file other tracks still have as their master (the image
+                // of a single-file rip) stays for them.
+                let shared: bool =
+                    tx.query_row("SELECT EXISTS(SELECT 1 FROM master WHERE file_hash = ?1)", [hash], |r| r.get(0))?;
+                if shared {
+                    out.master_hash = None;
+                }
             }
             tx.execute(
                 "UPDATE likes SET deleted = 1, updated_at = ?2, updated_by = ?3
