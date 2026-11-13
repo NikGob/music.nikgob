@@ -4,10 +4,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 const FILE_NAME: &str = "nikgob-torrent.json";
+/// Upload counters are written at most this often while seeding; a
+/// completion, a removal or the shutdown is written at once.
+const SAVE_EVERY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct Record {
@@ -32,6 +36,11 @@ pub(crate) struct StateFile {
     pub torrents: HashMap<String, Record>,
     #[serde(skip)]
     pub dirty: bool,
+    /// A change that must not wait for [`SAVE_EVERY`].
+    #[serde(skip)]
+    pub urgent: bool,
+    #[serde(skip)]
+    saved_at: Option<Instant>,
 }
 
 impl StateFile {
@@ -61,13 +70,40 @@ impl StateFile {
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
         std::fs::rename(&tmp, &path)?;
         self.dirty = false;
+        self.urgent = false;
+        self.saved_at = Some(Instant::now());
         Ok(())
+    }
+
+    /// Whether a periodic look should write the file now: something changed
+    /// and it is urgent, or the last write is [`SAVE_EVERY`] old.
+    pub fn due(&self, now: Instant) -> bool {
+        self.dirty && (self.urgent || self.saved_at.is_none_or(|t| now.duration_since(t) >= SAVE_EVERY))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counters_wait_and_urgent_changes_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = StateFile::load(dir.path(), 1);
+        let now = Instant::now();
+        assert!(s.due(now), "a fresh state is written at once");
+        s.save(dir.path()).unwrap();
+        assert!(!s.due(now));
+        // An upload counter moved: it waits.
+        s.dirty = true;
+        assert!(!s.due(Instant::now()));
+        assert!(s.due(Instant::now() + SAVE_EVERY));
+        // A completion does not.
+        s.urgent = true;
+        assert!(s.due(Instant::now()));
+        s.save(dir.path()).unwrap();
+        assert!(!s.due(Instant::now() + SAVE_EVERY), "nothing changed");
+    }
 
     #[test]
     fn roundtrip() {

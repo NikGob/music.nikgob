@@ -408,7 +408,7 @@ impl TorrentClient {
             .iter()
             .map(|h| snapshot(h, &cfg, &mut state, now))
             .collect();
-        if state.dirty
+        if state.due(std::time::Instant::now())
             && let Err(e) = state.save(&self.inner.state_dir)
         {
             log::warn!("cannot save torrent state: {e}");
@@ -417,8 +417,15 @@ impl TorrentClient {
         out
     }
 
+    /// Takes the counters now and writes whatever changed.
     fn flush(&self) {
         let _ = self.snapshots();
+        let mut state = lock(&self.inner.state);
+        if state.dirty
+            && let Err(e) = state.save(&self.inner.state_dir)
+        {
+            log::warn!("cannot save torrent state: {e}");
+        }
     }
 
     pub async fn pause(&self, id: u64) -> Result<()> {
@@ -557,9 +564,11 @@ fn snapshot(
     if complete && rec.completed_at.is_none() {
         rec.completed_at = Some(now);
         changed = true;
+        state.urgent = true;
     } else if known_state && !complete && rec.completed_at.is_some() {
         rec.completed_at = None;
         changed = true;
+        state.urgent = true;
     }
     let uploaded = rec.uploaded;
     let completed_at = rec.completed_at;
