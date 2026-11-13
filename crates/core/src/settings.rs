@@ -189,6 +189,11 @@ pub struct MetadataSettings {
     /// The user's own ListenBrainz token (https://listenbrainz.org/settings/):
     /// the graph's popularity asks ListenBrainz only with it.
     pub listenbrainz_token: Option<String>,
+    /// The user's own MusicLink API key (https://musiclink.one/dashboard,
+    /// free plan): «Поделиться» then gets a MusicLink page for every album,
+    /// also one MusicLink does not know yet. Optional: songs and known
+    /// albums need no key.
+    pub musiclink_key: Option<String>,
 }
 
 impl Default for MetadataSettings {
@@ -198,6 +203,7 @@ impl Default for MetadataSettings {
             acoustid_key: None,
             lastfm_key: None,
             listenbrainz_token: None,
+            musiclink_key: None,
         }
     }
 }
@@ -209,6 +215,7 @@ impl fmt::Debug for MetadataSettings {
             .field("acoustid_key", &self.acoustid_key.as_ref().map(|_| "<redacted>"))
             .field("lastfm_key", &self.lastfm_key.as_ref().map(|_| "<redacted>"))
             .field("listenbrainz_token", &self.listenbrainz_token.as_ref().map(|_| "<redacted>"))
+            .field("musiclink_key", &self.musiclink_key.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }

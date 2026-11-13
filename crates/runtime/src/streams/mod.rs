@@ -281,7 +281,7 @@ pub(crate) struct Streams {
     /// The «Ищу ссылку…» toast of the share that runs, replaced by its end.
     share_toast: Option<u64>,
     clipboard_id: u64,
-    odesli: Option<nikgob_metadata::Odesli>,
+    share_clients: Option<share::Clients>,
     cold: cold::ColdState,
     sync: sync::SyncState,
     disco: discography::DiscoState,
@@ -335,7 +335,7 @@ impl Streams {
             share_seq: 0,
             share_toast: None,
             clipboard_id: 0,
-            odesli: None,
+            share_clients: None,
             cold: cold::ColdState::default(),
             sync: sync::SyncState::default(),
             disco: discography::DiscoState::default(),
