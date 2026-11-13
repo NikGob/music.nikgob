@@ -347,9 +347,15 @@ async fn headless_service_over_http() {
     let got = tokio::time::timeout(Duration::from_secs(30), d.wait()).await.unwrap().unwrap();
     assert_eq!(got, local.path().join("Daydream").join("01 Insane Dream.flac"));
     assert_eq!(std::fs::read(&got).unwrap(), pattern(120_000));
-    // Fetched and removed on the service's side.
+    // Fetched and removed on the service's side (the removal follows the
+    // «done», so it may land a moment later).
     let Soulseek::Remote(rc) = &remote else { unreachable!() };
-    assert!(rc.files().await.unwrap().is_empty());
+    let removed = async {
+        while !rc.files().await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), removed).await.expect("the fetched file stays on the service");
     // Share settings through the API.
     remote.set_share(ShareSettings { enabled: true, upload_limit_kbps: 64, upload_slots: 1 }).await.unwrap();
     assert_eq!(b.share_settings().upload_limit_kbps, 64);
