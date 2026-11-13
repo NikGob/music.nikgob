@@ -108,9 +108,10 @@ fn watch_loop(
                 last_size: None,
             });
     };
-    // Files that were there before we started.
-    let (audio, torrents) = fsutil::scan(std::slice::from_ref(&inbox));
-    for p in audio.into_iter().chain(torrents) {
+    // Files that were there before we started (cue sheets too: an APE
+    // image is found through its sheet).
+    let found = fsutil::scan_import(std::slice::from_ref(&inbox));
+    for p in found.audio.into_iter().chain(found.torrents).chain(found.cues) {
         track(p, &mut waiting);
     }
 
@@ -123,11 +124,11 @@ fn watch_loop(
                             continue;
                         }
                         if p.is_dir() {
-                            let (audio, torrents) = fsutil::scan(std::slice::from_ref(&p));
-                            for f in audio.into_iter().chain(torrents) {
+                            let found = fsutil::scan_import(std::slice::from_ref(&p));
+                            for f in found.audio.into_iter().chain(found.torrents).chain(found.cues) {
                                 track(f, &mut waiting);
                             }
-                        } else if fsutil::is_audio_file(&p) || fsutil::is_torrent_file(&p) {
+                        } else if fsutil::is_audio_file(&p) || fsutil::is_torrent_file(&p) || fsutil::is_cue_file(&p) {
                             track(p, &mut waiting);
                         }
                     }

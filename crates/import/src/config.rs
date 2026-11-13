@@ -42,6 +42,9 @@ pub struct ImportConfig {
     pub fallback_seed_argb: u32,
     /// Give up on one online call after this long (offline never blocks import).
     pub online_timeout: Duration,
+    /// Where an import cuts single-file rips into tracks for the while it
+    /// encodes them. Empty: `nikgob-cue` in the system's temp folder.
+    pub work_dir: PathBuf,
 }
 
 impl ImportConfig {
@@ -66,6 +69,7 @@ impl ImportConfig {
             max_parallel: 2,
             fallback_seed_argb: 0xFF67_50A4,
             online_timeout: Duration::from_secs(15),
+            work_dir: PathBuf::new(),
         }
     }
 
@@ -92,6 +96,15 @@ impl ImportConfig {
             self.musiclib_dir().join("masters")
         } else {
             self.masters_dir.clone()
+        }
+    }
+
+    /// Where single-file rips are cut ([`Self::work_dir`]).
+    pub fn work_dir(&self) -> PathBuf {
+        if self.work_dir.as_os_str().is_empty() {
+            std::env::temp_dir().join("nikgob-cue")
+        } else {
+            self.work_dir.clone()
         }
     }
 

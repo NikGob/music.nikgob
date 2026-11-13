@@ -401,11 +401,26 @@ pub fn pick_files(files: &[(usize, String, u64)], w: &Want) -> Option<Vec<usize>
             }
             best.map(|(_, i)| vec![i])
         }
-        _ => Some(if album_files.is_empty() {
-            audio.iter().map(|(i, ..)| *i).collect()
-        } else {
-            album_files.iter().map(|(i, ..)| *i).collect()
-        }),
+        _ => {
+            let mut picked: Vec<usize> = if album_files.is_empty() {
+                audio.iter().map(|(i, ..)| *i).collect()
+            } else {
+                album_files.iter().map(|(i, ..)| *i).collect()
+            };
+            // The cue sheets of the picked folders: a single-file rip is
+            // cut into its tracks by its sheet.
+            let dirs: Vec<&str> = files
+                .iter()
+                .filter(|(i, ..)| picked.contains(i))
+                .map(|(_, p, _)| p.rsplit_once('/').map_or("", |(d, _)| d))
+                .collect();
+            picked.extend(files.iter().filter_map(|(i, p, _)| {
+                let dir = p.rsplit_once('/').map_or("", |(d, _)| d);
+                (ext_of(p) == "cue" && dirs.contains(&dir)).then_some(*i)
+            }));
+            picked.sort_unstable();
+            Some(picked)
+        }
     }
 }
 
@@ -447,6 +462,14 @@ mod tests {
         ];
         assert_eq!(pick_files(&files, &want(WantScope::Track)), Some(vec![2]));
         assert_eq!(pick_files(&files, &want(WantScope::Album)), Some(vec![0, 1, 2]));
+        // A single-file rip comes with its cue sheet (not another folder's).
+        let image = vec![
+            (0, "Кино - Группа крови/CDImage.ape".into(), 300),
+            (1, "Кино - Группа крови/CDImage.cue".into(), 1),
+            (2, "Кино - Группа крови/CDImage.log".into(), 1),
+            (3, "Other/CDImage.cue".into(), 1),
+        ];
+        assert_eq!(pick_files(&image, &want(WantScope::Album)), Some(vec![0, 1]));
         let mut w = want(WantScope::Track);
         w.title = Some("Voyna (War)".into());
         assert_eq!(pick_files(&files, &w), Some(vec![2]), "by its number");

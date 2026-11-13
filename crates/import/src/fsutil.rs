@@ -185,28 +185,48 @@ pub fn file_size(path: &Path) -> Result<u64> {
 
 /// Audio and `.torrent` files below `roots` (a file is taken as is), sorted.
 pub fn scan(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let mut audio = Vec::new();
-    let mut torrents = Vec::new();
-    for root in roots {
-        walk(root, &mut audio, &mut torrents, 0);
-    }
-    audio.sort();
-    audio.dedup();
-    torrents.sort();
-    torrents.dedup();
-    (audio, torrents)
+    let found = scan_import(roots);
+    (found.audio, found.torrents)
 }
 
-fn walk(path: &Path, audio: &mut Vec<PathBuf>, torrents: &mut Vec<PathBuf>, depth: usize) {
+/// What [`scan_import`] found.
+#[derive(Debug, Default)]
+pub struct Scanned {
+    pub audio: Vec<PathBuf>,
+    pub torrents: Vec<PathBuf>,
+    /// Cue sheets (`.cue`): the index cards of single-file rips.
+    pub cues: Vec<PathBuf>,
+}
+
+/// [`scan`] that also finds cue sheets.
+pub fn scan_import(roots: &[PathBuf]) -> Scanned {
+    let mut found = Scanned::default();
+    for root in roots {
+        walk(root, &mut found, 0);
+    }
+    for list in [&mut found.audio, &mut found.torrents, &mut found.cues] {
+        list.sort();
+        list.dedup();
+    }
+    found
+}
+
+pub fn is_cue_file(path: &Path) -> bool {
+    has_extension(path, &["cue"])
+}
+
+fn walk(path: &Path, found: &mut Scanned, depth: usize) {
     let p = long_path(path);
     let Ok(meta) = fs::metadata(&p) else {
         return;
     };
     if meta.is_file() {
         if is_audio_file(path) {
-            audio.push(path.to_path_buf());
+            found.audio.push(path.to_path_buf());
         } else if is_torrent_file(path) {
-            torrents.push(path.to_path_buf());
+            found.torrents.push(path.to_path_buf());
+        } else if is_cue_file(path) {
+            found.cues.push(path.to_path_buf());
         }
         return;
     }
@@ -222,7 +242,7 @@ fn walk(path: &Path, audio: &mut Vec<PathBuf>, torrents: &mut Vec<PathBuf>, dept
         if name.to_string_lossy().starts_with('.') {
             continue;
         }
-        walk(&path.join(&name), audio, torrents, depth + 1);
+        walk(&path.join(&name), found, depth + 1);
     }
 }
 

@@ -40,6 +40,9 @@ pub struct RebuildReport {
 #[derive(Deserialize)]
 struct SidecarScore {
     track_id: TrackId,
+    /// Every track of an image (a single-file rip of a disc).
+    #[serde(default)]
+    track_ids: Vec<TrackId>,
     quality_score: i32,
 }
 
@@ -62,9 +65,11 @@ fn master_scores(cfg: &ImportConfig) -> HashMap<TrackId, i32> {
                 && let Ok(bytes) = std::fs::read(&p)
                 && let Ok(s) = serde_json::from_slice::<SidecarScore>(&bytes)
             {
-                out.entry(s.track_id)
-                    .and_modify(|q| *q = (*q).max(s.quality_score))
-                    .or_insert(s.quality_score);
+                for t in std::iter::once(s.track_id).chain(s.track_ids) {
+                    out.entry(t)
+                        .and_modify(|q| *q = (*q).max(s.quality_score))
+                        .or_insert(s.quality_score);
+                }
             }
         }
     }

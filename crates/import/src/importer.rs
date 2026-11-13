@@ -27,6 +27,7 @@ use tokio::sync::{Semaphore, broadcast, mpsc};
 use crate::analysis::{AudioAnalysis, analyze_file};
 use crate::config::ImportConfig;
 use crate::cover::{ProcessedCover, derive_visuals, process_cover};
+use crate::cue_import::{self, Image, Segment};
 use crate::album::{Evidence, OnRelease, Reference, lookup_album, names_of};
 use crate::confirm::{Choice, Payload, TagView};
 use crate::decide::{Decision, ImportTargets, Incoming, decide, find_existing, stream_doubt};
@@ -100,9 +101,24 @@ struct Ctx {
     targets: Arc<ImportTargets>,
     /// When the job started: a file the library had before it is settled.
     started: i64,
+    /// The tracks cut out of single-file rips (see [`crate::cue_import`]).
+    cue: Arc<Mutex<CueJob>>,
+}
+
+/// What a job cut out of its single-file rips.
+#[derive(Default)]
+struct CueJob {
+    /// Each track file and what it is.
+    segments: HashMap<PathBuf, Arc<Segment>>,
+    /// Track files that turned out to be duplicates.
+    duplicates: HashSet<PathBuf>,
 }
 
 impl Ctx {
+    fn segment(&self, path: &Path) -> Option<Arc<Segment>> {
+        lock(&self.cue).segments.get(path).cloned()
+    }
+
     fn emit(&self, ev: ImportEvent) {
         let _ = self.tx.send(ev.clone());
         let _ = self.events.send(ev);
@@ -136,6 +152,16 @@ struct Analyzed {
     came_hash: Option<String>,
     /// When its job started ([`Ctx::started`]).
     job_started: i64,
+    /// A track cut out of a single-file rip: the image is its master.
+    cue: Option<Arc<Segment>>,
+}
+
+impl Analyzed {
+    /// The lossless file the track's master is: the image a cut track came
+    /// from, else the file itself.
+    fn master_path(&self) -> &Path {
+        self.cue.as_ref().map_or(&self.path, |s| &s.image.path)
+    }
 }
 
 /// A file that is read (tags, length, fingerprint) and waits for its folder.
@@ -335,6 +361,7 @@ impl Importer {
             events: self.inner.events.clone(),
             targets: Arc::new(targets),
             started: nikgob_library::now_ms(),
+            cue: Arc::default(),
         };
         let this = self.clone();
         tokio::spawn(async move { this.run_job(ctx, paths, origin).await });
@@ -357,11 +384,33 @@ impl Importer {
 
     async fn run_job(self, ctx: Ctx, paths: Vec<PathBuf>, origin: SourceOrigin) {
         lock(&self.inner.journal).insert(ctx.job.0, Vec::new());
-        let scanned = tokio::task::spawn_blocking(move || fsutil::scan(&paths)).await;
-        let (files, torrents) = scanned.unwrap_or_default();
+        // Single-file rips with a cue sheet are cut into their tracks
+        // folder by folder below; the rest imports as it is.
+        let scanned = tokio::task::spawn_blocking(move || {
+            let found = fsutil::scan_import(&paths);
+            (cue_import::plan(found.audio, &found.cues), found.torrents)
+        })
+        .await;
+        let (plan, torrents) = scanned.unwrap_or_default();
+        let files = plan.files;
+        // An image another job is cutting is left to it.
+        let images: Vec<Image> = {
+            let mut active = lock(&self.inner.active);
+            plan.images
+                .into_iter()
+                .filter(|i| {
+                    let free = active.insert(i.path.clone());
+                    if !free {
+                        log::info!("import: {} is being imported already", i.path.display());
+                    }
+                    free
+                })
+                .collect()
+        };
+        let work = cue_import::job_dir(&self.inner.cfg.work_dir(), ctx.job.0, ctx.started);
         ctx.emit(ImportEvent::Started {
             job: ctx.job,
-            files: files.len(),
+            files: files.len() + images.iter().map(|i| i.tracks().len()).sum::<usize>(),
         });
         for t in torrents {
             ctx.emit(ImportEvent::TorrentFound(t));
@@ -378,14 +427,52 @@ impl Importer {
         };
         // One album folder at a time: read all its files, identify them as
         // one album, agree on a single release, then import them.
-        let mut folders: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        let mut folders: BTreeMap<PathBuf, (Vec<PathBuf>, Vec<Image>)> = BTreeMap::new();
         for path in files {
-            folders.entry(album_group_dir(&path)).or_default().push(path);
+            folders.entry(album_group_dir(&path)).or_default().0.push(path);
+        }
+        for image in images {
+            folders.entry(album_group_dir(&image.path)).or_default().1.push(image);
         }
         let (mut imported, mut duplicates, mut failed, mut pending, mut left_out) = (0, 0, 0, 0, 0);
-        for (dir, files) in folders {
+        let mut cut_no = 0usize;
+        for (dir, (mut files, images)) in folders {
             if self.is_cancelled(ctx.job) {
-                break;
+                let mut active = lock(&self.inner.active);
+                for i in &images {
+                    active.remove(&i.path);
+                }
+                continue;
+            }
+            // The folder's images become their tracks' files.
+            let mut cut: Vec<(Image, PathBuf, Vec<PathBuf>)> = Vec::new();
+            for image in images {
+                cut_no += 1;
+                let at = work.join(format!("{cut_no:03}"));
+                ctx.stage(&image.path, Stage::Probing);
+                let (img, d) = (image.clone(), at.clone());
+                match blocking(move || cue_import::cut(&img, &d)).await {
+                    Ok(tracks) => {
+                        let paths: Vec<PathBuf> = tracks.iter().map(|(p, _)| p.clone()).collect();
+                        lock(&ctx.cue).segments.extend(tracks);
+                        files.extend(paths.iter().cloned());
+                        cut.push((image, at, paths));
+                    }
+                    Err(e) => {
+                        lock(&self.inner.active).remove(&image.path);
+                        if image.importable_whole() {
+                            log::warn!(
+                                "cue {}: {} is not cut ({e}); it imports as one file",
+                                image.cue.display(),
+                                image.path.display()
+                            );
+                            files.push(image.path.clone());
+                        } else {
+                            self.failed(&ctx, &image.path, &e);
+                            failed += 1;
+                        }
+                    }
+                }
             }
             let mut set = tokio::task::JoinSet::new();
             for path in files {
@@ -451,7 +538,16 @@ impl Importer {
                     FileOutcome::Skipped => {}
                 }
             }
+            if !cut.is_empty() {
+                let (this, c) = (self.clone(), ctx.clone());
+                let _ = blocking(move || {
+                    this.after_cut(&c, cut);
+                    Ok(())
+                })
+                .await;
+            }
         }
+        let _ = std::fs::remove_dir_all(long_path(&work));
         let journal = lock(&self.inner.journal).remove(&ctx.job.0).unwrap_or_default();
         let cancelled = lock(&self.inner.cancelled).remove(&ctx.job.0);
         if cancelled {
@@ -469,6 +565,35 @@ impl Importer {
             left_out,
             cancelled,
         });
+    }
+
+    /// A folder's images are done: their track files go, and an image of
+    /// the Inbox whose every track was a duplicate goes to the Trash with
+    /// its sheet (as a duplicate file does). The images are free for other
+    /// jobs again.
+    fn after_cut(&self, ctx: &Ctx, cut: Vec<(Image, PathBuf, Vec<PathBuf>)>) {
+        let cfg = &self.inner.cfg;
+        for (image, dir, paths) in cut {
+            let all_duplicates = {
+                let mut job = lock(&ctx.cue);
+                let all = paths.iter().all(|p| job.duplicates.contains(p));
+                for p in &paths {
+                    job.segments.remove(p);
+                    job.duplicates.remove(p);
+                }
+                all
+            };
+            let _ = std::fs::remove_dir_all(long_path(&dir));
+            if all_duplicates && image.path.starts_with(&cfg.inbox_dir) && long_path(&image.path).exists() {
+                for f in [&image.path, &image.cue] {
+                    match trash_file(&cfg.trash_dir, f) {
+                        Ok(to) => log::info!("import: {} is a duplicate, in the Trash at {}", f.display(), to.display()),
+                        Err(e) => log::warn!("cannot trash duplicate {}: {e}", f.display()),
+                    }
+                }
+            }
+            lock(&self.inner.active).remove(&image.path);
+        }
     }
 
     /// Reads one file; never returns an error, failures become events.
@@ -558,11 +683,13 @@ impl Importer {
     async fn read(&self, ctx: &Ctx, path: &Path, origin: SourceOrigin) -> Result<Read> {
         let inner = self.inner.clone();
         ctx.stage(path, Stage::Probing);
-        let origin = self.file_origin(&origin, path);
+        let segment = ctx.segment(path);
+        // A track cut out of an image came from where the image did.
+        let origin = self.file_origin(&origin, segment.as_ref().map_or(path, |s| &s.image.path));
         ctx.stage(path, Stage::Fingerprinting);
         let mut analyzed = {
             let (p, o, i) = (path.to_path_buf(), origin, inner.clone());
-            blocking(move || analyze(&i.cfg, &p, o)).await?
+            blocking(move || analyze_track(&i.cfg, &p, o, segment)).await?
         };
         analyzed.force_track = ctx.targets.track_of(path);
         analyzed.targets = ctx.targets.clone();
@@ -710,7 +837,7 @@ impl Importer {
         // A job of confirmed files takes those alone, each as its track.
         if ctx.targets.only_targets || !ctx.targets.pinned.is_empty() {
             for i in (0..read.len()).rev() {
-                if ctx.targets.unpinned(&read[i].analyzed.path) || (ids[i].is_none() && !read[i].known) {
+                if ctx.targets.unpinned(read[i].analyzed.master_path()) || (ids[i].is_none() && !read[i].known) {
                     let p = read.remove(i);
                     ids.remove(i);
                     log::info!("import: {} is none of the tracks it was fetched for, left out", p.analyzed.path.display());
@@ -770,6 +897,9 @@ impl Importer {
             }
             asked.sort_by_key(|(i, _)| *i);
             // Highest index first, so the indexes of the rest stay put.
+            // A track cut out of an image lives only while its job runs:
+            // it is never parked, its sheet's tags stand.
+            asked.retain(|(i, _)| read[*i].analyzed.cue.is_none());
             for (i, options) in asked.into_iter().rev() {
                 let p = read.remove(i);
                 ids.remove(i);
@@ -784,7 +914,7 @@ impl Importer {
             let identity = id.unwrap_or_else(|| base.clone());
             // A liked stream track of another length (TV size, radio edit)
             // is asked about rather than attached silently.
-            if analyzed.force_track.is_none() && !known {
+            if analyzed.force_track.is_none() && !known && analyzed.cue.is_none() {
                 let (i, a, id) = (inner.clone(), analyzed.clone(), identity.clone());
                 let doubt = blocking(move || {
                     let mut store = lock(&i.store);
@@ -1022,6 +1152,7 @@ impl Importer {
             events: self.inner.events.clone(),
             targets,
             started,
+            cue: Arc::default(),
         }
     }
 
@@ -1131,6 +1262,9 @@ impl Importer {
     /// A worse (or equal) copy: an Inbox file goes to Trash, anything else stays.
     fn report_duplicate(&self, ctx: &Ctx, a: &Analyzed, kept: TrackId) -> FileOutcome {
         let cfg = &self.inner.cfg;
+        if a.cue.is_some() {
+            lock(&ctx.cue).duplicates.insert(a.path.clone());
+        }
         if a.path.starts_with(&cfg.inbox_dir)
             && let Err(e) = trash_file(&cfg.trash_dir, &a.path)
         {
@@ -1161,7 +1295,7 @@ impl Importer {
         let max = self.inner.cfg.cover_max_edge;
         let (embedded, src_dir, album_dir) = (
             a.tags.cover.clone(),
-            a.path.parent().map(Path::to_path_buf),
+            a.master_path().parent().map(Path::to_path_buf),
             album_dir.to_path_buf(),
         );
         let local = blocking(move || {
@@ -1245,7 +1379,16 @@ impl Importer {
 // ------------------------------------------------------------------ stages
 
 fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Analyzed> {
-    let (tags, info) = tags::read_tags(path)?;
+    analyze_track(cfg, path, origin, None)
+}
+
+/// [`analyze`] for a file that may be a track cut out of an image: it is
+/// taken for what the sheet says and ranked as the image.
+fn analyze_track(cfg: &ImportConfig, path: &Path, origin: SourceOrigin, cue: Option<Arc<Segment>>) -> Result<Analyzed> {
+    let (mut tags, mut info) = tags::read_tags(path)?;
+    if let Some(seg) = &cue {
+        cue_import::apply(seg, &mut tags, &mut info);
+    }
     let lossless = info.codec.is_lossless();
     let audio = analyze_file(path, cfg.check_fake_lossless && lossless, info.duration)?;
     let verdict = audio.spectrum.map(|s| s.verdict);
@@ -1284,6 +1427,7 @@ fn analyze(cfg: &ImportConfig, path: &Path, origin: SourceOrigin) -> Result<Anal
         force_track: None,
         came_hash,
         job_started: nikgob_library::now_ms(),
+        cue,
     })
 }
 
@@ -1522,9 +1666,11 @@ fn convert(inner: &Inner, a: &Analyzed, album_dir: &Path) -> Result<Prepared> {
                 bitrate_kbps: inner.cfg.opus_bitrate_kbps,
             },
         )?;
-        match &a.came_hash {
-            Some(h) => Some(h.clone()),
-            None => Some(fsutil::hash_file(&a.path)?),
+        match (&a.cue, &a.came_hash) {
+            // A cut track's original is the image.
+            (Some(seg), _) => Some(seg.image.hash.clone()),
+            (None, Some(h)) => Some(h.clone()),
+            (None, None) => Some(fsutil::hash_file(&a.path)?),
         }
     } else if let Some(enc) = &mp3 {
         let target = nikgob_core::quality::Mp3Target::for_origin(sound_origin(&a.audio));
@@ -1578,6 +1724,8 @@ fn roll_back(inner: &Inner, journal: Vec<Undo>) -> usize {
     for u in journal.into_iter().rev() {
         let mut gone = vec![u.dest.clone(), u.dest.with_extension("lrc")];
         gone.extend(u.master_file.clone());
+        // The cue sheet kept with an image master goes with it.
+        gone.extend(u.master_file.as_ref().map(|m| m.with_extension("cue")));
         for f in gone {
             if long_path(&f).exists() {
                 match trash_file(&cfg.trash_dir, &f) {
@@ -1667,6 +1815,10 @@ fn build_tagset(
 #[derive(Serialize)]
 struct MasterSidecar<'a> {
     track_id: TrackId,
+    /// Every track this one file is the master of, when it is several (a
+    /// single-file rip of a disc is the master of all its tracks).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    track_ids: Vec<TrackId>,
     codec: &'a Codec,
     file_hash: &'a str,
     size_bytes: u64,
@@ -1676,12 +1828,26 @@ struct MasterSidecar<'a> {
     /// readers must look there by hash and not trust this field.
     path: String,
     original_name: String,
+    /// The cue sheet of a single-file rip, kept as `{file_hash}.cue`, by
+    /// the name it came with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cue: Option<String>,
     quality_score: i32,
+}
+
+/// The tracks an earlier sidecar of the same file names.
+#[derive(serde::Deserialize)]
+struct SidecarTracks {
+    track_id: TrackId,
+    #[serde(default)]
+    track_ids: Vec<TrackId>,
 }
 
 /// Registers the lossless original as the track's master (PLAN section 6, step
 /// 9): torrent payloads stay where they are (they keep seeding), Inbox files move
-/// to `.musiclib/masters/`, anything else is copied there.
+/// to `.musiclib/masters/`, anything else is copied there. A track cut out of a
+/// single-file rip has the image as its master, shared with the other tracks
+/// of the image, and its cue sheet is kept next to it as `{hash}.cue`.
 fn register_master(
     inner: &Inner,
     a: &Analyzed,
@@ -1689,56 +1855,81 @@ fn register_master(
     track_id: TrackId,
 ) -> Result<Master> {
     let cfg = &inner.cfg;
-    let size = fsutil::file_size(&a.path)?;
+    let src = a.master_path();
+    let image = a.cue.as_ref().map(|s| &s.image);
+    let codec = image.map_or(&a.info.codec, |i| &i.info.codec);
+    let size = match image {
+        Some(i) => i.size,
+        None => fsutil::file_size(src)?,
+    };
     let path = match &a.origin {
-        SourceOrigin::Torrent { .. } => a.path.clone(),
+        SourceOrigin::Torrent { .. } => src.to_path_buf(),
         _ => {
             let dir = cfg.masters_dir();
             fsutil::create_dir_all(&dir)?;
-            let ext = a
-                .path
+            let ext = src
                 .extension()
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_else(|| "flac".to_owned());
             let dest = dir.join(format!("{hash}.{ext}"));
             if !long_path(&dest).exists() {
-                if a.path.starts_with(&cfg.inbox_dir) {
-                    fsutil::move_file_verified(&a.path, &dest, Some(hash))?;
+                if src.starts_with(&cfg.inbox_dir) {
+                    fsutil::move_file_verified(src, &dest, Some(hash))?;
                 } else {
-                    fsutil::copy_file_verified(&a.path, &dest, Some(hash))?;
+                    fsutil::copy_file_verified(src, &dest, Some(hash))?;
                 }
-            } else if a.path.starts_with(&cfg.inbox_dir) {
+            } else if src.starts_with(&cfg.inbox_dir) && long_path(src).exists() {
                 if fsutil::hash_file(&dest).ok().as_deref() == Some(hash) {
-                    fsutil::remove_file(&a.path)?;
+                    fsutil::remove_file(src)?;
                 } else {
-                    fsutil::move_file_verified(&a.path, &dest, Some(hash))?;
+                    fsutil::move_file_verified(src, &dest, Some(hash))?;
                 }
             }
             dest
         }
     };
+    let dir = cfg.masters_dir();
+    fsutil::create_dir_all(&dir)?;
+    let sidecar_path = dir.join(format!("{hash}.json"));
+    // The sheet goes with the image (never over one kept before), and the
+    // image's sidecar names every track of it.
+    let (cue, track_ids) = match image {
+        Some(i) => {
+            if let Err(e) = cue_import::keep_sheet(&dir, &cfg.inbox_dir, &i.cue, hash) {
+                log::warn!("the cue sheet {} is not kept with its master: {e}", i.cue.display());
+            }
+            let mut ids: Vec<TrackId> = std::fs::read(long_path(&sidecar_path))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<SidecarTracks>(&b).ok())
+                .map(|s| std::iter::once(s.track_id).chain(s.track_ids).collect())
+                .unwrap_or_default();
+            ids.push(track_id);
+            ids.sort();
+            ids.dedup();
+            (i.cue.file_name().map(|n| n.to_string_lossy().into_owned()), ids)
+        }
+        None => (None, Vec::new()),
+    };
     let sidecar = MasterSidecar {
         track_id,
-        codec: &a.info.codec,
+        track_ids,
+        codec,
         file_hash: hash,
         size_bytes: size,
         origin: &a.origin,
         path: path.to_string_lossy().into_owned(),
-        original_name: a
-            .path
+        original_name: src
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        cue,
         quality_score: a.score,
     };
-    let dir = cfg.masters_dir();
-    fsutil::create_dir_all(&dir)?;
     let json = serde_json::to_vec_pretty(&sidecar).map_err(|e| ImportError::Other(e.to_string()))?;
-    let sidecar_path = dir.join(format!("{hash}.json"));
     std::fs::write(long_path(&sidecar_path), json).map_err(fsutil::io_err(&sidecar_path))?;
     Ok(Master {
         track_id,
-        codec: a.info.codec.clone(),
+        codec: codec.clone(),
         file_hash: hash.to_owned(),
         size_bytes: size,
         origin: Some(a.origin.clone()),
@@ -1760,12 +1951,16 @@ pub struct RelocateReport {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct OwnedMasterSidecar {
     track_id: TrackId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    track_ids: Vec<TrackId>,
     codec: Codec,
     file_hash: String,
     size_bytes: u64,
     origin: SourceOrigin,
     path: String,
     original_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cue: Option<String>,
     quality_score: i32,
 }
 
@@ -1829,7 +2024,11 @@ where
             .is_some_and(|e| e.eq_ignore_ascii_case("json"))
         {
             sidecar_files.push(path);
-        } else if fsutil::is_audio_file(&path) {
+        } else if fsutil::is_audio_file(&path)
+            || fsutil::is_cue_file(&path)
+            || cue_import::IMAGE_EXTENSIONS.contains(&path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default().as_str())
+        {
+            // Lossless files, and the cue sheets kept with images.
             audio_files.push(path);
         }
     }
@@ -1851,10 +2050,13 @@ where
             .ok()
             .and_then(|b| serde_json::from_slice::<OwnedMasterSidecar>(&b).ok())
             .map(|s| s.file_hash);
-        let expected_hash = sidecar_hash.or_else(|| {
-            (stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then(|| stem.to_ascii_lowercase())
-        });
+        // A kept cue sheet is named by its image's hash, not its own.
+        let expected_hash = sidecar_hash
+            .or_else(|| {
+                (stem.len() == 64 && stem.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .then(|| stem.to_ascii_lowercase())
+            })
+            .filter(|_| !fsutil::is_cue_file(src));
 
         let dst = new_dir.join(src.file_name().unwrap());
         fsutil::move_file_verified(src, &dst, expected_hash.as_deref())?;
@@ -2213,7 +2415,7 @@ fn commit_locked(
             (Some(hash), true) => {
                 let in_dir = (!matches!(a.origin, SourceOrigin::Torrent { .. })).then(|| {
                     let ext = a
-                        .path
+                        .master_path()
                         .extension()
                         .map(|e| e.to_string_lossy().to_lowercase())
                         .unwrap_or_else(|| "flac".to_owned());
@@ -2226,7 +2428,7 @@ fn commit_locked(
                         Some(m)
                     }
                     Err(e) => {
-                        log::warn!("master of {} not registered: {e}", a.path.display());
+                        log::warn!("master of {} not registered: {e}", a.master_path().display());
                         None
                     }
                 }

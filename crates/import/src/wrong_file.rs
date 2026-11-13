@@ -37,12 +37,13 @@ pub struct WrongFile {
 }
 
 /// The lossless original of `hash` in the masters folder (`<hash>.<ext>`,
-/// not its `.json`).
+/// not its `.json` nor the `.cue` sheet kept with an image).
 fn master_file(cfg: &ImportConfig, hash: &str) -> Option<PathBuf> {
     let rd = std::fs::read_dir(long_path(&cfg.masters_dir())).ok()?;
     rd.flatten().map(|e| e.path()).find(|p| {
         p.file_stem().is_some_and(|s| s.to_string_lossy() == hash)
             && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            && !crate::fsutil::is_cue_file(p)
     })
 }
 
@@ -152,7 +153,10 @@ fn take_master(
     m: &Master,
     moved: &mut Vec<(PathBuf, PathBuf)>,
 ) -> bool {
-    let file = match master_file(cfg, &m.file_hash) {
+    // An image other tracks have as their master too stays for them: only
+    // this track's row goes.
+    let shared = lib.master_users(&m.file_hash).unwrap_or(1) > 1;
+    let file = match master_file(cfg, &m.file_hash).filter(|_| !shared) {
         Some(file) => match trash_file(&cfg.trash_dir, &file) {
             Ok(to) => Some((file, to)),
             Err(e) => {
