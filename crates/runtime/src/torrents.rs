@@ -27,6 +27,8 @@ pub(crate) struct Added {
     magnet: Option<String>,
     /// The wishlist item it was added for.
     wish: Option<WishlistId>,
+    /// The Inbox .torrent it came from, removed now that it is added.
+    consume: Option<std::path::PathBuf>,
 }
 
 pub(crate) struct Torrents {
@@ -225,13 +227,14 @@ impl Worker {
             Command::CloseTorrentFiles => self.publish(|s| s.downloads.files = None),
             Command::AddTorrentFile(path) => match std::fs::read(&path) {
                 Ok(bytes) => {
-                    self.add_payload(TorrentPayload::TorrentFile(bytes), None, None);
-                    // A .torrent dropped into the Inbox is consumed.
-                    if let Some(svc) = &self.import
-                        && path.starts_with(&svc.config().inbox_dir)
-                    {
-                        let _ = std::fs::remove_file(&path);
-                    }
+                    // A .torrent dropped into the Inbox is consumed once the
+                    // client took it; kept for another try if it did not.
+                    let consume = self
+                        .import
+                        .as_ref()
+                        .is_some_and(|svc| path.starts_with(&svc.config().inbox_dir))
+                        .then_some(path);
+                    self.add_payload_inner(TorrentPayload::TorrentFile(bytes), None, None, None, consume);
                 }
                 Err(e) => {
                     log::warn!("{}: {e}", path.display());
@@ -439,6 +442,19 @@ impl Worker {
         magnet: Option<String>,
         wish: Option<WishlistId>,
     ) {
+        self.add_payload_inner(p, files, magnet, wish, None);
+    }
+
+    /// [`Self::add_payload_for`]; `consume` = a file removed once the
+    /// client has the torrent (never when adding failed).
+    fn add_payload_inner(
+        &mut self,
+        p: TorrentPayload,
+        files: Option<Vec<usize>>,
+        magnet: Option<String>,
+        wish: Option<WishlistId>,
+        consume: Option<std::path::PathBuf>,
+    ) {
         self.with_client(Box::new(move |w, c| {
             let Some(svc) = &w.import else { return };
             let tx = svc.internal();
@@ -452,6 +468,7 @@ impl Worker {
                             files,
                             magnet,
                             wish,
+                            consume,
                         })
                         .ok_or_else(|| "торрент пропал из сессии".to_owned())
                     }
@@ -470,7 +487,13 @@ impl Worker {
                 files,
                 magnet,
                 wish,
+                consume,
             }) => {
+                if let Some(path) = consume
+                    && let Err(e) = std::fs::remove_file(&path)
+                {
+                    log::warn!("{}: not removed from the Inbox: {e}", path.display());
+                }
                 let now = std::time::SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
