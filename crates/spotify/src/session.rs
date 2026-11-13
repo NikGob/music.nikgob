@@ -121,10 +121,23 @@ impl Sessions {
         self.connect_locked(credentials, generation).await
     }
 
-    /// A new session, replacing any current one (a fresh login).
-    pub async fn connect(&self, credentials: Credentials, generation: u64) -> Result<Session, Error> {
+    /// A new session for a fresh login, replacing the current one only once
+    /// `accept` (run with the connected candidate, nothing else seeing it)
+    /// says so; refused, the candidate is shut down and the current session
+    /// is left as it was.
+    pub async fn connect_checked(
+        &self,
+        credentials: Credentials,
+        generation: u64,
+        accept: impl FnOnce(&Session) -> bool,
+    ) -> Result<Session, Error> {
         let _serial = self.connecting.lock().await;
-        self.connect_locked(credentials, generation).await
+        let candidate = self.candidate(credentials, generation).await?;
+        if !accept(&candidate) {
+            candidate.shutdown();
+            return Err(Error::cancelled("the new session was not accepted"));
+        }
+        self.install(candidate, generation)
     }
 
     /// A new session in place of `dropped`, which Spotify dropped; the one
@@ -143,6 +156,12 @@ impl Sessions {
     /// Connects (the caller holds `connecting`) and installs the session,
     /// unless a close came since `generation`.
     async fn connect_locked(&self, credentials: Credentials, generation: u64) -> Result<Session, Error> {
+        let session = self.candidate(credentials, generation).await?;
+        self.install(session, generation)
+    }
+
+    /// A connected session nobody sees yet (the caller holds `connecting`).
+    async fn candidate(&self, credentials: Credentials, generation: u64) -> Result<Session, Error> {
         if self.generation() != generation {
             return Err(Error::cancelled("signed out before connecting"));
         }
@@ -158,7 +177,7 @@ impl Sessions {
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err(Error::deadline_exceeded("connecting to Spotify")),
         }
-        self.install(session, generation)
+        Ok(session)
     }
 
     /// Makes a connected `session` the current one, shutting down the one
@@ -187,16 +206,6 @@ impl Sessions {
         if let Some(s) = current.take() {
             s.shutdown();
         }
-    }
-
-    /// Drops `session` if it is still the current one (a newer one stays).
-    pub fn close_if(&self, session: &Session) {
-        let mut current = lock(&self.current);
-        if current.as_ref().is_some_and(|c| c.session_id() == session.session_id()) {
-            current.take();
-        }
-        drop(current);
-        session.shutdown();
     }
 }
 
@@ -699,11 +708,12 @@ mod tests {
         // The next login's session (read after the close) is installed.
         let next = s.install(session(), s.generation()).unwrap();
         assert!(!next.is_invalid());
-        // Dropping a session that is no longer current keeps the current one.
-        s.close_if(&late);
+        // A login with what was read before the close is refused before it
+        // connects (no network) and leaves the current session alone.
+        let refused = s.connect_checked(Credentials::with_access_token("x"), g, |_| true).await;
+        assert!(refused.is_err());
         assert_eq!(s.current().unwrap().session_id(), next.session_id());
-        s.close_if(&next);
-        assert!(s.current().is_none());
+        assert!(!next.is_invalid());
     }
 
     #[tokio::test]

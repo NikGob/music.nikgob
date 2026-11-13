@@ -212,12 +212,12 @@ async fn a_browser_login_verifies_persists_and_is_restored() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A Web login of another account drops the playback login of the old one
-/// (the sound of one account and the library of another must not mix); the
-/// same account (in another case) keeps it.
+/// A Web login whose id differs from the playback login's username keeps the
+/// playback login: Spotify does not document the two as one identity, so a
+/// difference is only logged.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_web_login_of_another_account_drops_the_old_playback_login() {
-    for (kept_for, keeps) in [("user1", false), ("User2", true)] {
+async fn a_web_login_never_drops_the_playback_login_over_an_id_difference() {
+    for kept_for in ["user1", "User2"] {
         let server = mock_spotify("user2", Some("premium")).await;
         let dir = temp_dir("switch");
         let s = service(&dir, memory(&dir), &server);
@@ -234,9 +234,9 @@ async fn a_web_login_of_another_account_drops_the_old_playback_login() {
         s.login_web(web_grant(TEST_CLIENT, port)).await.unwrap();
         browser.await.unwrap();
         let st = lock(&s.state);
-        assert_eq!(st.playback.is_some(), keeps, "{kept_for}");
-        assert_eq!(st.saved.slots.contains(&Slot::Playback), keeps, "{kept_for}");
-        assert_eq!(s.sessions.generation() == generation, keeps, "a connect in flight is void: {kept_for}");
+        assert!(st.playback.is_some(), "{kept_for}");
+        assert!(st.saved.slots.contains(&Slot::Playback), "{kept_for}");
+        assert_eq!(s.sessions.generation(), generation, "no session closed: {kept_for}");
         drop(st);
         let _ = std::fs::remove_dir_all(dir);
     }

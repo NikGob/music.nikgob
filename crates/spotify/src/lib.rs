@@ -89,11 +89,10 @@ pub use auth::{PLAYBACK_REDIRECT_PORT, WEB_REDIRECT_PORT};
 pub const WEB_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 /// Where a personal app is created.
 pub const DEVELOPER_DASHBOARD: &str = "https://developer.spotify.com/dashboard";
-/// A playback login of another account than the library's.
-const PLAYBACK_OTHER_ACCOUNT: &str = "Для звука выбран другой аккаунт Spotify";
-
-/// A Spotify username (librespot) and a Web API user id name the same
-/// account (they are the same string, in either case).
+/// A Spotify username (librespot's canonical username) and a Web API user
+/// id look like the same account. Only a hint for the log: Spotify does not
+/// document the two as one identity (the Web `id` must not be used for
+/// account linking), so a difference never blocks or drops anything.
 fn same_account(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
 }
@@ -505,11 +504,11 @@ impl Spotify {
         if epoch != self.epoch() {
             return;
         }
-        // Kept from before the check at login: only said, nothing dropped.
+        // Only said: the two ids are not a documented common identity.
         if let (Some(p), Some(c)) = (&saved.profile, &playback)
             && !same_account(&p.id, &c.username)
         {
-            log::warn!("spotify: the saved playback login is another account than the library's; sign in for sound again");
+            log::warn!("spotify: the saved playback login may be another account than the library's");
         }
         self.apply_probes(&saved);
         let has_web = self.web.has_grant();
@@ -590,6 +589,10 @@ impl Spotify {
                     product,
                 });
                 st.saved.profile_at = Some(now_secs());
+                let id = st.saved.profile.as_ref().map_or("", |p| p.id.as_str());
+                if st.playback.as_ref().is_some_and(|c| !same_account(&c.username, id)) {
+                    log::warn!("spotify: the playback login may be another account than the library's");
+                }
                 self.persist(&st);
             }
             Ok(_) => {}
@@ -790,16 +793,9 @@ impl Spotify {
                 // Another account: what was cached about the old one goes.
                 self.clear_caches();
             }
-            // Sound for one account and the library of another must not
-            // mix: a playback login of another account goes.
+            // Only said (see `same_account`): nothing is dropped.
             if st.playback.as_ref().is_some_and(|c| !same_account(&c.username, &me.id)) {
-                log::info!("spotify: the playback login is another account than this one; it is dropped");
-                st.playback = None;
-                st.saved.slots.retain(|s| *s != Slot::Playback);
-                st.saved.playback_username = None;
-                st.saved.session_premium = None;
-                self.store.clear(Slot::Playback);
-                self.sessions.close();
+                log::warn!("spotify: the playback login may be another account than this one");
             }
             st.saved.profile = Some(Profile {
                 name: me
@@ -841,32 +837,31 @@ impl Spotify {
         let response = auth::exchange_code(&self.http, &token_url, &grant, &code, &verifier)
             .await
             .map_err(|e| self.fail(e))?;
+        // The new session replaces the current one only once it is known to
+        // be wanted (not signed out meanwhile); until then nothing plays over
+        // it and the session before goes on.
+        let mut signed_out = false;
         let session = self
             .sessions
-            .connect(Credentials::with_access_token(response.access_token), generation)
-            .await
-            .map_err(|e| {
-                self.fail_text(&format!("Spotify не пустил сессию воспроизведения: {e}"))
-            })?;
+            .connect_checked(Credentials::with_access_token(response.access_token), generation, |candidate| {
+                signed_out = epoch != self.epoch();
+                if let Some(id) = self.user_id()
+                    && !same_account(&id, &candidate.username())
+                {
+                    log::warn!("spotify: the playback login may be another account than the Web API one");
+                }
+                !signed_out
+            })
+            .await;
+        if signed_out || epoch != self.epoch() {
+            return Err(StreamError::NotLoggedIn);
+        }
+        let session =
+            session.map_err(|e| self.fail_text(&format!("Spotify не пустил сессию воспроизведения: {e}")))?;
         let credential = PlaybackCredential {
             username: session.username(),
             auth_data: session.auth_data(),
         };
-        if epoch != self.epoch() {
-            // Signed out meanwhile: the sign-out closed this session.
-            self.sessions.close_if(&session);
-            return Err(StreamError::NotLoggedIn);
-        }
-        if let Some(id) = self.user_id()
-            && !same_account(&id, &credential.username)
-        {
-            // The library is one account's, the sound would be another's
-            // (its region, its plan): refused, nothing kept. The playback
-            // login kept from before, if any, stays.
-            log::warn!("spotify: the playback login is a different account than the Web API one; refused");
-            self.sessions.close_if(&session);
-            return Err(self.fail_text(PLAYBACK_OTHER_ACCOUNT));
-        }
         let generation = self.store.generation(Slot::Playback);
         {
             let mut st = lock(&self.state);
