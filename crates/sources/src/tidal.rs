@@ -1,5 +1,5 @@
-//! Tidal through a public hifi-api instance (docs/stage4.5.md §4;
-//! github.com/uimaxbai/hifi-api, the API behind Monochrome and its kin):
+//! Tidal through a public hifi-api instance
+//! (github.com/uimaxbai/hifi-api, the API behind Monochrome and its kin):
 //! `GET /search/?s=` (tracks) and `?al=` (albums), `GET /album/?id=` lists
 //! an album, `GET /track/?id=&quality=LOSSLESS` gives a manifest
 //! (`application/vnd.tidal.bts`: base64 JSON with the file's `urls`). The

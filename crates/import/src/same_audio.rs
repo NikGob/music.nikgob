@@ -1,4 +1,4 @@
-//! A file that holds another song's audio (docs/TODO.md 32): «Пошлая Молли
+//! A file that holds another song's audio: «Пошлая Молли
 //! — Сфотографирую» from Soulseek was «Тмстс» of the same album, and
 //! nothing noticed.
 //!

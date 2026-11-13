@@ -1,4 +1,4 @@
-//! What the local files sound like (migration 0021, docs/TODO.md 32): the
+//! What the local files sound like (migration 0021): the
 //! Chromaprint of each file, the files that held another song's audio (never
 //! taken for that track again) and the pairs of files that sound the same
 //! under different titles, waiting for the user.

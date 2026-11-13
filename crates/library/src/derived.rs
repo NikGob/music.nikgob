@@ -244,7 +244,7 @@ impl Library {
         })
     }
 
-    // ---- The neural sound model's vectors (docs/recommendations.md §5)
+    // ---- The neural sound model's vectors
 
     /// Stores a track's sound-model vector (`vector`: its 260 bytes; `None`:
     /// the model cannot make one of this audio, not tried again with this

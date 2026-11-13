@@ -16,7 +16,7 @@
 //!   by one: a track gets its ISRC when it is looked up alone
 //!   ([`StreamService::track`]), which the runtime does when it plays or
 //!   likes one.
-//! * **Discovery** (docs/stage4.md §5): similar artists
+//! * **Discovery**: similar artists
 //!   (`/artist/{id}/related`), an artist's top tracks (`/artist/{id}/top`)
 //!   and radio (`/artist/{id}/radio`), one request each. Deezer has no
 //!   radio of a track: [`StreamService::related`] is the radio of the

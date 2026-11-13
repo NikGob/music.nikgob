@@ -1,5 +1,5 @@
 //! One-time repair of albums a torrent brought in pieces
-//! (`torrent_identity_repair.v1`, docs/stage4.md §12.4).
+//! (`torrent_identity_repair.v1`).
 //!
 //! Before folders were identified as albums, each file of a torrent was
 //! looked up alone, and the confirm queue offered strangers' recordings of

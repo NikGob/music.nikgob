@@ -1,4 +1,4 @@
-//! Whether an offer is the wished track or album (docs/stage4.5.md): the
+//! Whether an offer is the wished track or album: the
 //! wish is the reference. An offer must name the artist (any of its
 //! spellings) — another artist's version is vetoed, never a cover, a
 //! karaoke or a tribute unless asked for —, and the album or the title. A

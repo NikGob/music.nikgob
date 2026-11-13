@@ -1,4 +1,4 @@
-//! «В файле другая песня» on a local track (docs/TODO.md 32): the file goes
+//! «В файле другая песня» on a local track: the file goes
 //! to the library's Trash (with its lyrics, and the lossless original it was
 //! made from), the track stays and is looked for again, and what the file
 //! was (its hash as it came, its sound) and where it came from (the torrent,

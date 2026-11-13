@@ -371,7 +371,7 @@ fn the_v2_repair_folds_dual_titles_and_other_albums_into_the_file() {
     live.id = RemoteId::new(Service::Youtube, "yt-natsuko-live");
     live.title = "夏子 - Live".into();
     let live = separate(&lib, &live);
-    // A clip of the song goes into its file (docs/stage4.md §12.5).
+    // A clip of the song goes into its file.
     let mut clip = y.clone();
     clip.id = RemoteId::new(Service::Youtube, "yt-natsuko-mv");
     clip.kind = nikgob_core::streaming::TrackKind::Video;

@@ -1125,7 +1125,7 @@ impl Library {
         self.tracks_of_release_where(release, concat!("AND ", page_row!()))
     }
 
-    /// The page of an album (docs/stage4.md §12.13): its rows
+    /// The page of an album: its rows
     /// ([`Self::tracks_of_release_all`]) and a hole for every place it
     /// counts that no row has, in order, with the counts every view of the
     /// album shows (the page's header, its card, «Хочу скачать»):

@@ -1,4 +1,4 @@
-//! One-time repairs of albums (docs/stage4.md §12.13), each through
+//! One-time repairs of albums, each through
 //! [`Library::repair`] (a mark, a backup, one transaction), run in order by
 //! [`Library::repair_catalog`]:
 //!

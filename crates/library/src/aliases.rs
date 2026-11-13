@@ -1,5 +1,4 @@
-//! One artist, several spellings (table `artist_alias`, docs/stage4.md
-//! §12.13): «Ohara Yuiko» from the files is 大原ゆい子 of the services,
+//! One artist, several spellings (table `artist_alias`): «Ohara Yuiko» from the files is 大原ゆい子 of the services,
 //! «Fujisawa Yoshiaki» and «Yoshiaki Fujisawa» are 藤澤慶昌. One track,
 //! two titles (table `track_alias`): «ベラフの子守歌» of a service is the
 //! file's «Belaf's Lullaby»; the title of the file stays, the other one

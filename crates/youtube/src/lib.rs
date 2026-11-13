@@ -15,7 +15,7 @@
 //!   Google» window (the runtime's `WebLogin`) gets the cookies instead and
 //!   logs in with them. Likes, playlist creation and edits
 //!   go through RustyPipe's raw request (see `innertube`).
-//! * **Discovery** (docs/stage4.md §5), each request in the spaced
+//! * **Discovery**, each request in the spaced
 //!   catalogue lane and kept an hour in memory (see `memo`): the radio of
 //!   a track ([`StreamService::radio`], one `next` request, ~50 tracks, the
 //!   best source of songs new to the listener), the related tracks
@@ -26,7 +26,7 @@
 //!   the id of the artist's radio ([`StreamService::artist_radio`], one
 //!   more request). [`StreamService::cached_audio`] hands out a complete
 //!   file of the audio cache, never the network.
-//! * **Suggestions** (docs/stage4.md §12.3, see `suggest`), signed in only,
+//! * **Suggestions** (see `suggest`), signed in only,
 //!   one request a feed in the signed-in lane: the home's quick picks and
 //!   listen again, and the history.
 //!

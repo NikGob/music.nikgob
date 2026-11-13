@@ -643,7 +643,7 @@ impl MusicBrainz {
 
     /// The artist called `name` (the best hit whose name folds to it, a
     /// score of 90 at least) with its tags and genres, one request: the
-    /// graph of similar music reads them (docs/recs-graph.md).
+    /// graph of similar music reads them.
     pub async fn search_artist_tags(&self, name: &str) -> Result<Option<ArtistTags>> {
         #[derive(Deserialize)]
         struct Raw {

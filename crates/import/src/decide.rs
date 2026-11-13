@@ -78,7 +78,7 @@ pub fn decide(existing: Option<Existing>, incoming_score: i32) -> Decision {
 }
 
 /// How far (ms) the length of a file may be from a stream track's to be the
-/// same recording (docs/stage3.md §1).
+/// same recording.
 pub const DURATION_SLACK_MS: u32 = 3_000;
 
 /// Title similarity (0..=1) a file needs to match one of its job's targets.
@@ -243,7 +243,7 @@ fn target_match(lib: &Library, inc: &Incoming<'_>) -> Result<Option<Track>> {
 /// Step 4: a stream-only track with this artist, title and length. Without
 /// a length on either side the album title has to agree instead. Never one
 /// of another album when the file's own album is in the library: a track
-/// is its place there (docs/stage4.md §12.13).
+/// is its place there.
 fn stream_match(lib: &Library, inc: &Incoming<'_>, release: Option<ReleaseId>) -> Result<Option<Track>> {
     for track in lib.stream_only_tracks()? {
         if !same_song(&track, inc.identity) || elsewhere(&track, release) {

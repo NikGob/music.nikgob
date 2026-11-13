@@ -110,7 +110,7 @@ pub enum ImportEvent {
         path: PathBuf,
         error: String,
     },
-    /// The file holds another song's audio (docs/TODO.md 32): it was not
+    /// The file holds another song's audio: it was not
     /// imported as `title` (a [`Self::Failed`] follows). `track` is the
     /// track it was taken for; what it is and where it came from are not
     /// taken for that track again.
