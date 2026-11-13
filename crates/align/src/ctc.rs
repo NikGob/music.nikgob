@@ -277,6 +277,10 @@ pub struct Costs {
     /// sharply it comes in, 0..1): short shouted syllables the model
     /// hardly hears still start where they are sung.
     pub onset: f32,
+    /// Starting a word where there is no voice, nor in the two frames
+    /// after, costs this: a word starts on its singing, not in the pause
+    /// before it (0: off).
+    pub start_silent: f32,
     /// A letter may take a frame where the model hears a similar vowel
     /// ([`Path::similar`]) at this under that vowel (0: off).
     pub vowels: f32,
@@ -614,6 +618,9 @@ pub fn align_path(em: &Emissions, path: &Path, voice: Option<Voice<'_>>) -> Opti
             }
             if st.starts && costs.onset > 0.0 {
                 pull -= costs.onset * voice.and_then(|v| v.onset.get(t)).copied().unwrap_or(0.0);
+            }
+            if st.starts && costs.start_silent > 0.0 && (t..(t + 3).min(t_len)).all(|u| quiet[u]) {
+                pull += costs.start_silent;
             }
             for (i, (p, c)) in st.from.iter().enumerate() {
                 let v = dp[*p] + c - pull;
