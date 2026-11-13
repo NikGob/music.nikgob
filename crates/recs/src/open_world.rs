@@ -28,9 +28,10 @@
 //!   links both, an outside song reached from two or three independent
 //!   seeds ([`crate::discover::multi_seed`]) stands far above a lone
 //!   answer, and new music takes the filter's share (a niche's at least).
-//!   The library's songs are ranked by the user model as a radio ranks
-//!   them ([`library_value`]), the wave's own pull (loved, linked to the
-//!   session, near its sound) beside it; the new songs it is about to play without a
+//!   The library's songs are ranked by the wave's own pull (loved, linked
+//!   to the session, near its sound), and by the user model too as a radio
+//!   ranks them ([`library_value`]) when [`WAVE_MODEL_RANKING`] is on; the
+//!   new songs it is about to play without a
 //!   preview ([`WaveNext::unheard`]) and a filter with few new songs left
 //!   ([`WaveNext::short`]) are told, so the runtime can ask for more.
 
@@ -76,6 +77,12 @@ const WALK_SEEDS: usize = 5;
 const NICHE_SEEDS: usize = 8;
 /// A library track played this recently waits.
 const RESTED_MS: i64 = 3 * HOUR_MS;
+/// The wave ranks the library's songs by the user model as a radio does
+/// ([`LibraryRanker`]: the model's candidates of the moment first, each by
+/// the model's value plus the wave's own pull) instead of by its own pull
+/// alone. Off: on the owner's history it picked more songs the user
+/// mostly skips; whether and how to blend them is to be decided.
+pub const WAVE_MODEL_RANKING: bool = false;
 /// Its filter's new songs are short when fewer than the share asks of a
 /// pick and this many more are left: a block of the wave.
 pub const NEW_RESERVE: usize = crate::wave::BLOCK_MAX as usize;
@@ -499,6 +506,12 @@ pub fn share_of(filter: &WaveFilter, niche: bool) -> f32 {
 /// library tracks and songs of `pool`, none of `served` (track ids and
 /// [`crate::stream_song_key`]s as strings).
 pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, session: &Session, n: usize, served: &HashSet<String>) -> WaveNext {
+    next_ranked(ctx, pool, filter, session, n, served, WAVE_MODEL_RANKING)
+}
+
+/// [`next`], the library ranked `by_model` ([`WAVE_MODEL_RANKING`]) or by
+/// the wave's own pull alone.
+fn next_ranked(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, session: &Session, n: usize, served: &HashSet<String>, by_model: bool) -> WaveNext {
     let m = ctx.model;
     let now = m.now();
     let fitting: Vec<usize> = (0..m.len()).filter(|&i| (ctx.ok)(i) && fits_filter(ctx, filter, i)).collect();
@@ -528,14 +541,14 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
     let fitting_set: HashSet<usize> = fitting.iter().copied().collect();
     let sound = (filtered || niche).then(|| NicheSound::heard(m, &fitting, filter.character != Character::Any, ctx.index));
 
-    // The library's, rested: by the user model, as a radio ranks them —
-    // the model's candidates of the moment first, then the rest of the
-    // filter, so the wave runs dry only when the filter does — and by the
-    // wave's own pull: loved, linked to the session by the walk, near its
-    // sound.
-    let ranker = LibraryRanker::of(m, ctx.learned, session);
+    // The library's, rested: by the wave's own pull (loved, linked to the
+    // session by the walk, near its sound); with [`WAVE_MODEL_RANKING`]
+    // by the user model too, as a radio ranks them — the model's
+    // candidates of the moment first, then the rest of the filter, so the
+    // wave runs dry only when the filter does.
+    let ranker = by_model.then(|| LibraryRanker::of(m, ctx.learned, session));
     let free = |i: usize| fitting_set.contains(&i) && !served.contains(&m.id(i).to_string()) && m.taste.last_played_at(i).is_none_or(|t| now - t >= RESTED_MS);
-    let first: HashSet<usize> = m.candidates(&ranker.moment, &free).into_iter().collect();
+    let first: HashSet<usize> = ranker.as_ref().map(|r| m.candidates(&r.moment, &free).into_iter().collect()).unwrap_or_default();
     let anchor = session.anchor(m).map(|a| m.embed(&a));
     let scale = m.scale().max(1e-6);
     let pull = |i: usize| {
@@ -547,7 +560,7 @@ pub fn next(ctx: &WaveContext<'_>, pool: &[OpenCandidate], filter: &WaveFilter, 
         };
         0.6 * aff + link + 0.5 * near + 0.2 * m.graph.prior(i)
     };
-    let mut lib: Vec<(bool, f32, usize)> = fitting.iter().copied().filter(|&i| free(i)).map(|i| (first.contains(&i), ranker.value(m, i) + pull(i), i)).collect();
+    let mut lib: Vec<(bool, f32, usize)> = fitting.iter().copied().filter(|&i| free(i)).map(|i| (first.contains(&i), ranker.as_ref().map_or(0.0, |r| r.value(m, i)) + pull(i), i)).collect();
     lib.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut lib: Vec<(f32, usize)> = lib.into_iter().map(|(_, v, i)| (v, i)).collect();
 
@@ -767,7 +780,7 @@ mod tests {
         for (w, want) in [(50.0, true), (-50.0, false)] {
             let weights = caring_for(&model, "liked", w);
             let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: None, learned: Some(&weights) };
-            let next = next(&ctx, &[], &familiar, &Session::default(), 8, &HashSet::new());
+            let next = next_ranked(&ctx, &[], &familiar, &Session::default(), 8, &HashSet::new(), true);
             assert_eq!(next.picks.len(), 8);
             for p in &next.picks {
                 let Item::Track(id) = p.item else { panic!("a library pick") };
@@ -778,18 +791,27 @@ mod tests {
         }
     }
 
-    /// A wave's radio ranks by the weights the runtime attuned it with.
+    /// A wave's radio ranks by the weights the runtime attuned it with
+    /// when the model ranks the wave ([`WAVE_MODEL_RANKING`]); else the
+    /// weights change nothing.
     #[test]
     fn a_wave_ranks_by_the_weights_learnt_since() {
         let model = listener();
         let (ok, no) = (|_: usize| true, |_: usize| false);
         let none = |_: &StreamTrack| Vec::new();
         let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: None, learned: None };
-        let mut radio = RadioState::new(RadioSeed::Wave(crate::wave::WaveSeed::plain(0.0)));
-        radio.attune(Session::default(), Some(caring_for(&model, "liked", -50.0)));
-        let picks = radio.extend_wave(&ctx, &[], 6, 1);
-        assert!(!picks.is_empty());
-        assert!(picks.iter().all(|p| matches!(p.item, Item::Track(id) if !model.tracks[model.position(id).unwrap()].liked(model.now()))));
+        let picks = |w: f32| {
+            let mut radio = RadioState::new(RadioSeed::Wave(crate::wave::WaveSeed::plain(0.0)));
+            radio.attune(Session::default(), Some(caring_for(&model, "liked", w)));
+            radio.extend_wave(&ctx, &[], 6, 1)
+        };
+        let against = picks(-50.0);
+        assert!(!against.is_empty());
+        if WAVE_MODEL_RANKING {
+            assert!(against.iter().all(|p| matches!(p.item, Item::Track(id) if !model.tracks[model.position(id).unwrap()].liked(model.now()))));
+        } else {
+            assert_eq!(against, picks(50.0));
+        }
     }
 
     /// The new songs a wave is about to play without a preview are told
