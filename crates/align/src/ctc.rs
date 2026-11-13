@@ -888,6 +888,23 @@ mod tests {
         assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[0].map(|s| s.0), Some(6));
     }
 
+    /// With the cost on, a word does not start in the silence before it.
+    #[test]
+    fn a_word_does_not_start_in_silence_when_that_costs() {
+        // A word heard clearly first, then the next word's letter heard a
+        // little in the silence after it (a breath); the voice only from
+        // frame 8 on.
+        let e = em(&[2, 2, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0], 0.5);
+        let mut p = path(&[Tok::Letter(2), Tok::Letter(1)]);
+        p.starts[1] = true;
+        let voiced: Vec<bool> = (0..12).map(|t| t < 2 || t >= 8).collect();
+        let v = Voice { voiced: &voiced, ..Default::default() };
+        assert_eq!(frames(&align_path(&e, &p, Some(v)).unwrap())[1].map(|s| s.0), Some(4));
+        p.costs.start_silent = 5.0;
+        let start = frames(&align_path(&e, &p, Some(v)).unwrap())[1].map(|s| s.0);
+        assert!(start.is_some_and(|f| f >= 6), "{start:?}");
+    }
+
     /// A letter may take a frame of a similar vowel, discounted.
     #[test]
     fn a_similar_vowel_is_heard_for_the_written_one() {
