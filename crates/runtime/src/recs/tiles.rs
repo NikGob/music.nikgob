@@ -1,4 +1,4 @@
-//! The bento's tiles in the runtime (docs/stage4.md §12.9): what the
+//! The bento's tiles in the runtime: what the
 //! recipes read besides the snapshot, the day's board kept in the
 //! library's cache (`recs.tiles`, so it does not change within the day),
 //! the kinds and parameters shown on the last days (`recs.tiles.shown`, the
@@ -221,7 +221,7 @@ fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Optio
 }
 
 /// A tile's title and subtitle: what it is and why it is here, short
-/// enough for a tile (docs/stage4.md §12.10). `title` is the recipe's
+/// enough for a tile. `title` is the recipe's
 /// («Kevin Penkin», «Лето 2025»), `param` its parameter, `n` the songs,
 /// `albums` how many albums they come from.
 fn lines(kind: TileKind, param: &str, title: String, n: usize, today: i64, albums: impl Fn() -> usize) -> (String, String) {

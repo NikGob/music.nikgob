@@ -1,4 +1,4 @@
-//! Likes both ways (docs/stage3.md §0 "Лайки обратно").
+//! Likes both ways.
 //!
 //! * Push: a like / unlike here (a track, or an album = its tracks) goes to
 //!   every logged-in service the track has an id in, when

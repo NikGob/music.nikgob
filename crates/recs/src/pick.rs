@@ -1,4 +1,4 @@
-//! What every selection shares (docs/stage4.md §4 «Общее для всех»): the
+//! What every selection shares: the
 //! engine context [`Recs`], picks with their reasons, the exclusion of
 //! disliked tracks and artists, the diversity rules (at most one track of
 //! an artist in any window of three, at most two of an album in any window

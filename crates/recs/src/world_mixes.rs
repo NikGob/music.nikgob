@@ -130,7 +130,7 @@ impl Recs<'_> {
         let core: Vec<Vector> = own.iter().copied().filter(|&i| loved(i)).filter_map(|i| m.embedded_at(i).copied()).collect();
         if let Some(centre) = mean(&core) {
             let scale = m.scale().max(1e-3);
-            // The graphs' neighbours of the loved (docs/recs-graph.md): what
+            // The graphs' neighbours of the loved: what
             // other listeners and the user's playlists put beside them.
             let mut linked: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
             for i in own.iter().copied().filter(|&i| loved(i)) {

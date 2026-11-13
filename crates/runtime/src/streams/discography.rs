@@ -1,5 +1,4 @@
-//! "Нет в библиотеке" on a library artist's page (docs/stage3.md §0
-//! "Дискография артиста", §3.4): the artist's albums in the services that
+//! "Нет в библиотеке" on a library artist's page: the artist's albums in the services that
 //! the page does not show already.
 //!
 //! * The artist is found in each enabled service by the id the library

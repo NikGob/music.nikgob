@@ -1,5 +1,4 @@
-//! The neural sound model of the recommendations (docs/recommendations.md
-//! §5): Discogs-EffNet on ONNX Runtime, the same runtime the lyrics
+//! The neural sound model of the recommendations: Discogs-EffNet on ONNX Runtime, the same runtime the lyrics
 //! alignment loads, on the device «На чём считать анализ звука» says;
 //! «Автоматически» picks it batch by batch ([`choose`]).
 //!

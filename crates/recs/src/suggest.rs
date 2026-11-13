@@ -1,5 +1,4 @@
-//! The services' own suggestions as a signal of taste (docs/stage4.md
-//! §12.3): YouTube Music's «Быстрый выбор» and «Слушать снова», its
+//! The services' own suggestions as a signal of taste: YouTube Music's «Быстрый выбор» and «Слушать снова», its
 //! history, Spotify's tops and recently played. They never show as cards
 //! of their own; they move our mixes.
 //!

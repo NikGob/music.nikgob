@@ -1,4 +1,4 @@
-//! New music (docs/stage4.md §5).
+//! New music.
 //!
 //! **«Новое для тебя».** The engine picks the seeds ([`Recs::discovery_seeds`]:
 //! [`SEED_TRACKS_MAX`] tracks shared among the taste profiles by their
@@ -21,7 +21,7 @@
 //! its affinity, a little more when the song stood high in the seed's
 //! list; a service suggesting it itself, [`SeedRef::Service`], weighs
 //! [`crate::suggest::SERVICE_VOTE`]), times [`multi_seed`] of the
-//! independent seeds (docs/recommendations.md §1.3: a song two or three
+//! independent seeds (a song two or three
 //! of the user's seeds lead to stands far above a lone answer of one
 //! request; the services' own suggestions count as one), plus
 //! [`NEW_ARTIST_BONUS`] for an

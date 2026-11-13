@@ -1524,7 +1524,7 @@ impl<'a> Builder<'a> {
         let is_loved = |i: usize| self.love[i] >= 0.5 && !(now_loved && self.stale[i]);
         let loved: Vec<&crate::analysis::Vector> = pool.tracks.iter().filter(|&&i| is_loved(i)).filter_map(|&i| self.model.embedded_at(i)).collect();
         let scale = self.model.scale().max(1e-3);
-        // …or beside the loved in the graphs (docs/recs-graph.md).
+        // …or beside the loved in the graphs.
         let mut linked: HashMap<usize, f32> = HashMap::new();
         for &l in pool.tracks.iter().filter(|&&i| is_loved(i)) {
             for &(c, w) in self.model.graph.near(l).iter().chain(self.model.personal_near(l)) {
@@ -1603,8 +1603,7 @@ impl<'a> Builder<'a> {
             core.splice(..k, top);
         }
         // A mix of one kind keeps to the scene its first songs are of: what
-        // the graph links to the songs taken stands higher
-        // (docs/recs-graph.md); without a graph nothing changes.
+        // the graph links to the songs taken stands higher; without a graph nothing changes.
         let cohere = (matches!(key, MixKey::Profile(_) | MixKey::Kind(_) | MixKey::Genre(_)) || key.is_cluster()) && !self.model.graph.is_empty();
         if cohere {
             let mut top: Vec<(f32, usize)> = core[..k].to_vec();

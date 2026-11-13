@@ -1,4 +1,4 @@
-//! The taste model (docs/stage4.md §3): what the listening history, the
+//! The taste model: what the listening history, the
 //! likes and the playlists say about every track and artist of the library.
 //!
 //! * **Track affinity**: the sum of event weights, each decayed with a
@@ -31,7 +31,7 @@
 //!   similarity for tracks without a sound vector.
 //! * **Day parts**: per track, how many plays fell into the morning (6–11),
 //!   the day (11–18), the evening (18–23) and the night (23–6), local time.
-//! * **Service suggestions** (docs/stage4.md §12.3, [`crate::suggest`]): a
+//! * **Service suggestions** ([`crate::suggest`]): a
 //!   track YouTube Music or Spotify suggests gets up to
 //!   [`crate::suggest::SUGGESTED_CAP`] more affinity, fading out over
 //!   [`crate::suggest::SUGGESTION_FADE_MS`] since it was suggested; a

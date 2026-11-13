@@ -1,4 +1,4 @@
-//! The bento's smaller tiles (docs/stage4.md §12.9): 21 kinds of selections
+//! The bento's smaller tiles: 21 kinds of selections
 //! in four groups (memory, artists, sound, collection), each a recipe that
 //! picks, orders and names its songs, and the daily choice of which of
 //! them the board shows.
@@ -161,7 +161,7 @@ impl TileKind {
     }
 
     /// The quiet label over the tile's title: why the tile is here, never
-    /// the title again (docs/stage4.md §12.10).
+    /// the title again.
     pub const fn kicker(self) -> &'static str {
         match self {
             Self::OnRepeat => "Чаще всего",

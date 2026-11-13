@@ -1,4 +1,4 @@
-//! The radio queue (docs/stage4.md §4): «Радио по треку», an artist's
+//! The radio queue: «Радио по треку», an artist's
 //! radio and the endless mixes (moods, style mixes, «Новое для тебя», the
 //! daylist) play as a queue that extends itself. The daylist starts with
 //! the picks the home shows ([`Worker::start_radio_picked`]).

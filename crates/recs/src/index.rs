@@ -1,4 +1,4 @@
-//! The library's sound vectors in memory (docs/stage4.md §2 «Индекс»):
+//! The library's sound vectors in memory:
 //! 50 000 tracks × 23 `f32` is about 5 MB, and a brute-force pass over all
 //! of them takes a few milliseconds, so there is no tree to keep balanced.
 //!
@@ -550,8 +550,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// How well `candidate` fits a niche of tracks (`niche`: e.g. the
     /// library's tracks of a mood, a filter or a profile) by sound: the
-    /// niche expansion's check of new music (docs/recommendations.md §1.2,
-    /// §5.1.6). The mean distance from the candidate to its few nearest
+    /// niche expansion's check of new music. The mean distance from the candidate to its few nearest
     /// members, against the same of the members among themselves: 1.0 = as
     /// close as the niche's own tracks are to each other (or closer),
     /// towards 0 the further away. Uses the blend, so a candidate whose

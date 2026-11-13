@@ -1,4 +1,4 @@
-//! A library album knows its whole tracklist (docs/stage4.md §12.8): an
+//! A library album knows its whole tracklist: an
 //! album that came from one file (or one liked song) used to look complete,
 //! and its page offered nothing to download.
 //!

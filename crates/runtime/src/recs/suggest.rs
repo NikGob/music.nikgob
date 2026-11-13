@@ -1,4 +1,4 @@
-//! The services' own suggestions (docs/stage4.md §12.3): YouTube Music's
+//! The services' own suggestions: YouTube Music's
 //! quick picks, listen again and history, Spotify's tops and recently
 //! played, read as a signal of taste for our mixes (never shown as cards of
 //! their own).

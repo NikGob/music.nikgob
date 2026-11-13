@@ -23,8 +23,7 @@
 //! [`nikgob_recs::mixes::row`]'s: ten cards at most, no two alike. «Любимые»
 //! is the playlist's own tile before the row (the page's).
 //!
-//! «С новым» goes by the open world (docs/recommendations.md §1,
-//! [`nikgob_recs::mix_new::take`]): between loved songs and a third at most
+//! «С новым» goes by the open world ([`nikgob_recs::mix_new::take`]): between loved songs and a third at most
 //! under «Сбалансировано»; as much as asked, anywhere after the first song,
 //! under «Больше нового»; a niche (a mix of few songs or artists) takes
 //! mostly new music of its sound, its songs the seeds of its top-up
@@ -415,7 +414,7 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
     // новым» goes to the first that fits it.
     let mut mixes: Vec<Mix> = nikgob_recs::mixes::row_upto(daily, pinned.into_iter().next(), mixes, input.row_more);
     // The niches: the calm songs in place of the calm side, a small kind or
-    // genre a card of its own (docs/recommendations.md §1.2).
+    // genre a card of its own.
     mix_new::with_niches(&snap.model, &mut mixes, niches);
     log_lineup(snap, tiles, &mixes);
 

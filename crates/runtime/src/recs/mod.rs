@@ -1,4 +1,4 @@
-//! Recommendations in the runtime (docs/stage4.md §3–§6): the engine of
+//! Recommendations in the runtime: the engine of
 //! `nikgob-recs` over the library, kept off the worker thread.
 //!
 //! * **Snapshot.** The [`Catalog`] (library tracks and liked or playlist
@@ -243,7 +243,7 @@ pub(crate) struct RecHome {
     pub daylist_key: String,
     /// `None` with an empty library.
     pub daylist: Option<DaylistHome>,
-    /// The day's tiles in their order (docs/stage4.md §12.9).
+    /// The day's tiles in their order.
     pub tiles: Vec<tiles::TileHome>,
     /// «Миксы для тебя».
     pub lanes: Vec<lanes::LaneHome>,
@@ -1983,7 +1983,7 @@ pub struct HomePreview {
     pub discover_cached: usize,
     pub new_releases_cached: usize,
     /// Library tracks the services' kept suggestions give affinity now,
-    /// and suggested songs new to the library (docs/stage4.md §12.3).
+    /// and suggested songs new to the library.
     pub suggested_library: usize,
     pub suggested_new: usize,
     pub took: Duration,
@@ -1991,7 +1991,7 @@ pub struct HomePreview {
 
 /// The home exactly as the runtime builds it, without a player: the
 /// recommendation snapshot of `lib` now and the home over it (checks on a
-/// copy of a real library, docs/stage4.md §12.7). Like a build, it keeps
+/// copy of a real library). Like a build, it keeps
 /// the day's picks in the library's cache.
 pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<HomePreview, String> {
     preview_home_with(lib, library_dir, &v::Prefs::default())

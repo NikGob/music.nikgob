@@ -1,5 +1,4 @@
-//! Playlists linked to a service (`playlist_remote`, docs/stage3.md §0
-//! "Плейлисты", §3.8), by sync mode:
+//! Playlists linked to a service (`playlist_remote`), by sync mode:
 //!
 //! * **Follow** (the default): the service's changes come here. The remote
 //!   list is compared with the one seen at the last sync (`base_json`, the

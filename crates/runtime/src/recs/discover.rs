@@ -1,4 +1,4 @@
-//! «Новое для тебя» and «Новые релизы» (docs/stage4.md §5): a background
+//! «Новое для тебя» and «Новые релизы»: a background
 //! pass over the services once a day, and after the first sign-in to a
 //! service.
 //!
@@ -10,7 +10,7 @@
 //!   (an artist the library has not matched in a service yet is looked up
 //!   by name and remembered, as the discography does). The strongest
 //!   songs the services suggest that the library does not have
-//!   ([`nikgob_recs::suggest::SUGGESTION_SEEDS`], docs/stage4.md §12.3)
+//!   ([`nikgob_recs::suggest::SUGGESTION_SEEDS`])
 //!   seed the pass the same way as tracks. About [`DISCOVER_BUDGET`]
 //!   requests a pass.
 //! * **New releases**: the discographies of the artists with affinity
@@ -31,8 +31,7 @@
 //!   vote as the services' own seeds, [`nikgob_recs::suggestion_finds`]),
 //!   and
 //!   [`nikgob_recs::Recs::new_releases`]. The pass keeps [`DISCOVER_POOL`]
-//!   ranked discoveries (the open world's pool, docs/recommendations.md
-//!   §1.1: new music that does not run out in a quarter of an hour), each
+//!   ranked discoveries (the open world's pool: new music that does not run out in a quarter of an hour), each
 //!   with the taste profile it fits, spread over the profiles by their
 //!   shares; the home's row and the radio take the first [`DISCOVERIES`].
 //!   Both kept in the cache

@@ -656,7 +656,7 @@ struct Worker {
     qualities: Vec<(u64, String)>,
     indexer: Option<Arc<dyn nikgob_core::indexer::Indexer>>,
     /// Download sources other than the indexer's torrents (khinsider, the
-    /// free services, Soulseek), whether on or not (docs/stage4.5.md).
+    /// free services, Soulseek), whether on or not.
     sources: Vec<Arc<dyn nikgob_core::source::Source>>,
     /// khinsider, so a webview can be given to it after start.
     khinsider: Option<Arc<nikgob_sources::khinsider::Khinsider>>,
@@ -693,7 +693,7 @@ struct Worker {
     soulseek: soulseek::SoulseekService,
     /// «Загрузки → Раздача»: speeds and what was given away.
     sharing: sharing::Sharing,
-    /// The lyrics aligner's thread (docs/lyrics-align.md).
+    /// The lyrics aligner's thread.
     align: align::AlignService,
     /// Where its models are downloaded.
     models_dir: Option<PathBuf>,

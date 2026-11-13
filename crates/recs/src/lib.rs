@@ -1,4 +1,4 @@
-//! Recommendations (docs/stage4.md). Pure logic: no database, no network,
+//! Recommendations. Pure logic: no database, no network,
 //! no decoding, no clock; the runtime feeds it samples, library rows and
 //! `now`, and every selection is a function of its inputs and a seed.
 //!
@@ -28,7 +28,7 @@
 //! * [`world_mixes`]: the mixes of a world's page; [`explain`]: why a mix
 //!   or a pick, in one line.
 //! * [`open_world`]: new music beyond the library — the niches, their
-//!   sound, the next of a wave (docs/recommendations.md §1).
+//!   sound, the next of a wave.
 //! * [`graph`]: the graph of similar music other listeners know (the
 //!   services' radios and similar artists, ListenBrainz, Last.fm, the tags
 //!   of MusicBrainz) and the user's own (an imported history, the

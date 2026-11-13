@@ -1,4 +1,4 @@
-//! Reading the services' export files (docs/stage3.md §3.6, cold start):
+//! Reading the services' export files (cold start):
 //! a folder or a `.zip` (or a folder of `.zip`s, as Google Takeout splits
 //! big exports), recognised by file name and structure rather than by exact
 //! folder names, since Takeout localises those.

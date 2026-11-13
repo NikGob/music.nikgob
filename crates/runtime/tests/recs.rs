@@ -1,4 +1,4 @@
-//! Recommendations in the runtime (docs/stage4.md §3–§6) over a library
+//! Recommendations in the runtime over a library
 //! with a listening history and sound vectors, and the fake services: the
 //! home's hero, moods and style mixes, the daily mix kept for the day,
 //! mixes and radios that play, extend themselves, learn from skips and
@@ -1085,7 +1085,7 @@ fn discovery_waits_out_a_rate_limit() {
     assert!(yt.calls("radio") >= 2, "the same request again: {:?}", yt.all_calls());
 }
 
-// ---- The services' own suggestions (docs/stage4.md §12.3) ----------------
+// ---- The services' own suggestions ----------------
 
 /// Suggestions read at once, the discovery quick.
 fn suggest_schedule() -> StreamSchedule {

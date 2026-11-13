@@ -1,4 +1,4 @@
-//! «✦ С дополнением» in the queue (docs/recommendations.md §4): while a
+//! «✦ С дополнением» in the queue: while a
 //! playlist plays with its chip on, a guest of the open pool joins it
 //! after every three of its own tracks ([`nikgob_recs::plus`]).
 //!

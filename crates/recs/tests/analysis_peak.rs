@@ -1,5 +1,4 @@
-//! The heap peak of the sound analysis of an 8-minute track
-//! (docs/recommendations.md §5.1.2): the whole-track pass (the first 8
+//! The heap peak of the sound analysis of an 8-minute track: the whole-track pass (the first 8
 //! minutes into bliss) against the three windows of 15 s, with and without
 //! the neural model's front end (its log-mel patches; the ONNX session's
 //! own memory is the runtime's and is not counted here).

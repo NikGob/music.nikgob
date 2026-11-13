@@ -1,5 +1,5 @@
-//! A stream track replaced by hand with a picked song (docs/stage3.md §7
-//! «Найти песню…»): only here the like stays the clip's; «И в YouTube Music»
+//! A stream track replaced by hand with a picked song («Найти песню…»):
+//! only here the like stays the clip's; «И в YouTube Music»
 //! moves the like there and the like checks stay calm about it; both come
 //! back with «Отменить»; the clip repair never touches a track replaced by
 //! hand; the scope chosen last is the next default. Fakes only: no network.

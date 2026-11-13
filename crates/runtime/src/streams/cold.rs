@@ -1,4 +1,4 @@
-//! Cold start (docs/stage3.md §0 "Холодный старт", §3.6): the history, likes
+//! Cold start: the history, likes
 //! and playlists of a service brought in from its API
 //! ([`Command::ImportFromService`](nikgob_view::Command::ImportFromService))
 //! or from its export files (`ImportExportFiles`, formats in

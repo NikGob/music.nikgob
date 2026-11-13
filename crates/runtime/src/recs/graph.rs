@@ -1,4 +1,4 @@
-//! The graph of similar music in the runtime (docs/recs-graph.md): the
+//! The graph of similar music in the runtime: the
 //! background pass that asks the sources about the library's artists and
 //! tracks and keeps their answers in the library, and the resolution of
 //! what was kept to the catalog at every build.
@@ -36,8 +36,7 @@
 //!   key; the similar artists the library lacks vote for the new music of
 //!   their artists ([`Resolved::votes`]), and every song and artist it
 //!   lacks is a node of its own (by its song or artist key) its tracks and
-//!   artists bridge through ([`GraphInput::outside_tracks`],
-//!   docs/recommendations.md §1.3).
+//!   artists bridge through ([`GraphInput::outside_tracks`]).
 //!
 //! [`StreamSchedule::graph_gap_youtube`]: crate::StreamSchedule::graph_gap_youtube
 //! [`StreamSchedule::graph_chunk`]: crate::StreamSchedule::graph_chunk
@@ -399,8 +398,8 @@ pub(crate) const GRAPH_FINDS: usize = 300;
 /// of a loved track does.
 const UNLOVED: f32 = 0.25;
 
-/// A song the graph found beside the library's that the library lacks
-/// (docs/recs-graph.md §2): new music the services can play at once.
+/// A song the graph found beside the library's that the library lacks:
+/// new music the services can play at once.
 #[derive(Clone, Debug)]
 pub(crate) struct GraphFind {
     pub track: StreamTrack,
@@ -419,7 +418,7 @@ pub(crate) struct GraphFind {
 /// its track is (`love`, 0…1; `None`: not the catalog's), times
 /// [`nikgob_recs::discover::multi_seed`] of the distinct artists of those
 /// tracks (`artist`: a song the radios of two or three independent loved
-/// tracks hold stands far above a lone one, docs/recommendations.md §1.3);
+/// tracks hold stands far above a lone one);
 /// the best [`GRAPH_FINDS`].
 pub(crate) fn finds(
     beyond: &[(TrackId, GraphEntry, f32)],

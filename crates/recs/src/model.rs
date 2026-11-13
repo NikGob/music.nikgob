@@ -170,7 +170,7 @@ pub const F_SESS_CO: usize = 19;
 pub const F_IS_PREV: usize = 20;
 pub const F_ALBUM_FIRST: usize = 21;
 /// The hand weights (`scripts/replay.py`, `HAND`; the graph's from the
-/// synthetic listeners, docs/recs-graph.md): the prior and the start.
+/// synthetic listeners): the prior and the start.
 pub const HAND: [f32; F] = [1.0, 1.2, 0.3, 0.8, 1.0, 3.0, 1.0, 0.8, 1.5, 1.5, -2.0, 0.3, 1.0, 0.8, -0.3, -0.5, 1.5, 1.0, 0.5, 0.5, 0.0, 0.3];
 /// What the replay of 15 days learnt from them (`out/replay.json`), for
 /// reference and tests (the graph's were not there then: the hand ones).

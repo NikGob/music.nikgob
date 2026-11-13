@@ -1,4 +1,4 @@
-//! Streaming in the runtime (stage 3, docs/stage3.md): accounts, the stream
+//! Streaming in the runtime (stage 3): accounts, the stream
 //! part of the unified search, pages of a service, playback resolution (a
 //! Spotify track without Spotify sound plays from YouTube Music), likes both
 //! ways, the wishlist pipeline (like → torrent → file attached to the same
@@ -7,7 +7,7 @@
 //! Every service call runs on this module's own tokio runtime (the import
 //! one exists only when importing is set up) and comes back to the worker
 //! as an [`Msg`], so the worker stays the only writer of the library state
-//! it publishes and never waits on the network (docs/stage3.md §1).
+//! it publishes and never waits on the network.
 //!
 //! Part B: the cold-start imports from the API and from export files
 //! ([`cold`], [`export`]), the sync of linked playlists ([`sync`]) and the
@@ -413,8 +413,7 @@ pub(crate) fn error_text(e: &StreamError) -> String {
 }
 
 /// Whether a service can be asked anything in this account state: Spotify
-/// only while connected (it needs Premium and the user's own app, docs/
-/// stage3.md §0); YouTube Music answers without a login, the Deezer
+/// only while connected (it needs Premium and the user's own app); YouTube Music answers without a login, the Deezer
 /// catalogue has none.
 pub(crate) fn usable(kind: Service, account: &Account) -> bool {
     match kind {

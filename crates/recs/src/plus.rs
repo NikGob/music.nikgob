@@ -1,4 +1,4 @@
-//! «✦ С дополнением» (docs/recommendations.md §4): a playlist of the
+//! «✦ С дополнением»: a playlist of the
 //! user's plays as it is, and after every [`EVERY`] of its own tracks one
 //! song of the open pool joins it as a guest.
 //!

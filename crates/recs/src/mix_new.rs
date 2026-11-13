@@ -22,7 +22,7 @@
 //!   the first two places nor two running, spread as evenly as such places
 //!   allow; what finds no place is not played.
 //!
-//! The open world (docs/recommendations.md §1.1, §1.2, [`NewMode`]): the
+//! The open world ([`NewMode`]): the
 //! cap and the places between loved songs hold for the calm default
 //! («Сбалансировано», [`NewMode::Calm`]). With «Больше нового»
 //! ([`NewMode::Open`]) a mix takes as much as the share asks, up to

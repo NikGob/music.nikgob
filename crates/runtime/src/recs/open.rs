@@ -1,4 +1,4 @@
-//! The open pool of the waves (docs/recommendations.md §1, §7 phase 2):
+//! The open pool of the waves:
 //! what the coming «Моя волна» draws from beyond the library, and the call
 //! it makes for its next songs ([`Worker::wave_next`] over
 //! [`nikgob_recs::open_world::next`]).

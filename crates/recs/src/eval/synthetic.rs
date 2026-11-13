@@ -13,7 +13,7 @@
 //! of autoplay heard out with no action. Likes follow songs heard out
 //! often. One listener brought a history from another service: imported
 //! plays and likes of an older taste. One listens to rap and has three calm
-//! songs of one artist (docs/recommendations.md §1.2): the open pool it
+//! songs of one artist: the open pool it
 //! carries holds calm new songs linked to them, rap new songs (some of them
 //! on the calm songs' radios) and songs of one of its rappers.
 

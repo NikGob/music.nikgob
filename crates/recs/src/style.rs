@@ -1,4 +1,4 @@
-//! «Твои миксы» (docs/stage4.md §4): mixes by style, like Daily Mixes.
+//! «Твои миксы»: mixes by style, like Daily Mixes.
 //!
 //! k-means over the weighted, normalised vectors of what you listen to
 //! (tracks with a positive affinity): k from the volume ([`k_for`]: 3…6,

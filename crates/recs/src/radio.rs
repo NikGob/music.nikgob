@@ -1,4 +1,4 @@
-//! Endless selections (docs/stage4.md §4): the radio of a track or an
+//! Endless selections: the radio of a track or an
 //! artist, and the mood and style mixes, which play the same way. A
 //! [`RadioState`] keeps the seed, what was served, the session's lessons
 //! and the new-music candidates; [`RadioState::extend`] gives the next `n`

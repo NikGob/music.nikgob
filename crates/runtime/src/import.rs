@@ -26,7 +26,7 @@ pub struct ImportSetup {
     pub torrent_state_dir: std::path::PathBuf,
     /// No DHT, listeners, UPnP or local discovery (tests).
     pub torrent_offline: bool,
-    /// Where the lyrics models are downloaded (docs/lyrics-align.md);
+    /// Where the lyrics models are downloaded;
     /// None = no aligner.
     pub models_dir: Option<std::path::PathBuf>,
 }

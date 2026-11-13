@@ -1,4 +1,4 @@
-//! «Дейлист» (docs/stage4.md §12.2): a selection of its own for each part
+//! «Дейлист»: a selection of its own for each part
 //! of the day, named by its sound and time («Тягучий вечер четверга»).
 //!
 //! * **Centre**: the mean point on the mood axes ([`Axes`]) of what was

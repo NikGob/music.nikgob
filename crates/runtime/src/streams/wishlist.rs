@@ -1,4 +1,4 @@
-//! The wishlist pipeline (docs/stage3.md §3.5, §3.7, docs/stage4.5.md): a
+//! The wishlist pipeline: a
 //! new like of a stream-only track becomes an item; items are searched in
 //! every download source that is on (torrents through the indexer,
 //! khinsider, the free FLAC services, Soulseek), the offers that are the
@@ -66,7 +66,7 @@ pub(crate) const WISH_ID: u64 = 1 << 47;
 const RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Offers shown in "Подтверди".
 const CONFIRM_OPTIONS: usize = 3;
-/// The note of an item whose files wait in «Подтверди» (docs/stage4.md §12.4).
+/// The note of an item whose files wait in «Подтверди».
 pub(crate) const FILES_WAIT: &str = "Файлы ждут подтверждения";
 /// The note of an item nothing was found for.
 const NOT_FOUND: &str = "Не нашёл, где скачать — поищу снова через неделю";
@@ -245,7 +245,7 @@ pub(crate) fn cancel_drops(item: &WishlistItem) -> bool {
 
 /// An offer as a place a file comes from (`soulseek:<user\path>`,
 /// `torrents:<id>`): what is not taken again for a track once a file from
-/// it held another song (docs/TODO.md 32).
+/// it held another song.
 pub(crate) fn offer_key(offer: &Offer) -> String {
     format!("{}:{}", offer.source.as_str(), offer.id)
 }
@@ -3174,8 +3174,7 @@ impl Worker {
             .collect()
     }
 
-    /// A file downloaded for the item held another song's audio (docs/TODO.md
-    /// 32; the importer noted the file and its place for the track): the
+    /// A file downloaded for the item held another song's audio (the importer noted the file and its place for the track): the
     /// item says so, and looks again once its import ends.
     pub(crate) fn wish_wrong_audio(&mut self, id: WishlistId, sounds_like: Option<String>) {
         // Only a track looks again at once (a better copy goes to its next

@@ -282,8 +282,7 @@ pub struct Window {
     pub len: f64,
 }
 
-/// The windows of a track `duration` seconds long (docs/recommendations.md
-/// §5.1.2): three of [`WINDOW_SECONDS`] at [`WINDOW_AT`] of its length,
+/// The windows of a track `duration` seconds long: three of [`WINDOW_SECONDS`] at [`WINDOW_AT`] of its length,
 /// pushed apart so they never overlap. A track shorter than the three gets
 /// one window of [`WINDOW_SECONDS`] around 45 % of it (or all of it when
 /// shorter still). A track of unknown length (a container that does not
@@ -333,8 +332,7 @@ pub struct Analysed {
     pub seconds: f64,
 }
 
-/// The analysis of a few windows of a track (docs/recommendations.md
-/// §5.1.2): feed it each window's decoded PCM ([`Self::push`] with the
+/// The analysis of a few windows of a track: feed it each window's decoded PCM ([`Self::push`] with the
 /// window's number), then [`Self::finish`]. bliss gets the windows one
 /// after another as 22 050 Hz mono (45 s at most, about 4 MB); the sound
 /// model gets each window at its own rate as soon as the window is over,

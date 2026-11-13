@@ -1,4 +1,4 @@
-//! Moods (docs/stage4.md §4 «Под настроение»): six cards always, each a
+//! Moods: six cards always, each a
 //! tail of a sound axis.
 //!
 //! The axes come from bliss's features (bliss 0.13, features version 2,

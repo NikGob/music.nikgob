@@ -1,4 +1,4 @@
-//! The open world (docs/recommendations.md §1): new music beyond the
+//! The open world: new music beyond the
 //! library, not a few songs between loved ones.
 //!
 //! * **A niche** ([`is_niche`], §1.2): a filter (a mood, a scene, the

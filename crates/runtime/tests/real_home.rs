@@ -1,5 +1,5 @@
-//! The home of a copy of a real library, built as the runtime builds it
-//! (docs/stage4.md §12.7), every section printed with its counts:
+//! The home of a copy of a real library, built as the runtime builds it,
+//! every section printed with its counts:
 //! `NIKGOB_REAL_LIBRARY=path/to/library.sqlite cargo test -p nikgob-runtime
 //! --test real_home -- --ignored --nocapture`. The file itself is never
 //! written; the copy lives in a temporary directory, and no player starts.

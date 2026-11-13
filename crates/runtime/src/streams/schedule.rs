@@ -1,5 +1,4 @@
-//! When the streaming runtime talks to the services by itself (docs/
-//! stage3.md §1; the stage 3 request audit): like pulls, playlist checks,
+//! When the streaming runtime talks to the services by itself: like pulls, playlist checks,
 //! the like queue, look-ups. Every periodic job runs with jitter, and the
 //! services are staggered, so nothing fires in lockstep (the shared Spotify
 //! app's quota is everyone's); while the window is hidden and nothing
@@ -83,7 +82,7 @@ pub struct StreamSchedule {
     /// …and looks for new music again this long after the last pass (and
     /// on a new day).
     pub discover_every: Duration,
-    /// The graph of similar music (docs/recs-graph.md §1) asks each source
+    /// The graph of similar music asks each source
     /// one request at a time, every source at once: YouTube Music somewhere
     /// between these apart…
     pub graph_gap_youtube: (Duration, Duration),
@@ -100,7 +99,7 @@ pub struct StreamSchedule {
     /// What it keeps is built in at most this often while it goes on (and
     /// once when it is over).
     pub graph_build_every: Duration,
-    /// The services' own suggestions (docs/stage4.md §12.3) are read again
+    /// The services' own suggestions are read again
     /// this long after the last time, per signed-in service…
     pub suggest_every: Duration,
     /// …the first time this long after the start (playback and the first
