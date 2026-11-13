@@ -636,8 +636,12 @@ struct Worker {
     /// …in the queue of this generation (saved with the queue).
     autoplay_gen: Option<u64>,
     /// The prefs changed in a way that is written at the next tick (and at
-    /// the end) rather than at once: the shuffle button's rule.
+    /// the end) rather than at once (the shuffle button's rule), or a write
+    /// of them failed: written again at the next tick and at the end, until
+    /// one succeeds.
     prefs_unsaved: bool,
+    /// The last write of the prefs failed (its error was said once).
+    prefs_failing: bool,
     prefs_path: Option<PathBuf>,
     settings_path: Option<PathBuf>,
     exported_rev: u64,
@@ -847,6 +851,7 @@ impl Worker {
             autoplay_entries: Default::default(),
             autoplay_gen: None,
             prefs_unsaved: false,
+            prefs_failing: false,
             prefs_path: config.prefs_path,
             settings_path: config.settings_path.clone(),
             exported_rev: 0,
@@ -2089,11 +2094,12 @@ impl Worker {
         self.prefs_unsaved = true;
     }
 
-    /// Writes the prefs a command changed without writing them itself
-    /// ([`Self::prefs_unsaved`]).
+    /// Writes the prefs a command changed without writing them itself, or
+    /// whose last write failed ([`Self::prefs_unsaved`]). A failure that
+    /// goes on is not said again.
     fn save_prefs_due(&mut self) {
-        if std::mem::take(&mut self.prefs_unsaved) {
-            self.save_prefs();
+        if self.prefs_unsaved {
+            self.write_prefs_now(!self.prefs_failing);
         }
     }
 
@@ -4130,14 +4136,41 @@ fn write_prefs(path: &std::path::Path, prefs: &nikgob_view::Prefs) -> std::io::R
 }
 
 impl Worker {
-    /// Writes the prefs; a failure is said (the next change writes them
-    /// all again).
+    /// Writes the prefs; a failure is said, and they are written again at
+    /// the next tick and at the end ([`Self::save_prefs_due`]).
     pub(crate) fn save_prefs(&mut self) {
-        let Some(path) = self.prefs_path.clone() else { return };
+        self.write_prefs_now(true);
+    }
+
+    /// Writes the prefs now: done, nothing left to write; failed, written
+    /// again later, the error said when `say`. True when written.
+    fn write_prefs_now(&mut self, say: bool) -> bool {
+        let Some(path) = self.prefs_path.clone() else {
+            self.prefs_unsaved = false;
+            return true;
+        };
         let prefs = self.state.read().prefs.clone();
-        if let Err(e) = write_prefs(&path, &prefs) {
-            log::error!("cannot save {}: {e}", path.display());
-            self.toast("Не удалось сохранить настройки", None);
+        match write_prefs(&path, &prefs) {
+            Ok(()) => {
+                if std::mem::take(&mut self.prefs_failing) {
+                    log::info!("{} written again", path.display());
+                }
+                self.prefs_unsaved = false;
+                true
+            }
+            Err(e) => {
+                if self.prefs_failing {
+                    log::debug!("cannot save {} yet: {e}", path.display());
+                } else {
+                    log::error!("cannot save {}: {e}", path.display());
+                }
+                self.prefs_failing = true;
+                self.prefs_unsaved = true;
+                if say {
+                    self.toast("Не удалось сохранить настройки", None);
+                }
+                false
+            }
         }
     }
 
