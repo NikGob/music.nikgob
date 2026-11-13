@@ -84,7 +84,6 @@ const PREVIEW_BYTES: usize = 1 << 20;
 /// Previews of new music analysed a day.
 const PREVIEW_DAILY: u32 = 60;
 /// Candidates asked for by [`Worker::want_preview`] waiting at most.
-#[allow(dead_code)]
 const WANTED_MAX: usize = 64;
 /// Library cache key of the previews analysed today: `day:count`.
 const PREVIEW_DAY_KEY: &str = "stream_analysis.preview_day";
@@ -342,8 +341,8 @@ impl Worker {
     /// [`nikgob_recs::VectorIndex::niche_fit`] can judge them. Previews keep
     /// to the day's limit; a track analysed already or asked for twice is
     /// left out, and the queue holds [`WANTED_MAX`] at most (the oldest go).
-    // Called by the niche expansion (r30-world) once it lands.
-    #[allow(dead_code)]
+    /// «Моя волна» asks for the new songs it is about to play
+    /// ([`Worker::wave_asked`]).
     pub(crate) fn want_preview(&mut self, track: TrackId, video: String) {
         let a = &mut self.streaming.analysis;
         if a.previewed.contains(&track) || a.wanted.iter().any(|(t, _)| *t == track) || self.analysis.index().read().contains(track) {

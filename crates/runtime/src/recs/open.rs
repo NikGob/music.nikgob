@@ -20,12 +20,20 @@ use super::Snapshot;
 use super::niche::NicheFound;
 use crate::Worker;
 
+/// What [`open_pool`] asks of a new song the snapshot holds no preview of:
+/// its analysed preview and the neural model's vector of it, if there are.
+pub(crate) type Heard<'a> = &'a dyn Fn(&StreamTrack) -> Option<(nikgob_recs::Vector, Option<nikgob_recs::Compact>)>;
+
 /// The open pool of `snap` (see the module docs): the discoveries `pool`
-/// with their `sources`, the graph's songs, the niches' `topped` songs.
-pub(crate) fn open_pool(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap<String, nikgob_recs::Source>, topped: &[NicheFound]) -> Vec<OpenCandidate> {
-    let mut cands = super::lanes::candidates(snap, pool, sources, &NewLog::default(), 1);
+/// with their `sources`, the graph's songs, the niches' `topped` songs,
+/// weighed by how new music was received (`log`: the shares of its
+/// sources, its artists kept out). A song without a preview in the
+/// snapshot (the snapshot knows the discoveries' only) takes what `heard`
+/// tells of it: a preview asked for one the wave was about to play.
+pub(crate) fn open_pool(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap<String, nikgob_recs::Source>, topped: &[NicheFound], log: &NewLog, heard: Heard<'_>) -> Vec<OpenCandidate> {
+    let mut cands = super::lanes::candidates(snap, pool, sources, log, 1);
     for f in topped {
-        cands.extend(super::lanes::niche_candidates(snap, f));
+        cands.extend(super::lanes::niche_candidates(snap, f, log));
     }
     // One song once: its links, preview, kind and the best weight of
     // every copy (a discovery a niche's radio holds too keeps that link).
@@ -41,7 +49,21 @@ pub(crate) fn open_pool(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMap
             }
         }
     }
+    for c in out.iter_mut().filter(|c| c.vector.is_none()) {
+        if let Some((v, e)) = heard(&c.track) {
+            c.vector = Some(v);
+            c.embedding = c.embedding.or(e);
+        }
+    }
     out
+}
+
+/// [`Heard`] of the library: the song's stream track (once the wave asked
+/// for its preview) in the shared sound index.
+pub(crate) fn heard_in(lib: &nikgob_library::Library, index: &crate::analysis::SoundIndex, t: &StreamTrack) -> Option<(nikgob_recs::Vector, Option<nikgob_recs::Compact>)> {
+    let id = lib.track_by_remote(&t.id).ok().flatten()?;
+    let shared = index.read();
+    shared.get(id).map(|v| (*v, shared.embedding(id)))
 }
 
 /// Another copy of the song `c` joins it.
@@ -84,7 +106,9 @@ impl Worker {
             Some(h) if !snap.local_only => h.lanes.iter().filter(|l| !l.niche.is_empty()).filter_map(|l| super::niche::cached(&self.lib, l.key, &l.niche)).collect(),
             _ => Vec::new(),
         };
-        let pool = if snap.local_only { Vec::new() } else { open_pool(&snap, &self.discoveries_all(), &self.discovery_sources(), &topped) };
+        let index = self.analysis.index().clone();
+        let heard = |t: &StreamTrack| heard_in(&self.lib, &index, t);
+        let pool = if snap.local_only { Vec::new() } else { open_pool(&snap, &self.discoveries_all(), &self.discovery_sources(), &topped, &self.recs.newlog.log, &heard) };
         let ok = |i: usize| {
             let t = &snap.catalog.tracks()[i];
             (t.local || !snap.local_only) && !snap.model.taste.blocks(t)
@@ -93,7 +117,7 @@ impl Worker {
         let artist_tracks = |t: &StreamTrack| super::lanes::artist_tracks(&snap, t);
         // The families of genres of the library's artists (the snapshot's).
         let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
-        let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index) };
+        let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index), learned: None };
         let next = nikgob_recs::open_world::next(&ctx, &pool, filter, &self.recs.session, n, served);
         let streams = pool.into_iter().map(|c| (c.track.id.clone(), c.track)).collect();
         Some((next, streams))

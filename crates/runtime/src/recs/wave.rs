@@ -130,7 +130,7 @@ pub(crate) fn extend(state: &mut Engine, snap: &Snapshot, pool: &[OpenCandidate]
     let background = |i: usize| snap.background.get(i).copied().unwrap_or(false);
     let artist_tracks = |t: &nikgob_core::streaming::StreamTrack| super::lanes::artist_tracks(snap, t);
     let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
-    let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index) };
+    let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index), learned: None };
     let pool: &[OpenCandidate] = if local_only { &[] } else { pool };
     state.extend_wave(&ctx, pool, n, seed)
 }
@@ -232,6 +232,34 @@ impl Worker {
         self.start_radio(RadioSeed::Wave(seed), title, EventContext::HomeSection, None);
         let id = self.recs.radio.run_id();
         self.recs.radio.wave_preset = id.map(|id| (id, preset));
+    }
+
+    /// What the wave of the radio `id` asked of its last picks (see
+    /// [`nikgob_recs::wave::WaveAsks`]): the previews of the new songs it
+    /// is about to play that have none (YouTube Music's, within the day's
+    /// limit of previews), and more new songs of a filter whose new songs
+    /// ran short (the niches' top-up, within its budgets). Nothing under
+    /// «Только скачанное».
+    pub(crate) fn wave_asked(&mut self, id: u64, asks: nikgob_recs::wave::WaveAsks) {
+        if self.recs.radio.run_id() != Some(id) || self.state.read().prefs.mixes_downloaded_only {
+            return;
+        }
+        if let Some(pool) = self.recs.radio.wave_pool.clone() {
+            for r in asks.previews.iter().filter(|r| r.service == nikgob_core::streaming::Service::Youtube) {
+                let Some(c) = pool.cands.iter().find(|c| c.track.id == *r && c.vector.is_none()) else { continue };
+                let track = match self.lib.track_by_remote(r).ok().flatten() {
+                    Some(t) => t,
+                    None => match self.upsert_streams(std::slice::from_ref(&c.track)).first() {
+                        Some(t) => *t,
+                        None => continue,
+                    },
+                };
+                self.want_preview(track, r.id.clone());
+            }
+        }
+        if let Some((token, seeds)) = asks.short {
+            self.niche_want_wave(token, seeds);
+        }
     }
 
     /// `Command::SetWave`: the playing wave plays `filter` from its next

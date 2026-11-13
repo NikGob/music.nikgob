@@ -224,7 +224,7 @@ pub(crate) struct RadioState {
     /// The user's scenes for the wave's header, of a snapshot.
     pub(crate) scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
     /// The wave's open pool, of a snapshot.
-    wave_pool: Option<super::wave::WavePool>,
+    pub(crate) wave_pool: Option<super::wave::WavePool>,
 }
 
 impl RadioState {
@@ -925,7 +925,7 @@ impl Worker {
         // What a new pool is built from (only when it is needed).
         let inputs = match (&pool, local_only) {
             (None, false) => {
-                let topped: Vec<super::niche::NicheFound> = match self.recs.home.as_ref() {
+                let mut topped: Vec<super::niche::NicheFound> = match self.recs.home.as_ref() {
                     Some(h) if !snap.local_only => h
                         .lanes
                         .iter()
@@ -934,7 +934,12 @@ impl Worker {
                         .collect(),
                     _ => Vec::new(),
                 };
-                Some((self.discoveries_all(), self.discovery_sources(), topped))
+                // What the wave's own filters were topped up with.
+                if !snap.local_only {
+                    topped.extend(super::niche::wave_topped(&self.lib, &self.recs.niche.wave));
+                }
+                self.new_log_load();
+                Some((self.discoveries_all(), self.discovery_sources(), topped, self.recs.newlog.log.clone(), self.lib.clone(), self.analysis.index().clone()))
             }
             _ => None,
         };
@@ -947,8 +952,9 @@ impl Worker {
             let t0 = std::time::Instant::now();
             let pool = match (pool, inputs) {
                 (Some(p), _) => Some(p),
-                (None, Some((found, sources, topped))) => {
-                    let cands = super::open::open_pool(&snap, &found, &sources, &topped);
+                (None, Some((found, sources, topped, log, lib, index))) => {
+                    let heard = |t: &StreamTrack| super::open::heard_in(&lib, &index, t);
+                    let cands = super::open::open_pool(&snap, &found, &sources, &topped, &log, &heard);
                     Some(super::wave::WavePool::new(&snap, kept, cands))
                 }
                 (None, None) => None,
@@ -1029,7 +1035,8 @@ impl Worker {
 
     pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
         match m {
-            RadioMsg::Extended { id, state, picks, wave_pool, scenes } => {
+            RadioMsg::Extended { id, mut state, picks, wave_pool, scenes } => {
+                let asks = state.take_wave_asks();
                 if scenes.is_some() {
                     self.recs.radio.scenes = scenes;
                 }
@@ -1046,6 +1053,7 @@ impl Worker {
                     }
                     self.recs.radio.wave_pool = Some(pool);
                 }
+                self.wave_asked(id, asks);
                 self.radio_extended(id, *state, picks);
             }
             RadioMsg::NewFound {
