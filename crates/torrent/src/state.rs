@@ -4,6 +4,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -62,13 +65,11 @@ impl StateFile {
         s
     }
 
-    /// Atomic write (temp file + rename). Clears `dirty` on success.
-    pub fn save(&mut self, dir: &Path) -> std::io::Result<()> {
-        let path = Self::path(dir);
-        let tmp = path.with_extension("json.tmp");
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, &path)?;
+    /// Hands the state to `saver`, which writes it on its own thread; here
+    /// it is only serialized. Clears `dirty` (a failed write sets it again
+    /// through [`Saver::take_failed`]).
+    pub fn save(&mut self, saver: &Saver) -> serde_json::Result<()> {
+        saver.write(serde_json::to_vec_pretty(self)?);
         self.dirty = false;
         self.urgent = false;
         self.saved_at = Some(Instant::now());
@@ -82,17 +83,117 @@ impl StateFile {
     }
 }
 
+/// What the saving thread is handed.
+enum Job {
+    Write(Vec<u8>),
+    /// Answered once every write handed over before it is on disk.
+    Wait(mpsc::Sender<()>),
+}
+
+/// Writes the sidecar off the caller's thread (the player loop polls the
+/// client): writes keep their order, of several waiting only the newest is
+/// written, each one atomically (temp file + rename).
+pub(crate) struct Saver {
+    tx: mpsc::Sender<Job>,
+    failed: Arc<AtomicBool>,
+}
+
+impl Saver {
+    pub fn new(dir: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let failed = Arc::new(AtomicBool::new(false));
+        let flag = failed.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-torrent-state".into()).spawn(move || {
+            while let Ok(first) = rx.recv() {
+                let mut latest = None;
+                let mut waits = Vec::new();
+                for job in std::iter::once(first).chain(rx.try_iter()) {
+                    match job {
+                        Job::Write(b) => latest = Some(b),
+                        Job::Wait(w) => waits.push(w),
+                    }
+                }
+                if let Some(bytes) = latest
+                    && let Err(e) = write_file(&dir, &bytes)
+                {
+                    log::warn!("cannot save torrent state: {e}");
+                    flag.store(true, Ordering::Relaxed);
+                }
+                for w in waits {
+                    let _ = w.send(());
+                }
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("cannot start the torrent state writer: {e}");
+        }
+        Self { tx, failed }
+    }
+
+    fn write(&self, bytes: Vec<u8>) {
+        if self.tx.send(Job::Write(bytes)).is_err() {
+            self.failed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Blocks until everything handed over so far is written (at most a
+    /// few seconds): for the shutdown.
+    pub fn wait(&self) {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.send(Job::Wait(tx)).is_ok() {
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+        }
+    }
+
+    /// Whether a write failed since the last call.
+    pub fn take_failed(&self) -> bool {
+        self.failed.swap(false, Ordering::Relaxed)
+    }
+}
+
+fn write_file(dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let path = StateFile::path(dir);
+    let tmp = path.with_extension("json.tmp");
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn the_saver_writes_on_its_thread_in_order_and_says_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let saver = Saver::new(dir.path().to_path_buf());
+        let mut s = StateFile::load(dir.path(), 1);
+        for i in 0..20 {
+            s.torrents.insert(format!("h{i}"), Record { uploaded: i, ..Default::default() });
+            s.save(&saver).unwrap();
+        }
+        saver.wait();
+        let back = StateFile::load(dir.path(), 2);
+        assert_eq!(back.torrents.len(), 20, "the newest state is the one on disk");
+        assert!(!saver.take_failed());
+        // A folder that cannot be made (a file is in its place): told.
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"x").unwrap();
+        let bad = Saver::new(blocked.join("sub"));
+        s.save(&bad).unwrap();
+        bad.wait();
+        assert!(bad.take_failed());
+        assert!(!bad.take_failed(), "told once");
+    }
+
+    #[test]
     fn counters_wait_and_urgent_changes_do_not() {
         let dir = tempfile::tempdir().unwrap();
+        let saver = Saver::new(dir.path().to_path_buf());
         let mut s = StateFile::load(dir.path(), 1);
         let now = Instant::now();
         assert!(s.due(now), "a fresh state is written at once");
-        s.save(dir.path()).unwrap();
+        s.save(&saver).unwrap();
         assert!(!s.due(now));
         // An upload counter moved: it waits.
         s.dirty = true;
@@ -101,7 +202,7 @@ mod tests {
         // A completion does not.
         s.urgent = true;
         assert!(s.due(Instant::now()));
-        s.save(dir.path()).unwrap();
+        s.save(&saver).unwrap();
         assert!(!s.due(Instant::now() + SAVE_EVERY), "nothing changed");
     }
 
@@ -118,7 +219,9 @@ mod tests {
                 last_live: 9,
             },
         );
-        s.save(dir.path()).unwrap();
+        let saver = Saver::new(dir.path().to_path_buf());
+        s.save(&saver).unwrap();
+        saver.wait();
         let back = StateFile::load(dir.path(), 200);
         assert_eq!(back.started_at, 100);
         assert_eq!(back.last_start, 200);
