@@ -2073,8 +2073,9 @@ impl Worker {
         }
         let one = files.len() == 1 && item.scope == WishlistScope::Track && self.targets_of(&item).len() == 1;
         let targets = self.item_targets(&item, one);
-        // Its row in «Активные» goes on under the same name.
-        let title = self.item_title(id);
+        // Named apart from the item's own line of «История» («Artist —
+        // Title», [`Self::wish_line`]): the import leaves a line of its own.
+        let title = format!("{}: {}", offer.provider, item.title.clone().unwrap_or_default());
         let note = format!("{} · {}", offer.detail(), offer.title);
         if self.import_for(files, title, SourceOrigin::Inbox, targets) {
             self.set_item(id, |i| {
