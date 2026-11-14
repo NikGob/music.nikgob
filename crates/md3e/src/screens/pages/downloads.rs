@@ -536,11 +536,11 @@ fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
             pages,
         );
     }
-    ui.add_space(12.0);
+    // Nothing seeding: the policy alone, no words for the empty list.
     if d.seeding.is_empty() {
-        note(ui, "Сейчас ничего не раздаётся");
         return;
     }
+    ui.add_space(12.0);
     let _ = segmented_list(ui, d.seeding.len(), |i| seed_row(&d.seeding[i], p.seed_ratio));
 }
 

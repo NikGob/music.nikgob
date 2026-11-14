@@ -254,7 +254,7 @@ pub struct AlbumPlan {
     /// альбом».
     pub split: bool,
     /// Of such an album: its page opens on «Весь альбом» and «Слушать»
-    /// plays it («Всегда весь альбом»).
+    /// plays it (its own choice, else «Всегда весь альбом»).
     pub opens_whole: bool,
     /// What each row is to the user.
     pub membership: std::collections::HashMap<TrackId, Membership>,
@@ -473,7 +473,9 @@ impl ReleaseListing {
         }
         AlbumPlan {
             split,
-            opens_whole: rules.mode == AlbumMode::Whole,
+            // The album's own choice ([`crate::Library::set_release_view`],
+            // synced too) before the setting.
+            opens_whole: self.view.unwrap_or(rules.mode == AlbumMode::Whole),
             membership,
             mine,
             whole,

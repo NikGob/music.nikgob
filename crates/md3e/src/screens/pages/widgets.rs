@@ -198,48 +198,10 @@ pub fn release_card(
     }
 }
 
-/// [`release_card`] of an album looked for (search): one only some songs of
-/// which are the user's opens on «Весь альбом» and plays whole.
-pub fn release_card_whole(
-    ui: &mut Ui,
-    r: &ReleaseCard,
-    width: f32,
-    row: &str,
-    out: &mut Vec<Command>,
-) -> Option<Route> {
-    let from = out.len();
-    let route = release_card(ui, r, width, row, out);
-    whole_album(ui.ctx(), r, from, out, route)
-}
-
-/// What a card of an album looked for did, as the whole album: its plays
-/// pushed since `from` play all of it, and its page opens on «Весь альбом».
-pub fn whole_album(ctx: &egui::Context, r: &ReleaseCard, from: usize, out: &mut [Command], route: Option<Route>) -> Option<Route> {
-    if r.mine.is_none() {
-        return route;
-    }
-    for c in out.iter_mut().skip(from) {
-        if let Command::PlayRelease { id, start, shuffle } = *c
-            && id == r.id
-        {
-            *c = Command::PlayReleaseWhole { id, start, shuffle };
-        }
-    }
-    if route == Some(Route::Release(r.id)) {
-        open_whole(ctx, r.id, true);
-    }
-    route
-}
-
 /// The key of what the page of album `id` shows this visit: «Весь альбом»
 /// (true) or «Мои треки».
 fn whole_key(id: ReleaseId) -> Id {
     Id::new(("rel-view", id))
-}
-
-/// The key of what the page of album `id` about to open shows.
-fn whole_next_key(id: ReleaseId) -> Id {
-    Id::new(("rel-view-next", id))
 }
 
 /// The key of the pass the page of album `id` was last drawn in.
@@ -253,25 +215,16 @@ pub fn show_whole(ctx: &egui::Context, id: ReleaseId, whole: bool) {
     ctx.data_mut(|d| d.insert_temp(whole_key(id), whole));
 }
 
-/// The page of album `id`, opened now, shows «Весь альбом» (or «Мои
-/// треки») for this visit only.
-pub fn open_whole(ctx: &egui::Context, id: ReleaseId, whole: bool) {
-    ctx.data_mut(|d| d.insert_temp(whole_next_key(id), whole));
-}
-
-/// What the page of album `id` shows this visit when it was opened so
-/// ([`open_whole`]) or switched since ([`show_whole`]); `None`: as the
-/// album opens. Called once per pass the page is drawn in: a visit after a
-/// gap starts again from how it was opened.
+/// What the page of album `id` shows this visit when switched on it
+/// ([`show_whole`]); `None`: as the album opens (its own choice, else the
+/// setting: every place the same). Called once per pass the page is drawn
+/// in: a visit after a gap starts again from how the album opens.
 pub fn visit_whole(ctx: &egui::Context, id: ReleaseId) -> Option<bool> {
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| {
         let seen = d.get_temp::<u64>(whole_seen_key(id));
         d.insert_temp(whole_seen_key(id), pass);
-        if let Some(next) = d.get_temp::<bool>(whole_next_key(id)) {
-            d.remove::<bool>(whole_next_key(id));
-            d.insert_temp(whole_key(id), next);
-        } else if seen.is_none_or(|s| pass > s + 2) {
+        if seen.is_none_or(|s| pass > s + 2) {
             d.remove::<bool>(whole_key(id));
         }
         d.get_temp::<bool>(whole_key(id))
@@ -2149,12 +2102,11 @@ mod menu_tests {
         );
     }
 
-    /// An album page opened on «Весь альбом» from search shows it this
-    /// visit only: back on the page later it opens as the album does; a
-    /// switch on the page holds while the page stays.
+    /// A switch on an album's page holds while the page stays: back on the
+    /// page later it opens as the album does.
     #[test]
     fn an_album_page_view_lasts_one_visit() {
-        use crate::screens::pages::widgets::{open_whole, show_whole, visit_whole};
+        use crate::screens::pages::widgets::{show_whole, visit_whole};
         let ctx = egui::Context::default();
         let id = ReleaseId::new();
         let page = |ctx: &egui::Context| {
@@ -2168,20 +2120,11 @@ mod menu_tests {
             }
         };
         assert_eq!(page(&ctx), None);
-        open_whole(&ctx, id, true);
-        assert_eq!(page(&ctx), Some(true));
-        assert_eq!(page(&ctx), Some(true));
-        away(&ctx);
-        assert_eq!(page(&ctx), None, "a later visit opens as the album does");
         show_whole(&ctx, id, true);
         assert_eq!(page(&ctx), Some(true));
         assert_eq!(page(&ctx), Some(true));
         away(&ctx);
-        assert_eq!(page(&ctx), None);
-        // Opened from search while the page is on screen: it switches.
-        assert_eq!(page(&ctx), None);
-        open_whole(&ctx, id, true);
-        assert_eq!(page(&ctx), Some(true));
+        assert_eq!(page(&ctx), None, "a later visit opens as the album does");
     }
 
     /// The artist's right-click menu and its page's ⋮: one list, the page

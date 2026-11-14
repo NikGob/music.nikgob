@@ -1123,6 +1123,37 @@ mod tests {
         assert_eq!(l.joins(mine, true), vec![a.id, b.id]);
     }
 
+    /// An album's own view («Мои треки» or «Весь альбом» kept for it; a
+    /// sync brings the same column, see
+    /// `choices_survive_an_export_and_an_import`) comes before the setting
+    /// either way, for its page and its ▶; taken back, the setting again.
+    #[test]
+    fn an_albums_own_view_comes_before_the_setting() {
+        use nikgob_core::model::AlbumMode;
+        let lib = Library::open_in_memory().unwrap();
+        let r = album(&lib, "OST");
+        let a = song(&lib, &r, 1, "One", true);
+        let b = song(&lib, &r, 2, "Two", false);
+        let rules = |mode| AlbumRules { mode, ..AlbumRules::default() };
+        lib.set_release_view(r.id, Some(false)).unwrap();
+        let l = lib.release_listing(r.id).unwrap().unwrap();
+        for mode in [AlbumMode::Whole, AlbumMode::Auto] {
+            assert!(!l.plan(rules(mode)).opens_whole, "{mode:?}");
+            assert_eq!(l.plays(rules(mode), None, None), (vec![a.id], false), "{mode:?}");
+        }
+        lib.set_release_view(r.id, Some(true)).unwrap();
+        let l = lib.release_listing(r.id).unwrap().unwrap();
+        for mode in [AlbumMode::Auto, AlbumMode::Mine, AlbumMode::Whole] {
+            assert!(l.plan(rules(mode)).opens_whole, "{mode:?}");
+        }
+        assert_eq!(l.plays(rules(AlbumMode::Auto), None, None), (vec![a.id, b.id], true));
+        // Taken back: the setting again.
+        lib.set_release_view(r.id, None).unwrap();
+        let l = lib.release_listing(r.id).unwrap().unwrap();
+        assert!(!l.plan(rules(AlbumMode::Auto)).opens_whole);
+        assert!(l.plan(rules(AlbumMode::Whole)).opens_whole);
+    }
+
     /// By default an album one song of which is the user's is an album:
     /// its page opens on «Весь альбом», «Слушать» plays every song of it,
     /// «Мои треки» stays a tap away; «Автоматически» keeps the old way.
