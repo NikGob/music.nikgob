@@ -803,16 +803,21 @@ impl RadioState {
         let served: HashSet<String> = keyed.iter().map(|k| k.0.clone()).collect();
         let again = crate::wave::repeatable(&keyed);
         let cool = self.no_repeat_ms.max(NO_REPEAT_MS);
-        // The library songs queued after the one playing: they play first.
-        let order: Vec<TrackId> = self.served.iter().filter_map(|x| match x {
-            Item::Track(t) => Some(*t),
-            Item::Stream(_) => None,
-        }).collect();
-        let queued: Vec<TrackId> = match self.session.last().and_then(|p| order.iter().rposition(|t| *t == p.track)) {
-            Some(k) => order[k + 1..].to_vec(),
-            None if self.session.is_empty() => order.clone(),
-            None => Vec::new(),
+        // The songs queued after the one playing, the new ones by their
+        // artists: they play first.
+        let order: Vec<&Item> = self.served.iter().collect();
+        let after: &[&Item] = match self.session.last().and_then(|p| order.iter().rposition(|x| matches!(x, Item::Track(t) if *t == p.track))) {
+            Some(k) => &order[k + 1..],
+            None if self.session.is_empty() => &order[..],
+            None => &[],
         };
+        let queued: Vec<crate::open_world::Ahead> = after
+            .iter()
+            .map(|x| match x {
+                Item::Track(t) => crate::open_world::Ahead::Track(*t),
+                Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or(crate::open_world::Ahead::New(None), |c| crate::open_world::Ahead::of_new(ctx, c)),
+            })
+            .collect();
         let queued = &queued[queued.len().saturating_sub(QUEUED_MAX)..];
         let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued);
         self.wave_asks = picked.asks;

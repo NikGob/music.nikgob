@@ -53,7 +53,7 @@ use nikgob_core::streaming::RemoteId;
 use serde::{Deserialize, Serialize};
 
 use crate::model::UserModel;
-use crate::open_world::{Character, OpenCandidate, Scene, WaveContext, WaveFilter, WavePick, WaveTurn, fits_filter, scene_of_new};
+use crate::open_world::{Ahead, Character, OpenCandidate, Scene, WaveContext, WaveFilter, WavePick, WaveTurn, fits_filter, scene_of_new};
 use crate::pick::Item;
 use crate::profiles::LaneKey;
 use crate::rng::Rng;
@@ -588,8 +588,8 @@ pub fn repeatable(served: &[(String, bool)]) -> Vec<String> {
 /// [`repeatable`]), none heard within `cool_ms` (nor within the radio's
 /// rest); then, only when even that is nothing, the scene is let go
 /// ([`Picked::scene_let_go`]). The character and the novelty always hold:
-/// with nothing of them left the wave picks nothing. `queued`: the library
-/// songs picked and queued after the one playing (they play first).
+/// with nothing of them left the wave picks nothing. `queued`: the songs
+/// picked and queued after the one playing (they play first).
 #[allow(clippy::too_many_arguments)]
 pub fn pick(
     bandit: &mut Bandit,
@@ -601,7 +601,7 @@ pub fn pick(
     served: &HashSet<String>,
     repeatable: &[String],
     cool_ms: i64,
-    queued: &[nikgob_core::model::TrackId],
+    queued: &[Ahead],
 ) -> Picked {
     bandit.ensure(ctx, seed);
     let m: &UserModel = ctx.model;
@@ -624,7 +624,11 @@ pub fn pick(
     let mut asks = WaveAsks::default();
     let bonus = bandit.session_bonus(ctx, session);
     // What plays before the next pick: the queue, then the picks so far.
-    let mut ahead: Vec<nikgob_core::model::TrackId> = queued.to_vec();
+    let mut ahead: Vec<Ahead> = queued.to_vec();
+    let ahead_of = |item: &Item| match item {
+        Item::Track(t) => Ahead::Track(*t),
+        Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or(Ahead::New(None), |c| Ahead::of_new(ctx, c)),
+    };
     let run_seed = bandit.seed;
     while out.len() < n {
         if (bandit.current.is_none() || bandit.block_left == 0 || bandit.current.is_some_and(|k| dry.contains(&k))) && !bandit.choose(&bonus, &dry) {
@@ -645,9 +649,7 @@ pub fn pick(
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
             bandit.note_served(p.item.clone(), k);
-            if let Item::Track(t) = p.item {
-                ahead.push(t);
-            }
+            ahead.push(ahead_of(&p.item));
             out.push(p);
         }
     }
@@ -666,18 +668,14 @@ pub fn pick(
         asks.add(m, pool, f, &next);
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
-            if let Item::Track(t) = p.item {
-                ahead.push(t);
-            }
+            ahead.push(ahead_of(&p.item));
             out.push(p);
         }
         if out.len() < n {
             let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms, WaveTurn { queued: &ahead, seed: run_seed });
             for p in again {
                 served.insert(served_key(&p.item, &keys));
-                if let Item::Track(t) = p.item {
-                    ahead.push(t);
-                }
+                ahead.push(ahead_of(&p.item));
                 out.push(p);
             }
         }
