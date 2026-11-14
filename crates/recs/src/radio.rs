@@ -928,7 +928,6 @@ impl RadioState {
     }
 
     /// What waves learnt before (the runtime keeps it): the wave's
-
     /// clusters start from it.
     pub fn set_wave_memory(&mut self, memory: crate::wave::BanditMemory) {
         match &mut self.wave {

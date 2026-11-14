@@ -878,7 +878,6 @@ impl Worker {
     }
 
     /// Downloads and analyses `video` for `track` (one of the day's).
-
     fn analysis_fetch(&mut self, track: TrackId, video: String) {
         let Some(youtube) = self.service(Service::Youtube) else { return };
         log::info!("stream analysis: {track} from YouTube {video}");

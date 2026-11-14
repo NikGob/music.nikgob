@@ -428,7 +428,6 @@ impl Deezer {
     }
 
     /// Downloads an image URL from Deezer's CDN (photos, covers).
-
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
         let url = Url::parse(url)
             .map_err(|e| MetadataError::InvalidArgument(format!("bad image URL: {e}")))?;

@@ -645,7 +645,6 @@ pub fn still_fits(ctx: &WaveContext<'_>, filter: &WaveFilter, c: &OpenCandidate)
 }
 
 /// A niche the home holds a card of ([`niches`]).
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct NicheCard {
     pub key: crate::mixes::MixKey,
@@ -1034,8 +1033,6 @@ pub(crate) fn rest_of(m: &UserModel, i: usize, rest: i64) -> i64 {
 }
 
 /// The work key of a new song picked ([`crate::discover::stream_work_key`]).
-
-
 fn picks_work(p: &WavePick, pool: &[OpenCandidate], known: &HashMap<usize, String>) -> Option<String> {
     let Item::Stream(r) = &p.item else { return None };
     let k = pool.iter().position(|c| c.track.id == *r)?;
@@ -1043,7 +1040,6 @@ fn picks_work(p: &WavePick, pool: &[OpenCandidate], known: &HashMap<usize, Strin
 }
 
 /// The library's picks of a wave by the user model ([`WAVE_MODEL_RANKING`]),
-
 /// one at a time as a radio picked by the model takes them
 /// ([`crate::radio`]): each the best by its value ([`library_value`]) at the
 /// moment of the session as if the songs queued and the picks before it

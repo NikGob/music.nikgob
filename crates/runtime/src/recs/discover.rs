@@ -84,7 +84,6 @@ fn seeds_doubt(snap: &super::Snapshot, near: &[usize]) -> (Option<f32>, bool) {
 }
 
 /// Requests of the discovery part of a pass…
-
 pub(crate) const DISCOVER_BUDGET: u32 = 60;
 /// …and of the new releases.
 pub(crate) const RELEASE_BUDGET: u32 = 60;

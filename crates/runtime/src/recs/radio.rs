@@ -1815,7 +1815,6 @@ impl Worker {
     }
 
     /// The upcoming entries of the radio past the first `keep` of the
-
     /// queue are to be picked again (the least `keep` asked wins), now or
     /// once the picks on their way come.
     fn radio_repick(&mut self, keep: usize) {
