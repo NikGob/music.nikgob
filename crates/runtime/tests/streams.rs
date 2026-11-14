@@ -498,3 +498,39 @@ fn a_track_from_youtube_is_not_looked_up_on_a_spotify_without_sound() {
         !lib.sources_of_track(track).unwrap().iter().any(|s| s.kind == SourceKind::Spotify)
     );
 }
+
+/// The engine lets go of a stream it was reading when another track
+/// takes over (a read that stalled is cancelled). Should an error of the
+/// track let go still come, it is not the playing track's: no skip, no
+/// failure, no toast, and its source is not set aside.
+#[test]
+fn an_error_of_a_track_no_longer_playing_changes_nothing() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = FakeService::youtube();
+    let a = lib.upsert_stream_track(&find(&yt, "yt-discovery-1")).unwrap();
+    let b = lib.upsert_stream_track(&find(&yt, "yt-discovery-2")).unwrap();
+    let rig = Rig::start(lib.clone(), vec![Arc::new(yt)]);
+    rig.rt.send(Command::PlayTracks { tracks: vec![a, b], start: 0, context: "test".into() });
+    let first = rig.asked(0);
+    rig.played_to(first.id, Duration::from_secs(5));
+
+    rig.rt.send(Command::Next);
+    let second = rig.asked(1);
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.source, stream(Service::Youtube, "yt-discovery-2"));
+    rig.played_to(second.id, Duration::from_secs(3));
+
+    // The track left behind fails late, as a refused video would.
+    let toasts = rig.rt.state().toasts.len();
+    rig.rt
+        .playback_sender()
+        .send(PlaybackEvent::Error { id: first.id, message: "youtube: video not available".into() })
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rig.asked.lock().unwrap().len(), 2, "nothing else was played");
+    assert_eq!(rig.status(), Status::Playing);
+    assert!(rig.position() >= Duration::from_secs(3), "{:?}", rig.position());
+    assert_eq!(rig.rt.state().toasts.len(), toasts, "{:?}", rig.rt.state().toasts);
+    let sources = lib.sources_of_track(a).unwrap();
+    assert!(sources.iter().all(|s| s.available), "{sources:?}");
+}

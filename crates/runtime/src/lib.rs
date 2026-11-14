@@ -2749,6 +2749,13 @@ impl Worker {
                     // all its sources) when its turn comes.
                     return;
                 }
+                if playing.is_none() {
+                    // A track no longer playing (stopped, skipped, replaced
+                    // while its stream still answered): not this one's
+                    // failure, no skip, no word, no mark on its source.
+                    log::info!("error of item {id}, which no longer plays: {message}");
+                    return;
+                }
                 if let Some(e) = playing
                     && let Some((source, kind)) = self.playing_source
                     && kind == SourceKind::Soundcloud
