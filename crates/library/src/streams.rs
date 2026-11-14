@@ -476,6 +476,21 @@ fn other_source_of_any(conn: &Connection, track: &str, locator: &str) -> Result<
     )?)
 }
 
+/// The release `id` is nobody's: streams a radio, a mix or a search
+/// brought, none of them kept (no file, none in the library), the album
+/// not saved, wished or set up by the user.
+fn nobodys_release(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM track WHERE release_id = ?1 AND deleted_at IS NULL
+                              AND (has_local = 1 OR in_library = 1))
+            AND NOT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'release' AND target_id = ?1 AND deleted = 0)
+            AND NOT EXISTS(SELECT 1 FROM wishlist WHERE release_id = ?1)
+            AND NOT EXISTS(SELECT 1 FROM release_selection WHERE release_id = ?1 AND deleted = 0)",
+        [id],
+        |r| r.get(0),
+    )?)
+}
+
 fn has_local_source(conn: &Connection, track: &str) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM source WHERE track_id = ?1 AND kind = 'local_file')",
@@ -842,8 +857,11 @@ impl Library {
     /// its track count, and a title in Latin letters takes the album's
     /// Cyrillic. Every place gets a row of this release: a song whose
     /// track is on another album the library has files of (the deluxe
-    /// edition) gets one here, which the stream moves to. An album id linked to another release with tracks is left
-    /// alone; one linked to an empty release is taken over. A song the
+    /// edition) gets one here, which the stream moves to. An album id
+    /// linked to another release with tracks is left alone; one linked to
+    /// an empty release, or to a release of streams nobody kept (a radio
+    /// brought a song of the album before its file came), is taken over,
+    /// its tracks move here and it goes. A song the
     /// user deleted from the album (`unwanted`) gets no line again.
     /// Returns how many tracks were added.
     pub fn adopt_stream_album(&self, release: ReleaseId, album: &StreamAlbum) -> Result<usize> {
@@ -856,6 +874,9 @@ impl Library {
                 return Ok(0);
             };
             let service = album.id.service;
+            // A release of streams nobody kept that held the album id: its
+            // tracks move here with the tracklist, then it goes.
+            let mut taken_from = None;
             match linked(tx, "release", service, EntityKind::Album, &album.id.id)? {
                 Some(other) if other != rid => {
                     let empty: bool = tx.query_row(
@@ -863,12 +884,17 @@ impl Library {
                         [&other],
                         |r| r.get(0),
                     )?;
-                    if !empty {
+                    if empty {
+                        log::info!("library: album {} {} was the empty release {other}, now {rid}", service.as_str(), album.id.id);
+                        set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?;
+                        crate::repairs::drop_empty_release_in(tx, &other, Some(&rid), self.device_id().as_str(), self.tick())?;
+                    } else if nobodys_release(tx, &other)? {
+                        log::info!("library: album {} {} was the release {other} of streams only, now {rid}", service.as_str(), album.id.id);
+                        set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?;
+                        taken_from = Some(other);
+                    } else {
                         return Ok(0);
                     }
-                    log::info!("library: album {} {} was the empty release {other}, now {rid}", service.as_str(), album.id.id);
-                    set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?;
-                    crate::repairs::drop_empty_release_in(tx, &other, Some(&rid), self.device_id().as_str(), self.tick())?;
                 }
                 Some(_) => {}
                 None => set_external(tx, service, EntityKind::Album, &album.id.id, &rid)?,
@@ -948,6 +974,11 @@ impl Library {
             // An album added whole takes its new songs into the library
             // (placed now: a stream twin of a file stays out).
             refresh_in_library_of_release(tx, &rid)?;
+            // The release the album id was taken from: gone once its
+            // tracks all moved here.
+            if let Some(other) = taken_from {
+                crate::repairs::drop_empty_release_in(tx, &other, Some(&rid), self.device_id().as_str(), self.tick())?;
+            }
             Ok((known(tx)? - before).max(0) as usize)
         })
     }

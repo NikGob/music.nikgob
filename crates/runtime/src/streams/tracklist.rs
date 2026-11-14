@@ -19,12 +19,19 @@
 //!   title extends the other («Discovery» and «Discovery Bonus Mix»), else
 //!   (a title in another script: «夏子» is «Natsuko») the one of that
 //!   artist the service puts one of the album's ISRCs on, or, when its
-//!   songs have no ISRC, the one of the same track count and year.
+//!   songs have no ISRC, the one of the same track count and year. An
+//!   album of several artists («JVKE, Bryant Barnes») is any of theirs.
 //! * Its tracks the release lacks become stream tracks of it, outside the
 //!   library ([`nikgob_library::Library::adopt_stream_album`]): the page
 //!   shows them muted with ▶ and ↓, the cards say «1 из 15». Found is
 //!   kept only once every place the album counts has a line; an album
 //!   still short of its count is asked again like a miss.
+//! * The albums the background pass asks are looked for off the player's
+//!   loop (every library album is read for it), at most once per
+//!   [`RESCAN`]; the loop only takes the next one of them.
+//! * Once per library (`tracklist_retry.v1`): the misses kept before the
+//!   matching above are forgotten, so those albums are asked again (one
+//!   per [`EVERY`]) instead of a week later.
 //! * Once per library (`wished_album_places_fixed.v1`, see
 //!   [`nikgob_library::Library::place_album_tracks`]): a «Хочу скачать»
 //!   album whose files came from several sources and brought their own
@@ -54,10 +61,22 @@ const ERROR_TTL_MS: UnixMs = 3600 * 1000;
 pub(crate) const EVERY: Duration = Duration::from_secs(60);
 /// Albums of a search looked at.
 const CANDIDATES: usize = 5;
+/// The albums the background pass asks are looked for at most this often.
+const RESCAN: Duration = Duration::from_secs(10 * 60);
+/// Albums of that list taken in one step of the pass, at most (each a few
+/// reads; one that asks a service ends the step).
+const STEP_TAKES: usize = 8;
+/// Library cache key: the misses of the older album matching were forgotten.
+const MISSES_RETRIED: &str = "tracklist_retry.v1";
 
-pub(crate) struct TracklistMsg {
-    release: ReleaseId,
-    result: Result<Option<StreamAlbum>, StreamError>,
+pub(crate) enum TracklistMsg {
+    /// The album of a library album in a service (or none).
+    Album {
+        release: ReleaseId,
+        result: Result<Option<StreamAlbum>, StreamError>,
+    },
+    /// The albums the background pass asks next, found off the loop.
+    Candidates(Vec<ReleaseId>),
 }
 
 #[derive(Default)]
@@ -70,6 +89,11 @@ pub(crate) struct TracklistState {
     places: Option<Vec<ReleaseId>>,
     placing: Option<ReleaseId>,
     places_missed: bool,
+    /// The albums the background pass asks next (the last first).
+    queue: Vec<ReleaseId>,
+    /// They are being looked for, off the loop; and when that last began.
+    scanning: bool,
+    scanned: Option<Instant>,
 }
 
 fn cache_key(release: ReleaseId) -> String {
@@ -105,6 +129,8 @@ fn same_artist(a: &str, b: &str) -> bool {
 #[derive(Clone, Debug, Default)]
 struct Wanted {
     artist: String,
+    /// The names of the album's artists, when it has several.
+    names: Vec<String>,
     title: String,
     /// The ISRCs of its tracks.
     isrcs: Vec<String>,
@@ -114,6 +140,27 @@ struct Wanted {
     /// Its tracklist is whole, only its year is asked: no other edition
     /// will do (one with more words, one by count).
     year_only: bool,
+}
+
+impl Wanted {
+    /// `name` is the album's artist, or one of its artists.
+    fn by(&self, name: &str) -> bool {
+        same_artist(name, &self.artist) || self.names.iter().any(|n| same_artist(name, n))
+    }
+}
+
+/// The names of a credit's artists, also of one name that lists several
+/// («リコ、レグ、ナナチ»; «& Emilio Piano» of a credit split at its commas
+/// is «Emilio Piano»); none for a credit of one artist.
+fn credit_names(credit: &nikgob_core::model::ArtistCredit) -> Vec<String> {
+    let names: Vec<String> = credit
+        .0
+        .iter()
+        .flat_map(|p| p.name.split([',', '、', '&', ';', '/']))
+        .map(|n| n.trim().to_owned())
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.len() < 2 { Vec::new() } else { names }
 }
 
 /// ISRCs of an album looked up in a service, at most.
@@ -128,7 +175,7 @@ async fn find(svc: Arc<dyn StreamService>, linked: Option<String>, w: &Wanted) -
     let by: Vec<_> = hits
         .into_iter()
         .take(CANDIDATES)
-        .filter(|a| a.artists.iter().any(|x| same_artist(&x.name, &w.artist)))
+        .filter(|a| a.artists.iter().any(|x| w.by(&x.name)))
         .collect();
     // The same title first; an edition with more words only without one.
     let mut hit = by.iter().find(|a| same_album(&a.title, &w.title)).map(|a| a.id.id.clone());
@@ -239,15 +286,10 @@ impl Worker {
     /// lacks it (see the module docs).
     pub(crate) fn complete_tracklist(&mut self, release: ReleaseId) {
         let now = nikgob_library::now_ms();
-        if let Some((at, what)) = self.lib.cache_get(&cache_key(release)).ok().flatten() {
-            let fresh = match what.as_str() {
-                "found" => true,
-                "error" => now - at < ERROR_TTL_MS,
-                _ => now - at < MISS_TTL_MS,
-            };
-            if fresh {
-                return;
-            }
+        if let Some((at, what)) = self.lib.cache_get(&cache_key(release)).ok().flatten()
+            && answer_fresh(at, &what, now)
+        {
+            return;
         }
         let Some(r) = self.lib.get_release(release).ok().flatten() else { return };
         let rows = self.lib.tracks_of_release_all(release).unwrap_or_default();
@@ -275,6 +317,7 @@ impl Worker {
         isrcs.dedup();
         let w = Wanted {
             artist: r.artist_credit.display(),
+            names: credit_names(&r.artist_credit),
             title: r.title.clone(),
             isrcs,
             count: r.total_tracks,
@@ -318,11 +361,21 @@ impl Worker {
             {
                 date_from(dz, a, &w).await;
             }
-            Msg::Tracklist(TracklistMsg { release, result: last })
+            Msg::Tracklist(TracklistMsg::Album { release, result: last })
         });
     }
 
     pub(crate) fn tracklist_msg(&mut self, m: TracklistMsg) {
+        let (release, result) = match m {
+            TracklistMsg::Album { release, result } => (release, result),
+            TracklistMsg::Candidates(found) => {
+                let t = &mut self.streaming.tracklist;
+                t.scanning = false;
+                t.queue = found;
+                return;
+            }
+        };
+        let m = TracklistAnswer { release, result };
         self.streaming.tracklist.asking.remove(&m.release);
         if self.streaming.tracklist.placing == Some(m.release) {
             self.streaming.tracklist.placing = None;
@@ -403,6 +456,7 @@ impl Worker {
 
     /// The background pass: one incomplete album with a file per [`EVERY`],
     /// the first one [`EVERY`] after the start (the start has enough to ask).
+    /// The albums to ask are looked for off the loop ([`pass_candidates`]).
     pub(crate) fn tracklist_tick(&mut self) {
         let t = &mut self.streaming.tracklist;
         let last = *t.last.get_or_insert_with(Instant::now);
@@ -413,20 +467,82 @@ impl Worker {
         if self.places_tick() {
             return;
         }
-        let releases = self.lib.releases(0, 100_000, nikgob_library::ReleaseSort::asc(Default::default())).unwrap_or_default();
-        for r in releases {
-            // Short of its count with a file, or without a year (one of
-            // streams only too: its page shows no date).
-            let short = r.local_tracks > 0 && !r.release.total_tracks.is_some_and(|t| r.known_tracks >= t);
-            if !short && r.release.year.is_some() {
-                continue;
-            }
-            self.complete_tracklist(r.release.id);
+        for _ in 0..STEP_TAKES {
+            let Some(release) = self.streaming.tracklist.queue.pop() else { break };
+            self.complete_tracklist(release);
             if !self.streaming.tracklist.asking.is_empty() {
-                break;
+                return;
             }
         }
+        let t = &mut self.streaming.tracklist;
+        if !t.queue.is_empty() || t.scanning || t.scanned.is_some_and(|at| at.elapsed() < RESCAN) {
+            return;
+        }
+        t.scanning = true;
+        t.scanned = Some(Instant::now());
+        let lib = self.lib.clone();
+        self.streaming.spawn(async move {
+            let found = tokio::task::spawn_blocking(move || pass_candidates(&lib)).await.unwrap_or_default();
+            Msg::Tracklist(TracklistMsg::Candidates(found))
+        });
     }
+
+    /// Once per library: the tracklist misses kept before the album
+    /// matching learnt other scripts, ISRCs and several artists are
+    /// forgotten, so those albums are asked again now (see the module docs).
+    pub(crate) fn retry_tracklist_misses_once(&mut self) {
+        if self.lib.cache_get(MISSES_RETRIED).ok().flatten().is_some() {
+            return;
+        }
+        match self.lib.cache_forget("tracklist.", "miss") {
+            Ok(0) => {}
+            Ok(n) => log::info!("tracklist: {n} albums not found before are asked again"),
+            Err(e) => {
+                log::warn!("forgetting the tracklist misses: {e}");
+                return;
+            }
+        }
+        let _ = self.lib.cache_put(MISSES_RETRIED, nikgob_library::now_ms(), "");
+    }
+}
+
+/// The answer for one album (see [`TracklistMsg::Album`]).
+struct TracklistAnswer {
+    release: ReleaseId,
+    result: Result<Option<StreamAlbum>, StreamError>,
+}
+
+/// Whether a cached answer of a tracklist lookup made at `at` still holds
+/// at `now`.
+fn answer_fresh(at: UnixMs, what: &str, now: UnixMs) -> bool {
+    match what {
+        "found" => true,
+        "error" => now - at < ERROR_TTL_MS,
+        _ => now - at < MISS_TTL_MS,
+    }
+}
+
+/// The library albums the background pass asks, the first last (it pops
+/// them): short of their count with a file, or without a year (one of
+/// streams only too: its page shows no date), and not asked lately. Read
+/// off the player's loop: it reads every album of the library.
+fn pass_candidates(lib: &nikgob_library::Library) -> Vec<ReleaseId> {
+    let now = nikgob_library::now_ms();
+    let releases = lib.releases(0, 100_000, nikgob_library::ReleaseSort::asc(Default::default())).unwrap_or_default();
+    let mut out: Vec<ReleaseId> = releases
+        .into_iter()
+        .filter(|r| {
+            let short = r.local_tracks > 0 && !r.release.total_tracks.is_some_and(|t| r.known_tracks >= t);
+            short || r.release.year.is_none()
+        })
+        .filter(|r| match lib.cache_get(&cache_key(r.release.id)).ok().flatten() {
+            Some((at, what)) => !answer_fresh(at, &what, now),
+            None => true,
+        })
+        .map(|r| r.release.id)
+        .collect();
+    out.reverse();
+    out
 }
 
 impl Worker {
@@ -474,6 +590,7 @@ impl Worker {
             self.streaming.tracklist.placing = Some(release);
             let w = Wanted {
                 artist: r.artist_credit.display(),
+                names: credit_names(&r.artist_credit),
                 title: r.title.clone(),
                 ..Wanted::default()
             };
@@ -563,6 +680,7 @@ mod tests {
         let svc: Arc<dyn StreamService> = Arc::new(nikgob_core::streaming::FakeService::deezer().with_album("natsuko", "Natsuko", 3));
         let w = Wanted {
             artist: "Big Band".into(),
+            names: Vec::new(),
             title: "Big Band".into(),
             isrcs: vec!["ZZBIG0000001".into()],
             count: Some(3),
@@ -590,6 +708,26 @@ mod tests {
         assert!(find(svc.clone(), None, &Wanted { count: Some(2), ..bare.clone() }).await.unwrap().is_none());
         assert!(find(svc.clone(), None, &Wanted { year: None, ..bare.clone() }).await.unwrap().is_none());
         assert!(find(svc, None, &Wanted { year_only: true, ..bare }).await.unwrap().is_none());
+    }
+
+    /// An album of several artists is any of theirs: «juliet» of «JVKE,
+    /// Bryant Barnes, & Emilio Piano» is JVKE's album in a service; an
+    /// album of one artist is that artist's in any case.
+    #[test]
+    fn an_album_of_several_artists_is_any_of_theirs() {
+        use nikgob_core::model::{ArtistCredit, ArtistCreditPart};
+        let part = |name: &str, join: &str| ArtistCreditPart { artist_id: None, name: name.into(), join_phrase: join.into() };
+        let credit = ArtistCredit(vec![part("JVKE", ", "), part("Bryant Barnes", ", "), part("& Emilio Piano", "")]);
+        let w = Wanted { artist: credit.display(), names: credit_names(&credit), ..Wanted::default() };
+        assert!(w.by("JVKE") && w.by("Emilio Piano") && w.by("Bryant Barnes"));
+        assert!(!w.by("Someone Else"));
+        let listed = ArtistCredit::single("リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)", None);
+        assert_eq!(credit_names(&listed).len(), 2);
+        let one = ArtistCredit::single("FUNKY MONKEY BΛBY'S", None);
+        assert!(credit_names(&one).is_empty());
+        let w = Wanted { artist: one.display(), names: credit_names(&one), ..Wanted::default() };
+        assert!(w.by("Funky Monkey Bλby's"));
+        assert!(!w.by("Funky Monkey"));
     }
 
     #[test]

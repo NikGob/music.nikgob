@@ -567,6 +567,7 @@ impl Worker {
         self.soloist_wanted();
         self.apply_stream_cache();
         self.retry_clip_misses_once();
+        self.retry_tracklist_misses_once();
         self.publish_accounts();
         self.likes_tick();
         self.publish_wishlist();
