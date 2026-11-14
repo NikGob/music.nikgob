@@ -86,6 +86,9 @@ pub struct VectorIndex<K> {
     /// an empty sketch = none).
     sketch: Vec<SoundSketch>,
     sketch_count: usize,
+    /// [`Self::calibration`] once measured; any change of the rows or of
+    /// their model vectors forgets it.
+    calibrated: std::sync::OnceLock<f32>,
 }
 
 impl<K: Copy + Eq + Hash> Default for VectorIndex<K> {
@@ -139,6 +142,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             emb_sum: Vec::new(),
             sketch: Vec::new(),
             sketch_count: 0,
+            calibrated: std::sync::OnceLock::new(),
         }
     }
 
@@ -168,6 +172,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 
     fn account(&mut self, v: &Vector, sign: f64) {
+        self.calibrated = std::sync::OnceLock::new();
         for (i, x) in v.iter().enumerate() {
             let x = f64::from(*x);
             self.sum[i] += sign * x;
@@ -361,6 +366,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 
     fn account_emb(&mut self, c: &Compact, sign: f64) {
+        self.calibrated = std::sync::OnceLock::new();
         if self.emb_sum.is_empty() {
             self.emb_sum = vec![0.0; COMPACT_DIM];
         }
@@ -437,6 +443,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// Drops every model vector (the neural analysis was switched off).
     pub fn clear_embeddings(&mut self) {
+        self.calibrated = std::sync::OnceLock::new();
         self.emb = Vec::new();
         self.emb_scale = Vec::new();
         self.emb_sum = Vec::new();
@@ -492,8 +499,13 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// Bliss's distance per unit of the model's, over pairs of the
     /// library's tracks that have both (pairs spread over the library the
-    /// same way every time).
+    /// same way every time); measured once until the rows change (`mean`
+    /// is the rows' own, [`Self::emb_mean`]).
     fn calibration(&self, mean: &[f32; COMPACT_DIM]) -> f32 {
+        *self.calibrated.get_or_init(|| self.measure_calibration(mean))
+    }
+
+    fn measure_calibration(&self, mean: &[f32; COMPACT_DIM]) -> f32 {
         let rows: Vec<usize> = (0..self.emb_scale.len()).filter(|&i| self.emb_scale[i] > 0.0).collect();
         let n = rows.len();
         if n < 2 {
@@ -724,6 +736,60 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             return Some(1.0);
         }
         Some((probe.typical / own).clamp(0.0, 1.0))
+    }
+}
+
+/// Stored tracks to measure many others against by the blend of both
+/// sounds ([`VectorIndex::sound_probe`]): their rows, the model's centred
+/// vectors where they have one, and the scale that brings the model's
+/// distance to bliss's.
+#[derive(Clone, Debug)]
+pub struct SoundProbe {
+    rows: Vec<(usize, Option<[f32; COMPACT_DIM]>)>,
+    mean: [f32; COMPACT_DIM],
+    ratio: f32,
+    factors: [f32; DIM],
+}
+
+impl SoundProbe {
+    /// The tracks it holds.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+impl<K: Copy + Eq + Hash> VectorIndex<K> {
+    /// A probe of the stored `keys` (each in its place; a key the index
+    /// lacks is left out and `None` stands in its place of the result of
+    /// [`Self::probe_distance`]). `None` while the model's vectors are too
+    /// few to blend ([`MIN_EMBEDDED`]): bliss alone then.
+    pub fn sound_probe(&self, keys: &[K]) -> Option<SoundProbe> {
+        if !self.blended() {
+            return None;
+        }
+        let mean = self.emb_mean();
+        let rows = keys.iter().map(|k| self.pos.get(k).map_or((usize::MAX, None), |&i| (i, self.centred(i, &mean)))).collect();
+        Some(SoundProbe { rows, mean, ratio: self.calibration(&mean), factors: self.factors() })
+    }
+
+    /// The distance of the probe's `k`-th track to the stored `key`: the
+    /// blend where both have the model's vector, else bliss's. `None` when
+    /// either is not stored.
+    pub fn probe_distance(&self, p: &SoundProbe, k: usize, key: K) -> Option<f32> {
+        let &(a, q) = p.rows.get(k)?;
+        if a == usize::MAX {
+            return None;
+        }
+        let &j = self.pos.get(&key)?;
+        let bliss = Self::dist_sq(&p.factors, self.row(a), self.row(j)).sqrt();
+        match q.as_ref().and_then(|q| self.emb_dist(q, j, &p.mean)) {
+            Some(e) => Some((1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * p.ratio * e),
+            None => Some(bliss),
+        }
     }
 }
 
@@ -1022,6 +1088,35 @@ mod tests {
         assert_eq!((idx.sketch(4), idx.sketched_len()), (None, 0));
         assert!(!idx.set_sketch(4, SoundSketch::default()));
         assert_eq!(idx.sketched_len(), 0);
+    }
+
+    /// The calibration of the two sounds is measured once while the rows
+    /// stand (every probe and neighbour search reuses it) and again after
+    /// any row or model vector changes.
+    #[test]
+    fn the_calibration_is_measured_once_while_the_rows_stand() {
+        let mut rng = Rng(5);
+        let mut idx = VectorIndex::new();
+        let dir = direction(&mut rng);
+        for k in 0..40u32 {
+            idx.insert(k, random(&mut rng));
+            idx.set_embedding(k, compact_near(&mut rng, &dir, 0.5));
+        }
+        assert!(idx.calibrated.get().is_none());
+        let a = idx.sound_probe(&[0, 1]).expect("blended");
+        let once = *idx.calibrated.get().expect("measured");
+        assert_eq!(once, idx.measure_calibration(&idx.emb_mean()));
+        assert_eq!(idx.probe_distance(&a, 0, 5), idx.sound_probe(&[0, 1]).and_then(|b| idx.probe_distance(&b, 0, 5)));
+        let other = direction(&mut rng);
+        idx.set_embedding(3, compact_near(&mut rng, &other, 0.1));
+        assert!(idx.calibrated.get().is_none(), "a model vector changed");
+        idx.sound_probe(&[0]);
+        assert_eq!(*idx.calibrated.get().unwrap(), idx.measure_calibration(&idx.emb_mean()));
+        idx.insert(99, random(&mut rng));
+        assert!(idx.calibrated.get().is_none(), "a row came");
+        idx.sound_probe(&[0]);
+        idx.remove(99);
+        assert!(idx.calibrated.get().is_none(), "a row went");
     }
 
     /// Two genres bliss cannot tell apart (their bliss vectors are drawn

@@ -155,6 +155,22 @@ const RELAXED_SERVED: usize = 50;
 /// A mix leaves tracks played this recently for later (unless the pool is
 /// dry).
 const RECENT_MS: i64 = 3 * HOUR_MS;
+/// A wave's picks queued ahead that its next picks go on from, at most.
+const QUEUED_MAX: usize = 6;
+
+/// What of `served` is still ahead: what follows the later of the
+/// session's last song (`session_last`, a library song) and the last told
+/// played (`told`, of either kind); all of it while nothing played; none
+/// when what played is not among it (the queue is not known).
+fn queued_after<'a>(served: &'a VecDeque<Item>, session_last: Option<TrackId>, told: Option<&Item>) -> Vec<&'a Item> {
+    let by_session = session_last.and_then(|t| served.iter().rposition(|x| matches!(x, Item::Track(u) if *u == t)));
+    let by_told = told.and_then(|it| served.iter().rposition(|x| x == it));
+    match by_session.max(by_told) {
+        Some(k) => served.iter().skip(k + 1).collect(),
+        None if session_last.is_none() && told.is_none() => served.iter().collect(),
+        None => Vec::new(),
+    }
+}
 /// Within a radio's own picks a track rests until this many others
 /// played since it…
 const REPEAT_AFTER: usize = 5;
@@ -326,6 +342,11 @@ pub struct RadioState {
     /// The last [`REPEAT_AFTER`] that played, oldest first.
     #[serde(default)]
     recent: Vec<Item>,
+    /// The last told played (its end, [`Self::feedback`], or its start,
+    /// [`Self::note_played`]), a library song or a new one: where the wave's
+    /// queue stands ([`queued_after`]).
+    #[serde(default)]
+    played_last: Option<Item>,
     /// Played twice running: it plays once more first.
     #[serde(default)]
     again: Option<Item>,
@@ -445,6 +466,7 @@ impl RadioState {
             liked: Vec::new(),
             skipped: Vec::new(),
             recent: Vec::new(),
+            played_last: None,
             again: None,
             not_world: None,
             new_pool: Vec::new(),
@@ -696,7 +718,14 @@ impl RadioState {
     /// (to the end, or to its outro) pulls them towards it; a skip past the
     /// half teaches nothing. A radio's track played twice running plays
     /// once more next.
+    /// `item` played (its end not told, or not known: a new song in a
+    /// replay): the queue stands after it.
+    pub fn note_played(&mut self, item: Item) {
+        self.played_last = Some(item);
+    }
+
     pub fn feedback(&mut self, item: Item, outcome: Outcome) {
+        self.played_last = Some(item.clone());
         if !self.is_mix() && self.recent.last() == Some(&item) && outcome == Outcome::Complete {
             self.again = Some(item.clone());
         }
@@ -801,7 +830,18 @@ impl RadioState {
         let served: HashSet<String> = keyed.iter().map(|k| k.0.clone()).collect();
         let again = crate::wave::repeatable(&keyed);
         let cool = self.no_repeat_ms.max(NO_REPEAT_MS);
-        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool);
+        // The songs queued after the one playing, the new ones by their
+        // artists: they play first.
+        let after = queued_after(&self.served, self.session.last().map(|p| p.track), self.played_last.as_ref());
+        let queued: Vec<crate::open_world::Ahead> = after
+            .iter()
+            .map(|x| match x {
+                Item::Track(t) => crate::open_world::Ahead::Track(*t),
+                Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or(crate::open_world::Ahead::New(crate::open_world::ArtistKey::Unknown), |c| crate::open_world::Ahead::of_new(ctx, c)),
+            })
+            .collect();
+        let queued = &queued[queued.len().saturating_sub(QUEUED_MAX)..];
+        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued);
         self.wave_asks = picked.asks;
         if picked.scene_let_go {
             // The chip shows what plays.
@@ -1364,6 +1404,10 @@ impl RadioState {
         let mut out: Vec<Slot> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut m = model.moment(&sim, ts);
+            // The session's rejections by both sounds; the songs taken out
+            // of the queue by bliss as before.
+            let push = model.push_probe(&sim, Some(recs.index));
+            let removed_push: Vec<(Vector, f32)> = removed.iter().map(|v| (*v, REMOVED_PUSH)).collect();
             m.album_session &= continuing;
             m.world_session = None;
             m.anchor = if traj.is_empty() { anchor.lean(m.anchor) } else { anchor.drift(sim.anchor_of(model, TRAJECTORY_RECENT)) };
@@ -1488,12 +1532,15 @@ impl RadioState {
             let best_of = |cands: Vec<usize>| -> Option<((usize, f32), Slot, bool)> {
                 let mut best: Option<((usize, f32), Slot, bool)> = None;
                 for c in cands {
-                    let f = model.features(&m, c);
+                    let mut f = model.features(&m, c);
+                    if let Some(p) = &push {
+                        f[F_SKIP_PUSH] = model.skip_push_by(p, c) + model.skip_push_of(&removed_push, c);
+                    }
                     let parts: Vec<f32> = w.w.iter().zip(&f).map(|(a, b)| a * b).collect();
                     let relevance: f32 = parts.iter().sum();
                     let mut x = model.skip_features(&m, c, nikgob_core::model::EventContext::Radio);
                     x[0] = 1.0;
-                    let p_skip = weights.skip.p(&x).min(0.99);
+                    let p_skip = model.skip_risk(c, weights.skip.p(&x)).min(0.99);
                     let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
                     let joins = match (block, model.profile_at(c)) {
                         (Some(b), Some(p)) if b == p => match run {
@@ -1749,7 +1796,7 @@ impl RadioState {
             // graph), their best known first.
             if let Some(m) = recs.model {
                 for &(b, w) in m.graph.similar_artists(a).iter().take(CO_ARTISTS) {
-                    let key = |i: usize| recs.taste.affinity_at(i) + m.graph.prior(i);
+                    let key = |i: usize| recs.taste.affinity_at(i) + m.prior_at(i);
                     let mut theirs: Vec<usize> = recs.catalog.of_artist(b).iter().map(|&i| i as usize).filter(|&i| ok(i)).collect();
                     theirs.sort_by(|x, y| key(*y).total_cmp(&key(*x)).then(x.cmp(y)));
                     for i in theirs.into_iter().take(CO_TRACKS) {
@@ -2422,7 +2469,7 @@ impl Ranker<'_> {
         let relevance = self.weights.next.score(&self.model.features(&self.m, c));
         let mut x = self.model.skip_features(&self.m, c, nikgob_core::model::EventContext::Radio);
         x[0] = 1.0;
-        let p = self.weights.skip.p(&x).min(0.99);
+        let p = self.model.skip_risk(c, self.weights.skip.p(&x)).min(0.99);
         W_MODEL * ((relevance / 2.0).tanh() + 0.5 * SKIP_VALUE * (1.0 - p).ln())
     }
 }
@@ -2430,6 +2477,32 @@ impl Ranker<'_> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The wave's queue stands after what played last, a library song or
+    /// a new one: new songs played are not ahead any more; nothing played,
+    /// all is ahead; a session the served songs do not hold has no known
+    /// queue.
+    #[test]
+    fn the_queue_stands_after_what_played_last() {
+        use nikgob_core::streaming::Service;
+        let t = |i: u128| Item::Track(crate::test_util::tid(i));
+        let n = |k: &str| Item::Stream(RemoteId::new(Service::Youtube, k));
+        let served: VecDeque<Item> = [t(1), n("a"), n("b"), t(2), n("c")].into_iter().collect();
+        let tid = crate::test_util::tid;
+        assert_eq!(queued_after(&served, Some(tid(1)), Some(&n("b"))), vec![&t(2), &n("c")], "a new song played after the library one");
+        assert_eq!(queued_after(&served, Some(tid(1)), None), vec![&n("a"), &n("b"), &t(2), &n("c")]);
+        assert_eq!(queued_after(&served, Some(tid(2)), Some(&n("a"))), vec![&n("c")], "the later of the two");
+        let only_new: VecDeque<Item> = [n("a"), n("b"), n("c")].into_iter().collect();
+        assert_eq!(queued_after(&only_new, None, Some(&n("a"))), vec![&n("b"), &n("c")]);
+        assert_eq!(queued_after(&only_new, None, None).len(), 3, "nothing played: all ahead");
+        assert!(queued_after(&served, Some(tid(9)), None).is_empty(), "a session the wave did not serve");
+        // Told played as it goes: a new song's end moves the queue on.
+        let mut radio = RadioState::new(RadioSeed::Wave(crate::wave::WaveSeed::plain(1.0)));
+        radio.note_played(n("a"));
+        assert_eq!(radio.played_last, Some(n("a")));
+        radio.feedback(n("b"), Outcome::Complete);
+        assert_eq!(radio.played_last, Some(n("b")));
+    }
     use crate::index::VectorIndex;
     use crate::pick::assert_diverse;
     use crate::taste::{Catalog, Play, Taste, TasteInput, TrackInfo};
@@ -2973,6 +3046,7 @@ pub(crate) mod tests {
         radio.feedback(Item::Track(tid(5)), Outcome::skip(120_000));
         let mut fresh = RadioState::new(RadioSeed::Track(tid(0)));
         fresh.recent.push(Item::Track(tid(5)));
+        fresh.played_last = Some(Item::Track(tid(5)));
         fresh.session = radio.session.clone();
         assert_eq!(radio, fresh);
     }

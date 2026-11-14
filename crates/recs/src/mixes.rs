@@ -107,7 +107,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use nikgob_core::model::{ArtistId, EventContext, TrackId, UnixMs};
+use nikgob_core::model::{ArtistId, EventContext, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
@@ -120,7 +120,7 @@ use crate::radio::MIX_REST;
 use crate::rng::Rng;
 use crate::session::Session;
 use crate::songtype::Lang;
-use crate::taste::{DAY_MS, DayPart, HOUR_MS};
+use crate::taste::DayPart;
 
 /// Moments of «Миксы для тебя».
 pub const MOMENTS: usize = 5;
@@ -158,25 +158,15 @@ const LIKED_MS: u64 = 150 * 60_000;
 const PART_POOL: usize = 4;
 const PART_BONUS: f32 = 1.5;
 const PART_LIKED: f32 = 0.3;
-/// A love counts whole within this of the user's latest listening…
-pub const FRESH_GRACE_MS: i64 = 30 * DAY_MS;
-/// …then fades by half every this long…
-pub const FRESH_HALF_MS: i64 = 60 * DAY_MS;
-/// …down to this.
-pub const STALE_FLOOR: f32 = 0.35;
-/// What is loved by a state alone (a like, a playlist) and never heard
-/// counts this much, once anything was heard.
-const UNHEARD_LOVE: f32 = 0.5;
-/// A loved song not heard for this long is an old one…
-pub const STALE_MS: i64 = 90 * DAY_MS;
+/// What is listened to now leads: the model's freshness of a love
+/// ([`crate::model::freshness`], [`UserModel::freshness_at`]), which every
+/// surface shares.
+pub use crate::model::{BULK_LIKES, FRESH_GRACE_MS, FRESH_HALF_MS, STALE_FLOOR, STALE_MS};
+use crate::model::{UNHEARD_LOVE, freshness};
 /// …and a mix takes this share of them at most while it has others
 /// («Любимые» [`LIKED_STALE_SHARE`]).
 pub const STALE_SHARE: f32 = 0.25;
 pub const LIKED_STALE_SHARE: f32 = 0.5;
-/// This many likes within [`BULK_WINDOW_MS`] of one another came from a
-/// service's library at once: they say nothing of when.
-pub const BULK_LIKES: usize = 20;
-const BULK_WINDOW_MS: i64 = HOUR_MS;
 /// The blends made today shown at most (the latest).
 pub const BLENDS_SHOWN: usize = 2;
 /// Songs of a mix (about 90–100 minutes)…
@@ -610,26 +600,6 @@ struct Caps {
     stale: usize,
 }
 
-/// When each of `n` tracks was last listened to (`None`: never): its last
-/// play of any origin by the play's own time, or its like when that was
-/// set by hand (not one of [`BULK_LIKES`] within an hour).
-fn last_heard(recs: &Recs<'_>, model: &UserModel, n: usize) -> Vec<Option<UnixMs>> {
-    let mut likes: Vec<UnixMs> = (0..n).filter_map(|i| recs.taste.liked_time_at(i)).collect();
-    likes.sort_unstable();
-    let by_hand = |t: UnixMs| {
-        let from = likes.partition_point(|x| *x < t - BULK_WINDOW_MS);
-        let to = likes.partition_point(|x| *x <= t + BULK_WINDOW_MS);
-        to - from < BULK_LIKES
-    };
-    (0..n)
-        .map(|i| {
-            let s = &model.tracks[i];
-            let liked = recs.taste.liked_time_at(i).filter(|t| by_hand(*t));
-            [recs.taste.last_played_at(i), s.last_start, s.last_complete, liked].into_iter().flatten().max()
-        })
-        .collect()
-}
-
 /// The track at `i` was never played here and is not loved otherwise (a
 /// like, a playlist, a play imported from a service, the library's prior):
 /// what a mix counts as never played (its rule, the offline evaluation's
@@ -637,16 +607,6 @@ fn last_heard(recs: &Recs<'_>, model: &UserModel, n: usize) -> Vec<Option<UnixMs
 pub fn never_heard(model: &UserModel, i: usize) -> bool {
     let s = &model.tracks[i];
     s.starts == 0 && s.aff_long(model.now()) <= 0.0 && model.taste.affinity_at(i) <= 0.0 && model.prior_mass(i) <= 0.0
-}
-
-/// How much of a love last heard `age` before the user's latest listening
-/// counts now.
-fn freshness(age: i64) -> f32 {
-    if age <= FRESH_GRACE_MS {
-        return 1.0;
-    }
-    let halves = (age - FRESH_GRACE_MS) as f64 / FRESH_HALF_MS as f64;
-    STALE_FLOOR + (1.0 - STALE_FLOOR) * (-halves).exp2() as f32
 }
 
 impl<'a> Builder<'a> {
@@ -672,9 +632,8 @@ impl<'a> Builder<'a> {
         let mut love = vec![0.0f32; n];
         let mut value = vec![None; n];
         // What was heard and when, against the latest of it (a user back
-        // after a year has last year's weeks, not none).
-        let heard = last_heard(recs, model, n);
-        let latest = heard.iter().flatten().copied().max();
+        // after a year has last year's weeks, not none): the model's.
+        let latest = model.latest_heard();
         let mut fresh = vec![1.0f32; n];
         let mut stale = vec![false; n];
         for i in 0..n {
@@ -683,10 +642,10 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let s = &model.tracks[i];
-            love[i] = s.aff_long(now).max(0.0).max((recs.taste.affinity_at(i).max(0.0) / 3.0).tanh()).max(model.prior_mass(i));
+            love[i] = s.aff_long_whole(now).max(0.0).max((recs.taste.affinity_at(i).max(0.0) / 3.0).tanh()).max(model.prior_mass(i));
             // What only the library's prior stands for is no love to fade.
             let state = love[i] > model.prior_mass(i);
-            match (latest, heard[i]) {
+            match (latest, model.last_heard_at(i)) {
                 (Some(l), Some(h)) => {
                     fresh[i] = freshness(l - h);
                     stale[i] = state && l - h >= STALE_MS;
