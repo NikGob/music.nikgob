@@ -1,7 +1,7 @@
 //! Query-side types: sort specs, list rows, reports.
 
 use nikgob_core::model::{
-    Artist, Codec, PlaylistEntry, PlaylistId, Release, Source, SourceId, SourceKind, TrackId,
+    AnalysisSource, Artist, Codec, PlaylistEntry, PlaylistId, Release, Source, SourceId, SourceKind, TrackId,
     UnixMs,
 };
 use serde::{Deserialize, Serialize};
@@ -810,6 +810,16 @@ pub struct AnalysisTodo {
     /// Which file this is (source id, hash, size): a failure is remembered
     /// for this key ([`crate::Library::mark_analysis_failed`]).
     pub file_key: String,
+}
+
+/// A track's stored sketch of its sound ([`crate::Library::sketch_of`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SketchRow {
+    pub track_id: TrackId,
+    pub sketch: Vec<u8>,
+    pub sketched_with: String,
+    pub styled_with: Option<String>,
+    pub source: AnalysisSource,
 }
 
 /// A stream-only track due for sound analysis

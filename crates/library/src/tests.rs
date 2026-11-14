@@ -1369,6 +1369,83 @@ fn sound_model_vectors_queue_store_and_load() {
 }
 
 #[test]
+fn sketches_queue_store_and_load() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let mut files = Vec::new();
+    for i in 0..3 {
+        let t = track(&lib, &a, None, &format!("F{i}"), i);
+        local(&lib, &t, &format!("f{i}.opus"), Codec::Opus, Some(160));
+        files.push(t);
+    }
+    lib.put_analysis(&analysis(files[0].id, "b", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(files[1].id, "b", AnalysisSource::File, 0.0)).unwrap();
+    lib.put_analysis(&analysis(files[2].id, "old", AnalysisSource::File, 0.0)).unwrap();
+    let queue = |styled: Option<&str>| {
+        let mut q: Vec<_> = lib.tracks_needing_sketch("k1", styled, "b", 10).unwrap().into_iter().map(|t| t.track_id).collect();
+        q.sort();
+        q
+    };
+    let mut both = vec![files[0].id, files[1].id];
+    both.sort();
+    assert_eq!(queue(None), both, "only files with a current bliss analysis");
+    assert_eq!(lib.sketch_counts("k1", None).unwrap(), (0, 3));
+
+    let bytes = vec![9u8; 40];
+    assert!(lib.put_sketch(files[0].id, &bytes, "k1", None, AnalysisSource::File).unwrap());
+    assert!(lib.put_sketch(files[1].id, &bytes, "k1", Some("s1"), AnalysisSource::File).unwrap());
+    assert!(queue(None).is_empty());
+    // The model runs now: the one it has not heard is due again.
+    assert_eq!(queue(Some("s1")), vec![files[0].id]);
+    assert_eq!(queue(Some("s2")).len(), 2, "another summary of the styles");
+    assert_eq!(lib.sketch_counts("k1", None).unwrap(), (2, 3));
+    assert_eq!(lib.sketch_counts("k1", Some("s1")).unwrap(), (1, 3));
+    let mut loaded = lib.sketches("k1").unwrap();
+    loaded.sort();
+    assert_eq!(loaded.len(), 2);
+    assert!(lib.sketches("k2").unwrap().is_empty());
+    let row = lib.sketch_of(files[1].id).unwrap().unwrap();
+    assert_eq!((row.sketch, row.styled_with.as_deref(), row.source), (bytes.clone(), Some("s1"), AnalysisSource::File));
+    assert!(lib.sketch_of(files[2].id).unwrap().is_none());
+    // A stream's never replaces a file's; a newer version of the sketch is due.
+    assert!(!lib.put_sketch(files[0].id, &[1u8; 40], "k1", Some("s1"), AnalysisSource::Youtube).unwrap());
+    assert_eq!(lib.sketch_of(files[0].id).unwrap().unwrap().sketch, bytes);
+    assert_eq!(lib.tracks_needing_sketch("k2", None, "b", 10).unwrap().len(), 2);
+    // A deleted track's sketch goes with it.
+    lib.merge_track_into(files[1].id, files[0].id).unwrap();
+    assert!(lib.sketch_of(files[1].id).unwrap().is_none());
+}
+
+/// Migration 32 adds the sketches' table only: an older library keeps
+/// every analysis and vector, and its files wait for their sketch.
+#[test]
+fn migration_adds_the_sketch_table_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.db");
+    let before = crate::migrations::MIGRATIONS.len() - 1;
+    {
+        let lib = Library::open(&path).unwrap();
+        let a = artist(&lib, "A");
+        let t = track(&lib, &a, None, "T", 1);
+        local(&lib, &t, "t.opus", Codec::Opus, Some(160));
+        lib.put_analysis(&analysis(t.id, "b", AnalysisSource::File, 0.2)).unwrap();
+        lib.put_embedding(t.id, Some(&[3u8; 260]), "m1", AnalysisSource::File).unwrap();
+    }
+    {
+        // Back to the schema before the sketches.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE sound_sketch").unwrap();
+        conn.pragma_update(None, "user_version", before as u32).unwrap();
+    }
+    let lib = Library::open(&path).unwrap();
+    assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
+    assert_eq!(lib.analysis_vectors("b").unwrap().len(), 1);
+    assert_eq!(lib.embedding_vectors("m1").unwrap().len(), 1);
+    assert!(lib.sketches("k1").unwrap().is_empty());
+    assert_eq!(lib.tracks_needing_sketch("k1", None, "b", 10).unwrap().len(), 1);
+}
+
+#[test]
 fn the_stream_analysis_queue_skips_failures_until_they_are_old() {
     let lib = lib();
     let a = artist(&lib, "A");

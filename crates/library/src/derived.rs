@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
-use crate::types::{AnalysisCounts, AnalysisTodo, RecFeedback, StreamAnalysisTodo};
+use crate::types::{AnalysisCounts, AnalysisTodo, RecFeedback, SketchRow, StreamAnalysisTodo};
 use crate::util::{get_id, now_ms};
 
 fn encode_vector(v: &[f32]) -> Vec<u8> {
@@ -334,6 +334,108 @@ impl Library {
                         AND (f.track_id IS NULL OR f.file_key <> {FILE_KEY})"
                 ),
                 [embedded_with],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+    }
+
+    // ---- The sketches of the sound (crest, edges, styles)
+
+    /// Stores a track's sketch (its bytes; `styled_with`: the tag of its
+    /// styles part, `None` while the model has not heard it). A stream's
+    /// never replaces a file's; returns whether it was stored.
+    pub fn put_sketch(&self, track: TrackId, sketch: &[u8], sketched_with: &str, styled_with: Option<&str>, source: AnalysisSource) -> Result<bool> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "INSERT INTO sound_sketch(track_id, sketch, sketched_with, styled_with, source, sketched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(track_id) DO UPDATE SET sketch = excluded.sketch,
+                    sketched_with = excluded.sketched_with, styled_with = excluded.styled_with,
+                    source = excluded.source, sketched_at = excluded.sketched_at
+                  WHERE NOT (sound_sketch.source = 'file' AND excluded.source <> 'file')",
+                params![track.to_string(), sketch, sketched_with, styled_with, source.as_str(), now_ms()],
+            )? > 0)
+        })
+    }
+
+    /// A track's stored sketch with its two tags and its source.
+    pub fn sketch_of(&self, track: TrackId) -> Result<Option<SketchRow>> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT sketch, sketched_with, styled_with, source FROM sound_sketch WHERE track_id = ?1",
+                [track.to_string()],
+                |r| {
+                    Ok(SketchRow {
+                        track_id: track,
+                        sketch: r.get(0)?,
+                        sketched_with: r.get(1)?,
+                        styled_with: r.get(2)?,
+                        source: AnalysisSource::parse(&r.get::<_, String>(3)?).unwrap_or(AnalysisSource::File),
+                    })
+                },
+            )
+            .optional()?)
+        })
+    }
+
+    /// Every sketch of `sketched_with` of tracks that are not deleted:
+    /// what the in-memory index takes at start (40 bytes a track).
+    pub fn sketches(&self, sketched_with: &str) -> Result<Vec<(TrackId, Vec<u8>)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT k.track_id, k.sketch FROM sound_sketch k JOIN track t ON t.id = k.track_id
+                  WHERE k.sketched_with = ?1 AND t.deleted_at IS NULL",
+            )?;
+            let mut rows = stmt.query([sketched_with])?;
+            let mut out = Vec::new();
+            while let Some(r) = rows.next()? {
+                out.push((get_id(r, 0)?, r.get(1)?));
+            }
+            Ok(out)
+        })
+    }
+
+    /// Tracks with a file whose bliss analysis (`analyzed_with`, from the
+    /// file) is current but whose sketch is missing, of another
+    /// `sketched_with`, a stream's, or — when `styled_with` is given (the
+    /// model runs) — without styles of that tag: the backfill's queue, once
+    /// bliss's and the model's are done. Newest first.
+    pub fn tracks_needing_sketch(&self, sketched_with: &str, styled_with: Option<&str>, analyzed_with: &str, limit: u32) -> Result<Vec<AnalysisTodo>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT t.id, s.id, s.locator, {FILE_KEY} FROM track t
+                   JOIN source s ON s.track_id = t.id AND s.is_active = 1 AND s.kind = 'local_file'
+                   JOIN analysis a ON a.track_id = t.id AND a.analyzed_with = ?3 AND a.source = 'file'
+                   LEFT JOIN sound_sketch k ON k.track_id = t.id
+                  WHERE t.has_local = 1 AND t.deleted_at IS NULL
+                    AND (k.track_id IS NULL OR k.sketched_with <> ?1 OR k.source <> 'file'
+                         OR (?2 IS NOT NULL AND (k.styled_with IS NULL OR k.styled_with <> ?2)))
+                  ORDER BY t.seq DESC LIMIT ?4"
+            ))?;
+            let rows = stmt.query_map(params![sketched_with, styled_with, analyzed_with, limit], |r| {
+                Ok(AnalysisTodo { track_id: get_id(r, 0)?, source_id: get_id(r, 1)?, locator: r.get(2)?, file_key: r.get(3)? })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Files with a current sketch (of `sketched_with`, and of
+    /// `styled_with` when given) and files in all, as
+    /// [`Self::analysis_counts`] counts them.
+    pub fn sketch_counts(&self, sketched_with: &str, styled_with: Option<&str>) -> Result<(u32, u32)> {
+        self.read(|c| {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT coalesce(sum(k.sketched_with = ?1 AND k.source = 'file'
+                                         AND (?2 IS NULL OR k.styled_with = ?2)), 0), count(*)
+                       FROM track t
+                       JOIN source s ON s.track_id = t.id AND s.is_active = 1 AND s.kind = 'local_file'
+                       LEFT JOIN sound_sketch k ON k.track_id = t.id
+                       LEFT JOIN analysis_failed f ON f.track_id = t.id
+                      WHERE t.has_local = 1 AND t.deleted_at IS NULL
+                        AND (f.track_id IS NULL OR f.file_key <> {FILE_KEY})"
+                ),
+                params![sketched_with, styled_with],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?)
         })

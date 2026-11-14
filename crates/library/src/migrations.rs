@@ -41,6 +41,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0027_sound_embedding.sql"),
     include_str!("../migrations/0028_graph_item_kind.sql"),
     include_str!("../migrations/0029_album_added.sql"),
+    // r38-sound: migration 32 by its name (0030 and 0031 belong to other
+    // branches); the lead renumbers it on merge.
+    include_str!("../migrations/0032_sound_sketch.sql"),
 
 ];
 
