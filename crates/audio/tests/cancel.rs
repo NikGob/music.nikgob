@@ -55,7 +55,7 @@ impl Read for Hang {
                 on = self.gate.changed.wait(on).unwrap();
             }
             self.gate.waiting.store(false, Ordering::SeqCst);
-            return Err(std::io::Error::other("interrupted"));
+            return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "interrupted"));
         }
         let n = buf.len().min((self.limit - pos) as usize);
         self.bytes.read(&mut buf[..n])
@@ -470,6 +470,39 @@ fn a_failure_of_the_playing_item_is_reported_while_the_next_one_is_replaced() {
     // The next item is replaced (and cancelled) just as the playing one
     // fails for real.
     rig.player.set_next(whole(3, b));
+    go.store(true, Ordering::SeqCst);
+    let seen = wait_event(&rig.events, PROMPT, |e| matches!(e, Event::Error { id: Some(1), .. }));
+    assert!(
+        seen.iter().any(|e| matches!(e, Event::Error { id: Some(1), .. })),
+        "the failure is reported: {seen:?}"
+    );
+}
+
+#[test]
+fn a_real_failure_while_a_seek_is_on_its_way_is_reported() {
+    let (a, _) = wav16(RATE, RATE as usize * 3);
+    let rig = rig(RATE);
+    let go = Arc::new(AtomicBool::new(false));
+    let waiting = Arc::new(AtomicBool::new(false));
+    let (g, w) = (Arc::clone(&go), Arc::clone(&waiting));
+    let open: StreamOpener = Box::new(move || {
+        Ok(Box::new(FailsOnce {
+            bytes: Cursor::new(a),
+            at: at(0.3),
+            go: g,
+            waiting: w,
+            failed: false,
+        }) as Box<dyn ByteSource>)
+    });
+    rig.player.play(PlayItem::stream(1, open));
+    let t = Instant::now();
+    while !waiting.load(Ordering::SeqCst) {
+        assert!(t.elapsed() < PROMPT, "the read waits");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // The engine raises an interrupt for the seek; the stream fails for a
+    // reason of its own before it gives way.
+    rig.player.seek(Duration::from_millis(100));
     go.store(true, Ordering::SeqCst);
     let seen = wait_event(&rig.events, PROMPT, |e| matches!(e, Event::Error { id: Some(1), .. }));
     assert!(

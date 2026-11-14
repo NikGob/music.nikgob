@@ -106,8 +106,8 @@ type Reopen = Box<dyn Fn() -> Result<Box<dyn FormatReader>, DecodeError> + Send>
 /// source is shared so its gain and duration can be asked after the probe.
 /// The first read error is kept: the probe reads past it as the end of
 /// the bytes, and the stream's own reason (a refused key, an age gate)
-/// says more than «no suitable format reader». A failed read is told to
-/// the item's slot, which knows whether it gave way (see
+/// says more than «no suitable format reader». A read that gave up is told
+/// to the item's slot, which knows whether the engine made it (see
 /// [`crate::cancel`]).
 struct SharedBytes(
     Arc<Mutex<Box<dyn ByteSource>>>,
@@ -124,8 +124,12 @@ impl SharedBytes {
 impl Read for SharedBytes {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.with(|s| s.read(buf)).inspect_err(|e| {
-            if let Some(slot) = &self.2 {
-                slot.note_failed_read();
+            // Only a read that gave up (see `Interrupter`) may have given
+            // way: any other error is the stream's own failure.
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                && let Some(slot) = &self.2
+            {
+                slot.note_given_way();
             }
             self.1.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| e.to_string());
         })

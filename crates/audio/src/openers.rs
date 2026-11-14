@@ -6,9 +6,13 @@
 //! (see [`crate::cancel`]), and a service lookup before the stream exists
 //! gives up too where the service lets it ([`crate::open_wanted`]); one
 //! that cannot keeps its thread until it returns, but no longer counts:
-//! the newest open gets a thread at once. Threads in all (such leftovers
-//! included) stay within [`MAX_THREADS`]. A thread that is done takes the
-//! next open in line instead of ending.
+//! the newest open always gets a thread at once. Such a leftover is
+//! already lost to whatever call holds it (a thread cannot be stopped
+//! from outside), so it is not waited for: what bounds the leftovers is
+//! the calls themselves (every service lookup has its HTTP timeout, a file
+//! open its disk), and more than [`LEFTOVERS_NOTED`] of them at once is
+//! logged. A thread that is done takes the next open in line instead of
+//! ending.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,8 +21,8 @@ use crate::cancel::{Slot, cancelled};
 
 /// Opens of wanted items running at once.
 pub(crate) const MAX_OPENERS: usize = 3;
-/// Opener threads in all, the ones finishing a superseded open included.
-pub(crate) const MAX_THREADS: usize = 6;
+/// Threads still finishing superseded opens past which it is logged.
+pub(crate) const LEFTOVERS_NOTED: usize = 6;
 
 /// How an open in line comes to an end.
 pub(crate) enum Start {
@@ -86,10 +90,13 @@ impl Openers {
                 .queue
                 .len()
                 .saturating_sub(pool.starting)
-                .min(MAX_OPENERS.saturating_sub(pool.wanted() + pool.starting))
-                .min(MAX_THREADS - pool.threads);
+                .min(MAX_OPENERS.saturating_sub(pool.wanted() + pool.starting));
             pool.threads += spawn;
             pool.starting += spawn;
+            let leftovers = pool.threads - pool.wanted() - pool.starting;
+            if spawn > 0 && leftovers > LEFTOVERS_NOTED {
+                log::warn!("audio: {leftovers} superseded opens still wait for their service");
+            }
             (skipped, spawn)
         };
         for job in skipped {
@@ -229,26 +236,29 @@ mod tests {
         let newest = Slot::new(true);
         openers.submit(Some(Arc::clone(&newest)), hanging(9, &gate, &busy, &tx));
         wait_until("the wanted ones run", || busy.load(Ordering::SeqCst) == 5);
-        assert!(openers.threads() <= MAX_THREADS);
 
-        // Superseded leftovers never pass the thread ceiling.
+        // However many superseded opens still hang, the newest gets a
+        // thread at once.
         for s in &slots {
             s.cancel();
         }
         newest.cancel();
-        for n in 10..20 {
+        for n in 10..14 {
             let s = Slot::new(true);
+            openers.submit(Some(Arc::clone(&s)), hanging(n, &gate, &busy, &tx));
+            wait_until("it runs", || busy.load(Ordering::SeqCst) == 6 + (n - 10) as usize);
             s.cancel();
-            openers.submit(Some(s), hanging(n, &gate, &busy, &tx));
-            assert!(openers.threads() <= MAX_THREADS, "{}", openers.threads());
         }
+        assert_eq!(busy.load(Ordering::SeqCst), 9, "nine hang, all superseded");
+        openers.submit(Some(Slot::new(true)), hanging(20, &gate, &busy, &tx));
+        wait_until("the newest runs", || busy.load(Ordering::SeqCst) == 10);
 
         gate.store(true, Ordering::SeqCst);
-        let mut ran: Vec<u64> = (0..16)
+        let mut ran: Vec<u64> = (0..11)
             .filter_map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap())
             .collect();
         ran.sort_unstable();
-        assert_eq!(ran, [0, 1, 2, 4, 9]);
+        assert_eq!(ran, [0, 1, 2, 4, 9, 10, 11, 12, 13, 20]);
         wait_until("the threads end", || openers.threads() == 0);
     }
 }

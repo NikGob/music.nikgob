@@ -761,13 +761,15 @@ pub trait AudioStream: Read + Seek + Send {
 /// until it is called with `false`; reads of bytes already there go on.
 /// The audio engine calls it from another thread while a read waits: when
 /// the track is no longer wanted (stopped, another one plays) and to take
-/// a seek. What a read returns meanwhile is not reported as a failure.
+/// a seek. A read that gives up this way fails with [`interrupted_read`]
+/// (kind [`std::io::ErrorKind::WouldBlock`]); only that error is taken for
+/// giving way, any other is the stream's failure, interrupted or not.
 pub type StreamInterrupter = std::sync::Arc<dyn Fn(bool) + Send + Sync>;
 
 /// The error of a read that gave up because it was interrupted (see
 /// [`StreamInterrupter`]).
 pub fn interrupted_read() -> std::io::Error {
-    std::io::Error::other("read interrupted")
+    std::io::Error::new(std::io::ErrorKind::WouldBlock, "read interrupted")
 }
 
 /// "Opus ~160 кбит/с": a codec and its bitrate, `approx` for a variable

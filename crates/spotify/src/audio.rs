@@ -9,7 +9,7 @@
 //! librespot-playback's `player.rs` (MIT).
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
@@ -199,8 +199,15 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
         }
     };
     // The first range is fetched in random-access mode, then streaming
-    // mode prefetches ahead of the read position.
+    // mode prefetches ahead of the read position. A header read cannot be
+    // stopped once it runs (librespot gives it up by itself): at most
+    // `MAX_HEADER_READS` run at once, a given-up open's one included.
+    let permit = header_reads()
+        .acquire_owned()
+        .await
+        .map_err(|e| failed(StreamError::Network(e.to_string())))?;
     let header = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let decrypted = AudioDecrypt::new(Some(key), file);
         OggBody::new(decrypted, size).map(|(body, gain)| (body, gain, controller))
     })
@@ -217,6 +224,14 @@ pub async fn open(session: &Session, id: &str, premium: Option<bool>) -> Result<
         cached,
         _controller: controller,
     })
+}
+
+/// Header reads running at most (see [`open`]).
+const MAX_HEADER_READS: usize = 3;
+
+fn header_reads() -> Arc<tokio::sync::Semaphore> {
+    static READS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(READS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_HEADER_READS))))
 }
 
 /// The item itself when it has files, else its first available alternative.
@@ -255,18 +270,25 @@ pub type Opener = Box<dyn FnOnce(&AtomicBool) -> Result<Opened, StreamError> + S
 /// fetches the wanted range; it prefetches ahead while streaming.
 ///
 /// librespot waits for a missing range on a condvar of its own, which
-/// nothing outside it can wake. So the opened track is read on a thread of
-/// its own ([`Reader`]), and the engine's thread waits for that thread's
-/// answer where the [`interrupter`](AudioStream::interrupter) reaches it:
-/// a read the engine interrupts returns at once, while librespot's read
-/// finishes on the reader thread (it gives up by itself after a few
-/// seconds without data). The interrupter also ends a wait for the open,
-/// whose work on the runtime is then stopped.
+/// nothing outside it can wake, and a file has one reading position. So the
+/// opened track is read on a thread of its own ([`Reader`]), and the
+/// engine's thread waits for that thread's answer where the
+/// [`interrupter`](AudioStream::interrupter) reaches it: a read the engine
+/// interrupts returns at once, while librespot's read finishes on the
+/// reader thread (it gives up by itself after a few seconds without data).
+/// What was read is kept, so a seek back into it is answered at once, also
+/// while librespot still waits elsewhere. At most [`MAX_READERS`] such
+/// threads live at once (stalled ones included); past that a stream reads
+/// on the caller's thread, as before the reader existed. The interrupter
+/// also ends a wait for the open, whose work on the runtime is then
+/// stopped.
 pub struct SpotifyStream {
     opener: Option<Opener>,
     /// The engine interrupted the stream (the open looks at this).
     interrupted: Arc<AtomicBool>,
     reader: Arc<Reader>,
+    /// The opened track read on this thread: no reader thread was free.
+    direct: Option<Body>,
     info: Option<Info>,
     failure: Option<String>,
     /// Where the next read starts, on the plain Ogg stream.
@@ -300,12 +322,37 @@ pub fn take_recent(recent: &Recent, id: &str) -> Option<Opened> {
     None
 }
 
+/// Streams dropped so far: the number of the last one, whose track is the
+/// one to keep in [`Recent`]. A track handed back later by a reader thread
+/// (librespot still waited in it) is kept only if no stream was dropped
+/// since its own.
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Keeps `opened` (of stream number `dropped`) as the recent track, unless
+/// a stream dropped later came first.
+fn keep_recent(keep: Option<(String, Recent)>, opened: Opened, dropped: u64) {
+    if let Some((id, recent)) = keep {
+        keep_latest(&recent, id, opened, dropped);
+    }
+}
+
+/// [`keep_recent`] for any kind of kept value.
+fn keep_latest<T>(slot: &Mutex<Option<(String, T)>>, id: String, value: T, dropped: u64) {
+    let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    if DROPPED.load(Ordering::SeqCst) == dropped {
+        let old = slot.replace((id, value));
+        drop(slot);
+        drop(old);
+    }
+}
+
 impl SpotifyStream {
     pub fn new(opener: Opener) -> Self {
         Self {
             opener: Some(opener),
             interrupted: Arc::new(AtomicBool::new(false)),
             reader: Arc::new(Reader::default()),
+            direct: None,
             info: None,
             failure: None,
             pos: 0,
@@ -324,25 +371,17 @@ impl SpotifyStream {
         if let Some(opener) = self.opener.take() {
             match opener(&self.interrupted) {
                 Ok(o) => {
-                    let info = Info {
+                    self.info = Some(Info {
                         len: o.body.len(),
                         gain_db: o.gain_db,
                         duration: o.duration,
                         kbps: o.kbps,
-                    };
-                    let keep = self.keep.take();
-                    let done = move |body: Body| {
-                        if let Some((id, recent)) = keep {
-                            let old = recent
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .replace((id, body.0));
-                            drop(old);
-                        }
-                    };
-                    match Reader::start(&self.reader, Body(o), done) {
-                        Ok(()) => self.info = Some(info),
-                        Err(e) => self.failure = Some(format!("Spotify: {e}")),
+                    });
+                    let keep = self.keep.clone();
+                    let done = move |body: Body, dropped: u64| keep_recent(keep, body.0, dropped);
+                    if let Err(body) = Reader::start(&self.reader, Body(o), done) {
+                        log::debug!("spotify: every reader thread is busy, reading on this thread");
+                        self.direct = Some(body);
                     }
                 }
                 Err(e) => self.failure = Some(describe(&e)),
@@ -372,7 +411,13 @@ impl Read for SpotifyStream {
         if buf.is_empty() || self.pos >= info.len {
             return Ok(0);
         }
-        let n = self.reader.read_at(self.pos, buf)?;
+        let n = match &mut self.direct {
+            Some(body) => {
+                body.seek(SeekFrom::Start(self.pos))?;
+                body.read(buf)?
+            }
+            None => self.reader.read_at(self.pos, buf)?,
+        };
         self.pos += n as u64;
         Ok(n)
     }
@@ -426,9 +471,19 @@ impl AudioStream for SpotifyStream {
 
 impl Drop for SpotifyStream {
     fn drop(&mut self) {
+        // Only a stream that opened its track counts: one dropped while it
+        // opened has nothing to keep and must not displace one that has.
+        let dropped = if self.info.is_some() {
+            DROPPED.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            0
+        };
+        if let Some(body) = self.direct.take() {
+            keep_recent(self.keep.take(), body.0, dropped);
+        }
         // The reader thread ends once a read librespot still waits in is
-        // over, and keeps the track (see `keep_in`).
-        self.reader.close();
+        // over, and keeps the track if nothing newer was kept meanwhile.
+        self.reader.close(dropped);
     }
 }
 
@@ -449,10 +504,18 @@ impl Seek for Body {
 
 /// The most one read asks of the reader thread.
 const READ_MAX: usize = 64 * 1024;
+/// Reader threads alive at most, the ones librespot still holds included.
+pub const MAX_READERS: usize = 4;
+/// Reader threads alive now.
+static READERS: AtomicUsize = AtomicUsize::new(0);
+/// What is read is kept in pieces of this size.
+const KEPT_BLOCK: u64 = 64 * 1024;
+/// At most this much of a track is kept (a long mix keeps its start).
+const KEPT_MAX: u64 = 16 * 1024 * 1024;
 
 /// Reads of a source done on a thread of its own (see [`SpotifyStream`]):
 /// one read at a time, asked by position; the caller's wait for the answer
-/// gives way to an interrupt.
+/// gives way to an interrupt, and what was read is kept and answered from.
 #[derive(Default)]
 struct Reader {
     state: Mutex<ReadState>,
@@ -469,7 +532,67 @@ struct ReadState {
     busy: bool,
     asked: u64,
     interrupted: bool,
-    closed: bool,
+    /// The stream was dropped, as stream number this.
+    closed: Option<u64>,
+    kept: Kept,
+}
+
+/// The bytes read so far, by position.
+#[derive(Default)]
+struct Kept {
+    blocks: std::collections::HashMap<u64, Box<[u8]>>,
+    /// Sorted, disjoint, non-adjacent ranges of kept bytes.
+    have: Vec<std::ops::Range<u64>>,
+}
+
+impl Kept {
+    fn put(&mut self, pos: u64, bytes: &[u8]) {
+        let end = pos + bytes.len() as u64;
+        if bytes.is_empty() || end > KEPT_MAX {
+            return;
+        }
+        let mut at = pos;
+        while at < end {
+            let block = at / KEPT_BLOCK;
+            let off = (at % KEPT_BLOCK) as usize;
+            let n = ((KEPT_BLOCK as usize) - off).min((end - at) as usize);
+            let from = (at - pos) as usize;
+            self.blocks
+                .entry(block)
+                .or_insert_with(|| vec![0; KEPT_BLOCK as usize].into_boxed_slice())[off..off + n]
+                .copy_from_slice(&bytes[from..from + n]);
+            at += n as u64;
+        }
+        let (mut start, mut stop) = (pos, end);
+        self.have.retain(|r| {
+            if r.end < start || r.start > stop {
+                return true;
+            }
+            start = start.min(r.start);
+            stop = stop.max(r.end);
+            false
+        });
+        let i = self.have.partition_point(|r| r.start < start);
+        self.have.insert(i, start..stop);
+    }
+
+    /// Copies kept bytes from `pos` into `buf`; how many (0: not kept).
+    fn get(&self, pos: u64, buf: &mut [u8]) -> usize {
+        let Some(run) = self.have.iter().find(|r| r.start <= pos && pos < r.end) else {
+            return 0;
+        };
+        let n = buf.len().min((run.end - pos) as usize);
+        let mut done = 0;
+        while done < n {
+            let at = pos + done as u64;
+            let off = (at % KEPT_BLOCK) as usize;
+            let m = ((KEPT_BLOCK as usize) - off).min(n - done);
+            let block = &self.blocks[&(at / KEPT_BLOCK)];
+            buf[done..done + m].copy_from_slice(&block[off..off + m]);
+            done += m;
+        }
+        n
+    }
 }
 
 impl Reader {
@@ -481,18 +604,40 @@ impl Reader {
         self.changed.wait(st).unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Starts the thread over `body` (at position 0); `done` gets it back
-    /// when the thread ends.
+    /// Starts the thread over `body` (at position 0); `done` gets it back,
+    /// with the number of its stream, when the thread ends. `body` back
+    /// when no reader thread is free ([`MAX_READERS`]).
     fn start<B: Read + Seek + Send + 'static>(
         this: &Arc<Self>,
         body: B,
-        done: impl FnOnce(B) + Send + 'static,
-    ) -> io::Result<()> {
+        done: impl FnOnce(B, u64) + Send + 'static,
+    ) -> Result<(), B> {
+        if READERS.fetch_add(1, Ordering::SeqCst) >= MAX_READERS {
+            READERS.fetch_sub(1, Ordering::SeqCst);
+            return Err(body);
+        }
         let me = Arc::clone(this);
-        std::thread::Builder::new()
+        let body = Arc::new(Mutex::new(Some(body)));
+        let mine = Arc::clone(&body);
+        let spawned = std::thread::Builder::new()
             .name("nikgob-spotify-read".into())
-            .spawn(move || done(me.serve(body)))
-            .map(drop)
+            .spawn(move || {
+                let body = mine.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some(body) = body {
+                    let body = me.serve(body);
+                    let dropped = me.lock().closed.unwrap_or(0);
+                    done(body, dropped);
+                }
+                READERS.fetch_sub(1, Ordering::SeqCst);
+            });
+        match spawned {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                READERS.fetch_sub(1, Ordering::SeqCst);
+                let body = body.lock().unwrap_or_else(PoisonError::into_inner).take();
+                body.map_or(Ok(()), Err)
+            }
+        }
     }
 
     /// The reader thread: answers reads until closed.
@@ -504,7 +649,7 @@ impl Reader {
                 if let Some(ask) = st.ask.take() {
                     break ask;
                 }
-                if st.closed {
+                if st.closed.is_some() {
                     return body;
                 }
                 st = self.wait(st);
@@ -527,21 +672,34 @@ impl Reader {
                 at = u64::MAX;
             }
             let mut st = self.lock();
+            if let Ok(bytes) = &read {
+                st.kept.put(pos, bytes);
+            }
             st.busy = false;
             st.answer = Some((n, read));
             self.changed.notify_all();
         }
     }
 
-    /// Reads at `pos` into `buf`, waiting for the thread unless interrupted.
+    /// Reads at `pos` into `buf`: from what was read before, else from the
+    /// thread, waiting for it unless interrupted.
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> io::Result<usize> {
         let mut st = self.lock();
+        let kept = st.kept.get(pos, buf);
+        if kept > 0 {
+            return Ok(kept);
+        }
         // One read at a time: one interrupted earlier may still be running.
         while st.ask.is_some() || st.busy {
             if st.interrupted {
                 return Err(interrupted_read());
             }
             st = self.wait(st);
+            // It may have brought the bytes asked for now.
+            let kept = st.kept.get(pos, buf);
+            if kept > 0 {
+                return Ok(kept);
+            }
         }
         st.asked += 1;
         let n = st.asked;
@@ -567,8 +725,9 @@ impl Reader {
         self.changed.notify_all();
     }
 
-    fn close(&self) {
-        self.lock().closed = true;
+    /// The stream (number `dropped`) is gone: the thread ends.
+    fn close(&self, dropped: u64) {
+        self.lock().closed = Some(dropped);
         self.changed.notify_all();
     }
 }
@@ -680,7 +839,8 @@ mod tests {
         let reader = Arc::new(Reader::default());
         let (back_tx, back_rx) = mpsc::channel();
         let body = Stalling { bytes: Cursor::new(data.clone()), stall: 100, go: Arc::clone(&go) };
-        Reader::start(&reader, body, move |b| back_tx.send(b.bytes.position()).unwrap()).unwrap();
+        let started = Reader::start(&reader, body, move |b, _| back_tx.send(b.bytes.position()).unwrap());
+        assert!(started.is_ok());
         let mut buf = [0u8; 50];
         assert_eq!(reader.read_at(10, &mut buf).unwrap(), 50);
         assert_eq!(buf[..], data[10..60]);
@@ -703,13 +863,58 @@ mod tests {
         // While interrupted, a read behind the one still running fails too.
         assert!(reader.read_at(0, &mut buf).is_err());
 
-        // Lifted, and the data comes: reads go on from anywhere.
+        // A seek back into what was read is answered at once, though
+        // librespot still waits where the read was abandoned.
         reader.interrupt(false);
+        let began = Instant::now();
+        assert_eq!(reader.read_at(20, &mut buf).unwrap(), 40);
+        assert_eq!(buf[..40], data[20..60]);
+        assert!(began.elapsed() < Duration::from_millis(500), "{:?}", began.elapsed());
+
+        // The data comes: reads go on from anywhere.
         go.store(true, Ordering::SeqCst);
         assert_eq!(reader.read_at(0, &mut buf).unwrap(), 50);
         assert_eq!(buf[..], data[..50]);
-        reader.close();
+        reader.close(0);
         back_rx.recv_timeout(Duration::from_secs(2)).expect("the thread ends and hands the body back");
+    }
+
+    #[test]
+    fn reader_threads_are_capped_and_a_stream_past_the_cap_reads_on_its_own_thread() {
+        let go = Arc::new(AtomicBool::new(false));
+        let mut readers = Vec::new();
+        let mut refused = 0;
+        for _ in 0..=MAX_READERS {
+            let reader = Arc::new(Reader::default());
+            let body = Stalling { bytes: Cursor::new(vec![0; 10]), stall: 0, go: Arc::clone(&go) };
+            match Reader::start(&reader, body, |_, _| {}) {
+                Ok(()) => readers.push(reader),
+                Err(_) => refused += 1,
+            }
+        }
+        assert!(refused >= 1 && readers.len() <= MAX_READERS, "{}", readers.len());
+        go.store(true, Ordering::SeqCst);
+        for r in &readers {
+            r.close(0);
+        }
+        let t = Instant::now();
+        while READERS.load(Ordering::SeqCst) >= MAX_READERS {
+            assert!(t.elapsed() < Duration::from_secs(2), "the threads end");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_late_track_does_not_displace_one_kept_after_it() {
+        let recent: Mutex<Option<(String, u32)>> = Mutex::new(None);
+        // Stream A is dropped, then stream B; B's track is kept at once, and
+        // A's comes late (its reader was still held by librespot).
+        let a = DROPPED.fetch_add(1, Ordering::SeqCst) + 1;
+        let b = DROPPED.fetch_add(1, Ordering::SeqCst) + 1;
+        keep_latest(&recent, "b".into(), 2, b);
+        keep_latest(&recent, "a".into(), 1, a);
+        let kept = recent.lock().unwrap().as_ref().map(|(id, _)| id.clone());
+        assert_eq!(kept.as_deref(), Some("b"));
     }
 
     #[test]

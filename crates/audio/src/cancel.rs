@@ -18,11 +18,13 @@
 //! read waiting in a cancelled or interrupted stream returns an error at
 //! once, so the decoder comes back to its commands.
 //!
-//! Which read gave way is told by the source itself: the engine's wrapper
-//! of each source notes a read of it that failed while it was cancelled or
-//! interrupted ([`Slot::note_failed_read`]), and the decoder looks at the
-//! very source whose read failed ([`Slot::take_gave_way`]). Any other read
-//! error is the stream's own failure and is reported.
+//! Which read gave way is told by the source itself: a read that gives up
+//! fails with [`std::io::ErrorKind::WouldBlock`], the engine's wrapper of
+//! each source notes such a read of it when the engine itself had cancelled
+//! or interrupted it ([`Slot::note_given_way`]), and the decoder looks at
+//! the very source whose read failed ([`Slot::take_gave_way`]). Any other
+//! read error is the stream's own failure and is reported, also while a
+//! seek is on its way.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -30,7 +32,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 /// bytes give up: called with `true`, a read waiting now returns an error
 /// at once, and so does every later read that would have to wait, until
 /// it is called with `false`. Reads of bytes already there go on as
-/// usual. Called from any thread, also while a read waits.
+/// usual. Called from any thread, also while a read waits. A read that
+/// gives up this way must fail with [`std::io::ErrorKind::WouldBlock`] and
+/// only such one: the engine takes any other error for the stream's own
+/// failure.
 pub type Interrupter = Arc<dyn Fn(bool) + Send + Sync>;
 
 #[derive(Default)]
@@ -154,9 +159,10 @@ impl Slot {
         self.lock().interrupts > 0
     }
 
-    /// The engine's wrapper of the source saw a read of it fail: when the
-    /// item was cancelled or interrupted, the read gave way.
-    pub(crate) fn note_failed_read(&self) {
+    /// The engine's wrapper of the source saw a read of it give up
+    /// ([`std::io::ErrorKind::WouldBlock`]): when the engine had cancelled
+    /// or interrupted the item, the read gave way to it.
+    pub(crate) fn note_given_way(&self) {
         let mut st = self.lock();
         if st.cancelled || st.interrupts > 0 {
             st.gave_way = true;
@@ -317,10 +323,10 @@ mod tests {
     fn only_a_read_failing_while_cancelled_or_interrupted_gave_way() {
         let s = Slot::new(true);
         s.mark_opened();
-        s.note_failed_read();
-        assert!(!s.take_gave_way(), "the stream's own failure");
+        s.note_given_way();
+        assert!(!s.take_gave_way(), "not raised by the engine");
         assert!(s.interrupt());
-        s.note_failed_read();
+        s.note_given_way();
         assert!(s.take_gave_way());
         assert!(!s.take_gave_way());
     }
