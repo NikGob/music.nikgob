@@ -334,3 +334,26 @@ fn a_query_with_ye_finds_the_song_written_with_yo() {
     let _ = search_all(&r, "лёд");
     assert_eq!(deezer.calls("search_kind"), 0);
 }
+
+/// With Spotify connected, a Deezer track (no sound of its own) is looked
+/// up on Spotify before YouTube Music: Spotify plays it, YouTube Music is
+/// not asked.
+#[test]
+fn a_deezer_track_plays_from_a_connected_spotify_before_youtube_music() {
+    let lib = Library::open_in_memory().unwrap();
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let deezer = Arc::new(FakeService::deezer());
+    let spotify = Arc::new(FakeService::spotify());
+    let mut listed = find(&deezer, "dz-discovery-2");
+    listed.isrc = None;
+    let track = lib.upsert_stream_track(&listed).unwrap();
+    let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone(), youtube.clone(), deezer.clone()];
+    let r = rig(&lib, streams);
+    r.rt.send(Command::PlayTracks { tracks: vec![track], start: 0, context: "test".into() });
+    wait_until("a play request", || !r.asked.lock().unwrap().is_empty());
+    let req = r.asked.lock().unwrap()[0].clone();
+    assert_eq!(req.source, PlaySource::Stream { service: Service::Spotify, id: "sp-discovery-2".into() });
+    assert_eq!(deezer.calls("track"), 1, "its ISRC from Deezer first");
+    assert_eq!(spotify.calls("find_isrc"), 1);
+    assert_eq!(youtube.calls("find_isrc") + youtube.calls("search_kind"), 0, "YouTube Music not asked");
+}

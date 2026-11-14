@@ -21,9 +21,11 @@
 //! While YouTube Music is off (or gives no sound) and Spotify plays, the
 //! track being played and the ones ahead are looked up on Spotify the same
 //! way instead (ISRC, then "artist title", songs only), and the hit is
-//! attached as a Spotify source. A track that starts from YouTube Music
-//! while Spotify plays is looked up on Spotify too, in the background: the
-//! play goes on, the next one is from Spotify. The stream analysis and
+//! attached as a Spotify source. While Spotify plays, a track about to
+//! start from YouTube Music (or to be looked up there) waits a moment for
+//! its Spotify copy first (see [`super::prefer`]); one that starts from
+//! YouTube Music all the same is looked up on Spotify in the background:
+//! the play goes on, the next one is from Spotify. The stream analysis and
 //! saving from YouTube Music only ever ask YouTube Music.
 //!
 //! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
@@ -165,7 +167,7 @@ fn pick_isrc(hit: &StreamTrack, q: &ResolveQuery) -> bool {
 /// Tracks to look up ahead in the queue.
 const AHEAD: usize = 2;
 /// Library cache key of a lookup on `via` that found nothing.
-fn miss_key(track: TrackId, via: Service) -> String {
+pub(super) fn miss_key(track: TrackId, via: Service) -> String {
     match via {
         Service::Spotify => format!("sp_miss.{track}"),
         _ => format!("yt_miss.{track}"),
@@ -231,6 +233,36 @@ pub(crate) async fn search_youtube(
     q: &ResolveQuery,
 ) -> Option<StreamTrack> {
     lookup_youtube(yt, q).await.ok().flatten()
+}
+
+/// The Deezer catalogue and the id of a track there.
+pub(super) type IsrcSource = (std::sync::Arc<dyn nikgob_core::streaming::StreamService>, String);
+
+/// Looks `q` up on `svc`: a Deezer track without its ISRC asks Deezer
+/// for it first (the full track comes back too), then the ISRC, then
+/// "artist title".
+pub(super) async fn look_up(
+    svc: std::sync::Arc<dyn nikgob_core::streaming::StreamService>,
+    mut q: ResolveQuery,
+    deezer: Option<IsrcSource>,
+) -> (Lookup, Option<Box<StreamTrack>>) {
+    let mut filled = None;
+    if let Some((dz, id)) = deezer {
+        match dz.track(&id).await {
+            Ok(full) => {
+                q.isrc = full.isrc.clone();
+                filled = Some(Box::new(full));
+            }
+            Err(e) => log::info!("deezer: no ISRC for {id}: {e}"),
+        }
+    }
+    if let Some(isrc) = &q.isrc
+        && let Ok(Some(hit)) = svc.find_isrc(isrc).await
+        && pick_isrc(&hit, &q)
+    {
+        return (Ok(Some(hit)), filled);
+    }
+    (lookup_youtube(svc.as_ref(), &q).await, filled)
 }
 
 /// [`search_youtube`] telling a rate limit apart.
@@ -352,7 +384,7 @@ impl Worker {
 
     /// The track can be looked up on `via`: it is on and plays, the track
     /// has no copy there yet, and it did not miss there within `ttl`.
-    fn can_resolve_on(&mut self, track: TrackId, ttl: Duration, via: Service) -> bool {
+    pub(super) fn can_resolve_on(&mut self, track: TrackId, ttl: Duration, via: Service) -> bool {
         if self.service(via).is_none() || !self.has_audio(via) {
             return false;
         }
@@ -425,14 +457,11 @@ impl Worker {
         self.begin_resolve_on(track, Service::Youtube);
     }
 
-    /// Starts the lookup of `track` on `via` (once).
-    fn begin_resolve_on(&mut self, track: TrackId, via: Service) {
-        if self.streaming.resolving.contains(&track) {
-            return;
-        }
-        let Some(yt) = self.service(via) else { return };
-        let Some(t) = self.lib.get_track(track).ok().flatten() else { return };
-        let mut q = ResolveQuery {
+    /// What `track` is looked up by, and the Deezer track to ask its ISRC
+    /// of when it has none.
+    pub(super) fn lookup_of(&mut self, track: TrackId) -> Option<(ResolveQuery, Option<IsrcSource>)> {
+        let t = self.lib.get_track(track).ok().flatten()?;
+        let q = ResolveQuery {
             title: t.title.clone(),
             artist: t.artist_credit.display(),
             duration_ms: t.duration_ms.map(u64::from),
@@ -441,38 +470,22 @@ impl Worker {
             aliases: self.artist_names(&t),
         };
         let deezer = if q.isrc.is_none() { self.isrc_source(track) } else { None };
+        Some((q, deezer))
+    }
+
+    /// Starts the lookup of `track` on `via` (once).
+    fn begin_resolve_on(&mut self, track: TrackId, via: Service) {
+        if self.streaming.resolving.contains(&track) {
+            return;
+        }
+        let Some(yt) = self.service(via) else { return };
+        let Some((q, deezer)) = self.lookup_of(track) else { return };
         self.streaming.resolving.insert(track);
         self.streaming.resolve_via.insert(track, via);
         log::info!("looking up {} on {}", q.text(), via.display_name());
         self.streaming.spawn(async move {
-            // A Deezer track without its ISRC: Deezer tells it first.
-            let mut filled = None;
-            if let Some((dz, id)) = deezer {
-                match dz.track(&id).await {
-                    Ok(full) => {
-                        q.isrc = full.isrc.clone();
-                        filled = Some(Box::new(full));
-                    }
-                    Err(e) => log::info!("deezer: no ISRC for {id}: {e}"),
-                }
-            }
-            if let Some(isrc) = &q.isrc
-                && let Ok(Some(hit)) = yt.find_isrc(isrc).await
-                && pick_isrc(&hit, &q)
-            {
-                return Msg::Resolved {
-                    track,
-                    via,
-                    found: Ok(Some(hit)),
-                    filled,
-                };
-            }
-            Msg::Resolved {
-                track,
-                via,
-                found: lookup_youtube(yt.as_ref(), &q).await,
-                filled,
-            }
+            let (found, filled) = look_up(yt, q, deezer).await;
+            Msg::Resolved { track, via, found, filled }
         });
     }
 
@@ -688,7 +701,8 @@ impl Worker {
     /// asked in the background (ISRC first), and the hit joins the same
     /// track. This play goes on; the next one is from Spotify.
     pub(crate) fn spotify_copy_for(&mut self, e: Entry, kind: SourceKind) {
-        if kind != SourceKind::Youtube {
+        // Asked already for this play (see `prefer`).
+        if kind != SourceKind::Youtube || self.prefer_asking(e.track) {
             return;
         }
         let ttl = self.streaming.schedule.miss_ttl;
@@ -704,6 +718,8 @@ impl Worker {
     pub(crate) fn resolve_ahead(&mut self) {
         // Clips the app queued: their songs first (see `clips::QueueClips`).
         self.clips_ahead();
+        // The next track's copy on the service the user prefers (`prefer`).
+        self.prefer_ahead();
         if !self.streaming.resolving.is_empty() {
             return; // one lookup at a time; the playing track's goes first
         }

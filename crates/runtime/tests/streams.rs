@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{Codec, Source, SourceKind, TrackId};
 use nikgob_core::streaming::{FakeService, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
-use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs, Status};
 
 /// Remembers what the engine was asked to play, and the seeks.
@@ -59,9 +59,13 @@ struct Rig {
 
 impl Rig {
     fn start(lib: Library, streams: Vec<Arc<dyn StreamService>>) -> Self {
+        Self::start_with(lib, streams, StreamSchedule::default())
+    }
+
+    fn start_with(lib: Library, streams: Vec<Arc<dyn StreamService>>, schedule: StreamSchedule) -> Self {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let seeks = Arc::new(Mutex::new(Vec::new()));
-        let rt = Runtime::start(
+        let rt = Runtime::start_scheduled(
             RuntimeConfig {
                 library: lib,
                 streams,
@@ -73,6 +77,7 @@ impl Rig {
             },
             Box::new(Recorder(asked.clone(), seeks.clone())),
             Arc::new(|| {}),
+            schedule,
         );
         Self { rt, asked, seeks }
     }
@@ -448,13 +453,90 @@ fn a_stream_without_details_takes_the_heard_length_and_its_video_picture() {
     assert_eq!(lib.get_track(track).unwrap().unwrap().duration_ms, Some(149_521));
 }
 
-#[test]
-fn a_track_from_youtube_gains_its_spotify_copy_for_the_next_play() {
-    // A song known only from YouTube Music (a radio, a search): it plays
-    // from there, and Spotify is asked for it meanwhile, by its ISRC.
-    let lib = Library::open_in_memory().unwrap();
+/// A song known only from YouTube Music (a like, a radio, a search), with
+/// its ISRC.
+fn youtube_only(lib: &Library) -> TrackId {
     let mut yt = find(&FakeService::youtube(), "yt-homogenic-3");
     yt.isrc = Some("ZZFAK9700003".into());
+    lib.upsert_stream_track(&yt).unwrap()
+}
+
+fn has_spotify_copy(lib: &Library, track: TrackId) -> bool {
+    lib.sources_of_track(track)
+        .unwrap()
+        .iter()
+        .any(|s| s.kind == SourceKind::Spotify && s.locator == "sp-homogenic-3")
+}
+
+#[test]
+fn a_track_from_youtube_plays_from_a_connected_spotify_first() {
+    // Spotify is asked for it (by its ISRC) before it starts: the first
+    // play is Spotify's, nothing is opened on YouTube Music.
+    let lib = Library::open_in_memory().unwrap();
+    let track = youtube_only(&lib);
+    let spotify = Arc::new(FakeService::spotify());
+    let youtube = Arc::new(FakeService::youtube());
+    let streams: Vec<Arc<dyn StreamService>> = vec![
+        spotify.clone() as Arc<dyn StreamService>,
+        youtube.clone() as Arc<dyn StreamService>,
+    ];
+    let rig = Rig::start(lib.clone(), streams);
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Spotify, "sp-homogenic-3"));
+    assert!(has_spotify_copy(&lib, track), "kept for the next time");
+    assert_eq!(spotify.calls("find_isrc"), 1, "{:?}", spotify.all_calls());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.asked.lock().unwrap().len(), 1, "nothing restarts it");
+    // The next play asks nothing.
+    rig.play(track);
+    assert_eq!(rig.asked(1).source, stream(Service::Spotify, "sp-homogenic-3"));
+    assert_eq!(spotify.calls("find_isrc"), 1);
+}
+
+#[test]
+fn a_slow_spotify_leaves_the_first_play_to_youtube_and_has_the_next() {
+    // Spotify does not answer within the wait: YouTube Music plays, the
+    // answer still joins the track, the next play is Spotify's.
+    let lib = Library::open_in_memory().unwrap();
+    let track = youtube_only(&lib);
+    let spotify = Arc::new(FakeService::spotify());
+    spotify.delay("find_isrc", Duration::from_millis(1500));
+    let streams: Vec<Arc<dyn StreamService>> = vec![
+        spotify.clone() as Arc<dyn StreamService>,
+        Arc::new(FakeService::youtube()),
+    ];
+    let schedule = StreamSchedule { prefer_wait: Duration::from_millis(300), ..StreamSchedule::default() };
+    let rig = Rig::start_with(lib.clone(), streams, schedule);
+    let t = Instant::now();
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-homogenic-3"));
+    assert!(t.elapsed() < Duration::from_millis(1400), "the wait is bounded: {:?}", t.elapsed());
+    wait_for("the Spotify copy", || has_spotify_copy(&lib, track));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.asked.lock().unwrap().len(), 1, "the play goes on from YouTube Music");
+    assert_eq!(spotify.calls("find_isrc"), 1, "asked once, not again when the play started");
+    spotify.delay("find_isrc", Duration::ZERO);
+    rig.play(track);
+    assert_eq!(rig.asked(1).source, stream(Service::Spotify, "sp-homogenic-3"));
+}
+
+#[test]
+fn without_spotify_a_track_from_youtube_plays_from_youtube_at_once() {
+    let lib = Library::open_in_memory().unwrap();
+    let track = youtube_only(&lib);
+    let rig = Rig::start(lib.clone(), vec![Arc::new(FakeService::youtube())]);
+    let t = Instant::now();
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-homogenic-3"));
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_song_spotify_does_not_have_plays_from_youtube_and_is_not_asked_again() {
+    let lib = Library::open_in_memory().unwrap();
+    let mut yt = find(&FakeService::youtube(), "yt-homogenic-3");
+    yt.isrc = None;
+    yt.title = "Песня, которой нет в Spotify".into();
     let track = lib.upsert_stream_track(&yt).unwrap();
     let spotify = Arc::new(FakeService::spotify());
     let streams: Vec<Arc<dyn StreamService>> = vec![
@@ -464,19 +546,12 @@ fn a_track_from_youtube_gains_its_spotify_copy_for_the_next_play() {
     let rig = Rig::start(lib.clone(), streams);
     rig.play(track);
     assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-homogenic-3"));
-    wait_for("the Spotify copy", || {
-        lib.sources_of_track(track)
-            .unwrap()
-            .iter()
-            .any(|s| s.kind == SourceKind::Spotify && s.locator == "sp-homogenic-3")
-    });
-    assert!(spotify.calls("find_isrc") >= 1, "{:?}", spotify.all_calls());
-    // The play goes on from YouTube Music: nothing restarts it.
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(rig.asked.lock().unwrap().len(), 1);
-    // The next play is Spotify's.
+    let asked = spotify.total_calls();
+    assert!(asked >= 1);
     rig.play(track);
-    assert_eq!(rig.asked(1).source, stream(Service::Spotify, "sp-homogenic-3"));
+    assert_eq!(rig.asked(1).source, stream(Service::Youtube, "yt-homogenic-3"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(spotify.total_calls(), asked, "the miss is kept");
 }
 
 #[test]

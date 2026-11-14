@@ -2219,6 +2219,11 @@ impl Worker {
             if self.wait_for_clip_song(e) {
                 return;
             }
+            // From YouTube Music while Spotify plays: a moment for its
+            // Spotify copy first.
+            if self.wait_for_preferred(e) {
+                return;
+            }
             if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
                 self.start_with(e, req, source, kind);
                 return;
