@@ -935,7 +935,11 @@ fn only_downloaded_lets_an_albums_tracklist_found_later_join_the_queue() {
         yt.set_liked_remotely(&id, false);
     }
     let r = rig(&lib, vec![Arc::new(yt)], false);
-    let prefs = nikgob_view::Prefs { library_only_downloaded: true, ..r.rt.state().prefs.clone() };
+    let prefs = nikgob_view::Prefs {
+        library_only_downloaded: true,
+        album_mode: nikgob_core::model::AlbumMode::Auto,
+        ..r.rt.state().prefs.clone()
+    };
     r.rt.send(Command::SetPrefs(Box::new(prefs)));
     wait_for(&r.rt, "the filter on", |s| s.prefs.library_only_downloaded);
 

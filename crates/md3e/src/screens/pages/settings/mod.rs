@@ -32,7 +32,7 @@ use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
 pub(super) use rows::fmt_speed;
 pub(crate) use services::{
-    SoloistDialog, cookies_fields, login_error, login_prompt, numbered, open_url, paused_line, spotify_steps, step, token_fields,
+    SoloistDialog, cookies_fields, login_error, login_prompt, open_url, paused_line, spotify_steps, step, token_fields,
 };
 
 use super::settings_help::{self, DrawnRow, Level, SettingId as Id, TABS};

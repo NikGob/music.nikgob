@@ -47,6 +47,9 @@ pub enum Field {
     CoverSpin,
     CoverPulse,
     Ring,
+    /// The ring's old «В такт» and «Вращение», settings no more (the ring
+    /// always jumps and turns): kept so a «Свои» saved with them reads;
+    /// no preset owns them and they change nothing.
     RingBeat,
     SpinRing,
     Ambient,
@@ -107,13 +110,11 @@ pub enum FieldValue {
 /// The values of an area's fields kept for «Свои».
 pub type Snapshot = Vec<(Field, FieldValue)>;
 
-const TRACK_FIELDS: [Field; 9] = [
+const TRACK_FIELDS: [Field; 7] = [
     Field::CoverShape,
     Field::CoverSpin,
     Field::CoverPulse,
     Field::Ring,
-    Field::RingBeat,
-    Field::SpinRing,
     Field::Ambient,
     Field::BgShapes,
     Field::ProgressWave,
@@ -239,13 +240,12 @@ const LYRICS: [LyricsRow; 4] = [
     },
 ];
 
-/// «Экран трека»: shape, spin, pulse, ring, ring in time, ring spin
-/// (`None`: «—», the ring is off), glow, background shapes, wave.
-type TrackRow = (CoverShape, bool, bool, bool, Option<bool>, Option<bool>, Ambient, BgShapes, bool);
+/// «Экран трека»: shape, spin, pulse, ring, glow, background shapes, wave.
+type TrackRow = (CoverShape, bool, bool, bool, Ambient, BgShapes, bool);
 const TRACK: [TrackRow; 3] = [
-    (CoverShape::Original, false, false, false, None, None, Ambient::Glow, BgShapes::Off, true),
-    (CoverShape::Cookie12, true, true, true, Some(true), Some(true), Ambient::Reactive, BgShapes::Off, true),
-    (CoverShape::Random, true, true, true, Some(true), Some(true), Ambient::Reactive, BgShapes::Morph, true),
+    (CoverShape::Original, false, false, false, Ambient::Glow, BgShapes::Off, true),
+    (CoverShape::Cookie12, true, true, true, Ambient::Reactive, BgShapes::Off, true),
+    (CoverShape::Random, true, true, true, Ambient::Reactive, BgShapes::Morph, true),
 ];
 
 /// «Рекомендации»: only downloaded, the share of new music, mixes with
@@ -322,16 +322,12 @@ impl Area {
         let mut out = Vec::new();
         match self {
             Self::Track => {
-                let Some(&(shape, spin, pulse, ring, beat, ring_spin, ambient, bg, wave)) = TRACK.get(n) else { return out };
+                let Some(&(shape, spin, pulse, ring, ambient, bg, wave)) = TRACK.get(n) else { return out };
                 out.extend([
                     (Field::CoverShape, V::Shape(shape)),
                     (Field::CoverSpin, V::Bool(spin)),
                     (Field::CoverPulse, V::Bool(pulse)),
                     (Field::Ring, V::Bool(ring)),
-                ]);
-                out.extend(beat.map(|b| (Field::RingBeat, V::Bool(b))));
-                out.extend(ring_spin.map(|b| (Field::SpinRing, V::Bool(b))));
-                out.extend([
                     (Field::Ambient, V::Ambient(ambient)),
                     (Field::BgShapes, V::BgShapes(bg)),
                     (Field::ProgressWave, V::Bool(wave)),
@@ -497,8 +493,7 @@ impl Field {
             Self::CoverSpin => V::Bool(p.cover_spin),
             Self::CoverPulse => V::Bool(p.cover_pulse),
             Self::Ring => V::Bool(p.ring),
-            Self::RingBeat => V::Bool(p.ring_beat),
-            Self::SpinRing => V::Bool(p.spin_ring),
+            Self::RingBeat | Self::SpinRing => V::Bool(p.ring),
             Self::Ambient => V::Ambient(p.ambient),
             Self::BgShapes => V::BgShapes(p.bg_shapes),
             Self::ProgressWave => V::Bool(p.progress_wave),
@@ -541,8 +536,6 @@ impl Field {
             (Self::CoverSpin, V::Bool(b)) => p.cover_spin = *b,
             (Self::CoverPulse, V::Bool(b)) => p.cover_pulse = *b,
             (Self::Ring, V::Bool(b)) => p.ring = *b,
-            (Self::RingBeat, V::Bool(b)) => p.ring_beat = *b,
-            (Self::SpinRing, V::Bool(b)) => p.spin_ring = *b,
             (Self::Ambient, V::Ambient(a)) => p.ambient = *a,
             (Self::BgShapes, V::BgShapes(b)) => p.bg_shapes = *b,
             (Self::ProgressWave, V::Bool(b)) => p.progress_wave = *b,
@@ -597,12 +590,12 @@ impl Field {
         }
     }
 
-    /// The field counts in `p`: its parent row is on (the ring for its
-    /// beat and spin, seeding for its limits, new music for the random
-    /// songs). One that does not count never makes a preset «Свои».
+    /// The field counts in `p`: its parent row is on (seeding for its
+    /// limits, new music for the random songs); the ring's old rows never.
+    /// One that does not count never makes a preset «Свои».
     pub fn counts(self, p: &Prefs) -> bool {
         match self {
-            Self::RingBeat | Self::SpinRing => p.ring,
+            Self::RingBeat | Self::SpinRing => false,
             Self::SeedLimitGb | Self::SeedDays | Self::SeedRatio => !p.no_seed,
             Self::RadioExplore => p.radio_new_share != RadioNewShare::None,
             // A line that lights whole (Focus by letters) has no speed and
@@ -695,12 +688,6 @@ mod tests {
 
     #[test]
     fn fields_whose_parent_is_off_do_not_count() {
-        let strict = Area::Track.with(&Prefs::default(), 0);
-        assert!(!strict.ring);
-        for (beat, spin) in [(false, false), (true, false), (false, true), (true, true)] {
-            let p = Prefs { ring_beat: beat, spin_ring: spin, ..strict.clone() };
-            assert_eq!(Area::Track.current(&p), Some(0));
-        }
         let none = Area::Seeding.with(&Prefs::default(), 0);
         let p = Prefs { seed_limit_gb: 7, seed_days: 1, seed_ratio: 9.0, ..none };
         assert_eq!(Area::Seeding.current(&p), Some(0));
@@ -709,8 +696,24 @@ mod tests {
             assert_eq!(Area::Recs.current(&Prefs { radio_explore: explore, ..mine.clone() }), Some(0));
         }
         // With the parent on they count.
-        let lively = Area::Track.with(&Prefs::default(), 1);
-        assert_eq!(Area::Track.current(&Prefs { ring_beat: false, ..lively }), None);
+        let shared = Area::Seeding.with(&Prefs::default(), 1);
+        assert_eq!(Area::Seeding.current(&Prefs { seed_days: 1, ..shared }), None);
+    }
+
+    /// A «Свои» kept with the ring's old rows («В такт», «Вращение») brings
+    /// back the rest and changes nothing for them; the presets own them no
+    /// more.
+    #[test]
+    fn the_rings_old_rows_are_no_presets_part() {
+        assert!(!Area::Track.fields().contains(&Field::RingBeat) && !Area::Track.fields().contains(&Field::SpinRing));
+        let mut p = Prefs::first_start();
+        p.custom_presets.insert(
+            Area::Track,
+            vec![(Field::CoverShape, FieldValue::Shape(CoverShape::Heart)), (Field::RingBeat, FieldValue::Bool(false)), (Field::SpinRing, FieldValue::Bool(false))],
+        );
+        let back = Area::Track.custom(&p).unwrap();
+        assert_eq!(back.cover_shape, CoverShape::Heart);
+        assert_eq!(back.ring, p.ring);
     }
 
     #[test]

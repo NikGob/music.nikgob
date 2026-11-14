@@ -1,4 +1,4 @@
--- The graph of similar music (docs/recs-graph.md): what other listeners
+-- The graph of similar music: what other listeners
 -- know of the library's tracks and artists, fetched in the background and
 -- kept here so the recommendations work offline. New tables only.
 

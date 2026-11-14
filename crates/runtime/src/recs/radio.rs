@@ -119,6 +119,9 @@ pub(crate) struct RadioRun {
     pending_new: Vec<NewTrack>,
     /// The queue ran out while an extension ran: play on when it comes.
     resume: bool,
+    /// «↻ Другой вайб» pressed while this queue entry played: it moves on
+    /// to the new vibe's first pick once the new tail is there.
+    vibe_skip: Option<u64>,
     /// Started by «Автовоспроизведение» to continue another queue.
     autoplay: bool,
     /// The queue entries it added (a change of source drops the ones that
@@ -682,6 +685,7 @@ impl Worker {
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            vibe_skip: None,
             autoplay: false,
             added: HashSet::new(),
             heard: Vec::new(),
@@ -757,6 +761,7 @@ impl Worker {
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            vibe_skip: None,
             autoplay: false,
             added: HashSet::new(),
             heard: Vec::new(),
@@ -897,6 +902,7 @@ impl Worker {
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            vibe_skip: None,
             autoplay: true,
             added: HashSet::new(),
             heard: Vec::new(),
@@ -1181,6 +1187,8 @@ impl Worker {
         let playing = self.playing.map(|e| e.track);
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let Some(old) = run.state.wave_seed().cloned() else { return };
+        // A chip after «↻ Другой вайб»: its tail joins as a chip's does.
+        run.vibe_skip = None;
         // The song playing, as the radio served it: «Другой вайб» leaves
         // its cluster, not that of the picks ahead of it.
         let playing = playing.map(|t| run.streams.get(&t).map_or(Item::Track(t), |r| Item::Stream(r.clone())));
@@ -1214,6 +1222,14 @@ impl Worker {
             }
         }
         self.radio_repick(0);
+    }
+
+    /// «↻ Другой вайб» was pressed while `entry` played: it gives way to
+    /// the new vibe's first pick when the new tail comes.
+    pub(crate) fn radio_vibe_skip(&mut self, entry: Option<u64>) {
+        if let Some(run) = self.recs.radio.run.as_mut() {
+            run.vibe_skip = entry;
+        }
     }
 
     /// The first snapshot is here: a radio waiting for it goes on.
@@ -1552,15 +1568,22 @@ impl Worker {
                     run.slots = left;
                 }
                 self.explain_entries(&entries, whys);
+                let came = !entries.is_empty();
                 if let Some(run) = self.recs.radio.run.as_mut() {
                     run.added.extend(entries);
                 }
                 let waiting = self.playing.is_none() && matches!(self.status, v::Status::Stopped | v::Status::Buffering);
+                // «↻ Другой вайб»: its first pick is here, the song it was
+                // pressed on gives way (unless the sleep timer ends with it);
+                // nothing came, it plays on and the wish is gone.
+                let vibe = self.recs.radio.run.as_mut().and_then(|r| r.vibe_skip.take()).filter(|_| came);
                 if resume && waiting {
                     match self.queue.current() {
                         Some(e) => self.start(e),
                         None => self.radio_stops_waiting(),
                     }
+                } else if vibe.is_some() && vibe == self.playing.map(|e| e.id) && !self.sleep_ends_with_playing() {
+                    self.vibe_move_on();
                 } else {
                     self.preload_next();
                     self.publish_player();
@@ -2435,6 +2458,7 @@ impl Worker {
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
+            vibe_skip: None,
             autoplay: save.autoplay,
             added,
             heard: Vec::new(),

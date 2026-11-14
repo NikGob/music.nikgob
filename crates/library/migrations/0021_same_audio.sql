@@ -1,4 +1,4 @@
--- A file that holds another song's audio (docs/TODO.md 32).
+-- A file that holds another song's audio.
 
 -- The Chromaprint of each local file (its first 120 s), so an import
 -- compares a new file with the album's songs without decoding them again,

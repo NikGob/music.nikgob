@@ -874,9 +874,9 @@ fn setting_row(ui: &mut Ui, label: &str, width: f32, control: impl FnOnce(&mut U
     control(&mut c);
 }
 
-/// «Перенести историю»: a text button; open, two short steps — order the
-/// export where it is made, then pick the archive (the import of
-/// Настройки → «Сервисы»).
+/// «Перенести историю»: a text button; open, the buttons that order the
+/// export where it is made and pick the archive (the import of Настройки →
+/// «Сервисы»), with no words around them.
 fn history(ui: &mut Ui, pages: &mut PageState, out: &mut Vec<Command>) {
     let s = Theme::get(ui.ctx()).scheme;
     let st = &mut pages.first_run;
@@ -901,39 +901,26 @@ fn history(ui: &mut Ui, pages: &mut PageState, out: &mut Vec<Command>) {
             .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-                let order = match (spotify, youtube) {
-                    (true, true) => "Закажи выгрузку: в Spotify — «Расширенная история стриминга», в Google Takeout — «YouTube и YouTube Music»",
-                    (true, false) => "Закажи в Spotify «Расширенную историю стриминга»",
-                    _ => "Закажи в Google Takeout выгрузку «YouTube и YouTube Music»",
-                };
-                settings::numbered(ui, 1, 20.0, |ui| {
-                    ui.label(TypeRole::BodyMedium.style().rich_para(order, s.on_surface));
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if spotify && ui.add(Button::new("Spotify").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-sp-export")).clicked() {
-                            settings::open_url(SPOTIFY_EXPORT);
-                        }
-                        if youtube && ui.add(Button::new("Google Takeout").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-takeout")).clicked() {
-                            settings::open_url(TAKEOUT);
-                        }
-                    });
-                });
-                settings::numbered(ui, 2, 20.0, |ui| {
-                    ui.label(TypeRole::BodyMedium.style().rich_para("Когда придёт архив, выбери его", s.on_surface));
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        if ui.add(Button::new("Архив .zip…").icon(Icon::UploadFile).style(Style::Tonal).size(Size::S).id_salt("first-run-import-zip")).clicked() {
-                            super::dialogs::file(
-                                |d| d.set_title("Архив выгрузки Spotify или Google Takeout").add_filter("Архив", &["zip"]),
-                                Command::ImportExportFiles,
-                                out,
-                            );
-                        }
-                        if ui.add(Button::new("Папка…").icon(Icon::Folder).style(Style::Outlined).size(Size::S).id_salt("first-run-import-dir")).clicked() {
-                            super::dialogs::folder(|d| d.set_title("Папка с выгрузкой Spotify или Google Takeout"), Command::ImportExportFiles, out);
-                        }
-                    });
+                // Where the export is ordered, then the archive once it
+                // came: the buttons alone, one wrapped row.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    if spotify && ui.add(Button::new("Spotify").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-sp-export")).clicked() {
+                        settings::open_url(SPOTIFY_EXPORT);
+                    }
+                    if youtube && ui.add(Button::new("Google Takeout").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-takeout")).clicked() {
+                        settings::open_url(TAKEOUT);
+                    }
+                    if ui.add(Button::new("Архив .zip…").icon(Icon::UploadFile).style(Style::Tonal).size(Size::S).id_salt("first-run-import-zip")).clicked() {
+                        super::dialogs::file(
+                            |d| d.set_title("Архив выгрузки Spotify или Google Takeout").add_filter("Архив", &["zip"]),
+                            Command::ImportExportFiles,
+                            out,
+                        );
+                    }
+                    if ui.add(Button::new("Папка…").icon(Icon::Folder).style(Style::Outlined).size(Size::S).id_salt("first-run-import-dir")).clicked() {
+                        super::dialogs::folder(|d| d.set_title("Папка с выгрузкой Spotify или Google Takeout"), Command::ImportExportFiles, out);
+                    }
                 });
             });
     });

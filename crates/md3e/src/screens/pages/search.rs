@@ -312,8 +312,8 @@ fn library(
         part_label(ui, "Альбомы");
         widgets::card_row(ui, "search-releases", |ui| {
             for rel in &r.releases {
-                // An album looked for opens whole.
-                nav = widgets::release_card_whole(ui, rel, widgets::CARD_W, "search", out).or(nav.take());
+                // As the album opens everywhere (its own choice, else the setting).
+                nav = widgets::release_card(ui, rel, widgets::CARD_W, "search", out).or(nav.take());
             }
         });
     }
@@ -748,7 +748,7 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
         widgets::card_row(ui, "sa-albums", |ui| {
             for x in &a.albums {
                 nav = match x {
-                    SearchAlbum::Library(r) => widgets::release_card_whole(ui, r, widgets::CARD_W, "sa", out),
+                    SearchAlbum::Library(r) => widgets::release_card(ui, r, widgets::CARD_W, "sa", out),
                     SearchAlbum::Stream(c) => streams::album_card(ui, c, widgets::CARD_W, "sa", &state.downloads.wishlist, out),
                 }
                 .or(nav.take());
@@ -1013,7 +1013,6 @@ fn top_card(
             )
             .clicked();
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let from = out.len();
     // The same menu as the rows and cards of what it is.
     let menu = match top {
         TopResult::Track(SearchTrack::Library(t)) => pages.track_context_menu(&resp, t, state, out),
@@ -1029,17 +1028,12 @@ fn top_card(
             None
         }
     };
-    let route = if play || (resp.clicked() && v.open.is_none()) {
+    if play || (resp.clicked() && v.open.is_none()) {
         out.push(if playing_now { Command::TogglePlay } else { v.play.clone().unwrap_or(Command::TogglePlay) });
         None
     } else if resp.clicked() {
         v.open
     } else {
         menu
-    };
-    // An album looked for opens and plays whole.
-    match top {
-        TopResult::Album(SearchAlbum::Library(r)) => widgets::whole_album(ui.ctx(), r, from, out, route),
-        _ => route,
     }
 }

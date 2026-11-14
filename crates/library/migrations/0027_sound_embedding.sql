@@ -1,6 +1,6 @@
 -- Migration 27 (r30-sound; renumber on merge if another 0027 lands first).
 --
--- The neural sound model's vector of a track (docs/recommendations.md §5):
+-- The neural sound model's vector of a track:
 -- Discogs-EffNet's embedding of a few windows of the audio, projected to
 -- 256 dimensions, L2-normalised and quantised to i8 with one scale. Beside
 -- bliss's vector in `analysis`, never instead of it: a track without one

@@ -1,5 +1,5 @@
 -- What the user chose of an album, apart from what the album is
--- (docs/TODO.md 57, «Альбом, из которого нравится одна песня»). Only
+-- («Альбом, из которого нравится одна песня»). Only
 -- decisions are kept; which songs of an album are the user's is worked out
 -- from them and the library (`in_library`). Both tables start empty: an
 -- album keeps the songs it has now, nothing is added, removed or

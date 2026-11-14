@@ -171,6 +171,17 @@ impl Worker {
         }
     }
 
+    /// The playing song gave way to the next («↻ Другой вайб»), cut short:
+    /// a timer that waits for a place keeps as many songs after the one
+    /// that plays now (the place moves on by the song left).
+    pub(crate) fn sleep_moved_on(&mut self) {
+        if let Some(Timer::Place { at, generation }) = self.sleep.timer {
+            self.sleep.timer = Some(Timer::Place { at: at + 1, generation });
+            self.sleep.counted = None;
+            self.sleep.after_current = None;
+        }
+    }
+
     /// The radio is about to take the entries `gone` out of the queue and
     /// pick others for their places: a timer that waits for one of them
     /// waits for the entry at its place instead (see the module docs).

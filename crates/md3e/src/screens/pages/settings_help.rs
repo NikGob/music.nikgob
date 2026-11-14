@@ -55,15 +55,10 @@ pub enum SettingId {
     CoverSpinSpeed,
     /// «Пульсация → Сила».
     CoverPulseStrength,
+    /// «Кольцо»: around a shaped cover while it plays; it turns and jumps
+    /// with the music on its own (no rows of its own for those).
     Ring,
     RingStyle,
-    RingSpin,
-    RingDir,
-    /// «Кольцо → Скорость»: seconds a turn of the ring takes.
-    RingSpinSpeed,
-    RingBeat,
-    /// «Кольцо на паузе»: dimmed on a pause, or gone until the music plays.
-    RingPause,
     Ambient,
     AmbientStrength,
     BgShapes,
@@ -409,7 +404,7 @@ enum Preview {
     Motion,
     Volume,
     /// Which way the cover outline (false) or the ring (true) turns.
-    Turn(bool),
+    Turn,
     /// Lines following a scroll, with or without the cascade.
     Cascade,
     /// Lines rolling through the lyrics' soft edges (or cut, when off).
@@ -483,8 +478,8 @@ impl SettingId {
             | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
             | LyricsModels => TAB_LYRICS,
             Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
-            | CoverSpinSpeed | CoverPulseStrength | RingSpinSpeed | RingPause | HomeSections
-            | Ring | RingStyle | RingSpin | RingDir | RingBeat | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
+            | CoverSpinSpeed | CoverPulseStrength | HomeSections
+            | Ring | RingStyle | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
             | BgSpeed | BgReact | BgColors | BgHue | ProgressWave | NpVolume | NpVolumeHold | CoverClickPause | DblClickShape
             | TapWait | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards | ProfileNames
             | HiddenMixes | AlbumDate | LikedAlbumsPlace | UiScale | RailCompact | ReducedMotion | Tooltips
@@ -528,7 +523,7 @@ impl SettingId {
             | LyricsStyle | LyricsUnit | LyricsScale | LyricsLead | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsGap
             | LyricsCountdown | LyricsGenius | SaveLyrics | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams
             // Вид: the theme, each part of the track screen and which kind.
-            | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverPulse | Ring | RingStyle | RingPause
+            | Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverPulse | Ring
             | Ambient | BgShapes | ProgressWave | NpVolume | HomeSections | HiddenMixes | AlbumDate | LikedAlbumsPlace
             | UiScale | RailCompact | ReducedMotion
             // Сервисы: the accounts, their sound and their playlists.
@@ -549,7 +544,7 @@ impl SettingId {
             // How strong, how fast, how long.
             | LyricsSmooth | LightSpeed | WaveJump | JumpSpeed | LyricsLift | LyricsDim | LyricsSoftDepth | LyricsSoftStrength
             | LyricsSoftFade | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsReturn | CoverDir | CoverSpinSpeed
-            | CoverPulseStrength | RingSpin | RingDir | RingSpinSpeed | RingBeat | AmbientStrength | BgCount | BgSize
+            | CoverPulseStrength | RingStyle | AmbientStrength | BgCount | BgSize
             | BgOpacity | BgSpeed | BgReact | BgColors | BgHue | NpVolumeHold | TapWait | ToastTime
             // Rare cases, gestures, parts of the window and of Главная.
             | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
@@ -597,17 +592,15 @@ impl SettingId {
             ShapeRange => "Фигуры для случайной",
             ShapePick => "Фигура",
             CoverPauseMorph => "Менять форму на паузе",
-            CoverSpin | RingSpin => "Вращение",
-            CoverDir | RingDir => "Направление",
+            CoverSpin => "Вращение",
+            CoverDir => "Направление",
             CoverPulse => "Пульсация",
-            CoverSpinSpeed | RingSpinSpeed => "Скорость",
+            CoverSpinSpeed => "Скорость",
             CoverPulseStrength => "Сила",
             HomeSections => "Разделы главной",
             Preset(a) => preset_title(a),
             Ring => "Кольцо",
             RingStyle => "Вид",
-            RingBeat => "В такт",
-            RingPause => "Кольцо на паузе",
             Ambient => "Свечение фона",
             AmbientStrength => "Яркость свечения",
             BgShapes => "Фигуры на фоне",
@@ -801,14 +794,12 @@ impl SettingId {
             CoverShape => "Обложка на экране трека может быть квадратной или вырезанной красивой фигурой.",
             ShapeRange => "Из этих фигур выбирается случайная для каждого трека. Нажми на фигуру, чтобы добавить или убрать её.",
             ShapePick => "Этой фигурой вырезается обложка, пока играет музыка.",
-            RingPause => "На паузе кольцо остаётся приглушённым. Выключи — на паузе оно плавно исчезает и возвращается, когда музыка снова играет.",
             CoverPauseMorph => "На паузе обложка плавно становится квадратом, при воспроизведении снова принимает форму. Выключи — форма остаётся и на паузе.",
             CoverSpin => "Край обложки медленно поворачивается, а сама картинка остаётся на месте.",
             CoverDir => "В какую сторону поворачивается край обложки.",
             CoverPulse => "Обложка слегка увеличивается в такт музыке, как будто дышит.",
             CoverSpinSpeed => "Сколько секунд занимает один оборот края обложки. Меньше — быстрее; на громких местах край чуть ускоряется.",
             CoverPulseStrength => "Насколько обложка увеличивается на ударе.",
-            RingSpinSpeed => "Сколько секунд занимает один оборот кольца. Меньше — быстрее.",
             HomeSections => "Какие разделы есть на главной и в каком порядке. Стрелки двигают раздел, переключатель убирает его. Раздел, которому нечего показать, не виден и включённым.",
             Preset(v::presets::Area::Recs) => "Сколько новой музыки в радио, миксах и автовоспроизведении — одним выбором. «Свои» возвращает твои значения.",
             Preset(v::presets::Area::Lyrics) => "Готовые виды текста: как загорается и движется строка, которую поют, и как стоят остальные. Размер текста, опережение и пауза не меняются. «Свои» возвращает твои значения.",
@@ -816,11 +807,8 @@ impl SettingId {
             Preset(v::presets::Area::Sources) => "Какие источники включены. Порядок не меняется. «Свои» возвращает твои переключатели.",
             Preset(v::presets::Area::Seeding) => "Сколько и как долго раздавать скачанное торрентами. «Свои» возвращает твои значения.",
             Preset(v::presets::Area::Load) => "Насколько плеер нагружает компьютер: кадры, окно в трее, загрузки и работа с голосом. «Свои» возвращает твои значения.",
-            Ring => "Вокруг обложки появляется кольцо из точек, которое шевелится под музыку.",
+            Ring => "Пока играет музыка, вокруг обложки-фигуры кружится кольцо из точек и подскакивает в такт. Вокруг квадратной обложки и на паузе его нет.",
             RingStyle => "Как выглядит кольцо вокруг обложки.",
-            RingSpin => "Кольцо из точек медленно вращается, пока играет музыка.",
-            RingDir => "В какую сторону вращается кольцо.",
-            RingBeat => "Точки кольца подскакивают на ударных и громких местах.",
             Ambient => "За экраном трека плывут мягкие цветные пятна в цветах обложки.",
             AmbientStrength => "Насколько заметны цветные пятна за экраном трека: от лёгкой дымки до яркого цвета.",
             BgShapes => "За экраном трека двигаются фигуры. Выбери, как они ведут себя.",
@@ -1002,7 +990,7 @@ impl SettingId {
             DislikeSkipEverywhere => "Треки с «Не нравится» и исполнители, которых не рекомендовать, пропускаются и в твоих альбомах и плейлистах. Выключено — только в миксах, радио и автовоспроизведении; трек, выбранный тобой, играет всегда.",
             DislikeInRecs => "«Не нравится» чуть опускает и самые похожие по звуку треки. Выключено — уходит только сам трек. Исполнителя дизлайк не трогает.",
             Marks => "Треки с «Не нравится», исполнители, которых не рекомендовать, и треки со своей скоростью. Там же их можно снять или сбросить.",
-            AlbumOpens => "Что показывает страница альбома и что играет «Слушать». Альбом попадает в библиотеку целиком кнопкой «Добавить в библиотеку»; из остальных у тебя только часть песен — одна из саундтрека, сингл без инструментала. «Весь альбом» на странице — в один клик.",
+            AlbumOpens => "Что показывает страница альбома, у которого у тебя только часть песен, и что играет «Слушать». «Мои треки» и «Весь альбом» на странице — в один клик.",
             AlbumVersions => "Инструментал, off vocal, караоке и ремиксы песен того же альбома, которые ты не выбирал, стоят на странице альбома отдельно, после остальных, и не играют с альбомом. Включено — играют все, кроме караоке. У каждого альбома свой переключатель над этими песнями. Версия, которую ты лайкнул или добавил сам, — твоя песня и играет всегда.",
             HiddenMixes => "Миксы, убранные с главной через ⋮ → «Не предлагать этот микс». «Вернуть» снова показывает микс.",
             GraphUse => "Радио, миксы и новое учитывают, что другие люди слушают вместе: радио YouTube Music, похожих исполнителей Deezer, ListenBrainz и Last.fm. Так рекомендации работают и без истории, по одним твоим файлам. Выключи — остаются звук, твоя история и тип песни.",
@@ -1092,7 +1080,7 @@ impl SettingId {
                 c!("Видеокарта", "Быстро: несколько секунд на песню."),
                 c!("Процессор", "Медленно: пара минут на песню, зато видеокарта свободна."),
             ],
-            Self::CoverDir | Self::RingDir => &[
+            Self::CoverDir => &[
                 c!("По часовой", "Поворачивается как стрелки часов: 12 → 3 → 6."),
                 c!("Против", "Поворачивается против часовой стрелки: 12 → 9 → 6."),
             ],
@@ -1183,9 +1171,9 @@ impl SettingId {
                 c!("И сам сингл", "Лайк песни из сингла кладёт сингл в «Любимые альбомы», снятый лайк убирает."),
             ],
             Self::AlbumOpens => &[
-                c!("Автоматически", "Альбом, добавленный в библиотеку, показывает и играет весь треклист, даже если скачано не всё. Не добавленный — только твои песни из него; весь альбом — в один клик. На полках альбомов главной — только добавленные."),
-                c!("Всегда весь альбом", "Любой альбом показывает и играет весь треклист. Песни, которые ты не выбирал, не считаются недостающими. На полках главной — и альбомы, из которых у тебя часть песен."),
-                c!("Только мои песни", "Любой альбом, даже добавленный, показывает и играет только песни, которые у тебя есть, лайкнуты, в плейлистах или добавлены тобой. Весь альбом — в один клик."),
+                c!("Автоматически", "Альбом, добавленный в библиотеку, показывает и играет весь треклист. Не добавленный — только твои песни из него."),
+                c!("Всегда весь альбом", "Любой альбом показывает и играет весь треклист, даже если твоя в нём одна песня. Песни, которые ты не выбирал, не считаются недостающими."),
+                c!("Только мои песни", "Любой альбом, даже добавленный, показывает и играет только песни, которые у тебя есть, лайкнуты, в плейлистах или добавлены тобой."),
             ],
             Self::LikedAlbumsPlace => &[
                 c!("Отдельно", "Своя полка «Любимые альбомы» в библиотеке."),
@@ -1319,7 +1307,6 @@ impl SettingId {
             Self::LyricsGpu => usize::from(!p.lyrics_gpu),
             Self::LyricsStreamKeep => usize::from(p.lyrics_stream_keep.min(1)),
             Self::LyricsUi => usize::from(p.lyrics_ui.min(2)),
-            Self::RingDir => usize::from(p.ring_ccw),
             Self::RingStyle => match p.ring_style {
                 v::RingStyle::Circle => 0,
                 v::RingStyle::Contour => 1,
@@ -1408,7 +1395,6 @@ impl SettingId {
             Self::LyricsGpu => p.lyrics_gpu = i == 0,
             Self::LyricsStreamKeep => p.lyrics_stream_keep = i.min(1) as u8,
             Self::LyricsUi => p.lyrics_ui = i.min(2) as u8,
-            Self::RingDir => p.ring_ccw = i == 1,
             Self::RingStyle => p.ring_style = [v::RingStyle::Circle, v::RingStyle::Contour, v::RingStyle::Bars][i.min(2)],
             Self::Ambient => p.ambient = [v::Ambient::Off, v::Ambient::Glow, v::Ambient::Reactive][i.min(2)],
             Self::BgShapes => {
@@ -1496,10 +1482,9 @@ impl SettingId {
             Theme | Contrast | Scheme => Preview::Palette,
             Ambient | AmbientStrength => Preview::Ambient,
             ProgressWave | ReducedMotion => Preview::Wave,
-            CoverDir | CoverSpin | CoverSpinSpeed => Preview::Turn(false),
-            RingDir | RingSpin | RingSpinSpeed => Preview::Turn(true),
+            CoverDir | CoverSpin | CoverSpinSpeed => Preview::Turn,
             CoverShape | ShapeRange | ShapePick | CoverPulse | CoverPulseStrength => Preview::Cover,
-            Ring | RingStyle | RingBeat => Preview::Ring,
+            Ring | RingStyle => Preview::Ring,
             LyricsCascade => Preview::Cascade,
             BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => Preview::Background,
             LyricsStyle | WaveFallback | WaveJump | JumpSpeed | LightSpeed | LyricsSmooth | LyricsDim | LyricsScale | LyricsGlow | LyricsUnit
@@ -1551,7 +1536,7 @@ impl SettingId {
             Preset(v::presets::Area::Track | v::presets::Area::Lyrics) => Part::Whole,
             CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverSpinSpeed | CoverPulse | CoverPulseStrength
             | CoverPauseMorph | CoverClickPause | DblClickShape | TapWait => Part::Cover,
-            Ring | RingStyle | RingSpin | RingDir | RingSpinSpeed | RingBeat | RingPause => Part::Ring,
+            Ring | RingStyle => Part::Ring,
             Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity | BgSpeed | BgReact | BgColors | BgHue => {
                 Part::Background
             }
@@ -1607,7 +1592,7 @@ impl SettingId {
         match self {
             // A shape of the pool under the pointer is shown as it is.
             CoverShape | ShapeRange if p.cover_shape == v::CoverShape::Random => Script::RandomShape,
-            CoverPauseMorph | CoverClickPause | RingPause => Script::PausePlay,
+            CoverPauseMorph | CoverClickPause => Script::PausePlay,
             DblClickShape | TapWait => Script::DoubleTap,
             NpVolume | NpVolumeHold => Script::Volume,
             NpMotion => Script::Open,
@@ -1629,12 +1614,12 @@ impl SettingId {
         use SettingId::*;
         match self {
             Ambient | AmbientStrength => p.ambient == v::Ambient::Reactive,
-            RingBeat => p.ring_beat,
+            Ring => p.ring,
             CoverPulse | CoverPulseStrength => p.cover_pulse,
             BgReact => p.bg_shapes != v::BgShapes::Off,
             Preset(v::presets::Area::Track) => {
                 p.cover_pulse
-                    || p.ring_beat
+                    || p.ring
                     || p.ambient == v::Ambient::Reactive
                     || (p.bg_shapes != v::BgShapes::Off && p.bg_shapes_react > 0.02)
             }
@@ -1652,8 +1637,8 @@ pub fn preset_rows(f: v::presets::Field) -> Vec<SettingId> {
         F::CoverSpin => vec![S::CoverSpin],
         F::CoverPulse => vec![S::CoverPulse],
         F::Ring => vec![S::Ring],
-        F::RingBeat => vec![S::RingBeat],
-        F::SpinRing => vec![S::RingSpin],
+        // The ring's old rows: no row shows them now.
+        F::RingBeat | F::SpinRing => Vec::new(),
         F::Ambient => vec![S::Ambient],
         F::BgShapes => vec![S::BgShapes],
         F::ProgressWave => vec![S::ProgressWave],
@@ -2676,7 +2661,7 @@ fn paint_preview(ui: &mut Ui, rect: Rect, kind: Preview, prefs: &Prefs, salt: Op
         Preview::Countdown => lyrics::countdown_preview(ui, rect, &Prefs { lyrics_countdown: true, ..prefs.clone() }),
         Preview::Motion => motion_preview(ui, rect, prefs),
         Preview::Volume => volume_preview(ui, rect, prefs),
-        Preview::Turn(ring) => turn_preview(ui, rect, prefs, ring),
+        Preview::Turn => turn_preview(ui, rect, prefs),
         Preview::Cascade => cascade_preview(ui, rect, prefs),
         Preview::Edges => lyrics::edges_preview(ui, rect, prefs),
     }
@@ -2755,17 +2740,17 @@ fn volume_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     }
 }
 
-/// Which way the cover's outline (or the ring) turns: a clock face, the
+/// Which way the cover's outline turns: a clock face, the
 /// shape turning in it with a bright marker, and an arrow running ahead of
 /// the marker the same way. Clockwise goes 12 → 3 → 6.
-fn turn_preview(ui: &Ui, rect: Rect, prefs: &Prefs, ring: bool) {
+fn turn_preview(ui: &Ui, rect: Rect, prefs: &Prefs) {
     use std::f32::consts::TAU;
     let s = Theme::get(ui.ctx()).scheme;
     let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
-    let ccw = if ring { prefs.ring_ccw } else { prefs.cover_ccw };
+    let ccw = prefs.cover_ccw;
     let sign = if ccw { -1.0 } else { 1.0 };
     // Not turning at all: no marker run, no arrow.
-    let turning = if ring { prefs.spin_ring } else { prefs.cover_spin };
+    let turning = prefs.cover_spin;
     let c = rect.center();
     let r = rect.width().min(rect.height()) * 0.5 - 18.0;
     let a = if turning { sign * (anim::now(ui.ctx()) as f32 * TAU / 6.0) } else { 0.0 };
@@ -2776,25 +2761,16 @@ fn turn_preview(ui: &Ui, rect: Rect, prefs: &Prefs, ring: bool) {
         let th = i as f32 * TAU / 4.0;
         painter.text(c + dir(th) * (r + 11.0), egui::Align2::CENTER_CENTER, *n, font.clone(), s.on_surface_variant.gamma_multiply(0.7));
     }
-    if ring {
-        for i in 0..24 {
-            let th = a + i as f32 * TAU / 24.0;
-            painter.circle_filled(c + dir(th) * (r - 4.0), 2.0, s.primary.gamma_multiply(0.45));
-        }
-        painter.circle_filled(c, r * 0.55, s.surface_container_highest);
-    } else {
-        let shape = match prefs.cover_shape {
-            v::CoverShape::Original | v::CoverShape::Random => v::CoverShape::Cookie12,
-            other => other,
-        };
-        if let Some(m) = now_playing::material(shape) {
-            let box_ = Rect::from_center_size(c, Vec2::splat((r - 6.0) * 2.0));
-            nikgob_shapes::paint::fill_shape(&painter, now_playing::shape_cubics(m), box_, a.rem_euclid(TAU), s.secondary_container);
-        }
+    let shape = match prefs.cover_shape {
+        v::CoverShape::Original | v::CoverShape::Random => v::CoverShape::Cookie12,
+        other => other,
+    };
+    if let Some(m) = now_playing::material(shape) {
+        let box_ = Rect::from_center_size(c, Vec2::splat((r - 6.0) * 2.0));
+        nikgob_shapes::paint::fill_shape(&painter, now_playing::shape_cubics(m), box_, a.rem_euclid(TAU), s.secondary_container);
     }
     // The marker on the turning part, and an arrow ahead of it.
-    let mr = if ring { r - 4.0 } else { r - 12.0 };
-    painter.circle_filled(c + dir(a) * mr, 4.5, s.primary);
+    painter.circle_filled(c + dir(a) * (r - 12.0), 4.5, s.primary);
     if !turning {
         return;
     }
@@ -2958,7 +2934,7 @@ mod tests {
             S::LyricsStyle, S::LyricsUnit, S::LyricsScale, S::LyricsLead, S::LyricsCascade, S::LyricsGlow, S::LyricsSoftEdges,
             S::LyricsGap, S::LyricsCountdown, S::LyricsWordsPlaying, S::LyricsLinesAuto, S::LyricsStreams,
             // Each part of the track screen.
-            S::Contrast, S::CoverShape, S::CoverSpin, S::CoverPulse, S::Ring, S::RingStyle, S::Ambient, S::BgShapes,
+            S::Contrast, S::CoverShape, S::CoverSpin, S::CoverPulse, S::Ring, S::Ambient, S::BgShapes,
             S::ProgressWave, S::NpVolume, S::HiddenMixes,
             S::SpotifyPlayback, S::ImportSpotify, S::DownloadToasts, S::Inbox, S::Trash,
         ] {
@@ -2967,8 +2943,8 @@ mod tests {
         for id in [
             S::LyricsSmooth, S::LightSpeed, S::WaveJump, S::JumpSpeed, S::LyricsLift, S::LyricsDim, S::LyricsSoftDepth,
             S::LyricsSoftStrength, S::LyricsSoftFade, S::LyricsGapWaves, S::LyricsGapHeight, S::LyricsGapSize, S::LyricsReturn, S::WaveFallback,
-            S::LyricsModels, S::CoverDir, S::CoverSpinSpeed, S::CoverPulseStrength, S::RingSpin, S::RingDir, S::RingSpinSpeed,
-            S::RingBeat, S::AmbientStrength, S::BgCount, S::NpVolumeHold, S::TapWait, S::ToastTime, S::StreamCache,
+            S::LyricsModels, S::CoverDir, S::CoverSpinSpeed, S::CoverPulseStrength, S::RingStyle,
+            S::AmbientStrength, S::BgCount, S::NpVolumeHold, S::TapWait, S::ToastTime, S::StreamCache,
             S::SeedRatio, S::FpsLimit,
         ] {
             assert_eq!(id.level(), Level::Deep, "{id:?}");
@@ -2976,7 +2952,6 @@ mod tests {
         // A row that hangs on another shows no earlier than it does.
         for (child, parent) in [
             (S::RingStyle, S::Ring),
-            (S::RingPause, S::Ring),
             (S::AutostartHidden, S::Autostart),
             (S::LyricsSoftDepth, S::LyricsSoftEdges),
             (S::LyricsGapSize, S::LyricsGap),
@@ -3076,7 +3051,7 @@ mod tests {
     fn every_choice_round_trips_through_prefs() {
         use SettingId as S;
         for id in [
-            S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::AlbumDate, S::RingDir, S::RingStyle, S::Ambient,
+            S::Theme, S::Contrast, S::Scheme, S::CoverShape, S::CoverDir, S::AlbumDate, S::RingStyle, S::Ambient,
             S::BgShapes, S::BgColors, S::LyricsStyle, S::LyricsUnit, S::WaveFallback, S::LyricsGap, S::NpMotion, S::DblClickShape,
             S::OpusBitrate, S::NpVolume, S::LikeDownload, S::AlbumLike, S::SingleLike, S::LikedAlbumsPlace, S::PlaylistSync, S::RadioNewShare, S::RadioSource,
             S::NewShareBy(v::RadioKind::Track), S::NewShareBy(v::RadioKind::Autoplay), S::ProfileNames, S::BackgroundCards,
@@ -3136,15 +3111,8 @@ mod tests {
         for id in [S::CoverSpinSpeed, S::CoverPulseStrength] {
             assert_eq!((id.scene(), id.part()), (Some(Scene::Track), Some(Part::Cover)), "{id:?}");
         }
-        assert_eq!(S::RingSpinSpeed.part(), Some(Part::Ring));
-        // «Кольцо на паузе» is shown by pausing: dimmed, or gone.
-        assert_eq!((S::RingPause.scene(), S::RingPause.part()), (Some(Scene::Track), Some(Part::Ring)));
-        assert_eq!(S::RingPause.script(&p), Script::PausePlay);
-        assert_eq!(S::RingPause.level(), Level::Simple);
-        assert!(now_playing::ring_alpha(true, 0.0) > 0.3 && now_playing::ring_alpha(false, 0.0) == 0.0);
-        assert!(now_playing::ring_alpha(false, 0.5) > 0.0 && now_playing::ring_alpha(false, 0.5) < 1.0, "it fades");
-        assert_eq!((now_playing::ring_alpha(true, 1.0), now_playing::ring_alpha(false, 1.0)), (1.0, 1.0));
-        assert!(Prefs::default().ring_on_pause && !Prefs::first_start().ring_on_pause);
+        assert_eq!((S::RingStyle.scene(), S::RingStyle.part()), (Some(Scene::Track), Some(Part::Ring)));
+        assert_eq!((S::Ring.level(), S::RingStyle.level()), (Level::Simple, Level::Deep));
         assert_eq!(S::HomeSections.scene(), Some(Scene::Home));
         assert_eq!(S::MixesProfiles.part(), Some(Part::Home(Section::Mixes)));
         assert_eq!(S::AlbumDate.scene(), Some(Scene::Album));
@@ -3167,17 +3135,18 @@ mod tests {
         assert_eq!(S::LyricsDim.staged(&karaoke), karaoke, "a row the look has is shown as it is");
         assert_eq!(S::Preset(v::presets::Area::Track).parts().len(), 4);
         assert!(S::Theme.parts().is_empty(), "the whole screen: nothing outlined");
-        // Pulse and ring-beat default on. Those rows pulse only while the
+        // Pulse and the ring default on. Those rows pulse only while the
         // switch is on; off, the stage stays calm. A shape row never pulses.
-        let calm = Prefs { cover_pulse: false, ring_beat: false, ..Prefs::default() };
+        let calm = Prefs { cover_pulse: false, ring: false, ..Prefs::default() };
         assert!(!S::CoverShape.needs_beat(&calm) && !S::RingStyle.needs_beat(&calm), "a shape stays calm");
         assert!(!S::CoverShape.needs_beat(&Prefs::default()), "a shape stays calm even when pulse is on");
         assert!(!S::CoverPulse.needs_beat(&calm), "pulse off: calm");
         assert!(S::CoverPulse.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
         assert!(!S::CoverPulseStrength.needs_beat(&calm));
         assert!(S::CoverPulseStrength.needs_beat(&Prefs { cover_pulse: true, ..calm.clone() }));
-        assert!(S::RingBeat.needs_beat(&Prefs { ring_beat: true, ..calm.clone() }));
-        assert!(!S::RingBeat.needs_beat(&calm));
+        assert!(S::Ring.needs_beat(&Prefs { ring: true, ..calm.clone() }));
+        assert!(!S::Ring.needs_beat(&calm));
+        assert!(!S::RingStyle.needs_beat(&Prefs { ring: true, ..calm.clone() }), "a look stays calm");
         assert!(S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Reactive, ..calm.clone() }));
         assert!(!S::Ambient.needs_beat(&Prefs { ambient: v::Ambient::Glow, ..calm }));
     }

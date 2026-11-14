@@ -412,7 +412,7 @@ mod tests {
             for ((name, g), (_, w)) in got.roles().into_iter().zip(want.roles()) {
                 if !near(g, w) && !TONAL_SPOT_DEVIATIONS.contains(&name) {
                     misses.push(format!(
-                        "dark={dark} {name}: got {}, tokens.md {}",
+                        "dark={dark} {name}: got {}, baseline {}",
                         hex_str(g),
                         hex_str(w)
                     ));

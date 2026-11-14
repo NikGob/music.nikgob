@@ -1,4 +1,4 @@
--- One artist, several spellings (docs/stage4.md §12.13): «Ohara Yuiko» is
+-- One artist, several spellings: «Ohara Yuiko» is
 -- 大原ゆい子, «Fujisawa Yoshiaki» and «Yoshiaki Fujisawa» are 藤澤慶昌. An
 -- artist merged into another leaves its name here: services and files that
 -- still say it find the artist, and search finds it by every spelling.

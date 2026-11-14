@@ -2,8 +2,8 @@
 //! their way to a file (likes, «Скачать», imports). Filter chips by status
 //! (their counts are the only numbers said), the grouping with «Скачать
 //! все» and «Искать снова» on its line, the list grouped by album or by
-//! artist. A row says where its track is in words (no
-//! coloured pills) and offers the one thing that helps now: «Скачать»,
+//! artist. A row says in words only what holds it up (no coloured pills,
+//! no status the chips say) and offers the one thing that helps now: «Скачать»,
 //! «Проверить», or for a track nothing was found for «Искать снова ▾» (with
 //! no source on, «Сохранить с YouTube ▾») with the ways to bring a file in
 //! by hand. Dismissed items can come back. The list draws only the
@@ -94,32 +94,25 @@ impl Counts {
     }
 }
 
-/// The status of an item in words, for its supporting line.
-fn status_text(r: &WishlistRow, torrents: bool) -> String {
+/// What an item's supporting line says of its state: only what nothing
+/// else on its row shows and what holds it up. The chips, its button
+/// («Скачать», «Проверить», «Искать снова», «Вернуть») and its progress bar
+/// say the rest.
+fn status_text(r: &WishlistRow) -> Option<String> {
     // A file the library has, looked for in better quality: the runtime
-    // words its state («MP3 128 · ищу lossless»).
+    // words which file it is («MP3 128 · ищу lossless»).
     if let Some(u) = &r.upgrade {
-        return u.clone();
+        return Some(u.clone());
     }
     match r.status {
-        St::Waiting | St::New | St::Searching if !torrents => "ждёт источник скачивания".into(),
-        St::Waiting => "ждёт · скачается по кнопке".into(),
-        St::New | St::Searching => "ищу…".into(),
-        St::Confirm if r.confirm_files => "файлы ждут подтверждения".into(),
-        St::Confirm => "нужно выбрать, что скачать".into(),
-        // The same transfer its row in «Активные» shows.
-        St::Downloading => r.transfer.unwrap_or_default().status(r.source.as_deref()),
-        St::NoTorrent | St::Failed if r.has_copy => match &r.next_try {
-            Some(next) => format!("есть копия с YouTube · ищу лучше, {next}"),
-            None => "есть копия с YouTube · ищу лучше".into(),
-        },
-        St::NoTorrent | St::Failed => match &r.next_try {
-            Some(next) => format!("не нашёл · {next}"),
-            None => "не нашёл".into(),
-        },
-        St::Done if r.missing > 0 => format!("скачано не всё · без файла {} тр.", r.missing),
-        St::Done => "скачано".into(),
-        St::Dismissed => "не качаю".into(),
+        // Waiting in a peer's queue or paused: the bar does not say it.
+        St::Downloading => {
+            let t = r.transfer.unwrap_or_default();
+            matches!(t.phase, TransferPhase::Queued(_) | TransferPhase::Paused).then(|| t.status(r.source.as_deref()))
+        }
+        St::NoTorrent | St::Failed if !r.has_copy => Some("не нашёл".into()),
+        St::Done if r.missing > 0 => Some(format!("без файла {} тр.", r.missing)),
+        _ => None,
     }
 }
 
@@ -167,15 +160,14 @@ pub fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec
     if !torrents {
         Card::filled().id_salt("wish-no-torrents").show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(TypeRole::TitleSmall.style().rich("Все источники выключены", s.on_surface));
-            ui.label(TypeRole::BodyMedium.style().rich_para(
-                "Всё отсюда скачается, когда включишь источник в «Откуда качать». А пока трек можно сохранить с YouTube — качество пониже, найденное потом заменит его.",
-                s.on_surface_variant,
-            ));
-            ui.add_space(8.0);
-            if ui.add(Button::new("Откуда качать").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
-                pages.open_setting(super::SettingId::DownloadSource(nikgob_view::SourceKey::Torrents));
-            }
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(TypeRole::TitleSmall.style().rich("Все источники выключены", s.on_surface));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(Button::new("Откуда качать").icon(Icon::Settings).style(Style::Tonal).id_salt("wish-setup")).clicked() {
+                        pages.open_setting(super::SettingId::DownloadSource(nikgob_view::SourceKey::Torrents));
+                    }
+                });
+            });
         });
         ui.add_space(12.0);
     }
@@ -390,12 +382,18 @@ fn item(ui: &mut Ui, r: &WishlistRow, under: Under, torrents: bool, pages: &mut 
         (Under::Nothing, _, Some(a)) => format!("{} · {a}", r.artist),
         (Under::Nothing, _, None) => r.artist.clone(),
     };
-    let status = status_text(r, torrents);
-    let line = if what.is_empty() { status } else { format!("{what} · {status}") };
+    let line = match status_text(r) {
+        Some(status) if what.is_empty() => status,
+        Some(status) => format!("{what} · {status}"),
+        None => what,
+    };
     let mut more = None;
     let mut split = None;
-    let o = ListItem::new(&r.title)
-        .supporting(line)
+    let mut li = ListItem::new(&r.title);
+    if !line.is_empty() {
+        li = li.supporting(line);
+    }
+    let o = li
         .leading(Leading::Image(
             r.cover.as_ref().map(|c| c.uri()),
             if r.scope == WishlistScope::Album { Icon::Album } else { Icon::MusicNote },
@@ -689,16 +687,27 @@ mod tests {
         assert_eq!((c.get(Filter::Searching), c.get(Filter::Waiting)), (0, 4), "without a source nothing searches");
     }
 
-    /// A downloading item says what its transfer says: the same percent as
-    /// «Активные», a peer's queue as a queue.
+    /// A row says in words only what holds it up: a peer's queue, a pause,
+    /// nothing found, files still missing. What its bar, its button or the
+    /// chips show is not said again.
     #[test]
-    fn a_downloading_line_is_its_transfer() {
+    fn a_line_says_only_what_holds_it_up() {
         let mut r = row(1, St::Downloading, WishlistScope::Track);
         r.source = Some("mugilaw".into());
-        assert_eq!(status_text(&r, true), "качается · mugilaw");
+        assert_eq!(status_text(&r), None);
         r.transfer = Some(Transfer { phase: TransferPhase::Going, done: 37, total: Some(100), bps: 0 });
-        assert_eq!(status_text(&r, true), "качается · mugilaw · 37%");
+        assert_eq!(status_text(&r), None);
         r.transfer = Some(Transfer { phase: TransferPhase::Queued(Some(3)), ..Transfer::default() });
-        assert_eq!(status_text(&r, true), "в очереди у mugilaw · 3-й");
+        assert_eq!(status_text(&r).as_deref(), Some("в очереди у mugilaw · 3-й"));
+        for st in [St::Waiting, St::New, St::Searching, St::Confirm, St::Done, St::Dismissed] {
+            assert_eq!(status_text(&row(2, st, WishlistScope::Track)), None, "{st:?}");
+        }
+        assert_eq!(status_text(&row(3, St::NoTorrent, WishlistScope::Track)).as_deref(), Some("не нашёл"));
+        let mut copy = row(4, St::NoTorrent, WishlistScope::Track);
+        copy.has_copy = true;
+        assert_eq!(status_text(&copy), None);
+        let mut short = row(5, St::Done, WishlistScope::Album);
+        short.missing = 2;
+        assert_eq!(status_text(&short).as_deref(), Some("без файла 2 тр."));
     }
 }

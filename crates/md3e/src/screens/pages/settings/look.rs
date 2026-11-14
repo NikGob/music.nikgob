@@ -6,7 +6,7 @@
 use egui::{Rect, Sense, Ui, vec2};
 use nikgob_shapes::paint as shape_paint;
 use nikgob_view::presets::Area;
-use nikgob_view::{self as v, Ambient, BgShapes, Command, CoverShape, HomeSectionSwitch, PrefPatch, Prefs, RingStyle};
+use nikgob_view::{self as v, Ambient, BgShapes, Command, CoverShape, HomeSectionSwitch, PrefPatch, Prefs};
 
 use super::super::settings_help::{self, SettingId as Id};
 use super::preset;
@@ -78,24 +78,11 @@ fn track_screen(ui: &mut Ui, p: &mut Prefs) {
     dimmed(ui, p.cover_shape == CoverShape::Original, |ui| switch(ui, Id::CoverPauseMorph, &mut p.cover_pause_morph));
 
     sub(ui, "Кольцо");
-    switch(ui, Id::Ring, &mut p.ring);
-    let ring = p.ring;
-    child(ui, !ring, |ui| {
-        segments(ui, Id::RingStyle, p);
-        // The bars stand on fixed angles, like a spectrum.
-        let bars = p.ring_style == RingStyle::Bars;
-        dimmed(ui, bars, |ui| switch(ui, Id::RingSpin, &mut p.spin_ring));
-        let spins = p.spin_ring && !bars;
-        child(ui, !spins, |ui| {
-            segments(ui, Id::RingDir, p);
-            let num = Num::new(*v::RING_SPIN_RANGE.start(), *v::RING_SPIN_RANGE.end(), 1.0, 0, " с");
-            if let Some(s) = rows::slider(ui, Id::RingSpinSpeed, p.ring_spin_s, num) {
-                p.ring_spin_s = s;
-            }
-        });
-        switch(ui, Id::RingBeat, &mut p.ring_beat);
-        switch(ui, Id::RingPause, &mut p.ring_on_pause);
-    });
+    // Only a shaped cover has a ring.
+    let square = p.cover_shape == CoverShape::Original;
+    dimmed(ui, square, |ui| switch(ui, Id::Ring, &mut p.ring));
+    let ring = p.ring && !square;
+    child(ui, !ring, |ui| segments(ui, Id::RingStyle, p));
 
     sub(ui, "Фон");
     background(ui, p);

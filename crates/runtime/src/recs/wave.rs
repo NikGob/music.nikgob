@@ -377,7 +377,28 @@ impl Worker {
             return;
         }
         log::info!("wave: another vibe");
+        let playing = self.playing.map(|e| e.id);
         self.radio_wave_changed(None);
+        // The song playing gives way to the new vibe's first pick when it
+        // comes ([`Self::vibe_move_on`]); none coming, it plays on.
+        self.radio_vibe_skip(playing);
+    }
+
+    /// «↻ Другой вайб»'s first pick is in the queue: it plays now. The song
+    /// it was pressed on is no skip and says nothing of itself (no end,
+    /// no verdict for the radio, the recommendations or new music), and
+    /// the sleep timer keeps as many songs after the one that plays.
+    pub(crate) fn vibe_move_on(&mut self) {
+        // Nothing of the song cut short is recorded.
+        self.ended = true;
+        log::info!("wave: on to the new vibe");
+        match self.queue.skip_forward() {
+            Some(e) => {
+                self.sleep_moved_on();
+                self.start(e);
+            }
+            None => self.publish_player(),
+        }
     }
 
     /// The playing wave's filter.

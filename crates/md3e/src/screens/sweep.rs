@@ -213,7 +213,7 @@ pub const ALL: &[SettingId] = {
         LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
         // Вид.
         Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
-        CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle, RingSpin, RingDir, RingSpinSpeed, RingBeat, RingPause,
+        CoverSpinSpeed, CoverPulse, CoverPulseStrength, CoverPauseMorph, Ring, RingStyle,
         Ambient, AmbientStrength, BgShapes, BgCount, BgSize, BgOpacity, BgSpeed, BgReact, BgColors, BgHue, ProgressWave, NpVolume,
         NpVolumeHold, CoverClickPause, DblClickShape, TapWait, NpMotion, PlayerButton(B::Shuffle), PlayerButton(B::Repeat),
         PlayerButton(B::Like), PlayerButton(B::AddToPlaylist), PlayerButton(B::Queue), PlayerButton(B::Lyrics), PlayerButton(B::Sound),
@@ -278,7 +278,7 @@ fn spec(id: SettingId) -> Spec {
     const SECRET: &str = "kept in settings.toml, not in the prefs; typed in, never set by the sweep";
     const BUTTONS: &str = "buttons only; the sweep never presses them (they open folders, sign in or change files)";
     match id {
-        S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingDir | S::RingStyle | S::Ambient | S::BgColors
+        S::Theme | S::Contrast | S::NpVolume | S::CoverShape | S::CoverDir | S::RingStyle | S::Ambient | S::BgColors
         | S::LyricsStyle | S::LyricsUnit | S::NpMotion | S::ToastTime | S::LyricsUi | S::LyricsGpu | S::LyricsStreamKeep
         | S::OpusBitrate | S::RadioNewShare | S::ProfileNames | S::LikeDownload | S::AlbumLike | S::SingleLike
         | S::LikedAlbumsPlace | S::UpgradeBar | S::UpgradeAuto | S::PlaylistSync | S::AlbumDate => Spec::Choice(Segments),
@@ -296,7 +296,6 @@ fn spec(id: SettingId) -> Spec {
         S::Preset(_) => Spec::Choice(Segments),
         S::CoverSpinSpeed => Spec::Slider(|p| &mut p.cover_spin_s, 12.0, 90.0, 1.0),
         S::CoverPulseStrength => Spec::Slider(|p| &mut p.cover_pulse_strength, 0.02, 0.15, 0.01),
-        S::RingSpinSpeed => Spec::Slider(|p| &mut p.ring_spin_s, 10.0, 90.0, 1.0),
         S::HomeSections => Spec::HomeSections,
         S::ProgressWave => Spec::Switch(|p| &mut p.progress_wave),
         S::NpVolumeHold => Spec::Slider(|p| &mut p.np_volume_pop_hold, 0.3, 3.0, 0.1),
@@ -306,9 +305,6 @@ fn spec(id: SettingId) -> Spec {
         S::CoverSpin => Spec::Switch(|p| &mut p.cover_spin),
         S::CoverPulse => Spec::Switch(|p| &mut p.cover_pulse),
         S::Ring => Spec::Switch(|p| &mut p.ring),
-        S::RingSpin => Spec::Switch(|p| &mut p.spin_ring),
-        S::RingBeat => Spec::Switch(|p| &mut p.ring_beat),
-        S::RingPause => Spec::Switch(|p| &mut p.ring_on_pause),
         S::AmbientStrength => Spec::Slider(|p| &mut p.ambient_strength, 0.25, 2.0, 0.05),
         S::BgCount => Spec::Count(|p| &mut p.bg_shapes_count, 4.0, 32.0, 1.0),
         S::BgSize => Spec::Slider(|p| &mut p.bg_shapes_size, 0.5, 2.0, 0.05),
@@ -610,7 +606,7 @@ pub fn shown(id: SettingId, p: &Prefs) -> Option<usize> {
 /// turns): what the page needs before the row's values do anything.
 pub fn enable(id: SettingId, p: &mut Prefs) {
     use SettingId as S;
-    use v::{Ambient, BgShapes, RingStyle};
+    use v::{Ambient, BgShapes};
     let unsquare = |p: &mut Prefs| {
         if p.cover_shape == CoverShape::Original {
             p.cover_shape = CoverShape::default();
@@ -619,12 +615,6 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
     let bg_on = |p: &mut Prefs| {
         if p.bg_shapes == BgShapes::Off {
             p.bg_shapes = BgShapes::Float;
-        }
-    };
-    let ring_turns = |p: &mut Prefs| {
-        p.ring = true;
-        if p.ring_style == RingStyle::Bars {
-            p.ring_style = RingStyle::Circle;
         }
     };
     match id {
@@ -637,11 +627,11 @@ pub fn enable(id: SettingId, p: &mut Prefs) {
             p.cover_spin = true;
         }
         S::CoverPulseStrength => p.cover_pulse = true,
-        S::RingStyle | S::RingBeat | S::RingPause => p.ring = true,
-        S::RingSpin => ring_turns(p),
-        S::RingDir | S::RingSpinSpeed => {
-            ring_turns(p);
-            p.spin_ring = true;
+        // The ring shows only around a shaped cover.
+        S::Ring => unsquare(p),
+        S::RingStyle => {
+            unsquare(p);
+            p.ring = true;
         }
         S::AmbientStrength => {
             if p.ambient == Ambient::Off {
@@ -699,9 +689,9 @@ pub fn screens(id: SettingId) -> Vec<Screen> {
         S::NpVolume | S::NpVolumeHold | S::FpsLimit | S::DislikeButton | S::PlayerButton(_) => vec![Np],
         S::CoverShape | S::Ring | S::RingStyle | S::CoverPauseMorph => vec![Np, NpPaused, NpLyrics],
         S::AlbumDate => vec![Album],
-        S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength | S::RingPause => vec![Np, NpPaused],
-        S::CoverSpin | S::CoverDir | S::CoverPulse | S::RingSpin | S::RingDir | S::RingBeat => vec![Np],
-        S::CoverSpinSpeed | S::CoverPulseStrength | S::RingSpinSpeed => vec![Np],
+        S::ShapeRange | S::ShapePick | S::Ambient | S::AmbientStrength => vec![Np, NpPaused],
+        S::CoverSpin | S::CoverDir | S::CoverPulse => vec![Np],
+        S::CoverSpinSpeed | S::CoverPulseStrength => vec![Np],
         S::Preset(Area::Track) => vec![Np, NpPaused],
         S::Preset(Area::Recs) | S::HomeSections => vec![Home],
         S::BgShapes | S::BgCount | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue => vec![Np],
@@ -733,16 +723,13 @@ pub fn animated(id: SettingId) -> bool {
         S::ProgressWave
             | S::CoverSpinSpeed
             | S::CoverPulseStrength
-            | S::RingSpinSpeed
             | S::Preset(Area::Track)
             | S::Preset(Area::Lyrics)
             | S::LyricsLift
             | S::CoverSpin
             | S::CoverDir
             | S::CoverPulse
-            | S::RingSpin
-            | S::RingDir
-            | S::RingBeat
+            | S::Ring
             | S::Ambient
             | S::AmbientStrength
             | S::BgShapes
@@ -917,7 +904,7 @@ mod tests {
             | S::LyricsGenius | S::SaveLyrics | S::LyricsCheck | S::LyricsWordsPlaying | S::LyricsLinesAuto | S::LyricsStreams
             | S::LyricsStreamKeep | S::LyricsRecognize | S::LyricsModels | S::Theme | S::Scheme | S::Contrast | S::CoverShape
             | S::ShapeRange | S::ShapePick | S::CoverSpin | S::CoverDir | S::CoverPulse | S::CoverPauseMorph | S::Ring
-            | S::RingStyle | S::RingSpin | S::RingDir | S::RingBeat | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount
+            | S::RingStyle | S::Ambient | S::AmbientStrength | S::BgShapes | S::BgCount
             | S::BgSize | S::BgOpacity | S::BgSpeed | S::BgReact | S::BgColors | S::BgHue | S::ProgressWave | S::NpVolume
             | S::NpVolumeHold | S::CoverClickPause | S::DblClickShape | S::TapWait | S::NpMotion | S::MixesProfiles
             | S::MixesEverything | S::MixesMoods | S::MixesOnRepeat | S::BackgroundCards | S::ProfileNames
@@ -934,7 +921,7 @@ mod tests {
             | S::Trash | S::ExportData | S::LyricsUi | S::LyricsGpu | S::LyricsModelsAuto | S::MusicBrainz | S::AcoustId
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
             | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::FirstRun | S::CoverSpinSpeed
-            | S::CoverPulseStrength | S::RingSpinSpeed | S::RingPause | S::HomeSections | S::Preset(_) => pos(id),
+            | S::CoverPulseStrength | S::HomeSections | S::Preset(_) => pos(id),
         }
     }
 

@@ -214,9 +214,10 @@ impl Default for ReleaseType {
 pub enum AlbumMode {
     /// An album added to the library is the whole album; one not added is
     /// the user's songs of it, the whole one tap away.
-    #[default]
     Auto,
-    /// Every album opens and plays whole.
+    /// Every album opens and plays whole (the default): an album is an
+    /// album, the user's songs of it one tap away.
+    #[default]
     Whole,
     /// Every album opens and plays the user's songs: the ones they have, liked
     /// or chose, not the ones that came with the album.
