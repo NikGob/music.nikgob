@@ -21,8 +21,9 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKUP_STEP_PAGES: i32 = 1024;
 /// The pause between two steps of a backup.
 const BACKUP_PAUSE: Duration = Duration::from_millis(20);
-/// Starts over a backup takes before it ends in one step.
-const BACKUP_RESTARTS: u32 = 5;
+/// Starts over (writes in between) a backup takes before it gives up: the
+/// copy is tried again later, a step is never longer.
+const BACKUP_RESTARTS: u32 = 20;
 /// A read or a write that waits this long for its connection is logged…
 const SLOW_WAIT: Duration = Duration::from_millis(250);
 /// …and a write that keeps the writer this long.
@@ -283,7 +284,8 @@ impl Library {
     /// [`BACKUP_STEP_PAGES`] with a pause between them, so no read snapshot
     /// is held for long and the writer and checkpoints go on. A write in
     /// between makes SQLite start the copy over; after
-    /// [`BACKUP_RESTARTS`] of those it ends in one step. Blocking: never
+    /// [`BACKUP_RESTARTS`] of those it gives up with an error (tried again
+    /// later), never taking one long step. Blocking: never
     /// call it from the player loop.
     pub fn backup_to(&self, dest: &Path) -> Result<()> {
         self.backup_in_steps(dest, BACKUP_STEP_PAGES)
@@ -305,8 +307,10 @@ impl Library {
             let mut restarts = 0;
             let mut left = i32::MAX;
             loop {
-                let pages = if restarts >= BACKUP_RESTARTS { -1 } else { step_pages };
-                match backup.step(pages)? {
+                if restarts >= BACKUP_RESTARTS {
+                    return Err(crate::error::LibraryError::Invalid("the library kept changing during its copy".into()));
+                }
+                match backup.step(step_pages)? {
                     StepResult::Done => break,
                     StepResult::More => {
                         let now = backup.progress().remaining;
@@ -362,6 +366,25 @@ impl Library {
     }
 
     /// Runs `f` on the writer connection outside any transaction (`VACUUM`).
+    /// Like [`Self::write`], but the commit is on the disk when this returns
+    /// (`synchronous = FULL` for this one transaction: the WAL is flushed,
+    /// and with it every commit before): for a row a file is deleted on
+    /// the strength of.
+    pub(crate) fn write_durable<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut conn = lock(&self.inner.writer);
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let out = (|| -> Result<T> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let out = f(&tx)?;
+            tx.commit()?;
+            Ok(out)
+        })();
+        let back = conn.pragma_update(None, "synchronous", "NORMAL");
+        let out = out?;
+        back?;
+        Ok(out)
+    }
+
     pub(crate) fn with_writer<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = lock(&self.inner.writer);
         f(&conn)

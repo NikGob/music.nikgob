@@ -1234,7 +1234,9 @@ impl Worker {
         self.after_delete();
     }
 
-    /// Deletes tracks for good: files, master, rows.
+    /// Deletes tracks for good: files, master, rows. On a blocking thread
+    /// (a master is checked by its hash before it goes, and waits for the
+    /// masters' lock): the toast and the lists follow when it is done.
     pub(crate) fn purge_tracks(&mut self, tracks: Vec<TrackId>) {
         let Some(svc) = &self.import else {
             self.toast("Удаление недоступно", None);
@@ -1245,20 +1247,29 @@ impl Worker {
             self.command(Command::Next);
         }
         let albums = self.wish_drop_deleted(&tracks);
-        let (mut done, mut failed) = (0usize, 0usize);
-        for &t in &tracks {
-            match nikgob_import::purge_track(&self.lib, &cfg, t) {
-                Ok(r) => {
-                    done += 1;
-                    failed += r.files_failed;
-                }
-                Err(e) => {
-                    log::error!("purge {t}: {e}");
-                    failed += 1;
+        let Some(svc) = &self.import else { return };
+        let (lib, later) = (self.lib.clone(), self.later_tx.clone());
+        svc.spawn_blocking(move || {
+            let (mut done, mut failed) = (0usize, 0usize);
+            for &t in &tracks {
+                match nikgob_import::purge_track(&lib, &cfg, t) {
+                    Ok(r) => {
+                        done += 1;
+                        failed += r.files_failed;
+                    }
+                    Err(e) => {
+                        log::error!("purge {t}: {e}");
+                        failed += 1;
+                    }
                 }
             }
-        }
-        self.wish_settle_albums(&albums);
+            let _ = later.send(crate::Later::new("the purge", move |w| w.tracks_purged(&albums, done, failed)));
+        });
+    }
+
+    /// [`Self::purge_tracks`] is done.
+    fn tracks_purged(&mut self, albums: &[nikgob_core::model::ReleaseId], done: usize, failed: usize) {
+        self.wish_settle_albums(albums);
         self.toast(
             if failed > 0 {
                 "Удалено, но не все файлы получилось стереть".to_owned()

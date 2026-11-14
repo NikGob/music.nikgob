@@ -738,17 +738,26 @@ async fn masters_relocate_to_another_folder_with_hash_verification_and_cleanup()
     assert_eq!(rel, std::path::Path::new("Кино").join("1988 - Группа крови").join("03 - Звезда по имени Солнце.wav"));
 
     let new_masters = root.dir.path().join("external_drive").join("FLAC");
+    // A master kept by name in an album folder of the old folder: the move
+    // is refused and nothing moves (it would stay on the old disk).
+    let refused = nikgob_import::relocate_masters(&lib, &old_masters, &new_masters, |_, _, _| {});
+    assert!(refused.is_err());
+    assert!(old_masters.join(&rel).is_file());
+    assert_eq!(std::fs::read(old_masters.join(format!("{older_hash}.flac"))).unwrap(), older);
+    assert!(!new_masters.exists(), "nothing written to the new folder");
+
+    // With only flat masters there, they move.
+    lib.delete_master(track_id).unwrap();
     let report = nikgob_import::relocate_masters(&lib, &old_masters, &new_masters, |_, _, _| {}).unwrap();
     assert_eq!(report.audio_moved, 1, "only the flat master moves");
     assert_eq!(report.sidecars_moved, 1);
     assert!(report.bytes_moved > 0);
-    assert!(old_masters.join(&rel).is_file(), "a master kept by name stays where it is");
+    assert!(old_masters.join(&rel).is_file(), "a file in an album folder is never touched by it");
 
     // Opus file stays untouched on the fast library drive.
     assert!(std::path::Path::new(&opus_locator).is_file());
 
-    // New masters folder has the verified flat original and the sidecar;
-    // the master kept by name keeps its row and its path.
+    // New masters folder has the verified flat original and the sidecar.
     let mut moved_cfg = root.cfg.clone().with_masters_dir(&new_masters);
     assert_eq!(moved_cfg.masters_dir(), new_masters);
     let entries: Vec<_> = std::fs::read_dir(&new_masters)
@@ -758,13 +767,7 @@ async fn masters_relocate_to_another_folder_with_hash_verification_and_cleanup()
         .collect();
     assert_eq!(std::fs::read(new_masters.join(format!("{older_hash}.flac"))).unwrap(), older);
     assert!(entries.iter().any(|n| n.ends_with(".json")), "{entries:?}");
-    assert_eq!(lib.get_master(track_id).unwrap().unwrap().file_path.as_deref(), Some(named.as_str()));
     assert!(!new_masters.join(&rel).exists());
-    let sidecar: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(entries.iter().find(|n| n.ends_with(".json")).map(|n| new_masters.join(n)).unwrap()).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(sidecar["path"].as_str(), Some(named.as_str()), "the sidecar still names where it is");
 
     // Rebuilding from files still finds the master quality score in the new folder.
     let fresh = Library::open_in_memory().unwrap();
@@ -1038,4 +1041,38 @@ async fn a_damaged_flat_file_is_never_written_over_and_the_row_comes_first() {
     assert_eq!(nikgob_import::fsutil::hash_file(&named).unwrap(), hash);
     assert_eq!(std::fs::read(&flat).unwrap(), b"damaged", "never written over");
     assert!(!wav.exists(), "the Inbox file goes once the row is there");
+}
+
+/// A master that cannot be registered (the masters folder cannot be made:
+/// a file stands where it goes) fails the import: the original stays in the
+/// Inbox, the track's rows and its converted file go again. The next try,
+/// once the folder can be made, imports it with its master, never as a
+/// duplicate of a track that has none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_master_that_cannot_be_registered_fails_the_import_and_keeps_the_original() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let masters = root.cfg.masters_dir();
+    std::fs::create_dir_all(masters.parent().unwrap()).unwrap();
+    std::fs::write(&masters, b"not a folder").unwrap();
+    let wav = root.inbox("song.wav");
+    write_wav(&wav, &broadband(RATE, 3.0, 29), RATE);
+    tags::write_tags(&wav, &song_tags("Кукушка")).unwrap();
+    let bytes = std::fs::read(&wav).unwrap();
+
+    let events = importer.import_paths(vec![wav.clone()], SourceOrigin::Inbox).wait().await;
+    assert_eq!(failures(&events).len(), 1, "{events:?}");
+    assert!(imported(&events).is_empty());
+    assert_eq!(std::fs::read(&wav).unwrap(), bytes, "the original stays in the Inbox");
+    assert_eq!(lib.count_tracks(TrackFilter::All).unwrap(), 0, "no track without its master");
+    let album = root.cfg.library_dir.join("Кино").join("1988 - Группа крови");
+    assert!(!album.join("03 - Кукушка.opus").exists(), "the converted file goes");
+
+    std::fs::remove_file(&masters).unwrap();
+    let events = importer.import_paths(vec![wav.clone()], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    let (id, _) = imported(&events)[0];
+    let m = lib.get_master(id).unwrap().expect("its master");
+    assert_eq!(m.file_hash, blake3::hash(&bytes).to_hex().to_string());
+    assert!(!wav.exists(), "the Inbox file goes once its master's row is there");
 }

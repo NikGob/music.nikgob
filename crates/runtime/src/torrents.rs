@@ -1004,16 +1004,21 @@ pub(crate) fn clean_payloads(
 }
 
 /// A cue sheet of the payload may go: the torrent has no disc image among
-/// its masters (an image is the master of two tracks or more), or the
-/// sheet kept with one of its images (`<masters>/<hash>.cue`) is this very
-/// sheet, byte for byte. A sheet whose copy failed or differs stays: it can
-/// be the only copy of the image's track boundaries.
+/// its masters (an image is the master of two tracks or more, or one whose
+/// sheet or sidecar the masters folder keeps: a partly imported image has
+/// one row), or the sheet kept with one of its images (`<masters>/<hash>.cue`)
+/// is this very sheet, byte for byte. A sheet whose copy failed or differs
+/// stays: it can be the only copy of the image's track boundaries.
 fn sheet_kept(sheet: &Path, masters_dir: &Path, masters: &[nikgob_core::model::Master]) -> bool {
     let mut count: HashMap<&str, usize> = HashMap::new();
     for m in masters {
         *count.entry(m.file_hash.as_str()).or_default() += 1;
     }
-    let images: Vec<&str> = count.into_iter().filter(|(_, n)| *n >= 2).map(|(h, _)| h).collect();
+    let images: Vec<&str> = count
+        .into_iter()
+        .filter(|(h, n)| *n >= 2 || nikgob_import::master_files::is_image_master(masters_dir, h))
+        .map(|(h, _)| h)
+        .collect();
     if images.is_empty() {
         return true;
     }
@@ -1274,6 +1279,36 @@ mod tests {
         assert_eq!(origin_path(&lib, track.id), dest.to_string_lossy());
         assert_eq!(lib.get_master(track.id).unwrap().unwrap().file_path, None);
         assert!(!cfg.masters_dir().join("Кино").exists(), "no folder by name");
+    }
+
+    /// The cue sheet of a disc image of which one track came stays in
+    /// Downloads while the masters folder has no copy of it (its sidecar
+    /// names a sheet the copy of which failed); it goes once its very copy
+    /// is kept, and a torrent without an image lets its sheet go.
+    #[test]
+    fn the_sheet_of_a_one_track_image_stays_until_its_copy_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let masters = dir.path().join("m");
+        std::fs::create_dir_all(&masters).unwrap();
+        let sheet = dir.path().join("disc.cue");
+        std::fs::write(&sheet, b"FILE \"CDImage.flac\" WAVE").unwrap();
+        let one = |hash: &str| Master {
+            track_id: TrackId::new(),
+            codec: Codec::Flac,
+            file_hash: hash.into(),
+            size_bytes: 1,
+            origin: None,
+            file_path: None,
+            replicas: Vec::new(),
+        };
+        let masters_rows = vec![one("img")];
+        std::fs::write(masters.join("img.json"), br#"{"track_id":"x","cue":"disc.cue"}"#).unwrap();
+        assert!(!sheet_kept(&sheet, &masters, &masters_rows), "no copy of the sheet: it stays");
+        std::fs::write(masters.join("img.cue"), b"another sheet").unwrap();
+        assert!(!sheet_kept(&sheet, &masters, &masters_rows), "a different copy: it stays");
+        std::fs::write(masters.join("img.cue"), std::fs::read(&sheet).unwrap()).unwrap();
+        assert!(sheet_kept(&sheet, &masters, &masters_rows), "its very copy is kept");
+        assert!(sheet_kept(&sheet, &masters, &[one("track")]), "no image: the sheet may go");
     }
 
     /// A master whose copy does not verify stays where it is, with its row,

@@ -280,38 +280,48 @@ impl Library {
     /// Inserts or replaces the master of `master.track_id` and upserts its
     /// replicas (replicas not listed are left alone).
     pub fn put_master(&self, master: &Master) -> Result<()> {
-        self.write(|tx| {
-            let (kind, info_hash, path) = match master.origin.as_ref().map(origin_columns) {
-                Some((k, h, p)) => (Some(k), h, p),
-                None => (None, None, None),
-            };
-            tx.execute(
-                "INSERT INTO master(track_id, codec, file_hash, size_bytes,
-                                    origin_kind, origin_info_hash, origin_path, file_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(track_id) DO UPDATE SET
-                    codec = excluded.codec, file_hash = excluded.file_hash,
-                    size_bytes = excluded.size_bytes, origin_kind = excluded.origin_kind,
-                    origin_info_hash = excluded.origin_info_hash,
-                    origin_path = excluded.origin_path, file_path = excluded.file_path",
-                params![
-                    master.track_id.to_string(),
-                    master.codec.as_str(),
-                    master.file_hash,
-                    master.size_bytes as i64,
-                    kind,
-                    info_hash,
-                    path,
-                    master.file_path
-                ],
-            )?;
-            for r in &master.replicas {
-                upsert_replica(tx, r)?;
-            }
-            Ok(())
-        })
+        self.write(|tx| put_master_in(tx, master))
     }
 
+    /// [`Self::put_master`], on the disk when it returns (see
+    /// `Library::write_durable`): a master's source is deleted only after it.
+    pub fn put_master_durable(&self, master: &Master) -> Result<()> {
+        self.write_durable(|tx| put_master_in(tx, master))
+    }
+}
+
+fn put_master_in(tx: &Connection, master: &Master) -> Result<()> {
+    let (kind, info_hash, path) = match master.origin.as_ref().map(origin_columns) {
+        Some((k, h, p)) => (Some(k), h, p),
+        None => (None, None, None),
+    };
+    tx.execute(
+        "INSERT INTO master(track_id, codec, file_hash, size_bytes,
+                            origin_kind, origin_info_hash, origin_path, file_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(track_id) DO UPDATE SET
+            codec = excluded.codec, file_hash = excluded.file_hash,
+            size_bytes = excluded.size_bytes, origin_kind = excluded.origin_kind,
+            origin_info_hash = excluded.origin_info_hash,
+            origin_path = excluded.origin_path, file_path = excluded.file_path",
+        params![
+            master.track_id.to_string(),
+            master.codec.as_str(),
+            master.file_hash,
+            master.size_bytes as i64,
+            kind,
+            info_hash,
+            path,
+            master.file_path
+        ],
+    )?;
+    for r in &master.replicas {
+        upsert_replica(tx, r)?;
+    }
+    Ok(())
+}
+
+impl Library {
     /// The master of a track, with its replicas.
     pub fn get_master(&self, track: TrackId) -> Result<Option<Master>> {
         self.read(|c| {
@@ -358,8 +368,9 @@ impl Library {
 
     /// Updates the in-torrent path of a torrent-origin master (the file was
     /// moved out of the torrent folder; the origin stays the torrent).
+    /// Durably: the payload is deleted right after.
     pub fn set_master_origin_path(&self, track: TrackId, path: &str) -> Result<()> {
-        self.write(|tx| {
+        self.write_durable(|tx| {
             let kind: Option<Option<String>> = tx
                 .query_row(
                     "SELECT origin_kind FROM master WHERE track_id = ?1",
@@ -386,8 +397,9 @@ impl Library {
     /// Sets where the master of `track` is kept under its name in the
     /// masters folder (a torrent's master taken out of `Downloads/`: its
     /// in-torrent path too, as [`Self::set_master_origin_path`] does).
+    /// Durably: the payload is deleted right after.
     pub fn set_master_file(&self, track: TrackId, path: &str) -> Result<()> {
-        self.write(|tx| {
+        self.write_durable(|tx| {
             let n = tx.execute(
                 "UPDATE master SET file_path = ?2,
                         origin_path = CASE WHEN origin_kind = 'torrent' THEN ?2 ELSE origin_path END
@@ -418,6 +430,15 @@ impl Library {
         self.read(|c| {
             let n: i64 = c.query_row("SELECT count(*) FROM master WHERE file_path = ?1", [path], |r| r.get(0))?;
             Ok(n.max(0) as usize)
+        })
+    }
+
+    /// The paths of every master kept by name, once each.
+    pub fn master_file_paths(&self) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare("SELECT DISTINCT file_path FROM master WHERE file_path IS NOT NULL")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
         })
     }
 
@@ -951,6 +972,9 @@ mod tests {
         assert_eq!(lib.masters_at("/m/A/01.flac").unwrap(), 2);
         assert_eq!(lib.masters_at("/m/B/01.flac").unwrap(), 1);
         assert_eq!(lib.masters_at("/m/C/01.flac").unwrap(), 0);
+        let mut paths = lib.master_file_paths().unwrap();
+        paths.sort();
+        assert_eq!(paths, vec!["/m/A/01.flac".to_owned(), "/m/B/01.flac".to_owned()]);
     }
 
     /// A move of the masters folder repoints only the flat masters it takes
@@ -1008,10 +1032,10 @@ mod tests {
             let (lib, stop) = (lib.clone(), stop.clone());
             std::thread::spawn(move || {
                 let mut n = 0;
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) && n < 200 {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) && n < 8 {
                     lib.put_master(&master(&format!("w{n}"), None)).unwrap();
                     n += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    std::thread::sleep(std::time::Duration::from_millis(15));
                 }
             })
         };
@@ -1023,6 +1047,46 @@ mod tests {
         for m in &before {
             assert_eq!(copy.get_master(m.track_id).unwrap().as_ref(), Some(m));
         }
+    }
+
+    /// A master written durably is there like any other, and the writes
+    /// after it are as quick as before (the full flush was for it alone).
+    #[test]
+    fn a_durable_master_leaves_later_writes_as_they_were() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path().join("library.sqlite")).unwrap();
+        let m = master("h", None);
+        lib.put_master_durable(&m).unwrap();
+        assert_eq!(lib.get_master(m.track_id).unwrap(), Some(m));
+        let sync: i64 = lib.write(|tx| Ok(tx.query_row("PRAGMA synchronous", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(sync, 1, "NORMAL again");
+    }
+
+    /// While the library never stops changing the copy gives up (to be
+    /// tried later) instead of ever taking one long step.
+    #[test]
+    fn a_copy_that_keeps_starting_over_gives_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path().join("library.sqlite")).unwrap();
+        for i in 0..300 {
+            lib.put_master(&master(&format!("h{i}"), None)).unwrap();
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (lib, stop) = (lib.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    lib.put_master(&master(&format!("w{n}"), None)).unwrap();
+                    n += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(3));
+                }
+            })
+        };
+        let gave_up = lib.backup_in_steps(&dir.path().join("copy.sqlite"), 1);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(gave_up.is_err());
     }
 
     #[test]

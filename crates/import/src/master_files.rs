@@ -13,10 +13,12 @@
 //! files right in the folder are never moved, renamed or deleted here, and
 //! are found as before ([`master_file`]). A master is written to a temporary
 //! file of its own in its album folder, flushed and checked (size and
-//! BLAKE3), then takes its name without ever replacing a file (a hard link,
-//! or a rename into a name seen free where the disk has no links), and only
-//! then is its path recorded in the library. A crash leaves at worst a
-//! temporary file, removed at a later start ([`clean_stale_temps`]). A name
+//! BLAKE3), then takes its name without ever replacing a file (a hard link;
+//! on Windows, where the disk has no links, a move the system refuses onto
+//! a taken name; elsewhere such a disk gets nothing and the source stays),
+//! its folders are flushed, and only then is its path recorded in the
+//! library. A crash leaves at worst a temporary file, removed at a later
+//! start of a player on the same computer ([`clean_stale_temps`]). A name
 //! that holds another file is never written over: the next free one
 //! (`name (2).flac`, …) is taken.
 
@@ -198,14 +200,57 @@ fn candidate(target: &Path, n: u32) -> PathBuf {
 }
 
 /// Flushes the folder's entries to the disk where that is a thing one can
-/// ask for (not on Windows, where a file's own flush is what there is).
-fn sync_dir(dir: &Path) {
+/// ask for (not on Windows, where NTFS journals its names and a file's own
+/// flush is what there is). A flush that fails is an error.
+fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
-    if let Ok(d) = File::open(dir) {
-        let _ = d.sync_all();
-    }
+    File::open(dir).and_then(|d| d.sync_all()).map_err(fsutil::io_err(dir))?;
     #[cfg(not(unix))]
     let _ = dir;
+    Ok(())
+}
+
+/// Flushes `dir` and every folder above it up to `top` (the first one that
+/// was there before `dir` was made): a new name and the new folders that
+/// lead to it are on the disk before the library records it.
+fn sync_dirs_up_to(dir: &Path, top: &Path) -> Result<()> {
+    let mut at = Some(dir);
+    while let Some(d) = at {
+        sync_dir(d)?;
+        if d == top {
+            break;
+        }
+        at = d.parent();
+    }
+    Ok(())
+}
+
+/// The nearest folder of `dir` (itself or above) that is there now.
+fn existing_ancestor(dir: &Path) -> PathBuf {
+    dir.ancestors().find(|d| long_path(d).is_dir()).unwrap_or(dir).to_path_buf()
+}
+
+/// This computer in our temporary files' names: 8 hex digits of its name's
+/// BLAKE3. None when the computer's name cannot be told (its temporary
+/// files are then never cleaned up: whose they are is not known).
+fn host_tag() -> Option<&'static str> {
+    static TAG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TAG.get_or_init(|| {
+        let name = std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| fs::read_to_string("/etc/hostname").ok())
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .map(|n| n.trim().to_lowercase())
+            .filter(|n| !n.is_empty())?;
+        Some(blake3::hash(name.as_bytes()).to_hex()[..8].to_owned())
+    })
+    .as_deref()
+}
+
+/// The host part of our temporary names: [`host_tag`], or zeros when the
+/// computer's name is not known.
+fn host_part() -> &'static str {
+    host_tag().unwrap_or("00000000")
 }
 
 /// The file a running player holds locked for as long as it lives
@@ -230,25 +275,25 @@ fn hold_live_lock() -> Result<()> {
     held.as_ref().map(|_| ()).map_err(|e| ImportError::Other(format!("masters: no live lock, nothing written: {e}")))
 }
 
-/// Whether the player with this pid may still be writing its temporary
-/// files: this very process always; another one while it holds its live
-/// lock. When that cannot be told, yes (nothing of it is touched).
+/// Whether the player of this computer with this pid may still be writing
+/// its temporary files: this very process always; another one unless its
+/// live lock file is there and no one holds it. When that cannot be told
+/// (no lock file: it may live where this player does not look), yes:
+/// nothing of it is touched.
 fn pid_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
     match File::options().write(true).open(live_lock_path(pid)) {
-        Err(e) if e.kind() == ErrorKind::NotFound => false,
         Err(_) => true,
         Ok(f) => match f.try_lock() {
             Ok(()) => false,
-            Err(std::fs::TryLockError::WouldBlock) => true,
             Err(_) => true,
         },
     }
 }
 
-/// A fresh temporary file of ours in `dir` (`<prefix><pid>-<n>.part`),
+/// A fresh temporary file of ours in `dir` (`<prefix><host>-<pid>-<n>.part`),
 /// made with `create_new` (never a file that is there) while this
 /// process's live lock is held.
 fn new_temp(dir: &Path, prefix: &str) -> Result<(PathBuf, File)> {
@@ -256,7 +301,7 @@ fn new_temp(dir: &Path, prefix: &str) -> Result<(PathBuf, File)> {
     hold_live_lock()?;
     for _ in 0..1000 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let p = dir.join(format!("{prefix}{}-{n}{TEMP_END}", std::process::id()));
+        let p = dir.join(format!("{prefix}{}-{}-{n}{TEMP_END}", host_part(), std::process::id()));
         match File::options().write(true).create_new(true).open(long_path(&p)) {
             Ok(f) => return Ok((p, f)),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
@@ -295,14 +340,14 @@ fn stage_temp(src: &Path, dir: &Path, size: u64, hash: Option<&str>) -> Result<P
 }
 
 /// Gives the temporary file `tmp` the name `to` unless the name is there
-/// already, never replacing a file, whoever made it: a hard link (refused
-/// by the system when the name is taken), then the temporary name goes.
-/// On a disk without links (FAT, exFAT) the name is claimed first with an
-/// empty file made by `create_new` (refused when the name is taken), and
-/// the temporary takes the place of that claim, which is ours alone; a
-/// crash in between leaves an empty file at the name (a later master takes
-/// the next name). False when the name is taken; `tmp` stays for the
-/// caller then.
+/// already, never replacing a file, whoever made it, in one step the system
+/// refuses when the name is taken: a hard link (then the temporary name
+/// goes) or, on a Windows disk without links (FAT, exFAT), a move that does
+/// not replace ([`move_new`]). Where neither is there, an error: nothing is
+/// published and `tmp` stays for the caller. The folder is flushed after
+/// ([`sync_dir`]): a flush that fails takes the new name back (no row has
+/// it yet) and is an error. False when the name is taken; `tmp` stays for
+/// the caller then.
 fn link_new(tmp: &Path, to: &Path) -> Result<bool> {
     match fs::hard_link(long_path(tmp), long_path(to)) {
         Ok(()) => {
@@ -312,25 +357,46 @@ fn link_new(tmp: &Path, to: &Path) -> Result<bool> {
             }
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
-        Err(_) => {
-            match File::options().write(true).create_new(true).open(long_path(to)) {
-                Ok(claim) => drop(claim),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
-                Err(e) => return Err(ImportError::io(to, e)),
-            }
-            if let Err(e) = fs::rename(long_path(tmp), long_path(to)) {
-                // Only our empty claim is there: it goes.
-                if fsutil::file_size(to).ok() == Some(0) {
-                    let _ = fs::remove_file(long_path(to));
-                }
-                return Err(ImportError::io(to, e));
+        Err(link) => {
+            if !move_new(tmp, to).map_err(|e| ImportError::Other(format!("{}: no link ({link}), no move: {e}", to.display())))? {
+                return Ok(false);
             }
         }
     }
-    if let Some(dir) = to.parent() {
-        sync_dir(dir);
+    if let Some(dir) = to.parent()
+        && let Err(e) = sync_dir(dir)
+    {
+        let _ = fs::remove_file(long_path(to));
+        return Err(e);
     }
     Ok(true)
+}
+
+/// Moves `tmp` to `to` only while `to` is not there, the check and the move
+/// one step of the system's (Windows: `MoveFileExW` without
+/// `MOVEFILE_REPLACE_EXISTING`, written through). False when the name is
+/// taken. Elsewhere there is no such step a disk without links has: an
+/// error, `tmp` stays.
+#[allow(unsafe_code)]
+fn move_new(tmp: &Path, to: &Path) -> std::io::Result<bool> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+        let wide = |p: &Path| long_path(p).as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let (from, into) = (wide(tmp), wide(to));
+        // SAFETY: both are NUL-terminated wide strings that outlive the call.
+        if unsafe { MoveFileExW(from.as_ptr(), into.as_ptr(), MOVEFILE_WRITE_THROUGH) } != 0 {
+            return Ok(true);
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() == ErrorKind::AlreadyExists { Ok(false) } else { Err(e) }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (tmp, to);
+        Err(std::io::Error::new(ErrorKind::Unsupported, "the disk has no hard links"))
+    }
 }
 
 /// What [`place_master`] did.
@@ -348,6 +414,7 @@ pub struct Placed {
 /// touched: the caller lets it go once the library records the copy.
 pub fn place_master(src: &Path, target: &Path, hash: &str) -> Result<Placed> {
     let dir = target.parent().ok_or_else(|| ImportError::Other(format!("{} has no folder", target.display())))?;
+    let top = existing_ancestor(dir);
     fsutil::create_dir_all(dir)?;
     let size = fsutil::file_size(src)?;
     let mut tmp: Option<PathBuf> = None;
@@ -373,6 +440,15 @@ pub fn place_master(src: &Path, target: &Path, hash: &str) -> Result<Placed> {
         match link_new(&staged, &to) {
             Ok(true) => {
                 tmp = None;
+                // The folders made for it are on the disk too, or the copy
+                // goes again (no row has it yet) and the source stays.
+                if let Some(parent) = dir.parent()
+                    && dir != top
+                    && let Err(e) = sync_dirs_up_to(parent, &top)
+                {
+                    let _ = fs::remove_file(long_path(&to));
+                    return Err(e);
+                }
                 placed = Some(Placed { path: to, written: true });
                 break;
             }
@@ -394,6 +470,26 @@ pub fn place_master(src: &Path, target: &Path, hash: &str) -> Result<Placed> {
         let _ = fsutil::remove_file(&t);
     }
     placed.ok_or_else(|| ImportError::Other(format!("{}: no free name", target.display())))
+}
+
+/// Writes `bytes` as the file `path` (a master's sidecar), over what is
+/// there: through a temporary file of ours beside it, flushed, then renamed
+/// into place, so a crash leaves the old file or the new one whole, never a
+/// cut one.
+pub(crate) fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().ok_or_else(|| ImportError::Other(format!("{} has no folder", path.display())))?;
+    let (tmp, mut out) = new_temp(dir, MASTER_TEMP)?;
+    let written = (|| -> Result<()> {
+        out.write_all(bytes).and_then(|()| out.sync_all()).map_err(fsutil::io_err(&tmp))?;
+        drop(out);
+        fs::rename(long_path(&tmp), long_path(path)).map_err(fsutil::io_err(path))?;
+        sync_dir(dir)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(long_path(&tmp));
+    }
+    written
 }
 
 /// Puts a copy of `cover` into `album_dir` as `cover.jpg` when the folder
@@ -526,14 +622,30 @@ fn release_cover(lib: &Library, cfg: &ImportConfig, track: TrackId) -> Option<Pa
     long_path(&p).is_file().then_some(p)
 }
 
-/// The kind of temporary file of ours `name` is, and the pid of the player
-/// that made it: exactly `<prefix><pid>-<n>.part`, both numbers decimal.
-fn temp_of(name: &str) -> Option<(&'static str, u32)> {
+/// A temporary file of ours, by its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Temp<'a> {
+    prefix: &'static str,
+    /// The computer it was made on ([`host_tag`]).
+    host: &'a str,
+    /// The player that made it.
+    pid: u32,
+}
+
+/// The temporary file of ours `name` is: exactly
+/// `<prefix><host>-<pid>-<n>.part`, the host 8 lower-case hex digits, both
+/// numbers decimal.
+fn temp_of(name: &str) -> Option<Temp<'_>> {
     [MASTER_TEMP, DB_TEMP].into_iter().find_map(|prefix| {
         let mid = name.strip_prefix(prefix)?.strip_suffix(TEMP_END)?;
-        let (pid, n) = mid.split_once('-')?;
+        let (host, rest) = mid.split_once('-')?;
+        let (pid, n) = rest.split_once('-')?;
         let digits = |s: &str| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit());
-        (digits(pid) && digits(n)).then(|| pid.parse().ok().map(|pid| (prefix, pid)))?
+        let hex = host.len() == 8 && host.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !(hex && digits(pid) && digits(n)) {
+            return None;
+        }
+        Some(Temp { prefix, host, pid: pid.parse().ok()? })
     })
 }
 
@@ -548,13 +660,17 @@ pub struct Cleaned {
 }
 
 /// Removes the temporary files a crash left in the masters folder `root`:
-/// only names of exactly our pattern ([`temp_of`]), a master's only in an
-/// album folder (four levels down at most, as deep as a single's goes),
-/// a database copy's only in `.nikgob-backup`, and only when the player
-/// that made it is gone ([`pid_alive`]): work in progress is never touched,
-/// however old. Nothing else is touched.
+/// only names of exactly our pattern ([`temp_of`]), a master's in the
+/// folder itself (an image, a flat master) or an album folder (four levels
+/// down at most, as deep as a single's goes), a database copy's only in
+/// `.nikgob-backup`, and only one made on this computer by a player that is
+/// gone ([`pid_alive`]): work in progress is never touched, however old,
+/// and neither is another computer's (a masters disk shared over the
+/// network: whether that player still runs cannot be told from here).
+/// Nothing else is touched; a computer whose name is not known cleans
+/// nothing.
 pub fn clean_stale_temps(root: &Path) -> Cleaned {
-    fn walk(dir: &Path, depth: usize, in_backup: bool, out: &mut Cleaned) {
+    fn walk(dir: &Path, host: &str, depth: usize, in_backup: bool, out: &mut Cleaned) {
         let Ok(rd) = fs::read_dir(long_path(dir)) else { return };
         for e in rd.flatten() {
             let Ok(kind) = e.file_type() else { continue };
@@ -562,18 +678,22 @@ pub fn clean_stale_temps(root: &Path) -> Cleaned {
             let path = dir.join(&name);
             if kind.is_dir() {
                 if depth == 0 && name == BACKUP_DIR {
-                    walk(&path, 1, true, out);
+                    walk(&path, host, 1, true, out);
                 } else if depth < 4 && !in_backup {
-                    walk(&path, depth + 1, false, out);
+                    walk(&path, host, depth + 1, false, out);
                 }
                 continue;
             }
-            let Some((prefix, pid)) = temp_of(&name).filter(|_| kind.is_file()) else { continue };
-            let here = if prefix == DB_TEMP { in_backup && depth == 1 } else { !in_backup && depth >= 1 };
+            let Some(temp) = temp_of(&name).filter(|_| kind.is_file()) else { continue };
+            let here = if temp.prefix == DB_TEMP { in_backup && depth == 1 } else { !in_backup };
             if !here {
                 continue;
             }
-            if pid_alive(pid) {
+            // Another computer's: not ours to judge, never looked at again.
+            if temp.host != host {
+                continue;
+            }
+            if pid_alive(temp.pid) {
                 out.live += 1;
                 continue;
             }
@@ -584,7 +704,9 @@ pub fn clean_stale_temps(root: &Path) -> Cleaned {
         }
     }
     let mut out = Cleaned::default();
-    walk(root, 0, false, &mut out);
+    if let Some(host) = host_tag() {
+        walk(root, host, 0, false, &mut out);
+    }
     out
 }
 
@@ -612,19 +734,39 @@ pub enum DbCopy {
     NoFolder,
 }
 
+/// `path` is a whole database file by its look: a file that starts with
+/// SQLite's header (a copy is published whole, so a file there that is not
+/// one is something else: an empty file, a folder, a user's own).
+fn is_database(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    long_path(path).is_file()
+        && File::open(long_path(path)).and_then(|mut f| f.read_exact(&mut head)).is_ok()
+        && &head == b"SQLite format 3\0"
+}
+
 /// One copy of the library's database for the day `day` into
 /// `<root>/.nikgob-backup/library-<day>.sqlite` (SQLite's online backup),
-/// then the newest `keep` copies kept: only files of exactly that name go.
-/// A day that has its copy gets no other; a missing `root` gets nothing
-/// (the folder is never made). Blocking: never on the player loop.
+/// then the newest `keep` copies kept: only database files of exactly that
+/// name go. A day that has its copy gets no other; something else at the
+/// day's name is left as it is and the day gets no copy (an error); a
+/// missing `root` gets nothing (the folder is never made). Blocking: never
+/// on the player loop.
 pub fn copy_database(lib: &Library, root: &Path, day: &str, keep: usize) -> Result<DbCopy> {
     if !long_path(root).is_dir() {
         return Ok(DbCopy::NoFolder);
     }
     let dir = root.join(BACKUP_DIR);
     let to = dir.join(format!("library-{day}.sqlite"));
-    if long_path(&to).exists() {
-        return Ok(DbCopy::Had);
+    let had = |to: &Path| -> Result<DbCopy> {
+        if is_database(to) {
+            Ok(DbCopy::Had)
+        } else {
+            Err(ImportError::Other(format!("{} is not a database copy: left as it is", to.display())))
+        }
+    };
+    if fs::symlink_metadata(long_path(&to)).is_ok() {
+        return had(&to);
     }
     match fs::create_dir(long_path(&dir)) {
         Ok(()) => {}
@@ -633,31 +775,38 @@ pub fn copy_database(lib: &Library, root: &Path, day: &str, keep: usize) -> Resu
     }
     let (tmp, file) = new_temp(&dir, DB_TEMP)?;
     drop(file);
-    let made = (|| -> Result<()> {
+    let made = (|| -> Result<bool> {
         lib.backup_to(&tmp).map_err(|e| ImportError::Other(format!("{}: {e}", to.display())))?;
         // Flushed through a handle that may write (Windows flushes no other).
         File::options().write(true).open(long_path(&tmp)).and_then(|f| f.sync_all()).map_err(fsutil::io_err(&tmp))?;
-        if !link_new(&tmp, &to)? {
-            let _ = fsutil::remove_file(&tmp);
-        }
-        Ok(())
+        link_new(&tmp, &to)
     })();
-    if let Err(e) = made {
-        let _ = fsutil::remove_file(&tmp);
-        return Err(e);
+    match made {
+        Ok(true) => {}
+        // The day's name was taken meanwhile: what is there decides.
+        Ok(false) => {
+            let _ = fsutil::remove_file(&tmp);
+            return had(&to);
+        }
+        Err(e) => {
+            let _ = fsutil::remove_file(&tmp);
+            return Err(e);
+        }
     }
     rotate_copies(&dir, keep);
     Ok(DbCopy::Made(to))
 }
 
 /// Keeps the newest `keep` database copies in `dir` (by the day in their
-/// names); only files named as a copy ([`is_copy_name`]) ever go.
+/// names); only database files named as a copy ([`is_copy_name`],
+/// [`is_database`]) count and ever go: anything else is left as it is.
 fn rotate_copies(dir: &Path, keep: usize) {
     let mut copies: Vec<PathBuf> = fs::read_dir(long_path(dir))
         .map(|rd| {
             rd.flatten()
                 .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && is_copy_name(&e.file_name().to_string_lossy()))
                 .map(|e| dir.join(e.file_name()))
+                .filter(|p| is_database(p))
                 .collect()
         })
         .unwrap_or_default();
@@ -820,8 +969,28 @@ mod tests {
         v
     }
 
-    /// A temporary of a player that is gone (no live lock for its pid).
-    const GONE: u32 = 3_999_999_999;
+    /// A player of this computer that is gone: its live lock file is there
+    /// and no one holds it. Each test has a pid of its own; the file goes
+    /// when the guard does.
+    struct Gone(u32);
+
+    impl Gone {
+        fn new(pid: u32) -> Self {
+            File::options().create(true).truncate(false).write(true).open(live_lock_path(pid)).unwrap();
+            Self(pid)
+        }
+
+        /// A temporary name of this gone player's on this computer.
+        fn temp(&self, prefix: &str, n: u32) -> String {
+            format!("{prefix}{}-{}-{n}{TEMP_END}", host_part(), self.0)
+        }
+    }
+
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(live_lock_path(self.0));
+        }
+    }
 
     fn is_ours(name: &str) -> bool {
         temp_of(name).is_some()
@@ -875,9 +1044,10 @@ mod tests {
         let album = root.join("A");
         fs::create_dir_all(&album).unwrap();
         let target = album.join("01 - Song.flac");
+        let gone = Gone::new(3_999_999_999);
         // What a player that crashed left: its temporary under its pid.
         let crashed = |tmp: &Path| {
-            let to = tmp.with_file_name(format!("{MASTER_TEMP}{GONE}-1{TEMP_END}"));
+            let to = tmp.with_file_name(gone.temp(MASTER_TEMP, 1));
             fs::rename(tmp, &to).unwrap();
             to
         };
@@ -915,45 +1085,82 @@ mod tests {
         assert!(tmp.exists());
     }
 
+    /// Where a disk has no links: the move the system refuses onto a taken
+    /// name (Windows), or nothing at all (elsewhere); never a file written
+    /// over, never an empty file left at the name, the temporary kept.
+    #[test]
+    fn without_links_a_name_is_never_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("t.part");
+        let other = dir.path().join("taken.flac");
+        write(&tmp, b"new");
+        write(&other, b"other");
+        let free = dir.path().join("free.flac");
+        if cfg!(windows) {
+            assert!(!move_new(&tmp, &other).unwrap());
+            assert_eq!(fs::read(&other).unwrap(), b"other");
+            assert!(tmp.exists());
+            assert!(move_new(&tmp, &free).unwrap());
+            assert_eq!(fs::read(&free).unwrap(), b"new");
+            assert!(!tmp.exists());
+        } else {
+            assert!(move_new(&tmp, &free).is_err());
+            assert!(tmp.exists() && !free.exists());
+        }
+    }
+
     /// Only exactly our names, each in its own place, and only a gone
-    /// player's: this player's and another running one's stay, however old.
+    /// player's of this computer: this player's, another running one's, one
+    /// whose lock this player cannot see and another computer's stay,
+    /// however old.
     #[test]
     fn the_clean_up_touches_only_a_gone_player_s_temporaries() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        let gone = Gone::new(3_999_999_997);
         let ours = [
-            root.join("A").join("B").join(format!(".nikgob-master-{GONE}-3.part")),
-            root.join("A").join("Singles").join("2020 - X").join(format!(".nikgob-master-{GONE}-1.part")),
-            root.join(BACKUP_DIR).join(format!(".nikgob-db-{GONE}-0.part")),
+            root.join("A").join("B").join(gone.temp(MASTER_TEMP, 3)),
+            root.join("A").join("Singles").join("2020 - X").join(gone.temp(MASTER_TEMP, 1)),
+            // A flat master's or an image's, right in the folder.
+            root.join(gone.temp(MASTER_TEMP, 0)),
+            root.join(BACKUP_DIR).join(gone.temp(DB_TEMP, 0)),
         ];
         // A running player: it holds its live lock.
-        let running = 3_999_999_998u32;
+        let running = 3_999_999_996u32;
         let lock = File::options().create(true).truncate(false).write(true).open(live_lock_path(running)).unwrap();
         lock.lock().unwrap();
+        let host = host_part();
+        let elsewhere = if host == "0badf00d" { "0badf00e" } else { "0badf00d" };
         let theirs = [
             root.join("abc.flac"),
             root.join("abc.json"),
             root.join(".abc.flac.nikgob-part"),
-            root.join(format!(".nikgob-master-{GONE}-0.part")),
-            root.join("A").join(BACKUP_DIR).join(format!(".nikgob-db-{GONE}-0.part")),
-            root.join(BACKUP_DIR).join(format!(".nikgob-master-{GONE}-0.part")),
+            root.join("A").join(BACKUP_DIR).join(gone.temp(DB_TEMP, 0)),
+            root.join(BACKUP_DIR).join(gone.temp(MASTER_TEMP, 0)),
             root.join("A").join("B").join("01 - Song.flac"),
             root.join("A").join("B").join(".nikgob-master-.part"),
             root.join("A").join("B").join(".nikgob-master-1.part"),
-            root.join("A").join("B").join(".nikgob-master-1--2.part"),
-            root.join("A").join("B").join(".nikgob-master-1-2-3.part"),
-            root.join("A").join("B").join(".nikgob-master-x1-2.part"),
-            root.join("A").join("B").join("nikgob-master-1-1.part"),
-            root.join("A").join("B").join(".nikgob-master-1-1.part.flac"),
-            root.join("A").join("B").join(format!(".nikgob-master-{running}-0.part")),
-            root.join("A").join("B").join(format!(".nikgob-master-{}-0.part", std::process::id())),
+            root.join("A").join("B").join(".nikgob-master-1-2.part"),
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-1--2.part")),
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-1-2-3.part")),
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-x1-2.part")),
+            root.join("A").join("B").join(format!(".nikgob-master-{}-1-2.part", host.to_uppercase().replace(char::is_numeric, "A"))),
+            root.join("A").join("B").join(format!("nikgob-master-{host}-1-1.part")),
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-1-1.part.flac")),
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-{running}-0.part")),
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-{}-0.part", std::process::id())),
+            // No lock file to look at: whether it runs is not known.
+            root.join("A").join("B").join(format!(".nikgob-master-{host}-3999999995-0.part")),
+            // Another computer's, over a shared disk.
+            root.join("A").join("B").join(format!(".nikgob-master-{elsewhere}-{}-0.part", gone.0)),
+            root.join(format!(".nikgob-master-{elsewhere}-{}-1.part", gone.0)),
             root.join(BACKUP_DIR).join("library-2026-11-14.sqlite"),
         ];
         for p in ours.iter().chain(&theirs) {
             write(p, b"x");
         }
         let cleaned = clean_stale_temps(root);
-        assert_eq!(cleaned, Cleaned { removed: ours.len(), live: 2 });
+        assert_eq!(cleaned, Cleaned { removed: ours.len(), live: 3 });
         assert!(ours.iter().all(|p| !p.exists()));
         assert!(theirs.iter().all(|p| p.exists()), "{:?}", theirs.iter().filter(|p| !p.exists()).collect::<Vec<_>>());
         drop(lock);
@@ -1031,18 +1238,28 @@ mod tests {
         assert!(!root.exists());
 
         fs::create_dir_all(root.join(BACKUP_DIR)).unwrap();
+        let mut db = b"SQLite format 3\0".to_vec();
+        db.extend_from_slice(&[0; 84]);
         for day in 1..=8 {
-            write(&root.join(BACKUP_DIR).join(format!("library-2026-11-{day:02}.sqlite")), b"old");
+            write(&root.join(BACKUP_DIR).join(format!("library-2026-11-{day:02}.sqlite")), &db);
         }
-        let not_ours = [root.join(BACKUP_DIR).join("library-old.sqlite"), root.join(BACKUP_DIR).join("notes.txt")];
+        // Not copies, whatever their names: never counted, never gone.
+        let not_ours = [
+            root.join(BACKUP_DIR).join("library-old.sqlite"),
+            root.join(BACKUP_DIR).join("notes.txt"),
+            root.join(BACKUP_DIR).join("library-2026-10-01.sqlite"),
+        ];
         for p in &not_ours {
-            write(p, b"keep");
+            write(p, b"");
         }
         let made = copy_database(&lib, &root, "2026-11-14", BACKUP_KEEP).unwrap();
         let to = root.join(BACKUP_DIR).join("library-2026-11-14.sqlite");
         assert_eq!(made, DbCopy::Made(to.clone()));
         assert!(Library::open(&to).is_ok(), "a whole database");
-        let mut copies: Vec<String> = files_in(&root.join(BACKUP_DIR)).into_iter().filter(|n| is_copy_name(n)).collect();
+        let mut copies: Vec<String> = files_in(&root.join(BACKUP_DIR))
+            .into_iter()
+            .filter(|n| is_copy_name(n) && is_database(&root.join(BACKUP_DIR).join(n)))
+            .collect();
         copies.sort();
         assert_eq!(copies.len(), BACKUP_KEEP);
         assert_eq!(copies.first().map(String::as_str), Some("library-2026-11-03.sqlite"));
@@ -1054,5 +1271,15 @@ mod tests {
         assert!(is_copy_name("library-2026-01-31.sqlite"));
         assert!(!is_copy_name("library-2026-1-31.sqlite"));
         assert!(!is_copy_name("library-2026-01-31.sqlite.bak"));
+
+        // An empty file (or a folder) at the day's name is not the day's
+        // copy: the day gets none, and what is there stays as it is.
+        let empty = root.join(BACKUP_DIR).join("library-2026-11-15.sqlite");
+        write(&empty, b"");
+        assert!(copy_database(&lib, &root, "2026-11-15", BACKUP_KEEP).is_err());
+        assert_eq!(fs::read(&empty).unwrap(), b"");
+        fs::create_dir_all(root.join(BACKUP_DIR).join("library-2026-11-16.sqlite")).unwrap();
+        assert!(copy_database(&lib, &root, "2026-11-16", BACKUP_KEEP).is_err());
+        assert!(root.join(BACKUP_DIR).join("library-2026-11-16.sqlite").is_dir());
     }
 }

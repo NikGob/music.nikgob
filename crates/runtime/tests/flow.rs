@@ -149,7 +149,14 @@ fn import_retag_trash_undo() {
     // For good: the file, its lossless master and every row go.
     assert!(lib.get_master(track).unwrap().is_some(), "a WAV import keeps a master");
     rt.send(Command::DeleteForever(vec![track]));
-    wait_for(&rt, "the purge", |s| s.library.track_count == 0 && !s.library.releases.iter().any(|r| r.title == "Альбом"));
+    // On a blocking thread: the rows go first, then the files.
+    let masters_left = || std::fs::read_dir(cfg.masters_dir()).map(|d| d.flatten().count()).unwrap_or(0);
+    wait_for(&rt, "the purge", |s| {
+        s.library.track_count == 0
+            && !s.library.releases.iter().any(|r| r.title == "Альбом")
+            && !expected.exists()
+            && masters_left() == 0
+    });
     assert!(!expected.exists());
     assert!(lib.get_track(track).unwrap().is_none());
     assert!(lib.get_master(track).unwrap().is_none());
@@ -170,7 +177,7 @@ fn import_retag_trash_undo() {
     let in_trash = std::fs::read_dir(&cfg.trash_dir).unwrap().count();
     rt.send(Command::SetPrefs(Box::new(Prefs { use_trash: false, ..rt.state().prefs.clone() })));
     rt.send(Command::TrashTrack(second));
-    wait_for(&rt, "the direct delete", |s| s.library.track_count == 0);
+    wait_for(&rt, "the direct delete", |s| s.library.track_count == 0 && !file.exists());
     assert!(!file.exists());
     assert!(lib.get_track(second).unwrap().is_none());
     assert_eq!(std::fs::read_dir(&cfg.trash_dir).unwrap().count(), in_trash);
@@ -258,15 +265,15 @@ fn torrent_download_imports_and_cleans_up() {
     assert!(album.join("01 - Song.wav").is_file(), "nothing goes before the masters folder is free");
     drop(held);
     wait_for(&rt, "cleanup", |s| s.downloads.seeding.is_empty() && !album.exists());
-    // The move then takes every master, the waiting import puts its own in
-    // the new folder.
+    // The torrent's masters are kept by name in the old folder now: the move
+    // is refused (they would stay on the old disk), and the waiting import
+    // puts its master in the old folder too.
+    wait_for(&rt, "the refused move", |s| s.toasts.iter().any(|t| t.text.contains("Не удалось перенести FLAC")));
     wait_for(&rt, "the import after the move", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
-    // The torrent's masters were kept by name in the old folder before the
-    // move and stay there (their rows say where); the waiting import's
-    // master is in the new one.
+    assert_eq!(rt.state().prefs.masters_dir, cfg.masters_dir(), "the folder stays as it was");
     let (old, new) = (wavs_in(&cfg.masters_dir()), wavs_in(&moved_to));
-    assert_eq!(old.len() + new.len(), 3, "{old:?} {new:?}: the lossless originals are kept as masters");
-    assert_eq!(new.len(), 1, "{new:?}");
+    assert_eq!(old.len(), 3, "{old:?}: the lossless originals are kept as masters");
+    assert!(new.is_empty(), "{new:?}");
     let rows = lib.masters_without_replicas(100).unwrap();
     assert_eq!(rows.len(), 3);
     for m in rows {
@@ -450,9 +457,17 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     let flat = old_masters.join(format!("{older_hash}.wav"));
     std::fs::rename(&older, &flat).unwrap();
 
-    // Move FLAC masters to another folder/drive: the flat ones move, the
-    // ones kept by name stay where their rows say.
+    // A master kept by name in an album folder: the move to another
+    // folder/drive is refused, nothing moves, the folder stays as it was.
     let new_masters = root.join("hdd_flac_archive");
+    rt.send(Command::MoveMastersDir(new_masters.clone()));
+    wait_for(&rt, "the refused move", |s| s.toasts.iter().any(|t| t.text.contains("Не удалось перенести FLAC")));
+    assert_eq!(rt.state().prefs.masters_dir, old_masters);
+    assert!(flat.is_file() && named.is_file());
+    assert!(wavs_in(&new_masters).is_empty());
+
+    // With flat masters alone the move goes: they move, verified.
+    lib.delete_master(track1).unwrap();
     rt.send(Command::MoveMastersDir(new_masters.clone()));
     wait_for(&rt, "masters relocation", |s| {
         s.prefs.masters_dir == new_masters
@@ -461,8 +476,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
 
     assert!(!flat.exists(), "the flat master moved, verified");
     assert!(new_masters.join(format!("{older_hash}.wav")).is_file());
-    assert!(named.is_file(), "a master kept by name is not moved");
-    assert_eq!(lib.get_master(track1).unwrap().unwrap().file_path.as_deref(), Some(&*named.to_string_lossy()));
+    assert!(named.is_file(), "a file in an album folder is not touched by the move");
     assert!(opus1.is_file(), "Opus stays on the fast library disk");
     let moved_files: Vec<_> = std::fs::read_dir(&new_masters)
         .unwrap()
