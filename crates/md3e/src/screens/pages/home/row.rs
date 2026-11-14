@@ -3,14 +3,15 @@
 //!
 //! * **The wheel**: a notch of a sideways wheel (a tilt wheel) or of
 //!   Shift + the wheel moves the row under the pointer one card on, on the
-//!   spatial spring; notches in a row add up, each a card. A touchpad's
-//!   two fingers sideways (and a wheel that turns in parts of a notch) take
-//!   the row with them, and once they stop for [`SETTLE_AFTER`] the row
-//!   comes to rest on the nearest card's edge. A wheel that turns in parts
-//!   of a notch (a thumb wheel's small steps) moves the row that part of a
-//!   card on the spring; once it stops for [`SETTLE_PARTS_AFTER`] the row
-//!   finishes the way it went, never back against the wheel. The plain wheel always
-//!   scrolls the page, whatever is under the pointer.
+//!   spatial spring; notches in a row add up, each a card. A wheel that
+//!   says a notch in parts (a high-resolution or a thumb wheel) is a card
+//!   per notch too: its first part takes the row a whole card on at once,
+//!   each further whole notch one more ([`Scroll::parts`]). A touchpad's
+//!   two fingers sideways take the row with them, and once they stop for
+//!   [`SETTLE_AFTER`] the row comes to rest on the nearest card's edge; one
+//!   that says its moves as parts of a notch (Windows, X11) is told from a
+//!   wheel by how small its steps are ([`NOTCH_PART`]). The plain wheel
+//!   always scrolls the page, whatever is under the pointer.
 //! * **A drag**: the pointer held on the row and moved [`DRAG_FROM`]
 //!   sideways takes the row with it (the card under it is not clicked: a
 //!   click moves less); let go, the row goes on a little the way it was
@@ -49,9 +50,16 @@ pub const DRAG_FROM: f32 = 8.0;
 const ARROW_INSET: f32 = 8.0;
 /// A touchpad that stopped this long: the row comes to rest on a card.
 pub const SETTLE_AFTER: f64 = 0.15;
-/// A wheel turned in parts of a notch that stopped this long: the row
-/// finishes on the next card's edge the way it went.
-pub const SETTLE_PARTS_AFTER: f64 = 0.35;
+/// The parts of a notch a turn starts with are at least this big from a
+/// wheel (a high-resolution wheel says an eighth); a touchpad's are
+/// smaller.
+pub const NOTCH_PART: f32 = 0.1;
+/// Parts of a notch this long after the last: a new turn (a wheel's first
+/// part takes a card at once again; a touchpad or a wheel is told anew).
+pub const TURN_GAP: f64 = 0.5;
+/// What a part of a notch may fall short of a whole one and still be the
+/// notch already taken (eight eighths add up to a little less than one).
+const NOTCH_SLACK: f32 = 0.05;
 /// A drag let go goes on as far as it would in this long at its speed.
 pub const FLING: f32 = 0.15;
 /// A drag that stood still this long before the button went up is not
@@ -75,10 +83,11 @@ pub struct Scroll {
     loose: bool,
     /// When the touchpad last moved it.
     glided: f64,
-    /// The way it last went loose (-1 back, 1 on) and whether by parts of
-    /// a notch ([`Self::nudge`]): where it comes to rest leans that way.
+    /// The way it last went loose (-1 back, 1 on): where it comes to rest
+    /// leans that way.
     lean: f32,
-    parts: bool,
+    /// The turn of parts of a notch going on ([`Self::parts`]).
+    turn: Option<PartsTurn>,
     /// The drag's speed (offset per second) and its last move (when, to
     /// what offset).
     speed: f32,
@@ -87,13 +96,26 @@ pub struct Scroll {
     pitch: f32,
 }
 
+/// A turn of parts of a notch ([`Scroll::parts`]): by a wheel (cards a
+/// notch) or a touchpad (followed as it goes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PartsTurn {
+    wheel: bool,
+    /// The parts of a wheel's turn so far, and the cards taken for them.
+    sum: f32,
+    cards: i64,
+    /// When its last part came.
+    at: f64,
+}
+
 /// What the wheel did over a row in a frame: whole notches (cards), parts
-/// of a notch (parts of a card) and smooth points, all as egui's scroll
-/// delta (positive brings what is at the left).
+/// of a notch (and the smallest of them) and smooth points, all as egui's
+/// scroll delta (positive brings what is at the left).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Turn {
     pub cards: f32,
     pub parts: f32,
+    pub smallest: f32,
     pub points: f32,
 }
 
@@ -113,7 +135,10 @@ impl Turn {
             }
             match unit {
                 MouseWheelUnit::Line if d.abs() >= 0.99 && (d - d.round()).abs() < 0.01 => turn.cards += d.round(),
-                MouseWheelUnit::Line => turn.parts += d,
+                MouseWheelUnit::Line => {
+                    turn.smallest = if turn.smallest == 0.0 { d.abs() } else { turn.smallest.min(d.abs()) };
+                    turn.parts += d;
+                }
                 MouseWheelUnit::Page => turn.cards += d.round(),
                 MouseWheelUnit::Point => turn.points += d,
             }
@@ -139,28 +164,60 @@ impl Scroll {
     pub fn glide(&mut self, delta: f32, max: f32, now: f64) {
         self.offset = (self.offset - delta).clamp(0.0, max.max(0.0));
         self.loose = true;
-        self.parts = false;
         self.lean = -delta.signum();
         self.glided = now;
     }
 
-    /// `parts` of a notch (as egui's scroll delta) at `now`: that part of a
-    /// card on, on the spring; parts in a row add up, four quarters a card.
-    pub fn nudge(&mut self, parts: f32, pitch: f32, max: f32, now: f64) {
+    /// `parts` of a notch (as egui's scroll delta, the smallest of them
+    /// `smallest`) at `now`, the row seen at `seen`. A turn that starts
+    /// with parts of at least [`NOTCH_PART`] is a wheel's: its first part
+    /// takes the row a whole card on at once (on the spring), each further
+    /// whole notch one more, never a part of a card. A turn of smaller
+    /// parts is a touchpad's: the row follows it, a notch a card, and comes
+    /// to rest on a card's edge once it stops ([`Self::settle`]). True when
+    /// the row follows by hand.
+    pub fn parts(&mut self, parts: f32, smallest: f32, pitch: f32, max: f32, now: f64, seen: f32) -> bool {
         if pitch <= 0.0 || parts == 0.0 {
-            return;
+            return false;
         }
-        self.offset = (self.offset - parts * pitch).clamp(0.0, max.max(0.0));
-        self.loose = true;
-        self.parts = true;
-        self.lean = -parts.signum();
-        self.glided = now;
+        let mut turn = match self.turn {
+            Some(t) if now - t.at <= TURN_GAP => t,
+            _ => PartsTurn { wheel: smallest >= NOTCH_PART, ..PartsTurn::default() },
+        };
+        turn.at = now;
+        if !turn.wheel {
+            if !self.loose {
+                self.take_from(seen, max);
+            }
+            self.glide(parts * pitch, max, now);
+            self.turn = Some(turn);
+            return true;
+        }
+        // Turned back: a new turn the other way.
+        if turn.sum != 0.0 && turn.sum.signum() != parts.signum() {
+            turn.sum = 0.0;
+            turn.cards = 0;
+        }
+        turn.sum += parts;
+        let cards = ((turn.sum.abs() - NOTCH_SLACK).ceil() as i64).max(1);
+        if cards > turn.cards {
+            self.step((cards - turn.cards) * turn.sum.signum() as i64, pitch, max);
+            turn.cards = cards;
+        }
+        self.turn = Some(turn);
+        false
     }
 
     /// The row is where it is seen (`at`, its spring on the way): a gesture
     /// starting now takes it from there.
     pub fn take_from(&mut self, at: f32, max: f32) {
         self.offset = at.clamp(0.0, max.max(0.0));
+    }
+
+    /// A gesture other than parts of a notch (a whole notch, a drag, an
+    /// arrow): the next parts start a turn of their own.
+    pub fn end_turn(&mut self) {
+        self.turn = None;
     }
 
     /// `cards` notches of the wheel (positive brings what is at the left):
@@ -178,31 +235,23 @@ impl Scroll {
         self.loose = false;
     }
 
-    /// The touchpad stopped [`SETTLE_AFTER`] ago (a wheel turned by parts,
-    /// [`SETTLE_PARTS_AFTER`]): the row comes to rest on a card's edge, the
-    /// nearest one leaning the way it went (by parts of a notch: the next
-    /// one that way, so it never goes back against the wheel). True when it
-    /// did now.
+    /// The touchpad stopped [`SETTLE_AFTER`] ago: the row comes to rest on
+    /// the nearest card's edge, leaning the way it went. True when it did
+    /// now.
     pub fn settle(&mut self, now: f64, pitch: f32, max: f32) -> bool {
         if !self.loose || self.dragging || self.settle_in(now) > 0.0 {
             return false;
         }
         self.loose = false;
         if pitch > 0.0 {
-            self.offset = (rest_edge(self.offset / pitch, self.parts, self.lean) * pitch).clamp(0.0, max.max(0.0));
+            self.offset = (rest_edge(self.offset / pitch, self.lean) * pitch).clamp(0.0, max.max(0.0));
         }
         true
     }
 
     /// How long until it comes to rest (0: it may now).
     fn settle_in(&self, now: f64) -> f64 {
-        let after = if self.parts { SETTLE_PARTS_AFTER } else { SETTLE_AFTER };
-        (self.glided + after - now).max(0.0)
-    }
-
-    /// Moved by parts of a notch and not at rest yet.
-    fn by_parts(&self) -> bool {
-        self.loose && self.parts
+        (self.glided + SETTLE_AFTER - now).max(0.0)
     }
 
     /// Moved by a touchpad and not at rest yet.
@@ -397,17 +446,19 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
                 turn
             });
             if turn.cards != 0.0 {
+                state.end_turn();
                 state.step(turn.cards as i64, pitch, max);
             }
-            if turn.parts != 0.0 {
-                state.nudge(turn.parts, pitch, max, now);
+            if turn.parts != 0.0 && state.parts(turn.parts, turn.smallest, pitch, max, now, seen) {
+                by_hand = true;
             }
             if turn.points != 0.0 {
                 // Fingers take the row where it is seen, not where its
                 // spring was going (it would jump there).
-                if !state.loose() || state.by_parts() {
+                if !state.loose() {
                     state.take_from(seen, max);
                 }
+                state.end_turn();
                 state.glide(turn.points, max, now);
                 by_hand = true;
             }
@@ -415,6 +466,7 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         let (pressed, down, at) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos()));
         if pressed && hovered && let Some(p) = at {
             state.take_from(seen, max);
+            state.end_turn();
             state.press(p.x);
         }
         if down {
@@ -478,11 +530,13 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
         let back = Rect::from_min_size(pos2(view.left() + ARROW_INSET, y), Vec2::splat(d));
         let clicked = arrow(ui, id.with("back"), on && state.can_back(), back, button(Icon::ChevronLeft, "Назад", "home-row-back"));
         if clicked.is_some_and(|r| r.clicked()) {
+            state.end_turn();
             state.page(false, per, pitch, max);
         }
         let forward = Rect::from_min_size(pos2(view.right() - ARROW_INSET - d, y), Vec2::splat(d));
         let clicked = arrow(ui, id.with("forward"), on && state.can_forward(max), forward, button(Icon::ChevronRight, "Дальше", "home-row-forward"));
         if clicked.is_some_and(|r| r.clicked()) {
+            state.end_turn();
             state.page(true, per, pitch, max);
         }
     }
@@ -492,20 +546,10 @@ pub fn show(ui: &mut Ui, grid: Grid, row: Row<'_>, mut card: impl FnMut(&mut Ui,
     row.live && state.wants_more(row.n, max, grid.width)
 }
 
-/// The card's edge a row at `at` cards comes to rest on. Turned by parts
-/// of a notch, the next edge the way it went (`lean`), however little it
-/// went: rounding with a lean took a hundredth of a card back. A touchpad,
-/// the nearest edge, leaning a little the way it went.
-fn rest_edge(at: f32, parts: bool, lean: f32) -> f32 {
-    // Already on an edge (to the float's error): it stays.
-    const ON: f32 = 1e-3;
-    if parts && lean > 0.0 {
-        (at - ON).ceil()
-    } else if parts && lean < 0.0 {
-        (at + ON).floor()
-    } else {
-        (at + 0.2 * lean).round()
-    }
+/// The card's edge a row at `at` cards comes to rest on after a touchpad:
+/// the nearest edge, leaning a little the way it went (`lean`).
+fn rest_edge(at: f32, lean: f32) -> f32 {
+    (at + 0.2 * lean).round()
 }
 
 #[cfg(test)]
@@ -598,56 +642,75 @@ mod tests {
         let t = Turn::of(&[wheel(MouseWheelUnit::Point, vec2(-12.0, 3.0), false)]);
         assert_eq!(t, Turn { points: -12.0, ..Turn::default() });
         let t = Turn::of(&[wheel(MouseWheelUnit::Line, vec2(0.25, 0.0), false)]);
-        assert_eq!(t, Turn { parts: 0.25, ..Turn::default() });
+        assert_eq!(t, Turn { parts: 0.25, smallest: 0.25, ..Turn::default() });
+        let t = Turn::of(&[wheel(MouseWheelUnit::Line, vec2(-0.125, 0.0), false), wheel(MouseWheelUnit::Line, vec2(-0.0625, 0.0), false)]);
+        assert_eq!(t, Turn { parts: -0.1875, smallest: 0.0625, ..Turn::default() });
     }
 
-    /// A thumb wheel turned a quarter of a notch at a time, slowly: the row
-    /// goes on that part of a card each time and, once the wheel stops,
-    /// finishes on the next card's edge the way it went. It used to slide
-    /// 10 points and spring back to the edge it left before the next step,
-    /// back and forth.
+    /// A wheel that says a notch in parts (eighths of a high-resolution
+    /// wheel, a thumb wheel's quarters): a whole card on at its first part,
+    /// one more for each further notch, never a part of a card; turned
+    /// back, a card back at once; never past the row's ends.
     #[test]
-    fn small_wheel_steps_never_spring_back() {
+    fn a_wheel_in_parts_moves_a_card_a_notch() {
         let max = Scroll::max(20, PITCH, 16.0, VIEW);
         let mut s = Scroll::default();
         let mut t = 0.0;
-        let mut last = 0.0;
-        for _ in 0..6 {
-            s.nudge(-0.25, PITCH, max, t);
-            assert!(s.offset > last, "on: {} after {last}", s.offset);
-            last = s.offset;
-            // Still turning: it holds.
-            assert!(!s.settle(t + SETTLE_PARTS_AFTER / 2.0, PITCH, max));
-            // Stopped: on the next card's edge, never back.
-            t += SETTLE_PARTS_AFTER + 0.01;
-            assert!(s.settle(t, PITCH, max));
-            assert!(s.offset >= last, "{} went back from {last}", s.offset);
-            assert_eq!(s.offset % PITCH, 0.0);
-            last = s.offset;
+        // One notch of eighths: one card, from its first eighth.
+        for k in 0..8 {
+            assert!(!s.parts(-0.125, 0.125, PITCH, max, t, s.offset), "a wheel rides the spring");
+            assert_eq!(s.offset, PITCH, "eighth {k}");
+            t += 0.01;
         }
-        // Four quarters in a row are a card.
+        // The next notch: the next card at its first eighth.
+        assert!(!s.parts(-0.125, 0.125, PITCH, max, t, s.offset));
+        assert_eq!(s.offset, 2.0 * PITCH);
+        for _ in 0..7 {
+            t += 0.01;
+            s.parts(-0.125, 0.125, PITCH, max, t, s.offset);
+        }
+        assert_eq!(s.offset, 2.0 * PITCH);
+        assert!(!s.loose(), "nothing to settle: on an edge");
+        // Turned slowly, a notch over a long while: still one card.
         let mut s = Scroll::default();
         for k in 0..4 {
-            s.nudge(-0.25, PITCH, max, 0.01 * k as f64);
+            s.parts(-0.25, 0.25, PITCH, max, k as f64 * 0.3, s.offset);
         }
-        assert!((s.offset - PITCH).abs() < 0.01, "{}", s.offset);
-        // Back the other way: the edge behind.
-        s.offset = 2.0 * PITCH;
-        s.nudge(0.25, PITCH, max, 10.0);
-        assert!(s.settle(11.0, PITCH, max));
         assert_eq!(s.offset, PITCH);
-        // However small the step, it goes on, either way, and never past
-        // the row's end.
-        for (from, parts, to) in [(0.0, -0.005, 1.0), (3.0, 0.005, 2.0), (2.0, -0.999, 3.0)] {
-            let mut s = Scroll { offset: from * PITCH, ..Scroll::default() };
-            s.nudge(parts, PITCH, max, 0.0);
-            assert!(s.settle(1.0, PITCH, max));
-            assert_eq!(s.offset, (to * PITCH).min(max), "{from} by {parts}");
-        }
+        // A pause, then a notch: the next card at once.
+        s.parts(-0.25, 0.25, PITCH, max, 5.0, s.offset);
+        assert_eq!(s.offset, 2.0 * PITCH);
+        // Back the other way: a card back at its first part.
+        s.parts(0.25, 0.25, PITCH, max, 5.1, s.offset);
+        assert_eq!(s.offset, PITCH);
+        // A whole notch said at once in parts of a frame.
+        let mut s = Scroll::default();
+        s.parts(-1.0, 0.5, PITCH, max, 0.0, 0.0);
+        assert_eq!(s.offset, PITCH);
+        // At the row's end it stays there.
         let mut s = Scroll { offset: max, ..Scroll::default() };
-        s.nudge(-0.005, PITCH, max, 0.0);
-        assert!(s.settle(1.0, PITCH, max));
+        s.parts(-0.125, 0.125, PITCH, max, 0.0, max);
         assert_eq!(s.offset, max);
+    }
+
+    /// A touchpad that says its moves as parts of a notch (small ones) is
+    /// followed as it goes, then rests on the nearest card's edge.
+    #[test]
+    fn a_touchpad_in_parts_is_followed() {
+        let max = Scroll::max(20, PITCH, 16.0, VIEW);
+        let mut s = Scroll::default();
+        let mut t = 0.0;
+        for _ in 0..10 {
+            assert!(s.parts(-0.04, 0.04, PITCH, max, t, s.offset), "by hand");
+            t += 0.008;
+        }
+        assert!((s.offset - 0.4 * PITCH).abs() < 0.01, "{}", s.offset);
+        assert!(s.loose());
+        // A bigger step later in the same turn is still the touchpad's.
+        assert!(s.parts(-0.2, 0.2, PITCH, max, t, s.offset));
+        assert!(!s.settle(t + SETTLE_AFTER / 2.0, PITCH, max));
+        assert!(s.settle(t + SETTLE_AFTER + 0.01, PITCH, max));
+        assert_eq!(s.offset, PITCH);
     }
 
     /// A touchpad stopping a little past a card's edge leans the way it
