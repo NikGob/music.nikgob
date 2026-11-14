@@ -17,6 +17,7 @@ pub mod fsutil;
 pub mod identity;
 pub mod importer;
 pub mod layout;
+pub mod master_files;
 pub mod quality;
 pub mod resample;
 pub mod repair;

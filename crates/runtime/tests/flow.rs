@@ -30,6 +30,21 @@ fn write_wav(path: &Path, secs: f32) {
     w.finalize().unwrap();
 }
 
+/// The `.wav` files in `dir` and its folders (masters are kept by name in
+/// album folders).
+fn wavs_in(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(wavs_in(&p));
+        } else if p.extension().is_some_and(|x| x == "wav") {
+            out.push(p);
+        }
+    }
+    out
+}
+
 fn wait_for(rt: &Runtime, what: &str, f: impl Fn(&ViewState) -> bool) {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(60) {
@@ -246,13 +261,8 @@ fn torrent_download_imports_and_cleans_up() {
     // The move then takes every master, the waiting import puts its own in
     // the new folder.
     wait_for(&rt, "the import after the move", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
-    let wavs = |dir: &Path| -> Vec<String> {
-        std::fs::read_dir(dir)
-            .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".wav")).collect())
-            .unwrap_or_default()
-    };
-    assert!(wavs(&cfg.masters_dir()).is_empty(), "{:?} left in the old folder", wavs(&cfg.masters_dir()));
-    let masters = wavs(&moved_to);
+    assert!(wavs_in(&cfg.masters_dir()).is_empty(), "{:?} left in the old folder", wavs_in(&cfg.masters_dir()));
+    let masters = wavs_in(&moved_to);
     assert_eq!(masters.len(), 3, "{masters:?}: the lossless originals are kept as masters");
     // One line in the history (not one more from the backfill of older
     // torrents), and it is still there after a restart.
@@ -438,7 +448,9 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert!(moved_files.iter().any(|n| n.ends_with(".wav")), "{moved_files:?}");
+    let moved = wavs_in(&new_masters);
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert_eq!(lib.get_master(track1).unwrap().unwrap().file_path.as_deref(), Some(&*moved[0].to_string_lossy()));
     assert!(moved_files.iter().any(|n| n.ends_with(".json")), "{moved_files:?}");
 
     // Subsequent imports store new masters directly into the new folder.
@@ -446,12 +458,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     write_wav(&wav2, 3.2);
     rt.send(Command::ImportFiles(vec![wav2]));
     wait_for(&rt, "second import", |s| s.library.track_count == 2);
-    let count_wavs = std::fs::read_dir(&new_masters)
-        .unwrap()
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".wav"))
-        .count();
-    assert_eq!(count_wavs, 2, "second master went straight into new_masters");
+    assert_eq!(wavs_in(&new_masters).len(), 2, "second master went straight into new_masters");
     assert!(!old_masters.exists());
 }
 

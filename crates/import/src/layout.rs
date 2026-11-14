@@ -56,7 +56,7 @@ pub fn kept_text_path(library_dir: &Path, artist: &str, title: &str) -> PathBuf 
 }
 
 impl LayoutInput {
-    fn is_compilation(&self) -> bool {
+    pub(crate) fn is_compilation(&self) -> bool {
         self.compilation
             || self.release_type == ReleaseType::Compilation
             || is_various_artists(&self.album_artist)

@@ -41,6 +41,7 @@ use crate::identity::{
     lookup as online_lookup,
 };
 use crate::layout::LayoutInput;
+use crate::master_files;
 use crate::same_audio::{Heard, Judgement, Known, file_keys, judge, marked_before, print_file};
 use crate::sanitize::long_path;
 use crate::spectrum::Verdict;
@@ -1798,6 +1799,11 @@ fn roll_back(inner: &Inner, journal: Vec<Undo>) -> usize {
                 }
             }
         }
+        // The album folder a master kept by name was the first in goes with
+        // it when nothing but its cover is left.
+        if let Some(dir) = u.master_file.as_ref().and_then(|m| m.parent()) {
+            fsutil::prune_empty_dirs(dir, &cfg.masters_dir());
+        }
         if let Some(hash) = &u.master_hash {
             let _ = lib.delete_master(u.track);
             // The sidecar goes back to what it was: gone when this import
@@ -1896,9 +1902,11 @@ struct MasterSidecar<'a> {
     file_hash: &'a str,
     size_bytes: u64,
     origin: &'a SourceOrigin,
-    /// Where the lossless file lived at import time. A torrent payload later
-    /// moves to `masters/{file_hash}.<ext>` when its torrent is cleaned up, so
-    /// readers must look there by hash and not trust this field.
+    /// Where the lossless master is: in the masters folder under its name
+    /// (or `{file_hash}.<ext>` for an older one or an image), or a torrent's
+    /// payload, which moves into the masters folder when its torrent is
+    /// cleaned up: readers of a torrent's must look there and not trust
+    /// this field.
     path: String,
     original_name: String,
     /// The cue sheet of a single-file rip, kept as `{file_hash}.cue`, by
@@ -1916,16 +1924,24 @@ struct SidecarTracks {
     track_ids: Vec<TrackId>,
 }
 
-/// Registers the lossless original as the track's master: torrent payloads stay where they are (they keep seeding), Inbox files move
-/// to `.musiclib/masters/`, anything else is copied there. A track cut out of a
-/// single-file rip has the image as its master, shared with the other tracks
-/// of the image, and its cue sheet is kept next to it as `{hash}.cue`.
+/// Registers the lossless original as the track's master: torrent payloads
+/// stay where they are (they keep seeding); an Inbox file moves into the
+/// masters folder, anything else is copied there, under its name
+/// ([`master_files::master_target`]: album artist, album, number and
+/// title, the album's `cover.jpg` beside it). A file that is a master
+/// already (an older `{hash}.<ext>`, or kept by name) is not written again.
+/// A track cut out of a single-file rip has the image as its master, shared
+/// with the other tracks of the image: the image stays `{hash}.<ext>` with
+/// its cue sheet as `{hash}.cue`. Returns the master and the file this call
+/// wrote, if it wrote one (for a cancel).
 fn register_master(
     inner: &Inner,
     a: &Analyzed,
     hash: &str,
     track_id: TrackId,
-) -> Result<Master> {
+    id: &Identity,
+    cover: Option<&Path>,
+) -> Result<(Master, Option<PathBuf>)> {
     let cfg = &inner.cfg;
     let _writes = master_writes();
     let src = a.master_path();
@@ -1935,6 +1951,9 @@ fn register_master(
         Some(i) => i.size,
         None => fsutil::file_size(src)?,
     };
+    let take = src.starts_with(&cfg.inbox_dir);
+    let mut written = None;
+    let mut file_path = None;
     let path = match &a.origin {
         SourceOrigin::Torrent { .. } => src.to_path_buf(),
         _ => {
@@ -1944,21 +1963,44 @@ fn register_master(
                 .extension()
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_else(|| "flac".to_owned());
-            let dest = dir.join(format!("{hash}.{ext}"));
-            if !long_path(&dest).exists() {
-                if src.starts_with(&cfg.inbox_dir) {
-                    fsutil::move_file_verified(src, &dest, Some(hash))?;
-                } else {
-                    fsutil::copy_file_verified(src, &dest, Some(hash))?;
+            let flat = dir.join(format!("{hash}.{ext}"));
+            let flat_there = long_path(&flat).exists();
+            if image.is_some() || flat_there {
+                // An image, or a file kept the older way already: as before.
+                if !flat_there {
+                    if take {
+                        fsutil::move_file_verified(src, &flat, Some(hash))?;
+                    } else {
+                        fsutil::copy_file_verified(src, &flat, Some(hash))?;
+                    }
+                    written = Some(flat.clone());
+                } else if take && long_path(src).exists() {
+                    if fsutil::hash_file(&flat).ok().as_deref() == Some(hash) {
+                        fsutil::remove_file(src)?;
+                    } else {
+                        fsutil::move_file_verified(src, &flat, Some(hash))?;
+                    }
                 }
-            } else if src.starts_with(&cfg.inbox_dir) && long_path(src).exists() {
-                if fsutil::hash_file(&dest).ok().as_deref() == Some(hash) {
+                flat
+            } else if let Some(kept) = master_files::existing_copy(&inner.library, &dir, hash, size) {
+                if take && long_path(src).exists() {
                     fsutil::remove_file(src)?;
-                } else {
-                    fsutil::move_file_verified(src, &dest, Some(hash))?;
                 }
+                file_path = Some(kept.to_string_lossy().into_owned());
+                kept
+            } else {
+                let tag = master_files::hi_res_tag(a.info.bit_depth, a.info.sample_rate);
+                let target = master_files::master_target(&dir, &layout_input(id), tag.as_deref(), &ext);
+                let placed = master_files::place_master(src, &target, hash, take)?;
+                if placed.written {
+                    written = Some(placed.path.clone());
+                    if let (Some(album), Some(cover)) = (placed.path.parent(), cover) {
+                        master_files::keep_cover(album, cover);
+                    }
+                }
+                file_path = Some(placed.path.to_string_lossy().into_owned());
+                placed.path
             }
-            dest
         }
     };
     let dir = cfg.masters_dir();
@@ -2000,14 +2042,16 @@ fn register_master(
     };
     let json = serde_json::to_vec_pretty(&sidecar).map_err(|e| ImportError::Other(e.to_string()))?;
     std::fs::write(long_path(&sidecar_path), json).map_err(fsutil::io_err(&sidecar_path))?;
-    Ok(Master {
+    let master = Master {
         track_id,
         codec: codec.clone(),
         file_hash: hash.to_owned(),
         size_bytes: size,
         origin: Some(a.origin.clone()),
+        file_path,
         replicas: Vec::new(),
-    })
+    };
+    Ok((master, written))
 }
 
 /// Summary of relocating lossless masters to a new directory/drive.
@@ -2044,9 +2088,13 @@ struct OwnedMasterSidecar {
 ///    flushes to disk (`sync_all`), verifies its byte size and BLAKE3 hash,
 ///    renames into place, and deletes the original in `old_dir` only after
 ///    verification succeeds.
-/// 3. Moves and updates `.json` sidecars and rewrites `master.origin_path` in
+/// 3. Moves each master kept by name (`<Artist>/<Album>/<NN - Title>.flac`)
+///    to the same place in `new_dir` (the next free name when another file
+///    is there), points its rows at the copy, and only then deletes the old
+///    file; its album's `cover.jpg` goes along.
+/// 4. Moves and updates `.json` sidecars and rewrites `master.origin_path` in
 ///    the library database.
-/// 4. Removes `old_dir` if it becomes empty.
+/// 5. Removes `old_dir` if it becomes empty.
 pub fn relocate_masters<F>(
     lib: &Library,
     old_dir: &Path,
@@ -2110,7 +2158,15 @@ where
     sidecar_files.sort();
 
     let mut report = RelocateReport::default();
-    let total = audio_files.len();
+    // Masters kept by name inside the folder move along under the same
+    // names.
+    let named: Vec<(PathBuf, String)> = lib
+        .master_files()?
+        .into_iter()
+        .map(|(p, h)| (PathBuf::from(p), h))
+        .filter(|(p, _)| p.starts_with(old_dir) && p.parent() != Some(old_dir))
+        .collect();
+    let total = audio_files.len() + named.len();
 
     for (idx, src) in audio_files.iter().enumerate() {
         on_progress(idx, total, src);
@@ -2138,6 +2194,34 @@ where
         report.bytes_moved += size;
     }
 
+    // One at a time: copied and checked into the new folder (never over
+    // another file there), the library pointed at the copy, and only then
+    // the old file goes; the album's cover goes along. A crash leaves at
+    // worst a second copy, never a row without its file.
+    let mut moved_named: HashMap<String, String> = HashMap::new();
+    for (idx, (src, hash)) in named.iter().enumerate() {
+        on_progress(audio_files.len() + idx, total, src);
+        if !long_path(src).is_file() {
+            log::warn!("masters: {} is not there, its row stays as it is", src.display());
+            continue;
+        }
+        let Ok(rel) = src.strip_prefix(old_dir) else { continue };
+        let size = fsutil::file_size(src)?;
+        let placed = master_files::place_master(src, &new_dir.join(rel), hash, false)?;
+        let (from, to) = (src.to_string_lossy().into_owned(), placed.path.to_string_lossy().into_owned());
+        lib.move_master_file(&from, &to)?;
+        if let (Some(old_album), Some(new_album)) = (src.parent(), placed.path.parent()) {
+            master_files::keep_cover(new_album, &old_album.join(master_files::COVER_FILE));
+        }
+        fsutil::remove_file(src)?;
+        if let Some(dir) = src.parent() {
+            fsutil::prune_empty_dirs(dir, old_dir);
+        }
+        moved_named.insert(from, to);
+        report.audio_moved += 1;
+        report.bytes_moved += size;
+    }
+
     for src_json in &sidecar_files {
         let file_name = src_json.file_name().unwrap();
         let dst_json = new_dir.join(file_name);
@@ -2145,7 +2229,13 @@ where
         let out_bytes = match serde_json::from_slice::<OwnedMasterSidecar>(&raw) {
             Ok(mut sc) => {
                 let p = Path::new(&sc.path);
-                if let Ok(rel) = p.strip_prefix(old_dir) {
+                // A flat master moved to the same name, one kept by name to
+                // where it went.
+                if let Some(to) = moved_named.get(&sc.path) {
+                    sc.path = to.clone();
+                } else if let Ok(rel) = p.strip_prefix(old_dir)
+                    && rel.components().count() == 1
+                {
                     sc.path = new_dir.join(rel).to_string_lossy().into_owned();
                 }
                 serde_json::to_vec_pretty(&sc).unwrap_or(raw)
@@ -2491,19 +2581,12 @@ fn commit_locked(
         // only whole copy of the disc, with its sheet).
         let master = match (&prep.original_hash, prep.converted || a.cue.is_some()) {
             (Some(hash), true) => {
-                let in_dir = (!matches!(a.origin, SourceOrigin::Torrent { .. })).then(|| {
-                    let ext = a
-                        .master_path()
-                        .extension()
-                        .map(|e| e.to_string_lossy().to_lowercase())
-                        .unwrap_or_else(|| "flac".to_owned());
-                    cfg.masters_dir().join(format!("{hash}.{ext}"))
-                });
-                let was_there = in_dir.as_ref().is_some_and(|p| long_path(p).exists());
                 sidecar_before = std::fs::read(long_path(&cfg.masters_dir().join(format!("{hash}.json")))).ok();
-                match register_master(inner, a, hash, track.id) {
-                    Ok(m) => {
-                        master_file = in_dir.filter(|_| !was_there);
+                let album_cover = album_dir.join(COVER_FILE);
+                let album_cover = long_path(&album_cover).is_file().then_some(album_cover);
+                match register_master(inner, a, hash, track.id, id, album_cover.as_deref()) {
+                    Ok((m, written)) => {
+                        master_file = written;
                         Some(m)
                     }
                     Err(e) => {
@@ -2624,7 +2707,7 @@ mod roll_back_tests {
     use super::*;
 
     fn master(track: TrackId, hash: &str) -> Master {
-        Master { track_id: track, codec: Codec::Flac, file_hash: hash.into(), size_bytes: 1, origin: None, replicas: Vec::new() }
+        Master { track_id: track, codec: Codec::Flac, file_hash: hash.into(), size_bytes: 1, origin: None, file_path: None, replicas: Vec::new() }
     }
 
     /// What a cancelled upgrade of `track` that registered the master

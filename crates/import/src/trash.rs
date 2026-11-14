@@ -187,6 +187,24 @@ pub fn purge_track(library: &Library, cfg: &ImportConfig, track: TrackId) -> Res
                 }
             }
         }
+        // A master kept by name: only inside the masters folder and only
+        // while it is still this very file; its album folder goes when
+        // nothing but its cover is left.
+        if let Some(file) = purged.master_file.as_deref().map(Path::new) {
+            let masters = cfg.masters_dir();
+            if !file.starts_with(&masters) {
+                log::warn!("not deleting {}: it is outside the masters folder", file.display());
+            } else if !long_path(file).exists() {
+                report.files_missing += 1;
+            } else if crate::fsutil::hash_file(file).ok().as_deref() != Some(hash.as_str()) {
+                log::warn!("not deleting {}: it is not the master it was", file.display());
+            } else {
+                delete(file, &mut report);
+                if let Some(dir) = file.parent() {
+                    prune_empty_dirs(dir, &masters);
+                }
+            }
+        }
     }
     Ok(report)
 }
