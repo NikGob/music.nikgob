@@ -316,12 +316,7 @@ pub fn release(
         members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
         let row = ButtonRow::new("rel-actions", Size::M).show(ui, members);
         let resp = &row.responses;
-        // What «Слушать» plays: as the page shows it.
-        let play = |shuffle: bool| match (r.partial, whole) {
-            (false, _) => Command::PlayRelease { id, start: None, shuffle },
-            (true, true) => Command::PlayReleaseWhole { id, start: None, shuffle },
-            (true, false) => Command::PlayReleaseMine { id, start: None, shuffle },
-        };
+        let play = |shuffle: bool| page_play(id, r.partial, whole, shuffle);
         if resp[0].clicked() {
             out.push(play(false));
         }
@@ -361,6 +356,10 @@ pub fn release(
         // what the album opens on, and an album added whole back to the
         // user's songs.
         let mut rows = widgets::release_rows(c, true);
+        // «Слушать» of «Весь альбом» already plays it whole.
+        if whole {
+            rows.retain(|x| !matches!(x, widgets::Row::Item(widgets::ReleaseAct::PlayWhole, _)));
+        }
         if r.added_whole {
             let at = rows.iter().position(|x| matches!(x, widgets::Row::Item(widgets::ReleaseAct::Playlist, _))).map_or(rows.len(), |p| p + 1);
             rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new(widgets::KEEP_MINE).icon(Icon::LibraryMusic)));
@@ -432,6 +431,18 @@ pub fn release(
         let from = if r.partial { PlayFrom::ReleaseAs(id, whole) } else { PlayFrom::Release(id) };
         widgets::track_list_ext(ui, "release", &r.tracks, Lead::Number, &from, opts, state, pages, out).or(nav)
     })
+}
+
+/// What «Слушать» (`shuffle`: «Перемешать») of an album's page plays: what
+/// the page shows. Of an album only some songs of which are the user's
+/// (`partial`), «Весь альбом» (`whole`) plays all of it, «Мои треки»
+/// their songs.
+fn page_play(id: nikgob_view::ReleaseId, partial: bool, whole: bool, shuffle: bool) -> Command {
+    match (partial, whole) {
+        (false, _) => Command::PlayRelease { id, start: None, shuffle },
+        (true, true) => Command::PlayReleaseWhole { id, start: None, shuffle },
+        (true, false) => Command::PlayReleaseMine { id, start: None, shuffle },
+    }
 }
 
 pub fn artist(
@@ -1137,5 +1148,17 @@ mod tests {
         assert_eq!(at(340.0, true), (true, true));
         assert_eq!(at(340.0, false), (false, false));
         assert_eq!(at(300.0, false), (true, true));
+    }
+
+    /// «Слушать» and «Перемешать» of an album's page play the chip it
+    /// shows: «Весь альбом» all of it, «Мои треки» the user's songs.
+    #[test]
+    fn the_page_plays_what_its_chip_shows() {
+        let id = nikgob_view::ReleaseId::new();
+        for shuffle in [false, true] {
+            assert_eq!(page_play(id, true, true, shuffle), Command::PlayReleaseWhole { id, start: None, shuffle });
+            assert_eq!(page_play(id, true, false, shuffle), Command::PlayReleaseMine { id, start: None, shuffle });
+            assert_eq!(page_play(id, false, false, shuffle), Command::PlayRelease { id, start: None, shuffle });
+        }
     }
 }

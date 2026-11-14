@@ -1539,6 +1539,10 @@ pub const LYRICS_REV: u8 = 6;
 /// The defaults of «Перемешивание» the prefs follow ([`Prefs::shuffle_rev`]).
 pub const SHUFFLE_REV: u8 = 1;
 
+/// The default of «Альбом показывает» the prefs follow
+/// ([`Prefs::album_rev`]): before 1 it was «Автоматически».
+pub const ALBUM_REV: u8 = 1;
+
 /// [`Prefs::lyrics_unit`]: letter by letter («По буквам») …
 pub const LYRICS_BY_LETTERS: u8 = 0;
 /// … syllable by syllable («По слогам», the default) …
@@ -1880,10 +1884,14 @@ pub struct Prefs {
     /// «Любимые альбомы».
     pub liked_albums_with_playlists: bool,
     /// A like of a single's song saves the single as an album too.
+    /// Which default of [`Self::album_mode`] the prefs were written with
+    /// ([`ALBUM_REV`]): before 1 it was «Автоматически», and that turns
+    /// into «Всегда весь альбом» once.
+    pub album_rev: u8,
     pub single_like_saves: bool,
-    /// «Песни из альбомов → Альбом показывает»: an album added to the library is whole,
-    /// one not added the user's songs («Автоматически»); every album whole;
-    /// every album the user's songs only.
+    /// «Песни из альбомов → Альбом показывает»: every album whole (the
+    /// default); an album added to the library whole, one not added the
+    /// user's songs («Автоматически»); every album the user's songs only.
     pub album_mode: AlbumMode,
     /// «Другие версии (инструментал, ремиксы)»: the other versions of an
     /// album's songs the user did not choose play with it (karaoke only
@@ -3944,7 +3952,8 @@ impl Default for Prefs {
             album_like_tracks: false,
             liked_albums_with_playlists: false,
             single_like_saves: false,
-            album_mode: AlbumMode::Auto,
+            album_mode: AlbumMode::Whole,
+            album_rev: ALBUM_REV,
             album_other_versions: false,
             import_saved_songs: true,
             library_only_downloaded: false,

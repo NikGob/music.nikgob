@@ -952,11 +952,12 @@ mod tests {
         assert_eq!(m[&main.id], Membership::Wanted);
         assert_eq!(m[&inst.id], Membership::Variant);
         assert_eq!(m[&lone.id], Membership::Undecided);
-        assert!(plan.split && !plan.opens_whole);
+        assert!(plan.split && plan.opens_whole);
         assert_eq!(plan.mine, vec![main.id]);
         // The whole album without its instrumental, unless asked.
         assert_eq!(plan.whole, vec![main.id, lone.id]);
-        assert_eq!(l.plays(AlbumRules::default(), None, None), (vec![main.id], false));
+        assert_eq!(l.plays(AlbumRules::default(), None, None), (vec![main.id, lone.id], true));
+        assert_eq!(l.plays(AlbumRules::default(), Some(false), None), (vec![main.id], false));
         assert_eq!(l.plays(AlbumRules::default(), Some(true), None), (vec![main.id, lone.id], true));
         // The instrumental picked by hand plays, the album from it.
         assert_eq!(l.plays(AlbumRules::default(), None, Some(inst.id)), (vec![main.id, inst.id, lone.id], true));
@@ -1120,6 +1121,32 @@ mod tests {
         // grows; a queue of the whole album all of it.
         assert_eq!(l.joins(mine, false), vec![a.id]);
         assert_eq!(l.joins(mine, true), vec![a.id, b.id]);
+    }
+
+    /// By default an album one song of which is the user's is an album:
+    /// its page opens on «Весь альбом», «Слушать» plays every song of it,
+    /// «Мои треки» stays a tap away; «Автоматически» keeps the old way.
+    #[test]
+    fn a_partly_owned_album_opens_and_plays_whole_by_default() {
+        use nikgob_core::model::AlbumMode;
+        let lib = Library::open_in_memory().unwrap();
+        let r = album(&lib, "Ahoy");
+        let songs: Vec<_> = (1..=14).map(|n| song(&lib, &r, n, &format!("Song {n}"), n == 3)).collect();
+        let all: Vec<_> = songs.iter().map(|t| t.id).collect();
+        let l = lib.release_listing(r.id).unwrap().unwrap();
+        let rules = AlbumRules::default();
+        assert_eq!(rules.mode, AlbumMode::Whole);
+        let plan = l.plan(rules);
+        assert!(plan.split && plan.opens_whole);
+        assert_eq!(plan.mine, vec![songs[2].id]);
+        assert_eq!(l.plays(rules, None, None), (all.clone(), true));
+        assert_eq!(l.plays(rules, Some(true), None), (all.clone(), true));
+        assert_eq!(l.plays(rules, Some(false), None), (vec![songs[2].id], false));
+        // A song of it picked plays the album from it, the whole of it.
+        assert_eq!(l.plays(rules, None, Some(songs[5].id)), (all.clone(), true));
+        let auto = AlbumRules { mode: AlbumMode::Auto, ..rules };
+        assert!(!l.plan(auto).opens_whole);
+        assert_eq!(l.plays(auto, None, None), (vec![songs[2].id], false));
     }
 
     /// The migration to schema 29 keeps the albums the library has whole

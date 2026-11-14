@@ -130,6 +130,10 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     // (shuffle turned off came back on at «Любимые»): that old default
     // becomes «По кнопке» once; a rule the user chose since stays.
     let shuffle_rev = value.get("shuffle_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
+    // «Альбом показывает» was «Автоматически» by default (an album not
+    // added opened on the user's songs): that old default becomes «Всегда
+    // весь альбом» once; a mode the user chose since stays.
+    let album_rev = value.get("album_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     // «Только на процессоре» became «Процессор» of «На чём считать анализ
     // звука».
     let cpu_only = value.get("sound_device").is_none() && value.get("sound_cpu_only").and_then(|v| v.as_bool()) == Some(true);
@@ -143,6 +147,10 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
         prefs.list_shuffle.own_playlists = nikgob_view::ListShuffle::Button;
     }
     prefs.shuffle_rev = nikgob_view::SHUFFLE_REV;
+    if album_rev < 1 && prefs.album_mode == nikgob_view::AlbumMode::Auto {
+        prefs.album_mode = nikgob_view::AlbumMode::Whole;
+    }
+    prefs.album_rev = nikgob_view::ALBUM_REV;
     if cpu_only {
         prefs.sound_device = nikgob_view::SoundDevice::Cpu;
     }
@@ -1191,6 +1199,24 @@ mod prefs_tests {
         chosen.list_shuffle.set(ListKind::OwnPlaylist, ListShuffle::Shuffled);
         let again = parse_prefs(&serde_json::to_vec(&chosen).unwrap()).unwrap();
         assert_eq!(again.list_shuffle.of(ListKind::OwnPlaylist), ListShuffle::Shuffled, "chosen since: stays");
+    }
+
+    /// «Автоматически» stored as the old default of «Альбом показывает»
+    /// becomes «Всегда весь альбом» once; a mode chosen since stays, and so
+    /// does «Только мои песни».
+    #[test]
+    fn albums_open_whole_once() {
+        use nikgob_view::AlbumMode;
+        let p = parse_prefs(br#"{"album_mode":"auto"}"#).unwrap();
+        assert_eq!(p.album_mode, AlbumMode::Whole);
+        assert_eq!(p.album_rev, nikgob_view::ALBUM_REV);
+        assert_eq!(parse_prefs(br#"{"theme":"Dark"}"#).unwrap().album_mode, AlbumMode::Whole);
+        assert_eq!(parse_prefs(br#"{"album_mode":"mine"}"#).unwrap().album_mode, AlbumMode::Mine);
+        let mut chosen = p.clone();
+        chosen.album_mode = AlbumMode::Auto;
+        let again = parse_prefs(&serde_json::to_vec(&chosen).unwrap()).unwrap();
+        assert_eq!(again.album_mode, AlbumMode::Auto, "chosen since: stays");
+        assert_eq!(prefs_of(None).album_mode, AlbumMode::Whole);
     }
 
     /// «Настройки текста…» is offered under the lyrics until it is picked
