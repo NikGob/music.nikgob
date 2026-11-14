@@ -1098,6 +1098,35 @@ mod tests {
         commit as f64 / 1_048_576.0
     }
 
+    /// What the sketches add to the index of 50 000 tracks, measured by
+    /// mimalloc's commit (`cargo test -p nikgob-runtime --lib
+    /// analysis::tests::sketch_memory -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "a measurement"]
+    fn sketch_memory() {
+        const N: usize = 50_000;
+        let ids: Vec<TrackId> = (0..N).map(|_| TrackId::new()).collect();
+        let mut idx: VectorIndex<TrackId> = VectorIndex::new();
+        for (k, id) in ids.iter().enumerate() {
+            idx.insert(*id, [k as f32 * 1e-4; nikgob_recs::DIM]);
+        }
+        let sketch = SoundSketch::new(Some(nikgob_recs::Crest { peak: -10.0, low: -20.0, max: -9.0 }), None, None, None);
+        let before = commit_mb();
+        for id in &ids {
+            idx.set_sketch(*id, sketch);
+        }
+        let with = commit_mb();
+        let copy = idx.clone();
+        let copied = commit_mb();
+        assert_eq!(copy.sketched_len(), N);
+        eprintln!(
+            "{N} tracks: the sketches add {:.2} MB to the index ({} bytes a track) (a snapshot's whole copy of the index with them: {:.2} MB)",
+            with - before,
+            std::mem::size_of::<SoundSketch>(),
+            copied - with
+        );
+    }
+
     /// The sketch harness: a list of files (`NIKGOB_SKETCH_LIST`, lines of
     /// track id, label, path, title, tab-separated) read only, each
     /// analysed at the lowest priority with the model of `NIKGOB_MODELS`
