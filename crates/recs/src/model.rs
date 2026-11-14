@@ -618,6 +618,14 @@ pub struct Moment {
     pub bag_near: HashMap<usize, f32>,
 }
 
+/// The rejections of a session measured by the sound index
+/// ([`UserModel::push_probe`]).
+pub struct PushProbe<'a> {
+    index: &'a VectorIndex<TrackId>,
+    probe: crate::index::SoundProbe,
+    pushed: Vec<(TrackId, f32)>,
+}
+
 /// What a live session is ([`UserModel::live`]): one profile or many,
 /// how much of it is background, whether it is focused, and the profile of
 /// its last start.
@@ -1450,13 +1458,20 @@ impl UserModel {
         let sess: Vec<(usize, Ended, EventContext)> =
             session.tracks().filter_map(|p| Some((self.position(p.track)?, p.ended, p.context))).collect();
         let prev = session.last().and_then(|p| self.position(p.track));
-        // The graphs around the last three not skipped early.
+        // The graphs around the last three played through.
         let mut graph_near: HashMap<usize, f32> = HashMap::new();
         let mut graph_artists: HashMap<ArtistId, f32> = HashMap::new();
         let mut pgraph_near: HashMap<usize, f32> = HashMap::new();
-        let recent: Vec<usize> = if rank { sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early).take(3).map(|x| x.0).collect() } else { Vec::new() };
+        // What played through (to its end or its outro, liked, or playing
+        // still): a skip past the half is no seed either.
+        let through: Vec<usize> = if rank {
+            session.tracks().rev().filter(|p| Session::played_through(p, self)).filter_map(|p| self.position(p.track)).collect()
+        } else {
+            Vec::new()
+        };
+        let recent: Vec<usize> = through.iter().take(3).copied().collect();
         let mut bag_near: HashMap<usize, f32> = HashMap::new();
-        for (k, (s, _, _)) in sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early && rank).take(BAG_WINDOW).enumerate() {
+        for (k, s) in through.iter().take(BAG_WINDOW).enumerate() {
             let f = 0.8f32.powi(k as i32);
             for &(c, w) in self.bag.row(*s) {
                 *bag_near.entry(c as usize).or_default() += f * w;
@@ -1515,8 +1530,8 @@ impl UserModel {
             (Some(e), Some(a)) => -euclid(e, a) / self.scale,
             _ => -1.0,
         };
-        if let Some(e) = e {
-            f[F_SKIP_PUSH] = -m.pushes.iter().map(|(p, w)| w * (1.0 - euclid(e, p) / self.scale).max(0.0)).sum::<f32>();
+        if e.is_some() {
+            f[F_SKIP_PUSH] = self.skip_push_of(&m.pushes, c);
         }
         f[F_NEXT_ALBUM] = f32::from(u8::from(m.next_album == Some(c)));
         if let Some(p) = m.prev {
@@ -1556,6 +1571,43 @@ impl UserModel {
         f[F_IS_PREV] = f32::from(u8::from(m.prev == Some(c)));
         f[F_ALBUM_FIRST] = f32::from(u8::from(self.album_first[c] && m.prev.is_none_or(|p| self.release[p] != self.release[c])));
         f
+    }
+
+    /// [`F_SKIP_PUSH`] of `c` by the sounds `pushes` (embedded, each with
+    /// how hard it pushes): 0 for a track without a sound.
+    pub fn skip_push_of(&self, pushes: &[(Vector, f32)], c: usize) -> f32 {
+        let Some(e) = self.emb[c].as_ref() else { return 0.0 };
+        -pushes.iter().map(|(p, w)| w * (1.0 - euclid(e, p) / self.scale).max(0.0)).sum::<f32>()
+    }
+
+    /// The tracks `session` rejected, to measure candidates against by
+    /// both sounds where the neural model heard them ([`Self::skip_push_by`]);
+    /// none without rejections or before the index blends.
+    pub fn push_probe<'a>(&self, session: &Session, index: Option<&'a VectorIndex<TrackId>>) -> Option<PushProbe<'a>> {
+        let index = index?;
+        let pushed = session.pushed(self);
+        if pushed.is_empty() {
+            return None;
+        }
+        let ids: Vec<TrackId> = pushed.iter().map(|p| p.0).collect();
+        let probe = index.sound_probe(&ids)?;
+        Some(PushProbe { index, probe, pushed })
+    }
+
+    /// [`F_SKIP_PUSH`] of `c` by the session's rejections as `probe` holds
+    /// them: by the blend of bliss and the neural model where both tracks
+    /// have the model's vector (an instrumental beat and a sung track of one
+    /// tempo stand apart), by bliss else. 0 for a track without a sound.
+    pub fn skip_push_by(&self, probe: &PushProbe<'_>, c: usize) -> f32 {
+        let Some(e) = self.emb[c].as_ref() else { return 0.0 };
+        let mut sum = 0.0f32;
+        for (k, (t, w)) in probe.pushed.iter().enumerate() {
+            let d = probe.index.probe_distance(&probe.probe, k, self.ids[c]).or_else(|| self.pos.get(t).and_then(|&j| self.emb[j].as_ref()).map(|p| euclid(e, p)));
+            if let Some(d) = d {
+                sum += w * (1.0 - d / self.scale).max(0.0);
+            }
+        }
+        -sum
     }
 
     /// The relevance of `c` by the model of the next start.
@@ -2727,5 +2779,77 @@ pub(crate) mod tests {
         // No graph here: both priors are 0, and the fade keeps them so.
         assert_eq!(m.prior_at(0), m.graph.prior(0));
         assert_eq!(m.prior_at(1), m.graph.prior(1) / 4.0);
+    }
+
+    /// A session's rejections push the candidates by both sounds where the
+    /// neural model heard them: two songs bliss cannot tell apart from the
+    /// skipped one, one of its genre and one of another, are pushed apart
+    /// by the model's vectors; without a rejection there is nothing to
+    /// measure.
+    #[test]
+    fn a_rejection_pushes_by_both_sounds() {
+        use crate::embedding::{COMPACT_DIM, Compact};
+        let n = 40u128;
+        let cat = Catalog::new((0..n).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut idx = VectorIndex::new();
+        let mut rng = Rng::new(5);
+        for i in 0..n {
+            let x = match i {
+                0 => 0.0,
+                1 | 2 => 0.05,
+                _ => i as f32 * 0.3,
+            };
+            idx.insert(tid(i), line(x));
+            // Two genres: the even dimensions and the odd ones.
+            let genre = match i {
+                1 => 1,
+                0 | 2 => 0,
+                _ => (i % 2) as usize,
+            };
+            let v: [f32; COMPACT_DIM] = std::array::from_fn(|j| if j % 2 == genre { 1.0 } else { 0.0 } + 0.3 * rng.f32());
+            assert!(idx.set_embedding(tid(i), Compact::of_unit(&v).unwrap()));
+        }
+        let m = UserModel::build(&cat, &TasteInput::default(), ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
+        let mut s = Session::default();
+        s.start(tid(0), T0 - 60_000, EventContext::Radio, Some(EventOrigin::Radio));
+        s.end_at(tid(0), Ended::Early, 5_000, Some(200_000), false);
+        assert_eq!(s.pushed(&m).len(), s.pushes(&m).len());
+        let probe = m.push_probe(&s, Some(&idx)).expect("a rejection, an index that blends");
+        let (one, two) = (m.position(tid(1)).unwrap(), m.position(tid(2)).unwrap());
+        let mo = m.moment(&s, T0);
+        let bliss = (m.skip_push_of(&mo.pushes, one), m.skip_push_of(&mo.pushes, two));
+        assert!(bliss.1 < 0.0 && (bliss.0 - bliss.1).abs() < 1e-6, "{bliss:?}");
+        let (other, same) = (m.skip_push_by(&probe, one), m.skip_push_by(&probe, two));
+        assert!(same < other - 0.05, "the skipped genre is pushed harder: {same} {other}");
+        assert!(m.push_probe(&Session::default(), Some(&idx)).is_none());
+        assert!(m.push_probe(&s, None).is_none());
+    }
+
+    /// What was listened with a song in sessions before follows it only
+    /// when it played through: a skip past its half seeds nothing.
+    #[test]
+    fn only_what_played_through_seeds_the_session() {
+        let cat = Catalog::new((0..3u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        let mut ts = T0 - 10 * DAY_MS;
+        for _ in 0..4 {
+            for t in [1u128, 2] {
+                events.push(Play::new(tid(t), ts, EventType::Start, Some(0)));
+                ts += 200_000;
+                events.push(Play::new(tid(t), ts, EventType::Complete, Some(200_000)));
+            }
+            ts += DAY_MS;
+        }
+        let idx = VectorIndex::new();
+        let m = UserModel::build(&cat, &TasteInput { events, ..TasteInput::default() }, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
+        let two = m.position(tid(2)).unwrap();
+        let session = |ended: Ended, at: u32| {
+            let mut s = Session::default();
+            s.start(tid(1), T0 - 300_000, EventContext::Library, Some(EventOrigin::Manual));
+            s.end_at(tid(1), ended, at, Some(200_000), false);
+            s
+        };
+        assert!(m.moment(&session(Ended::Complete, 200_000), T0).bag_near.contains_key(&two));
+        assert!(!m.moment(&session(Ended::Late, 130_000), T0).bag_near.contains_key(&two), "skipped past its half");
     }
 }

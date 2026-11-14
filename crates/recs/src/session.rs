@@ -426,6 +426,25 @@ impl Session {
         all[all.len().saturating_sub(PUSHES)..].to_vec()
     }
 
+    /// The tracks of [`Self::pushes`] (those with a sound) and how hard each
+    /// pushes: a sound index measures them by both sounds
+    /// ([`crate::UserModel::push_probe`]).
+    pub fn pushed(&self, look: &impl TrackLookup) -> Vec<(TrackId, f32)> {
+        let all: Vec<(TrackId, f32)> = self
+            .tracks
+            .iter()
+            .filter_map(|p| {
+                let v = Self::verdict(p, look);
+                if !v.rejects() {
+                    return None;
+                }
+                look.vector(p.track)?;
+                Some((p.track, v.push()))
+            })
+            .collect();
+        all[all.len().saturating_sub(PUSHES)..].to_vec()
+    }
+
     /// The commonest song lane of the last [`LANE_TRACKS`] (the earliest
     /// of them on a tie).
     pub fn lane(&self, look: &impl TrackLookup) -> Option<SongLane> {

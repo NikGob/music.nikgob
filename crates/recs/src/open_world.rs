@@ -578,7 +578,7 @@ fn next_ranked(
     let mut seeds: Vec<(usize, f32)> = session
         .tracks()
         .rev()
-        .filter(|p| p.ended != Ended::Early)
+        .filter(|p| Session::played_through(p, m))
         .filter_map(|p| m.position(p.track))
         .take(WALK_SEEDS)
         .enumerate()
@@ -731,6 +731,7 @@ fn next_ranked(
 /// is left out: a wave is no album.
 struct LibStepper<'a> {
     m: &'a UserModel,
+    index: Option<&'a VectorIndex<TrackId>>,
     weights: Weights,
     sim: Session,
     ts: UnixMs,
@@ -754,7 +755,7 @@ impl<'a> LibStepper<'a> {
         let sim = session.clone();
         let ts = sim.last_ts().unwrap_or(m.now());
         let free = by_pull.iter().copied().collect();
-        let mut s = Self { m, weights, sim, ts, seq: Vec::new(), rules: Diversity::default(), by_pull, free, taken: HashSet::new(), seed: turn.seed };
+        let mut s = Self { m, index: ctx.index, weights, sim, ts, seq: Vec::new(), rules: Diversity::default(), by_pull, free, taken: HashSet::new(), seed: turn.seed };
         let placed: Vec<usize> = s.sim.tracks().filter_map(|p| m.position(p.track)).collect();
         for i in placed {
             s.seq.push(s.seen_of(i));
@@ -794,6 +795,7 @@ impl<'a> LibStepper<'a> {
         let mut mo = m.moment(&self.sim, m.now().max(self.ts));
         mo.album_session = false;
         mo.world_session = None;
+        let push = m.push_probe(&self.sim, self.index);
         let in_sim: HashSet<TrackId> = self.sim.tracks().map(|p| p.track).collect();
         let ok = |i: usize| self.free.contains(&i) && !self.taken.contains(&i) && !in_sim.contains(&m.id(i));
         let mut cands = m.candidates(&mo, &ok);
@@ -804,7 +806,7 @@ impl<'a> LibStepper<'a> {
         let seen: Vec<Seen<'_>> = self.seq[from..].iter().map(|(a, b, w)| (&a[..], *b, *w)).collect();
         let mut best: Option<(usize, f32, usize)> = None;
         for c in cands {
-            let value = library_value(m, &mo, &self.weights, c) + WAVE_JITTER * Rng::derive(self.seed, c as u64).f32();
+            let value = library_value(m, &mo, &self.weights, c, push.as_ref()) + WAVE_JITTER * Rng::derive(self.seed, c as u64).f32();
             let (a, b, w) = self.seen_of(c);
             let over = per.get(&artist(c)).copied().unwrap_or(0) >= cap;
             let broken = self.rules.weighted(&seen, (&a[..], b, w)) + 2 * usize::from(over);
@@ -823,10 +825,15 @@ impl<'a> LibStepper<'a> {
 /// `moment` by `weights` (the album's features already left out of them),
 /// as a radio picked by the model weighs it ([`crate::radio`]): the model's
 /// relevance, the chance of an early skip, how rested a song is, the
-/// dislikes near it and how worn it is.
-pub(crate) fn library_value(m: &UserModel, moment: &Moment, weights: &Weights, i: usize) -> f32 {
+/// dislikes near it and how worn it is; the session's rejections measured
+/// by both sounds when `push` holds them.
+pub(crate) fn library_value(m: &UserModel, moment: &Moment, weights: &Weights, i: usize, push: Option<&crate::model::PushProbe<'_>>) -> f32 {
     use crate::radio::{COOL, RADIO_REST, REST_HALF_MS, SKIP_VALUE};
-    let relevance = weights.next.score(&m.features(moment, i));
+    let mut f = m.features(moment, i);
+    if let Some(p) = push {
+        f[crate::model::F_SKIP_PUSH] = m.skip_push_by(p, i);
+    }
+    let relevance = weights.next.score(&f);
     let p_skip = m.skip_risk(i, weights.skip.p(&m.skip_features(moment, i, EventContext::Radio))).min(0.99);
     let rested = m.tracks[i].last_start.map_or(1.0, |l| 1.0 - (-((moment.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
     relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested - m.taste.dislike_near_at(i) - COOL * m.taste.saturation_at(i)

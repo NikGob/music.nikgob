@@ -1345,6 +1345,10 @@ impl RadioState {
         let mut out: Vec<Slot> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut m = model.moment(&sim, ts);
+            // The session's rejections by both sounds; the songs taken out
+            // of the queue by bliss as before.
+            let push = model.push_probe(&sim, Some(recs.index));
+            let removed_push: Vec<(Vector, f32)> = removed.iter().map(|v| (*v, REMOVED_PUSH)).collect();
             m.album_session &= continuing;
             m.world_session = None;
             m.anchor = if traj.is_empty() { anchor.lean(m.anchor) } else { anchor.drift(sim.anchor_of(model, TRAJECTORY_RECENT)) };
@@ -1469,7 +1473,10 @@ impl RadioState {
             let best_of = |cands: Vec<usize>| -> Option<((usize, f32), Slot, bool)> {
                 let mut best: Option<((usize, f32), Slot, bool)> = None;
                 for c in cands {
-                    let f = model.features(&m, c);
+                    let mut f = model.features(&m, c);
+                    if let Some(p) = &push {
+                        f[F_SKIP_PUSH] = model.skip_push_by(p, c) + model.skip_push_of(&removed_push, c);
+                    }
                     let parts: Vec<f32> = w.w.iter().zip(&f).map(|(a, b)| a * b).collect();
                     let relevance: f32 = parts.iter().sum();
                     let mut x = model.skip_features(&m, c, nikgob_core::model::EventContext::Radio);
