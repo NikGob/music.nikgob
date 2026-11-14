@@ -273,6 +273,20 @@ pub struct TrackStats {
     recent_n: u8,
 }
 
+/// The bins of the time between two completes of one song
+/// ([`UserModel::repeat_rest`]): 2 h, 6 h, a day, three days, a week.
+pub const REPEAT_BINS: [i64; 5] = [2 * HOUR_MS, 6 * HOUR_MS, 24 * HOUR_MS, 72 * HOUR_MS, 168 * HOUR_MS];
+/// The time between repeats of a user whose repeats are not known yet
+/// (fewer than [`REPEAT_MIN`]).
+pub const REPEAT_DEFAULT_MS: i64 = 24 * HOUR_MS;
+pub const REPEAT_MIN: u32 = 20;
+/// A file come to the library this long ago is a new arrival…
+pub const ARRIVAL_WINDOW_MS: i64 = 30 * DAY_MS;
+/// …half as much of one after this; a day that brought more files than
+/// this is an import of the library, none of them a new arrival.
+pub const ARRIVAL_HALF_MS: i64 = 7 * DAY_MS;
+pub const ARRIVAL_BATCH: usize = 100;
+
 /// How much of a love last heard `age` before the user's latest listening
 /// counts now ([`UserModel::freshness_at`]).
 pub fn freshness(age: i64) -> f32 {
@@ -730,6 +744,23 @@ pub struct UserModel {
     /// those of the same main artist as the one before
     /// ([`Self::artist_again`]).
     again: (u32, u32),
+    /// The work of each track whose work is another track
+    /// ([`Catalog::work_at`]: another version or copy of one song).
+    work: HashMap<u32, TrackId>,
+    /// The library's works by their song keys ([`crate::song_key`] of the
+    /// work's title and artist, as [`crate::discover::stream_work_key`]
+    /// keys a new song) and back ([`Self::set_song_works`]): a new song
+    /// and a library track of one song are one work.
+    song_works: HashMap<String, TrackId>,
+    work_songs: HashMap<TrackId, String>,
+    /// When the library's files came (catalog positions of local tracks
+    /// added lately, [`ARRIVAL_WINDOW_MS`]): a new arrival never played is
+    /// offered among the unheard first ([`Self::arrival_at`]).
+    arrived: HashMap<u32, UnixMs>,
+    /// How long after a song was heard out it was heard out again (the
+    /// user's own plays, not imported ones), by [`REPEAT_BINS`]: how soon
+    /// this user likes to hear a song again ([`Self::repeat_rest`]).
+    repeat_gaps: [u32; REPEAT_BINS.len() + 1],
 
     /// The embedded vectors of the disliked tracks (a new track near them
     /// stands lower).
@@ -1233,6 +1264,70 @@ impl UserModel {
         (self.again.1 as f32 + 10.0 * prior) / (self.again.0 as f32 + 10.0)
     }
 
+    /// The work of the track at `i`: the track standing for its song when
+    /// it is another version or copy of a song ([`Catalog::work_at`]), else
+    /// itself.
+    pub fn work_at(&self, i: usize) -> TrackId {
+        self.work.get(&(i as u32)).copied().unwrap_or(self.ids[i])
+    }
+
+    /// The song keys of the library's works (`(key, track)`: the key of a
+    /// track's work title and artist, the work [`Self::work_at`] of the
+    /// track), so a new song of one of them is that work; the first of a
+    /// key, and the first key of a work, win.
+    pub fn set_song_works(&mut self, keys: impl IntoIterator<Item = (String, TrackId)>) {
+        for (key, track) in keys {
+            let Some(i) = self.position(track) else { continue };
+            let work = self.work_at(i);
+            self.work_songs.entry(work).or_insert_with(|| key.clone());
+            self.song_works.entry(key).or_insert(work);
+        }
+    }
+
+    /// How much the library's song at `i` is a new arrival: a file come
+    /// lately and never played, 1 just added, half after
+    /// [`ARRIVAL_HALF_MS`], none past [`ARRIVAL_WINDOW_MS`] or once played.
+    pub fn arrival_at(&self, i: usize) -> f32 {
+        let Some(&at) = self.arrived.get(&(i as u32)) else { return 0.0 };
+        if self.tracks[i].starts > 0 {
+            return 0.0;
+        }
+        let age = self.now - at;
+        if !(0..=ARRIVAL_WINDOW_MS).contains(&age) {
+            return 0.0;
+        }
+        0.5f32.powf(age as f32 / ARRIVAL_HALF_MS as f32)
+    }
+
+    /// The library work a new song's work key is of ([`Self::set_song_works`]).
+    pub fn work_of_song(&self, key: &str) -> Option<TrackId> {
+        self.song_works.get(key).copied()
+    }
+
+    /// The song key of the library's work `work` ([`Self::set_song_works`]).
+    pub fn song_of_work(&self, work: TrackId) -> Option<&str> {
+        self.work_songs.get(&work).map(String::as_str)
+    }
+
+    /// How long a song heard out by this user rests as a rule: the median
+    /// time after which their songs heard out were heard out again (the
+    /// upper bound of its bin), [`REPEAT_DEFAULT_MS`] with fewer than
+    /// [`REPEAT_MIN`] repeats known.
+    pub fn repeat_rest(&self) -> i64 {
+        let n: u32 = self.repeat_gaps.iter().sum();
+        if n < REPEAT_MIN {
+            return REPEAT_DEFAULT_MS;
+        }
+        let mut seen = 0;
+        for (k, c) in self.repeat_gaps.iter().enumerate() {
+            seen += c;
+            if 2 * seen >= n {
+                return REPEAT_BINS.get(k).copied().unwrap_or(2 * REPEAT_BINS[REPEAT_BINS.len() - 1]);
+            }
+        }
+        REPEAT_DEFAULT_MS
+    }
+
     /// The chance of an early skip of the track at `i`, `p` by the model:
     /// at least what its last outcomes say when it is worn out now
     /// ([`TrackStats::burnt`]).
@@ -1308,6 +1403,21 @@ impl UserModel {
             }
         }
         let types = ids.iter().map(|id| extra.types.and_then(|t| t.get(*id)).copied().unwrap_or_default()).collect();
+        let work: HashMap<u32, TrackId> = (0..n).filter(|&i| catalog.work_at(i) != ids[i]).map(|i| (i as u32, catalog.work_at(i))).collect();
+        // A day that brought more than a batch is the library's import, not
+        // new arrivals.
+        let mut per_day: HashMap<i64, usize> = HashMap::new();
+        for t in catalog.tracks().iter().filter(|t| t.local && t.added_at > 0) {
+            *per_day.entry(t.added_at.div_euclid(DAY_MS)).or_default() += 1;
+        }
+        let arrived: HashMap<u32, UnixMs> = catalog
+            .tracks()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.local && t.added_at > 0 && t.added_at <= now && now - t.added_at <= ARRIVAL_WINDOW_MS)
+            .filter(|(_, t)| per_day.get(&t.added_at.div_euclid(DAY_MS)).is_some_and(|&n| n <= ARRIVAL_BATCH))
+            .map(|(i, t)| (i as u32, t.added_at))
+            .collect();
         let vs: Vec<&Vector> = emb.iter().flatten().collect();
         let scale = {
             let step = (vs.len() / 64).max(1);
@@ -1372,6 +1482,11 @@ impl UserModel {
             fresh_at: None,
             imported_at: Vec::new(),
             again: (0, 0),
+            work,
+            song_works: HashMap::new(),
+            work_songs: HashMap::new(),
+            arrived,
+            repeat_gaps: [0; REPEAT_BINS.len() + 1],
             disliked: Vec::new(),
             walk: Session::default(),
             pending: HashMap::new(),
@@ -1905,14 +2020,23 @@ impl UserModel {
             EventType::Complete => {
                 let part = self.part_of(p.ts);
                 self.streak = 0;
-                let manual = self.tracks[i].open.take().is_some_and(|(_, o)| o == Some(EventOrigin::Manual));
+                let opened = self.tracks[i].open.take().and_then(|(_, o)| o);
+                let manual = opened == Some(EventOrigin::Manual);
+                let imported = opened == Some(EventOrigin::Import) || p.origin == Some(EventOrigin::Import);
                 let r = R_COMPLETE * if manual { MANUAL_POSITIVE } else { 1.0 };
                 self.tracks[i].add_as(p.ts, r, W_COMPLETE, true);
                 let t = &mut self.tracks[i];
                 t.note(false);
                 t.completes += 1;
                 t.done[part] = t.done[part].saturating_add(1);
-                t.last_complete = Some(p.ts);
+                let before = t.last_complete.replace(p.ts);
+                if let Some(b) = before
+                    && !imported
+                {
+                    let gap = p.ts - b;
+                    let bin = REPEAT_BINS.iter().position(|&x| gap < x).unwrap_or(REPEAT_BINS.len());
+                    self.repeat_gaps[bin] += 1;
+                }
                 self.walk.end(p.track, Ended::Complete);
                 if let Some(x) = self.pending.remove(&i).filter(|_| self.learn) {
                     self.weights.skip.observe(&x, false);
@@ -3076,5 +3200,56 @@ pub(crate) mod tests {
         assert!(same < other - 0.05, "the skipped genre is pushed harder: {same} {other}");
         assert!(m.push_probe(&Session::default(), Some(&idx)).is_none());
         assert!(m.push_probe(&s, None).is_none());
+    }
+
+    /// How soon a user hears a song again is their median time between two
+    /// completes of one song: unknown with few repeats (the default rest),
+    /// a day's bin for one who plays their songs again every 20 hours; an
+    /// imported history's repeats say nothing of it. A version's work is
+    /// its song's track.
+    #[test]
+    fn the_users_own_time_between_repeats() {
+        let cat = Catalog::new((0..3u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let few = build_of(&cat, TasteInput { events: played(0, T0 - DAY_MS, EventOrigin::Manual, EventContext::Library, None, None).into_iter().collect(), ..TasteInput::default() });
+        assert_eq!(few.repeat_rest(), REPEAT_DEFAULT_MS);
+        let mut events = Vec::new();
+        let mut imported = Vec::new();
+        for k in 0..30i64 {
+            for t in 0..2u128 {
+                let ts = T0 - 40 * DAY_MS + k * 20 * HOUR_MS + t as i64 * 300_000;
+                events.extend(played(t, ts, EventOrigin::Manual, EventContext::Library, None, None));
+                imported.extend(played(t, ts, EventOrigin::Import, EventContext::Library, None, None).map(|p| Play { origin: Some(EventOrigin::Import), ..p }));
+            }
+        }
+        let m = build_of(&cat, TasteInput { events, ..TasteInput::default() });
+        assert_eq!(m.repeat_rest(), 24 * HOUR_MS);
+        let m = build_of(&cat, TasteInput { events: imported, ..TasteInput::default() });
+        assert_eq!(m.repeat_rest(), REPEAT_DEFAULT_MS, "imported plays");
+        let versions = Catalog::new([info(0, &[1], Some(0)), info(1, &[1], Some(0)).with_song(tid(0)), info(2, &[2], Some(1))]);
+        let m = build_of(&versions, TasteInput::default());
+        assert_eq!((m.work_at(0), m.work_at(1), m.work_at(2)), (tid(0), tid(0), tid(2)));
+    }
+
+    /// A file come lately and never played is a new arrival: fully just
+    /// added, half a week later, none past the window, once played, without
+    /// a file, or with no time known.
+    #[test]
+    fn a_new_arrival_fades_and_ends_once_played() {
+        let cat = Catalog::new([
+            info(0, &[0], Some(0)).with_added(T0 - HOUR_MS),
+            info(1, &[1], Some(1)).with_added(T0 - ARRIVAL_HALF_MS),
+            info(2, &[2], Some(2)).with_added(T0 - ARRIVAL_WINDOW_MS - DAY_MS),
+            info(3, &[3], Some(3)).with_added(T0 - HOUR_MS),
+            info(4, &[4], Some(4)).with_added(T0 - HOUR_MS).with_local(false),
+            info(5, &[5], Some(5)),
+        ]);
+        let events: Vec<Play> = played(3, T0 - 30 * 60_000, EventOrigin::Manual, EventContext::Library, None, None).into_iter().collect();
+        let m = build_of(&cat, TasteInput { events, ..TasteInput::default() });
+        assert!(m.arrival_at(0) > 0.99, "{}", m.arrival_at(0));
+        assert!((m.arrival_at(1) - 0.5).abs() < 1e-3, "{}", m.arrival_at(1));
+        assert_eq!(m.arrival_at(2), 0.0, "past the window");
+        assert_eq!(m.arrival_at(3), 0.0, "played");
+        assert_eq!(m.arrival_at(4), 0.0, "no file");
+        assert_eq!(m.arrival_at(5), 0.0, "no time known");
     }
 }

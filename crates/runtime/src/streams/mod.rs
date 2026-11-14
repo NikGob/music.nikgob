@@ -17,6 +17,7 @@
 
 mod accounts;
 mod analysis;
+pub(crate) use analysis::AskRoom;
 mod clips;
 mod cold;
 mod complete;
@@ -216,6 +217,12 @@ pub(crate) enum Msg {
     Analysed(analysis::Done),
     /// Its gap or rate-limit pause is over.
     AnalysisWake,
+    /// A free preview of a new song was looked for (Deezer's 30 seconds):
+    /// its audio and container, if found.
+    FreePreview {
+        track: TrackId,
+        found: Option<(Vec<u8>, String)>,
+    },
     /// The pause the player waits on is over (see [`held`]).
     PauseLifted(u64),
     /// Whether a paused service's stream is on disk, asked off the loop.
@@ -787,6 +794,7 @@ impl Worker {
             } => self.replace_resolved(track, *pick, youtube_song.map(|s| *s), youtube),
             Msg::Analysed(done) => self.stream_analysed(done),
             Msg::AnalysisWake => self.stream_analysis_step(),
+            Msg::FreePreview { track, found } => self.free_preview_found(track, found),
             Msg::PauseLifted(seq) => self.pause_lifted(seq),
             Msg::CacheKnown { service, id, until, on_disk } => self.cache_known(service, id, until, on_disk),
             Msg::Completed { track, id, result } => self.completed(track, &id, result),

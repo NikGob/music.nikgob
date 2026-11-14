@@ -410,3 +410,49 @@ fn nothing_is_downloaded_while_the_next_song_needs_youtube_music() {
     wait_for(&rt, "the analysis", |s| s.analysis.streams_done >= 1);
     drop(rt);
 }
+
+/// A stream analysed before sketches were (its bliss current, no sketch)
+/// gets one: from the disk cache when it plays (no request), and in the
+/// background by a download — not while YouTube Music plays, then after.
+#[test]
+fn a_stream_analysed_before_sketches_gets_one() {
+    let current = |lib: &Library, t: TrackId| lib.sketch_of(t).unwrap().is_some_and(|s| s.sketched_with == nikgob_recs::SKETCHED_WITH);
+    let analysed = |lib: &Library, t: TrackId| {
+        lib.put_analysis(&nikgob_core::model::Analysis { track_id: t, bliss_vector: vec![0.1; nikgob_recs::DIM], analyzed_with: WITH.to_owned(), source: AnalysisSource::Youtube }).unwrap();
+    };
+    // Played from the cache.
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(youtube().logged_out());
+    let track = lib.upsert_stream_track(&find(&yt, "yt-gruppa-1")).unwrap();
+    analysed(&lib, track);
+    drop(yt.open_audio("yt-gruppa-1").unwrap());
+    yt.reset_calls();
+    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    rt.send(Command::PlayTracks { tracks: vec![track], start: 0, context: "test".into() });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let id = asked.lock().unwrap()[0].id;
+    rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
+    wait_until("the sketch", || current(&lib, track));
+    assert_eq!(yt.total_calls(), 0, "{:?}", yt.all_calls());
+    drop(rt);
+
+    // In the background: a liked stream, analysed, without a sketch.
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(youtube().logged_out());
+    let liked = lib.upsert_stream_track(&find(&yt, "yt-firstlove-1")).unwrap();
+    lib.like(liked).unwrap();
+    analysed(&lib, liked);
+    let playing = lib.upsert_stream_track(&find(&yt, "yt-gruppa-1")).unwrap();
+    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    rt.send(Command::PlayTracks { tracks: vec![playing], start: 0, context: "test".into() });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let id = asked.lock().unwrap()[0].id;
+    rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(!current(&lib, liked), "nothing while YouTube Music plays");
+    assert!(yt.opened().iter().all(|v| v != "yt-firstlove-1"), "{:?}", yt.opened());
+    rt.send(Command::Pause);
+    wait_until("the background sketch", || current(&lib, liked));
+    drop(rt);
+}

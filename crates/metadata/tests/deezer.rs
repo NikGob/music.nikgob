@@ -364,3 +364,30 @@ async fn download_image_returns_the_bytes() {
         .unwrap();
     assert_eq!(bytes, vec![1, 2, 3]);
 }
+
+/// The free preview of a song: the hit whose artist and title match (an
+/// instrumental of it is not it), downloaded from its URL; a song without
+/// a match has none; a known Deezer id is read directly.
+#[tokio::test]
+async fn a_songs_free_preview_is_found_and_downloaded() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    let hits = json!({ "data": [
+        { "id": 1, "title": "Sora (Instrumental)", "duration": 200, "artist": { "id": 5, "name": "Singer" }, "preview": format!("{uri}/p/1.mp3") },
+        { "id": 2, "title": "Sora", "duration": 201, "artist": { "id": 5, "name": "Singer" }, "preview": format!("{uri}/p/2.mp3") },
+        { "id": 3, "title": "Sora", "duration": 201, "artist": { "id": 6, "name": "Someone Else" }, "preview": format!("{uri}/p/3.mp3") }
+    ]});
+    Mock::given(method("GET")).and(path("/search/track")).respond_with(json_body(&hits.to_string())).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/track/7"))
+        .respond_with(json_body(&json!({ "id": 7, "title": "Umi", "preview": format!("{uri}/p/7.mp3") }).to_string()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET")).and(path("/p/2.mp3")).respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 1000])).mount(&server).await;
+    let dz = client(&server);
+    let url = dz.preview_url(None, "Singer", "Sora", Some(Duration::from_secs(200))).await.unwrap();
+    assert_eq!(url.as_deref(), Some(format!("{uri}/p/2.mp3").as_str()));
+    assert_eq!(dz.download_preview(&url.unwrap()).await.unwrap().len(), 1000);
+    assert_eq!(dz.preview_url(None, "Nobody", "Sora", None).await.unwrap(), None);
+    assert_eq!(dz.preview_url(Some(7), "", "", None).await.unwrap().as_deref(), Some(format!("{uri}/p/7.mp3").as_str()));
+}

@@ -120,6 +120,11 @@ impl WavePool {
         Self { snap: Arc::downgrade(snap), discoveries, bans, topped, cands: Arc::new(cands) }
     }
 
+    /// The snapshot it was built for, while it lives.
+    pub(crate) fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.snap.upgrade()
+    }
+
     /// Built for `snap` with `discoveries` kept, `bans` artists kept out and
     /// the wave's top-ups as they were at `topped`.
     pub(crate) fn holds(&self, snap: &Arc<Snapshot>, discoveries: usize, bans: u64, topped: u64) -> bool {
@@ -167,33 +172,37 @@ pub(crate) fn empty_snapshot() -> Arc<Snapshot> {
 pub const WAVE_REFILL: bool = false;
 
 /// What a wave's picks asked ([`nikgob_recs::wave::WaveAsks`]) with its
-/// library work done off the worker: the YouTube Music songs of the pool
-/// without a preview as stream tracks of the library (the track and its
-/// video), and the filter that ran short with its songs.
+/// library work done off the worker: the songs of the pool without a
+/// preview as stream tracks of the library (the track and its YouTube
+/// Music video, none for another service's song: a free preview only), and
+/// the filter that ran short with its songs.
 pub(crate) struct WaveAsked {
-    pub previews: Vec<(TrackId, String)>,
+    pub previews: Vec<(TrackId, Option<String>)>,
     pub short: Option<(String, Vec<TrackId>)>,
 }
 
 /// [`WaveAsked`] of `asks` over the open `pool` (on the picks' thread),
-/// `room` previews at most ([`Worker::preview_room`]: none when previews
-/// cannot run today): a song the library has no stream track of yet gets
-/// one, as a discovery's preview does — only for a preview that can be
-/// analysed, so no row is kept for a song that is never heard.
-pub(crate) fn prepare_asks(lib: &nikgob_library::Library, pool: &[OpenCandidate], asks: nikgob_recs::wave::WaveAsks, room: usize) -> WaveAsked {
+/// within `room` ([`Worker::ask_room`]: a free preview has a day of its
+/// own, so a song of any service is asked while it lasts; YouTube Music's
+/// songs while its previews can run too; none when neither can): a song
+/// the library has no stream track of yet gets one, as a discovery's
+/// preview does — only for a preview that can be analysed, so no row is
+/// kept for a song that is never heard.
+pub(crate) fn prepare_asks(lib: &nikgob_library::Library, pool: &[OpenCandidate], asks: nikgob_recs::wave::WaveAsks, room: crate::streams::AskRoom) -> WaveAsked {
+    let youtube = |r: &nikgob_core::streaming::RemoteId| r.service == nikgob_core::streaming::Service::Youtube;
     let previews = asks
         .previews
         .iter()
-        .filter(|r| r.service == nikgob_core::streaming::Service::Youtube)
+        .filter(|r| room.free || room.youtube && youtube(r))
         .filter_map(|r| pool.iter().find(|c| c.track.id == *r && c.vector.is_none()))
-        .take(room)
+        .take(room.room)
         .filter_map(|c| {
             let r = &c.track.id;
             let track = match lib.track_by_remote(r).ok().flatten() {
                 Some(t) => t,
                 None => lib.upsert_stream_tracks(std::slice::from_ref(&c.track)).ok()?.first().copied()?,
             };
-            Some((track, r.id.clone()))
+            Some((track, youtube(r).then(|| r.id.clone())))
         })
         .collect();
     WaveAsked { previews, short: asks.short }
@@ -203,6 +212,13 @@ pub(crate) fn prepare_asks(lib: &nikgob_library::Library, pool: &[OpenCandidate]
 /// (on the radio's thread). `local_only`: «Только скачанное» as the prefs
 /// say now.
 pub(crate) fn extend(state: &mut Engine, snap: &Snapshot, pool: &[OpenCandidate], local_only: bool, n: usize, seed: u64) -> Vec<Pick> {
+    let pool: &[OpenCandidate] = if local_only { &[] } else { pool };
+    with_context(snap, local_only, |ctx| state.extend_wave(ctx, pool, n, seed))
+}
+
+/// `f` over the wave's context of `snap` (`local_only`: «Только скачанное»
+/// as the prefs say now).
+pub(crate) fn with_context<R>(snap: &Snapshot, local_only: bool, f: impl FnOnce(&WaveContext<'_>) -> R) -> R {
     let ok = |i: usize| {
         let t = &snap.catalog.tracks()[i];
         (t.local || !local_only) && !snap.model.taste.blocks(t)
@@ -211,9 +227,9 @@ pub(crate) fn extend(state: &mut Engine, snap: &Snapshot, pool: &[OpenCandidate]
     let artist_tracks = |t: &nikgob_core::streaming::StreamTrack| super::lanes::artist_tracks(snap, t);
     let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
     let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index), learned: None };
-    let pool: &[OpenCandidate] = if local_only { &[] } else { pool };
-    state.extend_wave(&ctx, pool, n, seed)
+    f(&ctx)
 }
+
 
 /// The user's scenes over `snap` (see the module docs): the taste profiles
 /// named as «Смешать с…» names them (`profiles`), with at least a cluster's
@@ -397,6 +413,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::streams::AskRoom;
     use nikgob_core::streaming::{ArtistRef, RemoteId, Service, StreamTrack};
 
     fn candidate(service: Service, id: &str, heard: bool) -> OpenCandidate {
@@ -419,16 +436,30 @@ mod tests {
             short: Some(("any.all".to_owned(), vec![TrackId::new()])),
         };
         // No preview can run today: nothing is written.
-        let none = prepare_asks(&lib, &pool, asks.clone(), 0);
+        let none = prepare_asks(&lib, &pool, asks.clone(), AskRoom::default());
         assert!(none.previews.is_empty());
         assert_eq!(none.short, asks.short);
         assert_eq!(lib.track_by_remote(&pool[0].track.id).unwrap(), None, "no row for a preview that cannot run");
-        let asked = prepare_asks(&lib, &pool, asks.clone(), 6);
+        let yt = AskRoom { room: 6, youtube: true, free: false };
+        let asked = prepare_asks(&lib, &pool, asks.clone(), yt);
         assert_eq!(asked.previews.len(), 1);
-        assert_eq!(asked.previews[0].1, "a");
+        assert_eq!(asked.previews[0].1.as_deref(), Some("a"));
         assert_eq!(lib.track_by_remote(&pool[0].track.id).unwrap(), Some(asked.previews[0].0));
         assert_eq!(asked.short, asks.short);
-        assert_eq!(prepare_asks(&lib, &pool, asks, 6).previews, asked.previews);
+        assert_eq!(prepare_asks(&lib, &pool, asks, yt).previews, asked.previews);
+    }
+
+    /// YouTube Music's day of previews used up, the free previews still
+    /// ask for the songs the wave is about to play, of any service.
+    #[test]
+    fn a_wave_asks_free_previews_when_youtubes_day_is_over() {
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let pool = vec![candidate(Service::Youtube, "a", false), candidate(Service::Youtube, "b", true), candidate(Service::Deezer, "c", false)];
+        let asks = nikgob_recs::wave::WaveAsks { previews: pool.iter().map(|c| c.track.id.clone()).collect(), short: None };
+        let asked = prepare_asks(&lib, &pool, asks, AskRoom { room: 6, youtube: false, free: true });
+        let videos: Vec<Option<&str>> = asked.previews.iter().map(|p| p.1.as_deref()).collect();
+        assert_eq!(videos, vec![Some("a"), None]);
+        assert_eq!(lib.track_by_remote(&pool[2].track.id).unwrap(), Some(asked.previews[1].0));
     }
 
     /// The previews prepared keep to the room the day leaves: one row at
@@ -438,7 +469,7 @@ mod tests {
         let lib = nikgob_library::Library::open_in_memory().unwrap();
         let pool = vec![candidate(Service::Youtube, "a", false), candidate(Service::Youtube, "b", false), candidate(Service::Youtube, "c", false)];
         let asks = nikgob_recs::wave::WaveAsks { previews: pool.iter().map(|c| c.track.id.clone()).collect(), short: None };
-        let asked = prepare_asks(&lib, &pool, asks, 1);
+        let asked = prepare_asks(&lib, &pool, asks, AskRoom { room: 1, youtube: true, free: true });
         assert_eq!(asked.previews.len(), 1);
         let rows = pool.iter().filter(|c| lib.track_by_remote(&c.track.id).unwrap().is_some()).count();
         assert_eq!(rows, 1);

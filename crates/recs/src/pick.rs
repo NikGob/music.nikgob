@@ -89,6 +89,10 @@ pub struct NewTrack {
     pub album: Option<String>,
     /// Its sound, when it was analysed.
     pub vector: Option<Vector>,
+    /// [`crate::discover::stream_work_key`]: its versions (an off vocal, a
+    /// TV size) are one song; empty when not known.
+    #[serde(default)]
+    pub work: String,
 }
 
 impl NewTrack {
@@ -99,7 +103,9 @@ impl NewTrack {
             album: t.album.as_ref().map(|a| album_key(&a.title, &artist)),
             artist,
             vector,
+            work: crate::discover::stream_work_key(t),
         }
+
     }
 }
 

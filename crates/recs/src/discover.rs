@@ -719,6 +719,7 @@ pub fn rank_discoveries_upto(
             let artist = t.artists.first().map(|a| artist_key(&a.name)).unwrap_or_default();
             if filter.known_ids.contains(&t.id)
                 || filter.known_songs.contains(&key)
+                || filter.known_songs.contains(&stream_work_key(t))
                 || filter.disliked_songs.contains(&key)
                 || t.artists.iter().any(|a| filter.disliked_artists.contains(&artist_key(&a.name)))
                 || filter.shown.get(&key).is_some_and(|(n, played)| *n >= IGNORED_AFTER && !played)
@@ -1267,6 +1268,7 @@ mod tests {
                 heard: Heard::Early,
                 profile: None,
                 background: false,
+                seeds: Vec::new(),
             });
         }
         let vectors = HashMap::new();

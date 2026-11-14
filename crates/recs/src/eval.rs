@@ -86,6 +86,9 @@ pub struct DTrack {
     pub world: Option<u64>,
     pub duration_ms: Option<u32>,
     pub position: u32,
+    /// When it came to the library (0: not known; datasets before it).
+    #[serde(default)]
+    pub added_at: UnixMs,
 }
 
 /// One event of a [`Dataset`]'s history.
@@ -225,6 +228,7 @@ impl Dataset {
                     world: t.world,
                     duration_ms: t.duration_ms,
                     position: t.position,
+                    added_at: t.added_at,
                 })
                 .collect(),
             aliases: catalog.aliases().map(|(copy, i)| (copy, catalog.tracks()[i].id)).collect(),
@@ -259,7 +263,8 @@ impl Dataset {
     /// out: they would tell the past what came later.
     pub fn parts(&self) -> Parts {
         let catalog = Catalog::new(self.tracks.iter().map(|t| {
-            let mut info = TrackInfo::new(t.id, t.artists.clone(), t.release).with_local(t.local).with_duration(t.duration_ms).with_position(t.position);
+            let mut info =
+                TrackInfo::new(t.id, t.artists.clone(), t.release).with_local(t.local).with_duration(t.duration_ms).with_position(t.position).with_added(t.added_at);
             info.song = t.song;
             info.world = t.world;
             info
@@ -2121,6 +2126,30 @@ mod tests {
         }
     }
 
+    /// The parts of the wave turned off for a report
+    /// (`NIKGOB_DISCOVER_OFF=works,rest,probe,sequence,rejected,arrivals`):
+    /// each step measured on its own.
+    fn parts_off() {
+        use crate::open_world::Part;
+        let off: Vec<Part> = std::env::var("NIKGOB_DISCOVER_OFF")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|p| match p.trim() {
+                "works" => Some(Part::Works),
+                "rest" => Some(Part::Rest),
+                "probe" => Some(Part::Probe),
+                "sequence" => Some(Part::Sequence),
+                "rejected" => Some(Part::Rejected),
+                "arrivals" => Some(Part::Arrivals),
+                _ => None,
+            })
+            .collect();
+        if !off.is_empty() {
+            println!("parts off: {off:?}");
+        }
+        crate::open_world::set_off(&off);
+    }
+
     /// Every synthetic listener, measured (`cargo test -p nikgob-recs
     /// --release eval::tests::synthetic_report -- --ignored --nocapture`).
     #[test]
@@ -2130,6 +2159,7 @@ mod tests {
         // `NIKGOB_EVAL_NEXT`: the replay only.
         let quick = std::env::var_os("NIKGOB_EVAL_QUICK").is_some();
         let next_only = std::env::var_os("NIKGOB_EVAL_NEXT").is_some();
+        parts_off();
         for kind in synthetic::Kind::ALL {
             if (quick || next_only) && kind == synthetic::Kind::Big {
                 continue;
@@ -2160,6 +2190,7 @@ mod tests {
         };
         let d: Dataset = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let p = d.parts();
+        parts_off();
         for (k, (mode, label)) in ranking_modes().into_iter().enumerate() {
             crate::open_world::set_model_ranking(mode);
             // `NIKGOB_WAVE_TRACE`: sessions of the wave picked one by one.

@@ -49,6 +49,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use nikgob_core::model::TrackId;
 use nikgob_core::streaming::RemoteId;
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +89,23 @@ const SESSION_LOOK: usize = 5;
 const SERVED_KEEP: usize = 64;
 /// A block ends at this many rejections of it.
 const BLOCK_REJECTS: u8 = 2;
+/// While the wave looks for the mood (its start, a block left after
+/// rejections) a block is this many songs at most: a wrong cluster costs
+/// a song or two, not a block…
+pub const PROBE_MAX: u8 = 2;
+/// …until this many songs running were heard out; then blocks are
+/// [`BLOCK_MIN`]–[`BLOCK_MAX`] again.
+pub const SETTLED_AFTER: u8 = 2;
+/// New songs rejected in one block this often halve the share of new
+/// music of the next block (not of «Только новое»).
+pub const NEW_REJECTS_HALVE: u8 = 2;
+/// What a wave remembers of a cluster in a part of the day
+/// ([`BanditMemory`]) fades by this much a day…
+pub const MEMORY_DECAY: f32 = 0.85;
+/// …and weighs this many songs at most beside the prior.
+pub const MEMORY_WEIGHT: f32 = 6.0;
+/// The clusters remembered at most (the oldest go).
+const MEMORY_CAP: usize = 96;
 /// A library song is played again only past this many picks after it
 /// (the queue's buffer and the song playing)…
 pub const REPEAT_GAP: usize = 6;
@@ -113,6 +131,74 @@ impl WaveSeed {
     /// The plain wave of `novelty`.
     pub fn plain(novelty: f32) -> Self {
         Self { filter: WaveFilter { novelty, character: Character::Any, scene: Scene::All }, only: Vec::new(), part: None }
+    }
+}
+
+/// What the waves heard of each cluster in each part of the day, kept
+/// across waves and restarts (the library's cache keeps it): songs heard
+/// out and rejected, faded by [`MEMORY_DECAY`] a day. A wave started
+/// adds it to its clusters' priors ([`MEMORY_WEIGHT`] songs at most), so
+/// it remembers what worked yesterday evening.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BanditMemory {
+    entries: Vec<Remembered>,
+}
+
+/// One cluster of one character of wave in one part of the day.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct Remembered {
+    /// [`WaveFilter::token`] of its character and scene.
+    key: String,
+    part: u8,
+    ok: f32,
+    no: f32,
+    /// The day (since the epoch) its counts are of.
+    day: i64,
+}
+
+impl BanditMemory {
+    fn faded(e: &Remembered, day: i64) -> (f32, f32) {
+        let f = MEMORY_DECAY.powi((day - e.day).clamp(0, 365) as i32);
+        (e.ok * f, e.no * f)
+    }
+
+    /// The songs heard out and rejected of cluster `key` in `part` as of
+    /// `day`, [`MEMORY_WEIGHT`] in all at most.
+    pub fn prior(&self, key: &str, part: u8, day: i64) -> (f32, f32) {
+        let Some(e) = self.entries.iter().find(|e| e.key == key && e.part == part) else { return (0.0, 0.0) };
+        let (ok, no) = Self::faded(e, day);
+        let total = ok + no;
+        if total > MEMORY_WEIGHT { (ok * MEMORY_WEIGHT / total, no * MEMORY_WEIGHT / total) } else { (ok, no) }
+    }
+
+    /// A song of cluster `key` was heard out (`ok`) or rejected in `part`
+    /// on `day`.
+    pub fn learn(&mut self, key: &str, part: u8, day: i64, ok: bool) {
+        let at = match self.entries.iter().position(|e| e.key == key && e.part == part) {
+            Some(k) => k,
+            None => {
+                self.entries.push(Remembered { key: key.to_owned(), part, ok: 0.0, no: 0.0, day });
+                self.entries.len() - 1
+            }
+        };
+        let e = &mut self.entries[at];
+        (e.ok, e.no) = Self::faded(e, day);
+        e.day = day;
+        if ok {
+            e.ok += 1.0;
+        } else {
+            e.no += 1.0;
+        }
+        if self.entries.len() > MEMORY_CAP {
+            let oldest = self.entries.iter().enumerate().min_by_key(|(_, e)| e.day).map(|(k, _)| k);
+            if let Some(k) = oldest {
+                self.entries.remove(k);
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -160,6 +246,35 @@ pub struct Bandit {
     /// Seeds the draws (the radio's), and how many were drawn.
     seed: u64,
     draws: u64,
+    /// Songs heard out running (of any cluster), and whether the mood is
+    /// lost: a block was left after its rejections and fewer than
+    /// [`SETTLED_AFTER`] songs were heard out running since ([`PROBE_MAX`]).
+    /// A wave starts with the mood its prior and its session say.
+    #[serde(default)]
+    approved_run: u8,
+    #[serde(default)]
+    lost: bool,
+    /// The block of the new songs rejected last and how many of it.
+    #[serde(default)]
+    new_rejects: (u32, u8),
+    /// The next block plays half the share of new music, and whether the
+    /// block being picked does ([`NEW_REJECTS_HALVE`]).
+    #[serde(default)]
+    halve_next: bool,
+    #[serde(default)]
+    halved: bool,
+    /// What it learns across waves ([`BanditMemory`]): the runtime hands it
+    /// over and keeps it.
+    #[serde(skip)]
+    pub memory: BanditMemory,
+    /// The day and the part of the day of its last picks, and the
+    /// character of its filter: what the memory is kept by.
+    #[serde(default)]
+    day: i64,
+    #[serde(default)]
+    part: u8,
+    #[serde(default)]
+    character: Character,
 }
 
 /// A pick the bandit remembers: its cluster and its block.
@@ -303,10 +418,16 @@ impl Bandit {
             return;
         }
         let mut arms = Self::arms_of(ctx, seed);
+        self.stamp(ctx, seed);
         for a in &mut arms {
             if let Some(old) = self.arms.iter().find(|o| o.scene == a.scene) {
                 a.alpha = old.alpha;
                 a.beta = old.beta;
+            } else {
+                // What worked in this part of the day before.
+                let (ok, no) = self.memory.prior(&self.memory_key(a.scene), self.part, self.day);
+                a.alpha += ok;
+                a.beta += no;
             }
         }
         self.arms = arms;
@@ -315,6 +436,40 @@ impl Bandit {
         self.block_left = 0;
         self.avoid = None;
         self.served.clear();
+    }
+
+    /// The day, the part of the day and the character the memory is kept
+    /// by, as of `ctx`'s model.
+    fn stamp(&mut self, ctx: &WaveContext<'_>, seed: &WaveSeed) {
+        let m = ctx.model;
+        self.day = m.now().div_euclid(crate::taste::DAY_MS);
+        self.part = m.taste.day_part().index() as u8;
+        self.character = seed.filter.character;
+    }
+
+    /// The memory's key of a cluster's `scene`.
+    fn memory_key(&self, scene: Scene) -> String {
+        WaveFilter { novelty: 0.0, character: self.character, scene }.token()
+    }
+
+    /// Learns a verdict of arm `k` into the memory.
+    fn remember(&mut self, k: usize, ok: bool) {
+        if let Some(scene) = self.arms.get(k).map(|a| a.scene) {
+            let key = self.memory_key(scene);
+            self.memory.learn(&key, self.part, self.day, ok);
+        }
+    }
+
+    /// The share of new music of the block being picked: `novelty`, half
+    /// of it after new songs were rejected in the block before
+    /// ([`NEW_REJECTS_HALVE`]; «Только новое» stays whole).
+    pub fn novelty_of(&self, novelty: f32) -> f32 {
+        if self.halved && novelty < NOVELTY_ONLY_NEW && crate::open_world::part_on(crate::open_world::Part::Rejected) { novelty * 0.5 } else { novelty }
+    }
+
+    /// The mood is not lost ([`SETTLED_AFTER`]): blocks are of full length.
+    pub fn settled(&self) -> bool {
+        !self.lost
     }
 
     /// The arms of `seed` were found (not since changed).
@@ -327,7 +482,9 @@ impl Bandit {
     /// one to avoid are passed over (the avoided one too when nothing else
     /// is left). False when no arm is left.
     pub fn choose(&mut self, bonus: &[f32], dry: &[usize]) -> bool {
-        let avoid = self.avoid.take();
+        // While the mood is lost the cluster left stays avoided (short
+        // blocks would come back to it at once).
+        let avoid = if self.lost { self.avoid } else { self.avoid.take() };
         let mut rng = self.rng();
         let mut best: Option<(f32, usize)> = None;
         for pass in 0..2 {
@@ -350,7 +507,10 @@ impl Bandit {
         };
         self.current = Some(k);
         self.block = self.block.wrapping_add(1).max(1);
-        self.block_len = BLOCK_MIN + rng.below(usize::from(BLOCK_MAX - BLOCK_MIN) + 1) as u8;
+        self.halved = std::mem::take(&mut self.halve_next);
+        // Short blocks while the mood is looked for.
+        let (lo, hi) = if !self.lost || !crate::open_world::part_on(crate::open_world::Part::Probe) { (BLOCK_MIN, BLOCK_MAX) } else { (1, PROBE_MAX) };
+        self.block_len = lo + rng.below(usize::from(hi - lo) + 1) as u8;
         self.block_left = self.block_len;
         true
     }
@@ -377,6 +537,7 @@ impl Bandit {
         if self.current == Some(k) {
             self.block_left = self.block_left.saturating_sub(1);
         }
+
     }
 
     fn served_of(&self, item: &Item) -> Option<&Served> {
@@ -397,8 +558,36 @@ impl Bandit {
                 if let Some(a) = self.arms.get_mut(k) {
                     a.alpha += 1.0;
                 }
+                self.remember(k, true);
+                self.approved_run = self.approved_run.saturating_add(1);
+                // While the mood is looked for, a cluster heard out keeps
+                // its block going; found, the block grows to a full one.
+                let probing = self.lost && self.current == Some(k) && crate::open_world::part_on(crate::open_world::Part::Probe);
+                if self.approved_run >= SETTLED_AFTER && self.lost {
+                    self.lost = false;
+                    self.avoid = None;
+                }
+                if probing {
+                    let at_least = if self.lost { 1 } else { BLOCK_MIN };
+                    if self.block_left < at_least {
+                        self.block_len = self.block_len.saturating_add(at_least - self.block_left);
+                        self.block_left = at_least;
+                    }
+                }
             }
-            v if v.rejects() => self.rejected(k, block, if v == Verdict::NotNow { 2 } else { 1 }),
+            v if v.rejects() => {
+                self.approved_run = 0;
+                self.remember(k, false);
+                // New songs rejected in a block: the next one plays fewer.
+                if matches!(item, Item::Stream(_)) {
+                    let at = if block == 0 { self.block } else { block };
+                    self.new_rejects = if self.new_rejects.0 == at { (at, self.new_rejects.1.saturating_add(1)) } else { (at, 1) };
+                    if self.new_rejects.1 >= NEW_REJECTS_HALVE {
+                        self.halve_next = true;
+                    }
+                }
+                self.rejected(k, block, if v == Verdict::NotNow { 2 } else { 1 });
+            }
             _ => {}
         }
     }
@@ -427,7 +616,10 @@ impl Bandit {
                 self.block_left = 0;
             }
             self.avoid = Some(k);
+            // The mood is lost: short blocks until it is found again.
+            self.lost = true;
         }
+
     }
 
     /// A song liked while it played: its cluster's α grows.
@@ -602,8 +794,10 @@ pub fn pick(
     repeatable: &[String],
     cool_ms: i64,
     queued: &[Ahead],
+    skipped_new: &[RemoteId],
 ) -> Picked {
     bandit.ensure(ctx, seed);
+    bandit.stamp(ctx, seed);
     let m: &UserModel = ctx.model;
     let user = seed.filter;
     let keys: HashMap<&RemoteId, &str> = pool.iter().map(|c| (&c.track.id, c.key.as_str())).collect();
@@ -636,10 +830,10 @@ pub fn pick(
         }
         let Some(k) = bandit.current else { break };
         let scene = bandit.arms[k].scene;
-        let filter = WaveFilter { scene, ..user };
+        let filter = WaveFilter { scene, novelty: bandit.novelty_of(user.novelty), ..user };
         let want = (n - out.len()).min(usize::from(bandit.block_left.max(1)));
         let (c, p) = if scene == user.scene { (ctx, pool) } else { (&within, pool_in) };
-        let next = crate::open_world::next_turn(c, p, &filter, session, want, &served, WaveTurn { queued: &ahead, seed: run_seed });
+        let next = crate::open_world::next_turn(c, p, &filter, session, want, &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[] });
         asks.add(m, p, &filter, &next);
         if next.picks.is_empty() {
             dry.push(k);
@@ -664,7 +858,7 @@ pub fn pick(
             break;
         }
         let before = out.len();
-        let next = crate::open_world::next_turn(ctx, pool, f, session, n - out.len(), &served, WaveTurn { queued: &ahead, seed: run_seed });
+        let next = crate::open_world::next_turn(ctx, pool, f, session, n - out.len(), &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[] });
         asks.add(m, pool, f, &next);
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
@@ -672,7 +866,7 @@ pub fn pick(
             out.push(p);
         }
         if out.len() < n {
-            let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms, WaveTurn { queued: &ahead, seed: run_seed });
+            let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[] });
             for p in again {
                 served.insert(served_key(&p.item, &keys));
                 ahead.push(ahead_of(&p.item));
@@ -681,8 +875,152 @@ pub fn pick(
         }
         scene_let_go |= stage > 0 && out.len() > before;
     }
+    sequence(ctx, user.character, session, queued, &mut out);
     Picked { picks: out, scene_let_go, asks }
 }
+
+/// The library picks of a batch at most this many: orders of more are not
+/// all weighed ([`sequence`]).
+const SEQUENCE_MAX: usize = 6;
+/// Two songs of one artist next to each other cost this much in an order.
+const SAME_ARTIST_COST: f32 = 10.0;
+/// A song put a place later than the pull put it costs this much: the
+/// order of the pull stands unless a step saves more.
+const DELAY_COST: f32 = 0.15;
+/// A key change of the circle of fifths' far side costs this much, a step
+/// to a neighbour a sixth of it…
+const KEY_COST: f32 = 0.5;
+/// …told only when both keys are this sure (the correlation of their
+/// pitch classes with the key's profile).
+const KEY_SURE: f32 = 0.5;
+/// A head this much louder than the tail before it is free; louder still,
+/// a sudden attack, and it costs up to [`ATTACK_COST`] at [`ATTACK_FULL_DB`]
+/// more.
+const ATTACK_FREE_DB: f32 = 6.0;
+const ATTACK_FULL_DB: f32 = 12.0;
+const ATTACK_COST: f32 = 0.5;
+
+/// Orders the library's songs of a calm or background wave's batch of
+/// `picks` among their own places (new songs keep theirs: their sound is
+/// mostly unknown) by the cost of the steps from the song before (the last
+/// queued, else the session's): the edges' when both songs have them
+/// ([`crate::sketch::Edge`]: the keys on the circle of fifths, a loud head
+/// straight after a quiet tail), else a DJ's step of tempo and harmony
+/// ([`crate::pick::dj_cost`]), and the energy kept steady. No artist twice
+/// running; each place a song is put later than the pull put it costs
+/// ([`DELAY_COST`]). The order given wins a tie. A wave of any other
+/// character keeps the pull's order: reordered, the owner's replay heard
+/// fewer of the songs it played next and more skipped sounds back.
+pub fn sequence(ctx: &WaveContext<'_>, character: Character, session: &Session, queued: &[Ahead], picks: &mut [WavePick]) {
+    if !crate::open_world::part_on(crate::open_world::Part::Sequence) {
+        return;
+    }
+    let steady = matches!(character, Character::Calm | Character::Background);
+    if !steady {
+        return;
+    }
+    let m = ctx.model;
+    let Some(ix) = ctx.index else { return };
+    let slots: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| !p.new && matches!(p.item, Item::Track(_))).map(|(k, _)| k).collect();
+    if slots.len() < 2 || slots.len() > SEQUENCE_MAX {
+        return;
+    }
+    let prev: Option<TrackId> = queued.iter().rev().find_map(|q| if let Ahead::Track(t) = q { Some(*t) } else { None }).or_else(|| session.last().map(|p| p.track));
+    let prev_artist = prev.and_then(|t| m.position(t)).map(|i| crate::open_world::ArtistKey::of_track(m, i).label(|| format!("track:{i}")));
+    let id_of = |p: &WavePick| if let Item::Track(t) = p.item { Some(t) } else { None };
+    let step = |a: Option<TrackId>, b: Option<TrackId>| match (a, b) {
+        (Some(a), Some(b)) => transition(m, ix, a, b, steady),
+        _ => 0.0,
+    };
+    let cost = |order: &[WavePick]| {
+        let mut c = 0.0;
+        let (mut before, mut before_artist) = (prev, prev_artist.clone());
+        for p in order {
+            c += step(before, id_of(p));
+            if before_artist.as_deref() == Some(p.artist.as_str()) {
+                c += SAME_ARTIST_COST;
+            }
+            before = id_of(p);
+            before_artist = Some(p.artist.clone());
+        }
+        c
+    };
+    let lib: Vec<WavePick> = slots.iter().map(|&k| picks[k].clone()).collect();
+    let mut best: (f32, Vec<usize>) = (f32::INFINITY, Vec::new());
+    let mut perm: Vec<usize> = (0..lib.len()).collect();
+    loop {
+        let mut order = picks.to_vec();
+        for (s, &j) in slots.iter().zip(&perm) {
+            order[*s] = lib[j].clone();
+        }
+        let delay: usize = perm.iter().enumerate().map(|(at, &j)| at.saturating_sub(j)).sum();
+        let c = cost(&order) + DELAY_COST * delay as f32;
+        if c < best.0 - 1e-6 {
+            best = (c, perm.clone());
+        }
+        if !next_permutation(&mut perm) {
+            break;
+        }
+    }
+    for (s, &j) in slots.iter().zip(&best.1) {
+        picks[*s] = lib[j].clone();
+    }
+}
+
+/// The next permutation in lexicographic order; false after the last.
+fn next_permutation(p: &mut [usize]) -> bool {
+    let Some(i) = (1..p.len()).rev().find(|&i| p[i - 1] < p[i]) else { return false };
+    let j = (i..p.len()).rev().find(|&j| p[j] > p[i - 1]).unwrap_or(i);
+    p.swap(i - 1, j);
+    p[i..].reverse();
+    true
+}
+
+/// The place of a key on the circle of fifths (a minor key at its relative
+/// major's).
+fn fifths(k: crate::sketch::Key) -> i32 {
+    let root = i32::from(k.root) + if k.minor { 3 } else { 0 };
+    (root * 7).rem_euclid(12)
+}
+
+/// What the step from the library's song `a` to `b` costs (see
+/// [`sequence`]): 0 a seamless one.
+pub(crate) fn transition(m: &UserModel, ix: &crate::index::VectorIndex<TrackId>, a: TrackId, b: TrackId, steady: bool) -> f32 {
+    let edges = ix.sketch(a).and_then(|s| s.tail()).zip(ix.sketch(b).and_then(|s| s.head()));
+    let mut c = match edges {
+        Some((tail, head)) => edge_cost(&tail, &head),
+        None => match (ix.get(a), ix.get(b)) {
+            (Some(x), Some(y)) => crate::pick::dj_cost(&crate::pick::Dj::of(x), &crate::pick::Dj::of(y)),
+            _ => 0.0,
+        },
+    };
+    if steady
+        && let (Some(x), Some(y)) = (m.position(a).and_then(|i| m.energy_at(i)), m.position(b).and_then(|i| m.energy_at(i)))
+    {
+        c += (x - y).abs();
+    }
+    c
+}
+
+/// The step from a song's `tail` to the next one's `head`: their keys'
+/// distance on the circle of fifths (both sure), and a head far louder
+/// than the tail it follows coming in at full level.
+pub(crate) fn edge_cost(tail: &crate::sketch::Edge, head: &crate::sketch::Edge) -> f32 {
+    let key = match (tail.key(), head.key()) {
+        (Some((a, ra)), Some((b, rb))) if ra >= KEY_SURE && rb >= KEY_SURE => {
+            let d = (fifths(a) - fifths(b)).abs();
+            KEY_COST * d.min(12 - d) as f32 / 6.0
+        }
+        _ => 0.0,
+    };
+    let attack = if head.shape == crate::sketch::EdgeShape::Cold {
+        ATTACK_COST * ((head.loudness - tail.loudness - ATTACK_FREE_DB) / (ATTACK_FULL_DB - ATTACK_FREE_DB)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    key + attack
+}
+
 
 /// Up to `n` songs of `filter` played again (see [`pick`]): `repeatable`
 /// let back in from the oldest, a window doubling until enough are found;
@@ -711,7 +1049,8 @@ fn repeats(
     while window > 0 && out.len() < n {
         let free: HashSet<&String> = repeatable[..window].iter().filter(|k| !taken.contains(*k)).collect();
         let allowed: HashSet<String> = served.iter().filter(|k| !free.contains(k)).cloned().chain(taken.iter().cloned()).collect();
-        let next = crate::open_world::next_turn(&cooled, pool, filter, session, n - out.len(), &allowed, turn);
+        let back: Vec<String> = free.iter().map(|k| (*k).clone()).collect();
+        let next = crate::open_world::next_turn(&cooled, pool, filter, session, n - out.len(), &allowed, WaveTurn { again: &back, ..turn });
         for p in next.picks {
             taken.insert(served_key(&p.item, &keys));
             out.push(p);
@@ -809,7 +1148,8 @@ mod tests {
         assert!(with > counts[2] * 3, "{with} vs {}", counts[2]);
     }
 
-    /// A block is 4–6 songs of one cluster; then another draw.
+    /// Once the mood is found a block is 4–6 songs of one cluster; then
+    /// another draw.
     #[test]
     fn blocks_are_four_to_six() {
         for s in 0..50 {
@@ -1021,5 +1361,189 @@ mod tests {
         let json = serde_json::to_string(&b).unwrap();
         let back: Bandit = serde_json::from_str(&json).unwrap();
         assert_eq!(back, b);
+    }
+
+    /// A wave starts with full blocks (its prior and its session say the
+    /// mood); a block left after its rejections loses the mood: blocks of
+    /// one or two songs, going on while heard out, until two songs running
+    /// are heard out.
+    #[test]
+    fn short_blocks_until_the_mood_is_found_again() {
+        let mut b = bandit();
+        assert!(b.choose(&[], &[]));
+        assert!((BLOCK_MIN..=BLOCK_MAX).contains(&b.block_left()), "{}", b.block_left());
+        let k = b.current.unwrap();
+        let bad: Vec<Item> = (0..2).map(|t| Item::Track(tid(400 + t))).collect();
+        for i in &bad {
+            b.note_served(i.clone(), k);
+        }
+        for i in &bad {
+            b.feedback(i, Verdict::Rejected);
+        }
+        assert!(!b.settled());
+        b.choose(&[], &[]);
+        assert!((1..=PROBE_MAX).contains(&b.block_left()));
+        let k = b.current.unwrap();
+        let items: Vec<Item> = (0..2).map(|t| Item::Track(tid(300 + t))).collect();
+        for i in &items {
+            b.note_served(i.clone(), k);
+        }
+        b.feedback(&items[0], Verdict::Approved);
+        assert!(!b.settled());
+        assert!(b.block_left() >= 1, "a cluster heard out keeps its block going");
+        b.feedback(&items[1], Verdict::Approved);
+        assert!(b.settled());
+        assert!(b.block_left() >= BLOCK_MIN, "found, the block grows to a full one");
+        b.block_left = 0;
+        b.choose(&[], &[]);
+        assert!((BLOCK_MIN..=BLOCK_MAX).contains(&b.block_left()));
+    }
+
+    /// Two new songs rejected in a block halve the next block's share of
+    /// new music (not «Только новое»); the block after is whole again; a
+    /// library song rejected counts nothing towards it.
+    #[test]
+    fn rejected_new_songs_halve_the_next_block() {
+        let mut b = bandit();
+        b.choose(&[], &[]);
+        let k = b.current.unwrap();
+        let new = |n: &str| Item::Stream(RemoteId::new(nikgob_core::streaming::Service::Youtube, n));
+        let items = [new("a"), new("b"), Item::Track(tid(9))];
+        for i in &items {
+            b.note_served(i.clone(), k);
+        }
+        b.feedback(&items[2], Verdict::Rejected);
+        b.feedback(&items[0], Verdict::Rejected);
+        b.block_left = 0;
+        b.choose(&[], &[]);
+        assert_eq!(b.novelty_of(0.6), 0.6, "one new song rejected: whole");
+        let k = b.current.unwrap();
+        let more = [new("c"), new("d")];
+        for i in &more {
+            b.note_served(i.clone(), k);
+        }
+        for i in &more {
+            b.feedback(i, Verdict::Rejected);
+        }
+        b.block_left = 0;
+        b.choose(&[], &[]);
+        assert_eq!(b.novelty_of(0.6), 0.3);
+        assert_eq!(b.novelty_of(NOVELTY_ONLY_NEW), NOVELTY_ONLY_NEW);
+        b.block_left = 0;
+        b.choose(&[], &[]);
+        assert_eq!(b.novelty_of(0.6), 0.6, "the block after is whole again");
+    }
+
+    /// The memory keeps what each cluster did in each part of the day,
+    /// fades by the day, weighs a few songs at most, and keeps its size.
+    #[test]
+    fn the_memory_fades_and_stays_small() {
+        let mut m = BanditMemory::default();
+        for _ in 0..4 {
+            m.learn("any.p1", 2, 100, true);
+        }
+        m.learn("any.p1", 2, 100, false);
+        assert_eq!(m.prior("any.p1", 2, 100), (4.0, 1.0));
+        assert_eq!(m.prior("any.p1", 1, 100), (0.0, 0.0), "another part of the day");
+        let (ok, no) = m.prior("any.p1", 2, 102);
+        assert!((ok - 4.0 * MEMORY_DECAY * MEMORY_DECAY).abs() < 1e-4 && (no - MEMORY_DECAY * MEMORY_DECAY).abs() < 1e-4);
+        for _ in 0..40 {
+            m.learn("any.p2", 0, 100, true);
+        }
+        let (ok, no) = m.prior("any.p2", 0, 100);
+        assert!((ok + no - MEMORY_WEIGHT).abs() < 1e-4);
+        for k in 0..(MEMORY_CAP + 20) {
+            m.learn(&format!("any.p{k}"), 3, 200 + k as i64, true);
+        }
+        assert_eq!(m.entries.len(), MEMORY_CAP);
+        let back: BanditMemory = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    /// Edges: a key on the far side of the circle of fifths costs more
+    /// than its neighbour or its relative minor; a loud cold head right
+    /// after a quiet tail costs, a fade-in does not.
+    #[test]
+    fn steps_by_their_edges() {
+        use crate::sketch::{Edge, EdgeShape};
+        // C major's pitch classes, and rotated to other keys.
+        let c: [u8; 12] = [15, 1, 8, 1, 10, 9, 1, 13, 1, 8, 1, 3];
+        let key = |shift: usize, loudness: f32, shape: EdgeShape| Edge { loudness, shape, silence: 0.0, chroma: std::array::from_fn(|i| c[(i + 12 - shift) % 12]) };
+        let tail = key(0, -12.0, EdgeShape::Fade);
+        let same = edge_cost(&tail, &key(0, -12.0, EdgeShape::Cold));
+        let fifth = edge_cost(&tail, &key(7, -12.0, EdgeShape::Cold));
+        let tritone = edge_cost(&tail, &key(6, -12.0, EdgeShape::Cold));
+        assert!(same < 1e-6, "{same}");
+        assert!(fifth < tritone, "{fifth} {tritone}");
+        let attack = edge_cost(&key(0, -24.0, EdgeShape::Fade), &key(0, -8.0, EdgeShape::Cold));
+        let eased = edge_cost(&key(0, -24.0, EdgeShape::Fade), &key(0, -8.0, EdgeShape::Fade));
+        assert!(attack > eased + 0.3, "{attack} {eased}");
+        assert_eq!(fifths(crate::sketch::Key { root: 9, minor: true }), fifths(crate::sketch::Key { root: 0, minor: false }), "A minor is C major's relative");
+    }
+
+    /// The permutations of a batch are all weighed, the first one first.
+    #[test]
+    fn every_order_of_a_batch() {
+        let mut p = vec![0, 1, 2];
+        let mut seen = vec![p.clone()];
+        while next_permutation(&mut p) {
+            seen.push(p.clone());
+        }
+        assert_eq!(seen.len(), 6);
+        assert_eq!(seen[5], vec![2, 1, 0]);
+    }
+
+    /// The bandit at a cold start (a report): six clusters, one the mood
+    /// of the moment (heard out 4 in 5), the rest 1 in 4, the prior saying
+    /// nothing; how many songs until three are heard out running: blocks of
+    /// 4 to 6 throughout; short blocks once the mood is lost (as it plays);
+    /// short blocks from the start too; as it plays with the memory of the
+    /// mood from the day before.
+    #[test]
+    #[ignore = "a report"]
+    fn cold_start_report() {
+        let runs = 400u64;
+        let mut totals = [0.0f32; 4];
+        for (policy, total) in totals.iter_mut().enumerate() {
+            for run in 0..runs {
+                let arms: Vec<Arm> = (0..6).map(|k| arm(k, 2.0, 2.0)).collect();
+                let mut b = Bandit::with_arms(arms, 1 + run);
+                b.lost = policy == 2;
+                if policy == 3 {
+                    // The day before heard the mood out (the memory's songs
+                    // on its prior, at most MEMORY_WEIGHT).
+                    b.arms[3].alpha += 4.0;
+                }
+                let mut rng = Rng::new(9_000 + run);
+                let (mut steps, mut run_ok, mut t) = (0u32, 0u32, 0u128);
+                while run_ok < 3 && steps < 200 {
+                    if policy == 0 {
+                        b.lost = false;
+                    }
+                    if b.block_left() == 0 || b.current.is_none() {
+                        b.choose(&[], &[]);
+                    }
+                    let k = b.current.unwrap();
+                    let item = Item::Track(tid(10_000 + t));
+                    t += 1;
+                    b.note_served(item.clone(), k);
+                    let p = if k == 3 { 0.8 } else { 0.25 };
+                    let ok = rng.f32() < p;
+                    b.feedback(&item, if ok { Verdict::Approved } else { Verdict::Rejected });
+                    run_ok = if ok { run_ok + 1 } else { 0 };
+                    steps += 1;
+                }
+                *total += steps as f32;
+            }
+        }
+        let mean = |x: f32| x / runs as f32;
+        eprintln!(
+            "songs to three heard out running at a cold start: full blocks {:.1}, short once lost {:.1}, short from the start {:.1}, short once lost with memory {:.1}",
+            mean(totals[0]),
+            mean(totals[1]),
+            mean(totals[2]),
+            mean(totals[3])
+        );
+        assert!(totals[1] <= totals[0]);
     }
 }
