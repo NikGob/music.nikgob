@@ -3789,7 +3789,8 @@ pub enum Command {
     /// from its next tracks (the one playing goes on).
     SetWave(WaveFilter),
     /// «↻ Другой вайб»: the wave moves to another of the user's clusters
-    /// at once, the track playing counted as no skip.
+    /// at once and plays its first song as soon as it is there, the track
+    /// playing left without a skip or any word of it.
     OtherVibe,
     /// «Скрыть карточку»: switches «Карточка наверху главной» off and says
     /// how to bring it back (the snackbar's «Вернуть»).

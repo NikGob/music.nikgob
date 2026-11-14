@@ -435,10 +435,12 @@ fn a_radio_extends_itself_and_survives_a_restart() {
     wait_for(&s.rt, "the restored radio to extend", |st| st.queue.next.len() == 3 && st.queue.prev.len() >= 17);
 }
 
-/// «Моя волна»: it starts from nothing, keeps three ahead, a chip of its
-/// header and «↻ Другой вайб» replace its whole tail while the track
-/// playing goes on (no skip recorded), the novelty chosen is kept, and a
-/// card of «Миксы для тебя» starts it with the card's filter.
+/// «Моя волна»: it starts from nothing, keeps three ahead; «↻ Другой
+/// вайб» replaces its whole tail and, once the new tail is there, moves on
+/// to its first song (the song left is no skip: nothing of it ended); a
+/// chip of its header replaces the tail while the track playing goes on;
+/// the novelty chosen is kept, and a card of «Миксы для тебя» starts it
+/// with the card's filter.
 #[test]
 fn the_wave_plays_and_turns_without_a_skip() {
     let l = library(3, 6, 5, &[]);
@@ -456,16 +458,27 @@ fn the_wave_plays_and_turns_without_a_skip() {
     assert_eq!(wave.preset, None);
     let entries = |st: &ViewState| st.queue.next.iter().map(|e| e.entry).collect::<Vec<u64>>();
 
-    // «Другой вайб»: a new tail at once, the same track playing, no end
-    // recorded for it.
-    let current = st.queue.current_entry;
+    // «Другой вайб»: a new tail, and its first song plays; no end recorded
+    // for the song left.
+    let left = st.queue.current_entry;
+    let left_track = st.player.current.as_ref().map(|t| t.id).unwrap();
     let before = entries(&st);
     // The worker publishes under the lock: no guard held while it works.
     drop(st);
-    let events = l.lib.recent_events(100).unwrap().len();
+    let events = l.lib.recent_events(10_000).unwrap().len();
+    let asked = s.asked.lock().unwrap().len();
     s.rt.send(Command::OtherVibe);
-    wait_for(&s.rt, "a new tail", |st| st.queue.current_entry == current && settled(st) && !entries(st).iter().any(|e| before.contains(e)));
-    assert_eq!(l.lib.recent_events(100).unwrap().len(), events, "nothing ended");
+    wait_for(&s.rt, "the new vibe playing", |st| {
+        st.queue.current_entry.is_some_and(|c| Some(c) != left && !before.contains(&c))
+            && settled(st)
+            && !entries(st).iter().any(|e| before.contains(e))
+    });
+    assert!(s.asked.lock().unwrap().len() > asked, "the new vibe's first song was asked for");
+    let new = l.lib.recent_events(10_000).unwrap();
+    let added = &new[..new.len() - events];
+    assert!(added.iter().all(|e| e.event_type == nikgob_core::model::EventType::Start), "{added:?}");
+    assert!(!added.iter().any(|e| e.track_id == left_track), "nothing ended for the song left");
+    let current = s.rt.state().queue.current_entry;
 
     // A chip: the filter is the wave's, the tail new, the novelty kept.
     let before = entries(&s.rt.state());
@@ -1585,8 +1598,9 @@ fn ends_with_the_timer(s: &Started) {
 }
 
 /// «До конца очереди» in «Моя волна»: «↻ Другой вайб» replaces the
-/// picks the timer waited for, and the boundary stays as many tracks away
-/// (the new pick at its place), never the queue's new end.
+/// picks the timer waited for and moves on to the new vibe's first song;
+/// the boundary stays as many tracks after the one that plays (the new
+/// pick at its place), never the queue's new end.
 #[test]
 fn a_new_vibe_keeps_the_sleep_timer_where_it_was() {
     let l = library(3, 6, 5, &[]);
@@ -1606,7 +1620,11 @@ fn a_new_vibe_keeps_the_sleep_timer_where_it_was() {
     let (current, before) = (st.queue.current_entry, entries(&st));
     drop(st);
     s.rt.send(Command::OtherVibe);
-    wait_for(&s.rt, "a new tail", |st| st.queue.current_entry == current && wave_settled(st) && !entries(st).iter().any(|e| before.contains(e)));
+    wait_for(&s.rt, "the new vibe playing", |st| {
+        st.queue.current_entry.is_some_and(|c| Some(c) != current && !before.contains(&c))
+            && wave_settled(st)
+            && !entries(st).iter().any(|e| before.contains(e))
+    });
     // The timer's poll (once a second) has seen the new tail.
     std::thread::sleep(Duration::from_millis(1500));
     assert!(s.rt.state().player.sleep.is_some());
