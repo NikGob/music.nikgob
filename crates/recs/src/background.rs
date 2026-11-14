@@ -16,7 +16,9 @@
 //! modes' business ([`crate::listening`]), not this one's; but a playlist
 //! the user plays mostly in their own background sessions
 //! ([`background_playlists`]) is a hint for its tracks without words,
-//! whatever it is called.
+//! whatever it is called. A track whose sketch says it is loud or explodes
+//! out of quiet parts ([`SongType::background_dynamics`]) is none, however
+//! it is named: the background is what stays under one's thoughts.
 
 use std::collections::{HashMap, HashSet};
 
@@ -77,7 +79,7 @@ impl BackgroundScore for Basic {
     fn score(&self, t: &BackgroundTrack<'_>) -> f32 {
         let s = t.song;
         let wordless = s.voice == Voice::Instrumental || (s.ost && s.voice == Voice::Unknown);
-        if !wordless || s.theme.is_some() {
+        if !wordless || s.theme.is_some() || !s.background_dynamics() {
             return 0.0;
         }
         let text = format!(" {} {} {} ", t.title, t.album.unwrap_or_default(), t.artist).to_lowercase();

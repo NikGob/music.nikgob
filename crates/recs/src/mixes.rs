@@ -1483,8 +1483,11 @@ impl<'a> Builder<'a> {
         e.sort_by(f32::total_cmp);
         let at = |q: f32| e[((e.len() - 1) as f32 * q) as usize];
         let (lo, hi) = (at(SIDE), at(1.0 - SIDE));
-        let mut side: Vec<usize> =
-            base.into_iter().filter(|&i| self.model.energy_at(i).is_some_and(|x| if calm { x <= lo } else { x >= hi })).collect();
+        // A calm song never explodes ([`crate::songtype::SongType::calm_dynamics`]).
+        let mut side: Vec<usize> = base
+            .into_iter()
+            .filter(|&i| self.model.energy_at(i).is_some_and(|x| if calm { x <= lo && self.model.song_type_at(i).calm_dynamics() } else { x >= hi }))
+            .collect();
         let mut langs: HashMap<Lang, usize> = HashMap::new();
         for &i in &side {
             if let LaneKey::Sung(l) = LaneKey::of(self.model.song_type_at(i)) {
