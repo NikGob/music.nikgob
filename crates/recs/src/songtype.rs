@@ -55,14 +55,15 @@ pub const MIN_PROBE_LABELS: usize = 20;
 /// …on this many rows at most (an even sample of a larger library).
 const MAX_PROBE_ROWS: usize = 4000;
 /// A calm song's loud parts are this quiet at most (dB of full scale, the
-/// crest's 95th percentile)…
-pub const CALM_PEAK_DB: f32 = -13.0;
-/// …and stand this far above its quiet ones at most: a song that whispers
-/// and then explodes is no calm one, whatever its mean.
-pub const CALM_SPREAD_DB: f32 = 18.0;
-/// The background's: a little louder at most, as steady.
-pub const BACKGROUND_PEAK_DB: f32 = -11.0;
-pub const BACKGROUND_SPREAD_DB: f32 = 18.0;
+/// crest's 95th percentile; a sung pop master sits near -9).
+pub const CALM_PEAK_DB: f32 = -11.0;
+/// A song explodes when its loud parts stand this far above its quiet ones
+/// (dB)…
+pub const BURST_SPREAD_DB: f32 = 15.0;
+/// …and reach this loudness: a whisper that swells to a murmur does not.
+pub const BURST_PEAK_DB: f32 = -14.0;
+/// The background's loud parts: a little louder at most than calm's.
+pub const BACKGROUND_PEAK_DB: f32 = -10.0;
 /// The sound says sung above this…
 pub const SUNG_P: f32 = 0.85;
 /// …and instrumental below this.
@@ -111,6 +112,13 @@ pub struct Dynamics {
     pub peak: i8,
     /// How far they stand above the quiet ones (the 10th percentile).
     pub spread: u8,
+}
+
+impl Dynamics {
+    /// It explodes out of its quiet parts ([`BURST_SPREAD_DB`], [`BURST_PEAK_DB`]).
+    pub fn bursts(&self) -> bool {
+        f32::from(self.spread) >= BURST_SPREAD_DB && f32::from(self.peak) >= BURST_PEAK_DB
+    }
 }
 
 /// What a song is sung in.
@@ -222,15 +230,15 @@ impl SongType {
     }
 
     /// Its loud parts are quiet enough for calm music and never explode
-    /// out of quiet ones ([`CALM_PEAK_DB`], [`CALM_SPREAD_DB`]); a song
+    /// out of quiet ones ([`CALM_PEAK_DB`], [`Dynamics::bursts`]); a song
     /// without a sketch passes (its mean judges it, as before).
     pub fn calm_dynamics(&self) -> bool {
-        self.dynamics.is_none_or(|d| f32::from(d.peak) <= CALM_PEAK_DB && f32::from(d.spread) <= CALM_SPREAD_DB)
+        self.dynamics.is_none_or(|d| f32::from(d.peak) <= CALM_PEAK_DB && !d.bursts())
     }
 
     /// The same for the background ([`BACKGROUND_PEAK_DB`]).
     pub fn background_dynamics(&self) -> bool {
-        self.dynamics.is_none_or(|d| f32::from(d.peak) <= BACKGROUND_PEAK_DB && f32::from(d.spread) <= BACKGROUND_SPREAD_DB)
+        self.dynamics.is_none_or(|d| f32::from(d.peak) <= BACKGROUND_PEAK_DB && !d.bursts())
     }
 
     /// The feeling of its cached lyrics, −1…1 (0 without them).
@@ -980,6 +988,8 @@ mod tests {
         assert!(t(0).calm_dynamics() && t(0).background_dynamics());
         assert!(!t(1).calm_dynamics() && !t(1).background_dynamics(), "{:?}", t(1).dynamics);
         assert!(t(2).dynamics.is_none() && t(2).calm_dynamics());
+        // A whisper swelling to a murmur is calm; one swelling to a roar is not.
+        assert!(!Dynamics { peak: -22, spread: 17 }.bursts() && Dynamics { peak: -10, spread: 20 }.bursts());
         assert!(t(3).lyric_valence() < -0.3, "{}", t(3).lyric_valence());
         assert_eq!(t(0).valence, 0);
     }
