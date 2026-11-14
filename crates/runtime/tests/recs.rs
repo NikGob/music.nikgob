@@ -1741,3 +1741,33 @@ fn a_song_from_the_search_can_play_with_the_other_results() {
     assert_eq!(st.queue.next.iter().map(|e| e.track.id).collect::<Vec<_>>(), [results[2], results[3]]);
     assert!(st.queue.radio.is_none());
 }
+
+#[test]
+fn a_radio_tops_up_with_files_while_youtube_music_asks_to_wait() {
+    let l = library(3, 6, 5, &[]);
+    let streams = add_streams(&l);
+    let yt = Arc::new(FakeService::youtube());
+    let s = start(&l.lib, vec![yt.clone() as Arc<dyn StreamService>], Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[1]) });
+    wait_for(&s.rt, "the stream's radio", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() >= 3
+    });
+    wait_until("the seed plays", || !s.asked.lock().unwrap().is_empty());
+    let before: std::collections::HashSet<u64> = s.rt.state().queue.next.iter().map(|e| e.entry).collect();
+    // YouTube's bot check: every call fails for ten minutes.
+    yt.rate_limit_next_paused("open_audio", 1, Duration::from_secs(600));
+    assert!(yt.open_audio("yt-gruppa-1").is_err());
+
+    // The seed ends: the queue runs low and the radio picks more, only
+    // what plays now (files), not more of YouTube Music.
+    let id = s.asked.lock().unwrap().last().unwrap().id;
+    s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
+    wait_for(&s.rt, "a top-up", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.iter().any(|e| !before.contains(&e.entry))
+    });
+    let st = s.rt.state();
+    let added: Vec<_> = st.queue.next.iter().filter(|e| !before.contains(&e.entry)).collect();
+    assert!(added.iter().all(|e| e.track.has_local), "{:?}", added.iter().map(|e| &e.track.title).collect::<Vec<_>>());
+}
