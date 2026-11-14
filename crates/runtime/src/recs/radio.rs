@@ -133,6 +133,10 @@ pub(crate) struct RadioRun {
     queued: (usize, usize),
     /// Why each new candidate is offered: where it was found.
     via: HashMap<RemoteId, String>,
+    /// The library's songs that found each new pick of a wave
+    /// ([`SEEDS_KEEP`] picks at most): the log of new music learns how far
+    /// their finds are to be trusted.
+    seeds: HashMap<RemoteId, Vec<TrackId>>,
     /// Its upcoming entries past the first this many are to be picked
     /// again ([`Worker::radio_redo`])…
     redo: Option<usize>,
@@ -256,6 +260,12 @@ pub(crate) struct RadioState {
 
 /// New-music calls held back for the listener, at most.
 const DEFERRED_MAX: usize = 16;
+/// The new picks whose seeds a wave keeps at most.
+const SEEDS_KEEP: usize = 128;
+/// Library cache key of what the waves learnt of their clusters
+/// ([`nikgob_recs::wave::BanditMemory`]).
+const WAVE_MEMORY_KEY: &str = "recs.wave_memory";
+
 
 impl RadioState {
     /// The number of the radio playing.
@@ -285,6 +295,9 @@ pub(crate) enum RadioMsg {
     /// YouTube Music's pause that left radio `id` with nothing to pick is
     /// over.
     PauseOver(u64),
+    /// The new song `track` radio `id` queued was heard by its preview and
+    /// still fits what the radio plays, or not.
+    Heard { id: u64, track: TrackId, fits: bool },
     /// The new-music calls held back for the listener may go.
     AskDeferred,
     NewFound {
@@ -442,6 +455,13 @@ async fn fetch(
 }
 
 impl Worker {
+    /// The library's songs that found the new song `track` a wave plays.
+    pub(crate) fn radio_seeds_of(&self, track: TrackId) -> Vec<TrackId> {
+        let Some(run) = self.recs.radio.run.as_ref() else { return Vec::new() };
+        run.streams.get(&track).and_then(|r| run.seeds.get(r)).cloned().unwrap_or_default()
+    }
+
+
     /// Who chose the queue entry `entry`, when the playing radio added it.
     pub(crate) fn radio_origin(&mut self, entry: u64) -> Option<EventOrigin> {
         if !self.radio_alive() {
@@ -569,7 +589,11 @@ impl Worker {
     /// comes as it is picked.
     pub(crate) fn start_radio(&mut self, seed: RadioSeed, title: String, ctx: EventContext, first: Option<TrackId>) {
         // The seed track is the user's choice; the rest the radio's.
-        let state = Engine::new(seed);
+        let mut state = Engine::new(seed);
+        // A wave starts from what waves learnt before.
+        if is_wave(&state.seed) {
+            state.set_wave_memory(super::cache_read(&self.lib, WAVE_MEMORY_KEY).unwrap_or_default());
+        }
         self.user_switch(if first.is_some() { EventOrigin::Manual } else { origin_of(&state, false) });
         let r = &mut self.recs.radio;
         r.seq += 1;
@@ -594,6 +618,7 @@ impl Worker {
             asked: HashSet::new(),
             queued: (0, 0),
             via: HashMap::new(),
+            seeds: HashMap::new(),
             redo: None,
             stale: false,
             forgotten: Vec::new(),
@@ -666,6 +691,7 @@ impl Worker {
             asked: HashSet::new(),
             queued: (0, 0),
             via: HashMap::new(),
+            seeds: HashMap::new(),
             redo: None,
             stale: false,
             forgotten: Vec::new(),
@@ -803,6 +829,7 @@ impl Worker {
             asked: HashSet::new(),
             queued: (0, 0),
             via: HashMap::new(),
+            seeds: HashMap::new(),
             redo: None,
             stale: false,
             forgotten: Vec::new(),
@@ -953,7 +980,18 @@ impl Worker {
         let n = if run.queue_gen.is_none() { EXTEND_BY } else { EXTEND_BY.saturating_sub(ahead).max(1) };
         let tx = self.recs.tx.clone();
         if is_wave(&state.seed) {
+            // The queue as it is: what plays before the picks, in its order.
+            let upcoming: Vec<Item> = self
+                .queue
+                .upcoming()
+                .iter()
+                .map(|e| self.recs.radio.run.as_ref().and_then(|r| r.streams.get(&e.track)).map_or(Item::Track(e.track), |r| Item::Stream(r.clone())))
+                .collect();
+            if self.recs.radio.run.as_ref().is_some_and(|r| r.queue_gen.is_some()) {
+                state.set_upcoming(upcoming);
+            }
             self.wave_extend(id, state, snap, local_only, n, params.seed);
+
             return;
         }
         self.recs.radio.wave_pool = None;
@@ -1102,6 +1140,7 @@ impl Worker {
     pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
         match m {
             RadioMsg::PauseOver(id) => self.radio_pause_over(id),
+            RadioMsg::Heard { id, track, fits } => self.radio_heard(id, track, fits),
             RadioMsg::AskDeferred => {
                 self.recs.radio.deferred_wake = false;
                 let held = std::mem::take(&mut self.recs.radio.deferred);
@@ -1124,12 +1163,20 @@ impl Worker {
                 }
                 if let Some(pool) = wave_pool {
                     // The wave's new picks play from the pool's tracks.
+                    let snap = pool.snapshot();
                     if let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) {
                         for p in &picks {
                             if let Item::Stream(r) = &p.item
                                 && let Some(c) = pool.cands.iter().find(|c| c.track.id == *r)
                             {
                                 run.pool.insert(r.clone(), c.track.clone());
+                                if let Some(s) = &snap {
+                                    if run.seeds.len() >= SEEDS_KEEP {
+                                        run.seeds.clear();
+                                    }
+                                    let seeds = c.near.iter().filter(|&&i| i < s.model.len()).take(nikgob_recs::novelty::SEEDS_KEPT).map(|&i| s.model.id(i)).collect();
+                                    run.seeds.insert(r.clone(), seeds);
+                                }
                             }
                         }
                     }
@@ -1211,6 +1258,9 @@ impl Worker {
         let lately = self.played_lately();
         let mut ids = Vec::with_capacity(picks.len());
         let mut whys: Vec<Option<String>> = Vec::with_capacity(picks.len());
+        // The pick each queued id is of: a pick not queued is forgotten by
+        // the radio (its state took it as served).
+        let mut items: Vec<Item> = Vec::with_capacity(picks.len());
         for p in &picks {
             match &p.item {
                 Item::Track(t) => {
@@ -1226,6 +1276,7 @@ impl Worker {
                         };
                         ids.push(*t);
                         whys.push(why);
+                        items.push(p.item.clone());
                     }
                 }
                 // New music (never under «Миксы только из скачанного»).
@@ -1243,8 +1294,14 @@ impl Worker {
                         let found = self.recs.radio.run.as_ref().and_then(|run| run.via.get(r).cloned());
                         ids.push(tid);
                         whys.push(found.or_else(|| self.discovery_why(&t)));
+                        items.push(p.item.clone());
                         if let Some(run) = self.recs.radio.run.as_mut() {
                             run.streams.insert(tid, r.clone());
+                        }
+                        // A radio's new song about to play is heard first
+                        // when it can be (the wave asks for its own).
+                        if r.service == Service::Youtube && !self.recs.radio.run.as_ref().is_some_and(|run| is_wave(&run.state.seed)) && !self.analysis.index().read().contains(tid) {
+                            self.want_preview(tid, r.id.clone());
                         }
                     }
                 }
@@ -1255,19 +1312,33 @@ impl Worker {
         let paused_now = !prefs.mixes_downloaded_only && self.pause_left(Service::Youtube).is_some();
         if paused_now && !ids.is_empty() {
             let picked = ids.len();
-            let (mut keep, mut keep_why) = (Vec::with_capacity(picked), Vec::with_capacity(picked));
-            for (t, why) in ids.into_iter().zip(whys) {
+            let (mut keep, mut keep_why, mut keep_items) = (Vec::with_capacity(picked), Vec::with_capacity(picked), Vec::with_capacity(picked));
+            for ((t, why), item) in ids.into_iter().zip(whys).zip(items) {
                 if self.plays_now(t) {
                     keep.push(t);
                     keep_why.push(why);
+                    keep_items.push(item);
                 }
             }
+            items = keep_items;
             if keep.len() < picked {
                 log::info!("radio: {} of {picked} picks wait for YouTube Music's pause, not queued", picked - keep.len());
             }
             (ids, whys) = (keep, keep_why);
         }
+        // What was picked and is not queued was never served: the radio
+        // (its served songs, the wave's blocks) forgets it.
+        let dropped: Vec<Item> = picks.iter().map(|p| p.item.clone()).filter(|x| !items.contains(x)).collect();
+        if !dropped.is_empty()
+            && let Some(run) = self.recs.radio.run.as_mut()
+        {
+            run.state.forget(&dropped);
+            if run.extending {
+                run.forgotten.extend(dropped);
+            }
+        }
         if ids.is_empty() && paused_pick && !paused_now {
+
             // The pause ended while it picked among the files: as ever now.
             self.radio_extend();
             return;
@@ -1640,6 +1711,11 @@ impl Worker {
         if run.extending {
             run.pending.push((item, outcome));
         }
+        // What the wave learnt stays for the next waves.
+        if let Some(mem) = run.state.wave_memory().filter(|m| !m.is_empty()) {
+            super::cache_write(&self.lib, WAVE_MEMORY_KEY, nikgob_library::now_ms(), mem);
+        }
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
         if rejected {
             // Two running: the whole tail; one: all but the next (it is
             // preloaded already).
@@ -1651,7 +1727,95 @@ impl Worker {
         self.radio_redo();
     }
 
+    /// A new song's preview was just analysed: queued ahead by the radio
+    /// playing (not playing yet), it is looked at again on the picks'
+    /// thread against what the radio plays ([`Engine::still_fits`]: a
+    /// wave's character, scene and niche, the dislikes), and replaced in its
+    /// place when it no longer fits ([`Self::radio_heard`]).
+    pub(crate) fn radio_preview_heard(&mut self, track: TrackId) {
+        if !self.radio_alive() {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_ref() else { return };
+        let Some(remote) = run.streams.get(&track).cloned() else { return };
+        if run.extending || !self.queue.upcoming().iter().any(|e| e.track == track && run.added.contains(&e.id)) {
+            return;
+        }
+        let (vector, embedding) = {
+            let ix = self.analysis.index().read();
+            (ix.get(track).copied(), ix.embedding(track))
+        };
+        let Some(vector) = vector else { return };
+        let Some(snap) = self.snapshot() else { return };
+        // The song as the wave's pool has it (its links), else bare.
+        let pooled = self.recs.radio.wave_pool.as_ref().and_then(|p| p.cands.iter().find(|c| c.track.id == remote).cloned());
+        let bare = run.pool.get(&remote).map(|t| nikgob_recs::open_world::OpenCandidate {
+            key: nikgob_recs::stream_song_key(t),
+            track: t.clone(),
+            vector: None,
+            embedding: None,
+            lane: None,
+            near: Vec::new(),
+            weight: 0.0,
+        });
+        let Some(mut cand) = pooled.or(bare) else { return };
+        cand.vector = Some(vector);
+        cand.embedding = cand.embedding.or(embedding);
+        let (id, state) = (run.id, run.state.clone());
+        let local_only = self.state.read().prefs.mixes_downloaded_only;
+        let tx = self.recs.tx.clone();
+        let spawned = self.recs.picker.send(super::picker::Lane::Radio, move || {
+            let fits = super::wave::with_context(&snap, local_only, |ctx| state.still_fits(ctx, &cand));
+            let _ = tx.send(Internal::Recs(Msg::Radio(RadioMsg::Heard { id, track, fits })));
+        });
+        if let Err(e) = spawned {
+            log::warn!("radio: cannot look at a preview: {e}");
+        }
+    }
+
+    /// The new song `track` radio `id` queued was heard: one that no longer
+    /// fits leaves the queue before it plays, and its place and what came
+    /// after it are picked again ([`Self::radio_redo`]'s way), the song
+    /// itself kept served (never picked again; not counted against
+    /// anything: the user did nothing).
+    fn radio_heard(&mut self, id: u64, track: TrackId, fits: bool) {
+        if fits || !self.radio_alive() {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) else { return };
+        if run.queue_gen.is_none() {
+            return;
+        }
+        let up = self.queue.upcoming();
+        let Some(at) = up.iter().position(|e| e.track == track && run.added.contains(&e.id)) else { return };
+        let gone: Vec<Entry> = up.iter().skip(at).filter(|e| run.added.contains(&e.id)).copied().collect();
+        log::info!("radio «{}»: a new song queued no longer fits by its preview; it is replaced", run.title);
+        let items: Vec<Item> = gone.iter().filter(|e| e.track != track).map(|e| run.streams.get(&e.track).map_or(Item::Track(e.track), |r| Item::Stream(r.clone()))).collect();
+        run.state.forget(&items);
+        if run.extending {
+            run.stale = true;
+            run.forgotten.extend(items);
+        }
+        for e in &gone {
+            run.added.remove(&e.id);
+        }
+        self.sleep_replacing(&gone.iter().map(|e| e.id).collect::<Vec<_>>());
+        for e in &gone {
+            self.queue.remove(e.id);
+            self.recs.why.remove(&e.id);
+        }
+        if self.queue.upcoming().is_empty()
+            && let Some(run) = self.recs.radio.run.as_mut()
+        {
+            run.resume = true;
+        }
+        self.radio_extend();
+        self.preload_next();
+        self.publish_player();
+    }
+
     /// The upcoming entries of the radio past the first `keep` of the
+
     /// queue are to be picked again (the least `keep` asked wins), now or
     /// once the picks on their way come.
     fn radio_repick(&mut self, keep: usize) {
@@ -2127,10 +2291,15 @@ impl Worker {
         // A wave keeps the card it was started from.
         r.wave_preset = matches!(save.state.seed, RadioSeed::Wave(_)).then_some((r.seq, save.wave_preset));
         log::info!("radio «{}» goes on", save.title);
+        let mut state = save.state;
+        if is_wave(&state.seed) {
+            state.set_wave_memory(super::cache_read(&self.lib, WAVE_MEMORY_KEY).unwrap_or_default());
+        }
         self.streaming.learn(&save.pool);
+        let r = &mut self.recs.radio;
         r.run = Some(RadioRun {
             id: r.seq,
-            state: save.state,
+            state,
             title: save.title,
             ctx: save.context,
             seed: save.seed,
@@ -2149,6 +2318,7 @@ impl Worker {
             asked: HashSet::new(),
             queued: (0, 0),
             via: HashMap::new(),
+            seeds: HashMap::new(),
             redo: None,
             stale: false,
             forgotten: Vec::new(),

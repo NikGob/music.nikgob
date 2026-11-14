@@ -77,6 +77,8 @@ struct Playing {
     source: Option<Source>,
     vector: Option<Vector>,
     profile: Option<u32>,
+    /// The library's songs that found it (a wave's pick).
+    seeds: Vec<TrackId>,
 }
 
 #[derive(Default)]
@@ -130,6 +132,7 @@ impl Worker {
             profile: profile_key(&snap, vector.as_ref(), lang),
             vector,
             song,
+            seeds: self.radio_seeds_of(track),
         })
     }
 
@@ -197,7 +200,9 @@ impl Worker {
             heard,
             profile: p.profile,
             background: self.snapshot().is_some_and(|s| s.model.live(&self.recs.session).p_bg >= 0.5),
+            seeds: p.seeds.clone(),
         });
+
         if !was_out && self.recs.newlog.log.artist_penalty(&p.artist, now).is_infinite() {
             log::info!("new music: {} is kept out now", p.artist);
             self.recs.newlog.bans += 1;

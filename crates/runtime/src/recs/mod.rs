@@ -186,6 +186,7 @@ fn is_new(f: &DiscoveryFilter, t: &StreamTrack) -> bool {
     let key = stream_song_key(t);
     !f.known_ids.contains(&t.id)
         && !f.known_songs.contains(&key)
+        && !f.known_songs.contains(&nikgob_recs::discover::stream_work_key(t))
         && !f.disliked_songs.contains(&key)
         && !t.artists.iter().any(|a| f.disliked_artists.contains(&artist_key(&a.name)))
         && t.playable
@@ -888,10 +889,13 @@ fn read_parts(
         filter.disliked_songs.insert(song_key(&u.title, &u.artist));
     }
     filter.known_ids = remote.into_iter().collect();
+    // A song's versions are the song (an off vocal, a TV size: its work,
+    // [`nikgob_recs::work_title`]): a service's version of a library song
+    // is no new music.
     filter.known_songs = rows
         .iter()
         .filter(|r| r.in_library)
-        .map(|r| song_key(&r.title, &r.artist))
+        .flat_map(|r| [song_key(&r.title, &r.artist), song_key(&nikgob_recs::work_title(&r.title).0, &r.artist)])
         .collect();
     filter.known_artists = artist_keys.keys().cloned().collect();
     // A song the user keeps elsewhere is no new music, nor its artist.

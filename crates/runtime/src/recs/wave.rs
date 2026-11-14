@@ -120,6 +120,11 @@ impl WavePool {
         Self { snap: Arc::downgrade(snap), discoveries, bans, topped, cands: Arc::new(cands) }
     }
 
+    /// The snapshot it was built for, while it lives.
+    pub(crate) fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.snap.upgrade()
+    }
+
     /// Built for `snap` with `discoveries` kept, `bans` artists kept out and
     /// the wave's top-ups as they were at `topped`.
     pub(crate) fn holds(&self, snap: &Arc<Snapshot>, discoveries: usize, bans: u64, topped: u64) -> bool {
@@ -203,6 +208,13 @@ pub(crate) fn prepare_asks(lib: &nikgob_library::Library, pool: &[OpenCandidate]
 /// (on the radio's thread). `local_only`: «Только скачанное» as the prefs
 /// say now.
 pub(crate) fn extend(state: &mut Engine, snap: &Snapshot, pool: &[OpenCandidate], local_only: bool, n: usize, seed: u64) -> Vec<Pick> {
+    let pool: &[OpenCandidate] = if local_only { &[] } else { pool };
+    with_context(snap, local_only, |ctx| state.extend_wave(ctx, pool, n, seed))
+}
+
+/// `f` over the wave's context of `snap` (`local_only`: «Только скачанное»
+/// as the prefs say now).
+pub(crate) fn with_context<R>(snap: &Snapshot, local_only: bool, f: impl FnOnce(&WaveContext<'_>) -> R) -> R {
     let ok = |i: usize| {
         let t = &snap.catalog.tracks()[i];
         (t.local || !local_only) && !snap.model.taste.blocks(t)
@@ -211,9 +223,9 @@ pub(crate) fn extend(state: &mut Engine, snap: &Snapshot, pool: &[OpenCandidate]
     let artist_tracks = |t: &nikgob_core::streaming::StreamTrack| super::lanes::artist_tracks(snap, t);
     let genre = |i: usize| snap.model.main_artist_at(i).and_then(|a| snap.genres.get(&a).copied());
     let ctx = WaveContext { model: &snap.model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&snap.index), learned: None };
-    let pool: &[OpenCandidate] = if local_only { &[] } else { pool };
-    state.extend_wave(&ctx, pool, n, seed)
+    f(&ctx)
 }
+
 
 /// The user's scenes over `snap` (see the module docs): the taste profiles
 /// named as «Смешать с…» names them (`profiles`), with at least a cluster's

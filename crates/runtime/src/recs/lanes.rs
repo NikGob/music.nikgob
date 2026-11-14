@@ -748,7 +748,11 @@ pub(super) fn candidates(snap: &Snapshot, pool: &[StreamTrack], sources: &HashMa
     let share = |s: Option<Source>| s.and_then(|s| shares.get(&s).copied()).unwrap_or(1.0 / nikgob_recs::novelty::SOURCES.len() as f32);
     let graph: HashMap<String, &super::graph::GraphFind> = snap.graph_new.iter().map(|f| (stream_song_key(&f.track), f)).collect();
     let near = |key: &str| -> Vec<usize> { graph.get(key).map(|f| f.near.iter().filter_map(|(t, _)| snap.model.position(*t)).collect()).unwrap_or_default() };
-    let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| new_candidate(snap, t, near, weight);
+    let trusts = log.seed_trusts();
+    let candidate = |t: &StreamTrack, near: Vec<usize>, weight: f32| {
+        let trust = seeds_trust(snap, &trusts, &near);
+        new_candidate(snap, t, near, weight * trust)
+    };
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
     let now = snap.model.now();
@@ -821,17 +825,35 @@ pub(super) fn artist_tracks(snap: &Snapshot, t: &StreamTrack) -> Vec<usize> {
 /// The songs a niche's top-up found as candidates of its mix: linked to
 /// the niche's songs whose lists held them, the most seeds first; none of
 /// an artist kept out ([`banned`]).
+/// The trust of a new song's seeds lies within these bounds.
+const SEED_TRUST: (f32, f32) = (0.4, 1.2);
+
+/// How far the library's songs `near` a new song (catalog positions) are
+/// to be trusted to find new music ([`nikgob_recs::NewLog::seed_trusts`],
+/// relative to the prior): the mean of those the log knows, 1 when it
+/// knows none of them.
+fn seeds_trust(snap: &Snapshot, trusts: &HashMap<TrackId, f32>, near: &[usize]) -> f32 {
+    let known: Vec<f32> = near.iter().filter(|&&i| i < snap.model.len()).filter_map(|&i| trusts.get(&snap.model.id(i)).copied()).collect();
+    if known.is_empty() {
+        return 1.0;
+    }
+    (known.iter().sum::<f32>() / known.len() as f32).clamp(SEED_TRUST.0, SEED_TRUST.1)
+}
+
 pub(super) fn niche_candidates(snap: &Snapshot, found: &super::niche::NicheFound, log: &nikgob_recs::NewLog) -> Vec<NewCandidate> {
     let len = found.tracks.len().max(1) as f32;
     let now = snap.model.now();
+    let trusts = log.seed_trusts();
     found
         .tracks
         .iter()
         .filter(|(t, _)| snap.is_new(t) && !banned(log, t, now))
         .enumerate()
         .map(|(k, (t, seeds))| {
-            let near = seeds.iter().filter_map(|s| snap.model.position(*s)).collect();
-            new_candidate(snap, t, near, 0.8 * (1.0 - 0.5 * k as f32 / len))
+            let near: Vec<usize> = seeds.iter().filter_map(|s| snap.model.position(*s)).collect();
+            let trust = seeds_trust(snap, &trusts, &near);
+            new_candidate(snap, t, near, 0.8 * (1.0 - 0.5 * k as f32 / len) * trust)
+
         })
         .collect()
 }
@@ -874,6 +896,7 @@ mod tests {
             heard: Heard::Early,
             profile: None,
             background: false,
+            seeds: Vec::new(),
         };
         let song = |artist: &str| {
             let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, "x"), "Song");
@@ -923,6 +946,7 @@ mod tests {
                 heard: Heard::Early,
                 profile: None,
                 background: false,
+                seeds: Vec::new(),
             });
         }
         let now = 12 * day;
@@ -965,6 +989,7 @@ mod tests {
                 heard: Heard::Early,
                 profile: None,
                 background: false,
+                seeds: Vec::new(),
             }
         };
         let now = 12 * day;

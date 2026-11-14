@@ -61,7 +61,30 @@ use crate::Worker;
 use crate::import::Internal;
 use crate::streams::StreamSchedule;
 
+/// The discoveries weighed for a preview ([`Worker::discovery_preview_next`]):
+/// those shown and played and as many again past them, and the wave's.
+const PREVIEW_LOOK: usize = 120;
+
+/// What the library's songs that found a new song (`near`, catalog
+/// positions) say of how sure its blind place is: the share of them of
+/// their most common taste profile (`None` with fewer than two), and
+/// whether most of them are calm or suit the background (a candidate of a
+/// strict filter, where a wrong song costs more).
+fn seeds_doubt(snap: &super::Snapshot, near: &[usize]) -> (Option<f32>, bool) {
+    let m = &snap.model;
+    let agree = (near.len() >= 2).then(|| {
+        let mut by: HashMap<Option<usize>, usize> = HashMap::new();
+        for &i in near {
+            *by.entry(m.profile_at(i)).or_default() += 1;
+        }
+        by.values().copied().max().unwrap_or(0) as f32 / near.len() as f32
+    });
+    let quiet = near.iter().filter(|&&i| snap.background.get(i).copied().unwrap_or(false) || m.energy_at(i).is_some_and(|e| e <= nikgob_recs::open_world::CALM_Z)).count();
+    (agree, !near.is_empty() && 2 * quiet > near.len())
+}
+
 /// Requests of the discovery part of a pass…
+
 pub(crate) const DISCOVER_BUDGET: u32 = 60;
 /// …and of the new releases.
 pub(crate) const RELEASE_BUDGET: u32 = 60;
@@ -505,11 +528,32 @@ impl Worker {
         self.recs.discover.found.as_ref()?.sources.iter().find(|(k, _)| k == key).map(|(_, s)| *s)
     }
 
-    /// The next discovery to analyse a preview of (YouTube Music's, the
-    /// best first, none analysed or tried yet), as its track and video.
-    pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>) -> Option<(TrackId, String)> {
+    /// The next discovery to analyse a preview of (of YouTube Music's alone
+    /// when `youtube_only`), none analysed or in `tried` yet, as its track
+    /// and song: by what a preview of it is worth
+    /// ([`nikgob_recs::previews`]) — near the cut-off of what is shown and
+    /// played, found by songs of different taste profiles, by an artist new
+    /// to the library, found by calm or background songs — not simply the
+    /// first found. The first [`PREVIEW_LOOK`] are weighed.
+    pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>, youtube_only: bool) -> Option<(TrackId, StreamTrack)> {
+        use nikgob_recs::previews::{PreviewCandidate, preview_order};
         let found = self.recs.discover.found.clone()?;
-        for t in found.tracks.iter().take(DISCOVERIES).filter(|t| t.id.service == Service::Youtube) {
+        let snap = self.snapshot();
+        let seeds = self.discovery_seeds();
+        let list: Vec<(usize, &StreamTrack)> = found.tracks.iter().take(PREVIEW_LOOK).enumerate().filter(|(_, t)| !youtube_only || t.id.service == Service::Youtube).collect();
+        let cands: Vec<PreviewCandidate> = list
+            .iter()
+            .map(|&(rank, t)| {
+                let (agree, strict) = snap.as_ref().map_or((None, false), |s| {
+                    let near: Vec<usize> = seeds.get(&stream_song_key(t)).map(|(ts, _)| ts.iter().filter_map(|id| s.model.position(*id)).collect()).unwrap_or_default();
+                    seeds_doubt(s, &near)
+                });
+                let known_artist = snap.as_ref().is_some_and(|s| t.artists.first().is_some_and(|a| s.artist_keys.contains_key(&artist_key(&a.name))));
+                PreviewCandidate { rank, cut: DISCOVERIES, soon: false, agree, known_artist, strict }
+            })
+            .collect();
+        for k in preview_order(&cands) {
+            let t = list[k].1;
             let id = match self.lib.track_by_remote(&t.id).ok().flatten() {
                 Some(id) => id,
                 None => *self.upsert_streams(std::slice::from_ref(t)).first()?,
@@ -517,10 +561,11 @@ impl Worker {
             if tried.contains(&id) || self.analysis.index().read().contains(id) {
                 continue;
             }
-            return Some((id, t.id.id.clone()));
+            return Some((id, t.clone()));
         }
         None
     }
+
 
     /// YouTube Music and Deezer, the ones that can be asked now.
     fn discover_services(&self) -> (bool, bool) {
@@ -578,7 +623,13 @@ impl Worker {
         let (yt, dz) = self.discover_services();
         self.recs.discover.force = false;
         let recs = snap.recs();
-        let DiscoverySeeds { tracks, artists, profiles } = recs.discovery_seeds();
+        let DiscoverySeeds { mut tracks, artists, profiles } = recs.discovery_seeds();
+        // A seed whose finds keep flopping seeds less (the log of new music).
+        let trusts = self.recs.newlog.log.seed_trusts();
+        for t in &mut tracks {
+            t.1 *= trusts.get(&t.0).copied().unwrap_or(1.0);
+        }
+        tracks.sort_by(|a, b| b.1.total_cmp(&a.1));
         let release_artists = recs.release_artists();
         let mut pass = Pass {
             day,

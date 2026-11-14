@@ -600,7 +600,7 @@ pub(crate) fn read(lib: &Library, rows: &[nikgob_library::RecTrack], artist_keys
 
 impl Worker {
     /// The online metadata the pass asks: the test's, else the import's.
-    fn graph_metadata(&self) -> Option<Metadata> {
+    pub(crate) fn graph_metadata(&self) -> Option<Metadata> {
         self.recs.graph.metadata.clone().or_else(|| self.import.as_ref().and_then(|s| s.metadata()))
     }
 

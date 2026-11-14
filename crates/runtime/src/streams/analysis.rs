@@ -65,7 +65,8 @@ use crossbeam_channel::{Receiver, Sender};
 use nikgob_core::model::{AnalysisSource, SourceId, SourceKind, TrackId};
 use nikgob_core::streaming::{AudioStream, Service, StreamError, StreamService};
 use nikgob_library::{Library, now_ms};
-use nikgob_recs::{ANALYZED_WITH, EMBEDDED_WITH, SoundModel};
+use nikgob_recs::{ANALYZED_WITH, EMBEDDED_WITH, SKETCHED_WITH, SoundModel};
+
 use nikgob_view as v;
 
 use super::Msg;
@@ -96,6 +97,15 @@ const PREVIEW_DAILY: u32 = 60;
 const WANTED_MAX: usize = 64;
 /// Library cache key of the previews analysed today: `day:count`.
 const PREVIEW_DAY_KEY: &str = "stream_analysis.preview_day";
+/// Free previews (Deezer's 30 seconds of the same song, no login) looked
+/// for a day at most, and their count's key.
+const FREE_DAILY: u32 = 300;
+const FREE_DAY_KEY: &str = "stream_analysis.free_day";
+/// Songs looked for on Deezer remembered in a run at most (then all are
+/// forgotten and may be looked for again).
+const FREE_TRIED_MAX: usize = 4096;
+/// The next step after a song Deezer has no preview of.
+const FREE_MISS_GAP: Duration = Duration::from_secs(3);
 
 /// Where the audio of a job comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,7 +146,10 @@ struct Job {
     track: TrackId,
     video: String,
     origin: Origin,
-    youtube: Arc<dyn StreamService>,
+    /// YouTube Music, for a job of its audio.
+    youtube: Option<Arc<dyn StreamService>>,
+    /// The audio already at hand (a free preview) and its container.
+    bytes: Option<(Vec<u8>, String)>,
     /// YouTube Music plays or comes next (see `held::Held::listening`).
     listening: Arc<AtomicBool>,
     /// The neural sound model, when it hears this job's audio.
@@ -148,6 +161,8 @@ struct Job {
 enum Step {
     /// The track's song on YouTube Music ([`Msg::Resolved`]).
     Resolving,
+    /// A free preview of its song on Deezer ([`Msg::FreePreview`]).
+    Free,
     /// Its audio and analysis ([`Msg::Analysed`]).
     Analysing,
 }
@@ -178,6 +193,13 @@ pub(crate) struct StreamAnalysis {
     wanted: std::collections::VecDeque<(TrackId, String)>,
     /// New songs whose preview was tried in this run.
     previewed: HashSet<TrackId>,
+    /// Today and the free previews looked for, and the songs looked for
+    /// in this run ([`FREE_TRIED_MAX`] at most).
+    free_day: Option<(i64, u32)>,
+    free_tried: HashSet<TrackId>,
+    /// No song was left to look for a free preview of: not looked at
+    /// again before this (or a song asked for by a wave).
+    free_idle_until: Option<Instant>,
     /// The progress is counted again on the next tick.
     recount: bool,
     /// Why the last step did not start a track (logged once per change).
@@ -201,7 +223,8 @@ fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal
         // While a game runs the job waits; switched off, it stops at once.
         pacer.begin();
         let started = Instant::now();
-        let outcome = work(&job, &lib, &index, &off, &mut pacer);
+        let mut job = job;
+        let outcome = work(&mut job, &lib, &index, &off, &mut pacer);
         log::debug!(
             "stream analysis: {} ({:?}) {outcome:?} in {:?}",
             job.video,
@@ -224,32 +247,18 @@ fn run(jobs: Receiver<Job>, lib: Library, index: SoundIndex, tx: Sender<Internal
     }
 }
 
-fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &mut Pacer<'_>) -> Outcome {
+fn work(job: &mut Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &mut Pacer<'_>) -> Outcome {
     if off.load(Ordering::Relaxed) {
         return Outcome::Stopped;
     }
-    let audio = match (job.youtube.cached_audio(&job.video), job.origin) {
-        (Some(a), _) => a,
-        (None, Origin::Played) => return Outcome::NotCached,
-        // The listener's YouTube Music came meanwhile: later.
-        (None, Origin::Background | Origin::Preview) if job.listening.load(Ordering::Relaxed) => {
-            return Outcome::Transient("YouTube Music plays".into());
-        }
-        (None, Origin::Background | Origin::Preview) => match job.youtube.open_audio(&job.video) {
-            Ok(a) => a,
-            Err(e) => return stream_outcome(e),
+    let (bytes, ext) = match job.bytes.take() {
+        Some(b) => b,
+        None => match youtube_bytes(job, off) {
+            Ok(b) => b,
+            Err(o) => return o,
         },
     };
-    // Opening asked nothing yet (the first read does): one more look.
-    if job.origin != Origin::Played && job.listening.load(Ordering::Relaxed) {
-        return Outcome::Transient("YouTube Music plays".into());
-    }
-    let ext = audio.format_hint();
-    let max = if job.origin == Origin::Preview { PREVIEW_BYTES } else { MAX_BYTES };
-    let bytes = match read_all(audio, max, off) {
-        Ok(b) => b,
-        Err(o) => return o,
-    };
+    let ext = ext.as_str();
     let model = job.model.as_deref().filter(|m| m.ready() && !m.resting()).map(|m| m as &dyn SoundModel);
     let want = Want { bliss: true, model };
     let preview = job.origin == Origin::Preview;
@@ -275,6 +284,41 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &
         Err(FileError::Stopped) => Outcome::Stopped,
         Err(FileError::Unavailable(e)) => Outcome::Transient(e),
         Err(FileError::Undecodable(e)) => Outcome::Failed(e),
+    }
+}
+
+/// The audio of a YouTube Music job and its container: the disk cache,
+/// else a download (none for a played track), never while the listener's
+/// YouTube Music plays.
+fn youtube_bytes(job: &Job, off: &AtomicBool) -> Result<(Vec<u8>, String), Outcome> {
+    let Some(youtube) = job.youtube.as_ref() else { return Err(Outcome::Failed("no audio".into())) };
+    let audio = match (youtube.cached_audio(&job.video), job.origin) {
+        (Some(a), _) => a,
+        (None, Origin::Played) => return Err(Outcome::NotCached),
+        // The listener's YouTube Music came meanwhile: later.
+        (None, Origin::Background | Origin::Preview) if job.listening.load(Ordering::Relaxed) => {
+            return Err(Outcome::Transient("YouTube Music plays".into()));
+        }
+        (None, Origin::Background | Origin::Preview) => match youtube.open_audio(&job.video) {
+            Ok(a) => a,
+            Err(e) => return Err(stream_outcome(e)),
+        },
+    };
+    // Opening asked nothing yet (the first read does): one more look.
+    if job.origin != Origin::Played && job.listening.load(Ordering::Relaxed) {
+        return Err(Outcome::Transient("YouTube Music plays".into()));
+    }
+    let ext = audio.format_hint().to_owned();
+    let max = if job.origin == Origin::Preview { PREVIEW_BYTES } else { MAX_BYTES };
+    Ok((read_all(audio, max, off)?, ext))
+}
+
+/// The container of a preview by its URL's extension (Deezer's are MP3).
+fn ext_of(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or("");
+    match path.rsplit_once('.') {
+        Some((_, e)) if (2..=4).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric()) => e.to_ascii_lowercase(),
+        _ => "mp3".into(),
     }
 }
 
@@ -357,6 +401,15 @@ impl Worker {
         bliss && (!(self.analysis.neural().library && model) || self.lib.has_embedding(track, EMBEDDED_WITH).unwrap_or(true))
     }
 
+    /// The track has a sketch of the current version (a file's or a
+    /// stream's), or a file's analysis (the file job sketches it).
+    fn sketched(&self, track: TrackId) -> bool {
+        match self.lib.sketch_of(track).ok().flatten() {
+            Some(s) => s.sketched_with == SKETCHED_WITH,
+            None => self.lib.get_analysis(track).ok().flatten().is_some_and(|a| a.source == AnalysisSource::File),
+        }
+    }
+
     /// Asks for the preview of a new song (`track`, its YouTube Music
     /// `video`) to be analysed soon, before the discoveries' own: the niche
     /// expansion's candidates get their sound vector (and, with «Библиотека
@@ -373,6 +426,7 @@ impl Worker {
         }
         let a = &mut self.streaming.analysis;
         a.wanted.push_back((track, video));
+        a.free_idle_until = None;
         while a.wanted.len() > WANTED_MAX {
             a.wanted.pop_front();
         }
@@ -400,7 +454,7 @@ impl Worker {
             return;
         }
         let Some(src) = self.lib.get_source(source).ok().flatten() else { return };
-        if src.kind != SourceKind::Youtube || self.analysed(track) {
+        if src.kind != SourceKind::Youtube || (self.analysed(track) && self.sketched(track)) {
             return;
         }
         let Some(youtube) = self.service(Service::Youtube) else { return };
@@ -408,7 +462,8 @@ impl Worker {
             track,
             video: src.locator,
             origin: Origin::Played,
-            youtube,
+            youtube: Some(youtube),
+            bytes: None,
             listening: self.streaming.held.listening.clone(),
             model: None,
         };
@@ -554,6 +609,14 @@ impl Worker {
         {
             return;
         }
+        // A free preview of a new song (Deezer's): no request of YouTube
+        // Music's player, so it waits for neither its pause nor its
+        // listener; playback first still.
+        if self.free_preview_step() {
+            self.streaming.analysis.held = None;
+            return;
+        }
+
         if self.service(Service::Youtube).is_none() || !self.has_audio(Service::Youtube) {
             self.analysis_held("YouTube Music has no audio now");
             return;
@@ -605,7 +668,15 @@ impl Worker {
         // or they fill every batch and the rest is never reached.
         let mut limit = BATCH;
         loop {
-            let todo = match self.lib.streams_needing_analysis(ANALYZED_WITH, retry_before, limit) {
+            // The analyses first, then the sketches of streams analysed
+            // before sketches were (the same downloads, gates and limits).
+            let queue = self.lib.streams_needing_analysis(ANALYZED_WITH, retry_before, limit).and_then(|mut t| {
+                if t.len() < limit as usize {
+                    t.extend(self.lib.streams_needing_sketch(ANALYZED_WITH, SKETCHED_WITH, retry_before, limit - t.len() as u32)?);
+                }
+                Ok(t)
+            });
+            let todo = match queue {
                 Ok(t) => t,
                 Err(e) => {
                     log::warn!("stream analysis: reading the queue: {e}");
@@ -682,7 +753,7 @@ impl Worker {
                 other => break other,
             }
         };
-        let Some((track, video)) = wanted.or_else(|| self.discovery_preview_next(&tried)) else { return false };
+        let Some((track, video)) = wanted.or_else(|| self.discovery_preview_next(&tried, true).map(|(t, s)| (t, s.id.id))) else { return false };
         let Some(youtube) = self.service(Service::Youtube) else { return false };
         log::info!("stream analysis: a preview of new music {track} from YouTube {video}");
         self.streaming.analysis.previewed.insert(track);
@@ -690,7 +761,8 @@ impl Worker {
             track,
             video,
             origin: Origin::Preview,
-            youtube,
+            youtube: Some(youtube),
+            bytes: None,
             listening: self.streaming.held.listening.clone(),
             model: None,
         };
@@ -702,7 +774,111 @@ impl Worker {
         true
     }
 
+    /// Free previews looked for today.
+    fn free_today(&mut self) -> u32 {
+        let today = now_ms() / DAY_MS;
+        if let Some((day, n)) = self.streaming.analysis.free_day
+            && day == today
+        {
+            return n;
+        }
+        let n = self.day_count(FREE_DAY_KEY);
+        self.streaming.analysis.free_day = Some((today, n));
+        n
+    }
+
+    fn count_free(&mut self) {
+        let n = self.free_today() + 1;
+        self.streaming.analysis.free_day = Some((now_ms() / DAY_MS, n));
+        self.day_count_put(FREE_DAY_KEY, n);
+    }
+
+    /// The next new song to hear by a free preview, if one is worth it
+    /// and everything allows it: Deezer's 30 seconds of the same song (by
+    /// its Deezer id, else by its artist and title) spend nothing of
+    /// YouTube Music's day of previews and never ask its player. The songs
+    /// «Моя волна» is about to play first, then the discoveries by what a
+    /// preview of them is worth ([`nikgob_recs::previews`]); each song is
+    /// looked for once a run. Playback goes first: not while the app is
+    /// idle, buffers, looks a song up or a game is in front.
+    fn free_preview_step(&mut self) -> bool {
+        if self.streams_idle() || self.status == v::Status::Buffering || !self.streaming.resolving.is_empty() || quiet::busy() {
+            return false;
+        }
+        if self.free_today() >= FREE_DAILY || self.streaming.analysis.free_idle_until.is_some_and(|t| Instant::now() < t) {
+            return false;
+        }
+        let Some(meta) = self.graph_metadata() else { return false };
+        if self.streaming.analysis.free_tried.len() >= FREE_TRIED_MAX {
+            self.streaming.analysis.free_tried.clear();
+        }
+        let a = &self.streaming.analysis;
+        let mut skip: HashSet<TrackId> = a.free_tried.clone();
+        skip.extend(a.previewed.iter().copied());
+        let index = self.analysis.index().clone();
+        let wanted = a.wanted.iter().map(|(t, _)| *t).find(|t| !skip.contains(t) && !index.read().contains(*t));
+        let Some(track) = wanted.or_else(|| self.discovery_preview_next(&skip, false).map(|(t, _)| t)) else {
+            let idle = self.streaming.schedule.analysis_idle;
+            self.streaming.analysis.free_idle_until = Some(Instant::now() + idle);
+            return false;
+        };
+        let Some(row) = self.lib.get_track_row(track).ok().flatten() else {
+            self.streaming.analysis.free_tried.insert(track);
+            return false;
+        };
+        let duration = self.lib.get_track(track).ok().flatten().and_then(|t| t.duration_ms).map(|ms| Duration::from_millis(u64::from(ms)));
+        let deezer = self.lib.stream_refs(track).unwrap_or_default().into_iter().find(|r| r.id.service == Service::Deezer).and_then(|r| r.id.id.parse::<u64>().ok());
+        let (artist, title) = (row.artist.clone(), row.title.clone());
+        self.streaming.analysis.free_tried.insert(track);
+        self.streaming.analysis.busy = Some((track, Step::Free));
+        self.count_free();
+        log::info!("stream analysis: looking for a free preview of new music {track}");
+        self.streaming.spawn(async move {
+            let found = match meta.deezer.preview_url(deezer, &artist, &title, duration).await {
+                Ok(Some(url)) => match meta.deezer.download_preview(&url).await {
+                    Ok(bytes) if !bytes.is_empty() => Some((bytes, ext_of(&url))),
+                    _ => None,
+                },
+                _ => None,
+            };
+            Msg::FreePreview { track, found }
+        });
+        true
+    }
+
+    /// The free preview of `track` was looked for: found, it is analysed
+    /// as a preview (none of YouTube's day spent); else the song waits for
+    /// one of YouTube Music's previews if it is worth one.
+    pub(crate) fn free_preview_found(&mut self, track: TrackId, found: Option<(Vec<u8>, String)>) {
+        if self.streaming.analysis.busy != Some((track, Step::Free)) {
+            return;
+        }
+        self.streaming.analysis.busy = None;
+        let Some(bytes) = found else {
+            log::debug!("stream analysis: no free preview of {track}");
+            self.analysis_wait(FREE_MISS_GAP);
+            return;
+        };
+        if !self.stream_analysis_on() {
+            return;
+        }
+        log::info!("stream analysis: a free preview of new music {track} from Deezer");
+        let job = Job {
+            track,
+            video: format!("deezer-preview:{track}"),
+            origin: Origin::Preview,
+            youtube: None,
+            bytes: Some(bytes),
+            listening: self.streaming.held.listening.clone(),
+            model: None,
+        };
+        if self.analysis_job(job) {
+            self.streaming.analysis.busy = Some((track, Step::Analysing));
+        }
+    }
+
     /// Downloads and analyses `video` for `track` (one of the day's).
+
     fn analysis_fetch(&mut self, track: TrackId, video: String) {
         let Some(youtube) = self.service(Service::Youtube) else { return };
         log::info!("stream analysis: {track} from YouTube {video}");
@@ -710,7 +886,8 @@ impl Worker {
             track,
             video,
             origin: Origin::Background,
-            youtube,
+            youtube: Some(youtube),
+            bytes: None,
             listening: self.streaming.held.listening.clone(),
             model: None,
         };
@@ -776,9 +953,11 @@ impl Worker {
             Outcome::Stored(stored) => {
                 log::info!("stream analysis: {} analysed ({:?}, stored: {stored})", d.track, d.origin);
                 self.publish_analysis_counts();
-                // A new song placed by its sound: the next build takes it.
+                // A new song placed by its sound: the next build takes it,
+                // and the radio playing looks at it again if it queued it.
                 if d.origin == Origin::Preview {
                     self.recs_dirty(gap);
+                    self.radio_preview_heard(d.track);
                 }
                 if mine {
                     self.analysis_after(gap);
