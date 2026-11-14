@@ -187,6 +187,10 @@ pub struct Dataset {
     /// The new songs of the services the library's mixes could take.
     #[serde(default)]
     pub new: Vec<DNew>,
+    /// The neural sound model's vectors of the tracks that have one: its
+    /// scale and its 256 values.
+    #[serde(default)]
+    pub embeddings: Vec<(TrackId, f32, Vec<i8>)>,
 }
 
 /// A [`Dataset`] as the engine takes it.
@@ -247,6 +251,7 @@ impl Dataset {
             graph_outside_artists: graph.map(|g| g.outside_artists.clone()).unwrap_or_default(),
             truth: Vec::new(),
             new: Vec::new(),
+            embeddings: index.iter().filter_map(|(id, _)| index.embedding(id).map(|c| (id, c.scale, c.q.to_vec()))).collect(),
         }
     }
 
@@ -264,6 +269,11 @@ impl Dataset {
         for (id, v) in &self.vectors {
             if let Ok(v) = <[f32; DIM]>::try_from(v.as_slice()) {
                 index.insert(*id, v);
+            }
+        }
+        for (id, scale, q) in &self.embeddings {
+            if let Ok(q) = <[i8; crate::embedding::COMPACT_DIM]>::try_from(q.as_slice()) {
+                index.set_embedding(*id, crate::embedding::Compact { scale: *scale, q });
             }
         }
         let edge = |e: &DEdge<TrackId>| Edge { from: e.0, to: e.1, rank: e.2, of: e.3, source: e.4 };
@@ -801,7 +811,7 @@ pub fn home_with_niches(parts: &Parts, model: &UserModel, suits: &[bool], epoch:
     let background = |i: usize| suits.get(i).copied().unwrap_or(false);
     let ok = |_: usize| true;
     let none = |_: &StreamTrack| Vec::new();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: None, learned: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &none, index: Some(&parts.index), learned: None };
     let cards = crate::open_world::niches(&ctx).into_iter().map(|c| (c, String::new(), Vec::new())).collect();
     mix_new::with_niches(model, &mut home, cards);
     (home, row)
@@ -889,7 +899,7 @@ pub fn wave(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandid
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None, learned: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&parts.index), learned: None };
     crate::open_world::next(&ctx, pool, filter, session, n, &HashSet::new())
 }
 
@@ -922,7 +932,7 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None, learned: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&parts.index), learned: None };
     let mut run = WaveRun::default();
     for (k, &novelty) in WAVE_NOVELTIES.iter().enumerate() {
         let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(novelty)));
@@ -1003,6 +1013,23 @@ pub fn wave_counts(steps: &[WaveStep]) -> (usize, usize, usize) {
 /// (most of their plays before the moment skipped early), not an outcome.
 #[allow(clippy::too_many_arguments)]
 pub fn wave_replay(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], session: &Session, novelty: f32, n: usize, skipped: &dyn Fn(usize) -> bool) -> Vec<WaveStep> {
+    wave_replay_seeded(parts, model, suits, pool, session, novelty, n, skipped, 11)
+}
+
+/// [`wave_replay`] of a wave whose run is seeded by `seed` (the runtime
+/// seeds each wave started anew).
+#[allow(clippy::too_many_arguments)]
+pub fn wave_replay_seeded(
+    parts: &Parts,
+    model: &UserModel,
+    suits: &[bool],
+    pool: &[OpenCandidate],
+    session: &Session,
+    novelty: f32,
+    n: usize,
+    skipped: &dyn Fn(usize) -> bool,
+    seed: u64,
+) -> Vec<WaveStep> {
     use crate::radio::Outcome;
     use crate::wave::WaveSeed;
     let artist_of: HashMap<String, ArtistId> = parts.new.iter().filter_map(|d| Some((crate::stream_song_key(&d.track), d.artist?))).collect();
@@ -1011,12 +1038,12 @@ pub fn wave_replay(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Ope
     let ok = |_: usize| true;
     let genre_of = genres(parts);
     let genre = |i: usize| genre_of.get(i).copied().flatten();
-    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: None, learned: None };
+    let ctx = WaveContext { model, ok: &ok, genre: Some(&genre), background: &background, artist_tracks: &artist_tracks, index: Some(&parts.index), learned: None };
     let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(novelty)));
     radio.attune(session.clone(), Some(model.weights));
     let mut out: Vec<WaveStep> = Vec::with_capacity(n);
     while out.len() < n {
-        let picks = radio.extend_wave(&ctx, pool, 3.min(n - out.len()), 11);
+        let picks = radio.extend_wave(&ctx, pool, 3.min(n - out.len()), seed);
         if picks.is_empty() {
             break;
         }
@@ -1057,9 +1084,17 @@ pub fn wave_trace(parts: &Parts, novelty: f32, n: usize) -> String {
     let plays = skips_before(&Starts::of(events), parts, t);
     let skipped = |i: usize| plays[i].0 >= 2 && 2 * plays[i].1 >= plays[i].0;
     let steps = wave_replay(parts, &model, &suits, &pool, &Session::default(), novelty, n, &skipped);
+    let scale = model.scale().max(1e-6);
+    let dist = |a: usize, b: usize| match (model.embedded_at(a), model.embedded_at(b)) {
+        (Some(x), Some(y)) => Some(euclid(x, y) / scale),
+        _ => None,
+    };
     let mut out = format!("wave trace at novelty {novelty:.1}, pool {}:\n", pool.len());
     let mut per: HashMap<&str, usize> = HashMap::new();
     let (mut run, mut best_run) = (0usize, 0usize);
+    // The sound's steps between library picks one after another.
+    let mut prev: Option<usize> = None;
+    let (mut steps_sum, mut steps_n, mut jumps) = (0.0f32, 0usize, 0usize);
     for (k, s) in steps.iter().enumerate() {
         *per.entry(s.artist.as_str()).or_default() += 1;
         run = if k > 0 && steps[k - 1].artist == s.artist { run + 1 } else { 1 };
@@ -1068,8 +1103,49 @@ pub fn wave_trace(parts: &Parts, novelty: f32, n: usize) -> String {
             Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or_else(String::new, |c| c.track.title.clone()),
             Item::Track(_) => String::new(),
         };
+        let step = match (prev, s.track) {
+            (Some(a), Some(b)) => dist(a, b),
+            _ => None,
+        };
+        if let Some(d) = step {
+            steps_sum += d;
+            steps_n += 1;
+            jumps += usize::from(d > TRACE_JUMP);
+        }
+        if s.track.is_some() {
+            prev = s.track;
+        }
+        let profile = s.track.and_then(|i| model.profile_at(i)).map_or_else(|| "-".to_owned(), |p| format!("p{p}"));
+        let step = step.map_or_else(|| "    ".to_owned(), |d| format!("{d:.2}"));
         let short: String = s.artist.chars().rev().take(12).collect::<Vec<char>>().into_iter().rev().collect();
-        out += &format!("  {:>2} {} {:<12} {}{}\n", k + 1, if s.track.is_some() { "K" } else { "N" }, short, if s.skipped { "skip " } else { "" }, what);
+        out += &format!(
+            "  {:>2} {} {:<12} {:>3} {} {}{}\n",
+            k + 1,
+            if s.track.is_some() { "K" } else { "N" },
+            short,
+            profile,
+            step,
+            if s.skipped { "skip " } else { "" },
+            what
+        );
+    }
+    // A skipped sound back: a pick within the next six near a skipped one.
+    let mut back = 0usize;
+    for (k, s) in steps.iter().enumerate() {
+        let Some(i) = s.track.filter(|_| s.skipped) else { continue };
+        back += steps[k + 1..].iter().take(6).filter_map(|x| x.track).filter(|&j| dist(i, j).is_some_and(|d| d < TRACE_NEAR)).count();
+    }
+    // The start again: the first six picks of waves started five times.
+    let starts: Vec<HashSet<Item>> = (1..=5u64)
+        .map(|seed| wave_replay_seeded(parts, &model, &suits, &pool, &Session::default(), novelty, 6, &skipped, seed).into_iter().map(|s| s.item).collect())
+        .collect();
+    let (mut same, mut pairs) = (0.0f32, 0usize);
+    for a in 0..starts.len() {
+        for b in a + 1..starts.len() {
+            let union = starts[a].union(&starts[b]).count().max(1);
+            same += starts[a].intersection(&starts[b]).count() as f32 / union as f32;
+            pairs += 1;
+        }
     }
     let (all, new, skip) = wave_counts(&steps);
     out += &format!(
@@ -1078,8 +1154,19 @@ pub fn wave_trace(parts: &Parts, novelty: f32, n: usize) -> String {
         per.len(),
         per.values().copied().max().unwrap_or(0)
     );
+    out += &format!(
+        "  = sound: mean step {:.2}, jumps over {TRACE_JUMP} {jumps}, skipped sound back within six {back}; five starts share {:.2} of their first six\n",
+        steps_sum / steps_n.max(1) as f32,
+        same / pairs.max(1) as f32
+    );
     out
 }
+
+/// A step of the sound between two picks over this many median distances
+/// is a jump ([`wave_trace`])…
+const TRACE_JUMP: f32 = 1.5;
+/// …and a pick this near a skipped one brings its sound back.
+const TRACE_NEAR: f32 = 0.5;
 
 /// Each catalog track's plays ended by `t` and the early skips among them
 /// (a play started before `t` and ended after it is not known yet).

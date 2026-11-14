@@ -2100,6 +2100,7 @@ impl ModelPreview {
     pub fn of_with(lib: &Library, prefs: &v::Prefs) -> Result<Self, String> {
         let index = SoundIndex::default();
         crate::analysis::load_index(lib, &index);
+        crate::analysis::load_embeddings(lib, &index);
         let (_, utc_offset_min) = local_day();
         // The last pass's finds: their analysed previews come with the
         // snapshot.
