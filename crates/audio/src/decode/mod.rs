@@ -46,6 +46,7 @@ pub(crate) fn open_file(path: &Path) -> Result<SymphoniaSource, DecodeError> {
 /// Opens the encoded bytes of a stream as a frame source.
 pub(crate) fn open_stream(
     bytes: Box<dyn ByteSource>,
+    slot: Option<std::sync::Arc<crate::cancel::Slot>>,
 ) -> Result<(SymphoniaSource, StreamInfo), DecodeError> {
-    SymphoniaSource::open_stream(bytes)
+    SymphoniaSource::open_stream(bytes, slot)
 }

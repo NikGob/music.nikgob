@@ -18,13 +18,14 @@ use fastframe_audio::{Buffer, BufferSize, OutputOptions};
 
 use crate::analyzer::Analyzer;
 use crate::backend::{Backend, BackendNote, DeviceBackend, OfflineBackend, RenderHandle};
+use crate::cancel::{Slot, Slots};
 use crate::eq::{EQ_BANDS, EQ_MAX_DB, eq_preamp_db};
 use crate::offline::{OfflineDevice, OfflineOptions};
 use crate::pipeline::{DecCmd, DecEvent, Decoder};
 use crate::render::{CbEvent, Mark, Renderer};
 use crate::shared::{LogLimiter, ManualClock, PlayClock, Shared, volume_curve};
 use crate::tap::VisualizerTap;
-use crate::types::{Event, ItemFx, PlayItem, SpawnError};
+use crate::types::{Event, ItemFx, ItemSource, PlayItem, SpawnError};
 
 /// Samples the ring can hold (about 5 s of 48 kHz stereo; the decoder keeps
 /// it only about 1 s full).
@@ -89,14 +90,24 @@ impl std::fmt::Debug for PlayerOptions {
 }
 
 enum Command {
-    Play { item: PlayItem, gen_id: u64 },
-    SetNext(PlayItem),
+    Play {
+        item: PlayItem,
+        gen_id: u64,
+        slot: Option<Arc<Slot>>,
+    },
+    SetNext(PlayItem, Option<Arc<Slot>>),
     ClearNext,
     Pause,
     Resume,
     Toggle,
     Stop { gen_id: u64 },
-    Seek { pos: Duration, id: u64, gen_id: u64 },
+    /// `woke`: the items the seek interrupted (see [`crate::cancel`]).
+    Seek {
+        pos: Duration,
+        id: u64,
+        gen_id: u64,
+        woke: Vec<Arc<Slot>>,
+    },
     SetFx { id: u64, fx: ItemFx, gen_id: u64 },
     SetGain { id: u64, gain_db: f32 },
 }
@@ -118,6 +129,23 @@ struct Inner {
     gen_counter: AtomicU64,
     slider: Mutex<f32>,
     paused: Arc<AtomicBool>,
+    /// The items handed over whose reads may have to give way (see
+    /// [`crate::cancel`]).
+    slots: Slots,
+}
+
+impl Drop for Inner {
+    /// The engine ends: a read waiting in what it plays or opens gives up,
+    /// so its threads end now.
+    fn drop(&mut self) {
+        self.slots.lock().cancel_all(None);
+    }
+}
+
+/// The slot of an item with bytes to open (none for a PCM source, which
+/// never waits for long).
+fn slot_for(item: &PlayItem, started: bool) -> Option<Arc<Slot>> {
+    (!matches!(item.source, ItemSource::Pcm(_))).then(|| Slot::new(started))
 }
 
 /// The audio engine's handle. Cheap to clone and `Send + Sync`; every method
@@ -192,7 +220,7 @@ impl Player {
         if matches!(
             cmd,
             Command::Play { .. }
-                | Command::SetNext(_)
+                | Command::SetNext(..)
                 | Command::ClearNext
                 | Command::Stop { .. }
                 | Command::Seek { .. }
@@ -214,27 +242,42 @@ impl Player {
     }
 
     /// Plays `item` now, replacing whatever plays. Clears the prepared next
-    /// item: call [`set_next`](Self::set_next) afterwards.
+    /// item: call [`set_next`](Self::set_next) afterwards. A stream read
+    /// waiting for the network in what played or was to come gives up at
+    /// once (see [`ByteSource::interrupter`](crate::ByteSource::interrupter)).
     pub fn play(&self, item: PlayItem) {
+        // Held until the command is sent, here and in every method that
+        // cancels or interrupts: commands of two threads reach the engine
+        // in the order of their cancellations.
+        let mut slots = self.inner.slots.lock();
         let gen_id = self.next_gen();
         self.set_pending(Some(PendingPos {
             gen_id,
             id: item.id,
             pos_ns: 0,
         }));
-        self.send(Command::Play { item, gen_id });
+        let slot = slot_for(&item, true);
+        slots.cancel_all(slot.clone());
+        self.send(Command::Play { item, gen_id, slot });
     }
 
     /// Prepares the item that follows the current one. The decoder opens it
     /// right away and starts it at the exact end of the current item, so
     /// there is no gap (or a crossfade, see
-    /// [`set_crossfade`](Self::set_crossfade)).
+    /// [`set_crossfade`](Self::set_crossfade)). A next item prepared before
+    /// that has not taken over yet stops opening or waiting at once.
     pub fn set_next(&self, item: PlayItem) {
-        self.send(Command::SetNext(item));
+        let mut slots = self.inner.slots.lock();
+        let slot = slot_for(&item, false);
+        slots.cancel_next(slot.clone());
+        self.send(Command::SetNext(item, slot));
     }
 
-    /// Forgets the prepared next item.
+    /// Forgets the prepared next item (and stops its opening, as
+    /// [`set_next`](Self::set_next) does).
     pub fn clear_next(&self) {
+        let mut slots = self.inner.slots.lock();
+        slots.cancel_next(None);
         self.send(Command::ClearNext);
     }
 
@@ -253,16 +296,23 @@ impl Player {
         self.send(Command::Toggle);
     }
 
-    /// Stops and forgets the current and next items.
+    /// Stops and forgets the current and next items (a stream read waiting
+    /// in them gives up at once, as for [`play`](Self::play)).
     pub fn stop(&self) {
+        let mut slots = self.inner.slots.lock();
         let gen_id = self.next_gen();
         self.set_pending(None);
+        slots.cancel_all(None);
         self.send(Command::Stop { gen_id });
     }
 
     /// Seeks the current item (sample-accurate). [`position`](Self::position)
-    /// reports the target immediately.
+    /// reports the target immediately. A stream read waiting for the
+    /// network in what the engine reads (the item, or the one next to it
+    /// at a transition) gives up, so the seek is taken at once (and the
+    /// read is asked again from the new place).
     pub fn seek(&self, pos: Duration) {
+        let mut slots = self.inner.slots.lock();
         let Some(id) = self.current_id() else { return };
         let gen_id = self.next_gen();
         self.set_pending(Some(PendingPos {
@@ -270,7 +320,15 @@ impl Player {
             id,
             pos_ns: u64::try_from(pos.as_nanos()).unwrap_or(u64::MAX),
         }));
-        self.send(Command::Seek { pos, id, gen_id });
+        // Before the seek is sent: the decoder ends the interruption when
+        // it takes the seek.
+        let woke = slots.interrupt();
+        self.send(Command::Seek {
+            pos,
+            id,
+            gen_id,
+            woke,
+        });
     }
 
     /// Changes the speed, tone and reverb of item `id` (see [`ItemFx`]),
@@ -575,6 +633,7 @@ impl Parts {
             gen_counter: AtomicU64::new(0),
             slider: Mutex::new(1.0),
             paused,
+            slots: Slots::default(),
         };
         Ok((
             Player {
@@ -729,7 +788,7 @@ impl Control {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
-            Command::Play { item, gen_id } => {
+            Command::Play { item, gen_id, slot } => {
                 self.idle_pause_at = None;
                 if self.is_paused {
                     self.do_resume();
@@ -737,10 +796,10 @@ impl Control {
                 if self.open_device() {
                     self.wake_device();
                 }
-                let _ = self.dec_tx.send(DecCmd::Play { item, gen_id });
+                let _ = self.dec_tx.send(DecCmd::Play { item, gen_id, slot });
             }
-            Command::SetNext(item) => {
-                let _ = self.dec_tx.send(DecCmd::SetNext(item));
+            Command::SetNext(item, slot) => {
+                let _ = self.dec_tx.send(DecCmd::SetNext(item, slot));
             }
             Command::ClearNext => {
                 let _ = self.dec_tx.send(DecCmd::ClearNext);
@@ -773,8 +832,18 @@ impl Control {
             Command::SetGain { id, gain_db } => {
                 let _ = self.dec_tx.send(DecCmd::SetGain { id, gain_db });
             }
-            Command::Seek { pos, id, gen_id } => {
-                let _ = self.dec_tx.send(DecCmd::Seek { pos, id, gen_id });
+            Command::Seek {
+                pos,
+                id,
+                gen_id,
+                woke,
+            } => {
+                let _ = self.dec_tx.send(DecCmd::Seek {
+                    pos,
+                    id,
+                    gen_id,
+                    woke,
+                });
 
                 if let Some((id, p)) = position_of(&self.sh, &self.clock, &self.pending) {
                     self.emit(Event::Position { id, pos: p, at: Instant::now() });

@@ -371,7 +371,8 @@ impl Engine {
                 ItemSource::Stream(Box::new(move || {
                     let svc = svc.ok_or_else(|| format!("{service} is not available"))?;
                     log::debug!("opening {service} stream {id} (item {item})");
-                    let stream = svc.open_audio(&id).map_err(|e| {
+                    let wanted = nikgob_audio::open_wanted();
+                    let stream = svc.open_audio_while(&id, &wanted).map_err(|e| {
                         log::info!("{service} stream {id} did not open: {e}");
                         if matches!(e, StreamError::Drm)
                             && let Some(w) = widget.as_ref().filter(|w| w.plays(&id))
@@ -470,6 +471,10 @@ impl ByteSource for StreamBytes {
 
     fn duration(&self) -> Option<Duration> {
         self.inner.duration()
+    }
+
+    fn interrupter(&self) -> Option<nikgob_audio::Interrupter> {
+        self.inner.interrupter()
     }
 }
 

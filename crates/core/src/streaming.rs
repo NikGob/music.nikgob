@@ -26,6 +26,9 @@
 //!   first read of the returned [`AudioStream`]. Reads then run on the engine's decoder thread,
 //!   so a stream should download ahead on a background task and hand out
 //!   buffered bytes, blocking only while the wanted range is not there yet.
+//!   A stream whose reads block gives an [`AudioStream::interrupter`], so
+//!   the engine's commands (stop, another track, a seek) need not wait for
+//!   them.
 
 use std::fmt;
 use std::io::{Read, Seek};
@@ -745,6 +748,28 @@ pub trait AudioStream: Read + Seek + Send {
     fn quality(&self) -> Option<String> {
         None
     }
+    /// Makes reads that wait for bytes give up, for a stream whose reads
+    /// can wait (see [`StreamInterrupter`]). Asked once, before the first
+    /// read, on the engine's opener thread.
+    fn interrupter(&self) -> Option<StreamInterrupter> {
+        None
+    }
+}
+
+/// Called with `true`, a read of the stream that waits for bytes returns
+/// an error at once, and so does every later read that would have to wait,
+/// until it is called with `false`; reads of bytes already there go on.
+/// The audio engine calls it from another thread while a read waits: when
+/// the track is no longer wanted (stopped, another one plays) and to take
+/// a seek. A read that gives up this way fails with [`interrupted_read`]
+/// (kind [`std::io::ErrorKind::WouldBlock`]); only that error is taken for
+/// giving way, any other is the stream's failure, interrupted or not.
+pub type StreamInterrupter = std::sync::Arc<dyn Fn(bool) + Send + Sync>;
+
+/// The error of a read that gave up because it was interrupted (see
+/// [`StreamInterrupter`]).
+pub fn interrupted_read() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::WouldBlock, "read interrupted")
 }
 
 /// "Opus ~160 кбит/с": a codec and its bitrate, `approx` for a variable
@@ -1018,6 +1043,19 @@ pub trait StreamService: Send + Sync {
     /// is allowed): the download happens on the first read of the stream (see
     /// the module docs).
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError>;
+
+    /// [`Self::open_audio`] for a caller that may stop wanting the track
+    /// while it opens (the engine, when another track plays meanwhile). A
+    /// service whose open waits for a lookup gives up once `wanted` says
+    /// false (it is asked every few milliseconds while it waits).
+    fn open_audio_while(
+        &self,
+        id: &str,
+        wanted: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Box<dyn AudioStream>, StreamError> {
+        let _ = wanted;
+        self.open_audio(id)
+    }
 
     /// Saves the audio as it is (YouTube: Opus remuxed to Ogg, no re-encode)
     /// into `dir`; returns the file. Spotify: [`StreamError::Unsupported`].

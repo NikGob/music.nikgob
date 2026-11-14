@@ -12,10 +12,12 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use rtrb::Producer;
 
+use crate::cancel::{Slot, cancelled};
 use crate::channels;
 use crate::decode::{self, FrameSource, PcmFrames, ReadStatus};
 use crate::formant::Formant;
 use crate::fx::Chain;
+use crate::openers::{Openers, Start as Open};
 use crate::render::{Mark, Start};
 use crate::resample::StreamResampler;
 use crate::shared::{LogLimiter, Shared, frames_to_ns, ns_to_frames};
@@ -40,19 +42,50 @@ const SLOW_STEP_LOG_EVERY: Duration = Duration::from_secs(10);
 /// heard as a step.
 const GAIN_GLIDE: Duration = Duration::from_millis(400);
 
+thread_local! {
+    /// The slot of the item whose opener runs on this thread.
+    static OPENING: std::cell::RefCell<Option<Arc<Slot>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs a stream's opener with its slot known to [`open_wanted`].
+fn opening(
+    slot: Option<Arc<Slot>>,
+    open: crate::types::StreamOpener,
+) -> Result<Box<dyn crate::types::ByteSource>, String> {
+    OPENING.with(|o| *o.borrow_mut() = slot);
+    let opened = open();
+    OPENING.with(|o| *o.borrow_mut() = None);
+    opened
+}
+
+/// For a [`StreamOpener`](crate::StreamOpener), while it runs: whether the
+/// item it opens is still wanted. A service lookup the opener waits for
+/// (before the stream exists, so before an
+/// [`interrupter`](crate::ByteSource::interrupter) can reach it) should
+/// give up once this says false: the item was superseded (another play, a
+/// stop, a new next item). Asked outside an opener, it always says true.
+pub fn open_wanted() -> impl Fn() -> bool + Send + Sync + 'static {
+    let slot = OPENING.with(|o| o.borrow().clone());
+    move || !cancelled(slot.as_ref())
+}
+
 /// Commands for the decoder thread.
 pub(crate) enum DecCmd {
+    /// `slot`: see [`crate::cancel`] (none for a PCM source).
     Play {
         item: PlayItem,
         gen_id: u64,
+        slot: Option<Arc<Slot>>,
     },
-    SetNext(PlayItem),
+    SetNext(PlayItem, Option<Arc<Slot>>),
     ClearNext,
-    /// `id` is the item the listener saw when asking.
+    /// `id` is the item the listener saw when asking; `woke`, the items
+    /// the seek interrupted (see [`crate::cancel`]).
     Seek {
         pos: Duration,
         id: u64,
         gen_id: u64,
+        woke: Vec<Arc<Slot>>,
     },
     Stop {
         gen_id: u64,
@@ -114,10 +147,12 @@ pub(crate) struct Item {
     total_src: Option<u64>,
     fx: ItemFx,
     speed: Speed,
+    /// What the player knows about its reads (see [`crate::cancel`]).
+    slot: Option<Arc<Slot>>,
 }
 
 impl Item {
-    fn open(item: PlayItem) -> Result<Self, (u64, DecodeError)> {
+    fn open(item: PlayItem, slot: Option<Arc<Slot>>) -> Result<Self, (u64, DecodeError)> {
         let id = item.id;
         let fx = item.fx;
         let mut hint = item.duration_hint;
@@ -126,8 +161,19 @@ impl Item {
             ItemSource::File(path) => Box::new(decode::open_file(&path).map_err(|e| (id, e))?),
             ItemSource::Pcm(pcm) => Box::new(PcmFrames::new(pcm).map_err(|e| (id, e))?),
             ItemSource::Stream(open) => {
-                let bytes = open().map_err(|m| (id, DecodeError::Stream(m)))?;
-                let (src, info) = decode::open_stream(bytes).map_err(|e| (id, e))?;
+                // Superseded while it waited for a thread: not even begun.
+                if cancelled(slot.as_ref()) {
+                    return Err((id, DecodeError::Stream("cancelled".into())));
+                }
+                let bytes = opening(slot.clone(), open).map_err(|m| (id, DecodeError::Stream(m)))?;
+                // From here on a cancel reaches the reads of the probe too.
+                if let Some(s) = &slot
+                    && !s.attach(bytes.interrupter())
+                {
+                    return Err((id, DecodeError::Stream("cancelled".into())));
+                }
+                let (src, info) =
+                    decode::open_stream(bytes, slot.clone()).map_err(|e| (id, e))?;
                 gain_db = info.gain_db.unwrap_or(gain_db);
                 hint = info.duration.or(hint);
                 Box::new(src)
@@ -153,7 +199,33 @@ impl Item {
             total_src,
             fx,
             speed: Speed::new(fx.speed),
+            slot,
         })
+        .inspect(|item| {
+            if let Some(s) = &item.slot {
+                s.mark_opened();
+            }
+        })
+    }
+
+    fn cancelled(&self) -> bool {
+        cancelled(self.slot.as_ref())
+    }
+
+    /// A read of it failed because it was cancelled or interrupted (not
+    /// the stream's own failure); the note is taken.
+    fn gave_way(&self) -> bool {
+        self.slot.as_ref().is_some_and(|s| s.take_gave_way())
+    }
+
+    /// A seek that interrupted it is on its way.
+    fn interrupted(&self) -> bool {
+        self.slot.as_ref().is_some_and(|s| s.interrupted())
+    }
+
+    /// It takes over as the next item; false when it was superseded.
+    fn start(&self) -> bool {
+        self.slot.as_ref().is_none_or(|s| s.start())
     }
 
     fn set_fx(&mut self, fx: ItemFx) {
@@ -466,6 +538,10 @@ struct Active {
     ring: Option<(u64, u64)>,
     /// A change of the item's gain gliding in ([`Self::set_gain_db`]).
     glide: Option<Glide>,
+    /// A read failed because a seek interrupted it, and the seek did not
+    /// come: the demuxer may have stopped inside a packet, so the item
+    /// starts again where the listener is before it is read on.
+    stalled: bool,
 }
 
 /// A gain change on its way: from `from_db` to the item's own gain over
@@ -488,6 +564,7 @@ impl Active {
             fx_cfg: None,
             ring: None,
             glide: None,
+            stalled: false,
         }
     }
 
@@ -635,6 +712,7 @@ impl Active {
     /// Positions the source at `src_frame` and drops buffered audio.
     fn reposition(&mut self, src_frame: u64) -> Result<(), DecodeError> {
         self.item.src.seek(src_frame)?;
+        self.stalled = false;
         self.stream = None;
         self.start_src = src_frame;
         self.produced = 0;
@@ -642,6 +720,15 @@ impl Active {
         self.fx_cfg = None;
         self.ring = None;
         Ok(())
+    }
+
+    /// Back to its start: a next item the stream had read ahead into. One
+    /// that cannot get there now starts over when it takes over.
+    fn rewind(&mut self) {
+        if self.reposition(0).is_err() {
+            self.item.gave_way();
+            self.stalled = true;
+        }
     }
 
     /// Device frames from the item's end, if its length is known.
@@ -709,13 +796,21 @@ pub(crate) struct Decoder {
     tx: Sender<DecCmd>,
     /// Last token handed to an opener thread.
     open_seq: u64,
+    /// The opener threads.
+    openers: Openers,
     /// A `Play` of a stream waiting for its opener: `(token, gen_id, item id)`.
     pending_play: Option<(u64, u64, u64)>,
+    /// The slot of that item.
+    pending_play_slot: Option<Arc<Slot>>,
+    /// Tokens of superseded opens no longer counted in flight.
+    released: Vec<u64>,
     /// A seek of that item asked for meanwhile: `(position, gen_id)`.
     pending_seek: Option<(Duration, u64)>,
     /// A `SetNext` of a file or stream waiting for its opener (token). While
     /// it is set, the current item does not end into nothing: it waits.
     pending_next: Option<u64>,
+    /// The slot of that item.
+    pending_next_slot: Option<Arc<Slot>>,
     /// That pending next item is a local file: it opens in moments, so the
     /// current item holds just short of its end for it (see
     /// [`Self::hold_for_next`]).
@@ -777,9 +872,13 @@ impl Decoder {
             rx,
             tx,
             open_seq: 0,
+            openers: Openers::default(),
             pending_play: None,
+            pending_play_slot: None,
+            released: Vec::new(),
             pending_seek: None,
             pending_next: None,
+            pending_next_slot: None,
             pending_next_file: false,
             pending_next_id: None,
             pending_fx: None,
@@ -886,17 +985,32 @@ impl Decoder {
 
     fn dispatch(&mut self, cmd: DecCmd) -> bool {
         match cmd {
-            DecCmd::Play { item, gen_id } => self.play(item, gen_id),
-            DecCmd::SetNext(item) => self.set_next(item),
+            DecCmd::Play { item, gen_id, slot } => self.play(item, gen_id, slot),
+            DecCmd::SetNext(item, slot) => self.set_next(item, slot),
             DecCmd::ClearNext => {
                 self.next = None;
-                self.pending_next = None;
+                self.release_next();
+                self.pending_next_slot = None;
             }
-            DecCmd::Seek { pos, id, gen_id } => self.seek(pos, id, gen_id),
+            DecCmd::Seek {
+                pos,
+                id,
+                gen_id,
+                woke,
+            } => {
+                // Taken: the reads it interrupted wait again, unless a
+                // newer seek is on its way too.
+                for s in &woke {
+                    s.end_interrupt();
+                }
+                self.seek(pos, id, gen_id);
+            }
             DecCmd::Stop { gen_id } => {
-                self.pending_play = None;
+                self.release_play();
+                self.pending_play_slot = None;
                 self.drop_pending_seek();
-                self.pending_next = None;
+                self.release_next();
+                self.pending_next_slot = None;
                 self.last_gen = gen_id;
                 self.cur = None;
                 self.next = None;
@@ -905,38 +1019,71 @@ impl Decoder {
             }
             DecCmd::SetFx { id, fx, gen_id } => self.set_fx(id, fx, gen_id),
             DecCmd::SetGain { id, gain_db } => self.set_gain(id, gain_db),
-            DecCmd::Opened { token, result } => self.opened(token, result),
+            DecCmd::Opened { token, result } => {
+                if let Some(i) = self.released.iter().position(|t| *t == token) {
+                    // No longer counted (see `release`): `handle` counts it
+                    // off once more.
+                    self.released.swap_remove(i);
+                    self.sh.inflight.fetch_add(1, Ordering::AcqRel);
+                }
+                self.opened(token, result);
+            }
             DecCmd::Shutdown => return false,
         }
         true
     }
 
-    /// Opens an item on its own thread; the result comes back as
-    /// [`DecCmd::Opened`] with the returned token. Counted as a command in
-    /// flight until then (the offline device waits for it).
-    fn open_async(&mut self, item: PlayItem) -> u64 {
+    /// Opens an item on an opener thread (see [`crate::openers`]); the
+    /// result comes back as [`DecCmd::Opened`] with the returned token.
+    /// Counted as a command in flight until then (the offline device waits
+    /// for it), or until it turns out it will not open (cancelled first).
+    fn open_async(&mut self, item: PlayItem, slot: Option<Arc<Slot>>) -> u64 {
         self.open_seq += 1;
         let token = self.open_seq;
         let id = item.id;
         self.sh.inflight.fetch_add(1, Ordering::AcqRel);
         let tx = self.tx.clone();
         let sh = Arc::clone(&self.sh);
-        let spawned = std::thread::Builder::new()
-            .name("nikgob-audio-open".into())
-            .spawn(move || {
-                let result = Item::open(item);
+        let job_slot = slot.clone();
+        self.openers.submit(
+            slot,
+            Box::new(move |start| {
+                let result = match start {
+                    Open::Run => Item::open(item, job_slot),
+                    Open::Skip => Err((id, DecodeError::Stream("cancelled".into()))),
+                    Open::Failed(e) => Err((
+                        id,
+                        DecodeError::Stream(format!("cannot start opener: {e}")),
+                    )),
+                };
                 if tx.send(DecCmd::Opened { token, result }).is_err() {
                     sh.inflight.fetch_sub(1, Ordering::AcqRel);
                 }
-            });
-        if let Err(e) = spawned {
-            self.sh.inflight.fetch_sub(1, Ordering::AcqRel);
-            self.report(
-                Some(id),
-                &DecodeError::Stream(format!("cannot start opener: {e}")),
-            );
-        }
+            }),
+        );
         token
+    }
+
+    /// The pending play's open is superseded (see [`Self::release`]).
+    fn release_play(&mut self) {
+        if let Some((token, _, _)) = self.pending_play.take() {
+            self.release(token);
+        }
+    }
+
+    /// The pending next item's open is superseded (see [`Self::release`]).
+    fn release_next(&mut self) {
+        if let Some(token) = self.pending_next.take() {
+            self.release(token);
+        }
+    }
+
+    /// An open superseded is no longer a command in flight: the offline
+    /// device does not wait for it (its result is dropped when it comes,
+    /// whenever an open that cannot be interrupted returns).
+    fn release(&mut self, token: u64) {
+        self.sh.inflight.fetch_sub(1, Ordering::AcqRel);
+        self.released.push(token);
     }
 
     /// A stream finished opening: start it, or make it the next item, if it
@@ -946,7 +1093,16 @@ impl Decoder {
             && want == token
         {
             self.pending_play = None;
+            let slot = self.pending_play_slot.take();
             let seek = self.pending_seek.take();
+            if cancelled(slot.as_ref()) {
+                // Superseded by a play or a stop that is on its way: not
+                // started, nothing reported.
+                if let Some((_, seek_gen)) = seek {
+                    let _ = self.events.send(DecEvent::SeekDropped { gen_id: seek_gen });
+                }
+                return;
+            }
             match result {
                 Ok(mut item) => {
                     let id = item.id;
@@ -970,7 +1126,9 @@ impl Decoder {
             }
         } else if self.pending_next == Some(token) {
             self.pending_next = None;
-            self.accept_next(result);
+            if !cancelled(self.pending_next_slot.take().as_ref()) {
+                self.accept_next(result);
+            }
         }
         // Anything else was superseded meanwhile and is dropped.
     }
@@ -982,9 +1140,11 @@ impl Decoder {
         });
     }
 
-    fn play(&mut self, item: PlayItem, gen_id: u64) {
-        self.pending_play = None;
-        self.pending_next = None;
+    fn play(&mut self, item: PlayItem, gen_id: u64, slot: Option<Arc<Slot>>) {
+        self.release_play();
+        self.pending_play_slot = None;
+        self.release_next();
+        self.pending_next_slot = None;
         self.pending_fx = None;
         self.pending_gain = None;
         self.drop_pending_seek();
@@ -998,11 +1158,12 @@ impl Decoder {
             self.cur = None;
             self.push_flush(self.last_gen, None);
             let id = item.id;
-            let token = self.open_async(item);
+            let token = self.open_async(item, slot.clone());
             self.pending_play = Some((token, gen_id, id));
+            self.pending_play_slot = slot;
             return;
         }
-        match Item::open(item) {
+        match Item::open(item, slot) {
             Ok(item) => {
                 self.next = None;
                 self.start_item(item, gen_id);
@@ -1025,7 +1186,7 @@ impl Decoder {
         self.push_flush(gen_id, Some(start));
     }
 
-    fn set_next(&mut self, item: PlayItem) {
+    fn set_next(&mut self, item: PlayItem, slot: Option<Arc<Slot>>) {
         // A change asked for the next item that was opening is over with it
         // (the new item brings its own).
         if self
@@ -1045,11 +1206,14 @@ impl Decoder {
             self.next = None;
             self.pending_next_file = matches!(item.source, ItemSource::File(_));
             self.pending_next_id = Some(item.id);
-            self.pending_next = Some(self.open_async(item));
+            self.release_next();
+            self.pending_next = Some(self.open_async(item, slot.clone()));
+            self.pending_next_slot = slot;
             return;
         }
-        self.pending_next = None;
-        self.accept_next(Item::open(item));
+        self.release_next();
+        self.pending_next_slot = None;
+        self.accept_next(Item::open(item, slot));
     }
 
     fn accept_next(&mut self, result: Result<Item, (u64, DecodeError)>) {
@@ -1118,13 +1282,18 @@ impl Decoder {
         if was_chained {
             // The resampler had read ahead into the next item: rewind it.
             if let Some(next) = self.next.as_mut() {
-                let _ = next.reposition(0);
+                next.rewind();
             }
         }
         match result {
             Ok(()) => {
                 self.last_gen = gen_id;
                 self.push_flush(gen_id, Some(start));
+            }
+            Err(_) if cur.item.gave_way() => {
+                // A newer seek, a play or a stop is on its way and made
+                // the reposition give way: that one decides.
+                cur.stalled = true;
             }
             Err(e) => {
                 self.report(Some(id), &e);
@@ -1345,12 +1514,16 @@ impl Decoder {
         let result = cur.reposition(frame);
         let start = cur.start_at(pos_ns, unapplied_play);
         if was_chained && let Some(next) = self.next.as_mut() {
-            let _ = next.reposition(0);
+            next.rewind();
         }
         match result {
             Ok(()) => {
                 self.last_gen = gen_id;
                 self.push_flush(gen_id, Some(start));
+            }
+            Err(_) if cur.item.gave_way() => {
+                // A seek, a play or a stop on its way made it give way.
+                cur.stalled = true;
             }
             Err(e) => {
                 self.report(Some(id), &e);
@@ -1477,6 +1650,18 @@ impl Decoder {
     }
 
     fn produce_single(&mut self) -> Step {
+        if let Some(cur) = self.cur.as_ref().filter(|c| c.stalled) {
+            let waits = |i: &Item| i.cancelled() || i.interrupted();
+            if waits(&cur.item) || self.next.as_ref().is_some_and(|n| waits(&n.item)) {
+                // The command it gave way to is on its way.
+                self.short_wait = true;
+                return Step::Idle;
+            }
+            // It never came (a seek of another item): read on from where
+            // the listener is.
+            self.restart_current(self.last_gen);
+            return Step::Worked;
+        }
         let cfg = self.cfg;
         let cross = self.crossfade_frames();
         let mut want = CHUNK_FRAMES as u64;
@@ -1540,6 +1725,16 @@ impl Decoder {
                     self.finish_current();
                 }
                 Step::Worked
+            }
+            // The read that failed gave way (its own source says so: the
+            // item, or the next one it flowed on into at a gapless join):
+            // a seek, a play, a stop or a new next item is on its way. The
+            // demuxer may have stopped inside a packet: the item is read
+            // on only after a reposition.
+            Err(_) if cur.item.gave_way() | self.next.as_ref().is_some_and(|n| n.item.gave_way()) => {
+                cur.stalled = true;
+                self.short_wait = true;
+                Step::Idle
             }
             Err(e) => {
                 self.report(Some(id), &e);
@@ -1609,6 +1804,10 @@ impl Decoder {
         let Some(mut to) = self.next.take() else {
             return;
         };
+        if !to.item.start() {
+            // Superseded meanwhile: the current item plays to its end.
+            return;
+        }
         let cfg = self.cfg;
         if let Err(e) = to.prepare(cfg) {
             self.report(Some(to.id()), &e);
@@ -1636,6 +1835,19 @@ impl Decoder {
         let (Some(cur), Some(x)) = (self.cur.as_mut(), self.xfade.as_mut()) else {
             return Step::Idle;
         };
+        if x.to.stalled {
+            if x.to.item.cancelled() || x.to.item.interrupted() {
+                // What it gave way to is on its way (see below).
+                self.short_wait = true;
+                return Step::Idle;
+            }
+            // The seek its interruption was for went to the outgoing item:
+            // the incoming one goes on alone, from where the listener is.
+            if let Some(x) = self.xfade.take() {
+                self.cur = Some(x.to);
+            }
+            return Step::Worked;
+        }
         let want = (x.len - x.done).min(CHUNK_FRAMES as u64).max(1) as usize;
         let (out_from, out_to) = cur.gains(normalization, want);
         let (in_from, in_to) = x.to.gains(normalization, want);
@@ -1645,7 +1857,7 @@ impl Decoder {
         self.buf_b.clear();
         // Outgoing item: whatever it still has, silence once it is over
         // (through its reverb, which rings on under the incoming item).
-        let from_err = cur.read(cfg, want, &mut self.buf, None).err();
+        let mut from_err = cur.read(cfg, want, &mut self.buf, None).err();
         let got = self.buf.len().min(want * ch);
         self.buf.resize(want * ch, 0.0);
         if got < want * ch && cur.fx.is_some() {
@@ -1668,6 +1880,28 @@ impl Decoder {
                 Some(e)
             }
         };
+        // Either side may be the one a read gave way in (see
+        // `produce_single`); each looks at its own source.
+        let from_gave = from_err.is_some() && cur.item.gave_way();
+        let to_gave = to_err.is_some() && x.to.item.gave_way();
+        if from_gave && cur.item.cancelled() || to_gave && x.to.item.cancelled() {
+            // A play or a stop is on its way.
+            self.short_wait = true;
+            return Step::Idle;
+        }
+        if to_gave {
+            // A seek is on its way: one of the incoming item takes it.
+            x.to.stalled = true;
+            self.short_wait = true;
+            return Step::Idle;
+        }
+        // The outgoing item gave way to a seek: a seek of it is dropped (the
+        // listener is past it at once) and one of the incoming item drops
+        // it too, so it ends here.
+        let from_gone = from_gave;
+        if from_gone {
+            from_err = None;
+        }
 
         // Equal-power mix over `want` frames; a side that returned fewer
         // frames contributes silence for the rest.
@@ -1687,7 +1921,7 @@ impl Decoder {
             }
         }
         x.done += want as u64;
-        let finished = x.done >= x.len || to_eof;
+        let finished = x.done >= x.len || to_eof || from_gone;
         if let Some(e) = from_err {
             self.report(Some(cur_id), &e);
         }
@@ -1710,7 +1944,20 @@ impl Decoder {
         };
         let ended_id = ended.id();
         let cfg = self.cfg;
-        if let Some(mut next) = self.next.take() {
+        // A next item superseded meanwhile does not start: the current one
+        // ends into nothing, and the command that superseded it follows.
+        let next = match self.next.take().filter(|n| n.item.start()) {
+            // A read ahead into it gave way: it starts over.
+            Some(mut n) if n.stalled => match n.reposition(0) {
+                Ok(()) => Some(n),
+                Err(e) => {
+                    self.report(Some(n.id()), &e);
+                    None
+                }
+            },
+            other => other,
+        };
+        if let Some(mut next) = next {
             // If the resampler already flowed on into this item, keep it: the
             // join is then continuous instead of two separately flushed streams.
             let carried = ended
@@ -1901,6 +2148,7 @@ mod tests {
             total_src: Some(frames),
             fx: ItemFx::default(),
             speed: Speed::ONE,
+            slot: None,
         }
 
     }

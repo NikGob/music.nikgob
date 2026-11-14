@@ -109,12 +109,14 @@
 mod analyzer;
 mod backend;
 mod biquad;
+mod cancel;
 mod channels;
 mod decode;
 mod eq;
 mod formant;
 mod fx;
 mod offline;
+mod openers;
 mod pipeline;
 mod player;
 mod render;
@@ -127,9 +129,10 @@ pub use analyzer::Analyzer;
 pub use eq::{EQ_BANDS, EQ_FREQS, EQ_MAX_DB, eq_preamp_db, eq_response_db};
 pub use fastframe_audio::{Buffer, BufferSize, Device, OutputOptions, output_device_names};
 pub use offline::{OfflineDevice, OfflineOptions};
+pub use pipeline::open_wanted;
 pub use player::{Player, PlayerOptions, WakeFn};
 pub use tap::{SNAPSHOT_LEN, VisualizerTap};
 pub use types::{
-    ByteSource, DecodeError, Event, ItemFx, ItemSource, PcmError, PcmRead, PcmSource, PlayItem,
-    Reverb, SpawnError, StreamOpener,
+    ByteSource, DecodeError, Event, Interrupter, ItemFx, ItemSource, PcmError, PcmRead, PcmSource,
+    PlayItem, Reverb, SpawnError, StreamOpener,
 };

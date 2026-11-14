@@ -1854,8 +1854,8 @@ impl StreamService for Spotify {
         let recent = self.recent.clone();
         let kept = id.clone();
         Ok(Box::new(
-            audio::SpotifyStream::new(Box::new(move || {
-                audio::block_on_runtime(&handle, async move { me.open_track(id).await })
+            audio::SpotifyStream::new(Box::new(move |stop| {
+                audio::block_on_runtime(&handle, stop, async move { me.open_track(id).await })
             }))
             .keep_in(kept, recent),
         ))
