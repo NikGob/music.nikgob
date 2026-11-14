@@ -314,14 +314,19 @@ fn a_rate_limited_playlist_check_runs_again_when_the_pause_ends() {
     }
 }
 
-/// Remembers what the engine was asked to play, and the seeks.
-struct Recorder(Arc<Mutex<Vec<PlayRequest>>>, Arc<Mutex<Vec<Duration>>>);
+/// Remembers what the engine was asked to play, the seeks, and the entries
+/// handed over ahead (gapless).
+struct Recorder(Arc<Mutex<Vec<PlayRequest>>>, Arc<Mutex<Vec<Duration>>>, Arc<Mutex<Vec<u64>>>);
 
 impl Playback for Recorder {
     fn play(&mut self, item: PlayRequest) {
         self.0.lock().unwrap().push(item);
     }
-    fn set_next(&mut self, _: Option<PlayRequest>) {}
+    fn set_next(&mut self, next: Option<PlayRequest>) {
+        if let Some(n) = next {
+            self.2.lock().unwrap().push(n.id);
+        }
+    }
     fn pause(&mut self) {}
     fn resume(&mut self) {}
     fn stop(&mut self) {}
@@ -344,8 +349,19 @@ fn start_playing(lib: &Library, yt: &Arc<FakeService>) -> (Runtime, Arc<Mutex<Ve
 /// [`start_playing`] on `streams`, with the engine's seeks.
 #[allow(clippy::type_complexity)]
 fn start_on(lib: &Library, streams: Vec<Arc<dyn StreamService>>) -> (Runtime, Arc<Mutex<Vec<PlayRequest>>>, Arc<Mutex<Vec<Duration>>>) {
+    let (rt, asked, seeks, _) = start_ahead(lib, streams);
+    (rt, asked, seeks)
+}
+
+/// [`start_on`] with the entries handed over ahead.
+#[allow(clippy::type_complexity)]
+fn start_ahead(
+    lib: &Library,
+    streams: Vec<Arc<dyn StreamService>>,
+) -> (Runtime, Arc<Mutex<Vec<PlayRequest>>>, Arc<Mutex<Vec<Duration>>>, Arc<Mutex<Vec<u64>>>) {
     let asked = Arc::new(Mutex::new(Vec::new()));
     let seeks = Arc::new(Mutex::new(Vec::new()));
+    let ahead = Arc::new(Mutex::new(Vec::new()));
     let rt = Runtime::start_scheduled(
         RuntimeConfig {
             library: lib.clone(),
@@ -356,11 +372,11 @@ fn start_on(lib: &Library, streams: Vec<Arc<dyn StreamService>>) -> (Runtime, Ar
             settings_path: None,
             import: None,
         },
-        Box::new(Recorder(asked.clone(), seeks.clone())),
+        Box::new(Recorder(asked.clone(), seeks.clone(), ahead.clone())),
         Arc::new(|| {}),
         quick(),
     );
-    (rt, asked, seeks)
+    (rt, asked, seeks, ahead)
 }
 
 /// YouTube's bot check as the service keeps it: every call fails for
@@ -631,4 +647,122 @@ fn a_song_on_disk_plays_during_the_pause() {
     bot_check(&yt, Duration::from_secs(600));
     rt.send(Command::PlayTracks { tracks: vec![a], start: 0, context: "test".into() });
     assert!(is_stream(&asked_at(&asked, 0), "yt-gruppa-3"));
+}
+
+#[test]
+fn a_queue_edit_while_waiting_for_the_service_keeps_it_paused() {
+    // Clear, reorder, play next: each is the user's say over what comes.
+    type Edit = fn(&Runtime, TrackId);
+    let edits: [(&str, Edit); 3] = [
+        ("clear", |rt, _| rt.send(Command::ClearQueue)),
+        ("reorder", |rt, _| {
+            let next: Vec<u64> = rt.state().queue.next.iter().map(|e| e.entry).collect();
+            rt.send(Command::MoveInQueue { entry: next[1], anchor: next[0], after: false });
+        }),
+        ("play next", |rt, t| rt.send(Command::PlayNext(vec![t]))),
+    ];
+    for (what, edit) in edits {
+        let lib = Library::open_in_memory().unwrap();
+        let yt = Arc::new(FakeService::youtube());
+        let a = stream_track(&lib, &yt, "yt-gruppa-3");
+        let b = stream_track(&lib, &yt, "yt-firstlove-1");
+        let c = stream_track(&lib, &yt, "yt-firstlove-3");
+        let (rt, asked) = start_playing(&lib, &yt);
+        bot_check(&yt, Duration::from_millis(600));
+        rt.send(Command::PlayTracks { tracks: vec![a, b, c], start: 0, context: "test".into() });
+        wait_for("the wait", 10, || waits_on(&rt, a));
+        edit(&rt, c);
+        std::thread::sleep(Duration::from_millis(1600));
+        assert!(asked.lock().unwrap().is_empty(), "{what}: started by itself after the edit");
+        assert!(waits_on(&rt, a), "{what}");
+        rt.send(Command::Play);
+        assert!(is_stream(&asked_at(&asked, 0), "yt-gruppa-3"), "{what}");
+    }
+}
+
+#[test]
+fn a_cut_stream_is_not_handed_over_ahead_and_starts_where_it_stopped() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(FakeService::youtube());
+    let a = stream_track(&lib, &yt, "yt-gruppa-3");
+    let file = file_track(&lib, &yt, "yt-firstlove-2", "Music/later.opus");
+    let (rt, asked, seeks, ahead) = start_ahead(&lib, vec![yt.clone() as Arc<dyn StreamService>]);
+    assert!(rt.state().prefs.gapless, "gapless is on");
+    rt.send(Command::PlayTracks { tracks: vec![a, file], start: 0, context: "test".into() });
+    let r0 = asked_at(&asked, 0);
+    let tx = rt.playback_sender();
+    // (Its first report while it buffers is taken as it is.)
+    tx.send(PlaybackEvent::Position { id: r0.id, position: Duration::from_secs(90) }).unwrap();
+    wait_for("the position", 10, || rt.state().player.position >= Duration::from_secs(90));
+    bot_check(&yt, Duration::from_millis(500));
+    tx.send(PlaybackEvent::Error { id: r0.id, message: "stream: rate limited".into() }).unwrap();
+    let r1 = asked_at(&asked, 1);
+    assert!(is_file(&r1, "later.opus"), "{:?}", r1.source);
+    tx.send(PlaybackEvent::Started { id: r1.id }).unwrap();
+    // The pause lifts while the file plays; things around the player go on.
+    std::thread::sleep(Duration::from_millis(1200));
+    rt.send(Command::SetVolume(0.5));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!ahead.lock().unwrap().contains(&r0.id), "the cut stream was handed over ahead: a gapless step would start it at 0:00");
+    // The file ends: the song starts on its own, at 1:30.
+    tx.send(PlaybackEvent::Ended { id: r1.id }).unwrap();
+    let r2 = asked_at(&asked, 2);
+    assert_eq!(r2.id, r0.id);
+    wait_for("the seek", 10, || seeks.lock().unwrap().contains(&Duration::from_secs(90)));
+}
+
+#[test]
+fn two_cut_streams_keep_their_own_places() {
+    let lib = Library::open_in_memory().unwrap();
+    // Songs only one service has (Spotify would find a copy of a known one).
+    let yt = Arc::new(FakeService::youtube().with_track("only", "Only Here", "Nobody Else", 200));
+    let sp = Arc::new(FakeService::spotify().with_track("solo", "Solo", "Nobody", 200));
+    let a = stream_track(&lib, &yt, "yt-x-only");
+    let b = stream_track(&lib, &sp, "sp-x-solo");
+    let (rt, asked, seeks) = start_on(&lib, vec![sp.clone() as Arc<dyn StreamService>, yt.clone()]);
+    rt.send(Command::PlayTracks { tracks: vec![a, b], start: 0, context: "test".into() });
+    let tx = rt.playback_sender();
+    // YouTube pauses at 1:30 of the first: the Spotify song plays meanwhile.
+    let r0 = asked_at(&asked, 0);
+    tx.send(PlaybackEvent::Position { id: r0.id, position: Duration::from_secs(90) }).unwrap();
+    wait_for("the position", 10, || rt.state().player.position >= Duration::from_secs(90));
+    bot_check(&yt, Duration::from_secs(3));
+    tx.send(PlaybackEvent::Error { id: r0.id, message: "stream: rate limited".into() }).unwrap();
+    let r1 = asked_at(&asked, 1);
+    assert!(matches!(&r1.source, PlaySource::Stream { service: Service::Spotify, .. }), "{:?}", r1.source);
+    // Spotify pauses at 1:00 of it: nothing plays now, the player waits on it.
+    tx.send(PlaybackEvent::Position { id: r1.id, position: Duration::from_secs(60) }).unwrap();
+    wait_for("its position", 10, || rt.state().player.position >= Duration::from_secs(60));
+    sp.rate_limit_next_paused("open_audio", 1, Duration::from_millis(800));
+    assert!(sp.open_audio("sp-x-solo").is_err());
+    tx.send(PlaybackEvent::Error { id: r1.id, message: "stream: rate limited".into() }).unwrap();
+    wait_for("the wait", 10, || waits_on(&rt, b));
+    // Each goes on from its own place: the Spotify song at 1:00, then the
+    // YouTube song at 1:30.
+    let r2 = asked_at(&asked, 2);
+    assert_eq!(r2.id, r1.id);
+    wait_for("the first seek", 10, || seeks.lock().unwrap().contains(&Duration::from_secs(60)));
+    tx.send(PlaybackEvent::Ended { id: r2.id }).unwrap();
+    let r3 = asked_at(&asked, 3);
+    assert_eq!(r3.id, r0.id);
+    wait_for("the second seek", 10, || seeks.lock().unwrap().contains(&Duration::from_secs(90)));
+}
+
+#[test]
+fn a_slow_disk_does_not_hold_the_player_and_a_song_on_it_plays_once_known() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(FakeService::youtube());
+    let a = stream_track(&lib, &yt, "yt-gruppa-3");
+    drop(yt.open_audio("yt-gruppa-3").unwrap());
+    // Asking whether it is on disk takes 1.5 s.
+    yt.delay("has_cached_audio", Duration::from_millis(1500));
+    let (rt, asked) = start_playing(&lib, &yt);
+    bot_check(&yt, Duration::from_secs(600));
+    let sent = Instant::now();
+    rt.send(Command::PlayTracks { tracks: vec![a], start: 0, context: "test".into() });
+    wait_for("the player to answer", 10, || waits_on(&rt, a));
+    assert!(sent.elapsed() < Duration::from_millis(1000), "the player waited for the disk: {:?}", sent.elapsed());
+    // Known to be on disk: it plays.
+    assert!(is_stream(&asked_at(&asked, 0), "yt-gruppa-3"));
+    assert!(sent.elapsed() >= Duration::from_millis(1400));
 }

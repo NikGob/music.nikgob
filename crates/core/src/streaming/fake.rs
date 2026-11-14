@@ -1631,6 +1631,13 @@ impl StreamService for FakeService {
         Some(Box::new(audio))
     }
 
+    /// Counted as `"has_cached_audio"` (so [`FakeService::delay`] makes it
+    /// a slow disk).
+    fn has_cached_audio(&self, id: &str) -> bool {
+        self.count("has_cached_audio");
+        self.lock().cached.contains(id)
+    }
+
     fn clear_cache(&self) {
         self.lock().cached.clear();
     }

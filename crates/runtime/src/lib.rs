@@ -747,6 +747,36 @@ impl Later {
     }
 }
 
+/// The command changes what comes next in the queue (not a new queue).
+fn edits_queue(c: &Command) -> bool {
+    matches!(
+        c,
+        Command::PlayNext(_)
+            | Command::Enqueue(_)
+            | Command::PlayReleaseNext(_)
+            | Command::EnqueueRelease(_)
+            | Command::PlayPlaylistNext(_)
+            | Command::EnqueuePlaylist(_)
+            | Command::PlayArtistNext(_)
+            | Command::EnqueueArtist(_)
+            | Command::RemoveFromQueue(_)
+            | Command::MoveInQueue { .. }
+            | Command::ClearQueue
+            | Command::UndoClearQueue
+            | Command::ToggleShuffle
+            | Command::PlayStreamNext(_)
+            | Command::EnqueueStream(_)
+            | Command::PlayStreamAlbumNext(_)
+            | Command::EnqueueStreamAlbum(_)
+            | Command::PlayStreamPlaylistNext(_)
+            | Command::EnqueueStreamPlaylist(_)
+            | Command::PlayStreamArtistNext(_)
+            | Command::EnqueueStreamArtist(_)
+            | Command::PlayMixNext { .. }
+            | Command::EnqueueMix { .. }
+    )
+}
+
 impl Worker {
     fn new(
         config: RuntimeConfig,
@@ -1145,6 +1175,11 @@ impl Worker {
                 (self.wake)();
                 return;
             }
+        }
+        // The user edits the queue: an entry waiting out a service's pause
+        // no longer starts by itself.
+        if edits_queue(&c) {
+            self.cancel_pause_wake();
         }
         match c {
             Command::TogglePlay => match self.status {
@@ -2028,7 +2063,7 @@ impl Worker {
         self.playing = Some(e);
         self.playing_source = Some((source, kind));
         if kind == SourceKind::Youtube {
-            self.streaming.analysis.youtube_plays();
+            self.youtube_plays();
         }
         self.status = if kind.is_local() {
             Status::Playing
@@ -2268,6 +2303,9 @@ impl Worker {
         // A clip the app queued starts once its song is known (see
         // `streams::clips::QueueClips`): not handed over ahead.
         let next = next.filter(|n| !self.clip_not_ready(*n));
+        // A stream a service's pause cut midway starts where it stopped,
+        // through a start of its own (a gapless step would start it over).
+        let next = next.filter(|n| !self.has_held_position(n.id));
         let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
             self.reading_ahead = None;
             self.playback.set_next(None);
@@ -2361,7 +2399,9 @@ impl Worker {
         if self.playing.is_none() {
             // The restored track: play will start from here.
             if self.resume_at.is_some() {
-                self.drop_held_position();
+                if let Some(c) = self.queue.current() {
+                    self.drop_held_position(c.id);
+                }
                 self.resume_at = Some(p);
                 self.position = p;
                 self.publish_player();
@@ -2781,7 +2821,7 @@ impl Worker {
                     if self.hold_for_pause(e) {
                         return;
                     }
-                    self.drop_held_position();
+                    self.drop_held_position(e.id);
                     self.ended = ended;
                     self.playing_source = Some((source, kind));
                 }

@@ -64,6 +64,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use nikgob_core::model::{ArtistId, EventContext, EventOrigin, TrackId};
@@ -289,6 +290,9 @@ pub(crate) enum RadioMsg {
     NewFound {
         id: u64,
         tracks: Vec<StreamTrack>,
+        /// YouTube Music calls not sent: the listener's YouTube Music began
+        /// meanwhile; they are asked again later.
+        held: Vec<(Call, String)>,
         /// Artists matched in a service on the way.
         artists: Vec<(ArtistId, RemoteId)>,
         /// Answers to keep: cache key and tracks.
@@ -299,7 +303,7 @@ pub(crate) enum RadioMsg {
 }
 
 /// One new-music call for a radio.
-enum Call {
+pub(crate) enum Call {
     /// YouTube Music's radio of a song.
     Radio(String),
     /// A service's related list of a track (Deezer: the radio of its artist).
@@ -404,8 +408,14 @@ fn list_title(of: &str, name: &str) -> String {
     format!("Радио по {of} «{name}»")
 }
 
-async fn fetch(svc: Arc<dyn StreamService>, call: &Call) -> (Result<Vec<StreamTrack>, StreamError>, Option<(ArtistId, RemoteId)>) {
-    match call {
+/// One new-music call; `None` when its second request did not go because
+/// the listener's YouTube Music began (`listening`, YouTube Music only).
+async fn fetch(
+    svc: Arc<dyn StreamService>,
+    call: &Call,
+    listening: &AtomicBool,
+) -> Option<(Result<Vec<StreamTrack>, StreamError>, Option<(ArtistId, RemoteId)>)> {
+    Some(match call {
         Call::Radio(id) => (svc.radio(id).await, None),
         Call::Related(_, id) => (svc.related(id).await, None),
         Call::ArtistRadio { artist, id, name, .. } => {
@@ -415,17 +425,20 @@ async fn fetch(svc: Arc<dyn StreamService>, call: &Call) -> (Result<Vec<StreamTr
                     let key = artist_key(name);
                     let hits = match svc.search_kind(name, SearchKind::Artists).await {
                         Ok(s) => s.artists,
-                        Err(e) => return (Err(e), None),
+                        Err(e) => return Some((Err(e), None)),
                     };
                     match hits.into_iter().find(|a| artist_key(&a.name) == key) {
                         Some(a) => (a.id.id.clone(), Some((*artist, a.id))),
-                        None => return (Ok(Vec::new()), None),
+                        None => return Some((Ok(Vec::new()), None)),
                     }
                 }
             };
+            if svc.service() == Service::Youtube && listening.load(Ordering::Relaxed) {
+                return None;
+            }
             (svc.artist_radio(&id).await, matched)
         }
-    }
+    })
 }
 
 impl Worker {
@@ -899,12 +912,10 @@ impl Worker {
         let prefs = self.state.read().prefs.clone();
         let Some(kind) = self.recs.radio.run.as_ref().map(RadioRun::kind) else { return };
         let new_share = super::new_share(&prefs, kind);
-        // While YouTube Music asks to wait, a top-up of a playing radio
-        // queues what plays now (its files); after the pause it picks as
-        // before. (A radio just started picks as ever: its first entry
-        // waits for the pause or gives way to one that plays.)
-        let queued = self.recs.radio.run.as_ref().is_some_and(|r| r.queue_gen.is_some());
-        let paused = queued && !prefs.mixes_downloaded_only && self.pause_left(Service::Youtube).is_some();
+        // While YouTube Music asks to wait, a radio picks among what plays
+        // now (its files; the picks are looked at again when they come);
+        // after the pause it picks as before.
+        let paused = !prefs.mixes_downloaded_only && self.pause_left(Service::Youtube).is_some();
         let local_only = prefs.mixes_downloaded_only || paused;
         let snap = self.snapshot();
         // What is known of a seed the catalog lacks, once there is a
@@ -1130,10 +1141,14 @@ impl Worker {
             RadioMsg::NewFound {
                 id,
                 tracks,
+                held,
                 artists,
                 answers,
                 via,
             } => {
+                if !held.is_empty() {
+                    self.radio_defer(id, held);
+                }
                 let now = nikgob_library::now_ms();
                 for (key, tracks) in answers {
                     if let Ok(json) = serde_json::to_string(&tracks) {
@@ -1235,7 +1250,29 @@ impl Worker {
                 }
             }
         }
-        if paused_pick && ids.is_empty() {
+        // YouTube Music asks to wait (it may have begun while these were
+        // picked): only what plays now is queued.
+        let paused_now = !prefs.mixes_downloaded_only && self.pause_left(Service::Youtube).is_some();
+        if paused_now && !ids.is_empty() {
+            let picked = ids.len();
+            let (mut keep, mut keep_why) = (Vec::with_capacity(picked), Vec::with_capacity(picked));
+            for (t, why) in ids.into_iter().zip(whys) {
+                if self.plays_now(t) {
+                    keep.push(t);
+                    keep_why.push(why);
+                }
+            }
+            if keep.len() < picked {
+                log::info!("radio: {} of {picked} picks wait for YouTube Music's pause, not queued", picked - keep.len());
+            }
+            (ids, whys) = (keep, keep_why);
+        }
+        if ids.is_empty() && paused_pick && !paused_now {
+            // The pause ended while it picked among the files: as ever now.
+            self.radio_extend();
+            return;
+        }
+        if paused_now && ids.is_empty() {
             // Nothing that plays now: the queue waits for the pause (see
             // `streams::held`), and the radio picks again after it.
             let left = self.pause_left(Service::Youtube).unwrap_or(Duration::from_secs(30));
@@ -1518,6 +1555,23 @@ impl Worker {
     }
 
     /// The queue ran out: a radio picking more plays on when they come.
+    /// YouTube Music calls of radio `id` held back for the listener: asked
+    /// again when it looks again (at most [`DEFERRED_MAX`] wait).
+    fn radio_defer(&mut self, id: u64, calls: Vec<(Call, String)>) {
+        for (call, seed) in calls {
+            if self.recs.radio.deferred.len() < DEFERRED_MAX {
+                self.recs.radio.deferred.push((id, call, seed));
+            }
+        }
+        if !std::mem::replace(&mut self.recs.radio.deferred_wake, true) {
+            let after = self.streaming.schedule.listener_recheck + crate::streams::wake_jitter();
+            self.streaming.spawn_internal(async move {
+                tokio::time::sleep(after).await;
+                Internal::Recs(Msg::Radio(RadioMsg::AskDeferred))
+            });
+        }
+    }
+
     /// The pause that left radio `id` with nothing to pick is over: it
     /// picks again, and a radio that ran out meanwhile plays on.
     fn radio_pause_over(&mut self, id: u64) {
@@ -1961,7 +2015,7 @@ impl Worker {
         let now = nikgob_library::now_ms();
         let mut cached = Vec::new();
         let mut via: Vec<(RemoteId, String)> = Vec::new();
-        let mut asks: Vec<(Arc<dyn StreamService>, Call, String, String)> = Vec::new();
+        let mut asks: Vec<(Arc<dyn StreamService>, Call, String, String, String)> = Vec::new();
         for (call, seed) in calls {
             let (service, key) = match &call {
                 Call::Radio(v) => (Service::Youtube, cache_key(Service::Youtube, "radio", v)),
@@ -1985,21 +2039,12 @@ impl Worker {
                 continue;
             }
             // The listener's YouTube Music first: held back, asked later.
-            if let Some(wait) = self.background_wait(service) {
-                if self.recs.radio.deferred.len() < DEFERRED_MAX {
-                    self.recs.radio.deferred.push((id, call, seed));
-                }
-                if !std::mem::replace(&mut self.recs.radio.deferred_wake, true) {
-                    let after = wait + crate::streams::wake_jitter();
-                    self.streaming.spawn_internal(async move {
-                        tokio::time::sleep(after).await;
-                        Internal::Recs(Msg::Radio(RadioMsg::AskDeferred))
-                    });
-                }
+            if self.background_wait(service).is_some() {
+                self.radio_defer(id, vec![(call, seed)]);
                 continue;
             }
             if let Some(svc) = self.service(service) {
-                asks.push((svc, call, key, why));
+                asks.push((svc, call, key, why, seed));
             }
         }
         if !cached.is_empty() {
@@ -2012,13 +2057,23 @@ impl Worker {
         if asks.is_empty() {
             return;
         }
+        let listening = self.streaming.held.listening.clone();
         self.streaming.spawn_internal(async move {
             let mut tracks = Vec::new();
             let mut artists = Vec::new();
             let mut answers = Vec::new();
             let mut via = Vec::new();
-            for (svc, call, key, why) in asks {
-                let (result, matched) = fetch(svc, &call).await;
+            let mut held = Vec::new();
+            for (svc, call, key, why, seed) in asks {
+                // The listener's YouTube Music began meanwhile: later.
+                if svc.service() == Service::Youtube && listening.load(Ordering::Relaxed) {
+                    held.push((call, seed));
+                    continue;
+                }
+                let Some((result, matched)) = fetch(svc, &call, &listening).await else {
+                    held.push((call, seed));
+                    continue;
+                };
                 artists.extend(matched);
                 match result {
                     Ok(found) => {
@@ -2032,6 +2087,7 @@ impl Worker {
             Internal::Recs(Msg::Radio(RadioMsg::NewFound {
                 id,
                 tracks,
+                held,
                 artists,
                 answers,
                 via,

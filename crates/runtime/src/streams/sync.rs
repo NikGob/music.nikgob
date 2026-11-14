@@ -290,12 +290,19 @@ impl Worker {
             return;
         }
         let mut services = Vec::new();
+        // The listener's YouTube Music first: its check looks again later.
+        let youtube_listened = self.youtube_listened();
+        let recheck = self.streaming.schedule.listener_recheck;
         for (i, &service) in Service::ALL.iter().enumerate() {
             let schedule = &self.streaming.schedule;
             let first = StreamSchedule::between(schedule.sync_first) + schedule.sync_stagger * i as u32;
             let every = schedule.jittered(schedule.sync_every);
             let next = self.streaming.sync.next_check.entry(service).or_insert(now + first);
             if now < *next {
+                continue;
+            }
+            if service == Service::Youtube && youtube_listened {
+                *next = now + recheck;
                 continue;
             }
             *next = now + every;

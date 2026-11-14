@@ -137,7 +137,7 @@ struct Job {
     video: String,
     origin: Origin,
     youtube: Arc<dyn StreamService>,
-    /// YouTube Music plays or comes next (see [`StreamAnalysis::listening`]).
+    /// YouTube Music plays or comes next (see `held::Held::listening`).
     listening: Arc<AtomicBool>,
     /// The neural sound model, when it hears this job's audio.
     model: Option<Arc<Effnet>>,
@@ -158,9 +158,6 @@ pub(crate) struct StreamAnalysis {
     jobs: Option<Sender<Job>>,
     /// The switch is off or the app is closing: the thread drops its job.
     off: Arc<AtomicBool>,
-    /// YouTube Music plays or comes next, as the worker last saw it: a job
-    /// handed over just before does not download (it is tried again later).
-    listening: Arc<AtomicBool>,
     /// The background track in work, and what it waits for.
     busy: Option<(TrackId, Step)>,
     /// Played tracks handed to the thread.
@@ -188,11 +185,6 @@ pub(crate) struct StreamAnalysis {
 }
 
 impl StreamAnalysis {
-    /// A YouTube video starts playing: no download for the analysis now.
-    pub(crate) fn youtube_plays(&self) {
-        self.listening.store(true, Ordering::Relaxed);
-    }
-
     /// Stops the job in flight; nothing more is analysed.
     pub(crate) fn shutdown(&mut self) {
         self.off.store(true, Ordering::Relaxed);
@@ -248,6 +240,10 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &
             Err(e) => return stream_outcome(e),
         },
     };
+    // Opening asked nothing yet (the first read does): one more look.
+    if job.origin != Origin::Played && job.listening.load(Ordering::Relaxed) {
+        return Outcome::Transient("YouTube Music plays".into());
+    }
     let ext = audio.format_hint();
     let max = if job.origin == Origin::Preview { PREVIEW_BYTES } else { MAX_BYTES };
     let bytes = match read_all(audio, max, off) {
@@ -409,7 +405,7 @@ impl Worker {
             video: src.locator,
             origin: Origin::Played,
             youtube,
-            listening: self.streaming.analysis.listening.clone(),
+            listening: self.streaming.held.listening.clone(),
             model: None,
         };
         if self.analysis_job(job) {
@@ -444,8 +440,8 @@ impl Worker {
         if std::mem::take(&mut self.streaming.analysis.recount) {
             self.publish_analysis_counts();
         }
-        let listened = self.youtube_listened();
-        self.streaming.analysis.listening.store(listened, Ordering::Relaxed);
+        // (Kept for the analysis thread too.)
+        self.youtube_listened();
         self.stream_analysis_step();
     }
 
@@ -565,9 +561,7 @@ impl Worker {
         }
         // The listener's YouTube Music goes first: no request of its player
         // in the background while it plays or comes next.
-        let listened = self.youtube_listened();
-        self.streaming.analysis.listening.store(listened, Ordering::Relaxed);
-        if listened {
+        if self.youtube_listened() {
             self.analysis_held("YouTube Music plays");
             return;
         }
@@ -693,7 +687,7 @@ impl Worker {
             video,
             origin: Origin::Preview,
             youtube,
-            listening: self.streaming.analysis.listening.clone(),
+            listening: self.streaming.held.listening.clone(),
             model: None,
         };
         if !self.analysis_job(job) {
@@ -713,7 +707,7 @@ impl Worker {
             video,
             origin: Origin::Background,
             youtube,
-            listening: self.streaming.analysis.listening.clone(),
+            listening: self.streaming.held.listening.clone(),
             model: None,
         };
         if self.analysis_job(job) {
