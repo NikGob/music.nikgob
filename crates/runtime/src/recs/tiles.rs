@@ -317,7 +317,7 @@ pub type PreviewTile = (v::TileKind, String, String, usize);
 /// demo.
 pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTile>>, String> {
     let index = crate::analysis::SoundIndex::default();
-    crate::analysis::load_index(lib, &index);
+    crate::analysis::load_offline(lib, &index, &nikgob_view::Prefs::default());
     let (_, utc_offset_min) = super::local_day();
     let mut shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();
     let mut out = Vec::with_capacity(days);
@@ -342,7 +342,7 @@ pub fn preview_tile_days(lib: &Library, days: usize) -> Result<Vec<Vec<PreviewTi
 /// (its title and song count): what a library can show at all.
 pub fn preview_ready_tiles(lib: &Library) -> Result<Vec<(v::TileKind, String, usize)>, String> {
     let index = crate::analysis::SoundIndex::default();
-    crate::analysis::load_index(lib, &index);
+    crate::analysis::load_offline(lib, &index, &nikgob_view::Prefs::default());
     let (_, utc_offset_min) = super::local_day();
     let (snap, input, _) = super::read_snapshot(lib, &index, super::recs_now(), utc_offset_min, &[], false)?;
     let shown: TileHistory = cache_read(lib, SHOWN_KEY).unwrap_or_default();

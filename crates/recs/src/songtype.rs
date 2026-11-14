@@ -1,13 +1,26 @@
 //! «Тип песни»: what a track is beyond its sound — sung or
 //! instrumental, in which language, a soundtrack's song or not.
 //!
-//! * **Voice**, the first argument that holds: lyrics of 12 letters or more
-//!   are sung; LRCLIB's instrumental mark is instrumental; else the sound
-//!   says it ([`VoiceProbe`]: a logistic regression on the 23 z-scores of
-//!   bliss, trained on the library's own labels, AUC 0.94 offline): above
-//!   [`SUNG_P`] sung, below [`INSTRUMENTAL_P`] instrumental; else a
-//!   soundtrack's track is instrumental (confidence 0.6) and the rest
-//!   unknown.
+//! * **Voice**, the first argument that holds: a title that names an
+//!   instrumental, an off vocal or a karaoke version is instrumental
+//!   (whatever lyrics of the song were fetched for it); lyrics of 12
+//!   letters or more are sung; LRCLIB's instrumental mark is instrumental;
+//!   else the audio says it — above [`SUNG_P`] sung, below
+//!   [`INSTRUMENTAL_P`] instrumental — by the first of its probes that is
+//!   that sure, all trained on the library's own labels once it has
+//!   [`MIN_PROBE_LABELS`] of each kind: the neural sound model's vector
+//!   ([`EmbedProbe`]; AUC 0.98 on the owner's library in a held-out check,
+//!   against 0.94 of bliss's), its leading styles
+//!   ([`crate::styles::StyleProbe`]), bliss's 23 z-scores ([`VoiceProbe`]);
+//!   else a soundtrack's track is instrumental (confidence 0.6) and the
+//!   rest unknown. A probe unsure of a track leaves it to the next.
+//! * **Dynamics** ([`Dynamics`]): the crest of the sketch — how loud the
+//!   loud parts are and how far they stand above the quiet ones — so calm
+//!   and the background can turn down a song that explodes
+//!   ([`SongType::calm_dynamics`], [`SongType::background_dynamics`]).
+//! * **Lyric valence** ([`crate::lyric_valence`]): the sign of the feeling
+//!   of the cached lyrics, exactly 0 without them; a soft nudge of the dark
+//!   and bright moods, never a filter.
 //! * **Language**, unless instrumental: the lyrics' own, by the script most
 //!   of their letters are in (an odd Cyrillic «е» in English lyrics is no
 //!   Russian), Latin letters by their words (romanised Japanese by its
@@ -29,12 +42,40 @@ use nikgob_core::model::{ArtistId, TrackId};
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::{DIM, Vector};
+use crate::embedding::{COMPACT_DIM, Compact};
 use crate::mood::Axes;
+use crate::sketch::SoundSketch;
 use crate::tiles::{Script, script_of};
 
 /// Bumped whenever a rule here changes: what was classified by older rules
 /// (and the day's lanes picked by them) is classified again.
-pub const SONGTYPE_RULES: u32 = 2;
+pub const SONGTYPE_RULES: u32 = 5;
+/// The model's probe is trained from this many labels of each kind…
+pub const MIN_PROBE_LABELS: usize = 20;
+/// The probes' training: full-batch gradient ascent, this many epochs…
+pub(crate) const PROBE_EPOCHS: usize = 300;
+/// …of this step…
+pub(crate) const PROBE_LR: f32 = 0.1;
+/// …and this L2 penalty.
+pub(crate) const PROBE_L2: f32 = 0.01;
+/// …on this many rows at most (an even sample of a larger library).
+const MAX_PROBE_ROWS: usize = 4000;
+/// A calm song's loud parts are this quiet at most (dB of full scale, the
+/// crest's 95th percentile; a sung pop master sits near -9).
+pub const CALM_PEAK_DB: f32 = -11.0;
+/// A song explodes when its loud parts stand this far above its quiet ones
+/// (dB)…
+pub const BURST_SPREAD_DB: f32 = 15.0;
+/// …and reach this loudness: a whisper that swells to a murmur does not.
+pub const BURST_PEAK_DB: f32 = -14.0;
+/// The background's loud parts: a little louder at most than calm's.
+pub const BACKGROUND_PEAK_DB: f32 = -10.0;
+/// The loudest second may stand this far above the loud parts' cap
+/// ([`CALM_PEAK_DB`], [`BACKGROUND_PEAK_DB`]); a second louder still is a
+/// hit no calm or background song has. A hit this much past a burst's
+/// spread and loudness ([`BURST_SPREAD_DB`], [`BURST_PEAK_DB`]) is a burst
+/// too, however short.
+pub const HIT_DB: f32 = 4.0;
 /// The sound says sung above this…
 pub const SUNG_P: f32 = 0.85;
 /// …and instrumental below this.
@@ -68,6 +109,60 @@ pub enum VoiceSource {
     /// A soundtrack's track without lyrics.
     Soundtrack,
     Nothing,
+    /// The title names an instrumental, off vocal or karaoke version.
+    Title,
+    /// The neural sound model's vector ([`EmbedProbe`]).
+    Model,
+    /// The neural sound model's leading styles
+    /// ([`crate::styles::StyleProbe`]).
+    Styles,
+}
+
+/// The crest of a song's loudness in quarter dB, the sketch's own
+/// precision ([`crate::sketch::Crest`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dynamics {
+    /// The loud parts (the 95th percentile of its seconds)…
+    pub peak: i16,
+    /// …the quiet ones (the 10th percentile)…
+    pub low: i16,
+    /// …and its loudest second.
+    pub max: i16,
+}
+
+impl Dynamics {
+    pub fn of(c: &crate::sketch::Crest) -> Self {
+        let q = |db: f32| (db * 4.0).round().clamp(-32768.0, 32767.0) as i16;
+        Self { peak: q(c.peak), low: q(c.low), max: q(c.max) }
+    }
+
+    pub fn peak_db(&self) -> f32 {
+        f32::from(self.peak) / 4.0
+    }
+
+    pub fn max_db(&self) -> f32 {
+        f32::from(self.max) / 4.0
+    }
+
+    /// How far the loud parts stand above the quiet ones, dB.
+    pub fn spread_db(&self) -> f32 {
+        (f32::from(self.peak) - f32::from(self.low)).max(0.0) / 4.0
+    }
+
+    /// It explodes out of its quiet parts ([`BURST_SPREAD_DB`],
+    /// [`BURST_PEAK_DB`]): its loud parts do, or one loud second does by
+    /// [`HIT_DB`] more.
+    pub fn bursts(&self) -> bool {
+        let quiet = f32::from(self.low) / 4.0;
+        (self.spread_db() >= BURST_SPREAD_DB && self.peak_db() >= BURST_PEAK_DB)
+            || (self.max_db() - quiet >= BURST_SPREAD_DB + HIT_DB && self.max_db() >= BURST_PEAK_DB + HIT_DB)
+    }
+
+    /// Its loud parts are at most `cap` dB and its loudest second at most
+    /// [`HIT_DB`] above that, and it never bursts.
+    fn under(&self, cap: f32) -> bool {
+        self.peak_db() <= cap && self.max_db() <= cap + HIT_DB && !self.bursts()
+    }
 }
 
 /// What a song is sung in.
@@ -120,6 +215,13 @@ pub struct SongType {
     /// the library's middle), as the daylist's moods see it.
     pub mood_cell: u8,
     pub synced_lyrics: bool,
+    /// The crest of its sketch, when it has one.
+    #[serde(default)]
+    pub dynamics: Option<Dynamics>,
+    /// The feeling of its cached lyrics, ×100 (−100 sad … 100 happy); 0
+    /// without them.
+    #[serde(default)]
+    pub valence: i8,
 }
 
 impl Default for SongType {
@@ -135,6 +237,8 @@ impl Default for SongType {
             energy_q: 0.5,
             mood_cell: 0,
             synced_lyrics: false,
+            dynamics: None,
+            valence: 0,
         }
     }
 }
@@ -168,6 +272,23 @@ impl SongType {
     pub fn vocal(&self) -> bool {
         self.voice == Voice::Sung
     }
+
+    /// Its loud parts are quiet enough for calm music and never explode
+    /// out of quiet ones ([`CALM_PEAK_DB`], [`Dynamics::bursts`]); a song
+    /// without a sketch passes (its mean judges it, as before).
+    pub fn calm_dynamics(&self) -> bool {
+        self.dynamics.is_none_or(|d| d.under(CALM_PEAK_DB))
+    }
+
+    /// The same for the background ([`BACKGROUND_PEAK_DB`]).
+    pub fn background_dynamics(&self) -> bool {
+        self.dynamics.is_none_or(|d| d.under(BACKGROUND_PEAK_DB))
+    }
+
+    /// The feeling of its cached lyrics, −1…1 (0 without them).
+    pub fn lyric_valence(&self) -> f32 {
+        f32::from(self.valence) / 100.0
+    }
 }
 
 // ---------------------------------------------------------------- voice
@@ -181,9 +302,9 @@ pub struct VoiceProbe {
 }
 
 impl VoiceProbe {
-    const EPOCHS: usize = 300;
-    const LR: f32 = 0.1;
-    const L2: f32 = 0.01;
+    const EPOCHS: usize = PROBE_EPOCHS;
+    const LR: f32 = PROBE_LR;
+    const L2: f32 = PROBE_L2;
 
     /// Trained on `rows` (z-scores, sung) as `scripts/vocal_probe.py` does:
     /// full-batch gradient ascent, 300 epochs. `None` without both kinds.
@@ -218,6 +339,139 @@ impl VoiceProbe {
 
 pub(crate) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x.clamp(-30.0, 30.0)).exp())
+}
+
+/// Sung or instrumental by the neural sound model's vector: a logistic
+/// regression on its compact vector less the library's mean, made unit
+/// length (the scale of the weights is [`EMBED_SCALE`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbedProbe {
+    /// The bias first.
+    w: Vec<f32>,
+    mean: [f32; COMPACT_DIM],
+}
+
+/// The centred unit vector is scaled by this before the regression (the
+/// steps of [`VoiceProbe`]'s training suit features of about unit size).
+const EMBED_SCALE: f32 = 16.0;
+
+impl EmbedProbe {
+    /// The features of `c` around `mean`; `None` for a vector at the mean.
+    fn features(c: &Compact, mean: &[f32; COMPACT_DIM]) -> Option<[f32; COMPACT_DIM]> {
+        let mut v: [f32; COMPACT_DIM] = std::array::from_fn(|k| f32::from(c.q[k]) * c.scale - mean[k]);
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if !(n > 1e-9) {
+            return None;
+        }
+        v.iter_mut().for_each(|x| *x *= EMBED_SCALE / n);
+        Some(v)
+    }
+
+    /// Trained on `rows` (a vector, sung) around `mean` (the library's
+    /// mean vector) as [`VoiceProbe::train`] trains; `None` with fewer
+    /// than [`MIN_PROBE_LABELS`] of either kind.
+    pub fn train(rows: &[(Compact, bool)], mean: [f32; COMPACT_DIM]) -> Option<Self> {
+        let sung = rows.iter().filter(|r| r.1).count();
+        if sung < MIN_PROBE_LABELS || rows.len() - sung < MIN_PROBE_LABELS {
+            return None;
+        }
+        let step = rows.len().div_ceil(MAX_PROBE_ROWS).max(1);
+        let x: Vec<([f32; COMPACT_DIM], f32)> =
+            rows.iter().step_by(step).filter_map(|(c, y)| Some((Self::features(c, &mean)?, f32::from(u8::from(*y))))).collect();
+        let n = x.len() as f32;
+        let mut w = vec![0.0f32; COMPACT_DIM + 1];
+        let mut g = vec![0.0f32; COMPACT_DIM + 1];
+        for _ in 0..VoiceProbe::EPOCHS {
+            g.iter_mut().for_each(|v| *v = 0.0);
+            for (f, y) in &x {
+                let p = sigmoid(w[0] + f.iter().zip(&w[1..]).map(|(a, b)| a * b).sum::<f32>());
+                let d = y - p;
+                g[0] += d;
+                for (gi, fi) in g[1..].iter_mut().zip(f) {
+                    *gi += d * fi;
+                }
+            }
+            for (wi, gi) in w.iter_mut().zip(&g) {
+                *wi += VoiceProbe::LR * (gi / n - VoiceProbe::L2 * *wi);
+            }
+        }
+        Some(Self { w, mean })
+    }
+
+    /// The chance a track of this vector is sung.
+    pub fn p(&self, c: &Compact) -> Option<f32> {
+        let f = Self::features(c, &self.mean)?;
+        Some(sigmoid(self.w[0] + f.iter().zip(&self.w[1..]).map(|(a, b)| a * b).sum::<f32>()))
+    }
+}
+
+/// The mean of the vectors `of` gives for `ids`.
+fn mean_vector(ids: impl Iterator<Item = TrackId>, of: &dyn Fn(TrackId) -> Option<Compact>) -> Option<[f32; COMPACT_DIM]> {
+    let mut sum = [0f64; COMPACT_DIM];
+    let mut n = 0usize;
+    for c in ids.filter_map(of) {
+        for (s, q) in sum.iter_mut().zip(c.q) {
+            *s += f64::from(q) * f64::from(c.scale);
+        }
+        n += 1;
+    }
+    (n > 0).then(|| std::array::from_fn(|k| (sum[k] / n as f64) as f32))
+}
+
+/// A version that is the same work as the song for a session: without its
+/// lead voice ([`wordless_version`]) or cut short (a TV size, a short
+/// version, a game's or a film's size).
+fn same_work_version(base: &str, version: &str) -> bool {
+    let words: Vec<String> = version.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let has = |w: &str| words.iter().any(|x| x == w);
+    wordless_version(&format!("{base} ({version})")) || has("short") || (has("size") && (has("tv") || has("game") || has("movie"))) || (has("tv") && (has("ver") || has("version") || has("edit")))
+}
+
+/// The work a title is of and whether the title names a version of it:
+/// the title without its marks of an off vocal, an instrumental, a karaoke,
+/// a TV size or a short version («Song (TV Size) [Off Vocal]» → «Song»,
+/// true). A remix, a live or an acoustic version stays its own song.
+pub fn work_title(title: &str) -> (String, bool) {
+    let mut t = title.to_owned();
+    let mut marked = false;
+    while let Some((base, version)) = nikgob_core::clip_title::version_split(&t).or_else(|| last_part(&t)) {
+        if !same_work_version(&base, &version) {
+            break;
+        }
+        t = base;
+        marked = true;
+    }
+    (t, marked)
+}
+
+/// The last bracket or « - » tail of a title and the title without it
+/// (what [`nikgob_core::clip_title::version_split`] does not take as a
+/// version: «Short Ver.»).
+fn last_part(title: &str) -> Option<(String, String)> {
+    let t = title.trim_end();
+    let cut = |at: usize, version: &str| {
+        let base = t[..at].trim_end().to_owned();
+        (!base.is_empty()).then(|| (base, version.trim().to_owned()))
+    };
+    if let Some(close) = t.chars().last().filter(|c| matches!(c, ')' | ']' | '）' | '］')) {
+        let open = match close {
+            ')' => '(',
+            ']' => '[',
+            '）' => '（',
+            _ => '［',
+        };
+        let at = t.rfind(open)?;
+        return cut(at, &t[at + open.len_utf8()..t.len() - close.len_utf8()]);
+    }
+    let at = t.rfind(" - ")?;
+    cut(at, &t[at + 3..])
+}
+
+/// A title that names a version without its lead voice: an instrumental,
+/// an off vocal, a karaoke ([`nikgob_core::clip_title::version_mark`]).
+pub fn wordless_version(title: &str) -> bool {
+    use nikgob_core::clip_title::VersionKind;
+    nikgob_core::clip_title::version_mark(title).is_some_and(|(_, k)| matches!(k, VersionKind::Instrumental | VersionKind::OffVocal | VersionKind::Karaoke))
 }
 
 // ---------------------------------------------------------------- language
@@ -415,6 +669,8 @@ pub struct SongInput {
     pub synced_lyrics: bool,
     /// Its bliss vector as z-scores.
     pub z: Option<Vector>,
+    /// Its sketch ([`crate::sketch`]), when the analysis made one.
+    pub sketch: Option<SoundSketch>,
 }
 
 /// The types of a library's tracks, and what tells the language of a new
@@ -462,8 +718,21 @@ fn theme_of(album: Option<&str>, title: &str, credit: &str) -> Theme {
     Theme::Insert
 }
 
-/// The type of every track of `inputs` (see the module docs).
+/// The type of every track of `inputs` (see the module docs), without the
+/// neural model's vectors.
 pub fn song_types(inputs: &[SongInput]) -> SongTypes {
+    song_types_with(inputs, &|_| None)
+}
+
+/// The first of the sound's verdicts (asked in turn, each only if those
+/// before were missing or unsure) that is sure: above [`SUNG_P`] or below
+/// [`INSTRUMENTAL_P`].
+fn first_sure<const N: usize>(probes: [&dyn Fn() -> Option<(f32, VoiceSource)>; N]) -> Option<(f32, VoiceSource)> {
+    probes.into_iter().find_map(|probe| probe().filter(|(p, _)| *p > SUNG_P || *p < INSTRUMENTAL_P))
+}
+
+/// [`song_types`] with the neural model's vector of each track (`embedding`).
+pub fn song_types_with(inputs: &[SongInput], embedding: &dyn Fn(TrackId) -> Option<Compact>) -> SongTypes {
     // The lyrics' own languages and the artists' majorities.
     let sung: HashMap<TrackId, Lang> = inputs
         .iter()
@@ -489,22 +758,32 @@ pub fn song_types(inputs: &[SongInput]) -> SongTypes {
         .collect();
     let artist_langs: HashMap<String, Lang> = artist.iter().filter_map(|(a, l)| Some((names.get(a)?.clone(), *l))).collect();
 
-    // The sound's probe, on the library's own labels.
+    // The sound's probes, on the library's own labels: a version named
+    // wordless by its title is instrumental whatever lyrics it was given.
     let has_text = |t: &SongInput| {
         matches!(&t.lyrics, Some((false, text)) if lyric_words(text).chars().filter(|c| c.is_alphabetic()).count() >= LYRICS_LETTERS)
     };
-    let rows: Vec<(Vector, bool)> = inputs
-        .iter()
-        .filter_map(|t| {
-            let z = t.z?;
-            match &t.lyrics {
-                Some((true, _)) => Some((z, false)),
-                _ if has_text(t) => Some((z, true)),
-                _ => None,
-            }
-        })
-        .collect();
+    let label = |t: &SongInput| -> Option<bool> {
+        if wordless_version(&t.title) {
+            return Some(false);
+        }
+        match &t.lyrics {
+            Some((true, _)) => Some(false),
+            _ if has_text(t) => Some(true),
+            _ => None,
+        }
+    };
+    let rows: Vec<(Vector, bool)> = inputs.iter().filter_map(|t| Some((t.z?, label(t)?))).collect();
     let probe = VoiceProbe::train(&rows);
+    let embed_probe = mean_vector(inputs.iter().map(|t| t.id), embedding).and_then(|mean| {
+        let rows: Vec<(Compact, bool)> = inputs.iter().filter_map(|t| Some((embedding(t.id)?, label(t)?))).collect();
+        EmbedProbe::train(&rows, mean)
+    });
+    let style_probe = {
+        let rows: Vec<(crate::styles::Styles, bool)> =
+            inputs.iter().filter_map(|t| Some((t.sketch?.styles()?, label(t)?))).collect();
+        crate::styles::StyleProbe::train(&rows)
+    };
 
     // Energy percentiles and the middle of the axes.
     let axes: Vec<(TrackId, Axes)> = inputs.iter().filter_map(|t| Some((t.id, Axes::of(&t.z?)))).collect();
@@ -526,14 +805,25 @@ pub fn song_types(inputs: &[SongInput]) -> SongTypes {
             ty.energy_q = if energies.len() > 1 { below as f32 / (energies.len() - 1) as f32 } else { 0.5 };
             ty.mood_cell = u8::from(a.energy >= mid[0]) | u8::from(a.brightness >= mid[1]) << 1 | u8::from(a.steadiness >= mid[2]) << 2;
         }
-        let sound = probe.zip(t.z).map(|(p, z)| p.p(&z));
-        (ty.voice, ty.voice_conf, ty.voice_by) = if has_text(t) {
+        if let Some(c) = t.sketch.and_then(|s| s.crest()) {
+            ty.dynamics = Some(Dynamics::of(&c));
+        }
+        // The audio's word: the model's vector, its styles, bliss — the
+        // first that is sure.
+        let sound = first_sure([
+            &|| embed_probe.as_ref().zip(embedding(t.id)).and_then(|(p, c)| Some((p.p(&c)?, VoiceSource::Model))),
+            &|| style_probe.as_ref().zip(t.sketch.and_then(|s| s.styles())).and_then(|(p, s)| Some((p.p(&s)?, VoiceSource::Styles))),
+            &|| probe.zip(t.z).map(|(p, z)| (p.p(&z), VoiceSource::Sound)),
+        ]);
+        (ty.voice, ty.voice_conf, ty.voice_by) = if wordless_version(&t.title) {
+            (Voice::Instrumental, 0.95, VoiceSource::Title)
+        } else if has_text(t) {
             (Voice::Sung, 1.0, VoiceSource::Lyrics)
         } else if matches!(t.lyrics, Some((true, _))) {
             (Voice::Instrumental, 1.0, VoiceSource::LrclibFlag)
-        } else if let Some(p) = sound.filter(|p| *p > SUNG_P || *p < INSTRUMENTAL_P) {
+        } else if let Some((p, by)) = sound {
             let voice = if p > SUNG_P { Voice::Sung } else { Voice::Instrumental };
-            (voice, (p - 0.5).abs() * 2.0, VoiceSource::Sound)
+            (voice, (p - 0.5).abs() * 2.0, by)
         } else if t.ost {
             (Voice::Instrumental, 0.6, VoiceSource::Soundtrack)
         } else {
@@ -552,6 +842,11 @@ pub fn song_types(inputs: &[SongInput]) -> SongTypes {
         }
         if t.ost && ty.voice == Voice::Sung {
             ty.theme = Some(theme_of(t.album.as_deref(), &t.title, &t.credit));
+        }
+        if ty.voice == Voice::Sung
+            && let Some((false, text)) = &t.lyrics
+        {
+            ty.valence = (crate::lyric_valence::lyric_valence(&lyric_words(text)) * 100.0).round() as i8;
         }
         by_track.insert(t.id, ty);
     }
@@ -666,6 +961,170 @@ mod tests {
         let auc = crate::model::auc(&scored).unwrap();
         assert!(auc > 0.9, "AUC {auc}");
         assert!(VoiceProbe::train(&train[..1]).is_none(), "one kind only");
+    }
+
+    /// A compact vector near a direction (`voice` moves a few of its
+    /// dimensions, as a voice moves the model's vector).
+    fn compact(rng: &mut Rng, voice: bool) -> Compact {
+        let v: [f32; COMPACT_DIM] = std::array::from_fn(|k| rng.f32() - 0.5 + if voice && k % 17 == 3 { 0.6 } else { 0.0 });
+        Compact::of_unit(&v).unwrap()
+    }
+
+    /// The model's probe learns the voice from the library's own labels and
+    /// tells the tracks nothing else tells; with too few labels of a kind
+    /// it is not trained, nor is the styles' probe, and a sketch's styles
+    /// alone say nothing.
+    #[test]
+    fn the_models_vector_tells_the_voice() {
+        let mut rng = Rng::new(9);
+        let lyrics = "[00:01]We walked along the river in the rain tonight";
+        let mut inputs = Vec::new();
+        let mut vectors: HashMap<TrackId, Compact> = HashMap::new();
+        for i in 0..120u128 {
+            let sung = i % 2 == 0;
+            let labelled = i < 80;
+            let lyr = labelled.then(|| if sung { (false, lyrics.to_owned()) } else { (true, String::new()) });
+            inputs.push(SongInput { id: tid(i), title: format!("T{i}"), lyrics: lyr, ..SongInput::default() });
+            vectors.insert(tid(i), compact(&mut rng, sung));
+        }
+        let types = song_types_with(&inputs, &|id| vectors.get(&id).copied());
+        let mut right = 0;
+        for i in 80..120u128 {
+            let t = types.get(tid(i)).unwrap();
+            assert!(matches!(t.voice_by, VoiceSource::Model | VoiceSource::Nothing), "{t:?}");
+            if t.voice == if i % 2 == 0 { Voice::Sung } else { Voice::Instrumental } {
+                right += 1;
+            }
+        }
+        assert!(right >= 34, "{right} of 40 told right");
+        // Few instrumentals labelled: no probe; nothing reads a style by hand.
+        let few: Vec<SongInput> = inputs.iter().filter(|t| t.id.as_uuid().as_u128() >= 80 || t.id.as_uuid().as_u128() % 2 == 0).cloned().collect();
+        let score_style = crate::styles::STYLES.iter().position(|l| *l == "Stage & Screen---Score").unwrap() as u16;
+        let st = crate::styles::Styles { top: [(score_style, 0.9), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.9 };
+        let mut few = few;
+        few.push(SongInput { id: tid(500), title: "Score".into(), sketch: Some(SoundSketch::default().with_styles(Some(&st))), ..SongInput::default() });
+        let types = song_types_with(&few, &|id| vectors.get(&id).copied());
+        assert!(types.by_track.values().all(|t| t.voice_by != VoiceSource::Model));
+        let score = types.get(tid(500)).unwrap();
+        assert_eq!((score.voice, score.voice_by), (Voice::Unknown, VoiceSource::Nothing));
+    }
+
+    /// The sketch's styles tell the voice by what the library's labels
+    /// taught of them: its sung songs lead with one style, its
+    /// instrumentals with another, and an unlabelled song of either style
+    /// follows.
+    #[test]
+    fn the_styles_tell_the_voice_by_the_librarys_labels() {
+        let at = |l: &str| crate::styles::STYLES.iter().position(|x| *x == l).unwrap() as u16;
+        let styled = |l: &str| {
+            let st = crate::styles::Styles { top: [(at(l), 0.8), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.8 };
+            Some(SoundSketch::default().with_styles(Some(&st)))
+        };
+        let lyrics = "[00:01]We walked along the river in the rain tonight";
+        let mut inputs = Vec::new();
+        for i in 0..50u128 {
+            let sung = i % 2 == 0;
+            let lyr = Some(if sung { (false, lyrics.to_owned()) } else { (true, String::new()) });
+            let style = if sung { "Rock---Punk" } else { "Electronic---Techno" };
+            inputs.push(SongInput { id: tid(i), title: format!("T{i}"), lyrics: lyr, sketch: styled(style), ..SongInput::default() });
+        }
+        inputs.push(SongInput { id: tid(100), title: "A".into(), sketch: styled("Rock---Punk"), ..SongInput::default() });
+        inputs.push(SongInput { id: tid(101), title: "B".into(), sketch: styled("Electronic---Techno"), ..SongInput::default() });
+        let types = song_types(&inputs);
+        let t = |i| types.get(tid(i)).unwrap();
+        assert_eq!((t(100).voice, t(100).voice_by), (Voice::Sung, VoiceSource::Styles));
+        assert_eq!((t(101).voice, t(101).voice_by), (Voice::Instrumental, VoiceSource::Styles));
+    }
+
+    /// A probe unsure of a track leaves it to the next one: an unsure
+    /// model's vector does not hide a sure bliss verdict, and a sure one
+    /// is taken first.
+    #[test]
+    fn an_unsure_probe_falls_through() {
+        let unsure = || Some((0.5, VoiceSource::Model));
+        let sure_bliss = || Some((0.05, VoiceSource::Sound));
+        let none = || -> Option<(f32, VoiceSource)> { None };
+        assert_eq!(first_sure([&unsure, &none, &sure_bliss]), Some((0.05, VoiceSource::Sound)));
+        assert_eq!(first_sure([&|| Some((0.9, VoiceSource::Model)), &sure_bliss]), Some((0.9, VoiceSource::Model)));
+        assert_eq!(first_sure([&unsure, &none]), None);
+        // Asked in turn: a sure first never asks the rest.
+        let asked = std::cell::Cell::new(false);
+        let later = || -> Option<(f32, VoiceSource)> {
+            asked.set(true);
+            None
+        };
+        assert!(first_sure([&|| Some((0.95, VoiceSource::Model)), &later]).is_some());
+        assert!(!asked.get());
+    }
+
+    /// A title naming an off vocal or a karaoke is instrumental, even with
+    /// the song's lyrics fetched for it; a live version is not.
+    #[test]
+    fn a_wordless_version_is_told_by_its_title() {
+        let lyrics = Some((false, "[00:01]君の名前を呼んでいた夜の向こうで ずっとここにいるよ".to_owned()));
+        let types = song_types(&[
+            SongInput { id: tid(0), title: "夏の歌 (off vocal ver.)".into(), lyrics: lyrics.clone(), ..SongInput::default() },
+            SongInput { id: tid(1), title: "Song (Karaoke Version)".into(), ..SongInput::default() },
+            SongInput { id: tid(2), title: "夏の歌 (Live)".into(), lyrics, ..SongInput::default() },
+        ]);
+        let t = |i| types.get(tid(i)).unwrap();
+        assert_eq!((t(0).voice, t(0).voice_by, t(0).lane()), (Voice::Instrumental, VoiceSource::Title, SongLane::Instrumental));
+        assert_eq!(t(1).voice, Voice::Instrumental);
+        assert_eq!((t(2).voice, t(2).voice_by), (Voice::Sung, VoiceSource::Lyrics));
+        assert!(wordless_version("Song (Instrumental)") && !wordless_version("Song (Remix)") && !wordless_version("Instinct"));
+    }
+
+    /// The crest of the sketch makes the dynamics: a song that explodes is
+    /// neither calm nor background; without a sketch nothing changes. The
+    /// lyrics' feeling is kept for sung songs only.
+    #[test]
+    fn dynamics_and_valence_come_with_the_type() {
+        use crate::sketch::Crest;
+        let crest = |peak: f32, low: f32, max: f32| Some(SoundSketch::new(Some(Crest { peak, low, max }), None, None, None));
+        let sketch = |peak: f32, low: f32| crest(peak, low, peak + 1.0);
+        let sad = "[00:01]I cry alone in the cold dark night, the pain and tears and sorrow never end";
+        let types = song_types(&[
+            SongInput { id: tid(0), sketch: sketch(-24.0, -30.0), ..SongInput::default() },
+            SongInput { id: tid(1), sketch: sketch(-8.0, -32.0), ..SongInput::default() },
+            SongInput { id: tid(2), ..SongInput::default() },
+            SongInput { id: tid(3), lyrics: Some((false, sad.into())), ..SongInput::default() },
+            // Quiet throughout but for one loud second.
+            SongInput { id: tid(4), sketch: crest(-20.0, -30.0, -6.0), ..SongInput::default() },
+            // Just over the calm cap: −10.75 dB is no −11.
+            SongInput { id: tid(5), sketch: sketch(-10.75, -16.0), ..SongInput::default() },
+        ]);
+        let t = |i| types.get(tid(i)).unwrap();
+        assert_eq!(t(0).dynamics, Some(Dynamics { peak: -96, low: -120, max: -92 }));
+        assert_eq!((t(0).dynamics.unwrap().peak_db(), t(0).dynamics.unwrap().spread_db()), (-24.0, 6.0));
+        assert!(t(0).calm_dynamics() && t(0).background_dynamics());
+        assert!(!t(1).calm_dynamics() && !t(1).background_dynamics(), "{:?}", t(1).dynamics);
+        assert!(t(2).dynamics.is_none() && t(2).calm_dynamics());
+        // A whisper swelling to a murmur is calm; one swelling to a roar is not.
+        let d = |peak: f32, low: f32, max: f32| Dynamics::of(&Crest { peak, low, max });
+        assert!(!d(-22.0, -39.0, -20.0).bursts() && d(-10.0, -30.0, -8.0).bursts());
+        // One loud second: a hit, neither calm nor background.
+        assert!(d(-20.0, -30.0, -6.0).bursts());
+        assert!(!t(4).calm_dynamics() && !t(4).background_dynamics(), "{:?}", t(4).dynamics);
+        // A loudest second a little over the cap is no hit.
+        assert!(d(-14.0, -20.0, -8.0).under(CALM_PEAK_DB) && !d(-14.0, -20.0, -6.5).under(CALM_PEAK_DB));
+        assert!(!t(5).calm_dynamics() && t(5).background_dynamics(), "{:?}", t(5).dynamics);
+        assert!(t(3).lyric_valence() < -0.3, "{}", t(3).lyric_valence());
+        assert_eq!(t(0).valence, 0);
+    }
+
+    /// The versions of a song for a session are one work; a remix or a
+    /// live one stays its own.
+    #[test]
+    fn versions_of_a_song_are_one_work() {
+        assert_eq!(work_title("夏の歌 (off vocal ver.)"), ("夏の歌".to_owned(), true));
+        assert_eq!(work_title("Song (TV Size)"), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song (TV Size) [Instrumental]"), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song - Short Ver."), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song (Game Size)"), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song (Remix)"), ("Song (Remix)".to_owned(), false));
+        assert_eq!(work_title("Song (Live)"), ("Song (Live)".to_owned(), false));
+        assert_eq!(work_title("Song"), ("Song".to_owned(), false));
+        assert_eq!(work_title("Shortcut"), ("Shortcut".to_owned(), false));
     }
 
     #[test]

@@ -131,6 +131,28 @@ impl Mood {
         }
     }
 
+    /// [`Self::score`] with what the song's type knows beyond the sound:
+    /// the feeling of its cached lyrics nudges the dark and the bright mood
+    /// ([`crate::open_world::VALENCE_NUDGE`]; 0 without lyrics).
+    pub fn score_with(self, a: Axes, song: Option<&crate::songtype::SongType>) -> f32 {
+        let v = song.map_or(0.0, crate::songtype::SongType::lyric_valence) * crate::open_world::VALENCE_NUDGE;
+        match self {
+            Self::Dark => self.score(a) - v,
+            Self::Bright => self.score(a) + v,
+            _ => self.score(a),
+        }
+    }
+
+    /// Whether a song may be of this mood at all by its dynamics: calm
+    /// music and music to focus by never explode ([`crate::songtype::SongType::calm_dynamics`]).
+    pub fn fits(self, song: Option<&crate::songtype::SongType>) -> bool {
+        match self {
+            Self::Calm => song.is_none_or(crate::songtype::SongType::calm_dynamics),
+            Self::Focus => song.is_none_or(crate::songtype::SongType::background_dynamics),
+            _ => true,
+        }
+    }
+
     /// Where the mood lies on the axes, half a standard deviation out
     /// (the daylist of a part of the day without its own history).
     pub fn direction(self) -> Axes {
@@ -184,8 +206,11 @@ impl Recs<'_> {
         let mut all: Vec<(TrackId, f32)> = self
             .index
             .iter()
-            .filter(|(id, _)| self.catalog.position(*id).is_some_and(|i| !self.blocked(i)))
-            .map(|(id, v)| (id, mood.score(Axes::of(&self.norm.z(v)))))
+            .filter_map(|(id, v)| {
+                let i = self.catalog.position(id).filter(|&i| !self.blocked(i))?;
+                let song = self.model.map(|m| m.song_type_at(i));
+                mood.fits(song).then(|| (id, mood.score_with(Axes::of(&self.norm.z(v)), song)))
+            })
             .collect();
         all.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         let keep = ((all.len() as f32) * MOOD_SHARE).ceil() as usize;

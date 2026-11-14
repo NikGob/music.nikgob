@@ -75,7 +75,7 @@ pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, othe
 pub use types::{
     AlbumPlan, AlbumRules, AnalysisCounts, AnalysisTodo, ArtistRow, ArtistSort, ArtistSortKey, ConfirmRow, DeletedTrack, ExportReport, ImportReport, JobLogEntry,
     PlaylistEntryRow, PlaylistKind, PlaylistRemote, PlaylistSummary, PurgedFile, PurgedTrack,
-    ListingEntry, Membership, RecFeedback, ReleaseListing, ReleaseProgress, RemoteLike, StreamAnalysisTodo,
+    ListingEntry, Membership, RecFeedback, ReleaseListing, ReleaseProgress, RemoteLike, SketchRow, StreamAnalysisTodo,
     ReleaseRow, ReleaseSort, ReleaseSortKey, SearchResults, Sort, TrackFilter, TrackRow,
     TrackSort, TrackSortKey, TrackStats, TrashEntry,
 };

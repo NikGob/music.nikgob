@@ -16,6 +16,15 @@
 //! looks again now and then. The worker thread never waits for any of it:
 //! progress comes back as [`Msg::Progress`].
 //!
+//! The same decode gives each file's sketch ([`nikgob_recs::SoundSketch`]:
+//! the crest of the windows, the head and the tail — two more windows of
+//! 10 s at the file's ends, for nothing but them — and the model's styles
+//! when it runs), kept in `sound_sketch` and beside the vectors in the
+//! index. The files analysed before it get theirs from a queue of their
+//! own ([`Library::tracks_needing_sketch`]) once the other two are empty:
+//! the backfill, one file at a time at the same pace, resumed where it
+//! stopped after a restart (a file is done once its row is stored).
+//!
 //! With «Нейросетевой анализ звука» on ([`Neural`]), the same windows also
 //! go through the neural sound model ([`crate::sound_model::Effnet`]) and
 //! its compact vector is kept beside bliss's; the files analysed before get
@@ -43,7 +52,8 @@ use nikgob_import::ImportError;
 use nikgob_import::decode::{Feed, PcmSpec, Span, Take, decode_bytes_windows, decode_file_windows};
 use nikgob_library::{AnalysisTodo, Library};
 use nikgob_recs::{
-    ANALYZED_WITH, Analysed, AnalysisError, Compact, EMBEDDED_WITH, SoundModel, Vector, VectorIndex, Window, WindowedAnalyzer,
+    ANALYZED_WITH, Analysed, AnalysisError, Compact, EMBEDDED_WITH, Part, SKETCHED_WITH, STYLED_WITH, SoundModel, SoundSketch,
+    Vector, VectorIndex, Window, WindowedAnalyzer,
 };
 use nikgob_view as v;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -116,7 +126,12 @@ pub(crate) enum FileError {
 /// Decodes the windows of `path` and analyses them, at `pacer`'s pace (its
 /// stop aborts the decode).
 pub(crate) fn analyze_file(path: &Path, want: Want<'_>, pacer: &mut Pacer<'_>) -> Result<Analysed, FileError> {
-    analyze_decoded(|plan, sink| decode_file_windows(path, plan, sink), nikgob_recs::windows, want, pacer)
+    analyze_decoded(|plan, sink| decode_file_windows(path, plan, sink), nikgob_recs::file_plan, want, pacer)
+}
+
+/// The windows of a preview, all analysis windows.
+fn preview_plan(duration: Option<f64>) -> Vec<(Window, Part)> {
+    nikgob_recs::preview_windows(duration).into_iter().map(|w| (w, Part::Main)).collect()
 }
 
 /// [`analyze_file`] for encoded audio in memory (a stream's; `ext` is its
@@ -131,7 +146,7 @@ pub(crate) fn analyze_bytes(
     want: Want<'_>,
     pacer: &mut Pacer<'_>,
 ) -> Result<Analysed, FileError> {
-    let plan = if preview { nikgob_recs::preview_windows } else { nikgob_recs::windows };
+    let plan = if preview { preview_plan } else { nikgob_recs::file_plan };
     analyze_decoded(|p, sink| decode_bytes_windows(bytes, ext, name, p, sink), plan, want, pacer)
 }
 
@@ -140,13 +155,21 @@ type Sink<'a> = &'a mut dyn FnMut(Feed<'_>) -> Take;
 
 fn analyze_decoded(
     decode: impl FnOnce(Plan<'_>, Sink<'_>) -> Result<PcmSpec, ImportError>,
-    windows: fn(Option<f64>) -> Vec<Window>,
+    windows: fn(Option<f64>) -> Vec<(Window, Part)>,
     want: Want<'_>,
     pacer: &mut Pacer<'_>,
 ) -> Result<Analysed, FileError> {
     let mut analyzer: Option<WindowedAnalyzer<'_>> = None;
     let mut format: Option<AnalysisError> = None;
-    let mut plan = |d: Option<f64>| -> Vec<Span> { windows(d).into_iter().map(|w| Span { start: w.start, len: w.len }).collect() };
+    // The plan (what each span is for) and the file's length: the plan is
+    // made by the decoder, the analyzer when the first audio comes.
+    let planned: std::cell::RefCell<(Vec<(Window, Part)>, Option<f64>)> = std::cell::RefCell::new((Vec::new(), None));
+    let mut plan = |d: Option<f64>| -> Vec<Span> {
+        let p = windows(d);
+        let spans = p.iter().map(|(w, _)| Span { start: w.start, len: w.len }).collect();
+        *planned.borrow_mut() = (p, d);
+        spans
+    };
     // Audio read past between windows counts as work too: the pace, the
     // game pause and a stop apply while the heavy turn is held.
     let mut sink = |feed: Feed<'_>| -> Take {
@@ -157,7 +180,10 @@ fn analyze_decoded(
         let a = match &mut analyzer {
             Some(a) => a,
             None => match WindowedAnalyzer::new(spec.sample_rate, spec.channels, want.bliss, want.model) {
-                Ok(a) => analyzer.insert(a),
+                Ok(a) => {
+                    let (p, d) = planned.borrow().clone();
+                    analyzer.insert(a.with_plan(p, d))
+                }
                 Err(e) => {
                     format = Some(e);
                     return Take::Stop;
@@ -237,6 +263,58 @@ pub(crate) fn store_embedding(
     }
 }
 
+/// Stores a track's sketch (after its bliss vector: the index keeps it
+/// only beside one). `model_heard`: what the model made of the pass
+/// (`None`: it did not run) — a vector, or a track it cannot hear, marks
+/// the styles part done; a pass without the model keeps the styles a
+/// stored sketch already has.
+pub(crate) fn store_sketch(
+    lib: &Library,
+    index: &SoundIndex,
+    track: TrackId,
+    sketch: SoundSketch,
+    model_heard: Option<&Result<Vec<f32>, AnalysisError>>,
+    source: AnalysisSource,
+) -> nikgob_library::Result<bool> {
+    let styled = match model_heard {
+        Some(Ok(_)) | Some(Err(AnalysisError::TooShort)) => Some(STYLED_WITH),
+        _ => None,
+    };
+    let (sketch, styled) = match styled {
+        Some(_) => (sketch, styled),
+        None => match lib.sketch_of(track)? {
+            // Kept only when heard from the same source: a stream's styles
+            // are not the file's (another edit or master), and the file
+            // waits for its own.
+            Some(old) if old.styled_with.as_deref() == Some(STYLED_WITH) && old.source == source => {
+                let kept = SoundSketch::from_bytes(&old.sketch).and_then(|s| s.styles());
+                (sketch.with_styles(kept.as_ref()), Some(STYLED_WITH))
+            }
+            _ => (sketch, None),
+        },
+    };
+    let stored = lib.put_sketch(track, &sketch.to_bytes(), SKETCHED_WITH, styled, source)?;
+    if stored {
+        // An empty one takes the old one out of memory too.
+        index.write().set_sketch(track, sketch);
+    }
+    Ok(stored)
+}
+
+/// Puts every stored sketch into `index` (beside the vectors already there).
+pub(crate) fn load_sketches(lib: &Library, index: &SoundIndex) {
+    let rows = match lib.sketches(SKETCHED_WITH) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::warn!("analysis: loading the sketches: {e}");
+            return;
+        }
+    };
+    let mut idx = index.write();
+    let n = rows.into_iter().filter(|(track, bytes)| SoundSketch::from_bytes(bytes).is_some_and(|s| idx.set_sketch(*track, s))).count();
+    log::info!("analysis: {n} sketches of the sound in memory");
+}
+
 /// Fills `index` with every current vector of the library.
 pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
     let rows = match lib.analysis_vectors(ANALYZED_WITH) {
@@ -256,6 +334,18 @@ pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
         }
     }
     log::info!("analysis: {} vectors in memory", idx.len());
+}
+
+/// What the live worker holds, for a snapshot built without it (the
+/// previews of Главная, the model's preview, evaluations): the bliss
+/// vectors, the sketches and, when `prefs` let the model hear the library
+/// (unset: whatever vectors are stored), its vectors.
+pub(crate) fn load_offline(lib: &Library, index: &SoundIndex, prefs: &v::Prefs) {
+    load_index(lib, index);
+    load_sketches(lib, index);
+    if Neural::of(prefs.sound_neural_or(true)).library {
+        load_embeddings(lib, index);
+    }
 }
 
 /// Puts every stored vector of the neural model into `index` (beside the
@@ -305,6 +395,9 @@ enum Kind {
     Bliss,
     /// Only the neural model's vector (bliss's is current).
     Embed,
+    /// Only the sketch (the backfill of files analysed before it): the
+    /// model runs for its styles when it is on.
+    Sketch,
 }
 
 #[derive(Default)]
@@ -405,6 +498,15 @@ impl Shared {
         Ok(embed.into_iter().map(|t| (t, Kind::Embed)).collect())
     }
 
+    /// The backfill of the sketches, after bliss's queue and the model's
+    /// (their passes make the sketch too): with the model running, the
+    /// files it has not heard for their styles as well.
+    fn list_sketches(&self, aside: &HashSet<TrackId>) -> nikgob_library::Result<Vec<(AnalysisTodo, Kind)>> {
+        let styled = self.model().map(|_| STYLED_WITH);
+        let due = fresh(|limit| self.lib.tracks_needing_sketch(SKETCHED_WITH, styled, ANALYZED_WITH, limit), aside)?;
+        Ok(due.into_iter().map(|t| (t, Kind::Sketch)).collect())
+    }
+
     /// The next file to analyse; waits while there is none. `None` = stop.
     fn next(&self) -> Option<(AnalysisTodo, Kind)> {
         let mut q = self.queue.lock();
@@ -424,7 +526,10 @@ impl Shared {
             let aside: HashSet<TrackId> = q.busy.union(&q.skip).copied().collect();
             let listed = parking_lot::MutexGuard::unlocked(&mut q, || {
                 self.sync_embeddings();
-                self.list(&aside)
+                match self.list(&aside) {
+                    Ok(l) if l.is_empty() => self.list_sketches(&aside),
+                    other => other,
+                }
             });
             match listed {
                 Ok(list) => {
@@ -472,16 +577,27 @@ impl Shared {
         log::info!(
             "analysis: starting {}{}{}",
             path.display(),
-            if kind == Kind::Embed { " (sound model only)" } else { "" },
+            match kind {
+                Kind::Bliss => "",
+                Kind::Embed => " (sound model only)",
+                Kind::Sketch => " (sketch only)",
+            },
             if self.playing.load(Ordering::Relaxed) { " (music playing)" } else { "" }
         );
         let want = Want { bliss: kind == Kind::Bliss, model: model.map(|m| m as &dyn SoundModel) };
         let skip = match analyze_file(&path, want, pacer) {
-            Ok(out) => self.keep(todo.track_id, &path, out, started),
+            Ok(out) => self.keep(todo.track_id, &path, out, kind, started),
             Err(FileError::Stopped) => false,
             Err(FileError::Unavailable(e)) => {
                 log::info!("analysis: skipping {}: {e}", path.display());
                 true
+            }
+            Err(FileError::Undecodable(e)) if kind == Kind::Sketch => {
+                // Marked with an empty sketch: out of the queue until the
+                // sketch's version changes.
+                log::info!("analysis: no sketch of {}: {e}", path.display());
+                let heard = model.map(|_| Err(AnalysisError::TooShort));
+                store_sketch(&self.lib, &self.index, todo.track_id, SoundSketch::default(), heard.as_ref(), AnalysisSource::File).is_err()
             }
             Err(FileError::Undecodable(e)) if kind == Kind::Embed => {
                 log::info!("analysis: the sound model cannot hear {}: {e}", path.display());
@@ -505,14 +621,23 @@ impl Shared {
 
     /// Stores what a pass gave; true when the track is to be skipped in
     /// this run (it could not be stored).
-    fn keep(&self, track: TrackId, path: &Path, out: Analysed, started: Instant) -> bool {
+    fn keep(&self, track: TrackId, path: &Path, out: Analysed, kind: Kind, started: Instant) -> bool {
         if let Some(Ok(vector)) = out.bliss
             && let Err(e) = store_vector(&self.lib, &self.index, track, vector, AnalysisSource::File)
         {
             log::warn!("analysis: storing {track}: {e}");
             return true;
         }
-        let embedded = match &out.embedding {
+        // A failure of the model itself stores no styles mark (tried again).
+        let heard = out.embedding.as_ref().filter(|r| !matches!(r, Err(AnalysisError::Model(_))));
+        if let Err(e) = store_sketch(&self.lib, &self.index, track, out.sketch, heard, AnalysisSource::File) {
+            log::warn!("analysis: storing the sketch of {track}: {e}");
+            return true;
+        }
+        // The backfill ran the model for its styles: the vector it has
+        // already is the same.
+        let embedding = if kind == Kind::Sketch { None } else { out.embedding.as_ref() };
+        let embedded = match embedding {
             None => "",
             Some(result) => match store_embedding(&self.lib, &self.index, track, result, AnalysisSource::File) {
                 Ok(Some(_)) if result.is_ok() => " with the sound model",
@@ -588,6 +713,7 @@ impl Shared {
     fn run(self: &Arc<Self>, start: Duration, alive: Sender<()>) {
         lower_priority();
         load_index(&self.lib, &self.index);
+        load_sketches(&self.lib, &self.index);
         self.sync_embeddings();
         self.report(true);
         self.pause(start);
@@ -903,6 +1029,228 @@ mod tests {
         assert!(out.bliss.is_none() && out.embedding.is_some());
     }
 
+    /// A long file's pass gives its sketch too (the crest of the windows,
+    /// the head and the tail from two more windows that reach neither bliss
+    /// nor the model); it is stored and loaded after a restart, and a pass
+    /// without the model keeps the styles a sketch had.
+    #[test]
+    fn a_long_file_gets_its_sketch() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = dir.path().join("long.wav");
+        write_wav(&long, 22_050, 120.0, 330.0);
+        let stop = AtomicBool::new(false);
+        let out = analyze_file(&long, Want { bliss: false, model: None }, &mut Pacer::unpaced(&stop)).unwrap();
+        assert!(out.bliss.is_none() && out.embedding.is_none());
+        assert!((out.seconds - 45.0).abs() < 0.1, "{}", out.seconds);
+        let crest = out.sketch.crest().unwrap();
+        assert!(crest.peak > -30.0 && crest.spread() < 6.0, "{crest:?}");
+        assert!(out.sketch.head().is_some() && out.sketch.tail().is_some(), "{:?}", out.sketch);
+        assert!(out.sketch.styles().is_none());
+
+        let lib = Library::open_in_memory().unwrap();
+        let index: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
+        let credit = nikgob_core::model::ArtistCredit::single(String::from("A"), None);
+        let t = lib.upsert_track(&nikgob_core::model::Track::new("T", credit)).unwrap().id;
+        store_vector(&lib, &index, t, [0.5; nikgob_recs::DIM], AnalysisSource::File).unwrap();
+        let styles = nikgob_recs::Styles { top: [(3, 0.7), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.7 };
+        let heard: Result<Vec<f32>, AnalysisError> = Ok(vec![0.0; 4]);
+        assert!(store_sketch(&lib, &index, t, out.sketch.with_styles(Some(&styles)), Some(&heard), AnalysisSource::File).unwrap());
+        assert_eq!(index.read().sketch(t).and_then(|s| s.styles()).map(|s| s.top[0].0), Some(3));
+        // Again without the model: the styles stay.
+        assert!(store_sketch(&lib, &index, t, out.sketch, None, AnalysisSource::File).unwrap());
+        let row = lib.sketch_of(t).unwrap().unwrap();
+        assert_eq!(row.styled_with.as_deref(), Some(STYLED_WITH));
+        assert!(SoundSketch::from_bytes(&row.sketch).unwrap().styles().is_some());
+        // A restart loads it beside the vector.
+        let other: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
+        load_index(&lib, &other);
+        load_sketches(&lib, &other);
+        assert_eq!(other.read().sketch(t), index.read().sketch(t));
+        assert_eq!(other.read().sketched_len(), 1);
+
+        // Styles heard from a stream are not the local file's: a file pass
+        // without the model drops them, so the file is styled on its own.
+        let t2 = lib.upsert_track(&nikgob_core::model::Track::new("T2", nikgob_core::model::ArtistCredit::single(String::from("A"), None))).unwrap().id;
+        store_vector(&lib, &index, t2, [0.4; nikgob_recs::DIM], AnalysisSource::Youtube).unwrap();
+        assert!(store_sketch(&lib, &index, t2, out.sketch.with_styles(Some(&styles)), Some(&heard), AnalysisSource::Youtube).unwrap());
+        assert!(store_sketch(&lib, &index, t2, out.sketch, None, AnalysisSource::File).unwrap());
+        let row = lib.sketch_of(t2).unwrap().unwrap();
+        assert_eq!((row.styled_with.as_deref(), row.source), (None, AnalysisSource::File));
+        assert!(SoundSketch::from_bytes(&row.sketch).unwrap().styles().is_none());
+        assert!(index.read().sketch(t2).unwrap().styles().is_none());
+        // A file pass that measured nothing (or failed) leaves nothing of
+        // the old audio in memory either.
+        assert!(store_sketch(&lib, &index, t2, SoundSketch::default(), None, AnalysisSource::File).unwrap());
+        assert!(lib.sketch_of(t2).unwrap().is_some(), "the row marks it done");
+        assert!(index.read().sketch(t2).is_none());
+    }
+
+    /// The model's styles of each window, summed beside what it returns
+    /// (the harness keeps the 400 means for its report).
+    struct Recording<'a> {
+        model: &'a dyn SoundModel,
+        sum: Mutex<nikgob_recs::styles::StyleSum>,
+    }
+
+    impl SoundModel for Recording<'_> {
+        fn name(&self) -> &str {
+            self.model.name()
+        }
+        fn dim(&self) -> usize {
+            self.model.dim()
+        }
+        fn sample_rate(&self) -> u32 {
+            self.model.sample_rate()
+        }
+        fn embed(&self, mono: &[f32]) -> Result<Vec<f32>, AnalysisError> {
+            self.model.embed(mono)
+        }
+        fn embed_with_styles(&self, mono: &[f32]) -> Result<(Vec<f32>, Option<Vec<f32>>), AnalysisError> {
+            let out = self.model.embed_with_styles(mono)?;
+            if let Some(s) = &out.1 {
+                self.sum.lock().add(s, mono.len() as f64);
+            }
+            Ok(out)
+        }
+    }
+
+    /// The process's committed memory by mimalloc, MB.
+    #[allow(unsafe_code)]
+    fn commit_mb() -> f64 {
+        let (mut rss, mut commit) = (0usize, 0usize);
+        // SAFETY: mimalloc writes the counters it is given and ignores the null ones.
+        unsafe {
+            libmimalloc_sys::mi_process_info(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &raw mut rss,
+                std::ptr::null_mut(),
+                &raw mut commit,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+        commit as f64 / 1_048_576.0
+    }
+
+    /// What the sketches add to the index of 50 000 tracks, measured by
+    /// mimalloc's commit (`cargo test -p nikgob-runtime --lib
+    /// analysis::tests::sketch_memory -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "a measurement"]
+    fn sketch_memory() {
+        const N: usize = 50_000;
+        let ids: Vec<TrackId> = (0..N).map(|_| TrackId::new()).collect();
+        let mut idx: VectorIndex<TrackId> = VectorIndex::new();
+        for (k, id) in ids.iter().enumerate() {
+            idx.insert(*id, [k as f32 * 1e-4; nikgob_recs::DIM]);
+        }
+        let sketch = SoundSketch::new(Some(nikgob_recs::Crest { peak: -10.0, low: -20.0, max: -9.0 }), None, None, None);
+        let before = commit_mb();
+        for id in &ids {
+            idx.set_sketch(*id, sketch);
+        }
+        let with = commit_mb();
+        let copy = idx.clone();
+        let copied = commit_mb();
+        assert_eq!(copy.sketched_len(), N);
+        eprintln!(
+            "{N} tracks: the sketches add {:.2} MB to the index ({} bytes a track) (a snapshot's whole copy of the index with them: {:.2} MB)",
+            with - before,
+            std::mem::size_of::<SoundSketch>(),
+            copied - with
+        );
+    }
+
+    /// The sketch harness: a list of files (`NIKGOB_SKETCH_LIST`, lines of
+    /// track id, label, path, title, tab-separated) read only, each
+    /// analysed at the lowest priority with the model of `NIKGOB_MODELS`
+    /// on one CPU thread, three times — the three windows alone, the plan
+    /// with the edges (no model: the backfill without it), and the
+    /// backfill's pass with the model — its timings, sketch and the 400
+    /// style means written as JSON lines to `NIKGOB_SKETCH_OUT`:
+    ///
+    /// `NIKGOB_SKETCH_LIST=… NIKGOB_SKETCH_OUT=… NIKGOB_MODELS=… cargo test -p nikgob-runtime --lib analysis::tests::sketch_harness -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a harness: needs a list of files and the model"]
+    fn sketch_harness() {
+        let (Some(list), Some(out), Some(models)) =
+            (std::env::var_os("NIKGOB_SKETCH_LIST"), std::env::var_os("NIKGOB_SKETCH_OUT"), std::env::var_os("NIKGOB_MODELS"))
+        else {
+            eprintln!("NIKGOB_SKETCH_LIST, NIKGOB_SKETCH_OUT and NIKGOB_MODELS are needed");
+            return;
+        };
+        lower_priority();
+        let effnet = Effnet::new(PathBuf::from(models));
+        effnet.set_device(v::SoundDevice::Cpu);
+        assert!(effnet.ready(), "the model is not in that folder");
+        let text = std::fs::read_to_string(list).unwrap();
+        let mut lines = Vec::new();
+        let stop = AtomicBool::new(false);
+        let before = commit_mb();
+        let mut peak = before;
+        let mut totals = [0f64; 3];
+        let mut n = 0usize;
+        for row in text.lines().take(200) {
+            let f: Vec<&str> = row.split('\t').collect();
+            if f.len() < 4 {
+                continue;
+            }
+            let path = Path::new(f[2]);
+            let time = |plan: fn(Option<f64>) -> Vec<(Window, Part)>, model: Option<&dyn SoundModel>| {
+                let t = Instant::now();
+                let r = analyze_decoded(|p, sink| decode_file_windows(path, p, sink), plan, Want { bliss: false, model }, &mut Pacer::unpaced(&stop));
+                (t.elapsed().as_secs_f64(), r)
+            };
+            let windows_only = |d: Option<f64>| nikgob_recs::windows(d).into_iter().map(|w| (w, Part::Main)).collect();
+            let (t_windows, a) = time(windows_only, None);
+            if a.is_err() {
+                eprintln!("skipping {}: {:?}", f[2], a.err());
+                continue;
+            }
+            let (t_plan, _) = time(nikgob_recs::file_plan, None);
+            let rec = Recording { model: &effnet, sum: Mutex::new(Default::default()) };
+            let (t_model, b) = time(nikgob_recs::file_plan, Some(&rec));
+            peak = peak.max(commit_mb());
+            let Ok(b) = b else { continue };
+            let s = b.sketch;
+            let edge = |e: Option<nikgob_recs::sketch::Edge>| {
+                e.map(|e| {
+                    let key = e.key().map(|(k, r)| serde_json::json!({ "root": k.root, "minor": k.minor, "r": r }));
+                    serde_json::json!({ "loudness": e.loudness, "shape": format!("{:?}", e.shape), "silence": e.silence, "chroma": e.chroma, "key": key })
+                })
+            };
+            let styles = s.styles().map(|st| {
+                serde_json::json!({
+                    "sure": st.sure,
+                    "top": st.leading().map(|(l, p)| serde_json::json!([l, p])).collect::<Vec<_>>(),
+                })
+            });
+            let means: Option<Vec<f32>> = rec.sum.lock().mean().map(|m| m.iter().map(|x| (x * 1000.0).round() / 1000.0).collect());
+            lines.push(serde_json::json!({
+                "id": f[0], "label": f[1], "title": f[3],
+                "t_windows": t_windows, "t_plan": t_plan, "t_model": t_model,
+                "crest": s.crest().map(|c| serde_json::json!({ "peak": c.peak, "low": c.low, "max": c.max })),
+                "head": edge(s.head()), "tail": edge(s.tail()), "styles": styles, "means": means,
+            }).to_string());
+            totals[0] += t_windows;
+            totals[1] += t_plan;
+            totals[2] += t_model;
+            n += 1;
+        }
+        effnet.unload();
+        std::fs::write(out, lines.join("\n")).unwrap();
+        let k = n.max(1) as f64;
+        eprintln!(
+            "{n} files: three windows {:.0} ms, with the edges {:.0} ms, the backfill with the model {:.0} ms a file on the mean; commit {before:.0} MB → peak {peak:.0} MB → {:.0} MB after",
+            totals[0] / k * 1000.0,
+            totals[1] / k * 1000.0,
+            totals[2] / k * 1000.0,
+            commit_mb()
+        );
+    }
+
     /// Files set aside at the head of the queue (they could not be opened)
     /// never hide the rest: the read goes past them.
     #[test]
@@ -955,5 +1303,20 @@ mod tests {
         assert!(!lib.has_embedding(u, EMBEDDED_WITH).unwrap());
         assert_eq!(store_embedding(&lib, &index, u, &Err(AnalysisError::TooShort), AnalysisSource::File).unwrap(), Some(true));
         assert!(lib.has_embedding(u, EMBEDDED_WITH).unwrap());
+
+        // A snapshot built without the worker loads what it would hold:
+        // the sketch too, and the model's vectors while the mode wants them.
+        let styles = nikgob_recs::Styles { top: [(3, 0.7), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.7 };
+        let sketch = SoundSketch::default().with_styles(Some(&styles));
+        assert!(store_sketch(&lib, &index, t, sketch, Some(&Ok(raw)), AnalysisSource::File).unwrap());
+        let offline: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
+        load_offline(&lib, &offline, &v::Prefs::default());
+        assert_eq!(offline.read().get(t), Some(&file));
+        assert_eq!(offline.read().sketch(t).copied(), Some(sketch));
+        assert_eq!(offline.read().embedding(t), index.read().embedding(t));
+        let off = v::Prefs { sound_neural: Some(v::SoundNeural::Off), ..v::Prefs::default() };
+        let without: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
+        load_offline(&lib, &without, &off);
+        assert!(without.read().sketch(t).is_some() && without.read().embedding(t).is_none());
     }
 }

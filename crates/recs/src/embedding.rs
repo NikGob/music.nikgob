@@ -37,6 +37,13 @@ pub trait SoundModel: Send + Sync {
     /// The vector of one window of mono PCM at [`Self::sample_rate`] (the
     /// mean over the window's patches).
     fn embed(&self, mono: &[f32]) -> Result<Vec<f32>, AnalysisError>;
+
+    /// [`Self::embed`] and, from a model that has them, the mean over the
+    /// window's patches of its style probabilities
+    /// ([`crate::styles::STYLES`], computed by the same run).
+    fn embed_with_styles(&self, mono: &[f32]) -> Result<(Vec<f32>, Option<Vec<f32>>), AnalysisError> {
+        self.embed(mono).map(|v| (v, None))
+    }
 }
 
 /// The rate Discogs-EffNet reads.

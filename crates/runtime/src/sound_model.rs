@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use nikgob_align::catalog::{Catalog, ModelId};
 use nikgob_align::engine::{self, Device, Model};
 use nikgob_recs::embedding::{EFFNET_DIM, EMBED_RATE, MEL_BANDS, Mel, PATCH};
+use nikgob_recs::styles::STYLE_COUNT;
 use nikgob_recs::{AnalysisError, EMBEDDED_WITH, SoundModel};
 use nikgob_view::SoundDevice;
 use parking_lot::Mutex;
@@ -553,6 +554,19 @@ impl SoundModel for Effnet {
     }
 
     fn embed(&self, mono: &[f32]) -> Result<Vec<f32>, AnalysisError> {
+        self.run(mono, false).map(|(v, _)| v)
+    }
+
+    fn embed_with_styles(&self, mono: &[f32]) -> Result<(Vec<f32>, Option<Vec<f32>>), AnalysisError> {
+        self.run(mono, true)
+    }
+}
+
+impl Effnet {
+    /// The window's mean embedding and, when `styles`, the mean of the
+    /// style head's probabilities over its patches (the same run computes
+    /// both; nothing more is run for them).
+    fn run(&self, mono: &[f32], styles: bool) -> Result<(Vec<f32>, Option<Vec<f32>>), AnalysisError> {
         let frames = self.mel.frames(mono);
         let n = frames.len() / MEL_BANDS;
         if n == 0 {
@@ -560,12 +574,32 @@ impl SoundModel for Effnet {
         }
         self.with_session(|model| {
             let mut sum = vec![0f64; EFFNET_DIM];
+            let mut style_sum = styles.then(|| vec![0f64; STYLE_COUNT]);
             let mut count = 0usize;
             for start in Mel::patch_starts(n) {
                 let patch = Mel::patch(&frames, start);
                 let outputs = model.run_f32_outputs(vec![1, PATCH, MEL_BANDS], patch).map_err(|e| AnalysisError::Model(e.to_string()))?;
-                // The embedding is the 1280-wide head (the other is the 400 styles).
-                let Some((_, v)) = outputs.into_iter().find(|(shape, _)| shape.last() == Some(&(EFFNET_DIM as i64))) else {
+                // The embedding is the 1280-wide head, the other the 400 styles.
+                let mut embedding = None;
+                for (shape, v) in outputs {
+                    match shape.last() {
+                        Some(&w) if w == EFFNET_DIM as i64 => embedding = Some(v),
+                        Some(&w) if w == STYLE_COUNT as i64 => {
+                            // A broken style head loses the styles, never the vector.
+                            if let Some(acc) = style_sum.as_mut() {
+                                if v.len() == STYLE_COUNT && v.iter().all(|x| x.is_finite()) {
+                                    for (s, x) in acc.iter_mut().zip(&v) {
+                                        *s += f64::from(*x);
+                                    }
+                                } else {
+                                    style_sum = None;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let Some(v) = embedding else {
                     return Err(AnalysisError::Model("no 1280-wide output".into()));
                 };
                 if v.len() != EFFNET_DIM || v.iter().any(|x| !x.is_finite()) {
@@ -576,7 +610,8 @@ impl SoundModel for Effnet {
                 }
                 count += 1;
             }
-            Ok(sum.into_iter().map(|s| (s / count.max(1) as f64) as f32).collect())
+            let mean = |acc: Vec<f64>| acc.into_iter().map(|s| (s / count.max(1) as f64) as f32).collect::<Vec<f32>>();
+            Ok((mean(sum), style_sum.map(mean)))
         })
         .inspect_err(|e| {
             // A model that cannot run rests: bliss goes on alone.

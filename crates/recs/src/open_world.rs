@@ -70,6 +70,10 @@ const CALM_Z: f32 = -0.8;
 const CALM_LOUDNESS: f32 = 0.68;
 const LIVELY_Z: f32 = 0.8;
 const DARK_Z: f32 = -0.5;
+/// The feeling of a song's cached lyrics moves it on the brightness axis
+/// by this much at most (z units; sad words darker, happy ones brighter,
+/// a song without lyrics where its sound puts it).
+pub const VALENCE_NUDGE: f32 = 0.3;
 const BACKGROUND_Z: f32 = 0.6;
 /// The session's tracks the walk starts from, and the niche's best loved
 /// when the session has none.
@@ -371,10 +375,16 @@ pub fn fits_filter(ctx: &WaveContext<'_>, filter: &WaveFilter, i: usize) -> bool
     let m = ctx.model;
     let character = match filter.character {
         Character::Any => true,
-        Character::Calm => m.axes_at(i).is_some_and(|a| a.energy <= CALM_Z) && m.loudness_at(i).is_none_or(|l| l <= CALM_LOUDNESS),
+        Character::Calm => {
+            m.axes_at(i).is_some_and(|a| a.energy <= CALM_Z) && m.loudness_at(i).is_none_or(|l| l <= CALM_LOUDNESS) && m.song_type_at(i).calm_dynamics()
+        }
         Character::Lively => m.axes_at(i).is_some_and(|a| a.energy >= LIVELY_Z),
-        Character::Dark => m.axes_at(i).is_some_and(|a| a.brightness <= DARK_Z),
-        Character::Background => (ctx.background)(i) || (m.song_type_at(i).lane() == crate::songtype::SongLane::Instrumental && m.axes_at(i).is_some_and(|a| a.energy.abs() <= BACKGROUND_Z)),
+        Character::Dark => m.axes_at(i).is_some_and(|a| a.brightness + VALENCE_NUDGE * m.song_type_at(i).lyric_valence() <= DARK_Z),
+        Character::Background => {
+            let t = m.song_type_at(i);
+            (ctx.background)(i)
+                || (t.lane() == crate::songtype::SongLane::Instrumental && t.background_dynamics() && m.axes_at(i).is_some_and(|a| a.energy.abs() <= BACKGROUND_Z))
+        }
     };
     let scene = match filter.scene {
         Scene::All => true,

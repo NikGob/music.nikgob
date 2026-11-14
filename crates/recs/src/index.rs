@@ -23,6 +23,10 @@
 //! [`VectorIndex::nearest_with`] and [`VectorIndex::probe_fit`];
 //! [`VectorIndex::nearest`] and [`VectorIndex::distance`] of raw vectors
 //! stay bliss's.
+//!
+//! A track may also have its sketch ([`crate::sketch::SoundSketch`], 40
+//! bytes: the crest, the edges, the styles) in a row of its own beside
+//! the vectors, empty until the first one comes.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -32,6 +36,7 @@ use bliss_audio::FeaturesVersion;
 
 use crate::analysis::{DIM, Vector};
 use crate::embedding::{COMPACT_DIM, Compact};
+use crate::sketch::SoundSketch;
 
 /// The model's share of the distance of two tracks that both have its vector.
 pub const SOUND_MODEL_SHARE: f32 = 0.6;
@@ -77,6 +82,10 @@ pub struct VectorIndex<K> {
     emb_count: usize,
     /// Sum of the stored model vectors: their mean centres them.
     emb_sum: Vec<f64>,
+    /// Each row's sketch beside `data` (empty until the first one comes;
+    /// an empty sketch = none).
+    sketch: Vec<SoundSketch>,
+    sketch_count: usize,
 }
 
 impl<K: Copy + Eq + Hash> Default for VectorIndex<K> {
@@ -128,6 +137,8 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             emb_scale: Vec::new(),
             emb_count: 0,
             emb_sum: Vec::new(),
+            sketch: Vec::new(),
+            sketch_count: 0,
         }
     }
 
@@ -184,6 +195,9 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
                     self.emb.extend_from_slice(&[0; COMPACT_DIM]);
                     self.emb_scale.push(0.0);
                 }
+                if !self.sketch.is_empty() {
+                    self.sketch.push(SoundSketch::default());
+                }
             }
         }
         self.account(&vector, 1.0);
@@ -205,6 +219,12 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             self.pos.insert(self.keys[i], i);
         }
         self.data.truncate(last * DIM);
+        if !self.sketch.is_empty() {
+            if !self.sketch[i].is_empty() {
+                self.sketch_count -= 1;
+            }
+            self.sketch.swap_remove(i);
+        }
         if !self.emb_scale.is_empty() {
             self.emb_scale.swap_remove(i);
             if i != last {
@@ -381,6 +401,38 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             self.emb_sum.iter_mut().for_each(|s| *s = 0.0);
         }
         Some(old)
+    }
+
+    /// The sketch of `key`, when it has one.
+    pub fn sketch(&self, key: K) -> Option<&SoundSketch> {
+        self.pos.get(&key).and_then(|&i| self.sketch.get(i)).filter(|s| !s.is_empty())
+    }
+
+    /// Tracks with a sketch.
+    pub fn sketched_len(&self) -> usize {
+        self.sketch_count
+    }
+
+    /// Sets the sketch of a track that has a bliss vector (false
+    /// otherwise). An empty sketch (a pass that measured nothing) takes
+    /// the one there away, and is false: the track has none.
+    pub fn set_sketch(&mut self, key: K, s: SoundSketch) -> bool {
+        let Some(&i) = self.pos.get(&key) else { return false };
+        if s.is_empty() {
+            if self.sketch.get(i).is_some_and(|x| !x.is_empty()) {
+                self.sketch[i] = s;
+                self.sketch_count -= 1;
+            }
+            return false;
+        }
+        if self.sketch.is_empty() {
+            self.sketch = vec![SoundSketch::default(); self.keys.len()];
+        }
+        if self.sketch[i].is_empty() {
+            self.sketch_count += 1;
+        }
+        self.sketch[i] = s;
+        true
     }
 
     /// Drops every model vector (the neural analysis was switched off).
@@ -941,6 +993,35 @@ mod tests {
         assert!(idx.set_embedding(3, c[4]));
         assert_eq!(idx.embedded_len(), 1);
         assert_eq!(idx.embedding(3), Some(c[4]));
+    }
+
+    /// The sketches follow their rows the same way; an empty one is none.
+    #[test]
+    fn sketches_follow_their_rows() {
+        use crate::sketch::Crest;
+        let mut rng = Rng(5);
+        let mut idx = VectorIndex::new();
+        for k in 0..5u32 {
+            idx.insert(k, random(&mut rng));
+        }
+        let s = |peak: f32| SoundSketch::new(Some(Crest { peak, low: -40.0, max: peak }), None, None, None);
+        assert!(!idx.set_sketch(99, s(-10.0)), "no bliss vector, no sketch");
+        assert!(!idx.set_sketch(1, SoundSketch::default()), "an empty sketch is none");
+        assert!(idx.set_sketch(1, s(-10.0)) && idx.set_sketch(4, s(-20.0)));
+        assert_eq!(idx.sketched_len(), 2);
+        idx.insert(5, random(&mut rng));
+        assert_eq!(idx.sketch(5), None);
+        idx.remove(1);
+        assert_eq!(idx.sketched_len(), 1);
+        assert_eq!(idx.sketch(4), Some(&s(-20.0)));
+        assert!(idx.set_sketch(4, s(-12.0)));
+        assert_eq!(idx.sketched_len(), 1);
+        assert_eq!(idx.sketch(4).and_then(|x| x.crest()).map(|c| c.peak), Some(-12.0));
+        // A pass that measured nothing takes the old sketch away.
+        assert!(!idx.set_sketch(4, SoundSketch::default()));
+        assert_eq!((idx.sketch(4), idx.sketched_len()), (None, 0));
+        assert!(!idx.set_sketch(4, SoundSketch::default()));
+        assert_eq!(idx.sketched_len(), 0);
     }
 
     /// Two genres bliss cannot tell apart (their bliss vectors are drawn

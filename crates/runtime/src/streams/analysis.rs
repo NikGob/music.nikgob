@@ -71,7 +71,7 @@ use nikgob_view as v;
 use super::Msg;
 use super::resolve::Lookup;
 use crate::Worker;
-use crate::analysis::{FileError, SoundIndex, Want, analyze_bytes, store_embedding, store_vector};
+use crate::analysis::{FileError, SoundIndex, Want, analyze_bytes, store_embedding, store_sketch, store_vector};
 use crate::sound_model::Effnet;
 use crate::quiet::{self, Pacer, lower_priority};
 use crate::import::Internal;
@@ -262,6 +262,10 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &
                         && let Err(err) = store_embedding(lib, index, job.track, e, AnalysisSource::Youtube)
                     {
                         log::warn!("stream analysis: storing the sound model's vector of {}: {err}", job.track);
+                    }
+                    let heard = out.embedding.as_ref().filter(|r| !matches!(r, Err(nikgob_recs::AnalysisError::Model(_))));
+                    if stored && let Err(err) = store_sketch(lib, index, job.track, out.sketch, heard, AnalysisSource::Youtube) {
+                        log::warn!("stream analysis: storing the sketch of {}: {err}", job.track);
                     }
                     Outcome::Stored(stored)
                 }

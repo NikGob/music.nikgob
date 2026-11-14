@@ -263,6 +263,16 @@ pub fn stream_song_key(t: &StreamTrack) -> String {
     }
 }
 
+/// The work a stream's song is of, as [`stream_song_key`] keys songs: its
+/// title without the marks of a wordless or a short version
+/// ([`crate::work_title`]), so «Song (Off Vocal)» and «Song (TV Size)» key
+/// as «Song». Equal keys never both belong in one session.
+pub fn stream_work_key(t: &StreamTrack) -> String {
+    let artist = t.artists.first().map_or("", |a| a.name.as_str());
+    let title = if t.kind == TrackKind::Video { clip_title::display_title(&t.title, artist) } else { t.title.clone() };
+    song_key(&crate::work_title(&title).0, artist)
+}
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -864,6 +874,15 @@ mod tests {
         let mut clip = st(Service::Youtube, "v", "AIYOU - Eve Music Video", "Eve");
         clip.kind = TrackKind::Video;
         assert_eq!(stream_song_key(&clip), song_key("AIYOU", "Eve"));
+        // A version keys as its work; a remix stays its own.
+        let plain = st(Service::Youtube, "a", "Song", "Eve");
+        let off = st(Service::Youtube, "b", "Song (Off Vocal)", "Eve");
+        let tv = st(Service::Youtube, "c", "Song (TV Size)", "Eve");
+        let remix = st(Service::Youtube, "d", "Song (Remix)", "Eve");
+        assert_eq!(stream_work_key(&off), stream_work_key(&plain));
+        assert_eq!(stream_work_key(&tv), stream_work_key(&plain));
+        assert_ne!(stream_work_key(&remix), stream_work_key(&plain));
+        assert_ne!(stream_song_key(&off), stream_song_key(&plain));
     }
 
     /// One function keys a song's artists for the log of new music and for
