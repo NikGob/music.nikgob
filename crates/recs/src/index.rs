@@ -77,6 +77,9 @@ pub struct VectorIndex<K> {
     emb_count: usize,
     /// Sum of the stored model vectors: their mean centres them.
     emb_sum: Vec<f64>,
+    /// [`Self::calibration`] once measured; any change of the rows or of
+    /// their model vectors forgets it.
+    calibrated: std::sync::OnceLock<f32>,
 }
 
 impl<K: Copy + Eq + Hash> Default for VectorIndex<K> {
@@ -128,6 +131,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
             emb_scale: Vec::new(),
             emb_count: 0,
             emb_sum: Vec::new(),
+            calibrated: std::sync::OnceLock::new(),
         }
     }
 
@@ -157,6 +161,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 
     fn account(&mut self, v: &Vector, sign: f64) {
+        self.calibrated = std::sync::OnceLock::new();
         for (i, x) in v.iter().enumerate() {
             let x = f64::from(*x);
             self.sum[i] += sign * x;
@@ -341,6 +346,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 
     fn account_emb(&mut self, c: &Compact, sign: f64) {
+        self.calibrated = std::sync::OnceLock::new();
         if self.emb_sum.is_empty() {
             self.emb_sum = vec![0.0; COMPACT_DIM];
         }
@@ -385,6 +391,7 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// Drops every model vector (the neural analysis was switched off).
     pub fn clear_embeddings(&mut self) {
+        self.calibrated = std::sync::OnceLock::new();
         self.emb = Vec::new();
         self.emb_scale = Vec::new();
         self.emb_sum = Vec::new();
@@ -440,8 +447,13 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
 
     /// Bliss's distance per unit of the model's, over pairs of the
     /// library's tracks that have both (pairs spread over the library the
-    /// same way every time).
+    /// same way every time); measured once until the rows change (`mean`
+    /// is the rows' own, [`Self::emb_mean`]).
     fn calibration(&self, mean: &[f32; COMPACT_DIM]) -> f32 {
+        *self.calibrated.get_or_init(|| self.measure_calibration(mean))
+    }
+
+    fn measure_calibration(&self, mean: &[f32; COMPACT_DIM]) -> f32 {
         let rows: Vec<usize> = (0..self.emb_scale.len()).filter(|&i| self.emb_scale[i] > 0.0).collect();
         let n = rows.len();
         if n < 2 {
@@ -995,6 +1007,35 @@ mod tests {
         assert!(idx.set_embedding(3, c[4]));
         assert_eq!(idx.embedded_len(), 1);
         assert_eq!(idx.embedding(3), Some(c[4]));
+    }
+
+    /// The calibration of the two sounds is measured once while the rows
+    /// stand (every probe and neighbour search reuses it) and again after
+    /// any row or model vector changes.
+    #[test]
+    fn the_calibration_is_measured_once_while_the_rows_stand() {
+        let mut rng = Rng(5);
+        let mut idx = VectorIndex::new();
+        let dir = direction(&mut rng);
+        for k in 0..40u32 {
+            idx.insert(k, random(&mut rng));
+            idx.set_embedding(k, compact_near(&mut rng, &dir, 0.5));
+        }
+        assert!(idx.calibrated.get().is_none());
+        let a = idx.sound_probe(&[0, 1]).expect("blended");
+        let once = *idx.calibrated.get().expect("measured");
+        assert_eq!(once, idx.measure_calibration(&idx.emb_mean()));
+        assert_eq!(idx.probe_distance(&a, 0, 5), idx.sound_probe(&[0, 1]).and_then(|b| idx.probe_distance(&b, 0, 5)));
+        let other = direction(&mut rng);
+        idx.set_embedding(3, compact_near(&mut rng, &other, 0.1));
+        assert!(idx.calibrated.get().is_none(), "a model vector changed");
+        idx.sound_probe(&[0]);
+        assert_eq!(*idx.calibrated.get().unwrap(), idx.measure_calibration(&idx.emb_mean()));
+        idx.insert(99, random(&mut rng));
+        assert!(idx.calibrated.get().is_none(), "a row came");
+        idx.sound_probe(&[0]);
+        idx.remove(99);
+        assert!(idx.calibrated.get().is_none(), "a row went");
     }
 
     /// Two genres bliss cannot tell apart (their bliss vectors are drawn
