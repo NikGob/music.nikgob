@@ -177,13 +177,53 @@ pub fn purge_track(library: &Library, cfg: &ImportConfig, track: TrackId) -> Res
         }
     }
     if let Some(hash) = &purged.master_hash {
-        // `<hash>.<ext>` and its `<hash>.json` sidecar; a master still seeding
-        // in Downloads goes with the torrent's cleanup (no master row keeps it).
-        if let Ok(rd) = std::fs::read_dir(long_path(&cfg.masters_dir())) {
+        let masters = cfg.masters_dir();
+        // Under the masters' lock, and looked at again: an import may have
+        // taken this very file (or a file of this hash) as its master since
+        // the rows went, and keeps it then.
+        let _writes = crate::importer::master_writes();
+        if library.master_users(hash).unwrap_or(1) > 0 {
+            log::info!("the master {hash} is another track's now: its files stay");
+            return Ok(report);
+        }
+        let same_file = |path: &Path| crate::fsutil::hash_file(path).ok().as_deref() == Some(hash.as_str());
+        // The `<hash>.json` sidecar always; a master kept the older way is
+        // `<hash>.<ext>` (only while it holds that very file) with an
+        // image's `<hash>.cue`. A master kept by name owns no flat file:
+        // one there is another copy and stays. A master still seeding in
+        // Downloads goes with the torrent's cleanup (no master row keeps it).
+        if let Ok(rd) = std::fs::read_dir(long_path(&masters)) {
             for e in rd.flatten() {
                 let path = e.path();
-                if path.file_stem().is_some_and(|s| s.to_string_lossy() == hash.as_str()) {
+                if !path.file_stem().is_some_and(|s| s.to_string_lossy() == hash.as_str()) {
+                    continue;
+                }
+                let ext = path.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
+                if ext == "json" || (purged.master_file.is_none() && ext == "cue") {
                     delete(&path, &mut report);
+                } else if purged.master_file.is_none() {
+                    if same_file(&path) {
+                        delete(&path, &mut report);
+                    } else {
+                        log::warn!("not deleting {}: it is not the master it was", path.display());
+                    }
+                }
+            }
+        }
+        // A master kept by name: only inside the masters folder and only
+        // while it is still this very file; its album folder goes when
+        // nothing but its cover is left.
+        if let Some(file) = purged.master_file.as_deref().map(Path::new) {
+            if !file.starts_with(&masters) {
+                log::warn!("not deleting {}: it is outside the masters folder", file.display());
+            } else if !long_path(file).exists() {
+                report.files_missing += 1;
+            } else if !same_file(file) {
+                log::warn!("not deleting {}: it is not the master it was", file.display());
+            } else {
+                delete(file, &mut report);
+                if let Some(dir) = file.parent() {
+                    prune_empty_dirs(dir, &masters);
                 }
             }
         }
@@ -288,6 +328,109 @@ mod tests {
         let expected: Vec<String> = (0..8).map(|i| format!("content {i}")).collect();
         assert_eq!(contents, expected);
         assert!(moved.iter().all(|p| is_trash_name(p)));
+    }
+
+    /// A purge deletes a master's own file only: one kept by name leaves a
+    /// flat file of the same hash alone, and a flat file that no longer
+    /// holds the master's content stays.
+    #[test]
+    fn a_purge_deletes_only_the_master_s_own_file() {
+        use nikgob_core::model::{ArtistCredit, Codec, Master, SourceOrigin, Track};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let masters = cfg.masters_dir();
+        let lib = Library::open_in_memory().unwrap();
+        let song = b"the song".to_vec();
+        let hash = blake3::hash(&song).to_hex().to_string();
+        let named = masters.join("A").join("2001 - B").join("01 - C.flac");
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        std::fs::write(&named, &song).unwrap();
+        std::fs::write(named.with_file_name("cover.jpg"), b"jpeg").unwrap();
+        let flat = masters.join(format!("{hash}.flac"));
+        std::fs::write(&flat, &song).unwrap();
+        std::fs::write(masters.join(format!("{hash}.json")), b"{}").unwrap();
+        let master = |track: TrackId, file_path: Option<String>| Master {
+            track_id: track,
+            codec: Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: 8,
+            origin: Some(SourceOrigin::Inbox),
+            file_path,
+            replicas: Vec::new(),
+        };
+        let t = lib.upsert_track(&Track::new("C", ArtistCredit::single("A", None))).unwrap();
+        lib.put_master(&master(t.id, Some(named.to_string_lossy().into_owned()))).unwrap();
+        purge_track(&lib, &cfg, t.id).unwrap();
+        assert!(!named.exists());
+        assert!(!masters.join("A").exists(), "the album folder with only its cover goes");
+        assert!(!masters.join(format!("{hash}.json")).exists());
+        assert_eq!(std::fs::read(&flat).unwrap(), song, "another copy, not this master's");
+
+        // A flat master whose file changed: it stays.
+        std::fs::write(&flat, b"damaged").unwrap();
+        let t = lib.upsert_track(&Track::new("D", ArtistCredit::single("A", None))).unwrap();
+        lib.put_master(&master(t.id, None)).unwrap();
+        purge_track(&lib, &cfg, t.id).unwrap();
+        assert_eq!(std::fs::read(&flat).unwrap(), b"damaged");
+        // Its very file goes.
+        std::fs::write(&flat, &song).unwrap();
+        let t = lib.upsert_track(&Track::new("E", ArtistCredit::single("A", None))).unwrap();
+        lib.put_master(&master(t.id, None)).unwrap();
+        purge_track(&lib, &cfg, t.id).unwrap();
+        assert!(!flat.exists());
+    }
+
+    /// A purge whose rows are gone waits for the masters' lock; an import
+    /// that took the very file as another track's master meanwhile (under
+    /// that lock) keeps it: the purge looks again and leaves the file, its
+    /// sidecar and the new row alone.
+    #[test]
+    fn a_purge_leaves_a_master_an_import_took_meanwhile() {
+        use nikgob_core::model::{ArtistCredit, Codec, Master, SourceOrigin, Track};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let masters = cfg.masters_dir();
+        let lib = Library::open(dir.path().join("library.sqlite")).unwrap();
+        let song = b"the song".to_vec();
+        let hash = blake3::hash(&song).to_hex().to_string();
+        let file = masters.join("A").join("2001 - B").join("01 - C.flac");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, &song).unwrap();
+        let sidecar = masters.join(format!("{hash}.json"));
+        std::fs::write(&sidecar, b"{}").unwrap();
+        let master = |track: TrackId| Master {
+            track_id: track,
+            codec: Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: 8,
+            origin: Some(SourceOrigin::Inbox),
+            file_path: Some(file.to_string_lossy().into_owned()),
+            replicas: Vec::new(),
+        };
+        let gone = lib.upsert_track(&Track::new("C", ArtistCredit::single("A", None))).unwrap();
+        let other = lib.upsert_track(&Track::new("C (live)", ArtistCredit::single("A", None))).unwrap();
+        lib.put_master(&master(gone.id)).unwrap();
+
+        // The import holds the lock, as a registration does.
+        let writes = crate::importer::master_writes();
+        let purge = {
+            let (lib, cfg) = (lib.clone(), cfg.clone());
+            std::thread::spawn(move || purge_track(&lib, &cfg, gone.id).unwrap())
+        };
+        // The purge's rows are gone; it waits for the lock now.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while lib.get_master(gone.id).unwrap().is_some() {
+            assert!(std::time::Instant::now() < deadline, "the purge did not start");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // The import finds the file there and takes it as its master.
+        lib.put_master(&master(other.id)).unwrap();
+        drop(writes);
+        purge.join().unwrap();
+
+        assert_eq!(std::fs::read(&file).unwrap(), song, "the other track's master stays");
+        assert!(sidecar.exists());
+        assert_eq!(lib.get_master(other.id).unwrap(), Some(master(other.id)));
     }
 
     #[test]

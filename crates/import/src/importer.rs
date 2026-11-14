@@ -41,6 +41,7 @@ use crate::identity::{
     lookup as online_lookup,
 };
 use crate::layout::LayoutInput;
+use crate::master_files;
 use crate::same_audio::{Heard, Judgement, Known, file_keys, judge, marked_before, print_file};
 use crate::sanitize::long_path;
 use crate::spectrum::Verdict;
@@ -235,7 +236,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// One writer of the masters folder at a time: the importer placing a
 /// master, a move of the whole folder, the cleanup of a stopped torrent
-/// taking its masters out of Downloads. Shared by every importer (a new
+/// taking its masters out of Downloads, a purge or a wrong file taking a
+/// master away. Shared by every importer (a new
 /// configuration makes a new one). Only blocking threads take it, never the
 /// player loop: a holder may copy and hash a whole disc image.
 pub fn master_writes() -> MutexGuard<'static, ()> {
@@ -1292,10 +1294,8 @@ impl Importer {
                     list.push(undo);
                 }
                 ctx.stage(&path, Stage::Deriving);
+                // Its row is written with its file ([`register_master`]).
                 if let Some(master) = done.master.clone() {
-                    if let Err(e) = inner.library.put_master(&master) {
-                        log::warn!("master of {} not persisted: {e}", path.display());
-                    }
                     ctx.emit(ImportEvent::MasterRegistered(master));
                 }
                 ctx.emit(ImportEvent::Imported {
@@ -1772,51 +1772,100 @@ struct Undo {
     /// The track's master record before this import registered its own
     /// (`None`: it had none), put back when [`Self::master_hash`] is set.
     master_before: Option<Master>,
+    /// The master record this import wrote: only while the track's record
+    /// is still this one is it taken back (a later import of the same track
+    /// may have registered its own since).
+    master_registered: Option<Master>,
     /// The master's sidecar as it was before this import wrote it (`None`:
     /// there was none); a shared image's sidecar names earlier tracks too.
     sidecar_before: Option<Vec<u8>>,
+    /// The sidecar as this import wrote it: only while it is still this is
+    /// the earlier one put back.
+    sidecar_written: Option<Vec<u8>>,
     replaced: Replaced,
 }
 
 /// Takes back what a cancelled job committed, the last file first: its
 /// files go to the Trash (never deleted: an Inbox file may have been the
-/// only copy), its rows go, a file it replaced comes back. Returns how many
+/// only copy), its rows go, a file it replaced comes back. The master
+/// this import wrote goes only when no master row keeps it any more
+/// (another import may have taken the very file as its own master): its
+/// row and that look happen under the masters' lock. Returns how many
 /// files were taken back.
 fn roll_back(inner: &Inner, journal: Vec<Undo>) -> usize {
     let (cfg, lib) = (&inner.cfg, &inner.library);
-    let mut n = 0;
-    for u in journal.into_iter().rev() {
-        let mut gone = vec![u.dest.clone(), u.dest.with_extension("lrc")];
-        gone.extend(u.master_file.clone());
-        // The cue sheet kept with an image master goes with it.
-        gone.extend(u.master_file.as_ref().map(|m| m.with_extension("cue")));
-        for f in gone {
-            if long_path(&f).exists() {
-                match trash_file(&cfg.trash_dir, &f) {
-                    Ok(to) => log::info!("import cancelled: {} moved to {}", f.display(), to.display()),
-                    Err(e) => log::warn!("import cancelled: {} stays: {e}", f.display()),
-                }
+    let trash = |f: &Path| {
+        if long_path(f).exists() {
+            match trash_file(&cfg.trash_dir, f) {
+                Ok(to) => log::info!("import cancelled: {} moved to {}", f.display(), to.display()),
+                Err(e) => log::warn!("import cancelled: {} stays: {e}", f.display()),
             }
         }
-        if let Some(hash) = &u.master_hash {
-            let _ = lib.delete_master(u.track);
-            // The sidecar goes back to what it was: gone when this import
-            // made it, else as it was (other tracks of an image need it).
-            let sidecar = cfg.masters_dir().join(format!("{hash}.json"));
-            match &u.sidecar_before {
-                Some(bytes) => {
-                    if let Err(e) = std::fs::write(long_path(&sidecar), bytes) {
-                        log::warn!("import cancelled: {} is not put back: {e}", sidecar.display());
+    };
+    let mut n = 0;
+    for u in journal.into_iter().rev() {
+        trash(&u.dest);
+        trash(&u.dest.with_extension("lrc"));
+        {
+            let _writes = master_writes();
+            let masters = cfg.masters_dir();
+            if let Some(hash) = &u.master_hash {
+                // Only the record this import wrote goes back: one a later
+                // import of the track wrote since stays as it is.
+                let bare = |m: &Master| Master { replicas: Vec::new(), ..m.clone() };
+                let current = lib.get_master(u.track).ok().flatten();
+                let ours = current.as_ref().map(bare) == u.master_registered.as_ref().map(bare);
+                if ours {
+                    let _ = lib.delete_master(u.track);
+                    if let Some(m) = &u.master_before
+                        && let Err(e) = lib.put_master(m)
+                    {
+                        log::warn!("import cancelled: the master of {} before is not put back: {e}", u.track);
                     }
+                } else {
+                    log::info!("import cancelled: the master of {} changed since, it stays", u.track);
                 }
-                None => {
-                    let _ = fsutil::remove_file(&sidecar);
+                // The sidecar goes back to what it was, while it is still
+                // what this import wrote: gone when this import made it and
+                // no other master has the file, else as it was (other tracks
+                // of an image need it).
+                let sidecar = masters.join(format!("{hash}.json"));
+                let still_ours = u.sidecar_written.is_some()
+                    && std::fs::read(long_path(&sidecar)).ok() == u.sidecar_written;
+                match &u.sidecar_before {
+                    Some(bytes) if still_ours => {
+                        if let Err(e) = master_files::write_whole(&sidecar, bytes) {
+                            log::warn!("import cancelled: {} is not put back: {e}", sidecar.display());
+                        }
+                    }
+                    None if still_ours && lib.master_users(hash).unwrap_or(1) == 0 => {
+                        let _ = fsutil::remove_file(&sidecar);
+                    }
+                    _ => {}
                 }
             }
-            if let Some(m) = &u.master_before
-                && let Err(e) = lib.put_master(m)
-            {
-                log::warn!("import cancelled: the master of {} before is not put back: {e}", u.track);
+            if let Some(file) = &u.master_file {
+                let flat = file.parent() == Some(masters.as_path())
+                    && u.master_hash.as_deref().is_some_and(|h| file.file_stem().is_some_and(|s| s.to_string_lossy() == h));
+                let kept_by_others = if flat {
+                    u.master_hash.as_deref().is_none_or(|h| lib.master_users(h).unwrap_or(1) > 0)
+                } else {
+                    lib.masters_at(&file.to_string_lossy()).unwrap_or(1) > 0
+                };
+                if kept_by_others {
+                    log::info!("import cancelled: {} stays, another master has it", file.display());
+                } else {
+                    trash(file);
+                    // The cue sheet kept with an image master goes with it.
+                    if flat {
+                        trash(&file.with_extension("cue"));
+                    }
+                    // The album folder a master kept by name was the first
+                    // in goes with it when nothing but its cover is left.
+                    if let Some(dir) = file.parent() {
+                        fsutil::prune_empty_dirs(dir, &masters);
+                    }
+                }
             }
         }
         if let Err(e) = lib.forget_source(u.source) {
@@ -1896,9 +1945,11 @@ struct MasterSidecar<'a> {
     file_hash: &'a str,
     size_bytes: u64,
     origin: &'a SourceOrigin,
-    /// Where the lossless file lived at import time. A torrent payload later
-    /// moves to `masters/{file_hash}.<ext>` when its torrent is cleaned up, so
-    /// readers must look there by hash and not trust this field.
+    /// Where the lossless master is: in the masters folder under its name
+    /// (or `{file_hash}.<ext>` for an older one or an image), or a torrent's
+    /// payload, which moves into the masters folder when its torrent is
+    /// cleaned up: readers of a torrent's must look there and not trust
+    /// this field.
     path: String,
     original_name: String,
     /// The cue sheet of a single-file rip, kept as `{file_hash}.cue`, by
@@ -1916,16 +1967,39 @@ struct SidecarTracks {
     track_ids: Vec<TrackId>,
 }
 
-/// Registers the lossless original as the track's master: torrent payloads stay where they are (they keep seeding), Inbox files move
-/// to `.musiclib/masters/`, anything else is copied there. A track cut out of a
-/// single-file rip has the image as its master, shared with the other tracks
-/// of the image, and its cue sheet is kept next to it as `{hash}.cue`.
+/// What [`register_master`] did.
+struct Registered {
+    master: Master,
+    /// The file this call wrote, if it wrote one (for a cancel).
+    written: Option<PathBuf>,
+    /// The sidecar as this call wrote it (a cancel puts the earlier one
+    /// back only while it is still this).
+    sidecar: Option<Vec<u8>>,
+}
+
+/// Registers the lossless original as the track's master: torrent payloads
+/// stay where they are (they keep seeding); anything else is copied into
+/// the masters folder under its name ([`master_files::master_target`]:
+/// album artist, album, number and title, the album's `cover.jpg` beside
+/// it), never over another file. A file that is a master already (an older
+/// `{hash}.<ext>` holding that very file, or one kept by name) is not
+/// written again. A track cut out of a single-file rip has the image as its
+/// master, shared with the other tracks of the image: the image stays
+/// `{hash}.<ext>` with its cue sheet as `{hash}.cue` (a sheet that cannot
+/// be kept fails the registration: the sheet is what cuts the image), and
+/// is never written over a different file of that name. The master's row
+/// is written here, under the masters' lock and durably (a power cut after
+/// it keeps it), and only then does an Inbox file go: until the library
+/// knows the copy, the Inbox file stays (a failed row takes the copy
+/// written now back).
 fn register_master(
     inner: &Inner,
     a: &Analyzed,
     hash: &str,
     track_id: TrackId,
-) -> Result<Master> {
+    id: &Identity,
+    cover: Option<&Path>,
+) -> Result<Registered> {
     let cfg = &inner.cfg;
     let _writes = master_writes();
     let src = a.master_path();
@@ -1934,6 +2008,18 @@ fn register_master(
     let size = match image {
         Some(i) => i.size,
         None => fsutil::file_size(src)?,
+    };
+    let take = src.starts_with(&cfg.inbox_dir);
+    let mut written = None;
+    let mut file_path = None;
+    // A copy written now goes again when what follows fails (the source
+    // stays the original).
+    let undo_written = |written: &Option<PathBuf>| {
+        if let Some(w) = written
+            && long_path(src).exists()
+        {
+            let _ = fsutil::remove_file(w);
+        }
     };
     let path = match &a.origin {
         SourceOrigin::Torrent { .. } => src.to_path_buf(),
@@ -1944,32 +2030,62 @@ fn register_master(
                 .extension()
                 .map(|e| e.to_string_lossy().to_lowercase())
                 .unwrap_or_else(|| "flac".to_owned());
-            let dest = dir.join(format!("{hash}.{ext}"));
-            if !long_path(&dest).exists() {
-                if src.starts_with(&cfg.inbox_dir) {
-                    fsutil::move_file_verified(src, &dest, Some(hash))?;
-                } else {
-                    fsutil::copy_file_verified(src, &dest, Some(hash))?;
+            let flat = dir.join(format!("{hash}.{ext}"));
+            let flat_there = long_path(&flat).exists();
+            if flat_there && master_files::same_content(&flat, size, hash) {
+                // This very file, kept the older way: as before.
+                flat
+            } else if image.is_some() {
+                if flat_there {
+                    return Err(ImportError::Other(format!(
+                        "{} holds another file: the image is not written over it",
+                        flat.display()
+                    )));
                 }
-            } else if src.starts_with(&cfg.inbox_dir) && long_path(src).exists() {
-                if fsutil::hash_file(&dest).ok().as_deref() == Some(hash) {
-                    fsutil::remove_file(src)?;
-                } else {
-                    fsutil::move_file_verified(src, &dest, Some(hash))?;
+                let placed = master_files::place_master(src, &flat, hash)?;
+                if placed.path != flat {
+                    if placed.written {
+                        let _ = fsutil::remove_file(&placed.path);
+                    }
+                    return Err(ImportError::Other(format!("{} was taken meanwhile", flat.display())));
                 }
+                if placed.written {
+                    written = Some(flat.clone());
+                }
+                flat
+            } else if let Some(kept) = master_files::existing_copy(&inner.library, &dir, hash, size) {
+                file_path = Some(kept.to_string_lossy().into_owned());
+                kept
+            } else {
+                let tag = master_files::hi_res_tag(a.info.bit_depth, a.info.sample_rate);
+                // A masters folder too long for a name: the hash names it.
+                let target = master_files::master_target(&dir, &layout_input(id), tag.as_deref(), &ext)
+                    .unwrap_or_else(|| flat.clone());
+                let placed = master_files::place_master(src, &target, hash)?;
+                if placed.written {
+                    written = Some(placed.path.clone());
+                    if let (Some(album), Some(cover)) = (placed.path.parent(), cover) {
+                        master_files::keep_cover(album, cover);
+                    }
+                }
+                file_path = Some(placed.path.to_string_lossy().into_owned());
+                placed.path
             }
-            dest
         }
     };
     let dir = cfg.masters_dir();
-    fsutil::create_dir_all(&dir)?;
+    if let Err(e) = fsutil::create_dir_all(&dir) {
+        undo_written(&written);
+        return Err(e);
+    }
     let sidecar_path = dir.join(format!("{hash}.json"));
     // The sheet goes with the image (never over one kept before), and the
     // image's sidecar names every track of it.
     let (cue, track_ids) = match image {
         Some(i) => {
             if let Err(e) = cue_import::keep_sheet(&dir, &i.cue, hash) {
-                log::warn!("the cue sheet {} is not kept with its master: {e}", i.cue.display());
+                undo_written(&written);
+                return Err(ImportError::Other(format!("the cue sheet {} is not kept with its image: {e}", i.cue.display())));
             }
             let mut ids: Vec<TrackId> = std::fs::read(long_path(&sidecar_path))
                 .ok()
@@ -1998,16 +2114,44 @@ fn register_master(
         cue,
         quality_score: a.score,
     };
-    let json = serde_json::to_vec_pretty(&sidecar).map_err(|e| ImportError::Other(e.to_string()))?;
-    std::fs::write(long_path(&sidecar_path), json).map_err(fsutil::io_err(&sidecar_path))?;
-    Ok(Master {
+    // The sidecar is a second record beside the row: one that cannot be
+    // written does not stop the master. It is written whole or not at all.
+    let sidecar_bytes = match serde_json::to_vec_pretty(&sidecar) {
+        Ok(json) => match master_files::write_whole(&sidecar_path, &json) {
+            Ok(()) => Some(json),
+            Err(e) => {
+                log::warn!("the sidecar {} is not written: {e}", sidecar_path.display());
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("the sidecar {} is not written: {e}", sidecar_path.display());
+            None
+        }
+    };
+    let master = Master {
         track_id,
         codec: codec.clone(),
         file_hash: hash.to_owned(),
         size_bytes: size,
         origin: Some(a.origin.clone()),
+        file_path,
         replicas: Vec::new(),
-    })
+    };
+    // Durably: the Inbox file goes right after, and a power cut must not
+    // take the row back once it has gone.
+    if let Err(e) = inner.library.put_master_durable(&master) {
+        // The Inbox file stays the original: the copy made now goes again.
+        undo_written(&written);
+        return Err(e.into());
+    }
+    if take
+        && long_path(src).exists()
+        && let Err(e) = fsutil::remove_file(src)
+    {
+        log::warn!("the master of {} is kept at {}, the Inbox file stays: {e}", src.display(), path.display());
+    }
+    Ok(Registered { master, written, sidecar: sidecar_bytes })
 }
 
 /// Summary of relocating lossless masters to a new directory/drive.
@@ -2047,6 +2191,11 @@ struct OwnedMasterSidecar {
 /// 3. Moves and updates `.json` sidecars and rewrites `master.origin_path` in
 ///    the library database.
 /// 4. Removes `old_dir` if it becomes empty.
+///
+/// Only the flat `{file_hash}.<ext>` masters right in `old_dir` move. While
+/// any master is kept by name in an album folder of `old_dir`, nothing moves
+/// and the move is refused (an error): those masters would stay on the old
+/// disk, and a disk taken away for the new one would take them along.
 pub fn relocate_masters<F>(
     lib: &Library,
     old_dir: &Path,
@@ -2057,6 +2206,19 @@ where
     F: FnMut(usize, usize, &Path),
 {
     let _writes = master_writes();
+    if old_dir != new_dir {
+        let named = lib
+            .master_file_paths()?
+            .into_iter()
+            .filter(|p| Path::new(p).starts_with(old_dir))
+            .count();
+        if named > 0 {
+            return Err(ImportError::Other(format!(
+                "в {} лежат FLAC-оригиналы в папках альбомов ({named})",
+                old_dir.display()
+            )));
+        }
+    }
     fsutil::create_dir_all(new_dir)?;
     let probe = new_dir.join(".nikgob-write-probe");
     std::fs::write(long_path(&probe), b"ok").map_err(fsutil::io_err(&probe))?;
@@ -2145,7 +2307,11 @@ where
         let out_bytes = match serde_json::from_slice::<OwnedMasterSidecar>(&raw) {
             Ok(mut sc) => {
                 let p = Path::new(&sc.path);
-                if let Ok(rel) = p.strip_prefix(old_dir) {
+                // Only a flat master moved with the folder; one kept by name
+                // stays where it is, at the path its sidecar names.
+                if let Ok(rel) = p.strip_prefix(old_dir)
+                    && rel.components().count() == 1
+                {
                     sc.path = new_dir.join(rel).to_string_lossy().into_owned();
                 }
                 serde_json::to_vec_pretty(&sc).unwrap_or(raw)
@@ -2460,6 +2626,47 @@ fn commit_locked(
             }
         }
 
+        // The lossless original becomes the track's master. Every track cut
+        // out of an image has the image as its master, even one kept as it
+        // is (a fake lossless image: the image is still the only whole copy
+        // of the disc, with its sheet). A master that cannot be registered
+        // fails the import: the track's rows written now go again and the
+        // original stays where it is, for the next try to register it.
+        let mut master_file = None;
+        let mut sidecar_before = None;
+        let mut sidecar_written = None;
+        let master = match (&prep.original_hash, prep.converted || a.cue.is_some()) {
+            (Some(hash), true) => {
+                sidecar_before = std::fs::read(long_path(&cfg.masters_dir().join(format!("{hash}.json")))).ok();
+                let album_cover = album_dir.join(COVER_FILE);
+                let album_cover = long_path(&album_cover).is_file().then_some(album_cover);
+                match register_master(inner, a, hash, track.id, id, album_cover.as_deref()) {
+                    Ok(r) => {
+                        master_file = r.written;
+                        sidecar_written = r.sidecar;
+                        Some(r.master)
+                    }
+                    Err(e) => {
+                        log::warn!("master of {} not registered, the import fails: {e}", a.master_path().display());
+                        if let Err(e) = lib.forget_source(stored.id) {
+                            log::warn!("the row of {} stays: {e}", dest.display());
+                        }
+                        let back = match &before {
+                            Some(t) => lib.put_track_back(t).map(|_| ()),
+                            None => lib.forget_new_track(track.id).map(|_| ()),
+                        };
+                        if let Err(e) = back {
+                            log::warn!("track {} is not as it was: {e}", track.id);
+                        }
+                        // Albums and artists made now may be gone: read again.
+                        *store = Store::new(lib.clone());
+                        return Err(e);
+                    }
+                }
+            }
+            _ => None,
+        };
+
         // From here on the track is in the library: nothing below may fail the import.
         // Palette and ambient texture, once per release (or when the cover grew).
         if cover.is_some() {
@@ -2482,38 +2689,6 @@ fn commit_locked(
             }
         }
 
-        // The master file this import puts in the masters folder (not one a
-        // track of the same sound put there before), for a cancel.
-        let mut master_file = None;
-        let mut sidecar_before = None;
-        // Every track cut out of an image has the image as its master, even
-        // one kept as it is (a fake lossless image: the image is still the
-        // only whole copy of the disc, with its sheet).
-        let master = match (&prep.original_hash, prep.converted || a.cue.is_some()) {
-            (Some(hash), true) => {
-                let in_dir = (!matches!(a.origin, SourceOrigin::Torrent { .. })).then(|| {
-                    let ext = a
-                        .master_path()
-                        .extension()
-                        .map(|e| e.to_string_lossy().to_lowercase())
-                        .unwrap_or_else(|| "flac".to_owned());
-                    cfg.masters_dir().join(format!("{hash}.{ext}"))
-                });
-                let was_there = in_dir.as_ref().is_some_and(|p| long_path(p).exists());
-                sidecar_before = std::fs::read(long_path(&cfg.masters_dir().join(format!("{hash}.json")))).ok();
-                match register_master(inner, a, hash, track.id) {
-                    Ok(m) => {
-                        master_file = in_dir.filter(|_| !was_there);
-                        Some(m)
-                    }
-                    Err(e) => {
-                        log::warn!("master of {} not registered: {e}", a.master_path().display());
-                        None
-                    }
-                }
-            }
-            _ => None,
-        };
         // A lossy file taken from the Inbox now lives in the library; the
         // fake lossless file an MP3 was made from goes to the Trash.
         if !prep.converted && a.path.starts_with(&cfg.inbox_dir) {
@@ -2532,7 +2707,7 @@ fn commit_locked(
             track_id: track.id,
             upgraded: matches!(decision, Decision::Upgrade(_)),
             master_hash: master.as_ref().map(|m| m.file_hash.clone()),
-            master,
+            master: master.clone(),
             undo: Some(Undo {
                 track: track.id,
                 before: before.clone(),
@@ -2541,7 +2716,9 @@ fn commit_locked(
                 master_file,
                 master_hash: None,
                 master_before,
+                master_registered: master.clone(),
                 sidecar_before,
+                sidecar_written,
                 replaced: Replaced::default(),
             }),
         })
@@ -2624,7 +2801,7 @@ mod roll_back_tests {
     use super::*;
 
     fn master(track: TrackId, hash: &str) -> Master {
-        Master { track_id: track, codec: Codec::Flac, file_hash: hash.into(), size_bytes: 1, origin: None, replicas: Vec::new() }
+        Master { track_id: track, codec: Codec::Flac, file_hash: hash.into(), size_bytes: 1, origin: None, file_path: None, replicas: Vec::new() }
     }
 
     /// What a cancelled upgrade of `track` that registered the master
@@ -2638,7 +2815,9 @@ mod roll_back_tests {
             master_file: None,
             master_hash: Some(new.into()),
             master_before: before,
+            master_registered: Some(master(track.id, new)),
             sidecar_before: None,
+            sidecar_written: None,
             replaced: Replaced::default(),
         }
     }
@@ -2673,17 +2852,94 @@ mod roll_back_tests {
         std::fs::create_dir_all(&masters).unwrap();
         let sidecar = masters.join("image.json");
         let earlier = br#"{"track_id":"x","track_ids":["x"]}"#.to_vec();
-        std::fs::write(&sidecar, br#"{"track_id":"y","track_ids":["x","y"]}"#).unwrap();
+        let ours = br#"{"track_id":"y","track_ids":["x","y"]}"#.to_vec();
+        std::fs::write(&sidecar, &ours).unwrap();
         let track = lib.upsert_track(&Track::new("Песня", ArtistCredit::single("Кто-то", None))).unwrap();
         lib.put_master(&master(track.id, "image")).unwrap();
         let mut u = undo(dir.path(), &track, "image", None);
         u.sidecar_before = Some(earlier.clone());
+        u.sidecar_written = Some(ours.clone());
         roll_back(&importer.inner, vec![u]);
         assert_eq!(std::fs::read(&sidecar).unwrap(), earlier, "the earlier tracks' sidecar is back");
         assert_eq!(lib.get_master(track.id).unwrap(), None);
 
+        std::fs::write(&sidecar, &ours).unwrap();
         lib.put_master(&master(track.id, "image")).unwrap();
-        roll_back(&importer.inner, vec![undo(dir.path(), &track, "image", None)]);
+        let mut u = undo(dir.path(), &track, "image", None);
+        u.sidecar_written = Some(ours.clone());
+        roll_back(&importer.inner, vec![u]);
         assert!(!sidecar.exists(), "made by the cancelled import: gone");
+
+        // A sidecar a later import wrote since stays as that one wrote it.
+        let later = br#"{"track_id":"z","track_ids":["x","y","z"]}"#.to_vec();
+        std::fs::write(&sidecar, &later).unwrap();
+        lib.put_master(&master(track.id, "image")).unwrap();
+        let mut u = undo(dir.path(), &track, "image", None);
+        u.sidecar_before = Some(earlier.clone());
+        u.sidecar_written = Some(ours.clone());
+        roll_back(&importer.inner, vec![u]);
+        assert_eq!(std::fs::read(&sidecar).unwrap(), later);
+    }
+
+    /// A cancelled job whose track another job upgraded since (its own
+    /// master registered over the cancelled one's) leaves that later master
+    /// and its file as they are; only the cancelled job's own file goes,
+    /// since no row keeps it any more.
+    #[test]
+    fn a_cancel_keeps_a_later_upgrade_of_the_same_track() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let importer = Importer::new(ImportConfig::with_root(dir.path()), lib.clone(), None);
+        let album = importer.inner.cfg.masters_dir().join("Кто-то").join("Альбом");
+        std::fs::create_dir_all(&album).unwrap();
+        let (first_file, later_file) = (album.join("01 - Песня.flac"), album.join("01 - Песня (2).flac"));
+        std::fs::write(&first_file, b"first").unwrap();
+        std::fs::write(&later_file, b"later").unwrap();
+        let track = lib.upsert_track(&Track::new("Песня", ArtistCredit::single("Кто-то", None))).unwrap();
+        let at = |hash: &str, file: &Path| Master { file_path: Some(file.to_string_lossy().into_owned()), ..master(track.id, hash) };
+        // The first job registered its master; the later job its own over it.
+        lib.put_master(&at("later", &later_file)).unwrap();
+
+        let mut u = undo(dir.path(), &track, "first", None);
+        u.master_registered = Some(at("first", &first_file));
+        u.master_file = Some(first_file.clone());
+        roll_back(&importer.inner, vec![u]);
+        assert_eq!(lib.get_master(track.id).unwrap(), Some(at("later", &later_file)), "the later master stays");
+        assert_eq!(std::fs::read(&later_file).unwrap(), b"later");
+        assert!(!first_file.exists(), "the cancelled job's own file, kept by no row: to the Trash");
+    }
+
+    /// A cancelled import's master that another import took as its own
+    /// (the very same file) stays for it, with its row; once no row keeps
+    /// it, a cancel takes it to the Trash.
+    #[test]
+    fn a_cancel_keeps_a_master_another_track_took() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let importer = Importer::new(ImportConfig::with_root(dir.path()), lib.clone(), None);
+        let file = importer.inner.cfg.masters_dir().join("Кто-то").join("Альбом").join("01 - Песня.flac");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"the song").unwrap();
+        let named = |track: TrackId| Master { file_path: Some(file.to_string_lossy().into_owned()), ..master(track, "h") };
+        let first = lib.upsert_track(&Track::new("Песня", ArtistCredit::single("Кто-то", None))).unwrap();
+        let second = lib.upsert_track(&Track::new("Песня (ещё раз)", ArtistCredit::single("Кто-то", None))).unwrap();
+        lib.put_master(&named(first.id)).unwrap();
+        lib.put_master(&named(second.id)).unwrap();
+
+        let mut u = undo(dir.path(), &first, "h", None);
+        u.master_file = Some(file.clone());
+        u.master_registered = Some(named(first.id));
+        roll_back(&importer.inner, vec![u]);
+        assert_eq!(std::fs::read(&file).unwrap(), b"the song", "the other track's master stays");
+        assert_eq!(lib.get_master(second.id).unwrap(), Some(named(second.id)));
+        assert_eq!(lib.get_master(first.id).unwrap(), None);
+
+        let mut u = undo(dir.path(), &second, "h", None);
+        u.master_file = Some(file.clone());
+        u.master_registered = Some(named(second.id));
+        roll_back(&importer.inner, vec![u]);
+        assert!(!file.exists(), "no row keeps it: to the Trash");
+        assert!(std::fs::read_dir(&importer.inner.cfg.trash_dir).unwrap().count() >= 1);
+        assert!(!file.parent().unwrap().exists(), "its empty album folder goes");
     }
 }

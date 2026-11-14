@@ -5124,6 +5124,7 @@ dependencies = [
  "thiserror 2.0.21",
  "thread-priority",
  "tokio",
+ "windows-sys 0.61.2",
  "wiremock",
 ]
 

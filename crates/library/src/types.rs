@@ -702,6 +702,9 @@ pub struct PurgedTrack {
     /// other track has the same file as its master (the image of a
     /// single-file rip): its file and sidecar in `.musiclib/masters/` go too.
     pub master_hash: Option<String>,
+    /// Where that master was kept by name ([`nikgob_core::model::Master::file_path`]),
+    /// with `master_hash`.
+    pub master_file: Option<String>,
     /// The release went with its last track.
     pub release_removed: bool,
 }

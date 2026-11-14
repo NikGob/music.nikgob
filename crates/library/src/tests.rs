@@ -1423,8 +1423,8 @@ fn migration_adds_the_sketch_table_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
     // The file's number is the schema version it stamps.
-    assert_eq!(SCHEMA_VERSION, 30);
-    let before = crate::migrations::MIGRATIONS.len() - 1;
+    assert_eq!(SCHEMA_VERSION, 31);
+    let before = 29u32;
     {
         let lib = Library::open(&path).unwrap();
         let a = artist(&lib, "A");
@@ -1434,10 +1434,11 @@ fn migration_adds_the_sketch_table_only() {
         lib.put_embedding(t.id, Some(&[3u8; 260]), "m1", AnalysisSource::File).unwrap();
     }
     {
-        // Back to the schema before the sketches.
+        // Back to the schema before the sketches (and before the masters'
+        // paths that came after them).
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("DROP TABLE sound_sketch").unwrap();
-        conn.pragma_update(None, "user_version", before as u32).unwrap();
+        conn.execute_batch("DROP TABLE sound_sketch; ALTER TABLE master DROP COLUMN file_path").unwrap();
+        conn.pragma_update(None, "user_version", before).unwrap();
     }
     let lib = Library::open(&path).unwrap();
     assert_eq!(lib.schema_version().unwrap(), SCHEMA_VERSION);
@@ -2188,6 +2189,7 @@ fn purging_removes_rows_files_and_empty_albums() {
         file_hash: "abc".into(),
         size_bytes: 10,
         origin: None,
+        file_path: Some("D:/m/Solo/Only/01 - Song.flac".into()),
         replicas: Vec::new(),
     })
     .unwrap();
@@ -2201,6 +2203,7 @@ fn purging_removes_rows_files_and_empty_albums() {
     assert_eq!(purged.live_files, vec!["Music/song.opus"]);
     assert_eq!(purged.trash_files, vec!["Trash/2026-01-01 old.mp3"]);
     assert_eq!(purged.master_hash.as_deref(), Some("abc"));
+    assert_eq!(purged.master_file.as_deref(), Some("D:/m/Solo/Only/01 - Song.flac"));
     assert!(purged.release_removed);
     assert!(lib.get_track(t.id).unwrap().is_none());
     assert!(lib.get_release(r.id).unwrap().is_none());
@@ -2589,6 +2592,7 @@ fn a_master_two_tracks_share_goes_with_the_last_of_them() {
             file_hash: "image".into(),
             size_bytes: 10,
             origin: None,
+            file_path: None,
             replicas: Vec::new(),
         })
         .unwrap();

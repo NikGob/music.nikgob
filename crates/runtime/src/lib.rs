@@ -41,6 +41,7 @@ mod session;
 mod sharing;
 mod sleep;
 mod storage;
+mod db_copy;
 mod sound_model;
 mod editions;
 mod engine;
@@ -732,6 +733,8 @@ struct Worker {
     sleep: sleep::Sleep,
     /// How much the music takes («Загрузки», [`storage`]).
     storage: storage::Storage,
+    /// The day's copy of the database next to the masters.
+    db_copies: db_copy::DbCopies,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -928,6 +931,7 @@ impl Worker {
             library_load,
             sleep: Default::default(),
             storage: Default::default(),
+            db_copies: Default::default(),
         }
     }
 
@@ -1037,6 +1041,7 @@ impl Worker {
                     self.turn.lap("sources file");
                     self.sleep_poll();
                     self.storage_poll();
+                    self.db_copy_poll();
                     self.turn.lap("sleep and storage");
                 },
                 recv(ticker) -> _ => {

@@ -36,17 +36,6 @@ pub struct WrongFile {
     pub keys: Vec<String>,
 }
 
-/// The lossless original of `hash` in the masters folder (`<hash>.<ext>`,
-/// not its `.json` nor the `.cue` sheet kept with an image).
-fn master_file(cfg: &ImportConfig, hash: &str) -> Option<PathBuf> {
-    let rd = std::fs::read_dir(long_path(&cfg.masters_dir())).ok()?;
-    rd.flatten().map(|e| e.path()).find(|p| {
-        p.file_stem().is_some_and(|s| s.to_string_lossy() == hash)
-            && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
-            && !crate::fsutil::is_cue_file(p)
-    })
-}
-
 /// The user says `track`'s file holds another song (`sounds_like`, when
 /// known): see the module docs. Nothing is deleted; every file goes to the
 /// Trash.
@@ -153,10 +142,14 @@ fn take_master(
     m: &Master,
     moved: &mut Vec<(PathBuf, PathBuf)>,
 ) -> bool {
+    // Under the masters' lock: no import takes the file as its master while
+    // it is looked at and moved.
+    let _writes = crate::importer::master_writes();
     // An image other tracks have as their master too stays for them: only
-    // this track's row goes.
-    let shared = lib.master_users(&m.file_hash).unwrap_or(1) > 1;
-    let file = match master_file(cfg, &m.file_hash).filter(|_| !shared) {
+    // this track's row goes. So does a file another master row keeps by name.
+    let shared = lib.master_users(&m.file_hash).unwrap_or(1) > 1
+        || m.file_path.as_deref().is_some_and(|p| lib.masters_at(p).unwrap_or(2) > 1);
+    let file = match crate::master_files::master_file(cfg, m).filter(|_| !shared) {
         Some(file) => match trash_file(&cfg.trash_dir, &file) {
             Ok(to) => Some((file, to)),
             Err(e) => {
@@ -200,12 +193,17 @@ fn put_back(moved: &[(PathBuf, PathBuf)]) -> usize {
 pub fn undo_wrong_file(lib: &Library, w: &WrongFile) -> Result<bool> {
     // A file that was already missing has nothing to bring back.
     let file_back = w.file.is_none() || put_back(w.file.as_slice()) == 1;
-    put_back(&w.moved);
+    {
+        // The master's file and its row come back together, under the
+        // masters' lock.
+        let _writes = crate::importer::master_writes();
+        put_back(&w.moved);
+        if let Some(m) = &w.master {
+            lib.put_master(m)?;
+        }
+    }
     if file_back {
         lib.restore_source(w.source)?;
-    }
-    if let Some(m) = &w.master {
-        lib.put_master(m)?;
     }
     lib.forget_wrong_audio(w.track, &w.keys)?;
     Ok(file_back)

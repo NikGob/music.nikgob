@@ -865,6 +865,12 @@ pub struct Master {
     pub file_hash: String,
     pub size_bytes: u64,
     pub origin: Option<SourceOrigin>,
+    /// The full path of a master laid out by name in the masters folder
+    /// (`<Album artist>/<YYYY - Album>/<NN - Title>.flac`). `None`: an
+    /// older master, `<masters>/{file_hash}.<ext>` or where its torrent
+    /// keeps it.
+    #[serde(default)]
+    pub file_path: Option<String>,
     #[serde(default)]
     pub replicas: Vec<Replica>,
 }

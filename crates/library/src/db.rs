@@ -17,6 +17,13 @@ use crate::util::{meta_get, meta_set};
 /// Read-only connections kept for UI-adjacent reads.
 const READ_POOL_SIZE: usize = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Pages one step of [`Library::backup_to`] copies (4 MB of 4 KB pages).
+const BACKUP_STEP_PAGES: i32 = 1024;
+/// The pause between two steps of a backup.
+const BACKUP_PAUSE: Duration = Duration::from_millis(20);
+/// Starts over (writes in between) a backup takes before it gives up: the
+/// copy is tried again later, a step is never longer.
+const BACKUP_RESTARTS: u32 = 20;
 /// A read or a write that waits this long for its connection is logged…
 const SLOW_WAIT: Duration = Duration::from_millis(250);
 /// …and a write that keeps the writer this long.
@@ -48,6 +55,8 @@ struct Inner {
     /// See [`Library::set_album_likes_tracks`]; the SQL reads it through
     /// `album_likes_tracks()`.
     album_likes_tracks: Arc<AtomicBool>,
+    /// The database file (none in memory), for [`Library::backup_to`].
+    path: Option<std::path::PathBuf>,
 }
 
 struct ReadPool {
@@ -169,6 +178,7 @@ impl Library {
                 conns: Mutex::new(readers),
                 available: Condvar::new(),
             }),
+            Some(path.to_path_buf()),
         )
     }
 
@@ -177,10 +187,10 @@ impl Library {
         let mut writer = Connection::open_in_memory()?;
         configure(&writer, true)?;
         migrations::migrate(&mut writer)?;
-        Self::from_parts(writer, None)
+        Self::from_parts(writer, None, None)
     }
 
-    fn from_parts(writer: Connection, readers: Option<ReadPool>) -> Result<Self> {
+    fn from_parts(writer: Connection, readers: Option<ReadPool>, path: Option<std::path::PathBuf>) -> Result<Self> {
         let album_likes_tracks = Arc::new(AtomicBool::new(false));
         add_functions(&writer, &album_likes_tracks)?;
         if let Some(pool) = &readers {
@@ -205,6 +215,7 @@ impl Library {
                 device: RwLock::new(device),
                 last_ts: AtomicI64::new(0),
                 album_likes_tracks,
+                path,
             }),
         })
     }
@@ -267,6 +278,60 @@ impl Library {
         self.read(migrations::user_version)
     }
 
+    /// Writes one consistent copy of the whole database into `dest` (a new
+    /// or empty file) with SQLite's online backup, from a connection of its
+    /// own (read-only; the readers' pool is never taken), in short steps of
+    /// [`BACKUP_STEP_PAGES`] with a pause between them, so no read snapshot
+    /// is held for long and the writer and checkpoints go on. A write in
+    /// between makes SQLite start the copy over; after
+    /// [`BACKUP_RESTARTS`] of those it gives up with an error (tried again
+    /// later), never taking one long step. Blocking: never
+    /// call it from the player loop.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        self.backup_in_steps(dest, BACKUP_STEP_PAGES)
+    }
+
+    pub(crate) fn backup_in_steps(&self, dest: &Path, step_pages: i32) -> Result<()> {
+        use rusqlite::backup::{Backup, StepResult};
+        let from = self
+            .inner
+            .path
+            .clone()
+            .ok_or_else(|| crate::error::LibraryError::Invalid("the library is in memory".into()))?;
+        let src = Connection::open_with_flags(&from, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        src.busy_timeout(BUSY_TIMEOUT)?;
+        let mut dst = Connection::open(dest)?;
+        {
+            let backup = Backup::new(&src, &mut dst)?;
+            let mut waits = 0;
+            let mut restarts = 0;
+            let mut left = i32::MAX;
+            loop {
+                if restarts >= BACKUP_RESTARTS {
+                    return Err(crate::error::LibraryError::Invalid("the library kept changing during its copy".into()));
+                }
+                match backup.step(step_pages)? {
+                    StepResult::Done => break,
+                    StepResult::More => {
+                        let now = backup.progress().remaining;
+                        if now > left {
+                            restarts += 1;
+                        }
+                        left = now;
+                        std::thread::sleep(BACKUP_PAUSE);
+                    }
+                    StepResult::Busy | StepResult::Locked if waits < 50 => {
+                        waits += 1;
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    _ => return Err(crate::error::LibraryError::Invalid("the library stayed busy for its copy".into())),
+                }
+            }
+        }
+        dst.close().map_err(|(_, e)| e)?;
+        Ok(())
+    }
+
     /// The listening events kept from the last read, with their stamp.
     pub(crate) fn listening_kept(&self) -> Option<KeptEvents> {
         lock(&self.inner.listening).clone()
@@ -301,6 +366,25 @@ impl Library {
     }
 
     /// Runs `f` on the writer connection outside any transaction (`VACUUM`).
+    /// Like [`Self::write`], but the commit is on the disk when this returns
+    /// (`synchronous = FULL` for this one transaction: the WAL is flushed,
+    /// and with it every commit before): for a row a file is deleted on
+    /// the strength of.
+    pub(crate) fn write_durable<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut conn = lock(&self.inner.writer);
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let out = (|| -> Result<T> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let out = f(&tx)?;
+            tx.commit()?;
+            Ok(out)
+        })();
+        let back = conn.pragma_update(None, "synchronous", "NORMAL");
+        let out = out?;
+        back?;
+        Ok(out)
+    }
+
     pub(crate) fn with_writer<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = lock(&self.inner.writer);
         f(&conn)

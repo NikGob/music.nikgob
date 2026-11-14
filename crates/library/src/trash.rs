@@ -365,9 +365,12 @@ impl Library {
                     (false, _) => out.live_files.push(locator),
                 }
             }
-            out.master_hash = tx
-                .query_row("SELECT file_hash FROM master WHERE track_id = ?1", [&tid], |r| r.get(0))
+            let master: Option<(String, Option<String>)> = tx
+                .query_row("SELECT file_hash, file_path FROM master WHERE track_id = ?1", [&tid], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .optional()?;
+            (out.master_hash, out.master_file) = master.map_or((None, None), |(h, f)| (Some(h), f));
             let artists: Vec<String> = {
                 let mut stmt = tx.prepare_cached(
                     "SELECT artist_id FROM track_artist WHERE track_id = ?1
@@ -393,6 +396,7 @@ impl Library {
                     tx.query_row("SELECT EXISTS(SELECT 1 FROM master WHERE file_hash = ?1)", [hash], |r| r.get(0))?;
                 if shared {
                     out.master_hash = None;
+                    out.master_file = None;
                 }
             }
             tx.execute(

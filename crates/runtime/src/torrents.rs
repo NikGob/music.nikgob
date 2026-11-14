@@ -964,6 +964,11 @@ pub(crate) fn clean_payloads(
                 }
             }
             let gone = match of_file.first() {
+                // The master of one track goes into the masters folder under
+                // its name; a disc image (known by its kept sheet, however
+                // many of its tracks came) and one an earlier try put there
+                // the older way stay flat.
+                Some(m) if of_file.len() == 1 && !kept_flat(m) => keep_named(lib, cfg, &f, m),
                 Some(m) => {
                     let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                     let dest = cfg.masters_dir().join(format!("{}.{ext}", m.file_hash));
@@ -999,16 +1004,21 @@ pub(crate) fn clean_payloads(
 }
 
 /// A cue sheet of the payload may go: the torrent has no disc image among
-/// its masters (an image is the master of two tracks or more), or the
-/// sheet kept with one of its images (`<masters>/<hash>.cue`) is this very
-/// sheet, byte for byte. A sheet whose copy failed or differs stays: it can
-/// be the only copy of the image's track boundaries.
+/// its masters (an image is the master of two tracks or more, or one whose
+/// sheet or sidecar the masters folder keeps: a partly imported image has
+/// one row), or the sheet kept with one of its images (`<masters>/<hash>.cue`)
+/// is this very sheet, byte for byte. A sheet whose copy failed or differs
+/// stays: it can be the only copy of the image's track boundaries.
 fn sheet_kept(sheet: &Path, masters_dir: &Path, masters: &[nikgob_core::model::Master]) -> bool {
     let mut count: HashMap<&str, usize> = HashMap::new();
     for m in masters {
         *count.entry(m.file_hash.as_str()).or_default() += 1;
     }
-    let images: Vec<&str> = count.into_iter().filter(|(_, n)| *n >= 2).map(|(h, _)| h).collect();
+    let images: Vec<&str> = count
+        .into_iter()
+        .filter(|(h, n)| *n >= 2 || nikgob_import::master_files::is_image_master(masters_dir, h))
+        .map(|(h, _)| h)
+        .collect();
     if images.is_empty() {
         return true;
     }
@@ -1055,6 +1065,50 @@ fn keep_master(
     }
 }
 
+/// An earlier try copied the master the older way (`{file_hash}.<ext>`,
+/// its row pointed there) and could not delete its payload then.
+fn kept_flat(m: &nikgob_core::model::Master) -> bool {
+    m.file_path.is_none()
+        && matches!(&m.origin, Some(SourceOrigin::Torrent { path_in_torrent, .. }) if Path::new(path_in_torrent).is_absolute())
+}
+
+/// A payload file that is the master of one track goes into the masters
+/// folder under its name ([`nikgob_import::master_files::keep_torrent_master`]:
+/// copied and checked, never over another file, the row pointed there),
+/// then the payload is deleted. A track the library cannot name it by
+/// keeps it the older way ([`keep_master`]). False (the payload kept) at
+/// the first step that fails.
+fn keep_named(
+    lib: &nikgob_library::Library,
+    cfg: &nikgob_import::ImportConfig,
+    from: &Path,
+    m: &nikgob_core::model::Master,
+) -> bool {
+    if !from.exists() {
+        return true;
+    }
+    let at = match nikgob_import::master_files::keep_torrent_master(lib, cfg, from, m) {
+        Ok(Some(at)) => at,
+        Ok(None) => {
+            let ext = from.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let dest = cfg.masters_dir().join(format!("{}.{ext}", m.file_hash));
+            return keep_master(lib, from, &dest, &m.file_hash, &[m.track_id]);
+        }
+        Err(e) => {
+            log::warn!("master {} not kept in the masters folder, it stays: {e}", from.display());
+            return false;
+        }
+    };
+    match std::fs::remove_file(from) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            log::warn!("cannot delete {} (its master is kept at {}): {e}", from.display(), at.display());
+            false
+        }
+    }
+}
+
 /// Removes `dir` and its parents while empty, stopping at `stop`.
 fn remove_empty_up(dir: &Path, stop: &Path) {
     let mut d = dir.to_path_buf();
@@ -1086,6 +1140,7 @@ mod tests {
             file_hash: file_hash.to_owned(),
             size_bytes: 1,
             origin: Some(SourceOrigin::Torrent { info_hash: hash.to_owned(), path_in_torrent: rel.to_owned() }),
+            file_path: None,
             replicas: Vec::new(),
         })
         .unwrap();
@@ -1126,6 +1181,134 @@ mod tests {
             assert_eq!(origin_path(&lib, t), dest.to_string_lossy());
         }
         assert!(!album.exists(), "the payload and its folder are gone");
+    }
+
+    /// The master of one track leaves Downloads under its name (album
+    /// artist, album, number and title, the album's cover beside it), never
+    /// over another file there; a later try after the payload stayed takes
+    /// that copy as it is.
+    #[test]
+    fn a_track_s_master_leaves_downloads_under_its_name() {
+        use nikgob_core::model::{ArtistCredit, Release, Track};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let album = cfg.downloads_dir.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let payload = album.join("03 - song.flac");
+        std::fs::write(&payload, b"the song").unwrap();
+        let hash = nikgob_import::fsutil::hash_file(&payload).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let mut release = Release::new("Группа крови", ArtistCredit::single("Кино", None));
+        release.year = Some(1988);
+        release.cover_ref = Some("Кино/1988 - Группа крови/cover.jpg".into());
+        let release = lib.upsert_release(&release).unwrap();
+        let mut track = Track::new("Закрой за мной дверь", ArtistCredit::single("Кино", None));
+        track.release_id = Some(release.id);
+        track.track_no = 3;
+        let track = lib.upsert_track(&track).unwrap();
+        let cover = cfg.library_dir.join("Кино").join("1988 - Группа крови").join("cover.jpg");
+        std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+        std::fs::write(&cover, b"jpeg").unwrap();
+        lib.put_master(&Master {
+            track_id: track.id,
+            codec: Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: 8,
+            origin: Some(SourceOrigin::Torrent { info_hash: "ih".into(), path_in_torrent: "Album/03 - song.flac".into() }),
+            file_path: None,
+            replicas: Vec::new(),
+        })
+        .unwrap();
+        // Another file holds the name already.
+        let folder = cfg.masters_dir().join("Кино").join("1988 - Группа крови");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("03 - Закрой за мной дверь.flac"), b"another file").unwrap();
+
+        let left = clean_payloads(&lib, &cfg, vec![("ih".into(), vec![payload.clone()])]);
+        assert!(left.is_empty(), "{left:?}");
+        let dest = folder.join("03 - Закрой за мной дверь (2).flac");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the song");
+        assert_eq!(std::fs::read(folder.join("03 - Закрой за мной дверь.flac")).unwrap(), b"another file");
+        assert_eq!(std::fs::read(folder.join("cover.jpg")).unwrap(), b"jpeg");
+        let m = lib.get_master(track.id).unwrap().unwrap();
+        assert_eq!(m.file_path.as_deref(), Some(&*dest.to_string_lossy()));
+        assert_eq!(origin_path(&lib, track.id), dest.to_string_lossy());
+        assert!(!album.exists());
+
+        // The payload stayed last time: the copy is taken, none written again.
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(&payload, b"the song").unwrap();
+        assert!(clean_payloads(&lib, &cfg, vec![("ih".into(), vec![payload.clone()])]).is_empty());
+        assert!(!payload.exists());
+        let mut names: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, vec!["03 - Закрой за мной дверь (2).flac", "03 - Закрой за мной дверь.flac", "cover.jpg"]);
+    }
+
+    /// A disc image only one of whose tracks the library has is still an
+    /// image: it leaves Downloads as `{hash}.<ext>` beside its kept sheet,
+    /// never under a track's name.
+    #[test]
+    fn a_partly_imported_disc_image_stays_flat() {
+        use nikgob_core::model::{ArtistCredit, Track};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let album = cfg.downloads_dir.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let image = album.join("CDImage.flac");
+        std::fs::write(&image, b"the whole disc").unwrap();
+        let hash = nikgob_import::fsutil::hash_file(&image).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&Track::new("Одна песня", ArtistCredit::single("Кино", None))).unwrap();
+        lib.put_master(&Master {
+            track_id: track.id,
+            codec: Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: 14,
+            origin: Some(SourceOrigin::Torrent { info_hash: "ih".into(), path_in_torrent: "Album/CDImage.flac".into() }),
+            file_path: None,
+            replicas: Vec::new(),
+        })
+        .unwrap();
+        std::fs::create_dir_all(cfg.masters_dir()).unwrap();
+        std::fs::write(cfg.masters_dir().join(format!("{hash}.cue")), b"FILE").unwrap();
+
+        assert!(clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone()])]).is_empty());
+        let dest = cfg.masters_dir().join(format!("{hash}.flac"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the whole disc");
+        assert_eq!(origin_path(&lib, track.id), dest.to_string_lossy());
+        assert_eq!(lib.get_master(track.id).unwrap().unwrap().file_path, None);
+        assert!(!cfg.masters_dir().join("Кино").exists(), "no folder by name");
+    }
+
+    /// The cue sheet of a disc image of which one track came stays in
+    /// Downloads while the masters folder has no copy of it (its sidecar
+    /// names a sheet the copy of which failed); it goes once its very copy
+    /// is kept, and a torrent without an image lets its sheet go.
+    #[test]
+    fn the_sheet_of_a_one_track_image_stays_until_its_copy_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let masters = dir.path().join("m");
+        std::fs::create_dir_all(&masters).unwrap();
+        let sheet = dir.path().join("disc.cue");
+        std::fs::write(&sheet, b"FILE \"CDImage.flac\" WAVE").unwrap();
+        let one = |hash: &str| Master {
+            track_id: TrackId::new(),
+            codec: Codec::Flac,
+            file_hash: hash.into(),
+            size_bytes: 1,
+            origin: None,
+            file_path: None,
+            replicas: Vec::new(),
+        };
+        let masters_rows = vec![one("img")];
+        std::fs::write(masters.join("img.json"), br#"{"track_id":"x","cue":"disc.cue"}"#).unwrap();
+        assert!(!sheet_kept(&sheet, &masters, &masters_rows), "no copy of the sheet: it stays");
+        std::fs::write(masters.join("img.cue"), b"another sheet").unwrap();
+        assert!(!sheet_kept(&sheet, &masters, &masters_rows), "a different copy: it stays");
+        std::fs::write(masters.join("img.cue"), std::fs::read(&sheet).unwrap()).unwrap();
+        assert!(sheet_kept(&sheet, &masters, &masters_rows), "its very copy is kept");
+        assert!(sheet_kept(&sheet, &masters, &[one("track")]), "no image: the sheet may go");
     }
 
     /// A master whose copy does not verify stays where it is, with its row,
