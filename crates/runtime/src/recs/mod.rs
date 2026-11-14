@@ -839,7 +839,8 @@ fn read_parts(
             .with_local(r.has_local)
             .with_song(song)
             .with_duration(tiles_input.facts.get(&r.id).and_then(|f| f.duration_ms))
-            .with_position(tiles_input.facts.get(&r.id).map_or(0, |f| f.position));
+            .with_position(tiles_input.facts.get(&r.id).map_or(0, |f| f.position))
+            .with_added(tiles_input.facts.get(&r.id).map_or(0, |f| f.added_at));
         let main = r.artists.first().copied();
         if let Some(key) = crate::home_v2::track_world_key(world.map(|w| w.0.as_str()), main) {
             t = t.with_world(&key);

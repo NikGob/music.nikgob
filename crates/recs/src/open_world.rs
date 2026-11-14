@@ -161,6 +161,9 @@ pub enum Part {
     /// Rejected new songs teach at once ([`BLIND_DAMP`], [`NEW_PUSH`], the
     /// halved share of new music).
     Rejected,
+    /// Files come lately and never played lead the unheard of the mixes
+    /// ([`UserModel::arrival_at`]).
+    Arrivals,
 }
 
 static PARTS_OFF: AtomicU8 = AtomicU8::new(0);

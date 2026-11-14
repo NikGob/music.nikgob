@@ -125,6 +125,8 @@ pub struct TrackInfo {
     /// Its place on its release: disc × 1000 + number (the next on the
     /// album).
     pub position: u32,
+    /// When it came to the library (0: not known).
+    pub added_at: UnixMs,
 }
 
 impl TrackInfo {
@@ -139,6 +141,7 @@ impl TrackInfo {
             world: None,
             duration_ms: None,
             position: 0,
+            added_at: 0,
         }
     }
 
@@ -174,6 +177,13 @@ impl TrackInfo {
     #[must_use]
     pub fn with_position(mut self, position: u32) -> Self {
         self.position = position;
+        self
+    }
+
+    /// The same track, come to the library at `at`.
+    #[must_use]
+    pub fn with_added(mut self, at: UnixMs) -> Self {
+        self.added_at = at;
         self
     }
 

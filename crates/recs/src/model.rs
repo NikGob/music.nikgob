@@ -280,6 +280,12 @@ pub const REPEAT_BINS: [i64; 5] = [2 * HOUR_MS, 6 * HOUR_MS, 24 * HOUR_MS, 72 * 
 /// (fewer than [`REPEAT_MIN`]).
 pub const REPEAT_DEFAULT_MS: i64 = 24 * HOUR_MS;
 pub const REPEAT_MIN: u32 = 20;
+/// A file come to the library this long ago is a new arrival…
+pub const ARRIVAL_WINDOW_MS: i64 = 30 * DAY_MS;
+/// …half as much of one after this; a day that brought more files than
+/// this is an import of the library, none of them a new arrival.
+pub const ARRIVAL_HALF_MS: i64 = 7 * DAY_MS;
+pub const ARRIVAL_BATCH: usize = 100;
 
 /// How much of a love last heard `age` before the user's latest listening
 /// counts now ([`UserModel::freshness_at`]).
@@ -747,6 +753,10 @@ pub struct UserModel {
     /// and a library track of one song are one work.
     song_works: HashMap<String, TrackId>,
     work_songs: HashMap<TrackId, String>,
+    /// When the library's files came (catalog positions of local tracks
+    /// added lately, [`ARRIVAL_WINDOW_MS`]): a new arrival never played is
+    /// offered among the unheard first ([`Self::arrival_at`]).
+    arrived: HashMap<u32, UnixMs>,
     /// How long after a song was heard out it was heard out again (the
     /// user's own plays, not imported ones), by [`REPEAT_BINS`]: how soon
     /// this user likes to hear a song again ([`Self::repeat_rest`]).
@@ -1274,6 +1284,21 @@ impl UserModel {
         }
     }
 
+    /// How much the library's song at `i` is a new arrival: a file come
+    /// lately and never played, 1 just added, half after
+    /// [`ARRIVAL_HALF_MS`], none past [`ARRIVAL_WINDOW_MS`] or once played.
+    pub fn arrival_at(&self, i: usize) -> f32 {
+        let Some(&at) = self.arrived.get(&(i as u32)) else { return 0.0 };
+        if self.tracks[i].starts > 0 {
+            return 0.0;
+        }
+        let age = self.now - at;
+        if !(0..=ARRIVAL_WINDOW_MS).contains(&age) {
+            return 0.0;
+        }
+        0.5f32.powf(age as f32 / ARRIVAL_HALF_MS as f32)
+    }
+
     /// The library work a new song's work key is of ([`Self::set_song_works`]).
     pub fn work_of_song(&self, key: &str) -> Option<TrackId> {
         self.song_works.get(key).copied()
@@ -1379,6 +1404,20 @@ impl UserModel {
         }
         let types = ids.iter().map(|id| extra.types.and_then(|t| t.get(*id)).copied().unwrap_or_default()).collect();
         let work: HashMap<u32, TrackId> = (0..n).filter(|&i| catalog.work_at(i) != ids[i]).map(|i| (i as u32, catalog.work_at(i))).collect();
+        // A day that brought more than a batch is the library's import, not
+        // new arrivals.
+        let mut per_day: HashMap<i64, usize> = HashMap::new();
+        for t in catalog.tracks().iter().filter(|t| t.local && t.added_at > 0) {
+            *per_day.entry(t.added_at.div_euclid(DAY_MS)).or_default() += 1;
+        }
+        let arrived: HashMap<u32, UnixMs> = catalog
+            .tracks()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.local && t.added_at > 0 && t.added_at <= now && now - t.added_at <= ARRIVAL_WINDOW_MS)
+            .filter(|(_, t)| per_day.get(&t.added_at.div_euclid(DAY_MS)).is_some_and(|&n| n <= ARRIVAL_BATCH))
+            .map(|(i, t)| (i as u32, t.added_at))
+            .collect();
         let vs: Vec<&Vector> = emb.iter().flatten().collect();
         let scale = {
             let step = (vs.len() / 64).max(1);
@@ -1446,6 +1485,7 @@ impl UserModel {
             work,
             song_works: HashMap::new(),
             work_songs: HashMap::new(),
+            arrived,
             repeat_gaps: [0; REPEAT_BINS.len() + 1],
             disliked: Vec::new(),
             walk: Session::default(),
@@ -3188,5 +3228,28 @@ pub(crate) mod tests {
         let versions = Catalog::new([info(0, &[1], Some(0)), info(1, &[1], Some(0)).with_song(tid(0)), info(2, &[2], Some(1))]);
         let m = build_of(&versions, TasteInput::default());
         assert_eq!((m.work_at(0), m.work_at(1), m.work_at(2)), (tid(0), tid(0), tid(2)));
+    }
+
+    /// A file come lately and never played is a new arrival: fully just
+    /// added, half a week later, none past the window, once played, without
+    /// a file, or with no time known.
+    #[test]
+    fn a_new_arrival_fades_and_ends_once_played() {
+        let cat = Catalog::new([
+            info(0, &[0], Some(0)).with_added(T0 - HOUR_MS),
+            info(1, &[1], Some(1)).with_added(T0 - ARRIVAL_HALF_MS),
+            info(2, &[2], Some(2)).with_added(T0 - ARRIVAL_WINDOW_MS - DAY_MS),
+            info(3, &[3], Some(3)).with_added(T0 - HOUR_MS),
+            info(4, &[4], Some(4)).with_added(T0 - HOUR_MS).with_local(false),
+            info(5, &[5], Some(5)),
+        ]);
+        let events: Vec<Play> = played(3, T0 - 30 * 60_000, EventOrigin::Manual, EventContext::Library, None, None).into_iter().collect();
+        let m = build_of(&cat, TasteInput { events, ..TasteInput::default() });
+        assert!(m.arrival_at(0) > 0.99, "{}", m.arrival_at(0));
+        assert!((m.arrival_at(1) - 0.5).abs() < 1e-3, "{}", m.arrival_at(1));
+        assert_eq!(m.arrival_at(2), 0.0, "past the window");
+        assert_eq!(m.arrival_at(3), 0.0, "played");
+        assert_eq!(m.arrival_at(4), 0.0, "no file");
+        assert_eq!(m.arrival_at(5), 0.0, "no time known");
     }
 }

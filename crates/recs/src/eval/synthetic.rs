@@ -148,6 +148,7 @@ fn library(rng: &mut Rng, artists_per_genre: usize, albums_per_artist: usize, tr
                         world: Some(world_token(&world)),
                         duration_ms: Some(duration),
                         position: 1 + p as u32,
+                        added_at: 0,
                     });
                     list.push(i);
                 }

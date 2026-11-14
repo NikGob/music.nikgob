@@ -86,6 +86,9 @@ pub struct DTrack {
     pub world: Option<u64>,
     pub duration_ms: Option<u32>,
     pub position: u32,
+    /// When it came to the library (0: not known; datasets before it).
+    #[serde(default)]
+    pub added_at: UnixMs,
 }
 
 /// One event of a [`Dataset`]'s history.
@@ -225,6 +228,7 @@ impl Dataset {
                     world: t.world,
                     duration_ms: t.duration_ms,
                     position: t.position,
+                    added_at: t.added_at,
                 })
                 .collect(),
             aliases: catalog.aliases().map(|(copy, i)| (copy, catalog.tracks()[i].id)).collect(),
@@ -259,7 +263,8 @@ impl Dataset {
     /// out: they would tell the past what came later.
     pub fn parts(&self) -> Parts {
         let catalog = Catalog::new(self.tracks.iter().map(|t| {
-            let mut info = TrackInfo::new(t.id, t.artists.clone(), t.release).with_local(t.local).with_duration(t.duration_ms).with_position(t.position);
+            let mut info =
+                TrackInfo::new(t.id, t.artists.clone(), t.release).with_local(t.local).with_duration(t.duration_ms).with_position(t.position).with_added(t.added_at);
             info.song = t.song;
             info.world = t.world;
             info
@@ -2122,7 +2127,7 @@ mod tests {
     }
 
     /// The parts of the wave turned off for a report
-    /// (`NIKGOB_DISCOVER_OFF=works,rest,probe,sequence,rejected`):
+    /// (`NIKGOB_DISCOVER_OFF=works,rest,probe,sequence,rejected,arrivals`):
     /// each step measured on its own.
     fn parts_off() {
         use crate::open_world::Part;
@@ -2135,6 +2140,7 @@ mod tests {
                 "probe" => Some(Part::Probe),
                 "sequence" => Some(Part::Sequence),
                 "rejected" => Some(Part::Rejected),
+                "arrivals" => Some(Part::Arrivals),
                 _ => None,
             })
             .collect();

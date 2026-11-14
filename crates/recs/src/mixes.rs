@@ -215,6 +215,10 @@ pub const OVERLAP: f32 = 0.65;
 const W_HOT: f32 = 0.4;
 const W_SKIP: f32 = 1.2;
 const W_EXPLORE: f32 = 0.9;
+/// A file just come to the library and never played: this much more value
+/// among the unheard, fading as it waits
+/// ([`crate::UserModel::arrival_at`]).
+const W_ARRIVAL: f32 = 0.9;
 /// The chance of the rotating half.
 const ROTATE: f32 = 0.6;
 /// What the graph links to the songs taken stands this much higher in a
@@ -1506,6 +1510,10 @@ impl<'a> Builder<'a> {
                 // never played.
                 if near > 0.0 && matches!(key, MixKey::Daily(_) | MixKey::Genre(_)) {
                     v += W_DAILY_NEW;
+                }
+                // A file come lately leads the never played.
+                if crate::open_world::part_on(crate::open_world::Part::Arrivals) {
+                    v += W_ARRIVAL * self.model.arrival_at(i);
                 }
             }
             v
@@ -2863,6 +2871,31 @@ mod tests {
         let (more, all) = count(Settings { unheard: UNHEARD_MOST, ..Settings::default() });
         assert!(more > usual, "{more} never played asked for, {usual} as usual");
         assert!(more as f32 >= UNHEARD_SHARE * all as f32, "{more} of {all}");
+    }
+
+    /// Files come lately and never played are the first of the never
+    /// played a mix takes: of the songs never played the mixes bring, more
+    /// are new arrivals than without their time known.
+    #[test]
+    fn new_arrivals_lead_the_never_played() {
+        let l = lib(40, &[]);
+        let m = model(&l, T0);
+        // Every other song never played came in the last days.
+        let unplayed: Vec<TrackId> = (0..m.len()).filter(|&i| m.tracks[i].starts == 0).map(|i| m.id(i)).collect();
+        let arrived: HashSet<TrackId> = unplayed.iter().step_by(2).copied().collect();
+        let tracks: Vec<TrackInfo> =
+            l.catalog.tracks().iter().enumerate().map(|(k, t)| if arrived.contains(&t.id) { t.clone().with_added(T0 - HOUR_MS - (k % 10) as i64 * DAY_MS) } else { t.clone() }).collect();
+        let fresh = Lib { catalog: Catalog::new(tracks), index: l.index.clone(), types: l.types.clone(), input: l.input.clone() };
+        let fm = model(&fresh, T0);
+        assert!(arrived.iter().filter_map(|id| fm.position(*id)).any(|i| fm.arrival_at(i) > 0.0));
+        let share = |l: &Lib, m: &UserModel| {
+            let (mixes, _) = with(l, m, DayPart::Day, |b| b.lineup(&Kept::default()));
+            let picked: Vec<TrackId> = mixes.iter().flat_map(|x| x.tracks.iter().map(|&i| m.id(i))).filter(|id| unplayed.contains(id)).collect();
+            (picked.iter().filter(|id| arrived.contains(id)).count(), picked.len())
+        };
+        let (before, of_before) = share(&l, &m);
+        let (after, of_after) = share(&fresh, &fm);
+        assert!(of_after > 0 && after * of_before > before * of_after, "{after} of {of_after} vs {before} of {of_before}");
     }
 
     /// Later in the epoch, after more plays, the lineup, its order and the
