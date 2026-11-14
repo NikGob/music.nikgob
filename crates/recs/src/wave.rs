@@ -627,7 +627,7 @@ pub fn pick(
     let mut ahead: Vec<Ahead> = queued.to_vec();
     let ahead_of = |item: &Item| match item {
         Item::Track(t) => Ahead::Track(*t),
-        Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or(Ahead::New(None), |c| Ahead::of_new(ctx, c)),
+        Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or(Ahead::New(crate::open_world::ArtistKey::Unknown), |c| Ahead::of_new(ctx, c)),
     };
     let run_seed = bandit.seed;
     while out.len() < n {
