@@ -49,6 +49,11 @@ pub const PENALTY_MS: i64 = 7 * DAY_MS;
 pub const BAN_MS: i64 = 30 * DAY_MS;
 /// Completes of a new song before it is offered to keep.
 pub const KEEP_AFTER: u32 = 2;
+/// How far a library song's finds are to be trusted starts from
+/// `Beta(3, 1)` ([`NewLog::seed_trust`])…
+pub const SEED_PRIOR: (f32, f32) = (3.0, 1.0);
+/// …and an event keeps this many of the songs that found it.
+pub const SEEDS_KEPT: usize = 3;
 /// Events kept.
 const LOG_CAP: usize = 2_000;
 
@@ -97,6 +102,11 @@ pub struct NewEvent {
     /// It ended in a background session.
     #[serde(default)]
     pub background: bool,
+    /// The library's songs whose radios or neighbours found it
+    /// ([`SEEDS_KEPT`] at most): how far each one's finds are to be
+    /// trusted ([`NewLog::seed_trust`]).
+    #[serde(default)]
+    pub seeds: Vec<TrackId>,
 }
 
 /// The log of new music heard (see the module docs).
@@ -250,6 +260,38 @@ impl NewLog {
             && (self.completes(song) >= KEEP_AFTER || self.events.iter().any(|e| e.song == song && e.heard == Heard::Liked))
     }
 
+    /// How far the finds of the library's song `seed` are to be trusted:
+    /// the mean of `Beta(3 + heard out or liked, 1 + skipped early)` over the
+    /// new songs it found that were played ([`SEED_PRIOR`]): a song whose
+    /// finds keep flopping seeds less.
+    pub fn seed_trust(&self, seed: TrackId) -> f32 {
+        let (mut a, mut b) = SEED_PRIOR;
+        for e in self.events.iter().filter(|e| e.seeds.contains(&seed)) {
+            match e.heard {
+                Heard::Complete | Heard::Liked => a += 1.0,
+                Heard::Early => b += 1.0,
+            }
+        }
+        a / (a + b)
+    }
+
+    /// [`Self::seed_trust`] of every seed the log knows, relative to the
+    /// prior's (1: nothing known; below 1: finds that flopped).
+    pub fn seed_trusts(&self) -> std::collections::HashMap<TrackId, f32> {
+        let mut counts: std::collections::HashMap<TrackId, (f32, f32)> = std::collections::HashMap::new();
+        for e in &self.events {
+            for s in &e.seeds {
+                let c = counts.entry(*s).or_insert(SEED_PRIOR);
+                match e.heard {
+                    Heard::Complete | Heard::Liked => c.0 += 1.0,
+                    Heard::Early => c.1 += 1.0,
+                }
+            }
+        }
+        let prior = SEED_PRIOR.0 / (SEED_PRIOR.0 + SEED_PRIOR.1);
+        counts.into_iter().map(|(s, (a, b))| (s, a / (a + b) / prior)).collect()
+    }
+
     /// New songs heard out lately, the most recent first (seeds of the next
     /// pass).
     pub fn heard_out(&self, n: usize) -> Vec<TrackId> {
@@ -275,8 +317,30 @@ mod tests {
     use crate::test_util::point;
 
     fn ev(song: &str, artist: &str, source: Option<Source>, v: Option<Vector>, at: UnixMs, heard: Heard) -> NewEvent {
-        NewEvent { song: song.into(), artist: artist.into(), source, vector: v, track: None, at, heard, profile: None, background: false }
+        NewEvent { song: song.into(), artist: artist.into(), source, vector: v, track: None, at, heard, profile: None, background: false, seeds: Vec::new() }
     }
+
+    /// A seed whose finds keep being skipped is trusted less, one whose
+    /// finds are heard out more; one never heard of stays at the prior.
+    #[test]
+    fn seeds_whose_finds_flop_are_trusted_less() {
+        use crate::test_util::tid;
+        let mut log = NewLog::default();
+        for k in 0..4 {
+            log.push(NewEvent { seeds: vec![tid(1)], ..ev(&format!("a{k}"), "a", None, None, k, Heard::Early) });
+            log.push(NewEvent { seeds: vec![tid(2), tid(1)], ..ev(&format!("b{k}"), "b", None, None, k, Heard::Complete) });
+            log.push(NewEvent { seeds: vec![tid(3)], ..ev(&format!("c{k}"), "c", None, None, k, Heard::Early) });
+        }
+        let prior = SEED_PRIOR.0 / (SEED_PRIOR.0 + SEED_PRIOR.1);
+        assert_eq!(log.seed_trust(tid(9)), prior);
+        assert!(log.seed_trust(tid(2)) > prior);
+        assert!(log.seed_trust(tid(3)) < 0.5);
+        assert!((log.seed_trust(tid(1)) - 7.0 / 12.0).abs() < 1e-6);
+        let all = log.seed_trusts();
+        assert!((all[&tid(3)] - log.seed_trust(tid(3)) / prior).abs() < 1e-6);
+        assert!(!all.contains_key(&tid(9)));
+    }
+
 
     /// Thompson over the sources: the one heard out wins most passes'
     /// budget, the skipped one keeps its floor.

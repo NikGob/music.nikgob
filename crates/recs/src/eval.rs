@@ -2121,6 +2121,29 @@ mod tests {
         }
     }
 
+    /// The parts of the wave turned off for a report
+    /// (`NIKGOB_DISCOVER_OFF=works,rest,probe,sequence,rejected`):
+    /// each step measured on its own.
+    fn parts_off() {
+        use crate::open_world::Part;
+        let off: Vec<Part> = std::env::var("NIKGOB_DISCOVER_OFF")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|p| match p.trim() {
+                "works" => Some(Part::Works),
+                "rest" => Some(Part::Rest),
+                "probe" => Some(Part::Probe),
+                "sequence" => Some(Part::Sequence),
+                "rejected" => Some(Part::Rejected),
+                _ => None,
+            })
+            .collect();
+        if !off.is_empty() {
+            println!("parts off: {off:?}");
+        }
+        crate::open_world::set_off(&off);
+    }
+
     /// Every synthetic listener, measured (`cargo test -p nikgob-recs
     /// --release eval::tests::synthetic_report -- --ignored --nocapture`).
     #[test]
@@ -2130,6 +2153,7 @@ mod tests {
         // `NIKGOB_EVAL_NEXT`: the replay only.
         let quick = std::env::var_os("NIKGOB_EVAL_QUICK").is_some();
         let next_only = std::env::var_os("NIKGOB_EVAL_NEXT").is_some();
+        parts_off();
         for kind in synthetic::Kind::ALL {
             if (quick || next_only) && kind == synthetic::Kind::Big {
                 continue;
@@ -2160,6 +2184,7 @@ mod tests {
         };
         let d: Dataset = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let p = d.parts();
+        parts_off();
         for (k, (mode, label)) in ranking_modes().into_iter().enumerate() {
             crate::open_world::set_model_ranking(mode);
             // `NIKGOB_WAVE_TRACE`: sessions of the wave picked one by one.

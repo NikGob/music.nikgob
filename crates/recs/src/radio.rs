@@ -404,6 +404,14 @@ pub struct RadioState {
     /// What the wave's last picks asked of the runtime.
     #[serde(skip)]
     wave_asks: crate::wave::WaveAsks,
+    /// What waves learnt before ([`crate::wave::BanditMemory`]), handed
+    /// to the bandit when it is made.
+    #[serde(skip)]
+    wave_memory: Option<crate::wave::BanditMemory>,
+    /// The songs queued after the one playing, in the queue's order, as the
+    /// runtime told them for the next extension ([`Self::set_upcoming`]).
+    #[serde(skip)]
+    upcoming: Option<Vec<Item>>,
 }
 
 fn no_repeat_default() -> i64 {
@@ -485,6 +493,8 @@ impl RadioState {
             attuned: false,
             wave: matches!(seed, RadioSeed::Wave(_)).then(crate::wave::Bandit::default),
             wave_asks: crate::wave::WaveAsks::default(),
+            wave_memory: None,
+            upcoming: None,
             seed,
         };
         match &s.seed {
@@ -814,7 +824,11 @@ impl RadioState {
         // engine's was built, as the radio's are.
         let learned = self.learned;
         let ctx = &WaveContext { learned: learned.as_ref().or(ctx.learned), ..*ctx };
+        let memory = self.wave_memory.take();
         let bandit = self.wave.get_or_insert_with(crate::wave::Bandit::default);
+        if let Some(mem) = memory {
+            bandit.memory = mem;
+        }
         bandit.seed_once(seed);
         self.turns += 1;
         // Served: track ids, and the songs of the pool by their keys.
@@ -832,7 +846,14 @@ impl RadioState {
         let cool = self.no_repeat_ms.max(NO_REPEAT_MS);
         // The songs queued after the one playing, the new ones by their
         // artists: they play first.
-        let after = queued_after(&self.served, self.session.last().map(|p| p.track), self.played_last.as_ref());
+        // The queue as it stands when the runtime told it (a song waiting
+        // for its service may have been passed over), else what of the
+        // served is still ahead.
+        let told = self.upcoming.take();
+        let after: Vec<&Item> = match &told {
+            Some(list) => list.iter().collect(),
+            None => queued_after(&self.served, self.session.last().map(|p| p.track), self.played_last.as_ref()),
+        };
         let queued: Vec<crate::open_world::Ahead> = after
             .iter()
             .map(|x| match x {
@@ -841,7 +862,8 @@ impl RadioState {
             })
             .collect();
         let queued = &queued[queued.len().saturating_sub(QUEUED_MAX)..];
-        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued);
+        let skipped_new: Vec<RemoteId> = self.skipped.iter().chain(&self.removed).filter_map(|i| if let Item::Stream(r) = i { Some(r.clone()) } else { None }).collect();
+        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued, &skipped_new);
         self.wave_asks = picked.asks;
         if picked.scene_let_go {
             // The chip shows what plays.
@@ -881,6 +903,45 @@ impl RadioState {
     pub fn wave_bandit(&self) -> Option<&crate::wave::Bandit> {
         self.wave.as_ref()
     }
+
+    /// Whether the new song `c` it served, now that its preview is heard,
+    /// still fits what it plays: a wave's filter with the scene of the
+    /// cluster it was picked for ([`crate::open_world::still_fits`]); any
+    /// other radio's, not near the user's dislikes.
+    pub fn still_fits(&self, ctx: &WaveContext<'_>, c: &OpenCandidate) -> bool {
+        match &self.seed {
+            RadioSeed::Wave(w) => {
+                let item = Item::Stream(c.track.id.clone());
+                let scene = self.wave.as_ref().and_then(|b| b.scene_of(&item)).unwrap_or(w.filter.scene);
+                crate::open_world::still_fits(ctx, &crate::open_world::WaveFilter { scene, ..w.filter }, c)
+            }
+            _ => c.vector.as_ref().is_none_or(|v| ctx.model.dislike_near_of(&ctx.model.embed(v)) < crate::open_world::MISFIT_DISLIKE),
+        }
+    }
+
+    /// The songs queued after the one playing, in the queue's order: the
+    /// next extension of a wave goes on from them (not from the order it
+    /// served them in: a song waiting for its service may have been passed
+    /// over).
+    pub fn set_upcoming(&mut self, items: Vec<Item>) {
+        self.upcoming = Some(items);
+    }
+
+    /// What waves learnt before (the runtime keeps it): the wave's
+
+    /// clusters start from it.
+    pub fn set_wave_memory(&mut self, memory: crate::wave::BanditMemory) {
+        match &mut self.wave {
+            Some(b) => b.memory = memory,
+            None => self.wave_memory = Some(memory),
+        }
+    }
+
+    /// What the wave learnt so far, its memory before included.
+    pub fn wave_memory(&self) -> Option<&crate::wave::BanditMemory> {
+        self.wave.as_ref().map(|b| &b.memory).or(self.wave_memory.as_ref())
+    }
+
 
     /// The wave plays `seed` from its next picks (a chip of the queue's
     /// header): its clusters are found again for it.
@@ -1071,6 +1132,14 @@ impl RadioState {
         }
         let mut taken: HashSet<Item> = HashSet::new();
         let works = take_works(recs, &played, &mut taken);
+        // New songs too: another version of one served is not picked, nor
+        // two versions of one song in an extension.
+        let mut new_works: HashSet<&str> = self.new_pool.iter().filter(|t| !t.work.is_empty() && served.contains(&Item::Stream(t.id.clone()))).map(|t| t.work.as_str()).collect();
+        for t in self.new_pool.iter().filter(|t| !t.work.is_empty() && !served.contains(&Item::Stream(t.id.clone()))) {
+            if !new_works.insert(t.work.as_str()) {
+                taken.insert(Item::Stream(t.id.clone()));
+            }
+        }
         let sound = Sound::new(seed_vec, liked, skipped, library_scale(recs));
 
         // 0. Played twice running: once more, first.
@@ -1089,7 +1158,7 @@ impl RadioState {
             .new_pool
             .iter()
             .enumerate()
-            .filter(|(_, t)| !served.contains(&Item::Stream(t.id.clone())))
+            .filter(|(_, t)| !served.contains(&Item::Stream(t.id.clone())) && !taken.contains(&Item::Stream(t.id.clone())))
             .filter(|(_, t)| match (&plan, recs.model) {
                 (Some(p), Some(m)) if p.background => p.quiet_new(m, t.vector.map(|v| recs.norm.embed(&v)).as_ref()),
                 _ => true,
@@ -2979,7 +3048,7 @@ pub(crate) mod tests {
             let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: Some(&types), weights: None, graph: None }, crate::model::tests::T0);
             let recs = Recs::new(&cat, &model.taste, &idx).with_model(&model);
             let mut radio = RadioState::new(RadioSeed::Track(tid(OST.0 + 3)));
-            radio.add_new((0..60).map(|k| NewTrack {
+            radio.add_new((0..60).map(|k| NewTrack { work: String::new(),
                 id: RemoteId::new(Service::Youtube, format!("n{k}")),
                 artist: format!("new artist {}", k % 20),
                 album: None,
@@ -3183,7 +3252,7 @@ pub(crate) mod tests {
         let recs = Recs::new(&cat, &taste, &idx);
         let params = RadioParams { new_share: 0.2, seed: 9 };
         let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
-        radio.add_new((0..30).map(|k| NewTrack {
+        radio.add_new((0..30).map(|k| NewTrack { work: String::new(),
             id: RemoteId::new(Service::Youtube, format!("v{k}")),
             artist: format!("new artist {k}"),
             album: None,
@@ -3206,7 +3275,7 @@ pub(crate) mod tests {
         assert_diverse(&recs, &all);
         // The same seed, the same radio.
         let mut again = RadioState::new(RadioSeed::Track(tid(0)));
-        again.add_new((0..30).map(|k| NewTrack {
+        again.add_new((0..30).map(|k| NewTrack { work: String::new(),
             id: RemoteId::new(Service::Youtube, format!("v{k}")),
             artist: format!("new artist {k}"),
             album: None,
@@ -3609,7 +3678,7 @@ pub(crate) mod tests {
     }
 
     fn stream(tag: &str, k: usize, vector: Option<Vector>) -> NewTrack {
-        NewTrack {
+        NewTrack { work: String::new(),
             id: RemoteId::new(Service::Youtube, format!("{tag}{k}")),
             artist: format!("{tag} artist {k}"),
             album: None,
@@ -3821,5 +3890,35 @@ pub(crate) mod tests {
         let ru = LINKED_TRACKS.len() + OTHER_RU.1 as usize;
         assert!(picks.len() >= 25, "{picks:?}");
         assert!(picks[..ru].iter().all(|t| russian(*t)), "the Russian first: {picks:?}");
+    }
+
+    /// New songs of a radio are one song across their versions too: «Sora»
+    /// and «Sora (Off Vocal)» never both, in one extension or across them.
+    #[test]
+    fn a_radios_new_songs_keep_one_version() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service, StreamTrack};
+        let cat = Catalog::new((0..6u128).map(|i| info(i, &[i as u32], None)));
+        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
+        let empty = VectorIndex::new();
+        let recs = Recs::new(&cat, &taste, &empty);
+        let song = |k: usize, title: &str| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, format!("s{k}")), title);
+            t.artists.push(ArtistRef::new(None, "Singer"));
+            NewTrack::from_stream(&t, None)
+        };
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.add_new([song(0, "Sora"), song(1, "Sora (Off Vocal)"), song(2, "Umi"), song(3, "Umi (TV Size)"), song(4, "Kaze")]);
+        let mut works: Vec<String> = Vec::new();
+        for round in 0..4 {
+            for p in radio.extend(&recs, 3, &RadioParams { new_share: 1.0, seed: round }) {
+                if let Item::Stream(r) = &p.item {
+                    let n: usize = r.id[1..].parse().unwrap();
+                    let w = ["sora", "sora", "umi", "umi", "kaze"][n].to_owned();
+                    assert!(!works.contains(&w), "two versions of {w}: round {round}");
+                    works.push(w);
+                }
+            }
+        }
+        assert!(!works.is_empty());
     }
 }

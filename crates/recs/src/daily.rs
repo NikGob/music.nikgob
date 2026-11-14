@@ -256,7 +256,7 @@ mod tests {
         let taste = Taste::build(&cat, &input, NOW);
         let recs = Recs::new(&cat, &taste, &idx);
         let new: Vec<NewTrack> = (0..10)
-            .map(|k| NewTrack {
+            .map(|k| NewTrack { work: String::new(),
                 id: RemoteId::new(Service::Deezer, format!("{k}")),
                 artist: format!("someone {k}"),
                 album: None,

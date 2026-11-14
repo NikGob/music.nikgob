@@ -59,6 +59,7 @@ pub mod mood;
 pub mod novelty;
 pub mod open_world;
 pub mod pick;
+pub mod previews;
 pub mod plus;
 pub mod profiles;
 pub mod radio;
@@ -226,7 +227,7 @@ mod tests {
     fn new_music() -> Vec<NewTrack> {
         use nikgob_core::streaming::{RemoteId, Service};
         (0..20)
-            .map(|k| NewTrack {
+            .map(|k| NewTrack { work: String::new(),
                 id: RemoteId::new(Service::Deezer, format!("{k}")),
                 artist: format!("someone {k}"),
                 album: None,
