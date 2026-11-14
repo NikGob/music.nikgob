@@ -538,7 +538,7 @@ fn torrent_share(ui: &mut Ui, state: &ViewState, pages: &mut PageState) {
     }
     ui.add_space(12.0);
     if d.seeding.is_empty() {
-        note(ui, "Сейчас ничего не раздаётся. Скачанные торренты раздаются здесь, пока не сработает политика.");
+        note(ui, "Сейчас ничего не раздаётся");
         return;
     }
     let _ = segmented_list(ui, d.seeding.len(), |i| seed_row(&d.seeding[i], p.seed_ratio));
@@ -616,23 +616,21 @@ fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut
     if outs.get(1).is_some_and(|o| o.response.clicked()) {
         pages.open_setting(SettingId::SoulseekUpload);
     }
-    ui.add_space(12.0);
+    // Off, the switch above says it.
     if !k.share {
-        note(ui, "Библиотека не раздаётся: другие не могут у тебя ничего скачать.");
         return;
     }
-    if !k.running {
-        note(ui, "Soulseek не запущен: раздача начнётся, когда он подключится.");
-        return;
-    }
-    note(ui, &shared_line(k));
     ui.add_space(12.0);
+    if !k.running {
+        note(ui, "Soulseek не подключён");
+        return;
+    }
+    if let Some(line) = shared_line(k) {
+        note(ui, &line);
+        ui.add_space(12.0);
+    }
     let (now, done): (Vec<&UploadRow>, Vec<&UploadRow>) =
         k.uploads.iter().partition(|u| matches!(u.state, UploadRowState::Sending | UploadRowState::Queued));
-    if now.is_empty() && done.is_empty() {
-        note(ui, "Пока никто ничего не скачивал.");
-        return;
-    }
     for (title, rows, salt) in [("Отдаётся сейчас", &now, "up-now"), ("Отдано недавно", &done, "up-done")] {
         if rows.is_empty() {
             continue;
@@ -648,11 +646,11 @@ fn slsk_share(ui: &mut Ui, k: &SlskSharingView, pages: &mut PageState, out: &mut
     }
 }
 
-/// What Soulseek shares, in one line.
-fn shared_line(k: &SlskSharingView) -> String {
-    let files = if k.files == 0 {
-        "список файлов ещё собирается".to_owned()
-    } else {
+/// What Soulseek shares, in one line: how many files in how many folders
+/// (nothing while the list is still being made), and where when another
+/// computer shares them.
+fn shared_line(k: &SlskSharingView) -> Option<String> {
+    let files = (k.files > 0).then(|| {
         format!(
             "{} {} в {} {}",
             k.files,
@@ -660,11 +658,11 @@ fn shared_line(k: &SlskSharingView) -> String {
             k.folders,
             if k.folders % 10 == 1 && k.folders % 100 != 11 { "папке" } else { "папках" },
         )
-    };
-    if k.remote {
-        format!("Раздаёт утилита nikgob-slsk на другом компьютере: {files}.")
-    } else {
-        format!("Раздаются папки Music и Downloads библиотеки — песни и их обложки: {files}.")
+    });
+    match (k.remote, files) {
+        (true, Some(files)) => Some(format!("nikgob-slsk на другом компьютере · {files}")),
+        (true, None) => Some("nikgob-slsk на другом компьютере".to_owned()),
+        (false, files) => files,
     }
 }
 
@@ -823,14 +821,10 @@ mod tests {
     #[test]
     fn shared_line_counts_files_and_folders() {
         let k = SlskSharingView { files: 4812, folders: 391, ..Default::default() };
-        assert_eq!(
-            shared_line(&k),
-            "Раздаются папки Music и Downloads библиотеки — песни и их обложки: 4812 файлов в 391 папке."
-        );
+        assert_eq!(shared_line(&k).as_deref(), Some("4812 файлов в 391 папке"));
         let k = SlskSharingView { files: 2, folders: 12, remote: true, ..Default::default() };
-        assert_eq!(shared_line(&k), "Раздаёт утилита nikgob-slsk на другом компьютере: 2 файла в 12 папках.");
-        let k = SlskSharingView::default();
-        assert!(shared_line(&k).ends_with("список файлов ещё собирается."));
+        assert_eq!(shared_line(&k).as_deref(), Some("nikgob-slsk на другом компьютере · 2 файла в 12 папках"));
+        assert_eq!(shared_line(&SlskSharingView::default()), None);
     }
 
     #[test]
