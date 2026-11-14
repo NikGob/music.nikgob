@@ -353,6 +353,18 @@ impl Session {
 
     /// The start `p` was not skipped: it played through (to the end or its
     /// outro), was liked, or plays still. A skip past the half was a skip.
+    /// What the session goes on from, latest first: what it approved
+    /// (played through or liked) and the song playing now; a song skipped,
+    /// early or past its half, leads nowhere.
+    pub fn seeds<'a>(&'a self, look: &'a impl TrackLookup) -> impl Iterator<Item = &'a Played> + 'a {
+        let last = self.tracks.len().saturating_sub(1);
+        self.tracks.iter().enumerate().rev().filter(move |(k, p)| match Self::verdict(p, look) {
+            Verdict::Approved => true,
+            Verdict::Playing => *k == last && p.ended == Ended::Open,
+            _ => false,
+        }).map(|(_, p)| p)
+    }
+
     pub fn played_through(p: &Played, look: &impl TrackLookup) -> bool {
         matches!(Self::verdict(p, look), Verdict::Approved | Verdict::Playing)
     }

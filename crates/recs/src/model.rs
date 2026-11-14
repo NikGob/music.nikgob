@@ -723,9 +723,12 @@ pub struct UserModel {
     /// when the freshness was last brought to the walk's moment.
     hand_likes: Vec<Option<UnixMs>>,
     fresh_at: Option<UnixMs>,
-    /// The user's own starts that followed another of their session (out
-    /// of an album's run: [`EventContext::Album`] aside), and those of the
-    /// same main artist as the one before ([`Self::artist_again`]).
+    /// Each track's last imported play the walk has reached.
+    imported_at: Vec<Option<UnixMs>>,
+    /// The user's own starts that followed another own start of their
+    /// session (neither of an album's run, [`EventContext::Album`]), and
+    /// those of the same main artist as the one before
+    /// ([`Self::artist_again`]).
     again: (u32, u32),
 
     /// The embedded vectors of the disliked tracks (a new track near them
@@ -1175,7 +1178,8 @@ impl UserModel {
     /// The freshness of every like as it was at `at` (see
     /// [`Self::freshness_at`]): what was heard by then — the walk's own
     /// starts and completes, the last play when it was before `at`, a like
-    /// set by hand by then; `at` itself when the user is `listening` then
+    /// set by hand by then, an imported play the walk passed; `at` itself
+    /// when the user is `listening` then
     /// (a start). The walk of the history brings it to each day it reaches
     /// (and to each session after a pause), so a like learns as it counted
     /// then, not as it counts at the end.
@@ -1186,7 +1190,8 @@ impl UserModel {
                 let s = &self.tracks[i];
                 let played = self.taste.last_played_at(i).filter(|t| *t <= at);
                 let liked = self.hand_likes.get(i).copied().flatten().filter(|t| *t <= at);
-                [played, s.last_start, s.last_complete, liked].into_iter().flatten().max()
+                let imported = self.imported_at.get(i).copied().flatten();
+                [played, s.last_start, s.last_complete, liked, imported].into_iter().flatten().max()
             })
             .collect();
         self.latest_heard = self.last_heard.iter().flatten().copied().chain(listening.then_some(at)).max();
@@ -1219,8 +1224,9 @@ impl UserModel {
         }
     }
 
-    /// The share of the user's own next starts (out of an album) that were
-    /// of the same artist as the one before, shrunk to `prior` by ten
+    /// The share of the user's own next starts after an own start (out of
+    /// an album) that were of the same artist as the one before, shrunk to
+    /// `prior` by ten
     /// starts: how much an artist again is the user's own way of
     /// listening.
     pub fn artist_again(&self, prior: f32) -> f32 {
@@ -1234,19 +1240,14 @@ impl UserModel {
         self.tracks.get(i).and_then(|t| t.burnt(p)).map_or(p, |b| b.max(p))
     }
 
-    /// How worn out the track at `i` is by its own plays alone, as a chance
-    /// of an early skip: what its last outcomes say when most were early
-    /// ([`TrackStats::burnt`]), or its share of early skips once they are
-    /// most of its plays ended (three at least; shrunk by one play); 0
-    /// else. The wave reads it: by the model as a floor of the chance
-    /// ([`crate::open_world`]), by its own pull as a weight against the
-    /// song.
+    /// How worn out the track at `i` is now, as a chance of an early skip:
+    /// what its last outcomes say when most were early
+    /// ([`TrackStats::burnt`], shrunk to none), 0 else — however it was
+    /// skipped before, a song heard out again lately is not worn. The
+    /// wave's own pull reads it as a weight against the song (by the model,
+    /// [`Self::skip_risk`] holds it).
     pub fn worn(&self, i: usize) -> f32 {
-        let Some(t) = self.tracks.get(i) else { return 0.0 };
-        let early = u32::from(t.early);
-        let ended = t.completes + early + u32::from(t.late);
-        let often = if ended >= 3 && 2 * early > ended { (early as f32 + 0.5) / (ended as f32 + 1.0) } else { 0.0 };
-        t.burnt(0.0).unwrap_or(0.0).max(often)
+        self.tracks.get(i).and_then(|t| t.burnt(0.0)).unwrap_or(0.0)
     }
 
     /// The graph's prior of the track at `i` (how central it is, how
@@ -1369,6 +1370,7 @@ impl UserModel {
             latest_heard: None,
             hand_likes: Vec::new(),
             fresh_at: None,
+            imported_at: Vec::new(),
             again: (0, 0),
             disliked: Vec::new(),
             walk: Session::default(),
@@ -1515,15 +1517,15 @@ impl UserModel {
         let sess: Vec<(usize, Ended, EventContext)> =
             session.tracks().filter_map(|p| Some((self.position(p.track)?, p.ended, p.context))).collect();
         let prev = session.last().and_then(|p| self.position(p.track));
-        // The graphs around the last three not rejected.
+        // The graphs around the last three approved.
         let mut graph_near: HashMap<usize, f32> = HashMap::new();
         let mut graph_artists: HashMap<ArtistId, f32> = HashMap::new();
         let mut pgraph_near: HashMap<usize, f32> = HashMap::new();
-        // What the session did not reject ([`Session::verdict`]): played
-        // through, skipped past its half, playing still. A song skipped in
-        // its first half (or «not now», or missed) seeds nothing.
+        // What the session approved ([`Session::seeds`]: played through or
+        // liked) and the song playing now. A song skipped, early or past its
+        // half, seeds nothing.
         let through: Vec<usize> = if rank {
-            session.tracks().rev().filter(|p| !Session::verdict(p, self).rejects()).filter_map(|p| self.position(p.track)).collect()
+            session.seeds(self).filter_map(|p| self.position(p.track)).collect()
         } else {
             Vec::new()
         };
@@ -1824,6 +1826,12 @@ impl UserModel {
     /// teaches the long affinity of its track, nothing else.
     fn imported(&mut self, p: &Play) {
         let Some(&i) = self.pos.get(&p.track) else { return };
+        if matches!(p.kind, EventType::Start | EventType::Complete) {
+            if self.imported_at.len() < self.len() {
+                self.imported_at.resize(self.len(), None);
+            }
+            self.imported_at[i] = self.imported_at[i].max(Some(p.ts));
+        }
         match p.kind {
             EventType::Start => {
                 if let Some(t0) = self.import_open.insert(i, p.ts) {
@@ -2005,10 +2013,12 @@ impl UserModel {
                 None => {}
             }
         }
-        // How often the user's own next start is of the same artist.
+        // How often the user's own next start is of the same artist: both
+        // the user's own picks, neither of an album's run.
+        let own = |origin: Option<EventOrigin>, context: EventContext| origin == Some(EventOrigin::Manual) && context != EventContext::Album;
         if let Some(prev) = m.prev
-            && p.origin == Some(EventOrigin::Manual)
-            && p.context != EventContext::Album
+            && own(p.origin, p.context)
+            && self.walk.last().is_some_and(|q| own(q.origin, q.context))
         {
             self.again.0 += 1;
             self.again.1 += u32::from(self.artist[prev].is_some() && self.artist[prev] == self.artist[i]);
@@ -2857,9 +2867,9 @@ pub(crate) mod tests {
         assert_eq!(then.tracks[2].love_fresh(), UNHEARD_LOVE);
     }
 
-    /// What the session rejected seeds nothing: a song skipped before its
-    /// half (past its first 30 s) leads the graphs and the sessions before
-    /// nowhere; heard out, it does.
+    /// What the session did not approve seeds nothing: a song skipped
+    /// before its half (past its first 30 s) or past it leads the graphs and
+    /// the sessions before nowhere; heard out, it does.
     #[test]
     fn a_rejected_song_seeds_nothing() {
         let cat = Catalog::new((0..4u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
@@ -2886,6 +2896,10 @@ pub(crate) mod tests {
         assert!(Session::verdict(rejected.last().unwrap(), &m).rejects());
         let mo = m.moment(&rejected, T0);
         assert!(mo.bag_near.is_empty() && mo.graph_near.is_empty() && mo.pgraph_near.is_empty(), "a rejection seeds nothing");
+        // Approved alone seeds: a skip past the half (no rejection) does not.
+        let past_half = session(Some(150_000));
+        assert!(!Session::verdict(past_half.last().unwrap(), &m).rejects());
+        assert!(m.moment(&past_half, T0).bag_near.is_empty(), "not approved: no seed");
     }
 
     /// How often the user's own next start is of the same artist, out of
@@ -2902,6 +2916,9 @@ pub(crate) mod tests {
             events.extend(played(1, ts + 250_000, EventOrigin::Manual, EventContext::Library, None, None));
             events.extend(played(2, ts + 500_000, EventOrigin::Manual, EventContext::Library, None, None));
         }
+        // A pick of the user's after the app's says nothing of it.
+        events.extend(played(0, T0 - 30 * HOUR_MS, EventOrigin::Radio, EventContext::Radio, None, None));
+        events.extend(played(1, T0 - 30 * HOUR_MS + 250_000, EventOrigin::Manual, EventContext::Library, None, None));
         // An album's run says nothing of it.
         events.extend(played(2, T0 - 3 * HOUR_MS, EventOrigin::Manual, EventContext::Album, None, None));
         events.extend(played(3, T0 - 3 * HOUR_MS + 250_000, EventOrigin::Manual, EventContext::Album, None, None));
@@ -2912,8 +2929,76 @@ pub(crate) mod tests {
         assert!((m.artist_again(0.3) - (4.0 + 3.0) / (8.0 + 10.0)).abs() < 1e-6, "{}", m.artist_again(0.3));
         assert_eq!(m.worn(0), 0.0, "heard out every time");
         let w = m.worn(3);
-        assert!((w - 2.5 / 4.0).abs() < 1e-6, "two early skips of three plays: {w}");
-        assert!(m.skip_risk(3, 0.1) >= 0.1);
+        assert!((w - 2.0 / 5.0).abs() < 1e-6, "two early skips of its three last plays: {w}");
+        assert!(m.skip_risk(3, 0.1) >= w);
+    }
+
+    /// A song skipped early for long and heard out six times since is not
+    /// worn any more: wear is what its last plays say.
+    #[test]
+    fn a_song_heard_out_again_is_not_worn() {
+        let mut t = TrackStats::default();
+        for _ in 0..100 {
+            t.note(true);
+        }
+        assert!(t.burnt(0.0).is_some());
+        for _ in 0..6 {
+            t.note(false);
+        }
+        assert_eq!(t.burnt(0.0), None);
+        let cat = Catalog::new((0..2u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        let mut ts = T0 - 40 * DAY_MS;
+        for _ in 0..20 {
+            events.extend(played(0, ts, EventOrigin::Radio, EventContext::Radio, Some(10_000), Some(EndReason::UserNext)));
+            ts += DAY_MS;
+        }
+        let m = build_of(&cat, TasteInput { events: events.clone(), ..TasteInput::default() });
+        assert!(m.worn(0) > 0.5);
+        for _ in 0..6 {
+            events.extend(played(0, ts, EventOrigin::Manual, EventContext::Library, None, None));
+            ts += DAY_MS;
+        }
+        let m = build_of(&cat, TasteInput { events, ..TasteInput::default() });
+        assert_eq!(m.worn(0), 0.0, "{}", m.worn(0));
+        assert!(m.skip_risk(0, 0.2) <= 0.2 + 1e-6);
+    }
+
+    /// An imported play is heard as of when it was: a saved song imported
+    /// long before a start and again after it counts, at that start, as
+    /// fresh as a model of the history up to the start counts it.
+    #[test]
+    fn an_imported_play_is_heard_as_of_when_it_was() {
+        let cat = Catalog::new((0..8u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        let import = |ts: UnixMs| {
+            [
+                Play { origin: Some(EventOrigin::Import), ..Play::new(tid(5), ts, EventType::Start, Some(0)) },
+                Play { origin: Some(EventOrigin::Import), ..Play::new(tid(5), ts + 200_000, EventType::Complete, Some(200_000)) },
+            ]
+        };
+        events.extend(import(T0 - 300 * DAY_MS));
+        let at = T0 - 200 * DAY_MS;
+        events.extend(played(1, at, EventOrigin::Manual, EventContext::Library, None, None));
+        events.extend(played(2, at + 300_000, EventOrigin::Manual, EventContext::Library, None, None));
+        events.extend(import(T0 - 100 * DAY_MS));
+        events.extend(played(3, T0 - DAY_MS, EventOrigin::Manual, EventContext::Library, None, None));
+        let saved = vec![tid(5)];
+        let input = TasteInput { events: events.clone(), saved: saved.clone(), ..TasteInput::default() };
+        let mut seen = None;
+        let mut hook = |m: &UserModel, _: &Moment, _: usize, p: &Play| {
+            if p.ts == at + 300_000 {
+                seen = Some(m.tracks[5].love_fresh());
+            }
+        };
+        let idx = VectorIndex::new();
+        let extra = ModelInput { index: &idx, types: None, weights: None, graph: None };
+        UserModel::build_with(&cat, &input, extra, T0, Some(&mut hook));
+        let walked = seen.expect("the start was walked");
+        let before: Vec<Play> = events.into_iter().filter(|p| p.ts < at + 300_000).collect();
+        let then = UserModel::build(&cat, &TasteInput { events: before, saved, ..TasteInput::default() }, extra, at + 300_000);
+        assert!((walked - then.tracks[5].love_fresh()).abs() < 1e-3, "{walked} {}", then.tracks[5].love_fresh());
+        assert!(walked > UNHEARD_LOVE && walked < 1.0, "heard 100 days before, not unheard: {walked}");
     }
 
     /// The app closing on a song (playing or paused, the app's pick or the
