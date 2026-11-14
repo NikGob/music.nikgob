@@ -126,6 +126,10 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     // «Перемешивание остаётся включённым» became a rule by the kind of
     // list: off, every kind keeps playing in order.
     let keep_shuffle = value.get("list_shuffle").is_none().then(|| value.get("keep_shuffle").and_then(|v| v.as_bool())).flatten();
+    // Own playlists started shuffled by default and fought the button
+    // (shuffle turned off came back on at «Любимые»): that old default
+    // becomes «По кнопке» once; a rule the user chose since stays.
+    let shuffle_rev = value.get("shuffle_rev").and_then(|v| v.as_u64()).map_or(0, |r| r.min(u64::from(u8::MAX)) as u8);
     // «Только на процессоре» became «Процессор» of «На чём считать анализ
     // звука».
     let cpu_only = value.get("sound_device").is_none() && value.get("sound_cpu_only").and_then(|v| v.as_bool()) == Some(true);
@@ -135,6 +139,10 @@ fn parse_prefs(bytes: &[u8]) -> serde_json::Result<Prefs> {
     if let Some(keep) = keep_shuffle {
         prefs.list_shuffle = nikgob_view::ListShuffles::from_keep(keep);
     }
+    if shuffle_rev < 1 && prefs.list_shuffle.own_playlists == nikgob_view::ListShuffle::Shuffled {
+        prefs.list_shuffle.own_playlists = nikgob_view::ListShuffle::Button;
+    }
+    prefs.shuffle_rev = nikgob_view::SHUFFLE_REV;
     if cpu_only {
         prefs.sound_device = nikgob_view::SoundDevice::Cpu;
     }
@@ -1162,6 +1170,24 @@ mod prefs_tests {
         let again = parse_prefs(&serde_json::to_vec(&written).unwrap()).unwrap();
         assert_eq!(again.list_shuffle, p.list_shuffle);
         assert!(!serde_json::to_value(&again).unwrap().as_object().unwrap().contains_key("keep_shuffle"));
+    }
+
+    /// Own playlists shuffled by the old default become «По кнопке» once;
+    /// a rule chosen since (or another than the old default) stays.
+    #[test]
+    fn own_playlists_follow_the_button_once() {
+        use nikgob_view::{ListKind, ListShuffle};
+        let old = br#"{"list_shuffle":{"mixes":"Shuffled","own_playlists":"Shuffled","albums":"InOrder","ready_playlists":"InOrder"}}"#;
+        let p = parse_prefs(old).unwrap();
+        assert_eq!(p.list_shuffle.of(ListKind::OwnPlaylist), ListShuffle::Button);
+        assert_eq!(p.list_shuffle.of(ListKind::Mix), ListShuffle::Shuffled);
+        assert_eq!(p.shuffle_rev, nikgob_view::SHUFFLE_REV);
+        let in_order = br#"{"list_shuffle":{"own_playlists":"InOrder"}}"#;
+        assert_eq!(parse_prefs(in_order).unwrap().list_shuffle.of(ListKind::OwnPlaylist), ListShuffle::InOrder);
+        let mut chosen = p.clone();
+        chosen.list_shuffle.set(ListKind::OwnPlaylist, ListShuffle::Shuffled);
+        let again = parse_prefs(&serde_json::to_vec(&chosen).unwrap()).unwrap();
+        assert_eq!(again.list_shuffle.of(ListKind::OwnPlaylist), ListShuffle::Shuffled, "chosen since: stays");
     }
 
     /// «Настройки текста…» is offered under the lyrics until it is picked

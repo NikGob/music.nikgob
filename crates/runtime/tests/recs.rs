@@ -1651,7 +1651,7 @@ fn a_card_wave_comes_back_as_its_card() {
 /// The shuffle button while what autoplay added after an album plays sets
 /// no rule of albums; back on the album's own track, it does.
 #[test]
-fn shuffle_in_autoplay_after_an_album_leaves_the_album_rule() {
+fn the_shuffle_button_in_autoplay_after_an_album_changes_no_rule() {
     use nikgob_view::{ListKind, ListShuffle};
     let l = library(3, 6, 5, &[]);
     let s = start(&l.lib, Vec::new(), Prefs::default(), None);
@@ -1672,14 +1672,16 @@ fn shuffle_in_autoplay_after_an_album_leaves_the_album_rule() {
     s.rt.send(Command::ToggleShuffle);
     wait_for(&s.rt, "shuffle on", |st| st.player.shuffle);
     std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(rule(&s.rt), ListShuffle::InOrder, "autoplay's pick is not the album");
+    assert_eq!(rule(&s.rt), ListShuffle::InOrder, "autoplay's pick changes no rule");
     s.rt.send(Command::ToggleShuffle);
     wait_for(&s.rt, "shuffle off", |st| !st.player.shuffle);
 
     s.rt.send(Command::Previous);
     wait_for(&s.rt, "the album's last track again", |st| st.player.current.as_ref().map(|t| t.id) == Some(last));
     s.rt.send(Command::ToggleShuffle);
-    wait_for(&s.rt, "albums shuffled", |st| st.player.shuffle && st.prefs.list_shuffle.of(ListKind::Album) == ListShuffle::Shuffled);
+    wait_for(&s.rt, "shuffle on again", |st| st.player.shuffle);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(rule(&s.rt), ListShuffle::InOrder, "the button never sets the rule of albums");
 }
 
 /// «Трек из поиска → Радио по треку» (the default): a song started from
