@@ -2027,6 +2027,9 @@ impl Worker {
         self.restarted = Some(e.id);
         self.playing = Some(e);
         self.playing_source = Some((source, kind));
+        if kind == SourceKind::Youtube {
+            self.streaming.analysis.youtube_plays();
+        }
         self.status = if kind.is_local() {
             Status::Playing
         } else {
@@ -2230,6 +2233,11 @@ impl Worker {
         self.position_at = Instant::now();
         self.rate = self.speed;
         self.jumped_at = Instant::now();
+        // A stream a service's pause cut midway goes on from there.
+        if let Some(at) = self.take_held_position(e.id) {
+            self.failover = Some((e.id, at));
+            self.seek_to_failover(e);
+        }
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
         self.turn.lap("next");
@@ -2296,6 +2304,8 @@ impl Worker {
     }
 
     fn pause(&mut self) {
+        // Waiting out a service's pause: it stays paused now.
+        self.cancel_pause_wake();
         if matches!(self.status, Status::Playing | Status::Buffering) {
             self.heard_tick();
             self.position = self.position_now();
@@ -2351,6 +2361,7 @@ impl Worker {
         if self.playing.is_none() {
             // The restored track: play will start from here.
             if self.resume_at.is_some() {
+                self.drop_held_position();
                 self.resume_at = Some(p);
                 self.position = p;
                 self.publish_player();
@@ -2743,15 +2754,34 @@ impl Worker {
                     // The service paused (as the stream opened, or as it
                     // asked for its URL again): not this track's failure,
                     // and no lesson (see `streams::held`). It goes on from
-                    // where it stopped.
-                    if !self.position.is_zero() {
-                        self.failover = Some((e.id, self.position));
+                    // where it stopped: on another copy that plays now, or
+                    // whenever its entry starts again.
+                    let at = self.position;
+                    if !at.is_zero() {
+                        self.failover = Some((e.id, at));
+                    }
+                    self.tried.push(source);
+                    let skip = self.tried.clone();
+                    if let Some((req, again, other)) = self.request_skipping(e, &skip) {
+                        log::info!("{}: {kind} asks to wait; its {other} copy plays", e.track);
+                        self.playing_source = None;
+                        self.play_request(e, req, again, other);
+                        self.position = Duration::ZERO;
+                        self.position_at = Instant::now();
+                        self.rate = self.speed;
+                        self.jumped_at = Instant::now();
+                        self.seek_to_failover(e);
+                        self.preload_next();
+                        self.publish_player();
+                        return;
                     }
                     let ended = std::mem::replace(&mut self.ended, true);
                     self.playing_source = None;
+                    self.hold_position(e.id, at);
                     if self.hold_for_pause(e) {
                         return;
                     }
+                    self.drop_held_position();
                     self.ended = ended;
                     self.playing_source = Some((source, kind));
                 }

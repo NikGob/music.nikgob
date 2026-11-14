@@ -892,7 +892,8 @@ impl Worker {
             if next.service().is_some() && svc.is_none() {
                 continue;
             }
-            if let Some(left) = next.service().and_then(|s| self.pause_left(s)) {
+            // Its pause, or the listener's turn on YouTube Music.
+            if let Some(left) = next.service().and_then(|s| self.background_wait(s)) {
                 self.recs.graph.lane(lane).queue.push_front(next);
                 self.graph_wait(lane, left + crate::streams::wake_jitter());
                 return;

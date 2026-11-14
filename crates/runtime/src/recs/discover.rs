@@ -775,7 +775,8 @@ impl Worker {
             };
             let service = step.service();
             let svc = self.service(service);
-            let paused = self.pause_left(service);
+            // Its pause, or the listener's turn on YouTube Music.
+            let paused = if svc.is_some() && !over { self.background_wait(service) } else { None };
             let Some(pass) = self.recs.discover.pass.as_mut() else { return };
             let Some(svc) = svc.filter(|_| !over) else {
                 pass.steps.pop_front();

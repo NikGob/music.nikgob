@@ -1342,6 +1342,10 @@ impl StreamService for Youtube {
             .map(|c| Box::new(c) as Box<dyn AudioStream>)
     }
 
+    fn has_cached_audio(&self, id: &str) -> bool {
+        self.inner.cache.has(id)
+    }
+
     /// The complete cached file (`{id}.{itag}.webm` / `.m4a`) itself.
     fn cached_file(&self, id: &str) -> Option<std::path::PathBuf> {
         self.inner.cache.open(id).map(|c| c.path().to_owned())
@@ -1557,9 +1561,18 @@ mod tests {
             bitrate: 160_000,
             route: None,
         };
+        assert!(!yt.has_cached_audio("abc"));
         yt.inner.cache.store("abc", &r, &mut &[1, 2, 3][..]);
         assert!(yt.cached_audio("abc").is_none(), "a partial download is not served");
+        assert!(!yt.has_cached_audio("abc"));
         yt.inner.cache.store("abc", &r, &mut &[1, 2, 3, 4][..]);
+        // The cheap check opens nothing: the file keeps its place in the
+        // eviction order.
+        let file = dir.join("cache").join("abc.251.webm");
+        let old = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+        assert!(yt.has_cached_audio("abc"));
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), old);
         let mut a = yt.cached_audio("abc").expect("complete");
         assert_eq!((a.format_hint(), a.byte_len()), (format::WEBM, Some(4)));
         let mut bytes = Vec::new();

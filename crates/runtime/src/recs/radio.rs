@@ -242,9 +242,19 @@ pub(crate) struct RadioState {
     /// The run whose extension on its way keeps to what plays while
     /// YouTube Music asks to wait.
     paused_pick: Option<u64>,
-    /// Such an extension found nothing: no top-up before this.
-    paused_dry_until: Option<std::time::Instant>,
+    /// Such an extension of this run found nothing: no top-up before
+    /// this; a wake picks again then ([`RadioMsg::PauseOver`]).
+    paused_dry: Option<(u64, std::time::Instant)>,
+    /// YouTube Music calls for new music held back while the listener
+    /// plays it, by run, asked again when its turn comes (bounded by
+    /// [`DEFERRED_MAX`]).
+    deferred: Vec<(u64, Call, String)>,
+    /// A wake for them is on its way.
+    deferred_wake: bool,
 }
+
+/// New-music calls held back for the listener, at most.
+const DEFERRED_MAX: usize = 16;
 
 impl RadioState {
     /// The number of the radio playing.
@@ -271,6 +281,11 @@ pub(crate) enum RadioMsg {
         /// What a wave's picks asked, ready for the worker.
         wave_asked: Option<super::wave::WaveAsked>,
     },
+    /// YouTube Music's pause that left radio `id` with nothing to pick is
+    /// over.
+    PauseOver(u64),
+    /// The new-music calls held back for the listener may go.
+    AskDeferred,
     NewFound {
         id: u64,
         tracks: Vec<StreamTrack>,
@@ -697,7 +712,7 @@ impl Worker {
         if run.extending || (run.queue_gen.is_some() && left > EXTEND_AT) {
             return;
         }
-        if self.recs.radio.paused_dry_until.is_some_and(|t| std::time::Instant::now() < t) {
+        if self.recs.radio.paused_dry.is_some_and(|(id, t)| id == run.id && std::time::Instant::now() < t) {
             return;
         }
         if let (Some(dry), Some(snap)) = (&run.wave_dry, &snap)
@@ -1075,6 +1090,23 @@ impl Worker {
 
     pub(crate) fn radio_msg(&mut self, m: RadioMsg) {
         match m {
+            RadioMsg::PauseOver(id) => self.radio_pause_over(id),
+            RadioMsg::AskDeferred => {
+                self.recs.radio.deferred_wake = false;
+                let held = std::mem::take(&mut self.recs.radio.deferred);
+                let alive = self.radio_alive();
+                let run = self.recs.radio.run_id();
+                let mut by_run: Vec<(u64, Vec<(Call, String)>)> = Vec::new();
+                for (id, call, seed) in held.into_iter().filter(|(id, ..)| alive && Some(*id) == run) {
+                    match by_run.iter_mut().find(|(r, _)| *r == id) {
+                        Some((_, v)) => v.push((call, seed)),
+                        None => by_run.push((id, vec![(call, seed)])),
+                    }
+                }
+                for (id, calls) in by_run {
+                    self.radio_ask(id, calls);
+                }
+            }
             RadioMsg::Extended { id, state, picks, wave_pool, scenes, wave_asked } => {
                 if scenes.is_some() {
                     self.recs.radio.scenes = scenes;
@@ -1208,7 +1240,12 @@ impl Worker {
             // `streams::held`), and the radio picks again after it.
             let left = self.pause_left(Service::Youtube).unwrap_or(Duration::from_secs(30));
             log::info!("radio: nothing that plays while YouTube Music asks to wait; picks again in {} s", left.as_secs());
-            self.recs.radio.paused_dry_until = Some(std::time::Instant::now() + left);
+            self.recs.radio.paused_dry = Some((id, std::time::Instant::now() + left));
+            let after = left + crate::streams::wake_jitter();
+            self.streaming.spawn_internal(async move {
+                tokio::time::sleep(after).await;
+                Internal::Recs(Msg::Radio(RadioMsg::PauseOver(id)))
+            });
             self.publish_player();
             return;
         }
@@ -1481,6 +1518,28 @@ impl Worker {
     }
 
     /// The queue ran out: a radio picking more plays on when they come.
+    /// The pause that left radio `id` with nothing to pick is over: it
+    /// picks again, and a radio that ran out meanwhile plays on.
+    fn radio_pause_over(&mut self, id: u64) {
+        if self.recs.radio.paused_dry.is_none_or(|(r, _)| r != id) {
+            return;
+        }
+        self.recs.radio.paused_dry = None;
+        if !self.radio_alive() || self.recs.radio.run_id() != Some(id) {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_ref() else { return };
+        if run.extending {
+            return;
+        }
+        log::info!("radio «{}»: YouTube Music's pause is over, it picks again", run.title);
+        if run.resume {
+            self.radio_extend();
+        } else {
+            self.radio_top_up();
+        }
+    }
+
     pub(crate) fn radio_ran_out(&mut self) {
         if self.radio_alive()
             && let Some(run) = self.recs.radio.run.as_mut()
@@ -1923,6 +1982,20 @@ impl Worker {
                 continue;
             }
             if self.pause_left(service).is_some() {
+                continue;
+            }
+            // The listener's YouTube Music first: held back, asked later.
+            if let Some(wait) = self.background_wait(service) {
+                if self.recs.radio.deferred.len() < DEFERRED_MAX {
+                    self.recs.radio.deferred.push((id, call, seed));
+                }
+                if !std::mem::replace(&mut self.recs.radio.deferred_wake, true) {
+                    let after = wait + crate::streams::wake_jitter();
+                    self.streaming.spawn_internal(async move {
+                        tokio::time::sleep(after).await;
+                        Internal::Recs(Msg::Radio(RadioMsg::AskDeferred))
+                    });
+                }
                 continue;
             }
             if let Some(svc) = self.service(service) {

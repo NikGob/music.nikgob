@@ -137,6 +137,8 @@ struct Job {
     video: String,
     origin: Origin,
     youtube: Arc<dyn StreamService>,
+    /// YouTube Music plays or comes next (see [`StreamAnalysis::listening`]).
+    listening: Arc<AtomicBool>,
     /// The neural sound model, when it hears this job's audio.
     model: Option<Arc<Effnet>>,
 }
@@ -156,6 +158,9 @@ pub(crate) struct StreamAnalysis {
     jobs: Option<Sender<Job>>,
     /// The switch is off or the app is closing: the thread drops its job.
     off: Arc<AtomicBool>,
+    /// YouTube Music plays or comes next, as the worker last saw it: a job
+    /// handed over just before does not download (it is tried again later).
+    listening: Arc<AtomicBool>,
     /// The background track in work, and what it waits for.
     busy: Option<(TrackId, Step)>,
     /// Played tracks handed to the thread.
@@ -183,6 +188,11 @@ pub(crate) struct StreamAnalysis {
 }
 
 impl StreamAnalysis {
+    /// A YouTube video starts playing: no download for the analysis now.
+    pub(crate) fn youtube_plays(&self) {
+        self.listening.store(true, Ordering::Relaxed);
+    }
+
     /// Stops the job in flight; nothing more is analysed.
     pub(crate) fn shutdown(&mut self) {
         self.off.store(true, Ordering::Relaxed);
@@ -229,6 +239,10 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &
     let audio = match (job.youtube.cached_audio(&job.video), job.origin) {
         (Some(a), _) => a,
         (None, Origin::Played) => return Outcome::NotCached,
+        // The listener's YouTube Music came meanwhile: later.
+        (None, Origin::Background | Origin::Preview) if job.listening.load(Ordering::Relaxed) => {
+            return Outcome::Transient("YouTube Music plays".into());
+        }
         (None, Origin::Background | Origin::Preview) => match job.youtube.open_audio(&job.video) {
             Ok(a) => a,
             Err(e) => return stream_outcome(e),
@@ -395,6 +409,7 @@ impl Worker {
             video: src.locator,
             origin: Origin::Played,
             youtube,
+            listening: self.streaming.analysis.listening.clone(),
             model: None,
         };
         if self.analysis_job(job) {
@@ -429,6 +444,8 @@ impl Worker {
         if std::mem::take(&mut self.streaming.analysis.recount) {
             self.publish_analysis_counts();
         }
+        let listened = self.youtube_listened();
+        self.streaming.analysis.listening.store(listened, Ordering::Relaxed);
         self.stream_analysis_step();
     }
 
@@ -548,7 +565,9 @@ impl Worker {
         }
         // The listener's YouTube Music goes first: no request of its player
         // in the background while it plays or comes next.
-        if self.youtube_listened() {
+        let listened = self.youtube_listened();
+        self.streaming.analysis.listening.store(listened, Ordering::Relaxed);
+        if listened {
             self.analysis_held("YouTube Music plays");
             return;
         }
@@ -643,30 +662,6 @@ impl Worker {
         a.idle_until = Some(now + idle);
     }
 
-    /// YouTube Music plays, or comes next: the playing source is a YouTube
-    /// video, or the next entry has nothing that plays without YouTube
-    /// Music (a file, another service with sound) while the player runs.
-    fn youtube_listened(&mut self) -> bool {
-        if !matches!(self.status, v::Status::Playing | v::Status::Buffering) {
-            return false;
-        }
-        if self.playing_source.is_some_and(|(_, kind)| kind == SourceKind::Youtube) {
-            return true;
-        }
-        let Some(next) = self.queue.peek_auto_next() else { return false };
-        let sources = self.lib.sources_of_track(next.track).unwrap_or_default();
-        let live: Vec<_> = sources.iter().filter(|s| s.trashed_at.is_none()).collect();
-        let elsewhere = live.iter().any(|s| {
-            s.available
-                && match s.kind.service() {
-                    None => true,
-                    Some(Service::Youtube) => false,
-                    Some(k) => self.has_audio(k),
-                }
-        });
-        !elsewhere && live.iter().any(|s| s.kind.service().is_some())
-    }
-
     /// The background queue waits for `why`; logged when the reason changes.
     fn analysis_held(&mut self, why: &'static str) {
         let a = &mut self.streaming.analysis;
@@ -698,6 +693,7 @@ impl Worker {
             video,
             origin: Origin::Preview,
             youtube,
+            listening: self.streaming.analysis.listening.clone(),
             model: None,
         };
         if !self.analysis_job(job) {
@@ -717,6 +713,7 @@ impl Worker {
             video,
             origin: Origin::Background,
             youtube,
+            listening: self.streaming.analysis.listening.clone(),
             model: None,
         };
         if self.analysis_job(job) {
@@ -735,6 +732,12 @@ impl Worker {
         self.streaming.analysis.busy = None;
         match found {
             Ok(Some(hit)) => {
+                // YouTube Music began to play meanwhile: the song (attached
+                // now) is taken again once it stops.
+                if self.youtube_listened() {
+                    log::info!("stream analysis: {track} waits, YouTube Music plays");
+                    return;
+                }
                 if self.stream_analysis_on() && self.analysis_downloads() < self.streaming.schedule.analysis_daily {
                     self.analysis_fetch(track, hit.id.id.clone());
                 }

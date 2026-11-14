@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{AnalysisSource, Codec, Source, SourceKind, TrackId};
 use nikgob_core::streaming::{FakeService, RemoteId, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
-use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs, ViewState};
 
 const WITH: &str = nikgob_recs::ANALYZED_WITH;
@@ -353,3 +353,36 @@ fn nothing_is_downloaded_or_previewed_in_the_background_while_youtube_music_play
     assert!(!yt.opened().is_empty());
     drop(rt);
 }
+
+#[test]
+fn a_lookup_answered_after_youtube_music_began_to_play_downloads_nothing() {
+    let lib = Library::open_in_memory().unwrap();
+    let sp = Arc::new(FakeService::spotify());
+    // A song only YouTube Music has (Spotify's likes would win it otherwise).
+    let yt = Arc::new(youtube().with_track("solo", "Solo", "Nobody", 200).logged_out());
+    let playable = lib.upsert_stream_track(&find(&yt, "yt-x-solo")).unwrap();
+    // A slow network: the analysis's lookup of a Spotify like is still on
+    // its way when YouTube Music starts to play.
+    yt.delay("search_kind", Duration::from_millis(700));
+    yt.delay("find_isrc", Duration::from_millis(700));
+    let streams: Vec<Arc<dyn StreamService>> = vec![sp.clone(), yt.clone()];
+    let (rt, asked) = start(&lib, streams, Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    wait_until("a lookup on its way", || yt.calls("search_kind") + yt.calls("find_isrc") >= 1);
+    rt.send(Command::PlayTracks {
+        tracks: vec![playable],
+        start: 0,
+        context: "test".into(),
+    });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let first = asked.lock().unwrap()[0].clone();
+    assert!(matches!(&first.source, PlaySource::Stream { service: Service::Youtube, .. }), "{:?}", first.source);
+    rt.playback_sender().send(PlaybackEvent::Started { id: first.id }).unwrap();
+    // The answer comes while it plays: nothing is downloaded.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(yt.opened().is_empty(), "{:?}", yt.opened());
+
+    rt.send(Command::Pause);
+    wait_for(&rt, "the analysis", |s| s.analysis.streams_done >= 1);
+    drop(rt);
+}
+
