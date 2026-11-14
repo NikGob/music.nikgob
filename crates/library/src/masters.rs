@@ -413,37 +413,19 @@ impl Library {
         })
     }
 
-    /// Every file kept by name ([`Master::file_path`]) with its file hash,
-    /// once each.
-    pub fn master_files(&self) -> Result<Vec<(String, String)>> {
+    /// How many masters keep their file by name at `path`.
+    pub fn masters_at(&self, path: &str) -> Result<usize> {
         self.read(|c| {
-            let mut stmt = c.prepare_cached(
-                "SELECT DISTINCT file_path, file_hash FROM master WHERE file_path IS NOT NULL ORDER BY file_path",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-        })
-    }
-
-    /// Points every master kept at `from` to `to` (the file moved with
-    /// the masters folder), a torrent's in-torrent path too. Returns the
-    /// number of rows updated.
-    pub fn move_master_file(&self, from: &str, to: &str) -> Result<usize> {
-        self.write(|tx| {
-            Ok(tx.execute(
-                "UPDATE master SET file_path = ?2,
-                        origin_path = CASE WHEN origin_kind = 'torrent' AND origin_path = ?1 THEN ?2 ELSE origin_path END
-                  WHERE file_path = ?1",
-                params![from, to],
-            )?)
+            let n: i64 = c.query_row("SELECT count(*) FROM master WHERE file_path = ?1", [path], |r| r.get(0))?;
+            Ok(n.max(0) as usize)
         })
     }
 
     /// Rewrites `origin_path` of masters that lived right in `old_dir` (the
     /// `{file_hash}.<ext>` files a move of the folder takes along) to point
-    /// into `new_dir`. Masters kept by name ([`Master::file_path`]) are
-    /// pointed one by one as they move ([`Self::move_master_file`]). Returns
-    /// the number of rows updated.
+    /// into `new_dir`. Masters kept by name ([`Master::file_path`]) do not
+    /// move with the folder and keep their paths. Returns the number of rows
+    /// updated.
     pub fn relocate_master_paths(
         &self,
         old_dir: &std::path::Path,
@@ -953,9 +935,9 @@ mod tests {
         assert!(matches!(lib.set_master_file(TrackId::new(), "p"), Err(LibraryError::NotFound { .. })));
     }
 
-    /// A file kept by name that moves takes every row of it along.
+    /// How many rows keep a file by name at a path.
     #[test]
-    fn a_master_file_that_moves_takes_its_rows_along() {
+    fn rows_at_a_path_are_counted() {
         let lib = lib();
         let a = master("h", Some(SourceOrigin::Inbox));
         let b = master("h", torrent("ih", "x"));
@@ -963,22 +945,16 @@ mod tests {
         for m in [&a, &b, &c] {
             lib.put_master(m).unwrap();
         }
-        lib.set_master_file(a.track_id, "/old/A/01.flac").unwrap();
-        lib.set_master_file(b.track_id, "/old/A/01.flac").unwrap();
-        lib.set_master_file(c.track_id, "/old/B/01.flac").unwrap();
-        assert_eq!(
-            lib.master_files().unwrap(),
-            vec![("/old/A/01.flac".to_owned(), "h".to_owned()), ("/old/B/01.flac".to_owned(), "other".to_owned())]
-        );
-        assert_eq!(lib.move_master_file("/old/A/01.flac", "/new/A/01.flac").unwrap(), 2);
-        assert_eq!(lib.get_master(a.track_id).unwrap().unwrap().file_path.as_deref(), Some("/new/A/01.flac"));
-        let got = lib.get_master(b.track_id).unwrap().unwrap();
-        assert_eq!((got.file_path.as_deref(), got.origin), (Some("/new/A/01.flac"), torrent("ih", "/new/A/01.flac")));
-        assert_eq!(lib.get_master(c.track_id).unwrap().unwrap().file_path.as_deref(), Some("/old/B/01.flac"));
+        lib.set_master_file(a.track_id, "/m/A/01.flac").unwrap();
+        lib.set_master_file(b.track_id, "/m/A/01.flac").unwrap();
+        lib.set_master_file(c.track_id, "/m/B/01.flac").unwrap();
+        assert_eq!(lib.masters_at("/m/A/01.flac").unwrap(), 2);
+        assert_eq!(lib.masters_at("/m/B/01.flac").unwrap(), 1);
+        assert_eq!(lib.masters_at("/m/C/01.flac").unwrap(), 0);
     }
 
     /// A move of the masters folder repoints only the flat masters it takes
-    /// along; the ones kept by name are pointed as they move.
+    /// along; the ones kept by name stay where they are.
     #[test]
     fn a_folder_move_leaves_masters_kept_by_name_alone() {
         let lib = lib();
@@ -1015,6 +991,38 @@ mod tests {
         let copy = Library::open(&to).unwrap();
         assert_eq!(copy.get_master(m.track_id).unwrap().unwrap(), m);
         assert!(Library::open_in_memory().unwrap().backup_to(&dir.path().join("x.sqlite")).is_err());
+    }
+
+    /// A copy in small steps while the player keeps writing ends whole:
+    /// every row written before it began is in it.
+    #[test]
+    fn a_copy_in_steps_goes_on_while_the_library_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path().join("library.sqlite")).unwrap();
+        let before: Vec<Master> = (0..300).map(|i| master(&format!("h{i}"), Some(SourceOrigin::Inbox))).collect();
+        for m in &before {
+            lib.put_master(m).unwrap();
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (lib, stop) = (lib.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) && n < 200 {
+                    lib.put_master(&master(&format!("w{n}"), None)).unwrap();
+                    n += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })
+        };
+        let to = dir.path().join("copy.sqlite");
+        lib.backup_in_steps(&to, 2).unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        let copy = Library::open(&to).unwrap();
+        for m in &before {
+            assert_eq!(copy.get_master(m.track_id).unwrap().as_ref(), Some(m));
+        }
     }
 
     #[test]
