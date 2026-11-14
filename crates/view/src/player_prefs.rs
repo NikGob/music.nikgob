@@ -48,8 +48,8 @@ impl ListShuffle {
 }
 
 /// [`ListShuffle`] of each [`ListKind`]: a mix is a mix and plays
-/// shuffled, the user's own playlists too; albums and ready playlists play
-/// in the order they were made in.
+/// shuffled; the user's own playlists play as the shuffle button is;
+/// albums and ready playlists play in the order they were made in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ListShuffles {
@@ -63,7 +63,7 @@ impl Default for ListShuffles {
     fn default() -> Self {
         Self {
             mixes: ListShuffle::Shuffled,
-            own_playlists: ListShuffle::Shuffled,
+            own_playlists: ListShuffle::Button,
             albums: ListShuffle::InOrder,
             ready_playlists: ListShuffle::InOrder,
         }
@@ -177,10 +177,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mixes_and_own_playlists_shuffle_albums_and_ready_ones_keep_their_order() {
+    fn mixes_shuffle_own_playlists_follow_the_button_albums_and_ready_ones_keep_their_order() {
         let r = ListShuffles::default();
         assert_eq!(r.of(ListKind::Mix), ListShuffle::Shuffled);
-        assert_eq!(r.of(ListKind::OwnPlaylist), ListShuffle::Shuffled);
+        assert_eq!(r.of(ListKind::OwnPlaylist), ListShuffle::Button);
         assert_eq!(r.of(ListKind::Album), ListShuffle::InOrder);
         assert_eq!(r.of(ListKind::ReadyPlaylist), ListShuffle::InOrder);
         for now in [false, true] {

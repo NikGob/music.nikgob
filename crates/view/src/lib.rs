@@ -1495,6 +1495,9 @@ impl ToastKind {
 /// player's lyrics button (the key L stays).
 pub const LYRICS_REV: u8 = 5;
 
+/// The defaults of «Перемешивание» the prefs follow ([`Prefs::shuffle_rev`]).
+pub const SHUFFLE_REV: u8 = 1;
+
 /// [`Prefs::lyrics_unit`]: letter by letter («По буквам») …
 pub const LYRICS_BY_LETTERS: u8 = 0;
 /// … syllable by syllable («По слогам», the default) …
@@ -1543,6 +1546,10 @@ pub struct Prefs {
     /// its order, or as the shuffle button is ([`ListShuffles`]).
     /// «Перемешать» shuffles anyway; other lists follow the button.
     pub list_shuffle: ListShuffles,
+    /// Which defaults of [`Self::list_shuffle`] the prefs were written with
+    /// ([`SHUFFLE_REV`]): before 1 own playlists started shuffled by
+    /// default, and that default turns into «По кнопке» once.
+    pub shuffle_rev: u8,
     /// «Перемешивать радио и автовоспроизведение»: with shuffle on, the
     /// picks of a radio, autoplay and the daylist play shuffled too (off:
     /// they keep their own order).
@@ -3751,6 +3758,7 @@ impl Default for Prefs {
             speed_enabled: true,
             keep_timbre: false,
             list_shuffle: ListShuffles::default(),
+            shuffle_rev: SHUFFLE_REV,
             shuffle_radio: false,
             opus_bitrate: 160,
             check_fake_lossless: true,

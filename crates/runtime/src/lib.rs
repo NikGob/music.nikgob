@@ -1221,8 +1221,9 @@ impl Worker {
             }
             Command::ToggleShuffle => {
                 let on = !self.queue.shuffle;
+                // The button changes the queue only: the rules of the
+                // kinds of lists are the settings' («Перемешивание»).
                 self.queue.set_shuffle(on);
-                self.shuffle_rule_from_button(on);
                 self.preload_next();
                 self.publish_player();
             }
@@ -2071,27 +2072,6 @@ impl Worker {
     pub(crate) fn new_list(&mut self, kind: Option<nikgob_view::ListKind>) {
         let rule = kind.map_or(nikgob_view::ListShuffle::Button, |k| self.state.read().prefs.list_shuffle.of(k));
         self.queue.new_list(rule, kind);
-    }
-
-    /// The shuffle button pressed while a list of a kind plays: what the
-    /// user chose is how lists of that kind start from now on (a kind left
-    /// to «По кнопке» stays so). A radio, the wave, a queue of no kind, and
-    /// what autoplay added after the list (playing now) set no rule. The
-    /// prefs file is written at the next tick, not on this command.
-    fn shuffle_rule_from_button(&mut self, on: bool) {
-        use nikgob_view::ListShuffle;
-        let Some(kind) = self.queue.list_kind() else { return };
-        if self.queue.current().is_some_and(|e| self.autoplay_owns(e.id)) {
-            return;
-        }
-        let rule = if on { ListShuffle::Shuffled } else { ListShuffle::InOrder };
-        let now = self.state.read().prefs.list_shuffle.of(kind);
-        if now == ListShuffle::Button || now == rule {
-            return;
-        }
-        log::info!("shuffle {} by the button: {kind:?} lists start so from now on", if on { "on" } else { "off" });
-        self.publish(|s| s.prefs.list_shuffle.set(kind, rule));
-        self.prefs_unsaved = true;
     }
 
     /// Writes the prefs a command changed without writing them itself, or
