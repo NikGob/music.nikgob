@@ -17,6 +17,8 @@ const DEFAULT_BASE: &str = "https://api.deezer.com/";
 const ALBUM_TRACKS_PAGE: usize = 100;
 const ALBUM_TRACKS_MAX_PAGES: usize = 10;
 const MAX_IMAGE_BYTES: usize = 12 << 20;
+/// A 30-second preview MP3 is about half a megabyte.
+const MAX_PREVIEW_BYTES: usize = 2 << 20;
 /// Minimum name similarity (0..=1, see `text::similarity`) of an artist hit.
 const MIN_ARTIST_SIMILARITY: f64 = 0.85;
 /// Minimum title similarity of a track / album match.
@@ -128,6 +130,9 @@ pub struct DeezerTrack {
     pub explicit_lyrics: Option<bool>,
     pub artist: Option<DeezerArtist>,
     pub album: Option<DeezerAlbum>,
+    /// The URL of its free 30-second preview (an MP3 on Deezer's CDN), when
+    /// Deezer has one.
+    pub preview: Option<String>,
 }
 
 impl DeezerTrack {
@@ -386,7 +391,44 @@ impl Deezer {
         Ok(ArtistPicture::Unverified)
     }
 
+    /// The free 30-second preview of a song: of Deezer's track `id` when it
+    /// is known, else of the hit of a search by `artist` and `title` whose
+    /// artist and title match (the same checks as the artist's photo; the
+    /// variant of the title too: an instrumental is not the song). `None`
+    /// when Deezer has neither the song nor a preview of it.
+    pub async fn preview_url(&self, id: Option<u64>, artist: &str, title: &str, duration: Option<Duration>) -> Result<Option<String>> {
+        if let Some(id) = id {
+            return Ok(self.track(id).await?.preview.filter(|p| !p.is_empty()));
+        }
+        let want_artist = artist_key(artist);
+        let want = title_key(title);
+        if want_artist.is_empty() || want.base.is_empty() {
+            return Ok(None);
+        }
+        let hits = self.search_track(Some(&search_artist(artist)), &search_title(title), 10).await?;
+        let found = hits.into_iter().find(|t| {
+            let duration_ok = match (duration, t.duration) {
+                (Some(local), Some(remote)) => local.as_secs().abs_diff(u64::from(remote)) <= MAX_DURATION_DIFF_SECS,
+                _ => true,
+            };
+            let theirs = title_key(&t.title);
+            duration_ok
+                && t.preview.as_deref().is_some_and(|p| !p.is_empty())
+                && similarity(&want_artist, &artist_key(t.artist_name())) >= MIN_ARTIST_SIMILARITY
+                && similarity(&want.base, &theirs.base) >= MIN_TITLE_SIMILARITY
+                && theirs.variant == want.variant
+        });
+        Ok(found.and_then(|t| t.preview))
+    }
+
+    /// Downloads a preview `url` (an MP3 of Deezer's CDN).
+    pub async fn download_preview(&self, url: &str) -> Result<Vec<u8>> {
+        let url = Url::parse(url).map_err(|e| MetadataError::InvalidArgument(format!("bad preview URL: {e}")))?;
+        self.http.get_bytes(Service::Deezer, url, MAX_PREVIEW_BYTES).await
+    }
+
     /// Downloads an image URL from Deezer's CDN (photos, covers).
+
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>> {
         let url = Url::parse(url)
             .map_err(|e| MetadataError::InvalidArgument(format!("bad image URL: {e}")))?;

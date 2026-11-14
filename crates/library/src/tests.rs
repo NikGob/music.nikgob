@@ -2601,3 +2601,36 @@ fn a_master_two_tracks_share_goes_with_the_last_of_them() {
     assert_eq!(last.master_hash.as_deref(), Some("image"));
     assert_eq!(lib.master_users("image").unwrap(), 0);
 }
+
+/// A stream analysed before sketches were (or by another sketch version)
+/// is due again for its sketch alone; a file's track or one without a
+/// current stream analysis is not, nor one sketched as now, and a fresh
+/// failure waits.
+#[test]
+fn streams_analysed_before_sketches_are_due_for_one() {
+    let lib = lib();
+    let a = artist(&lib, "A");
+    let stream = |title: &str, id: &str, n: u32| {
+        let t = track(&lib, &a, None, title, n);
+        lib.add_source(&source(&t, SourceKind::Youtube, id, Codec::Opus, None)).unwrap();
+        lib.like(t.id).unwrap();
+        t
+    };
+    let old = stream("Old", "v1", 1);
+    let sketched = stream("Sketched", "v2", 2);
+    let unanalysed = stream("Unanalysed", "v3", 3);
+    let outdated = stream("Outdated", "v4", 4);
+    for t in [&old, &sketched, &outdated] {
+        lib.put_analysis(&analysis(t.id, "b", AnalysisSource::Youtube, 0.1)).unwrap();
+    }
+    lib.put_sketch(sketched.id, &[1u8; 40], "k1", None, AnalysisSource::Youtube).unwrap();
+    lib.put_sketch(outdated.id, &[1u8; 40], "k0", None, AnalysisSource::Youtube).unwrap();
+    let due = |before: i64| -> Vec<(TrackId, Option<String>)> {
+        lib.streams_needing_sketch("b", "k1", before, 10).unwrap().into_iter().map(|t| (t.track_id, t.youtube)).collect()
+    };
+    assert_eq!(due(0), [(outdated.id, Some("v4".into())), (old.id, Some("v1".into()))]);
+    assert!(due(0).iter().all(|(t, _)| *t != unanalysed.id), "the analysis's own queue first");
+    lib.mark_stream_analysis_failed(old.id, "gone").unwrap();
+    assert_eq!(due(0).len(), 1, "a fresh failure waits");
+    assert_eq!(lib.streams_needing_sketch("c", "k1", 0, 10).unwrap().len(), 0, "an outdated analysis is the other queue's");
+}

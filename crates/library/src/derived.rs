@@ -395,6 +395,38 @@ impl Library {
         })
     }
 
+    /// Stream-only tracks of [`Self::streams_needing_analysis`]'s kind whose
+    /// stream analysis is current (`analyzed_with`) but whose sketch is
+    /// missing or of another `sketched_with` (analysed before sketches
+    /// were): the same work queue after the analyses themselves, newest
+    /// first; one whose stream analysis failed at or after `retry_before`
+    /// is left out.
+    pub fn streams_needing_sketch(&self, analyzed_with: &str, sketched_with: &str, retry_before: UnixMs, limit: u32) -> Result<Vec<StreamAnalysisTodo>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT t.id,
+                        (SELECT y.locator FROM source y WHERE y.track_id = t.id AND y.kind = 'youtube'
+                            AND y.available = 1 AND y.trashed_at IS NULL
+                          ORDER BY y.is_active DESC, y.quality_score DESC LIMIT 1)
+                   FROM track t
+                   JOIN analysis a ON a.track_id = t.id AND a.analyzed_with = ?1 AND a.source = 'youtube'
+                   LEFT JOIN sound_sketch k ON k.track_id = t.id
+                   LEFT JOIN analysis_failed f ON f.track_id = t.id
+                  WHERE {STREAM_ANALYSABLE}
+                    AND (k.track_id IS NULL OR k.sketched_with <> ?2)
+                    AND (f.track_id IS NULL OR f.file_key <> '{STREAM_FAILED}' OR f.failed_at < ?3)
+                  ORDER BY t.seq DESC LIMIT ?4"
+            ))?;
+            let rows = stmt.query_map(params![analyzed_with, sketched_with, retry_before, limit], |r| {
+                Ok(StreamAnalysisTodo {
+                    track_id: get_id(r, 0)?,
+                    youtube: r.get(1)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Tracks with a file whose bliss analysis (`analyzed_with`, from the
     /// file) is current but whose sketch is missing, of another
     /// `sketched_with`, a stream's, or — when `styled_with` is given (the
