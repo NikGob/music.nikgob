@@ -1025,7 +1025,7 @@ impl RadioState {
         };
         let served: HashSet<Item> = self.served.iter().cloned().collect();
         let mut taken: HashSet<Item> = HashSet::new();
-        take_works(recs, &served, &mut taken);
+        let works = take_works(recs, &served, &mut taken);
         let sound = Sound::new(seed_vec, liked, skipped, library_scale(recs));
 
         // 0. Played twice running: once more, first.
@@ -1101,6 +1101,15 @@ impl RadioState {
         if lib.len() < want_lib {
             let keep_out = RELAXED_SERVED.min(recs.catalog.len() / 3);
             let recent: HashSet<Item> = self.served.iter().rev().take(keep_out).cloned().collect();
+            // The works of what may play again are free again too: only
+            // the recently served keep theirs out.
+            for item in &works {
+                taken.remove(item);
+            }
+            take_works(recs, &recent, &mut taken);
+            if let Some(s) = &again {
+                taken.insert(s.item.clone());
+            }
             let more = self.library(recs, want_lib - lib.len(), &sound, &recent, false, &rules, &mut rng, &mut taken, pull_vec.as_ref());
             lib.extend(more);
         }
@@ -1857,30 +1866,41 @@ fn slot_unheard(recs: &Recs<'_>, s: &Slot) -> bool {
     }
 }
 
-/// The best `n` of `slots` (sorted) under the rules, at least `share` of
-/// them unheard by the user while there are («Преимущественно новые
-/// песни»).
 /// What a session served takes its whole song along: a served version's
 /// song (an off vocal or a TV size of it, by [`crate::taste::TrackInfo::song`])
 /// and the versions of a served song are not picked in the same session.
-fn take_works(recs: &Recs<'_>, served: &HashSet<Item>, taken: &mut HashSet<Item>) {
-    let ids: HashSet<TrackId> = served.iter().filter_map(|x| match x {
-        Item::Track(id) => Some(*id),
-        Item::Stream(_) => None,
-    }).collect();
+/// Returns what it marked taken that was not, so a radio running dry can
+/// give it back ([`RadioState::extend`] then marks the works of the
+/// recently served only, as it keeps out only those).
+fn take_works(recs: &Recs<'_>, served: &HashSet<Item>, taken: &mut HashSet<Item>) -> Vec<Item> {
+    let ids: HashSet<TrackId> = served
+        .iter()
+        .filter_map(|x| match x {
+            Item::Track(id) => Some(*id),
+            Item::Stream(_) => None,
+        })
+        .collect();
+    let mut marked = Vec::new();
     if ids.is_empty() {
-        return;
+        return marked;
     }
     for t in recs.catalog.tracks() {
         if let Some(song) = t.song
             && (ids.contains(&song) || ids.contains(&t.id))
         {
-            taken.insert(Item::Track(song));
-            taken.insert(Item::Track(t.id));
+            for item in [Item::Track(song), Item::Track(t.id)] {
+                if taken.insert(item.clone()) {
+                    marked.push(item);
+                }
+            }
         }
     }
+    marked
 }
 
+/// The best `n` of `slots` (sorted) under the rules, at least `share` of
+/// them unheard by the user while there are («Преимущественно новые
+/// песни»).
 fn select_unheard(recs: &Recs<'_>, slots: Vec<Slot>, n: usize, share: f32, rules: &Diversity, taken: &mut HashSet<Item>) -> Vec<Slot> {
     if share <= 0.0 {
         return select_diverse(slots, n, rules, taken);
@@ -2448,8 +2468,36 @@ pub(crate) mod tests {
         let slot = recs.slot(1, Reason::Random, 1.0);
         assert!(slot.song.as_ref().is_some_and(|s| taken.contains(s)), "the other version stays out");
         let mut taken = HashSet::new();
-        take_works(&recs, &HashSet::new(), &mut taken);
+        assert!(take_works(&recs, &HashSet::new(), &mut taken).is_empty());
         assert!(taken.is_empty());
+    }
+
+    /// A small library of songs that all have a version never runs dry: once
+    /// everything has played, what played long ago (and its versions) may
+    /// play again, as for songs without one; one batch never holds a song
+    /// and its version.
+    #[test]
+    fn a_library_of_versions_never_runs_dry() {
+        let mut tracks = Vec::new();
+        let mut idx = VectorIndex::with_weights([1.0; DIM]);
+        for i in 0..24u128 {
+            let t = info(i, &[(i / 2) as u32], None);
+            tracks.push(if i % 2 == 1 { t.with_song(tid(i - 1)) } else { t });
+            idx.insert(tid(i), point(i as f32 * 0.1, 0.0));
+        }
+        let cat = Catalog::new(tracks);
+        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
+        let recs = Recs::new(&cat, &taste, &idx);
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        for round in 0..30 {
+            let picks = radio.extend(&recs, 3, &RadioParams { new_share: 0.0, seed: round });
+            assert_eq!(picks.len(), 3, "round {round}");
+            let works: HashSet<u128> = picks.iter().map(|p| match &p.item {
+                Item::Track(id) => id.0.as_u128() / 2,
+                Item::Stream(_) => u128::MAX,
+            }).collect();
+            assert_eq!(works.len(), 3, "a song and its version in one batch, round {round}");
+        }
     }
 
     /// A like while a radio plays: its next extension starts with the best

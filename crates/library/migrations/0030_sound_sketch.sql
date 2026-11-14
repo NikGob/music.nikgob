@@ -1,4 +1,4 @@
--- Migration 32 (r38-sound; renumber on merge if others land first).
+-- Migration 30.
 --
 -- What the background analysis's decode of a track tells beyond its
 -- vectors, 40 bytes: the crest of the loudness of its analysis windows,

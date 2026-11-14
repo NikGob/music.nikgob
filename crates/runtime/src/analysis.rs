@@ -161,13 +161,14 @@ fn analyze_decoded(
 ) -> Result<Analysed, FileError> {
     let mut analyzer: Option<WindowedAnalyzer<'_>> = None;
     let mut format: Option<AnalysisError> = None;
-    // What each span is for: the plan is made by the decoder, the
-    // analyzer when the first audio comes.
-    let parts: std::cell::RefCell<Vec<Part>> = std::cell::RefCell::new(Vec::new());
+    // The plan (what each span is for) and the file's length: the plan is
+    // made by the decoder, the analyzer when the first audio comes.
+    let planned: std::cell::RefCell<(Vec<(Window, Part)>, Option<f64>)> = std::cell::RefCell::new((Vec::new(), None));
     let mut plan = |d: Option<f64>| -> Vec<Span> {
         let p = windows(d);
-        *parts.borrow_mut() = p.iter().map(|w| w.1).collect();
-        p.into_iter().map(|(w, _)| Span { start: w.start, len: w.len }).collect()
+        let spans = p.iter().map(|(w, _)| Span { start: w.start, len: w.len }).collect();
+        *planned.borrow_mut() = (p, d);
+        spans
     };
     // Audio read past between windows counts as work too: the pace, the
     // game pause and a stop apply while the heavy turn is held.
@@ -179,7 +180,10 @@ fn analyze_decoded(
         let a = match &mut analyzer {
             Some(a) => a,
             None => match WindowedAnalyzer::new(spec.sample_rate, spec.channels, want.bliss, want.model) {
-                Ok(a) => analyzer.insert(a.with_parts(parts.borrow().clone())),
+                Ok(a) => {
+                    let (p, d) = planned.borrow().clone();
+                    analyzer.insert(a.with_plan(p, d))
+                }
                 Err(e) => {
                     format = Some(e);
                     return Take::Stop;
@@ -279,7 +283,10 @@ pub(crate) fn store_sketch(
     let (sketch, styled) = match styled {
         Some(_) => (sketch, styled),
         None => match lib.sketch_of(track)? {
-            Some(old) if old.styled_with.as_deref() == Some(STYLED_WITH) => {
+            // Kept only when heard from the same source: a stream's styles
+            // are not the file's (another edit or master), and the file
+            // waits for its own.
+            Some(old) if old.styled_with.as_deref() == Some(STYLED_WITH) && old.source == source => {
                 let kept = SoundSketch::from_bytes(&old.sketch).and_then(|s| s.styles());
                 (sketch.with_styles(kept.as_ref()), Some(STYLED_WITH))
             }
@@ -326,6 +333,18 @@ pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
         }
     }
     log::info!("analysis: {} vectors in memory", idx.len());
+}
+
+/// What the live worker holds, for a snapshot built without it (the
+/// previews of Главная, the model's preview, evaluations): the bliss
+/// vectors, the sketches and, when `prefs` let the model hear the library
+/// (unset: whatever vectors are stored), its vectors.
+pub(crate) fn load_offline(lib: &Library, index: &SoundIndex, prefs: &v::Prefs) {
+    load_index(lib, index);
+    load_sketches(lib, index);
+    if Neural::of(prefs.sound_neural_or(true)).library {
+        load_embeddings(lib, index);
+    }
 }
 
 /// Puts every stored vector of the neural model into `index` (beside the
@@ -1032,7 +1051,7 @@ mod tests {
         let credit = nikgob_core::model::ArtistCredit::single(String::from("A"), None);
         let t = lib.upsert_track(&nikgob_core::model::Track::new("T", credit)).unwrap().id;
         store_vector(&lib, &index, t, [0.5; nikgob_recs::DIM], AnalysisSource::File).unwrap();
-        let styles = nikgob_recs::Styles { top: [(3, 0.7), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], voice: 0.1, ..Default::default() };
+        let styles = nikgob_recs::Styles { top: [(3, 0.7), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.7 };
         let heard: Result<Vec<f32>, AnalysisError> = Ok(vec![0.0; 4]);
         assert!(store_sketch(&lib, &index, t, out.sketch.with_styles(Some(&styles)), Some(&heard), AnalysisSource::File).unwrap());
         assert_eq!(index.read().sketch(t).and_then(|s| s.styles()).map(|s| s.top[0].0), Some(3));
@@ -1047,6 +1066,17 @@ mod tests {
         load_sketches(&lib, &other);
         assert_eq!(other.read().sketch(t), index.read().sketch(t));
         assert_eq!(other.read().sketched_len(), 1);
+
+        // Styles heard from a stream are not the local file's: a file pass
+        // without the model drops them, so the file is styled on its own.
+        let t2 = lib.upsert_track(&nikgob_core::model::Track::new("T2", nikgob_core::model::ArtistCredit::single(String::from("A"), None))).unwrap().id;
+        store_vector(&lib, &index, t2, [0.4; nikgob_recs::DIM], AnalysisSource::Youtube).unwrap();
+        assert!(store_sketch(&lib, &index, t2, out.sketch.with_styles(Some(&styles)), Some(&heard), AnalysisSource::Youtube).unwrap());
+        assert!(store_sketch(&lib, &index, t2, out.sketch, None, AnalysisSource::File).unwrap());
+        let row = lib.sketch_of(t2).unwrap().unwrap();
+        assert_eq!((row.styled_with.as_deref(), row.source), (None, AnalysisSource::File));
+        assert!(SoundSketch::from_bytes(&row.sketch).unwrap().styles().is_none());
+        assert!(index.read().sketch(t2).unwrap().styles().is_none());
     }
 
     /// The model's styles of each window, summed beside what it returns
@@ -1187,7 +1217,7 @@ mod tests {
             };
             let styles = s.styles().map(|st| {
                 serde_json::json!({
-                    "voice": st.voice, "electronic": st.electronic, "acoustic": st.acoustic, "speech": st.speech, "sure": st.sure,
+                    "sure": st.sure,
                     "top": st.leading().map(|(l, p)| serde_json::json!([l, p])).collect::<Vec<_>>(),
                 })
             });
@@ -1267,5 +1297,20 @@ mod tests {
         assert!(!lib.has_embedding(u, EMBEDDED_WITH).unwrap());
         assert_eq!(store_embedding(&lib, &index, u, &Err(AnalysisError::TooShort), AnalysisSource::File).unwrap(), Some(true));
         assert!(lib.has_embedding(u, EMBEDDED_WITH).unwrap());
+
+        // A snapshot built without the worker loads what it would hold:
+        // the sketch too, and the model's vectors while the mode wants them.
+        let styles = nikgob_recs::Styles { top: [(3, 0.7), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.7 };
+        let sketch = SoundSketch::default().with_styles(Some(&styles));
+        assert!(store_sketch(&lib, &index, t, sketch, Some(&Ok(raw)), AnalysisSource::File).unwrap());
+        let offline: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
+        load_offline(&lib, &offline, &v::Prefs::default());
+        assert_eq!(offline.read().get(t), Some(&file));
+        assert_eq!(offline.read().sketch(t).copied(), Some(sketch));
+        assert_eq!(offline.read().embedding(t), index.read().embedding(t));
+        let off = v::Prefs { sound_neural: Some(v::SoundNeural::Off), ..v::Prefs::default() };
+        let without: SoundIndex = Arc::new(RwLock::new(VectorIndex::new()));
+        load_offline(&lib, &without, &off);
+        assert!(without.read().sketch(t).is_some() && without.read().embedding(t).is_none());
     }
 }

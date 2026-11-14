@@ -11,7 +11,7 @@
 //!   12-bin profile of their pitch classes ([`Edge::key`]), so a sequence
 //!   can match one track's end to the next one's start.
 //! * **The styles** ([`crate::styles::Styles`]): the leading Discogs
-//!   styles and the coarse shares, when the neural sound model heard it.
+//!   styles, when the neural sound model heard it.
 //!
 //! Loudness is the RMS of the mono mix in dB of full scale (a full-scale
 //! sine is −3 dB): plain, the same for every file whatever its rate.
@@ -24,7 +24,7 @@ use crate::styles::{STYLE_COUNT, Styles, TOP};
 pub const SKETCH_BYTES: usize = 40;
 /// The tag of the sketches' loudness and edges this build computes:
 /// another one is computed again.
-pub const SKETCHED_WITH: &str = "sketch-1";
+pub const SKETCHED_WITH: &str = "sketch-2";
 /// The tag of the styles part: the model file and this summary of it.
 pub const STYLED_WITH: &str = "discogs-effnet-bsdynamic-1:styles-1";
 
@@ -40,9 +40,6 @@ pub const EDGE_SECONDS: f64 = 10.0;
 /// …of which this much from the first (or up to the last) sounding block
 /// is measured.
 pub const EDGE_TAKE: f64 = 5.0;
-/// The edges are measured on files this long at least (shorter ones have
-/// their windows over the whole of them).
-pub const EDGE_MIN_TRACK: f64 = 90.0;
 /// An edge's blocks are this long.
 const EDGE_BLOCK: f64 = 0.1;
 /// Below the loudest block of the edge by this much is silence too.
@@ -350,7 +347,8 @@ const HEAD: usize = 4;
 const TAIL: usize = 13;
 const EDGE_BYTES: usize = 9;
 const TOP_AT: usize = 22;
-const COARSE: usize = TOP_AT + 3 * TOP;
+/// The leading styles' mass, after four bytes kept zero.
+const SURE: usize = TOP_AT + 3 * TOP + 4;
 const HAS_CREST: u8 = 1;
 const HAS_HEAD: u8 = 2;
 const HAS_TAIL: u8 = 4;
@@ -360,8 +358,8 @@ const HAS_STYLES: u8 = 8;
 /// a byte of which parts there are; the crest (peak, low, max as
 /// quarter-dB bytes); the head and the tail (loudness, shape, silence in
 /// tenths of a second, the 12 pitch classes as nibbles); the leading
-/// styles (index u16 LE and probability ×255 each) and the coarse shares
-/// (words, electronic, acoustic, speech, the leading styles' mass, ×255).
+/// styles (index u16 LE and probability ×255 each), four spare bytes and
+/// the leading styles' mass ×255.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SoundSketch([u8; SKETCH_BYTES]);
 
@@ -419,9 +417,7 @@ impl SoundSketch {
                 self.0[at..at + 2].copy_from_slice(&i.to_le_bytes());
                 self.0[at + 2] = unit_q(*p);
             }
-            for (k, x) in [st.voice, st.electronic, st.acoustic, st.speech, st.sure].into_iter().enumerate() {
-                self.0[COARSE + k] = unit_q(x);
-            }
+            self.0[SURE] = unit_q(st.sure);
         }
         self
     }
@@ -446,8 +442,7 @@ impl SoundSketch {
             let at = TOP_AT + 3 * k;
             (u16::from_le_bytes([self.0[at], self.0[at + 1]]), q_unit(self.0[at + 2]))
         });
-        let c = |k: usize| q_unit(self.0[COARSE + k]);
-        Some(Styles { top, voice: c(0), electronic: c(1), acoustic: c(2), speech: c(3), sure: c(4) })
+        Some(Styles { top, sure: q_unit(self.0[SURE]) })
     }
 
     /// Nothing measured.
@@ -566,7 +561,7 @@ mod tests {
         let crest = Crest { peak: -9.25, low: -31.0, max: -6.5 };
         let head = Edge { loudness: -18.0, shape: EdgeShape::Fade, silence: 1.3, chroma: [15, 0, 7, 1, 9, 3, 0, 12, 2, 5, 1, 4] };
         let tail = Edge { loudness: -12.5, shape: EdgeShape::Cold, silence: 0.0, chroma: [3; 12] };
-        let mut styles = Styles { top: [(42, 0.6), (7, 0.25), (399, 0.1), (u16::MAX, 0.0)], voice: 0.9, electronic: 0.2, acoustic: 0.4, speech: 0.0, sure: 0.95 };
+        let mut styles = Styles { top: [(42, 0.6), (7, 0.25), (399, 0.1), (u16::MAX, 0.0)], sure: 0.95 };
         let s = SoundSketch::new(Some(crest), Some(head), Some(tail), Some(&styles));
         let back = SoundSketch::from_bytes(&s.to_bytes()).unwrap();
         assert_eq!(back, s);
@@ -575,7 +570,7 @@ mod tests {
         assert_eq!(back.tail(), Some(tail));
         let st = back.styles().unwrap();
         assert_eq!(st.top.map(|t| t.0), styles.top.map(|t| t.0));
-        assert!((st.voice - 0.9).abs() < 0.003 && (st.top[0].1 - 0.6).abs() < 0.003);
+        assert!((st.sure - 0.95).abs() < 0.003 && (st.top[0].1 - 0.6).abs() < 0.003);
         // Without the styles, the rest stays.
         let bare = s.with_styles(None);
         assert!(bare.styles().is_none() && bare.crest() == Some(crest) && bare.tail() == Some(tail));

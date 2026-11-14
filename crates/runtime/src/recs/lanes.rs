@@ -1097,7 +1097,7 @@ mod tests {
         }
         let lib = nikgob_library::Library::open(&db).unwrap();
         let index = crate::analysis::SoundIndex::default();
-        crate::analysis::load_index(&lib, &index);
+        crate::analysis::load_offline(&lib, &index, &nikgob_view::Prefs::default());
         let now = super::super::recs_now();
         let (snap, tiles, _) = super::super::read_snapshot(&lib, &index, now, 180, &[], false).unwrap();
         let recs = snap.recs();

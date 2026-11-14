@@ -823,12 +823,16 @@ fn read_parts(
     // song beside it) are one song for a session or a mix: they stand for
     // the plain one (or, without it, the first of them).
     let works = work_heads(rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)).map(|r| (r.id, r.title.as_str(), r.artists.first().copied())));
+    // Both together: every copy of every version of a work has one key.
+    let song_of = compose_songs(
+        rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)).map(|r| (r.id, songs.get(r.song.as_str()).map_or(r.id, |s| s.1))),
+        &works,
+    );
     // The worlds of Главная: one of them does not fill a mix.
     let album_worlds = crate::home_v2::worlds_of_releases(&release_rows);
     let mut worlds: HashMap<u64, (String, String)> = HashMap::new();
     let catalog = Catalog::new(rows.iter().filter(|r| r.in_library && !spares.contains_key(&r.id)).map(|r| {
-        let song = songs.get(r.song.as_str()).map_or(r.id, |s| s.1);
-        let song = if song == r.id { works.get(&r.id).copied().unwrap_or(song) } else { song };
+        let song = song_of.get(&r.id).copied().unwrap_or(r.id);
         let world = r.release.and_then(|a| album_worlds.get(&a));
         let mut t = TrackInfo::new(r.id, r.artists.clone(), r.release)
             .with_local(r.has_local)
@@ -1047,8 +1051,8 @@ fn read_parts(
         for (a, t, w) in &similar.input.tags {
             tags.entry(*a).or_default().push((t.clone(), *w));
         }
-        let untagged = style_families(&catalog, &index, &|a| tags.contains_key(&a));
-        let mut genres: HashMap<ArtistId, u8> = tags.into_iter().filter_map(|(a, t)| Some((a, nikgob_recs::mix_names::leading(&t)?))).collect();
+        let mut genres: HashMap<ArtistId, u8> = tags.iter().filter_map(|(a, t)| Some((*a, nikgob_recs::mix_names::leading(t)?))).collect();
+        let untagged = style_families(&catalog, &index, &|a| tags.contains_key(&a), &genres);
         genres.extend(untagged);
         genres
     };
@@ -1105,18 +1109,91 @@ pub(crate) fn work_heads<'a>(rows: impl Iterator<Item = (TrackId, &'a str, Optio
     out
 }
 
+/// One song key for each track of `tracks` (its id and the copy standing
+/// for its song on several albums) and the versions of works `works`
+/// joins ([`work_heads`]): the two relations together, so a copy of a
+/// version and a copy of the plain song share it. A group stands for the
+/// copy that stands for its work's head (the first head, when two works
+/// meet through a song), else for its song's copy.
+pub(crate) fn compose_songs(tracks: impl Iterator<Item = (TrackId, TrackId)>, works: &HashMap<TrackId, TrackId>) -> HashMap<TrackId, TrackId> {
+    fn root(parent: &mut HashMap<TrackId, TrackId>, x: TrackId) -> TrackId {
+        let mut r = x;
+        while let Some(&p) = parent.get(&r).filter(|p| **p != r) {
+            r = p;
+        }
+        let mut y = x;
+        while y != r {
+            y = parent.insert(y, r).unwrap_or(r);
+        }
+        r
+    }
+    fn join(parent: &mut HashMap<TrackId, TrackId>, a: TrackId, b: TrackId) {
+        let (ra, rb) = (root(parent, a), root(parent, b));
+        if ra != rb {
+            parent.insert(ra.max(rb), ra.min(rb));
+        }
+    }
+    let mut parent: HashMap<TrackId, TrackId> = HashMap::new();
+    let mut copy_of: HashMap<TrackId, TrackId> = HashMap::new();
+    let tracks: Vec<(TrackId, TrackId)> = tracks.collect();
+    for &(id, song) in &tracks {
+        parent.entry(id).or_insert(id);
+        parent.entry(song).or_insert(song);
+        copy_of.insert(id, song);
+        join(&mut parent, id, song);
+    }
+    for (&version, &head) in works {
+        if parent.contains_key(&version) && parent.contains_key(&head) {
+            join(&mut parent, version, head);
+        }
+    }
+    // Each group's head: the smallest work head in it.
+    let mut heads: HashMap<TrackId, TrackId> = HashMap::new();
+    for &head in works.values() {
+        if !parent.contains_key(&head) {
+            continue;
+        }
+        let r = root(&mut parent, head);
+        let e = heads.entry(r).or_insert(head);
+        *e = (*e).min(head);
+    }
+    tracks
+        .iter()
+        .map(|&(id, song)| {
+            let r = root(&mut parent, id);
+            let key = heads.get(&r).map_or(song, |h| copy_of.get(h).copied().unwrap_or(*h));
+            (id, key)
+        })
+        .collect()
+}
+
 /// The family of genres of each artist of the catalog that `tagged` says
-/// has no tags, by the styles of their songs' sketches
-/// ([`nikgob_recs::styles::leading_family`]), when they lead.
-pub(crate) fn style_families(catalog: &Catalog, index: &VectorIndex<TrackId>, tagged: &dyn Fn(ArtistId) -> bool) -> HashMap<ArtistId, u8> {
+/// has no tags, by the styles of their songs' sketches, when they lead:
+/// what each style is of is learnt from the songs of the artists whose
+/// tags gave them a family (`families`,
+/// [`nikgob_recs::styles::StyleFamilies`]).
+pub(crate) fn style_families(
+    catalog: &Catalog,
+    index: &VectorIndex<TrackId>,
+    tagged: &dyn Fn(ArtistId) -> bool,
+    families: &HashMap<ArtistId, u8>,
+) -> HashMap<ArtistId, u8> {
     let mut by_artist: HashMap<ArtistId, Vec<nikgob_recs::Styles>> = HashMap::new();
+    let mut taught: Vec<(nikgob_recs::Styles, u8)> = Vec::new();
     for t in catalog.tracks() {
-        let Some(a) = t.artists.first().copied().filter(|a| !tagged(*a)) else { continue };
-        if let Some(s) = index.sketch(t.id).and_then(|s| s.styles()) {
+        let Some(a) = t.artists.first().copied() else { continue };
+        let Some(s) = index.sketch(t.id).and_then(|s| s.styles()) else { continue };
+        if let Some(f) = families.get(&a) {
+            taught.push((s, *f));
+        } else if !tagged(a) {
             by_artist.entry(a).or_default().push(s);
         }
     }
-    by_artist.into_iter().filter_map(|(a, list)| Some((a, nikgob_recs::styles::leading_family(&list)?))).collect()
+    if by_artist.is_empty() || taught.is_empty() {
+        return HashMap::new();
+    }
+    let learnt = nikgob_recs::styles::StyleFamilies::learn(taught.iter().map(|(s, f)| (s, *f)));
+    by_artist.into_iter().filter_map(|(a, list)| Some((a, learnt.leading(&list)?))).collect()
 }
 
 /// Whether each catalog track suits the background
@@ -2069,7 +2146,7 @@ pub fn preview_home(lib: &Library, library_dir: &std::path::Path) -> Result<Home
 pub fn preview_home_with(lib: &Library, library_dir: &std::path::Path, prefs: &v::Prefs) -> Result<HomePreview, String> {
     let started = Instant::now();
     let index = SoundIndex::default();
-    crate::analysis::load_index(lib, &index);
+    crate::analysis::load_offline(lib, &index, prefs);
     let vectors = index.read().len();
     let (day, utc_offset_min) = local_day();
     let (discoveries, new_releases_cached) = discover::cached_found(lib);
@@ -2165,7 +2242,7 @@ impl ModelPreview {
     /// The snapshot with the recommendations' settings of `prefs`.
     pub fn of_with(lib: &Library, prefs: &v::Prefs) -> Result<Self, String> {
         let index = SoundIndex::default();
-        crate::analysis::load_index(lib, &index);
+        crate::analysis::load_offline(lib, &index, prefs);
         let (_, utc_offset_min) = local_day();
         // The last pass's finds: their analysed previews come with the
         // snapshot.
@@ -3353,27 +3430,56 @@ mod tests {
         assert_eq!(heads.len(), 2, "{heads:?}");
     }
 
+    /// A copy of an off vocal on a second album, the off vocal and the plain
+    /// song are one song; when the work's head has a copy standing for its
+    /// song, the whole work takes that copy.
+    #[test]
+    fn song_copies_and_work_versions_compose() {
+        let mut ids: Vec<TrackId> = (0..6).map(|_| TrackId::new()).collect();
+        ids.sort();
+        let (plain, off1, off2) = (ids[3], ids[1], ids[2]);
+        // off2 is off1 on another album; both are versions of plain.
+        let works = HashMap::from([(off1, plain), (off2, plain)]);
+        let keys = compose_songs([(plain, plain), (off1, off1), (off2, off1)].into_iter(), &works);
+        assert_eq!(keys.get(&plain), Some(&plain));
+        assert_eq!(keys.get(&off1), Some(&plain));
+        assert_eq!(keys.get(&off2), Some(&plain), "{keys:?}");
+        // The head plain2 is a copy of plain1 (the one with the file).
+        let (plain1, plain2, off) = (ids[5], ids[0], ids[4]);
+        let works = HashMap::from([(off, plain2)]);
+        let keys = compose_songs([(plain1, plain1), (plain2, plain1), (off, off)].into_iter(), &works);
+        assert!([plain1, plain2, off].iter().all(|t| keys.get(t) == Some(&plain1)), "{keys:?}");
+        // Nothing joined: each its own.
+        let alone = compose_songs([(ids[0], ids[0])].into_iter(), &HashMap::new());
+        assert_eq!(alone.get(&ids[0]), Some(&ids[0]));
+    }
+
     /// An artist no tag tells gets the family their songs' styles lead
-    /// with; a tagged one is left to the tags.
+    /// with, as the tagged artists' songs taught it; a tagged artist of no
+    /// family is left to the tags; nothing taught, nothing told.
     #[test]
     fn untagged_artists_take_the_family_of_their_styles() {
-        let (a, b) = (ArtistId::new(), ArtistId::new());
-        let tracks: Vec<TrackId> = (0..3).map(|_| TrackId::new()).collect();
+        let (a, b, c) = (ArtistId::new(), ArtistId::new(), ArtistId::new());
+        let tracks: Vec<TrackId> = (0..4).map(|_| TrackId::new()).collect();
         let catalog = Catalog::new([
             TrackInfo::new(tracks[0], vec![a], None),
             TrackInfo::new(tracks[1], vec![a], None),
             TrackInfo::new(tracks[2], vec![b], None),
+            TrackInfo::new(tracks[3], vec![c], None),
         ]);
         let ambient = nikgob_recs::styles::STYLES.iter().position(|l| *l == "Electronic---Ambient").unwrap() as u16;
-        let styles = nikgob_recs::Styles { top: [(ambient, 0.8), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], ..Default::default() };
+        let styles = nikgob_recs::Styles { top: [(ambient, 0.8), (u16::MAX, 0.0), (u16::MAX, 0.0), (u16::MAX, 0.0)], sure: 0.8 };
         let mut index = VectorIndex::new();
         for (k, t) in tracks.iter().enumerate() {
             index.insert(*t, [k as f32; nikgob_recs::DIM]);
             index.set_sketch(*t, nikgob_recs::SoundSketch::default().with_styles(Some(&styles)));
         }
-        let fams = style_families(&catalog, &index, &|x| x == b);
-        assert_eq!(fams.get(&a).copied(), nikgob_recs::mix_names::family_id("Эмбиент-микс"));
-        assert!(!fams.contains_key(&b));
+        // c's tags make it of family 7: its song teaches that the style is.
+        let families = HashMap::from([(c, 7u8)]);
+        let fams = style_families(&catalog, &index, &|x| x == b || x == c, &families);
+        assert_eq!(fams.get(&a).copied(), Some(7));
+        assert!(!fams.contains_key(&b) && !fams.contains_key(&c));
+        assert!(style_families(&catalog, &index, &|x| x == b, &HashMap::new()).is_empty());
     }
 
     /// «Твой микс» and the daylist kept for the day are picked again once

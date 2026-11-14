@@ -266,6 +266,21 @@ impl Catalog {
         self.position(id).map(|i| &self.tracks[i])
     }
 
+    /// The work the catalog track at `i` is of: the track standing for its
+    /// song ([`TrackInfo::song`]: its copy on another album, the plain song
+    /// of an off vocal or a TV size), else itself. Two tracks of one work
+    /// never both belong in one session or mix. O(1).
+    pub fn work_at(&self, i: usize) -> TrackId {
+        let t = &self.tracks[i];
+        t.song.unwrap_or(t.id)
+    }
+
+    /// [`Self::work_at`] by id (a copy's is its track's); a track the
+    /// catalog lacks is its own.
+    pub fn work_of(&self, id: TrackId) -> TrackId {
+        self.position(id).map_or(id, |i| self.work_at(i))
+    }
+
     /// Catalog positions of an artist's tracks (any credit, not only main).
     pub fn of_artist(&self, artist: ArtistId) -> &[u32] {
         self.by_artist.get(&artist).map_or(&[], Vec::as_slice)
@@ -1011,6 +1026,19 @@ mod tests {
 
     fn play(track: TrackId, ts: UnixMs, kind: EventType, pos: Option<u32>) -> Play {
         Play::new(track, ts, kind, pos)
+    }
+
+    /// A version's work is its song's track, a copy's its track's, the
+    /// rest their own.
+    #[test]
+    fn tracks_know_their_work() {
+        let cat = Catalog::new([info(0, &[1], None), info(1, &[1], None).with_song(tid(0)), info(2, &[1], None)]).with_aliases([(tid(9), tid(1))]);
+        assert_eq!(cat.work_of(tid(0)), tid(0));
+        assert_eq!(cat.work_of(tid(1)), tid(0));
+        assert_eq!(cat.work_at(1), tid(0));
+        assert_eq!(cat.work_of(tid(9)), tid(0), "a copy of the version");
+        assert_eq!(cat.work_of(tid(2)), tid(2));
+        assert_eq!(cat.work_of(tid(50)), tid(50));
     }
 
     /// A track played to the end five times in the last four days is worn

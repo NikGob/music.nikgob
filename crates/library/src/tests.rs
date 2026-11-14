@@ -1416,12 +1416,14 @@ fn sketches_queue_store_and_load() {
     assert!(lib.sketch_of(files[1].id).unwrap().is_none());
 }
 
-/// Migration 32 adds the sketches' table only: an older library keeps
+/// Migration 30 adds the sketches' table only: an older library keeps
 /// every analysis and vector, and its files wait for their sketch.
 #[test]
 fn migration_adds_the_sketch_table_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
+    // The file's number is the schema version it stamps.
+    assert_eq!(SCHEMA_VERSION, 30);
     let before = crate::migrations::MIGRATIONS.len() - 1;
     {
         let lib = Library::open(&path).unwrap();
