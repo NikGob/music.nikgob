@@ -79,7 +79,7 @@ use crate::taste::{
 
 /// Bumped when a feature changes meaning: cached weights of another
 /// version are learnt again from the history.
-pub const FEATURE_VERSION: u32 = 5;
+pub const FEATURE_VERSION: u32 = 6;
 
 pub const H_LONG_MS: i64 = 45 * DAY_MS;
 pub const H_HOT_MS: i64 = 2 * DAY_MS;
@@ -97,6 +97,36 @@ const LOVED_COMPLETES: u32 = 3;
 /// library songs»): long taste without decay.
 const R_SAVED: f32 = 1.0;
 const MANUAL_POSITIVE: f32 = 1.2;
+/// A like or a save is a state, not a moment: it counts whole while its
+/// song was heard within this of the user's latest listening (a play of
+/// any origin, a like set by hand)…
+pub const FRESH_GRACE_MS: i64 = 30 * DAY_MS;
+/// …then fades by half every this long…
+pub const FRESH_HALF_MS: i64 = 60 * DAY_MS;
+/// …down to this.
+pub const STALE_FLOOR: f32 = 0.35;
+/// What is loved by a state alone (a like, a save) and never heard counts
+/// this much, once anything was heard.
+pub const UNHEARD_LOVE: f32 = 0.5;
+/// A loved song not heard for this long is an old one.
+pub const STALE_MS: i64 = 90 * DAY_MS;
+/// This many likes within [`BULK_WINDOW_MS`] of one another came from a
+/// service's library at once: they say nothing of when the songs were
+/// loved.
+pub const BULK_LIKES: usize = 20;
+pub const BULK_WINDOW_MS: i64 = HOUR_MS;
+/// The last this many outcomes of a track are kept ([`TrackStats::burnt`])…
+const RECENT_LOOK: u8 = 6;
+/// …and from this many on, early skips in most of them say it is worn out
+/// now, whatever its love: its chance of an early skip is at least theirs,
+/// shrunk to the model's by this many outcomes' weight.
+const BURNT_FROM: u8 = 3;
+const BURNT_PRIOR: f32 = 2.0;
+/// A song the app chose, left within this of its start (the app closed on
+/// it, from [`ABANDON_FROM_MS`] on: what plays for a moment says nothing),
+/// was skipped early.
+pub const ABANDON_MS: u32 = 25_000;
+pub const ABANDON_FROM_MS: u32 = 3_000;
 const MANUAL_EARLY: f32 = 0.6;
 const AUTO_EARLY: f32 = 1.3;
 /// Track → track pairs kept per track.
@@ -238,6 +268,24 @@ pub struct TrackStats {
     liked: Option<UnixMs>,
     /// Saved in a service's library (see [`R_SAVED`]).
     saved: bool,
+    /// How much of a like's (or a save's) love no longer counts: `1 −` its
+    /// freshness ([`UserModel::freshness_at`], set once the history is
+    /// walked; 0 while it is).
+    love_stale: f32,
+    /// Its last [`RECENT_LOOK`] outcomes, the latest in the lowest bit (1:
+    /// an early skip), and how many there are.
+    recent: u8,
+    recent_n: u8,
+}
+
+/// How much of a love last heard `age` before the user's latest listening
+/// counts now ([`UserModel::freshness_at`]).
+pub fn freshness(age: i64) -> f32 {
+    if age <= FRESH_GRACE_MS {
+        return 1.0;
+    }
+    let halves = (age - FRESH_GRACE_MS) as f64 / FRESH_HALF_MS as f64;
+    STALE_FLOOR + (1.0 - STALE_FLOOR) * (-halves).exp2() as f32
 }
 
 fn halve(x: f32, from: UnixMs, to: UnixMs, half: i64) -> f32 {
@@ -269,6 +317,30 @@ impl TrackStats {
         self.t_ref = ts;
     }
 
+    /// An outcome: skipped early or not ([`Self::burnt`]).
+    fn note(&mut self, early: bool) {
+        self.recent = (self.recent << 1) | u8::from(early);
+        self.recent_n = (self.recent_n + 1).min(RECENT_LOOK);
+    }
+
+    /// Worn out now: skipped early in most of its last outcomes (at least
+    /// [`BURNT_FROM`] of them), whatever its love — their share of early
+    /// skips shrunk towards `p` (the model's chance) by [`BURNT_PRIOR`]
+    /// outcomes. `None` when it is not.
+    pub fn burnt(&self, p: f32) -> Option<f32> {
+        let n = self.recent_n.min(RECENT_LOOK);
+        if n < BURNT_FROM {
+            return None;
+        }
+        let early = (u32::from(self.recent) & ((1u32 << n) - 1)).count_ones() as f32;
+        (2.0 * early > f32::from(n)).then(|| (early + BURNT_PRIOR * p) / (f32::from(n) + BURNT_PRIOR))
+    }
+
+    /// How much of a like's love counts now (see [`Self::love_stale`]).
+    pub fn love_fresh(&self) -> f32 {
+        1.0 - self.love_stale
+    }
+
     /// Loved for long at `now`: liked, or [`LOVED_AFF`] of long affinity
     /// over [`LOVED_COMPLETES`] completes at least.
     pub fn loved(&self, now: UnixMs) -> bool {
@@ -280,16 +352,28 @@ impl TrackStats {
         !self.liked(now) && !self.saved && self.completes == 0 && self.starts <= 1
     }
 
-    /// The long affinity at `now`, `tanh(A / 3)`.
+    /// The long affinity at `now`, `tanh(A / 3)`: a like (or a save) as
+    /// much as it counts now ([`Self::love_fresh`]: an old love and a like
+    /// of a bulk never heard count less).
     pub fn aff_long(&self, now: UnixMs) -> f32 {
+        self.aff_long_by(now, self.love_fresh())
+    }
+
+    /// [`Self::aff_long`] with a like counting whole whenever it was (the
+    /// mixes weigh its freshness themselves, with the rest of a love).
+    pub fn aff_long_whole(&self, now: UnixMs) -> f32 {
+        self.aff_long_by(now, 1.0)
+    }
+
+    fn aff_long_by(&self, now: UnixMs, fresh: f32) -> f32 {
         let mut a = halve(self.a_long, self.t_ref, now, H_LONG_MS);
         if let Some((t, _)) = self.open {
             a += halve(R_OPEN, t, now, H_LONG_MS);
         }
         if self.liked.is_some_and(|t| t <= now) {
-            a += R_LIKE;
+            a += R_LIKE * fresh;
         } else if self.saved {
-            a += R_SAVED;
+            a += R_SAVED * fresh;
         }
         (a / 3.0).tanh()
     }
@@ -627,6 +711,11 @@ pub struct UserModel {
     norm: Normalizer,
     /// The regions of sound of the taste profiles.
     pub regions: Regions,
+    /// When each track was last heard (a play of any origin, a like set by
+    /// hand: not one of [`BULK_LIKES`] within an hour) and the latest of
+    /// them ([`Self::freshness_at`]).
+    last_heard: Vec<Option<UnixMs>>,
+    latest_heard: Option<UnixMs>,
 
     /// The embedded vectors of the disliked tracks (a new track near them
     /// stands lower).
@@ -915,6 +1004,7 @@ impl UserModel {
     fn settle(&mut self, catalog: &Catalog, input: &TasteInput, starts: &[Started], p_bg: &[f32]) {
         let now = self.now;
         let n = self.len();
+        self.settle_freshness();
         let set = &input.profiles;
         let w_bg = if set.background_less { W_BG } else { 1.0 };
         let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import).collect();
@@ -1041,6 +1131,69 @@ impl UserModel {
         }
     }
 
+    /// When each track was last heard and how much of its like counts now
+    /// (see [`Self::freshness_at`]): every surface weighs an old love and a
+    /// bulk of likes so.
+    fn settle_freshness(&mut self) {
+        let n = self.len();
+        let mut likes: Vec<UnixMs> = (0..n).filter_map(|i| self.taste.liked_time_at(i)).collect();
+        likes.sort_unstable();
+        let by_hand = |t: UnixMs| {
+            let from = likes.partition_point(|x| *x < t - BULK_WINDOW_MS);
+            let to = likes.partition_point(|x| *x <= t + BULK_WINDOW_MS);
+            to - from < BULK_LIKES
+        };
+        self.last_heard = (0..n)
+            .map(|i| {
+                let s = &self.tracks[i];
+                let liked = self.taste.liked_time_at(i).filter(|t| by_hand(*t));
+                [self.taste.last_played_at(i), s.last_start, s.last_complete, liked].into_iter().flatten().max()
+            })
+            .collect();
+        self.latest_heard = self.last_heard.iter().flatten().copied().max();
+        for i in 0..n {
+            let stale = 1.0 - self.freshness_at(i);
+            self.tracks[i].love_stale = stale;
+        }
+    }
+
+    /// When the track at `i` was last heard (see [`Self::last_heard`]).
+    pub fn last_heard_at(&self, i: usize) -> Option<UnixMs> {
+        self.last_heard.get(i).copied().flatten()
+    }
+
+    /// The user's latest listening (a play, a like set by hand).
+    pub fn latest_heard(&self) -> Option<UnixMs> {
+        self.latest_heard
+    }
+
+    /// How much of a love of the track at `i` counts now: whole while it
+    /// was heard within [`FRESH_GRACE_MS`] of the user's latest listening
+    /// (a user back after a year has last year's weeks, not none), then by
+    /// half every [`FRESH_HALF_MS`] down to [`STALE_FLOOR`]; never heard
+    /// once anything was, [`UNHEARD_LOVE`].
+    pub fn freshness_at(&self, i: usize) -> f32 {
+        match (self.latest_heard, self.last_heard_at(i)) {
+            (Some(l), Some(h)) => freshness(l - h),
+            (Some(_), None) => UNHEARD_LOVE,
+            _ => 1.0,
+        }
+    }
+
+    /// The chance of an early skip of the track at `i`, `p` by the model:
+    /// at least what its last outcomes say when it is worn out now
+    /// ([`TrackStats::burnt`]).
+    pub fn skip_risk(&self, i: usize, p: f32) -> f32 {
+        self.tracks.get(i).and_then(|t| t.burnt(p)).map_or(p, |b| b.max(p))
+    }
+
+    /// The graph's prior of the track at `i` (how central it is, how
+    /// popular) as a cold start: whole for a track never started, fading
+    /// with its own starts — what the user plays of it says more.
+    pub fn prior_at(&self, i: usize) -> f32 {
+        self.graph.prior(i) / (1.0 + self.tracks.get(i).map_or(0, |t| t.starts) as f32)
+    }
+
     /// A raw bliss vector in the model's space.
     pub fn embed(&self, v: &Vector) -> Vector {
         self.norm.embed(v)
@@ -1150,6 +1303,8 @@ impl UserModel {
             scale,
             norm,
             regions: Regions::default(),
+            last_heard: Vec::new(),
+            latest_heard: None,
             disliked: Vec::new(),
             walk: Session::default(),
             pending: HashMap::new(),
@@ -1354,7 +1509,7 @@ impl UserModel {
         let mut f = [0.0f32; F];
         f[0] = t.aff_long(m.now);
         f[1] = t.aff_hot(m.now);
-        f[2] = f32::from(u8::from(t.liked(m.now)));
+        f[2] = if t.liked(m.now) { t.love_fresh() } else { 0.0 };
         let e = self.emb[c].as_ref();
         f[F_SOUND] = match (e, &m.anchor) {
             (Some(e), Some(a)) => -euclid(e, a) / self.scale,
@@ -1396,7 +1551,7 @@ impl UserModel {
         let like_artist = self.artist[c].and_then(|a| m.graph_artists.get(&a)).copied().unwrap_or(0.0);
         f[F_GRAPH] = (m.graph_near.get(&c).copied().unwrap_or(0.0) + GRAPH_ARTIST * like_artist).tanh();
         f[F_PGRAPH] = m.pgraph_near.get(&c).copied().unwrap_or(0.0).tanh();
-        f[F_PRIOR] = self.graph.prior(c);
+        f[F_PRIOR] = self.prior_at(c);
         f[F_SESS_CO] = (m.bag_near.get(&c).copied().unwrap_or(0.0) / 2.0).tanh();
         f[F_IS_PREV] = f32::from(u8::from(m.prev == Some(c)));
         f[F_ALBUM_FIRST] = f32::from(u8::from(self.album_first[c] && m.prev.is_none_or(|p| self.release[p] != self.release[c])));
@@ -1452,7 +1607,7 @@ impl UserModel {
 
     /// The chance `c` started now from `ctx` is skipped in its first 30 s.
     pub fn p_skip(&self, m: &Moment, c: usize, ctx: EventContext) -> f32 {
-        self.weights.skip.p(&self.skip_features(m, c, ctx))
+        self.skip_risk(c, self.weights.skip.p(&self.skip_features(m, c, ctx)))
     }
 
     /// The features of starting a new track of a service now from `ctx`
@@ -1527,7 +1682,7 @@ impl UserModel {
         artists.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
         for (a, _) in artists.into_iter().take(GRAPH_ARTISTS) {
             let mut theirs: Vec<usize> = self.by_artist.get(&a).map_or(&[][..], Vec::as_slice).iter().map(|&i| i as usize).filter(|&i| ok(i)).collect();
-            let key = |i: usize| self.tracks[i].aff_long(m.now) + self.graph.prior(i);
+            let key = |i: usize| self.tracks[i].aff_long(m.now) + self.prior_at(i);
             theirs.sort_by(|x, y| key(*y).total_cmp(&key(*x)).then(x.cmp(y)));
             out.extend(theirs.into_iter().take(GRAPH_ARTIST_TRACKS));
         }
@@ -1629,6 +1784,7 @@ impl UserModel {
                 let r = R_COMPLETE * if manual { MANUAL_POSITIVE } else { 1.0 };
                 self.tracks[i].add_as(p.ts, r, W_COMPLETE, true);
                 let t = &mut self.tracks[i];
+                t.note(false);
                 t.completes += 1;
                 t.done[part] = t.done[part].saturating_add(1);
                 t.last_complete = Some(p.ts);
@@ -1639,11 +1795,14 @@ impl UserModel {
             }
             EventType::Skip => {
                 let opened = self.tracks[i].open.take();
-                if p.end_reason == Some(EndReason::AppClosed) {
+                let origin = opened.and_then(|(_, o)| o);
+                // The app closed on it: no outcome, unless the app chose it
+                // and it was left within its first seconds (abandoned).
+                let abandoned = p.position_ms.is_some_and(|x| (ABANDON_FROM_MS..ABANDON_MS).contains(&x)) && in_stream(p.context, origin);
+                if p.end_reason == Some(EndReason::AppClosed) && !abandoned {
                     self.pending.remove(&i);
                     return;
                 }
-                let origin = opened.and_then(|(_, o)| o);
                 match p.position_ms {
                     // A short track's outro is no early skip.
                     Some(pos) if skip_ended(pos, self.duration[i]) == Ended::Early => {
@@ -1659,6 +1818,7 @@ impl UserModel {
                         // «not now»: the session's mood, nothing against the
                         // track in the long run.
                         let not_now = pos < NOT_NOW_MS && in_stream(p.context, origin) && self.tracks[i].loved(p.ts);
+                        self.tracks[i].note(true);
                         if not_now {
                             self.tracks[i].add_hot(p.ts, R_EARLY * who * lean);
                         } else {
@@ -1681,6 +1841,7 @@ impl UserModel {
                         let manual = origin == Some(EventOrigin::Manual);
                         self.tracks[i].add_as(p.ts, R_LATE * heard * if manual { MANUAL_POSITIVE } else { 1.0 }, W_SKIP_LATE_HEARD * heard, true);
                         let t = &mut self.tracks[i];
+                        t.note(false);
                         t.late = t.late.saturating_add(1);
                         match pos {
                             Some(pos) => self.walk.end_at(p.track, Ended::Late, pos, self.duration[i], false),
@@ -2443,5 +2604,128 @@ pub(crate) mod tests {
         assert_eq!(warm.cold(), 0.0);
         assert_eq!(warm.prior_mass(0), 0.0);
         assert_eq!(built(0, false).prior_mass(0), 0.0);
+    }
+
+    fn build_of(cat: &Catalog, input: TasteInput) -> UserModel {
+        let idx = VectorIndex::new();
+        UserModel::build(cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0)
+    }
+
+    fn played(t: u128, ts: UnixMs, origin: EventOrigin, context: EventContext, end: Option<u32>, reason: Option<EndReason>) -> [Play; 2] {
+        let start = Play { context, origin: Some(origin), ..Play::new(tid(t), ts, EventType::Start, Some(0)) };
+        let end = match end {
+            None => Play { context, ..Play::new(tid(t), ts + 200_000, EventType::Complete, Some(200_000)) },
+            Some(at) => Play { context, end_reason: reason, ..Play::new(tid(t), ts + i64::from(at), EventType::Skip, Some(at)) },
+        };
+        [start, end]
+    }
+
+    /// A like is a state, not a moment: it counts whole while its song is
+    /// heard, less as it was last heard long before the latest listening,
+    /// and a bulk of likes never heard (a service's library brought at
+    /// once) counts half; the mixes still read the whole like.
+    #[test]
+    fn an_old_love_and_a_bulk_of_likes_count_less() {
+        let cat = Catalog::new((0..30u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        // Song 0 heard lately, song 1 last heard half a year ago.
+        events.extend(played(0, T0 - DAY_MS, EventOrigin::Manual, EventContext::Library, None, None));
+        events.extend(played(1, T0 - 180 * DAY_MS, EventOrigin::Manual, EventContext::Library, None, None));
+        // Liked by hand: 0 and 1; 2…26 in a bulk a year ago, never heard.
+        let mut like_times = vec![(tid(0), T0 - DAY_MS), (tid(1), T0 - 181 * DAY_MS)];
+        like_times.extend((2..27u128).map(|t| (tid(t), T0 - 365 * DAY_MS + t as i64 * 1_000)));
+        let likes = like_times.iter().map(|l| l.0).collect();
+        let m = build_of(&cat, TasteInput { events, likes, like_times, ..TasteInput::default() });
+        assert_eq!(m.freshness_at(0), 1.0);
+        let old = m.freshness_at(1);
+        assert!(old < 0.6 && old >= STALE_FLOOR, "{old}");
+        assert_eq!(m.freshness_at(5), UNHEARD_LOVE, "a bulk like says nothing of when");
+        let (t0, t1, t5) = (&m.tracks[0], &m.tracks[1], &m.tracks[5]);
+        assert!(t1.aff_long(T0) < t1.aff_long_whole(T0));
+        assert!(t5.aff_long(T0) < t5.aff_long_whole(T0));
+        assert!(t0.aff_long(T0) > t1.aff_long(T0));
+        assert_eq!(t5.aff_long_whole(T0), m.tracks[6].aff_long_whole(T0));
+        // The model's «liked» fades too.
+        let mo = m.moment(&Session::default(), T0);
+        assert_eq!(m.features(&mo, 0)[2], 1.0);
+        assert!(m.features(&mo, 5)[2] < 1.0 && m.features(&mo, 5)[2] > 0.0);
+    }
+
+    /// Skipped early in most of its last plays, a liked song is worn out
+    /// now: its chance of an early skip is at least theirs whatever the
+    /// model says; one skip in three is no wear.
+    #[test]
+    fn a_liked_song_skipped_lately_is_worn_out() {
+        let mut t = TrackStats::default();
+        for early in [false, false, false, false, true, true, true] {
+            t.note(early);
+        }
+        assert_eq!(t.burnt(0.1), None, "three of the last six is not most");
+        t.note(true);
+        let p = t.burnt(0.1).expect("four of the last six");
+        assert!((p - (4.0 + 0.2) / 8.0).abs() < 1e-6, "{p}");
+        let mut t = TrackStats::default();
+        for early in [false, true, false, false] {
+            t.note(early);
+        }
+        assert_eq!(t.burnt(0.1), None);
+        let mut t = TrackStats::default();
+        for early in [true, true] {
+            t.note(early);
+        }
+        assert_eq!(t.burnt(0.1), None, "too few outcomes");
+
+        let cat = Catalog::new((0..3u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        let mut ts = T0 - 20 * DAY_MS;
+        for _ in 0..6 {
+            events.extend(played(0, ts, EventOrigin::Manual, EventContext::Library, None, None));
+            events.extend(played(1, ts + HOUR_MS, EventOrigin::Manual, EventContext::Library, None, None));
+            ts += DAY_MS;
+        }
+        for _ in 0..4 {
+            events.extend(played(0, ts, EventOrigin::Radio, EventContext::Radio, Some(15_000), Some(EndReason::UserNext)));
+            ts += DAY_MS;
+        }
+        let likes = vec![tid(0), tid(1)];
+        let m = build_of(&cat, TasteInput { events, likes, ..TasteInput::default() });
+        assert!(m.tracks[0].liked(T0));
+        let mo = m.moment(&Session::default(), T0);
+        let (worn, kept) = (m.p_skip(&mo, 0, EventContext::Radio), m.p_skip(&mo, 1, EventContext::Radio));
+        assert!(worn >= 0.55 && worn > kept + 0.1, "{worn} {kept}");
+        assert_eq!(m.skip_risk(1, 0.2), 0.2);
+    }
+
+    /// A song the app chose and the app closed on in its first seconds was
+    /// skipped early; closed on at once, or the user's own pick, it says
+    /// nothing.
+    #[test]
+    fn a_stream_song_left_at_once_is_an_early_skip() {
+        let cat = Catalog::new((0..4u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        events.extend(played(0, T0 - 4 * HOUR_MS, EventOrigin::Radio, EventContext::Radio, Some(12_000), Some(EndReason::AppClosed)));
+        events.extend(played(1, T0 - 3 * HOUR_MS, EventOrigin::Radio, EventContext::Radio, Some(500), Some(EndReason::AppClosed)));
+        events.extend(played(2, T0 - 2 * HOUR_MS, EventOrigin::Manual, EventContext::Album, Some(12_000), Some(EndReason::AppClosed)));
+        events.extend(played(3, T0 - HOUR_MS, EventOrigin::Mix, EventContext::HomeSection, Some(60_000), Some(EndReason::AppClosed)));
+        let m = build_of(&cat, TasteInput { events, ..TasteInput::default() });
+        assert_eq!(m.tracks[0].early, 1, "left in its first seconds");
+        assert_eq!((m.tracks[1].early, m.tracks[2].early, m.tracks[3].early), (0, 0, 0));
+        assert_eq!((m.tracks[3].late, m.tracks[1].late), (0, 0), "the app closed: no outcome");
+    }
+
+    /// The graph's prior is a cold start: whole for a song never started,
+    /// fading with its own starts.
+    #[test]
+    fn the_graphs_prior_fades_with_a_songs_plays() {
+        let cat = Catalog::new((0..2u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
+        let mut events = Vec::new();
+        for k in 0..3 {
+            events.extend(played(1, T0 - (k + 1) * DAY_MS, EventOrigin::Manual, EventContext::Library, None, None));
+        }
+        let m = build_of(&cat, TasteInput { events, ..TasteInput::default() });
+        assert_eq!(m.tracks[1].starts, 3);
+        // No graph here: both priors are 0, and the fade keeps them so.
+        assert_eq!(m.prior_at(0), m.graph.prior(0));
+        assert_eq!(m.prior_at(1), m.graph.prior(1) / 4.0);
     }
 }

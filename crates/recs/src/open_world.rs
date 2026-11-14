@@ -610,7 +610,7 @@ fn next_ranked(
             (Some(e), Some(a)) => (-euclid(e, a) / scale).exp(),
             _ => 0.0,
         };
-        0.6 * aff + link + 0.5 * near + 0.2 * m.graph.prior(i)
+        0.6 * aff + link + 0.5 * near + 0.2 * m.prior_at(i)
     };
     let mut lib: Vec<(f32, usize)> = fitting.iter().copied().filter(|&i| free(i)).map(|i| (pull(i), i)).collect();
     lib.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -824,7 +824,7 @@ impl<'a> LibStepper<'a> {
 pub(crate) fn library_value(m: &UserModel, moment: &Moment, weights: &Weights, i: usize) -> f32 {
     use crate::radio::{COOL, RADIO_REST, REST_HALF_MS, SKIP_VALUE};
     let relevance = weights.next.score(&m.features(moment, i));
-    let p_skip = weights.skip.p(&m.skip_features(moment, i, EventContext::Radio)).min(0.99);
+    let p_skip = m.skip_risk(i, weights.skip.p(&m.skip_features(moment, i, EventContext::Radio))).min(0.99);
     let rested = m.tracks[i].last_start.map_or(1.0, |l| 1.0 - (-((moment.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
     relevance + SKIP_VALUE * (1.0 - p_skip).ln() + RADIO_REST * rested - m.taste.dislike_near_at(i) - COOL * m.taste.saturation_at(i)
 }

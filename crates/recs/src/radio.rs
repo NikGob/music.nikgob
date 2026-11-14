@@ -1474,7 +1474,7 @@ impl RadioState {
                     let relevance: f32 = parts.iter().sum();
                     let mut x = model.skip_features(&m, c, nikgob_core::model::EventContext::Radio);
                     x[0] = 1.0;
-                    let p_skip = weights.skip.p(&x).min(0.99);
+                    let p_skip = model.skip_risk(c, weights.skip.p(&x)).min(0.99);
                     let rested = model.tracks[c].last_start.map_or(1.0, |l| 1.0 - (-((m.now - l).max(0) as f64) / REST_HALF_MS as f64).exp2() as f32);
                     let joins = match (block, model.profile_at(c)) {
                         (Some(b), Some(p)) if b == p => match run {
@@ -1730,7 +1730,7 @@ impl RadioState {
             // graph), their best known first.
             if let Some(m) = recs.model {
                 for &(b, w) in m.graph.similar_artists(a).iter().take(CO_ARTISTS) {
-                    let key = |i: usize| recs.taste.affinity_at(i) + m.graph.prior(i);
+                    let key = |i: usize| recs.taste.affinity_at(i) + m.prior_at(i);
                     let mut theirs: Vec<usize> = recs.catalog.of_artist(b).iter().map(|&i| i as usize).filter(|&i| ok(i)).collect();
                     theirs.sort_by(|x, y| key(*y).total_cmp(&key(*x)).then(x.cmp(y)));
                     for i in theirs.into_iter().take(CO_TRACKS) {
@@ -2354,7 +2354,7 @@ impl Ranker<'_> {
         let relevance = self.weights.next.score(&self.model.features(&self.m, c));
         let mut x = self.model.skip_features(&self.m, c, nikgob_core::model::EventContext::Radio);
         x[0] = 1.0;
-        let p = self.weights.skip.p(&x).min(0.99);
+        let p = self.model.skip_risk(c, self.weights.skip.p(&x)).min(0.99);
         W_MODEL * ((relevance / 2.0).tanh() + 0.5 * SKIP_VALUE * (1.0 - p).ln())
     }
 }
