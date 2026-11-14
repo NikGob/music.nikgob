@@ -3,7 +3,8 @@
 //! a request; liked tracks are downloaded and analysed in the background one
 //! at a time, a gap apart and within the daily cap (kept over a restart);
 //! Spotify likes go through their YouTube Music songs and Spotify's sound is
-//! never opened; a rate limit only waits; the switch stops it at once; a
+//! never opened; a rate limit only waits; nothing is downloaded while
+//! YouTube Music plays; the switch stops it at once; a
 //! file that arrives later is analysed again from the file.
 
 use std::path::Path;
@@ -323,5 +324,32 @@ fn a_file_that_arrives_later_is_analysed_from_the_file() {
     wait_for(&rt, "the progress", |s| {
         (s.analysis.files_done, s.analysis.files_total, s.analysis.streams_total) == (1, 1, 2)
     });
+    drop(rt);
+}
+
+#[test]
+fn nothing_is_downloaded_or_previewed_in_the_background_while_youtube_music_plays() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(youtube());
+    let track = lib.upsert_stream_track(&find(&yt, "yt-gruppa-1")).unwrap();
+    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    rt.send(Command::PlayTracks {
+        tracks: vec![track],
+        start: 0,
+        context: "test".into(),
+    });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let id = asked.lock().unwrap()[0].id;
+    rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    wait_for(&rt, "the likes", |s| s.analysis.streams_total >= 3);
+    // The player's requests are the listener's: none in the background.
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(yt.opened().is_empty(), "{:?}", yt.opened());
+    assert_eq!(rt.state().analysis.streams_done, 0);
+
+    // Paused by the user: the background goes on.
+    rt.send(Command::Pause);
+    wait_for(&rt, "the analysis", |s| s.analysis.streams_done >= 1);
+    assert!(!yt.opened().is_empty());
     drop(rt);
 }

@@ -17,8 +17,15 @@
 //!   Tracks are [`StreamSchedule::analysis_gap`] apart, at most
 //!   [`StreamSchedule::analysis_daily`] downloads a day (the count is kept in
 //!   the library's cache, so a restart does not start over), only while
-//!   YouTube Music is not paused, the periodic network work is not idle and
-//!   nothing waits for its sound (Buffering). A rate limit is not a failure:
+//!   YouTube Music is not paused, the periodic network work is not idle,
+//!   nothing waits for its sound (Buffering) and YouTube Music neither plays
+//!   nor comes next. The last is the listener's budget: YouTube's bot check
+//!   («Sign in to confirm you’re not a bot») answers its player, which
+//!   playback and these downloads both ask, and it is the service's, not a
+//!   client's (every client of the player is refused alike, see
+//!   `nikgob_youtube::player`), so a pause of its own for the background
+//!   would not keep playback safe. The songs that play are analysed from
+//!   the cache when they end anyway. A rate limit is not a failure:
 //!   the job waits for the pause to end. A real failure
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
@@ -539,6 +546,12 @@ impl Worker {
             self.analysis_wait(left + super::schedule::wake_jitter());
             return;
         }
+        // The listener's YouTube Music goes first: no request of its player
+        // in the background while it plays or comes next.
+        if self.youtube_listened() {
+            self.analysis_held("YouTube Music plays");
+            return;
+        }
         // Playback and its lookups go first.
         if self.streams_idle() {
             self.analysis_held("the app is idle");
@@ -628,6 +641,30 @@ impl Worker {
         // may answer again.
         a.skip.clear();
         a.idle_until = Some(now + idle);
+    }
+
+    /// YouTube Music plays, or comes next: the playing source is a YouTube
+    /// video, or the next entry has nothing that plays without YouTube
+    /// Music (a file, another service with sound) while the player runs.
+    fn youtube_listened(&mut self) -> bool {
+        if !matches!(self.status, v::Status::Playing | v::Status::Buffering) {
+            return false;
+        }
+        if self.playing_source.is_some_and(|(_, kind)| kind == SourceKind::Youtube) {
+            return true;
+        }
+        let Some(next) = self.queue.peek_auto_next() else { return false };
+        let sources = self.lib.sources_of_track(next.track).unwrap_or_default();
+        let live: Vec<_> = sources.iter().filter(|s| s.trashed_at.is_none()).collect();
+        let elsewhere = live.iter().any(|s| {
+            s.available
+                && match s.kind.service() {
+                    None => true,
+                    Some(Service::Youtube) => false,
+                    Some(k) => self.has_audio(k),
+                }
+        });
+        !elsewhere && live.iter().any(|s| s.kind.service().is_some())
     }
 
     /// The background queue waits for `why`; logged when the reason changes.

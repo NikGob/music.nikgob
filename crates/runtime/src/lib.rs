@@ -1848,11 +1848,14 @@ impl Worker {
         let refused = self.refused_videos();
         // A stream needs its service on and able to play sound for this
         // account (Spotify not connected, or before its playback login:
-        // the library's Spotify tracks play from YouTube Music).
+        // the library's Spotify tracks play from YouTube Music), and not
+        // paused by a rate limit unless its audio is on disk.
         let usable = |w: &mut Self, s: &nikgob_core::model::Source| match s.kind.service() {
             None => s.available,
             Some(service) => {
-                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator))) && w.has_audio(service)
+                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator)))
+                    && w.has_audio(service)
+                    && !w.waits_for_pause(service, &s.locator)
             }
         };
         let Some(src) = sources.iter().find(|s| usable(self, s)).cloned() else {
@@ -1862,6 +1865,8 @@ impl Worker {
                 format!("all its {all} sources were tried or trashed")
             } else if sources.iter().all(|s| !s.available && s.kind.service().is_none()) {
                 "its files are missing".to_owned()
+            } else if let Some(s) = sources.iter().find(|s| s.kind.service().is_some_and(|k| self.pause_left(k).is_some())) {
+                format!("{} asks to wait", s.kind.as_str())
             } else {
                 let services: Vec<&str> = sources.iter().filter_map(|s| s.kind.service()).map(|s| s.as_str()).collect();
                 let off = if self.service(StreamKind::Youtube).is_none() { ", YouTube Music switched off" } else { "" };
@@ -2178,6 +2183,11 @@ impl Worker {
             }
             if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
                 self.start_with(e, req, source, kind);
+                return;
+            }
+            // Its service asks to wait: what plays now goes first, or the
+            // player waits on it (never a run down the queue).
+            if self.hold_for_pause(e) {
                 return;
             }
             // Nothing plays now, but YouTube Music may have it: wait for it.
@@ -2724,6 +2734,26 @@ impl Worker {
                         self.seek_to_failover(e);
                         return;
                     }
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
+                    && kind.service().is_some()
+                    && message.contains("rate limited")
+                {
+                    // The service paused (as the stream opened, or as it
+                    // asked for its URL again): not this track's failure,
+                    // and no lesson (see `streams::held`). It goes on from
+                    // where it stopped.
+                    if !self.position.is_zero() {
+                        self.failover = Some((e.id, self.position));
+                    }
+                    let ended = std::mem::replace(&mut self.ended, true);
+                    self.playing_source = None;
+                    if self.hold_for_pause(e) {
+                        return;
+                    }
+                    self.ended = ended;
+                    self.playing_source = Some((source, kind));
                 }
                 if let Some(e) = playing
                     && let Some((source, kind)) = self.playing_source

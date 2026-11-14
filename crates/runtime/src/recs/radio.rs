@@ -239,6 +239,11 @@ pub(crate) struct RadioState {
     pub(crate) scenes: Option<(std::sync::Weak<super::Snapshot>, Vec<v::WaveSceneCard>)>,
     /// The wave's open pool, of a snapshot.
     pub(crate) wave_pool: Option<super::wave::WavePool>,
+    /// The run whose extension on its way keeps to what plays while
+    /// YouTube Music asks to wait.
+    paused_pick: Option<u64>,
+    /// Such an extension found nothing: no top-up before this.
+    paused_dry_until: Option<std::time::Instant>,
 }
 
 impl RadioState {
@@ -692,6 +697,9 @@ impl Worker {
         if run.extending || (run.queue_gen.is_some() && left > EXTEND_AT) {
             return;
         }
+        if self.recs.radio.paused_dry_until.is_some_and(|t| std::time::Instant::now() < t) {
+            return;
+        }
         if let (Some(dry), Some(snap)) = (&run.wave_dry, &snap)
             && std::sync::Weak::ptr_eq(dry, &Arc::downgrade(snap))
         {
@@ -876,7 +884,13 @@ impl Worker {
         let prefs = self.state.read().prefs.clone();
         let Some(kind) = self.recs.radio.run.as_ref().map(RadioRun::kind) else { return };
         let new_share = super::new_share(&prefs, kind);
-        let local_only = prefs.mixes_downloaded_only;
+        // While YouTube Music asks to wait, a top-up of a playing radio
+        // queues what plays now (its files); after the pause it picks as
+        // before. (A radio just started picks as ever: its first entry
+        // waits for the pause or gives way to one that plays.)
+        let queued = self.recs.radio.run.as_ref().is_some_and(|r| r.queue_gen.is_some());
+        let paused = queued && !prefs.mixes_downloaded_only && self.pause_left(Service::Youtube).is_some();
+        let local_only = prefs.mixes_downloaded_only || paused;
         let snap = self.snapshot();
         // What is known of a seed the catalog lacks, once there is a
         // snapshot to tell it by (autoplay may start before the first one).
@@ -904,6 +918,7 @@ impl Worker {
         run.want = false;
         run.extending = true;
         let (id, mut state) = (run.id, run.state.clone());
+        self.recs.radio.paused_pick = paused.then_some(id);
         state.attune(self.recs.session.clone(), self.recs.weights);
         state.set_no_repeat_ms(i64::from(prefs.radio_no_repeat_hours) * 3_600_000);
         state.set_explore(Some(prefs.radio_explore.fraction()));
@@ -1107,6 +1122,7 @@ impl Worker {
 
     fn radio_extended(&mut self, id: u64, mut state: Engine, picks: Vec<Pick>, refill: Option<String>) {
         let alive = self.radio_alive();
+        let paused_pick = self.recs.radio.paused_pick.take_if(|r| *r == id).is_some();
         let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) else { return };
         run.extending = false;
         for (item, outcome) in run.pending.drain(..) {
@@ -1186,6 +1202,15 @@ impl Worker {
                     }
                 }
             }
+        }
+        if paused_pick && ids.is_empty() {
+            // Nothing that plays now: the queue waits for the pause (see
+            // `streams::held`), and the radio picks again after it.
+            let left = self.pause_left(Service::Youtube).unwrap_or(Duration::from_secs(30));
+            log::info!("radio: nothing that plays while YouTube Music asks to wait; picks again in {} s", left.as_secs());
+            self.recs.radio.paused_dry_until = Some(std::time::Instant::now() + left);
+            self.publish_player();
+            return;
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let mut went_dry = false;
@@ -1304,6 +1329,11 @@ impl Worker {
         let Some(snap) = self.snapshot() else { return };
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         let share = super::new_share(&prefs, run.kind());
+        // New music waits for YouTube Music's pause too.
+        if self.pause_left(Service::Youtube).is_some() {
+            return;
+        }
+        let Some(run) = self.recs.radio.run.as_mut() else { return };
         if is_wave(&run.state.seed) || run.extending || run.queue_gen.is_none() || !streams_allowed(new_seed(&run.state.seed), &prefs, run.kind()) || share <= 0.0 {
             return;
         }
