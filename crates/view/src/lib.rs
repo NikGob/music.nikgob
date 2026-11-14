@@ -1631,8 +1631,6 @@ pub struct Prefs {
     pub upload_limit_kbps: u32,
     /// Content beside the cover in Now Playing.
     pub np_slot: NpSlot,
-    /// The dotted ring around the Now Playing cover turns while playing.
-    pub spin_ring: bool,
     /// How synced lyrics animate: 0 karaoke, 1 focus, 2 wave. Prefs saved
     /// with 3 (the old «По словам» animation) move to the wave by words
     /// ([`Prefs::upgrade_lyrics`]).
@@ -1757,13 +1755,12 @@ pub struct Prefs {
     pub cover_spin: bool,
     /// The cover swells a little on each beat.
     pub cover_pulse: bool,
-    /// The dotted ring around the cover is shown.
+    /// «Кольцо»: the dotted ring around a shaped cover while it plays
+    /// (never around the square cover, never on a pause). It turns against
+    /// the cover in [`RING_SPIN_S`] and jumps with the music, unless motion
+    /// is reduced. Prefs saved with its old rows (on a pause, the turn, its
+    /// way and speed, in time) still read: those keys are let go.
     pub ring: bool,
-    /// The ring's dots jump with the music.
-    pub ring_beat: bool,
-    /// «Кольцо на паузе»: a pause dims the ring (off: the ring fades out
-    /// on a pause and comes back with the music).
-    pub ring_on_pause: bool,
     /// What the ring is made of and where it sits.
     pub ring_style: RingStyle,
     /// The visualizer's picture (chosen in the visualizer itself).
@@ -1771,8 +1768,6 @@ pub struct Prefs {
     /// The visualizer takes the whole screen (F11 or its button inside it
     /// switch it); off, it fills the window.
     pub viz_fullscreen: bool,
-    /// The ring turns counter-clockwise.
-    pub ring_ccw: bool,
     /// The cover's outline turns counter-clockwise.
     pub cover_ccw: bool,
     /// Now Playing shows a volume slider (otherwise just the mute button;
@@ -1884,15 +1879,15 @@ pub struct Prefs {
     /// «Любимые альбомы».
     pub liked_albums_with_playlists: bool,
     /// A like of a single's song saves the single as an album too.
-    /// Which default of [`Self::album_mode`] the prefs were written with
-    /// ([`ALBUM_REV`]): before 1 it was «Автоматически», and that turns
-    /// into «Всегда весь альбом» once.
-    pub album_rev: u8,
     pub single_like_saves: bool,
     /// «Песни из альбомов → Альбом показывает»: every album whole (the
     /// default); an album added to the library whole, one not added the
     /// user's songs («Автоматически»); every album the user's songs only.
     pub album_mode: AlbumMode,
+    /// Which default of [`Self::album_mode`] the prefs were written with
+    /// ([`ALBUM_REV`]): before 1 it was «Автоматически», and that turns
+    /// into «Всегда весь альбом» once.
+    pub album_rev: u8,
     /// «Другие версии (инструментал, ремиксы)»: the other versions of an
     /// album's songs the user did not choose play with it (karaoke only
     /// when the album's own switch says so). Off by default.
@@ -2089,9 +2084,6 @@ pub struct Prefs {
     /// «Обложка → Скорость»: seconds a turn of the cover's outline takes
     /// ([`COVER_SPIN_S`]).
     pub cover_spin_s: f32,
-    /// «Кольцо → Скорость»: seconds a turn of the ring takes
-    /// ([`RING_SPIN_S`]).
-    pub ring_spin_s: f32,
     /// «Пульсация → Сила»: how much the cover swells on a beat, a share of
     /// its size ([`COVER_PULSE`]).
     pub cover_pulse_strength: f32,
@@ -2108,9 +2100,8 @@ pub struct Prefs {
 /// The default of [`Prefs::cover_spin_s`] and its range in the settings.
 pub const COVER_SPIN_S: f32 = 48.0;
 pub const COVER_SPIN_RANGE: std::ops::RangeInclusive<f32> = 12.0..=90.0;
-/// The default of [`Prefs::ring_spin_s`] and its range.
+/// Seconds a turn of the ring around the cover takes ([`Prefs::ring`]).
 pub const RING_SPIN_S: f32 = 36.0;
-pub const RING_SPIN_RANGE: std::ops::RangeInclusive<f32> = 10.0..=90.0;
 /// The default of [`Prefs::cover_pulse_strength`] and its range.
 pub const COVER_PULSE: f32 = 0.08;
 pub const COVER_PULSE_RANGE: std::ops::RangeInclusive<f32> = 0.02..=0.15;
@@ -2928,7 +2919,7 @@ pub enum SearchPlay {
 /// The ring around the Now Playing cover.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RingStyle {
-    /// Dots on a soft circle.
+    /// Dots on a circle.
     Circle,
     /// Dots following the cover's outline at a fixed gap.
     #[default]
@@ -3854,7 +3845,6 @@ impl Default for Prefs {
             download_limit_kbps: 0,
             upload_limit_kbps: 0,
             np_slot: NpSlot::None,
-            spin_ring: true,
             lyrics_style: 0,
             wave_syllables_only: true,
             lyrics_wave_jump: 1.0,
@@ -3901,13 +3891,9 @@ impl Default for Prefs {
             cover_spin: true,
             cover_pulse: true,
             ring: true,
-            ring_beat: true,
-            // Prefs written before the switch keep the dimmed ring.
-            ring_on_pause: true,
             ring_style: RingStyle::default(),
             viz_concept: VizConcept::default(),
             viz_fullscreen: true,
-            ring_ccw: false,
             cover_ccw: true,
             np_volume: false,
             np_volume_pop: false,
@@ -4013,7 +3999,6 @@ impl Default for Prefs {
             custom_presets: std::collections::BTreeMap::new(),
             settings_rev: presets::SETTINGS_REV,
             cover_spin_s: COVER_SPIN_S,
-            ring_spin_s: RING_SPIN_S,
             cover_pulse_strength: COVER_PULSE,
             home_sections: Vec::new(),
             track_menu: Vec::new(),
@@ -4054,7 +4039,6 @@ impl Prefs {
             lyrics_deep: false,
             cover_shape: CoverShape::Random,
             ring_style: RingStyle::Circle,
-            ring_on_pause: false,
             np_volume_pop: true,
             np_volume_pop_hold: 0.5,
             random_shapes: vec![
@@ -4275,9 +4259,9 @@ mod settings_v2_tests {
     #[test]
     fn the_new_knobs_default_to_what_the_code_drew() {
         for p in [Prefs::default(), Prefs::first_start()] {
-            assert_eq!((p.cover_spin_s, p.ring_spin_s, p.cover_pulse_strength), (48.0, 36.0, 0.08));
+            assert_eq!((p.cover_spin_s, p.cover_pulse_strength), (48.0, 0.08));
             assert!(!p.settings_deep && p.custom_presets.is_empty() && p.home_sections.is_empty());
-            assert!(COVER_SPIN_RANGE.contains(&p.cover_spin_s) && RING_SPIN_RANGE.contains(&p.ring_spin_s));
+            assert!(COVER_SPIN_RANGE.contains(&p.cover_spin_s));
             assert!(COVER_PULSE_RANGE.contains(&p.cover_pulse_strength));
         }
     }

@@ -359,17 +359,23 @@ struct RingInput<'a> {
     room: f32,
     kick: f32,
     alpha: f32,
-    /// Gaps, wobble and dot spacing relative to the player's (1); a small
-    /// sample shrinks them so each style still reads as itself.
+    /// How far the ring has come in (1) or gone (0): it settles a few
+    /// points inward as it fades on a pause.
+    shown: f32,
+    /// The cover's side at rest (no beat's swell): the «Контур» ring's
+    /// dot count follows it, never the outline's live length.
+    base: f32,
+    /// Gaps and dot spacing relative to the player's (1); a small sample
+    /// shrinks them so each style still reads as itself.
     scale: f32,
     /// Where the «Круг» ring keeps its dots' place ([`dot_phase`]).
     key: egui::Id,
 }
 
-/// The ring around the cover: dots on a soft 12-lobed circle (around the
-/// square, its rounded offset), dots riding
-/// the outline at a fixed gap, or rounded bars growing out of it. Dots and
-/// bars jump out on each beat (`kick`) and where the spectrum spikes.
+/// The ring around the cover: dots on a circle (around the square, its
+/// rounded offset), as many dots riding the outline at a fixed gap, or
+/// rounded bars growing out of it. Dots and bars jump out on each beat
+/// (`kick`) and where the spectrum spikes.
 fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
     if input.alpha <= 0.01 {
         return;
@@ -388,7 +394,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             // on the way between them) the outline's own offset, so no
             // corner covers a dot and the path morphs with the cover. The
             // dots sit evenly along it and keep the circle's speed.
-            let gap = 14.0 * sc;
+            let gap = (10.0 + 4.0 * input.shown) * sc;
             let circle = outline.rect.width() * 0.5 + gap;
             let path = circle_path(&outline.radii(), circle, gap);
             let pts: Vec<Pos2> = (0..BINS).map(|i| center + dir(i as f32 * TAU / BINS as f32) * path[i]).collect();
@@ -417,9 +423,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
                 let (a, b) = (pts[bin], pts[(bin + 1) % BINS]);
                 let theta = (bin as f32 + f) * TAU / BINS as f32;
                 let level = band_at(input.transients, theta);
-                // The soft 12 lobes ride with the dots.
-                let wobble = 3.0 * sc * (12.0 * TAU * along / n as f32).cos();
-                let out = dir(theta) * (wobble + (level * 16.0 + kick * 8.0) * sc);
+                let out = dir(theta) * (level * 16.0 + kick * 8.0) * sc;
                 let dot = (2.0 + level * 2.0 + kick * 0.8) * kd;
                 let alpha = input.alpha * (0.45 + 0.55 * level.max(kick * 0.6));
                 painter.circle_filled(a + (b - a) * f + out, dot, s.primary.gamma_multiply(alpha));
@@ -430,7 +434,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             // its length (not by angle: a square's corners would thin out),
             // sliding along it as the ring turns.
             let radii = outline.radii();
-            let gap = 14.0 * sc;
+            let gap = (10.0 + 4.0 * input.shown) * sc;
             let pts: Vec<Pos2> = (0..BINS)
                 .map(|i| center + dir(i as f32 * TAU / BINS as f32) * (radii[i] + gap))
                 .collect();
@@ -441,8 +445,11 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
                 total += pts[i].distance(pts[(i + 1) % BINS]);
                 acc.push(total);
             }
+            // As many dots as the cover's circle holds at rest: a count that
+            // followed the outline's length (a beat's swell, the morph)
+            // popped dots in and out.
             let spacing = 11.0 * kd;
-            let n = ((total / spacing).round() as usize).max(12);
+            let n = ((TAU * (input.base * 0.5 + 14.0 * sc) / spacing).round() as usize).max(12);
             let phase = (input.angle / TAU).rem_euclid(1.0) * total;
             let mut bin = 0;
             for k in 0..n {
@@ -473,7 +480,7 @@ fn ring(ui: &Ui, outline: &Outline, input: &RingInput<'_>) {
             // the cover.
             let radii = outline.radii();
             let n = BAR_COUNT;
-            let gap = 8.0 * sc;
+            let gap = (6.0 + 2.0 * input.shown) * sc;
             let r_mid = outline.rect.width() * 0.5 + gap;
             let width = (TAU * r_mid / n as f32 - 3.0).clamp(2.5, 7.0);
             let room = (input.room - gap - width).max(4.0);
@@ -667,8 +674,9 @@ struct Pulse {
 }
 
 /// One step of the [`Pulse`]: the kick (0..1, sharp attack, ~0.15 s decay)
-/// and per-band transients (0..1).
-fn pulse(ui: &Ui, id: egui::Id, bass: f32, bands: &[f32]) -> (f32, Vec<f32>) {
+/// and per-band transients (0..1). Not `live` (a pause), nothing new
+/// comes: what jumped falls back at its own pace.
+fn pulse(ui: &Ui, id: egui::Id, bass: f32, bands: &[f32], live: bool) -> (f32, Vec<f32>) {
     let ctx = ui.ctx();
     let now = anim::now(ctx);
     let mut p: Pulse = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
@@ -676,15 +684,17 @@ fn pulse(ui: &Ui, id: egui::Id, bass: f32, bands: &[f32]) -> (f32, Vec<f32>) {
     p.last = now;
     let ease = |tau: f32| 1.0 - (-dt / tau).exp();
 
+    let bass = if live { bass } else { 0.0 };
     p.bass_avg += (bass - p.bass_avg) * ease(0.6);
     let hit = ((bass - p.bass_avg - 0.03) * 5.0).clamp(0.0, 1.0);
     p.kick = hit.max(p.kick * (-dt / 0.15).exp());
 
-    if p.band_avg.len() != bands.len() {
+    if live && p.band_avg.len() != bands.len() {
         p.band_avg = bands.to_vec();
         p.bands = vec![0.0; bands.len()];
     }
-    for ((avg, out), &b) in p.band_avg.iter_mut().zip(&mut p.bands).zip(bands) {
+    for (i, (avg, out)) in p.band_avg.iter_mut().zip(&mut p.bands).enumerate() {
+        let b = if live { bands.get(i).copied().unwrap_or(0.0) } else { 0.0 };
         *avg += (b - *avg) * ease(0.45);
         let target = ((b - *avg) * 4.0 + b * 0.2).clamp(0.0, 1.0);
         *out = target.max(*out * (-dt / 0.12).exp());
@@ -697,8 +707,9 @@ fn pulse(ui: &Ui, id: egui::Id, bass: f32, bands: &[f32]) -> (f32, Vec<f32>) {
 /// Bars around the cover in [`RingStyle::Bars`].
 const BAR_COUNT: usize = 48;
 
-/// cava-style processing of the analyzer's bands for the bars: one pass
-/// around the circle (no mirror), automatic sensitivity (normalised between
+/// cava-style processing of the analyzer's bands for the bars: mirrored
+/// left and right (the lows at the top, the highs at the bottom, so no
+/// seam where the circle closes), automatic sensitivity (normalised between
 /// a slow floor and a peak that falls back slowly), neighbour smoothing
 /// ("monstercat") and gravity on the way down.
 #[derive(Clone, Default)]
@@ -743,19 +754,23 @@ fn cava(ui: &Ui, stage: &Stage, bands: &[f32], active: bool) -> Vec<f32> {
     out
 }
 
-/// The bars' targets this frame: `bands` resampled to [`BAR_COUNT`] in one
-/// pass, auto-scaled and smoothed. `peak_k` / `floor_k` are this frame's
-/// easing fractions for the sensitivity envelopes.
+/// The bars' targets this frame: `bands` resampled to [`BAR_COUNT`],
+/// mirrored (bar `i` and bar `BAR_COUNT - i` are one), each bar the
+/// loudest band of its span, auto-scaled and smoothed. `peak_k` /
+/// `floor_k` are this frame's easing fractions for the sensitivity
+/// envelopes.
 fn cava_targets(c: &mut Cava, bands: &[f32], active: bool, peak_k: f32, floor_k: f32) -> Vec<f32> {
+    const HALF: usize = BAR_COUNT / 2;
     let raw: Vec<f32> = (0..BAR_COUNT)
         .map(|i| {
             if !active || bands.is_empty() {
                 return 0.0;
             }
-            let x = i as f32 / (BAR_COUNT - 1) as f32 * (bands.len() - 1) as f32;
-            let (i0, f) = (x.floor() as usize, x.fract());
-            let i1 = (i0 + 1).min(bands.len() - 1);
-            bands[i0] * (1.0 - f) + bands[i1] * f
+            let k = if i <= HALF { i } else { BAR_COUNT - i } as f32;
+            let last = (bands.len() - 1) as f32;
+            let from = ((k - 0.5).max(0.0) / HALF as f32 * last).round() as usize;
+            let to = ((k + 0.5).min(HALF as f32) / HALF as f32 * last).round() as usize;
+            bands[from..=to.max(from)].iter().copied().fold(0.0, f32::max)
         })
         .collect();
     let max = raw.iter().copied().fold(0.0, f32::max);
@@ -846,11 +861,16 @@ enum Tap {
     Pause,
 }
 
-/// How visible the ring is `played` of the way from paused (0) to playing
-/// (1): dimmed on a pause, or with «Кольцо на паузе» off faded out.
-pub(crate) fn ring_alpha(on_pause: bool, played: f32) -> f32 {
-    let paused = if on_pause { 0.35 } else { 0.0 };
-    paused + (1.0 - paused) * played.clamp(0.0, 1.0)
+/// The ring is there (`ring`, «Кольцо») only around a shaped cover: the
+/// square one keeps its own frame.
+pub(crate) fn ring_on(ring: bool, shape: CoverShape) -> bool {
+    ring && shape != CoverShape::Original
+}
+
+/// The ring shows only while the music plays and only around a shaped
+/// cover ([`ring_on`]): on a pause it fades out, and nothing of it stays.
+pub(crate) fn ring_shown(ring: bool, shape: CoverShape, playing: bool) -> bool {
+    playing && ring_on(ring, shape)
 }
 
 /// The container under Now Playing: the floating pill's colour and radius
@@ -933,14 +953,22 @@ pub fn show_on(
     }
     let motion = !theme.reduced_motion;
     let bass = if playing { levels_bass } else { 0.0 };
-    let (kick, transients) = if playing && motion {
-        pulse(ui, stage.id("np-pulse"), bass, &bands)
+    // The ring comes in a little slower than it goes, both on the
+    // critically damped effects springs (no overshoot), and its size never
+    // changes the cover's.
+    let ring_shown = ring_shown(state.prefs.ring, state.prefs.cover_shape, playing);
+    let ring_spring = if ring_shown { theme.motion.slow_effects } else { theme.motion.default_effects };
+    let ring_k = anim::fraction(&ctx, stage.id("np-ring-shown"), if ring_shown { 1.0 } else { 0.0 }, ring_spring).clamp(0.0, 1.0);
+    // While the ring fades on a pause its dots fall back at their own pace.
+    let (kick, transients) = if motion && (playing || ring_k > 0.01) {
+        pulse(ui, stage.id("np-pulse"), bass, &bands, playing)
     } else {
         (0.0, Vec::new())
     };
+    let (live_kick, live_transients): (f32, &[f32]) = if playing { (kick, &transients) } else { (0.0, &[]) };
     {
         let _p = crate::prof::scope("np.bg_shapes");
-        super::bg_shapes::paint(ui, stage.id("np-bg-shapes"), rect, &state.prefs, playing && stage.moving, kick, &transients, bass);
+        super::bg_shapes::paint(ui, stage.id("np-bg-shapes"), rect, &state.prefs, playing && stage.moving, live_kick, live_transients, bass);
     }
     stage.part(&ctx, Part::Background, rect);
 
@@ -1077,16 +1105,9 @@ pub fn show_on(
         if playing || !prefs.cover_pause_morph { 1.0 } else { 0.0 },
         theme.motion.default_spatial,
     );
-    // Playing or paused, apart from the shape (the rings dim on a pause).
-    let played = anim::fraction(
-        &ctx,
-        stage.id("np-cover-play"),
-        if playing { 1.0 } else { 0.0 },
-        theme.motion.default_spatial,
-    )
-    .clamp(0.0, 1.0);
     let mega = mega_layout(body);
-    let bars = prefs.ring && prefs.ring_style == RingStyle::Bars;
+    // Whether it plays or not: a pause never resizes the cover.
+    let bars = ring_on(prefs.ring, prefs.cover_shape) && prefs.ring_style == RingStyle::Bars;
     let current = p.current.as_ref();
     let shape = cover_shape_in(&ctx, stage.id("np-random-shape"), prefs.cover_shape, &prefs.random_shapes, current);
     // The bars want room to grow: the cover gives way to them.
@@ -1098,7 +1119,7 @@ pub fn show_on(
     // «Обложка → Скорость» and «Пульсация → Сила».
     let period = if prefs.cover_spin && motion { prefs.cover_spin_s.max(1.0) } else { 0.0 };
     let spin = turn(ui, stage.id("np-cover-angle"), playing, bass, period, prefs.cover_ccw);
-    let swell = if prefs.cover_pulse { 1.0 + prefs.cover_pulse_strength * kick } else { 1.0 };
+    let swell = if prefs.cover_pulse { 1.0 + prefs.cover_pulse_strength * live_kick } else { 1.0 };
     // Instant feedback: the cover sinks a little while pressed, so a tap
     // feels taken even while it waits to see whether a second one comes.
     // (The stage's copy is pressed by its scene, not the pointer.)
@@ -1125,21 +1146,23 @@ pub fn show_on(
     };
     let mega_outline = Outline::new(shape, morph, mega.cover, 0.0);
     let ring_scope = crate::prof::scope("np.ring");
-    if prefs.ring {
-        let period = if prefs.spin_ring && motion { prefs.ring_spin_s.max(1.0) } else { 0.0 };
-        let angle = turn(ui, stage.id("np-ring-angle"), playing, bass, period, prefs.ring_ccw);
-        let beat = prefs.ring_beat && playing;
-        let heights = if bars { cava(ui, stage, &bands, beat && motion) } else { Vec::new() };
+    // Gone and settled: nothing of the ring runs (no frames asked for).
+    if ring_k > 0.01 {
+        // Against the cover, at its own pace; still with reduced motion.
+        let period = if motion { nikgob_view::RING_SPIN_S } else { 0.0 };
+        let angle = turn(ui, stage.id("np-ring-angle"), playing, bass, period, !prefs.cover_ccw);
+        let heights = if bars { cava(ui, stage, &bands, playing && motion) } else { Vec::new() };
         let mut input = RingInput {
                 style: prefs.ring_style,
                 angle,
-                transients: if beat { &transients } else { &[] },
+                transients: &transients,
                 bars: &heights,
                 room: pad,
-                kick: if beat { kick } else { 0.0 },
-                // Dimmed on a pause, or gone with «Кольцо на паузе» off;
-                // every style follows the outline as it morphs.
-                alpha: ring_alpha(prefs.ring_on_pause, played),
+                kick,
+                // Every style follows the outline as it morphs.
+                alpha: ring_k,
+                shown: ring_k,
+                base: normal_cover.width(),
                 scale: 1.0,
                 key: egui::Id::new("np-ring-dots"),
         };
@@ -1457,13 +1480,13 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
         c => Outline::new(material(c), 1.0, cover, spin),
     };
     outline.paint(ui, None);
-    if with_ring {
-        let angle = if prefs.spin_ring && motion && prefs.ring_style != RingStyle::Bars {
-            t * TAU / (prefs.ring_spin_s / 3.6).max(2.0) * sign(prefs.ring_ccw)
+    if with_ring && ring_on(true, prefs.cover_shape) {
+        let angle = if motion && prefs.ring_style != RingStyle::Bars {
+            t * TAU / (nikgob_view::RING_SPIN_S / 3.6).max(2.0) * sign(!prefs.cover_ccw)
         } else {
             0.0
         };
-        let beat = prefs.ring_beat && motion;
+        let beat = motion;
         let transients: Vec<f32> = if beat {
             (0..12).map(|i| kick * (0.5 + 0.5 * (i as f32 * 1.3 + t * 3.0).sin()).powi(2)).collect()
         } else {
@@ -1487,8 +1510,10 @@ pub(crate) fn preview(ui: &Ui, rect: Rect, prefs: &nikgob_view::Prefs, with_ring
             room: pad,
             kick: if beat { kick } else { 0.0 },
             alpha: 1.0,
-            // The player's cover is ~300 px: at sample size the gaps and
-            // the circle's wobble would swamp the shape.
+            shown: 1.0,
+            base: side,
+            // The player's cover is ~300 px: at sample size the gaps would
+            // swamp the shape.
             scale: (side / 300.0).clamp(0.3, 1.0),
             key: egui::Id::new("np-ring-dots-sample"),
         };
@@ -2070,6 +2095,20 @@ mod tests {
     }
     use super::*;
 
+    /// The ring shows only while the music plays and only around a shaped
+    /// cover: never on a pause, never around the square one.
+    #[test]
+    fn the_ring_shows_only_playing_around_a_shape() {
+        for shape in [CoverShape::Cookie12, CoverShape::Circle, CoverShape::Random] {
+            assert!(ring_shown(true, shape, true), "{shape:?}");
+            assert!(!ring_shown(true, shape, false), "{shape:?} paused");
+            assert!(!ring_shown(false, shape, true), "{shape:?} off");
+            assert!(ring_on(true, shape));
+        }
+        assert!(!ring_shown(true, CoverShape::Original, true), "the square cover");
+        assert!(!ring_on(true, CoverShape::Original));
+    }
+
     /// A click on empty space puts the track's info away and leaves the
     /// player open; with the lyrics, the queue or nothing beside the cover
     /// it closes the player (mini mode has nothing to close to).
@@ -2287,14 +2326,16 @@ mod tests {
         for _ in 0..120 {
             t = cava_targets(&mut c, &bands, true, 0.05, 0.05);
         }
-        assert!(t[3] > 0.9, "{t:?}");
-        assert!(t[BAR_COUNT - 1] < 0.5, "{t:?}");
-        // One pass around the circle: no mirror, the highs end it.
+        // Near the top on both sides, the same: no seam at 12 o'clock.
+        assert!(t[1] > 0.9 && t[BAR_COUNT - 1] > 0.9, "{t:?}");
+        assert_eq!(t[1], t[BAR_COUNT - 1]);
+        assert!(t[BAR_COUNT / 2] < 0.5, "{t:?}");
+        // The highs at the bottom.
         let mut high = vec![0.2; 64];
         high[63] = 1.0;
         let mut c = Cava::default();
         let t = cava_targets(&mut c, &high, true, 0.05, 0.05);
-        assert!(t[BAR_COUNT - 1] > 0.9 && t[0] < 0.2, "{t:?}");
+        assert!(t[BAR_COUNT / 2] > 0.9 && t[0] < 0.2, "{t:?}");
         // Silence and pause: nothing.
         assert!(cava_targets(&mut c, &[0.01; 64], true, 0.05, 0.05).iter().all(|v| *v == 0.0));
         assert!(cava_targets(&mut c, &bands, false, 0.05, 0.05).iter().all(|v| *v == 0.0));

@@ -1219,6 +1219,28 @@ mod prefs_tests {
         assert_eq!(prefs_of(None).album_mode, AlbumMode::Whole);
     }
 
+    /// Prefs saved with the ring's old rows (on a pause, the turn, its way
+    /// and speed, in time) read whole: the ring and its look stay, the old
+    /// keys are let go, and «Свои» kept with them still brings the rest
+    /// back.
+    #[test]
+    fn prefs_with_the_old_ring_rows_still_read() {
+        use nikgob_view::presets::Area;
+        let old = br#"{"ring":true,"ring_style":"Bars","ring_on_pause":true,"spin_ring":false,"ring_spin_s":20.0,
+            "ring_ccw":true,"ring_beat":false,"fps_limit":90,"settings_rev":1,
+            "custom_presets":{"Track":[["CoverShape",{"Shape":"Heart"}],["Ring",{"Bool":true}],["RingBeat",{"Bool":false}],["SpinRing",{"Bool":true}]]}}"#;
+        let p = parse_prefs(old).unwrap();
+        assert!(p.ring);
+        assert_eq!(p.ring_style, nikgob_view::RingStyle::Bars);
+        assert_eq!(p.fps_limit, 90);
+        let written = serde_json::to_value(&p).unwrap();
+        for key in ["ring_on_pause", "spin_ring", "ring_spin_s", "ring_ccw", "ring_beat"] {
+            assert!(written.get(key).is_none(), "{key}");
+        }
+        let back = Area::Track.custom(&p).expect("«Свои» kept");
+        assert_eq!(back.cover_shape, nikgob_view::CoverShape::Heart);
+    }
+
     /// «Настройки текста…» is offered under the lyrics until it is picked
     /// once, and stays gone after a restart.
     #[test]
@@ -1237,7 +1259,7 @@ mod prefs_tests {
     #[test]
     fn old_prefs_gain_only_the_new_keys() {
         use nikgob_view::presets::{Area, SETTINGS_REV};
-        const NEW: [&str; 7] = ["settings_deep", "custom_presets", "settings_rev", "cover_spin_s", "ring_spin_s", "cover_pulse_strength", "home_sections"];
+        const NEW: [&str; 6] = ["settings_deep", "custom_presets", "settings_rev", "cover_spin_s", "cover_pulse_strength", "home_sections"];
         let mut sample = serde_json::to_value(Prefs {
             fps_limit: 90,
             seed_ratio: 2.0,

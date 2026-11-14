@@ -213,12 +213,12 @@ fn row_effects(before: &[DrawnRow], after: &[DrawnRow], own: SettingId) -> Map<S
 
 /// Combinations of values known to be risky, shot together.
 const COMBOS: &[(&str, &[(&str, &str)], &[&str])] = &[
-    ("square-ring-circle-paused", &[("CoverShape", "0"), ("Ring", "on"), ("RingStyle", "0"), ("RingSpin", "on")], &["np", "np_paused"]),
+    ("square-ring-circle-paused", &[("CoverShape", "0"), ("Ring", "on"), ("RingStyle", "0")], &["np", "np_paused"]),
     ("square-ring-contour", &[("CoverShape", "0"), ("Ring", "on"), ("RingStyle", "1")], &["np", "np_paused"]),
     ("random-ring-bars-pulse", &[("CoverShape", "2"), ("Ring", "on"), ("RingStyle", "2"), ("CoverPulse", "on")], &["np", "np_paused"]),
     (
-        "shape-spin-ccw-ring-contour-spin",
-        &[("CoverShape", "1"), ("CoverSpin", "on"), ("CoverDir", "1"), ("Ring", "on"), ("RingStyle", "1"), ("RingSpin", "on"), ("RingDir", "0")],
+        "shape-spin-ccw-ring-contour",
+        &[("CoverShape", "1"), ("CoverSpin", "on"), ("CoverDir", "1"), ("Ring", "on"), ("RingStyle", "1")],
         &["np", "np_paused"],
     ),
     (
@@ -230,8 +230,6 @@ const COMBOS: &[(&str, &[(&str, &str)], &[&str])] = &[
             ("CoverPulse", "on"),
             ("Ring", "on"),
             ("RingStyle", "0"),
-            ("RingSpin", "on"),
-            ("RingBeat", "on"),
         ],
         &["np", "np_paused", "np_opening"],
     ),
