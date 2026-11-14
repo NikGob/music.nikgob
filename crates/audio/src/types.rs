@@ -5,6 +5,8 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub use crate::cancel::Interrupter;
+
 /// What the engine plays. The `id` is opaque to the engine and comes back in
 /// every [`Event`] that concerns the item.
 pub struct PlayItem {
@@ -249,7 +251,9 @@ pub type StreamOpener = Box<dyn FnOnce() -> Result<Box<dyn ByteSource>, String> 
 /// `read` / `seek` run on engine threads (the opener thread for the probe,
 /// then the decoder thread); they may block on the network, but a read that
 /// blocks for long starves the output, so implementations should download
-/// ahead in the background.
+/// ahead in the background. A source whose reads can wait should give an
+/// [`interrupter`](Self::interrupter): without one, Stop, Play or Seek
+/// wait for such a read to return.
 pub trait ByteSource: Read + Seek + Send {
     /// Total size in bytes, if known.
     fn byte_len(&self) -> Option<u64>;
@@ -265,6 +269,14 @@ pub trait ByteSource: Read + Seek + Send {
     /// replaces [`PlayItem::duration_hint`] when `Some`). Asked once the
     /// stream has been probed.
     fn duration(&self) -> Option<Duration> {
+        None
+    }
+    /// Makes reads that wait for bytes give up (see [`Interrupter`]). The
+    /// engine asks once, right after the opener returned the source, and
+    /// uses it from other threads while a read waits: when the item is
+    /// superseded (a play, a stop, a new next item) and to take a seek. An
+    /// error a read returns meanwhile is not reported.
+    fn interrupter(&self) -> Option<Interrupter> {
         None
     }
 }

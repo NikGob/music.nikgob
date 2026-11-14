@@ -32,7 +32,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use nikgob_core::streaming::{AudioStream, BoxFuture, StreamError, format};
+use nikgob_core::streaming::{
+    AudioStream, BoxFuture, StreamError, StreamInterrupter, format, interrupted_read,
+};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
@@ -405,6 +407,9 @@ struct State {
     /// A final failure; reads of bytes not downloaded return it.
     error: Option<StreamError>,
     closed: bool,
+    /// The engine interrupted the reader (see [`StreamInterrupter`]): a
+    /// read that would wait returns at once instead.
+    interrupted: bool,
 }
 
 struct Shared {
@@ -458,6 +463,7 @@ impl HttpStream {
                 want: 0,
                 error: None,
                 closed: false,
+                interrupted: false,
             }),
             arrived: Condvar::new(),
             moved: Notify::new(),
@@ -504,6 +510,9 @@ impl HttpStream {
 }
 
 fn wait<'a>(shared: &'a Shared, st: MutexGuard<'a, State>) -> io::Result<MutexGuard<'a, State>> {
+    if st.interrupted {
+        return Err(interrupted_read());
+    }
     let (st, timeout) = shared
         .arrived
         .wait_timeout(st, READ_TIMEOUT)
@@ -582,6 +591,16 @@ impl AudioStream for HttpStream {
     fn quality(&self) -> Option<String> {
         self.info_now()
             .map(|r| quality_of(r.itag, r.format == format::WEBM, r.bitrate))
+    }
+
+    /// Wakes a read waiting for its bytes (or for the resolve); the
+    /// download goes on.
+    fn interrupter(&self) -> Option<StreamInterrupter> {
+        let shared = Arc::clone(&self.shared);
+        Some(Arc::new(move |on| {
+            shared.lock().interrupted = on;
+            shared.arrived.notify_all();
+        }))
     }
 }
 
@@ -1099,6 +1118,51 @@ mod tests {
         assert!(matches!(stream_error(&other), StreamError::Network(_)));
         // Seeking before the start is refused.
         assert!(s.seek(SeekFrom::Current(-1)).is_err());
+    }
+
+    /// A read that waits for a resolve that never comes.
+    fn waiting_read(s: HttpStream) -> std::sync::mpsc::Receiver<io::Result<usize>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = s;
+            let _ = tx.send(s.read(&mut [0; 4]));
+        });
+        rx
+    }
+
+    #[test]
+    fn an_interrupt_ends_a_waiting_read_at_once_until_it_is_lifted() {
+        let rt = runtime();
+        let never: ResolveFn = Arc::new(|_| Box::pin(std::future::pending()));
+        let s = HttpStream::new(rt.handle().clone(), reqwest::Client::new(), never, None);
+        let interrupt = s.interrupter().unwrap();
+        let read = waiting_read(s);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(read.try_recv().is_err(), "the read waits");
+        interrupt(true);
+        let got = read.recv_timeout(Duration::from_secs(1)).expect("the read returns at once");
+        assert!(got.is_err());
+
+        // Lifted: reads wait for their bytes again.
+        let never: ResolveFn = Arc::new(|_| Box::pin(std::future::pending()));
+        let s = HttpStream::new(rt.handle().clone(), reqwest::Client::new(), never, None);
+        let interrupt = s.interrupter().unwrap();
+        interrupt(true);
+        interrupt(false);
+        let read = waiting_read(s);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(read.try_recv().is_err(), "the read waits");
+        interrupt(true);
+        assert!(read.recv_timeout(Duration::from_secs(1)).unwrap().is_err());
+
+        // Bytes already there are read while interrupted.
+        let data = fixture(100_000);
+        let server = serve(Arc::clone(&data), |_| Answer::Ok);
+        let resolves = Arc::new(AtomicU32::new(0));
+        let mut s = open(&rt, server.port, data.len() as u64, &resolves);
+        assert_eq!(read_at(&mut s, 0, 1000), data[..1000]);
+        s.interrupter().unwrap()(true);
+        assert_eq!(read_at(&mut s, 10, 100), data[10..110]);
     }
 
     #[test]

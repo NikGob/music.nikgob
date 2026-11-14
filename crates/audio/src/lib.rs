@@ -109,12 +109,14 @@
 mod analyzer;
 mod backend;
 mod biquad;
+mod cancel;
 mod channels;
 mod decode;
 mod eq;
 mod formant;
 mod fx;
 mod offline;
+mod openers;
 mod pipeline;
 mod player;
 mod render;
@@ -130,6 +132,6 @@ pub use offline::{OfflineDevice, OfflineOptions};
 pub use player::{Player, PlayerOptions, WakeFn};
 pub use tap::{SNAPSHOT_LEN, VisualizerTap};
 pub use types::{
-    ByteSource, DecodeError, Event, ItemFx, ItemSource, PcmError, PcmRead, PcmSource, PlayItem,
-    Reverb, SpawnError, StreamOpener,
+    ByteSource, DecodeError, Event, Interrupter, ItemFx, ItemSource, PcmError, PcmRead, PcmSource,
+    PlayItem, Reverb, SpawnError, StreamOpener,
 };

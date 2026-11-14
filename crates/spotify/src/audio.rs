@@ -9,14 +9,15 @@
 //! librespot-playback's `player.rs` (MIT).
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use librespot_audio::{AudioDecrypt, AudioFile, StreamLoaderController};
 use librespot_core::spotify_id::SpotifyId;
 use librespot_core::{Session, SpotifyUri};
 use librespot_metadata::audio::{AudioFileFormat, AudioItem};
-use nikgob_core::streaming::{AudioStream, StreamError, format};
+use nikgob_core::streaming::{AudioStream, StreamError, StreamInterrupter, format};
 
 /// End of Spotify's own first Ogg page, which decoders must not see.
 pub const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
@@ -32,6 +33,9 @@ const FORMATS: [(AudioFileFormat, usize, u32); 3] = [
 ];
 /// The whole open (metadata, key, first bytes) must not take longer.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(45);
+/// How often a thread waiting for the open looks whether it was
+/// interrupted.
+const OPEN_POLL: Duration = Duration::from_millis(20);
 
 /// A decrypted Spotify file seen from after its header: offsets are those
 /// of the plain Ogg stream.
@@ -234,15 +238,23 @@ fn network(e: librespot_core::Error) -> StreamError {
     }
 }
 
-/// Opens a track in the background; given to [`SpotifyStream`].
-pub type Opener = Box<dyn FnOnce() -> Result<Opened, StreamError> + Send>;
+/// Opens a track in the background; given to [`SpotifyStream`]. It gives
+/// up once the flag is set (see [`block_on_runtime`]).
+pub type Opener = Box<dyn FnOnce(&AtomicBool) -> Result<Opened, StreamError> + Send>;
 
 /// The [`AudioStream`] handed to the engine: nothing happens until the
 /// first read or seek, which opens the track (blocking the engine's thread
 /// until the header is there). Reads then block only while librespot
 /// fetches the wanted range; it prefetches ahead while streaming.
+///
+/// Its [`interrupter`](AudioStream::interrupter) ends a wait for the open
+/// (the engine dropping a track that is still opening, which is where a
+/// Spotify stream waits longest). A read waiting inside librespot cannot be
+/// woken: librespot gives it up itself after a few seconds without data.
 pub struct SpotifyStream {
     opener: Option<Opener>,
+    /// The engine interrupted the stream while it opened.
+    interrupted: Arc<AtomicBool>,
     opened: Option<Opened>,
     failure: Option<String>,
     /// Where the opened track goes when this stream is dropped (see
@@ -269,6 +281,7 @@ impl SpotifyStream {
     pub fn new(opener: Opener) -> Self {
         Self {
             opener: Some(opener),
+            interrupted: Arc::new(AtomicBool::new(false)),
             opened: None,
             failure: None,
             keep: None,
@@ -283,7 +296,7 @@ impl SpotifyStream {
 
     fn body(&mut self) -> io::Result<&mut OggBody<AudioDecrypt<AudioFile>>> {
         if let Some(opener) = self.opener.take() {
-            match opener() {
+            match opener(&self.interrupted) {
                 Ok(o) => self.opened = Some(o),
                 Err(e) => self.failure = Some(describe(&e)),
             }
@@ -340,6 +353,11 @@ impl AudioStream for SpotifyStream {
             .as_ref()
             .map(|o| nikgob_core::streaming::quality_label("Vorbis", o.kbps, false))
     }
+
+    fn interrupter(&self) -> Option<StreamInterrupter> {
+        let flag = Arc::clone(&self.interrupted);
+        Some(Arc::new(move |on| flag.store(on, Ordering::SeqCst)))
+    }
 }
 
 impl Drop for SpotifyStream {
@@ -355,17 +373,34 @@ impl Drop for SpotifyStream {
 }
 
 /// Runs `open` on the runtime and waits for it on this (engine) thread,
-/// which may be any thread: inside or outside a runtime.
+/// which may be any thread: inside or outside a runtime. Gives up when
+/// `stop` is set (what the open brings then is dropped once it comes).
 pub fn block_on_runtime<T: Send + 'static>(
     handle: &tokio::runtime::Handle,
+    stop: &AtomicBool,
     fut: impl Future<Output = Result<T, StreamError>> + Send + 'static,
 ) -> Result<T, StreamError> {
     let (tx, rx) = mpsc::sync_channel(1);
     handle.spawn(async move {
         let _ = tx.send(fut.await);
     });
-    rx.recv_timeout(OPEN_TIMEOUT)
-        .unwrap_or_else(|_| Err(StreamError::Network("Spotify did not answer".into())))
+    let deadline = Instant::now() + OPEN_TIMEOUT;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Err(StreamError::Network("interrupted".into()));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(StreamError::Network("Spotify did not answer".into()));
+        }
+        match rx.recv_timeout(left.min(OPEN_POLL)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(StreamError::Network("Spotify did not answer".into()));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -409,6 +444,30 @@ mod tests {
             size,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_open_that_does_not_answer_gives_up_when_interrupted() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut s = SpotifyStream::new(Box::new({
+            let handle = rt.handle().clone();
+            move |stop| {
+                block_on_runtime(&handle, stop, std::future::pending::<Result<Opened, StreamError>>())
+            }
+        }));
+        let interrupt = s.interrupter().unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            interrupt(true);
+        });
+        let began = Instant::now();
+        assert!(s.read(&mut [0; 4]).is_err());
+        assert!(began.elapsed() < Duration::from_secs(2), "{:?}", began.elapsed());
+        t.join().unwrap();
     }
 
     #[test]

@@ -471,6 +471,10 @@ impl ByteSource for StreamBytes {
     fn duration(&self) -> Option<Duration> {
         self.inner.duration()
     }
+
+    fn interrupter(&self) -> Option<nikgob_audio::Interrupter> {
+        self.inner.interrupter()
+    }
 }
 
 impl Playback for Engine {

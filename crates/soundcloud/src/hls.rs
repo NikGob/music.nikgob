@@ -39,7 +39,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nikgob_core::streaming::{AudioStream, BoxFuture, StreamError, format};
+use nikgob_core::streaming::{
+    AudioStream, BoxFuture, StreamError, StreamInterrupter, format, interrupted_read,
+};
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, Semaphore};
 
@@ -254,6 +256,9 @@ struct State {
     /// The download is waiting out a network outage: a reader waits with
     /// it (the download fails the stream when the outage lasts too long).
     outage: bool,
+    /// The engine interrupted the reader (see [`StreamInterrupter`]): a
+    /// read that would wait returns at once instead.
+    interrupted: bool,
 }
 
 struct Shared {
@@ -342,6 +347,9 @@ impl HlsStream {
             if let Some(e) = &st.error {
                 return Err(io_error(e.clone()));
             }
+            if st.interrupted {
+                return Err(interrupted_read());
+            }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "SoundCloud: no answer"));
@@ -417,6 +425,9 @@ impl Read for HlsStream {
                 st.want = i;
                 shared.wake.notify_one();
             }
+            if st.interrupted {
+                return Err(interrupted_read());
+            }
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() && !st.outage {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "SoundCloud: the stream stalled"));
@@ -472,6 +483,16 @@ impl AudioStream for HlsStream {
     fn quality(&self) -> Option<String> {
         let kbps = u32::try_from(self.kbps.load(Ordering::SeqCst)).unwrap_or(160);
         Some(nikgob_core::streaming::quality_label("AAC", kbps, false))
+    }
+
+    /// Wakes a read waiting for its segment (or for the playlist), also
+    /// through an outage; the download goes on.
+    fn interrupter(&self) -> Option<StreamInterrupter> {
+        let shared = Arc::clone(&self.shared);
+        Some(Arc::new(move |on| {
+            shared.lock().interrupted = on;
+            shared.ready.notify_all();
+        }))
     }
 }
 
@@ -1042,6 +1063,26 @@ mod tests {
                 "{inner:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_interrupt_ends_a_waiting_read_at_once_until_it_is_lifted() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let never: ResolveFn = Arc::new(|| Box::pin(std::future::pending()));
+        let s = HlsStream::new(rt.handle().clone(), reqwest::Client::new(), never, Arc::new(AtomicU64::new(160)), MediaCooldown::default());
+        let interrupt = s.interrupter().unwrap();
+        interrupt(true);
+        interrupt(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut s = s;
+            let _ = tx.send(s.read(&mut [0; 4]));
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(rx.try_recv().is_err(), "the read waits for the playlist");
+        interrupt(true);
+        let got = rx.recv_timeout(Duration::from_secs(1)).expect("the read returns at once");
+        assert!(got.is_err());
     }
 
     #[test]
