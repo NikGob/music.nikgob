@@ -277,6 +277,10 @@ pub struct WaveTurn<'a> {
     /// [`crate::stream_song_key`]s, [`crate::wave::repeatable`]): the very
     /// recordings, never another version of their songs.
     pub again: &'a [String],
+    /// The works ([`crate::discover::stream_work_key`]) of the new songs
+    /// served, queued or played this session, kept as they were (the pool
+    /// may no longer hold them): no other version of them is picked.
+    pub works: &'a [String],
 }
 
 /// Whether a filter with `tracks` fitting library tracks of `artists`
@@ -831,6 +835,9 @@ fn next_ranked(
     works.extend(session.tracks().filter_map(|p| m.position(p.track)).map(|i| m.work_at(i)));
     works.extend(turn.queued.iter().filter_map(|q| if let Ahead::Track(t) = q { m.position(*t) } else { None }).map(|i| m.work_at(i)));
     let mut new_works: HashSet<String> = pool.iter().filter(|c| served.contains(&c.key) || again.contains(c.key.as_str())).map(|c| crate::discover::stream_work_key(&c.track)).collect();
+    // A song let in again keeps its own recording's work out of this.
+    let again_works: HashSet<String> = pool.iter().filter(|c| again.contains(c.key.as_str())).map(|c| crate::discover::stream_work_key(&c.track)).collect();
+    new_works.extend(turn.works.iter().filter(|w| !again_works.contains(*w)).cloned());
     if by_work {
         // One identity of a song across the library and the new songs: a
         // new song served is its library work too, and back.
@@ -1632,6 +1639,70 @@ mod tests {
         let both = w.picks.iter().any(|p| p.item == Item::Track(a)) && w.picks.iter().any(|p| p.item == stream(0));
         assert!(!both, "{:?}", w.picks);
         assert!(w.picks.iter().any(|p| p.item == Item::Track(a)) || w.picks.iter().any(|p| p.item == stream(0)));
+    }
+
+    /// A stream queued or played that the pool no longer holds (the user's
+    /// own, or one served before the pool was built again) keeps its work:
+    /// no other version of it is picked, new or of the library, in this
+    /// call or the next ones; its own recording let in again may play.
+    #[test]
+    fn a_stream_queued_outside_the_pool_keeps_its_work() {
+        let p = user(Kind::Omnivore, 5).parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let mut model = p.model_at(last + 1);
+        let first = by_pull(&model, &Session::default(), 10, WaveTurn::default());
+        let a = model.id(first[0]);
+        let song = |k: usize, title: &str, artist: &str| {
+            let mut track = StreamTrack::new(RemoteId::new(Service::Youtube, format!("v{k}")), title);
+            track.artists.push(ArtistRef::new(None, artist));
+            OpenCandidate { key: crate::stream_song_key(&track), track, vector: None, embedding: None, lane: None, near: vec![first[2]], weight: 1.0 - k as f32 * 0.1 }
+        };
+        // Queued by the user, never in the pool: «Sora» by «Singer».
+        let queued = crate::discover::stream_work_key(&song(9, "Sora", "Singer").track);
+        model.set_song_works([(queued.clone(), a)]);
+        let pool = vec![song(0, "Sora (Off Vocal)", "Singer"), song(1, "Umi", "Singer")];
+        let (ok, no) = (|_: usize| true, |_: usize| false);
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: None, learned: None };
+        let only = WaveFilter { novelty: 1.0, ..WaveFilter::default() };
+        let familiar = WaveFilter { novelty: 0.0, ..WaveFilter::default() };
+        let works = [queued];
+        let turn = WaveTurn { works: &works, ..WaveTurn::default() };
+        let w = next_ranked(&ctx, &pool, &only, &Session::default(), 2, &HashSet::new(), false, turn);
+        assert!(w.picks.iter().all(|p| p.item != Item::Stream(pool[0].track.id.clone())), "a new version of the queued stream");
+        let w = next_ranked(&ctx, &pool, &familiar, &Session::default(), 10, &HashSet::new(), false, turn);
+        assert!(!w.picks.is_empty());
+        assert!(w.picks.iter().all(|p| p.item != Item::Track(a)), "the library's version of the queued stream");
+        // Without it both may play.
+        let w = next_ranked(&ctx, &pool, &only, &Session::default(), 2, &HashSet::new(), false, WaveTurn::default());
+        assert!(w.picks.iter().any(|p| p.item == Item::Stream(pool[0].track.id.clone())));
+    }
+
+    /// A wave's radio keeps the works of the new songs it served once its
+    /// pool is built again without them, and of the streams the runtime
+    /// tells it the session queued.
+    #[test]
+    fn a_wave_keeps_the_works_it_served_across_pools() {
+        let model = listener();
+        let (ok, no) = (|_: usize| true, |_: usize| false);
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: None, learned: None };
+        let song = |k: usize, title: &str| {
+            let mut track = StreamTrack::new(RemoteId::new(Service::Youtube, format!("w{k}")), title);
+            track.artists.push(ArtistRef::new(None, "Singer"));
+            OpenCandidate { key: crate::stream_song_key(&track), track, vector: None, embedding: None, lane: None, near: vec![0], weight: 1.0 - k as f32 * 0.1 }
+        };
+        let mut radio = RadioState::new(RadioSeed::Wave(crate::wave::WaveSeed::plain(1.0)));
+        radio.attune(Session::default(), None);
+        let first = radio.extend_wave(&ctx, &[song(0, "Sora")], 1, 1);
+        assert_eq!(first.len(), 1);
+        // The pool built again: the song gone, its off vocal there.
+        let next = radio.extend_wave(&ctx, &[song(1, "Sora (Off Vocal)"), song(2, "Umi")], 2, 1);
+        assert!(next.iter().all(|p| p.item != Item::Stream(song(1, "x").track.id)), "{next:?}");
+        // Told by the runtime: a stream the user queued.
+        radio.note_stream_works([crate::discover::stream_work_key(&song(3, "Kaze").track)]);
+        let after = radio.extend_wave(&ctx, &[song(4, "Kaze (TV Size)"), song(5, "Hoshi")], 2, 1);
+        assert!(after.iter().all(|p| p.item != Item::Stream(song(4, "x").track.id)), "{after:?}");
     }
 
     /// Picks the runtime did not queue (YouTube Music began to ask to wait
