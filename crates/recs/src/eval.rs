@@ -65,7 +65,7 @@ use crate::graph::{Edge, GraphInput, GraphSource};
 use crate::index::{VectorIndex, euclid};
 use crate::mix_new::{self, NewCandidate};
 use crate::mixes::{Builder, Kept, Mix, MixKey, Settings as MixSettings, never_heard, row};
-use crate::open_world::{Character, OpenCandidate, WaveContext, WaveFilter};
+use crate::open_world::{ArtistKey, Character, OpenCandidate, WaveContext, WaveFilter};
 use crate::model::{Hits, Live, ModelInput, ReplayReport, UserModel, replay};
 use crate::pick::{Item, Recs};
 use crate::radio::{RadioParams, RadioSeed, RadioState};
@@ -1056,14 +1056,19 @@ pub fn wave_replay_seeded(
                 Item::Track(id) => parts.catalog.position(*id),
                 Item::Stream(_) => None,
             };
+            // One identity of an artist for library and new songs, as the
+            // wave keeps them apart ([`ArtistKey`]); an unknown one apart.
             let artist = match (&p.item, track) {
-                (_, Some(i)) => parts.catalog.tracks()[i].main_artist().map_or_else(|| format!("track:{i}"), |a| a.to_string()),
-                (Item::Stream(r), None) => pool.iter().find(|c| c.track.id == *r).and_then(|c| c.track.artists.first()).map_or_else(String::new, |a| crate::artist_key(&a.name)),
+                (_, Some(i)) => ArtistKey::of_track(model, i).label(|| format!("track:{i}")),
+                (Item::Stream(r), None) => pool.iter().find(|c| c.track.id == *r).map_or_else(|| r.to_string(), |c| ArtistKey::of_new(&ctx, c).label(|| format!("new:{}", c.key))),
                 (Item::Track(id), None) => id.to_string(),
             };
             let skip = track.is_some_and(skipped);
             if track.is_some() {
                 radio.feedback(p.item.clone(), if skip { Outcome::skip(8_000) } else { Outcome::Complete });
+            } else {
+                // A new song played, its end unknown: the queue moves on.
+                radio.note_played(p.item.clone());
             }
             out.push(WaveStep { item: p.item, track, artist, skipped: skip });
         }
@@ -1234,6 +1239,23 @@ fn kept_taste(steps: &[WaveStep], sounds: &[Option<Vector>], scale: f32, relevan
         }
     }
     sum / steps.len() as f32
+}
+
+/// Each catalog track's plays started from `t` on and ended, and the early
+/// skips among them (what the user did with it after the moment).
+fn skips_after(starts: &Starts, parts: &Parts, t: UnixMs) -> Vec<(u32, u32)> {
+    let mut out = vec![(0u32, 0u32); parts.catalog.len()];
+    let from = starts.list.partition_point(|s| s.0 < t);
+    for s in &starts.list[from..] {
+        if s.2 == Ended::Open {
+            continue;
+        }
+        if let Some(i) = parts.catalog.position(s.1) {
+            out[i].0 += 1;
+            out[i].1 += u32::from(s.2 == Ended::Early);
+        }
+    }
+    out
 }
 
 /// Each catalog track's plays ended by `t` and the early skips among them
@@ -1513,18 +1535,21 @@ pub fn evaluate(name: &str, parts: &Parts, opts: &Options) -> Report {
         let before = skips_before(&starts, parts, t);
         let skipped = |i: usize| before.get(i).is_some_and(|&(plays, early)| plays >= 2 && 2 * early >= plays);
         // The kept taste of a library pick: listened to within the window;
-        // else a loved song rested a week brought back (as much as it is
-        // not skipped); else an unheard one as much as the hidden taste
-        // (a synthetic listener) or its plays later (not skipped) say.
+        // else a loved song rested a week brought back, as much as its
+        // plays after the moment are not skipped early (none or one after:
+        // unknown, half); else an unheard one as much as the hidden taste
+        // (a synthetic listener) or its plays after say (none: nothing).
+        let later = skips_after(&starts, parts, t);
+        let later_kept = |i: usize| later.get(i).filter(|x| x.0 >= 2).map(|&(plays, early)| 1.0 - early as f32 / plays as f32);
         let relevance = |i: usize| {
             let id = parts.catalog.tracks()[i].id;
             let rested = model.taste.last_played_at(i).is_none_or(|l| t - l >= Q_RESTED_MS);
             if listened.contains(&id) {
                 1.0
             } else if model.tracks[i].loved(t) && rested {
-                Q_REDISCOVERED * (1.0 - ctx.skip_rate[i].unwrap_or(0.0))
+                Q_REDISCOVERED * later_kept(i).unwrap_or(0.5)
             } else if model.tracks[i].unfamiliar(t) {
-                ctx.truth_pct[i].or_else(|| ctx.skip_rate[i].map(|r| 1.0 - r)).unwrap_or(0.0)
+                ctx.truth_pct[i].or_else(|| later_kept(i)).unwrap_or(0.0)
             } else {
                 0.0
             }
@@ -2172,6 +2197,14 @@ mod tests {
         assert_eq!(r.wave_familiar_mix.0, 0.0, "{}", r.table());
         assert!(wave_trace(&p, crate::wave::NOVELTY_BALANCE, 20).contains("= "));
         assert!(steps.iter().filter(|s| s.track.is_none()).all(|s| !s.skipped), "a new song's end is unknown");
+        // One identity of an artist for library and new songs; nobody's
+        // song is an artist of its own.
+        for s in &steps {
+            match s.track {
+                Some(i) => assert_eq!(s.artist, ArtistKey::of_track(&model, i).label(|| format!("track:{i}"))),
+                None => assert!(s.artist.starts_with("name:") || s.artist.starts_with("new:") || !s.artist.is_empty(), "{}", s.artist),
+            }
+        }
     }
 
     /// The kept taste of a wave: what is listened to counts, an artist
