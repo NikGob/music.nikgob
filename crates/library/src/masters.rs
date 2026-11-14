@@ -18,7 +18,7 @@ use crate::error::{LibraryError, Result};
 use crate::util::{get_enum, get_id, get_json, get_opt_id, now_ms};
 
 const MASTER_COLS: &str =
-    "track_id, codec, file_hash, size_bytes, origin_kind, origin_info_hash, origin_path";
+    "track_id, codec, file_hash, size_bytes, origin_kind, origin_info_hash, origin_path, file_path";
 
 /// Reads a master row (without replicas).
 fn master_from_row(row: &Row<'_>) -> rusqlite::Result<Master> {
@@ -37,6 +37,7 @@ fn master_from_row(row: &Row<'_>) -> rusqlite::Result<Master> {
         file_hash: row.get(2)?,
         size_bytes: row.get::<_, i64>(3)? as u64,
         origin,
+        file_path: row.get(7)?,
         replicas: Vec::new(),
     })
 }
@@ -286,13 +287,13 @@ impl Library {
             };
             tx.execute(
                 "INSERT INTO master(track_id, codec, file_hash, size_bytes,
-                                    origin_kind, origin_info_hash, origin_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                                    origin_kind, origin_info_hash, origin_path, file_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(track_id) DO UPDATE SET
                     codec = excluded.codec, file_hash = excluded.file_hash,
                     size_bytes = excluded.size_bytes, origin_kind = excluded.origin_kind,
                     origin_info_hash = excluded.origin_info_hash,
-                    origin_path = excluded.origin_path",
+                    origin_path = excluded.origin_path, file_path = excluded.file_path",
                 params![
                     master.track_id.to_string(),
                     master.codec.as_str(),
@@ -300,7 +301,8 @@ impl Library {
                     master.size_bytes as i64,
                     kind,
                     info_hash,
-                    path
+                    path,
+                    master.file_path
                 ],
             )?;
             for r in &master.replicas {
@@ -381,8 +383,67 @@ impl Library {
         })
     }
 
-    /// Rewrites `origin_path` of masters that lived inside `old_dir` to point
-    /// into `new_dir`. Returns the number of rows updated.
+    /// Sets where the master of `track` is kept under its name in the
+    /// masters folder (a torrent's master taken out of `Downloads/`: its
+    /// in-torrent path too, as [`Self::set_master_origin_path`] does).
+    pub fn set_master_file(&self, track: TrackId, path: &str) -> Result<()> {
+        self.write(|tx| {
+            let n = tx.execute(
+                "UPDATE master SET file_path = ?2,
+                        origin_path = CASE WHEN origin_kind = 'torrent' THEN ?2 ELSE origin_path END
+                  WHERE track_id = ?1",
+                params![track.to_string(), path],
+            )?;
+            if n == 0 {
+                return Err(LibraryError::not_found("master", track));
+            }
+            Ok(())
+        })
+    }
+
+    /// The paths masters of the file `file_hash` are kept at by name (see
+    /// [`Master::file_path`]), the oldest row first.
+    pub fn master_files_of_hash(&self, file_hash: &str) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT DISTINCT file_path FROM master WHERE file_hash = ?1 AND file_path IS NOT NULL ORDER BY file_path",
+            )?;
+            let rows = stmt.query_map([file_hash], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
+    /// Every file kept by name ([`Master::file_path`]) with its file hash,
+    /// once each.
+    pub fn master_files(&self) -> Result<Vec<(String, String)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT DISTINCT file_path, file_hash FROM master WHERE file_path IS NOT NULL ORDER BY file_path",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
+    /// Points every master kept at `from` to `to` (the file moved with
+    /// the masters folder), a torrent's in-torrent path too. Returns the
+    /// number of rows updated.
+    pub fn move_master_file(&self, from: &str, to: &str) -> Result<usize> {
+        self.write(|tx| {
+            Ok(tx.execute(
+                "UPDATE master SET file_path = ?2,
+                        origin_path = CASE WHEN origin_kind = 'torrent' AND origin_path = ?1 THEN ?2 ELSE origin_path END
+                  WHERE file_path = ?1",
+                params![from, to],
+            )?)
+        })
+    }
+
+    /// Rewrites `origin_path` of masters that lived right in `old_dir` (the
+    /// `{file_hash}.<ext>` files a move of the folder takes along) to point
+    /// into `new_dir`. Masters kept by name ([`Master::file_path`]) are
+    /// pointed one by one as they move ([`Self::move_master_file`]). Returns
+    /// the number of rows updated.
     pub fn relocate_master_paths(
         &self,
         old_dir: &std::path::Path,
@@ -391,7 +452,7 @@ impl Library {
         self.write(|tx| {
             let rows: Vec<(String, String)> = {
                 let mut stmt = tx.prepare_cached(
-                    "SELECT track_id, origin_path FROM master WHERE origin_path IS NOT NULL",
+                    "SELECT track_id, origin_path FROM master WHERE origin_path IS NOT NULL AND file_path IS NULL",
                 )?;
                 let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
                 mapped.collect::<rusqlite::Result<_>>()?
@@ -399,7 +460,9 @@ impl Library {
             let mut updated = 0usize;
             for (track_id, path_str) in rows {
                 let p = std::path::Path::new(&path_str);
-                if let Ok(rel) = p.strip_prefix(old_dir) {
+                if let Ok(rel) = p.strip_prefix(old_dir)
+                    && rel.components().count() == 1
+                {
                     let target = new_dir.join(rel).to_string_lossy().into_owned();
                     tx.execute(
                         "UPDATE master SET origin_path = ?2 WHERE track_id = ?1",
@@ -789,6 +852,7 @@ mod tests {
             file_hash: hash.to_owned(),
             size_bytes: 12_345_678,
             origin,
+            file_path: None,
             replicas: Vec::new(),
         }
     }
@@ -862,6 +926,95 @@ mod tests {
             lib.set_master_origin_path(TrackId::new(), "p"),
             Err(LibraryError::NotFound { .. })
         ));
+    }
+
+    /// A master kept by name carries its path through every write and read;
+    /// a torrent's master taken out of Downloads points its origin there too.
+    #[test]
+    fn a_master_kept_by_name_keeps_its_path() {
+        let lib = lib();
+        let mut m = master("h", Some(SourceOrigin::Inbox));
+        m.file_path = Some("/m/A/2001 - B/01 - C.flac".into());
+        lib.put_master(&m).unwrap();
+        assert_eq!(lib.get_master(m.track_id).unwrap().unwrap(), m);
+        assert_eq!(lib.master_files_of_hash("h").unwrap(), vec!["/m/A/2001 - B/01 - C.flac".to_owned()]);
+        assert!(lib.master_files_of_hash("other").unwrap().is_empty());
+
+        let old = master("old", Some(SourceOrigin::Inbox));
+        lib.put_master(&old).unwrap();
+        assert_eq!(lib.get_master(old.track_id).unwrap().unwrap().file_path, None, "an older master has none");
+
+        let t = master("t", torrent("ih", "Album/01.flac"));
+        lib.put_master(&t).unwrap();
+        lib.set_master_file(t.track_id, "/m/A/B/01 - C.flac").unwrap();
+        let got = lib.get_master(t.track_id).unwrap().unwrap();
+        assert_eq!(got.file_path.as_deref(), Some("/m/A/B/01 - C.flac"));
+        assert_eq!(got.origin, torrent("ih", "/m/A/B/01 - C.flac"));
+        assert!(matches!(lib.set_master_file(TrackId::new(), "p"), Err(LibraryError::NotFound { .. })));
+    }
+
+    /// A file kept by name that moves takes every row of it along.
+    #[test]
+    fn a_master_file_that_moves_takes_its_rows_along() {
+        let lib = lib();
+        let a = master("h", Some(SourceOrigin::Inbox));
+        let b = master("h", torrent("ih", "x"));
+        let c = master("other", Some(SourceOrigin::Inbox));
+        for m in [&a, &b, &c] {
+            lib.put_master(m).unwrap();
+        }
+        lib.set_master_file(a.track_id, "/old/A/01.flac").unwrap();
+        lib.set_master_file(b.track_id, "/old/A/01.flac").unwrap();
+        lib.set_master_file(c.track_id, "/old/B/01.flac").unwrap();
+        assert_eq!(
+            lib.master_files().unwrap(),
+            vec![("/old/A/01.flac".to_owned(), "h".to_owned()), ("/old/B/01.flac".to_owned(), "other".to_owned())]
+        );
+        assert_eq!(lib.move_master_file("/old/A/01.flac", "/new/A/01.flac").unwrap(), 2);
+        assert_eq!(lib.get_master(a.track_id).unwrap().unwrap().file_path.as_deref(), Some("/new/A/01.flac"));
+        let got = lib.get_master(b.track_id).unwrap().unwrap();
+        assert_eq!((got.file_path.as_deref(), got.origin), (Some("/new/A/01.flac"), torrent("ih", "/new/A/01.flac")));
+        assert_eq!(lib.get_master(c.track_id).unwrap().unwrap().file_path.as_deref(), Some("/old/B/01.flac"));
+    }
+
+    /// A move of the masters folder repoints only the flat masters it takes
+    /// along; the ones kept by name are pointed as they move.
+    #[test]
+    fn a_folder_move_leaves_masters_kept_by_name_alone() {
+        let lib = lib();
+        let old = std::path::Path::new("/old");
+        let flat = master("a", torrent("ih", "x"));
+        let named = master("b", torrent("ih", "y"));
+        let deep = master("c", torrent("ih", "z"));
+        for m in [&flat, &named, &deep] {
+            lib.put_master(m).unwrap();
+        }
+        lib.set_master_origin_path(flat.track_id, &old.join("a.flac").to_string_lossy()).unwrap();
+        lib.set_master_file(named.track_id, &old.join("A").join("B").join("01 - C.flac").to_string_lossy()).unwrap();
+        lib.set_master_origin_path(deep.track_id, &old.join("sub").join("c.flac").to_string_lossy()).unwrap();
+        assert_eq!(lib.relocate_master_paths(old, std::path::Path::new("/new")).unwrap(), 1);
+        let path = |m: &Master| match lib.get_master(m.track_id).unwrap().unwrap().origin {
+            Some(SourceOrigin::Torrent { path_in_torrent, .. }) => std::path::PathBuf::from(path_in_torrent),
+            o => panic!("{o:?}"),
+        };
+        assert_eq!(path(&flat), std::path::Path::new("/new").join("a.flac"));
+        assert_eq!(path(&named), old.join("A").join("B").join("01 - C.flac"));
+        assert_eq!(path(&deep), old.join("sub").join("c.flac"));
+    }
+
+    /// The online copy of the database is a whole, readable database.
+    #[test]
+    fn the_database_copies_itself_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(dir.path().join("library.sqlite")).unwrap();
+        let m = master("h", Some(SourceOrigin::Inbox));
+        lib.put_master(&m).unwrap();
+        let to = dir.path().join("copy.sqlite");
+        std::fs::File::create(&to).unwrap();
+        lib.backup_to(&to).unwrap();
+        let copy = Library::open(&to).unwrap();
+        assert_eq!(copy.get_master(m.track_id).unwrap().unwrap(), m);
+        assert!(Library::open_in_memory().unwrap().backup_to(&dir.path().join("x.sqlite")).is_err());
     }
 
     #[test]

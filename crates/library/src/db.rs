@@ -267,6 +267,37 @@ impl Library {
         self.read(migrations::user_version)
     }
 
+    /// Writes one consistent copy of the whole database into `dest` (a new
+    /// or empty file) with SQLite's online backup: from a connection of its
+    /// own, read-only, in one step (one read snapshot; the writer goes on
+    /// meanwhile). Blocking: never call it from the player loop.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        use rusqlite::backup::{Backup, StepResult};
+        let from = self
+            .read(|c| Ok(c.path().filter(|p| !p.is_empty()).map(std::path::PathBuf::from)))?
+            .ok_or_else(|| crate::error::LibraryError::Invalid("the library is in memory".into()))?;
+        let src = Connection::open_with_flags(&from, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        src.busy_timeout(BUSY_TIMEOUT)?;
+        let mut dst = Connection::open(dest)?;
+        {
+            let backup = Backup::new(&src, &mut dst)?;
+            let mut waits = 0;
+            loop {
+                match backup.step(-1)? {
+                    StepResult::Done => break,
+                    StepResult::More => {}
+                    StepResult::Busy | StepResult::Locked if waits < 50 => {
+                        waits += 1;
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    _ => return Err(crate::error::LibraryError::Invalid("the library stayed busy for its copy".into())),
+                }
+            }
+        }
+        dst.close().map_err(|(_, e)| e)?;
+        Ok(())
+    }
+
     /// The listening events kept from the last read, with their stamp.
     pub(crate) fn listening_kept(&self) -> Option<KeptEvents> {
         lock(&self.inner.listening).clone()
