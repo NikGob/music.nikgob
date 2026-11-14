@@ -1991,6 +1991,18 @@ mod tests {
         }
     }
 
+    /// How the wave ranks the library in a report (`NIKGOB_WAVE_MODEL`:
+    /// `on`, `off`, `both`; unset, as the constant has it): each way with
+    /// its name.
+    fn ranking_modes() -> Vec<(Option<bool>, &'static str)> {
+        match std::env::var("NIKGOB_WAVE_MODEL").as_deref() {
+            Ok("on") => vec![(Some(true), " [wave by the model]")],
+            Ok("off") => vec![(Some(false), " [wave by its pull]")],
+            Ok("both") => vec![(Some(false), " [wave by its pull]"), (Some(true), " [wave by the model]")],
+            _ => vec![(None, "")],
+        }
+    }
+
     /// Every synthetic listener, measured (`cargo test -p nikgob-recs
     /// --release eval::tests::synthetic_report -- --ignored --nocapture`).
     #[test]
@@ -2006,13 +2018,17 @@ mod tests {
             }
             let d = synthetic::user(kind, 7);
             let p = d.parts();
-            let opts = if kind == synthetic::Kind::Big {
-                Options { next: false, autoplay_points: 0, mix_days: 0, ..Options::default() }
-            } else {
-                Options { next: !quick, autoplay_points: if next_only { 0 } else { 40 }, mix_days: if next_only { 0 } else { 8 }, ..Options::default() }
-            };
-            println!("{}", evaluate(&d.name, &p, &opts).table());
+            for (k, (mode, label)) in ranking_modes().into_iter().enumerate() {
+                crate::open_world::set_model_ranking(mode);
+                let opts = if kind == synthetic::Kind::Big {
+                    Options { next: false, autoplay_points: 0, mix_days: 0, ..Options::default() }
+                } else {
+                    Options { next: !quick && k == 0, autoplay_points: if next_only { 0 } else { 40 }, mix_days: if next_only { 0 } else { 8 }, ..Options::default() }
+                };
+                println!("{}", evaluate(&format!("{}{label}", d.name), &p, &opts).table());
+            }
         }
+        crate::open_world::set_model_ranking(None);
     }
 
     /// A real library's dataset (`NIKGOB_RECS_DATASET=path.json`, written
@@ -2026,13 +2042,17 @@ mod tests {
         };
         let d: Dataset = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let p = d.parts();
-        // `NIKGOB_WAVE_TRACE`: sessions of the wave picked one by one.
-        if std::env::var_os("NIKGOB_WAVE_TRACE").is_some() {
-            for novelty in [crate::wave::NOVELTY_FAMILIAR, crate::wave::NOVELTY_BALANCE, crate::wave::NOVELTY_MORE] {
-                println!("{}", wave_trace(&p, novelty, 60));
+        for (k, (mode, label)) in ranking_modes().into_iter().enumerate() {
+            crate::open_world::set_model_ranking(mode);
+            // `NIKGOB_WAVE_TRACE`: sessions of the wave picked one by one.
+            if std::env::var_os("NIKGOB_WAVE_TRACE").is_some() {
+                for novelty in [crate::wave::NOVELTY_FAMILIAR, crate::wave::NOVELTY_BALANCE, crate::wave::NOVELTY_MORE] {
+                    println!("{label}\n{}", wave_trace(&p, novelty, 60));
+                }
             }
+            println!("{}", evaluate(&format!("{}{label}", d.name), &p, &Options { next: k == 0, ..Options::default() }).table());
         }
-        println!("{}", evaluate(&d.name, &p, &Options::default()).table());
+        crate::open_world::set_model_ranking(None);
     }
 
     /// The wave replayed against the history: its picks go by as asked,

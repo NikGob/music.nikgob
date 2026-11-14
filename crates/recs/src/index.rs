@@ -675,6 +675,60 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 }
 
+/// Stored tracks to measure many others against by the blend of both
+/// sounds ([`VectorIndex::sound_probe`]): their rows, the model's centred
+/// vectors where they have one, and the scale that brings the model's
+/// distance to bliss's.
+#[derive(Clone, Debug)]
+pub struct SoundProbe {
+    rows: Vec<(usize, Option<[f32; COMPACT_DIM]>)>,
+    mean: [f32; COMPACT_DIM],
+    ratio: f32,
+    factors: [f32; DIM],
+}
+
+impl SoundProbe {
+    /// The tracks it holds.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+impl<K: Copy + Eq + Hash> VectorIndex<K> {
+    /// A probe of the stored `keys` (each in its place; a key the index
+    /// lacks is left out and `None` stands in its place of the result of
+    /// [`Self::probe_distance`]). `None` while the model's vectors are too
+    /// few to blend ([`MIN_EMBEDDED`]): bliss alone then.
+    pub fn sound_probe(&self, keys: &[K]) -> Option<SoundProbe> {
+        if !self.blended() {
+            return None;
+        }
+        let mean = self.emb_mean();
+        let rows = keys.iter().map(|k| self.pos.get(k).map_or((usize::MAX, None), |&i| (i, self.centred(i, &mean)))).collect();
+        Some(SoundProbe { rows, mean, ratio: self.calibration(&mean), factors: self.factors() })
+    }
+
+    /// The distance of the probe's `k`-th track to the stored `key`: the
+    /// blend where both have the model's vector, else bliss's. `None` when
+    /// either is not stored.
+    pub fn probe_distance(&self, p: &SoundProbe, k: usize, key: K) -> Option<f32> {
+        let &(a, q) = p.rows.get(k)?;
+        if a == usize::MAX {
+            return None;
+        }
+        let &j = self.pos.get(&key)?;
+        let bliss = Self::dist_sq(&p.factors, self.row(a), self.row(j)).sqrt();
+        match q.as_ref().and_then(|q| self.emb_dist(q, j, &p.mean)) {
+            Some(e) => Some((1.0 - SOUND_MODEL_SHARE) * bliss + SOUND_MODEL_SHARE * p.ratio * e),
+            None => Some(bliss),
+        }
+    }
+}
+
 /// A niche measured once ([`VectorIndex::niche_probe`]) for the
 /// candidates [`VectorIndex::probe_fit`] judges: previews of new music.
 #[derive(Clone, Debug)]

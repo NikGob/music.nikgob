@@ -155,6 +155,8 @@ const RELAXED_SERVED: usize = 50;
 /// A mix leaves tracks played this recently for later (unless the pool is
 /// dry).
 const RECENT_MS: i64 = 3 * HOUR_MS;
+/// A wave's picks queued ahead that its next picks go on from, at most.
+const QUEUED_MAX: usize = 6;
 /// Within a radio's own picks a track rests until this many others
 /// played since it…
 const REPEAT_AFTER: usize = 5;
@@ -801,7 +803,18 @@ impl RadioState {
         let served: HashSet<String> = keyed.iter().map(|k| k.0.clone()).collect();
         let again = crate::wave::repeatable(&keyed);
         let cool = self.no_repeat_ms.max(NO_REPEAT_MS);
-        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool);
+        // The library songs queued after the one playing: they play first.
+        let order: Vec<TrackId> = self.served.iter().filter_map(|x| match x {
+            Item::Track(t) => Some(*t),
+            Item::Stream(_) => None,
+        }).collect();
+        let queued: Vec<TrackId> = match self.session.last().and_then(|p| order.iter().rposition(|t| *t == p.track)) {
+            Some(k) => order[k + 1..].to_vec(),
+            None if self.session.is_empty() => order.clone(),
+            None => Vec::new(),
+        };
+        let queued = &queued[queued.len().saturating_sub(QUEUED_MAX)..];
+        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued);
         self.wave_asks = picked.asks;
         if picked.scene_let_go {
             // The chip shows what plays.
