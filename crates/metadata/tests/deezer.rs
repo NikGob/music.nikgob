@@ -391,3 +391,26 @@ async fn a_songs_free_preview_is_found_and_downloaded() {
     assert_eq!(dz.preview_url(None, "Nobody", "Sora", None).await.unwrap(), None);
     assert_eq!(dz.preview_url(Some(7), "", "", None).await.unwrap().as_deref(), Some(format!("{uri}/p/7.mp3").as_str()));
 }
+
+/// A song's ISRC finds its free preview by Deezer's public lookup, whatever
+/// its credited artist and title; an unknown ISRC, or one that is no ISRC,
+/// finds none.
+#[tokio::test]
+async fn a_songs_isrc_finds_its_free_preview() {
+    let server = MockServer::start().await;
+    let uri = server.uri();
+    Mock::given(method("GET"))
+        .and(path("/track/isrc:JPAB01234567"))
+        .respond_with(json_body(&json!({ "id": 9, "title": "空 (Sora)", "isrc": "JPAB01234567", "preview": format!("{uri}/p/9.mp3") }).to_string()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/track/isrc:ZZZZZ0000000"))
+        .respond_with(json_body(&json!({ "error": { "type": "DataException", "message": "no data", "code": 800 } }).to_string()))
+        .mount(&server)
+        .await;
+    let dz = client(&server);
+    assert_eq!(dz.preview_by_isrc("jp-ab0-12-34567").await.unwrap().as_deref(), Some(format!("{uri}/p/9.mp3").as_str()));
+    assert_eq!(dz.preview_by_isrc("ZZZZZ0000000").await.unwrap(), None);
+    assert_eq!(dz.preview_by_isrc("short").await.unwrap(), None);
+}

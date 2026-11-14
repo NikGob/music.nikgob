@@ -148,9 +148,10 @@ pub(crate) struct RadioRun {
     /// New songs whose previews were heard while an extension ran: looked
     /// at again once it is applied ([`HEARD_LATER_MAX`] at most).
     heard_later: Vec<TrackId>,
-    /// The place of a new song taken out for its preview (the entry it
-    /// stood after, else before): the next pick takes it.
-    slot: Option<(u64, bool)>,
+    /// The places of the new songs taken out for their previews (the entry
+    /// each stood after, else before; [`SLOTS_MAX`] at most): the next
+    /// picks take them in the queue's order.
+    slots: Vec<(u64, bool)>,
     /// A wave whose filter has nothing left (not even to play again) in
     /// this snapshot: it is not asked again until the filter or the
     /// snapshot changes.
@@ -217,6 +218,16 @@ pub(crate) struct RadioSave {
     wave_preset: Option<v::MixKey>,
 }
 
+/// The library songs an ordinary radio's new finds are found around: a
+/// track radio's track, a list's first songs (a mix's are not of one).
+fn ordinary_seeds(seed: &RadioSeed) -> Vec<TrackId> {
+    match seed {
+        RadioSeed::Track(t) => vec![*t],
+        RadioSeed::Tracks(ts) => ts.iter().take(nikgob_recs::novelty::SEEDS_KEPT).copied().collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Every entry of the queue in play order (played, current, upcoming).
 fn queue_order(q: &crate::queue::Queue) -> Vec<Entry> {
     let mut out = q.history().to_vec();
@@ -234,6 +245,36 @@ fn misfit_slot(up: &[Entry], misfit: u64) -> Option<(u64, bool)> {
         Some(before) => Some((up[before].id, true)),
         None => up.get(at + 1).map(|e| (e.id, false)),
     }
+}
+
+/// `gone` (a misfit) leaves the queue with `own` its place: the places
+/// anchored on it move to its own, then its own joins them.
+fn reanchor(slots: &mut Vec<(u64, bool)>, gone: u64, own: Option<(u64, bool)>) {
+    match own {
+        Some(o) => {
+            for s in slots.iter_mut().filter(|s| s.0 == gone) {
+                *s = o;
+            }
+            slots.push(o);
+        }
+        None => slots.retain(|s| s.0 != gone),
+    }
+    let over = slots.len().saturating_sub(SLOTS_MAX);
+    slots.drain(..over);
+}
+
+/// The picks `entries` (in their order) take the `slots` in the queue's
+/// order, one each, while their anchors are still upcoming; the places
+/// left without a pick come back.
+fn into_slots(queue: &mut crate::queue::Queue, entries: &[u64], mut slots: Vec<(u64, bool)>) -> Vec<(u64, bool)> {
+    let at = |q: &crate::queue::Queue, s: &(u64, bool)| q.upcoming().iter().position(|e| e.id == s.0).map(|k| 2 * k + usize::from(s.1));
+    slots.retain(|s| at(queue, s).is_some());
+    slots.sort_by_key(|s| at(queue, s));
+    let left = slots.split_off(entries.len().min(slots.len()));
+    for (&entry, slot) in entries.iter().zip(slots) {
+        into_slot(queue, entry, slot);
+    }
+    left
 }
 
 /// Moves `entry` into `slot` ([`misfit_slot`]) while its anchor is still
@@ -285,6 +326,10 @@ pub(crate) struct RadioState {
 const DEFERRED_MAX: usize = 16;
 /// Previews heard during an extension kept to be looked at after it.
 const HEARD_LATER_MAX: usize = 16;
+/// The songs of the session looked at for the works of its streams.
+const STREAM_WORKS_LOOK: usize = 20;
+/// Places of misfits waiting for their replacements, at most.
+const SLOTS_MAX: usize = 8;
 /// The new picks whose seeds a wave keeps at most.
 const SEEDS_KEEP: usize = 128;
 /// Library cache key of what the waves learnt of their clusters
@@ -648,7 +693,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             heard_later: Vec::new(),
-            slot: None,
+            slots: Vec::new(),
             wave_dry: None,
             refill: None,
         };
@@ -723,7 +768,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             heard_later: Vec::new(),
-            slot: None,
+            slots: Vec::new(),
             wave_dry: None,
             refill: None,
         });
@@ -863,7 +908,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             heard_later: Vec::new(),
-            slot: None,
+            slots: Vec::new(),
             wave_dry: None,
             refill: None,
         });
@@ -1021,6 +1066,17 @@ impl Worker {
             if self.recs.radio.run.as_ref().is_some_and(|r| r.queue_gen.is_some()) {
                 state.set_upcoming(upcoming);
             }
+            // The works of the streams queued or played lately that the
+            // library's catalog lacks (the user's own, or the wave's from a
+            // pool built since): no other version of them is picked.
+            let lately: Vec<TrackId> = self.queue.upcoming().iter().map(|e| e.track).chain(self.recs.session.tracks().map(|p| p.track).collect::<Vec<_>>().into_iter().rev().take(STREAM_WORKS_LOOK)).collect();
+            let works: Vec<String> = lately
+                .into_iter()
+                .filter(|t| snap.catalog.position(*t).is_none())
+                .filter_map(|t| self.lib.stream_refs(t).ok()?.into_iter().next())
+                .map(|r| nikgob_recs::discover::stream_work_key(&r))
+                .collect();
+            state.note_stream_works(works);
             self.wave_extend(id, state, snap, local_only, n, params.seed);
 
             return;
@@ -1252,6 +1308,10 @@ impl Worker {
         for track in later {
             self.radio_preview_heard(track);
         }
+        // Places still waiting for a replacement: picked for now.
+        if self.recs.radio.run.as_ref().is_some_and(|r| r.id == id && !r.extending && !r.slots.is_empty()) {
+            self.radio_extend();
+        }
     }
 
     fn radio_extended_now(&mut self, id: u64, mut state: Engine, picks: Vec<Pick>, refill: Option<String>) {
@@ -1482,11 +1542,14 @@ impl Worker {
                 let resume = std::mem::take(&mut run.resume);
                 let shuffled = self.shuffle_radio();
                 let entries: Vec<u64> = self.queue.enqueue_path(&ids, shuffled).iter().map(|e| e.id).collect();
-                // A new song taken out for its preview: the first pick
-                // stands in its place.
-                let slot = self.recs.radio.run.as_mut().and_then(|r| r.slot.take());
-                if let (Some(slot), Some(&first)) = (slot, entries.first()) {
-                    into_slot(&mut self.queue, first, slot);
+                // New songs taken out for their previews: the picks stand
+                // in their places, in the queue's order.
+                let slots = self.recs.radio.run.as_mut().map(|r| std::mem::take(&mut r.slots)).unwrap_or_default();
+                let left = into_slots(&mut self.queue, &entries, slots);
+                if let Some(run) = self.recs.radio.run.as_mut()
+                    && !entries.is_empty()
+                {
+                    run.slots = left;
                 }
                 self.explain_entries(&entries, whys);
                 if let Some(run) = self.recs.radio.run.as_mut() {
@@ -1835,7 +1898,7 @@ impl Worker {
 
     /// The new song `track` radio `id` queued was heard: one that no longer
     /// fits leaves the queue before it plays and the radio's next pick
-    /// takes its very place ([`RadioRun::slot`]); the rest of the queue
+    /// takes its very place ([`RadioRun::slots`]); the rest of the queue
     /// stays as it is, the song itself kept served (never picked again; not
     /// counted against anything: the user did nothing).
     fn radio_heard(&mut self, id: u64, track: TrackId, fits: bool) {
@@ -1850,7 +1913,8 @@ impl Worker {
         let Some(at) = up.iter().position(|e| e.track == track && run.added.contains(&e.id)) else { return };
         let gone = up[at];
         log::info!("radio «{}»: a new song queued no longer fits by its preview; it is replaced", run.title);
-        run.slot = misfit_slot(up, gone.id);
+        let own = misfit_slot(up, gone.id);
+        reanchor(&mut run.slots, gone.id, own);
         run.added.remove(&gone.id);
         run.queued.0 = run.queued.0.saturating_sub(1);
         run.queued.1 = run.queued.1.saturating_sub(1);
@@ -2094,7 +2158,13 @@ impl Worker {
             .iter()
             .map(|t| snap.as_ref().map_or_else(|| NewTrack::from_stream(t, None), |s| s.new_track(t)))
             .collect();
+        // An ordinary radio's finds are of its seed: the log of new music
+        // learns from them how far its finds are to be trusted.
+        let seeds: Vec<TrackId> = ordinary_seeds(&run.state.seed).into_iter().filter(|t| snap.as_ref().is_some_and(|s| s.catalog.position(*t).is_some())).collect();
         for t in fresh {
+            if !seeds.is_empty() && run.seeds.len() < SEEDS_KEEP {
+                run.seeds.entry(t.id.clone()).or_insert_with(|| seeds.clone());
+            }
             run.pool.insert(t.id.clone(), t);
         }
         if run.extending {
@@ -2376,7 +2446,7 @@ impl Worker {
             stale: false,
             forgotten: Vec::new(),
             heard_later: Vec::new(),
-            slot: None,
+            slots: Vec::new(),
             wave_dry: None,
             refill: None,
         });
@@ -2454,6 +2524,55 @@ mod tests {
         assert_eq!(q.upcoming().last().map(|e| e.id), Some(late.id));
         // Alone in the queue: no place to keep.
         assert_eq!(misfit_slot(&[misfit], misfit.id), None);
+    }
+
+    /// Two new songs taken out before the picks come (two previews heard
+    /// during one extension): each pick takes one place, in the queue's
+    /// order, around the user's song; two side by side, both before the
+    /// radio's tail; one pick for two places keeps the second waiting.
+    #[test]
+    fn two_misfits_are_replaced_each_in_its_place() {
+        let run = |shape: &[&str]| {
+            let mut q = crate::queue::Queue::default();
+            let tracks: Vec<TrackId> = (0..=shape.len()).map(|_| TrackId::new()).collect();
+            q.set_path(&tracks, None, false);
+            let up: Vec<Entry> = q.upcoming().to_vec();
+            let mut slots = Vec::new();
+            for (k, name) in shape.iter().enumerate() {
+                if name.starts_with('m') {
+                    let now: Vec<Entry> = q.upcoming().to_vec();
+                    reanchor(&mut slots, up[k].id, misfit_slot(&now, up[k].id));
+                    assert!(q.remove(up[k].id));
+                }
+            }
+            (q, up, slots)
+        };
+        let (mut q, up, slots) = run(&["m1", "user", "m2", "tail"]);
+        let picks: Vec<u64> = q.enqueue(&[TrackId::new(), TrackId::new()]).iter().map(|e| e.id).collect();
+        assert!(into_slots(&mut q, &picks, slots).is_empty());
+        let order: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
+        assert_eq!(order, vec![picks[0], up[1].id, picks[1], up[3].id]);
+        let (mut q, up, slots) = run(&["m1", "m2", "tail"]);
+        let picks: Vec<u64> = q.enqueue(&[TrackId::new(), TrackId::new()]).iter().map(|e| e.id).collect();
+        assert!(into_slots(&mut q, &picks, slots).is_empty());
+        let order: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
+        assert_eq!(order, vec![picks[0], picks[1], up[2].id]);
+        let (mut q, up, slots) = run(&["m1", "user", "m2", "tail"]);
+        let one: Vec<u64> = q.enqueue(&[TrackId::new()]).iter().map(|e| e.id).collect();
+        let left = into_slots(&mut q, &one, slots);
+        assert_eq!(left, vec![(up[1].id, true)], "the second place waits");
+        let order: Vec<u64> = q.upcoming().iter().map(|e| e.id).collect();
+        assert_eq!(order, vec![one[0], up[1].id, up[3].id]);
+    }
+
+    /// An ordinary radio's new finds are of its seed: a track's radio, its
+    /// track; a list's, its first songs; a mix's, none.
+    #[test]
+    fn an_ordinary_radios_finds_are_of_its_seed() {
+        let (a, b) = (TrackId::new(), TrackId::new());
+        assert_eq!(ordinary_seeds(&RadioSeed::Track(a)), vec![a]);
+        assert_eq!(ordinary_seeds(&RadioSeed::Tracks(vec![a, b])), vec![a, b]);
+        assert!(ordinary_seeds(&RadioSeed::Discover).is_empty());
     }
 
     /// What autoplay and a radio added comes back by its places after a

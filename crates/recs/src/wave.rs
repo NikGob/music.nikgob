@@ -795,6 +795,7 @@ pub fn pick(
     cool_ms: i64,
     queued: &[Ahead],
     skipped_new: &[RemoteId],
+    works: &[String],
 ) -> Picked {
     bandit.ensure(ctx, seed);
     bandit.stamp(ctx, seed);
@@ -833,7 +834,7 @@ pub fn pick(
         let filter = WaveFilter { scene, novelty: bandit.novelty_of(user.novelty), ..user };
         let want = (n - out.len()).min(usize::from(bandit.block_left.max(1)));
         let (c, p) = if scene == user.scene { (ctx, pool) } else { (&within, pool_in) };
-        let next = crate::open_world::next_turn(c, p, &filter, session, want, &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[] });
+        let next = crate::open_world::next_turn(c, p, &filter, session, want, &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[], works });
         asks.add(m, p, &filter, &next);
         if next.picks.is_empty() {
             dry.push(k);
@@ -858,7 +859,7 @@ pub fn pick(
             break;
         }
         let before = out.len();
-        let next = crate::open_world::next_turn(ctx, pool, f, session, n - out.len(), &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[] });
+        let next = crate::open_world::next_turn(ctx, pool, f, session, n - out.len(), &served, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[], works });
         asks.add(m, pool, f, &next);
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
@@ -866,7 +867,7 @@ pub fn pick(
             out.push(p);
         }
         if out.len() < n {
-            let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[] });
+            let again = repeats(ctx, pool, f, session, n - out.len(), &served, repeatable, cool_ms, WaveTurn { queued: &ahead, seed: run_seed, skipped_new, again: &[], works });
             for p in again {
                 served.insert(served_key(&p.item, &keys));
                 ahead.push(ahead_of(&p.item));

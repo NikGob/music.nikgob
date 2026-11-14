@@ -150,6 +150,8 @@ use crate::taste::{DayPart, HOUR_MS};
 
 /// Served items remembered (never repeated while remembered).
 const SERVED_CAP: usize = 2_000;
+/// The works of new songs a radio keeps known ([`RadioState::note_stream_works`]).
+const STREAM_WORKS_KEEP: usize = 256;
 /// When the library runs dry, only this many last served stay excluded.
 const RELAXED_SERVED: usize = 50;
 /// A mix leaves tracks played this recently for later (unless the pool is
@@ -412,6 +414,12 @@ pub struct RadioState {
     /// runtime told them for the next extension ([`Self::set_upcoming`]).
     #[serde(skip)]
     upcoming: Option<Vec<Item>>,
+    /// The works of the new songs a wave served and of the streams the
+    /// session queued or played ([`crate::discover::stream_work_key`],
+    /// [`STREAM_WORKS_KEEP`] at most): another version of them is not
+    /// picked even once the pool no longer holds them.
+    #[serde(default)]
+    stream_works: VecDeque<String>,
 }
 
 fn no_repeat_default() -> i64 {
@@ -495,6 +503,7 @@ impl RadioState {
             wave_asks: crate::wave::WaveAsks::default(),
             wave_memory: None,
             upcoming: None,
+            stream_works: VecDeque::new(),
             seed,
         };
         match &s.seed {
@@ -879,7 +888,8 @@ impl RadioState {
             .collect();
         let queued = &queued[queued.len().saturating_sub(QUEUED_MAX)..];
         let skipped_new: Vec<RemoteId> = self.skipped.iter().chain(&self.removed).filter_map(|i| if let Item::Stream(r) = i { Some(r.clone()) } else { None }).collect();
-        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued, &skipped_new);
+        let works: Vec<String> = self.stream_works.iter().cloned().collect();
+        let picked = crate::wave::pick(bandit, &wave, ctx, pool, &self.session, n, &served, &again, cool, queued, &skipped_new, &works);
         self.wave_asks = picked.asks;
         if picked.scene_let_go {
             // The chip shows what plays.
@@ -889,6 +899,10 @@ impl RadioState {
             self.seed = RadioSeed::Wave(wave);
         }
         let out: Vec<Pick> = picked.picks.into_iter().map(|p| Pick { reason: if p.new { Reason::New } else { Reason::Favourite }, item: p.item }).collect();
+        // The new songs' works stay known whatever the pool becomes.
+        let picked_works: Vec<String> =
+            out.iter().filter_map(|p| if let Item::Stream(r) = &p.item { pool.iter().find(|c| c.track.id == *r).map(|c| crate::discover::stream_work_key(&c.track)) } else { None }).collect();
+        self.note_stream_works(picked_works);
         for p in &out {
             self.served.push_back(p.item.clone());
         }
@@ -977,6 +991,19 @@ impl RadioState {
     /// over).
     pub fn set_upcoming(&mut self, items: Vec<Item>) {
         self.upcoming = Some(items);
+    }
+
+    /// The works of streams queued or played this session (the runtime
+    /// tells them): a wave picks no other version of them.
+    pub fn note_stream_works(&mut self, works: impl IntoIterator<Item = String>) {
+        for w in works {
+            if !w.is_empty() && !self.stream_works.contains(&w) {
+                self.stream_works.push_back(w);
+            }
+        }
+        while self.stream_works.len() > STREAM_WORKS_KEEP {
+            self.stream_works.pop_front();
+        }
     }
 
     /// What waves learnt before (the runtime keeps it): the wave's

@@ -421,6 +421,24 @@ impl Deezer {
         Ok(found.and_then(|t| t.preview))
     }
 
+    /// The free preview of the song of `isrc` (Deezer's public lookup by
+    /// ISRC, no login): the very recording, whatever its credited artist
+    /// and title. `None` when Deezer has no such track or no preview of it;
+    /// an ISRC not of twelve letters and digits is not asked.
+    pub async fn preview_by_isrc(&self, isrc: &str) -> Result<Option<String>> {
+        let isrc: String = isrc.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect();
+        if isrc.len() != 12 {
+            return Ok(None);
+        }
+        // Deezer answers an unknown ISRC with «no data»: no track.
+        let t = match self.get::<DeezerTrack>(&format!("track/isrc:{isrc}"), &[]).await {
+            Ok(t) => t,
+            Err(MetadataError::NotFound) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok((t.id > 0).then_some(t.preview).flatten().filter(|p| !p.is_empty()))
+    }
+
     /// Downloads a preview `url` (an MP3 of Deezer's CDN).
     pub async fn download_preview(&self, url: &str) -> Result<Vec<u8>> {
         let url = Url::parse(url).map_err(|e| MetadataError::InvalidArgument(format!("bad preview URL: {e}")))?;

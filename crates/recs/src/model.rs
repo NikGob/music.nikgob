@@ -1407,7 +1407,7 @@ impl UserModel {
         // A day that brought more than a batch is the library's import, not
         // new arrivals.
         let mut per_day: HashMap<i64, usize> = HashMap::new();
-        for t in catalog.tracks().iter().filter(|t| t.local && t.added_at > 0) {
+        for t in catalog.tracks().iter().filter(|t| t.local && t.added_at > 0 && t.added_at <= now) {
             *per_day.entry(t.added_at.div_euclid(DAY_MS)).or_default() += 1;
         }
         let arrived: HashMap<u32, UnixMs> = catalog
@@ -3251,5 +3251,23 @@ pub(crate) mod tests {
         assert_eq!(m.arrival_at(3), 0.0, "played");
         assert_eq!(m.arrival_at(4), 0.0, "no file");
         assert_eq!(m.arrival_at(5), 0.0, "no time known");
+    }
+
+    /// A day's files are counted as they had come by the moment: more of
+    /// that day coming later (a replay's catalog holds them already) do not
+    /// make the morning's an import.
+    #[test]
+    fn a_days_import_counts_only_what_had_come() {
+        let day = T0.div_euclid(DAY_MS) * DAY_MS;
+        let now = day + 9 * HOUR_MS;
+        let mut tracks: Vec<crate::taste::TrackInfo> = (0..50u128).map(|i| info(i, &[i as u32], None).with_added(day + HOUR_MS)).collect();
+        tracks.extend((50..50 + ARRIVAL_BATCH as u128 + 1).map(|i| info(i, &[i as u32], None).with_added(day + 15 * HOUR_MS)));
+        let cat = Catalog::new(tracks);
+        let idx = VectorIndex::new();
+        let m = UserModel::build(&cat, &TasteInput::default(), ModelInput { index: &idx, types: None, weights: None, graph: None }, now);
+        assert!(m.arrival_at(0) > 0.9, "the morning's files are new arrivals");
+        assert_eq!(m.arrival_at(60), 0.0, "not come yet");
+        let later = UserModel::build(&cat, &TasteInput::default(), ModelInput { index: &idx, types: None, weights: None, graph: None }, day + 20 * HOUR_MS);
+        assert_eq!(later.arrival_at(0), 0.0, "once the day brought an import, none of it");
     }
 }

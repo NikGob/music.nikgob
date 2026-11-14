@@ -273,6 +273,17 @@ pub(crate) struct DiscoverState {
     force: bool,
     /// The first request of this run waited its gap (no burst at start-up).
     warmed: bool,
+    /// The discoveries ranked for previews ([`Worker::discovery_preview_next`]).
+    preview_rank: Option<PreviewRank>,
+}
+
+/// The discoveries in the order their previews are worth, for the
+/// discoveries and snapshot of `key`, with the library tracks of those
+/// looked at ([`PREVIEW_LOOK`] at most).
+pub(crate) struct PreviewRank {
+    key: (usize, Option<RemoteId>, usize),
+    order: Vec<StreamTrack>,
+    ids: HashMap<RemoteId, Option<TrackId>>,
 }
 
 impl DiscoverState {
@@ -536,14 +547,70 @@ impl Worker {
     /// first found. The first [`PREVIEW_LOOK`] are weighed. `only`: of
     /// these alone (the songs a free preview was looked for already).
     pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>, youtube_only: bool, only: Option<&HashSet<TrackId>>) -> Option<(TrackId, StreamTrack)> {
+        let key = self.preview_rank_key()?;
+        // Ranked once for the discoveries and the snapshot (not on every
+        // step of the analysis job), each song's library track looked up
+        // once as it is reached.
+        let mut rank = match self.recs.discover.preview_rank.take() {
+            Some(r) if r.key == key => r,
+            _ => PreviewRank { key, order: self.preview_ranking(), ids: HashMap::new() },
+        };
+        let index = self.analysis.index().clone();
+        let mut chosen = None;
+        for t in &rank.order {
+            if youtube_only && t.id.service != Service::Youtube {
+                continue;
+            }
+            let id = *rank.ids.entry(t.id.clone()).or_insert_with(|| self.lib.track_by_remote(&t.id).ok().flatten());
+            match id {
+                Some(id) => {
+                    if tried.contains(&id) || only.is_some_and(|o| !o.contains(&id)) || index.read().contains(id) {
+                        continue;
+                    }
+                    chosen = Some((Some(id), t.clone()));
+                }
+                // No track yet: never tried, never looked for free; a row
+                // only for the one chosen.
+                None if only.is_some() => continue,
+                None => chosen = Some((None, t.clone())),
+            }
+            break;
+        }
+        let picked = match chosen {
+            Some((Some(id), t)) => Some((id, t)),
+            Some((None, t)) => {
+                let id = self.upsert_streams(std::slice::from_ref(&t)).first().copied();
+                if let Some(id) = id {
+                    rank.ids.insert(t.id.clone(), Some(id));
+                }
+                id.map(|id| (id, t))
+            }
+            None => None,
+        };
+        self.recs.discover.preview_rank = Some(rank);
+        picked
+    }
+
+    /// What [`PreviewRank`] is ranked for: the discoveries (their count and
+    /// first song) and the snapshot.
+    fn preview_rank_key(&self) -> Option<(usize, Option<RemoteId>, usize)> {
+        let found = self.recs.discover.found.as_ref()?;
+        let snap = self.snapshot().map_or(0, |s| Arc::as_ptr(&s) as usize);
+        Some((found.tracks.len(), found.tracks.first().map(|t| t.id.clone()), snap))
+    }
+
+    /// The first [`PREVIEW_LOOK`] discoveries by what a preview of each is
+    /// worth ([`nikgob_recs::previews`]).
+    fn preview_ranking(&self) -> Vec<StreamTrack> {
         use nikgob_recs::previews::{PreviewCandidate, preview_order};
-        let found = self.recs.discover.found.clone()?;
+        let Some(found) = self.recs.discover.found.as_ref() else { return Vec::new() };
         let snap = self.snapshot();
         let seeds = self.discovery_seeds();
-        let list: Vec<(usize, &StreamTrack)> = found.tracks.iter().take(PREVIEW_LOOK).enumerate().filter(|(_, t)| !youtube_only || t.id.service == Service::Youtube).collect();
+        let list: Vec<&StreamTrack> = found.tracks.iter().take(PREVIEW_LOOK).collect();
         let cands: Vec<PreviewCandidate> = list
             .iter()
-            .map(|&(rank, t)| {
+            .enumerate()
+            .map(|(rank, t)| {
                 let (agree, strict) = snap.as_ref().map_or((None, false), |s| {
                     let near: Vec<usize> = seeds.get(&stream_song_key(t)).map(|(ts, _)| ts.iter().filter_map(|id| s.model.position(*id)).collect()).unwrap_or_default();
                     seeds_doubt(s, &near)
@@ -552,18 +619,7 @@ impl Worker {
                 PreviewCandidate { rank, cut: DISCOVERIES, soon: false, agree, known_artist, strict }
             })
             .collect();
-        for k in preview_order(&cands) {
-            let t = list[k].1;
-            let id = match self.lib.track_by_remote(&t.id).ok().flatten() {
-                Some(id) => id,
-                None => *self.upsert_streams(std::slice::from_ref(t)).first()?,
-            };
-            if tried.contains(&id) || only.is_some_and(|o| !o.contains(&id)) || self.analysis.index().read().contains(id) {
-                continue;
-            }
-            return Some((id, t.clone()));
-        }
-        None
+        preview_order(&cands).into_iter().map(|k| list[k].clone()).collect()
     }
 
 
