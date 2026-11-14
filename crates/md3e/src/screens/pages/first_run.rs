@@ -905,7 +905,7 @@ fn history(ui: &mut Ui, pages: &mut PageState, out: &mut Vec<Command>) {
                 // came: the buttons alone, one wrapped row.
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    if spotify && ui.add(Button::new("Выгрузка Spotify").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-sp-export")).clicked() {
+                    if spotify && ui.add(Button::new("Spotify").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-sp-export")).clicked() {
                         settings::open_url(SPOTIFY_EXPORT);
                     }
                     if youtube && ui.add(Button::new("Google Takeout").icon(Icon::OpenInNew).style(Style::Tonal).size(Size::S).id_salt("first-run-takeout")).clicked() {
