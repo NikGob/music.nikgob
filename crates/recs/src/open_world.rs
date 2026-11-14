@@ -97,6 +97,11 @@ const GATHER: usize = 200;
 const WAVE_JITTER: f32 = 0.15;
 /// A simulated pick plays this long ([`LibStepper`]).
 const SIM_MS: i64 = 200_000;
+/// A pick by the model stands this much lower for each song of its artist
+/// among the last [`SPREAD_LOOK`] of the session, the queue and the picks
+/// (the radio's rules keep an artist out of three running only).
+const ARTIST_SPREAD: f32 = 0.3;
+const SPREAD_LOOK: usize = 12;
 /// Its filter's new songs are short when fewer than the share asks of a
 /// pick and this many more are left: a block of the wave.
 pub const NEW_RESERVE: usize = crate::wave::BLOCK_MAX as usize;
@@ -578,7 +583,7 @@ fn next_ranked(
     let mut seeds: Vec<(usize, f32)> = session
         .tracks()
         .rev()
-        .filter(|p| Session::played_through(p, m))
+        .filter(|p| p.ended != Ended::Early)
         .filter_map(|p| m.position(p.track))
         .take(WALK_SEEDS)
         .enumerate()
@@ -726,7 +731,8 @@ fn next_ranked(
 /// with the filter's best by the wave's own pull ([`GATHER`]), and all are
 /// ranked by the one value; the rules of a radio keep them apart (an
 /// artist within three, an album twice within ten, a world thrice running)
-/// beside the wave's own artist cap. The album's own pull (the next on it,
+/// beside the wave's own artist cap, and an artist heard lately stands
+/// lower ([`ARTIST_SPREAD`]). The album's own pull (the next on it,
 /// another's first, the same album, the same song, a song of the session)
 /// is left out: a wave is no album.
 struct LibStepper<'a> {
@@ -808,6 +814,8 @@ impl<'a> LibStepper<'a> {
         for c in cands {
             let value = library_value(m, &mo, &self.weights, c, push.as_ref()) + WAVE_JITTER * Rng::derive(self.seed, c as u64).f32();
             let (a, b, w) = self.seen_of(c);
+            // An artist heard lately stands lower the more it was.
+            let value = value - ARTIST_SPREAD * self.seq.iter().rev().take(SPREAD_LOOK).filter(|x| x.0 == a).count() as f32;
             let over = per.get(&artist(c)).copied().unwrap_or(0) >= cap;
             let broken = self.rules.weighted(&seen, (&a[..], b, w)) + 2 * usize::from(over);
             if best.is_none_or(|(k, v, _)| broken < k || (broken == k && value > v)) {
@@ -1018,7 +1026,8 @@ mod tests {
 
     /// The model's picks keep a radio's rules: no artist twice within
     /// three picks, no album a third time within ten, no world thrice
-    /// running — the queue before them counted.
+    /// running — the queue before them counted; an artist heard lately
+    /// stands lower.
     #[test]
     fn the_models_picks_keep_apart() {
         let model = listener();
@@ -1034,6 +1043,12 @@ mod tests {
                 assert!(w.is_none() || !(model.world_at(picks[k - 1]) == w && model.world_at(picks[k - 2]) == w), "a world thrice running");
             }
         }
+        // An artist heard lately stands lower: twice at most in twelve.
+        let mut per: HashMap<Option<ArtistId>, usize> = HashMap::new();
+        for &i in &picks {
+            *per.entry(model.main_artist_at(i)).or_default() += 1;
+        }
+        assert!(per.iter().all(|(a, k)| a.is_none() || *k <= 2), "{per:?}");
         // A song queued: its artist does not come right after it.
         let queued = [model.id(picks[0])];
         let after = by_model(&model, None, &Session::default(), 3, WaveTurn { queued: &queued, seed: 0 });

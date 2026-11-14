@@ -1458,17 +1458,15 @@ impl UserModel {
         let sess: Vec<(usize, Ended, EventContext)> =
             session.tracks().filter_map(|p| Some((self.position(p.track)?, p.ended, p.context))).collect();
         let prev = session.last().and_then(|p| self.position(p.track));
-        // The graphs around the last three played through.
+        // The graphs around the last three not skipped early.
         let mut graph_near: HashMap<usize, f32> = HashMap::new();
         let mut graph_artists: HashMap<ArtistId, f32> = HashMap::new();
         let mut pgraph_near: HashMap<usize, f32> = HashMap::new();
-        // What played through (to its end or its outro, liked, or playing
-        // still): a skip past the half is no seed either.
-        let through: Vec<usize> = if rank {
-            session.tracks().rev().filter(|p| Session::played_through(p, self)).filter_map(|p| self.position(p.track)).collect()
-        } else {
-            Vec::new()
-        };
+        // What was not skipped early: a skip past its first 30 s (even
+        // before its half) still tells what the session goes on from — only
+        // what played through seeded worse (autoplay's and the wave's
+        // replays of the history).
+        let through: Vec<usize> = if rank { sess.iter().rev().filter(|(_, e, _)| *e != Ended::Early).map(|x| x.0).collect() } else { Vec::new() };
         let recent: Vec<usize> = through.iter().take(3).copied().collect();
         let mut bag_near: HashMap<usize, f32> = HashMap::new();
         for (k, s) in through.iter().take(BAG_WINDOW).enumerate() {
@@ -2823,33 +2821,5 @@ pub(crate) mod tests {
         assert!(same < other - 0.05, "the skipped genre is pushed harder: {same} {other}");
         assert!(m.push_probe(&Session::default(), Some(&idx)).is_none());
         assert!(m.push_probe(&s, None).is_none());
-    }
-
-    /// What was listened with a song in sessions before follows it only
-    /// when it played through: a skip past its half seeds nothing.
-    #[test]
-    fn only_what_played_through_seeds_the_session() {
-        let cat = Catalog::new((0..3u128).map(|i| info(i, &[i as u32], Some(i)).with_duration(Some(200_000))));
-        let mut events = Vec::new();
-        let mut ts = T0 - 10 * DAY_MS;
-        for _ in 0..4 {
-            for t in [1u128, 2] {
-                events.push(Play::new(tid(t), ts, EventType::Start, Some(0)));
-                ts += 200_000;
-                events.push(Play::new(tid(t), ts, EventType::Complete, Some(200_000)));
-            }
-            ts += DAY_MS;
-        }
-        let idx = VectorIndex::new();
-        let m = UserModel::build(&cat, &TasteInput { events, ..TasteInput::default() }, ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
-        let two = m.position(tid(2)).unwrap();
-        let session = |ended: Ended, at: u32| {
-            let mut s = Session::default();
-            s.start(tid(1), T0 - 300_000, EventContext::Library, Some(EventOrigin::Manual));
-            s.end_at(tid(1), ended, at, Some(200_000), false);
-            s
-        };
-        assert!(m.moment(&session(Ended::Complete, 200_000), T0).bag_near.contains_key(&two));
-        assert!(!m.moment(&session(Ended::Late, 130_000), T0).bag_near.contains_key(&two), "skipped past its half");
     }
 }
