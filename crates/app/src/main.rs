@@ -1137,16 +1137,19 @@ mod prefs_tests {
         assert_eq!(parse_prefs(&serde_json::to_vec(&p).unwrap()).unwrap().sound_device, SoundDevice::Gpu);
     }
 
-    /// Revision 5: the player's lyrics button is hidden by default; prefs
-    /// from before it hide it once, a button shown since stays.
+    /// Revision 5 hid the player's lyrics button, revision 6 shows it again
+    /// by default: prefs from before 6 show it once, a button hidden since
+    /// stays hidden.
     #[test]
-    fn the_lyrics_button_goes_once() {
-        let old = parse_prefs(br#"{"player_buttons":{"lyrics":true,"queue":true},"lyrics_rev":4}"#).unwrap();
-        assert!(!old.player_buttons.lyrics && old.player_buttons.queue);
+    fn the_lyrics_button_comes_back_once() {
+        let old = parse_prefs(br#"{"player_buttons":{"lyrics":false,"queue":true},"lyrics_rev":5}"#).unwrap();
+        assert!(old.player_buttons.lyrics && old.player_buttons.queue);
         assert_eq!(old.lyrics_rev, nikgob_view::LYRICS_REV);
-        let since = parse_prefs(br#"{"player_buttons":{"lyrics":true},"lyrics_rev":5}"#).unwrap();
-        assert!(since.player_buttons.lyrics, "shown since: stays");
-        assert!(!prefs_of(None).player_buttons.lyrics);
+        let older = parse_prefs(br#"{"player_buttons":{"lyrics":true},"lyrics_rev":4}"#).unwrap();
+        assert!(older.player_buttons.lyrics);
+        let since = parse_prefs(br#"{"player_buttons":{"lyrics":false},"lyrics_rev":6}"#).unwrap();
+        assert!(!since.player_buttons.lyrics, "hidden since: stays");
+        assert!(prefs_of(None).player_buttons.lyrics);
         let again = parse_prefs(&serde_json::to_vec(&since).unwrap()).unwrap();
         assert_eq!(again, since);
     }

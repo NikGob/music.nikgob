@@ -1533,8 +1533,8 @@ fn without_quoted(text: &str) -> String {
 /// control; 3 turned word timing for the playing song on and moved the
 /// lead from [`OLD_LYRICS_LEAD`] to [`LYRICS_LEAD`]; 4 made «По слогам»
 /// the unit of the lyrics' animations ([`Prefs::lyrics_unit`]); 5 hid the
-/// player's lyrics button (the key L stays).
-pub const LYRICS_REV: u8 = 5;
+/// player's lyrics button (the key L stays); 6 shows it again by default.
+pub const LYRICS_REV: u8 = 6;
 
 /// The defaults of «Перемешивание» the prefs follow ([`Prefs::shuffle_rev`]).
 pub const SHUFFLE_REV: u8 = 1;
@@ -2463,6 +2463,11 @@ impl Prefs {
             // The player's lyrics button is hidden by default now (the key
             // L opens the lyrics): it goes once; shown again since, it stays.
             self.player_buttons.lyrics = false;
+        }
+        if stored < 6 {
+            // The lyrics button is back by default: it shows once; hidden
+            // again since, it stays hidden.
+            self.player_buttons.lyrics = true;
         }
 
         self.lyrics_rev = LYRICS_REV;
