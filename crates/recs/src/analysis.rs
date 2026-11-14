@@ -23,6 +23,8 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 
 use crate::embedding::{EmbedSum, SoundModel};
+use crate::sketch::{EDGE_MIN_TRACK, EDGE_SECONDS, Edge, EdgeProbe, Loudness, SoundSketch};
+use crate::styles::StyleSum;
 
 /// The rate bliss analyses at.
 pub const SAMPLE_RATE: u32 = 22_050;
@@ -312,6 +314,32 @@ pub fn windows(duration: Option<f64>) -> Vec<Window> {
     }
 }
 
+/// What a window of a file's plan is for ([`file_plan`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// An analysis window: bliss, the sound model, the crest.
+    Main,
+    /// The file's first seconds, for its head ([`crate::sketch::Edge`])…
+    Head,
+    /// …and its last ones, for its tail. Neither reaches bliss or the model.
+    Tail,
+}
+
+/// The windows of a file `duration` seconds long, in the order they lie:
+/// its [`windows`] and, for a file of [`EDGE_MIN_TRACK`] or more, its
+/// first and last [`EDGE_SECONDS`] around them (they never overlap the
+/// analysis windows there).
+pub fn file_plan(duration: Option<f64>) -> Vec<(Window, Part)> {
+    let main = windows(duration).into_iter().map(|w| (w, Part::Main));
+    match duration {
+        Some(d) if d.is_finite() && d >= EDGE_MIN_TRACK => std::iter::once((Window { start: 0.0, len: EDGE_SECONDS }, Part::Head))
+            .chain(main)
+            .chain(std::iter::once((Window { start: d - EDGE_SECONDS, len: EDGE_SECONDS }, Part::Tail)))
+            .collect(),
+        _ => main.collect(),
+    }
+}
+
 /// The window of a preview of new music (the head of a stream, its first
 /// minute or so): [`PREVIEW_SECONDS`] from [`PREVIEW_START`], or from the
 /// start of a song too short for that.
@@ -328,7 +356,10 @@ pub struct Analysed {
     /// The sound model's raw vector, the mean of the windows'; `None` when
     /// there is no model.
     pub embedding: Option<Result<Vec<f32>, AnalysisError>>,
-    /// Seconds of audio taken.
+    /// The crest of the analysis windows, the edges when the plan had them,
+    /// and the styles when the model gave them ([`crate::sketch`]).
+    pub sketch: SoundSketch,
+    /// Seconds of audio taken in the analysis windows.
     pub seconds: f64,
 }
 
@@ -357,11 +388,18 @@ pub struct WindowedAnalyzer<'m> {
     /// The current window at the model's rate.
     model_buf: Vec<f32>,
     sum: EmbedSum,
+    styles: StyleSum,
     mono: Vec<f32>,
     frames_in_window: u64,
     frames_total: u64,
     error: Option<AnalysisError>,
     model_error: Option<AnalysisError>,
+    /// What each window of the plan is for (all [`Part::Main`] unless told).
+    parts: Vec<Part>,
+    loudness: Loudness,
+    edge: Option<EdgeProbe>,
+    head: Option<Edge>,
+    tail: Option<Edge>,
 }
 
 impl<'m> WindowedAnalyzer<'m> {
@@ -381,17 +419,40 @@ impl<'m> WindowedAnalyzer<'m> {
             bliss: Vec::new(),
             model_buf: Vec::new(),
             sum: EmbedSum::default(),
+            styles: StyleSum::default(),
             mono: Vec::new(),
             frames_in_window: 0,
             frames_total: 0,
             error: None,
             model_error: None,
+            parts: Vec::new(),
+            loudness: Loudness::new(sample_rate),
+            edge: None,
+            head: None,
+            tail: None,
         })
+    }
+
+    /// What each window of the plan is for ([`file_plan`]).
+    pub fn with_parts(mut self, parts: Vec<Part>) -> Self {
+        self.parts = parts;
+        self
+    }
+
+    fn part(&self, window: usize) -> Part {
+        self.parts.get(window).copied().unwrap_or(Part::Main)
     }
 
     fn open(&mut self, window: usize) -> Result<(), AnalysisError> {
         self.window = Some(window);
         self.frames_in_window = 0;
+        match self.part(window) {
+            Part::Main => {}
+            edge => {
+                self.edge = Some(EdgeProbe::new(self.rate_in, edge == Part::Head));
+                return Ok(());
+            }
+        }
         if self.want_bliss && self.rate_in != SAMPLE_RATE {
             self.bliss_rs = Some(ToRate::new(self.rate_in, SAMPLE_RATE)?);
         }
@@ -406,8 +467,20 @@ impl<'m> WindowedAnalyzer<'m> {
     /// Ends the current window: the resamplers' tails, and the model's pass
     /// over it.
     fn close(&mut self) -> Result<(), AnalysisError> {
-        if self.window.take().is_none() {
+        let Some(window) = self.window.take() else {
             return Ok(());
+        };
+        match self.part(window) {
+            Part::Main => self.loudness.end_window(),
+            edge => {
+                let found = self.edge.take().and_then(EdgeProbe::finish);
+                if edge == Part::Head {
+                    self.head = found;
+                } else {
+                    self.tail = found;
+                }
+                return Ok(());
+            }
         }
         if let Some(mut rs) = self.bliss_rs.take() {
             rs.finish(&mut self.bliss)?;
@@ -419,8 +492,13 @@ impl<'m> WindowedAnalyzer<'m> {
             let secs = self.model_buf.len() as f64 / f64::from(m.sample_rate());
             // Less than a second says nothing (a seam's leftover).
             if secs >= 1.0 && self.model_error.is_none() {
-                match m.embed(&self.model_buf) {
-                    Ok(v) => self.sum.add(&v, secs),
+                match m.embed_with_styles(&self.model_buf) {
+                    Ok((v, styles)) => {
+                        self.sum.add(&v, secs);
+                        if let Some(s) = styles {
+                            self.styles.add(&s, secs);
+                        }
+                    }
                     Err(e) => self.model_error = Some(e),
                 }
             }
@@ -445,9 +523,14 @@ impl<'m> WindowedAnalyzer<'m> {
         let cap = MAX_WINDOW_SECONDS * u64::from(self.rate_in);
         let frames = (interleaved.len() / ch).min(cap.saturating_sub(self.frames_in_window) as usize);
         self.frames_in_window += frames as u64;
-        self.frames_total += frames as u64;
         self.mono.clear();
         self.mono.extend(interleaved[..frames * ch].chunks_exact(ch).map(|f| if ch == 1 { f[0] } else { f.iter().sum::<f32>() / ch as f32 }));
+        if let Some(edge) = &mut self.edge {
+            edge.push(&self.mono);
+            return if self.frames_in_window >= cap { ControlFlow::Break(()) } else { ControlFlow::Continue(()) };
+        }
+        self.frames_total += frames as u64;
+        self.loudness.push(&self.mono);
         if let Err(e) = self.feed() {
             self.error = Some(e);
             return ControlFlow::Break(());
@@ -482,7 +565,8 @@ impl<'m> WindowedAnalyzer<'m> {
         self.frames_total as f64 / f64::from(self.rate_in)
     }
 
-    /// bliss over the windows and the mean of the model's vectors.
+    /// bliss over the windows, the mean of the model's vectors and the
+    /// sketch.
     pub fn finish(mut self) -> Result<Analysed, AnalysisError> {
         if let Some(e) = self.error.take() {
             return Err(e);
@@ -496,18 +580,21 @@ impl<'m> WindowedAnalyzer<'m> {
             (None, Some(v)) => Ok(v),
             (None, None) => Err(AnalysisError::TooShort),
         });
-        Ok(Analysed { bliss, embedding, seconds })
+        let styles = if embedding.as_ref().is_some_and(Result::is_ok) { self.styles.styles() } else { None };
+        let sketch = SoundSketch::new(self.loudness.crest(), self.head, self.tail, styles.as_ref());
+        Ok(Analysed { bliss, embedding, sketch, seconds })
     }
 }
 
-/// Analyses an interleaved buffer by the windows of its length (what the
-/// decoder does for a file, done in memory): bliss and, given a model, its
-/// vector.
+/// Analyses an interleaved buffer by the plan of its length (what the
+/// decoder does for a file, done in memory): bliss, the sketch and, given
+/// a model, its vector.
 pub fn analyze_windows(samples: &[f32], sample_rate: u32, channels: usize, model: Option<&dyn SoundModel>) -> Result<Analysed, AnalysisError> {
-    let mut a = WindowedAnalyzer::new(sample_rate, channels, true, model)?;
     let frames = samples.len() / channels.max(1);
     let duration = frames as f64 / f64::from(sample_rate);
-    for (i, w) in windows(Some(duration)).iter().enumerate() {
+    let plan = file_plan(Some(duration));
+    let mut a = WindowedAnalyzer::new(sample_rate, channels, true, model)?.with_parts(plan.iter().map(|p| p.1).collect());
+    for (i, (w, _)) in plan.iter().enumerate() {
         let from = ((w.start * f64::from(sample_rate)) as usize).min(frames);
         let to = (((w.start + w.len) * f64::from(sample_rate)) as usize).min(frames);
         for chunk in samples[from * channels..to * channels].chunks(CHUNK_FRAMES * 8 * channels) {
@@ -727,6 +814,86 @@ pub(crate) mod tests {
         let mut a = WindowedAnalyzer::new(16_000, 1, false, Some(&Fake)).unwrap();
         let _ = a.push(0, &[0.1; 1000]);
         assert!(matches!(a.finish().unwrap().embedding, Some(Err(AnalysisError::TooShort))));
+    }
+
+    /// A model that hears one style in every window.
+    struct Styled;
+
+    impl SoundModel for Styled {
+        fn name(&self) -> &str {
+            "styled"
+        }
+        fn dim(&self) -> usize {
+            1
+        }
+        fn sample_rate(&self) -> u32 {
+            16_000
+        }
+        fn embed(&self, _: &[f32]) -> Result<Vec<f32>, AnalysisError> {
+            Ok(vec![1.0])
+        }
+        fn embed_with_styles(&self, mono: &[f32]) -> Result<(Vec<f32>, Option<Vec<f32>>), AnalysisError> {
+            let mut s = vec![0.01; crate::styles::STYLE_COUNT];
+            s[crate::styles::STYLES.iter().position(|l| *l == "Electronic---Ambient").unwrap()] = 0.8;
+            self.embed(mono).map(|v| (v, Some(s)))
+        }
+    }
+
+    /// A long file's plan has its head and tail around the three windows,
+    /// in order and apart; a short one only its windows.
+    #[test]
+    fn a_files_plan_has_its_edges() {
+        let plan = file_plan(Some(240.0));
+        assert_eq!(plan.iter().map(|p| p.1).collect::<Vec<_>>(), [Part::Head, Part::Main, Part::Main, Part::Main, Part::Tail]);
+        for pair in plan.windows(2) {
+            assert!(pair[1].0.start >= pair[0].0.start + pair[0].0.len - 1e-9, "{plan:?}");
+        }
+        assert_eq!(plan[4].0, Window { start: 230.0, len: crate::sketch::EDGE_SECONDS });
+        for d in [crate::sketch::EDGE_MIN_TRACK, 100.0, 600.0] {
+            let p = file_plan(Some(d));
+            assert!(p.windows(2).all(|w| w[1].0.start >= w[0].0.start + w[0].0.len - 1e-9), "{d}: {p:?}");
+        }
+        assert!(file_plan(Some(60.0)).iter().all(|p| p.1 == Part::Main));
+        assert!(file_plan(None).iter().all(|p| p.1 == Part::Main));
+    }
+
+    /// One pass gives the sketch: a quiet song that explodes in its last
+    /// window has a wide crest; its head starts cold after a second of
+    /// silence, its tail fades; the styles come with the model's vector.
+    #[test]
+    fn one_decode_gives_the_sketch() {
+        let rate = 16_000;
+        let secs = 120.0;
+        let n = (f64::from(rate) * secs) as usize;
+        let mut track = music(rate, secs, 100.0, 0.5, 11);
+        for (i, x) in track.iter_mut().enumerate() {
+            let t = i as f64 / f64::from(rate);
+            let gain = if t < 1.0 {
+                0.0
+            } else if t >= 0.7 * secs && t < 0.7 * secs + 15.0 {
+                3.0
+            } else if t > secs - 6.0 {
+                ((secs - t) / 6.0).powi(3) * 0.3
+            } else {
+                0.3
+            };
+            *x *= gain as f32;
+        }
+        assert_eq!(track.len(), n);
+        let out = analyze_windows(&track, rate, 1, Some(&Styled)).unwrap();
+        let crest = out.sketch.crest().unwrap();
+        assert!(crest.spread() > 12.0, "{crest:?}");
+        let head = out.sketch.head().unwrap();
+        assert_eq!(head.shape, crate::sketch::EdgeShape::Cold, "{head:?}");
+        assert!((head.silence - 1.0).abs() < 0.15, "{head:?}");
+        assert_eq!(out.sketch.tail().unwrap().shape, crate::sketch::EdgeShape::Fade);
+        assert!((out.seconds - 45.0).abs() < 0.1, "only the analysis windows count: {}", out.seconds);
+        let styles = out.sketch.styles().unwrap();
+        assert_eq!(styles.leading().next().map(|s| s.0), Some("Electronic---Ambient"));
+        // Without a model (or one with no styles) the sketch has none.
+        let plain = analyze_windows(&track, rate, 1, None).unwrap();
+        assert!(plain.sketch.styles().is_none() && plain.sketch.crest().is_some());
+        assert!(analyze_windows(&track, rate, 1, Some(&Fake)).unwrap().sketch.styles().is_none());
     }
 
     /// A window stops taking audio past its cap.

@@ -5,7 +5,8 @@
 //! * [`analysis`]: bliss features of a track from a few decoded windows of
 //!   it (mono 22 050 Hz), tagged [`ANALYZED_WITH`]; [`embedding`]: the
 //!   neural sound model's input and its compact vectors, tagged
-//!   [`EMBEDDED_WITH`].
+//!   [`EMBEDDED_WITH`]; [`sketch`]: what the same decode tells besides
+//!   (the crest, the edges, the 400 styles summed up by [`styles`]).
 //! * [`index`]: every vector of the library in memory, z-normalised over the
 //!   library itself, with brute-force nearest neighbours.
 //! * [`taste`]: the [`Catalog`] of pickable tracks and the [`Taste`] built
@@ -64,8 +65,10 @@ pub mod radio;
 pub mod regions;
 pub mod rng;
 pub mod session;
+pub mod sketch;
 pub mod songtype;
 pub mod style;
+pub mod styles;
 pub mod suggest;
 pub mod taste;
 pub mod tiles;
@@ -74,9 +77,11 @@ pub mod world_mixes;
 
 pub use analysis::{
     ANALYZED_WITH, Analysed, AnalysisError, DIM, MAX_SECONDS, PcmAnalyzer, SAMPLE_RATE, Vector, Window, WindowedAnalyzer,
-    analyze_pcm, analyze_windows, preview_windows, windows,
+    Part, analyze_pcm, analyze_windows, file_plan, preview_windows, windows,
 };
 pub use embedding::{Compact, EMBEDDED_WITH, SoundModel};
+pub use sketch::{Crest, SKETCHED_WITH, STYLED_WITH, SoundSketch};
+pub use styles::Styles;
 pub use daily::DailyParams;
 pub use daylist::{Centre, DAYLIST_LEN, daylist_title};
 pub use discover::{
