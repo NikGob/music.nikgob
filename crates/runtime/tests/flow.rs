@@ -882,7 +882,7 @@ fn only_downloaded_still_plays_an_album_whole() {
 /// added whole, the album plays all of it.
 #[test]
 fn an_album_of_one_song_of_the_users_plays_that_song() {
-    use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
+    use nikgob_core::model::{Artist, ArtistCredit, AlbumMode, Codec, Release, Source, SourceKind, Track};
 
     let dir = tempfile::tempdir().unwrap();
     let lib = Library::open_in_memory().unwrap();
@@ -907,7 +907,7 @@ fn an_album_of_one_song_of_the_users_plays_that_song() {
             library: lib,
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
-            prefs: Prefs::default(),
+            prefs: Prefs { album_mode: AlbumMode::Auto, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,
@@ -993,7 +993,7 @@ fn a_stream_song_goes_into_the_library_without_a_like() {
 /// again.
 #[test]
 fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
-    use nikgob_core::model::{Artist, ArtistCredit, Codec, LikeTarget, Release, ReleaseType, Source, SourceKind, Track};
+    use nikgob_core::model::{AlbumMode, Artist, ArtistCredit, Codec, LikeTarget, Release, ReleaseType, Source, SourceKind, Track};
 
     let dir = tempfile::tempdir().unwrap();
     let lib = Library::open_in_memory().unwrap();
@@ -1019,7 +1019,7 @@ fn a_single_saved_with_its_song_or_left_out_never_turns_whole() {
             library: lib,
             streams: Vec::new(),
             library_dir: dir.path().to_owned(),
-            prefs: Prefs { single_like_saves: true, ..Prefs::default() },
+            prefs: Prefs { single_like_saves: true, album_mode: AlbumMode::Auto, ..Prefs::default() },
             prefs_path: None,
             settings_path: None,
             import: None,
