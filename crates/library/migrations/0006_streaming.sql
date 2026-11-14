@@ -1,4 +1,4 @@
--- Streaming (stage 3, docs/stage3.md): tracks outside the library, ids in the
+-- Streaming (stage 3): tracks outside the library, ids in the
 -- services, playlist sync state and the extended wishlist.
 
 -- track.in_library: shown in the library. A track that only has stream

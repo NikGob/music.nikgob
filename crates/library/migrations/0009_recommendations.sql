@@ -1,4 +1,4 @@
--- Recommendations (stage 4, docs/stage4.md): where a sound analysis came
+-- Recommendations (stage 4): where a sound analysis came
 -- from, files that cannot be analysed, and "do not recommend" feedback.
 
 -- analysis.source: what the vector was computed from. A file's analysis

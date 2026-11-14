@@ -1,6 +1,6 @@
 -- Migration 29.
 --
--- «Добавить в библиотеку» of an album (docs/TODO.md 60): an album added to
+-- «Добавить в библиотеку» of an album: an album added to
 -- the library is the whole album (`release_selection.mode = 'whole'`, as
 -- since 0025); one not added is the user's songs of it. Only data is added
 -- here: no track, source, like, playlist or file changes, and `in_library`

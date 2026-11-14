@@ -1,4 +1,4 @@
--- Torrent → library rework (docs/stage4.md §12.4, §12.5).
+-- Torrent → library rework.
 
 -- «Подтверди»: files the importer could not identify alone wait here for
 -- the user and survive a restart (they used to live in memory only, the

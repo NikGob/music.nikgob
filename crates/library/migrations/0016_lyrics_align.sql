@@ -1,5 +1,5 @@
--- What the player made of a lyrics text against the track's own recording
--- (docs/lyrics-align.md): how well it fits, how its line times sit, and the
+-- What the player made of a lyrics text against the track's own recording:
+-- how well it fits, how its line times sit, and the
 -- word timing made from it. A cache keyed by catalog ids, no foreign keys:
 -- dropping it only means the work is done again.
 

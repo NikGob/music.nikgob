@@ -11,7 +11,7 @@ publish.workspace = true
 nikgob-core.workspace = true
 nikgob-import = { path = "../import" }
 log.workspace = true
-# Loaded at run time from the runtime the app downloads (docs/lyrics-align.md):
+# Loaded at run time from the runtime the app downloads:
 # nothing is linked or fetched at build time.
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "directml", "api-22"] }
 realfft = "3.5"
