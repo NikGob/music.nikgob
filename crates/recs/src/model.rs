@@ -741,6 +741,12 @@ pub struct UserModel {
     /// The work of each track whose work is another track
     /// ([`Catalog::work_at`]: another version or copy of one song).
     work: HashMap<u32, TrackId>,
+    /// The library's works by their song keys ([`crate::song_key`] of the
+    /// work's title and artist, as [`crate::discover::stream_work_key`]
+    /// keys a new song) and back ([`Self::set_song_works`]): a new song
+    /// and a library track of one song are one work.
+    song_works: HashMap<String, TrackId>,
+    work_songs: HashMap<TrackId, String>,
     /// How long after a song was heard out it was heard out again (the
     /// user's own plays, not imported ones), by [`REPEAT_BINS`]: how soon
     /// this user likes to hear a song again ([`Self::repeat_rest`]).
@@ -1255,6 +1261,29 @@ impl UserModel {
         self.work.get(&(i as u32)).copied().unwrap_or(self.ids[i])
     }
 
+    /// The song keys of the library's works (`(key, track)`: the key of a
+    /// track's work title and artist, the work [`Self::work_at`] of the
+    /// track), so a new song of one of them is that work; the first of a
+    /// key, and the first key of a work, win.
+    pub fn set_song_works(&mut self, keys: impl IntoIterator<Item = (String, TrackId)>) {
+        for (key, track) in keys {
+            let Some(i) = self.position(track) else { continue };
+            let work = self.work_at(i);
+            self.work_songs.entry(work).or_insert_with(|| key.clone());
+            self.song_works.entry(key).or_insert(work);
+        }
+    }
+
+    /// The library work a new song's work key is of ([`Self::set_song_works`]).
+    pub fn work_of_song(&self, key: &str) -> Option<TrackId> {
+        self.song_works.get(key).copied()
+    }
+
+    /// The song key of the library's work `work` ([`Self::set_song_works`]).
+    pub fn song_of_work(&self, work: TrackId) -> Option<&str> {
+        self.work_songs.get(&work).map(String::as_str)
+    }
+
     /// How long a song heard out by this user rests as a rule: the median
     /// time after which their songs heard out were heard out again (the
     /// upper bound of its bin), [`REPEAT_DEFAULT_MS`] with fewer than
@@ -1415,6 +1444,8 @@ impl UserModel {
             imported_at: Vec::new(),
             again: (0, 0),
             work,
+            song_works: HashMap::new(),
+            work_songs: HashMap::new(),
             repeat_gaps: [0; REPEAT_BINS.len() + 1],
             disliked: Vec::new(),
             walk: Session::default(),

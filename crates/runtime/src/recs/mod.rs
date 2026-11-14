@@ -1004,12 +1004,15 @@ fn read_parts(
     // The graph of similar music the library keeps, resolved to it now.
     let similar = if extra.graph { graph::read(lib, &rows, &artist_keys) } else { graph::Resolved::default() };
     lap("graph", &mut stages);
-    let model = UserModel::build(
+    let mut model = UserModel::build(
         &catalog,
         &history,
         ModelInput { index: &index, types: Some(&types), weights: cached, graph: (!similar.input.is_empty()).then_some(&similar.input) },
         now,
     );
+    // The library's works by the keys new songs are known by, so the wave
+    // plays one version of a song of either kind.
+    model.set_song_works(rows.iter().filter(|r| catalog.position(r.id).is_some()).map(|r| (song_key(&nikgob_recs::work_title(&r.title).0, &r.artist), r.id)));
     lap("model", &mut stages);
     log::debug!(
         "recs: snapshot of {} events: {}",

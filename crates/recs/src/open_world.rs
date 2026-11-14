@@ -828,7 +828,12 @@ fn next_ranked(
     works.extend(session.tracks().filter_map(|p| m.position(p.track)).map(|i| m.work_at(i)));
     works.extend(turn.queued.iter().filter_map(|q| if let Ahead::Track(t) = q { m.position(*t) } else { None }).map(|i| m.work_at(i)));
     let mut new_works: HashSet<String> = pool.iter().filter(|c| served.contains(&c.key) || again.contains(c.key.as_str())).map(|c| crate::discover::stream_work_key(&c.track)).collect();
-    if !by_work {
+    if by_work {
+        // One identity of a song across the library and the new songs: a
+        // new song served is its library work too, and back.
+        works.extend(new_works.iter().filter_map(|k| m.work_of_song(k)));
+        new_works.extend(works.iter().filter_map(|w| m.song_of_work(*w)).map(str::to_owned));
+    } else {
         works.clear();
         new_works.clear();
     }
@@ -958,11 +963,22 @@ fn next_ranked(
                     if let Some(st) = stepper.as_mut() {
                         st.free.retain(|&i| m.work_at(i) != w);
                     }
+                    if let Some(k) = m.song_of_work(w) {
+                        ext.retain(|x| ext_work.get(&x.1).map(String::as_str) != Some(k));
+                        new_works.insert(k.to_owned());
+                    }
                 }
             }
             Item::Stream(_) => {
                 if let Some(w) = picks_work(&p, pool, &ext_work) {
                     ext.retain(|x| ext_work.get(&x.1) != Some(&w));
+                    if let Some(lw) = m.work_of_song(&w) {
+                        works.insert(lw);
+                        lib.retain(|x| m.work_at(x.1) != lw);
+                        if let Some(st) = stepper.as_mut() {
+                            st.free.retain(|&i| m.work_at(i) != lw);
+                        }
+                    }
                     new_works.insert(w);
                 }
             }
@@ -1566,6 +1582,55 @@ mod tests {
         assert_eq!(w.picks.iter().map(|p| &p.item).collect::<Vec<_>>(), vec![&Item::Stream(pool[2].track.id.clone())]);
     }
 
+    /// A library song and a new song of one work are one song: either
+    /// served, the other is not picked after it, nor both in one call.
+    #[test]
+    fn a_library_song_and_its_new_version_are_one_song() {
+        let p = user(Kind::Omnivore, 5).parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let mut model = p.model_at(last + 1);
+        let first = by_pull(&model, &Session::default(), 10, WaveTurn::default());
+        let a = model.id(first[0]);
+        let song = |k: usize, title: &str| {
+            let mut track = StreamTrack::new(RemoteId::new(Service::Youtube, format!("v{k}")), title);
+            track.artists.push(ArtistRef::new(None, "Singer"));
+            OpenCandidate { key: crate::stream_song_key(&track), track, vector: None, embedding: None, lane: None, near: vec![first[2]], weight: 1.0 - k as f32 * 0.1 }
+        };
+        let pool = vec![song(0, "Sora (TV Size)"), song(1, "Umi")];
+        // The library's track `a` is «Sora» by «Singer».
+        model.set_song_works([(crate::discover::stream_work_key(&song(9, "Sora").track), a)]);
+        let (ok, no) = (|_: usize| true, |_: usize| false);
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: None, learned: None };
+        let only = WaveFilter { novelty: 1.0, ..WaveFilter::default() };
+        let familiar = WaveFilter { novelty: 0.0, ..WaveFilter::default() };
+        let half = WaveFilter { novelty: 0.5, ..WaveFilter::default() };
+        let stream = |i: usize| Item::Stream(pool[i].track.id.clone());
+        // Unrelated: the new version may play, the library one leads.
+        let w = next_ranked(&ctx, &pool, &only, &Session::default(), 2, &HashSet::new(), false, WaveTurn::default());
+        assert!(w.picks.iter().any(|p| p.item == stream(0)));
+        // The library's served (an extension before): not its new version.
+        let served: HashSet<String> = [a.to_string()].into_iter().collect();
+        let w = next_ranked(&ctx, &pool, &only, &Session::default(), 2, &served, false, WaveTurn::default());
+        assert!(w.picks.iter().all(|p| p.item != stream(0)), "library then new");
+        // Played in the session: the same.
+        let mut session = Session::default();
+        session.start(a, model.now() - 4 * HOUR_MS, EventContext::Radio, Some(EventOrigin::Radio));
+        session.end(a, Ended::Complete);
+        let w = next_ranked(&ctx, &pool, &only, &session, 2, &HashSet::new(), false, WaveTurn::default());
+        assert!(w.picks.iter().all(|p| p.item != stream(0)), "session then new");
+        // The new one served: not the library's.
+        let served: HashSet<String> = [pool[0].key.clone()].into_iter().collect();
+        let w = next_ranked(&ctx, &pool, &familiar, &Session::default(), 10, &served, false, WaveTurn::default());
+        assert!(!w.picks.is_empty());
+        assert!(w.picks.iter().all(|p| p.item != Item::Track(a)), "new then library");
+        // One call of both kinds: one of the two.
+        let w = next_ranked(&ctx, &pool, &half, &Session::default(), 6, &HashSet::new(), false, WaveTurn::default());
+        let both = w.picks.iter().any(|p| p.item == Item::Track(a)) && w.picks.iter().any(|p| p.item == stream(0));
+        assert!(!both, "{:?}", w.picks);
+        assert!(w.picks.iter().any(|p| p.item == Item::Track(a)) || w.picks.iter().any(|p| p.item == stream(0)));
+    }
+
     /// Picks the runtime did not queue (YouTube Music began to ask to wait
     /// while they were picked) are forgotten: the next extension may pick
     /// them again and the cluster's block has its places back; partly so
@@ -1692,5 +1757,33 @@ mod tests {
         assert!(still_fits(&ctx, &calm, &pool_of(&model, 1).remove(0)), "unheard");
         let any = WaveFilter { character: Character::Any, ..calm };
         assert!(still_fits(&ctx, &any, &heard(loud)));
+    }
+
+    /// An ordinary radio's new song heard is looked at as the radio picks
+    /// one heard: with «Подмешивать случайное» limiting what does not sound
+    /// like the seed, one heard far from the seed no longer fits, one near
+    /// it does; unheard, or with no limit, it stays.
+    #[test]
+    fn a_radios_new_song_heard_far_from_its_seed_no_longer_fits() {
+        let p = user(Kind::Omnivore, 5).parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let (ok, no) = (|_: usize| true, |_: usize| false);
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &no, artist_tracks: &none, index: Some(&p.index), learned: None };
+        let seed = (0..model.len()).find(|&i| model.embedded_at(i).is_some() && p.index.get(model.id(i)).is_some()).unwrap();
+        let d = |i: usize| euclid(model.embedded_at(i).unwrap(), model.embedded_at(seed).unwrap());
+        let far = (0..model.len()).filter(|&i| model.embedded_at(i).is_some() && p.index.get(model.id(i)).is_some()).max_by(|a, b| d(*a).total_cmp(&d(*b))).unwrap();
+        let heard = |i: usize| {
+            let mut c = pool_of(&model, 1).remove(0);
+            c.vector = p.index.get(model.id(i)).copied();
+            c
+        };
+        let mut radio = RadioState::new(RadioSeed::Track(model.id(seed)));
+        assert!(radio.still_fits(&ctx, &heard(far)), "no limit on what does not sound like the seed");
+        radio.set_explore(Some(0.2));
+        assert!(!radio.still_fits(&ctx, &heard(far)));
+        assert!(radio.still_fits(&ctx, &heard(seed)));
+        assert!(radio.still_fits(&ctx, &pool_of(&model, 1).remove(0)), "unheard");
     }
 }

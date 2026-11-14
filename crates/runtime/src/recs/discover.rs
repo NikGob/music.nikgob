@@ -533,8 +533,9 @@ impl Worker {
     /// ([`nikgob_recs::previews`]) — near the cut-off of what is shown and
     /// played, found by songs of different taste profiles, by an artist new
     /// to the library, found by calm or background songs — not simply the
-    /// first found. The first [`PREVIEW_LOOK`] are weighed.
-    pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>, youtube_only: bool) -> Option<(TrackId, StreamTrack)> {
+    /// first found. The first [`PREVIEW_LOOK`] are weighed. `only`: of
+    /// these alone (the songs a free preview was looked for already).
+    pub(crate) fn discovery_preview_next(&mut self, tried: &HashSet<TrackId>, youtube_only: bool, only: Option<&HashSet<TrackId>>) -> Option<(TrackId, StreamTrack)> {
         use nikgob_recs::previews::{PreviewCandidate, preview_order};
         let found = self.recs.discover.found.clone()?;
         let snap = self.snapshot();
@@ -557,7 +558,7 @@ impl Worker {
                 Some(id) => id,
                 None => *self.upsert_streams(std::slice::from_ref(t)).first()?,
             };
-            if tried.contains(&id) || self.analysis.index().read().contains(id) {
+            if tried.contains(&id) || only.is_some_and(|o| !o.contains(&id)) || self.analysis.index().read().contains(id) {
                 continue;
             }
             return Some((id, t.clone()));

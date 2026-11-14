@@ -17,6 +17,7 @@
 
 mod accounts;
 mod analysis;
+pub(crate) use analysis::AskRoom;
 mod clips;
 mod cold;
 mod complete;

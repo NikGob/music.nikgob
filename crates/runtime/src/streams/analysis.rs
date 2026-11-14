@@ -189,8 +189,10 @@ pub(crate) struct StreamAnalysis {
     /// Today and the previews of new music analysed.
     preview_day: Option<(i64, u32)>,
     /// Candidates whose preview was asked for ([`Worker::want_preview`]),
-    /// first come first served, before the discoveries.
-    wanted: std::collections::VecDeque<(TrackId, String)>,
+    /// first come first served, before the discoveries: the track and its
+    /// YouTube Music video (none: of another service, heard by a free
+    /// preview only).
+    wanted: std::collections::VecDeque<(TrackId, Option<String>)>,
     /// New songs whose preview was tried in this run.
     previewed: HashSet<TrackId>,
     /// Today and the free previews looked for, and the songs looked for
@@ -313,6 +315,25 @@ fn youtube_bytes(job: &Job, off: &AtomicBool) -> Result<(Vec<u8>, String), Outco
     Ok((read_all(audio, max, off)?, ext))
 }
 
+/// What may be asked to be heard soon ([`Worker::ask_room`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AskRoom {
+    /// Songs at most.
+    pub room: usize,
+    /// YouTube Music's songs may be heard by its previews today.
+    pub youtube: bool,
+    /// Free previews can be looked for (a song of any service).
+    pub free: bool,
+}
+
+/// Deezer's id of the song of `isrc` by Deezer's own lookup (`deezer`,
+/// when it is switched on), if it has one.
+async fn deezer_id_by_isrc(isrc: Option<&str>, deezer: Option<&dyn StreamService>) -> Option<String> {
+    let (isrc, deezer) = (isrc?, deezer?);
+    let found = deezer.find_isrc(isrc).await.ok().flatten()?;
+    (found.id.service == Service::Deezer).then_some(found.id.id)
+}
+
 /// The container of a preview by its URL's extension (Deezer's are MP3).
 fn ext_of(url: &str) -> String {
     let path = url.split(['?', '#']).next().unwrap_or("");
@@ -411,7 +432,8 @@ impl Worker {
     }
 
     /// Asks for the preview of a new song (`track`, its YouTube Music
-    /// `video`) to be analysed soon, before the discoveries' own: the niche
+    /// `video` if it is one: a song of another service is heard by a free
+    /// preview only) to be analysed soon, before the discoveries' own: the niche
     /// expansion's candidates get their sound vector (and, with «Библиотека
     /// и превью новых песен», the neural model's) so
     /// [`nikgob_recs::VectorIndex::niche_fit`] can judge them. Previews keep
@@ -419,7 +441,7 @@ impl Worker {
     /// left out, and the queue holds [`WANTED_MAX`] at most (the oldest go).
     /// «Моя волна» asks for the new songs it is about to play
     /// ([`Worker::wave_asked`]).
-    pub(crate) fn want_preview(&mut self, track: TrackId, video: String) {
+    pub(crate) fn want_preview(&mut self, track: TrackId, video: Option<String>) {
         let a = &mut self.streaming.analysis;
         if a.previewed.contains(&track) || a.wanted.iter().any(|(t, _)| *t == track) || self.analysis.index().read().contains(track) {
             return;
@@ -444,6 +466,33 @@ impl Worker {
         let waiting = self.streaming.analysis.wanted.len();
         let today = PREVIEW_DAILY.saturating_sub(self.previews_today()) as usize;
         today.saturating_sub(waiting).min(WANTED_MAX.saturating_sub(waiting))
+    }
+
+    /// How many songs may still be asked to be heard soon, and whether by
+    /// a YouTube Music preview and by a free one: a free preview has a day
+    /// of its own ([`FREE_DAILY`]), so a song of any service is asked
+    /// while it lasts, whatever YouTube Music's day left.
+    pub(crate) fn ask_room(&mut self) -> AskRoom {
+        if !self.stream_analysis_on() {
+            return AskRoom::default();
+        }
+        let youtube = self.preview_room() > 0;
+        let free = self.free_open();
+        let room = if youtube || free { WANTED_MAX.saturating_sub(self.streaming.analysis.wanted.len()) } else { 0 };
+        AskRoom { room, youtube, free }
+    }
+
+    /// A YouTube Music preview could start now: its service has audio,
+    /// does not ask to wait, and today has room for one.
+    fn youtube_preview_ready(&mut self) -> bool {
+        self.service(Service::Youtube).is_some() && self.has_audio(Service::Youtube) && self.pause_left(Service::Youtube).is_none() && self.previews_today() < PREVIEW_DAILY
+    }
+
+    /// Free previews can be looked for (today's are not used up, the
+    /// clients are there, and the app is not idle: it looks for them then
+    /// as it does every other background request).
+    fn free_open(&mut self) -> bool {
+        self.free_today() < FREE_DAILY && self.graph_metadata().is_some() && !self.streams_idle()
     }
 
     /// The playing entry of `track` ended (or was skipped) while it played
@@ -747,13 +796,17 @@ impl Worker {
             return false;
         }
         let tried = self.streaming.analysis.previewed.clone();
-        let wanted = loop {
-            match self.streaming.analysis.wanted.pop_front() {
-                Some((t, _)) if tried.contains(&t) || self.analysis.index().read().contains(t) => continue,
-                other => break other,
-            }
-        };
-        let Some((track, video)) = wanted.or_else(|| self.discovery_preview_next(&tried, true).map(|(t, s)| (t, s.id.id))) else { return false };
+        // A song a free preview may still hear waits for it: none of
+        // YouTube Music's day is spent on it before it was looked for.
+        let free_open = self.free_open();
+        let index = self.analysis.index().clone();
+        let a = &mut self.streaming.analysis;
+        let (wanted, free_tried) = (&mut a.wanted, &a.free_tried);
+        wanted.retain(|(t, v)| !tried.contains(t) && !index.read().contains(*t) && (v.is_some() || free_open && !free_tried.contains(t)));
+        let at = wanted.iter().position(|(t, v)| v.is_some() && (!free_open || free_tried.contains(t)));
+        let wanted = at.and_then(|k| wanted.remove(k)).and_then(|(t, v)| Some((t, v?)));
+        let only = free_open.then(|| self.streaming.analysis.free_tried.clone());
+        let Some((track, video)) = wanted.or_else(|| self.discovery_preview_next(&tried, true, only.as_ref()).map(|(t, s)| (t, s.id.id))) else { return false };
         let Some(youtube) = self.service(Service::Youtube) else { return false };
         log::info!("stream analysis: a preview of new music {track} from YouTube {video}");
         self.streaming.analysis.previewed.insert(track);
@@ -817,7 +870,13 @@ impl Worker {
         skip.extend(a.previewed.iter().copied());
         let index = self.analysis.index().clone();
         let wanted = a.wanted.iter().map(|(t, _)| *t).find(|t| !skip.contains(t) && !index.read().contains(*t));
-        let Some(track) = wanted.or_else(|| self.discovery_preview_next(&skip, false).map(|(t, _)| t)) else {
+        // A song asked for that a free preview missed comes before every
+        // discovery: its YouTube Music preview next, when that can run now.
+        let urgent = a.wanted.iter().any(|(t, v)| v.is_some() && !a.previewed.contains(t) && !index.read().contains(*t));
+        if wanted.is_none() && urgent && self.youtube_preview_ready() {
+            return false;
+        }
+        let Some(track) = wanted.or_else(|| self.discovery_preview_next(&skip, false, None).map(|(t, _)| t)) else {
             let idle = self.streaming.schedule.analysis_idle;
             self.streaming.analysis.free_idle_until = Some(Instant::now() + idle);
             return false;
@@ -827,13 +886,22 @@ impl Worker {
             return false;
         };
         let duration = self.lib.get_track(track).ok().flatten().and_then(|t| t.duration_ms).map(|ms| Duration::from_millis(u64::from(ms)));
-        let deezer = self.lib.stream_refs(track).unwrap_or_default().into_iter().find(|r| r.id.service == Service::Deezer).and_then(|r| r.id.id.parse::<u64>().ok());
+        let refs = self.lib.stream_refs(track).unwrap_or_default();
+        let deezer = refs.iter().find(|r| r.id.service == Service::Deezer).and_then(|r| r.id.id.parse::<u64>().ok());
+        // Its ISRC, when it is known, finds the very song on Deezer (by
+        // Deezer's own lookup, when Deezer is switched on).
+        let isrc = self.lib.get_track(track).ok().flatten().and_then(|t| t.isrc).or_else(|| refs.iter().find_map(|r| r.isrc.clone()));
+        let dz = deezer.is_none().then(|| self.service(Service::Deezer)).flatten();
         let (artist, title) = (row.artist.clone(), row.title.clone());
         self.streaming.analysis.free_tried.insert(track);
         self.streaming.analysis.busy = Some((track, Step::Free));
         self.count_free();
         log::info!("stream analysis: looking for a free preview of new music {track}");
         self.streaming.spawn(async move {
+            let deezer = match deezer {
+                Some(id) => Some(id),
+                None => deezer_id_by_isrc(isrc.as_deref(), dz.as_deref()).await.and_then(|id| id.parse().ok()),
+            };
             let found = match meta.deezer.preview_url(deezer, &artist, &title, duration).await {
                 Ok(Some(url)) => match meta.deezer.download_preview(&url).await {
                     Ok(bytes) if !bytes.is_empty() => Some((bytes, ext_of(&url))),
@@ -989,5 +1057,23 @@ impl Worker {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nikgob_core::streaming::FakeService;
+
+    /// A song's ISRC finds its Deezer track by Deezer's own lookup; an
+    /// unknown ISRC, none, or Deezer switched off finds nothing.
+    #[tokio::test]
+    async fn an_isrc_finds_the_song_on_deezer() {
+        let deezer = FakeService::new(Service::Deezer);
+        let found = deezer_id_by_isrc(Some("ZZFAK8800001"), Some(&deezer)).await;
+        assert!(found.as_deref().is_some_and(|id| id.starts_with("dz-")), "{found:?}");
+        assert_eq!(deezer_id_by_isrc(Some("ZZZZZ0000000"), Some(&deezer)).await, None);
+        assert_eq!(deezer_id_by_isrc(None, Some(&deezer)).await, None);
+        assert_eq!(deezer_id_by_isrc(Some("ZZFAK8800001"), None).await, None);
     }
 }

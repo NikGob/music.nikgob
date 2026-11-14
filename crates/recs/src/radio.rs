@@ -671,12 +671,14 @@ impl RadioState {
     /// of `of`, the new music queued counted as blind.
     pub fn take_new(&mut self, recs: &Recs<'_>, k: usize, of: usize, have: usize) -> Vec<Pick> {
         let served: HashSet<Item> = self.served.iter().cloned().collect();
+        // One version of a song (as [`Self::extend`] keeps it).
+        let by_work = self.new_taken_by_work(&served);
         let seed_vec = self.seed_vector(recs);
         let mut slots: Vec<Slot> = self
             .new_pool
             .iter()
             .enumerate()
-            .filter(|(_, t)| !served.contains(&Item::Stream(t.id.clone())))
+            .filter(|(_, t)| !served.contains(&Item::Stream(t.id.clone())) && !by_work.contains(&Item::Stream(t.id.clone())))
             .map(|(order, t)| {
                 let mut s = recs.new_slot(t, 0.0);
                 let near = match (&s.vec, &seed_vec) {
@@ -699,6 +701,20 @@ impl RadioState {
             self.served.push_back(s.item.clone());
         }
         picked.into_iter().map(Slot::pick).collect()
+    }
+
+    /// The new songs not to pick by their works ([`NewTrack::work`]):
+    /// another version of a song `served`, and of two versions of one song
+    /// in the pool the later.
+    fn new_taken_by_work(&self, served: &HashSet<Item>) -> HashSet<Item> {
+        let mut works: HashSet<&str> = self.new_pool.iter().filter(|t| !t.work.is_empty() && served.contains(&Item::Stream(t.id.clone()))).map(|t| t.work.as_str()).collect();
+        let mut taken = HashSet::new();
+        for t in self.new_pool.iter().filter(|t| !t.work.is_empty() && !served.contains(&Item::Stream(t.id.clone()))) {
+            if !works.insert(t.work.as_str()) {
+                taken.insert(Item::Stream(t.id.clone()));
+            }
+        }
+        taken
     }
 
     /// `id` is among the new-music candidates kept.
@@ -907,7 +923,10 @@ impl RadioState {
     /// Whether the new song `c` it served, now that its preview is heard,
     /// still fits what it plays: a wave's filter with the scene of the
     /// cluster it was picked for ([`crate::open_world::still_fits`]); any
-    /// other radio's, not near the user's dislikes.
+    /// other radio's as it picks a new song heard ([`Self::extend`]): not
+    /// near the user's dislikes, quiet enough for a radio of the
+    /// background, and near the seed when «Подмешивать случайное» keeps
+    /// what does not sound like it to a share.
     pub fn still_fits(&self, ctx: &WaveContext<'_>, c: &OpenCandidate) -> bool {
         match &self.seed {
             RadioSeed::Wave(w) => {
@@ -915,8 +934,41 @@ impl RadioState {
                 let scene = self.wave.as_ref().and_then(|b| b.scene_of(&item)).unwrap_or(w.filter.scene);
                 crate::open_world::still_fits(ctx, &crate::open_world::WaveFilter { scene, ..w.filter }, c)
             }
-            _ => c.vector.as_ref().is_none_or(|v| ctx.model.dislike_near_of(&ctx.model.embed(v)) < crate::open_world::MISFIT_DISLIKE),
+            _ => {
+                let Some(v) = &c.vector else { return true };
+                let m = ctx.model;
+                let e = m.embed(v);
+                if m.dislike_near_of(&e) >= crate::open_world::MISFIT_DISLIKE {
+                    return false;
+                }
+                if matches!(self.seed, RadioSeed::Track(_) | RadioSeed::Tracks(_)) && self.plan(m).background && !self.plan(m).quiet_new(m, Some(&e)) {
+                    return false;
+                }
+                if self.explore_cap().is_some()
+                    && let Some((p, r)) = self.fit_zone_of(m)
+                {
+                    return euclid(&e, &p) <= r;
+                }
+                true
+            }
         }
+    }
+
+    /// [`Self::fit_zone`] by the user model alone (a radio's new song heard
+    /// later): the seed's point and radius, for a seed with a sound.
+    fn fit_zone_of(&self, m: &UserModel) -> Option<(Vector, f32)> {
+        let mean = |vs: Vec<Vector>| (!vs.is_empty()).then(|| std::array::from_fn(|k| vs.iter().map(|v| v[k]).sum::<f32>() / vs.len() as f32));
+        let point: Option<Vector> = match &self.seed {
+            RadioSeed::Track(t) => {
+                let a = SeedAnchor::of(m, Some(*t), self.seed_facts.as_ref());
+                return a.point.map(|p| (p, a.radius));
+            }
+            RadioSeed::Stream { vector, .. } => vector.map(|v| m.embed(&v)),
+            RadioSeed::Artist(a) => mean(m.of_artist(*a).iter().filter_map(|&i| m.embedded_at(i as usize).copied()).collect()),
+            RadioSeed::Tracks(ts) => mean(ts.iter().filter_map(|t| m.position(*t)).filter_map(|i| m.embedded_at(i).copied()).collect()),
+            _ => None,
+        };
+        point.map(|p| (p, SEED_RADIUS * m.scale()))
     }
 
     /// The songs queued after the one playing, in the queue's order: the
@@ -1133,12 +1185,7 @@ impl RadioState {
         let works = take_works(recs, &played, &mut taken);
         // New songs too: another version of one served is not picked, nor
         // two versions of one song in an extension.
-        let mut new_works: HashSet<&str> = self.new_pool.iter().filter(|t| !t.work.is_empty() && served.contains(&Item::Stream(t.id.clone()))).map(|t| t.work.as_str()).collect();
-        for t in self.new_pool.iter().filter(|t| !t.work.is_empty() && !served.contains(&Item::Stream(t.id.clone()))) {
-            if !new_works.insert(t.work.as_str()) {
-                taken.insert(Item::Stream(t.id.clone()));
-            }
-        }
+        taken.extend(self.new_taken_by_work(&served));
         let sound = Sound::new(seed_vec, liked, skipped, library_scale(recs));
 
         // 0. Played twice running: once more, first.
@@ -3919,5 +3966,37 @@ pub(crate) mod tests {
             }
         }
         assert!(!works.is_empty());
+    }
+
+    /// New songs spliced into a radio's queue later ([`RadioState::take_new`])
+    /// keep one version of a song too: not another version of one served,
+    /// nor two versions at once.
+    #[test]
+    fn new_songs_spliced_later_keep_one_version() {
+        use nikgob_core::streaming::{ArtistRef, RemoteId, Service, StreamTrack};
+        let cat = Catalog::new((0..6u128).map(|i| info(i, &[i as u32], None)));
+        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
+        let empty = VectorIndex::new();
+        let recs = Recs::new(&cat, &taste, &empty);
+        let song = |k: usize, title: &str| {
+            let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, format!("s{k}")), title);
+            t.artists.push(ArtistRef::new(None, "Singer"));
+            NewTrack::from_stream(&t, None)
+        };
+        let id = |k: usize| Item::Stream(RemoteId::new(Service::Youtube, format!("s{k}")));
+        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+        radio.add_new([song(0, "Sora")]);
+        let first = radio.take_new(&recs, 1, 4, 0);
+        assert_eq!(first.iter().map(|p| p.item.clone()).collect::<Vec<_>>(), vec![id(0)]);
+        // Its off vocal comes later, with another song in two versions.
+        radio.add_new([song(1, "Sora (Off Vocal)"), song(2, "Umi"), song(3, "Umi (TV Size)")]);
+        let later: Vec<Item> = radio.take_new(&recs, 3, 8, 1).into_iter().map(|p| p.item).collect();
+        assert!(!later.contains(&id(1)), "a version of one served: {later:?}");
+        assert!(!(later.contains(&id(2)) && later.contains(&id(3))), "two versions at once: {later:?}");
+        assert!(!later.is_empty());
+        let mut fresh = RadioState::new(RadioSeed::Track(tid(0)));
+        fresh.add_new([song(0, "Sora"), song(1, "Sora (Off Vocal)"), song(2, "Umi"), song(3, "Umi (TV Size)")]);
+        let served: HashSet<Item> = [id(0)].into_iter().collect();
+        assert_eq!(fresh.new_taken_by_work(&served), [id(1), id(3)].into_iter().collect::<HashSet<_>>());
     }
 }
