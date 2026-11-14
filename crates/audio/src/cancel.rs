@@ -9,13 +9,20 @@
 //! [`Player`](crate::Player) gets a [`Slot`]. Once the item's
 //! [`ByteSource`](crate::ByteSource) exists, its [`Interrupter`] goes into
 //! the slot. The player's methods run on the caller's thread and go through
-//! [`Slots`]: a play, a stop or the engine's end cancel every item handed
-//! over before, a new next item (or none) cancels the next one that has not
-//! started, a seek interrupts the playing item. A read waiting in a
-//! cancelled or interrupted stream returns an error at once, so the decoder
-//! comes back to its commands; it knows from the slot that the error is not
-//! the stream's own failure and reports nothing. An interrupted item waits
-//! again once the decoder has taken the seek ([`Slot::take_interrupt`]).
+//! [`Slots`], which also keeps the order of the commands they send (see
+//! [`Slots::lock`]): a play, a stop or the engine's end cancel every item
+//! handed over before, a new next item (or none) cancels the next one that
+//! has not started, a seek interrupts every item the decoder may be reading
+//! (the playing one, and the next one or both sides of a crossfade, which
+//! the decoder reads at a transition) until the decoder takes that seek. A
+//! read waiting in a cancelled or interrupted stream returns an error at
+//! once, so the decoder comes back to its commands.
+//!
+//! Which read gave way is told by the source itself: the engine's wrapper
+//! of each source notes a read of it that failed while it was cancelled or
+//! interrupted ([`Slot::note_failed_read`]), and the decoder looks at the
+//! very source whose read failed ([`Slot::take_gave_way`]). Any other read
+//! error is the stream's own failure and is reported.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -32,8 +39,11 @@ struct State {
     handle: Option<Interrupter>,
     /// Superseded: the item will never be heard (again).
     cancelled: bool,
-    /// Interrupted for a seek the decoder has not taken yet.
-    interrupted: bool,
+    /// Seeks sent that interrupted it and that the decoder has not taken
+    /// yet: its reads wait again only when the last one is taken.
+    interrupts: u32,
+    /// A read of it failed while it was cancelled or interrupted.
+    gave_way: bool,
     /// The item plays: it was played, or it took over as the next item. A
     /// new next item no longer supersedes it.
     started: bool,
@@ -43,15 +53,13 @@ struct State {
 
 /// What the engine knows about the reads of one item; see the module docs.
 pub(crate) struct Slot {
-    id: u64,
     state: Mutex<State>,
 }
 
 impl Slot {
-    /// A slot for item `id`; `started` for an item that plays at once.
-    pub(crate) fn new(id: u64, started: bool) -> Arc<Self> {
+    /// A slot for an item; `started` for an item that plays at once.
+    pub(crate) fn new(started: bool) -> Arc<Self> {
         Arc::new(Self {
-            id,
             state: Mutex::new(State {
                 started,
                 ..State::default()
@@ -108,32 +116,56 @@ impl Slot {
         true
     }
 
-    /// A seek of the playing item: a read waiting in it gives up until the
-    /// decoder takes the seek. Nothing for an item still opening (its
-    /// probe must not fail) or not playing.
-    fn interrupt(&self) {
+    /// A seek on its way: a read waiting in the item gives up until the
+    /// decoder takes it ([`Self::end_interrupt`]). Nothing for an item still
+    /// opening (its probe must not fail): false then.
+    fn interrupt(&self) -> bool {
         let mut st = self.lock();
-        if st.cancelled || !st.started || !st.opened {
+        if st.cancelled || !st.opened {
+            return false;
+        }
+        st.interrupts += 1;
+        if st.interrupts == 1
+            && let Some(h) = &st.handle
+        {
+            h(true);
+        }
+        true
+    }
+
+    /// The decoder took a seek that interrupted the item: when no other
+    /// seek is on its way, its reads wait for their bytes again.
+    pub(crate) fn end_interrupt(&self) {
+        let mut st = self.lock();
+        if st.interrupts == 0 {
             return;
         }
-        st.interrupted = true;
-        if let Some(h) = &st.handle {
-            h(true);
+        st.interrupts -= 1;
+        if st.interrupts == 0
+            && !st.cancelled
+            && let Some(h) = &st.handle
+        {
+            h(false);
         }
     }
 
-    /// Ends an interruption: reads wait for their bytes again. Whether the
-    /// item was interrupted (so a read that just failed was made to).
-    pub(crate) fn take_interrupt(&self) -> bool {
+    /// A seek that interrupted the item is on its way.
+    pub(crate) fn interrupted(&self) -> bool {
+        self.lock().interrupts > 0
+    }
+
+    /// The engine's wrapper of the source saw a read of it fail: when the
+    /// item was cancelled or interrupted, the read gave way.
+    pub(crate) fn note_failed_read(&self) {
         let mut st = self.lock();
-        if st.cancelled || !st.interrupted {
-            return false;
+        if st.cancelled || st.interrupts > 0 {
+            st.gave_way = true;
         }
-        st.interrupted = false;
-        if let Some(h) = &st.handle {
-            h(false);
-        }
-        true
+    }
+
+    /// Whether a read of the item gave way since the last look.
+    pub(crate) fn take_gave_way(&self) -> bool {
+        std::mem::take(&mut self.lock().gave_way)
     }
 
     /// The next item takes over (or its crossfade begins). False when it
@@ -165,35 +197,44 @@ pub(crate) fn cancelled(slot: Option<&Arc<Slot>>) -> bool {
 pub(crate) struct Slots(Mutex<Vec<Arc<Slot>>>);
 
 impl Slots {
-    fn lock(&self) -> MutexGuard<'_, Vec<Arc<Slot>>> {
+    /// The slots, held while a command that changes them is sent: the
+    /// commands of two threads reach the decoder in the order their
+    /// cancellations happened.
+    pub(crate) fn lock(&self) -> Held<'_> {
         let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         all.retain(|s| Arc::strong_count(s) > 1);
-        all
+        Held(all)
     }
+}
 
+/// [`Slots`] while held.
+pub(crate) struct Held<'a>(MutexGuard<'a, Vec<Arc<Slot>>>);
+
+impl Held<'_> {
     /// A play, a stop, the engine's end: everything handed over before is
     /// superseded. `then` is the new item's slot.
-    pub(crate) fn cancel_all(&self, then: Option<Arc<Slot>>) {
-        let mut all = self.lock();
-        for s in all.drain(..) {
+    pub(crate) fn cancel_all(&mut self, then: Option<Arc<Slot>>) {
+        for s in self.0.drain(..) {
             s.cancel();
         }
-        all.extend(then);
+        self.0.extend(then);
     }
 
     /// A new next item (`then`), or none: the next item handed over before
     /// is superseded unless it already took over.
-    pub(crate) fn cancel_next(&self, then: Option<Arc<Slot>>) {
-        let mut all = self.lock();
-        all.retain(|s| !s.cancel_unless_started());
-        all.extend(then);
+    pub(crate) fn cancel_next(&mut self, then: Option<Arc<Slot>>) {
+        self.0.retain(|s| !s.cancel_unless_started());
+        self.0.extend(then);
     }
 
-    /// A seek of item `id`.
-    pub(crate) fn interrupt(&self, id: u64) {
-        for s in self.lock().iter().filter(|s| s.id == id) {
-            s.interrupt();
-        }
+    /// A seek: every opened item may be the one the decoder waits in. The
+    /// slots interrupted, for the decoder to end it when it takes the seek.
+    pub(crate) fn interrupt(&mut self) -> Vec<Arc<Slot>> {
+        self.0
+            .iter()
+            .filter(|s| s.interrupt())
+            .cloned()
+            .collect()
     }
 }
 
@@ -215,12 +256,12 @@ mod tests {
 
     #[test]
     fn a_cancel_reaches_the_source_also_when_it_comes_before_the_source() {
-        let early = Slot::new(1, true);
+        let early = Slot::new(true);
         early.cancel();
         let (h, _) = probe();
         assert!(!early.attach(Some(h)), "the open stops");
 
-        let late = Slot::new(2, true);
+        let late = Slot::new(true);
         let (h, last) = probe();
         assert!(late.attach(Some(h)));
         late.cancel();
@@ -231,50 +272,64 @@ mod tests {
     #[test]
     fn a_new_next_item_cancels_only_a_next_item_that_has_not_started() {
         let slots = Slots::default();
-        let playing = Slot::new(1, true);
-        let next = Slot::new(2, false);
+        let playing = Slot::new(true);
+        let next = Slot::new(false);
         let held = [Arc::clone(&playing), Arc::clone(&next)];
-        slots.cancel_all(Some(Arc::clone(&playing)));
-        slots.cancel_next(Some(Arc::clone(&next)));
-        slots.cancel_next(Some(Slot::new(3, false)));
+        slots.lock().cancel_all(Some(Arc::clone(&playing)));
+        slots.lock().cancel_next(Some(Arc::clone(&next)));
+        slots.lock().cancel_next(Some(Slot::new(false)));
         assert!(next.is_cancelled());
         assert!(!playing.is_cancelled());
 
         // A next item that took over is not superseded by the one after it.
-        let took = Slot::new(4, false);
-        slots.cancel_next(Some(Arc::clone(&took)));
+        let took = Slot::new(false);
+        slots.lock().cancel_next(Some(Arc::clone(&took)));
         assert!(took.start());
-        slots.cancel_next(None);
+        slots.lock().cancel_next(None);
         assert!(!took.is_cancelled());
-        slots.cancel_all(None);
+        slots.lock().cancel_all(None);
         assert!(took.is_cancelled() && playing.is_cancelled());
         drop(held);
     }
 
     #[test]
-    fn an_interrupt_lasts_until_the_decoder_takes_it_and_spares_an_opening_item() {
+    fn a_second_seek_keeps_the_reads_interrupted_until_it_is_taken_too() {
         let slots = Slots::default();
-        let s = Slot::new(7, true);
-        slots.cancel_all(Some(Arc::clone(&s)));
+        let s = Slot::new(true);
+        slots.lock().cancel_all(Some(Arc::clone(&s)));
         let (h, last) = probe();
         assert!(s.attach(Some(h)));
-        slots.interrupt(7);
-        assert_eq!(last.load(Ordering::SeqCst), 0, "still opening");
+        assert!(slots.lock().interrupt().is_empty(), "still opening");
         s.mark_opened();
-        slots.interrupt(8);
-        assert!(!s.take_interrupt());
-        slots.interrupt(7);
+        let first = slots.lock().interrupt();
+        let second = slots.lock().interrupt();
+        assert_eq!((first.len(), second.len()), (1, 1));
         assert_eq!(last.load(Ordering::SeqCst), 2);
-        assert!(s.take_interrupt());
+        first[0].end_interrupt();
+        assert_eq!(last.load(Ordering::SeqCst), 2, "the second seek is still on its way");
+        assert!(s.interrupted());
+        second[0].end_interrupt();
         assert_eq!(last.load(Ordering::SeqCst), 1);
-        assert!(!s.take_interrupt());
+        assert!(!s.interrupted());
+    }
+
+    #[test]
+    fn only_a_read_failing_while_cancelled_or_interrupted_gave_way() {
+        let s = Slot::new(true);
+        s.mark_opened();
+        s.note_failed_read();
+        assert!(!s.take_gave_way(), "the stream's own failure");
+        assert!(s.interrupt());
+        s.note_failed_read();
+        assert!(s.take_gave_way());
+        assert!(!s.take_gave_way());
     }
 
     #[test]
     fn items_the_engine_let_go_are_forgotten() {
         let slots = Slots::default();
-        slots.cancel_all(Some(Slot::new(1, true)));
-        slots.cancel_next(Some(Slot::new(2, false)));
-        assert!(slots.lock().is_empty());
+        slots.lock().cancel_all(Some(Slot::new(true)));
+        slots.lock().cancel_next(Some(Slot::new(false)));
+        assert!(slots.lock().0.is_empty());
     }
 }

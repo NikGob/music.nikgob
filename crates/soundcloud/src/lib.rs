@@ -1280,6 +1280,34 @@ fn part_of<T>(r: Result<T, StreamError>, first_err: &mut Option<StreamError>) ->
 }
 
 /// A SoundCloud id is a number; anything else is no such item.
+/// How often a thread waiting for a lookup asks whether it is still wanted.
+const WANTED_POLL: Duration = Duration::from_millis(20);
+
+/// Runs `fut` on the runtime and waits for it on this (non-runtime)
+/// thread while `wanted` says so; `None` when it stopped wanting it (the
+/// lookup is then aborted).
+fn wait_while<T: Send + 'static>(
+    handle: &tokio::runtime::Handle,
+    fut: impl Future<Output = T> + Send + 'static,
+    wanted: &(dyn Fn() -> bool + Sync),
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let task = handle.spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    loop {
+        if !wanted() {
+            task.abort();
+            return None;
+        }
+        match rx.recv_timeout(WANTED_POLL) {
+            Ok(v) => return Some(v),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
 fn num_id(id: &str) -> Result<&str, StreamError> {
     let id = id.trim();
     if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) { Ok(id) } else { Err(StreamError::Unavailable) }
@@ -1447,20 +1475,35 @@ impl StreamService for Soundcloud {
     }
 
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError> {
+        self.open_audio_while(id, &|| true)
+    }
+
+    fn open_audio_while(
+        &self,
+        id: &str,
+        wanted: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Box<dyn AudioStream>, StreamError> {
         let id = num_id(id)?.to_owned();
         // A DRM-only track fails here, at the open, so the engine can hand
         // it to SoundCloud's own player; inside the stream's first read the
         // error would only be a failed read. The listing just shown usually
-        // has the track already.
+        // has the track already. The lookup gives up (and is stopped) once
+        // the track is no longer wanted.
         if tokio::runtime::Handle::try_current().is_err() {
             let inner = Arc::clone(&self.inner);
             let probe = id.clone();
-            if let Ok(t) = self.runtime.handle().block_on(async move { inner.raw_track(&probe, false).await })
-                && t.playable_transcoding().is_none()
-                && t.drm_only()
-            {
-                log::info!("soundcloud: track {id} has only encrypted streams");
-                return Err(StreamError::Drm);
+            let looked = wait_while(
+                self.runtime.handle(),
+                async move { inner.raw_track(&probe, false).await },
+                wanted,
+            );
+            match looked {
+                Some(Ok(t)) if t.playable_transcoding().is_none() && t.drm_only() => {
+                    log::info!("soundcloud: track {id} has only encrypted streams");
+                    return Err(StreamError::Drm);
+                }
+                Some(_) => {}
+                None => return Err(StreamError::Network("no longer wanted".into())),
             }
         }
         let inner = Arc::clone(&self.inner);
@@ -1575,6 +1618,46 @@ impl StreamService for Soundcloud {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_lookup_no_longer_wanted_is_given_up_and_stopped() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let wanted = Arc::new(AtomicBool::new(true));
+        let dropped = Arc::new(AtomicBool::new(false));
+        struct Flag(Arc<AtomicBool>);
+        impl Drop for Flag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let flag = Flag(Arc::clone(&dropped));
+        let w = Arc::clone(&wanted);
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            w.store(false, Ordering::SeqCst);
+        });
+        let began = std::time::Instant::now();
+        let got = super::wait_while(
+            rt.handle(),
+            async move {
+                let _flag = flag;
+                std::future::pending::<()>().await
+            },
+            &|| wanted.load(Ordering::SeqCst),
+        );
+        assert!(got.is_none());
+        assert!(began.elapsed() < std::time::Duration::from_secs(2));
+        t.join().unwrap();
+        let t = std::time::Instant::now();
+        while !dropped.load(Ordering::SeqCst) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(2), "the lookup is stopped");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let fine = super::wait_while(rt.handle(), async { 7 }, &|| true);
+        assert_eq!(fine, Some(7));
+    }
+
     use super::*;
 
     #[test]

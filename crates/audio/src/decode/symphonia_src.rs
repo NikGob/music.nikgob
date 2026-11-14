@@ -45,6 +45,7 @@ use symphonia::core::units::{TimeBase, Timestamp};
 
 use super::opus::{OpusHead, OpusPackets};
 use super::{FrameSource, ReadStatus};
+use crate::cancel::Slot;
 use crate::types::{ByteSource, DecodeError};
 
 /// How long before the seek target decoding restarts for codecs whose output
@@ -105,8 +106,14 @@ type Reopen = Box<dyn Fn() -> Result<Box<dyn FormatReader>, DecodeError> + Send>
 /// source is shared so its gain and duration can be asked after the probe.
 /// The first read error is kept: the probe reads past it as the end of
 /// the bytes, and the stream's own reason (a refused key, an age gate)
-/// says more than «no suitable format reader».
-struct SharedBytes(Arc<Mutex<Box<dyn ByteSource>>>, Arc<Mutex<Option<String>>>);
+/// says more than «no suitable format reader». A failed read is told to
+/// the item's slot, which knows whether it gave way (see
+/// [`crate::cancel`]).
+struct SharedBytes(
+    Arc<Mutex<Box<dyn ByteSource>>>,
+    Arc<Mutex<Option<String>>>,
+    Option<Arc<Slot>>,
+);
 
 impl SharedBytes {
     fn with<T>(&self, f: impl FnOnce(&mut Box<dyn ByteSource>) -> T) -> T {
@@ -117,6 +124,9 @@ impl SharedBytes {
 impl Read for SharedBytes {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.with(|s| s.read(buf)).inspect_err(|e| {
+            if let Some(slot) = &self.2 {
+                slot.note_failed_read();
+            }
             self.1.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| e.to_string());
         })
     }
@@ -166,6 +176,7 @@ impl SymphoniaSource {
     /// Probes and opens encoded bytes from a stream.
     pub(crate) fn open_stream(
         bytes: Box<dyn ByteSource>,
+        slot: Option<Arc<Slot>>,
     ) -> Result<(Self, StreamInfo), DecodeError> {
         let hint = bytes
             .format_hint()
@@ -175,7 +186,7 @@ impl SymphoniaSource {
         let failure = Arc::new(Mutex::new(None));
         let ext = (!hint.is_empty()).then_some(hint);
         let opened = Self::open_media(
-            Box::new(SharedBytes(Arc::clone(&shared), Arc::clone(&failure))),
+            Box::new(SharedBytes(Arc::clone(&shared), Arc::clone(&failure), slot.clone())),
             ext.as_deref(),
         );
         let mut source = match opened {
@@ -193,7 +204,11 @@ impl SymphoniaSource {
                     .unwrap_or_else(PoisonError::into_inner)
                     .seek(SeekFrom::Start(0))?;
                 probe(
-                    Box::new(SharedBytes(Arc::clone(&shared), Arc::new(Mutex::new(None)))),
+                    Box::new(SharedBytes(
+                        Arc::clone(&shared),
+                        Arc::new(Mutex::new(None)),
+                        slot.clone(),
+                    )),
                     ext.as_deref(),
                 )
             }));
@@ -675,7 +690,7 @@ mod tests {
         let bytes: &'static [u8] = include_bytes!("../../tests/fixtures/tone.webm");
         let reopens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let src = Counted(std::io::Cursor::new(bytes), Arc::clone(&reopens));
-        let (mut s, _) = SymphoniaSource::open_stream(Box::new(src)).unwrap();
+        let (mut s, _) = SymphoniaSource::open_stream(Box::new(src), None).unwrap();
         assert!(s.is_mkv());
         let mut out = Vec::new();
         s.read(&mut out).unwrap();
@@ -698,7 +713,7 @@ mod tests {
 
     #[test]
     fn a_stream_that_fails_says_its_own_reason() {
-        let Err(e) = SymphoniaSource::open_stream(Box::new(Refused)) else { panic!("opened") };
+        let Err(e) = SymphoniaSource::open_stream(Box::new(Refused), None) else { panic!("opened") };
         assert!(e.to_string().contains("age-restricted"), "{e}");
     }
 }

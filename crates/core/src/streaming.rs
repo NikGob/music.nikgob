@@ -1042,6 +1042,19 @@ pub trait StreamService: Send + Sync {
     /// the module docs).
     fn open_audio(&self, id: &str) -> Result<Box<dyn AudioStream>, StreamError>;
 
+    /// [`Self::open_audio`] for a caller that may stop wanting the track
+    /// while it opens (the engine, when another track plays meanwhile). A
+    /// service whose open waits for a lookup gives up once `wanted` says
+    /// false (it is asked every few milliseconds while it waits).
+    fn open_audio_while(
+        &self,
+        id: &str,
+        wanted: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Box<dyn AudioStream>, StreamError> {
+        let _ = wanted;
+        self.open_audio(id)
+    }
+
     /// Saves the audio as it is (YouTube: Opus remuxed to Ogg, no re-encode)
     /// into `dir`; returns the file. Spotify: [`StreamError::Unsupported`].
     fn save_audio(&self, id: &str, dir: &Path) -> BoxFuture<'_, Result<PathBuf, StreamError>>;
