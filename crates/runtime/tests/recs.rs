@@ -46,6 +46,7 @@ fn schedule() -> StreamSchedule {
         analysis_idle: Duration::from_secs(60),
         recs_debounce: Duration::from_millis(20),
         discover_gap: (Duration::from_millis(1), Duration::from_millis(5)),
+        listener_recheck: Duration::from_millis(200),
         ..StreamSchedule::default()
     }
 }
@@ -1466,6 +1467,9 @@ fn autoplay_brings_back_nothing_the_queue_played_as_new_music() {
         end_current(&s);
     }
     wait_for(&s.rt, "autoplay", |st| st.queue.radio.as_ref().is_some_and(|r| r.autoplay && !r.extending) && !st.queue.next.is_empty());
+    // YouTube Music is asked nothing in the background while it plays: the
+    // service's radio is asked once it pauses.
+    s.rt.send(Command::Pause);
     wait_until("the service's radio", || yt.calls("radio") > 0);
     std::thread::sleep(Duration::from_millis(500));
     let st = s.rt.state();
@@ -1740,4 +1744,144 @@ fn a_song_from_the_search_can_play_with_the_other_results() {
     let st = s.rt.state();
     assert_eq!(st.queue.next.iter().map(|e| e.track.id).collect::<Vec<_>>(), [results[2], results[3]]);
     assert!(st.queue.radio.is_none());
+}
+
+#[test]
+fn a_radio_tops_up_with_files_while_youtube_music_asks_to_wait() {
+    let l = library(3, 6, 5, &[]);
+    let streams = add_streams(&l);
+    let yt = Arc::new(FakeService::youtube());
+    let s = start(&l.lib, vec![yt.clone() as Arc<dyn StreamService>], Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[1]) });
+    wait_for(&s.rt, "the stream's radio", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() >= 3
+    });
+    wait_until("the seed plays", || !s.asked.lock().unwrap().is_empty());
+    let before: std::collections::HashSet<u64> = s.rt.state().queue.next.iter().map(|e| e.entry).collect();
+    // YouTube's bot check: every call fails for ten minutes.
+    yt.rate_limit_next_paused("open_audio", 1, Duration::from_secs(600));
+    assert!(yt.open_audio("yt-gruppa-1").is_err());
+
+    // The seed ends: the queue runs low and the radio picks more, only
+    // what plays now (files), not more of YouTube Music.
+    let id = s.asked.lock().unwrap().last().unwrap().id;
+    s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Ended { id }).unwrap();
+    wait_for(&s.rt, "a top-up", |st| {
+        st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.iter().any(|e| !before.contains(&e.entry))
+    });
+    let st = s.rt.state();
+    let added: Vec<_> = st.queue.next.iter().filter(|e| !before.contains(&e.entry)).collect();
+    assert!(added.iter().all(|e| e.track.has_local), "{:?}", added.iter().map(|e| &e.track.title).collect::<Vec<_>>());
+}
+
+#[test]
+fn discovery_asks_nothing_of_youtube_music_while_it_plays() {
+    let l = library(0, 0, 0, KNOWN);
+    let (yt, dz) = fakes();
+    let song = l.lib.upsert_stream_track(&yt.tracks().into_iter().find(|t| t.id.id == "yt-gruppa-1").unwrap()).unwrap();
+    let prefs = Prefs { graph_services: false, graph_open_data: false, autoplay: false, ..Prefs::default() };
+    let recheck = Duration::from_millis(200);
+    let s = start_with(&l.lib, vec![yt.clone(), dz.clone()], prefs, None, StreamSchedule { listener_recheck: recheck, ..schedule() });
+    s.rt.send(Command::PlayTracks { tracks: vec![song], start: 0, context: "test".into() });
+    wait_until("the play request", || !s.asked.lock().unwrap().is_empty());
+    let id = s.asked.lock().unwrap()[0].id;
+    s.rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    let before = discovery_calls(&yt);
+    // While it plays: no YouTube Music call at all (Deezer is asked).
+    std::thread::sleep(Duration::from_millis(2000));
+    let during = discovery_calls(&yt) - before;
+    assert_eq!(during, 0, "calls while YouTube Music played: {:?}", yt.all_calls());
+    // Paused: the pass goes on.
+    s.rt.send(Command::Pause);
+    wait_until("discovery goes on", || discovery_calls(&yt) > before + during);
+}
+
+/// Ten liked songs of `yt` (no file), each played before so its whole
+/// audio is on disk, in one sound.
+fn add_cached_streams(l: &Lib, yt: &FakeService) -> Vec<TrackId> {
+    let lib = &l.lib;
+    let now = now_ms();
+    let mut rng = Lcg(13);
+    // Plain songs that play (no clips: those wait for their song).
+    let songs: Vec<_> = yt
+        .tracks()
+        .into_iter()
+        .filter(|t| t.playable && t.kind == nikgob_core::streaming::TrackKind::Song)
+        .take(10)
+        .collect();
+    assert_eq!(songs.len(), 10);
+    songs
+        .iter()
+        .map(|song| {
+            let t = lib.upsert_stream_track(song).unwrap();
+            drop(yt.open_audio(&song.id.id).unwrap());
+            lib.like(t).unwrap();
+            let v: Vec<f32> = (0..nikgob_recs::DIM).map(|i| ((i * 3) % 11) as f32 * 0.8 + rng.f32() * 0.3).collect();
+            lib.put_analysis(&Analysis {
+                track_id: t,
+                bliss_vector: v,
+                analyzed_with: nikgob_recs::ANALYZED_WITH.to_owned(),
+                source: AnalysisSource::Youtube,
+            })
+            .unwrap();
+            for k in 0..3i64 {
+                let ts = now - (2 + k * 5) * DAY;
+                for kind in [EventType::Start, EventType::Complete] {
+                    let e = Event::new(t, kind, ts + i64::from(kind == EventType::Complete) * 200_000, lib.device_id());
+                    lib.record_event_raw(&e).unwrap();
+                }
+            }
+            t
+        })
+        .collect()
+}
+
+#[test]
+fn a_radio_that_ran_out_during_a_pause_plays_on_by_itself_after_it() {
+    let l = library(0, 0, 0, &[]);
+    // Signed out: its own likes do not come in and take the songs' copies.
+    let yt = Arc::new(FakeService::youtube().logged_out());
+    let songs = add_cached_streams(&l, &yt);
+    let prefs = Prefs { radio_new_share: nikgob_view::RadioNewShare::None, ..Prefs::default() };
+    let s = start(&l.lib, vec![yt.clone() as Arc<dyn StreamService>], prefs, None);
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(songs[1]) });
+    wait_for(&s.rt, "the radio", |st| st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() >= 3);
+    wait_until("the seed plays", || !s.asked.lock().unwrap().is_empty());
+    // YouTube's bot check: the queued songs still play (on disk), but a
+    // top-up finds nothing that plays now (no files).
+    let pause = Duration::from_secs(8);
+    yt.rate_limit_next_paused("open_audio", 1, pause);
+    assert!(yt.open_audio("yt-gruppa-1").is_err());
+    let paused_at = Instant::now();
+    // Everything queued plays to its end: the radio runs out.
+    while !s.rt.state().queue.next.is_empty() {
+        end_current(&s);
+    }
+    let last = s.asked.lock().unwrap().last().unwrap().id;
+    let asked = s.asked.lock().unwrap().len();
+    s.rt.playback_sender().send(PlaybackEvent::Started { id: last }).unwrap();
+    s.rt.playback_sender().send(PlaybackEvent::Ended { id: last }).unwrap();
+    assert!(paused_at.elapsed() < pause, "ran out within the pause (the test is too slow)");
+    // No one touches anything: after the pause it picks again and plays.
+    wait_until("the radio plays on", || s.asked.lock().unwrap().len() > asked);
+    assert!(paused_at.elapsed() >= pause.mul_f64(0.9), "not before the pause ends: {:?}", paused_at.elapsed());
+    assert!(s.rt.state().queue.radio.is_some());
+}
+
+#[test]
+fn a_radio_started_during_the_pause_queues_what_plays_now() {
+    let l = library(3, 6, 5, &[]);
+    let streams = add_streams(&l);
+    let yt = Arc::new(FakeService::youtube().logged_out());
+    let s = start(&l.lib, vec![yt.clone() as Arc<dyn StreamService>], Prefs::default(), None);
+    wait_for(&s.rt, "the home", home_ready);
+    // YouTube's bot check first, then the radio of a streamed song.
+    yt.rate_limit_next_paused("open_audio", 1, Duration::from_secs(600));
+    assert!(yt.open_audio("yt-gruppa-1").is_err());
+    s.rt.send(Command::StartRadio { seed: RadioSeed::Track(streams[1]) });
+    wait_for(&s.rt, "the radio", |st| st.queue.radio.as_ref().is_some_and(|r| !r.extending) && st.queue.next.len() >= 2);
+    let st = s.rt.state();
+    assert!(st.queue.next.iter().all(|e| e.track.has_local), "{:?}", st.queue.next.iter().map(|e| &e.track.title).collect::<Vec<_>>());
 }

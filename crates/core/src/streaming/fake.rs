@@ -581,6 +581,8 @@ struct State {
     limited: HashMap<&'static str, (usize, Option<Duration>, Option<Duration>)>,
     /// What [`StreamService::paused_until`] answers.
     paused_until: Option<std::time::SystemTime>,
+    /// Calls of a method that take this long ([`FakeService::delay`]).
+    delays: HashMap<&'static str, Duration>,
     /// A login finds no Premium ([`FakeService::without_premium`]).
     no_premium: bool,
     /// The song of each music video ([`StreamService::song_for_video`]),
@@ -656,6 +658,7 @@ impl FakeService {
                 calls: HashMap::new(),
                 limited: HashMap::new(),
                 paused_until: None,
+                delays: HashMap::new(),
                 no_premium: false,
                 // The clip of «Группа крови» is the album's song.
                 songs: if service == Service::Youtube {
@@ -977,8 +980,24 @@ impl FakeService {
         self.lock().limited.insert(name, (n, None, Some(pause)));
     }
 
+    /// Every call of the trait method `name` that goes through its limits
+    /// (see [`Self::rate_limit_next`]) takes `d` before it answers (it
+    /// blocks the calling thread: the answer of a slow network). Zero lifts it.
+    pub fn delay(&self, name: &'static str, d: Duration) {
+        let mut st = self.lock();
+        if d.is_zero() {
+            st.delays.remove(name);
+        } else {
+            st.delays.insert(name, d);
+        }
+    }
+
     fn count(&self, name: &'static str) {
         *self.lock().calls.entry(name).or_default() += 1;
+        let delay = self.lock().delays.get(name).copied();
+        if let Some(d) = delay {
+            std::thread::sleep(d);
+        }
     }
 
     /// Counts the call; a rate limit set by [`Self::rate_limit_next`]
@@ -1610,6 +1629,13 @@ impl StreamService for FakeService {
         let mut audio = FakeAudio::new(220.0 + 20.0 * index as f32, self.lock().audio_secs, false, None);
         audio.quality = Some(self.service.nominal_quality());
         Some(Box::new(audio))
+    }
+
+    /// Counted as `"has_cached_audio"` (so [`FakeService::delay`] makes it
+    /// a slow disk).
+    fn has_cached_audio(&self, id: &str) -> bool {
+        self.count("has_cached_audio");
+        self.lock().cached.contains(id)
     }
 
     fn clear_cache(&self) {

@@ -22,6 +22,7 @@ mod cold;
 mod complete;
 mod discography;
 mod export;
+mod held;
 mod likes;
 mod pages;
 mod rank;
@@ -215,6 +216,15 @@ pub(crate) enum Msg {
     Analysed(analysis::Done),
     /// Its gap or rate-limit pause is over.
     AnalysisWake,
+    /// The pause the player waits on is over (see [`held`]).
+    PauseLifted(u64),
+    /// Whether a paused service's stream is on disk, asked off the loop.
+    CacheKnown {
+        service: Service,
+        id: String,
+        until: std::time::SystemTime,
+        on_disk: bool,
+    },
     /// The details of a playing track that lacked its album or length
     /// (see [`complete`]).
     Completed {
@@ -290,6 +300,8 @@ pub(crate) struct Streams {
     pub(crate) analysis: analysis::StreamAnalysis,
     /// Playing tracks completed from their service.
     completing: complete::Completing,
+    /// The queue waiting out a service's pause (see [`held`]).
+    pub(crate) held: held::Held,
 }
 
 impl Streams {
@@ -342,6 +354,7 @@ impl Streams {
             tracklist: tracklist::TracklistState::default(),
             analysis: analysis::StreamAnalysis::default(),
             completing: complete::Completing::default(),
+            held: held::Held::default(),
         }
     }
 
@@ -774,6 +787,8 @@ impl Worker {
             } => self.replace_resolved(track, *pick, youtube_song.map(|s| *s), youtube),
             Msg::Analysed(done) => self.stream_analysed(done),
             Msg::AnalysisWake => self.stream_analysis_step(),
+            Msg::PauseLifted(seq) => self.pause_lifted(seq),
+            Msg::CacheKnown { service, id, until, on_disk } => self.cache_known(service, id, until, on_disk),
             Msg::Completed { track, id, result } => self.completed(track, &id, result),
         }
     }

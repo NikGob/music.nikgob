@@ -3,7 +3,8 @@
 //! a request; liked tracks are downloaded and analysed in the background one
 //! at a time, a gap apart and within the daily cap (kept over a restart);
 //! Spotify likes go through their YouTube Music songs and Spotify's sound is
-//! never opened; a rate limit only waits; the switch stops it at once; a
+//! never opened; a rate limit only waits; nothing is downloaded while
+//! YouTube Music plays; the switch stops it at once; a
 //! file that arrives later is analysed again from the file.
 
 use std::path::Path;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::model::{AnalysisSource, Codec, Source, SourceKind, TrackId};
 use nikgob_core::streaming::{FakeService, RemoteId, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
-use nikgob_runtime::{PlayRequest, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
+use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs, ViewState};
 
 const WITH: &str = nikgob_recs::ANALYZED_WITH;
@@ -323,5 +324,89 @@ fn a_file_that_arrives_later_is_analysed_from_the_file() {
     wait_for(&rt, "the progress", |s| {
         (s.analysis.files_done, s.analysis.files_total, s.analysis.streams_total) == (1, 1, 2)
     });
+    drop(rt);
+}
+
+#[test]
+fn nothing_is_downloaded_or_previewed_in_the_background_while_youtube_music_plays() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(youtube());
+    let track = lib.upsert_stream_track(&find(&yt, "yt-gruppa-1")).unwrap();
+    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    rt.send(Command::PlayTracks {
+        tracks: vec![track],
+        start: 0,
+        context: "test".into(),
+    });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let id = asked.lock().unwrap()[0].id;
+    rt.playback_sender().send(PlaybackEvent::Started { id }).unwrap();
+    wait_for(&rt, "the likes", |s| s.analysis.streams_total >= 3);
+    // The player's requests are the listener's: none in the background.
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(yt.opened().is_empty(), "{:?}", yt.opened());
+    assert_eq!(rt.state().analysis.streams_done, 0);
+
+    // Paused by the user: the background goes on.
+    rt.send(Command::Pause);
+    wait_for(&rt, "the analysis", |s| s.analysis.streams_done >= 1);
+    assert!(!yt.opened().is_empty());
+    drop(rt);
+}
+
+#[test]
+fn a_lookup_answered_after_youtube_music_began_to_play_downloads_nothing() {
+    let lib = Library::open_in_memory().unwrap();
+    let sp = Arc::new(FakeService::spotify());
+    // A song only YouTube Music has (Spotify's likes would win it otherwise).
+    let yt = Arc::new(youtube().with_track("solo", "Solo", "Nobody", 200).logged_out());
+    let playable = lib.upsert_stream_track(&find(&yt, "yt-x-solo")).unwrap();
+    // A slow network: the analysis's lookup of a Spotify like is still on
+    // its way when YouTube Music starts to play.
+    yt.delay("search_kind", Duration::from_millis(700));
+    yt.delay("find_isrc", Duration::from_millis(700));
+    let streams: Vec<Arc<dyn StreamService>> = vec![sp.clone(), yt.clone()];
+    let (rt, asked) = start(&lib, streams, Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    wait_until("a lookup on its way", || yt.calls("search_kind") + yt.calls("find_isrc") >= 1);
+    rt.send(Command::PlayTracks {
+        tracks: vec![playable],
+        start: 0,
+        context: "test".into(),
+    });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    let first = asked.lock().unwrap()[0].clone();
+    assert!(matches!(&first.source, PlaySource::Stream { service: Service::Youtube, .. }), "{:?}", first.source);
+    rt.playback_sender().send(PlaybackEvent::Started { id: first.id }).unwrap();
+    // The answer comes while it plays: nothing is downloaded.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(yt.opened().is_empty(), "{:?}", yt.opened());
+
+    rt.send(Command::Pause);
+    wait_for(&rt, "the analysis", |s| s.analysis.streams_done >= 1);
+    drop(rt);
+}
+
+
+#[test]
+fn nothing_is_downloaded_while_the_next_song_needs_youtube_music() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(youtube());
+    // A file plays; the next song only Spotify has, and Spotify is not
+    // here: YouTube Music looks it up and plays it.
+    let file = lib.upsert_track(&nikgob_core::model::Track::new("A file", nikgob_core::model::ArtistCredit::single("Someone", None))).unwrap();
+    lib.add_source(&Source::new(file.id, SourceKind::LocalFile, "Music/a-file.opus", Codec::Opus)).unwrap();
+    let next = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-1")).unwrap();
+    let (rt, asked) = start(&lib, vec![yt.clone()], Prefs { autoplay: false, ..Prefs::default() }, schedule(50, 300));
+    rt.send(Command::PlayTracks {
+        tracks: vec![file.id, next],
+        start: 0,
+        context: "test".into(),
+    });
+    wait_until("the play request", || !asked.lock().unwrap().is_empty());
+    wait_for(&rt, "the likes", |s| s.analysis.streams_total >= 3);
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(yt.opened().is_empty(), "{:?}", yt.opened());
+    rt.send(Command::Pause);
+    wait_for(&rt, "the analysis", |s| s.analysis.streams_done >= 1);
     drop(rt);
 }

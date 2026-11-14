@@ -1048,6 +1048,13 @@ pub trait StreamService: Send + Sync {
         None
     }
 
+    /// Whether [`Self::cached_audio`] would give the track, as cheaply as
+    /// the service can tell (YouTube: one look at its note, nothing opened
+    /// or touched). For the player's loop, which only needs to know.
+    fn has_cached_audio(&self, id: &str) -> bool {
+        self.cached_audio(id).is_some()
+    }
+
     /// The file of [`Self::cached_audio`], to be read where it lies (the
     /// lyrics check of a clip reads the audio that played); never deleted
     /// by the reader. Same rules: no network, off the UI thread.

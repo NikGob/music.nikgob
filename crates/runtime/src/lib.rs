@@ -747,6 +747,36 @@ impl Later {
     }
 }
 
+/// The command changes what comes next in the queue (not a new queue).
+fn edits_queue(c: &Command) -> bool {
+    matches!(
+        c,
+        Command::PlayNext(_)
+            | Command::Enqueue(_)
+            | Command::PlayReleaseNext(_)
+            | Command::EnqueueRelease(_)
+            | Command::PlayPlaylistNext(_)
+            | Command::EnqueuePlaylist(_)
+            | Command::PlayArtistNext(_)
+            | Command::EnqueueArtist(_)
+            | Command::RemoveFromQueue(_)
+            | Command::MoveInQueue { .. }
+            | Command::ClearQueue
+            | Command::UndoClearQueue
+            | Command::ToggleShuffle
+            | Command::PlayStreamNext(_)
+            | Command::EnqueueStream(_)
+            | Command::PlayStreamAlbumNext(_)
+            | Command::EnqueueStreamAlbum(_)
+            | Command::PlayStreamPlaylistNext(_)
+            | Command::EnqueueStreamPlaylist(_)
+            | Command::PlayStreamArtistNext(_)
+            | Command::EnqueueStreamArtist(_)
+            | Command::PlayMixNext { .. }
+            | Command::EnqueueMix { .. }
+    )
+}
+
 impl Worker {
     fn new(
         config: RuntimeConfig,
@@ -1145,6 +1175,11 @@ impl Worker {
                 (self.wake)();
                 return;
             }
+        }
+        // The user edits the queue: an entry waiting out a service's pause
+        // no longer starts by itself.
+        if edits_queue(&c) {
+            self.cancel_pause_wake();
         }
         match c {
             Command::TogglePlay => match self.status {
@@ -1848,11 +1883,14 @@ impl Worker {
         let refused = self.refused_videos();
         // A stream needs its service on and able to play sound for this
         // account (Spotify not connected, or before its playback login:
-        // the library's Spotify tracks play from YouTube Music).
+        // the library's Spotify tracks play from YouTube Music), and not
+        // paused by a rate limit unless its audio is on disk.
         let usable = |w: &mut Self, s: &nikgob_core::model::Source| match s.kind.service() {
             None => s.available,
             Some(service) => {
-                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator))) && w.has_audio(service)
+                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator)))
+                    && w.has_audio(service)
+                    && !w.waits_for_pause(service, &s.locator)
             }
         };
         let Some(src) = sources.iter().find(|s| usable(self, s)).cloned() else {
@@ -1862,6 +1900,8 @@ impl Worker {
                 format!("all its {all} sources were tried or trashed")
             } else if sources.iter().all(|s| !s.available && s.kind.service().is_none()) {
                 "its files are missing".to_owned()
+            } else if let Some(s) = sources.iter().find(|s| s.kind.service().is_some_and(|k| self.pause_left(k).is_some())) {
+                format!("{} asks to wait", s.kind.as_str())
             } else {
                 let services: Vec<&str> = sources.iter().filter_map(|s| s.kind.service()).map(|s| s.as_str()).collect();
                 let off = if self.service(StreamKind::Youtube).is_none() { ", YouTube Music switched off" } else { "" };
@@ -2022,6 +2062,9 @@ impl Worker {
         self.restarted = Some(e.id);
         self.playing = Some(e);
         self.playing_source = Some((source, kind));
+        if kind == SourceKind::Youtube {
+            self.youtube_plays();
+        }
         self.status = if kind.is_local() {
             Status::Playing
         } else {
@@ -2180,6 +2223,11 @@ impl Worker {
                 self.start_with(e, req, source, kind);
                 return;
             }
+            // Its service asks to wait: what plays now goes first, or the
+            // player waits on it (never a run down the queue).
+            if self.hold_for_pause(e) {
+                return;
+            }
             // Nothing plays now, but YouTube Music may have it: wait for it.
             if self.wait_for_youtube(e) {
                 return;
@@ -2220,6 +2268,11 @@ impl Worker {
         self.position_at = Instant::now();
         self.rate = self.speed;
         self.jumped_at = Instant::now();
+        // A stream a service's pause cut midway goes on from there.
+        if let Some(at) = self.take_held_position(e.id) {
+            self.failover = Some((e.id, at));
+            self.seek_to_failover(e);
+        }
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
         self.turn.lap("next");
@@ -2250,6 +2303,9 @@ impl Worker {
         // A clip the app queued starts once its song is known (see
         // `streams::clips::QueueClips`): not handed over ahead.
         let next = next.filter(|n| !self.clip_not_ready(*n));
+        // A stream a service's pause cut midway starts where it stopped,
+        // through a start of its own (a gapless step would start it over).
+        let next = next.filter(|n| !self.has_held_position(n.id));
         let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
             self.reading_ahead = None;
             self.playback.set_next(None);
@@ -2286,6 +2342,8 @@ impl Worker {
     }
 
     fn pause(&mut self) {
+        // Waiting out a service's pause: it stays paused now.
+        self.cancel_pause_wake();
         if matches!(self.status, Status::Playing | Status::Buffering) {
             self.heard_tick();
             self.position = self.position_now();
@@ -2341,6 +2399,9 @@ impl Worker {
         if self.playing.is_none() {
             // The restored track: play will start from here.
             if self.resume_at.is_some() {
+                if let Some(c) = self.queue.current() {
+                    self.drop_held_position(c.id);
+                }
                 self.resume_at = Some(p);
                 self.position = p;
                 self.publish_player();
@@ -2724,6 +2785,45 @@ impl Worker {
                         self.seek_to_failover(e);
                         return;
                     }
+                }
+                if let Some(e) = playing
+                    && let Some((source, kind)) = self.playing_source
+                    && kind.service().is_some()
+                    && message.contains("rate limited")
+                {
+                    // The service paused (as the stream opened, or as it
+                    // asked for its URL again): not this track's failure,
+                    // and no lesson (see `streams::held`). It goes on from
+                    // where it stopped: on another copy that plays now, or
+                    // whenever its entry starts again.
+                    let at = self.position;
+                    if !at.is_zero() {
+                        self.failover = Some((e.id, at));
+                    }
+                    self.tried.push(source);
+                    let skip = self.tried.clone();
+                    if let Some((req, again, other)) = self.request_skipping(e, &skip) {
+                        log::info!("{}: {kind} asks to wait; its {other} copy plays", e.track);
+                        self.playing_source = None;
+                        self.play_request(e, req, again, other);
+                        self.position = Duration::ZERO;
+                        self.position_at = Instant::now();
+                        self.rate = self.speed;
+                        self.jumped_at = Instant::now();
+                        self.seek_to_failover(e);
+                        self.preload_next();
+                        self.publish_player();
+                        return;
+                    }
+                    let ended = std::mem::replace(&mut self.ended, true);
+                    self.playing_source = None;
+                    self.hold_position(e.id, at);
+                    if self.hold_for_pause(e) {
+                        return;
+                    }
+                    self.drop_held_position(e.id);
+                    self.ended = ended;
+                    self.playing_source = Some((source, kind));
                 }
                 if let Some(e) = playing
                     && let Some((source, kind)) = self.playing_source

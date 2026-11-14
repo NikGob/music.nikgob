@@ -120,6 +120,10 @@ pub struct StreamSchedule {
     /// app runs with [`crate::recs::WAVE_REFILL`] (off); the tests of
     /// the refill turn it on.
     pub wave_refill: bool,
+    /// While YouTube Music plays or comes next, background work of YouTube
+    /// Music does not start: it looks again this long after (see
+    /// `streams::held`).
+    pub listener_recheck: Duration,
 }
 
 impl Default for StreamSchedule {
@@ -162,6 +166,7 @@ impl Default for StreamSchedule {
             rate_limit_cap: Duration::from_secs(10 * 60),
             rate_limit_unknown: Duration::from_secs(30),
             wave_refill: crate::recs::WAVE_REFILL,
+            listener_recheck: Duration::from_secs(10),
         }
     }
 }

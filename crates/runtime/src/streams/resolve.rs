@@ -29,8 +29,9 @@
 //! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
 //! for the pause to end, and a track that waits for its lookup (Buffering)
 //! is looked up again by itself when a pause of up to a minute ends («YouTube
-//! Music просит подождать — продолжу сам»), at most three times. After a
-//! longer pause playback stops and the toast says when to try again.
+//! Music просит подождать — продолжу сам»), at most three times. A longer
+//! pause the service keeps is waited out as [`super::held`] says; one it
+//! does not keep stops playback, and the toast says when to try again.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -176,7 +177,7 @@ const LIMIT_RETRIES: u32 = 3;
 /// The pause assumed when YouTube Music does not say how long it is.
 const UNKNOWN_PAUSE: Duration = Duration::from_secs(30);
 /// How long a miss keeps a track the user plays from being looked up again.
-const PLAYED_MISS_TTL: Duration = Duration::from_secs(10 * 60);
+pub(super) const PLAYED_MISS_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// A lookup's answer: the hit (or none), or `Err(retry_after)` when the
 /// service rate-limited it.
@@ -339,7 +340,7 @@ impl Worker {
     /// Where a track that plays from nothing now is looked up: YouTube
     /// Music, or Spotify while YouTube Music is off or silent (see the
     /// module docs). `None` when neither can be asked.
-    fn play_lookup(&mut self, track: TrackId, ttl: Duration) -> Option<Service> {
+    pub(super) fn play_lookup(&mut self, track: TrackId, ttl: Duration) -> Option<Service> {
         if self.streaming.resolving.contains(&track) {
             return Some(self.streaming.resolve_via.get(&track).copied().unwrap_or(Service::Youtube));
         }
@@ -638,7 +639,7 @@ impl Worker {
         if wait <= super::search::SHORT_WAIT && n <= LIMIT_RETRIES {
             log::info!("{track}: {who} lookup rate limited, again in {} s ({n} of {LIMIT_RETRIES})", wait.as_secs());
             if n == 1 {
-                self.toast(format!("{who} просит подождать — продолжу сам"), None);
+                self.pause_toast(via, wait);
             }
             let after = wait + super::schedule::wake_jitter();
             self.streaming.spawn(async move {
@@ -648,6 +649,13 @@ impl Worker {
             return;
         }
         self.streaming.resolve_limit.retries.remove(&track);
+        // A pause the service keeps: what plays now goes first, or the
+        // player waits it out (see `held`).
+        if let Some(e) = waiting
+            && self.hold_for_pause(e)
+        {
+            return;
+        }
         let title = self.lib.get_track(track).ok().flatten().map(|t| t.title).unwrap_or_default();
         let until = pause
             .filter(|p| *p > super::search::SHORT_WAIT)

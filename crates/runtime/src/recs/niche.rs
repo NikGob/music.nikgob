@@ -643,7 +643,8 @@ impl Worker {
             };
             let service = step.service();
             let Some(svc) = self.service(service) else { continue };
-            if let Some(left) = self.pause_left(service) {
+            // Its pause, or the listener's turn on YouTube Music.
+            if let Some(left) = self.background_wait(service) {
                 if let Some(open) = self.recs.niche.open.as_mut() {
                     open.steps.push_front(step);
                 }

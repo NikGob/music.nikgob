@@ -288,7 +288,8 @@ impl Worker {
             self.recs.suggest.pass = None;
             return;
         };
-        if let Some(left) = self.pause_left(service) {
+        // Its pause, or the listener's turn on YouTube Music.
+        if let Some(left) = self.background_wait(service) {
             log::info!("suggest: {service} asks to wait {} s", left.as_secs());
             self.suggest_wait(left + crate::streams::wake_jitter());
             return;

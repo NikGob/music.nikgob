@@ -82,6 +82,14 @@ impl AudioCache {
         self.dir().filter(|_| self.limit.load(Ordering::Relaxed) > 0)
     }
 
+    /// Whether `id` has a complete cached file: its note is written last,
+    /// so its presence says so. One look at the folder, nothing opened (and
+    /// the file's place in the eviction order stays).
+    pub(crate) fn has(&self, id: &str) -> bool {
+        let (Some(dir), Some(id)) = (self.enabled(), safe(id)) else { return false };
+        dir.join(format!("{id}.json")).is_file()
+    }
+
     /// The complete cached file of `id`, if there is one.
     pub(crate) fn open(&self, id: &str) -> Option<CachedStream> {
         let dir = self.enabled()?;

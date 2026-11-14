@@ -228,6 +228,12 @@ impl Worker {
             }
             return;
         }
+        // The listener's turn on YouTube Music first.
+        if let Some(left) = self.background_wait(Service::Youtube) {
+            self.streaming.clips.queue.push_front(next);
+            self.streaming.clips.next_at = Some(Instant::now() + left + super::schedule::wake_jitter());
+            return;
+        }
         self.streaming.clips.busy = true;
         self.streaming.spawn(async move {
             let result = yt.song_for_video(&next.video).await;

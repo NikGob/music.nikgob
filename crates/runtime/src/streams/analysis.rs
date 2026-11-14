@@ -17,8 +17,15 @@
 //!   Tracks are [`StreamSchedule::analysis_gap`] apart, at most
 //!   [`StreamSchedule::analysis_daily`] downloads a day (the count is kept in
 //!   the library's cache, so a restart does not start over), only while
-//!   YouTube Music is not paused, the periodic network work is not idle and
-//!   nothing waits for its sound (Buffering). A rate limit is not a failure:
+//!   YouTube Music is not paused, the periodic network work is not idle,
+//!   nothing waits for its sound (Buffering) and YouTube Music neither plays
+//!   nor comes next. The last is the listener's budget: YouTube's bot check
+//!   («Sign in to confirm you’re not a bot») answers its player, which
+//!   playback and these downloads both ask, and it is the service's, not a
+//!   client's (every client of the player is refused alike, see
+//!   `nikgob_youtube::player`), so a pause of its own for the background
+//!   would not keep playback safe. The songs that play are analysed from
+//!   the cache when they end anyway. A rate limit is not a failure:
 //!   the job waits for the pause to end. A real failure
 //!   (no song, a video that does not play or decode) is marked and tried
 //!   again after [`StreamSchedule::miss_ttl`].
@@ -130,6 +137,8 @@ struct Job {
     video: String,
     origin: Origin,
     youtube: Arc<dyn StreamService>,
+    /// YouTube Music plays or comes next (see `held::Held::listening`).
+    listening: Arc<AtomicBool>,
     /// The neural sound model, when it hears this job's audio.
     model: Option<Arc<Effnet>>,
 }
@@ -222,11 +231,19 @@ fn work(job: &Job, lib: &Library, index: &SoundIndex, off: &AtomicBool, pacer: &
     let audio = match (job.youtube.cached_audio(&job.video), job.origin) {
         (Some(a), _) => a,
         (None, Origin::Played) => return Outcome::NotCached,
+        // The listener's YouTube Music came meanwhile: later.
+        (None, Origin::Background | Origin::Preview) if job.listening.load(Ordering::Relaxed) => {
+            return Outcome::Transient("YouTube Music plays".into());
+        }
         (None, Origin::Background | Origin::Preview) => match job.youtube.open_audio(&job.video) {
             Ok(a) => a,
             Err(e) => return stream_outcome(e),
         },
     };
+    // Opening asked nothing yet (the first read does): one more look.
+    if job.origin != Origin::Played && job.listening.load(Ordering::Relaxed) {
+        return Outcome::Transient("YouTube Music plays".into());
+    }
     let ext = audio.format_hint();
     let max = if job.origin == Origin::Preview { PREVIEW_BYTES } else { MAX_BYTES };
     let bytes = match read_all(audio, max, off) {
@@ -388,6 +405,7 @@ impl Worker {
             video: src.locator,
             origin: Origin::Played,
             youtube,
+            listening: self.streaming.held.listening.clone(),
             model: None,
         };
         if self.analysis_job(job) {
@@ -422,6 +440,8 @@ impl Worker {
         if std::mem::take(&mut self.streaming.analysis.recount) {
             self.publish_analysis_counts();
         }
+        // (Kept for the analysis thread too.)
+        self.youtube_listened();
         self.stream_analysis_step();
     }
 
@@ -537,6 +557,12 @@ impl Worker {
         if let Some(left) = self.pause_left(Service::Youtube) {
             self.analysis_held("YouTube Music is paused");
             self.analysis_wait(left + super::schedule::wake_jitter());
+            return;
+        }
+        // The listener's YouTube Music goes first: no request of its player
+        // in the background while it plays or comes next.
+        if self.youtube_listened() {
+            self.analysis_held("YouTube Music plays");
             return;
         }
         // Playback and its lookups go first.
@@ -661,6 +687,7 @@ impl Worker {
             video,
             origin: Origin::Preview,
             youtube,
+            listening: self.streaming.held.listening.clone(),
             model: None,
         };
         if !self.analysis_job(job) {
@@ -680,6 +707,7 @@ impl Worker {
             video,
             origin: Origin::Background,
             youtube,
+            listening: self.streaming.held.listening.clone(),
             model: None,
         };
         if self.analysis_job(job) {
@@ -698,6 +726,12 @@ impl Worker {
         self.streaming.analysis.busy = None;
         match found {
             Ok(Some(hit)) => {
+                // YouTube Music began to play meanwhile: the song (attached
+                // now) is taken again once it stops.
+                if self.youtube_listened() {
+                    log::info!("stream analysis: {track} waits, YouTube Music plays");
+                    return;
+                }
                 if self.stream_analysis_on() && self.analysis_downloads() < self.streaming.schedule.analysis_daily {
                     self.analysis_fetch(track, hit.id.id.clone());
                 }

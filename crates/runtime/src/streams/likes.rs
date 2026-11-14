@@ -157,6 +157,15 @@ impl Worker {
         if svc.catalogue_only() || !svc.account().is_logged_in() {
             return;
         }
+        // The listener's YouTube Music first: the check looks again later.
+        if service == Service::Youtube && self.youtube_listened() {
+            let again = Instant::now() + self.streaming.schedule.listener_recheck;
+            let l = self.streaming.likes.entry(service).or_default();
+            if !l.pulling {
+                l.next_at = Some(again);
+            }
+            return;
+        }
         let every = self.streaming.schedule.jittered(self.streaming.schedule.likes_every);
         let full_every = self.streaming.schedule.likes_full_every;
         let l = self.streaming.likes.entry(service).or_default();
