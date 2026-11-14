@@ -499,7 +499,8 @@ impl Worker {
     /// `Command::PlaySearch`: a song of the search results. «Трек из
     /// поиска» ([`v::Prefs::search_play`]) says what follows it: by
     /// default it plays alone and autoplay goes on from it (with autoplay
-    /// off, «Радио по треку» of it), or the results shown play as one
+    /// off, «Радио по треку» of it, the queue still «из поиска»), or the
+    /// results shown play as one
     /// queue from it. Stream rows become "seen" tracks, library rows are
     /// what they are; a row the runtime does not know (any more) is left
     /// out.
@@ -516,7 +517,13 @@ impl Worker {
                     v::SearchPick::Library(t) => v::RadioSeed::Track(*t),
                     v::SearchPick::Stream(r) => v::RadioSeed::Stream(r.clone()),
                 };
+                // The song's radio, its queue still named after the search.
+                let before = self.queue.generation();
                 self.start_radio_cmd(seed);
+                if self.queue.generation() != before {
+                    self.queue.context = Some(context);
+                    self.publish_player();
+                }
                 self.after_stream_play();
                 return;
             }

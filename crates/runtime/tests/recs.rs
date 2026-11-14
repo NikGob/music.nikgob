@@ -1716,6 +1716,7 @@ fn a_song_from_the_search_plays_alone_and_its_radio_goes_on() {
             && st.queue.radio.as_ref().is_some_and(|r| !r.autoplay && !r.extending)
             && !st.queue.next.is_empty()
     });
+    assert_eq!(s.rt.state().player.context_line(), "Играет из поиска", "the radio's queue keeps the search's name");
 }
 
 /// «Трек из поиска → Остальные результаты поиска»: the results shown play

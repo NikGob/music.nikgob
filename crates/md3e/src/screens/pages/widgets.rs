@@ -543,7 +543,8 @@ pub fn sub_rows_mut<'a, A>(rows: &'a mut [Row<A>], label: &str) -> Option<&'a mu
 }
 
 /// `rows` as a menu shows them: a submenu with no item is left out, the
-/// one item of a submenu stands in the menu in its place.
+/// one item of a submenu stands in the menu in its place — but «Файл»,
+/// where a track's file items always are, even one.
 pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
     let mut shown = Vec::with_capacity(rows.len());
     for r in rows {
@@ -552,7 +553,7 @@ pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
                 let rows = shown_rows(rows);
                 match rows.iter().filter(|r| matches!(r, Row::Item(..))).count() {
                     0 => {}
-                    1 => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
+                    1 if parent.label != super::FILE => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
                     _ => shown.push(Row::Sub(parent, rows)),
                 }
             }

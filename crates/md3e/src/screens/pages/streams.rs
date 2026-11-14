@@ -1125,6 +1125,39 @@ mod menu_tests {
             .collect()
     }
 
+    /// A service song with an album and no file, as its menu shows it:
+    /// «Скачать» in the menu itself, «Скачать альбом» in «Файл».
+    #[test]
+    fn a_service_song_keeps_the_album_download_in_its_file_menu() {
+        use crate::screens::pages::{FILE, TrackAct};
+        use crate::screens::pages::widgets::{shown_rows, sub_rows};
+        let remote = |id: &str| nikgob_view::RemoteId::new(nikgob_view::Service::Spotify, id);
+        let t = nikgob_view::StreamTrackRow {
+            remote: remote("t"),
+            title: "Song".into(),
+            artist: "Band".into(),
+            artists: nikgob_view::Credit::single("Band", Some(remote("a"))),
+            album: Some("LP".into()),
+            album_id: Some(remote("l")),
+            duration: None,
+            disc_no: 1,
+            track_no: 1,
+            cover_url: None,
+            kind: nikgob_view::TrackKind::Song,
+            playable: true,
+            track: None,
+            liked: false,
+            in_library: false,
+            has_local: false,
+            elsewhere: None,
+            also_on: Vec::new(),
+        };
+        let shown = shown_rows(super::stream_track_rows(&t, None, &nikgob_view::DislikesView::default()));
+        assert!(shown.iter().any(|r| matches!(r, Row::Item(TrackAct::Fetch, _))));
+        assert!(!shown.iter().any(|r| matches!(r, Row::Item(TrackAct::AlbumDownload, _))));
+        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::AlbumDownload]);
+    }
+
     /// A service album's right click and its page's ⋮ are one list in the
     /// library album's order: the card adds play / shuffle / the like /
     /// «Скачать альбом»; both play next, queue and add to a playlist. What

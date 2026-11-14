@@ -254,21 +254,14 @@ fn count(n: usize, one: &str, few: &str, many: &str) -> String {
 
 /// «Ничего не найдено» for the filter, with «Сбросить» (also the chips).
 fn no_results(ui: &mut Ui, pages: &mut PageState) {
+    // The title and what to do next, no line under it.
     let q = pages.library_filter.trim().to_owned();
-    let among = match pages.library_tab {
-        LibraryTab::Playlists => "Среди плейлистов",
-        LibraryTab::Albums => "Среди альбомов",
-        LibraryTab::Artists => "Среди исполнителей",
-        LibraryTab::Tracks => "Среди треков",
-        LibraryTab::All | LibraryTab::Downloaded | LibraryTab::Trash => "В библиотеке",
-    };
     if q.is_empty() {
-        let body = format!("{among} с этими фильтрами пусто.");
-        if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &body, Some("Сбросить")) {
+        if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", "", Some("Сбросить")) {
             pages.release_filter = 0;
             pages.release_source = 0;
         }
-    } else if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", &format!("{among} нет «{q}»."), Some("Искать везде")) {
+    } else if widgets::empty_state(ui, Icon::Search, "Ничего не найдено", "", Some("Искать везде")) {
         pages.search_everywhere = Some(q);
     }
 }

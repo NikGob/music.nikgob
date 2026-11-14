@@ -1934,9 +1934,9 @@ mod speed_tests {
         let top = labels(&shown);
         assert_eq!(&top[..4], [PLAY_NEXT, TO_QUEUE, RADIO_BY_TRACK, "В плейлист…"]);
         assert!(matches!(shown[3], Row::Divider) && matches!(shown[5], Row::Divider));
-        // «Файл» with «Скачать альбом» alone shows it in its place.
-        assert_eq!(&top[top.len() - 5..], ["Поделиться", "Скачать", "Скачать альбом", "Не нравится", "Не рекомендовать исполнителя"]);
-        assert_eq!(row_acts(sub_rows(&rows(), FILE).unwrap()), [TrackAct::AlbumDownload]);
+        // «Файл» stays a submenu even with «Скачать альбом» alone.
+        assert_eq!(&top[top.len() - 5..], ["Поделиться", "Скачать", FILE, "Не нравится", "Не рекомендовать исполнителя"]);
+        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::AlbumDownload]);
         // The speed stands in the menu itself, right before «Файл».
         let top = labels(&with_speed_row(rows(), &speeds(true, &[]), true));
         let at = top.iter().position(|l| l == "Скорость…").unwrap();

@@ -162,8 +162,10 @@ pub fn is_credit_line(text: &str) -> bool {
 
 #[derive(Deserialize)]
 struct Entry {
+    /// When the line starts; `None` when the answer gives no time (a
+    /// duration alone is no start).
     #[serde(default)]
-    time: u64,
+    time: Option<u64>,
     #[serde(default)]
     duration: u64,
     #[serde(default)]
@@ -241,9 +243,11 @@ impl Payload {
         if self.kind.eq_ignore_ascii_case("line") {
             return Timing::Line;
         }
-        if self.lyrics.iter().any(|e| e.syllabus.iter().any(|s| s.time > 0 || s.duration > 0)) {
+        // Starts that are given and say something: a line or syllable that
+        // starts after the song does (a given 0 of the first line stays 0).
+        if self.lyrics.iter().any(|e| e.syllabus.iter().any(|s| s.time > 0)) {
             Timing::Word
-        } else if self.lyrics.iter().any(|e| e.time > 0 || e.duration > 0) {
+        } else if self.lyrics.iter().any(|e| e.time.is_some_and(|t| t > 0)) {
             Timing::Line
         } else {
             Timing::Plain
@@ -257,14 +261,13 @@ impl Payload {
             Timing::Plain => return Err(MetadataError::Parse("LyricsPlus text has no timing".into())),
         };
         let mut entries = self.lyrics;
-        entries.sort_by_key(|l| l.time);
+        entries.sort_by_key(|l| l.time.unwrap_or(0));
         let mut out = Vec::new();
         for entry in entries {
+            let time = entry.time.unwrap_or(0);
             let mut line = LyricLine {
-                start: Duration::from_millis(entry.time),
-                end: Some(Duration::from_millis(
-                    entry.time.saturating_add(entry.duration),
-                )),
+                start: Duration::from_millis(time),
+                end: Some(Duration::from_millis(time.saturating_add(entry.duration))),
                 text: entry.text,
                 background: entry.background || entry.element.background,
                 duet: entry
@@ -421,6 +424,18 @@ mod tests {
         let t = payload.text().unwrap();
         assert!(t.lines.is_empty());
         assert_eq!(t.plain.as_deref(), Some("Раз\nДва"));
+    }
+
+    #[test]
+    fn durations_without_starts_are_no_timing() {
+        let payload: Payload = serde_json::from_str(r#"{"type":"Static","lyrics":[{"duration":1000,"text":"First"},{"duration":1000,"text":"Second"}]}"#).unwrap();
+        let t = payload.text().unwrap();
+        assert!(t.lines.is_empty());
+        assert_eq!(t.plain.as_deref(), Some("First\nSecond"));
+        // A given 0 of the first line stays its start.
+        let payload: Payload = serde_json::from_str(r#"{"type":"Static","lyrics":[{"time":0,"duration":900,"text":"First"},{"time":1000,"duration":900,"text":"Second"}]}"#).unwrap();
+        let t = payload.text().unwrap();
+        assert_eq!(t.lines.iter().map(|l| l.start.as_millis()).collect::<Vec<_>>(), [0, 1000]);
     }
 
     #[test]
