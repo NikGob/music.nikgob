@@ -610,7 +610,10 @@ fn next_ranked(
             (Some(e), Some(a)) => (-euclid(e, a) / scale).exp(),
             _ => 0.0,
         };
-        0.6 * aff + link + 0.5 * near + 0.2 * m.prior_at(i)
+        // The graph's prior whole: faded with a song's own starts (as the
+        // model's feature is) it lifts every song never played over the
+        // played ones, and «Знакомое» fills with the unheard.
+        0.6 * aff + link + 0.5 * near + 0.2 * m.graph.prior(i)
     };
     let mut lib: Vec<(f32, usize)> = fitting.iter().copied().filter(|&i| free(i)).map(|i| (pull(i), i)).collect();
     lib.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
