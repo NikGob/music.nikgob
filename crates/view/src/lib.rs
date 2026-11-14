@@ -493,24 +493,31 @@ impl Default for PlayerView {
 
 impl PlayerView {
     /// The header line of Now Playing: "Играет из альбома «…»", "Играет
-    /// из поиска Spotify: лёд", "Играет из «Библиотека»" — never quotes in
-    /// quotes. A context that is a phrase ("альбома «…»", "поиска: …") is
-    /// used as it is, a bare name is quoted; old saved contexts ("Поиск
-    /// «…»", "Spotify · «…»") read the new way.
+    /// из поиска Spotify", "Играет из «Библиотека»" — never quotes in
+    /// quotes, never the typed query. A context that is a phrase ("альбома
+    /// «…»", "поиска") is used as it is, a bare name is quoted; a search
+    /// context saved with its query ("поиска: …", old "Поиск «…»",
+    /// "Spotify · «…»") reads without it.
     pub fn context_line(&self) -> String {
         let Some(c) = self.context.as_deref().map(str::trim).filter(|c| !c.is_empty()) else {
             return "Сейчас играет".to_owned();
         };
-        let unquote = |s: &str| s.trim().trim_start_matches('«').trim_end_matches('»').to_owned();
-        const PHRASES: [&str; 5] = ["поиска", "альбома ", "плейлиста ", "исполнителя ", "микса "];
+        if let Some(rest) = c.strip_prefix("поиска") {
+            // "поиска", "поиска Spotify", "поиска Spotify: лёд", "поиска: лёд".
+            let service = rest.split(':').next().unwrap_or_default().trim();
+            return if service.is_empty() { "Играет из поиска".to_owned() } else { format!("Играет из поиска {service}") };
+        }
+        const PHRASES: [&str; 4] = ["альбома ", "плейлиста ", "исполнителя ", "микса "];
         if PHRASES.iter().any(|p| c.starts_with(p)) || c == "библиотеки" {
             return format!("Играет из {c}");
         }
-        if let Some(q) = c.strip_prefix("Поиск ") {
-            return format!("Играет из поиска: {}", unquote(q));
+        if c.starts_with("Поиск ") {
+            return "Играет из поиска".to_owned();
         }
-        if let Some((service, q)) = c.split_once(" · ") {
-            return format!("Играет из поиска {service}: {}", unquote(q));
+        if let Some((service, q)) = c.split_once(" · ")
+            && q.trim_start().starts_with('«')
+        {
+            return format!("Играет из поиска {}", service.trim());
         }
         if c.contains('«') || c.contains('»') {
             return format!("Играет из {c}");
@@ -1466,17 +1473,26 @@ pub enum ToastKind {
 
 impl ToastKind {
     /// Guesses the kind from the (Russian) message text, so call sites only
-    /// say what happened.
+    /// say what happened. The names in «…» (a song, an album: «Дай мне
+    /// всё») are the user's, not the message's: a failure is read from the
+    /// rest only, and its words count from the start of a word («мне всё»
+    /// is not «не всё»).
     pub fn guess(text: &str) -> Self {
         let t = text.to_lowercase();
+        let bare = without_quoted(&t);
+        let failed = |words: &[&str]| {
+            words.iter().any(|w| {
+                bare.match_indices(w).any(|(i, _)| bare[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric()))
+            })
+        };
         let any = |words: &[&str]| words.iter().any(|w| t.contains(w));
-        if any(&[
+        if failed(&[
             "ошибка", "не получилось", "не удалось", "недоступ", "не читается", "нельзя", "не запустил",
             "некуда", "нечего", "нет файла", "нет локального", "это не ", "устарел", "не скачать", "не всё",
             "не нашёл", "не нашел", "нужно войти", "не подключ", "нет связи",
         ]) {
             Self::Error
-        } else if t.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
+        } else if bare.ends_with('…') || any(&["начался", "качается", "добавляю"]) {
             Self::Working
         } else if any(&["сохранен", "сохранён", "добавлено", "скачано", "восстановлено", "удалён", "удалено", "следующим", "в любимых", "убран", "в корзине", "объединено", "скопирован", "заменено", "вошёл", "вход выполнен", "подключён", "включён", "в «хочу скачать»", "в библиотеке"]) {
             Self::Success
@@ -1484,6 +1500,31 @@ impl ToastKind {
             Self::Info
         }
     }
+}
+
+/// `text` less what stands in «…» (nested quotes too), the quotes kept.
+fn without_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '«' => {
+                if depth == 0 {
+                    out.push(c);
+                }
+                depth += 1;
+            }
+            '»' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(c);
+                }
+            }
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The revision of the lyrics defaults: 1 turned word timing off for the
@@ -1926,6 +1967,10 @@ pub struct Prefs {
     /// next tracks of its world (a soundtrack franchise, an artist's
     /// discography) in album order first, then the similar ones.
     pub autoplay_continue_world: bool,
+    /// «Трек из поиска»: a song started from the search results plays
+    /// alone, autoplay going on from it ([`SearchPlay::Radio`]), or with
+    /// the other results after it.
+    pub search_play: SearchPlay,
     /// The share of new music by the kind of radio (a track's, an
     /// artist's, a mix, autoplay): what was chosen for it last; a kind not
     /// here takes [`Self::radio_new_share`].
@@ -2094,7 +2139,8 @@ pub enum TrackMenuItem {
     Tags,
     /// «Изменить текст…».
     LyricsEdit,
-    /// «Скачать» of a track with no file, and «Скачать альбом».
+    /// «Скачать» of a track with no file («Скачать альбом» stays in
+    /// «Файл»).
     Download,
     /// «Найти качество лучше» of a track with a file.
     Torrents,
@@ -2153,7 +2199,7 @@ impl TrackMenuItem {
     /// Where the item stands until the settings say otherwise.
     pub fn default_place(self) -> TrackMenuPlace {
         match self {
-            Self::Tags | Self::LyricsEdit | Self::Download | Self::Torrents | Self::PickRelease | Self::WrongFile => {
+            Self::Info | Self::Tags | Self::LyricsEdit | Self::Torrents | Self::PickRelease | Self::WrongFile => {
                 TrackMenuPlace::File
             }
             _ => TrackMenuPlace::Menu,
@@ -2843,6 +2889,20 @@ impl NpSlot {
     pub fn toggle(&mut self, slot: Self) {
         *self = if *self == slot { Self::None } else { slot };
     }
+}
+
+/// What follows a song started from the search results
+/// ([`Prefs::search_play`]). An album, a playlist or an artist found plays
+/// as its own list either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchPlay {
+    /// «Радио по треку»: the song alone in the queue; autoplay (a radio of
+    /// it) fills «Далее».
+    #[default]
+    Radio,
+    /// «Остальные результаты поиска»: the results shown, from the song on.
+    Results,
 }
 
 /// The ring around the Now Playing cover.
@@ -3900,6 +3960,7 @@ impl Default for Prefs {
             sound_device: SoundDevice::Auto,
             autoplay: true,
             autoplay_continue_world: true,
+            search_play: SearchPlay::Radio,
             radio_new_share_by: std::collections::BTreeMap::new(),
             dislike_button: true,
             dislike_skips: true,
@@ -4063,6 +4124,11 @@ mod toast_tests {
             ("Spotify подключён · звук пока с YouTube Music", ToastKind::Success),
             ("Spotify не подключён", ToastKind::Error),
             ("В «Хочу скачать»: «Война»", ToastKind::Success),
+            // A name with a failure's words in it is still a name.
+            ("В «Хочу скачать»: «Дай мне всё»", ToastKind::Success),
+            ("В «Хочу скачать»: «Не всё потеряно»", ToastKind::Success),
+            ("Плейлист «Ошибка» сохранён", ToastKind::Success),
+            ("Не получилось скачать «Дай мне всё»", ToastKind::Error),
             ("Нет связи — проверь интернет", ToastKind::Error),
             ("Заменено на «AIYOU»", ToastKind::Success),
             ("Скоро", ToastKind::Info),
@@ -4088,11 +4154,14 @@ mod context_tests {
         assert_eq!(line(Some("библиотеки")), "Играет из библиотеки");
         assert_eq!(line(Some("альбома «Группа крови»")), "Играет из альбома «Группа крови»");
         assert_eq!(line(Some("плейлиста «Вечер»")), "Играет из плейлиста «Вечер»");
-        assert_eq!(line(Some("поиска Spotify: лёд")), "Играет из поиска Spotify: лёд");
-        assert_eq!(line(Some("поиска: лёд")), "Играет из поиска: лёд");
-        // Saved by older versions.
-        assert_eq!(line(Some("Spotify · «лёд»")), "Играет из поиска Spotify: лёд");
-        assert_eq!(line(Some("Поиск «лёд»")), "Играет из поиска: лёд");
+        assert_eq!(line(Some("поиска")), "Играет из поиска");
+        assert_eq!(line(Some("поиска Spotify")), "Играет из поиска Spotify");
+        assert_eq!(line(Some("исполнителя «Кино»")), "Играет из исполнителя «Кино»");
+        // Saved with the typed query: the query never shows.
+        assert_eq!(line(Some("поиска Spotify: лай мне все")), "Играет из поиска Spotify");
+        assert_eq!(line(Some("поиска: лай мне все")), "Играет из поиска");
+        assert_eq!(line(Some("Spotify · «лёд»")), "Играет из поиска Spotify");
+        assert_eq!(line(Some("Поиск «лёд»")), "Играет из поиска");
         for c in ["Spotify · «лёд»", "Поиск «лёд»", "альбома «X»", "Кино"] {
             assert!(line(Some(c)).matches('«').count() <= 1, "{c}");
         }
@@ -4110,7 +4179,7 @@ mod context_tests {
         assert_eq!(with("Кино", Some(crate::Route::Artist(crate::ArtistId::new()))).as_deref(), Some("Кино"));
         // No page (a search, a queue of picked songs), or nothing quoted.
         assert_eq!(with("альбома «Группа крови»", None), None);
-        assert_eq!(with("поиска: лёд", album.clone()), None);
+        assert_eq!(with("поиска", album.clone()), None);
         assert_eq!(with("библиотеки", album), None);
     }
 }
@@ -4243,7 +4312,11 @@ mod track_menu_tests {
         for item in I::ALL {
             assert_eq!(p.track_menu_place(item), item.default_place());
         }
-        assert_eq!((I::Info.default_place(), I::Tags.default_place()), (P::Menu, P::File));
+        // «Скачать» in the menu itself, «Источник и качество» in «Файл».
+        assert_eq!(
+            (I::Info.default_place(), I::Tags.default_place(), I::Download.default_place(), I::Share.default_place()),
+            (P::File, P::File, P::Menu, P::Menu)
+        );
         p.set_track_menu_place(I::Share, P::File);
         p.set_track_menu_place(I::Tags, P::Menu);
         p.set_track_menu_place(I::Ban, P::Hidden);

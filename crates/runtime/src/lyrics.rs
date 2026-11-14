@@ -881,6 +881,10 @@ async fn find_lyricsplus(meta: &Metadata, lib: &Library, row: &TrackRow) -> Resu
                 t.provider.as_deref().unwrap_or("?"),
                 if t.words_dropped { ", generated word timing dropped" } else { "" }
             );
+            if t.lines.is_empty() {
+                // A timing type with no times: the words alone.
+                return Ok(t.plain.as_deref().and_then(Text::from_plain));
+            }
             return Ok(Text::from_lines(t.lines).map(|x| Text { weak: t.words_dropped, ..x }));
         }
     }

@@ -18,6 +18,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, pages: &mut Pa
     switch(ui, Id::Autoplay, &mut p.autoplay);
     let autoplay = p.autoplay;
     child(ui, !autoplay, |ui| switch(ui, Id::AutoplayWorld, &mut p.autoplay_continue_world));
+    menu(ui, Id::SearchPlay, p);
     menu(ui, Id::RadioNoRepeat, p);
     // How a new list starts, by its kind; radio and autoplay on their own.
     sub(ui, "Перемешивание");

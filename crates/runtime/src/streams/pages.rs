@@ -496,10 +496,42 @@ impl Worker {
         self.after_stream_play();
     }
 
-    /// `Command::PlaySearch`: the merged tracks of the «Всё» search as one
-    /// queue; stream rows become "seen" tracks, library rows are what they
-    /// are. A row the runtime does not know (any more) is left out.
+    /// `Command::PlaySearch`: a song of the search results. «Трек из
+    /// поиска» ([`v::Prefs::search_play`]) says what follows it: by
+    /// default it plays alone and autoplay goes on from it (with autoplay
+    /// off, «Радио по треку» of it, the queue still «из поиска»), or the
+    /// results shown play as one
+    /// queue from it. Stream rows become "seen" tracks, library rows are
+    /// what they are; a row the runtime does not know (any more) is left
+    /// out.
     pub(crate) fn play_search(&mut self, picks: &[v::SearchPick], start: usize, context: String) {
+        let (mode, autoplay) = {
+            let p = &self.state.read().prefs;
+            (p.search_play, p.autoplay)
+        };
+        let alone;
+        let picks = if mode == v::SearchPlay::Radio {
+            alone = picks.get(start).cloned().into_iter().collect::<Vec<_>>();
+            if !autoplay && let Some(pick) = alone.first() {
+                let seed = match pick {
+                    v::SearchPick::Library(t) => v::RadioSeed::Track(*t),
+                    v::SearchPick::Stream(r) => v::RadioSeed::Stream(r.clone()),
+                };
+                // The song's radio, its queue still named after the search.
+                let before = self.queue.generation();
+                self.start_radio_cmd(seed);
+                if self.queue.generation() != before {
+                    self.queue.context = Some(context);
+                    self.publish_player();
+                }
+                self.after_stream_play();
+                return;
+            }
+            &alone[..]
+        } else {
+            picks
+        };
+        let start = if mode == v::SearchPlay::Radio { 0 } else { start };
         let mut ids = Vec::with_capacity(picks.len());
         let mut start_at = 0;
         for (i, p) in picks.iter().enumerate() {

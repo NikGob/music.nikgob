@@ -754,7 +754,13 @@ impl Md3eUi {
             }
         }
         if let Some(tab) = self.chrome.open_pane.take() {
-            self.pane = Some(tab);
+            if tab.on(&state.prefs) {
+                self.pane = Some(tab);
+            } else if tab == PaneTab::Lyrics {
+                // No lyrics in the side pane: Now Playing shows them.
+                self.set_now_playing(ctx, true);
+                self.chrome.np_ask = Some(NpSlot::Lyrics);
+            }
         }
         // A torrent search for a better copy shows its results on the search page.
         let query = out[first_cmd..].iter().rev().find_map(|c| match c {
@@ -787,6 +793,8 @@ impl Md3eUi {
                 self.pane = None;
             } else if !self.search.is_empty() {
                 self.search.clear();
+            } else if self.pages.bar_filters_library(self.route()) && self.pages.clear_library_filter() {
+                // The library's filter (the bar there) empties first.
             } else if compact && compact_page(self.route()) {
                 self.navigate(ctx, Route::Home, out);
             } else {
@@ -1024,13 +1032,26 @@ impl Md3eUi {
         if std::mem::take(&mut self.pages.focus_search) {
             self.search_focus = true;
         }
-        let bar = pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, state.prefs.prowlarr_configured, out);
-        if bar.edited {
-            self.search_edited = Some(std::time::Instant::now());
+        // One field: on Библиотека the bar filters the library (Enter or
+        // «Искать везде» takes the text to the search); elsewhere it searches.
+        if self.search.is_empty() && self.pages.bar_filters_library(&route) {
+            pages::library_bar(ui, search_rect, &mut self.pages, &mut self.search_focus);
+        } else {
+            let bar =
+                pages::search_bar(ui, search_rect, &mut self.search, &mut self.search_focus, state.prefs.prowlarr_configured, out);
+            if bar.edited {
+                self.search_edited = Some(std::time::Instant::now());
+            }
+            // Enter: sent at once, without waiting for the pause.
+            if bar.submitted {
+                self.search_edited = None;
+            }
         }
-        // Enter: sent at once, without waiting for the pause.
-        if bar.submitted {
+        if let Some(q) = self.pages.search_everywhere.take() {
+            self.pages.set_library_filter("");
+            self.search = q;
             self.search_edited = None;
+            self.search_focus = true;
         }
         self.flush_search(&ctx, out);
 
@@ -1340,6 +1361,7 @@ impl Md3eUi {
             "unheard" => S::RadioUnheard,
             "recs" => S::RadioNewShare,
             "autoplay" => S::Autoplay,
+            "search-play" => S::SearchPlay,
             "mixes" => S::MixesProfiles,
             "dislikes" => S::DislikeButton,
             "blacklist" => S::Marks,

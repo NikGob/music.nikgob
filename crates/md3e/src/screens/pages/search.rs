@@ -296,13 +296,12 @@ fn library(
     }
     if !r.tracks.is_empty() {
         part_label(ui, "Треки");
-        let ids = r.tracks.iter().map(|t| t.id).collect();
         nav = widgets::track_list(
             ui,
             "search",
             &r.tracks,
             Lead::Cover,
-            &PlayFrom::Tracks(ids, format!("поиска: {}", r.query.trim())),
+            &PlayFrom::SearchRows("поиска".to_owned()),
             state,
             pages,
             out,
@@ -570,9 +569,6 @@ fn results(
     let empty = |x: &StreamSearchSection| {
         x.tracks.is_empty() && x.albums.is_empty() && x.artists.is_empty() && x.playlists.is_empty()
     };
-    // What the section searched for (its rows are of that query while a
-    // newer one runs).
-    let shown_q = state.search.query.trim();
     // A rate limit: a quiet line, never a button (the runtime asks again).
     if !q.is_empty()
         && let Some(note) = sec.and_then(|x| x.note.as_deref())
@@ -596,7 +592,7 @@ fn results(
         Some(x) => {
             if !x.tracks.is_empty() {
                 part_label(ui, "Треки");
-                let from = streams::StreamFrom::Rows(format!("поиска {}: {shown_q}", service.display_name()));
+                let from = streams::StreamFrom::SearchRows(format!("поиска {}", service.display_name()));
                 nav = streams::track_rows(ui, &format!("sv-tracks-{salt}"), &x.tracks, false, &from, state, pages, out)
                     .or(nav.take());
             }
@@ -684,7 +680,8 @@ fn all_page(ui: &mut Ui, query: &str, state: &ViewState, pages: &mut PageState, 
     }
     queue.extend(a.tracks.iter());
     let picks: Vec<SearchPick> = queue.iter().map(|t| t.pick()).collect();
-    let context = format!("поиска: {q}");
+    // The header of Now Playing says where, never the typed query.
+    let context = "поиска".to_owned();
     let offset = usize::from(matches!(a.top, Some(TopResult::Track(_))));
     let first = a.tracks.len().min(TOP_TRACKS);
     let show_top = a.top.is_some() || a.top_pending;
@@ -861,12 +858,12 @@ fn top_view(top: &TopResult, picks: &[SearchPick], context: &str) -> TopView {
             salt: format!("la-{}", a.id),
         },
         TopResult::Artist(SearchArtist::Stream(a)) => {
-            // Their songs among the results play; a library artist plays
-            // from the library.
-            let play = match a.artist {
-                Some(id) => Some(Command::PlayArtist { id, shuffle: false }),
-                None => (!picks.is_empty()).then(play_queue),
-            };
+            // An artist plays as its own list: a library artist from the
+            // library, a service's its newest release.
+            let play = Some(match a.artist {
+                Some(id) => Command::PlayArtist { id, shuffle: false },
+                None => Command::PlayStreamArtist(a.remote.clone()),
+            });
             TopView {
                 title: a.name.clone(),
                 line: "Исполнитель".into(),

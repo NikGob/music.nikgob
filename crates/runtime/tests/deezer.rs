@@ -214,6 +214,25 @@ fn a_deezer_track_plays_from_youtube_music_with_the_isrc_deezer_gives() {
     assert!(deezer.opened().is_empty());
 }
 
+/// A service's song from the search with autoplay off: its radio plays,
+/// the header still says where it was found.
+#[test]
+fn a_service_song_from_the_search_keeps_its_source_with_autoplay_off() {
+    let lib = Library::open_in_memory().unwrap();
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let deezer = Arc::new(FakeService::deezer());
+    let r = rig(&lib, vec![youtube, deezer]);
+    let prefs = Prefs { autoplay: false, ..r.rt.state().prefs.clone() };
+    r.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for(&r.rt, "autoplay off", |s| !s.prefs.autoplay);
+    let a = search_all(&r, "кино");
+    let picks: Vec<SearchPick> = a.tracks.iter().map(|t| t.pick()).collect();
+    let start = picks.iter().position(|p| matches!(p, SearchPick::Stream(_))).expect("a service song");
+    r.rt.send(Command::PlaySearch { tracks: picks, start, context: "поиска Deezer".into() });
+    wait_until("a play request", || !r.asked.lock().unwrap().is_empty());
+    wait_for(&r.rt, "the header", |s| s.player.current.is_some() && s.player.context_line() == "Играет из поиска Deezer");
+}
+
 #[test]
 fn a_deezer_track_without_a_youtube_isrc_is_found_by_name() {
     let lib = Library::open_in_memory().unwrap();

@@ -543,7 +543,8 @@ pub fn sub_rows_mut<'a, A>(rows: &'a mut [Row<A>], label: &str) -> Option<&'a mu
 }
 
 /// `rows` as a menu shows them: a submenu with no item is left out, the
-/// one item of a submenu stands in the menu in its place.
+/// one item of a submenu stands in the menu in its place — but «Файл»,
+/// where a track's file items always are, even one.
 pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
     let mut shown = Vec::with_capacity(rows.len());
     for r in rows {
@@ -552,7 +553,7 @@ pub fn shown_rows<A>(rows: Vec<Row<A>>) -> Vec<Row<A>> {
                 let rows = shown_rows(rows);
                 match rows.iter().filter(|r| matches!(r, Row::Item(..))).count() {
                     0 => {}
-                    1 => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
+                    1 if parent.label != super::FILE => shown.extend(rows.into_iter().filter(|r| matches!(r, Row::Item(..)))),
                     _ => shown.push(Row::Sub(parent, rows)),
                 }
             }
@@ -1094,6 +1095,9 @@ pub enum PlayFrom {
     ReleaseAs(nikgob_view::ReleaseId, bool),
     Playlist(nikgob_view::PlaylistId),
     Tracks(Vec<nikgob_view::TrackId>, String),
+    /// Library rows of the search: the row played is a search's pick
+    /// ([`nikgob_view::Prefs::search_play`] says what follows it).
+    SearchRows(String),
     /// The merged «Всё» search: a queue of library and stream tracks,
     /// started at `at` (the row's own place in it).
     Search {
@@ -1750,6 +1754,11 @@ fn play_from(from: &PlayFrom, tracks: &[TrackRow], i: usize) -> Command {
         PlayFrom::Search { picks, at, context } => Command::PlaySearch {
             tracks: picks.clone(),
             start: *at,
+            context: context.clone(),
+        },
+        PlayFrom::SearchRows(context) => Command::PlaySearch {
+            tracks: tracks.iter().map(|t| nikgob_view::SearchPick::Library(t.id)).collect(),
+            start: i,
             context: context.clone(),
         },
     }

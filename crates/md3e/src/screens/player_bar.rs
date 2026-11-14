@@ -309,7 +309,9 @@ pub fn show(
             // track's one list.
             let mut top = Vec::new();
             top.extend((!show_like).then_some(Act::Like));
-            top.extend((lyrics_on && !show_lyrics).then_some(Act::Lyrics));
+            // «Текст песни» whenever its button is not on the pill: the
+            // side pane shows it, or Now Playing when the pane has none.
+            top.extend((!show_lyrics).then_some(Act::Lyrics));
             top.extend((!show_volume).then_some(Act::Volume));
             // Placed by «Меню трека» like Now Playing's (F12 anyway).
             top.push(Act::Visualizer);

@@ -30,7 +30,9 @@
 //! playlist (`find_song:Title` for the clip shown so, `find_song:song` «Другая
 //! версия…» for its first stream song); `replace_first` replaces it with the
 //! dialog's first result in the scope the dialog would offer.
-//! `play_track:<id>` plays one track of the library by its id.
+//! `play_track:<id>` plays one track of the library by its id;
+//! `play_search:n` the n-th track of the search's «Всё» answer;
+//! `download` asks for the playing track's file.
 //! `wave` starts «Моя волна» (`wave:card` with the first card of «Миксы
 //! для тебя» as its preset), `vibe` is «↻ Другой вайб».
 //! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
@@ -718,6 +720,28 @@ impl Shot {
                         start: 0,
                         context: "Скриншот".into(),
                     });
+                }
+                self.wait = 30;
+            }
+            // `play_search:2` plays the third track of the «Всё» answer as a
+            // click on its row does (the top track first).
+            "play_search" => {
+                let a = &state.search.answer;
+                let mut picks: Vec<nikgob_view::SearchPick> = Vec::new();
+                if let Some(nikgob_view::TopResult::Track(t)) = &a.top {
+                    picks.push(t.pick());
+                }
+                picks.extend(a.tracks.iter().map(|t| t.pick()));
+                let start = arg.parse::<usize>().unwrap_or(0).min(picks.len().saturating_sub(1));
+                if !picks.is_empty() {
+                    out.push(Command::PlaySearch { tracks: picks, start, context: "поиска".into() });
+                }
+                self.wait = 60;
+            }
+            // `download` asks for the playing track's file («Скачать»).
+            "download" => {
+                if let Some(t) = &state.player.current {
+                    out.push(Command::DownloadTracks(vec![t.id]));
                 }
                 self.wait = 30;
             }

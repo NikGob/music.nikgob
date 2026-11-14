@@ -410,13 +410,14 @@ impl TrackAct {
             Self::Info => I::Info,
             Self::Speed | Self::Equalizer => I::Sound,
             Self::Fetch if tags => I::Tags,
-            Self::Fetch | Self::AlbumDownload => I::Download,
+            Self::Fetch => I::Download,
             Self::Better => I::Torrents,
             Self::PickRelease => I::PickRelease,
             Self::WrongFile => I::WrongFile,
             Self::Dislike => I::Dislike,
             Self::Ban => I::Ban,
             Self::Next | Self::Queue | Self::Playlist | Self::ToLibrary | Self::OutOfLibrary | Self::AlsoOn | Self::Apart | Self::FindSong | Self::ToMp3
+            | Self::AlbumDownload
             | Self::Remove | Self::Trash | Self::Purge => return None,
         })
     }
@@ -457,9 +458,10 @@ pub struct TrackMenuOf {
 
 /// The one list of a track's actions, in groups: play next / the queue /
 /// radio │ to a playlist │ album (and the other album of the song) /
-/// artist / share │ info, the sound (the speed, and what the player adds:
-/// see [`sound_at`]), «Файл ▸» (the file's actions, or its download, and
-/// the deletes of the place) │ «Не нравится» / «Не рекомендовать
+/// artist / share │ «Скачать» of a track with no file, the sound (the
+/// speed, and what the player adds: see [`sound_at`]), «Файл ▸» (the
+/// info, the file's actions or the other ways to get it, and the deletes
+/// of the place) │ «Не нравится» / «Не рекомендовать
 /// исполнителя» │ «Разные песни», after which the caller puts what takes
 /// the track out of its list. A submenu is shown as [`widgets::shown_rows`]
 /// has it: not at all with no item, its one item in its place.
@@ -493,11 +495,17 @@ pub fn track_rows(o: TrackMenuOf) -> Vec<widgets::Row<TrackAct>> {
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
     rows.push(Row::Divider);
-    if o.info {
-        rows.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
-    }
     let mut file = Vec::new();
-    file.extend(o.fetch.map(|f| Row::Item(A::Fetch, f)));
+    if o.info {
+        file.push(Row::Item(A::Info, MenuItem::new("Источник и качество").icon(Icon::Info)));
+    }
+    // «Скачать» stands in the menu itself; a file's «Редактировать теги…»
+    // in «Файл».
+    match o.fetch {
+        Some(f) if o.has_file => file.push(Row::Item(A::Fetch, f)),
+        Some(f) => rows.push(Row::Item(A::Fetch, f)),
+        None => {}
+    }
     if o.has_file {
         if o.better {
             file.push(Row::Item(A::Better, MenuItem::new(FIND_BETTER).icon(Icon::Search)));
@@ -798,6 +806,9 @@ pub struct PageState {
     /// artist), and what «Треки» last asked the runtime for.
     library_filter: String,
     track_filter_sent: String,
+    /// The library filter's text asked to be looked for everywhere
+    /// («Искать везде»): the search bar takes it over.
+    pub(crate) search_everywhere: Option<String>,
     release_filter: usize,
     /// Library albums by source: 0 all, 1 with files, 2 stream.
     release_source: usize,
@@ -883,6 +894,20 @@ pub(crate) fn set_library_list(ctx: &Context, list: bool) {
 impl PageState {
     pub(crate) fn set_library_filter(&mut self, text: &str) {
         self.library_filter = text.to_owned();
+    }
+
+    /// On Библиотека (but its «Скачано» and «Корзина», which have no
+    /// filter) the search bar is the library's filter.
+    pub(crate) fn bar_filters_library(&self, route: &Route) -> bool {
+        matches!(route, Route::Library(_)) && !matches!(self.library_tab, LibraryTab::Downloaded | LibraryTab::Trash)
+    }
+
+    /// Esc in the bar while it filters the library: empties the filter;
+    /// false when there was nothing to empty.
+    pub(crate) fn clear_library_filter(&mut self) -> bool {
+        let had = !self.library_filter.is_empty();
+        self.library_filter.clear();
+        had
     }
 
     /// Opens the "В плейлист" picker for stream tracks.
@@ -1631,6 +1656,25 @@ pub fn search_bar(
     SearchBarOutput { edited: *query != before, submitted: o.submitted }
 }
 
+/// The search bar on Библиотека: the library's instant filter of the tab
+/// shown (placeholder «Найти в библиотеке», …), live as it is typed; Enter
+/// looks for the text everywhere (`pages.search_everywhere`).
+pub fn library_bar(ui: &mut Ui, rect: Rect, pages: &mut PageState, focus: &mut bool) {
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("search-bar"));
+    let o = SearchBar::new("main-search")
+        .placeholder(library::filter_hint(pages.library_tab))
+        .width(rect.width())
+        .shortcut(true)
+        .show(&mut cui, &mut pages.library_filter);
+    if std::mem::take(focus) {
+        o.response.request_focus();
+    }
+    let q = pages.library_filter.trim();
+    if o.submitted && !q.is_empty() {
+        pages.search_everywhere = Some(q.to_owned());
+    }
+}
+
 /// What the search bar did this frame: the text changed (sent once typing
 /// pauses), Enter (sent at once).
 pub struct SearchBarOutput {
@@ -1861,10 +1905,11 @@ mod speed_tests {
         let on = with_speed_row(rows(), &speeds(true, &[]), true);
         let acts = row_acts(&on);
         assert_eq!(acts.len(), plain.len() + 1);
+        // «Скачать» of a track with no file, then the speed.
         let share = acts.iter().position(|a| *a == TrackAct::Share).unwrap();
-        assert_eq!(acts[share + 1], TrackAct::Speed);
+        assert_eq!(acts[share + 1..share + 3], [TrackAct::Fetch, TrackAct::Speed]);
         let at = on.iter().position(|r| matches!(r, Row::Item(TrackAct::Speed, _))).unwrap();
-        assert!(matches!(on[at - 1], Row::Divider));
+        assert!(matches!(on[at - 1], Row::Item(TrackAct::Fetch, _)));
         assert!(matches!(&on[at + 1], Row::Sub(item, _) if item.label == FILE));
     }
 
@@ -1880,21 +1925,23 @@ mod speed_tests {
     }
 
     /// The menu is in its groups: play next, the queue and the radio, then
-    /// «В плейлист…», then where the track is from; the files are behind
-    /// «Файл»; the info stands right before it.
+    /// «В плейлист…», then where the track is from; «Скачать» of a track
+    /// with no file in the menu itself, the rest of the files and the info
+    /// behind «Файл».
     #[test]
     fn the_menu_is_in_its_groups_and_the_files_are_in_a_submenu() {
         let shown = shown_rows(rows());
         let top = labels(&shown);
         assert_eq!(&top[..4], [PLAY_NEXT, TO_QUEUE, RADIO_BY_TRACK, "В плейлист…"]);
         assert!(matches!(shown[3], Row::Divider) && matches!(shown[5], Row::Divider));
-        assert_eq!(&top[top.len() - 4..], ["Поделиться", FILE, "Не нравится", "Не рекомендовать исполнителя"]);
-        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::Fetch, TrackAct::AlbumDownload]);
+        // «Файл» stays a submenu even with «Скачать альбом» alone.
+        assert_eq!(&top[top.len() - 5..], ["Поделиться", "Скачать", FILE, "Не нравится", "Не рекомендовать исполнителя"]);
+        assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::AlbumDownload]);
         // The speed stands in the menu itself, right before «Файл».
-        let shown = shown_rows(with_speed_row(rows(), &speeds(true, &[]), true));
-        let top = labels(&shown);
+        let top = labels(&with_speed_row(rows(), &speeds(true, &[]), true));
         let at = top.iter().position(|l| l == "Скорость…").unwrap();
         assert_eq!(top[at + 1], FILE);
+        let shown = shown_rows(with_speed_row(rows(), &speeds(true, &[]), true));
         // What is shown stands for the same actions in the same order.
         assert_eq!(row_acts(&shown), row_acts(&with_speed_row(rows(), &speeds(true, &[]), true)));
         // A library row's deletes close «Файл».
@@ -1903,10 +1950,10 @@ mod speed_tests {
         let mut library = library_track_rows(&t, of(&marks, true));
         push_deletes(&mut library, &t);
         let file = row_acts(sub_rows(&library, FILE).unwrap());
-        assert_eq!(file, [TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::Trash, TrackAct::Purge]);
+        assert_eq!(file, [TrackAct::Info, TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::Trash, TrackAct::Purge]);
         let top = labels(&library);
         let share = top.iter().position(|l| l == "Поделиться").unwrap();
-        assert_eq!(&top[share + 1..share + 3], ["Источник и качество", FILE]);
+        assert_eq!(top[share + 1], FILE);
         let acts = row_acts(&library);
         assert_eq!(&acts[acts.len() - 2..], [TrackAct::Dislike, TrackAct::Ban]);
     }
@@ -1980,8 +2027,8 @@ mod speed_tests {
         };
         assert!(file(&track(true), true).contains(&TrackAct::Better));
         assert!(!file(&track(true), true).contains(&TrackAct::PickRelease));
-        assert_eq!(file(&track(false), true), [TrackAct::Fetch, TrackAct::AlbumDownload, TrackAct::PickRelease]);
-        assert_eq!(file(&track(false), false), [TrackAct::Fetch, TrackAct::AlbumDownload]);
+        assert_eq!(file(&track(false), true), [TrackAct::AlbumDownload, TrackAct::PickRelease]);
+        assert_eq!(file(&track(false), false), [TrackAct::AlbumDownload]);
         let rows = library_track_rows(&track(false), LibraryRowsOf { torrents: true, ..of(&marks, false) });
         assert!(row_items(&rows).iter().any(|(a, i)| *a == TrackAct::PickRelease && i.label == PICK_RELEASE));
         assert_eq!(TrackAct::PickRelease.menu_item(false), Some(TrackMenuItem::PickRelease));
@@ -2045,14 +2092,14 @@ mod speed_tests {
         let file = |rows: &[Row<A>]| row_acts(sub_rows(rows, FILE).unwrap());
         assert_eq!(row_acts(&with(&[])), row_acts(&library()));
         let plain = (top(&library()), file(&library()));
-        assert_eq!(plain.1[..2], [A::Fetch, A::Better]);
+        assert_eq!(plain.1[..3], [A::Info, A::Fetch, A::Better]);
 
         // Into «Файл»: before its own items, in the menu's order; from
         // below it: after them, before the deletes.
         let rows = with(&[(I::Share, P::File), (I::Radio, P::File), (I::Ban, P::File)]);
         assert!(!top(&rows).contains(&A::Share) && !top(&rows).contains(&A::Radio) && !top(&rows).contains(&A::Ban));
         let f = file(&rows);
-        assert_eq!(f[..3], [A::Radio, A::Share, A::Fetch]);
+        assert_eq!(f[..4], [A::Radio, A::Share, A::Info, A::Fetch]);
         assert_eq!(f[f.len() - 3..], [A::Ban, A::Trash, A::Purge]);
         assert!(matches!(sub_rows(&rows, FILE).unwrap()[f.len() - 2], Row::Divider));
 
@@ -2066,10 +2113,10 @@ mod speed_tests {
         let rows = with(&[(I::Tags, P::Menu)]);
         let at = rows.iter().position(|r| matches!(r, Row::Sub(..))).unwrap();
         assert!(matches!(rows[at - 1], Row::Item(A::Fetch, _)) && matches!(rows[at - 2], Row::Item(A::Speed, _)));
-        assert_eq!(file(&rows)[0], A::Better);
+        assert_eq!(file(&rows)[..2], [A::Info, A::Better]);
 
         // Everything taken out of «Файл»: the deletes alone stay in it.
-        let rows = with(&[(I::Tags, P::Menu), (I::Torrents, P::Menu), (I::WrongFile, P::Hidden)]);
+        let rows = with(&[(I::Info, P::Menu), (I::Tags, P::Menu), (I::Torrents, P::Menu), (I::WrongFile, P::Hidden)]);
         assert!(file(&rows).iter().all(|a| matches!(a, A::Trash | A::Purge)));
         // No divider is doubled or left at an end once the menu is built.
         let (_, acts) = widgets::menu_of("placed-test", rows);
