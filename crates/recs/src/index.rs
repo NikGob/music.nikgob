@@ -414,10 +414,15 @@ impl<K: Copy + Eq + Hash> VectorIndex<K> {
     }
 
     /// Sets the sketch of a track that has a bliss vector (false
-    /// otherwise, or for an empty sketch).
+    /// otherwise). An empty sketch (a pass that measured nothing) takes
+    /// the one there away, and is false: the track has none.
     pub fn set_sketch(&mut self, key: K, s: SoundSketch) -> bool {
         let Some(&i) = self.pos.get(&key) else { return false };
         if s.is_empty() {
+            if self.sketch.get(i).is_some_and(|x| !x.is_empty()) {
+                self.sketch[i] = s;
+                self.sketch_count -= 1;
+            }
             return false;
         }
         if self.sketch.is_empty() {
@@ -1012,6 +1017,11 @@ mod tests {
         assert!(idx.set_sketch(4, s(-12.0)));
         assert_eq!(idx.sketched_len(), 1);
         assert_eq!(idx.sketch(4).and_then(|x| x.crest()).map(|c| c.peak), Some(-12.0));
+        // A pass that measured nothing takes the old sketch away.
+        assert!(!idx.set_sketch(4, SoundSketch::default()));
+        assert_eq!((idx.sketch(4), idx.sketched_len()), (None, 0));
+        assert!(!idx.set_sketch(4, SoundSketch::default()));
+        assert_eq!(idx.sketched_len(), 0);
     }
 
     /// Two genres bliss cannot tell apart (their bliss vectors are drawn

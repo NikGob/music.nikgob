@@ -24,7 +24,7 @@ use crate::styles::{STYLE_COUNT, Styles, TOP};
 pub const SKETCH_BYTES: usize = 40;
 /// The tag of the sketches' loudness and edges this build computes:
 /// another one is computed again.
-pub const SKETCHED_WITH: &str = "sketch-2";
+pub const SKETCHED_WITH: &str = "sketch-3";
 /// The tag of the styles part: the model file and this summary of it.
 pub const STYLED_WITH: &str = "discogs-effnet-bsdynamic-1:styles-1";
 
@@ -35,8 +35,12 @@ pub const SILENT_DB: f32 = -55.0;
 /// The crest needs this many sounding blocks.
 const MIN_BLOCKS: usize = 3;
 
-/// An edge's window: the first or last seconds of a file decoded for it…
+/// An edge's window: this much from the file's first (up to its last)
+/// sounding block…
 pub const EDGE_SECONDS: f64 = 10.0;
+/// …looked for within this much of the file's start (end): a longer
+/// silence there leaves the edge unknown.
+pub const EDGE_SEARCH: f64 = 30.0;
 /// …of which this much from the first (or up to the last) sounding block
 /// is measured.
 pub const EDGE_TAKE: f64 = 5.0;
@@ -237,30 +241,93 @@ impl Edge {
     }
 }
 
-/// The audio of one edge window (mono at the input's rate), measured once
-/// it is over ([`Self::finish`]).
+/// The audio of one edge (mono at the input's rate), measured once it is
+/// over ([`Self::finish`]). It takes the file's first (last)
+/// [`EDGE_SEARCH`] seconds as they come but keeps [`EDGE_SECONDS`] or so
+/// of them from the first (up to the last) block above [`SILENT_DB`]: the
+/// silence beyond is only counted, however long.
 #[derive(Clone, Debug)]
 pub struct EdgeProbe {
     rate: u32,
     head: bool,
+    block: usize,
+    /// A block not yet whole.
+    partial: Vec<f32>,
+    /// The audio kept, whole blocks.
     samples: Vec<f32>,
+    /// A tail's silent blocks after its last sound (kept while few).
+    pending: Vec<f32>,
+    /// Silent blocks counted, not kept: a head's before its first sound, a
+    /// tail's after its last one past those kept.
+    skipped: usize,
+    heard: bool,
 }
 
 impl EdgeProbe {
     /// `head`: the start of the file; else its end.
     pub fn new(rate: u32, head: bool) -> Self {
-        Self { rate, head, samples: Vec::new() }
+        let block = ((f64::from(rate) * EDGE_BLOCK) as usize).max(1);
+        Self { rate, head, block, partial: Vec::new(), samples: Vec::new(), pending: Vec::new(), skipped: 0, heard: false }
+    }
+
+    fn cap(&self) -> usize {
+        (f64::from(self.rate) * EDGE_SECONDS * 1.5) as usize / self.block * self.block
     }
 
     pub fn push(&mut self, mono: &[f32]) {
-        let cap = (f64::from(self.rate) * EDGE_SECONDS * 1.5) as usize;
-        let room = cap.saturating_sub(self.samples.len());
-        self.samples.extend_from_slice(&mono[..mono.len().min(room)]);
+        self.partial.extend_from_slice(mono);
+        let whole = self.partial.len() / self.block * self.block;
+        let blocks: Vec<f32> = self.partial.drain(..whole).collect();
+        for b in blocks.chunks_exact(self.block) {
+            self.take(b);
+        }
+    }
+
+    fn take(&mut self, b: &[f32]) {
+        let sounding = db(b.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>() / b.len() as f64) > SILENT_DB;
+        let cap = self.cap();
+        if self.head {
+            if !self.heard && !sounding {
+                self.skipped += 1;
+            } else if self.samples.len() < cap {
+                self.heard = true;
+                self.samples.extend_from_slice(b);
+            }
+        } else if sounding {
+            if self.skipped > 0 {
+                // Sound again after a silence longer than an edge: what
+                // came before it is no part of the end.
+                self.samples.clear();
+                self.pending.clear();
+                self.skipped = 0;
+            }
+            self.samples.append(&mut self.pending);
+            self.samples.extend_from_slice(b);
+            if self.samples.len() > cap {
+                let over = self.samples.len() - cap;
+                self.samples.drain(..over);
+            }
+            self.heard = true;
+        } else if self.heard {
+            if self.pending.len() < cap {
+                self.pending.extend_from_slice(b);
+            } else {
+                self.skipped += 1;
+            }
+        }
+    }
+
+    /// A head has all it keeps (the rest of the file can go on without it).
+    pub fn done(&self) -> bool {
+        self.head && self.samples.len() >= self.cap()
     }
 
     /// The edge; `None` for silence or too little audio.
-    pub fn finish(self) -> Option<Edge> {
-        let block = ((f64::from(self.rate) * EDGE_BLOCK) as usize).max(1);
+    pub fn finish(mut self) -> Option<Edge> {
+        let block = self.block;
+        let extra = self.skipped;
+        let mut pending = std::mem::take(&mut self.pending);
+        self.samples.append(&mut pending);
         let blocks: Vec<f32> =
             self.samples.chunks_exact(block).map(|c| db(c.iter().map(|x| f64::from(*x) * f64::from(*x)).sum::<f64>() / c.len() as f64)).collect();
         let take = (EDGE_TAKE / EDGE_BLOCK) as usize;
@@ -273,10 +340,10 @@ impl EdgeProbe {
         let sounding = |b: &f32| *b > floor;
         let (from, to, silence) = if self.head {
             let first = blocks.iter().position(sounding)?;
-            (first, (first + take).min(blocks.len()), first)
+            (first, (first + take).min(blocks.len()), first + extra)
         } else {
             let last = blocks.iter().rposition(sounding)?;
-            (last.saturating_sub(take - 1), last + 1, blocks.len() - 1 - last)
+            (last.saturating_sub(take - 1), last + 1, blocks.len() - 1 - last + extra)
         };
         if to - from < second {
             return None;
@@ -533,6 +600,39 @@ mod tests {
         let mut quiet = EdgeProbe::new(rate, true);
         quiet.push(&vec![0.0; rate as usize * 10]);
         assert!(quiet.finish().is_none(), "silence has no edge");
+    }
+
+    /// Silence longer than an edge's window before the first sound or after
+    /// the last one is counted, and the edge is still found past it; a head
+    /// is done once it has its window.
+    #[test]
+    fn edges_are_found_past_long_silence() {
+        let rate = 16_000;
+        let chord = tone(rate, 8.0, &[261.6, 329.6, 392.0], 0.6);
+        let mut head = EdgeProbe::new(rate, true);
+        head.push(&vec![0.0; rate as usize * 12]);
+        assert!(!head.done());
+        head.push(&chord);
+        head.push(&chord);
+        assert!(head.done());
+        let h = head.finish().unwrap();
+        assert_eq!(h.shape, EdgeShape::Cold);
+        assert!((h.silence - 12.0).abs() < 0.15, "{h:?}");
+        let mut tail = EdgeProbe::new(rate, false);
+        tail.push(&chord);
+        tail.push(&vec![0.0; rate as usize * 20]);
+        let t = tail.finish().unwrap();
+        assert_eq!(t.shape, EdgeShape::Cold);
+        assert!((t.silence - 20.0).abs() < 0.15, "{t:?}");
+        // Sound again after a long silence: that is the end.
+        let mut late = EdgeProbe::new(rate, false);
+        late.push(&tone(rate, 8.0, &[261.6], 0.6));
+        late.push(&vec![0.0; rate as usize * 20]);
+        late.push(&tone(rate, 3.0, &[440.0], 0.6));
+        late.push(&vec![0.0; rate as usize]);
+        let t = late.finish().unwrap();
+        assert!((t.silence - 1.0).abs() < 0.15, "{t:?}");
+        assert!(t.chroma[9] == 15 && t.chroma[0] < 15, "the A at the end, not the C before: {t:?}");
     }
 
     /// A C major chord reads as C major, an A minor one as A minor.

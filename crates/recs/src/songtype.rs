@@ -49,7 +49,7 @@ use crate::tiles::{Script, script_of};
 
 /// Bumped whenever a rule here changes: what was classified by older rules
 /// (and the day's lanes picked by them) is classified again.
-pub const SONGTYPE_RULES: u32 = 4;
+pub const SONGTYPE_RULES: u32 = 5;
 /// The model's probe is trained from this many labels of each kind…
 pub const MIN_PROBE_LABELS: usize = 20;
 /// The probes' training: full-batch gradient ascent, this many epochs…
@@ -70,6 +70,12 @@ pub const BURST_SPREAD_DB: f32 = 15.0;
 pub const BURST_PEAK_DB: f32 = -14.0;
 /// The background's loud parts: a little louder at most than calm's.
 pub const BACKGROUND_PEAK_DB: f32 = -10.0;
+/// The loudest second may stand this far above the loud parts' cap
+/// ([`CALM_PEAK_DB`], [`BACKGROUND_PEAK_DB`]); a second louder still is a
+/// hit no calm or background song has. A hit this much past a burst's
+/// spread and loudness ([`BURST_SPREAD_DB`], [`BURST_PEAK_DB`]) is a burst
+/// too, however short.
+pub const HIT_DB: f32 = 4.0;
 /// The sound says sung above this…
 pub const SUNG_P: f32 = 0.85;
 /// …and instrumental below this.
@@ -112,19 +118,50 @@ pub enum VoiceSource {
     Styles,
 }
 
-/// The crest of a song's loudness, whole dB ([`crate::sketch::Crest`]).
+/// The crest of a song's loudness in quarter dB, the sketch's own
+/// precision ([`crate::sketch::Crest`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dynamics {
-    /// The loud parts (the 95th percentile of its seconds).
-    pub peak: i8,
-    /// How far they stand above the quiet ones (the 10th percentile).
-    pub spread: u8,
+    /// The loud parts (the 95th percentile of its seconds)…
+    pub peak: i16,
+    /// …the quiet ones (the 10th percentile)…
+    pub low: i16,
+    /// …and its loudest second.
+    pub max: i16,
 }
 
 impl Dynamics {
-    /// It explodes out of its quiet parts ([`BURST_SPREAD_DB`], [`BURST_PEAK_DB`]).
+    pub fn of(c: &crate::sketch::Crest) -> Self {
+        let q = |db: f32| (db * 4.0).round().clamp(-32768.0, 32767.0) as i16;
+        Self { peak: q(c.peak), low: q(c.low), max: q(c.max) }
+    }
+
+    pub fn peak_db(&self) -> f32 {
+        f32::from(self.peak) / 4.0
+    }
+
+    pub fn max_db(&self) -> f32 {
+        f32::from(self.max) / 4.0
+    }
+
+    /// How far the loud parts stand above the quiet ones, dB.
+    pub fn spread_db(&self) -> f32 {
+        (f32::from(self.peak) - f32::from(self.low)).max(0.0) / 4.0
+    }
+
+    /// It explodes out of its quiet parts ([`BURST_SPREAD_DB`],
+    /// [`BURST_PEAK_DB`]): its loud parts do, or one loud second does by
+    /// [`HIT_DB`] more.
     pub fn bursts(&self) -> bool {
-        f32::from(self.spread) >= BURST_SPREAD_DB && f32::from(self.peak) >= BURST_PEAK_DB
+        let quiet = f32::from(self.low) / 4.0;
+        (self.spread_db() >= BURST_SPREAD_DB && self.peak_db() >= BURST_PEAK_DB)
+            || (self.max_db() - quiet >= BURST_SPREAD_DB + HIT_DB && self.max_db() >= BURST_PEAK_DB + HIT_DB)
+    }
+
+    /// Its loud parts are at most `cap` dB and its loudest second at most
+    /// [`HIT_DB`] above that, and it never bursts.
+    fn under(&self, cap: f32) -> bool {
+        self.peak_db() <= cap && self.max_db() <= cap + HIT_DB && !self.bursts()
     }
 }
 
@@ -240,12 +277,12 @@ impl SongType {
     /// out of quiet ones ([`CALM_PEAK_DB`], [`Dynamics::bursts`]); a song
     /// without a sketch passes (its mean judges it, as before).
     pub fn calm_dynamics(&self) -> bool {
-        self.dynamics.is_none_or(|d| f32::from(d.peak) <= CALM_PEAK_DB && !d.bursts())
+        self.dynamics.is_none_or(|d| d.under(CALM_PEAK_DB))
     }
 
     /// The same for the background ([`BACKGROUND_PEAK_DB`]).
     pub fn background_dynamics(&self) -> bool {
-        self.dynamics.is_none_or(|d| f32::from(d.peak) <= BACKGROUND_PEAK_DB && !d.bursts())
+        self.dynamics.is_none_or(|d| d.under(BACKGROUND_PEAK_DB))
     }
 
     /// The feeling of its cached lyrics, −1…1 (0 without them).
@@ -769,7 +806,7 @@ pub fn song_types_with(inputs: &[SongInput], embedding: &dyn Fn(TrackId) -> Opti
             ty.mood_cell = u8::from(a.energy >= mid[0]) | u8::from(a.brightness >= mid[1]) << 1 | u8::from(a.steadiness >= mid[2]) << 2;
         }
         if let Some(c) = t.sketch.and_then(|s| s.crest()) {
-            ty.dynamics = Some(Dynamics { peak: c.peak.round().clamp(-128.0, 127.0) as i8, spread: c.spread().round().clamp(0.0, 255.0) as u8 });
+            ty.dynamics = Some(Dynamics::of(&c));
         }
         // The audio's word: the model's vector, its styles, bliss — the
         // first that is sure.
@@ -1043,21 +1080,34 @@ mod tests {
     #[test]
     fn dynamics_and_valence_come_with_the_type() {
         use crate::sketch::Crest;
-        let sketch = |peak: f32, low: f32| Some(SoundSketch::new(Some(Crest { peak, low, max: peak + 1.0 }), None, None, None));
+        let crest = |peak: f32, low: f32, max: f32| Some(SoundSketch::new(Some(Crest { peak, low, max }), None, None, None));
+        let sketch = |peak: f32, low: f32| crest(peak, low, peak + 1.0);
         let sad = "[00:01]I cry alone in the cold dark night, the pain and tears and sorrow never end";
         let types = song_types(&[
             SongInput { id: tid(0), sketch: sketch(-24.0, -30.0), ..SongInput::default() },
             SongInput { id: tid(1), sketch: sketch(-8.0, -32.0), ..SongInput::default() },
             SongInput { id: tid(2), ..SongInput::default() },
             SongInput { id: tid(3), lyrics: Some((false, sad.into())), ..SongInput::default() },
+            // Quiet throughout but for one loud second.
+            SongInput { id: tid(4), sketch: crest(-20.0, -30.0, -6.0), ..SongInput::default() },
+            // Just over the calm cap: −10.75 dB is no −11.
+            SongInput { id: tid(5), sketch: sketch(-10.75, -16.0), ..SongInput::default() },
         ]);
         let t = |i| types.get(tid(i)).unwrap();
-        assert_eq!(t(0).dynamics, Some(Dynamics { peak: -24, spread: 6 }));
+        assert_eq!(t(0).dynamics, Some(Dynamics { peak: -96, low: -120, max: -92 }));
+        assert_eq!((t(0).dynamics.unwrap().peak_db(), t(0).dynamics.unwrap().spread_db()), (-24.0, 6.0));
         assert!(t(0).calm_dynamics() && t(0).background_dynamics());
         assert!(!t(1).calm_dynamics() && !t(1).background_dynamics(), "{:?}", t(1).dynamics);
         assert!(t(2).dynamics.is_none() && t(2).calm_dynamics());
         // A whisper swelling to a murmur is calm; one swelling to a roar is not.
-        assert!(!Dynamics { peak: -22, spread: 17 }.bursts() && Dynamics { peak: -10, spread: 20 }.bursts());
+        let d = |peak: f32, low: f32, max: f32| Dynamics::of(&Crest { peak, low, max });
+        assert!(!d(-22.0, -39.0, -20.0).bursts() && d(-10.0, -30.0, -8.0).bursts());
+        // One loud second: a hit, neither calm nor background.
+        assert!(d(-20.0, -30.0, -6.0).bursts());
+        assert!(!t(4).calm_dynamics() && !t(4).background_dynamics(), "{:?}", t(4).dynamics);
+        // A loudest second a little over the cap is no hit.
+        assert!(d(-14.0, -20.0, -8.0).under(CALM_PEAK_DB) && !d(-14.0, -20.0, -6.5).under(CALM_PEAK_DB));
+        assert!(!t(5).calm_dynamics() && t(5).background_dynamics(), "{:?}", t(5).dynamics);
         assert!(t(3).lyric_valence() < -0.3, "{}", t(3).lyric_valence());
         assert_eq!(t(0).valence, 0);
     }

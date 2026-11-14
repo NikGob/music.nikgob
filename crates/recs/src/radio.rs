@@ -1024,8 +1024,13 @@ impl RadioState {
             ..Diversity::default()
         };
         let served: HashSet<Item> = self.served.iter().cloned().collect();
+        // What the session played of works: what it served and its seed.
+        let mut played = served.clone();
+        if let RadioSeed::Track(t) = &self.seed {
+            played.insert(Item::Track(*t));
+        }
         let mut taken: HashSet<Item> = HashSet::new();
-        let works = take_works(recs, &served, &mut taken);
+        let works = take_works(recs, &played, &mut taken);
         let sound = Sound::new(seed_vec, liked, skipped, library_scale(recs));
 
         // 0. Played twice running: once more, first.
@@ -1083,6 +1088,11 @@ impl RadioState {
                 let more = self.library(recs, want_lib - lib.len(), &sound, &served, false, &rules, &mut rng, &mut taken, None);
                 lib.extend(more);
             }
+            if lib.len() < want_lib {
+                let keep_out = self.relax(recs, &played, &served, &works, &mut taken, again.as_ref());
+                let more = self.library(recs, want_lib - lib.len(), &sound, &keep_out, false, &rules, &mut rng, &mut taken, None);
+                lib.extend(more);
+            }
             make_way(recs, &mut lib, &mut new_slots, reserve, &rules, &mut taken);
             // New music between, evenly.
             let mut out: Vec<Slot> = again.into_iter().collect();
@@ -1099,18 +1109,8 @@ impl RadioState {
         }
         let mut lib = self.library(recs, want_lib, &sound, &served, true, &rules, &mut rng, &mut taken, pull_vec.as_ref());
         if lib.len() < want_lib {
-            let keep_out = RELAXED_SERVED.min(recs.catalog.len() / 3);
-            let recent: HashSet<Item> = self.served.iter().rev().take(keep_out).cloned().collect();
-            // The works of what may play again are free again too: only
-            // the recently served keep theirs out.
-            for item in &works {
-                taken.remove(item);
-            }
-            take_works(recs, &recent, &mut taken);
-            if let Some(s) = &again {
-                taken.insert(s.item.clone());
-            }
-            let more = self.library(recs, want_lib - lib.len(), &sound, &recent, false, &rules, &mut rng, &mut taken, pull_vec.as_ref());
+            let keep_out = self.relax(recs, &played, &served, &works, &mut taken, again.as_ref());
+            let more = self.library(recs, want_lib - lib.len(), &sound, &keep_out, false, &rules, &mut rng, &mut taken, pull_vec.as_ref());
             lib.extend(more);
         }
         make_way(recs, &mut lib, &mut new_slots, reserve, &rules, &mut taken);
@@ -1161,6 +1161,28 @@ impl RadioState {
     /// the module docs): each the best by value among the candidates of
     /// the session as if the picks before it played to the end.
     #[allow(clippy::too_many_arguments)]
+    /// A radio run dry lets what it served play again, but for the last
+    /// [`RELAXED_SERVED`]: what it then keeps out (the recent, the whole
+    /// works of theirs, and every version of a work the session played
+    /// other than the recordings that played — the same recording may come
+    /// back, another version of it never). The marks of the session's works
+    /// leave `taken` (a served version must not stand in its own way by
+    /// its song); the picks of this extension and `again` stay in it.
+    fn relax(&self, recs: &Recs<'_>, played: &HashSet<Item>, served: &HashSet<Item>, works: &[Item], taken: &mut HashSet<Item>, again: Option<&Slot>) -> HashSet<Item> {
+        let keep = RELAXED_SERVED.min(recs.catalog.len() / 3);
+        let recent: HashSet<Item> = self.served.iter().rev().take(keep).cloned().collect();
+        for item in works {
+            taken.remove(item);
+        }
+        if let Some(s) = again {
+            taken.insert(s.item.clone());
+        }
+        let mut out = works_of(recs, &recent);
+        out.extend(recent);
+        out.extend(works_of(recs, played).into_iter().filter(|x| !served.contains(x)));
+        out
+    }
+
     fn by_model(
         &self,
         recs: &Recs<'_>,
@@ -1898,6 +1920,23 @@ fn take_works(recs: &Recs<'_>, served: &HashSet<Item>, taken: &mut HashSet<Item>
     marked
 }
 
+/// Every catalog track of the works of `items` (by
+/// [`crate::taste::Catalog::work_of`]: a song, its copies and its
+/// versions).
+fn works_of(recs: &Recs<'_>, items: &HashSet<Item>) -> HashSet<Item> {
+    let keys: HashSet<TrackId> = items
+        .iter()
+        .filter_map(|x| match x {
+            Item::Track(id) => Some(recs.catalog.work_of(*id)),
+            Item::Stream(_) => None,
+        })
+        .collect();
+    if keys.is_empty() {
+        return HashSet::new();
+    }
+    recs.catalog.tracks().iter().filter(|t| keys.contains(&t.song.unwrap_or(t.id))).map(|t| Item::Track(t.id)).collect()
+}
+
 /// The best `n` of `slots` (sorted) under the rules, at least `share` of
 /// them unheard by the user while there are («Преимущественно новые
 /// песни»).
@@ -2478,6 +2517,7 @@ pub(crate) mod tests {
     /// and its version.
     #[test]
     fn a_library_of_versions_never_runs_dry() {
+        use crate::model::{ModelInput, UserModel};
         let mut tracks = Vec::new();
         let mut idx = VectorIndex::with_weights([1.0; DIM]);
         for i in 0..24u128 {
@@ -2486,17 +2526,32 @@ pub(crate) mod tests {
             idx.insert(tid(i), point(i as f32 * 0.1, 0.0));
         }
         let cat = Catalog::new(tracks);
-        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
-        let recs = Recs::new(&cat, &taste, &idx);
-        let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
-        for round in 0..30 {
-            let picks = radio.extend(&recs, 3, &RadioParams { new_share: 0.0, seed: round });
-            assert_eq!(picks.len(), 3, "round {round}");
-            let works: HashSet<u128> = picks.iter().map(|p| match &p.item {
-                Item::Track(id) => id.0.as_u128() / 2,
-                Item::Stream(_) => u128::MAX,
-            }).collect();
-            assert_eq!(works.len(), 3, "a song and its version in one batch, round {round}");
+        let input = TasteInput::default();
+        let taste = Taste::build(&cat, &input, NOW);
+        let model = UserModel::build(&cat, &input, ModelInput { index: &idx, types: None, weights: None, graph: None }, NOW);
+        for with_model in [false, true] {
+            let recs = Recs::new(&cat, &taste, &idx);
+            let recs = if with_model { recs.with_model(&model) } else { recs };
+            let mut radio = RadioState::new(RadioSeed::Track(tid(0)));
+            // Each work's one recording in the session (the seed's too).
+            let mut heard: HashMap<u128, u128> = HashMap::from([(0, 0)]);
+            for round in 0..30 {
+                let picks = radio.extend(&recs, 3, &RadioParams { new_share: 0.0, seed: round });
+                assert_eq!(picks.len(), 3, "{with_model}: round {round}");
+                let ids: Vec<u128> = picks
+                    .iter()
+                    .map(|p| match &p.item {
+                        Item::Track(id) => id.0.as_u128(),
+                        Item::Stream(_) => u128::MAX,
+                    })
+                    .collect();
+                let works: HashSet<u128> = ids.iter().map(|i| i / 2).collect();
+                assert_eq!(works.len(), 3, "{with_model}: a song and its version in one batch, round {round}");
+                for id in ids {
+                    let first = *heard.entry(id / 2).or_insert(id);
+                    assert_eq!(first, id, "{with_model}: another version of a work the session played, round {round}");
+                }
+            }
         }
     }
 

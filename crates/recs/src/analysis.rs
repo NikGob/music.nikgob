@@ -23,7 +23,7 @@ use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Indexing, Resampler};
 
 use crate::embedding::{EmbedSum, SoundModel};
-use crate::sketch::{EDGE_SECONDS, Edge, EdgeProbe, Loudness, SoundSketch};
+use crate::sketch::{EDGE_SEARCH, Edge, EdgeProbe, Loudness, SoundSketch};
 use crate::styles::StyleSum;
 
 /// The rate bliss analyses at.
@@ -333,17 +333,21 @@ const MIN_SPAN: f64 = 0.1;
 
 /// The windows of a file `duration` seconds long, in the order they lie and
 /// never overlapping: its [`windows`], and what of its first and last
-/// [`EDGE_SECONDS`] they leave out, so the head and the tail are heard
-/// whole whatever its length — on a long file two windows of their own, on
-/// a short one the analysis windows' audio with the gaps between filled.
-/// Of a file of unknown length only the head is known (its windows start
-/// at 0); where its end is, nothing says.
+/// [`EDGE_SEARCH`] seconds they leave out, so the head and the tail are
+/// found whatever its length and its silence there — on a long file
+/// windows of their own (the head's ends as soon as it has its edge), on a
+/// short one the analysis windows' audio with the gaps between filled. Of
+/// a file of unknown length only the head is known (its windows start at
+/// 0); where its end is, nothing says.
 pub fn file_plan(duration: Option<f64>) -> Vec<(Window, Part)> {
     let main = windows(duration);
-    let mut edges: Vec<(f64, f64)> = vec![(0.0, EDGE_SECONDS)];
-    if let Some(d) = duration.filter(|d| d.is_finite() && *d > 0.0) {
-        edges[0].1 = EDGE_SECONDS.min(d);
-        let tail = ((d - EDGE_SECONDS).max(0.0), d);
+    let d = duration.filter(|d| d.is_finite() && *d > 0.0);
+    let mut edges: Vec<(f64, f64)> = vec![(0.0, EDGE_SEARCH)];
+    // Where a gap is the tail's rather than the head's (a name only).
+    let tail_from = d.map(|d| (d - EDGE_SEARCH).max(d / 2.0));
+    if let Some(d) = d {
+        edges[0].1 = EDGE_SEARCH.min(d);
+        let tail = ((d - EDGE_SEARCH).max(0.0), d);
         if tail.0 <= edges[0].1 {
             edges[0].1 = d;
         } else {
@@ -358,7 +362,7 @@ pub fn file_plan(duration: Option<f64>) -> Vec<(Window, Part)> {
         covered.sort_by(|a, b| a.start.total_cmp(&b.start));
         for w in covered.into_iter().map(|w| (w.start, w.start + w.len)).chain(std::iter::once((to, to))) {
             if w.0 - at >= MIN_SPAN {
-                let part = if at < EDGE_SECONDS { Part::Head } else { Part::Tail };
+                let part = if tail_from.is_some_and(|f| at >= f) { Part::Tail } else { Part::Head };
                 plan.push((Window { start: at, len: w.0 - at }, part));
             }
             at = at.max(w.1);
@@ -483,14 +487,14 @@ impl<'m> WindowedAnalyzer<'m> {
 
     /// The plan the windows are numbered by ([`file_plan`]) and the file's
     /// length: the head is heard when the plan covers the file's first
-    /// [`EDGE_SECONDS`] (or all of a shorter file), the tail when the
-    /// length is known and the plan covers its last ones.
+    /// [`EDGE_SEARCH`] seconds (or all of a shorter file), the tail when
+    /// the length is known and the plan covers its last ones.
     pub fn with_plan(mut self, plan: Vec<(Window, Part)>, duration: Option<f64>) -> Self {
         let d = duration.filter(|d| d.is_finite() && *d > 0.0);
-        let head_to = d.map_or(EDGE_SECONDS, |d| EDGE_SECONDS.min(d));
+        let head_to = d.map_or(EDGE_SEARCH, |d| EDGE_SEARCH.min(d));
         self.head_probe = covers(&plan, 0.0, head_to).then(|| (EdgeProbe::new(self.rate_in, true), 0.0, head_to));
         self.tail_probe = d.and_then(|d| {
-            let from = (d - EDGE_SECONDS).max(0.0);
+            let from = (d - EDGE_SEARCH).max(0.0);
             covers(&plan, from, d).then(|| (EdgeProbe::new(self.rate_in, false), from, d))
         });
         self.plan = plan;
@@ -515,8 +519,8 @@ impl<'m> WindowedAnalyzer<'m> {
             let b = (((*to - t0) * rate).ceil().max(0.0) as usize).min(self.mono.len());
             p.push(&self.mono[a..b]);
         }
-        // The head is over once the file is past it.
-        if self.head_probe.as_ref().is_some_and(|h| t1 >= h.2) {
+        // The head is over once it has its edge or the file is past it.
+        if self.head_probe.as_ref().is_some_and(|h| t1 >= h.2 || h.0.done()) {
             self.head = self.head_probe.take().and_then(|h| h.0.finish());
         }
     }
@@ -597,7 +601,10 @@ impl<'m> WindowedAnalyzer<'m> {
             self.feed_edges(t0);
         }
         if self.part(window) != Part::Main {
-            return if self.frames_in_window >= cap { ControlFlow::Break(()) } else { ControlFlow::Continue(()) };
+            // An edge's own window ends once no edge wants the rest of it.
+            let end = self.plan.get(window).map_or(f64::INFINITY, |p| p.0.start + p.0.len);
+            let wanted = self.head_probe.is_some() || self.tail_probe.as_ref().is_some_and(|t| end > t.1);
+            return if self.frames_in_window >= cap || !wanted { ControlFlow::Break(()) } else { ControlFlow::Continue(()) };
         }
         self.frames_total += frames as u64;
         self.loudness.push(&self.mono);
@@ -923,25 +930,55 @@ pub(crate) mod tests {
     fn a_files_plan_has_its_edges() {
         let plan = file_plan(Some(240.0));
         assert_eq!(plan.iter().map(|p| p.1).collect::<Vec<_>>(), [Part::Head, Part::Main, Part::Main, Part::Main, Part::Tail]);
-        assert_eq!(plan[0].0, Window { start: 0.0, len: EDGE_SECONDS });
-        assert_eq!(plan[4].0, Window { start: 230.0, len: EDGE_SECONDS });
+        assert_eq!(plan[0].0, Window { start: 0.0, len: EDGE_SEARCH });
+        assert_eq!(plan[4].0, Window { start: 240.0 - EDGE_SEARCH, len: EDGE_SEARCH });
         for d in [5.0, 12.0, 18.0, 30.0, 44.0, 50.0, 60.0, 89.0, 90.0, 100.0, 600.0] {
             let p = file_plan(Some(d));
             assert!(p.windows(2).all(|w| w[1].0.start >= w[0].0.start + w[0].0.len - 1e-9), "{d}: {p:?}");
             assert_eq!(p.iter().filter(|w| w.1 == Part::Main).count(), windows(Some(d)).len(), "{d}");
-            assert!(covers(&p, 0.0, EDGE_SECONDS.min(d)) && covers(&p, (d - EDGE_SECONDS).max(0.0), d), "{d}: {p:?}");
+            assert!(covers(&p, 0.0, EDGE_SEARCH.min(d)) && covers(&p, (d - EDGE_SEARCH).max(0.0), d), "{d}: {p:?}");
         }
         // 60 s: the head before the first window, the tail's last seconds
         // after the last one (its first ones are that window's).
         let p = file_plan(Some(60.0));
-        assert_eq!(p.first().map(|w| (w.0, w.1)), Some((Window { start: 0.0, len: EDGE_SECONDS }, Part::Head)));
+        assert_eq!(p.first().map(|w| (w.0, w.1)), Some((Window { start: 0.0, len: 12.0 }, Part::Head)));
         assert_eq!(p.last().map(|w| w.1), Some(Part::Tail));
         assert!((p.last().unwrap().0.start - 57.0).abs() < 1e-9, "{p:?}");
         // Shorter than a window: the window is all of it.
         assert!(file_plan(Some(12.0)).iter().all(|p| p.1 == Part::Main));
         let unknown = file_plan(None);
         assert!(unknown.iter().all(|p| p.1 == Part::Main));
-        assert!(covers(&unknown, 0.0, EDGE_SECONDS));
+        assert!(covers(&unknown, 0.0, EDGE_SEARCH));
+    }
+
+    /// A file that starts after 12 s of silence and ends with 14 s of it
+    /// still has its head and tail: the first and last sounding seconds,
+    /// with the silence counted; the head's own window stops early.
+    #[test]
+    fn edges_are_found_past_long_silence() {
+        let rate = 16_000;
+        let secs = 150.0;
+        let mut track = music(rate, secs, 100.0, 0.5, 7);
+        for (i, x) in track.iter_mut().enumerate() {
+            let t = i as f64 / f64::from(rate);
+            if t < 12.0 || t > secs - 14.0 {
+                *x = 0.0;
+            } else {
+                *x *= 0.3;
+            }
+        }
+        let out = analyze_windows(&track, rate, 1, None).unwrap();
+        let head = out.sketch.head().expect("a head past the silence");
+        assert!((head.silence - 12.0).abs() < 0.15, "{head:?}");
+        let tail = out.sketch.tail().expect("a tail before the silence");
+        assert!((tail.silence - 14.0).abs() < 0.15, "{tail:?}");
+        // Past the search, the edge is unknown.
+        for (i, x) in track.iter_mut().enumerate() {
+            if (i as f64 / f64::from(rate)) < 40.0 {
+                *x = 0.0;
+            }
+        }
+        assert!(analyze_windows(&track, rate, 1, None).unwrap().sketch.head().is_none());
     }
 
     /// Short files get their edges too, from the audio their analysis

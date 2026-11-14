@@ -295,6 +295,7 @@ pub(crate) fn store_sketch(
     };
     let stored = lib.put_sketch(track, &sketch.to_bytes(), SKETCHED_WITH, styled, source)?;
     if stored {
+        // An empty one takes the old one out of memory too.
         index.write().set_sketch(track, sketch);
     }
     Ok(stored)
@@ -1077,6 +1078,11 @@ mod tests {
         assert_eq!((row.styled_with.as_deref(), row.source), (None, AnalysisSource::File));
         assert!(SoundSketch::from_bytes(&row.sketch).unwrap().styles().is_none());
         assert!(index.read().sketch(t2).unwrap().styles().is_none());
+        // A file pass that measured nothing (or failed) leaves nothing of
+        // the old audio in memory either.
+        assert!(store_sketch(&lib, &index, t2, SoundSketch::default(), None, AnalysisSource::File).unwrap());
+        assert!(lib.sketch_of(t2).unwrap().is_some(), "the row marks it done");
+        assert!(index.read().sketch(t2).is_none());
     }
 
     /// The model's styles of each window, summed beside what it returns

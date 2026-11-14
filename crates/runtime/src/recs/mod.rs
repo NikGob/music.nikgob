@@ -1109,6 +1109,17 @@ pub(crate) fn work_heads<'a>(rows: impl Iterator<Item = (TrackId, &'a str, Optio
     out
 }
 
+/// `h` with a track's model vector folded in (FNV-1a over its scale and
+/// every coordinate; a track without one counts too).
+pub(crate) fn embedding_fingerprint(h: u64, c: Option<&nikgob_recs::Compact>) -> u64 {
+    const PRIME: u64 = 0x100_0000_01b3;
+    let Some(c) = c else {
+        return (h ^ 0xff).wrapping_mul(PRIME);
+    };
+    let h = (h ^ 1).wrapping_mul(PRIME);
+    c.to_bytes().iter().fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
+}
+
 /// One song key for each track of `tracks` (its id and the copy standing
 /// for its song on several albums) and the versions of works `works`
 /// joins ([`work_heads`]): the two relations together, so a copy of a
@@ -1442,16 +1453,9 @@ fn read_song_types(
         .collect();
     inputs.sort_by_key(|t| t.id);
     // The model's vectors tell the voice too (their probe is trained on the
-    // library's labels): which tracks have one, and their scales, change
-    // the types.
-    let of = {
-        let mut h = fingerprint(&inputs);
-        for t in &inputs {
-            let scale = index.embedding(t.id).map_or(0, |c| c.scale.to_bits());
-            h = (h ^ u64::from(scale)).wrapping_mul(0x100_0000_01b3);
-        }
-        h
-    };
+    // library's labels and their mean): which tracks have one, and each
+    // vector whole, change the types.
+    let of = inputs.iter().fold(fingerprint(&inputs), |h, t| embedding_fingerprint(h, index.embedding(t.id).as_ref()));
     let cached: Option<SongTypesCache> = lib
         .cache_get(SONG_TYPES_KEY)
         .ok()
@@ -3428,6 +3432,18 @@ mod tests {
         assert_eq!(heads.get(&ids[1]), Some(&ids[0]));
         assert_eq!(heads.get(&ids[2]), Some(&ids[0]));
         assert_eq!(heads.len(), 2, "{heads:?}");
+    }
+
+    /// A changed model vector changes the song types' fingerprint even at
+    /// the same scale, and so does having one at all.
+    #[test]
+    fn every_coordinate_of_a_vector_changes_the_fingerprint() {
+        let mut a = nikgob_recs::Compact { scale: 0.01, q: [3; nikgob_recs::embedding::COMPACT_DIM] };
+        let h = embedding_fingerprint(7, Some(&a));
+        assert_eq!(h, embedding_fingerprint(7, Some(&a)));
+        a.q[200] = 4;
+        assert_ne!(h, embedding_fingerprint(7, Some(&a)), "same scale, another vector");
+        assert_ne!(embedding_fingerprint(7, None), embedding_fingerprint(7, Some(&a)));
     }
 
     /// A copy of an off vocal on a second album, the off vocal and the plain
