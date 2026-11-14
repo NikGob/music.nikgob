@@ -98,7 +98,7 @@ pub use mood::{Axes, Mood};
 pub use pick::{Item, NewTrack, Pick, Reason, Recs};
 pub use radio::{NO_REPEAT_MS, Outcome, RadioParams, RadioSeed, RadioState, SeedFacts};
 pub use session::{Ended, Familiarity, Session, TrackLookup, Verdict};
-pub use songtype::{Lang, SONGTYPE_RULES, SongInput, SongLane, SongType, SongTypes, Voice, song_types};
+pub use songtype::{Lang, SONGTYPE_RULES, SongInput, SongLane, SongType, SongTypes, Voice, song_types, song_types_with, work_title};
 pub use style::{StyleMix, style_words};
 pub use suggest::{Matched, ServiceSuggestions, match_suggestions, suggestion_finds};
 pub use taste::{Catalog, DayPart, Play, Taste, TasteInput, TrackInfo, hot_affinity, world_token};

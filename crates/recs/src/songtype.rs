@@ -366,6 +366,55 @@ fn mean_vector(ids: impl Iterator<Item = TrackId>, of: &dyn Fn(TrackId) -> Optio
     (n > 0).then(|| std::array::from_fn(|k| (sum[k] / n as f64) as f32))
 }
 
+/// A version that is the same work as the song for a session: without its
+/// lead voice ([`wordless_version`]) or cut short (a TV size, a short
+/// version, a game's or a film's size).
+fn same_work_version(base: &str, version: &str) -> bool {
+    let words: Vec<String> = version.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let has = |w: &str| words.iter().any(|x| x == w);
+    wordless_version(&format!("{base} ({version})")) || has("short") || (has("size") && (has("tv") || has("game") || has("movie"))) || (has("tv") && (has("ver") || has("version") || has("edit")))
+}
+
+/// The work a title is of and whether the title names a version of it:
+/// the title without its marks of an off vocal, an instrumental, a karaoke,
+/// a TV size or a short version («Song (TV Size) [Off Vocal]» → «Song»,
+/// true). A remix, a live or an acoustic version stays its own song.
+pub fn work_title(title: &str) -> (String, bool) {
+    let mut t = title.to_owned();
+    let mut marked = false;
+    while let Some((base, version)) = nikgob_core::clip_title::version_split(&t).or_else(|| last_part(&t)) {
+        if !same_work_version(&base, &version) {
+            break;
+        }
+        t = base;
+        marked = true;
+    }
+    (t, marked)
+}
+
+/// The last bracket or « - » tail of a title and the title without it
+/// (what [`nikgob_core::clip_title::version_split`] does not take as a
+/// version: «Short Ver.»).
+fn last_part(title: &str) -> Option<(String, String)> {
+    let t = title.trim_end();
+    let cut = |at: usize, version: &str| {
+        let base = t[..at].trim_end().to_owned();
+        (!base.is_empty()).then(|| (base, version.trim().to_owned()))
+    };
+    if let Some(close) = t.chars().last().filter(|c| matches!(c, ')' | ']' | '）' | '］')) {
+        let open = match close {
+            ')' => '(',
+            ']' => '[',
+            '）' => '（',
+            _ => '［',
+        };
+        let at = t.rfind(open)?;
+        return cut(at, &t[at + open.len_utf8()..t.len() - close.len_utf8()]);
+    }
+    let at = t.rfind(" - ")?;
+    cut(at, &t[at + 3..])
+}
+
 /// A title that names a version without its lead voice: an instrumental,
 /// an off vocal, a karaoke ([`nikgob_core::clip_title::version_mark`]).
 pub fn wordless_version(title: &str) -> bool {
@@ -933,6 +982,21 @@ mod tests {
         assert!(t(2).dynamics.is_none() && t(2).calm_dynamics());
         assert!(t(3).lyric_valence() < -0.3, "{}", t(3).lyric_valence());
         assert_eq!(t(0).valence, 0);
+    }
+
+    /// The versions of a song for a session are one work; a remix or a
+    /// live one stays its own.
+    #[test]
+    fn versions_of_a_song_are_one_work() {
+        assert_eq!(work_title("夏の歌 (off vocal ver.)"), ("夏の歌".to_owned(), true));
+        assert_eq!(work_title("Song (TV Size)"), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song (TV Size) [Instrumental]"), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song - Short Ver."), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song (Game Size)"), ("Song".to_owned(), true));
+        assert_eq!(work_title("Song (Remix)"), ("Song (Remix)".to_owned(), false));
+        assert_eq!(work_title("Song (Live)"), ("Song (Live)".to_owned(), false));
+        assert_eq!(work_title("Song"), ("Song".to_owned(), false));
+        assert_eq!(work_title("Shortcut"), ("Shortcut".to_owned(), false));
     }
 
     #[test]

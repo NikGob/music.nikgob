@@ -1025,6 +1025,7 @@ impl RadioState {
         };
         let served: HashSet<Item> = self.served.iter().cloned().collect();
         let mut taken: HashSet<Item> = HashSet::new();
+        take_works(recs, &served, &mut taken);
         let sound = Sound::new(seed_vec, liked, skipped, library_scale(recs));
 
         // 0. Played twice running: once more, first.
@@ -1859,6 +1860,27 @@ fn slot_unheard(recs: &Recs<'_>, s: &Slot) -> bool {
 /// The best `n` of `slots` (sorted) under the rules, at least `share` of
 /// them unheard by the user while there are («Преимущественно новые
 /// песни»).
+/// What a session served takes its whole song along: a served version's
+/// song (an off vocal or a TV size of it, by [`crate::taste::TrackInfo::song`])
+/// and the versions of a served song are not picked in the same session.
+fn take_works(recs: &Recs<'_>, served: &HashSet<Item>, taken: &mut HashSet<Item>) {
+    let ids: HashSet<TrackId> = served.iter().filter_map(|x| match x {
+        Item::Track(id) => Some(*id),
+        Item::Stream(_) => None,
+    }).collect();
+    if ids.is_empty() {
+        return;
+    }
+    for t in recs.catalog.tracks() {
+        if let Some(song) = t.song
+            && (ids.contains(&song) || ids.contains(&t.id))
+        {
+            taken.insert(Item::Track(song));
+            taken.insert(Item::Track(t.id));
+        }
+    }
+}
+
 fn select_unheard(recs: &Recs<'_>, slots: Vec<Slot>, n: usize, share: f32, rules: &Diversity, taken: &mut HashSet<Item>) -> Vec<Slot> {
     if share <= 0.0 {
         return select_diverse(slots, n, rules, taken);
@@ -2400,6 +2422,34 @@ pub(crate) mod tests {
         radio.forget(&dropped);
         assert!(radio.served().all(|x| !dropped.contains(x)));
         assert_eq!(radio.served().last(), Some(&picks[0].item));
+    }
+
+    /// A served song takes its versions along (they stand for it as their
+    /// song), and a served version takes its song and the other versions:
+    /// none of them is picked again in the session.
+    #[test]
+    fn a_served_song_takes_its_versions_along() {
+        let cat = Catalog::new(vec![
+            info(0, &[1], None),
+            info(1, &[1], None).with_song(tid(0)),
+            info(2, &[1], None).with_song(tid(0)),
+            info(3, &[2], None),
+        ]);
+        let taste = Taste::build(&cat, &TasteInput::default(), NOW);
+        let idx = VectorIndex::new();
+        let recs = Recs::new(&cat, &taste, &idx);
+        let mut taken = HashSet::new();
+        take_works(&recs, &HashSet::from([Item::Track(tid(0))]), &mut taken);
+        assert!(taken.contains(&Item::Track(tid(1))) && taken.contains(&Item::Track(tid(2))));
+        assert!(!taken.contains(&Item::Track(tid(3))));
+        let mut taken = HashSet::new();
+        take_works(&recs, &HashSet::from([Item::Track(tid(2))]), &mut taken);
+        assert!(taken.contains(&Item::Track(tid(0))));
+        let slot = recs.slot(1, Reason::Random, 1.0);
+        assert!(slot.song.as_ref().is_some_and(|s| taken.contains(s)), "the other version stays out");
+        let mut taken = HashSet::new();
+        take_works(&recs, &HashSet::new(), &mut taken);
+        assert!(taken.is_empty());
     }
 
     /// A like while a radio plays: its next extension starts with the best
