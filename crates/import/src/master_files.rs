@@ -25,7 +25,7 @@ use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, SystemTime};
+
 
 use nikgob_core::model::{Master, ReleaseType, TrackId};
 use nikgob_library::Library;
@@ -34,7 +34,7 @@ use crate::config::ImportConfig;
 use crate::error::{ImportError, Result};
 use crate::fsutil;
 use crate::layout::{LayoutInput, is_various_artists};
-use crate::sanitize::{fit_stem, long_path, numbered_path};
+use crate::sanitize::{fit_stem, long_path, numbered_path, truncate_chars};
 
 /// Longest path a master gets (UTF-16 units with the closing NUL, as
 /// Windows counts them): Explorer and other programs open it as it is.
@@ -46,6 +46,10 @@ const MAX_DIR_BYTES: usize = 200;
 const MAX_STEM_BYTES: usize = 230;
 /// A name is looked for this many times (` (2)` … ` (999)`) at most.
 const MAX_NAMES: u32 = 999;
+/// Room a numbered name takes at most (` (999)`).
+const SUFFIX_ROOM: usize = 6;
+/// A folder or title is never shortened below this many letters.
+const MIN_NAME: usize = 8;
 
 /// The album folder's cover.
 pub const COVER_FILE: &str = "cover.jpg";
@@ -92,22 +96,23 @@ fn cap_bytes(s: &str, max: usize) -> String {
 /// library's own layout ([`LayoutInput`]) with the format in the album
 /// folder's name for a hi-res file (`tag`, [`hi_res_tag`]) and, on a
 /// compilation, the track's artist in the file name. Every name is safe on
-/// Windows and Linux, capped in letters and bytes, and the whole path fits
-/// [`MAX_MASTER_PATH`].
-pub fn master_target(root: &Path, layout: &LayoutInput, tag: Option<&str>, ext: &str) -> PathBuf {
+/// Windows and Linux and capped in letters and bytes; the whole path, with
+/// room for a ` (999)` a taken name may get, fits [`MAX_MASTER_PATH`]: the
+/// longest folder names are shortened first, then the title. None when even
+/// the shortest names do not fit (a very long masters folder).
+pub fn master_target(root: &Path, layout: &LayoutInput, tag: Option<&str>, ext: &str) -> Option<PathBuf> {
+    let units = |s: &str| s.encode_utf16().count();
     let album = layout.album_dir(Path::new(""));
-    let parts: Vec<String> = album.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
-    let mut dir = root.to_path_buf();
-    let last = parts.len().saturating_sub(1);
-    for (i, part) in parts.iter().enumerate() {
-        let mut name = cap_bytes(part, MAX_DIR_BYTES);
-        if i == last
-            && let Some(tag) = tag
-        {
-            name = format!("{name} {tag}");
-        }
-        dir.push(name);
-    }
+    let fixed: Vec<String> = album.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    let singles = fixed.len() == 3;
+    // (the name, whether it may be shortened); the tag goes after the last.
+    let mut parts: Vec<(String, bool)> = fixed
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (cap_bytes(p, MAX_DIR_BYTES), !(singles && i == 1)))
+        .collect();
+    let tag = tag.map(|t| format!(" {t}")).unwrap_or_default();
+
     let mut named = layout.clone();
     let artist = layout.artist.trim();
     if layout.is_compilation() && !artist.is_empty() && !is_various_artists(artist) {
@@ -116,8 +121,29 @@ pub fn master_target(root: &Path, layout: &LayoutInput, tag: Option<&str>, ext: 
     }
     let (stem, prefix) = named.file_stem();
     let stem = cap_bytes(&stem, MAX_STEM_BYTES);
-    let stem = fit_stem(&dir, &stem, ext, MAX_MASTER_PATH, prefix);
-    dir.join(format!("{stem}.{ext}"))
+    let min_stem = prefix + MIN_NAME;
+    // Usable units: the limit less the closing NUL and a numbered suffix.
+    let budget = MAX_MASTER_PATH - 1 - SUFFIX_ROOM;
+    let dirs_len = |parts: &[(String, bool)]| -> usize {
+        units(&root.to_string_lossy()) + parts.iter().map(|(p, _)| 1 + units(p)).sum::<usize>() + units(&tag)
+    };
+    let tail = 1 + min_stem.min(units(&stem)) + 1 + units(ext);
+    while dirs_len(&parts) + tail > budget {
+        let longest = parts
+            .iter_mut()
+            .filter(|(p, may)| *may && p.chars().count() > MIN_NAME)
+            .max_by_key(|(p, _)| p.chars().count())?;
+        let n = longest.0.chars().count() - 1;
+        longest.0 = truncate_chars(&longest.0, n);
+    }
+    let mut dir = root.to_path_buf();
+    let last = parts.len().saturating_sub(1);
+    for (i, (part, _)) in parts.iter().enumerate() {
+        dir.push(if i == last { format!("{part}{tag}") } else { part.clone() });
+    }
+    let stem = fit_stem(&dir, &stem, ext, MAX_MASTER_PATH - SUFFIX_ROOM, prefix);
+    let path = dir.join(format!("{stem}.{ext}"));
+    (crate::sanitize::win_len(&path) + SUFFIX_ROOM < MAX_MASTER_PATH).then_some(path)
 }
 
 /// The layout of a track as the library has it now (its album, artists,
@@ -162,7 +188,7 @@ fn taken(path: &Path, names: &HashSet<String>) -> bool {
 }
 
 /// `path` holds exactly the file of `size` bytes and BLAKE3 `hash`.
-fn same_content(path: &Path, size: u64, hash: &str) -> bool {
+pub(crate) fn same_content(path: &Path, size: u64, hash: &str) -> bool {
     fsutil::file_size(path).ok() == Some(size) && fsutil::hash_file(path).ok().is_some_and(|h| h.eq_ignore_ascii_case(hash))
 }
 
@@ -182,10 +208,52 @@ fn sync_dir(dir: &Path) {
     let _ = dir;
 }
 
+/// The file a running player holds locked for as long as it lives
+/// (`nikgob-live-<pid>.lock` in the system's temporary folder): a
+/// temporary file named with that pid is someone's work in progress while
+/// the lock is held ([`pid_alive`]).
+fn live_lock_path(pid: u32) -> PathBuf {
+    std::env::temp_dir().join(format!("nikgob-live-{pid}.lock"))
+}
+
+/// Takes this process's live lock (once; kept until the process ends).
+/// Every temporary file of ours is made only while it is held, so no other
+/// player takes one of ours for a crash's leftover.
+fn hold_live_lock() -> Result<()> {
+    static LIVE: std::sync::OnceLock<std::result::Result<File, String>> = std::sync::OnceLock::new();
+    let held = LIVE.get_or_init(|| {
+        let p = live_lock_path(std::process::id());
+        let f = File::options().create(true).truncate(false).write(true).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        f.lock().map_err(|e| format!("{}: {e}", p.display()))?;
+        Ok(f)
+    });
+    held.as_ref().map(|_| ()).map_err(|e| ImportError::Other(format!("masters: no live lock, nothing written: {e}")))
+}
+
+/// Whether the player with this pid may still be writing its temporary
+/// files: this very process always; another one while it holds its live
+/// lock. When that cannot be told, yes (nothing of it is touched).
+fn pid_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    match File::options().write(true).open(live_lock_path(pid)) {
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(_) => true,
+        Ok(f) => match f.try_lock() {
+            Ok(()) => false,
+            Err(std::fs::TryLockError::WouldBlock) => true,
+            Err(_) => true,
+        },
+    }
+}
+
 /// A fresh temporary file of ours in `dir` (`<prefix><pid>-<n>.part`),
-/// made with `create_new`: never a file that is there.
+/// made with `create_new` (never a file that is there) while this
+/// process's live lock is held.
 fn new_temp(dir: &Path, prefix: &str) -> Result<(PathBuf, File)> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
+    hold_live_lock()?;
     for _ in 0..1000 {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let p = dir.join(format!("{prefix}{}-{n}{TEMP_END}", std::process::id()));
@@ -227,11 +295,14 @@ fn stage_temp(src: &Path, dir: &Path, size: u64, hash: Option<&str>) -> Result<P
 }
 
 /// Gives the temporary file `tmp` the name `to` unless the name is there
-/// already: a hard link (refused by the system when the name is taken),
-/// then the temporary name goes. On a disk without links (FAT, exFAT) a
-/// rename into the name, checked free just before (one writer of the
-/// masters folder at a time, [`crate::master_writes`]). False when the name
-/// is taken; `tmp` stays for the caller then.
+/// already, never replacing a file, whoever made it: a hard link (refused
+/// by the system when the name is taken), then the temporary name goes.
+/// On a disk without links (FAT, exFAT) the name is claimed first with an
+/// empty file made by `create_new` (refused when the name is taken), and
+/// the temporary takes the place of that claim, which is ours alone; a
+/// crash in between leaves an empty file at the name (a later master takes
+/// the next name). False when the name is taken; `tmp` stays for the
+/// caller then.
 fn link_new(tmp: &Path, to: &Path) -> Result<bool> {
     match fs::hard_link(long_path(tmp), long_path(to)) {
         Ok(()) => {
@@ -242,10 +313,18 @@ fn link_new(tmp: &Path, to: &Path) -> Result<bool> {
         }
         Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
         Err(_) => {
-            if long_path(to).exists() {
-                return Ok(false);
+            match File::options().write(true).create_new(true).open(long_path(to)) {
+                Ok(claim) => drop(claim),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(false),
+                Err(e) => return Err(ImportError::io(to, e)),
             }
-            fs::rename(long_path(tmp), long_path(to)).map_err(fsutil::io_err(to))?;
+            if let Err(e) = fs::rename(long_path(tmp), long_path(to)) {
+                // Only our empty claim is there: it goes.
+                if fsutil::file_size(to).ok() == Some(0) {
+                    let _ = fs::remove_file(long_path(to));
+                }
+                return Err(ImportError::io(to, e));
+            }
         }
     }
     if let Some(dir) = to.parent() {
@@ -263,12 +342,11 @@ pub struct Placed {
     pub written: bool,
 }
 
-/// Puts the file `src` (BLAKE3 `hash`) at `target` or the first free
-/// numbered name after it, see the module docs. The same file under one of
-/// those names already is taken as it is. With `take`, `src` goes once its
-/// copy is in place (a file from the Inbox); a `src` that cannot go stays
-/// (logged), the master is kept.
-pub fn place_master(src: &Path, target: &Path, hash: &str, take: bool) -> Result<Placed> {
+/// Puts a copy of the file `src` (BLAKE3 `hash`) at `target` or the first
+/// free numbered name after it, see the module docs. The same file under
+/// one of those names already is taken as it is. `src` itself is never
+/// touched: the caller lets it go once the library records the copy.
+pub fn place_master(src: &Path, target: &Path, hash: &str) -> Result<Placed> {
     let dir = target.parent().ok_or_else(|| ImportError::Other(format!("{} has no folder", target.display())))?;
     fsutil::create_dir_all(dir)?;
     let size = fsutil::file_size(src)?;
@@ -315,14 +393,7 @@ pub fn place_master(src: &Path, target: &Path, hash: &str, take: bool) -> Result
     if let Some(t) = tmp {
         let _ = fsutil::remove_file(&t);
     }
-    let placed = placed.ok_or_else(|| ImportError::Other(format!("{}: no free name", target.display())))?;
-    if take
-        && long_path(src).exists()
-        && let Err(e) = fsutil::remove_file(src)
-    {
-        log::warn!("masters: {} is kept at {}, {} stays: {e}", hash, placed.path.display(), src.display());
-    }
-    Ok(placed)
+    placed.ok_or_else(|| ImportError::Other(format!("{}: no free name", target.display())))
 }
 
 /// Puts a copy of `cover` into `album_dir` as `cover.jpg` when the folder
@@ -347,15 +418,14 @@ pub fn keep_cover(album_dir: &Path, cover: &Path) {
 }
 
 /// The lossless file of `m` in the masters folder: its own path when it is
-/// kept by name, else `{file_hash}.<ext>` right in the folder (not the
-/// `.json` beside it, not the `.cue` kept with an image).
+/// kept by name (none when that file is gone: a flat file of the same hash
+/// is not this master's), else `{file_hash}.<ext>` right in the folder (not
+/// the `.json` beside it, not the `.cue` kept with an image).
 pub fn master_file(cfg: &ImportConfig, m: &Master) -> Option<PathBuf> {
-    if let Some(p) = m.file_path.as_deref().map(PathBuf::from)
-        && long_path(&p).is_file()
-    {
-        return Some(p);
+    match m.file_path.as_deref().map(PathBuf::from) {
+        Some(p) => long_path(&p).is_file().then_some(p),
+        None => flat_master(&cfg.masters_dir(), &m.file_hash),
     }
-    flat_master(&cfg.masters_dir(), &m.file_hash)
 }
 
 /// `{hash}.<ext>` right in `dir`, the way masters were kept before.
@@ -388,11 +458,29 @@ pub(crate) fn existing_copy(lib: &Library, root: &Path, hash: &str, size: u64) -
         .find(|p| long_path(p).is_file() && same_content(p, size, hash))
 }
 
+/// The file `hash` is a disc image (a single-file rip a cue sheet cuts
+/// into tracks), whatever number of its tracks the library has now: its
+/// sheet is kept as `<root>/<hash>.cue`, or its sidecar names one. Images
+/// stay `{hash}.<ext>` right in the masters folder.
+pub fn is_image_master(root: &Path, hash: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct SidecarCue {
+        #[serde(default)]
+        cue: Option<String>,
+    }
+    long_path(&root.join(format!("{hash}.cue"))).exists()
+        || fs::read(long_path(&root.join(format!("{hash}.json"))))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<SidecarCue>(&b).ok())
+            .is_some_and(|s| s.cue.is_some())
+}
+
 /// A torrent's payload file `from` that is the master of the one track of
 /// `m`, kept by name in the masters folder: copied there (the payload is
 /// left to the caller), its row pointed at the copy. A copy an earlier try
-/// made is taken as it is. Returns where it is kept; None when the track is
-/// not there to name it (the caller keeps it the older way).
+/// made is taken as it is. Returns where it is kept; None when it is not
+/// one to keep by name (a disc image, a track the library cannot name, a
+/// masters folder too long for a name): the caller keeps it the older way.
 pub fn keep_torrent_master(lib: &Library, cfg: &ImportConfig, from: &Path, m: &Master) -> Result<Option<PathBuf>> {
     let size = fsutil::file_size(from)?;
     if let Some(p) = m.file_path.as_deref().map(PathBuf::from)
@@ -401,14 +489,23 @@ pub fn keep_torrent_master(lib: &Library, cfg: &ImportConfig, from: &Path, m: &M
     {
         return Ok(Some(p));
     }
+    let root = cfg.masters_dir();
+    if is_image_master(&root, &m.file_hash) {
+        return Ok(None);
+    }
     let Some(layout) = layout_of_track(lib, m.track_id) else { return Ok(None) };
     let info = crate::tags::probe_info(from).ok();
     let tag = info.as_ref().and_then(|i| hi_res_tag(i.bit_depth, i.sample_rate));
     let ext = from.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "flac".to_owned());
-    let root = cfg.masters_dir();
-    let target = master_target(&root, &layout, tag.as_deref(), &ext);
-    let placed = place_master(from, &target, &m.file_hash, false)?;
-    lib.set_master_file(m.track_id, &placed.path.to_string_lossy())?;
+    let Some(target) = master_target(&root, &layout, tag.as_deref(), &ext) else { return Ok(None) };
+    let placed = place_master(from, &target, &m.file_hash)?;
+    if let Err(e) = lib.set_master_file(m.track_id, &placed.path.to_string_lossy()) {
+        // The payload stays the master: a copy written now goes again.
+        if placed.written {
+            let _ = fsutil::remove_file(&placed.path);
+        }
+        return Err(e.into());
+    }
     if placed.written
         && let Some(dir) = placed.path.parent()
         && let Some(cover) = release_cover(lib, cfg, m.track_id)
@@ -429,49 +526,66 @@ fn release_cover(lib: &Library, cfg: &ImportConfig, track: TrackId) -> Option<Pa
     long_path(&p).is_file().then_some(p)
 }
 
-/// Is `name` one of our temporary files (`.nikgob-master-<pid>-<n>.part`,
-/// `.nikgob-db-<pid>-<n>.part`)?
-fn is_temp_name(name: &str) -> bool {
-    [MASTER_TEMP, DB_TEMP].iter().any(|prefix| {
-        name.strip_prefix(prefix).and_then(|n| n.strip_suffix(TEMP_END)).is_some_and(|mid| {
-            !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit() || b == b'-') && mid.bytes().any(|b| b.is_ascii_digit())
-        })
+/// The kind of temporary file of ours `name` is, and the pid of the player
+/// that made it: exactly `<prefix><pid>-<n>.part`, both numbers decimal.
+fn temp_of(name: &str) -> Option<(&'static str, u32)> {
+    [MASTER_TEMP, DB_TEMP].into_iter().find_map(|prefix| {
+        let mid = name.strip_prefix(prefix)?.strip_suffix(TEMP_END)?;
+        let (pid, n) = mid.split_once('-')?;
+        let digits = |s: &str| !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit());
+        (digits(pid) && digits(n)).then(|| pid.parse().ok().map(|pid| (prefix, pid)))?
     })
 }
 
-/// Removes our temporary files ([`is_temp_name`]) older than `min_age` in
-/// `root` and its folders (four levels down, as deep as an album folder of
-/// a single goes): what a crash left on the way. Nothing else is touched.
-/// Returns how many went.
-pub fn clean_stale_temps(root: &Path, min_age: Duration) -> usize {
-    fn walk(dir: &Path, depth: usize, min_age: Duration, now: SystemTime, n: &mut usize) {
+/// What [`clean_stale_temps`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cleaned {
+    /// Temporary files a crash left, removed.
+    pub removed: usize,
+    /// Temporary files of a player still running (this one or another),
+    /// left alone.
+    pub live: usize,
+}
+
+/// Removes the temporary files a crash left in the masters folder `root`:
+/// only names of exactly our pattern ([`temp_of`]), a master's only in an
+/// album folder (four levels down at most, as deep as a single's goes),
+/// a database copy's only in `.nikgob-backup`, and only when the player
+/// that made it is gone ([`pid_alive`]): work in progress is never touched,
+/// however old. Nothing else is touched.
+pub fn clean_stale_temps(root: &Path) -> Cleaned {
+    fn walk(dir: &Path, depth: usize, in_backup: bool, out: &mut Cleaned) {
         let Ok(rd) = fs::read_dir(long_path(dir)) else { return };
         for e in rd.flatten() {
             let Ok(kind) = e.file_type() else { continue };
-            let path = dir.join(e.file_name());
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = dir.join(&name);
             if kind.is_dir() {
-                if depth < 4 {
-                    walk(&path, depth + 1, min_age, now, n);
+                if depth == 0 && name == BACKUP_DIR {
+                    walk(&path, 1, true, out);
+                } else if depth < 4 && !in_backup {
+                    walk(&path, depth + 1, false, out);
                 }
-            } else if kind.is_file() && is_temp_name(&e.file_name().to_string_lossy()) {
-                let old = e
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .map(|t| now.duration_since(t).unwrap_or_default())
-                    .is_some_and(|age| age >= min_age);
-                if old {
-                    match fs::remove_file(long_path(&path)) {
-                        Ok(()) => *n += 1,
-                        Err(err) => log::warn!("masters: the temporary {} stays: {err}", path.display()),
-                    }
-                }
+                continue;
+            }
+            let Some((prefix, pid)) = temp_of(&name).filter(|_| kind.is_file()) else { continue };
+            let here = if prefix == DB_TEMP { in_backup && depth == 1 } else { !in_backup && depth >= 1 };
+            if !here {
+                continue;
+            }
+            if pid_alive(pid) {
+                out.live += 1;
+                continue;
+            }
+            match fs::remove_file(long_path(&path)) {
+                Ok(()) => out.removed += 1,
+                Err(err) => log::warn!("masters: the temporary {} stays: {err}", path.display()),
             }
         }
     }
-    let mut n = 0;
-    walk(root, 0, min_age, SystemTime::now(), &mut n);
-    n
+    let mut out = Cleaned::default();
+    walk(root, 0, false, &mut out);
+    out
 }
 
 /// Is `name` a database copy's own name, `library-YYYY-MM-DD.sqlite`?
@@ -584,12 +698,16 @@ mod tests {
             .join("/")
     }
 
+    fn target(root: &Path, layout: &LayoutInput, tag: Option<&str>) -> PathBuf {
+        master_target(root, layout, tag, "flac").expect("a name fits")
+    }
+
     #[test]
     fn a_master_goes_where_its_album_does() {
         let root = Path::new("/m");
-        assert_eq!(rel(&master_target(root, &layout(), None, "flac"), root), "Кино/1988 - Группа крови/03 - Группа крови.flac");
+        assert_eq!(rel(&target(root, &layout(), None), root), "Кино/1988 - Группа крови/03 - Группа крови.flac");
         let two = LayoutInput { disc_no: 2, disc_total: Some(2), ..layout() };
-        assert_eq!(rel(&master_target(root, &two, None, "flac"), root), "Кино/1988 - Группа крови/2-03 - Группа крови.flac");
+        assert_eq!(rel(&target(root, &two, None), root), "Кино/1988 - Группа крови/2-03 - Группа крови.flac");
     }
 
     #[test]
@@ -602,7 +720,7 @@ mod tests {
         assert_eq!(hi_res_tag(Some(16), Some(88_200)).as_deref(), Some("[16-88.2]"));
         assert_eq!(hi_res_tag(Some(24), None).as_deref(), Some("[24]"));
         let root = Path::new("/m");
-        let p = master_target(root, &layout(), hi_res_tag(Some(24), Some(48_000)).as_deref(), "flac");
+        let p = target(root, &layout(), hi_res_tag(Some(24), Some(48_000)).as_deref());
         assert_eq!(rel(&p, root), "Кино/1988 - Группа крови [24-48]/03 - Группа крови.flac");
     }
 
@@ -621,21 +739,21 @@ mod tests {
             ..layout()
         };
         assert_eq!(
-            rel(&master_target(root, &va, None, "flac"), root),
+            rel(&target(root, &va, None), root),
             "Various Artists/2018 - Spider-Man - Into the Spider-Verse/02 - Post Malone & Swae Lee - Sunflower.flac"
         );
         // A compilation whose track names no artist of its own.
         let bare = LayoutInput { artist: "Various Artists".into(), ..va };
-        assert_eq!(rel(&master_target(root, &bare, None, "flac"), root), "Various Artists/2018 - Spider-Man - Into the Spider-Verse/02 - Sunflower.flac");
+        assert_eq!(rel(&target(root, &bare, None), root), "Various Artists/2018 - Spider-Man - Into the Spider-Verse/02 - Sunflower.flac");
     }
 
     #[test]
     fn a_track_without_an_album_is_a_single() {
         let root = Path::new("/m");
         let single = LayoutInput { album: None, track_no: 0, year: Some(2021), title: "Песня".into(), ..layout() };
-        assert_eq!(rel(&master_target(root, &single, None, "flac"), root), "Кино/Singles/2021 - Песня/01 - Песня.flac");
+        assert_eq!(rel(&target(root, &single, None), root), "Кино/Singles/2021 - Песня/01 - Песня.flac");
         let nobody = LayoutInput { album_artist: String::new(), artist: " ".into(), album: None, year: None, title: String::new(), track_no: 0, ..layout() };
-        assert_eq!(rel(&master_target(root, &nobody, None, "flac"), root), "Unknown Artist/Singles/Untitled/01 - Untitled.flac");
+        assert_eq!(rel(&target(root, &nobody, None), root), "Unknown Artist/Singles/Untitled/01 - Untitled.flac");
     }
 
     #[test]
@@ -648,23 +766,43 @@ mod tests {
             year: None,
             ..layout()
         };
-        assert_eq!(rel(&master_target(root, &rough, None, "flac"), root), "AC-DC/What_ _Yes_ - 'No'/03 - CON_.flac");
-        // Long Japanese names: every name within 255 bytes, the path within
-        // the limit Explorer opens without help.
+        assert_eq!(rel(&target(root, &rough, None), root), "AC-DC/What_ _Yes_ - 'No'/03 - CON_.flac");
+        assert_eq!(cap_bytes("ab.  c", 4), "ab");
+        assert_eq!(cap_bytes("日本", 4), "日");
+    }
+
+    /// Long names: every name within 255 bytes, and the whole path, with
+    /// room for the longest numbered suffix, within the limit Explorer opens
+    /// without help, a single's extra folder and a long masters folder
+    /// included; the folders give way before the title. A masters folder too
+    /// long for any name gets none.
+    #[test]
+    fn the_whole_path_fits_with_room_for_a_number() {
         let long = LayoutInput {
             album_artist: "あ".repeat(150),
             album: Some("い".repeat(150)),
             title: "う".repeat(150),
             ..layout()
         };
-        let p = master_target(Path::new(r"X:\masters\archive"), &long, Some("[24-96]"), "flac");
-        for c in p.components().skip(1) {
-            assert!(c.as_os_str().len() <= 255, "{c:?}");
+        let single = LayoutInput { album: None, release_type: ReleaseType::Single, ..long.clone() };
+        let roots = [PathBuf::from(r"X:\masters\archive"), PathBuf::from(r"X:\").join("deep folder ".repeat(9))];
+        for root in &roots {
+            for (l, tag) in [(&long, Some("[24-96]")), (&single, None)] {
+                let p = target(root, l, tag);
+                for c in p.components() {
+                    assert!(c.as_os_str().len() <= 255, "{c:?}");
+                }
+                let numbered = numbered_path(&p, MAX_NAMES);
+                assert!(crate::sanitize::win_len(&numbered) < MAX_MASTER_PATH, "{}", numbered.display());
+                assert!(p.file_name().unwrap().to_string_lossy().starts_with("03 - う") || p.file_name().unwrap().to_string_lossy().starts_with("01 - う"));
+                assert!(p.file_stem().unwrap().to_string_lossy().chars().count() >= MIN_NAME + 5, "{}", p.display());
+            }
         }
-        assert!(crate::sanitize::win_len(&p) < MAX_MASTER_PATH, "{}", p.display());
-        assert!(p.file_name().unwrap().to_string_lossy().starts_with("03 - う"));
-        assert_eq!(cap_bytes("ab.  c", 4), "ab");
-        assert_eq!(cap_bytes("日本", 4), "日");
+        if cfg!(windows) {
+            let p = target(Path::new(r"X:\m"), &long, Some("[24-96]"));
+            assert_eq!(p.parent().unwrap().file_name().unwrap().to_string_lossy().chars().last(), Some(']'), "the tag stays");
+        }
+        assert_eq!(master_target(&PathBuf::from(r"X:\").join("x".repeat(230)), &long, None, "flac"), None);
     }
 
     fn write(p: &Path, bytes: &[u8]) {
@@ -682,6 +820,13 @@ mod tests {
         v
     }
 
+    /// A temporary of a player that is gone (no live lock for its pid).
+    const GONE: u32 = 3_999_999_999;
+
+    fn is_ours(name: &str) -> bool {
+        temp_of(name).is_some()
+    }
+
     #[test]
     fn a_master_takes_a_free_name_and_never_writes_over_another_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -691,67 +836,73 @@ mod tests {
         let other = b"another song";
         write(&target, other);
         // Another file at the very name: the next free one.
-        let placed = place_master(&src, &target, &hash_of(b"the song"), true).unwrap();
+        let placed = place_master(&src, &target, &hash_of(b"the song")).unwrap();
         assert_eq!(placed, Placed { path: target.with_file_name("01 - Song (2).flac"), written: true });
         assert_eq!(fs::read(&target).unwrap(), other, "the other file is as it was");
         assert_eq!(fs::read(&placed.path).unwrap(), b"the song");
-        assert!(!src.exists(), "taken from the Inbox once in place");
+        assert!(src.exists(), "the source is the caller's to let go");
         assert_eq!(files_in(target.parent().unwrap()), vec!["01 - Song (2).flac", "01 - Song.flac"], "no temporary left");
 
         // The same file again: found under its name, nothing written.
-        let again = dir.path().join("in").join("again.flac");
-        write(&again, b"the song");
-        let placed = place_master(&again, &target, &hash_of(b"the song"), false).unwrap();
+        let placed = place_master(&src, &target, &hash_of(b"the song")).unwrap();
         assert_eq!(placed, Placed { path: target.with_file_name("01 - Song (2).flac"), written: false });
-        assert!(again.exists(), "a file not taken stays");
 
         // A name taken in another letter case is taken.
         let upper = dir.path().join("m").join("B").join("01 - SONG.flac");
         write(&upper, other);
         let lower = upper.with_file_name("01 - song.flac");
-        let placed = place_master(&again, &lower, &hash_of(b"the song"), false).unwrap();
+        let placed = place_master(&src, &lower, &hash_of(b"the song")).unwrap();
         assert_eq!(placed.path, upper.with_file_name("01 - song (2).flac"));
         assert_eq!(fs::read(&upper).unwrap(), other);
 
         // A source that is not what its hash says: nothing is written.
-        let wrong = place_master(&again, &dir.path().join("m").join("C").join("x.flac"), &hash_of(b"else"), false);
+        let wrong = place_master(&src, &dir.path().join("m").join("C").join("x.flac"), &hash_of(b"else"));
         assert!(wrong.is_err());
         assert!(files_in(&dir.path().join("m").join("C")).is_empty(), "no temporary, no file");
     }
 
     /// A crash before the master takes its name leaves its source and a
     /// temporary only; one after it leaves the master whole and its source
-    /// too. Either way nothing is lost or written over, and the next try
-    /// takes the master as it is.
+    /// too. Either way nothing is lost or written over, the next start
+    /// removes the temporary, and the next try takes the master as it is.
     #[test]
     fn a_crash_on_the_way_loses_nothing() {
         let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("m");
         let src = dir.path().join("in").join("song.flac");
         write(&src, b"the song");
         let hash = hash_of(b"the song");
-        let album = dir.path().join("m").join("A");
+        let album = root.join("A");
         fs::create_dir_all(&album).unwrap();
         let target = album.join("01 - Song.flac");
+        // What a player that crashed left: its temporary under its pid.
+        let crashed = |tmp: &Path| {
+            let to = tmp.with_file_name(format!("{MASTER_TEMP}{GONE}-1{TEMP_END}"));
+            fs::rename(tmp, &to).unwrap();
+            to
+        };
 
         // Before the name: the temporary is written, nothing else.
         let tmp = stage_temp(&src, &album, 8, Some(&hash)).unwrap();
         assert!(src.exists() && !target.exists());
-        assert!(is_temp_name(&tmp.file_name().unwrap().to_string_lossy()));
+        assert!(is_ours(&tmp.file_name().unwrap().to_string_lossy()));
+        assert_eq!(clean_stale_temps(&root), Cleaned { removed: 0, live: 1 }, "this player's own work stays");
+        crashed(&tmp);
         // The start after the crash: the temporary goes, nothing else.
-        assert_eq!(clean_stale_temps(&dir.path().join("m"), Duration::ZERO), 1);
+        assert_eq!(clean_stale_temps(&root), Cleaned { removed: 1, live: 0 });
         assert!(files_in(&album).is_empty());
         assert!(src.exists());
 
-        // After the name, before the source went and the row was written.
+        // After the name, before the row was written and the source went.
         let tmp = stage_temp(&src, &album, 8, Some(&hash)).unwrap();
         fs::hard_link(&tmp, &target).unwrap();
+        crashed(&tmp);
         assert_eq!(fs::read(&target).unwrap(), b"the song");
         assert!(src.exists(), "the source is still there");
         // The next try: the very file at the name, no second copy.
-        let placed = place_master(&src, &target, &hash, true).unwrap();
+        let placed = place_master(&src, &target, &hash).unwrap();
         assert_eq!(placed, Placed { path: target.clone(), written: false });
-        assert!(!src.exists());
-        assert_eq!(clean_stale_temps(&dir.path().join("m"), Duration::ZERO), 1, "the temporary's second name goes");
+        assert_eq!(clean_stale_temps(&root), Cleaned { removed: 1, live: 0 }, "the temporary's second name goes");
         assert_eq!(files_in(&album), vec!["01 - Song.flac"]);
         assert_eq!(fs::read(&target).unwrap(), b"the song");
 
@@ -764,35 +915,51 @@ mod tests {
         assert!(tmp.exists());
     }
 
+    /// Only exactly our names, each in its own place, and only a gone
+    /// player's: this player's and another running one's stay, however old.
     #[test]
-    fn the_clean_up_touches_only_our_temporaries() {
+    fn the_clean_up_touches_only_a_gone_player_s_temporaries() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let ours = [
-            root.join(".nikgob-master-12-0.part"),
-            root.join("A").join("B").join(".nikgob-master-7-3.part"),
-            root.join("A").join("Singles").join("2020 - X").join(".nikgob-master-1-1.part"),
-            root.join(BACKUP_DIR).join(".nikgob-db-5-0.part"),
+            root.join("A").join("B").join(format!(".nikgob-master-{GONE}-3.part")),
+            root.join("A").join("Singles").join("2020 - X").join(format!(".nikgob-master-{GONE}-1.part")),
+            root.join(BACKUP_DIR).join(format!(".nikgob-db-{GONE}-0.part")),
         ];
+        // A running player: it holds its live lock.
+        let running = 3_999_999_998u32;
+        let lock = File::options().create(true).truncate(false).write(true).open(live_lock_path(running)).unwrap();
+        lock.lock().unwrap();
         let theirs = [
             root.join("abc.flac"),
             root.join("abc.json"),
             root.join(".abc.flac.nikgob-part"),
+            root.join(format!(".nikgob-master-{GONE}-0.part")),
+            root.join("A").join(BACKUP_DIR).join(format!(".nikgob-db-{GONE}-0.part")),
+            root.join(BACKUP_DIR).join(format!(".nikgob-master-{GONE}-0.part")),
             root.join("A").join("B").join("01 - Song.flac"),
             root.join("A").join("B").join(".nikgob-master-.part"),
-            root.join("A").join("B").join(".nikgob-master-x1.part"),
+            root.join("A").join("B").join(".nikgob-master-1.part"),
+            root.join("A").join("B").join(".nikgob-master-1--2.part"),
+            root.join("A").join("B").join(".nikgob-master-1-2-3.part"),
+            root.join("A").join("B").join(".nikgob-master-x1-2.part"),
             root.join("A").join("B").join("nikgob-master-1-1.part"),
             root.join("A").join("B").join(".nikgob-master-1-1.part.flac"),
+            root.join("A").join("B").join(format!(".nikgob-master-{running}-0.part")),
+            root.join("A").join("B").join(format!(".nikgob-master-{}-0.part", std::process::id())),
             root.join(BACKUP_DIR).join("library-2026-11-14.sqlite"),
         ];
         for p in ours.iter().chain(&theirs) {
             write(p, b"x");
         }
-        // Young ones may be on their way right now: they stay.
-        assert_eq!(clean_stale_temps(root, Duration::from_secs(3600)), 0);
-        assert_eq!(clean_stale_temps(root, Duration::ZERO), ours.len());
+        let cleaned = clean_stale_temps(root);
+        assert_eq!(cleaned, Cleaned { removed: ours.len(), live: 2 });
         assert!(ours.iter().all(|p| !p.exists()));
-        assert!(theirs.iter().all(|p| p.exists()));
+        assert!(theirs.iter().all(|p| p.exists()), "{:?}", theirs.iter().filter(|p| !p.exists()).collect::<Vec<_>>());
+        drop(lock);
+        // Once that player is gone, its temporary goes too.
+        assert_eq!(clean_stale_temps(root).removed, 1);
+        let _ = fs::remove_file(live_lock_path(running));
     }
 
     #[test]
@@ -835,7 +1002,22 @@ mod tests {
         let n = Master { file_hash: "def".into(), file_path: Some(named.to_string_lossy().into_owned()), ..m.clone() };
         assert_eq!(master_file(&cfg, &n), Some(named));
         let gone = Master { file_path: Some(root.join("gone.flac").to_string_lossy().into_owned()), ..m };
-        assert_eq!(master_file(&cfg, &gone), Some(old), "a path that is gone falls back to the hash");
+        assert_eq!(master_file(&cfg, &gone), None, "a flat file of the same hash is not this master's");
+    }
+
+    /// An image is known by its kept sheet or its sidecar, however many of
+    /// its tracks the library has.
+    #[test]
+    fn a_disc_image_is_known_by_its_sheet() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(!is_image_master(root, "a"));
+        write(&root.join("a.cue"), b"FILE");
+        assert!(is_image_master(root, "a"));
+        write(&root.join("b.json"), br#"{"track_id":"x","cue":"disc.cue"}"#);
+        assert!(is_image_master(root, "b"));
+        write(&root.join("c.json"), br#"{"track_id":"x"}"#);
+        assert!(!is_image_master(root, "c"));
     }
 
     #[test]
@@ -865,7 +1047,7 @@ mod tests {
         assert_eq!(copies.len(), BACKUP_KEEP);
         assert_eq!(copies.first().map(String::as_str), Some("library-2026-11-03.sqlite"));
         assert!(not_ours.iter().all(|p| p.exists()), "only our copies go");
-        assert!(!files_in(&root.join(BACKUP_DIR)).iter().any(|n| is_temp_name(n)), "no temporary left");
+        assert!(!files_in(&root.join(BACKUP_DIR)).iter().any(|n| is_ours(n)), "no temporary left");
 
         // The same day again: no second copy.
         assert_eq!(copy_database(&lib, &root, "2026-11-14", BACKUP_KEEP).unwrap(), DbCopy::Had);

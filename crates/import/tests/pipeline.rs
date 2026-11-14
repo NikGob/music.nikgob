@@ -739,16 +739,16 @@ async fn masters_relocate_to_another_folder_with_hash_verification_and_cleanup()
 
     let new_masters = root.dir.path().join("external_drive").join("FLAC");
     let report = nikgob_import::relocate_masters(&lib, &old_masters, &new_masters, |_, _, _| {}).unwrap();
-    assert_eq!(report.audio_moved, 2);
+    assert_eq!(report.audio_moved, 1, "only the flat master moves");
     assert_eq!(report.sidecars_moved, 1);
     assert!(report.bytes_moved > 0);
-    assert!(!old_masters.exists(), "old masters folder removed once empty");
+    assert!(old_masters.join(&rel).is_file(), "a master kept by name stays where it is");
 
     // Opus file stays untouched on the fast library drive.
     assert!(std::path::Path::new(&opus_locator).is_file());
 
-    // New masters folder has the verified lossless originals, each where it
-    // was, the rows pointed there, and the updated sidecar.
+    // New masters folder has the verified flat original and the sidecar;
+    // the master kept by name keeps its row and its path.
     let mut moved_cfg = root.cfg.clone().with_masters_dir(&new_masters);
     assert_eq!(moved_cfg.masters_dir(), new_masters);
     let entries: Vec<_> = std::fs::read_dir(&new_masters)
@@ -758,14 +758,13 @@ async fn masters_relocate_to_another_folder_with_hash_verification_and_cleanup()
         .collect();
     assert_eq!(std::fs::read(new_masters.join(format!("{older_hash}.flac"))).unwrap(), older);
     assert!(entries.iter().any(|n| n.ends_with(".json")), "{entries:?}");
-    let moved = new_masters.join(&rel);
-    assert!(moved.is_file());
-    assert_eq!(lib.get_master(track_id).unwrap().unwrap().file_path.as_deref(), Some(&*moved.to_string_lossy()));
+    assert_eq!(lib.get_master(track_id).unwrap().unwrap().file_path.as_deref(), Some(named.as_str()));
+    assert!(!new_masters.join(&rel).exists());
     let sidecar: serde_json::Value = serde_json::from_slice(
         &std::fs::read(entries.iter().find(|n| n.ends_with(".json")).map(|n| new_masters.join(n)).unwrap()).unwrap(),
     )
     .unwrap();
-    assert_eq!(sidecar["path"].as_str(), Some(&*moved.to_string_lossy()));
+    assert_eq!(sidecar["path"].as_str(), Some(named.as_str()), "the sidecar still names where it is");
 
     // Rebuilding from files still finds the master quality score in the new folder.
     let fresh = Library::open_in_memory().unwrap();
@@ -1009,4 +1008,34 @@ async fn older_masters_stay_untouched_and_are_still_found() {
     assert_eq!(std::fs::read(&flat).unwrap(), bytes, "the older master is as it was");
     assert_eq!(std::fs::metadata(&flat).unwrap().modified().unwrap(), stamp);
     assert_eq!(nikgob_import::master_files::master_file(&root.cfg, &lib.get_master(first).unwrap().unwrap()), Some(flat));
+}
+
+/// A flat `{hash}.<ext>` that holds another file (damaged) is never written
+/// over: the new master goes under its name and the damaged file stays as
+/// it was. A sidecar that cannot be written does not stop the master: its
+/// row is there before the Inbox file goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_flat_file_is_never_written_over_and_the_row_comes_first() {
+    let root = Root::new();
+    let (importer, lib) = importer(&root);
+    let masters = root.cfg.masters_dir();
+    std::fs::create_dir_all(&masters).unwrap();
+    let wav = root.inbox("song.wav");
+    write_wav(&wav, &broadband(RATE, 3.0, 23), RATE);
+    tags::write_tags(&wav, &song_tags("Кукушка")).unwrap();
+    let hash = blake3::hash(&std::fs::read(&wav).unwrap()).to_hex().to_string();
+    let flat = masters.join(format!("{hash}.wav"));
+    std::fs::write(&flat, b"damaged").unwrap();
+    // A folder where the sidecar would go: it cannot be written.
+    std::fs::create_dir_all(masters.join(format!("{hash}.json"))).unwrap();
+
+    let events = importer.import_paths(vec![wav.clone()], SourceOrigin::Inbox).wait().await;
+    assert!(failures(&events).is_empty(), "{events:?}");
+    let (id, _) = imported(&events)[0];
+    let m = lib.get_master(id).unwrap().expect("the row is there");
+    let named = std::path::PathBuf::from(m.file_path.expect("kept by name"));
+    assert_eq!(named, masters.join("Кино").join("1988 - Группа крови").join("03 - Кукушка.wav"));
+    assert_eq!(nikgob_import::fsutil::hash_file(&named).unwrap(), hash);
+    assert_eq!(std::fs::read(&flat).unwrap(), b"damaged", "never written over");
+    assert!(!wav.exists(), "the Inbox file goes once the row is there");
 }

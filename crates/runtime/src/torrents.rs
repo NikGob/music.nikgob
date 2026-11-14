@@ -965,8 +965,9 @@ pub(crate) fn clean_payloads(
             }
             let gone = match of_file.first() {
                 // The master of one track goes into the masters folder under
-                // its name (one an earlier try put there the older way stays
-                // that way).
+                // its name; a disc image (known by its kept sheet, however
+                // many of its tracks came) and one an earlier try put there
+                // the older way stay flat.
                 Some(m) if of_file.len() == 1 && !kept_flat(m) => keep_named(lib, cfg, &f, m),
                 Some(m) => {
                     let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -1237,6 +1238,42 @@ mod tests {
         let mut names: Vec<_> = std::fs::read_dir(&folder).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names, vec!["03 - Закрой за мной дверь (2).flac", "03 - Закрой за мной дверь.flac", "cover.jpg"]);
+    }
+
+    /// A disc image only one of whose tracks the library has is still an
+    /// image: it leaves Downloads as `{hash}.<ext>` beside its kept sheet,
+    /// never under a track's name.
+    #[test]
+    fn a_partly_imported_disc_image_stays_flat() {
+        use nikgob_core::model::{ArtistCredit, Track};
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ImportConfig::with_root(dir.path());
+        let album = cfg.downloads_dir.join("Album");
+        std::fs::create_dir_all(&album).unwrap();
+        let image = album.join("CDImage.flac");
+        std::fs::write(&image, b"the whole disc").unwrap();
+        let hash = nikgob_import::fsutil::hash_file(&image).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let track = lib.upsert_track(&Track::new("Одна песня", ArtistCredit::single("Кино", None))).unwrap();
+        lib.put_master(&Master {
+            track_id: track.id,
+            codec: Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: 14,
+            origin: Some(SourceOrigin::Torrent { info_hash: "ih".into(), path_in_torrent: "Album/CDImage.flac".into() }),
+            file_path: None,
+            replicas: Vec::new(),
+        })
+        .unwrap();
+        std::fs::create_dir_all(cfg.masters_dir()).unwrap();
+        std::fs::write(cfg.masters_dir().join(format!("{hash}.cue")), b"FILE").unwrap();
+
+        assert!(clean_payloads(&lib, &cfg, vec![("ih".into(), vec![image.clone()])]).is_empty());
+        let dest = cfg.masters_dir().join(format!("{hash}.flac"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the whole disc");
+        assert_eq!(origin_path(&lib, track.id), dest.to_string_lossy());
+        assert_eq!(lib.get_master(track.id).unwrap().unwrap().file_path, None);
+        assert!(!cfg.masters_dir().join("Кино").exists(), "no folder by name");
     }
 
     /// A master whose copy does not verify stays where it is, with its row,

@@ -18,8 +18,6 @@ use crate::{Later, Worker};
 const EVERY: Duration = Duration::from_secs(60 * 60);
 /// The first look, a while after the start (the start has its own work).
 const FIRST_AFTER: Duration = Duration::from_secs(2 * 60);
-/// A temporary file of ours this old is not on its way any more.
-const STALE_TEMP: Duration = Duration::from_secs(60 * 60);
 
 /// The worker's side of the copy.
 pub(crate) struct DbCopies {
@@ -68,11 +66,15 @@ impl Worker {
         let spawned = std::thread::Builder::new().name("nikgob-db-copy".into()).spawn(move || {
             let _low = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
             let there = root.is_dir();
+            // Only a gone player's temporaries go; ones still in use (another
+            // player running) are looked at again an hour later.
+            let mut left_live = 0;
             if clean && there {
-                let n = master_files::clean_stale_temps(&root, STALE_TEMP);
-                if n > 0 {
-                    log::info!("masters: {n} temporary files a crash left are gone");
+                let c = master_files::clean_stale_temps(&root);
+                if c.removed > 0 {
+                    log::info!("masters: {} temporary files a crash left are gone", c.removed);
                 }
+                left_live = c.live;
             }
             let made = match master_files::copy_database(&lib, &root, &today, master_files::BACKUP_KEEP) {
                 Ok(DbCopy::Made(to)) => {
@@ -86,7 +88,7 @@ impl Worker {
                     false
                 }
             };
-            let cleaned = clean && there;
+            let cleaned = clean && there && left_live == 0;
             let _ = later.send(Later::new("the database copy", move |w| w.db_copied(made.then_some(today), cleaned)));
         });
         if let Err(e) = spawned {

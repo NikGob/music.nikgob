@@ -261,9 +261,18 @@ fn torrent_download_imports_and_cleans_up() {
     // The move then takes every master, the waiting import puts its own in
     // the new folder.
     wait_for(&rt, "the import after the move", |s| s.library.track_count == 3 && s.downloads.active.is_empty());
-    assert!(wavs_in(&cfg.masters_dir()).is_empty(), "{:?} left in the old folder", wavs_in(&cfg.masters_dir()));
-    let masters = wavs_in(&moved_to);
-    assert_eq!(masters.len(), 3, "{masters:?}: the lossless originals are kept as masters");
+    // The torrent's masters were kept by name in the old folder before the
+    // move and stay there (their rows say where); the waiting import's
+    // master is in the new one.
+    let (old, new) = (wavs_in(&cfg.masters_dir()), wavs_in(&moved_to));
+    assert_eq!(old.len() + new.len(), 3, "{old:?} {new:?}: the lossless originals are kept as masters");
+    assert_eq!(new.len(), 1, "{new:?}");
+    let rows = lib.masters_without_replicas(100).unwrap();
+    assert_eq!(rows.len(), 3);
+    for m in rows {
+        let p = std::path::PathBuf::from(m.file_path.expect("kept by name"));
+        assert!(p.is_file(), "{p:?}");
+    }
     // One line in the history (not one more from the backfill of older
     // torrents), and it is still there after a restart.
     let album_rows = |s: &ViewState| s.downloads.history.iter().filter(|j| j.title == "Album").count();
@@ -432,8 +441,17 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     let opus1 = std::path::PathBuf::from(lib.active_source(track1).unwrap().unwrap().locator);
     assert!(opus1.is_file(), "Opus is in the library");
     assert!(old_masters.is_dir(), "initial master in default masters_dir");
+    let named = std::path::PathBuf::from(lib.get_master(track1).unwrap().unwrap().file_path.expect("kept by name"));
+    assert!(named.starts_with(&old_masters));
+    // A master kept the older way (`{hash}.wav` right in the folder).
+    let older = old_masters.join("older.part.wav");
+    write_wav(&older, 1.0);
+    let older_hash = nikgob_import::fsutil::hash_file(&older).unwrap();
+    let flat = old_masters.join(format!("{older_hash}.wav"));
+    std::fs::rename(&older, &flat).unwrap();
 
-    // Move FLAC masters to another folder/drive.
+    // Move FLAC masters to another folder/drive: the flat ones move, the
+    // ones kept by name stay where their rows say.
     let new_masters = root.join("hdd_flac_archive");
     rt.send(Command::MoveMastersDir(new_masters.clone()));
     wait_for(&rt, "masters relocation", |s| {
@@ -441,16 +459,16 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
             && s.toasts.iter().any(|t| t.text.contains("Перенесено FLAC"))
     });
 
-    assert!(!old_masters.exists(), "old masters folder cleaned up after verified transfer");
+    assert!(!flat.exists(), "the flat master moved, verified");
+    assert!(new_masters.join(format!("{older_hash}.wav")).is_file());
+    assert!(named.is_file(), "a master kept by name is not moved");
+    assert_eq!(lib.get_master(track1).unwrap().unwrap().file_path.as_deref(), Some(&*named.to_string_lossy()));
     assert!(opus1.is_file(), "Opus stays on the fast library disk");
     let moved_files: Vec<_> = std::fs::read_dir(&new_masters)
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    let moved = wavs_in(&new_masters);
-    assert_eq!(moved.len(), 1, "{moved:?}");
-    assert_eq!(lib.get_master(track1).unwrap().unwrap().file_path.as_deref(), Some(&*moved[0].to_string_lossy()));
     assert!(moved_files.iter().any(|n| n.ends_with(".json")), "{moved_files:?}");
 
     // Subsequent imports store new masters directly into the new folder.
@@ -459,7 +477,7 @@ fn moving_masters_dir_transfers_verifies_and_deletes_old_masters_while_keeping_o
     rt.send(Command::ImportFiles(vec![wav2]));
     wait_for(&rt, "second import", |s| s.library.track_count == 2);
     assert_eq!(wavs_in(&new_masters).len(), 2, "second master went straight into new_masters");
-    assert!(!old_masters.exists());
+    assert!(named.is_file());
 }
 
 
