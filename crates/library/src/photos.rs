@@ -406,6 +406,56 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(rows[0], ("a".into(), None, 0, false));
-        assert_eq!(rows[1], ("b".into(), None, 7, false));
+        // Still a miss; migration 32 makes it due again.
+        assert_eq!(rows[1], ("b".into(), None, 0, false));
+    }
+
+    /// Migration 32: every miss of an older library is asked again at the
+    /// next start; a photo, and a miss the user locked, stay as they are.
+    #[test]
+    fn migration_makes_old_misses_due_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        drop(Library::open(&path).unwrap());
+        let recent = now_ms() - 86_400_000;
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO artist_photo(artist_id, path, source, fetched_at, photo_locked) VALUES
+                    ('a', 'a.jpg', 'deezer', ?1, 0), ('b', NULL, 'deezer', ?1, 0),
+                    ('c', NULL, 'unverified', ?1, 0), ('d', NULL, 'custom', ?1, 1)",
+                [recent],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 31).unwrap();
+        }
+        let lib = Library::open(&path).unwrap();
+        let rows: Vec<(String, i64)> = lib
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT artist_id, fetched_at FROM artist_photo ORDER BY artist_id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(rows, vec![("a".into(), recent), ("b".into(), 0), ("c".into(), 0), ("d".into(), recent)]);
+    }
+
+    /// A miss with `fetched_at = 0` (what migration 32 leaves) is due for
+    /// the queue and for an opened artist page alike.
+    #[test]
+    fn a_miss_of_time_zero_is_due() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = artist_with_file(&lib, "Noize MC", true);
+        lib.set_artist_photo(a.id, None).unwrap();
+        let retry = now_ms() - 14 * 86_400_000;
+        assert!(lib.artists_needing_photo(retry, now_ms() - 1000, 10).unwrap().is_empty());
+        assert!(!lib.artist_photo_due(a.id, retry, now_ms() - 1000).unwrap());
+        lib.write(|tx| {
+            tx.execute("UPDATE artist_photo SET fetched_at = 0 WHERE path IS NULL AND photo_locked = 0", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(lib.artists_needing_photo(retry, now_ms() - 1000, 10).unwrap().len(), 1);
+        assert!(lib.artist_photo_due(a.id, retry, now_ms() - 1000).unwrap());
     }
 }
