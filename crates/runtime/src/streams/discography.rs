@@ -4,7 +4,9 @@
 //! * The artist is found in each enabled service by the id the library
 //!   knows (`external_id`), else by a search for the name: a hit whose name
 //!   matches (folded like the importer folds names) is taken when one of
-//!   our release titles is among its albums: then it is remembered as the
+//!   our release titles is among its albums credited to this artist (an
+//!   album of someone else on a merged channel, or one without credits,
+//!   proves nothing): then it is remembered as the
 //!   artist's id in the service and its image is kept. The only hit of
 //!   that name without a shared album is shown for this visit, never
 //!   linked and its image not kept: a name does not make it the artist.
@@ -123,15 +125,26 @@ fn credited(album: &StreamAlbum, keys: &[String]) -> bool {
     keys.is_empty() || album.artists.is_empty() || album.artists.iter().any(|a| keys.contains(&artist_key(&a.name)))
 }
 
-/// Finds the artist in one service and reads its albums.
+/// Whether `album` names the artist of `keys` among its credits: an
+/// album without credits does not.
+fn credits_name(album: &StreamAlbum, keys: &[String]) -> bool {
+    album.artists.iter().any(|a| keys.contains(&artist_key(&a.name)))
+}
+
+/// Finds the artist in one service and reads its albums. `keys`: the
+/// artist's names ([`crate::artist_names::credit_keys`]); only an album
+/// credited to one of them with one of `ours`' titles proves the artist.
 async fn lookup(
     svc: Arc<dyn StreamService>,
     name: String,
     ours: Vec<String>,
     known: Option<String>,
+    keys: Vec<String>,
 ) -> Found {
     let service = svc.service();
-    let shared = |albums: &[StreamAlbum]| albums.iter().any(|a| ours.contains(&album_key(&a.title)));
+    let shared = |albums: &[StreamAlbum]| {
+        albums.iter().any(|a| credits_name(a, &keys) && ours.contains(&album_key(&a.title)))
+    };
     if let Some(id) = known {
         let full = svc.artist(&id).await;
         let image = full.as_ref().ok().filter(|a| shared(a.albums.as_slice())).and_then(|a| a.image_url.clone());
@@ -231,12 +244,13 @@ impl Worker {
             .lib
             .external_ids(EntityKind::Artist, *artist.as_uuid())
             .unwrap_or_default();
+        let keys = crate::artist_names::credit_keys(&self.lib, artist, &a.name);
         let name = a.name;
         self.streaming.spawn(async move {
             let mut found = Vec::new();
             for svc in services {
                 let mine = known.iter().find(|r| r.service == svc.service()).map(|r| r.id.clone());
-                found.push(lookup(svc, name.clone(), ours.clone(), mine).await);
+                found.push(lookup(svc, name.clone(), ours.clone(), mine, keys.clone()).await);
             }
             Msg::Disco(DiscoMsg { artist, found })
         });
@@ -396,19 +410,29 @@ mod tests {
     async fn an_artist_image_needs_a_shared_album() {
         let svc: Arc<dyn StreamService> = Arc::new(nikgob_core::streaming::FakeService::spotify());
         let ours = vec![album_key("Группа крови")];
-        let f = lookup(svc.clone(), "Кино".into(), ours.clone(), None).await;
+        let kino = vec![artist_key("Кино")];
+        let f = lookup(svc.clone(), "Кино".into(), ours.clone(), None, kino.clone()).await;
         assert!(f.matched_now && f.image.is_some());
         let id = f.artist.expect("linked").id;
-        let f = lookup(svc.clone(), "Кино".into(), ours, Some(id.clone())).await;
+        let f = lookup(svc.clone(), "Кино".into(), ours.clone(), Some(id.clone()), kino.clone()).await;
         assert!(f.image.is_some());
 
         let none = vec![album_key("Совсем другой альбом")];
-        let f = lookup(svc.clone(), "Кино".into(), none.clone(), None).await;
+        let f = lookup(svc.clone(), "Кино".into(), none.clone(), None, kino.clone()).await;
         assert!(!f.matched_now && f.artist.is_none(), "not linked on the name alone");
         assert_eq!(f.image, None);
         assert!(f.albums.as_ref().is_ok_and(|a| !a.is_empty()), "its albums are shown");
-        let f = lookup(svc, "Кино".into(), none, Some(id)).await;
+        let f = lookup(svc.clone(), "Кино".into(), none, Some(id.clone()), kino.clone()).await;
         assert_eq!(f.image, None, "a link proves nothing by itself");
         assert!(f.albums.is_ok_and(|a| !a.is_empty()));
+
+        // A merged channel: the title it shares with ours is credited to
+        // someone else, so it proves neither the link nor the image.
+        let gotlib = vec![artist_key("gotlibgotlibgotlib")];
+        let f = lookup(svc.clone(), "Кино".into(), ours.clone(), None, gotlib.clone()).await;
+        assert!(!f.matched_now && f.artist.is_none(), "not linked on someone else's album");
+        assert_eq!(f.image, None);
+        let f = lookup(svc, "Кино".into(), ours, Some(id), gotlib).await;
+        assert_eq!(f.image, None);
     }
 }
