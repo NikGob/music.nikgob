@@ -1973,7 +1973,7 @@ mod tests {
             radio.attune(Session::default(), Some(model.weights));
             // One at a time until the first block is picked whole.
             let mut block: Vec<Item> = Vec::new();
-            while radio.wave_bandit().is_none_or(|b| b.block_left() > 0) && block.len() < 12 {
+            while (block.is_empty() || radio.wave_bandit().is_some_and(|b| b.block_left() > 0)) && block.len() < 12 {
                 let Some(pk) = radio.extend_wave(&ctx, &[], 1, seed).pop() else { break };
                 block.push(pk.item);
             }
