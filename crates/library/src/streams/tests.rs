@@ -991,6 +991,17 @@ fn cached_answers_are_forgotten_by_prefix_and_value() {
     assert!(lib.cache_get("ytXclip.c").unwrap().is_some(), "«_» is no wildcard");
 }
 
+#[test]
+fn a_cached_answer_is_dropped_by_its_key_alone() {
+    let lib = lib();
+    lib.cache_put("cover_better.v2.a", 1, "x").unwrap();
+    lib.cache_put("cover_better.v2.ab", 1, "y").unwrap();
+    lib.cache_drop("cover_better.v2.a").unwrap();
+    assert!(lib.cache_get("cover_better.v2.a").unwrap().is_none());
+    assert!(lib.cache_get("cover_better.v2.ab").unwrap().is_some(), "another key");
+    lib.cache_drop("cover_better.v2.a").unwrap();
+}
+
 /// A track with a file: `names` credited (joined by « & »), on its album.
 fn file_track(lib: &Library, title: &str, names: &[&str], album: &str, ms: u32) -> TrackId {
     let mut credit = ArtistCredit::default();

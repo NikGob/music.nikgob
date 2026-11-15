@@ -3527,6 +3527,12 @@ pub enum Command {
     /// Takes the files [`Self::FindBetterAlbum`] replaced back, the whole
     /// album at once: the old files from the Trash, the new ones into it.
     UndoBetterAlbum(ReleaseId),
+    /// «Обновить обложку» of an album: its art is picked again from its
+    /// files and looked up online, the best of it becomes its cover.
+    RefreshReleaseCover(ReleaseId),
+    /// «Обновить обложку» of a service's album: it is fetched again, and the
+    /// open artist's discography that shows it.
+    RefreshStreamAlbumCover(RemoteId),
     /// «Превратить в MP3» of a track whose lossless file surely holds an
     /// MP3: its MP3 with the tags, cover and lyrics takes its place, the
     /// original goes to the Trash.

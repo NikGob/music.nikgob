@@ -43,6 +43,15 @@ pub(crate) fn cached(lib: &Library, id: ReleaseId) -> Option<String> {
     lib.cache_get(&key(id)).ok().flatten().map(|(_, url)| url).filter(|u| !u.is_empty())
 }
 
+/// After «Обновить обложку» of `id`: the larger cover found goes; `url`,
+/// the art it took online, stands for it.
+pub(crate) fn settle(lib: &Library, id: ReleaseId, url: Option<&str>) {
+    let _ = lib.cache_drop(&key(id));
+    if let Some(u) = url {
+        let _ = lib.cache_put(&key(id), now_ms(), u);
+    }
+}
+
 /// Whether `id` was not looked up yet, or found nothing long enough ago.
 fn due(lib: &Library, id: ReleaseId, now: i64) -> bool {
     match lib.cache_get(&key(id)) {

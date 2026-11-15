@@ -129,7 +129,17 @@ impl PageCache {
 
     /// The playlist changed in its service: the next open fetches it.
     pub(crate) fn stale_playlist(&mut self, id: &RemoteId) {
-        if let Some((at, _)) = self.entries.get_mut(&(Kind::Playlist, id.clone())) {
+        self.stale(&(Kind::Playlist, id.clone()));
+    }
+
+    /// The album is asked for anew («Обновить обложку»): the next open
+    /// fetches it.
+    pub(crate) fn stale_album(&mut self, id: &RemoteId) {
+        self.stale(&(Kind::Album, id.clone()));
+    }
+
+    fn stale(&mut self, key: &Key) {
+        if let Some((at, _)) = self.entries.get_mut(key) {
             *at = Instant::now() - Duration::from_secs(365 * 24 * 3600);
         }
     }
@@ -244,6 +254,28 @@ impl Worker {
         };
         self.publish(|s| s.stream_page = Some(view));
         self.fetch_page(key, Waiter::Page { seq, page }, svc);
+    }
+
+    /// «Обновить обложку» of a service's album: its page is fetched again
+    /// (now, when it is open), and so is the discography of the open
+    /// artist that shows it.
+    pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
+        self.streaming.pages.stale_album(&id);
+        let page = self.state.read().stream_page.as_ref().map(|p| p.page.clone());
+        if let Some(page @ v::StreamPage::Album(_)) = page.filter(|p| *p.remote() == id) {
+            self.load_stream(page);
+        }
+        let artist = self
+            .state
+            .read()
+            .artist
+            .as_ref()
+            .filter(|a| a.discography.albums.iter().any(|c| c.remote == id))
+            .map(|a| a.card.id);
+        if let Some(artist) = artist {
+            let _ = self.lib.cache_drop(&super::discography::cache_key(artist));
+            self.load_discography(artist, false);
+        }
     }
 
     /// How long a page of this kind is shown without asking again.

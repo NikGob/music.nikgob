@@ -243,6 +243,9 @@ pub fn album_like_label(liked: bool) -> &'static str {
     super::like_label(liked)
 }
 
+/// «Обновить обложку» of an album, the library's or a service's.
+pub const REFRESH_COVER: &str = "Обновить обложку";
+
 //// What the menu of an album does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReleaseAct {
@@ -272,6 +275,8 @@ pub enum ReleaseAct {
     DownloadWhole,
     /// «Найти качество лучше»: a better copy of its files that can get one.
     Better,
+    /// «Обновить обложку»: its art picked again, from its files and online.
+    RefreshCover,
     Trash,
     Purge,
 }
@@ -310,6 +315,7 @@ pub fn release_rows(r: &ReleaseCard, on_page: bool) -> Vec<Row<ReleaseAct>> {
         rows.push(Row::Item(A::Artist, MenuItem::new("К исполнителю").icon(Icon::Person)));
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Item(A::RefreshCover, MenuItem::new(REFRESH_COVER).icon(Icon::Refresh)));
     // An album only some songs of which are the user's lacks only those
     // without a file; the whole of it is a download of its own.
     let download = !on_page && (progress_badge(r).is_some() || r.mine.is_some_and(|n| r.mine_local < n));
@@ -352,6 +358,7 @@ pub fn release_apply(ctx: &egui::Context, act: ReleaseAct, r: &ReleaseCard, out:
         ReleaseAct::Download => out.push(Command::DownloadRelease(r.id)),
         ReleaseAct::DownloadWhole => out.push(Command::DownloadWholeRelease(r.id)),
         ReleaseAct::Better => out.push(Command::FindBetterAlbum(r.id)),
+        ReleaseAct::RefreshCover => out.push(Command::RefreshReleaseCover(r.id)),
         ReleaseAct::Trash => super::request_release_delete(ctx, r.id, &r.title, false),
         ReleaseAct::Purge => super::request_release_delete(ctx, r.id, &r.title, true),
         ReleaseAct::Playlist => {
@@ -2057,6 +2064,16 @@ mod menu_tests {
         assert!(!row_acts(&release_rows(&r, false)).contains(&ReleaseAct::Better));
         let gone = ReleaseCard { local_tracks: 0, ..mp3 };
         assert!(!row_acts(&release_rows(&gone, false)).contains(&ReleaseAct::Better));
+        // Its cover is refreshed from its card and its page, a stream-only
+        // album's too.
+        for (card, on_page) in [(&r, false), (&r, true), (&gone, false)] {
+            let acts = row_acts(&release_rows(card, on_page));
+            let share = acts.iter().position(|a| *a == ReleaseAct::Share).unwrap();
+            assert_eq!(acts[share + 1], ReleaseAct::RefreshCover);
+        }
+        let mut out = Vec::new();
+        release_apply(&egui::Context::default(), ReleaseAct::RefreshCover, &r, &mut out);
+        assert_eq!(out, [Command::RefreshReleaseCover(r.id)]);
     }
 
     /// An album only some songs of which are the user's: its card counts

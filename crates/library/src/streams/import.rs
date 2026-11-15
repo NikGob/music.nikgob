@@ -513,6 +513,15 @@ impl Library {
         self.write(|tx| meta_set(tx, &format!("{CACHE_PREFIX}{key}"), &format!("{at}|{value}")))
     }
 
+    /// Forgets the cached answer of `key`.
+    pub fn cache_drop(&self, key: &str) -> Result<()> {
+        let key = format!("{CACHE_PREFIX}{key}");
+        self.write(|tx| {
+            tx.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+            Ok(())
+        })
+    }
+
     /// Forgets the cached answers whose key starts with `prefix` and whose
     /// value is `value`; returns how many went.
     pub fn cache_forget(&self, prefix: &str, value: &str) -> Result<usize> {

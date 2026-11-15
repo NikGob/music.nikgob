@@ -94,6 +94,9 @@ pub(crate) enum Internal {
     /// Real art of a stream track's video thumbnail, see
     /// [`crate::stream_covers`].
     StreamCover(crate::stream_covers::Found),
+    /// «Обновить обложку» of an album came back, see
+    /// [`crate::cover_refresh`].
+    CoverRefreshed(nikgob_core::model::ReleaseId, Result<crate::cover_refresh::Refreshed, String>),
     SeedStopped(Vec<nikgob_torrent::TorrentStatus>),
     /// A stopped-torrent cleanup job ended: the files it left, by torrent.
     TorrentCleanupDone(Vec<(String, Vec<PathBuf>)>),
@@ -846,6 +849,7 @@ impl Worker {
             Internal::SameAudio(m) => self.same_audio_msg(m),
             Internal::Recs(m) => self.recs_msg(m),
             Internal::StreamCover(f) => self.real_cover_found(f),
+            Internal::CoverRefreshed(id, result) => self.release_cover_refreshed(id, result),
             Internal::SeedStopped(list) => self.seed_stopped(list),
             Internal::TorrentCleanupDone(left) => self.torrent_cleanup_done(left),
             Internal::MastersMoveProgress {

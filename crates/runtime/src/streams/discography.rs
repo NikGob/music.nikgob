@@ -69,7 +69,7 @@ pub(crate) struct DiscoState {
     loading: HashSet<ArtistId>,
 }
 
-fn cache_key(artist: ArtistId) -> String {
+pub(crate) fn cache_key(artist: ArtistId) -> String {
     format!("discography.{artist}")
 }
 

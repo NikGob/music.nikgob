@@ -474,6 +474,8 @@ pub enum StreamAlbumAct {
     Like,
     Artist,
     Share,
+    /// «Обновить обложку»: the album fetched again.
+    RefreshCover,
     Download,
     Library,
 }
@@ -522,6 +524,7 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
         rows.push(Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic)));
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
+    rows.push(Row::Item(A::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
     if !o.on_page && o.can_download {
         rows.push(Row::Divider);
         rows.push(Row::Item(A::Download, MenuItem::new("Скачать альбом").icon(Icon::Download)));
@@ -548,6 +551,7 @@ fn stream_album_apply(
         A::Download => out.push(Command::DownloadStreamAlbum(id.clone())),
         A::Like => out.push(Command::LikeStreamAlbum { album: id.clone(), on: true }),
         A::Share => out.push(Command::Share(ShareTarget::StreamAlbum(id.clone()))),
+        A::RefreshCover => out.push(Command::RefreshStreamAlbumCover(id.clone())),
         A::Artist => return artist_links::go_to(ctx, artist_links::stream(artists)),
         A::Library => return release.map(Route::Release),
         A::Next => out.push(Command::PlayStreamAlbumNext(id.clone())),
@@ -1172,8 +1176,11 @@ mod menu_tests {
             acts.iter().copied().filter(|a| !matches!(a, A::Play | A::Shuffle | A::Like | A::Download)).collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(shared(&card), [A::Radio, A::Next, A::Queue, A::Playlist, A::Artist, A::Library, A::Share]);
-        assert_eq!(card, [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Like, A::Playlist, A::Artist, A::Library, A::Share, A::Download]);
+        assert_eq!(shared(&card), [A::Radio, A::Next, A::Queue, A::Playlist, A::Artist, A::Library, A::Share, A::RefreshCover]);
+        assert_eq!(
+            card,
+            [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Like, A::Playlist, A::Artist, A::Library, A::Share, A::RefreshCover, A::Download]
+        );
         assert_eq!(&page[..4], [A::Radio, A::Next, A::Queue, A::Playlist]);
         assert_eq!(&labels(&stream_album_rows(of))[2..7], ["Радио по альбому", "Сыграть следующим", "В очередь", "Нравится", "В плейлист…"]);
         assert_eq!(labels(&stream_album_rows(of)).last().map(String::as_str), Some("Скачать альбом"));
