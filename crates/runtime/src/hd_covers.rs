@@ -94,6 +94,12 @@ impl Want {
         self.tracks <= 1
     }
 
+    /// A single or an EP, or nothing tells it from one: a song of its
+    /// found anywhere stands for it.
+    pub(crate) fn song_stands(&self) -> bool {
+        self.wants_single() || self.few()
+    }
+
     /// Whether a service's release of `kind` with `n` songs may give its
     /// art. An album of several songs takes nothing of fewer songs than it
     /// has: no single or EP short of them (the library files many a single

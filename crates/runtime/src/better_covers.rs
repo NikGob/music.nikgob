@@ -171,10 +171,34 @@ pub(crate) fn accepts(w: &Want, artist: &str, title: &str, album: Option<&str>) 
             k == t || similarity(&k, &t) >= 0.92
         });
     let same_album = match (&w.album, album) {
-        (Some(want), Some(theirs)) => album_titles(&want.title).iter().any(|t| hd_covers::same_album(t, theirs)),
+        (Some(want), Some(theirs)) => {
+            // An album of several songs: never a hit whose album says it is
+            // a single or an EP («… - Single» on iTunes).
+            let small = !w.song_ok && titled_kind(theirs).is_some();
+            !small && album_titles(&want.title).iter().any(|t| hd_covers::same_album(t, theirs))
+        }
         _ => false,
     };
     same_album || (song && (w.song_ok || w.album.is_none()))
+}
+
+/// The kind an album title says it is: iTunes and others end a single's
+/// with « - Single», an EP's with « - EP».
+fn titled_kind(title: &str) -> Option<nikgob_core::model::ReleaseType> {
+    let t = title.trim_end().to_lowercase();
+    if t.ends_with(" - single") || t.ends_with("(single)") {
+        Some(nikgob_core::model::ReleaseType::Single)
+    } else if t.ends_with(" - ep") || t.ends_with("(ep)") {
+        Some(nikgob_core::model::ReleaseType::Ep)
+    } else {
+        None
+    }
+}
+
+/// Whether the album of a Deezer song hit may give its art to `w`: what
+/// Deezer tells of its kind and songs fits ([`hd_covers::Want::takes`]).
+fn deezer_album_fits(w: &Want, a: &nikgob_metadata::deezer::DeezerAlbum) -> bool {
+    w.album.as_ref().is_none_or(|want| want.takes(hd_covers::deezer_kind(a.record_type.as_deref()), a.nb_tracks))
 }
 
 /// Whether one of `names` is the hit's `artist` (spelled alike, in another
@@ -283,12 +307,9 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
                 Ok(hits) => {
                     // The song on its single of the album's title is no
                     // hit for the album, when Deezer tells the kind.
-                    let kind_fits = |a: &nikgob_metadata::deezer::DeezerAlbum| {
-                        w.album.as_ref().is_none_or(|want| want.takes(hd_covers::deezer_kind(a.record_type.as_deref()), a.nb_tracks))
-                    };
                     let found = hits.iter().find(|h| {
                         accepts(w, h.artist_name(), &h.title, h.album.as_ref().map(|a| a.title.as_str()))
-                            && h.album.as_ref().is_none_or(kind_fits)
+                            && h.album.as_ref().is_none_or(|a| deezer_album_fits(w, a))
                     });
                     if let Some(url) = found.and_then(|h| h.album.as_ref()).and_then(|a| a.best_cover()) {
                         return Ok(Some(url.to_owned()));
@@ -551,13 +572,15 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     let mut want = if clip {
         clip_want(tracks.first().unwrap_or(row))
     } else {
+        let album = hd_covers::want_of(lib, &r, Vec::new());
         Want {
             artists: vec![r.artist_credit.display()],
             titles: tracks.iter().take(2).map(|t| t.title.clone()).collect(),
             context: r.title.clone(),
-            // A single's song is the single.
-            song_ok: tracks.len() <= 1,
-            album: Some(hd_covers::want_of(lib, &r, Vec::new())),
+            // A single's song is the single; an album of more songs than
+            // came in (its count) takes only its own album's art.
+            song_ok: album.song_stands(),
+            album: Some(album),
             ..Want::default()
         }
     };
@@ -970,6 +993,60 @@ mod tests {
         // A title in two scripts matches by either part.
         let concert = album_want("Ensemble G.A.P. TOKYO", &["x"], "第二回演奏会 メイドインアビス / THE SECOND CONCERT MADE IN ABYSS", false);
         assert!(accepts(&concert, "Ensemble G.A.P. TOKYO", "y", Some("The Second Concert: Made in Abyss")));
+    }
+
+    /// An album of several songs takes song art only from a hit on that
+    /// album: not one without an album, not its single (by the title iTunes
+    /// gives it, or by what Deezer tells), not an album of one song.
+    #[test]
+    fn an_album_of_several_songs_takes_song_art_only_from_itself() {
+        let mut w = album_want("Artist", &["Рисунки"], "Рисунки", false);
+        if let Some(a) = w.album.as_mut() {
+            a.tracks = 11;
+        }
+        assert!(accepts(&w, "Artist", "Рисунки", Some("Рисунки")));
+        assert!(!accepts(&w, "Artist", "Рисунки", None), "its album untold");
+        assert!(!accepts(&w, "Artist", "Рисунки", Some("Рисунки - Single")));
+        assert!(!accepts(&w, "Artist", "Рисунки", Some("Рисунки - EP")));
+        let deezer = |record: Option<&str>, n: Option<u32>| nikgob_metadata::deezer::DeezerAlbum {
+            title: "Рисунки".into(),
+            record_type: record.map(str::to_owned),
+            nb_tracks: n,
+            ..Default::default()
+        };
+        assert!(!deezer_album_fits(&w, &deezer(Some("single"), Some(1))));
+        assert!(!deezer_album_fits(&w, &deezer(Some("album"), Some(1))));
+        assert!(deezer_album_fits(&w, &deezer(Some("album"), Some(11))));
+        assert!(deezer_album_fits(&w, &deezer(None, None)), "what Deezer does not tell is no mismatch");
+        // The single itself takes its song's art from anywhere.
+        let single = album_want("Artist", &["Рисунки"], "Рисунки", true);
+        assert!(accepts(&single, "Artist", "Рисунки", Some("Рисунки - Single")));
+        assert!(accepts(&single, "Artist", "Рисунки", None));
+    }
+
+    /// An album of which one song came in, its count 11: its lookup takes
+    /// no song art from elsewhere; a single of one song does.
+    #[test]
+    fn a_partly_imported_album_counts_its_songs_by_its_total() {
+        use nikgob_core::model::{ArtistCredit, Release, ReleaseType, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows = Vec::new();
+        for (album, kind, total) in [("Part", ReleaseType::Album, Some(11)), ("One", ReleaseType::Single, Some(1))] {
+            std::fs::create_dir_all(dir.path().join(album)).unwrap();
+            image::RgbImage::from_pixel(300, 300, image::Rgb([90, 60, 30])).save(dir.path().join(album).join("cover.png")).unwrap();
+            let mut r = Release::new(album, ArtistCredit::single("X", None));
+            r.cover_ref = Some(format!("{album}/cover.png"));
+            r.release_type = kind;
+            r.total_tracks = total;
+            let r = lib.upsert_release(&r).unwrap();
+            let mut t = Track::new(format!("{album} song"), ArtistCredit::single("X", None));
+            t.release_id = Some(r.id);
+            let t = lib.upsert_track(&t).unwrap();
+            rows.push(lib.get_track_row(t.id).unwrap().unwrap());
+        }
+        let got = wants(&lib, dir.path(), &rows, &Asked::default());
+        assert_eq!(got.iter().map(|w| w.song_ok).collect::<Vec<_>>(), [false, true]);
     }
 
     fn row_of(lib: &Library, title: &str, artist: &str) -> TrackRow {

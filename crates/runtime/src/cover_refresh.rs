@@ -594,6 +594,8 @@ mod tests {
         assert_eq!(owned_folder(me, &[f("/lib/01.opus")], None, root, None, &[]), None, "the library's root");
         // No files: its cover's folder.
         assert_eq!(owned_folder(me, &[], Some(Path::new("/lib/A/X/cover.jpg")), root, None, &[]), Some(f("/lib/A/X")));
+        // Its cover names a folder that is gone: its files' folder still is.
+        assert_eq!(owned_folder(me, &mine, Some(Path::new("/lib/Gone/cover.jpg")), root, None, &places), Some(f("/lib/A/2024 - X")));
     }
 
     fn want() -> hd_covers::Want {
