@@ -462,6 +462,13 @@ pub(crate) struct Known {
     picture: Option<String>,
 }
 
+impl Known {
+    /// Who the artist is was proved (a MusicBrainz artist or a Wikidata item).
+    pub(crate) fn proved(&self) -> bool {
+        self.mbid.is_some() || self.wikidata.is_some()
+    }
+}
+
 /// The photo sources after Deezer ([`photo_sources`]) and what they need.
 #[derive(Clone, Default)]
 pub(crate) struct After {

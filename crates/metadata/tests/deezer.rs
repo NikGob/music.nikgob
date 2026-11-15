@@ -253,15 +253,59 @@ async fn verified_picture_is_none_when_no_candidate_overlaps() {
     );
     // Same-named artists with photos, none proved: not «no photo».
     assert_eq!(
-        deezer.verified_artist_lookup("Кино", &["Группа крови".to_owned()]).await.unwrap(),
+        deezer.verified_artist_lookup("Кино", &["Группа крови".to_owned()], false).await.unwrap(),
         ArtistPicture::Unverified
     );
     assert_eq!(
         deezer
-            .verified_artist_lookup("Совсем Другой Исполнитель", &["Группа крови".to_owned()])
+            .verified_artist_lookup("Совсем Другой Исполнитель", &["Группа крови".to_owned()], false)
             .await
             .unwrap(),
         ArtistPicture::Missing
+    );
+}
+
+/// An artist whose identity is proved elsewhere: the one same-named
+/// candidate with a photo is taken without a shared title (and without
+/// titles at all); a namesake «(cover band)» is not the same name.
+#[tokio::test]
+async fn a_proved_artist_takes_the_one_exact_namesake() {
+    let server = MockServer::start().await;
+    mount_artist_search(&server).await;
+    mount_titles(&server, 1001, r#"{"id": 1, "title": "Other Album"}"#, "").await;
+    mount_titles(&server, 9, r#"{"id": 2, "title": "Covers"}"#, "").await;
+    let deezer = client(&server);
+    let found = deezer.verified_artist_lookup("Кино", &["Группа крови".to_owned()], true).await.unwrap();
+    let ArtistPicture::Found(url) = found else { panic!("{found:?}") };
+    assert!(url.contains("/artist/abc/"), "{url}");
+    let found = deezer.verified_artist_lookup("Кино", &[], true).await.unwrap();
+    assert!(matches!(found, ArtistPicture::Found(ref u) if u.contains("/artist/abc/")), "{found:?}");
+    // Not proved: the titles still decide.
+    assert_eq!(
+        deezer.verified_artist_lookup("Кино", &["Группа крови".to_owned()], false).await.unwrap(),
+        ArtistPicture::Unverified
+    );
+}
+
+/// Two same-named artists with photos: the name alone proves neither.
+#[tokio::test]
+async fn a_proved_artist_with_two_exact_namesakes_is_unverified() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search/artist"))
+        .respond_with(json_body(
+            r#"{"data": [
+                {"id": 1, "name": "Dave", "nb_fan": 10, "picture_xl": "https://cdn-images.dzcdn.net/images/artist/a/1000x1000.jpg"},
+                {"id": 2, "name": "Dave", "nb_fan": 5, "picture_xl": "https://cdn-images.dzcdn.net/images/artist/b/1000x1000.jpg"}
+            ]}"#,
+        ))
+        .mount(&server)
+        .await;
+    mount_titles(&server, 1, r#"{"id": 1, "title": "Other"}"#, "").await;
+    mount_titles(&server, 2, r#"{"id": 2, "title": "Another"}"#, "").await;
+    assert_eq!(
+        client(&server).verified_artist_lookup("Dave", &["Psychodrama".to_owned()], true).await.unwrap(),
+        ArtistPicture::Unverified
     );
 }
 
