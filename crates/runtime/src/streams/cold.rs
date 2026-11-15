@@ -1561,7 +1561,7 @@ impl Worker {
                     for s in self.lib.sources_of_track(track).unwrap_or_default() {
                         if s.kind == kind && s.locator == id {
                             log::info!("{track}: {service} no longer has {id}");
-                            if let Err(e) = self.lib.set_source_available(s.id, false) {
+                            if let Err(e) = self.lib.set_source_aside(s.id) {
                                 log::warn!("{track}: setting aside {id}: {e}");
                             }
                         }

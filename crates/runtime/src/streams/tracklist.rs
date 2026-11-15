@@ -75,6 +75,13 @@ pub(crate) enum TracklistMsg {
     },
     /// The albums the background pass asks next, found off the loop.
     Candidates(Vec<ReleaseId>),
+    /// The tracklist `album` of a library album was taken in off the loop
+    /// (how many tracks it added, or why not).
+    Adopted {
+        release: ReleaseId,
+        album: StreamAlbum,
+        added: Result<usize, String>,
+    },
 }
 
 #[derive(Default)]
@@ -386,6 +393,19 @@ impl Worker {
                 t.queue = found;
                 return;
             }
+            TracklistMsg::Adopted { release, album, added } => {
+                match added {
+                    Ok(n) => log::info!("album {release}: {n} more tracks from {}", album.id),
+                    Err(e) => log::warn!("album {release}: tracklist not stored: {e}"),
+                }
+                self.keep_released(release, &album);
+                self.extend_album_queue(release);
+                self.load_library();
+                if self.state.read().release.as_ref().is_some_and(|r| r.card.id == release) {
+                    self.load_release(release);
+                }
+                return;
+            }
         };
         let m = TracklistAnswer { release, result };
         self.streaming.tracklist.asking.remove(&m.release);
@@ -412,18 +432,23 @@ impl Worker {
                     self.load_release(m.release);
                 }
             }
+            // The takeover reads the user's traces of the album in its
+            // transaction (plays, playlists, likes…): off the player's loop,
+            // and what it added is shown when it is done.
             Ok(Some(album)) => {
-                match self.lib.adopt_stream_album(m.release, &album) {
-                    Ok(n) => log::info!("album {}: {n} more tracks from {}", m.release, album.id),
-                    Err(e) => log::warn!("album {}: tracklist not stored: {e}", m.release),
-                }
-                let _ = self.lib.cache_put(&key, now, found_mark(&self.lib, m.release));
-                self.keep_released(m.release, &album);
-                self.extend_album_queue(m.release);
-                self.load_library();
-                if self.state.read().release.as_ref().is_some_and(|r| r.card.id == m.release) {
-                    self.load_release(m.release);
-                }
+                let lib = self.lib.clone();
+                let release = m.release;
+                self.streaming.spawn(async move {
+                    let kept = album.clone();
+                    let added = tokio::task::spawn_blocking(move || {
+                        let added = lib.adopt_stream_album(release, &album).map_err(|e| e.to_string());
+                        let _ = lib.cache_put(&key, now, found_mark(&lib, release));
+                        added
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    Msg::Tracklist(TracklistMsg::Adopted { release, album: kept, added })
+                });
             }
             Ok(None) => {
                 let _ = self.lib.cache_put(&key, now, "miss");

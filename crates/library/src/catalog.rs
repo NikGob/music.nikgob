@@ -14,7 +14,8 @@ use crate::types::{
 };
 use crate::streams::refresh_in_library;
 use crate::util::{
-    credit_columns, get_enum, get_id, get_json, get_opt_enum, get_opt_id, now_ms, opt_u32, sort_key,
+    credit_columns, get_enum, get_id, get_json, get_opt_enum, get_opt_id, meta_get, meta_set, now_ms, opt_u32,
+    sort_key,
 };
 
 // ---------------------------------------------------------------- row mapping
@@ -955,16 +956,25 @@ impl Library {
     /// Marks a source (un)playable (stream withdrawn, file missing) and
     /// re-selects the active source.
     pub fn set_source_available(&self, source: SourceId, available: bool) -> Result<()> {
+        self.write(|tx| set_available(tx, source, available))
+    }
+
+    /// Sets a stream copy aside for now (its service left it out of an
+    /// answer): unplayable like [`Self::set_source_available`], but marked
+    /// as only set aside, so it may be tried again when nothing else plays
+    /// (see [`Self::source_set_aside`]). Playable again, it loses the mark.
+    pub fn set_source_aside(&self, source: SourceId) -> Result<()> {
         self.write(|tx| {
-            let src = source_by_id(tx, source)?
-                .ok_or_else(|| LibraryError::not_found("source", source))?;
-            tx.execute(
-                "UPDATE source SET available = ?2 WHERE id = ?1",
-                params![source.to_string(), available],
-            )?;
-            refresh_active(tx, src.track_id)?;
-            Ok(())
+            set_available(tx, source, false)?;
+            meta_set(tx, &aside_key(source), &now_ms().to_string())
         })
+    }
+
+    /// The source is unplayable only because it was set aside
+    /// ([`Self::set_source_aside`]), not because its listing gives no full
+    /// audio (a preview, a protected stream).
+    pub fn source_set_aside(&self, source: SourceId) -> Result<bool> {
+        self.read(|c| Ok(meta_get(c, &aside_key(source))?.is_some()))
     }
 
     pub fn get_source(&self, id: SourceId) -> Result<Option<Source>> {
@@ -1565,4 +1575,19 @@ pub(crate) fn artist_row(row: &Row<'_>) -> rusqlite::Result<ArtistRow> {
         local_track_count: row.get::<_, i64>(7)? as u32,
         liked: row.get(8)?,
     })
+}
+
+/// `meta` key of a source set aside by [`Library::set_source_aside`].
+fn aside_key(source: SourceId) -> String {
+    format!("source_aside.{source}")
+}
+
+fn set_available(tx: &Connection, source: SourceId, available: bool) -> Result<()> {
+    let src = source_by_id(tx, source)?.ok_or_else(|| LibraryError::not_found("source", source))?;
+    tx.execute("UPDATE source SET available = ?2 WHERE id = ?1", params![source.to_string(), available])?;
+    if available {
+        tx.execute("DELETE FROM meta WHERE key = ?1", [aside_key(source)])?;
+    }
+    refresh_active(tx, src.track_id)?;
+    Ok(())
 }

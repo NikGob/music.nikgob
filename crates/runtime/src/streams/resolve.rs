@@ -130,40 +130,54 @@ const VERSION_WORDS: &[&str] = &[
     "カバー",
 ];
 
-/// Words after a version word that opens a dash part (or an album title)
-/// when it stands as a qualifier: «- Live at Wembley», «Acoustic Version».
+/// Words after a version word that make it a qualifier: «Live at
+/// Wembley», «Acoustic Version», «Official Live Video», «Cover by …».
+/// A year, a sign or another version word after it does too («Live
+/// 1985», «Slowed + Reverb», «Acoustic Live»).
 const QUALIFIER_NEXT: &[&str] = &[
-    "at", "in", "from", "version", "ver", "ver.", "mix", "edit", "session", "sessions", "recording", "performance",
+    "at", "in", "from", "version", "ver", "ver.", "mix", "remix", "edit", "session", "sessions", "recording",
+    "performance", "video", "by", "на", "в",
 ];
 
-/// `w` in `hay` not glued to letters on either side (both lowercase).
-fn has_word(hay: &str, w: &str) -> bool {
-    hay.match_indices(w).any(|(i, _)| {
-        let before = hay[..i].chars().next_back();
-        let after = hay[i + w.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+/// `part` (lowercase, trimmed: a bracket, a dash part) names the version
+/// word `w` as a qualifier: the word closing it («(Live)», «(Club
+/// Remix)», «(Guitar Cover)») or followed by «at», «version»… («(Live at
+/// Wembley)», «(Karaoke Version)»); not a name the word is part of
+/// («(Cover Me)», «Live Forever»).
+fn qualifier(part: &str, w: &str) -> bool {
+    part.match_indices(w).any(|(i, _)| {
+        let rest = &part[i + w.len()..];
+        if part[..i].chars().next_back().is_some_and(char::is_alphanumeric)
+            || rest.starts_with(|c: char| c.is_alphanumeric() || c == '\'' || c == '’')
+        {
+            return false;
+        }
+        let rest = rest.trim_start();
+        rest.is_empty()
+            || rest.split_whitespace().next().is_some_and(|next| {
+                next.starts_with(|c: char| !c.is_alphabetic()) || QUALIFIER_NEXT.contains(&next) || VERSION_WORDS.contains(&next)
+            })
     })
 }
 
-/// `part` (lowercase, trimmed) stands as a qualifier of the version word
-/// `w`: the word alone, the word then «at», «version»…, or the word
-/// closing it («Club Remix»); not a name the word opens («Live Forever»).
-fn qualifier(part: &str, w: &str) -> bool {
-    if part == w || part.ends_with(&format!(" {w}")) {
-        return true;
+/// A title ends with «`w` version» or «`w` ver.» outside brackets: «Song
+/// karaoke version», «Song Live Ver.».
+fn version_suffix(title: &str, w: &str) -> bool {
+    let ends = |tail: &str| title == tail || title.ends_with(&format!(" {tail}"));
+    if w.ends_with("version") {
+        return ends(w);
     }
-    part.strip_prefix(w)
-        .and_then(|rest| rest.strip_prefix(' '))
-        .and_then(|rest| rest.split_whitespace().next())
-        .is_some_and(|next| QUALIFIER_NEXT.contains(&next))
+    ["version", "ver.", "ver"].iter().any(|v| ends(&format!("{w} {v}")))
 }
 
-/// The version words `text` names as a qualifier of its recording: any in
-/// its brackets («(Live)», «[Remix]», «(Sped Up)»), or a dash part that is
-/// one («- Live at Wembley», «- Acoustic Version»). `album`: the whole
-/// title may be one too («Live at Leeds», «Live in Moscow»). A word inside
-/// an ordinary name is none («Live Through This», «Cover Me», «Live
-/// Forever»). In the order of [`VERSION_WORDS`].
+/// The version words `text` names as a qualifier of its recording: in its
+/// brackets as a qualifier phrase («(Live)», «[Remix]», «(Sped Up)»,
+/// «(Karaoke Version)», «(Guitar Cover)»), in a dash part the same way
+/// («- Live at Wembley», «- Acoustic Version»), or as a «… version» ending
+/// («Song karaoke version»). `album`: the whole title may be one too
+/// («Live at Leeds», «Live in Moscow»). A word inside an ordinary name is
+/// none («Live Through This», «(Cover Me)», «Live Forever»). In the order
+/// of [`VERSION_WORDS`].
 pub(crate) fn version_marks(text: &str, album: bool) -> Vec<&'static str> {
     let lower = text.to_lowercase();
     let mut rest = String::with_capacity(lower.len());
@@ -196,7 +210,9 @@ pub(crate) fn version_marks(text: &str, album: bool) -> Vec<&'static str> {
     VERSION_WORDS
         .iter()
         .copied()
-        .filter(|w| brackets.iter().any(|b| has_word(b, w)) || parts.iter().any(|p| qualifier(p, w)))
+        .filter(|w| {
+            brackets.iter().any(|b| qualifier(b.trim(), w)) || parts.iter().any(|p| qualifier(p, w)) || version_suffix(first, w)
+        })
         .collect()
 }
 
@@ -1072,8 +1088,56 @@ mod tests {
         assert_eq!(one(&compilation, &q(None)).as_deref(), Some("best"));
     }
 
+    /// A «… version» ending outside brackets is a version too, and an
+    /// ordinary bracketed name is none.
+    #[test]
+    fn a_version_ending_counts_and_a_bracketed_name_does_not() {
+        let q = |title: &str| ResolveQuery {
+            title: title.into(),
+            artist: "Кино".into(),
+            duration_ms: Some(285_000),
+            isrc: None,
+            exclude: Vec::new(),
+            aliases: Vec::new(),
+            album: None,
+        };
+        let one = |h: &StreamTrack, q: &ResolveQuery| pick_youtube(std::slice::from_ref(h), q).map(|t| t.id.id);
+        let studio = hit("studio", "Группа крови", 285, TrackKind::Song);
+        for (id, title) in [("kv", "Группа крови karaoke version"), ("lv", "Группа крови Live Version"), ("lver", "Группа крови live ver.")] {
+            let version = hit(id, title, 285, TrackKind::Song);
+            assert_eq!(one(&studio, &q(title)), None, "the studio song is not {title}");
+            assert_eq!(one(&version, &q("Группа крови")), None, "{title} is not the studio song");
+            assert_eq!(one(&version, &q(title)).as_deref(), Some(id), "{title} is itself");
+        }
+        let named = hit("named", "Группа крови (Cover Me)", 285, TrackKind::Song);
+        assert_eq!(one(&named, &q("Группа крови (Cover Me)")).as_deref(), Some("named"), "a bracketed name");
+        assert_eq!(one(&hit("cover", "Группа крови (Cover)", 285, TrackKind::Song), &q("Группа крови (Cover Me)")), None);
+    }
+
     #[test]
     fn version_words_count_only_as_qualifiers() {
+        for (title, marks) in [
+            ("Song (Live)", "live"),
+            ("Song (Live at Wembley)", "live"),
+            ("Song (Club Remix)", "remix"),
+            ("Song (Acoustic)", "acoustic"),
+            ("Song (Karaoke Version)", "karaoke"),
+            ("Song (Cover)", "cover"),
+            ("Song (Guitar Cover)", "cover"),
+            ("Song (Official Live Video)", "live"),
+            ("Song (Live 1985)", "live"),
+            ("Song (Live, Remastered)", "live"),
+            ("Song (Slowed + Reverb)", "slowed"),
+            ("Song (Acoustic Live)", "live,acoustic"),
+            ("Song karaoke version", "karaoke"),
+            ("Song Live Ver.", "live"),
+            ("Song (Cover Me)", ""),
+            ("Song (I Can't Live Without You)", ""),
+            ("Song (Radio Edit)", ""),
+            ("Song (feat. Someone)", ""),
+        ] {
+            assert_eq!(version_marks(title, false).join(","), marks, "{title}");
+        }
         assert_eq!(version_marks("Song (Live at Wembley 1986)", false), ["live"]);
         assert_eq!(version_marks("Song - Acoustic Version", false), ["acoustic"]);
         assert!(version_marks("Live Forever", false).is_empty());
