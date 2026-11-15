@@ -179,6 +179,34 @@ fn version_suffix(title: &str, w: &str) -> bool {
 /// none («Live Through This», «(Cover Me)», «Live Forever»). In the order
 /// of [`VERSION_WORDS`].
 pub(crate) fn version_marks(text: &str, album: bool) -> Vec<&'static str> {
+    let mut marks: Vec<&'static str> = version_quals(text, album).into_iter().map(|(w, _)| w).collect();
+    marks.dedup();
+    marks
+}
+
+/// Words of a qualifier that name nothing of the recording.
+const QUALIFIER_FILLER: &[&str] = &["version", "ver", "official", "video", "audio", "music", "the"];
+
+/// A qualifier folded for comparing: its lowercase words, signs, brackets
+/// and dash forms left out, a featured artist's part and the words that
+/// name nothing («version», «official»…) too.
+fn folded(phrase: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in phrase.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()) {
+        if matches!(w, "feat" | "ft" | "featuring") {
+            break;
+        }
+        if !QUALIFIER_FILLER.contains(&w) {
+            out.push(w.to_owned());
+        }
+    }
+    out
+}
+
+/// Each version word `text` names (see [`version_marks`]) with what its
+/// qualifier names beyond the word, folded («(Live at Wembley)»: «live at
+/// wembley»); `None` for a bare one («(Live)», «Karaoke Version»).
+fn version_quals(text: &str, album: bool) -> Vec<(&'static str, Option<Vec<String>>)> {
     let lower = text.to_lowercase();
     let mut rest = String::with_capacity(lower.len());
     let mut brackets: Vec<String> = Vec::new();
@@ -207,34 +235,55 @@ pub(crate) fn version_marks(text: &str, album: bool) -> Vec<&'static str> {
     let mut pieces = rest.split(" - ").map(str::trim);
     let first = pieces.next().unwrap_or("");
     let parts: Vec<&str> = pieces.chain(album.then_some(first)).collect();
-    VERSION_WORDS
-        .iter()
-        .copied()
-        .filter(|w| {
-            brackets.iter().any(|b| qualifier(b.trim(), w)) || parts.iter().any(|p| qualifier(p, w)) || version_suffix(first, w)
-        })
-        .collect()
-}
-
-/// The version words of a recording: its title's and its album's.
-fn marks_of(title: &str, album: Option<&str>) -> Vec<&'static str> {
-    let mut marks = version_marks(title, false);
-    for w in album.map(|a| version_marks(a, true)).unwrap_or_default() {
-        if !marks.contains(&w) {
-            marks.push(w);
+    let mut out = Vec::new();
+    for &w in VERSION_WORDS {
+        let bare = folded(w);
+        for phrase in brackets.iter().map(|b| b.trim()).chain(parts.iter().copied()).filter(|p| qualifier(p, w)) {
+            let named = folded(phrase);
+            out.push((w, (named != bare).then_some(named)));
+        }
+        if version_suffix(first, w) {
+            out.push((w, None));
         }
     }
-    marks.sort_unstable();
-    marks
+    out
+}
+
+/// The version words of a recording (its title's and its album's), each
+/// with the qualifiers that name more than the word (empty when only bare
+/// ones do).
+fn quals_of(title: &str, album: Option<&str>) -> std::collections::BTreeMap<&'static str, Vec<Vec<String>>> {
+    let mut quals: std::collections::BTreeMap<&'static str, Vec<Vec<String>>> = std::collections::BTreeMap::new();
+    let all = version_quals(title, false).into_iter().chain(album.map(|a| version_quals(a, true)).unwrap_or_default());
+    for (w, named) in all {
+        let names = quals.entry(w).or_default();
+        names.extend(named);
+    }
+    quals
 }
 
 /// A hit is another recording of the song than the wish (a live take, a
 /// remix, a karaoke, an acoustic or sped-up version, a cover): the two do
 /// not name the same version words in their titles and albums, either
 /// way (a live wish is never its studio song, nor the studio song a live
-/// one).
+/// one). Where both name what the version is, that must agree too, in any
+/// spelling («Live at Wembley» is not «Live at Leeds», «Club Remix» not
+/// «Dub Remix»; one may say more than the other: «Live at Wembley 1986»).
+/// A bare one against a named one («(Live)», «(Live at Leeds)») is the
+/// same only when both lengths are known and fit.
 fn other_version(hit: &StreamTrack, q: &ResolveQuery) -> bool {
-    marks_of(&hit.title, hit.album.as_ref().map(|a| a.title.as_str())) != marks_of(&q.title, q.album.as_deref())
+    let a = quals_of(&hit.title, hit.album.as_ref().map(|a| a.title.as_str()));
+    let b = quals_of(&q.title, q.album.as_deref());
+    if !a.keys().eq(b.keys()) {
+        return true;
+    }
+    let within = |n: &Vec<String>, m: &Vec<String>| n.iter().all(|w| m.contains(w));
+    let lengths_fit = matches!((hit.duration_ms, q.duration_ms), (Some(x), Some(y)) if x.abs_diff(y) <= SLACK_MS);
+    a.values().zip(b.values()).any(|(x, y)| match (x.is_empty(), y.is_empty()) {
+        (true, true) => false,
+        (false, false) => !x.iter().any(|n| y.iter().any(|m| within(n, m) || within(m, n))),
+        _ => !lengths_fit,
+    })
 }
 
 /// The best YouTube hit for `q`, if any is the song: playable, not refused,
@@ -1112,6 +1161,48 @@ mod tests {
         let named = hit("named", "Группа крови (Cover Me)", 285, TrackKind::Song);
         assert_eq!(one(&named, &q("Группа крови (Cover Me)")).as_deref(), Some("named"), "a bracketed name");
         assert_eq!(one(&hit("cover", "Группа крови (Cover)", 285, TrackKind::Song), &q("Группа крови (Cover Me)")), None);
+    }
+
+    /// Two versions of one kind are told apart by what their qualifiers
+    /// name, in any spelling; a bare one against a named one takes known
+    /// lengths that fit.
+    #[test]
+    fn versions_of_one_kind_are_told_apart_by_their_names() {
+        let q = |title: &str, secs: Option<u64>| ResolveQuery {
+            title: title.into(),
+            artist: "Кино".into(),
+            duration_ms: secs.map(|s| s * 1000),
+            isrc: None,
+            exclude: Vec::new(),
+            aliases: Vec::new(),
+            album: None,
+        };
+        let one = |title: &str, q: &ResolveQuery| {
+            pick_youtube(std::slice::from_ref(&hit("v", title, 285, TrackKind::Song)), q).is_some()
+        };
+        for (wish, other) in [
+            ("Группа крови (Live at Wembley)", "Группа крови - Live at Leeds"),
+            ("Группа крови (Club Remix)", "Группа крови (Dub Remix)"),
+            ("Группа крови (Live in Moscow)", "Группа крови (Live at Wembley)"),
+        ] {
+            assert!(!one(other, &q(wish, Some(285))), "{wish} is not {other}");
+            assert!(!one(wish, &q(other, Some(285))), "{other} is not {wish}");
+        }
+        for (wish, same) in [
+            ("Группа крови (Live at Wembley)", "Группа крови - Live At Wembley"),
+            ("Группа крови [Club Remix]", "Группа крови (Club Remix)"),
+            ("Группа крови (Club Remix feat. Someone)", "Группа крови (Club Remix)"),
+            ("Группа крови (Live at Wembley)", "Группа крови (Live at Wembley 1986)"),
+        ] {
+            assert!(one(same, &q(wish, Some(285))), "{wish} is {same}");
+            assert!(one(wish, &q(same, Some(285))), "{same} is {wish}");
+        }
+        assert!(one("Группа крови (Live)", &q("Группа крови (Live at Leeds)", Some(284))), "a bare one, lengths fit");
+        assert!(!one("Группа крови (Live)", &q("Группа крови (Live at Leeds)", None)), "a bare one, a length unknown");
+        assert!(!one("Группа крови (Live at Leeds)", &q("Группа крови (Live)", None)));
+        let mut unknown = hit("v", "Группа крови (Live)", 285, TrackKind::Song);
+        unknown.duration_ms = None;
+        assert!(pick_youtube(&[unknown], &q("Группа крови (Live at Leeds)", Some(285))).is_none());
     }
 
     #[test]
