@@ -2686,8 +2686,8 @@ pub(crate) mod tests {
     /// A wave saved before skips were weighed (`session.json` as it was
     /// then) goes on: a play the bar was dragged into is a scrub-skip as it
     /// was, the β its rejections add fades to the β it was restored with,
-    /// and its picks of then are of no known artist (their run is left by
-    /// its weight alone).
+    /// and its picks of then are of an unknown artist (one artist: their run
+    /// is left at [`crate::wave::LEAVE_UNKNOWN`]).
     #[test]
     fn a_wave_saved_before_goes_on() {
         use crate::open_world::Scene;
@@ -2732,7 +2732,7 @@ pub(crate) mod tests {
         for i in &items[1..] {
             b.feedback(i, Verdict::Rejected);
         }
-        assert!(!b.settled(), "of no known artist: its weight alone leaves");
+        assert!(!b.settled(), "of unknown artists alone: five leave");
         assert!((b.arms[k].beta - (b0 + 5.0)).abs() < 1e-4);
         b.note_served(Item::Track(tid(200)), k, "x");
         b.feedback(&Item::Track(tid(200)), Verdict::Approved);
