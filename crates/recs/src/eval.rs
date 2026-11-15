@@ -980,12 +980,14 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
             run.clusters = radio.wave_bandit().map_or(0, |b| b.arms.len());
         }
     }
-    // Early skips of a fresh wave, its queue replaced as the runtime does.
+    // Early skips of a fresh wave as the runtime has them.
     let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(crate::wave::NOVELTY_BALANCE)));
-    radio.attune(session.clone(), Some(model.weights));
+    let mut heard = session.clone();
+    radio.attune(heard.clone(), Some(model.weights));
     let mut queue: Vec<Item> = radio.extend_wave(&ctx, pool, WAVE_QUEUE, 13).into_iter().map(|p| p.item).collect();
-    if queue.len() >= 2 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
-        let mut heard = session.clone();
+    let scene = |radio: &RadioState, i: &Item| radio.wave_bandit().and_then(|b| b.scene_of(i));
+    let start = queue.first().and_then(|i| scene(&radio, i));
+    if start.is_some() && queue.len() >= 2 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
         let mut ts = heard.last_ts().unwrap_or_else(|| model.now());
         let mut moved = false;
         for n in 1..=WAVE_SKIPS_MAX {
@@ -993,35 +995,52 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
                 break;
             }
             let item = queue.remove(0);
-            let verdict = match &item {
-                Item::Track(t) => {
-                    ts += 20_000;
-                    heard.start(*t, ts, EventContext::Radio, Some(EventOrigin::Radio));
-                    heard.end_at(*t, Ended::Early, 8_000, None, None);
-                    heard.last().map_or(Verdict::Rejected, |p| Session::verdict(p, model))
-                }
-                Item::Stream(_) => Verdict::Missed,
-            };
-            match verdict {
+            ts += 20_000;
+            match skip_heard(&mut radio, &mut heard, model, item, ts) {
                 Verdict::Missed => run.verdicts[1] += 1,
                 Verdict::NotNow => run.verdicts[2] += 1,
                 _ => run.verdicts[0] += 1,
             }
-            radio.judged(item, Outcome::skip(8_000), verdict);
             run.skips = n;
-            if radio.wave_bandit().is_some_and(|b| !b.settled()) {
+            // The session handed over before the picks, as the runtime does.
+            radio.attune(heard.clone(), Some(model.weights));
+            requeue(&mut radio, &ctx, pool, &mut queue, WAVE_QUEUE, 13);
+            // Moved: the song to play next is of another cluster.
+            if queue.first().and_then(|i| scene(&radio, i)).is_some_and(|s| Some(s) != start) {
                 moved = true;
                 break;
             }
-            let running = radio.wave_bandit().map_or(0, |b| b.skips_running());
-            let keep = usize::from(running < crate::radio::SKIP_SHIFT).min(queue.len());
-            let gone = queue.split_off(keep);
-            radio.forget(&gone);
-            queue.extend(radio.extend_wave(&ctx, pool, WAVE_QUEUE - queue.len(), 13).into_iter().map(|p| p.item));
         }
         run.moved = Some(moved);
     }
     run
+}
+
+/// An early skip at 8 s of the wave's `item` at `ts` as the runtime has it:
+/// the session `heard` hears it (a library song with its length, a new one
+/// by an id of its own) and judges it, and the radio learns that verdict,
+/// which it returns.
+fn skip_heard(radio: &mut RadioState, heard: &mut Session, model: &UserModel, item: Item, ts: UnixMs) -> Verdict {
+    let (id, duration_ms) = match &item {
+        Item::Track(t) => (*t, crate::session::TrackLookup::duration(model, *t)),
+        Item::Stream(_) => (TrackId::new(), None),
+    };
+    heard.start(id, ts, EventContext::Radio, Some(EventOrigin::Radio));
+    heard.end_at(id, Ended::Early, 8_000, duration_ms, None);
+    let verdict = heard.last().map_or(Verdict::Rejected, |p| Session::verdict(p, model));
+    radio.judged(item, crate::radio::Outcome::Skip { position_ms: 8_000, duration_ms, scrub: None }, verdict);
+    verdict
+}
+
+/// The wave's `queue` after a skip as the runtime leaves it: its next pick
+/// kept only as [`crate::wave::Bandit::keep_next`] says, the rest
+/// forgotten, then filled up to `want` again.
+fn requeue(radio: &mut RadioState, ctx: &WaveContext<'_>, pool: &[OpenCandidate], queue: &mut Vec<Item>, want: usize, seed: u64) {
+    let keep = usize::from(radio.wave_bandit().is_none_or(|b| b.keep_next(queue.first()))).min(queue.len());
+    let gone = queue.split_off(keep);
+    radio.forget(&gone);
+    let more = want.saturating_sub(queue.len());
+    queue.extend(radio.extend_wave(ctx, pool, more, seed).into_iter().map(|p| p.item));
 }
 
 /// One pick of a wave replayed against the history ([`wave_replay`]).
@@ -1929,10 +1948,11 @@ mod tests {
         assert_eq!(r.verdicts.iter().sum::<usize>(), r.skips, "{r:?}");
     }
 
-    /// Two skips keep the wave's cluster past a block's end: the songs
-    /// picked after them, the tail picked again as the runtime does, are of
-    /// the skipped cluster though the next block was picked ahead of
-    /// another one already; a third skip leaves it.
+    /// A skip or two keep the wave's cluster past a block's end, the queue
+    /// replaced as the runtime does: the first block's last song skipped
+    /// while the next block's first is queued ahead of another cluster, that
+    /// song gives way, and what plays after one skip and after two is of
+    /// the skipped cluster; a third skip leaves it.
     #[test]
     fn skips_keep_the_cluster_past_a_block_boundary() {
         use crate::radio::Outcome;
@@ -1960,23 +1980,31 @@ mod tests {
             let Some(a) = radio.wave_bandit().filter(|b| b.arms.len() >= 2 && block.len() >= 2).and_then(|b| b.scene_of(&block[0])) else { continue };
             // The next block's first song queued ahead.
             let Some(ahead) = radio.extend_wave(&ctx, &[], 1, seed).pop() else { continue };
-            other_ahead += usize::from(radio.wave_bandit().and_then(|b| b.scene_of(&ahead.item)) != Some(a));
-            // The block's last two skipped as they play: the tail again.
-            for item in &block[block.len() - 2..] {
-                skip(&mut radio, item);
+            let scene = |radio: &RadioState, i: &Item| radio.wave_bandit().and_then(|b| b.scene_of(i));
+            other_ahead += usize::from(scene(&radio, &ahead.item) != Some(a));
+            let mut queue = vec![ahead.item];
+            // The block's last song skipped as it plays: the song queued
+            // ahead stays only when of its cluster, the tail again.
+            skip(&mut radio, &block[block.len() - 1]);
+            requeue(&mut radio, &ctx, &[], &mut queue, 3, seed);
+            assert!(!queue.is_empty(), "seed {seed}");
+            for item in &queue {
+                assert_eq!(scene(&radio, item), Some(a), "seed {seed}: one skip, the skipped cluster still");
             }
-            radio.forget(std::slice::from_ref(&ahead.item));
-            let next: Vec<Item> = radio.extend_wave(&ctx, &[], 3, seed).into_iter().map(|p| p.item).collect();
-            assert!(!next.is_empty(), "seed {seed}");
-            for item in &next {
-                assert_eq!(radio.wave_bandit().and_then(|b| b.scene_of(item)), Some(a), "seed {seed}: the skipped cluster still");
+            // The next skipped too: the whole tail, of the cluster still.
+            let item = queue.remove(0);
+            skip(&mut radio, &item);
+            requeue(&mut radio, &ctx, &[], &mut queue, 3, seed);
+            for item in &queue {
+                assert_eq!(scene(&radio, item), Some(a), "seed {seed}: two skips, the skipped cluster still");
             }
-            // A third leaves it.
-            skip(&mut radio, &next[0]);
-            radio.forget(&next[1..]);
-            let after: Vec<Item> = radio.extend_wave(&ctx, &[], 2, seed).into_iter().map(|p| p.item).collect();
-            for item in &after {
-                assert_ne!(radio.wave_bandit().and_then(|b| b.scene_of(item)), Some(a), "seed {seed}: a third skip leaves");
+            // A third leaves it: the next song is of another.
+            let item = queue.remove(0);
+            skip(&mut radio, &item);
+            requeue(&mut radio, &ctx, &[], &mut queue, 3, seed);
+            assert!(!queue.is_empty(), "seed {seed}");
+            for item in &queue {
+                assert_ne!(scene(&radio, item), Some(a), "seed {seed}: a third skip leaves");
             }
         }
         assert!(other_ahead > 0, "a block of another cluster was picked ahead");

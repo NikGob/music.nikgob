@@ -204,6 +204,14 @@ impl Mark {
     }
 }
 
+/// What an end tells the radio: complete, or where it was skipped; a play
+/// the bar was dragged into that reached its end (a «Дальше» at 90 % or
+/// later, or run out) is told as a skip there, so what was heard says
+/// ([`nikgob_recs::session::judge`]), not reaching the end.
+fn outcome_of(complete: bool, position_ms: u32, duration_ms: Option<u32>, scrub: Option<nikgob_recs::session::Scrub>) -> Outcome {
+    if complete && scrub.is_none_or(|s| s.blind) { Outcome::Complete } else { Outcome::Skip { position_ms, duration_ms, scrub } }
+}
+
 /// What `session.json` keeps of a radio.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RadioSave {
@@ -1821,7 +1829,7 @@ impl Worker {
         let snap = self.snapshot();
         let played = self.recs.session.last_of(song).cloned();
         let scrub = played.as_ref().and_then(|p| p.dragged());
-        let outcome = if complete { Outcome::Complete } else { Outcome::Skip { position_ms, duration_ms, scrub } };
+        let outcome = outcome_of(complete, position_ms, duration_ms, scrub);
         let (verdict, streak) = match (&snap, &played) {
             (Some(s), Some(p)) => (Session::verdict(p, &s.model), self.recs.session.skip_streak(&s.model)),
             _ => (outcome.verdict(), u8::from(outcome.verdict().rejects())),
@@ -1832,7 +1840,7 @@ impl Worker {
             return;
         }
         let item = run.streams.get(&track).map_or(Item::Track(track), |r| Item::Stream(r.clone()));
-        if complete {
+        if outcome == Outcome::Complete {
             run.heard.retain(|t| *t != track);
             run.heard.push(track);
             let over = run.heard.len().saturating_sub(HEARD_KEEP);
@@ -1848,10 +1856,19 @@ impl Worker {
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         if rejected {
-            // Two running (a wave's: of its cluster, those it weighs): the
-            // whole tail; one: all but the next (it is preloaded already).
-            let streak = run.state.wave_bandit().map_or(streak, |b| b.skips_running());
-            let keep = if streak >= nikgob_recs::radio::SKIP_SHIFT { 0 } else { 1 };
+            // Two running: the whole tail; one: all but the next (it is
+            // preloaded already). A wave counts its cluster's skips, and
+            // keeps its next pick only when it is of the cluster a skip
+            // holds ([`nikgob_recs::wave::Bandit::keep_next`]); the user's
+            // own entries always stay.
+            let keep = match run.state.wave_bandit() {
+                Some(b) => {
+                    let next = self.queue.upcoming().first().filter(|e| run.added.contains(&e.id));
+                    let next = next.map(|e| run.streams.get(&e.track).map_or(Item::Track(e.track), |r| Item::Stream(r.clone())));
+                    usize::from(b.keep_next(next.as_ref()))
+                }
+                None => usize::from(streak < nikgob_recs::radio::SKIP_SHIFT),
+            };
             log::info!("radio «{}»: a skip ({streak} running), the tail past {keep} is picked again", run.title);
             run.redo = Some(run.redo.map_or(keep, |k| k.min(keep)));
         }
@@ -2609,6 +2626,31 @@ mod tests {
         assert_eq!(entries_at(&after, &places), HashSet::from([102]));
         // An older session (no places): nothing.
         assert!(entries_at(&after, &[]).is_empty());
+    }
+
+    /// A play dragged to its end (the runtime's «Дальше» at 90 % or later,
+    /// or the track run out) is judged by what was heard, by the session
+    /// and by the radio alike; with the bar untouched, or dragged from
+    /// where nobody knows, it is complete as always.
+    #[test]
+    fn a_play_dragged_to_its_end_is_judged_by_what_was_heard() {
+        use nikgob_recs::session::{Ended, Scrub, judge};
+        let t = TrackId::new();
+        for (to, at, verdict) in [(190_000, 192_000, Verdict::Neutral), (195_000, 200_000, Verdict::Neutral), (30_000, 200_000, Verdict::Approved)] {
+            let mut s = Session::default();
+            s.start(t, 1_000, EventContext::Radio, None);
+            s.seek(t, Some(2_000), to);
+            s.end_at(t, Ended::Complete, at, Some(200_000), None);
+            let p = s.last().unwrap();
+            assert_eq!(judge(p.ended, p.position_ms, p.duration_ms, p.dragged()), verdict, "the session, to {to}");
+            let o = outcome_of(true, at, Some(200_000), p.dragged());
+            assert!(matches!(o, Outcome::Skip { .. }));
+            assert_eq!(o.verdict(), verdict, "the radio, to {to}");
+        }
+        assert_eq!(outcome_of(true, 192_000, Some(200_000), None), Outcome::Complete);
+        let blind = Some(Scrub { to_ms: 190_000, heard_ms: 0, blind: true });
+        assert_eq!(outcome_of(true, 200_000, Some(200_000), blind), Outcome::Complete);
+        assert_eq!(outcome_of(false, 50_000, Some(200_000), None), Outcome::Skip { position_ms: 50_000, duration_ms: Some(200_000), scrub: None });
     }
 
     /// A wave's card is saved with it, and a session from before it was

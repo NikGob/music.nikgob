@@ -26,7 +26,8 @@
 //! intro is no rejection: a start the bar was dragged into says nothing
 //! once it played on [`SCRUB_HEARD_MS`] past the drag or reached its half,
 //! and is approved when [`APPROVED_SHARE`] of its length was heard all the
-//! same (every stretch heard between the drags, either way). Where a drag
+//! same (every stretch heard between the drags, either way), not by
+//! reaching its outro or end: dragged there, it says nothing. Where a drag
 //! came from nobody knows (the history replayed, a save of before), a skip
 //! after it rejects, as a scrub-skip always did. A start whose length
 //! nobody knows is rejected only by an early skip (or a scrub-skip).
@@ -171,7 +172,13 @@ pub fn judge(ended: Ended, position_ms: Option<u32>, duration_ms: Option<u32>, s
         _ => None,
     };
     let rejected = match ended {
-        Ended::Complete => return Verdict::Approved,
+        // Played to its end after a drag: what was heard says.
+        Ended::Complete => {
+            return match (scrub, position_ms, duration_ms) {
+                (Some(s), Some(at), Some(d)) if !s.blind && d > 0 && (s.heard_ms.saturating_add(at.saturating_sub(s.to_ms)) as f32) < APPROVED_SHARE * d as f32 => Verdict::Neutral,
+                _ => Verdict::Approved,
+            };
+        }
         Ended::Open => return Verdict::Playing,
         Ended::Early | Ended::Late if scrub.is_some() => match (scrub, position_ms) {
             (Some(s), Some(at)) if !s.blind => {
@@ -684,6 +691,35 @@ mod tests {
         assert_eq!(play(&mut s, 15, &[(10_000, 50_000), (60_000, 120_000)], 130_000), Verdict::Neutral, "past the half");
         // Back to the start before any drag is a restart, nothing else.
         assert_eq!(play(&mut s, 16, &[(60_000, 0)], 170_000), Verdict::Approved);
+    }
+
+    /// Dragged to the end is no approval: the runtime's end at 90 % or
+    /// later (a «Дальше» there, or the track running out) is complete, and
+    /// after a drag what was heard says; complete with the bar untouched,
+    /// or dragged from where nobody knows, approves as always.
+    #[test]
+    fn dragged_to_the_end_is_no_approval() {
+        let mut s = Session::default();
+        let mut ts = T;
+        let mut play = |s: &mut Session, t: u128, drag: Option<(Option<u32>, u32)>, at: u32| {
+            ts += 400_000;
+            s.start(tid(t), ts, EventContext::Radio, Some(EventOrigin::Radio));
+            if let Some((from, to)) = drag {
+                s.seek(tid(t), from, to);
+            }
+            s.end_at(tid(t), Ended::Complete, at, Some(200_000), None);
+            Session::verdict(s.last().unwrap(), &Look)
+        };
+        assert_eq!(play(&mut s, 10, Some((Some(2_000), 180_000)), 182_000), Verdict::Neutral, "«Дальше» at 91 %, 4 s heard");
+        assert_eq!(play(&mut s, 11, Some((Some(2_000), 195_000)), 200_000), Verdict::Neutral, "run out, 7 s heard");
+        assert_eq!(play(&mut s, 12, Some((Some(2_000), 30_000)), 200_000), Verdict::Approved, "run out, 172 s heard");
+        assert_eq!(play(&mut s, 13, None, 185_000), Verdict::Approved, "the bar untouched");
+        assert_eq!(play(&mut s, 14, Some((None, 180_000)), 200_000), Verdict::Approved, "from nobody knows where, as always");
+        assert_eq!(s.skip_streak(&Look), 0);
+        let mut plain = Session::default();
+        plain.start(tid(15), T, EventContext::Radio, None);
+        plain.end(tid(15), Ended::Complete);
+        assert_eq!(Session::verdict(plain.last().unwrap(), &Look), Verdict::Approved);
     }
 
     /// A short track skipped at its outro, before 30 s, is approved; the
