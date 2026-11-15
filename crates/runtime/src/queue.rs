@@ -436,18 +436,17 @@ impl Queue {
         }
     }
 
-    /// Shuffle on: what plays now stays current, what has played stays
-    /// behind it, the rest is shuffled. Off: the order the queue was
-    /// started with comes back, the current track stays current and "next"
-    /// goes on from its place in that order.
+    /// Shuffle on: what plays now comes first, every other track of the
+    /// list (the ones before it too) follows shuffled. Off: the order the
+    /// queue was started with comes back, the current track stays current
+    /// and "next" goes on from its place in that order.
     pub fn set_shuffle(&mut self, on: bool) {
         if on == self.shuffle {
             return;
         }
         self.shuffle = on;
         if on {
-            let from = self.pos.map_or(0, |p| (p + 1).min(self.items.len()));
-            fastrand::shuffle(&mut self.items[from..]);
+            self.shuffle_all_but_current();
         } else {
             let cur = self.current();
             self.items = self.original.clone();
@@ -514,8 +513,13 @@ mod tests {
         q.set(&t, 5, None);
         q.set_shuffle(true);
         assert_eq!(q.current().map(|e| e.track), Some(t[5]));
-        assert_eq!(q.history().len(), 5);
-        assert_eq!(q.upcoming().len(), 14);
+        // The current track first, every other one of the list after it.
+        assert!(q.history().is_empty());
+        let mut rest: Vec<TrackId> = q.upcoming().iter().map(|e| e.track).collect();
+        let mut others: Vec<TrackId> = t.iter().copied().filter(|&x| x != t[5]).collect();
+        rest.sort();
+        others.sort();
+        assert_eq!(rest, others);
         q.set_shuffle(false);
         assert_eq!(q.current().map(|e| e.track), Some(t[5]));
         assert_eq!(q.tracks(), t);
@@ -721,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn shuffle_on_mid_list_keeps_what_played_and_shuffles_the_rest() {
+    fn shuffle_on_mid_list_puts_the_current_first_and_shuffles_all_the_others() {
         let t = ids(30);
         let mut q = Queue::default();
         q.set(&t, 0, None);
@@ -729,11 +733,12 @@ mod tests {
             q.skip_forward();
         }
         q.set_shuffle(true);
-        assert_eq!(tracks_of(q.history()), t[..5].to_vec());
+        assert!(q.history().is_empty(), "the current track comes first");
         assert_eq!(q.current().map(|e| e.track), Some(t[5]));
         let up = tracks_of(q.upcoming());
-        assert!(same_tracks(&up, &t[6..]));
-        assert_ne!(up, t[6..].to_vec(), "the rest is shuffled");
+        let others: Vec<TrackId> = t[..5].iter().chain(&t[6..]).copied().collect();
+        assert!(same_tracks(&up, &others), "the ones before it too");
+        assert_ne!(up, others, "the rest is shuffled");
         q.set_shuffle(false);
         assert_eq!(q.tracks(), t);
         assert_eq!(q.current().map(|e| e.track), Some(t[5]));
