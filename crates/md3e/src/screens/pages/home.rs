@@ -1083,7 +1083,7 @@ fn new_music(ui: &mut Ui, grid: Grid, n: usize, live: bool, state: &ViewState, p
                     }
                     if o.liked {
                         out.push(Command::LikeStream { track: t.remote.clone(), on: !t.liked });
-                    } else if o.clicked && t.playable {
+                    } else if o.clicked && super::streams::row_plays(t, super::streams::youtube_plays(state)) {
                         out.push(play_discover(&h.discover, i));
                     }
                     // A service song's one list (its ♥ is on the row).

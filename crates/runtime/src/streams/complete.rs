@@ -28,8 +28,7 @@ pub(crate) struct Completing {
 impl Worker {
     /// [`Self::complete_playing`] for the next two tracks of the queue.
     pub(crate) fn complete_next(&mut self) {
-        let mut next: Vec<TrackId> = self.queue.peek_auto_next().map(|e| e.track).into_iter().collect();
-        next.extend(self.queue.upcoming().iter().skip(1).take(1).map(|e| e.track));
+        let next: Vec<TrackId> = self.queue.ahead(2).iter().map(|e| e.track).collect();
         for t in next {
             self.complete_playing(t);
         }

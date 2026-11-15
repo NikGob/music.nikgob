@@ -1549,7 +1549,10 @@ impl Worker {
                 // play (an upload of a soundtrack, a cover), and a video's
                 // page may be gone: the video is set aside only when it
                 // fails to play, and not asked again soon.
-                Err(StreamError::Unavailable) if service == Service::Youtube => {
+                // SoundCloud's batch answer leaves out tracks this client may
+                // not see that still play from their own listing: no proof
+                // either.
+                Err(StreamError::Unavailable) if matches!(service, Service::Youtube | Service::Soundcloud) => {
                     log::debug!("{service}: no details of {id}; it stays playable");
                     let _ = self.lib.cache_put(&enrich_miss_key(service, &id), now, "-");
                 }

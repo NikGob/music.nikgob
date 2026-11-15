@@ -83,6 +83,19 @@ fn play_from(from: &StreamFrom, rows: &[StreamTrackRow], i: usize) -> Command {
     }
 }
 
+/// YouTube Music can play now: a track another service will not play
+/// (a SoundCloud preview or Go+ track, one with only DRM streams here) is
+/// played from there.
+pub(crate) fn youtube_plays(state: &ViewState) -> bool {
+    state.accounts.iter().any(|a| a.service == Service::Youtube && a.usable && a.audio)
+}
+
+/// A service's row plays when clicked: its service plays it, or (another
+/// service's) YouTube Music finds the song when it does not.
+pub(crate) fn row_plays(t: &StreamTrackRow, youtube_plays: bool) -> bool {
+    t.playable || (youtube_plays && t.remote.service != Service::Youtube)
+}
+
 /// How far a stream track is in «Хочу скачать» (its library track's item).
 fn wish_of(t: &StreamTrackRow, wish: &widgets::WishIndex) -> Option<WishlistStatus> {
     (!t.has_local).then(|| wish.of_track(t.track, None)).flatten()
@@ -132,6 +145,7 @@ fn track_row(
     let current = state.player.current.as_ref().map(|t| t.id);
     let playing = state.player.status == Status::Playing;
     let is_cur = t.track.is_some() && t.track == current;
+    let plays = row_plays(t, youtube_plays(state));
     let leading = if numbered {
         Leading::Number(if is_cur { String::new() } else if t.track_no > 0 { t.track_no.to_string() } else { (i + 1).to_string() })
     } else {
@@ -159,7 +173,7 @@ fn track_row(
         (None, true) => extras.push("у тебя".into()),
         _ => {}
     }
-    if !t.playable {
+    if !plays {
         extras.push("недоступен".into());
     }
     // Two lines: after the artist; one line (an album page): quiet text by
@@ -182,8 +196,8 @@ fn track_row(
     let o = item
         .leading(leading)
         .selected(is_cur)
-        .muted(!t.playable)
-        .hover_play(!is_cur && t.playable)
+        .muted(!plays)
+        .hover_play(!is_cur && plays)
         .trailing(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
@@ -225,7 +239,7 @@ fn track_row(
             .playing(playing)
             .paint_at(ui, Rect::from_center_size(c, vec2(24.0, 24.0)));
     }
-    if (o.response.double_clicked() || o.play_clicked) && t.playable {
+    if (o.response.double_clicked() || o.play_clicked) && plays {
         out.push(if is_cur { Command::TogglePlay } else { play_from(from, rows, i) });
     }
     let mut nav = None;
@@ -1156,6 +1170,40 @@ mod menu_tests {
         assert!(shown.iter().any(|r| matches!(r, Row::Item(TrackAct::Fetch, _))));
         assert!(!shown.iter().any(|r| matches!(r, Row::Item(TrackAct::AlbumDownload, _))));
         assert_eq!(row_acts(sub_rows(&shown, FILE).unwrap()), [TrackAct::AlbumDownload]);
+    }
+
+    /// A SoundCloud row its service will not play (a preview, Go+, DRM
+    /// only here) plays from YouTube Music when that can play, and looks
+    /// muted only when nothing can; a YouTube row is what it is.
+    #[test]
+    fn a_row_its_service_does_not_play_plays_from_youtube_music() {
+        use nikgob_view::{Credit, RemoteId, Service, StreamTrackRow, TrackKind};
+        let row = |service: Service, playable: bool| StreamTrackRow {
+            remote: RemoteId::new(service, "t"),
+            title: "Song".into(),
+            artist: "Band".into(),
+            artists: Credit::single("Band", None),
+            album: None,
+            album_id: None,
+            duration: None,
+            disc_no: 1,
+            track_no: 1,
+            cover_url: None,
+            kind: TrackKind::Song,
+            playable,
+            track: None,
+            liked: false,
+            in_library: false,
+            has_local: false,
+            elsewhere: None,
+            also_on: Vec::new(),
+        };
+        assert!(super::row_plays(&row(Service::Soundcloud, false), true));
+        assert!(!super::row_plays(&row(Service::Soundcloud, false), false), "nothing can play it");
+        assert!(super::row_plays(&row(Service::Soundcloud, true), false));
+        assert!(super::row_plays(&row(Service::Spotify, false), true));
+        assert!(!super::row_plays(&row(Service::Youtube, false), true), "YouTube's own row");
+        assert!(!super::youtube_plays(&nikgob_view::ViewState::default()), "no YouTube Music, no fallback");
     }
 
     /// A service album's right click and its page's ⋮ are one list in the
