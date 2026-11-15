@@ -71,6 +71,16 @@ impl Pauses {
         map.get(source)?.until.filter(|u| *u > now).map(|u| u - now)
     }
 
+    /// `source` sits out until `until`, as a pause noted before the app
+    /// last quit: the next refusal after it starts the next pause.
+    pub fn hold(&self, source: &'static str, until: Instant) {
+        let mut map = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let p = map.entry(source).or_default();
+        p.times = p.times.max(1);
+        p.strikes = STRIKES - 1;
+        p.until = Some(until);
+    }
+
     /// Notes what `source` answered at `now`; the pause this starts, if it
     /// starts one.
     pub fn note(&self, source: &'static str, verdict: Verdict, now: Instant) -> Option<Duration> {
@@ -162,5 +172,20 @@ mod tests {
         assert_eq!(p.paused_for("betterlyrics", t0 + FIRST_PAUSE), Some(LONGEST_PAUSE - FIRST_PAUSE));
         // Clones share it.
         assert!(p.clone().paused_for("betterlyrics", t0).is_some());
+    }
+
+    /// A pause from before the app quit goes on, and the next refusal
+    /// after it starts the next pause at once.
+    #[test]
+    fn a_held_pause_goes_on_and_one_refusal_after_it_pauses_again() {
+        let p = Pauses::new();
+        let t0 = Instant::now();
+        p.hold("betterlyrics", t0 + FIRST_PAUSE);
+        assert_eq!(p.paused_for("betterlyrics", t0), Some(FIRST_PAUSE));
+        let t1 = t0 + FIRST_PAUSE;
+        assert_eq!(p.paused_for("betterlyrics", t1), None);
+        assert_eq!(p.note("betterlyrics", Verdict::Refused, t1), Some(FIRST_PAUSE * 2));
+        p.note("betterlyrics", Verdict::Answered, t1);
+        assert_eq!(p.paused_for("betterlyrics", t1), None);
     }
 }

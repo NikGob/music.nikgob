@@ -286,6 +286,9 @@ impl ImportService {
                 .map_err(|e| log::warn!("online metadata disabled: {e}"))
                 .ok()
         });
+        if let Some(meta) = &metadata {
+            crate::lyrics::restore_pauses(meta, &library);
+        }
         // Albums imported before folders were imported as a whole may be in pieces.
         match nikgob_import::merge_split_releases(&library) {
             Ok(0) => {}
@@ -1514,6 +1517,9 @@ impl Worker {
         svc.metadata = Metadata::new(cfg)
             .map_err(|e| log::warn!("online metadata disabled: {e}"))
             .ok();
+        if let Some(meta) = &svc.metadata {
+            crate::lyrics::restore_pauses(meta, &self.lib);
+        }
         svc.reconfigure = Some(svc.reconfigure.take().unwrap_or_else(|| svc.config().clone()));
         svc.apply_reconfigure();
         self.start_enrich();

@@ -959,15 +959,41 @@ async fn ask_source(meta: Metadata, lib: Library, row: TrackRow, source: LyricsS
         crate::enrich::fetch_and_store(&meta.lrclib, &lib, &row).await
             .map(|st| Text::from_lrc(st.synced.as_deref(), st.plain.as_deref()))
     } else {
-        fetch_online(meta, lib, row, source).await
+        fetch_online(meta, lib.clone(), row, source).await
     };
     let verdict = nikgob_metadata::Verdict::of(&got);
-    if let Some(pause) = pauses.note(source.key(), verdict, std::time::Instant::now())
-        && let Err(e) = &got
-    {
-        log::warn!("lyrics ({}): {e}; not asked for {} min", source.key(), pause.as_secs() / 60);
+    let key = pause_key(source);
+    if let Some(pause) = pauses.note(source.key(), verdict, std::time::Instant::now()) {
+        let now = now_ms();
+        let until = now + i64::try_from(pause.as_millis()).unwrap_or(i64::MAX / 2);
+        if let Err(e) = lib.cache_put(&key, now, &until.to_string()) {
+            log::debug!("lyrics ({}): keeping the pause: {e}", source.key());
+        }
+        if let Err(e) = &got {
+            log::warn!("lyrics ({}): {e}; not asked for {} min", source.key(), pause.as_secs() / 60);
+        }
+    } else if verdict == nikgob_metadata::Verdict::Answered && lib.cache_get(&key).ok().flatten().is_some() {
+        let _ = lib.cache_drop(&key);
     }
     got
+}
+
+/// Where a source's pause is kept, so it outlasts the app.
+fn pause_key(source: LyricsSource) -> String {
+    format!("lyrics_pause.{}", source.key())
+}
+
+/// The pauses noted before the app last quit, still running, go on
+/// ([`ask_source`] keeps them).
+pub(crate) fn restore_pauses(meta: &Metadata, lib: &Library) {
+    let now = now_ms();
+    for source in LyricsSource::ALL {
+        let Ok(Some((_, until))) = lib.cache_get(&pause_key(source)) else { continue };
+        let Some(left) = until.parse::<i64>().ok().and_then(|u| u64::try_from(u - now).ok()).filter(|l| *l > 0) else {
+            continue;
+        };
+        meta.lyrics_pauses.hold(source.key(), std::time::Instant::now() + Duration::from_millis(left));
+    }
 }
 
 /// Sitting out ([`ask_source`]): taken out of `tl`'s lookups as a failure
