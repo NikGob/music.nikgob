@@ -1967,7 +1967,7 @@ mod tests {
         let none = |_: &StreamTrack| Vec::new();
         let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
         let skip = |radio: &mut RadioState, item: &Item| radio.judged(item.clone(), Outcome::skip(8_000), Verdict::Rejected);
-        let mut other_ahead = 0;
+        let mut checked = 0;
         for seed in 0..16u64 {
             let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(crate::wave::NOVELTY_FAMILIAR)));
             radio.attune(Session::default(), Some(model.weights));
@@ -1979,9 +1979,16 @@ mod tests {
             }
             let Some(a) = radio.wave_bandit().filter(|b| b.arms.len() >= 2 && block.len() >= 2).and_then(|b| b.scene_of(&block[0])) else { continue };
             // The next block's first song queued ahead.
+            // The next block drawn of another cluster, as a draw may (the
+            // prior leads the first cluster's way too far to wait for one):
+            // its first song queued ahead while the block's last plays.
+            if !radio.other_vibe(block.last()) {
+                continue;
+            }
             let Some(ahead) = radio.extend_wave(&ctx, &[], 1, seed).pop() else { continue };
             let scene = |radio: &RadioState, i: &Item| radio.wave_bandit().and_then(|b| b.scene_of(i));
-            other_ahead += usize::from(scene(&radio, &ahead.item) != Some(a));
+            assert_ne!(scene(&radio, &ahead.item), Some(a), "seed {seed}: queued ahead of another cluster");
+            checked += 1;
             let mut queue = vec![ahead.item];
             // The block's last song skipped as it plays: the song queued
             // ahead stays only when of its cluster, the tail again.
@@ -2007,7 +2014,7 @@ mod tests {
                 assert_ne!(scene(&radio, item), Some(a), "seed {seed}: a third skip leaves");
             }
         }
-        assert!(other_ahead > 0, "a block of another cluster was picked ahead");
+        assert!(checked > 0, "a wave of two clusters or more was met");
     }
 
     /// Blocks of one cluster: a wave's picks come four to six of one
