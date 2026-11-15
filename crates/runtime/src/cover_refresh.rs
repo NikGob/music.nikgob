@@ -75,6 +75,8 @@ const GUARD: Duration = Duration::from_secs(30);
 /// Without the importer's settings.
 const MAX_EDGE: u32 = 1200;
 const FALLBACK_SEED: u32 = 0xFF67_50A4;
+/// What «Обновить обложку» says as it starts (of a service's album too).
+pub(crate) const LOOKING: &str = "Ищу обложку…";
 /// Two pictures are one when each colour's steps differ in at most this
 /// many of 64 and their mean colours are at most this far apart.
 const SAME_BITS: u32 = 8;
@@ -952,11 +954,13 @@ async fn online(meta: &Metadata, services: &[Arc<dyn StreamService>], w: &hd_cov
 impl Worker {
     /// «Обновить обложку» of a library album (see the module docs): read,
     /// looked up and written off the loop, [`Self::release_cover_refreshed`]
-    /// takes the answer.
+    /// takes the answer. It says at once that it looks (once while it runs);
+    /// the new cover showing is its answer.
     pub(crate) fn refresh_release_cover(&mut self, id: ReleaseId) {
         if !self.cover_refresh.insert(id) {
             return;
         }
+        self.toast(LOOKING, None);
         let lib = self.lib.clone();
         let root = self.res.root().to_owned();
         let masters = self.import.as_ref().map(|s| s.config().masters_dir());

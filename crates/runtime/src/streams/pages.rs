@@ -260,7 +260,9 @@ impl Worker {
     /// cache and the UI keep of it and of its cover goes, its page is
     /// fetched again (now, when it is open), and so is the discography of
     /// the open artist that shows it (the artist too, in every service).
+    /// It says at once that it looks; the new cover showing is its answer.
     pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
+        self.toast(crate::cover_refresh::LOOKING, None);
         let mut covers: Vec<String> = self.streaming.pages.album(&id).and_then(|a| a.cover_url.clone()).into_iter().collect();
         self.streaming.pages.stale_album(&id);
         if let Some(svc) = self.service(id.service) {

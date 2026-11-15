@@ -1485,3 +1485,39 @@ fn the_shuffle_button_is_kept_by_own_playlists_and_changes_no_rule() {
     let on_disk = std::fs::read(&prefs_path).ok().and_then(|b| serde_json::from_slice::<Prefs>(&b).ok());
     assert!(on_disk.is_none_or(|p| p.list_shuffle == before), "the button wrote a rule");
 }
+
+/// «Обновить обложку» says at once that it looks, once for each refresh
+/// that runs: a second press while one runs adds no toast of its own.
+#[test]
+fn a_cover_refresh_says_it_looks_once_while_it_runs() {
+    use nikgob_core::model::{Artist, ArtistCredit, Release};
+
+    let lib = Library::open_in_memory().unwrap();
+    let artist = lib.upsert_artist(&Artist::new("A")).unwrap();
+    let release = lib.upsert_release(&Release::new("Album", ArtistCredit::single("A", Some(artist.id)))).unwrap();
+    let rt = Runtime::start(
+        RuntimeConfig {
+            library: lib,
+            streams: Vec::new(),
+            library_dir: std::env::temp_dir(),
+            prefs: Prefs::default(),
+            prefs_path: None,
+            settings_path: None,
+            import: None,
+        },
+        Box::new(NullPlayback),
+        Arc::new(|| {}),
+    );
+    // Each toast's count: shown again bumps it.
+    let shown = |s: &ViewState, texts: &[&str]| -> u32 {
+        s.toasts.iter().filter(|t| texts.contains(&t.text.as_str())).map(|t| t.again + 1).sum()
+    };
+    let looking = |s: &ViewState| shown(s, &["Ищу обложку…"]);
+    let ended = |s: &ViewState| shown(s, &["Лучшей обложки не нашлось", "Не получилось обновить обложку"]);
+    rt.send(Command::RefreshReleaseCover(release.id));
+    rt.send(Command::RefreshReleaseCover(release.id));
+    wait_for(&rt, "the refresh's answer", |s| ended(s) > 0 && looking(s) == ended(s));
+    std::thread::sleep(Duration::from_millis(200));
+    let s = rt.state();
+    assert_eq!(looking(&s), ended(&s), "one «Ищу обложку…» for each refresh that ran");
+}
