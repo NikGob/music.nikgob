@@ -144,6 +144,8 @@ pub struct TrackMetadata {
     pub duration: Option<Duration>,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
+    /// The tracks of the release, when the source tells.
+    pub track_total: Option<u32>,
     /// Possibly partial ISO date.
     pub date: Option<String>,
     pub isrcs: Vec<String>,
@@ -233,6 +235,8 @@ fn apply_release(meta: &mut TrackMetadata, ids: &mut CandidateIds, rel: &Release
     }
     meta.release_status = rel.status.clone();
     meta.country = rel.country.clone();
+    let total: u32 = rel.media.iter().map(|m| m.track_count.max(m.tracks.len() as u32)).sum();
+    meta.track_total = (total > 0).then_some(total);
     meta.label = rel.label_name().map(str::to_owned);
     ids.release_mbid = Some(rel.id.clone());
     if let Some(rg) = &rel.release_group {
@@ -337,6 +341,7 @@ pub fn candidate_from_deezer(track: &DeezerTrack) -> Candidate {
         duration: track.duration(),
         track_no: track.track_position,
         disc_no: track.disk_number,
+        track_total: album.and_then(|a| a.nb_tracks).filter(|n| *n > 0),
         date: track
             .release_date
             .clone()
@@ -782,14 +787,18 @@ fn release_type_is(meta: &TrackMetadata, kinds: &[&str]) -> bool {
         .is_some_and(|t| kinds.iter().any(|k| t.eq_ignore_ascii_case(k)))
 }
 
-/// A file of an album (a track after the first, or a release of several
-/// tracks) whose best match is a single or EP of its song, released
-/// earlier and as good as the album's own: the album's wins. Its track
+/// A file whose best match is a single or EP of its song, released
+/// earlier and as good as the album's own, while the file's tags count
+/// more tracks than that single has: the album's wins. Without both counts
+/// nothing tells them apart and the earliest stays. The album's track
 /// number must be the file's when both are known.
 fn prefer_album(p: &Prepared, ranked: &mut Vec<MatchCandidate>) {
-    let of_album = p.track_no.is_some_and(|n| n > 1) || p.track_total.is_some_and(|n| n > 1);
     let Some(top) = ranked.first() else { return };
-    if !of_album || !release_type_is(&top.metadata, &["single", "ep"]) {
+    let more = match (p.track_total, top.metadata.track_total) {
+        (Some(file), Some(single)) => single < file,
+        _ => false,
+    };
+    if !more || !release_type_is(&top.metadata, &["single", "ep"]) {
         return;
     }
     let best = quantized(top);
