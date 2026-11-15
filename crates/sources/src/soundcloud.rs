@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::{client, download, get_range, safe_name};
 use crate::matching::{judge, same_artist};
-use crate::sniff::{AFTER_TAG, HEAD, Sniff, named_by_bytes, sniff, sniff_at, with_average};
+use crate::sniff::{named_by_bytes, sniff_remote, with_average};
 use crate::text::catalogue_queries;
 
 /// Matching tracks whose file is looked at for one wish.
@@ -74,15 +74,8 @@ impl SoundcloudOriginals {
     /// What the original at `link` is and how big; `None` when it is not
     /// audio this knows.
     async fn probe(&self, link: &str, secs: Option<u32>) -> Result<Option<(Format, &'static str, Option<u64>)>, SourceError> {
-        let (head, size) = get_range(&self.http, link, 0, HEAD).await?;
-        let s = match sniff(&head) {
-            Sniff::Audio(s) => s,
-            Sniff::After(at) => match sniff_at(&get_range(&self.http, link, at, AFTER_TAG).await?.0, at) {
-                Some(s) => s,
-                None => return Ok(None),
-            },
-            Sniff::Unknown => return Ok(None),
-        };
+        let http = &self.http;
+        let Some((s, size)) = sniff_remote(move |from, len| get_range(http, link, from, len)).await? else { return Ok(None) };
         Ok(Some((with_average(&s, size, secs), s.ext, size)))
     }
 
@@ -163,6 +156,13 @@ fn about_download(text: &str) -> bool {
         || [".wav", ".mp3", ".flac", ".aif", ".aiff"].iter().any(|e| t.trim_end().ends_with(e))
 }
 
+/// Where an ASCII `needle` starts in `hay`, any case, as a byte offset at
+/// a character's start.
+fn find_ascii_nocase(hay: &str, needle: &str) -> Option<usize> {
+    let n = needle.as_bytes();
+    hay.char_indices().map(|(i, _)| i).find(|&i| hay.as_bytes().get(i..i + n.len()).is_some_and(|w| w.eq_ignore_ascii_case(n)))
+}
+
 /// A title without what the uploader says about the download.
 pub fn clean_title(raw: &str) -> String {
     let mut s = raw.trim().to_owned();
@@ -188,19 +188,21 @@ pub fn clean_title(raw: &str) -> String {
             None => break,
         }
     }
-    // A tail about the download, after a separator or bare.
-    let lower = s.to_lowercase();
+    // A tail about the download, after a separator or bare: found in the
+    // title itself (a lowercase copy may be longer or shorter in bytes).
     if let Some(at) = ["| free", "// free", "- free download", "free download", "free dl", "buy ="]
         .iter()
-        .filter_map(|w| lower.find(w))
+        .filter_map(|w| find_ascii_nocase(&s, w))
         .filter(|at| *at > 0)
         .min()
     {
         s.truncate(at);
     }
     for ext in [".wav", ".mp3", ".flac", ".aiff", ".aif"] {
-        if s.to_lowercase().trim_end().ends_with(ext) {
-            let keep = s.trim_end().len() - ext.len();
+        let t = s.trim_end();
+        if t.len() >= ext.len() && t.as_bytes()[t.len() - ext.len()..].eq_ignore_ascii_case(ext.as_bytes()) {
+            // ASCII bytes end the title: the cut is between characters.
+            let keep = t.len() - ext.len();
             s.truncate(keep);
         }
     }
@@ -274,6 +276,12 @@ mod tests {
         assert_eq!(clean_title("UN_WAV - SOCCA [FREE DOWNLOAD]"), "UN_WAV - SOCCA");
         assert_eq!(clean_title("Night Drive (Extended Mix)"), "Night Drive (Extended Mix)");
         assert_eq!(clean_title("Song | FREE DL"), "Song");
+        // Letters whose lowercase is shorter or longer in bytes: no cut
+        // inside a character.
+        assert_eq!(clean_title("ẞẞé free download"), "ẞẞé");
+        assert_eq!(clean_title("İstanbul İİ Buy = Free Download"), "İstanbul İİ");
+        assert_eq!(clean_title("Ⱥⱥ Song.WAV"), "Ⱥⱥ Song");
+        assert_eq!(find_ascii_nocase("ẞẞé free download", "free download"), Some(9));
     }
 
     #[test]

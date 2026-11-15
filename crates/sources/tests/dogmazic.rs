@@ -205,3 +205,48 @@ async fn an_album_needs_the_login_and_the_login_is_the_api() {
     assert!(!o.lossless());
     assert!(server.received_requests().await.unwrap().iter().all(|r| r.url.path() == "/rest/search3"), "no page asked");
 }
+
+/// stream.php answers with a redirect to the file, as the site does: the
+/// redirect is followed by hand, the range asked again, and each hop
+/// waits for its turn (the search, the redirect and the file: two pauses).
+#[tokio::test]
+async fn a_redirect_waits_for_its_turn_too() {
+    let server = MockServer::start().await;
+    search_page(&server).await;
+    let mp3 = mp3_bytes();
+    let file = "/play/type/song/oid/1430/uid/-1/format/raw/action/download/cache/1/name/x.mp3";
+    Mock::given(path("/stream.php"))
+        .and(query_param("song_id", "1430"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", file))
+        .mount(&server)
+        .await;
+    Mock::given(path(file))
+        .and(header_exists("range"))
+        .respond_with(part(&mp3, 8_531_968, "audio/mpeg"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let pace = Duration::from_millis(250);
+    let src = Dogmazic::with_pace(&server.uri(), "", "", pace);
+    let started = std::time::Instant::now();
+    let offers = src.search(&kali()).await.unwrap();
+    assert_eq!(offers[0].format.as_ref().unwrap().label(), "MP3 320");
+    assert!(started.elapsed() >= pace * 2, "{:?}", started.elapsed());
+    let paths: Vec<String> = server.received_requests().await.unwrap().iter().map(|r| r.url.path().to_owned()).collect();
+    assert_eq!(paths, ["/search.php", "/stream.php", file]);
+}
+
+/// A request waiting for its turn while another one is turned away (429)
+/// is not sent: the breaker is looked at again once the turn comes.
+#[tokio::test]
+async fn a_waiting_request_sees_the_pause_another_one_started() {
+    let server = MockServer::start().await;
+    Mock::given(path("/search.php")).respond_with(ResponseTemplate::new(429)).mount(&server).await;
+    let src = Dogmazic::with_pace(&server.uri(), "", "", Duration::from_millis(300));
+    let other = Want { title: Some("Primitiv Aberrations".into()), ..kali() };
+    let want = kali();
+    let (a, b) = tokio::join!(src.search(&want), src.search(&other));
+    assert!(a.unwrap_err().is_refusal());
+    assert!(b.unwrap_err().is_refusal());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1, "the second one never went out");
+}

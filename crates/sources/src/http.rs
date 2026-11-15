@@ -31,6 +31,18 @@ pub fn client() -> Client {
         .unwrap_or_default()
 }
 
+/// [`client`] that hands a redirect back instead of following it: a
+/// source that keeps a pace between its requests follows it itself.
+pub fn client_without_redirects() -> Client {
+    Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .user_agent(BROWSER_UA)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+}
+
 /// At most one request per `every` to one site.
 pub struct Pace {
     every: Duration,
@@ -203,7 +215,7 @@ pub fn ends_at_utc_midnight(now: u64, left: Duration) -> bool {
 
 /// No answer, with why (the name not found, the TLS handshake): reqwest's
 /// own line says only that sending failed.
-fn unreachable(e: reqwest::Error) -> SourceError {
+pub(crate) fn unreachable(e: reqwest::Error) -> SourceError {
     if e.is_timeout() {
         return SourceError::Unreachable("timed out".into());
     }
@@ -314,6 +326,10 @@ async fn exchange(http: &Client, url: &str, cookies: Option<&Cookies>, nav: Opti
         req = req.header(reqwest::header::COOKIE, c);
     }
     let resp = req.send().await.map_err(unreachable)?;
+    reply_of(resp, cookies).await
+}
+
+async fn reply_of(resp: Response, cookies: Option<&Cookies>) -> Result<Reply, SourceError> {
     if let Some(c) = cookies {
         c.keep(&resp);
     }
@@ -321,6 +337,18 @@ async fn exchange(http: &Client, url: &str, cookies: Option<&Cookies>, nav: Opti
     let retry_after = retry_after(&resp);
     let body = resp.text().await.map_err(unreachable)?;
     Ok(Reply { status, body, retry_after })
+}
+
+/// The body of a page that came (a request a source sent itself), told as
+/// [`get_page`] tells it; its cookies kept.
+pub async fn page_of(resp: Response, cookies: Option<&Cookies>) -> Result<String, SourceError> {
+    classify_page(reply_of(resp, cookies).await?)
+}
+
+/// The `Cookie` header of what a site set, for a request a source builds
+/// itself.
+pub fn cookie_header(cookies: &Cookies) -> Option<String> {
+    cookies.header()
 }
 
 fn classify_page(reply: Reply) -> Result<String, SourceError> {
@@ -350,8 +378,14 @@ pub async fn get_json<T: serde::de::DeserializeOwned>(http: &Client, url: &str) 
 /// Downloads `url` into `dest` (through `dest.part`), saying how far it got.
 /// A page instead of audio (an HTML error) is refused.
 pub async fn download(http: &Client, url: &str, dest: &Path, progress: &Progress) -> Result<PathBuf, SourceError> {
+    let resp = http.get(url).send().await.map_err(unreachable)?;
+    save(resp, dest, progress).await
+}
+
+/// A download that came (a request a source sent itself) into `dest`, as
+/// [`download`] writes it.
+pub async fn save(mut resp: Response, dest: &Path, progress: &Progress) -> Result<PathBuf, SourceError> {
     let io = |e: std::io::Error| SourceError::Io(e.to_string());
-    let mut resp = http.get(url).send().await.map_err(unreachable)?;
     let status = resp.status();
     if !status.is_success() {
         return Err(match status {
@@ -414,13 +448,24 @@ pub async fn download(http: &Client, url: &str, dest: &Path, progress: &Progress
 /// range gives its first bytes (the rest is not read); asked for bytes
 /// past the start, such a server is a [`SourceError::Parse`].
 pub async fn get_range(http: &Client, url: &str, from: u64, len: u64) -> Result<(Vec<u8>, Option<u64>), SourceError> {
-    let mut resp = http
+    let resp = http
         .get(url)
-        .header(reqwest::header::RANGE, format!("bytes={from}-{}", from + len.max(1) - 1))
+        .header(reqwest::header::RANGE, range_header(from, len))
         .timeout(PAGE_TIMEOUT)
         .send()
         .await
         .map_err(unreachable)?;
+    read_range(resp, from, len).await
+}
+
+/// The `Range` header's value for `len` bytes from `from`.
+pub fn range_header(from: u64, len: u64) -> String {
+    format!("bytes={from}-{}", from.saturating_add(len.max(1) - 1))
+}
+
+/// The answer to a range request (a request a source sent itself), read
+/// as [`get_range`] reads it.
+pub async fn read_range(mut resp: Response, from: u64, len: u64) -> Result<(Vec<u8>, Option<u64>), SourceError> {
     let status = resp.status();
     if !status.is_success() {
         return Err(match status {
