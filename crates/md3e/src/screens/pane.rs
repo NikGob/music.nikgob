@@ -374,11 +374,12 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
                     rows.push((entry, o.rect));
                 }
                 // The history must not push the current track out of view:
-                // bring it to the top whenever it changes (and on first show),
-                // not when a row is removed or moved.
+                // bring it to the top whenever it changes (and on first show)
+                // or shuffle turns on or off (the list moves around it), not
+                // when a row is removed or moved.
                 let key = ui.id().with("q-shown");
-                let shown = q.current_entry;
-                if ui.ctx().data(|d| d.get_temp::<Option<u64>>(key)) != Some(shown) {
+                let shown = (q.current_entry, state.player.shuffle);
+                if ui.ctx().data(|d| d.get_temp::<(Option<u64>, bool)>(key)) != Some(shown) {
                     ui.ctx().data_mut(|d| d.insert_temp(key, shown));
                     let r = Rect::from_min_max(egui::pos2(o.rect.left(), top), o.rect.max);
                     ui.scroll_to_rect(r, Some(egui::Align::TOP));
