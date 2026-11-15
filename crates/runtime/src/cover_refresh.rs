@@ -79,6 +79,10 @@ const FALLBACK_SEED: u32 = 0xFF67_50A4;
 /// many of 64 and their mean colours are at most this far apart.
 const SAME_BITS: u32 = 8;
 const SAME_COLOUR: u32 = 40;
+/// Two pictures are one only when their 8×8 colours differ by at most this
+/// on average (the same cover from four sources: under 1; the drawing of
+/// «рисунки» and the photo of its single: 147).
+const SAME_THUMB: u32 = 10;
 /// A step of light this large is plain to see; a picture needs this many
 /// of its 128 to be told from another.
 const STEP: u32 = 3;
@@ -89,7 +93,11 @@ const MAX_SIDE: u32 = 4000;
 const MAX_ALLOC: u64 = 128 << 20;
 /// The covers downloaded per refresh, at most; the time each has.
 const MAX_CANDIDATES: usize = 6;
-const IMAGE_BUDGET: Duration = Duration::from_secs(25);
+/// The time one try of a rendition has, at most (else its share of the
+/// time left).
+const TRY_TIME: Duration = Duration::from_secs(8);
+/// A cover image of the album's folder larger than this is not read.
+const MAX_FILE_BYTES: u64 = 48 << 20;
 /// The time of [`ONLINE_TIMEOUT`] the lookups leave for the downloads.
 const DOWNLOAD_TIME: Duration = Duration::from_secs(30);
 /// How long a refresh waits for another one's heavy work.
@@ -333,20 +341,25 @@ fn cover_images(dir: &Path) -> Vec<PathBuf> {
 
 /// What a picture looks like, small: for each colour whether each of 9×9
 /// is lighter than the next to its right and than the next below it, its
-/// mean colour, and how many of its 128 steps of light are plain to see.
+/// mean colour, how many of its 128 steps of light are plain to see, and
+/// the picture itself at 8×8 (its colours where they are).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Look {
     across: [u64; 3],
     down: [u64; 3],
     mean: [u8; 3],
     steps: u32,
+    thumb: [u8; 192],
 }
 
 /// The [`Look`] of a picture. A picture keeps it at any size and
 /// compression; another picture has another, and so does the same drawing
 /// in other colours or turned upside down.
 pub(crate) fn look(img: &image::DynamicImage) -> Look {
-    let small = img.thumbnail(64, 64).resize_exact(9, 9, image::imageops::FilterType::Triangle).to_rgb8();
+    let base = img.thumbnail(64, 64);
+    let small = base.resize_exact(9, 9, image::imageops::FilterType::Triangle).to_rgb8();
+    let mut thumb = [0u8; 192];
+    thumb.copy_from_slice(base.resize_exact(8, 8, image::imageops::FilterType::Triangle).to_rgb8().as_raw());
     let light = |p: [u8; 3]| (299 * u32::from(p[0]) + 587 * u32::from(p[1]) + 114 * u32::from(p[2])) / 1000;
     let mut across = [0u64; 3];
     let mut down = [0u64; 3];
@@ -369,19 +382,23 @@ pub(crate) fn look(img: &image::DynamicImage) -> Look {
             steps += u32::from(light(p).abs_diff(light(right)) >= STEP) + u32::from(light(p).abs_diff(light(below)) >= STEP);
         }
     }
-    Look { across, down, mean: sum.map(|s| u8::try_from(s / 81).unwrap_or(u8::MAX)), steps }
+    Look { across, down, mean: sum.map(|s| u8::try_from(s / 81).unwrap_or(u8::MAX)), steps, thumb }
 }
 
 /// Whether two looks are of one picture: each colour's steps alike both
-/// ways ([`SAME_BITS`]), the mean colours near ([`SAME_COLOUR`]). A picture
-/// with too little to tell (a flat colour, a faint gradient: fewer than
-/// [`MIN_STEPS`] plain steps) is never the same as any.
+/// ways ([`SAME_BITS`]), the mean colours near ([`SAME_COLOUR`]), and the
+/// small pictures themselves near, colour by colour, place by place
+/// ([`SAME_THUMB`] on average): steps alike in another layout are another
+/// picture. A picture with too little to tell (a flat colour, a faint
+/// gradient: fewer than [`MIN_STEPS`] plain steps) is never the same as
+/// any.
 fn same_picture(a: Option<&Look>, b: Option<&Look>) -> bool {
     let (Some(a), Some(b)) = (a, b) else { return false };
     let told = |l: &Look| l.steps >= MIN_STEPS;
     let near = a.mean.iter().zip(b.mean).map(|(x, y)| u32::from(x.abs_diff(y)).pow(2)).sum::<u32>() <= SAME_COLOUR * SAME_COLOUR;
     let alike = |x: &[u64; 3], y: &[u64; 3]| x.iter().zip(y).all(|(p, q)| (p ^ q).count_ones() <= SAME_BITS);
-    told(a) && told(b) && near && alike(&a.across, &b.across) && alike(&a.down, &b.down)
+    let close = a.thumb.iter().zip(b.thumb).map(|(x, y)| u32::from(x.abs_diff(y))).sum::<u32>() <= SAME_THUMB * 192;
+    told(a) && told(b) && near && close && alike(&a.across, &b.across) && alike(&a.down, &b.down)
 }
 
 /// The size of the picture in `bytes` from its header, when it is one.
@@ -465,7 +482,8 @@ fn own_art(files: &[PathBuf], images: &[PathBuf], dirs: &[PathBuf], max_edge: u3
         }
     }
     for p in images.iter().cloned().chain(dirs.iter().flat_map(|d| cover_images(d))) {
-        if let Ok(b) = std::fs::read(long_path(&p)) {
+        let small = std::fs::metadata(long_path(&p)).is_ok_and(|m| m.len() <= MAX_FILE_BYTES);
+        if small && let Ok(b) = std::fs::read(long_path(&p)) {
             take(b);
         }
     }
@@ -729,46 +747,86 @@ async fn measured(bytes: Vec<u8>, hold: &Hold) -> Option<(Vec<u8>, (u32, Look))>
     .flatten()
 }
 
-/// The picture of `found` by `fetch`: its largest rendition that comes
-/// and is a picture within the limits ([`measure`]), each in the time one
-/// image has and none past `deadline`. A frame of a video is none (at any
-/// size). A failure `fetch` calls a trouble of the url the source gave, or
-/// no answer in time, goes into `trouble`.
-async fn fetch_one<F, Fut>(found: &hd_covers::Found, fetch: &F, deadline: Instant, hold: &Hold, trouble: &mut Option<String>) -> Option<Fetched>
+/// What one try of a rendition came to.
+enum Tried {
+    Picture(Fetched),
+    /// A frame of a video: no cover at any size.
+    Frame,
+    Nothing,
+}
+
+/// The rendition `url` by `fetch`, in its fair share of the time left
+/// (that time over the `tries` left, at most [`TRY_TIME`]), measured within
+/// the caps ([`measure`]). A failure of the url the source gave (`own`)
+/// that `fetch` calls a trouble, or no answer in time, goes into `trouble`.
+#[allow(clippy::too_many_arguments)]
+async fn try_url<F, Fut>(url: &str, own: bool, stage: &str, fetch: &F, deadline: Instant, hold: &Hold, tries: &mut u32, trouble: &mut Option<String>) -> Tried
 where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
 {
-    let last = found.urls.len().saturating_sub(1);
-    for (i, url) in found.urls.iter().enumerate() {
-        let until = deadline.min(Instant::now() + IMAGE_BUDGET);
-        let bytes = match tokio::time::timeout_at(until, fetch(url.clone())).await {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err((e, hard))) => {
-                log::debug!("cover refresh: {url}: {e}");
-                if hard && i == last {
-                    trouble.get_or_insert(format!("{url}: {e}"));
-                }
-                continue;
+    let share = (deadline.saturating_duration_since(Instant::now()) / (*tries).max(1)).min(TRY_TIME);
+    *tries = tries.saturating_sub(1);
+    let bytes = match tokio::time::timeout(share, fetch(url.to_owned())).await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err((e, hard))) => {
+            log::debug!("cover refresh: {url}: {e}");
+            if hard && own {
+                trouble.get_or_insert(format!("{url}: {e}"));
             }
-            Err(_) => {
-                log::debug!("cover refresh: {url}: no answer in time");
-                trouble.get_or_insert(format!("{url}: no answer in time"));
-                continue;
-            }
-        };
-        if dimensions(&bytes).is_some_and(|(w, h)| cover_frame::is_frame(w, h)) {
-            log::debug!("cover refresh: {url} is a frame of a video");
-            return None;
+            return Tried::Nothing;
         }
-        match measured(bytes, hold).await {
-            Some((bytes, (side, look))) => {
-                return Some(Fetched { url: url.clone(), stage: found.stage.clone(), bytes, side, look });
+        Err(_) => {
+            log::debug!("cover refresh: {url}: no answer in time");
+            if own {
+                trouble.get_or_insert(format!("{url}: no answer in time"));
             }
-            None => log::debug!("cover refresh: {url} is no picture it takes"),
+            return Tried::Nothing;
+        }
+    };
+    if dimensions(&bytes).is_some_and(|(w, h)| cover_frame::is_frame(w, h)) {
+        log::debug!("cover refresh: {url} is a frame of a video");
+        return Tried::Frame;
+    }
+    match measured(bytes, hold).await {
+        Some((bytes, (side, look))) => Tried::Picture(Fetched { url: url.to_owned(), stage: stage.to_owned(), bytes, side, look }),
+        None => {
+            log::debug!("cover refresh: {url} is no picture it takes");
+            Tried::Nothing
         }
     }
-    None
+}
+
+/// The picture of `found` by `fetch`: the url its source gave first (it is
+/// known to be there), then the larger renditions made of it, largest
+/// first, each in its share of the time ([`try_url`]): one takes the place
+/// of what came only as the same picture, larger. A frame of a video is
+/// none (at any size).
+async fn fetch_one<F, Fut>(found: &hd_covers::Found, fetch: &F, deadline: Instant, hold: &Hold, tries: &mut u32, trouble: &mut Option<String>) -> Option<Fetched>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
+{
+    let (own, larger) = found.urls.split_last()?;
+    let mut got = match try_url(own, true, &found.stage, fetch, deadline, hold, tries, trouble).await {
+        Tried::Picture(f) => Some(f),
+        Tried::Frame => return None,
+        Tried::Nothing => None,
+    };
+    for url in larger {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let Tried::Picture(f) = try_url(url, false, &found.stage, fetch, deadline, hold, tries, trouble).await else { continue };
+        match &got {
+            Some(g) if !(same_picture(Some(&g.look), Some(&f.look)) && f.side > g.side) => {}
+            _ => {
+                got = Some(f);
+                break;
+            }
+        }
+    }
+    got
 }
 
 /// The album's art among `found`, taken in their order
@@ -789,6 +847,8 @@ where
     let mut best: Option<Fetched> = None;
     let mut trouble = None;
     let mut downloads = 0;
+    // The tries the time is shared by.
+    let mut tries = u32::try_from(found.iter().take(MAX_CANDIDATES).map(|f| f.urls.len()).sum::<usize>()).unwrap_or(u32::MAX);
     for f in &found {
         if f.lends && anchor.is_none() {
             continue;
@@ -802,7 +862,7 @@ where
             break;
         }
         downloads += 1;
-        let Some(got) = fetch_one(f, fetch, deadline, hold, &mut trouble).await else { continue };
+        let Some(got) = fetch_one(f, fetch, deadline, hold, &mut tries, &mut trouble).await else { continue };
         match &anchor {
             None => {
                 anchor = Some(got.look);
@@ -834,7 +894,7 @@ where
     if best.stage == best.url || Instant::now() >= deadline {
         return best.url.clone();
     }
-    let until = deadline.min(Instant::now() + IMAGE_BUDGET);
+    let until = deadline.min(Instant::now() + TRY_TIME);
     let Ok(Ok(bytes)) = tokio::time::timeout_at(until, fetch(best.stage.clone())).await else { return best.url.clone() };
     if dimensions(&bytes).is_none_or(|(w, h)| cover_frame::is_frame(w, h)) {
         return best.url.clone();
@@ -845,19 +905,37 @@ where
     }
 }
 
+/// What a refresh takes online of what the lookups found (`finds`): the
+/// cover [`select`] takes. Covers found but none usable, or nothing found
+/// while a lookup could not answer, is a failure (the cover stays as it
+/// is, with its toast), never a miss: a miss lets the files' art win, and
+/// that may be the single's. A cover that came wins whatever failed
+/// besides.
+async fn take_online<F, Fut>(finds: hd_covers::Finds, fetch: &F, deadline: Instant, hold: &Hold) -> Result<Option<Fetched>, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
+{
+    let hd_covers::Finds { found, trouble } = finds;
+    if found.is_empty() {
+        return trouble.map_or(Ok(None), Err);
+    }
+    match select(found, fetch, deadline, hold).await {
+        Ok(Some(best)) => Ok(Some(best)),
+        Ok(None) => Err(trouble.unwrap_or_else(|| "no cover found online came as a picture".to_owned())),
+        Err(e) => Err(trouble.unwrap_or(e)),
+    }
+}
+
 /// The album's art online: the covers [`hd_covers::find_all`] finds in
 /// [`ONLINE_TIMEOUT`] less the time kept for the downloads
-/// ([`DOWNLOAD_TIME`]), downloaded one by one ([`select`]) within it, the
-/// heavy work held (`hold`): when time runs out, the best that came. Err:
-/// nothing came and a source could not answer, or time ran out first.
+/// ([`DOWNLOAD_TIME`]), downloaded one by one within it ([`take_online`]),
+/// the heavy work held (`hold`): when time runs out, the best that came.
 async fn online(meta: &Metadata, services: &[Arc<dyn StreamService>], w: &hd_covers::Want, max_edge: u32, hold: &Hold) -> Result<Option<Online>, String> {
     let deadline = Instant::now() + ONLINE_TIMEOUT;
-    let found = hd_covers::find_all(Some(meta), services, w, true, Some(deadline - DOWNLOAD_TIME)).await?;
-    if found.is_empty() {
-        return Ok(None);
-    }
+    let finds = hd_covers::find_all(Some(meta), services, w, true, Some(deadline - DOWNLOAD_TIME)).await;
     let fetch = |url: String| async move { meta.cover_art.download(&url).await.map_err(|e| (e.to_string(), better_covers::meta_trouble(&e))) };
-    let Some(best) = select(found, &fetch, deadline, hold).await? else { return Ok(None) };
+    let Some(best) = take_online(finds, &fetch, deadline, hold).await? else { return Ok(None) };
     log::info!("cover refresh of «{}»: {} of {} px online", w.title, best.url, best.side);
     let keep = keep_url(&best, &fetch, deadline, hold).await;
     let Fetched { bytes, side, look, .. } = best;
@@ -1168,6 +1246,85 @@ mod tests {
         };
         let got = select(vec![found(true, &["a"]), found(false, &["b"])], &fetch, far(), &hold()).await.unwrap().unwrap();
         assert_eq!((got.url.as_str(), got.side), ("a", 600));
+    }
+
+    /// A picture whose light grows along both sides at other rates.
+    fn diagonal(w: u32, h: u32, across: u32, down: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = u8::try_from(20 + across * x / w + down * y / h).unwrap();
+            image::Rgb([v, v, v])
+        });
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    }
+
+    /// Two gradients whose steps go the same ways and whose means are the
+    /// same, but steep across in one and down in the other, are two
+    /// pictures (their corners differ): through decoding, measuring and the
+    /// choice, a larger one never takes the anchor's place.
+    #[tokio::test]
+    async fn steps_alike_in_another_layout_are_another_picture() {
+        let (a, b) = (diagonal(600, 600, 135, 45), diagonal(900, 900, 45, 135));
+        assert!(!same_picture(look_of(&a).as_ref(), look_of(&b).as_ref()));
+        assert!(same_picture(look_of(&a).as_ref(), look_of(&diagonal(900, 900, 135, 45)).as_ref()));
+        let pics: HashMap<&str, Vec<u8>> = HashMap::from([("a", a), ("b", b)]);
+        let fetch = |url: String| {
+            let got = pics.get(url.as_str()).cloned();
+            async move { got.ok_or_else(|| ("404".to_owned(), false)) }
+        };
+        let got = select(vec![found(true, &["a"]), found(false, &["b"])], &fetch, far(), &hold()).await.unwrap().unwrap();
+        assert_eq!((got.url.as_str(), got.side), ("a", 600));
+    }
+
+    /// The url the source gave is tried first; a larger rendition made of
+    /// it that stalls has only its share of the time, and one of another
+    /// picture leaves the source's.
+    #[tokio::test]
+    async fn the_source_url_comes_before_a_larger_one_made_of_it() {
+        let pics: HashMap<&str, Vec<u8>> = HashMap::from([("own", drawing(544, 544, 2)), ("big", drawing(1440, 1440, 2)), ("odd", drawing(1440, 1440, 7))]);
+        let fetch = |url: String| {
+            let got = pics.get(url.as_str()).cloned();
+            async move {
+                if url == "stall" {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+                got.ok_or_else(|| ("404".to_owned(), true))
+            }
+        };
+        let started = Instant::now();
+        let soon = started + Duration::from_secs(2);
+        let got = select(vec![found(true, &["stall", "own"])], &fetch, soon, &hold()).await.unwrap().unwrap();
+        assert_eq!(got.url, "own");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let got = select(vec![found(true, &["big", "own"])], &fetch, far(), &hold()).await.unwrap().unwrap();
+        assert_eq!((got.url.as_str(), got.side), ("big", 1440));
+        let got = select(vec![found(true, &["odd", "own"])], &fetch, far(), &hold()).await.unwrap().unwrap();
+        assert_eq!(got.url, "own");
+        // The source's url gone: the larger one stands.
+        let got = select(vec![found(true, &["big", "gone"])], &fetch, far(), &hold()).await.unwrap().unwrap();
+        assert_eq!(got.url, "big");
+    }
+
+    /// Covers found but none usable, or nothing found while a lookup could
+    /// not answer, is a failure (the cover stays), never a miss that lets
+    /// the files' art win; nothing found and nothing failed is a miss; a
+    /// cover that came wins whatever failed besides.
+    #[tokio::test]
+    async fn a_lookup_that_failed_is_no_miss() {
+        let pics: HashMap<&str, Vec<u8>> = HashMap::from([("ok", drawing(600, 600, 2))]);
+        let fetch = |url: String| {
+            let got = pics.get(url.as_str()).cloned();
+            async move { got.ok_or_else(|| ("404".to_owned(), false)) }
+        };
+        let finds = |found: Vec<hd_covers::Found>, trouble: Option<&str>| hd_covers::Finds { found, trouble: trouble.map(str::to_owned) };
+        let lends = hd_covers::Found { lends: true, ..found(false, &["ok"]) };
+        assert!(take_online(finds(vec![lends], None), &fetch, far(), &hold()).await.is_err(), "only one that lends");
+        assert!(take_online(finds(vec![found(true, &["gone"])], None), &fetch, far(), &hold()).await.is_err(), "none came");
+        assert!(take_online(finds(Vec::new(), Some("Deezer: no answer in time")), &fetch, far(), &hold()).await.is_err());
+        assert!(take_online(finds(Vec::new(), None), &fetch, far(), &hold()).await.unwrap().is_none());
+        let got = take_online(finds(vec![found(true, &["ok"])], Some("iTunes: 503")), &fetch, far(), &hold()).await.unwrap();
+        assert_eq!(got.map(|b| b.url).as_deref(), Some("ok"));
     }
 
     /// A cover that only lends its size (a linked Spotify album by its
