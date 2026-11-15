@@ -11,6 +11,7 @@ mod artist_names;
 mod quality;
 mod same_audio;
 mod better_covers;
+mod cover_refresh;
 mod stream_covers;
 mod convert;
 mod enrich;
@@ -685,6 +686,8 @@ struct Worker {
     recs: recs::RecsState,
     /// Albums whose larger cover was looked up in this run.
     hd_asked: hd_covers::Asked,
+    /// Albums whose «Обновить обложку» runs.
+    cover_refresh: cover_refresh::Busy,
     /// Albums and clips whose real art was looked up in this run.
     better_asked: better_covers::Asked,
     /// Real art of the stream tracks' video thumbnails on screen.
@@ -908,6 +911,7 @@ impl Worker {
             quality,
             same_audio,
             hd_asked: Default::default(),
+            cover_refresh: Default::default(),
             better_asked: Default::default(),
             stream_covers: Default::default(),
             album_queue: None,
@@ -1664,6 +1668,8 @@ impl Worker {
             Command::TrackInfo(track) => self.track_info(track),
             Command::FindBetterAlbum(release) => self.find_better_album(release),
             Command::UndoBetterAlbum(release) => self.undo_better_album(release),
+            Command::RefreshReleaseCover(release) => self.refresh_release_cover(release),
+            Command::RefreshStreamAlbumCover(album) => self.refresh_stream_album_cover(album),
             Command::FakeToMp3(track) => self.fake_to_mp3(track),
             Command::UndoFakeToMp3(pairs) => self.undo_fake_to_mp3(pairs),
             Command::RecordingApart(track) => self.recording_apart(track),

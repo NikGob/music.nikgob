@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{ArtistId, ReleaseId, TrackId};
-use nikgob_core::streaming::{EntityKind, Service, StreamError, StreamService, TrackKind};
+use nikgob_core::streaming::{Service, StreamError, StreamService, TrackKind};
 use nikgob_core::{cover_frame, names};
 use nikgob_library::{Library, TrackRow, is_web_ref, now_ms};
 use nikgob_metadata::text::{artist_key, similarity, title_key};
@@ -78,8 +78,9 @@ impl Target {
         match self {
             // `v2`: an album found by its title alone took the art of
             // another artist's («There is a reason (RUS COVER)» got «The
-            // Rush – Is the Reason»): asked again with the artist.
-            Self::Release(id) => format!("cover_better.v2.{id}"),
+            // Rush – Is the Reason»): asked again with the artist. `v3`:
+            // never a single's art for an album of more songs.
+            Self::Release(id) => format!("cover_better.v3.{id}"),
             Self::Track(id) => format!("cover_better.track.{id}"),
         }
     }
@@ -91,6 +92,13 @@ pub(crate) fn cached(lib: &Library, target: Target, current: Option<&str>) -> Op
     let (_, value) = lib.cache_get(&target.key()).ok().flatten()?;
     let (replaced, url) = value.split_once(SEP)?;
     (!url.is_empty() && replaced == current.unwrap_or("")).then(|| url.to_owned())
+}
+
+/// The cache entry «Обновить обложку» of release `id` leaves (key, value):
+/// its cover `current` counts as asked (`url`: what it shows instead, empty
+/// for its own), so a sweep does not bring the old art back.
+pub(crate) fn settled(id: ReleaseId, current: Option<&str>, url: &str) -> (String, String) {
+    (Target::Release(id).key(), format!("{}{SEP}{url}", current.unwrap_or("")))
 }
 
 /// Whether `target` was not looked up for its `current` cover yet, or found
@@ -139,6 +147,9 @@ pub(crate) struct Want {
     /// A song's match counts: a clip, a single. An album takes only the
     /// art of an album of its title.
     pub song_ok: bool,
+    /// When the lookup was made (unix ms): a refresh by hand since then has
+    /// the last word ([`crate::cover_refresh::decision_key`]).
+    pub asked_at: i64,
 }
 
 fn folded(s: &str) -> String {
@@ -158,10 +169,34 @@ pub(crate) fn accepts(w: &Want, artist: &str, title: &str, album: Option<&str>) 
             k == t || similarity(&k, &t) >= 0.92
         });
     let same_album = match (&w.album, album) {
-        (Some(want), Some(theirs)) => album_titles(&want.title).iter().any(|t| hd_covers::same_album(t, theirs)),
+        (Some(want), Some(theirs)) => {
+            // An album of several songs: never a hit whose album says it is
+            // a single or an EP («… - Single» on iTunes).
+            let small = !w.song_ok && titled_kind(theirs).is_some();
+            !small && album_titles(&want.title).iter().any(|t| hd_covers::same_album(t, theirs))
+        }
         _ => false,
     };
     same_album || (song && (w.song_ok || w.album.is_none()))
+}
+
+/// The kind an album title says it is: iTunes and others end a single's
+/// with « - Single», an EP's with « - EP».
+fn titled_kind(title: &str) -> Option<nikgob_core::model::ReleaseType> {
+    let t = title.trim_end().to_lowercase();
+    if t.ends_with(" - single") || t.ends_with("(single)") {
+        Some(nikgob_core::model::ReleaseType::Single)
+    } else if t.ends_with(" - ep") || t.ends_with("(ep)") {
+        Some(nikgob_core::model::ReleaseType::Ep)
+    } else {
+        None
+    }
+}
+
+/// Whether the album of a Deezer song hit may give its art to `w`: what
+/// Deezer tells of its kind and songs fits ([`hd_covers::Want::takes`]).
+fn deezer_album_fits(w: &Want, a: &nikgob_metadata::deezer::DeezerAlbum) -> bool {
+    w.album.as_ref().is_none_or(|want| want.takes(hd_covers::deezer_kind(a.record_type.as_deref()), a.nb_tracks))
 }
 
 /// Whether one of `names` is the hit's `artist` (spelled alike, in another
@@ -268,8 +303,11 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
         for q in &queries {
             match meta.deezer.search_raw(q, 10).await {
                 Ok(hits) => {
+                    // The song on its single of the album's title is no
+                    // hit for the album, when Deezer tells the kind.
                     let found = hits.iter().find(|h| {
                         accepts(w, h.artist_name(), &h.title, h.album.as_ref().map(|a| a.title.as_str()))
+                            && h.album.as_ref().is_none_or(|a| deezer_album_fits(w, a))
                     });
                     if let Some(url) = found.and_then(|h| h.album.as_ref()).and_then(|a| a.best_cover()) {
                         return Ok(Some(url.to_owned()));
@@ -513,7 +551,8 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     let target = Target::Release(id);
     let r = lib.get_release(id).ok().flatten()?;
     let current = r.cover_ref.clone();
-    if !due(lib, target, current.as_deref(), now) {
+    // Refreshed by hand: its cover stays.
+    if !due(lib, target, current.as_deref(), now) || crate::cover_refresh::decided(lib, id, current.as_deref()) {
         return None;
     }
     let dims = current.as_deref().filter(|c| !is_web_ref(c)).and_then(|c| {
@@ -525,37 +564,27 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     }
     let frame = dims.is_some_and(|(w, h)| cover_frame::is_frame(w, h));
     let tracks = lib.tracks_of_release(id).unwrap_or_default();
-    let deezer = lib
-        .external_ids(EntityKind::Album, *id.as_uuid())
-        .unwrap_or_default()
-        .into_iter()
-        .find(|x| x.service == Service::Deezer)
-        .and_then(|x| x.id.parse().ok());
     // A file saved from a clip, or a clip: its song as the clip's title
     // says; else the album's artist, its songs and the album itself.
     let clip = frame || row.is_clip();
     let mut want = if clip {
         clip_want(tracks.first().unwrap_or(row))
     } else {
+        let album = hd_covers::want_of(lib, &r, Vec::new());
         Want {
             artists: vec![r.artist_credit.display()],
             titles: tracks.iter().take(2).map(|t| t.title.clone()).collect(),
             context: r.title.clone(),
-            // A single's song is the single.
-            song_ok: tracks.len() <= 1,
-            album: Some(hd_covers::Want {
-                id,
-                mbid: r.mbid.clone(),
-                group_mbid: r.release_group_mbid.clone(),
-                deezer,
-                title: r.title.clone(),
-                artists: Vec::new(),
-            }),
+            // A single's song is the single; an album of more songs than
+            // came in (its count) takes only its own album's art.
+            song_ok: album.song_stands(),
+            album: Some(album),
             ..Want::default()
         }
     };
     want.target = Some(target);
     want.current = current;
+    want.asked_at = now;
     let mut own = vec![row.id];
     own.extend(tracks.iter().take(2).map(|t| t.id).filter(|t| *t != row.id));
     widen(lib, spellings.get_or_insert_with(|| Spellings::of(lib)), &mut want, &own);
@@ -620,7 +649,7 @@ where
     let mut done = Swept { asked: 0, found: 0, stopped: None };
     for w in wants {
         let Some(target) = w.target else { continue };
-        let (current, title) = (w.current.clone(), w.titles.first().cloned());
+        let (current, title, since) = (w.current.clone(), w.titles.first().cloned(), w.asked_at);
         // Waits while a game is in front (outside the lookup's timeout).
         if quiet {
             crate::quiet::free().await;
@@ -637,8 +666,16 @@ where
             }
         };
         done.asked += 1;
-        let _ = lib.cache_put(&target.key(), now_ms(), &format!("{}{SEP}{url}", current.as_deref().unwrap_or("")));
-        if url.is_empty() {
+        let value = format!("{}{SEP}{url}", current.as_deref().unwrap_or(""));
+        let kept = match target {
+            Target::Release(id) => {
+                lib.cache_put_unless(&target.key(), now_ms(), &value, &crate::cover_refresh::decision_key(id), since).unwrap_or(false)
+            }
+            Target::Track(_) => lib.cache_put(&target.key(), now_ms(), &value).is_ok(),
+        };
+        if !kept {
+            log::debug!("art for {target:?} ({title:?}) not kept: its cover was refreshed meanwhile");
+        } else if url.is_empty() {
             log::debug!("no art for {target:?} ({title:?})");
         } else {
             log::info!("art for {target:?} ({title:?}): {url}");
@@ -847,6 +884,8 @@ mod tests {
             deezer: None,
             title: "Mushoku Tensei ~Isekai Ittara Honki Dasu~ Original Soundtrack 2 Special Edition".into(),
             artists: Vec::new(),
+            release_type: nikgob_core::model::ReleaseType::Album,
+            tracks: 0,
         });
         assert!(
             !accepts(&w, "Yoshiaki Fujisawa", "Something", Some("Mushoku Tensei: Jobless Reincarnation (Original Soundtrack 2)")),
@@ -906,6 +945,13 @@ mod tests {
         // A new cover imported since: its own, and asked again.
         assert_eq!(cached(&lib, t, Some("a/new-cover.jpg")), None);
         assert!(due(&lib, t, Some("a/new-cover.jpg"), now_ms()));
+        // Refreshed by hand: the art found goes, and the cover is asked.
+        let put = |(k, v): (String, String)| lib.cache_put(&k, now_ms(), &v).unwrap();
+        put(settled(id, Some("a/cover.jpg"), ""));
+        assert_eq!(cached(&lib, t, Some("a/cover.jpg")), None);
+        assert!(!due(&lib, t, Some("a/cover.jpg"), now_ms()));
+        put(settled(id, Some("https://x/stream.jpg"), "https://x/album.jpg"));
+        assert_eq!(cached(&lib, t, Some("https://x/stream.jpg")).as_deref(), Some("https://x/album.jpg"));
         // A miss is asked again after a while.
         let c = Target::Track(TrackId::new());
         lib.cache_put(&c.key(), now_ms() - RETRY_MS - 1, &format!("{SEP}")).unwrap();
@@ -923,6 +969,8 @@ mod tests {
             deezer: None,
             title: title.into(),
             artists: vec![artist.into()],
+            release_type: nikgob_core::model::ReleaseType::Album,
+            tracks: 0,
         });
         w
     }
@@ -944,6 +992,60 @@ mod tests {
         // A title in two scripts matches by either part.
         let concert = album_want("Ensemble G.A.P. TOKYO", &["x"], "第二回演奏会 メイドインアビス / THE SECOND CONCERT MADE IN ABYSS", false);
         assert!(accepts(&concert, "Ensemble G.A.P. TOKYO", "y", Some("The Second Concert: Made in Abyss")));
+    }
+
+    /// An album of several songs takes song art only from a hit on that
+    /// album: not one without an album, not its single (by the title iTunes
+    /// gives it, or by what Deezer tells), not an album of one song.
+    #[test]
+    fn an_album_of_several_songs_takes_song_art_only_from_itself() {
+        let mut w = album_want("Artist", &["Рисунки"], "Рисунки", false);
+        if let Some(a) = w.album.as_mut() {
+            a.tracks = 11;
+        }
+        assert!(accepts(&w, "Artist", "Рисунки", Some("Рисунки")));
+        assert!(!accepts(&w, "Artist", "Рисунки", None), "its album untold");
+        assert!(!accepts(&w, "Artist", "Рисунки", Some("Рисунки - Single")));
+        assert!(!accepts(&w, "Artist", "Рисунки", Some("Рисунки - EP")));
+        let deezer = |record: Option<&str>, n: Option<u32>| nikgob_metadata::deezer::DeezerAlbum {
+            title: "Рисунки".into(),
+            record_type: record.map(str::to_owned),
+            nb_tracks: n,
+            ..Default::default()
+        };
+        assert!(!deezer_album_fits(&w, &deezer(Some("single"), Some(1))));
+        assert!(!deezer_album_fits(&w, &deezer(Some("album"), Some(1))));
+        assert!(deezer_album_fits(&w, &deezer(Some("album"), Some(11))));
+        assert!(deezer_album_fits(&w, &deezer(None, None)), "what Deezer does not tell is no mismatch");
+        // The single itself takes its song's art from anywhere.
+        let single = album_want("Artist", &["Рисунки"], "Рисунки", true);
+        assert!(accepts(&single, "Artist", "Рисунки", Some("Рисунки - Single")));
+        assert!(accepts(&single, "Artist", "Рисунки", None));
+    }
+
+    /// An album of which one song came in, its count 11: its lookup takes
+    /// no song art from elsewhere; a single of one song does.
+    #[test]
+    fn a_partly_imported_album_counts_its_songs_by_its_total() {
+        use nikgob_core::model::{ArtistCredit, Release, ReleaseType, Track};
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows = Vec::new();
+        for (album, kind, total) in [("Part", ReleaseType::Album, Some(11)), ("One", ReleaseType::Single, Some(1))] {
+            std::fs::create_dir_all(dir.path().join(album)).unwrap();
+            image::RgbImage::from_pixel(300, 300, image::Rgb([90, 60, 30])).save(dir.path().join(album).join("cover.png")).unwrap();
+            let mut r = Release::new(album, ArtistCredit::single("X", None));
+            r.cover_ref = Some(format!("{album}/cover.png"));
+            r.release_type = kind;
+            r.total_tracks = total;
+            let r = lib.upsert_release(&r).unwrap();
+            let mut t = Track::new(format!("{album} song"), ArtistCredit::single("X", None));
+            t.release_id = Some(r.id);
+            let t = lib.upsert_track(&t).unwrap();
+            rows.push(lib.get_track_row(t.id).unwrap().unwrap());
+        }
+        let got = wants(&lib, dir.path(), &rows, &Asked::default());
+        assert_eq!(got.iter().map(|w| w.song_ok).collect::<Vec<_>>(), [false, true]);
     }
 
     fn row_of(lib: &Library, title: &str, artist: &str) -> TrackRow {

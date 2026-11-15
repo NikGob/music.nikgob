@@ -3143,6 +3143,10 @@ pub struct ViewState {
     /// Bumped when cover files on disk may have been rewritten (an import,
     /// a retag), so a UI looks at the covers it holds again.
     pub cover_files: u64,
+    /// Web covers to ask anew, whatever is kept of them (in memory, on
+    /// disk, decoded): «Обновить обложку» of a service's album. Counted, so
+    /// a UI does it once per change.
+    pub refetch_covers: (u64, Vec<String>),
     /// Real album art found for the video thumbnails of stream tracks drawn
     /// on screen ([`Command::RealCovers`]): the thumbnail's url → the art's.
     pub real_covers: std::sync::Arc<std::collections::HashMap<String, String>>,
@@ -3527,6 +3531,12 @@ pub enum Command {
     /// Takes the files [`Self::FindBetterAlbum`] replaced back, the whole
     /// album at once: the old files from the Trash, the new ones into it.
     UndoBetterAlbum(ReleaseId),
+    /// «Обновить обложку» of an album: its art is picked again from its
+    /// files and looked up online, the best of it becomes its cover.
+    RefreshReleaseCover(ReleaseId),
+    /// «Обновить обложку» of a service's album: it is fetched again, and the
+    /// open artist's discography that shows it.
+    RefreshStreamAlbumCover(RemoteId),
     /// «Превратить в MP3» of a track whose lossless file surely holds an
     /// MP3: its MP3 with the tags, cover and lyrics takes its place, the
     /// original goes to the Trash.

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{EventContext, LikeTarget, TrackId};
 use nikgob_core::streaming::{
-    RemoteId, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamTrack, join_names,
+    EntityKind, RemoteId, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamTrack, join_names,
 };
 use nikgob_view::{self as v, Command};
 
@@ -129,7 +129,17 @@ impl PageCache {
 
     /// The playlist changed in its service: the next open fetches it.
     pub(crate) fn stale_playlist(&mut self, id: &RemoteId) {
-        if let Some((at, _)) = self.entries.get_mut(&(Kind::Playlist, id.clone())) {
+        self.stale(&(Kind::Playlist, id.clone()));
+    }
+
+    /// The album is asked for anew («Обновить обложку»): the next open
+    /// fetches it.
+    pub(crate) fn stale_album(&mut self, id: &RemoteId) {
+        self.stale(&(Kind::Album, id.clone()));
+    }
+
+    fn stale(&mut self, key: &Key) {
+        if let Some((at, _)) = self.entries.get_mut(key) {
             *at = Instant::now() - Duration::from_secs(365 * 24 * 3600);
         }
     }
@@ -244,6 +254,46 @@ impl Worker {
         };
         self.publish(|s| s.stream_page = Some(view));
         self.fetch_page(key, Waiter::Page { seq, page }, svc);
+    }
+
+    /// «Обновить обложку» of a service's album: what the service, the page
+    /// cache and the UI keep of it and of its cover goes, its page is
+    /// fetched again (now, when it is open), and so is the discography of
+    /// the open artist that shows it (the artist too, in every service).
+    pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
+        let mut covers: Vec<String> = self.streaming.pages.album(&id).and_then(|a| a.cover_url.clone()).into_iter().collect();
+        self.streaming.pages.stale_album(&id);
+        if let Some(svc) = self.service(id.service) {
+            svc.forget(EntityKind::Album, &id.id);
+        }
+        let (page, artist) = {
+            let s = self.state.read();
+            let page = s.stream_page.as_ref().filter(|p| *p.page.remote() == id).map(|p| (p.page.clone(), p.cover_url.clone()));
+            let artist = s.artist.as_ref().and_then(|a| {
+                let card = a.discography.albums.iter().find(|c| c.remote == id)?;
+                Some((a.card.id, card.cover_url.clone()))
+            });
+            (page, artist)
+        };
+        covers.extend(page.as_ref().and_then(|(_, c)| c.clone()));
+        covers.extend(artist.as_ref().and_then(|(_, c)| c.clone()));
+        covers.sort_unstable();
+        covers.dedup();
+        if !covers.is_empty() {
+            self.publish(|s| s.refetch_covers = (s.refetch_covers.0 + 1, covers));
+        }
+        if let Some((page @ v::StreamPage::Album(_), _)) = page {
+            self.load_stream(page);
+        }
+        if let Some((artist, _)) = artist {
+            for remote in self.lib.external_ids(EntityKind::Artist, *artist.as_uuid()).unwrap_or_default() {
+                if let Some(svc) = self.service(remote.service) {
+                    svc.forget(EntityKind::Artist, &remote.id);
+                }
+            }
+            let _ = self.lib.cache_drop(&super::discography::cache_key(artist));
+            self.load_discography(artist, false);
+        }
     }
 
     /// How long a page of this kind is shown without asking again.

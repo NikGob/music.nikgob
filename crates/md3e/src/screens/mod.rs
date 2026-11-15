@@ -479,6 +479,14 @@ impl Md3eUi {
                 crate::covers::refresh(ctx);
             }
         }
+        // Web covers asked anew («Обновить обложку» of a service's album).
+        let refetch_id = egui::Id::new("md3e-cover-refetch");
+        if ctx.data(|d| d.get_temp::<u64>(refetch_id)) != Some(state.refetch_covers.0) {
+            ctx.data_mut(|d| d.insert_temp(refetch_id, state.refetch_covers.0));
+            for url in &state.refetch_covers.1 {
+                crate::covers::refetch(ctx, url);
+            }
+        }
         // Video thumbnails of stream tracks: the real art the runtime found
         // is drawn in their place, those drawn since the last frame are
         // looked up.

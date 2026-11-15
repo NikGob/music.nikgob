@@ -133,6 +133,16 @@ impl DiskCache {
         Ok(())
     }
 
+    /// Drops the image of `url`: it is asked anew.
+    pub fn remove(&self, url: &str) {
+        let path = self.path(url);
+        if let Ok(m) = fs::metadata(&path)
+            && fs::remove_file(&path).is_ok()
+        {
+            self.sub(m.len());
+        }
+    }
+
     fn sub(&self, n: u64) {
         let mut size = self.size.lock().unwrap_or_else(PoisonError::into_inner);
         *size = size.saturating_sub(n);
@@ -232,6 +242,21 @@ mod tests {
             assert!(c.get(url).is_some(), "{url} stays");
         }
         assert!(c.size() <= one * 3);
+    }
+
+    #[test]
+    fn a_removed_cover_is_a_miss_and_leaves_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = DiskCache::open(dir.path(), DEFAULT_LIMIT).unwrap();
+        let img = png(8, 4);
+        c.put("https://x/a", &img).unwrap();
+        c.put("https://x/b", &img).unwrap();
+        c.remove("https://x/a");
+        assert_eq!(c.get("https://x/a"), None);
+        assert!(c.get("https://x/b").is_some());
+        assert_eq!(c.size(), img.len() as u64);
+        c.remove("https://x/a");
+        assert_eq!(c.size(), img.len() as u64);
     }
 
     #[test]

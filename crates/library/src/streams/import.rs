@@ -24,7 +24,7 @@
 //!   services are skipped there.
 
 use nikgob_core::model::{
-    Event, EventId, EventType, LikeTarget, ReleaseId, Track, TrackId, UnixMs, Uuid,
+    Event, EventId, EventType, LikeTarget, Palette, ReleaseId, Track, TrackId, UnixMs, Uuid,
 };
 use nikgob_core::streaming::{AlbumRef, ArtistRef, EntityKind, Service, StreamTrack};
 use rusqlite::{OptionalExtension, params};
@@ -511,6 +511,70 @@ impl Library {
 
     pub fn cache_put(&self, key: &str, at: UnixMs, value: &str) -> Result<()> {
         self.write(|tx| meta_set(tx, &format!("{CACHE_PREFIX}{key}"), &format!("{at}|{value}")))
+    }
+
+    /// [`Self::cache_put`], unless the cached answer of `unless` was put at
+    /// `since` or later (a decision taken while the answer was looked up);
+    /// whether it was put. One transaction: nothing comes in between.
+    pub fn cache_put_unless(&self, key: &str, at: UnixMs, value: &str, unless: &str, since: UnixMs) -> Result<bool> {
+        let key = format!("{CACHE_PREFIX}{key}");
+        let unless = format!("{CACHE_PREFIX}{unless}");
+        self.write(|tx| {
+            let newer = meta_get(tx, &unless)?
+                .and_then(|v| v.split_once('|').and_then(|(t, _)| t.parse::<UnixMs>().ok()))
+                .is_some_and(|t| t >= since);
+            if newer {
+                return Ok(false);
+            }
+            meta_set(tx, &key, &format!("{at}|{value}"))?;
+            Ok(true)
+        })
+    }
+
+    /// «Обновить обложку» decided, in one transaction: the release's cover
+    /// ref and palette (when given), the cached answers `puts` put at `at`
+    /// and `drops` dropped. A lookup that began before it and puts with
+    /// [`Self::cache_put_unless`] comes either before all of it or not at all.
+    pub fn settle_cover(
+        &self,
+        release: ReleaseId,
+        cover_ref: Option<&str>,
+        palette: Option<&Palette>,
+        at: UnixMs,
+        puts: &[(String, String)],
+        drops: &[String],
+    ) -> Result<()> {
+        self.write(|tx| {
+            if let Some(r) = cover_ref {
+                tx.execute("UPDATE release SET cover_ref = ?2 WHERE id = ?1", params![release.to_string(), r])?;
+            }
+            if let Some(p) = palette {
+                tx.execute(
+                    "INSERT INTO palette(release_id, seed_argb, scheme_blob, ambient_blur, computed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(release_id) DO UPDATE SET seed_argb = excluded.seed_argb,
+                        scheme_blob = excluded.scheme_blob, ambient_blur = excluded.ambient_blur,
+                        computed_at = excluded.computed_at",
+                    params![release.to_string(), i64::from(p.seed_argb), p.scheme_blob, p.ambient_blur, at],
+                )?;
+            }
+            for k in drops {
+                tx.execute("DELETE FROM meta WHERE key = ?1", [format!("{CACHE_PREFIX}{k}")])?;
+            }
+            for (k, v) in puts {
+                meta_set(tx, &format!("{CACHE_PREFIX}{k}"), &format!("{at}|{v}"))?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Forgets the cached answer of `key`.
+    pub fn cache_drop(&self, key: &str) -> Result<()> {
+        let key = format!("{CACHE_PREFIX}{key}");
+        self.write(|tx| {
+            tx.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+            Ok(())
+        })
     }
 
     /// Forgets the cached answers whose key starts with `prefix` and whose

@@ -1,0 +1,1003 @@
+//! «Обновить обложку» of a library album. Its art is picked again from its
+//! own files (each track's picture, its master's, the cover it shows and
+//! the cover images of its own folder) and looked up online as
+//! [`hd_covers::find`] does: the Cover Art Archive by its ids when
+//! MusicBrainz says they are of its kind, the Deezer album linked to it
+//! unless that is a single, the album of its title on the services, never
+//! a single or an EP for an album of more songs. The album's art found
+//! online wins over its files' when it is at least as large: a file may
+//! hold the art of the single the album was once taken for. Else the
+//! largest picture of its files that is no frame of a video.
+//!
+//! Where the art goes: the album's folder, when that folder is the album's
+//! alone (in the library, not the masters' or the app's, every file of the
+//! album in it, its copies too, and nothing of another album): its
+//! `cover.jpg` and `ambient.png`. Otherwise a file of the album's own in
+//! the app's covers folder (`.musiclib/covers/release-<id>-<time>.jpg`, a
+//! fresh name each time: the UI keeps pictures by their address), the one
+//! before it kept. Every file is written whole or not at all (staged beside
+//! it, flushed, renamed over it). In the album's folder the cover it showed
+//! is staged beside it and becomes `cover.prev.jpg` only once the library
+//! took the new one; when the library cannot, the old cover comes back. An
+//! album without files (a service's) shows the url found, and its picture
+//! is asked anew.
+//!
+//! A lookup that failed changes nothing. The palette and the texture are
+//! made again from the picked picture every time. The library takes the
+//! cover ref, the palette, what the background lookups keep for the album
+//! and the decision ([`decision_key`]) in one transaction: the lookups
+//! leave the album's cover alone while it shows that cover, and one of
+//! theirs that began before it is not kept. Everything but the decision of
+//! where to write runs off the player's loop.
+
+use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use nikgob_core::cover_frame;
+use nikgob_core::model::{Palette, ReleaseId, SourceKind};
+use nikgob_core::streaming::{Service, StreamService};
+use nikgob_import::cover::{ProcessedCover, derive_visuals, process_cover};
+use nikgob_import::sanitize::long_path;
+use nikgob_library::{Library, is_web_ref, now_ms};
+use nikgob_metadata::Metadata;
+
+use crate::Worker;
+use crate::better_covers;
+use crate::hd_covers;
+use crate::import::Internal;
+
+const COVER_FILE: &str = "cover.jpg";
+/// The cover a refresh replaced in an album's folder.
+const PREV_FILE: &str = "cover.prev.jpg";
+const AMBIENT_FILE: &str = "ambient.png";
+/// The app's folder in the library; its covers folder.
+const APP_DIR: &str = ".musiclib";
+const MANAGED_DIR: &str = ".musiclib/covers";
+/// Names of the cover images in a folder (as the importer reads them).
+const COVER_NAMES: &[&str] = &["cover", "folder", "front", "album", "albumart"];
+/// The online lookup and download, at most.
+const ONLINE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Without the importer's settings.
+const MAX_EDGE: u32 = 1200;
+const FALLBACK_SEED: u32 = 0xFF67_50A4;
+
+/// Staging files of this run, counted.
+static STAGING: AtomicU64 = AtomicU64::new(0);
+/// The album folders a refresh writes into right now.
+static FOLDERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The albums being refreshed.
+pub(crate) type Busy = HashSet<ReleaseId>;
+
+/// The library cache key of the refresh decided for `id`: the cover ref it
+/// left the album with.
+pub(crate) fn decision_key(id: ReleaseId) -> String {
+    format!("cover_refreshed.{id}")
+}
+
+/// Whether «Обновить обложку» decided the cover of `id` and the album still
+/// shows that cover (`current`, its ref).
+pub(crate) fn decided(lib: &Library, id: ReleaseId, current: Option<&str>) -> bool {
+    lib.cache_get(&decision_key(id)).ok().flatten().is_some_and(|(_, v)| v == current.unwrap_or(""))
+}
+
+/// What a refresh of an album came to.
+#[derive(Debug)]
+pub(crate) enum Refreshed {
+    /// A picture was picked: its file is in place.
+    File(Picked),
+    /// The album has no files: it shows this url (asked anew).
+    Web(String),
+    /// Nothing to pick from.
+    Nothing,
+}
+
+/// The picked picture of an album with files.
+#[derive(Debug)]
+pub(crate) struct Picked {
+    cover_ref: String,
+    seed: Option<u32>,
+    ambient: Vec<u8>,
+    /// The url it came from, when it came from online.
+    url: Option<String>,
+    /// What the album shows changes (else it shows that picture already).
+    changed: bool,
+    /// The cover it showed, staged, and where it goes once the library
+    /// took the new one.
+    backup: Option<(PathBuf, PathBuf)>,
+    /// How the files go back when the library cannot take it.
+    undo: Undo,
+}
+
+#[derive(Debug, PartialEq)]
+enum Undo {
+    Nothing,
+    /// The staged copy of the cover goes back over it.
+    Restore { staged: PathBuf, target: PathBuf },
+    /// The new file of the covers folder goes.
+    Remove(PathBuf),
+}
+
+/// Where a refresh writes.
+#[derive(Clone, Debug, PartialEq)]
+enum Dest {
+    /// The album's own folder.
+    Folder(PathBuf),
+    /// A file of its own in the app's covers folder (this one).
+    Managed(PathBuf),
+    /// No files: a url.
+    Web,
+}
+
+/// What the refresh of one album works with.
+struct Job {
+    id: ReleaseId,
+    dest: Dest,
+    /// The library folder refs are relative to.
+    root: PathBuf,
+    /// Its cover ref, and the file when it is one.
+    current: Option<String>,
+    current_file: Option<PathBuf>,
+    /// The url it shows: the one the lookups found, or its own.
+    shown_url: Option<String>,
+    /// Audio files whose pictures count, the masters first.
+    files: Vec<PathBuf>,
+    /// Folders whose cover images count (its own folder only).
+    dirs: Vec<PathBuf>,
+    want: hd_covers::Want,
+    max_edge: u32,
+    /// The name of a new file in the covers folder.
+    stamp: i64,
+}
+
+/// A path as compared: forward slashes, no slash at the end, lower case on
+/// Windows.
+fn norm(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    if cfg!(windows) { s.to_lowercase() } else { s.to_owned() }
+}
+
+/// Whether `p` is `dir` or lies under it.
+fn within(p: &Path, dir: &Path) -> bool {
+    let (p, d) = (norm(p), norm(dir));
+    p == d || p.starts_with(&format!("{d}/"))
+}
+
+/// A locator or a cover ref as a path: relative ones under `root`.
+fn resolve(root: &Path, locator: &str) -> PathBuf {
+    let p = Path::new(locator);
+    if p.is_absolute() { p.to_owned() } else { root.join(p) }
+}
+
+/// One refresh at a time writes into an album folder: held while it does.
+struct Claim(String);
+
+impl Claim {
+    fn take(dir: &Path) -> Option<Self> {
+        let key = norm(dir);
+        let mut held = FOLDERS.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.contains(&key) {
+            return None;
+        }
+        held.push(key.clone());
+        Some(Self(key))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        FOLDERS.lock().unwrap_or_else(PoisonError::into_inner).retain(|k| *k != self.0);
+    }
+}
+
+/// The folder that is release `id`'s alone, where its cover may be
+/// written: the one folder every local file of it (`local`: its copies
+/// too) is in, else its cover file's; under the library `root`, not the
+/// masters' nor the app's; no file of another release (a track or a
+/// cover, `places`) in it.
+fn owned_folder(
+    id: ReleaseId,
+    local: &[PathBuf],
+    cover: Option<&Path>,
+    root: &Path,
+    masters: Option<&Path>,
+    places: &[(ReleaseId, PathBuf)],
+) -> Option<PathBuf> {
+    let dir = match local.first() {
+        Some(f) => f.parent()?.to_owned(),
+        None => cover?.parent()?.to_owned(),
+    };
+    let key = norm(&dir);
+    let in_dir = |p: &Path| p.parent().is_some_and(|d| norm(d) == key);
+    let ours = local.iter().all(|f| in_dir(f));
+    let placed = within(&dir, root) && norm(&dir) != norm(root) && !masters.is_some_and(|m| within(&dir, m));
+    let app = dir.components().any(|c| c.as_os_str() == APP_DIR);
+    let shared = places.iter().any(|(r, p)| *r != id && in_dir(p));
+    (ours && placed && !app && !shared).then_some(dir)
+}
+
+/// What the refresh of release `id` works with, read from the library (off
+/// the player's loop); `None` when it is gone.
+fn gather(lib: &Library, id: ReleaseId, root: &Path, masters: Option<&Path>, max_edge: u32, stamp: i64) -> Option<Job> {
+    let r = lib.get_release(id).ok().flatten()?;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut local: Vec<PathBuf> = Vec::new();
+    for t in lib.tracks_of_release(id).unwrap_or_default() {
+        if let Some(path) = lib.get_master(t.id).ok().flatten().and_then(|m| m.file_path) {
+            files.push(PathBuf::from(path));
+        }
+        // Every copy of it, not only the one that plays.
+        for s in lib.sources_of_track(t.id).unwrap_or_default() {
+            if s.kind == SourceKind::LocalFile && s.trashed_at.is_none() {
+                local.push(resolve(root, &s.locator));
+            }
+        }
+    }
+    let current_file = r.cover_ref.as_deref().filter(|c| !is_web_ref(c)).map(|c| resolve(root, c));
+    // Unknown who else is in a folder: none is the album's alone.
+    let owned = match lib.release_file_places() {
+        Ok(places) => {
+            let places: Vec<(ReleaseId, PathBuf)> = places.into_iter().map(|(r, p)| (r, resolve(root, &p))).collect();
+            owned_folder(id, &local, current_file.as_deref(), root, masters, &places)
+        }
+        Err(e) => {
+            log::warn!("cover refresh of «{}»: the places of the library's files: {e}", r.title);
+            None
+        }
+    }
+    .filter(|d| long_path(d).is_dir());
+    let dest = match owned {
+        Some(d) => Dest::Folder(d),
+        None if local.is_empty() && current_file.is_none() => Dest::Web,
+        None => Dest::Managed(root.join(MANAGED_DIR)),
+    };
+    let dirs = match &dest {
+        Dest::Folder(d) => vec![d.clone()],
+        Dest::Managed(_) | Dest::Web => Vec::new(),
+    };
+    let shown_url = better_covers::cached(lib, better_covers::Target::Release(id), r.cover_ref.as_deref())
+        .or_else(|| r.cover_ref.clone().filter(|c| is_web_ref(c)));
+    files.extend(local);
+    Some(Job {
+        id,
+        dest,
+        root: root.to_owned(),
+        current: r.cover_ref.clone(),
+        current_file,
+        shown_url,
+        files,
+        dirs,
+        want: hd_covers::want_of(lib, &r, vec![r.artist_credit.display()]),
+        max_edge,
+        stamp,
+    })
+}
+
+/// The cover images of `dir` (see [`COVER_NAMES`]; `cover.prev.jpg` is
+/// none).
+fn cover_images(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(long_path(dir)) else { return Vec::new() };
+    let mut out: Vec<(usize, PathBuf)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_string_lossy().to_lowercase();
+            let ext = p.extension()?.to_string_lossy().to_lowercase();
+            let rank = COVER_NAMES.iter().position(|n| *n == stem)?;
+            matches!(ext.as_str(), "jpg" | "jpeg" | "png").then(|| (rank, dir.join(p.file_name()?)))
+        })
+        .collect();
+    out.sort();
+    out.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Every picture of the album's own: those in the audio `files`, the
+/// `images`, and the cover images in `dirs`, each once, in that order.
+fn own_art(files: &[PathBuf], images: &[PathBuf], dirs: &[PathBuf], max_edge: u32) -> Vec<ProcessedCover> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut take = |bytes: Vec<u8>| {
+        let mut h = DefaultHasher::new();
+        bytes.hash(&mut h);
+        if seen.insert(h.finish())
+            && let Ok(c) = process_cover(&bytes, max_edge)
+        {
+            out.push(c);
+        }
+    };
+    for f in files {
+        match nikgob_import::tags::read_tags(f) {
+            Ok((tags, _)) => tags.cover.into_iter().for_each(&mut take),
+            Err(e) => log::debug!("cover refresh: the picture of {}: {e}", f.display()),
+        }
+    }
+    for p in images.iter().cloned().chain(dirs.iter().flat_map(|d| cover_images(d))) {
+        if let Ok(b) = std::fs::read(long_path(&p)) {
+            take(b);
+        }
+    }
+    out
+}
+
+fn side(c: &ProcessedCover) -> u32 {
+    c.width.max(c.height)
+}
+
+/// The art the album takes: `online` (its own, by the lookup) when it is at
+/// least as large as the largest of `local`, else that one; frames of a
+/// video never. The first of equals wins.
+fn pick(local: Vec<ProcessedCover>, online: Option<(String, ProcessedCover)>) -> Option<(ProcessedCover, Option<String>)> {
+    let mut best: Option<ProcessedCover> = None;
+    for c in local.into_iter().filter(|c| !cover_frame::is_frame(c.width, c.height)) {
+        if best.as_ref().is_none_or(|b| side(&c) > side(b)) {
+            best = Some(c);
+        }
+    }
+    match online.filter(|(_, c)| !cover_frame::is_frame(c.width, c.height)) {
+        Some((url, c)) if best.as_ref().is_none_or(|b| side(&c) >= side(b)) => Some((c, Some(url))),
+        _ => best.map(|c| (c, None)),
+    }
+}
+
+/// A name beside `target` that no other write takes.
+fn staging(target: &Path) -> PathBuf {
+    let n = STAGING.fetch_add(1, Ordering::Relaxed);
+    let name = target.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    target.with_file_name(format!(".{name}.{}-{}-{n}.tmp", std::process::id(), now_ms()))
+}
+
+/// Fills the staging file `tmp` and flushes it to the disk; on a failure
+/// it goes.
+fn stage(tmp: &Path, fill: impl FnOnce(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let done = fill(tmp).and_then(|()| std::fs::OpenOptions::new().write(true).open(long_path(tmp))?.sync_all());
+    if done.is_err() {
+        let _ = std::fs::remove_file(long_path(tmp));
+    }
+    done
+}
+
+/// Renames `tmp` over `target`; on a failure `tmp` goes and `target` stays
+/// as it was.
+fn swap(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    let done = std::fs::rename(long_path(tmp), long_path(target));
+    if done.is_err() {
+        let _ = std::fs::remove_file(long_path(tmp));
+    }
+    done
+}
+
+/// Writes `bytes` as `target`, whole or not at all.
+fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = staging(target);
+    stage(&tmp, |tmp| {
+        let mut f = std::fs::File::create(long_path(tmp))?;
+        f.write_all(bytes)
+    })?;
+    swap(&tmp, target)
+}
+
+/// The texture beside a cover: `ambient.png` in an album's folder, the
+/// cover's own name with `.ambient.png` in the covers folder.
+fn ambient_of(cover: &Path, dest: &Dest) -> PathBuf {
+    match dest {
+        Dest::Folder(d) => d.join(AMBIENT_FILE),
+        Dest::Managed(_) | Dest::Web => cover.with_extension("ambient.png"),
+    }
+}
+
+/// `path` as a cover ref: relative to the library `root` with forward
+/// slashes, else as it is.
+fn cover_ref_of(path: &Path, root: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// The covers of release `id` in the covers folder `dir` but those `keep`
+/// (with their textures) go.
+fn prune_managed(dir: &Path, id: ReleaseId, keep: &[&Path]) {
+    let prefix = format!("release-{id}-");
+    let keep: Vec<String> = keep.iter().flat_map(|k| [norm(k), norm(&k.with_extension("ambient.png"))]).collect();
+    for e in std::fs::read_dir(long_path(dir)).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let path = dir.join(&name);
+        if name.starts_with(&prefix) && !keep.contains(&norm(&path)) {
+            let _ = std::fs::remove_file(long_path(&path));
+        }
+    }
+}
+
+/// The files' part of a refresh, with what was found `online` (Err: the
+/// lookup failed, nothing changes).
+fn settle_files(job: &Job, online: Result<Option<(String, ProcessedCover)>, String>) -> Result<Refreshed, String> {
+    let online = online?;
+    let (own_dir, managed) = match &job.dest {
+        Dest::Web => return Ok(online.map_or(Refreshed::Nothing, |(url, _)| Refreshed::Web(url))),
+        Dest::Folder(d) => (Some(d), None),
+        Dest::Managed(m) => (None, Some(m)),
+    };
+    let images: Vec<PathBuf> = job.current_file.iter().cloned().collect();
+    let Some((cover, url)) = pick(own_art(&job.files, &images, &job.dirs, job.max_edge), online) else {
+        return Ok(Refreshed::Nothing);
+    };
+    let holds = |p: &Path| std::fs::read(long_path(p)).ok().as_deref() == Some(&cover.jpeg[..]);
+    let visuals = derive_visuals(&cover.jpeg).map_err(|e| e.to_string())?;
+    let is_own_managed = |f: &Path| {
+        managed.is_some_and(|m| f.parent().is_some_and(|p| norm(p) == norm(m)))
+            && f.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("release-{}-", job.id)))
+    };
+    let mut backup = None;
+    let mut undo = Undo::Nothing;
+    // It shows that picture already (its own file, no url over it).
+    let showing = job.shown_url.is_none() && job.current_file.as_deref().is_some_and(|f| holds(f));
+    let (cover_ref, ambient_path) = if showing {
+        let f = job.current_file.clone().unwrap_or_default();
+        // A texture only where the album's own files are.
+        let ambient = match own_dir {
+            Some(d) if f.parent().is_some_and(|p| norm(p) == norm(d)) => Some(d.join(AMBIENT_FILE)),
+            _ => is_own_managed(&f).then(|| f.with_extension("ambient.png")),
+        };
+        (job.current.clone().unwrap_or_else(|| cover_ref_of(&f, &job.root)), ambient)
+    } else {
+        let (target, fresh) = match (own_dir, managed) {
+            (Some(d), _) => (d.join(COVER_FILE), false),
+            (None, Some(m)) => match job.current_file.as_ref().filter(|f| is_own_managed(f) && holds(f)) {
+                Some(f) => (f.clone(), false),
+                None => (m.join(format!("release-{}-{}.jpg", job.id, job.stamp)), true),
+            },
+            (None, None) => return Ok(Refreshed::Nothing),
+        };
+        if fresh || !holds(&target) {
+            if let Some(d) = own_dir {
+                // The cover it shows, else the file this one replaces.
+                let source = job
+                    .current_file
+                    .clone()
+                    .filter(|f| long_path(f).is_file())
+                    .or_else(|| long_path(&target).is_file().then(|| target.clone()));
+                if let Some(src) = source {
+                    let prev = d.join(PREV_FILE);
+                    let staged = staging(&prev);
+                    stage(&staged, |tmp| std::fs::copy(long_path(&src), long_path(tmp)).map(|_| ()))
+                        .map_err(|e| format!("{}: {e}", src.display()))?;
+                    if norm(&src) == norm(&target) {
+                        undo = Undo::Restore { staged: staged.clone(), target: target.clone() };
+                    }
+                    backup = Some((staged, prev));
+                }
+            }
+            if let Some(m) = managed {
+                std::fs::create_dir_all(long_path(m)).map_err(|e| format!("{}: {e}", m.display()))?;
+            }
+            if let Err(e) = write_atomic(&target, &cover.jpeg) {
+                if let Some((staged, _)) = &backup {
+                    let _ = std::fs::remove_file(long_path(staged));
+                }
+                return Err(format!("{}: {e}", target.display()));
+            }
+            if fresh {
+                undo = Undo::Remove(target.clone());
+                if let Some(m) = managed {
+                    let mut keep = vec![target.as_path()];
+                    keep.extend(job.current_file.as_deref());
+                    prune_managed(m, job.id, &keep);
+                }
+            }
+        }
+        (cover_ref_of(&target, &job.root), Some(ambient_of(&target, &job.dest)))
+    };
+    // Made again from the picked picture every time; one that cannot be
+    // written is only a missing glow.
+    if let Some(a) = &ambient_path
+        && let Err(e) = write_atomic(a, &visuals.ambient_png)
+    {
+        log::warn!("cover refresh: {}: {e}", a.display());
+    }
+    Ok(Refreshed::File(Picked {
+        cover_ref,
+        seed: visuals.seed_argb,
+        ambient: visuals.ambient_png,
+        url,
+        changed: !showing,
+        backup,
+        undo,
+    }))
+}
+
+/// After the library took the picked cover (`saved`) or could not: the
+/// staged cover becomes `cover.prev.jpg`, or the files go back.
+fn finish(p: &Picked, saved: bool) {
+    let staged = p.backup.as_ref().map(|(s, _)| s);
+    if saved {
+        if let Some((staged, prev)) = &p.backup
+            && let Err(e) = swap(staged, prev)
+        {
+            log::warn!("cover refresh: {}: {e}", prev.display());
+        }
+        return;
+    }
+    match &p.undo {
+        Undo::Restore { staged, target } => {
+            if let Err(e) = swap(staged, target) {
+                log::warn!("cover refresh: putting {} back: {e}", target.display());
+            }
+        }
+        Undo::Remove(file) => {
+            let _ = std::fs::remove_file(long_path(file));
+            let _ = std::fs::remove_file(long_path(&file.with_extension("ambient.png")));
+            if let Some(s) = staged {
+                let _ = std::fs::remove_file(long_path(s));
+            }
+        }
+        Undo::Nothing => {
+            if let Some(s) = staged {
+                let _ = std::fs::remove_file(long_path(s));
+            }
+        }
+    }
+}
+
+/// The album's art online, by [`hd_covers::find`], downloaded. Err: a
+/// service could not answer.
+async fn online(meta: &Metadata, services: &[Arc<dyn StreamService>], w: &hd_covers::Want, max_edge: u32) -> Result<Option<(String, ProcessedCover)>, String> {
+    let Some(url) = hd_covers::find(Some(meta), services, w).await? else { return Ok(None) };
+    let bytes = match meta.cover_art.download(&url).await {
+        Ok(b) => b,
+        Err(e) if better_covers::meta_trouble(&e) => return Err(format!("{url}: {e}")),
+        Err(e) => {
+            log::info!("cover refresh of «{}»: {url}: {e}", w.title);
+            return Ok(None);
+        }
+    };
+    let cover = tokio::task::spawn_blocking(move || process_cover(&bytes, max_edge)).await.map_err(|e| e.to_string())?;
+    Ok(cover.ok().map(|c| (url, c)))
+}
+
+impl Worker {
+    /// «Обновить обложку» of a library album (see the module docs): read,
+    /// looked up and written off the loop, [`Self::release_cover_refreshed`]
+    /// takes the answer.
+    pub(crate) fn refresh_release_cover(&mut self, id: ReleaseId) {
+        if !self.cover_refresh.insert(id) {
+            return;
+        }
+        let lib = self.lib.clone();
+        let root = self.res.root().to_owned();
+        let masters = self.import.as_ref().map(|s| s.config().masters_dir());
+        let max_edge = self.import.as_ref().map_or(MAX_EDGE, |s| s.config().cover_max_edge);
+        let meta = self.import.as_ref().filter(|s| s.config().fetch_cover_online).and_then(|s| s.metadata());
+        let services: Vec<Arc<dyn StreamService>> =
+            [Service::Deezer, Service::Youtube, Service::Spotify].into_iter().filter_map(|k| self.service(k)).collect();
+        let stamp = now_ms();
+        self.streaming.spawn_internal(async move {
+            let job = tokio::task::spawn_blocking(move || gather(&lib, id, &root, masters.as_deref(), max_edge, stamp))
+                .await
+                .ok()
+                .flatten();
+            let Some(job) = job else { return Internal::CoverRefreshed(id, Ok(Refreshed::Nothing)) };
+            log::info!("cover refresh of «{}»: into {:?}, {} files, online {}", job.want.title, job.dest, job.files.len(), meta.is_some());
+            let found = match &meta {
+                Some(m) => match tokio::time::timeout(ONLINE_TIMEOUT, online(m, &services, &job.want, job.max_edge)).await {
+                    Ok(r) => r,
+                    Err(_) => Err("the online lookup took too long".to_owned()),
+                },
+                None => Ok(None),
+            };
+            let result = tokio::task::spawn_blocking(move || {
+                let _claim = match &job.dest {
+                    Dest::Folder(d) => Some(Claim::take(d).ok_or_else(|| format!("{} is being written by another refresh", d.display()))?),
+                    Dest::Managed(_) | Dest::Web => None,
+                };
+                settle_files(&job, found)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            Internal::CoverRefreshed(id, result)
+        });
+    }
+
+    /// A refresh came back. The library takes the cover ref, the palette,
+    /// what the lookups keep and the decision at once; then the staged
+    /// cover becomes the backup (or, when the library could not, the files
+    /// go back, off the loop) and everything on screen takes it. Nothing
+    /// better, or a failure: what it shows stays, with a toast.
+    pub(crate) fn release_cover_refreshed(&mut self, id: ReleaseId, result: Result<Refreshed, String>) {
+        self.cover_refresh.remove(&id);
+        let current = self.lib.get_release(id).ok().flatten().and_then(|r| r.cover_ref);
+        let now = now_ms();
+        match result {
+            Ok(Refreshed::File(p)) => {
+                log::info!("cover refresh of {id}: {} from {}", p.cover_ref, p.url.as_deref().unwrap_or("its files"));
+                let fallback = self.import.as_ref().map_or(FALLBACK_SEED, |s| s.config().fallback_seed_argb);
+                let mut palette = Palette::new(id, p.seed.unwrap_or(fallback));
+                palette.ambient_blur = Some(p.ambient.clone());
+                let mut puts = vec![better_covers::settled(id, Some(&p.cover_ref), ""), (decision_key(id), p.cover_ref.clone())];
+                let mut drops = Vec::new();
+                match &p.url {
+                    Some(u) => puts.push((hd_covers::key(id), u.clone())),
+                    None => drops.push(hd_covers::key(id)),
+                }
+                let saved = self.lib.settle_cover(id, Some(&p.cover_ref), Some(&palette), now, &puts, &drops);
+                let ok = saved.is_ok();
+                let changed = p.changed;
+                self.streaming.spawn_reporting(move |_| async move {
+                    let _ = tokio::task::spawn_blocking(move || finish(&p, ok)).await;
+                });
+                match saved {
+                    Ok(()) => {
+                        self.reload_after_import();
+                        if !changed {
+                            self.toast("Лучшей обложки не нашлось", None);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("cover refresh of {id}: {e}");
+                        self.toast("Не получилось обновить обложку", None);
+                    }
+                }
+            }
+            Ok(Refreshed::Web(url)) => {
+                log::info!("cover refresh of {id}: {url}");
+                let puts = vec![
+                    better_covers::settled(id, current.as_deref(), &url),
+                    (hd_covers::key(id), url.clone()),
+                    (decision_key(id), current.clone().unwrap_or_default()),
+                ];
+                match self.lib.settle_cover(id, None, None, now, &puts, &[]) {
+                    Ok(()) => {
+                        // The service may have put another picture at the
+                        // same address.
+                        self.publish(|s| s.refetch_covers = (s.refetch_covers.0 + 1, vec![url]));
+                        self.reload_after_import();
+                    }
+                    Err(e) => {
+                        log::warn!("cover refresh of {id}: {e}");
+                        self.toast("Не получилось обновить обложку", None);
+                    }
+                }
+            }
+            Ok(Refreshed::Nothing) => {
+                log::info!("cover refresh of {id}: nothing to pick from");
+                self.toast("Лучшей обложки не нашлось", None);
+            }
+            Err(e) => {
+                log::warn!("cover refresh of {id}: {e}");
+                self.toast("Не получилось обновить обложку", None);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jpeg(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut out = Vec::new();
+        image::RgbImage::from_pixel(w, h, image::Rgb(rgb))
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
+            .unwrap();
+        out
+    }
+
+    fn cover(w: u32, h: u32, rgb: [u8; 3]) -> ProcessedCover {
+        process_cover(&jpeg(w, h, rgb), MAX_EDGE).unwrap()
+    }
+
+    fn picked(r: Refreshed) -> Picked {
+        match r {
+            Refreshed::File(p) => p,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The single's art in the folder is as large as the album's found
+    /// online: the album's wins. A larger picture of the files wins over a
+    /// smaller one online; a frame of a video never.
+    #[test]
+    fn the_album_art_found_online_wins_when_it_is_as_large() {
+        let single = cover(1000, 1000, [200, 20, 20]);
+        let album = cover(1000, 1000, [20, 20, 200]);
+        let (got, url) = pick(vec![single.clone()], Some(("https://x/album.jpg".into(), album.clone()))).unwrap();
+        assert_eq!((got, url.as_deref()), (album.clone(), Some("https://x/album.jpg")));
+        let scan = cover(1200, 1200, [20, 200, 20]);
+        assert_eq!(pick(vec![single.clone(), scan.clone()], Some(("u".into(), album.clone()))).map(|(c, _)| c), Some(scan));
+        let frame = cover(1280, 720, [0, 0, 0]);
+        assert_eq!(pick(vec![frame.clone(), single.clone()], None), Some((single.clone(), None)));
+        assert_eq!(pick(vec![single.clone()], Some(("u".into(), frame.clone()))).map(|(c, _)| c), Some(single));
+        assert!(pick(vec![frame], None).is_none());
+        assert!(pick(Vec::new(), None).is_none());
+    }
+
+    /// A folder is the album's alone when all its files are there and
+    /// nothing of another album is; never the masters' or the app's, never
+    /// outside the library.
+    #[test]
+    fn only_a_folder_of_the_album_alone_is_written() {
+        let root = Path::new("/lib");
+        let (me, other) = (ReleaseId::new(), ReleaseId::new());
+        let f = |p: &str| PathBuf::from(p);
+        let mine = vec![f("/lib/A/2024 - X/01.opus"), f("/lib/A/2024 - X/02.opus")];
+        let places = vec![(me, f("/lib/A/2024 - X/01.opus")), (other, f("/lib/A/2023 - Y/01.opus"))];
+        assert_eq!(owned_folder(me, &mine, None, root, None, &places), Some(f("/lib/A/2024 - X")));
+        let mut shared = places.clone();
+        shared.push((other, f("/lib/A/2024 - X/03.opus")));
+        assert_eq!(owned_folder(me, &mine, None, root, None, &shared), None);
+        let mut covered = places.clone();
+        covered.push((other, f("/lib/A/2024 - X/cover.jpg")));
+        assert_eq!(owned_folder(me, &mine, None, root, None, &covered), None);
+        let split = vec![f("/lib/A/2024 - X/01.opus"), f("/lib/A/2024 - X (CD2)/01.opus")];
+        assert_eq!(owned_folder(me, &split, None, root, None, &places), None);
+        let masters = vec![f("/lib/.musiclib/masters/A/X/01.flac")];
+        assert_eq!(owned_folder(me, &masters, None, root, None, &[]), None);
+        assert_eq!(owned_folder(me, &[f("/m/A/X/01.flac")], None, root, Some(Path::new("/m")), &[]), None);
+        assert_eq!(owned_folder(me, &[f("/elsewhere/X/01.opus")], None, root, None, &[]), None);
+        assert_eq!(owned_folder(me, &[f("/lib/01.opus")], None, root, None, &[]), None, "the library's root");
+        assert_eq!(owned_folder(me, &[], Some(Path::new("/lib/A/X/cover.jpg")), root, None, &[]), Some(f("/lib/A/X")));
+        // Its cover names a folder that is gone: its files' folder still is.
+        assert_eq!(owned_folder(me, &mine, Some(Path::new("/lib/Gone/cover.jpg")), root, None, &places), Some(f("/lib/A/2024 - X")));
+    }
+
+    /// A copy of a track in another folder (not the one that plays) makes
+    /// the album's folder not its alone; one folder with all of it is.
+    #[test]
+    fn the_copies_of_its_tracks_count_for_its_folder() {
+        use nikgob_core::model::{ArtistCredit, Codec, Release, Source, Track};
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let lib = Library::open_in_memory().unwrap();
+        let release = |title: &str, files: &[&str]| {
+            let r = lib.upsert_release(&Release::new(title, ArtistCredit::single("X", None))).unwrap();
+            let mut t = Track::new(format!("{title} song"), ArtistCredit::single("X", None));
+            t.release_id = Some(r.id);
+            let t = lib.upsert_track(&t).unwrap();
+            for f in files {
+                std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+                let path = root.join(f).to_string_lossy().into_owned();
+                lib.add_source(&Source::new(t.id, SourceKind::LocalFile, path, Codec::Opus)).unwrap();
+            }
+            r.id
+        };
+        let two = release("Two", &["A/Two/01.opus", "B/Two/01.opus"]);
+        let one = release("One", &["C/One/01.opus"]);
+        let dest = |id| gather(&lib, id, root, None, MAX_EDGE, 1).unwrap().dest;
+        assert!(matches!(dest(two), Dest::Managed(_)));
+        assert!(matches!(dest(one), Dest::Folder(d) if norm(&d) == norm(&root.join("C/One"))));
+    }
+
+    fn want() -> hd_covers::Want {
+        hd_covers::Want {
+            id: ReleaseId::new(),
+            mbid: None,
+            group_mbid: None,
+            deezer: None,
+            title: "X".into(),
+            artists: Vec::new(),
+            release_type: nikgob_core::model::ReleaseType::Album,
+            tracks: 9,
+        }
+    }
+
+    fn job(root: &Path, dest: Dest, current: Option<&str>) -> Job {
+        Job {
+            id: ReleaseId::new(),
+            dest,
+            root: root.to_owned(),
+            current: current.map(str::to_owned),
+            current_file: current.filter(|c| !is_web_ref(c)).map(|c| root.join(c)),
+            shown_url: current.filter(|c| is_web_ref(c)).map(str::to_owned),
+            files: Vec::new(),
+            dirs: Vec::new(),
+            want: want(),
+            max_edge: MAX_EDGE,
+            stamp: 7,
+        }
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// The album's own folder: the album's art over the single's
+    /// `cover.jpg`; the single's staged, and `cover.prev.jpg` (an older one)
+    /// replaced by it only once the library took the new cover. Asked
+    /// again, it shows that picture already.
+    #[test]
+    fn a_refresh_writes_the_cover_of_its_own_folder_and_keeps_the_one_it_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("A/2024 - X");
+        std::fs::create_dir_all(&dir).unwrap();
+        let single = jpeg(1000, 1000, [200, 20, 20]);
+        std::fs::write(dir.join("cover.jpg"), &single).unwrap();
+        std::fs::write(dir.join("cover.prev.jpg"), b"older").unwrap();
+        let album = cover(1000, 1000, [20, 20, 200]);
+        let mut j = job(root, Dest::Folder(dir.clone()), Some("A/2024 - X/cover.jpg"));
+        j.dirs = vec![dir.clone()];
+        let p = picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album.clone())))).unwrap());
+        assert_eq!((p.cover_ref.as_str(), p.url.as_deref(), p.changed), ("A/2024 - X/cover.jpg", Some("https://x/album.jpg"), true));
+        assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), album.jpeg);
+        assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), b"older", "not before the library took it");
+        assert!(dir.join("ambient.png").is_file());
+        finish(&p, true);
+        assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), single);
+        assert!(leftovers(&dir).is_empty());
+        let again = picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album)))).unwrap());
+        assert!(!again.changed && again.backup.is_none());
+        let offline = picked(settle_files(&j, Ok(None)).unwrap());
+        assert!(!offline.changed);
+        // A lookup that failed changes nothing.
+        assert!(settle_files(&j, Err("Deezer: network".into())).is_err());
+    }
+
+    /// The library could not take the new cover: the old one comes back
+    /// and `cover.prev.jpg` stays as it was.
+    #[test]
+    fn a_cover_the_library_could_not_take_goes_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("A/X");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = jpeg(500, 500, [200, 20, 20]);
+        std::fs::write(dir.join("cover.jpg"), &old).unwrap();
+        std::fs::write(dir.join("cover.prev.jpg"), b"older").unwrap();
+        let mut j = job(root, Dest::Folder(dir.clone()), Some("A/X/cover.jpg"));
+        j.dirs = vec![dir.clone()];
+        let p = picked(settle_files(&j, Ok(Some(("https://x/a.jpg".into(), cover(1000, 1000, [1, 1, 200]))))).unwrap());
+        finish(&p, false);
+        assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), old);
+        assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), b"older");
+        assert!(leftovers(&dir).is_empty());
+    }
+
+    /// The backup is the cover the album shows: its `folder.png`, not an
+    /// unregistered `cover.jpg` of its folder.
+    #[test]
+    fn the_backup_is_the_cover_it_shows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("A/X");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shown = jpeg(300, 300, [9, 9, 9]);
+        std::fs::write(dir.join("folder.jpg"), &shown).unwrap();
+        std::fs::write(dir.join("cover.jpg"), jpeg(200, 200, [1, 2, 3])).unwrap();
+        let mut j = job(root, Dest::Folder(dir.clone()), Some("A/X/folder.jpg"));
+        j.dirs = vec![dir.clone()];
+        let p = picked(settle_files(&j, Ok(Some(("https://x/a.jpg".into(), cover(1000, 1000, [1, 1, 200]))))).unwrap());
+        assert_eq!(p.cover_ref, "A/X/cover.jpg");
+        assert_eq!(p.undo, Undo::Nothing, "what it showed is still there");
+        finish(&p, true);
+        assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), shown);
+    }
+
+    /// A folder shared with another album is not touched: the art becomes
+    /// a file of the album's own in the covers folder, a fresh name each
+    /// time, the one before kept and older ones gone; when the library
+    /// cannot take it, the new file goes.
+    #[test]
+    fn a_shared_folder_is_left_alone_and_the_cover_is_the_albums_own_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let shared = root.join("A/Singles");
+        std::fs::create_dir_all(&shared).unwrap();
+        let theirs = jpeg(600, 600, [200, 20, 20]);
+        std::fs::write(shared.join("cover.jpg"), &theirs).unwrap();
+        let managed = root.join(MANAGED_DIR);
+        let mut j = job(root, Dest::Managed(managed.clone()), Some("A/Singles/cover.jpg"));
+        let album = cover(1000, 1000, [20, 20, 200]);
+        let p = picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album.clone())))).unwrap());
+        let want_ref = format!(".musiclib/covers/release-{}-7.jpg", j.id);
+        assert_eq!(p.cover_ref, want_ref);
+        assert_eq!(std::fs::read(shared.join("cover.jpg")).unwrap(), theirs, "the shared folder is untouched");
+        assert!(!shared.join("cover.prev.jpg").exists() && !shared.join("ambient.png").exists());
+        let first = managed.join(format!("release-{}-7.jpg", j.id));
+        assert_eq!(std::fs::read(&first).unwrap(), album.jpeg);
+        assert!(first.with_extension("ambient.png").is_file());
+        j.current = Some(want_ref.clone());
+        j.current_file = Some(first.clone());
+        assert!(!picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album)))).unwrap()).changed);
+        for (stamp, rgb) in [(8, [1, 200, 1]), (9, [1, 1, 1])] {
+            j.stamp = stamp;
+            let p = picked(settle_files(&j, Ok(Some(("https://x/new.jpg".into(), cover(1100, 1100, rgb))))).unwrap());
+            j.current_file = Some(root.join(&p.cover_ref));
+            j.current = Some(p.cover_ref);
+        }
+        assert!(!first.exists(), "two steps back");
+        let ninth = managed.join(format!("release-{}-9.jpg", j.id));
+        assert!(managed.join(format!("release-{}-8.jpg", j.id)).exists() && ninth.exists());
+        j.stamp = 10;
+        let p = picked(settle_files(&j, Ok(Some(("https://x/other.jpg".into(), cover(1200, 1200, [5, 5, 5]))))).unwrap());
+        finish(&p, false);
+        assert!(!managed.join(format!("release-{}-10.jpg", j.id)).exists());
+        assert!(ninth.exists(), "what it shows stays");
+    }
+
+    /// A url the lookups found shows over the album's own file of the same
+    /// art: the file takes its place, nothing written but the texture. The
+    /// album's cover ref names another picture of its folder: the ref
+    /// follows the picked `cover.jpg`.
+    #[test]
+    fn what_shows_is_compared_not_only_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("A/X");
+        std::fs::create_dir_all(&dir).unwrap();
+        let art = jpeg(1000, 1000, [20, 200, 20]);
+        std::fs::write(dir.join("cover.jpg"), &art).unwrap();
+        let mut j = job(root, Dest::Folder(dir.clone()), Some("A/X/cover.jpg"));
+        j.dirs = vec![dir.clone()];
+        j.shown_url = Some("https://x/single.jpg".into());
+        let p = picked(settle_files(&j, Ok(None)).unwrap());
+        assert!(p.changed && p.url.is_none() && p.backup.is_none());
+        assert_eq!(p.cover_ref, "A/X/cover.jpg");
+        assert!(dir.join("ambient.png").is_file(), "the texture is made again");
+        let mut png = Vec::new();
+        image::RgbImage::from_pixel(300, 300, image::Rgb([9, 9, 9])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        std::fs::write(dir.join("folder.png"), png).unwrap();
+        let mut j = job(root, Dest::Folder(dir.clone()), Some("A/X/folder.png"));
+        j.dirs = vec![dir.clone()];
+        let p = picked(settle_files(&j, Ok(None)).unwrap());
+        assert_eq!(p.cover_ref, "A/X/cover.jpg");
+        assert!(p.changed);
+        let empty = root.join("B/Y");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(matches!(settle_files(&job(root, Dest::Folder(empty), None), Ok(None)).unwrap(), Refreshed::Nothing));
+    }
+
+    /// An album without files: the url found, the same one too (its
+    /// picture is asked anew); a miss or a failure keeps what it shows.
+    #[test]
+    fn an_album_without_files_shows_the_url_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let web = job(tmp.path(), Dest::Web, Some("https://x/old.jpg"));
+        let art = cover(1000, 1000, [9, 9, 9]);
+        assert!(matches!(settle_files(&web, Ok(Some(("https://x/new.jpg".into(), art.clone())))).unwrap(), Refreshed::Web(u) if u == "https://x/new.jpg"));
+        assert!(matches!(settle_files(&web, Ok(Some(("https://x/old.jpg".into(), art)))).unwrap(), Refreshed::Web(u) if u == "https://x/old.jpg"));
+        assert!(matches!(settle_files(&web, Ok(None)).unwrap(), Refreshed::Nothing));
+        assert!(settle_files(&web, Err("x".into())).is_err());
+    }
+
+    /// A write that cannot land leaves the old cover and no staging file;
+    /// a texture that cannot be written does not undo the cover.
+    #[test]
+    fn a_failed_write_keeps_the_old_cover_and_a_failed_texture_keeps_the_new() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("A/X");
+        std::fs::create_dir_all(dir.join("cover.jpg")).unwrap();
+        assert!(write_atomic(&dir.join("cover.jpg"), b"new").is_err(), "a folder is in the way");
+        assert!(dir.join("cover.jpg").is_dir());
+        assert!(leftovers(&dir).is_empty());
+        std::fs::remove_dir(dir.join("cover.jpg")).unwrap();
+        std::fs::write(dir.join("cover.jpg"), jpeg(300, 300, [1, 2, 3])).unwrap();
+        std::fs::create_dir_all(dir.join("ambient.png")).unwrap();
+        let mut j = job(tmp.path(), Dest::Folder(dir.clone()), Some("A/X/cover.jpg"));
+        j.dirs = vec![dir.clone()];
+        let album = cover(1000, 1000, [20, 20, 200]);
+        let p = picked(settle_files(&j, Ok(Some(("https://x/a.jpg".into(), album.clone())))).unwrap());
+        assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), album.jpeg);
+        finish(&p, true);
+        assert!(leftovers(&dir).is_empty());
+    }
+
+    /// One refresh at a time per folder.
+    #[test]
+    fn a_folder_is_written_by_one_refresh_at_a_time() {
+        let dir = Path::new("/lib/claim-test");
+        let first = Claim::take(dir).unwrap();
+        assert!(Claim::take(dir).is_none());
+        drop(first);
+        assert!(Claim::take(dir).is_some());
+    }
+}

@@ -991,6 +991,70 @@ fn cached_answers_are_forgotten_by_prefix_and_value() {
     assert!(lib.cache_get("ytXclip.c").unwrap().is_some(), "«_» is no wildcard");
 }
 
+#[test]
+fn a_cached_answer_is_not_put_over_a_decision_taken_meanwhile() {
+    let lib = lib();
+    assert!(lib.cache_put_unless("cover_hd.v3.a", 10, "https://x/a.jpg", "cover_refreshed.a", 5).unwrap());
+    lib.cache_put("cover_refreshed.a", 20, "A/cover.jpg").unwrap();
+    // Looked up from 15 on: the decision at 20 came meanwhile.
+    assert!(!lib.cache_put_unless("cover_hd.v3.a", 30, "https://x/old.jpg", "cover_refreshed.a", 15).unwrap());
+    assert_eq!(lib.cache_get("cover_hd.v3.a").unwrap(), Some((10, "https://x/a.jpg".to_owned())));
+    // Looked up after it: put.
+    assert!(lib.cache_put_unless("cover_hd.v3.a", 40, "https://x/new.jpg", "cover_refreshed.a", 25).unwrap());
+}
+
+/// A release's files and its cover file are its places; a cover url and a
+/// file in the Trash are not.
+#[test]
+fn the_places_of_a_releases_files_are_its_tracks_and_its_cover() {
+    let lib = lib();
+    let t = file_track(&lib, "Song", &["Band"], "LP", 200_000);
+    let release = lib.get_track_row(t).unwrap().unwrap().release_id.unwrap();
+    let mut r = lib.get_release(release).unwrap().unwrap();
+    r.cover_ref = Some("Band/LP/cover.jpg".into());
+    lib.upsert_release(&r).unwrap();
+    let mut web = Release::new("Stream", ArtistCredit::default());
+    web.cover_ref = Some("https://x/a.jpg".into());
+    lib.upsert_release(&web).unwrap();
+    let places = lib.release_file_places().unwrap();
+    assert_eq!(places.len(), 2, "{places:?}");
+    assert!(places.iter().all(|(id, _)| *id == release));
+    assert!(places.iter().any(|(_, p)| p == "Band/LP/cover.jpg"));
+    let source = lib.active_source(t).unwrap().unwrap();
+    lib.trash_source(source.id, None).unwrap();
+    assert_eq!(lib.release_file_places().unwrap().len(), 1);
+}
+
+/// A refresh's cover ref, palette and cached answers go in at once.
+#[test]
+fn a_cover_refresh_settles_ref_palette_and_answers_together() {
+    let lib = lib();
+    let t = file_track(&lib, "Song", &["Band"], "LP", 200_000);
+    let id = lib.get_track_row(t).unwrap().unwrap().release_id.unwrap();
+    lib.cache_put("cover_hd.v3.x", 1, "https://x/single.jpg").unwrap();
+    let mut palette = nikgob_core::model::Palette::new(id, 0xFF11_2233);
+    palette.ambient_blur = Some(vec![1, 2, 3]);
+    let puts = vec![("cover_refreshed.x".to_owned(), "Band/LP/cover.jpg".to_owned())];
+    lib.settle_cover(id, Some("Band/LP/cover.jpg"), Some(&palette), 50, &puts, &["cover_hd.v3.x".to_owned()]).unwrap();
+    assert_eq!(lib.get_release(id).unwrap().unwrap().cover_ref.as_deref(), Some("Band/LP/cover.jpg"));
+    assert_eq!(lib.get_palette(id).unwrap().map(|p| (p.seed_argb, p.ambient_blur)), Some((0xFF11_2233, Some(vec![1, 2, 3]))));
+    assert_eq!(lib.cache_get("cover_refreshed.x").unwrap(), Some((50, "Band/LP/cover.jpg".to_owned())));
+    assert_eq!(lib.cache_get("cover_hd.v3.x").unwrap(), None);
+    // A lookup begun before it puts nothing after it.
+    assert!(!lib.cache_put_unless("cover_hd.v3.x", 60, "https://x/old.jpg", "cover_refreshed.x", 40).unwrap());
+}
+
+#[test]
+fn a_cached_answer_is_dropped_by_its_key_alone() {
+    let lib = lib();
+    lib.cache_put("cover_better.v2.a", 1, "x").unwrap();
+    lib.cache_put("cover_better.v2.ab", 1, "y").unwrap();
+    lib.cache_drop("cover_better.v2.a").unwrap();
+    assert!(lib.cache_get("cover_better.v2.a").unwrap().is_none());
+    assert!(lib.cache_get("cover_better.v2.ab").unwrap().is_some(), "another key");
+    lib.cache_drop("cover_better.v2.a").unwrap();
+}
+
 /// A track with a file: `names` credited (joined by « & »), on its album.
 fn file_track(lib: &Library, title: &str, names: &[&str], album: &str, ms: u32) -> TrackId {
     let mut credit = ArtistCredit::default();

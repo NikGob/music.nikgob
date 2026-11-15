@@ -1114,6 +1114,23 @@ impl Library {
 
     // ---- listings
 
+    /// Every place a file of a release lies at, as stored: the local files
+    /// of its tracks (not in the Trash) and its cover when that is a file.
+    pub fn release_file_places(&self) -> Result<Vec<(ReleaseId, String)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT t.release_id, s.locator FROM source s JOIN track t ON t.id = s.track_id
+                  WHERE s.kind = 'local_file' AND s.trashed_at IS NULL AND t.release_id IS NOT NULL
+                 UNION ALL
+                 SELECT id, cover_ref FROM release
+                  WHERE cover_ref IS NOT NULL AND cover_ref <> ''
+                    AND cover_ref NOT LIKE 'https://%' AND cover_ref NOT LIKE 'http://%'",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, r.get::<_, String>(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// Tracks of a release in album order (disc, track number).
     pub fn tracks_of_release(&self, release: ReleaseId) -> Result<Vec<TrackRow>> {
         self.tracks_of_release_impl(release, false)
