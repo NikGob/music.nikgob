@@ -82,8 +82,9 @@ impl Want {
     }
 
     /// Whether a service's release of `kind` with `n` songs may give its
-    /// art: an album of several songs takes no single, nothing of one
-    /// song, and an EP only of as many songs as it has.
+    /// art: an album of several songs takes nothing of one song, and a
+    /// single or an EP only of as many songs as it has (the library files
+    /// many a single of three songs as an album).
     pub(crate) fn takes(&self, kind: ReleaseType, n: Option<u32>) -> bool {
         if self.single() {
             return true;
@@ -92,8 +93,7 @@ impl Want {
             return false;
         }
         match kind {
-            ReleaseType::Single => false,
-            ReleaseType::Ep => n.is_some_and(|n| n >= self.tracks),
+            ReleaseType::Single | ReleaseType::Ep => n.is_some_and(|n| n >= self.tracks),
             ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => true,
         }
     }
@@ -430,7 +430,10 @@ mod tests {
         assert!(!album.takes(deezer_kind(Some("single")), Some(1)));
         assert!(!album.takes(deezer_kind(Some("album")), Some(1)), "an album of one song");
         assert!(!album.takes(deezer_kind(Some("ep")), Some(4)));
+        assert!(!album.takes(deezer_kind(Some("single")), None), "a single of songs untold");
         assert!(album.takes(deezer_kind(Some("album")), Some(9)));
+        // A single of three songs the library files as an album of three.
+        assert!(want(ReleaseType::Album, 3).takes(deezer_kind(Some("single")), Some(3)));
         assert!(album.takes(deezer_kind(Some("compile")), None));
         assert!(album.takes(deezer_kind(None), None));
         assert!(want(ReleaseType::Single, 1).takes(deezer_kind(Some("single")), Some(1)));
