@@ -27,14 +27,17 @@
 //!   ([`BETA_KEEP`]); a rejection (a skip in its first half, a scrub-skip, a
 //!   song taken out of the queue) grows β. A skip or two stay in the vibe:
 //!   the picks turn from the skipped song's artist and sound within the
-//!   cluster, and after two running the block plays fewer new songs. Only
-//!   a run of rejections of one cluster, none heard out between, leaves it
-//!   ([`LEAVE_UNSETTLED`], [`LEAVE_SETTLED`]): each weighed by what it says
-//!   (an unfamiliar song [`MISSED_WEIGHT`], «not now» of a loved one
+//!   cluster, and after two running the block plays fewer new songs; the
+//!   next block stays in the cluster too. Only a run of rejections of one
+//!   cluster, none heard out between, leaves it ([`LEAVE_UNSETTLED`],
+//!   [`LEAVE_SETTLED`], the latter of two known artists): each weighed by
+//!   what it says (an unfamiliar song [`MISSED_WEIGHT`], a whole one where
+//!   the wave plays new music alone; «not now» of a loved one
 //!   [`NOT_NOW_WEIGHT`] or nothing once the vibe is settled: the song is
 //!   worn, not the vibe); then the block ends at once and the next is of
-//!   another cluster. «↻ Другой вайб» ([`Bandit::other_vibe`]) moves to
-//!   another cluster at once and counts nothing against the song playing.
+//!   another cluster. A like approves at once. «↻ Другой вайб»
+//!   ([`Bandit::other_vibe`]) moves to another cluster at once and counts
+//!   nothing against the song playing.
 //! * **The songs** of a block come from [`crate::open_world::next`] with
 //!   the cluster as the scene: the library and the open pool ranked
 //!   together, new music by the novelty's share. A cluster that has
@@ -100,7 +103,7 @@ pub const LEAVE_UNSETTLED: f32 = 3.0;
 /// …and at this weight, of two artists at least, once it is.
 pub const LEAVE_SETTLED: f32 = 4.0;
 /// A rejection of a known song weighs 1 in the run; of an unfamiliar one
-/// («did not land») this…
+/// («did not land») this (1 where the wave plays new music alone)…
 pub const MISSED_WEIGHT: f32 = 0.5;
 /// …and «not now» of a loved one this while the vibe is not settled
 /// (settled, nothing).
@@ -274,12 +277,18 @@ pub struct Bandit {
     /// The cluster of the last song heard out: its vibe is settled.
     #[serde(default)]
     heard_in: Option<usize>,
-    /// Each arm's β as the wave found it ([`BETA_KEEP`]), and what its
-    /// rejections wrote into the memory ([`MEMORY_NO_CAP`]).
+    /// Each arm's β as the wave found it (or as it was restored, for a
+    /// wave saved before; [`BETA_KEEP`]).
     #[serde(default)]
     base_beta: Vec<f32>,
+    /// What the wave's rejections wrote into the memory of each cluster,
+    /// by the memory's key ([`MEMORY_NO_CAP`]), whatever its arms now.
     #[serde(default)]
-    memory_no: Vec<f32>,
+    memory_no: Vec<(String, f32)>,
+    /// The wave plays new music alone («Только новое»): a song that did not
+    /// land weighs a whole rejection there.
+    #[serde(default)]
+    only_new: bool,
     /// The next block is not of this cluster.
     avoid: Option<usize>,
     /// The cluster and the block of each recent pick.
@@ -318,7 +327,8 @@ pub struct Bandit {
     character: Character,
 }
 
-/// A pick the bandit remembers: its cluster, its block and its artist.
+/// A pick the bandit remembers: its cluster, its block, its artist (empty:
+/// unknown) and whether it was liked (its approval told then).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Served {
     item: Item,
@@ -326,16 +336,22 @@ struct Served {
     block: u32,
     #[serde(default)]
     artist: String,
+    #[serde(default)]
+    liked: bool,
 }
 
 /// Rejections running of one cluster, none heard out between: their
-/// weight, how many, and their artists.
+/// weight, how many, their known artists, and whether it holds the
+/// cluster no more (the wave left it, «↻ Другой вайб» did, or a song was
+/// heard past its half since).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 struct Run {
     arm: usize,
     weight: f32,
     count: u8,
     artists: Vec<String>,
+    released: bool,
 }
 
 /// One draw of Gamma(`shape`, 1) (Marsaglia–Tsang; a shape below one is
@@ -467,31 +483,29 @@ impl Bandit {
     /// profiles it keeps to changed; a cluster found again keeps what it
     /// learnt).
     pub fn ensure(&mut self, ctx: &WaveContext<'_>, seed: &WaveSeed) {
+        self.restored();
         let key = (seed.filter, seed.only.clone());
         if self.built_for.as_ref() == Some(&key) && !self.arms.is_empty() {
             return;
         }
         let mut arms = Self::arms_of(ctx, seed);
         self.stamp(ctx, seed);
-        let (mut base_beta, mut memory_no) = (Vec::with_capacity(arms.len()), Vec::with_capacity(arms.len()));
+        let mut base_beta = Vec::with_capacity(arms.len());
         for a in &mut arms {
             if let Some((j, old)) = self.arms.iter().enumerate().find(|(_, o)| o.scene == a.scene) {
                 a.alpha = old.alpha;
                 a.beta = old.beta;
                 base_beta.push(self.base_beta.get(j).copied().unwrap_or(old.beta));
-                memory_no.push(self.memory_no.get(j).copied().unwrap_or(0.0));
             } else {
                 // What worked in this part of the day before.
                 let (ok, no) = self.memory.prior(&self.memory_key(a.scene), self.part, self.day);
                 a.alpha += ok;
                 a.beta += no;
                 base_beta.push(a.beta);
-                memory_no.push(0.0);
             }
         }
         self.arms = arms;
         self.base_beta = base_beta;
-        self.memory_no = memory_no;
         self.built_for = Some(key);
         self.current = None;
         self.block_left = 0;
@@ -508,6 +522,16 @@ impl Bandit {
         self.day = m.now().div_euclid(crate::taste::DAY_MS);
         self.part = m.taste.day_part().index() as u8;
         self.character = seed.filter.character;
+        self.only_new = seed.filter.novelty >= NOVELTY_ONLY_NEW;
+    }
+
+    /// A wave saved before its arms kept their β at the start: its β as
+    /// restored is where what its rejections add fades to.
+    fn restored(&mut self) {
+        if self.base_beta.len() < self.arms.len() {
+            let from = self.base_beta.len();
+            self.base_beta.extend(self.arms[from..].iter().map(|a| a.beta));
+        }
     }
 
     /// The memory's key of a cluster's `scene`.
@@ -518,22 +542,24 @@ impl Bandit {
     /// Learns a verdict of arm `k` into the memory, counting `by` songs (the
     /// rejections of a wave [`MEMORY_NO_CAP`] in all at most).
     fn remember(&mut self, k: usize, ok: bool, by: f32) {
+        let Some(scene) = self.arms.get(k).map(|a| a.scene) else { return };
+        let key = self.memory_key(scene);
         let by = if ok {
             by
         } else {
-            if self.memory_no.len() < self.arms.len() {
-                self.memory_no.resize(self.arms.len(), 0.0);
-            }
-            let Some(written) = self.memory_no.get_mut(k) else { return };
+            let at = match self.memory_no.iter().position(|(c, _)| *c == key) {
+                Some(at) => at,
+                None => {
+                    self.memory_no.push((key.clone(), 0.0));
+                    self.memory_no.len() - 1
+                }
+            };
+            let written = &mut self.memory_no[at].1;
             let by = by.min(MEMORY_NO_CAP - *written);
             *written += by.max(0.0);
             by
         };
-        if by <= 0.0 {
-            return;
-        }
-        if let Some(scene) = self.arms.get(k).map(|a| a.scene) {
-            let key = self.memory_key(scene);
+        if by > 0.0 {
             self.memory.learn_as(&key, self.part, self.day, ok, by);
         }
     }
@@ -558,14 +584,30 @@ impl Bandit {
     /// Chooses the next block's cluster by Thompson sampling: `bonus` adds
     /// to each arm's α for this draw (the session's), `dry` arms and the
     /// one to avoid are passed over (the avoided one too when nothing else
-    /// is left). False when no arm is left.
+    /// is left). A cluster with rejections running short of leaving it
+    /// ([`Self::held`]) is chosen again, while it has songs. False when no
+    /// arm is left.
     pub fn choose(&mut self, bonus: &[f32], dry: &[usize]) -> bool {
+        self.draw(bonus, dry, true)
+    }
+
+    /// The cluster a run of rejections short of leaving holds: a skip or
+    /// two never move the wave, not at a block's end either.
+    fn held(&self) -> Option<usize> {
+        self.run.as_ref().filter(|r| !r.released && r.arm < self.arms.len() && self.arms.len() > 1).map(|r| r.arm)
+    }
+
+    /// [`Self::choose`]; `hold`: as [`Self::held`] says.
+    fn draw(&mut self, bonus: &[f32], dry: &[usize], hold: bool) -> bool {
         // While the mood is lost the cluster left stays avoided (short
         // blocks would come back to it at once).
         let avoid = if self.lost { self.avoid } else { self.avoid.take() };
         let mut rng = self.rng();
-        let mut best: Option<(f32, usize)> = None;
+        let mut best: Option<(f32, usize)> = self.held().filter(|k| hold && !dry.contains(k)).map(|k| (1.0, k));
         for pass in 0..2 {
+            if best.is_some() {
+                break;
+            }
             for (k, a) in self.arms.iter().enumerate() {
                 if dry.contains(&k) || (pass == 0 && avoid == Some(k)) {
                     continue;
@@ -574,9 +616,6 @@ impl Bandit {
                 if best.is_none_or(|b| s > b.0) {
                     best = Some((s, k));
                 }
-            }
-            if best.is_some() {
-                break;
             }
         }
         let Some((_, k)) = best else {
@@ -603,20 +642,19 @@ impl Bandit {
         self.current.and_then(|k| self.arms.get(k)).map(|a| a.scene)
     }
 
-    /// `item` by `artist` ([`WavePick::artist`]; empty, unknown) was picked
-    /// from arm `k`.
+    /// `item` by `artist` (a known artist's identity; empty, unknown) was
+    /// picked from arm `k`.
     pub fn note_served(&mut self, item: Item, k: usize, artist: &str) {
         self.served.retain(|s| s.item != item);
         // Of the block being picked when it is of `k` (else of no block).
         let block = if self.current == Some(k) { self.block } else { 0 };
-        self.served.push_back(Served { item, arm: k, block, artist: artist.to_owned() });
+        self.served.push_back(Served { item, arm: k, block, artist: artist.to_owned(), liked: false });
         while self.served.len() > SERVED_KEEP {
             self.served.pop_front();
         }
         if self.current == Some(k) {
             self.block_left = self.block_left.saturating_sub(1);
         }
-
     }
 
     fn served_of(&self, item: &Item) -> Option<&Served> {
@@ -629,43 +667,18 @@ impl Bandit {
 
     /// How a served song ended (its verdict, the session's): heard out
     /// grows α, a rejection β, and a run of them leaves the cluster (see
-    /// the module docs).
+    /// the module docs). A song liked said it all when it was liked.
     pub fn feedback(&mut self, item: &Item, verdict: Verdict) {
-        let Some(s) = self.served_of(item) else { return };
+        self.restored();
+        let Some(s) = self.served_of(item).filter(|s| !s.liked) else { return };
         let (k, block, artist) = (s.arm, s.block, s.artist.clone());
         match verdict {
-            Verdict::Approved => {
-                if let Some(a) = self.arms.get_mut(k) {
-                    a.alpha += 1.0;
-                }
-                self.remember(k, true, 1.0);
-                self.approved_run = self.approved_run.saturating_add(1);
-                // Heard out: the rejections running end, its vibe is
-                // settled, and what rejections added to β fades.
-                self.run = None;
-                self.heard_in = Some(k);
-                for (a, base) in self.arms.iter_mut().zip(&self.base_beta) {
-                    if a.beta > *base {
-                        a.beta = base + (a.beta - base) * BETA_KEEP;
-                    }
-                }
-                // While the mood is looked for, a cluster heard out keeps
-                // its block going; found, the block grows to a full one.
-                let probing = self.lost && self.current == Some(k) && crate::open_world::part_on(crate::open_world::Part::Probe);
-                if self.approved_run >= SETTLED_AFTER && self.lost {
-                    self.lost = false;
-                    self.avoid = None;
-                }
-                if probing {
-                    let at_least = if self.lost { 1 } else { BLOCK_MIN };
-                    if self.block_left < at_least {
-                        self.block_len = self.block_len.saturating_add(at_least - self.block_left);
-                        self.block_left = at_least;
-                    }
-                }
-            }
+            Verdict::Approved => self.approved(k),
             v if v.rejects() => {
                 let weight = match v {
+                    // Of new music alone every song is new: one that did not
+                    // land is a rejection like any.
+                    Verdict::Missed if self.only_new => 1.0,
                     Verdict::Missed => MISSED_WEIGHT,
                     Verdict::NotNow if self.heard_in == Some(k) => 0.0,
                     Verdict::NotNow => NOT_NOW_WEIGHT,
@@ -686,21 +699,62 @@ impl Bandit {
                         self.halve_next = true;
                     }
                 }
-                let artist = if artist.is_empty() { format!("{item:?}") } else { artist };
                 self.rejected(k, weight, artist);
+            }
+            // Heard past its half (or on after a drag): the vibe will do,
+            // the rejections running hold the cluster no more (they still
+            // count).
+            Verdict::Neutral => {
+                if let Some(r) = self.run.as_mut() {
+                    r.released = true;
+                }
             }
             _ => {}
         }
     }
 
-    /// A rejection of a song of arm `k` by `artist`, weighing `weight`: β
-    /// grows by it and it joins the run of `k` (a run of another cluster
-    /// ends). At [`RUN_HALVE`] running the block being picked, of `k`,
-    /// plays half the share of new music; at [`LEAVE_UNSETTLED`] (the vibe
-    /// not settled) or [`LEAVE_SETTLED`] of two artists (settled) the wave
-    /// leaves the cluster: the block being picked ends if it is of `k` (the
-    /// songs rejected are of a block before it, picked ahead meanwhile),
-    /// and the next one is of another.
+    /// A song of arm `k` heard out or liked: α grows, the rejections
+    /// running end, its vibe is settled, and what rejections added to β
+    /// fades.
+    fn approved(&mut self, k: usize) {
+        if let Some(a) = self.arms.get_mut(k) {
+            a.alpha += 1.0;
+        }
+        self.remember(k, true, 1.0);
+        self.approved_run = self.approved_run.saturating_add(1);
+        self.run = None;
+        self.heard_in = Some(k);
+        for (a, base) in self.arms.iter_mut().zip(&self.base_beta) {
+            if a.beta > *base {
+                a.beta = base + (a.beta - base) * BETA_KEEP;
+            }
+        }
+        // While the mood is looked for, a cluster heard out keeps its block
+        // going; found, the block grows to a full one.
+        let probing = self.lost && self.current == Some(k) && crate::open_world::part_on(crate::open_world::Part::Probe);
+        if self.approved_run >= SETTLED_AFTER && self.lost {
+            self.lost = false;
+            self.avoid = None;
+        }
+        if probing {
+            let at_least = if self.lost { 1 } else { BLOCK_MIN };
+            if self.block_left < at_least {
+                self.block_len = self.block_len.saturating_add(at_least - self.block_left);
+                self.block_left = at_least;
+            }
+        }
+    }
+
+    /// A rejection of a song of arm `k` by `artist` (empty: unknown),
+    /// weighing `weight`: β grows by it and it joins the run of `k` (a run
+    /// of another cluster ends). At [`RUN_HALVE`] running the block being
+    /// picked, of `k`, plays half the share of new music; at
+    /// [`LEAVE_UNSETTLED`] (the vibe not settled) or [`LEAVE_SETTLED`] of two
+    /// known artists (settled; songs of unknown artists prove no second
+    /// one) the wave leaves the cluster: the block being picked ends if it
+    /// is of `k` (the songs rejected are of a block before it, picked ahead
+    /// meanwhile), and the next one is of another. Short of that the run
+    /// holds the cluster ([`Self::held`]).
     fn rejected(&mut self, k: usize, weight: f32, artist: String) {
         if let Some(a) = self.arms.get_mut(k) {
             a.beta += weight;
@@ -712,14 +766,15 @@ impl Bandit {
         let Some(run) = self.run.as_mut() else { return };
         run.weight += weight;
         run.count = run.count.saturating_add(1);
-        if !run.artists.contains(&artist) {
+        if !artist.is_empty() && !run.artists.contains(&artist) {
             run.artists.push(artist);
         }
-        let leave = if settled { run.weight >= LEAVE_SETTLED && run.artists.len() >= 2 } else { run.weight >= LEAVE_UNSETTLED };
+        let leave = self.arms.len() > 1 && if settled { run.weight >= LEAVE_SETTLED && run.artists.len() >= 2 } else { run.weight >= LEAVE_UNSETTLED };
+        run.released = leave;
         if run.count >= RUN_HALVE && self.current == Some(k) && crate::open_world::part_on(crate::open_world::Part::Rejected) {
             self.halved = true;
         }
-        if leave && self.arms.len() > 1 {
+        if leave {
             if self.current == Some(k) {
                 self.block_left = 0;
             }
@@ -735,11 +790,14 @@ impl Bandit {
         self.run.as_ref().map_or(0, |r| r.count)
     }
 
-    /// A song liked while it played: its cluster's α grows.
+    /// A song liked while it played: approved at once, once (its end tells
+    /// nothing more).
     pub fn liked(&mut self, item: &Item) {
-        if let Some(a) = self.arm_of(item).and_then(|k| self.arms.get_mut(k)) {
-            a.alpha += 1.0;
-        }
+        self.restored();
+        let Some(s) = self.served.iter_mut().rev().find(|s| s.item == *item && !s.liked) else { return };
+        s.liked = true;
+        let k = s.arm;
+        self.approved(k);
     }
 
     /// A pick taken out of the queue by hand: its cluster's β grows (the
@@ -768,17 +826,20 @@ impl Bandit {
 
     /// «↻ Другой вайб»: another cluster than that of the song `playing`
     /// at once (and, with three or more, than that of the block picked
-    /// ahead of it), nothing counted against either. False when there is
-    /// no other cluster.
+    /// ahead of it), nothing counted against either; the rejections running
+    /// hold their cluster no more. False when there is no other cluster.
     pub fn other_vibe(&mut self, playing: Option<&Item>) -> bool {
         if self.arms.len() < 2 {
             self.block_left = 0;
             return false;
         }
+        if let Some(r) = self.run.as_mut() {
+            r.released = true;
+        }
         let from = playing.and_then(|i| self.arm_of(i)).or(self.current);
         let ahead: Vec<usize> = self.current.filter(|c| Some(*c) != from && self.arms.len() > 2).into_iter().collect();
         self.avoid = from;
-        self.choose(&[], &ahead)
+        self.draw(&[], &ahead, false)
     }
 
     /// The cluster the song `item` was picked from.
@@ -938,9 +999,20 @@ pub fn pick(
         Item::Track(t) => Ahead::Track(*t),
         Item::Stream(r) => pool.iter().find(|c| c.track.id == *r).map_or(Ahead::New(crate::open_world::ArtistKey::Unknown), |c| Ahead::of_new(ctx, c)),
     };
+    // Who a pick is by for the bandit: a known artist, else nobody (empty).
+    let artist_of = |a: Ahead| {
+        let key = match a {
+            Ahead::Track(t) => m.position(t).map_or(crate::open_world::ArtistKey::Unknown, |i| crate::open_world::ArtistKey::of_track(m, i)),
+            Ahead::New(key) => key,
+        };
+        key.label(String::new)
+    };
     let run_seed = bandit.seed;
     while out.len() < n {
-        if (bandit.current.is_none() || bandit.block_left == 0 || bandit.current.is_some_and(|k| dry.contains(&k))) && !bandit.choose(&bonus, &dry) {
+        // A cluster held by rejections running takes the picks back from a
+        // block picked ahead of another.
+        let held = bandit.held().filter(|h| bandit.current != Some(*h) && !dry.contains(h)).is_some();
+        if (bandit.current.is_none() || bandit.block_left == 0 || bandit.current.is_some_and(|k| dry.contains(&k)) || held) && !bandit.choose(&bonus, &dry) {
             break;
         }
         let Some(k) = bandit.current else { break };
@@ -957,8 +1029,9 @@ pub fn pick(
         }
         for p in next.picks {
             served.insert(served_key(&p.item, &keys));
-            bandit.note_served(p.item.clone(), k, &p.artist);
-            ahead.push(ahead_of(&p.item));
+            let a = ahead_of(&p.item);
+            bandit.note_served(p.item.clone(), k, &artist_of(a));
+            ahead.push(a);
             out.push(p);
         }
     }
@@ -1294,11 +1367,8 @@ mod tests {
             .collect()
     }
 
-    /// The wave left the cluster `k` (its next block is of another).
+    /// The wave's next block, drawn now, is of another cluster than `k`.
     fn has_left(b: &mut Bandit, k: usize) -> bool {
-        if b.settled() {
-            return false;
-        }
         b.block_left = 0;
         b.choose(&[], &[]);
         b.current != Some(k)
@@ -1347,6 +1417,7 @@ mod tests {
             assert_eq!(b.arms[k].beta, 3.0);
             assert_eq!(b.block_left(), left_before - 1);
             assert!(b.settled());
+            assert!(!has_left(&mut b, k), "the next block is of it too");
         }
     }
 
@@ -1444,7 +1515,7 @@ mod tests {
             assert_eq!(b.arms, before);
             assert_eq!(b.memory, memory);
             assert_eq!(b.skips_running(), 0);
-            assert!(!has_left(&mut b, k));
+            assert!(b.settled());
 
             let mut b = bandit();
             b.seed = s;
@@ -1503,6 +1574,136 @@ mod tests {
         b.feedback(&other[1], Verdict::Approved);
         assert!((b.arms[k].beta - (base + 6.0 * BETA_KEEP * BETA_KEEP)).abs() < 1e-4);
         assert_eq!(b.memory.prior(&key, b.part, b.day), (0.0, MEMORY_NO_CAP), "heard out elsewhere");
+    }
+
+    /// The memory's cap holds for a cluster through the wave whatever its
+    /// arms: left out by a filter and back, it is the same cluster.
+    #[test]
+    fn the_memory_cap_holds_through_a_filter_and_back() {
+        let mut b = bandit();
+        b.choose(&[], &[]);
+        let scene = b.arms[0].scene;
+        let key = b.memory_key(scene);
+        for i in serve(&mut b, 0, 100, &["a", "b", "c"]) {
+            b.feedback(&i, Verdict::Rejected);
+        }
+        assert_eq!(b.memory.prior(&key, b.part, b.day), (0.0, MEMORY_NO_CAP));
+        // A filter without it, then one with it again (at another place).
+        let a = b.arms.remove(0);
+        b.arms.push(a);
+        let k = b.arms.iter().position(|a| a.scene == scene).unwrap();
+        b.run = None;
+        for i in serve(&mut b, k, 200, &["d", "e"]) {
+            b.feedback(&i, Verdict::Rejected);
+        }
+        assert_eq!(b.memory.prior(&key, b.part, b.day), (0.0, MEMORY_NO_CAP));
+    }
+
+    /// Songs of unknown artists prove no second artist: a settled vibe is
+    /// left by four skips of two known artists, not by unknown ones.
+    #[test]
+    fn unknown_artists_are_no_second_artist() {
+        for s in 0..20 {
+            let mut b = bandit();
+            b.seed = s;
+            b.choose(&[], &[]);
+            let k = b.current.unwrap();
+            let items = serve(&mut b, k, 100, &["x", "", "", "", "", "a", "b"]);
+            b.feedback(&items[0], Verdict::Approved);
+            for i in &items[1..6] {
+                b.feedback(i, Verdict::Rejected);
+            }
+            assert!(b.settled(), "four unknown and one known artist stay");
+            assert!(!has_left(&mut b, k));
+            b.feedback(&items[6], Verdict::Rejected);
+            assert!(has_left(&mut b, k), "a second known artist leaves");
+        }
+    }
+
+    /// Where the wave plays new music alone a song that did not land is a
+    /// whole rejection: three leave a vibe not settled.
+    #[test]
+    fn of_new_music_alone_a_miss_is_a_rejection() {
+        let mut b = bandit();
+        b.only_new = true;
+        b.choose(&[], &[]);
+        let k = b.current.unwrap();
+        let items = serve(&mut b, k, 100, &["a", "b", "c"]);
+        for i in &items {
+            b.feedback(i, Verdict::Missed);
+        }
+        assert!(has_left(&mut b, k));
+    }
+
+    /// A like approves at once and once: it ends the run and settles the
+    /// vibe, and the song's end, skipped or heard out, adds nothing.
+    #[test]
+    fn a_like_approves_at_once_and_once() {
+        let mut b = bandit();
+        b.choose(&[], &[]);
+        let k = b.current.unwrap();
+        let items = serve(&mut b, k, 100, &["a", "b", "c", "d"]);
+        b.feedback(&items[0], Verdict::Rejected);
+        b.feedback(&items[1], Verdict::Rejected);
+        let a0 = b.arms[k].alpha;
+        b.liked(&items[2]);
+        assert_eq!(b.arms[k].alpha, a0 + 1.0);
+        assert_eq!(b.skips_running(), 0);
+        assert_eq!(b.heard_in, Some(k));
+        let after = b.clone();
+        b.feedback(&items[2], Verdict::Rejected);
+        assert_eq!(b, after, "liked, then skipped: nothing more");
+        b.feedback(&items[2], Verdict::Approved);
+        b.liked(&items[2]);
+        assert_eq!(b, after, "nor heard out, nor liked again");
+        // Settled: «not now» counts nothing, a skip one.
+        b.feedback(&items[3], Verdict::NotNow);
+        assert_eq!(b.skips_running(), 0);
+    }
+
+    /// What came while picks were on their way is told to their state in
+    /// the order it came: a like after two skips ends their run there too.
+    #[test]
+    fn a_like_during_an_extension_keeps_its_order() {
+        let mut live = bandit();
+        live.choose(&[], &[]);
+        let k = live.current.unwrap();
+        let items = serve(&mut live, k, 100, &["a", "b", "c"]);
+        let mut picked = live.clone();
+        let mut late = live.clone();
+        live.feedback(&items[0], Verdict::Rejected);
+        live.feedback(&items[1], Verdict::Rejected);
+        live.liked(&items[2]);
+        live.feedback(&items[2], Verdict::Approved);
+        // The marks as they came, on the state the picks came with.
+        picked.feedback(&items[0], Verdict::Rejected);
+        picked.feedback(&items[1], Verdict::Rejected);
+        picked.liked(&items[2]);
+        picked.feedback(&items[2], Verdict::Approved);
+        assert_eq!(picked, live);
+        assert_eq!(picked.skips_running(), 0);
+        assert!(picked.held().is_none());
+        // The ends first and the likes after: the like would count twice.
+        late.feedback(&items[0], Verdict::Rejected);
+        late.feedback(&items[1], Verdict::Rejected);
+        late.feedback(&items[2], Verdict::Approved);
+        late.liked(&items[2]);
+        assert!(late.arms[k].alpha > live.arms[k].alpha);
+    }
+
+    /// A song heard past its half after a skip lets the cluster go at the
+    /// block's end (the skip still counts).
+    #[test]
+    fn a_song_heard_past_its_half_lets_the_cluster_go() {
+        let mut b = bandit();
+        b.choose(&[], &[]);
+        let k = b.current.unwrap();
+        let items = serve(&mut b, k, 100, &["a", "b"]);
+        b.feedback(&items[0], Verdict::Rejected);
+        assert_eq!(b.held(), Some(k));
+        b.feedback(&items[1], Verdict::Neutral);
+        assert_eq!(b.held(), None);
+        assert_eq!(b.skips_running(), 1);
     }
 
     /// «↻ Другой вайб»: another cluster at once, and nothing counted

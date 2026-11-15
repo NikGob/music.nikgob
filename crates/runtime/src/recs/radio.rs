@@ -114,9 +114,8 @@ pub(crate) struct RadioRun {
     extending: bool,
     /// An extension waits for the first snapshot.
     want: bool,
-    /// Learnt while an extension ran: applied to its result.
-    pending: Vec<(Item, Outcome, Verdict)>,
-    /// Likes and removals while an extension ran: applied to its result.
+    /// Ends, likes and removals while an extension ran: applied to its
+    /// result in the order they came.
     marks: Vec<Mark>,
     pending_new: Vec<NewTrack>,
     /// The queue ran out while an extension ran: play on when it comes.
@@ -177,8 +176,10 @@ struct Refill {
     empty: Vec<String>,
 }
 
-/// What the user did to a track of the radio besides playing it.
+/// What the user did to a track of the radio while an extension ran.
 enum Mark {
+    /// How it ended and what the session said of it.
+    Ended(Item, Outcome, Verdict),
     /// Liked while it played (its raw sound, when analysed).
     Liked(Item, Option<nikgob_recs::Vector>),
     /// Taken out of the queue, or «Не нравится».
@@ -192,6 +193,7 @@ enum Mark {
 impl Mark {
     fn apply(self, state: &mut Engine) {
         match self {
+            Self::Ended(item, outcome, verdict) => state.judged(item, outcome, verdict),
             Self::Liked(item, vector) => state.liked(item, vector),
             Self::Removed(item) => state.removed(item),
             Self::Wave(seed) => state.set_wave(seed),
@@ -683,7 +685,6 @@ impl Worker {
             pool: HashMap::new(),
             extending: false,
             want: false,
-            pending: Vec::new(),
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
@@ -759,7 +760,6 @@ impl Worker {
             // meanwhile joins the state they come with.
             extending: true,
             want: false,
-            pending: Vec::new(),
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
@@ -900,7 +900,6 @@ impl Worker {
             pool: HashMap::new(),
             extending: false,
             want: false,
-            pending: Vec::new(),
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,
@@ -1337,9 +1336,6 @@ impl Worker {
         let paused_pick = self.recs.radio.paused_pick.take_if(|r| *r == id).is_some();
         let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) else { return };
         run.extending = false;
-        for (item, outcome, verdict) in run.pending.drain(..) {
-            state.judged(item, outcome, verdict);
-        }
         for mark in run.marks.drain(..) {
             mark.apply(&mut state);
         }
@@ -1824,7 +1820,7 @@ impl Worker {
         let song = self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).map_or(track, |t| t.id);
         let snap = self.snapshot();
         let played = self.recs.session.last_of(song).cloned();
-        let scrub = played.as_ref().and_then(|p| p.scrub);
+        let scrub = played.as_ref().and_then(|p| p.dragged());
         let outcome = if complete { Outcome::Complete } else { Outcome::Skip { position_ms, duration_ms, scrub } };
         let (verdict, streak) = match (&snap, &played) {
             (Some(s), Some(p)) => (Session::verdict(p, &s.model), self.recs.session.skip_streak(&s.model)),
@@ -1844,7 +1840,7 @@ impl Worker {
         }
         run.state.judged(item.clone(), outcome, verdict);
         if run.extending {
-            run.pending.push((item, outcome, verdict));
+            run.marks.push(Mark::Ended(item, outcome, verdict));
         }
         // What the wave learnt stays for the next waves.
         if let Some(mem) = run.state.wave_memory().filter(|m| !m.is_empty()) {
@@ -2455,7 +2451,6 @@ impl Worker {
             pool: save.pool.into_iter().map(|t| (t.id.clone(), t)).collect(),
             extending: false,
             want: false,
-            pending: Vec::new(),
             marks: Vec::new(),
             pending_new: Vec::new(),
             resume: false,

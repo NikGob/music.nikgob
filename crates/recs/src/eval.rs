@@ -45,8 +45,9 @@
 //!   - a session of «Моя волна» ([`wave_session`], [`crate::wave`]) at
 //!     the same mornings: the share of new music it plays at each novelty
 //!     (heard out song by song, three at a time as the queue asks), and
-//!     how often three early skips of a fresh wave's first songs move it
-//!     to another cluster;
+//!     how often and after how many early skips of a fresh wave (each
+//!     judged as the session judges it, the queue replaced as the runtime
+//!     does) it moves to another cluster, and the mix of those verdicts;
 //!   - the share of the catalog all lists ever held, and for a synthetic
 //!     listener how high the hidden taste rates what was picked (0.5 is a
 //!     random pick);
@@ -69,7 +70,7 @@ use crate::open_world::{ArtistKey, Character, OpenCandidate, WaveContext, WaveFi
 use crate::model::{Hits, Live, ModelInput, ReplayReport, UserModel, replay};
 use crate::pick::{Item, Recs};
 use crate::radio::{RadioParams, RadioSeed, RadioState};
-use crate::session::{Ended, Session};
+use crate::session::{Ended, Session, Verdict};
 use crate::songtype::{SongTypes, Voice};
 use crate::taste::{Catalog, DAY_MS, DayPart, EARLY_SKIP_MS, HOUR_MS, Play, SESSION_GAP_MS, TasteInput, TrackInfo};
 
@@ -447,10 +448,14 @@ pub struct WaveSessionStats {
     pub new: [f32; 4],
     /// Clusters the wave weighed, on average.
     pub clusters: f32,
-    /// Sessions of two clusters or more where three early skips were
-    /// measured, and the share of them whose next block was of another.
+    /// Sessions of two clusters or more where early skips of a fresh wave
+    /// were measured, the share of them where the wave left its cluster
+    /// within [`WAVE_SKIPS_MAX`], the skips it took on average (of those),
+    /// and the verdicts of the skips: rejected, did not land, «not now».
     pub skips_n: usize,
     pub skips_moved: f32,
+    pub skips_to_move: f32,
+    pub verdicts: [usize; 3],
 }
 
 /// What [`evaluate`] measured.
@@ -923,16 +928,27 @@ pub struct WaveRun {
     pub new: [Option<f32>; 4],
     /// The clusters it weighed.
     pub clusters: usize,
-    /// Three early skips of a fresh wave's first songs (its vibe not
-    /// settled): whether the next block was of another cluster (`None` with
-    /// one cluster).
+    /// Early skips of a fresh wave's songs, one after another (its vibe not
+    /// settled): whether it left its cluster within [`WAVE_SKIPS_MAX`]
+    /// (`None` with one cluster), and after how many.
     pub moved: Option<bool>,
+    pub skips: usize,
+    /// The verdicts of those skips: rejected, did not land, «not now».
+    pub verdicts: [usize; 3],
 }
+
+/// The early skips of a fresh wave [`wave_session`] tries at most.
+pub const WAVE_SKIPS_MAX: usize = 10;
+/// The songs a wave keeps queued ahead in [`wave_session`].
+const WAVE_QUEUE: usize = 3;
 
 /// A session of «Моя волна» after `session` over the dataset's open
 /// `pool`: [`WAVE_LEN`] songs at each novelty, three at a time, each heard
-/// out; then at «Баланс» a fresh wave whose first three songs are skipped
-/// early, and the cluster its next block is of.
+/// out; then at «Баланс» a fresh wave whose songs are skipped early one
+/// after another as the runtime has it: each judged as the session judges
+/// it (a known song rejected, an unfamiliar one did not land, a loved one
+/// «not now»), and the queue's tail picked again (all but the next at one
+/// skip running, all at two), until the wave leaves its cluster.
 pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], session: &Session) -> WaveRun {
     use crate::radio::Outcome;
     use crate::wave::WaveSeed;
@@ -964,21 +980,46 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
             run.clusters = radio.wave_bandit().map_or(0, |b| b.arms.len());
         }
     }
-    // Three early skips of a fresh block.
+    // Early skips of a fresh wave, its queue replaced as the runtime does.
     let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(crate::wave::NOVELTY_BALANCE)));
     radio.attune(session.clone(), Some(model.weights));
-    let first = radio.extend_wave(&ctx, pool, 3, 13);
-    let skipped = radio.wave_bandit().and_then(|b| b.current_scene());
-    if first.len() >= 3 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
-        for p in first.iter().take(3) {
-            radio.feedback(p.item.clone(), Outcome::skip(8_000));
+    let mut queue: Vec<Item> = radio.extend_wave(&ctx, pool, WAVE_QUEUE, 13).into_iter().map(|p| p.item).collect();
+    if queue.len() >= 2 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
+        let mut heard = session.clone();
+        let mut ts = heard.last_ts().unwrap_or_else(|| model.now());
+        let mut moved = false;
+        for n in 1..=WAVE_SKIPS_MAX {
+            if queue.is_empty() {
+                break;
+            }
+            let item = queue.remove(0);
+            let verdict = match &item {
+                Item::Track(t) => {
+                    ts += 20_000;
+                    heard.start(*t, ts, EventContext::Radio, Some(EventOrigin::Radio));
+                    heard.end_at(*t, Ended::Early, 8_000, None, None);
+                    heard.last().map_or(Verdict::Rejected, |p| Session::verdict(p, model))
+                }
+                Item::Stream(_) => Verdict::Missed,
+            };
+            match verdict {
+                Verdict::Missed => run.verdicts[1] += 1,
+                Verdict::NotNow => run.verdicts[2] += 1,
+                _ => run.verdicts[0] += 1,
+            }
+            radio.judged(item, Outcome::skip(8_000), verdict);
+            run.skips = n;
+            if radio.wave_bandit().is_some_and(|b| !b.settled()) {
+                moved = true;
+                break;
+            }
+            let running = radio.wave_bandit().map_or(0, |b| b.skips_running());
+            let keep = usize::from(running < crate::radio::SKIP_SHIFT).min(queue.len());
+            let gone = queue.split_off(keep);
+            radio.forget(&gone);
+            queue.extend(radio.extend_wave(&ctx, pool, WAVE_QUEUE - queue.len(), 13).into_iter().map(|p| p.item));
         }
-        radio.forget(&first[3..].iter().map(|p| p.item.clone()).collect::<Vec<_>>());
-        let again = radio.extend_wave(&ctx, pool, 3, 13);
-        let now = radio.wave_bandit().and_then(|b| b.current_scene());
-        if !again.is_empty() {
-            run.moved = Some(now != skipped);
-        }
+        run.moved = Some(moved);
     }
     run
 }
@@ -1287,7 +1328,9 @@ struct WaveSessions {
     n: usize,
     new: [(f32, usize); 4],
     clusters: usize,
-    skips: (usize, usize),
+    /// Sessions measured, those moved, the skips those took.
+    skips: (usize, usize, usize),
+    verdicts: [usize; 3],
 }
 
 impl WaveSessions {
@@ -1303,6 +1346,10 @@ impl WaveSessions {
         if let Some(m) = r.moved {
             self.skips.0 += 1;
             self.skips.1 += usize::from(m);
+            self.skips.2 += if m { r.skips } else { 0 };
+        }
+        for (acc, x) in self.verdicts.iter_mut().zip(r.verdicts) {
+            *acc += x;
         }
     }
 
@@ -1313,6 +1360,8 @@ impl WaveSessions {
             clusters: self.clusters as f32 / self.n.max(1) as f32,
             skips_n: self.skips.0,
             skips_moved: self.skips.1 as f32 / self.skips.0.max(1) as f32,
+            skips_to_move: self.skips.2 as f32 / self.skips.1.max(1) as f32,
+            verdicts: self.verdicts,
         }
     }
 }
@@ -1718,8 +1767,8 @@ impl Report {
         }
         let w = &self.wave_sessions;
         out += &format!(
-            "  wave session: n {:>3}  new familiar {:.3} balance {:.3} more {:.3} only-new {:.3}  clusters {:.1}  3 skips: n {:>3} moved {:.3}\n",
-            w.sessions, w.new[0], w.new[1], w.new[2], w.new[3], w.clusters, w.skips_n, w.skips_moved
+            "  wave session: n {:>3}  new familiar {:.3} balance {:.3} more {:.3} only-new {:.3}  clusters {:.1}  skips: n {:>3} moved {:.3} after {:.1}  rejected {} did-not-land {} not-now {}\n",
+            w.sessions, w.new[0], w.new[1], w.new[2], w.new[3], w.clusters, w.skips_n, w.skips_moved, w.skips_to_move, w.verdicts[0], w.verdicts[1], w.verdicts[2]
         );
         out += &format!(
             "  time: build {:.0} ms (learning) / {:.0} ms (cached weights), home mixes {:.0} ms, autoplay of ten {:.0} ms, graph {:.1} ms, walk {:.0} µs\n",
@@ -1843,8 +1892,8 @@ mod tests {
 
     /// A session of «Моя волна» on a listener of several clusters: its new
     /// music follows the novelty (none at «Знакомое», all it can at «Только
-    /// новое»), it weighs several clusters, and three early skips of a
-    /// fresh wave move it to another.
+    /// новое»), it weighs several clusters, and early skips of a fresh wave
+    /// as the session judges them move it to another, not before the second.
     /// An open pool for a listener who has none: a new song of a new
     /// artist beside each of `every`-th library tracks, linked to it.
     fn linked_pool(model: &UserModel, every: usize) -> Vec<OpenCandidate> {
@@ -1875,7 +1924,62 @@ mod tests {
         assert!(new[1] > 0.0 && new[1] < new[2] + 0.05 && new[2] < new[3] + 0.05, "{new:?}");
         assert!(new[3] >= 0.9, "«Только новое»: {new:?}");
         assert!(r.clusters >= 2, "{}", r.clusters);
-        assert_eq!(r.moved, Some(true), "three skips change the cluster");
+        assert_eq!(r.moved, Some(true), "skips change the cluster: {r:?}");
+        assert!(r.skips >= 2, "a skip stays: {r:?}");
+        assert_eq!(r.verdicts.iter().sum::<usize>(), r.skips, "{r:?}");
+    }
+
+    /// Two skips keep the wave's cluster past a block's end: the songs
+    /// picked after them, the tail picked again as the runtime does, are of
+    /// the skipped cluster though the next block was picked ahead of
+    /// another one already; a third skip leaves it.
+    #[test]
+    fn skips_keep_the_cluster_past_a_block_boundary() {
+        use crate::radio::Outcome;
+        use crate::wave::WaveSeed;
+        let d = synthetic::user(synthetic::Kind::Omnivore, 6);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+        let ok = |_: usize| true;
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
+        let skip = |radio: &mut RadioState, item: &Item| radio.judged(item.clone(), Outcome::skip(8_000), Verdict::Rejected);
+        let mut other_ahead = 0;
+        for seed in 0..16u64 {
+            let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(crate::wave::NOVELTY_FAMILIAR)));
+            radio.attune(Session::default(), Some(model.weights));
+            // One at a time until the first block is picked whole.
+            let mut block: Vec<Item> = Vec::new();
+            while radio.wave_bandit().is_none_or(|b| b.block_left() > 0) && block.len() < 12 {
+                let Some(pk) = radio.extend_wave(&ctx, &[], 1, seed).pop() else { break };
+                block.push(pk.item);
+            }
+            let Some(a) = radio.wave_bandit().filter(|b| b.arms.len() >= 2 && block.len() >= 2).and_then(|b| b.scene_of(&block[0])) else { continue };
+            // The next block's first song queued ahead.
+            let Some(ahead) = radio.extend_wave(&ctx, &[], 1, seed).pop() else { continue };
+            other_ahead += usize::from(radio.wave_bandit().and_then(|b| b.scene_of(&ahead.item)) != Some(a));
+            // The block's last two skipped as they play: the tail again.
+            for item in &block[block.len() - 2..] {
+                skip(&mut radio, item);
+            }
+            radio.forget(std::slice::from_ref(&ahead.item));
+            let next: Vec<Item> = radio.extend_wave(&ctx, &[], 3, seed).into_iter().map(|p| p.item).collect();
+            assert!(!next.is_empty(), "seed {seed}");
+            for item in &next {
+                assert_eq!(radio.wave_bandit().and_then(|b| b.scene_of(item)), Some(a), "seed {seed}: the skipped cluster still");
+            }
+            // A third leaves it.
+            skip(&mut radio, &next[0]);
+            radio.forget(&next[1..]);
+            let after: Vec<Item> = radio.extend_wave(&ctx, &[], 2, seed).into_iter().map(|p| p.item).collect();
+            for item in &after {
+                assert_ne!(radio.wave_bandit().and_then(|b| b.scene_of(item)), Some(a), "seed {seed}: a third skip leaves");
+            }
+        }
+        assert!(other_ahead > 0, "a block of another cluster was picked ahead");
     }
 
     /// Blocks of one cluster: a wave's picks come four to six of one

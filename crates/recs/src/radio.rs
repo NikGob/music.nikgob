@@ -2683,6 +2683,62 @@ pub(crate) mod tests {
         matches!(&p.item, Item::Track(id) if (1..=60).contains(&id.0.as_u128()))
     }
 
+    /// A wave saved before skips were weighed (`session.json` as it was
+    /// then) goes on: a play the bar was dragged into is a scrub-skip as it
+    /// was, the β its rejections add fades to the β it was restored with,
+    /// and its picks of then are of no known artist (four skips of them do
+    /// not leave a settled vibe).
+    #[test]
+    fn a_wave_saved_before_goes_on() {
+        use crate::open_world::Scene;
+        use crate::wave::{Arm, BETA_KEEP, Bandit, WaveSeed};
+        let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(0.3)));
+        let arms = vec![Arm { scene: Scene::Profile(1), alpha: 4.0, beta: 2.0, tracks: 20 }, Arm { scene: Scene::Profile(2), alpha: 2.0, beta: 4.0, tracks: 20 }];
+        let mut b = Bandit::with_arms(arms, 3);
+        b.choose(&[], &[]);
+        let k = b.current.unwrap();
+        for t in 0..6 {
+            b.note_served(Item::Track(tid(100 + t)), k, &format!("artist {t}"));
+        }
+        radio.wave = Some(b);
+        let mut s = Session::default();
+        s.start(tid(7), NOW, nikgob_core::model::EventContext::Radio, None);
+        s.seek(tid(7), Some(1_000), 30_000);
+        s.end_at(tid(7), Ended::Late, 190_000, Some(200_000), None);
+        radio.attune(s, None);
+        let judged = |r: &RadioState| r.session.last().map(|p| judge(p.ended, p.position_ms, p.duration_ms, p.dragged()));
+        assert_eq!(judged(&radio), Some(Verdict::Approved), "161 s of 200 heard");
+        // As it was saved then.
+        let mut json = serde_json::to_value(&radio).unwrap();
+        let play = json["session"]["tracks"][0].as_object_mut().unwrap();
+        play.remove("scrub");
+        play.insert("scrubbed".into(), true.into());
+        let wave = json["wave"].as_object_mut().unwrap();
+        for key in ["base_beta", "memory_no", "run", "heard_in", "only_new"] {
+            wave.remove(key);
+        }
+        wave.insert("rejects".into(), serde_json::json!([1, 1]));
+        for served in wave.get_mut("served").unwrap().as_array_mut().unwrap() {
+            let o = served.as_object_mut().unwrap();
+            o.remove("artist");
+            o.remove("liked");
+        }
+        let mut back: RadioState = serde_json::from_value(json).unwrap();
+        assert_eq!(judged(&back), Some(Verdict::Rejected), "a scrub-skip, as then");
+        let b = back.wave.as_mut().unwrap();
+        let b0 = b.arms[k].beta;
+        let items: Vec<Item> = (0..6).map(|t| Item::Track(tid(100 + t))).collect();
+        b.feedback(&items[0], Verdict::Approved);
+        for i in &items[1..] {
+            b.feedback(i, Verdict::Rejected);
+        }
+        assert!(b.settled(), "five skips of no known artist stay");
+        assert!((b.arms[k].beta - (b0 + 5.0)).abs() < 1e-4);
+        b.note_served(Item::Track(tid(200)), k, "x");
+        b.feedback(&Item::Track(tid(200)), Verdict::Approved);
+        assert!((b.arms[k].beta - (b0 + 5.0 * BETA_KEEP)).abs() < 1e-4, "fades to the β restored");
+    }
+
     /// What an end says, and picks dropped unplayed are not served: the
     /// radio goes on from what is queued.
     #[test]
@@ -2691,7 +2747,7 @@ pub(crate) mod tests {
         assert_eq!(Outcome::skip(5_000).verdict(), Verdict::Rejected);
         assert_eq!(Outcome::skip(120_000).verdict(), Verdict::Neutral, "length unknown: past 30 s says nothing");
         let at = |s: u32, scrub| Outcome::Skip { position_ms: s, duration_ms: Some(200_000), scrub }.verdict();
-        let to = |to_ms| Some(Scrub { to_ms, jumped_ms: to_ms - 2_000 });
+        let to = |to_ms| Some(Scrub { to_ms, heard_ms: 2_000, blind: false });
         assert_eq!(at(45_000, None), Verdict::Rejected, "the first half");
         assert_eq!(at(120_000, None), Verdict::Neutral);
         assert_eq!(at(170_000, None), Verdict::Approved, "the outro");
