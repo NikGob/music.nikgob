@@ -243,6 +243,32 @@ struct ServiceHit {
     image: Option<String>,
     /// Its name there.
     name: String,
+    /// Found by the link the library has, not proved by titles now.
+    linked: bool,
+}
+
+impl ServiceHit {
+    /// Its image, for the artist credited under `keys` ([`credit_keys`]):
+    /// a linked artist's only when its name there is one of them. A link
+    /// is made from a track's credit, and a service may have merged two
+    /// artists into the one it points to.
+    fn image_for(self, keys: &[String]) -> Option<String> {
+        (!self.linked || keys.contains(&artist_key(&self.name))).then_some(self.image).flatten()
+    }
+}
+
+/// The keys ([`artist_key`]) of every name the artist `id` called `name`
+/// is credited under: its own, its aliases and its Latin name.
+pub(crate) fn credit_keys(lib: &Library, id: ArtistId, name: &str) -> Vec<String> {
+    let latin = lib.artist_latin(id).ok().flatten().and_then(|l| l.name);
+    let mut keys: Vec<String> = std::iter::once(name.to_owned())
+        .chain(lib.aliases_of_artist(id).unwrap_or_default())
+        .chain(latin)
+        .map(|n| artist_key(&n))
+        .filter(|k| !k.is_empty())
+        .collect();
+    keys.dedup();
+    keys
 }
 
 /// How many of the library's titles `a` shares in its service: its
@@ -280,7 +306,7 @@ async fn service_artist(
         .find(|r| r.service == service);
     if let Some(remote) = linked {
         return match svc.artist(&remote.id).await {
-            Ok(a) => Ok(Some(ServiceHit { image: a.image_url, name: a.name })),
+            Ok(a) => Ok(Some(ServiceHit { image: a.image_url, name: a.name, linked: true })),
             Err(e) if busy_stream(&e) => Err(busy),
             Err(_) => Ok(None),
         };
@@ -320,7 +346,7 @@ async fn service_artist(
         }
         if let Some((hit, full)) = proved.pop() {
             let _ = lib.set_external_id(EntityKind::Artist, &hit.id, *id.as_uuid());
-            return Ok(Some(ServiceHit { image: hit.image_url.or(full.image_url), name: full.name }));
+            return Ok(Some(ServiceHit { image: hit.image_url.or(full.image_url), name: full.name, linked: false }));
         }
     }
     Ok(None)
@@ -533,6 +559,7 @@ pub(crate) async fn photo_after_deezer(
     if let Some(l) = lib.artist_latin(id).ok().flatten().and_then(|l| l.name).filter(|l| l != name) {
         names.push(l);
     }
+    let keys = credit_keys(lib, id, name);
     let mut busy = None;
     let connected: Vec<Service> = after.services.iter().map(|s| s.service()).collect();
     for source in photo_sources(&connected) {
@@ -547,7 +574,7 @@ pub(crate) async fn photo_after_deezer(
                 let url = match service_artist(&**svc, lib, id, &names, &titles).await {
                     Ok(hit) => {
                         gate.ok(key);
-                        hit.and_then(|h| h.image)
+                        hit.and_then(|h| h.image_for(&keys))
                     }
                     Err(Busy(s)) => {
                         busy = Some(gate.failed(s));
@@ -827,6 +854,27 @@ mod tests {
         assert_eq!(two.identity.latin, Some(("Ayako Saso".to_owned(), "musicbrainz")));
         let both = ask(musicbrainz(&[MBID, OTHER], &["Hoshi no Uta", "Kaze Machi"]).await).await;
         assert_eq!(both.identity, Identity::default(), "two candidates");
+    }
+
+    /// A link points to a service artist under another name (a channel that
+    /// merged two artists): its picture is not this artist's. One under the
+    /// artist's own name in another script, or its Latin name, is.
+    #[tokio::test]
+    async fn a_linked_service_artist_of_another_name_gives_no_photo() {
+        let svc = nikgob_core::streaming::FakeService::spotify();
+        let kino = svc.search_kind("Кино", SearchKind::Artists).await.unwrap().artists[0].id.clone();
+        let lib = Library::open_in_memory().unwrap();
+        for (name, latin, ok) in [("gotlibgotlibgotlib", None, false), ("Kino", None, true), ("キノ", Some("Kino"), true)] {
+            let id = artist_with(&lib, name, &["Song"]);
+            if let Some(l) = latin {
+                let found = LatinFound { name: Some(l.into()), source: "musicbrainz".into(), complete: true, ..LatinFound::default() };
+                lib.set_artist_latin(id, &found).unwrap();
+            }
+            lib.set_external_id(EntityKind::Artist, &kino, *id.as_uuid()).unwrap();
+            let hit = service_artist(&svc, &lib, id, &[name.to_owned()], &[]).await.unwrap().expect("the linked artist");
+            assert!(hit.linked);
+            assert_eq!(hit.image_for(&credit_keys(&lib, id, name)).is_some(), ok, "{name}");
+        }
     }
 
     /// MusicBrainz answering 503: nothing is recorded (no miss), the artists

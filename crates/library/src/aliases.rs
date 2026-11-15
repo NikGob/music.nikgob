@@ -471,6 +471,18 @@ impl Library {
         })
     }
 
+    /// The aliases that name `artist` wherever it is credited (see
+    /// [`Library::artist_aliases`]).
+    pub fn aliases_of_artist(&self, artist: ArtistId) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT name FROM artist_alias WHERE artist_id = ?1 AND source <> ?2 ORDER BY name",
+            )?;
+            let rows = stmt.query_map(params![artist.to_string(), READING], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     /// The artist known under the alias `name`, if any.
     pub fn artist_by_alias(&self, name: &str) -> Result<Option<ArtistId>> {
         self.read(|c| Ok(alias_of(c, name)?.and_then(|id| id.parse().ok())))
