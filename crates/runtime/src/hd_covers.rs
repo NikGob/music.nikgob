@@ -542,103 +542,137 @@ fn past(deadline: Option<Instant>) -> bool {
     deadline.is_some_and(|d| Instant::now() >= d)
 }
 
-/// The covers of `w` found online, best first ([`Found::rank`]): of the
-/// releases linked to it ([`linked_cover`]; at most [`MAX_LINKED`]), of the
-/// Cover Art Archive by its MusicBrainz ids when MusicBrainz says they fit,
-/// of the album of its title on each service ([`pick`]; else a single or an
-/// EP of its very title and songs untold, asked for its songs: one request
-/// a service); with `all` also of the iTunes Store and of a linked Spotify
-/// album whose service is off (by its public page, as one alike by its
-/// title). Without `all` it stops at the first step that found one. Each
-/// source has its time and none goes past `deadline`: what was found by
-/// then is the answer. A source that could not answer makes it no miss:
-/// Err when nothing was found and one could not.
-pub(crate) async fn find_all(
+/// What a lookup found, best first ([`Found::rank`]), and what could not
+/// answer on the way (or that time ran out): with nothing usable found,
+/// that is a failure, never a miss.
+#[derive(Debug, Default)]
+pub(crate) struct Finds {
+    pub found: Vec<Found>,
+    pub trouble: Option<String>,
+}
+
+fn late(what: &dyn std::fmt::Display) -> String {
+    format!("{what}: no answer in time")
+}
+
+/// The covers of the releases linked to `w` ([`linked_cover`]; at most
+/// [`MAX_LINKED`]); with `all` also of a linked Spotify album whose service
+/// is off, by its public page ([`oembed_found`]). Without `all` it stops at
+/// the first.
+async fn linked_step(
     meta: Option<&Metadata>,
     services: &[Arc<dyn StreamService>],
     w: &Want,
     all: bool,
     deadline: Option<Instant>,
-) -> Result<Vec<Found>, String> {
-    let mut out: Vec<Found> = Vec::new();
-    let mut trouble: Option<String> = None;
-    let late = |what: &dyn std::fmt::Display| format!("{what}: no answer in time");
-    'look: {
-        for id in w.linked.iter().take(MAX_LINKED) {
-            if past(deadline) {
-                break 'look;
-            }
-            let off = !services.iter().any(|s| s.service() == id.service);
-            if id.service == Service::Spotify && off {
-                if let (true, Some(meta)) = (all, meta) {
-                    match in_time(deadline, meta.web_images.spotify_album_art(&id.id)).await {
-                        Some(Ok(art)) => out.extend(art.and_then(|a| oembed_found(w, &a))),
-                        Some(Err(e)) if crate::better_covers::meta_trouble(&e) => {
-                            trouble.get_or_insert(format!("Spotify: {e}"));
-                        }
-                        Some(Err(_)) => {}
-                        None => {
-                            trouble.get_or_insert(late(&"Spotify"));
-                        }
+    out: &mut Vec<Found>,
+    trouble: &mut Option<String>,
+) {
+    for id in w.linked.iter().take(MAX_LINKED) {
+        if past(deadline) {
+            return;
+        }
+        let off = !services.iter().any(|s| s.service() == id.service);
+        if id.service == Service::Spotify && off {
+            if let (true, Some(meta)) = (all, meta) {
+                match in_time(deadline, meta.web_images.spotify_album_art(&id.id)).await {
+                    Some(Ok(art)) => out.extend(art.and_then(|a| oembed_found(w, &a))),
+                    Some(Err(e)) if crate::better_covers::meta_trouble(&e) => {
+                        trouble.get_or_insert(format!("Spotify: {e}"));
+                    }
+                    Some(Err(_)) => {}
+                    None => {
+                        trouble.get_or_insert(late(&"Spotify"));
                     }
                 }
-                continue;
             }
-            match in_time(deadline, linked_cover(meta, services, w, id)).await {
-                Some(Ok(Some(url))) => out.push(Found::new(true, true, source_order(Some(id.service)), &url)),
-                Some(Ok(None)) => {}
-                Some(Err(e)) => {
-                    log::debug!("the cover of «{}» linked on {}: {e}", w.title, id.service);
-                    trouble.get_or_insert(e);
-                }
-                None => {
-                    trouble.get_or_insert(late(&id.service));
-                }
+            continue;
+        }
+        match in_time(deadline, linked_cover(meta, services, w, id)).await {
+            Some(Ok(Some(url))) => out.push(Found::new(true, true, source_order(Some(id.service)), &url)),
+            Some(Ok(None)) => {}
+            Some(Err(e)) => {
+                log::debug!("the cover of «{}» linked on {}: {e}", w.title, id.service);
+                trouble.get_or_insert(e);
             }
-            // The first linked cover is the answer of a lookup for the
-            // first one.
-            if !all && !out.is_empty() {
-                break 'look;
+            None => {
+                trouble.get_or_insert(late(&id.service));
             }
         }
-        if let Some(meta) = meta {
-            let fits = if w.mbid.is_some() || w.group_mbid.is_some() {
-                match in_time(deadline, mb_fits(meta, w)).await {
-                    Some(Ok(fits)) => fits,
-                    Some(Err(e)) => {
-                        trouble.get_or_insert(e);
-                        false
-                    }
-                    None => {
-                        trouble.get_or_insert(late(&"MusicBrainz"));
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            for target in [w.mbid.clone().map(CoverTarget::Release), w.group_mbid.clone().map(CoverTarget::ReleaseGroup)]
-                .into_iter()
-                .flatten()
-                .filter(|_| fits)
-            {
-                match in_time(deadline, meta.cover_art.front_cover(&target)).await {
-                    Some(Ok(Some(c))) if c.thumbnails.contains_key("1200") => {
-                        out.push(Found::new(true, true, 0, c.url_for(1200)));
-                        break;
-                    }
-                    Some(Err(e)) if crate::better_covers::meta_trouble(&e) => {
-                        trouble.get_or_insert(e.to_string());
-                        break;
-                    }
-                    None => {
-                        trouble.get_or_insert(late(&"Cover Art Archive"));
-                        break;
-                    }
-                    Some(_) => {}
-                }
+        if !all && !out.is_empty() {
+            return;
+        }
+    }
+}
+
+/// The cover of the Cover Art Archive by the MusicBrainz ids of `w` when
+/// MusicBrainz says they fit ([`mb_fits`]), at 1200 px.
+async fn caa_step(meta: &Metadata, w: &Want, deadline: Option<Instant>, out: &mut Vec<Found>, trouble: &mut Option<String>) {
+    if w.mbid.is_none() && w.group_mbid.is_none() {
+        return;
+    }
+    let fits = match in_time(deadline, mb_fits(meta, w)).await {
+        Some(Ok(fits)) => fits,
+        Some(Err(e)) => {
+            trouble.get_or_insert(e);
+            false
+        }
+        None => {
+            trouble.get_or_insert(late(&"MusicBrainz"));
+            false
+        }
+    };
+    for target in [w.mbid.clone().map(CoverTarget::Release), w.group_mbid.clone().map(CoverTarget::ReleaseGroup)]
+        .into_iter()
+        .flatten()
+        .filter(|_| fits)
+    {
+        match in_time(deadline, meta.cover_art.front_cover(&target)).await {
+            Some(Ok(Some(c))) if c.thumbnails.contains_key("1200") => {
+                out.push(Found::new(true, true, 0, c.url_for(1200)));
+                return;
             }
-            if !all && !out.is_empty() {
+            Some(Err(e)) if crate::better_covers::meta_trouble(&e) => {
+                trouble.get_or_insert(e.to_string());
+                return;
+            }
+            None => {
+                trouble.get_or_insert(late(&"Cover Art Archive"));
+                return;
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+/// The covers of `w` found online, best first ([`Found::rank`]). A refresh
+/// (`all`) asks the releases linked to it ([`linked_step`]), the Cover Art
+/// Archive ([`caa_step`]), the album of its title on each service
+/// ([`pick`]; else a single or an EP of its very title and songs untold,
+/// asked for its songs: one request a service) and the iTunes Store. A
+/// lookup for the stage (not `all`) keeps the order it always had: the
+/// Cover Art Archive's 1200 px first, a linked release's cover only when
+/// it has none, then the services; it stops at the first step that found
+/// one. Each source has its time and none goes past `deadline`: what was
+/// found by then is the answer, with what could not answer.
+pub(crate) async fn find_all(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want, all: bool, deadline: Option<Instant>) -> Finds {
+    let mut out: Vec<Found> = Vec::new();
+    let mut trouble: Option<String> = None;
+    'look: {
+        if all {
+            linked_step(meta, services, w, all, deadline, &mut out, &mut trouble).await;
+            if let Some(meta) = meta {
+                caa_step(meta, w, deadline, &mut out, &mut trouble).await;
+            }
+        } else {
+            if let Some(meta) = meta {
+                caa_step(meta, w, deadline, &mut out, &mut trouble).await;
+            }
+            if !out.is_empty() {
+                break 'look;
+            }
+            linked_step(meta, services, w, all, deadline, &mut out, &mut trouble).await;
+            if !out.is_empty() {
                 break 'look;
             }
         }
@@ -724,18 +758,19 @@ pub(crate) async fn find_all(
         trouble.get_or_insert("the lookup ran out of time".to_owned());
     }
     out.sort_by_key(Found::rank);
-    match trouble {
-        Some(e) if out.is_empty() => Err(e),
-        _ => Ok(out),
-    }
+    Finds { found: out, trouble }
 }
 
 /// The url of a larger cover of `w` for the stage, if a source has one:
 /// the best [`find_all`] finds, as its source gave it (never a rendition
-/// nobody asked for yet).
+/// nobody saw come). Err: nothing found and a source could not answer.
 pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want) -> Result<Option<String>, String> {
-    let found = find_all(meta, services, w, false, None).await?;
-    Ok(found.first().map(|f| f.original().to_owned()).filter(|u| !u.is_empty()))
+    let Finds { found, trouble } = find_all(meta, services, w, false, None).await;
+    match (found.first(), trouble) {
+        (Some(f), _) => Ok(Some(f.original().to_owned()).filter(|u| !u.is_empty())),
+        (None, Some(e)) => Err(e),
+        (None, None) => Ok(None),
+    }
 }
 
 /// An album title as a search query: without a «~subtitle~» and «Special
@@ -1055,7 +1090,7 @@ mod tests {
         let id = yt.albums().into_iter().find(|a| a.title == "рисунки").unwrap().id;
         let services: Vec<Arc<dyn StreamService>> = vec![yt.clone()];
         let w = Want { linked: vec![id], ..risunki(3) };
-        let all = find_all(None, &services, &w, true, None).await.unwrap();
+        let all = find_all(None, &services, &w, true, None).await.found;
         let first = all.first().unwrap();
         assert!(first.linked);
         assert_eq!(first.urls, ["https://yt3.googleusercontent.com/risunki=w3000-h3000-l90-rj", cover]);
@@ -1065,7 +1100,7 @@ mod tests {
         let one = Arc::new(FakeService::youtube().with_release("one", "другое", "nyan.mp3", ReleaseType::Single, 1, true, cover));
         let id = one.albums().into_iter().find(|a| a.title == "другое").unwrap().id;
         let services: Vec<Arc<dyn StreamService>> = vec![one];
-        assert_eq!(find_all(None, &services, &Want { linked: vec![id], ..risunki(3) }, true, None).await, Ok(Vec::new()));
+        assert!(find_all(None, &services, &Want { linked: vec![id], ..risunki(3) }, true, None).await.found.is_empty());
     }
 
     /// A linked Spotify album is linked only through its service, which
@@ -1080,9 +1115,10 @@ mod tests {
         let id = sp.albums().into_iter().find(|a| a.title == "рисунки").unwrap().id;
         let w = Want { linked: vec![id.clone()], ..risunki(3) };
         let services: Vec<Arc<dyn StreamService>> = vec![sp.clone()];
-        assert!(find_all(None, &services, &w, true, None).await.unwrap().iter().all(|f| !f.linked));
+        assert!(find_all(None, &services, &w, true, None).await.found.iter().all(|f| !f.linked));
         // Off: nothing asked without the page's reader, nothing linked.
-        assert_eq!(find_all(None, &[], &w, true, None).await, Ok(Vec::new()));
+        let off = find_all(None, &[], &w, true, None).await;
+        assert!(off.found.is_empty() && off.trouble.is_none());
         let art = |title: &str| nikgob_metadata::SpotifyAlbumArt { title: title.into(), thumbnail: cover.into() };
         // Of an album of three: it only lends its size, ranked last.
         let alike = oembed_found(&w, &art("рисунки")).unwrap();
@@ -1107,7 +1143,7 @@ mod tests {
         assert_eq!(find(None, &services, &w).await.unwrap().as_deref(), Some("https://x/dz.jpg"));
         assert_eq!((dz.calls("album"), yt.calls("album"), dz.calls("search")), (1, 0, 0));
         // A refresh asks them all.
-        assert_eq!(find_all(None, &services, &w, true, None).await.unwrap().iter().filter(|f| f.linked).count(), 2);
+        assert_eq!(find_all(None, &services, &w, true, None).await.found.iter().filter(|f| f.linked).count(), 2);
     }
 
     /// The album's very title of songs untold is asked for its songs before
@@ -1121,7 +1157,7 @@ mod tests {
                 .with_release("r", "рисунки", "nyan.mp3", ReleaseType::Single, 3, false, "https://x/yt.jpg"),
         );
         let services: Vec<Arc<dyn StreamService>> = vec![yt.clone()];
-        let found = find_all(None, &services, &risunki(3), true, None).await.unwrap();
+        let found = find_all(None, &services, &risunki(3), true, None).await.found;
         assert_eq!(found.iter().map(Found::original).collect::<Vec<_>>(), ["https://x/yt.jpg"]);
         assert!(found[0].exact);
         assert_eq!(yt.calls("album"), 1);
@@ -1132,7 +1168,7 @@ mod tests {
                 .with_release("r", "рисунки", "nyan.mp3", ReleaseType::Single, 1, false, "https://x/yt.jpg"),
         );
         let services: Vec<Arc<dyn StreamService>> = vec![short];
-        let found = find_all(None, &services, &risunki(3), true, None).await.unwrap();
+        let found = find_all(None, &services, &risunki(3), true, None).await.found;
         assert_eq!(found.iter().map(|f| (f.original(), f.exact)).collect::<Vec<_>>(), [("https://x/deluxe.jpg", false)]);
     }
 
@@ -1145,7 +1181,7 @@ mod tests {
         let cover = "https://yt3.googleusercontent.com/risunki=w544-h544-l90-rj";
         let three = Arc::new(FakeService::youtube().with_release("risunki", "рисунки", "nyan.mp3", ReleaseType::Single, 3, false, cover));
         let services: Vec<Arc<dyn StreamService>> = vec![three.clone()];
-        let found = find_all(None, &services, &risunki(3), true, None).await.unwrap();
+        let found = find_all(None, &services, &risunki(3), true, None).await.found;
         assert_eq!(found.len(), 1);
         assert!(!found[0].linked && found[0].exact);
         assert_eq!(found[0].original(), cover);
@@ -1171,7 +1207,7 @@ mod tests {
         let dz = Arc::new(FakeService::deezer().with_release("dlx", "рисунки (Deluxe Edition)", "nyan.mp3", ReleaseType::Album, 3, true, "https://x/dz.jpg"));
         let yt = Arc::new(FakeService::youtube().with_release("r", "рисунки", "nyan.mp3", ReleaseType::Album, 3, true, "https://x/yt.jpg"));
         let services: Vec<Arc<dyn StreamService>> = vec![dz, yt];
-        let found = find_all(None, &services, &risunki(3), true, None).await.unwrap();
+        let found = find_all(None, &services, &risunki(3), true, None).await.found;
         let urls: Vec<&str> = found.iter().map(Found::original).collect();
         assert_eq!(urls, ["https://x/yt.jpg", "https://x/dz.jpg"]);
         assert_eq!((found[0].exact, found[1].exact), (true, false));
