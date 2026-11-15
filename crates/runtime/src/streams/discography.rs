@@ -6,8 +6,9 @@
 //!   matches (folded like the importer folds names) is taken when one of
 //!   our release titles is among its albums, or when it is the only hit of
 //!   that name. The match is remembered as the artist's id in the service.
-//!   Its image is kept only when one of our release titles is among its
-//!   albums: a name alone does not make the picture the artist's.
+//!   An artist matched by name now gives its image only when one of our
+//!   release titles is among its albums: a name alone does not make the
+//!   picture the artist's. One linked before gives it as it is.
 //! * Albums the page has (a release of the artist with the same folded title
 //!   and a year within ±1, or linked to it) are left out, and so are the
 //!   same albums of a later service (Spotify first).
@@ -120,10 +121,9 @@ async fn lookup(
     known: Option<String>,
 ) -> Found {
     let service = svc.service();
-    let shared = |albums: &[StreamAlbum]| albums.iter().any(|a| ours.contains(&album_key(&a.title)));
     if let Some(id) = known {
         let full = svc.artist(&id).await;
-        let image = full.as_ref().ok().filter(|a| shared(a.albums.as_slice())).and_then(|a| a.image_url.clone());
+        let image = full.as_ref().ok().and_then(|a| a.image_url.clone());
         return Found {
             service,
             artist: Some(RemoteId::new(service, id)),
@@ -153,7 +153,7 @@ async fn lookup(
     let only = exact.len() == 1;
     for c in exact {
         let Ok(full) = svc.artist(&c.id.id).await else { continue };
-        let overlaps = shared(full.albums.as_slice());
+        let overlaps = full.albums.iter().any(|a| ours.contains(&album_key(&a.title)));
         if overlaps || only {
             return Found {
                 service,
@@ -339,7 +339,8 @@ mod tests {
     }
 
     /// The only artist of the name is linked, but its image is kept only
-    /// when one of our releases is among its albums, by search or by id.
+    /// when one of our releases is among its albums; an artist linked
+    /// before keeps its image.
     #[tokio::test]
     async fn an_artist_image_needs_a_shared_album() {
         let svc: Arc<dyn StreamService> = Arc::new(nikgob_core::streaming::FakeService::spotify());
@@ -355,7 +356,7 @@ mod tests {
         assert!(f.matched_now && f.artist.is_some(), "still the only one of the name");
         assert_eq!(f.image, None);
         let f = lookup(svc, "Кино".into(), none, Some(id)).await;
-        assert_eq!(f.image, None);
+        assert!(f.image.is_some(), "a link made before is trusted");
         assert!(f.albums.is_ok_and(|a| !a.is_empty()));
     }
 }
