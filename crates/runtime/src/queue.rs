@@ -244,21 +244,19 @@ impl Queue {
     }
 
     /// The `n` entries at most that come after the current one, for what is
-    /// done ahead of them: the next one (the first again past the end with
-    /// repeat all), then the ones after it. With repeat one these are the
+    /// done ahead of them: the next one, then the ones after it (with repeat
+    /// all on past the end from the first one, each once and never the
+    /// current one again). With repeat one these are the
     /// ones «Дальше» goes to, not the current one again. None while nothing
     /// is current.
     pub fn ahead(&self, n: usize) -> Vec<Entry> {
         if self.pos.is_none() {
             return Vec::new();
         }
-        let up = self.upcoming();
-        let mut out: Vec<Entry> = Vec::with_capacity(n);
-        if up.is_empty() && self.repeat == Repeat::All {
-            out.extend(self.items.first().copied());
+        let mut out: Vec<Entry> = self.upcoming().iter().take(n).copied().collect();
+        if self.repeat == Repeat::All {
+            out.extend(self.history().iter().take(n - out.len()).copied());
         }
-        out.extend(up.iter().take(n.saturating_sub(out.len())).copied());
-        out.truncate(n);
         out
     }
 
@@ -538,9 +536,27 @@ mod tests {
         assert_eq!(tracks(&q), [t[2], t[3]], "not the current one again");
         q.set(&t, 3, None);
         q.repeat = Repeat::All;
-        assert_eq!(tracks(&q), [t[0]], "the first again past the end");
+        assert_eq!(tracks(&q), [t[0], t[1]], "the first ones again past the end");
         q.repeat = Repeat::Off;
         assert!(q.ahead(2).is_empty());
+    }
+
+    /// With repeat all the entries ahead go on past the end from the first
+    /// one, never the current one again nor any twice.
+    #[test]
+    fn ahead_with_repeat_all_fills_past_the_end() {
+        let t = ids(3);
+        let mut q = Queue::default();
+        q.repeat = Repeat::All;
+        let tracks = |q: &Queue, n: usize| q.ahead(n).iter().map(|e| e.track).collect::<Vec<_>>();
+        q.set(&t, 1, None);
+        assert_eq!(tracks(&q, 2), [t[2], t[0]], "the penultimate one");
+        assert_eq!(tracks(&q, 5), [t[2], t[0]], "each once, not the current one");
+        q.set(&t, 2, None);
+        assert_eq!(tracks(&q, 2), [t[0], t[1]], "the last one");
+        assert_eq!(tracks(&q, 5), [t[0], t[1]]);
+        q.set(&t[..1], 0, None);
+        assert!(q.ahead(2).is_empty(), "a single one is only itself");
     }
 
     #[test]

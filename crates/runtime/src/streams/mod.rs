@@ -188,7 +188,7 @@ pub(crate) enum Msg {
     PreferWait(u64),
     /// The next track's time to wait for its preferred copy before it is
     /// handed to the engine ran out.
-    PreferAhead(u64),
+    PreferAhead(u64, u64),
     /// Time to send the queued likes of a service.
     LikeFlush(Service),
     LikesPushed {
@@ -782,7 +782,7 @@ impl Worker {
             Msg::QueueClipWait(entry) => self.queue_clip_wait(entry),
             Msg::Preferred(m) => self.preferred(m),
             Msg::PreferWait(entry) => self.prefer_wait_over(entry),
-            Msg::PreferAhead(entry) => self.prefer_ahead_over(entry),
+            Msg::PreferAhead(entry, seq) => self.prefer_ahead_over(entry, seq),
             Msg::LikeFlush(service) => self.flush_likes(service),
             Msg::LikesPushed {
                 service,

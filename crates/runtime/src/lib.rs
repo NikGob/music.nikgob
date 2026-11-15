@@ -1870,12 +1870,12 @@ impl Worker {
 
     /// The best source of `e` that is usable and not in `skip` (local >
     /// Spotify > YouTube, then quality). A stream source needs its service
-    /// registered. A stream copy set aside earlier (its details or its
-    /// video refused once, a listing that said it does not play) is tried
-    /// again when nothing else plays: a YouTube video unless it was refused
-    /// in the last hours (`REFUSED_TTL`), another service's copy once the
-    /// song cannot be looked up anywhere either (a snippet-only or DRM-only
-    /// listing is not played before YouTube Music is asked). Says in the
+    /// registered. A stream copy set aside earlier (its video refused once,
+    /// its service leaving it out of an answer) is tried again when nothing
+    /// else plays: a YouTube video unless it was refused in the last hours
+    /// (`REFUSED_TTL`), another service's copy once the song cannot be
+    /// looked up anywhere either. A listing that gives no full audio (a
+    /// SoundCloud preview, a DRM-only stream) is never played. Says in the
     /// log why nothing plays.
     fn pick_source(&mut self, e: Entry, skip: &[SourceId]) -> Option<nikgob_core::model::Source> {
         let mut sources = match self.lib.sources_of_track(e.track) {
@@ -1901,7 +1901,8 @@ impl Worker {
                     || if s.kind == SourceKind::Youtube {
                         !refused.contains(&s.locator)
                     } else {
-                        !*lookup.get_or_insert_with(|| w.can_look_up(e.track))
+                        w.lib.source_set_aside(s.id).unwrap_or(false)
+                            && !*lookup.get_or_insert_with(|| w.can_look_up(e.track))
                     };
                 ok && w.has_audio(service) && !w.waits_for_pause(service, &s.locator)
             }
@@ -2048,6 +2049,7 @@ impl Worker {
                 self.speed = f64::from(fx.0.speed());
                 self.rate = self.speed;
                 self.publish_player();
+                self.prefer_ahead_again();
             }
         }
         let playing = self.playing.map(|e| e.id);
@@ -2322,6 +2324,14 @@ impl Worker {
         // Gapless off: nothing is prepared, the next track starts after `Ended`.
         // Nor when the sleep timer ends with the playing track.
         let next = if self.state.read().prefs.gapless && !self.sleep_ends_with_playing() { self.queue.peek_auto_next() } else { None };
+        // The engine holds this entry already: it keeps exactly what it was
+        // handed, whatever has come since (a Spotify copy, a file). It may
+        // have taken it over already, and a swap would record a source that
+        // does not play, or open a second one.
+        if next.is_some_and(|n| self.playback.holds_next(n.id)) {
+            self.reading_ahead = None;
+            return;
+        }
         // A clip the app queued starts once its song is known (see
         // `streams::clips::QueueClips`): not handed over ahead.
         let next = next.filter(|n| !self.clip_not_ready(*n));
@@ -2336,15 +2346,6 @@ impl Worker {
             self.playback.set_next(None);
             return;
         };
-        // The engine holds this entry already and it would stream again:
-        // it keeps what it has. It may have taken it over, and a swap would
-        // record a source that does not play (a Spotify copy found after
-        // the YouTube one was handed); a file that came meanwhile still
-        // takes its place.
-        if src.kind.service().is_some() && self.playback.holds_next(next.id) {
-            self.reading_ahead = None;
-            return;
-        }
         // A file whose tags were not read yet is read off the loop; the
         // engine gets the next track when they are.
         if ahead && src.kind.service().is_none() {
@@ -2463,6 +2464,9 @@ impl Worker {
             self.recs_seeked(e.track, p.as_millis() as u32);
         }
         self.publish_player();
+        // Nearer the end now: the next track's wait for its Spotify copy is
+        // counted again.
+        self.prefer_ahead_again();
     }
 
     /// Who chose `e`, starting now: what the command said, else the user
@@ -2722,6 +2726,7 @@ impl Worker {
                     self.speed = speed;
                     self.rate = speed;
                     self.publish_player();
+                    self.prefer_ahead_again();
                 }
             }
             PlaybackEvent::DeviceError { generation, message } => {

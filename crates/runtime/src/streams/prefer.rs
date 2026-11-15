@@ -23,11 +23,13 @@
 //! * Gapless, the next track waits for its Spotify answer before it is
 //!   handed to the engine, but not for long: at most
 //!   [`super::StreamSchedule::prefer_wait`], and never closer than
-//!   [`AHEAD_MARGIN`] to the end of the playing one. Then it is handed
-//!   over with what it has (its YouTube Music copy), so the join stays
-//!   gapless; an answer after that is for the next time only. A request
-//!   the engine holds is never taken back or swapped (it may have taken it
-//!   over already), and the join records the source it was handed.
+//!   [`AHEAD_MARGIN`] to the end of the playing one (counted again after
+//!   a seek or a change of speed; at once when the playing track's length
+//!   is not known). Then it is handed over with what it has (its YouTube
+//!   Music copy), so the join stays gapless; an answer after that is for
+//!   the next time only. A request the engine holds is never taken back or
+//!   swapped (it may have taken it over already), and the join records
+//!   the source it was handed.
 //!   Without a request handed (gapless off, or none prepared), the next
 //!   track starts as any other: with the bounded wait.
 //! * A pause during the wait is kept through whatever comes next (the
@@ -70,8 +72,12 @@ pub(crate) struct PreferState {
     /// The entry that waited already: it plays what it has now.
     passed: Option<u64>,
     /// The next entry held back from the engine for its answer, until
-    /// [`Msg::PreferAhead`] of it.
+    /// [`Msg::PreferAhead`] of it (with [`Self::ahead_seq`]), and since
+    /// when.
     ahead: Option<u64>,
+    ahead_since: Option<Instant>,
+    /// Counts the timers of [`Self::ahead`]: only the last one counts.
+    ahead_seq: u64,
     /// The next entry whose answer did not come in time: it is handed
     /// over with what it has.
     ahead_passed: Option<u64>,
@@ -144,45 +150,77 @@ impl Worker {
         if self.streaming.prefer.ahead == Some(next.id) {
             return true;
         }
+        self.streaming.prefer.ahead = Some(next.id);
+        self.streaming.prefer.ahead_since = Some(Instant::now());
+        self.arm_ahead()
+    }
+
+    /// Arms the timer of the next entry that waits for its answer (see
+    /// [`Self::ahead_wait`]); when no time is left, it goes over at once
+    /// (false: it is not waited for).
+    fn arm_ahead(&mut self) -> bool {
+        let Some(entry) = self.streaming.prefer.ahead else { return false };
         let wait = self.ahead_wait();
         if wait.is_zero() {
-            self.streaming.prefer.ahead_passed = Some(next.id);
+            self.streaming.prefer.ahead = None;
+            self.streaming.prefer.ahead_passed = Some(entry);
             return false;
         }
-        self.streaming.prefer.ahead = Some(next.id);
-        let entry = next.id;
+        let st = &mut self.streaming.prefer;
+        st.ahead_seq += 1;
+        let seq = st.ahead_seq;
         self.streaming.spawn(async move {
             tokio::time::sleep(wait).await;
-            Msg::PreferAhead(entry)
+            Msg::PreferAhead(entry, seq)
         });
         true
     }
 
-    /// How long the next entry may wait for its answer from now:
-    /// [`super::StreamSchedule::prefer_wait`], less when the playing track
-    /// ends sooner than [`AHEAD_MARGIN`] after that (as fast as it plays).
+    /// How long the next entry may still wait for its answer:
+    /// [`super::StreamSchedule::prefer_wait`] since it began, less when the
+    /// playing track ends sooner than [`AHEAD_MARGIN`] after that (as fast
+    /// as it plays now); nothing when the playing track's length is not
+    /// known (its end could come any moment).
     fn ahead_wait(&mut self) -> Duration {
-        let wait = self.streaming.schedule.prefer_wait;
+        let since = self.streaming.prefer.ahead_since.map_or(Duration::ZERO, |t| t.elapsed());
+        let wait = self.streaming.schedule.prefer_wait.saturating_sub(since);
         let Some(p) = self.playing else { return wait };
         let Some(total) = self.lib.get_track(p.track).ok().flatten().and_then(|t| t.duration_ms) else {
-            return wait;
+            return Duration::ZERO;
         };
         let left = Duration::from_millis(u64::from(total)).saturating_sub(self.position_now());
         let left = left.div_f64(self.speed.max(0.25));
         wait.min(left.saturating_sub(AHEAD_MARGIN))
     }
 
+    /// The playing track moved (a seek) or changed its speed: the next
+    /// entry's time for its answer is counted again, and it goes over at
+    /// once when too little is left.
+    pub(crate) fn prefer_ahead_again(&mut self) {
+        let Some(entry) = self.streaming.prefer.ahead else { return };
+        if !self.arm_ahead() {
+            log::info!("the playing track ends soon: the next one goes over with what it has");
+            self.hand_ahead(entry);
+        }
+    }
+
     /// The next entry's time for its answer ran out: it is handed over
     /// with what it has (the answer, when it comes, is for the next time).
-    pub(crate) fn prefer_ahead_over(&mut self, entry: u64) {
-        if self.streaming.prefer.ahead != Some(entry) {
+    pub(crate) fn prefer_ahead_over(&mut self, entry: u64, seq: u64) {
+        if self.streaming.prefer.ahead != Some(entry) || self.streaming.prefer.ahead_seq != seq {
             return;
         }
         self.streaming.prefer.ahead = None;
+        log::info!("the next track's preferred copy did not come in time: handed over with what it has");
+        self.hand_ahead(entry);
+    }
+
+    /// The next entry `entry` goes to the engine with what it has, if it
+    /// is still the next one and not handed over yet.
+    fn hand_ahead(&mut self, entry: u64) {
         if !self.queue.peek_auto_next().is_some_and(|n| n.id == entry) || self.playback.holds_next(entry) {
             return;
         }
-        log::info!("the next track's preferred copy did not come in time: handed over with what it has");
         self.streaming.prefer.ahead_passed = Some(entry);
         self.preload_next();
     }
