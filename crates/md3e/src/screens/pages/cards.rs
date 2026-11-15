@@ -657,8 +657,9 @@ fn mix_look(l: &LaneCard, s: &crate::ColorScheme) -> (nikgob_shapes::MaterialSha
 /// A click opens the playlist, ▶ plays it; under the pointer ⋮ at the top
 /// grows in as on a mix (the playlist's own actions, the right click too);
 /// while it plays the name is primary, ⏸ stays in its square and the heart
-/// beats softly with the song (`song_s`: where the song is, so it rests on
-/// a pause and goes on with it), the beat fading in and out.
+/// beats with the song (`song_s`: where the song is, so it rests on a pause
+/// and goes on with it); under the pointer it beats too; the beat fades in
+/// and out.
 #[allow(clippy::too_many_arguments)]
 pub fn liked_playlist(
     ui: &mut Ui,
@@ -672,23 +673,27 @@ pub fn liked_playlist(
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
     let id = ui.id().with("home-liked-playlist");
-    let beating = playing && status == Status::Playing && !theme.reduced_motion;
-    let beat_k = anim::fraction(ui.ctx(), id.with("beat"), f32::from(u8::from(beating)), theme.motion.default_effects).clamp(0.0, 1.0);
-    let beat = if beat_k > 0.001 {
-        // Out of sight (below the window) it asks for no frames.
-        if ui.is_rect_visible(cell) {
-            ui.ctx().request_repaint();
-        }
-        beat_k * heartbeat(song_s)
-    } else {
-        0.0
-    };
     let cell = on_pixels(ui, cell);
     let art = Rect::from_min_size(cell.min, vec2(cell.width(), cell.width()));
     let resp = ui.interact(cell, id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
     let hover = hover || menu_open;
+    // It beats while «Любимые» plays (with the song) and under the pointer
+    // (with the clock).
+    let with_song = playing && status == Status::Playing;
+    let beating = (with_song || hover) && !theme.reduced_motion;
+    let beat_k = anim::fraction(ui.ctx(), id.with("beat"), f32::from(u8::from(beating)), theme.motion.default_effects).clamp(0.0, 1.0);
+    let beat = if beat_k > 0.001 {
+        // Out of sight (below the window) it asks for no frames.
+        if ui.is_rect_visible(cell) {
+            ui.ctx().request_repaint();
+        }
+        let t = if with_song { song_s } else { ui.input(|i| i.time) as f32 };
+        beat_k * heartbeat(t)
+    } else {
+        0.0
+    };
     let r = shape::LARGE;
     let mut more: Option<Response> = None;
     let play = scaled(ui, art.center(), squish, |ui| {
@@ -697,7 +702,7 @@ pub fn liked_playlist(
         let heart = Rect::from_center_size(art.center(), vec2(size, size));
         // The icon is drawn at its size and scaled, so it stays crisp at
         // rest and its raster is not made again on every beat.
-        scaled(ui, art.center(), 1.0 + 0.08 * beat, |ui| Icon::Favorite.widget(true, s.on_primary_container, size).paint_at(ui, heart));
+        scaled(ui, art.center(), 1.0 + 0.16 * beat, |ui| Icon::Favorite.widget(true, s.on_primary_container, size).paint_at(ui, heart));
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
