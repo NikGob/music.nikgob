@@ -132,9 +132,10 @@ const UNHEARD_AHEAD: usize = 3;
 /// the session rejected unheard stands this many times lower…
 pub const BLIND_DAMP: f32 = 0.25;
 /// …and every song near where a rejected new song sounded (its preview, or
-/// the mean of its seeds' sounds) this much lower at that very spot, the
-/// new ones by this share of their score; library songs by [`NEW_PUSH_LIB`]
-/// of the pull.
+/// the mean of its seeds' sounds), or a library song the session rejected
+/// sounds (by its push), this much lower at that very spot, the new ones by
+/// this share of their score; library songs by [`NEW_PUSH_LIB`] of the
+/// pull.
 pub const NEW_PUSH: f32 = 0.6;
 pub const NEW_PUSH_LIB: f32 = 0.3;
 /// A song without a preview joins a niche of a sound when the lists of
@@ -158,7 +159,7 @@ pub enum Part {
     /// A calm or background batch ordered by its transitions
     /// ([`crate::wave::sequence`]).
     Sequence,
-    /// Rejected new songs teach at once ([`BLIND_DAMP`], [`NEW_PUSH`], the
+    /// Rejected songs teach at once ([`BLIND_DAMP`], [`NEW_PUSH`], the
     /// halved share of new music).
     Rejected,
     /// Files come lately and never played lead the unheard of the mixes
@@ -795,21 +796,26 @@ fn next_ranked(
     let scale = m.scale().max(1e-6);
     // Where the new songs the session rejected sounded (their preview, else
     // the mean of their seeds' sounds), and the seeds of those rejected
-    // unheard.
-    let mut rejected_at: Vec<Vector> = Vec::new();
+    // unheard; and where its rejected library songs sound, each as hard as
+    // its rejection pushes ([`crate::session::Verdict::push`]): a skip turns
+    // the picks from its sound within the cluster too.
+    let mut rejected_at: Vec<(Vector, f32)> = Vec::new();
     let mut blind_seeds: HashSet<usize> = HashSet::new();
     for r in turn.skipped_new.iter().filter(|_| part_on(Part::Rejected)) {
 
         let Some(c) = pool.iter().find(|c| c.track.id == *r) else { continue };
         match &c.vector {
-            Some(v) => rejected_at.push(m.embed(v)),
+            Some(v) => rejected_at.push((m.embed(v), 1.0)),
             None => {
                 blind_seeds.extend(c.near.iter().copied());
-                rejected_at.extend(centroid(m, &c.near));
+                rejected_at.extend(centroid(m, &c.near).map(|v| (v, 1.0)));
             }
         }
     }
-    let pushed = |e: &Vector| rejected_at.iter().map(|r| (-euclid(e, r) / scale).exp()).fold(0.0f32, f32::max);
+    if part_on(Part::Rejected) {
+        rejected_at.extend(session.pushed(m).into_iter().filter_map(|(t, w)| Some((*m.embedded_at(m.position(t)?)?, w))));
+    }
+    let pushed = |e: &Vector| rejected_at.iter().map(|(r, w)| w * (-euclid(e, r) / scale).exp()).fold(0.0f32, f32::max);
     let pull = |i: usize| {
         let aff = (m.tracks[i].aff_long(now).max(0.0) / 3.0).tanh();
         let link = walk.get(&i).copied().unwrap_or(0.0).min(1.0);

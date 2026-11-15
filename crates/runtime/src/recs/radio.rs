@@ -12,11 +12,13 @@
 //! * How each track ended teaches the session: an approval (to the end or
 //!   its outro, a like) pulls the next picks towards its sound, a rejection
 //!   (a skip in its first half, a scrub-skip) pushes them away
-//!   ([`Engine::feedback`]). The radio's tail follows at once: one
-//!   rejection keeps the next track (it is preloaded) and picks the rest
-//!   again with its push; two running («not now» of a loved track counts
-//!   as two), «Не нравится» or a pick taken out of the queue by hand
-//!   replace the radio's whole tail (playback waits for the new picks); a
+//!   ([`Engine::judged`]: the session's verdict, «not now» and «did not
+//!   land» told apart). The radio's tail follows at once: one rejection
+//!   keeps the next track (it is preloaded) and picks the rest again with
+//!   its push; two running (a wave's: of its cluster, «not now» in a
+//!   settled vibe not counted, [`nikgob_recs::wave::Bandit::skips_running`]),
+//!   «Не нравится» or a pick taken out of the queue by hand replace the
+//!   radio's whole tail (playback waits for the new picks); a
 //!   like of an unfamiliar track keeps the next and makes the best of its
 //!   neighbours the one after, and asks the services around it. Only the
 //!   radio's own entries ever go: what the user queued stays where it is.
@@ -69,7 +71,7 @@ use std::time::Duration;
 
 use nikgob_core::model::{ArtistId, EventContext, EventOrigin, TrackId};
 use nikgob_core::streaming::{EntityKind, RemoteId, SearchKind, Service, StreamError, StreamService, StreamTrack};
-use nikgob_recs::{Familiarity, Item, NewTrack, Outcome, Pick, RadioParams, RadioSeed, RadioState as Engine, Session, TrackLookup, artist_key};
+use nikgob_recs::{Familiarity, Item, NewTrack, Outcome, Pick, RadioParams, RadioSeed, RadioState as Engine, Session, TrackLookup, Verdict, artist_key};
 use nikgob_view as v;
 use serde::{Deserialize, Serialize};
 
@@ -113,7 +115,7 @@ pub(crate) struct RadioRun {
     /// An extension waits for the first snapshot.
     want: bool,
     /// Learnt while an extension ran: applied to its result.
-    pending: Vec<(Item, Outcome)>,
+    pending: Vec<(Item, Outcome, Verdict)>,
     /// Likes and removals while an extension ran: applied to its result.
     marks: Vec<Mark>,
     pending_new: Vec<NewTrack>,
@@ -1335,8 +1337,8 @@ impl Worker {
         let paused_pick = self.recs.radio.paused_pick.take_if(|r| *r == id).is_some();
         let Some(run) = self.recs.radio.run.as_mut().filter(|r| r.id == id) else { return };
         run.extending = false;
-        for (item, outcome) in run.pending.drain(..) {
-            state.feedback(item, outcome);
+        for (item, outcome, verdict) in run.pending.drain(..) {
+            state.judged(item, outcome, verdict);
         }
         for mark in run.marks.drain(..) {
             mark.apply(&mut state);
@@ -1822,29 +1824,27 @@ impl Worker {
         let song = self.recs.snap.as_ref().and_then(|s| s.catalog.get(track)).map_or(track, |t| t.id);
         let snap = self.snapshot();
         let played = self.recs.session.last_of(song).cloned();
-        let scrubbed = played.as_ref().is_some_and(|p| p.scrubbed);
-        let (rejected, streak) = match (&snap, &played) {
-            (Some(s), Some(p)) => (Session::verdict(p, &s.model).rejects(), self.recs.session.skip_streak(&s.model)),
-            _ => {
-                let o = if complete { Outcome::Complete } else { Outcome::Skip { position_ms, duration_ms, scrubbed } };
-                (o.verdict().rejects(), u8::from(o.verdict().rejects()))
-            }
+        let scrub = played.as_ref().and_then(|p| p.scrub);
+        let outcome = if complete { Outcome::Complete } else { Outcome::Skip { position_ms, duration_ms, scrub } };
+        let (verdict, streak) = match (&snap, &played) {
+            (Some(s), Some(p)) => (Session::verdict(p, &s.model), self.recs.session.skip_streak(&s.model)),
+            _ => (outcome.verdict(), u8::from(outcome.verdict().rejects())),
         };
+        let rejected = verdict.rejects();
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         if run.queue_gen.is_none() {
             return;
         }
         let item = run.streams.get(&track).map_or(Item::Track(track), |r| Item::Stream(r.clone()));
-        let outcome = if complete { Outcome::Complete } else { Outcome::Skip { position_ms, duration_ms, scrubbed } };
         if complete {
             run.heard.retain(|t| *t != track);
             run.heard.push(track);
             let over = run.heard.len().saturating_sub(HEARD_KEEP);
             run.heard.drain(..over);
         }
-        run.state.feedback(item.clone(), outcome);
+        run.state.judged(item.clone(), outcome, verdict);
         if run.extending {
-            run.pending.push((item, outcome));
+            run.pending.push((item, outcome, verdict));
         }
         // What the wave learnt stays for the next waves.
         if let Some(mem) = run.state.wave_memory().filter(|m| !m.is_empty()) {
@@ -1852,8 +1852,9 @@ impl Worker {
         }
         let Some(run) = self.recs.radio.run.as_mut() else { return };
         if rejected {
-            // Two running: the whole tail; one: all but the next (it is
-            // preloaded already).
+            // Two running (a wave's: of its cluster, those it weighs): the
+            // whole tail; one: all but the next (it is preloaded already).
+            let streak = run.state.wave_bandit().map_or(streak, |b| b.skips_running());
             let keep = if streak >= nikgob_recs::radio::SKIP_SHIFT { 0 } else { 1 };
             log::info!("radio «{}»: a skip ({streak} running), the tail past {keep} is picked again", run.title);
             run.redo = Some(run.redo.map_or(keep, |k| k.min(keep)));

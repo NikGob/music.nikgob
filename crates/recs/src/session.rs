@@ -4,8 +4,8 @@
 //! world being listened through, one track on repeat, a run of skips.
 //!
 //! The runtime feeds every start and end ([`Session::start`],
-//! [`Session::end_at`]: where it ended, its length, whether the bar was
-//! dragged first, [`Session::seek`]) and every like ([`Session::like`]); a
+//! [`Session::end_at`]: where it ended, its length, how the bar was dragged
+//! first, [`Session::seek`]) and every like ([`Session::like`]); a
 //! radio keeps one of its own for its tracks
 //! ([`crate::RadioState::feedback`]) that the runtime replaces with the
 //! real one before it picks.
@@ -16,15 +16,18 @@
 //! track still playing has said nothing yet: a radio's seed leads its own
 //! picks, not the session's anchor). With the length known a skip is
 //! judged by its share, however soon it came (a short track's outro may
-//! come before 30 s). A skip in its first half, or after the bar was dragged (a
-//! scrub-skip: the drop heard, then off), rejects it: its sound pushes the
-//! picks away. A fast skip ([`NOT_NOW_MS`]) of a long-loved track in a
-//! stream is «not now»: a strong turn of the session (it counts twice in a
-//! run of skips) and nothing against the track in the long run; a rejected
-//! start of an unfamiliar track «did not land»: a light push of its sound
-//! ([`MISSED_PUSH`]). A skip past the half, the bar untouched, says
-//! neither. A start whose length nobody knows is rejected only by an early
-//! skip (or a scrub).
+//! come before 30 s). A skip in its first half, or soon after the bar was
+//! dragged (a scrub-skip: the drop heard, then off), rejects it: its sound
+//! pushes the picks away. A fast skip ([`NOT_NOW_MS`]) of a long-loved
+//! track in a stream is «not now»: a turn of the session and nothing
+//! against the track in the long run; a rejected start of an unfamiliar
+//! track «did not land»: a light push of its sound ([`MISSED_PUSH`]). A
+//! skip past the half, the bar untouched, says neither. A drag past an
+//! intro is no rejection: a start the bar was dragged into says nothing
+//! once it played on [`SCRUB_HEARD_MS`] past the drag or reached its half,
+//! and is approved when [`APPROVED_SHARE`] of its length was heard all the
+//! same (what the drags jumped over not counted). A start whose length
+//! nobody knows is rejected only by an early skip (or a scrub-skip).
 
 use std::collections::{HashMap, VecDeque};
 
@@ -57,6 +60,9 @@ pub const MISSED_PUSH: f32 = 0.5;
 /// A seek this far into a track or farther drags the bar (back to its
 /// start is a restart).
 pub const SCRUB_FROM_MS: u32 = 5_000;
+/// A start the bar was dragged into, then played this long past the drag,
+/// was heard, not skipped.
+pub const SCRUB_HEARD_MS: u32 = 25_000;
 
 /// How a start of the session ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,10 +91,20 @@ pub struct Played {
     pub duration_ms: Option<u32>,
     /// The bar was dragged into it while it played.
     #[serde(default)]
-    pub scrubbed: bool,
+    pub scrub: Option<Scrub>,
     /// Liked while it played (or after, in the session).
     #[serde(default)]
     pub liked: bool,
+}
+
+/// The bar dragged into a start ([`Session::seek`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scrub {
+    /// Where to, the last time.
+    pub to_ms: u32,
+    /// What the drags forward jumped over in all (a drag from where nobody
+    /// knows, from the start).
+    pub jumped_ms: u32,
 }
 
 /// What a start says of its track (see the module docs).
@@ -98,9 +114,10 @@ pub enum Verdict {
     Approved,
     /// Still playing (or the app closed on it): nothing yet.
     Playing,
-    /// Skipped past its half, the bar untouched.
+    /// Skipped past its half, the bar untouched, or played on after the
+    /// bar was dragged.
     Neutral,
-    /// Skipped in its first half, or after the bar was dragged.
+    /// Skipped in its first half, or soon after the bar was dragged.
     Rejected,
     /// A fast skip of a long-loved track in a stream.
     NotNow,
@@ -122,23 +139,16 @@ impl Verdict {
             Self::Approved | Self::Playing | Self::Neutral => 0.0,
         }
     }
-
-    /// What it counts in a run of skips: «not now» turns the session as
-    /// two skips do.
-    fn streak(self) -> u8 {
-        match self {
-            Self::NotNow => 2,
-            Self::Rejected | Self::Missed => 1,
-            Self::Approved | Self::Playing | Self::Neutral => 0,
-        }
-    }
 }
 
 /// What an end says of its track, whoever it is: approved, playing,
 /// neutral or rejected ([`Session::verdict`] tells the rejections apart).
 /// A skip of a known length is judged by its share, however soon it came;
 /// of an unknown one, an early skip rejects and a later one says nothing.
-pub fn judge(ended: Ended, position_ms: Option<u32>, duration_ms: Option<u32>, scrubbed: bool) -> Verdict {
+/// After the bar was dragged (`scrub`) a skip rejects only soon after the
+/// drag and before the half, and what was heard approves (see the module
+/// docs).
+pub fn judge(ended: Ended, position_ms: Option<u32>, duration_ms: Option<u32>, scrub: Option<Scrub>) -> Verdict {
     let share = match (position_ms, duration_ms) {
         (Some(at), Some(d)) if d > 0 => Some(at as f32 / d as f32),
         _ => None,
@@ -146,7 +156,16 @@ pub fn judge(ended: Ended, position_ms: Option<u32>, duration_ms: Option<u32>, s
     let rejected = match ended {
         Ended::Complete => return Verdict::Approved,
         Ended::Open => return Verdict::Playing,
-        Ended::Early | Ended::Late if scrubbed => true,
+        Ended::Early | Ended::Late if scrub.is_some() => match (scrub, position_ms) {
+            (Some(s), Some(at)) => {
+                let heard = at.saturating_sub(s.jumped_ms);
+                if duration_ms.is_some_and(|d| d > 0 && heard as f32 >= APPROVED_SHARE * d as f32) {
+                    return Verdict::Approved;
+                }
+                at.saturating_sub(s.to_ms) < SCRUB_HEARD_MS && share.is_none_or(|x| x < REJECTED_SHARE)
+            }
+            _ => true,
+        },
         Ended::Early | Ended::Late => match share {
             Some(s) if s >= APPROVED_SHARE => return Verdict::Approved,
             Some(s) => s < REJECTED_SHARE,
@@ -221,7 +240,7 @@ impl Session {
             origin,
             position_ms: None,
             duration_ms: None,
-            scrubbed: false,
+            scrub: None,
             liked: false,
         });
         while self.tracks.len() > SESSION_LEN {
@@ -238,25 +257,28 @@ impl Session {
     }
 
     /// How the last start of `track` ended, where (`position_ms`), its
-    /// length when known, and whether the bar was dragged (besides what
-    /// [`Self::seek`] said).
-    pub fn end_at(&mut self, track: TrackId, ended: Ended, position_ms: u32, duration_ms: Option<u32>, scrubbed: bool) {
+    /// length when known, and how the bar was dragged (when told, instead
+    /// of what [`Self::seek`] said).
+    pub fn end_at(&mut self, track: TrackId, ended: Ended, position_ms: u32, duration_ms: Option<u32>, scrub: Option<Scrub>) {
         if let Some(p) = self.open_mut(track) {
             p.ended = ended;
             p.position_ms = Some(position_ms);
             p.duration_ms = duration_ms.filter(|d| *d > 0).or(p.duration_ms);
-            p.scrubbed |= scrubbed;
+            p.scrub = scrub.or(p.scrub);
         }
     }
 
-    /// The bar was dragged to `to_ms` while `track` played: a scrub when
-    /// it went into the track ([`SCRUB_FROM_MS`]).
-    pub fn seek(&mut self, track: TrackId, to_ms: u32) {
+    /// The bar was dragged from `from_ms` (when known) to `to_ms` while
+    /// `track` played: a scrub when it went into the track
+    /// ([`SCRUB_FROM_MS`]).
+    pub fn seek(&mut self, track: TrackId, from_ms: Option<u32>, to_ms: u32) {
         if to_ms < SCRUB_FROM_MS {
             return;
         }
         if let Some(p) = self.open_mut(track) {
-            p.scrubbed = true;
+            let s = p.scrub.get_or_insert_with(Scrub::default);
+            s.to_ms = to_ms;
+            s.jumped_ms = s.jumped_ms.saturating_add(to_ms.saturating_sub(from_ms.unwrap_or(0)));
         }
     }
 
@@ -281,13 +303,13 @@ impl Session {
         if p.liked {
             return Verdict::Approved;
         }
-        let v = judge(p.ended, p.position_ms, p.duration_ms.or_else(|| look.duration(p.track)), p.scrubbed);
+        let v = judge(p.ended, p.position_ms, p.duration_ms.or_else(|| look.duration(p.track)), p.scrub);
         if v != Verdict::Rejected {
             return v;
         }
         let stream = in_stream(p.context, p.origin);
         match look.familiarity(p.track) {
-            Familiarity::Loved if stream && !p.scrubbed && p.position_ms.is_some_and(|x| x < NOT_NOW_MS) => Verdict::NotNow,
+            Familiarity::Loved if stream && p.scrub.is_none() && p.position_ms.is_some_and(|x| x < NOT_NOW_MS) => Verdict::NotNow,
             Familiarity::Unfamiliar => Verdict::Missed,
             _ => Verdict::Rejected,
         }
@@ -314,17 +336,10 @@ impl Session {
         self.last_ts
     }
 
-    /// Rejections running at the end (a «not now» counts twice).
+    /// Rejections running at the end.
     pub fn skip_streak(&self, look: &impl TrackLookup) -> u8 {
-        let mut n = 0u8;
-        for p in self.tracks.iter().rev() {
-            let v = Self::verdict(p, look);
-            if !v.rejects() {
-                break;
-            }
-            n = n.saturating_add(v.streak());
-        }
-        n
+        let n = self.tracks.iter().rev().take_while(|p| Self::verdict(p, look).rejects()).count();
+        u8::try_from(n).unwrap_or(u8::MAX)
     }
 
     /// The last start rejects its track.
@@ -554,8 +569,8 @@ mod tests {
     }
 
     /// Only approved starts make the anchor: a skip past 30 s in the first
-    /// half pushes, a scrub-skip pushes even late, the outro and a like
-    /// approve, a skip past the half says nothing.
+    /// half pushes, a scrub-skip (the drop heard, then off) pushes, the
+    /// outro and a like approve, a skip past the half says nothing.
     #[test]
     fn the_anchor_takes_only_approved_tracks() {
         let mut s = Session::default();
@@ -564,9 +579,9 @@ mod tests {
             ts += 200_000;
             s.start(tid(t), ts, EventContext::Playlist, None);
             if scrub {
-                s.seek(tid(t), 70_000);
+                s.seek(tid(t), None, 70_000);
             }
-            s.end_at(tid(t), ended, at, None, false);
+            s.end_at(tid(t), ended, at, None, None);
         };
         play(&mut s, 10, Ended::Complete, 200_000, false);
         play(&mut s, 20, Ended::Late, 45_000, false);
@@ -574,7 +589,7 @@ mod tests {
         assert_eq!(s.pushes(&Look), vec![(line(20.0), 1.0)], "and it pushes");
         play(&mut s, 30, Ended::Late, 170_000, false);
         assert_eq!(s.anchor_of(&Look, 1), Some(line(30.0)), "the outro approves");
-        play(&mut s, 40, Ended::Late, 170_000, true);
+        play(&mut s, 40, Ended::Late, 80_000, true);
         assert_eq!(s.anchor_of(&Look, 1), Some(line(30.0)), "a scrub-skip does not");
         assert!(s.last_rejected(&Look));
         play(&mut s, 50, Ended::Late, 120_000, false);
@@ -587,9 +602,36 @@ mod tests {
         assert_eq!(s.kept(&Look, 3), vec![tid(30), tid(50), tid(60)]);
         // A seek back to the start is a restart, not a scrub.
         s.start(tid(70), ts + 400_000, EventContext::Playlist, None);
-        s.seek(tid(70), 0);
-        s.end_at(tid(70), Ended::Late, 190_000, None, false);
+        s.seek(tid(70), Some(60_000), 0);
+        s.end_at(tid(70), Ended::Late, 190_000, None, None);
         assert_eq!(Session::verdict(s.last().unwrap(), &Look), Verdict::Approved);
+    }
+
+    /// A drag past an intro is no rejection: played on 25 s past the drag
+    /// or to the half it says nothing, heard for the most of it (what the
+    /// drags jumped over not counted) it approves; dragged and soon off it
+    /// rejects, and dragged to the outro and off it approves nothing.
+    #[test]
+    fn a_drag_past_the_intro_is_no_rejection() {
+        let mut s = Session::default();
+        let mut ts = T;
+        let mut play = |s: &mut Session, t: u128, from: Option<u32>, to: u32, at: u32| {
+            ts += 200_000;
+            s.start(tid(t), ts, EventContext::Radio, Some(EventOrigin::Radio));
+            s.seek(tid(t), from, to);
+            s.end_at(tid(t), skip_ended(at, Some(200_000)), at, None, None);
+            Session::verdict(s.last().unwrap(), &Look)
+        };
+        assert_eq!(play(&mut s, 10, Some(2_000), 30_000, 58_000), Verdict::Neutral, "28 s past the drag");
+        assert_eq!(play(&mut s, 11, Some(2_000), 90_000, 101_000), Verdict::Neutral, "past the half");
+        assert_eq!(play(&mut s, 12, Some(2_000), 30_000, 190_000), Verdict::Approved, "162 s of 200 heard");
+        assert_eq!(play(&mut s, 13, None, 30_000, 165_000), Verdict::Neutral, "from nobody knows where: 135 s heard");
+        assert_eq!(play(&mut s, 14, Some(2_000), 30_000, 45_000), Verdict::Rejected, "15 s past the drag, before the half");
+        assert_eq!(play(&mut s, 15, Some(3_000), 180_000, 185_000), Verdict::Neutral, "to the outro: no approval");
+        assert_eq!(s.skip_streak(&Look), 0);
+        assert_eq!(s.pushes(&Look), vec![(line(14.0), 1.0)], "only the scrub-skip pushes");
+        // A loved track dragged into and off is no «not now».
+        assert_eq!(play(&mut s, 900, Some(1_000), 6_000, 8_000), Verdict::Rejected);
     }
 
     /// A short track skipped at its outro, before 30 s, is approved; the
@@ -599,32 +641,35 @@ mod tests {
         assert_eq!(skip_ended(17_000, Some(20_000)), Ended::Late);
         assert_eq!(skip_ended(17_000, Some(200_000)), Ended::Early);
         assert_eq!(skip_ended(17_000, None), Ended::Early);
-        assert_eq!(judge(Ended::Early, Some(17_000), Some(20_000), false), Verdict::Approved, "an old label, judged by its share");
-        assert_eq!(judge(Ended::Early, Some(12_000), Some(20_000), false), Verdict::Neutral);
-        assert_eq!(judge(Ended::Early, Some(17_000), Some(20_000), true), Verdict::Rejected, "a scrub-skip");
-        assert_eq!(judge(Ended::Early, Some(17_000), None, false), Verdict::Rejected, "length unknown: early rejects");
-        assert_eq!(judge(Ended::Open, None, None, false), Verdict::Playing);
+        assert_eq!(judge(Ended::Early, Some(17_000), Some(20_000), None), Verdict::Approved, "an old label, judged by its share");
+        assert_eq!(judge(Ended::Early, Some(12_000), Some(20_000), None), Verdict::Neutral);
+        let scrub = |to_ms| Some(Scrub { to_ms, jumped_ms: to_ms });
+        assert_eq!(judge(Ended::Early, Some(8_000), Some(20_000), scrub(6_000)), Verdict::Rejected, "a scrub-skip");
+        assert_eq!(judge(Ended::Early, Some(17_000), Some(20_000), scrub(15_000)), Verdict::Neutral, "dragged to the outro");
+        assert_eq!(judge(Ended::Early, Some(17_000), None, scrub(15_000)), Verdict::Rejected, "length unknown: soon after the drag");
+        assert_eq!(judge(Ended::Early, Some(17_000), None, None), Verdict::Rejected, "length unknown: early rejects");
+        assert_eq!(judge(Ended::Open, None, None, None), Verdict::Playing);
     }
 
-    /// A fast skip of a loved track in a stream is «not now» (two in the
-    /// run); a skip of an unfamiliar one pushes half as hard.
+    /// A fast skip of a loved track in a stream is «not now» (one in the
+    /// run, as any skip); a skip of an unfamiliar one pushes half as hard.
     #[test]
     fn not_now_and_did_not_land() {
         let mut s = Session::default();
         s.start(tid(900), T, EventContext::Radio, Some(EventOrigin::Autoplay));
-        s.end_at(tid(900), Ended::Early, 4_000, None, false);
+        s.end_at(tid(900), Ended::Early, 4_000, None, None);
         assert_eq!(Session::verdict(s.last().unwrap(), &Look), Verdict::NotNow);
-        assert_eq!(s.skip_streak(&Look), 2, "a strong turn");
+        assert_eq!(s.skip_streak(&Look), 1, "one skip, not two");
         s.start(tid(800), T + 10_000, EventContext::Radio, Some(EventOrigin::Autoplay));
-        s.end_at(tid(800), Ended::Early, 15_000, None, false);
+        s.end_at(tid(800), Ended::Early, 15_000, None, None);
         assert_eq!(s.pushes(&Look), vec![(line(900.0), 1.0), (line(800.0), MISSED_PUSH)]);
-        assert_eq!(s.skip_streak(&Look), 3);
+        assert_eq!(s.skip_streak(&Look), 2);
         assert_eq!(Session::skip_lesson(s.last_of(tid(900)).unwrap(), &Look), None, "«not now» teaches no skip");
         assert_eq!(Session::skip_lesson(s.last_of(tid(800)).unwrap(), &Look), Some(true));
         // The same fast skip from the user's own playlist is a rejection.
         let mut own = Session::default();
         own.start(tid(901), T, EventContext::Playlist, Some(EventOrigin::Manual));
-        own.end_at(tid(901), Ended::Early, 4_000, None, false);
+        own.end_at(tid(901), Ended::Early, 4_000, None, None);
         assert_eq!(Session::verdict(own.last().unwrap(), &Look), Verdict::Rejected);
     }
 

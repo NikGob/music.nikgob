@@ -2074,7 +2074,7 @@ impl UserModel {
                             let t = &mut self.tracks[i];
                             t.early = t.early.saturating_add(1);
                         }
-                        self.walk.end_at(p.track, Ended::Early, pos, self.duration[i], false);
+                        self.walk.end_at(p.track, Ended::Early, pos, self.duration[i], None);
                         // «Not now» teaches the skip model nothing either.
                         if let Some(x) = self.pending.remove(&i).filter(|_| self.learn && !not_now) {
                             self.weights.skip.observe(&x, true);
@@ -2092,7 +2092,7 @@ impl UserModel {
                         t.note(false);
                         t.late = t.late.saturating_add(1);
                         match pos {
-                            Some(pos) => self.walk.end_at(p.track, Ended::Late, pos, self.duration[i], false),
+                            Some(pos) => self.walk.end_at(p.track, Ended::Late, pos, self.duration[i], None),
                             None => self.walk.end(p.track, Ended::Late),
                         }
                         self.pending.remove(&i);
@@ -2102,7 +2102,7 @@ impl UserModel {
             EventType::Start => self.start(i, p, hook),
             EventType::Seek => {
                 if let Some(to) = p.position_ms {
-                    self.walk.seek(p.track, to);
+                    self.walk.seek(p.track, None, to);
                 }
             }
             EventType::AddToPlaylist => {}
@@ -3009,7 +3009,7 @@ pub(crate) mod tests {
             let mut s = Session::default();
             s.start(tid(0), T0 - 60_000, EventContext::Radio, Some(EventOrigin::Radio));
             match end {
-                Some(at) => s.end_at(tid(0), Ended::Late, at, Some(200_000), false),
+                Some(at) => s.end_at(tid(0), Ended::Late, at, Some(200_000), None),
                 None => s.end(tid(0), Ended::Complete),
             }
             s
@@ -3189,7 +3189,7 @@ pub(crate) mod tests {
         let m = UserModel::build(&cat, &TasteInput::default(), ModelInput { index: &idx, types: None, weights: None, graph: None }, T0);
         let mut s = Session::default();
         s.start(tid(0), T0 - 60_000, EventContext::Radio, Some(EventOrigin::Radio));
-        s.end_at(tid(0), Ended::Early, 5_000, Some(200_000), false);
+        s.end_at(tid(0), Ended::Early, 5_000, Some(200_000), None);
         assert_eq!(s.pushed(&m).len(), s.pushes(&m).len());
         let probe = m.push_probe(&s, Some(&idx)).expect("a rejection, an index that blends");
         let (one, two) = (m.position(tid(1)).unwrap(), m.position(tid(2)).unwrap());

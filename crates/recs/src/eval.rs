@@ -45,8 +45,8 @@
 //!   - a session of «Моя волна» ([`wave_session`], [`crate::wave`]) at
 //!     the same mornings: the share of new music it plays at each novelty
 //!     (heard out song by song, three at a time as the queue asks), and
-//!     how often two early skips of a block's first songs move it to
-//!     another cluster;
+//!     how often three early skips of a fresh wave's first songs move it
+//!     to another cluster;
 //!   - the share of the catalog all lists ever held, and for a synthetic
 //!     listener how high the hidden taste rates what was picked (0.5 is a
 //!     random pick);
@@ -447,7 +447,7 @@ pub struct WaveSessionStats {
     pub new: [f32; 4],
     /// Clusters the wave weighed, on average.
     pub clusters: f32,
-    /// Sessions of two clusters or more where two early skips were
+    /// Sessions of two clusters or more where three early skips were
     /// measured, and the share of them whose next block was of another.
     pub skips_n: usize,
     pub skips_moved: f32,
@@ -580,9 +580,9 @@ fn session_before(events: &[Play], t: UnixMs) -> Session {
             (EventType::Start, _) => {
                 s.start(p.track, p.ts, p.context, p.origin);
             }
-            (EventType::Complete | EventType::Skip, Some(at)) => s.end_at(p.track, ended_of(p), at, None, false),
+            (EventType::Complete | EventType::Skip, Some(at)) => s.end_at(p.track, ended_of(p), at, None, None),
             (EventType::Complete | EventType::Skip, None) => s.end(p.track, ended_of(p)),
-            (EventType::Seek, Some(to)) => s.seek(p.track, to),
+            (EventType::Seek, Some(to)) => s.seek(p.track, None, to),
             (EventType::Like, _) => s.like(p.track),
             _ => {}
         }
@@ -923,14 +923,15 @@ pub struct WaveRun {
     pub new: [Option<f32>; 4],
     /// The clusters it weighed.
     pub clusters: usize,
-    /// Two early skips of a block's first songs: whether the next block
-    /// was of another cluster (`None` with one cluster).
+    /// Three early skips of a fresh wave's first songs (its vibe not
+    /// settled): whether the next block was of another cluster (`None` with
+    /// one cluster).
     pub moved: Option<bool>,
 }
 
 /// A session of «Моя волна» after `session` over the dataset's open
 /// `pool`: [`WAVE_LEN`] songs at each novelty, three at a time, each heard
-/// out; then at «Баланс» a fresh wave whose first two songs are skipped
+/// out; then at «Баланс» a fresh wave whose first three songs are skipped
 /// early, and the cluster its next block is of.
 pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[OpenCandidate], session: &Session) -> WaveRun {
     use crate::radio::Outcome;
@@ -963,16 +964,16 @@ pub fn wave_session(parts: &Parts, model: &UserModel, suits: &[bool], pool: &[Op
             run.clusters = radio.wave_bandit().map_or(0, |b| b.arms.len());
         }
     }
-    // Two early skips of a fresh block.
+    // Three early skips of a fresh block.
     let mut radio = RadioState::new(RadioSeed::Wave(WaveSeed::plain(crate::wave::NOVELTY_BALANCE)));
     radio.attune(session.clone(), Some(model.weights));
     let first = radio.extend_wave(&ctx, pool, 3, 13);
     let skipped = radio.wave_bandit().and_then(|b| b.current_scene());
-    if first.len() >= 2 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
-        for p in first.iter().take(2) {
+    if first.len() >= 3 && radio.wave_bandit().is_some_and(|b| b.arms.len() >= 2) {
+        for p in first.iter().take(3) {
             radio.feedback(p.item.clone(), Outcome::skip(8_000));
         }
-        radio.forget(&first[2..].iter().map(|p| p.item.clone()).collect::<Vec<_>>());
+        radio.forget(&first[3..].iter().map(|p| p.item.clone()).collect::<Vec<_>>());
         let again = radio.extend_wave(&ctx, pool, 3, 13);
         let now = radio.wave_bandit().and_then(|b| b.current_scene());
         if !again.is_empty() {
@@ -1717,7 +1718,7 @@ impl Report {
         }
         let w = &self.wave_sessions;
         out += &format!(
-            "  wave session: n {:>3}  new familiar {:.3} balance {:.3} more {:.3} only-new {:.3}  clusters {:.1}  2 skips: n {:>3} moved {:.3}\n",
+            "  wave session: n {:>3}  new familiar {:.3} balance {:.3} more {:.3} only-new {:.3}  clusters {:.1}  3 skips: n {:>3} moved {:.3}\n",
             w.sessions, w.new[0], w.new[1], w.new[2], w.new[3], w.clusters, w.skips_n, w.skips_moved
         );
         out += &format!(
@@ -1842,8 +1843,8 @@ mod tests {
 
     /// A session of «Моя волна» on a listener of several clusters: its new
     /// music follows the novelty (none at «Знакомое», all it can at «Только
-    /// новое»), it weighs several clusters, and two early skips of a block
-    /// move it to another.
+    /// новое»), it weighs several clusters, and three early skips of a
+    /// fresh wave move it to another.
     /// An open pool for a listener who has none: a new song of a new
     /// artist beside each of `every`-th library tracks, linked to it.
     fn linked_pool(model: &UserModel, every: usize) -> Vec<OpenCandidate> {
@@ -1874,7 +1875,7 @@ mod tests {
         assert!(new[1] > 0.0 && new[1] < new[2] + 0.05 && new[2] < new[3] + 0.05, "{new:?}");
         assert!(new[3] >= 0.9, "«Только новое»: {new:?}");
         assert!(r.clusters >= 2, "{}", r.clusters);
-        assert_eq!(r.moved, Some(true), "two skips change the cluster");
+        assert_eq!(r.moved, Some(true), "three skips change the cluster");
     }
 
     /// Blocks of one cluster: a wave's picks come four to six of one

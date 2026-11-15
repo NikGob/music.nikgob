@@ -2635,7 +2635,7 @@ impl Worker {
         let ended = if complete { Ended::Complete } else { nikgob_recs::session::skip_ended(position_ms, duration_ms) };
         self.new_ended(track, ended);
         let r = &mut self.recs;
-        r.session.end_at(track, ended, position_ms, duration_ms, false);
+        r.session.end_at(track, ended, position_ms, duration_ms, None);
         let Some((t, x)) = r.skip_x.take() else { return };
         let Some(snap) = r.snap.clone() else { return };
         // What it teaches the skip model («not now» of a loved track:
@@ -2646,11 +2646,12 @@ impl Worker {
         self.recs_keep_weights();
     }
 
-    /// The bar of the playing `track` was dragged to `to_ms`: a skip after
-    /// it is a scrub-skip ([`nikgob_recs::session::Session::seek`]).
-    pub(crate) fn recs_seeked(&mut self, track: TrackId, to_ms: u32) {
+    /// The bar of the playing `track` was dragged from `from_ms` to
+    /// `to_ms`: a skip soon after it is a scrub-skip
+    /// ([`nikgob_recs::session::Session::seek`]).
+    pub(crate) fn recs_seeked(&mut self, track: TrackId, from_ms: u32, to_ms: u32) {
         let track = self.recs_song_of(track);
-        self.recs.session.seek(track, to_ms);
+        self.recs.session.seek(track, Some(from_ms), to_ms);
     }
 
     /// The user liked `track`: its start in the session is approved, and a

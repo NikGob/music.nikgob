@@ -40,11 +40,11 @@
 //! [`SEED_HOLD`] and the session's for the rest, so affinity only orders
 //! what is near. The diversity rules always hold (artist, album, world);
 //! the next one on the album goes on only right after the user's own start
-//! from an album. After two rejections running (a «not now» counts as
-//! two) the model weighs the rejected sounds' push and the session's lane
-//! twice ([`SKIP_SHIFT`]) and the radio leaves the taste profile they were
-//! of for another of a kind of song that goes with X, while there is one:
-//! two skips change the cluster. A seed with few neighbours of its own scene (its artists, what the
+//! from an album. After two rejections running the model weighs the
+//! rejected sounds' push and the session's lane twice ([`SKIP_SHIFT`]) and
+//! the radio leaves the taste profile they were of for another of a kind
+//! of song that goes with X, while there is one: two skips change the
+//! cluster. A seed with few neighbours of its own scene (its artists, what the
 //! graph links to them, its language) keeps to that scene before anything
 //! else: its artists' and their graph neighbours' tracks of any sound,
 //! then its language of any sound, and only then the rest. A track seed
@@ -54,8 +54,9 @@
 //! The session is the runtime's own, handed to the radio before it picks
 //! ([`RadioState::attune`]), else the radio's tracks. Only what the session
 //! approved leads the anchor ([`crate::session::Verdict`]): a skip in a
-//! track's first half or after a scrub pushes, a fast skip of a loved one
-//! turns the radio as two skips do.
+//! track's first half or soon after a scrub pushes; a fast skip of a loved
+//! one counts once in a run of skips, as any other («not now» of one song
+//! is no reason to leave its profile).
 //!
 //! Autoplay goes on by the session's trajectory: the last
 //! [`TRAJECTORY_MAX`] tracks not skipped (played through, liked, or still
@@ -143,7 +144,7 @@ use crate::mood::Axes;
 use crate::listening::Mode;
 use crate::profiles::LaneKey;
 use crate::open_world::{OpenCandidate, WaveContext};
-use crate::session::{Ended, MISSED_PUSH, Session, Verdict, judge};
+use crate::session::{Ended, MISSED_PUSH, Scrub, Session, Verdict, judge};
 use crate::songtype::{SongLane, SongType, Voice};
 
 use crate::taste::{DayPart, HOUR_MS};
@@ -295,14 +296,14 @@ pub enum RadioSeed {
 pub enum Outcome {
     Complete,
     /// Skipped at `position_ms` of its `duration_ms` (when known), the bar
-    /// dragged before (`scrubbed`).
-    Skip { position_ms: u32, duration_ms: Option<u32>, scrubbed: bool },
+    /// dragged before (`scrub`).
+    Skip { position_ms: u32, duration_ms: Option<u32>, scrub: Option<Scrub> },
 }
 
 impl Outcome {
     /// A skip at `position_ms`, nothing else known.
     pub fn skip(position_ms: u32) -> Self {
-        Self::Skip { position_ms, duration_ms: None, scrubbed: false }
+        Self::Skip { position_ms, duration_ms: None, scrub: None }
     }
 
     fn ended(self) -> Ended {
@@ -316,7 +317,7 @@ impl Outcome {
     pub fn verdict(self) -> Verdict {
         match self {
             Self::Complete => Verdict::Approved,
-            Self::Skip { position_ms, duration_ms, scrubbed } => judge(self.ended(), Some(position_ms), duration_ms, scrubbed),
+            Self::Skip { position_ms, duration_ms, scrub } => judge(self.ended(), Some(position_ms), duration_ms, scrub),
         }
     }
 }
@@ -760,6 +761,13 @@ impl RadioState {
     }
 
     pub fn feedback(&mut self, item: Item, outcome: Outcome) {
+        self.judged(item, outcome, outcome.verdict());
+    }
+
+    /// [`Self::feedback`] with what the user's session says of it
+    /// ([`Session::verdict`]: a like, «not now», «did not land»), which the
+    /// lessons and the wave's clusters take instead of the end's own.
+    pub fn judged(&mut self, item: Item, outcome: Outcome, verdict: Verdict) {
         self.played_last = Some(item.clone());
         if !self.is_mix() && self.recent.last() == Some(&item) && outcome == Outcome::Complete {
             self.again = Some(item.clone());
@@ -772,8 +780,8 @@ impl RadioState {
             }
             match outcome {
                 Outcome::Complete => self.session.end(*t, Ended::Complete),
-                Outcome::Skip { position_ms, duration_ms, scrubbed } => {
-                    self.session.end_at(*t, outcome.ended(), position_ms, duration_ms, scrubbed);
+                Outcome::Skip { position_ms, duration_ms, scrub } => {
+                    self.session.end_at(*t, outcome.ended(), position_ms, duration_ms, scrub);
                 }
             }
         }
@@ -781,9 +789,9 @@ impl RadioState {
         let over = self.recent.len().saturating_sub(REPEAT_AFTER);
         self.recent.drain(..over);
         if let Some(b) = &mut self.wave {
-            b.feedback(&item, outcome.verdict());
+            b.feedback(&item, verdict);
         }
-        match outcome.verdict() {
+        match verdict {
             Verdict::Approved => {
                 self.skipped.retain(|x| *x != item);
                 push_capped(&mut self.liked, item, LESSONS);
@@ -2682,11 +2690,14 @@ pub(crate) mod tests {
         assert_eq!(Outcome::Complete.verdict(), Verdict::Approved);
         assert_eq!(Outcome::skip(5_000).verdict(), Verdict::Rejected);
         assert_eq!(Outcome::skip(120_000).verdict(), Verdict::Neutral, "length unknown: past 30 s says nothing");
-        let at = |s: u32, scrubbed| Outcome::Skip { position_ms: s, duration_ms: Some(200_000), scrubbed }.verdict();
-        assert_eq!(at(45_000, false), Verdict::Rejected, "the first half");
-        assert_eq!(at(120_000, false), Verdict::Neutral);
-        assert_eq!(at(170_000, false), Verdict::Approved, "the outro");
-        assert_eq!(at(170_000, true), Verdict::Rejected, "a scrub-skip");
+        let at = |s: u32, scrub| Outcome::Skip { position_ms: s, duration_ms: Some(200_000), scrub }.verdict();
+        let to = |to_ms| Some(Scrub { to_ms, jumped_ms: to_ms - 2_000 });
+        assert_eq!(at(45_000, None), Verdict::Rejected, "the first half");
+        assert_eq!(at(120_000, None), Verdict::Neutral);
+        assert_eq!(at(170_000, None), Verdict::Approved, "the outro");
+        assert_eq!(at(60_000, to(50_000)), Verdict::Rejected, "a scrub-skip");
+        assert_eq!(at(60_000, to(30_000)), Verdict::Neutral, "played on past the drag");
+        assert_eq!(at(170_000, to(160_000)), Verdict::Neutral, "dragged to the outro: no approval");
         let (cat, idx) = two_regions();
         let taste = Taste::build(&cat, &TasteInput::default(), NOW);
         let recs = Recs::new(&cat, &taste, &idx);
@@ -3482,7 +3493,7 @@ pub(crate) mod tests {
                 ts += 200_000;
                 if skipped == Some(k) {
                     // Skipped past its half: not rejected, not played through.
-                    session.end_at(tid(t), Ended::Late, 120_000, Some(200_000), false);
+                    session.end_at(tid(t), Ended::Late, 120_000, Some(200_000), None);
                 } else {
                     session.end(tid(t), Ended::Complete);
                 }

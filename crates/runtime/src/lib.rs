@@ -2449,6 +2449,7 @@ impl Worker {
             }
             return;
         }
+        let from = self.position_now();
         match self.playing {
             // Waiting for a lookup (or a clip's song): nothing is open to
             // seek in; it starts from here (see `seek_to_failover`).
@@ -2467,7 +2468,7 @@ impl Worker {
                 Some(p.as_millis() as u32),
                 self.play_context,
             );
-            self.recs_seeked(e.track, p.as_millis() as u32);
+            self.recs_seeked(e.track, from.as_millis() as u32, p.as_millis() as u32);
         }
         self.publish_player();
         // Nearer the end now: the next track's wait for its Spotify copy is
