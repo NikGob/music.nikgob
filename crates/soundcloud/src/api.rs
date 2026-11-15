@@ -124,9 +124,28 @@ pub(crate) struct Track {
     pub(crate) permalink_url: Option<String>,
     #[serde(default)]
     pub(crate) release_date: Option<String>,
+    /// The uploader lets the original file be downloaded.
+    #[serde(default)]
+    pub(crate) downloadable: Option<bool>,
+    /// False once the uploader's download limit is reached.
+    #[serde(default)]
+    pub(crate) has_downloads_left: Option<bool>,
+}
+
+/// `/tracks/{id}/download`: where the original file is.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct DownloadLink {
+    #[serde(default, rename = "redirectUri")]
+    pub(crate) redirect_uri: Option<String>,
 }
 
 impl Track {
+    /// The original file may be downloaded: the uploader allows it, its
+    /// limit is not reached, and the track is not blocked.
+    pub(crate) fn offers_original(&self) -> bool {
+        self.downloadable == Some(true) && self.has_downloads_left != Some(false) && self.policy.as_deref() != Some("BLOCK")
+    }
+
     /// A playlist's stub: only the id (the service fills it).
     pub(crate) fn is_stub(&self) -> bool {
         self.title.is_none() && self.user.is_none()
@@ -494,5 +513,27 @@ mod tests {
         let pl = playlist(&sys, &[]);
         assert!(!pl.editable);
         assert_eq!(pl.version.as_deref(), Some("2026-11-06T00:00:00Z"));
+    }
+
+    /// The flags api-v2 gave on 2026-11-15 for an upload «FREE DOWNLOAD.wav»
+    /// and for one sold elsewhere.
+    #[test]
+    fn an_original_is_offered_only_when_the_uploader_lets_it_go() {
+        let free: Track = serde_json::from_str(
+            r#"{"id":2437472571,"title":"LA PAZ - NIXON (FREE DOWNLOAD.wav)","downloadable":true,"has_downloads_left":true,"policy":"ALLOW","user":{"id":241718650,"username":"NIXON"}}"#,
+        )
+        .unwrap();
+        assert!(free.offers_original());
+        let sold: Track = serde_json::from_str(
+            r#"{"id":2330746367,"title":"PENYANGKALAN","downloadable":false,"has_downloads_left":false,"policy":"ALLOW","user":{"id":1,"username":"A"}}"#,
+        )
+        .unwrap();
+        assert!(!sold.offers_original());
+        let used_up: Track = serde_json::from_str(r#"{"id":7,"title":"T","downloadable":true,"has_downloads_left":false}"#).unwrap();
+        assert!(!used_up.offers_original());
+        let unsaid: Track = serde_json::from_str(r#"{"id":8,"title":"T"}"#).unwrap();
+        assert!(!unsaid.offers_original());
+        let link: DownloadLink = serde_json::from_str(r#"{"redirectUri":"https://cf-media.sndcdn.com/o.wav?Policy=p"}"#).unwrap();
+        assert_eq!(link.redirect_uri.as_deref(), Some("https://cf-media.sndcdn.com/o.wav?Policy=p"));
     }
 }

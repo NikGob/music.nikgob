@@ -41,12 +41,17 @@ pub enum SourceKey {
     Archive,
     /// Bandcamp's free and name-your-price releases.
     Bandcamp,
+    /// The original files SoundCloud uploaders let download (needs the
+    /// user's SoundCloud sign-in).
+    Soundcloud,
+    /// play.dogmazic.net: an archive of free (Creative Commons) music.
+    Dogmazic,
 }
 
 impl SourceKey {
     /// Every key, in the default order of «Источники»: the cheap and
     /// reliable first, the free services last.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Torrents,
         Self::Khinsider,
         Self::Bandcamp,
@@ -55,6 +60,8 @@ impl SourceKey {
         Self::Tidal,
         Self::Squidify,
         Self::Archive,
+        Self::Soundcloud,
+        Self::Dogmazic,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -67,6 +74,8 @@ impl SourceKey {
             Self::Squidify => "squidify",
             Self::Archive => "archive",
             Self::Bandcamp => "bandcamp",
+            Self::Soundcloud => "soundcloud",
+            Self::Dogmazic => "dogmazic",
         }
     }
 
@@ -81,6 +90,8 @@ impl SourceKey {
             Self::Squidify => "Squidify",
             Self::Archive => "Internet Archive",
             Self::Bandcamp => "Bandcamp",
+            Self::Soundcloud => "SoundCloud",
+            Self::Dogmazic => "Dogmazic",
         }
     }
 

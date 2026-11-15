@@ -55,6 +55,17 @@ pub fn sc_widget() -> Option<Arc<nikgob_sc_widget::ScWidget>> {
     SC_WIDGET.get().cloned()
 }
 
+/// The real SoundCloud (set by [`real`]): its sign-in fetches the
+/// originals its uploaders let download.
+static SOUNDCLOUD: std::sync::OnceLock<Arc<nikgob_soundcloud::Soundcloud>> = std::sync::OnceLock::new();
+
+/// SoundCloud's originals as a download source, when the real SoundCloud
+/// runs.
+pub fn soundcloud_originals() -> Option<Arc<dyn nikgob_core::source::Source>> {
+    let sc: Arc<dyn nikgob_sources::soundcloud::Originals> = SOUNDCLOUD.get()?.clone();
+    Some(Arc::new(nikgob_sources::soundcloud::SoundcloudOriginals::new(sc)))
+}
+
 /// Stops Soloist and SoundCloud's player host as the app quits.
 pub fn shutdown() {
     if let Some(s) = SOLOIST.get() {
@@ -116,7 +127,10 @@ pub fn real(data_dir: &Path, secrets: &StreamingSettings) -> Services {
     // The demo's real services keep their sign-in out of the user's store.
     sc.memory_store = real_in_demo();
     match nikgob_soundcloud::Soundcloud::new(sc) {
-        Ok(sc) => out.push(sc),
+        Ok(sc) => {
+            let _ = SOUNDCLOUD.set(sc.clone());
+            out.push(sc);
+        }
         Err(e) => log::error!("SoundCloud did not start: {e}"),
     }
     // Its DRM-only tracks play through its own player (WebView2 has the

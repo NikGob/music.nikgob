@@ -227,6 +227,7 @@ pub const ALL: &[SettingId] = {
         Preset(Area::Sources), DownloadSource(Src::Torrents), DownloadSource(Src::Khinsider), DownloadSource(Src::Soulseek),
         DownloadSource(Src::Qobuz),
         DownloadSource(Src::Tidal), DownloadSource(Src::Squidify), DownloadSource(Src::Archive), DownloadSource(Src::Bandcamp),
+        DownloadSource(Src::Soundcloud), DownloadSource(Src::Dogmazic),
         LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
         Preset(Area::Seeding), NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
         // Система.

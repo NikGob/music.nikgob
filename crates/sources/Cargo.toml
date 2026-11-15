@@ -1,6 +1,6 @@
 [package]
 name = "nikgob-sources"
-description = "Download sources behind the core's Source trait (torrents through the indexer, khinsider, free FLAC services, a Subsonic server), query variants, matching and the one quality policy that picks among them."
+description = "Download sources behind the core's Source trait (torrents through the indexer, khinsider, free FLAC services, Subsonic servers, Dogmazic, SoundCloud originals), query variants, matching and the one quality policy that picks among them."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 nikgob-core.workspace = true
 nikgob-metadata = { path = "../metadata" }
+nikgob-soundcloud = { path = "../soundcloud" }
 log.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1", features = ["derive"] }

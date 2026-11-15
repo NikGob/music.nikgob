@@ -1,15 +1,18 @@
 //! Download sources behind [`nikgob_core::source::Source`]: torrents through the indexer ([`torrent`]),
 //! khinsider ([`khinsider`]), the free FLAC services ([`qobuz`],
-//! [`tidal`]), a Subsonic server ([`squidify`]), the Internet Archive
-//! ([`archive`]), Bandcamp's free releases ([`bandcamp`]); the query variants
-//! ([`text`]), whether an offer is the wished thing ([`matching`]) and the
-//! one quality policy over all of them ([`select`]). Soulseek (crates/soulseek) is one more implementation of
+//! [`tidal`]), Subsonic servers ([`subsonic`]: [`squidify`], [`dogmazic`]),
+//! the Internet Archive ([`archive`]), Bandcamp's free releases
+//! ([`bandcamp`]), SoundCloud's originals ([`soundcloud`]); the query
+//! variants ([`text`]), whether an offer is the wished thing ([`matching`]),
+//! what a file is from its bytes ([`sniff`]) and the one quality policy
+//! over all of them ([`select`]). Soulseek (crates/soulseek) is one more implementation of
 //! the same trait.
 
 pub mod album;
 pub mod archive;
 pub mod bandcamp;
 pub mod config;
+pub mod dogmazic;
 pub mod html;
 pub mod http;
 pub mod instances;
@@ -17,7 +20,10 @@ pub mod khinsider;
 pub mod matching;
 pub mod qobuz;
 pub mod select;
+pub mod sniff;
+pub mod soundcloud;
 pub mod squidify;
+pub mod subsonic;
 pub mod text;
 pub mod tidal;
 pub mod torrent;
@@ -43,9 +49,11 @@ impl WebSources {
 }
 
 /// The sources that need no setup (khinsider, the free services, the
-/// Subsonic server). Qobuz and Tidal use `lists` (from `sources.toml`,
-/// merged with the built-in addresses). Whether each is used is the user's
-/// switch on «Источники».
+/// Subsonic server, Dogmazic). Qobuz and Tidal use `lists` (from
+/// `sources.toml`, merged with the built-in addresses). SoundCloud's
+/// originals come with the SoundCloud service
+/// ([`soundcloud::SoundcloudOriginals`]). Whether each is used is the
+/// user's switch on «Источники».
 pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
     let s = &settings.sources;
     let kh = Arc::new(khinsider::Khinsider::new(&s.khinsider_url));
@@ -58,6 +66,7 @@ pub fn web_sources(settings: &Settings, lists: &config::Lists) -> WebSources {
         Arc::new(squidify::Squidify::from_settings(s)),
         Arc::new(archive::Archive::new(&s.archive_url)),
         Arc::new(bandcamp::Bandcamp::new()),
+        Arc::new(dogmazic::Dogmazic::from_settings(s)),
     ];
     WebSources { list, khinsider: Some(kh), qobuz: Some(q), tidal: Some(t) }
 }

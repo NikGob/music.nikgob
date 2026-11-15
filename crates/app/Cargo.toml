@@ -29,6 +29,7 @@ nikgob-soloist = { path = "../soloist" }
 nikgob-youtube = { path = "../youtube" }
 nikgob-deezer = { path = "../deezer" }
 nikgob-soundcloud = { path = "../soundcloud" }
+nikgob-sources = { path = "../sources" }
 nikgob-sc-widget = { path = "../sc-widget" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
