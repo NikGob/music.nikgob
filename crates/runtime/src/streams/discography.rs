@@ -6,11 +6,10 @@
 //!   matches (folded like the importer folds names) is taken when one of
 //!   our release titles is among its albums, or when it is the only hit of
 //!   that name. The match is remembered as the artist's id in the service.
-//! * Albums the page has (a release of the artist with the same folded title,
-//!   as large — a single never hides the album — and a year within ±1, or
-//!   linked to it) are left out, and so are the same albums of a later
-//!   service (Spotify first). A year missing on either side counts only
-//!   between releases of one kind.
+//! * Albums the page has (a release of the artist of the same kind — a
+//!   single, an EP and an album of one title are three releases — with the
+//!   same folded title and a year within ±1, or linked to it) are left out,
+//!   and so are the same albums of a later service (Spotify first).
 //! * Which services: Spotify when it is signed in, else the Deezer
 //!   catalogue (its discographies are good and need no account), then
 //!   YouTube Music.
@@ -82,9 +81,10 @@ fn group_rank(t: ReleaseType) -> u8 {
     }
 }
 
-/// How much of a release it is: a single is part of an EP, an EP of an
-/// album.
-fn size(t: ReleaseType) -> u8 {
+/// The kind a release is deduplicated within: a single, an EP, or an
+/// album (a compilation and the rest count as one; the services file them
+/// differently).
+fn kind(t: ReleaseType) -> u8 {
     match t {
         ReleaseType::Single => 0,
         ReleaseType::Ep => 1,
@@ -92,15 +92,14 @@ fn size(t: ReleaseType) -> u8 {
     }
 }
 
-/// Whether a release of kind `have` and year `year` stands for `a` of the
-/// same title: it is as large, and their years are within one; a year
-/// missing on either side, only when they are of one kind.
+/// Whether a release of kind `have` and year `year` is `a` of the same
+/// title: of one kind, and their years within one (a year missing on
+/// either side does not part them).
 fn stands_for(have: ReleaseType, year: Option<i32>, a: &StreamAlbum) -> bool {
-    let (mine, theirs) = (size(have), size(a.release_type));
-    mine >= theirs
+    kind(have) == kind(a.release_type)
         && match (year, a.year) {
             (Some(x), Some(y)) => (x - y).abs() <= 1,
-            _ => mine == theirs,
+            _ => true,
         }
 }
 
@@ -115,13 +114,9 @@ pub(crate) fn missing<'a>(
     ours: &[Have],
     linked: impl Fn(&RemoteId) -> bool,
 ) -> Vec<&'a StreamAlbum> {
-    // The larger first: an album hides the single of its title whichever
-    // a service lists first (stable: each kind keeps the services' order).
-    let mut larger_first: Vec<&StreamAlbum> = albums.iter().collect();
-    larger_first.sort_by_key(|a| std::cmp::Reverse(size(a.release_type)));
     let mut seen: Vec<Have> = Vec::new();
     let mut out = Vec::new();
-    for a in larger_first {
+    for a in albums {
         let key = album_key(&a.title);
         let same = |(k, y, t): &Have| *k == key && stands_for(*t, *y, a);
         if linked(&a.id) || ours.iter().any(same) || seen.iter().any(same) {
@@ -365,22 +360,23 @@ mod tests {
 
     /// The library has the single «Рисунки» that came out before the album
     /// «Рисунки»: the album is still missing from the page, and the single
-    /// of a service is the library's.
+    /// of a service is the library's. A single, an EP and an album of one
+    /// title are three releases.
     #[test]
     fn a_single_in_the_library_does_not_hide_the_album_of_its_title() {
-        let albums = vec![album("Рисунки", 2023, ReleaseType::Single, 1), album("Рисунки", 2023, ReleaseType::Album, 2)];
+        let albums = vec![
+            album("Рисунки", 2023, ReleaseType::Single, 1),
+            album("Рисунки", 2023, ReleaseType::Album, 2),
+            album("Рисунки", 2023, ReleaseType::Ep, 3),
+        ];
         let single = vec![(album_key("Рисунки"), Some(2023), ReleaseType::Single)];
-        assert_eq!(ids(missing(&albums, &single, |_| false)), vec![2]);
-        // The album in the library stands for both.
+        assert_eq!(ids(missing(&albums, &single, |_| false)), vec![2, 3]);
         let whole = vec![(album_key("Рисунки"), Some(2023), ReleaseType::Album)];
-        assert!(missing(&albums, &whole, |_| false).is_empty());
-        // A service's single listed before its album: the album stays.
-        assert_eq!(ids(missing(&albums, &[], |_| false)), vec![2]);
-        // An EP in the library hides a single, not the album.
-        let ep = vec![(album_key("Рисунки"), Some(2023), ReleaseType::Ep)];
-        assert_eq!(ids(missing(&albums, &ep, |_| false)), vec![2]);
-        let singles = vec![album("Рисунки", 2023, ReleaseType::Single, 1)];
-        assert!(missing(&singles, &ep, |_| false).is_empty());
+        assert_eq!(ids(missing(&albums, &whole, |_| false)), vec![1, 3]);
+        assert_eq!(ids(missing(&albums, &[], |_| false)), vec![2, 1, 3]);
+        // The same single on another service is one.
+        let twice = vec![album("Рисунки", 2023, ReleaseType::Single, 1), album("рисунки", 2023, ReleaseType::Single, 4)];
+        assert_eq!(ids(missing(&twice, &[], |_| false)), vec![1]);
     }
 
     /// A year missing makes two releases of one title the same only when
