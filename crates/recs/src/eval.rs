@@ -1973,7 +1973,7 @@ mod tests {
             radio.attune(Session::default(), Some(model.weights));
             // One at a time until the first block is picked whole.
             let mut block: Vec<Item> = Vec::new();
-            while radio.wave_bandit().is_none_or(|b| b.block_left() > 0) && block.len() < 12 {
+            while (block.is_empty() || radio.wave_bandit().is_some_and(|b| b.block_left() > 0)) && block.len() < 12 {
                 let Some(pk) = radio.extend_wave(&ctx, &[], 1, seed).pop() else { break };
                 block.push(pk.item);
             }
@@ -2012,6 +2012,63 @@ mod tests {
             assert!(!queue.is_empty(), "seed {seed}");
             for item in &queue {
                 assert_ne!(scene(&radio, item), Some(a), "seed {seed}: a third skip leaves");
+            }
+        }
+        assert!(checked > 0, "a wave of two clusters or more was met");
+    }
+
+    /// A fresh wave of «Знакомое» with its first block picked whole, one at
+    /// a time, and the next block drawn of another cluster, its first song
+    /// queued ahead: the wave, the block, its cluster, the song ahead.
+    fn wave_at_a_boundary(ctx: &WaveContext<'_>, model: &UserModel, seed: u64) -> Option<(RadioState, Vec<Item>, crate::open_world::Scene, Item)> {
+        let mut radio = RadioState::new(RadioSeed::Wave(crate::wave::WaveSeed::plain(crate::wave::NOVELTY_FAMILIAR)));
+        radio.attune(Session::default(), Some(model.weights));
+        let mut block: Vec<Item> = Vec::new();
+        while (block.is_empty() || radio.wave_bandit().is_some_and(|b| b.block_left() > 0)) && block.len() < 12 {
+            let Some(pk) = radio.extend_wave(ctx, &[], 1, seed).pop() else { break };
+            block.push(pk.item);
+        }
+        let a = radio.wave_bandit().filter(|b| b.arms.len() >= 2 && block.len() >= 3).and_then(|b| b.scene_of(&block[0]))?;
+        if !radio.other_vibe(block.last()) {
+            return None;
+        }
+        let ahead = radio.extend_wave(ctx, &[], 1, seed).pop()?.item;
+        Some((radio, block, a, ahead))
+    }
+
+    /// «Не сейчас» of a worn song in a settled vibe at its block's end, the
+    /// next block of another cluster queued ahead: the song ahead gives way
+    /// and the next to play is of the vibe still, after a skip before it
+    /// too, the queue replaced as the runtime does; nothing counts.
+    #[test]
+    fn a_worn_song_keeps_the_next_song_past_a_block_boundary() {
+        use crate::radio::Outcome;
+        let d = synthetic::user(synthetic::Kind::Omnivore, 6);
+        let p = d.parts();
+        let last = p.input.events.iter().map(|e| e.ts).max().unwrap();
+        let model = p.model_at(last + 1);
+        let suits = p.suits();
+        let background = |i: usize| suits.get(i).copied().unwrap_or(false);
+        let ok = |_: usize| true;
+        let none = |_: &StreamTrack| Vec::new();
+        let ctx = WaveContext { model: &model, ok: &ok, genre: None, background: &background, artist_tracks: &none, index: None, learned: None };
+        let scene = |radio: &RadioState, i: &Item| radio.wave_bandit().and_then(|b| b.scene_of(i));
+        let mut checked = 0;
+        for seed in 0..16u64 {
+            for skip_first in [false, true] {
+                let Some((mut radio, block, a, ahead)) = wave_at_a_boundary(&ctx, &model, seed) else { continue };
+                assert_ne!(scene(&radio, &ahead), Some(a), "seed {seed}: queued ahead of another cluster");
+                radio.judged(block[0].clone(), Outcome::Complete, Verdict::Approved);
+                if skip_first {
+                    radio.judged(block[block.len() - 2].clone(), Outcome::skip(8_000), Verdict::Rejected);
+                }
+                let arms = radio.wave_bandit().map(|b| b.arms.clone());
+                radio.judged(block[block.len() - 1].clone(), Outcome::skip(4_000), Verdict::NotNow);
+                assert_eq!(radio.wave_bandit().map(|b| b.arms.clone()), arms, "seed {seed}: nothing counted");
+                let mut queue = vec![ahead];
+                requeue(&mut radio, &ctx, &[], &mut queue, 3, seed);
+                assert_eq!(queue.first().and_then(|i| scene(&radio, i)), Some(a), "seed {seed}, a skip first {skip_first}: the next is of the vibe still");
+                checked += 1;
             }
         }
         assert!(checked > 0, "a wave of two clusters or more was met");
