@@ -63,6 +63,11 @@ pub(crate) type Key = (Kind, RemoteId);
 /// Pages kept at most.
 const PAGES_MAX: usize = 400;
 
+/// The album `id` is being fetched (`inflight`: the fetches running).
+fn album_fetching<W>(inflight: &HashMap<Key, W>, id: &RemoteId) -> bool {
+    inflight.contains_key(&(Kind::Album, id.clone()))
+}
+
 pub(crate) fn key_of(page: &v::StreamPage) -> Key {
     let kind = match page {
         v::StreamPage::Album(_) => Kind::Album,
@@ -260,9 +265,13 @@ impl Worker {
     /// cache and the UI keep of it and of its cover goes, its page is
     /// fetched again (now, when it is open), and so is the discography of
     /// the open artist that shows it (the artist too, in every service).
-    /// It says at once that it looks; the new cover showing is its answer.
+    /// It says at once that it looks, unless the album is being fetched
+    /// already (a press before, the fetch it starts only joins that one);
+    /// the new cover showing is its answer.
     pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
-        self.toast(crate::cover_refresh::LOOKING, None);
+        if !album_fetching(&self.streaming.pages.inflight, &id) {
+            self.toast(crate::cover_refresh::LOOKING, None);
+        }
         let mut covers: Vec<String> = self.streaming.pages.album(&id).and_then(|a| a.cover_url.clone()).into_iter().collect();
         self.streaming.pages.stale_album(&id);
         if let Some(svc) = self.service(id.service) {
@@ -877,5 +886,23 @@ impl Worker {
         // A liked track is a library hit now: the sections merge again.
         self.streaming.search.forget_links();
         self.rebuild_sections();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refresh_says_it_looks_only_when_its_album_is_not_being_fetched() {
+        let album = RemoteId::new(Service::Deezer, "1");
+        let mut inflight: HashMap<Key, ()> = HashMap::new();
+        assert!(!album_fetching(&inflight, &album));
+        // Another album, or this one as a playlist: not this fetch.
+        inflight.insert((Kind::Album, RemoteId::new(Service::Deezer, "2")), ());
+        inflight.insert((Kind::Playlist, album.clone()), ());
+        assert!(!album_fetching(&inflight, &album));
+        inflight.insert((Kind::Album, album.clone()), ());
+        assert!(album_fetching(&inflight, &album));
     }
 }
