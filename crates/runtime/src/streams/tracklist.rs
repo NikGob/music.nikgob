@@ -29,9 +29,9 @@
 //! * The albums the background pass asks are looked for off the player's
 //!   loop (every library album is read for it), at most once per
 //!   [`RESCAN`]; the loop only takes the next one of them.
-//! * Once per library (`tracklist_retry.v1`): the misses kept before the
-//!   matching above are forgotten, so those albums are asked again (one
-//!   per [`EVERY`]) instead of a week later.
+//! * Once per library (`tracklist_misses_asked.v1`): the misses kept
+//!   before the matching above are forgotten, so those albums are asked
+//!   again (one per [`EVERY`]) instead of a week later.
 //! * Once per library (`wished_album_places_fixed.v1`, see
 //!   [`nikgob_library::Library::place_album_tracks`]): a «Хочу скачать»
 //!   album whose files came from several sources and brought their own
@@ -66,8 +66,6 @@ const RESCAN: Duration = Duration::from_secs(10 * 60);
 /// Albums of that list taken in one step of the pass, at most (each a few
 /// reads; one that asks a service ends the step).
 const STEP_TAKES: usize = 8;
-/// Library cache key: the misses of the older album matching were forgotten.
-const MISSES_RETRIED: &str = "tracklist_retry.v1";
 
 pub(crate) enum TracklistMsg {
     /// The album of a library album in a service (or none).
@@ -147,20 +145,34 @@ impl Wanted {
     fn by(&self, name: &str) -> bool {
         same_artist(name, &self.artist) || self.names.iter().any(|n| same_artist(name, n))
     }
+
+    /// An album of the service's `artists` is by the album's artist. One
+    /// of several artists is not enough when the service credits someone
+    /// else too: «juliet» of JVKE alone is the album of «JVKE, Bryant
+    /// Barnes, & Emilio Piano», one of JVKE and another artist is not.
+    fn album_by(&self, artists: &[nikgob_core::streaming::ArtistRef]) -> bool {
+        if self.names.is_empty() {
+            artists.iter().any(|x| self.by(&x.name))
+        } else {
+            !artists.is_empty() && artists.iter().all(|x| self.by(&x.name))
+        }
+    }
 }
 
-/// The names of a credit's artists, also of one name that lists several
-/// («リコ、レグ、ナナチ»; «& Emilio Piano» of a credit split at its commas
-/// is «Emilio Piano»); none for a credit of one artist.
+/// The names of a credit's artists, as the credit has them apart («&
+/// Emilio Piano» of a credit split at its commas is «Emilio Piano»); none
+/// for a credit of one artist. A name of one artist is never cut up
+/// («AC/DC» is not «AC»).
 fn credit_names(credit: &nikgob_core::model::ArtistCredit) -> Vec<String> {
-    let names: Vec<String> = credit
+    if credit.0.len() < 2 {
+        return Vec::new();
+    }
+    credit
         .0
         .iter()
-        .flat_map(|p| p.name.split([',', '、', '&', ';', '/']))
-        .map(|n| n.trim().to_owned())
+        .map(|p| p.name.trim_start_matches(|c: char| c == '&' || c == ',' || c.is_whitespace()).trim().to_owned())
         .filter(|n| !n.is_empty())
-        .collect();
-    if names.len() < 2 { Vec::new() } else { names }
+        .collect()
 }
 
 /// ISRCs of an album looked up in a service, at most.
@@ -175,7 +187,7 @@ async fn find(svc: Arc<dyn StreamService>, linked: Option<String>, w: &Wanted) -
     let by: Vec<_> = hits
         .into_iter()
         .take(CANDIDATES)
-        .filter(|a| a.artists.iter().any(|x| w.by(&x.name)))
+        .filter(|a| w.album_by(&a.artists))
         .collect();
     // The same title first; an edition with more words only without one.
     let mut hit = by.iter().find(|a| same_album(&a.title, &w.title)).map(|a| a.id.id.clone());
@@ -491,18 +503,12 @@ impl Worker {
     /// matching learnt other scripts, ISRCs and several artists are
     /// forgotten, so those albums are asked again now (see the module docs).
     pub(crate) fn retry_tracklist_misses_once(&mut self) {
-        if self.lib.cache_get(MISSES_RETRIED).ok().flatten().is_some() {
-            return;
+        // One transaction with its own mark (see the library's repair).
+        match self.lib.ask_missed_tracklists_again() {
+            Ok(Some(n)) if n > 0 => log::info!("tracklist: {n} albums not found before are asked again"),
+            Ok(_) => {}
+            Err(e) => log::warn!("forgetting the tracklist misses: {e}"),
         }
-        match self.lib.cache_forget("tracklist.", "miss") {
-            Ok(0) => {}
-            Ok(n) => log::info!("tracklist: {n} albums not found before are asked again"),
-            Err(e) => {
-                log::warn!("forgetting the tracklist misses: {e}");
-                return;
-            }
-        }
-        let _ = self.lib.cache_put(MISSES_RETRIED, nikgob_library::now_ms(), "");
     }
 }
 
@@ -721,13 +727,29 @@ mod tests {
         let w = Wanted { artist: credit.display(), names: credit_names(&credit), ..Wanted::default() };
         assert!(w.by("JVKE") && w.by("Emilio Piano") && w.by("Bryant Barnes"));
         assert!(!w.by("Someone Else"));
-        let listed = ArtistCredit::single("リコ(CV:富田美憂)、レグ(CV:伊瀬茉莉也)", None);
-        assert_eq!(credit_names(&listed).len(), 2);
+        // A service album of one of them with someone else is another one.
+        let refs = |names: &[&str]| names.iter().map(|n| nikgob_core::streaming::ArtistRef::new(None, *n)).collect::<Vec<_>>();
+        assert!(w.album_by(&refs(&["JVKE"])));
+        assert!(w.album_by(&refs(&["JVKE", "Bryant Barnes", "Emilio Piano"])));
+        assert!(!w.album_by(&refs(&["JVKE", "Someone Else"])));
+        assert!(!w.album_by(&refs(&["Someone Else"])));
+        assert!(!w.album_by(&[]));
+        // One artist whose name has a separator: never one of its halves.
+        for name in ["AC/DC", "Simon & Garfunkel", "Earth, Wind & Fire"] {
+            let one = ArtistCredit::single(name, None);
+            assert!(credit_names(&one).is_empty(), "{name}");
+            let w = Wanted { artist: one.display(), names: credit_names(&one), ..Wanted::default() };
+            assert!(w.by(name), "{name}");
+            for half in ["AC", "DC", "Simon", "Garfunkel", "Earth", "Fire"] {
+                assert!(!w.by(half), "{name}: {half}");
+            }
+        }
         let one = ArtistCredit::single("FUNKY MONKEY BΛBY'S", None);
         assert!(credit_names(&one).is_empty());
         let w = Wanted { artist: one.display(), names: credit_names(&one), ..Wanted::default() };
         assert!(w.by("Funky Monkey Bλby's"));
         assert!(!w.by("Funky Monkey"));
+        assert!(w.album_by(&refs(&["Funky Monkey Bλby's", "Someone Else"])), "one artist's album: as before");
     }
 
     #[test]

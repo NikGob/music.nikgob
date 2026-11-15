@@ -477,15 +477,29 @@ fn other_source_of_any(conn: &Connection, track: &str, locator: &str) -> Result<
 }
 
 /// The release `id` is nobody's: streams a radio, a mix or a search
-/// brought, none of them kept (no file, none in the library), the album
-/// not saved, wished or set up by the user.
+/// brought that the user never touched. None of its tracks (deleted ones
+/// too) has a file, is in the library, was ever played, liked, disliked,
+/// put in a playlist, wished, given a speed or lyrics settings of the
+/// user's, or chosen on the album; the album was never liked, wished, set
+/// up or had a song deleted from it.
 fn nobodys_release(conn: &Connection, id: &str) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM track WHERE release_id = ?1 AND deleted_at IS NULL
-                              AND (has_local = 1 OR in_library = 1))
-            AND NOT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'release' AND target_id = ?1 AND deleted = 0)
-            AND NOT EXISTS(SELECT 1 FROM wishlist WHERE release_id = ?1)
-            AND NOT EXISTS(SELECT 1 FROM release_selection WHERE release_id = ?1 AND deleted = 0)",
+        "WITH t(id) AS (SELECT id FROM track WHERE release_id = ?1)
+         SELECT NOT EXISTS(SELECT 1 FROM track WHERE release_id = ?1 AND (has_local = 1 OR in_library = 1))
+            AND NOT EXISTS(SELECT 1 FROM event WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'track' AND target_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM remote_like WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM rec_feedback WHERE target_kind = 'track' AND target_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM playlist_entry WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM wishlist WHERE track_id IN t OR release_id = ?1)
+            AND NOT EXISTS(SELECT 1 FROM track_fx WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM track_put WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM lyrics_pick WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM lyrics_show WHERE track_id IN t)
+            AND NOT EXISTS(SELECT 1 FROM release_track_selection WHERE track_id IN t OR release_id = ?1)
+            AND NOT EXISTS(SELECT 1 FROM likes WHERE target_kind = 'release' AND target_id = ?1)
+            AND NOT EXISTS(SELECT 1 FROM release_selection WHERE release_id = ?1)
+            AND NOT EXISTS(SELECT 1 FROM unwanted WHERE release_id = ?1)",
         [id],
         |r| r.get(0),
     )?)

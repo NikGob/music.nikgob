@@ -41,6 +41,8 @@ pub(crate) const PLACES_KEY: &str = "edition_places_fixed.v1";
 pub(crate) const EDITIONS_KEY: &str = "album_editions_folded.v1";
 pub(crate) const TRACKLISTS_KEY: &str = "tracklists_reidentified.v1";
 pub(crate) const YEARS_KEY: &str = "album_years_asked.v1";
+/// Meta key of [`Library::ask_missed_tracklists_again`].
+pub(crate) const MISSES_KEY: &str = "tracklist_misses_asked.v1";
 
 /// MusicBrainz id of «Various Artists».
 pub(crate) const VARIOUS_ARTISTS_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
@@ -438,6 +440,28 @@ impl Library {
             )?;
             meta_set(tx, YEARS_KEY, &now_ms().to_string())?;
             Ok(n)
+        })
+    }
+
+    /// Once (`tracklist_misses_asked.v1`): the tracklist misses kept
+    /// before the album matching learnt other scripts, ISRCs and several
+    /// artists go, so the background pass asks those albums again. The
+    /// marks and the mark of this repair change in one transaction: a crash
+    /// or a failed write leaves both as they were, and it never runs twice.
+    /// Returns how many went (`None`: done before).
+    pub fn ask_missed_tracklists_again(&self) -> Result<Option<usize>> {
+        self.write(|tx| {
+            if meta_get(tx, MISSES_KEY)?.is_some() {
+                return Ok(None);
+            }
+            let n = tx.execute(
+                "DELETE FROM meta
+                  WHERE substr(key, 1, length('cache.tracklist.')) = 'cache.tracklist.'
+                    AND substr(value, instr(value, '|') + 1) = 'miss'",
+                [],
+            )?;
+            meta_set(tx, MISSES_KEY, &now_ms().to_string())?;
+            Ok(Some(n))
         })
     }
 

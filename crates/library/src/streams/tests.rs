@@ -1947,11 +1947,17 @@ fn found_tracklists_of_albums_without_a_year_are_asked_again_once() {
 
 /// «夏子» as the library had it: the file of its first song (the album
 /// counts three), and a release «Natsuko» a radio made of the same album's
-/// «SMILE» under YouTube Music's id. The album found under that id takes
-/// the radio's release over: «SMILE» moves to «夏子», «Natsuko» goes. A
-/// release the user kept something of is never taken.
-#[test]
-fn an_album_found_under_the_id_of_a_radios_release_takes_it_over() {
+/// «SMILE» under YouTube Music's id.
+struct RadioRelease {
+    lib: Library,
+    release: ReleaseId,
+    file: TrackId,
+    smile: TrackId,
+    radios: ReleaseId,
+    album: nikgob_core::streaming::StreamAlbum,
+}
+
+fn radio_release() -> RadioRelease {
     let lib = lib();
     let file = file_track(&lib, "夏子", &["FUNKY MONKEY BΛBY'S"], "夏子", 212_800);
     let release = lib.get_track(file).unwrap().unwrap().release_id.unwrap();
@@ -1986,12 +1992,14 @@ fn an_album_found_under_the_id_of_a_radios_release_takes_it_over() {
         total_tracks: Some(3),
         tracks: tracks.to_vec(),
     };
-    // Someone's song on it: left alone, as before.
-    lib.like(smile).unwrap();
-    assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0);
-    assert!(lib.get_release(radios).unwrap().is_some());
-    lib.unlike(smile).unwrap();
-    // Nobody's: taken over.
+    RadioRelease { lib, release, file, smile, radios, album }
+}
+
+/// The album found under the radio release's id takes it over: «SMILE»
+/// moves to «夏子», «Natsuko» goes.
+#[test]
+fn an_album_found_under_the_id_of_a_radios_release_takes_it_over() {
+    let RadioRelease { lib, release, file, smile, radios, album } = radio_release();
     assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 2, "«SMILE» and the instrumental");
     let rows = lib.tracks_of_release_all(release).unwrap();
     assert_eq!(rows.iter().map(|r| (r.track_no, r.has_local)).collect::<Vec<_>>(), [(1, true), (2, false), (3, false)]);
@@ -2002,4 +2010,64 @@ fn an_album_found_under_the_id_of_a_radios_release_takes_it_over() {
     assert_eq!(lib.release_listing(release).unwrap().unwrap().holes(), 0, "no «Трек 2», «Трек 3»");
     assert_eq!(lib.track_in_library(smile).unwrap(), Some(false), "still nobody's song");
     assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0, "nothing twice");
+}
+
+/// A release the user left any trace on is never taken: a play, a like
+/// (even one taken back), a playlist, a speed of its own, a wish.
+#[test]
+fn a_radios_release_the_user_touched_is_never_taken() {
+    let traces: [(&str, fn(&Library, TrackId, ReleaseId)); 6] = [
+        ("a play", |lib: &Library, t: TrackId, _: ReleaseId| {
+            let e = nikgob_core::model::Event::new(t, nikgob_core::model::EventType::Start, crate::now_ms(), lib.device_id());
+            lib.record_event_raw(&e).unwrap();
+        }),
+        ("a like taken back", |lib: &Library, t: TrackId, _: ReleaseId| {
+            lib.like(t).unwrap();
+            lib.unlike(t).unwrap();
+        }),
+        ("a playlist, deleted since", |lib: &Library, t: TrackId, _: ReleaseId| {
+            let p = lib.create_playlist("Mine").unwrap();
+            lib.playlist_add(p.id, t).unwrap();
+            lib.delete_playlist(p.id).unwrap();
+        }),
+        ("a speed", |lib: &Library, t: TrackId, _: ReleaseId| lib.set_track_fx(t, Some("slowed")).unwrap()),
+        ("a dislike", |lib: &Library, t: TrackId, _: ReleaseId| {
+            lib.set_rec_feedback("track", &t.to_string(), true).unwrap();
+        }),
+        ("the album liked once", |lib: &Library, _: TrackId, r: ReleaseId| {
+            lib.like(r).unwrap();
+            lib.unlike(r).unwrap();
+        }),
+    ];
+    for (what, leave) in traces {
+        let RadioRelease { lib, release, smile, radios, album, .. } = radio_release();
+        leave(&lib, smile, radios);
+        assert_eq!(lib.adopt_stream_album(release, &album).unwrap(), 0, "{what}");
+        assert!(lib.get_release(radios).unwrap().is_some(), "{what}: the radio's release stays");
+        assert_eq!(lib.get_track(smile).unwrap().unwrap().release_id, Some(radios), "{what}");
+        assert_eq!(lib.release_by_remote(&album.id).unwrap(), Some(radios), "{what}: its id stays");
+    }
+}
+
+/// The tracklist misses of the older matching go once: found marks and
+/// other answers stay, and a miss kept after the repair is never touched
+/// by it again.
+#[test]
+fn old_tracklist_misses_go_once() {
+    let lib = lib();
+    let now = crate::now_ms();
+    lib.cache_put("tracklist.a", now, "miss").unwrap();
+    lib.cache_put("tracklist.b", now, "miss").unwrap();
+    lib.cache_put("tracklist.c", now, "found").unwrap();
+    lib.cache_put("tracklist.d", now, "error").unwrap();
+    lib.cache_put("sp_miss.x", now, "miss").unwrap();
+    assert_eq!(lib.ask_missed_tracklists_again().unwrap(), Some(2));
+    assert!(lib.cache_get("tracklist.a").unwrap().is_none());
+    assert!(lib.cache_get("tracklist.b").unwrap().is_none());
+    assert!(lib.cache_get("tracklist.c").unwrap().is_some());
+    assert!(lib.cache_get("tracklist.d").unwrap().is_some());
+    assert!(lib.cache_get("sp_miss.x").unwrap().is_some(), "only tracklists");
+    lib.cache_put("tracklist.e", now, "miss").unwrap();
+    assert_eq!(lib.ask_missed_tracklists_again().unwrap(), None);
+    assert!(lib.cache_get("tracklist.e").unwrap().is_some(), "a new miss stays");
 }
