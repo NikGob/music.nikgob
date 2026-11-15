@@ -299,11 +299,12 @@ fn the_discography_comes_from_deezer_when_spotify_is_not_connected() {
     assert_eq!(spotify.calls("artist") + spotify.calls("search_kind"), 0, "{:?}", spotify.all_calls());
 }
 
-/// The only Deezer artist of the name is linked to a library artist none
-/// of whose releases it has: neither that lookup nor a later one through
-/// the stored link takes its picture.
+/// The only Deezer artist of the name, none of whose albums the library
+/// has: its discography is shown, but it is not linked to the library
+/// artist (so no photo source or artist page takes it for that artist) and
+/// its picture is not kept, now or on a later lookup.
 #[test]
-fn a_link_made_on_the_name_alone_brings_no_artist_image() {
+fn an_artist_of_the_same_name_alone_is_not_linked() {
     let lib = Library::open_in_memory().unwrap();
     let a = lib.upsert_artist(&Artist::new("Кино")).unwrap();
     let t = lib.upsert_track(&Track::new("Совсем другая песня", ArtistCredit::single("Кино", Some(a.id)))).unwrap();
@@ -314,17 +315,21 @@ fn a_link_made_on_the_name_alone_brings_no_artist_image() {
     let key = format!("discography.{}", a.id);
     r.rt.send(Command::LoadDiscography(a.id));
     wait_until("the discography", || lib.cache_get(&key).unwrap().is_some());
-    let links = lib.external_ids(EntityKind::Artist, *a.id.as_uuid()).unwrap();
-    assert!(links.iter().any(|l| l.service == Service::Deezer), "linked on the name: {links:?}");
-    assert!(lib.get_artist(a.id).unwrap().unwrap().images.is_empty());
-    // A day later the stored link is used.
+    let unlinked = |lib: &Library| {
+        let links = lib.external_ids(EntityKind::Artist, *a.id.as_uuid()).unwrap();
+        assert!(links.is_empty(), "linked on the name alone: {links:?}");
+        assert!(lib.get_artist(a.id).unwrap().unwrap().images.is_empty());
+    };
+    unlinked(&lib);
     let (_, json) = lib.cache_get(&key).unwrap().unwrap();
+    assert!(json.contains("Группа крови"), "its albums are shown: {json}");
+    // A day later: searched again, still not linked.
     lib.cache_put(&key, 0, &json).unwrap();
-    let before = deezer.calls("artist");
+    let before = deezer.calls("search_kind");
     r.rt.send(Command::LoadDiscography(a.id));
     wait_until("the discography again", || lib.cache_get(&key).unwrap().is_some_and(|(at, _)| at > 0));
-    assert!(deezer.calls("artist") > before, "asked by the stored id");
-    assert!(lib.get_artist(a.id).unwrap().unwrap().images.is_empty());
+    assert!(deezer.calls("search_kind") > before);
+    unlinked(&lib);
 }
 
 #[test]

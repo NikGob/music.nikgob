@@ -4,11 +4,11 @@
 //! * The artist is found in each enabled service by the id the library
 //!   knows (`external_id`), else by a search for the name: a hit whose name
 //!   matches (folded like the importer folds names) is taken when one of
-//!   our release titles is among its albums, or when it is the only hit of
-//!   that name. The match is remembered as the artist's id in the service.
-//!   Its image is kept only when one of our release titles is among its
-//!   albums, also for an artist linked before (a link made on the name
-//!   alone looks the same): a name does not make the picture the artist's.
+//!   our release titles is among its albums: then it is remembered as the
+//!   artist's id in the service and its image is kept. The only hit of
+//!   that name without a shared album is shown for this visit, never
+//!   linked and its image not kept: a name does not make it the artist.
+//!   An id known before gives its image only with a shared album too.
 //! * Albums the page has (a release of the artist with the same folded title
 //!   and a year within ±1, or linked to it) are left out, and so are the
 //!   same albums of a later service (Spotify first).
@@ -154,15 +154,17 @@ async fn lookup(
     let only = exact.len() == 1;
     for c in exact {
         let Ok(full) = svc.artist(&c.id.id).await else { continue };
-        let overlaps = shared(full.albums.as_slice());
-        if overlaps || only {
+        if shared(full.albums.as_slice()) {
             return Found {
                 service,
                 artist: Some(full.id.clone()),
                 matched_now: true,
-                image: full.image_url.clone().filter(|_| overlaps),
+                image: full.image_url.clone(),
                 albums: Ok(full.albums),
             };
+        }
+        if only {
+            return none(Ok(full.albums));
         }
     }
     none(Ok(Vec::new()))
@@ -339,8 +341,9 @@ mod tests {
         assert_eq!(got, vec![3, 5, 2, 1, 6]);
     }
 
-    /// The only artist of the name is linked, but its image is kept only
-    /// when one of our releases is among its albums, by search or by id.
+    /// An artist of the name with one of our releases among its albums is
+    /// linked with its image; the only one of the name without one is shown,
+    /// not linked, no image. A known id gives no image without one either.
     #[tokio::test]
     async fn an_artist_image_needs_a_shared_album() {
         let svc: Arc<dyn StreamService> = Arc::new(nikgob_core::streaming::FakeService::spotify());
@@ -353,8 +356,9 @@ mod tests {
 
         let none = vec![album_key("Совсем другой альбом")];
         let f = lookup(svc.clone(), "Кино".into(), none.clone(), None).await;
-        assert!(f.matched_now && f.artist.is_some(), "still the only one of the name");
+        assert!(!f.matched_now && f.artist.is_none(), "not linked on the name alone");
         assert_eq!(f.image, None);
+        assert!(f.albums.as_ref().is_ok_and(|a| !a.is_empty()), "its albums are shown");
         let f = lookup(svc, "Кино".into(), none, Some(id)).await;
         assert_eq!(f.image, None, "a link proves nothing by itself");
         assert!(f.albums.is_ok_and(|a| !a.is_empty()));
