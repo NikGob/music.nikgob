@@ -44,11 +44,14 @@
 //! and [`refresh`] (after a library change, when the window comes back)
 //! forgets every loaded size whose file changed. Both take effect at the end
 //! of a pass, and a forgotten size that is still drawn is read again.
+//! A file that could not be read (not there yet, or broken) is read again
+//! after [`FAILED_RETRY`] while it stays drawn, not at every pass.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use egui::load::{
     BytesPoll, ImageLoadResult, ImageLoader, ImagePoll, LoadError, SizeHint, SizedTexture, TexturePoll,
@@ -79,6 +82,10 @@ const MAX_SEEDS: usize = 512;
 /// Bytes of pixels the decoding threads may hold at once (see
 /// [`decode_cost`]); one decode runs whatever it costs.
 pub const DECODE_BUDGET: usize = 64 << 20;
+
+/// A cover file that failed to load is read again after this long while
+/// it is drawn (an artist's photo downloaded again to the same path).
+const FAILED_RETRY: Duration = Duration::from_secs(5);
 
 /// What decoding a size at `tier` may hold at its peak: the decoded
 /// picture, its RGBA copy and the image handed to egui.
@@ -120,7 +127,8 @@ pub fn memory() -> Memory {
 enum Slot {
     Pending,
     Ready(Arc<ColorImage>),
-    Failed(String),
+    /// The error, and when it was met.
+    Failed(String, Instant),
 }
 
 /// Where a cover's bytes come from.
@@ -873,7 +881,7 @@ impl Shared {
             }
             let slot = match checked.and_then(|()| decode(&job.source, job.tier)) {
                 Ok(img) => Slot::Ready(Arc::new(img)),
-                Err(e) => Slot::Failed(e),
+                Err(e) => Slot::Failed(e, Instant::now()),
             };
             release();
             if let (Source::Web(..), Slot::Ready(img)) = (&job.source, &slot) {
@@ -1078,13 +1086,26 @@ impl ImageLoader for CoverLoader {
         let Some((parsed, tier)) = parse(uri) else {
             return Err(LoadError::NotSupported);
         };
+        let file = matches!(parsed, Parsed::File(_));
         let mut slots = lock(&self.0.slots);
+        // A file that failed a while ago is read again (a web cover's
+        // bytes stay what they were: its failure stands).
+        if file && matches!(slots.get(uri), Some(Slot::Failed(_, at)) if at.elapsed() >= FAILED_RETRY) {
+            slots.remove(uri);
+        }
         match slots.remove(uri) {
             // The texture loader keeps the texture; no copy stays here.
             Some(Slot::Ready(image)) => Ok(ImagePoll::Ready { image }),
             Some(slot) => {
                 let r = match &slot {
-                    Slot::Failed(e) => Err(LoadError::Loading(e.clone())),
+                    Slot::Failed(e, at) => {
+                        // Drawn now: a frame when it may be read again,
+                        // so an idle window does not keep it missing.
+                        if file {
+                            ctx.request_repaint_after(FAILED_RETRY.saturating_sub(at.elapsed()));
+                        }
+                        Err(LoadError::Loading(e.clone()))
+                    }
                     _ => Ok(ImagePoll::Pending { size: None }),
                 };
                 slots.insert(uri.to_owned(), slot);
@@ -1138,7 +1159,7 @@ impl ImageLoader for CoverLoader {
             .values()
             .map(|s| match s {
                 Slot::Ready(img) => img.pixels.len() * 4,
-                Slot::Failed(e) => e.len(),
+                Slot::Failed(e, _) => e.len(),
                 Slot::Pending => 0,
             })
             .sum()
@@ -1582,6 +1603,38 @@ mod tests {
         assert!(settles_at(&ctx, uri, 400.0, vec2(512.0, 256.0)));
         // ...and the small one, pinned and loaded before, follows it.
         assert!(settles_at(&ctx, uri, 48.0, vec2(128.0, 64.0)), "the small size kept the old picture");
+    }
+
+    /// A cover file that was not there when it was first drawn (a photo
+    /// downloaded again to its old path) is read again a while later while
+    /// it stays on screen; before that its failure stands.
+    #[test]
+    fn a_cover_file_that_failed_is_read_again_after_a_while() {
+        let ctx = ctx();
+        let uris = covers("failed", 1, 300);
+        let path = path_of(&uris[0]);
+        std::fs::remove_file(&path).unwrap();
+        let s = shared(&ctx).unwrap();
+        let failed = || lock(&s.slots).values().any(|slot| matches!(slot, Slot::Failed(..)));
+        for _ in 0..5000 {
+            pass(&ctx, &uris, 72.0);
+            if failed() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(failed(), "the missing file did not fail");
+        image::RgbImage::from_pixel(300, 300, image::Rgb([0, 200, 0])).save(&path).unwrap();
+        for _ in 0..20 {
+            assert!(pass(&ctx, &uris, 72.0)[0].is_none(), "read again at once");
+        }
+        assert!(failed());
+        for slot in lock(&s.slots).values_mut() {
+            if let Slot::Failed(_, at) = slot {
+                *at = Instant::now().checked_sub(FAILED_RETRY).unwrap_or(*at);
+            }
+        }
+        assert!(settles_at(&ctx, &uris[0], 72.0, vec2(128.0, 128.0)), "the file was not read again");
     }
 
     #[test]

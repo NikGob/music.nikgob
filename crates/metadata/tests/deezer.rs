@@ -265,6 +265,24 @@ async fn verified_picture_is_none_when_no_candidate_overlaps() {
     );
 }
 
+/// A candidate whose albums answer 404 and nothing proved: not
+/// «unverified» but no answer.
+#[tokio::test]
+async fn a_404_while_verifying_is_no_answer() {
+    let server = MockServer::start().await;
+    mount_artist_search(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/artist/1001/top"))
+        .respond_with(json_body(r#"{"data": [{"id": 2, "title": "Other Song"}]}"#))
+        .mount(&server)
+        .await;
+    let err = client(&server).verified_artist_lookup("Кино", &["Группа крови".to_owned()]).await.unwrap_err();
+    assert!(matches!(err, MetadataError::NotFound), "{err:?}");
+    // Proved by its top tracks despite the 404: found.
+    let found = client(&server).verified_artist_lookup("Кино", &["Other Song".to_owned()]).await.unwrap();
+    assert!(matches!(found, ArtistPicture::Found(_)), "{found:?}");
+}
+
 #[tokio::test]
 async fn picture_by_track_uses_the_matched_tracks_artist_id() {
     let server = MockServer::start().await;

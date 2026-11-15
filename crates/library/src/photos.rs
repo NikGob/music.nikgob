@@ -13,6 +13,16 @@ use crate::util::{get_id, now_ms};
 /// `artist_photo.source` of a lookup that found a photo it could not prove
 /// this artist's.
 const UNVERIFIED: &str = "unverified";
+/// `artist_photo.source` of a lookup the source could not answer for now
+/// (a 404, out of time): asked again after [`later_wait`].
+const LATER: &str = "later";
+const DAY_MS: UnixMs = 86_400_000;
+
+/// How long a lookup recorded [`LATER`] `tries` times in a row waits: a
+/// day, then two, four, eight, sixteen (a miss's own retry comes first).
+fn later_wait(tries: i64) -> UnixMs {
+    DAY_MS << (tries - 1).clamp(0, 4)
+}
 
 impl Library {
     /// The stored photo path of an artist (`None` = unknown or looked up without luck).
@@ -41,8 +51,9 @@ impl Library {
     }
 
     /// The artist's photo is to be looked up: never tried, a miss older than
-    /// `retry_before`, or an unverified one older than `unverified_before`
-    /// (see [`Library::artists_needing_photo`]). Never for a role.
+    /// `retry_before`, an unverified one older than `unverified_before`, or
+    /// one asked again later whose wait is over (see
+    /// [`Library::artists_needing_photo`]). Never for a role.
     pub fn artist_photo_due(&self, artist: ArtistId, retry_before: UnixMs, unverified_before: UnixMs) -> Result<bool> {
         self.read(|c| {
             let role: bool = c.query_row(
@@ -55,14 +66,18 @@ impl Library {
             }
             let row = c
                 .query_row(
-                    "SELECT path IS NULL AND photo_locked = 0, fetched_at, source = ?2 FROM artist_photo WHERE artist_id = ?1",
-                    params![artist.to_string(), UNVERIFIED],
-                    |r| Ok((r.get::<_, bool>(0)?, r.get::<_, UnixMs>(1)?, r.get::<_, bool>(2)?)),
+                    "SELECT path IS NULL AND photo_locked = 0, fetched_at, source, tries FROM artist_photo WHERE artist_id = ?1",
+                    [artist.to_string()],
+                    |r| Ok((r.get::<_, bool>(0)?, r.get::<_, UnixMs>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)),
                 )
                 .optional()?;
             Ok(match row {
                 None => true,
-                Some((open, at, unverified)) => open && (at < retry_before || (unverified && at < unverified_before)),
+                Some((open, at, source, tries)) => {
+                    open && (at < retry_before
+                        || (source == UNVERIFIED && at < unverified_before)
+                        || (source == LATER && at < now_ms() - later_wait(tries)))
+                }
             })
         })
     }
@@ -122,6 +137,23 @@ impl Library {
                     source = excluded.source, fetched_at = excluded.fetched_at
                  WHERE photo_locked = 0",
                 params![artist.to_string(), UNVERIFIED, now_ms()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Records "the source could not answer for now" (a 404 in its lookup,
+    /// a lookup out of time): asked again after a day, then after twice as
+    /// long each time in a row, never later than a miss.
+    pub fn set_artist_photo_later(&self, artist: ArtistId) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO artist_photo(artist_id, path, source, fetched_at, tries) VALUES (?1, NULL, ?2, ?3, 1)
+                 ON CONFLICT(artist_id) DO UPDATE SET path = NULL, source = excluded.source,
+                    fetched_at = excluded.fetched_at,
+                    tries = CASE WHEN artist_photo.source = excluded.source THEN artist_photo.tries + 1 ELSE 1 END
+                 WHERE photo_locked = 0",
+                params![artist.to_string(), LATER, now_ms()],
             )?;
             Ok(())
         })
@@ -215,9 +247,10 @@ impl Library {
     }
 
     /// Artists with a local track or a library track (a stream one too) and
-    /// no photo: never tried, a miss older than `retry_before`, or an
-    /// unverified one older than `unverified_before` (unix ms). Never-tried
-    /// first, artists with files first, most tracks first. A compilation's
+    /// no photo: never tried, a miss older than `retry_before`, an
+    /// unverified one older than `unverified_before` (unix ms), or one asked
+    /// again later whose wait is over ([`Library::set_artist_photo_later`]).
+    /// Never-tried first, artists with files first, most tracks first. A compilation's
     /// «Various Artists» is nobody and has no photo to look up, a role (an
     /// anime character, [`Library::mark_voice_roles`]) no photo of its own.
     pub fn artists_needing_photo(
@@ -236,7 +269,8 @@ impl Library {
                     AND NOT EXISTS (SELECT 1 FROM artist_latin l WHERE l.artist_id = a.id AND l.character = 1)
                     AND (p.artist_id IS NULL
                          OR (p.path IS NULL AND p.photo_locked = 0
-                             AND (p.fetched_at < ?1 OR (p.source = ?4 AND p.fetched_at < ?3))))
+                             AND (p.fetched_at < ?1 OR (p.source = ?4 AND p.fetched_at < ?3)
+                                  OR (p.source = ?5 AND p.fetched_at < ?6 - (?7 << min(max(p.tries - 1, 0), 4))))))
                   ORDER BY p.fetched_at IS NOT NULL,
                            NOT EXISTS (SELECT 1 FROM track_artist ta JOIN track t ON t.id = ta.track_id
                                         WHERE ta.artist_id = a.id AND t.has_local = 1),
@@ -245,9 +279,10 @@ impl Library {
                            a.seq
                   LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![retry_before, limit, unverified_before, UNVERIFIED], |r| {
-                Ok((get_id::<ArtistId>(r, 0)?, r.get::<_, String>(1)?))
-            })?;
+            let rows = stmt.query_map(
+                params![retry_before, limit, unverified_before, UNVERIFIED, LATER, now_ms(), DAY_MS],
+                |r| Ok((get_id::<ArtistId>(r, 0)?, r.get::<_, String>(1)?)),
+            )?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
@@ -406,6 +441,145 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(rows[0], ("a".into(), None, 0, false));
-        assert_eq!(rows[1], ("b".into(), None, 7, false));
+        // Still a miss; migration 32 makes it due again.
+        assert_eq!(rows[1], ("b".into(), None, 0, false));
+    }
+
+    /// Migration 32: every miss of an older library is asked again at the
+    /// next start; a photo, and a miss the user locked, stay as they are.
+    #[test]
+    fn migration_makes_old_misses_due_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        drop(Library::open(&path).unwrap());
+        let recent = now_ms() - 86_400_000;
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO artist_photo(artist_id, path, source, fetched_at, photo_locked) VALUES
+                    ('a', 'a.jpg', 'deezer', ?1, 0), ('b', NULL, 'deezer', ?1, 0),
+                    ('c', NULL, 'unverified', ?1, 0), ('d', NULL, 'custom', ?1, 1)",
+                [recent],
+            )
+            .unwrap();
+            // Migration 33 adds `tries` again.
+            conn.execute_batch("ALTER TABLE artist_photo DROP COLUMN tries").unwrap();
+            conn.pragma_update(None, "user_version", 31).unwrap();
+        }
+        let lib = Library::open(&path).unwrap();
+        let rows: Vec<(String, i64)> = lib
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT artist_id, fetched_at FROM artist_photo ORDER BY artist_id")?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .unwrap();
+        assert_eq!(rows, vec![("a".into(), recent), ("b".into(), 0), ("c".into(), 0), ("d".into(), recent)]);
+    }
+
+    /// Migration 33: a channel banner stored as an artist's image goes, also
+    /// from the front of two images (the other stays); a square Google
+    /// image, a Deezer image and a file stay.
+    #[test]
+    fn migration_drops_stored_banners_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let ids: Vec<ArtistId> = {
+            let lib = Library::open(&path).unwrap();
+            ["Banner", "Square", "File", "Deezer", "Two"]
+                .iter()
+                .map(|n| lib.upsert_artist(&nikgob_core::model::Artist::new(*n)).unwrap().id)
+                .collect()
+        };
+        let images = [
+            r#"["https://lh3.googleusercontent.com/b=w2880-h1200-p-l90-rj"]"#,
+            r#"["https://lh3.googleusercontent.com/s=w544-h544-l90-rj"]"#,
+            r#"["C:/Music/Artists/x.jpg"]"#,
+            r#"["https://cdn-images.dzcdn.net/images/artist/a/1000x1000-000000-80-0-0.jpg"]"#,
+            r#"["https://lh3.googleusercontent.com/b=w2880-h1200-p-l90-rj", "https://x.invalid/y.jpg"]"#,
+        ];
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for (id, json) in ids.iter().zip(images) {
+                conn.execute("UPDATE artist SET images = ?2 WHERE id = ?1", params![id.to_string(), json]).unwrap();
+            }
+            conn.execute_batch("ALTER TABLE artist_photo DROP COLUMN tries").unwrap();
+            conn.pragma_update(None, "user_version", 32).unwrap();
+        }
+        let lib = Library::open(&path).unwrap();
+        let now: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                lib.read(|c| Ok(c.query_row("SELECT images FROM artist WHERE id = ?1", [id.to_string()], |r| r.get(0))?))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(now[0], "[]");
+        for i in 1..4 {
+            assert_eq!(now[i], images[i]);
+        }
+        assert_eq!(now[4], r#"["https://x.invalid/y.jpg"]"#);
+    }
+
+    /// A lookup the source could not answer is not asked again by the next
+    /// session: after a day, then two days the time after, never beyond a
+    /// miss's own wait.
+    #[test]
+    fn a_later_lookup_waits_a_day_then_twice_as_long() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = artist_with_file(&lib, "Noize MC", true);
+        let retry = now_ms() - 14 * DAY_MS;
+        let next_session = now_ms() + 1000;
+        let due = |lib: &Library| {
+            let queued = !lib.artists_needing_photo(retry, next_session, 10).unwrap().is_empty();
+            let page = lib.artist_photo_due(a.id, retry, next_session).unwrap();
+            assert_eq!(queued, page, "the queue and the artist page agree");
+            queued
+        };
+        let ago = |lib: &Library, ms: UnixMs| {
+            lib.write(|tx| {
+                tx.execute("UPDATE artist_photo SET fetched_at = ?1", [now_ms() - ms])?;
+                Ok(())
+            })
+            .unwrap();
+        };
+        lib.set_artist_photo_later(a.id).unwrap();
+        assert!(!due(&lib), "not by the next session");
+        ago(&lib, DAY_MS + 1000);
+        assert!(due(&lib), "after a day");
+        lib.set_artist_photo_later(a.id).unwrap();
+        ago(&lib, DAY_MS + 1000);
+        assert!(!due(&lib), "the second time waits two days");
+        ago(&lib, 2 * DAY_MS + 1000);
+        assert!(due(&lib));
+        for _ in 0..10 {
+            lib.set_artist_photo_later(a.id).unwrap();
+        }
+        ago(&lib, 14 * DAY_MS + 1000);
+        assert!(due(&lib), "never beyond a miss's wait");
+        // A real miss starts over: the next «later» waits a day again.
+        lib.set_artist_photo(a.id, None).unwrap();
+        lib.set_artist_photo_later(a.id).unwrap();
+        ago(&lib, DAY_MS + 1000);
+        assert!(due(&lib));
+    }
+
+    /// A miss with `fetched_at = 0` (what migration 32 leaves) is due for
+    /// the queue and for an opened artist page alike.
+    #[test]
+    fn a_miss_of_time_zero_is_due() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = artist_with_file(&lib, "Noize MC", true);
+        lib.set_artist_photo(a.id, None).unwrap();
+        let retry = now_ms() - 14 * 86_400_000;
+        assert!(lib.artists_needing_photo(retry, now_ms() - 1000, 10).unwrap().is_empty());
+        assert!(!lib.artist_photo_due(a.id, retry, now_ms() - 1000).unwrap());
+        lib.write(|tx| {
+            tx.execute("UPDATE artist_photo SET fetched_at = 0 WHERE path IS NULL AND photo_locked = 0", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(lib.artists_needing_photo(retry, now_ms() - 1000, 10).unwrap().len(), 1);
+        assert!(lib.artist_photo_due(a.id, retry, now_ms() - 1000).unwrap());
     }
 }

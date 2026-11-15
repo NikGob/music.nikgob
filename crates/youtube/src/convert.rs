@@ -25,6 +25,13 @@ pub(crate) fn best_image(thumbs: &[Thumbnail]) -> Option<String> {
     Some(upscale(&t.url, t.width, t.height))
 }
 
+/// [`best_image`] of the square images only: an artist page's header is
+/// mostly a wide banner, which is no photo of the artist.
+fn square_image(thumbs: &[Thumbnail]) -> Option<String> {
+    let t = thumbs.iter().filter(|t| t.width > 0 && t.width == t.height).max_by_key(|t| t.width * t.height)?;
+    Some(upscale(&t.url, t.width, t.height))
+}
+
 pub(crate) fn upscale(url: &str, width: u32, height: u32) -> String {
     let googleusercontent = url.contains(".googleusercontent.com/") || url.contains(".ggpht.com/");
     if !googleusercontent || width != height || width >= COVER_PX {
@@ -178,7 +185,7 @@ pub(crate) fn artist(a: &MusicArtist) -> StreamArtist {
     StreamArtist {
         id: rid(&a.id),
         name: a.name.clone(),
-        image_url: best_image(&a.header_image),
+        image_url: square_image(&a.header_image),
         albums,
     }
 }
@@ -390,6 +397,24 @@ mod tests {
         assert_eq!(ids, ["single", "mid", "old"]);
         assert_eq!(s.albums[0].release_type, ReleaseType::Single);
         assert!(s.albums.iter().all(|a| a.tracks.is_empty()));
+        assert_eq!(s.image_url.as_deref(), Some("https://lh3.googleusercontent.com/abc=w1200-h1200-l90-rj"));
+    }
+
+    /// The channel banner of an artist page is not taken for the artist's photo.
+    #[test]
+    fn an_artist_banner_is_no_photo() {
+        let a: MusicArtist = serde_json::from_value(json!({
+            "id": "UCL9NQ06h7I0CRUcGxPWMtkQ", "name": "Noize MC",
+            "header_image": [
+                {"url": "https://lh3.googleusercontent.com/b=w1440-h600-p-l90-rj", "width": 1440, "height": 600},
+                {"url": "https://lh3.googleusercontent.com/b=w2880-h1200-p-l90-rj", "width": 2880, "height": 1200}
+            ],
+            "description": null, "wikipedia_url": null, "subscriber_count": null,
+            "tracks": [], "playlists": [], "similar_artists": [], "albums": [],
+            "tracks_playlist_id": null, "videos_playlist_id": null, "radio_id": null
+        }))
+        .unwrap();
+        assert_eq!(artist(&a).image_url, None);
     }
 
     #[test]
