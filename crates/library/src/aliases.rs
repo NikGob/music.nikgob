@@ -488,6 +488,12 @@ impl Library {
         })
     }
 
+    /// The aliases that name `artist` wherever it is credited (see
+    /// [`Library::artist_aliases`]).
+    pub fn aliases_of_artist(&self, artist: ArtistId) -> Result<Vec<String>> {
+        self.aliases_of(&[artist])
+    }
+
     /// The artist known under the alias `name`, if any.
     pub fn artist_by_alias(&self, name: &str) -> Result<Option<ArtistId>> {
         self.read(|c| Ok(alias_of(c, name)?.and_then(|id| id.parse().ok())))

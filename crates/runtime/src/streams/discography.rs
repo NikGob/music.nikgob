@@ -9,6 +9,10 @@
 //!   that name without a shared album is shown for this visit, never
 //!   linked and its image not kept: a name does not make it the artist.
 //!   An id known before gives its image only with a shared album too.
+//! * Only albums credited to this artist are offered (one of its names,
+//!   aliases or its Latin name among the album's artists; an album without
+//!   credits too): a service may have merged two artists into the one the
+//!   library links to.
 //! * Albums the page has (a release of the artist of the same kind — a
 //!   single, an EP and an album of one title are three releases — with the
 //!   same folded title and a year within ±1, or linked to it) are left out,
@@ -130,6 +134,12 @@ pub(crate) fn missing<'a>(
     }
     out.sort_by_key(|a| (group_rank(a.release_type), std::cmp::Reverse(a.year.unwrap_or(i32::MIN))));
     out
+}
+
+/// Whether `album` is credited to the artist named by `keys`
+/// ([`crate::artist_names::credit_keys`]); an album without credits is.
+fn credited(album: &StreamAlbum, keys: &[String]) -> bool {
+    keys.is_empty() || album.artists.is_empty() || album.artists.iter().any(|a| keys.contains(&artist_key(&a.name)))
 }
 
 /// Finds the artist in one service and reads its albums.
@@ -290,6 +300,10 @@ impl Worker {
     }
 
     fn discography_view(&self, artist: ArtistId, albums: &[StreamAlbum], error: Option<String>) -> v::DiscographyView {
+        let name = self.lib.get_artist(artist).ok().flatten().map(|a| a.name).unwrap_or_default();
+        let keys = crate::artist_names::credit_keys(&self.lib, artist, &name);
+        let albums: Vec<StreamAlbum> = albums.iter().filter(|a| credited(a, &keys)).cloned().collect();
+        let albums = albums.as_slice();
         let releases = self.lib.releases_of_artist(artist).unwrap_or_default();
         let ours: Vec<Have> = releases
             .iter()
@@ -358,6 +372,40 @@ mod tests {
             .map(|a| a.id.id[1..].parse().unwrap())
             .collect();
         assert_eq!(got, vec![3, 5, 2, 1, 6]);
+    }
+
+    /// A channel that merged two artists: only the albums credited to this
+    /// one are offered. Its name in another script still matches, and so
+    /// does an album with a guest beside it, or one without credits.
+    #[test]
+    fn only_albums_credited_to_the_artist_are_offered() {
+        let credit = |title: &str, n: u32, names: &[&str]| StreamAlbum {
+            artists: names.iter().map(|x| nikgob_core::streaming::ArtistRef::new(None, (*x).to_owned())).collect(),
+            ..album(title, 2020, ReleaseType::Single, n)
+        };
+        let keys = vec![artist_key("gotlibgotlibgotlib")];
+        assert!(credited(&credit("Own", 1, &["gotlibgotlibgotlib"]), &keys));
+        assert!(!credited(&credit("Pop", 2, &["Готлиб"]), &keys));
+        assert!(credited(&credit("Feat", 3, &["gotlibgotlibgotlib", "Guest"]), &keys));
+        assert!(credited(&credit("Bare", 4, &[]), &keys));
+        let kino = vec![artist_key("Кино")];
+        assert!(credited(&credit("Группа крови", 5, &["Kino"]), &kino));
+        assert!(!credited(&credit("Other", 6, &["Аквариум"]), &kino));
+
+        // The names come from the library: its own, its Latin name.
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        let a = lib.upsert_artist(&nikgob_core::model::Artist::new("藤澤慶昌")).unwrap();
+        let latin = nikgob_library::LatinFound {
+            name: Some("Yoshiaki Fujisawa".into()),
+            source: "musicbrainz".into(),
+            complete: true,
+            ..nikgob_library::LatinFound::default()
+        };
+        lib.set_artist_latin(a.id, &latin).unwrap();
+        let keys = crate::artist_names::credit_keys(&lib, a.id, &a.name);
+        assert!(credited(&credit("OST", 7, &["Yoshiaki Fujisawa"]), &keys));
+        assert!(credited(&credit("OST 2", 8, &["藤澤慶昌"]), &keys));
+        assert!(!credited(&credit("Other", 9, &["Someone Else"]), &keys));
     }
 
     /// An artist of the name with one of our releases among its albums is
