@@ -300,14 +300,15 @@ enum Verdict {
 
 impl Verdict {
     /// Of the answers without a photo, the stronger: a lookup that did not
-    /// finish (failed, or no answer for now) is never taken for «no photo»
-    /// nor for «not proved».
+    /// finish (no answer for now, or failed) is never taken for «no photo»
+    /// nor for «not proved», and a failed one wins so that it is asked
+    /// again by the next run.
     fn rank(&self) -> u8 {
         match self {
             Verdict::Missing => 0,
             Verdict::Unverified => 1,
-            Verdict::Failed => 2,
-            Verdict::Later => 3,
+            Verdict::Later => 2,
+            Verdict::Failed => 3,
             Verdict::Image(_) => 4,
         }
     }
@@ -339,19 +340,26 @@ fn photo_names(lib: &Library, id: ArtistId, name: &str) -> Vec<String> {
 
 /// One name's lookup: an anchor on the artist's own tracks (local ones
 /// first), else the name search whose candidates' albums / top tracks must
-/// overlap ours. A 404 on the way with nothing proved is no answer.
+/// overlap ours. With nothing proved, an anchor that failed makes it
+/// [`Verdict::Failed`], a 404 on the way [`Verdict::Later`].
 async fn named_lookup(deezer: &Deezer, anchors: &[&TrackRow], known: &[String], who: &str) -> Result<Named, MetadataError> {
     let mut gap = false;
+    let mut failed = false;
     for t in anchors.iter().take(ANCHOR_TRACKS) {
         let duration = t.duration_ms.map(|ms| Duration::from_millis(ms.into()));
         match deezer.artist_picture_by_track(who, &t.title, duration).await {
             Ok(Some(u)) => return Ok(Named::Url(u)),
+            Ok(None) => {}
             Err(MetadataError::NotFound) => gap = true,
-            // Any other failed anchor just means no anchor; the name search decides.
-            Ok(None) | Err(_) => {}
+            // The name search may still prove the artist.
+            Err(_) => failed = true,
         }
     }
-    Ok(match deezer.verified_artist_lookup(who, known).await {
+    let found = deezer.verified_artist_lookup(who, known).await;
+    if failed && !matches!(found, Ok(ArtistPicture::Found(_))) {
+        return Ok(Named::Not(Verdict::Failed));
+    }
+    Ok(match found {
         Ok(ArtistPicture::Found(u)) => Named::Url(u),
         Ok(ArtistPicture::Unverified) if !gap => Named::Not(Verdict::Unverified),
         Ok(ArtistPicture::Missing) if !gap => Named::Not(Verdict::Missing),
@@ -1629,6 +1637,29 @@ mod tests {
         assert_eq!(asked.iter().filter(|r| r.url.path() == "/img/1.jpg").count(), 1, "the picture once");
         // Recorded as no answer for now, not asked again this session.
         assert!(!lib.artist_photo_due(kino.id, now_ms() - PHOTO_RETRY_MS, now_ms() + 1).unwrap());
+    }
+
+    /// The track search fails (500) and the name search finds nobody: the
+    /// anchor could have proved the artist, so it is no miss but a failure,
+    /// asked again by the next run. A stale linked id (404) beside a failed
+    /// search is a failure too, not a wait of days.
+    #[tokio::test]
+    async fn a_failed_anchor_is_no_miss_and_a_failure_wins_over_a_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/search/track")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/search/artist")).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
+        let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (a, _) = library_track(&lib, "Кино", "Группа крови");
+        assert_eq!(fetch_artist_photo(&deezer, &lib, a.id, "Кино", dir.path()).await, PhotoOutcome::Failed);
+        assert_eq!(lib.artist_photo_lookup(a.id).unwrap(), None, "nothing recorded");
+
+        let (b, _) = library_track(&lib, "Аквариум", "Город");
+        let stale = nikgob_core::streaming::RemoteId::new(Service::Deezer, "9");
+        lib.set_external_id(EntityKind::Artist, &stale, *b.id.as_uuid()).unwrap();
+        assert_eq!(fetch_artist_photo(&deezer, &lib, b.id, "Аквариум", dir.path()).await, PhotoOutcome::Failed);
+        assert_eq!(lib.artist_photo_lookup(b.id).unwrap(), None);
     }
 
     /// An artist whose lookup fails is asked once per run; the queue goes
