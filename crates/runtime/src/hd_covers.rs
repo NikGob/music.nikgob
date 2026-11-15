@@ -33,7 +33,7 @@ const RETRY_MS: i64 = 14 * 86_400_000;
 /// Albums looked up per visit of Главная.
 const BATCH: usize = 12;
 
-fn key(id: ReleaseId) -> String {
+pub(crate) fn key(id: ReleaseId) -> String {
     // `v2`: found with the album's artist (see [`Want::artists`]); `v3`:
     // never a single's art for an album of more songs (see [`Want::takes`]).
     format!("cover_hd.v3.{id}")
@@ -42,15 +42,6 @@ fn key(id: ReleaseId) -> String {
 /// The larger cover found for `id`, if one was.
 pub(crate) fn cached(lib: &Library, id: ReleaseId) -> Option<String> {
     lib.cache_get(&key(id)).ok().flatten().map(|(_, url)| url).filter(|u| !u.is_empty())
-}
-
-/// After «Обновить обложку» of `id`: the larger cover found goes; `url`,
-/// the art it took online, stands for it.
-pub(crate) fn settle(lib: &Library, id: ReleaseId, url: Option<&str>) {
-    let _ = lib.cache_drop(&key(id));
-    if let Some(u) = url {
-        let _ = lib.cache_put(&key(id), now_ms(), u);
-    }
 }
 
 /// Whether `id` was not looked up yet, or found nothing long enough ago.
@@ -102,15 +93,16 @@ impl Want {
 
     /// Whether a service's release of `kind` with `n` songs may give its
     /// art. An album of several songs takes nothing of fewer songs than it
-    /// has: no single or EP short of them (the library files many a single
-    /// of three songs as an album), no album of one song. A count the
-    /// service does not tell is no mismatch.
+    /// has: no single or EP short of them or of songs untold (the library
+    /// files many a single of three songs as an album), no album of one
+    /// song. An album's count untold is no mismatch.
     pub(crate) fn takes(&self, kind: ReleaseType, n: Option<u32>) -> bool {
         if self.wants_single() || self.few() {
             return true;
         }
         match kind {
-            ReleaseType::Single | ReleaseType::Ep => n.is_none_or(|n| n >= self.tracks),
+            // A single or an EP of songs untold may be just the single.
+            ReleaseType::Single | ReleaseType::Ep => n.is_some_and(|n| n >= self.tracks),
             ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => n.is_none_or(|n| n > 1),
         }
     }
@@ -505,9 +497,12 @@ mod tests {
         // An EP the library files as an album: the EP of as many songs.
         assert_eq!(pick(&want(ReleaseType::Album, 3), hits()[..2].to_vec()).as_deref(), Some("https://x/ep.jpg"));
         assert_eq!(pick(&want(ReleaseType::Album, 11), hits()[..2].to_vec()), None);
-        // A YouTube EP tells no count: no mismatch.
-        let untold = vec![found("Рисунки", ReleaseType::Ep, None, "yt-ep")];
-        assert_eq!(pick(&want(ReleaseType::Album, 5), untold).as_deref(), Some("https://x/yt-ep.jpg"));
+        // A YouTube single tells no count: it may be the single, not taken.
+        let untold = vec![found("Рисунки", ReleaseType::Single, None, "yt-single"), found("Рисунки", ReleaseType::Album, None, "yt-album")];
+        assert_eq!(pick(&want(ReleaseType::Album, 5), untold[..1].to_vec()), None);
+        assert_eq!(pick(&want(ReleaseType::Album, 5), untold.clone()).as_deref(), Some("https://x/yt-album.jpg"));
+        // A single takes the single's art over the album's.
+        assert_eq!(pick(&want(ReleaseType::Single, 1), untold).as_deref(), Some("https://x/yt-single.jpg"));
     }
 
     /// The Deezer album linked to an album of several songs is its single
@@ -518,7 +513,8 @@ mod tests {
         assert!(!album.takes(deezer_kind(Some("single")), Some(1)));
         assert!(!album.takes(deezer_kind(Some("album")), Some(1)), "an album of one song");
         assert!(!album.takes(deezer_kind(Some("ep")), Some(4)));
-        assert!(album.takes(deezer_kind(Some("single")), None), "a count untold is no mismatch");
+        assert!(!album.takes(deezer_kind(Some("single")), None), "a single of songs untold");
+        assert!(album.takes(deezer_kind(Some("album")), None), "an album's count untold");
         assert!(album.takes(deezer_kind(Some("album")), Some(9)));
         // A single of three songs the library files as an album of three.
         assert!(want(ReleaseType::Album, 3).takes(deezer_kind(Some("single")), Some(3)));

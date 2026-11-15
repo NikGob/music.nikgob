@@ -433,7 +433,7 @@ pub fn album_card(
     if o.download_clicked {
         out.push(Command::DownloadStreamAlbum(a.remote.clone()));
     }
-    let nav = album_menus(&o.response, o.menu.as_ref(), a, wishlist, out);
+    let nav = card_menus(&o.response, o.menu.as_ref(), a, wishlist, row == DISCOGRAPHY, out);
     if o.play_clicked {
         out.push(Command::PlayStreamAlbum { id: a.remote.clone(), start: None, shuffle: false });
         None
@@ -448,7 +448,19 @@ pub fn album_card(
 /// its ⋮ (`more`): [`stream_album_rows`]. For every card of such an album
 /// (search, an artist, «Новые релизы», a world's «Новое»).
 pub fn album_menus(resp: &egui::Response, more: Option<&egui::Response>, a: &StreamAlbumCard, wishlist: &WishlistView, out: &mut Vec<Command>) -> Option<Route> {
-    let of = || album_of(a, album_status(a, wishlist) == CoverStatus::None);
+    card_menus(resp, more, a, wishlist, false, out)
+}
+
+/// [`album_menus`]; `refresh`: a discography card, with «Обновить обложку».
+fn card_menus(
+    resp: &egui::Response,
+    more: Option<&egui::Response>,
+    a: &StreamAlbumCard,
+    wishlist: &WishlistView,
+    refresh: bool,
+    out: &mut Vec<Command>,
+) -> Option<Route> {
+    let of = || StreamAlbumMenuOf { refresh, ..album_of(a, album_status(a, wishlist) == CoverStatus::None) };
     let mut act = None;
     if let Some(m) = more {
         let (menu, acts) = widgets::menu_of(("st-album-more", m.id), stream_album_rows(of()));
@@ -490,7 +502,13 @@ pub struct StreamAlbumMenuOf {
     pub in_library: bool,
     /// Nothing downloads it yet and the library lacks some of it.
     pub can_download: bool,
+    /// A card of a library artist's discography: «Обновить обложку» works
+    /// there (and on the page), not on other cards.
+    pub refresh: bool,
 }
+
+/// The `row` of [`album_card`] for a library artist's discography.
+pub const DISCOGRAPHY: &str = "discography";
 
 /// The one list of a service album's actions, in the order of the library
 /// album's ([`widgets::release_rows`]): its card's right click and ⋮ and
@@ -524,7 +542,9 @@ pub fn stream_album_rows(o: StreamAlbumMenuOf) -> Vec<widgets::Row<StreamAlbumAc
         rows.push(Row::Item(A::Library, MenuItem::new("Открыть в библиотеке").icon(Icon::LibraryMusic)));
     }
     rows.push(Row::Item(A::Share, MenuItem::new("Поделиться").icon(Icon::Share)));
-    rows.push(Row::Item(A::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
+    if o.on_page || o.refresh {
+        rows.push(Row::Item(A::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
+    }
     if !o.on_page && o.can_download {
         rows.push(Row::Divider);
         rows.push(Row::Item(A::Download, MenuItem::new("Скачать альбом").icon(Icon::Download)));
@@ -570,6 +590,7 @@ fn album_of(a: &StreamAlbumCard, can_download: bool) -> StreamAlbumMenuOf {
         has_artists: !a.artists.linked().is_empty(),
         in_library: a.release.is_some(),
         can_download,
+        refresh: false,
     }
 }
 
@@ -961,7 +982,7 @@ fn album_page(
         out.push(Command::LikeStreamAlbum { album: id.clone(), on: !v.liked });
     }
     let more = &r[4];
-    let of = StreamAlbumMenuOf { on_page: true, has_artists: !artists.is_empty(), in_library: v.release.is_some(), can_download: dl_can };
+    let of = StreamAlbumMenuOf { on_page: true, has_artists: !artists.is_empty(), in_library: v.release.is_some(), can_download: dl_can, refresh: false };
     let (menu, acts) = widgets::menu_of("st-album-more", stream_album_rows(of));
     match menu.attach(more).and_then(|i| acts.get(i).copied()) {
         Some(StreamAlbumAct::Next) => out.push(Command::PlayStreamNext(remotes.clone())),
@@ -1173,14 +1194,15 @@ mod menu_tests {
         let card = row_acts(&stream_album_rows(of));
         let page = row_acts(&stream_album_rows(StreamAlbumMenuOf { on_page: true, ..of }));
         let shared = |acts: &[A]| -> Vec<A> {
-            acts.iter().copied().filter(|a| !matches!(a, A::Play | A::Shuffle | A::Like | A::Download)).collect()
+            acts.iter().copied().filter(|a| !matches!(a, A::Play | A::Shuffle | A::Like | A::Download | A::RefreshCover)).collect()
         };
         assert_eq!(shared(&card), shared(&page));
-        assert_eq!(shared(&card), [A::Radio, A::Next, A::Queue, A::Playlist, A::Artist, A::Library, A::Share, A::RefreshCover]);
-        assert_eq!(
-            card,
-            [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Like, A::Playlist, A::Artist, A::Library, A::Share, A::RefreshCover, A::Download]
-        );
+        assert_eq!(shared(&card), [A::Radio, A::Next, A::Queue, A::Playlist, A::Artist, A::Library, A::Share]);
+        assert_eq!(card, [A::Play, A::Shuffle, A::Radio, A::Next, A::Queue, A::Like, A::Playlist, A::Artist, A::Library, A::Share, A::Download]);
+        // «Обновить обложку» where it works: the page and a discography card.
+        assert!(page.contains(&A::RefreshCover));
+        let disco = row_acts(&stream_album_rows(StreamAlbumMenuOf { refresh: true, ..of }));
+        assert_eq!(&disco[disco.len() - 2..], [A::RefreshCover, A::Download]);
         assert_eq!(&page[..4], [A::Radio, A::Next, A::Queue, A::Playlist]);
         assert_eq!(&labels(&stream_album_rows(of))[2..7], ["Радио по альбому", "Сыграть следующим", "В очередь", "Нравится", "В плейлист…"]);
         assert_eq!(labels(&stream_album_rows(of)).last().map(String::as_str), Some("Скачать альбом"));

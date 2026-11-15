@@ -378,9 +378,13 @@ impl BytesLoader for WebImages {
                 s.queue.retain(|u| u != url);
             }
             drop(s);
-            if let Some(disk) = &self.inner.disk {
-                disk.remove(url);
-            }
+            // The disk off the UI thread.
+            let (inner, url) = (Arc::clone(&self.inner), url.to_owned());
+            self.rt.spawn_blocking(move || {
+                if let Some(disk) = &inner.disk {
+                    disk.remove(&url);
+                }
+            });
             return;
         }
         let mut s = lock(&self.inner.state);

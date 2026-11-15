@@ -94,13 +94,11 @@ pub(crate) fn cached(lib: &Library, target: Target, current: Option<&str>) -> Op
     (!url.is_empty() && replaced == current.unwrap_or("")).then(|| url.to_owned())
 }
 
-/// After «Обновить обложку» of release `id`: what was found for it goes,
-/// and its cover `current` counts as asked now (`url`: what it shows
-/// instead, empty for its own), so a sweep does not bring the old art back.
-pub(crate) fn settle(lib: &Library, id: ReleaseId, current: Option<&str>, url: &str) {
-    let key = Target::Release(id).key();
-    let _ = lib.cache_drop(&key);
-    let _ = lib.cache_put(&key, now_ms(), &format!("{}{SEP}{url}", current.unwrap_or("")));
+/// The cache entry «Обновить обложку» of release `id` leaves (key, value):
+/// its cover `current` counts as asked (`url`: what it shows instead, empty
+/// for its own), so a sweep does not bring the old art back.
+pub(crate) fn settled(id: ReleaseId, current: Option<&str>, url: &str) -> (String, String) {
+    (Target::Release(id).key(), format!("{}{SEP}{url}", current.unwrap_or("")))
 }
 
 /// Whether `target` was not looked up for its `current` cover yet, or found
@@ -948,10 +946,11 @@ mod tests {
         assert_eq!(cached(&lib, t, Some("a/new-cover.jpg")), None);
         assert!(due(&lib, t, Some("a/new-cover.jpg"), now_ms()));
         // Refreshed by hand: the art found goes, and the cover is asked.
-        settle(&lib, id, Some("a/cover.jpg"), "");
+        let put = |(k, v): (String, String)| lib.cache_put(&k, now_ms(), &v).unwrap();
+        put(settled(id, Some("a/cover.jpg"), ""));
         assert_eq!(cached(&lib, t, Some("a/cover.jpg")), None);
         assert!(!due(&lib, t, Some("a/cover.jpg"), now_ms()));
-        settle(&lib, id, Some("https://x/stream.jpg"), "https://x/album.jpg");
+        put(settled(id, Some("https://x/stream.jpg"), "https://x/album.jpg"));
         assert_eq!(cached(&lib, t, Some("https://x/stream.jpg")).as_deref(), Some("https://x/album.jpg"));
         // A miss is asked again after a while.
         let c = Target::Track(TrackId::new());

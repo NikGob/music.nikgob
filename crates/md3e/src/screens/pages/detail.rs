@@ -592,7 +592,7 @@ fn discography(
             ui.add_space(4.0);
         }
         nav = widgets::grid(ui, &list, widgets::CARD_W, |_, w| crate::components::MediaCard::height(w), |ui, a, w| {
-            super::streams::album_card(ui, a, w, "discography", wishlist, out)
+            super::streams::album_card(ui, a, w, super::streams::DISCOGRAPHY, wishlist, out)
         })
         .or(nav);
         ui.add_space(8.0);
