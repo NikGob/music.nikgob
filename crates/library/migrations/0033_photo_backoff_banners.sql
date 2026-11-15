@@ -6,19 +6,25 @@
 -- counts these in a row (source 'later').
 ALTER TABLE artist_photo ADD COLUMN tries INTEGER NOT NULL DEFAULT 0;
 
--- YouTube Music channel banners stored as an artist's image (a Google
--- image asked wider than tall, `…=w2880-h1200-…`): no photo of the artist.
--- Only an artist whose images are that one web url loses it; a file, a
--- picture the user chose and a square service image stay.
-WITH one AS (
-    SELECT id, json_extract(images, '$[0]') AS u FROM artist
-     WHERE json_valid(images) AND json_array_length(images) = 1
-), google AS (
-    SELECT id, substr(u, instr(u, '=w') + 2) AS rest FROM one
-     WHERE (u LIKE 'https://%.googleusercontent.com/%' OR u LIKE 'https://%.ggpht.com/%')
-       AND instr(u, '=w') > 0
-), sized AS (
-    SELECT id, CAST(rest AS INTEGER) AS w, CAST(substr(rest, instr(rest, '-h') + 2) AS INTEGER) AS h
-      FROM google WHERE instr(rest, '-h') > 0
+-- Every url in an artist's images comes from a service's artist page, and
+-- the only Google-hosted ones are YouTube Music's: one asked wider than
+-- tall (`…=w2880-h1200-…`) is the channel banner, no photo of the artist.
+-- Those entries are dropped; every other entry stays where it was.
+WITH parts AS (
+    SELECT a.id AS id, e.key AS k, substr(e.value, instr(e.value, '=w') + 2) AS rest
+      FROM artist a, json_each(CASE WHEN json_valid(a.images) THEN a.images ELSE '[]' END) e
+     WHERE e.type = 'text'
+       AND (e.value LIKE 'https://%.googleusercontent.com/%' OR e.value LIKE 'https://%.ggpht.com/%')
+       AND instr(e.value, '=w') > 0
+), banners AS (
+    SELECT id, k FROM parts
+     WHERE instr(rest, '-h') > 0
+       AND CAST(substr(rest, instr(rest, '-h') + 2) AS INTEGER) > 0
+       AND CAST(rest AS INTEGER) * 10 > CAST(substr(rest, instr(rest, '-h') + 2) AS INTEGER) * 13
 )
-UPDATE artist SET images = '[]' WHERE id IN (SELECT id FROM sized WHERE h > 0 AND w * 10 > h * 13);
+UPDATE artist SET images = (
+    SELECT json_group_array(value) FROM (
+        SELECT e.value AS value FROM json_each(artist.images) e
+         WHERE NOT EXISTS (SELECT 1 FROM banners b WHERE b.id = artist.id AND b.k = e.key)
+         ORDER BY e.key)
+) WHERE id IN (SELECT id FROM banners);

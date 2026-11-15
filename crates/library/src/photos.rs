@@ -477,8 +477,9 @@ mod tests {
         assert_eq!(rows, vec![("a".into(), recent), ("b".into(), 0), ("c".into(), 0), ("d".into(), recent)]);
     }
 
-    /// Migration 33: a channel banner stored as an artist's image goes; a
-    /// square service image, a file and two images stay.
+    /// Migration 33: a channel banner stored as an artist's image goes, also
+    /// from the front of two images (the other stays); a square Google
+    /// image, a Deezer image and a file stay.
     #[test]
     fn migration_drops_stored_banners_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -514,9 +515,10 @@ mod tests {
             })
             .collect();
         assert_eq!(now[0], "[]");
-        for i in 1..images.len() {
+        for i in 1..4 {
             assert_eq!(now[i], images[i]);
         }
+        assert_eq!(now[4], r#"["https://x.invalid/y.jpg"]"#);
     }
 
     /// A lookup the source could not answer is not asked again by the next
