@@ -121,19 +121,104 @@ fn artist_score(hit: &StreamTrack, q: &ResolveQuery) -> f64 {
     credited.max(in_title)
 }
 
-/// A hit is another version of the song than the wish (a cover, a live
-/// take, a karaoke, a remix, a sped-up upload): a version word in the
-/// title or the album of one that the other has not, either way (a live
-/// wish is never its studio song, nor the studio song a live one).
+/// Words of another recording of a song: a live take, a remix, an
+/// acoustic or sped-up version, a karaoke, a cover. A remaster, a radio
+/// edit or a featured artist is the same recording: not on the list.
+const VERSION_WORDS: &[&str] = &[
+    "live", "remix", "acoustic", "unplugged", "karaoke", "instrumental", "sped up", "speed up", "slowed",
+    "nightcore", "cover", "piano version", "lofi", "lo-fi", "8-bit", "кавер", "караоке", "минус", "акустика",
+    "カバー",
+];
+
+/// Words after a version word that opens a dash part (or an album title)
+/// when it stands as a qualifier: «- Live at Wembley», «Acoustic Version».
+const QUALIFIER_NEXT: &[&str] = &[
+    "at", "in", "from", "version", "ver", "ver.", "mix", "edit", "session", "sessions", "recording", "performance",
+];
+
+/// `w` in `hay` not glued to letters on either side (both lowercase).
+fn has_word(hay: &str, w: &str) -> bool {
+    hay.match_indices(w).any(|(i, _)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + w.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// `part` (lowercase, trimmed) stands as a qualifier of the version word
+/// `w`: the word alone, the word then «at», «version»…, or the word
+/// closing it («Club Remix»); not a name the word opens («Live Forever»).
+fn qualifier(part: &str, w: &str) -> bool {
+    if part == w || part.ends_with(&format!(" {w}")) {
+        return true;
+    }
+    part.strip_prefix(w)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .and_then(|rest| rest.split_whitespace().next())
+        .is_some_and(|next| QUALIFIER_NEXT.contains(&next))
+}
+
+/// The version words `text` names as a qualifier of its recording: any in
+/// its brackets («(Live)», «[Remix]», «(Sped Up)»), or a dash part that is
+/// one («- Live at Wembley», «- Acoustic Version»). `album`: the whole
+/// title may be one too («Live at Leeds», «Live in Moscow»). A word inside
+/// an ordinary name is none («Live Through This», «Cover Me», «Live
+/// Forever»). In the order of [`VERSION_WORDS`].
+pub(crate) fn version_marks(text: &str, album: bool) -> Vec<&'static str> {
+    let lower = text.to_lowercase();
+    let mut rest = String::with_capacity(lower.len());
+    let mut brackets: Vec<String> = Vec::new();
+    let mut body = String::new();
+    let mut close: Option<char> = None;
+    for c in lower.chars() {
+        match close {
+            Some(end) if c == end => {
+                brackets.push(std::mem::take(&mut body));
+                close = None;
+                rest.push(' ');
+            }
+            Some(_) => body.push(c),
+            None => match c {
+                '(' => close = Some(')'),
+                '[' => close = Some(']'),
+                '【' => close = Some('】'),
+                _ => rest.push(c),
+            },
+        }
+    }
+    if close.is_some() {
+        brackets.push(body);
+    }
+    let rest = rest.replace(" – ", " - ").replace(" — ", " - ");
+    let mut pieces = rest.split(" - ").map(str::trim);
+    let first = pieces.next().unwrap_or("");
+    let parts: Vec<&str> = pieces.chain(album.then_some(first)).collect();
+    VERSION_WORDS
+        .iter()
+        .copied()
+        .filter(|w| brackets.iter().any(|b| has_word(b, w)) || parts.iter().any(|p| qualifier(p, w)))
+        .collect()
+}
+
+/// The version words of a recording: its title's and its album's.
+fn marks_of(title: &str, album: Option<&str>) -> Vec<&'static str> {
+    let mut marks = version_marks(title, false);
+    for w in album.map(|a| version_marks(a, true)).unwrap_or_default() {
+        if !marks.contains(&w) {
+            marks.push(w);
+        }
+    }
+    marks.sort_unstable();
+    marks
+}
+
+/// A hit is another recording of the song than the wish (a live take, a
+/// remix, a karaoke, an acoustic or sped-up version, a cover): the two do
+/// not name the same version words in their titles and albums, either
+/// way (a live wish is never its studio song, nor the studio song a live
+/// one).
 fn other_version(hit: &StreamTrack, q: &ResolveQuery) -> bool {
-    use nikgob_sources::matching::other_version;
-    let with_album = |title: &str, album: Option<&str>| match album {
-        Some(a) => format!("{title} / {a}"),
-        None => title.to_owned(),
-    };
-    let got = with_album(&hit.title, hit.album.as_ref().map(|a| a.title.as_str()));
-    let want = with_album(&q.title, q.album.as_deref());
-    other_version(&got, &want).is_some() || other_version(&want, &got).is_some()
+    marks_of(&hit.title, hit.album.as_ref().map(|a| a.title.as_str())) != marks_of(&q.title, q.album.as_deref())
 }
 
 /// The best YouTube hit for `q`, if any is the song: playable, not refused,
@@ -173,7 +258,7 @@ fn pick_isrc(hit: &StreamTrack, q: &ResolveQuery) -> bool {
         && !q.exclude.contains(&hit.id.id)
         // The ISRC is the recording: only a version word the hit adds
         // (a remix filed under the song) is refused.
-        && nikgob_sources::matching::other_version(&hit.title, &q.title).is_none()
+        && version_marks(&hit.title, false).iter().all(|w| version_marks(&q.title, false).contains(w))
         && match (hit.duration_ms, q.duration_ms) {
             (Some(a), Some(b)) => a.abs_diff(b) <= SLACK_MS,
             _ => title_score(hit, &nikgob_sources::text::title_keys(&q.title)) >= MIN_TITLE,
@@ -365,8 +450,16 @@ pub(crate) fn failure_text(
         // Every client of the player was asked (see nikgob_youtube::player):
         // YouTube's, not the video's.
         ("YouTube сейчас не отдаёт звук — попробуй чуть позже".into(), None)
-    } else if service == Some(Service::Youtube) && (m.contains("network") || m.contains("stalled")) {
-        ("нет связи с YouTube — проверь интернет".into(), None)
+    } else if let Some(s) = service
+        && (m.contains("network") || m.contains("stalled") || m.contains("timed out"))
+    {
+        // Any service's outage says so (a SoundCloud read that waited too
+        // long, Spotify's fetch).
+        let who = if s == Service::Youtube { "YouTube" } else { s.display_name() };
+        (format!("нет связи с {who} — проверь интернет"), None)
+    } else if service == Some(Service::Spotify) && (m.contains("включи воспроизведение") || m.contains("not logged in")) {
+        // Spotify's sound needs its playback login.
+        ("для звука из Spotify включи воспроизведение в настройках".into(), Some(SettingLink::SpotifyPlayback))
     } else {
         ("не получилось воспроизвести".into(), None)
     }
@@ -429,6 +522,12 @@ impl Worker {
         self.can_resolve_on(track, ttl, Service::Youtube)
     }
 
+    /// A track the user plays can be looked up now (on YouTube Music, or
+    /// on Spotify while YouTube Music is off), or is being looked up.
+    pub(crate) fn can_look_up(&mut self, track: TrackId) -> bool {
+        self.play_lookup(track, PLAYED_MISS_TTL).is_some()
+    }
+
     /// Where a track that plays from nothing now is looked up: YouTube
     /// Music, or Spotify while YouTube Music is off or silent (see the
     /// module docs). `None` when neither can be asked.
@@ -450,10 +549,6 @@ impl Worker {
         }
         if self.streaming.resolving.contains(&track) {
             return true;
-        }
-        // Its last Spotify lookup failed a moment ago.
-        if via == Service::Spotify && self.streaming.prefer.holds(track) {
-            return false;
         }
         let ttl = ttl.as_millis() as i64;
         let now = nikgob_library::now_ms();
@@ -490,13 +585,8 @@ impl Worker {
                 out.push(a.name);
             }
         }
-        if !ids.is_empty() {
-            for (who, name) in self.lib.artist_aliases().unwrap_or_default() {
-                if ids.contains(&who) {
-                    out.push(name);
-                }
-            }
-        }
+        // Only the credited artists' aliases (it runs on the player's loop).
+        out.extend(self.lib.aliases_of(&ids).unwrap_or_default());
         out.sort();
         out.dedup();
         out
@@ -640,7 +730,8 @@ impl Worker {
             // failures stay misses, as its lookups ahead would repeat.
             Found::Failed if via == Service::Spotify => {
                 log::info!("{track}: the {} lookup failed: asked again later", via.display_name());
-                self.streaming.prefer.hold(track, super::prefer::RETRY_AFTER);
+                let retry = self.streaming.schedule.prefer_retry;
+                self.streaming.prefer.hold(retry);
             }
             _ => {
                 log::info!("{track}: no copy on {}", via.display_name());
@@ -665,8 +756,8 @@ impl Worker {
             let skip = self.tried.clone();
             match self.request_skipping(e, &skip) {
                 Some((req, source, kind)) => {
+                    // (A place it is to go on from: `start_with` seeks there.)
                     self.start_with(e, req, source, kind);
-                    self.seek_to_failover(e);
                     if paused {
                         self.playback.pause();
                         self.status = nikgob_view::Status::Paused;
@@ -687,6 +778,8 @@ impl Worker {
                         None => self.toast(format!("{title}: не нашёл эту песню на {}", via.display_name()), find),
                     }
                     match self.queue.skip_forward() {
+                        // Paused while it waited: the next one starts paused too.
+                        Some(n) if n.id != e.id && paused => self.start_kept_paused(n),
                         Some(n) if n.id != e.id => self.start(n),
                         _ => self.stop(),
                     }
@@ -770,8 +863,9 @@ impl Worker {
     /// asked in the background (ISRC first), and the hit joins the same
     /// track. This play goes on; the next one is from Spotify.
     pub(crate) fn spotify_copy_for(&mut self, e: Entry, kind: SourceKind) {
-        // Asked already for this play (see `prefer`).
-        if kind != SourceKind::Youtube || self.prefer_asking(e.track) {
+        // Asked already for this play, or a Spotify lookup failed just now
+        // (see `prefer`).
+        if kind != SourceKind::Youtube || self.prefer_asking(e.track) || self.streaming.prefer.held() {
             return;
         }
         let ttl = self.streaming.schedule.miss_ttl;
@@ -795,8 +889,8 @@ impl Worker {
         if self.streaming.resolve_limit.until.is_some_and(|t| Instant::now() < t) {
             return;
         }
-        let mut next: Vec<Entry> = self.queue.peek_auto_next().into_iter().collect();
-        next.extend(self.queue.upcoming().iter().skip(1).take(AHEAD - 1).copied());
+        // With repeat one, the ones «Дальше» goes to.
+        let next = self.queue.ahead(AHEAD);
         let current = self.queue.current().map(|c| c.track);
         for e in next {
             if Some(e.track) == current {
@@ -808,6 +902,10 @@ impl Worker {
             }
             let ttl = self.streaming.schedule.miss_ttl;
             if let Some(via) = self.play_lookup(e.track, ttl) {
+                // Spotify failed just now: nothing ahead is asked of it.
+                if via == Service::Spotify && self.streaming.prefer.held() {
+                    return;
+                }
                 self.begin_resolve_on(e.track, via);
                 return;
             }
@@ -895,8 +993,9 @@ mod tests {
         assert!(!pick_isrc(&by("i2", "Kan Saete Kuyashiiwa (Remix)", "ZTMY", 228, TrackKind::Song), &q));
     }
 
-    /// A live, remix or karaoke recording is never its studio song, and the
-    /// studio song is never one of them, whichever is wished.
+    /// A live, remix, karaoke, acoustic or sped-up recording is never its
+    /// studio song, and the studio song is never one of them, whichever is
+    /// wished; a remaster, a radio edit or a featured artist is the song.
     #[test]
     fn a_version_is_never_taken_for_the_studio_song_either_way() {
         let q = |title: &str| ResolveQuery {
@@ -908,35 +1007,80 @@ mod tests {
             aliases: Vec::new(),
             album: None,
         };
+        let one = |h: &StreamTrack, q: &ResolveQuery| pick_youtube(std::slice::from_ref(h), q).map(|t| t.id.id);
         let studio = hit("studio", "Группа крови", 285, TrackKind::Song);
-        let live = hit("live", "Группа крови (Live)", 285, TrackKind::Song);
-        let remix = hit("remix", "Группа крови (Remix)", 285, TrackKind::Song);
-        let karaoke = hit("karaoke", "Группа крови (Karaoke)", 285, TrackKind::Song);
-        for wish in ["Группа крови (Live)", "Группа крови (Remix)", "Группа крови (Karaoke)"] {
-            assert!(pick_youtube(std::slice::from_ref(&studio), &q(wish)).is_none(), "{wish} is not the studio song");
+        for (id, title) in [
+            ("live", "Группа крови (Live)"),
+            ("dash-live", "Группа крови - Live at Wembley"),
+            ("remix", "Группа крови [Remix]"),
+            ("club", "Группа крови - Club Remix"),
+            ("karaoke", "Группа крови (Karaoke Version)"),
+            ("acoustic", "Группа крови (Acoustic)"),
+            ("sped", "Группа крови (Sped Up)"),
+            ("inst", "Группа крови (Instrumental)"),
+        ] {
+            let version = hit(id, title, 285, TrackKind::Song);
+            assert_eq!(one(&version, &q("Группа крови")), None, "{title} is not the studio song");
+            assert_eq!(one(&studio, &q(title)), None, "the studio song is not {title}");
+            assert_eq!(one(&version, &q(title)).as_deref(), Some(id), "{title} is itself");
         }
-        assert!(pick_youtube(&[live.clone(), remix.clone(), karaoke.clone()], &q("Группа крови")).is_none());
-        assert_eq!(pick_youtube(&[studio.clone(), live.clone()], &q("Группа крови (Live)")).unwrap().id.id, "live");
-        assert_eq!(pick_youtube(&[remix, studio.clone()], &q("Группа крови")).unwrap().id.id, "studio");
-        // Acoustic and sped-up the same way.
-        let acoustic = hit("acoustic", "Группа крови (Acoustic)", 285, TrackKind::Song);
-        let sped = hit("sped", "Группа крови (Sped Up)", 285, TrackKind::Song);
-        assert!(pick_youtube(&[acoustic, sped], &q("Группа крови")).is_none());
-        assert!(pick_youtube(std::slice::from_ref(&studio), &q("Группа крови (Sped Up)")).is_none());
-        // The album tells it when the title does not: a song of a live
-        // album is not the studio one, either way.
-        let on = |mut t: StreamTrack, album: &str| {
+        assert_eq!(one(&hit("dash", "Группа крови - Live", 285, TrackKind::Song), &q("Группа крови (Live)")).as_deref(), Some("dash"));
+        // The same recording.
+        for (id, title) in [
+            ("rm", "Группа крови (Remastered 2011)"),
+            ("rm-dash", "Группа крови - Remastered 2011"),
+            ("edit", "Группа крови (Radio Edit)"),
+            ("feat", "Группа крови (feat. Someone)"),
+        ] {
+            assert_eq!(one(&hit(id, title, 285, TrackKind::Song), &q("Группа крови")).as_deref(), Some(id), "{title}");
+        }
+        // A version word inside a name is no version.
+        assert_eq!(one(&hit("lf", "Live Forever", 285, TrackKind::Song), &q("Live Forever")).as_deref(), Some("lf"));
+        assert_eq!(one(&hit("cm", "Cover Me", 285, TrackKind::Song), &q("Cover Me")).as_deref(), Some("cm"));
+    }
+
+    /// The album tells the version when the title does not: a song of a
+    /// live album is not the studio one, either way. A version word inside
+    /// an ordinary album name tells nothing.
+    #[test]
+    fn a_live_album_tells_the_version_and_an_ordinary_album_name_does_not() {
+        let q = |album: Option<&str>| ResolveQuery {
+            title: "Doll Parts".into(),
+            artist: "Кино".into(),
+            duration_ms: Some(285_000),
+            isrc: None,
+            exclude: Vec::new(),
+            aliases: Vec::new(),
+            album: album.map(str::to_owned),
+        };
+        let on = |id: &str, album: &str| {
+            let mut t = hit(id, "Doll Parts", 285, TrackKind::Song);
             t.album = Some(nikgob_core::streaming::AlbumRef::new(None, album));
             t
         };
-        let from_live_album = ResolveQuery { album: Some("Live in Moscow".into()), ..q("Группа крови") };
-        let studio_album = on(studio.clone(), "Группа крови");
-        assert!(pick_youtube(std::slice::from_ref(&studio_album), &from_live_album).is_none());
-        let live_album_song = on(hit("live-album", "Группа крови", 285, TrackKind::Song), "Live in Moscow");
-        assert!(pick_youtube(std::slice::from_ref(&live_album_song), &q("Группа крови")).is_none());
-        assert_eq!(pick_youtube(&[studio_album, live_album_song], &from_live_album).unwrap().id.id, "live-album");
-        let from_studio_album = ResolveQuery { album: Some("Группа крови".into()), ..q("Группа крови") };
-        assert_eq!(pick_youtube(&[on(live, "Live in Moscow"), on(studio, "Группа крови")], &from_studio_album).unwrap().id.id, "studio");
+        let one = |h: &StreamTrack, q: &ResolveQuery| pick_youtube(std::slice::from_ref(h), q).map(|t| t.id.id);
+        let compilation = on("best", "Greatest Hits");
+        for live in ["Live at Leeds", "Live in Moscow", "Unplugged", "Doll Parts (Live)", "Tour 1995 - Live"] {
+            assert_eq!(one(&compilation, &q(Some(live))), None, "a song of «{live}» is not the studio one");
+            assert_eq!(one(&on("live", live), &q(Some("Greatest Hits"))), None, "nor the other way: «{live}»");
+            assert_eq!(one(&on("live", live), &q(Some(live))).as_deref(), Some("live"));
+        }
+        for name in ["Live Through This", "Guitar Hero", "Cover Me", "Alive 2007", "Greatest Hits (Remastered)"] {
+            assert_eq!(one(&compilation, &q(Some(name))).as_deref(), Some("best"), "«{name}» is an ordinary name");
+            assert_eq!(one(&on("named", name), &q(Some("Greatest Hits"))).as_deref(), Some("named"), "«{name}»");
+        }
+        assert_eq!(one(&compilation, &q(None)).as_deref(), Some("best"));
+    }
+
+    #[test]
+    fn version_words_count_only_as_qualifiers() {
+        assert_eq!(version_marks("Song (Live at Wembley 1986)", false), ["live"]);
+        assert_eq!(version_marks("Song - Acoustic Version", false), ["acoustic"]);
+        assert!(version_marks("Live Forever", false).is_empty());
+        assert!(version_marks("Oasis - Live Forever", false).is_empty());
+        assert!(version_marks("Live Through This", true).is_empty());
+        assert_eq!(version_marks("Live at Leeds", true), ["live"]);
+        assert!(version_marks("Song (Remastered 2011) - Radio Edit", false).is_empty());
     }
 
     #[test]
@@ -953,5 +1097,23 @@ mod tests {
         assert_eq!(failure_text(age, false, yt).1, Some(nikgob_view::SettingLink::Youtube));
         assert!(video_refused("not available") && video_refused("blocked in this region"));
         assert_eq!(failure_text("whatever", false, None).0, "не получилось воспроизвести");
+    }
+
+    /// Every service's outage says so, with its name; Spotify without its
+    /// playback login points at the setting that turns it on.
+    #[test]
+    fn spotify_and_soundcloud_failures_say_what_happened() {
+        let sp = Some(Service::Spotify);
+        let sc = Some(Service::Soundcloud);
+        assert_eq!(failure_text("Spotify: network error: connection reset", false, sp).0, "нет связи с Spotify — проверь интернет");
+        assert_eq!(failure_text("i/o error: SoundCloud: the stream stalled", false, sc).0, "нет связи с SoundCloud — проверь интернет");
+        assert_eq!(failure_text("i/o error: network error: dns error", false, sc).1, None);
+        let login = failure_text("Spotify: включи воспроизведение в настройках", false, sp);
+        assert_eq!(login.0, "для звука из Spotify включи воспроизведение в настройках");
+        assert_eq!(login.1, Some(nikgob_view::SettingLink::SpotifyPlayback));
+        assert_eq!(failure_text("Spotify: not logged in", false, sp).1, Some(nikgob_view::SettingLink::SpotifyPlayback));
+        // Not for another service's login.
+        assert_eq!(failure_text("SoundCloud: not logged in", false, sc).0, "не получилось воспроизвести");
+        assert_eq!(failure_text("Spotify: для звука нужен Premium", false, sp).0, "для звука из Spotify нужен Premium");
     }
 }

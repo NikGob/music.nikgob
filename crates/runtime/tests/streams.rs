@@ -12,21 +12,35 @@ use nikgob_library::Library;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, PlaybackEvent, Runtime, RuntimeConfig, StreamSchedule};
 use nikgob_view::{Command, Prefs, Status};
 
-/// Remembers what the engine was asked to play, the seeks, and what it
-/// was handed as the next item.
-struct Recorder(Arc<Mutex<Vec<PlayRequest>>>, Arc<Mutex<Vec<Duration>>>, Arc<Mutex<Vec<Option<PlayRequest>>>>);
+/// Remembers what the engine was asked to play, the seeks, what it was
+/// handed as the next item, and every play, pause, resume, stop and seek
+/// in order.
+struct Recorder(
+    Arc<Mutex<Vec<PlayRequest>>>,
+    Arc<Mutex<Vec<Duration>>>,
+    Arc<Mutex<Vec<Option<PlayRequest>>>>,
+    Arc<Mutex<Vec<String>>>,
+);
 
 impl Playback for Recorder {
     fn play(&mut self, item: PlayRequest) {
+        self.3.lock().unwrap().push("play".into());
         self.0.lock().unwrap().push(item);
     }
     fn set_next(&mut self, next: Option<PlayRequest>) {
         self.2.lock().unwrap().push(next);
     }
-    fn pause(&mut self) {}
-    fn resume(&mut self) {}
-    fn stop(&mut self) {}
+    fn pause(&mut self) {
+        self.3.lock().unwrap().push("pause".into());
+    }
+    fn resume(&mut self) {
+        self.3.lock().unwrap().push("resume".into());
+    }
+    fn stop(&mut self) {
+        self.3.lock().unwrap().push("stop".into());
+    }
     fn seek(&mut self, position: Duration) {
+        self.3.lock().unwrap().push("seek".into());
         self.1.lock().unwrap().push(position);
     }
     fn set_volume(&mut self, _: f32) {}
@@ -59,6 +73,7 @@ struct Rig {
     asked: Arc<Mutex<Vec<PlayRequest>>>,
     seeks: Arc<Mutex<Vec<Duration>>>,
     nexts: Arc<Mutex<Vec<Option<PlayRequest>>>>,
+    log: Arc<Mutex<Vec<String>>>,
 }
 
 impl Rig {
@@ -70,6 +85,7 @@ impl Rig {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let seeks = Arc::new(Mutex::new(Vec::new()));
         let nexts = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::new(Mutex::new(Vec::new()));
         let rt = Runtime::start_scheduled(
             RuntimeConfig {
                 library: lib,
@@ -80,11 +96,11 @@ impl Rig {
                 settings_path: None,
                 import: None,
             },
-            Box::new(Recorder(asked.clone(), seeks.clone(), nexts.clone())),
+            Box::new(Recorder(asked.clone(), seeks.clone(), nexts.clone(), log.clone())),
             Arc::new(|| {}),
             schedule,
         );
-        Self { rt, asked, seeks, nexts }
+        Self { rt, asked, seeks, nexts, log }
     }
 
     fn play(&self, track: TrackId) {
@@ -625,26 +641,95 @@ fn gapless_the_next_track_is_handed_over_with_its_spotify_copy_once_known() {
     assert_eq!(rig.asked.lock().unwrap().len(), 1, "a gapless join, no new play");
 }
 
+fn handed_spotify(rig: &Rig) -> bool {
+    rig.nexts.lock().unwrap().iter().flatten().any(|n| n.source == stream(Service::Spotify, "sp-homogenic-3"))
+}
+
+/// The source the start of `track` was recorded with (waits for it).
+fn started_from(lib: &Library, track: TrackId) -> Option<SourceKind> {
+    let start = |e: &nikgob_core::model::Event| e.event_type == nikgob_core::model::EventType::Start;
+    wait_for("its start", || lib.events_of_track(track, 10).unwrap().iter().any(start));
+    lib.events_of_track(track, 10).unwrap().into_iter().find(start).unwrap().source_kind
+}
+
 #[test]
-fn a_join_before_spotify_answers_starts_the_next_track_with_what_it_has() {
-    // Spotify is slower than the first song: nothing is handed over ahead,
-    // and when the first ends the next starts from YouTube Music at once.
+fn a_late_spotify_answer_leaves_the_next_track_its_youtube_copy_for_a_gapless_join() {
+    // Spotify is slower than the next track may wait: its YouTube copy is
+    // handed over in time for the join. The answer then joins the track for
+    // the next time but swaps nothing, nor does a change of the queue, and
+    // the join records what the engine was handed.
+    let lib = Library::open_in_memory().unwrap();
+    let (first, next) = spotify_then_youtube(&lib);
+    let other = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-2")).unwrap();
+    let spotify = Arc::new(FakeService::spotify());
+    spotify.delay("find_isrc", Duration::from_millis(1200));
+    let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, Arc::new(FakeService::youtube())];
+    let schedule = StreamSchedule { prefer_wait: Duration::from_millis(300), ..StreamSchedule::default() };
+    let rig = Rig::start_with(lib.clone(), streams, schedule);
+    let t = Instant::now();
+    play_both(&rig, [first, next]);
+    let playing = rig.asked(0);
+    wait_for("the YouTube copy handed over", || handed_youtube(&rig));
+    assert!(t.elapsed() < Duration::from_millis(1100), "before Spotify answered: {:?}", t.elapsed());
+    wait_for("the Spotify copy", || has_spotify_copy(&lib, next));
+    rig.rt.send(Command::Enqueue(vec![other]));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!handed_spotify(&rig), "the handed request is never swapped: {:?}", rig.nexts.lock().unwrap());
+    let last = rig.nexts.lock().unwrap().last().cloned().flatten();
+    assert!(last.is_some_and(|n| n.source == stream(Service::Youtube, "yt-homogenic-3")), "never taken back");
+    let tx = rig.rt.playback_sender();
+    tx.send(PlaybackEvent::Started { id: playing.id }).unwrap();
+    let handed = rig.nexts.lock().unwrap().iter().flatten().last().cloned().unwrap();
+    tx.send(PlaybackEvent::TrackChanged { to: handed.id }).unwrap();
+    assert_eq!(started_from(&lib, next), Some(SourceKind::Youtube), "what the engine plays");
+    assert_eq!(rig.asked.lock().unwrap().len(), 1, "a gapless join, no new play");
+}
+
+#[test]
+fn the_next_track_is_handed_over_ten_seconds_before_the_end_at_the_latest() {
+    // The playing song has 12 s: the next one waits 2 s for Spotify, not
+    // the whole wait, and goes over with its YouTube copy.
+    let lib = Library::open_in_memory().unwrap();
+    let mut short = find(&FakeService::spotify(), "sp-discovery-1");
+    short.duration_ms = Some(12_000);
+    let first = lib.upsert_stream_track(&short).unwrap();
+    let next = youtube_only(&lib);
+    let spotify = Arc::new(FakeService::spotify());
+    spotify.delay("find_isrc", Duration::from_millis(4000));
+    let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, Arc::new(FakeService::youtube())];
+    let schedule = StreamSchedule { prefer_wait: Duration::from_secs(6), ..StreamSchedule::default() };
+    let rig = Rig::start_with(lib.clone(), streams, schedule);
+    let t = Instant::now();
+    play_both(&rig, [first, next]);
+    let playing = rig.asked(0);
+    rig.rt.playback_sender().send(PlaybackEvent::Started { id: playing.id }).unwrap();
+    wait_for("the YouTube copy handed over", || handed_youtube(&rig));
+    let at = t.elapsed();
+    assert!(at >= Duration::from_millis(1500) && at < Duration::from_millis(3500), "about 2 s: {at:?}");
+    assert!(!handed_spotify(&rig));
+}
+
+#[test]
+fn without_a_request_handed_over_the_next_track_waits_for_spotify_as_any_other() {
+    // Gapless off: when the first song ends, the next one waits (bounded)
+    // for its Spotify copy and plays from there.
     let lib = Library::open_in_memory().unwrap();
     let (first, next) = spotify_then_youtube(&lib);
     let spotify = Arc::new(FakeService::spotify());
-    spotify.delay("find_isrc", Duration::from_millis(2500));
     let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, Arc::new(FakeService::youtube())];
     let rig = Rig::start(lib.clone(), streams);
+    let prefs = Prefs { gapless: false, ..rig.rt.state().prefs.clone() };
+    rig.rt.send(Command::SetPrefs(Box::new(prefs)));
+    wait_for("gapless off", || !rig.rt.state().prefs.gapless);
+    // Asked ahead; delayed so the answer is not in when the first ends.
+    spotify.delay("find_isrc", Duration::from_millis(600));
     play_both(&rig, [first, next]);
     let playing = rig.asked(0);
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(!handed_youtube(&rig), "not handed over while Spotify is asked");
     let tx = rig.rt.playback_sender();
     tx.send(PlaybackEvent::Started { id: playing.id }).unwrap();
-    let t = Instant::now();
     tx.send(PlaybackEvent::Ended { id: playing.id }).unwrap();
-    assert_eq!(rig.asked(1).source, stream(Service::Youtube, "yt-homogenic-3"));
-    assert!(t.elapsed() < Duration::from_millis(800), "no wait at the join: {:?}", t.elapsed());
+    assert_eq!(rig.asked(1).source, stream(Service::Spotify, "sp-homogenic-3"));
+    assert!(!handed_youtube(&rig));
 }
 
 #[test]
@@ -695,6 +780,123 @@ fn a_pause_during_the_wait_is_kept_through_the_youtube_lookup_that_follows() {
     assert_eq!(req.source, stream(Service::Youtube, "yt-discovery-2"));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(rig.status(), Status::Paused, "still paused once it is ready");
+    assert!(paused_right_after_play(&rig), "{:?}", rig.log.lock().unwrap());
+}
+
+/// The engine was paused right after it was asked to play (nothing in
+/// between), and never resumed.
+fn paused_right_after_play(rig: &Rig) -> bool {
+    let log = rig.log.lock().unwrap();
+    let Some(at) = log.iter().rposition(|e| e == "play") else { return false };
+    log.get(at + 1).is_some_and(|e| e == "pause") && !log.iter().any(|e| e == "resume")
+}
+
+#[test]
+fn a_pause_during_the_wait_is_kept_when_nothing_is_found_and_the_next_track_starts() {
+    // Paused while a track that plays from nothing waits for Spotify;
+    // neither Spotify nor YouTube Music has it: the next track is prepared
+    // paused, never played.
+    let lib = Library::open_in_memory().unwrap();
+    let mut listed = find(&FakeService::deezer(), "dz-discovery-2");
+    listed.isrc = None;
+    listed.id = nikgob_core::streaming::RemoteId::new(Service::Deezer, "dz-not-listed");
+    listed.title = "Zzqx Nothing Here".into();
+    let missing = lib.upsert_stream_track(&listed).unwrap();
+    let after = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-1")).unwrap();
+    let spotify = Arc::new(FakeService::spotify());
+    spotify.delay("search_kind", Duration::from_millis(800));
+    let youtube = Arc::new(FakeService::youtube().logged_out());
+    let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, youtube as Arc<dyn StreamService>, Arc::new(FakeService::deezer())];
+    let schedule = StreamSchedule { prefer_wait: Duration::from_millis(300), ..StreamSchedule::default() };
+    let rig = Rig::start_with(lib.clone(), streams, schedule);
+    play_both(&rig, [missing, after]);
+    wait_for("the wait", || rig.status() == Status::Buffering);
+    rig.rt.send(Command::Pause);
+    wait_for("paused", || rig.status() == Status::Paused);
+    let req = rig.asked(0);
+    assert_eq!(req.source, stream(Service::Spotify, "sp-discovery-1"), "the next track");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.status(), Status::Paused);
+    assert!(rig.rt.state().player.current.as_ref().is_some_and(|t| t.id == after));
+    assert!(paused_right_after_play(&rig), "{:?}", rig.log.lock().unwrap());
+}
+
+#[test]
+fn a_seek_during_the_wait_is_where_the_track_starts() {
+    // The bar moved to 1:30 while the track waited for its Spotify copy:
+    // it starts there, the engine asked to seek once the track is open.
+    let lib = Library::open_in_memory().unwrap();
+    let track = youtube_only(&lib);
+    let spotify = Arc::new(FakeService::spotify());
+    spotify.delay("find_isrc", Duration::from_millis(600));
+    let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, Arc::new(FakeService::youtube())];
+    let rig = Rig::start(lib.clone(), streams);
+    rig.play(track);
+    wait_for("the wait", || rig.status() == Status::Buffering);
+    let at = Duration::from_secs(90);
+    rig.rt.send(Command::Seek(at));
+    wait_for("the bar moved", || rig.position() >= at);
+    let req = rig.asked(0);
+    assert_eq!(req.source, stream(Service::Spotify, "sp-homogenic-3"));
+    wait_for("the seek", || !rig.seeks.lock().unwrap().is_empty());
+    assert_eq!(*rig.seeks.lock().unwrap(), vec![at], "once the track is open");
+    {
+        let log = rig.log.lock().unwrap();
+        let play = log.iter().position(|e| e == "play").unwrap();
+        assert!(log[play..].iter().any(|e| e == "seek"), "{log:?}");
+    }
+    rig.rt.playback_sender().send(PlaybackEvent::Started { id: req.id }).unwrap();
+    wait_for("playing", || rig.status() == Status::Playing);
+    assert!(rig.position() >= at, "{:?}", rig.position());
+}
+
+#[test]
+fn a_spotify_outage_asks_nothing_track_after_track_until_its_time() {
+    // Spotify fails: the next songs are not asked of it (and play from
+    // YouTube Music at once) until the hold is over; then it is asked
+    // again.
+    let lib = Library::open_in_memory().unwrap();
+    let yt = FakeService::youtube();
+    let tracks = vec![
+        youtube_only(&lib),
+        lib.upsert_stream_track(&find(&yt, "yt-gruppa-3")).unwrap(),
+        lib.upsert_stream_track(&find(&yt, "yt-firstlove-2")).unwrap(),
+    ];
+    let spotify = Arc::new(FakeService::spotify());
+    spotify.fail_next("find_isrc", 1000);
+    spotify.fail_next("search_kind", 1000);
+    let asked = || spotify.calls("find_isrc") + spotify.calls("search_kind");
+    let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, Arc::new(FakeService::youtube())];
+    let schedule = StreamSchedule { prefer_retry: Duration::from_millis(1500), ..StreamSchedule::default() };
+    let rig = Rig::start_with(lib.clone(), streams, schedule);
+    rig.rt.send(Command::PlayTracks { tracks, start: 0, context: "test".into() });
+    assert_eq!(rig.asked(0).source, stream(Service::Youtube, "yt-homogenic-3"));
+    let failed_at = Instant::now();
+    std::thread::sleep(Duration::from_millis(200));
+    let before = asked();
+    assert!(before >= 1);
+    rig.rt.send(Command::Next);
+    assert_eq!(rig.asked(1).source, stream(Service::Youtube, "yt-gruppa-3"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(asked(), before, "nothing asked of Spotify meanwhile");
+    std::thread::sleep(Duration::from_millis(1600).saturating_sub(failed_at.elapsed()));
+    rig.rt.send(Command::Next);
+    wait_for("Spotify asked again", || asked() > before);
+    assert_eq!(rig.asked(2).source, stream(Service::Youtube, "yt-firstlove-2"));
+}
+
+#[test]
+fn a_spotify_copy_set_aside_is_tried_again_when_nothing_else_plays() {
+    // Its only copy was set aside and the song was looked up just now:
+    // the copy is tried again rather than nothing.
+    let lib = Library::open_in_memory().unwrap();
+    let track = lib.upsert_stream_track(&find(&FakeService::spotify(), "sp-discovery-1")).unwrap();
+    let source = lib.sources_of_track(track).unwrap()[0].id;
+    lib.set_source_available(source, false).unwrap();
+    lib.cache_put(&format!("sp_miss.{track}"), nikgob_library::now_ms(), "").unwrap();
+    let rig = Rig::start(lib.clone(), vec![Arc::new(FakeService::spotify()) as Arc<dyn StreamService>]);
+    rig.play(track);
+    assert_eq!(rig.asked(0).source, stream(Service::Spotify, "sp-discovery-1"));
 }
 
 #[test]

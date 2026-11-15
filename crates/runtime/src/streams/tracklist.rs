@@ -503,12 +503,14 @@ impl Worker {
     /// matching learnt other scripts, ISRCs and several artists are
     /// forgotten, so those albums are asked again now (see the module docs).
     pub(crate) fn retry_tracklist_misses_once(&mut self) {
-        // One transaction with its own mark (see the library's repair).
-        match self.lib.ask_missed_tracklists_again() {
+        // One transaction with its own mark (see the library's repair), off
+        // the player's loop: it reads the whole cache once.
+        let lib = self.lib.clone();
+        self.streaming.rt.spawn_blocking(move || match lib.ask_missed_tracklists_again() {
             Ok(Some(n)) if n > 0 => log::info!("tracklist: {n} albums not found before are asked again"),
             Ok(_) => {}
             Err(e) => log::warn!("forgetting the tracklist misses: {e}"),
-        }
+        });
     }
 }
 

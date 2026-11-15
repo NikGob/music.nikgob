@@ -413,7 +413,10 @@ pub(crate) fn reupload_song(hits: &[StreamTrack], q: &ResolveQuery, video: &Stre
         .filter(|h| h.kind == TrackKind::Song && h.id != video.id)
         // A live or sped-up upload (its brackets are not in the query) is
         // not the studio song.
-        .filter(|h| nikgob_sources::matching::other_version(&video.title, &h.title).is_none())
+        .filter(|h| {
+            let song = super::resolve::version_marks(&h.title, false);
+            super::resolve::version_marks(&video.title, false).iter().all(|w| song.contains(w))
+        })
         .filter(|h| match (h.duration_ms, video.duration_ms) {
             (Some(song), Some(clip)) => song <= clip + 10_000 && song + 60_000 >= clip,
             _ => true,
@@ -537,8 +540,7 @@ impl Worker {
         if !self.streaming.queue_clips.asking.is_empty() || self.service(Service::Youtube).is_none() {
             return;
         }
-        let mut next: Vec<Entry> = self.queue.peek_auto_next().into_iter().collect();
-        next.extend(self.queue.upcoming().iter().skip(1).take(1).copied());
+        let next = self.queue.ahead(2);
         let current = self.queue.current().map(|c| c.track);
         for e in next {
             if Some(e.track) == current {

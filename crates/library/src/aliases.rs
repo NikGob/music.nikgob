@@ -471,6 +471,23 @@ impl Library {
         })
     }
 
+    /// [`Self::artist_aliases`] of the artists `ids` only (by the index on
+    /// the artist): what a track's lookup needs, without reading every
+    /// alias of the library.
+    pub fn aliases_of(&self, ids: &[ArtistId]) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached("SELECT name FROM artist_alias WHERE artist_id = ?1 AND source <> ?2 ORDER BY name")?;
+            let mut out = Vec::new();
+            for id in ids {
+                let rows = stmt.query_map(params![id.to_string(), READING], |r| r.get::<_, String>(0))?;
+                for name in rows {
+                    out.push(name?);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// The artist known under the alias `name`, if any.
     pub fn artist_by_alias(&self, name: &str) -> Result<Option<ArtistId>> {
         self.read(|c| Ok(alias_of(c, name)?.and_then(|id| id.parse().ok())))
@@ -544,6 +561,29 @@ mod tests {
             .unwrap();
         out.sort();
         out
+    }
+
+    /// The aliases of some artists: theirs only, the readings left out, as
+    /// the whole list has them.
+    #[test]
+    fn the_aliases_of_some_artists_are_theirs_only() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = artist(&lib, "ヒトリエ");
+        let b = artist(&lib, "Кино");
+        lib.write(|tx| {
+            add_alias(tx, &a.id.to_string(), "HITORIE", "merged")?;
+            add_alias(tx, &a.id.to_string(), "hitorie reading", READING)?;
+            add_alias(tx, &b.id.to_string(), "Kino", "merged")
+        })
+        .unwrap();
+        assert_eq!(lib.aliases_of(&[a.id]).unwrap(), ["HITORIE"]);
+        assert_eq!(lib.aliases_of(&[b.id]).unwrap(), ["Kino"]);
+        let mut both = lib.aliases_of(&[a.id, b.id]).unwrap();
+        both.sort();
+        let mut all: Vec<String> = lib.artist_aliases().unwrap().into_iter().map(|(_, n)| n).collect();
+        all.sort();
+        assert_eq!(both, all);
+        assert!(lib.aliases_of(&[]).unwrap().is_empty());
     }
 
     #[test]
