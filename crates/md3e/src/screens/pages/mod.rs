@@ -2089,7 +2089,9 @@ mod speed_tests {
         assert!(!file(&loose).contains(&TrackAct::RefreshCover));
         assert!(!file(&track(false)).contains(&TrackAct::RefreshCover));
         assert_eq!(TrackAct::RefreshCover.menu_item(true), None);
-        let items = row_items(&library_track_rows(&track(true), of(&marks, true)));
+        let full = track(true);
+        let rows = library_track_rows(&full, of(&marks, true));
+        let items = row_items(&rows);
         assert!(items.iter().any(|(a, i)| *a == TrackAct::RefreshCover && i.label == widgets::REFRESH_COVER));
     }
 
