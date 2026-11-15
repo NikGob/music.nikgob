@@ -90,13 +90,12 @@ fn group_rank(t: ReleaseType) -> u8 {
     }
 }
 
-/// The kind a release is deduplicated within: a single, an EP, or an
-/// album (a compilation and the rest count as one; the services file them
+/// The kind a release is deduplicated within: a single or an EP (one
+/// service's single is another's EP), or an album (a compilation and the rest count as one; the services file them
 /// differently).
 fn kind(t: ReleaseType) -> u8 {
     match t {
-        ReleaseType::Single => 0,
-        ReleaseType::Ep => 1,
+        ReleaseType::Single | ReleaseType::Ep => 0,
         ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => 2,
     }
 }
@@ -134,7 +133,13 @@ pub(crate) fn missing<'a>(
         seen.push((key, a.year, a.release_type));
         out.push(a);
     }
-    out.sort_by_key(|a| (group_rank(a.release_type), std::cmp::Reverse(a.year.unwrap_or(i32::MIN))));
+    // Newest first: by year, then by the day out where a service tells it.
+    out.sort_by(|a, b| {
+        group_rank(a.release_type)
+            .cmp(&group_rank(b.release_type))
+            .then_with(|| b.year.unwrap_or(i32::MIN).cmp(&a.year.unwrap_or(i32::MIN)))
+            .then_with(|| b.release_date.cmp(&a.release_date))
+    });
     out
 }
 
@@ -461,8 +466,9 @@ mod tests {
 
     /// The library has the single «Рисунки» that came out before the album
     /// «Рисунки»: the album is still missing from the page, and the single
-    /// of a service is the library's. A single, an EP and an album of one
-    /// title are three releases.
+    /// of a service is the library's. A single and an album of one title
+    /// are two releases; a single and an EP of it, one (services file it
+    /// either way).
     #[test]
     fn a_single_in_the_library_does_not_hide_the_album_of_its_title() {
         let albums = vec![
@@ -471,10 +477,10 @@ mod tests {
             album("Рисунки", 2023, ReleaseType::Ep, 3),
         ];
         let single = vec![(album_key("Рисунки"), Some(2023), ReleaseType::Single)];
-        assert_eq!(ids(missing(&albums, &single, |_| false)), vec![2, 3]);
+        assert_eq!(ids(missing(&albums, &single, |_| false)), vec![2]);
         let whole = vec![(album_key("Рисунки"), Some(2023), ReleaseType::Album)];
-        assert_eq!(ids(missing(&albums, &whole, |_| false)), vec![1, 3]);
-        assert_eq!(ids(missing(&albums, &[], |_| false)), vec![2, 1, 3]);
+        assert_eq!(ids(missing(&albums, &whole, |_| false)), vec![1]);
+        assert_eq!(ids(missing(&albums, &[], |_| false)), vec![2, 1]);
         // The same single on another service is one.
         let twice = vec![album("Рисунки", 2023, ReleaseType::Single, 1), album("рисунки", 2023, ReleaseType::Single, 4)];
         assert_eq!(ids(missing(&twice, &[], |_| false)), vec![1]);
@@ -491,5 +497,24 @@ mod tests {
         // The undated album of the library is the service's album, not
         // its undated single.
         assert_eq!(ids(missing(&albums, &ours, |_| false)), vec![1]);
+    }
+
+    /// Within a year the newest comes first by the day it came out; one
+    /// without a day stands after those of its year that have one.
+    #[test]
+    fn releases_of_a_year_stand_by_their_day() {
+        let dated = |title: &str, n: u32, day: Option<&str>| {
+            let mut a = album(title, 2026, ReleaseType::Single, n);
+            a.release_date = day.map(str::to_owned);
+            a
+        };
+        let albums = vec![
+            dated("Завоз", 1, Some("2026-01-10")),
+            dated("Opus", 2, Some("2026-09-02")),
+            dated("VPN", 3, None),
+            dated("CLAY", 4, Some("2026-05-20")),
+            album("Репит", 2025, ReleaseType::Single, 5),
+        ];
+        assert_eq!(ids(missing(&albums, &[], |_| false)), vec![2, 4, 1, 3, 5]);
     }
 }
