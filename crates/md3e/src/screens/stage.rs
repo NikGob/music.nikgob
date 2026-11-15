@@ -840,18 +840,18 @@ fn drive(v: &mut ViewState, real: &PlayerView, script: Script, t: f32, clock: f3
 
 /// The album page the stage shows, never without its list: the playing
 /// track's album when that is the one loaded, else the service's album
-/// open with the playing track on it, else the library album loaded, else
-/// the playing track and its album's songs in the queue. `seed` makes the
+/// open with the playing track on it, else the playing track and its
+/// album's songs in the queue (another album loaded is never shown for it). `seed` makes the
 /// ids it has to make up the same on every rebuild. Without a known day,
 /// today stands in, so every way of showing the date looks different.
 fn album_of(v: &ViewState, seed: TrackId) -> ReleaseDetail {
     let current = v.player.current.as_ref();
-    let loaded = v.release.as_ref().filter(|r| !r.tracks.is_empty());
-    let mut album = loaded
-        .filter(|r| current.is_some_and(|t| t.release_id == Some(r.card.id)))
+    let mut album = v
+        .release
+        .as_ref()
+        .filter(|r| !r.tracks.is_empty() && current.is_some_and(|t| t.release_id == Some(r.card.id)))
         .cloned()
         .or_else(|| current.and_then(|t| catalogue_album(v, t, seed)))
-        .or_else(|| loaded.cloned())
         .unwrap_or_else(|| queue_album(v, seed));
     album.released = album.released.filter(|d| d.day.is_some()).or_else(|| Some(today()));
     album
@@ -909,13 +909,14 @@ fn card_of(id: ReleaseId, title: String, artist: String, release_type: ReleaseTy
 }
 
 /// The service's album open, as an album page, when the playing track `t`
-/// is on it and its list is in.
+/// is on it and its list is in. A track that names its album needs that
+/// album: a compilation or another release with the same song is not it.
 fn catalogue_album(v: &ViewState, t: &TrackRow, seed: TrackId) -> Option<ReleaseDetail> {
     let p = v.stream_page.as_ref().filter(|p| matches!(p.page, StreamPage::Album(_)) && !p.loading && !p.tracks.is_empty())?;
-    let on_album = t.album.as_deref().is_some_and(|a| same_name(a, &p.title));
-    let playing = p.tracks.iter().position(|r| {
-        r.track == Some(t.id) || (same_name(&r.title, &t.title) && (same_name(&r.artist, &t.artist) || on_album))
-    })?;
+    if t.album.as_deref().is_some_and(|a| !same_name(a, &p.title)) {
+        return None;
+    }
+    let playing = p.tracks.iter().position(|r| r.track == Some(t.id) || (same_name(&r.title, &t.title) && same_name(&r.artist, &t.artist)))?;
     let id = t.release_id.or(p.release).unwrap_or_else(|| ReleaseId::from_uuid(made_up(seed, 0)));
     let tracks: Vec<TrackRow> = p
         .tracks
@@ -1899,15 +1900,19 @@ mod tests {
         assert_eq!(album_of(&v, seed).tracks.len(), 3);
         v.stream_page.as_mut().unwrap().loading = false;
 
-        // Another library album loaded: the service's album of the song
-        // still comes first.
+        // Another album of the service open with the same song (a
+        // compilation): not the song's album.
+        let mut compilation = service_album(12);
+        compilation.title = "Best Of".into();
+        v.stream_page = Some(compilation);
+        assert_eq!(album_of(&v, seed).tracks.len(), 3);
+        v.stream_page = Some(service_album(12));
+
+        // Another library album loaded: never shown for the song, with the
+        // service's album of the song open or without it.
         v.release = Some(library_album(ReleaseId::new(), 4));
         assert_eq!(album_of(&v, seed).tracks.len(), 12);
-        // Without it, that library album.
         v.stream_page = None;
-        assert_eq!(album_of(&v, seed).tracks.len(), 4);
-        // An empty one is never shown.
-        v.release.as_mut().unwrap().tracks.clear();
         assert_eq!(album_of(&v, seed).tracks.len(), 3);
 
         // The song's own library album loaded: that one, first of all.
