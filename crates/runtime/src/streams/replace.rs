@@ -272,6 +272,7 @@ impl Worker {
                 isrc: pick.isrc.clone(),
                 exclude: Vec::new(),
                 aliases: Vec::new(),
+                album: pick.album.as_ref().map(|a| a.title.clone()),
             };
             if q.isrc.is_none()
                 && let Some(dz) = dz

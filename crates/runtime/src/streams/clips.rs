@@ -400,6 +400,7 @@ pub(crate) fn reupload_query(video: &StreamTrack) -> Option<ResolveQuery> {
         isrc: None,
         exclude: Vec::new(),
         aliases: Vec::new(),
+        album: None,
     })
 }
 
@@ -410,6 +411,9 @@ pub(crate) fn reupload_song(hits: &[StreamTrack], q: &ResolveQuery, video: &Stre
     let songs: Vec<StreamTrack> = hits
         .iter()
         .filter(|h| h.kind == TrackKind::Song && h.id != video.id)
+        // A live or sped-up upload (its brackets are not in the query) is
+        // not the studio song.
+        .filter(|h| nikgob_sources::matching::other_version(&video.title, &h.title).is_none())
         .filter(|h| match (h.duration_ms, video.duration_ms) {
             (Some(song), Some(clip)) => song <= clip + 10_000 && song + 60_000 >= clip,
             _ => true,
@@ -593,16 +597,9 @@ impl Worker {
         match after_wait(waits, self.status) {
             AfterWait::Nothing => {}
             AfterWait::Start => self.start(e),
-            AfterWait::StartPaused => {
-                // Paused while it waited: ready to go on, still paused.
-                self.start(e);
-                if self.playing.is_some_and(|p| p.id == entry) && self.playing_source.is_some() {
-                    self.playback.pause();
-                    self.position = self.position_now();
-                    self.status = nikgob_view::Status::Paused;
-                    self.publish_player();
-                }
-            }
+            // Paused while it waited: ready to go on, still paused (also
+            // while it waits for something else next).
+            AfterWait::StartPaused => self.start_kept_paused(e),
         }
     }
 
@@ -748,6 +745,10 @@ mod tests {
         ];
         assert_eq!(reupload_song(&hits, &q, &up).map(|s| s.id.id), Some("face".into()));
         assert_eq!(reupload_song(&hits[..3], &q, &up), None, "no song of FACE as long as the upload");
+        // A live upload is not the studio song.
+        let live = video("live", "FACE - ЮМОРИСТ (Live)", "RusLyrics", 144);
+        let q_live = reupload_query(&live).expect("a reupload");
+        assert_eq!(reupload_song(&hits, &q_live, &live), None);
         // The artist's own channel names no one else; a plain title names no one.
         assert!(reupload_query(&video("own", "FACE - ЮМОРИСТ", "FACE", 144)).is_none());
         assert!(reupload_query(&video("plain", "ЮМОРИСТ", "RusLyrics", 144)).is_none());

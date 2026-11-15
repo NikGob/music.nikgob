@@ -25,8 +25,10 @@
 //! start from YouTube Music (or to be looked up there) waits a moment for
 //! its Spotify copy first (see [`super::prefer`]); one that starts from
 //! YouTube Music all the same is looked up on Spotify in the background:
-//! the play goes on, the next one is from Spotify. The stream analysis and
-//! saving from YouTube Music only ever ask YouTube Music.
+//! the play goes on, the next one is from Spotify. A Spotify lookup that
+//! failed (the network, the login) is no miss: the track is asked again a
+//! moment later. The stream analysis and saving from YouTube Music only
+//! ever ask YouTube Music.
 //!
 //! A rate limit is not a miss: nothing is recorded, the lookups ahead wait
 //! for the pause to end, and a track that waits for its lookup (Buffering)
@@ -65,6 +67,9 @@ pub(crate) struct ResolveQuery {
     pub(crate) exclude: Vec<String>,
     /// Other names of the artist (its aliases, the credit's other names).
     pub(crate) aliases: Vec<String>,
+    /// The title of its album, when known: a live or acoustic album tells
+    /// the version its songs are, as a word in the title does.
+    pub(crate) album: Option<String>,
 }
 
 impl ResolveQuery {
@@ -116,10 +121,19 @@ fn artist_score(hit: &StreamTrack, q: &ResolveQuery) -> f64 {
     credited.max(in_title)
 }
 
-/// A hit is another version of the song (a cover, a karaoke, a remix, a
-/// sped-up upload) that the wish does not name.
+/// A hit is another version of the song than the wish (a cover, a live
+/// take, a karaoke, a remix, a sped-up upload): a version word in the
+/// title or the album of one that the other has not, either way (a live
+/// wish is never its studio song, nor the studio song a live one).
 fn other_version(hit: &StreamTrack, q: &ResolveQuery) -> bool {
-    nikgob_sources::matching::other_version(&hit.title, &q.title).is_some()
+    use nikgob_sources::matching::other_version;
+    let with_album = |title: &str, album: Option<&str>| match album {
+        Some(a) => format!("{title} / {a}"),
+        None => title.to_owned(),
+    };
+    let got = with_album(&hit.title, hit.album.as_ref().map(|a| a.title.as_str()));
+    let want = with_album(&q.title, q.album.as_deref());
+    other_version(&got, &want).is_some() || other_version(&want, &got).is_some()
 }
 
 /// The best YouTube hit for `q`, if any is the song: playable, not refused,
@@ -157,7 +171,9 @@ pub(crate) fn pick_youtube(hits: &[StreamTrack], q: &ResolveQuery) -> Option<Str
 fn pick_isrc(hit: &StreamTrack, q: &ResolveQuery) -> bool {
     hit.playable
         && !q.exclude.contains(&hit.id.id)
-        && !other_version(hit, q)
+        // The ISRC is the recording: only a version word the hit adds
+        // (a remix filed under the song) is refused.
+        && nikgob_sources::matching::other_version(&hit.title, &q.title).is_none()
         && match (hit.duration_ms, q.duration_ms) {
             (Some(a), Some(b)) => a.abs_diff(b) <= SLACK_MS,
             _ => title_score(hit, &nikgob_sources::text::title_keys(&q.title)) >= MIN_TITLE,
@@ -195,12 +211,15 @@ pub(crate) struct ResolveLimit {
 }
 
 /// Songs, then videos only when no song fits (YouTube Music: Spotify
-/// has songs only); a rate limit stops it.
+/// has songs only); a rate limit stops it. Another failure of a search
+/// (the network, the login) sets `failed`: nothing found then is no
+/// answer of the catalogue.
 async fn songs_then_videos(
     yt: &dyn nikgob_core::streaming::StreamService,
     text: &str,
     keep: &(dyn Fn(&StreamTrack) -> bool + Sync),
     q: &ResolveQuery,
+    failed: &mut bool,
 ) -> Lookup {
     let who = yt.service().display_name();
     let kinds: &[SearchKind] = if yt.service() == Service::Youtube {
@@ -220,7 +239,10 @@ async fn songs_then_videos(
                 log::warn!("{who} lookup of {text}: {e}");
                 return Err(retry_after);
             }
-            Err(e) => log::warn!("{who} lookup of {text}: {e}"),
+            Err(e) => {
+                log::warn!("{who} lookup of {text}: {e}");
+                *failed = true;
+            }
         }
     }
     Ok(None)
@@ -238,39 +260,77 @@ pub(crate) async fn search_youtube(
 /// The Deezer catalogue and the id of a track there.
 pub(super) type IsrcSource = (std::sync::Arc<dyn nikgob_core::streaming::StreamService>, String);
 
+/// What a lookup came to.
+#[derive(Clone, Debug)]
+pub(crate) enum Found {
+    /// The song.
+    Hit(StreamTrack),
+    /// Every request answered and none was the song: the catalogue has it
+    /// not (kept for days).
+    Miss,
+    /// A rate limit (and the pause the service asked for).
+    Limited(Option<Duration>),
+    /// A request failed otherwise (the network, the login): nothing is
+    /// known, it is asked again soon.
+    Failed,
+}
+
 /// Looks `q` up on `svc`: a Deezer track without its ISRC asks Deezer
 /// for it first (the full track comes back too), then the ISRC, then
-/// "artist title".
+/// "artist title". A request that failed (other than a rate limit or a
+/// Deezer track that is gone) makes nothing found [`Found::Failed`].
 pub(super) async fn look_up(
     svc: std::sync::Arc<dyn nikgob_core::streaming::StreamService>,
     mut q: ResolveQuery,
     deezer: Option<IsrcSource>,
-) -> (Lookup, Option<Box<StreamTrack>>) {
+) -> (Found, Option<Box<StreamTrack>>) {
     let mut filled = None;
+    let mut failed = false;
     if let Some((dz, id)) = deezer {
         match dz.track(&id).await {
             Ok(full) => {
                 q.isrc = full.isrc.clone();
                 filled = Some(Box::new(full));
             }
-            Err(e) => log::info!("deezer: no ISRC for {id}: {e}"),
+            Err(e) => {
+                log::info!("deezer: no ISRC for {id}: {e}");
+                failed |= !matches!(e, nikgob_core::streaming::StreamError::Unavailable);
+            }
         }
     }
-    if let Some(isrc) = &q.isrc
-        && let Ok(Some(hit)) = svc.find_isrc(isrc).await
-        && pick_isrc(&hit, &q)
-    {
-        return (Ok(Some(hit)), filled);
+    if let Some(isrc) = &q.isrc {
+        match svc.find_isrc(isrc).await {
+            Ok(Some(hit)) if pick_isrc(&hit, &q) => return (Found::Hit(hit), filled),
+            Ok(_) => {}
+            Err(nikgob_core::streaming::StreamError::RateLimited { retry_after }) => {
+                return (Found::Limited(retry_after), filled);
+            }
+            Err(e) => {
+                log::warn!("{} ISRC lookup of {isrc}: {e}", svc.service().display_name());
+                failed = true;
+            }
+        }
     }
-    (lookup_youtube(svc.as_ref(), &q).await, filled)
+    let found = match lookup_noting(svc.as_ref(), &q, &mut failed).await {
+        Ok(Some(hit)) => Found::Hit(hit),
+        Err(retry_after) => Found::Limited(retry_after),
+        Ok(None) if failed => Found::Failed,
+        Ok(None) => Found::Miss,
+    };
+    (found, filled)
 }
 
 /// [`search_youtube`] telling a rate limit apart.
 async fn lookup_youtube(yt: &dyn nikgob_core::streaming::StreamService, q: &ResolveQuery) -> Lookup {
-    if let Some(hit) = songs_then_videos(yt, &q.text(), &|_| true, q).await? {
+    lookup_noting(yt, q, &mut false).await
+}
+
+/// [`lookup_youtube`] noting a failed request in `failed`.
+async fn lookup_noting(yt: &dyn nikgob_core::streaming::StreamService, q: &ResolveQuery, failed: &mut bool) -> Lookup {
+    if let Some(hit) = songs_then_videos(yt, &q.text(), &|_| true, q, failed).await? {
         return Ok(Some(hit));
     }
-    songs_then_videos(yt, &search_title(&q.title), &|_| true, q).await
+    songs_then_videos(yt, &search_title(&q.title), &|_| true, q, failed).await
 }
 
 /// Why a stream did not play, from the engine's error text, as the user
@@ -391,6 +451,10 @@ impl Worker {
         if self.streaming.resolving.contains(&track) {
             return true;
         }
+        // Its last Spotify lookup failed a moment ago.
+        if via == Service::Spotify && self.streaming.prefer.holds(track) {
+            return false;
+        }
         let ttl = ttl.as_millis() as i64;
         let now = nikgob_library::now_ms();
         let missed = match self.streaming.misses.get(&(track, via)) {
@@ -468,6 +532,7 @@ impl Worker {
             isrc: t.isrc.clone(),
             exclude: self.refused_videos(),
             aliases: self.artist_names(&t),
+            album: t.release_id.and_then(|r| self.lib.get_release(r).ok().flatten()).map(|r| r.title),
         };
         let deezer = if q.isrc.is_none() { self.isrc_source(track) } else { None };
         Some((q, deezer))
@@ -549,7 +614,7 @@ impl Worker {
         self.try_next_source(e);
     }
 
-    pub(crate) fn resolved(&mut self, track: TrackId, via: Service, found: Lookup, filled: Option<Box<StreamTrack>>) {
+    pub(crate) fn resolved(&mut self, track: TrackId, via: Service, found: Found, filled: Option<Box<StreamTrack>>) {
         self.streaming.resolving.remove(&track);
         self.streaming.resolve_via.remove(&track);
         if via == Service::Youtube {
@@ -558,22 +623,26 @@ impl Worker {
         if let Some(full) = &filled {
             self.isrc_filled(track, full);
         }
-        let found = match found {
-            Ok(f) => {
-                self.streaming.resolve_limit.retries.remove(&track);
-                f
-            }
-            Err(retry_after) => return self.resolve_limited(track, via, retry_after),
-        };
+        if let Found::Limited(retry_after) = found {
+            return self.resolve_limited(track, via, retry_after);
+        }
+        self.streaming.resolve_limit.retries.remove(&track);
         match &found {
-            Some(hit) => {
+            Found::Hit(hit) => {
                 log::info!("{track} plays from {} as {}", via.display_name(), hit.id.id);
                 self.streaming.learn(std::slice::from_ref(hit));
                 if let Err(e) = self.lib.attach_stream_source(track, hit) {
                     log::warn!("attaching the {} copy of {track}: {e}", via.display_name());
                 }
             }
-            None => {
+            // Spotify did not answer (the network, the login): no miss,
+            // asked again in a moment (see `prefer`). YouTube Music's
+            // failures stay misses, as its lookups ahead would repeat.
+            Found::Failed if via == Service::Spotify => {
+                log::info!("{track}: the {} lookup failed: asked again later", via.display_name());
+                self.streaming.prefer.hold(track, super::prefer::RETRY_AFTER);
+            }
+            _ => {
                 log::info!("{track}: no copy on {}", via.display_name());
                 let now = nikgob_library::now_ms();
                 self.streaming.misses.insert((track, via), now);
@@ -768,6 +837,7 @@ mod tests {
             isrc: None,
             exclude: Vec::new(),
             aliases: Vec::new(),
+            album: None,
         };
         assert_eq!(q.text(), "Кино Группа крови");
         let clip = hit("clip", "Кино - Группа крови (клип)", 286, TrackKind::Video);
@@ -801,6 +871,7 @@ mod tests {
             isrc: None,
             exclude: Vec::new(),
             aliases: vec!["ずっと真夜中でいいのに。".into()],
+            album: None,
         };
         let by = |id: &str, title: &str, artist: &str, secs: u64, kind: TrackKind| {
             let mut t = StreamTrack::new(RemoteId::new(Service::Youtube, id), title);
@@ -822,6 +893,50 @@ mod tests {
         let isrc = by("i", "Kan Saete Kuyashiiwa", "ZTMY", 228, TrackKind::Song);
         assert!(pick_isrc(&isrc, &q));
         assert!(!pick_isrc(&by("i2", "Kan Saete Kuyashiiwa (Remix)", "ZTMY", 228, TrackKind::Song), &q));
+    }
+
+    /// A live, remix or karaoke recording is never its studio song, and the
+    /// studio song is never one of them, whichever is wished.
+    #[test]
+    fn a_version_is_never_taken_for_the_studio_song_either_way() {
+        let q = |title: &str| ResolveQuery {
+            title: title.into(),
+            artist: "Кино".into(),
+            duration_ms: Some(285_000),
+            isrc: None,
+            exclude: Vec::new(),
+            aliases: Vec::new(),
+            album: None,
+        };
+        let studio = hit("studio", "Группа крови", 285, TrackKind::Song);
+        let live = hit("live", "Группа крови (Live)", 285, TrackKind::Song);
+        let remix = hit("remix", "Группа крови (Remix)", 285, TrackKind::Song);
+        let karaoke = hit("karaoke", "Группа крови (Karaoke)", 285, TrackKind::Song);
+        for wish in ["Группа крови (Live)", "Группа крови (Remix)", "Группа крови (Karaoke)"] {
+            assert!(pick_youtube(std::slice::from_ref(&studio), &q(wish)).is_none(), "{wish} is not the studio song");
+        }
+        assert!(pick_youtube(&[live.clone(), remix.clone(), karaoke.clone()], &q("Группа крови")).is_none());
+        assert_eq!(pick_youtube(&[studio.clone(), live.clone()], &q("Группа крови (Live)")).unwrap().id.id, "live");
+        assert_eq!(pick_youtube(&[remix, studio.clone()], &q("Группа крови")).unwrap().id.id, "studio");
+        // Acoustic and sped-up the same way.
+        let acoustic = hit("acoustic", "Группа крови (Acoustic)", 285, TrackKind::Song);
+        let sped = hit("sped", "Группа крови (Sped Up)", 285, TrackKind::Song);
+        assert!(pick_youtube(&[acoustic, sped], &q("Группа крови")).is_none());
+        assert!(pick_youtube(std::slice::from_ref(&studio), &q("Группа крови (Sped Up)")).is_none());
+        // The album tells it when the title does not: a song of a live
+        // album is not the studio one, either way.
+        let on = |mut t: StreamTrack, album: &str| {
+            t.album = Some(nikgob_core::streaming::AlbumRef::new(None, album));
+            t
+        };
+        let from_live_album = ResolveQuery { album: Some("Live in Moscow".into()), ..q("Группа крови") };
+        let studio_album = on(studio.clone(), "Группа крови");
+        assert!(pick_youtube(std::slice::from_ref(&studio_album), &from_live_album).is_none());
+        let live_album_song = on(hit("live-album", "Группа крови", 285, TrackKind::Song), "Live in Moscow");
+        assert!(pick_youtube(std::slice::from_ref(&live_album_song), &q("Группа крови")).is_none());
+        assert_eq!(pick_youtube(&[studio_album, live_album_song], &from_live_album).unwrap().id.id, "live-album");
+        let from_studio_album = ResolveQuery { album: Some("Группа крови".into()), ..q("Группа крови") };
+        assert_eq!(pick_youtube(&[on(live, "Live in Moscow"), on(studio, "Группа крови")], &from_studio_album).unwrap().id.id, "studio");
     }
 
     #[test]

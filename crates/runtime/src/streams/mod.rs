@@ -145,7 +145,7 @@ pub(crate) enum Msg {
         /// Where it was looked up: YouTube Music, or Spotify while
         /// YouTube Music is off.
         via: Service,
-        found: resolve::Lookup,
+        found: resolve::Found,
         /// The full Deezer track asked for its ISRC on the way.
         filled: Option<Box<StreamTrack>>,
     },

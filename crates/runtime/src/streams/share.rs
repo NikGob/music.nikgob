@@ -503,6 +503,7 @@ impl Worker {
                     isrc: t.isrc.clone(),
                     exclude: Vec::new(),
                     aliases: Vec::new(),
+                    album: None,
                 };
                 (text, pages, Some(Lookup::Track(q)))
             }
