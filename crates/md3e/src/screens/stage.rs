@@ -1,5 +1,5 @@
 //! The live stage of Settings: the real Now Playing, its
-//! lyrics, the top of Главная or an album's header, drawn a second time by
+//! lyrics, the top of Главная or an album's page, drawn a second time by
 //! the same painters, smaller, under the settings being shown. Not a
 //! picture and not a mock-up: the same functions, called again into a layer
 //! of their own that takes no input and whose commands are dropped.
@@ -24,8 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use egui::{Context, Id, LayerId, Painter, Pos2, Rect, Stroke, Ui, UiBuilder, Vec2, emath::GuiRounding as _, emath::TSTransform, pos2, vec2};
 use nikgob_motion::Spring;
 use nikgob_view::{
-    Command, CoverShape, LyricLine, LyricWord, NpSlot, PlayerView, Prefs, ReleaseCard, ReleaseDay, ReleaseId,
-    ReleaseType, Status, TrackId, TrackRow, ViewState,
+    Command, Cover, CoverShape, LyricLine, LyricWord, NpSlot, PlayerView, Prefs, ReleaseCard, ReleaseDay, ReleaseDetail,
+    ReleaseId, ReleaseType, Status, StreamPage, TrackId, TrackRow, ViewState,
 };
 
 use super::{
@@ -226,7 +226,7 @@ pub enum Scene {
     Lyrics,
     /// The top of Главная.
     Home,
-    /// The header of the playing track's album.
+    /// The playing track's album page.
     Album,
 }
 
@@ -738,7 +738,8 @@ pub(crate) struct Staged {
 
 /// The state the stage draws `scene` from: the player, the lyrics, the
 /// accounts and the dislikes of the real one, `prefs` the settings shown;
-/// Главная and the album only for their own scenes, the library never.
+/// Главная and the album (the album and the service's page open, the
+/// queue) only for their own scenes, the library never.
 ///
 /// The text is the song's own whenever it has one: its timed lines (their
 /// times dropped for «Если нет времени слов»; a pause scene needs a break
@@ -757,7 +758,11 @@ pub(crate) fn light_state(state: &ViewState, prefs: &Prefs, scene: Scene, script
     };
     match scene {
         Scene::Home => v.home = state.home.clone(),
-        Scene::Album => v.release = state.release.clone(),
+        Scene::Album => {
+            v.release = state.release.clone();
+            v.stream_page = state.stream_page.clone();
+            v.queue = state.queue.clone();
+        }
         Scene::Track | Scene::Lyrics => {}
     }
     let playing = v.player.current.as_ref().map(|t| t.id);
@@ -833,58 +838,134 @@ fn drive(v: &mut ViewState, real: &PlayerView, script: Script, t: f32, clock: f3
     }
 }
 
-/// The album the stage's header shows.
-struct Album {
-    card: ReleaseCard,
-    released: Option<ReleaseDay>,
-    count: u32,
-    total: Duration,
-    facts: Vec<String>,
-}
-
-/// The playing track's album: its page's data when that is the album open,
-/// else what the track knows. Without a known day, today stands in, so
-/// every way of showing the date looks different.
-fn album_of(v: &ViewState) -> Album {
+/// The album page the stage shows, never without its list: the playing
+/// track's album when that is the one loaded, else the service's album
+/// open with the playing track on it, else the library album loaded, else
+/// the playing track and its album's songs in the queue. `seed` makes the
+/// ids it has to make up the same on every rebuild. Without a known day,
+/// today stands in, so every way of showing the date looks different.
+fn album_of(v: &ViewState, seed: TrackId) -> ReleaseDetail {
     let current = v.player.current.as_ref();
-    let open = v.release.as_ref().filter(|r| current.is_some_and(|t| t.release_id == Some(r.card.id)));
-    let mut album = match open {
-        Some(r) => Album {
-            card: r.card.clone(),
-            released: r.released,
-            count: if r.lines.is_empty() { r.tracks.len() } else { r.lines.len() } as u32,
-            total: r.total_duration,
-            facts: r.label.iter().chain(&r.quality).cloned().collect(),
-        },
-        None => {
-            let t = current;
-            Album {
-                card: ReleaseCard {
-                    id: t.and_then(|t| t.release_id).unwrap_or_else(ReleaseId::new),
-                    title: t.and_then(|t| t.album.clone()).unwrap_or_else(|| "Альбом".into()),
-                    artist: t.map_or_else(|| "Исполнитель".into(), |t| t.artist.clone()),
-                    artists: t.map(|t| t.artists.clone()).unwrap_or_default(),
-                    year: None,
-                    release_type: ReleaseType::Album,
-                    cover: t.and_then(|t| t.cover.clone()),
-                    local_tracks: 12,
-                    total_tracks: Some(12),
-                    liked: false,
-                    added_at: 0,
-                    better: false,
-                    mine: None,
-                    mine_local: 12,
-                    whole: false,
-                },
-                released: None,
-                count: 12,
-                total: Duration::from_secs(42 * 60),
-                facts: Vec::new(),
-            }
-        }
-    };
+    let loaded = v.release.as_ref().filter(|r| !r.tracks.is_empty());
+    let mut album = loaded
+        .filter(|r| current.is_some_and(|t| t.release_id == Some(r.card.id)))
+        .cloned()
+        .or_else(|| current.and_then(|t| catalogue_album(v, t, seed)))
+        .or_else(|| loaded.cloned())
+        .unwrap_or_else(|| queue_album(v, seed));
     album.released = album.released.filter(|d| d.day.is_some()).or_else(|| Some(today()));
     album
+}
+
+/// An id made up from `seed`, the `n`-th.
+fn made_up(seed: TrackId, n: u128) -> nikgob_core::model::Uuid {
+    nikgob_core::model::Uuid::from_u128(seed.as_uuid().as_u128().wrapping_add(n))
+}
+
+/// Two names the same, case aside.
+fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// A plain album of `tracks`.
+fn plain_album(card: ReleaseCard, tracks: Vec<TrackRow>, total: Duration, released: Option<ReleaseDay>, liked: bool) -> ReleaseDetail {
+    ReleaseDetail {
+        card,
+        tracks,
+        total_duration: total,
+        quality: None,
+        liked,
+        lines: Vec::new(),
+        released,
+        label: None,
+        marks: Vec::new(),
+        partial: false,
+        open_whole: false,
+        added_whole: false,
+        versions_on: false,
+    }
+}
+
+/// The card of an album of `tracks`.
+fn card_of(id: ReleaseId, title: String, artist: String, release_type: ReleaseType, cover: Option<Cover>, tracks: &[TrackRow]) -> ReleaseCard {
+    let local = tracks.iter().filter(|t| t.has_local).count() as u32;
+    ReleaseCard {
+        id,
+        title,
+        artist,
+        artists: Default::default(),
+        year: None,
+        release_type,
+        cover,
+        local_tracks: local,
+        total_tracks: Some(tracks.len() as u32),
+        liked: false,
+        added_at: 0,
+        better: false,
+        mine: None,
+        mine_local: local,
+        whole: false,
+    }
+}
+
+/// The service's album open, as an album page, when the playing track `t`
+/// is on it and its list is in.
+fn catalogue_album(v: &ViewState, t: &TrackRow, seed: TrackId) -> Option<ReleaseDetail> {
+    let p = v.stream_page.as_ref().filter(|p| matches!(p.page, StreamPage::Album(_)) && !p.loading && !p.tracks.is_empty())?;
+    let on_album = t.album.as_deref().is_some_and(|a| same_name(a, &p.title));
+    let playing = p.tracks.iter().position(|r| {
+        r.track == Some(t.id) || (same_name(&r.title, &t.title) && (same_name(&r.artist, &t.artist) || on_album))
+    })?;
+    let id = t.release_id.or(p.release).unwrap_or_else(|| ReleaseId::from_uuid(made_up(seed, 0)));
+    let tracks: Vec<TrackRow> = p
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, r)| TrackRow {
+            id: if i == playing { t.id } else { r.track.unwrap_or_else(|| TrackId::from_uuid(made_up(seed, i as u128 + 1))) },
+            title: r.title.clone(),
+            artist: r.artist.clone(),
+            album: Some(p.title.clone()),
+            release_id: Some(id),
+            artists: Default::default(),
+            disc_no: r.disc_no.max(1),
+            track_no: if r.track_no > 0 { r.track_no } else { i as u32 + 1 },
+            duration: r.duration,
+            quality: None,
+            source: t.source,
+            has_local: r.has_local,
+            liked: r.liked,
+            cover: r.cover_url.clone().map(Cover::web),
+            clip: false,
+            in_library: r.in_library,
+        })
+        .collect();
+    let artist = if p.subtitle.is_empty() { t.artist.clone() } else { p.subtitle.clone() };
+    let cover = p.cover_url.clone().map(Cover::web).or_else(|| t.cover.clone());
+    let mut card = card_of(id, p.title.clone(), artist, p.release_type.unwrap_or(ReleaseType::Album), cover, &tracks);
+    card.year = p.year;
+    card.liked = p.liked;
+    let total = if p.total_duration.is_zero() { tracks.iter().filter_map(|r| r.duration).sum() } else { p.total_duration };
+    Some(plain_album(card, tracks, total, p.released, p.liked))
+}
+
+/// The playing track (the placeholder when nothing plays) and the songs of
+/// its album in the queue, in the album's order.
+fn queue_album(v: &ViewState, seed: TrackId) -> ReleaseDetail {
+    let t = v.player.current.clone().unwrap_or_else(|| placeholder(seed));
+    let same = |r: &TrackRow| r.album.is_some() && r.album == t.album && same_name(&r.artist, &t.artist);
+    let mut tracks = vec![t.clone()];
+    for r in v.queue.prev.iter().chain(&v.queue.next).map(|e| &e.track) {
+        if same(r) && tracks.iter().all(|x| x.id != r.id && (x.disc_no, x.track_no) != (r.disc_no, r.track_no)) {
+            tracks.push(r.clone());
+        }
+    }
+    tracks.sort_by_key(|r| (r.disc_no, r.track_no));
+    let id = t.release_id.unwrap_or_else(|| ReleaseId::from_uuid(made_up(seed, 0)));
+    let title = t.album.clone().unwrap_or_else(|| "Альбом".into());
+    let card = card_of(id, title, t.artist.clone(), ReleaseType::Album, t.cover.clone(), &tracks);
+    let total = tracks.iter().filter_map(|r| r.duration).sum();
+    plain_album(card, tracks, total, None, false)
 }
 
 // ---- The shell's side ---------------------------------------------------
@@ -941,7 +1022,7 @@ struct Cache {
     own: Option<f32>,
     /// The break the pause scenes play.
     brk: (f32, f32),
-    album: Option<Album>,
+    album: Option<ReleaseDetail>,
 }
 
 /// The stage's presentation state, kept by the shell: a [`Chrome`] and a
@@ -1167,7 +1248,7 @@ impl StageUi {
         }
         if rebuild {
             let staged = light_state(state, &req.prefs, scene, req.script, self.track);
-            let album = (scene == Scene::Album).then(|| album_of(&staged.state));
+            let album = (scene == Scene::Album).then(|| album_of(&staged.state, self.track));
             self.cache = Some(Cache {
                 revision: state.revision,
                 prefs: req.prefs.clone(),
@@ -1330,7 +1411,7 @@ fn paint_scene(
     virt: Rect,
     scene: Scene,
     v: &ViewState,
-    album: Option<&Album>,
+    album: Option<&ReleaseDetail>,
     stage: &Stage,
     open: Option<f32>,
     chrome: &mut Chrome,
@@ -1379,17 +1460,7 @@ fn paint_scene(
             let page = Rect::from_min_max(virt.min + vec2(24.0, PAGE_TOP), virt.max - vec2(24.0, 0.0));
             let mut aui = ui.new_child(UiBuilder::new().max_rect(page).id_salt("stage-album"));
             aui.spacing_mut().item_spacing.y = 8.0;
-            let header = pages::detail::ReleaseHeader {
-                card: &a.card,
-                released: a.released,
-                album_date: v.prefs.album_date,
-                count: a.count,
-                local: a.card.local_tracks,
-                counts: true,
-                total: a.total,
-                facts: a.facts.iter().map(String::as_str).collect(),
-            };
-            let drawn = pages::detail::release_top(&mut aui, &a.card.title, &header);
+            let drawn = pages::detail::release_on(&mut aui, a, v, pages, out);
             stage.part(&ctx, Part::AlbumDate, drawn.date);
         }
     }
@@ -1744,6 +1815,127 @@ mod tests {
         let a = light_state(&state, &prefs, Scene::Track, Script::None, track).state;
         let b = light_state(&state, &prefs, Scene::Track, Script::None, track).state;
         assert_eq!(a.player.current.map(|t| t.id), b.player.current.map(|t| t.id));
+    }
+
+    /// A song of the album «LP» by «Band», the `n`-th.
+    fn song(n: u32, release: Option<ReleaseId>) -> TrackRow {
+        TrackRow { title: format!("Song {n}"), artist: "Band".into(), album: Some("LP".into()), release_id: release, track_no: n, ..placeholder(TrackId::new()) }
+    }
+
+    fn queued(entry: u64, track: TrackRow) -> nikgob_view::QueueEntry {
+        nikgob_view::QueueEntry { entry, track, why: None, guest: false }
+    }
+
+    /// The service's page of «LP», `n` songs long.
+    fn service_album(n: u32) -> nikgob_view::StreamPageView {
+        let remote = |id: &str| nikgob_view::RemoteId::new(nikgob_view::Service::Spotify, id);
+        let mut p = nikgob_view::StreamPageView::loading(StreamPage::Album(remote("lp")));
+        p.loading = false;
+        p.title = "LP".into();
+        p.subtitle = "Band".into();
+        p.total_duration = Duration::from_secs(42 * 60);
+        p.tracks = (1..=n)
+            .map(|i| nikgob_view::StreamTrackRow {
+                remote: remote(&format!("t{i}")),
+                title: format!("Song {i}"),
+                artist: "Band".into(),
+                artists: nikgob_view::Credit::single("Band", None),
+                album: Some("LP".into()),
+                album_id: Some(remote("lp")),
+                duration: Some(Duration::from_secs(210)),
+                disc_no: 1,
+                track_no: i,
+                cover_url: None,
+                kind: nikgob_view::TrackKind::Song,
+                playable: true,
+                track: None,
+                liked: false,
+                in_library: false,
+                has_local: false,
+                elsewhere: None,
+                also_on: Vec::new(),
+            })
+            .collect();
+        p
+    }
+
+    /// A library album of `n` songs.
+    fn library_album(id: ReleaseId, n: u32) -> ReleaseDetail {
+        let tracks: Vec<TrackRow> = (1..=n).map(|i| song(i, Some(id))).collect();
+        let card = card_of(id, "LP".into(), "Band".into(), ReleaseType::Album, None, &tracks);
+        plain_album(card, tracks, Duration::from_secs(600), None, false)
+    }
+
+    #[test]
+    fn the_album_on_the_stage_always_has_its_list() {
+        let seed = TrackId::new();
+        let mut v = ViewState::default();
+        // A song of a service, its album not in the library and nothing
+        // loaded: the song itself, and the songs of its album queued.
+        let playing = song(3, None);
+        v.player.current = Some(playing.clone());
+        let a = album_of(&v, seed);
+        assert_eq!(a.tracks.len(), 1);
+        assert_eq!(a.tracks[0].id, playing.id);
+        assert_eq!((a.card.title.as_str(), a.card.total_tracks), ("LP", Some(1)), "no made-up count");
+        let other = TrackRow { album: Some("Other".into()), ..song(2, None) };
+        v.queue.next = vec![queued(1, song(1, None)), queued(2, song(5, None)), queued(3, other)];
+        let a = album_of(&v, seed);
+        assert_eq!(a.tracks.iter().map(|t| t.track_no).collect::<Vec<_>>(), [1, 3, 5]);
+        assert!(a.released.is_some_and(|d| d.day.is_some()), "today stands in");
+
+        // Its album open on the service: that album, the playing row its own.
+        v.stream_page = Some(service_album(12));
+        let a = album_of(&v, seed);
+        assert_eq!(a.tracks.len(), 12);
+        assert_eq!(a.tracks[2].id, playing.id);
+        assert_eq!(a.total_duration, Duration::from_secs(42 * 60));
+        assert_eq!(a.card.local_tracks, 0);
+        // The ids it makes up stay the same on a rebuild.
+        assert_eq!(album_of(&v, seed).tracks[0].id, a.tracks[0].id);
+        assert_eq!(album_of(&v, seed).card.id, a.card.id);
+        // Still loading: not used.
+        v.stream_page.as_mut().unwrap().loading = true;
+        assert_eq!(album_of(&v, seed).tracks.len(), 3);
+        v.stream_page.as_mut().unwrap().loading = false;
+
+        // Another library album loaded: the service's album of the song
+        // still comes first.
+        v.release = Some(library_album(ReleaseId::new(), 4));
+        assert_eq!(album_of(&v, seed).tracks.len(), 12);
+        // Without it, that library album.
+        v.stream_page = None;
+        assert_eq!(album_of(&v, seed).tracks.len(), 4);
+        // An empty one is never shown.
+        v.release.as_mut().unwrap().tracks.clear();
+        assert_eq!(album_of(&v, seed).tracks.len(), 3);
+
+        // The song's own library album loaded: that one, first of all.
+        let id = ReleaseId::new();
+        v.release = Some(library_album(id, 9));
+        v.stream_page = Some(service_album(12));
+        v.player.current = Some(song(3, Some(id)));
+        let a = album_of(&v, seed);
+        assert_eq!((a.card.id, a.tracks.len()), (id, 9));
+    }
+
+    #[test]
+    fn the_album_scene_gets_the_service_page_and_the_queue() {
+        let mut state = ViewState::default();
+        state.stream_page = Some(service_album(2));
+        state.queue.next.push(queued(1, song(1, None)));
+        let prefs = Prefs::default();
+        let track = TrackId::new();
+        for scene in Scene::ALL {
+            let v = light_state(&state, &prefs, scene, Script::None, track).state;
+            assert_eq!(v.stream_page.is_some(), scene == Scene::Album, "{scene:?}");
+            assert_eq!(v.queue.next.len() == 1, scene == Scene::Album, "{scene:?}");
+        }
+        // Nothing plays: the placeholder's album, one song.
+        let v = light_state(&ViewState::default(), &prefs, Scene::Album, Script::None, track).state;
+        let a = album_of(&v, track);
+        assert_eq!(a.tracks.len(), 1);
+        assert_eq!(a.tracks[0].title, "Название песни");
     }
 
     #[test]

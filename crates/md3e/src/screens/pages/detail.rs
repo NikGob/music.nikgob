@@ -6,7 +6,7 @@ use std::time::Duration;
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_view::{
     AlbumDate, ArtistId, Command, Cover, LIKED_PLAYLIST, LikeTarget, MixKey, PlaylistCoverMode, PlaylistDetail, PlaylistId,
-    ReleaseCard, ReleaseDay, ReleaseId, ReleaseLine, ReleaseType, Route, TrackId, ViewState,
+    ReleaseCard, ReleaseDay, ReleaseDetail, ReleaseId, ReleaseLine, ReleaseType, Route, TrackId, ViewState,
 };
 
 use super::{PageState, widgets};
@@ -174,19 +174,18 @@ pub fn release_header(ui: &mut Ui, h: &ReleaseHeader<'_>) -> HeaderOut {
     HeaderOut { nav, date }
 }
 
-/// The top of an album's page without the page: the large bar with its
-/// title (never collapsed) over [`release_header`]. For the settings'
-/// stage.
-pub fn release_top(ui: &mut Ui, title: &str, h: &ReleaseHeader<'_>) -> HeaderOut {
+/// An album's whole page without it being open: the large bar with its
+/// title (never collapsed) over [`release_body`]. For the settings' stage.
+pub fn release_on(ui: &mut Ui, r: &ReleaseDetail, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> HeaderOut {
     let left = ui.cursor().left();
     let top = ui.cursor().top();
     let width = ui.available_width();
     ui.add_space(app_bar::LARGE_HEIGHT);
-    let drawn = release_header(ui, h);
+    let drawn = release_body(ui, r, state, pages, out);
     let m = app_bar::flexible_metrics(0.0, false, true);
     let rect = Rect::from_min_size(pos2(left, top), vec2(width, m.height));
     let mut bar_ui = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("detail-bar-ui"));
-    FlexibleAppBar::new(title)
+    FlexibleAppBar::new(&r.card.title)
         .leading(Icon::ArrowBack, "Назад (Esc)")
         .id_salt("detail-bar")
         .show(&mut bar_ui, 0.0, |_| {});
@@ -206,7 +205,6 @@ pub fn release(
             None
         });
     };
-    let c = &r.card;
     // The album was deleted (or its last track): nothing left to show, go
     // back like ← does.
     // Once: the page may still be drawn while the transition runs.
@@ -219,6 +217,13 @@ pub fn release(
     } else {
         ui.ctx().data_mut(|d| d.remove::<bool>(left));
     }
+    with_bar(ui, &r.card.title, pages, |ui, pages| release_body(ui, r, state, pages, out).nav)
+}
+
+/// An album's page under its bar: the header, the actions and the list.
+fn release_body(ui: &mut Ui, r: &ReleaseDetail, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) -> HeaderOut {
+    let id = r.card.id;
+    let c = &r.card;
     // An album only some songs of which are the user's: «Мои треки» (its
     // lines are those songs) or «Весь альбом» (every place, the versions of
     // its songs the user did not choose as a group of their own), as it
@@ -238,199 +243,199 @@ pub fn release(
     let local = shown.iter().filter(|&&i| r.tracks[i].has_local).count() as u32;
     let lacking = n.saturating_sub(local);
     let length: Duration = if mine { shown.iter().filter_map(|&i| r.tracks[i].duration).sum() } else { r.total_duration };
-    with_bar(ui, &c.title, pages, |ui, pages| {
-        let head = ReleaseHeader {
-            card: c,
-            released: r.released,
-            album_date: state.prefs.album_date,
-            count: n,
-            local,
-            counts: !(r.partial && whole),
-            total: length,
-            facts: r.label.iter().chain(&r.quality).map(String::as_str).collect(),
-        };
-        let mut nav = release_header(ui, &head).nav;
-        ui.add_space(16.0);
+    let head = ReleaseHeader {
+        card: c,
+        released: r.released,
+        album_date: state.prefs.album_date,
+        count: n,
+        local,
+        counts: !(r.partial && whole),
+        total: length,
+        facts: r.label.iter().chain(&r.quality).map(String::as_str).collect(),
+    };
+    let drawn = release_header(ui, &head);
+    let mut nav = drawn.nav;
+    ui.add_space(16.0);
 
-        // Actions: standard button group, "Слушать" is the only filled button.
-        // «Весь альбом» of an album only some songs of which are the user's
-        // lacks nothing; such an album can be added to the library whole.
-        let missing = lacking > 0 && !(r.partial && whole);
-        let add_whole = r.partial;
-        let query = format!("{} {}", c.artist, c.title);
-        let index = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
-        // The album's «Хочу скачать» item, if it is on its way; of the
-        // user's songs of an album only some of which are theirs, the item
-        // of one of them without a file.
-        let wish = if mine {
-            shown.iter().filter(|&&i| !r.tracks[i].has_local).find_map(|&i| index.of_track(Some(r.tracks[i].id), None))
-        } else {
-            index.of_release(id)
-        };
-        let dl_label = match wish {
-            Some(nikgob_view::WishlistStatus::Downloading) => "Качается",
-            Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm)
-                if !state.prefs.prowlarr_configured =>
-            {
-                "Ждёт торренты"
-            }
-            Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm) => "В очереди",
-            Some(nikgob_view::WishlistStatus::NoTorrent | nikgob_view::WishlistStatus::Failed) => "Не нашлось",
-            // A narrow page keeps the row on one line (the menu says more).
-            _ if ui.available_width() < 640.0 => "Скачать",
-            _ => "Скачать недостающие",
-        };
-        // «Скачать недостающие · 1»: as many as the list shows without a file.
-        let dl_label = if matches!(dl_label, "Скачать недостающие" | "Скачать") {
-            format!("{dl_label} · {lacking}")
-        } else {
-            dl_label.to_owned()
-        };
-        let mut members: Vec<Member> = vec![
-            Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
-            widgets::shuffle_member(ui),
-        ];
-        // By hand, through the indexer: only with a torrent source set up
-        // (a search for the whole album: not of the user's songs alone).
-        let torrents = state.prefs.prowlarr_configured && !mine;
-        if add_whole {
-            let label = if ui.available_width() < 640.0 { "Добавить" } else { widgets::ADD_ALBUM };
-            members.push(Button::new(label).icon(Icon::LibraryMusic).size(Size::M).style(Style::Tonal).into());
+    // Actions: standard button group, "Слушать" is the only filled button.
+    // «Весь альбом» of an album only some songs of which are the user's
+    // lacks nothing; such an album can be added to the library whole.
+    let missing = lacking > 0 && !(r.partial && whole);
+    let add_whole = r.partial;
+    let query = format!("{} {}", c.artist, c.title);
+    let index = widgets::WishIndex::of(ui.ctx(), &state.downloads.wishlist);
+    // The album's «Хочу скачать» item, if it is on its way; of the
+    // user's songs of an album only some of which are theirs, the item
+    // of one of them without a file.
+    let wish = if mine {
+        shown.iter().filter(|&&i| !r.tracks[i].has_local).find_map(|&i| index.of_track(Some(r.tracks[i].id), None))
+    } else {
+        index.of_release(id)
+    };
+    let dl_label = match wish {
+        Some(nikgob_view::WishlistStatus::Downloading) => "Качается",
+        Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm)
+            if !state.prefs.prowlarr_configured =>
+        {
+            "Ждёт торренты"
         }
-        if missing && torrents {
-            members.push(
-                SplitButton::new("rel-download", &dl_label)
-                    .icon(Icon::Download)
-                    .size(Size::M)
-                    .style(Style::Tonal)
-                    .item(MenuItem::new(super::PICK_RELEASE).icon(Icon::Search))
-                    .item(MenuItem::new("Заменить на FLAC…").icon(Icon::Search))
-                    .into(),
-            );
-        } else if missing {
-            members.push(Button::new(&dl_label).icon(Icon::Download).size(Size::M).style(Style::Tonal).into());
-        }
+        Some(nikgob_view::WishlistStatus::New | nikgob_view::WishlistStatus::Searching | nikgob_view::WishlistStatus::Confirm) => "В очереди",
+        Some(nikgob_view::WishlistStatus::NoTorrent | nikgob_view::WishlistStatus::Failed) => "Не нашлось",
+        // A narrow page keeps the row on one line (the menu says more).
+        _ if ui.available_width() < 640.0 => "Скачать",
+        _ => "Скачать недостающие",
+    };
+    // «Скачать недостающие · 1»: as many as the list shows without a file.
+    let dl_label = if matches!(dl_label, "Скачать недостающие" | "Скачать") {
+        format!("{dl_label} · {lacking}")
+    } else {
+        dl_label.to_owned()
+    };
+    let mut members: Vec<Member> = vec![
+        Button::new("Слушать").icon(Icon::PlayArrow).size(Size::M).style(Style::Filled).into(),
+        widgets::shuffle_member(ui),
+    ];
+    // By hand, through the indexer: only with a torrent source set up
+    // (a search for the whole album: not of the user's songs alone).
+    let torrents = state.prefs.prowlarr_configured && !mine;
+    if add_whole {
+        let label = if ui.available_width() < 640.0 { "Добавить" } else { widgets::ADD_ALBUM };
+        members.push(Button::new(label).icon(Icon::LibraryMusic).size(Size::M).style(Style::Tonal).into());
+    }
+    if missing && torrents {
         members.push(
-            IconButton::new(Icon::Favorite).size(Size::M).style(Style::Tonal).selected(r.liked).tooltip(widgets::album_like_label(r.liked)).into(),
+            SplitButton::new("rel-download", &dl_label)
+                .icon(Icon::Download)
+                .size(Size::M)
+                .style(Style::Tonal)
+                .item(MenuItem::new(super::PICK_RELEASE).icon(Icon::Search))
+                .item(MenuItem::new("Заменить на FLAC…").icon(Icon::Search))
+                .into(),
         );
-        members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
-        let row = ButtonRow::new("rel-actions", Size::M).show(ui, members);
-        let resp = &row.responses;
-        let play = |shuffle: bool| page_play(id, r.partial, whole, shuffle);
-        if resp[0].clicked() {
-            out.push(play(false));
+    } else if missing {
+        members.push(Button::new(&dl_label).icon(Icon::Download).size(Size::M).style(Style::Tonal).into());
+    }
+    members.push(
+        IconButton::new(Icon::Favorite).size(Size::M).style(Style::Tonal).selected(r.liked).tooltip(widgets::album_like_label(r.liked)).into(),
+    );
+    members.push(IconButton::new(Icon::MoreVert).size(Size::M).style(Style::Tonal).tooltip("Ещё").into());
+    let row = ButtonRow::new("rel-actions", Size::M).show(ui, members);
+    let resp = &row.responses;
+    let play = |shuffle: bool| page_play(id, r.partial, whole, shuffle);
+    if resp[0].clicked() {
+        out.push(play(false));
+    }
+    if resp[1].clicked() {
+        out.push(play(true));
+    }
+    let at = 2 + usize::from(add_whole);
+    if add_whole && resp[2].clicked() {
+        out.push(Command::AddWholeAlbum { id, on: true });
+    }
+    let off = usize::from(add_whole) + usize::from(missing);
+    // «Скачать недостающие»: one album item of «Хочу скачать» (it picks
+    // the release and the files itself), of the user's songs an item
+    // each; once on its way, the button opens it. By hand: the torrent
+    // search view.
+    if missing && resp[at].clicked() {
+        match wish {
+            Some(nikgob_view::WishlistStatus::Waiting | nikgob_view::WishlistStatus::Dismissed) | None => {
+                out.push(Command::DownloadRelease(id));
+            }
+            Some(_) => nav = Some(Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
         }
-        if resp[1].clicked() {
-            out.push(play(true));
+    }
+    match row.picked {
+        Some((i, 0)) if i == at => out.push(Command::SearchTorrents(query.clone())),
+        Some((i, 1)) if i == at => out.push(Command::SearchTorrents(format!("{query} FLAC"))),
+        _ => {}
+    }
+    if resp[2 + off].clicked() {
+        out.push(Command::Like(LikeTarget::Release(id), !r.liked));
+    }
+    // «В плейлист…»: the songs the page shows.
+    let ids: Vec<_> = shown.iter().map(|&i| r.tracks[i].id).collect();
+    let more = &resp[3 + off];
+    // The same actions as the album's right-click menu
+    // ([`widgets::release_rows`]), less the buttons left of it; and
+    // what the album opens on, and an album added whole back to the
+    // user's songs.
+    let mut rows = widgets::release_rows(c, true);
+    // «Слушать» of «Весь альбом» already plays it whole.
+    if whole {
+        rows.retain(|x| !matches!(x, widgets::Row::Item(widgets::ReleaseAct::PlayWhole, _)));
+    }
+    if r.added_whole {
+        let at = rows.iter().position(|x| matches!(x, widgets::Row::Item(widgets::ReleaseAct::Playlist, _))).map_or(rows.len(), |p| p + 1);
+        rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new(widgets::KEEP_MINE).icon(Icon::LibraryMusic)));
+    }
+    let (menu, acts) = widgets::menu_of("rel-more", rows);
+    match menu.attach(more).and_then(|i| acts.get(i).copied()) {
+        Some(widgets::ReleaseAct::Playlist) => {
+            pages.pending_add = Some(ids.clone());
+            pages.pending_add_anchor = Some(more.rect);
         }
-        let at = 2 + usize::from(add_whole);
-        if add_whole && resp[2].clicked() {
-            out.push(Command::AddWholeAlbum { id, on: true });
-        }
-        let off = usize::from(add_whole) + usize::from(missing);
-        // «Скачать недостающие»: one album item of «Хочу скачать» (it picks
-        // the release and the files itself), of the user's songs an item
-        // each; once on its way, the button opens it. By hand: the torrent
-        // search view.
-        if missing && resp[at].clicked() {
-            match wish {
-                Some(nikgob_view::WishlistStatus::Waiting | nikgob_view::WishlistStatus::Dismissed) | None => {
-                    out.push(Command::DownloadRelease(id));
-                }
-                Some(_) => nav = Some(Route::Downloads(nikgob_view::DownloadsTab::Wishlist)),
+        Some(a) => {
+            if let Some(r) = widgets::release_apply(ui.ctx(), a, c, out) {
+                nav = Some(r);
             }
         }
-        match row.picked {
-            Some((i, 0)) if i == at => out.push(Command::SearchTorrents(query.clone())),
-            Some((i, 1)) if i == at => out.push(Command::SearchTorrents(format!("{query} FLAC"))),
-            _ => {}
-        }
-        if resp[2 + off].clicked() {
-            out.push(Command::Like(LikeTarget::Release(id), !r.liked));
-        }
-        // «В плейлист…»: the songs the page shows.
-        let ids: Vec<_> = shown.iter().map(|&i| r.tracks[i].id).collect();
-        let more = &resp[3 + off];
-        // The same actions as the album's right-click menu
-        // ([`widgets::release_rows`]), less the buttons left of it; and
-        // what the album opens on, and an album added whole back to the
-        // user's songs.
-        let mut rows = widgets::release_rows(c, true);
-        // «Слушать» of «Весь альбом» already plays it whole.
-        if whole {
-            rows.retain(|x| !matches!(x, widgets::Row::Item(widgets::ReleaseAct::PlayWhole, _)));
-        }
-        if r.added_whole {
-            let at = rows.iter().position(|x| matches!(x, widgets::Row::Item(widgets::ReleaseAct::Playlist, _))).map_or(rows.len(), |p| p + 1);
-            rows.insert(at, widgets::Row::Item(widgets::ReleaseAct::KeepMine, MenuItem::new(widgets::KEEP_MINE).icon(Icon::LibraryMusic)));
-        }
-        let (menu, acts) = widgets::menu_of("rel-more", rows);
-        match menu.attach(more).and_then(|i| acts.get(i).copied()) {
-            Some(widgets::ReleaseAct::Playlist) => {
-                pages.pending_add = Some(ids.clone());
-                pages.pending_add_anchor = Some(more.rect);
-            }
-            Some(a) => {
-                if let Some(r) = widgets::release_apply(ui.ctx(), a, c, out) {
-                    nav = Some(r);
-                }
-            }
-            None => {}
+        None => {}
+    }
+    ui.add_space(16.0);
+    // «Мои треки · 2 │ Весь альбом · 9».
+    if r.partial {
+        let all = r.all_lines().0.len();
+        let labels = [format!("Мои треки · {}", r.mine_lines().len()), format!("Весь альбом · {all}")];
+        let labels = [labels[0].as_str(), labels[1].as_str()];
+        if let Some(i) = ConnectedGroup::new(("rel-view-group", id), &labels).show(ui, usize::from(whole)) {
+            widgets::show_whole(ui.ctx(), id, i == 1);
         }
         ui.add_space(16.0);
-        // «Мои треки · 2 │ Весь альбом · 9».
-        if r.partial {
-            let all = r.all_lines().0.len();
-            let labels = [format!("Мои треки · {}", r.mine_lines().len()), format!("Весь альбом · {all}")];
-            let labels = [labels[0].as_str(), labels[1].as_str()];
-            if let Some(i) = ConnectedGroup::new(("rel-view-group", id), &labels).show(ui, usize::from(whole)) {
-                widgets::show_whole(ui.ctx(), id, i == 1);
-            }
-            ui.add_space(16.0);
+    }
+    // «Не скачано · 1»: only the lines without a file (the album has
+    // some files; with none every line is one).
+    let only_key = Id::new(("rel-only-missing", id));
+    let mut only = ui.ctx().data(|d| d.get_temp::<bool>(only_key).unwrap_or(false));
+    if local > 0 && missing {
+        let chip = FilterChip::new(format!("Не скачано · {lacking}"), only).id_salt("rel-only-missing");
+        if ui.add(chip).clicked() {
+            only = !only;
+            ui.ctx().data_mut(|d| d.insert_temp(only_key, only));
         }
-        // «Не скачано · 1»: only the lines without a file (the album has
-        // some files; with none every line is one).
-        let only_key = Id::new(("rel-only-missing", id));
-        let mut only = ui.ctx().data(|d| d.get_temp::<bool>(only_key).unwrap_or(false));
-        if local > 0 && missing {
-            let chip = FilterChip::new(format!("Не скачано · {lacking}"), only).id_salt("rel-only-missing");
-            if ui.add(chip).clicked() {
-                only = !only;
-                ui.ctx().data_mut(|d| d.insert_temp(only_key, only));
-            }
-            ui.add_space(8.0);
-        } else {
-            only = false;
-        }
-        let versions_at = versions_at.filter(|_| !only);
-        let lines: Vec<ReleaseLine> = if only {
-            lines
-                .into_iter()
-                .filter(|l| match *l {
-                    ReleaseLine::Track(i) => !r.tracks[i].has_local,
-                    ReleaseLine::Hole { .. } => true,
-                })
-                .collect()
-        } else {
-            lines
-        };
-        // The songs it lacks (from a service's tracklist): quieter, «стрим»;
-        // a place no track has: «Трек 7 · нет файла». «Весь альбом» of an
-        // album only some songs of which are the user's: each song in or
-        // out of their songs, a place without a track no download of its
-        // own.
-        let opts = TrackListOpts {
-            mark_missing: true,
-            lines: Some(&lines),
-            album_marks: (r.partial && whole).then_some(r.marks.as_slice()),
-            versions_at,
-            versions_on: r.versions_on,
-            no_hole_download: r.partial,
-            ..Default::default()
-        };
-        let from = if r.partial { PlayFrom::ReleaseAs(id, whole) } else { PlayFrom::Release(id) };
-        widgets::track_list_ext(ui, "release", &r.tracks, Lead::Number, &from, opts, state, pages, out).or(nav)
-    })
+        ui.add_space(8.0);
+    } else {
+        only = false;
+    }
+    let versions_at = versions_at.filter(|_| !only);
+    let lines: Vec<ReleaseLine> = if only {
+        lines
+            .into_iter()
+            .filter(|l| match *l {
+                ReleaseLine::Track(i) => !r.tracks[i].has_local,
+                ReleaseLine::Hole { .. } => true,
+            })
+            .collect()
+    } else {
+        lines
+    };
+    // The songs it lacks (from a service's tracklist): quieter, «стрим»;
+    // a place no track has: «Трек 7 · нет файла». «Весь альбом» of an
+    // album only some songs of which are the user's: each song in or
+    // out of their songs, a place without a track no download of its
+    // own.
+    let opts = TrackListOpts {
+        mark_missing: true,
+        lines: Some(&lines),
+        album_marks: (r.partial && whole).then_some(r.marks.as_slice()),
+        versions_at,
+        versions_on: r.versions_on,
+        no_hole_download: r.partial,
+        ..Default::default()
+    };
+    let from = if r.partial { PlayFrom::ReleaseAs(id, whole) } else { PlayFrom::Release(id) };
+    let nav = widgets::track_list_ext(ui, "release", &r.tracks, Lead::Number, &from, opts, state, pages, out).or(nav);
+    HeaderOut { nav, date: drawn.date }
 }
 
 /// What «Слушать» (`shuffle`: «Перемешать») of an album's page plays: what
