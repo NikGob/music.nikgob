@@ -34,8 +34,9 @@ const RETRY_MS: i64 = 14 * 86_400_000;
 const BATCH: usize = 12;
 
 fn key(id: ReleaseId) -> String {
-    // `v2`: found with the album's artist (see [`Want::artists`]).
-    format!("cover_hd.v2.{id}")
+    // `v2`: found with the album's artist (see [`Want::artists`]); `v3`:
+    // never a single's art for an album of more songs (see [`Want::takes`]).
+    format!("cover_hd.v3.{id}")
 }
 
 /// The larger cover found for `id`, if one was.
@@ -84,27 +85,80 @@ pub(crate) struct Want {
 }
 
 impl Want {
-    /// A single or an EP itself, or one song with nothing that says more:
-    /// a single of its title may stand for it.
-    fn single(&self) -> bool {
-        matches!(self.release_type, ReleaseType::Single | ReleaseType::Ep) || self.tracks <= 1
+    fn wants_single(&self) -> bool {
+        matches!(self.release_type, ReleaseType::Single | ReleaseType::Ep)
+    }
+
+    /// One song and no count: nothing tells it from a single.
+    fn few(&self) -> bool {
+        self.tracks <= 1
     }
 
     /// Whether a service's release of `kind` with `n` songs may give its
-    /// art: an album of several songs takes nothing of one song, and a
-    /// single or an EP only of as many songs as it has (the library files
-    /// many a single of three songs as an album).
+    /// art. An album of several songs takes nothing of fewer songs than it
+    /// has: no single or EP short of them (the library files many a single
+    /// of three songs as an album), no album of one song. A count the
+    /// service does not tell is no mismatch.
     pub(crate) fn takes(&self, kind: ReleaseType, n: Option<u32>) -> bool {
-        if self.single() {
+        if self.wants_single() || self.few() {
             return true;
         }
-        if n.is_some_and(|n| n <= 1) {
-            return false;
-        }
         match kind {
-            ReleaseType::Single | ReleaseType::Ep => n.is_some_and(|n| n >= self.tracks),
-            ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => true,
+            ReleaseType::Single | ReleaseType::Ep => n.is_none_or(|n| n >= self.tracks),
+            ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => n.is_none_or(|n| n > 1),
         }
+    }
+
+    /// Like with like: an album's art for an album, a single's for a
+    /// single, an EP's for an EP.
+    fn prefers(&self, kind: ReleaseType) -> bool {
+        let class = |t: ReleaseType| match t {
+            ReleaseType::Single => 0,
+            ReleaseType::Ep => 1,
+            ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => 2,
+        };
+        class(kind) == class(self.release_type)
+    }
+}
+
+/// A MusicBrainz primary type as a release type (none: an album).
+fn mb_kind(primary: Option<&str>) -> ReleaseType {
+    match primary.map(str::to_ascii_lowercase).as_deref() {
+        Some("single") => ReleaseType::Single,
+        Some("ep") => ReleaseType::Ep,
+        None | Some("album") => ReleaseType::Album,
+        Some(_) => ReleaseType::Other,
+    }
+}
+
+/// Whether the MusicBrainz release (else group) `w` is linked to may give
+/// its art: its kind and songs fit (see [`Want::takes`]). An import that
+/// took an album for its first single linked the single. A single, an EP
+/// or an album of one song needs no look.
+async fn mb_fits(meta: &Metadata, w: &Want) -> Result<bool, String> {
+    if w.wants_single() || w.few() {
+        return Ok(true);
+    }
+    let release = if let Some(id) = &w.mbid {
+        meta.musicbrainz.lookup_release(id).await.map(Some)
+    } else if let Some(group) = &w.group_mbid {
+        meta.musicbrainz.browse_release_group_releases(group, 1, 0).await.map(|p| p.items.into_iter().next())
+    } else {
+        return Ok(true);
+    };
+    match release {
+        Ok(Some(r)) => {
+            let kind = mb_kind(r.release_group.as_ref().and_then(|g| g.primary_type.as_deref()));
+            let n: u32 = r.media.iter().map(|m| m.track_count).sum();
+            let fits = w.takes(kind, (n > 0).then_some(n));
+            if !fits {
+                log::debug!("the MusicBrainz release linked to «{}» is a {kind:?} of {n} songs", w.title);
+            }
+            Ok(fits)
+        }
+        Ok(None) => Ok(false),
+        Err(e) if crate::better_covers::meta_trouble(&e) => Err(e.to_string()),
+        Err(_) => Ok(false),
     }
 }
 
@@ -118,15 +172,17 @@ pub(crate) fn deezer_kind(record_type: Option<&str>) -> ReleaseType {
     }
 }
 
-/// The cover of the first of `found` that is `w`: its title, by its
-/// artist, of a kind that may stand for it ([`Want::takes`]).
+/// The cover of the first of `found` that is `w` (its title, by its
+/// artist, of a kind that may stand for it, [`Want::takes`]) and of its own
+/// kind, else of the first that is `w` at all.
 fn pick(w: &Want, found: Vec<StreamAlbum>) -> Option<String> {
     let by_them = |a: &StreamAlbum| w.artists.is_empty() || a.artists.iter().any(|x| crate::better_covers::names_artist(&w.artists, &x.name));
-    found
+    let fits: Vec<StreamAlbum> = found
         .into_iter()
-        .find(|a| same_album(&w.title, &a.title) && by_them(a) && w.takes(a.release_type, a.total_tracks))
-        .and_then(|a| a.cover_url)
-        .filter(|u| !u.is_empty())
+        .filter(|a| same_album(&w.title, &a.title) && by_them(a) && w.takes(a.release_type, a.total_tracks))
+        .collect();
+    let at = fits.iter().position(|a| w.prefers(a.release_type)).unwrap_or(0);
+    fits.into_iter().nth(at).and_then(|a| a.cover_url).filter(|u| !u.is_empty())
 }
 
 /// Words that tell one part of a series from another: they must be on
@@ -190,9 +246,11 @@ pub(crate) fn same_album(ours: &str, theirs: &str) -> bool {
 /// The url of a larger cover of `w`, if a source has one.
 pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want) -> Result<Option<String>, String> {
     if let Some(meta) = meta {
+        let linked = if w.mbid.is_some() || w.group_mbid.is_some() { mb_fits(meta, w).await? } else { false };
         for target in [w.mbid.clone().map(CoverTarget::Release), w.group_mbid.clone().map(CoverTarget::ReleaseGroup)]
             .into_iter()
             .flatten()
+            .filter(|_| linked)
         {
             match meta.cover_art.front_cover(&target).await {
                 Ok(Some(c)) if c.thumbnails.contains_key("1200") => return Ok(Some(c.url_for(1200).to_owned())),
@@ -267,6 +325,10 @@ impl Worker {
                 continue;
             }
             let Ok(Some(r)) = self.lib.get_release(id) else { continue };
+            // Its cover was refreshed by hand.
+            if crate::cover_refresh::decided(&self.lib, id, r.cover_ref.as_deref()) {
+                continue;
+            }
             // Only a file cover (a service's is as large as it comes).
             let Some(cover) = r.cover_ref.as_deref().filter(|c| !nikgob_library::is_web_ref(c)) else { continue };
             if side(&self.res.path(cover)).is_some_and(|s| s >= HD_SIDE) {
@@ -292,7 +354,11 @@ impl Worker {
                     Ok(Ok(found)) => {
                         failures = 0;
                         let url = found.unwrap_or_default();
-                        let _ = lib.cache_put(&key(w.id), now_ms(), &url);
+                        // A refresh by hand since this began has the last word.
+                        let decision = crate::cover_refresh::decision_key(w.id);
+                        if !lib.cache_put_unless(&key(w.id), now_ms(), &url, &decision, now).unwrap_or(false) {
+                            continue;
+                        }
                         if url.is_empty() {
                             log::debug!("no larger cover of «{}»", w.title);
                         } else {
@@ -424,11 +490,18 @@ mod tests {
         };
         assert_eq!(pick(&want(ReleaseType::Album, 11), hits()).as_deref(), Some("https://x/album.jpg"));
         assert_eq!(pick(&want(ReleaseType::Single, 1), hits()).as_deref(), Some("https://x/single.jpg"));
-        // One song and nothing that says more: as before, the first.
-        assert_eq!(pick(&want(ReleaseType::Album, 1), hits()).as_deref(), Some("https://x/single.jpg"));
+        // The album listed first: a single still takes the single's.
+        let mut reversed = hits();
+        reversed.reverse();
+        assert_eq!(pick(&want(ReleaseType::Single, 1), reversed).as_deref(), Some("https://x/single.jpg"));
+        // An album of which one song came in, no count: an album's art.
+        assert_eq!(pick(&want(ReleaseType::Album, 1), hits()).as_deref(), Some("https://x/album.jpg"));
         // An EP the library files as an album: the EP of as many songs.
         assert_eq!(pick(&want(ReleaseType::Album, 3), hits()[..2].to_vec()).as_deref(), Some("https://x/ep.jpg"));
         assert_eq!(pick(&want(ReleaseType::Album, 11), hits()[..2].to_vec()), None);
+        // A YouTube EP tells no count: no mismatch.
+        let untold = vec![found("Рисунки", ReleaseType::Ep, None, "yt-ep")];
+        assert_eq!(pick(&want(ReleaseType::Album, 5), untold).as_deref(), Some("https://x/yt-ep.jpg"));
     }
 
     /// The Deezer album linked to an album of several songs is its single
@@ -439,7 +512,7 @@ mod tests {
         assert!(!album.takes(deezer_kind(Some("single")), Some(1)));
         assert!(!album.takes(deezer_kind(Some("album")), Some(1)), "an album of one song");
         assert!(!album.takes(deezer_kind(Some("ep")), Some(4)));
-        assert!(!album.takes(deezer_kind(Some("single")), None), "a single of songs untold");
+        assert!(album.takes(deezer_kind(Some("single")), None), "a count untold is no mismatch");
         assert!(album.takes(deezer_kind(Some("album")), Some(9)));
         // A single of three songs the library files as an album of three.
         assert!(want(ReleaseType::Album, 3).takes(deezer_kind(Some("single")), Some(3)));
@@ -447,5 +520,10 @@ mod tests {
         assert!(album.takes(deezer_kind(None), None));
         assert!(want(ReleaseType::Single, 1).takes(deezer_kind(Some("single")), Some(1)));
         assert!(want(ReleaseType::Ep, 4).takes(deezer_kind(Some("single")), Some(2)));
+        // What MusicBrainz says of a linked release.
+        assert!(!album.takes(mb_kind(Some("Single")), Some(1)));
+        assert!(!album.takes(mb_kind(Some("EP")), Some(4)));
+        assert!(album.takes(mb_kind(Some("Album")), Some(9)));
+        assert!(album.takes(mb_kind(None), None));
     }
 }

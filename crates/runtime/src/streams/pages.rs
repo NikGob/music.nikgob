@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{EventContext, LikeTarget, TrackId};
 use nikgob_core::streaming::{
-    RemoteId, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamTrack, join_names,
+    EntityKind, RemoteId, Service, StreamAlbum, StreamArtist, StreamError, StreamPlaylist, StreamTrack, join_names,
 };
 use nikgob_view::{self as v, Command};
 
@@ -256,23 +256,41 @@ impl Worker {
         self.fetch_page(key, Waiter::Page { seq, page }, svc);
     }
 
-    /// «Обновить обложку» of a service's album: its page is fetched again
-    /// (now, when it is open), and so is the discography of the open
-    /// artist that shows it.
+    /// «Обновить обложку» of a service's album: what the service, the page
+    /// cache and the UI keep of it and of its cover goes, its page is
+    /// fetched again (now, when it is open), and so is the discography of
+    /// the open artist that shows it (the artist too, in every service).
     pub(crate) fn refresh_stream_album_cover(&mut self, id: RemoteId) {
+        let mut covers: Vec<String> = self.streaming.pages.album(&id).and_then(|a| a.cover_url.clone()).into_iter().collect();
         self.streaming.pages.stale_album(&id);
-        let page = self.state.read().stream_page.as_ref().map(|p| p.page.clone());
-        if let Some(page @ v::StreamPage::Album(_)) = page.filter(|p| *p.remote() == id) {
+        if let Some(svc) = self.service(id.service) {
+            svc.forget(EntityKind::Album, &id.id);
+        }
+        let (page, artist) = {
+            let s = self.state.read();
+            let page = s.stream_page.as_ref().filter(|p| *p.page.remote() == id).map(|p| (p.page.clone(), p.cover_url.clone()));
+            let artist = s.artist.as_ref().and_then(|a| {
+                let card = a.discography.albums.iter().find(|c| c.remote == id)?;
+                Some((a.card.id, card.cover_url.clone()))
+            });
+            (page, artist)
+        };
+        covers.extend(page.as_ref().and_then(|(_, c)| c.clone()));
+        covers.extend(artist.as_ref().and_then(|(_, c)| c.clone()));
+        covers.sort_unstable();
+        covers.dedup();
+        if !covers.is_empty() {
+            self.publish(|s| s.refetch_covers = (s.refetch_covers.0 + 1, covers));
+        }
+        if let Some((page @ v::StreamPage::Album(_), _)) = page {
             self.load_stream(page);
         }
-        let artist = self
-            .state
-            .read()
-            .artist
-            .as_ref()
-            .filter(|a| a.discography.albums.iter().any(|c| c.remote == id))
-            .map(|a| a.card.id);
-        if let Some(artist) = artist {
+        if let Some((artist, _)) = artist {
+            for remote in self.lib.external_ids(EntityKind::Artist, *artist.as_uuid()).unwrap_or_default() {
+                if let Some(svc) = self.service(remote.service) {
+                    svc.forget(EntityKind::Artist, &remote.id);
+                }
+            }
             let _ = self.lib.cache_drop(&super::discography::cache_key(artist));
             self.load_discography(artist, false);
         }

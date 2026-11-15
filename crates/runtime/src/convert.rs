@@ -258,7 +258,12 @@ impl Resolver {
                 return v::Cover::web(r);
             }
             let path = self.path(&r);
-            let ambient = path.with_file_name("ambient.png");
+            // A cover of the app's covers folder has its texture by its own
+            // name; an album folder's, `ambient.png`.
+            let ambient = [path.with_extension("ambient.png"), path.with_file_name("ambient.png")]
+                .into_iter()
+                .find(|a| a.exists())
+                .unwrap_or_else(|| path.with_file_name("ambient.png"));
             let seeds = self
                 .seeds
                 .get_or_insert_with(|| self.lib.palette_seeds().unwrap_or_default());

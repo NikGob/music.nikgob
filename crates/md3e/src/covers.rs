@@ -387,6 +387,35 @@ pub fn refresh(ctx: &Context) {
     }
 }
 
+/// Put before a web cover's url in a bytes loader's `forget`: what is kept
+/// of it goes from the disk too, it is asked anew ([`refetch`]).
+pub const REFETCH: &str = "refetch:";
+
+/// The web cover at `url` is asked anew («Обновить обложку»): every size
+/// of it held is forgotten at the end of the frame, and so is its seed; the
+/// bytes loaders drop what they keep of each url it is asked at, on disk
+/// too ([`REFETCH`]).
+pub fn refetch(ctx: &Context, url: &str) {
+    let Some(shared) = shared(ctx) else { return };
+    let held: Vec<String> = lock(&shared.lru).used.iter().filter(|(_, u)| u.origin == url).map(|(k, _)| k.clone()).collect();
+    lock(&shared.stale).extend(held);
+    lock(&shared.web_seeds).remove(url);
+    let mut asked: Vec<String> = TIERS
+        .iter()
+        .map(|t| Some(*t))
+        .chain([None])
+        .map(|t| base(&sized(&shared, url, t).0).to_owned())
+        .collect();
+    asked.sort_unstable();
+    asked.dedup();
+    for l in ctx.loaders().bytes.lock().iter() {
+        for a in &asked {
+            l.forget(&format!("{REFETCH}{a}"));
+        }
+    }
+    ctx.request_repaint();
+}
+
 /// The colour-scheme seed of the web cover at `url`, once a size of it has
 /// been decoded; `None` before, or for a cover too grey for one.
 pub fn web_seed(ctx: &Context, url: &str) -> Option<u32> {

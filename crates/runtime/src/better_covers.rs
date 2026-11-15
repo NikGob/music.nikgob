@@ -78,8 +78,9 @@ impl Target {
         match self {
             // `v2`: an album found by its title alone took the art of
             // another artist's («There is a reason (RUS COVER)» got «The
-            // Rush – Is the Reason»): asked again with the artist.
-            Self::Release(id) => format!("cover_better.v2.{id}"),
+            // Rush – Is the Reason»): asked again with the artist. `v3`:
+            // never a single's art for an album of more songs.
+            Self::Release(id) => format!("cover_better.v3.{id}"),
             Self::Track(id) => format!("cover_better.track.{id}"),
         }
     }
@@ -148,6 +149,9 @@ pub(crate) struct Want {
     /// A song's match counts: a clip, a single. An album takes only the
     /// art of an album of its title.
     pub song_ok: bool,
+    /// When the lookup was made (unix ms): a refresh by hand since then has
+    /// the last word ([`crate::cover_refresh::decision_key`]).
+    pub asked_at: i64,
 }
 
 fn folded(s: &str) -> String {
@@ -528,7 +532,8 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     let target = Target::Release(id);
     let r = lib.get_release(id).ok().flatten()?;
     let current = r.cover_ref.clone();
-    if !due(lib, target, current.as_deref(), now) {
+    // Refreshed by hand: its cover stays.
+    if !due(lib, target, current.as_deref(), now) || crate::cover_refresh::decided(lib, id, current.as_deref()) {
         return None;
     }
     let dims = current.as_deref().filter(|c| !is_web_ref(c)).and_then(|c| {
@@ -558,6 +563,7 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     };
     want.target = Some(target);
     want.current = current;
+    want.asked_at = now;
     let mut own = vec![row.id];
     own.extend(tracks.iter().take(2).map(|t| t.id).filter(|t| *t != row.id));
     widen(lib, spellings.get_or_insert_with(|| Spellings::of(lib)), &mut want, &own);
@@ -622,7 +628,7 @@ where
     let mut done = Swept { asked: 0, found: 0, stopped: None };
     for w in wants {
         let Some(target) = w.target else { continue };
-        let (current, title) = (w.current.clone(), w.titles.first().cloned());
+        let (current, title, since) = (w.current.clone(), w.titles.first().cloned(), w.asked_at);
         // Waits while a game is in front (outside the lookup's timeout).
         if quiet {
             crate::quiet::free().await;
@@ -639,8 +645,16 @@ where
             }
         };
         done.asked += 1;
-        let _ = lib.cache_put(&target.key(), now_ms(), &format!("{}{SEP}{url}", current.as_deref().unwrap_or("")));
-        if url.is_empty() {
+        let value = format!("{}{SEP}{url}", current.as_deref().unwrap_or(""));
+        let kept = match target {
+            Target::Release(id) => {
+                lib.cache_put_unless(&target.key(), now_ms(), &value, &crate::cover_refresh::decision_key(id), since).unwrap_or(false)
+            }
+            Target::Track(_) => lib.cache_put(&target.key(), now_ms(), &value).is_ok(),
+        };
+        if !kept {
+            log::debug!("art for {target:?} ({title:?}) not kept: its cover was refreshed meanwhile");
+        } else if url.is_empty() {
             log::debug!("no art for {target:?} ({title:?})");
         } else {
             log::info!("art for {target:?} ({title:?}): {url}");

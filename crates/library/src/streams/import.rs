@@ -513,6 +513,24 @@ impl Library {
         self.write(|tx| meta_set(tx, &format!("{CACHE_PREFIX}{key}"), &format!("{at}|{value}")))
     }
 
+    /// [`Self::cache_put`], unless the cached answer of `unless` was put at
+    /// `since` or later (a decision taken while the answer was looked up);
+    /// whether it was put. One transaction: nothing comes in between.
+    pub fn cache_put_unless(&self, key: &str, at: UnixMs, value: &str, unless: &str, since: UnixMs) -> Result<bool> {
+        let key = format!("{CACHE_PREFIX}{key}");
+        let unless = format!("{CACHE_PREFIX}{unless}");
+        self.write(|tx| {
+            let newer = meta_get(tx, &unless)?
+                .and_then(|v| v.split_once('|').and_then(|(t, _)| t.parse::<UnixMs>().ok()))
+                .is_some_and(|t| t >= since);
+            if newer {
+                return Ok(false);
+            }
+            meta_set(tx, &key, &format!("{at}|{value}"))?;
+            Ok(true)
+        })
+    }
+
     /// Forgets the cached answer of `key`.
     pub fn cache_drop(&self, key: &str) -> Result<()> {
         let key = format!("{CACHE_PREFIX}{key}");

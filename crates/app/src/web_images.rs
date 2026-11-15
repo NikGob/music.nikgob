@@ -367,6 +367,22 @@ impl BytesLoader for WebImages {
     /// A cover no longer drawn: its bytes leave memory (the disk keeps
     /// them), and if it still waits for a download it leaves the queue.
     fn forget(&self, uri: &str) {
+        // Asked anew: gone from memory and the disk (not a download running).
+        if let Some(url) = uri.strip_prefix(nikgob_md3e::covers::REFETCH) {
+            let mut s = lock(&self.inner.state);
+            if !matches!(s.slots.get(url), None | Some(Slot::Fetching)) {
+                if let Some(Slot::Ready { bytes }) = s.slots.remove(url) {
+                    s.size -= bytes.len();
+                }
+                s.order.retain(|u| u != url);
+                s.queue.retain(|u| u != url);
+            }
+            drop(s);
+            if let Some(disk) = &self.inner.disk {
+                disk.remove(url);
+            }
+            return;
+        }
         let mut s = lock(&self.inner.state);
         match s.slots.get(uri) {
             Some(Slot::Ready { .. }) => {

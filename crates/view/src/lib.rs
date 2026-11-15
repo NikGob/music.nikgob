@@ -3143,6 +3143,10 @@ pub struct ViewState {
     /// Bumped when cover files on disk may have been rewritten (an import,
     /// a retag), so a UI looks at the covers it holds again.
     pub cover_files: u64,
+    /// Web covers to ask anew, whatever is kept of them (in memory, on
+    /// disk, decoded): «Обновить обложку» of a service's album. Counted, so
+    /// a UI does it once per change.
+    pub refetch_covers: (u64, Vec<String>),
     /// Real album art found for the video thumbnails of stream tracks drawn
     /// on screen ([`Command::RealCovers`]): the thumbnail's url → the art's.
     pub real_covers: std::sync::Arc<std::collections::HashMap<String, String>>,
