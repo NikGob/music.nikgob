@@ -583,6 +583,9 @@ struct State {
     paused_until: Option<std::time::SystemTime>,
     /// Calls of a method that take this long ([`FakeService::delay`]).
     delays: HashMap<&'static str, Duration>,
+    /// The next calls of a method that fail as an outage would
+    /// ([`FakeService::fail_next`]): how many are left.
+    failing: HashMap<&'static str, usize>,
     /// A login finds no Premium ([`FakeService::without_premium`]).
     no_premium: bool,
     /// The song of each music video ([`StreamService::song_for_video`]),
@@ -659,6 +662,7 @@ impl FakeService {
                 limited: HashMap::new(),
                 paused_until: None,
                 delays: HashMap::new(),
+                failing: HashMap::new(),
                 no_premium: false,
                 // The clip of «Группа крови» is the album's song.
                 songs: if service == Service::Youtube {
@@ -992,6 +996,18 @@ impl FakeService {
         }
     }
 
+    /// The next `n` calls of the trait method `name` (as for
+    /// [`Self::rate_limit_next`], `"find_isrc"` too) fail with
+    /// [`StreamError::Network`], as without a connection. `n = 0` lifts it.
+    pub fn fail_next(&self, name: &'static str, n: usize) {
+        let mut st = self.lock();
+        if n == 0 {
+            st.failing.remove(name);
+        } else {
+            st.failing.insert(name, n);
+        }
+    }
+
     fn count(&self, name: &'static str) {
         *self.lock().calls.entry(name).or_default() += 1;
         let delay = self.lock().delays.get(name).copied();
@@ -1005,6 +1021,13 @@ impl FakeService {
     fn gate(&self, name: &'static str) -> Result<(), StreamError> {
         self.count(name);
         let mut st = self.lock();
+        if let Some(left) = st.failing.get_mut(name) {
+            *left -= 1;
+            if *left == 0 {
+                st.failing.remove(name);
+            }
+            return Err(StreamError::Network("no connection (fake)".into()));
+        }
         let Some((left, retry_after, pause)) = st.limited.get_mut(name) else {
             return Ok(());
         };
@@ -1472,7 +1495,9 @@ impl StreamService for FakeService {
     }
 
     fn find_isrc(&self, isrc: &str) -> BoxFuture<'_, Result<Option<StreamTrack>, StreamError>> {
-        self.count("find_isrc");
+        if let Err(e) = self.gate("find_isrc") {
+            return ready(Err(e));
+        }
         let isrc = isrc.trim().to_uppercase();
         ready(Ok(self
             .catalog

@@ -26,6 +26,7 @@ mod export;
 mod held;
 mod likes;
 mod pages;
+mod prefer;
 mod rank;
 mod replace;
 pub(crate) mod resolve;
@@ -144,7 +145,7 @@ pub(crate) enum Msg {
         /// Where it was looked up: YouTube Music, or Spotify while
         /// YouTube Music is off.
         via: Service,
-        found: resolve::Lookup,
+        found: resolve::Found,
         /// The full Deezer track asked for its ISRC on the way.
         filled: Option<Box<StreamTrack>>,
     },
@@ -181,6 +182,10 @@ pub(crate) enum Msg {
     },
     /// The wait of a queued clip for its song ran out.
     QueueClipWait(u64),
+    /// A copy on the service the user prefers was looked up (see [`prefer`]).
+    Preferred(prefer::PreferMsg),
+    /// The wait of a track for its preferred copy ran out.
+    PreferWait(u64),
     /// Time to send the queued likes of a service.
     LikeFlush(Service),
     LikesPushed {
@@ -291,6 +296,8 @@ pub(crate) struct Streams {
     clips: clips::ClipRepair,
     /// The songs of the clips the app queued.
     queue_clips: clips::QueueClips,
+    /// Copies on the service the user prefers, looked up before a play.
+    prefer: prefer::PreferState,
     /// «Найти песню…»: its searches, the undo of replacements.
     replace: replace::ReplaceState,
     pub(crate) wish: wishlist::WishState,
@@ -349,6 +356,7 @@ impl Streams {
             like_queue: likes::LikeQueue::default(),
             clips: clips::ClipRepair::default(),
             queue_clips: clips::QueueClips::default(),
+            prefer: prefer::PreferState::default(),
             replace: replace::ReplaceState::default(),
             wish: wishlist::WishState::default(),
             share_seq: 0,
@@ -559,6 +567,7 @@ impl Worker {
         self.soloist_wanted();
         self.apply_stream_cache();
         self.retry_clip_misses_once();
+        self.retry_tracklist_misses_once();
         self.publish_accounts();
         self.likes_tick();
         self.publish_wishlist();
@@ -768,6 +777,8 @@ impl Worker {
             Msg::ClipSong { clip, result } => self.clip_song(*clip, result),
             Msg::QueueClipSong { track, video, result } => self.queue_clip_song(track, *video, result),
             Msg::QueueClipWait(entry) => self.queue_clip_wait(entry),
+            Msg::Preferred(m) => self.preferred(m),
+            Msg::PreferWait(entry) => self.prefer_wait_over(entry),
             Msg::LikeFlush(service) => self.flush_likes(service),
             Msg::LikesPushed {
                 service,

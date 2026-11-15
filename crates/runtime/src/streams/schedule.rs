@@ -124,6 +124,10 @@ pub struct StreamSchedule {
     /// Music does not start: it looks again this long after (see
     /// `streams::held`).
     pub listener_recheck: Duration,
+    /// A track about to play from YouTube Music waits at most this long
+    /// for its copy on the service the user prefers (Spotify) to be
+    /// found; then it plays what it has (see `streams::prefer`).
+    pub prefer_wait: Duration,
 }
 
 impl Default for StreamSchedule {
@@ -167,6 +171,7 @@ impl Default for StreamSchedule {
             rate_limit_unknown: Duration::from_secs(30),
             wave_refill: crate::recs::WAVE_REFILL,
             listener_recheck: Duration::from_secs(10),
+            prefer_wait: Duration::from_millis(2500),
         }
     }
 }

@@ -5,6 +5,8 @@
 
 use std::ops::{Deref, DerefMut};
 
+use nikgob_core::model::{SourceId, SourceKind};
+
 use crate::{PlayRequest, Playback};
 
 /// [`Playback`] that remembers the next item it holds. Every call goes to
@@ -16,11 +18,32 @@ pub(crate) struct Engine {
     /// it now (its speed and gain follow `set_speed` and `set_gain`). None
     /// when nothing was handed or the engine let it go.
     next: Option<PlayRequest>,
+    /// The library source that request plays, when it was handed with one.
+    next_source: Option<(SourceId, SourceKind)>,
 }
 
 impl Engine {
     pub(crate) fn new(inner: Box<dyn Playback>) -> Self {
-        Self { inner, next: None }
+        Self { inner, next: None, next_source: None }
+    }
+
+    /// [`Self::set_next`] of the next item from the library source
+    /// `source`, remembered for [`Self::take_next`].
+    pub(crate) fn set_next_from(&mut self, item: PlayRequest, source: SourceId, kind: SourceKind) {
+        self.set_next(Some(item));
+        self.next_source = Some((source, kind));
+    }
+
+    /// The engine took the next item `id` over (a gapless join): the request
+    /// and the source it was handed with, if it was; the engine no longer
+    /// holds it as the next item.
+    pub(crate) fn take_next(&mut self, id: u64) -> Option<(PlayRequest, SourceId, SourceKind)> {
+        if !self.next.as_ref().is_some_and(|n| n.id == id) {
+            return None;
+        }
+        let req = self.next.take()?;
+        let (source, kind) = self.next_source.take()?;
+        Some((req, source, kind))
     }
 
     /// Hands `item` over as the next item, unless the engine already holds
@@ -31,23 +54,27 @@ impl Engine {
             return;
         }
         self.next = item.clone();
+        self.next_source = None;
         self.inner.set_next(item);
     }
 
     /// A new item plays: the engine drops what it had prepared.
     pub(crate) fn play(&mut self, item: PlayRequest) {
         self.next = None;
+        self.next_source = None;
         self.inner.play(item);
     }
 
     pub(crate) fn stop(&mut self) {
         self.next = None;
+        self.next_source = None;
         self.inner.stop();
     }
 
     /// Another device: a restarted engine holds nothing.
     pub(crate) fn set_device(&mut self, device: Option<String>) -> bool {
         self.next = None;
+        self.next_source = None;
         self.inner.set_device(device)
     }
 
@@ -71,7 +98,13 @@ impl Engine {
     pub(crate) fn let_go(&mut self, id: u64) {
         if self.next.as_ref().is_some_and(|n| n.id == id) {
             self.next = None;
+            self.next_source = None;
         }
+    }
+
+    /// The engine holds item `id` as the next item.
+    pub(crate) fn holds_next(&self, id: u64) -> bool {
+        self.next.as_ref().is_some_and(|n| n.id == id)
     }
 
     /// What the engine holds as the next item, as far as it was told.

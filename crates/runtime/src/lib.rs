@@ -2224,6 +2224,11 @@ impl Worker {
             if self.wait_for_clip_song(e) {
                 return;
             }
+            // From YouTube Music while Spotify plays: a moment for its
+            // Spotify copy first.
+            if self.wait_for_preferred(e) {
+                return;
+            }
             if let Some((req, source, kind)) = self.request_skipping(e, &[]) {
                 self.start_with(e, req, source, kind);
                 return;
@@ -2311,6 +2316,9 @@ impl Worker {
         // A stream a service's pause cut midway starts where it stopped,
         // through a start of its own (a gapless step would start it over).
         let next = next.filter(|n| !self.has_held_position(n.id));
+        // Its Spotify copy is being looked up: handed over once that answer
+        // is in (see `streams::prefer`).
+        let next = next.filter(|n| !self.prefer_pending(*n));
         let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
             self.reading_ahead = None;
             self.playback.set_next(None);
@@ -2328,7 +2336,7 @@ impl Worker {
         // Prepared here: a read still on its way prepares nothing again.
         self.reading_ahead = None;
         let req = self.request_from(next, &src);
-        self.playback.set_next(Some(req));
+        self.playback.set_next_from(req, src.id, src.kind);
     }
 
     /// Reads the tags of `path` (the next track's file) on a thread of its
@@ -2571,7 +2579,8 @@ impl Worker {
                 }
             }
             PlaybackEvent::TrackChanged { to } => {
-                self.playback.let_go(to);
+                // What the engine took over: the source it was handed.
+                let handed = self.playback.take_next(to);
                 // `play()` over a playing item also reports a change: that one
                 // we started ourselves. The same entry changing to itself
                 // otherwise is repeat-one looping gaplessly: handled below
@@ -2595,7 +2604,7 @@ impl Worker {
                     self.playing = Some(e);
                     self.tried.clear();
                     // The engine took over what `preload_next` asked for.
-                    let taken = self.request_skipping(e, &[]);
+                    let taken = handed.filter(|(req, ..)| req.id == e.id).or_else(|| self.request_skipping(e, &[]));
                     self.playing_fx = taken
                         .as_ref()
                         .map_or((nikgob_view::SpeedVariant::Normal, false), |(req, ..)| (req.speed, req.keep_timbre));
@@ -2736,7 +2745,7 @@ impl Worker {
                     }
                     // Repeat-one with no preload (or preload failed): restart.
                     match self.queue.advance_auto() {
-                        Some(e) => self.start(e),
+                        Some(e) => self.start_at_join(e),
                         None => {
                             self.stop();
                             // A radio still picking its next tracks plays on.

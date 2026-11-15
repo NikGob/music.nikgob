@@ -70,7 +70,7 @@ use nikgob_recs::{ANALYZED_WITH, EMBEDDED_WITH, SKETCHED_WITH, SoundModel};
 use nikgob_view as v;
 
 use super::Msg;
-use super::resolve::Lookup;
+use super::resolve::Found;
 use crate::Worker;
 use crate::analysis::{FileError, SoundIndex, Want, analyze_bytes, store_embedding, store_sketch, store_vector};
 use crate::sound_model::Effnet;
@@ -1002,13 +1002,13 @@ impl Worker {
     /// A YouTube lookup answered ([`Self::resolved`]); one the background
     /// analysis asked for goes on: the song is analysed, a miss is marked
     /// (the lookup keeps its own 5-day miss), a rate limit waits.
-    pub(crate) fn analysis_resolved(&mut self, track: TrackId, found: &Lookup) {
+    pub(crate) fn analysis_resolved(&mut self, track: TrackId, found: &Found) {
         if self.streaming.analysis.busy != Some((track, Step::Resolving)) {
             return;
         }
         self.streaming.analysis.busy = None;
         match found {
-            Ok(Some(hit)) => {
+            Found::Hit(hit) => {
                 // YouTube Music began to play meanwhile: the song (attached
                 // now) is taken again once it stops.
                 if self.youtube_listened() {
@@ -1019,7 +1019,7 @@ impl Worker {
                     self.analysis_fetch(track, hit.id.id.clone());
                 }
             }
-            Ok(None) => {
+            Found::Miss | Found::Failed => {
                 if let Err(e) = self.lib.mark_stream_analysis_failed(track, "no song on YouTube Music") {
                     log::warn!("stream analysis: marking {track}: {e}");
                 }
@@ -1027,7 +1027,7 @@ impl Worker {
                 let gap = self.streaming.schedule.analysis_gap;
                 self.analysis_after(gap);
             }
-            Err(retry_after) => self.analysis_limited(*retry_after),
+            Found::Limited(retry_after) => self.analysis_limited(*retry_after),
         }
     }
 

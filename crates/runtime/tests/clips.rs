@@ -274,3 +274,60 @@ fn the_misses_of_the_old_title_cleaner_are_asked_once_more() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(yt.calls("song_for_video"), 1);
 }
+
+/// A music video a radio plays (YouTube Music's radios and the wave bring
+/// clips: «Starboy (Official Video)»), the user never kept it.
+fn radio_clip(lib: &Library, yt: &FakeService, id: &str) -> TrackId {
+    let track = lib.upsert_stream_track(&find(yt, id)).unwrap();
+    assert_eq!(lib.track_in_library(track).unwrap(), Some(false));
+    track
+}
+
+fn played(asked: &Arc<Mutex<Vec<PlayRequest>>>) -> PlaySource {
+    wait_until("a play request", || !asked.lock().unwrap().is_empty());
+    asked.lock().unwrap()[0].source.clone()
+}
+
+fn youtube(id: &str) -> PlaySource {
+    PlaySource::Stream {
+        service: Service::Youtube,
+        id: id.into(),
+    }
+}
+
+#[test]
+fn a_clip_a_radio_plays_is_its_song_before_it_plays() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(FakeService::youtube());
+    let clip = radio_clip(&lib, &yt, "yt-video-kino");
+    let (rt, asked) = start(&lib, &yt, quick());
+    rt.send(Command::StartRadio { seed: nikgob_view::RadioSeed::Track(clip) });
+    assert_eq!(played(&asked), youtube("yt-gruppa-1"), "the song, not the clip");
+    assert_eq!(yt.calls("song_for_video"), 1);
+    let song = lib.track_by_remote(&find(&yt, "yt-gruppa-1").id).unwrap();
+    assert_eq!(rt.state().player.current.as_ref().map(|t| t.id), song);
+    assert!(!rt.state().player.current.as_ref().unwrap().clip);
+    assert_eq!(lib.cache_get("yt_clip.yt-video-kino").unwrap().map(|(_, v)| v).as_deref(), Some("song"));
+    // Asked once: the next play of the clip's id is the song at once.
+    drop(rt);
+    asked.lock().unwrap().clear();
+    let (rt, asked) = start(&lib, &yt, quick());
+    let clip = lib.track_by_remote(&find(&yt, "yt-video-kino").id).unwrap().unwrap();
+    rt.send(Command::StartRadio { seed: nikgob_view::RadioSeed::Track(clip) });
+    assert_eq!(played(&asked), youtube("yt-gruppa-1"));
+    assert_eq!(yt.calls("song_for_video"), 1, "nothing asked twice");
+}
+
+#[test]
+fn a_clip_a_radio_plays_without_a_song_plays_as_the_clip() {
+    let lib = Library::open_in_memory().unwrap();
+    let yt = Arc::new(with_lonely_clip());
+    let clip = radio_clip(&lib, &yt, "yt-video-live");
+    let (rt, asked) = start(&lib, &yt, quick());
+    rt.send(Command::StartRadio { seed: nikgob_view::RadioSeed::Track(clip) });
+    assert_eq!(played(&asked), youtube("yt-video-live"), "no song: the clip, not someone else's");
+    assert_eq!(yt.calls("song_for_video"), 1);
+    assert_eq!(rt.state().player.current.as_ref().map(|t| t.id), Some(clip));
+    wait_until("now playing says clip", || rt.state().player.current.as_ref().is_some_and(|t| t.clip));
+    assert_eq!(lib.cache_get("yt_clip.yt-video-live").unwrap().map(|(_, v)| v).as_deref(), Some("clip"));
+}
