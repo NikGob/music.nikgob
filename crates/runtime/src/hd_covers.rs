@@ -308,6 +308,10 @@ pub(crate) struct Found {
     pub exact: bool,
     /// [`source_order`] of where it was found.
     pub order: u8,
+    /// Nothing tells its songs (a linked Spotify album by its public
+    /// page): it only lends its size to a verified cover of the same
+    /// picture, never stands for the album itself.
+    pub lends: bool,
     /// The renditions to try, the largest first; the last is the url the
     /// source gave.
     pub urls: Vec<String>,
@@ -319,7 +323,7 @@ pub(crate) struct Found {
 impl Found {
     fn new(linked: bool, exact: bool, order: u8, url: &str) -> Self {
         let (urls, stage) = renditions(url);
-        Self { linked, exact, order, urls, stage }
+        Self { linked, exact, order, lends: false, urls, stage }
     }
 
     /// The url the source gave.
@@ -329,12 +333,14 @@ impl Found {
 
     /// Its place among the covers found: the linked ones first (in the
     /// order they were asked), then those of the album's very title, then
-    /// the others alike, each by [`source_order`].
+    /// the others alike, each by [`source_order`]; those that only lend
+    /// their size last.
     fn rank(&self) -> (u8, u8) {
-        match (self.linked, self.exact) {
-            (true, _) => (0, 0),
-            (false, true) => (1, self.order),
-            (false, false) => (2, self.order),
+        match (self.lends, self.linked, self.exact) {
+            (true, _, _) => (3, self.order),
+            (false, true, _) => (0, 0),
+            (false, false, true) => (1, self.order),
+            (false, false, false) => (2, self.order),
         }
     }
 }
@@ -477,10 +483,15 @@ fn itunes_pick(w: &Want, albums: &[ItunesAlbum]) -> Option<(String, bool)> {
     a.artwork_url100.clone().filter(|u| !u.is_empty()).map(|u| (u, *exact))
 }
 
-/// The cover of a Spotify album linked to `w` as its public page tells it
-/// (no songs there): no linked release, only one alike by its title.
+/// The cover of a Spotify album linked to `w` as its public page tells it:
+/// of a title alike, never a linked release. Its songs untold, for an album
+/// of several songs it only lends its size to a verified cover of the same
+/// picture ([`Found::lends`]): it may be the album's first single.
 fn oembed_found(w: &Want, art: &nikgob_metadata::SpotifyAlbumArt) -> Option<Found> {
-    same_album(&w.title, &art.title).then(|| Found::new(false, same_title(&w.title, &art.title), source_order(Some(Service::Spotify)), &art.thumbnail))
+    same_album(&w.title, &art.title).then(|| Found {
+        lends: !w.song_stands(),
+        ..Found::new(false, same_title(&w.title, &art.title), source_order(Some(Service::Spotify)), &art.thumbnail)
+    })
 }
 
 /// The cover of the release `id` linked to `w`, when its songs fit
@@ -584,9 +595,11 @@ pub(crate) async fn find_all(
                     trouble.get_or_insert(late(&id.service));
                 }
             }
-        }
-        if !all && out.iter().any(|f| f.linked) {
-            break 'look;
+            // The first linked cover is the answer of a lookup for the
+            // first one.
+            if !all && !out.is_empty() {
+                break 'look;
+            }
         }
         if let Some(meta) = meta {
             let fits = if w.mbid.is_some() || w.group_mbid.is_some() {
@@ -611,7 +624,7 @@ pub(crate) async fn find_all(
             {
                 match in_time(deadline, meta.cover_art.front_cover(&target)).await {
                     Some(Ok(Some(c))) if c.thumbnails.contains_key("1200") => {
-                        out.push(Found { linked: true, exact: true, order: 0, urls: vec![c.url_for(1200).to_owned()], stage: c.url_for(1200).to_owned() });
+                        out.push(Found::new(true, true, 0, c.url_for(1200)));
                         break;
                     }
                     Some(Err(e)) if crate::better_covers::meta_trouble(&e) => {
@@ -650,18 +663,17 @@ pub(crate) async fn find_all(
                     continue;
                 }
             };
-            if let Some(hit) = pick_hit(w, found.clone()) {
-                if let Some(url) = hit.cover_url.as_deref().filter(|u| !u.is_empty()) {
-                    out.push(Found::new(false, same_title(&w.title, &hit.title), order, url));
-                }
-            } else if let Some(hit) = untold(w, &found) {
+            // Its very title first: one of songs untold is asked for them
+            // before one only alike is taken.
+            let hit = pick_hit(w, found.clone());
+            let exact = hit.as_ref().is_some_and(|h| same_title(&w.title, &h.title));
+            let mut taken = None;
+            if !exact && let Some(hit) = untold(w, &found) {
                 match in_time(deadline, s.album(&hit.id.id)).await {
                     Some(Ok(a)) => {
                         let n = a.total_tracks.or_else(|| u32::try_from(a.tracks.len()).ok().filter(|n| *n > 0));
                         if w.takes(hit.release_type, n) {
-                            if let Some(url) = a.cover_url.or_else(|| hit.cover_url.clone()).filter(|u| !u.is_empty()) {
-                                out.push(Found::new(false, true, order, &url));
-                            }
+                            taken = a.cover_url.or_else(|| hit.cover_url.clone()).filter(|u| !u.is_empty()).map(|u| (u, true));
                         } else {
                             log::debug!("the {:?} «{}» on {} has {n:?} songs", hit.release_type, hit.title, s.service());
                         }
@@ -676,6 +688,10 @@ pub(crate) async fn find_all(
                         trouble.get_or_insert(late(&s.service()));
                     }
                 }
+            }
+            let taken = taken.or_else(|| hit.and_then(|h| h.cover_url).filter(|u| !u.is_empty()).map(|u| (u, exact)));
+            if let Some((url, exact)) = taken {
+                out.push(Found::new(false, exact, order, &url));
             }
             if !all && !out.is_empty() {
                 break 'look;
@@ -703,6 +719,9 @@ pub(crate) async fn find_all(
                 }
             }
         }
+    }
+    if past(deadline) {
+        trouble.get_or_insert("the lookup ran out of time".to_owned());
     }
     out.sort_by_key(Found::rank);
     match trouble {
@@ -1065,10 +1084,56 @@ mod tests {
         // Off: nothing asked without the page's reader, nothing linked.
         assert_eq!(find_all(None, &[], &w, true, None).await, Ok(Vec::new()));
         let art = |title: &str| nikgob_metadata::SpotifyAlbumArt { title: title.into(), thumbnail: cover.into() };
+        // Of an album of three: it only lends its size, ranked last.
         let alike = oembed_found(&w, &art("рисунки")).unwrap();
-        assert!(!alike.linked && alike.exact);
-        assert_eq!(alike.rank(), (1, source_order(Some(Service::Spotify))));
+        assert!(!alike.linked && alike.exact && alike.lends);
+        assert_eq!(alike.rank(), (3, source_order(Some(Service::Spotify))));
         assert_eq!(oembed_found(&w, &art("Совсем другое")), None);
+        // Of a single: nothing to tell it from, it stands for it.
+        let single = Want { title: "рисунки".into(), ..want(ReleaseType::Single, 1) };
+        assert!(!oembed_found(&single, &art("рисунки")).unwrap().lends);
+    }
+
+    /// A lookup for the first cover answers with the first linked one: the
+    /// next linked release is not asked.
+    #[tokio::test]
+    async fn the_first_linked_cover_answers_a_lookup_for_one() {
+        use nikgob_core::streaming::FakeService;
+        let dz = Arc::new(FakeService::deezer().with_release("r", "рисунки", "nyan.mp3", ReleaseType::Single, 3, true, "https://x/dz.jpg"));
+        let yt = Arc::new(FakeService::youtube().with_release("r", "рисунки", "nyan.mp3", ReleaseType::Single, 3, false, "https://x/yt.jpg"));
+        let ids = vec![dz.albums().into_iter().find(|a| a.title == "рисунки").unwrap().id, yt.albums().into_iter().find(|a| a.title == "рисунки").unwrap().id];
+        let services: Vec<Arc<dyn StreamService>> = vec![dz.clone(), yt.clone()];
+        let w = Want { linked: ids, ..risunki(3) };
+        assert_eq!(find(None, &services, &w).await.unwrap().as_deref(), Some("https://x/dz.jpg"));
+        assert_eq!((dz.calls("album"), yt.calls("album"), dz.calls("search")), (1, 0, 0));
+        // A refresh asks them all.
+        assert_eq!(find_all(None, &services, &w, true, None).await.unwrap().iter().filter(|f| f.linked).count(), 2);
+    }
+
+    /// The album's very title of songs untold is asked for its songs before
+    /// a counted one only alike («Deluxe Edition») is taken.
+    #[tokio::test]
+    async fn the_very_title_of_songs_untold_comes_before_one_alike() {
+        use nikgob_core::streaming::FakeService;
+        let yt = Arc::new(
+            FakeService::youtube()
+                .with_release("dlx", "рисунки (Deluxe Edition)", "nyan.mp3", ReleaseType::Album, 3, true, "https://x/deluxe.jpg")
+                .with_release("r", "рисунки", "nyan.mp3", ReleaseType::Single, 3, false, "https://x/yt.jpg"),
+        );
+        let services: Vec<Arc<dyn StreamService>> = vec![yt.clone()];
+        let found = find_all(None, &services, &risunki(3), true, None).await.unwrap();
+        assert_eq!(found.iter().map(Found::original).collect::<Vec<_>>(), ["https://x/yt.jpg"]);
+        assert!(found[0].exact);
+        assert_eq!(yt.calls("album"), 1);
+        // Its songs fewer: the one alike stands.
+        let short = Arc::new(
+            FakeService::youtube()
+                .with_release("dlx", "рисунки (Deluxe Edition)", "nyan.mp3", ReleaseType::Album, 3, true, "https://x/deluxe.jpg")
+                .with_release("r", "рисунки", "nyan.mp3", ReleaseType::Single, 1, false, "https://x/yt.jpg"),
+        );
+        let services: Vec<Arc<dyn StreamService>> = vec![short];
+        let found = find_all(None, &services, &risunki(3), true, None).await.unwrap();
+        assert_eq!(found.iter().map(|f| (f.original(), f.exact)).collect::<Vec<_>>(), [("https://x/deluxe.jpg", false)]);
     }
 
     /// A single of the album's very title whose search hit counts no songs
