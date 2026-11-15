@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{ArtistId, ReleaseId, TrackId};
-use nikgob_core::streaming::{EntityKind, Service, StreamError, StreamService, TrackKind};
+use nikgob_core::streaming::{Service, StreamError, StreamService, TrackKind};
 use nikgob_core::{cover_frame, names};
 use nikgob_library::{Library, TrackRow, is_web_ref, now_ms};
 use nikgob_metadata::text::{artist_key, similarity, title_key};
@@ -268,8 +268,14 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
         for q in &queries {
             match meta.deezer.search_raw(q, 10).await {
                 Ok(hits) => {
+                    // The song on its single of the album's title is no
+                    // hit for the album, when Deezer tells the kind.
+                    let kind_fits = |a: &nikgob_metadata::deezer::DeezerAlbum| {
+                        w.album.as_ref().is_none_or(|want| want.takes(hd_covers::deezer_kind(a.record_type.as_deref()), a.nb_tracks))
+                    };
                     let found = hits.iter().find(|h| {
                         accepts(w, h.artist_name(), &h.title, h.album.as_ref().map(|a| a.title.as_str()))
+                            && h.album.as_ref().is_none_or(kind_fits)
                     });
                     if let Some(url) = found.and_then(|h| h.album.as_ref()).and_then(|a| a.best_cover()) {
                         return Ok(Some(url.to_owned()));
@@ -525,12 +531,6 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
     }
     let frame = dims.is_some_and(|(w, h)| cover_frame::is_frame(w, h));
     let tracks = lib.tracks_of_release(id).unwrap_or_default();
-    let deezer = lib
-        .external_ids(EntityKind::Album, *id.as_uuid())
-        .unwrap_or_default()
-        .into_iter()
-        .find(|x| x.service == Service::Deezer)
-        .and_then(|x| x.id.parse().ok());
     // A file saved from a clip, or a clip: its song as the clip's title
     // says; else the album's artist, its songs and the album itself.
     let clip = frame || row.is_clip();
@@ -543,14 +543,7 @@ fn release_want(lib: &Library, root: &Path, id: ReleaseId, row: &TrackRow, now: 
             context: r.title.clone(),
             // A single's song is the single.
             song_ok: tracks.len() <= 1,
-            album: Some(hd_covers::Want {
-                id,
-                mbid: r.mbid.clone(),
-                group_mbid: r.release_group_mbid.clone(),
-                deezer,
-                title: r.title.clone(),
-                artists: Vec::new(),
-            }),
+            album: Some(hd_covers::want_of(lib, &r, Vec::new())),
             ..Want::default()
         }
     };
@@ -847,6 +840,8 @@ mod tests {
             deezer: None,
             title: "Mushoku Tensei ~Isekai Ittara Honki Dasu~ Original Soundtrack 2 Special Edition".into(),
             artists: Vec::new(),
+            release_type: nikgob_core::model::ReleaseType::Album,
+            tracks: 0,
         });
         assert!(
             !accepts(&w, "Yoshiaki Fujisawa", "Something", Some("Mushoku Tensei: Jobless Reincarnation (Original Soundtrack 2)")),
@@ -923,6 +918,8 @@ mod tests {
             deezer: None,
             title: title.into(),
             artists: vec![artist.into()],
+            release_type: nikgob_core::model::ReleaseType::Album,
+            tracks: 0,
         });
         w
     }
