@@ -12,10 +12,14 @@ use super::{
 use crate::{
     Icon, Theme, TypeRole,
     components::{
-        Button, ConnectedGroup, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Size, Style, Switch,
+        Button, ConnectedGroup, anim, IconButton, Leading, ListItem, LoadingIndicator, Menu, MenuItem, Size, Style, Switch,
         TooltipExt,
     },
 };
+
+mod queue_motion;
+
+use queue_motion::{Change, PREV_GAP, PREV_LABEL, QueueMotion, Role, Seen, TAIL, current_top};
 
 /// What the user asked of the pane this frame.
 #[derive(Default)]
@@ -271,26 +275,95 @@ fn queue_row(ui: &mut Ui, e: &QueueEntry, played: bool, state: &ViewState, chrom
 /// How tall a queue row is (two lines beside a cover).
 const QUEUE_ROW_H: f32 = crate::components::list::TWO_LINE;
 
+/// The queue's motion for one frame ([`queue_motion`]): the change running
+/// and how far in, and what gets painted in sight (for the next one).
+struct ListMotion {
+    change: Option<Change>,
+    t: f32,
+    motion: crate::Motion,
+    clip: Rect,
+    ppp: f32,
+    seen: Vec<Seen>,
+}
+
+impl ListMotion {
+    /// Lays out `add` where the cursor is, `h` tall (a guess will do for
+    /// what is not a row), moved and faded as its part in a change says:
+    /// `rel` is its place from the playing track's block, `rank` how many
+    /// rows away it is, `below` whether it comes after it. Returns its
+    /// unmoved place and what `add` returned.
+    #[allow(clippy::too_many_arguments)]
+    fn place<R>(
+        &mut self,
+        ui: &mut Ui,
+        h: f32,
+        entry: u64,
+        rel: f32,
+        rank: usize,
+        below: bool,
+        played: bool,
+        add: impl FnOnce(&mut Ui) -> R,
+    ) -> (Rect, R) {
+        let slot = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), h));
+        let role = match self.change.as_mut() {
+            Some(c) => c.role(entry, rel, rank, below, slot.intersects(self.clip)),
+            None => Role::Still,
+        };
+        let (dy, alpha) = role.at(self.t, &self.motion);
+        let dy = (dy * self.ppp).round() / self.ppp;
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(slot.translate(egui::vec2(0.0, dy)))
+                .id_salt(("q-slot", entry)),
+        );
+        if alpha < 1.0 {
+            child.multiply_opacity(alpha);
+        }
+        let inner = add(&mut child);
+        let painted = child.min_rect();
+        let place = painted.translate(egui::vec2(0.0, -dy));
+        ui.advance_cursor_after_rect(place);
+        if alpha >= 0.5 && painted.intersects(self.clip) {
+            self.seen.push(Seen { entry, y: painted.top() - self.clip.top(), played });
+        }
+        (place, inner)
+    }
+}
+
 /// The rows of `entries`, one under another: those in sight (see
 /// [`Shown`](super::pages::widgets::Shown)) and the one dragged (`held`)
-/// are laid out by `row`, the others only take their room. Every row's
-/// rect goes into `rows`, for the drag and drop.
+/// are laid out by `row` in their slot, the others only take their room.
+/// Every row's rect goes into `rows`, for the drag and drop. `anchor` is
+/// where the playing track's block starts when the rows come after it;
+/// `None`: they are the history above it.
+#[allow(clippy::too_many_arguments)]
 fn queue_rows(
     ui: &mut Ui,
     key: &str,
     entries: &[QueueEntry],
     held: Option<u64>,
+    played: bool,
+    anchor: Option<f32>,
+    lm: &mut ListMotion,
     rows: &mut Vec<(u64, Rect)>,
-    mut row: impl FnMut(&mut Ui, &QueueEntry, &mut Vec<(u64, Rect)>),
+    mut row: impl FnMut(&mut Ui, &QueueEntry, Rect, &mut Vec<(u64, Rect)>),
 ) {
     use super::pages::widgets::{Shown, span_range};
     let step = QUEUE_ROW_H + ui.spacing().item_spacing.y;
     let clip = ui.clip_rect();
-    let now = span_range(entries.len(), ui.cursor().top(), step, QUEUE_ROW_H, clip.top(), clip.bottom());
+    let start = ui.cursor().top();
+    let n = entries.len();
+    let (anchor, below) = match anchor {
+        Some(a) => (a, true),
+        None => (start + n as f32 * step + PREV_GAP, false),
+    };
+    let now = span_range(n, start, step, QUEUE_ROW_H, clip.top(), clip.bottom());
     let shown = Shown::of(ui.ctx(), ui.id().with(("q-rows", key)), now);
     for (i, e) in entries.iter().enumerate() {
         if shown.contains(i) || held == Some(e.entry) {
-            row(ui, e, rows);
+            let slot = Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), QUEUE_ROW_H));
+            let rank = if below { i + 1 } else { n - i };
+            lm.place(ui, QUEUE_ROW_H, e.entry, slot.top() - anchor, rank, below, played, |ui| row(ui, e, slot, rows));
         } else {
             let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width(), QUEUE_ROW_H));
             rows.push((e.entry, rect));
@@ -298,8 +371,44 @@ fn queue_rows(
     }
 }
 
-pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
+/// The rows a change took out of sight, where they were, fading out.
+/// `anchor`: where the playing track's block is painted.
+fn queue_ghosts(ui: &mut Ui, q: &nikgob_view::QueueView, lm: &ListMotion, anchor: Option<f32>) {
+    let Some(c) = &lm.change else {
+        return;
+    };
+    let alpha = Change::ghost_alpha(lm.t, &lm.motion);
+    if c.ghosts.is_empty() || alpha < 0.01 {
+        return;
+    }
     let s = Theme::get(ui.ctx()).scheme;
+    let span = ui.max_rect();
+    for (g, at) in c.ghosts.iter().zip(&c.ghost_at) {
+        let y = match (c.anchored, anchor) {
+            (true, Some(a)) => a + g.y,
+            (true, None) => continue,
+            (false, _) => lm.clip.top() + g.y,
+        };
+        let rect = Rect::from_min_size(egui::pos2(span.left(), y), egui::vec2(span.width(), QUEUE_ROW_H));
+        if !rect.intersects(lm.clip) {
+            continue;
+        }
+        let mut gui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("q-ghost", g.entry)));
+        gui.multiply_opacity(if g.played { alpha * 0.6 } else { alpha });
+        match (g.entry, at) {
+            (PREV_LABEL, _) => {
+                common::label(&mut gui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant);
+            }
+            (_, Some((prev, i))) => {
+                let e = if *prev { &q.prev[*i] } else { &q.next[*i] };
+                queue_item(&e.track, e.guest, ("q-ghost", e.entry)).0.muted(g.played).show(&mut gui);
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &mut Vec<Command>) {
     let q = &state.queue;
     // A radio says so above the list, and where it picks from; autoplay
     // can be switched off right there.
@@ -316,136 +425,70 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
     }
     let bottom_h = 56.0;
     let list_h = ui.available_height() - bottom_h;
-    egui::ScrollArea::vertical()
+    let ctx = ui.ctx().clone();
+    let theme = Theme::get(&ctx);
+    let motion_id = ui.id().with("q-motion");
+    let mut mo = ctx.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<QueueMotion>(motion_id)));
+    let frame = ctx.cumulative_frame_nr();
+    let now = anim::now(&ctx);
+    let shuffle = state.player.shuffle;
+    // Shown last frame too (not just come back to).
+    let fresh = mo.known && frame <= mo.frame + 1;
+    // The history must not push the current track out of view: it goes
+    // to the top whenever it changes (and on first show), or when shuffle
+    // turned on or off out of sight; not when a row is removed or moved.
+    let jump = !mo.known || mo.current != q.current_entry || (mo.shuffle != shuffle && !fresh);
+    let mut area = egui::ScrollArea::vertical()
         .id_salt("queue-scroll")
         .max_height(list_h)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // The queue is a temporary playlist: every row but the current
-            // one can be removed or dragged anywhere, across the current
-            // track too (a played one back up next, an upcoming one into
-            // the history). Rows in queue order: (entry, rect).
-            let mut rows: Vec<(u64, Rect)> = Vec::new();
-            // Index into `rows` of the row whose handle is dragged / was released.
-            let mut dragging = None;
-            let mut dropped = None;
-            let mut current_pick = None;
-            let mut current_link = None;
-            // The row dragged last frame stays laid out wherever it is.
-            let drag_key = ui.id().with("q-dragged");
-            let held = ui.ctx().data(|d| d.get_temp::<u64>(drag_key));
-            let mut row = |ui: &mut Ui, e: &QueueEntry, played: bool, rows: &mut Vec<(u64, Rect)>| {
-                let (rect, drag, drop) = queue_row(ui, e, played, state, chrome, out);
-                debug_assert_eq!(rect.height(), QUEUE_ROW_H, "queue rows are of one height");
-                if drag {
-                    dragging = Some(rows.len());
-                }
-                if drop {
-                    dropped = Some(rows.len());
-                }
-                rows.push((e.entry, rect));
-            };
-            // What already played, dimmed, above the current track; a
-            // double click goes back to it.
-            if !q.prev.is_empty() {
-                common::label(ui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant);
-                ui.add_space(4.0);
-                queue_rows(ui, "prev", &q.prev, held, &mut rows, |ui, e, rows| row(ui, e, true, rows));
-                ui.add_space(12.0);
-            }
-            if let Some(t) = &q.current {
-                let top = ui.cursor().min.y;
-                common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
-                ui.add_space(4.0);
-                let (item, links) = queue_item(t, q.current_guest, "q-current");
-                let o = item.selected(true).show(ui);
-                current_link = o.link_clicked.and_then(|k| links.get(k).cloned());
-                if let Some(why) = &q.current_why {
-                    o.response.clone().md3_tooltip(why, None);
-                }
-                // The player's menu (the same as the bar's ⋮). Done after
-                // the rows: they hold `chrome` and `out` meanwhile.
-                if !Menu::context_idle(&o.response, "q-ctx-current") {
-                    let rows = Chrome::player_rows(ui.ctx(), t, state, &[], true, false);
-                    let (menu, acts) = super::pages::widgets::menu_of("q-ctx-current", rows);
-                    current_pick = menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()).map(|a: PlayerAct| (a, t));
-                }
-                if let Some(entry) = q.current_entry {
-                    rows.push((entry, o.rect));
-                }
-                // The history must not push the current track out of view:
-                // bring it to the top whenever it changes (and on first show)
-                // or shuffle turns on or off (the list moves around it), not
-                // when a row is removed or moved.
-                let key = ui.id().with("q-shown");
-                let shown = (q.current_entry, state.player.shuffle);
-                if ui.ctx().data(|d| d.get_temp::<(Option<u64>, bool)>(key)) != Some(shown) {
-                    ui.ctx().data_mut(|d| d.insert_temp(key, shown));
-                    let r = Rect::from_min_max(egui::pos2(o.rect.left(), top), o.rect.max);
-                    ui.scroll_to_rect(r, Some(egui::Align::TOP));
-                }
-                ui.add_space(12.0);
-            }
-            let extending = q.radio.as_ref().is_some_and(|r| r.extending);
-            if q.next.is_empty() && !extending {
-                common::label(ui, "Дальше ничего нет", TypeRole::BodyMedium, s.on_surface_variant);
-            } else if !q.next.is_empty() {
-                common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
-                ui.add_space(4.0);
-                queue_rows(ui, "next", &q.next, held, &mut rows, |ui, e, rows| row(ui, e, false, rows));
-            }
-            // The radio is looking for the next tracks: said where they
-            // will appear.
-            if extending {
-                extending_row(ui);
-            }
-            // What comes after a queue that ends: autoplay.
-            if q.radio.is_none() {
-                autoplay_block(ui, state, chrome, out);
-            }
-            if let Some(r) = current_link {
-                chrome.nav = Some(r);
-            }
-            if let Some((act, t)) = current_pick {
-                let at = Rect::from_center_size(ui.ctx().pointer_latest_pos().unwrap_or_default(), egui::vec2(1.0, 1.0));
-                chrome.pick(&ui.ctx().clone(), act, t, state, at, Where::Bar, out);
-            }
-            if rows.is_empty() {
-                return;
-            }
-            // The row under the pointer is where the dragged one lands:
-            // after it when dragged down, before it when dragged up.
-            let last = rows.len() - 1;
-            let target_at = |y: f32| rows.iter().position(|(_, r)| y < r.bottom()).unwrap_or(last);
-            let pointer = ui.ctx().pointer_latest_pos();
-            if let (Some(from), Some(p)) = (dragging, pointer) {
-                let to = target_at(p.y);
-                if to != from {
-                    let r = rows[to].1;
-                    let y = if to < from { r.top() } else { r.bottom() };
-                    ui.painter().rect_filled(
-                        Rect::from_min_max(
-                            egui::pos2(r.left() + 16.0, y - 1.5),
-                            egui::pos2(r.right() - 16.0, y + 1.5),
-                        ),
-                        2,
-                        s.primary,
-                    );
-                }
-            }
-            match dragging {
-                Some(from) => {
-                    ui.ctx().data_mut(|d| d.insert_temp(drag_key, rows[from].0));
-                }
-                None => ui.ctx().data_mut(|d| d.remove::<u64>(drag_key)),
-            }
-            if let (Some(from), Some(p)) = (dropped, pointer) {
-                let to = target_at(p.y);
-                if to != from {
-                    out.push(Command::MoveInQueue { entry: rows[from].0, anchor: rows[to].0, after: to > from });
-                }
-            }
-        });
+        .auto_shrink([false, false]);
+    if jump {
+        mo.change = None;
+    } else if mo.shuffle != shuffle && q.current.is_some() {
+        // Shuffle on or off in sight: the list changes around the playing
+        // track, which stays where it is.
+        let step = QUEUE_ROW_H + ui.spacing().item_spacing.y;
+        let top = current_top(q.prev.len(), mo.head, step);
+        area = area.vertical_scroll_offset(mo.begin(now, top, QUEUE_ROW_H, &theme.motion, theme.reduced_motion));
+    }
+    mo.known = true;
+    mo.frame = frame;
+    mo.current = q.current_entry;
+    mo.shuffle = shuffle;
+    let t = mo.change.as_ref().map_or(0.0, |c| (now - c.started) as f32);
+    let ppp = ctx.pixels_per_point();
+    let shift = mo.change.as_ref().map_or(0.0, |c| (c.shift_at(t) * ppp).round() / ppp);
+    let mut seen = std::mem::take(&mut mo.seen);
+    seen.clear();
+    let mut lm = ListMotion { change: mo.change.take(), t, motion: theme.motion, clip: Rect::NOTHING, ppp, seen };
+    let mut head = mo.head;
+    let mut anchor = None;
+    let output = area.show(ui, |ui| {
+        lm.clip = ui.clip_rect();
+        // Everything moves together while the list glides.
+        let room = ui.available_rect_before_wrap();
+        let mut list = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(room.translate(egui::vec2(0.0, shift)))
+                .id_salt("q-list"),
+        );
+        anchor = queue_list(&mut list, state, chrome, out, &mut lm, jump, &mut head);
+        ui.advance_cursor_after_rect(list.min_rect().translate(egui::vec2(0.0, -shift)));
+    });
+    mo.scroll = output.state.offset.y;
+    mo.view_h = output.inner_rect.height();
+    mo.head = head;
+    mo.anchor = anchor.map(|a| a - lm.clip.top());
+    mo.seen = lm.seen;
+    mo.change = lm.change;
+    mo.end_first_frame(mo.scroll);
+    if mo.change.as_ref().is_some_and(|c| c.done(t)) {
+        mo.change = None;
+    }
+    if mo.change.is_some() {
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(motion_id, mo));
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui
@@ -465,6 +508,169 @@ pub(super) fn queue(ui: &mut Ui, state: &ViewState, chrome: &mut Chrome, out: &m
             chrome.ask_save_queue(state.player.context.as_deref().unwrap_or("Очередь"));
         }
     });
+}
+
+/// The queue's list inside its scroll area. `jump`: bring the playing
+/// track to the top. `head` is kept up to date with the room between the
+/// playing track's block and its row. Returns where that block is painted.
+fn queue_list(
+    ui: &mut Ui,
+    state: &ViewState,
+    chrome: &mut Chrome,
+    out: &mut Vec<Command>,
+    lm: &mut ListMotion,
+    jump: bool,
+    head: &mut f32,
+) -> Option<f32> {
+    let s = Theme::get(ui.ctx()).scheme;
+    let q = &state.queue;
+    let step = QUEUE_ROW_H + ui.spacing().item_spacing.y;
+    // The queue is a temporary playlist: every row but the current
+    // one can be removed or dragged anywhere, across the current
+    // track too (a played one back up next, an upcoming one into
+    // the history). Rows in queue order: (entry, rect).
+    let mut rows: Vec<(u64, Rect)> = Vec::new();
+    // Index into `rows` of the row whose handle is dragged / was released.
+    let mut dragging = None;
+    let mut dropped = None;
+    let mut current_pick = None;
+    let mut current_link = None;
+    let mut anchor = None;
+    // The row dragged last frame stays laid out wherever it is.
+    let drag_key = ui.id().with("q-dragged");
+    let held = ui.ctx().data(|d| d.get_temp::<u64>(drag_key));
+    let mut row = |ui: &mut Ui, e: &QueueEntry, played: bool, slot: Rect, rows: &mut Vec<(u64, Rect)>| {
+        let (rect, drag, drop) = queue_row(ui, e, played, state, chrome, out);
+        debug_assert_eq!(rect.height(), QUEUE_ROW_H, "queue rows are of one height");
+        if drag {
+            dragging = Some(rows.len());
+        }
+        if drop {
+            dropped = Some(rows.len());
+        }
+        rows.push((e.entry, slot));
+    };
+    // What already played, dimmed, above the current track; a
+    // double click goes back to it.
+    if !q.prev.is_empty() {
+        let n = q.prev.len();
+        let rel = -(PREV_GAP + n as f32 * step + *head);
+        lm.place(ui, 20.0, PREV_LABEL, rel, n + 1, false, false, |ui| {
+            common::label(ui, "Ранее", TypeRole::TitleSmall, s.on_surface_variant)
+        });
+        ui.add_space(4.0);
+        queue_rows(ui, "prev", &q.prev, held, true, None, lm, &mut rows, |ui, e, slot, rows| {
+            row(ui, e, true, slot, rows)
+        });
+        ui.add_space(PREV_GAP);
+    }
+    if let Some(t) = &q.current {
+        let top = ui.cursor().min.y;
+        anchor = Some(top);
+        common::label(ui, "Сейчас играет", TypeRole::TitleSmall, s.on_surface_variant);
+        ui.add_space(4.0);
+        let (item, links) = queue_item(t, q.current_guest, "q-current");
+        let o = item.selected(true).show(ui);
+        *head = o.rect.top() - top;
+        current_link = o.link_clicked.and_then(|k| links.get(k).cloned());
+        if let Some(why) = &q.current_why {
+            o.response.clone().md3_tooltip(why, None);
+        }
+        // The player's menu (the same as the bar's ⋮). Done after
+        // the rows: they hold `chrome` and `out` meanwhile.
+        if !Menu::context_idle(&o.response, "q-ctx-current") {
+            let rows = Chrome::player_rows(ui.ctx(), t, state, &[], true, false);
+            let (menu, acts) = super::pages::widgets::menu_of("q-ctx-current", rows);
+            current_pick = menu.context_menu(&o.response).and_then(|i| acts.get(i).copied()).map(|a: PlayerAct| (a, t));
+        }
+        if let Some(entry) = q.current_entry {
+            rows.push((entry, o.rect));
+        }
+        if jump {
+            let r = Rect::from_min_max(egui::pos2(o.rect.left(), top), o.rect.max);
+            ui.scroll_to_rect(r, Some(egui::Align::TOP));
+        }
+        ui.add_space(12.0);
+    }
+    let after = anchor.unwrap_or_else(|| ui.cursor().top());
+    let extending = q.radio.as_ref().is_some_and(|r| r.extending);
+    if q.next.is_empty() && !extending {
+        common::label(ui, "Дальше ничего нет", TypeRole::BodyMedium, s.on_surface_variant);
+    } else if !q.next.is_empty() {
+        common::label(ui, "Далее", TypeRole::TitleSmall, s.on_surface_variant);
+        ui.add_space(4.0);
+        queue_rows(ui, "next", &q.next, held, false, Some(after), lm, &mut rows, |ui, e, slot, rows| {
+            row(ui, e, false, slot, rows)
+        });
+    }
+    // The radio is looking for the next tracks (said where they will
+    // appear), or the queue ends and autoplay follows: one part, moved
+    // with the rows.
+    if extending || q.radio.is_none() {
+        let rel = ui.cursor().top() - after;
+        lm.place(ui, 48.0, TAIL, rel, q.next.len() + 1, true, false, |ui| {
+            if extending {
+                extending_row(ui);
+            }
+            if q.radio.is_none() {
+                autoplay_block(ui, state, chrome, out);
+            }
+        });
+    }
+    // On a change's first frame, what was in sight and is no more is
+    // known now: it fades out where it was.
+    if let Some(c) = lm.change.as_mut().filter(|c| c.first) {
+        c.end_first();
+        let find = |entry: u64| {
+            q.prev
+                .iter()
+                .position(|e| e.entry == entry)
+                .map(|i| (true, i))
+                .or_else(|| q.next.iter().position(|e| e.entry == entry).map(|i| (false, i)))
+        };
+        c.ghost_at = c.ghosts.iter().map(|g| find(g.entry)).collect();
+    }
+    queue_ghosts(ui, q, lm, anchor);
+    if let Some(r) = current_link {
+        chrome.nav = Some(r);
+    }
+    if let Some((act, t)) = current_pick {
+        let at = Rect::from_center_size(ui.ctx().pointer_latest_pos().unwrap_or_default(), egui::vec2(1.0, 1.0));
+        chrome.pick(&ui.ctx().clone(), act, t, state, at, Where::Bar, out);
+    }
+    if rows.is_empty() {
+        return anchor;
+    }
+    // The row under the pointer is where the dragged one lands:
+    // after it when dragged down, before it when dragged up.
+    let last = rows.len() - 1;
+    let target_at = |y: f32| rows.iter().position(|(_, r)| y < r.bottom()).unwrap_or(last);
+    let pointer = ui.ctx().pointer_latest_pos();
+    if let (Some(from), Some(p)) = (dragging, pointer) {
+        let to = target_at(p.y);
+        if to != from {
+            let r = rows[to].1;
+            let y = if to < from { r.top() } else { r.bottom() };
+            ui.painter().rect_filled(
+                Rect::from_min_max(egui::pos2(r.left() + 16.0, y - 1.5), egui::pos2(r.right() - 16.0, y + 1.5)),
+                2,
+                s.primary,
+            );
+        }
+    }
+    match dragging {
+        Some(from) => {
+            ui.ctx().data_mut(|d| d.insert_temp(drag_key, rows[from].0));
+        }
+        None => ui.ctx().data_mut(|d| d.remove::<u64>(drag_key)),
+    }
+    if let (Some(from), Some(p)) = (dropped, pointer) {
+        let to = target_at(p.y);
+        if to != from {
+            out.push(Command::MoveInQueue { entry: rows[from].0, anchor: rows[to].0, after: to > from });
+        }
+    }
+    anchor
 }
 
 /// The end of a queue that is no radio: «Автовоспроизведение» with its

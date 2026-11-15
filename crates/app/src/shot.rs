@@ -33,6 +33,8 @@
 //! `play_track:<id>` plays one track of the library by its id;
 //! `play_search:n` the n-th track of the search's «Всё» answer;
 //! `download` asks for the playing track's file.
+//! `next` skips to the next track (`next:4` four times); `shuffle` turns
+//! shuffle on or off (`shuffle:3` goes on 3 frames later, mid-change).
 //! `wave` starts «Моя волна» (`wave:card` with the first card of «Миксы
 //! для тебя» as its preset), `vibe` is «↻ Другой вайб».
 //! `play_mix:daily|discover|mood|style|daylist|tile` plays a mix of Главная
@@ -496,6 +498,16 @@ impl Shot {
                     out.push(Command::PlayRelease { id: r.id, start: None, shuffle: false });
                 }
                 self.wait = 20;
+            }
+            "next" => {
+                for _ in 0..arg.parse().unwrap_or(1) {
+                    out.push(Command::Next);
+                }
+                self.wait = 20;
+            }
+            "shuffle" => {
+                out.push(Command::ToggleShuffle);
+                self.wait = arg.parse().unwrap_or(30);
             }
             "seek" => {
                 if let Ok(seconds) = arg.parse::<f32>()
