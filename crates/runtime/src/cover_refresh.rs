@@ -290,7 +290,8 @@ fn cover_images(dir: &Path) -> Vec<PathBuf> {
             let stem = p.file_stem()?.to_string_lossy().to_lowercase();
             let ext = p.extension()?.to_string_lossy().to_lowercase();
             let rank = COVER_NAMES.iter().position(|n| *n == stem)?;
-            matches!(ext.as_str(), "jpg" | "jpeg" | "png").then(|| (rank, dir.join(p.file_name()?)))
+            let name = p.file_name()?;
+            matches!(ext.as_str(), "jpg" | "jpeg" | "png").then(|| (rank, dir.join(name)))
         })
         .collect();
     out.sort();
