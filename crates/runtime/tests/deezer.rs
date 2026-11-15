@@ -7,8 +7,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nikgob_core::model::{Codec, Source, SourceKind};
-use nikgob_core::streaming::{FakeService, RemoteId, Service, StreamService, StreamTrack};
+use nikgob_core::model::{Artist, ArtistCredit, Codec, Source, SourceKind, Track};
+use nikgob_core::streaming::{EntityKind, FakeService, RemoteId, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, Runtime, RuntimeConfig};
 use nikgob_view::{
@@ -297,6 +297,34 @@ fn the_discography_comes_from_deezer_when_spotify_is_not_connected() {
     r.rt.send(Command::LoadDiscography(artist));
     wait_until("Deezer's artist", || deezer.calls("artist") > 0);
     assert_eq!(spotify.calls("artist") + spotify.calls("search_kind"), 0, "{:?}", spotify.all_calls());
+}
+
+/// The only Deezer artist of the name is linked to a library artist none
+/// of whose releases it has: neither that lookup nor a later one through
+/// the stored link takes its picture.
+#[test]
+fn a_link_made_on_the_name_alone_brings_no_artist_image() {
+    let lib = Library::open_in_memory().unwrap();
+    let a = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+    let t = lib.upsert_track(&Track::new("Совсем другая песня", ArtistCredit::single("Кино", Some(a.id)))).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "/nonexistent/x.flac", Codec::Flac).with_quality(false))
+        .unwrap();
+    let deezer = Arc::new(FakeService::deezer());
+    let r = rig(&lib, vec![deezer.clone()]);
+    let key = format!("discography.{}", a.id);
+    r.rt.send(Command::LoadDiscography(a.id));
+    wait_until("the discography", || lib.cache_get(&key).unwrap().is_some());
+    let links = lib.external_ids(EntityKind::Artist, *a.id.as_uuid()).unwrap();
+    assert!(links.iter().any(|l| l.service == Service::Deezer), "linked on the name: {links:?}");
+    assert!(lib.get_artist(a.id).unwrap().unwrap().images.is_empty());
+    // A day later the stored link is used.
+    let (_, json) = lib.cache_get(&key).unwrap().unwrap();
+    lib.cache_put(&key, 0, &json).unwrap();
+    let before = deezer.calls("artist");
+    r.rt.send(Command::LoadDiscography(a.id));
+    wait_until("the discography again", || lib.cache_get(&key).unwrap().is_some_and(|(at, _)| at > 0));
+    assert!(deezer.calls("artist") > before, "asked by the stored id");
+    assert!(lib.get_artist(a.id).unwrap().unwrap().images.is_empty());
 }
 
 #[test]
