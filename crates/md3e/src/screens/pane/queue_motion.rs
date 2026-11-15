@@ -136,8 +136,11 @@ impl Change {
     /// track's block, `rank` how many rows away it is, `below` whether it
     /// comes after it, `in_sight` whether its place shows this frame.
     pub fn role(&mut self, entry: u64, rel: f32, rank: usize, below: bool, in_sight: bool) -> Role {
+        // A row that goes to the other side of the playing track would
+        // slide across it: it is swapped instead.
         if self.anchored
             && let Some(b) = self.before.iter().find(|b| b.entry == entry)
+            && (b.y < 0.0) == (rel < 0.0)
         {
             if self.first && in_sight {
                 self.stays.push(entry);
@@ -368,6 +371,20 @@ mod tests {
         // Later frames remember who stays, even out of sight.
         assert_eq!(c.role(2, 340.0, 4, true, false), Role::Stays { from: -160.0 });
         assert!(matches!(c.role(3, 500.0, 5, true, true), Role::Arrives { .. }), "it faded out, it fades in");
+    }
+
+    #[test]
+    fn a_row_never_slides_across_the_playing_track() {
+        let mut m = motion();
+        m.anchor = Some(300.0);
+        // A played row above it lands among the next ones (shuffle on).
+        m.seen = vec![seen(4, 220.0), seen(5, 400.0)];
+        m.begin(1.0, 0.0, 72.0, &Motion::default(), false);
+        let c = m.change.as_mut().unwrap();
+        assert!(matches!(c.role(4, 180.0, 2, true, true), Role::Arrives { .. }));
+        assert_eq!(c.role(5, 260.0, 3, true, true), Role::Stays { from: -160.0 });
+        c.end_first();
+        assert_eq!(c.ghosts, vec![seen(4, -80.0)]);
     }
 
     #[test]
