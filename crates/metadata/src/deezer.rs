@@ -370,31 +370,69 @@ impl Deezer {
         }
         let mut gap = false;
         for hit in candidates.into_iter().take(MAX_VERIFIED_CANDIDATES) {
-            let mut theirs: Vec<String> = Vec::new();
-            match self.artist_albums(hit.id, 100).await {
-                Ok(a) => theirs.extend(a.into_iter().map(|a| a.title)),
-                Err(MetadataError::NotFound) => gap = true,
-                Err(e) => return Err(e),
-            }
-            match self.artist_top(hit.id, 50).await {
-                Ok(t) => theirs.extend(t.into_iter().map(|t| t.title)),
-                Err(MetadataError::NotFound) => gap = true,
-                Err(e) => return Err(e),
-            }
-            let overlaps = theirs.iter().map(|t| album_key(t)).any(|t| {
-                !t.is_empty()
-                    && known
-                        .iter()
-                        .any(|k| similarity(k, &t) >= MIN_TITLE_SIMILARITY)
-            });
-            if overlaps && let Some(url) = hit.best_picture() {
-                return Ok(ArtistPicture::Found(url.to_owned()));
+            match self.titles_overlap(hit.id, &known).await? {
+                Some(true) => {
+                    if let Some(url) = hit.best_picture() {
+                        return Ok(ArtistPicture::Found(url.to_owned()));
+                    }
+                }
+                Some(false) => {}
+                None => gap = true,
             }
         }
         if gap {
             return Err(MetadataError::NotFound);
         }
         Ok(ArtistPicture::Unverified)
+    }
+
+    /// The photo of the Deezer artist `id` (one the library linked by
+    /// itself, which proves nothing), accepted only when one of its albums
+    /// or top tracks matches one of `known_titles`, like a searched
+    /// candidate: [`ArtistPicture::Unverified`] when none does,
+    /// [`ArtistPicture::Missing`] when it has no photo, and
+    /// [`MetadataError::NotFound`] when a list answered 404 and none matched.
+    pub async fn linked_artist_lookup(&self, id: u64, known_titles: &[String]) -> Result<ArtistPicture> {
+        let known: Vec<String> = known_titles.iter().map(|t| album_key(t)).filter(|k| !k.is_empty()).collect();
+        let artist = self.artist(id).await?;
+        let Some(url) = artist.best_picture() else { return Ok(ArtistPicture::Missing) };
+        if known.is_empty() {
+            return Ok(ArtistPicture::Unverified);
+        }
+        match self.titles_overlap(id, &known).await? {
+            Some(true) => Ok(ArtistPicture::Found(url.to_owned())),
+            Some(false) => Ok(ArtistPicture::Unverified),
+            None => Err(MetadataError::NotFound),
+        }
+    }
+
+    /// Whether one of the Deezer artist `id`'s albums or top tracks matches
+    /// one of `known` (album keys); `None` when none does and one of the
+    /// lists answered 404.
+    async fn titles_overlap(&self, id: u64, known: &[String]) -> Result<Option<bool>> {
+        let mut theirs: Vec<String> = Vec::new();
+        let mut gap = false;
+        match self.artist_albums(id, 100).await {
+            Ok(a) => theirs.extend(a.into_iter().map(|a| a.title)),
+            Err(MetadataError::NotFound) => gap = true,
+            Err(e) => return Err(e),
+        }
+        match self.artist_top(id, 50).await {
+            Ok(t) => theirs.extend(t.into_iter().map(|t| t.title)),
+            Err(MetadataError::NotFound) => gap = true,
+            Err(e) => return Err(e),
+        }
+        let overlaps = theirs
+            .iter()
+            .map(|t| album_key(t))
+            .any(|t| !t.is_empty() && known.iter().any(|k| similarity(k, &t) >= MIN_TITLE_SIMILARITY));
+        Ok(if overlaps {
+            Some(true)
+        } else if gap {
+            None
+        } else {
+            Some(false)
+        })
     }
 
     /// The free 30-second preview of a song: of Deezer's track `id` when it
