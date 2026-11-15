@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use nikgob_core::model::{Artist, ArtistCredit, Codec, Source, SourceKind, Track};
+use nikgob_core::model::{Artist, ArtistCredit, Codec, Release, Source, SourceKind, Track};
 use nikgob_core::streaming::{EntityKind, FakeService, RemoteId, Service, StreamService, StreamTrack};
 use nikgob_library::Library;
 use nikgob_runtime::{PlayRequest, PlaySource, Playback, Runtime, RuntimeConfig};
@@ -330,6 +330,31 @@ fn an_artist_of_the_same_name_alone_is_not_linked() {
     wait_until("the discography again", || lib.cache_get(&key).unwrap().is_some_and(|(at, _)| at > 0));
     assert!(deezer.calls("search_kind") > before);
     unlinked(&lib);
+}
+
+/// A merged channel the library links an artist to (by a track's credit):
+/// its only album with one of the artist's titles is credited to someone
+/// else, so the channel's picture is not saved for the artist.
+#[test]
+fn a_merged_channel_lends_no_image_through_someone_elses_album() {
+    let lib = Library::open_in_memory().unwrap();
+    let a = lib.upsert_artist(&Artist::new("gotlibgotlibgotlib")).unwrap();
+    let credit = ArtistCredit::single("gotlibgotlibgotlib", Some(a.id));
+    let release = lib.upsert_release(&Release::new("Группа крови", credit.clone())).unwrap();
+    let mut t = Track::new("Группа крови", credit);
+    t.release_id = Some(release.id);
+    let t = lib.upsert_track(&t).unwrap();
+    lib.add_source(&Source::new(t.id, SourceKind::LocalFile, "/nonexistent/g.flac", Codec::Flac).with_quality(false))
+        .unwrap();
+    let channel = RemoteId::new(Service::Deezer, "dz-art-kino");
+    lib.set_external_id(EntityKind::Artist, &channel, *a.id.as_uuid()).unwrap();
+    let deezer = Arc::new(FakeService::deezer());
+    let r = rig(&lib, vec![deezer.clone()]);
+    let key = format!("discography.{}", a.id);
+    r.rt.send(Command::LoadDiscography(a.id));
+    wait_until("the discography", || lib.cache_get(&key).unwrap().is_some());
+    assert!(deezer.calls("artist") > 0, "asked by the stored link");
+    assert!(lib.get_artist(a.id).unwrap().unwrap().images.is_empty(), "no picture from someone else's album");
 }
 
 #[test]
