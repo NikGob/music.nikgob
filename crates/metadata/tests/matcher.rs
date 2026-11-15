@@ -489,6 +489,74 @@ fn deezer_compilations_are_flagged_and_dates_cleaned() {
     assert_eq!(cand.metadata.isrcs, ["XX1234567890"]);
 }
 
+fn release_of(c: Candidate, kind: &str, date: &str, track_no: u32) -> Candidate {
+    let mut c = c;
+    c.ids.release_mbid = Some(format!("{kind}-{date}"));
+    c.metadata.release_type = Some(kind.into());
+    c.metadata.date = Some(date.into());
+    c.metadata.track_no = Some(track_no);
+    c
+}
+
+/// «Рисунки» came out first as a single, then as the first song of the
+/// album «Рисунки». A file of the album (its tags say 11 tracks) matched
+/// the single, which is earlier, and took the single's cover.
+#[test]
+fn a_file_of_an_album_takes_the_album_over_its_earlier_single() {
+    let song = || mb("rec-1", "Рисунки", "Artist", "Рисунки", 200);
+    let single = || release_of(song(), "Single", "2023-03-01", 1);
+    let album = || release_of(song(), "Album", "2023-09-01", 1);
+    let ev = LocalEvidence {
+        track_no: Some(1),
+        track_total: Some(11),
+        ..evidence("Рисунки", "Artist", "Рисунки", 200)
+    };
+    let best = match_candidates(&ev, vec![single(), album()]);
+    assert_eq!(best.best().unwrap().metadata.release_type.as_deref(), Some("Album"));
+    assert_eq!(best.confidence, Confidence::Sure);
+    // A later song of the album, its tags without the count.
+    let fifth = |c: Candidate| Candidate { metadata: TrackMetadata { title: "Пятая".into(), ..c.metadata }, ..c };
+    let ev5 = LocalEvidence {
+        track_no: Some(5),
+        album: None,
+        ..evidence("Пятая", "Artist", "", 200)
+    };
+    let result = match_candidates(&ev5, vec![fifth(single()), release_of(fifth(song()), "Album", "2023-09-01", 5)]);
+    assert_eq!(result.best().unwrap().metadata.release_type.as_deref(), Some("Album"));
+    // The single's own file (one track, or nothing that says more) keeps
+    // the earliest release.
+    for total in [Some(1), None] {
+        let ev = LocalEvidence {
+            track_no: Some(1),
+            track_total: total,
+            ..evidence("Рисунки", "Artist", "Рисунки", 200)
+        };
+        let result = match_candidates(&ev, vec![album(), single()]);
+        assert_eq!(result.best().unwrap().metadata.release_type.as_deref(), Some("Single"), "{total:?}");
+    }
+    // The album's song at another place is not the file's.
+    let elsewhere = release_of(song(), "Album", "2023-09-01", 7);
+    let ev3 = LocalEvidence { track_no: Some(3), ..evidence("Рисунки", "Artist", "", 200) };
+    let result = match_candidates(&ev3, vec![single(), elsewhere]);
+    assert_eq!(result.best().unwrap().metadata.release_type.as_deref(), Some("Single"));
+}
+
+/// Two editions of an album: the earliest still wins the tie.
+#[test]
+fn a_tie_between_editions_of_an_album_goes_to_the_earliest() {
+    let song = || mb("rec-1", "Heroes", "David Bowie", "Heroes", 370);
+    let ev = LocalEvidence {
+        track_no: Some(3),
+        track_total: Some(10),
+        ..evidence("Heroes", "David Bowie", "Heroes", 370)
+    };
+    let result = match_candidates(
+        &ev,
+        vec![release_of(song(), "Album", "1999-01-01", 3), release_of(song(), "Album", "1977-10-14", 3)],
+    );
+    assert_eq!(result.best().unwrap().metadata.date.as_deref(), Some("1977-10-14"));
+}
+
 #[test]
 fn nothing_to_choose_from_is_unsure_and_empty() {
     let ev = evidence("Heroes", "David Bowie", "Heroes", 370);

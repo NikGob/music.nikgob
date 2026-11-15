@@ -333,6 +333,7 @@ pub fn evidence(tags: &TagSet, info: &FileInfo, path: &Path) -> LocalEvidence {
         album: tags.album.clone(),
         duration: (!info.duration.is_zero()).then_some(info.duration),
         track_no: tags.track_no,
+        track_total: tags.track_total,
         disc_no: tags.disc_no,
         filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
         acoustid: Vec::new(),
