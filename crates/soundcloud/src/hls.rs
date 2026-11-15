@@ -253,9 +253,6 @@ struct State {
     /// The segment the reader waits for or reads.
     want: usize,
     closed: bool,
-    /// The download is waiting out a network outage: a reader waits with
-    /// it (the download fails the stream when the outage lasts too long).
-    outage: bool,
     /// The engine interrupted the reader (see [`StreamInterrupter`]): a
     /// read that would wait returns at once instead.
     interrupted: bool,
@@ -291,7 +288,7 @@ pub(crate) struct HlsStream {
     duration: Arc<Mutex<Option<Duration>>>,
     cooldown: MediaCooldown,
     /// Longest wait of a read for its bytes ([`READ_TIMEOUT`]; shorter in
-    /// tests), unless the download waits out an outage.
+    /// tests), through a network outage too.
     read_timeout: Duration,
 }
 
@@ -428,14 +425,14 @@ impl Read for HlsStream {
             if st.interrupted {
                 return Err(interrupted_read());
             }
+            // The read gives up after its own time, an outage or not (the
+            // player moves on to another copy meanwhile); the download goes
+            // on asking, and a later read finds the bytes.
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() && !st.outage {
+            if left.is_zero() {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "SoundCloud: the stream stalled"));
             }
-            // Through an outage the download decides: the bytes come, or
-            // its error does once the outage has lasted too long.
-            let wait = if left.is_zero() { Duration::from_secs(1) } else { left };
-            st = shared.ready.wait_timeout(st, wait).unwrap_or_else(PoisonError::into_inner).0;
+            st = shared.ready.wait_timeout(st, left).unwrap_or_else(PoisonError::into_inner).0;
         }
     }
 }
@@ -600,10 +597,6 @@ impl Download {
             if attempt >= MAX_ATTEMPTS || self.closed() {
                 return Err(err);
             }
-            if range.is_none() {
-                // A whole segment is being retried: a reader waits with it.
-                self.shared.lock().outage = true;
-            }
             tokio::time::sleep(wait.max(Duration::from_millis(300 * u64::from(attempt)))).await;
         }
     }
@@ -708,7 +701,6 @@ impl Download {
             let got = match self.get(&plan.segments[i].0, None).await {
                 Ok(got) => {
                     outage = None;
-                    self.shared.lock().outage = false;
                     got
                 }
                 // The network went away (or the CDN is down) for longer than
@@ -720,7 +712,6 @@ impl Download {
                     if since.elapsed() >= OUTAGE_MAX {
                         return Err(e);
                     }
-                    self.shared.lock().outage = true;
                     log::info!("soundcloud: segment {i} not fetched ({e}); asking again");
                     let _ = tokio::time::timeout(OUTAGE_RETRY, self.shared.wake.notified()).await;
                     continue;
@@ -1016,10 +1007,23 @@ mod tests {
                 .mount(&server)
                 .await;
             let mut s = stream(&server, 1, Arc::new(AtomicU32::new(0)));
-            // The reader waits with the download past its own deadline.
+            // The read gives up after its own time, the outage or not; the
+            // download goes on, and a later read gets the segment.
             s.read_timeout = Duration::from_secs(1);
-            let bytes = tokio::task::spawn_blocking(move || read_all(s)).await.unwrap().unwrap();
-            assert_eq!(bytes.len(), 10_050);
+            let (first, rest) = tokio::task::spawn_blocking(move || {
+                let mut out = Vec::new();
+                let started = std::time::Instant::now();
+                let first = s.read_to_end(&mut out).map_err(|e| (e.kind(), started.elapsed()));
+                s.read_timeout = Duration::from_secs(30);
+                let rest = s.read_to_end(&mut out).map(|_| out.len());
+                (first, rest)
+            })
+            .await
+            .unwrap();
+            let (kind, after) = first.unwrap_err();
+            assert_eq!(kind, std::io::ErrorKind::TimedOut);
+            assert!(after < Duration::from_secs(5), "not held through the outage: {after:?}");
+            assert_eq!(rest.unwrap(), 10_050);
         }
 
         #[test]

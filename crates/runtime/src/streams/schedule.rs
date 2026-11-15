@@ -128,6 +128,10 @@ pub struct StreamSchedule {
     /// for its copy on the service the user prefers (Spotify) to be
     /// found; then it plays what it has (see `streams::prefer`).
     pub prefer_wait: Duration,
+    /// After a lookup there failed (the network, the login) or was rate
+    /// limited, the service the user prefers is asked for no copies for
+    /// this long (longer when it says so; see `streams::prefer`).
+    pub prefer_retry: Duration,
 }
 
 impl Default for StreamSchedule {
@@ -172,6 +176,7 @@ impl Default for StreamSchedule {
             wave_refill: crate::recs::WAVE_REFILL,
             listener_recheck: Duration::from_secs(10),
             prefer_wait: Duration::from_millis(2500),
+            prefer_retry: Duration::from_secs(2 * 60),
         }
     }
 }

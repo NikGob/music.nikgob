@@ -18,8 +18,7 @@
 //!   may only preview (`policy: SNIP`, Go+ tracks) is
 //!   [`StreamError::Unavailable`]; one with only encrypted streams
 //!   (`cbc-/ctr-encrypted-hls`, major labels) is [`StreamError::Drm`]:
-//!   never decrypted, left for a route through SoundCloud's own player
-//!   ([`Soundcloud::availability`] tells the two apart without opening).
+//!   never decrypted, left for a route through SoundCloud's own player.
 //! * **Read only**: likes are sent both ways (one request each), playlists
 //!   never ([`StreamPlaylist::editable`] is false), nothing is saved to
 //!   disk ([`StreamService::save_audio`] is unsupported).
@@ -116,19 +115,6 @@ impl SoundcloudConfig {
             memory_store: false,
         }
     }
-}
-
-/// Whether a listed track can play here, as far as its listing tells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Availability {
-    /// A clear AAC stream.
-    Playable,
-    /// Only a 30-second preview for this account.
-    Preview,
-    /// Only encrypted (DRM) streams: SoundCloud's own player only.
-    Drm,
-    /// Nothing streamable.
-    None,
 }
 
 struct Inner {
@@ -281,25 +267,6 @@ impl Soundcloud {
     {
         let task = self.runtime.handle().spawn(f(Arc::clone(&self.inner)));
         Box::pin(Joined(task))
-    }
-
-    /// Whether a track can play here, from its listing (one request when
-    /// it is not cached): for a later route that plays DRM-only tracks
-    /// through SoundCloud's own player.
-    pub fn availability(&self, id: &str) -> BoxFuture<'_, Result<Availability, StreamError>> {
-        let id = id.to_owned();
-        self.run(move |inner| async move {
-            let t = inner.raw_track(&id, false).await?;
-            Ok(if t.playable_transcoding().is_some() {
-                Availability::Playable
-            } else if t.drm_only() {
-                Availability::Drm
-            } else if t.preview_only() {
-                Availability::Preview
-            } else {
-                Availability::None
-            })
-        })
     }
 }
 

@@ -307,6 +307,22 @@ fn twenty_spotify_tracks_are_looked_up_on_youtube_once() {
     assert_eq!(yt.total_calls(), 0, "after a restart: {:?}", yt.all_calls());
 }
 
+/// SoundCloud's `/tracks?ids=` leaves out a track this client may not
+/// see: no proof it is gone, its source stays playable.
+#[test]
+fn a_soundcloud_track_left_out_of_a_batch_answer_stays_playable() {
+    let lib = Library::open_in_memory().unwrap();
+    let remote = RemoteId::new(Service::Soundcloud, "sc-not-listed");
+    lib.ensure_stream_tracks(&[StreamTrack::new(remote.clone(), "Unlisted")]).unwrap();
+    let track = lib.track_by_remote(&remote).unwrap().unwrap();
+    let sc = Arc::new(FakeService::new(Service::Soundcloud));
+    let _rig = start(&lib, std::slice::from_ref(&sc), quick());
+    wait_for("the batch", 10, || sc.calls("tracks") >= 1);
+    std::thread::sleep(Duration::from_millis(300));
+    let sources = lib.sources_of_track(track).unwrap();
+    assert!(!sources.is_empty() && sources.iter().all(|s| s.available), "{sources:?}");
+}
+
 #[test]
 fn completing_three_hundred_imported_tracks_is_six_calls() {
     let lib = Library::open_in_memory().unwrap();

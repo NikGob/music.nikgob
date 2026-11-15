@@ -1871,9 +1871,12 @@ impl Worker {
     /// The best source of `e` that is usable and not in `skip` (local >
     /// Spotify > YouTube, then quality). A stream source needs its service
     /// registered. A stream copy set aside earlier (its details or its
-    /// video refused once) is tried again when nothing else plays, unless
-    /// it was refused in the last hours (`REFUSED_TTL`). Says in the log
-    /// why nothing plays.
+    /// video refused once, a listing that said it does not play) is tried
+    /// again when nothing else plays: a YouTube video unless it was refused
+    /// in the last hours (`REFUSED_TTL`), another service's copy once the
+    /// song cannot be looked up anywhere either (a snippet-only or DRM-only
+    /// listing is not played before YouTube Music is asked). Says in the
+    /// log why nothing plays.
     fn pick_source(&mut self, e: Entry, skip: &[SourceId]) -> Option<nikgob_core::model::Source> {
         let mut sources = match self.lib.sources_of_track(e.track) {
             Ok(s) => s,
@@ -1890,12 +1893,17 @@ impl Worker {
         // account (Spotify not connected, or before its playback login:
         // the library's Spotify tracks play from YouTube Music), and not
         // paused by a rate limit unless its audio is on disk.
-        let usable = |w: &mut Self, s: &nikgob_core::model::Source| match s.kind.service() {
+        let mut lookup: Option<bool> = None;
+        let mut usable = |w: &mut Self, s: &nikgob_core::model::Source| match s.kind.service() {
             None => s.available,
             Some(service) => {
-                (s.available || (s.kind == SourceKind::Youtube && !refused.contains(&s.locator)))
-                    && w.has_audio(service)
-                    && !w.waits_for_pause(service, &s.locator)
+                let ok = s.available
+                    || if s.kind == SourceKind::Youtube {
+                        !refused.contains(&s.locator)
+                    } else {
+                        !*lookup.get_or_insert_with(|| w.can_look_up(e.track))
+                    };
+                ok && w.has_audio(service) && !w.waits_for_pause(service, &s.locator)
             }
         };
         let Some(src) = sources.iter().find(|s| usable(self, s)).cloned() else {
@@ -2201,7 +2209,10 @@ impl Worker {
 
     fn start(&mut self, e: Entry) {
         self.resume_at = None;
-        self.failover = None;
+        // A place the user moved to while `e` waited for a lookup (or its
+        // clip's song) is where it starts; anything else starts at 0:00.
+        let waited = self.playing.is_some_and(|p| p.id == e.id) && self.playing_source.is_none();
+        self.failover = self.failover.filter(|(id, _)| waited && *id == e.id);
         let mut e = e;
         // Skip forward over unplayable items rather than stall. With repeat on,
         // `skip_forward` wraps around, so the walk is bounded by the queue
@@ -2278,11 +2289,12 @@ impl Worker {
         self.position_at = Instant::now();
         self.rate = self.speed;
         self.jumped_at = Instant::now();
-        // A stream a service's pause cut midway goes on from there.
+        // A stream a service's pause cut midway goes on from there, and a
+        // track moved along while it waited from where it was moved to.
         if let Some(at) = self.take_held_position(e.id) {
             self.failover = Some((e.id, at));
-            self.seek_to_failover(e);
         }
+        self.seek_to_failover(e);
         self.record_start(e, (!kind.is_local()).then_some(kind));
         self.preload_next();
         self.turn.lap("next");
@@ -2317,13 +2329,22 @@ impl Worker {
         // through a start of its own (a gapless step would start it over).
         let next = next.filter(|n| !self.has_held_position(n.id));
         // Its Spotify copy is being looked up: handed over once that answer
-        // is in (see `streams::prefer`).
+        // is in, or a moment before the join (see `streams::prefer`).
         let next = next.filter(|n| !self.prefer_pending(*n));
         let Some((next, src)) = next.and_then(|n| Some((n, self.pick_source(n, &[])?))) else {
             self.reading_ahead = None;
             self.playback.set_next(None);
             return;
         };
+        // The engine holds this entry already and it would stream again:
+        // it keeps what it has. It may have taken it over, and a swap would
+        // record a source that does not play (a Spotify copy found after
+        // the YouTube one was handed); a file that came meanwhile still
+        // takes its place.
+        if src.kind.service().is_some() && self.playback.holds_next(next.id) {
+            self.reading_ahead = None;
+            return;
+        }
         // A file whose tags were not read yet is read off the loop; the
         // engine gets the next track when they are.
         if ahead && src.kind.service().is_none() {
@@ -2421,7 +2442,12 @@ impl Worker {
             }
             return;
         }
-        self.playback.seek(p);
+        match self.playing {
+            // Waiting for a lookup (or a clip's song): nothing is open to
+            // seek in; it starts from here (see `seek_to_failover`).
+            Some(e) if self.playing_source.is_none() => self.failover = Some((e.id, p)),
+            _ => self.playback.seek(p),
+        }
         self.position = p;
         self.position_at = Instant::now();
         self.rate = self.speed;
@@ -2745,7 +2771,7 @@ impl Worker {
                     }
                     // Repeat-one with no preload (or preload failed): restart.
                     match self.queue.advance_auto() {
-                        Some(e) => self.start_at_join(e),
+                        Some(e) => self.start(e),
                         None => {
                             self.stop();
                             // A radio still picking its next tracks plays on.

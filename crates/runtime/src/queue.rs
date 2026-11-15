@@ -243,6 +243,25 @@ impl Queue {
         }
     }
 
+    /// The `n` entries at most that come after the current one, for what is
+    /// done ahead of them: the next one (the first again past the end with
+    /// repeat all), then the ones after it. With repeat one these are the
+    /// ones «Дальше» goes to, not the current one again. None while nothing
+    /// is current.
+    pub fn ahead(&self, n: usize) -> Vec<Entry> {
+        if self.pos.is_none() {
+            return Vec::new();
+        }
+        let up = self.upcoming();
+        let mut out: Vec<Entry> = Vec::with_capacity(n);
+        if up.is_empty() && self.repeat == Repeat::All {
+            out.extend(self.items.first().copied());
+        }
+        out.extend(up.iter().take(n.saturating_sub(out.len())).copied());
+        out.truncate(n);
+        out
+    }
+
     /// Moves on when the current item ends by itself (respects repeat one).
     pub fn advance_auto(&mut self) -> Option<Entry> {
         let next = self.peek_auto_next();
@@ -504,6 +523,24 @@ mod tests {
         assert_eq!(q.advance_auto().map(|e| e.track), Some(t[0]));
         // Pressing next skips even with repeat one.
         assert_eq!(q.skip_forward().map(|e| e.track), Some(t[1]));
+    }
+
+    /// What is done ahead looks at the entries that really come next: with
+    /// repeat one not the current one again but the ones after it.
+    #[test]
+    fn ahead_is_what_comes_after_the_current_one() {
+        let t = ids(4);
+        let mut q = Queue::default();
+        q.set(&t, 1, None);
+        let tracks = |q: &Queue| q.ahead(2).iter().map(|e| e.track).collect::<Vec<_>>();
+        assert_eq!(tracks(&q), [t[2], t[3]]);
+        q.repeat = Repeat::One;
+        assert_eq!(tracks(&q), [t[2], t[3]], "not the current one again");
+        q.set(&t, 3, None);
+        q.repeat = Repeat::All;
+        assert_eq!(tracks(&q), [t[0]], "the first again past the end");
+        q.repeat = Repeat::Off;
+        assert!(q.ahead(2).is_empty());
     }
 
     #[test]

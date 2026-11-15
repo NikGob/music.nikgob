@@ -31,7 +31,7 @@
 //! [`StreamService::liked_head`]: nikgob_core::streaming::StreamService::liked_head
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nikgob_core::model::{TrackId, WishlistOrigin};
 use nikgob_core::streaming::{LikedHead, RemoteId, Service, StreamError, StreamTrack};
@@ -72,7 +72,28 @@ impl LikeQueue {
         self.armed.remove(&service);
         self.pending.remove(&service).unwrap_or_default()
     }
+
+    /// Puts what [`Self::take`] took back in front of anything queued
+    /// since, a flush armed for it (the caller sends it later).
+    fn put_back(&mut self, service: Service, taken: Vec<(RemoteId, bool)>) {
+        let q = self.pending.entry(service).or_default();
+        let since = std::mem::replace(q, taken);
+        for (remote, on) in since {
+            if let Some(i) = q.iter().position(|(r, _)| *r == remote) {
+                if q[i].1 != on {
+                    q.remove(i);
+                }
+            } else {
+                q.push((remote, on));
+            }
+        }
+        self.armed.insert(service);
+    }
 }
+
+/// Queued likes of a service that is gone for a moment (switched off, an
+/// account change) are tried again this long after.
+const LIKES_AGAIN: Duration = Duration::from_secs(60);
 
 /// What a head check says.
 #[derive(Debug, PartialEq, Eq)]
@@ -499,7 +520,16 @@ impl Worker {
         if queued.is_empty() {
             return;
         }
-        let Some(svc) = self.service(service) else { return };
+        let Some(svc) = self.service(service) else {
+            // Gone for a moment: they wait for it, not dropped (each is
+            // already recorded here as sent).
+            self.streaming.like_queue.put_back(service, queued);
+            self.streaming.spawn(async move {
+                tokio::time::sleep(LIKES_AGAIN).await;
+                Msg::LikeFlush(service)
+            });
+            return;
+        };
         for on in [true, false] {
             let remotes: Vec<RemoteId> = queued
                 .iter()
@@ -597,5 +627,26 @@ mod tests {
         assert!(!q.push(r.clone(), false), "cancelled");
         assert_eq!(q.take(Service::Spotify), vec![(RemoteId::new(Service::Spotify, "b"), true)]);
         assert!(q.push(r, true), "armed again after a flush");
+    }
+
+    /// Likes taken while their service was gone go back in front, and a
+    /// like and its unlike still cancel out across the two.
+    #[test]
+    fn likes_put_back_wait_for_the_next_flush() {
+        let mut q = LikeQueue::default();
+        let (a, b, c) = (RemoteId::new(Service::Spotify, "a"), RemoteId::new(Service::Spotify, "b"), RemoteId::new(Service::Spotify, "c"));
+        q.push(a.clone(), true);
+        q.push(b.clone(), true);
+        let taken = q.take(Service::Spotify);
+        // Queued meanwhile: an unlike of «b», a like of «c».
+        q.push(b, false);
+        q.push(c.clone(), true);
+        q.put_back(Service::Spotify, taken);
+        assert!(!q.push(RemoteId::new(Service::Spotify, "d"), true), "a flush is armed already");
+        assert_eq!(
+            q.take(Service::Spotify),
+            vec![(a, true), (c, true), (RemoteId::new(Service::Spotify, "d"), true)],
+            "nothing dropped, «b» cancelled out"
+        );
     }
 }

@@ -147,7 +147,7 @@ impl Track {
             .min_by_key(|t| rank(t))
     }
 
-    /// Only encrypted streams in full (DRM): see [`crate::Availability`].
+    /// Only encrypted streams in full (DRM): SoundCloud's own player only.
     pub(crate) fn drm_only(&self) -> bool {
         let Some(m) = &self.media else { return false };
         self.playable_transcoding().is_none() && m.transcodings.iter().any(|t| t.is_drm() && !t.snipped)
