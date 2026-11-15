@@ -724,13 +724,13 @@ fn a_late_spotify_answer_leaves_the_next_track_its_youtube_copy_for_a_gapless_jo
 #[test]
 fn the_next_track_is_handed_over_ten_seconds_before_the_end_at_the_latest() {
     // The playing song has 12 s: the next one waits 2 s for Spotify, not
-    // the whole wait, and goes over with its YouTube copy.
+    // the whole wait, and goes over with its YouTube copy. (A song of the
+    // fake's own catalog would come back with its own length from the
+    // likes, playlists or details read at the start: one of 12 s there.)
     let lib = Library::open_in_memory().unwrap();
-    let mut short = find(&FakeService::spotify(), "sp-discovery-1");
-    short.duration_ms = Some(12_000);
-    let first = lib.upsert_stream_track(&short).unwrap();
+    let spotify = Arc::new(FakeService::spotify().with_song("short", "Short", "Daft Punk", "Short", 12));
+    let first = lib.upsert_stream_track(&find(&spotify, "sp-x-short")).unwrap();
     let next = youtube_only(&lib);
-    let spotify = Arc::new(FakeService::spotify());
     spotify.delay("find_isrc", Duration::from_millis(4000));
     let streams: Vec<Arc<dyn StreamService>> = vec![spotify.clone() as Arc<dyn StreamService>, Arc::new(FakeService::youtube())];
     let schedule = StreamSchedule { prefer_wait: Duration::from_secs(6), ..StreamSchedule::default() };
@@ -782,11 +782,14 @@ fn a_file_that_comes_after_the_handover_leaves_the_engine_what_it_was_handed() {
 #[test]
 fn the_next_track_goes_over_at_once_when_the_playing_ones_length_is_unknown() {
     // Its end could come any moment: the next song does not wait for
-    // Spotify and goes over with its YouTube copy.
+    // Spotify and goes over with its YouTube copy. The song is not in the
+    // fake's catalog and was completed in vain lately: nothing at the
+    // start gives it a length.
     let lib = Library::open_in_memory().unwrap();
-    let mut unknown = find(&FakeService::spotify(), "sp-discovery-1");
-    unknown.duration_ms = None;
+    let mut unknown = StreamTrack::new(nikgob_core::streaming::RemoteId::new(Service::Spotify, "sp-x-nowhere"), "Nowhere");
+    unknown.artists = vec![nikgob_core::streaming::ArtistRef::new(None, "Daft Punk")];
     let first = lib.upsert_stream_track(&unknown).unwrap();
+    lib.cache_put("enrich.miss.spotify:sp-x-nowhere", nikgob_library::now_ms(), "-").unwrap();
     assert_eq!(lib.get_track(first).unwrap().unwrap().duration_ms, None);
     let next = youtube_only(&lib);
     let spotify = Arc::new(FakeService::spotify());

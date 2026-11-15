@@ -131,12 +131,13 @@ const VERSION_WORDS: &[&str] = &[
 ];
 
 /// Words after a version word that make it a qualifier: «Live at
-/// Wembley», «Acoustic Version», «Official Live Video», «Cover by …».
+/// Wembley», «Acoustic Version», «Official Live Video», «Cover by …»,
+/// «Club Remix feat. …».
 /// A year, a sign or another version word after it does too («Live
 /// 1985», «Slowed + Reverb», «Acoustic Live»).
 const QUALIFIER_NEXT: &[&str] = &[
     "at", "in", "from", "version", "ver", "ver.", "mix", "remix", "edit", "session", "sessions", "recording",
-    "performance", "video", "by", "на", "в",
+    "performance", "video", "by", "на", "в", "feat", "feat.", "ft", "ft.", "featuring",
 ];
 
 /// `part` (lowercase, trimmed: a bracket, a dash part) names the version
@@ -1219,6 +1220,7 @@ mod tests {
             ("Song (Live 1985)", "live"),
             ("Song (Live, Remastered)", "live"),
             ("Song (Slowed + Reverb)", "slowed"),
+            ("Song (Club Remix feat. Someone)", "remix"),
             ("Song (Acoustic Live)", "live,acoustic"),
             ("Song karaoke version", "karaoke"),
             ("Song Live Ver.", "live"),
