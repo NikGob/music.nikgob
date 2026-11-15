@@ -408,6 +408,50 @@ pub async fn download(http: &Client, url: &str, dest: &Path, progress: &Progress
     Ok(dest.to_owned())
 }
 
+/// The bytes `from..from + len` of `url` (fewer when the file is shorter)
+/// and the whole file's size when the answer says it: the head of a file,
+/// to tell what it is before it is downloaded. A server that ignores the
+/// range gives its first bytes (the rest is not read); asked for bytes
+/// past the start, such a server is a [`SourceError::Parse`].
+pub async fn get_range(http: &Client, url: &str, from: u64, len: u64) -> Result<(Vec<u8>, Option<u64>), SourceError> {
+    let mut resp = http
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={from}-{}", from + len.max(1) - 1))
+        .timeout(PAGE_TIMEOUT)
+        .send()
+        .await
+        .map_err(unreachable)?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(match status {
+            StatusCode::TOO_MANY_REQUESTS => SourceError::RateLimited { retry_after: retry_after(&resp) },
+            s => SourceError::Http { status: s.as_u16() },
+        });
+    }
+    let partial = status == StatusCode::PARTIAL_CONTENT;
+    if !partial && from > 0 {
+        return Err(SourceError::Parse("the server gives no part of a file".into()));
+    }
+    let header = |name: reqwest::header::HeaderName| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    if header(reqwest::header::CONTENT_TYPE).is_some_and(|t| t.starts_with("text/html")) {
+        return Err(SourceError::Parse("a page instead of audio".into()));
+    }
+    let whole = if partial {
+        header(reqwest::header::CONTENT_RANGE).and_then(|r| r.rsplit('/').next()?.trim().parse::<u64>().ok())
+    } else {
+        resp.content_length()
+    };
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(unreachable)? {
+        out.extend_from_slice(&chunk);
+        if out.len() as u64 >= len {
+            out.truncate(len as usize);
+            break;
+        }
+    }
+    Ok((out, whole))
+}
+
 /// `%XX` escapes decoded (a URL's last part as a file name).
 pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();

@@ -22,6 +22,11 @@
 //! * **Read only**: likes are sent both ways (one request each), playlists
 //!   never ([`StreamPlaylist::editable`] is false), nothing is saved to
 //!   disk ([`StreamService::save_audio`] is unsupported).
+//! * **Originals**: a track whose uploader lets it be downloaded
+//!   (`downloadable`, `has_downloads_left`) has its uploaded file behind
+//!   `/tracks/{id}/download` (a `redirectUri`), for the signed-in user only
+//!   ([`Soundcloud::downloadable`], [`Soundcloud::original_url`]; the
+//!   download source is crates/sources).
 //! * **Discovery**: related tracks, the track's and the artist's stations,
 //!   related artists, an artist's top tracks and albums. Suggestions:
 //!   the personal shelves of `/mixed-selections` ([`SuggestionFeed::Home`]),
@@ -173,6 +178,23 @@ impl Drop for Runtime {
     }
 }
 
+/// A track its uploader lets anyone download: the file it was uploaded as
+/// (often a WAV, an AIFF or a FLAC, or an MP3).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Downloadable {
+    pub id: u64,
+    pub title: String,
+    /// The credited artists: the record's (a label's upload), else the
+    /// uploader.
+    pub artists: Vec<String>,
+    pub uploader: String,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub isrc: Option<String>,
+    /// Its page.
+    pub url: Option<String>,
+}
+
 /// SoundCloud; see the crate docs.
 pub struct Soundcloud {
     inner: Arc<Inner>,
@@ -258,6 +280,25 @@ impl Soundcloud {
         let inner = Arc::clone(&me.inner);
         me.runtime.handle().spawn(async move { inner.restore().await });
         Ok(me)
+    }
+
+    /// Whether the user is signed in (the originals need it).
+    pub fn signed_in(&self) -> bool {
+        self.inner.token().is_some()
+    }
+
+    /// Tracks found for `query` whose uploader lets the original file be
+    /// downloaded.
+    pub fn downloadable(&self, query: &str) -> BoxFuture<'_, Result<Vec<Downloadable>, StreamError>> {
+        let q = query.trim().to_owned();
+        self.run(move |inner| async move { inner.downloadable(&q).await })
+    }
+
+    /// The link of a downloadable track's original file (short-lived: ask
+    /// right before downloading). [`StreamError::NotLoggedIn`] when signed
+    /// out.
+    pub fn original_url(&self, id: u64) -> BoxFuture<'_, Result<String, StreamError>> {
+        self.run(move |inner| async move { inner.original_url(id).await })
     }
 
     fn run<T, F>(&self, f: impl FnOnce(Arc<Inner>) -> F) -> BoxFuture<'_, Result<T, StreamError>>
@@ -751,6 +792,57 @@ impl Inner {
             .get(Lane::Interactive, "/search/tracks", &[("q", q.to_owned()), ("limit", SEARCH_LIMIT.to_string())], false)
             .await?;
         Ok(self.tracks_of(&p.collection))
+    }
+
+    /// Tracks of a search whose uploader lets the original file go
+    /// (a background call: the catalogue's lane, not the user's search).
+    async fn downloadable(&self, q: &str) -> Result<Vec<Downloadable>, StreamError> {
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let p: api::Page<api::Track> = self
+            .get(Lane::Catalog, "/search/tracks", &[("q", q.to_owned()), ("limit", SEARCH_LIMIT.to_string())], false)
+            .await?;
+        Ok(p.collection
+            .iter()
+            .filter(|t| t.id > 0 && !t.is_stub() && t.offers_original())
+            .map(|t| {
+                let s = self.track(t);
+                Downloadable {
+                    id: t.id,
+                    title: s.title,
+                    artists: s.artists.into_iter().map(|a| a.name).filter(|n| !n.is_empty()).collect(),
+                    uploader: t.user.as_ref().map(|u| u.username.trim().to_owned()).unwrap_or_default(),
+                    album: s.album.map(|a| a.title),
+                    duration_ms: s.duration_ms,
+                    isrc: s.isrc,
+                    url: t.permalink_url.clone(),
+                }
+            })
+            .collect())
+    }
+
+    /// Where the original file of track `id` is (`/tracks/{id}/download`,
+    /// a short-lived link). Only with the sign-in: api-v2 answers 401
+    /// without one (checked 2026-11-15). A refusal of this call is the
+    /// track's (its uploader closed downloads, the limit is reached), never
+    /// taken for the sign-in failing.
+    async fn original_url(&self, id: u64) -> Result<String, StreamError> {
+        let Some(token) = self.token() else { return Err(StreamError::NotLoggedIn) };
+        let client_id = self.client_id(false, None).await?;
+        let url = format!("/tracks/{id}/download");
+        let answer = self.gate.run(Lane::SignedIn, self.send(reqwest::Method::GET, &url, &[], &client_id, Some(&token))).await?;
+        match answer {
+            Answer::Ok(body) => {
+                let link: api::DownloadLink =
+                    serde_json::from_slice(&body).map_err(|e| StreamError::Parse(format!("/tracks/download: {e}")))?;
+                link.redirect_uri.filter(|u| u.starts_with("http")).ok_or(StreamError::Unavailable)
+            }
+            Answer::Refused(status) => {
+                log::info!("soundcloud: the original of track {id} was refused (HTTP {status})");
+                Err(StreamError::Http { status })
+            }
+        }
     }
 
     async fn search_albums(&self, q: &str) -> Result<Vec<StreamAlbum>, StreamError> {

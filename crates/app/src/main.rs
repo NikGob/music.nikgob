@@ -924,6 +924,9 @@ fn main() -> eframe::Result {
     if let Some(c) = relogin {
         runtime.send(c);
     }
+    if let Some(s) = streams::soundcloud_originals() {
+        runtime.add_source(s);
+    }
     stage("runtime");
     let mut ui = Md3eUi::new();
     // A screenshot run off the screen never covers the user's screen.

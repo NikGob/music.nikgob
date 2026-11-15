@@ -129,7 +129,7 @@ const RECS_FIELDS: [Field; 6] = [
     Field::RadioUnheard,
 ];
 
-const SOURCE_FIELDS: [Field; 8] = [
+const SOURCE_FIELDS: [Field; 10] = [
     Field::Source(SourceKey::Torrents),
     Field::Source(SourceKey::Khinsider),
     Field::Source(SourceKey::Bandcamp),
@@ -138,6 +138,8 @@ const SOURCE_FIELDS: [Field; 8] = [
     Field::Source(SourceKey::Tidal),
     Field::Source(SourceKey::Squidify),
     Field::Source(SourceKey::Archive),
+    Field::Source(SourceKey::Soundcloud),
+    Field::Source(SourceKey::Dogmazic),
 ];
 
 const SEED_FIELDS: [Field; 4] = [Field::NoSeed, Field::SeedLimitGb, Field::SeedDays, Field::SeedRatio];
@@ -262,10 +264,14 @@ const RECS: [RecsRow; 3] = [
 /// Archive alone) are «Свои».
 const fn source_row(k: SourceKey) -> [bool; 2] {
     match k {
-        SourceKey::Bandcamp | SourceKey::Archive | SourceKey::Torrents | SourceKey::Khinsider | SourceKey::Qobuz | SourceKey::Tidal => {
-            [true, true]
-        }
-        SourceKey::Soulseek | SourceKey::Squidify => [false, true],
+        SourceKey::Bandcamp
+        | SourceKey::Archive
+        | SourceKey::Torrents
+        | SourceKey::Khinsider
+        | SourceKey::Qobuz
+        | SourceKey::Tidal
+        | SourceKey::Dogmazic => [true, true],
+        SourceKey::Soulseek | SourceKey::Squidify | SourceKey::Soundcloud => [false, true],
     }
 }
 
@@ -807,6 +813,7 @@ mod tests {
         let usual = Area::Sources.with(&p, 0);
         assert!(usual.source_on(SourceKey::Archive) && usual.source_on(SourceKey::Torrents));
         assert!(!usual.source_on(SourceKey::Soulseek) && !usual.source_on(SourceKey::Squidify));
+        assert!(usual.source_on(SourceKey::Dogmazic) && !usual.source_on(SourceKey::Soundcloud));
     }
 
     /// The switches of the old «Законное» (Bandcamp and Internet Archive

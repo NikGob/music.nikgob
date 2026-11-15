@@ -61,6 +61,11 @@ pub struct SourcesSettings {
     pub subsonic_password: String,
     /// The Internet Archive's address (empty: archive.org).
     pub archive_url: String,
+    /// A play.dogmazic.net login (free to register). Empty: its public
+    /// pages, which anyone may search and download from.
+    pub dogmazic_user: String,
+    /// Never reaches logs.
+    pub dogmazic_password: String,
 }
 
 impl fmt::Debug for SourcesSettings {
@@ -73,6 +78,8 @@ impl fmt::Debug for SourcesSettings {
             .field("subsonic_user", &self.subsonic_user)
             .field("subsonic_password", &"<redacted>")
             .field("archive_url", &self.archive_url)
+            .field("dogmazic_user", &self.dogmazic_user)
+            .field("dogmazic_password", &"<redacted>")
             .finish()
     }
 }
@@ -309,6 +316,8 @@ mod tests {
                 qobuz_instances: vec!["https://qobuz.example".into()],
                 subsonic_user: "navi-user".into(),
                 subsonic_password: "navi-pass".into(),
+                dogmazic_user: "dz-user".into(),
+                dogmazic_password: "dz-pass".into(),
                 ..SourcesSettings::default()
             },
             soulseek: SoulseekSettings {
@@ -369,6 +378,7 @@ username = \"me\"
         assert!(!dbg.contains("slsk-pass"));
         assert!(!dbg.contains("slsk-token"));
         assert!(!dbg.contains("navi-pass"));
+        assert!(!dbg.contains("dz-pass"));
         assert!(dbg.contains("navi-user"));
         assert!(dbg.contains("localhost:9696"));
     }
