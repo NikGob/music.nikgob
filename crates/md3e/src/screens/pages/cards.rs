@@ -547,15 +547,80 @@ pub fn turn_while(ctx: &egui::Context, id: Id, turning: bool, seen: bool) -> f32
     spin
 }
 
-/// How much bigger the heart of «Любимые» is at `t` seconds of the song: a
+/// A period of the heart of «Любимые»: 66 beats a minute.
+const HEART_PERIOD: f32 = 60.0 / 66.0;
+/// The spring a beat of the heart is a push of (default spatial).
+const HEART_SPRING: nikgob_motion::Spring = nikgob_motion::tokens::EXPRESSIVE_DEFAULT_SPATIAL;
+/// A beat lasts until the spring pushed from rest comes back to it: half
+/// its damped period, π / (√380 · 0.6).
+const HEART_LOBE: f32 = 0.2686;
+/// The push that brings the spring to 1 at its crest (55 ms in).
+const HEART_PUSH: f32 = 45.5;
+/// The softer beat comes this long after the first.
+const HEART_SECOND: f32 = 0.24;
+/// How much bigger the heart is under the pointer, at a full beat while
+/// «Любимые» plays and at a beat for a liked song; never more than
+/// `HEART_MAX` together.
+const HEART_HOVER: f32 = 0.07;
+const HEART_PLAY: f32 = 0.09;
+const HEART_LIKED: f32 = 0.12;
+const HEART_MAX: f32 = 1.14;
+/// How far the heart's colour goes to primary at a full beat.
+const HEART_WARM: f32 = 0.18;
+
+/// One double beat of the heart `dt` seconds after it started: a beat and
+/// a softer one after it, each a push of the default spatial spring (a
+/// quick rise, a longer give back), 0 before and after.
+fn heartbeat_once(dt: f32) -> f32 {
+    let push = |u: f32| if (0.0..HEART_LOBE).contains(&u) { HEART_SPRING.solve(0.0, HEART_PUSH, u).0.max(0.0) } else { 0.0 };
+    (push(dt) + 0.55 * push(dt - HEART_SECOND)).clamp(0.0, 1.0)
+}
+
+/// How much bigger the heart of «Любимые» is at `t` seconds of its beat: a
 /// calm heartbeat (66 a minute), a beat and a softer one after it, 0 at
 /// rest between them.
 pub fn heartbeat(t: f32) -> f32 {
-    const PERIOD: f32 = 60.0 / 66.0;
-    const WIDTH: f32 = 0.2;
-    let bump = |x: f32| if (0.0..WIDTH).contains(&x) { (std::f32::consts::PI * x / WIDTH).sin().powi(2) } else { 0.0 };
-    let x = t.rem_euclid(PERIOD);
-    bump(x) + 0.55 * bump(x - 0.24)
+    heartbeat_once(t.rem_euclid(HEART_PERIOD))
+}
+
+/// Where in its period the heart's beat is after `dt` more seconds from
+/// `phase`. While «Любимые» plays (`song_s`: where the song is) it goes on
+/// with the song and catches up with it in a moment after a seek; on a
+/// pause it slows with the beat's fade (`run`) and stays where it stopped,
+/// so it never jumps.
+fn heart_phase(phase: f32, dt: f32, run: f32, song_s: Option<f32>) -> f32 {
+    let p = match song_s {
+        Some(song) => {
+            let p = phase + dt;
+            let mut off = (song - p).rem_euclid(HEART_PERIOD);
+            if off > HEART_PERIOD / 2.0 {
+                off -= HEART_PERIOD;
+            }
+            p + off * (dt * 8.0).min(1.0)
+        }
+        None => phase + run.max(0.0) * dt,
+    };
+    p.rem_euclid(HEART_PERIOD)
+}
+
+/// The heart's scale: grown under the pointer (`grow`), with the beat while
+/// it plays (`play`) or a liked song's beat (`liked`) over it, never past
+/// `HEART_MAX`.
+fn heart_scale(grow: f32, play: f32, liked: f32) -> f32 {
+    (1.0 + HEART_HOVER * grow + (HEART_PLAY * play).max(HEART_LIKED * liked)).min(HEART_MAX)
+}
+
+/// What the card saw of the number of liked songs (`seen`: on which pass and
+/// how many) after pass `pass` with `n`, and whether a song was just liked:
+/// more than on a pass right before. The first pass of a visit to the page
+/// (none right before) and fewer songs beat nothing; a second card drawn on
+/// the same pass (a cross-fade) changes nothing.
+fn liked_grew(seen: Option<(u64, u32)>, pass: u64, n: u32) -> ((u64, u32), bool) {
+    match seen {
+        Some(s) if s.0 == pass => (s, false),
+        Some((at, was)) => ((pass, n), pass <= at + 2 && n > was),
+        None => ((pass, n), false),
+    }
 }
 
 /// «Моя волна» in «Миксы для тебя», right after «Любимые»: its
@@ -656,10 +721,12 @@ fn mix_look(l: &LaneCard, s: &crate::ColorScheme) -> (nikgob_shapes::MaterialSha
 /// a heart on a container of the scheme, its name and its length under it.
 /// A click opens the playlist, ▶ plays it; under the pointer ⋮ at the top
 /// grows in as on a mix (the playlist's own actions, the right click too);
-/// while it plays the name is primary, ⏸ stays in its square and the heart
-/// beats with the song (`song_s`: where the song is, so it rests on a pause
-/// and goes on with it); under the pointer it beats too; the beat fades in
-/// and out.
+/// under the pointer the heart grows a little (fast spatial); while it
+/// plays the name is primary, ⏸ stays in its square and the heart beats
+/// with the song (`song_s`: where the song is), warming toward primary at
+/// each beat; the beat fades in and out and rests where it stopped; a song
+/// liked while the page is shown beats it once. With less motion it only
+/// grows, without a bounce.
 #[allow(clippy::too_many_arguments)]
 pub fn liked_playlist(
     ui: &mut Ui,
@@ -679,21 +746,47 @@ pub fn liked_playlist(
     let menu_open = ui.ctx().data(|d| d.get_temp::<bool>(id.with("more-open"))).unwrap_or(false);
     let (squish, layer, hover) = feedback(ui, id, &resp, 0.96);
     let hover = hover || menu_open;
-    // It beats while «Любимые» plays (with the song) and under the pointer
-    // (with the clock).
-    let with_song = playing && status == Status::Playing;
-    let beating = (with_song || hover) && !theme.reduced_motion;
-    let beat_k = anim::fraction(ui.ctx(), id.with("beat"), f32::from(u8::from(beating)), theme.motion.default_effects).clamp(0.0, 1.0);
-    let beat = if beat_k > 0.001 {
-        // Out of sight (below the window) it asks for no frames.
-        if ui.is_rect_visible(cell) {
-            ui.ctx().request_repaint();
+    let now = anim::now(ui.ctx());
+    // Under the pointer the heart grows (with less motion the spring does
+    // not bounce).
+    let grow = anim::fraction(ui.ctx(), id.with("grow"), f32::from(u8::from(hover)), theme.motion.fast_spatial);
+    // It beats while «Любимые» plays, with the song.
+    let with_song = playing && status == Status::Playing && !theme.reduced_motion;
+    let beat_k = anim::fraction(ui.ctx(), id.with("beat"), f32::from(u8::from(with_song)), theme.motion.default_effects).clamp(0.0, 1.0);
+    let phase = ui.ctx().data_mut(|d| {
+        let song = with_song.then_some(song_s);
+        let start = song.map_or(0.0, |t| t.rem_euclid(HEART_PERIOD));
+        let (t, ph) = d.get_temp::<(f64, f32)>(id.with("beat-phase")).unwrap_or((now, start));
+        let ph = heart_phase(ph, ((now - t) as f32).clamp(0.0, 0.1), beat_k, song);
+        d.insert_temp(id.with("beat-phase"), (now, ph));
+        ph
+    });
+    let play_beat = if beat_k > 0.001 { beat_k * heartbeat(phase) } else { 0.0 };
+    // A song liked anywhere while the page is shown beats it once.
+    let pass = ui.ctx().cumulative_pass_nr();
+    let liked_beat = ui.ctx().data_mut(|d| {
+        let (seen, grew) = liked_grew(d.get_temp::<(u64, u32)>(id.with("liked-seen")), pass, p.track_count);
+        d.insert_temp(id.with("liked-seen"), seen);
+        if grew && !theme.reduced_motion {
+            d.insert_temp(id.with("liked-beat"), now);
         }
-        let t = if with_song { song_s } else { ui.input(|i| i.time) as f32 };
-        beat_k * heartbeat(t)
-    } else {
-        0.0
-    };
+        let dt = d.get_temp::<f64>(id.with("liked-beat")).map(|t0| (now - t0) as f32);
+        match dt {
+            Some(dt) if dt < HEART_SECOND + HEART_LOBE => heartbeat_once(dt),
+            Some(_) => {
+                d.remove::<f64>(id.with("liked-beat"));
+                0.0
+            }
+            None => 0.0,
+        }
+    });
+    // Out of sight (below the window) it asks for no frames.
+    let beating = beat_k > 0.001 || ui.ctx().data(|d| d.get_temp::<f64>(id.with("liked-beat")).is_some());
+    if beating && ui.is_rect_visible(cell) {
+        ui.ctx().request_repaint();
+    }
+    let heart_k = heart_scale(grow, play_beat, liked_beat);
+    let heart_c = crate::lerp_color(s.on_primary_container, s.primary, HEART_WARM * play_beat.max(liked_beat).clamp(0.0, 1.0));
     let r = shape::LARGE;
     let mut more: Option<Response> = None;
     let play = scaled(ui, art.center(), squish, |ui| {
@@ -702,7 +795,7 @@ pub fn liked_playlist(
         let heart = Rect::from_center_size(art.center(), vec2(size, size));
         // The icon is drawn at its size and scaled, so it stays crisp at
         // rest and its raster is not made again on every beat.
-        scaled(ui, art.center(), 1.0 + 0.16 * beat, |ui| Icon::Favorite.widget(true, s.on_primary_container, size).paint_at(ui, heart));
+        scaled(ui, art.center(), heart_k, |ui| Icon::Favorite.widget(true, heart_c, size).paint_at(ui, heart));
         paint::state_layer(ui.painter(), art, Radii::all(r), s.on_surface, layer);
         let d = Size::M.height();
         let slot = Rect::from_min_size(art.max - vec2(8.0 + d, 8.0 + d), vec2(d, d));
@@ -1154,6 +1247,89 @@ mod tests {
         assert_eq!(heartbeat(0.0), heartbeat(period * 3.0), "the same every period");
         let second = heartbeat(0.24 + 0.1);
         assert!(second > 0.3 && second < 0.7, "a softer second beat: {second}");
+    }
+
+    /// A beat is a push of the spring: it rises quickly (the crest about
+    /// 55 ms in), gives back slower, never goes below rest, and one double
+    /// beat is over in about half a second.
+    #[test]
+    fn a_beat_rises_quickly_and_gives_back_slowly() {
+        let crest = (0..300).map(|k| k as f32 / 1000.0).fold((0.0, 0.0), |(at, v), t| {
+            let x = heartbeat_once(t);
+            if x > v { (t, x) } else { (at, v) }
+        });
+        assert!((0.045..0.065).contains(&crest.0), "the crest comes soon: {crest:?}");
+        assert!(crest.1 > 0.97 && crest.1 <= 1.0, "a full beat: {crest:?}");
+        assert!(crest.0 < HEART_LOBE - crest.0, "it gives back slower than it rises");
+        assert_eq!(heartbeat_once(-0.01), 0.0, "nothing before it starts");
+        assert_eq!(heartbeat_once(HEART_SECOND + HEART_LOBE + 0.01), 0.0, "nothing after it");
+        assert!((0..600).all(|k| heartbeat_once(k as f32 / 1000.0) >= 0.0), "never below rest");
+        assert!(heartbeat_once(HEART_SECOND + HEART_LOBE - 0.002) < 0.02, "a beat ends at rest");
+    }
+
+    /// The heart grows 7 % under the pointer, 9 % at a beat, 12 % at a liked
+    /// song's beat, and together never past 14 %.
+    #[test]
+    fn the_heart_grows_within_its_cap() {
+        assert_eq!(heart_scale(0.0, 0.0, 0.0), 1.0);
+        assert!((heart_scale(1.0, 0.0, 0.0) - 1.07).abs() < 1e-6);
+        assert!((heart_scale(0.0, 1.0, 0.0) - 1.09).abs() < 1e-6);
+        assert!((heart_scale(0.0, 0.0, 1.0) - 1.12).abs() < 1e-6);
+        assert!((heart_scale(1.0, 1.0, 1.0) - HEART_MAX).abs() < 1e-6, "capped");
+        // The spring's overshoot under the pointer stays under the cap too.
+        assert!(heart_scale(1.1, 1.0, 0.0) <= HEART_MAX);
+    }
+
+    /// A song liked on the next passes beats the heart once; a song taken
+    /// out, the first pass of a visit and a second card on the same pass
+    /// beat nothing.
+    #[test]
+    fn a_liked_song_beats_the_heart_once() {
+        let (seen, grew) = liked_grew(None, 10, 5);
+        assert!(!grew, "the first pass of a visit");
+        let (seen, grew) = liked_grew(Some(seen), 11, 6);
+        assert!(grew, "a song liked");
+        let (seen, grew) = liked_grew(Some(seen), 12, 6);
+        assert!(!grew, "once");
+        let (seen, grew) = liked_grew(Some(seen), 13, 5);
+        assert!(!grew, "a song taken out");
+        assert_eq!(seen, (13, 5));
+        let (seen, grew) = liked_grew(Some(seen), 13, 9);
+        assert!(!grew, "a second card on the same pass");
+        assert_eq!(seen, (13, 5), "the first card's count stays");
+        let (_, grew) = liked_grew(Some(seen), 40, 9);
+        assert!(!grew, "liked while the page was not shown");
+    }
+
+    /// The beat goes on with the song, catches up after a seek in a moment
+    /// rather than at once, and on a pause slows and stays where it stopped.
+    #[test]
+    fn the_beat_follows_the_song_without_jumps() {
+        let dt = 1.0 / 60.0;
+        let wrap = |d: f32| {
+            let d = d.rem_euclid(HEART_PERIOD);
+            if d > HEART_PERIOD / 2.0 { d - HEART_PERIOD } else { d }
+        };
+        // In time: it keeps in time.
+        let (mut ph, mut song) = (0.3, 0.3);
+        for _ in 0..120 {
+            song += dt;
+            ph = heart_phase(ph, dt, 1.0, Some(song));
+        }
+        assert!(wrap(song - ph).abs() < 1e-3, "in time with the song");
+        // A seek: not at once, in time within a second.
+        song += 0.4;
+        let first = heart_phase(ph, dt, 1.0, Some(song + dt));
+        assert!(wrap(first - ph).abs() < 0.1, "no jump: {}", wrap(first - ph));
+        for _ in 0..60 {
+            song += dt;
+            ph = heart_phase(ph, dt, 1.0, Some(song));
+        }
+        assert!(wrap(song - ph).abs() < 0.01, "caught up: {}", wrap(song - ph));
+        // A pause: it moves only as fast as the beat's fade, then stays.
+        let half = heart_phase(ph, dt, 0.5, None);
+        assert!((wrap(half - ph) - 0.5 * dt).abs() < 1e-5);
+        assert!((heart_phase(ph, dt, 0.0, None) - ph).abs() < 1e-6, "stays");
     }
 
     /// A card sliding along a row by fractions of a pixel keeps its size on
