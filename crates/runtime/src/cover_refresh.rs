@@ -1,12 +1,17 @@
 //! «Обновить обложку» of a library album. Its art is picked again from its
 //! own files (each track's picture, its master's, the cover it shows and
-//! the cover images of its own folder) and looked up online as
-//! [`hd_covers::find`] does: the Cover Art Archive by its ids when
-//! MusicBrainz says they are of its kind, the Deezer album linked to it
-//! unless that is a single, the album of its title on the services, never
-//! a single or an EP for an album of more songs. The album's art found
-//! online wins over its files' when it is at least as large: a file may
-//! hold the art of the single the album was once taken for. Else the
+//! the cover images of its own folder) and looked up online
+//! ([`hd_covers::find_all`]): the services' releases linked to it (the same
+//! release, whatever kind a service calls it), the Cover Art Archive by its
+//! ids when MusicBrainz says they are of its kind, the album of its title
+//! on the services and in the iTunes Store, never a single or an EP for an
+//! album of more songs unless its songs are counted as many. Each found is
+//! downloaded at the largest size its CDN serves and measured by its bytes;
+//! the largest of the linked ones (else of those found by its title), or
+//! of any other that is the same picture, is the album's art online. It
+//! wins over the pictures of the album's files — a file may hold the art of
+//! the single the album was once taken for — unless one of them is the
+//! same picture (a small perceptual hash) and larger. Without it, the
 //! largest picture of its files that is no frame of a video.
 //!
 //! Where the art goes: the album's folder, when that folder is the album's
@@ -65,6 +70,8 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Without the importer's settings.
 const MAX_EDGE: u32 = 1200;
 const FALLBACK_SEED: u32 = 0xFF67_50A4;
+/// Pictures this many bits apart in their [`picture_hash`] are one picture.
+const SAME_BITS: u32 = 10;
 
 /// Staging files of this run, counted.
 static STAGING: AtomicU64 = AtomicU64::new(0);
@@ -298,18 +305,67 @@ fn cover_images(dir: &Path) -> Vec<PathBuf> {
     out.into_iter().map(|(_, p)| p).collect()
 }
 
+/// A small perceptual hash of a picture: whether each of 9×8 greys is
+/// lighter than the next. A picture keeps it at any size and compression,
+/// another picture has another.
+pub(crate) fn picture_hash(img: &image::DynamicImage) -> u64 {
+    let small = img.thumbnail(64, 64).resize_exact(9, 8, image::imageops::FilterType::Triangle).to_luma8();
+    let mut h = 0u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            h = (h << 1) | u64::from(small.get_pixel(x, y)[0] > small.get_pixel(x + 1, y)[0]);
+        }
+    }
+    h
+}
+
+/// Whether two hashes are of one picture.
+fn same_picture(a: Option<u64>, b: Option<u64>) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if (a ^ b).count_ones() <= SAME_BITS)
+}
+
+/// The long side of a picture as it came, and its [`picture_hash`].
+fn measure(bytes: &[u8]) -> Option<(u32, u64)> {
+    let img = image::load_from_memory(bytes).ok()?;
+    Some((img.width().max(img.height()), picture_hash(&img)))
+}
+
+/// A picture of the album's own files: as a cover, with its long side as
+/// it came and its hash.
+#[derive(Clone, Debug)]
+struct Own {
+    cover: ProcessedCover,
+    side: u32,
+    hash: Option<u64>,
+}
+
+/// The album's art found online, downloaded.
+#[derive(Clone, Debug)]
+pub(crate) struct Online {
+    /// What the background lookups keep of it: the service's url.
+    plain: String,
+    cover: ProcessedCover,
+    /// Its long side as it came, and its hash.
+    side: u32,
+    hash: Option<u64>,
+}
+
 /// Every picture of the album's own: those in the audio `files`, the
 /// `images`, and the cover images in `dirs`, each once, in that order.
-fn own_art(files: &[PathBuf], images: &[PathBuf], dirs: &[PathBuf], max_edge: u32) -> Vec<ProcessedCover> {
+fn own_art(files: &[PathBuf], images: &[PathBuf], dirs: &[PathBuf], max_edge: u32) -> Vec<Own> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     let mut take = |bytes: Vec<u8>| {
         let mut h = DefaultHasher::new();
         bytes.hash(&mut h);
         if seen.insert(h.finish())
-            && let Ok(c) = process_cover(&bytes, max_edge)
+            && let Ok(cover) = process_cover(&bytes, max_edge)
         {
-            out.push(c);
+            let (side, hash) = match measure(&bytes) {
+                Some((s, h)) => (s, Some(h)),
+                None => (side(&cover), None),
+            };
+            out.push(Own { cover, side, hash });
         }
     };
     for f in files {
@@ -330,19 +386,32 @@ fn side(c: &ProcessedCover) -> u32 {
     c.width.max(c.height)
 }
 
-/// The art the album takes: `online` (its own, by the lookup) when it is at
-/// least as large as the largest of `local`, else that one; frames of a
-/// video never. The first of equals wins.
-fn pick(local: Vec<ProcessedCover>, online: Option<(String, ProcessedCover)>) -> Option<(ProcessedCover, Option<String>)> {
-    let mut best: Option<ProcessedCover> = None;
-    for c in local.into_iter().filter(|c| !cover_frame::is_frame(c.width, c.height)) {
-        if best.as_ref().is_none_or(|b| side(&c) > side(b)) {
+/// The art the album takes, frames of a video never: its art found
+/// `online` (verified by the lookup) over the pictures of its files, which
+/// may be a single's, unless one of them is the same picture and larger as
+/// it came (the largest such); without it, the largest of `local`. The
+/// first of equals wins. With it, the url the lookups keep.
+fn pick(local: Vec<Own>, online: Option<Online>) -> Option<(ProcessedCover, Option<String>)> {
+    let shown = |c: &ProcessedCover| !cover_frame::is_frame(c.width, c.height);
+    let online = online.filter(|o| shown(&o.cover));
+    let mut best: Option<Own> = None;
+    let mut same: Option<Own> = None;
+    for c in local.into_iter().filter(|c| shown(&c.cover)) {
+        if let Some(o) = &online
+            && same_picture(c.hash, o.hash)
+            && c.side > o.side
+            && same.as_ref().is_none_or(|s| c.side > s.side)
+        {
+            same = Some(c.clone());
+        }
+        if best.as_ref().is_none_or(|b| c.side > b.side) {
             best = Some(c);
         }
     }
-    match online.filter(|(_, c)| !cover_frame::is_frame(c.width, c.height)) {
-        Some((url, c)) if best.as_ref().is_none_or(|b| side(&c) >= side(b)) => Some((c, Some(url))),
-        _ => best.map(|c| (c, None)),
+    match (online, same) {
+        (Some(_), Some(c)) => Some((c.cover, None)),
+        (Some(o), None) => Some((o.cover, Some(o.plain))),
+        (None, _) => best.map(|c| (c.cover, None)),
     }
 }
 
@@ -417,10 +486,10 @@ fn prune_managed(dir: &Path, id: ReleaseId, keep: &[&Path]) {
 
 /// The files' part of a refresh, with what was found `online` (Err: the
 /// lookup failed, nothing changes).
-fn settle_files(job: &Job, online: Result<Option<(String, ProcessedCover)>, String>) -> Result<Refreshed, String> {
+fn settle_files(job: &Job, online: Result<Option<Online>, String>) -> Result<Refreshed, String> {
     let online = online?;
     let (own_dir, managed) = match &job.dest {
-        Dest::Web => return Ok(online.map_or(Refreshed::Nothing, |(url, _)| Refreshed::Web(url))),
+        Dest::Web => return Ok(online.map_or(Refreshed::Nothing, |o| Refreshed::Web(o.plain))),
         Dest::Folder(d) => (Some(d), None),
         Dest::Managed(m) => (None, Some(m)),
     };
@@ -545,20 +614,87 @@ fn finish(p: &Picked, saved: bool) {
     }
 }
 
-/// The album's art online, by [`hd_covers::find`], downloaded. Err: a
-/// service could not answer.
-async fn online(meta: &Metadata, services: &[Arc<dyn StreamService>], w: &hd_covers::Want, max_edge: u32) -> Result<Option<(String, ProcessedCover)>, String> {
-    let Some(url) = hd_covers::find(Some(meta), services, w).await? else { return Ok(None) };
-    let bytes = match meta.cover_art.download(&url).await {
-        Ok(b) => b,
-        Err(e) if better_covers::meta_trouble(&e) => return Err(format!("{url}: {e}")),
-        Err(e) => {
-            log::info!("cover refresh of «{}»: {url}: {e}", w.title);
-            return Ok(None);
+/// A cover found online, downloaded.
+struct Fetched {
+    linked: bool,
+    /// The rendition that came, and the service's url of it.
+    url: String,
+    plain: String,
+    bytes: Vec<u8>,
+    /// Its long side as it came, and its [`picture_hash`].
+    side: u32,
+    hash: u64,
+}
+
+/// Each of `found` by `fetch` at its largest rendition that comes and is a
+/// picture, measured. Err: none came and a source could not answer
+/// (`fetch` says whether a failure is such).
+async fn fetch_found<F, Fut>(found: Vec<hd_covers::Found>, fetch: F) -> Result<Vec<Fetched>, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
+{
+    let mut out = Vec::new();
+    let mut trouble = None;
+    for f in found {
+        let plain = f.plain().to_owned();
+        let last = f.urls.len().saturating_sub(1);
+        for (i, url) in f.urls.into_iter().enumerate() {
+            match fetch(url.clone()).await {
+                Ok(bytes) => {
+                    let measured = tokio::task::spawn_blocking(move || measure(&bytes).map(|m| (bytes, m))).await.ok().flatten();
+                    if let Some((bytes, (side, hash))) = measured {
+                        out.push(Fetched { linked: f.linked, url, plain: plain.clone(), bytes, side, hash });
+                        break;
+                    }
+                    log::debug!("cover refresh: {url} is no picture");
+                }
+                Err((e, hard)) => {
+                    log::debug!("cover refresh: {url}: {e}");
+                    if hard && i == last {
+                        trouble.get_or_insert(format!("{url}: {e}"));
+                    }
+                }
+            }
         }
-    };
+    }
+    match trouble {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
+}
+
+/// The album's art of those `fetched`: of its linked releases when any
+/// came (the same release), else of those found by its title, or any
+/// other of the same picture; of them the largest as it came. The first of
+/// equals wins.
+fn choose(fetched: Vec<Fetched>) -> Option<Fetched> {
+    let linked = fetched.iter().any(|f| f.linked);
+    let reference = fetched.iter().find(|f| f.linked == linked)?.hash;
+    let mut best: Option<Fetched> = None;
+    for f in fetched {
+        let counts = f.linked == linked || same_picture(Some(f.hash), Some(reference));
+        if counts && best.as_ref().is_none_or(|b| f.side > b.side) {
+            best = Some(f);
+        }
+    }
+    best
+}
+
+/// The album's art online: every cover [`hd_covers::find_all`] finds,
+/// downloaded ([`fetch_found`]), the one [`choose`] takes. Err: nothing
+/// came and a source could not answer.
+async fn online(meta: &Metadata, services: &[Arc<dyn StreamService>], w: &hd_covers::Want, max_edge: u32) -> Result<Option<Online>, String> {
+    let found = hd_covers::find_all(Some(meta), services, w, true).await?;
+    let fetched = fetch_found(found, |url| async move {
+        meta.cover_art.download(&url).await.map_err(|e| (e.to_string(), better_covers::meta_trouble(&e)))
+    })
+    .await?;
+    let Some(best) = choose(fetched) else { return Ok(None) };
+    log::info!("cover refresh of «{}»: {} of {} px online", w.title, best.url, best.side);
+    let Fetched { plain, bytes, side, hash, .. } = best;
     let cover = tokio::task::spawn_blocking(move || process_cover(&bytes, max_edge)).await.map_err(|e| e.to_string())?;
-    Ok(cover.ok().map(|c| (url, c)))
+    Ok(cover.ok().map(|cover| Online { plain, cover, side, hash: Some(hash) }))
 }
 
 impl Worker {
@@ -699,22 +835,122 @@ mod tests {
         }
     }
 
-    /// The single's art in the folder is as large as the album's found
-    /// online: the album's wins. A larger picture of the files wins over a
-    /// smaller one online; a frame of a video never.
+    /// A picture of 9×8 blocks of greys drawn from `seed`: the same seed is
+    /// the same picture at any size, another seed another picture.
+    fn drawing(w: u32, h: u32, seed: u8) -> Vec<u8> {
+        let level = |bx: u32, by: u32| -> u8 {
+            let mut x = (u64::from(seed) + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(bx * 31 + by * 7 + 1).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+            x ^= x >> 29;
+            x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x ^= x >> 32;
+            u8::try_from(x % 200).unwrap() + 28
+        };
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = level(x * 9 / w, y * 8 / h);
+            image::Rgb([v, v, v])
+        });
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
+        out
+    }
+
+    fn own(bytes: &[u8]) -> Own {
+        let (side, hash) = measure(bytes).unwrap();
+        Own { cover: process_cover(bytes, MAX_EDGE).unwrap(), side, hash: Some(hash) }
+    }
+
+    fn online_bytes(url: &str, bytes: &[u8]) -> Online {
+        let (side, hash) = measure(bytes).unwrap();
+        Online { plain: url.to_owned(), cover: process_cover(bytes, MAX_EDGE).unwrap(), side, hash: Some(hash) }
+    }
+
+    fn online_of(url: &str, c: &ProcessedCover) -> Online {
+        let (side, hash) = measure(&c.jpeg).unwrap();
+        Online { plain: url.to_owned(), cover: c.clone(), side, hash: Some(hash) }
+    }
+
+    /// A picture keeps its hash at any size; another picture has another.
     #[test]
-    fn the_album_art_found_online_wins_when_it_is_as_large() {
-        let single = cover(1000, 1000, [200, 20, 20]);
-        let album = cover(1000, 1000, [20, 20, 200]);
-        let (got, url) = pick(vec![single.clone()], Some(("https://x/album.jpg".into(), album.clone()))).unwrap();
-        assert_eq!((got, url.as_deref()), (album.clone(), Some("https://x/album.jpg")));
-        let scan = cover(1200, 1200, [20, 200, 20]);
-        assert_eq!(pick(vec![single.clone(), scan.clone()], Some(("u".into(), album.clone()))).map(|(c, _)| c), Some(scan));
-        let frame = cover(1280, 720, [0, 0, 0]);
-        assert_eq!(pick(vec![frame.clone(), single.clone()], None), Some((single.clone(), None)));
-        assert_eq!(pick(vec![single.clone()], Some(("u".into(), frame.clone()))).map(|(c, _)| c), Some(single));
+    fn a_picture_is_the_same_at_any_size_and_another_is_not() {
+        let hash = |b: &[u8]| measure(b).map(|(_, h)| h);
+        let a = hash(&drawing(1000, 1000, 7));
+        assert!(same_picture(a, hash(&drawing(1800, 1800, 7))));
+        assert!(same_picture(a, hash(&drawing(544, 544, 7))));
+        assert!(!same_picture(a, hash(&drawing(1000, 1000, 8))));
+        assert!(!same_picture(a, None));
+        assert_eq!(measure(&drawing(1800, 1200, 7)).map(|(s, _)| s), Some(1800));
+    }
+
+    /// «рисунки»: its files hold the lead single's art (1200 px, in the
+    /// first track) and the album's (544 px, in the others); online, the
+    /// album's art of 1000 px. That wins over the larger single's: another
+    /// picture. The same picture larger in the files wins over it; as large
+    /// or smaller, not. A frame of a video never.
+    #[test]
+    fn the_album_art_found_online_beats_other_pictures_of_its_files() {
+        let (single, small) = (drawing(1200, 1200, 1), drawing(544, 544, 2));
+        let album = online_bytes("https://x/album.jpg", &drawing(1000, 1000, 2));
+        let (got, url) = pick(vec![own(&single), own(&small)], Some(album.clone())).unwrap();
+        assert_eq!((got, url.as_deref()), (album.cover.clone(), Some("https://x/album.jpg")));
+        let scan = own(&drawing(1400, 1400, 2));
+        let (got, url) = pick(vec![own(&single), scan.clone()], Some(album.clone())).unwrap();
+        assert_eq!((got, url), (scan.cover.clone(), None));
+        let as_large = own(&drawing(1000, 1000, 2));
+        assert_eq!(pick(vec![as_large], Some(album.clone())).and_then(|(_, u)| u).as_deref(), Some("https://x/album.jpg"));
+        // Nothing online: the largest of the files.
+        assert_eq!(pick(vec![own(&small), own(&single)], None).map(|(c, _)| c), Some(own(&single).cover));
+        let frame = own(&drawing(1280, 720, 3));
+        assert_eq!(pick(vec![frame.clone(), own(&small)], None).map(|(c, _)| c), Some(own(&small).cover));
+        let wide = online_bytes("u", &drawing(1280, 720, 3));
+        assert_eq!(pick(vec![own(&small)], Some(wide)), Some((own(&small).cover, None)));
         assert!(pick(vec![frame], None).is_none());
         assert!(pick(Vec::new(), None).is_none());
+    }
+
+    fn fetched(linked: bool, url: &str, side: u32, seed: u8) -> Fetched {
+        let bytes = drawing(64, 64, seed);
+        let (_, hash) = measure(&bytes).unwrap();
+        Fetched { linked, url: url.into(), plain: url.into(), bytes, side, hash }
+    }
+
+    /// Of the covers found online the linked release's picture is taken,
+    /// at the largest size any source has it; without a linked one, the
+    /// largest found by the title.
+    #[test]
+    fn the_largest_of_the_verified_covers_is_taken() {
+        let take = |f: Vec<Fetched>| choose(f).map(|f| f.url);
+        // YouTube Music's linked release (1440 px), Deezer's of the same
+        // picture (1800 px), the iTunes Store's of another (3000 px).
+        let all = vec![fetched(true, "yt", 1440, 2), fetched(false, "dz", 1800, 2), fetched(false, "it", 3000, 5)];
+        assert_eq!(take(all).as_deref(), Some("dz"));
+        let by_title = vec![fetched(false, "dz", 1000, 2), fetched(false, "it", 3000, 5)];
+        assert_eq!(take(by_title).as_deref(), Some("it"));
+        assert_eq!(take(vec![fetched(true, "a", 640, 2), fetched(true, "b", 640, 9)]).as_deref(), Some("a"));
+        assert!(choose(Vec::new()).is_none());
+    }
+
+    /// Each cover found comes at its largest rendition that downloads; a
+    /// source that could not answer is no failure while another came.
+    #[tokio::test]
+    async fn the_largest_rendition_that_comes_is_measured() {
+        let found = vec![
+            hd_covers::Found { linked: true, urls: vec!["big".into(), "plain".into()] },
+            hd_covers::Found { linked: false, urls: vec!["down".into()] },
+        ];
+        let big_refused = |url: String| async move {
+            match url.as_str() {
+                "plain" => Ok(drawing(1000, 1000, 2)),
+                "big" => Err(("403".to_owned(), true)),
+                _ => Err(("network".to_owned(), true)),
+            }
+        };
+        let got = fetch_found(found.clone(), big_refused).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].url.as_str(), got[0].plain.as_str(), got[0].side, got[0].linked), ("plain", "plain", 1000, true));
+        let down = |_: String| async { Err::<Vec<u8>, _>(("network".to_owned(), true)) };
+        assert!(fetch_found(found.clone(), down).await.is_err());
+        let pages = |_: String| async { Ok::<_, (String, bool)>(b"<html>".to_vec()) };
+        assert!(fetch_found(found, pages).await.unwrap().is_empty());
     }
 
     /// A folder is the album's alone when all its files are there and
@@ -778,7 +1014,7 @@ mod tests {
             id: ReleaseId::new(),
             mbid: None,
             group_mbid: None,
-            deezer: None,
+            linked: Vec::new(),
             title: "X".into(),
             artists: Vec::new(),
             release_type: nikgob_core::model::ReleaseType::Album,
@@ -827,7 +1063,7 @@ mod tests {
         let album = cover(1000, 1000, [20, 20, 200]);
         let mut j = job(root, Dest::Folder(dir.clone()), Some("A/2024 - X/cover.jpg"));
         j.dirs = vec![dir.clone()];
-        let p = picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album.clone())))).unwrap());
+        let p = picked(settle_files(&j, Ok(Some(online_of("https://x/album.jpg", &album)))).unwrap());
         assert_eq!((p.cover_ref.as_str(), p.url.as_deref(), p.changed), ("A/2024 - X/cover.jpg", Some("https://x/album.jpg"), true));
         assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), album.jpeg);
         assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), b"older", "not before the library took it");
@@ -835,7 +1071,7 @@ mod tests {
         finish(&p, true);
         assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), single);
         assert!(leftovers(&dir).is_empty());
-        let again = picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album)))).unwrap());
+        let again = picked(settle_files(&j, Ok(Some(online_of("https://x/album.jpg", &album)))).unwrap());
         assert!(!again.changed && again.backup.is_none());
         let offline = picked(settle_files(&j, Ok(None)).unwrap());
         assert!(!offline.changed);
@@ -856,7 +1092,7 @@ mod tests {
         std::fs::write(dir.join("cover.prev.jpg"), b"older").unwrap();
         let mut j = job(root, Dest::Folder(dir.clone()), Some("A/X/cover.jpg"));
         j.dirs = vec![dir.clone()];
-        let p = picked(settle_files(&j, Ok(Some(("https://x/a.jpg".into(), cover(1000, 1000, [1, 1, 200]))))).unwrap());
+        let p = picked(settle_files(&j, Ok(Some(online_of("https://x/a.jpg", &cover(1000, 1000, [1, 1, 200]))))).unwrap());
         finish(&p, false);
         assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), old);
         assert_eq!(std::fs::read(dir.join("cover.prev.jpg")).unwrap(), b"older");
@@ -876,7 +1112,7 @@ mod tests {
         std::fs::write(dir.join("cover.jpg"), jpeg(200, 200, [1, 2, 3])).unwrap();
         let mut j = job(root, Dest::Folder(dir.clone()), Some("A/X/folder.jpg"));
         j.dirs = vec![dir.clone()];
-        let p = picked(settle_files(&j, Ok(Some(("https://x/a.jpg".into(), cover(1000, 1000, [1, 1, 200]))))).unwrap());
+        let p = picked(settle_files(&j, Ok(Some(online_of("https://x/a.jpg", &cover(1000, 1000, [1, 1, 200]))))).unwrap());
         assert_eq!(p.cover_ref, "A/X/cover.jpg");
         assert_eq!(p.undo, Undo::Nothing, "what it showed is still there");
         finish(&p, true);
@@ -898,7 +1134,7 @@ mod tests {
         let managed = root.join(MANAGED_DIR);
         let mut j = job(root, Dest::Managed(managed.clone()), Some("A/Singles/cover.jpg"));
         let album = cover(1000, 1000, [20, 20, 200]);
-        let p = picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album.clone())))).unwrap());
+        let p = picked(settle_files(&j, Ok(Some(online_of("https://x/album.jpg", &album)))).unwrap());
         let want_ref = format!(".musiclib/covers/release-{}-7.jpg", j.id);
         assert_eq!(p.cover_ref, want_ref);
         assert_eq!(std::fs::read(shared.join("cover.jpg")).unwrap(), theirs, "the shared folder is untouched");
@@ -908,10 +1144,10 @@ mod tests {
         assert!(first.with_extension("ambient.png").is_file());
         j.current = Some(want_ref.clone());
         j.current_file = Some(first.clone());
-        assert!(!picked(settle_files(&j, Ok(Some(("https://x/album.jpg".into(), album)))).unwrap()).changed);
+        assert!(!picked(settle_files(&j, Ok(Some(online_of("https://x/album.jpg", &album)))).unwrap()).changed);
         for (stamp, rgb) in [(8, [1, 200, 1]), (9, [1, 1, 1])] {
             j.stamp = stamp;
-            let p = picked(settle_files(&j, Ok(Some(("https://x/new.jpg".into(), cover(1100, 1100, rgb))))).unwrap());
+            let p = picked(settle_files(&j, Ok(Some(online_of("https://x/new.jpg", &cover(1100, 1100, rgb))))).unwrap());
             j.current_file = Some(root.join(&p.cover_ref));
             j.current = Some(p.cover_ref);
         }
@@ -919,7 +1155,7 @@ mod tests {
         let ninth = managed.join(format!("release-{}-9.jpg", j.id));
         assert!(managed.join(format!("release-{}-8.jpg", j.id)).exists() && ninth.exists());
         j.stamp = 10;
-        let p = picked(settle_files(&j, Ok(Some(("https://x/other.jpg".into(), cover(1200, 1200, [5, 5, 5]))))).unwrap());
+        let p = picked(settle_files(&j, Ok(Some(online_of("https://x/other.jpg", &cover(1200, 1200, [5, 5, 5]))))).unwrap());
         finish(&p, false);
         assert!(!managed.join(format!("release-{}-10.jpg", j.id)).exists());
         assert!(ninth.exists(), "what it shows stays");
@@ -964,8 +1200,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let web = job(tmp.path(), Dest::Web, Some("https://x/old.jpg"));
         let art = cover(1000, 1000, [9, 9, 9]);
-        assert!(matches!(settle_files(&web, Ok(Some(("https://x/new.jpg".into(), art.clone())))).unwrap(), Refreshed::Web(u) if u == "https://x/new.jpg"));
-        assert!(matches!(settle_files(&web, Ok(Some(("https://x/old.jpg".into(), art)))).unwrap(), Refreshed::Web(u) if u == "https://x/old.jpg"));
+        assert!(matches!(settle_files(&web, Ok(Some(online_of("https://x/new.jpg", &art)))).unwrap(), Refreshed::Web(u) if u == "https://x/new.jpg"));
+        assert!(matches!(settle_files(&web, Ok(Some(online_of("https://x/old.jpg", &art)))).unwrap(), Refreshed::Web(u) if u == "https://x/old.jpg"));
         assert!(matches!(settle_files(&web, Ok(None)).unwrap(), Refreshed::Nothing));
         assert!(settle_files(&web, Err("x".into())).is_err());
     }
@@ -986,7 +1222,7 @@ mod tests {
         let mut j = job(tmp.path(), Dest::Folder(dir.clone()), Some("A/X/cover.jpg"));
         j.dirs = vec![dir.clone()];
         let album = cover(1000, 1000, [20, 20, 200]);
-        let p = picked(settle_files(&j, Ok(Some(("https://x/a.jpg".into(), album.clone())))).unwrap());
+        let p = picked(settle_files(&j, Ok(Some(online_of("https://x/a.jpg", &album)))).unwrap());
         assert_eq!(std::fs::read(dir.join("cover.jpg")).unwrap(), album.jpeg);
         finish(&p, true);
         assert!(leftovers(&dir).is_empty());

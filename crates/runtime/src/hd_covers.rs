@@ -2,11 +2,14 @@
 //! stage draws a cover of 568 points, up to 850 pixels at 150 %, and some
 //! albums come with a cover of 300 px or less (Mushoku Tensei's are
 //! 181–400 px). For an album whose own cover is smaller than [`HD_SIDE`],
-//! the url of a larger one is looked up — the Cover Art Archive by the
-//! album's MusicBrainz ids, the Deezer album linked to it, else the album
+//! the url of a larger one is looked up — a service's release linked to the
+//! album (the same release, whatever kind the service calls it: a service
+//! calls an album of three songs a single), the Cover Art Archive by the
+//! album's MusicBrainz ids, else the album
 //! of its artist found by its title on the services (Deezer, YouTube Music, Spotify) —
 //! a single or an EP of its title never stands for an album of more songs
-//! (the first single often bears the album's name) — and kept in the library's cache (`cover_hd.v2.<album>`; a miss too, asked
+//! (the first single often bears the album's name) unless its songs are
+//! counted as many — and kept in the library's cache (`cover_hd.v3.<album>`; a miss too, asked
 //! again after [`RETRY_MS`]). Only the url is kept: the picture goes through
 //! the web cover cache like any cover of a service, never into the music
 //! folders. The stage shows the album's own cover at once and fades the
@@ -18,9 +21,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nikgob_core::model::{ReleaseId, ReleaseType};
-use nikgob_core::streaming::{EntityKind, Service, StreamAlbum, StreamService};
+use nikgob_core::streaming::{EntityKind, RemoteId, Service, StreamAlbum, StreamService};
 use nikgob_library::{Library, now_ms};
-use nikgob_metadata::{CoverTarget, Metadata};
+use nikgob_metadata::itunes::sized_artwork;
+use nikgob_metadata::{CoverTarget, ItunesAlbum, Metadata};
 
 use crate::Worker;
 use crate::enrich::Event;
@@ -32,6 +36,18 @@ pub(crate) const HD_SIDE: u32 = 1000;
 const RETRY_MS: i64 = 14 * 86_400_000;
 /// Albums looked up per visit of Главная.
 const BATCH: usize = 12;
+/// The sides a CDN is asked for: Deezer's largest (it gives at most what
+/// it has, larger asks are refused), Google's (likewise), the iTunes
+/// Store's.
+const DEEZER_SIDE: u32 = 1800;
+const GOOGLE_SIDE: u32 = 3000;
+const ITUNES_SIDE: u32 = 3000;
+/// The size a Google or iTunes cover is kept at for the stage.
+const STAGE_SIDE: u32 = 1200;
+/// A Spotify cover id: its size, then the picture's hash.
+const SPOTIFY_SIZES: &[&str] = &["ab67616d00004851", "ab67616d00001e02", "ab67616d0000b273", "ab67616d000082c1"];
+const SPOTIFY_LARGE: &str = "ab67616d000082c1";
+const SPOTIFY_MEDIUM: &str = "ab67616d0000b273";
 
 pub(crate) fn key(id: ReleaseId) -> String {
     // `v2`: found with the album's artist (see [`Want::artists`]); `v3`:
@@ -64,7 +80,9 @@ pub(crate) struct Want {
     pub id: ReleaseId,
     pub mbid: Option<String>,
     pub group_mbid: Option<String>,
-    pub deezer: Option<u64>,
+    /// The services' releases linked to it (Deezer's first, then
+    /// Spotify's, then YouTube Music's): the same release.
+    pub linked: Vec<RemoteId>,
     pub title: String,
     /// The album's artist names: an album found by its title is by one of
     /// them (titles alike are common: «There is a reason (RUS COVER)» is
@@ -105,6 +123,15 @@ impl Want {
             ReleaseType::Single | ReleaseType::Ep => n.is_some_and(|n| n >= self.tracks),
             ReleaseType::Album | ReleaseType::Compilation | ReleaseType::Other => n.is_none_or(|n| n > 1),
         }
+    }
+
+    /// Whether a release linked to it with `n` songs is it: of whatever
+    /// kind the service calls it (an album of three songs is a single on
+    /// Deezer, Spotify, YouTube Music and in the iTunes Store), but no
+    /// release of one song for an album of several (an import that took
+    /// the album for its first single linked that).
+    pub(crate) fn linked_fits(&self, n: Option<u32>) -> bool {
+        self.song_stands() || n.is_none_or(|n| n > 1)
     }
 
     /// Like with like: an album's art for an album, a single's for a
@@ -174,10 +201,11 @@ pub(crate) fn deezer_kind(record_type: Option<&str>) -> ReleaseType {
 /// artist, of a kind that may stand for it, [`Want::takes`]) and of its own
 /// kind, else of the first that is `w` at all.
 fn pick(w: &Want, found: Vec<StreamAlbum>) -> Option<String> {
-    let by_them = |a: &StreamAlbum| w.artists.is_empty() || a.artists.iter().any(|x| crate::better_covers::names_artist(&w.artists, &x.name));
     let fits: Vec<StreamAlbum> = found
         .into_iter()
-        .filter(|a| same_album(&w.title, &a.title) && by_them(a) && w.takes(a.release_type, a.total_tracks))
+        .filter(|a| {
+            same_album(&w.title, &a.title) && by_them(w, a.artists.iter().map(|x| x.name.as_str())) && w.takes(a.release_type, a.total_tracks)
+        })
         .collect();
     let at = fits.iter().position(|a| w.prefers(a.release_type)).unwrap_or(0);
     fits.into_iter().nth(at).and_then(|a| a.cover_url).filter(|u| !u.is_empty())
@@ -241,41 +269,260 @@ pub(crate) fn same_album(ours: &str, theirs: &str) -> bool {
     shared >= 2 || shared * 2 >= a.len().min(b.len())
 }
 
-/// The url of a larger cover of `w`, if a source has one.
-pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want) -> Result<Option<String>, String> {
+/// A cover of an album found online: the renditions of one picture its CDN
+/// serves, the largest first; the last is what the stage takes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Found {
+    /// Of a release linked to the album (a service's, or the MusicBrainz
+    /// release that fits it), not of one found by its title.
+    pub linked: bool,
+    pub urls: Vec<String>,
+}
+
+impl Found {
+    fn new(linked: bool, url: &str) -> Self {
+        Self { linked, urls: renditions(url) }
+    }
+
+    /// What the stage of a world takes: no larger than it needs.
+    pub(crate) fn plain(&self) -> &str {
+        self.urls.last().map_or("", String::as_str)
+    }
+}
+
+/// The renditions of the cover at `url`, the largest first: Deezer's at
+/// [`DEEZER_SIDE`] then `url`, Google's at [`GOOGLE_SIDE`] then
+/// [`STAGE_SIDE`], the iTunes Store's at [`ITUNES_SIDE`] then
+/// [`STAGE_SIDE`], Spotify's largest then its 640 px; any other `url`
+/// alone. A CDN gives at most the picture it has: the bytes tell its real
+/// size.
+pub(crate) fn renditions(url: &str) -> Vec<String> {
+    let mut out = if let Some(larger) = deezer_sized(url, DEEZER_SIDE) {
+        vec![larger, url.to_owned()]
+    } else if is_google(url) {
+        vec![google_sized(url, GOOGLE_SIDE), google_sized(url, STAGE_SIDE)]
+    } else if url.contains(".mzstatic.com/") {
+        vec![sized_artwork(url, ITUNES_SIDE), sized_artwork(url, STAGE_SIDE)]
+    } else if let Some(hash) = spotify_hash(url) {
+        vec![format!("https://i.scdn.co/image/{SPOTIFY_LARGE}{hash}"), format!("https://i.scdn.co/image/{SPOTIFY_MEDIUM}{hash}")]
+    } else {
+        vec![url.to_owned()]
+    };
+    out.dedup();
+    out
+}
+
+/// A Deezer cover (`…/images/cover/<md5>/1000x1000-000000-80-0-0.jpg`) at
+/// `side`, when it is asked smaller.
+fn deezer_sized(url: &str, side: u32) -> Option<String> {
+    if !url.contains(".dzcdn.net/images/") {
+        return None;
+    }
+    let (base, file) = url.rsplit_once('/')?;
+    let (size, rest) = file.split_once('-')?;
+    let (w, h) = size.split_once('x')?;
+    let n: u32 = w.parse().ok()?;
+    (w == h && n < side).then(|| format!("{base}/{side}x{side}-{rest}"))
+}
+
+fn is_google(url: &str) -> bool {
+    url.contains(".googleusercontent.com/") || url.contains(".ggpht.com/")
+}
+
+/// A Google-hosted square cover (`…=w544-h544-l90-rj`) at `side`, its other
+/// options kept; one of another shape as it is.
+fn google_sized(url: &str, side: u32) -> String {
+    let (base, params) = url.rsplit_once('=').unwrap_or((url, ""));
+    let parts: Vec<&str> = params.split('-').filter(|p| !p.is_empty()).collect();
+    let sized = |p: &str| {
+        let mut c = p.chars();
+        matches!(c.next(), Some('w' | 'h' | 's')) && c.as_str().parse::<u32>().is_ok()
+    };
+    let num = |k: char| parts.iter().find_map(|p| p.strip_prefix(k).filter(|_| sized(*p)).and_then(|n| n.parse::<u32>().ok()));
+    if let (Some(w), Some(h)) = (num('w'), num('h'))
+        && w != h
+    {
+        return url.to_owned();
+    }
+    let mut out = format!("{base}=w{side}-h{side}");
+    for p in parts.into_iter().filter(|p| !sized(*p)) {
+        out.push('-');
+        out.push_str(p);
+    }
+    out
+}
+
+/// The picture's hash in a Spotify cover url (`…/image/ab67616d0000b273<hash>`).
+fn spotify_hash(url: &str) -> Option<&str> {
+    if !(url.contains("i.scdn.co/image/") || url.contains(".spotifycdn.com/image/")) {
+        return None;
+    }
+    let id = url.rsplit('/').next()?;
+    SPOTIFY_SIZES
+        .iter()
+        .find_map(|p| id.strip_prefix(p))
+        .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Whether a release by `names` may be `w`'s: by one of its artists (any,
+/// when it knows none).
+fn by_them<'a>(w: &Want, mut names: impl Iterator<Item = &'a str>) -> bool {
+    w.artists.is_empty() || names.any(|n| crate::better_covers::names_artist(&w.artists, n))
+}
+
+/// Whether two titles are the very same words and numbers.
+fn same_title(ours: &str, theirs: &str) -> bool {
+    let (a, an) = words(ours);
+    let (b, bn) = words(theirs);
+    !a.is_empty() && a == b && an == bn
+}
+
+/// The first of `found` that may be `w` but tells too little to be taken:
+/// a single or an EP of its very title, by its artist, its songs untold
+/// (YouTube Music counts none in a search). Asked for its songs, it is `w`
+/// when they are as many ([`Want::takes`]).
+fn untold<'a>(w: &Want, found: &'a [StreamAlbum]) -> Option<&'a StreamAlbum> {
+    if w.song_stands() {
+        return None;
+    }
+    found.iter().find(|a| {
+        matches!(a.release_type, ReleaseType::Single | ReleaseType::Ep)
+            && a.total_tracks.is_none()
+            && same_title(&w.title, &a.title)
+            && by_them(w, a.artists.iter().map(|x| x.name.as_str()))
+    })
+}
+
+/// An iTunes Store album name as a title and a kind: the store names a
+/// single «… - Single» and an EP «… - EP».
+fn itunes_kind(name: &str) -> (&str, ReleaseType) {
+    if let Some(t) = name.strip_suffix(" - Single") {
+        (t, ReleaseType::Single)
+    } else if let Some(t) = name.strip_suffix(" - EP") {
+        (t, ReleaseType::Ep)
+    } else {
+        (name, ReleaseType::Album)
+    }
+}
+
+/// The art of the first of the iTunes Store's `albums` that is `w` (as
+/// [`pick`]: its title, by its artist, of a kind and songs that may stand
+/// for it, its own kind first).
+fn itunes_pick(w: &Want, albums: &[ItunesAlbum]) -> Option<String> {
+    let fits: Vec<(ReleaseType, &ItunesAlbum)> = albums
+        .iter()
+        .filter_map(|a| {
+            let (title, kind) = itunes_kind(&a.collection_name);
+            (same_album(&w.title, title) && by_them(w, std::iter::once(a.artist_name.as_str())) && w.takes(kind, a.track_count))
+                .then_some((kind, a))
+        })
+        .collect();
+    let at = fits.iter().position(|(k, _)| w.prefers(*k)).unwrap_or(0);
+    fits.get(at).and_then(|(_, a)| a.artwork_url100.clone()).filter(|u| !u.is_empty())
+}
+
+/// The cover of the release `id` linked to `w`, when it is `w`
+/// ([`Want::linked_fits`]): a Deezer album by the catalogue, else by the
+/// service it is of; a Spotify album without its service by its public
+/// page (no count there).
+async fn linked_cover(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want, id: &RemoteId) -> Result<Option<String>, String> {
+    let some = |u: Option<String>| u.filter(|u| !u.is_empty());
+    if id.service == Service::Deezer
+        && let Some(meta) = meta
+    {
+        let Ok(n) = id.id.parse::<u64>() else { return Ok(None) };
+        return match meta.deezer.album(n).await {
+            Ok(a) if !w.linked_fits(a.nb_tracks) => {
+                log::debug!("the Deezer album {n} linked to «{}» has {:?} songs", w.title, a.nb_tracks);
+                Ok(None)
+            }
+            Ok(a) => Ok(some(a.cover_xl)),
+            Err(e) if crate::better_covers::meta_trouble(&e) => Err(format!("Deezer: {e}")),
+            Err(_) => Ok(None),
+        };
+    }
+    if let Some(s) = services.iter().find(|s| s.service() == id.service) {
+        return match s.album(&id.id).await {
+            Ok(a) => {
+                let n = a.total_tracks.or_else(|| u32::try_from(a.tracks.len()).ok().filter(|n| *n > 0));
+                if w.linked_fits(n) {
+                    Ok(some(a.cover_url))
+                } else {
+                    log::debug!("the album {} linked to «{}» has {n:?} songs", id.id, w.title);
+                    Ok(None)
+                }
+            }
+            Err(e) if crate::better_covers::stream_trouble(&e) => Err(format!("{}: {e}", id.service)),
+            Err(_) => Ok(None),
+        };
+    }
+    match (id.service, meta) {
+        (Service::Spotify, Some(meta)) => match meta.web_images.spotify_album_art(&id.id).await {
+            Ok(u) => Ok(some(u)),
+            Err(e) if crate::better_covers::meta_trouble(&e) => Err(format!("Spotify: {e}")),
+            Err(_) => Ok(None),
+        },
+        _ => Ok(None),
+    }
+}
+
+/// The covers of `w` found online, in this order: of the releases linked
+/// to it ([`linked_cover`]); of the Cover Art Archive by its MusicBrainz
+/// ids when MusicBrainz says they fit; of the album of its title on each
+/// service ([`pick`]; else a single or an EP of its very title and songs
+/// untold, asked for its songs: one request a service); with `all`, of the
+/// iTunes Store's. Without `all` it stops at the first. A source that
+/// could not answer makes it no miss: Err when nothing was found and one
+/// could not.
+pub(crate) async fn find_all(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want, all: bool) -> Result<Vec<Found>, String> {
+    let mut out: Vec<Found> = Vec::new();
+    let mut trouble: Option<String> = None;
+    let enough = |out: &[Found]| !all && !out.is_empty();
+    for id in &w.linked {
+        match linked_cover(meta, services, w, id).await {
+            Ok(Some(url)) => out.push(Found::new(true, &url)),
+            Ok(None) => {}
+            Err(e) => {
+                log::debug!("the cover of «{}» linked on {}: {e}", w.title, id.service);
+                trouble.get_or_insert(e);
+            }
+        }
+        if enough(&out) {
+            return Ok(out);
+        }
+    }
     if let Some(meta) = meta {
-        let linked = if w.mbid.is_some() || w.group_mbid.is_some() { mb_fits(meta, w).await? } else { false };
+        let fits = if w.mbid.is_some() || w.group_mbid.is_some() {
+            mb_fits(meta, w).await.unwrap_or_else(|e| {
+                trouble.get_or_insert(e);
+                false
+            })
+        } else {
+            false
+        };
         for target in [w.mbid.clone().map(CoverTarget::Release), w.group_mbid.clone().map(CoverTarget::ReleaseGroup)]
             .into_iter()
             .flatten()
-            .filter(|_| linked)
+            .filter(|_| fits)
         {
             match meta.cover_art.front_cover(&target).await {
-                Ok(Some(c)) if c.thumbnails.contains_key("1200") => return Ok(Some(c.url_for(1200).to_owned())),
-                Err(e) if crate::better_covers::meta_trouble(&e) => return Err(e.to_string()),
+                Ok(Some(c)) if c.thumbnails.contains_key("1200") => {
+                    out.push(Found { linked: true, urls: vec![c.url_for(1200).to_owned()] });
+                    break;
+                }
+                Err(e) if crate::better_covers::meta_trouble(&e) => {
+                    trouble.get_or_insert(e.to_string());
+                    break;
+                }
                 Ok(_) | Err(_) => {}
             }
         }
-        if let Some(id) = w.deezer {
-            match meta.deezer.album(id).await {
-                // A link to the album's first single gives the single's art.
-                Ok(a) if !w.takes(deezer_kind(a.record_type.as_deref()), a.nb_tracks) => {
-                    log::debug!("the Deezer album {id} linked to «{}» is a {:?} of {:?} songs", w.title, a.record_type, a.nb_tracks);
-                }
-                Ok(a) => {
-                    if let Some(url) = a.cover_xl.filter(|u| !u.is_empty()) {
-                        return Ok(Some(url));
-                    }
-                }
-                Err(e) if crate::better_covers::meta_trouble(&e) => return Err(e.to_string()),
-                Err(_) => {}
-            }
+        if enough(&out) {
+            return Ok(out);
         }
     }
-    // By its title on the services, the first that has it. A service that
-    // could not answer makes it no miss: it is asked again.
+    // By its title on the services.
     let query = search_query(&w.title);
-    let mut trouble = None;
     for s in services {
         let found = match s.search(&query).await {
             Ok(r) => r.albums,
@@ -287,11 +534,59 @@ pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamServ
                 continue;
             }
         };
-        if let Some(url) = pick(w, found) {
-            return Ok(Some(url));
+        if let Some(url) = pick(w, found.clone()) {
+            out.push(Found::new(false, &url));
+        } else if let Some(hit) = untold(w, &found) {
+            match s.album(&hit.id.id).await {
+                Ok(a) => {
+                    let n = a.total_tracks.or_else(|| u32::try_from(a.tracks.len()).ok().filter(|n| *n > 0));
+                    if w.takes(hit.release_type, n) {
+                        if let Some(url) = a.cover_url.or_else(|| hit.cover_url.clone()).filter(|u| !u.is_empty()) {
+                            out.push(Found::new(false, &url));
+                        }
+                    } else {
+                        log::debug!("the {:?} «{}» on {} has {n:?} songs", hit.release_type, hit.title, s.service());
+                    }
+                }
+                Err(e) => {
+                    log::debug!("the songs of «{}» on {}: {e}", hit.title, s.service());
+                    if crate::better_covers::stream_trouble(&e) {
+                        trouble.get_or_insert(format!("{}: {e}", s.service()));
+                    }
+                }
+            }
+        }
+        if enough(&out) {
+            return Ok(out);
         }
     }
-    trouble.map_or(Ok(None), Err)
+    if all && let Some(meta) = meta {
+        let term = w.artists.first().map_or_else(|| query.clone(), |a| format!("{a} {query}"));
+        match meta.itunes.search_albums(&term, 10).await {
+            Ok(albums) => {
+                if let Some(url) = itunes_pick(w, &albums) {
+                    out.push(Found::new(false, &url));
+                }
+            }
+            Err(e) => {
+                log::debug!("a cover of «{}» in the iTunes Store: {e}", w.title);
+                if crate::better_covers::meta_trouble(&e) {
+                    trouble.get_or_insert(format!("iTunes: {e}"));
+                }
+            }
+        }
+    }
+    match trouble {
+        Some(e) if out.is_empty() => Err(e),
+        _ => Ok(out),
+    }
+}
+
+/// The url of a larger cover of `w` for the stage, if a source has one:
+/// the first [`find_all`] finds.
+pub(crate) async fn find(meta: Option<&Metadata>, services: &[Arc<dyn StreamService>], w: &Want) -> Result<Option<String>, String> {
+    let found = find_all(meta, services, w, false).await?;
+    Ok(found.first().map(|f| f.plain().to_owned()).filter(|u| !u.is_empty()))
 }
 
 /// An album title as a search query: without a «~subtitle~» and «Special
@@ -400,18 +695,20 @@ impl Worker {
 
 /// The lookup of release `r` by `artists` (empty: the title alone).
 pub(crate) fn want_of(lib: &Library, r: &nikgob_core::model::Release, artists: Vec<String>) -> Want {
-    let deezer = lib
-        .external_ids(EntityKind::Album, *r.id.as_uuid())
-        .unwrap_or_default()
-        .into_iter()
-        .find(|x| x.service == Service::Deezer)
-        .and_then(|x| x.id.parse().ok());
+    let mut linked = lib.external_ids(EntityKind::Album, *r.id.as_uuid()).unwrap_or_default();
+    // Deezer's first (one request, its cover large), YouTube Music's last.
+    linked.sort_by_key(|x| match x.service {
+        Service::Deezer => 0,
+        Service::Spotify => 1,
+        Service::Youtube => 2,
+        _ => 3,
+    });
     let have = lib.tracks_of_release(r.id).map_or(0, |t| u32::try_from(t.len()).unwrap_or(u32::MAX));
     Want {
         id: r.id,
         mbid: r.mbid.clone(),
         group_mbid: r.release_group_mbid.clone(),
-        deezer,
+        linked,
         title: r.title.clone(),
         artists,
         release_type: r.release_type,
@@ -466,7 +763,7 @@ mod tests {
             id: ReleaseId::new(),
             mbid: None,
             group_mbid: None,
-            deezer: None,
+            linked: Vec::new(),
             title: "Рисунки".into(),
             artists: vec!["Artist".into()],
             release_type: kind,
@@ -505,10 +802,11 @@ mod tests {
         assert_eq!(pick(&want(ReleaseType::Single, 1), untold).as_deref(), Some("https://x/yt-single.jpg"));
     }
 
-    /// The Deezer album linked to an album of several songs is its single
-    /// (a wrong match of the import): its art is not taken.
+    /// A single or an EP found for an album of several songs is taken only
+    /// when its songs are counted as many; what MusicBrainz says of a linked
+    /// release likewise.
     #[test]
-    fn a_linked_deezer_single_gives_no_art_to_an_album() {
+    fn a_found_single_gives_no_art_to_an_album() {
         let album = want(ReleaseType::Album, 9);
         assert!(!album.takes(deezer_kind(Some("single")), Some(1)));
         assert!(!album.takes(deezer_kind(Some("album")), Some(1)), "an album of one song");
@@ -527,5 +825,134 @@ mod tests {
         assert!(!album.takes(mb_kind(Some("EP")), Some(4)));
         assert!(album.takes(mb_kind(Some("Album")), Some(9)));
         assert!(album.takes(mb_kind(None), None));
+    }
+
+    /// A release linked to the album is the album whatever kind the
+    /// service calls it; only one of one song for an album of several (the
+    /// album's first single, linked by a wrong match) is not.
+    #[test]
+    fn a_linked_release_fits_but_a_linked_single_song() {
+        let album = want(ReleaseType::Album, 3);
+        assert!(album.linked_fits(Some(3)) && album.linked_fits(Some(2)) && album.linked_fits(None));
+        assert!(!album.linked_fits(Some(1)));
+        assert!(want(ReleaseType::Single, 1).linked_fits(Some(1)));
+        assert!(want(ReleaseType::Album, 1).linked_fits(Some(1)), "one song of it came in");
+    }
+
+    /// Each CDN is asked for its largest picture, then what the stage
+    /// takes; an unknown url stays as it is.
+    #[test]
+    fn a_cover_is_asked_large_on_its_cdn() {
+        let dz = "https://cdn-images.dzcdn.net/images/cover/d9e1d3a69e838614ad4a50ecabaa0b46/1000x1000-000000-80-0-0.jpg";
+        assert_eq!(
+            renditions(dz),
+            [
+                "https://cdn-images.dzcdn.net/images/cover/d9e1d3a69e838614ad4a50ecabaa0b46/1800x1800-000000-80-0-0.jpg",
+                dz
+            ]
+        );
+        assert_eq!(renditions("https://cdn-images.dzcdn.net/images/cover/aa/1800x1800-000000-80-0-0.jpg").len(), 1);
+        assert_eq!(
+            renditions("https://yt3.googleusercontent.com/7MXi=w544-h544-l90-rj"),
+            ["https://yt3.googleusercontent.com/7MXi=w3000-h3000-l90-rj", "https://yt3.googleusercontent.com/7MXi=w1200-h1200-l90-rj"]
+        );
+        assert_eq!(renditions("https://lh3.googleusercontent.com/b=w2880-h1200-p-l90-rj"), ["https://lh3.googleusercontent.com/b=w2880-h1200-p-l90-rj"]);
+        assert_eq!(
+            renditions("https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/eb/cover.jpg/100x100bb.jpg"),
+            [
+                "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/eb/cover.jpg/3000x3000bb.jpg",
+                "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/eb/cover.jpg/1200x1200bb.jpg"
+            ]
+        );
+        assert_eq!(
+            renditions("https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e022c5b24ecfa39523a75c993c4"),
+            [
+                "https://i.scdn.co/image/ab67616d000082c12c5b24ecfa39523a75c993c4",
+                "https://i.scdn.co/image/ab67616d0000b2732c5b24ecfa39523a75c993c4"
+            ]
+        );
+        assert_eq!(renditions("https://coverartarchive.org/release/x/1-1200.jpg"), ["https://coverartarchive.org/release/x/1-1200.jpg"]);
+    }
+
+    fn risunki(tracks: u32) -> Want {
+        Want { title: "рисунки".into(), artists: vec!["nyan.mp3".into()], ..want(ReleaseType::Album, tracks) }
+    }
+
+    /// «рисунки» (an album of three songs in the library) is linked to its
+    /// YouTube Music release, which YouTube Music calls a single: its cover
+    /// is taken first, asked large; the stage takes it at 1200.
+    #[tokio::test]
+    async fn the_linked_release_is_taken_first_whatever_the_service_calls_it() {
+        use nikgob_core::streaming::FakeService;
+        let cover = "https://yt3.googleusercontent.com/risunki=w544-h544-l90-rj";
+        let yt = Arc::new(FakeService::youtube().with_release("risunki", "рисунки", "nyan.mp3", ReleaseType::Single, 3, false, cover));
+        let id = yt.albums().into_iter().find(|a| a.title == "рисунки").unwrap().id;
+        let services: Vec<Arc<dyn StreamService>> = vec![yt.clone()];
+        let w = Want { linked: vec![id], ..risunki(3) };
+        let all = find_all(None, &services, &w, true).await.unwrap();
+        assert_eq!(
+            all.first(),
+            Some(&Found {
+                linked: true,
+                urls: vec![
+                    "https://yt3.googleusercontent.com/risunki=w3000-h3000-l90-rj".into(),
+                    "https://yt3.googleusercontent.com/risunki=w1200-h1200-l90-rj".into()
+                ]
+            })
+        );
+        assert_eq!(
+            find(None, &services, &w).await.unwrap().as_deref(),
+            Some("https://yt3.googleusercontent.com/risunki=w1200-h1200-l90-rj")
+        );
+        // Linked by a wrong match: a release of one song is not an album
+        // of three.
+        let one = Arc::new(FakeService::youtube().with_release("one", "другое", "nyan.mp3", ReleaseType::Single, 1, true, cover));
+        let id = one.albums().into_iter().find(|a| a.title == "другое").unwrap().id;
+        let services: Vec<Arc<dyn StreamService>> = vec![one];
+        assert_eq!(find_all(None, &services, &Want { linked: vec![id], ..risunki(3) }, true).await, Ok(Vec::new()));
+    }
+
+    /// A single of the album's very title whose search hit counts no songs
+    /// is asked for its songs (one request): as many as the album's, it is
+    /// the album; fewer, it is not.
+    #[tokio::test]
+    async fn a_single_of_songs_untold_is_asked_for_its_songs() {
+        use nikgob_core::streaming::FakeService;
+        let cover = "https://yt3.googleusercontent.com/risunki=w544-h544-l90-rj";
+        let three = Arc::new(FakeService::youtube().with_release("risunki", "рисунки", "nyan.mp3", ReleaseType::Single, 3, false, cover));
+        let services: Vec<Arc<dyn StreamService>> = vec![three.clone()];
+        let found = find_all(None, &services, &risunki(3), true).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].linked);
+        assert_eq!(found[0].plain(), "https://yt3.googleusercontent.com/risunki=w1200-h1200-l90-rj");
+        assert_eq!(three.calls("album"), 1);
+        let one = Arc::new(FakeService::youtube().with_release("lead", "рисунки", "nyan.mp3", ReleaseType::Single, 1, false, cover));
+        let services: Vec<Arc<dyn StreamService>> = vec![one.clone()];
+        assert_eq!(find(None, &services, &risunki(3)).await, Ok(None));
+        assert_eq!(one.calls("album"), 1);
+        // Another title or another artist: not asked at all.
+        let other = Arc::new(FakeService::youtube().with_release("x", "рисунки 2", "nyan.mp3", ReleaseType::Single, 3, false, cover));
+        let services: Vec<Arc<dyn StreamService>> = vec![other.clone()];
+        assert_eq!(find(None, &services, &risunki(3)).await, Ok(None));
+        assert_eq!(other.calls("album"), 0);
+    }
+
+    /// The iTunes Store names a single «… - Single» and counts its songs.
+    #[test]
+    fn an_itunes_album_is_the_album_by_its_title_artist_and_songs() {
+        let album = |name: &str, artist: &str, n: u32| ItunesAlbum {
+            artist_name: artist.into(),
+            collection_name: name.into(),
+            track_count: Some(n),
+            artwork_url100: Some(format!("https://is1-ssl.mzstatic.com/image/thumb/{n}/cover.jpg/100x100bb.jpg")),
+        };
+        let w = risunki(3);
+        assert_eq!(
+            itunes_pick(&w, &[album("рисунки - Single", "nyan.mp3", 3)]).as_deref(),
+            Some("https://is1-ssl.mzstatic.com/image/thumb/3/cover.jpg/100x100bb.jpg")
+        );
+        assert_eq!(itunes_pick(&w, &[album("рисунки - Single", "nyan.mp3", 1)]), None, "the lead single");
+        assert_eq!(itunes_pick(&w, &[album("рисунки", "Кто-то ещё", 3)]), None);
+        assert_eq!(itunes_kind("X - EP"), ("X", ReleaseType::Ep));
     }
 }

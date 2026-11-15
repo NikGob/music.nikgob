@@ -4,7 +4,8 @@
 //!
 //! `GET https://itunes.apple.com/search?term=<artist title>&entity=song`
 //! answers with songs and their `artworkUrl100`; the same url with another
-//! size (`…/1200x1200bb.jpg`) gives the art larger. Apple asks for about 20
+//! size (`…/1200x1200bb.jpg`) gives the art larger. `entity=album` answers
+//! with albums, their songs counted. Apple asks for about 20
 //! requests a minute: requests are spaced by the shared rate limiter
 //! ([`crate::RateLimits::itunes`]).
 
@@ -35,6 +36,17 @@ impl ItunesSong {
     }
 }
 
+/// An album of the store. Its name ends in « - Single» or « - EP» for
+/// those.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ItunesAlbum {
+    pub artist_name: String,
+    pub collection_name: String,
+    pub track_count: Option<u32>,
+    pub artwork_url100: Option<String>,
+}
+
 /// `…/100x100bb.jpg` → `…/{side}x{side}bb.jpg`; any other url as it is.
 pub fn sized_artwork(url: &str, side: u32) -> String {
     match url.rsplit_once('/') {
@@ -52,6 +64,17 @@ pub fn parse_search(body: &[u8]) -> Result<Vec<ItunesSong>> {
     struct Raw {
         #[serde(default)]
         results: Vec<ItunesSong>,
+    }
+    let raw: Raw = parse_json(body)?;
+    Ok(raw.results)
+}
+
+/// Parses a `/search` answer of albums.
+pub fn parse_albums(body: &[u8]) -> Result<Vec<ItunesAlbum>> {
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        results: Vec<ItunesAlbum>,
     }
     let raw: Raw = parse_json(body)?;
     Ok(raw.results)
@@ -85,6 +108,14 @@ impl Itunes {
         let body = self.http.get_body(Service::Itunes, url).await?;
         parse_search(&body)
     }
+
+    /// Albums for a free-form `term` («artist title»), at most `limit`.
+    pub async fn search_albums(&self, term: &str, limit: u32) -> Result<Vec<ItunesAlbum>> {
+        let limit = limit.clamp(1, 50).to_string();
+        let url = build_url(&self.base, "search", &[("term", term), ("entity", "album"), ("limit", limit.as_str())])?;
+        let body = self.http.get_body(Service::Itunes, url).await?;
+        parse_albums(&body)
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +137,20 @@ mod tests {
         );
         assert_eq!(songs[1].artwork(), None);
         assert_eq!(sized_artwork("https://x/y.png", 600), "https://x/y.png");
+    }
+
+    #[test]
+    fn an_album_search_answer_gives_albums_and_their_songs_counted() {
+        let body = br#"{"resultCount":1,"results":[
+            {"wrapperType":"collection","collectionType":"Album","artistName":"nyan.mp3","collectionName":"Drawings - Single",
+             "trackCount":3,"artworkUrl100":"https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/eb/cover.jpg/100x100bb.jpg"}]}"#;
+        let albums = parse_albums(body).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].collection_name, "Drawings - Single");
+        assert_eq!(albums[0].track_count, Some(3));
+        assert_eq!(
+            sized_artwork(albums[0].artwork_url100.as_deref().unwrap(), 3000),
+            "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/eb/cover.jpg/3000x3000bb.jpg"
+        );
     }
 }

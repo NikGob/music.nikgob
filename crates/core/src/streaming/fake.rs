@@ -345,6 +345,9 @@ struct Catalog {
     more_artists: Vec<StreamArtist>,
     more_albums: Vec<StreamAlbum>,
     more_tracks: Vec<StreamTrack>,
+    /// Albums whose search hit counts no songs (a YouTube Music single's):
+    /// only the album itself tells them ([`FakeService::with_release`]).
+    untold: HashSet<String>,
 }
 
 /// The artist of `key` in either table, as a credit.
@@ -450,6 +453,7 @@ impl Catalog {
             more_artists,
             more_albums,
             more_tracks,
+            untold: HashSet::new(),
         }
     }
 
@@ -883,6 +887,32 @@ impl FakeService {
         self
     }
 
+    /// Adds a release `{prefix}-alb-{key}` of `artist` as the service calls
+    /// it (`kind`, `n` songs) with its cover; `counted`: its search hit
+    /// counts its songs (YouTube Music's do not, the album does).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_release(mut self, key: &str, title: &str, artist: &str, kind: ReleaseType, n: u32, counted: bool, cover: &str) -> Self {
+        let service = self.service;
+        let p = prefix(service);
+        let id = RemoteId::new(service, format!("{p}-alb-{key}"));
+        if !counted {
+            self.catalog.untold.insert(id.id.clone());
+        }
+        self.catalog.albums.push(StreamAlbum {
+            id,
+            title: title.to_owned(),
+            artists: vec![ArtistRef::new(None, artist)],
+            year: Some(2026),
+            release_date: None,
+            release_type: kind,
+            cover_url: Some(cover.to_owned()),
+            total_tracks: Some(n),
+            tracks: Vec::new(),
+        });
+        self
+    }
+
     /// Adds one single track `{prefix}-x-{key}` (no album, no ISRC) to the
     /// catalog. Its search matches the text as written (lower case only):
     /// «лед» does not find «Лёд», as on the real services.
@@ -1095,6 +1125,7 @@ impl FakeService {
             })
             .map(|a| StreamAlbum {
                 tracks: Vec::new(),
+                total_tracks: if self.catalog.untold.contains(&a.id.id) { None } else { a.total_tracks },
                 ..a.clone()
             })
             .collect();

@@ -34,7 +34,7 @@ pub use acoustid::{AcoustId, AcoustIdRecording, AcoustIdResult};
 pub use config::MetadataConfig;
 pub use coverart::{CoverArtArchive, CoverImage, CoverTarget, FetchedCover};
 pub use deezer::{ArtistPicture, Deezer, DeezerAlbum, DeezerArtistHit, DeezerTrack};
-pub use itunes::{Itunes, ItunesSong};
+pub use itunes::{Itunes, ItunesAlbum, ItunesSong};
 pub use error::{MetadataError, Result};
 pub use http::{Http, RateLimiter, RateLimits, RetryPolicy, in_background};
 pub use lastfm::{LastFm, LastFmSimilar};

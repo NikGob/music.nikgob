@@ -389,6 +389,8 @@ pub enum TrackAct {
     ToMp3,
     FindSong,
     WrongFile,
+    /// «Обновить обложку» of the album of a song with a file.
+    RefreshCover,
     Dislike,
     Ban,
     Remove,
@@ -418,6 +420,7 @@ impl TrackAct {
             Self::Ban => I::Ban,
             Self::Next | Self::Queue | Self::Playlist | Self::ToLibrary | Self::OutOfLibrary | Self::AlsoOn | Self::Apart | Self::FindSong | Self::ToMp3
             | Self::AlbumDownload
+            | Self::RefreshCover
             | Self::Remove | Self::Trash | Self::Purge => return None,
         })
     }
@@ -708,6 +711,14 @@ pub(crate) fn library_track_rows(track: &TrackRow, o: LibraryRowsOf<'_>) -> Vec<
             .position(|r| matches!(r, widgets::Row::Item(TrackAct::Better, _)))
             .map_or(file.len(), |i| i + 1);
         file.insert(at, widgets::Row::Item(TrackAct::ToMp3, MenuItem::new(TO_MP3).icon(Icon::Sync)));
+    }
+    // The cover of the album of a file, last of the file's own items. A
+    // song without an album has no cover of its own to refresh.
+    if track.has_local
+        && track.release_id.is_some()
+        && let Some(file) = widgets::sub_rows_mut(&mut rows, FILE)
+    {
+        file.push(widgets::Row::Item(TrackAct::RefreshCover, MenuItem::new(widgets::REFRESH_COVER).icon(Icon::Refresh)));
     }
     rows
 }
@@ -1120,6 +1131,7 @@ impl PageState {
             A::ToMp3 => out.push(Command::FakeToMp3(track.id)),
             A::FindSong => out.push(Command::FindSong { track: track.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(track.id)),
+            A::RefreshCover => out.extend(track.release_id.map(Command::RefreshReleaseCover)),
             A::Dislike => out.push(dislike_command(track.id, marks)),
             A::Ban => out.extend(track.artist_id().map(|a| ban_command(a, marks))),
             A::Trash => self.confirm_trash = Some((Doomed::Tracks(vec![track.id]), format!("«{}»", track.title))),
@@ -1950,7 +1962,10 @@ mod speed_tests {
         let mut library = library_track_rows(&t, of(&marks, true));
         push_deletes(&mut library, &t);
         let file = row_acts(sub_rows(&library, FILE).unwrap());
-        assert_eq!(file, [TrackAct::Info, TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::Trash, TrackAct::Purge]);
+        assert_eq!(
+            file,
+            [TrackAct::Info, TrackAct::Fetch, TrackAct::Better, TrackAct::WrongFile, TrackAct::RefreshCover, TrackAct::Trash, TrackAct::Purge]
+        );
         let top = labels(&library);
         let share = top.iter().position(|l| l == "Поделиться").unwrap();
         assert_eq!(top[share + 1], FILE);
@@ -2063,6 +2078,21 @@ mod speed_tests {
         }
     }
 
+    /// «Обновить обложку» of a file's album is the last of the file's own
+    /// items in «Файл»; a song without an album or without a file has none.
+    #[test]
+    fn the_cover_of_a_files_album_is_refreshed_from_its_file_menu() {
+        let marks = nikgob_view::DislikesView::default();
+        let file = |t: &TrackRow| row_acts(sub_rows(&library_track_rows(t, of(&marks, true)), FILE).unwrap());
+        assert_eq!(file(&track(true)).last(), Some(&TrackAct::RefreshCover));
+        let loose = TrackRow { release_id: None, album: None, ..track(true) };
+        assert!(!file(&loose).contains(&TrackAct::RefreshCover));
+        assert!(!file(&track(false)).contains(&TrackAct::RefreshCover));
+        assert_eq!(TrackAct::RefreshCover.menu_item(true), None);
+        let items = row_items(&library_track_rows(&track(true), of(&marks, true)));
+        assert!(items.iter().any(|(a, i)| *a == TrackAct::RefreshCover && i.label == widgets::REFRESH_COVER));
+    }
+
     /// «Меню трека»: an item sent to «Файл» joins the submenu in the menu's
     /// order, one taken out stands right before it, a hidden one is gone;
     /// nothing set, nothing changes.
@@ -2115,9 +2145,10 @@ mod speed_tests {
         assert!(matches!(rows[at - 1], Row::Item(A::Fetch, _)) && matches!(rows[at - 2], Row::Item(A::Speed, _)));
         assert_eq!(file(&rows)[..2], [A::Info, A::Better]);
 
-        // Everything taken out of «Файл»: the deletes alone stay in it.
+        // Everything it places taken out of «Файл»: the album's cover and
+        // the deletes stay in it.
         let rows = with(&[(I::Info, P::Menu), (I::Tags, P::Menu), (I::Torrents, P::Menu), (I::WrongFile, P::Hidden)]);
-        assert!(file(&rows).iter().all(|a| matches!(a, A::Trash | A::Purge)));
+        assert_eq!(file(&rows), [A::RefreshCover, A::Trash, A::Purge]);
         // No divider is doubled or left at an end once the menu is built.
         let (_, acts) = widgets::menu_of("placed-test", rows);
         assert!(acts.contains(&A::Fetch) && acts.contains(&A::Trash));

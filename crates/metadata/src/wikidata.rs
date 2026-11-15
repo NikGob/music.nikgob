@@ -132,6 +132,26 @@ impl WebImages {
         }
         self.http.get_bytes(Service::WebImages, url, MAX_IMAGE_BYTES).await
     }
+
+    /// The cover of the Spotify album `id` by its public oEmbed (no
+    /// account): its thumbnail's url. `None`: it has none.
+    pub async fn spotify_album_art(&self, id: &str) -> Result<Option<String>> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(MetadataError::InvalidArgument(format!("not a Spotify id: {id:?}")));
+        }
+        let page = format!("https://open.spotify.com/album/{id}");
+        let base = base_url(SPOTIFY_BASE)?;
+        let url = build_url(&base, "oembed", &[("url", page.as_str())])?;
+        let body: Value = self.http.get_json(Service::WebImages, url).await?;
+        Ok(oembed_thumbnail(&body))
+    }
+}
+
+const SPOTIFY_BASE: &str = "https://open.spotify.com/";
+
+/// The thumbnail of an oEmbed answer.
+fn oembed_thumbnail(body: &Value) -> Option<String> {
+    body.get("thumbnail_url").and_then(Value::as_str).filter(|u| u.starts_with("https://")).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -172,5 +192,16 @@ mod tests {
         assert_eq!(a.musicbrainz, vec!["0b2f0b5a-0000-4000-8000-000000000001".to_owned()]);
         assert_eq!(wd.download_image("Ayako_Saso_2019.jpg").await.unwrap(), vec![0xFF, 0xD8, 0xFF, 1]);
         assert!(wd.artist("P18").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_spotify_oembed_gives_its_thumbnail() {
+        let body: Value = serde_json::from_str(
+            r#"{"title":"Global Warming","thumbnail_url":"https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e02aa","thumbnail_width":300}"#,
+        )
+        .unwrap();
+        assert_eq!(oembed_thumbnail(&body).as_deref(), Some("https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e02aa"));
+        assert_eq!(oembed_thumbnail(&serde_json::json!({"title": "x"})), None);
+        assert!(WebImages::new(http()).spotify_album_art("../x").await.is_err());
     }
 }

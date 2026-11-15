@@ -411,6 +411,7 @@ impl Chrome {
             A::ToMp3 => out.push(Command::FakeToMp3(t.id)),
             A::FindSong => out.push(Command::FindSong { track: t.id, query: None }),
             A::WrongFile => out.push(Command::WrongFile(t.id)),
+            A::RefreshCover => out.extend(t.release_id.map(Command::RefreshReleaseCover)),
             A::Dislike => out.push(super::pages::dislike_command(t.id, &state.dislikes)),
             A::Ban => out.extend(t.artist_id().map(|a| super::pages::ban_command(a, &state.dislikes))),
             // A list's rows: not in the player's menu.
