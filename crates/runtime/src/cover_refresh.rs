@@ -6,12 +6,14 @@
 //! ids when MusicBrainz says they are of its kind, the album of its title
 //! on the services and in the iTunes Store, never a single or an EP for an
 //! album of more songs unless its songs are counted as many. Each found is
-//! downloaded at the largest size its CDN serves and measured by its bytes;
-//! the largest of the linked ones (else of those found by its title), or
-//! of any other that is the same picture, is the album's art online. It
-//! wins over the pictures of the album's files — a file may hold the art of
-//! the single the album was once taken for — unless one of them is the
-//! same picture (a small perceptual hash) and larger. Without it, the
+//! downloaded one by one at the largest size its CDN serves and measured
+//! by its bytes: the first that comes (a linked release's, else the one of
+//! the very title of the first source) is the anchor, and a larger one
+//! takes its place only as the same picture (a small colour-aware look,
+//! [`same_picture`]). That is the album's art online. It wins over the
+//! pictures of the album's files — a file may hold the art of the single
+//! the album was once taken for — unless one of them is the same picture
+//! and larger. Without it, the
 //! largest picture of its files that is no frame of a video.
 //!
 //! Where the art goes: the album's folder, when that folder is the album's
@@ -43,6 +45,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use nikgob_core::cover_frame;
 use nikgob_core::model::{Palette, ReleaseId, SourceKind};
 use nikgob_core::streaming::{Service, StreamService};
@@ -67,11 +71,28 @@ const MANAGED_DIR: &str = ".musiclib/covers";
 const COVER_NAMES: &[&str] = &["cover", "folder", "front", "album", "albumart"];
 /// The online lookup and download, at most.
 const ONLINE_TIMEOUT: Duration = Duration::from_secs(90);
+const GUARD: Duration = Duration::from_secs(30);
 /// Without the importer's settings.
 const MAX_EDGE: u32 = 1200;
 const FALLBACK_SEED: u32 = 0xFF67_50A4;
-/// Pictures this many bits apart in their [`picture_hash`] are one picture.
+/// Two pictures are one when each colour's steps differ in at most this
+/// many of 64 and their mean colours are at most this far apart.
 const SAME_BITS: u32 = 10;
+const SAME_COLOUR: u32 = 40;
+/// A step of light this large is plain to see; a picture needs this many
+/// to be told from another.
+const STEP: u32 = 3;
+const MIN_STEPS: u32 = 12;
+/// A picture is decoded up to this long side and this much memory (a
+/// 3000 px cover of the iTunes Store takes 36 MB).
+const MAX_SIDE: u32 = 4000;
+const MAX_ALLOC: u64 = 128 << 20;
+/// The covers downloaded per refresh, at most; the time each has.
+const MAX_CANDIDATES: usize = 6;
+const IMAGE_BUDGET: Duration = Duration::from_secs(25);
+
+/// One refresh at a time downloads and decodes the pictures found online.
+static HEAVY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Staging files of this run, counted.
 static STAGING: AtomicU64 = AtomicU64::new(0);
@@ -305,49 +326,97 @@ fn cover_images(dir: &Path) -> Vec<PathBuf> {
     out.into_iter().map(|(_, p)| p).collect()
 }
 
-/// A small perceptual hash of a picture: whether each of 9×8 greys is
-/// lighter than the next. A picture keeps it at any size and compression,
-/// another picture has another.
-pub(crate) fn picture_hash(img: &image::DynamicImage) -> u64 {
-    let small = img.thumbnail(64, 64).resize_exact(9, 8, image::imageops::FilterType::Triangle).to_luma8();
-    let mut h = 0u64;
+/// What a picture looks like, small: for each colour whether each of 9×8
+/// is lighter than the next, its mean colour, and how many of its 64 steps
+/// of light are plain to see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Look {
+    bits: [u64; 3],
+    mean: [u8; 3],
+    steps: u32,
+}
+
+/// The [`Look`] of a picture. A picture keeps it at any size and
+/// compression; another picture has another, and so does the same drawing
+/// in other colours.
+pub(crate) fn look(img: &image::DynamicImage) -> Look {
+    let small = img.thumbnail(64, 64).resize_exact(9, 8, image::imageops::FilterType::Triangle).to_rgb8();
+    let light = |p: [u8; 3]| (299 * u32::from(p[0]) + 587 * u32::from(p[1]) + 114 * u32::from(p[2])) / 1000;
+    let mut bits = [0u64; 3];
+    let mut sum = [0u32; 3];
+    let mut steps = 0;
     for y in 0..8 {
-        for x in 0..8 {
-            h = (h << 1) | u64::from(small.get_pixel(x, y)[0] > small.get_pixel(x + 1, y)[0]);
+        for x in 0..9 {
+            let p = small.get_pixel(x, y).0;
+            for (s, v) in sum.iter_mut().zip(p) {
+                *s += u32::from(v);
+            }
+            if x < 8 {
+                let q = small.get_pixel(x + 1, y).0;
+                for ((b, a), n) in bits.iter_mut().zip(p).zip(q) {
+                    *b = (*b << 1) | u64::from(a > n);
+                }
+                if light(p).abs_diff(light(q)) >= STEP {
+                    steps += 1;
+                }
+            }
         }
     }
-    h
+    Look { bits, mean: sum.map(|s| u8::try_from(s / 72).unwrap_or(u8::MAX)), steps }
 }
 
-/// Whether two hashes are of one picture.
-fn same_picture(a: Option<u64>, b: Option<u64>) -> bool {
-    matches!((a, b), (Some(a), Some(b)) if (a ^ b).count_ones() <= SAME_BITS)
+/// Whether two looks are of one picture: each colour's steps alike
+/// ([`SAME_BITS`]), the mean colours near ([`SAME_COLOUR`]). A picture with
+/// too little to tell (a flat colour, a faint gradient: fewer than
+/// [`MIN_STEPS`] plain steps) is never the same as any.
+fn same_picture(a: Option<&Look>, b: Option<&Look>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else { return false };
+    let told = |l: &Look| l.steps >= MIN_STEPS;
+    let near = a.mean.iter().zip(b.mean).map(|(x, y)| u32::from(x.abs_diff(y)).pow(2)).sum::<u32>() <= SAME_COLOUR * SAME_COLOUR;
+    told(a) && told(b) && near && a.bits.iter().zip(b.bits).all(|(x, y)| (x ^ y).count_ones() <= SAME_BITS)
 }
 
-/// The long side of a picture as it came, and its [`picture_hash`].
-fn measure(bytes: &[u8]) -> Option<(u32, u64)> {
-    let img = image::load_from_memory(bytes).ok()?;
-    Some((img.width().max(img.height()), picture_hash(&img)))
+/// The size of the picture in `bytes` from its header, when it is one.
+fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
+}
+
+/// The long side of the picture in `bytes` as it came and its [`Look`]:
+/// none when it is no picture, is larger than [`MAX_SIDE`] or needs more
+/// than [`MAX_ALLOC`] to decode.
+fn measure(bytes: &[u8]) -> Option<(u32, Look)> {
+    let (w, h) = dimensions(bytes)?;
+    if w.max(h) > MAX_SIDE {
+        return None;
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SIDE);
+    limits.max_image_height = Some(MAX_SIDE);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    Some((img.width().max(img.height()), look(&img)))
 }
 
 /// A picture of the album's own files: as a cover, with its long side as
-/// it came and its hash.
+/// it came and its look.
 #[derive(Clone, Debug)]
 struct Own {
     cover: ProcessedCover,
     side: u32,
-    hash: Option<u64>,
+    look: Option<Look>,
 }
 
 /// The album's art found online, downloaded.
 #[derive(Clone, Debug)]
-pub(crate) struct Online {
-    /// What the background lookups keep of it: the service's url.
-    plain: String,
+struct Online {
+    /// The url the album keeps: one that came ([`keep_url`]).
+    keep: String,
     cover: ProcessedCover,
-    /// Its long side as it came, and its hash.
+    /// Its long side as it came, and its look.
     side: u32,
-    hash: Option<u64>,
+    look: Option<Look>,
 }
 
 /// Every picture of the album's own: those in the audio `files`, the
@@ -361,11 +430,11 @@ fn own_art(files: &[PathBuf], images: &[PathBuf], dirs: &[PathBuf], max_edge: u3
         if seen.insert(h.finish())
             && let Ok(cover) = process_cover(&bytes, max_edge)
         {
-            let (side, hash) = match measure(&bytes) {
-                Some((s, h)) => (s, Some(h)),
+            let (side, look) = match measure(&bytes) {
+                Some((s, l)) => (s, Some(l)),
                 None => (side(&cover), None),
             };
-            out.push(Own { cover, side, hash });
+            out.push(Own { cover, side, look });
         }
     };
     for f in files {
@@ -398,7 +467,7 @@ fn pick(local: Vec<Own>, online: Option<Online>) -> Option<(ProcessedCover, Opti
     let mut same: Option<Own> = None;
     for c in local.into_iter().filter(|c| shown(&c.cover)) {
         if let Some(o) = &online
-            && same_picture(c.hash, o.hash)
+            && same_picture(c.look.as_ref(), o.look.as_ref())
             && c.side > o.side
             && same.as_ref().is_none_or(|s| c.side > s.side)
         {
@@ -410,7 +479,7 @@ fn pick(local: Vec<Own>, online: Option<Online>) -> Option<(ProcessedCover, Opti
     }
     match (online, same) {
         (Some(_), Some(c)) => Some((c.cover, None)),
-        (Some(o), None) => Some((o.cover, Some(o.plain))),
+        (Some(o), None) => Some((o.cover, Some(o.keep))),
         (None, _) => best.map(|c| (c.cover, None)),
     }
 }
@@ -489,7 +558,7 @@ fn prune_managed(dir: &Path, id: ReleaseId, keep: &[&Path]) {
 fn settle_files(job: &Job, online: Result<Option<Online>, String>) -> Result<Refreshed, String> {
     let online = online?;
     let (own_dir, managed) = match &job.dest {
-        Dest::Web => return Ok(online.map_or(Refreshed::Nothing, |o| Refreshed::Web(o.plain))),
+        Dest::Web => return Ok(online.map_or(Refreshed::Nothing, |o| Refreshed::Web(o.keep))),
         Dest::Folder(d) => (Some(d), None),
         Dest::Managed(m) => (None, Some(m)),
     };
@@ -614,87 +683,140 @@ fn finish(p: &Picked, saved: bool) {
     }
 }
 
-/// A cover found online, downloaded.
+/// The best cover found online so far, downloaded.
 struct Fetched {
-    linked: bool,
-    /// The rendition that came, and the service's url of it.
+    /// The rendition that came, and what the stage of it takes.
     url: String,
-    plain: String,
+    stage: String,
     bytes: Vec<u8>,
-    /// Its long side as it came, and its [`picture_hash`].
+    /// Its long side as it came, and its look.
     side: u32,
-    hash: u64,
+    look: Look,
 }
 
-/// Each of `found` by `fetch` at its largest rendition that comes and is a
-/// picture, measured. Err: none came and a source could not answer
-/// (`fetch` says whether a failure is such).
-async fn fetch_found<F, Fut>(found: Vec<hd_covers::Found>, fetch: F) -> Result<Vec<Fetched>, String>
+/// The picture of `found` by `fetch`: its largest rendition that comes
+/// and is a picture within the limits ([`measure`]), each in the time one
+/// image has and none past `deadline`. A frame of a video is none (at any
+/// size). A failure `fetch` calls a trouble of the url the source gave
+/// goes into `trouble`.
+async fn fetch_one<F, Fut>(found: &hd_covers::Found, fetch: &F, deadline: Instant, trouble: &mut Option<String>) -> Option<Fetched>
 where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
 {
-    let mut out = Vec::new();
-    let mut trouble = None;
-    for f in found {
-        let plain = f.plain().to_owned();
-        let last = f.urls.len().saturating_sub(1);
-        for (i, url) in f.urls.into_iter().enumerate() {
-            match fetch(url.clone()).await {
-                Ok(bytes) => {
-                    let measured = tokio::task::spawn_blocking(move || measure(&bytes).map(|m| (bytes, m))).await.ok().flatten();
-                    if let Some((bytes, (side, hash))) = measured {
-                        out.push(Fetched { linked: f.linked, url, plain: plain.clone(), bytes, side, hash });
-                        break;
-                    }
-                    log::debug!("cover refresh: {url} is no picture");
+    let last = found.urls.len().saturating_sub(1);
+    for (i, url) in found.urls.iter().enumerate() {
+        let until = deadline.min(Instant::now() + IMAGE_BUDGET);
+        let bytes = match tokio::time::timeout_at(until, fetch(url.clone())).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err((e, hard))) => {
+                log::debug!("cover refresh: {url}: {e}");
+                if hard && i == last {
+                    trouble.get_or_insert(format!("{url}: {e}"));
                 }
-                Err((e, hard)) => {
-                    log::debug!("cover refresh: {url}: {e}");
-                    if hard && i == last {
-                        trouble.get_or_insert(format!("{url}: {e}"));
-                    }
+                continue;
+            }
+            Err(_) => {
+                log::debug!("cover refresh: {url}: no answer in time");
+                if i == last {
+                    trouble.get_or_insert(format!("{url}: no answer in time"));
+                }
+                continue;
+            }
+        };
+        if dimensions(&bytes).is_some_and(|(w, h)| cover_frame::is_frame(w, h)) {
+            log::debug!("cover refresh: {url} is a frame of a video");
+            return None;
+        }
+        let measured = tokio::task::spawn_blocking(move || measure(&bytes).map(|m| (bytes, m))).await.ok().flatten();
+        match measured {
+            Some((bytes, (side, look))) => {
+                return Some(Fetched { url: url.clone(), stage: found.stage.clone(), bytes, side, look });
+            }
+            None => log::debug!("cover refresh: {url} is no picture it takes"),
+        }
+    }
+    None
+}
+
+/// The album's art among `found`, taken in their order
+/// ([`hd_covers::find_all`]; at most [`MAX_CANDIDATES`]) until `deadline`:
+/// the first that comes as a picture is the anchor — the linked release's,
+/// else the one of the very title of the first source; a later one takes
+/// its place only when it is the same picture ([`same_picture`]) and
+/// larger. Other editions never win by their size. Only the best one's
+/// bytes are kept. Err: none came and a source could not answer.
+async fn select<F, Fut>(found: Vec<hd_covers::Found>, fetch: &F, deadline: Instant) -> Result<Option<Fetched>, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
+{
+    let mut anchor: Option<Look> = None;
+    let mut best: Option<Fetched> = None;
+    let mut trouble = None;
+    for f in found.iter().take(MAX_CANDIDATES) {
+        if Instant::now() >= deadline {
+            log::info!("cover refresh: out of time, the best found so far");
+            break;
+        }
+        let Some(got) = fetch_one(f, fetch, deadline, &mut trouble).await else { continue };
+        match &anchor {
+            None => {
+                anchor = Some(got.look);
+                best = Some(got);
+            }
+            Some(a) => {
+                if same_picture(Some(a), Some(&got.look)) && best.as_ref().is_none_or(|b| got.side > b.side) {
+                    best = Some(got);
                 }
             }
         }
     }
-    match trouble {
-        Some(e) if out.is_empty() => Err(e),
-        _ => Ok(out),
+    match (best, trouble) {
+        (Some(b), _) => Ok(Some(b)),
+        (None, Some(e)) => Err(e),
+        (None, None) => Ok(None),
     }
 }
 
-/// The album's art of those `fetched`: of its linked releases when any
-/// came (the same release), else of those found by its title, or any
-/// other of the same picture; of them the largest as it came. The first of
-/// equals wins.
-fn choose(fetched: Vec<Fetched>) -> Option<Fetched> {
-    let linked = fetched.iter().any(|f| f.linked);
-    let reference = fetched.iter().find(|f| f.linked == linked)?.hash;
-    let mut best: Option<Fetched> = None;
-    for f in fetched {
-        let counts = f.linked == linked || same_picture(Some(f.hash), Some(reference));
-        if counts && best.as_ref().is_none_or(|b| f.side > b.side) {
-            best = Some(f);
-        }
+/// The url the album keeps of `best`: what the stage takes when that
+/// comes as a picture (asked in the time left), else the rendition that
+/// came. Never one nobody has seen come.
+async fn keep_url<F, Fut>(best: &Fetched, fetch: &F, deadline: Instant) -> String
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, (String, bool)>>,
+{
+    if best.stage == best.url || Instant::now() >= deadline {
+        return best.url.clone();
     }
-    best
+    let until = deadline.min(Instant::now() + IMAGE_BUDGET);
+    match tokio::time::timeout_at(until, fetch(best.stage.clone())).await {
+        Ok(Ok(bytes)) if dimensions(&bytes).is_some() => best.stage.clone(),
+        _ => best.url.clone(),
+    }
 }
 
-/// The album's art online: every cover [`hd_covers::find_all`] finds,
-/// downloaded ([`fetch_found`]), the one [`choose`] takes. Err: nothing
-/// came and a source could not answer.
+/// The album's art online: the covers [`hd_covers::find_all`] finds, one
+/// by one ([`select`]), one refresh at a time over all albums, everything
+/// within [`ONLINE_TIMEOUT`]: when time runs out, the best that came. Err:
+/// nothing came and a source could not answer.
 async fn online(meta: &Metadata, services: &[Arc<dyn StreamService>], w: &hd_covers::Want, max_edge: u32) -> Result<Option<Online>, String> {
-    let found = hd_covers::find_all(Some(meta), services, w, true).await?;
-    let fetched = fetch_found(found, |url| async move {
-        meta.cover_art.download(&url).await.map_err(|e| (e.to_string(), better_covers::meta_trouble(&e)))
-    })
-    .await?;
-    let Some(best) = choose(fetched) else { return Ok(None) };
+    let deadline = Instant::now() + ONLINE_TIMEOUT;
+    let found = hd_covers::find_all(Some(meta), services, w, true, Some(deadline)).await?;
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let Ok(Ok(_heavy)) = tokio::time::timeout_at(deadline, HEAVY.acquire()).await else {
+        return Err("another cover refresh took the time".to_owned());
+    };
+    let fetch = |url: String| async move { meta.cover_art.download(&url).await.map_err(|e| (e.to_string(), better_covers::meta_trouble(&e))) };
+    let Some(best) = select(found, &fetch, deadline).await? else { return Ok(None) };
     log::info!("cover refresh of «{}»: {} of {} px online", w.title, best.url, best.side);
-    let Fetched { plain, bytes, side, hash, .. } = best;
+    let keep = keep_url(&best, &fetch, deadline).await;
+    let Fetched { bytes, side, look, .. } = best;
     let cover = tokio::task::spawn_blocking(move || process_cover(&bytes, max_edge)).await.map_err(|e| e.to_string())?;
-    Ok(cover.ok().map(|cover| Online { plain, cover, side, hash: Some(hash) }))
+    Ok(cover.ok().map(|cover| Online { keep, cover, side, look: Some(look) }))
 }
 
 impl Worker {
@@ -721,7 +843,9 @@ impl Worker {
             let Some(job) = job else { return Internal::CoverRefreshed(id, Ok(Refreshed::Nothing)) };
             log::info!("cover refresh of «{}»: into {:?}, {} files, online {}", job.want.title, job.dest, job.files.len(), meta.is_some());
             let found = match &meta {
-                Some(m) => match tokio::time::timeout(ONLINE_TIMEOUT, online(m, &services, &job.want, job.max_edge)).await {
+                // Its own steps keep within ONLINE_TIMEOUT; this is the last
+                // guard.
+                Some(m) => match tokio::time::timeout(ONLINE_TIMEOUT + GUARD, online(m, &services, &job.want, job.max_edge)).await {
                     Ok(r) => r,
                     Err(_) => Err("the online lookup took too long".to_owned()),
                 },
@@ -814,6 +938,8 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     fn jpeg(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
@@ -835,57 +961,87 @@ mod tests {
         }
     }
 
-    /// A picture of 9×8 blocks of greys drawn from `seed`: the same seed is
-    /// the same picture at any size, another seed another picture.
-    fn drawing(w: u32, h: u32, seed: u8) -> Vec<u8> {
-        let level = |bx: u32, by: u32| -> u8 {
+    /// A picture of 9×8 blocks drawn from `seed` in the colour `tint`: the
+    /// same seed is the same drawing at any size, another seed another.
+    fn tinted(w: u32, h: u32, seed: u8, tint: [u8; 3]) -> Vec<u8> {
+        let level = |bx: u32, by: u32| -> u32 {
             let mut x = (u64::from(seed) + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(bx * 31 + by * 7 + 1).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
             x ^= x >> 29;
             x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
             x ^= x >> 32;
-            u8::try_from(x % 200).unwrap() + 28
+            u32::try_from(x % 200).unwrap() + 28
         };
         let img = image::RgbImage::from_fn(w, h, |x, y| {
             let v = level(x * 9 / w, y * 8 / h);
-            image::Rgb([v, v, v])
+            image::Rgb(tint.map(|t| u8::try_from(v * u32::from(t) / 255).unwrap()))
         });
         let mut out = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg).unwrap();
         out
     }
 
+    /// [`tinted`] in greys.
+    fn drawing(w: u32, h: u32, seed: u8) -> Vec<u8> {
+        tinted(w, h, seed, [255, 255, 255])
+    }
+
+    fn look_of(bytes: &[u8]) -> Option<Look> {
+        measure(bytes).map(|(_, l)| l)
+    }
+
     fn own(bytes: &[u8]) -> Own {
-        let (side, hash) = measure(bytes).unwrap();
-        Own { cover: process_cover(bytes, MAX_EDGE).unwrap(), side, hash: Some(hash) }
+        let (side, look) = measure(bytes).unwrap();
+        Own { cover: process_cover(bytes, MAX_EDGE).unwrap(), side, look: Some(look) }
     }
 
     fn online_bytes(url: &str, bytes: &[u8]) -> Online {
-        let (side, hash) = measure(bytes).unwrap();
-        Online { plain: url.to_owned(), cover: process_cover(bytes, MAX_EDGE).unwrap(), side, hash: Some(hash) }
+        let (side, look) = measure(bytes).unwrap();
+        Online { keep: url.to_owned(), cover: process_cover(bytes, MAX_EDGE).unwrap(), side, look: Some(look) }
     }
 
     fn online_of(url: &str, c: &ProcessedCover) -> Online {
-        let (side, hash) = measure(&c.jpeg).unwrap();
-        Online { plain: url.to_owned(), cover: c.clone(), side, hash: Some(hash) }
+        let (side, look) = measure(&c.jpeg).unwrap();
+        Online { keep: url.to_owned(), cover: c.clone(), side, look: Some(look) }
     }
 
-    /// A picture keeps its hash at any size; another picture has another.
+    /// A picture looks the same at any size; another picture does not.
     #[test]
     fn a_picture_is_the_same_at_any_size_and_another_is_not() {
-        let hash = |b: &[u8]| measure(b).map(|(_, h)| h);
-        let a = hash(&drawing(1000, 1000, 7));
-        assert!(same_picture(a, hash(&drawing(1800, 1800, 7))));
-        assert!(same_picture(a, hash(&drawing(544, 544, 7))));
-        assert!(!same_picture(a, hash(&drawing(1000, 1000, 8))));
-        assert!(!same_picture(a, None));
+        let a = look_of(&drawing(1000, 1000, 7));
+        assert!(same_picture(a.as_ref(), look_of(&drawing(1800, 1800, 7)).as_ref()));
+        assert!(same_picture(a.as_ref(), look_of(&drawing(544, 544, 7)).as_ref()));
+        assert!(!same_picture(a.as_ref(), look_of(&drawing(1000, 1000, 8)).as_ref()));
+        assert!(!same_picture(a.as_ref(), None));
         assert_eq!(measure(&drawing(1800, 1200, 7)).map(|(s, _)| s), Some(1800));
+        assert_eq!(measure(&drawing(4200, 100, 7)), None, "larger than it decodes");
+        assert_eq!(measure(b"<html>"), None);
+    }
+
+    /// Flat colours tell nothing: never one picture, not even with the same
+    /// colour. The same drawing in other colours is another picture.
+    /// «рисунки»: the pale drawing is one picture at 544 and 1440 px, the
+    /// dark photo of the single another.
+    #[test]
+    fn flat_colours_and_other_colours_are_never_the_same_picture() {
+        let (red, blue) = (look_of(&jpeg(1200, 1200, [200, 20, 20])), look_of(&jpeg(1000, 1000, [20, 20, 200])));
+        assert!(!same_picture(red.as_ref(), blue.as_ref()));
+        assert!(!same_picture(red.as_ref(), red.as_ref()));
+        let warm = look_of(&tinted(1000, 1000, 4, [255, 90, 60]));
+        let cold = look_of(&tinted(1000, 1000, 4, [60, 90, 255]));
+        assert!(!same_picture(warm.as_ref(), cold.as_ref()));
+        assert!(same_picture(warm.as_ref(), look_of(&tinted(1400, 1400, 4, [255, 90, 60])).as_ref()));
+        let pale = [230, 245, 240];
+        let drawing_small = look_of(&tinted(544, 544, 2, pale));
+        assert!(same_picture(drawing_small.as_ref(), look_of(&tinted(1440, 1440, 2, pale)).as_ref()));
+        assert!(!same_picture(drawing_small.as_ref(), look_of(&tinted(1200, 1200, 1, [90, 110, 50])).as_ref()));
     }
 
     /// «рисунки»: its files hold the lead single's art (1200 px, in the
     /// first track) and the album's (544 px, in the others); online, the
     /// album's art of 1000 px. That wins over the larger single's: another
     /// picture. The same picture larger in the files wins over it; as large
-    /// or smaller, not. A frame of a video never.
+    /// or smaller, not. Flat colours are never the same picture: the online
+    /// one wins. A frame of a video never.
     #[test]
     fn the_album_art_found_online_beats_other_pictures_of_its_files() {
         let (single, small) = (drawing(1200, 1200, 1), drawing(544, 544, 2));
@@ -897,60 +1053,109 @@ mod tests {
         assert_eq!((got, url), (scan.cover.clone(), None));
         let as_large = own(&drawing(1000, 1000, 2));
         assert_eq!(pick(vec![as_large], Some(album.clone())).and_then(|(_, u)| u).as_deref(), Some("https://x/album.jpg"));
+        let blue = online_bytes("https://x/blue.jpg", &jpeg(1000, 1000, [20, 20, 200]));
+        assert_eq!(pick(vec![own(&jpeg(1200, 1200, [200, 20, 20]))], Some(blue)).and_then(|(_, u)| u).as_deref(), Some("https://x/blue.jpg"));
         // Nothing online: the largest of the files.
         assert_eq!(pick(vec![own(&small), own(&single)], None).map(|(c, _)| c), Some(own(&single).cover));
         let frame = own(&drawing(1280, 720, 3));
         assert_eq!(pick(vec![frame.clone(), own(&small)], None).map(|(c, _)| c), Some(own(&small).cover));
-        let wide = online_bytes("u", &drawing(1280, 720, 3));
-        assert_eq!(pick(vec![own(&small)], Some(wide)), Some((own(&small).cover, None)));
         assert!(pick(vec![frame], None).is_none());
         assert!(pick(Vec::new(), None).is_none());
     }
 
-    fn fetched(linked: bool, url: &str, side: u32, seed: u8) -> Fetched {
-        let bytes = drawing(64, 64, seed);
-        let (_, hash) = measure(&bytes).unwrap();
-        Fetched { linked, url: url.into(), plain: url.into(), bytes, side, hash }
+    fn found(linked: bool, urls: &[&str]) -> hd_covers::Found {
+        hd_covers::Found {
+            linked,
+            exact: true,
+            order: 0,
+            urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+            stage: (*urls.last().unwrap()).to_owned(),
+        }
     }
 
-    /// Of the covers found online the linked release's picture is taken,
-    /// at the largest size any source has it; without a linked one, the
-    /// largest found by the title.
-    #[test]
-    fn the_largest_of_the_verified_covers_is_taken() {
-        let take = |f: Vec<Fetched>| choose(f).map(|f| f.url);
-        // YouTube Music's linked release (1440 px), Deezer's of the same
-        // picture (1800 px), the iTunes Store's of another (3000 px).
-        let all = vec![fetched(true, "yt", 1440, 2), fetched(false, "dz", 1800, 2), fetched(false, "it", 3000, 5)];
-        assert_eq!(take(all).as_deref(), Some("dz"));
-        let by_title = vec![fetched(false, "dz", 1000, 2), fetched(false, "it", 3000, 5)];
-        assert_eq!(take(by_title).as_deref(), Some("it"));
-        assert_eq!(take(vec![fetched(true, "a", 640, 2), fetched(true, "b", 640, 9)]).as_deref(), Some("a"));
-        assert!(choose(Vec::new()).is_none());
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(60)
     }
 
-    /// Each cover found comes at its largest rendition that downloads; a
-    /// source that could not answer is no failure while another came.
+    /// The anchor is the first that comes: the linked release's, else the
+    /// first found by the very title. A larger one takes its place only as
+    /// the same picture; another edition never wins by its size.
     #[tokio::test]
-    async fn the_largest_rendition_that_comes_is_measured() {
-        let found = vec![
-            hd_covers::Found { linked: true, urls: vec!["big".into(), "plain".into()] },
-            hd_covers::Found { linked: false, urls: vec!["down".into()] },
-        ];
-        let big_refused = |url: String| async move {
-            match url.as_str() {
-                "plain" => Ok(drawing(1000, 1000, 2)),
-                "big" => Err(("403".to_owned(), true)),
-                _ => Err(("network".to_owned(), true)),
+    async fn the_anchor_takes_only_its_own_picture_larger() {
+        let pics: HashMap<&str, Vec<u8>> = HashMap::from([
+            ("yt", drawing(600, 600, 2)),
+            ("dz", drawing(900, 900, 2)),
+            ("it", drawing(1500, 1500, 5)),
+        ]);
+        let fetch = |url: String| {
+            let got = pics.get(url.as_str()).cloned();
+            async move { got.ok_or_else(|| ("404".to_owned(), false)) }
+        };
+        let urls = |b: Option<Fetched>| b.map(|b| (b.url, b.side));
+        let all = vec![found(true, &["yt"]), found(false, &["dz"]), found(false, &["it"])];
+        assert_eq!(urls(select(all, &fetch, far()).await.unwrap()), Some(("dz".to_owned(), 900)));
+        let by_title = vec![found(false, &["dz"]), found(false, &["it"])];
+        assert_eq!(urls(select(by_title, &fetch, far()).await.unwrap()), Some(("dz".to_owned(), 900)));
+        assert_eq!(urls(select(vec![found(false, &["gone"])], &fetch, far()).await.unwrap()), None);
+    }
+
+    /// A frame of a video found first is passed over: the next cover is the
+    /// anchor. At most [`MAX_CANDIDATES`] are downloaded.
+    #[tokio::test]
+    async fn a_frame_is_passed_over_and_the_downloads_are_few() {
+        let pics: HashMap<&str, Vec<u8>> = HashMap::from([("frame", drawing(1280, 720, 3)), ("square", drawing(700, 700, 2))]);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let fetch = |url: String| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            let got = pics.get(url.as_str()).cloned().unwrap_or_else(|| drawing(64, 64, 9));
+            async move { Ok::<_, (String, bool)>(got) }
+        };
+        let got = select(vec![found(true, &["frame"]), found(false, &["square"])], &fetch, far()).await.unwrap().unwrap();
+        assert_eq!(got.url, "square");
+        calls.store(0, Ordering::Relaxed);
+        let many: Vec<hd_covers::Found> = (0..9).map(|_| found(false, &["other"])).collect();
+        assert!(select(many, &fetch, far()).await.unwrap().is_some());
+        assert_eq!(calls.load(Ordering::Relaxed), MAX_CANDIDATES);
+    }
+
+    /// Each cover comes at its largest rendition that downloads; a source
+    /// that stalls past the deadline leaves the best already come; nothing
+    /// come and a source that could not answer is a failure.
+    #[tokio::test]
+    async fn the_best_that_came_in_time_is_taken() {
+        let pics: HashMap<&str, Vec<u8>> = HashMap::from([("plain", drawing(1000, 1000, 2)), ("first", drawing(500, 500, 2))]);
+        let fetch = |url: String| {
+            let got = pics.get(url.as_str()).cloned();
+            async move {
+                match url.as_str() {
+                    "slow" => {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        Err(("late".to_owned(), true))
+                    }
+                    "big" => Err(("403".to_owned(), true)),
+                    _ => got.ok_or_else(|| ("network".to_owned(), true)),
+                }
             }
         };
-        let got = fetch_found(found.clone(), big_refused).await.unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!((got[0].url.as_str(), got[0].plain.as_str(), got[0].side, got[0].linked), ("plain", "plain", 1000, true));
-        let down = |_: String| async { Err::<Vec<u8>, _>(("network".to_owned(), true)) };
-        assert!(fetch_found(found.clone(), down).await.is_err());
-        let pages = |_: String| async { Ok::<_, (String, bool)>(b"<html>".to_vec()) };
-        assert!(fetch_found(found, pages).await.unwrap().is_empty());
+        let got = select(vec![found(true, &["big", "plain"])], &fetch, far()).await.unwrap().unwrap();
+        assert_eq!((got.url.as_str(), got.side), ("plain", 1000));
+        let soon = Instant::now() + Duration::from_millis(300);
+        let got = select(vec![found(true, &["first"]), found(false, &["slow"])], &fetch, soon).await.unwrap().unwrap();
+        assert_eq!(got.url, "first");
+        assert!(select(vec![found(true, &["down"])], &fetch, far()).await.is_err());
+    }
+
+    /// The album keeps what the stage takes once it came, else the
+    /// rendition that came; never a url nobody saw come.
+    #[tokio::test]
+    async fn the_url_kept_is_one_that_came() {
+        let best = Fetched { url: "big".into(), stage: "stage".into(), bytes: Vec::new(), side: 3000, look: look_of(&drawing(64, 64, 1)).unwrap() };
+        let comes = |_: String| async { Ok::<_, (String, bool)>(drawing(64, 64, 1)) };
+        assert_eq!(keep_url(&best, &comes, far()).await, "stage");
+        let refused = |_: String| async { Err::<Vec<u8>, _>(("403".to_owned(), true)) };
+        assert_eq!(keep_url(&best, &refused, far()).await, "big");
+        let page = |_: String| async { Ok::<_, (String, bool)>(b"<html>".to_vec()) };
+        assert_eq!(keep_url(&best, &page, far()).await, "big");
     }
 
     /// A folder is the album's alone when all its files are there and

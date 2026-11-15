@@ -134,8 +134,9 @@ impl WebImages {
     }
 
     /// The cover of the Spotify album `id` by its public oEmbed (no
-    /// account): its thumbnail's url. `None`: it has none.
-    pub async fn spotify_album_art(&self, id: &str) -> Result<Option<String>> {
+    /// account): its title and its thumbnail's url. `None`: it has none.
+    /// It tells no songs.
+    pub async fn spotify_album_art(&self, id: &str) -> Result<Option<SpotifyAlbumArt>> {
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(MetadataError::InvalidArgument(format!("not a Spotify id: {id:?}")));
         }
@@ -143,15 +144,24 @@ impl WebImages {
         let base = base_url(SPOTIFY_BASE)?;
         let url = build_url(&base, "oembed", &[("url", page.as_str())])?;
         let body: Value = self.http.get_json(Service::WebImages, url).await?;
-        Ok(oembed_thumbnail(&body))
+        Ok(oembed_art(&body))
     }
+}
+
+/// A Spotify album as its oEmbed tells it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpotifyAlbumArt {
+    pub title: String,
+    pub thumbnail: String,
 }
 
 const SPOTIFY_BASE: &str = "https://open.spotify.com/";
 
-/// The thumbnail of an oEmbed answer.
-fn oembed_thumbnail(body: &Value) -> Option<String> {
-    body.get("thumbnail_url").and_then(Value::as_str).filter(|u| u.starts_with("https://")).map(str::to_owned)
+/// The title and the thumbnail of an oEmbed answer.
+fn oembed_art(body: &Value) -> Option<SpotifyAlbumArt> {
+    let thumbnail = body.get("thumbnail_url").and_then(Value::as_str).filter(|u| u.starts_with("https://"))?;
+    let title = body.get("title").and_then(Value::as_str).unwrap_or_default();
+    Some(SpotifyAlbumArt { title: title.to_owned(), thumbnail: thumbnail.to_owned() })
 }
 
 #[cfg(test)]
@@ -200,8 +210,14 @@ mod tests {
             r#"{"title":"Global Warming","thumbnail_url":"https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e02aa","thumbnail_width":300}"#,
         )
         .unwrap();
-        assert_eq!(oembed_thumbnail(&body).as_deref(), Some("https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e02aa"));
-        assert_eq!(oembed_thumbnail(&serde_json::json!({"title": "x"})), None);
+        assert_eq!(
+            oembed_art(&body),
+            Some(SpotifyAlbumArt {
+                title: "Global Warming".into(),
+                thumbnail: "https://image-cdn-fa.spotifycdn.com/image/ab67616d00001e02aa".into()
+            })
+        );
+        assert_eq!(oembed_art(&serde_json::json!({"title": "x"})), None);
         assert!(WebImages::new(http()).spotify_album_art("../x").await.is_err());
     }
 }
