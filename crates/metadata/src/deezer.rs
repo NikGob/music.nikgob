@@ -332,7 +332,7 @@ impl Deezer {
         name: &str,
         known_titles: &[String],
     ) -> Result<Option<String>> {
-        Ok(match self.verified_artist_lookup(name, known_titles, false).await? {
+        Ok(match self.verified_artist_lookup(name, known_titles).await? {
             ArtistPicture::Found(url) => Some(url),
             ArtistPicture::Missing | ArtistPicture::Unverified => None,
         })
@@ -341,14 +341,12 @@ impl Deezer {
     /// [`Self::verified_artist_picture`] telling «Deezer has no such artist
     /// with a photo» ([`ArtistPicture::Missing`]) from «same-named artists
     /// with photos, none proved this one» ([`ArtistPicture::Unverified`]).
-    /// `proved`: the caller already knows who the artist is (a MusicBrainz
-    /// identity), so when no titles overlap, the only candidate whose name
-    /// key is exactly `name`'s is taken.
+    /// When none is proved and a candidate's albums or top tracks answered
+    /// 404, that is [`MetadataError::NotFound`]: not an answer.
     pub async fn verified_artist_lookup(
         &self,
         name: &str,
         known_titles: &[String],
-        proved: bool,
     ) -> Result<ArtistPicture> {
         let want = artist_key(name);
         let known: Vec<String> = known_titles
@@ -356,7 +354,7 @@ impl Deezer {
             .map(|t| album_key(t))
             .filter(|k| !k.is_empty())
             .collect();
-        if want.is_empty() || (known.is_empty() && !proved) {
+        if want.is_empty() || known.is_empty() {
             return Ok(ArtistPicture::Missing);
         }
         let mut candidates: Vec<DeezerArtistHit> = self
@@ -370,22 +368,17 @@ impl Deezer {
         if candidates.is_empty() {
             return Ok(ArtistPicture::Missing);
         }
-        let mut exact = candidates.iter().filter(|h| artist_key(&h.name) == want);
-        let by_name = match (exact.next(), exact.next()) {
-            (Some(h), None) if proved => h.best_picture().map(str::to_owned),
-            _ => None,
-        };
-        let tried = if known.is_empty() { 0 } else { MAX_VERIFIED_CANDIDATES };
-        for hit in candidates.into_iter().take(tried) {
+        let mut gap = false;
+        for hit in candidates.into_iter().take(MAX_VERIFIED_CANDIDATES) {
             let mut theirs: Vec<String> = Vec::new();
             match self.artist_albums(hit.id, 100).await {
                 Ok(a) => theirs.extend(a.into_iter().map(|a| a.title)),
-                Err(MetadataError::NotFound) => {}
+                Err(MetadataError::NotFound) => gap = true,
                 Err(e) => return Err(e),
             }
             match self.artist_top(hit.id, 50).await {
                 Ok(t) => theirs.extend(t.into_iter().map(|t| t.title)),
-                Err(MetadataError::NotFound) => {}
+                Err(MetadataError::NotFound) => gap = true,
                 Err(e) => return Err(e),
             }
             let overlaps = theirs.iter().map(|t| album_key(t)).any(|t| {
@@ -398,7 +391,10 @@ impl Deezer {
                 return Ok(ArtistPicture::Found(url.to_owned()));
             }
         }
-        Ok(by_name.map_or(ArtistPicture::Unverified, ArtistPicture::Found))
+        if gap {
+            return Err(MetadataError::NotFound);
+        }
+        Ok(ArtistPicture::Unverified)
     }
 
     /// The free 30-second preview of a song: of Deezer's track `id` when it

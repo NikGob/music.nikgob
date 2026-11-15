@@ -7,11 +7,13 @@
 //! library, so tests can run them against a mock server; the `Worker` glue at
 //! the bottom only spawns them and applies their results to the view state.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nikgob_core::model::ArtistId;
+use nikgob_core::streaming::{EntityKind, Service};
 use nikgob_library::{Library, ROMAJI, StoredLyrics, TrackRow, now_ms};
 use nikgob_metadata::{ArtistPicture, Deezer, Lrclib, Lyrics, Metadata, MetadataError};
 use nikgob_view as v;
@@ -224,19 +226,15 @@ pub(crate) enum PhotoOutcome {
     Saved(PathBuf),
     /// Deezer has no usable photo; recorded, retried much later.
     NotFound,
-    /// Deezer has same-named artists with photos, none proved this one, or
-    /// could not answer for now (a 404); recorded, asked again by the next
-    /// session.
+    /// Deezer has same-named artists with photos, none proved this one;
+    /// recorded, asked again by the next session.
     Unverified,
-    /// No network or an unexpected answer; nothing recorded.
+    /// Deezer could not answer for now (a 404, out of time); recorded,
+    /// asked again after a day, then after longer each time in a row.
+    Later,
+    /// No network or an unexpected answer; nothing recorded, not asked
+    /// again in this run.
     Failed,
-}
-
-/// What the lookup of a photo brought.
-enum Fetched {
-    Image(Vec<u8>),
-    Missing,
-    Unverified,
 }
 
 /// When this session's first photo run started: an unverified photo
@@ -275,6 +273,16 @@ const ANCHOR_TRACKS: usize = 3;
 /// Local track / album titles handed to the name-search verification.
 const VERIFY_TITLES: u32 = 60;
 
+/// How long one name's Deezer lookup may take, and the image download.
+#[cfg(not(test))]
+const NAME_BUDGET: Duration = Duration::from_secs(40);
+#[cfg(not(test))]
+const DOWNLOAD_BUDGET: Duration = Duration::from_secs(20);
+#[cfg(test)]
+const NAME_BUDGET: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const DOWNLOAD_BUDGET: Duration = Duration::from_secs(2);
+
 /// What Deezer says of an artist's photo, before anything is recorded.
 enum Verdict {
     Image(Vec<u8>),
@@ -282,87 +290,149 @@ enum Verdict {
     Missing,
     /// Same-named artists with photos, none proved this one.
     Unverified,
-    /// Deezer could not answer for this artist now (a 404 somewhere in
-    /// the lookup or the image download): asked again by the next session.
+    /// Deezer could not answer for this artist now: a 404 somewhere in the
+    /// lookup or the image download with nothing else proved, or out of
+    /// time.
     Later,
     /// No network or an unexpected answer.
     Failed,
 }
 
+impl Verdict {
+    /// Of the answers without a photo, the one asked again soonest wins.
+    fn rank(&self) -> u8 {
+        match self {
+            Verdict::Missing => 0,
+            Verdict::Later => 1,
+            Verdict::Unverified => 2,
+            Verdict::Image(_) | Verdict::Failed => 3,
+        }
+    }
+}
+
+/// `best` or `v`, whichever is asked again sooner.
+fn sooner(best: Option<Verdict>, v: Verdict) -> Option<Verdict> {
+    Some(match best {
+        Some(b) if b.rank() >= v.rank() => b,
+        _ => v,
+    })
+}
+
+/// What one name finds on Deezer: a photo's url, or why not.
+enum Named {
+    Url(String),
+    Not(Verdict),
+}
+
+/// The names Deezer is asked by: the artist's own, then its Latin name
+/// when one was identified (an alias or a service, not a romaji guess,
+/// which proves nobody).
+fn photo_names(lib: &Library, id: ArtistId, name: &str) -> Vec<String> {
+    let mut names = vec![name.to_owned()];
+    let latin = lib.artist_latin(id).ok().flatten().filter(|l| l.source != ROMAJI).and_then(|l| l.name);
+    names.extend(latin.filter(|l| !l.trim().is_empty() && l != name));
+    names
+}
+
+/// One name's lookup: an anchor on the artist's own tracks (local ones
+/// first), else the name search whose candidates' albums / top tracks must
+/// overlap ours. A 404 on the way with nothing proved is no answer.
+async fn named_lookup(deezer: &Deezer, anchors: &[&TrackRow], known: &[String], who: &str) -> Result<Named, MetadataError> {
+    let mut gap = false;
+    for t in anchors.iter().take(ANCHOR_TRACKS) {
+        let duration = t.duration_ms.map(|ms| Duration::from_millis(ms.into()));
+        match deezer.artist_picture_by_track(who, &t.title, duration).await {
+            Ok(Some(u)) => return Ok(Named::Url(u)),
+            Err(MetadataError::NotFound) => gap = true,
+            // Any other failed anchor just means no anchor; the name search decides.
+            Ok(None) | Err(_) => {}
+        }
+    }
+    Ok(match deezer.verified_artist_lookup(who, known).await {
+        Ok(ArtistPicture::Found(u)) => Named::Url(u),
+        Ok(ArtistPicture::Unverified) => Named::Not(Verdict::Unverified),
+        Ok(ArtistPicture::Missing) if !gap => Named::Not(Verdict::Missing),
+        Ok(ArtistPicture::Missing) | Err(MetadataError::NotFound) => Named::Not(Verdict::Later),
+        Err(e) => return Err(e),
+    })
+}
+
 /// Finds the artist on Deezer and downloads its photo; records nothing.
 ///
-/// A photo is only taken from a Deezer artist known to be this one: first via
-/// one of the artist's own tracks (its `artist.id`), then by name search whose
-/// albums / top tracks must overlap the local titles. No proof, no photo.
-/// `proved`: who the artist is was settled (a MusicBrainz or Wikidata
-/// identity), so the one Deezer artist of exactly its name is taken without
-/// the titles. When the artist's own name brings no photo, its Latin name
-/// is asked the same way (a romaji reading never proves it by name).
-async fn deezer_verdict(deezer: &Deezer, lib: &Library, id: ArtistId, name: &str, proved: bool) -> Verdict {
+/// A photo is only taken from a Deezer artist known to be this one: the
+/// Deezer artist the library has linked it to, else one of the artist's
+/// own tracks (its `artist.id`), else a name search whose albums / top
+/// tracks overlap the local titles. No proof, no photo. When the own name
+/// brings no photo, the identified Latin name is asked the same way. Each
+/// name has its own time: what the own name answered stands when the
+/// Latin one runs out of time or fails.
+async fn deezer_verdict(deezer: &Deezer, lib: &Library, id: ArtistId, name: &str) -> Verdict {
     let tracks = lib.tracks_of_artist(id, 0, VERIFY_TITLES).unwrap_or_default();
-    let mut names = vec![(name.to_owned(), proved)];
-    if let Some(latin) = lib.artist_latin(id).ok().flatten() {
-        let by_name = proved && latin.source != ROMAJI;
-        names.extend(latin.name.filter(|l| !l.trim().is_empty() && l != name).map(|l| (l, by_name)));
-    }
-    let work = async {
-        let mut anchors: Vec<&TrackRow> = tracks.iter().filter(|t| t.has_local).collect();
-        anchors.extend(tracks.iter().filter(|t| !t.has_local));
-        let mut known: Vec<String> = tracks.iter().map(|t| t.title.clone()).collect();
-        known.extend(tracks.iter().filter_map(|t| t.album.clone()));
-        let mut url = None;
-        let mut unverified = false;
-        'names: for (who, by_name) in &names {
-            // 1. Anchor on the artist's own tracks (local ones first).
-            for t in anchors.iter().take(ANCHOR_TRACKS) {
-                let duration = t.duration_ms.map(|ms| Duration::from_millis(ms.into()));
-                // A failed anchor lookup just means no anchor; the fallback decides.
-                if let Ok(Some(u)) = deezer.artist_picture_by_track(who, &t.title, duration).await {
-                    url = Some(u);
-                    break 'names;
-                }
-            }
-            // 2. Name search, accepted only when the candidate's records overlap ours.
-            match deezer.verified_artist_lookup(who, &known, *by_name).await? {
-                ArtistPicture::Found(u) => {
-                    url = Some(u);
-                    break;
-                }
-                ArtistPicture::Missing => {}
-                ArtistPicture::Unverified => unverified = true,
-            }
+    let mut anchors: Vec<&TrackRow> = tracks.iter().filter(|t| t.has_local).collect();
+    anchors.extend(tracks.iter().filter(|t| !t.has_local));
+    let mut known: Vec<String> = tracks.iter().map(|t| t.title.clone()).collect();
+    known.extend(tracks.iter().filter_map(|t| t.album.clone()));
+    let linked = lib
+        .external_ids(EntityKind::Artist, *id.as_uuid())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.service == Service::Deezer)
+        .and_then(|r| r.id.parse::<u64>().ok());
+    let mut url = None;
+    let mut best = None;
+    if let Some(n) = linked {
+        match tokio::time::timeout(NAME_BUDGET, deezer.artist(n)).await {
+            Ok(Ok(a)) => url = a.best_picture().map(str::to_owned),
+            Ok(Err(MetadataError::NotFound)) | Err(_) => best = Some(Verdict::Later),
+            Ok(Err(_)) => {}
         }
-        let Some(url) = url else {
-            return Ok(if unverified { Fetched::Unverified } else { Fetched::Missing });
-        };
-        deezer.download_image(&url).await.map(Fetched::Image)
+    }
+    for (i, who) in photo_names(lib, id, name).iter().enumerate() {
+        if url.is_some() {
+            break;
+        }
+        match tokio::time::timeout(NAME_BUDGET, named_lookup(deezer, &anchors, &known, who)).await {
+            Ok(Ok(Named::Url(u))) => url = Some(u),
+            Ok(Ok(Named::Not(v))) => best = sooner(best, v),
+            Ok(Err(e)) if i == 0 => {
+                log::debug!("photo of {name}: {e}");
+                return Verdict::Failed;
+            }
+            Err(_) if i == 0 => best = sooner(best, Verdict::Later),
+            // The Latin name is a second chance: its failure keeps what the own name answered.
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    let Some(url) = url else {
+        return best.unwrap_or(Verdict::Missing);
     };
-    match tokio::time::timeout(Duration::from_secs(45), work).await {
-        Ok(Ok(Fetched::Image(b))) if looks_like_image(&b) => Verdict::Image(b),
-        // Not proved this artist's: not «Deezer has no photo».
-        Ok(Ok(Fetched::Unverified)) => Verdict::Unverified,
-        Ok(Ok(Fetched::Image(_) | Fetched::Missing)) => Verdict::Missing,
-        // A page or a picture that is not there now is no answer.
-        Ok(Err(MetadataError::NotFound)) => Verdict::Later,
+    match tokio::time::timeout(DOWNLOAD_BUDGET, deezer.download_image(&url)).await {
+        Ok(Ok(b)) if looks_like_image(&b) => Verdict::Image(b),
+        Ok(Ok(_)) => Verdict::Missing,
+        // A picture that is not there now, or slow: no answer.
+        Ok(Err(MetadataError::NotFound)) | Err(_) => Verdict::Later,
         Ok(Err(e)) => {
             log::debug!("photo of {name}: {e}");
             Verdict::Failed
         }
-        Err(_) => Verdict::Failed,
     }
 }
 
-/// Records a verdict without a photo: a miss of days, or an unverified one
-/// asked again by the next session.
+/// Records a verdict without a photo: a miss of days, an unverified one
+/// asked again by the next session, or one asked again later.
 fn record_verdict(lib: &Library, id: ArtistId, verdict: &Verdict) -> PhotoOutcome {
     match verdict {
         Verdict::Missing => {
             let _ = lib.set_artist_photo(id, None);
             PhotoOutcome::NotFound
         }
-        Verdict::Unverified | Verdict::Later => {
+        Verdict::Unverified => {
             let _ = lib.set_artist_photo_unverified(id);
             PhotoOutcome::Unverified
+        }
+        Verdict::Later => {
+            let _ = lib.set_artist_photo_later(id);
+            PhotoOutcome::Later
         }
         Verdict::Image(_) | Verdict::Failed => PhotoOutcome::Failed,
     }
@@ -380,7 +450,7 @@ pub(crate) async fn fetch_artist_photo(
     if lib.artist_photo_locked(id).unwrap_or(false) {
         return PhotoOutcome::NotFound;
     }
-    match deezer_verdict(deezer, lib, id, name, false).await {
+    match deezer_verdict(deezer, lib, id, name).await {
         Verdict::Image(bytes) => save_photo(lib, id, name, dir, &bytes, "deezer"),
         v => record_verdict(lib, id, &v),
     }
@@ -439,7 +509,7 @@ pub(crate) async fn fetch_photo(
     if known.character {
         return PhotoOutcome::NotFound;
     }
-    let verdict = match deezer_verdict(deezer, lib, id, name, known.proved()).await {
+    let verdict = match deezer_verdict(deezer, lib, id, name).await {
         Verdict::Image(bytes) => return save_photo(lib, id, name, dir, &bytes, "deezer"),
         Verdict::Failed => return PhotoOutcome::Failed,
         v => v,
@@ -488,6 +558,7 @@ struct PhotoTally {
     saved: u32,
     not_found: u32,
     unverified: u32,
+    later: u32,
     failed: u32,
     /// Photos whose file was gone, looked up again.
     gone: usize,
@@ -495,15 +566,16 @@ struct PhotoTally {
 
 impl PhotoTally {
     fn log(&self) {
-        if self.saved + self.not_found + self.unverified + self.failed == 0 && self.gone == 0 {
+        if self.saved + self.not_found + self.unverified + self.later + self.failed == 0 && self.gone == 0 {
             return;
         }
         let gone = if self.gone > 0 { format!(", {} files gone", self.gone) } else { String::new() };
         log::info!(
-            "artist photos: {} saved, {} not found, {} unverified, {} failed{gone}",
+            "artist photos: {} saved, {} not found, {} unverified, {} later, {} failed{gone}",
             self.saved,
             self.not_found,
             self.unverified,
+            self.later,
             self.failed
         );
     }
@@ -518,7 +590,8 @@ struct PhotoQueue<'a> {
 }
 
 /// [`run_photos`]' batches until nothing is due (or the network failed
-/// [`MAX_FAILURES`] times in a row).
+/// [`MAX_FAILURES`] times in a row). An artist whose lookup failed is not
+/// asked again in this run: the queue goes on past it.
 async fn photo_batches(
     deezer: &Deezer,
     after: &After,
@@ -529,14 +602,18 @@ async fn photo_batches(
     tally: &mut PhotoTally,
 ) {
     let mut failures = 0;
+    let mut failed: HashSet<ArtistId> = HashSet::new();
     loop {
-        let batch = match lib.artists_needing_photo(now_ms() - PHOTO_RETRY_MS, q.unverified_before, BATCH) {
-            Ok(b) => b,
-            Err(e) => {
-                log::warn!("photo queue: {e}");
-                return;
-            }
-        };
+        // The failed ones are still due: asked for on top, then left out.
+        let limit = BATCH.saturating_add(u32::try_from(failed.len()).unwrap_or(u32::MAX));
+        let batch: Vec<(ArtistId, String)> =
+            match lib.artists_needing_photo(now_ms() - PHOTO_RETRY_MS, q.unverified_before, limit) {
+                Ok(b) => b.into_iter().filter(|(id, _)| !failed.contains(id)).collect(),
+                Err(e) => {
+                    log::warn!("photo queue: {e}");
+                    return;
+                }
+            };
         let mut queue = batch.into_iter();
         let mut did_any = false;
         loop {
@@ -544,6 +621,9 @@ async fn photo_batches(
             let Some((id, name)) = urgent.or_else(|| queue.next()) else {
                 break;
             };
+            if failed.contains(&id) {
+                continue;
+            }
             did_any = true;
             match fetch_photo(deezer, after, lib, id, &name, dir, found).await {
                 PhotoOutcome::Saved(_) => {
@@ -559,9 +639,14 @@ async fn photo_batches(
                     failures = 0;
                     tally.unverified += 1;
                 }
+                PhotoOutcome::Later => {
+                    failures = 0;
+                    tally.later += 1;
+                }
                 PhotoOutcome::Failed => {
                     failures += 1;
                     tally.failed += 1;
+                    failed.insert(id);
                     if failures >= MAX_FAILURES {
                         return;
                     }
@@ -934,6 +1019,11 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
+            .and(path("/search/track"))
+            .respond_with(json(r#"{"data": []}"#))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/search/artist"))
             .respond_with(json(r#"{"data": []}"#))
             .mount(&server)
@@ -1279,36 +1369,77 @@ mod tests {
         assert!(asked.iter().all(|r| !r.url.path().contains("FilePath")), "another artist's picture is not fetched");
     }
 
-    /// A picture the CDN answers 404 for is not «Deezer has no photo»:
-    /// nothing is kept for days, the next session asks again.
-    #[tokio::test]
-    async fn a_404_picture_is_asked_again_by_the_next_session() {
-        let server = MockServer::start().await;
+    /// The searches and pages of a Deezer artist `id` called `name`, with
+    /// a picture and `titles` as its albums and top tracks.
+    async fn deezer_artist(server: &MockServer, id: u64, name: &str, titles: &str) {
         Mock::given(method("GET"))
             .and(path("/search/artist"))
+            .and(query_param("q", name))
             .respond_with(json(&format!(
-                r#"{{"data": [{{"id": 1, "name": "Кино", "picture_xl": "{}/img/gone.jpg"}}]}}"#,
+                r#"{{"data": [{{"id": {id}, "name": "{name}", "nb_fan": 9, "picture_xl": "{}/img/{id}.jpg"}}]}}"#,
                 server.uri()
             )))
-            .mount(&server)
+            .mount(server)
             .await;
         for tail in ["albums", "top"] {
             Mock::given(method("GET"))
-                .and(path(format!("/artist/1/{tail}")))
-                .respond_with(json(r#"{"data": [{"id": 5, "title": "Группа крови"}]}"#))
-                .mount(&server)
+                .and(path(format!("/artist/{id}/{tail}")))
+                .respond_with(json(&format!(r#"{{"data": [{{"id": 5, "title": "{titles}"}}]}}"#)))
+                .mount(server)
                 .await;
         }
-        Mock::given(method("GET")).and(path("/img/gone.jpg")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+    }
+
+    async fn picture(server: &MockServer, id: u64, jpeg: &[u8]) {
+        Mock::given(method("GET"))
+            .and(path(format!("/img/{id}.jpg")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(jpeg.to_vec(), "image/jpeg"))
+            .mount(server)
+            .await;
+    }
+
+    async fn empty_searches(server: &MockServer) {
+        for p in ["/search/track", "/search/artist"] {
+            Mock::given(method("GET")).and(path(p)).respond_with(json(r#"{"data": []}"#)).mount(server).await;
+        }
+    }
+
+    /// A picture the CDN answers 404 for is not «Deezer has no photo»: it
+    /// is asked again after a day, not for two weeks, and not by the next
+    /// session either.
+    #[tokio::test]
+    async fn a_404_picture_is_asked_again_later_not_every_session() {
+        let server = MockServer::start().await;
+        deezer_artist(&server, 1, "Кино", "Группа крови").await;
+        empty_searches(&server).await;
         let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
         let lib = Library::open_in_memory().unwrap();
         let (kino, _) = library_track(&lib, "Кино", "Группа крови");
         let dir = tempfile::tempdir().unwrap();
         let out = fetch_artist_photo(&deezer, &lib, kino.id, "Кино", dir.path()).await;
-        assert_eq!(out, PhotoOutcome::Unverified);
+        assert_eq!(out, PhotoOutcome::Later);
         let retry = now_ms() - PHOTO_RETRY_MS;
-        assert!(!lib.artist_photo_due(kino.id, retry, now_ms() - 60_000).unwrap(), "not again this session");
-        assert!(lib.artist_photo_due(kino.id, retry, now_ms() + 1).unwrap(), "again the next one");
+        assert!(!lib.artist_photo_due(kino.id, retry, now_ms() + 1).unwrap(), "not by the next session");
+        // The next session's run asks Deezer nothing.
+        server.reset().await;
+        run_photos(deezer, After::default(), lib.clone(), dir.path().to_owned(), now_ms() + 1, Arc::default(), NO_WAIT, |_| {
+            panic!("no photo expected")
+        })
+        .await;
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// The track anchors meet a 404 and the name search finds nobody:
+    /// not proved absent, so no miss of days.
+    #[tokio::test]
+    async fn an_anchor_404_with_nothing_found_is_no_miss() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/search/artist")).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
+        let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let (a, _) = library_track(&lib, "Кино", "Группа крови");
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(fetch_artist_photo(&deezer, &lib, a.id, "Кино", dir.path()).await, PhotoOutcome::Later);
     }
 
     /// Deezer knows the artist only by the Latin name the app found for
@@ -1317,28 +1448,9 @@ mod tests {
     async fn the_latin_name_is_asked_when_the_own_one_finds_nothing() {
         let server = MockServer::start().await;
         let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 4];
-        Mock::given(method("GET"))
-            .and(path("/search/artist"))
-            .and(query_param("q", "Yoshiaki Fujisawa"))
-            .respond_with(json(&format!(
-                r#"{{"data": [{{"id": 3, "name": "Yoshiaki Fujisawa", "picture_xl": "{}/img/fujisawa.jpg"}}]}}"#,
-                server.uri()
-            )))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET")).and(path("/search/artist")).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
-        Mock::given(method("GET")).and(path("/search/track")).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
-        Mock::given(method("GET")).and(path("/artist/3/albums")).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
-        Mock::given(method("GET"))
-            .and(path("/artist/3/top"))
-            .respond_with(json(r#"{"data": [{"id": 8, "title": "ギレーヌと二人きり"}]}"#))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/img/fujisawa.jpg"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(jpeg.clone(), "image/jpeg"))
-            .mount(&server)
-            .await;
+        deezer_artist(&server, 3, "Yoshiaki Fujisawa", "ギレーヌと二人きり").await;
+        picture(&server, 3, &jpeg).await;
+        empty_searches(&server).await;
         let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
         let lib = Library::open_in_memory().unwrap();
         let (a, _) = library_track(&lib, "藤澤慶昌", "ギレーヌと二人きり");
@@ -1355,49 +1467,122 @@ mod tests {
         assert_eq!(std::fs::read(saved).unwrap(), jpeg);
     }
 
-    /// Who the artist is was proved (its MusicBrainz id): the one Deezer
-    /// artist of exactly its name gives the photo though no title is shared
-    /// (a soundtrack titled in another script); unproved, it would not.
+    /// A romaji reading is a guess, not the artist: Deezer is never asked
+    /// by it.
     #[tokio::test]
-    async fn a_proved_artist_takes_its_exact_namesake_without_titles() {
+    async fn a_romaji_guess_is_never_asked() {
         let server = MockServer::start().await;
-        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 6];
+        empty_searches(&server).await;
+        let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let (a, _) = library_track(&lib, "ふじさわ", "ギレーヌと二人きり");
+        let guess = nikgob_library::LatinFound {
+            name: Some("Fujisawa".into()),
+            source: ROMAJI.into(),
+            complete: true,
+            ..nikgob_library::LatinFound::default()
+        };
+        lib.set_artist_latin(a.id, &guess).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(fetch_artist_photo(&deezer, &lib, a.id, "ふじさわ", dir.path()).await, PhotoOutcome::NotFound);
+        let asked = server.received_requests().await.unwrap();
+        assert!(!asked.is_empty());
+        assert!(asked.iter().all(|r| !r.url.query().unwrap_or("").contains("Fujisawa")), "asked by the guess");
+    }
+
+    /// The Latin name's lookup runs out of time: what the own name
+    /// answered (an unverified namesake) stands, not a failure.
+    #[tokio::test]
+    async fn a_slow_latin_lookup_keeps_the_own_names_answer() {
+        let server = MockServer::start().await;
+        deezer_artist(&server, 4, "藤澤慶昌", "『無職転生』 オリジナル･サウンドトラック").await;
         Mock::given(method("GET"))
             .and(path("/search/artist"))
+            .and(query_param("q", "Yoshiaki Fujisawa"))
+            .respond_with(json(r#"{"data": []}"#).set_delay(NAME_BUDGET * 3))
+            .mount(&server)
+            .await;
+        empty_searches(&server).await;
+        let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let (a, _) = library_track(&lib, "藤澤慶昌", "ギレーヌと二人きり");
+        let latin = nikgob_library::LatinFound {
+            name: Some("Yoshiaki Fujisawa".into()),
+            source: "musicbrainz".into(),
+            complete: true,
+            ..nikgob_library::LatinFound::default()
+        };
+        lib.set_artist_latin(a.id, &latin).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(fetch_artist_photo(&deezer, &lib, a.id, "藤澤慶昌", dir.path()).await, PhotoOutcome::Unverified);
+    }
+
+    /// Who the artist is (its MusicBrainz id) does not tell which Deezer
+    /// artist of its name it is: no photo on the name alone. The Deezer
+    /// artist the library has linked it to gives its photo.
+    #[tokio::test]
+    async fn only_a_linked_deezer_artist_is_taken_without_titles() {
+        let server = MockServer::start().await;
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 6];
+        deezer_artist(&server, 4, "藤澤慶昌", "『無職転生』 オリジナル･サウンドトラック").await;
+        picture(&server, 4, &jpeg).await;
+        Mock::given(method("GET"))
+            .and(path("/artist/4"))
             .respond_with(json(&format!(
-                r#"{{"data": [{{"id": 4, "name": "藤澤慶昌", "nb_fan": 176, "picture_xl": "{}/img/f.jpg"}}]}}"#,
+                r#"{{"id": 4, "name": "藤澤慶昌", "picture_xl": "{}/img/4.jpg"}}"#,
                 server.uri()
             )))
             .mount(&server)
             .await;
-        Mock::given(method("GET")).and(path("/search/track")).respond_with(json(r#"{"data": []}"#)).mount(&server).await;
-        for tail in ["albums", "top"] {
-            Mock::given(method("GET"))
-                .and(path(format!("/artist/4/{tail}")))
-                .respond_with(json(r#"{"data": [{"id": 1, "title": "『無職転生』 オリジナル･サウンドトラック"}]}"#))
-                .mount(&server)
-                .await;
-        }
-        Mock::given(method("GET"))
-            .and(path("/img/f.jpg"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(jpeg.clone(), "image/jpeg"))
-            .mount(&server)
-            .await;
+        empty_searches(&server).await;
         let (meta, lib, id) = tagged(&server, "藤澤慶昌");
-        let dir = tempfile::tempdir().unwrap();
-        // Unproved (Deezer alone): not taken on the name.
-        let out = fetch_artist_photo(&meta.deezer, &lib, id, "藤澤慶昌", dir.path()).await;
-        assert_eq!(out, PhotoOutcome::Unverified);
         let known = nikgob_library::LatinFound {
             mbid: Some(TAGGED.into()),
             complete: true,
             ..nikgob_library::LatinFound::default()
         };
         lib.set_artist_latin(id, &known).unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let after = After { meta: Some(meta.clone()), ..After::default() };
+        let out = fetch_photo(&meta.deezer, &after, &lib, id, "藤澤慶昌", dir.path(), &|_| {}).await;
+        assert_eq!(out, PhotoOutcome::Unverified);
+        let linked = nikgob_core::streaming::RemoteId::new(Service::Deezer, "4");
+        lib.set_external_id(EntityKind::Artist, &linked, *id.as_uuid()).unwrap();
         let out = fetch_photo(&meta.deezer, &after, &lib, id, "藤澤慶昌", dir.path(), &|_| {}).await;
         let PhotoOutcome::Saved(saved) = out else { panic!("{out:?}") };
         assert_eq!(std::fs::read(saved).unwrap(), jpeg);
+    }
+
+    /// An artist whose lookup fails is asked once per run; the queue goes
+    /// on to the next one instead of asking it again until the run gives up.
+    #[tokio::test]
+    async fn a_failing_artist_is_asked_once_and_the_queue_goes_on() {
+        let server = MockServer::start().await;
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 8];
+        Mock::given(method("GET"))
+            .and(path("/search/artist"))
+            .and(query_param("q", "Alpha"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        deezer_artist(&server, 2, "Beta", "Beta Song").await;
+        picture(&server, 2, &jpeg).await;
+        empty_searches(&server).await;
+        let deezer = Deezer::with_base_url(http(), &server.uri()).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let (alpha, _) = library_track(&lib, "Alpha", "Alpha Song");
+        let (beta, _) = library_track(&lib, "Beta", "Beta Song");
+        let dir = tempfile::tempdir().unwrap();
+        run_photos(deezer, After::default(), lib.clone(), dir.path().to_owned(), now_ms(), Arc::default(), NO_WAIT, |_| {})
+            .await;
+        assert!(lib.artist_photo(beta.id).unwrap().is_some());
+        assert_eq!(lib.artist_photo_lookup(alpha.id).unwrap(), None, "a failure is not recorded");
+        let asked = server.received_requests().await.unwrap();
+        let alpha_searches = asked
+            .iter()
+            .filter(|r| r.url.path() == "/search/artist" && r.url.query().unwrap_or("").contains("Alpha"))
+            .count();
+        assert_eq!(alpha_searches, 1);
     }
 
     #[tokio::test]
