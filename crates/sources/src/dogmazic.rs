@@ -19,8 +19,9 @@
 //! as the server lists them.
 //!
 //! Its robots.txt asks a second between requests: one request every 1.5 s,
+//! the hops of a redirect included (followed by hand, each at the pace),
 //! one file at a time, and a pause of the whole source when it turns us
-//! away ([`Breaker`]).
+//! away ([`Breaker`]), looked at again once a request's turn has come.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,9 +32,12 @@ use nikgob_core::source::{Fetched, Format, Offer, OfferScope, Progress, Source, 
 use serde::{Deserialize, Serialize};
 
 use crate::html::text_of;
-use crate::http::{Breaker, Cookies, Pace, client, download, get_page, get_range, safe_name};
+use crate::http::{
+    Breaker, Cookies, PAGE_TIMEOUT, Pace, client_without_redirects, cookie_header, page_of, range_header, read_range, safe_name, save,
+    unreachable,
+};
 use crate::matching::judge;
-use crate::sniff::{AFTER_TAG, HEAD, Sniff, named_by_bytes, sniff, sniff_at, with_average};
+use crate::sniff::{named_by_bytes, sniff_remote, with_average};
 use crate::subsonic::{Server, Subsonic, base_of};
 use crate::text::{main_artist, title_forms};
 
@@ -44,11 +48,14 @@ const SERVER: Server = Server { key: SourceKey::Dogmazic, default_url: DEFAULT_U
 const PACE: Duration = Duration::from_millis(1500);
 /// Matching songs whose file is looked at for one wish.
 const PROBED: usize = 2;
+/// Redirects followed for one request.
+const REDIRECTS: usize = 5;
 
 pub struct Dogmazic {
     /// The Subsonic API, with the user's login.
     api: Option<Subsonic>,
     base: String,
+    /// Follows no redirect by itself: each hop waits for its turn.
     http: reqwest::Client,
     pace: Pace,
     breaker: Breaker,
@@ -88,7 +95,7 @@ impl Dogmazic {
         Self {
             api,
             base: base_of(url, DEFAULT_URL),
-            http: client(),
+            http: client_without_redirects(),
             pace: Pace::new(every),
             breaker: Breaker::default(),
             cookies: Cookies::default(),
@@ -109,20 +116,65 @@ impl Dogmazic {
         format!("{}/stream.php?action=download&song_id={}", self.base, enc(id))
     }
 
-    /// A page, at the pace, through the breaker.
+    /// One request: at the pace, through the breaker (looked at again
+    /// once its turn came: another request may have set the source aside
+    /// meanwhile), a redirect followed by hand, each hop at the pace too.
+    /// A page sends the site's cookies; a range asks for those bytes.
+    async fn send(&self, url: &str, range: Option<(u64, u64)>, page: bool) -> Result<reqwest::Response, SourceError> {
+        let mut url = url::Url::parse(url).map_err(|e| SourceError::Parse(e.to_string()))?;
+        for _ in 0..=REDIRECTS {
+            self.breaker.check()?;
+            self.pace.wait().await;
+            self.breaker.check()?;
+            let mut req = self.http.get(url.clone());
+            if page {
+                req = req
+                    .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+                    .timeout(PAGE_TIMEOUT);
+                if let Some(c) = cookie_header(&self.cookies) {
+                    req = req.header(reqwest::header::COOKIE, c);
+                }
+            }
+            if let Some((from, len)) = range {
+                req = req.header(reqwest::header::RANGE, range_header(from, len)).timeout(PAGE_TIMEOUT);
+            }
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let e = unreachable(e);
+                    self.breaker.note::<()>(&Err(e.clone()));
+                    return Err(e);
+                }
+            };
+            let next = if resp.status().is_redirection() {
+                resp.headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|l| url.join(l).ok())
+            } else {
+                None
+            };
+            match next {
+                Some(n) => url = n,
+                None => return Ok(resp),
+            }
+        }
+        Err(SourceError::Parse("too many redirects".into()))
+    }
+
+    /// A page. (The breaker hears of what the site answered, not of its
+    /// own refusal: a request turned away at its turn adds no pause.)
     async fn page(&self, url: &str) -> Result<String, SourceError> {
-        self.breaker.check()?;
-        self.pace.wait().await;
-        let r = get_page(&self.http, url, Some(&self.cookies)).await;
+        let resp = self.send(url, None, true).await?;
+        let r = page_of(resp, Some(&self.cookies)).await;
         self.breaker.note(&r);
         r
     }
 
-    /// Bytes of a song's file, at the pace, through the breaker.
+    /// Bytes of a song's file.
     async fn bytes(&self, id: &str, from: u64, len: u64) -> Result<(Vec<u8>, Option<u64>), SourceError> {
-        self.breaker.check()?;
-        self.pace.wait().await;
-        let r = get_range(&self.http, &self.download_url(id), from, len).await;
+        let resp = self.send(&self.download_url(id), Some((from, len)), false).await?;
+        let r = read_range(resp, from, len).await;
         self.breaker.note(&r);
         r
     }
@@ -130,15 +182,8 @@ impl Dogmazic {
     /// What a song's file is (its format with the bitrate, its extension)
     /// and how big; `None` when it is not audio this knows.
     async fn probe(&self, row: &Row) -> Result<Option<(Format, &'static str, Option<u64>)>, SourceError> {
-        let (head, size) = self.bytes(&row.id, 0, HEAD).await?;
-        let s = match sniff(&head) {
-            Sniff::Audio(s) => s,
-            Sniff::After(at) => match sniff_at(&self.bytes(&row.id, at, AFTER_TAG).await?.0, at) {
-                Some(s) => s,
-                None => return Ok(None),
-            },
-            Sniff::Unknown => return Ok(None),
-        };
+        let id = row.id.as_str();
+        let Some((s, size)) = sniff_remote(move |from, len| self.bytes(id, from, len)).await? else { return Ok(None) };
         Ok(Some((with_average(&s, size, row.secs), s.ext, size)))
     }
 
@@ -206,10 +251,9 @@ impl Dogmazic {
 
     /// A song of the pages into `dest`, named by what its bytes are.
     async fn fetch_page_song(&self, h: &Handle, dest: &Path, progress: &Progress) -> Result<PathBuf, SourceError> {
-        self.breaker.check()?;
-        self.pace.wait().await;
         let path = dest.join(format!("{}.{}", h.stem, h.ext));
-        let r = download(&self.http, &self.download_url(&h.web), &path, progress).await;
+        let resp = self.send(&self.download_url(&h.web), None, false).await?;
+        let r = save(resp, &path, progress).await;
         self.breaker.note(&r);
         named_by_bytes(&r?).await
     }

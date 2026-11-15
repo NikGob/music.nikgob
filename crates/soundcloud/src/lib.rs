@@ -539,7 +539,19 @@ impl Inner {
         query: &[(&str, String)],
         signed: bool,
     ) -> Result<Vec<u8>, StreamError> {
-        let token = self.token();
+        self.request_as(method, url, query, signed, self.token()).await
+    }
+
+    /// [`Self::request`] with this sign-in (`None`: none at all, so no
+    /// answer of it can ever be taken for the sign-in failing).
+    async fn request_as(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        query: &[(&str, String)],
+        signed: bool,
+        token: Option<String>,
+    ) -> Result<Vec<u8>, StreamError> {
         if signed && token.is_none() {
             return Err(StreamError::NotLoggedIn);
         }
@@ -594,6 +606,14 @@ impl Inner {
         signed: bool,
     ) -> Result<T, StreamError> {
         let body = self.gate.run(lane, self.request(reqwest::Method::GET, url, query, signed)).await?;
+        serde_json::from_slice(&body)
+            .map_err(|e| StreamError::Parse(format!("{}: {e}", url.split('?').next().unwrap_or(url))))
+    }
+
+    /// [`Self::get`] of the catalogue without the sign-in: a background
+    /// call whose refusal must never sign the user out.
+    async fn get_anonymous<T: DeserializeOwned>(&self, lane: Lane, url: &str, query: &[(&str, String)]) -> Result<T, StreamError> {
+        let body = self.gate.run(lane, self.request_as(reqwest::Method::GET, url, query, false, None)).await?;
         serde_json::from_slice(&body)
             .map_err(|e| StreamError::Parse(format!("{}: {e}", url.split('?').next().unwrap_or(url))))
     }
@@ -796,12 +816,14 @@ impl Inner {
 
     /// Tracks of a search whose uploader lets the original file go
     /// (a background call: the catalogue's lane, not the user's search).
+    /// Asked without the sign-in: the flags are the same for everyone,
+    /// and a refusal of this search is then never the sign-in's.
     async fn downloadable(&self, q: &str) -> Result<Vec<Downloadable>, StreamError> {
         if q.is_empty() {
             return Ok(Vec::new());
         }
         let p: api::Page<api::Track> = self
-            .get(Lane::Catalog, "/search/tracks", &[("q", q.to_owned()), ("limit", SEARCH_LIMIT.to_string())], false)
+            .get_anonymous(Lane::Catalog, "/search/tracks", &[("q", q.to_owned()), ("limit", SEARCH_LIMIT.to_string())])
             .await?;
         Ok(p.collection
             .iter()

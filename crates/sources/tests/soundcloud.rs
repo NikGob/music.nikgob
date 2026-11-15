@@ -297,3 +297,28 @@ async fn a_refused_link_does_not_sign_out() {
     assert!(sc.signed_in());
     assert!(matches!(sc.account(), Account::LoggedIn { .. }), "{:?}", sc.account());
 }
+
+/// The originals' search goes without the sign-in: a search that refuses
+/// the token (401) is never taken for the sign-in failing.
+#[tokio::test]
+async fn the_search_for_originals_never_signs_out() {
+    let server = MockServer::start().await;
+    Mock::given(path("/search/tracks"))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(401))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/search/tracks")).respond_with(ResponseTemplate::new(200).set_body_raw(SEARCH, "application/json")).mount(&server).await;
+    Mock::given(path("/me")).respond_with(ResponseTemplate::new(200).set_body_raw(r#"{"id":42,"username":"listener"}"#, "application/json")).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let sc = service(&server, dir.path()).await;
+    sc.login(LoginInput::Cookies("OAuth tok-123".into())).await.unwrap();
+    let found = sc.downloadable("Ell Kingston Critizice Edit").await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(sc.signed_in(), "the sign-in stays");
+    assert!(matches!(sc.account(), Account::LoggedIn { .. }), "{:?}", sc.account());
+    let searches: Vec<_> = server.received_requests().await.unwrap().into_iter().filter(|r| r.url.path() == "/search/tracks").collect();
+    assert!(!searches.is_empty());
+    assert!(searches.iter().all(|r| !r.headers.contains_key("authorization")), "no token sent with the search");
+}
