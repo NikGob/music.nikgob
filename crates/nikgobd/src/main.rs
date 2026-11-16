@@ -89,7 +89,9 @@ fn main() {
     });
     log::info!("stopping");
     host.shutdown();
-    drop(rt);
+    // Nothing on it is waited for (a blocked read of stdin, a server's
+    // last connections): the player has stopped and saved already.
+    rt.shutdown_background();
     log::info!("stopped");
 }
 

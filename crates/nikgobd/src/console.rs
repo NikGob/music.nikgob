@@ -4,7 +4,6 @@
 
 use nikgob_runtime::Runtime;
 use nikgob_view::Command;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 const HELP: &str = "\
 play | pause | toggle | next | prev
@@ -71,11 +70,24 @@ pub fn parse(line: &str) -> Result<Line, String> {
 }
 
 /// Reads stdin until it closes, then waits for good (the stop comes from a
-/// signal, not from the end of stdin, which systemd closes at once).
+/// signal, not from the end of stdin, which systemd closes at once). The
+/// reads block on a thread of their own that nobody waits for, so a stop
+/// while a read waits for input ends the process at once.
 pub async fn run(runtime: &Runtime) {
     eprintln!("nikgobd console; help lists the commands");
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let reader = std::thread::Builder::new().name("nikgobd-console".into()).spawn(move || {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    if let Err(e) = reader {
+        eprintln!("no console: {e}");
+    }
+    while let Some(line) = lines.recv().await {
         match parse(&line) {
             Ok(Line::Send(c)) => runtime.send(c),
             Ok(Line::Status) => eprintln!("{}", status(runtime)),
