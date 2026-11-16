@@ -49,6 +49,16 @@
 //!   of its artist, shared among them: the profile of that artist's sound
 //!   weighs more.
 //!
+//! * Who played and where ([`crate::context`]): every outcome counts as
+//!   much as the weight of its play's context for the device the model is
+//!   built for; the counts of the part of the day and the repeats count a
+//!   play of [`crate::context::FULL_PLAY`] at least; the models of the next
+//!   start and of the skip never learn from the voice assistant's plays;
+//!   the sessions of a speaker and of a computer are walked apart; the
+//!   user's background threshold is of the owner's own plays at a
+//!   personal device. Then the time habits ([`crate::context::TimeModel`]):
+//!   each play by its slot, its profile and its sound.
+//!
 //! [`UserModel::build`] walks the history in order of time: the stats, and
 //! the weights too unless [`Weights`] of the same [`FEATURE_VERSION`] are
 //! given (the library's cache keeps them between builds, the runtime
@@ -62,6 +72,7 @@ use nikgob_core::model::{ArtistId, EndReason, EventContext, EventOrigin, EventTy
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::Vector;
+use crate::context::{FULL_PLAY, PlayActor, PlayDevice, SLOT_HALF_LIFE_MS, TimeModel, TimeSlot, event_weights};
 use crate::graph::{GraphInput, SimGraph};
 use crate::index::{Normalizer, VectorIndex, euclid};
 use crate::listening::{Heard, Listening, SessionSignals, W_BG};
@@ -258,8 +269,10 @@ pub struct TrackStats {
     pub part: [u16; 4],
     /// Its completes by the part of the day ([`DayPart::index`]).
     pub done: [u16; 4],
-    /// A start not ended yet, and who chose it.
+    /// A start not ended yet, and who chose it…
     open: Option<(UnixMs, Option<EventOrigin>)>,
+    /// …and the weight of its context ([`crate::context`]).
+    open_w: f32,
     liked: Option<UnixMs>,
     /// Saved in a service's library (see [`R_SAVED`]).
     saved: bool,
@@ -377,7 +390,7 @@ impl TrackStats {
     fn aff_long_by(&self, now: UnixMs, fresh: f32) -> f32 {
         let mut a = halve(self.a_long, self.t_ref, now, H_LONG_MS);
         if let Some((t, _)) = self.open {
-            a += halve(R_OPEN, t, now, H_LONG_MS);
+            a += halve(R_OPEN, t, now, H_LONG_MS) * self.open_w;
         }
         if self.liked.is_some_and(|t| t <= now) {
             a += R_LIKE * fresh;
@@ -396,7 +409,7 @@ impl TrackStats {
     pub fn aff_today(&self, now: UnixMs) -> f32 {
         let mut a = halve(self.a_today, self.t_ref, now, crate::taste::HALF_LIFE_MS);
         if let Some((t, _)) = self.open {
-            a += halve(W_START_ONLY, t, now, crate::taste::HALF_LIFE_MS);
+            a += halve(W_START_ONLY, t, now, crate::taste::HALF_LIFE_MS) * self.open_w;
         }
         if self.liked.is_some_and(|t| t <= now) {
             a += W_LIKE;
@@ -658,6 +671,12 @@ struct Started {
     touches: u32,
     attention: Option<f32>,
     import: bool,
+    /// The weight of its context and of its end's ([`crate::context`]).
+    weight: f32,
+    end_weight: f32,
+    /// Not the owner's own play at a personal device: the user's sessions
+    /// are told background without it ([`UserModel::listen`]).
+    room: bool,
 }
 
 /// The home's cards of the taste profiles ([`UserModel::home_profiles`]):
@@ -675,6 +694,9 @@ pub struct UserModel {
     pub taste: Taste,
     now: UnixMs,
     utc_offset_min: i32,
+    /// The local offset of each moment of the history
+    /// ([`TasteInput::utc_offsets`]).
+    offsets: Vec<(UnixMs, i32)>,
     ids: Vec<TrackId>,
     pos: HashMap<TrackId, usize>,
     pub tracks: Vec<TrackStats>,
@@ -765,12 +787,20 @@ pub struct UserModel {
     /// The embedded vectors of the disliked tracks (a new track near them
     /// stands lower).
     disliked: Vec<Vector>,
+    /// The kind of device it is built for ([`TasteInput::target_device`]).
+    device: PlayDevice,
+    /// The user's time habits ([`crate::context::TimeModel`]).
+    pub time: TimeModel,
     /// The walk: its session, the skip features of open starts, the run of
-    /// early skips for leafing.
+    /// early skips for leafing, of the kind of device its last event
+    /// played on; the other kind's session, run and last event wait
+    /// beside it (a speaker's session never runs into the computer's).
     walk: Session,
     pending: HashMap<usize, [f32; G]>,
     streak: u32,
     last_event: Option<UnixMs>,
+    walk_device: PlayDevice,
+    walk_other: (Session, u32, Option<UnixMs>),
     learn: bool,
     /// The walk teaches the weights from this start on ([`TEACH_LAST`]).
     learn_from: UnixMs,
@@ -809,11 +839,18 @@ impl TrackLookup for UserModel {
     }
 }
 
-/// Events in the order the walk takes them: by time, a start after the
-/// end it shares a moment with.
-fn ordered(events: &[Play]) -> Vec<&Play> {
-    let mut sorted: Vec<&Play> = events.iter().collect();
-    sorted.sort_by_key(|p| (p.ts, p.kind == EventType::Start));
+/// Whether the models (the next start, the skip) learn from a play of
+/// `actor`: the owner's, and an agent's, which plays for the owner; never
+/// the voice assistant's or a guest's.
+fn teaches_by(actor: PlayActor) -> bool {
+    matches!(actor, PlayActor::Owner | PlayActor::Agent)
+}
+
+/// The places of events in the order the walk takes them: by time, a start
+/// after the end it shares a moment with.
+fn ordered(events: &[Play]) -> Vec<usize> {
+    let mut sorted: Vec<usize> = (0..events.len()).collect();
+    sorted.sort_by_key(|&k| (events[k].ts, events[k].kind == EventType::Start));
     sorted
 }
 
@@ -827,8 +864,12 @@ impl UserModel {
     /// [`Self::build`], `hook` seeing every start of the walk that follows
     /// another of its session (see [`Self::event`]).
     fn build_with(catalog: &Catalog, input: &TasteInput, extra: ModelInput<'_>, now: UnixMs, mut hook: Option<&mut dyn FnMut(&Self, &Moment, usize, &Play)>) -> Self {
-        let taste = Taste::build(catalog, input, now);
+        // Each event by who played it where, for the device it is built for.
+        let weights = event_weights(&input.events, input.target_device);
+        let taste = Taste::build_weighted(catalog, input, &weights, now);
         let mut m = Self::empty(catalog, taste, extra, input.utc_offset_min, now);
+        m.device = input.target_device;
+        m.offsets = input.utc_offsets.clone();
         m.learn = extra.weights.is_none_or(|w| w.version != FEATURE_VERSION);
         m.learn_from = teach_from(&input.events);
         if let Some(w) = extra.weights.filter(|w| w.version == FEATURE_VERSION) {
@@ -857,10 +898,11 @@ impl UserModel {
         }
         // How the user listens, before the walk: the skip model reads the
         // background of each moment.
-        let (starts, p_bg) = m.listen(input);
+        let order = ordered(&input.events);
+        let (starts, p_bg) = m.listen(input, &order, &weights);
         m.hand_likes = m.hand_likes_of();
-        for p in ordered(&input.events) {
-            m.event(p, hook.as_mut().map(|h| &mut **h as &mut dyn FnMut(&Self, &Moment, usize, &Play)));
+        for &k in &order {
+            m.event(&input.events[k], weights[k], hook.as_mut().map(|h| &mut **h as &mut dyn FnMut(&Self, &Moment, usize, &Play)));
         }
         m.close_imported();
         m.now = now;
@@ -954,15 +996,23 @@ impl UserModel {
         HomeProfiles { cards, background }
     }
 
-    /// Every start of the history and how it ended, its seeks and the likes
-    /// set while it played as its touches, in order of time.
-    fn starts_of(&self, input: &TasteInput) -> Vec<Started> {
+    /// Every start of the history (`order` of [`ordered`], `weights` of
+    /// its events) and how it ended, its seeks and the likes set while it
+    /// played as its touches, in order of time. A guest's are not read.
+    fn starts_of(&self, input: &TasteInput, order: &[usize], weights: &[f32]) -> Vec<Started> {
         let mut out: Vec<Started> = Vec::new();
-        let mut open: HashMap<TrackId, usize> = HashMap::new();
-        for p in ordered(&input.events) {
+        // By track and kind of device: the same song on a speaker and at
+        // the computer at once are two plays (as [`event_weights`] pairs them).
+        let mut open: HashMap<(TrackId, PlayDevice), usize> = HashMap::new();
+        for &e in order {
+            let p = &input.events[e];
+            let w = weights.get(e).copied().unwrap_or(1.0);
+            if w <= 0.0 {
+                continue;
+            }
             match p.kind {
                 EventType::Start => {
-                    open.insert(p.track, out.len());
+                    open.insert((p.track, p.device), out.len());
                     out.push(Started {
                         ts: p.ts,
                         pos: self.pos.get(&p.track).copied(),
@@ -974,12 +1024,16 @@ impl UserModel {
                         touches: 0,
                         attention: None,
                         import: p.origin == Some(EventOrigin::Import),
+                        weight: w,
+                        end_weight: w,
+                        room: p.actor != PlayActor::Owner || p.device != PlayDevice::Personal,
                     });
                 }
                 EventType::Complete | EventType::Skip => {
-                    let Some(k) = open.remove(&p.track) else { continue };
+                    let Some(k) = open.remove(&(p.track, p.device)) else { continue };
                     let s = &mut out[k];
                     s.end = Some(p.ts);
+                    s.end_weight = w;
                     s.attention = p.attention;
                     s.ended = match p.kind {
                         EventType::Complete => Ended::Complete,
@@ -989,7 +1043,7 @@ impl UserModel {
                     };
                 }
                 EventType::Seek => {
-                    if let Some(&k) = open.get(&p.track) {
+                    if let Some(&k) = open.get(&(p.track, p.device)) {
                         out[k].touches += 1;
                     }
                 }
@@ -1013,10 +1067,13 @@ impl UserModel {
     }
 
     /// How the user listens ([`Listening`]): of the user's own starts of
-    /// `input`; the starts and the `p_bg` of each.
-    fn listen(&mut self, input: &TasteInput) -> (Vec<Started>, Vec<f32>) {
-        let starts = self.starts_of(input);
-        let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import).collect();
+    /// `input` at a personal device (the threshold of background is the
+    /// user's at the screen: a speaker's runs, the assistant's and an
+    /// agent's plays are weighed by their context instead, `p_bg` 0); the
+    /// starts and the `p_bg` of each.
+    fn listen(&mut self, input: &TasteInput, order: &[usize], weights: &[f32]) -> (Vec<Started>, Vec<f32>) {
+        let starts = self.starts_of(input, order, weights);
+        let own: Vec<usize> = (0..starts.len()).filter(|&k| !starts[k].import && !starts[k].room).collect();
         let heard: Vec<Heard> = own
             .iter()
             .enumerate()
@@ -1066,7 +1123,11 @@ impl UserModel {
         let mut mass = vec![0.0f32; n];
         let mut alive = vec![0.0f32; n];
         let mut plays: Vec<(UnixMs, usize)> = Vec::new();
+        // The history's plays as much as each weighs (the cold start's
+        // measure: a speaker's marathon does not end it).
+        let mut heard_mass = 0.0f32;
         for (k, s) in starts.iter().enumerate() {
+            heard_mass += s.weight;
             let Some(i) = s.pos else { continue };
             let r = match s.ended {
                 Ended::Complete => MASS_COMPLETE,
@@ -1074,11 +1135,16 @@ impl UserModel {
                 Ended::Open => MASS_OPEN,
                 Ended::Early => MASS_EARLY,
             };
-            mass[i] += r * halve(1.0, s.ts, now, H_MASS_MS) * (1.0 - (1.0 - w_bg) * p_bg[k]);
-            if p_bg[k] < 0.5 && s.ended != Ended::Early && now - s.ts <= ALIVE_DAYS * DAY_MS {
+            // As much as its context weighs (an early skip as its skip does).
+            let w = if s.ended == Ended::Early { s.end_weight } else { s.weight };
+            mass[i] += r * halve(1.0, s.ts, now, H_MASS_MS) * (1.0 - (1.0 - w_bg) * p_bg[k]) * w;
+            if p_bg[k] < 0.5 && s.weight >= FULL_PLAY && s.ended != Ended::Early && now - s.ts <= ALIVE_DAYS * DAY_MS {
                 alive[i] += 1.0;
             }
-            plays.push((s.ts, i));
+            // The plays the profiles are cut from: whole ones.
+            if s.weight >= FULL_PLAY {
+                plays.push((s.ts, i));
+            }
         }
         for (i, m) in mass.iter_mut().enumerate() {
             if self.tracks[i].liked(now) {
@@ -1100,7 +1166,7 @@ impl UserModel {
         }
         // The library is a taste too while the history is short: every
         // track a little, the ones the graph gathers around more.
-        self.cold = if starts.len() >= COLD_UNTIL { 0.0 } else { 1.0 / (1.0 + starts.len() as f32 / COLD_STARTS) };
+        self.cold = if heard_mass >= COLD_UNTIL as f32 { 0.0 } else { 1.0 / (1.0 + heard_mass / COLD_STARTS) };
         self.library_prior = input.library_prior;
         for (i, m) in mass.iter_mut().enumerate() {
             *m += self.prior_mass(i);
@@ -1144,12 +1210,14 @@ impl UserModel {
             } else if s.import && own_listening {
                 IMPORT_SHARE
             } else {
-                1.0
+                s.weight
             };
             Some(SharePlay { ts: s.ts, profile: self.profile_at(i), p_bg: p_bg[x], weight })
         };
         let all: Vec<SharePlay> = (0..starts.len()).filter_map(share_play).collect();
-        let own_plays: Vec<SharePlay> = own.iter().filter_map(|&x| share_play(x)).collect();
+        // How much of each profile is background: of the user's own plays
+        // at a personal device (the rest is weighed by its context).
+        let own_plays: Vec<SharePlay> = own.iter().filter(|&&x| !starts[x].room).filter_map(|&x| share_play(x)).collect();
         let sh = shares(&all, k, w_bg, Some(SHARE_HALF_DAYS), now);
         // No plays yet: the profiles' shares of the mass (the likes, the
         // playlists, the library's prior).
@@ -1175,6 +1243,24 @@ impl UserModel {
             }
         }
         self.profile_top = top;
+        // The time habits: each play heard (not skipped early) by its
+        // outcome, its context and its age, in its slot, of its profile,
+        // with its sound; an imported one a little.
+        let mut time = TimeModel::new(k);
+        for s in starts {
+            let Some(i) = s.pos else { continue };
+            let outcome = match s.ended {
+                Ended::Complete => MASS_COMPLETE,
+                Ended::Late => MASS_LATE,
+                Ended::Open => MASS_OPEN,
+                Ended::Early => continue,
+            };
+            let w = if s.import { IMPORT_SHARE } else { s.weight };
+            let m = outcome * w * halve(1.0, s.ts, now, SLOT_HALF_LIFE_MS);
+            // Its slot by its own day's clock.
+            time.add(TimeSlot::at(s.ts, input.offset_at(s.ts)), self.profile_at(i), m, self.sound_point_at(i));
+        }
+        self.time = time;
         let disliked: Vec<usize> = input.disliked_tracks.iter().filter_map(|t| self.pos.get(t).copied()).collect();
         if input.dislike_neighbours {
             self.disliked = disliked.iter().filter_map(|&i| self.emb[i]).collect();
@@ -1431,6 +1517,7 @@ impl UserModel {
             taste,
             now,
             utc_offset_min,
+            offsets: Vec::new(),
             ids,
             pos,
             tracks: vec![TrackStats::default(); n],
@@ -1488,10 +1575,14 @@ impl UserModel {
             arrived,
             repeat_gaps: [0; REPEAT_BINS.len() + 1],
             disliked: Vec::new(),
+            device: PlayDevice::Personal,
+            time: TimeModel::default(),
             walk: Session::default(),
             pending: HashMap::new(),
             streak: 0,
             last_event: None,
+            walk_device: PlayDevice::Personal,
+            walk_other: (Session::default(), 0, None),
             learn: false,
             learn_from: UnixMs::MIN,
             import_open: HashMap::new(),
@@ -1608,6 +1699,58 @@ impl UserModel {
         crate::mood::Axes::of(&self.norm.z_of_embedded(v))
     }
 
+    /// The sound of the track at `i` as the time habits read it: energy,
+    /// tempo and steadiness (z over the library), when it has a sound.
+    pub fn sound_point_at(&self, i: usize) -> Option<[f32; 3]> {
+        self.emb.get(i).copied().flatten().map(|e| self.sound_point_of(&e))
+    }
+
+    /// [`Self::sound_point_at`] of an embedded sound `v` (a new song's
+    /// preview).
+    pub fn sound_point_of(&self, v: &Vector) -> [f32; 3] {
+        let z = self.norm.z_of_embedded(v);
+        let a = crate::mood::Axes::of(&z);
+        [a.energy, z[crate::mood::TEMPO], a.steadiness]
+    }
+
+    /// The kind of device it is built for.
+    pub fn device(&self) -> PlayDevice {
+        self.device
+    }
+
+    /// The part of the day of the week at [`Self::now`].
+    pub fn slot(&self) -> TimeSlot {
+        TimeSlot::at(self.now, self.utc_offset_min)
+    }
+
+    /// How much the track at `i` belongs to `slot`
+    /// ([`crate::context::LIFT_MIN`]…[`crate::context::LIFT_MAX`]): its own
+    /// part of the day ([`Taste::part_lift_at`]) and its profile's slot
+    /// ([`TimeModel::profile_lift`]), so a song never heard in the morning
+    /// rises there with its morning profile. 0 without a history.
+    pub fn time_bonus_at(&self, i: usize, slot: TimeSlot) -> f32 {
+        let own = self.taste.part_lift_at(i, slot.part);
+        let profile = self.profile_at(i).map_or(0.0, |j| self.time.profile_lift(j, slot));
+        crate::context::TIME_TRACK_SHARE * own + (1.0 - crate::context::TIME_TRACK_SHARE) * profile
+    }
+
+    /// How well the sound of the track at `i` fits what the user plays in
+    /// `slot` ([`TimeModel::sound_fit`]); 0 without a sound.
+    pub fn sound_fit_at(&self, i: usize, slot: TimeSlot) -> f32 {
+        self.sound_point_at(i).map_or(0.0, |p| self.time.sound_fit(slot, p))
+    }
+
+    /// [`Self::sound_fit_at`] of an embedded sound `v` (a new song's preview).
+    pub fn sound_fit_of(&self, v: &Vector, slot: TimeSlot) -> f32 {
+        self.time.sound_fit(slot, self.sound_point_of(v))
+    }
+
+    /// The share of profile `j` in `slot`, smoothed by the part of the day
+    /// and everything ([`TimeModel::profile_share`]).
+    pub fn profile_slot_share(&self, j: usize, slot: TimeSlot) -> f32 {
+        self.time.profile_share(j, slot)
+    }
+
     /// The share of the user's starts in `part` of the day ([`DayPart::index`]);
     /// a quarter without a history.
     pub fn part_share(&self, part: usize) -> f32 {
@@ -1616,7 +1759,7 @@ impl UserModel {
     }
 
     fn part_of(&self, ts: UnixMs) -> usize {
-        DayPart::at(ts, self.utc_offset_min).index()
+        DayPart::at(ts, crate::context::offset_at(&self.offsets, self.utc_offset_min, ts)).index()
     }
 
     /// The moment of `session` at `now` (at least the session's last start).
@@ -1987,13 +2130,33 @@ impl UserModel {
         }
     }
 
-    /// One event of the history, in order of time. `hook` sees every start
-    /// that follows another of its session, before anything learns from it.
-    fn event(&mut self, p: &Play, hook: Option<&mut dyn FnMut(&Self, &Moment, usize, &Play)>) {
+    /// One event of the history, in order of time, `w` the weight of its
+    /// context ([`crate::context`]): the outcomes count as much, the
+    /// counts and the windows a play of [`FULL_PLAY`] at least, and the
+    /// models learn from the owner's and an agent's plays only (the voice
+    /// assistant's are background). The sessions of each kind of device
+    /// are walked apart. `hook` sees every start that follows another of
+    /// its session, before anything learns from it.
+    fn event(&mut self, p: &Play, w: f32, hook: Option<&mut dyn FnMut(&Self, &Moment, usize, &Play)>) {
+        // A guest's: nothing.
+        if w <= 0.0 {
+            return;
+        }
         if p.origin == Some(EventOrigin::Import) {
             self.imported(p);
             return;
         }
+        if p.device != self.walk_device {
+            std::mem::swap(&mut self.walk, &mut self.walk_other.0);
+            std::mem::swap(&mut self.streak, &mut self.walk_other.1);
+            std::mem::swap(&mut self.last_event, &mut self.walk_other.2);
+            self.walk_device = p.device;
+        }
+        // The models learn from the owner's plays (and an agent's, which plays
+        // for the owner): from a start of theirs, and from an outcome only
+        // when its start and its end are both theirs (the assistant's
+        // «дальше» on the owner's song teaches nothing).
+        let teach = teaches_by(p.actor);
         let pause = self.last_event.is_none_or(|l| p.ts - l >= SESSION_GAP_MS);
         if pause {
             self.streak = 0;
@@ -2024,12 +2187,14 @@ impl UserModel {
                 let manual = opened == Some(EventOrigin::Manual);
                 let imported = opened == Some(EventOrigin::Import) || p.origin == Some(EventOrigin::Import);
                 let r = R_COMPLETE * if manual { MANUAL_POSITIVE } else { 1.0 };
-                self.tracks[i].add_as(p.ts, r, W_COMPLETE, true);
+                self.tracks[i].add_as(p.ts, r * w, W_COMPLETE * w, true);
                 let t = &mut self.tracks[i];
-                t.note(false);
-                t.completes += 1;
-                t.done[part] = t.done[part].saturating_add(1);
-                let before = t.last_complete.replace(p.ts);
+                if w >= FULL_PLAY {
+                    t.note(false);
+                    t.completes += 1;
+                    t.done[part] = t.done[part].saturating_add(1);
+                }
+                let before = if w >= FULL_PLAY { t.last_complete.replace(p.ts) } else { None };
                 if let Some(b) = before
                     && !imported
                 {
@@ -2038,7 +2203,7 @@ impl UserModel {
                     self.repeat_gaps[bin] += 1;
                 }
                 self.walk.end(p.track, Ended::Complete);
-                if let Some(x) = self.pending.remove(&i).filter(|_| self.learn) {
+                if let Some(x) = self.pending.remove(&i).filter(|_| self.learn && teach) {
                     self.weights.skip.observe(&x, false);
                 }
             }
@@ -2066,17 +2231,22 @@ impl UserModel {
                         // «not now»: the session's mood, nothing against the
                         // track in the long run.
                         let not_now = pos < NOT_NOW_MS && in_stream(p.context, origin) && self.tracks[i].loved(p.ts);
-                        self.tracks[i].note(true);
+                        let full = w >= FULL_PLAY;
+                        if full {
+                            self.tracks[i].note(true);
+                        }
                         if not_now {
-                            self.tracks[i].add_hot(p.ts, R_EARLY * who * lean);
+                            self.tracks[i].add_hot(p.ts, R_EARLY * who * lean * w);
                         } else {
-                            self.tracks[i].add_as(p.ts, R_EARLY * who * lean, W_SKIP_EARLY * lean, true);
-                            let t = &mut self.tracks[i];
-                            t.early = t.early.saturating_add(1);
+                            self.tracks[i].add_as(p.ts, R_EARLY * who * lean * w, W_SKIP_EARLY * lean * w, true);
+                            if full {
+                                let t = &mut self.tracks[i];
+                                t.early = t.early.saturating_add(1);
+                            }
                         }
                         self.walk.end_at(p.track, Ended::Early, pos, self.duration[i], None);
                         // «Not now» teaches the skip model nothing either.
-                        if let Some(x) = self.pending.remove(&i).filter(|_| self.learn && !not_now) {
+                        if let Some(x) = self.pending.remove(&i).filter(|_| self.learn && teach && !not_now) {
                             self.weights.skip.observe(&x, true);
                         }
                     }
@@ -2087,10 +2257,13 @@ impl UserModel {
                             _ => 0.0,
                         };
                         let manual = origin == Some(EventOrigin::Manual);
-                        self.tracks[i].add_as(p.ts, R_LATE * heard * if manual { MANUAL_POSITIVE } else { 1.0 }, W_SKIP_LATE_HEARD * heard, true);
-                        let t = &mut self.tracks[i];
-                        t.note(false);
-                        t.late = t.late.saturating_add(1);
+                        let r = R_LATE * heard * if manual { MANUAL_POSITIVE } else { 1.0 };
+                        self.tracks[i].add_as(p.ts, r * w, W_SKIP_LATE_HEARD * heard * w, true);
+                        if w >= FULL_PLAY {
+                            let t = &mut self.tracks[i];
+                            t.note(false);
+                            t.late = t.late.saturating_add(1);
+                        }
                         match pos {
                             Some(pos) => self.walk.end_at(p.track, Ended::Late, pos, self.duration[i], None),
                             None => self.walk.end(p.track, Ended::Late),
@@ -2099,7 +2272,7 @@ impl UserModel {
                     }
                 }
             }
-            EventType::Start => self.start(i, p, hook),
+            EventType::Start => self.start(i, p, w, teach, hook),
             EventType::Seek => {
                 if let Some(to) = p.position_ms {
                     self.walk.seek(p.track, None, to);
@@ -2109,16 +2282,23 @@ impl UserModel {
         }
     }
 
-    fn start(&mut self, i: usize, p: &Play, hook: Option<&mut dyn FnMut(&Self, &Moment, usize, &Play)>) {
+    /// A start of the track at `i`, `w` the weight of its context; the
+    /// models learn from it when it `teach`es (not the assistant's).
+    fn start(&mut self, i: usize, p: &Play, w: f32, teach: bool, hook: Option<&mut dyn FnMut(&Self, &Moment, usize, &Play)>) {
         let ts = p.ts;
         // A start after a pause begins a session of its own.
         if self.walk.last_ts().is_none_or(|l| ts - l >= SESSION_GAP_MS) {
             self.walk = Session::default();
         }
-        let learn = self.learn && teaches(p.origin, p.context) && ts >= self.learn_from;
+        let learn = self.learn && teach && teaches(p.origin, p.context) && ts >= self.learn_from;
         let m = self.moment_with(&self.walk, ts, hook.is_some() || learn);
-        let x = self.skip_features(&m, i, p.context);
-        self.pending.insert(i, x);
+        // The skip model learns from its end only when the start teaches.
+        if teach {
+            let x = self.skip_features(&m, i, p.context);
+            self.pending.insert(i, x);
+        } else {
+            self.pending.remove(&i);
+        }
         if m.prev.is_some() {
             match hook {
                 Some(h) => {
@@ -2141,23 +2321,25 @@ impl UserModel {
         // the user's own picks, neither of an album's run.
         let own = |origin: Option<EventOrigin>, context: EventContext| origin == Some(EventOrigin::Manual) && context != EventContext::Album;
         if let Some(prev) = m.prev
+            && teach
             && own(p.origin, p.context)
             && self.walk.last().is_some_and(|q| own(q.origin, q.context))
         {
             self.again.0 += 1;
             self.again.1 += u32::from(self.artist[prev].is_some() && self.artist[prev] == self.artist[i]);
         }
-        // What this start says.
+        // What this start says, as much as it weighs.
         for (k, (s, _, _)) in m.sess.iter().rev().take(3).enumerate() {
-            self.co.add(*s, i, 0.5f32.powi(k as i32));
+            self.co.add(*s, i, 0.5f32.powi(k as i32) * w);
         }
         if let Some(prev) = m.prev
             && let (Some(wp), Some(wc)) = (self.world[prev], self.world[i])
         {
-            *self.trans.entry(wp).or_default().entry(wc).or_default() += 1.0;
-            *self.trans_total.entry(wp).or_default() += 1.0;
+            *self.trans.entry(wp).or_default().entry(wc).or_default() += w;
+            *self.trans_total.entry(wp).or_default() += w;
         }
         if let Some(prev) = m.prev
+            && teach
             && teaches(p.origin, p.context)
         {
             self.lane_trans[lane_index(self.types[prev].lane())][lane_index(self.types[i].lane())] += 1.0;
@@ -2165,34 +2347,46 @@ impl UserModel {
         // Listened together within the session, either order.
         for (k, (s, e, _)) in m.sess.iter().rev().take(BAG_WINDOW).enumerate() {
             if *s != i && *e != Ended::Early {
-                let w = 1.0 / (k + 1) as f32;
-                self.bag.add(*s, i, w);
-                self.bag.add(i, *s, w);
+                let near = w / (k + 1) as f32;
+                self.bag.add(*s, i, near);
+                self.bag.add(i, *s, near);
             }
         }
         let part = self.part_of(ts);
         if let Some((t0, o)) = self.tracks[i].open.take() {
             // The start before never ended.
             let r = R_OPEN * if o == Some(EventOrigin::Manual) { MANUAL_POSITIVE } else { 1.0 };
-            self.tracks[i].add_as(t0, r, W_START_ONLY, true);
+            let w0 = self.tracks[i].open_w;
+            self.tracks[i].add_as(t0, r * w0, W_START_ONLY * w0, true);
         }
         if self.tracks[i].last_complete.is_some_and(|c| ts - c <= REPEAT_WITHIN_MS) {
-            self.tracks[i].add_as(ts, R_REPEAT, W_REPEAT, true);
+            self.tracks[i].add_as(ts, R_REPEAT * w, W_REPEAT * w, true);
         }
+        // The counts read as «heard» (a song played, a world visited, when
+        // last) take a whole play: a speaker's long run heard from afar is
+        // weighed in, never counted.
+        let full = w >= FULL_PLAY;
         let t = &mut self.tracks[i];
-        t.starts += 1;
-        t.last_start = Some(ts);
-        t.part[part] = t.part[part].saturating_add(1);
-        t.open = Some((ts, p.origin));
-        if let Some(w) = self.world[i] {
-            let ws = self.worlds.entry(w).or_default();
-            ws.hot = halve(ws.hot, ws.t_ref, ts, DAY_MS) + 1.0;
-            ws.t_ref = ts.max(ws.t_ref);
-            ws.last = Some(ts);
-            ws.part[part] += 1;
-            ws.n += 1;
+        if full {
+            t.starts += 1;
+            t.last_start = Some(ts);
+            t.part[part] = t.part[part].saturating_add(1);
         }
-        self.part_total[part] += 1;
+        t.open = Some((ts, p.origin));
+        t.open_w = w;
+        if let Some(world) = self.world[i] {
+            let ws = self.worlds.entry(world).or_default();
+            ws.hot = halve(ws.hot, ws.t_ref, ts, DAY_MS) + w;
+            ws.t_ref = ts.max(ws.t_ref);
+            if full {
+                ws.last = Some(ts);
+                ws.part[part] += 1;
+                ws.n += 1;
+            }
+        }
+        if full {
+            self.part_total[part] += 1;
+        }
         self.walk.start(p.track, ts, p.context, p.origin);
     }
 }
@@ -2314,7 +2508,9 @@ pub fn replay_with(
     dislikes: &[TrackId],
     unscored: &HashSet<TrackId>,
 ) -> ReplayReport {
-    let events = ordered(&input.events);
+    let order = ordered(&input.events);
+    let weights = event_weights(&input.events, input.target_device);
+    let events: Vec<&Play> = order.iter().map(|&k| &input.events[k]).collect();
     // The user's own history: imported plays are walked, never scored.
     let own: Vec<UnixMs> = events.iter().filter(|p| p.origin != Some(EventOrigin::Import)).map(|p| p.ts).collect();
     let (Some(&first), Some(&last)) = (own.first(), own.last()) else {
@@ -2323,15 +2519,15 @@ pub fn replay_with(
     let mid = first + (last - first) / 2;
     // The outcome of every start (for the splits), by its place in `events`.
     let mut outcome: HashMap<usize, Ended> = HashMap::new();
-    let mut open: HashMap<TrackId, usize> = HashMap::new();
+    let mut open: HashMap<(TrackId, crate::context::PlayDevice), usize> = HashMap::new();
     for (k, p) in events.iter().enumerate() {
         match p.kind {
             EventType::Start => {
-                open.insert(p.track, k);
+                open.insert((p.track, p.device), k);
                 outcome.insert(k, Ended::Open);
             }
             EventType::Complete | EventType::Skip => {
-                if let Some(j) = open.remove(&p.track) {
+                if let Some(j) = open.remove(&(p.track, p.device)) {
                     outcome.insert(j, match p.kind {
                         EventType::Complete => Ended::Complete,
                         _ if p.end_reason == Some(EndReason::AppClosed) => Ended::Open,
@@ -2349,7 +2545,9 @@ pub fn replay_with(
         m.personal = crate::graph::personal(catalog, &input.events, &input.playlists);
     }
     m.learn = true;
-    m.listen(input);
+    m.device = input.target_device;
+    m.offsets = input.utc_offsets.clone();
+    m.listen(input, &order, &weights);
     let disliked: Vec<usize> = dislikes.iter().filter_map(|t| m.position(*t)).collect();
     let near = crate::dislike::near_dislikes(&m.emb, &disliked, m.scale);
     let mut shown: HashSet<usize> = HashSet::new();
@@ -2430,7 +2628,7 @@ pub fn replay_with(
                 }
             }
         };
-        m.event(p, Some(&mut hook));
+        m.event(p, weights[order[k]], Some(&mut hook));
     }
     let mut splits: Vec<(&'static str, &'static str, Hits)> = ranks.into_iter().map(|((s, n), r)| (s, n, Hits::of(&r))).collect();
     splits.sort_by_key(|(s, n, _)| (*s, *n));

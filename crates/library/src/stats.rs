@@ -180,7 +180,7 @@ impl Library {
                 "SELECT coalesce(SUM(type = 'start'), 0), coalesce(SUM(type = 'complete'), 0), coalesce(SUM(type = 'skip'), 0),
                         coalesce(SUM(type = 'skip' AND coalesce(position_ms, 0) < ?3), 0),
                         COUNT(DISTINCT CASE WHEN type = 'start' THEN track_id END)
-                   FROM event WHERE ts >= ?1 AND ts < ?2",
+                   FROM event WHERE ts >= ?1 AND ts < ?2 AND coalesce(actor, 'owner') <> 'guest'",
                 params![from_ms, to_ms, EARLY_SKIP_MS],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
@@ -193,7 +193,7 @@ impl Library {
                 "SELECT coalesce(SUM(CASE WHEN e.type = 'complete' THEN coalesce(t.duration_ms, e.position_ms, 0)
                                           WHEN e.type = 'skip' THEN coalesce(e.position_ms, 0) ELSE 0 END), 0)
                    FROM event e LEFT JOIN track t ON t.id = e.track_id
-                  WHERE e.ts >= ?1 AND e.ts < ?2",
+                  WHERE e.ts >= ?1 AND e.ts < ?2 AND coalesce(e.actor, 'owner') <> 'guest'",
                 params![from_ms, to_ms],
                 |r| r.get(0),
             )?;
@@ -202,7 +202,7 @@ impl Library {
                     "SELECT t.id, t.title, t.artist_display, r.title, s.plays, s.completes, s.skips, s.last, {LIKED_SQL}
                        FROM (SELECT track_id, SUM(type = 'start') AS plays, SUM(type = 'complete') AS completes,
                                     SUM(type = 'skip') AS skips, MAX(ts) AS last
-                               FROM event WHERE ts >= ?1 AND ts < ?2 GROUP BY track_id) s
+                               FROM event WHERE ts >= ?1 AND ts < ?2 AND coalesce(actor, 'owner') <> 'guest' GROUP BY track_id) s
                        JOIN track t ON t.id = s.track_id
                        LEFT JOIN release r ON r.id = t.release_id
                       WHERE s.plays > 0
@@ -217,7 +217,7 @@ impl Library {
                        (SELECT (SELECT ta.artist_id FROM track_artist ta WHERE ta.track_id = e.track_id ORDER BY ta.position LIMIT 1) AS artist,
                                MAX(t.artist_display) AS display, COUNT(*) AS plays
                           FROM event e JOIN track t ON t.id = e.track_id
-                         WHERE e.type = 'start' AND e.ts >= ?1 AND e.ts < ?2
+                         WHERE e.type = 'start' AND e.ts >= ?1 AND e.ts < ?2 AND coalesce(e.actor, 'owner') <> 'guest'
                          GROUP BY artist, CASE WHEN artist IS NULL THEN t.artist_display END) x
                        LEFT JOIN artist a ON a.id = x.artist
                       ORDER BY x.plays DESC LIMIT ?3",
@@ -233,7 +233,7 @@ impl Library {
                 let mut stmt = c.prepare_cached(
                     "SELECT r.id, r.title, r.artist_display, COUNT(*) AS plays
                        FROM event e JOIN track t ON t.id = e.track_id JOIN release r ON r.id = t.release_id
-                      WHERE e.type = 'start' AND e.ts >= ?1 AND e.ts < ?2
+                      WHERE e.type = 'start' AND e.ts >= ?1 AND e.ts < ?2 AND coalesce(e.actor, 'owner') <> 'guest'
                       GROUP BY r.id ORDER BY plays DESC LIMIT ?3",
                 )?;
                 rep.top_albums = stmt
@@ -245,7 +245,7 @@ impl Library {
             {
                 let mut stmt = c.prepare_cached(
                     "SELECT ((ts / 1000 + ?3) % 86400 + 86400) % 86400 / 3600 AS h, COUNT(*)
-                       FROM event WHERE type = 'start' AND ts >= ?1 AND ts < ?2 GROUP BY h",
+                       FROM event WHERE type = 'start' AND ts >= ?1 AND ts < ?2 AND coalesce(actor, 'owner') <> 'guest' GROUP BY h",
                 )?;
                 let rows = stmt.query_map(params![from_ms, to_ms, tz_offset_s], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
                 for row in rows {
@@ -257,7 +257,7 @@ impl Library {
             }
             for (col, out) in [("device", &mut rep.by_device), ("context", &mut rep.by_context)] {
                 let mut stmt = c.prepare(&format!(
-                    "SELECT {col}, COUNT(*) AS n FROM event WHERE type = 'start' AND ts >= ?1 AND ts < ?2 GROUP BY {col} ORDER BY n DESC LIMIT 20"
+                    "SELECT {col}, COUNT(*) AS n FROM event WHERE type = 'start' AND ts >= ?1 AND ts < ?2 AND coalesce(actor, 'owner') <> 'guest' GROUP BY {col} ORDER BY n DESC LIMIT 20"
                 ))?;
                 *out = stmt.query_map(params![from_ms, to_ms], |r| Ok((r.get::<_, String>(0)?, u(r.get(1)?))))?.collect::<rusqlite::Result<_>>()?;
             }
@@ -276,7 +276,7 @@ impl Library {
                    FROM track t
                    LEFT JOIN (SELECT track_id, SUM(type = 'start') AS plays, SUM(type = 'complete') AS completes,
                                      SUM(type = 'skip') AS skips, MAX(CASE WHEN type IN ('start', 'complete') THEN ts END) AS last
-                                FROM event GROUP BY track_id) s ON s.track_id = t.id
+                                FROM event WHERE coalesce(actor, 'owner') <> 'guest' GROUP BY track_id) s ON s.track_id = t.id
                    LEFT JOIN release r ON r.id = t.release_id
                   WHERE t.deleted_at IS NULL
                     AND (coalesce(s.plays, 0) >= ?2 OR {LIKED_SQL})
@@ -426,6 +426,55 @@ mod tests {
         let r = lib.listening_report(t0, t0 + DAY, 10, 3 * 3600).unwrap();
         assert_eq!(r.by_hour[3], 1);
         assert_eq!(r.by_hour[13], 1);
+    }
+
+    /// A guest's plays are kept on the device, but never read: not in the
+    /// history the recommendations learn from, not in what was played
+    /// lately, not in a song's plays, not in the reports.
+    #[test]
+    fn guest_plays_never_enter_recs_recent_or_stats() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_artist(&Artist::new("Кино")).unwrap();
+        let rel = lib.upsert_release(&Release::new("Группа крови", ArtistCredit::single("Кино", Some(a.id)))).unwrap();
+        let x = song(&lib, &a, &rel, "Группа крови", 200_000, Codec::Flac);
+        let y = song(&lib, &a, &rel, "Звезда по имени Солнце", 220_000, Codec::Flac);
+        let t0 = 100 * DAY;
+        play(&lib, &x, t0, EventType::Complete, 200_000);
+        let snapshot = |lib: &Library| {
+            (
+                lib.listening_events().unwrap(),
+                lib.recent_events(50).unwrap(),
+                lib.track_stats(x.id).unwrap(),
+                lib.track_stats(y.id).unwrap(),
+                lib.all_track_stats().unwrap(),
+                lib.count_events().unwrap(),
+                lib.events_of_track(y.id, 10).unwrap(),
+            )
+        };
+        let before = snapshot(&lib);
+        let report = lib.listening_report(t0 - DAY, t0 + DAY, 10, 0).unwrap();
+        for (k, t) in [&x, &y, &y].into_iter().enumerate() {
+            for (ty, at) in [(EventType::Start, 0), (EventType::Complete, 200_000)] {
+                let mut e = Event::new(t.id, ty, t0 + 3_600_000 * (k as i64 + 1) + i64::from(at), DeviceId("pc".into()));
+                e.position_ms = Some(at);
+                e.actor = Some(nikgob_core::settings::ApiActor::Guest);
+                lib.record_event_raw(&e).unwrap();
+            }
+        }
+        let n: i64 = lib.read(|c| Ok(c.query_row("SELECT count(*) FROM event", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(n, 8, "kept on the device");
+        let after = snapshot(&lib);
+        assert_eq!(after.0, before.0, "the history");
+        assert_eq!(after.1, before.1, "played lately");
+        assert_eq!((after.2.plays, after.2.completes), (before.2.plays, before.2.completes), "a song's plays");
+        assert_eq!(after.3.plays, 0);
+        assert_eq!(after.4.len(), before.4.len());
+        assert_eq!(after.5, before.5);
+        assert!(after.6.is_empty());
+        let again = lib.listening_report(t0 - DAY, t0 + DAY, 10, 0).unwrap();
+        assert_eq!((again.plays, again.completes, again.listened_ms), (report.plays, report.completes, report.listened_ms));
+        assert_eq!(again.top_tracks.len(), report.top_tracks.len());
+        assert_eq!(again.by_hour, report.by_hour);
     }
 
     #[test]

@@ -86,6 +86,9 @@ use queue::{Entry, Queue};
 
 /// How many of the tracks before the current one the queue view lists.
 const HISTORY_SHOWN: usize = 50;
+/// The entries kept with who added or picked them before those gone from
+/// the queue are let go.
+const ENTRY_ACTORS_KEPT: usize = 64;
 
 /// In a [`PlaybackEvent::Error`] of a SoundCloud track: SoundCloud streams
 /// it only with DRM, and the backend can play it through SoundCloud's own
@@ -317,6 +320,8 @@ enum Msg {
     /// from now on.
     ConnectLink(connect::ConnectLink),
     Shutdown,
+    /// The kind of device this runs on ([`Runtime::set_device_kind`]).
+    DeviceKind(nikgob_view::MeshKind),
 }
 
 /// Handle to the running worker.
@@ -463,6 +468,13 @@ impl Runtime {
     /// and Deezer (tests).
     pub fn set_share_base(&self, base: impl Into<String>) {
         let _ = self.tx.send(Msg::ShareBase(base.into()));
+    }
+
+    /// This runs on a `kind` of device (a computer until told): a speaker's
+    /// (a Pi, a TV, a server) recommendations are for a room, its own plays
+    /// a room's.
+    pub fn set_device_kind(&self, kind: nikgob_view::MeshKind) {
+        let _ = self.tx.send(Msg::DeviceKind(kind));
     }
 
     /// The graph of similar music asks this online metadata (tests: its
@@ -825,8 +837,14 @@ struct Worker {
     next_origin: Option<EventOrigin>,
     /// Who started the queue that plays: an API request's token (the voice
     /// assistant, an agent, a guest), `None` the owner. Recorded with each
-    /// play of it.
+    /// play of it…
     queue_actor: Option<nikgob_core::settings::ApiActor>,
+    /// …but an entry added or picked by someone else plays as them (a
+    /// guest's song in the owner's queue is the guest's, the next one the
+    /// owner's again)…
+    entry_actor: std::collections::HashMap<u64, Option<nikgob_core::settings::ApiActor>>,
+    /// …and the playing entry's, from its start.
+    play_actor: Option<nikgob_core::settings::ApiActor>,
     /// The queue generation of the last start: a start in another queue
     /// is the user's choice.
     origin_gen: Option<u64>,
@@ -999,6 +1017,33 @@ fn edits_queue(c: &Command) -> bool {
     )
 }
 
+/// Whether `c` adds songs to the queue that plays (after the current one
+/// or at its end), its own entries for who added them
+/// ([`Worker::entry_actor`]).
+fn adds_to_queue(c: &Command) -> bool {
+    matches!(
+        c,
+        Command::PlayNext(_)
+            | Command::Enqueue(_)
+            | Command::PlayReleaseNext(_)
+            | Command::EnqueueRelease(_)
+            | Command::PlayPlaylistNext(_)
+            | Command::EnqueuePlaylist(_)
+            | Command::PlayArtistNext(_)
+            | Command::EnqueueArtist(_)
+            | Command::PlayStreamNext(_)
+            | Command::EnqueueStream(_)
+            | Command::PlayStreamAlbumNext(_)
+            | Command::EnqueueStreamAlbum(_)
+            | Command::PlayStreamPlaylistNext(_)
+            | Command::EnqueueStreamPlaylist(_)
+            | Command::PlayStreamArtistNext(_)
+            | Command::EnqueueStreamArtist(_)
+            | Command::PlayMixNext { .. }
+            | Command::EnqueueMix { .. }
+    )
+}
+
 impl Worker {
     fn new(
         config: RuntimeConfig,
@@ -1098,6 +1143,8 @@ impl Worker {
             restored_page: None,
             next_origin: None,
             queue_actor: None,
+            entry_actor: std::collections::HashMap::new(),
+            play_actor: None,
             origin_gen: None,
             ended: true,
             heard: Heard::default(),
@@ -1203,6 +1250,9 @@ impl Worker {
             self.start_align();
         } else {
             log::info!("background compute is off: no sound analysis, lyrics alignment or file checks here");
+            // The vectors the other devices made, as the sync brought them.
+            let prefs = self.state.read().prefs.clone();
+            self.analysis.load_synced(self.lib.clone(), prefs);
         }
         self.dislikes_load(false);
         loop {
@@ -1249,6 +1299,12 @@ impl Worker {
                     Ok(Msg::MeshFlush(done)) => {
                         self.mesh_flush_now();
                         let _ = done.send(());
+                    }
+                    Ok(Msg::DeviceKind(kind)) => {
+                        if recs::set_own_kind(kind) {
+                            log::info!("recs: this is a {} device", kind.key());
+                            self.recs_dirty(Duration::ZERO);
+                        }
                     }
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
@@ -1423,7 +1479,26 @@ impl Worker {
 
     // ---------------------------------------------------------------- commands
 
+    /// [`Self::command_now`]; what it adds to the queue plays as whoever
+    /// added it when that is not whose the queue is (a guest's song in the
+    /// owner's queue is the guest's, the owner's in an assistant's queue the
+    /// owner's).
     fn command(&mut self, c: Command) {
+        if !adds_to_queue(&c) {
+            return self.command_now(c);
+        }
+        let before: std::collections::HashSet<u64> = self.queue.upcoming().iter().map(|e| e.id).collect();
+        self.command_now(c);
+        let by = self.api_actor();
+        if by != self.queue_actor {
+            let added: Vec<u64> = self.queue.upcoming().iter().map(|e| e.id).filter(|id| !before.contains(id)).collect();
+            for id in added {
+                self.entry_actor.insert(id, by);
+            }
+        }
+    }
+
+    fn command_now(&mut self, c: Command) {
         for i in 0..self.services.len() {
             let mut handled = false;
             let mut st = self.state.write();
@@ -1470,7 +1545,7 @@ impl Worker {
                 if self.position_now() > Duration::from_secs(3) || self.queue.current().is_none() {
                     self.seek(Duration::ZERO);
                 } else if let Some(e) = self.queue.previous() {
-                    self.user_switch(EventOrigin::Manual);
+                    self.user_pick(EventOrigin::Manual, e.id);
                     self.start(e);
                 }
             }
@@ -1632,7 +1707,7 @@ impl Worker {
             }
             Command::PlayQueueEntry(entry) => {
                 if let Some(e) = self.queue.jump(entry) {
-                    self.user_switch(EventOrigin::Manual);
+                    self.user_pick(EventOrigin::Manual, e.id);
                     self.start(e);
                 }
             }
@@ -1708,6 +1783,11 @@ impl Worker {
                     self.library_edited(before, Vec::new());
                 }
             }
+            // A guest's like would fetch files and write to the owner's
+            // services: the API never lets one through, and it stops here too.
+            Command::Like(..) if self.api.actor == Some(nikgob_core::settings::ApiActor::Guest) => {
+                log::info!("api: a guest's like is not kept");
+            }
             Command::Like(LikeTarget::Release(id), on) => self.like_release(id, on),
             Command::Like(target, on) => {
                 let before = self.library_tracks();
@@ -1725,12 +1805,16 @@ impl Worker {
                             self.new_liked(t);
                             self.recs_liked(t);
                         }
-                        let _ = self.lib.record_event(
+                        // The like's actor: the voice assistant's «нравится»
+                        // is its own in the history, as its plays are.
+                        let actor = self.api_actor();
+                        let _ = self.lib.record_event_with(
                             t,
                             if on { EventType::Like } else { EventType::Unlike },
                             None,
                             None,
                             EventContext::Other,
+                            EventMeta { actor, ..EventMeta::default() },
                         );
                         wished = self.track_liked(t, on);
                     }
@@ -2787,15 +2871,16 @@ impl Worker {
         self.rate = self.speed;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
+            let actor = self.hand_actor();
             let _ = self.lib.record_event_with(
                 e.track,
                 EventType::Seek,
                 None,
                 Some(p.as_millis() as u32),
                 self.play_context,
-                EventMeta { actor: self.queue_actor, ..EventMeta::default() },
+                EventMeta { actor, ..EventMeta::default() },
             );
-            if self.queue_teaches() {
+            if self.queue_teaches() && teaches_live_recs(actor) {
                 self.recs_seeked(e.track, from.as_millis() as u32, p.as_millis() as u32);
             }
         }
@@ -2838,7 +2923,14 @@ impl Worker {
         };
         self.ended = false;
         self.heard.reset();
-        let meta = EventMeta { origin: Some(origin), context_id, actor: self.queue_actor, ..EventMeta::default() };
+        // Who plays it: whoever added or picked it, else whoever's queue it is.
+        self.play_actor = self.entry_actor.get(&e.id).copied().unwrap_or(self.queue_actor);
+        if self.entry_actor.len() > ENTRY_ACTORS_KEPT {
+            let live: std::collections::HashSet<u64> =
+                self.queue.history().iter().chain(self.queue.upcoming()).map(|x| x.id).chain([e.id]).collect();
+            self.entry_actor.retain(|id, _| live.contains(id));
+        }
+        let meta = EventMeta { origin: Some(origin), context_id, actor: self.play_actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
         self.turn.lap("start recorded");
         if self.queue_teaches() {
@@ -2857,6 +2949,12 @@ impl Worker {
         self.heard.tick(playing, away, volume);
     }
 
+    /// The actor of the API request that runs now (its token's), `None`
+    /// the owner (an owner's token, the window).
+    fn api_actor(&self) -> Option<nikgob_core::settings::ApiActor> {
+        self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner)
+    }
+
     /// The user picks something else to play (`origin` of what comes): the
     /// playing track ends here.
     pub(crate) fn user_switch(&mut self, origin: EventOrigin) {
@@ -2866,15 +2964,40 @@ impl Worker {
         self.next_origin = Some(origin);
         // Whoever asked for the new queue (an API request's token while its
         // commands run; the window: the owner) plays it from now on.
-        self.queue_actor = self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner);
+        self.queue_actor = self.api_actor();
     }
 
-    /// Whether the plays of the queue that plays teach the live
-    /// recommendations (the session, the skip and next-start models): the
-    /// owner's and an agent's do; a guest's never, the voice assistant's
-    /// are background (as in the history the mixes are made of).
+    /// The user picks another entry of the queue that plays (`origin` of
+    /// what comes): the playing track ends here, the picked `entry` plays
+    /// as whoever picked it, and the queue stays whose it was (after a
+    /// guest's pick in the owner's queue the next song is the owner's).
+    pub(crate) fn user_pick(&mut self, origin: EventOrigin, entry: u64) {
+        if !self.ended {
+            self.record_end(true, EndReason::UserPick);
+        }
+        self.next_origin = Some(origin);
+        let by = self.api_actor();
+        if by == self.queue_actor {
+            self.entry_actor.remove(&entry);
+        } else {
+            self.entry_actor.insert(entry, by);
+        }
+    }
+
+    /// Whether the play that plays teaches the live recommendations (the
+    /// session, the skip and next-start models): the owner's and an
+    /// agent's do; a guest's never, the voice assistant's are background
+    /// (as in the history the mixes are made of).
     fn queue_teaches(&self) -> bool {
-        teaches_live_recs(self.queue_actor)
+        teaches_live_recs(self.play_actor)
+    }
+
+    /// Who ends or seeks the song that plays: an API request's token
+    /// while its commands run (the voice assistant's «дальше» is its own;
+    /// an owner's token is the owner, as the window is), else whoever
+    /// plays it.
+    fn hand_actor(&self) -> Option<nikgob_core::settings::ApiActor> {
+        self.api_actor().or(self.play_actor)
     }
 
     /// The app closes: the playing (or paused) track ends as it is.
@@ -2905,15 +3028,19 @@ impl Worker {
         let complete = !by_user
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
         let position_ms = pos.as_millis() as u32;
+        // Who ended it: a guest's «дальше» on the owner's song is the
+        // guest's, never the owner's skip.
+        let actor = self.hand_actor();
+        let guest = Some(nikgob_core::settings::ApiActor::Guest);
         if reason != EndReason::AppClosed {
-            if self.queue_teaches() {
+            if self.queue_teaches() && teaches_live_recs(actor) {
                 self.recs_played();
                 self.recs_ended(e.track, complete, position_ms, dur);
             }
             // After the session: the radio reads its verdict (a radio the
             // assistant started still follows its skips; a guest's plays
-            // steer nothing).
-            if self.queue_actor != Some(nikgob_core::settings::ApiActor::Guest) {
+            // and skips steer nothing).
+            if self.play_actor != guest && actor != guest {
                 self.radio_feedback(e.track, complete, position_ms, dur);
             }
             // «Дальше» on a guest is a skip at any point of it.
@@ -2921,7 +3048,7 @@ impl Worker {
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();
-        let meta = EventMeta { end_reason: Some(reason), attention, volume, actor: self.queue_actor, ..EventMeta::default() };
+        let meta = EventMeta { end_reason: Some(reason), attention, volume, actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(
             e.track,
             if complete {

@@ -547,6 +547,13 @@ impl Worker {
                 self.mesh_publish();
             }
             Command::MeshSyncReport { node_id, sync } => {
+                // A pull that brought rows: on a device that does not analyse,
+                // the sound vectors among them are read in.
+                let brought = sync.last_ms.is_some() && self.mesh.sync.get(&node_id).and_then(|s| s.last_ms) < sync.last_ms;
+                if brought && !self.compute {
+                    let prefs = self.state.read().prefs.clone();
+                    self.analysis.load_synced(self.lib.clone(), prefs);
+                }
                 if self.mesh.sync.get(&node_id) != Some(&sync) {
                     self.mesh.sync.insert(node_id, sync);
                     self.mesh_publish();

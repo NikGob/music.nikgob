@@ -11,6 +11,10 @@ use crate::error::Result;
 use crate::types::TrackStats;
 use crate::util::{get_enum, get_id, get_opt_enum, opt_u32};
 
+/// Everything but a guest's plays: what the owner, the voice assistant and
+/// the agents put on (their own `actor` and `device` say how much it counts).
+pub(crate) const NOT_GUEST: &str = "coalesce(actor, 'owner') <> 'guest'";
+
 pub(crate) const EVENT_COLS: &str =
     "id, ts, track_id, source_kind, type, position_ms, context, device, origin, context_id, end_reason, attention, volume, actor";
 
@@ -183,7 +187,7 @@ impl Library {
     pub fn recent_events(&self, limit: u32) -> Result<Vec<Event>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(&format!(
-                "SELECT {EVENT_COLS} FROM event ORDER BY ts DESC, id DESC LIMIT ?1"
+                "SELECT {EVENT_COLS} FROM event WHERE {NOT_GUEST} ORDER BY ts DESC, id DESC LIMIT ?1"
             ))?;
             let rows = stmt.query_map([limit], event_from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -194,7 +198,7 @@ impl Library {
     pub fn events_of_track(&self, track: TrackId, limit: u32) -> Result<Vec<Event>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(&format!(
-                "SELECT {EVENT_COLS} FROM event WHERE track_id = ?1
+                "SELECT {EVENT_COLS} FROM event WHERE track_id = ?1 AND {NOT_GUEST}
                   ORDER BY ts DESC, id DESC LIMIT ?2"
             ))?;
             let rows = stmt.query_map(params![track.to_string(), limit], event_from_row)?;
@@ -212,7 +216,8 @@ impl Library {
                       WHERE track_id IN (SELECT ?1
                                          UNION SELECT b.track_id FROM recording_link a
                                                  JOIN recording_link b ON b.recording = a.recording
-                                                WHERE a.track_id = ?1)"
+                                                WHERE a.track_id = ?1)
+                        AND {NOT_GUEST}"
                 ))?
                 .query_row([track.to_string()], |r| stats_from_row_at(r, 0))?)
         })
@@ -226,6 +231,7 @@ impl Library {
             let mut stmt = c.prepare_cached(&format!(
                 "SELECT coalesce(s.canon, e.track_id) AS song, {STATS_COLS}
                    FROM event e LEFT JOIN recording_spare s ON s.track_id = e.track_id
+                  WHERE coalesce(e.actor, 'owner') <> 'guest'
                   GROUP BY song"
             ))?;
             let rows = stmt.query_map([], |r| Ok((get_id(r, 0)?, stats_from_row_at(r, 1)?)))?;
@@ -236,7 +242,7 @@ impl Library {
     /// Total number of stored events.
     pub fn count_events(&self) -> Result<u64> {
         self.read(|c| {
-            Ok(c.query_row("SELECT COUNT(*) FROM event", [], |r| r.get::<_, i64>(0))? as u64)
+            Ok(c.query_row(&format!("SELECT COUNT(*) FROM event WHERE {NOT_GUEST}"), [], |r| r.get::<_, i64>(0))? as u64)
         })
     }
 }

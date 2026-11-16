@@ -3,15 +3,15 @@
 //! entries with their times, and the ids the services know the library by.
 //! Plain rows; the runtime turns them into the engine's inputs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use nikgob_core::model::{ArtistId, Event, ReleaseId, TrackId, UnixMs};
 use nikgob_core::streaming::{RemoteId, Service};
 
 use crate::db::Library;
 use crate::error::Result;
-use crate::events::{EVENT_COLS, event_from_row};
-use crate::util::{get_id, get_opt_id};
+use crate::events::{EVENT_COLS, NOT_GUEST, event_from_row};
+use crate::util::{get_id, get_opt_id, meta_get};
 
 /// One track as the recommendations see it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,10 +34,6 @@ pub struct RecTrack {
     /// plays it once.
     pub song: String,
 }
-
-/// The plays of the owner's own listening: not a guest's, not the voice
-/// assistant's (an agent plays for the owner, as asked).
-const OWN_PLAYS: &str = "coalesce(actor, 'owner') NOT IN ('guest', 'assistant')";
 
 impl Library {
     /// Every track not deleted, with its artists in credit order.
@@ -92,10 +88,9 @@ impl Library {
     }
 
     /// Every start, complete and skip, oldest first (the taste model's
-    /// history; likes and the rest are read as state). Only the owner's
-    /// own listening: a guest's plays never count, and what
-    /// the voice assistant put on (background on another device) is left
-    /// to [`Self::assistant_events`].
+    /// history; likes and the rest are read as state). A guest's plays never
+    /// count; what the voice assistant and the agents put on comes with its
+    /// `actor` and `device`, and the taste weighs it by them.
     ///
     /// A long history is read again and again (every build of the
     /// recommendations, every home), so the last answer is kept while the
@@ -110,7 +105,7 @@ impl Library {
             }
             let mut stmt = c.prepare_cached(
                 &format!(
-                    "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') AND {OWN_PLAYS} ORDER BY ts, id"
+                    "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') AND {NOT_GUEST} ORDER BY ts, id"
                 ),
             )?;
             let rows = stmt.query_map([], event_from_row)?;
@@ -125,30 +120,19 @@ impl Library {
     pub fn seek_events(&self) -> Result<Vec<Event>> {
         self.read(|c| {
             let mut stmt =
-                c.prepare_cached(&format!("SELECT {EVENT_COLS} FROM event WHERE type = 'seek' AND {OWN_PLAYS} ORDER BY ts, id"))?;
+                c.prepare_cached(&format!("SELECT {EVENT_COLS} FROM event WHERE type = 'seek' AND {NOT_GUEST} ORDER BY ts, id"))?;
             let rows = stmt.query_map([], event_from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
-    /// The starts, completes and skips the voice assistant put on, oldest
-    /// first, as background listening (heard from afar: `attention` 1),
-    /// with their device: for a context of their own (music asked for on
-    /// that device), never the owner's mixes.
-    pub fn assistant_events(&self) -> Result<Vec<Event>> {
-        self.read(|c| {
-            let mut stmt = c.prepare_cached(&format!(
-                "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') AND actor = 'assistant' ORDER BY ts, id"
-            ))?;
-            let rows = stmt.query_map([], event_from_row)?;
-            let mut events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            for e in &mut events {
-                if e.event_type != nikgob_core::model::EventType::Start {
-                    e.attention = Some(1.0);
-                }
-            }
-            Ok(events)
-        })
+    /// The ids this device has stamped its events with: its own, and the
+    /// ones it had before it took its node's (`device_ids_before`).
+    pub fn own_device_ids(&self) -> Result<HashSet<String>> {
+        let mut ids: HashSet<String> = HashSet::from([self.device_id().as_str().to_owned()]);
+        let before = self.read(|c| meta_get(c, "device_ids_before"))?.unwrap_or_default();
+        ids.extend(before.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned));
+        Ok(ids)
     }
 
     /// Every liked track and when it was liked, newest first.

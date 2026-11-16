@@ -80,10 +80,18 @@ impl Recs<'_> {
         let mut favourites: Vec<usize> = (0..n_cat).filter(|&i| aff(i) > 0.0 && !self.blocked(i)).collect();
         favourites.sort_by(|a, b| aff(*b).total_cmp(&aff(*a)).then(a.cmp(b)));
         let part = self.taste.day_part();
-        // A dislike near in sound leans a track a little lower.
-        let weight = |i: usize| {
-            f64::from(aff(i)) * f64::from(1.0 + 0.5 * self.taste.daypart_bonus_at(i, part)) * f64::from(1.0 - self.taste.dislike_near_at(i))
+        // The fit to this moment: with the user model, of this part of this
+        // weekday and its sound ([`crate::context`]); else of the part of
+        // the day by the plays.
+        let moment = |i: usize| match self.model {
+            Some(m) => {
+                let slot = m.slot();
+                (m.time_bonus_at(i, slot) + m.sound_fit_at(i, slot)).clamp(-0.9, 1.5)
+            }
+            None => self.taste.daypart_bonus_at(i, part),
         };
+        // A dislike near in sound leans a track a little lower.
+        let weight = |i: usize| f64::from(aff(i)) * f64::from(1.0 + 0.5 * moment(i)) * f64::from(1.0 - self.taste.dislike_near_at(i));
 
 
         // Rediscoveries: favourites (played or liked) long unplayed.
@@ -207,6 +215,8 @@ mod tests {
                     origin: None,
                     end_reason: None,
                     attention: None,
+                    actor: Default::default(),
+                    device: Default::default(),
                 });
             }
         }
@@ -221,6 +231,8 @@ mod tests {
                     origin: None,
                     end_reason: None,
                     attention: None,
+                    actor: Default::default(),
+                    device: Default::default(),
                 });
             }
         }
@@ -234,6 +246,8 @@ mod tests {
             origin: None,
             end_reason: None,
             attention: None,
+            actor: Default::default(),
+            device: Default::default(),
         });
         let input = TasteInput {
             events,

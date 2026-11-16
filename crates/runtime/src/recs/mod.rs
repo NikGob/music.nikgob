@@ -91,6 +91,9 @@ const MAX_REST: Duration = Duration::from_secs(300);
 /// The analysis added this many vectors (or a tenth of the index, or
 /// doubled it) since the last build: built again.
 const NEW_VECTORS: usize = 200;
+/// A sync brought vectors to a device that does not analyse: built again
+/// this soon (the pulls of one sync come together).
+const SYNCED_SOUND_REST: Duration = Duration::from_secs(60);
 /// Library cache keys.
 const DAILY_KEY: &str = "recs.daily";
 const DAYLIST_KEY: &str = "recs.daylist";
@@ -980,8 +983,17 @@ fn read_parts(
     let seeks = lib.seek_events().unwrap_or_default();
     let kept: Option<nikgob_recs::profiles::ProfileHistory> =
         lib.cache_get(PROFILES_KEY).ok().flatten().and_then(|(_, json)| serde_json::from_str(&json).ok());
+    // Each play on the kind of device it was on, for the device the taste
+    // is for (this one); a guest's device is left out.
+    let devices = Devices::read(lib);
     let history = TasteInput {
-        events: events.iter().chain(&seeks).map(play_of).collect(),
+        events: events.iter().chain(&seeks).filter_map(|e| devices.place(e, play_of(e))).collect(),
+        target_device: devices.here(),
+        // Each play by the clock of its own day (the summer time and back);
+        // an offset asked for that is not the zone's now keeps to itself.
+        utc_offsets: Some(local_offsets(events.iter().map(|e| e.ts).min().unwrap_or(now), now))
+            .filter(|o| o.last().map(|x| x.1) == Some(utc_offset_min))
+            .unwrap_or_default(),
         playlists: tiles_input.playlists.iter().map(|p| p.tracks.clone()).collect(),
         profiles: nikgob_recs::profiles::Settings {
             background_less: extra.background_less,
@@ -1302,6 +1314,102 @@ pub(crate) fn play_of(e: &nikgob_core::model::Event) -> nikgob_recs::Play {
         p.origin = Some(nikgob_core::model::EventOrigin::Import);
     }
     p
+}
+
+/// The kind of device this process plays on ([`v::MeshKind::ALL`]'s
+/// place; a computer until it is told): one fact of the process, read by
+/// the builds on their threads, which have the library only.
+static OWN_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// This process plays on a `kind` of device (the Pi's daemon is a Pi).
+/// Whether it changed.
+pub(crate) fn set_own_kind(kind: v::MeshKind) -> bool {
+    let k = v::MeshKind::ALL.iter().position(|x| *x == kind).unwrap_or(0) as u8;
+    OWN_KIND.swap(k, std::sync::atomic::Ordering::Relaxed) != k
+}
+
+/// See [`set_own_kind`].
+pub(crate) fn own_kind() -> v::MeshKind {
+    v::MeshKind::ALL.get(usize::from(OWN_KIND.load(std::sync::atomic::Ordering::Relaxed))).copied().unwrap_or_default()
+}
+
+/// What kind of device each play was on, by the id it is stamped with:
+/// this device's own ids its own kind, a paired device's as its row says;
+/// a guest's device is no one's history. Any other id (one from before a
+/// device took its node's, an import) a personal device.
+pub(crate) struct Devices {
+    own: HashSet<String>,
+    here: nikgob_recs::PlayDevice,
+    nodes: HashMap<String, Option<nikgob_recs::PlayDevice>>,
+}
+
+impl Devices {
+    pub(crate) fn read(lib: &Library) -> Self {
+        let here = nikgob_recs::PlayDevice::of_kind(own_kind().key());
+        let own = lib.own_device_ids().unwrap_or_else(|e| {
+            log::warn!("recs: this device's ids: {e}");
+            HashSet::new()
+        });
+        let nodes = lib
+            .nodes()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|n| {
+                let kind = (!n.scope.eq_ignore_ascii_case(v::MeshScope::Guest.key())).then(|| nikgob_recs::PlayDevice::of_kind(&n.kind));
+                (n.id, kind)
+            })
+            .collect();
+        Self { own, here, nodes }
+    }
+
+    /// The device the taste is for: this one.
+    pub(crate) fn here(&self) -> nikgob_recs::PlayDevice {
+        self.here
+    }
+
+    /// The kind of device `device` is; none for a guest's.
+    pub(crate) fn of(&self, device: &str) -> Option<nikgob_recs::PlayDevice> {
+        if self.own.contains(device) {
+            return Some(self.here);
+        }
+        self.nodes.get(device).copied().unwrap_or(Some(nikgob_recs::PlayDevice::Personal))
+    }
+
+    /// `p` (read of `e`) with the device it was played on; none when it
+    /// was a guest's device.
+    pub(crate) fn place(&self, e: &nikgob_core::model::Event, mut p: nikgob_recs::Play) -> Option<nikgob_recs::Play> {
+        p.device = self.of(e.device.as_str())?;
+        Some(p)
+    }
+}
+
+/// The local offsets (minutes east of UTC) of this device's time zone from
+/// `from` to `to`: the one at `from`, then each change by the zone's rules,
+/// oldest first ([`nikgob_recs::TasteInput::utc_offsets`]).
+pub(crate) fn local_offsets(from: UnixMs, to: UnixMs) -> Vec<(UnixMs, i32)> {
+    let Ok(start) = jiff::Timestamp::from_millisecond(from) else { return Vec::new() };
+    let tz = jiff::tz::TimeZone::system();
+    let mut out = vec![(from, tz.to_offset(start).seconds() / 60)];
+    for t in tz.following(start) {
+        let at = t.timestamp().as_millisecond();
+        // Two changes a year: a long history has a few dozen.
+        if at > to || out.len() >= 4_096 {
+            break;
+        }
+        out.push((at, t.offset().seconds() / 60));
+    }
+    out
+}
+
+/// Whether each of `plays` counts whole on a list of what was played (a
+/// tile, «Слушать снова»): what a room heard on and on from afar, or the
+/// assistant put on in passing, weighs less than half a play there
+/// ([`nikgob_recs::context::event_weights`]).
+pub(crate) fn whole(plays: &[nikgob_recs::Play]) -> Vec<bool> {
+    nikgob_recs::context::event_weights(plays, nikgob_recs::PlayDevice::Personal)
+        .into_iter()
+        .map(|w| w >= nikgob_recs::context::FULL_PLAY)
+        .collect()
 }
 
 /// The taste profiles of a build in the log: a line
@@ -2742,6 +2850,19 @@ impl Worker {
         }
         log::info!("recs: the run's first build, before the first tick");
         self.recs_build();
+    }
+
+    /// The vectors the sync brought are in memory (a device that does not
+    /// analyse): the run's first build, or one soon when anything of the
+    /// sound `changed` (a vector new or replaced, a sketch, a vector of
+    /// the model).
+    pub(crate) fn recs_sound_loaded(&mut self, changed: bool) {
+        // A build under way read the index before these came.
+        if self.recs.built_at.is_none() && !self.recs.building {
+            self.recs_first_build();
+        } else if changed {
+            self.recs_dirty(SYNCED_SOUND_REST);
+        }
     }
 
     fn recs_build(&mut self) {

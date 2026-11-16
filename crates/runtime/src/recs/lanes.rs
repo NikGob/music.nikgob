@@ -451,8 +451,6 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
         && let Some(tracks) = on_repeat(snap, tiles)
     {
         let anchors = vec![true; tracks.len()];
-        let week = snap.model.taste.now() - 7 * DAY_MS;
-        let starts = tiles.events.iter().filter(|p| p.ts >= week && p.kind == EventType::Start && tracks.contains(&p.track)).count();
         out.push(LaneHome {
             key: v::MixKey::OnRepeat,
             title: "На повторе".into(),
@@ -465,7 +463,8 @@ pub(super) fn build(snap: &Snapshot, input: &BuildInput, tiles: &TilesInput) -> 
             open: false,
             niche: Vec::new(),
             blend_base: None,
-            why: nikgob_recs::explain::on_repeat(starts as u32),
+            // A card's name is all it says.
+            why: None,
         });
     }
     (out, blendable)
@@ -609,8 +608,8 @@ fn lane_of(snap: &Snapshot, tiles: &TilesInput, m: &Mix) -> LaneHome {
         open: false,
         niche: Vec::new(),
         blend_base: m.key.blend_base(),
-        // A blend is the user's own, «Любимые» says what it is.
-        why: if matches!(m.key, MixKey::Blend(_) | MixKey::Liked) { None } else { snap.recs().why_moment(&m.tracks, &m.title) },
+        // A card's name is all it says.
+        why: None,
     }
 }
 

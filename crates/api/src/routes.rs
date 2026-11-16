@@ -33,6 +33,13 @@ impl Shared {
         Ok(Json(StateAnswer { state: self.snapshot() }))
     }
 
+    /// [`Self::answer`] of a token that plays for `actor`: what the
+    /// commands start or end is the actor's in the history.
+    async fn answer_by(&self, actor: nikgob_view::ApiActor, commands: Vec<Command>) -> Result<Json<StateAnswer>, ApiError> {
+        self.run_by(Some(actor), commands).await?;
+        Ok(Json(StateAnswer { state: self.snapshot() }))
+    }
+
     fn playing(&self) -> bool {
         self.rt.state().player.status == Status::Playing
     }
@@ -164,7 +171,7 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     let b: PlayBody = body(&bytes)?;
     let kind = b.kind.unwrap_or_default();
     let mode = b.mode.unwrap_or_default();
-    if kind == Kind::Wave && mode != Mode::Replace {
+    if matches!(kind, Kind::Wave | Kind::Part) && mode != Mode::Replace {
         return Err(play::wave_not_queued());
     }
     // The output first: a device that does not exist changes nothing.
@@ -178,7 +185,7 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     // Another device's queue is not known here.
     let to_node = output.as_ref().is_some_and(|p| matches!(p.target, Some((Some(_), _))));
     let query = b.query.clone().unwrap_or_default();
-    let resume = b.id.is_none() && query.trim().is_empty() && !matches!(kind, Kind::Liked | Kind::Wave);
+    let resume = b.id.is_none() && query.trim().is_empty() && !matches!(kind, Kind::Liked | Kind::Wave | Kind::Part);
     if resume && !to_node && sh.empty() {
         return Err(ApiError::nothing_to_play());
     }
@@ -216,8 +223,8 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
 }
 
 #[utoipa::path(post, path = "/v1/player/pause", tag = "player", responses((status = 200, body = StateAnswer)), security(("bearer" = [])))]
-pub async fn pause(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, ApiError> {
-    sh.answer(vec![Command::Pause]).await
+pub async fn pause(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<StateAnswer>, ApiError> {
+    sh.answer_by(caller.actor, vec![Command::Pause]).await
 }
 
 #[utoipa::path(
@@ -227,12 +234,12 @@ pub async fn pause(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, A
     responses((status = 200, body = StateAnswer), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn resume(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn resume(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<StateAnswer>, ApiError> {
     sh.audio()?;
     if sh.empty() {
         return Err(ApiError::nothing_to_play());
     }
-    sh.answer(vec![Command::Play]).await
+    sh.answer_by(caller.actor, vec![Command::Play]).await
 }
 
 #[utoipa::path(
@@ -242,7 +249,7 @@ pub async fn resume(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, 
     responses((status = 200, body = StateAnswer), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn toggle(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn toggle(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<StateAnswer>, ApiError> {
     // A pause needs no sound.
     if !sh.playing() {
         sh.audio()?;
@@ -250,7 +257,7 @@ pub async fn toggle(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, 
     if sh.empty() {
         return Err(ApiError::nothing_to_play());
     }
-    sh.answer(vec![Command::TogglePlay]).await
+    sh.answer_by(caller.actor, vec![Command::TogglePlay]).await
 }
 
 #[utoipa::path(
@@ -260,19 +267,19 @@ pub async fn toggle(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, 
     responses((status = 200, body = StateAnswer), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn next(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn next(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<StateAnswer>, ApiError> {
     sh.audio()?;
     if sh.empty() {
         return Err(ApiError::nothing_to_play());
     }
-    sh.answer(vec![Command::Next]).await
+    sh.answer_by(caller.actor, vec![Command::Next]).await
 }
 
 /// Past 3 s of the song it starts again, as in the player.
 #[utoipa::path(post, path = "/v1/player/previous", tag = "player", responses((status = 200, body = StateAnswer)), security(("bearer" = [])))]
-pub async fn previous(State(sh): State<Arc<Shared>>) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn previous(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<StateAnswer>, ApiError> {
     sh.audio()?;
-    sh.answer(vec![Command::Previous]).await
+    sh.answer_by(caller.actor, vec![Command::Previous]).await
 }
 
 /// `PUT /v1/player/volume`: one of the three.
@@ -405,7 +412,7 @@ pub struct SeekBody {
     responses((status = 200, body = StateAnswer), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn seek(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn seek(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: SeekBody = body(&bytes)?;
     let c = match (b.position_ms, b.delta_ms) {
         (Some(p), None) => Command::Seek(Duration::from_millis(u64::try_from(p.max(0)).unwrap_or(0))),
@@ -415,7 +422,7 @@ pub async fn seek(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<St
     if sh.empty() {
         return Err(ApiError::nothing_to_play());
     }
-    sh.answer(vec![c]).await
+    sh.answer_by(caller.actor, vec![c]).await
 }
 
 /// `PUT /v1/player/mode`.
@@ -446,7 +453,7 @@ pub fn mode_commands(shuffle: bool, repeat: RepeatMode, b: &ModeBody) -> Vec<Com
     responses((status = 200, body = StateAnswer), (status = 400, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn mode(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn mode(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: ModeBody = body(&bytes)?;
     if b.shuffle.is_none() && b.repeat.is_none() {
         return Err(ApiError::bad_request("Нужно shuffle или repeat"));
@@ -455,7 +462,7 @@ pub async fn mode(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<St
         let st = sh.rt.state();
         (st.player.shuffle, RepeatMode::of(st.player.repeat))
     };
-    sh.answer(mode_commands(shuffle, repeat, &b)).await
+    sh.answer_by(caller.actor, mode_commands(shuffle, repeat, &b)).await
 }
 
 /// Where the sound goes: the sound devices of this computer, then the
@@ -610,7 +617,7 @@ pub struct QueueAdd {
     responses((status = 200, body = QueueAnswer), (status = 400, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn queue_add(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<QueueAnswer>, ApiError> {
+pub async fn queue_add(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<QueueAnswer>, ApiError> {
     let b: QueueAdd = body(&bytes)?;
     if b.track_ids.is_empty() {
         return Err(ApiError::bad_request("Нужен track_ids"));
@@ -621,7 +628,7 @@ pub async fn queue_add(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Js
         QueueMode::Next => Command::PlayNext(ids),
         QueueMode::Enqueue => Command::Enqueue(ids),
     };
-    sh.run(vec![c]).await?;
+    sh.run_by(Some(caller.actor), vec![c]).await?;
     Ok(Json(sh.queue_now()))
 }
 
@@ -633,12 +640,12 @@ pub async fn queue_add(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Js
     responses((status = 200, body = StateAnswer), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn queue_play(State(sh): State<Arc<Shared>>, Path(entry): Path<String>) -> Result<Json<StateAnswer>, ApiError> {
+pub async fn queue_play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, Path(entry): Path<String>) -> Result<Json<StateAnswer>, ApiError> {
     let entry = entry_of(&entry)?;
     if !sh.has_entry(entry) {
         return Err(ApiError::not_found("Такого места в очереди нет"));
     }
-    sh.answer(vec![Command::PlayQueueEntry(entry)]).await
+    sh.answer_by(caller.actor, vec![Command::PlayQueueEntry(entry)]).await
 }
 
 #[utoipa::path(
@@ -649,12 +656,12 @@ pub async fn queue_play(State(sh): State<Arc<Shared>>, Path(entry): Path<String>
     responses((status = 200, body = QueueAnswer), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn queue_remove(State(sh): State<Arc<Shared>>, Path(entry): Path<String>) -> Result<Json<QueueAnswer>, ApiError> {
+pub async fn queue_remove(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, Path(entry): Path<String>) -> Result<Json<QueueAnswer>, ApiError> {
     let entry = entry_of(&entry)?;
     if !sh.has_entry(entry) {
         return Err(ApiError::not_found("Такого места в очереди нет"));
     }
-    sh.run(vec![Command::RemoveFromQueue(entry)]).await?;
+    sh.run_by(Some(caller.actor), vec![Command::RemoveFromQueue(entry)]).await?;
     Ok(Json(sh.queue_now()))
 }
 
@@ -675,7 +682,7 @@ pub struct QueueMove {
     responses((status = 200, body = QueueAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn queue_move(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<QueueAnswer>, ApiError> {
+pub async fn queue_move(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<QueueAnswer>, ApiError> {
     let b: QueueMove = body(&bytes)?;
     let (Some(entry), Some(anchor)) = (b.entry, b.anchor) else {
         return Err(ApiError::bad_request("Нужны entry и anchor"));
@@ -683,13 +690,13 @@ pub async fn queue_move(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<J
     if !sh.has_entry(entry) || !sh.has_entry(anchor) {
         return Err(ApiError::not_found("Такого места в очереди нет"));
     }
-    sh.run(vec![Command::MoveInQueue { entry, anchor, after: b.after.unwrap_or(true) }]).await?;
+    sh.run_by(Some(caller.actor), vec![Command::MoveInQueue { entry, anchor, after: b.after.unwrap_or(true) }]).await?;
     Ok(Json(sh.queue_now()))
 }
 
 #[utoipa::path(delete, path = "/v1/queue", tag = "queue", responses((status = 200, body = QueueAnswer)), security(("bearer" = [])))]
-pub async fn queue_clear(State(sh): State<Arc<Shared>>) -> Result<Json<QueueAnswer>, ApiError> {
-    sh.run(vec![Command::ClearQueue]).await?;
+pub async fn queue_clear(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<QueueAnswer>, ApiError> {
+    sh.run_by(Some(caller.actor), vec![Command::ClearQueue]).await?;
     Ok(Json(sh.queue_now()))
 }
 

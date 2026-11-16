@@ -1,5 +1,6 @@
-//! `POST /v1/player/play`: what a spoken query means. «Моя волна» and
-//! «Любимые» (and their English names) are found by their words; anything
+//! `POST /v1/player/play`: what a spoken query means. «Моя волна»,
+//! «Любимые» and the mixes of the parts of the day («доброе утро»,
+//! «вечерний микс»; and their English names) are found by their words; anything
 //! else is searched in the library and the best match wins, ties going to
 //! a playlist, then an artist, an album, a song.
 
@@ -24,6 +25,9 @@ pub enum Kind {
     Playlist,
     Liked,
     Wave,
+    /// The mix of a part of the day («Доброе утро», «День», «Вечер»,
+    /// «Ночь»): its id is the part, 0–3 from the morning.
+    Part,
 }
 
 /// Where it goes in the queue.
@@ -107,9 +111,54 @@ pub fn special(query: &str) -> Option<Kind> {
         Some(Kind::Wave)
     } else if LIKED.contains(&q.as_str()) {
         Some(Kind::Liked)
+    } else if special_part(query).is_some() {
+        Some(Kind::Part)
     } else {
         None
     }
+}
+
+/// The mixes of the parts of the day by their names, 0–3 from the morning.
+pub const PARTS: [&str; 4] = ["Доброе утро", "День", "Вечер", "Ночь"];
+
+/// The part of the day a spoken query asks the mix of («доброе утро»,
+/// «вечерний микс»), 0–3 from the morning. A bare «ночь» or «вечер» is
+/// a title as well (an album, a song), so only the mix's own words count.
+pub fn special_part(query: &str) -> Option<u8> {
+    const WORDS: [&[&str]; 4] = [
+        &["доброе утро", "утренний микс", "утренняя музыка", "микс доброе утро", "good morning", "morning mix"],
+        &["дневной микс", "дневная музыка", "микс на день", "day mix", "daytime mix"],
+        &["вечерний микс", "вечерняя музыка", "микс на вечер", "evening mix"],
+        &["ночной микс", "ночная музыка", "микс на ночь", "night mix"],
+    ];
+    let q = bare(query);
+    WORDS.iter().position(|w| w.contains(&q.as_str())).map(|p| p as u8)
+}
+
+/// The part a query names when the part is asked for already: the mix's
+/// words, a part's own name («утро», «вечер», «night») or its number.
+fn part_of(query: &str) -> Option<u8> {
+    if let Some(p) = special_part(query) {
+        return Some(p);
+    }
+    const NAMES: [&[&str]; 4] = [
+        &["утро", "утром", "morning", "0"],
+        &["день", "днем", "day", "daytime", "1"],
+        &["вечер", "вечером", "evening", "2"],
+        &["ночь", "ночью", "night", "3"],
+    ];
+    let q = bare(query);
+    let q: &str = q.strip_suffix(" микс").unwrap_or(q.as_str());
+    NAMES.iter().position(|w| w.contains(&q)).map(|p| p as u8)
+}
+
+fn part(p: u8) -> Target {
+    Target { kind: Kind::Part, id: Some(p.to_string()), title: PARTS[usize::from(p)].to_owned() }
+}
+
+/// A part asked for that is none of the four.
+fn no_such_part() -> ApiError {
+    ApiError::bad_request("Часть дня: утро, день, вечер или ночь")
 }
 
 /// How well `c` answers the normalized query `q` (higher is better).
@@ -223,6 +272,7 @@ pub fn exact(lib: &Library, kind: Kind, id: &str) -> Result<Target, ApiError> {
     match kind {
         Kind::Liked => Ok(liked()),
         Kind::Wave => Ok(wave()),
+        Kind::Part => part_of(id).map(part).ok_or_else(no_such_part),
         Kind::Any => Err(ApiError::bad_request("С id нужен kind: track, album, artist или playlist")),
         Kind::Track => {
             let id: TrackId = id.parse().map_err(|_| bad())?;
@@ -256,9 +306,15 @@ pub fn find(lib: &Library, query: &str, kind: Kind) -> Result<Target, ApiError> 
     match kind {
         Kind::Liked => return Ok(liked()),
         Kind::Wave => return Ok(wave()),
+        Kind::Part => return part_of(query).map(part).ok_or_else(no_such_part),
         Kind::Any => match special(query) {
             Some(Kind::Liked) => return Ok(liked()),
             Some(Kind::Wave) => return Ok(wave()),
+            Some(Kind::Part) => {
+                if let Some(p) = special_part(query) {
+                    return Ok(part(p));
+                }
+            }
             _ => {}
         },
         _ => {}
@@ -291,6 +347,13 @@ pub fn commands(t: &Target, shuffle: bool, mode: Mode) -> Result<Vec<Command>, A
     let c = match (t.kind, mode) {
         (Kind::Wave, Mode::Replace) => return Ok(vec![Command::PlayWave { preset: None }]),
         (Kind::Wave, _) => return Err(wave_not_queued()),
+        // The part's mix as «Моя волна» of that part: the card of a part
+        // is on the home only while it lasts, the wave of any part is.
+        (Kind::Part, Mode::Replace) => {
+            let p: u8 = id.parse().ok().filter(|p| usize::from(*p) < PARTS.len()).ok_or_else(no_such_part)?;
+            return Ok(vec![Command::PlayWave { preset: Some(nikgob_view::MixKey::Part(p)) }]);
+        }
+        (Kind::Part, _) => return Err(wave_not_queued()),
         (Kind::Liked, Mode::Replace) => Command::PlayPlaylist { id: LIKED_PLAYLIST, start: None, shuffle },
         (Kind::Liked, Mode::Next) => Command::PlayPlaylistNext(LIKED_PLAYLIST),
         (Kind::Liked, Mode::Enqueue) => Command::EnqueuePlaylist(LIKED_PLAYLIST),
@@ -350,6 +413,32 @@ mod tests {
         for q in ["radiohead", "волна за волной", "любимые песни на ночь", ""] {
             assert_eq!(special(q), None, "{q}");
         }
+    }
+
+    #[test]
+    fn the_mix_of_a_part_of_the_day_by_its_words() {
+        for (q, p) in [("Доброе утро", 0), ("включи утренний микс", 0), ("поставь дневной микс", 1), ("Вечерний микс!", 2), ("включи ночной микс", 3)] {
+            assert_eq!(special_part(q), Some(p), "{q}");
+            assert_eq!(special(q), Some(Kind::Part), "{q}");
+        }
+        // A bare «ночь» may be an album: searched as anything else.
+        for q in ["ночь", "вечер", "день", "звезда по имени солнце"] {
+            assert_eq!(special_part(q), None, "{q}");
+        }
+        // With the part asked for, its name or number is enough.
+        for (q, p) in [("утро", 0), ("Ночь", 3), ("вечер", 2), ("1", 1), ("evening", 2), ("ночной микс", 3)] {
+            assert_eq!(part_of(q), Some(p), "{q}");
+        }
+        assert_eq!(part_of("полдник"), None);
+        let t = part(0);
+        assert_eq!((t.kind, t.id.as_deref(), t.title.as_str()), (Kind::Part, Some("0"), "Доброе утро"));
+        assert!(matches!(
+            commands(&t, false, Mode::Replace).unwrap()[..],
+            [Command::PlayWave { preset: Some(nikgob_view::MixKey::Part(0)) }]
+        ));
+        assert_eq!(commands(&t, false, Mode::Next).unwrap_err().code, "bad_request");
+        let broken = Target { kind: Kind::Part, id: Some("7".into()), title: String::new() };
+        assert_eq!(commands(&broken, false, Mode::Replace).unwrap_err().code, "bad_request");
     }
 
     #[test]

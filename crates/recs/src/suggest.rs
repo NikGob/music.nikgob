@@ -194,6 +194,8 @@ mod tests {
                 origin: None,
                 end_reason: None,
                 attention: None,
+                actor: Default::default(),
+                device: Default::default(),
             }],
             suggested_tracks: vec![
                 // 0: once, fresh: 0.6.
@@ -323,6 +325,8 @@ mod tests {
                 origin: None,
                 end_reason: None,
                 attention: None,
+                actor: Default::default(),
+                device: Default::default(),
             })
             .collect();
         let taste = Taste::build(&cat, &TasteInput { events, ..Default::default() }, now);

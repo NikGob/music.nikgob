@@ -36,9 +36,13 @@
 //!   playlists), and the prior of each track of the library.
 //! * [`wave`]: «Моя волна» — its filters and the bandit of the user's
 //!   clusters that leads it.
+//! * [`context`]: who played, on what kind of device, when — how much each
+//!   play teaches the recommendations of a device, and the user's habits
+//!   by the part of the day and the day of the week.
 
 pub mod analysis;
 pub mod background;
+pub mod context;
 pub mod daily;
 pub mod daylist;
 pub mod discover;
@@ -83,6 +87,7 @@ pub use analysis::{
 pub use embedding::{Compact, EMBEDDED_WITH, SoundModel};
 pub use sketch::{Crest, SKETCHED_WITH, STYLED_WITH, SoundSketch};
 pub use styles::Styles;
+pub use context::{PlayActor, PlayDevice, TimeModel, TimeSlot};
 pub use daily::DailyParams;
 pub use daylist::{Centre, DAYLIST_LEN, daylist_title};
 pub use discover::{
@@ -163,6 +168,8 @@ pub(crate) mod test_util {
                 origin: None,
                 end_reason: None,
                 attention: None,
+                actor: Default::default(),
+                device: Default::default(),
             })
             .collect();
         let likes = (0..2_000).map(|_| tid(rng.below(tracks as usize) as u128)).collect();
