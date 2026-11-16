@@ -276,13 +276,21 @@ pub fn shuffled(kind: Kind, asked: Option<bool>) -> bool {
     asked.unwrap_or(matches!(kind, Kind::Artist | Kind::Liked))
 }
 
-/// The commands that play `t`. The wave cannot go after the current track:
-/// it always replaces the queue.
+/// The wave asked to go after the current track or at the end: it can only
+/// replace the queue.
+pub fn wave_not_queued() -> ApiError {
+    ApiError::bad_request("Волну можно только включить вместо очереди")
+}
+
+/// The commands that play `t`. A new queue (`replace`) gets `shuffle`
+/// before it is made; the wave only replaces the queue (and keeps its own
+/// order).
 pub fn commands(t: &Target, shuffle: bool, mode: Mode) -> Result<Vec<Command>, ApiError> {
     let bad = || ApiError::bad_request("Неверный id");
     let id = t.id.as_deref().unwrap_or_default();
     let c = match (t.kind, mode) {
-        (Kind::Wave, _) => Command::PlayWave { preset: None },
+        (Kind::Wave, Mode::Replace) => return Ok(vec![Command::PlayWave { preset: None }]),
+        (Kind::Wave, _) => return Err(wave_not_queued()),
         (Kind::Liked, Mode::Replace) => Command::PlayPlaylist { id: LIKED_PLAYLIST, start: None, shuffle },
         (Kind::Liked, Mode::Next) => Command::PlayPlaylistNext(LIKED_PLAYLIST),
         (Kind::Liked, Mode::Enqueue) => Command::EnqueuePlaylist(LIKED_PLAYLIST),
@@ -320,7 +328,7 @@ pub fn commands(t: &Target, shuffle: bool, mode: Mode) -> Result<Vec<Command>, A
         }
         (Kind::Any, _) => return Err(ApiError::bad_request("Не сказано, что играть")),
     };
-    Ok(vec![c])
+    Ok(if mode == Mode::Replace { vec![Command::ApiShuffle(shuffle), c] } else { vec![c] })
 }
 
 #[cfg(test)]
@@ -377,16 +385,31 @@ mod tests {
     #[test]
     fn what_plays_and_where() {
         let t = Target { kind: Kind::Artist, id: Some(ArtistId::new().to_string()), title: "R".into() };
-        assert!(matches!(commands(&t, true, Mode::Replace).unwrap()[..], [Command::PlayArtist { shuffle: true, .. }]));
+        assert!(matches!(
+            commands(&t, true, Mode::Replace).unwrap()[..],
+            [Command::ApiShuffle(true), Command::PlayArtist { shuffle: true, .. }]
+        ));
         assert!(matches!(commands(&t, false, Mode::Next).unwrap()[..], [Command::PlayArtistNext(_)]));
-        assert!(matches!(commands(&wave(), false, Mode::Enqueue).unwrap()[..], [Command::PlayWave { preset: None }]));
+        assert!(matches!(commands(&wave(), false, Mode::Replace).unwrap()[..], [Command::PlayWave { preset: None }]));
+        assert_eq!(commands(&wave(), false, Mode::Enqueue).unwrap_err().code, "bad_request");
+        assert_eq!(commands(&wave(), false, Mode::Next).unwrap_err().code, "bad_request");
         assert!(matches!(
             commands(&liked(), true, Mode::Replace).unwrap()[..],
-            [Command::PlayPlaylist { id, start: None, shuffle: true }] if id == LIKED_PLAYLIST
+            [Command::ApiShuffle(true), Command::PlayPlaylist { id, start: None, shuffle: true }] if id == LIKED_PLAYLIST
         ));
         let track = Target { kind: Kind::Track, id: Some(TrackId::new().to_string()), title: "S".into() };
         assert!(matches!(commands(&track, false, Mode::Enqueue).unwrap()[..], [Command::Enqueue(_)]));
-        assert!(matches!(commands(&track, false, Mode::Replace).unwrap()[..], [Command::PlayTracks { start: 0, .. }]));
+        // A single song replacing the queue is in order unless asked: the
+        // shuffle of the queue before does not stay.
+        assert!(matches!(
+            commands(&track, false, Mode::Replace).unwrap()[..],
+            [Command::ApiShuffle(false), Command::PlayTracks { start: 0, .. }]
+        ));
+        let album = Target { kind: Kind::Album, id: Some(ReleaseId::new().to_string()), title: "A".into() };
+        assert!(matches!(
+            commands(&album, shuffled(Kind::Album, None), Mode::Replace).unwrap()[..],
+            [Command::ApiShuffle(false), Command::PlayRelease { shuffle: false, .. }]
+        ));
         let broken = Target { kind: Kind::Album, id: Some("nope".into()), title: String::new() };
         assert_eq!(commands(&broken, false, Mode::Replace).unwrap_err().code, "bad_request");
         assert!(shuffled(Kind::Artist, None) && shuffled(Kind::Liked, None));

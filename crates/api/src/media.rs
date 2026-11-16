@@ -1,6 +1,11 @@
 //! The files: a song's best local file as it is (HTTP Range: a player can
 //! seek and resume), and an album's cover. Conversion to other formats
 //! comes later (profiles).
+//!
+//! Only files inside the library, the masters folder and the folders the
+//! host names ([`crate::ApiContext::media_roots`]) are served, with links
+//! followed first: a library entry that is a link to a file elsewhere is
+//! "not found", like a file the library does not have.
 
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -92,12 +97,44 @@ pub fn content_type(path: &FsPath) -> &'static str {
     }
 }
 
-/// `path` as the answer to `headers` (its Range).
-async fn serve_file(path: PathBuf, headers: &HeaderMap) -> Result<Response, ApiError> {
+/// `path` with its links followed, if that is inside one of `roots`
+/// (themselves with links followed).
+pub fn inside(path: &FsPath, roots: &[PathBuf]) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(path).ok()?;
+    roots.iter().any(|r| real.starts_with(r)).then_some(real)
+}
+
+/// The folders files are served from, links followed (a folder that is
+/// not there is left out).
+fn roots(shared: &Shared) -> Vec<PathBuf> {
+    let (library, masters) = {
+        let st = shared.rt.state();
+        (st.prefs.library_dir.clone(), st.prefs.masters_dir.clone())
+    };
+    [library, masters]
+        .into_iter()
+        .chain(shared.media_roots.iter().cloned())
+        .filter(|p| !p.as_os_str().is_empty())
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect()
+}
+
+/// Opens `path` if it is a file inside `roots`: by its real path, which is
+/// checked again once open (a link put in between is refused).
+fn open_inside(path: &FsPath, roots: &[PathBuf]) -> Option<(std::fs::File, PathBuf)> {
+    let real = inside(path, roots)?;
+    let file = std::fs::File::open(&real).ok()?;
+    let still = std::fs::canonicalize(&real).ok()? == real;
+    (still && file.metadata().ok()?.is_file()).then_some((file, real))
+}
+
+/// The open file `file` (named `path`, for its type) as the answer to
+/// `headers` (its Range).
+async fn serve_file(file: std::fs::File, path: &FsPath, headers: &HeaderMap) -> Result<Response, ApiError> {
     let gone = || ApiError::not_found("Файла нет");
-    let mut file = tokio::fs::File::open(&path).await.map_err(|_| gone())?;
+    let mut file = tokio::fs::File::from_std(file);
     let size = file.metadata().await.map_err(|_| gone())?.len();
-    let kind = HeaderValue::from_static(content_type(&path));
+    let kind = HeaderValue::from_static(content_type(path));
     let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     let (status, start, len) = match parse_range(range, size) {
         Span::Full => (StatusCode::OK, 0, size),
@@ -129,14 +166,16 @@ async fn serve_file(path: PathBuf, headers: &HeaderMap) -> Result<Response, ApiE
     Ok(r)
 }
 
-/// The song's best local file: available, the best quality first.
-fn best_file(shared: &Shared, track: TrackId) -> Result<Option<PathBuf>, ApiError> {
+/// The song's best local file inside the served folders, open: available,
+/// the best quality first.
+fn best_file(shared: &Shared, track: TrackId) -> Result<Option<(std::fs::File, PathBuf)>, ApiError> {
     let sources = shared.lib.sources_of_track(track).map_err(db)?;
     let root = shared.rt.state().prefs.library_dir.clone();
     let resolver = Resolver::new(shared.lib.clone(), root);
+    let roots = roots(shared);
     let mut local: Vec<_> = sources.into_iter().filter(|s| s.kind == SourceKind::LocalFile && s.available && s.trashed_at.is_none()).collect();
     local.sort_by_key(|s| (std::cmp::Reverse(s.is_active), std::cmp::Reverse(s.quality_score)));
-    Ok(local.into_iter().map(|s| resolver.path(&s.locator)).find(|p| p.is_file()))
+    Ok(local.into_iter().find_map(|s| open_inside(&resolver.path(&s.locator), &roots)))
 }
 
 /// `GET /v1/media/tracks/{id}/audio`.
@@ -156,13 +195,13 @@ fn best_file(shared: &Shared, track: TrackId) -> Result<Option<PathBuf>, ApiErro
 pub async fn audio(State(sh): State<Arc<Shared>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
     let id: TrackId = id.parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
     let shared = sh.clone();
-    let path = blocking(move || best_file(&shared, id)).await?.ok_or_else(|| ApiError::not_found("Файла этой песни здесь нет"))?;
-    serve_file(path, &headers).await
+    let (file, path) = blocking(move || best_file(&shared, id)).await?.ok_or_else(|| ApiError::not_found("Файла этой песни здесь нет"))?;
+    serve_file(file, &path, &headers).await
 }
 
-/// Where an album's cover is: a file, or a service's url.
+/// Where an album's cover is: a file (open), or a service's url.
 enum CoverAt {
-    File(PathBuf),
+    File(std::fs::File, PathBuf),
     Web(String),
 }
 
@@ -185,14 +224,15 @@ pub async fn cover(State(sh): State<Arc<Shared>>, Path(id): Path<String>, header
     let at = blocking(move || {
         let root = shared.rt.state().prefs.library_dir.clone();
         let mut resolver = Resolver::new(shared.lib.clone(), root);
+        let roots = roots(&shared);
         Ok(resolver.release_cover(id).and_then(|c| match c.web_url() {
             Some(url) => Some(CoverAt::Web(url.to_owned())),
-            None => c.file().filter(|p| p.is_file()).map(|p| CoverAt::File(p.to_owned())),
+            None => c.file().and_then(|p| open_inside(p, &roots)).map(|(f, p)| CoverAt::File(f, p)),
         }))
     })
     .await?;
     match at {
-        Some(CoverAt::File(p)) => serve_file(p, &headers).await,
+        Some(CoverAt::File(f, p)) => serve_file(f, &p, &headers).await,
         Some(CoverAt::Web(url)) => Ok(Redirect::temporary(&url).into_response()),
         None => Err(ApiError::not_found("Обложки нет")),
     }
@@ -239,20 +279,45 @@ mod tests {
         let path = dir.path().join("a.flac");
         std::fs::write(&path, (0u8..100).collect::<Vec<u8>>()).unwrap();
         let mut h = HeaderMap::new();
-        let full = serve_file(path.clone(), &h).await.unwrap();
+        let open = || std::fs::File::open(&path).unwrap();
+        let full = serve_file(open(), &path, &h).await.unwrap();
         assert_eq!(full.status(), StatusCode::OK);
         assert_eq!(full.headers()[header::CONTENT_LENGTH], "100");
         assert_eq!(full.headers()[header::CONTENT_TYPE], "audio/flac");
         h.insert(header::RANGE, "bytes=10-19".parse().unwrap());
-        let part = serve_file(path.clone(), &h).await.unwrap();
+        let part = serve_file(open(), &path, &h).await.unwrap();
         assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(part.headers()[header::CONTENT_RANGE], "bytes 10-19/100");
         assert_eq!(part.headers()[header::CONTENT_LENGTH], "10");
         let bytes = axum::body::to_bytes(part.into_body(), 1024).await.unwrap();
         assert_eq!(bytes.as_ref(), &(10u8..20).collect::<Vec<u8>>()[..]);
         h.insert(header::RANGE, "bytes=200-".parse().unwrap());
-        let none = serve_file(path, &h).await.unwrap();
+        let none = serve_file(open(), &path, &h).await.unwrap();
         assert_eq!(none.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(none.headers()[header::CONTENT_RANGE], "bytes */100");
+    }
+
+    /// Only files inside the served folders, links followed: a link in the
+    /// library to a file outside is not served, `..` does not get out.
+    #[test]
+    fn only_files_inside_the_folders_are_served() {
+        let lib = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let song = lib.path().join("a.flac");
+        std::fs::write(&song, b"x").unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"s").unwrap();
+        let roots = vec![std::fs::canonicalize(lib.path()).unwrap()];
+        assert!(open_inside(&song, &roots).is_some());
+        assert!(open_inside(&secret, &roots).is_none());
+        assert!(open_inside(&lib.path().join("..").join(outside.path().file_name().unwrap()).join("secret.txt"), &roots).is_none());
+        assert!(open_inside(&lib.path().join("missing.flac"), &roots).is_none());
+        assert!(open_inside(lib.path(), &roots).is_none(), "a folder is not a file");
+        #[cfg(unix)]
+        {
+            let link = lib.path().join("b.flac");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            assert!(open_inside(&link, &roots).is_none(), "a link to outside");
+        }
     }
 }

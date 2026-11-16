@@ -924,7 +924,8 @@ fn main() -> eframe::Result {
     let api = if sweep::active() {
         None
     } else {
-        match nikgob_api::start(nikgob_api::ApiContext { runtime: runtime.handle(), library: api_library, wake: api_wake }) {
+        let media_roots = vec![covers_dir.clone()];
+        match nikgob_api::start(nikgob_api::ApiContext { runtime: runtime.handle(), library: api_library, wake: api_wake, media_roots }) {
             Ok(h) => Some(h),
             Err(e) => {
                 log::error!("api: not started: {e}");

@@ -24,8 +24,8 @@ mod state;
 pub mod tokens;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
@@ -72,6 +72,9 @@ pub struct ApiContext {
     pub library: Library,
     /// The wake the runtime calls on every change.
     pub wake: Wake,
+    /// Folders besides the library and the masters folder whose files may
+    /// be served (a covers folder of the host's own); none is fine.
+    pub media_roots: Vec<std::path::PathBuf>,
 }
 
 /// The running API; [`ApiHandle::stop`] (or dropping it) stops the server
@@ -130,12 +133,15 @@ const STOP_WAIT: Duration = Duration::from_secs(2);
 pub(crate) struct Shared {
     pub rt: RuntimeHandle,
     pub lib: Library,
+    pub media_roots: Vec<std::path::PathBuf>,
     pub wake: Wake,
     pub tokens: auth::Tokens,
     pub limiter: auth::Limiter,
     pub uses: auth::Uses,
     pub sse_clients: AtomicUsize,
-    sync: AtomicU64,
+    /// The last acknowledgement sent; held while a request is sent, so the
+    /// loop gets the requests in the order of their acknowledgements.
+    sent: parking_lot::Mutex<u64>,
 }
 
 impl Shared {
@@ -143,36 +149,63 @@ impl Shared {
         Self {
             rt: ctx.runtime,
             lib: ctx.library,
+            media_roots: ctx.media_roots,
             wake: ctx.wake,
             tokens: auth::Tokens::default(),
             limiter: auth::Limiter::default(),
             uses: auth::Uses::default(),
             sse_clients: AtomicUsize::new(0),
-            sync: AtomicU64::new(0),
+            sent: parking_lot::Mutex::new(0),
         }
     }
 
-    /// Sends `commands`, then waits (at most [`SYNC_WAIT`]) until the
-    /// runtime got past them.
-    pub async fn run(&self, commands: Vec<Command>) {
-        let n = self.sync.fetch_add(1, Ordering::AcqRel) + 1;
+    /// Sends `commands` as one request with an acknowledgement of its own
+    /// (the loop runs them with nothing between them), then waits (at most
+    /// [`SYNC_WAIT`]) until the loop shows it: acknowledgements are sent in
+    /// order under one lock, so a larger one shown means this one was run.
+    /// Not shown in time: an error, not a state the commands may not have
+    /// made.
+    pub async fn run(&self, commands: Vec<Command>) -> Result<(), error::ApiError> {
         let mut changes = self.wake.subscribe();
-        self.rt.send_all(commands);
-        self.rt.send(Command::ApiSync(n));
+        let ack = {
+            let mut sent = self.sent.lock();
+            *sent += 1;
+            self.rt.send(Command::ApiRun { commands, ack: *sent });
+            *sent
+        };
         let deadline = tokio::time::Instant::now() + SYNC_WAIT;
         loop {
-            let synced = self.rt.state().api.synced;
-            if synced >= n {
-                return;
+            if self.rt.state().api.synced >= ack {
+                return Ok(());
             }
             match tokio::time::timeout_at(deadline, changes.changed()).await {
                 Ok(Ok(())) => {}
                 _ => {
                     log::warn!("api: the player did not answer in time");
-                    return;
+                    return Err(error::ApiError::timeout());
                 }
             }
         }
+    }
+
+    /// The caller of `secret` as the tokens are now (a revoke counts at
+    /// once).
+    pub fn caller(&self, secret: &str) -> Option<Caller> {
+        {
+            let st = self.rt.state();
+            self.tokens.refresh(&st.api.tokens);
+        }
+        self.tokens.find(secret)
+    }
+
+    /// Whether token `id` still works (kept and not revoked).
+    pub fn token_works(&self, id: &str) -> bool {
+        self.rt.state().api.tokens.iter().any(|t| t.id == id && !t.revoked)
+    }
+
+    /// No sound can come out: `503 no_audio`.
+    pub fn audio(&self) -> Result<(), error::ApiError> {
+        if self.rt.state().no_audio { Err(error::ApiError::no_audio()) } else { Ok(()) }
     }
 
     /// The state now.
@@ -284,7 +317,9 @@ async fn supervise(ctx: ApiContext, mut stop: oneshot::Receiver<()>) {
     let mut changes = sh.wake.subscribe();
     let mut running: Option<Server> = None;
     let mut reported: Option<(Option<String>, Option<String>)> = None;
-    let mut failed: Option<(String, Instant)> = None;
+    // The address that could not be had, and when to try it again (a fixed
+    // time: other wakes do not put it off).
+    let mut failed: Option<(String, tokio::time::Instant)> = None;
     let report = |reported: &mut Option<(Option<String>, Option<String>)>, listening: Option<String>, error: Option<String>| {
         let now = (listening, error);
         if reported.as_ref() != Some(&now) {
@@ -306,7 +341,7 @@ async fn supervise(ctx: ApiContext, mut stop: oneshot::Receiver<()>) {
             }
             match &want {
                 Some(addr) => {
-                    let due = failed.as_ref().is_none_or(|(a, at)| a != addr || at.elapsed() >= RETRY);
+                    let due = failed.as_ref().is_none_or(|(a, at)| a != addr || tokio::time::Instant::now() >= *at);
                     if due {
                         match Server::bind(addr, sh.clone()).await {
                             Ok(s) => {
@@ -318,7 +353,7 @@ async fn supervise(ctx: ApiContext, mut stop: oneshot::Receiver<()>) {
                             Err(e) => {
                                 log::warn!("api: cannot listen on {addr}: {e}");
                                 report(&mut reported, None, Some(bind_error(&e, &ip, port)));
-                                failed = Some((addr.clone(), Instant::now()));
+                                failed = Some((addr.clone(), tokio::time::Instant::now() + RETRY));
                             }
                         }
                     }
@@ -336,7 +371,7 @@ async fn supervise(ctx: ApiContext, mut stop: oneshot::Receiver<()>) {
                     break;
                 }
             }
-            () = tokio::time::sleep(RETRY), if failed.is_some() => {}
+            () = tokio::time::sleep_until(failed.as_ref().map_or_else(tokio::time::Instant::now, |(_, at)| *at)), if failed.is_some() => {}
         }
     }
     if let Some(s) = running.take() {

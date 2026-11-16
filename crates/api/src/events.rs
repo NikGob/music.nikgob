@@ -6,7 +6,8 @@
 //!
 //! Each client's stream makes its next event only when the connection has
 //! taken the last one, from the state as it is then: nothing piles up for
-//! a slow client.
+//! a slow client. A stream ends when its token is revoked or removed (the
+//! revoke wakes every stream).
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use tokio::sync::watch;
 
+use crate::auth::Caller;
 use crate::error::ApiError;
 use crate::state::PlayerState;
 use crate::{Closing, Shared};
@@ -70,6 +72,8 @@ impl Drop for Client {
 
 struct Feed {
     client: Client,
+    /// The token the stream was opened with.
+    token: String,
     changes: watch::Receiver<u64>,
     closing: watch::Receiver<bool>,
     known: Coalescer,
@@ -103,6 +107,9 @@ async fn next_event(mut f: Feed) -> Option<(Result<Event, Infallible>, Feed)> {
             // What changed meanwhile is in the state read now.
             f.changes.borrow_and_update();
         }
+        if !f.client.0.token_works(&f.token) {
+            return None;
+        }
         let (state, revision) = {
             let st = f.client.0.rt.state();
             (PlayerState::of(&st, nikgob_library::now_ms()), st.revision)
@@ -128,12 +135,13 @@ async fn next_event(mut f: Feed) -> Option<(Result<Event, Infallible>, Feed)> {
     ),
     security(("bearer" = []), ("token" = []))
 )]
-pub async fn events(State(sh): State<Arc<Shared>>, Extension(closing): Extension<Closing>) -> Response {
+pub async fn events(State(sh): State<Arc<Shared>>, Extension(closing): Extension<Closing>, Extension(caller): Extension<Caller>) -> Response {
     if sh.sse_clients.fetch_add(1, Ordering::AcqRel) >= MAX_CLIENTS {
         sh.sse_clients.fetch_sub(1, Ordering::AcqRel);
         return ApiError::rate_limited().into_response();
     }
     let feed = Feed {
+        token: caller.token_id,
         changes: sh.wake.subscribe(),
         client: Client(sh),
         closing: closing.0,

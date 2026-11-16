@@ -216,7 +216,8 @@ pub async fn guard(State(sh): State<Arc<Shared>>, mut req: Request, next: Next) 
     let secret = bearer(req.headers()).or_else(|| {
         if query_token_allowed(&path) { query_value(req.uri().query(), "token") } else { None }
     });
-    let Some(caller) = secret.as_deref().and_then(|s| sh.tokens.find(s)) else {
+    // Against the tokens as they are now: a revoke counts from the next request.
+    let Some(caller) = secret.as_deref().and_then(|s| sh.caller(s)) else {
         return ApiError::unauthorized().into_response();
     };
     let need = needed(req.method(), &path);

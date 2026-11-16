@@ -164,7 +164,7 @@ impl PlayerState {
             position_ms: if stopped { 0 } else { ms(p.position_now()) },
             at_ms: now_ms,
             server_time_ms: now_ms,
-            rate: if status == PlayStatus::Playing { p.speed.max(0.0) } else { 0.0 },
+            rate: if status == PlayStatus::Playing { p.rate.max(0.0) } else { 0.0 },
             volume: p.volume.clamp(0.0, 1.0),
             muted: p.muted,
             shuffle: p.shuffle,
@@ -284,6 +284,20 @@ mod tests {
         // An ended duck is none.
         st.player.duck = Some(nikgob_view::DuckView { gain: 0.1, until_unix_ms: 4 });
         assert_eq!(PlayerState::of(&st, 5).duck, None);
+    }
+
+    /// The rate is the clock's, not the speed asked for: a stall while
+    /// playing stands still.
+    #[test]
+    fn the_rate_is_the_clocks() {
+        let mut st = fixture();
+        st.player.speed = 1.2;
+        st.player.rate = 1.19;
+        assert!((PlayerState::of(&st, 5).rate - 1.19).abs() < 1e-6);
+        st.player.rate = 0.0;
+        assert_eq!(PlayerState::of(&st, 5).rate, 0.0, "a stall");
+        st.player.rate = -1.0;
+        assert_eq!(PlayerState::of(&st, 5).rate, 0.0);
     }
 
     #[test]

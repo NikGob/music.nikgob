@@ -15,7 +15,8 @@ pub const JSON: &str = "application/json; charset=utf-8";
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct ErrorBody {
     /// `bad_request`, `unauthorized`, `forbidden`, `not_found`,
-    /// `nothing_to_play`, `rate_limited`, `no_audio`, `internal`.
+    /// `nothing_to_play`, `rate_limited`, `no_audio`, `player_timeout`,
+    /// `internal`.
     pub error: String,
     /// What went wrong, in Russian.
     pub message: String,
@@ -70,6 +71,12 @@ impl ApiError {
 
     pub fn no_audio() -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "no_audio", "Устройство вывода недоступно")
+    }
+
+    /// The player did not get to the request in time: it may run later, or
+    /// not at all.
+    pub fn timeout() -> Self {
+        Self::new(StatusCode::GATEWAY_TIMEOUT, "player_timeout", "Плеер не ответил вовремя")
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -151,6 +158,7 @@ mod tests {
         assert_eq!(ApiError::nothing_to_play().status, StatusCode::CONFLICT);
         assert_eq!(ApiError::rate_limited().status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(ApiError::no_audio().status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!((ApiError::timeout().status, ApiError::timeout().code), (StatusCode::GATEWAY_TIMEOUT, "player_timeout"));
     }
 
     #[derive(Debug, Default, serde::Deserialize, PartialEq)]
