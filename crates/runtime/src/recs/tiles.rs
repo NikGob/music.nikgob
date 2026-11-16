@@ -124,9 +124,14 @@ pub(super) fn input(lib: &Library, rows: &[RecTrack], events: &[Event], artist_n
             tracks: p.tracks,
         })
         .collect();
+    // Each play on its device; a room's long passive runs are not what the
+    // tiles count.
+    let devices = super::Devices::read(lib);
+    let plays: Vec<nikgob_recs::Play> = events.iter().filter_map(|e| devices.place(e, nikgob_recs::Play::from(e))).collect();
+    let whole = super::whole(&plays);
     TilesInput {
         facts,
-        events: events.iter().map(nikgob_recs::Play::from).collect(),
+        events: plays.into_iter().zip(whole).filter_map(|(p, w)| w.then_some(p)).collect(),
         playlists,
         artist_names,
     }
@@ -191,17 +196,7 @@ fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Optio
     if picks.is_empty() {
         return None;
     }
-    let albums = || {
-        let albums: std::collections::HashSet<_> = picks
-            .iter()
-            .filter_map(|p| match p.item {
-                Item::Track(id) => snap.catalog.get(id).and_then(|t| t.release),
-                Item::Stream(_) => None,
-            })
-            .collect();
-        albums.len()
-    };
-    let (title, subtitle) = lines(t.kind, &t.param, t.title, picks.len(), today, albums);
+    let (title, subtitle) = lines(t.kind, t.title, picks.len(), today);
     let covers = if t.kind == TileKind::Lottery { Vec::new() } else { covers_of(snap, &picks, &no_streams) };
     let ms: u64 = picks
         .iter()
@@ -220,11 +215,10 @@ fn home_of(snap: &Snapshot, facts: &TilesInput, today: i64, t: TileMix) -> Optio
     })
 }
 
-/// A tile's title and subtitle: what it is and why it is here, short
-/// enough for a tile. `title` is the recipe's
-/// («Kevin Penkin», «Лето 2025»), `param` its parameter, `n` the songs,
-/// `albums` how many albums they come from.
-fn lines(kind: TileKind, param: &str, title: String, n: usize, today: i64, albums: impl Fn() -> usize) -> (String, String) {
+/// A tile's title and subtitle: what it is and how many songs, short
+/// enough for a tile. `title` is the recipe's («Kevin Penkin», «Лето
+/// 2025»), `n` the songs.
+fn lines(kind: TileKind, title: String, n: usize, today: i64) -> (String, String) {
     // A board kept from before the titles changed reads as today's.
     let title = match kind {
         TileKind::OnRepeat => "На повторе".to_owned(),
@@ -239,61 +233,20 @@ fn lines(kind: TileKind, param: &str, title: String, n: usize, today: i64, album
         TileKind::Unfinished => "Недослушанные альбомы".to_owned(),
         TileKind::NotDownloaded => "Ещё не скачано".to_owned(),
         TileKind::Lottery => "Лотерея".to_owned(),
-        TileKind::BecauseYouLiked if !title.starts_with("Похоже на ") => like_title(&title),
-        _ => title,
-    };
-    let n = tracks_count(n);
-    let subtitle = match kind {
-        TileKind::OnRepeat => format!("{n} · что крутил весь месяц"),
         TileKind::YearAgo => {
             let mut month = month_year(today - 365);
             if let Some(first) = month.get(..2) {
                 month = first.to_uppercase() + &month[2..];
             }
-            return (month, format!("{n} · играло в эти дни год назад"));
+            month
         }
-        TileKind::Season => {
-            let of = match param.rsplit('-').next() {
-                Some("0") => "той зимы",
-                Some("1") => "той весны",
-                Some("2") => "того лета",
-                _ => "той осени",
-            };
-            format!("{n} · любимое {of}")
-        }
-        TileKind::Rediscover => format!("{n} · любимое, не играло 2 месяца"),
-        TileKind::FirstLikes => format!("{n} · что ты лайкнул первым"),
-        TileKind::FreshLikes => format!("{n} · лайкнул за последний месяц"),
-        TileKind::Unplayed => format!("{n} · добавлены, но ещё не играли"),
-        TileKind::DeepCuts => format!("{n} · почти не игранное у любимых"),
-        TileKind::ArtistOfDay => format!("{n} · любимое из библиотеки"),
-        TileKind::Comeback => format!("{n} · слушал часто, а теперь нет"),
-        TileKind::BecauseYouLiked => format!("{n} · по звуку и вкусу"),
-        TileKind::Long => format!("{n} · каждый от 7 минут"),
-        TileKind::Short => format!("{n} · каждый до 2:30"),
-        TileKind::SingAlong => format!("{n} · текст идёт в такт песне"),
-        TileKind::Language => {
-            let lang = match param {
-                "ja" => "на японском",
-                "ko" => "на корейском",
-                "ru" => "на русском",
-                _ => "на иностранном",
-            };
-            format!("{n} · всё {lang}")
-        }
-        TileKind::Decade => match param.parse::<i32>() {
-            Ok(d) if (1900..2000).contains(&d) => format!("{n} · вышли в {}-х", d - 1900),
-            Ok(d) => format!("{n} · вышли в {d}-х"),
-            Err(_) => n,
-        },
-        TileKind::Soundtrack => format!("{n} · музыка из саундтрека"),
-        TileKind::Playlist => format!("{n} · плейлист, давно не слушал"),
-        TileKind::Unfinished => {
-            let a = albums();
-            format!("{n} · что осталось в {a} {}", crate::streams::plural(a, "альбоме", "альбомах", "альбомах"))
-        }
-        TileKind::NotDownloaded => format!("{n} · лайкнул, но нет файла"),
+        TileKind::BecauseYouLiked if !title.starts_with("Похоже на ") => like_title(&title),
+        _ => title,
+    };
+    // The name says what it is; the line under it, how many songs.
+    let subtitle = match kind {
         TileKind::Lottery => LOTTERY_SUBTITLE.to_owned(),
+        _ => tracks_count(n),
     };
     (title, subtitle)
 }
@@ -370,27 +323,23 @@ mod tests {
     /// Every tile says what it is in a title and a subtitle that fit a
     /// tile.
     #[test]
-    fn every_tile_explains_itself() {
-        let params = [("Season", "2025-2"), ("Language", "ja"), ("Decade", "1990"), ("Playlist", "p")];
+    fn every_tile_has_a_name_and_its_count() {
         for k in TileKind::ALL {
-            let param = params.iter().find(|(n, _)| *n == format!("{k:?}")).map_or("", |p| p.1);
-            let (title, subtitle) = lines(k, param, "Kevin Penkin".into(), 25, 20_748, || 3);
+            let (title, subtitle) = lines(k, "Kevin Penkin".into(), 25, 20_748);
             assert!(!title.is_empty() && title.chars().count() <= 24, "{k:?}: {title}");
             assert!(subtitle.chars().count() <= 40, "{k:?}: {subtitle} ({})", subtitle.chars().count());
             assert_ne!(k.kicker().to_lowercase(), title.to_lowercase(), "{k:?}: the kicker repeats the title");
             assert!(k.kicker().chars().count() <= 16, "{k:?}: {}", k.kicker());
+            if k != TileKind::Lottery {
+                assert_eq!(subtitle, tracks_count(25), "{k:?}: the count only");
+            }
         }
-        let line = |k, p: &str| lines(k, p, String::new(), 13, 20_748, || 3);
-        assert_eq!(line(TileKind::YearAgo, "").0, "Октябрь 2025");
-        assert_eq!(line(TileKind::Season, "2025-2").1, "13 треков · любимое того лета");
-        assert_eq!(line(TileKind::Decade, "1990").1, "13 треков · вышли в 90-х");
-        assert_eq!(line(TileKind::Decade, "2000").1, "13 треков · вышли в 2000-х");
-        assert_eq!(line(TileKind::Language, "ja").1, "13 треков · всё на японском");
-        assert_eq!(line(TileKind::Unfinished, "").1, "13 треков · что осталось в 3 альбомах");
-        assert_eq!(line(TileKind::BecauseYouLiked, "").1, "13 треков · по звуку и вкусу");
-        assert_eq!(line(TileKind::Lottery, "").1, LOTTERY_SUBTITLE);
+        let line = |k| lines(k, String::new(), 13, 20_748);
+        assert_eq!(line(TileKind::YearAgo).0, "Октябрь 2025");
+        assert_eq!(line(TileKind::Season).1, "13 треков");
+        assert_eq!(line(TileKind::Lottery).1, LOTTERY_SUBTITLE);
         // A board kept from before the titles changed.
-        let kept = |k, t: &str| lines(k, "", t.into(), 13, 20_748, || 3).0;
+        let kept = |k, t: &str| lines(k, t.into(), 13, 20_748).0;
         assert_eq!(kept(TileKind::BecauseYouLiked, "Underground River (opening version)"), "Похоже на Underground River");
         assert_eq!(kept(TileKind::BecauseYouLiked, "Похоже на Разгром"), "Похоже на Разгром");
         assert_eq!(kept(TileKind::NotDownloaded, "Лайкнутое без файла"), "Ещё не скачано");

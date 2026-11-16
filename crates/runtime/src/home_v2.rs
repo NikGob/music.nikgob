@@ -294,10 +294,17 @@ impl Facts {
         }
         let liked: HashSet<TrackId> =
             lib.liked_track_ids().unwrap_or_default().into_iter().map(|t| spares.get(&t).copied().unwrap_or(t)).collect();
+        // Each play on its device (a guest's device left out); what a room
+        // heard on and on from afar is not what was played here.
+        let devices = crate::recs::Devices::read(lib);
+        let placed: Vec<(&nikgob_core::model::Event, nikgob_recs::Play)> =
+            events.iter().filter_map(|e| devices.place(e, crate::recs::play_of(e)).map(|p| (e, p))).collect();
+        let plays: Vec<nikgob_recs::Play> = placed.iter().map(|(_, p)| *p).collect();
+        let whole = crate::recs::whole(&plays);
         let mut starts = Vec::new();
         let mut completes: HashMap<TrackId, u32> = HashMap::new();
         let mut last_start = HashMap::new();
-        for e in &events {
+        for ((e, _), _) in placed.iter().zip(&whole).filter(|(_, w)| **w) {
             match e.event_type {
                 EventType::Start => {
                     starts.push((e.ts, e.track_id, e.context));
@@ -307,7 +314,6 @@ impl Facts {
                 _ => {}
             }
         }
-        let plays: Vec<nikgob_recs::Play> = events.iter().map(crate::recs::play_of).collect();
         let hot = nikgob_recs::hot_affinity(&plays, |t| facts.get(&t).and_then(|f| f.duration_ms), now);
         Self { rows, facts, starts, completes, last_start, liked, hot }
     }

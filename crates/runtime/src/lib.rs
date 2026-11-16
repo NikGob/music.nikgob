@@ -315,6 +315,8 @@ enum Msg {
     /// from now on.
     ConnectLink(connect::ConnectLink),
     Shutdown,
+    /// The kind of device this runs on ([`Runtime::set_device_kind`]).
+    DeviceKind(nikgob_view::MeshKind),
 }
 
 /// Handle to the running worker.
@@ -461,6 +463,13 @@ impl Runtime {
     /// and Deezer (tests).
     pub fn set_share_base(&self, base: impl Into<String>) {
         let _ = self.tx.send(Msg::ShareBase(base.into()));
+    }
+
+    /// This runs on a `kind` of device (a computer until told): a speaker's
+    /// (a Pi, a TV, a server) recommendations are for a room, its own plays
+    /// a room's.
+    pub fn set_device_kind(&self, kind: nikgob_view::MeshKind) {
+        let _ = self.tx.send(Msg::DeviceKind(kind));
     }
 
     /// The graph of similar music asks this online metadata (tests: its
@@ -1198,6 +1207,9 @@ impl Worker {
             self.start_align();
         } else {
             log::info!("background compute is off: no sound analysis, lyrics alignment or file checks here");
+            // The vectors the other devices made, as the sync brought them.
+            let prefs = self.state.read().prefs.clone();
+            self.analysis.load_synced(self.lib.clone(), prefs);
         }
         self.dislikes_load(false);
         loop {
@@ -1244,6 +1256,12 @@ impl Worker {
                     Ok(Msg::MeshFlush(done)) => {
                         self.mesh_flush_now();
                         let _ = done.send(());
+                    }
+                    Ok(Msg::DeviceKind(kind)) => {
+                        if recs::set_own_kind(kind) {
+                            log::info!("recs: this is a {} device", kind.key());
+                            self.recs_dirty(Duration::ZERO);
+                        }
                     }
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
@@ -1701,6 +1719,11 @@ impl Worker {
                     self.library_edited(before, Vec::new());
                 }
             }
+            // A guest's like would fetch files and write to the owner's
+            // services: the API never lets one through, and it stops here too.
+            Command::Like(..) if self.api.actor == Some(nikgob_core::settings::ApiActor::Guest) => {
+                log::info!("api: a guest's like is not kept");
+            }
             Command::Like(LikeTarget::Release(id), on) => self.like_release(id, on),
             Command::Like(target, on) => {
                 let before = self.library_tracks();
@@ -1718,12 +1741,16 @@ impl Worker {
                             self.new_liked(t);
                             self.recs_liked(t);
                         }
-                        let _ = self.lib.record_event(
+                        // The like's actor: the voice assistant's «нравится»
+                        // is its own in the history, as its plays are.
+                        let actor = self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner);
+                        let _ = self.lib.record_event_with(
                             t,
                             if on { EventType::Like } else { EventType::Unlike },
                             None,
                             None,
                             EventContext::Other,
+                            EventMeta { actor, ..EventMeta::default() },
                         );
                         wished = self.track_liked(t, on);
                     }
@@ -2775,15 +2802,16 @@ impl Worker {
         self.rate = self.speed;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
+            let actor = self.hand_actor();
             let _ = self.lib.record_event_with(
                 e.track,
                 EventType::Seek,
                 None,
                 Some(p.as_millis() as u32),
                 self.play_context,
-                EventMeta { actor: self.queue_actor, ..EventMeta::default() },
+                EventMeta { actor, ..EventMeta::default() },
             );
-            if self.queue_teaches() {
+            if self.queue_teaches() && teaches_live_recs(actor) {
                 self.recs_seeked(e.track, from.as_millis() as u32, p.as_millis() as u32);
             }
         }
@@ -2865,6 +2893,14 @@ impl Worker {
         teaches_live_recs(self.queue_actor)
     }
 
+    /// Who ends or seeks the song that plays: an API request's token
+    /// while its commands run (the voice assistant's «дальше» is its own;
+    /// an owner's token is the owner, as the window is), else whoever's
+    /// queue it is.
+    fn hand_actor(&self) -> Option<nikgob_core::settings::ApiActor> {
+        self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner).or(self.queue_actor)
+    }
+
     /// The app closes: the playing (or paused) track ends as it is.
     fn record_closed(&mut self) {
         if !self.ended && self.playing.is_some() {
@@ -2893,15 +2929,19 @@ impl Worker {
         let complete = !by_user
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
         let position_ms = pos.as_millis() as u32;
+        // Who ended it: a guest's «дальше» on the owner's song is the
+        // guest's, never the owner's skip.
+        let actor = self.hand_actor();
+        let guest = Some(nikgob_core::settings::ApiActor::Guest);
         if reason != EndReason::AppClosed {
-            if self.queue_teaches() {
+            if self.queue_teaches() && teaches_live_recs(actor) {
                 self.recs_played();
                 self.recs_ended(e.track, complete, position_ms, dur);
             }
             // After the session: the radio reads its verdict (a radio the
             // assistant started still follows its skips; a guest's plays
-            // steer nothing).
-            if self.queue_actor != Some(nikgob_core::settings::ApiActor::Guest) {
+            // and skips steer nothing).
+            if self.queue_actor != guest && actor != guest {
                 self.radio_feedback(e.track, complete, position_ms, dur);
             }
             // «Дальше» on a guest is a skip at any point of it.
@@ -2909,7 +2949,7 @@ impl Worker {
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();
-        let meta = EventMeta { end_reason: Some(reason), attention, volume, actor: self.queue_actor, ..EventMeta::default() };
+        let meta = EventMeta { end_reason: Some(reason), attention, volume, actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(
             e.track,
             if complete {

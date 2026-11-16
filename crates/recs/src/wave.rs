@@ -1159,10 +1159,7 @@ pub fn sequence(ctx: &WaveContext<'_>, character: Character, session: &Session, 
         return;
     }
     let m = ctx.model;
-    // In a room (a speaker) any wave is kept steady too: no loud head
-    // after a quiet tail.
-    let steady = matches!(character, Character::Calm | Character::Background)
-        || (character == Character::Any && m.device() == crate::context::PlayDevice::Ambient);
+    let steady = kept_steady(character, m.device());
     if !steady {
         return;
     }
@@ -1211,6 +1208,15 @@ pub fn sequence(ctx: &WaveContext<'_>, character: Character, session: &Session, 
     for (s, &j) in slots.iter().zip(&best.1) {
         picks[*s] = lib[j].clone();
     }
+}
+
+/// Whether a wave of `character` built for `device` is ordered for a
+/// steady energy ([`sequence`]): a calm or a background one anywhere, and
+/// in a room (a speaker) any wave, no loud head after a quiet tail; a
+/// lively one never.
+pub(crate) fn kept_steady(character: Character, device: crate::context::PlayDevice) -> bool {
+    matches!(character, Character::Calm | Character::Background)
+        || (character == Character::Any && device == crate::context::PlayDevice::Ambient)
 }
 
 /// The next permutation in lexicographic order; false after the last.
@@ -2103,6 +2109,26 @@ mod tests {
         assert_eq!(m.entries.len(), MEMORY_CAP);
         let back: BanditMemory = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(back, m);
+    }
+
+    /// In a room any wave is ordered for a steady energy (no loud cold
+    /// head after a quiet tail); at a computer only a calm or a background
+    /// one is, and a lively one nowhere.
+    #[test]
+    fn a_room_keeps_any_wave_steady() {
+        use crate::context::PlayDevice::{Ambient, Personal};
+        assert!(kept_steady(Character::Any, Ambient));
+        assert!(!kept_steady(Character::Any, Personal));
+        for c in [Character::Calm, Character::Background] {
+            assert!(kept_steady(c, Personal) && kept_steady(c, Ambient), "{c:?}");
+        }
+        for c in [Character::Lively, Character::Dark] {
+            assert!(!kept_steady(c, Ambient), "{c:?}");
+        }
+        // The step a steady order avoids: a loud cold head after a quiet tail.
+        use crate::sketch::{Edge, EdgeShape};
+        let edge = |loudness: f32, shape: EdgeShape| Edge { loudness, shape, silence: 0.0, chroma: [15, 1, 8, 1, 10, 9, 1, 13, 1, 8, 1, 3] };
+        assert!(edge_cost(&edge(-24.0, EdgeShape::Fade), &edge(-13.0, EdgeShape::Cold)) > edge_cost(&edge(-24.0, EdgeShape::Fade), &edge(-24.0, EdgeShape::Fade)));
     }
 
     /// Edges: a key on the far side of the circle of fifths costs more

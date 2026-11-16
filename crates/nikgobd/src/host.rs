@@ -112,6 +112,8 @@ impl Host {
         if let Some(l) = &links {
             l.connect(runtime.playback_sender());
         }
+        // A speaker's recommendations are for a room.
+        runtime.set_device_kind(cfg.mesh_kind());
         if !cfg.background_compute {
             log::info!("background compute off (background_compute = true in the config turns it on)");
         }

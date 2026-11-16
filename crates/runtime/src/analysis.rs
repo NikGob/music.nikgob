@@ -77,6 +77,8 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 pub(crate) enum Msg {
     Progress(v::AnalysisProgress),
     SoundModel(v::SoundModelView),
+    /// The vectors the sync brought are in memory ([`FileAnalysis::load_synced`]).
+    Loaded,
 }
 
 /// What the neural sound model hears now: «Нейросетевой анализ звука» as
@@ -751,6 +753,8 @@ pub(crate) struct FileAnalysis {
     /// The neural model (made with the first start that has a models folder).
     effnet: Option<Arc<Effnet>>,
     neural: Neural,
+    /// A read of the synced vectors is under way ([`Self::load_synced`]).
+    loading: Arc<AtomicBool>,
 }
 
 impl FileAnalysis {
@@ -762,6 +766,29 @@ impl FileAnalysis {
             gone: None,
             effnet: None,
             neural: Neural::default(),
+            loading: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A device that does not analyse (a Pi) still has the vectors the
+    /// other devices made, as the sync brings them: read into the index on
+    /// a thread of their own (never the loop's), [`Msg::Loaded`] once they
+    /// are in. Nothing while the analysis runs here (it reads them itself)
+    /// or a read is under way.
+    pub(crate) fn load_synced(&self, lib: Library, prefs: v::Prefs) {
+        if self.shared.is_some() || self.loading.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (index, tx, loading) = (self.index.clone(), self.tx.clone(), self.loading.clone());
+        let spawned = std::thread::Builder::new().name("nikgob-sound-load".into()).spawn(move || {
+            lower_priority();
+            load_offline(&lib, &index, &prefs);
+            loading.store(false, Ordering::Release);
+            let _ = tx.send(Internal::Analysis(Msg::Loaded));
+        });
+        if let Err(e) = spawned {
+            self.loading.store(false, Ordering::Release);
+            log::warn!("analysis: cannot read the synced vectors: {e}");
         }
     }
 
@@ -930,6 +957,7 @@ impl Worker {
                     self.publish(|s| s.sound_model = m);
                 }
             }
+            Msg::Loaded => self.recs_sound_loaded(),
         }
     }
 }
