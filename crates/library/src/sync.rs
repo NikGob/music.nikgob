@@ -1458,6 +1458,16 @@ impl Library {
         })
     }
 
+    /// The files here of the pictures of `kind` (`release` | `artist`), by
+    /// id.
+    pub fn local_pictures(&self, kind: &str) -> Result<HashMap<String, PathBuf>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached("SELECT p.id, f.path FROM picture p JOIN picture_file f ON f.hash = p.hash WHERE p.kind = ?1")?;
+            let rows = stmt.query_map([kind], |r| Ok((r.get::<_, String>(0)?, PathBuf::from(r.get::<_, String>(1)?))))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
     /// The local copy of the picture of `kind` (`release` | `artist`) `id`,
     /// for a cover or photo whose own file is not here.
     pub fn local_picture(&self, kind: &str, id: &str) -> Result<Option<PathBuf>> {
