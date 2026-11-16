@@ -1423,7 +1423,7 @@ fn migration_adds_the_sketch_table_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
     // The file's number is the schema version it stamps.
-    assert_eq!(SCHEMA_VERSION, 34);
+    assert_eq!(SCHEMA_VERSION, 35);
     let before = 29u32;
     {
         let lib = Library::open(&path).unwrap();
@@ -1435,8 +1435,25 @@ fn migration_adds_the_sketch_table_only() {
     }
     {
         // Back to the schema before the sketches (and before the masters'
-        // paths and the photos' tries that came after them).
+        // paths, the photos' tries, the mesh's and sync's columns and tables
+        // that came after them).
         let conn = rusqlite::Connection::open(&path).unwrap();
+        let triggers: Vec<String> = {
+            let mut stmt = conn
+                .prepare(r"SELECT name FROM sqlite_master WHERE type = 'trigger' AND (name LIKE 'sync!_%' ESCAPE '!' OR name LIKE 'node!_file!_%' ESCAPE '!')")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert!(triggers.len() > 3, "{triggers:?}");
+        for t in triggers {
+            conn.execute_batch(&format!("DROP TRIGGER \"{t}\"")).unwrap();
+        }
+        conn.execute_batch(
+            "DROP TABLE change_log; DROP TABLE sync_clock; DROP TABLE sync_peer; DROP TABLE sync_node;
+             DROP TABLE node_file; ALTER TABLE event DROP COLUMN actor; ALTER TABLE lyrics_align DROP COLUMN fits;
+             DELETE FROM meta WHERE key IN ('sync.triggers', 'sync.epoch')",
+        )
+        .unwrap();
         conn.execute_batch(
             "DROP TABLE sound_sketch; ALTER TABLE master DROP COLUMN file_path;
              ALTER TABLE artist_photo DROP COLUMN tries;
