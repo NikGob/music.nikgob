@@ -4,7 +4,7 @@
 //! latest albums. A chip tapped again, or ✕ before the chips, goes back to
 //! all of it. Under a chip, a row of its tools: the sort (a sheet) or a new
 //! playlist on the left, grid or list on the right. Albums, playlists and
-//! artists stand in three columns (Metrolist's grid); the tracks are one
+//! artists stand in two columns, 12 dp from the edge; the tracks are one
 //! long list loaded as it scrolls.
 
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
@@ -174,7 +174,7 @@ impl Library {
         self.playlist_items(ui, state, page);
         let recent = if state.library.recently_added.is_empty() { &state.library.releases } else { &state.library.recently_added };
         if !recent.is_empty() {
-            parts::section(ui, "Альбомы");
+            parts::section_head(ui, "Альбомы");
             let shown = &recent[..recent.len().min(6)];
             self.album_cards(ui, shown, page, false);
         }
@@ -183,7 +183,7 @@ impl Library {
     fn playlist_items(&mut self, ui: &mut Ui, state: &ViewState, page: &mut PageOut) {
         for p in state.library.playlists.iter().filter(|p| p.id == LIKED_PLAYLIST || !p.pinned || p.track_count > 0) {
             let uri = p.cover.as_ref().map(|c| c.uri());
-            if parts::item(ui, Id::new(("lib-pl", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
+            if parts::media_row(ui, Id::new(("lib-pl", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
                 page.nav = Some(Route::Playlist(p.id));
             }
         }
@@ -195,10 +195,10 @@ impl Library {
             return;
         }
         let pls = &state.library.playlists;
-        parts::grid(ui, pls.len(), 3, |ui, i, r| {
+        parts::grid2(ui, "lib-pl", pls.len(), |ui, i, r| {
             let p = &pls[i];
             let uri = p.cover.as_ref().map(|c| c.uri());
-            if parts::card(ui, r, Id::new(("lib-pl-card", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
+            if parts::grid_card(ui, r, Id::new(("lib-pl-card", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
                 page.nav = Some(Route::Playlist(p.id));
             }
         });
@@ -217,16 +217,16 @@ impl Library {
         if list {
             for r in releases {
                 let uri = r.cover.as_ref().map(|c| c.uri());
-                if parts::item(ui, Id::new(("lib-al", r.id)), uri.as_deref(), &r.title, &sub(r), Picture::Square).clicked() {
+                if parts::media_row(ui, Id::new(("lib-al", r.id)), uri.as_deref(), &r.title, &sub(r), Picture::Square).clicked() {
                     page.nav = Some(Route::Release(r.id));
                 }
             }
             return;
         }
-        parts::grid(ui, releases.len(), 3, |ui, i, rect| {
+        parts::grid2(ui, "lib-al", releases.len(), |ui, i, rect| {
             let r = &releases[i];
             let uri = r.cover.as_ref().map(|c| c.uri());
-            if parts::card(ui, rect, Id::new(("lib-al-card", r.id)), uri.as_deref(), &r.title, &sub(r), Picture::Square).clicked() {
+            if parts::grid_card(ui, rect, Id::new(("lib-al-card", r.id)), uri.as_deref(), &r.title, &sub(r), Picture::Square).clicked() {
                 page.nav = Some(Route::Release(r.id));
             }
         });
@@ -238,16 +238,16 @@ impl Library {
         if self.list {
             for a in artists {
                 let uri = a.image.as_ref().map(|c| c.uri());
-                if parts::item(ui, Id::new(("lib-ar", a.id)), uri.as_deref(), &a.name, &sub(a), Picture::Round).clicked() {
+                if parts::media_row(ui, Id::new(("lib-ar", a.id)), uri.as_deref(), &a.name, &sub(a), Picture::Round).clicked() {
                     page.nav = Some(Route::Artist(a.id));
                 }
             }
             return;
         }
-        parts::grid(ui, artists.len(), 3, |ui, i, r| {
+        parts::grid2(ui, "lib-ar", artists.len(), |ui, i, r| {
             let a = &artists[i];
             let uri = a.image.as_ref().map(|c| c.uri());
-            if parts::card(ui, r, Id::new(("lib-ar-card", a.id)), uri.as_deref(), &a.name, &sub(a), Picture::Round).clicked() {
+            if parts::grid_card(ui, r, Id::new(("lib-ar-card", a.id)), uri.as_deref(), &a.name, &sub(a), Picture::Round).clicked() {
                 page.nav = Some(Route::Artist(a.id));
             }
         });
@@ -274,8 +274,8 @@ impl Library {
             let Some(t) = i.checked_sub(lib.tracks_offset).and_then(|k| lib.tracks.get(k)) else {
                 // Not loaded yet: the row's place, quiet.
                 let s = Theme::get(ui.ctx()).scheme;
-                let c = Rect::from_min_size(pos2(r.left() + 16.0, r.center().y - 24.0), vec2(48.0, 48.0));
-                ui.painter().rect_filled(c, 8.0, s.surface_container_high);
+                let c = rows::thumb_rect(r);
+                ui.painter().rect_filled(c, rows::THUMB_R, s.surface_container_high);
                 return;
             };
             let look = Look::list(t, state);
