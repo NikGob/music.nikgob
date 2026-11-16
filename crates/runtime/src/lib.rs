@@ -2082,6 +2082,12 @@ impl Worker {
             | Command::MeshForgetAnswer { .. }
             | Command::MeshSetSync { .. }
             | Command::MeshSyncReport { .. }) => self.mesh_command(c),
+            // Playing on another device: the connect runtime's part.
+            Command::OutputTransfer { .. }
+            | Command::OutputAttach { .. }
+            | Command::OutputDetach
+            | Command::OutputContinueHere
+            | Command::OutputUndoTransfer => {}
         }
     }
 
