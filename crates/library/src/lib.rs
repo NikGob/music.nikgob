@@ -44,6 +44,7 @@ pub mod search;
 mod selection;
 mod storage;
 mod streams;
+pub mod sync;
 mod track_fx;
 mod trash;
 
@@ -67,6 +68,7 @@ pub use playlists::LIKED_PLAYLIST_NAME;
 pub use prints::{AudioPrint, NearPrint, PrintTodo, SameAudioOffer, SameSide, WrongAudio};
 pub use quality::{Conversion, FakeOffer, QualityTodo};
 pub use storage::LocalFileSizes;
+pub use sync::{SyncApplied, SyncCursors, SyncGroup, SyncHeads, SyncPage, SyncRow, SyncTable, TABLES as SYNC_TABLES, sync_table};
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recordings::{PrintToLink, RecordingSide};

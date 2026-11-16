@@ -118,6 +118,11 @@ impl ApiActor {
             Self::Guest => "guest",
         }
     }
+
+    /// The actor of [`Self::key`].
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.key() == s)
+    }
 }
 
 /// One token of the API. The secret itself is never stored: only its

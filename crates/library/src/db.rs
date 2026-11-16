@@ -190,7 +190,7 @@ impl Library {
         Self::from_parts(writer, None, None)
     }
 
-    fn from_parts(writer: Connection, readers: Option<ReadPool>, path: Option<std::path::PathBuf>) -> Result<Self> {
+    fn from_parts(mut writer: Connection, readers: Option<ReadPool>, path: Option<std::path::PathBuf>) -> Result<Self> {
         let album_likes_tracks = Arc::new(AtomicBool::new(false));
         add_functions(&writer, &album_likes_tracks)?;
         if let Some(pool) = &readers {
@@ -206,6 +206,7 @@ impl Library {
                 id
             }
         };
+        let clock = crate::sync::install(&mut writer, device.as_str())?;
         Ok(Self {
             inner: Arc::new(Inner {
                 writer: Mutex::new(writer),
@@ -213,7 +214,7 @@ impl Library {
                 listening: Mutex::new(None),
                 readers,
                 device: RwLock::new(device),
-                last_ts: AtomicI64::new(0),
+                last_ts: AtomicI64::new(clock),
                 album_likes_tracks,
                 path,
             }),
@@ -244,7 +245,11 @@ impl Library {
 
     /// Replaces the device id (e.g. with the node's public key once sync exists).
     pub fn set_device_id(&self, id: DeviceId) -> Result<()> {
-        self.write(|tx| meta_set(tx, "device_id", id.as_str()))?;
+        self.write(|tx| {
+            meta_set(tx, "device_id", id.as_str())?;
+            tx.execute("UPDATE sync_clock SET node = ?1 WHERE id = 1", [id.as_str()])?;
+            Ok(())
+        })?;
         *self
             .inner
             .device
@@ -253,24 +258,26 @@ impl Library {
         Ok(())
     }
 
-    /// Timestamp for a user-data write: the wall clock, but strictly increasing
-    /// within this handle, so two quick edits never share a timestamp (they
-    /// would otherwise tie in last-writer-wins merges and in "recent" orderings).
+    /// Timestamp for a user-data write: a hybrid logical clock in unix ms
+    /// (see [`crate::sync`]): the wall clock, but strictly increasing within
+    /// this handle, so two quick edits never share a timestamp (they would
+    /// otherwise tie in last-writer-wins merges and in "recent" orderings),
+    /// and past every time seen in another device's rows.
     pub(crate) fn tick(&self) -> UnixMs {
-        let now = crate::util::now_ms();
-        let mut prev = self.inner.last_ts.load(Ordering::Relaxed);
-        loop {
-            let next = now.max(prev + 1);
-            match self.inner.last_ts.compare_exchange_weak(
-                prev,
-                next,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return next,
-                Err(actual) => prev = actual,
-            }
-        }
+        crate::sync::hlc_next(&self.inner.last_ts, crate::util::now_ms())
+    }
+
+    /// Another device's row of time `seen` was merged in.
+    pub(crate) fn observe_clock(&self, seen: UnixMs) {
+        crate::sync::hlc_observe(&self.inner.last_ts, seen, crate::util::now_ms());
+    }
+
+    pub(crate) fn set_device_in_memory(&self, id: DeviceId) {
+        *self
+            .inner
+            .device
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = id;
     }
 
     /// Schema version of the open database.

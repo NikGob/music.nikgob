@@ -12,7 +12,7 @@ use crate::types::TrackStats;
 use crate::util::{get_enum, get_id, get_opt_enum, opt_u32};
 
 pub(crate) const EVENT_COLS: &str =
-    "id, ts, track_id, source_kind, type, position_ms, context, device, origin, context_id, end_reason, attention, volume";
+    "id, ts, track_id, source_kind, type, position_ms, context, device, origin, context_id, end_reason, attention, volume, actor";
 
 pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -29,6 +29,7 @@ pub(crate) fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
         end_reason: get_opt_enum(row, 10)?,
         attention: row.get(11)?,
         volume: row.get(12)?,
+        actor: row.get::<_, Option<String>>(13)?.as_deref().and_then(nikgob_core::settings::ApiActor::parse),
     })
 }
 
@@ -99,8 +100,8 @@ pub(crate) fn stamp(conn: &Connection) -> Result<(i64, i64, u64)> {
 pub(crate) fn insert_event(conn: &Connection, event: &Event) -> Result<bool> {
     let n = conn.execute(
         "INSERT OR IGNORE INTO event(id, ts, track_id, source_kind, type, position_ms, context,
-                                     device, origin, context_id, end_reason, attention, volume)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                                     device, origin, context_id, end_reason, attention, volume, actor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             event.id.to_string(),
             event.ts,
@@ -114,7 +115,8 @@ pub(crate) fn insert_event(conn: &Connection, event: &Event) -> Result<bool> {
             event.context_id.as_deref(),
             event.end_reason.map(|r| r.as_str()),
             event.attention,
-            event.volume
+            event.volume,
+            event.actor.map(|a| a.key())
         ],
     )?;
     Ok(n > 0)
@@ -158,6 +160,7 @@ impl Library {
             end_reason: meta.end_reason,
             attention: meta.attention,
             volume: meta.volume,
+            actor: meta.actor,
         };
         self.record_event_raw(&event)?;
         Ok(event)
