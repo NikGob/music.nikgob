@@ -285,11 +285,11 @@ mod tests {
     async fn the_tools_listed_follow_the_token() {
         let n = |v: Value| v["result"]["tools"].as_array().unwrap().len();
         assert_eq!(n(ask(&McpServer::new(Api("read")), "tools/list", json!({})).await), 7);
-        assert_eq!(n(ask(&McpServer::new(Api("control")), "tools/list", json!({})).await), 11);
-        assert_eq!(n(ask(&McpServer::with_preset(Down, ApiPreset::Full), "tools/list", json!({})).await), 17);
+        assert_eq!(n(ask(&McpServer::new(Api("control")), "tools/list", json!({})).await), 12);
+        assert_eq!(n(ask(&McpServer::with_preset(Down, ApiPreset::Full), "tools/list", json!({})).await), 18);
         // The player is not running: everything is listed, each call says why it fails.
         let down = McpServer::new(Down);
-        assert_eq!(n(ask(&down, "tools/list", json!({})).await), 17);
+        assert_eq!(n(ask(&down, "tools/list", json!({})).await), 18);
         let r = ask(&down, "tools/call", json!({"name": "status_get", "arguments": {}})).await;
         assert_eq!(r["result"]["isError"], true);
         assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("Плеер не запущен"));

@@ -11,7 +11,7 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -20,8 +20,14 @@ use nikgob_core::model::{ReleaseId, SourceKind, TrackId};
 use nikgob_runtime::Resolver;
 
 use crate::Shared;
-use crate::error::ApiError;
+use crate::error::{ApiError, query_value};
 use crate::library::{blocking, db};
+
+/// The file's BLAKE3 (hex) as it is now, with `?hash=1`: a paired device
+/// checks the copy it fetched by it.
+pub const HASH_HEADER: &str = "x-nikgob-blake3";
+/// The file's extension (`flac`, `opus`…), for the copy's name.
+pub const EXT_HEADER: &str = "x-nikgob-ext";
 
 /// What a `Range` header asks of a file `size` bytes long.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,12 +184,22 @@ fn best_file(shared: &Shared, track: TrackId) -> Result<Option<(std::fs::File, P
     Ok(local.into_iter().find_map(|s| open_inside(&resolver.path(&s.locator), &roots)))
 }
 
+/// The BLAKE3 (hex) of the file at `path`.
+fn blake3_of(path: &FsPath) -> std::io::Result<String> {
+    let mut h = blake3::Hasher::new();
+    h.update_reader(std::fs::File::open(path)?)?;
+    Ok(h.finalize().to_hex().to_string())
+}
+
 /// `GET /v1/media/tracks/{id}/audio`.
 #[utoipa::path(
     get,
     path = "/v1/media/tracks/{id}/audio",
     tag = "media",
-    params(("id" = String, Path, description = "id песни")),
+    params(
+        ("id" = String, Path, description = "id песни"),
+        ("hash" = Option<String>, Query, description = "1: BLAKE3 файла в заголовке x-nikgob-blake3"),
+    ),
     responses(
         (status = 200, description = "Файл как есть"),
         (status = 206, description = "Часть файла по Range"),
@@ -192,11 +208,31 @@ fn best_file(shared: &Shared, track: TrackId) -> Result<Option<(std::fs::File, P
     ),
     security(("bearer" = []), ("token" = []))
 )]
-pub async fn audio(State(sh): State<Arc<Shared>>, Path(id): Path<String>, headers: HeaderMap) -> Result<Response, ApiError> {
+pub async fn audio(State(sh): State<Arc<Shared>>, Path(id): Path<String>, RawQuery(raw): RawQuery, headers: HeaderMap) -> Result<Response, ApiError> {
     let id: TrackId = id.parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
+    let hash = query_value(raw.as_deref(), "hash").is_some_and(|v| v == "1");
     let shared = sh.clone();
-    let (file, path) = blocking(move || best_file(&shared, id)).await?.ok_or_else(|| ApiError::not_found("Файла этой песни здесь нет"))?;
-    serve_file(file, &path, &headers).await
+    let found = blocking(move || {
+        let Some((file, path)) = best_file(&shared, id)? else {
+            return Ok(None);
+        };
+        let sum = if hash { Some(blake3_of(&path).map_err(|e| ApiError::internal(e.to_string()))?) } else { None };
+        Ok(Some((file, path, sum)))
+    })
+    .await?;
+    let (file, path, sum) = found.ok_or_else(|| ApiError::not_found("Файла этой песни здесь нет"))?;
+    let mut r = serve_file(file, &path, &headers).await?;
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
+        && let Ok(v) = HeaderValue::from_str(&ext)
+    {
+        r.headers_mut().insert(EXT_HEADER, v);
+    }
+    if let Some(sum) = sum
+        && let Ok(v) = HeaderValue::from_str(&sum)
+    {
+        r.headers_mut().insert(HASH_HEADER, v);
+    }
+    Ok(r)
 }
 
 /// Where an album's cover is: a file (open), or a service's url.
@@ -295,6 +331,8 @@ mod tests {
         let none = serve_file(open(), &path, &h).await.unwrap();
         assert_eq!(none.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(none.headers()[header::CONTENT_RANGE], "bytes */100");
+        // The hash a paired device checks its copy by is the whole file's.
+        assert_eq!(blake3_of(&path).unwrap(), blake3::hash(&(0u8..100).collect::<Vec<u8>>()).to_hex().to_string());
     }
 
     /// Only files inside the served folders, links followed: a link in the

@@ -197,6 +197,11 @@ impl Worker {
     /// row and info again.
     fn retagged_playing(&mut self, tracks: &[TrackId]) {
         let Some(track) = self.playing.map(|e| e.track).filter(|t| tracks.contains(t)) else { return };
+        // The view shows another device's zone: only the parked view.
+        if self.connect.remote() {
+            self.publish_parked();
+            return;
+        }
         let current = self.lib.get_track_row(track).ok().flatten();
         let src = self.lib.active_source(track).ok().flatten();
         let row = current.as_ref().map(|r| self.res.track(r));

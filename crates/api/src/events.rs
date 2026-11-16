@@ -8,6 +8,9 @@
 //! taken the last one, from the state as it is then: nothing piles up for
 //! a slow client. A stream ends when its token is revoked or removed (the
 //! revoke wakes every stream).
+//!
+//! `?zone=1` (a paired device driving this one) sends `event: zone`
+//! instead: the zone's player with its queue, by the same rules.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -15,13 +18,15 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Extension;
-use axum::extract::State;
+use axum::extract::{RawQuery, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use tokio::sync::watch;
 
+use nikgob_view::ZoneState;
+
 use crate::auth::Caller;
-use crate::error::ApiError;
+use crate::error::{ApiError, query_value};
 use crate::state::PlayerState;
 use crate::{Closing, Shared};
 
@@ -44,18 +49,26 @@ pub struct Coalescer {
 impl Coalescer {
     /// Whether `s` is to be sent; if so it becomes what the client knows.
     pub fn news(&mut self, s: &PlayerState) -> bool {
-        let key = s.change_key();
+        self.news_of(s.change_key(), s.position_ms, s.at_ms, s.rate)
+    }
+
+    /// [`Self::news`] of a zone's state.
+    pub fn zone_news(&mut self, s: &ZoneState) -> bool {
+        self.news_of(s.change_key(), i64::try_from(s.position_ms).unwrap_or(i64::MAX), s.server_time_ms, s.rate)
+    }
+
+    fn news_of(&mut self, key: String, position_ms: i64, at_ms: i64, rate: f32) -> bool {
         let jumped = match self.anchor {
             Some((pos, at, rate)) => {
-                let expected = pos as f64 + (s.at_ms - at) as f64 * f64::from(rate);
-                (s.position_ms as f64 - expected).abs() > JUMP_MS
+                let expected = pos as f64 + (at_ms - at) as f64 * f64::from(rate);
+                (position_ms as f64 - expected).abs() > JUMP_MS
             }
             None => true,
         };
         let news = jumped || self.key.as_deref() != Some(key.as_str());
         if news {
             self.key = Some(key);
-            self.anchor = Some((s.position_ms, s.at_ms, s.rate));
+            self.anchor = Some((position_ms, at_ms, rate));
         }
         news
     }
@@ -79,6 +92,8 @@ struct Feed {
     known: Coalescer,
     first: bool,
     sent_at: Option<tokio::time::Instant>,
+    /// `event: zone` (`?zone=1`) instead of `event: state`.
+    zone: bool,
 }
 
 async fn closed(rx: &mut watch::Receiver<bool>) {
@@ -110,16 +125,25 @@ async fn next_event(mut f: Feed) -> Option<(Result<Event, Infallible>, Feed)> {
         if !f.client.0.token_works(&f.token) {
             return None;
         }
-        let (state, revision) = {
-            let st = f.client.0.rt.state();
-            (PlayerState::of(&st, nikgob_library::now_ms()), st.revision)
+        let (name, data, revision) = if f.zone {
+            let (state, revision) = {
+                let st = f.client.0.rt.state();
+                (ZoneState::of(&st, nikgob_library::now_ms()), st.revision)
+            };
+            let send = f.known.zone_news(&state) || f.first;
+            ("zone", send.then(|| serde_json::to_string(&state).unwrap_or_default()), revision)
+        } else {
+            let (state, revision) = {
+                let st = f.client.0.rt.state();
+                (PlayerState::of(&st, nikgob_library::now_ms()), st.revision)
+            };
+            let send = f.known.news(&state) || f.first;
+            ("state", send.then(|| serde_json::to_string(&state).unwrap_or_default()), revision)
         };
-        let news = f.known.news(&state);
-        if f.first || news {
+        if let Some(data) = data {
             f.first = false;
             f.sent_at = Some(tokio::time::Instant::now());
-            let data = serde_json::to_string(&state).unwrap_or_default();
-            let ev = Event::default().event("state").id(revision.to_string()).data(data);
+            let ev = Event::default().event(name).id(revision.to_string()).data(data);
             return Some((Ok(ev), f));
         }
     }
@@ -135,7 +159,13 @@ async fn next_event(mut f: Feed) -> Option<(Result<Event, Infallible>, Feed)> {
     ),
     security(("bearer" = []), ("token" = []))
 )]
-pub async fn events(State(sh): State<Arc<Shared>>, Extension(closing): Extension<Closing>, Extension(caller): Extension<Caller>) -> Response {
+pub async fn events(
+    State(sh): State<Arc<Shared>>,
+    Extension(closing): Extension<Closing>,
+    Extension(caller): Extension<Caller>,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    let zone = query_value(raw.as_deref(), "zone").is_some_and(|v| v == "1" || v == "true");
     if sh.sse_clients.fetch_add(1, Ordering::AcqRel) >= MAX_CLIENTS {
         sh.sse_clients.fetch_sub(1, Ordering::AcqRel);
         return ApiError::rate_limited().into_response();
@@ -148,6 +178,7 @@ pub async fn events(State(sh): State<Arc<Shared>>, Extension(closing): Extension
         known: Coalescer::default(),
         first: true,
         sent_at: None,
+        zone,
     };
     let stream = futures_util::stream::unfold(feed, next_event);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive")).into_response()
@@ -189,5 +220,42 @@ mod tests {
         assert!(c.news(&state(PlayStatus::Paused, 60_100, 15_200, 0.6)), "a pause");
         assert!(!c.news(&state(PlayStatus::Paused, 60_100, 25_000, 0.6)), "paused, time passing");
         assert!(c.news(&state(PlayStatus::Paused, 0, 25_100, 0.6)), "a seek while paused");
+    }
+
+    /// A zone's state is news by the same rules; its queue changing is.
+    #[test]
+    fn a_zones_changes_are_news() {
+        let zone = |pos: u64, at: i64, next: usize| ZoneState {
+            status: nikgob_view::ZoneStatus::Playing,
+            position_ms: pos,
+            server_time_ms: at,
+            rate: 1.0,
+            next: (0..next)
+                .map(|i| nikgob_view::ZoneEntry {
+                    entry: i as u64,
+                    track: nikgob_view::ZoneTrack {
+                        id: nikgob_core::model::TrackId::new(),
+                        title: "T".into(),
+                        artist: "A".into(),
+                        album: None,
+                        duration_ms: None,
+                        liked: false,
+                    },
+                })
+                .collect(),
+            ..ZoneState::default()
+        };
+        let mut c = Coalescer::default();
+        let first = zone(1_000, 10_000, 1);
+        assert!(c.zone_news(&first));
+        let mut later = first.clone();
+        later.position_ms = 3_000;
+        later.server_time_ms = 12_000;
+        assert!(!c.zone_news(&later), "the clock alone");
+        later.position_ms = 90_000;
+        assert!(c.zone_news(&later), "a seek");
+        let mut more = later.clone();
+        more.next.extend(zone(0, 0, 1).next);
+        assert!(c.zone_news(&more), "the queue");
     }
 }

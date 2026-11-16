@@ -2,7 +2,7 @@
 //! name, kind and version, its library disk, and what it plays with the
 //! clock of the position (a remote extrapolates the progress itself).
 
-use nikgob_view::{MeshKind, MeshPlaying, MeshStorage, Status, ViewState};
+use nikgob_view::{MeshKind, MeshPlaying, MeshStorage, Status, TrackRow, ViewState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -18,25 +18,47 @@ pub struct Presence {
 /// puts it is a change (a seek); closer, the clock says it.
 pub const JUMP_MS: i64 = 1500;
 
-/// This device's presence from its view at `now_ms`.
+/// Every credited name of a track (its display line when it has none).
+fn artists_of(t: &TrackRow) -> Vec<String> {
+    let mut artists: Vec<String> = t.artists.0.iter().map(|n| n.name.clone()).filter(|n| !n.trim().is_empty()).collect();
+    if artists.is_empty() && !t.artist.trim().is_empty() {
+        artists.push(t.artist.clone());
+    }
+    artists
+}
+
+fn ms(d: std::time::Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// This device's presence from its view at `now_ms`. While its window
+/// drives another device, the view's player is that device's: this one
+/// tells of its own zone, parked (paused).
 pub fn of_view(st: &ViewState, name: &str, kind: MeshKind, version: &str, now_ms: i64) -> Presence {
     let p = &st.player;
     let playing = match (p.status, p.current.as_ref()) {
+        _ if st.target.is_some() => st.parked.as_ref().and_then(|z| {
+            z.current.as_ref().map(|t| MeshPlaying {
+                title: t.title.clone(),
+                artists: artists_of(t),
+                paused: true,
+                position_ms: ms(z.position),
+                at_ms: now_ms,
+                rate: 0.0,
+                duration_ms: t.duration.map(ms),
+            })
+        }),
         (Status::Stopped, _) | (_, None) => None,
         (status, Some(t)) => {
-            let mut artists: Vec<String> = t.artists.0.iter().map(|n| n.name.clone()).filter(|n| !n.trim().is_empty()).collect();
-            if artists.is_empty() && !t.artist.trim().is_empty() {
-                artists.push(t.artist.clone());
-            }
             let playing = status == Status::Playing;
             Some(MeshPlaying {
                 title: t.title.clone(),
-                artists,
+                artists: artists_of(t),
                 paused: !playing,
-                position_ms: i64::try_from(p.position_now().as_millis()).unwrap_or(i64::MAX),
+                position_ms: ms(p.position_now()),
                 at_ms: now_ms,
                 rate: if playing { p.rate.max(0.0) } else { 0.0 },
-                duration_ms: p.duration.or(t.duration).and_then(|d| i64::try_from(d.as_millis()).ok()),
+                duration_ms: p.duration.or(t.duration).map(ms),
             })
         }
     };
@@ -121,5 +143,24 @@ mod tests {
         assert_eq!(p.artists, vec!["Band".to_owned()]);
         assert!(p.paused);
         assert_eq!(p.rate, 0.0);
+
+        // Driving another device: the player is that one's; this device
+        // tells of its own zone, parked.
+        st.player.status = Status::Playing;
+        st.player.rate = 1.0;
+        st.target = Some(nikgob_view::RemoteTarget {
+            node_id: "pi".into(),
+            name: "Pi".into(),
+            kind: MeshKind::Pi,
+            link: nikgob_view::RemoteLink::Live,
+            volume: 1.0,
+            muted: false,
+        });
+        assert_eq!(of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1).playing, None, "nothing parked");
+        let mut own = st.player.current.clone().unwrap();
+        own.title = "Own".into();
+        st.parked = Some(nikgob_view::ParkedView { current: Some(own), position: std::time::Duration::from_secs(7) });
+        let p = of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1).playing.unwrap();
+        assert_eq!((p.title.as_str(), p.paused, p.position_ms, p.rate), ("Own", true, 7_000, 0.0));
     }
 }

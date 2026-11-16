@@ -28,6 +28,8 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
         crate::routes::unduck,
         crate::routes::list_outputs,
         crate::routes::set_output,
+        crate::connect::snapshot,
+        crate::connect::load,
         crate::routes::queue,
         crate::routes::queue_add,
         crate::routes::queue_play,
@@ -92,6 +94,9 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
         crate::routes::QueueMode,
         crate::routes::QueueMove,
         crate::outputs::Output,
+        crate::outputs::OutputKind,
+        crate::connect::PlayerSnapshot,
+        crate::connect::LoadAnswer,
         crate::library::Track,
         crate::library::Album,
         crate::library::AlbumDetail,
@@ -211,9 +216,13 @@ mod tests {
             "/v1/discover/share",
             "/v1/downloads",
             "/v1/downloads/sources",
+            "/v1/player/snapshot",
+            "/v1/player/load",
         ] {
             assert!(paths.contains_key(p), "{p}");
         }
+        assert!(!paths.contains_key("/v1/player/remote"), "between the devices only");
+        assert!(doc["components"]["schemas"]["PlayerSnapshot"].is_object());
         assert!(doc["paths"]["/v1/playlists"]["post"].is_object());
         assert!(doc["paths"]["/v1/playlists/{id}"]["delete"].is_object());
         assert!(doc["paths"]["/v1/playlists/{id}"]["put"].is_object());

@@ -115,6 +115,10 @@ impl Worker {
     }
 
     fn publish_duck(&mut self) {
+        // The view shows another device's zone (and its duck).
+        if self.connect.remote() {
+            return;
+        }
         let duck = self.duck.view();
         self.publish(|s| s.player.duck = duck);
     }

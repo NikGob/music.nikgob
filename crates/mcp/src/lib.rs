@@ -1,4 +1,4 @@
-//! The player's MCP server: 17 tools in four groups of rights, four
+//! The player's MCP server: 18 tools in four groups of rights, four
 //! resources, a template and three prompts over the local REST API (crates/api), so
 //! the token, its rights, the rate limit and its actor are the API's.
 //!

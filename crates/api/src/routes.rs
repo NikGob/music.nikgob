@@ -18,7 +18,7 @@ use crate::Shared;
 use crate::auth::Caller;
 use crate::error::{ApiError, Json, body, query_value};
 use crate::library::{Track, blocking};
-use crate::outputs::{self, Output, Pick};
+use crate::outputs::{self, NodePick, Output, Pick};
 use crate::play::{self, Kind, Matched, Mode};
 use crate::state::{DuckState, PlayerState, RepeatMode, StateAnswer, duck_of};
 
@@ -70,7 +70,8 @@ pub struct PlayBody {
     /// `replace` by default.
     pub mode: Option<Mode>,
     /// Switch the output first (an id of `GET /v1/outputs` or a part of a
-    /// name), in the same request: the music starts there.
+    /// name), in the same request: the music starts there. A device of the
+    /// home (`node:<id>`) plays it with its queue, as from its remote.
     pub output: Option<String>,
 }
 
@@ -82,6 +83,29 @@ impl Shared {
             Pick::Default => Ok(Command::SetOutputDevice(None)),
             Pick::Device(name) => Ok(Command::SetOutputDevice(Some(name))),
             Pick::NotFound => Err(ApiError::not_found("Такого устройства вывода нет")),
+        }
+    }
+
+    /// The commands of `output`: a paired device (`node:<id>`), where what
+    /// plays here moves (`attach`: the window drives what it plays there,
+    /// nothing moves); `this`, back here; a sound device of this computer
+    /// (back here first while the window drives another device).
+    pub(crate) fn output_commands(&self, output: &str, attach: bool) -> Result<Vec<Command>, ApiError> {
+        let (remote, pick) = {
+            let st = self.rt.state();
+            (st.target.is_some(), outputs::node_pick(output, &st.mesh.this.id, &st.mesh.nodes))
+        };
+        let back = if attach { Command::OutputDetach } else { Command::OutputTransfer { node_id: None } };
+        match pick {
+            NodePick::Node(id) if attach => Ok(vec![Command::OutputAttach { node_id: id }]),
+            NodePick::Node(id) => Ok(vec![Command::OutputTransfer { node_id: Some(id) }]),
+            NodePick::Offline(name) => Err(ApiError::of(axum::http::StatusCode::CONFLICT, "offline", format!("{name} не в сети"))),
+            NodePick::Unknown => Err(ApiError::not_found("Такого устройства нет")),
+            NodePick::This => Ok(if remote { vec![back] } else { Vec::new() }),
+            NodePick::NoNode => {
+                let c = self.output_command(output)?;
+                Ok(if remote { vec![back, c] } else { vec![c] })
+            }
         }
     }
 }
@@ -119,18 +143,20 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     }
     // The output first: a device that does not exist changes nothing.
     let output = match b.output.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
-        Some(o) => Some(sh.output_command(o)?),
+        Some(o) => Some(sh.output_commands(o, true)?),
         None => None,
     };
     if output.is_none() {
         sh.audio()?;
     }
+    // Another device's queue is not known here.
+    let to_node = output.as_ref().is_some_and(|c| c.iter().any(|c| matches!(c, Command::OutputAttach { .. })));
     let query = b.query.clone().unwrap_or_default();
     if b.id.is_none() && query.trim().is_empty() && !matches!(kind, Kind::Liked | Kind::Wave) {
-        if sh.empty() {
+        if !to_node && sh.empty() {
             return Err(ApiError::nothing_to_play());
         }
-        sh.run_by(Some(caller.actor), output.into_iter().chain([Command::Play]).collect()).await?;
+        sh.run_by(Some(caller.actor), output.into_iter().flatten().chain([Command::Play]).collect()).await?;
         return Ok(Json(PlayAnswer { matched: None, state: sh.snapshot() }));
     }
     let lib = sh.lib.clone();
@@ -140,7 +166,7 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     };
     // The shuffle asked for (or the kind's default) is set before the new
     // list is made: `play::commands` puts `ApiShuffle` first.
-    let commands: Vec<Command> = output.into_iter().chain(play::commands(&target, play::shuffled(target.kind, b.shuffle), mode)?).collect();
+    let commands: Vec<Command> = output.into_iter().flatten().chain(play::commands(&target, play::shuffled(target.kind, b.shuffle), mode)?).collect();
     // Who plays: the loop keeps `caller.actor` while these run, for the
     // listening events they start once events have an actor.
     log::debug!("api: play {:?} by a token of {:?}", target.kind, caller.actor);
@@ -391,12 +417,22 @@ pub async fn mode(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<St
     sh.answer(mode_commands(shuffle, repeat, &b)).await
 }
 
-/// Where the sound goes.
+/// Where the sound goes: the sound devices of this computer, then the
+/// paired devices of the home online (`node:<id>`, the music moves there).
 #[utoipa::path(get, path = "/v1/outputs", tag = "outputs", responses((status = 200, body = Vec<Output>)), security(("bearer" = [])))]
 pub async fn list_outputs(State(sh): State<Arc<Shared>>) -> Json<Vec<Output>> {
     let sinks = tokio::task::spawn_blocking(sink_names).await.unwrap_or_default();
     let st = sh.rt.state();
-    Json(outputs::list(&st.prefs.output_devices, st.prefs.output_device.as_deref(), &sinks))
+    let target = st.target.as_ref().map(|t| t.node_id.as_str());
+    let mut out = outputs::list(&st.prefs.output_devices, st.prefs.output_device.as_deref(), &sinks);
+    if target.is_some() {
+        // The sound is there, not here.
+        for o in &mut out {
+            o.current = false;
+        }
+    }
+    out.extend(outputs::nodes(&st.mesh.nodes, target));
+    Json(out)
 }
 
 /// The PulseAudio sink name of each output (Linux), by its shown name.
@@ -418,8 +454,15 @@ fn sink_names() -> Vec<(String, String)> {
 #[derive(Clone, Debug, Default, Deserialize, ToSchema)]
 pub struct OutputBody {
     /// An id of `GET /v1/outputs`, a name or a part of one; on Linux also a
-    /// PulseAudio sink name.
+    /// PulseAudio sink name. `node:<id>`: what plays here moves to that
+    /// device; `this`: back here.
     pub output: Option<String>,
+    /// The same as `output` (either one).
+    pub id: Option<String>,
+    /// With a device of the home: drive what it plays from here, moving
+    /// nothing.
+    #[serde(default)]
+    pub attach: bool,
 }
 
 #[utoipa::path(
@@ -427,14 +470,19 @@ pub struct OutputBody {
     path = "/v1/player/output",
     tag = "outputs",
     request_body(content = OutputBody, content_type = "application/json"),
-    responses((status = 200, body = StateAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
+    responses(
+        (status = 200, body = StateAnswer),
+        (status = 400, body = crate::error::ErrorBody),
+        (status = 404, body = crate::error::ErrorBody),
+        (status = 409, body = crate::error::ErrorBody),
+    ),
     security(("bearer" = []))
 )]
 pub async fn set_output(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: OutputBody = body(&bytes)?;
-    let q = b.output.filter(|o| !o.trim().is_empty()).ok_or_else(|| ApiError::bad_request("Нужен output"))?;
-    let c = sh.output_command(&q)?;
-    sh.answer(vec![c]).await
+    let q = b.output.or(b.id).filter(|o| !o.trim().is_empty()).ok_or_else(|| ApiError::bad_request("Нужен output"))?;
+    let commands = sh.output_commands(q.trim(), b.attach)?;
+    sh.answer(commands).await
 }
 
 /// One place of the queue.

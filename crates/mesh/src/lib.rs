@@ -13,8 +13,10 @@
 //! only); addresses come from mDNS. ALPNs: `nikgob/pair/1` (pairing, the
 //! only thing that answers a device not in the ring, and only with
 //! SPAKE2), `nikgob/ctl/1` (presence, heartbeats, the ring's updates) and
-//! `nikgob/http/1` (the tunnel to the API).
+//! `nikgob/http/1` (the tunnel to the API). Playing on another device
+//! goes through the tunnel (`connect`).
 
+mod connect;
 pub mod discovery;
 pub mod keys;
 pub mod pair;
@@ -174,11 +176,14 @@ pub fn start(ctx: MeshContext) -> std::io::Result<MeshHandle> {
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("nikgob-mesh-io").enable_all().build()?;
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(64);
     let runtime = ctx.runtime.clone();
+    let (api, data_dir) = (ctx.api.clone(), ctx.data_dir.clone());
     let sh = Arc::new(service::Shared::new(ctx)?);
     let client = MeshClient { sh: sh.clone(), rt: rt.handle().clone() };
     // `/install/` asks the invite itself, not the view of it.
     let held = Arc::downgrade(&sh);
     nikgob_api::set_install_check(Some(Arc::new(move |key: &str| held.upgrade().is_some_and(|s| s.install_key_ok(key)))));
+    // Playing on another device: its network part.
+    connect::start(rt.handle(), client.clone(), api, runtime.clone(), &data_dir);
     let runtime_link = runtime.clone();
     runtime_link.link_mesh(move |c| {
         if cmd_tx.try_send(c).is_err() {

@@ -350,8 +350,10 @@ impl Worker {
                 self.api.actor = actor;
                 self.api.in_run = true;
                 self.api.skipped.clear();
+                // As the window's: while the target is another device, the
+                // player's commands go there.
                 for c in commands {
-                    self.command(c);
+                    self.user_command(c);
                 }
                 self.api.in_run = false;
                 let skipped = std::mem::take(&mut self.api.skipped);
