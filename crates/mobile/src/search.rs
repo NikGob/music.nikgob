@@ -1,7 +1,8 @@
-//! Поиск: the bar at the top (it takes the keyboard when the destination
-//! is tapped again), then the one answer of the library and the services
-//! together: the best match, the songs, the albums, the artists and the
-//! playlists. A song plays the answer's songs from it.
+//! Поиск, opened by the search bar of Главная or Библиотека over the page:
+//! its own bar at the top with ← (it takes the keyboard as it opens), then
+//! the one answer of the library and the services together: the best
+//! match, the songs, the albums, the artists and the playlists. A song
+//! plays the answer's songs from it.
 
 use egui::{Id, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{SearchBar, anim};
@@ -40,6 +41,14 @@ fn artist_route(a: &SearchArtist) -> Route {
 }
 
 impl Search {
+    /// Puts `q` in the bar, looked for on the next frame (screenshot runs).
+    pub fn set_query(&mut self, q: &str, now: f64) {
+        if !q.is_empty() {
+            self.query = q.to_owned();
+            self.edited = Some(now - DEBOUNCE);
+        }
+    }
+
     pub fn show(&mut self, ui: &mut Ui, frame: PageFrame, state: &ViewState, out: &mut Vec<Command>) -> PageOut {
         let mut page = PageOut::default();
         let ctx = ui.ctx().clone();
@@ -48,9 +57,13 @@ impl Search {
         let bar = Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + frame.top + 8.0), vec2(rect.width() - 32.0, 56.0));
         let mut bui = ui.new_child(UiBuilder::new().max_rect(bar).id_salt("phone-search-bar"));
         let before = self.query.clone();
-        let o = SearchBar::new("phone-search").placeholder("Поиск").width(bar.width()).show(&mut bui, &mut self.query);
+        let o = SearchBar::new("phone-search").placeholder("Поиск").back(true).shortcut(false).width(bar.width()).show(&mut bui, &mut self.query);
         if std::mem::take(&mut self.focus) {
             o.response.request_focus();
+        }
+        if o.back_clicked {
+            o.response.surrender_focus();
+            page.back = true;
         }
         if self.query != before {
             self.edited = Some(now);

@@ -145,6 +145,8 @@ pub struct SearchBarOutput {
     pub submitted: bool,
     /// The clear button emptied the text.
     pub cleared: bool,
+    /// The leading ← was tapped (with [`SearchBar::back`]).
+    pub back_clicked: bool,
 }
 
 /// A stand-alone search bar (no expanding view).
@@ -154,6 +156,7 @@ pub struct SearchBar {
     placeholder: String,
     width: Option<f32>,
     shortcut: bool,
+    back: bool,
 }
 
 impl SearchBar {
@@ -163,7 +166,15 @@ impl SearchBar {
             placeholder: String::new(),
             width: None,
             shortcut: true,
+            back: false,
         }
+    }
+
+    /// A ← in place of the leading search icon (a search screen of its
+    /// own, the phone's).
+    pub fn back(mut self, on: bool) -> Self {
+        self.back = on;
+        self
     }
 
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
@@ -209,7 +220,7 @@ impl SearchBar {
             motion.fast_effects,
         );
         paint::state_layer(ui.painter(), rect, radii, s.on_surface, layer);
-        let out = header(ui, rect, self.id, text, &self.placeholder, false, focus);
+        let out = header(ui, rect, self.id, text, &self.placeholder, self.back, focus);
         let mut cleared = false;
         if out.clear_clicked {
             text.clear();
@@ -222,6 +233,7 @@ impl SearchBar {
             response: out.edit,
             rect,
             cleared,
+            back_clicked: out.back_clicked,
         }
     }
 }

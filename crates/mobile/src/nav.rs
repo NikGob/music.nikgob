@@ -1,8 +1,9 @@
-//! The four destinations of the bottom bar, each with a stack of its own:
-//! an album opened from Библиотека stays there while Поиск is looked at,
+//! The three destinations of the bottom bar, each with a stack of its own:
+//! an album opened from Библиотека stays there while Главная is looked at,
 //! and the bar's tab brings it back as it was. Pages of the whole app
 //! (Главная, Библиотека on a tab, Настройки) switch the destination instead
-//! of stacking.
+//! of stacking. Поиск has no tab: the search bar at the top of Главная and
+//! Библиотека opens it over the destination (Metrolist's).
 
 use nikgob_view::{Command, LibraryTab, Route};
 
@@ -12,27 +13,24 @@ use nikgob_md3e::Icon;
 pub enum Tab {
     #[default]
     Home,
-    Search,
     Library,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Self; 4] = [Self::Home, Self::Search, Self::Library, Self::Settings];
+    pub const ALL: [Self; 3] = [Self::Home, Self::Library, Self::Settings];
 
     pub const fn index(self) -> usize {
         match self {
             Self::Home => 0,
-            Self::Search => 1,
-            Self::Library => 2,
-            Self::Settings => 3,
+            Self::Library => 1,
+            Self::Settings => 2,
         }
     }
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Home => "Главная",
-            Self::Search => "Поиск",
             Self::Library => "Библиотека",
             Self::Settings => "Настройки",
         }
@@ -41,7 +39,6 @@ impl Tab {
     pub const fn icon(self) -> Icon {
         match self {
             Self::Home => Icon::Home,
-            Self::Search => Icon::Search,
             Self::Library => Icon::LibraryMusic,
             Self::Settings => Icon::Settings,
         }
@@ -71,7 +68,7 @@ pub struct Change {
 #[derive(Clone, Debug, Default)]
 pub struct Nav {
     tab: Tab,
-    stacks: [Vec<Route>; 4],
+    stacks: [Vec<Route>; 3],
     change: Option<Change>,
 }
 
@@ -95,6 +92,12 @@ impl Nav {
 
     fn changed(&mut self, dir: f32, now: f64) {
         self.change = Some(Change { dir, at: now });
+    }
+
+    /// Something over the page came or went (Поиск): the page on screen
+    /// comes in as if pushed (+1) or gone back to (-1).
+    pub fn moved(&mut self, dir: f32, now: f64) {
+        self.changed(dir, now);
     }
 
     /// Opens `route` where it belongs.
@@ -197,7 +200,7 @@ mod tests {
         let mut nav = Nav::default();
         assert_eq!(nav.select(Tab::Library, 0.0), false);
         assert_eq!(nav.open(release(1), 0.1), Opened::Pushed);
-        assert_eq!(nav.select(Tab::Search, 0.2), false);
+        assert_eq!(nav.select(Tab::Settings, 0.2), false);
         assert_eq!(nav.top(), None);
         nav.select(Tab::Library, 0.3);
         assert_eq!(nav.top(), Some(&release(1)));

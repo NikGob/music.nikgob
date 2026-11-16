@@ -22,6 +22,8 @@ pub struct PageOut {
     pub back: bool,
     /// The menu of a track shown on a page.
     pub menu: Option<(TrackRow, Route)>,
+    /// The search bar at the top was tapped.
+    pub search: bool,
 }
 
 impl PageOut {
@@ -31,6 +33,34 @@ impl PageOut {
 }
 
 pub const BAR_H: f32 = 64.0;
+
+/// The search bar at the top of Главная and Библиотека, and the room it
+/// takes with its margins.
+pub const SEARCH_H: f32 = 56.0;
+pub const SEARCH_ROOM: f32 = 8.0 + SEARCH_H + 8.0;
+
+/// Where the search bar of a page `rect` wide goes under the status bar
+/// `top` high.
+pub fn search_rect(rect: Rect, top: f32) -> Rect {
+    Rect::from_min_size(pos2(rect.left() + 16.0, rect.top() + top + 8.0), vec2(rect.width() - 32.0, SEARCH_H))
+}
+
+/// Metrolist's search bar at the top of a page: a tap opens Поиск with the
+/// keyboard (the field itself lives there). True when tapped.
+pub fn search_bar(ui: &mut Ui, rect: Rect, id: Id) -> bool {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let resp = ui.interact(rect, id, Sense::click());
+    let radii = Radii::all(rect.height() * 0.5);
+    paint::container(ui.painter(), rect, radii, s.surface_container_high, Stroke::NONE);
+    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
+    paint::state_layer(ui.painter(), rect, radii, s.on_surface, layer);
+    let c = pos2(rect.left() + 28.0, rect.center().y);
+    Icon::Search.widget(false, s.on_surface, 24.0).paint_at(ui, Rect::from_center_size(c, vec2(24.0, 24.0)));
+    let style = TypeRole::BodyLarge.style();
+    text::paint_line(ui, pos2(rect.left() + 56.0, rect.center().y - style.line_height * 0.5), "Поиск", style, s.on_surface_variant, rect.width() - 72.0);
+    resp.clicked()
+}
 
 /// The bar over a page: ← and the page's title, which fades in on the
 /// surface container as `solid` goes 0 → 1 (the head scrolled under it).

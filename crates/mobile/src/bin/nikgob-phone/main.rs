@@ -9,7 +9,8 @@
 //! the screen and gives the interface their insets; F3 brings up a
 //! keyboard's worth of inset at the bottom; F4 switches the screen between
 //! 360×800, 392×852 and 412×915; Esc and the mouse's back button are the
-//! system's back.
+//! system's back. `NIKGOB_SHOT=out.png` with `NIKGOB_SHOT_STEPS` runs it
+//! off the screen through steps and saves pictures (see shot.rs).
 
 #![forbid(unsafe_code)]
 
@@ -17,6 +18,10 @@
 #[path = "../../../../app/src/demo.rs"]
 mod demo;
 mod host;
+mod shot;
+#[allow(dead_code, clippy::all)]
+#[path = "../../../../app/src/shot_fakes.rs"]
+mod shot_fakes;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,10 +67,11 @@ struct Phone {
     host: Arc<host::Host>,
     ui: MobileUi,
     commands: Vec<Command>,
-    /// F2: the cut-out and the gesture bar.
-    insets: bool,
-    /// F3: the keyboard.
-    keyboard: bool,
+    /// F2: the cut-out and the gesture bar; F3: the keyboard; a screenshot
+    /// run's back.
+    knobs: shot::Knobs,
+    /// A screenshot run (`NIKGOB_SHOT`).
+    shot: Option<shot::Shot>,
     preset: usize,
     /// The last clipboard request copied.
     copied: u64,
@@ -75,6 +81,9 @@ impl eframe::App for Phone {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         // The glyph atlas never as large as the GPU allows.
         raw_input.max_texture_side = Some(raw_input.max_texture_side.unwrap_or(4096).min(4096));
+        if let Some(s) = self.shot.as_mut() {
+            s.raw_input(raw_input);
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -88,8 +97,9 @@ impl eframe::App for Phone {
                 back,
             )
         });
-        self.insets ^= f2;
-        self.keyboard ^= f3;
+        self.knobs.insets ^= f2;
+        self.knobs.keyboard ^= f3;
+        let back = back || std::mem::take(&mut self.knobs.back);
         if f4 {
             self.preset = (self.preset + 1) % PRESETS.len();
             let (w, h) = PRESETS[self.preset];
@@ -98,9 +108,9 @@ impl eframe::App for Phone {
         let (bass, bands) = self.host.levels();
         let env = MobileEnv {
             insets: SafeInsets {
-                top: if self.insets { STATUS_BAR } else { 0.0 },
-                bottom: if self.insets { GESTURE_BAR } else { 0.0 },
-                ime_bottom: if self.keyboard { KEYBOARD } else { 0.0 },
+                top: if self.knobs.insets { STATUS_BAR } else { 0.0 },
+                bottom: if self.knobs.insets { GESTURE_BAR } else { 0.0 },
+                ime_bottom: if self.knobs.keyboard { KEYBOARD } else { 0.0 },
             },
             back_pressed: back,
             bass,
@@ -109,18 +119,24 @@ impl eframe::App for Phone {
         };
         {
             let state = self.host.runtime.state();
-            self.ui.frame(ui, &env, &state, &mut self.commands);
+            // A screenshot run may lay states the demo cannot reach over it.
+            let faked = self.shot.as_ref().and_then(|s| s.overlay(&state));
+            let shown: &nikgob_view::ViewState = faked.as_ref().unwrap_or(&*state);
+            self.ui.frame(ui, &env, shown, &mut self.commands);
             if let Some(c) = state.clipboard.as_ref().filter(|c| c.id != self.copied) {
                 self.copied = c.id;
                 ctx.copy_text(c.text.clone());
             }
+            if let Some(s) = self.shot.as_mut() {
+                s.frame(&ctx, &mut self.ui, shown, &mut self.commands, &mut self.knobs);
+            }
         }
         self.host.runtime.send_all(self.commands.drain(..));
         let screen = ctx.content_rect();
-        if self.insets {
+        if self.knobs.insets {
             paint_insets(&ctx, screen);
         }
-        if self.keyboard {
+        if self.knobs.keyboard {
             paint_keyboard(&ctx, screen);
         }
     }
@@ -160,19 +176,21 @@ fn main() -> eframe::Result {
             std::process::exit(1);
         }
     };
-    let (w, h) = PRESETS[DEFAULT_PRESET];
+    let [w, h] = shot::size().unwrap_or([PRESETS[DEFAULT_PRESET].0, PRESETS[DEFAULT_PRESET].1]);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("music.nikgob")
+        .with_app_id("music.nikgob.phone")
+        .with_inner_size([w, h])
+        .with_min_inner_size([320.0, 568.0])
+        .with_max_inner_size([480.0, 1040.0]);
+    // A screenshot run never shows up over the user's windows.
+    if shot::offscreen() {
+        viewport = viewport.with_position(shot::OFFSCREEN).with_active(false).with_taskbar(false);
+    }
     let app_host = host.clone();
     let result = eframe::run_native(
         "nikgob-phone",
-        eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_title("music.nikgob")
-                .with_app_id("music.nikgob.phone")
-                .with_inner_size([w, h])
-                .with_min_inner_size([320.0, 568.0])
-                .with_max_inner_size([480.0, 1040.0]),
-            ..Default::default()
-        },
+        eframe::NativeOptions { viewport, ..Default::default() },
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             let mut fonts = egui::FontDefinitions::default();
@@ -185,8 +203,8 @@ fn main() -> eframe::Result {
                 host: app_host,
                 ui: MobileUi::new(),
                 commands: Vec::new(),
-                insets: false,
-                keyboard: false,
+                knobs: shot::Knobs::default(),
+                shot: shot::Shot::from_env(),
                 preset: DEFAULT_PRESET,
                 copied: 0,
             }))

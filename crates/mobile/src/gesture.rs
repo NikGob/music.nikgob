@@ -52,6 +52,7 @@ impl Sprung {
     }
 
     /// Units per second.
+    #[cfg(test)]
     pub fn velocity(&self, now: f64) -> f32 {
         if self.from == self.target && self.v0 == 0.0 {
             return 0.0;
@@ -86,13 +87,6 @@ impl Sprung {
         }
         let (x, v) = if self.settled(now) { (self.target, 0.0) } else { self.solved(now) };
         self.release(x, v, target, spring, now);
-    }
-
-    /// There at once.
-    pub fn snap(&mut self, value: f32) {
-        self.from = value;
-        self.target = value;
-        self.v0 = 0.0;
     }
 }
 
