@@ -2,7 +2,9 @@
 //! destinations in the navigation bar (Главная, Библиотека, Настройки),
 //! each with a stack of its own, and Поиск one tap away in the search bar
 //! at the top of Главная and Библиотека (Metrolist's); our Главная as the
-//! desktop draws it, laid out for the phone's width. The same code runs in the PC's
+//! desktop draws it, laid out for the phone's width. The bar leaves on the
+//! album, playlist and artist pages, where the mini player stands at the
+//! bottom instead. The same code runs in the PC's
 //! phone-size window (`nikgob-phone`) and, later, inside the Android shell:
 //! the host hands it a [`MobileEnv`] (the system's insets, its back
 //! gesture, the levels of what plays) and the runtime's state, and sends
@@ -89,6 +91,16 @@ pub(crate) fn scroll(id: impl std::hash::Hash + std::fmt::Debug, reset: bool) ->
 
 /// The navigation bar's height above the gesture area.
 pub const NAV_H: f32 = nikgob_md3e::components::nav_bar::HEIGHT;
+
+/// The room the navigation bar keeps at the bottom of the page on screen:
+/// its whole height while it is shown, only the gesture inset while it is
+/// not (the album, playlist and artist pages hide it, and the mini player
+/// stands on what is left, 7 dp above the inset). One value, so the
+/// page's bottom, the sheets and the player's open and close geometry
+/// never disagree.
+pub(crate) fn bar_room(inset: f32, shown: f32) -> f32 {
+    NAV_H * shown + inset
+}
 
 /// The phone's interface and what it keeps between frames.
 pub struct MobileUi {
@@ -332,15 +344,24 @@ impl MobileUi {
             ctx.request_repaint();
         }
         // The player's spring: 0 the capsule over the bar … 1 the screen.
-        // The bar slides away under the growing player.
+        // The bar slides away under the growing player, and it leaves on
+        // the album, playlist and artist pages with the page's transition
+        // (the same spring the page moves on). Everything that keeps room
+        // at the bottom of the page reads one value — the room the bar
+        // leaves behind — so the page, the sheets and the player's own
+        // geometry stay on it and nothing jumps while it comes and goes.
         let k = self.player.expand(now).clamp(0.0, 1.0);
+        let hides_bar = matches!(self.nav.top(), Some(Route::Release(_) | Route::Playlist(_) | Route::Artist(_)));
+        let shown = anim::fraction(&ctx, egui::Id::new("phone-nav-room"), if hides_bar { 0.0 } else { 1.0 }, theme.motion.default_spatial);
         let bar_h = NAV_H + ins.bottom;
-        let bar_top = full.bottom() - bar_h + bar_h * k;
+        let room = bar_room(ins.bottom, shown);
+        let bar_top = full.bottom() - bar_h * shown + bar_h * k;
+        let mini_bottom = full.bottom() - room - player::MINI_GAP + bar_h * k;
         let mini_space = if has_track { player::MINI_H + player::MINI_GAP } else { 0.0 };
-        let content_bottom = if keyboard { full.bottom() - ins.ime_bottom } else { full.bottom() - bar_h - mini_space };
+        let content_bottom = if keyboard { full.bottom() - ins.ime_bottom } else { full.bottom() - room - mini_space };
         let content = Rect::from_min_max(full.min, pos2(full.right(), content_bottom));
         let mini = Rect::from_min_size(
-            pos2(full.left() + player::MINI_MARGIN, bar_top - player::MINI_GAP - player::MINI_H),
+            pos2(full.left() + player::MINI_MARGIN, mini_bottom - player::MINI_H),
             vec2(full.width() - 2.0 * player::MINI_MARGIN, player::MINI_H),
         );
 
@@ -532,5 +553,19 @@ impl MobileUi {
             Tab::Library => out.push(Command::LoadLibrary),
             Tab::Settings => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bar_keeps_its_height_while_shown_and_the_inset_while_hidden() {
+        assert_eq!(bar_room(16.0, 1.0), NAV_H + 16.0);
+        assert_eq!(bar_room(16.0, 0.0), 16.0, "a page without the bar keeps its gesture inset");
+        assert_eq!(bar_room(0.0, 1.0), NAV_H);
+        // Half-way there the room is half the bar's height above the inset.
+        assert_eq!(bar_room(16.0, 0.5), NAV_H * 0.5 + 16.0);
     }
 }
