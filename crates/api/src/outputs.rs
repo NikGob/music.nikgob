@@ -31,21 +31,20 @@ pub struct Output {
     pub current: bool,
 }
 
-/// The system's output first, then each device.
-pub fn list(devices: &[String], current: Option<&str>) -> Vec<Output> {
+/// The system's output first, then each device. `sinks` pairs a shown name
+/// with the system's own id of it (the PulseAudio sink on Linux), where known.
+pub fn list(devices: &[String], current: Option<&str>, sinks: &[(String, String)]) -> Vec<Output> {
+    let sink_of = |d: &str| sinks.iter().find(|(n, _)| n == d).map(|(_, id)| id.clone()).or_else(|| is_sink_name(d).then(|| d.to_owned()));
+    // A current device chosen by its sink name is the listed device with that sink.
+    let current_name = current.map(|c| sinks.iter().find(|(_, id)| id == c).map_or(c, |(n, _)| n.as_str()));
     let mut out = vec![Output { id: DEFAULT_ID.to_owned(), name: DEFAULT_NAME.to_owned(), system_name: None, current: current.is_none() }];
-    let current_listed = current.is_some_and(|c| devices.iter().any(|d| d == c));
+    let current_listed = current_name.is_some_and(|c| devices.iter().any(|d| d == c));
     for d in devices {
-        out.push(Output {
-            id: local_id(d),
-            name: d.clone(),
-            system_name: is_sink_name(d).then(|| d.clone()),
-            current: current == Some(d.as_str()),
-        });
+        out.push(Output { id: local_id(d), name: d.clone(), system_name: sink_of(d), current: current_name == Some(d.as_str()) });
     }
     // A sink chosen by its name that the list does not have.
-    if let Some(c) = current.filter(|_| !current_listed) {
-        out.push(Output { id: local_id(c), name: c.to_owned(), system_name: is_sink_name(c).then(|| c.to_owned()), current: true });
+    if let Some(c) = current_name.filter(|_| !current_listed) {
+        out.push(Output { id: local_id(c), name: c.to_owned(), system_name: sink_of(c), current: true });
     }
     out
 }
@@ -140,16 +139,27 @@ mod tests {
     #[test]
     fn the_list_has_the_default_first_and_the_current_marked() {
         let d = devices();
-        let l = list(&d, Some(d[1].as_str()));
+        let l = list(&d, Some(d[1].as_str()), &[]);
         assert_eq!(l[0].id, DEFAULT_ID);
         assert!(!l[0].current);
         assert!(l[2].current && l.iter().filter(|o| o.current).count() == 1);
         assert_eq!(l[4].system_name.as_deref(), Some(d[3].as_str()));
         assert_eq!(l[1].system_name, None);
-        assert!(list(&d, None)[0].current);
+        assert!(list(&d, None, &[])[0].current);
         let sink = "alsa_output.pci-0000_00_1f.3.analog-stereo";
-        let l = list(&d, Some(sink));
+        let l = list(&d, Some(sink), &[]);
         assert_eq!(l.last().map(|o| (o.name.as_str(), o.current)), Some((sink, true)));
+    }
+
+    #[test]
+    fn a_device_shows_its_sink_and_is_current_when_chosen_by_it() {
+        let d = vec!["fifine Headset Analog Stereo".to_owned()];
+        let sink = "alsa_output.usb-3142_fifine_Headset-00.analog-stereo";
+        let sinks = vec![(d[0].clone(), sink.to_owned())];
+        let l = list(&d, Some(sink), &sinks);
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[1].system_name.as_deref(), Some(sink));
+        assert!(l[1].current && !l[0].current);
     }
 
     #[test]

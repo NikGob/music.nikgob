@@ -394,8 +394,24 @@ pub async fn mode(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<St
 /// Where the sound goes.
 #[utoipa::path(get, path = "/v1/outputs", tag = "outputs", responses((status = 200, body = Vec<Output>)), security(("bearer" = [])))]
 pub async fn list_outputs(State(sh): State<Arc<Shared>>) -> Json<Vec<Output>> {
+    let sinks = tokio::task::spawn_blocking(sink_names).await.unwrap_or_default();
     let st = sh.rt.state();
-    Json(outputs::list(&st.prefs.output_devices, st.prefs.output_device.as_deref()))
+    Json(outputs::list(&st.prefs.output_devices, st.prefs.output_device.as_deref(), &sinks))
+}
+
+/// The PulseAudio sink name of each output (Linux), by its shown name.
+#[cfg(target_os = "linux")]
+fn sink_names() -> Vec<(String, String)> {
+    nikgob_audio::output_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|d| d.id.map(|id| (d.name, id)))
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sink_names() -> Vec<(String, String)> {
+    Vec::new()
 }
 
 /// `PUT /v1/player/output`.

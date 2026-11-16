@@ -45,3 +45,7 @@ tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The PulseAudio sink names of the outputs.
+nikgob-audio = { path = "../audio" }
