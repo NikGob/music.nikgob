@@ -12,7 +12,7 @@ pub(crate) mod home;
 mod library;
 mod logos;
 mod marks;
-mod mesh_ui;
+pub(crate) mod mesh_ui;
 mod network;
 mod search;
 mod shelf;
@@ -912,6 +912,21 @@ pub struct PageState {
 pub(crate) fn open_add_device(ctx: &Context, state: &ViewState, pages: &mut PageState, install: bool, out: &mut Vec<Command>) {
     let tab = if install { add_device::AddTab::Install } else { add_device::AddTab::Connect };
     add_device::open(ctx, &state.mesh, &mut pages.mesh, None, tab, state.mesh.nearby.first().map(|n| n.id.clone()), out);
+}
+
+/// Opens «Добавить устройство» out of `from` (the output popover's
+/// «Добавить»), at the first nearby device's code.
+pub(crate) fn open_add_device_from(ctx: &Context, state: &ViewState, pages: &mut PageState, from: Rect, out: &mut Vec<Command>) {
+    add_device::open(ctx, &state.mesh, &mut pages.mesh, Some(from), add_device::AddTab::Connect, state.mesh.nearby.first().map(|n| n.id.clone()), out);
+}
+
+/// The devices' window and dialogs when no page of the devices drew them
+/// this frame (opened from the player's output popover over another page,
+/// or with Now Playing over the pages).
+pub(crate) fn mesh_overlays_elsewhere(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
+    if !mesh_ui::overlays_drawn(ui.ctx()) {
+        mesh_ui::overlays(ui, state, &mut pages.mesh, out);
+    }
 }
 
 /// The library as a list (true) or a grid.

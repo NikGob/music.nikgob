@@ -372,8 +372,24 @@ pub(crate) fn act(ui: &Ui, m: &MeshView, node: Option<&MeshNodeView>, a: Act, me
     }
 }
 
-/// The dialogs and the window of the devices, wherever they were opened.
+fn overlays_pass_id() -> egui::Id {
+    egui::Id::new("mesh-overlays-pass")
+}
+
+/// [`overlays`] ran this frame already.
+pub(crate) fn overlays_drawn(ctx: &egui::Context) -> bool {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data(|d| d.get_temp::<u64>(overlays_pass_id())) == Some(pass)
+}
+
+/// The dialogs and the window of the devices, wherever they were opened
+/// (once a frame).
 pub(crate) fn overlays(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut Vec<Command>) {
+    if overlays_drawn(ui.ctx()) {
+        return;
+    }
+    let pass = ui.ctx().cumulative_pass_nr();
+    ui.ctx().data_mut(|d| d.insert_temp(overlays_pass_id(), pass));
     let now = anim::now(ui.ctx());
     mem.scope_sent.retain(|(id, s, at)| now - at < SENT_S && state.mesh.node(id).is_some_and(|n| n.scope != *s));
     rename_dialog(ui, mem, out);

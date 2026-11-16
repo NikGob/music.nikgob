@@ -44,6 +44,8 @@ pub enum Act {
     SleepMenu,
     /// A choice of «Таймер сна».
     Sleep(nikgob_view::SleepChoice),
+    /// «Где играть»: the output popover, where its button has no room.
+    Output,
 }
 
 /// What a row of the playing track's ⋮ stands for.
@@ -132,6 +134,8 @@ pub struct Chrome {
     /// Open Settings at this row (it also closes Now Playing).
     pub setting: Option<super::pages::SettingId>,
     pub tag: TagEditorUi,
+    /// «Где играть»: the output popover.
+    pub(crate) output: super::output::OutputUi,
     ask: Option<Ask>,
     ask_text: String,
     vol: Volume,
@@ -162,7 +166,7 @@ impl Chrome {
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
             Act::Volume => MenuItem::new("Громкость…")
-                .icon(Icon::volume(state.player.volume, state.player.muted)),
+                .icon(super::output::volume_icon(state, state.player.volume, state.player.muted)),
             Act::Visualizer => MenuItem::new("Визуализатор")
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
@@ -174,6 +178,7 @@ impl Chrome {
                 .shortcut("Y"),
             Act::SleepMenu => MenuItem::new(super::sleep_ui::MENU_LABEL).icon(Icon::Bedtime),
             Act::Sleep(c) => MenuItem::new(super::sleep_ui::choice_label(c, nikgob_view::SleepContext::of(&state.player))),
+            Act::Output => MenuItem::new("Где играть").icon(Icon::SpeakerGroup),
         }
     }
 
@@ -338,6 +343,7 @@ impl Chrome {
             Act::Sleep(c) => out.push(Command::SleepTimer(c)),
             // A submenu, never picked itself.
             Act::SleepMenu => {}
+            Act::Output => self.output.open_at(Id::new("md3e-output-menu"), anchor),
         }
     }
 
@@ -432,6 +438,7 @@ impl Chrome {
         self.dialogs(ctx, out);
         self.tag.show(ctx, state, out);
         self.volume_ui(ctx, state, out);
+        super::output::popover(self, ctx, state, out);
     }
 
     fn dialogs(&mut self, ctx: &Context, out: &mut Vec<Command>) {
@@ -693,7 +700,7 @@ impl Chrome {
                 let mute = ui
                     .scope_builder(UiBuilder::new().max_rect(btn), |ui| {
                         ui.add(
-                            IconButton::new(Icon::volume(volume, state.player.muted))
+                            IconButton::new(super::output::volume_icon(state, volume, state.player.muted))
                                 .size(Size::S)
                                 .tooltip("Без звука")
                                 .id_salt("md3e-volume-mute"),
