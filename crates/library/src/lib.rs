@@ -41,6 +41,7 @@ mod recs;
 mod repairs;
 pub mod search;
 mod selection;
+mod stats;
 mod storage;
 mod streams;
 mod track_fx;
@@ -70,6 +71,7 @@ pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recordings::{PrintToLink, RecordingSide};
 pub use recs::RecTrack;
 pub use selection::{ReleaseChoice, TrackChoice, TrackLibraryWas, WholeUndo};
+pub use stats::{EARLY_SKIP_MS, FakeLossless, FormatCount, LibraryHealth, ListeningReport, StatAlbum, StatArtist, StatTrack, format_group};
 pub use unwanted::Unwanted;
 pub use streams::{LikedClip, MatchRow, TrackSnapshot, event_id, is_web_ref, other_scripts};
 pub use types::{
