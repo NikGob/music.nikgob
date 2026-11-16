@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use nikgob_core::settings::{ApiSettings, ApiTokenRecord, Settings};
+use nikgob_core::settings::{ApiActor, ApiSettings, ApiTokenRecord, Settings};
 use nikgob_view::{ApiTokenView, ApiView, Command};
 
 use crate::{PlaybackEvent, Worker};
@@ -36,6 +36,11 @@ pub(crate) struct ApiKeep {
     pub(crate) switching_device: bool,
     /// The device heard failed and nothing has played since.
     device_failed: bool,
+    /// The actor of the token whose request's commands run now (`None`
+    /// outside a request): a queue it starts plays as theirs
+    /// ([`crate::Worker::user_switch`]). Set by `ApiRun` once it carries
+    /// the actor.
+    pub(crate) actor: Option<ApiActor>,
 }
 
 /// What a device event says of the sound: `Some(true)` it comes out,

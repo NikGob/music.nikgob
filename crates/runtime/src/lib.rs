@@ -783,6 +783,10 @@ struct Worker {
     restored_page: Option<(u64, String)>,
     /// Who chose the next start, when the command that starts it knows.
     next_origin: Option<EventOrigin>,
+    /// Who started the queue that plays: an API request's token (the voice
+    /// assistant, an agent, a guest), `None` the owner. Recorded with each
+    /// play of it.
+    queue_actor: Option<nikgob_core::settings::ApiActor>,
     /// The queue generation of the last start: a start in another queue
     /// is the user's choice.
     origin_gen: Option<u64>,
@@ -1049,6 +1053,7 @@ impl Worker {
             play_context_id: None,
             restored_page: None,
             next_origin: None,
+            queue_actor: None,
             origin_gen: None,
             ended: true,
             heard: Heard::default(),
@@ -2686,12 +2691,13 @@ impl Worker {
         self.rate = self.speed;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
-            let _ = self.lib.record_event(
+            let _ = self.lib.record_event_with(
                 e.track,
                 EventType::Seek,
                 None,
                 Some(p.as_millis() as u32),
                 self.play_context,
+                EventMeta { actor: self.queue_actor, ..EventMeta::default() },
             );
             self.recs_seeked(e.track, from.as_millis() as u32, p.as_millis() as u32);
         }
@@ -2734,7 +2740,7 @@ impl Worker {
         };
         self.ended = false;
         self.heard.reset();
-        let meta = EventMeta { origin: Some(origin), context_id, ..EventMeta::default() };
+        let meta = EventMeta { origin: Some(origin), context_id, actor: self.queue_actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
         self.turn.lap("start recorded");
         self.recs_started(e.track, origin);
@@ -2758,6 +2764,9 @@ impl Worker {
             self.record_end(true, EndReason::UserPick);
         }
         self.next_origin = Some(origin);
+        // Whoever asked for the new queue (an API request's token while its
+        // commands run; the window: the owner) plays it from now on.
+        self.queue_actor = self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner);
     }
 
     /// The app closes: the playing (or paused) track ends as it is.
@@ -2798,7 +2807,7 @@ impl Worker {
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();
-        let meta = EventMeta { end_reason: Some(reason), attention, volume, ..EventMeta::default() };
+        let meta = EventMeta { end_reason: Some(reason), attention, volume, actor: self.queue_actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(
             e.track,
             if complete {
