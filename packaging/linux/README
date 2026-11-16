@@ -1,0 +1,38 @@
+nikgobd: the music.nikgob player without a window (Raspberry Pi, server)
+
+Files
+  nikgobd           the binary
+  nikgobd.toml      example config (also: nikgobd --print-config)
+  nikgobd.service   systemd user unit
+
+Install (as the user who owns the sound, not root)
+  install -Dm755 nikgobd ~/.local/bin/nikgobd
+  install -Dm644 nikgobd.toml ~/.config/nikgob/nikgobd.toml
+  install -Dm644 nikgobd.service ~/.config/systemd/user/nikgobd.service
+  # edit ~/.config/nikgob/nikgobd.toml: library_dir, output_device
+  sudo loginctl enable-linger "$USER"
+  systemctl --user daemon-reload
+  systemctl --user enable --now nikgobd
+
+Linger keeps the user's services, PulseAudio among them, running without
+a login session. Without it the player and PulseAudio stop when the last
+session ends.
+
+Output
+  pactl list short sinks
+The second column is the sink name to put in output_device. A sink that is
+not there plays on the default output until it comes back.
+
+Logs and state
+  journalctl --user -u nikgobd -f
+  systemctl --user status nikgobd
+  ~/.local/share/nikgobd/crash.log      panics
+  ~/.local/share/nikgobd/               library database, prefs, session
+
+Stop and remove
+  systemctl --user disable --now nikgobd
+  rm ~/.local/bin/nikgobd ~/.config/systemd/user/nikgobd.service
+
+Runtime packages: libasound2 (Debian/Raspberry Pi OS) or alsa-lib (Arch),
+and a PulseAudio server (or PipeWire's pulse service) for the user. One
+nikgobd per data dir: a second one on the same dir exits at once.

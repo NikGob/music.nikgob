@@ -1,0 +1,27 @@
+# nikgobd: the player without a window.
+# Default place: ~/.config/nikgob/nikgobd.toml (or nikgobd --config <file>).
+# Every key is optional. NIKGOBD_DATA_DIR, NIKGOBD_LIBRARY_DIR,
+# NIKGOBD_MASTERS_DIR, NIKGOBD_OUTPUT_DEVICE, NIKGOBD_BACKGROUND_COMPUTE and
+# NIKGOBD_LOG override the keys below.
+
+# The library database, prefs, session, settings.toml, the lock and
+# crash.log. Default: ~/.local/share/nikgobd
+#data_dir = "~/.local/share/nikgobd"
+
+# The music. Default: <data_dir>/Music
+#library_dir = "/mnt/ssd/music.nikgob/Music"
+
+# The lossless masters. Default: <library_dir>/.musiclib/masters
+#masters_dir = "/mnt/ssd/music.nikgob/masters"
+
+# The output: a PulseAudio sink name (pactl list short sinks, second
+# column) or a device's description. Missing now, the default output plays
+# until it is back. Unset, the last one chosen over the API is used.
+output_device = "alsa_output.usb-3142_fifine_Headset-00.analog-stereo"
+
+# Sound analysis and file checks in the background. Off: their results
+# come from the PC.
+background_compute = false
+
+# env_logger filters: error, warn, info, debug, or e.g. "info,nikgob_runtime=debug".
+log = "info"
