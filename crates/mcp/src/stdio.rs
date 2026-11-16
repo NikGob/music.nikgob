@@ -10,6 +10,7 @@ use std::sync::Arc;
 use nikgob_core::settings::{API_PORT, ApiSettings, Settings};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::http::HttpBackend;
 use crate::protocol::McpServer;
@@ -89,8 +90,16 @@ pub fn main() -> i32 {
     }
 }
 
+/// One request at most: the longest tool makes a few calls to the API,
+/// each bounded by the client's own timeout.
+const REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(200);
+/// The answers left are written within this once every request is done.
+const FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Reads messages a line each and answers each as it is done (requests run
-/// side by side; their answers carry their ids).
+/// side by side; their answers carry their ids). When stdin closes, the
+/// requests still running are waited for (each at most [`REQUEST_WAIT`])
+/// and their answers written before the end.
 pub async fn serve(config: Config) -> Result<(), String> {
     let backend = HttpBackend::new(&config.url, &config.token)?;
     log::info!("mcp: on stdio, the player's API at {}", config.url);
@@ -106,7 +115,10 @@ pub async fn serve(config: Config) -> Result<(), String> {
         }
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut running = JoinSet::new();
     loop {
+        // The finished ones are let go as it reads.
+        while running.try_join_next().is_some() {}
         let line = match lines.next_line().await {
             Ok(Some(l)) => l,
             Ok(None) => break,
@@ -120,15 +132,21 @@ pub async fn serve(config: Config) -> Result<(), String> {
         }
         let server = server.clone();
         let tx = tx.clone();
-        tokio::spawn(async move {
-            if let Some(answer) = server.handle_text(&line).await {
-                let _ = tx.send(answer).await;
+        running.spawn(async move {
+            match tokio::time::timeout(REQUEST_WAIT, server.handle_text(&line)).await {
+                Ok(Some(answer)) => {
+                    let _ = tx.send(answer).await;
+                }
+                Ok(None) => {}
+                Err(_) => log::warn!("mcp: a request took longer than {} s, dropped", REQUEST_WAIT.as_secs()),
             }
         });
     }
+    // The requests still running finish (each bounded), then their answers
+    // are written.
+    while running.join_next().await.is_some() {}
     drop(tx);
-    // The answers still being made are written before the end.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), writer).await;
+    let _ = tokio::time::timeout(FLUSH_WAIT, writer).await;
     log::info!("mcp: stdin closed");
     Ok(())
 }
