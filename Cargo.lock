@@ -6061,6 +6061,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "fastframe-fonts",
  "image",
  "log",
  "nikgob-api",
