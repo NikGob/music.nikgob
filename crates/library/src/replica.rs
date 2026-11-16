@@ -15,6 +15,7 @@
 //! ([`Library::masters_to_let_go`]), and the ones it let go of, in the
 //! Trash (`master_trash`, migration 36).
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use nikgob_core::model::{PlaylistId, Source, TrackId};
@@ -52,26 +53,82 @@ pub enum Keep {
     Ordered { order: Vec<TrackId>, cap: u64 },
 }
 
-/// A track to pull and the devices that have it, the best copy first.
+/// A track's file to pull: the best one the devices offer (`file_hash`,
+/// `size` bytes, 0: not known) and the devices that have that very file
+/// (one offer each); the pull asks for exactly it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Want {
     pub track_id: TrackId,
+    pub file_hash: String,
+    pub size: u64,
     pub offers: Vec<Offer>,
 }
 
 impl Want {
-    /// The bytes of the copy it would take.
+    /// The bytes of the file it would take (0: not known).
     pub fn size(&self) -> u64 {
-        self.offers.first().map_or(0, |o| o.size)
+        self.size
     }
 }
 
-/// The tracks to pull, in order: those `keep` wants that this device does
-/// not hold (`held`: track → bytes held) and some device offers. Each
-/// track's offers go best first (quality, then size), one per device. With
-/// a cap, a track that does not fit any more is passed over and the next
-/// smaller one may still fit.
-pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, u64>) -> Vec<Want> {
+/// A file of a track this device holds (a live local source): what the
+/// planning counts as held once the caller has seen it on the disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldFile {
+    pub track_id: TrackId,
+    pub file_hash: Option<String>,
+    pub size: u64,
+    pub quality_score: i32,
+    /// Where it is (as the source has it; a relative one is the library
+    /// folder's).
+    pub locator: String,
+}
+
+/// Offers best first: the better quality, then the larger file, then the
+/// device's id.
+fn rank(a: &Offer, b: &Offer) -> Ordering {
+    b.quality_score.cmp(&a.quality_score).then(b.size.cmp(&a.size)).then_with(|| a.node_id.cmp(&b.node_id))
+}
+
+/// Each track's best file the devices offer.
+pub fn best_offers(offers: &[Offer]) -> HashMap<TrackId, Offer> {
+    let mut out: HashMap<TrackId, Offer> = HashMap::new();
+    for o in offers {
+        match out.get(&o.track_id) {
+            Some(b) if rank(o, b) != Ordering::Less => {}
+            _ => {
+                out.insert(o.track_id, o.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The best file of a track's offers and the devices that have that very
+/// file, one offer each.
+fn want_of(track_id: TrackId, mut list: Vec<Offer>) -> Option<Want> {
+    list.sort_by(rank);
+    let best = list.first()?.clone();
+    let mut seen = HashSet::new();
+    let offers: Vec<Offer> = list.into_iter().filter(|o| o.file_hash == best.file_hash && seen.insert(o.node_id.clone())).collect();
+    let size = offers.iter().map(|o| o.size).max().unwrap_or(0);
+    Some(Want { track_id, file_hash: best.file_hash, size, offers })
+}
+
+/// Whether what this device holds of a track (`held`) makes pulling `want`
+/// pointless: that very file, or a better one than any offered.
+fn satisfied(want: &Want, held: &[HeldFile]) -> bool {
+    let best = want.offers.first().map_or(i32::MIN, |o| o.quality_score);
+    held.iter().any(|h| h.file_hash.as_deref() == Some(want.file_hash.as_str()) || h.quality_score > best)
+}
+
+/// The files to pull, in order: for each track `keep` wants and some
+/// device offers, its best file (by hash) unless this device holds that
+/// very file or a better one (`held`: the files it has on the disk now).
+/// With a cap, what is held of the wanted tracks is charged first; a file
+/// that does not fit any more is passed over and a smaller one after it
+/// may still fit; a file of a size not known is never taken as free.
+pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, Vec<HeldFile>>) -> Vec<Want> {
     let mut order: Vec<TrackId> = Vec::new();
     let mut by_track: HashMap<TrackId, Vec<Offer>> = HashMap::new();
     for o in offers {
@@ -81,16 +138,12 @@ pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, u64>
         });
         list.push(o);
     }
-    for list in by_track.values_mut() {
-        list.sort_by(|a, b| b.quality_score.cmp(&a.quality_score).then(b.size.cmp(&a.size)).then_with(|| a.node_id.cmp(&b.node_id)));
-        let mut seen = HashSet::new();
-        list.retain(|o| seen.insert(o.node_id.clone()));
-    }
+    let none: Vec<HeldFile> = Vec::new();
     match keep {
         Keep::All => order
             .into_iter()
-            .filter(|t| !held.contains_key(t))
-            .filter_map(|t| by_track.remove(&t).map(|offers| Want { track_id: t, offers }))
+            .filter_map(|t| by_track.remove(&t).and_then(|list| want_of(t, list)))
+            .filter(|w| !satisfied(w, held.get(&w.track_id).unwrap_or(&none)))
             .collect(),
         Keep::Ordered { order: wanted, cap } => {
             let mut used = 0u64;
@@ -100,17 +153,17 @@ pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, u64>
                 if !seen.insert(*t) {
                     continue;
                 }
-                if let Some(size) = held.get(t) {
-                    used = used.saturating_add(*size);
+                let here = held.get(t).unwrap_or(&none);
+                used = used.saturating_add(here.iter().map(|h| h.size).sum::<u64>());
+                let Some(w) = by_track.remove(t).and_then(|list| want_of(*t, list)) else { continue };
+                if satisfied(&w, here) {
                     continue;
                 }
-                let Some(offers) = by_track.remove(t) else { continue };
-                let size = offers.first().map_or(0, |o| o.size);
-                if used.saturating_add(size) > *cap {
+                if w.size == 0 || used.saturating_add(w.size) > *cap {
                     continue;
                 }
-                used += size;
-                out.push(Want { track_id: *t, offers });
+                used += w.size;
+                out.push(w);
             }
             out
         }
@@ -164,10 +217,14 @@ pub struct Held {
     pub verified_ms: i64,
 }
 
-/// The answer to a [`CheckAsk`]: the files held (those not listed are not).
+/// The answer to a [`CheckAsk`]: the files held, and those not read this
+/// time (`deferred`: the call's reading budget ran out; ask them again,
+/// alone). Those in neither are not held.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckAnswer {
     pub held: Vec<Held>,
+    #[serde(default)]
+    pub deferred: Vec<String>,
 }
 
 /// A lossless master this computer may let go of: trusted devices hold
@@ -276,17 +333,25 @@ impl Library {
         })
     }
 
-    /// The tracks this device has a playable file of, with the bytes of
-    /// its largest.
-    pub fn replica_held(&self) -> Result<HashMap<TrackId, u64>> {
+    /// The files this device's live local sources say it has (whether each
+    /// is on the disk now is the caller's to look at).
+    pub fn replica_held_files(&self) -> Result<Vec<HeldFile>> {
         self.read(|c| {
             let mut stmt = c.prepare(
-                "SELECT track_id, max(coalesce(size_bytes, 0)) FROM source
+                "SELECT track_id, file_hash, coalesce(size_bytes, 0), quality_score, locator FROM source
                   WHERE kind = 'local_file' AND trashed_at IS NULL AND available = 1
-                  GROUP BY track_id",
+                  ORDER BY track_id, id",
             )?;
-            let rows = stmt.query_map([], |r| Ok((get_id::<TrackId>(r, 0)?, r.get::<_, i64>(1)?.max(0) as u64)))?;
-            Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+            let rows = stmt.query_map([], |r| {
+                Ok(HeldFile {
+                    track_id: get_id::<TrackId>(r, 0)?,
+                    file_hash: r.get(1)?,
+                    size: r.get::<_, i64>(2)?.max(0) as u64,
+                    quality_score: r.get(3)?,
+                    locator: r.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
@@ -386,15 +451,13 @@ impl Library {
         })
     }
 
-    /// The hashes of the masters this device keeps, and of the files it
-    /// (`me`) holds a verified copy of: what it does not pull again.
-    pub fn masters_held(&self, me: &str) -> Result<HashSet<String>> {
+    /// Every master row's file: its hash and where it is kept by name
+    /// (None: flat, `{hash}.<ext>` in the masters folder). Whether each is
+    /// on the disk now is the caller's to look at.
+    pub fn master_paths(&self) -> Result<Vec<(String, Option<String>)>> {
         self.read(|c| {
-            let mut stmt = c.prepare(
-                "SELECT file_hash FROM master
-                 UNION SELECT file_hash FROM replica WHERE node_id = ?1 AND verified_at IS NOT NULL",
-            )?;
-            let rows = stmt.query_map([me], |r| r.get::<_, String>(0))?;
+            let mut stmt = c.prepare("SELECT DISTINCT file_hash, file_path FROM master ORDER BY file_hash")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
@@ -519,6 +582,50 @@ impl Library {
         })
     }
 
+    /// The trusted devices holding a verified copy of `hash` now: owner
+    /// devices of the node table, none of `leaving`. Read right before a
+    /// master goes.
+    pub fn verified_holders(&self, hash: &str, leaving: &[String]) -> Result<Vec<String>> {
+        let leaving = serde_json::to_string(leaving).unwrap_or_else(|_| "[]".into());
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT r.node_id FROM replica r JOIN node n ON n.id = r.node_id
+                  WHERE r.file_hash = ?1 AND r.verified_at IS NOT NULL AND n.scope = 'owner'
+                    AND r.node_id NOT IN (SELECT value FROM json_each(?2))
+                  ORDER BY r.node_id",
+            )?;
+            let rows = stmt.query_map(params![hash, leaving], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
+    // ------------------------------------------------ what a file hashed to
+
+    /// What the file at `path` hashed to when it had `size` bytes and was
+    /// changed at `mtime_ms`: (size, mtime, hash).
+    pub fn file_stamp(&self, path: &str) -> Result<Option<(u64, i64, String)>> {
+        self.read(|c| {
+            Ok(c.query_row("SELECT size_bytes, mtime_ms, file_hash FROM file_stamp WHERE path = ?1", [path], |r| {
+                Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+            })
+            .optional()?)
+        })
+    }
+
+    /// Notes what the file at `path` hashed to just now.
+    pub fn put_file_stamp(&self, path: &str, size: u64, mtime_ms: i64, hash: &str) -> Result<()> {
+        let now = now_ms();
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO file_stamp(path, size_bytes, mtime_ms, file_hash, at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(path) DO UPDATE SET size_bytes = excluded.size_bytes, mtime_ms = excluded.mtime_ms,
+                        file_hash = excluded.file_hash, at = excluded.at",
+                params![path, size as i64, mtime_ms, hash, now],
+            )?;
+            Ok(())
+        })
+    }
+
     /// The lossless (FLAC) masters that at least `need` trusted devices
     /// hold a verified copy of: owner devices of the node table, none of
     /// `leaving` (being forgotten). The rows of a forgotten device count
@@ -617,11 +724,11 @@ mod tests {
     use super::*;
     use crate::NodeRow;
 
-    fn offer(t: TrackId, node: &str, size: u64, quality: i32) -> Offer {
+    fn offer(t: TrackId, node: &str, hash: &str, size: u64, quality: i32) -> Offer {
         Offer {
             track_id: t,
             node_id: node.into(),
-            file_hash: format!("{t}-{node}"),
+            file_hash: hash.into(),
             size,
             codec: "opus".into(),
             quality_score: quality,
@@ -631,37 +738,56 @@ mod tests {
         }
     }
 
-    /// The whole library: every track some device has, not those held
-    /// here, the best copy first and one offer per device.
+    fn held_file(t: TrackId, hash: &str, size: u64, quality: i32) -> HeldFile {
+        HeldFile { track_id: t, file_hash: Some(hash.into()), size, quality_score: quality, locator: format!("{hash}.opus") }
+    }
+
+    /// The whole library: each track's best file by hash, asked of the
+    /// devices that have that very file; held only when this device has
+    /// that file (or a better one), not any file of the track.
     #[test]
-    fn a_full_copy_takes_every_track_it_lacks() {
-        let t: Vec<TrackId> = (0..3).map(|_| TrackId::new()).collect();
+    fn a_full_copy_takes_each_tracks_best_file_it_lacks() {
+        let t: Vec<TrackId> = (0..4).map(|_| TrackId::new()).collect();
         let offers = vec![
-            offer(t[0], "pc", 10, 50),
-            offer(t[0], "lap", 12, 80),
-            offer(t[0], "pc", 9, 20),
-            offer(t[1], "pc", 10, 50),
-            offer(t[2], "pc", 10, 50),
+            offer(t[0], "pc", "mp3", 10, 50),
+            offer(t[0], "lap", "flac", 12, 80),
+            offer(t[0], "pc", "flac", 12, 80),
+            offer(t[1], "pc", "a1", 10, 50),
+            offer(t[2], "pc", "a2", 10, 50),
+            offer(t[3], "pc", "a3", 10, 50),
         ];
-        let held: HashMap<TrackId, u64> = [(t[1], 10)].into();
+        let held: HashMap<TrackId, Vec<HeldFile>> = [
+            (t[0], vec![held_file(t[0], "mp3", 10, 50)]),
+            (t[1], vec![held_file(t[1], "a1", 10, 50)]),
+            (t[3], vec![held_file(t[3], "flac3", 30, 90)]),
+        ]
+        .into();
         let plan = plan_tracks(&Keep::All, offers, &held);
-        assert_eq!(plan.iter().map(|w| w.track_id).collect::<Vec<_>>(), vec![t[0], t[2]]);
-        assert_eq!(plan[0].offers.iter().map(|o| o.node_id.as_str()).collect::<Vec<_>>(), ["lap", "pc"], "the better copy first");
-        assert_eq!(plan[0].offers[1].size, 10, "the device's best copy");
+        assert_eq!(plan.iter().map(|w| w.track_id).collect::<Vec<_>>(), vec![t[0], t[2]], "a held MP3 does not stand for the FLAC; a better file held does");
+        assert_eq!(plan[0].file_hash, "flac");
+        assert_eq!(plan[0].offers.iter().map(|o| o.node_id.as_str()).collect::<Vec<_>>(), ["lap", "pc"], "both have that very file");
         assert_eq!(plan[0].size(), 12);
+        assert_eq!(best_offers(&[offer(t[0], "pc", "mp3", 10, 50), offer(t[0], "pc", "flac", 12, 80)])[&t[0]].file_hash, "flac");
     }
 
     /// «Избранное»: in its order while it fits the cap, what is held
-    /// counted; a track too big is passed over, a smaller one after it
-    /// still taken; tracks no device has and repeats are skipped.
+    /// charged; a file too big is passed over, a smaller one after it still
+    /// taken; tracks no device has, repeats and files of a size not known
+    /// are skipped.
     #[test]
     fn favorites_take_their_order_up_to_the_cap() {
-        let t: Vec<TrackId> = (0..6).map(|_| TrackId::new()).collect();
-        let offers = vec![offer(t[0], "pc", 40, 50), offer(t[1], "pc", 50, 50), offer(t[2], "pc", 30, 50), offer(t[4], "pc", 20, 50)];
-        let held: HashMap<TrackId, u64> = [(t[3], 25)].into();
-        let keep = Keep::Ordered { order: vec![t[3], t[0], t[0], t[1], t[5], t[2], t[4]], cap: 100 };
+        let t: Vec<TrackId> = (0..7).map(|_| TrackId::new()).collect();
+        let offers = vec![
+            offer(t[0], "pc", "h0", 40, 50),
+            offer(t[1], "pc", "h1", 50, 50),
+            offer(t[2], "pc", "h2", 30, 50),
+            offer(t[4], "pc", "h4", 20, 50),
+            offer(t[6], "pc", "h6", 0, 50),
+        ];
+        let held: HashMap<TrackId, Vec<HeldFile>> = [(t[3], vec![held_file(t[3], "h3", 25, 50)])].into();
+        let keep = Keep::Ordered { order: vec![t[3], t[6], t[0], t[0], t[1], t[5], t[2], t[4]], cap: 100 };
         let plan = plan_tracks(&keep, offers.clone(), &held);
-        // 25 held + 40 = 65; 50 would be 115: passed over; 30 → 95; 20 → 115: no.
+        // 25 held; size unknown: not free; + 40 = 65; 50 would be 115: passed over; 30 → 95; 20 → 115: no.
         assert_eq!(plan.iter().map(|w| w.track_id).collect::<Vec<_>>(), vec![t[0], t[2]]);
         let roomy = Keep::Ordered { order: vec![t[0], t[1]], cap: 1000 };
         assert_eq!(plan_tracks(&roomy, offers.clone(), &HashMap::new()).len(), 2);
@@ -732,14 +858,15 @@ mod tests {
         let offers = lib.replica_offers(&["pc".to_owned()]).unwrap();
         assert_eq!(offers.len(), 1, "a deleted track, another device's file: not offered");
         assert_eq!((offers[0].track_id, offers[0].file_hash.as_str(), offers[0].size), (a.id, "ha", 1000));
-        assert!(lib.replica_held().unwrap().is_empty());
+        assert!(lib.replica_held_files().unwrap().is_empty());
 
         let mut s = Source::new(a.id, SourceKind::LocalFile, "/srv/Music/Кино/01 - A.opus", Codec::Opus);
         s.file_hash = Some("ha".into());
         s.size_bytes = Some(1000);
         let stored = lib.put_pulled_file(&s, &me).unwrap();
         assert!(stored.is_active, "it plays");
-        assert_eq!(lib.replica_held().unwrap().get(&a.id), Some(&1000));
+        let files = lib.replica_held_files().unwrap();
+        assert_eq!((files[0].track_id, files[0].file_hash.as_deref(), files[0].size), (a.id, Some("ha"), 1000));
         assert!(lib.replica_verified("ha", &me).unwrap().is_some());
         let mine = lib.replica_offers(&[me.clone()]).unwrap();
         assert_eq!(mine.len(), 1, "the others see it as this device's");
@@ -797,6 +924,9 @@ mod tests {
         let two = lib.masters_to_let_go(2, &[]).unwrap();
         assert_eq!(two.iter().map(|g| g.file_hash.as_str()).collect::<Vec<_>>(), ["h1"], "a guest's and a forgotten device's copies count for nothing");
         assert!(lib.masters_to_let_go(2, &["lap".into()]).unwrap().is_empty(), "a device being forgotten counts for nothing");
+        assert_eq!(lib.verified_holders("h1", &[]).unwrap(), ["lap", "pi"]);
+        assert_eq!(lib.verified_holders("h1", &["pi".into()]).unwrap(), ["lap"]);
+        assert!(lib.verified_holders("h4", &[]).unwrap().is_empty(), "never verified");
         assert!(lib.masters_to_let_go(0, &[]).unwrap().is_empty());
     }
 
@@ -829,11 +959,20 @@ mod tests {
         let m = lib.get_master(a.id).unwrap().unwrap();
         assert_eq!((m.file_hash.as_str(), m.size_bytes, m.file_path.as_deref()), ("hm", 300, Some("/srv/Music/.musiclib/masters/Кино/01 - A.flac")));
         assert_eq!(lib.get_master(b.id).unwrap().unwrap().file_hash, "other");
-        assert!(lib.masters_held(&me).unwrap().contains("hm"));
+        assert!(lib.master_paths().unwrap().contains(&("hm".to_owned(), Some("/srv/Music/.musiclib/masters/Кино/01 - A.flac".to_owned()))));
         let page = lib.masters_after("", 10).unwrap();
         assert_eq!(page.iter().map(|f| f.item.hash.as_str()).collect::<Vec<_>>(), ["hm", "other"]);
         assert_eq!(page[0].item.tracks, vec![a.id]);
         assert_eq!(lib.master_hashes_after("hm", 10).unwrap(), ["other"]);
+    }
+
+    #[test]
+    fn a_files_hash_is_noted_with_its_size_and_time() {
+        let lib = Library::open_in_memory().unwrap();
+        assert!(lib.file_stamp("/m/a.flac").unwrap().is_none());
+        lib.put_file_stamp("/m/a.flac", 10, 5, "h1").unwrap();
+        lib.put_file_stamp("/m/a.flac", 12, 6, "h2").unwrap();
+        assert_eq!(lib.file_stamp("/m/a.flac").unwrap(), Some((12, 6, "h2".to_owned())));
     }
 
     #[test]
