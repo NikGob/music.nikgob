@@ -10,7 +10,6 @@
 
 [![English](https://img.shields.io/badge/README-English-2b6cb0?style=for-the-badge)](README.md)
 [![Version](https://img.shields.io/badge/version-0.1.0%20pre--release-d97706?style=for-the-badge)](https://github.com/NikGob/music.nikgob/releases)
-[![Rust](https://img.shields.io/badge/Rust-2024%20edition-000000?style=for-the-badge&logo=rust)](Cargo.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Strict%201.0.0-4b5563?style=for-the-badge)](LICENSE.md)
 
 <br />
@@ -28,6 +27,7 @@
 > - **Spotify и SoundCloud** работают, но **очень мало тестировались вживую** на разных типах подписок, региональных ограничениях, лимитах запросов и переключении между устройствами.
 > - **Linux-сборки** (`x86_64` под Wayland/X11, NixOS flake и консольный демон `nikgobd` под `aarch64`) собираются и запускаются, но **тестировались заметно меньше Windows** (особенно переключение устройств PipeWire/PulseAudio, окна входа на WebKitGTK и связки ключей).
 > - **Мобильная версия (`crates/mobile`)** находится в **ОЧЕНЬ ранней стадии прототипа** — сейчас это портретный тач-интерфейс в десктопной обёртке (`nikgob-phone`) поверх общего рантайма, а не готовое Android-приложение.
+> - **Язык интерфейса** в `0.1.0` пока **только русский**; полный перевод интерфейса на английский запланирован в следующих обновлениях.
 
 ---
 
