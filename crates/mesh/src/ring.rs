@@ -4,6 +4,12 @@
 //! member keeps the ring's public key, its own certificate, the others' and
 //! the revocations (`ring.json`). Two devices trust each other when both
 //! show a certificate of the same ring that no revocation came after.
+//!
+//! A ring keeps one revocation per forgotten device (the newest) and drops
+//! the certificates they made void. The holder admits a device only while
+//! every member could still be forgotten within [`MAX_REVOKED`], and every
+//! member keeps the same limits, so nothing the holder signs is ever left
+//! out somewhere on the way round.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -14,10 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::keys::write_atomic;
 
-/// Members a ring may have, revocations it may keep (a list from another
-/// device never grows past these).
+/// Members a ring may have at once (the holder too)…
 pub const MAX_MEMBERS: usize = 64;
-pub const MAX_REVOKED: usize = 256;
+/// …and forgotten devices it remembers (one revocation each). Both lists
+/// in one control message stay well under its 256 KiB.
+pub const MAX_REVOKED: usize = 512;
 
 /// Lowercase hex.
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -222,21 +229,51 @@ impl Ring {
         self.members.iter().filter(|c| c.node != self.me.node && !self.is_revoked(&c.node, c.issued_ms))
     }
 
+    /// Takes a revocation signed by the ring: the newest one per device
+    /// stays. Past [`MAX_REVOKED`] only a member's is still taken (a holder
+    /// keeps within it, so no member is ever left unforgettable). Whether it
+    /// changed anything.
+    fn take_revocation(&mut self, r: &Revocation) -> bool {
+        if !r.verify(&self.public) {
+            return false;
+        }
+        match self.revoked.iter_mut().find(|x| x.node == r.node) {
+            Some(x) if r.revoked_ms > x.revoked_ms => {
+                *x = r.clone();
+                true
+            }
+            Some(_) => false,
+            None => {
+                if self.revoked.len() >= MAX_REVOKED && !self.members.iter().any(|m| m.node == r.node) {
+                    return false;
+                }
+                self.revoked.push(r.clone());
+                true
+            }
+        }
+    }
+
+    /// Drops the certificates a revocation made void (this device's own
+    /// stays: [`Ring::me_revoked`] tells). Whether any went.
+    fn prune(&mut self) -> bool {
+        let before = self.members.len();
+        let (revoked, me) = (std::mem::take(&mut self.revoked), self.me.node.clone());
+        self.members.retain(|c| c.node == me || !revoked.iter().any(|r| r.node == c.node && r.revoked_ms >= c.issued_ms));
+        self.revoked = revoked;
+        self.members.len() != before
+    }
+
     /// Takes the certificates and revocations of another member (or of a
-    /// grant): only the ring's own, newer ones. Whether anything changed.
+    /// grant): only the ring's own, newer ones; a certificate a revocation
+    /// voids is not taken. Whether anything changed.
     pub fn merge(&mut self, certs: &[Cert], revoked: &[Revocation]) -> bool {
         let mut changed = false;
         for r in revoked {
-            if self.revoked.len() >= MAX_REVOKED {
-                break;
-            }
-            if !self.revoked.contains(r) && r.verify(&self.public) {
-                self.revoked.push(r.clone());
-                changed = true;
-            }
+            changed |= self.take_revocation(r);
         }
+        changed |= self.prune();
         for c in certs {
-            if !c.verify(&self.public) {
+            if !c.verify(&self.public) || self.is_revoked(&c.node, c.issued_ms) {
                 continue;
             }
             match self.members.iter_mut().find(|m| m.node == c.node) {
@@ -257,6 +294,37 @@ impl Ring {
             changed = true;
         }
         changed
+    }
+
+    /// The holder may sign `node` a certificate: it is a member already, or
+    /// there is room for one more member, and forgetting every member, the
+    /// new one too, would still fit in [`MAX_REVOKED`].
+    pub fn can_admit(&self, node: &PublicKey) -> bool {
+        if self.trusted(node).is_some() {
+            return true;
+        }
+        let id = node.to_string();
+        let has_rev = |n: &str| self.revoked.iter().any(|r| r.node == n);
+        let would = self.revoked.len()
+            + self.members.iter().filter(|c| c.node != self.me.node && !has_rev(&c.node)).count()
+            + usize::from(!has_rev(&id));
+        self.members.len() < MAX_MEMBERS && would <= MAX_REVOKED
+    }
+
+    /// Forgets member `node` (holder): a revocation after every certificate
+    /// it has, signed with `ring_key`; its certificate goes. Always taken
+    /// for a member; `false` when `node` is not one (or is this device).
+    pub fn revoke(&mut self, ring_key: &SecretKey, node: &PublicKey, now_ms: i64) -> bool {
+        let id = node.to_string();
+        if id == self.me.node {
+            return false;
+        }
+        let Some(issued) = self.members.iter().filter(|c| c.node == id).map(|c| c.issued_ms).max() else { return false };
+        let after = self.revoked.iter().filter(|r| r.node == id).map(|r| r.revoked_ms + 1).max().unwrap_or(i64::MIN);
+        let rev = Revocation::issue(ring_key, node, now_ms.max(issued).max(after));
+        let taken = self.take_revocation(&rev);
+        self.prune();
+        taken
     }
 
     /// Adds (or renews) a member's certificate signed here.
@@ -372,6 +440,63 @@ pub(crate) mod tests {
         assert!(at_tv.merge(&at_pi.members, &at_pi.revoked));
         assert!(at_tv.me_revoked(), "the TV learns it was forgotten");
         assert!(!at_pi.merge(&at_tv.members, &at_tv.revoked), "nothing new comes back");
+    }
+
+    /// One revocation per device, the newest; the certificate it voids goes
+    /// and an old copy of it coming round again is not taken back.
+    #[test]
+    fn revocations_stay_one_per_device_and_void_certificates_go() {
+        let ring_key = key(1);
+        let (pc, pi) = (key(2).public(), key(3).public());
+        let mut ring = Ring::create(&ring_key, &pc, "PC", MeshKind::Pc, 10);
+        let old = Cert::issue(&ring_key, &pi, "Pi", MeshKind::Pi, MeshScope::Owner, 20);
+        ring.admit(old.clone());
+        assert!(ring.revoke(&ring_key, &pi, 30));
+        assert_eq!(ring.members.len(), 1, "the voided certificate went");
+        assert!(!ring.merge(&[old.clone()], &[]), "an old copy is not taken back");
+        // Paired again and forgotten again: still one revocation.
+        ring.admit(Cert::issue(&ring_key, &pi, "Pi", MeshKind::Pi, MeshScope::Owner, 40));
+        assert!(ring.trusted(&pi).is_some());
+        assert!(ring.revoke(&ring_key, &pi, 35), "after its newest certificate even with a clock behind");
+        assert_eq!(ring.revoked.len(), 1);
+        assert!(ring.revoked[0].revoked_ms >= 40);
+        assert!(ring.trusted(&pi).is_none());
+        // An older revocation changes nothing.
+        assert!(!ring.merge(&[], &[Revocation::issue(&ring_key, &pi, 30)]));
+        assert!(!ring.revoke(&ring_key, &pc, 50), "the holder does not forget itself");
+        assert!(!ring.revoke(&ring_key, &key(7).public(), 50), "nor a stranger");
+    }
+
+    fn many(i: usize) -> PublicKey {
+        let mut b = [7u8; 32];
+        b[0] = (i & 0xff) as u8;
+        b[1] = (i >> 8) as u8;
+        SecretKey::from_bytes(&b).public()
+    }
+
+    /// The holder admits only devices it could still forget, and forgetting
+    /// a member is never refused, even with the list of revocations full.
+    #[test]
+    fn a_member_can_always_be_forgotten() {
+        let ring_key = key(1);
+        let (pc, pi, tv) = (key(2).public(), key(3).public(), key(4).public());
+        let mut ring = Ring::create(&ring_key, &pc, "PC", MeshKind::Pc, 10);
+        let strangers: Vec<Revocation> = (0..MAX_REVOKED - 1).map(|i| Revocation::issue(&ring_key, &many(i), 5)).collect();
+        assert!(ring.merge(&[], &strangers));
+        assert_eq!(ring.revoked.len(), MAX_REVOKED - 1);
+        assert!(ring.can_admit(&pi));
+        ring.admit(Cert::issue(&ring_key, &pi, "Pi", MeshKind::Pi, MeshScope::Owner, 20));
+        assert!(!ring.can_admit(&tv), "forgetting both would not fit");
+        assert!(ring.can_admit(&pi), "a member is renewed");
+        assert!(ring.revoke(&ring_key, &pi, 30));
+        assert_eq!(ring.revoked.len(), MAX_REVOKED);
+        assert!(ring.trusted(&pi).is_none());
+        // Full: a stranger's revocation is not kept, a member's still is.
+        assert!(!ring.merge(&[], &[Revocation::issue(&ring_key, &many(9999), 5)]));
+        let mut other = ring.clone();
+        other.members.push(Cert::issue(&ring_key, &tv, "TV", MeshKind::Tv, MeshScope::Guest, 40));
+        assert!(other.merge(&[], &[Revocation::issue(&ring_key, &tv, 50)]));
+        assert!(other.trusted(&tv).is_none());
     }
 
     #[test]
