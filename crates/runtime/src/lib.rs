@@ -195,6 +195,11 @@ pub trait Playback: Send {
     /// Engine `generation` did not open its device: dropped if it was
     /// waiting to take over.
     fn drop_device(&mut self, _generation: u64) {}
+    /// Whether sound can come out at all (false: a stand-in for an engine
+    /// that did not start).
+    fn available(&self) -> bool {
+        true
+    }
 }
 
 /// A backend that plays nothing (tests, or when no device is available).
@@ -211,6 +216,28 @@ impl Playback for NullPlayback {
     fn set_volume(&mut self, _: f32) {}
     fn position(&self) -> Duration {
         Duration::ZERO
+    }
+}
+
+/// What the host plays through when the audio engine did not start: it
+/// plays nothing and says so ([`Playback::available`]), so the view shows
+/// [`ViewState::no_audio`].
+#[derive(Default)]
+pub struct NoAudio;
+
+impl Playback for NoAudio {
+    fn play(&mut self, _: PlayRequest) {}
+    fn set_next(&mut self, _: Option<PlayRequest>) {}
+    fn pause(&mut self) {}
+    fn resume(&mut self) {}
+    fn stop(&mut self) {}
+    fn seek(&mut self, _: Duration) {}
+    fn set_volume(&mut self, _: f32) {}
+    fn position(&self) -> Duration {
+        Duration::ZERO
+    }
+    fn available(&self) -> bool {
+        false
     }
 }
 
@@ -1860,7 +1887,8 @@ impl Worker {
             | Command::ApiRestoreToken(_)
             | Command::ApiStatus { .. }
             | Command::ApiTokensUsed(_)
-            | Command::ApiSync(_)) => self.api_command(c),
+            | Command::ApiRun { .. }
+            | Command::ApiShuffle(_)) => self.api_command(c),
         }
     }
 
@@ -2186,6 +2214,10 @@ impl Worker {
     pub(crate) fn new_list(&mut self, kind: Option<nikgob_view::ListKind>) {
         let rule = kind.map_or(nikgob_view::ListShuffle::Button, |k| self.state.read().prefs.list_shuffle.of(k));
         self.queue.new_list(rule, kind);
+        // An API request said shuffled or not: so before the list is made.
+        if let Some(on) = self.api.next_shuffle.take() {
+            self.queue.shuffle = on;
+        }
     }
 
     /// Writes the prefs a command changed without writing them itself, or
@@ -2645,6 +2677,7 @@ impl Worker {
             PlaybackEvent::PositionAt { id, position, at } => (PlaybackEvent::Position { id, position }, at.elapsed().min(POSITION_SNAP)),
             ev => (ev, Duration::ZERO),
         };
+        self.api_audio_event(&ev);
         match ev {
             PlaybackEvent::Started { id } => {
                 if self.restarted == Some(id) {
@@ -4088,6 +4121,9 @@ impl Worker {
     fn switch_device(&mut self, device: Option<String>) {
         if self.playback.set_device(device) {
             self.resume_on_new_device();
+        } else {
+            // A device error from now on is the new device's, not the one heard.
+            self.api.switching_device = true;
         }
     }
 

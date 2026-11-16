@@ -828,7 +828,8 @@ fn main() -> eframe::Result {
             Ok((engine, links)) => (Box::new(engine), Some(links)),
             Err(e) => {
                 log::error!("audio engine failed to start: {e}");
-                (Box::new(NullPlayback), None)
+                // Plays nothing and says so: the view's `no_audio`, the API's 503.
+                (Box::new(nikgob_runtime::NoAudio), None)
             }
         }
     };

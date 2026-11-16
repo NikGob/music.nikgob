@@ -3158,6 +3158,10 @@ pub struct ViewState {
     pub revision: u64,
     /// The local REST API («Межсеть → API и MCP»).
     pub api: ApiView,
+    /// No sound can come out: the audio engine did not start, or the
+    /// device heard failed and nothing has played since. The API answers
+    /// its play commands with `503 no_audio`.
+    pub no_audio: bool,
 }
 
 /// What the user does not want: tracks disliked and artists not to
@@ -3840,9 +3844,14 @@ pub enum Command {
     /// From the API server: these tokens were used (id, unix ms), at most
     /// once a second each.
     ApiTokensUsed(Vec<(String, i64)>),
-    /// From the API server, after its own commands: the runtime says it got
-    /// here ([`ApiView::synced`]), so the answer has their state.
-    ApiSync(u64),
+    /// From the API server: one request's commands, run one after another
+    /// with nothing between them, then `ack` is shown as
+    /// [`ApiView::synced`] (acks come in the order they were sent), so the
+    /// answer has their state.
+    ApiRun { commands: Vec<Command>, ack: u64 },
+    /// Inside an [`Command::ApiRun`]: the next list it makes plays shuffled
+    /// or in order as this says, whatever the settings of its kind.
+    ApiShuffle(bool),
 }
 
 impl Default for Prefs {

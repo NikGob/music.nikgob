@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use nikgob_core::settings::{ApiSettings, ApiTokenRecord, Settings};
 use nikgob_view::{ApiTokenView, ApiView, Command};
 
-use crate::Worker;
+use crate::{PlaybackEvent, Worker};
 
 /// The tokens' last uses are written to settings.toml at most this often
 /// (and when the player quits).
@@ -28,6 +28,30 @@ pub(crate) struct ApiKeep {
     /// Uses of the tokens shown but not written yet.
     used_unsaved: bool,
     used_saved_at: Option<Instant>,
+    /// The shuffle an API request asked for the next list it makes
+    /// ([`Command::ApiShuffle`]); gone at the end of its request.
+    pub(crate) next_shuffle: Option<bool>,
+    /// A device switch is waiting for its device: a device error now is the
+    /// new device's (the one heard plays on).
+    pub(crate) switching_device: bool,
+    /// The device heard failed and nothing has played since.
+    device_failed: bool,
+}
+
+/// What a device event says of the sound: `Some(true)` it comes out,
+/// `Some(false)` the device heard failed, None nothing new. `switching`:
+/// a device switch waits for its device.
+pub(crate) fn audio_news(ev: &PlaybackEvent, switching: bool) -> Option<bool> {
+    match ev {
+        PlaybackEvent::DeviceError { .. } => (!switching).then_some(false),
+        PlaybackEvent::Started { .. }
+        | PlaybackEvent::TrackChanged { .. }
+        | PlaybackEvent::Resumed
+        | PlaybackEvent::Position { .. }
+        | PlaybackEvent::PositionAt { .. }
+        | PlaybackEvent::DeviceReady { .. } => Some(true),
+        _ => None,
+    }
 }
 
 fn token_view(t: &ApiTokenRecord) -> ApiTokenView {
@@ -69,6 +93,7 @@ impl Worker {
     /// `[api]` into the view at start. Tokens revoked in a run that ended
     /// lost their «Отменить» with it: they go now.
     pub(crate) fn api_load(&mut self) {
+        self.publish_audio();
         let Some(path) = self.settings_path.clone() else { return };
         let mut settings = match Settings::load(&path) {
             Ok(s) => s,
@@ -88,13 +113,51 @@ impl Worker {
         self.publish(move |s| apply(&mut s.api, &api, true));
     }
 
+    /// Whether sound can come out, into the view: the engine started, and
+    /// the device heard did not fail since something last played.
+    pub(crate) fn publish_audio(&mut self) {
+        let no_audio = !self.playback.available() || self.api.device_failed;
+        if self.state.read().no_audio != no_audio {
+            self.publish(move |s| s.no_audio = no_audio);
+        }
+    }
+
+    /// A playback event, for [`nikgob_view::ViewState::no_audio`].
+    pub(crate) fn api_audio_event(&mut self, ev: &PlaybackEvent) {
+        if matches!(ev, PlaybackEvent::DeviceError { .. } | PlaybackEvent::DeviceReady { .. }) {
+            // The switch got its answer either way.
+            let switching = std::mem::take(&mut self.api.switching_device);
+            if let Some(ok) = audio_news(ev, switching) {
+                self.api.device_failed = !ok;
+            }
+        } else if audio_news(ev, false) == Some(true) {
+            if !self.api.device_failed {
+                return;
+            }
+            self.api.device_failed = false;
+        } else {
+            return;
+        }
+        self.publish_audio();
+    }
+
     /// Changes `[api]` in settings.toml (`edit` says whether it changed
     /// anything) with the tokens' last uses as shown, and shows the result.
-    /// False when nothing was saved.
+    /// False when nothing was saved; a failure is a toast.
     fn api_edit(&mut self, edit: impl FnOnce(&mut ApiSettings) -> bool) -> bool {
+        match self.api_save(edit) {
+            Ok(saved) => saved,
+            Err(why) => {
+                self.toast(why, None);
+                false
+            }
+        }
+    }
+
+    /// [`Self::api_edit`] with the failure in words instead of a toast.
+    fn api_save(&mut self, edit: impl FnOnce(&mut ApiSettings) -> bool) -> Result<bool, &'static str> {
         let Some(path) = self.settings_path.clone() else {
-            self.toast("Некуда сохранить настройки", None);
-            return false;
+            return Err("Некуда сохранить настройки");
         };
         // A file that cannot be read is not replaced by defaults: that would
         // drop every other secret in it.
@@ -102,8 +165,7 @@ impl Worker {
             Ok(s) => s,
             Err(e) => {
                 log::error!("loading settings: {e}");
-                self.toast("settings.toml не читается — поправь файл вручную", None);
-                return false;
+                return Err("settings.toml не читается — поправь файл вручную");
             }
         };
         {
@@ -115,18 +177,17 @@ impl Worker {
             }
         }
         if !edit(&mut settings.api) {
-            return false;
+            return Ok(false);
         }
         if let Err(e) = settings.save(&path) {
             log::error!("saving settings: {e}");
-            self.toast("Не удалось сохранить настройки", None);
-            return false;
+            return Err("Не удалось сохранить настройки");
         }
         self.api.used_unsaved = false;
         self.api.used_saved_at = Some(Instant::now());
         let api = settings.api;
         self.publish(move |s| apply(&mut s.api, &api, true));
-        true
+        Ok(true)
     }
 
     pub(crate) fn api_command(&mut self, c: Command) {
@@ -159,8 +220,10 @@ impl Worker {
                 });
             }
             Command::ApiCreateToken(t) => {
+                let id = t.id.clone();
                 if t.name.trim().is_empty() || nikgob_core::api_token::Hashed::parse(&t.hash).is_none() {
                     log::warn!("api: a token without a name or a hash refused");
+                    self.publish(move |s| s.api.token_failed = Some((id, "Токен без названия".to_owned())));
                     return;
                 }
                 let record = ApiTokenRecord {
@@ -173,13 +236,22 @@ impl Worker {
                     last_used_ms: None,
                     revoked_ms: None,
                 };
-                self.api_edit(move |a| {
+                // The dialog shows the secret once the token is in the view
+                // (kept in the file), or this failure.
+                let failed = match self.api_save(move |a| {
                     if a.tokens.iter().any(|x| x.id == record.id) {
                         return false;
                     }
                     a.tokens.push(record);
                     true
-                });
+                }) {
+                    Ok(true) => None,
+                    Ok(false) => Some("Такой токен уже есть"),
+                    Err(why) => Some(why),
+                };
+                if let Some(why) = failed {
+                    self.publish(move |s| s.api.token_failed = Some((id, why.to_owned())));
+                }
             }
             Command::ApiRevokeToken(id) => {
                 let name = self.state.read().api.tokens.iter().find(|t| t.id == id).map(|t| t.name.clone());
@@ -222,7 +294,16 @@ impl Worker {
                 });
                 self.api.used_unsaved = true;
             }
-            Command::ApiSync(n) => self.publish(move |s| s.api.synced = s.api.synced.max(n)),
+            Command::ApiRun { commands, ack } => {
+                for c in commands {
+                    self.command(c);
+                }
+                // A shuffle asked for a list the request did not make (it had
+                // nothing to play) does not reach a later one.
+                self.api.next_shuffle = None;
+                self.publish(move |s| s.api.synced = s.api.synced.max(ack));
+            }
+            Command::ApiShuffle(on) => self.api.next_shuffle = Some(on),
             other => log::warn!("api: not an API command {other:?}"),
         }
     }
@@ -294,6 +375,19 @@ mod tests {
         assert_eq!(gone, vec!["old".to_owned()]);
         assert!(purgeable(&tokens, 10_000, |_| true).is_empty());
         assert_eq!(purgeable(&tokens, 20_000, |_| false), vec!["fresh".to_owned(), "old".to_owned(), "undo".to_owned()]);
+    }
+
+    /// A device error is the heard device's unless a switch waits; any
+    /// sound playing clears it.
+    #[test]
+    fn the_sound_comes_out_or_not() {
+        let err = PlaybackEvent::DeviceError { generation: 1, message: "busy".into() };
+        assert_eq!(audio_news(&err, false), Some(false));
+        assert_eq!(audio_news(&err, true), None, "the switch's device failed, the heard one plays on");
+        assert_eq!(audio_news(&PlaybackEvent::Started { id: 3 }, false), Some(true));
+        assert_eq!(audio_news(&PlaybackEvent::Resumed, false), Some(true));
+        assert_eq!(audio_news(&PlaybackEvent::DeviceReady { generation: 2 }, true), Some(true));
+        assert_eq!(audio_news(&PlaybackEvent::Paused, false), None);
     }
 
     #[test]

@@ -22,9 +22,12 @@ pub struct ApiView {
     pub error: Option<String>,
     /// The settings can be saved (there is a settings.toml).
     pub configurable: bool,
-    /// The last [`crate::Command::ApiSync`] the runtime got to: the API
-    /// waits for it to answer with the state its commands made.
+    /// The last [`crate::Command::ApiRun`] the runtime got through: the
+    /// API waits for its own to answer with the state its commands made.
     pub synced: u64,
+    /// A token the dialog sent that was not kept (its id, why): the dialog
+    /// shows the error instead of the secret.
+    pub token_failed: Option<(String, String)>,
 }
 
 impl Default for ApiView {
@@ -39,6 +42,7 @@ impl Default for ApiView {
             error: None,
             configurable: false,
             synced: 0,
+            token_failed: None,
         }
     }
 }
