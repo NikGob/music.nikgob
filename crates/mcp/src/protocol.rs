@@ -20,7 +20,7 @@ pub const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26
 /// What the server tells the client about itself.
 const INSTRUCTIONS: &str = "Controls the music.nikgob player on the user's computer and reads its library. \
 Start with status_get or the music://now-playing resource. Use library_search for the user's own music and discover_search for anything else. \
-Destructive tools (playlist_remove, library_retag, library_trash) answer a plan and a confirm_token first: show the plan and repeat the call with the token only after the user agrees. \
+Destructive tools (playlist_remove, library_retag, library_trash) answer a plan and a confirm_token first: show the plan and repeat the call with the token only after the user agrees. If the answer is plan_changed, show the new plan it carries and ask again. \
 Messages from the player are in Russian.";
 
 /// A JSON-RPC error.
@@ -49,6 +49,52 @@ fn reply(id: Value, r: Result<Value, RpcError>) -> Value {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
         Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": e.code, "message": e.message}}),
     }
+}
+
+/// `-32600 Invalid Request` for `id`.
+fn invalid(id: Value, why: &str) -> Value {
+    reply(id, Err(RpcError::new(RpcError::INVALID_REQUEST, format!("Invalid Request: {why}"))))
+}
+
+/// A message that passed [`check`].
+struct Envelope {
+    /// `None`: a notification (no `id` at all).
+    id: Option<Value>,
+    /// `None`: an answer from the client.
+    method: Option<String>,
+    params: Value,
+}
+
+/// The JSON-RPC 2.0 envelope of `msg`: an object with `"jsonrpc": "2.0"`,
+/// an `id` that is a string or a number when present (never null), a
+/// string `method` (or, for an answer, `result` or `error` with an id), and
+/// `params` an object or an array when present. Else the error to send.
+fn check(msg: &Value) -> Result<Envelope, Value> {
+    let Some(m) = msg.as_object() else {
+        return Err(invalid(Value::Null, "not an object"));
+    };
+    let id = match m.get("id") {
+        None => None,
+        Some(i @ (Value::String(_) | Value::Number(_))) => Some(i.clone()),
+        Some(Value::Null) => return Err(invalid(Value::Null, "id must not be null")),
+        Some(_) => return Err(invalid(Value::Null, "id must be a string or a number")),
+    };
+    let echo = || id.clone().unwrap_or(Value::Null);
+    if m.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(invalid(echo(), "jsonrpc must be \"2.0\""));
+    }
+    let method = match m.get("method") {
+        None if (m.contains_key("result") || m.contains_key("error")) && id.is_some() => None,
+        None => return Err(invalid(echo(), "no method")),
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(invalid(echo(), "method must be a string")),
+    };
+    let params = match m.get("params") {
+        None => json!({}),
+        Some(p @ (Value::Object(_) | Value::Array(_))) => p.clone(),
+        Some(_) => return Err(invalid(echo(), "params must be an object or an array")),
+    };
+    Ok(Envelope { id, method, params })
 }
 
 /// A tool's answer as the protocol carries it.
@@ -105,6 +151,7 @@ impl<B: Backend> McpServer<B> {
             Err(e) => return Some(reply(Value::Null, Err(RpcError::new(RpcError::PARSE, format!("Parse error: {e}")))).to_string()),
         };
         match msg {
+            Value::Array(batch) if batch.is_empty() => Some(invalid(Value::Null, "Empty batch").to_string()),
             Value::Array(batch) => {
                 let mut out = Vec::new();
                 for m in batch {
@@ -118,24 +165,24 @@ impl<B: Backend> McpServer<B> {
         }
     }
 
-    /// One message; the answer, if it is a request.
+    /// One message; the answer, if it is a request (or not a valid
+    /// message: `-32600` with the id when it had a usable one, else null).
     pub async fn handle(&self, msg: Value) -> Option<Value> {
-        let id = msg.get("id").filter(|i| !i.is_null()).cloned();
-        let Some(method) = msg.get("method").and_then(Value::as_str) else {
-            // A client's answer to a request of ours (none are sent), or junk.
-            let is_answer = msg.get("result").is_some() || msg.get("error").is_some();
-            return match id {
-                Some(id) if !is_answer => Some(reply(id, Err(RpcError::new(RpcError::INVALID_REQUEST, "No method")))),
-                _ => None,
-            };
+        let envelope = match check(&msg) {
+            Ok(e) => e,
+            Err(e) => return Some(e),
         };
-        let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
+        let Envelope { id, method, params } = envelope;
+        let Some(method) = method else {
+            // A client's answer to a request of ours (none are sent).
+            return None;
+        };
         let Some(id) = id else {
             // Notifications: initialized, cancelled, progress… nothing to do.
             log::debug!("mcp: notification {method}");
             return None;
         };
-        Some(reply(id, self.request(method, &params).await))
+        Some(reply(id, self.request(&method, &params).await))
     }
 
     async fn request(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
@@ -282,5 +329,32 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&r).unwrap().as_array().unwrap().len(), 1);
         assert!(s.handle_text(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{}}"#).await.is_none());
         assert!(s.handle_text(r#"{"jsonrpc":"2.0","id":5,"result":{}}"#).await.is_none(), "a client's answer");
+    }
+
+    async fn err(text: &str) -> Value {
+        let r = McpServer::new(Api("full")).handle_text(text).await.expect("an answer");
+        serde_json::from_str::<Value>(&r).unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_requests_are_answered_never_run() {
+        let s = McpServer::new(Api("full"));
+        let r = err("[]").await;
+        assert_eq!((r["error"]["code"].as_i64(), r["id"].clone()), (Some(RpcError::INVALID_REQUEST), Value::Null), "an empty batch");
+        let r = err(r#"{"id":1,"method":"ping"}"#).await;
+        assert_eq!((r["error"]["code"].as_i64(), r["id"].clone()), (Some(RpcError::INVALID_REQUEST), json!(1)), "no jsonrpc");
+        let r = err(r#"{"jsonrpc":"1.0","id":"a","method":"ping"}"#).await;
+        assert_eq!(r["id"], "a");
+        assert_eq!(r["error"]["code"], RpcError::INVALID_REQUEST);
+        let r = err(r#"{"jsonrpc":"2.0","id":null,"method":"ping"}"#).await;
+        assert_eq!((r["error"]["code"].as_i64(), r["id"].clone()), (Some(RpcError::INVALID_REQUEST), Value::Null), "a null id");
+        assert_eq!(err(r#"{"jsonrpc":"2.0","id":{"x":1},"method":"ping"}"#).await["error"]["code"], RpcError::INVALID_REQUEST);
+        assert_eq!(err(r#"{"jsonrpc":"2.0","id":2,"method":7}"#).await["error"]["code"], RpcError::INVALID_REQUEST);
+        assert_eq!(err(r#"{"jsonrpc":"2.0","id":3,"method":"ping","params":"x"}"#).await["error"]["code"], RpcError::INVALID_REQUEST);
+        assert_eq!(err(r#"{"jsonrpc":"2.0","method":7}"#).await["error"]["code"], RpcError::INVALID_REQUEST, "a broken notification");
+        assert_eq!(err("[1]").await[0]["error"]["code"], RpcError::INVALID_REQUEST, "a batch of junk");
+        assert_eq!(err("3").await["error"]["code"], RpcError::INVALID_REQUEST);
+        // A valid one still runs.
+        assert_eq!(ask(&s, "ping", json!({})).await["result"], json!({}));
     }
 }

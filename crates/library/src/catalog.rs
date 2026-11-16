@@ -1266,6 +1266,19 @@ impl Library {
         })
     }
 
+    /// How many tracks [`Self::tracks_of_artist`] pages through.
+    pub fn count_tracks_of_artist(&self, artist: ArtistId) -> Result<u32> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM track t
+                  WHERE t.id IN (SELECT track_id FROM track_artist WHERE artist_id = ?1)
+                    AND t.deleted_at IS NULL AND t.in_library = 1",
+                [artist.to_string()],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
     /// One page of the track list (for a virtualised list).
     pub fn tracks(&self, offset: u32, limit: u32, sort: TrackSort) -> Result<Vec<TrackRow>> {
         self.tracks_filtered(offset, limit, sort, TrackFilter::All)

@@ -3883,12 +3883,16 @@ pub enum Command {
     /// to `reply` as `{"link", "text"}`; no toast, nothing copied.
     ApiShare { target: ShareTarget, reply: ApiReply },
     /// From the API: the tags in the files of these tracks, answered as
-    /// `{"<track id>": {"title", …}}` (a track without a file is left out).
+    /// `{"tags": {"<track id>": {"title", …}}, "outside": [ids]}` (a track
+    /// without a file is left out; one whose file lies outside the library
+    /// is never read, only listed).
     ApiReadTags { tracks: Vec<TrackId>, reply: ApiReply },
     /// From the API: these tags written into the files and the library,
-    /// each track's fields not named kept as its file has them; answered as
-    /// `{"done": [ids], "failed": [{"id", "error"}]}`.
-    ApiRetag { tracks: Vec<(TrackId, TagPatch)>, reply: ApiReply },
+    /// each track's fields not named kept as its file has them. The second
+    /// patch is what the confirmed plan showed of those fields: a track
+    /// whose file has other values now fails and is not written. Answered
+    /// as `{"done": [ids], "failed": [{"id", "error"}]}`.
+    ApiRetag { tracks: Vec<(TrackId, TagPatch, TagPatch)>, reply: ApiReply },
     /// From the API: these tracks into the Trash at once, one snackbar with
     /// «Отменить» for all of them. Never deletes for good: nothing happens
     /// while the Trash is off.
@@ -3931,6 +3935,12 @@ pub enum Command {
     /// From the mesh service: a forget could not be done (the device stays
     /// in the ring); `why` in words.
     MeshForgetFailed { node_id: String, why: String },
+    /// From the API: service tracks it found, remembered as the window's
+    /// search results are, so the commands after it can act on them.
+    ApiKnow(Vec<nikgob_core::streaming::StreamTrack>),
+    /// From the API: a new playlist with the id the API chose, with these
+    /// tracks.
+    ApiCreatePlaylist { id: PlaylistId, name: String, tracks: Vec<TrackId> },
 }
 
 impl Default for Prefs {

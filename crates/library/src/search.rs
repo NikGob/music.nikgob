@@ -42,6 +42,23 @@ pub fn match_expression(query: &str) -> Option<String> {
 }
 
 impl Library {
+    /// How many tracks match `query` in all (the tracks [`Self::search`]
+    /// would page through).
+    pub fn search_track_count(&self, query: &str) -> Result<u32> {
+        let Some(expr) = match_expression(query) else {
+            return Ok(0);
+        };
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM track t JOIN track_fts ON track_fts.rowid = t.seq
+                  WHERE track_fts MATCH ?1 AND t.deleted_at IS NULL AND t.in_library = 1
+                    AND t.id NOT IN (SELECT track_id FROM recording_spare)",
+                [expr],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
     /// Searches everything; each category returns at most `limit` best matches.
     pub fn search(&self, query: &str, limit: u32) -> Result<SearchResults> {
         let Some(expr) = match_expression(query) else {

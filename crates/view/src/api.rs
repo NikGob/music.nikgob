@@ -25,6 +25,10 @@ pub struct ApiView {
     /// The last [`crate::Command::ApiRun`] the runtime got through: the
     /// API waits for its own to answer with the state its commands made.
     pub synced: u64,
+    /// What the last few [`crate::Command::ApiRun`]s could not do, by their
+    /// `ack` (a service track no longer known, a file outside the library):
+    /// the API answers an error instead of «done».
+    pub skipped: Vec<(u64, Vec<String>)>,
     /// A token the dialog sent that was not kept (its id, why): the dialog
     /// shows the error instead of the secret.
     pub token_failed: Option<(String, String)>,
@@ -42,6 +46,7 @@ impl Default for ApiView {
             error: None,
             configurable: false,
             synced: 0,
+            skipped: Vec::new(),
             token_failed: None,
         }
     }

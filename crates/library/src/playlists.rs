@@ -259,11 +259,17 @@ impl Library {
     // ---- playlists
 
     pub fn create_playlist(&self, name: &str) -> Result<Playlist> {
+        self.create_playlist_with_id(PlaylistId::new(), name)
+    }
+
+    /// [`Self::create_playlist`] under an id the caller chose (the local
+    /// API answers it without looking the new playlist up).
+    pub fn create_playlist_with_id(&self, id: PlaylistId, name: &str) -> Result<Playlist> {
         let device = self.device_id();
         let now = self.tick();
         self.write(|tx| {
             let playlist = Playlist {
-                id: PlaylistId::new(),
+                id,
                 name: name.to_owned(),
                 cover: None,
                 created_at: now,

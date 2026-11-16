@@ -50,7 +50,7 @@ pub use retag::TagChanges;
 pub use spectrum::{SpectrumReport, Verdict};
 pub use trash::{
     PurgeReport, RestoreReport, TRASH_DAYS, delete_track_to_trash, purge_deleted_tracks, purge_track,
-    restore_track, trash_file, trash_purge,
+    restore_track, trash_file, trash_purge, trash_touches,
 };
 pub use watch::InboxWatcher;
 pub use wrong_file::{WrongFile, mark_wrong_file, undo_wrong_file};

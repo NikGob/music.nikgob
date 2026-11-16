@@ -2,8 +2,12 @@
 //! result marked when the library has it), an artist's releases the
 //! library lacks, and a share page (song.link / MusicLink, as «Поделиться»
 //! finds it). Every route here asks the network: a token may make a few a
-//! minute ([`crate::auth::LOOKUPS_PER_S`]).
+//! minute ([`crate::auth::LOOKUPS_PER_S`]), each service asked one of them.
+//! The tracks a search finds are handed to the loop (as the window's search
+//! results are) and kept here too, so a like, a playlist or a download of
+//! one acts on it later ([`stream_tracks`]).
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +18,7 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use nikgob_core::model::{ArtistId, ReleaseId, TrackId};
-use nikgob_core::streaming::{ArtistRef, Service, StreamAlbum, StreamSearch, StreamTrack, TrackKind};
+use nikgob_core::streaming::{ArtistRef, RemoteId, Service, StreamAlbum, StreamSearch, StreamTrack, TrackKind};
 use nikgob_library::Library;
 use nikgob_view::{Command, ShareTarget};
 
@@ -30,6 +34,80 @@ const SEARCH_WAIT: Duration = Duration::from_secs(15);
 const DISCOGRAPHY_WAIT: Duration = Duration::from_secs(25);
 /// How long a share link is waited for.
 const SHARE_WAIT: Duration = Duration::from_secs(25);
+/// Services one request may name at most.
+const SERVICES_MAX: usize = 6;
+/// Service tracks kept for later requests at most.
+const SEEN_MAX: usize = 2000;
+/// Service tracks one request may act on at most.
+pub const REMOTE_TRACKS_MAX: usize = 50;
+
+/// Service tracks the API found, the oldest dropped first.
+#[derive(Default)]
+pub struct Seen {
+    map: HashMap<RemoteId, StreamTrack>,
+    order: VecDeque<RemoteId>,
+}
+
+impl Seen {
+    pub fn keep(&mut self, t: &StreamTrack) {
+        if self.map.insert(t.id.clone(), t.clone()).is_none() {
+            self.order.push_back(t.id.clone());
+        }
+        while self.order.len() > SEEN_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
+
+    pub fn get(&self, r: &RemoteId) -> Option<StreamTrack> {
+        self.map.get(r).cloned()
+    }
+}
+
+/// The service tracks behind `remotes`, to hand to the loop
+/// ([`Command::ApiKnow`]) before the commands that act on them: as a
+/// search found them, else asked of their service (one lookup per
+/// service). `404` naming the ones no service has; `400` over
+/// [`REMOTE_TRACKS_MAX`].
+pub async fn stream_tracks(sh: &Shared, caller: &Caller, remotes: &[RemoteId]) -> Result<Vec<StreamTrack>, ApiError> {
+    if remotes.len() > REMOTE_TRACKS_MAX {
+        return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("Не больше {REMOTE_TRACKS_MAX} треков сервисов за раз")));
+    }
+    let mut found: Vec<StreamTrack> = Vec::new();
+    let mut ask: HashMap<Service, Vec<String>> = HashMap::new();
+    {
+        let seen = sh.seen.lock();
+        for r in remotes {
+            match seen.get(r) {
+                Some(t) => found.push(t),
+                None => ask.entry(r.service).or_default().push(r.id.clone()),
+            }
+        }
+    }
+    for (service, ids) in ask {
+        let Some(svc) = sh.rt.service(service) else {
+            return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", format!("{} не подключён", service.as_str())));
+        };
+        sh.lookup_allowed(caller)?;
+        let got = match tokio::time::timeout(SEARCH_WAIT, svc.tracks(&ids)).await {
+            Ok(Ok(got)) => got,
+            Ok(Err(e)) => return Err(ApiError::of(StatusCode::BAD_GATEWAY, "lookup_failed", e.to_string())),
+            Err(_) => return Err(ApiError::of(StatusCode::GATEWAY_TIMEOUT, "lookup_timeout", "Сервис не ответил вовремя")),
+        };
+        let mut seen = sh.seen.lock();
+        for t in got.into_iter().flatten() {
+            seen.keep(&t);
+            found.push(t);
+        }
+    }
+    let have: HashSet<&RemoteId> = found.iter().map(|t| &t.id).collect();
+    let missing: Vec<String> = remotes.iter().filter(|r| !have.contains(r)).map(ToString::to_string).collect();
+    if !missing.is_empty() {
+        return Err(ApiError::not_found(format!("Сервис не знает таких треков: {}", missing.join(", "))));
+    }
+    Ok(found)
+}
 
 fn names(artists: &[ArtistRef]) -> Vec<String> {
     artists.iter().map(|a| a.name.clone()).filter(|n| !n.trim().is_empty()).collect()
@@ -108,17 +186,24 @@ pub struct DiscoverAnswer {
     pub services: Vec<ServiceAnswer>,
 }
 
-/// The services asked: those named (`spotify,deezer`), else all.
+/// The services asked: those named (`spotify,deezer`; each once, at most
+/// [`SERVICES_MAX`] names), else all.
 pub fn services_of(raw: Option<&str>) -> Result<Vec<Service>, ApiError> {
-    match raw.map(str::trim).filter(|s| !s.is_empty()) {
-        None => Ok(Service::ALL.to_vec()),
-        Some(list) => list
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| Service::parse(&s.to_ascii_lowercase()).ok_or_else(|| ApiError::bad_request(format!("Нет такого сервиса: {s}"))))
-            .collect(),
+    let Some(list) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(Service::ALL.to_vec());
+    };
+    let names: Vec<&str> = list.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if names.len() > SERVICES_MAX {
+        return Err(ApiError::bad_request(format!("Не больше {SERVICES_MAX} сервисов")));
     }
+    let mut out = Vec::new();
+    for s in names {
+        let service = Service::parse(&s.to_ascii_lowercase()).ok_or_else(|| ApiError::bad_request(format!("Нет такого сервиса: {s}")))?;
+        if !out.contains(&service) {
+            out.push(service);
+        }
+    }
+    Ok(out)
 }
 
 /// The library's track of a service's track, and whether it is in the
@@ -222,7 +307,10 @@ pub async fn search(State(sh): State<Arc<Shared>>, Extension(caller): Extension<
     if ready.is_empty() {
         return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", "Ни один из этих сервисов не подключён"));
     }
-    sh.lookup_allowed(&caller)?;
+    // Each service asked is a lookup of its own.
+    for _ in &ready {
+        sh.lookup_allowed(&caller)?;
+    }
     let asks = ready.into_iter().map(|(service, svc)| {
         let q = q.clone();
         async move {
@@ -235,6 +323,18 @@ pub async fn search(State(sh): State<Arc<Shared>>, Extension(caller): Extension<
         }
     });
     let answers = futures_util::future::join_all(asks).await;
+    // The tracks found, for the requests that act on them: kept here and
+    // handed to the loop as its own search results are.
+    let tracks: Vec<StreamTrack> = answers.iter().filter_map(|(_, r)| r.as_ref().ok()).flat_map(|r| r.tracks.iter().take(limit).cloned()).collect();
+    if !tracks.is_empty() {
+        {
+            let mut seen = sh.seen.lock();
+            for t in &tracks {
+                seen.keep(t);
+            }
+        }
+        sh.run(vec![Command::ApiKnow(tracks)]).await?;
+    }
     let lib = sh.lib.clone();
     let services = blocking(move || {
         Ok(answers
@@ -302,11 +402,14 @@ pub async fn discography(
         let lib = sh.lib.clone();
         return blocking(move || Ok(discography_answer(artist, &name, kept.as_ref(), false, &lib))).await.map(Json);
     }
-    let can = [Service::Spotify, Service::Deezer, Service::Youtube].iter().any(|s| sh.rt.service(*s).is_some());
-    if !can {
+    let asked = [Service::Spotify, Service::Deezer, Service::Youtube].iter().filter(|s| sh.rt.service(**s).is_some()).count();
+    if asked == 0 {
         return Err(ApiError::of(StatusCode::SERVICE_UNAVAILABLE, "no_services", "Нет подключённых сервисов для дискографии"));
     }
-    sh.lookup_allowed(&caller)?;
+    // Each service the loop asks is a lookup.
+    for _ in 0..asked {
+        sh.lookup_allowed(&caller)?;
+    }
     let before = kept.as_ref().map(|k| k.at);
     sh.run_by(Some(caller.actor), vec![Command::LoadDiscography(artist)]).await?;
     // The loop asks the services in the background and keeps the answer.
@@ -402,13 +505,25 @@ pub async fn share(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nikgob_core::streaming::RemoteId;
 
     #[test]
     fn services_by_name() {
         assert_eq!(services_of(None).unwrap(), Service::ALL.to_vec());
         assert_eq!(services_of(Some("Deezer, youtube")).unwrap(), vec![Service::Deezer, Service::Youtube]);
         assert!(services_of(Some("napster")).is_err());
+        assert_eq!(services_of(Some("deezer,deezer,DEEZER")).unwrap(), vec![Service::Deezer], "each once");
+        assert!(services_of(Some("deezer,deezer,deezer,deezer,deezer,deezer,deezer")).is_err(), "too many names");
+    }
+
+    #[test]
+    fn the_seen_tracks_are_bounded() {
+        let mut seen = Seen::default();
+        for i in 0..SEEN_MAX + 10 {
+            seen.keep(&StreamTrack::new(RemoteId::new(Service::Deezer, i.to_string()), "S"));
+        }
+        assert_eq!(seen.map.len(), SEEN_MAX);
+        assert!(seen.get(&RemoteId::new(Service::Deezer, "0")).is_none(), "the oldest went");
+        assert!(seen.get(&RemoteId::new(Service::Deezer, (SEEN_MAX + 9).to_string())).is_some());
     }
 
     #[test]

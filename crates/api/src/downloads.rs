@@ -2,7 +2,9 @@
 //! a dry search of the download sources, and a request to download. A
 //! small request (a few releases of a sure match, not too big) goes to
 //! «Хочу скачать» at once, as the window's «Скачать» does; anything larger
-//! waits as a card in the app's own «Подтверди» for the owner's click.
+//! waits as a card in the app's own «Подтверди» for the owner's click,
+//! and so does one whose size cannot be told for sure (a service that did
+//! not answer, an album listed without all its songs).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -11,6 +13,7 @@ use std::time::Duration;
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -28,7 +31,7 @@ use crate::mutate::remote_id;
 /// A request of at most this many releases may start by itself…
 pub const SMALL_RELEASES: usize = 3;
 /// …of at most this many bytes (as estimated)…
-pub const SMALL_BYTES: u64 = 1_500 * 1024 * 1024;
+pub const SMALL_BYTES: u64 = 1_500_000_000;
 /// …estimated as lossless files: bytes a second of music.
 const BYTES_PER_S: u64 = 110_000;
 /// A song of unknown length counts as this long.
@@ -37,6 +40,8 @@ const SONG_S: u64 = 240;
 const SOURCES_WAIT: Duration = Duration::from_secs(75);
 /// A service's album is asked for at most this long.
 const ALBUM_WAIT: Duration = Duration::from_secs(10);
+/// Service albums one request may name at most (each is a lookup).
+pub const REMOTE_ALBUMS_MAX: usize = 20;
 /// Items of «Хочу скачать» listed at most.
 const WISHLIST_SHOWN: usize = 50;
 
@@ -251,16 +256,40 @@ pub struct Want {
     pub release: Option<String>,
     /// What starts it (one command may stand for several wants).
     pub command: Option<Command>,
+    /// Its size is known (not a guess for a service that did not answer or
+    /// an album listed without all its songs).
+    pub sure: bool,
 }
 
-/// The estimate and whether it may start by itself.
+/// The estimate and whether it may start by itself: small, and every part
+/// of it known for sure.
 pub fn estimate(wants: &[Want]) -> (usize, usize, u64, bool) {
     let releases: HashSet<&String> = wants.iter().filter_map(|w| w.release.as_ref()).collect();
     let releases = releases.len();
     let tracks: usize = wants.iter().map(|w| w.tracks).sum();
     let secs: u64 = wants.iter().map(|w| w.known_ms / 1000 + w.unknown as u64 * SONG_S).sum();
     let bytes = secs * BYTES_PER_S;
-    (releases, tracks, bytes, releases <= SMALL_RELEASES && bytes <= SMALL_BYTES)
+    let sure = wants.iter().all(|w| w.sure);
+    (releases, tracks, bytes, sure && releases <= SMALL_RELEASES && bytes <= SMALL_BYTES)
+}
+
+/// The want of a service album as the service listed it (`None`: it did
+/// not answer). Its songs: the larger of those listed and the count it
+/// gave; unsure when it did not answer or listed fewer songs than it
+/// counts.
+pub fn album_want(r: &RemoteId, album: Option<&nikgob_core::streaming::StreamAlbum>) -> Want {
+    let (line, n, known, unknown, sure) = match album {
+        Some(a) => {
+            let listed = a.tracks.len();
+            let n = listed.max(a.total_tracks.unwrap_or(0) as usize);
+            let known: u64 = a.tracks.iter().filter_map(|t| t.duration_ms).sum();
+            let unknown = a.tracks.iter().filter(|t| t.duration_ms.is_none()).count() + (n - listed);
+            let line = format!("{} — {} ({})", album_artists(a), a.title, crate::mutate::tracks_word(n));
+            (line, n, known, unknown, listed > 0 && listed >= n)
+        }
+        None => (format!("Альбом {r}"), 12, 0, 12, false),
+    };
+    Want { line, tracks: n, known_ms: known, unknown, release: Some(r.to_string()), command: Some(Command::DownloadStreamAlbum(r.clone())), sure }
 }
 
 /// Asks the player to download songs and albums: at once when the request
@@ -283,6 +312,9 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
     if tracks.is_empty() && albums.is_empty() && remote_tracks.is_empty() && remote_albums.is_empty() {
         return Err(ApiError::bad_request("Нечего скачивать"));
     }
+    if remote_albums.len() > REMOTE_ALBUMS_MAX {
+        return Err(ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("Не больше {REMOTE_ALBUMS_MAX} альбомов сервисов за раз")));
+    }
     let lib = sh.lib.clone();
     let (mut wants, already) = blocking(move || {
         let mut wants = Vec::new();
@@ -303,6 +335,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
                 unknown: usize::from(r.duration_ms.is_none()),
                 release: Some(r.release_id.map_or_else(|| t.to_string(), |r| r.to_string())),
                 command: None,
+                sure: true,
             });
         }
         // One command for the songs: the window's «Скачать» of a selection.
@@ -324,49 +357,56 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
                 unknown: lacking.iter().filter(|t| t.duration_ms.is_none()).count(),
                 release: Some(a.to_string()),
                 command: Some(Command::DownloadRelease(*a)),
+                sure: true,
             });
         }
         Ok((wants, already))
     })
     .await?;
+    let mut first = Vec::new();
     if !remote_tracks.is_empty() {
+        // The loop acts only on service tracks it knows: handed to it first.
+        let found = crate::discover::stream_tracks(&sh, &caller, &remote_tracks).await?;
         let n = remote_tracks.len();
         wants.push(Want {
             line: format!("{} из сервисов", crate::mutate::tracks_word(n)),
-            tracks: n,
+            tracks: 0,
             known_ms: 0,
-            unknown: n,
+            unknown: 0,
             release: None,
             command: Some(Command::DownloadStream { tracks: remote_tracks.clone() }),
+            sure: true,
         });
-        // Each song of a service counts as a release of its own.
-        for r in &remote_tracks {
-            wants.push(Want { line: String::new(), tracks: 0, known_ms: 0, unknown: 0, release: Some(r.to_string()), command: None });
+        // Each song: its own length, its album a release (or itself).
+        for t in &found {
+            wants.push(Want {
+                line: String::new(),
+                tracks: 1,
+                known_ms: t.duration_ms.unwrap_or(0),
+                unknown: usize::from(t.duration_ms.is_none()),
+                release: Some(t.album.as_ref().and_then(|a| a.id.as_ref()).unwrap_or(&t.id).to_string()),
+                command: None,
+                sure: true,
+            });
         }
-    }
-    if !remote_albums.is_empty() {
-        sh.lookup_allowed(&caller)?;
+        first.push(Command::ApiKnow(found));
     }
     for r in remote_albums {
-        // Its size from the service, when it answers in time.
+        // Its size from the service, when it answers in time; each album
+        // asked is a lookup.
+        sh.lookup_allowed(&caller)?;
         let album = match sh.rt.service(r.service) {
             Some(svc) => tokio::time::timeout(ALBUM_WAIT, svc.album(&r.id)).await.ok().and_then(Result::ok),
             None => None,
         };
-        let (line, n, known, unknown) = match &album {
-            Some(a) => {
-                let n = if a.tracks.is_empty() { a.total_tracks.unwrap_or(10) as usize } else { a.tracks.len() };
-                let known: u64 = a.tracks.iter().filter_map(|t| t.duration_ms).sum();
-                let unknown = if a.tracks.is_empty() { n } else { a.tracks.iter().filter(|t| t.duration_ms.is_none()).count() };
-                (format!("{} — {} ({})", album_artists(a), a.title, crate::mutate::tracks_word(n)), n, known, unknown)
-            }
-            None => (format!("Альбом {r}"), 12, 0, 12),
-        };
-        wants.push(Want { line, tracks: n, known_ms: known, unknown, release: Some(r.to_string()), command: Some(Command::DownloadStreamAlbum(r)) });
+        wants.push(album_want(&r, album.as_ref()));
     }
     let (releases, track_count, estimated, small) = estimate(&wants);
     let items: Vec<String> = wants.iter().filter(|w| !w.line.is_empty()).map(|w| w.line.clone()).collect();
     let commands: Vec<Command> = wants.into_iter().filter_map(|w| w.command).collect();
+    // Service tracks are known to the loop before anything acts on them
+    // (now or when the card is confirmed).
+    let commands: Vec<Command> = first.into_iter().chain(commands).collect();
     let answer = |status: &str, confirm_id| EnqueueAnswer {
         status: status.to_owned(),
         confirm_id,
@@ -376,7 +416,7 @@ pub async fn enqueue(State(sh): State<Arc<Shared>>, Extension(caller): Extension
         estimated_bytes: estimated,
         already_here: already.clone(),
     };
-    if commands.is_empty() {
+    if !commands.iter().any(|c| !matches!(c, Command::ApiKnow(_))) {
         return Ok(Json(answer("nothing_to_do", None)));
     }
     if small {
@@ -408,7 +448,7 @@ mod tests {
     use super::*;
 
     fn want(tracks: usize, ms: u64, release: Option<&str>) -> Want {
-        Want { line: "x".into(), tracks, known_ms: ms, unknown: 0, release: release.map(str::to_owned), command: None }
+        Want { line: "x".into(), tracks, known_ms: ms, unknown: 0, release: release.map(str::to_owned), command: None, sure: true }
     }
 
     #[test]
@@ -429,5 +469,43 @@ mod tests {
         // Unknown lengths count as four minutes each.
         let w = Want { unknown: 3, ..want(3, 0, Some("a")) };
         assert_eq!(estimate(&[w]).2, 3 * SONG_S * BYTES_PER_S);
+        // A guess never starts by itself, however small.
+        let unsure = Want { sure: false, ..want(1, 200_000, Some("a")) };
+        assert!(!estimate(&[unsure]).3);
+        assert_eq!(SMALL_BYTES, 1_500_000_000);
+    }
+
+    #[test]
+    fn a_service_album_counts_every_song_it_has() {
+        use nikgob_core::streaming::{Service, StreamAlbum, StreamTrack};
+        let r = RemoteId::new(Service::Deezer, "7");
+        // No answer: a guess, never sure.
+        let w = album_want(&r, None);
+        assert!(!w.sure);
+        assert!(!estimate(&[w]).3);
+        let mut a = StreamAlbum {
+            id: r.clone(),
+            title: "Box".into(),
+            artists: Vec::new(),
+            year: None,
+            release_date: None,
+            release_type: Default::default(),
+            cover_url: None,
+            total_tracks: None,
+            tracks: Vec::new(),
+        };
+        let mut t = StreamTrack::new(RemoteId::new(Service::Deezer, "1"), "S");
+        t.duration_ms = Some(200_000);
+        a.tracks = vec![t.clone(), t];
+        // Listed in full.
+        let w = album_want(&r, Some(&a));
+        assert_eq!((w.tracks, w.known_ms, w.unknown, w.sure), (2, 400_000, 0, true));
+        // Counted as 100 songs, two listed: the rest count, and it is unsure.
+        a.total_tracks = Some(100);
+        let w = album_want(&r, Some(&a));
+        assert_eq!((w.tracks, w.unknown, w.sure), (100, 98, false));
+        // Listed without songs: unsure.
+        a.tracks.clear();
+        assert!(!album_want(&r, Some(&a)).sure);
     }
 }

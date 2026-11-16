@@ -824,6 +824,9 @@ impl Worker {
             .iter()
             .filter_map(|r| self.streaming.known.get(r).cloned())
             .collect();
+        for r in remotes.iter().filter(|r| !self.streaming.known.contains_key(r)).cloned().collect::<Vec<_>>() {
+            self.api_skip(format!("{r} is not known: find it again"));
+        }
         if tracks.len() < remotes.len() {
             log::warn!(
                 "{} of {} stream tracks are not known",

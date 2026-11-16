@@ -3,7 +3,10 @@
 //! `confirm_token` changes nothing and answers the exact plan with a
 //! one-time token, valid [`TTL`] for the same token and exactly the same
 //! arguments; the same request with it does the change. A token is gone
-//! once presented, whether it fit or not.
+//! once presented, whether it fit or not. The token is bound to the plan
+//! it was shown with too (the tracks an album expanded to, the tags a
+//! retag found): when the confirmed request would now do something else,
+//! it does nothing and answers `409 plan_changed` with the new plan.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -24,6 +27,8 @@ const KEPT: usize = 64;
 struct Pending {
     token_id: String,
     args: String,
+    /// [`plan_hash`] of the plan shown.
+    plan: String,
     until: Instant,
 }
 
@@ -70,6 +75,11 @@ fn canonical(v: &Value) -> Value {
     }
 }
 
+/// The hash of a resolved plan: what a confirmation must find again.
+pub fn plan_hash(plan: &Value) -> String {
+    blake3::hash(serde_json::to_string(&canonical(plan)).unwrap_or_default().as_bytes()).to_hex().to_string()
+}
+
 /// What a plan is bound to: the route and its arguments (without the
 /// token itself), as a hash.
 pub fn args_hash(route: &str, args: &Value) -> String {
@@ -82,8 +92,9 @@ pub fn args_hash(route: &str, args: &Value) -> String {
 }
 
 impl Store {
-    /// A new token for the plan of `token_id` with `args` (a hash).
-    pub fn issue(&self, token_id: &str, args: &str, now: Instant) -> Result<String, ApiError> {
+    /// A new token for the plan (`plan`, a hash) of `token_id` with `args`
+    /// (a hash).
+    pub fn issue(&self, token_id: &str, args: &str, plan: &str, now: Instant) -> Result<String, ApiError> {
         let secret = nikgob_core::api_token::generate().ok_or_else(|| ApiError::internal("Нет случайных чисел"))?;
         let token = format!("ct_{}", secret.trim_start_matches("nk_"));
         let mut p = self.pending.lock();
@@ -92,12 +103,13 @@ impl Store {
             let Some(oldest) = p.iter().min_by_key(|(_, x)| x.until).map(|(k, _)| k.clone()) else { break };
             p.remove(&oldest);
         }
-        p.insert(token.clone(), Pending { token_id: token_id.to_owned(), args: args.to_owned(), until: now + TTL });
+        p.insert(token.clone(), Pending { token_id: token_id.to_owned(), args: args.to_owned(), plan: plan.to_owned(), until: now + TTL });
         Ok(token)
     }
 
-    /// Takes `token` for `token_id` and `args`: Ok once, when it fits.
-    pub fn take(&self, token: &str, token_id: &str, args: &str, now: Instant) -> Result<(), Refused> {
+    /// Takes `token` for `token_id` and `args`: once, when it fits, the
+    /// hash of the plan it was shown with.
+    pub fn take(&self, token: &str, token_id: &str, args: &str, now: Instant) -> Result<String, Refused> {
         let Some(p) = self.pending.lock().remove(token.trim()) else { return Err(Refused::Unknown) };
         if p.token_id != token_id {
             return Err(Refused::Unknown);
@@ -108,7 +120,7 @@ impl Store {
         if p.args != args {
             return Err(Refused::Mismatch);
         }
-        Ok(())
+        Ok(p.plan)
     }
 }
 
@@ -156,9 +168,9 @@ mod tests {
         let s = Store::default();
         let t0 = Instant::now();
         let h = args_hash("POST /v1/library/trash", &json!({"track_ids": ["a"]}));
-        let tok = s.issue("tok1", &h, t0).unwrap();
+        let tok = s.issue("tok1", &h, "p", t0).unwrap();
         assert!(tok.starts_with("ct_"));
-        assert_eq!(s.take(&tok, "tok1", &h, t0 + Duration::from_secs(10)), Ok(()));
+        assert_eq!(s.take(&tok, "tok1", &h, t0 + Duration::from_secs(10)), Ok("p".to_owned()));
         assert_eq!(s.take(&tok, "tok1", &h, t0 + Duration::from_secs(11)), Err(Refused::Unknown), "reuse refused");
     }
 
@@ -168,12 +180,12 @@ mod tests {
         let t0 = Instant::now();
         let h = args_hash("POST /v1/library/trash", &json!({"track_ids": ["a"]}));
         let other = args_hash("POST /v1/library/trash", &json!({"track_ids": ["b"]}));
-        let tok = s.issue("tok1", &h, t0).unwrap();
+        let tok = s.issue("tok1", &h, "p", t0).unwrap();
         assert_eq!(s.take(&tok, "tok1", &h, t0 + TTL + Duration::from_secs(1)), Err(Refused::Expired));
-        let tok = s.issue("tok1", &h, t0).unwrap();
+        let tok = s.issue("tok1", &h, "p", t0).unwrap();
         assert_eq!(s.take(&tok, "tok1", &other, t0), Err(Refused::Mismatch));
         assert_eq!(s.take(&tok, "tok1", &h, t0), Err(Refused::Unknown), "gone after a wrong try");
-        let tok = s.issue("tok1", &h, t0).unwrap();
+        let tok = s.issue("tok1", &h, "p", t0).unwrap();
         assert_eq!(s.take(&tok, "tok2", &h, t0), Err(Refused::Unknown), "another token's plan");
         assert_eq!(s.take("ct_nothing", "tok1", &h, t0), Err(Refused::Unknown));
         let e: ApiError = Refused::Expired.into();
@@ -190,12 +202,18 @@ mod tests {
     }
 
     #[test]
+    fn the_plan_hash_ignores_key_order_only() {
+        assert_eq!(plan_hash(&json!({"a": 1, "b": [1, 2]})), plan_hash(&json!({"b": [1, 2], "a": 1})));
+        assert_ne!(plan_hash(&json!({"tracks": ["a"]})), plan_hash(&json!({"tracks": ["a", "b"]})));
+    }
+
+    #[test]
     fn the_store_keeps_a_bounded_number() {
         let s = Store::default();
         let t0 = Instant::now();
-        let first = s.issue("t", "h", t0).unwrap();
+        let first = s.issue("t", "h", "p", t0).unwrap();
         for i in 1..=KEPT as u64 {
-            s.issue("t", "h", t0 + Duration::from_millis(i)).unwrap();
+            s.issue("t", "h", "p", t0 + Duration::from_millis(i)).unwrap();
         }
         assert!(s.pending.lock().len() <= KEPT);
         assert_eq!(s.take(&first, "t", "h", t0), Err(Refused::Unknown), "the oldest went");

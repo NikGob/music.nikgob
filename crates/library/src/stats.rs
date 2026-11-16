@@ -312,7 +312,10 @@ impl Library {
                     c,
                     "SELECT COUNT(*) FROM track t WHERE t.deleted_at IS NULL AND t.has_local = 1
                         AND NOT EXISTS(SELECT 1 FROM lyrics l WHERE l.track_id = t.id AND l.synced IS NOT NULL)
-                        AND NOT EXISTS(SELECT 1 FROM lyrics_text x WHERE x.track_id = t.id AND x.body IS NOT NULL)",
+                        AND NOT EXISTS(SELECT 1 FROM lyrics_text x WHERE x.track_id = t.id AND x.body IS NOT NULL AND json_valid(x.body)
+                                       AND ((json_type(x.body) = 'array' AND json_array_length(x.body) > 0)
+                                            OR (json_type(x.body) = 'object' AND json_array_length(x.body, '$.lines') > 0
+                                                AND COALESCE(json_extract(x.body, '$.weak'), 0) = 0)))",
                 )?,
                 masters: count(c, "SELECT COUNT(*) FROM master")?,
                 masters_without_replica: count(
@@ -453,14 +456,22 @@ mod tests {
         let lib = Library::open_in_memory().unwrap();
         let a = lib.upsert_artist(&Artist::new("A")).unwrap();
         let rel = lib.upsert_release(&Release::new("R", ArtistCredit::single("A", Some(a.id)))).unwrap();
-        song(&lib, &a, &rel, "One", 100_000, Codec::Flac);
-        song(&lib, &a, &rel, "Two", 100_000, Codec::Mp3);
-        song(&lib, &a, &rel, "Three", 100_000, Codec::Mp3);
+        let one = song(&lib, &a, &rel, "One", 100_000, Codec::Flac);
+        let two = song(&lib, &a, &rel, "Two", 100_000, Codec::Mp3);
+        let three = song(&lib, &a, &rel, "Three", 100_000, Codec::Mp3);
+        // Only timed lines count: a cached miss (`[]`), a plain text, weak
+        // (guessed) times and a plain-only lookup do not.
+        lib.put_lyrics_text(one.id, "lyricsplus", Some("[]")).unwrap();
+        lib.put_lyrics_text(two.id, "genius", Some(r#"{"lines":[],"weak":false,"plain":"la"}"#)).unwrap();
+        lib.put_lyrics_text(two.id, "recognized", Some(r#"{"lines":[{"text":"la"}],"weak":true,"plain":null}"#)).unwrap();
+        lib.put_lyrics(one.id, None, Some("la"), false).unwrap();
         let h = lib.library_health(5).unwrap();
         assert_eq!((h.tracks, h.local_tracks, h.albums, h.artists), (3, 3, 1, 1));
         assert_eq!(h.local_bytes, 3_000);
         assert_eq!(h.local_ms, 300_000);
         assert_eq!(h.without_synced_lyrics, 3);
+        lib.put_lyrics_text(three.id, "lyricsplus", Some(r#"[{"text":"la"}]"#)).unwrap();
+        assert_eq!(lib.library_health(5).unwrap().without_synced_lyrics, 2, "timed lines count");
         assert_eq!(h.fake_lossless, 0);
         assert_eq!(h.masters_without_replica, 0);
         let mp3 = h.formats.iter().find(|f| f.group == "mp3").unwrap();

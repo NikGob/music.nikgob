@@ -145,21 +145,21 @@ pub const TOOLS: &[ToolDef] = &[
         name: "playlist_remove",
         title: "Remove from, rename or delete a playlist",
         contour: Contour::Destructive,
-        description: "Destructive, two steps: called without confirm_token it changes nothing and answers the exact plan with a confirm_token (valid 5 minutes, for exactly these arguments); show the plan to the user and call again with the same arguments and the token to do it. action=remove_tracks (track_ids), rename (name) or delete.",
+        description: "Destructive, two steps: called without confirm_token it changes nothing and answers the exact plan with a confirm_token (valid 5 minutes, for exactly these arguments); show the plan to the user and call again with the same arguments and the token to do it. If the playlist changed meanwhile, the answer is plan_changed with the new plan and a new token. At most 50 tracks per call. action=remove_tracks (track_ids), rename (name) or delete.",
         schema: schema_playlist_remove,
     },
     ToolDef {
         name: "library_retag",
         title: "Change tags",
         contour: Contour::Destructive,
-        description: "Destructive, two steps: writes tags (title, artist, album, album_artist, year, track_no, disc_no, genre) into the files of track_ids and the library; fields not given stay. Without confirm_token it answers the plan (before → after per track) and a confirm_token; call again with the same arguments and the token to write.",
+        description: "Destructive, two steps: writes tags (title, artist, album, album_artist, year, track_no, disc_no, genre) into the files of track_ids and the library; fields not given stay. Without confirm_token it answers the plan (before → after per track) and a confirm_token; call again with the same arguments and the token to write. A file changed since the plan is not written (plan_changed or a failure). At most 50 tracks per call; files outside the library are listed apart and never touched.",
         schema: schema_retag,
     },
     ToolDef {
         name: "library_trash",
         title: "Move to the Trash",
         contour: Contour::Destructive,
-        description: "Destructive, two steps: moves track_ids and/or album_ids to the library's Trash (kept 30 days, the app can restore them; nothing is ever deleted for good). Without confirm_token it answers the plan and a confirm_token; call again with the same arguments and the token.",
+        description: "Destructive, two steps: moves track_ids and/or album_ids to the library's Trash (kept 30 days, the app can restore them; nothing is ever deleted for good). Without confirm_token it answers the plan and a confirm_token; call again with the same arguments and the token. At most 50 tracks per call (albums count by their tracks); if what would go changed meanwhile, the answer is plan_changed with the new plan and a new token. Files outside the library are never touched.",
         schema: schema_trash,
     },
 ];
@@ -223,7 +223,8 @@ fn schema_search() -> Value {
         json!({
             "query": {"type": "string", "description": "Words of a title or a name."},
             "kind": {"type": "string", "enum": ["any", "track", "album", "artist", "playlist"]},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Per kind, 10 by default."}
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Per kind, 10 by default."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Skip this many of each kind (offset + limit at most 250); `track_total` says how many tracks match."}
         }),
         &["query"],
     )
@@ -520,6 +521,20 @@ fn page(mut v: Value, key: &str, offset: usize, limit: usize) -> Value {
     v
 }
 
+/// A page the API cut already: `tracks_total` (of `total`) and the window
+/// beside it when it is not all of them.
+fn served_page(mut v: Value, total: usize, offset: usize) -> Value {
+    if let Some(m) = v.as_object_mut() {
+        let shown = m.get("tracks").and_then(Value::as_array).map_or(0, Vec::len);
+        m.remove("tracks_offset");
+        m.insert("tracks_total".to_owned(), json!(total));
+        if shown < total {
+            m.insert("tracks_window".to_owned(), json!({"offset": offset, "count": shown}));
+        }
+    }
+    v
+}
+
 fn usize_of(v: Option<i64>, default: usize, max: usize) -> usize {
     v.map_or(default, |n| usize::try_from(n.max(0)).unwrap_or(default)).min(max)
 }
@@ -534,7 +549,12 @@ pub async fn call<B: Backend>(b: &B, name: &str, args: &Value) -> Out {
             let q = need(args, "query")?;
             let path = with_query(
                 "/v1/search",
-                &[("q", Some(q)), ("kind", text(args, "kind")), ("limit", int(args, "limit").map(|n| n.to_string()))],
+                &[
+                    ("q", Some(q)),
+                    ("kind", text(args, "kind")),
+                    ("limit", int(args, "limit").map(|n| n.to_string())),
+                    ("offset", int(args, "offset").map(|n| n.to_string())),
+                ],
             );
             send(b, ApiRequest::get(path)).await
         }
@@ -657,13 +677,21 @@ async fn library_get<B: Backend>(b: &B, args: &Value) -> Out {
             let a = send(b, ApiRequest::get(format!("/v1/albums/{}", id()?))).await?;
             Ok(page(brief_tracks(a), "tracks", offset, limit))
         }
+        // The API pages these itself: the whole list is never fetched.
         "artist" => {
-            let a = send(b, ApiRequest::get(format!("/v1/artists/{}", id()?))).await?;
-            Ok(page(brief_tracks(a), "tracks", offset, limit))
+            let path = with_query(&format!("/v1/artists/{}", id()?), &[("offset", Some(offset.to_string())), ("limit", Some(limit.to_string()))]);
+            let mut a = send(b, ApiRequest::get(path)).await?;
+            let total = a.get("tracks_total").and_then(Value::as_u64).unwrap_or(0) as usize;
+            if let Some(m) = a.as_object_mut() {
+                m.remove("tracks_total");
+            }
+            Ok(served_page(brief_tracks(a), total, offset))
         }
         "playlist" => {
-            let p = send(b, ApiRequest::get(format!("/v1/playlists/{}", id()?))).await?;
-            Ok(page(brief_tracks(p), "tracks", offset, limit))
+            let path = with_query(&format!("/v1/playlists/{}", id()?), &[("offset", Some(offset.to_string())), ("limit", Some(limit.to_string()))]);
+            let p = send(b, ApiRequest::get(path)).await?;
+            let total = p.pointer("/playlist/track_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+            Ok(served_page(brief_tracks(p), total, offset))
         }
         other => Err(bad(format!("Unknown kind `{other}`"))),
     }
@@ -986,7 +1014,9 @@ mod tests {
             ("library_search", json!({"query": "кино", "kind": "album"}), vec!["GET /v1/search?q=%D0%BA%D0%B8%D0%BD%D0%BE&kind=album"]),
             ("library_get", json!({"kind": "playlists"}), vec!["GET /v1/playlists"]),
             ("library_get", json!({"kind": "track", "id": "x", "include_lyrics": true}), vec!["GET /v1/tracks/x", "GET /v1/tracks/x/lyrics"]),
-            ("library_get", json!({"kind": "playlist", "id": "liked"}), vec!["GET /v1/playlists/liked"]),
+            ("library_get", json!({"kind": "playlist", "id": "liked"}), vec!["GET /v1/playlists/liked?offset=0&limit=100"]),
+            ("library_get", json!({"kind": "artist", "id": "a", "offset": 200, "limit": 50}), vec!["GET /v1/artists/a?offset=200&limit=50"]),
+            ("library_search", json!({"query": "x", "offset": 10}), vec!["GET /v1/search?q=x&offset=10"]),
             ("discover_search", json!({"query": "radiohead", "services": ["deezer", "youtube"]}), vec!["GET /v1/discover/search?q=radiohead&services=deezer%2Cyoutube"]),
             ("discover_search", json!({"mode": "artist_discography", "artist_id": "a1", "refresh": true}), vec!["GET /v1/discover/artists/a1/discography?refresh=true"]),
             ("discover_search", json!({"mode": "share_link", "target_kind": "album", "target_id": "r1"}), vec!["GET /v1/discover/share?kind=album&id=r1"]),
@@ -1075,5 +1105,10 @@ mod tests {
         assert_eq!(v["tracks_window"], json!({"offset": 1, "count": 2}));
         let v = page(json!({"tracks": [1]}), "tracks", 0, 10);
         assert!(v.get("tracks_window").is_none());
+        // A page the API cut: its total is the API's, not the page's.
+        let v = served_page(json!({"tracks": [1, 2], "tracks_offset": 200}), 300, 200);
+        assert_eq!(v["tracks_total"], 300);
+        assert_eq!(v["tracks_window"], json!({"offset": 200, "count": 2}));
+        assert!(v.get("tracks_offset").is_none());
     }
 }
