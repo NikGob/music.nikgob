@@ -75,11 +75,11 @@ pub fn parse(line: &str) -> Result<Line, String> {
 /// while a read waits for input ends the process at once.
 pub async fn run(runtime: &Runtime) {
     eprintln!("nikgobd console; help lists the commands");
-    let (tx, mut lines) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut lines) = tokio::sync::mpsc::channel::<String>(16);
     let reader = std::thread::Builder::new().name("nikgobd-console".into()).spawn(move || {
         for line in std::io::stdin().lines() {
             let Ok(line) = line else { break };
-            if tx.send(line).is_err() {
+            if tx.blocking_send(line).is_err() {
                 break;
             }
         }
