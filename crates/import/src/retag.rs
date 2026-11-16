@@ -135,6 +135,14 @@ fn cleared_fields(before: &TagSet, after: &TagSet) -> Vec<Field> {
 }
 
 impl Importer {
+    /// Refuses a file that resolves outside the library and the masters
+    /// folder: tags are written only to files the library owns.
+    pub fn check_in_library(&self, path: &std::path::Path) -> Result<()> {
+        let cfg = self.config();
+        let masters = cfg.masters_dir();
+        fsutil::check_inside(path, &[&cfg.library_dir, &masters])
+    }
+
     /// Current tags of the track's active local file.
     pub fn read_track_tags(&self, track: TrackId) -> Result<(PathBuf, TagSet)> {
         let src = self
@@ -143,6 +151,7 @@ impl Importer {
             .filter(|s| s.kind.is_local())
             .ok_or_else(|| ImportError::Other("the track has no local file".into()))?;
         let path = PathBuf::from(&src.locator);
+        self.check_in_library(&path)?;
         let (set, _) = tags::read_tags(&path)?;
         Ok((path, set))
     }
@@ -157,6 +166,7 @@ impl Importer {
             .filter(|s| s.kind.is_local())
             .ok_or_else(|| ImportError::Other("the track has no local file".into()))?;
         let path = PathBuf::from(&src.locator);
+        self.check_in_library(&path)?;
         let (mut set, _) = tags::read_tags(&path)?;
         let (old_artist, old_aa) = (set.artist.clone(), set.album_artist.clone());
         let before = set.clone();

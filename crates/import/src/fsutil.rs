@@ -315,9 +315,51 @@ pub fn prune_empty_dirs(dir: &Path, stop: &Path) {
     }
 }
 
+/// Whether `path`, with every link resolved, lies under one of `roots` (also
+/// resolved). A file that cannot be resolved (gone, no access) is outside.
+pub fn inside_roots(path: &Path, roots: &[&Path]) -> bool {
+    let Ok(real) = fs::canonicalize(long_path(path)) else {
+        return false;
+    };
+    roots
+        .iter()
+        .filter(|r| !r.as_os_str().is_empty())
+        .filter_map(|r| fs::canonicalize(long_path(r)).ok())
+        .any(|root| real.starts_with(&root))
+}
+
+/// [`inside_roots`] as an error naming the file.
+pub fn check_inside(path: &Path, roots: &[&Path]) -> Result<()> {
+    if inside_roots(path, roots) {
+        Ok(())
+    } else {
+        Err(ImportError::Other(format!("{} is outside the library", path.display())))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_counts_as_inside_only_under_a_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Music");
+        let other = dir.path().join("Elsewhere");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let inside = root.join("a").join("01.opus");
+        let outside = other.join("01.opus");
+        std::fs::write(&inside, b"x").unwrap();
+        std::fs::write(&outside, b"x").unwrap();
+        assert!(inside_roots(&inside, &[&root]));
+        assert!(!inside_roots(&outside, &[&root]));
+        assert!(inside_roots(&outside, &[&root, &other]));
+        // A way out through `..` is resolved before the check.
+        assert!(!inside_roots(&root.join("..").join("Elsewhere").join("01.opus"), &[&root]));
+        assert!(!inside_roots(&root.join("a").join("gone.opus"), &[&root]));
+        assert!(check_inside(&outside, &[&root]).is_err());
+    }
 
     #[test]
     fn civil_dates() {

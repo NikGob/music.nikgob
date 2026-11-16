@@ -14,7 +14,7 @@ use nikgob_library::Library;
 use crate::config::ImportConfig;
 use crate::error::Result;
 use crate::fsutil::{
-    create_dir_all, move_file, prune_empty_dirs, remove_file, reserve_unique, unix_secs, ymd_from_unix,
+    check_inside, create_dir_all, move_file, prune_empty_dirs, remove_file, reserve_unique, unix_secs, ymd_from_unix,
 };
 use crate::sanitize::{long_path, sanitize_component, truncate_chars};
 
@@ -50,16 +50,22 @@ pub fn trash_file(trash_dir: &Path, file: &Path) -> Result<PathBuf> {
 /// track leaves the library and [`restore_track`] knows what to bring back.
 /// Returns the new locations. Lyrics next to a file go along. The album folder
 /// keeps its cover (a restore needs it; [`purge_track`] tidies up). The
-/// lossless master, if any, is left alone until the track is purged.
+/// lossless master, if any, is left alone until the track is purged. A file
+/// (or its lyrics) that resolves outside `library_dir` refuses the whole
+/// track before anything moves.
 pub fn delete_track_to_trash(
     library: &Library,
     trash_dir: &Path,
-    _library_dir: &Path,
+    library_dir: &Path,
     track: TrackId,
 ) -> Result<Vec<PathBuf>> {
     let at = nikgob_library::now_ms();
+    let sources = library.sources_of_track(track)?;
+    for path in trash_touches(&sources) {
+        check_inside(&path, &[library_dir])?;
+    }
     let mut moved = Vec::new();
-    for source in library.sources_of_track(track)? {
+    for source in sources {
         if !source.kind.is_local() {
             continue;
         }
@@ -83,6 +89,24 @@ pub fn delete_track_to_trash(
     }
     library.mark_track_deleted(track, at)?;
     Ok(moved)
+}
+
+/// Every file [`delete_track_to_trash`] would move for these sources: the
+/// live local files and the lyrics next to them.
+pub fn trash_touches(sources: &[nikgob_core::model::Source]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for source in sources.iter().filter(|s| s.kind.is_local()) {
+        let path = PathBuf::from(&source.locator);
+        if !long_path(&path).exists() {
+            continue;
+        }
+        let lrc = path.with_extension("lrc");
+        if long_path(&lrc).exists() {
+            out.push(lrc);
+        }
+        out.push(path);
+    }
+    out
 }
 
 /// What [`restore_track`] did.
