@@ -1,21 +1,22 @@
 //! `/v1/sync/…`: the owner's other devices take this library's changes
 //! (and give theirs) through the mesh's tunnel. Only a paired device of the
 //! owner may: a token (an assistant, a script) is refused, so is a guest's
-//! device and a device syncing is turned off with. Each asks with its own
-//! node id (`peer`), which has to be the one of its certificate.
+//! device and a device syncing is turned off with. The device is the one
+//! of its certificate (its full node id, from the tunnel's caller), never
+//! one it names.
 //!
-//! * `GET /v1/sync/heads?peer=` — the database's epoch and how far each
-//!   table's changes go ([`nikgob_library::SyncHeads`]);
-//! * `GET /v1/sync/changes?table=&since=&limit=&peer=` — a page of a
-//!   table's changes after `since` ([`nikgob_library::SyncPage`]), none of
-//!   those that came from `peer`;
-//! * `POST /v1/sync/apply?peer=` — a page of `peer`'s changes merged in
-//!   (idempotent) → [`nikgob_library::SyncApplied`];
-//! * `GET /v1/sync/blob?path=&peer=` — a picture the synced rows name (an
-//!   album's cover, an artist's photo) by its path as the rows have it, if
-//!   it is inside the served folders.
+//! * `GET /v1/sync/heads` — the database's epoch and how far each table's
+//!   changes go ([`nikgob_library::SyncHeads`]);
+//! * `GET /v1/sync/changes?table=&since=&limit=` — a page of a table's
+//!   changes after `since` ([`nikgob_library::SyncPage`]), none of those
+//!   that came from the device asking;
+//! * `POST /v1/sync/apply` — a page of the device's changes merged in
+//!   (idempotent) → [`nikgob_library::SyncApplied`]; a page of a clock far
+//!   ahead is refused (409 `clock_ahead`);
+//! * `GET /v1/sync/blob?hash=` — a picture the synced rows name (an album's
+//!   cover, an artist's photo) by its BLAKE3 hash, when this device has it.
 
-use std::path::{Component, Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::Extension;
@@ -31,36 +32,37 @@ use crate::Shared;
 use crate::auth::Caller;
 use crate::error::{ApiError, Json, query_value};
 use crate::library::{blocking, db};
-use crate::media::{open_inside, roots, serve_file};
+use crate::media::serve_file;
 
 /// What a tunnelled caller's token id starts with ([`Caller::token_id`]
-/// of a paired device: `mesh:` and the first characters of its node id).
+/// of a paired device: `mesh:` and its node id).
 const MESH_PREFIX: &str = "mesh:";
+/// The largest picture served.
+const MAX_PICTURE: u64 = 20 << 20;
 
 fn refused(message: &str) -> ApiError {
     ApiError { status: StatusCode::FORBIDDEN, code: "forbidden", message: message.to_owned(), needs: None }
 }
 
 /// The node id of the device asking: an owner's paired device, through the
-/// tunnel, with `peer` its own id.
-pub(crate) fn peer_of(caller: &Caller, peer: Option<&str>) -> Result<String, ApiError> {
-    let Some(short) = caller.token_id.strip_prefix(MESH_PREFIX) else {
+/// tunnel (its certificate's id, as the tunnel's caller carries it).
+pub(crate) fn peer_of(caller: &Caller) -> Result<String, ApiError> {
+    let Some(node) = caller.token_id.strip_prefix(MESH_PREFIX) else {
         return Err(refused("Только для своих устройств"));
     };
     if caller.actor != ApiActor::Owner {
         return Err(refused("Гостевому устройству библиотека не передаётся"));
     }
-    let peer = peer.map(str::trim).unwrap_or_default();
-    let fine = !peer.is_empty() && peer.len() <= 128 && peer.chars().all(|c| c.is_ascii_alphanumeric()) && peer.starts_with(short);
+    let fine = !node.is_empty() && node.len() <= 128 && node.chars().all(|c| c.is_ascii_alphanumeric());
     if !fine {
-        return Err(ApiError::bad_request("Неверный id устройства"));
+        return Err(refused("Неверный id устройства"));
     }
-    Ok(peer.to_owned())
+    Ok(node.to_owned())
 }
 
 /// [`peer_of`], and syncing with it is on.
-async fn allowed(sh: &Arc<Shared>, caller: &Caller, raw: Option<&str>) -> Result<String, ApiError> {
-    let peer = peer_of(caller, query_value(raw, "peer").as_deref())?;
+async fn allowed(sh: &Arc<Shared>, caller: &Caller) -> Result<String, ApiError> {
+    let peer = peer_of(caller)?;
     let lib = sh.lib.clone();
     let p = peer.clone();
     let off = blocking(move || lib.sync_cursors(&p).map(|c| c.off).map_err(db)).await?;
@@ -71,15 +73,15 @@ async fn allowed(sh: &Arc<Shared>, caller: &Caller, raw: Option<&str>) -> Result
 }
 
 /// `GET /v1/sync/heads`.
-pub async fn heads(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery) -> Result<Json<SyncHeads>, ApiError> {
-    allowed(&sh, &caller, raw.as_deref()).await?;
+pub async fn heads(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>) -> Result<Json<SyncHeads>, ApiError> {
+    allowed(&sh, &caller).await?;
     let lib = sh.lib.clone();
     Ok(Json(blocking(move || lib.sync_heads().map_err(db)).await?))
 }
 
 /// `GET /v1/sync/changes`.
 pub async fn changes(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery) -> Result<Json<SyncPage>, ApiError> {
-    let peer = allowed(&sh, &caller, raw.as_deref()).await?;
+    let peer = allowed(&sh, &caller).await?;
     let raw = raw.as_deref();
     let table = query_value(raw, "table").unwrap_or_default();
     if nikgob_library::sync_table(&table).is_none() {
@@ -95,47 +97,50 @@ pub async fn changes(State(sh): State<Arc<Shared>>, Extension(caller): Extension
 }
 
 /// `POST /v1/sync/apply`.
-pub async fn apply(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery, bytes: Bytes) -> Result<Json<SyncApplied>, ApiError> {
-    let peer = allowed(&sh, &caller, raw.as_deref()).await?;
+pub async fn apply(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<SyncApplied>, ApiError> {
+    let peer = allowed(&sh, &caller).await?;
     let page: SyncPage = serde_json::from_slice(&bytes).map_err(|e| ApiError::bad_request(format!("Неверное тело запроса: {e}")))?;
     if nikgob_library::sync_table(&page.table).is_none() {
         return Err(ApiError::bad_request("Нет такой таблицы"));
+    }
+    if nikgob_library::page_ahead(&page, nikgob_library::now_ms()) {
+        return Err(ApiError { status: StatusCode::CONFLICT, code: "clock_ahead", message: "Часы устройства спешат".into(), needs: None });
     }
     let lib = sh.lib.clone();
     Ok(Json(blocking(move || lib.sync_apply(&page, &peer, false).map_err(db)).await?))
 }
 
-/// The picture of `path` as the synced rows name it: relative to the
-/// library folder (or its parent, where the artists' photos are), or
-/// absolute. Pictures only, nothing outside the library's own parts.
-pub(crate) fn blob_path(path: &str, library: &FsPath) -> Option<Vec<PathBuf>> {
-    let p = FsPath::new(path);
-    let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)?;
-    if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif") {
-        return None;
-    }
-    if p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return None;
-    }
-    if p.is_absolute() {
-        return Some(vec![p.to_path_buf()]);
-    }
-    let mut out = vec![library.join(p)];
-    if let Some(parent) = library.parent() {
-        out.push(parent.join(p));
-    }
-    Some(out)
+/// Whether `hash` looks like a BLAKE3 hash (64 lowercase hex digits).
+pub(crate) fn is_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// `GET /v1/sync/blob`.
+/// Whether `path` names a picture file (by its extension).
+pub(crate) fn is_picture(path: &FsPath) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    matches!(ext.as_deref(), Some("jpg" | "jpeg" | "png" | "webp" | "gif"))
+}
+
+/// `GET /v1/sync/blob?hash=`: the file this device keeps for picture
+/// `hash`, only while its content is still that picture.
 pub async fn blob(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, RawQuery(raw): RawQuery, headers: HeaderMap) -> Result<Response, ApiError> {
-    allowed(&sh, &caller, raw.as_deref()).await?;
-    let path = query_value(raw.as_deref(), "path").unwrap_or_default();
-    let shared = sh.clone();
+    allowed(&sh, &caller).await?;
+    let hash = query_value(raw.as_deref(), "hash").unwrap_or_default();
+    if !is_hash(&hash) {
+        return Err(ApiError::bad_request("Неверный hash"));
+    }
+    let lib = sh.lib.clone();
     let found = blocking(move || {
-        let library = shared.rt.state().prefs.library_dir.clone();
-        let roots = roots(&shared);
-        Ok(blob_path(&path, &library).and_then(|tries| tries.iter().find_map(|p| open_inside(p, &roots))))
+        let Some(path) = lib.picture_file(&hash).map_err(db)? else { return Ok(None) };
+        if !is_picture(&path) {
+            return Ok(None);
+        }
+        let same = std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= MAX_PICTURE)
+            && std::fs::read(&path).is_ok_and(|bytes| blake3::hash(&bytes).to_hex().as_str() == hash);
+        if !same {
+            return Ok(None);
+        }
+        Ok(std::fs::File::open(&path).ok().map(|f| (f, path)))
     })
     .await?;
     let (file, real) = found.ok_or_else(|| ApiError::not_found("Файла нет"))?;
@@ -151,29 +156,29 @@ mod tests {
         Caller { token_id: token.into(), name: "Pi".into(), preset: ApiPreset::Full, actor }
     }
 
+    const PI: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
     #[test]
     fn only_the_owners_devices_may_sync() {
-        let pi = caller("mesh:abcdef0123", ApiActor::Owner);
-        assert_eq!(peer_of(&pi, Some("abcdef0123456789")).unwrap(), "abcdef0123456789");
-        assert_eq!(peer_of(&pi, Some("ffff")).unwrap_err().code, "bad_request", "another device's id");
-        assert_eq!(peer_of(&pi, None).unwrap_err().code, "bad_request");
-        assert_eq!(peer_of(&pi, Some("abcdef0123/../x")).unwrap_err().code, "bad_request");
+        let pi = caller(&format!("mesh:{PI}"), ApiActor::Owner);
+        assert_eq!(peer_of(&pi).unwrap(), PI, "its whole node id");
+        assert_eq!(peer_of(&caller("mesh:", ApiActor::Owner)).unwrap_err().status, StatusCode::FORBIDDEN);
+        assert_eq!(peer_of(&caller("mesh:ab/../x", ApiActor::Owner)).unwrap_err().status, StatusCode::FORBIDDEN);
         let token = caller("k3J9aQ0b1c", ApiActor::Owner);
-        assert_eq!(peer_of(&token, Some("k3J9aQ0b1c")).unwrap_err().status, StatusCode::FORBIDDEN, "a token");
-        let agent = caller("mesh:abcdef0123", ApiActor::Agent);
-        assert_eq!(peer_of(&agent, Some("abcdef0123")).unwrap_err().status, StatusCode::FORBIDDEN);
-        let guest = caller("mesh:abcdef0123", ApiActor::Guest);
-        assert_eq!(peer_of(&guest, Some("abcdef0123")).unwrap_err().status, StatusCode::FORBIDDEN, "a guest's device");
+        assert_eq!(peer_of(&token).unwrap_err().status, StatusCode::FORBIDDEN, "a token");
+        let agent = caller(&format!("mesh:{PI}"), ApiActor::Agent);
+        assert_eq!(peer_of(&agent).unwrap_err().status, StatusCode::FORBIDDEN);
+        let guest = caller(&format!("mesh:{PI}"), ApiActor::Guest);
+        assert_eq!(peer_of(&guest).unwrap_err().status, StatusCode::FORBIDDEN, "a guest's device");
     }
 
     #[test]
-    fn blobs_are_pictures_inside_the_library() {
-        let lib = FsPath::new("/music/Music");
-        assert_eq!(blob_path("Кино/1988 - Группа крови/cover.jpg", lib).unwrap()[0], lib.join("Кино/1988 - Группа крови/cover.jpg"));
-        assert_eq!(blob_path("Artists/a.JPG", lib).unwrap()[1], FsPath::new("/music").join("Artists/a.JPG"));
-        assert!(blob_path("Кино/01.flac", lib).is_none(), "not a picture");
-        assert!(blob_path("../secret.png", lib).is_none());
-        assert!(blob_path("a/../../b.png", lib).is_none());
+    fn blobs_are_pictures_by_hash() {
+        assert!(is_hash(&blake3::hash(b"x").to_hex()));
+        assert!(!is_hash("ABCDEF"));
+        assert!(!is_hash(&"g".repeat(64)));
+        assert!(is_picture(FsPath::new("/m/Кино/cover.JPG")));
+        assert!(!is_picture(FsPath::new("/m/Кино/01.flac")));
     }
 
     /// Through the router: a token is refused, a paired owner device gets
@@ -200,23 +205,35 @@ mod tests {
         let ctx = crate::ApiContext { runtime: rt.handle(), library: library.clone(), wake: crate::Wake::new(), media_roots: Vec::new() };
         let local = crate::LocalApi::new(Arc::new(Shared::new(ctx)));
         let get = |uri: &str| axum::http::Request::get(uri).body(Body::empty()).unwrap();
-        let r = local.call(caller("k3J9aQ0b1c", ApiActor::Owner), get("/v1/sync/heads?peer=k3J9aQ0b1c")).await;
+        let r = local.call(caller("k3J9aQ0b1c", ApiActor::Owner), get("/v1/sync/heads")).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
-        let pi = caller("mesh:abcdef0123", ApiActor::Owner);
-        let r = local.call(pi.clone(), get("/v1/sync/heads?peer=abcdef0123456789")).await;
+        let pi = caller(&format!("mesh:{PI}"), ApiActor::Owner);
+        let r = local.call(pi.clone(), get("/v1/sync/heads")).await;
         assert_eq!(r.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
         let heads: SyncHeads = serde_json::from_slice(&bytes).unwrap();
         assert!(heads.tables["artist"] > 0);
-        let r = local.call(pi.clone(), get("/v1/sync/changes?table=artist&since=0&peer=abcdef0123456789")).await;
+        let r = local.call(pi.clone(), get("/v1/sync/changes?table=artist&since=0")).await;
         assert_eq!(r.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
         let page: SyncPage = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(page.rows.len(), 1);
-        let r = local.call(pi.clone(), get("/v1/sync/changes?table=meta&peer=abcdef0123456789")).await;
+        let r = local.call(pi.clone(), get("/v1/sync/changes?table=meta")).await;
         assert_eq!(r.status(), StatusCode::BAD_REQUEST, "only synced tables");
-        library.set_sync_off("abcdef0123456789", true).unwrap();
-        let r = local.call(pi, get("/v1/sync/heads?peer=abcdef0123456789")).await;
+        // A picture by its hash, only while the file is still that picture.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cover.jpg");
+        std::fs::write(&file, b"\xFF\xD8\xFFcover").unwrap();
+        let hash = blake3::hash(b"\xFF\xD8\xFFcover").to_hex().to_string();
+        library.put_picture_file(&hash, &file).unwrap();
+        let r = local.call(pi.clone(), get(&format!("/v1/sync/blob?hash={hash}"))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        std::fs::write(&file, b"another").unwrap();
+        let r = local.call(pi.clone(), get(&format!("/v1/sync/blob?hash={hash}"))).await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "changed since");
+        // Turned off for its whole id, whatever it says of itself.
+        library.set_sync_off(PI, true).unwrap();
+        let r = local.call(pi.clone(), get("/v1/sync/heads?peer=abcdef0123")).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN, "turned off");
         drop(rt);
     }
