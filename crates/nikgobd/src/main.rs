@@ -154,6 +154,7 @@ fn main() {
             wake: api_wake.clone(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             headless: true,
+            library: Some(host.library.clone()),
         };
         match nikgob_mesh::start(ctx) {
             Ok(m) => Some(m),
