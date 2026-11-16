@@ -316,6 +316,16 @@ pub fn event_weights(events: &[Play], target: PlayDevice) -> Vec<f32> {
     w
 }
 
+/// The local offset at `ts` of `offsets` (the offset from each moment on,
+/// oldest first): the last one begun by then, the first one before it;
+/// `fallback` when there are none.
+pub fn offset_at(offsets: &[(UnixMs, i32)], fallback: i32, ts: UnixMs) -> i32 {
+    match offsets.partition_point(|(at, _)| *at <= ts) {
+        0 => offsets.first().map_or(fallback, |o| o.1),
+        k => offsets[k - 1].1,
+    }
+}
+
 /// A part of a day of the week (see the module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TimeSlot {
@@ -568,6 +578,25 @@ mod tests {
         let w = event_weights(&events, PlayDevice::Personal);
         assert!(w[29] < 0.4 * 0.35 + 0.1);
         assert!((w[30] - 0.35).abs() < 1e-6, "{}", w[30]);
+    }
+
+    /// A play is placed by the clock of its own day: 05:30 UTC on a winter
+    /// day at +2 is 07:30, a morning; at +3 in summer the same UTC hour is
+    /// 08:30, still a morning, and 03:30 UTC is a night in winter but 06:30,
+    /// a morning, in summer.
+    #[test]
+    fn a_play_keeps_the_clock_of_its_own_day() {
+        let summer = 100 * DAY_MS;
+        let offsets = [(0, 120), (summer, 180)];
+        assert_eq!(offset_at(&offsets, 0, 10 * DAY_MS), 120);
+        assert_eq!(offset_at(&offsets, 0, summer), 180);
+        assert_eq!(offset_at(&offsets, 0, summer + 30 * DAY_MS), 180);
+        assert_eq!(offset_at(&offsets, 0, -DAY_MS), 120, "before the first: the first");
+        assert_eq!(offset_at(&[], 60, 5), 60, "none: the fallback");
+        let winter_night = 10 * DAY_MS + 3 * HOUR_MS + HOUR_MS / 2;
+        let summer_dawn = summer + 10 * DAY_MS + 3 * HOUR_MS + HOUR_MS / 2;
+        assert_eq!(TimeSlot::at(winter_night, offset_at(&offsets, 0, winter_night)).part, DayPart::Night);
+        assert_eq!(TimeSlot::at(summer_dawn, offset_at(&offsets, 0, summer_dawn)).part, DayPart::Morning);
     }
 
     #[test]

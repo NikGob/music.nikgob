@@ -694,6 +694,9 @@ pub struct UserModel {
     pub taste: Taste,
     now: UnixMs,
     utc_offset_min: i32,
+    /// The local offset of each moment of the history
+    /// ([`TasteInput::utc_offsets`]).
+    offsets: Vec<(UnixMs, i32)>,
     ids: Vec<TrackId>,
     pos: HashMap<TrackId, usize>,
     pub tracks: Vec<TrackStats>,
@@ -866,6 +869,7 @@ impl UserModel {
         let taste = Taste::build_weighted(catalog, input, &weights, now);
         let mut m = Self::empty(catalog, taste, extra, input.utc_offset_min, now);
         m.device = input.target_device;
+        m.offsets = input.utc_offsets.clone();
         m.learn = extra.weights.is_none_or(|w| w.version != FEATURE_VERSION);
         m.learn_from = teach_from(&input.events);
         if let Some(w) = extra.weights.filter(|w| w.version == FEATURE_VERSION) {
@@ -1253,7 +1257,8 @@ impl UserModel {
             };
             let w = if s.import { IMPORT_SHARE } else { s.weight };
             let m = outcome * w * halve(1.0, s.ts, now, SLOT_HALF_LIFE_MS);
-            time.add(TimeSlot::at(s.ts, self.utc_offset_min), self.profile_at(i), m, self.sound_point_at(i));
+            // Its slot by its own day's clock.
+            time.add(TimeSlot::at(s.ts, input.offset_at(s.ts)), self.profile_at(i), m, self.sound_point_at(i));
         }
         self.time = time;
         let disliked: Vec<usize> = input.disliked_tracks.iter().filter_map(|t| self.pos.get(t).copied()).collect();
@@ -1512,6 +1517,7 @@ impl UserModel {
             taste,
             now,
             utc_offset_min,
+            offsets: Vec::new(),
             ids,
             pos,
             tracks: vec![TrackStats::default(); n],
@@ -1753,7 +1759,7 @@ impl UserModel {
     }
 
     fn part_of(&self, ts: UnixMs) -> usize {
-        DayPart::at(ts, self.utc_offset_min).index()
+        DayPart::at(ts, crate::context::offset_at(&self.offsets, self.utc_offset_min, ts)).index()
     }
 
     /// The moment of `session` at `now` (at least the session's last start).
@@ -2540,6 +2546,7 @@ pub fn replay_with(
     }
     m.learn = true;
     m.device = input.target_device;
+    m.offsets = input.utc_offsets.clone();
     m.listen(input, &order, &weights);
     let disliked: Vec<usize> = dislikes.iter().filter_map(|t| m.position(*t)).collect();
     let near = crate::dislike::near_dislikes(&m.emb, &disliked, m.scale);

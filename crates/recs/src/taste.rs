@@ -610,6 +610,19 @@ pub struct TasteInput {
     /// The kind of device the recommendations are for: the plays weigh
     /// by who played them where ([`crate::context::event_weights`]).
     pub target_device: PlayDevice,
+    /// The local offset (minutes east of UTC) from each moment on, oldest
+    /// first, as the device's time zone had it: a play falls in the part
+    /// of the day and the weekday of its own clock (a winter evening stays
+    /// an evening when the summer time comes). Empty: [`Self::utc_offset_min`]
+    /// throughout.
+    pub utc_offsets: Vec<(UnixMs, i32)>,
+}
+
+impl TasteInput {
+    /// The local offset at `ts` ([`Self::utc_offsets`]).
+    pub fn offset_at(&self, ts: UnixMs) -> i32 {
+        crate::context::offset_at(&self.utc_offsets, self.utc_offset_min, ts)
+    }
 }
 
 /// Per-track and per-artist signals at one moment (`now`).
@@ -688,7 +701,6 @@ impl Taste {
         let mut saturated = vec![0u8; n];
         let mut year_ago = vec![0u16; n];
         let mut hot = vec![0.0f32; n];
-        let off = input.utc_offset_min;
 
         type Ev = (UnixMs, usize, EventType, Option<u32>, EventContext, f32, PlayDevice);
         let mut events: Vec<Ev> = Vec::new();
@@ -725,7 +737,7 @@ impl Taste {
             if whole {
                 plays[i] += 1;
             }
-            let part = DayPart::at(ts, off).index();
+            let part = DayPart::at(ts, input.offset_at(ts)).index();
             daypart[i][part] += w;
             if whole && (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
                 year_ago[i] = year_ago[i].saturating_add(1);
@@ -742,7 +754,7 @@ impl Taste {
             affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
             hot[i] += w * decay(now, ts, HOT_HALF_LIFE_MS);
             if w > 0.0 {
-                part_mass[i][DayPart::at(ts, off).index()] += w * decay(now, ts, SLOT_HALF_LIFE_MS);
+                part_mass[i][DayPart::at(ts, input.offset_at(ts)).index()] += w * decay(now, ts, SLOT_HALF_LIFE_MS);
             }
         };
 
@@ -790,7 +802,7 @@ impl Taste {
         let mut add_long = |i: usize, ts: UnixMs, w: f32| {
             affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
             if w > 0.0 {
-                part_mass[i][DayPart::at(ts, off).index()] += crate::model::IMPORT_SHARE * w * decay(now, ts, SLOT_HALF_LIFE_MS);
+                part_mass[i][DayPart::at(ts, input.offset_at(ts)).index()] += crate::model::IMPORT_SHARE * w * decay(now, ts, SLOT_HALF_LIFE_MS);
             }
         };
         for &(ts, i, kind, pos, context, w, _) in &imported {

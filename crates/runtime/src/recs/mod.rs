@@ -989,6 +989,11 @@ fn read_parts(
     let history = TasteInput {
         events: events.iter().chain(&seeks).filter_map(|e| devices.place(e, play_of(e))).collect(),
         target_device: devices.here(),
+        // Each play by the clock of its own day (the summer time and back);
+        // an offset asked for that is not the zone's now keeps to itself.
+        utc_offsets: Some(local_offsets(events.iter().map(|e| e.ts).min().unwrap_or(now), now))
+            .filter(|o| o.last().map(|x| x.1) == Some(utc_offset_min))
+            .unwrap_or_default(),
         playlists: tiles_input.playlists.iter().map(|p| p.tracks.clone()).collect(),
         profiles: nikgob_recs::profiles::Settings {
             background_less: extra.background_less,
@@ -1376,6 +1381,24 @@ impl Devices {
         p.device = self.of(e.device.as_str())?;
         Some(p)
     }
+}
+
+/// The local offsets (minutes east of UTC) of this device's time zone from
+/// `from` to `to`: the one at `from`, then each change by the zone's rules,
+/// oldest first ([`nikgob_recs::TasteInput::utc_offsets`]).
+pub(crate) fn local_offsets(from: UnixMs, to: UnixMs) -> Vec<(UnixMs, i32)> {
+    let Ok(start) = jiff::Timestamp::from_millisecond(from) else { return Vec::new() };
+    let tz = jiff::tz::TimeZone::system();
+    let mut out = vec![(from, tz.to_offset(start).seconds() / 60)];
+    for t in tz.following(start) {
+        let at = t.timestamp().as_millisecond();
+        // Two changes a year: a long history has a few dozen.
+        if at > to || out.len() >= 4_096 {
+            break;
+        }
+        out.push((at, t.offset().seconds() / 60));
+    }
+    out
 }
 
 /// Whether each of `plays` counts whole on a list of what was played (a
