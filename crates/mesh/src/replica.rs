@@ -20,8 +20,8 @@
 //! here outlive a restart), never past [`MIN_FREE`] left on the disks it
 //! writes to (the running pulls' bytes reserved, [`UNKNOWN_SIZE`] for a
 //! file of a size not known; each write weighed against the free space
-//! seen, looked at again every [`ROOM_STEP`]; a copy across disks weighed
-//! on the disk it goes to; a disk whose free space is not known gets
+//! seen, looked at again every [`ROOM_STEP`]; each placement weighed on
+//! the disk it goes to; a disk whose free space is not known gets
 //! nothing). A new profile or new pins drop the old plan at once. The
 //! parts wait in `<library>/.musiclib/replica` under names no one can
 //! guess, found by listing the folder and opened never through a link; a
@@ -295,8 +295,8 @@ impl Drop for Reserve {
     }
 }
 
-/// What a copy across disks must leave on the disk it writes to: the
-/// reserve and what the other pulls keep.
+/// What a placement must leave on the disk it writes to: the reserve and
+/// what the other pulls keep.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Room {
     pub(crate) keep: u64,
@@ -1432,8 +1432,7 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
 }
 
 /// The checked part put in its place and made this device's own (on the
-/// blocking pool); a copy across disks keeps `room` on the disk it goes
-/// to.
+/// blocking pool), only when the disk it goes to keeps `room` after it.
 #[allow(clippy::too_many_arguments)]
 async fn keep(lib: &Library, me: &str, dirs: &Dirs, job: &Job, part: &Part, hash: &str, ext: &str, size: u64, room: Room) -> Result<(), Failed> {
     let (lib, me, dirs, job, part, hash, ext) = (lib.clone(), me.to_owned(), dirs.clone(), job.clone(), part.clone(), hash.to_owned(), ext.to_owned());
@@ -1455,31 +1454,13 @@ fn same_file(path: &Path, size: u64, hash: &str) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == size) && blake3_plain(path).is_ok_and(|h| h == hash)
 }
 
-/// Whether `a` and `b` (both there) are on one disk: a move between them
-/// is a rename, nothing copied. Not known: no.
-#[cfg(unix)]
-fn same_volume(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev())
-}
-
-#[cfg(windows)]
-fn same_volume(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x.components().next() == y.components().next(),
-        _ => false,
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_volume(_: &Path, _: &Path) -> bool {
-    false
-}
 
 /// Puts the checked `part` at `target`, or at `target (2)`… when the name
 /// is another file's — never over anything, its folders made only inside
-/// `root`, a copy across disks only when that disk keeps `room` after it
-/// ([`Failed::NoRoom`]: the part stays) and checked before the part goes;
+/// `root`, only when the disk it goes to keeps `room` after its bytes,
+/// whatever disk that is (a move on one disk is weighed as a copy too;
+/// [`Failed::NoRoom`]: the part stays), a copy across disks checked before
+/// the part goes;
 /// the very file there already (a plain file inside `root`) is taken as it
 /// is (the part goes). Where it is, and whether the part was moved there
 /// (false: the file was there already).
@@ -1490,7 +1471,7 @@ pub(crate) fn put_in_place(part: &Path, target: &Path, hash: &str, size: u64, ro
         let _ = std::fs::remove_file(part);
         return Ok((target.to_owned(), false));
     }
-    if !same_volume(part, dir) && !room.fits(dir, size) {
+    if !room.fits(dir, size) {
         return Err(Failed::NoRoom);
     }
     let placed = nikgob_import::fsutil::move_unique_verified(part, target, hash).map_err(|e| Failed::Bad(e.to_string()))?;
@@ -1502,8 +1483,8 @@ pub(crate) fn put_in_place(part: &Path, target: &Path, hash: &str, size: u64, ro
 }
 
 /// A flat master, `{hash}.<ext>` right in `root`: only under that very
-/// name (a master kept flat is found by it), never over another file, a
-/// copy across disks only when that disk keeps `room` after it.
+/// name (a master kept flat is found by it), never over another file, only
+/// when the disk it goes to keeps `room` after its bytes.
 fn put_flat(part: &Path, root: &Path, hash: &str, ext: &str, size: u64, room: Room) -> Result<(PathBuf, bool), Failed> {
     nikgob_import::fsutil::create_dir_inside(root, root).map_err(|e| Failed::Bad(e.to_string()))?;
     let target = root.join(format!("{hash}.{ext}"));
@@ -1511,7 +1492,7 @@ fn put_flat(part: &Path, root: &Path, hash: &str, ext: &str, size: u64, room: Ro
         let _ = std::fs::remove_file(part);
         return Ok((target, false));
     }
-    if !same_volume(part, root) && !room.fits(root, size) {
+    if !room.fits(root, size) {
         return Err(Failed::NoRoom);
     }
     nikgob_import::fsutil::move_new_verified(part, &target, hash).map_err(|e| Failed::Bad(format!("{}: {e}", target.display())))?;
@@ -1988,6 +1969,13 @@ mod tests {
         assert_eq!(held[&t.id].iter().map(|f| f.file_hash.as_deref()).collect::<Vec<_>>(), [Some(hash.as_str())]);
         assert!(pending.is_empty());
         assert!(lib.replica_verified(&hash, "me").unwrap().is_some());
+
+        // A disk that would go below its reserve: the part stays.
+        std::fs::write(&part, &bytes).unwrap();
+        let tight = Room { keep: u64::MAX / 2, others: 0 };
+        let elsewhere = library.join("Кино").join("1988 - Группа крови").join("02 - Другая.opus");
+        assert_eq!(put_in_place(&part, &elsewhere, &hash, bytes.len() as u64, &library, tight), Err(Failed::NoRoom));
+        assert!(part.exists() && !elsewhere.exists());
 
         // The same file at the name already: taken as it is.
         std::fs::write(&target, &bytes).unwrap();
