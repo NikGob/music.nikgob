@@ -43,6 +43,8 @@ mod sharing;
 mod sleep;
 mod storage;
 mod db_copy;
+mod duck;
+pub use duck::DUCK_RESTORE_FADE;
 mod sound_model;
 mod editions;
 mod engine;
@@ -194,6 +196,12 @@ pub trait Playback: Send {
     /// Engine `generation` did not open its device: dropped if it was
     /// waiting to take over.
     fn drop_device(&mut self, _generation: u64) {}
+    /// The duck: the sound glides to the linear `gain` (0..1, a factor on
+    /// what the volume and the sleep fade make it) over `fade` (zero: at
+    /// once); 1 restores it. The volume stays as the user set it; the duck
+    /// holds whatever plays next, across gapless joins and device switches,
+    /// until it is changed.
+    fn set_duck(&mut self, _gain: f32, _fade: Duration) {}
 }
 
 /// A backend that plays nothing (tests, or when no device is available).
@@ -217,6 +225,24 @@ impl Playback for NullPlayback {
 pub trait Service: Send {
     /// Returns true if the command was handled.
     fn handle(&mut self, command: &Command, state: &mut ViewState) -> bool;
+}
+
+/// What the runtime does besides playing, chosen by its host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeOptions {
+    /// The heavy passes over the music in the background: the sound
+    /// analysis (bliss, the neural sound model, the previews of new songs),
+    /// the lyrics alignment, the spectrum check of the files (fake
+    /// lossless) and the check for files that hold another song. On by
+    /// default; the headless player turns them off (a Raspberry Pi gets
+    /// their results from another device).
+    pub background_compute: bool,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self { background_compute: true }
+    }
 }
 
 pub struct RuntimeConfig {
@@ -253,7 +279,8 @@ pub struct Runtime {
     tx: Sender<Msg>,
     pb_tx: Sender<PlaybackEvent>,
     state: Arc<RwLock<ViewState>>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    /// Taken by [`Runtime::shutdown`] (or the drop).
+    worker: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Runtime {
@@ -274,6 +301,18 @@ impl Runtime {
         playback: Box<dyn Playback>,
         wake: Arc<dyn Fn() + Send + Sync>,
         schedule: StreamSchedule,
+    ) -> Self {
+        Self::start_with(config, playback, wake, schedule, RuntimeOptions::default())
+    }
+
+    /// [`Self::start_scheduled`] with the host's [`RuntimeOptions`] (the
+    /// headless player's background passes off).
+    pub fn start_with(
+        config: RuntimeConfig,
+        playback: Box<dyn Playback>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        schedule: StreamSchedule,
+        options: RuntimeOptions,
     ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (pb_tx, pb_rx) = crossbeam_channel::unbounded();
@@ -298,6 +337,7 @@ impl Runtime {
                 .spawn(move || {
                     let mut w = Worker::new(config, playback, state, wake, in_tx);
                     w.streaming.schedule = schedule;
+                    w.compute = options.background_compute;
                     w.run(rx, pb_rx, in_rx);
                 })
                 .expect("spawn runtime thread")
@@ -306,7 +346,7 @@ impl Runtime {
             tx,
             pb_tx,
             state,
-            worker: Some(worker),
+            worker: parking_lot::Mutex::new(Some(worker)),
         };
         rt.send(Command::LoadHome);
         rt.send(Command::LoadLibrary);
@@ -375,12 +415,24 @@ impl Runtime {
     }
 }
 
-impl Drop for Runtime {
-    fn drop(&mut self) {
+impl Runtime {
+    /// Stops the worker as the drop does (the session, the prefs and the
+    /// rest saved) and waits for it, through a shared handle: a host whose
+    /// other parts (an API server) still hold the runtime stops it at a
+    /// signal. Commands sent after it go nowhere; a second call returns at
+    /// once.
+    pub fn shutdown(&self) {
         let _ = self.tx.send(Msg::Shutdown);
-        if let Some(w) = self.worker.take() {
+        let worker = self.worker.lock().take();
+        if let Some(w) = worker {
             let _ = w.join();
         }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -738,6 +790,10 @@ struct Worker {
     storage: storage::Storage,
     /// The day's copy of the database next to the masters.
     db_copies: db_copy::DbCopies,
+    /// The heavy background passes run ([`RuntimeOptions::background_compute`]).
+    compute: bool,
+    /// The sound lowered for a while ([`duck`]).
+    duck: duck::DuckState,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -936,6 +992,8 @@ impl Worker {
             sleep: Default::default(),
             storage: Default::default(),
             db_copies: Default::default(),
+            compute: true,
+            duck: Default::default(),
         }
     }
 
@@ -970,14 +1028,23 @@ impl Worker {
         self.wish_restart();
         self.publish_sources();
         self.start_streams();
-        self.start_analysis();
-        self.start_quality();
-        self.start_same_audio();
-        self.start_align();
+        if self.compute {
+            self.start_analysis();
+            self.start_quality();
+            self.start_same_audio();
+            self.start_align();
+        } else {
+            log::info!("background compute is off: no sound analysis, lyrics alignment or file checks here");
+        }
         self.dislikes_load(false);
         loop {
             // What this turn of the loop does, for [`SLOW_TURN`].
             self.turn = Turn::default();
+            // The duck's end, to the millisecond rather than at a poll.
+            let duck_end = match self.duck.deadline() {
+                Some(at) => crossbeam_channel::at(at),
+                None => crossbeam_channel::never(),
+            };
             select! {
                 recv(rx) -> m => match m {
                     Ok(Msg::Cmd(c)) => {
@@ -1030,6 +1097,10 @@ impl Worker {
                     let what = l.what;
                     self.turn.begin(|| what.to_owned());
                     (l.run)(self);
+                },
+                recv(duck_end) -> _ => {
+                    self.turn.begin(|| "the duck's end".to_owned());
+                    self.duck_due();
                 },
                 recv(fast) -> _ => {
                     self.turn.begin(|| "the second's poll".to_owned());
@@ -1811,6 +1882,8 @@ impl Worker {
                     log::warn!("unhandled {c:?}");
                 }
             }
+            c @ (Command::SetDuck { .. } | Command::ClearDuck { .. }) => self.duck_command(c),
+            Command::SetOutputDevice(device) => self.set_output_device(device),
         }
     }
 
@@ -4049,10 +4122,27 @@ impl Worker {
         }
     }
 
+    /// `Command::SetOutputDevice`: the device is chosen as in Settings
+    /// (saved with the prefs, switched to live). A name no device has now
+    /// is kept: the engine plays on the default output until it is back.
+    fn set_output_device(&mut self, device: Option<String>) {
+        let device = device.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty());
+        let mut p = self.state.read().prefs.clone();
+        if p.output_device == device {
+            return;
+        }
+        log::info!("output device: {}", device.as_deref().unwrap_or("the system default"));
+        p.output_device = device;
+        self.set_prefs(Box::new(p));
+    }
+
     /// The engine was restarted on another device and lost what it played.
     fn resume_on_new_device(&mut self) {
         let volume = if self.muted { 0.0 } else { self.volume };
         self.playback.set_volume(volume);
+        if let Some(gain) = self.duck.gain() {
+            self.playback.set_duck(gain, Duration::ZERO);
+        }
         let prefs = self.state.read().prefs.clone();
         self.playback.configure(crossfade(&prefs), prefs.normalization);
         self.playback.set_equalizer(prefs.eq_on, prefs.eq_gains);

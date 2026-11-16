@@ -385,12 +385,16 @@ fn stream_outcome(e: StreamError) -> Outcome {
 
 impl Worker {
     fn stream_analysis_on(&self) -> bool {
-        self.state.read().prefs.stream_analysis
+        self.compute && self.state.read().prefs.stream_analysis
     }
 
     /// Hands a job to the analysis thread (started on the first one); the
     /// neural model goes along where its mode hears this kind of job.
     fn analysis_job(&mut self, mut job: Job) -> bool {
+        // A host without the background passes analyses nothing here.
+        if !self.compute {
+            return false;
+        }
         let neural = self.analysis.neural();
         let hears = if job.origin == Origin::Preview { neural.previews } else { neural.library };
         job.model = if hears { self.analysis.effnet() } else { None };
