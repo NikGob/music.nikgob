@@ -119,10 +119,15 @@ impl Dogmazic {
     /// One request: at the pace, through the breaker (looked at again
     /// once its turn came: another request may have set the source aside
     /// meanwhile), a redirect followed by hand, each hop at the pace too.
-    /// A page sends the site's cookies; a range asks for those bytes.
-    async fn send(&self, url: &str, range: Option<(u64, u64)>, page: bool) -> Result<reqwest::Response, SourceError> {
+    /// A page sends the site's cookies, but only to the origin it was
+    /// asked of (scheme, host and port alike: no other host, no step down
+    /// from https); a range asks for those bytes. With the answer: whether
+    /// it came from that origin (only then are its cookies kept).
+    async fn send(&self, url: &str, range: Option<(u64, u64)>, page: bool) -> Result<(reqwest::Response, bool), SourceError> {
         let mut url = url::Url::parse(url).map_err(|e| SourceError::Parse(e.to_string()))?;
+        let origin = url.origin();
         for _ in 0..=REDIRECTS {
+            let home = url.origin() == origin;
             self.breaker.check()?;
             self.pace.wait().await;
             self.breaker.check()?;
@@ -131,7 +136,7 @@ impl Dogmazic {
                 req = req
                     .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
                     .timeout(PAGE_TIMEOUT);
-                if let Some(c) = cookie_header(&self.cookies) {
+                if let Some(c) = cookie_header(&self.cookies).filter(|_| home) {
                     req = req.header(reqwest::header::COOKIE, c);
                 }
             }
@@ -156,7 +161,7 @@ impl Dogmazic {
             };
             match next {
                 Some(n) => url = n,
-                None => return Ok(resp),
+                None => return Ok((resp, home)),
             }
         }
         Err(SourceError::Parse("too many redirects".into()))
@@ -165,15 +170,15 @@ impl Dogmazic {
     /// A page. (The breaker hears of what the site answered, not of its
     /// own refusal: a request turned away at its turn adds no pause.)
     async fn page(&self, url: &str) -> Result<String, SourceError> {
-        let resp = self.send(url, None, true).await?;
-        let r = page_of(resp, Some(&self.cookies)).await;
+        let (resp, home) = self.send(url, None, true).await?;
+        let r = page_of(resp, home.then_some(&self.cookies)).await;
         self.breaker.note(&r);
         r
     }
 
     /// Bytes of a song's file.
     async fn bytes(&self, id: &str, from: u64, len: u64) -> Result<(Vec<u8>, Option<u64>), SourceError> {
-        let resp = self.send(&self.download_url(id), Some((from, len)), false).await?;
+        let (resp, _) = self.send(&self.download_url(id), Some((from, len)), false).await?;
         let r = read_range(resp, from, len).await;
         self.breaker.note(&r);
         r
@@ -252,7 +257,7 @@ impl Dogmazic {
     /// A song of the pages into `dest`, named by what its bytes are.
     async fn fetch_page_song(&self, h: &Handle, dest: &Path, progress: &Progress) -> Result<PathBuf, SourceError> {
         let path = dest.join(format!("{}.{}", h.stem, h.ext));
-        let resp = self.send(&self.download_url(&h.web), None, false).await?;
+        let (resp, _) = self.send(&self.download_url(&h.web), None, false).await?;
         let r = save(resp, &path, progress).await;
         self.breaker.note(&r);
         named_by_bytes(&r?).await

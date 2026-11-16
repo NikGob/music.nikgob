@@ -250,3 +250,39 @@ async fn a_waiting_request_sees_the_pause_another_one_started() {
     assert!(b.unwrap_err().is_refusal());
     assert_eq!(server.received_requests().await.unwrap().len(), 1, "the second one never went out");
 }
+
+/// The site's cookies go to the site only: a page that redirects to
+/// another origin is asked there without them, and what that origin sets
+/// is not kept for the site.
+#[tokio::test]
+async fn cookies_stay_with_the_site() {
+    let site = MockServer::start().await;
+    let other = MockServer::start().await;
+    let empty = "<html><body><table></table></body></html>";
+    Mock::given(path("/search.php"))
+        .and(query_param("rule_1_input", "One"))
+        .respond_with(ResponseTemplate::new(200).insert_header("Set-Cookie", "site=1; path=/").set_body_raw(empty, "text/html"))
+        .mount(&site)
+        .await;
+    Mock::given(path("/search.php"))
+        .and(query_param("rule_1_input", "Two"))
+        .respond_with(ResponseTemplate::new(302).insert_header("Location", format!("{}/elsewhere", other.uri()).as_str()))
+        .mount(&site)
+        .await;
+    Mock::given(path("/search.php")).and(query_param("rule_1_input", "Three")).respond_with(ResponseTemplate::new(200).set_body_raw(empty, "text/html")).mount(&site).await;
+    Mock::given(path("/elsewhere"))
+        .respond_with(ResponseTemplate::new(200).insert_header("Set-Cookie", "evil=1; path=/").set_body_raw(empty, "text/html"))
+        .mount(&other)
+        .await;
+    let src = Dogmazic::with_pace(&site.uri(), "", "", Duration::ZERO);
+    let wish = |t: &str| Want { artists: vec!["Someone".into()], title: Some(t.into()), ..Want::default() };
+    for t in ["One", "Two", "Three"] {
+        assert!(src.search(&wish(t)).await.unwrap().is_empty(), "{t}");
+    }
+    let away = other.received_requests().await.unwrap();
+    assert_eq!(away.len(), 1, "the redirect was followed");
+    assert!(!away[0].headers.contains_key("cookie"), "no cookie for another origin");
+    let asked = site.received_requests().await.unwrap();
+    let third = asked.iter().find(|r| r.url.query().unwrap_or_default().contains("Three")).unwrap();
+    assert_eq!(third.headers.get("cookie").unwrap().to_str().unwrap(), "site=1", "the site's own cookie, nothing of the other's");
+}
