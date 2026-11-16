@@ -3907,6 +3907,12 @@ pub enum Command {
     MeshRestore { node_id: String },
     /// The pairing's result was seen: back to idle.
     MeshClearPairing,
+    /// Turns the library's sync with a paired device on or off (the
+    /// device's settings row).
+    MeshSetSync { node_id: String, on: bool },
+    /// From the mesh's sync loop to the worker: how the sync with a device
+    /// goes.
+    MeshSyncReport { node_id: String, sync: MeshSyncView },
 }
 
 impl Default for Prefs {

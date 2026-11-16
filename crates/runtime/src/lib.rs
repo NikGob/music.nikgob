@@ -2029,7 +2029,9 @@ impl Worker {
             | Command::MeshSetScope { .. }
             | Command::MeshUpdate(_)
             | Command::MeshRestore { .. }
-            | Command::MeshClearPairing) => self.mesh_command(c),
+            | Command::MeshClearPairing
+            | Command::MeshSetSync { .. }
+            | Command::MeshSyncReport { .. }) => self.mesh_command(c),
         }
     }
 

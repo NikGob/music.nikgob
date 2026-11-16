@@ -6,11 +6,12 @@
 //! as [`Command::MeshUpdate`] and is merged here. Nothing here waits on the
 //! network.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use nikgob_core::settings::{MeshSettings, Settings};
 use nikgob_library::NodeRow;
-use nikgob_view::{Command, MeshKind, MeshNodeView, MeshPairing, MeshProfile, MeshScope, MeshSnapshot, MeshView};
+use nikgob_view::{Command, MeshKind, MeshNodeView, MeshPairing, MeshProfile, MeshScope, MeshSnapshot, MeshSyncView, MeshView};
 
 use crate::Worker;
 
@@ -34,6 +35,22 @@ pub(crate) struct MeshKeep {
     forgetting: Vec<(String, i64)>,
     /// A pairing that could not even start here (no mesh service).
     failed: Option<String>,
+    /// The devices the library's sync is turned off with.
+    sync_off: Vec<String>,
+    /// The sync loop's last report per device.
+    sync: HashMap<String, MeshSyncView>,
+}
+
+impl MeshKeep {
+    /// The sync with `id` as the view shows it.
+    fn sync_of(&self, id: &str) -> MeshSyncView {
+        let mut s = self.sync.get(id).cloned().unwrap_or_default();
+        s.off = self.sync_off.iter().any(|o| o == id);
+        if s.off {
+            s.running = false;
+        }
+        s
+    }
 }
 
 fn row_view(r: &NodeRow) -> MeshNodeView {
@@ -49,6 +66,11 @@ fn row_view(r: &NodeRow) -> MeshNodeView {
         profile: MeshProfile::parse(&r.profile).unwrap_or_default(),
         ..MeshNodeView::default()
     }
+}
+
+fn with_sync(keep: &MeshKeep, mut v: MeshNodeView) -> MeshNodeView {
+    v.sync = keep.sync_of(&v.id);
+    v
 }
 
 /// The view: the service's report (when there is one) with what is kept
@@ -78,10 +100,10 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
                         v.version = r.version.clone();
                     }
                 }
-                v
+                with_sync(keep, v)
             })
             .collect(),
-        None => keep.rows.iter().filter(|r| !hidden(&r.id)).map(row_view).collect(),
+        None => keep.rows.iter().filter(|r| !hidden(&r.id)).map(|r| with_sync(keep, row_view(r))).collect(),
     };
     nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
     let live = keep.live.clone().unwrap_or_default();
@@ -172,6 +194,10 @@ impl Worker {
         match self.lib.nodes() {
             Ok(rows) => self.mesh.rows = rows,
             Err(e) => log::warn!("mesh: the paired devices not read: {e}"),
+        }
+        match self.lib.sync_off_nodes() {
+            Ok(off) => self.mesh.sync_off = off,
+            Err(e) => log::warn!("mesh: the devices sync is off with not read: {e}"),
         }
         self.mesh_publish();
     }
@@ -311,6 +337,24 @@ impl Worker {
                 self.mesh.live = Some(*snap);
                 self.mesh_publish();
             }
+            Command::MeshSetSync { node_id, on } => {
+                if let Err(e) = self.lib.set_sync_off(&node_id, !on) {
+                    log::error!("mesh: the sync switch not saved: {e}");
+                    self.toast("Не удалось сохранить настройку", None);
+                    return;
+                }
+                self.mesh.sync_off.retain(|o| *o != node_id);
+                if !on {
+                    self.mesh.sync_off.push(node_id);
+                }
+                self.mesh_publish();
+            }
+            Command::MeshSyncReport { node_id, sync } => {
+                if self.mesh.sync.get(&node_id) != Some(&sync) {
+                    self.mesh.sync.insert(node_id, sync);
+                    self.mesh_publish();
+                }
+            }
             c @ (Command::MeshPairNearby { .. }
             | Command::MeshCreateInvite
             | Command::MeshCancelInvite
@@ -433,5 +477,21 @@ mod tests {
     fn a_pairing_that_could_not_start_says_why() {
         let keep = MeshKeep { failed: Some("Межсеть не запущена".into()), ..MeshKeep::default() };
         assert_eq!(merge(&keep).pairing, MeshPairing::Failed("Межсеть не запущена".into()));
+    }
+
+    #[test]
+    fn the_sync_switch_and_reports_show_per_device() {
+        let live = MeshSnapshot { running: true, paired: true, nodes: vec![node("a", "Pi", true)], ..MeshSnapshot::default() };
+        let mut keep = MeshKeep { live: Some(live), ..MeshKeep::default() };
+        keep.sync.insert("a".into(), MeshSyncView { running: true, done: 5, total: 10, ..MeshSyncView::default() });
+        let v = merge(&keep);
+        assert!(v.nodes[0].sync.running && !v.nodes[0].sync.off);
+        assert!((v.nodes[0].sync.fraction() - 0.5).abs() < 1e-6);
+        keep.sync_off.push("a".into());
+        let v = merge(&keep);
+        assert!(v.nodes[0].sync.off && !v.nodes[0].sync.running, "off: nothing runs");
+        // Without a report from the service, the kept rows show the switch too.
+        let keep = MeshKeep { rows: vec![row("b", "Pi")], sync_off: vec!["b".into()], ..MeshKeep::default() };
+        assert!(merge(&keep).nodes[0].sync.off);
     }
 }

@@ -151,6 +151,31 @@ pub struct MeshNodeView {
     pub playing: Option<MeshPlaying>,
     pub profile: MeshProfile,
     pub transfer: Option<MeshTransfer>,
+    /// The library's sync with it.
+    pub sync: MeshSyncView,
+}
+
+/// The library's sync with a device: its switch (`MeshSetSync`), a pull
+/// running and how far it is (in the device's change numbers: a first sync
+/// of a library is a long one), the last pull that brought something, why
+/// the last one failed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshSyncView {
+    /// Turned off for this device.
+    pub off: bool,
+    pub running: bool,
+    pub done: u64,
+    pub total: u64,
+    /// When the last pull that brought rows ended (unix ms).
+    pub last_ms: Option<i64>,
+    pub error: Option<String>,
+}
+
+impl MeshSyncView {
+    /// How far a running pull is, 0..=1.
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 { 0.0 } else { (self.done as f64 / self.total as f64).clamp(0.0, 1.0) as f32 }
+    }
 }
 
 /// An unpaired instance seen on the home network now.
