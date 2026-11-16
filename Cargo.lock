@@ -6054,6 +6054,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "nikgob-mobile"
+version = "0.0.5"
+dependencies = [
+ "directories",
+ "eframe",
+ "egui",
+ "env_logger",
+ "image",
+ "log",
+ "nikgob-api",
+ "nikgob-audio",
+ "nikgob-core",
+ "nikgob-deezer",
+ "nikgob-library",
+ "nikgob-md3e",
+ "nikgob-mesh",
+ "nikgob-motion",
+ "nikgob-playback",
+ "nikgob-recs",
+ "nikgob-runtime",
+ "nikgob-shapes",
+ "nikgob-view",
+ "nikgob-youtube",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "nikgob-motion"
 version = "0.0.5"
 
