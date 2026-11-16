@@ -1,5 +1,4 @@
-//! «Межсеть»: the devices of the home (a group of its own from the
-//! devices wave: until then it has no row and no title), then «API и
+//! «Межсеть»: the devices of the home ([`super::devices`]), then «API и
 //! MCP» — its switch with «Открыть /docs», who may reach it, its port, and
 //! the tokens: «Новый токен» (and two ready ones in its menu), a dialog
 //! that shows the secret once with a ready snippet to paste, the list
@@ -42,6 +41,8 @@ pub(crate) struct NetState {
     /// Each token's last use as seen, and when a new one came (its pulse).
     seen: HashMap<String, Option<i64>>,
     pulses: HashMap<String, f64>,
+    /// The devices' group.
+    pub(super) devices: super::devices::DevicesState,
 }
 
 /// The token dialog: the form, then the secret (shown once).
@@ -106,9 +107,7 @@ const SENT_S: f64 = 3.0;
 const KEEP_S: f64 = 5.0;
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
-    // «Устройства» comes with the devices wave; a group with no row has no
-    // title either.
-    group(ui, "Устройства");
+    super::devices::show(ui, state, &mut pages.net.devices, out);
     group(ui, "API и MCP");
     let api = &state.api;
     let mem = &mut pages.net;
@@ -572,7 +571,7 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
 }
 
 /// Text to copy in a `surface-container-low` box with «Копировать».
-fn code_block(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, text: &str, s: crate::ColorScheme) {
+pub(super) fn code_block(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, text: &str, s: crate::ColorScheme) {
     egui::Frame::new().fill(s.surface_container_low).corner_radius(egui::CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {

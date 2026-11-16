@@ -332,6 +332,15 @@ pub enum SettingId {
     ApiPort,
     /// «Токены»: «Новый токен» and the list of tokens.
     ApiTokens,
+    // Межсеть → Устройства.
+    /// «Это устройство»: its name, its code while it is in no ring.
+    MeshThis,
+    /// «Связь с устройствами»: the mesh on or off.
+    MeshEnabled,
+    /// «Мои устройства»: «Добавить устройство» and the paired devices.
+    MeshDevices,
+    /// «Рядом»: unpaired instances on the home network, «Подключить».
+    MeshNearby,
 }
 
 /// Where a radio of `kind` takes its tracks, in a few words (the line under
@@ -502,7 +511,7 @@ impl SettingId {
             DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
             | Soulseek | SoulseekShare | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
             | SoulseekUpload => TAB_DOWNLOADS,
-            ApiEnabled | ApiAccess | ApiPort | ApiTokens => TAB_NET,
+            ApiEnabled | ApiAccess | ApiPort | ApiTokens | MeshThis | MeshEnabled | MeshDevices | MeshNearby => TAB_NET,
             UserName | Autostart | AutostartHidden | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate
             | LyricsDeep | LyricsWordsAll | ToastTime | DownloadToasts | LibraryDir | MastersDir | Inbox | Trash | ExportData
             // «Для разработчика».
@@ -544,9 +553,9 @@ impl SettingId {
             | DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | Soulseek | Prowlarr
             // Система.
             | UserName | Autostart | AutostartHidden | DownloadToasts | LibraryDir | Inbox | Trash | Preset(_)
-            // Межсеть: the switch and the tokens (a token is what every
-            // client needs).
-            | ApiEnabled | ApiTokens => Level::Simple,
+            // Межсеть: this device, the devices, the API's switch and the
+            // tokens (a token is what every client needs).
+            | ApiEnabled | ApiTokens | MeshThis | MeshDevices | MeshNearby => Level::Simple,
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile | FirstRun => Level::Dev,
@@ -570,7 +579,7 @@ impl SettingId {
             | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
             | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit | SoulseekUpload
             | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep | LyricsWordsAll
-            | MastersDir | ExportData | ApiAccess | ApiPort => Level::Deep,
+            | MastersDir | ExportData | ApiAccess | ApiPort | MeshEnabled => Level::Deep,
         }
     }
 
@@ -789,6 +798,10 @@ impl SettingId {
             ApiAccess => "Доступ",
             ApiPort => "Порт",
             ApiTokens => "Токены",
+            MeshThis => "Это устройство",
+            MeshEnabled => "Связь с устройствами",
+            MeshDevices => "Мои устройства",
+            MeshNearby => "Рядом",
         }
     }
 
@@ -943,6 +956,10 @@ impl SettingId {
             ApiEnabled => "Локальный API плеера: им управляют голосовой ассистент, скрипты и ИИ-агенты — включают музыку, ставят паузу, меняют громкость и очередь, ищут в библиотеке. Каждому нужен свой токен. «Открыть /docs» — описание всех запросов с примерами; кнопка работает, когда API действительно слушает порт.",
             ApiAccess => "«Этот компьютер» — к API могут обратиться только программы на этом компьютере. «Домашняя сеть» — ещё и другие устройства дома: колонка с ассистентом, телефон, второй компьютер; без токена не пустит никого. Windows при первом открытии в сеть спросит, разрешить ли плееру входящие подключения, — разреши для частных сетей. Адрес, заданный в settings.toml (как на Raspberry Pi), показан рядом.",
             ApiPort => "Порт, на котором слушает API, от 1024 до 65535; по умолчанию 47210. Меняй, только если он занят другой программой, и не забудь поменять его в настройках ассистента.",
+            MeshThis => "Имя, под которым этот плеер видят другие твои устройства; пусто — имя компьютера. Пока устройство ни к чему не привязано, рядом с именем стоит его код из шести цифр: его вводят в «Подключить» на другом устройстве.",
+            MeshEnabled => "Плеер сам находит другие твои устройства в домашней сети — компьютер, Raspberry Pi с nikgobd, потом телефон и телевизор — и держит с ними связь. Выключи — он не виден в сети и никого не видит; привязки при этом сохраняются.",
+            MeshDevices => "Привязанные устройства доверяют друг другу: видят, что где играет, и могут управлять друг другом. Цвет круга у значка — в сети ли устройство. «Добавить устройство» даёт одноразовое приглашение на 15 минут: на Raspberry Pi или сервере выполни показанную команду nikgobd pair. «Забыть» отключает устройство на всех сразу; передумал — «Отменить». Windows при первом включении спросит, разрешить ли плееру связь в сети, — разреши для частных сетей, иначе устройства друг друга не увидят.",
+            MeshNearby => "Плееры в домашней сети, ещё не привязанные к твоим устройствам. «Подключить» спросит код, который показывает то устройство; на Raspberry Pi его печатает команда nikgobd pair-code. После пяти неверных кодов устройство покажет новый.",
             ApiTokens => "Токен — пароль для одной программы. Он показывается один раз, сразу после создания: скопируй его тогда, потом плеер хранит только его отпечаток и показать снова не сможет. Права: «Управление» — плеер, очередь, громкость, приглушение, вывод звука, поиск и чтение библиотеки; «Полный» — то же и сами файлы песен и обложки; «Только чтение» — смотреть и искать. «Кто включает» — кто будет пользоваться токеном: ты, ассистент, агент или гость. «Отозвать» отключает токен сразу; передумал — «Отменить».",
             Spotify => "Вход в аккаунт Spotify через браузер со своим ключом: поиск, лайки, плейлисты и история. Нужен Premium — без него Spotify не подключить, а YouTube Music работает и так. Пароль приложение не видит.",
             SpotifyEnabled => "Выключи — Spotify не используется нигде: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
@@ -3032,6 +3049,8 @@ mod tests {
             (S::NavRoot, TAB_LOOK),
             (S::ApiEnabled, TAB_NET),
             (S::ApiTokens, TAB_NET),
+            (S::MeshThis, TAB_NET),
+            (S::MeshDevices, TAB_NET),
         ] {
             assert_eq!(id.tab(), tab, "{id:?}");
         }

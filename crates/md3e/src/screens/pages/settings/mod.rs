@@ -18,6 +18,7 @@
 //! steps back through this visit's changes.
 
 mod dev;
+mod devices;
 mod downloads;
 mod look;
 mod lyrics;
