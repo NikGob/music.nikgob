@@ -88,6 +88,55 @@ fn spring(state: &ViewState) -> nikgob_motion::Spring {
     phone::player_spring(state.prefs.np_motion)
 }
 
+/// The seek handle. The slider allocates 44 and draws the bar that tall;
+/// a press only narrows it (4 → 2), so this is as low as it reaches, at
+/// either end of the track.
+const SEEK_HANDLE: f32 = 44.0;
+/// Air under that bar before the times, and under the times before the transport.
+const SEEK_AIR: f32 = 4.0;
+const SEEK_GAP: f32 = 16.0;
+
+/// The times' line (LabelMedium), under the handle.
+fn seek_time() -> f32 {
+    TypeRole::LabelMedium.style().line_height
+}
+
+/// The seek block: the handle, the air, the times.
+fn seek_block_h() -> f32 {
+    SEEK_HANDLE + SEEK_AIR + seek_time()
+}
+
+/// The full player's column, top to bottom, from one stack: the title sits
+/// on the seek block, the transport under it, the cover in what is left.
+struct Column {
+    col: Rect,
+    header: Rect,
+    stage: Rect,
+    meta: Rect,
+    progress: Rect,
+    transport: Rect,
+    bottom: Rect,
+}
+
+fn player_column(screen: Rect, inset_top: f32, inset_bottom: f32) -> Column {
+    let pad = 32.0;
+    let col = Rect::from_min_max(
+        pos2(screen.left() + pad, screen.top() + inset_top + 8.0),
+        pos2(screen.right() - pad, screen.bottom() - inset_bottom - 12.0),
+    );
+    let header = Rect::from_min_size(col.min, vec2(col.width(), 48.0));
+    let bottom = Rect::from_min_max(pos2(col.left(), col.bottom() - 48.0), col.max);
+    let transport = Rect::from_min_max(pos2(col.left(), bottom.top() - 24.0 - TRANSPORT_H), pos2(col.right(), bottom.top() - 24.0));
+    let progress = Rect::from_min_max(
+        pos2(col.left(), transport.top() - SEEK_GAP - seek_block_h()),
+        pos2(col.right(), transport.top() - SEEK_GAP),
+    );
+    let meta = Rect::from_min_max(pos2(col.left(), progress.top() - 12.0 - 56.0), pos2(col.right(), progress.top() - 12.0));
+    let stage = Rect::from_min_max(pos2(col.left(), header.bottom() + 16.0), pos2(col.right(), meta.top() - 24.0));
+    Column { col, header, stage, meta, progress, transport, bottom }
+}
+
+
 impl Player {
     pub fn expand(&self, now: f64) -> f32 {
         self.expand.value(now)
@@ -251,16 +300,10 @@ impl Player {
         };
         ui.multiply_opacity(content_alpha);
         phone::ambient(&ui, screen, state, env.bass);
-        // The layout, top to bottom.
+        // The layout, top to bottom. One stack (`player_column`), so the
+        // seek block's growth lifts the title and shrinks the cover with it.
         let ins = env.insets;
-        let pad = 32.0;
-        let col = Rect::from_min_max(pos2(screen.left() + pad, screen.top() + ins.top + 8.0), pos2(screen.right() - pad, screen.bottom() - ins.bottom - 12.0));
-        let header = Rect::from_min_size(col.min, vec2(col.width(), 48.0));
-        let bottom = Rect::from_min_max(pos2(col.left(), col.bottom() - 48.0), col.max);
-        let transport = Rect::from_min_max(pos2(col.left(), bottom.top() - 24.0 - TRANSPORT_H), pos2(col.right(), bottom.top() - 24.0));
-        let progress = Rect::from_min_max(pos2(col.left(), transport.top() - 8.0 - 52.0), pos2(col.right(), transport.top() - 8.0));
-        let meta = Rect::from_min_max(pos2(col.left(), progress.top() - 12.0 - 56.0), pos2(col.right(), progress.top() - 12.0));
-        let stage = Rect::from_min_max(pos2(col.left(), header.bottom() + 16.0), pos2(col.right(), meta.top() - 24.0));
+        let Column { col, header, stage, meta, progress, transport, bottom } = player_column(screen, ins.top, ins.bottom);
         let side = stage.width().min(stage.height()).max(48.0);
         let big = Rect::from_center_size(stage.center(), vec2(side, side));
         let lyr = anim::fraction(&ctx, id.with("lyrics"), if self.lyrics { 1.0 } else { 0.0 }, theme.motion.default_spatial);
@@ -405,7 +448,8 @@ impl Player {
         // The progress, its times and the sound.
         let playing = p.status == Status::Playing;
         let f = p.fraction_now();
-        let mut sui = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(progress.min, vec2(progress.width(), 36.0))).id_salt("phone-np-seek"));
+        let seek = Rect::from_min_size(progress.min, vec2(progress.width(), SEEK_HANDLE));
+        let mut sui = ui.new_child(UiBuilder::new().max_rect(seek).id_salt("phone-np-seek"));
         let so = Slider::new("phone-np-seek", f).width(progress.width()).wavy(playing).show(&mut sui);
         let dur = p.duration.unwrap_or_default();
         if let Some(v) = so.committed
@@ -414,7 +458,7 @@ impl Player {
             out.push(Command::Seek(dur.mul_f32(v.clamp(0.0, 1.0))));
         }
         let shown = so.dragging.map_or_else(|| p.position_now(), |v| dur.mul_f32(v.clamp(0.0, 1.0)));
-        let times_y = progress.top() + 36.0;
+        let times_y = progress.top() + SEEK_HANDLE + SEEK_AIR;
         let ts = TypeRole::LabelMedium.style();
         ui.painter().text(pos2(progress.left(), times_y), egui::Align2::LEFT_TOP, text::duration(shown), ts.font_id(), s.on_surface_variant);
         if p.duration.is_some() {
@@ -983,5 +1027,35 @@ mod tests {
         assert!((a[0].y + 10.0).abs() < 1e-4 && a[0].x.abs() < 1e-4);
         let last = a[a.len() - 1];
         assert!((last.y - 10.0).abs() < 1e-3, "half way is the bottom");
+    }
+
+    #[test]
+    fn the_times_clear_the_seek_thumb_and_the_transport_on_a_short_phone() {
+        // Was a 52 dp block (a 36 dp slot the 44 dp thumb overflowed, times
+        // at +36) and 8 dp above the transport: the thumb ran 8 into «0:02».
+        assert_eq!(seek_time(), 16.0);
+        assert_eq!((SEEK_HANDLE, SEEK_AIR, SEEK_GAP), (44.0, 4.0, 16.0));
+        assert_eq!(seek_block_h(), 64.0);
+        // 360×800 with the status bar and the gesture inset, and without;
+        // 392×852 as the shot. The cover stays on screen, width-limited.
+        let cases = [(360.0, 800.0, 28.0, 24.0, 352.0), (360.0, 800.0, 0.0, 0.0, 404.0), (392.0, 852.0, 0.0, 0.0, 456.0)];
+        for (w, h, top, bot, stage_h) in cases {
+            let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(w, h));
+            let c = player_column(screen, top, bot);
+            let times_y = c.progress.top() + SEEK_HANDLE + SEEK_AIR;
+            let times_bottom = times_y + seek_time();
+            assert_eq!(c.progress.height(), seek_block_h());
+            assert_eq!(c.progress.width(), c.col.width(), "both ends of the track share the clearance");
+            assert_eq!(times_y - c.progress.top(), SEEK_HANDLE + SEEK_AIR);
+            assert!(times_y >= c.progress.top() + SEEK_HANDLE + 4.0);
+            assert_eq!(c.transport.top() - times_bottom, SEEK_GAP);
+            assert!(c.transport.top() - times_bottom >= 16.0);
+            assert_eq!(c.stage.height(), stage_h);
+            assert!(c.stage.height() >= c.stage.width(), "the cover is limited by the width, not pushed");
+            assert!(c.header.top() >= screen.top() && c.bottom.bottom() <= screen.bottom());
+            assert!(c.stage.top() >= c.header.bottom() && c.meta.top() >= c.stage.bottom());
+            assert!(c.progress.top() >= c.meta.bottom() && c.transport.top() >= c.progress.bottom());
+            assert!(c.bottom.top() >= c.transport.bottom());
+        }
     }
 }
