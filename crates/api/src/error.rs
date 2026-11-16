@@ -19,7 +19,8 @@ pub struct ErrorBody {
     /// `trash_off`, `confirm_unknown`, `confirm_expired`,
     /// `confirm_mismatch`, `no_services`, `lookup_failed`,
     /// `lookup_timeout`, `plan_changed`, `not_done`, `too_many`,
-    /// `outside_library`, `offline`, `nothing_playable`, `internal`.
+    /// `outside_library`, `offline`, `nothing_playable`,
+    /// `transfer_failed`, `transfer_timeout`, `internal`.
     pub error: String,
     /// What went wrong, in Russian.
     pub message: String,

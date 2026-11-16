@@ -86,28 +86,54 @@ impl Shared {
         }
     }
 
-    /// The commands of `output`: a paired device (`node:<id>`), where what
-    /// plays here moves (`attach`: the window drives what it plays there,
-    /// nothing moves); `this`, back here; a sound device of this computer
-    /// (back here first while the window drives another device).
-    pub(crate) fn output_commands(&self, output: &str, attach: bool) -> Result<Vec<Command>, ApiError> {
+    /// What `output` asks: a paired device (`node:<id>`), where what plays
+    /// here moves (`attach`: the window drives what it plays there, nothing
+    /// moves); `this`, back here; a sound device of this computer (back
+    /// here first while the window drives another device).
+    pub(crate) fn output_plan(&self, output: &str, attach: bool) -> Result<OutputPlan, ApiError> {
         let (remote, pick) = {
             let st = self.rt.state();
             (st.target.is_some(), outputs::node_pick(output, &st.mesh.this.id, &st.mesh.nodes))
         };
-        let back = if attach { Command::OutputDetach } else { Command::OutputTransfer { node_id: None } };
+        let back = remote.then_some((None, attach));
         match pick {
-            NodePick::Node(id) if attach => Ok(vec![Command::OutputAttach { node_id: id }]),
-            NodePick::Node(id) => Ok(vec![Command::OutputTransfer { node_id: Some(id) }]),
+            NodePick::Node(id) => Ok(OutputPlan { target: Some((Some(id), attach)), commands: Vec::new() }),
             NodePick::Offline(name) => Err(ApiError::of(axum::http::StatusCode::CONFLICT, "offline", format!("{name} не в сети"))),
             NodePick::Unknown => Err(ApiError::not_found("Такого устройства нет")),
-            NodePick::This => Ok(if remote { vec![back] } else { Vec::new() }),
-            NodePick::NoNode => {
-                let c = self.output_command(output)?;
-                Ok(if remote { vec![back, c] } else { vec![c] })
-            }
+            NodePick::This => Ok(OutputPlan { target: back, commands: Vec::new() }),
+            NodePick::NoNode => Ok(OutputPlan { target: back, commands: vec![self.output_command(output)?] }),
         }
     }
+
+    /// The target changed as `plan` says, answered when it is done (the
+    /// transfer moved, or failed: `409 transfer_failed`).
+    pub(crate) async fn switch_target(&self, actor: Option<nikgob_view::ApiActor>, node: Option<String>, attach: bool) -> Result<(), ApiError> {
+        let v = self.ask(actor, TRANSFER_WAIT, move |reply| Command::ApiTransfer { node_id: node, attach, reply }).await.map_err(|e| {
+            if e.code == "lookup_timeout" {
+                ApiError::of(axum::http::StatusCode::GATEWAY_TIMEOUT, "transfer_timeout", "Перенос не закончился вовремя")
+            } else {
+                e
+            }
+        })?;
+        if v.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        let message = v.get("message").and_then(serde_json::Value::as_str).unwrap_or("Не удалось перенести").to_owned();
+        Err(ApiError::of(axum::http::StatusCode::CONFLICT, "transfer_failed", message))
+    }
+}
+
+/// A transfer is answered within this (each of its steps has a deadline;
+/// one asked while another runs waits for it).
+const TRANSFER_WAIT: Duration = Duration::from_secs(60);
+
+/// What a request's `output` asks.
+pub(crate) struct OutputPlan {
+    /// A change of the target first: to a device of the home (None: back
+    /// here), and whether it is an attach (or a detach) only.
+    pub target: Option<(Option<String>, bool)>,
+    /// Then these, here.
+    pub commands: Vec<Command>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
@@ -143,30 +169,45 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     }
     // The output first: a device that does not exist changes nothing.
     let output = match b.output.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
-        Some(o) => Some(sh.output_commands(o, true)?),
+        Some(o) => Some(sh.output_plan(o, true)?),
         None => None,
     };
     if output.is_none() {
         sh.audio()?;
     }
     // Another device's queue is not known here.
-    let to_node = output.as_ref().is_some_and(|c| c.iter().any(|c| matches!(c, Command::OutputAttach { .. })));
+    let to_node = output.as_ref().is_some_and(|p| matches!(p.target, Some((Some(_), _))));
     let query = b.query.clone().unwrap_or_default();
-    if b.id.is_none() && query.trim().is_empty() && !matches!(kind, Kind::Liked | Kind::Wave) {
-        if !to_node && sh.empty() {
-            return Err(ApiError::nothing_to_play());
-        }
-        sh.run_by(Some(caller.actor), output.into_iter().flatten().chain([Command::Play]).collect()).await?;
-        return Ok(Json(PlayAnswer { matched: None, state: sh.snapshot() }));
+    let resume = b.id.is_none() && query.trim().is_empty() && !matches!(kind, Kind::Liked | Kind::Wave);
+    if resume && !to_node && sh.empty() {
+        return Err(ApiError::nothing_to_play());
     }
-    let lib = sh.lib.clone();
-    let target = match b.id.clone() {
-        Some(id) => blocking(move || play::exact(&lib, kind, &id)).await?,
-        None => blocking(move || play::find(&lib, &query, kind)).await?,
+    // What to play is found before anything changes.
+    let found = if resume {
+        None
+    } else {
+        let lib = sh.lib.clone();
+        Some(match b.id.clone() {
+            Some(id) => blocking(move || play::exact(&lib, kind, &id)).await?,
+            None => blocking(move || play::find(&lib, &query, kind)).await?,
+        })
+    };
+    // The device the music is to play on is the target before it starts.
+    let output = match output {
+        Some(OutputPlan { target: Some((node, attach)), commands }) => {
+            sh.switch_target(Some(caller.actor), node, attach).await?;
+            commands
+        }
+        Some(p) => p.commands,
+        None => Vec::new(),
+    };
+    let Some(target) = found else {
+        sh.run_by(Some(caller.actor), output.into_iter().chain([Command::Play]).collect()).await?;
+        return Ok(Json(PlayAnswer { matched: None, state: sh.snapshot() }));
     };
     // The shuffle asked for (or the kind's default) is set before the new
     // list is made: `play::commands` puts `ApiShuffle` first.
-    let commands: Vec<Command> = output.into_iter().flatten().chain(play::commands(&target, play::shuffled(target.kind, b.shuffle), mode)?).collect();
+    let commands: Vec<Command> = output.into_iter().chain(play::commands(&target, play::shuffled(target.kind, b.shuffle), mode)?).collect();
     // Who plays: the loop keeps `caller.actor` while these run, for the
     // listening events they start once events have an actor.
     log::debug!("api: play {:?} by a token of {:?}", target.kind, caller.actor);
@@ -481,8 +522,12 @@ pub struct OutputBody {
 pub async fn set_output(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: OutputBody = body(&bytes)?;
     let q = b.output.or(b.id).filter(|o| !o.trim().is_empty()).ok_or_else(|| ApiError::bad_request("Нужен output"))?;
-    let commands = sh.output_commands(q.trim(), b.attach)?;
-    sh.answer(commands).await
+    let plan = sh.output_plan(q.trim(), b.attach)?;
+    // A transfer is answered when it is done, with the state it made.
+    if let Some((node, attach)) = plan.target {
+        sh.switch_target(None, node, attach).await?;
+    }
+    sh.answer(plan.commands).await
 }
 
 /// One place of the queue.

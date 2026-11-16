@@ -250,6 +250,7 @@ pub async fn guard(State(sh): State<Arc<Shared>>, mut req: Request, next: Next) 
             return ApiError::rate_limited().into_response();
         }
         req.extensions_mut().insert(caller);
+        req.extensions_mut().insert(crate::Paired);
         return next.run(req).await;
     }
     let secret = bearer(req.headers()).or_else(|| {
