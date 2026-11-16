@@ -68,6 +68,13 @@ pub fn allows(preset: ApiPreset, right: Right) -> bool {
     }
 }
 
+/// Whether `caller` has `right`: its preset's, but a guest never changes
+/// the library (a like of theirs would fetch files and write to the
+/// owner's services), whatever the preset.
+pub fn allowed(caller: &Caller, right: Right) -> bool {
+    allows(caller.preset, right) && !(caller.actor == ApiActor::Guest && right == Right::Library)
+}
+
 /// The right a `/v1` request needs, by its method and path.
 pub fn needed(method: &Method, path: &str) -> Right {
     let p = path.trim_end_matches('/');
@@ -243,7 +250,7 @@ pub async fn guard(State(sh): State<Arc<Shared>>, mut req: Request, next: Next) 
     // same.
     if let Some(crate::Trusted(caller)) = req.extensions_mut().remove::<crate::Trusted>() {
         let need = needed(req.method(), &path);
-        if !allows(caller.preset, need) {
+        if !allowed(&caller, need) {
             return ApiError::forbidden(need.key()).into_response();
         }
         if !sh.limiter.allow(&caller.token_id, Instant::now()) {
@@ -261,7 +268,7 @@ pub async fn guard(State(sh): State<Arc<Shared>>, mut req: Request, next: Next) 
         return ApiError::unauthorized().into_response();
     };
     let need = needed(req.method(), &path);
-    if !allows(caller.preset, need) {
+    if !allowed(&caller, need) {
         return ApiError::forbidden(need.key()).into_response();
     }
     let now = Instant::now();
@@ -300,7 +307,7 @@ pub fn token_info(c: &Caller) -> TokenInfo {
         name: c.name.clone(),
         preset: name_of(&c.preset),
         actor: name_of(&c.actor),
-        rights: Right::ALL.iter().filter(|r| allows(c.preset, **r)).map(|r| r.key().to_owned()).collect(),
+        rights: Right::ALL.iter().filter(|r| allowed(c, **r)).map(|r| r.key().to_owned()).collect(),
     }
 }
 
@@ -451,6 +458,14 @@ mod tests {
         let info = token_info(&c);
         assert_eq!((info.preset.as_str(), info.actor.as_str()), ("control", "agent"));
         assert!(info.rights.contains(&"player".to_owned()) && !info.rights.contains(&"library".to_owned()));
+        // A guest's full token drives the player but never the library.
+        let guest = Caller { token_id: "g".into(), name: "Гость".into(), preset: ApiPreset::Full, actor: ApiActor::Guest };
+        assert!(allowed(&guest, Right::Player) && allowed(&guest, Right::Queue) && allowed(&guest, Right::Media));
+        assert!(!allowed(&guest, Right::Library));
+        assert!(!allowed(&guest, needed(&Method::POST, "/v1/library/feedback")));
+        assert!(!token_info(&guest).rights.contains(&"library".to_owned()));
+        let owner = Caller { actor: ApiActor::Owner, ..guest };
+        assert!(allowed(&owner, Right::Library));
         let lookups = Limiter::new(LOOKUPS_PER_S, LOOKUP_BURST);
         let t0 = Instant::now();
         assert_eq!((0..20).filter(|_| lookups.allow("a", t0)).count(), LOOKUP_BURST as usize);
