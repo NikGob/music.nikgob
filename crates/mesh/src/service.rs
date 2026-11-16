@@ -16,13 +16,13 @@ use nikgob_runtime::RuntimeHandle;
 use nikgob_view::{Command, MeshInvite, MeshKind, MeshNearbyView, MeshNodeView, MeshPairing, MeshScope, MeshSnapshot, MeshSnapshotNode};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 
 use crate::discovery::{self, Change, Table};
 use crate::keys::{self, MeshPaths};
 use crate::pair::{self, Grant, Me, PairError, PairHost, Refusal, Served};
 use crate::presence::{self, Presence};
-use crate::ring::{Cert, MAX_MEMBERS, Revocation, Ring, RingError, clean_name, hex, parse_id};
+use crate::ring::{Cert, Revocation, Ring, RingError, clean_name, hex, parse_id};
 use crate::ticket::{self, Ticket};
 use crate::wire::{read_frame, write_frame};
 use crate::{ALPN_CTL, ALPN_HTTP, ALPN_PAIR, MESH_PORT, MeshContext, MeshError, tunnel};
@@ -46,6 +46,12 @@ const RETRY: Duration = Duration::from_secs(30);
 const TICK: Duration = Duration::from_secs(2);
 /// Changes are reported to the runtime at most this often.
 const PUBLISH_GAP: Duration = Duration::from_millis(150);
+/// Incoming connections being set up at once (the QUIC handshake, then a
+/// pairing or a link's hello); more are turned away.
+const MAX_HANDSHAKES: usize = 16;
+/// Tunnelled requests one device may have running here at once; the next
+/// stream is taken when one ends.
+const MAX_STREAMS: usize = 32;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
@@ -105,6 +111,16 @@ struct Code {
     busy: bool,
 }
 
+/// A tunnel connection a device opened here, kept so that it can be closed
+/// when the ring forgets the device or makes it a guest.
+struct HttpIn {
+    n: u64,
+    peer: PublicKey,
+    conn: Connection,
+    /// The device's scope when the connection opened.
+    scope: MeshScope,
+}
+
 struct State {
     name: String,
     kind: MeshKind,
@@ -148,6 +164,10 @@ pub(crate) struct Shared {
     presence: watch::Sender<Presence>,
     node: Mutex<Option<Arc<Node>>>,
     http: Mutex<HashMap<PublicKey, Connection>>,
+    /// The tunnel connections other devices opened here (with a counter).
+    http_in: Mutex<(u64, Vec<HttpIn>)>,
+    /// Each device's room for running tunnelled requests.
+    streams: Mutex<HashMap<PublicKey, Arc<Semaphore>>>,
 }
 
 /// Binds an endpoint with `key`: LAN only, every ALPN of the mesh; on
@@ -332,6 +352,8 @@ impl Shared {
             presence: watch::channel(Presence::default()).0,
             node: Mutex::new(None),
             http: Mutex::new(HashMap::new()),
+            http_in: Mutex::new((0, Vec::new())),
+            streams: Mutex::new(HashMap::new()),
         })
     }
 
@@ -339,8 +361,53 @@ impl Shared {
         self.changed.notify_one();
     }
 
+    /// The ring changed: the links tell the others, and the tunnel
+    /// connections of devices it no longer trusts as before are closed.
     fn bump_ring(&self) {
         self.ring_rev.send_modify(|n| *n = n.wrapping_add(1));
+        self.recheck_http();
+    }
+
+    /// Closes the incoming tunnel connections of devices forgotten, or made
+    /// guests since the connection opened (their running requests end too).
+    fn recheck_http(&self) {
+        let peers: Vec<PublicKey> = self.http_in.lock().1.iter().map(|h| h.peer).collect();
+        if peers.is_empty() {
+            return;
+        }
+        let now: HashMap<PublicKey, Option<MeshScope>> = {
+            let s = self.state.lock();
+            peers.iter().map(|p| (*p, s.ring.as_ref().and_then(|r| r.trusted(p)).map(|c| c.scope))).collect()
+        };
+        self.http_in.lock().1.retain(|h| {
+            let keep = match now.get(&h.peer) {
+                // Opened after the check: checked at its first request.
+                None => true,
+                Some(None) => false,
+                Some(Some(scope)) => !(h.scope == MeshScope::Owner && *scope == MeshScope::Guest),
+            };
+            if !keep {
+                log::info!("mesh: the tunnel of {} closed: the ring changed", h.peer.fmt_short());
+                h.conn.close(VarInt::from_u32(3), b"ring changed");
+            }
+            keep
+        });
+    }
+
+    fn track_http(&self, peer: &PublicKey, conn: &Connection, scope: MeshScope) -> u64 {
+        let mut g = self.http_in.lock();
+        g.0 += 1;
+        let n = g.0;
+        g.1.push(HttpIn { n, peer: *peer, conn: conn.clone(), scope });
+        n
+    }
+
+    fn untrack_http(&self, n: u64) {
+        self.http_in.lock().1.retain(|h| h.n != n);
+    }
+
+    fn stream_slots(&self, peer: &PublicKey) -> Arc<Semaphore> {
+        self.streams.lock().entry(*peer).or_insert_with(|| Arc::new(Semaphore::new(MAX_STREAMS))).clone()
     }
 
     fn me(&self) -> Me {
@@ -418,47 +485,67 @@ impl Shared {
         Ok(true)
     }
 
-    fn save_ring(&self, s: &State) {
-        if let Some(r) = &s.ring
-            && let Err(e) = r.save(&self.paths.ring())
-        {
-            log::error!("mesh: cannot write ring.json: {e}");
+    /// Writes the ring as it is now.
+    fn save_ring(&self, s: &State) -> std::io::Result<()> {
+        match &s.ring {
+            Some(r) => r.save(&self.paths.ring()),
+            None => Ok(()),
         }
     }
 
     /// Signs `joiner`'s certificate (holder).
     fn admit(&self, joiner: &PublicKey, name: &str, kind: MeshKind, invite: Option<&str>) -> Result<Grant, Refusal> {
-        let made;
-        let grant = {
+        let mut made = false;
+        let out = {
             let mut s = self.state.lock();
-            if let Some(inv) = invite
-                && !s.invite.as_ref().is_some_and(|i| hex(&i.id) == inv)
-            {
-                return Err(Refusal::NoInvite);
-            }
-            made = self.ensure_ring(&mut s)?;
-            let Some(rk) = s.ring_key.clone() else { return Err(Refusal::NotHolder) };
-            let Some(ring) = s.ring.as_mut() else { return Err(Refusal::Internal) };
-            if ring.trusted(joiner).is_none() && ring.others().count() + 1 >= MAX_MEMBERS {
-                return Err(Refusal::Internal);
-            }
-            let node = joiner.to_string();
-            let after = ring.revoked.iter().filter(|r| r.node == node).map(|r| r.revoked_ms + 1).max().unwrap_or(0);
-            let cert = Cert::issue(&rk, joiner, name, kind, MeshScope::Owner, now_ms().max(after));
-            ring.admit(cert.clone());
-            let grant = Grant { ring: ring.public.to_string(), cert, members: ring.members.clone(), revoked: ring.revoked.clone() };
-            if invite.is_some() {
-                s.invite = None;
-            }
-            self.save_ring(&s);
-            grant
+            self.admit_locked(&mut s, &mut made, joiner, name, kind, invite)
         };
         if made {
             self.reannounce();
         }
-        self.bump_ring();
+        if out.is_ok() {
+            self.bump_ring();
+            log::info!("mesh: {} ({}) joins the ring", clean_name(name), joiner.fmt_short());
+        } else if made {
+            self.bump_ring();
+        }
         self.notify();
-        log::info!("mesh: {} ({}) joins the ring", clean_name(name), joiner.fmt_short());
+        out
+    }
+
+    fn admit_locked(&self, s: &mut State, made: &mut bool, joiner: &PublicKey, name: &str, kind: MeshKind, invite: Option<&str>) -> Result<Grant, Refusal> {
+        if let Some(inv) = invite {
+            // Checked again under the lock the grant is made under: an
+            // exchange begun before the invite expired (or was spent) gets
+            // nothing after.
+            let live = s.invite.as_ref().is_some_and(|i| hex(&i.id) == inv && i.tries < pair::TRIES && now_ms() < i.expires_ms);
+            if !live {
+                return Err(Refusal::NoInvite);
+            }
+        }
+        *made = self.ensure_ring(s)?;
+        let Some(rk) = s.ring_key.clone() else { return Err(Refusal::NotHolder) };
+        let Some(current) = s.ring.as_ref() else { return Err(Refusal::Internal) };
+        if !current.can_admit(joiner) {
+            log::warn!("mesh: the ring has no room for {}", joiner.fmt_short());
+            return Err(Refusal::Full);
+        }
+        let mut ring = current.clone();
+        let node = joiner.to_string();
+        let after = ring.revoked.iter().filter(|r| r.node == node).map(|r| r.revoked_ms + 1).max().unwrap_or(0);
+        let cert = Cert::issue(&rk, joiner, name, kind, MeshScope::Owner, now_ms().max(after));
+        ring.admit(cert.clone());
+        // Granted only once the ring with it is on disk: never a certificate
+        // the holder would no longer know after a restart.
+        if let Err(e) = ring.save(&self.paths.ring()) {
+            log::error!("mesh: cannot write ring.json: {e}");
+            return Err(Refusal::Internal);
+        }
+        let grant = Grant { ring: ring.public.to_string(), cert, members: ring.members.clone(), revoked: ring.revoked.clone() };
+        s.ring = Some(ring);
+        if invite.is_some() {
+            s.invite = None;
+        }
         Ok(grant)
     }
 
@@ -737,7 +824,12 @@ impl Shared {
                     });
                 });
             }
-            Command::MeshForget { node_id } => self.forget(&node_id),
+            Command::MeshForget { node_id } => {
+                if let Err(why) = self.forget(&node_id) {
+                    log::warn!("mesh: forgetting {node_id} failed: {why}");
+                    self.rt.send(Command::MeshForgetFailed { node_id, why });
+                }
+            }
             Command::MeshSetScope { node_id, scope } => self.set_scope(&node_id, scope),
             Command::MeshClearPairing => self.set_pairing(MeshPairing::Idle),
             other => log::debug!("mesh: not a command of the mesh: {other:?}"),
@@ -843,25 +935,30 @@ impl Shared {
         Ok((t.holder.to_string(), holder_name))
     }
 
-    /// «Забыть» (holder): a revocation every member hears of.
-    fn forget(&self, node_id: &str) {
-        let Some(id) = parse_id(node_id) else { return };
+    /// «Забыть» (holder): a revocation every member hears of, on disk before
+    /// it counts. Why it could not be done, in words.
+    fn forget(&self, node_id: &str) -> Result<(), String> {
+        let id = parse_id(node_id).ok_or_else(|| "нет такого устройства".to_owned())?;
         {
             let mut s = self.state.lock();
-            let Some(rk) = s.ring_key.clone() else {
-                log::warn!("mesh: only the ring holder forgets devices");
-                return;
-            };
-            let Some(ring) = s.ring.as_mut() else { return };
-            let issued = ring.members.iter().filter(|c| c.node == node_id).map(|c| c.issued_ms).max().unwrap_or(0);
-            let rev = Revocation::issue(&rk, &id, now_ms().max(issued));
-            ring.merge(&[], &[rev]);
-            self.save_ring(&s);
+            let Some(rk) = s.ring_key.clone() else { return Err("забывать устройства может только главное устройство".to_owned()) };
+            let Some(current) = s.ring.as_ref() else { return Err("это устройство ни с кем не связано".to_owned()) };
+            let mut ring = current.clone();
+            if !ring.revoke(&rk, &id, now_ms()) {
+                // Not a member (forgotten already): nothing left to do.
+                return Ok(());
+            }
+            if let Err(e) = ring.save(&self.paths.ring()) {
+                log::error!("mesh: cannot write ring.json: {e}");
+                return Err("не удалось записать кольцо на диск".to_owned());
+            }
+            s.ring = Some(ring);
         }
         self.http.lock().remove(&id);
         log::info!("mesh: {} forgotten", id.fmt_short());
         self.bump_ring();
         self.notify();
+        Ok(())
     }
 
     /// «Свой» / «Гость» (holder): the device's certificate signed anew.
@@ -870,13 +967,18 @@ impl Shared {
         {
             let mut s = self.state.lock();
             let Some(rk) = s.ring_key.clone() else { return };
-            let Some(ring) = s.ring.as_mut() else { return };
-            let Some(old) = ring.trusted(&id).cloned() else { return };
+            let Some(current) = s.ring.as_ref() else { return };
+            let Some(old) = current.trusted(&id).cloned() else { return };
             if old.scope == scope {
                 return;
             }
+            let mut ring = current.clone();
             ring.admit(Cert::issue(&rk, &id, &old.name, old.kind, scope, now_ms().max(old.issued_ms + 1)));
-            self.save_ring(&s);
+            if let Err(e) = ring.save(&self.paths.ring()) {
+                log::error!("mesh: cannot write ring.json: {e}; the scope stays");
+                return;
+            }
+            s.ring = Some(ring);
         }
         self.bump_ring();
         self.notify();
@@ -940,8 +1042,11 @@ impl Shared {
             let Some(r) = s.ring.as_mut() else { return false };
             let changed = r.merge(certs, revoked);
             let out = (changed, r.me_revoked(), r.trusted(peer).is_some());
-            if changed {
-                self.save_ring(&s);
+            // News from the ring counts even when it cannot be written (a
+            // revocation must not wait for the disk); the others tell it
+            // again after a restart.
+            if changed && let Err(e) = self.save_ring(&s) {
+                log::error!("mesh: cannot write ring.json: {e}");
             }
             out
         };
@@ -983,16 +1088,21 @@ impl Shared {
 
     /// A refusal's revocations: this device may have been forgotten.
     fn refused(&self, revoked: &[Revocation]) {
-        let me_revoked = {
+        let (changed, me_revoked) = {
             let mut s = self.state.lock();
             let Some(r) = s.ring.as_mut() else { return };
-            if r.merge(&[], revoked) {
-                self.save_ring(&s);
+            let changed = r.merge(&[], revoked);
+            let me_revoked = r.me_revoked();
+            if changed && let Err(e) = self.save_ring(&s) {
+                log::error!("mesh: cannot write ring.json: {e}");
             }
-            s.ring.as_ref().is_some_and(Ring::me_revoked)
+            (changed, me_revoked)
         };
         if me_revoked {
             self.forgotten();
+        } else if changed {
+            self.bump_ring();
+            self.notify();
         }
     }
 
@@ -1148,7 +1258,7 @@ impl Shared {
         }
     }
 
-    async fn accept_link(self: Arc<Self>, node: Arc<Node>, conn: Connection, peer: PublicKey) {
+    async fn accept_link(self: Arc<Self>, node: Arc<Node>, conn: Connection, peer: PublicKey, permit: OwnedSemaphorePermit) {
         let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(HANDSHAKE, conn.accept_bi()).await else {
             conn.close(VarInt::from_u32(0), b"timeout");
             return;
@@ -1169,6 +1279,7 @@ impl Shared {
         if write_frame(&mut send, &mine).await.is_err() {
             return;
         }
+        drop(permit);
         self.run_link(node, conn, peer, send, recv, false).await;
     }
 
@@ -1255,15 +1366,18 @@ impl Shared {
 
     // ------------------------------------------------------------ incoming
 
-    async fn incoming(self: Arc<Self>, node: Arc<Node>, conn: Connection) {
+    /// An incoming connection, set up; `permit` is its place among those
+    /// being set up, held until its handshake is done.
+    async fn incoming(self: Arc<Self>, node: Arc<Node>, conn: Connection, permit: OwnedSemaphorePermit) {
         let peer = conn.remote_id();
         let alpn = conn.alpn().to_vec();
         if alpn == ALPN_PAIR {
             self.serve_pair(conn, peer).await;
+            drop(permit);
         } else if alpn == ALPN_CTL {
-            self.accept_link(node, conn, peer).await;
+            self.accept_link(node, conn, peer, permit).await;
         } else if alpn == ALPN_HTTP {
-            self.serve_http(conn, peer).await;
+            self.serve_http(conn, peer, permit).await;
         } else {
             conn.close(VarInt::from_u32(1), b"alpn");
         }
@@ -1294,19 +1408,37 @@ impl Shared {
         }
     }
 
-    async fn serve_http(self: Arc<Self>, conn: Connection, peer: PublicKey) {
+    async fn serve_http(self: Arc<Self>, conn: Connection, peer: PublicKey, permit: OwnedSemaphorePermit) {
         let Some(api) = self.api.clone() else {
             conn.close(VarInt::from_u32(2), b"no api");
             return;
         };
+        let Some(first) = self.trusted_cert(&peer) else {
+            conn.close(VarInt::from_u32(3), b"not a member");
+            return;
+        };
+        drop(permit);
+        let n = self.track_http(&peer, &conn, first.scope);
+        let slots = self.stream_slots(&peer);
         loop {
+            // A place among the device's running requests first: past
+            // [`MAX_STREAMS`] its next stream waits (QUIC holds it back).
+            let Ok(slot) = slots.clone().acquire_owned().await else { break };
+            let Ok((send, recv)) = conn.accept_bi().await else { break };
+            // The ring is asked at each request, not once per connection: a
+            // device forgotten or made a guest since gets no more than the
+            // ring allows now.
             let Some(cert) = self.trusted_cert(&peer) else {
                 conn.close(VarInt::from_u32(3), b"not a member");
-                return;
+                break;
             };
-            let Ok((send, recv)) = conn.accept_bi().await else { return };
-            tokio::spawn(tunnel::serve(recv, send, api.clone(), tunnel::caller_of(&cert)));
+            let api = api.clone();
+            tokio::spawn(async move {
+                tunnel::serve(recv, send, api, tunnel::caller_of(&cert)).await;
+                drop(slot);
+            });
         }
+        self.untrack_http(n);
     }
 
     // ------------------------------------------------------------ tunnel
@@ -1426,16 +1558,24 @@ impl PairHost for HostRef {
 
 async fn accept_loop(sh: Arc<Shared>, node: Arc<Node>) {
     let mut stop = node.stop.subscribe();
+    let setting_up = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     loop {
         let incoming = tokio::select! {
             i = node.ep.accept() => i,
             _ = stop.changed() => break,
         };
         let Some(incoming) = incoming else { break };
+        // Too many half-open connections (a flood from the network): this
+        // one is turned away (dropped unanswered) instead of waiting.
+        let Ok(permit) = setting_up.clone().try_acquire_owned() else {
+            log::debug!("mesh: too many connections being set up; one turned away");
+            drop(incoming);
+            continue;
+        };
         let (sh, node) = (sh.clone(), node.clone());
         tokio::spawn(async move {
             match tokio::time::timeout(HANDSHAKE, incoming).await {
-                Ok(Ok(conn)) => sh.incoming(node, conn).await,
+                Ok(Ok(conn)) => sh.incoming(node, conn, permit).await,
                 Ok(Err(e)) => log::debug!("mesh: an incoming connection failed: {e}"),
                 Err(_) => log::debug!("mesh: an incoming connection timed out"),
             }
@@ -1538,6 +1678,15 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
                 None => break,
             },
             _ = tick.tick() => sh.tick().await,
+        }
+    }
+    // What the runtime passed on before the stop (the forgets of a player
+    // closing, [`crate::MeshHandle::stop`]): done before the endpoint goes,
+    // so their revocations are on disk; the others hear of them at the next
+    // start.
+    while let Ok(c) = cmds.try_recv() {
+        if matches!(c, Command::MeshForget { .. } | Command::MeshSetScope { .. }) {
+            sh.command(c).await;
         }
     }
     sh.stop_node().await;

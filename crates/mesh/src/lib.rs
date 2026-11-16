@@ -121,11 +121,17 @@ impl MeshClient {
     }
 }
 
-/// The running mesh; [`MeshHandle::stop`] (or dropping it) stops it.
+/// How long a stopping mesh waits for the runtime to pass on the forgets
+/// still waiting for their snackbar.
+const FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The running mesh; [`MeshHandle::stop`] (or dropping it) stops it. Stop it
+/// before the runtime: the devices still being forgotten are revoked first.
 pub struct MeshHandle {
     stop: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
     client: MeshClient,
+    runtime: RuntimeHandle,
 }
 
 impl MeshHandle {
@@ -139,6 +145,12 @@ impl MeshHandle {
 
     fn shutdown(&mut self) {
         if let Some(s) = self.stop.take() {
+            // The forgets still waiting reach the mesh before the stop (at
+            // most [`FLUSH_WAIT`]); it does what it was given, revocations
+            // written, before its thread ends.
+            if !self.runtime.flush_mesh(FLUSH_WAIT) {
+                log::debug!("mesh: no forgets passed on before the stop (the runtime is gone or busy)");
+            }
             let _ = s.send(());
         }
         if let Some(t) = self.thread.take() {
@@ -161,7 +173,8 @@ pub fn start(ctx: MeshContext) -> std::io::Result<MeshHandle> {
     let runtime = ctx.runtime.clone();
     let sh = Arc::new(service::Shared::new(ctx)?);
     let client = MeshClient { sh: sh.clone(), rt: rt.handle().clone() };
-    runtime.link_mesh(move |c| {
+    let runtime_link = runtime.clone();
+    runtime_link.link_mesh(move |c| {
         if cmd_tx.try_send(c).is_err() {
             log::warn!("mesh: a command dropped (the mesh is busy or stopped)");
         }
@@ -171,7 +184,7 @@ pub fn start(ctx: MeshContext) -> std::io::Result<MeshHandle> {
         rt.block_on(service::run(sh, cmd_rx, stop_rx));
         rt.shutdown_timeout(std::time::Duration::from_secs(1));
     })?;
-    Ok(MeshHandle { stop: Some(stop_tx), thread: Some(thread), client })
+    Ok(MeshHandle { stop: Some(stop_tx), thread: Some(thread), client, runtime })
 }
 
 /// `nikgobd pair <ticket>` while no instance of `data_dir` runs: joins the

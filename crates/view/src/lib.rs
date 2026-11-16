@@ -3907,6 +3907,9 @@ pub enum Command {
     MeshRestore { node_id: String },
     /// The pairing's result was seen: back to idle.
     MeshClearPairing,
+    /// From the mesh service: a forget could not be done (the device stays
+    /// in the ring); `why` in words.
+    MeshForgetFailed { node_id: String, why: String },
 }
 
 impl Default for Prefs {

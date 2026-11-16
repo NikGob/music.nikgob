@@ -14,6 +14,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::ring::Cert;
 
+/// A tunnelled request's head must come within this (its body then streams
+/// as long as it takes).
+const HEADER_READ: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The caller a member's certificate makes.
 pub fn caller_of(cert: &Cert) -> Caller {
     let (preset, actor) = match cert.scope {
@@ -37,7 +41,7 @@ where
         async move { Ok::<_, Infallible>(api.call(caller, req.map(Body::new)).await) }
     });
     let mut b = hyper::server::conn::http1::Builder::new();
-    b.keep_alive(false).timer(TokioTimer::new());
+    b.keep_alive(false).timer(TokioTimer::new()).header_read_timeout(HEADER_READ);
     if let Err(e) = b.serve_connection(io, svc).await {
         log::debug!("mesh: a tunnelled request ended: {e}");
     }

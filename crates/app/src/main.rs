@@ -364,6 +364,8 @@ impl Resident for Core {
     fn shutdown(&mut self) {
         memory::log_now("exit");
         self.geometry.flush();
+        // Before the runtime: the devices still being forgotten are passed
+        // to the mesh and revoked, on disk, before it stops.
         if let Some(mesh) = self.mesh.take() {
             mesh.stop();
         }

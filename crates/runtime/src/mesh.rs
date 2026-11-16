@@ -32,6 +32,9 @@ pub(crate) struct MeshKeep {
     live: Option<MeshSnapshot>,
     /// Devices forgotten here, their «Отменить» up: (id, when).
     forgetting: Vec<(String, i64)>,
+    /// Forgets passed to the mesh service: hidden until a report no longer
+    /// lists the device (its row goes then) or the service says it failed.
+    sent: Vec<String>,
     /// A pairing that could not even start here (no mesh service).
     failed: Option<String>,
 }
@@ -55,7 +58,7 @@ fn row_view(r: &NodeRow) -> MeshNodeView {
 /// here over it — names given here, profiles, the devices being forgotten
 /// left out; without a report, the devices as kept, offline.
 pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
-    let hidden = |id: &str| keep.forgetting.iter().any(|(f, _)| f == id);
+    let hidden = |id: &str| keep.forgetting.iter().any(|(f, _)| f == id) || keep.sent.iter().any(|f| f == id);
     let mut nodes: Vec<MeshNodeView> = match &keep.live {
         Some(live) => live
             .nodes
@@ -305,11 +308,20 @@ impl Worker {
                 let gone = rows_gone(&snap, &self.mesh.rows, &self.mesh.forgetting);
                 self.mesh_put(write);
                 self.mesh_remove(&gone);
+                self.mesh.sent.retain(|id| snap.nodes.iter().any(|n| n.view.id == *id));
                 if snap.pairing != MeshPairing::Idle {
                     self.mesh.failed = None;
                 }
                 self.mesh.live = Some(*snap);
                 self.mesh_publish();
+            }
+            Command::MeshForgetFailed { node_id, why } => {
+                self.mesh.sent.retain(|f| *f != node_id);
+                let name = self.mesh.live.as_ref().and_then(|l| l.nodes.iter().find(|n| n.view.id == node_id)).map(|n| {
+                    self.mesh.rows.iter().find(|r| r.id == node_id).map_or_else(|| n.view.name.clone(), |r| r.shown_name().to_owned())
+                });
+                self.mesh_publish();
+                self.toast(format!("Не удалось забыть «{}»: {why}", name.unwrap_or_else(|| "устройство".to_owned())), None);
             }
             c @ (Command::MeshPairNearby { .. }
             | Command::MeshCreateInvite
@@ -344,15 +356,38 @@ impl Worker {
             return;
         }
         self.mesh.forgetting.retain(|(f, _)| !due.contains(f));
-        self.mesh_remove(&due);
-        for id in due {
-            self.mesh_forward(Command::MeshForget { node_id: id });
-        }
+        self.mesh_send_forgets(due);
         self.mesh_publish();
     }
 
-    /// At the end: devices still being forgotten go now (their «Отменить»
-    /// ends with the run).
+    /// Passes forgets to the mesh service; their rows go when its report no
+    /// longer lists them. Without a service there is no ring to tell: the
+    /// rows go now.
+    fn mesh_send_forgets(&mut self, ids: Vec<String>) {
+        if self.mesh.link.is_none() {
+            self.mesh_remove(&ids);
+            return;
+        }
+        for id in ids {
+            self.mesh.sent.push(id.clone());
+            self.mesh_forward(Command::MeshForget { node_id: id });
+        }
+    }
+
+    /// The mesh is about to stop ([`crate::RuntimeHandle::flush_mesh`]): the
+    /// devices still being forgotten go to it now (their «Отменить» ends
+    /// with the run), so it revokes them before it stops.
+    pub(crate) fn mesh_flush_now(&mut self) {
+        let due: Vec<String> = self.mesh.forgetting.drain(..).map(|(id, _)| id).collect();
+        if due.is_empty() {
+            return;
+        }
+        self.mesh_send_forgets(due);
+        self.mesh_publish();
+    }
+
+    /// At the end: what is left of the forgets (no mesh, or it stopped
+    /// before) — the rows go, the command is passed on if anyone listens.
     pub(crate) fn mesh_flush(&mut self) {
         let due: Vec<String> = self.mesh.forgetting.drain(..).map(|(id, _)| id).collect();
         self.mesh_remove(&due);
@@ -402,6 +437,21 @@ mod tests {
         assert_eq!(v.nodes[0].name, "Кухня");
         assert_eq!(v.nodes[0].profile, MeshProfile::Library);
         assert!(v.nodes[0].online);
+    }
+
+    /// A forget passed to the mesh stays hidden while reports still list the
+    /// device (the ring has not taken it yet).
+    #[test]
+    fn a_forget_passed_on_stays_hidden() {
+        let live = MeshSnapshot { running: true, paired: true, nodes: vec![node("a", "Pi", true), node("b", "TV", true)], ..MeshSnapshot::default() };
+        let keep = MeshKeep { rows: vec![row("a", "Pi"), row("b", "TV")], live: Some(live.clone()), sent: vec!["b".into()], ..MeshKeep::default() };
+        let v = merge(&keep);
+        assert_eq!(v.nodes.len(), 1);
+        assert_eq!(v.nodes[0].id, "a");
+        // The report without it: its row goes (not kept back like one with
+        // its snackbar still up).
+        let after = MeshSnapshot { nodes: vec![node("a", "Pi", true)], ..live };
+        assert_eq!(rows_gone(&after, &keep.rows, &[]), vec!["b".to_owned()]);
     }
 
     #[test]

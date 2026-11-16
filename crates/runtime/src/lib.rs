@@ -307,6 +307,9 @@ enum Msg {
     KhinsiderBrowser(Arc<dyn nikgob_sources::khinsider::PageBrowser>),
     /// The mesh service takes the network commands from now on.
     MeshLink(Arc<dyn Fn(Command) + Send + Sync>),
+    /// The forgets still waiting for their snackbar go to the mesh service
+    /// now; answered once they are passed on (the mesh is about to stop).
+    MeshFlush(Sender<()>),
     Shutdown,
 }
 
@@ -520,6 +523,16 @@ impl RuntimeHandle {
     /// on (pairing, invites, forgetting); `f` must not block.
     pub fn link_mesh(&self, f: impl Fn(Command) + Send + Sync + 'static) {
         let _ = self.tx.send(Msg::MeshLink(Arc::new(f)));
+    }
+
+    /// Before the mesh stops: the devices still being forgotten are passed
+    /// to it now. Waits at most `wait` for the loop to do it; whether it did.
+    pub fn flush_mesh(&self, wait: Duration) -> bool {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        if self.tx.send(Msg::MeshFlush(tx)).is_err() {
+            return false;
+        }
+        rx.recv_timeout(wait).is_ok()
     }
 }
 
@@ -1194,6 +1207,10 @@ impl Worker {
                         }
                     }
                     Ok(Msg::MeshLink(f)) => self.mesh.link = Some(f),
+                    Ok(Msg::MeshFlush(done)) => {
+                        self.mesh_flush_now();
+                        let _ = done.send(());
+                    }
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
                         break;
@@ -2029,7 +2046,8 @@ impl Worker {
             | Command::MeshSetScope { .. }
             | Command::MeshUpdate(_)
             | Command::MeshRestore { .. }
-            | Command::MeshClearPairing) => self.mesh_command(c),
+            | Command::MeshClearPairing
+            | Command::MeshForgetFailed { .. }) => self.mesh_command(c),
         }
     }
 

@@ -177,6 +177,8 @@ fn main() {
         }
     });
     log::info!("stopping");
+    // Before the player: the devices still being forgotten are revoked, on
+    // disk, before the mesh stops.
     if let Some(m) = mesh {
         m.stop();
     }
