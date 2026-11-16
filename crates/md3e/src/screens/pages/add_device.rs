@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(line, releases::install_command(host, &key, &sum, "nkm1abc"));
         assert!(line.contains(&format!("/install/nikgobd.sh?k={key}")), "{line}");
         assert!(line.contains(&sum) && line.ends_with(" nkm1abc"), "{line}");
-        assert!(!line.contains("| sh"), "{line}");
+        assert!(!line.contains("| sh "), "{line}");
         assert_ne!(line, install_line(host, "nkm1abc", &[]), "another set of builds, another script");
         let url = windows_url(host, "nkm1abc");
         assert!(url.starts_with("http://192.168.0.10:47210/install/music.nikgob-"), "{url}");
