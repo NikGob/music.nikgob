@@ -4003,6 +4003,10 @@ pub enum Command {
     ConnectRun { from: Option<String>, commands: Vec<Command> },
     /// From the mesh service: what came of a [`ConnectJob`].
     ConnectReport(Box<ConnectReport>),
+    /// From the API (`PUT /v1/player/output`): a transfer to `node_id`
+    /// (None: back here), or with `attach` an attach (None: a detach),
+    /// answered when it is done as `{"done": bool, "message"?: text}`.
+    ApiTransfer { node_id: Option<String>, attach: bool, reply: ApiReply },
 }
 
 impl Default for Prefs {

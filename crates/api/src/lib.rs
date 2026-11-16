@@ -114,6 +114,12 @@ pub struct LocalApi {
 #[derive(Clone)]
 pub(crate) struct Trusted(pub Caller);
 
+/// Marks a request of an in-process caller (a paired device through the
+/// mesh's tunnel, or this device's own connect service): the guard puts
+/// it there for those only, never for a token.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Paired;
+
 impl LocalApi {
     fn new(sh: Arc<Shared>) -> Self {
         let (closing, closed) = watch::channel(false);

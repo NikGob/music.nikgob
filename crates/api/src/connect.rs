@@ -16,9 +16,9 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 
 use nikgob_core::model::TrackId;
-use nikgob_view::{Command, RemoteCommand, ZoneLoaded, ZoneSnapshot};
+use nikgob_view::{ApiActor, ApiPreset, Command, RemoteCommand, ZoneLoaded, ZoneSnapshot};
 
-use crate::Shared;
+use crate::{Paired, Shared};
 use crate::auth::Caller;
 use crate::error::{ApiError, Json, body};
 use crate::library::{blocking, db};
@@ -95,12 +95,26 @@ pub struct RemoteBody {
     pub commands: Vec<RemoteCommand>,
 }
 
+/// A device of the owner's (or this device's connect service): an
+/// in-process caller with the owner's rights; never a token, never a
+/// guest's device.
+fn owner_device(paired: bool, caller: &Caller) -> bool {
+    paired && caller.preset == ApiPreset::Full && caller.actor == ApiActor::Owner
+}
+
+fn not_for(what: &'static str) -> ApiError {
+    ApiError::of(StatusCode::FORBIDDEN, "forbidden", what)
+}
+
 impl Shared {
     /// The paired device a request comes from: one through the mesh's
     /// tunnel (its certificate's id begins its caller's), or the one the
     /// connect service names for a load here. Both callers exist only in
-    /// this process: a token's id has no `:`.
-    pub(crate) fn mesh_peer(&self, caller: &Caller) -> Option<String> {
+    /// this process (`paired`).
+    pub(crate) fn mesh_peer(&self, caller: &Caller, paired: bool) -> Option<String> {
+        if !paired {
+            return None;
+        }
         if let Some(id) = caller.token_id.strip_prefix("connect:") {
             return (!id.is_empty() && id != "-").then(|| id.to_owned());
         }
@@ -158,7 +172,18 @@ pub async fn snapshot(State(sh): State<Arc<Shared>>) -> Result<Json<ZoneSnapshot
     ),
     security(("bearer" = []))
 )]
-pub async fn load(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<ZoneLoaded>, ApiError> {
+pub async fn load(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    paired: Option<Extension<Paired>>,
+    bytes: Bytes,
+) -> Result<Json<ZoneLoaded>, ApiError> {
+    // A token with the player's right, or a device of the owner's: a
+    // guest's device does not replace this queue.
+    let paired = paired.is_some();
+    if paired && !owner_device(paired, &caller) {
+        return Err(not_for("Только для устройств владельца"));
+    }
     let snap: ZoneSnapshot = body(&bytes)?;
     if snap.tracks.len() > BODY_MAX_TRACKS {
         return Err(ApiError::bad_request("Слишком длинная очередь"));
@@ -177,7 +202,7 @@ pub async fn load(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
         return Err(ApiError::of(StatusCode::CONFLICT, "nothing_playable", "Здесь нет ни одной из этих песен"));
     }
     let loaded = snap.tracks.len();
-    let from = sh.mesh_peer(&caller);
+    let from = sh.mesh_peer(&caller, paired);
     let v = sh.ask(Some(caller.actor), LOAD_WAIT, move |reply| Command::ApiLoad { snapshot: Box::new(snap), from, reply }).await?;
     let mut previous: Option<ZoneSnapshot> = serde_json::from_value(v.get("previous").cloned().unwrap_or(serde_json::Value::Null)).unwrap_or(None);
     if let Some(p) = previous.as_mut() {
@@ -188,8 +213,17 @@ pub async fn load(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
 
 /// `POST /v1/player/remote`: the commands a remote forwards, run here in
 /// order as one request (the files of tracks this device lacks come from
-/// the device that sent them).
-pub async fn remote(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
+/// the device that sent them). Only a device of the owner's.
+pub async fn remote(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    paired: Option<Extension<Paired>>,
+    bytes: Bytes,
+) -> Result<Json<StateAnswer>, ApiError> {
+    let paired = paired.is_some();
+    if !owner_device(paired, &caller) {
+        return Err(not_for("Только для устройств владельца"));
+    }
     let b: RemoteBody = body(&bytes)?;
     if b.commands.is_empty() {
         return Err(ApiError::bad_request("Нужен commands"));
@@ -197,7 +231,7 @@ pub async fn remote(State(sh): State<Arc<Shared>>, Extension(caller): Extension<
     if b.commands.len() > REMOTE_MAX {
         return Err(ApiError::bad_request("Слишком много команд сразу"));
     }
-    let from = sh.mesh_peer(&caller);
+    let from = sh.mesh_peer(&caller, paired);
     let commands: Vec<Command> = b.commands.into_iter().map(RemoteCommand::command).collect();
     sh.run_by(Some(caller.actor), vec![Command::ConnectRun { from, commands }]).await?;
     Ok(Json(StateAnswer { state: sh.snapshot() }))
@@ -358,12 +392,58 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(f.sh.mesh_peer(&caller()).as_deref(), Some(id));
+        assert_eq!(f.sh.mesh_peer(&caller(), true).as_deref(), Some(id));
+        assert_eq!(f.sh.mesh_peer(&caller(), false), None, "not in this process: no device");
         let named = Caller { token_id: format!("connect:{id}"), ..caller() };
-        assert_eq!(f.sh.mesh_peer(&named).as_deref(), Some(id));
+        assert_eq!(f.sh.mesh_peer(&named, true).as_deref(), Some(id));
         let none = Caller { token_id: "connect:-".into(), ..caller() };
-        assert_eq!(f.sh.mesh_peer(&none), None);
+        assert_eq!(f.sh.mesh_peer(&none, true), None);
         let token = Caller { token_id: "Ab12Cd34Ef".into(), ..caller() };
-        assert_eq!(f.sh.mesh_peer(&token), None);
+        assert_eq!(f.sh.mesh_peer(&token, true), None);
+    }
+
+    /// A guest's device neither forwards commands nor loads a queue here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_guests_device_may_not_drive_this_zone() {
+        let f = fixture(1, 0);
+        let guest = Caller { token_id: "mesh:guest00000".into(), name: "TV".into(), preset: ApiPreset::Control, actor: ApiActor::Guest };
+        let ask = |req: Request<Body>| f.local.call(guest.clone(), req);
+        let r = ask(post("/v1/player/remote", serde_json::json!({"commands": [{"do": "toggle_play"}]}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = ask(post("/v1/player/load", serde_json::json!({"tracks": [f.tracks[0]], "index": 0}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        assert!(f.rt.state().queue.current.is_none(), "nothing loaded");
+        let r = ask(Request::get("/v1/player/snapshot").body(Body::empty()).unwrap()).await;
+        assert_eq!(r.status(), StatusCode::OK, "reading is fine");
+    }
+
+    /// The output route answers a target change when it is done: a device
+    /// with nothing here to move becomes the target, a detach, and a transfer
+    /// that could not go (no mesh service here) as `409 transfer_failed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_output_route_answers_when_the_target_changed() {
+        let f = fixture(1, 0);
+        let id = "abcdef0123456789abcdef0123456789";
+        let node = nikgob_view::MeshNodeView { id: id.into(), name: "Pi".into(), online: true, ..Default::default() };
+        f.rt.send(Command::MeshUpdate(Box::new(nikgob_view::MeshSnapshot {
+            running: true,
+            nodes: vec![nikgob_view::MeshSnapshotNode { view: node, cert: String::new() }],
+            ..Default::default()
+        })));
+        until("the device", || f.rt.state().mesh.node(id).is_some()).await;
+        let put = |b: serde_json::Value| Request::put("/v1/player/output").header("content-type", "application/json").body(Body::from(b.to_string())).unwrap();
+        let (status, v) = call(&f.local, put(serde_json::json!({"output": format!("node:{id}")}))).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["state"]["output"]["id"], format!("node:{id}"), "the device is the target when it answers");
+        let (status, v) = call(&f.local, put(serde_json::json!({"output": "this", "attach": true}))).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["state"]["output"]["id"], "local:default");
+
+        let (status, _) = call(&f.local, post("/v1/player/load", serde_json::json!({"tracks": [f.tracks[0]], "index": 0, "paused": true}))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, v) = call(&f.local, put(serde_json::json!({"id": format!("node:{id}")}))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["error"], "transfer_failed");
+        assert!(f.rt.state().target.is_none(), "nothing moved");
     }
 }

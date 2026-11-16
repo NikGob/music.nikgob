@@ -124,7 +124,7 @@ pub const TOOLS: &[ToolDef] = &[
         name: "target_switch",
         title: "Play on another device",
         contour: Contour::Control,
-        description: "Play on another device of the home, like Spotify Connect. target: a node id from outputs_list (`node:<id>`), a device's name, or `this` to bring the music back here. mode: transfer (default) moves the queue, the track and its position there and pauses here; attach only drives what that device already plays, moving nothing.",
+        description: "Play on another device of the home, like Spotify Connect. target: a node id from outputs_list (`node:<id>`), a device's name, or `this` to bring the music back here. mode: transfer (default) moves the queue, the track and its position there and pauses here; attach only drives what that device already plays, moving nothing. Answers when the move is done (or why it failed: the music then stays paused where it was).",
         schema: schema_target,
     },
     ToolDef {

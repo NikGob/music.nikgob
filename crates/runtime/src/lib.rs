@@ -545,8 +545,8 @@ impl RuntimeHandle {
 
     /// The mesh service takes the network part of playing on another
     /// device from now on (following a zone, forwarding, transfers, the
-    /// files fetched); `f` must not block.
-    pub fn link_connect(&self, f: impl Fn(nikgob_view::ConnectJob) + Send + Sync + 'static) {
+    /// files fetched); `f` must not block, and says whether it took the job.
+    pub fn link_connect(&self, f: impl Fn(nikgob_view::ConnectJob) -> bool + Send + Sync + 'static) {
         let _ = self.tx.send(Msg::ConnectLink(Arc::new(f)));
     }
 
@@ -2105,7 +2105,8 @@ impl Worker {
             | Command::ApiSnapshot { .. }
             | Command::ApiLoad { .. }
             | Command::ConnectRun { .. }
-            | Command::ConnectReport(_)) => self.connect_command(c),
+            | Command::ConnectReport(_)
+            | Command::ApiTransfer { .. }) => self.connect_command(c),
         }
     }
 

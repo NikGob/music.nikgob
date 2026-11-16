@@ -343,6 +343,8 @@ impl Worker {
         let view = merge(&self.mesh);
         if self.state.read().mesh != view {
             self.publish(move |s| s.mesh = view);
+            // A device driven from here that is gone from the list.
+            self.connect_check_target();
         }
     }
 
