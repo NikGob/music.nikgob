@@ -165,8 +165,7 @@ impl Chrome {
                 .selected(t.liked)
                 .shortcut("Ctrl+L"),
             Act::Lyrics => MenuItem::new("Текст песни").icon(Icon::Lyrics),
-            Act::Volume => MenuItem::new("Громкость…")
-                .icon(super::output::volume_icon(state, state.player.volume, state.player.muted)),
+            Act::Volume | Act::Output => Self::bare_item(act, state).unwrap_or_else(|| MenuItem::new("")),
             Act::Visualizer => MenuItem::new("Визуализатор")
                 .icon(Icon::GraphicEq)
                 .shortcut("F12"),
@@ -178,7 +177,39 @@ impl Chrome {
                 .shortcut("Y"),
             Act::SleepMenu => MenuItem::new(super::sleep_ui::MENU_LABEL).icon(Icon::Bedtime),
             Act::Sleep(c) => MenuItem::new(super::sleep_ui::choice_label(c, nikgob_view::SleepContext::of(&state.player))),
-            Act::Output => MenuItem::new("Где играть").icon(Icon::SpeakerGroup),
+        }
+    }
+
+    /// A row of the player's own that needs no track: the volume, «Где
+    /// играть».
+    fn bare_item(act: Act, state: &ViewState) -> Option<MenuItem> {
+        match act {
+            Act::Volume => Some(MenuItem::new("Громкость…").icon(super::output::volume_icon(state, state.player.volume, state.player.muted))),
+            Act::Output => Some(MenuItem::new("Где играть").icon(Icon::SpeakerGroup)),
+            _ => None,
+        }
+    }
+
+    /// The rows of the player's ⋮ while nothing plays: of `top`, those
+    /// that need no track, and «Таймер сна ▸» when it is named.
+    pub fn own_rows(state: &ViewState, top: &[Act]) -> Vec<Row<PlayerAct>> {
+        let mut rows: Vec<Row<PlayerAct>> =
+            top.iter().filter_map(|&a| Self::bare_item(a, state).map(|item| Row::Item(PlayerAct::Own(a), item))).collect();
+        if top.contains(&Act::SleepMenu) {
+            rows.push(super::sleep_ui::submenu(state, |c| PlayerAct::Own(Act::Sleep(c))));
+        }
+        rows
+    }
+
+    /// The player's ⋮ while nothing plays ([`Self::own_rows`]) on
+    /// `anchor`, right-aligned.
+    pub fn own_menu(&mut self, anchor: &Response, salt: &'static str, rows: Vec<Row<PlayerAct>>, out: &mut Vec<Command>) {
+        let (menu, picks) = super::pages::widgets::menu_of(("md3e-own-menu", salt), rows);
+        match menu.align_right(true).attach(anchor).and_then(|i| picks.get(i).copied()) {
+            Some(PlayerAct::Own(Act::Volume)) => self.vol.pinned = Some(anchor.rect),
+            Some(PlayerAct::Own(Act::Output)) => self.output.open_at(Id::new("md3e-output-menu"), anchor.rect),
+            Some(PlayerAct::Own(Act::Sleep(c))) => out.push(Command::SleepTimer(c)),
+            _ => {}
         }
     }
 
