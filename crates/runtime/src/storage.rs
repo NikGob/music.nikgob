@@ -257,6 +257,12 @@ fn volume_of(path: &Path) -> Option<String> {
     })
 }
 
+/// Free bytes (for this user) of the disk `at` is on, `at` existing (the
+/// copies from the other devices stop short of a full disk).
+pub fn free_bytes(at: &Path) -> Option<u64> {
+    space(at).map(|(free, _)| free)
+}
+
 /// Free (for this user) and total bytes of the disk `at` is on.
 #[cfg(unix)]
 fn space(at: &Path) -> Option<(u64, u64)> {

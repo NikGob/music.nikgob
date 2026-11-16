@@ -30,6 +30,7 @@ mod library_search;
 mod lyrics;
 mod mesh;
 mod connect;
+mod replica;
 mod lyrics_keep;
 mod playlist_cover;
 mod recs;
@@ -69,6 +70,7 @@ use nikgob_view::{Command, LIKED_PLAYLIST, Status, Toast, ViewState};
 use parking_lot::{RwLock, RwLockReadGuard};
 
 pub use convert::Resolver;
+pub use storage::free_bytes;
 pub use import::ImportSetup;
 pub use lyrics::memory as lyrics_memory;
 pub use nikgob_sources::khinsider::PageBrowser;
@@ -950,6 +952,8 @@ struct Worker {
     mesh: mesh::MeshKeep,
     /// Playing on another device ([`connect`]).
     connect: connect::ConnectKeep,
+    /// The masters that may go once the devices hold copies ([`replica`]).
+    replica: replica::ReplicaKeep,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -1155,6 +1159,7 @@ impl Worker {
             api: Default::default(),
             mesh: Default::default(),
             connect: Default::default(),
+            replica: Default::default(),
         }
     }
 
@@ -1305,6 +1310,8 @@ impl Worker {
                     self.turn.lap("api");
                     self.mesh_tick();
                     self.turn.lap("mesh");
+                    self.replica_tick();
+                    self.turn.lap("replica");
                 }
             }
             std::mem::take(&mut self.turn).end();
@@ -1889,6 +1896,7 @@ impl Worker {
             Command::MergeEditions(id) => self.merge_editions(id),
             Command::KeepEditionsApart(id) => self.keep_editions_apart(id),
             Command::ConfirmChoice { id, option } if id & api::API_CONFIRM_ID != 0 => self.api_confirm(id, option),
+            Command::ConfirmChoice { id, option } if id & replica::REPLICA_ID != 0 => self.replica_choice(id, option),
             Command::ConfirmChoice { id, option } if id & streams::WISH_ID != 0 => {
                 self.wish_confirm(id, option);
             }
@@ -2107,6 +2115,10 @@ impl Worker {
             | Command::ConnectRun { .. }
             | Command::ConnectReport(_)
             | Command::ApiTransfer { .. }) => self.connect_command(c),
+            Command::ReplicaRechecked { card, ok, failed } => self.replica_rechecked(card, ok, failed),
+            Command::ReplicaUndoTrash { ids } => self.replica_undo(ids),
+            Command::ReplicaCopiesChanged => self.replica_soon(),
+            Command::ReplicaRecheck { .. } => log::warn!("replica: a recheck goes to the mesh, not to the worker"),
         }
     }
 
