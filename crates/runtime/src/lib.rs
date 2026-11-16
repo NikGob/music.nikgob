@@ -29,6 +29,7 @@ mod library_load;
 mod library_search;
 mod lyrics;
 mod mesh;
+mod connect;
 mod lyrics_keep;
 mod playlist_cover;
 mod recs;
@@ -310,6 +311,9 @@ enum Msg {
     /// The forgets still waiting for their snackbar go to the mesh service
     /// now; answered once they are passed on (the mesh is about to stop).
     MeshFlush(Sender<()>),
+    /// The mesh service does the network part of playing on another device
+    /// from now on.
+    ConnectLink(connect::ConnectLink),
     Shutdown,
 }
 
@@ -541,6 +545,13 @@ impl RuntimeHandle {
 
     /// Before the mesh stops: the devices still being forgotten are passed
     /// to it now. Waits at most `wait` for the loop to do it; whether it did.
+    /// The mesh service takes the network part of playing on another
+    /// device from now on (following a zone, forwarding, transfers, the
+    /// files fetched); `f` must not block.
+    pub fn link_connect(&self, f: impl Fn(nikgob_view::ConnectJob) + Send + Sync + 'static) {
+        let _ = self.tx.send(Msg::ConnectLink(Arc::new(f)));
+    }
+
     pub fn flush_mesh(&self, wait: Duration) -> bool {
         let (tx, rx) = crossbeam_channel::bounded(1);
         if self.tx.send(Msg::MeshFlush(tx)).is_err() {
@@ -933,6 +944,8 @@ struct Worker {
     api: api::ApiKeep,
     /// The owner's devices as kept here ([`mesh`]).
     mesh: mesh::MeshKeep,
+    /// Playing on another device ([`connect`]).
+    connect: connect::ConnectKeep,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -1136,6 +1149,7 @@ impl Worker {
             duck: Default::default(),
             api: Default::default(),
             mesh: Default::default(),
+            connect: Default::default(),
         }
     }
 
@@ -1193,7 +1207,7 @@ impl Worker {
                 recv(rx) -> m => match m {
                     Ok(Msg::Cmd(c)) => {
                         self.turn.begin(|| format!("command {}", head_of(&c)));
-                        self.command(c);
+                        self.user_command(c);
                     }
                     Ok(Msg::Service(s)) => self.services.push(s),
                     Ok(Msg::Indexer(i)) => {
@@ -1221,6 +1235,7 @@ impl Worker {
                         }
                     }
                     Ok(Msg::MeshLink(f)) => self.mesh.link = Some(f),
+                    Ok(Msg::ConnectLink(f)) => self.connect.link = Some(f),
                     Ok(Msg::MeshFlush(done)) => {
                         self.mesh_flush_now();
                         let _ = done.send(());
@@ -2074,6 +2089,15 @@ impl Worker {
             | Command::MeshSetKeepMasters(_)
             | Command::MeshSetPins { .. }
             | Command::MeshPauseTransfer { .. }) => self.mesh_command(c),
+            c @ (Command::OutputTransfer { .. }
+            | Command::OutputAttach { .. }
+            | Command::OutputDetach
+            | Command::OutputContinueHere
+            | Command::OutputUndoTransfer
+            | Command::ApiSnapshot { .. }
+            | Command::ApiLoad { .. }
+            | Command::ConnectRun { .. }
+            | Command::ConnectReport(_)) => self.connect_command(c),
         }
     }
 
@@ -2113,6 +2137,10 @@ impl Worker {
     /// Publishes only where playback is and how fast the view should move
     /// it (a position report, many a second: none of the rest changed).
     fn publish_clock(&mut self) {
+        // The view shows another device's zone.
+        if self.connect.remote() {
+            return;
+        }
         let now = Instant::now();
         let (position, rate) = (self.position_at_instant(now), self.rate);
         self.publish(|s| {
@@ -2177,6 +2205,10 @@ impl Worker {
             }
         };
         let Some(src) = sources.iter().find(|s| usable(self, s)).cloned() else {
+            // A file another device sent for it ([`connect`]).
+            if let Some(src) = self.connect_source(e.track, skip) {
+                return Some(src);
+            }
             let why = if all == 0 {
                 "it has no source".to_owned()
             } else if sources.is_empty() {
@@ -2519,6 +2551,10 @@ impl Worker {
                 self.start_with(e, req, source, kind);
                 return;
             }
+            // Its file is on its way from the device that sent the queue.
+            if self.wait_for_pull(e) {
+                return;
+            }
             // Its service asks to wait: what plays now goes first, or the
             // player waits on it (never a run down the queue).
             if self.hold_for_pause(e) {
@@ -2583,6 +2619,8 @@ impl Worker {
         self.turn.lap("now playing");
         self.likes_if_stale();
         self.turn.lap("likes");
+        // The next files of a queue another device sent, fetched ahead.
+        self.connect_prefetch();
     }
 
     fn preload_next(&mut self) {
@@ -3213,6 +3251,11 @@ impl Worker {
         self.plus_top_up();
         // A radio picks more when its queue runs low.
         self.radio_top_up();
+        // The view shows another device's zone: this one is the parked view.
+        if self.connect.remote() {
+            self.publish_parked();
+            return;
+        }
         let radio = self.radio_view();
         let status = self.status;
         let now = Instant::now();
@@ -3286,6 +3329,9 @@ impl Worker {
 
     /// Volume and mute only: nothing else of the player or the queue changes.
     fn publish_volume(&mut self) {
+        if self.connect.remote() {
+            return;
+        }
         let (volume, muted) = (self.volume, self.muted);
         self.publish(|s| {
             s.player.volume = volume;
@@ -3294,6 +3340,11 @@ impl Worker {
     }
 
     fn publish_now_playing(&mut self) {
+        // The view shows another device's zone: this one is the parked view.
+        if self.connect.remote() {
+            self.publish_parked();
+            return;
+        }
         let shown = self.playing.or_else(|| self.resume_at.and(self.queue.current()));
         let current = shown
             .and_then(|e| self.lib.get_track_row(e.track).ok().flatten());

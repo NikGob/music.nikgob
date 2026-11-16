@@ -446,7 +446,11 @@ impl Worker {
     }
 
     /// The timer as the player shows it.
-    fn sleep_publish(&mut self) {
+    pub(crate) fn sleep_publish(&mut self) {
+        // The view shows another device's zone (its timer is its own).
+        if self.connect.remote() {
+            return;
+        }
         let view = self.sleep.timer.map(|t| v::SleepView {
             choice: self.sleep.choice,
             deadline: match t {
