@@ -237,6 +237,13 @@ fn u64_be(b: &[u8], i: usize) -> Option<u64> {
     at::<8>(b, i).map(u64::from_be_bytes)
 }
 
+/// Where `pos` (an offset in the file) is in `b`, which starts at `base`:
+/// `None` when it is before `b` or not inside it, so no offset past it is
+/// ever added up.
+fn inside(b: &[u8], base: u64, pos: u64) -> Option<usize> {
+    pos.checked_sub(base).and_then(|r| usize::try_from(r).ok()).filter(|r| *r < b.len())
+}
+
 fn lossless(codec: Codec, ext: &'static str, bits: Option<u16>, rate: Option<u32>) -> Sniffed {
     Sniffed {
         format: Format {
@@ -299,7 +306,10 @@ fn flac(b: &[u8], ext: &'static str) -> Sniffed {
 /// not told. A chunk past the bytes read is read on.
 fn riff(b: &[u8], base: u64, mut pos: u64) -> Sniff {
     loop {
-        let Some(rel) = pos.checked_sub(base).and_then(|r| usize::try_from(r).ok()) else { return Sniff::Unknown };
+        if pos < base {
+            return Sniff::Unknown;
+        }
+        let Some(rel) = inside(b, base, pos) else { return more(pos, CHUNK, Step::Riff) };
         let (Some(id), Some(size)) = (at::<4>(b, rel), u32_le(b, rel + 4)) else { return more(pos, CHUNK, Step::Riff) };
         if &id == b"fmt " {
             let f = rel + 8;
@@ -331,7 +341,10 @@ const AIFC_PCM: [&[u8; 4]; 11] = [b"NONE", b"none", b"sowt", b"twos", b"raw ", b
 fn aiff(b: &[u8], base: u64, mut pos: u64, compressed: bool) -> Sniff {
     let step = Step::Aiff { compressed };
     loop {
-        let Some(rel) = pos.checked_sub(base).and_then(|r| usize::try_from(r).ok()) else { return Sniff::Unknown };
+        if pos < base {
+            return Sniff::Unknown;
+        }
+        let Some(rel) = inside(b, base, pos) else { return more(pos, CHUNK, step) };
         let (Some(id), Some(size)) = (at::<4>(b, rel), u32_be(b, rel + 4)) else { return more(pos, CHUNK, step) };
         if &id == b"COMM" {
             let c = rel + 8;
@@ -414,27 +427,34 @@ fn child<'a>(b: &'a [u8], ty: &[u8; 4]) -> Vec<&'a [u8]> {
 /// `moov` past the bytes read (after the `mdat`) is read on.
 fn mp4(b: &[u8], base: u64, mut pos: u64) -> Sniff {
     loop {
-        let Some(rel) = pos.checked_sub(base).and_then(|r| usize::try_from(r).ok()) else { return Sniff::Unknown };
+        if pos < base {
+            return Sniff::Unknown;
+        }
+        // A box past the bytes read: read on there (a size that points
+        // past the file is turned down by the reader).
+        let Some(rel) = inside(b, base, pos) else { return more(pos, MOOV, Step::Mp4) };
         let (Some(size32), Some(ty)) = (u32_be(b, rel), at::<4>(b, rel + 4)) else { return more(pos, MOOV, Step::Mp4) };
-        let size = match size32 {
+        // The header is 16 bytes with a 64-bit size, else 8.
+        let (head, size) = match size32 {
             1 => match u64_be(b, rel + 8) {
-                Some(s) => s,
+                Some(s) => (16u64, s),
                 None => return more(pos, MOOV, Step::Mp4),
             },
             // To the end of the file: the last box.
-            0 => (b.len() - rel) as u64,
-            s => u64::from(s),
+            0 => (8, (b.len() - rel) as u64),
+            s => (8, u64::from(s)),
         };
-        if size < 8 {
+        if size < head {
             return Sniff::Unknown;
         }
         if &ty == b"moov" {
-            let end = usize::try_from(size).map_or(b.len(), |s| rel.saturating_add(s).min(b.len()));
-            let moov = &b[rel..end];
-            if let Some(s) = sample_entry(moov.get(8..).unwrap_or_default()) {
+            let here = (b.len() - rel) as u64;
+            let end = rel + usize::try_from(size.min(here)).unwrap_or(0);
+            let content = b.get(rel + head as usize..end).unwrap_or_default();
+            if let Some(s) = sample_entry(content) {
                 return audio(s);
             }
-            let whole = (end - rel) as u64 >= size.min(MOOV);
+            let whole = here >= size.min(MOOV);
             // Cut short by the bytes read: read on from the box itself (once:
             // a read that starts at it has all it gives).
             return if whole || rel == 0 { Sniff::Unknown } else { more(pos, MOOV, Step::Mp4) };
@@ -814,6 +834,35 @@ mod tests {
         cut.extend(b"alacalacalac");
         cut.resize(HEAD as usize, 0);
         assert!(remote(&cut).is_none());
+    }
+
+    /// A moov with a 64-bit size has a 16-byte header; a box size that
+    /// points past everything neither overflows nor is believed.
+    #[test]
+    fn extended_box_sizes() {
+        let ftyp = mp4_box(b"ftyp", b"M4A \0\0\0\0M4A mp42");
+        let small = moov(b"alac", &[]);
+        let content = &small[8..];
+        let mut big = vec![0, 0, 0, 1];
+        big.extend(b"moov");
+        big.extend(((content.len() + 16) as u64).to_be_bytes());
+        big.extend(content);
+        assert_eq!(told(&[ftyp.clone(), big].concat()), ("ALAC".into(), "m4a"));
+        // An extended size of nearly u64::MAX: read on there, never added
+        // past the buffer; the reader turns it down.
+        let mut lying = vec![0, 0, 0, 1];
+        lying.extend(b"ftyp");
+        lying.extend((u64::MAX - 3).to_be_bytes());
+        lying.extend([0u8; 32]);
+        assert!(matches!(sniff(&lying), Sniff::More(r) if r.at == u64::MAX - 3));
+        assert!(remote(&lying).is_none());
+        let mut huge = ftyp.clone();
+        huge.extend([0, 0, 0, 1]);
+        huge.extend(b"mdat");
+        huge.extend(u64::MAX.to_be_bytes());
+        assert_eq!(sniff(&huge), Sniff::Unknown, "a size that overflows the offset");
+        let free = [&[0u8, 0, 0, 16][..], &b"free"[..], &[0u8; 8][..]].concat();
+        assert_eq!(resume(&Resume { at: u64::MAX, len: MOOV, step: Step::Mp4 }, &free), Sniff::Unknown, "the next box would be past u64");
     }
 
     #[test]
