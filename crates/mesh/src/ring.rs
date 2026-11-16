@@ -276,9 +276,9 @@ impl Ring {
             if !c.verify(&self.public) || self.is_revoked(&c.node, c.issued_ms) {
                 continue;
             }
-            match self.members.iter_mut().find(|m| m.node == c.node) {
-                Some(m) if c.issued_ms > m.issued_ms => {
-                    *m = c.clone();
+            match self.members.iter().position(|m| m.node == c.node) {
+                Some(i) if c.issued_ms > self.members[i].issued_ms => {
+                    self.members[i] = c.clone();
                     changed = true;
                 }
                 Some(_) => {}
