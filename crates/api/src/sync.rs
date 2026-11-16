@@ -41,7 +41,7 @@ const MESH_PREFIX: &str = "mesh:";
 const MAX_PICTURE: u64 = 20 << 20;
 
 fn refused(message: &str) -> ApiError {
-    ApiError { status: StatusCode::FORBIDDEN, code: "forbidden", message: message.to_owned(), needs: None }
+    ApiError { status: StatusCode::FORBIDDEN, code: "forbidden", message: message.to_owned(), needs: None, plan: None }
 }
 
 /// The node id of the device asking: an owner's paired device, through the
@@ -64,13 +64,13 @@ pub(crate) fn peer_of(caller: &Caller) -> Result<String, ApiError> {
 async fn allowed(sh: &Arc<Shared>, caller: &Caller) -> Result<String, ApiError> {
     let peer = peer_of(caller)?;
     if let Some(why) = sh.lib.sync_blocked() {
-        return Err(ApiError { status: StatusCode::SERVICE_UNAVAILABLE, code: "sync_blocked", message: why, needs: None });
+        return Err(ApiError { status: StatusCode::SERVICE_UNAVAILABLE, code: "sync_blocked", message: why, needs: None, plan: None });
     }
     let lib = sh.lib.clone();
     let p = peer.clone();
     let off = blocking(move || lib.sync_cursors(&p).map(|c| c.off).map_err(db)).await?;
     if off {
-        return Err(ApiError { status: StatusCode::FORBIDDEN, code: "sync_off", message: "Синхронизация с этим устройством выключена".into(), needs: None });
+        return Err(ApiError { status: StatusCode::FORBIDDEN, code: "sync_off", message: "Синхронизация с этим устройством выключена".into(), needs: None, plan: None });
     }
     Ok(peer)
 }
@@ -107,7 +107,7 @@ pub async fn apply(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
         return Err(ApiError::bad_request("Нет такой таблицы"));
     }
     if nikgob_library::page_ahead(&page, nikgob_library::now_ms()) {
-        return Err(ApiError { status: StatusCode::CONFLICT, code: "clock_ahead", message: "Часы устройства спешат".into(), needs: None });
+        return Err(ApiError { status: StatusCode::CONFLICT, code: "clock_ahead", message: "Часы устройства спешат".into(), needs: None, plan: None });
     }
     let lib = sh.lib.clone();
     Ok(Json(blocking(move || lib.sync_apply(&page, &peer, false).map_err(db)).await?))

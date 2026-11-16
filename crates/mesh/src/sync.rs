@@ -694,7 +694,7 @@ mod tests {
         let lib = Library::open_in_memory().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let here = dir.path().join("here.jpg");
-        std::fs::write(&here, b"ÿØÿ").unwrap();
+        std::fs::write(&here, b"\xff\xd8\xff").unwrap();
         let gone = dir.path().join("gone.jpg");
         for (i, h) in ["h1", "h2", "h3", "h4"].into_iter().enumerate() {
             let id = lib.upsert_artist(&nikgob_core::model::Artist::new(format!("A {i}"))).unwrap().id.to_string();
