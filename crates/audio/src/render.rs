@@ -138,7 +138,7 @@ pub(crate) struct Renderer {
     fade_target: f32,
     fade_step: f32,
     fade_gen: u32,
-    /// The duck's gain, gliding (see [`Shared::duck_gain`]), and the
+    /// The duck's gain, gliding (see [`Shared::duck`]), and the
     /// `duck_gen` seen last.
     duck: Glide,
     duck_gen: u32,
@@ -527,7 +527,7 @@ impl Renderer {
         }
     }
 
-    /// A new duck asked for ([`Shared::duck_gain`]): the gain glides there
+    /// A new duck asked for ([`Shared::duck`]): the gain glides there
     /// from where it is.
     fn take_duck(&mut self) {
         let duck_gen = self.sh.duck_gen.load(Ordering::Acquire);
@@ -535,9 +535,11 @@ impl Renderer {
             return;
         }
         self.duck_gen = duck_gen;
-        let gain = f32::from_bits(self.sh.duck_gain.load(Ordering::Relaxed));
-        let frames = ns_to_frames(self.sh.duck_over_ns.load(Ordering::Relaxed), self.rate.max(1));
-        self.duck.set(gain, frames);
+        // One request whole: a newer one read here is applied again at its
+        // own `duck_gen`, from where this one got to.
+        let (gain, over) = self.sh.duck();
+        let ns = u64::try_from(over.as_nanos()).unwrap_or(u64::MAX);
+        self.duck.set(gain, ns_to_frames(ns, self.rate.max(1)));
     }
 
     /// Counts callbacks of steady playback that came late or found the

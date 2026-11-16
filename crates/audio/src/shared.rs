@@ -142,12 +142,11 @@ pub(crate) struct Shared {
     pub fade_level: AtomicU32,
     pub fade_over_ns: AtomicU64,
     pub fade_gen: AtomicU32,
-    /// The duck (a voice assistant lowering the music): a linear gain after
-    /// the volume and the fade (0..1, f32 bits), how long the glide to it
-    /// takes (ns, 0 = at once); then `duck_gen`, which the callback
+    /// The duck (a voice assistant lowering the music): one request as one
+    /// value, so the callback never takes the gain of one and the glide of
+    /// another ([`pack_duck`]); then `duck_gen`, which the callback
     /// watches. Neither the volume nor the fade changes for it.
-    pub duck_gain: AtomicU32,
-    pub duck_over_ns: AtomicU64,
+    pub duck: AtomicU64,
     pub duck_gen: AtomicU32,
     pub normalization: AtomicBool,
     /// Crossfade length in milliseconds; 0 means gapless.
@@ -204,8 +203,7 @@ impl Shared {
             fade_level: AtomicU32::new(1f32.to_bits()),
             fade_over_ns: AtomicU64::new(0),
             fade_gen: AtomicU32::new(0),
-            duck_gain: AtomicU32::new(1f32.to_bits()),
-            duck_over_ns: AtomicU64::new(0),
+            duck: AtomicU64::new(pack_duck(1.0, Duration::ZERO)),
             duck_gen: AtomicU32::new(0),
             normalization: AtomicBool::new(true),
             crossfade_ms: AtomicU32::new(0),
@@ -236,11 +234,13 @@ impl Shared {
     /// Asks the callback to glide the duck to the linear `gain` (clamped to
     /// 0..1; not a number is no duck) over `over`.
     pub(crate) fn set_duck(&self, gain: f32, over: Duration) {
-        let gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
-        self.duck_gain.store(gain.to_bits(), Ordering::Relaxed);
-        self.duck_over_ns
-            .store(u64::try_from(over.as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.duck.store(pack_duck(gain, over), Ordering::Release);
         self.duck_gen.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The duck asked for last: its gain and its glide.
+    pub(crate) fn duck(&self) -> (f32, Duration) {
+        unpack_duck(self.duck.load(Ordering::Acquire))
     }
 }
 
@@ -279,6 +279,21 @@ impl LogLimiter {
         self.last = Some(now);
         Some(std::mem::take(&mut self.pending))
     }
+}
+
+/// A duck request in one word: the gain's `f32` bits above, the glide in
+/// microseconds below (up to 71 minutes). The gain is clamped to 0..1, not
+/// a number is no duck.
+pub(crate) fn pack_duck(gain: f32, over: Duration) -> u64 {
+    let gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
+    let us = u32::try_from(over.as_micros()).unwrap_or(u32::MAX);
+    (u64::from(gain.to_bits()) << 32) | u64::from(us)
+}
+
+pub(crate) fn unpack_duck(word: u64) -> (f32, Duration) {
+    let gain = f32::from_bits((word >> 32) as u32);
+    let us = (word & u64::from(u32::MAX)) as u32;
+    (gain, Duration::from_micros(u64::from(us)))
 }
 
 /// Perceptual volume curve: slider position 0..1 to linear gain.
@@ -352,6 +367,23 @@ mod tests {
         assert_eq!(l.record(0, t0 + every), Some(2));
         assert_eq!(l.record(0, t0 + every * 3), None);
         assert_eq!(l.record(4, t0 + every * 3), Some(4));
+    }
+
+    #[test]
+    fn a_duck_request_is_one_word_both_ways() {
+        let (g, d) = unpack_duck(pack_duck(0.18, Duration::from_millis(120)));
+        assert_eq!((g, d), (0.18, Duration::from_millis(120)));
+        assert_eq!(unpack_duck(pack_duck(1.0, Duration::ZERO)), (1.0, Duration::ZERO));
+        assert_eq!(unpack_duck(pack_duck(7.0, Duration::from_secs(5))).0, 1.0);
+        assert_eq!(unpack_duck(pack_duck(f32::NAN, Duration::ZERO)).0, 1.0);
+        assert_eq!(unpack_duck(pack_duck(-1.0, Duration::ZERO)).0, 0.0);
+        // A glide too long for the word is the longest it holds.
+        assert_eq!(unpack_duck(pack_duck(0.5, Duration::from_secs(1 << 40))).1, Duration::from_micros(u64::from(u32::MAX)));
+        let sh = Shared::new();
+        assert_eq!(sh.duck(), (1.0, Duration::ZERO));
+        sh.set_duck(0.03, Duration::from_millis(80));
+        assert_eq!(sh.duck(), (0.03, Duration::from_millis(80)));
+        assert_eq!(sh.duck_gen.load(Ordering::Acquire), 1);
     }
 
     #[test]
