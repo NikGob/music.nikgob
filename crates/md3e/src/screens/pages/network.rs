@@ -4,7 +4,14 @@
 //! on a ring; this computer first. A card: the kind's shape (its fill:
 //! online; turning: music plays there), the name, ⋮; what plays there on a
 //! plate of its own (the card grows for it); the storage as a bar and a
-//! number.
+//! number. A few devices take the room there is: wider cards, further
+//! apart. A small bar (back and the title on one line) leaves the mat the
+//! height of the page.
+//!
+//! A card can be picked up and moved: let go near its place or onto
+//! another card it springs back, elsewhere it stays (for the session).
+//! While something flows the cards wander a few dp; at rest nothing moves
+//! and nothing is drawn again.
 //!
 //! Between the cards nothing lies at rest. A line grows only while
 //! something flows: files on their way — a wave from this computer to the
@@ -32,7 +39,7 @@ use super::add_device::{self, AddTab};
 use super::mesh_ui::{self, Act, Look, MeshUi};
 use crate::{
     Icon, Theme, TypeRole,
-    components::{BottomSheet, Button, IconButton, Size, Style, SupportingPane, anim, paint, paint::Radii},
+    components::{BottomSheet, Button, IconButton, Size, SmallAppBar, Style, SupportingPane, anim, paint, paint::Radii},
     tokens::{Elevation, state},
 };
 
@@ -46,6 +53,12 @@ const CARD_SHORT: f32 = 104.0;
 const CARD_PAD: f32 = 14.0;
 /// The courtyard's least room between two cards.
 const COURT: f32 = 48.0;
+/// The widest a card grows in a roomy field.
+const CARD_W_MAX: f32 = 340.0;
+/// A card dropped this near its place goes back to it.
+const SNAP_HOME: f32 = 48.0;
+/// How far a card wanders while something flows.
+const DRIFT_DP: f32 = 4.0;
 const PANE_W: f32 = 360.0;
 const GAP: f32 = 24.0;
 /// The foot of the mat: the nearby players and «Добавить устройство».
@@ -60,6 +73,12 @@ pub(crate) struct MapState {
     selected: Option<String>,
     /// Each transfer's last bytes seen, when, and its smoothed speed (B/s).
     speeds: HashMap<String, (u64, f64, f64)>,
+    /// Cards dropped away from their places: where, as fractions of the
+    /// field from its centre (a resize keeps them where they were put).
+    dropped: HashMap<String, Vec2>,
+    /// The card being dragged, and where the pointer holds it (from its
+    /// centre).
+    drag: Option<(String, Vec2)>,
 }
 
 impl MapState {
@@ -135,26 +154,42 @@ fn wall_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// Where `n` cards stand, as offsets of their centres from the courtyard's
-/// centre, in a field of `size`: two side by side, three as a triangle,
-/// four as two pairs, more on a ring from the top; the first is this
-/// computer (left, top left, top).
-pub(crate) fn slots(n: usize, size: Vec2) -> Vec<Vec2> {
-    let sx = (size.x * 0.5 - CARD_W * 0.5 - 8.0).max(0.0);
+/// How wide the cards are in a field of `size` holding `n`: wider while a
+/// few have room (the field is not left empty around small cards), never
+/// narrower than [`CARD_W`].
+pub(crate) fn card_width(n: usize, size: Vec2) -> f32 {
+    let share = match n {
+        0..=2 => 0.3,
+        3 | 4 => 0.26,
+        _ => 0.0,
+    };
+    (size.x * share).clamp(CARD_W, CARD_W_MAX)
+}
+
+/// Where `n` cards `w` wide stand, as offsets of their centres from the
+/// courtyard's centre, in a field of `size`: two side by side, three as a
+/// triangle, four as two pairs, more on a ring from the top; the first is
+/// this computer (left, top left, top). A few spread over the field as it
+/// grows, the courtyard between them.
+pub(crate) fn slots(n: usize, size: Vec2, w: f32) -> Vec<Vec2> {
+    let sx = (size.x * 0.5 - w * 0.5 - 8.0).max(0.0);
     let sy = (size.y * 0.5 - CARD_H * 0.5 - 8.0).max(0.0);
+    // At least far enough apart for the courtyard, else a share of the
+    // room there is.
+    let spread = |room: f32, share: f32, least: f32| room.min((room * share).max(least));
     match n {
         0 => Vec::new(),
         1 => vec![Vec2::ZERO],
         2 => {
-            let a = sx.min(CARD_W * 0.5 + 120.0);
+            let a = spread(sx, 0.7, w * 0.5 + COURT);
             vec![vec2(-a, 0.0), vec2(a, 0.0)]
         }
         3 => {
-            let (a, b) = (sx.min(CARD_W * 0.5 + 100.0), sy.min(CARD_H * 0.5 + 56.0));
+            let (a, b) = (spread(sx, 0.65, w * 0.5 + COURT), spread(sy, 0.6, CARD_H * 0.5 + COURT * 0.5));
             vec![vec2(-a, -b), vec2(a, -b), vec2(0.0, b)]
         }
         4 => {
-            let (a, b) = (sx.min(CARD_W * 0.5 + 90.0), sy.min(CARD_H * 0.5 + 60.0));
+            let (a, b) = (spread(sx, 0.65, w * 0.5 + COURT), spread(sy, 0.6, CARD_H * 0.5 + COURT * 0.5));
             vec![vec2(-a, -b), vec2(a, -b), vec2(-a, b), vec2(a, b)]
         }
         _ => (0..n)
@@ -166,15 +201,40 @@ pub(crate) fn slots(n: usize, size: Vec2) -> Vec<Vec2> {
     }
 }
 
-/// The cards at `slots` keep the courtyard between them and stay in the
-/// field.
-pub(crate) fn fits(slots: &[Vec2], size: Vec2) -> bool {
-    let half = vec2(CARD_W, CARD_H) * 0.5;
-    let rects: Vec<Rect> = slots.iter().map(|c| Rect::from_center_size(Pos2::ZERO + *c, vec2(CARD_W, CARD_H))).collect();
+/// The cards `w` wide at `slots` keep the courtyard between them and stay
+/// in the field.
+pub(crate) fn fits(slots: &[Vec2], size: Vec2, w: f32) -> bool {
+    let rects: Vec<Rect> = slots.iter().map(|c| Rect::from_center_size(Pos2::ZERO + *c, vec2(w, CARD_H))).collect();
     let field = Rect::from_center_size(Pos2::ZERO, size);
     rects.iter().all(|r| field.contains_rect(*r))
         && rects.iter().enumerate().all(|(i, a)| rects[i + 1..].iter().all(|b| !a.expand(COURT * 0.5).intersects(*b)))
-        && half.x > 0.0
+        && w > 0.0
+}
+
+/// Keeps an offset `off` of a card `w` wide inside a field of `size`.
+fn inside(off: Vec2, size: Vec2, w: f32) -> Vec2 {
+    let hx = (size.x * 0.5 - w * 0.5).max(0.0);
+    let hy = (size.y * 0.5 - CARD_H * 0.5).max(0.0);
+    vec2(off.x.clamp(-hx, hx), off.y.clamp(-hy, hy))
+}
+
+/// Where a card dropped at `off` stays: back at `home` when dropped near it
+/// or onto another card (`others`, their centres; the courtyard kept),
+/// else where it was put, in the field. `None`: home.
+pub(crate) fn drop_at(off: Vec2, home: Vec2, others: &[Vec2], size: Vec2, w: f32) -> Option<Vec2> {
+    let off = inside(off, size, w);
+    let r = Rect::from_center_size(Pos2::ZERO + off, vec2(w, CARD_H));
+    let crowded = others.iter().any(|o| r.expand(COURT * 0.5).intersects(Rect::from_center_size(Pos2::ZERO + *o, vec2(w, CARD_H))));
+    ((off - home).length() > SNAP_HOME && !crowded).then_some(off)
+}
+
+/// The slow wander of card `i` at `t` (s): a few dp, each card on its own
+/// period.
+pub(crate) fn drift(i: usize, t: f64) -> Vec2 {
+    let p = i as f64 * 1.7;
+    let x = (t * std::f64::consts::TAU / (11.0 + i as f64) + p).sin();
+    let y = (t * std::f64::consts::TAU / (13.0 + 0.5 * i as f64) + p * 1.3).cos();
+    vec2(x as f32, y as f32) * DRIFT_DP
 }
 
 /// Where the segment from `inside` toward `toward` leaves `rect` (the
@@ -194,30 +254,34 @@ pub(crate) fn edge_point(rect: Rect, toward: Pos2, gap: f32) -> Pos2 {
 /// The page: under its bar, the mat with the cards (and the passport beside
 /// it), or a column of cards on a narrow window.
 pub fn show(ui: &mut Ui, state: &ViewState, bottom_inset: f32, pages: &mut PageState, out: &mut Vec<Command>) -> Option<Route> {
-    super::detail::with_bar(ui, TITLE, pages, |ui, pages| {
-        let full = ui.max_rect();
-        let top = ui.cursor().top();
-        let area = Rect::from_min_max(pos2(full.left(), top), pos2(full.right(), (full.bottom() - bottom_inset).max(top + 200.0)));
-        ui.allocate_rect(area, Sense::hover());
-        let mem = &mut pages.mesh;
-        // A device that went away takes its passport with it.
-        if let Some(sel) = mem.map.selected.clone()
-            && !sel.is_empty()
-            && state.mesh.node(&sel).is_none()
-        {
-            mem.map.selected = None;
-        }
-        track_speeds(&mut mem.map, &state.mesh, anim::now(ui.ctx()));
-        let wall = wall_ms();
-        let devs = devices(state, wall);
-        if !map_fits(area.width(), mem.map.selected.is_some()) {
-            column(ui, area, state, &devs, mem, out);
-        } else {
-            map(ui, area, state, &devs, mem, out);
-        }
-        mesh_ui::overlays(ui, state, mem, out);
-        None
-    })
+    // A small bar (the back arrow and the title on one line): the mat
+    // takes the rest of the height.
+    let bar = SmallAppBar::new(TITLE).leading(Icon::ArrowBack, "Назад (Esc)").id_salt("mesh-map-bar").show(ui, |_| {});
+    if bar.leading_clicked {
+        pages.go_back = true;
+    }
+    let full = ui.max_rect();
+    let top = ui.cursor().top();
+    let area = Rect::from_min_max(pos2(full.left(), top), pos2(full.right(), (full.bottom() - bottom_inset).max(top + 200.0)));
+    ui.allocate_rect(area, Sense::hover());
+    let mem = &mut pages.mesh;
+    // A device that went away takes its passport with it.
+    if let Some(sel) = mem.map.selected.clone()
+        && !sel.is_empty()
+        && state.mesh.node(&sel).is_none()
+    {
+        mem.map.selected = None;
+    }
+    track_speeds(&mut mem.map, &state.mesh, anim::now(ui.ctx()));
+    let wall = wall_ms();
+    let devs = devices(state, wall);
+    if !map_fits(area.width(), mem.map.selected.is_some()) {
+        column(ui, area, state, &devs, mem, out);
+    } else {
+        map(ui, area, state, &devs, mem, out);
+    }
+    mesh_ui::overlays(ui, state, mem, out);
+    None
 }
 
 /// The mat of cards has room in `width` beside the passport when one is
@@ -264,28 +328,61 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
     let mat = Rect::from_min_size(area.min, vec2(mat_w.max(NARROW * 0.5), area.height()));
     paint::container(ui.painter(), mat, Radii::all(28.0), s.surface_container_lowest, Stroke::NONE);
     let field = Rect::from_min_max(mat.min + vec2(16.0, 16.0), pos2(mat.right() - 16.0, mat.bottom() - FOOT_H - 8.0));
-    let mut place = slots(devs.len(), field.size());
+    let size = field.size();
+    let w = card_width(devs.len(), size);
+    let mut home = slots(devs.len(), size, w);
     // Too many for the field: a ring as wide as it goes, the cards may
     // touch rather than leave it.
-    if !fits(&place, field.size()) && devs.len() >= 2 {
-        place = slots(devs.len().max(5), field.size()).into_iter().take(devs.len()).collect();
+    if !fits(&home, size, w) && devs.len() >= 2 {
+        home = slots(devs.len().max(5), size, w).into_iter().take(devs.len()).collect();
+    }
+    // A card dropped elsewhere stays there (as a share of the field).
+    mem.map.dropped.retain(|id, _| devs.iter().any(|d| d.id == id.as_str()));
+    let place: Vec<Vec2> = devs
+        .iter()
+        .zip(&home)
+        .map(|(d, h)| mem.map.dropped.get(d.id).map_or(*h, |f| inside(vec2(f.x * size.x, f.y * size.y), size, w)))
+        .collect();
+    // While something flows the cards wander a little (the page draws
+    // anyway then); at rest they stand still and nothing is drawn.
+    let flowing = !theme.reduced_motion && devs.iter().any(|d| d.look.playing || d.node.is_some_and(|n| n.transfer.is_some()));
+    let wander = anim::fraction(&ctx, egui::Id::new("mesh-map-wander"), if flowing { 1.0 } else { 0.0 }, motion.slow_effects);
+    if wander > 0.001 {
+        ctx.request_repaint();
+    }
+    let t = anim::now(&ctx);
+    let (pointer, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
+    // Let go (wherever the release went): the card is no longer held.
+    if !down {
+        mem.map.drag = None;
     }
     // Every card moves to its place on a spring (a device that comes or
-    // goes, a window that resizes).
+    // goes, a window that resizes, a card let go); the one held follows the
+    // pointer.
     let centres: Vec<Pos2> = devs
         .iter()
         .zip(&place)
-        .map(|(d, off)| {
+        .enumerate()
+        .map(|(i, (d, off))| {
             let id = egui::Id::new(("mesh-map-card-pos", d.id));
+            let held = mem.map.drag.as_ref().filter(|(h, _)| h == d.id).map(|(_, grab)| *grab);
+            if let (Some(grab), Some(p)) = (held, pointer) {
+                let at = p + grab;
+                let at = field.center() + inside(at - field.center(), size, w);
+                anim::snap_f32(&ctx, id.with("x"), at.x);
+                anim::snap_f32(&ctx, id.with("y"), at.y);
+                return at;
+            }
             let target = field.center() + *off;
-            pos2(anim::f32(&ctx, id.with("x"), target.x, motion.default_spatial), anim::f32(&ctx, id.with("y"), target.y, motion.default_spatial))
+            let at = pos2(anim::f32(&ctx, id.with("x"), target.x, motion.default_spatial), anim::f32(&ctx, id.with("y"), target.y, motion.default_spatial));
+            at + drift(i, t) * wander
         })
         .collect();
     let heights: Vec<f32> = devs
         .iter()
         .map(|d| anim::f32(&ctx, egui::Id::new(("mesh-map-card-h", d.id)), if d.playing.is_some() { CARD_H } else { CARD_SHORT }, motion.default_spatial))
         .collect();
-    let rects: Vec<Rect> = centres.iter().zip(&heights).map(|(c, h)| Rect::from_center_size(*c, vec2(CARD_W, *h))).collect();
+    let rects: Vec<Rect> = centres.iter().zip(&heights).map(|(c, h)| Rect::from_center_size(*c, vec2(w, *h))).collect();
     // What flows, under the cards.
     if let Some(this) = rects.first().copied() {
         for (i, d) in devs.iter().enumerate().skip(1) {
@@ -295,9 +392,30 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
     let mut clicked = None;
     for (i, d) in devs.iter().enumerate() {
         let selected = mem.map.selected.as_deref() == Some(d.id);
-        let (r, act) = card(ui, rects[i], d, selected, &state.mesh);
+        let (r, act) = card(ui, rects[i], d, selected, &state.mesh, true);
         if r.clicked() {
             clicked = Some(d.id.to_owned());
+        }
+        if r.drag_started()
+            && let Some(p) = r.interact_pointer_pos()
+        {
+            mem.map.drag = Some((d.id.to_owned(), rects[i].center() - p));
+        }
+        if r.dragged() {
+            ctx.request_repaint();
+        }
+        if r.drag_stopped() {
+            mem.map.drag = None;
+            let off = centres[i] - field.center();
+            let others: Vec<Vec2> = place.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, o)| *o).collect();
+            match drop_at(off, home[i], &others, size, w) {
+                Some(o) => {
+                    mem.map.dropped.insert(d.id.to_owned(), vec2(o.x / size.x.max(1.0), o.y / size.y.max(1.0)));
+                }
+                None => {
+                    mem.map.dropped.remove(d.id);
+                }
+            }
         }
         if let Some(a) = act {
             mesh_ui::act(ui, &state.mesh, d.node, a, mem, state, out);
@@ -333,7 +451,7 @@ fn column(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mu
             let h = anim::f32(&ctx, egui::Id::new(("mesh-map-card-h", d.id)), if d.playing.is_some() { CARD_H } else { CARD_SHORT }, Theme::get(&ctx).motion.default_spatial);
             let (slot, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
             let selected = mem.map.selected.as_deref() == Some(d.id);
-            let (r, act) = card(ui, slot, d, selected, &state.mesh);
+            let (r, act) = card(ui, slot, d, selected, &state.mesh, false);
             if r.clicked() {
                 clicked = Some(d.id.to_owned());
             }
@@ -362,7 +480,7 @@ fn column(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mu
 
 /// One card at `rect`. Its response (a click opens the passport) and what
 /// its ⋮ asked for.
-fn card(ui: &mut Ui, rect: Rect, d: &Dev<'_>, selected: bool, m: &MeshView) -> (egui::Response, Option<Act>) {
+fn card(ui: &mut Ui, rect: Rect, d: &Dev<'_>, selected: bool, m: &MeshView, movable: bool) -> (egui::Response, Option<Act>) {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let (s, motion) = (theme.scheme, theme.motion);
@@ -378,9 +496,11 @@ fn card(ui: &mut Ui, rect: Rect, d: &Dev<'_>, selected: bool, m: &MeshView) -> (
     };
     let fill = anim::color(&ctx, id.with("fill"), fill, motion.default_effects);
     let radius = anim::f32(&ctx, id.with("r"), radius, motion.fast_spatial);
+    // Held: lifted a little off the mat.
+    let scale = if movable && ctx.dragged_id() == Some(id) { scale + 0.03 } else { scale };
     let scale = anim::f32(&ctx, id.with("scale"), scale, motion.fast_spatial);
     let rect = Rect::from_center_size(rect.center(), rect.size() * scale);
-    let response = ui.interact(rect, id, Sense::click());
+    let response = ui.interact(rect, id, if movable { Sense::click_and_drag() } else { Sense::click() });
     let radii = Radii::all(radius).clamped(rect);
     if lift {
         paint::shadow(ui.painter(), rect, radii, Elevation::Level1);
@@ -739,15 +859,60 @@ mod tests {
     fn the_cards_stand_apart_around_the_courtyard() {
         let field = vec2(1000.0, 620.0);
         for n in 1..=5 {
-            let p = slots(n, field);
+            let w = card_width(n, field);
+            let p = slots(n, field, w);
             assert_eq!(p.len(), n);
-            assert!(fits(&p, field), "{n} cards: {p:?}");
+            assert!(fits(&p, field, w), "{n} cards: {p:?}");
         }
-        assert!(slots(2, field)[0].x < 0.0, "this computer on the left");
-        assert!(slots(3, field)[0].y < 0.0 && slots(3, field)[0].x < 0.0, "top left");
-        assert!(slots(5, field)[0].y < 0.0 && slots(5, field)[0].x.abs() < 1.0, "on top of the ring");
+        assert!(slots(2, field, CARD_W)[0].x < 0.0, "this computer on the left");
+        assert!(slots(3, field, CARD_W)[0].y < 0.0 && slots(3, field, CARD_W)[0].x < 0.0, "top left");
+        assert!(slots(5, field, CARD_W)[0].y < 0.0 && slots(5, field, CARD_W)[0].x.abs() < 1.0, "on top of the ring");
         // A field too small for two side by side does not fit them.
-        assert!(!fits(&slots(2, vec2(420.0, 300.0)), vec2(420.0, 300.0)));
+        assert!(!fits(&slots(2, vec2(420.0, 300.0), CARD_W), vec2(420.0, 300.0), CARD_W));
+    }
+
+    /// Two devices in a roomy field: wider cards, set well apart (the field
+    /// is not left empty around two small cards); many keep the card's own
+    /// width.
+    #[test]
+    fn a_few_cards_take_the_room_there_is() {
+        let roomy = vec2(1300.0, 700.0);
+        assert!(card_width(2, roomy) > CARD_W);
+        assert!(card_width(2, roomy) <= CARD_W_MAX);
+        assert_eq!(card_width(6, roomy), CARD_W);
+        assert_eq!(card_width(2, vec2(600.0, 400.0)), CARD_W, "never narrower");
+        let w = card_width(2, roomy);
+        let p = slots(2, roomy, w);
+        let room = roomy.x * 0.5 - w * 0.5 - 8.0;
+        assert!(p[1].x >= room * 0.69, "spread over the field: {p:?}");
+        let small = slots(2, vec2(900.0, 500.0), CARD_W);
+        assert!(p[1].x > small[1].x, "a larger field, further apart");
+    }
+
+    /// A card let go near its place, or onto another card, goes back; let
+    /// go elsewhere it stays there, inside the field.
+    #[test]
+    fn a_dropped_card_stays_or_goes_home() {
+        let size = vec2(1000.0, 600.0);
+        let home = vec2(-240.0, 0.0);
+        let others = [vec2(240.0, 0.0)];
+        assert_eq!(drop_at(home + vec2(20.0, 10.0), home, &others, size, CARD_W), None, "near its place");
+        assert_eq!(drop_at(vec2(200.0, 30.0), home, &others, size, CARD_W), None, "onto the other card");
+        assert_eq!(drop_at(vec2(-100.0, -180.0), home, &others, size, CARD_W), Some(vec2(-100.0, -180.0)));
+        let far = drop_at(vec2(-900.0, 900.0), home, &others, size, CARD_W).expect("kept");
+        assert_eq!(far, vec2(-(500.0 - CARD_W * 0.5), 300.0 - CARD_H * 0.5), "kept inside the field");
+    }
+
+    /// The wander is a few dp, never more, and each card has its own.
+    #[test]
+    fn the_cards_wander_a_little() {
+        for i in 0..5 {
+            for k in 0..200 {
+                let d = drift(i, f64::from(k) * 0.37);
+                assert!(d.x.abs() <= DRIFT_DP + 1e-3 && d.y.abs() <= DRIFT_DP + 1e-3, "{d:?}");
+            }
+        }
+        assert_ne!(drift(0, 3.0), drift(1, 3.0));
     }
 
     #[test]
