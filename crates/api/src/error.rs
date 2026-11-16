@@ -18,12 +18,17 @@ pub struct ErrorBody {
     /// `nothing_to_play`, `rate_limited`, `no_audio`, `player_timeout`,
     /// `trash_off`, `confirm_unknown`, `confirm_expired`,
     /// `confirm_mismatch`, `no_services`, `lookup_failed`,
-    /// `lookup_timeout`, `internal`.
+    /// `lookup_timeout`, `plan_changed`, `not_done`, `too_many`,
+    /// `outside_library`, `internal`.
     pub error: String,
     /// What went wrong, in Russian.
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<ErrorDetails>,
+    /// `plan_changed`: the plan as it is now, with a new `confirm_token`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub plan: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
@@ -40,11 +45,13 @@ pub struct ApiError {
     pub code: &'static str,
     pub message: String,
     pub needs: Option<&'static str>,
+    /// The new plan of a `plan_changed`.
+    pub plan: Option<serde_json::Value>,
 }
 
 impl ApiError {
     fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self { status, code, message: message.into(), needs: None }
+        Self { status, code, message: message.into(), needs: None, plan: None }
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
@@ -91,11 +98,21 @@ impl ApiError {
         Self::new(status, code, message)
     }
 
+    /// `409 plan_changed`: what was confirmed is not what would be done
+    /// now; `plan` is the new one, with its own token.
+    pub fn plan_changed(plan: serde_json::Value) -> Self {
+        Self {
+            plan: Some(plan),
+            ..Self::new(StatusCode::CONFLICT, "plan_changed", "План изменился с тех пор, как его показали: вот новый, подтверди его")
+        }
+    }
+
     pub fn body(&self) -> ErrorBody {
         ErrorBody {
             error: self.code.to_owned(),
             message: self.message.clone(),
             details: self.needs.map(|n| ErrorDetails { needs: Some(n.to_owned()) }),
+            plan: self.plan.clone(),
         }
     }
 }

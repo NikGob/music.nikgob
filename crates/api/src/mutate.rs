@@ -2,10 +2,14 @@
 //! likes and the rest of the feedback, playlists, tags and the Trash. The
 //! additive and reversible ones act at once; the destructive ones (tags,
 //! the Trash, removing from, renaming or deleting a playlist) answer the
-//! exact plan and a one-time `confirm_token` first ([`crate::confirm`]).
+//! exact plan and a one-time `confirm_token` first ([`crate::confirm`]),
+//! every item it would touch listed (so at most [`PLAN_MAX`] per request).
+//! A file outside the library is never touched: such tracks are listed
+//! apart and left alone.
 //! Nothing here deletes a file for good: the Trash only, and nothing at
 //! all while the Trash is off.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,16 +28,18 @@ use nikgob_view::{Command, LIKED_PLAYLIST, RecTarget, TagPatch};
 
 use crate::Shared;
 use crate::auth::Caller;
-use crate::confirm::{PlanAnswer, args_hash};
+use crate::confirm::{PlanAnswer, args_hash, plan_hash};
 use crate::error::{ApiError, Json, body, query_value};
 use crate::library::{LIKED_ID, Playlist, blocking, db};
 
-/// Tracks one retag may change at most.
-const RETAG_MAX: usize = 200;
-/// Tracks one request may move to the Trash at most.
-const TRASH_MAX: usize = 2000;
-/// Names a plan lists at most (the count says the rest).
-const PLAN_NAMES: usize = 50;
+/// Items one destructive request may touch at most: its plan lists every
+/// one of them.
+pub const PLAN_MAX: usize = 50;
+
+/// `400 too_many`: split the request.
+fn too_many(what: &str) -> ApiError {
+    ApiError::of(StatusCode::BAD_REQUEST, "too_many", format!("Не больше {PLAN_MAX} {what} за раз: раздели запрос"))
+}
 
 /// `service:id` of a service's track or album (`spotify:4uLU…`).
 pub fn remote_id(s: &str) -> Option<RemoteId> {
@@ -186,7 +192,13 @@ pub async fn feedback(State(sh): State<Arc<Shared>>, Extension(caller): Extensio
     let lib = sh.lib.clone();
     let t = target.clone();
     let title = blocking(move || title_of(&lib, &t)).await?;
-    sh.run_by(Some(caller.actor), vec![command]).await?;
+    let mut commands = Vec::new();
+    if let Target::StreamTrack(r) = &target {
+        let tracks = crate::discover::stream_tracks(&sh, &caller, std::slice::from_ref(r)).await?;
+        commands.push(Command::ApiKnow(tracks));
+    }
+    commands.push(command);
+    sh.run_by(Some(caller.actor), commands).await?;
     Ok(done(json!({"action": action.trim(), "kind": kind.trim(), "id": id.trim(), "title": title})))
 }
 
@@ -248,26 +260,24 @@ pub async fn create_playlist(State(sh): State<Arc<Shared>>, Extension(caller): E
     let remotes = remote_ids(&b.remote_track_ids)?;
     let lib = sh.lib.clone();
     let album = b.album_id.clone();
-    let (before, tracks) = blocking(move || {
+    let tracks = blocking(move || {
         known_tracks(&lib, &tracks)?;
         tracks.extend(album_tracks(&lib, album.as_deref())?);
-        let before: Vec<PlaylistId> = lib.list_playlists().map_err(db)?.into_iter().filter_map(|p| p.id).collect();
-        Ok((before, tracks))
+        Ok(tracks)
     })
     .await?;
-    let first = if tracks.is_empty() { Command::CreatePlaylist(name.clone()) } else { Command::SaveTracksAsPlaylist { name: name.clone(), tracks } };
-    sh.run_by(Some(caller.actor), vec![first]).await?;
-    // The new playlist: the one of that name that was not there before.
-    let lib = sh.lib.clone();
-    let wanted = name.clone();
-    let id = blocking(move || {
-        Ok(lib.list_playlists().map_err(db)?.into_iter().filter_map(|p| p.id.filter(|id| !before.contains(id) && p.name == wanted)).next())
-    })
-    .await?
-    .ok_or_else(|| ApiError::internal("Плейлист не создался"))?;
+    let mut commands = Vec::new();
     if !remotes.is_empty() {
-        sh.run_by(Some(caller.actor), vec![Command::AddStreamToPlaylist(id, remotes)]).await?;
+        commands.push(Command::ApiKnow(crate::discover::stream_tracks(&sh, &caller, &remotes).await?));
     }
+    // The id is chosen here: the answer names this playlist, whatever
+    // other playlists of that name are made meanwhile.
+    let id = PlaylistId::new();
+    commands.push(Command::ApiCreatePlaylist { id, name, tracks });
+    if !remotes.is_empty() {
+        commands.push(Command::AddStreamToPlaylist(id, remotes));
+    }
+    sh.run_by(Some(caller.actor), commands).await?;
     let lib = sh.lib.clone();
     let p = blocking(move || playlist_now(&lib, id)).await?;
     Ok(done(json!({"playlist": p})))
@@ -310,6 +320,9 @@ pub async fn add_to_playlist(
     })
     .await?;
     let mut commands = Vec::new();
+    if !remotes.is_empty() {
+        commands.push(Command::ApiKnow(crate::discover::stream_tracks(&sh, &caller, &remotes).await?));
+    }
     if !tracks.is_empty() {
         commands.push(Command::AddToPlaylist(pid, tracks));
     }
@@ -325,16 +338,33 @@ pub async fn add_to_playlist(
     Ok(done(json!({"playlist": p})))
 }
 
-/// A destructive request's arguments, without its token.
-fn plan_or_take(sh: &Shared, caller: &Caller, route: &str, args: &Value, token: Option<&str>) -> Result<Option<String>, ApiError> {
-    let hash = args_hash(route, args);
-    match token.map(str::trim).filter(|t| !t.is_empty()) {
-        Some(t) => {
-            sh.confirms.take(t, &caller.token_id, &hash, Instant::now())?;
-            Ok(None)
-        }
-        None => sh.confirms.issue(&caller.token_id, &hash, Instant::now()).map(Some),
+/// What a destructive request would do, resolved now.
+pub struct Plan {
+    pub action: &'static str,
+    pub affected: usize,
+    pub plan: Value,
+    pub reversible: bool,
+}
+
+/// The gate of a destructive request. Without a token: the plan, with a
+/// new token bound to these arguments and to this plan. With one: `None`
+/// (go on) when it fits the arguments and the plan resolved now is the
+/// one it was shown with; else `409 plan_changed` with the plan as it is
+/// now and a new token (nothing done).
+fn gate(sh: &Shared, caller: &Caller, route: &str, args: &Value, token: Option<&str>, plan: Plan) -> Result<Option<PlanAnswer>, ApiError> {
+    let args = args_hash(route, args);
+    let shown = plan_hash(&plan.plan);
+    let answer = |token: String| PlanAnswer::new(plan.action, plan.affected, plan.plan.clone(), plan.reversible, token);
+    let Some(t) = token.map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(Some(answer(sh.confirms.issue(&caller.token_id, &args, &shown, Instant::now())?)));
+    };
+    let was = sh.confirms.take(t, &caller.token_id, &args, Instant::now())?;
+    if was == shown {
+        return Ok(None);
     }
+    let mut fresh = answer(sh.confirms.issue(&caller.token_id, &args, &shown, Instant::now())?);
+    fresh.status = "plan_changed".to_owned();
+    Err(ApiError::plan_changed(serde_json::to_value(fresh).unwrap_or_default()))
 }
 
 /// Either the plan (with a token) or, confirmed, what was done.
@@ -377,9 +407,9 @@ pub async fn rename_playlist(
     let lib = sh.lib.clone();
     let p = blocking(move || playlist_now(&lib, pid)).await?;
     let args = json!({"playlist": id, "name": name});
-    if let Some(token) = plan_or_take(&sh, &caller, "PUT /v1/playlists/{id}", &args, b.confirm_token.as_deref())? {
-        let plan = json!({"playlist": p.id, "before": p.name, "after": name});
-        return Ok(Json(Destructive::Plan(PlanAnswer::new("playlist_rename", 1, plan, true, token))));
+    let plan = Plan { action: "playlist_rename", affected: 1, plan: json!({"playlist": p.id, "before": p.name, "after": name}), reversible: true };
+    if let Some(answer) = gate(&sh, &caller, "PUT /v1/playlists/{id}", &args, b.confirm_token.as_deref(), plan)? {
+        return Ok(Json(Destructive::Plan(answer)));
     }
     sh.run_by(Some(caller.actor), vec![Command::RenamePlaylist(pid, name)]).await?;
     let lib = sh.lib.clone();
@@ -418,6 +448,9 @@ pub async fn remove_from_playlist(
     if tracks.is_empty() {
         return Err(ApiError::bad_request("Нужен track_ids"));
     }
+    if tracks.len() > PLAN_MAX {
+        return Err(too_many("песен"));
+    }
     let lib = sh.lib.clone();
     let t = tracks.clone();
     let (p, inside, outside) = blocking(move || {
@@ -435,13 +468,14 @@ pub async fn remove_from_playlist(
     })
     .await?;
     let args = json!({"playlist": id, "track_ids": tracks.iter().map(ToString::to_string).collect::<Vec<_>>()});
-    if let Some(token) = plan_or_take(&sh, &caller, "POST /v1/playlists/{id}/remove", &args, b.confirm_token.as_deref())? {
-        let plan = json!({
-            "playlist": {"id": p.id, "name": p.name, "track_count": p.track_count},
-            "remove": inside.iter().take(PLAN_NAMES).map(|(id, name)| json!({"id": id.to_string(), "name": name})).collect::<Vec<_>>(),
-            "not_in_playlist": outside,
-        });
-        return Ok(Json(Destructive::Plan(PlanAnswer::new("playlist_remove", inside.len(), plan, true, token))));
+    let plan = json!({
+        "playlist": {"id": p.id, "name": p.name, "track_count": p.track_count},
+        "remove": inside.iter().map(|(id, name)| json!({"id": id.to_string(), "name": name})).collect::<Vec<_>>(),
+        "not_in_playlist": outside,
+    });
+    let plan = Plan { action: "playlist_remove", affected: inside.len(), plan, reversible: true };
+    if let Some(answer) = gate(&sh, &caller, "POST /v1/playlists/{id}/remove", &args, b.confirm_token.as_deref(), plan)? {
+        return Ok(Json(Destructive::Plan(answer)));
     }
     let commands: Vec<Command> = inside.iter().map(|(t, _)| Command::RemoveFromPlaylist(pid, *t)).collect();
     let removed = commands.len();
@@ -476,9 +510,10 @@ pub async fn delete_playlist(
     let lib = sh.lib.clone();
     let p = blocking(move || playlist_now(&lib, pid)).await?;
     let token = query_value(raw.as_deref(), "confirm_token");
-    if let Some(token) = plan_or_take(&sh, &caller, "DELETE /v1/playlists/{id}", &json!({"playlist": id}), token.as_deref())? {
-        let plan = json!({"delete": {"id": p.id, "name": p.name, "track_count": p.track_count}, "songs_stay_in_library": true});
-        return Ok(Json(Destructive::Plan(PlanAnswer::new("playlist_delete", 1, plan, false, token))));
+    let plan = json!({"delete": {"id": p.id, "name": p.name, "track_count": p.track_count}, "songs_stay_in_library": true});
+    let plan = Plan { action: "playlist_delete", affected: 1, plan, reversible: false };
+    if let Some(answer) = gate(&sh, &caller, "DELETE /v1/playlists/{id}", &json!({"playlist": id}), token.as_deref(), plan)? {
+        return Ok(Json(Destructive::Plan(answer)));
     }
     sh.run_by(Some(caller.actor), vec![Command::DeletePlaylist(pid)]).await?;
     Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"deleted": p}) })))
@@ -527,6 +562,19 @@ pub fn retag_plan(now: &Value, p: &TagPatch) -> Option<Value> {
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
+/// The values a track's plan showed before the change, as a patch.
+pub fn shown_before(fields: &Value) -> TagPatch {
+    let mut m = serde_json::Map::new();
+    if let Some(f) = fields.as_object() {
+        for (k, v) in f {
+            if let Some(before) = v.get("before") {
+                m.insert(k.clone(), before.clone());
+            }
+        }
+    }
+    serde_json::from_value(Value::Object(m)).unwrap_or_default()
+}
+
 /// Writes tags into the files of songs and the library (with a
 /// confirmation; the plan has each song's fields before and after — the
 /// app keeps no other copy of them).
@@ -544,8 +592,8 @@ pub async fn retag(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     if tracks.is_empty() {
         return Err(ApiError::bad_request("Нужен track_ids"));
     }
-    if tracks.len() > RETAG_MAX {
-        return Err(ApiError::bad_request(format!("Не больше {RETAG_MAX} песен за раз")));
+    if tracks.len() > PLAN_MAX {
+        return Err(too_many("песен"));
     }
     check_patch(&b.changes)?;
     let lib = sh.lib.clone();
@@ -553,11 +601,16 @@ pub async fn retag(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     blocking(move || known_tracks(&lib, &t)).await?;
     // What the files have now.
     let t = tracks.clone();
-    let now = sh.ask(Some(caller.actor), Duration::from_secs(30), move |reply| Command::ApiReadTags { tracks: t, reply }).await?;
+    let read = sh.ask(Some(caller.actor), Duration::from_secs(30), move |reply| Command::ApiReadTags { tracks: t, reply }).await?;
+    let now = read.get("tags").cloned().unwrap_or_default();
+    let outside: Vec<String> = read.get("outside").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
     let mut changes = Vec::new();
     let mut without_file = Vec::new();
     let mut same = Vec::new();
     for t in &tracks {
+        if outside.contains(&t.to_string()) {
+            continue;
+        }
         match now.get(t.to_string()) {
             None => without_file.push(t.to_string()),
             Some(tags) => match retag_plan(tags, &b.changes) {
@@ -570,25 +623,33 @@ pub async fn retag(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
         }
     }
     let args = serde_json::to_value(RetagBody { confirm_token: None, ..b.clone() }).unwrap_or_default();
-    if let Some(token) = plan_or_take(&sh, &caller, "POST /v1/library/retag", &args, b.confirm_token.as_deref())? {
-        let plan = json!({
-            "tracks": changes.iter().take(PLAN_NAMES).map(|(id, name, fields)| json!({"id": id.to_string(), "name": name, "fields": fields})).collect::<Vec<_>>(),
-            "without_file": without_file,
-            "already_so": same,
-            "files_renamed": "the files move to the place their new tags name",
-        });
-        return Ok(Json(Destructive::Plan(PlanAnswer::new("retag", changes.len(), plan, false, token))));
+    let plan = json!({
+        "tracks": changes.iter().map(|(id, name, fields)| json!({"id": id.to_string(), "name": name, "fields": fields})).collect::<Vec<_>>(),
+        "without_file": without_file,
+        "already_so": same,
+        "outside_library": outside,
+        "files_renamed": "the files move to the place their new tags name",
+    });
+    let plan = Plan { action: "retag", affected: changes.len(), plan, reversible: false };
+    if let Some(answer) = gate(&sh, &caller, "POST /v1/library/retag", &args, b.confirm_token.as_deref(), plan)? {
+        return Ok(Json(Destructive::Plan(answer)));
     }
     if changes.is_empty() {
-        return Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"done": [], "failed": [], "without_file": without_file, "already_so": same}) })));
+        return Ok(Json(Destructive::Done(DoneAnswer {
+            status: "done".to_owned(),
+            result: json!({"done": [], "failed": [], "without_file": without_file, "already_so": same, "outside_library": outside}),
+        })));
     }
     let patch = b.changes.clone();
-    let list: Vec<(TrackId, TagPatch)> = changes.iter().map(|(t, _, _)| (*t, patch.clone())).collect();
+    // Each track with the values the plan showed: the loop writes nothing
+    // over a field that changed since.
+    let list: Vec<(TrackId, TagPatch, TagPatch)> = changes.iter().map(|(t, _, fields)| (*t, patch.clone(), shown_before(fields))).collect();
     let wait = Duration::from_secs((10 + list.len() as u64).min(120));
     let mut result = sh.ask(Some(caller.actor), wait, move |reply| Command::ApiRetag { tracks: list, reply }).await?;
     if let Some(m) = result.as_object_mut() {
         m.insert("without_file".to_owned(), json!(without_file));
         m.insert("already_so".to_owned(), json!(same));
+        m.insert("outside_library".to_owned(), json!(outside));
     }
     Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result })))
 }
@@ -603,6 +664,27 @@ pub struct TrashBody {
     #[serde(default)]
     pub album_ids: Vec<String>,
     pub confirm_token: Option<String>,
+}
+
+/// Whether the Trash would move a file of `track` (a live local file or
+/// the lyrics next to it) that lies outside `root` (links followed). No
+/// root (the library folder is not there): every file is outside.
+pub fn touches_outside(lib: &Library, track: TrackId, root: &[PathBuf]) -> Result<bool, ApiError> {
+    for s in lib.sources_of_track(track).map_err(db)? {
+        if !s.kind.is_local() {
+            continue;
+        }
+        let file = PathBuf::from(&s.locator);
+        if !file.exists() {
+            continue;
+        }
+        for f in [file.with_extension("lrc"), file] {
+            if f.exists() && crate::media::inside(&f, root).is_none() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// The toast's word for what goes: «Трек», «Альбом», «12 треков».
@@ -635,8 +717,10 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
     if tracks.is_empty() && albums.is_empty() {
         return Err(ApiError::bad_request("Нужен track_ids или album_ids"));
     }
+    let library_dir = sh.rt.state().prefs.library_dir.clone();
     let lib = sh.lib.clone();
-    let (all, names, album_names) = blocking(move || {
+    let (all, names, album_names, outside) = blocking(move || {
+        let root: Vec<PathBuf> = std::fs::canonicalize(&library_dir).ok().into_iter().collect();
         let mut all: Vec<TrackId> = Vec::new();
         let mut album_names = Vec::new();
         for a in &albums {
@@ -654,30 +738,41 @@ pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<C
                 all.push(t);
             }
         }
-        let rows = lib.get_track_rows(&all).map_err(db)?;
-        let names: Vec<Value> = all
+        if all.len() > PLAN_MAX {
+            return Err(too_many("песен (альбомы считаются по песням)"));
+        }
+        // A track with a file (or its lyrics) outside the library stays.
+        let mut outside = Vec::new();
+        let mut kept = Vec::new();
+        for t in all {
+            if touches_outside(&lib, t, &root)? {
+                outside.push(t);
+            } else {
+                kept.push(t);
+            }
+        }
+        let rows = lib.get_track_rows(&kept).map_err(db)?;
+        let names: Vec<Value> = kept
             .iter()
-            .take(PLAN_NAMES)
             .filter_map(|t| rows.get(t).map(|r| json!({"id": t.to_string(), "name": format!("{} — {}", r.artist, r.title), "has_file": r.has_local})))
             .collect();
-        Ok((all, names, album_names))
+        Ok((kept, names, album_names, outside))
     })
     .await?;
-    if all.len() > TRASH_MAX {
-        return Err(ApiError::bad_request(format!("Не больше {TRASH_MAX} песен за раз")));
+    if all.is_empty() && !outside.is_empty() {
+        return Err(ApiError::of(StatusCode::CONFLICT, "outside_library", "Файлы этих песен лежат вне библиотеки: через API они не удаляются"));
     }
     let args = serde_json::to_value(TrashBody { confirm_token: None, ..b.clone() }).unwrap_or_default();
-    if let Some(token) = plan_or_take(&sh, &caller, "POST /v1/library/trash", &args, b.confirm_token.as_deref())? {
-        let plan = json!({"albums": album_names, "tracks": names, "to": "the library's Trash, 30 days"});
-        return Ok(Json(Destructive::Plan(PlanAnswer::new("trash", all.len(), plan, true, token))));
+    let outside: Vec<String> = outside.iter().map(ToString::to_string).collect();
+    let plan = json!({"albums": album_names, "tracks": names, "outside_library": outside, "to": "the library's Trash, 30 days"});
+    let plan = Plan { action: "trash", affected: all.len(), plan, reversible: true };
+    if let Some(answer) = gate(&sh, &caller, "POST /v1/library/trash", &args, b.confirm_token.as_deref(), plan)? {
+        return Ok(Json(Destructive::Plan(answer)));
     }
-    let what = trash_what(all.len(), b.album_ids.len() == 1 && b.track_ids.is_empty());
+    let what = trash_what(all.len(), b.album_ids.len() == 1 && b.track_ids.is_empty() && outside.is_empty());
     let n = all.len();
     sh.run_by(Some(caller.actor), vec![Command::ApiTrash { tracks: all, what }]).await?;
     Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"trashed": n, "undo": "the app's «Отменить» or its Trash"}) })))
-}
-
-|(k, _)| *k).collect()
 }
 
 #[cfg(test)]
@@ -737,6 +832,40 @@ mod tests {
         assert!(check_patch(&TagPatch { year: Some("88".into()), ..Default::default() }).is_err());
         assert!(check_patch(&TagPatch { track_no: Some("x".into()), ..Default::default() }).is_err());
         assert!(check_patch(&TagPatch { year: Some("1988".into()), track_no: Some("3".into()), ..Default::default() }).is_ok());
+    }
+
+    #[test]
+    fn the_shown_values_become_the_expected_patch() {
+        let fields = json!({"title": {"before": "Old", "after": "New"}, "year": {"before": "", "after": "1988"}});
+        let p = shown_before(&fields);
+        assert_eq!(p.title.as_deref(), Some("Old"));
+        assert_eq!(p.year.as_deref(), Some(""));
+        assert_eq!(p.artist, None, "a field the plan did not show is not checked");
+    }
+
+    #[test]
+    fn a_track_with_a_file_outside_the_library_is_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("Music");
+        let other = dir.path().join("Other");
+        std::fs::create_dir_all(&music).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let root = vec![std::fs::canonicalize(&music).unwrap()];
+        let lib = Library::open_in_memory().unwrap();
+        let track = |file: &std::path::Path| {
+            use nikgob_core::model::{ArtistCredit, Codec, Source, SourceKind, Track as CoreTrack};
+            let t = lib.upsert_track(&CoreTrack::new("T", ArtistCredit::single("A", None))).unwrap();
+            lib.add_source(&Source::new(t.id, SourceKind::LocalFile, file.to_string_lossy(), Codec::Opus)).unwrap();
+            t.id
+        };
+        let inside = track(&music.join("a.opus"));
+        let outside = track(&other.join("b.opus"));
+        std::fs::write(music.join("a.opus"), b"x").unwrap();
+        std::fs::write(other.join("b.opus"), b"x").unwrap();
+        assert!(!touches_outside(&lib, inside, &root).unwrap());
+        assert!(touches_outside(&lib, outside, &root).unwrap());
+        std::fs::write(other.join("a.lrc"), b"x").unwrap();
+        assert!(!touches_outside(&lib, inside, &root).unwrap(), "only the lyrics next to the file count");
     }
 
     #[test]

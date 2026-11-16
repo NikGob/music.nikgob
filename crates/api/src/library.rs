@@ -154,8 +154,13 @@ pub struct ArtistDetail {
     pub artist: Artist,
     /// Newest first.
     pub albums: Vec<Album>,
-    /// Their songs in the library, by album (the first 200).
+    /// Their songs in the library, by album: the page asked for
+    /// (`offset`, `limit`; the first 200 by default).
     pub tracks: Vec<Track>,
+    /// Their songs in all.
+    pub tracks_total: u32,
+    /// Where the page starts.
+    pub tracks_offset: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
@@ -169,8 +174,11 @@ pub struct Playlist {
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct PlaylistDetail {
     pub playlist: Playlist,
-    /// In its order (the first 5000).
+    /// In its order: the page asked for (`offset`, `limit`; the first 5000
+    /// by default). `playlist.track_count` is all of them.
     pub tracks: Vec<Track>,
+    /// Where the page starts.
+    pub tracks_offset: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, ToSchema)]
@@ -179,21 +187,36 @@ pub struct SearchAnswer {
     pub albums: Vec<Album>,
     pub artists: Vec<Artist>,
     pub playlists: Vec<Playlist>,
+    /// Where each group's page starts.
+    pub offset: u32,
+    /// The songs that match in all.
+    pub track_total: u32,
+}
+
+/// The page `offset`, `limit` of a query: `limit` defaults to `default`
+/// and is at most `max`.
+pub fn page_of(raw: Option<&str>, default: u32, max: u32) -> (u32, u32) {
+    let offset = query_value(raw, "offset").and_then(|o| o.trim().parse::<u32>().ok()).unwrap_or(0);
+    let limit = query_value(raw, "limit").and_then(|l| l.trim().parse::<u32>().ok()).unwrap_or(default).clamp(1, max);
+    (offset, limit)
 }
 
 fn playlist_of(p: &nikgob_library::PlaylistSummary) -> Playlist {
     Playlist { id: p.id.map_or_else(|| LIKED_ID.to_owned(), |id| id.to_string()), name: p.name.clone(), track_count: p.track_count }
 }
 
-/// The search's answer, of `kind` only (`any`: everything).
-pub fn search_answer(r: &SearchResults, kind: &str) -> SearchAnswer {
+/// The search's answer, of `kind` only (`any`: everything), each group
+/// from `offset` on.
+pub fn search_answer(r: &SearchResults, kind: &str, offset: u32, track_total: u32) -> SearchAnswer {
     let all = kind == "any" || kind.is_empty();
+    let skip = offset as usize;
     SearchAnswer {
-        tracks: if all || kind == "track" { r.tracks.iter().map(Track::of_row).collect() } else { Vec::new() },
-        albums: if all || kind == "album" { r.releases.iter().map(Album::of_row).collect() } else { Vec::new() },
+        tracks: if all || kind == "track" { r.tracks.iter().skip(skip).map(Track::of_row).collect() } else { Vec::new() },
+        albums: if all || kind == "album" { r.releases.iter().skip(skip).map(Album::of_row).collect() } else { Vec::new() },
         artists: if all || kind == "artist" {
             r.artists
                 .iter()
+                .skip(skip)
                 .map(|a| Artist {
                     id: a.artist.id.to_string(),
                     name: a.artist.name.clone(),
@@ -205,9 +228,14 @@ pub fn search_answer(r: &SearchResults, kind: &str) -> SearchAnswer {
         } else {
             Vec::new()
         },
-        playlists: if all || kind == "playlist" { r.playlists.iter().map(playlist_of).collect() } else { Vec::new() },
+        playlists: if all || kind == "playlist" { r.playlists.iter().skip(skip).map(playlist_of).collect() } else { Vec::new() },
+        offset,
+        track_total,
     }
 }
+
+/// How far a search may page (`offset` + `limit`).
+const SEARCH_DEPTH: u32 = 250;
 
 /// `GET /v1/search?q=&kind=&limit=`.
 #[utoipa::path(
@@ -218,6 +246,7 @@ pub fn search_answer(r: &SearchResults, kind: &str) -> SearchAnswer {
         ("q" = String, Query, description = "Что искать"),
         ("kind" = Option<String>, Query, description = "any (по умолчанию), track, album, artist, playlist"),
         ("limit" = Option<u32>, Query, description = "Сколько в каждой группе, 1–50, по умолчанию 10"),
+        ("offset" = Option<u32>, Query, description = "С какого места каждой группы (offset + limit не больше 250)"),
     ),
     responses((status = 200, body = SearchAnswer), (status = 400, body = crate::error::ErrorBody)),
     security(("bearer" = []))
@@ -231,10 +260,13 @@ pub async fn search(State(sh): State<Arc<Shared>>, RawQuery(raw): RawQuery) -> R
     if !["", "any", "track", "album", "artist", "playlist"].contains(&kind.as_str()) {
         return Err(ApiError::bad_request("kind: any, track, album, artist или playlist"));
     }
-    let limit = query_value(raw.as_deref(), "limit").and_then(|l| l.parse::<u32>().ok()).unwrap_or(10).clamp(1, 50);
+    let (offset, limit) = page_of(raw.as_deref(), 10, 50);
+    if offset.saturating_add(limit) > SEARCH_DEPTH {
+        return Err(ApiError::bad_request(format!("offset + limit — не больше {SEARCH_DEPTH}")));
+    }
     let lib = sh.lib.clone();
-    let found = blocking(move || lib.search(&q, limit).map_err(db)).await?;
-    Ok(Json(search_answer(&found, &kind)))
+    let (found, total) = blocking(move || Ok((lib.search(&q, offset + limit).map_err(db)?, lib.search_track_count(&q).map_err(db)?))).await?;
+    Ok(Json(search_answer(&found, &kind, offset, total)))
 }
 
 /// `GET /v1/tracks/{id}`.
@@ -279,22 +311,28 @@ pub async fn album(State(sh): State<Arc<Shared>>, Path(id): Path<String>) -> Res
     get,
     path = "/v1/artists/{id}",
     tag = "library",
-    params(("id" = String, Path, description = "id исполнителя")),
+    params(
+        ("id" = String, Path, description = "id исполнителя"),
+        ("offset" = Option<u32>, Query, description = "С какой песни"),
+        ("limit" = Option<u32>, Query, description = "Сколько песен, 1–500, по умолчанию 200"),
+    ),
     responses((status = 200, body = ArtistDetail), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn artist(State(sh): State<Arc<Shared>>, Path(id): Path<String>) -> Result<Json<ArtistDetail>, ApiError> {
+pub async fn artist(State(sh): State<Arc<Shared>>, Path(id): Path<String>, RawQuery(raw): RawQuery) -> Result<Json<ArtistDetail>, ApiError> {
     let id: ArtistId = id.parse().map_err(|_| bad_id())?;
+    let (offset, limit) = page_of(raw.as_deref(), 200, 500);
     let lib = sh.lib.clone();
-    blocking(move || artist_detail(&lib, id)).await.map(Json)
+    blocking(move || artist_detail(&lib, id, offset, limit)).await.map(Json)
 }
 
-fn artist_detail(lib: &Library, id: ArtistId) -> Result<ArtistDetail, ApiError> {
+fn artist_detail(lib: &Library, id: ArtistId, offset: u32, limit: u32) -> Result<ArtistDetail, ApiError> {
     let a = lib.get_artist(id).map_err(db)?.ok_or_else(gone)?;
     let albums = lib.releases_of_artist(id).map_err(db)?;
-    let tracks = lib.tracks_of_artist(id, 0, 200).map_err(db)?;
+    let tracks = lib.tracks_of_artist(id, offset, limit).map_err(db)?;
+    let total = lib.count_tracks_of_artist(id).map_err(db)?;
     let liked = lib.is_liked(LikeTarget::Artist(id)).map_err(db)?;
-    let local = u32::try_from(tracks.iter().filter(|t| t.has_local).count()).unwrap_or(u32::MAX);
+    let local = u32::try_from(albums.iter().map(|r| u64::from(r.local_tracks)).sum::<u64>()).unwrap_or(u32::MAX);
     Ok(ArtistDetail {
         artist: Artist {
             id: a.id.to_string(),
@@ -305,6 +343,8 @@ fn artist_detail(lib: &Library, id: ArtistId) -> Result<ArtistDetail, ApiError> 
         },
         albums: albums.iter().map(Album::of_row).collect(),
         tracks: tracks.iter().map(Track::of_row).collect(),
+        tracks_total: total,
+        tracks_offset: offset,
     })
 }
 
@@ -327,29 +367,37 @@ pub async fn playlists(State(sh): State<Arc<Shared>>) -> Result<Json<Vec<Playlis
     get,
     path = "/v1/playlists/{id}",
     tag = "library",
-    params(("id" = String, Path, description = "id плейлиста или liked")),
+    params(
+        ("id" = String, Path, description = "id плейлиста или liked"),
+        ("offset" = Option<u32>, Query, description = "С какой песни"),
+        ("limit" = Option<u32>, Query, description = "Сколько песен, 1–5000, по умолчанию 5000"),
+    ),
     responses((status = 200, body = PlaylistDetail), (status = 404, body = crate::error::ErrorBody)),
     security(("bearer" = []))
 )]
-pub async fn playlist(State(sh): State<Arc<Shared>>, Path(id): Path<String>) -> Result<Json<PlaylistDetail>, ApiError> {
+pub async fn playlist(State(sh): State<Arc<Shared>>, Path(id): Path<String>, RawQuery(raw): RawQuery) -> Result<Json<PlaylistDetail>, ApiError> {
+    let (offset, limit) = page_of(raw.as_deref(), 5000, 5000);
     let lib = sh.lib.clone();
     if id == LIKED_ID {
-        let (count, rows) = blocking(move || Ok((lib.liked_count().map_err(db)?, lib.liked_tracks(0, 5000).map_err(db)?))).await?;
+        let (count, rows) = blocking(move || Ok((lib.liked_count().map_err(db)?, lib.liked_tracks(offset, limit).map_err(db)?))).await?;
         return Ok(Json(PlaylistDetail {
             playlist: Playlist { id: LIKED_ID.to_owned(), name: nikgob_library::LIKED_PLAYLIST_NAME.to_owned(), track_count: count },
             tracks: rows.iter().map(Track::of_row).collect(),
+            tracks_offset: offset,
         }));
     }
     let id: PlaylistId = id.parse().map_err(|_| bad_id())?;
-    let (p, entries) = blocking(move || {
+    let (p, count, entries) = blocking(move || {
         let p = lib.get_playlist(id).map_err(db)?.ok_or_else(gone)?;
-        let entries = lib.playlist_entries(id, 0, 5000).map_err(db)?;
-        Ok((p, entries))
+        let count = lib.playlist_len(id).map_err(db)?;
+        let entries = lib.playlist_entries(id, offset, limit).map_err(db)?;
+        Ok((p, count, entries))
     })
     .await?;
     Ok(Json(PlaylistDetail {
-        playlist: Playlist { id: p.id.to_string(), name: p.name, track_count: u32::try_from(entries.len()).unwrap_or(u32::MAX) },
+        playlist: Playlist { id: p.id.to_string(), name: p.name, track_count: count },
         tracks: entries.iter().map(|e| Track::of_row(&e.track)).collect(),
+        tracks_offset: offset,
     }))
 }
 
@@ -472,11 +520,15 @@ mod tests {
     #[test]
     fn a_search_of_one_kind_has_only_it() {
         let r = SearchResults::default();
-        let a = search_answer(&r, "track");
+        let a = search_answer(&r, "track", 0, 0);
         assert!(a.tracks.is_empty() && a.albums.is_empty());
-        let v = serde_json::to_value(search_answer(&r, "any")).unwrap();
+        let v = serde_json::to_value(search_answer(&r, "any", 0, 0)).unwrap();
         for k in ["tracks", "albums", "artists", "playlists"] {
             assert!(v[k].is_array(), "{k}");
         }
+        assert_eq!((v["offset"].as_u64(), v["track_total"].as_u64()), (Some(0), Some(0)));
+        assert_eq!(page_of(Some("offset=200&limit=100"), 200, 500), (200, 100));
+        assert_eq!(page_of(None, 200, 500), (0, 200));
+        assert_eq!(page_of(Some("limit=9999"), 200, 500), (0, 500));
     }
 }

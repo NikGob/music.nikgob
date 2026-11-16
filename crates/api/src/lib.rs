@@ -155,6 +155,9 @@ pub(crate) struct Shared {
     /// The library's sound vectors for similar tracks, made at most every
     /// few minutes.
     pub sound: stats::SoundCache,
+    /// Service tracks the API found, handed to the loop with a request
+    /// that acts on them.
+    pub seen: parking_lot::Mutex<discover::Seen>,
 }
 
 impl Shared {
@@ -172,6 +175,7 @@ impl Shared {
             confirms: confirm::Store::default(),
             lookups: auth::Limiter::new(auth::LOOKUPS_PER_S, auth::LOOKUP_BURST),
             sound: stats::SoundCache::default(),
+            seen: parking_lot::Mutex::new(discover::Seen::default()),
         }
     }
 
@@ -197,8 +201,16 @@ impl Shared {
         };
         let deadline = tokio::time::Instant::now() + SYNC_WAIT;
         loop {
-            if self.rt.state().api.synced >= ack {
-                return Ok(());
+            {
+                let st = self.rt.state();
+                if st.api.synced >= ack {
+                    // What the loop could not do (a service track it no
+                    // longer knows, a file outside the library) is not «done».
+                    return match st.api.skipped.iter().find(|(a, _)| *a == ack) {
+                        Some((_, why)) => Err(error::ApiError::of(axum::http::StatusCode::CONFLICT, "not_done", format!("Не выполнено: {}", why.join("; ")))),
+                        None => Ok(()),
+                    };
+                }
             }
             match tokio::time::timeout_at(deadline, changes.changed()).await {
                 Ok(Ok(())) => {}
