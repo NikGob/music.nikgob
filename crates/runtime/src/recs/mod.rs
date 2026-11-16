@@ -2853,11 +2853,14 @@ impl Worker {
     }
 
     /// The vectors the sync brought are in memory (a device that does not
-    /// analyse): the run's first build, or one soon with them.
-    pub(crate) fn recs_sound_loaded(&mut self) {
-        if self.recs.built_at.is_none() {
+    /// analyse): the run's first build, or one soon when anything of the
+    /// sound `changed` (a vector new or replaced, a sketch, a vector of
+    /// the model).
+    pub(crate) fn recs_sound_loaded(&mut self, changed: bool) {
+        // A build under way read the index before these came.
+        if self.recs.built_at.is_none() && !self.recs.building {
             self.recs_first_build();
-        } else if self.analysis.index().read().len() > self.recs.built_index_len {
+        } else if changed {
             self.recs_dirty(SYNCED_SOUND_REST);
         }
     }

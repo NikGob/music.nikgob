@@ -40,10 +40,11 @@
 //! it too.
 
 use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
@@ -77,8 +78,9 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 pub(crate) enum Msg {
     Progress(v::AnalysisProgress),
     SoundModel(v::SoundModelView),
-    /// The vectors the sync brought are in memory ([`FileAnalysis::load_synced`]).
-    Loaded,
+    /// The vectors the sync brought are in memory ([`FileAnalysis::load_synced`]),
+    /// and whether anything of the sound changed since the last read.
+    Loaded(bool),
 }
 
 /// What the neural sound model hears now: «Нейросетевой анализ звука» as
@@ -304,30 +306,43 @@ pub(crate) fn store_sketch(
 }
 
 /// Puts every stored sketch into `index` (beside the vectors already there).
-pub(crate) fn load_sketches(lib: &Library, index: &SoundIndex) {
+/// A fingerprint of what was read (two reads of the same rows: the same).
+pub(crate) fn load_sketches(lib: &Library, index: &SoundIndex) -> u64 {
     let rows = match lib.sketches(SKETCHED_WITH) {
         Ok(rows) => rows,
         Err(e) => {
             log::warn!("analysis: loading the sketches: {e}");
-            return;
+            return 0;
         }
+    };
+    let print = {
+        let mut h = std::hash::DefaultHasher::new();
+        rows.hash(&mut h);
+        h.finish()
     };
     let mut idx = index.write();
     let n = rows.into_iter().filter(|(track, bytes)| SoundSketch::from_bytes(bytes).is_some_and(|s| idx.set_sketch(*track, s))).count();
     log::info!("analysis: {n} sketches of the sound in memory");
+    print
 }
 
-/// Fills `index` with every current vector of the library.
-pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
+/// Fills `index` with every current vector of the library. A fingerprint
+/// of what was read.
+pub(crate) fn load_index(lib: &Library, index: &SoundIndex) -> u64 {
     let rows = match lib.analysis_vectors(ANALYZED_WITH) {
         Ok(rows) => rows,
         Err(e) => {
             log::warn!("analysis: loading the vectors: {e}");
-            return;
+            return 0;
         }
     };
+    let mut h = std::hash::DefaultHasher::new();
     let mut idx = index.write();
     for row in rows {
+        row.track_id.hash(&mut h);
+        for x in &row.bliss_vector {
+            x.to_bits().hash(&mut h);
+        }
         match Vector::try_from(row.bliss_vector.as_slice()) {
             Ok(v) => {
                 idx.insert(row.track_id, v);
@@ -336,29 +351,37 @@ pub(crate) fn load_index(lib: &Library, index: &SoundIndex) {
         }
     }
     log::info!("analysis: {} vectors in memory", idx.len());
+    h.finish()
 }
 
 /// What the live worker holds, for a snapshot built without it (the
 /// previews of Главная, the model's preview, evaluations): the bliss
 /// vectors, the sketches and, when `prefs` let the model hear the library
-/// (unset: whatever vectors are stored), its vectors.
-pub(crate) fn load_offline(lib: &Library, index: &SoundIndex, prefs: &v::Prefs) {
-    load_index(lib, index);
-    load_sketches(lib, index);
-    if Neural::of(prefs.sound_neural_or(true)).library {
-        load_embeddings(lib, index);
-    }
+/// (unset: whatever vectors are stored), its vectors. A fingerprint of all
+/// that was read: a read that brought nothing new gives the last one.
+pub(crate) fn load_offline(lib: &Library, index: &SoundIndex, prefs: &v::Prefs) -> u64 {
+    let vectors = load_index(lib, index);
+    let sketches = load_sketches(lib, index);
+    let embedded = if Neural::of(prefs.sound_neural_or(true)).library { load_embeddings(lib, index) } else { 0 };
+    let mut h = std::hash::DefaultHasher::new();
+    (vectors, sketches, embedded).hash(&mut h);
+    h.finish()
 }
 
 /// Puts every stored vector of the neural model into `index` (beside the
-/// bliss vectors already there).
-pub(crate) fn load_embeddings(lib: &Library, index: &SoundIndex) {
+/// bliss vectors already there). A fingerprint of what was read.
+pub(crate) fn load_embeddings(lib: &Library, index: &SoundIndex) -> u64 {
     let rows = match lib.embedding_vectors(EMBEDDED_WITH) {
         Ok(rows) => rows,
         Err(e) => {
             log::warn!("analysis: loading the sound model's vectors: {e}");
-            return;
+            return 0;
         }
+    };
+    let print = {
+        let mut h = std::hash::DefaultHasher::new();
+        rows.hash(&mut h);
+        h.finish()
     };
     let mut idx = index.write();
     let mut n = 0;
@@ -370,6 +393,7 @@ pub(crate) fn load_embeddings(lib: &Library, index: &SoundIndex) {
         }
     }
     log::info!("analysis: {n} vectors of the sound model in memory");
+    print
 }
 
 /// The first [`BATCH`] rows of a queue (`read` with a limit) that are not
@@ -753,8 +777,12 @@ pub(crate) struct FileAnalysis {
     /// The neural model (made with the first start that has a models folder).
     effnet: Option<Arc<Effnet>>,
     neural: Neural,
-    /// A read of the synced vectors is under way ([`Self::load_synced`]).
+    /// A read of the synced vectors is under way ([`Self::load_synced`])…
     loading: Arc<AtomicBool>,
+    /// …another was asked meanwhile (it runs once that one ends)…
+    again: Arc<AtomicBool>,
+    /// …and the fingerprint of what the last one read ([`load_offline`]).
+    seen: Arc<AtomicU64>,
 }
 
 impl FileAnalysis {
@@ -767,24 +795,43 @@ impl FileAnalysis {
             effnet: None,
             neural: Neural::default(),
             loading: Arc::new(AtomicBool::new(false)),
+            again: Arc::new(AtomicBool::new(false)),
+            seen: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// A device that does not analyse (a Pi) still has the vectors the
     /// other devices made, as the sync brings them: read into the index on
-    /// a thread of their own (never the loop's), [`Msg::Loaded`] once they
-    /// are in. Nothing while the analysis runs here (it reads them itself)
-    /// or a read is under way.
+    /// a thread of their own (never the loop's), [`Msg::Loaded`] after each
+    /// read, saying whether anything of the sound changed (a vector, a
+    /// sketch, a vector of the model, new or replaced). Asked while a read
+    /// runs, it reads once more when that one ends (the rows a sync wrote
+    /// meanwhile). Nothing while the analysis runs here (it reads them
+    /// itself).
     pub(crate) fn load_synced(&self, lib: Library, prefs: v::Prefs) {
-        if self.shared.is_some() || self.loading.swap(true, Ordering::AcqRel) {
+        if self.shared.is_some() {
             return;
         }
-        let (index, tx, loading) = (self.index.clone(), self.tx.clone(), self.loading.clone());
+        self.again.store(true, Ordering::Release);
+        if self.loading.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (index, tx) = (self.index.clone(), self.tx.clone());
+        let (loading, again, seen) = (self.loading.clone(), self.again.clone(), self.seen.clone());
         let spawned = std::thread::Builder::new().name("nikgob-sound-load".into()).spawn(move || {
             lower_priority();
-            load_offline(&lib, &index, &prefs);
-            loading.store(false, Ordering::Release);
-            let _ = tx.send(Internal::Analysis(Msg::Loaded));
+            loop {
+                again.store(false, Ordering::Release);
+                let print = load_offline(&lib, &index, &prefs);
+                let changed = seen.swap(print, Ordering::AcqRel) != print;
+                let _ = tx.send(Internal::Analysis(Msg::Loaded(changed)));
+                loading.store(false, Ordering::Release);
+                // Asked again while it read: once more, unless a new read
+                // took it up meanwhile.
+                if !again.load(Ordering::Acquire) || loading.swap(true, Ordering::AcqRel) {
+                    break;
+                }
+            }
         });
         if let Err(e) = spawned {
             self.loading.store(false, Ordering::Release);
@@ -957,7 +1004,7 @@ impl Worker {
                     self.publish(|s| s.sound_model = m);
                 }
             }
-            Msg::Loaded => self.recs_sound_loaded(),
+            Msg::Loaded(changed) => self.recs_sound_loaded(changed),
         }
     }
 }
