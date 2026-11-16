@@ -23,6 +23,7 @@ use fastframe_audio::Render;
 use rtrb::{Consumer, Producer};
 
 use crate::eq::Eq;
+use crate::glide::Glide;
 use crate::shared::{CursorSnapshot, PlayClock, Shared, frames_to_ns, ns_to_frames, volume_curve};
 use crate::types::Speed;
 
@@ -137,6 +138,10 @@ pub(crate) struct Renderer {
     fade_target: f32,
     fade_step: f32,
     fade_gen: u32,
+    /// The duck's gain, gliding (see [`Shared::duck_gain`]), and the
+    /// `duck_gen` seen last.
+    duck: Glide,
+    duck_gen: u32,
     declick_frames: u64,
     pause_frames: u64,
     resume_frames: u64,
@@ -198,6 +203,8 @@ impl Renderer {
             fade_target: 1.0,
             fade_step: 1.0,
             fade_gen: 0,
+            duck: Glide::new(),
+            duck_gen: 0,
             declick_frames: 1,
             pause_frames: 1,
             resume_frames: 1,
@@ -464,16 +471,18 @@ impl Renderer {
         self.sh.tap.write_interleaved(seg, ch);
 
         self.take_fade();
-        if self.fade != self.fade_target {
-            // The fade glides frame by frame; the volume follows it.
+        self.take_duck();
+        if self.fade != self.fade_target || self.duck.moving() {
+            // The fade and the duck glide frame by frame; the volume
+            // follows them.
             let volume = self.sh.volume_gain();
             for frame in seg.chunks_exact_mut(ch) {
-                self.fade = if self.fade < self.fade_target {
-                    (self.fade + self.fade_step).min(self.fade_target)
-                } else {
-                    (self.fade - self.fade_step).max(self.fade_target)
-                };
-                let target = volume * volume_curve(self.fade);
+                if self.fade < self.fade_target {
+                    self.fade = (self.fade + self.fade_step).min(self.fade_target);
+                } else if self.fade > self.fade_target {
+                    self.fade = (self.fade - self.fade_step).max(self.fade_target);
+                }
+                let target = volume * volume_curve(self.fade) * self.duck.advance();
                 self.vol += (target - self.vol) * self.vol_k;
                 for s in frame {
                     *s = soft_limit(*s * self.vol);
@@ -481,7 +490,7 @@ impl Renderer {
             }
             return;
         }
-        let target = self.sh.volume_gain() * volume_curve(self.fade);
+        let target = self.sh.volume_gain() * volume_curve(self.fade) * self.duck.gain();
         if (target - self.vol).abs() > 1e-6 {
             for frame in seg.chunks_exact_mut(ch) {
                 self.vol += (target - self.vol) * self.vol_k;
@@ -516,6 +525,19 @@ impl Renderer {
         } else {
             self.fade_step = ((self.fade_target - self.fade).abs() / frames as f32).max(f32::MIN_POSITIVE);
         }
+    }
+
+    /// A new duck asked for ([`Shared::duck_gain`]): the gain glides there
+    /// from where it is.
+    fn take_duck(&mut self) {
+        let duck_gen = self.sh.duck_gen.load(Ordering::Acquire);
+        if duck_gen == self.duck_gen {
+            return;
+        }
+        self.duck_gen = duck_gen;
+        let gain = f32::from_bits(self.sh.duck_gain.load(Ordering::Relaxed));
+        let frames = ns_to_frames(self.sh.duck_over_ns.load(Ordering::Relaxed), self.rate.max(1));
+        self.duck.set(gain, frames);
     }
 
     /// Counts callbacks of steady playback that came late or found the
@@ -1004,6 +1026,52 @@ mod tests {
         r.update_control();
         r.note_timing(t0 + Duration::from_secs(3), 480);
         assert_eq!(late(), 3);
+    }
+
+    #[test]
+    fn a_duck_glides_down_and_back_without_a_click_and_leaves_the_volume() {
+        let (mut r, mut ring_tx, _marks, sh) = playing(16_000);
+        let mut out = vec![1.0f32; 512];
+        // The item has started and sounds at its own level.
+        for _ in 0..2 {
+            r.render(&mut out);
+        }
+        assert_eq!(out[511], 0.25);
+        let mut heard = out.clone();
+
+        // Down to 0.18 over 5 ms.
+        sh.set_duck(0.18, Duration::from_millis(5));
+        let mut down = Vec::new();
+        for _ in 0..24 {
+            r.render(&mut out);
+            down.extend_from_slice(&out);
+        }
+        assert!(
+            down.windows(2).all(|w| w[1] <= w[0] + 1e-7),
+            "the level only goes down"
+        );
+        let low = *down.last().unwrap();
+        assert!((low - 0.25 * 0.18).abs() < 1e-3, "{low}");
+        assert_eq!(sh.volume_gain(), 1.0, "the volume stays as it was");
+        heard.extend_from_slice(&down);
+
+        // Back up over 10 ms.
+        push(&mut ring_tx, 8000);
+        sh.set_duck(1.0, Duration::from_millis(10));
+        let mut up = Vec::new();
+        for _ in 0..16 {
+            r.render(&mut out);
+            up.extend_from_slice(&out);
+        }
+        assert!(up.windows(2).all(|w| w[1] + 1e-7 >= w[0]), "the level only goes up");
+        assert!((up.last().unwrap() - 0.25).abs() < 1e-3, "{}", up.last().unwrap());
+        heard.extend_from_slice(&up);
+        assert!(
+            largest_step(&heard) < 0.01,
+            "a click: {}",
+            largest_step(&heard)
+        );
+        assert_eq!(sh.underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]

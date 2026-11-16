@@ -32,6 +32,9 @@ cpal = { version = "0.18.2", default-features = false, features = ["realtime"] }
 # outputs rather than every ALSA plugin and hw: node.
 [target.'cfg(target_os = "linux")'.dependencies]
 fastframe-audio = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47", features = ["pulseaudio"] }
+# The same cpal (features unify), for the devices' ids: a PulseAudio sink
+# asked for by its name (`alsa_output.…`) rather than its description.
+cpal = { version = "0.18.2", default-features = false, features = ["pulseaudio"] }
 
 [dev-dependencies]
 hound = "3.5"

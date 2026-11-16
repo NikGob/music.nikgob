@@ -85,12 +85,39 @@ impl DeviceBackend {
     }
 }
 
+impl DeviceBackend {
+    /// The options to open the output with. On Linux a device named by its
+    /// PulseAudio sink name is opened by its display name, which is the
+    /// one fastframe-audio knows (see [`crate::devices`]); a name no device
+    /// has now is left for fastframe-audio, which plays on the default
+    /// output instead.
+    fn options_to_open(&self) -> OutputOptions {
+        #[allow(unused_mut)]
+        let mut options = self.options.clone();
+        #[cfg(target_os = "linux")]
+        if let fastframe_audio::Device::Named(wanted) = options.device.clone() {
+            match crate::devices::output_devices() {
+                Ok(devices) => {
+                    if let Some(name) = crate::devices::resolve_device(&wanted, &devices)
+                        && name != wanted
+                    {
+                        log::info!("audio device {wanted:?} is {name:?}");
+                        options.device = fastframe_audio::Device::Named(name);
+                    }
+                }
+                Err(e) => log::warn!("audio devices: {e}"),
+            }
+        }
+        options
+    }
+}
+
 impl Backend for DeviceBackend {
     fn ensure_open(&mut self) -> Result<(), String> {
         if self.output.is_some() {
             return Ok(());
         }
-        match Output::open(self.options.clone(), self.handle.clone()) {
+        match Output::open(self.options_to_open(), self.handle.clone()) {
             Ok(output) => {
                 let _ = self.clock_cell.set(PlayClock::Device(output.clock()));
                 log::info!(

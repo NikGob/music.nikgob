@@ -438,6 +438,16 @@ impl Player {
         sh.fade_gen.fetch_add(1, Ordering::AcqRel);
     }
 
+    /// Lowers the sound to the linear `gain` (0..1, a factor on what the
+    /// volume and the fade make it) over `over`, from wherever an earlier
+    /// duck got to; a gain of 1 restores it. The duck of a voice assistant
+    /// that listens or speaks: [`volume`](Self::volume) stays what the
+    /// listener set, and it holds across tracks, gapless joins, seeks and
+    /// pauses (an engine on another device starts without it).
+    pub fn set_duck(&self, gain: f32, over: Duration) {
+        self.inner.sh.set_duck(gain, over);
+    }
+
     /// The last value given to [`set_volume`](Self::set_volume).
     #[must_use]
     pub fn volume(&self) -> f32 {

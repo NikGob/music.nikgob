@@ -142,6 +142,13 @@ pub(crate) struct Shared {
     pub fade_level: AtomicU32,
     pub fade_over_ns: AtomicU64,
     pub fade_gen: AtomicU32,
+    /// The duck (a voice assistant lowering the music): a linear gain after
+    /// the volume and the fade (0..1, f32 bits), how long the glide to it
+    /// takes (ns, 0 = at once); then `duck_gen`, which the callback
+    /// watches. Neither the volume nor the fade changes for it.
+    pub duck_gain: AtomicU32,
+    pub duck_over_ns: AtomicU64,
+    pub duck_gen: AtomicU32,
     pub normalization: AtomicBool,
     /// Crossfade length in milliseconds; 0 means gapless.
     pub crossfade_ms: AtomicU32,
@@ -197,6 +204,9 @@ impl Shared {
             fade_level: AtomicU32::new(1f32.to_bits()),
             fade_over_ns: AtomicU64::new(0),
             fade_gen: AtomicU32::new(0),
+            duck_gain: AtomicU32::new(1f32.to_bits()),
+            duck_over_ns: AtomicU64::new(0),
+            duck_gen: AtomicU32::new(0),
             normalization: AtomicBool::new(true),
             crossfade_ms: AtomicU32::new(0),
             pause_req: AtomicBool::new(false),
@@ -221,6 +231,16 @@ impl Shared {
 
     pub(crate) fn volume_gain(&self) -> f32 {
         f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// Asks the callback to glide the duck to the linear `gain` (clamped to
+    /// 0..1; not a number is no duck) over `over`.
+    pub(crate) fn set_duck(&self, gain: f32, over: Duration) {
+        let gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
+        self.duck_gain.store(gain.to_bits(), Ordering::Relaxed);
+        self.duck_over_ns
+            .store(u64::try_from(over.as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.duck_gen.fetch_add(1, Ordering::AcqRel);
     }
 }
 
