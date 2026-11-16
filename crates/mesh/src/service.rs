@@ -1106,7 +1106,7 @@ impl Shared {
     }
 
     async fn dial(self: Arc<Self>, node: Arc<Node>, id: PublicKey, addrs: Vec<SocketAddr>) {
-        let opened = async {
+        let opened: Result<(Connection, SendStream, RecvStream), String> = async {
             let conn = connect(&node.ep, id, &addrs, ALPN_CTL).await?;
             let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
             let hello = self.hello().ok_or("in no ring")?;
@@ -1134,10 +1134,10 @@ impl Shared {
         .await;
         match opened {
             Ok((conn, send, recv)) => {
-                if let Some(a) = addrs.first() {
-                    if let Some(p) = self.state.lock().peers.get_mut(&id) {
-                        p.addr = Some(*a);
-                    }
+                if let Some(a) = addrs.first()
+                    && let Some(p) = self.state.lock().peers.get_mut(&id)
+                {
+                    p.addr = Some(*a);
                 }
                 self.run_link(node, conn, id, send, recv, true).await;
             }
