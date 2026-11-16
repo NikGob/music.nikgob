@@ -41,6 +41,15 @@ pub struct Config {
     pub api_address: Option<String>,
     /// The API's port; unset: settings.toml's (47210 by default).
     pub api_port: Option<u16>,
+    /// The owner's devices: found on the home network, paired once
+    /// (`nikgobd pair <ticket>`, or the code of `nikgobd pair-code`). On by
+    /// default.
+    pub mesh: bool,
+    /// This device's name for the others; unset: the computer's name.
+    pub name: Option<String>,
+    /// What it is: `pi`, `server`, `pc`, `tv`, `phone`; unset: `pi` on a
+    /// 64-bit ARM Linux, else `server`.
+    pub kind: Option<String>,
 }
 
 impl Default for Config {
@@ -55,7 +64,21 @@ impl Default for Config {
             api: true,
             api_address: None,
             api_port: None,
+            mesh: true,
+            name: None,
+            kind: None,
         }
+    }
+}
+
+impl Config {
+    /// The kind of device this is ([`Config::kind`], else by the machine).
+    pub fn mesh_kind(&self) -> nikgob_view::MeshKind {
+        self.kind.as_deref().and_then(nikgob_view::MeshKind::parse).unwrap_or(if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            nikgob_view::MeshKind::Pi
+        } else {
+            nikgob_view::MeshKind::Server
+        })
     }
 }
 
@@ -101,13 +124,19 @@ pub fn parse(text: &str) -> Result<Config, String> {
         *p = expand_home(p, home.as_deref());
     }
     cfg.output_device = cfg.output_device.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty());
+    cfg.name = cfg.name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+    if let Some(k) = &cfg.kind
+        && nikgob_view::MeshKind::parse(k).is_none()
+    {
+        return Err(format!("kind = \"{k}\": one of pi, server, pc, tv, phone"));
+    }
     Ok(cfg)
 }
 
 /// `NIKGOBD_DATA_DIR`, `NIKGOBD_LIBRARY_DIR`, `NIKGOBD_MASTERS_DIR`,
 /// `NIKGOBD_OUTPUT_DEVICE`, `NIKGOBD_BACKGROUND_COMPUTE` (`1`/`0`,
-/// `true`/`false`) and `NIKGOBD_LOG` over the file; an empty value is
-/// none.
+/// `true`/`false`), `NIKGOBD_LOG`, `NIKGOBD_NAME` and `NIKGOBD_MESH` over
+/// the file; an empty value is none.
 pub fn apply_env(cfg: &mut Config, var: impl Fn(&str) -> Option<String>) {
     let var = |k: &str| var(k).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
     if let Some(v) = var("NIKGOBD_DATA_DIR") {
@@ -131,6 +160,16 @@ pub fn apply_env(cfg: &mut Config, var: impl Fn(&str) -> Option<String>) {
     }
     if let Some(v) = var("NIKGOBD_LOG") {
         cfg.log = v;
+    }
+    if let Some(v) = var("NIKGOBD_NAME") {
+        cfg.name = Some(v);
+    }
+    if let Some(v) = var("NIKGOBD_MESH") {
+        match v.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => cfg.mesh = true,
+            "0" | "false" | "no" | "off" => cfg.mesh = false,
+            other => eprintln!("NIKGOBD_MESH={other}: not a yes or no, left as it was"),
+        }
     }
 }
 
@@ -183,6 +222,27 @@ mod tests {
         assert_eq!(cfg.output_device.as_deref(), Some("alsa_output.usb-3142_fifine_Headset-00.analog-stereo"));
         assert!(!cfg.background_compute);
         assert_eq!(cfg.log, "info");
+        assert!(cfg.mesh);
+        assert_eq!(cfg.name.as_deref(), Some("Raspberry Pi"));
+        assert_eq!(cfg.mesh_kind(), nikgob_view::MeshKind::Pi);
+    }
+
+    #[test]
+    fn the_mesh_keys() {
+        let cfg = parse("mesh = false\nname = \"  Кухня \"\nkind = \"server\"\n").unwrap();
+        assert!(!cfg.mesh);
+        assert_eq!(cfg.name.as_deref(), Some("Кухня"));
+        assert_eq!(cfg.mesh_kind(), nikgob_view::MeshKind::Server);
+        assert!(parse("kind = \"fridge\"").is_err());
+        assert_eq!(parse("name = \" \"").unwrap().name, None);
+        let mut cfg = Config::default();
+        apply_env(&mut cfg, |k| match k {
+            "NIKGOBD_NAME" => Some("Второй".to_owned()),
+            "NIKGOBD_MESH" => Some("off".to_owned()),
+            _ => None,
+        });
+        assert_eq!(cfg.name.as_deref(), Some("Второй"));
+        assert!(!cfg.mesh);
     }
 
     #[test]

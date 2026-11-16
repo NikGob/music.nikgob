@@ -35,3 +35,13 @@ api = true
 api_address = "192.168.0.157"
 # Default 47210.
 #api_port = 47210
+
+# The owner's devices: this player appears on the PC by itself (Настройки →
+# Межсеть) and is paired once: «Добавить устройство» on the PC gives the
+# command `nikgobd pair <ticket>`, or «Подключить» there asks for the code
+# `nikgobd pair-code` prints. On by default.
+mesh = true
+# Its name on the other devices. Default: the computer's name.
+name = "Raspberry Pi"
+# pi, server, pc, tv or phone. Default: pi on a 64-bit ARM Linux, else server.
+kind = "pi"

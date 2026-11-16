@@ -593,13 +593,10 @@ username = \"me\"
         assert_eq!(Settings::load(&path).unwrap().mesh, s.mesh);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 
-        let none: Settings = toml::from_str("[soulseek]
-").unwrap();
+        let none: Settings = toml::from_str("[soulseek]\n").unwrap();
         assert!(none.mesh.enabled, "on unless switched off");
         assert!(none.mesh.name.is_empty());
-        let named: Settings = toml::from_str("[mesh]
-name = \"Pi\"
-").unwrap();
+        let named: Settings = toml::from_str("[mesh]\nname = \"Pi\"\n").unwrap();
         assert!(named.mesh.enabled);
         assert_eq!(named.mesh.name, "Pi");
     }
