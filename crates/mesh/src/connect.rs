@@ -171,11 +171,11 @@ impl Ctx {
         *self.live.borrow()
     }
 
-    /// Session `gen` ended (by a transfer or an undo it made): what was
+    /// Session `sess` ended (by a transfer or an undo it made): what was
     /// sent for it and still waits is dropped.
-    fn end(&self, gen: u64) {
+    fn end(&self, sess: u64) {
         self.live.send_if_modified(|g| {
-            let same = *g == gen;
+            let same = *g == sess;
             if same {
                 *g = ENDED;
             }
@@ -242,11 +242,11 @@ impl Ctx {
 
 /// What runs one at a time, in order.
 enum Op {
-    Run { gen: u64, node: String, commands: Vec<RemoteCommand> },
-    Pause { gen: u64, node: String, until: Instant },
-    Move { seq: u64, gen: u64, from: Option<String>, to: Option<String> },
-    Undo { seq: u64, gen: u64, node: String, snapshot: Box<ZoneSnapshot> },
-    Here { seq: u64, gen: u64, snapshot: Box<ZoneSnapshot> },
+    Run { sess: u64, node: String, commands: Vec<RemoteCommand> },
+    Pause { sess: u64, node: String, until: Instant },
+    Move { seq: u64, sess: u64, from: Option<String>, to: Option<String> },
+    Undo { seq: u64, sess: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    Here { seq: u64, sess: u64, snapshot: Box<ZoneSnapshot> },
 }
 
 impl Op {
@@ -270,11 +270,11 @@ async fn dispatch(ctx: Ctx, mut jobs: mpsc::Receiver<ConnectJob>) {
     let pulling: Arc<Mutex<HashSet<(TrackId, String, u64)>>> = Arc::default();
     while let Some(job) = jobs.recv().await {
         let op = match job {
-            ConnectJob::Session { gen, follow } => {
-                ctx.live.send_replace(gen);
+            ConnectJob::Session { sess, follow } => {
+                ctx.live.send_replace(sess);
                 // A new stream every time: its first event is the state
                 // now, which the runtime waits for.
-                _follower = follow.map(|node| Abort(tokio::spawn(follow_zone(ctx.clone(), node, gen))));
+                _follower = follow.map(|node| Abort(tokio::spawn(follow_zone(ctx.clone(), node, sess))));
                 continue;
             }
             ConnectJob::Pull { track, from, load, keep } => {
@@ -297,11 +297,11 @@ async fn dispatch(ctx: Ctx, mut jobs: mpsc::Receiver<ConnectJob>) {
                 });
                 continue;
             }
-            ConnectJob::Run { gen, node, commands } => Op::Run { gen, node, commands },
-            ConnectJob::Pause { gen, node, until } => Op::Pause { gen, node, until },
-            ConnectJob::Move { seq, gen, from, to } => Op::Move { seq, gen, from, to },
-            ConnectJob::Undo { seq, gen, node, snapshot } => Op::Undo { seq, gen, node, snapshot },
-            ConnectJob::Here { seq, gen, snapshot } => Op::Here { seq, gen, snapshot },
+            ConnectJob::Run { sess, node, commands } => Op::Run { sess, node, commands },
+            ConnectJob::Pause { sess, node, until } => Op::Pause { sess, node, until },
+            ConnectJob::Move { seq, sess, from, to } => Op::Move { seq, sess, from, to },
+            ConnectJob::Undo { seq, sess, node, snapshot } => Op::Undo { seq, sess, node, snapshot },
+            ConnectJob::Here { seq, sess, snapshot } => Op::Here { seq, sess, snapshot },
         };
         if let Err(e) = op_tx.try_send(op) {
             log::warn!("connect: too much waiting, an operation dropped");
@@ -328,11 +328,11 @@ async fn runner(ctx: Ctx, mut rx: mpsc::Receiver<Op>) {
         };
         let gen_now = ctx.session();
         match op {
-            Op::Run { gen, node, mut commands } => {
+            Op::Run { sess, node, mut commands } => {
                 // What waits of the same session and device goes along.
                 while commands.len() < REMOTE_MAX {
                     match rx.try_recv() {
-                        Ok(Op::Run { gen: g, node: n, commands: more }) if g == gen && n == node => commands.extend(more),
+                        Ok(Op::Run { sess: g, node: n, commands: more }) if g == sess && n == node => commands.extend(more),
                         Ok(other) => {
                             next = Some(other);
                             break;
@@ -340,7 +340,7 @@ async fn runner(ctx: Ctx, mut rx: mpsc::Receiver<Op>) {
                         Err(_) => break,
                     }
                 }
-                if gen != gen_now {
+                if sess != gen_now {
                     continue;
                 }
                 let mut ended = ctx.live.subscribe();
@@ -348,18 +348,18 @@ async fn runner(ctx: Ctx, mut rx: mpsc::Receiver<Op>) {
                     tokio::select! {
                         r = ctx.run(Some(&node), chunk) => {
                             if let Err(why) = r {
-                                ctx.report(ConnectReport::RunFailed { gen, node: node.clone(), why });
+                                ctx.report(ConnectReport::RunFailed { sess, node: node.clone(), why });
                                 break;
                             }
                         }
                         () = async {
-                            let _ = ended.wait_for(|g| *g != gen).await;
+                            let _ = ended.wait_for(|g| *g != sess).await;
                         } => break,
                     }
                 }
             }
-            Op::Pause { gen, node, until } => {
-                if gen != gen_now {
+            Op::Pause { sess, node, until } => {
+                if sess != gen_now {
                     continue;
                 }
                 let left = until.saturating_duration_since(Instant::now());
@@ -372,22 +372,22 @@ async fn runner(ctx: Ctx, mut rx: mpsc::Receiver<Op>) {
                     Err(_) => log::info!("connect: the device left did not pause in time"),
                 }
             }
-            Op::Move { seq, gen, from, to } => {
-                let result = if gen != gen_now { Err(ConnectFail::Stale) } else { transfer(&ctx, from.as_deref(), to.as_deref()).await };
+            Op::Move { seq, sess, from, to } => {
+                let result = if sess != gen_now { Err(ConnectFail::Stale) } else { transfer(&ctx, from.as_deref(), to.as_deref()).await };
                 if result.is_ok() {
-                    ctx.end(gen);
+                    ctx.end(sess);
                 }
                 ctx.report(ConnectReport::Moved { seq, to, result });
             }
-            Op::Undo { seq, gen, node, snapshot } => {
-                let result = if gen != gen_now { Err(ConnectFail::Stale) } else { undo(&ctx, &node, &snapshot).await };
+            Op::Undo { seq, sess, node, snapshot } => {
+                let result = if sess != gen_now { Err(ConnectFail::Stale) } else { undo(&ctx, &node, &snapshot).await };
                 if result.is_ok() {
-                    ctx.end(gen);
+                    ctx.end(sess);
                 }
                 ctx.report(ConnectReport::Undone { seq, node, result });
             }
-            Op::Here { seq, gen, snapshot } => {
-                let result = if gen != gen_now {
+            Op::Here { seq, sess, snapshot } => {
+                let result = if sess != gen_now {
                     Err(ConnectFail::Stale)
                 } else {
                     // Only what this device has a file of: the device left
@@ -648,10 +648,10 @@ impl SnapshotWant {
     }
 }
 
-/// Follows `node`'s zone (session `gen`) until aborted: its states, its
+/// Follows `node`'s zone (session `sess`) until aborted: its states, its
 /// snapshot when its queue changes, and its link, to the runtime. It
 /// never sends the device anything but reads.
-async fn follow_zone(ctx: Ctx, node: String, gen: u64) {
+async fn follow_zone(ctx: Ctx, node: String, sess: u64) {
     let (rtt_tx, mut rtt_rx) = mpsc::channel::<Duration>(8);
     let _pinger = Abort(tokio::spawn(ping(ctx.clone(), node.clone(), rtt_tx)));
     let mut link = Link::new(Instant::now());
@@ -703,7 +703,7 @@ async fn follow_zone(ctx: Ctx, node: String, gen: u64) {
                 match r {
                     Ok(snapshot) => {
                         want.done(key, true);
-                        ctx.report(ConnectReport::Snapshot { gen, node: node.clone(), snapshot: Box::new(snapshot) });
+                        ctx.report(ConnectReport::Snapshot { sess, node: node.clone(), snapshot: Box::new(snapshot) });
                     }
                     Err(e) => {
                         log::debug!("connect: the zone's snapshot did not come: {e}");
@@ -726,7 +726,7 @@ async fn follow_zone(ctx: Ctx, node: String, gen: u64) {
                                     want.seen(state.queue_key());
                                     let half = rtt.unwrap_or_default() / 2;
                                     let at = Instant::now().checked_sub(half).unwrap_or_else(Instant::now);
-                                    ctx.report(ConnectReport::State { gen, node: node.clone(), state: Box::new(state), at });
+                                    ctx.report(ConnectReport::State { sess, node: node.clone(), state: Box::new(state), at });
                                 }
                                 Err(e) => log::debug!("connect: a zone event not understood: {e}"),
                             }
@@ -758,7 +758,7 @@ async fn follow_zone(ctx: Ctx, node: String, gen: u64) {
             _ = check.tick() => {}
         }
         if let Some(l) = link.check(Instant::now()) {
-            ctx.report(ConnectReport::Link { gen, node: node.clone(), link: l });
+            ctx.report(ConnectReport::Link { sess, node: node.clone(), link: l });
         }
     }
 }

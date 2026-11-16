@@ -680,25 +680,25 @@ pub fn starts_service_music(c: &Command) -> bool {
 /// ended is dropped before it touches the network.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectJob {
-    /// The target session `gen` begins: follow `node`'s zone (its event
+    /// The target session `sess` begins: follow `node`'s zone (its event
     /// stream and its snapshot), or none (the target is this device). Every
     /// earlier session has ended.
-    Session { gen: u64, follow: Option<String> },
-    /// Run these on `node`'s zone, in order, while session `gen` lasts.
-    Run { gen: u64, node: String, commands: Vec<RemoteCommand> },
-    /// Pause `node`'s zone if it can be done while session `gen` lasts and
+    Session { sess: u64, follow: Option<String> },
+    /// Run these on `node`'s zone, in order, while session `sess` lasts.
+    Run { sess: u64, node: String, commands: Vec<RemoteCommand> },
+    /// Pause `node`'s zone if it can be done while session `sess` lasts and
     /// before `until` (best effort).
-    Pause { gen: u64, node: String, until: Instant },
+    Pause { sess: u64, node: String, until: Instant },
     /// Move a zone's music to another: from `from`'s zone (None: this
     /// device's) to `to`'s (None: here). The source is paused first (its
     /// answer awaited: none, nothing moves); a load not known to be taken
     /// leaves the source paused.
-    Move { seq: u64, gen: u64, from: Option<String>, to: Option<String> },
+    Move { seq: u64, sess: u64, from: Option<String>, to: Option<String> },
     /// The undo of a transfer: `snapshot` back into `node`'s zone.
-    Undo { seq: u64, gen: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    Undo { seq: u64, sess: u64, node: String, snapshot: Box<ZoneSnapshot> },
     /// «Продолжить здесь»: `snapshot` into this device's zone, only what
     /// this device can play.
-    Here { seq: u64, gen: u64, snapshot: Box<ZoneSnapshot> },
+    Here { seq: u64, sess: u64, snapshot: Box<ZoneSnapshot> },
     /// `track`'s file from device `from` into this device's cache (or the
     /// copy kept there), for the zone's load `load`; `keep` are cached
     /// files in use (playing, next) that the cache must not drop.
@@ -721,19 +721,19 @@ pub enum ConnectFail {
 /// ([`Command::ConnectReport`]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectReport {
-    /// `node`'s zone as its last event says it, in session `gen`; `at` is
+    /// `node`'s zone as its last event says it, in session `sess`; `at` is
     /// when that was (the event's arrival less half the round trip).
-    State { gen: u64, node: String, state: Box<ZoneState>, at: Instant },
-    /// How `node` answers (session `gen`): silent a while, or again.
-    Link { gen: u64, node: String, link: RemoteLink },
+    State { sess: u64, node: String, state: Box<ZoneState>, at: Instant },
+    /// How `node` answers (session `sess`): silent a while, or again.
+    Link { sess: u64, node: String, link: RemoteLink },
     /// `node`'s whole transferable state, fetched when its queue changed.
-    Snapshot { gen: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    Snapshot { sess: u64, node: String, snapshot: Box<ZoneSnapshot> },
     Moved { seq: u64, to: Option<String>, result: Result<ZoneLoaded, ConnectFail> },
     Undone { seq: u64, node: String, result: Result<ZoneLoaded, ConnectFail> },
     Here { seq: u64, result: Result<ZoneLoaded, ConnectFail> },
     Pulled { track: TrackId, from: String, load: u64, result: Result<PathBuf, String> },
-    /// Commands for `node` (session `gen`) did not get there.
-    RunFailed { gen: u64, node: String, why: String },
+    /// Commands for `node` (session `sess`) did not get there.
+    RunFailed { sess: u64, node: String, why: String },
 }
 
 #[cfg(test)]

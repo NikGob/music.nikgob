@@ -86,7 +86,7 @@ enum Doing {
 struct Busy {
     seq: u64,
     /// The session it was asked in.
-    gen: u64,
+    sess: u64,
     doing: Doing,
     /// The API's request waiting for its end.
     reply: Option<ApiReply>,
@@ -95,7 +95,7 @@ struct Busy {
 /// «Отменить» of a transfer onto a device that was playing.
 struct Undo {
     /// The session it was raised for: another target since, no undo.
-    gen: u64,
+    sess: u64,
     node: String,
     previous: ZoneSnapshot,
     until: Instant,
@@ -108,7 +108,7 @@ struct Undo {
 pub(crate) struct ConnectKeep {
     pub(crate) link: Option<ConnectLink>,
     /// The target session's generation.
-    gen: u64,
+    sess: u64,
     target: Option<Target>,
     mirror: Option<Mirror>,
     /// The target's whole transferable state, as last fetched.
@@ -204,8 +204,8 @@ impl Worker {
         };
         if let Some(rc) = RemoteCommand::of(&c) {
             self.connect_optimistic(&rc);
-            let gen = self.connect.gen;
-            if !self.connect_send(ConnectJob::Run { gen, node, commands: vec![rc] }) {
+            let sess = self.connect.sess;
+            if !self.connect_send(ConnectJob::Run { sess, node, commands: vec![rc] }) {
                 log::warn!("connect: a command for the target dropped: no mesh service");
             }
             return None;
@@ -317,9 +317,9 @@ impl Worker {
 
     /// A new target session: what was sent for the one before is dropped.
     fn connect_session(&mut self, follow: Option<String>) {
-        self.connect.gen += 1;
-        let gen = self.connect.gen;
-        if !self.connect_send(ConnectJob::Session { gen, follow }) {
+        self.connect.sess += 1;
+        let sess = self.connect.sess;
+        if !self.connect_send(ConnectJob::Session { sess, follow }) {
             log::warn!("connect: no mesh service for the target's session");
         }
     }
@@ -357,13 +357,13 @@ impl Worker {
 
     fn connect_move(&mut self, from: Option<String>, to: Option<String>, reply: Option<ApiReply>) {
         self.connect.seq += 1;
-        let (seq, gen) = (self.connect.seq, self.connect.gen);
-        if !self.connect_send(ConnectJob::Move { seq, gen, from: from.clone(), to }) {
+        let (seq, sess) = (self.connect.seq, self.connect.sess);
+        if !self.connect_send(ConnectJob::Move { seq, sess, from: from.clone(), to }) {
             self.toast("Межсеть не запущена", None);
             answer(reply, Err("Межсеть не запущена".to_owned()));
             return;
         }
-        self.connect.busy = Some(Busy { seq, gen, doing: Doing::Move { from }, reply });
+        self.connect.busy = Some(Busy { seq, sess, doing: Doing::Move { from }, reply });
     }
 
     /// `node` becomes the target as it is (nothing moves); why not.
@@ -518,15 +518,15 @@ impl Worker {
         });
         self.connect_leave();
         self.connect_show_local();
-        let gen = self.connect.gen;
+        let sess = self.connect.sess;
         if let Some(snapshot) = snapshot.filter(|s| s.index.is_some()) {
             self.connect.seq += 1;
             let seq = self.connect.seq;
-            if self.connect_send(ConnectJob::Here { seq, gen, snapshot: Box::new(snapshot) }) {
-                self.connect.busy = Some(Busy { seq, gen, doing: Doing::Here, reply: None });
+            if self.connect_send(ConnectJob::Here { seq, sess, snapshot: Box::new(snapshot) }) {
+                self.connect.busy = Some(Busy { seq, sess, doing: Doing::Here, reply: None });
             }
         }
-        self.connect_send(ConnectJob::Pause { gen, node, until: Instant::now() + PAUSE_FOR });
+        self.connect_send(ConnectJob::Pause { sess, node, until: Instant::now() + PAUSE_FOR });
     }
 
     /// «Отменить» of a transfer: the device's music before it comes back
@@ -534,31 +534,31 @@ impl Worker {
     /// while the target is still the one the transfer made.
     fn connect_undo(&mut self) {
         let Some(u) = self.connect.undo.take() else { return };
-        if Instant::now() > u.until || u.gen != self.connect.gen {
+        if Instant::now() > u.until || u.sess != self.connect.sess {
             log::info!("connect: the undo came too late (or the target changed)");
             return;
         }
         self.connect.seq += 1;
         let seq = self.connect.seq;
-        if self.connect_send(ConnectJob::Undo { seq, gen: u.gen, node: u.node, snapshot: Box::new(u.previous) }) {
-            self.connect.busy = Some(Busy { seq, gen: u.gen, doing: Doing::Undo { before: u.before }, reply: None });
+        if self.connect_send(ConnectJob::Undo { seq, sess: u.sess, node: u.node, snapshot: Box::new(u.previous) }) {
+            self.connect.busy = Some(Busy { seq, sess: u.sess, doing: Doing::Undo { before: u.before }, reply: None });
         }
     }
 
     fn connect_report(&mut self, r: ConnectReport) {
         match r {
-            ConnectReport::State { gen, node, state, at } => {
-                if gen == self.connect.gen {
+            ConnectReport::State { sess, node, state, at } => {
+                if sess == self.connect.sess {
                     self.connect_state(&node, *state, at);
                 }
             }
-            ConnectReport::Link { gen, node, link } => {
-                if gen == self.connect.gen {
+            ConnectReport::Link { sess, node, link } => {
+                if sess == self.connect.sess {
                     self.connect_link(&node, link);
                 }
             }
-            ConnectReport::Snapshot { gen, node, snapshot } => {
-                if gen == self.connect.gen && self.connect.target.as_ref().is_some_and(|t| t.node == node) {
+            ConnectReport::Snapshot { sess, node, snapshot } => {
+                if sess == self.connect.sess && self.connect.target.as_ref().is_some_and(|t| t.node == node) {
                     self.connect.full = Some(*snapshot);
                 }
             }
@@ -584,7 +584,7 @@ impl Worker {
             Doing::Move { from } => from,
             _ => None,
         };
-        let same = b.gen == self.connect.gen;
+        let same = b.sess == self.connect.sess;
         let name = to.as_deref().and_then(|n| self.node_view(n)).map(|v| v.0).unwrap_or_default();
         let failed = match &to {
             Some(_) => format!("Не удалось перенести на {name}"),
@@ -635,7 +635,7 @@ impl Worker {
         }
         self.connect_target(node.clone(), name.clone(), kind);
         if let Some(previous) = loaded.previous.filter(|prev| !prev.paused && prev.index.is_some()) {
-            self.connect.undo = Some(Undo { gen: self.connect.gen, node, previous, until: Instant::now() + UNDO_FOR, before: from });
+            self.connect.undo = Some(Undo { sess: self.connect.sess, node, previous, until: Instant::now() + UNDO_FOR, before: from });
             self.connect_toast_long(format!("Очередь перенесена на {name}"), Some(("Отменить".to_owned(), Command::OutputUndoTransfer)));
         }
     }
@@ -646,7 +646,7 @@ impl Worker {
             Doing::Undo { before } => before,
             _ => None,
         };
-        if b.gen == self.connect.gen {
+        if b.sess == self.connect.sess {
             match result {
                 Ok(_) => match before.and_then(|n| self.node_view(&n).map(|(name, kind, _)| (n, name, kind))) {
                     // The target before, as it is (paused by the transfer).

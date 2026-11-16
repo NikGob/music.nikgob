@@ -80,7 +80,7 @@ fn service(h: &RuntimeHandle) -> Jobs {
 /// The generation of the last session that follows `node`.
 fn session_of(jobs: &Jobs, node: &str) -> Option<u64> {
     jobs.lock().unwrap().iter().rev().find_map(|j| match j {
-        ConnectJob::Session { gen, follow: Some(n) } if n == node => Some(*gen),
+        ConnectJob::Session { sess, follow: Some(n) } if n == node => Some(*sess),
         _ => None,
     })
 }
@@ -137,7 +137,7 @@ fn a_remote_sends_its_commands_and_mirrors_the_target() {
     rt.send(Command::OutputAttach { node_id: "pi-node".into() });
     wait("the target", || rt.state().target.is_some());
     wait("followed", || session_of(&jobs, "pi-node").is_some());
-    let gen = session_of(&jobs, "pi-node").unwrap();
+    let sess = session_of(&jobs, "pi-node").unwrap();
     assert!(rt.state().parked.is_some());
 
     let unknown = TrackId::new();
@@ -153,10 +153,10 @@ fn a_remote_sends_its_commands_and_mirrors_the_target() {
         ..ZoneState::default()
     };
     // A state of an ended session is not shown.
-    h.send(Command::ConnectReport(Box::new(ConnectReport::State { gen: gen - 1, node: "pi-node".into(), state: Box::new(zone.clone()), at: Instant::now() })));
+    h.send(Command::ConnectReport(Box::new(ConnectReport::State { sess: sess - 1, node: "pi-node".into(), state: Box::new(zone.clone()), at: Instant::now() })));
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(rt.state().player.status, Status::Buffering, "still waiting for the target's first state");
-    h.send(Command::ConnectReport(Box::new(ConnectReport::State { gen, node: "pi-node".into(), state: Box::new(zone), at: Instant::now() })));
+    h.send(Command::ConnectReport(Box::new(ConnectReport::State { sess, node: "pi-node".into(), state: Box::new(zone), at: Instant::now() })));
     wait("the mirror", || rt.state().player.status == Status::Playing);
     {
         let st = rt.state();
@@ -172,7 +172,7 @@ fn a_remote_sends_its_commands_and_mirrors_the_target() {
     }
 
     // The window's commands go there, with the session.
-    let sent = |c: RemoteCommand| jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Run { gen: g, node, commands } if *g == gen && node == "pi-node" && commands == &vec![c.clone()]));
+    let sent = |c: RemoteCommand| jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Run { sess: g, node, commands } if *g == sess && node == "pi-node" && commands == &vec![c.clone()]));
     rt.send(Command::Pause);
     wait("the pause sent", || sent(RemoteCommand::Pause));
     rt.send(Command::SetVolume(0.7));
@@ -180,19 +180,19 @@ fn a_remote_sends_its_commands_and_mirrors_the_target() {
     assert!(sent(RemoteCommand::SetVolume { volume: 0.7 }));
 
     // The link lost: paused display and «Продолжить здесь»; back by itself.
-    h.send(Command::ConnectReport(Box::new(ConnectReport::Link { gen, node: "pi-node".into(), link: RemoteLink::Lost })));
+    h.send(Command::ConnectReport(Box::new(ConnectReport::Link { sess, node: "pi-node".into(), link: RemoteLink::Lost })));
     wait("lost", || rt.state().target.as_ref().is_some_and(|t| t.link == RemoteLink::Lost));
     assert_eq!(rt.state().player.status, Status::Paused);
     let toast = |st: &nikgob_view::ViewState| st.toasts.iter().any(|t| matches!(&t.action, Some((_, Command::OutputContinueHere))));
     assert!(toast(&rt.state()));
-    h.send(Command::ConnectReport(Box::new(ConnectReport::Link { gen, node: "pi-node".into(), link: RemoteLink::Live })));
+    h.send(Command::ConnectReport(Box::new(ConnectReport::Link { sess, node: "pi-node".into(), link: RemoteLink::Live })));
     wait("live again", || rt.state().player.status == Status::Playing);
     assert!(!toast(&rt.state()), "the toast goes by itself");
 
     // Back to this device: nothing moved, the parked zone shows again.
     rt.send(Command::OutputDetach);
     wait("detached", || rt.state().target.is_none());
-    assert!(jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Session { gen: g, follow: None } if *g > gen)));
+    assert!(jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Session { sess: g, follow: None } if *g > sess)));
     assert_eq!(rt.state().player.status, Status::Stopped);
     assert!(rt.state().parked.is_none());
 }
@@ -236,7 +236,7 @@ fn a_transfer_moves_through_the_service_and_parks_this_zone() {
     // the parked zone is back, paused.
     wait("the target and the waiting detach", || {
         let Some(g) = session_of(&jobs, "pi-node") else { return false };
-        jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Session { gen, follow: None } if *gen > g))
+        jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Session { sess, follow: None } if *sess > g))
     });
     wait("detached", || rt.state().target.is_none());
     assert_eq!(jobs.lock().unwrap().iter().filter(|j| matches!(j, ConnectJob::Move { .. })).count(), 1, "back here was here already");
@@ -288,10 +288,10 @@ fn forgetting_the_target_brings_this_zone_back_paused() {
     wait("playing here", || rt.state().player.status == Status::Playing);
     rt.send(Command::OutputAttach { node_id: "pi-node".into() });
     wait("the target", || rt.state().target.is_some());
-    let gen = session_of(&jobs, "pi-node").unwrap();
+    let sess = session_of(&jobs, "pi-node").unwrap();
     rt.send(Command::MeshForget { node_id: "pi-node".into() });
     wait("back here", || rt.state().target.is_none());
-    assert!(jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Session { gen: g, follow: None } if *g > gen)));
+    assert!(jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Session { sess: g, follow: None } if *g > sess)));
     assert_eq!(rt.state().player.status, Status::Paused, "parked, not resumed");
     assert_eq!(rt.state().player.current.as_ref().map(|c| c.id), Some(t[0]));
 }
