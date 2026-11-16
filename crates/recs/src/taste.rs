@@ -1420,6 +1420,66 @@ mod tests {
         assert_eq!(DayPart::day_of(day + 2 * HOUR_MS, 180), 2, "05:00 in Moscow");
     }
 
+    /// «Включи X» to the assistant is the owner's own pick, a little less
+    /// (six of them stand between four and five picks at the computer); two
+    /// early «дальше» on the speaker push a song down; the radio going on
+    /// for hours after a command weighs a few songs at the computer (more
+    /// on the speaker itself), and none of them counts as on repeat.
+    #[test]
+    fn a_voice_request_is_intent_and_a_marathon_a_few_songs() {
+        use crate::context::{PlayActor, PlayDevice};
+        let now = 1_000 * DAY_MS;
+        let cat = Catalog::new((0..80).map(|i| info(i, &[i as u32 % 10], Some(i)).with_duration(Some(180_000))));
+        let speaker = |p: Play| Play { actor: PlayActor::Assistant, device: PlayDevice::Ambient, ..p };
+        let pick = |track: u128, ts: UnixMs| Play { origin: Some(EventOrigin::Manual), ..play(tid(track), ts, EventType::Start, Some(0)) };
+        let done = |track: u128, ts: UnixMs| play(tid(track), ts + 180_000, EventType::Complete, Some(180_000));
+        let mut events = Vec::new();
+        // Every other day (no repeats within a day).
+        for d in (3..15i64).step_by(2) {
+            let day = now - d * DAY_MS;
+            // The voice: «включи» song 1 in the morning, on the speaker.
+            events.push(speaker(pick(1, day + 9 * HOUR_MS)));
+            events.push(speaker(done(1, day + 9 * HOUR_MS)));
+            // The computer: song 2 four evenings, song 3 five.
+            if d < 10 {
+                events.push(pick(2, day + 20 * HOUR_MS));
+                events.push(done(2, day + 20 * HOUR_MS));
+            }
+            if d < 12 {
+                events.push(pick(3, day + 21 * HOUR_MS));
+                events.push(done(3, day + 21 * HOUR_MS));
+            }
+        }
+        // A command, then the radio fifty songs on, untouched.
+        let t0 = now - DAY_MS + 8 * HOUR_MS;
+        events.push(speaker(pick(5, t0)));
+        events.push(speaker(done(5, t0)));
+        for k in 0..50u128 {
+            let ts = t0 + (k as i64 + 1) * 181_000;
+            events.push(speaker(Play { origin: Some(EventOrigin::Radio), ..play(tid(10 + k), ts, EventType::Start, Some(0)) }));
+            events.push(speaker(play(tid(10 + k), ts + 179_000, EventType::Complete, Some(179_000))));
+        }
+        // Two early «дальше» by voice.
+        for h in [12, 11] {
+            let ts = now - h * HOUR_MS;
+            events.push(speaker(Play { origin: Some(EventOrigin::Radio), ..play(tid(4), ts, EventType::Start, Some(0)) }));
+            events.push(speaker(Play { end_reason: Some(EndReason::UserNext), ..play(tid(4), ts + 8_000, EventType::Skip, Some(8_000)) }));
+        }
+        let taste = Taste::build(&cat, &TasteInput { events: events.clone(), ..TasteInput::default() }, now);
+        let a = |t: &Taste, i: u128| t.affinity_at(cat.position(tid(i)).unwrap());
+        assert!(a(&taste, 2) < a(&taste, 1) && a(&taste, 1) < a(&taste, 3), "{} {} {}", a(&taste, 2), a(&taste, 1), a(&taste, 3));
+        assert!(a(&taste, 4) < -1.0, "{}", a(&taste, 4));
+        let radio = |t: &Taste| (10..60u128).map(|i| a(t, i)).sum::<f32>();
+        assert!(radio(&taste) > 1.0 && radio(&taste) < 5.0, "{}", radio(&taste));
+        let i10 = cat.position(tid(10)).unwrap();
+        assert_eq!(taste.plays_at(i10), 1, "heard");
+        assert_eq!(taste.recent_completes_at(i10), 0, "not on repeat");
+        assert_eq!(taste.recent_completes_at(cat.position(tid(1)).unwrap()), 6, "the asked-for song is");
+        // On the speaker itself its own radio weighs more.
+        let room = Taste::build(&cat, &TasteInput { events, target_device: PlayDevice::Ambient, ..TasteInput::default() }, now);
+        assert!(radio(&room) > 2.0 * radio(&taste), "{} {}", radio(&room), radio(&taste));
+    }
+
     #[test]
     fn a_big_history_is_quick() {
         let (cat, input, now) = big_history(50_000, 100_000, 5_000);
