@@ -1,8 +1,10 @@
 //! What a device tells the others of itself while they are connected: its
 //! name, kind and version, its library disk, and what it plays with the
-//! clock of the position (a remote extrapolates the progress itself).
+//! clock of the position (a remote extrapolates the progress itself); how
+//! its copies of the library come along; the ring holder also what each
+//! device is to store, and any device whose copies the owner paused there.
 
-use nikgob_view::{MeshKind, MeshPlaying, MeshStorage, Status, TrackRow, ViewState};
+use nikgob_view::{MeshKind, MeshPlaying, MeshProfile, MeshScope, MeshStorage, MeshTransfer, PlaylistId, Status, TrackRow, ViewState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -12,7 +14,36 @@ pub struct Presence {
     pub version: String,
     pub storage: Option<MeshStorage>,
     pub playing: Option<MeshPlaying>,
+    /// This device pulling the library's files (none: nothing to pull).
+    #[serde(default)]
+    pub transfer: Option<MeshTransfer>,
+    /// This device holds the ring: what it gives the devices to store is
+    /// what they store.
+    #[serde(default)]
+    pub holder: bool,
+    /// What each owner's device stores (the ring holder's choice).
+    #[serde(default)]
+    pub assign: Vec<Assigned>,
+    /// The devices whose pulls the owner paused here.
+    #[serde(default)]
+    pub pause: Vec<String>,
 }
+
+/// What a device stores, as the ring holder chose it: its profile and, for
+/// «Избранное», what it keeps pinned.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assigned {
+    pub node: String,
+    pub profile: MeshProfile,
+    #[serde(default)]
+    pub liked: bool,
+    #[serde(default)]
+    pub playlists: Vec<PlaylistId>,
+}
+
+/// A transfer's bytes that moved this far are told at once (the heartbeat
+/// carries smaller steps).
+pub const TRANSFER_STEP: u64 = 16 << 20;
 
 /// A position that drifted further than this from where the last report
 /// puts it is a change (a seek); closer, the clock says it.
@@ -64,7 +95,34 @@ pub fn of_view(st: &ViewState, name: &str, kind: MeshKind, version: &str, now_ms
     };
     let s = &st.downloads.storage;
     let storage = s.known.then(|| MeshStorage { used: s.music(), free: s.disks.first().map_or(0, |d| d.free) });
-    Presence { name: name.to_owned(), kind, version: version.to_owned(), storage, playing }
+    let holder = st.mesh.ring_holder;
+    let assign = if holder {
+        st.mesh
+            .nodes
+            .iter()
+            .filter(|n| n.scope == MeshScope::Owner)
+            .map(|n| Assigned { node: n.id.clone(), profile: n.profile, liked: n.pins.liked, playlists: n.pins.playlists.clone() })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Presence { name: name.to_owned(), kind, version: version.to_owned(), storage, playing, transfer: None, holder, assign, pause: Vec::new() }
+}
+
+/// Whether a transfer changed enough to tell at once: begun or ended, its
+/// total, its pause, a stop or a start, or bytes past [`TRANSFER_STEP`]
+/// (or a fiftieth of the whole).
+pub fn transfer_differs(old: &Option<MeshTransfer>, new: &Option<MeshTransfer>) -> bool {
+    match (old, new) {
+        (None, None) => false,
+        (Some(a), Some(b)) => {
+            a.total != b.total
+                || a.paused != b.paused
+                || (a.speed == 0) != (b.speed == 0)
+                || a.done.abs_diff(b.done) >= (b.total / 50).max(TRANSFER_STEP)
+        }
+        _ => true,
+    }
 }
 
 /// Where `p` puts the position at `now_ms`.
@@ -76,6 +134,9 @@ pub fn position_at(p: &MeshPlaying, now_ms: i64) -> i64 {
 /// with its clock is nothing new).
 pub fn differs(old: &Presence, new: &Presence) -> bool {
     if old.name != new.name || old.kind != new.kind || old.version != new.version || old.storage != new.storage {
+        return true;
+    }
+    if old.holder != new.holder || old.assign != new.assign || old.pause != new.pause || transfer_differs(&old.transfer, &new.transfer) {
         return true;
     }
     match (&old.playing, &new.playing) {
@@ -162,5 +223,43 @@ mod tests {
         st.parked = Some(nikgob_view::ParkedView { current: Some(own), position: std::time::Duration::from_secs(7) });
         let p = of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1).playing.unwrap();
         assert_eq!((p.title.as_str(), p.paused, p.position_ms, p.rate), ("Own", true, 7_000, 0.0));
+    }
+
+    /// The ring holder tells what each owner device stores (a guest
+    /// nothing); another device tells nothing of that.
+    #[test]
+    fn the_holder_gives_the_devices_their_profiles() {
+        let mut st = ViewState::default();
+        let list = PlaylistId::new();
+        st.mesh.nodes = vec![
+            nikgob_view::MeshNodeView {
+                id: "phone".into(),
+                profile: MeshProfile::Favorites { cap_bytes: 8 << 30 },
+                pins: nikgob_view::MeshPins { liked: true, playlists: vec![list] },
+                ..nikgob_view::MeshNodeView::default()
+            },
+            nikgob_view::MeshNodeView { id: "tv".into(), scope: MeshScope::Guest, ..nikgob_view::MeshNodeView::default() },
+        ];
+        assert!(of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1).assign.is_empty(), "not the holder");
+        st.mesh.ring_holder = true;
+        let p = of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1);
+        assert!(p.holder);
+        assert_eq!(p.assign, vec![Assigned { node: "phone".into(), profile: MeshProfile::Favorites { cap_bytes: 8 << 30 }, liked: true, playlists: vec![list] }]);
+        let back: Presence = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        let old: Presence = serde_json::from_str(r#"{"name":"Pi","kind":"pi","version":"0.0.4","storage":null,"playing":null}"#).unwrap();
+        assert!(old.assign.is_empty() && old.transfer.is_none(), "a device of an older version");
+    }
+
+    #[test]
+    fn a_transfer_is_told_when_it_moved_enough() {
+        let t = |done: u64, speed: u64| Some(MeshTransfer { done, total: 10 << 30, paused: false, speed });
+        assert!(!transfer_differs(&t(0, 5), &t(100 << 20, 5)), "under a fiftieth of ten gigabytes");
+        assert!(transfer_differs(&t(0, 5), &t(300 << 20, 5)));
+        assert!(transfer_differs(&t(0, 5), &t(0, 0)), "it stopped");
+        assert!(transfer_differs(&None, &t(0, 0)));
+        assert!(transfer_differs(&t(0, 0), &None));
+        let p = Presence { transfer: t(0, 5), ..Presence::default() };
+        assert!(differs(&p, &Presence { pause: vec!["pi".into()], ..p.clone() }));
     }
 }

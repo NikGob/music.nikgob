@@ -6025,6 +6025,7 @@ dependencies = [
  "mdns-sd",
  "nikgob-api",
  "nikgob-core",
+ "nikgob-import",
  "nikgob-library",
  "nikgob-runtime",
  "nikgob-view",

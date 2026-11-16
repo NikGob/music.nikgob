@@ -32,6 +32,12 @@ use crate::{ALPN_CTL, ALPN_HTTP, ALPN_PAIR, MESH_PORT, MeshContext, MeshError, t
 #[path = "sync.rs"]
 mod sync;
 
+/// The library's files on this device by the profile the ring holder gives
+/// it, and the copies this computer's masters have on the others (a child
+/// of this module for the same reason).
+#[path = "replica.rs"]
+mod replica;
+
 /// A link sends its presence at least this often…
 const HEARTBEAT: Duration = Duration::from_secs(5);
 /// …and a link that hears nothing for this long is dropped (offline).
@@ -195,6 +201,8 @@ pub(crate) struct Shared {
     /// Each device's room for running tunnelled requests.
     streams: Mutex<HashMap<PublicKey, Arc<Semaphore>>>,
     library: Option<nikgob_library::Library>,
+    /// This device's pull of the library's files and the pauses asked here.
+    replica: replica::ReplicaShared,
 }
 
 /// Binds an endpoint with `key`: LAN only, every ALPN of the mesh; on
@@ -382,6 +390,7 @@ impl Shared {
             http_in: Mutex::new((0, Vec::new())),
             streams: Mutex::new(HashMap::new()),
             library: ctx.library,
+            replica: replica::ReplicaShared::default(),
         })
     }
 
@@ -670,6 +679,11 @@ impl Shared {
             let p = presence::of_view(&st, &name, kind, &self.version, now_ms());
             (st.mesh.enabled, name, known, p)
         };
+        // The copies: this device's pull, and the devices whose pulls the
+        // owner paused here.
+        let mut p = p;
+        p.transfer = self.replica.transfer();
+        p.pause = self.replica.pause_list();
         let renamed = {
             let mut s = self.state.lock();
             s.known = known.into_iter().collect();
@@ -686,6 +700,8 @@ impl Shared {
                 *cur = p;
                 true
             } else {
+                // The heartbeat carries the transfer's smaller steps.
+                cur.transfer = p.transfer;
                 false
             }
         }) {
@@ -777,6 +793,7 @@ impl Shared {
             version: Some(self.version.clone()),
             storage: own.storage,
             playing: own.playing,
+            transfer: self.replica.transfer(),
             ..MeshNodeView::default()
         };
         let members: Vec<Cert> = s.ring.as_ref().map(|r| r.others().cloned().collect()).unwrap_or_default();
@@ -805,6 +822,7 @@ impl Shared {
                 version: pres.map(|p| p.version.clone()).filter(|v| !v.is_empty()),
                 storage: pres.and_then(|p| p.storage),
                 playing: if online { pres.and_then(|p| p.playing.clone()) } else { None },
+                transfer: if online { pres.and_then(|p| p.transfer) } else { None },
                 ..MeshNodeView::default()
             };
             nodes.push(MeshSnapshotNode { view, cert: serde_json::to_string(&c).unwrap_or_default() });
@@ -874,6 +892,15 @@ impl Shared {
             }
             Command::MeshSetScope { node_id, scope } => self.set_scope(&node_id, scope),
             Command::MeshClearPairing => self.set_pairing(MeshPairing::Idle),
+            // The pause of a device's copies: this device's own, or told
+            // to the other through the presence.
+            Command::MeshPauseTransfer { node_id, paused } => {
+                self.replica.set_paused(&node_id, paused);
+                self.notify();
+            }
+            Command::ReplicaRecheck { card, hashes, need, leaving } => {
+                tokio::spawn(replica::recheck(self.clone(), card, hashes, need, leaving));
+            }
             other => log::debug!("mesh: not a command of the mesh: {other:?}"),
         }
     }
@@ -1688,6 +1715,8 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
     let mut changes = sh.wake.subscribe();
     let publisher = tokio::spawn(publish_loop(sh.clone()));
     let syncer = tokio::spawn(sync::run(sh.clone()));
+    let replicator = tokio::spawn(replica::run(sh.clone()));
+    let auditor = tokio::spawn(replica::audit(sh.clone()));
     let mut retry_at: Option<Instant> = None;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1735,6 +1764,8 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
         }
     }
     syncer.abort();
+    replicator.abort();
+    auditor.abort();
     sh.stop_node().await;
     publisher.abort();
     sh.rt.send(Command::MeshUpdate(Box::new(sh.snapshot())));
