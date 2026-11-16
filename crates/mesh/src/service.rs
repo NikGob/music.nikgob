@@ -576,7 +576,10 @@ impl Shared {
         let grant = Grant { ring: ring.public.to_string(), cert, members: ring.members.clone(), revoked: ring.revoked.clone() };
         s.ring = Some(ring);
         if invite.is_some() {
+            // Spent; the window that showed it hears of the device at once
+            // (it closes as a success, asks no new invite).
             s.invite = None;
+            s.pairing = MeshPairing::Done { node_id: node };
         }
         Ok(grant)
     }

@@ -157,7 +157,7 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
 /// kept flat and no `{hash}.<ext>` among `flat` (the stems of the masters
 /// folder's files). `exists` says whether a path is a file.
 pub(crate) fn lost_with(only: &[OnlyCopy], flat: &std::collections::HashSet<String>, exists: impl Fn(&str) -> bool) -> u64 {
-    only.iter().filter(|o| !(o.paths.iter().any(|p| exists(p)) || (o.flat && flat.contains(&o.file_hash)))).count() as u64
+    only.iter().filter(|o| !(o.paths.iter().any(|p| exists(p.as_str())) || (o.flat && flat.contains(&o.file_hash)))).count() as u64
 }
 
 /// The stems of the files right in the masters folder (`{hash}.flac`, not
