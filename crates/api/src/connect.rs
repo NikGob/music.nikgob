@@ -267,6 +267,16 @@ mod tests {
         Request::post(path).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
     }
 
+    async fn until(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..2000 {
+            if f() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
     fn ids(v: &serde_json::Value) -> Vec<String> {
         v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default()
     }
@@ -285,6 +295,11 @@ mod tests {
         assert!(v["previous"].is_null(), "the queue was empty");
         assert_eq!(ids(&v["skipped"]), vec![unknown.to_string(), t2.to_string()]);
         assert_eq!(v["loaded"], 2);
+        until("paused on the first", || {
+            let st = f.rt.state();
+            st.player.status == Status::Paused && st.player.current.as_ref().map(|c| c.id) == Some(t0)
+        })
+        .await;
         {
             let st = f.rt.state();
             assert_eq!(st.player.status, Status::Paused);
