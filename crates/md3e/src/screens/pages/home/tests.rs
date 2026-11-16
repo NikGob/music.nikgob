@@ -554,3 +554,30 @@ fn a_song_row_of_home_links_its_album() {
     assert_eq!(&line[links2.last().unwrap().clone()], "Made in Abyss OST");
     assert_eq!(routes.last(), Some(&Route::Release(r)));
 }
+
+#[test]
+fn compact_shortcuts_fill_the_column_in_two() {
+    let grid = Grid::new(16.0, 328.0);
+    let a = compact_cell(grid, 0, 2, 100.0);
+    let b = compact_cell(grid, 1, 2, 100.0);
+    let c = compact_cell(grid, 2, 2, 100.0);
+    assert_eq!(a.left(), 16.0);
+    assert!((b.right() - (16.0 + 328.0)).abs() < 0.01);
+    assert!((b.left() - a.right() - COMPACT_GAP).abs() < 0.01);
+    assert_eq!(c.top(), 100.0 + SHORTCUT_COMPACT_H + COMPACT_GAP);
+    assert_eq!(a.height(), SHORTCUT_COMPACT_H);
+}
+
+#[test]
+fn the_downloaded_chip_folds_only_where_the_greeting_would_be_cut() {
+    // «Добрый день» beside «Только скачанное»: a phone of 360 dp less its
+    // margins folds it, a window does not.
+    assert!(chip_folds(328.0, 150.0, 120.0));
+    assert!(!chip_folds(900.0, 150.0, 120.0));
+}
+
+#[test]
+fn the_name_buttons_go_under_a_cramped_field() {
+    assert!(name_buttons_below(288.0, 204.0));
+    assert!(!name_buttons_below(520.0, 204.0));
+}

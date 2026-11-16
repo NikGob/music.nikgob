@@ -275,6 +275,9 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
         }
     };
     let cover = Rect::from_min_size(cell.min, vec2(cell.height(), cell.height()));
+    // A phone's quick pick (home::COMPACT_BELOW): a line each for the name
+    // and its line, what plays marked on the cover.
+    let compact = cell.height() < super::home::SHORTCUT_H - 1.0;
     let clicked_play = scaled(ui, cell.center(), squish, |ui| {
         paint::container(ui.painter(), cell, Radii::all(r), s.surface_container, egui::Stroke::NONE);
         match sc {
@@ -314,17 +317,22 @@ pub fn shortcut(ui: &mut Ui, cell: Rect, sc: &Shortcut, st: &ViewState, i: usize
         }
         paint::state_layer(ui.painter(), cell, Radii::all(r), s.on_surface, layer);
         // The name and the line, centred as a block.
-        let left = cover.right() + 16.0;
-        let trail = if playing { 48.0 } else { 16.0 };
+        let left = cover.right() + if compact { 12.0 } else { 16.0 };
+        let trail = if compact { 12.0 } else if playing { 48.0 } else { 16.0 };
         let w = (cell.right() - trail - left).max(10.0);
         let name_c = if playing { s.primary } else { s.on_surface };
-        let name = text(ui, &title, TypeRole::TitleSmall.style(), name_c, w, 2);
+        let name = text(ui, &title, TypeRole::TitleSmall.style(), name_c, w, if compact { 1 } else { 2 });
         let line = text(ui, &sub, TypeRole::BodySmall.style(), s.on_surface_variant, w, 1);
         let h = name.size().y + line.size().y;
         let y = cell.center().y - h / 2.0;
         ui.painter().galley(pos2(left, y), name.clone(), name_c);
         ui.painter().galley(pos2(left, y + name.size().y), line, s.on_surface_variant);
-        if playing {
+        if playing && compact {
+            let c = cover.center();
+            ui.painter().circle_filled(c, 16.0, Color32::from_black_alpha(110));
+            let slot = Rect::from_center_size(c, vec2(32.0, 32.0));
+            crate::components::Equalizer::new(id.with("eq"), Color32::WHITE).size(18.0).playing(true).paint_at(ui, slot);
+        } else if playing {
             let slot = Rect::from_center_size(pos2(cell.right() - 16.0 - 16.0, cell.center().y), vec2(32.0, 32.0));
             crate::components::Equalizer::new(id.with("eq"), s.primary).size(20.0).playing(true).paint_at(ui, slot);
         }
