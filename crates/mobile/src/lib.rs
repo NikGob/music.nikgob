@@ -12,12 +12,16 @@
 
 mod gesture;
 mod home;
+mod menu;
 mod nav;
+mod player;
+mod queue;
+mod rows;
 mod text;
 
 use egui::{Pos2, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{NavBar, NavBarItem, anim};
-use nikgob_md3e::screens::phone::PhonePages;
+use nikgob_md3e::screens::phone::{self, PhonePages};
 use nikgob_md3e::{Icon, Theme};
 use nikgob_view::{Command, LibraryTab, Route, ViewState};
 
@@ -61,7 +65,7 @@ pub(crate) struct PageFrame {
 
 /// A vertical list that a finger (or a mouse on the PC) drags, with no
 /// scroll bar: a phone shows none.
-pub(crate) fn scroll(id: impl std::hash::Hash, reset: bool) -> egui::ScrollArea {
+pub(crate) fn scroll(id: impl std::hash::Hash + std::fmt::Debug, reset: bool) -> egui::ScrollArea {
     use egui::containers::scroll_area::{ScrollBarVisibility, ScrollSource};
     let mut area = egui::ScrollArea::vertical()
         .id_salt(id)
@@ -86,6 +90,11 @@ pub struct MobileUi {
     reset_scroll: bool,
     /// Библиотека's chip, as a route asked for it.
     library_tab: LibraryTab,
+    player: player::Player,
+    queue: queue::QueueSheet,
+    menu: menu::TrackMenu,
+    /// «Где играть» was asked for (the player's output).
+    output_asked: bool,
 }
 
 impl Default for MobileUi {
@@ -96,7 +105,17 @@ impl Default for MobileUi {
 
 impl MobileUi {
     pub fn new() -> Self {
-        Self { shell: PhonePages::new(), nav: Nav::default(), started: false, reset_scroll: false, library_tab: LibraryTab::All }
+        Self {
+            shell: PhonePages::new(),
+            nav: Nav::default(),
+            started: false,
+            reset_scroll: false,
+            library_tab: LibraryTab::All,
+            player: player::Player::default(),
+            queue: queue::QueueSheet::default(),
+            menu: menu::TrackMenu::default(),
+            output_asked: false,
+        }
     }
 
     /// The destination shown.
@@ -122,52 +141,112 @@ impl MobileUi {
         ui.painter().rect_filled(full, 0.0, s.surface);
         let ins = env.insets;
         let keyboard = ins.ime_bottom > 0.0;
-
+        let has_track = state.player.current.is_some();
+        if self.player.animating(now) {
+            ctx.request_repaint();
+        }
+        // The player's spring: 0 the capsule over the bar … 1 the screen.
+        // The bar slides away under the growing player.
+        let k = self.player.expand(now).clamp(0.0, 1.0);
         let bar_h = NAV_H + ins.bottom;
-        let bar_top = full.bottom() - bar_h;
-        let content_bottom = if keyboard { full.bottom() - ins.ime_bottom } else { bar_top };
+        let bar_top = full.bottom() - bar_h + bar_h * k;
+        let mini_space = if has_track { player::MINI_H + player::MINI_GAP } else { 0.0 };
+        let content_bottom = if keyboard { full.bottom() - ins.ime_bottom } else { full.bottom() - bar_h - mini_space };
         let content = Rect::from_min_max(full.min, pos2(full.right(), content_bottom));
+        let mini = Rect::from_min_size(
+            pos2(full.left() + player::MINI_MARGIN, bar_top - player::MINI_GAP - player::MINI_H),
+            vec2(full.width() - 2.0 * player::MINI_MARGIN, player::MINI_H),
+        );
 
-        // The back swipe from the left edge, while there is a page to go
-        // back to.
-        let edge = gesture::edge_back(&ctx, content, egui::Id::new("phone-edge"), self.nav.depth() > 0);
-        if edge.back {
-            self.nav.back(now);
+        // Under a player open all the way nothing else is laid out.
+        if k < 0.999 {
+            // The back swipe from the left edge, while there is a page to
+            // go back to.
+            let edge = gesture::edge_back(&ctx, content, egui::Id::new("phone-edge"), self.nav.depth() > 0 && !self.player.is_open());
+            if edge.back {
+                self.nav.back(now);
+            }
+            let reset = std::mem::take(&mut self.reset_scroll);
+            let (dx, alpha) = self.transition(&ctx, now, content.width());
+            let page_rect = content.translate(vec2(dx + edge.offset, 0.0));
+            let frame = PageFrame { rect: page_rect, top: ins.top, reset };
+            let mut pui = ui.new_child(UiBuilder::new().max_rect(page_rect).id_salt(("phone-page", self.nav.tab().index(), self.nav.depth())));
+            pui.set_clip_rect(content);
+            if alpha < 1.0 {
+                pui.multiply_opacity(alpha);
+            }
+            if let Some(r) = self.page(&mut pui, frame, state, out) {
+                self.go(r, now, out);
+            }
+            if !keyboard {
+                let items: Vec<NavBarItem<'_>> =
+                    Tab::ALL.iter().map(|t| NavBarItem { icon: t.icon(), label: t.label(), badge: None }).collect();
+                let bar = Rect::from_min_size(pos2(full.left(), bar_top), vec2(full.width(), bar_h));
+                if let Some(i) = NavBar::new("phone-nav", &items).selected(Some(self.nav.tab().index())).bottom_inset(ins.bottom).show(ui, bar) {
+                    self.select(Tab::ALL[i], now, out);
+                }
+                if has_track {
+                    self.player.mini(ui, mini, mini.top() - full.top(), state, out);
+                }
+            }
         }
-        let reset = std::mem::take(&mut self.reset_scroll);
-        let (dx, alpha) = self.transition(&ctx, now, content.width());
-        let page_rect = content.translate(vec2(dx + edge.offset, 0.0));
-        let frame = PageFrame { rect: page_rect, top: ins.top, reset };
-        let mut pui = ui.new_child(UiBuilder::new().max_rect(page_rect).id_salt(("phone-page", self.nav.tab().index(), self.nav.depth())));
-        pui.set_clip_rect(content);
-        if alpha < 1.0 {
-            pui.multiply_opacity(alpha);
+        if self.shell.take_open_now_playing() && has_track {
+            self.player.open(now, state);
         }
-        let nav = self.page(&mut pui, frame, state, out);
-        if let Some(r) = nav {
+        let po = self.player.full(ui, full, mini, env, state, out);
+        let here = state.player.context_page.clone().unwrap_or(Route::Home);
+        if po.queue {
+            self.queue.open(&ctx);
+        }
+        if po.menu
+            && let Some(t) = state.player.current.clone()
+        {
+            self.menu.open(t, here.clone());
+        }
+        if po.sound
+            && let Some(t) = state.player.current.clone()
+        {
+            self.shell.apply(&ctx, phone::TrackAct::Equalizer, &t, &here, state, out);
+        }
+        if po.output {
+            self.output_asked = true;
+        }
+        if let Some(r) = po.nav {
             self.go(r, now, out);
         }
 
-        if !keyboard {
-            let items: Vec<NavBarItem<'_>> =
-                Tab::ALL.iter().map(|t| NavBarItem { icon: t.icon(), label: t.label(), badge: None }).collect();
-            let bar = Rect::from_min_size(pos2(full.left(), bar_top), vec2(full.width(), bar_h));
-            if let Some(i) = NavBar::new("phone-nav", &items).selected(Some(self.nav.tab().index())).bottom_inset(ins.bottom).show(ui, bar) {
-                self.select(Tab::ALL[i], now, out);
-            }
+        // The sheets, the pages' dialogs and the snackbars over everything.
+        if self.queue.is_open()
+            && let Some((t, here)) = self.queue.show(&ctx, state, out)
+        {
+            self.menu.open(t, here);
         }
-
-        // The pages' dialogs and snackbars over everything.
+        if let Some(r) = self.menu.show(&ctx, &mut self.shell, state, out) {
+            self.queue.close(&ctx);
+            self.player.close(now, state);
+            self.go(r, now, out);
+        }
         let snack = full.bottom() - content_bottom + 8.0;
         if let Some(r) = self.shell.overlays(&ctx, state, full, snack, out) {
+            self.player.close(now, state);
             self.go(r, now, out);
         }
         if let Some(r) = self.shell.take_nav() {
+            self.player.close(now, state);
             self.go(r, now, out);
         }
         let back = self.shell.take_go_back() || env.back_pressed;
         if back {
-            self.nav.back(now);
+            // The topmost thing open closes first.
+            if self.menu.is_open() {
+                self.menu.close();
+            } else if self.queue.is_open() {
+                self.queue.close(&ctx);
+            } else if self.player.is_open() {
+                self.player.close(now, state);
+            } else {
+                self.nav.back(now);
+            }
         }
     }
 

@@ -121,10 +121,13 @@ pub struct RowGesture {
     pub tap: bool,
     /// Held without moving (or a right click on the PC): the row's menu.
     pub long: bool,
-    /// How far the finger has the row to the right now (0: not swiping).
+    /// How far the finger has the row sideways now (to the right positive;
+    /// 0: not swiping).
     pub offset: f32,
-    /// Let go past [`SWIPE_TRIGGER`].
+    /// Let go past [`SWIPE_TRIGGER`] to the right.
     pub swiped: bool,
+    /// ... to the left.
+    pub swiped_left: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -136,8 +139,9 @@ struct Press {
     moved: bool,
 }
 
-/// The gestures of a row over `rect`; `swipe`: it has a swipe action.
-pub fn row(ui: &Ui, rect: Rect, id: Id, swipe: bool) -> RowGesture {
+/// The gestures of a row over `rect`; `right` / `left`: it has an action
+/// for a swipe that way.
+pub fn row(ui: &Ui, rect: Rect, id: Id, right: bool, left: bool) -> RowGesture {
     let response = ui.interact(rect, id, Sense::click());
     let ctx = ui.ctx().clone();
     let (pressed, down, origin, pos, now) = ctx.input(|i| {
@@ -151,12 +155,13 @@ pub fn row(ui: &Ui, rect: Rect, id: Id, swipe: bool) -> RowGesture {
     {
         st = Some(Press { origin: o, t0: now, long: false, swipe: false, moved: false });
     }
-    let mut g = RowGesture { tap: false, long: response.secondary_clicked(), offset: 0.0, swiped: false, response };
+    let mut g = RowGesture { tap: false, long: response.secondary_clicked(), offset: 0.0, swiped: false, swiped_left: false, response };
     match st {
         Some(mut p) if down => {
             let d = pos.map_or(Vec2::ZERO, |q| q - p.origin);
             if !p.swipe && !p.long && !p.moved {
-                if swipe && d.x > SWIPE_START && d.x.abs() > d.y.abs() * 1.4 {
+                let sideways = d.x.abs() > SWIPE_START && d.x.abs() > d.y.abs() * 1.4;
+                if sideways && ((right && d.x > 0.0) || (left && d.x < 0.0)) {
                     p.swipe = true;
                 } else if d.length() > SLOP {
                     p.moved = true;
@@ -166,7 +171,8 @@ pub fn row(ui: &Ui, rect: Rect, id: Id, swipe: bool) -> RowGesture {
                 }
             }
             if p.swipe {
-                g.offset = rubber(d.x.max(0.0), SWIPE_TRIGGER);
+                let x = if right { d.x.max(if left { f32::MIN } else { 0.0 }) } else { d.x.min(0.0) };
+                g.offset = rubber(x.abs(), SWIPE_TRIGGER) * x.signum();
             }
             // Frames only while a finger is down on it and it is undecided
             // or moving.
@@ -178,7 +184,8 @@ pub fn row(ui: &Ui, rect: Rect, id: Id, swipe: bool) -> RowGesture {
         Some(p) => {
             let d = pos.map_or(Vec2::ZERO, |q| q - p.origin);
             if p.swipe {
-                g.swiped = d.x >= SWIPE_TRIGGER;
+                g.swiped = right && d.x >= SWIPE_TRIGGER;
+                g.swiped_left = left && d.x <= -SWIPE_TRIGGER;
             } else if !p.long {
                 g.tap = g.response.clicked();
             }
