@@ -1438,29 +1438,10 @@ fn migration_adds_the_sketch_table_only() {
         // paths, the photos' tries, the mesh's and sync's columns and tables
         // that came after them).
         let conn = rusqlite::Connection::open(&path).unwrap();
-        let triggers: Vec<String> = {
-            let mut stmt = conn
-                .prepare(r"SELECT name FROM sqlite_master WHERE type = 'trigger' AND (name LIKE 'sync!_%' ESCAPE '!' OR name LIKE 'node!_file!_%' ESCAPE '!')")
-                .unwrap();
-            stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
-        };
-        assert!(triggers.len() > 3, "{triggers:?}");
-        for t in triggers {
-            conn.execute_batch(&format!("DROP TRIGGER \"{t}\"")).unwrap();
-        }
-        conn.execute_batch(
-            "DROP TABLE change_log; DROP TABLE sync_clock; DROP TABLE sync_peer; DROP TABLE sync_node;
-             DROP TABLE node_file; ALTER TABLE event DROP COLUMN actor; ALTER TABLE lyrics_align DROP COLUMN fits;
-             DELETE FROM meta WHERE key IN ('sync.triggers', 'sync.epoch')",
-        )
-        .unwrap();
+        crate::sync::rewind_before_mesh(&conn);
         conn.execute_batch(
             "DROP TABLE sound_sketch; ALTER TABLE master DROP COLUMN file_path;
-             ALTER TABLE artist_photo DROP COLUMN tries;
-             ALTER TABLE node DROP COLUMN alias; ALTER TABLE node DROP COLUMN scope;
-             ALTER TABLE node DROP COLUMN profile; ALTER TABLE node DROP COLUMN addr;
-             ALTER TABLE node DROP COLUMN version; ALTER TABLE node DROP COLUMN cert;
-             ALTER TABLE node DROP COLUMN paired_at",
+             ALTER TABLE artist_photo DROP COLUMN tries",
         )
         .unwrap();
         conn.pragma_update(None, "user_version", before).unwrap();

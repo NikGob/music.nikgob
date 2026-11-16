@@ -1,8 +1,10 @@
 -- Syncing the library between the owner's devices.
 --
--- * sync_clock: one row. `hlc` is this database's hybrid logical clock (unix
---   ms that never goes back and moves past every time seen from another
---   device), `seq` the last change number given out, `node` this device's id
+-- * sync_clock: one row. `hlc` is the last version of this database's hybrid
+--   logical clock (`unix ms << 16 | counter`: never behind the wall clock,
+--   always growing, past every version taken from another device), `seq` the
+--   last change number given out (one per change log entry), `node` this
+--   device's id
 --   (stamped into the change log), `applying` set while rows from another
 --   device are written (the change triggers then stay quiet: the writer logs
 --   those rows itself, with their own versions).
@@ -15,6 +17,16 @@
 -- * sync_peer: how far this device has taken each table of each device.
 -- * sync_node: per device: syncing turned off, the other side's database
 --   (its epoch: a new one starts from the beginning), the last good pull.
+-- * sync_conflict: rows of another device that did not go through here (a
+--   row that could not be written, a delete held back while the row is still
+--   used here), kept as they came to be tried again; the cursor may pass them
+--   only because they are kept here.
+-- * sync_alias: ids of artists, albums and stream sources another device made
+--   for what this one has under its own id; incoming references go through it.
+-- * picture: the BLAKE3 hash of each album's cover and artist's photo file
+--   (synced); picture_file: where the file of a hash is on this device (its
+--   own file, or a copy taken from another device into the library's cache);
+--   picture_src: the reference each hash was taken from here.
 -- * node_file: which device has which file (local sources minus their paths),
 --   kept by the triggers below; synced like the rest.
 -- * event.actor: who started the play (owner | assistant | agent | guest;
@@ -56,6 +68,50 @@ CREATE TABLE sync_node (
     off      INTEGER NOT NULL DEFAULT 0,
     epoch    TEXT,
     last_ok  INTEGER
+) WITHOUT ROWID;
+
+CREATE TABLE sync_conflict (
+    tbl        TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    peer       TEXT NOT NULL,
+    cols       TEXT NOT NULL,
+    row        TEXT NOT NULL,
+    held       INTEGER NOT NULL DEFAULT 0,
+    reason     TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    last_try   INTEGER NOT NULL,
+    tries      INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (tbl, key, peer)
+) WITHOUT ROWID;
+CREATE INDEX sync_conflict_try ON sync_conflict(last_try);
+
+CREATE TABLE sync_alias (
+    tbl       TEXT NOT NULL,
+    remote_id TEXT NOT NULL,
+    local_id  TEXT NOT NULL,
+    peer      TEXT NOT NULL,
+    at        INTEGER NOT NULL,
+    PRIMARY KEY (tbl, remote_id)
+) WITHOUT ROWID;
+
+CREATE TABLE picture (
+    kind TEXT NOT NULL,
+    id   TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
+) WITHOUT ROWID;
+CREATE INDEX picture_hash ON picture(hash);
+
+CREATE TABLE picture_file (
+    hash TEXT PRIMARY KEY,
+    path TEXT NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE picture_src (
+    kind TEXT NOT NULL,
+    id   TEXT NOT NULL,
+    ref  TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
 ) WITHOUT ROWID;
 
 CREATE TABLE node_file (

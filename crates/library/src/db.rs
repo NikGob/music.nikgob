@@ -51,7 +51,11 @@ struct Inner {
     listening: Mutex<Option<KeptEvents>>,
     readers: Option<ReadPool>,
     device: RwLock<DeviceId>,
+    /// The last [`Library::tick`] (wall-clock ms).
     last_ts: AtomicI64,
+    /// The sync clock (see [`crate::sync`]); the change triggers read it
+    /// through `sync_hlc()`.
+    clock: Arc<AtomicI64>,
     /// See [`Library::set_album_likes_tracks`]; the SQL reads it through
     /// `album_likes_tracks()`.
     album_likes_tracks: Arc<AtomicBool>,
@@ -128,6 +132,25 @@ fn add_functions(conn: &Connection, album_likes_tracks: &Arc<AtomicBool>) -> Res
     Ok(())
 }
 
+/// What the connections share: the album likes mode and the sync clock.
+struct Shared {
+    album_likes_tracks: Arc<AtomicBool>,
+    clock: Arc<AtomicI64>,
+}
+
+/// The writer's functions, before anything (a migration's write fires the
+/// change triggers, which read the clock), and the clock where it was left.
+fn prepare_writer(writer: &Connection) -> Result<Shared> {
+    let shared = Shared { album_likes_tracks: Arc::new(AtomicBool::new(false)), clock: Arc::new(AtomicI64::new(0)) };
+    add_functions(writer, &shared.album_likes_tracks)?;
+    crate::sync::register_clock(writer, Arc::clone(&shared.clock))?;
+    // No such table before the sync migration.
+    if let Ok(hlc) = writer.query_row("SELECT hlc FROM sync_clock WHERE id = 1", [], |r| r.get::<_, i64>(0)) {
+        shared.clock.fetch_max(hlc, Ordering::Relaxed);
+    }
+    Ok(shared)
+}
+
 fn configure(conn: &Connection, writer: bool) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     // Hot reads (queue rows, cards, likes) keep their statements prepared.
@@ -161,6 +184,7 @@ impl Library {
         }
         let mut writer = Connection::open(path)?;
         configure(&writer, true)?;
+        let shared = prepare_writer(&writer)?;
         migrations::migrate(&mut writer)?;
 
         let mut readers = Vec::with_capacity(READ_POOL_SIZE);
@@ -179,6 +203,7 @@ impl Library {
                 available: Condvar::new(),
             }),
             Some(path.to_path_buf()),
+            shared,
         )
     }
 
@@ -186,13 +211,18 @@ impl Library {
     pub fn open_in_memory() -> Result<Self> {
         let mut writer = Connection::open_in_memory()?;
         configure(&writer, true)?;
+        let shared = prepare_writer(&writer)?;
         migrations::migrate(&mut writer)?;
-        Self::from_parts(writer, None, None)
+        Self::from_parts(writer, None, None, shared)
     }
 
-    fn from_parts(mut writer: Connection, readers: Option<ReadPool>, path: Option<std::path::PathBuf>) -> Result<Self> {
-        let album_likes_tracks = Arc::new(AtomicBool::new(false));
-        add_functions(&writer, &album_likes_tracks)?;
+    fn from_parts(
+        mut writer: Connection,
+        readers: Option<ReadPool>,
+        path: Option<std::path::PathBuf>,
+        shared: Shared,
+    ) -> Result<Self> {
+        let Shared { album_likes_tracks, clock } = shared;
         if let Some(pool) = &readers {
             for conn in pool.conns.lock().unwrap_or_else(PoisonError::into_inner).iter() {
                 add_functions(conn, &album_likes_tracks)?;
@@ -206,7 +236,9 @@ impl Library {
                 id
             }
         };
-        let clock = crate::sync::install(&mut writer, device.as_str())?;
+        let epoch_file = path.as_deref().map(crate::sync::epoch_file_of);
+        let hlc = crate::sync::install(&mut writer, device.as_str(), epoch_file.as_deref())?;
+        clock.fetch_max(hlc, Ordering::Relaxed);
         Ok(Self {
             inner: Arc::new(Inner {
                 writer: Mutex::new(writer),
@@ -214,7 +246,8 @@ impl Library {
                 listening: Mutex::new(None),
                 readers,
                 device: RwLock::new(device),
-                last_ts: AtomicI64::new(clock),
+                last_ts: AtomicI64::new(crate::sync::ms_of(hlc)),
+                clock,
                 album_likes_tracks,
                 path,
             }),
@@ -258,18 +291,27 @@ impl Library {
         Ok(())
     }
 
-    /// Timestamp for a user-data write: a hybrid logical clock in unix ms
-    /// (see [`crate::sync`]): the wall clock, but strictly increasing within
-    /// this handle, so two quick edits never share a timestamp (they would
-    /// otherwise tie in last-writer-wins merges and in "recent" orderings),
-    /// and past every time seen in another device's rows.
+    /// Timestamp for a user-data write (`updated_at`, shown and ordered
+    /// by): the wall clock in unix ms, but strictly increasing within this
+    /// handle, so two quick edits never share a timestamp (they would tie
+    /// in "recent" orderings), and never behind the sync clock. Which edit
+    /// wins a merge is the change log's version, not this.
     pub(crate) fn tick(&self) -> UnixMs {
-        crate::sync::hlc_next(&self.inner.last_ts, crate::util::now_ms())
+        let floor = crate::util::now_ms().max(crate::sync::ms_of(self.inner.clock.load(Ordering::Relaxed)));
+        let mut prev = self.inner.last_ts.load(Ordering::Relaxed);
+        loop {
+            let next = floor.max(prev + 1);
+            match self.inner.last_ts.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next,
+                Err(actual) => prev = actual,
+            }
+        }
     }
 
-    /// Another device's row of time `seen` was merged in.
-    pub(crate) fn observe_clock(&self, seen: UnixMs) {
-        crate::sync::hlc_observe(&self.inner.last_ts, seen, crate::util::now_ms());
+    /// Another device's row of version `seen` was merged in: the clock
+    /// never gives a version up to it again.
+    pub(crate) fn observe_clock(&self, seen: i64) {
+        crate::sync::hlc_observe(&self.inner.clock, seen);
     }
 
     pub(crate) fn set_device_in_memory(&self, id: DeviceId) {

@@ -1,44 +1,56 @@
 //! Syncing the library between the owner's devices: what changed, in
 //! pages, and the rows of another device merged in.
 //!
-//! * **The clock.** [`Library::tick`] is a hybrid logical clock in unix
-//!   milliseconds: never less than the wall clock, never back, and past
-//!   every time seen in a row from another device ([`hlc_observe`], at most
-//!   [`MAX_AHEAD_MS`] ahead of this device's own clock), so an edit made
-//!   after seeing another device's always wins over it, and old rows still
-//!   compare. The database keeps one too (`sync_clock.hlc`), for the
-//!   change triggers.
+//! * **The clock.** One hybrid logical clock per database, in process
+//!   ([`Library`] keeps it; the change triggers read it through the SQL
+//!   function `sync_hlc()`), persisted in `sync_clock.hlc`. A version is
+//!   `unix ms << 16 | counter` ([`LOGICAL_BITS`]): never less than the wall
+//!   clock, strictly growing (65 536 per millisecond before it runs ahead)
+//!   and past every version merged from another device. A page with a
+//!   version more than [`MAX_AHEAD_MS`] ahead of this device's wall clock
+//!   is refused ([`page_ahead`]): a version that could not be superseded is
+//!   never taken. `updated_at` columns stay wall-clock ms for display.
 //! * **The change log.** Every synced table ([`TABLES`]) has triggers that
-//!   note the last change of each row in `change_log` with a number growing
-//!   over the whole database (`seq`): another device asks for "everything
-//!   of a table after N" ([`Library::sync_changes`]). Rows deleted leave
-//!   their key there as gone (a tombstone), so a hard delete (`track_fx`,
-//!   the catalog) syncs too.
-//! * **Versions.** The user data with its own `updated_at`, `updated_by`
-//!   and `deleted` columns (playlists, entries, likes, album choices, songs
-//!   put in the library) keeps comparing by them; every other table by the
-//!   change log's version (`hlc`, `node`, `gone`). Both with the rule of
-//!   the userdata files ([`incoming_wins`]): the later clock wins, a gone
-//!   row beats a live one on a tie, then the larger device id.
+//!   note the last change of each row in `change_log`, each with its own
+//!   number (`seq`, growing over the whole database) and version: another
+//!   device asks for "everything of a table after N"
+//!   ([`Library::sync_changes`]). Rows deleted leave their key there as
+//!   gone (a tombstone), so a hard delete (`track_fx`, the catalog) syncs.
+//! * **Versions.** Every table compares by the change log's
+//!   `(version, gone, device)`: the larger version wins; a row noted before
+//!   sync existed has version 0 (its own `updated_at` when it has one,
+//!   [`SyncTable::stamp`]), and on an equal version 0 the row here stays (a
+//!   migration is never an edit: an incoming row only fills what is
+//!   missing); on another equal version a tombstone wins, then the larger
+//!   device id. A table may prefer rows by a flag ([`SyncTable::prefer`]:
+//!   a saved alignment beats an automatic one whatever the versions).
 //! * **Merging** ([`Library::sync_apply`]) writes a page in one transaction,
 //!   with the change triggers quiet (`sync_clock.applying`): the rows keep
 //!   the version they came with and remember the device they came from,
-//!   which is not offered them back. A row that breaks a constraint here
-//!   (an artist whose MusicBrainz id another artist has, a stream source
-//!   another one plays) is left out and counted; a catalog row is deleted
-//!   only when nothing here still uses it (a track with a file of this
-//!   device stays).
+//!   which is not offered them back. Ids of artists, albums and stream
+//!   sources another device made for what this one has under its own id
+//!   (the same MusicBrainz id, the same folded name, the same stream) become
+//!   aliases (`sync_alias`), and every incoming reference goes through them.
+//!   A row that cannot be written here, and a delete held back because the
+//!   row is still used here, is kept in `sync_conflict` and tried again
+//!   after every page and every turn of the loop; the count shows on the
+//!   device's row. After stream sources change, their tracks' playing source
+//!   is chosen again.
 //! * **What does not travel**: the paths of local files (`source` rows of
 //!   kind `local_file`; which device has which file travels as `node_file`
 //!   rows, kept by triggers on `source`), what is computed per file by its
 //!   source id (prints, the quality verdicts, the same-audio pairs), the
 //!   services' sync state, downloads and wishes, masters and replicas, the
-//!   guest's plays.
+//!   guest's plays. Pictures (covers, artist photos) travel as files by
+//!   their BLAKE3 hash (`picture`, `picture_file`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use nikgob_core::model::Uuid;
+use nikgob_core::model::{TrackId, Uuid};
+use nikgob_core::names::name_key;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -46,42 +58,73 @@ use serde_json::Value;
 
 use crate::db::Library;
 use crate::error::{LibraryError, Result};
-use crate::userdata::incoming_wins;
 use crate::util::{meta_get, meta_set, now_ms};
 
-/// Another device's clock is followed at most this far ahead of this
-/// device's own (a clock far off is that device's problem: its rows still
-/// count with their own times).
+/// A page with a version further ahead of this device's wall clock is
+/// refused.
 pub const MAX_AHEAD_MS: i64 = 5 * 60_000;
+/// The low bits of a version: a counter within one millisecond.
+pub const LOGICAL_BITS: u32 = 16;
 /// Rows a page holds at most…
 pub const PAGE_ROWS: u32 = 500;
 /// …and about this many bytes of values (blobs as base64).
 pub const PAGE_BYTES: usize = 1 << 20;
 /// The largest page a device asks for.
 const MAX_PAGE_ROWS: u32 = 2_000;
-
+/// Kept conflicts tried again after a page, at most.
+const RETRY_BATCH: u32 = 300;
 /// What the triggers are made from: a change here (or in [`TABLES`])
 /// makes them again.
-const TRIGGERS_VERSION: &str = "1";
+const TRIGGERS_VERSION: &str = "2";
 
-/// The next time of the clock `last` at wall time `now`.
-pub(crate) fn hlc_next(last: &AtomicI64, now: i64) -> i64 {
-    let mut prev = last.load(Ordering::Relaxed);
+// ------------------------------------------------------------------ clock
+
+/// The version of wall-clock time `ms`.
+pub const fn version_at(ms: i64) -> i64 {
+    ms << LOGICAL_BITS
+}
+
+/// The wall-clock ms of version `v`.
+pub const fn ms_of(v: i64) -> i64 {
+    v >> LOGICAL_BITS
+}
+
+/// The next version of the clock `clock` at wall time `now` (ms).
+pub(crate) fn hlc_next(clock: &AtomicI64, now: i64) -> i64 {
+    let floor = version_at(now);
+    let mut prev = clock.load(Ordering::Relaxed);
     loop {
-        let next = now.max(prev + 1);
-        match last.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+        let next = floor.max(prev + 1);
+        match clock.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return next,
             Err(actual) => prev = actual,
         }
     }
 }
 
-/// The clock `last` has seen time `seen` (another device's) at wall time
-/// `now`: it never gives a time before it again, unless it is more than
-/// [`MAX_AHEAD_MS`] ahead.
-pub(crate) fn hlc_observe(last: &AtomicI64, seen: i64, now: i64) {
-    last.fetch_max(seen.min(now + MAX_AHEAD_MS), Ordering::Relaxed);
+/// The clock has seen version `seen` (merged from another device): it never
+/// gives a version up to it again. Only versions [`page_ahead`] let through
+/// get here.
+pub(crate) fn hlc_observe(clock: &AtomicI64, seen: i64) {
+    clock.fetch_max(seen, Ordering::Relaxed);
 }
+
+/// Whether a page carries a version more than [`MAX_AHEAD_MS`] ahead of
+/// wall time `now` (that device's clock runs fast: nothing of it is taken).
+pub fn page_ahead(page: &SyncPage, now: i64) -> bool {
+    let limit = version_at(now + MAX_AHEAD_MS);
+    page.rows.iter().any(|r| r.v.0 > limit)
+}
+
+/// `sync_hlc()` for the change triggers, on connection `conn`, backed by
+/// `clock`.
+pub(crate) fn register_clock(conn: &Connection, clock: Arc<AtomicI64>) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function("sync_hlc", 0, FunctionFlags::SQLITE_UTF8, move |_| Ok(hlc_next(&clock, now_ms())))?;
+    Ok(())
+}
+
+// ----------------------------------------------------------------- tables
 
 /// What part of the library a synced table is (the order of a first sync).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -93,6 +136,31 @@ pub enum SyncGroup {
     Derived,
 }
 
+/// What a column points at, for the aliases of ids another device made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    Artist,
+    Release,
+    Source,
+    /// By the value of this column: `artist`, `release`.
+    ByKind(&'static str),
+    /// A credit (JSON) naming artists by id.
+    Credit,
+}
+
+/// How a row of another device is recognised as one this device has under
+/// another id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Identity {
+    None,
+    /// The same MusicBrainz id, or the same folded name.
+    Artist,
+    /// The same MusicBrainz id, or the same folded title and artist line.
+    Release,
+    /// The same stream (kind and locator).
+    Source,
+}
+
 /// A synced table.
 #[derive(Debug)]
 pub struct SyncTable {
@@ -101,8 +169,15 @@ pub struct SyncTable {
     /// The synced columns besides the key (local ones, like a track's
     /// `has_local` or a row's `seq`, are not here).
     pub cols: &'static [&'static str],
-    /// Versioned by its own `updated_at` / `updated_by` / `deleted`.
-    pub own: bool,
+    /// A column with the row's last edit in wall-clock ms: the version of a
+    /// row noted before sync existed (none: 0).
+    pub stamp: Option<&'static str>,
+    /// A flag column: between two live rows, the one with it set wins
+    /// whatever the versions.
+    pub prefer: Option<&'static str>,
+    /// Columns pointing at artists, albums, sources (keys too).
+    pub refs: &'static [(&'static str, Target)],
+    pub identity: Identity,
     /// The rows that travel, `{r}` standing for the row.
     filter: Option<&'static str>,
     /// When a row gone elsewhere may go here too (`?1` the first key
@@ -112,11 +187,12 @@ pub struct SyncTable {
 }
 
 const fn table(name: &'static str, keys: &'static [&'static str], cols: &'static [&'static str], group: SyncGroup) -> SyncTable {
-    SyncTable { name, keys, cols, own: false, filter: None, guard: None, group }
+    SyncTable { name, keys, cols, stamp: None, prefer: None, refs: &[], identity: Identity::None, filter: None, guard: None, group }
 }
 
+/// User data versioned by its own `updated_at`.
 const fn own(name: &'static str, keys: &'static [&'static str], cols: &'static [&'static str]) -> SyncTable {
-    SyncTable { own: true, ..table(name, keys, cols, SyncGroup::UserData) }
+    SyncTable { stamp: Some("updated_at"), ..table(name, keys, cols, SyncGroup::UserData) }
 }
 
 use SyncGroup::{Catalog, Derived, History, UserData};
@@ -129,10 +205,14 @@ pub const TABLES: &[SyncTable] = &[
             "NOT EXISTS (SELECT 1 FROM track_artist WHERE artist_id = ?1)
              AND NOT EXISTS (SELECT 1 FROM release_artist WHERE artist_id = ?1)",
         ),
+        refs: &[("id", Target::Artist)],
+        identity: Identity::Artist,
         ..table("artist", &["id"], &["mbid", "name", "sort_name", "sort_key", "images", "added_at"], Catalog)
     },
     SyncTable {
         guard: Some("NOT EXISTS (SELECT 1 FROM track WHERE release_id = ?1)"),
+        refs: &[("id", Target::Release), ("artist_credit", Target::Credit)],
+        identity: Identity::Release,
         ..table(
             "release",
             &["id"],
@@ -145,6 +225,7 @@ pub const TABLES: &[SyncTable] = &[
     },
     SyncTable {
         guard: Some("NOT EXISTS (SELECT 1 FROM source WHERE track_id = ?1)"),
+        refs: &[("release_id", Target::Release), ("artist_credit", Target::Credit)],
         ..table(
             "track",
             &["id"],
@@ -155,15 +236,20 @@ pub const TABLES: &[SyncTable] = &[
             Catalog,
         )
     },
-    table("release_artist", &["release_id", "artist_id"], &["position"], Catalog),
-    table("track_artist", &["track_id", "artist_id"], &["position"], Catalog),
-    table("artist_alias", &["key", "artist_id"], &["name", "source"], Catalog),
+    SyncTable {
+        refs: &[("release_id", Target::Release), ("artist_id", Target::Artist)],
+        ..table("release_artist", &["release_id", "artist_id"], &["position"], Catalog)
+    },
+    SyncTable { refs: &[("artist_id", Target::Artist)], ..table("track_artist", &["track_id", "artist_id"], &["position"], Catalog) },
+    SyncTable { refs: &[("artist_id", Target::Artist)], ..table("artist_alias", &["key", "artist_id"], &["name", "source"], Catalog) },
     table("track_alias", &["key", "track_id"], &["title", "source"], Catalog),
     // The streams' sources (a local file's path is this device's own; which
     // device has which file is `node_file`). Which source plays is each
-    // device's own choice (`is_active`).
+    // device's own choice (`is_active`, chosen again after a merge).
     SyncTable {
         filter: Some("{r}.kind <> 'local_file'"),
+        refs: &[("id", Target::Source)],
+        identity: Identity::Source,
         ..table(
             "source",
             &["id"],
@@ -180,26 +266,48 @@ pub const TABLES: &[SyncTable] = &[
         &["track_id", "file_hash", "codec", "size_bytes", "quality_score", "bitrate", "sample_rate", "bit_depth"],
         Catalog,
     ),
-    table("external_id", &["service", "kind", "remote_id"], &["local_id"], Catalog),
+    SyncTable {
+        refs: &[("local_id", Target::ByKind("kind"))],
+        ..table("external_id", &["service", "kind", "remote_id"], &["local_id"], Catalog)
+    },
     own("playlist", &["id"], &["name", "cover", "created_at", "updated_at", "updated_by", "deleted"]),
     own("playlist_entry", &["id"], &["playlist_id", "track_id", "position", "added_at", "updated_at", "updated_by", "deleted"]),
-    own("likes", &["target_kind", "target_id"], &["updated_at", "updated_by", "deleted"]),
-    own("release_selection", &["release_id"], &["mode", "view", "versions", "updated_at", "updated_by", "deleted"]),
-    own("release_track_selection", &["release_id", "track_id"], &["choice", "updated_at", "updated_by", "deleted"]),
+    SyncTable {
+        refs: &[("target_id", Target::ByKind("target_kind"))],
+        ..own("likes", &["target_kind", "target_id"], &["updated_at", "updated_by", "deleted"])
+    },
+    SyncTable {
+        refs: &[("release_id", Target::Release)],
+        ..own("release_selection", &["release_id"], &["mode", "view", "versions", "updated_at", "updated_by", "deleted"])
+    },
+    SyncTable {
+        refs: &[("release_id", Target::Release)],
+        ..own("release_track_selection", &["release_id", "track_id"], &["choice", "updated_at", "updated_by", "deleted"])
+    },
     own("track_put", &["track_id"], &["updated_at", "updated_by", "deleted"]),
-    table("rec_feedback", &["target_kind", "target_id"], &["dislike", "updated_at"], UserData),
+    SyncTable {
+        stamp: Some("updated_at"),
+        refs: &[("target_id", Target::ByKind("target_kind"))],
+        ..table("rec_feedback", &["target_kind", "target_id"], &["dislike", "updated_at"], UserData)
+    },
     table("recording_link", &["track_id"], &["recording", "how", "at"], UserData),
     table("recording_apart", &["track_id", "other_track"], &["at"], UserData),
-    table("track_fx", &["track_id"], &["variant", "updated_at"], UserData),
+    SyncTable { stamp: Some("updated_at"), ..table("track_fx", &["track_id"], &["variant", "updated_at"], UserData) },
     table("lyrics_pick", &["track_id"], &["source"], UserData),
     table("lyrics_show", &["track_id"], &["sync"], UserData),
-    table(
-        "unwanted",
-        &["release_id", "title_key"],
-        &["title", "artist", "disc_no", "track_no", "duration_ms", "isrc", "recording_mbid", "track_id", "at"],
-        UserData,
-    ),
-    table("artist_photo", &["artist_id"], &["path", "source", "fetched_at", "photo_locked"], UserData),
+    SyncTable {
+        refs: &[("release_id", Target::Release)],
+        ..table(
+            "unwanted",
+            &["release_id", "title_key"],
+            &["title", "artist", "disc_no", "track_no", "duration_ms", "isrc", "recording_mbid", "track_id", "at"],
+            UserData,
+        )
+    },
+    SyncTable {
+        refs: &[("artist_id", Target::Artist)],
+        ..table("artist_photo", &["artist_id"], &["path", "source", "fetched_at", "photo_locked"], UserData)
+    },
     SyncTable {
         filter: Some("coalesce({r}.actor, 'owner') <> 'guest'"),
         ..table(
@@ -214,17 +322,24 @@ pub const TABLES: &[SyncTable] = &[
     },
     table("lyrics", &["track_id"], &["synced", "plain", "instrumental", "source", "fetched_at"], Derived),
     table("lyrics_text", &["track_id", "source"], &["body", "fetched_at"], Derived),
-    table(
-        "lyrics_align",
-        &["track_id", "source"],
-        &["text_hash", "fit", "timing", "offset_ms", "covered", "body", "made_by", "made_at", "saved", "fits"],
-        Derived,
-    ),
+    SyncTable {
+        prefer: Some("saved"),
+        ..table(
+            "lyrics_align",
+            &["track_id", "source"],
+            &["text_hash", "fit", "timing", "offset_ms", "covered", "body", "made_by", "made_at", "saved", "fits"],
+            Derived,
+        )
+    },
     table("lyrics_align_done", &["track_id"], &["state", "detail", "made_by", "at"], Derived),
     table("analysis", &["track_id"], &["bliss_vector", "analyzed_with", "analyzed_at", "source"], Derived),
     table("sound_embedding", &["track_id"], &["vector", "embedded_with", "source", "embedded_at"], Derived),
     table("sound_sketch", &["track_id"], &["sketch", "sketched_with", "styled_with", "source", "sketched_at"], Derived),
-    table("palette", &["release_id"], &["seed_argb", "scheme_blob", "ambient_blur", "computed_at"], Derived),
+    SyncTable {
+        refs: &[("release_id", Target::Release)],
+        ..table("palette", &["release_id"], &["seed_argb", "scheme_blob", "ambient_blur", "computed_at"], Derived)
+    },
+    SyncTable { refs: &[("id", Target::ByKind("kind"))], ..table("picture", &["kind", "id"], &["hash"], Derived) },
 ];
 
 /// The synced table named `name`.
@@ -252,7 +367,7 @@ pub struct SyncPage {
 pub struct SyncRow {
     /// The key as the change log keeps it (`json_array` of the key columns).
     pub k: String,
-    /// Its version: the clock, the device, gone.
+    /// Its version: the version, the device, gone.
     pub v: (i64, String, bool),
     /// The values of [`SyncPage::cols`]; none for a row gone. Blobs are
     /// `{"b": "<base64>"}`.
@@ -263,8 +378,8 @@ pub struct SyncRow {
 /// How far each table's changes go, and which database it is.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncHeads {
-    /// Made once per database: another one (rebuilt, restored from an old
-    /// copy) is taken from the beginning.
+    /// Made once per database, and again when the database was put back
+    /// from a copy: another one is taken from the beginning.
     pub epoch: String,
     pub tables: BTreeMap<String, i64>,
 }
@@ -274,10 +389,14 @@ pub struct SyncHeads {
 pub struct SyncApplied {
     /// Rows written (or deleted).
     pub taken: u32,
-    /// Rows already as new here, or a delete held back.
+    /// Rows already as new here.
     pub kept: u32,
-    /// Rows that could not be written here.
-    pub skipped: u32,
+    /// Deletes held back (the row is still used here), kept to try again.
+    pub held: u32,
+    /// Rows that could not be written here, kept to try again.
+    pub failed: u32,
+    /// Kept conflicts that went through this time.
+    pub resolved: u32,
 }
 
 /// How far this device has taken another one.
@@ -287,6 +406,15 @@ pub struct SyncCursors {
     pub epoch: Option<String>,
     pub tables: BTreeMap<String, i64>,
     pub last_ok: Option<i64>,
+}
+
+/// The rows of a device kept to try again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SyncConflicts {
+    /// Rows that could not be written.
+    pub failed: u32,
+    /// Deletes held back (still used here).
+    pub held: u32,
 }
 
 // ---------------------------------------------------------------- values
@@ -387,14 +515,26 @@ fn key_values(key: &str) -> Result<Vec<SqlValue>> {
     parts.iter().map(sql_of).collect()
 }
 
+/// The change log's text of a key (as the triggers write it).
+fn key_text(tx: &Connection, keys: &[SqlValue]) -> Result<String> {
+    let marks: Vec<String> = (1..=keys.len()).map(|i| format!("?{i}")).collect();
+    let sql = format!("SELECT json_array({})", marks.join(", "));
+    Ok(tx.prepare_cached(&sql)?.query_row(params_from_iter(keys.iter()), |r| r.get(0))?)
+}
+
+fn text(v: Option<&SqlValue>) -> Option<&str> {
+    match v {
+        Some(SqlValue::Text(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 fn is_constraint(e: &rusqlite::Error) -> bool {
     e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)
 }
 
 // -------------------------------------------------------------- triggers
 
-/// `UPDATE` of the database's clock for a change made here.
-const BUMP: &str = "UPDATE sync_clock SET seq = seq + 1, hlc = max(hlc + 1, CAST(unixepoch('subsec') * 1000 AS INTEGER)) WHERE id = 1;";
 /// The triggers stay quiet while another device's rows are written.
 const QUIET: &str = "(SELECT applying FROM sync_clock WHERE id = 1) = 0";
 
@@ -408,12 +548,14 @@ fn filter_of(t: &SyncTable, r: &str) -> String {
 }
 
 /// The statements noting `key`'s change (`gone` an SQL expression), when
-/// `when` holds. A delete and an insert, never `OR REPLACE`: the statement
-/// that fired the trigger would impose its own conflict rule on it.
+/// `when` holds: a change number and a version of its own, then a delete
+/// and an insert (never `OR REPLACE`: the statement that fired the trigger
+/// would impose its own conflict rule on it).
 fn note(t: &SyncTable, key: &str, gone: &str, when: &str) -> String {
     let n = t.name;
     format!(
-        "DELETE FROM change_log WHERE tbl = '{n}' AND key = {key} AND ({when}); \
+        "UPDATE sync_clock SET seq = seq + 1, hlc = sync_hlc() WHERE id = 1 AND ({when}); \
+         DELETE FROM change_log WHERE tbl = '{n}' AND key = {key} AND ({when}); \
          INSERT INTO change_log(tbl, key, seq, hlc, node, gone, came_from) \
          SELECT '{n}', {key}, seq, hlc, node, {gone}, NULL FROM sync_clock WHERE id = 1 AND ({when});"
     )
@@ -426,13 +568,13 @@ fn triggers(t: &SyncTable) -> [String; 3] {
     let changed: Vec<String> = t.keys.iter().chain(t.cols.iter()).map(|c| format!("old.{c} IS NOT new.{c}")).collect();
     let changed = changed.join(" OR ");
     [
-        format!("CREATE TRIGGER sync_{n}_ai AFTER INSERT ON {n} WHEN {QUIET} AND ({fnew}) BEGIN {BUMP} {} END", note(t, &knew, "0", "1")),
+        format!("CREATE TRIGGER sync_{n}_ai AFTER INSERT ON {n} WHEN {QUIET} AND ({fnew}) BEGIN {} END", note(t, &knew, "0", "1")),
         format!(
-            "CREATE TRIGGER sync_{n}_au AFTER UPDATE ON {n} WHEN {QUIET} AND (({fnew}) OR ({fold})) AND ({changed}) BEGIN {BUMP} {} {} END",
+            "CREATE TRIGGER sync_{n}_au AFTER UPDATE ON {n} WHEN {QUIET} AND (({fnew}) OR ({fold})) AND ({changed}) BEGIN {} {} END",
             note(t, &kold, "1", &format!("{kold} IS NOT {knew}")),
             note(t, &knew, &format!("CASE WHEN ({fnew}) THEN 0 ELSE 1 END"), "1"),
         ),
-        format!("CREATE TRIGGER sync_{n}_ad AFTER DELETE ON {n} WHEN {QUIET} AND ({fold}) BEGIN {BUMP} {} END", note(t, &kold, "1", "1")),
+        format!("CREATE TRIGGER sync_{n}_ad AFTER DELETE ON {n} WHEN {QUIET} AND ({fold}) BEGIN {} END", note(t, &kold, "1", "1")),
     ]
 }
 
@@ -453,16 +595,16 @@ fn fingerprint() -> String {
 
 /// Notes every row of the synced tables not in the change log yet (a
 /// library from before sync, a table newly synced), each with its own
-/// change number.
+/// change number and the version it can be trusted with: its own last edit
+/// ([`SyncTable::stamp`]), else 0. Never an edit.
 fn backfill(tx: &Connection) -> Result<()> {
-    let now = now_ms();
-    tx.execute("UPDATE sync_clock SET hlc = max(hlc, ?1) WHERE id = 1", [now])?;
     for t in TABLES {
         let key = key_expr(t, "x");
+        let version = t.stamp.map_or_else(|| "0".to_owned(), |s| format!("coalesce(x.{s}, 0) * {}", 1i64 << LOGICAL_BITS));
         let n = tx.execute(
             &format!(
                 "INSERT INTO change_log(tbl, key, seq, hlc, node, gone, came_from)
-                 SELECT '{name}', {key}, c.seq + row_number() OVER (), c.hlc, c.node, 0, NULL
+                 SELECT '{name}', {key}, c.seq + row_number() OVER (), {version}, c.node, 0, NULL
                    FROM {name} x, sync_clock c
                   WHERE c.id = 1 AND ({filter})
                     AND NOT EXISTS (SELECT 1 FROM change_log l WHERE l.tbl = '{name}' AND l.key = {key})",
@@ -478,10 +620,20 @@ fn backfill(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The epoch kept beside the database file (`<db>.sync-epoch`).
+pub(crate) fn epoch_file_of(db: &Path) -> PathBuf {
+    let mut name = db.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".sync-epoch");
+    db.with_file_name(name)
+}
+
 /// Readies sync on an open, migrated database: this device's id for the
 /// change log, the triggers (made again when [`TABLES`] changed, and then
-/// the rows not noted yet), the database's epoch. The clock's time.
-pub(crate) fn install(conn: &mut Connection, device: &str) -> Result<i64> {
+/// the rows not noted yet), the database's epoch — a new one when the copy
+/// beside the database (`epoch_file`) says another (the database was put
+/// back from an older copy: the other devices take it from the start). The
+/// clock's last version.
+pub(crate) fn install(conn: &mut Connection, device: &str, epoch_file: Option<&Path>) -> Result<i64> {
     let tx = conn.transaction()?;
     tx.execute("UPDATE sync_clock SET node = ?1, applying = 0 WHERE id = 1", [device])?;
     let want = fingerprint();
@@ -502,11 +654,25 @@ pub(crate) fn install(conn: &mut Connection, device: &str) -> Result<i64> {
         backfill(&tx)?;
         meta_set(&tx, "sync.triggers", &want)?;
     }
-    if meta_get(&tx, "sync.epoch")?.is_none() {
-        meta_set(&tx, "sync.epoch", &Uuid::now_v7().simple().to_string())?;
+    let mut epoch = meta_get(&tx, "sync.epoch")?.unwrap_or_default();
+    let kept = epoch_file.and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+    if epoch.is_empty() || kept.as_ref().is_some_and(|k| *k != epoch) {
+        if !epoch.is_empty() {
+            log::warn!("library: the database is not the one last opened here (put back from a copy?): a new sync epoch");
+        }
+        epoch = Uuid::now_v7().simple().to_string();
+        meta_set(&tx, "sync.epoch", &epoch)?;
     }
     let hlc: i64 = tx.query_row("SELECT hlc FROM sync_clock WHERE id = 1", [], |r| r.get(0))?;
     tx.commit()?;
+    if let Some(f) = epoch_file
+        && kept.as_deref() != Some(epoch.as_str())
+    {
+        let tmp = f.with_extension("sync-epoch.tmp");
+        if let Err(e) = std::fs::write(&tmp, &epoch).and_then(|()| std::fs::rename(&tmp, f)) {
+            log::warn!("library: the sync epoch not kept beside the database: {e}");
+        }
+    }
     Ok(hlc)
 }
 
@@ -539,15 +705,6 @@ fn fetch_row(stmt: &mut rusqlite::Statement<'_>, keys: &[SqlValue], n: usize) ->
     Ok(out)
 }
 
-/// The version of a user-data row from its own columns.
-fn own_version(t: &SyncTable, d: &[Value]) -> Option<(i64, String, bool)> {
-    let at = |name: &str| t.cols.iter().position(|c| *c == name).and_then(|i| d.get(i));
-    let ts = at("updated_at")?.as_i64()?;
-    let by = at("updated_by")?.as_str()?.to_owned();
-    let deleted = at("deleted")?.as_i64()? != 0;
-    Some((ts, by, deleted))
-}
-
 fn changes_in(c: &Connection, t: &SyncTable, since: i64, limit: u32, peer: Option<&str>) -> Result<SyncPage> {
     type Entry = (String, i64, i64, String, bool, Option<String>);
     let entries: Vec<Entry> = {
@@ -574,11 +731,7 @@ fn changes_in(c: &Connection, t: &SyncTable, since: i64, limit: u32, peer: Optio
             continue;
         }
         let data = if gone { None } else { fetch_row(&mut fetch, &key_values(&key)?, t.cols.len())? };
-        let v = match &data {
-            Some(d) if t.own => own_version(t, d).unwrap_or((hlc, node, false)),
-            Some(_) => (hlc, node, false),
-            None => (hlc, node, true),
-        };
+        let v = (hlc, node, data.is_none());
         bytes += key.len() + 32 + data.as_ref().map_or(0, |d| d.iter().map(weight).sum());
         page.rows.push(SyncRow { k: key, v, d: data });
         if bytes >= PAGE_BYTES {
@@ -591,25 +744,220 @@ fn changes_in(c: &Connection, t: &SyncTable, since: i64, limit: u32, peer: Optio
 
 // ----------------------------------------------------------------- merge
 
-/// The version of the row of `key` here, if it has one: a user-data row's
-/// own, else the change log's (a row here the log does not know loses to
-/// any other).
-fn local_version(tx: &Connection, t: &SyncTable, key: &str, keys: &[SqlValue]) -> Result<Option<(i64, bool, String)>> {
-    if t.own {
-        let sql = format!("SELECT x.updated_at, x.deleted, x.updated_by FROM {} x WHERE {}", t.name, where_keys(t));
-        let row: Option<(i64, bool, String)> = tx
-            .prepare_cached(&sql)?
-            .query_row(params_from_iter(keys.iter()), |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)))
-            .optional()?;
-        if row.is_some() {
-            return Ok(row);
+/// Does an incoming row of version `inc` replace the row here of version
+/// `here` (each `(version, gone, device)`)? The larger version; on an
+/// equal version 0 (both noted before sync) the row here stays; on another
+/// equal version a tombstone, then the larger device id.
+pub(crate) fn wins(inc: (i64, bool, &str), here: (i64, bool, &str)) -> bool {
+    if inc.0 != here.0 {
+        return inc.0 > here.0;
+    }
+    if inc.0 == 0 {
+        return false;
+    }
+    if inc.1 != here.1 {
+        return inc.1;
+    }
+    inc.2 > here.2
+}
+
+/// What became of one incoming row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Outcome {
+    Taken,
+    Kept,
+    /// A delete held back: the row is still used here.
+    Held(String),
+    /// It could not be written here.
+    Failed(String),
+}
+
+/// What a merge keeps while it runs.
+struct Ctx {
+    /// The device the rows come from.
+    from: String,
+    seq: i64,
+    seen: i64,
+    /// Tracks whose stream sources changed.
+    tracks: HashSet<String>,
+    /// This device's own artists (not taken from `from`) by folded name:
+    /// (id, MusicBrainz id).
+    artists: Option<HashMap<String, (String, Option<String>)>>,
+    /// …and albums by folded title and artist line.
+    releases: Option<HashMap<(String, String), (String, Option<String>)>>,
+}
+
+impl Ctx {
+    fn new(tx: &Connection, from: &str) -> Result<Self> {
+        let seq: i64 = tx.query_row("SELECT seq FROM sync_clock WHERE id = 1", [], |r| r.get(0))?;
+        Ok(Self { from: from.to_owned(), seq, seen: 0, tracks: HashSet::new(), artists: None, releases: None })
+    }
+
+    fn artists(&mut self, tx: &Connection) -> Result<&HashMap<String, (String, Option<String>)>> {
+        if self.artists.is_none() {
+            let mut stmt = tx.prepare_cached(
+                "SELECT a.id, a.name, a.mbid FROM artist a
+                   LEFT JOIN change_log l ON l.tbl = 'artist' AND l.key = json_array(a.id)
+                  WHERE l.came_from IS NULL OR l.came_from <> ?1",
+            )?;
+            let rows = stmt.query_map([&self.from], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)))?;
+            let mut map = HashMap::new();
+            for row in rows {
+                let (id, name, mbid) = row?;
+                let k = name_key(&name);
+                if !k.is_empty() {
+                    map.entry(k).or_insert((id, mbid));
+                }
+            }
+            self.artists = Some(map);
+        }
+        Ok(self.artists.as_ref().expect("filled"))
+    }
+
+    fn releases(&mut self, tx: &Connection) -> Result<&HashMap<(String, String), (String, Option<String>)>> {
+        if self.releases.is_none() {
+            let mut stmt = tx.prepare_cached(
+                "SELECT r.id, r.title, r.artist_display, r.mbid FROM release r
+                   LEFT JOIN change_log l ON l.tbl = 'release' AND l.key = json_array(r.id)
+                  WHERE l.came_from IS NULL OR l.came_from <> ?1",
+            )?;
+            let rows = stmt.query_map([&self.from], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?))
+            })?;
+            let mut map = HashMap::new();
+            for row in rows {
+                let (id, title, artist, mbid) = row?;
+                let k = (name_key(&title), name_key(&artist));
+                if !k.0.is_empty() {
+                    map.entry(k).or_insert((id, mbid));
+                }
+            }
+            self.releases = Some(map);
+        }
+        Ok(self.releases.as_ref().expect("filled"))
+    }
+}
+
+/// Where column `name` of `t` is: a key (index) or a synced column.
+enum Place {
+    Key(usize),
+    Col(usize),
+}
+
+fn place(t: &SyncTable, name: &str) -> Option<Place> {
+    if let Some(i) = t.keys.iter().position(|k| *k == name) {
+        return Some(Place::Key(i));
+    }
+    t.cols.iter().position(|c| *c == name).map(Place::Col)
+}
+
+fn value<'v>(t: &SyncTable, keys: &'v [SqlValue], data: &'v [Option<SqlValue>], name: &str) -> Option<&'v SqlValue> {
+    match place(t, name)? {
+        Place::Key(i) => keys.get(i),
+        Place::Col(i) => data.get(i).and_then(Option::as_ref),
+    }
+}
+
+fn alias_of(tx: &Connection, table: &str, id: &str) -> Result<Option<String>> {
+    Ok(tx
+        .prepare_cached("SELECT local_id FROM sync_alias WHERE tbl = ?1 AND remote_id = ?2")?
+        .query_row(params![table, id], |r| r.get(0))
+        .optional()?)
+}
+
+/// Every reference of an incoming row through the aliases of ids another
+/// device made.
+fn remap(tx: &Connection, t: &SyncTable, keys: &mut [SqlValue], data: &mut [Option<SqlValue>]) -> Result<()> {
+    for (col, target) in t.refs {
+        let Some(id) = text(value(t, keys, data, col)).map(str::to_owned) else { continue };
+        let table = match target {
+            Target::Artist => "artist",
+            Target::Release => "release",
+            Target::Source => "source",
+            Target::ByKind(kind) => match text(value(t, keys, data, kind)) {
+                Some("artist") => "artist",
+                Some("release") => "release",
+                _ => continue,
+            },
+            Target::Credit => {
+                let pairs: Vec<(String, String)> = {
+                    let mut stmt =
+                        tx.prepare_cached("SELECT remote_id, local_id FROM sync_alias WHERE tbl = 'artist' AND instr(?1, remote_id) > 0")?;
+                    let rows = stmt.query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                    rows.collect::<rusqlite::Result<_>>()?
+                };
+                if let (false, Some(Place::Col(i))) = (pairs.is_empty(), place(t, col)) {
+                    let credit = pairs.iter().fold(id, |c, (remote, local)| c.replace(remote.as_str(), local));
+                    data[i] = Some(SqlValue::Text(credit));
+                }
+                continue;
+            }
+        };
+        let Some(local) = alias_of(tx, table, &id)? else { continue };
+        match place(t, col) {
+            Some(Place::Key(i)) => keys[i] = SqlValue::Text(local),
+            Some(Place::Col(i)) => data[i] = Some(SqlValue::Text(local)),
+            None => {}
         }
     }
+    Ok(())
+}
+
+/// A row here of another id that is what the incoming row of `t` is.
+fn same_here(tx: &Connection, t: &SyncTable, keys: &[SqlValue], data: &[Option<SqlValue>], ctx: &mut Ctx) -> Result<Option<String>> {
+    let Some(id) = text(keys.first()).map(str::to_owned) else { return Ok(None) };
+    let col = |name: &str| text(value(t, keys, data, name)).map(str::to_owned);
+    match t.identity {
+        Identity::None => Ok(None),
+        Identity::Artist | Identity::Release => {
+            let table = t.name;
+            let mbid = col("mbid").filter(|m| !m.is_empty());
+            if let Some(m) = &mbid {
+                let found: Option<String> = tx
+                    .prepare_cached(&format!("SELECT id FROM {table} WHERE mbid = ?1 AND id <> ?2"))?
+                    .query_row(params![m, id], |r| r.get(0))
+                    .optional()?;
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+            let hit = if t.identity == Identity::Artist {
+                let k = name_key(&col("name").unwrap_or_default());
+                if k.is_empty() {
+                    return Ok(None);
+                }
+                ctx.artists(tx)?.get(&k).cloned()
+            } else {
+                let k = (name_key(&col("title").unwrap_or_default()), name_key(&col("artist_display").unwrap_or_default()));
+                if k.0.is_empty() {
+                    return Ok(None);
+                }
+                ctx.releases(tx)?.get(&k).cloned()
+            };
+            // Two MusicBrainz ids that differ are two things.
+            Ok(hit.filter(|(local, local_mbid)| *local != id && (mbid.is_none() || local_mbid.is_none() || *local_mbid == mbid)).map(|h| h.0))
+        }
+        Identity::Source => {
+            if value(t, keys, data, "trashed_at").is_some_and(|v| *v != SqlValue::Null) {
+                return Ok(None);
+            }
+            let (Some(kind), Some(locator)) = (col("kind"), col("locator")) else { return Ok(None) };
+            Ok(tx
+                .prepare_cached("SELECT id FROM source WHERE kind = ?1 AND locator = ?2 AND trashed_at IS NULL AND id <> ?3")?
+                .query_row(params![kind, locator, id], |r| r.get(0))
+                .optional()?)
+        }
+    }
+}
+
+/// The version of the row of `key` here, if it has one: the change log's
+/// (a row here the log does not know has version 0).
+fn local_version(tx: &Connection, t: &SyncTable, key: &str, keys: &[SqlValue]) -> Result<Option<(i64, bool, String)>> {
     let logged: Option<(i64, bool, String)> = tx
         .prepare_cached("SELECT hlc, gone, node FROM change_log WHERE tbl = ?1 AND key = ?2")?
         .query_row(params![t.name, key], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)))
         .optional()?;
-    if logged.is_some() || t.own {
+    if logged.is_some() {
         return Ok(logged);
     }
     Ok(row_exists(tx, t, keys)?.then(|| (0, false, String::new())))
@@ -618,6 +966,13 @@ fn local_version(tx: &Connection, t: &SyncTable, key: &str, keys: &[SqlValue]) -
 fn row_exists(tx: &Connection, t: &SyncTable, keys: &[SqlValue]) -> Result<bool> {
     let sql = format!("SELECT EXISTS (SELECT 1 FROM {} x WHERE {})", t.name, where_keys(t));
     Ok(tx.prepare_cached(&sql)?.query_row(params_from_iter(keys.iter()), |r| r.get(0))?)
+}
+
+/// The flag of [`SyncTable::prefer`] of the live row here (none: no row).
+fn preferred_here(tx: &Connection, t: &SyncTable, col: &str, keys: &[SqlValue]) -> Result<Option<bool>> {
+    let sql = format!("SELECT x.{col} FROM {} x WHERE {}", t.name, where_keys(t));
+    let v: Option<i64> = tx.prepare_cached(&sql)?.query_row(params_from_iter(keys.iter()), |r| r.get(0)).optional()?;
+    Ok(v.map(|v| v != 0))
 }
 
 fn upsert_sql(t: &SyncTable, cols: &[&str]) -> String {
@@ -640,82 +995,205 @@ fn upsert_sql(t: &SyncTable, cols: &[&str]) -> String {
 
 fn delete_sql(t: &SyncTable) -> String {
     let keys: Vec<String> = t.keys.iter().enumerate().map(|(i, k)| format!("{k} = ?{}", i + 1)).collect();
-    match t.guard {
-        Some(g) => format!("DELETE FROM {} WHERE {} AND ({g})", t.name, keys.join(" AND ")),
-        None => format!("DELETE FROM {} WHERE {}", t.name, keys.join(" AND ")),
+    format!("DELETE FROM {} WHERE {}", t.name, keys.join(" AND "))
+}
+
+/// Merges one row of `ctx.from` (`cols` naming its values).
+fn apply_row(tx: &Connection, t: &SyncTable, cols: &[String], row: &SyncRow, ctx: &mut Ctx) -> Result<Outcome> {
+    let mut keys = match key_values(&row.k) {
+        Ok(k) if k.len() == t.keys.len() => k,
+        _ => return Ok(Outcome::Failed("a key that is not this table's".into())),
+    };
+    let mut data: Vec<Option<SqlValue>> = vec![None; t.cols.len()];
+    if let Some(d) = &row.d {
+        for (i, c) in t.cols.iter().enumerate() {
+            if let Some(p) = cols.iter().position(|x| x == c) {
+                match sql_of(d.get(p).unwrap_or(&Value::Null)) {
+                    Ok(v) => data[i] = Some(v),
+                    Err(e) => return Ok(Outcome::Failed(e.to_string())),
+                }
+            }
+        }
+    }
+    let gone = row.d.is_none() || row.v.2;
+    let (version, node) = (row.v.0, row.v.1.as_str());
+    remap(tx, t, &mut keys, &mut data)?;
+    if !gone
+        && t.identity != Identity::None
+        && !row_exists(tx, t, &keys)?
+        && let Some(local) = same_here(tx, t, &keys, &data, ctx)?
+    {
+        let remote = text(keys.first()).unwrap_or_default().to_owned();
+        tx.execute(
+            "INSERT INTO sync_alias(tbl, remote_id, local_id, peer, at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(tbl, remote_id) DO UPDATE SET local_id = excluded.local_id, peer = excluded.peer, at = excluded.at",
+            params![t.name, remote, local, ctx.from, now_ms()],
+        )?;
+        log::info!("sync: {} {remote} of {} is {local} here", t.name, ctx.from);
+        // The row here stays as it is (its own ids, names, MusicBrainz id);
+        // what points at the other id comes here through the alias.
+        return Ok(Outcome::Kept);
+    }
+    let key = key_text(tx, &keys)?;
+    let here = local_version(tx, t, &key, &keys)?;
+    let take = match &here {
+        None => true,
+        Some((at, here_gone, by)) => {
+            let flags = match t.prefer.and_then(|p| place(t, p).map(|pl| (p, pl))) {
+                Some((col, Place::Col(i))) if !gone && !*here_gone => {
+                    let incoming = matches!(data[i], Some(SqlValue::Integer(v)) if v != 0);
+                    preferred_here(tx, t, col, &keys)?.map(|h| (incoming, h))
+                }
+                _ => None,
+            };
+            match flags {
+                Some((incoming, here_flag)) if incoming != here_flag => incoming,
+                _ => wins((version, gone, node), (*at, *here_gone, by.as_str())),
+            }
+        }
+    };
+    if !take {
+        return Ok(Outcome::Kept);
+    }
+    // The tracks whose sources change (their playing source is chosen
+    // again): the one the source was on here, the one it is on now.
+    let mut source_tracks: Vec<String> = Vec::new();
+    if t.name == "source" {
+        let was: Option<String> =
+            tx.prepare_cached("SELECT track_id FROM source WHERE id = ?1")?.query_row([&keys[0]], |r| r.get(0)).optional()?;
+        let now = if gone { None } else { text(value(t, &keys, &data, "track_id")).map(str::to_owned) };
+        if was.is_some() && was != now {
+            // Moved to another track: it plays there only once chosen there.
+            tx.prepare_cached("UPDATE source SET is_active = 0 WHERE id = ?1")?.execute([&keys[0]])?;
+        }
+        source_tracks.extend(was);
+        source_tracks.extend(now);
+    }
+    // Chosen again whatever comes of the write below.
+    ctx.tracks.extend(source_tracks);
+    let written = if gone {
+        if row_exists(tx, t, &keys)? {
+            if let Some(g) = t.guard {
+                let may: bool = tx.prepare_cached(&format!("SELECT ({g})"))?.query_row([&keys[0]], |r| r.get(0))?;
+                if !may {
+                    return Ok(Outcome::Held("still used here".into()));
+                }
+            }
+            tx.prepare_cached(&delete_sql(t))?.execute(params_from_iter(keys.iter())).map(|_| ())
+        } else {
+            Ok(())
+        }
+    } else {
+        let present: Vec<usize> = (0..t.cols.len()).filter(|i| data[*i].is_some()).collect();
+        let names: Vec<&str> = present.iter().map(|i| t.cols[*i]).collect();
+        let mut vals = keys.clone();
+        for i in &present {
+            vals.push(data[*i].clone().unwrap_or(SqlValue::Null));
+        }
+        tx.prepare_cached(&upsert_sql(t, &names))?.execute(params_from_iter(vals.iter())).map(|_| ())
+    };
+    match written {
+        Ok(()) => {}
+        Err(e) if is_constraint(&e) => return Ok(Outcome::Failed(e.to_string())),
+        Err(e) => return Err(e.into()),
+    }
+    ctx.seq += 1;
+    tx.execute("DELETE FROM change_log WHERE tbl = ?1 AND key = ?2", params![t.name, key])?;
+    tx.execute(
+        "INSERT INTO change_log(tbl, key, seq, hlc, node, gone, came_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![t.name, key, ctx.seq, version, node, gone, ctx.from],
+    )?;
+    ctx.seen = ctx.seen.max(version);
+    Ok(Outcome::Taken)
+}
+
+/// Keeps a row that did not go through to try again, or forgets the one
+/// kept when it went through (or turned out older than what is here).
+fn record(tx: &Connection, t: &SyncTable, cols: &[String], row: &SyncRow, from: &str, outcome: &Outcome) -> Result<()> {
+    match outcome {
+        Outcome::Taken | Outcome::Kept => {
+            tx.prepare_cached("DELETE FROM sync_conflict WHERE tbl = ?1 AND key = ?2 AND peer = ?3")?.execute(params![t.name, row.k, from])?;
+        }
+        Outcome::Held(why) | Outcome::Failed(why) => {
+            let now = now_ms();
+            tx.prepare_cached(
+                "INSERT INTO sync_conflict(tbl, key, peer, cols, row, held, reason, first_seen, last_try, tries)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 1)
+                 ON CONFLICT(tbl, key, peer) DO UPDATE SET cols = excluded.cols, row = excluded.row, held = excluded.held,
+                    reason = excluded.reason, last_try = excluded.last_try, tries = sync_conflict.tries + 1",
+            )?
+            .execute(params![
+                t.name,
+                row.k,
+                from,
+                serde_json::to_string(cols)?,
+                serde_json::to_string(row)?,
+                matches!(outcome, Outcome::Held(_)),
+                why,
+                now
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+fn count(out: &mut SyncApplied, o: &Outcome) {
+    match o {
+        Outcome::Taken => out.taken += 1,
+        Outcome::Kept => out.kept += 1,
+        Outcome::Held(_) => out.held += 1,
+        Outcome::Failed(_) => out.failed += 1,
     }
 }
 
-/// Merges `page` (rows of device `from`) in; the change triggers are quiet
-/// meanwhile. What it did, and the latest clock among its rows.
-fn apply_in(tx: &Connection, t: &SyncTable, page: &SyncPage, from: &str) -> Result<(SyncApplied, i64)> {
-    // The columns both sides know (another version may have more or less).
-    let present: Vec<(usize, &'static str)> =
-        t.cols.iter().filter_map(|c| page.cols.iter().position(|p| p == c).map(|i| (i, *c))).collect();
-    if t.own && !["updated_at", "updated_by", "deleted"].iter().all(|c| present.iter().any(|(_, n)| n == c)) {
-        return Err(LibraryError::Invalid(format!("{}: a page without its versions", t.name)));
-    }
-    let cols: Vec<&str> = present.iter().map(|(_, c)| *c).collect();
-    let up = upsert_sql(t, &cols);
-    let del = delete_sql(t);
-    let mut seq: i64 = tx.query_row("SELECT seq FROM sync_clock WHERE id = 1", [], |r| r.get(0))?;
-    let mut seen = 0i64;
-    let mut out = SyncApplied::default();
-    for row in &page.rows {
-        let keys = match key_values(&row.k) {
-            Ok(k) if k.len() == t.keys.len() => k,
-            _ => {
-                out.skipped += 1;
-                continue;
-            }
-        };
-        let (hlc, node) = (row.v.0, row.v.1.as_str());
-        // A user-data row deleted is a row with `deleted` set (written as
-        // it is); any other row gone is deleted here too.
-        let tomb = row.v.2 || row.d.is_none();
-        let gone = row.d.is_none() || (!t.own && row.v.2);
-        seen = seen.max(hlc);
-        if let Some((at, deleted, by)) = local_version(tx, t, &row.k, &keys)?
-            && !incoming_wins((hlc, tomb, node), (at, deleted, by.as_str()))
-        {
-            out.kept += 1;
-            continue;
-        }
-        let written = if gone {
-            tx.prepare_cached(&del)?.execute(params_from_iter(keys.iter()))
-        } else {
-            let d = row.d.as_deref().unwrap_or_default();
-            let mut vals = keys.clone();
-            for (i, _) in &present {
-                vals.push(sql_of(d.get(*i).unwrap_or(&Value::Null))?);
-            }
-            tx.prepare_cached(&up)?.execute(params_from_iter(vals.iter()))
-        };
-        match written {
-            Ok(_) => {}
-            Err(e) if is_constraint(&e) => {
-                log::debug!("sync: a row of {} from {from} left out: {e}", t.name);
-                out.skipped += 1;
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        if gone && row_exists(tx, t, &keys)? {
-            // Still used here: it stays (with its own version).
-            out.kept += 1;
-            continue;
-        }
-        seq += 1;
-        tx.execute("DELETE FROM change_log WHERE tbl = ?1 AND key = ?2", params![t.name, row.k])?;
-        tx.execute(
-            "INSERT INTO change_log(tbl, key, seq, hlc, node, gone, came_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![t.name, row.k, seq, hlc, node, gone, from],
+/// Tries the kept rows (of any device) last tried at `before` or earlier
+/// again, at most `limit`. How many went through (or turned out older).
+fn retry_in(tx: &Connection, ctx: &mut Ctx, before: i64, limit: u32) -> Result<u32> {
+    type Kept = (String, String, String, String, String);
+    let kept: Vec<Kept> = {
+        let mut stmt = tx.prepare_cached(
+            "SELECT tbl, key, peer, cols, row FROM sync_conflict WHERE last_try <= ?1 ORDER BY last_try, tbl, key LIMIT ?2",
         )?;
-        out.taken += 1;
+        let rows = stmt.query_map(params![before, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mine = ctx.from.clone();
+    let mut resolved = 0;
+    for (tbl, key, peer, cols, row) in kept {
+        let parsed = sync_table(&tbl).and_then(|t| Some((t, serde_json::from_str::<Vec<String>>(&cols).ok()?, serde_json::from_str::<SyncRow>(&row).ok()?)));
+        let Some((t, cols, row)) = parsed else {
+            tx.execute("DELETE FROM sync_conflict WHERE tbl = ?1 AND key = ?2 AND peer = ?3", params![tbl, key, peer])?;
+            continue;
+        };
+        if ctx.from != peer {
+            ctx.from = peer.clone();
+            ctx.artists = None;
+            ctx.releases = None;
+        }
+        let o = apply_row(tx, t, &cols, &row, ctx)?;
+        if matches!(o, Outcome::Taken | Outcome::Kept) {
+            resolved += 1;
+        }
+        record(tx, t, &cols, &row, &peer, &o)?;
     }
-    let seen_capped = seen.min(now_ms() + MAX_AHEAD_MS);
-    tx.execute("UPDATE sync_clock SET seq = ?1, hlc = max(hlc, ?2) WHERE id = 1", params![seq, seen_capped])?;
-    Ok((out, seen))
+    if ctx.from != mine {
+        ctx.from = mine;
+        ctx.artists = None;
+        ctx.releases = None;
+    }
+    Ok(resolved)
+}
+
+/// Ends a merge: the changed tracks' playing source chosen again, the
+/// clock kept.
+fn finish(tx: &Connection, ctx: &mut Ctx) -> Result<()> {
+    for track in ctx.tracks.drain() {
+        if let Ok(id) = track.parse::<TrackId>() {
+            crate::catalog::refresh_active(tx, id)?;
+        }
+    }
+    tx.execute("UPDATE sync_clock SET seq = ?1, hlc = max(hlc, ?2), applying = 0 WHERE id = 1", params![ctx.seq, ctx.seen])?;
+    Ok(())
 }
 
 impl Library {
@@ -742,14 +1220,27 @@ impl Library {
         self.read(|c| changes_in(c, t, since, limit, peer))
     }
 
-    /// Merges a page of device `from`'s changes in, in one transaction;
-    /// with `cursor`, notes in it that `from`'s table is taken up to the
-    /// page's end. Idempotent: a page merged twice changes nothing more.
+    /// Merges a page of device `from`'s changes in, in one transaction,
+    /// then tries the rows kept from before again; with `cursor`, notes in
+    /// it that `from`'s table is taken up to the page's end (a row that did
+    /// not go through is kept, so the cursor may pass it). Idempotent. A
+    /// page of a clock running ahead ([`page_ahead`]) is refused whole.
     pub fn sync_apply(&self, page: &SyncPage, from: &str, cursor: bool) -> Result<SyncApplied> {
         let t = sync_table(&page.table).ok_or_else(|| LibraryError::Invalid(format!("no synced table {}", page.table)))?;
+        let now = now_ms();
+        if page_ahead(page, now) {
+            return Err(LibraryError::Invalid(format!("the clock of {from} runs ahead")));
+        }
         let (out, seen) = self.write(|tx| {
             tx.execute("UPDATE sync_clock SET applying = 1 WHERE id = 1", [])?;
-            let r = apply_in(tx, t, page, from)?;
+            let mut ctx = Ctx::new(tx, from)?;
+            let mut out = SyncApplied::default();
+            for row in &page.rows {
+                let o = apply_row(tx, t, &page.cols, row, &mut ctx)?;
+                record(tx, t, &page.cols, row, from, &o)?;
+                count(&mut out, &o);
+            }
+            out.resolved = retry_in(tx, &mut ctx, now, RETRY_BATCH)?;
             if cursor {
                 tx.execute(
                     "INSERT INTO sync_peer(node, tbl, seq) VALUES (?1, ?2, ?3)
@@ -757,13 +1248,46 @@ impl Library {
                     params![from, t.name, page.next],
                 )?;
             }
-            tx.execute("UPDATE sync_clock SET applying = 0 WHERE id = 1", [])?;
-            Ok(r)
+            finish(tx, &mut ctx)?;
+            Ok((out, ctx.seen))
         })?;
         if seen > 0 {
             self.observe_clock(seen);
         }
         Ok(out)
+    }
+
+    /// Tries every kept row again (the loop's turn: what blocked one may
+    /// have changed here). How many went through.
+    pub fn sync_retry(&self) -> Result<u32> {
+        let any: bool = self.read(|c| Ok(c.query_row("SELECT EXISTS (SELECT 1 FROM sync_conflict)", [], |r| r.get(0))?))?;
+        if !any {
+            return Ok(0);
+        }
+        let now = now_ms();
+        let (resolved, seen) = self.write(|tx| {
+            tx.execute("UPDATE sync_clock SET applying = 1 WHERE id = 1", [])?;
+            let mut ctx = Ctx::new(tx, "")?;
+            let resolved = retry_in(tx, &mut ctx, now, RETRY_BATCH)?;
+            finish(tx, &mut ctx)?;
+            Ok((resolved, ctx.seen))
+        })?;
+        if seen > 0 {
+            self.observe_clock(seen);
+        }
+        Ok(resolved)
+    }
+
+    /// The rows of device `node` kept to try again.
+    pub fn sync_conflicts(&self, node: &str) -> Result<SyncConflicts> {
+        self.read(|c| {
+            let (failed, held): (i64, i64) = c.query_row(
+                "SELECT coalesce(sum(held = 0), 0), coalesce(sum(held = 1), 0) FROM sync_conflict WHERE peer = ?1",
+                [node],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok(SyncConflicts { failed: failed as u32, held: held as u32 })
+        })
     }
 
     /// How far device `node` is taken, and whether syncing with it is off.
@@ -856,6 +1380,122 @@ impl Library {
         log::info!("library: this device's id is now its node id {node}");
         Ok(true)
     }
+
+    // ------------------------------------------------------------ pictures
+
+    /// Covers and artist photos with a file here not hashed yet (or whose
+    /// reference changed): (`release` | `artist`, id, the reference as the
+    /// row has it), at most `limit`.
+    pub fn pictures_to_index(&self, limit: u32) -> Result<Vec<(String, String, String)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT 'release', r.id, r.cover_ref FROM release r
+                   LEFT JOIN picture_src s ON s.kind = 'release' AND s.id = r.id
+                  WHERE r.cover_ref IS NOT NULL AND r.cover_ref NOT LIKE 'http%' AND s.ref IS NOT r.cover_ref
+                 UNION ALL
+                 SELECT 'artist', p.artist_id, p.path FROM artist_photo p
+                   LEFT JOIN picture_src s ON s.kind = 'artist' AND s.id = p.artist_id
+                  WHERE p.path IS NOT NULL AND p.path NOT LIKE 'http%' AND s.ref IS NOT p.path
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
+    /// What the picture of `kind`/`id` (reference `reference`) is: its hash
+    /// and the file here (`None`: no file here — the picture a device sent
+    /// stays as it is).
+    pub fn put_picture(&self, kind: &str, id: &str, reference: &str, found: Option<(&str, &Path)>) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO picture_src(kind, id, ref) VALUES (?1, ?2, ?3) ON CONFLICT(kind, id) DO UPDATE SET ref = excluded.ref",
+                params![kind, id, reference],
+            )?;
+            if let Some((hash, path)) = found {
+                tx.execute(
+                    "INSERT INTO picture(kind, id, hash) VALUES (?1, ?2, ?3) ON CONFLICT(kind, id) DO UPDATE SET hash = excluded.hash",
+                    params![kind, id, hash],
+                )?;
+                tx.execute(
+                    "INSERT INTO picture_file(hash, path) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET path = excluded.path",
+                    params![hash, path.to_string_lossy()],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Pictures the synced rows name that have no file here: their hashes,
+    /// at most `limit`.
+    pub fn pictures_missing(&self, limit: u32) -> Result<Vec<String>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT DISTINCT p.hash FROM picture p LEFT JOIN picture_file f ON f.hash = p.hash WHERE f.hash IS NULL LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
+    /// The file of picture `hash` is here now, at `path`.
+    pub fn put_picture_file(&self, hash: &str, path: &Path) -> Result<()> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO picture_file(hash, path) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET path = excluded.path",
+                params![hash, path.to_string_lossy()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Where the file of picture `hash` is here.
+    pub fn picture_file(&self, hash: &str) -> Result<Option<PathBuf>> {
+        self.read(|c| {
+            let p: Option<String> =
+                c.prepare_cached("SELECT path FROM picture_file WHERE hash = ?1")?.query_row([hash], |r| r.get(0)).optional()?;
+            Ok(p.map(PathBuf::from))
+        })
+    }
+
+    /// The local copy of the picture of `kind` (`release` | `artist`) `id`,
+    /// for a cover or photo whose own file is not here.
+    pub fn local_picture(&self, kind: &str, id: &str) -> Result<Option<PathBuf>> {
+        self.read(|c| {
+            let p: Option<String> = c
+                .prepare_cached("SELECT f.path FROM picture p JOIN picture_file f ON f.hash = p.hash WHERE p.kind = ?1 AND p.id = ?2")?
+                .query_row(params![kind, id], |r| r.get(0))
+                .optional()?;
+            Ok(p.map(PathBuf::from))
+        })
+    }
+}
+
+/// Takes a test database back before the mesh's and sync's migrations
+/// (34, 35): their triggers, tables and columns go, so older migrations
+/// can run again on it.
+#[cfg(test)]
+pub(crate) fn rewind_before_mesh(conn: &Connection) {
+    let triggers: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND (name LIKE 'sync!_%' ESCAPE '!' OR name LIKE 'node!_file!_%' ESCAPE '!')")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    for t in triggers {
+        conn.execute_batch(&format!("DROP TRIGGER \"{t}\"")).unwrap();
+    }
+    conn.execute_batch(
+        "DROP TABLE change_log; DROP TABLE sync_clock; DROP TABLE sync_peer; DROP TABLE sync_node; DROP TABLE sync_conflict;
+         DROP TABLE sync_alias; DROP TABLE picture; DROP TABLE picture_file; DROP TABLE picture_src; DROP TABLE node_file;
+         ALTER TABLE event DROP COLUMN actor; ALTER TABLE lyrics_align DROP COLUMN fits;
+         ALTER TABLE node DROP COLUMN alias; ALTER TABLE node DROP COLUMN scope;
+         ALTER TABLE node DROP COLUMN profile; ALTER TABLE node DROP COLUMN addr;
+         ALTER TABLE node DROP COLUMN version; ALTER TABLE node DROP COLUMN cert;
+         ALTER TABLE node DROP COLUMN paired_at;
+         DELETE FROM meta WHERE key IN ('sync.triggers', 'sync.epoch')",
+    )
+    .unwrap();
 }
 
 #[cfg(test)]

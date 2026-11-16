@@ -455,6 +455,9 @@ mod tests {
         let recent = now_ms() - 86_400_000;
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
+            // Before migrations 34 and 35 (their triggers need the library's
+            // functions), so they run again.
+            crate::sync::rewind_before_mesh(&conn);
             conn.execute(
                 "INSERT INTO artist_photo(artist_id, path, source, fetched_at, photo_locked) VALUES
                     ('a', 'a.jpg', 'deezer', ?1, 0), ('b', NULL, 'deezer', ?1, 0),
@@ -500,6 +503,7 @@ mod tests {
         ];
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
+            crate::sync::rewind_before_mesh(&conn);
             for (id, json) in ids.iter().zip(images) {
                 conn.execute("UPDATE artist SET images = ?2 WHERE id = ?1", params![id.to_string(), json]).unwrap();
             }
