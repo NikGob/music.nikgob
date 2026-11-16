@@ -237,6 +237,8 @@ fn load_prefs(
 /// Everything that outlives a window.
 struct Core {
     ui: Md3eUi,
+    /// The local REST API (before the runtime: it stops first).
+    api: Option<nikgob_api::ApiHandle>,
     runtime: Runtime,
     desktop: desktop::Desktop,
     analyzer: Option<audio::AnalyzerSlot>,
@@ -360,6 +362,9 @@ impl Resident for Core {
     fn shutdown(&mut self) {
         memory::log_now("exit");
         self.geometry.flush();
+        if let Some(api) = self.api.take() {
+            api.stop();
+        }
         self.runtime.send(Command::Pause);
         // Soloist would also go with the process (its job object); stopping
         // it here lets it leave Spotify Connect cleanly.
@@ -833,6 +838,16 @@ fn main() -> eframe::Result {
         let w = waker.clone();
         move || w.wake()
     };
+    // The local REST API is woken by the runtime too, with the window.
+    let api_wake = nikgob_api::Wake::new();
+    let runtime_wake = {
+        let (w, a) = (wake.clone(), api_wake.clone());
+        move || {
+            w();
+            a.wake();
+        }
+    };
+    let api_library = library.clone();
     let import = {
         let mut cfg = nikgob_runtime::ImportConfig::new(
             prefs.library_dir.clone(),
@@ -900,9 +915,22 @@ fn main() -> eframe::Result {
             streams,
         },
         backend,
-        Arc::new(wake.clone()),
+        Arc::new(runtime_wake),
         schedule,
     );
+    // It listens only once switched on in Settings → Межсеть; a settings
+    // sweep never starts it.
+    let api = if sweep::active() {
+        None
+    } else {
+        match nikgob_api::start(nikgob_api::ApiContext { runtime: runtime.handle(), library: api_library, wake: api_wake }) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log::error!("api: not started: {e}");
+                None
+            }
+        }
+    };
     if let Some(l) = &links {
         l.connect(runtime.playback_sender());
     }
@@ -934,6 +962,7 @@ fn main() -> eframe::Result {
     ui.set_synthetic_levels(std::env::var_os("NIKGOB_VIZ_SYNTH").is_some());
     let core = Core {
         ui,
+        api,
         runtime,
         desktop: desktop::Desktop::start(wake),
         analyzer: links.map(|l| l.analyzer),
