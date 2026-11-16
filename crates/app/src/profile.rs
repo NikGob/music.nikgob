@@ -19,7 +19,7 @@
 //! the mixes, the artist pages and the lyrics look like a real user's. The
 //! tracks have no files: each has a local source where its file would be,
 //! which the audio engine plays as silence of the track's length
-//! ([`crate::audio::play_missing_files_silent`]); «Включить с YouTube» (key
+//! ([`nikgob_playback::play_missing_files_silent`]); «Включить с YouTube» (key
 //! Y) plays the real song instead. A file imported later (Inbox, or the
 //! usual import) lands on the seeded track: same release by MBID or name,
 //! same number and title, and any file is better than the silent source

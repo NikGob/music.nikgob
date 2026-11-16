@@ -1,0 +1,27 @@
+[package]
+name = "nikgob-playback"
+description = "The player's engine as the runtime drives it: nikgob-audio behind the runtime's Playback, streams opened through their services, device switches, the duck; Spotify Soloist and SoundCloud's player as live sources where the app runs them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["live"]
+# Spotify Soloist and SoundCloud's official player as live sources (the
+# app). The headless player builds without them.
+live = ["dep:nikgob-soloist", "dep:nikgob-sc-widget"]
+
+[dependencies]
+nikgob-core.workspace = true
+nikgob-view.workspace = true
+nikgob-runtime = { path = "../runtime" }
+nikgob-audio = { path = "../audio" }
+nikgob-soloist = { path = "../soloist", optional = true }
+nikgob-sc-widget = { path = "../sc-widget", optional = true }
+crossbeam-channel = "0.5"
+log.workspace = true
+
+[lints]
+workspace = true

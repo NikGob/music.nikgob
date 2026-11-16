@@ -8,7 +8,6 @@
 
 #![windows_subsystem = "windows"]
 
-mod audio;
 mod autostart;
 mod cover_cache;
 mod demo;
@@ -239,7 +238,7 @@ struct Core {
     ui: Md3eUi,
     runtime: Runtime,
     desktop: desktop::Desktop,
-    analyzer: Option<audio::AnalyzerSlot>,
+    analyzer: Option<nikgob_playback::AnalyzerSlot>,
     commands: Vec<Command>,
     shot: Option<shot::Shot>,
     /// `NIKGOB_FRAMES`: the frame-time log.
@@ -747,13 +746,13 @@ fn main() -> eframe::Result {
         profile::prepare(&dir);
         paths = profile::paths(&dir);
         nikgob_view::dev::set_profile(true);
-        audio::play_missing_files_silent();
+        nikgob_playback::play_missing_files_silent();
         log::info!("developer profile in {}", dir.display());
     }
     // A sweep on a copy of the profile plays its file-less tracks as the
     // profile does, so the screens show a track running.
     if sweep::active() {
-        audio::play_missing_files_silent();
+        nikgob_playback::play_missing_files_silent();
     }
     // Next to the library in use: a demo's crash stays in the demo's dir.
     if let Some(dir) = paths.db.parent() {
@@ -815,11 +814,15 @@ fn main() -> eframe::Result {
     let (backend, links): (Box<dyn Playback>, _) = if std::env::var_os("NIKGOB_NO_AUDIO").is_some() {
         (Box::new(NullPlayback), None)
     } else {
+        // On Linux a device may also be named by its PulseAudio sink name,
+        // which the list does not show: the engine finds it (or plays on
+        // the default output while it is not there).
         let device = prefs
             .output_device
             .clone()
-            .filter(|d| prefs.output_devices.contains(d));
-        match audio::Engine::start(device, streams.clone(), streams::soloist(), streams::sc_widget()) {
+            .filter(|d| prefs.output_devices.contains(d) || cfg!(target_os = "linux"));
+        let live = nikgob_playback::LivePlayers { soloist: streams::soloist(), widget: streams::sc_widget() };
+        match nikgob_playback::Engine::start(device, streams.clone(), live) {
             Ok((engine, links)) => (Box::new(engine), Some(links)),
             Err(e) => {
                 log::error!("audio engine failed to start: {e}");
