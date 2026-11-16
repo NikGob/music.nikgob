@@ -9,6 +9,8 @@
 //! `crash.log` in its data dir; SIGTERM or Ctrl+C stops it as the app
 //! quits, its session and prefs saved. `--console` takes commands typed on
 //! stdin (the duck, the output, play and pause) for trying it by hand.
+//! `nikgobd token <name> [control|full|read] [owner|assistant|agent|guest]`
+//! makes a token for the API while the player is stopped and prints it once.
 
 mod config;
 mod console;
@@ -22,9 +24,22 @@ use std::path::PathBuf;
 fn main() {
     let mut asked: Option<PathBuf> = None;
     let mut console = false;
+    let mut token: Option<Vec<String>> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
+        if let Some(words) = token.as_mut() {
+            if a == "--config" {
+                match args.next() {
+                    Some(p) => asked = Some(PathBuf::from(p)),
+                    None => usage("--config needs a file"),
+                }
+            } else {
+                words.push(a);
+            }
+            continue;
+        }
         match a.as_str() {
+            "token" => token = Some(Vec::new()),
             "--config" => match args.next() {
                 Some(p) => asked = Some(PathBuf::from(p)),
                 None => usage("--config needs a file"),
@@ -48,6 +63,10 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if let Some(words) = token {
+        make_token(&config::Paths::of(&cfg), &words);
+        return;
+    }
     init_log(&cfg.log);
     let paths = config::Paths::of(&cfg);
     log_panics(paths.crash_log.clone());
@@ -74,10 +93,24 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let api_wake = nikgob_api::Wake::new();
+    {
+        let w = api_wake.clone();
+        host.wake.add(move || w.wake());
+    }
+    let api = match nikgob_api::start(nikgob_api::ApiContext {
+        runtime: host.runtime.handle(),
+        library: host.library.clone(),
+        wake: api_wake,
+        media_roots: Vec::new(),
+    }) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            log::error!("the API did not start: {e}");
+            None
+        }
+    };
     rt.block_on(async {
-        // A server next to the player starts here, on this runtime, with
-        // `host.runtime`, `host.library`, `host.settings` and
-        // `host.wake.add(...)` for the state's changes.
         if console {
             tokio::select! {
                 () = stopped() => {}
@@ -88,6 +121,9 @@ fn main() {
         }
     });
     log::info!("stopping");
+    if let Some(a) = api {
+        a.stop();
+    }
     host.shutdown();
     // Nothing on it is waited for (a blocked read of stdin, a server's
     // last connections): the player has stopped and saved already.
@@ -95,8 +131,47 @@ fn main() {
     log::info!("stopped");
 }
 
+/// `nikgobd token <name> [preset] [actor]`: a new API token in the data
+/// dir's settings.toml (refused while the player runs), printed once.
+fn make_token(paths: &config::Paths, words: &[String]) {
+    use nikgob_core::settings::{ApiActor, ApiPreset};
+    let Some(name) = words.first() else { usage("token needs a name") };
+    let preset = match words.get(1).map(String::as_str) {
+        None | Some("control") => ApiPreset::Control,
+        Some("full") => ApiPreset::Full,
+        Some("read") => ApiPreset::Read,
+        Some(other) => usage(&format!("unknown preset {other}")),
+    };
+    let actor = match words.get(2).map(String::as_str) {
+        None => match preset {
+            ApiPreset::Control => ApiActor::Assistant,
+            ApiPreset::Full => ApiActor::Agent,
+            ApiPreset::Read => ApiActor::Owner,
+        },
+        Some("owner") => ApiActor::Owner,
+        Some("assistant") => ApiActor::Assistant,
+        Some("agent") => ApiActor::Agent,
+        Some("guest") => ApiActor::Guest,
+        Some(other) => usage(&format!("unknown actor {other}")),
+    };
+    if words.len() > 3 {
+        usage("token takes a name, a preset and an actor");
+    }
+    if let Err(e) = std::fs::create_dir_all(&paths.data) {
+        eprintln!("nikgobd: {}: {e}", paths.data.display());
+        std::process::exit(1);
+    }
+    match nikgob_api::create_token(&paths.settings, &paths.lock, name, preset, actor) {
+        Ok(secret) => println!("{secret}"),
+        Err(e) => {
+            eprintln!("nikgobd: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn usage(problem: &str) -> ! {
-    eprintln!("nikgobd: {problem}\nusage: nikgobd [--config <file>] [--console] | --print-config | --version");
+    eprintln!("nikgobd: {problem}\nusage: nikgobd [--config <file>] [--console] | token <name> [control|full|read] [owner|assistant|agent|guest] [--config <file>] | --print-config | --version");
     std::process::exit(2);
 }
 

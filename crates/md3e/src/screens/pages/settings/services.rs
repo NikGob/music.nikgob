@@ -875,7 +875,7 @@ pub(crate) fn open_url(url: &str) {
 }
 
 /// A small «Копировать» that reads «Скопировано» for a moment.
-fn copy_button(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, text: &str) {
+pub(super) fn copy_button(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, text: &str) {
     let key = egui::Id::new(("copied", &salt));
     let now = ui.ctx().input(|i| i.time);
     let at: Option<f64> = ui.ctx().data(|d| d.get_temp(key));

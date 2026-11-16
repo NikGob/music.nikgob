@@ -32,6 +32,15 @@ pub struct Config {
     pub background_compute: bool,
     /// env_logger filters: `info`, `debug`, `info,nikgob_runtime=debug`.
     pub log: String,
+    /// The local API (REST, `/docs`): on by default, it is how this player
+    /// is driven. Written into `[api]` of the data dir's settings.toml at
+    /// every start.
+    pub api: bool,
+    /// Listen on exactly this address (`192.168.0.157`); unset: this
+    /// machine only (127.0.0.1), or what settings.toml says.
+    pub api_address: Option<String>,
+    /// The API's port; unset: settings.toml's (47210 by default).
+    pub api_port: Option<u16>,
 }
 
 impl Default for Config {
@@ -43,6 +52,9 @@ impl Default for Config {
             output_device: None,
             background_compute: false,
             log: "info".to_owned(),
+            api: true,
+            api_address: None,
+            api_port: None,
         }
     }
 }

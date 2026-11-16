@@ -1,0 +1,407 @@
+//! The player's local REST API: the voice assistant on the Raspberry Pi,
+//! scripts and (next) the MCP server drive the player with it, through
+//! the same loop as the window's buttons.
+//!
+//! [`start`] runs it on a thread of its own with its own tokio runtime. It
+//! follows the settings live (`[api]` of settings.toml, as the runtime
+//! shows them in [`nikgob_view::ApiView`]): on or off, this computer
+//! (`127.0.0.1`) or the home network (`0.0.0.0`, or an explicit address),
+//! the port (47210 by default); it tells the runtime where it listens or
+//! why it cannot ([`nikgob_view::Command::ApiStatus`]). Every `/v1` route
+//! needs a token; `/docs` (Swagger UI) and `/openapi.json` do not. It needs
+//! no window: the headless player starts it the same way.
+
+mod auth;
+mod docs;
+mod error;
+mod events;
+mod library;
+mod media;
+mod outputs;
+mod play;
+mod routes;
+mod state;
+pub mod tokens;
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
+
+use axum::Router;
+use axum::routing::{delete, get, post, put};
+use tokio::sync::{oneshot, watch};
+
+use nikgob_library::Library;
+use nikgob_runtime::RuntimeHandle;
+use nikgob_view::Command;
+
+pub use auth::Caller;
+pub use tokens::create_token;
+
+/// Wakes the API when the runtime publishes a change. Give the runtime a
+/// wake that calls both the window's and this one's [`Wake::wake`].
+#[derive(Clone)]
+pub struct Wake(Arc<watch::Sender<u64>>);
+
+impl Wake {
+    pub fn new() -> Self {
+        Self(Arc::new(watch::channel(0).0))
+    }
+
+    /// Cheap and never blocks for long: call it from the runtime's wake.
+    pub fn wake(&self) {
+        self.0.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+        self.0.subscribe()
+    }
+}
+
+impl Default for Wake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What the API needs of its host.
+pub struct ApiContext {
+    /// The player, as the window drives it.
+    pub runtime: RuntimeHandle,
+    /// A handle of the library, for reads (it has its own read connections).
+    pub library: Library,
+    /// The wake the runtime calls on every change.
+    pub wake: Wake,
+    /// Folders besides the library and the masters folder whose files may
+    /// be served (a covers folder of the host's own); none is fine.
+    pub media_roots: Vec<std::path::PathBuf>,
+}
+
+/// The running API; [`ApiHandle::stop`] (or dropping it) stops the server
+/// and its thread.
+pub struct ApiHandle {
+    stop: Option<oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ApiHandle {
+    pub fn stop(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(s) = self.stop.take() {
+            let _ = s.send(());
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for ApiHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Starts the API's thread. It listens only while the settings say so.
+pub fn start(ctx: ApiContext) -> std::io::Result<ApiHandle> {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let thread = std::thread::Builder::new().name("nikgob-api".into()).spawn(move || {
+        let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("nikgob-api-io").enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                log::error!("api: no runtime: {e}");
+                return;
+            }
+        };
+        rt.block_on(supervise(ctx, stop_rx));
+        rt.shutdown_timeout(Duration::from_secs(1));
+    })?;
+    Ok(ApiHandle { stop: Some(stop_tx), thread: Some(thread) })
+}
+
+/// How long an answer waits for the runtime to get past its commands.
+const SYNC_WAIT: Duration = Duration::from_secs(2);
+/// A server that could not listen tries again this often.
+const RETRY: Duration = Duration::from_secs(15);
+/// How long a stopping server may finish its answers.
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// What the routes share, across restarts of the server.
+pub(crate) struct Shared {
+    pub rt: RuntimeHandle,
+    pub lib: Library,
+    pub media_roots: Vec<std::path::PathBuf>,
+    pub wake: Wake,
+    pub tokens: auth::Tokens,
+    pub limiter: auth::Limiter,
+    pub uses: auth::Uses,
+    pub sse_clients: AtomicUsize,
+    /// The last acknowledgement sent; held while a request is sent, so the
+    /// loop gets the requests in the order of their acknowledgements.
+    sent: parking_lot::Mutex<u64>,
+}
+
+impl Shared {
+    fn new(ctx: ApiContext) -> Self {
+        Self {
+            rt: ctx.runtime,
+            lib: ctx.library,
+            media_roots: ctx.media_roots,
+            wake: ctx.wake,
+            tokens: auth::Tokens::default(),
+            limiter: auth::Limiter::default(),
+            uses: auth::Uses::default(),
+            sse_clients: AtomicUsize::new(0),
+            sent: parking_lot::Mutex::new(0),
+        }
+    }
+
+    /// Sends `commands` as one request with an acknowledgement of its own
+    /// (the loop runs them with nothing between them), then waits (at most
+    /// [`SYNC_WAIT`]) until the loop shows it: acknowledgements are sent in
+    /// order under one lock, so a larger one shown means this one was run.
+    /// Not shown in time: an error, not a state the commands may not have
+    /// made.
+    pub async fn run(&self, commands: Vec<Command>) -> Result<(), error::ApiError> {
+        let mut changes = self.wake.subscribe();
+        let ack = {
+            let mut sent = self.sent.lock();
+            *sent += 1;
+            self.rt.send(Command::ApiRun { commands, ack: *sent });
+            *sent
+        };
+        let deadline = tokio::time::Instant::now() + SYNC_WAIT;
+        loop {
+            if self.rt.state().api.synced >= ack {
+                return Ok(());
+            }
+            match tokio::time::timeout_at(deadline, changes.changed()).await {
+                Ok(Ok(())) => {}
+                _ => {
+                    log::warn!("api: the player did not answer in time");
+                    return Err(error::ApiError::timeout());
+                }
+            }
+        }
+    }
+
+    /// The caller of `secret` as the tokens are now (a revoke counts at
+    /// once).
+    pub fn caller(&self, secret: &str) -> Option<Caller> {
+        {
+            let st = self.rt.state();
+            self.tokens.refresh(&st.api.tokens);
+        }
+        self.tokens.find(secret)
+    }
+
+    /// Whether token `id` still works (kept and not revoked).
+    pub fn token_works(&self, id: &str) -> bool {
+        self.rt.state().api.tokens.iter().any(|t| t.id == id && !t.revoked)
+    }
+
+    /// No sound can come out: `503 no_audio`.
+    pub fn audio(&self) -> Result<(), error::ApiError> {
+        if self.rt.state().no_audio { Err(error::ApiError::no_audio()) } else { Ok(()) }
+    }
+
+    /// The state now.
+    pub fn snapshot(&self) -> state::PlayerState {
+        let st = self.rt.state();
+        state::PlayerState::of(&st, nikgob_library::now_ms())
+    }
+}
+
+/// Stops a server's event streams when it stops (axum waits for every
+/// connection to end, and a stream never does by itself).
+#[derive(Clone)]
+pub(crate) struct Closing(pub watch::Receiver<bool>);
+
+async fn not_found() -> error::ApiError {
+    error::ApiError::not_found("Нет такого адреса")
+}
+
+/// The routes: `/v1` behind the token, the docs open.
+pub(crate) fn router(sh: Arc<Shared>, closing: Closing) -> Router {
+    let v1 = Router::new()
+        .route("/v1/state", get(routes::state))
+        .route("/v1/events", get(events::events))
+        .route("/v1/player/play", post(routes::play))
+        .route("/v1/player/pause", post(routes::pause))
+        .route("/v1/player/resume", post(routes::resume))
+        .route("/v1/player/toggle", post(routes::toggle))
+        .route("/v1/player/next", post(routes::next))
+        .route("/v1/player/previous", post(routes::previous))
+        .route("/v1/player/seek", post(routes::seek))
+        .route("/v1/player/mode", put(routes::mode))
+        .route("/v1/player/volume", put(routes::volume))
+        .route("/v1/player/duck", put(routes::duck).delete(routes::unduck))
+        .route("/v1/player/output", put(routes::set_output))
+        .route("/v1/outputs", get(routes::list_outputs))
+        .route("/v1/queue", get(routes::queue).post(routes::queue_add).delete(routes::queue_clear))
+        .route("/v1/queue/move", post(routes::queue_move))
+        .route("/v1/queue/{entry}", delete(routes::queue_remove))
+        .route("/v1/queue/{entry}/play", post(routes::queue_play))
+        .route("/v1/search", get(library::search))
+        .route("/v1/tracks/{id}", get(library::track))
+        .route("/v1/tracks/{id}/lyrics", get(library::lyrics))
+        .route("/v1/albums/{id}", get(library::album))
+        .route("/v1/artists/{id}", get(library::artist))
+        .route("/v1/playlists", get(library::playlists))
+        .route("/v1/playlists/{id}", get(library::playlist))
+        .route("/v1/media/tracks/{id}/audio", get(media::audio))
+        .route("/v1/media/albums/{id}/cover", get(media::cover))
+        .route_layer(axum::middleware::from_fn_with_state(sh.clone(), auth::guard))
+        .layer(axum::Extension(closing))
+        .with_state(sh);
+    Router::new().merge(v1).merge(docs::swagger()).fallback(not_found)
+}
+
+/// The address to listen on: `ip:port` (`[ip]:port` for IPv6).
+pub(crate) fn listen_addr(ip: &str, port: u16) -> String {
+    if ip.contains(':') && !ip.starts_with('[') { format!("[{ip}]:{port}") } else { format!("{ip}:{port}") }
+}
+
+/// Why the server cannot listen, in words for the settings row.
+pub(crate) fn bind_error(e: &std::io::Error, ip: &str, port: u16) -> String {
+    match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!("Порт {port} занят"),
+        std::io::ErrorKind::AddrNotAvailable => format!("У компьютера нет адреса {ip}"),
+        std::io::ErrorKind::PermissionDenied => format!("Нет доступа к порту {port}"),
+        _ => format!("Не удалось открыть порт {port}: {e}"),
+    }
+}
+
+/// A listening server.
+struct Server {
+    addr: String,
+    local: std::net::SocketAddr,
+    closing: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Server {
+    async fn bind(addr: &str, sh: Arc<Shared>) -> std::io::Result<Self> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let local = listener.local_addr()?;
+        let (closing, closed) = watch::channel(false);
+        let app = router(sh, Closing(closed.clone()));
+        let mut stop = closed;
+        let task = tokio::spawn(async move {
+            let shutdown = async move {
+                let _ = stop.wait_for(|c| *c).await;
+            };
+            if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
+                log::warn!("api: the server stopped: {e}");
+            }
+        });
+        Ok(Self { addr: addr.to_owned(), local, closing, task })
+    }
+
+    async fn stop(self) {
+        let _ = self.closing.send(true);
+        let mut task = self.task;
+        if tokio::time::timeout(STOP_WAIT, &mut task).await.is_err() {
+            log::warn!("api: the server did not stop in time");
+            task.abort();
+        }
+    }
+}
+
+/// Keeps the server as the settings say, until `stop`.
+async fn supervise(ctx: ApiContext, mut stop: oneshot::Receiver<()>) {
+    let sh = Arc::new(Shared::new(ctx));
+    let mut changes = sh.wake.subscribe();
+    let mut running: Option<Server> = None;
+    let mut reported: Option<(Option<String>, Option<String>)> = None;
+    // The address that could not be had, and when to try it again (a fixed
+    // time: other wakes do not put it off).
+    let mut failed: Option<(String, tokio::time::Instant)> = None;
+    let report = |reported: &mut Option<(Option<String>, Option<String>)>, listening: Option<String>, error: Option<String>| {
+        let now = (listening, error);
+        if reported.as_ref() != Some(&now) {
+            sh.rt.send(Command::ApiStatus { listening: now.0.clone(), error: now.1.clone() });
+            *reported = Some(now);
+        }
+    };
+    loop {
+        let (want, ip, port) = {
+            let st = sh.rt.state();
+            sh.tokens.refresh(&st.api.tokens);
+            let ip = st.api.bind_ip();
+            (st.api.enabled.then(|| listen_addr(&ip, st.api.port)), ip, st.api.port)
+        };
+        if want.as_deref() != running.as_ref().map(|s| s.addr.as_str()) {
+            if let Some(s) = running.take() {
+                s.stop().await;
+                log::info!("api: stopped");
+            }
+            match &want {
+                Some(addr) => {
+                    let due = failed.as_ref().is_none_or(|(a, at)| a != addr || tokio::time::Instant::now() >= *at);
+                    if due {
+                        match Server::bind(addr, sh.clone()).await {
+                            Ok(s) => {
+                                log::info!("api: listening on {}", s.local);
+                                report(&mut reported, Some(s.local.to_string()), None);
+                                running = Some(s);
+                                failed = None;
+                            }
+                            Err(e) => {
+                                log::warn!("api: cannot listen on {addr}: {e}");
+                                report(&mut reported, None, Some(bind_error(&e, &ip, port)));
+                                failed = Some((addr.clone(), tokio::time::Instant::now() + RETRY));
+                            }
+                        }
+                    }
+                }
+                None => {
+                    report(&mut reported, None, None);
+                    failed = None;
+                }
+            }
+        }
+        tokio::select! {
+            _ = &mut stop => break,
+            r = changes.changed() => {
+                if r.is_err() {
+                    break;
+                }
+            }
+            () = tokio::time::sleep_until(failed.as_ref().map_or_else(tokio::time::Instant::now, |(_, at)| *at)), if failed.is_some() => {}
+        }
+    }
+    if let Some(s) = running.take() {
+        s.stop().await;
+    }
+    report(&mut reported, None, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addresses() {
+        assert_eq!(listen_addr("127.0.0.1", 47210), "127.0.0.1:47210");
+        assert_eq!(listen_addr("::1", 47210), "[::1]:47210");
+        assert_eq!(listen_addr("[::1]", 1), "[::1]:1");
+        let busy = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        assert_eq!(bind_error(&busy, "127.0.0.1", 47210), "Порт 47210 занят");
+        let none = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
+        assert_eq!(bind_error(&none, "192.168.0.157", 47210), "У компьютера нет адреса 192.168.0.157");
+    }
+
+    /// Two servers cannot share a port: the second says so.
+    #[tokio::test]
+    async fn a_taken_port_is_an_error() {
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = first.local_addr().unwrap().port();
+        let second = tokio::net::TcpListener::bind(listen_addr("127.0.0.1", port)).await;
+        let e = second.err().expect("the port is taken");
+        assert_eq!(bind_error(&e, "127.0.0.1", port), format!("Порт {port} занят"));
+    }
+}

@@ -7,6 +7,7 @@
 
 mod align;
 mod analysis;
+mod api;
 mod artist_names;
 mod quality;
 mod same_audio;
@@ -202,6 +203,11 @@ pub trait Playback: Send {
     /// holds whatever plays next, across gapless joins and device switches,
     /// until it is changed.
     fn set_duck(&mut self, _gain: f32, _fade: Duration) {}
+    /// Whether sound can come out at all (false: a stand-in for an engine
+    /// that did not start).
+    fn available(&self) -> bool {
+        true
+    }
 }
 
 /// A backend that plays nothing (tests, or when no device is available).
@@ -218,6 +224,28 @@ impl Playback for NullPlayback {
     fn set_volume(&mut self, _: f32) {}
     fn position(&self) -> Duration {
         Duration::ZERO
+    }
+}
+
+/// What the host plays through when the audio engine did not start: it
+/// plays nothing and says so ([`Playback::available`]), so the view shows
+/// [`ViewState::no_audio`].
+#[derive(Default)]
+pub struct NoAudio;
+
+impl Playback for NoAudio {
+    fn play(&mut self, _: PlayRequest) {}
+    fn set_next(&mut self, _: Option<PlayRequest>) {}
+    fn pause(&mut self) {}
+    fn resume(&mut self) {}
+    fn stop(&mut self) {}
+    fn seek(&mut self, _: Duration) {}
+    fn set_volume(&mut self, _: f32) {}
+    fn position(&self) -> Duration {
+        Duration::ZERO
+    }
+    fn available(&self) -> bool {
+        false
     }
 }
 
@@ -457,6 +485,39 @@ impl Runtime {
                 }
             }
         }
+    }
+}
+
+/// A handle another thread drives the player with, as the UI does (the
+/// local API's server): it sends commands and reads the state, and does not
+/// keep the worker alive.
+#[derive(Clone)]
+pub struct RuntimeHandle {
+    tx: Sender<Msg>,
+    state: Arc<RwLock<ViewState>>,
+}
+
+impl RuntimeHandle {
+    pub fn send(&self, command: Command) {
+        let _ = self.tx.send(Msg::Cmd(command));
+    }
+
+    pub fn send_all(&self, commands: impl IntoIterator<Item = Command>) {
+        for c in commands {
+            self.send(c);
+        }
+    }
+
+    /// The state (a short read lock: copy out what is needed).
+    pub fn state(&self) -> RwLockReadGuard<'_, ViewState> {
+        self.state.read()
+    }
+}
+
+impl Runtime {
+    /// A [`RuntimeHandle`] for another thread.
+    pub fn handle(&self) -> RuntimeHandle {
+        RuntimeHandle { tx: self.tx.clone(), state: self.state.clone() }
     }
 }
 
@@ -832,6 +893,8 @@ struct Worker {
     userdata_export: bool,
     /// The sound lowered for a while ([`duck`]).
     duck: duck::DuckState,
+    /// The local API's settings and the tokens' uses ([`api`]).
+    api: api::ApiKeep,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -1033,6 +1096,7 @@ impl Worker {
             compute: true,
             userdata_export: true,
             duck: Default::default(),
+            api: Default::default(),
         }
     }
 
@@ -1066,6 +1130,7 @@ impl Worker {
         self.offer_editions();
         self.wish_restart();
         self.publish_sources();
+        self.api_load();
         self.start_streams();
         if self.compute {
             self.start_analysis();
@@ -1171,6 +1236,8 @@ impl Worker {
                     self.turn.lap("streams");
                     self.recs_tick();
                     self.turn.lap("recs");
+                    self.api_tick();
+                    self.turn.lap("api");
                 }
             }
             std::mem::take(&mut self.turn).end();
@@ -1181,6 +1248,7 @@ impl Worker {
         }
         self.save_session();
         self.save_prefs_due();
+        self.api_flush();
         self.session_saved.flush();
         self.recs_flush_weights(true);
         self.niche_flush();
@@ -1923,6 +1991,16 @@ impl Worker {
             }
             c @ (Command::SetDuck { .. } | Command::ClearDuck { .. }) => self.duck_command(c),
             Command::SetOutputDevice(device) => self.set_output_device(device),
+            c @ (Command::SetApiEnabled(_)
+            | Command::SetApiAccess(_)
+            | Command::SetApiPort(_)
+            | Command::ApiCreateToken(_)
+            | Command::ApiRevokeToken(_)
+            | Command::ApiRestoreToken(_)
+            | Command::ApiStatus { .. }
+            | Command::ApiTokensUsed(_)
+            | Command::ApiRun { .. }
+            | Command::ApiShuffle(_)) => self.api_command(c),
         }
     }
 
@@ -2248,6 +2326,10 @@ impl Worker {
     pub(crate) fn new_list(&mut self, kind: Option<nikgob_view::ListKind>) {
         let rule = kind.map_or(nikgob_view::ListShuffle::Button, |k| self.state.read().prefs.list_shuffle.of(k));
         self.queue.new_list(rule, kind);
+        // An API request said shuffled or not: so before the list is made.
+        if let Some(on) = self.api.next_shuffle.take() {
+            self.queue.shuffle = on;
+        }
     }
 
     /// Writes the prefs a command changed without writing them itself, or
@@ -2707,6 +2789,7 @@ impl Worker {
             PlaybackEvent::PositionAt { id, position, at } => (PlaybackEvent::Position { id, position }, at.elapsed().min(POSITION_SNAP)),
             ev => (ev, Duration::ZERO),
         };
+        self.api_audio_event(&ev);
         match ev {
             PlaybackEvent::Started { id } => {
                 if self.restarted == Some(id) {
@@ -4150,6 +4233,9 @@ impl Worker {
     fn switch_device(&mut self, device: Option<String>) {
         if self.playback.set_device(device) {
             self.resume_on_new_device();
+        } else {
+            // A device error from now on is the new device's, not the one heard.
+            self.api.switching_device = true;
         }
     }
 

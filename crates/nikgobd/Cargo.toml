@@ -19,6 +19,7 @@ nikgob-runtime = { path = "../runtime" }
 nikgob-playback = { path = "../playback", default-features = false }
 nikgob-library = { path = "../library" }
 nikgob-audio = { path = "../audio" }
+nikgob-api = { path = "../api" }
 log.workspace = true
 env_logger.workspace = true
 serde = { version = "1", features = ["derive"] }

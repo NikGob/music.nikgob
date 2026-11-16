@@ -47,10 +47,11 @@ impl Host {
         }
         let lock = DataLock::acquire(&paths.lock)?;
         let library = Library::open(&paths.db).map_err(|e| format!("cannot open the library at {}: {e}", paths.db.display()))?;
-        let settings = Settings::load(&paths.settings).unwrap_or_else(|e| {
+        let mut settings = Settings::load(&paths.settings).unwrap_or_else(|e| {
             log::warn!("{e}; going on without it");
             Settings::default()
         });
+        apply_api(&mut settings, cfg, &paths.settings);
         let prefs = prefs_for(&paths, cfg, nikgob_audio::output_device_names().unwrap_or_else(|e| {
             log::warn!("audio devices: {e}");
             Vec::new()
@@ -78,7 +79,7 @@ impl Host {
                 }
                 Err(e) => {
                     log::error!("the audio engine did not start: {e}");
-                    backend = Box::new(NullPlayback);
+                    backend = Box::new(nikgob_runtime::NoAudio);
                     links = None;
                 }
             }
@@ -128,6 +129,24 @@ impl Host {
     /// prefs saved, the engine stopped), then lets the data dir go.
     pub fn shutdown(self) {
         self.runtime.shutdown();
+    }
+}
+
+/// The config's API switch, address and port over `[api]` of settings.toml,
+/// saved before the runtime reads it.
+fn apply_api(settings: &mut Settings, cfg: &Config, path: &Path) {
+    let before = (settings.api.enabled, settings.api.address.clone(), settings.api.port);
+    settings.api.enabled = cfg.api;
+    if let Some(a) = &cfg.api_address {
+        settings.api.address = a.trim().to_owned();
+    }
+    if let Some(p) = cfg.api_port {
+        settings.api.port = p;
+    }
+    if before != (settings.api.enabled, settings.api.address.clone(), settings.api.port)
+        && let Err(e) = settings.save(path)
+    {
+        log::warn!("cannot save the API settings to {}: {e}", path.display());
     }
 }
 

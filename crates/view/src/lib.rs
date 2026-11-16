@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod api;
 mod credit;
 pub mod dev;
 pub mod first_run;
@@ -26,6 +27,7 @@ pub use nikgob_core::model::AlbumMode;
 pub use nikgob_core::model::{
     ArtistId, LikeTarget, PlaylistId, ReleaseId, ReleaseType, SourceKind, TrackId,
 };
+pub use api::*;
 pub use credit::*;
 pub use player_prefs::*;
 pub use recs::*;
@@ -3166,6 +3168,12 @@ pub struct ViewState {
     pub real_covers: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Bumped on every change, so a UI can skip work when nothing changed.
     pub revision: u64,
+    /// The local REST API («Межсеть → API и MCP»).
+    pub api: ApiView,
+    /// No sound can come out: the audio engine did not start, or the
+    /// device heard failed and nothing has played since. The API answers
+    /// its play commands with `503 no_audio`.
+    pub no_audio: bool,
 }
 
 /// What the user does not want: tracks disliked and artists not to
@@ -3836,6 +3844,36 @@ pub enum Command {
     /// a name from `Prefs::output_devices`, or on Linux also a PulseAudio sink
     /// name (`alsa_output.usb-…analog-stereo`). Persisted like the Settings pick.
     SetOutputDevice(Option<String>),
+
+    // The local REST API («Межсеть → API и MCP»), kept in `[api]` of
+    // settings.toml and applied live.
+    /// Its switch.
+    SetApiEnabled(bool),
+    /// This computer only, or the home network too.
+    SetApiAccess(ApiAccess),
+    /// Its port (1024–65535).
+    SetApiPort(u16),
+    /// A new token: the runtime keeps its hash, the secret stays with the
+    /// dialog that shows it once.
+    ApiCreateToken(ApiNewToken),
+    /// «Отозвать» (by id): refused from now on; it goes for good once its
+    /// snackbar's «Отменить» is gone.
+    ApiRevokeToken(String),
+    /// «Отменить» of a revoke.
+    ApiRestoreToken(String),
+    /// From the API server: where it listens, or why it does not.
+    ApiStatus { listening: Option<String>, error: Option<String> },
+    /// From the API server: these tokens were used (id, unix ms), at most
+    /// once a second each.
+    ApiTokensUsed(Vec<(String, i64)>),
+    /// From the API server: one request's commands, run one after another
+    /// with nothing between them, then `ack` is shown as
+    /// [`ApiView::synced`] (acks come in the order they were sent), so the
+    /// answer has their state.
+    ApiRun { commands: Vec<Command>, ack: u64 },
+    /// Inside an [`Command::ApiRun`]: the next list it makes plays shuffled
+    /// or in order as this says, whatever the settings of its kind.
+    ApiShuffle(bool),
 }
 
 impl Default for Prefs {

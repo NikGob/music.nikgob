@@ -1,5 +1,5 @@
-//! Настройки: one page, six tabs — Музыка ·
-//! Тексты · Вид · Сервисы · Загрузки · Система — and one switch, Просто ·
+//! Настройки: one page, seven tabs — Музыка ·
+//! Тексты · Вид · Сервисы · Загрузки · Межсеть · Система — and one switch, Просто ·
 //! Подробно (kept in the prefs). «Подробно» shows the same tabs, groups and
 //! rows in the same order, with the rest of the rows between them; a row
 //! never moves when the mode changes.
@@ -22,6 +22,7 @@ mod downloads;
 mod look;
 mod lyrics;
 mod music;
+mod net;
 mod preset;
 mod rows;
 mod services;
@@ -30,6 +31,7 @@ mod system;
 use egui::{Align2, Key, Modifiers, Rangef, Rect, Sense, Ui, UiBuilder, Vec2, emath::GuiRounding as _, pos2, vec2};
 use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
+pub(crate) use net::NetState;
 pub(super) use rows::fmt_speed;
 pub(crate) use services::{
     SoloistDialog, cookies_fields, login_error, login_prompt, open_url, paused_line, spotify_steps, step, token_fields,
@@ -274,6 +276,7 @@ pub(super) fn page(
             settings_help::TAB_LOOK => look::show(ui, &mut p, out),
             settings_help::TAB_SERVICES => services::show(ui, state, &mut p, pages, out),
             settings_help::TAB_DOWNLOADS => downloads::show(ui, state, &mut p, pages, out),
+            settings_help::TAB_NET => net::show(ui, state, pages, out),
             _ => system::show(ui, state, &mut p, pages, out),
         }
         // Beside the stage the ⓘ cards have no sample of their own.
@@ -547,9 +550,9 @@ fn header(ui: &mut Ui, deep: bool) -> Option<bool> {
     pick.map(|n| n == 1)
 }
 
-/// The six tabs: a connected group, or a menu chip where they do not fit.
+/// The seven tabs: a connected group, or a menu chip where they do not fit.
 fn tabs(ui: &mut Ui, tab: usize) -> Option<usize> {
-    if ui.available_width() < 560.0 {
+    if ui.available_width() < 660.0 {
         let options: Vec<(String, bool)> = TABS.iter().enumerate().map(|(i, t)| ((*t).to_owned(), i == tab)).collect();
         return rows::dropdown(ui, "set-tab-menu", TABS[tab], &options);
     }
