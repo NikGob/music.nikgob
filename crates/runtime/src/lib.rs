@@ -2073,7 +2073,8 @@ impl Worker {
             | Command::MeshForgetFailed { .. }
             | Command::MeshSetKeepMasters(_)
             | Command::MeshSetPins { .. }
-            | Command::MeshPauseTransfer { .. }) => self.mesh_command(c),
+            | Command::MeshPauseTransfer { .. }
+            | Command::MeshForgetAnswer { .. }) => self.mesh_command(c),
         }
     }
 

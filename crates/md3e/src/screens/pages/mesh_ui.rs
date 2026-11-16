@@ -39,7 +39,8 @@ pub(crate) struct MeshUi {
     pub(crate) add: super::add_device::AddState,
     rename: Option<Rename>,
     favorites: Option<Favorites>,
-    forget: Option<ForgetAsk>,
+    /// The forget asked about whose answer went (until the view drops it).
+    answered: Option<String>,
     /// «Гость» clicked: (device, scope, when), until the view has it.
     scope_sent: Vec<(String, MeshScope, f64)>,
     /// «Карта сети».
@@ -61,13 +62,6 @@ struct Favorites {
     cap_gb: u64,
     liked: bool,
     playlists: Vec<PlaylistId>,
-}
-
-/// «Забыть» of a device holding originals no other has.
-struct ForgetAsk {
-    node: String,
-    name: String,
-    count: u64,
 }
 
 /// What a control of a device asked for.
@@ -350,13 +344,9 @@ pub(crate) fn act(ui: &Ui, m: &MeshView, node: Option<&MeshNodeView>, a: Act, me
             mem.rename = Some(Rename { node: None, name: m.name_setting.clone(), placeholder, focus: true });
         }
         (Act::Rename, Some(n)) => mem.rename = Some(Rename { node: Some(n.id.clone()), name: n.name.clone(), placeholder: String::new(), focus: true }),
-        (Act::Forget, Some(n)) if m.ring_holder => {
-            if m.forget_risky(n) {
-                mem.forget = Some(ForgetAsk { node: n.id.clone(), name: n.name.clone(), count: n.sole_masters });
-            } else {
-                out.push(Command::MeshForget { node_id: n.id.clone() });
-            }
-        }
+        // Checked by the loop first (the originals only it holds): it asks
+        // through the view when some would go.
+        (Act::Forget, Some(n)) if m.ring_holder => out.push(Command::MeshForget { node_id: n.id.clone() }),
         (Act::Profile(p), Some(n)) if p != n.profile => out.push(Command::MeshSetProfile { node_id: n.id.clone(), profile: p }),
         (Act::Favorites, Some(n)) => {
             let cap = match n.profile {
@@ -388,7 +378,7 @@ pub(crate) fn overlays(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &m
     mem.scope_sent.retain(|(id, s, at)| now - at < SENT_S && state.mesh.node(id).is_some_and(|n| n.scope != *s));
     rename_dialog(ui, mem, out);
     favorites_dialog(ui, state, mem, out);
-    forget_dialog(ui, mem, out);
+    forget_dialog(ui, state, mem, out);
     super::add_device::window(ui, state, mem, out);
 }
 
@@ -495,25 +485,48 @@ fn check_row(ui: &mut Ui, salt: impl egui::AsId + Copy, name: &str, on: &mut boo
     *on != was
 }
 
-/// «Забыть» of a device that alone holds some originals while this
-/// computer may let go of its own: it asks first.
-fn forget_dialog(ui: &mut Ui, mem: &mut MeshUi, out: &mut Vec<Command>) {
-    let Some(d) = mem.forget.as_ref() else { return };
+/// «Забыть» stopped by the check made at that moment: originals have their
+/// only copy on that device (or the check failed). It asks; the answer goes
+/// once.
+fn forget_dialog(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut Vec<Command>) {
+    let Some(d) = state.mesh.forget_ask.as_ref() else {
+        mem.answered = None;
+        return;
+    };
+    if mem.answered.as_deref() == Some(d.node_id.as_str()) {
+        return;
+    }
     let ctx = ui.ctx().clone();
     let mut open = true;
-    let what = crate::screens::common::plural(d.count, "оригинал", "оригинала", "оригиналов");
     let r = Dialog::new("mesh-forget-dialog", format!("Забыть «{}»?", d.name))
         .icon(Icon::Error)
-        .supporting(format!("Только на этом устройстве лежат проверенные копии: {} {what} FLAC.", d.count))
+        .supporting(forget_text(d.originals))
         .max_width(420.0)
         .action("Отмена")
         .action_with(DialogAction::new("Забыть всё равно"))
         .show_with(&ctx, &mut open, |_| {});
-    if r.action == Some(1) {
-        out.push(Command::MeshForget { node_id: d.node.clone() });
-        mem.forget = None;
+    let answer = if r.action == Some(1) {
+        Some(true)
     } else if r.action.is_some() || r.dismissed || !open {
-        mem.forget = None;
+        Some(false)
+    } else {
+        None
+    };
+    if let Some(forget) = answer {
+        out.push(Command::MeshForgetAnswer { node_id: d.node_id.clone(), forget });
+        mem.answered = Some(d.node_id.clone());
+    }
+}
+
+/// What the forget's dialog says: how many originals only that device
+/// holds, or that it could not be checked.
+fn forget_text(originals: Option<u64>) -> String {
+    match originals {
+        Some(n) => {
+            let what = crate::screens::common::plural(n, "оригинал", "оригинала", "оригиналов");
+            format!("Только на этом устройстве лежат проверенные копии: {n} {what} FLAC.")
+        }
+        None => "Не удалось проверить, есть ли на этом устройстве единственные копии оригиналов FLAC.".to_owned(),
     }
 }
 
@@ -556,6 +569,15 @@ mod tests {
         assert!(!node_look(&n).playing);
         n.online = false;
         assert_eq!(node_look(&n), Look::default());
+    }
+
+    /// The forget's question says how many originals would go, or that the
+    /// check failed.
+    #[test]
+    fn the_forget_says_what_would_go() {
+        assert_eq!(forget_text(Some(12)), "Только на этом устройстве лежат проверенные копии: 12 оригиналов FLAC.");
+        assert_eq!(forget_text(Some(1)), "Только на этом устройстве лежат проверенные копии: 1 оригинал FLAC.");
+        assert!(forget_text(None).starts_with("Не удалось проверить"));
     }
 
     #[test]

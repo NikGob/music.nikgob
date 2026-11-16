@@ -62,7 +62,7 @@ pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
 pub use latin::{ArtistLatin, LatinFound, ROMAJI};
 pub use migrations::SCHEMA_VERSION;
-pub use nodes::NodeRow;
+pub use nodes::{NodeRow, OnlyCopy};
 pub use places::{PLACES_FROM_WISH_KEY, PlaceChange};
 pub use playlists::LIKED_PLAYLIST_NAME;
 pub use prints::{AudioPrint, NearPrint, PrintTodo, SameAudioOffer, SameSide, WrongAudio};

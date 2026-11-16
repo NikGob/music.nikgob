@@ -3953,6 +3953,8 @@ pub enum Command {
     /// The pause on a transfer's line («Карта сети»): the files to that
     /// device wait (the replicas honour it).
     MeshPauseTransfer { node_id: String, paused: bool },
+    /// The answer to [`MeshView::forget_ask`]: forget anyway, or not.
+    MeshForgetAnswer { node_id: String, forget: bool },
 }
 
 impl Default for Prefs {
