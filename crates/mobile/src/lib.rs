@@ -10,23 +10,28 @@
 
 #![forbid(unsafe_code)]
 
+mod detail;
 mod gesture;
 mod home;
+mod library;
 mod menu;
 mod nav;
+mod parts;
 mod player;
 mod queue;
 mod rows;
+mod search;
 mod text;
 
 use egui::{Pos2, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{NavBar, NavBarItem, anim};
 use nikgob_md3e::screens::phone::{self, PhonePages};
 use nikgob_md3e::{Icon, Theme};
-use nikgob_view::{Command, LibraryTab, Route, ViewState};
+use nikgob_view::{Command, Route, ViewState};
 
 pub use nav::Tab;
 use nav::{Nav, Opened};
+use parts::PageOut;
 
 /// The parts of the screen the system draws over, in dp: the status bar
 /// (and a camera's cut-out) at the top, the gesture area at the bottom, and
@@ -88,8 +93,8 @@ pub struct MobileUi {
     started: bool,
     /// The destination tapped again: its first page scrolls to the top.
     reset_scroll: bool,
-    /// Библиотека's chip, as a route asked for it.
-    library_tab: LibraryTab,
+    library: library::Library,
+    search: search::Search,
     player: player::Player,
     queue: queue::QueueSheet,
     menu: menu::TrackMenu,
@@ -110,7 +115,8 @@ impl MobileUi {
             nav: Nav::default(),
             started: false,
             reset_scroll: false,
-            library_tab: LibraryTab::All,
+            library: library::Library::default(),
+            search: search::Search::default(),
             player: player::Player::default(),
             queue: queue::QueueSheet::default(),
             menu: menu::TrackMenu::default(),
@@ -175,7 +181,14 @@ impl MobileUi {
             if alpha < 1.0 {
                 pui.multiply_opacity(alpha);
             }
-            if let Some(r) = self.page(&mut pui, frame, state, out) {
+            let po = self.page(&mut pui, frame, state, out);
+            if po.back {
+                self.nav.back(now);
+            }
+            if let Some((t, here)) = po.menu {
+                self.menu.open(t, here);
+            }
+            if let Some(r) = po.nav {
                 self.go(r, now, out);
             }
             if !keyboard {
@@ -268,17 +281,17 @@ impl MobileUi {
     }
 
     /// The page of the destination's top.
-    fn page(&mut self, ui: &mut Ui, frame: PageFrame, state: &ViewState, out: &mut Vec<Command>) -> Option<Route> {
+    fn page(&mut self, ui: &mut Ui, frame: PageFrame, state: &ViewState, out: &mut Vec<Command>) -> PageOut {
         let top = self.nav.top().cloned();
         match (self.nav.tab(), top) {
-            (Tab::Home, None) => home::show(ui, frame, &mut self.shell, state, out),
-            (Tab::Library, None) => {
-                let route = Route::Library(self.library_tab);
-                self.desktop_page(ui, frame, &route, state, false, out)
-            }
-            (Tab::Settings, None) => self.desktop_page(ui, frame, &Route::Settings, state, false, out),
-            (Tab::Search, None) => None,
-            (_, Some(route)) => self.desktop_page(ui, frame, &route, state, true, out),
+            (Tab::Home, None) => PageOut::nav(home::show(ui, frame, &mut self.shell, state, out)),
+            (Tab::Library, None) => self.library.show(ui, frame, state, out),
+            (Tab::Settings, None) => PageOut::nav(self.desktop_page(ui, frame, &Route::Settings, state, false, out)),
+            (Tab::Search, None) => self.search.show(ui, frame, state, out),
+            (_, Some(Route::Release(id))) => detail::album(ui, frame, id, state, out),
+            (_, Some(Route::Playlist(id))) => detail::playlist(ui, frame, id, state, out),
+            (_, Some(Route::Artist(id))) => detail::artist(ui, frame, id, state, out),
+            (_, Some(route)) => PageOut::nav(self.desktop_page(ui, frame, &route, state, true, out)),
         }
     }
 
@@ -305,7 +318,7 @@ impl MobileUi {
             out.push(c);
         }
         match self.nav.open(route, now) {
-            Opened::Library(chip) => self.library_tab = chip,
+            Opened::Library(chip) => self.library.set_tab(chip),
             Opened::Tab(_) | Opened::Pushed | Opened::Same => {}
         }
     }
@@ -314,6 +327,9 @@ impl MobileUi {
     fn select(&mut self, tab: Tab, now: f64, out: &mut Vec<Command>) {
         if self.nav.select(tab, now) {
             self.reset_scroll = true;
+            if tab == Tab::Search {
+                self.search.focus = true;
+            }
         }
         match tab {
             Tab::Home => out.push(Command::LoadHome),

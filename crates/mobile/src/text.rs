@@ -55,6 +55,11 @@ pub fn plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a str 
     }
 }
 
+/// «3 альбома»: `n` and its word.
+pub fn plural_count(n: u64, one: &str, few: &str, many: &str) -> String {
+    format!("{n} {}", plural(n, one, few, many))
+}
+
 /// «14 треков».
 pub fn tracks(n: u64) -> String {
     format!("{n} {}", plural(n, "трек", "трека", "треков"))

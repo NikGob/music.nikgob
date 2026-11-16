@@ -189,6 +189,28 @@ pub fn track(ui: &mut Ui, rect: Rect, id: Id, t: &TrackRow, look: Look, state: &
     out
 }
 
+/// A plain row of a service's song (no menu of its own): its cover, its
+/// title over `sub`. True when tapped.
+pub fn simple(ui: &mut Ui, rect: Rect, id: Id, uri: Option<&str>, title: &str, sub: &str) -> bool {
+    let ctx = ui.ctx().clone();
+    let theme = Theme::get(&ctx);
+    let s = theme.scheme;
+    let g = gesture::row(ui, rect, id, false, false);
+    let pressed = g.response.is_pointer_button_down_on();
+    let layer = nikgob_md3e::components::anim::fraction(&ctx, id.with("layer"), if pressed { 0.10 } else { 0.0 }, theme.motion.fast_effects);
+    paint::state_layer(ui.painter(), rect.shrink2(vec2(8.0, 2.0)), Radii::all(16.0), s.on_surface, layer);
+    let c = Rect::from_min_size(pos2(rect.left() + SIDE, rect.center().y - COVER * 0.5), vec2(COVER, COVER));
+    phone::paint_cover(ui, c, uri, 8.0);
+    let x = c.right() + SIDE;
+    let w = (rect.right() - SIDE - x).max(16.0);
+    let ts = TypeRole::BodyLarge.style();
+    let ss = TypeRole::BodyMedium.style();
+    let top = rect.center().y - (ts.line_height + ss.line_height) * 0.5;
+    text::paint_line(ui, pos2(x, top), title, ts, s.on_surface, w);
+    text::paint_line(ui, pos2(x, top + ts.line_height), sub, ss, s.on_surface_variant, w);
+    g.tap
+}
+
 /// A list of `n` rows `row_h` tall in `ui`'s width, only those in sight
 /// drawn, each in a child of its own; returns the list's rect.
 pub fn list(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, n: usize, row_h: f32, mut draw: impl FnMut(&mut Ui, usize, Rect)) -> Rect {
