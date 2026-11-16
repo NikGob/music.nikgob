@@ -158,7 +158,7 @@ pub struct MeshNodeView {
 /// The library's sync with a device: its switch (`MeshSetSync`), a pull
 /// running and how far it is (in the device's change numbers: a first sync
 /// of a library is a long one), the last pull that brought something, why
-/// the last one failed.
+/// the last one failed, what of it is kept to try again.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MeshSyncView {
     /// Turned off for this device.
@@ -168,7 +168,15 @@ pub struct MeshSyncView {
     pub total: u64,
     /// When the last pull that brought rows ended (unix ms).
     pub last_ms: Option<i64>,
+    /// Why the last pull failed, or that rows of it did not go through
+    /// ([`Self::conflicts`]): a blocker to show.
     pub error: Option<String>,
+    /// Rows of the device that could not be written here, kept and tried
+    /// again.
+    pub conflicts: u32,
+    /// Its deletes held back while the row is still used here (a file of
+    /// this device keeps a song): not an error.
+    pub held: u32,
 }
 
 impl MeshSyncView {
