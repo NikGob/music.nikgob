@@ -4167,6 +4167,7 @@ fn open_file(path: &std::path::Path) -> std::io::Result<()> {
     let child = cmd.spawn()?;
     #[cfg(unix)]
     let _ = std::thread::Builder::new().name("opener".into()).spawn(move || {
+        let mut child = child;
         let _ = child.wait();
     });
     #[cfg(not(unix))]
