@@ -45,18 +45,24 @@ impl Default for QueueSheet {
 }
 
 /// The stop a sheet let go at `at` (part of the screen) moving at `v`
-/// (parts per second, up positive) settles on: a fling goes one stop its
-/// way (down from the lower one closes), else the nearest.
+/// (parts per second, up positive) settles on: a fling goes to the next
+/// stop its way (down from the lower one closes), past a stop it is
+/// still at ([`AT_STOP`]: one pulled a little off its stop and flung goes
+/// on, not back to where it was); else the nearest.
 pub fn stop_for(at: f32, v: f32) -> f32 {
     const FLING: f32 = 0.9;
+    let stops = [0.0, LOW, HIGH];
     if v > FLING {
-        if at < LOW { LOW } else { HIGH }
+        stops.into_iter().find(|s| *s > at + AT_STOP).unwrap_or(HIGH)
     } else if v < -FLING {
-        if at > LOW { LOW } else { 0.0 }
+        stops.into_iter().rev().find(|s| *s < at - AT_STOP).unwrap_or(0.0)
     } else {
-        [0.0, LOW, HIGH].into_iter().min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs())).unwrap_or(0.0)
+        stops.into_iter().min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs())).unwrap_or(0.0)
     }
 }
+
+/// A stop this near where the sheet was let go is the one it is at.
+const AT_STOP: f32 = 0.05;
 
 /// Where a row moved by its handle lands: the row under `y` of a list at
 /// `top` of `n` rows.
@@ -301,6 +307,11 @@ mod tests {
         assert_eq!(stop_for(0.6, -2.0), 0.0);
         assert_eq!(stop_for(0.9, -2.0), LOW);
         assert_eq!(stop_for(0.3, 2.0), LOW);
+        // Below the low stop by more than a pull, a fling up stops there.
+        assert_eq!(stop_for(0.45, 2.0), LOW);
+        // Nothing further its way: the last stop.
+        assert_eq!(stop_for(0.95, 2.0), HIGH);
+        assert_eq!(stop_for(0.03, -2.0), 0.0);
     }
 
     #[test]
