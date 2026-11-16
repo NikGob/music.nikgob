@@ -4983,7 +4983,6 @@ name = "nikgob"
 version = "0.0.5"
 dependencies = [
  "blake3",
- "crossbeam-channel",
  "directories",
  "eframe",
  "egui",
@@ -5008,6 +5007,7 @@ dependencies = [
  "nikgob-deezer",
  "nikgob-library",
  "nikgob-md3e",
+ "nikgob-playback",
  "nikgob-recs",
  "nikgob-runtime",
  "nikgob-sc-widget",
@@ -5195,6 +5195,20 @@ dependencies = [
 [[package]]
 name = "nikgob-motion"
 version = "0.0.5"
+
+[[package]]
+name = "nikgob-playback"
+version = "0.0.5"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "nikgob-audio",
+ "nikgob-core",
+ "nikgob-runtime",
+ "nikgob-sc-widget",
+ "nikgob-soloist",
+ "nikgob-view",
+]
 
 [[package]]
 name = "nikgob-recs"
@@ -5424,6 +5438,26 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "nikgobd"
+version = "0.0.5"
+dependencies = [
+ "directories",
+ "env_logger",
+ "log",
+ "nikgob-audio",
+ "nikgob-core",
+ "nikgob-library",
+ "nikgob-playback",
+ "nikgob-runtime",
+ "nikgob-view",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
