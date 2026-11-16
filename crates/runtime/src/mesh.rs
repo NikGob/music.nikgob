@@ -363,6 +363,8 @@ impl Worker {
             // A device driven from here that is gone from the list.
             self.connect_check_target();
         }
+        // A forget or another choice reaches the masters' movers at once.
+        self.replica_follow();
     }
 
     /// Changes `[mesh]` in settings.toml; a failure is a toast.

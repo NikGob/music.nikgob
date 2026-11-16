@@ -13,8 +13,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use nikgob_library::Library;
 use nikgob_view::{Command, Confirm, ConfirmOption};
@@ -51,6 +52,37 @@ pub(crate) struct Watch {
     devices: Vec<String>,
 }
 
+/// What the thread moving masters looks at right before each file goes,
+/// under the lock the worker takes to change it (so a forget or another
+/// choice lands before or after a removal, never between the look and
+/// it): the count of changes, the choice and the devices being forgotten
+/// as they are now.
+#[derive(Debug, Default)]
+pub(crate) struct MoveWatch {
+    era: u64,
+    need: Option<u32>,
+    leaving: Vec<String>,
+}
+
+/// The last look before one master's file goes ([`MoveWatch`]): nothing
+/// changed since the owner said yes, and the trusted devices staying hold
+/// verified copies of it as many as the choice wants now.
+struct Gate {
+    watch: Arc<Mutex<MoveWatch>>,
+    era: u64,
+    lib: Library,
+    hash: String,
+}
+
+impl nikgob_import::trash::MoveGate for Gate {
+    fn through(&self, step: &mut dyn FnMut() -> std::io::Result<()>) -> Option<std::io::Result<()>> {
+        let w = self.watch.lock();
+        let need = w.need.filter(|_| w.era == self.era)?;
+        let holders = self.lib.verified_holders(&self.hash, &w.leaving).ok()?;
+        (holders.len() >= need as usize).then(|| step())
+    }
+}
+
 /// What an accepted card is doing.
 enum Busy {
     /// Its masters' copies are being read again on the devices, with the
@@ -74,11 +106,10 @@ pub(crate) struct ReplicaKeep {
     /// again while the player runs.
     kept: HashSet<String>,
     busy: Option<Busy>,
-    /// What the masters that may go depend on, as last seen, and its
-    /// count of changes (read by the thread that moves them, before each
-    /// file).
+    /// What the masters that may go depend on, as last seen, and what the
+    /// thread moving them looks at before each file.
     watch: Option<Watch>,
-    era: Arc<AtomicU64>,
+    gate: Arc<Mutex<MoveWatch>>,
 }
 
 /// «файл», «файла», «файлов» for `n`.
@@ -188,20 +219,29 @@ impl Worker {
         Watch { need: st.mesh.keep_masters.copies(), devices }
     }
 
-    /// A change of the choice or of the trusted devices: counted (the
-    /// thread moving masters stops before its next file), and a second
-    /// look under way is void.
-    fn replica_follow(&mut self) {
+    /// A change of the choice or of the trusted devices (called at once
+    /// when the mesh's state is published, a forget among them): counted
+    /// under the movers' lock before it returns (the thread moving masters
+    /// stops before its next file), and a second look under way is void.
+    pub(crate) fn replica_follow(&mut self) {
         let now = self.replica_watch_now();
         if self.replica.watch.as_ref() == Some(&now) {
             return;
         }
         let first = self.replica.watch.is_none();
+        {
+            let leaving = self.mesh.leaving();
+            let mut g = self.replica.gate.lock();
+            g.need = now.need;
+            g.leaving = leaving;
+            if !first {
+                g.era += 1;
+            }
+        }
         self.replica.watch = Some(now);
         if first {
             return;
         }
-        self.replica.era.fetch_add(1, Ordering::SeqCst);
         self.replica.due = None;
         if matches!(self.replica.busy, Some(Busy::Rechecking { .. })) {
             self.replica.busy = None;
@@ -323,7 +363,7 @@ impl Worker {
             return;
         };
         self.replica_follow();
-        let era = self.replica.era.load(Ordering::SeqCst);
+        let era = self.replica.gate.lock().era;
         self.replica.card = None;
         self.replica.busy = Some(Busy::Rechecking { card, items, since: Instant::now(), era });
         self.replica_publish();
@@ -347,7 +387,7 @@ impl Worker {
             self.toast("Выбор изменился — оригиналы остались на компьютере", None);
             return;
         };
-        if self.replica.era.load(Ordering::SeqCst) != era {
+        if self.replica.gate.lock().era != era {
             self.replica.busy = None;
             self.toast("Устройства или выбор изменились — оригиналы остались на компьютере", None);
             return;
@@ -375,19 +415,18 @@ impl Worker {
         };
         let (trash, masters) = (svc.config().trash_dir.clone(), svc.config().masters_dir());
         let (lib, later) = (self.lib.clone(), self.later_tx.clone());
-        let (watch, leaving) = (self.replica.era.clone(), self.mesh.leaving());
+        let watch = self.replica.gate.clone();
+        log::debug!("replica: {need} copies wanted when the masters go");
         self.replica.busy = Some(Busy::Moving);
         let spawned = std::thread::Builder::new().name("nikgob-masters-trash".into()).spawn(move || {
             let (mut ids, mut left) = (Vec::new(), stayed);
             for h in &ok {
                 let files: Vec<PathBuf> = items.iter().filter(|o| &o.hash == h).map(|o| o.path.clone()).collect();
-                // Right before each file: nothing changed meanwhile, and the
-                // trusted devices staying still hold enough verified copies.
-                let still = || {
-                    watch.load(Ordering::SeqCst) == era
-                        && lib.verified_holders(h, &leaving).is_ok_and(|holders| holders.len() >= need as usize)
-                };
-                let moved = nikgob_import::trash::trash_master_files(&lib, &trash, &masters, h, &files, &still);
+                // Right before each file, under the lock a forget or another
+                // choice takes: nothing changed since, and the trusted devices
+                // staying still hold enough verified copies.
+                let gate = Gate { watch: watch.clone(), era, lib: lib.clone(), hash: h.clone() };
+                let moved = nikgob_import::trash::trash_master_files(&lib, &trash, &masters, h, &files, &gate);
                 if let Some(e) = &moved.error {
                     log::warn!("replica: the master {h} stays (in part): {e}");
                 }
