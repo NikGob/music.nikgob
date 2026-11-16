@@ -42,6 +42,10 @@ http = "1"
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
 gethostname = "1"
 
+# A part of a pulled file is opened never through a link (`O_NOFOLLOW`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }

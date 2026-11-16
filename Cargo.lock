@@ -6022,6 +6022,7 @@ dependencies = [
  "hyper-util",
  "if-addrs",
  "iroh",
+ "libc",
  "log",
  "mdns-sd",
  "nikgob-api",

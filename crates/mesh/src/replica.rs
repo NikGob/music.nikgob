@@ -10,20 +10,26 @@
 //! it, through the tunnel: a song's best file by its hash from
 //! `/v1/media/tracks/{id}/audio?hash=` (the original as it is:
 //! [`nikgob_view::MeshFormat`]), a master from `/v1/replica/masters/{hash}`.
-//! What it holds is what is on its disk now, not what rows say. At most
-//! [`AT_ONCE`] files at a time, paced to [`RATE`], resumed from a part left
-//! by an earlier try (Range), checked against its BLAKE3 before it is kept,
-//! paused by the owner (here, or on the device that asks it in its
-//! presence; the pauses asked here outlive a restart), never past
-//! [`MIN_FREE`] left on the disks it writes to (the running pulls' bytes
-//! reserved, looked at again while it writes; a disk whose free space is
-//! not known gets nothing). A new profile or new pins drop the old plan at
-//! once. The parts wait in `<library>/.musiclib/replica`; a file lands as
-//! the library lays songs out (`Artist/YYYY - Album/NN - Title.ext`, a
-//! master in the masters folder), only in folders inside them, never over
-//! another file, checked again after a copy across disks, and becomes this
-//! device's own (a source, a master row, a `replica` row). The sending
-//! device writes nothing.
+//! What it holds is what is on its disk now, not what rows say: a file
+//! inside its folders (links resolved), the very file (what it hashed to
+//! while its size and change time are the same, else read again, a few a
+//! plan; one not read yet waits). At most [`AT_ONCE`] files at a time,
+//! paced to [`RATE`], resumed from a part left by an earlier try (Range),
+//! checked against its BLAKE3 before it is kept, paused by the owner
+//! (here, or on the device that asks it in its presence; the pauses asked
+//! here outlive a restart), never past [`MIN_FREE`] left on the disks it
+//! writes to (the running pulls' bytes reserved, [`UNKNOWN_SIZE`] for a
+//! file of a size not known; each write weighed against the free space
+//! seen, looked at again every [`ROOM_STEP`]; a copy across disks weighed
+//! on the disk it goes to; a disk whose free space is not known gets
+//! nothing). A new profile or new pins drop the old plan at once. The
+//! parts wait in `<library>/.musiclib/replica` under names no one can
+//! guess, found by listing the folder and opened never through a link; a
+//! file lands as the library lays songs out (`Artist/YYYY - Album/NN -
+//! Title.ext`, a master in the masters folder), only in folders inside
+//! them, never over another file, checked again after a copy across disks,
+//! and becomes this device's own (a source, a master row, a `replica` row).
+//! The sending device writes nothing.
 //!
 //! **Copies of this computer's masters** (a device with a window): every
 //! [`AUDIT_EVERY`] each owner device online is asked which of this
@@ -32,6 +38,8 @@
 //! devices read their copies again ([`recheck`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::fs::{Metadata, OpenOptions};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -42,7 +50,7 @@ use futures_util::StreamExt as _;
 use nikgob_core::model::{Codec, Source, SourceKind};
 use nikgob_library::Library;
 use nikgob_core::model::TrackId;
-use nikgob_library::replica::{CheckAnswer, CheckAsk, Held, HeldFile, Keep, MasterItem, MastersPage, Offer, Want, best_offers, plan_tracks};
+use nikgob_library::replica::{CheckAnswer, CheckAsk, Held, HeldFile, Keep, MasterItem, MastersPage, Offer, Want, best_offers, held_satisfies, plan_tracks};
 use nikgob_view::{Command, MeshProfile, MeshScope, MeshTransfer};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -105,14 +113,33 @@ const SAVED: &str = "replica.json";
 /// Where the pauses asked here are kept, in the mesh's folder.
 pub(crate) const PAUSED: &str = "replica-paused.json";
 /// While a file is written, the disk's free space is looked at again each
-/// time this much more came.
-const ROOM_STEP: u64 = 16 << 20;
+/// time this much more came (each write is weighed against what was seen
+/// then, less what came since).
+const ROOM_STEP: u64 = 4 << 20;
+/// What a file of a size not known keeps free for itself on the disks
+/// while it is pulled.
+const UNKNOWN_SIZE: u64 = 200 << 20;
 /// A disk without room (or whose room is not known) is looked at again
 /// after this.
 const ROOM_WAIT: Duration = Duration::from_secs(60);
 /// Files of «Избранное» whose size is not known are asked for it, at most
 /// this many a plan.
 const SIZE_ASKS: usize = 200;
+/// Sizes learned (or asked for in vain) kept at most.
+const SIZES_MAX: usize = 50_000;
+/// Files here whose hash is not known for their size and change time are
+/// read again, at most this many and this many bytes a plan (the first one
+/// whatever its size); the others wait for the next plan.
+const REHASH_FILES: usize = 200;
+const REHASH_BYTES: u64 = 4 << 30;
+/// The longest note of a part read.
+const NOTE_MAX: u64 = 512;
+/// Windows: open a link or another reparse point itself, not what it
+/// points to; the attribute that tells one.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 
 /// What the service keeps of the copies (in [`Shared`]).
 #[derive(Default)]
@@ -209,8 +236,11 @@ pub(crate) struct Ctl {
     pub(crate) era: AtomicU64,
     /// Bytes pulled in this round (a resumed part counts whole).
     pub(crate) received: AtomicU64,
-    /// Bytes the running pulls may still write: kept free on the disks.
+    /// Bytes the running pulls may still write: kept free on the disks
+    /// ([`Reserve`]).
     pub(crate) reserved: AtomicU64,
+    /// What the disks keep free besides ([`MIN_FREE`]).
+    pub(crate) keep_free: u64,
     pub(crate) pace: Pace,
 }
 
@@ -221,6 +251,7 @@ impl Ctl {
             era: AtomicU64::new(0),
             received: AtomicU64::new(0),
             reserved: AtomicU64::new(0),
+            keep_free: MIN_FREE,
             pace: Pace::new(rate),
         }
     }
@@ -228,6 +259,55 @@ impl Ctl {
     /// Whether a pull of plan `era` stops now.
     fn halted(&self, era: u64) -> bool {
         self.stop.load(Ordering::Relaxed) || self.era.load(Ordering::Relaxed) != era
+    }
+}
+
+/// A running pull's share of the room kept on the disks
+/// ([`Ctl::reserved`]): what it may still write; what it did not write
+/// goes back when it ends.
+pub(crate) struct Reserve {
+    ctl: Arc<Ctl>,
+    left: u64,
+}
+
+impl Reserve {
+    pub(crate) fn new(ctl: Arc<Ctl>, bytes: u64) -> Self {
+        ctl.reserved.fetch_add(bytes, Ordering::Relaxed);
+        Self { ctl, left: bytes }
+    }
+
+    /// `n` bytes written: that much less is kept for them.
+    fn wrote(&mut self, n: u64) {
+        let k = n.min(self.left);
+        self.left -= k;
+        self.ctl.reserved.fetch_sub(k, Ordering::Relaxed);
+    }
+
+    /// What the other running pulls keep.
+    fn others(&self) -> u64 {
+        self.ctl.reserved.load(Ordering::Relaxed).saturating_sub(self.left)
+    }
+}
+
+impl Drop for Reserve {
+    fn drop(&mut self) {
+        self.ctl.reserved.fetch_sub(self.left, Ordering::Relaxed);
+    }
+}
+
+/// What a copy across disks must leave on the disk it writes to: the
+/// reserve and what the other pulls keep.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Room {
+    pub(crate) keep: u64,
+    pub(crate) others: u64,
+}
+
+impl Room {
+    /// Whether the disk of `dir` takes `size` more bytes and still keeps
+    /// it; a disk whose free space is not known does not.
+    fn fits(&self, dir: &Path, size: u64) -> bool {
+        existing(dir).and_then(nikgob_runtime::free_bytes).is_some_and(|free| free >= size.saturating_add(self.others).saturating_add(self.keep))
     }
 }
 
@@ -311,6 +391,10 @@ struct Puller {
     failed: HashMap<String, Waiting>,
     /// The devices' lists of masters, and when each came.
     masters: HashMap<String, (Instant, Vec<MasterItem>)>,
+    /// The sizes of files no device told, learned by asking (None: asked
+    /// in vain; asked again once all the others were), by hash, for the
+    /// session.
+    sizes: HashMap<String, Option<u64>>,
     /// The holder's last word (also kept on disk).
     saved: Option<Assigned>,
     next_start: Option<Instant>,
@@ -477,18 +561,124 @@ fn absolute(locator: &str, library: &Path) -> PathBuf {
     if p.is_absolute() { p.to_owned() } else { library.join(p) }
 }
 
-/// The songs' files this device holds now: its live local sources whose
-/// file is on the disk, inside the library or the masters folder.
-pub(crate) fn held_on_disk(lib: &Library, dirs: &Dirs) -> nikgob_library::Result<HashMap<TrackId, Vec<HeldFile>>> {
-    let mut out: HashMap<TrackId, Vec<HeldFile>> = HashMap::new();
-    for f in lib.replica_held_files()? {
-        let path = absolute(&f.locator, &dirs.library);
-        let inside = path.starts_with(&dirs.library) || path.starts_with(&dirs.masters);
-        if inside && std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
-            out.entry(f.track_id).or_default().push(f);
+/// The library folder's and the masters folder's real paths (those there).
+fn real_roots(dirs: &Dirs) -> Vec<PathBuf> {
+    [&dirs.library, &dirs.masters].into_iter().filter_map(|d| std::fs::canonicalize(d).ok()).collect()
+}
+
+/// A file here as it is now: its real path (links resolved) inside one of
+/// `roots`, a plain file; nothing else.
+fn real_file(path: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Metadata)> {
+    let real = std::fs::canonicalize(path).ok()?;
+    if !roots.iter().any(|r| real.starts_with(r)) {
+        return None;
+    }
+    let m = std::fs::metadata(&real).ok().filter(Metadata::is_file)?;
+    Some((real, m))
+}
+
+/// When a file was changed, in unix ms.
+fn mtime_ms(m: &Metadata) -> Option<i64> {
+    m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as i64)
+}
+
+/// The files read again for their hash in one plan, at most.
+pub(crate) struct Rehash {
+    files: usize,
+    bytes: u64,
+}
+
+impl Rehash {
+    pub(crate) fn new() -> Self {
+        Self { files: REHASH_FILES, bytes: REHASH_BYTES }
+    }
+
+    /// Whether a file of `size` bytes may still be read in this plan
+    /// (counted when it may).
+    fn take(&mut self, size: u64) -> bool {
+        let first = self.files == REHASH_FILES;
+        if self.files == 0 || (size > self.bytes && !first) {
+            return false;
+        }
+        self.files -= 1;
+        self.bytes = self.bytes.saturating_sub(size);
+        true
+    }
+}
+
+/// What a file here hashes to.
+enum Hashed {
+    Known(String),
+    /// Not read in this plan: it waits for the next.
+    Later,
+    Unreadable,
+}
+
+/// What the file at `real` (`m` its metadata) hashes to: what it hashed to
+/// while its size and change time are the same, else read again when
+/// `rehash` lets it (and noted for the next time).
+fn hash_here(lib: &Library, real: &Path, m: &Metadata, rehash: &mut Rehash) -> Hashed {
+    let key = real.to_string_lossy();
+    let mtime = mtime_ms(m);
+    if let Some(t) = mtime
+        && let Ok(Some((size, at, hash))) = lib.file_stamp(&key)
+        && size == m.len()
+        && at == t
+    {
+        return Hashed::Known(hash);
+    }
+    if !rehash.take(m.len()) {
+        return Hashed::Later;
+    }
+    let Ok(hash) = blake3_plain(real) else { return Hashed::Unreadable };
+    if let Some(t) = mtime
+        && let Err(e) = lib.put_file_stamp(&key, m.len(), t, &hash)
+    {
+        log::debug!("replica: the hash of {} not noted: {e}", real.display());
+    }
+    Hashed::Known(hash)
+}
+
+/// Notes what the file at `path` hashes to (by its real path, with its
+/// size and change time now): a later plan takes it without reading it.
+fn stamp(lib: &Library, path: &Path, hash: &str) {
+    let Ok(real) = std::fs::canonicalize(path) else { return };
+    let Ok(m) = std::fs::metadata(&real) else { return };
+    let Some(t) = mtime_ms(&m) else { return };
+    if let Err(e) = lib.put_file_stamp(&real.to_string_lossy(), m.len(), t, hash) {
+        log::debug!("replica: the hash of {} not noted: {e}", real.display());
+    }
+}
+
+/// The songs' files this device holds now, each checked: a live local
+/// source whose file is inside the library or the masters folder (links
+/// resolved), a plain file, the very file its source names (its hash, as
+/// [`hash_here`] knows it), its size as it is on the disk. And the tracks
+/// with a file here not read yet (`rehash` ran out), with its bytes: they
+/// wait for the next plan.
+#[allow(clippy::type_complexity)]
+pub(crate) fn held_on_disk(lib: &Library, dirs: &Dirs, rehash: &mut Rehash) -> nikgob_library::Result<(HashMap<TrackId, Vec<HeldFile>>, HashMap<TrackId, u64>)> {
+    let roots = real_roots(dirs);
+    let mut held: HashMap<TrackId, Vec<HeldFile>> = HashMap::new();
+    let mut pending: HashMap<TrackId, u64> = HashMap::new();
+    for mut f in lib.replica_held_files()? {
+        let Some((real, m)) = real_file(&absolute(&f.locator, &dirs.library), &roots) else { continue };
+        f.size = m.len();
+        match hash_here(lib, &real, &m, rehash) {
+            // A file whose source names another hash is not that file
+            // any more.
+            Hashed::Known(h) if f.file_hash.as_deref().is_none_or(|want| want == h) => {
+                f.file_hash = Some(h);
+                held.entry(f.track_id).or_default().push(f);
+            }
+            Hashed::Later => {
+                let n = pending.entry(f.track_id).or_default();
+                *n = n.saturating_add(f.size);
+            }
+            Hashed::Known(_) | Hashed::Unreadable => {}
         }
     }
-    Ok(out)
+    Ok((held, pending))
 }
 
 /// Whether `s` is a BLAKE3 as the library writes it (64 lowercase hex).
@@ -496,37 +686,63 @@ fn is_hash(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// The masters this device holds now: those its master rows keep by name
-/// with the file there, and the files kept flat (`{hash}.<ext>` right in
-/// the masters folder, a disc image's too).
-pub(crate) fn masters_on_disk(lib: &Library, masters: &Path) -> nikgob_library::Result<HashSet<String>> {
-    let mut out: HashSet<String> = lib
-        .master_paths()?
-        .into_iter()
-        .filter_map(|(h, p)| p.filter(|p| Path::new(p).is_file()).map(|_| h))
-        .collect();
-    if let Ok(rd) = std::fs::read_dir(masters) {
+/// One file of master `hash` at `path`: held when it is that very file
+/// inside `roots`, waiting when it was not read yet.
+fn check_master(lib: &Library, path: &Path, roots: &[PathBuf], hash: &str, rehash: &mut Rehash, held: &mut HashSet<String>, pending: &mut HashSet<String>) {
+    if held.contains(hash) {
+        return;
+    }
+    let Some((real, m)) = real_file(path, roots) else { return };
+    match hash_here(lib, &real, &m, rehash) {
+        Hashed::Known(h) if h == hash => {
+            held.insert(hash.to_owned());
+        }
+        Hashed::Later => {
+            pending.insert(hash.to_owned());
+        }
+        Hashed::Known(_) | Hashed::Unreadable => {}
+    }
+}
+
+/// The masters this device holds now, each checked to be its file inside
+/// the masters folder (links resolved): those its master rows keep by
+/// name, and the plain files kept flat (`{hash}.<ext>` right in the
+/// masters folder, a disc image's too). And those with a file here not
+/// read yet: they wait for the next plan.
+pub(crate) fn masters_on_disk(lib: &Library, masters: &Path, rehash: &mut Rehash) -> nikgob_library::Result<(HashSet<String>, HashSet<String>)> {
+    let (mut held, mut pending) = (HashSet::new(), HashSet::new());
+    let Ok(root) = std::fs::canonicalize(masters) else { return Ok((held, pending)) };
+    let roots = [root.clone()];
+    for (h, p) in lib.master_paths()? {
+        if let Some(p) = p {
+            check_master(lib, Path::new(&p), &roots, &h, rehash, &mut held, &mut pending);
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(&root) {
         for p in rd.flatten().map(|e| e.path()) {
             let side = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json") || e.eq_ignore_ascii_case("cue"));
-            if side || !p.is_file() {
+            if side || !std::fs::symlink_metadata(&p).is_ok_and(|m| plain_meta(&m)) {
                 continue;
             }
             if let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().into_owned())
                 && is_hash(&stem)
             {
-                out.insert(stem);
+                check_master(lib, &p, &roots, &stem, rehash, &mut held, &mut pending);
             }
         }
     }
-    Ok(out)
+    pending.retain(|h| !held.contains(h));
+    Ok((held, pending))
 }
 
 /// What a plan starts from: the offers of the devices online, «Избранное»'s
-/// order, and what this device holds on its disk.
+/// order, what this device holds on its disk and the tracks whose file
+/// here waits to be read.
 struct Ground {
     offers: Vec<Offer>,
     keep: Keep,
     held: HashMap<TrackId, Vec<HeldFile>>,
+    pending: HashMap<TrackId, u64>,
 }
 
 fn ground(lib: &Library, a: &Assigned, peers: &[String], dirs: &Dirs) -> nikgob_library::Result<Option<Ground>> {
@@ -535,16 +751,37 @@ fn ground(lib: &Library, a: &Assigned, peers: &[String], dirs: &Dirs) -> nikgob_
         MeshProfile::Favorites { cap_bytes } => Keep::Ordered { order: lib.replica_order(a.liked, &a.playlists)?, cap: cap_bytes },
         MeshProfile::SoundOnly => return Ok(None),
     };
-    Ok(Some(Ground { offers: lib.replica_offers(peers)?, keep, held: held_on_disk(lib, dirs)? }))
+    let (held, pending) = held_on_disk(lib, dirs, &mut Rehash::new())?;
+    Ok(Some(Ground { offers: lib.replica_offers(peers)?, keep, held, pending }))
 }
 
-/// The best files of «Избранное»'s tracks whose size no device told, in
-/// its order, at most [`SIZE_ASKS`].
-fn sizes_to_ask(g: &Ground) -> Vec<Offer> {
+/// The best files of «Избранное»'s tracks whose size no device told and
+/// that were not asked about yet (`known`), in its order, at most
+/// [`SIZE_ASKS`]; a track held (or whose file here waits to be read) is
+/// not asked about.
+fn sizes_to_ask(g: &Ground, known: &HashMap<String, Option<u64>>) -> Vec<Offer> {
     let Keep::Ordered { order, .. } = &g.keep else { return Vec::new() };
     let best = best_offers(&g.offers);
+    let none: Vec<HeldFile> = Vec::new();
     let mut seen = HashSet::new();
-    order.iter().filter(|t| seen.insert(**t)).filter_map(|t| best.get(t)).filter(|o| o.size == 0).take(SIZE_ASKS).cloned().collect()
+    order
+        .iter()
+        .filter(|t| seen.insert(**t) && !g.pending.contains_key(t))
+        .filter_map(|t| best.get(t))
+        .filter(|o| o.size == 0 && !known.contains_key(&o.file_hash))
+        .filter(|o| !held_satisfies(o, g.held.get(&o.track_id).unwrap_or(&none)))
+        .take(SIZE_ASKS)
+        .cloned()
+        .collect()
+}
+
+/// The sizes learned put into the offers that told none.
+fn learn(offers: &mut [Offer], sizes: &HashMap<String, Option<u64>>) {
+    for o in offers.iter_mut().filter(|o| o.size == 0) {
+        if let Some(Some(n)) = sizes.get(&o.file_hash) {
+            o.size = *n;
+        }
+    }
 }
 
 /// The size of the file `hash` of track `track` on device `peer`, from the
@@ -597,21 +834,25 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
         None => Vec::new(),
         Some(mut g) => {
             // «Избранное» charges each file with its real size: one no
-            // device told is asked for it first (one still not known is
-            // never taken as free).
-            let mut sizes: HashMap<String, u64> = HashMap::new();
-            for o in sizes_to_ask(&g) {
-                if let Some(n) = size_of(sh, &o.node_id, o.track_id, &o.file_hash).await {
-                    sizes.insert(o.file_hash.clone(), n);
+            // device told is asked for it first, the sizes learned kept
+            // for the next plans (so the asks go on to the next files; one
+            // asked in vain is asked again once all the others were); one
+            // still not known is never taken as free.
+            learn(&mut g.offers, &st.sizes);
+            let ask = sizes_to_ask(&g, &st.sizes);
+            if ask.is_empty() {
+                st.sizes.retain(|_, n| n.is_some());
+            }
+            for o in ask {
+                let n = size_of(sh, &o.node_id, o.track_id, &o.file_hash).await;
+                if st.sizes.len() >= SIZES_MAX {
+                    st.sizes.clear();
                 }
+                st.sizes.insert(o.file_hash.clone(), n);
                 tokio::time::sleep(PACE).await;
             }
-            for o in g.offers.iter_mut().filter(|o| o.size == 0) {
-                if let Some(n) = sizes.get(&o.file_hash) {
-                    o.size = *n;
-                }
-            }
-            match tokio::task::spawn_blocking(move || plan_tracks(&g.keep, g.offers, &g.held)).await {
+            learn(&mut g.offers, &st.sizes);
+            match tokio::task::spawn_blocking(move || plan_tracks(&g.keep, g.offers, &g.held, &g.pending)).await {
                 Ok(w) => w,
                 Err(e) => {
                     log::warn!("replica: the songs to keep not worked out: {e}");
@@ -636,10 +877,11 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
             }
         }
         st.masters.retain(|p, _| peers.contains(p));
-        let held = {
+        // Held, or a file here not read yet (it waits): not pulled.
+        let skip = {
             let (l, m) = (lib.clone(), dirs.masters.clone());
-            match blocking(move || masters_on_disk(&l, &m)).await {
-                Ok(h) => h,
+            match blocking(move || masters_on_disk(&l, &m, &mut Rehash::new())).await {
+                Ok((held, pending)) => held.into_iter().chain(pending).collect::<HashSet<String>>(),
                 Err(e) => {
                     log::warn!("replica: the masters here not read: {e}");
                     st.planned_at = Some(Instant::now());
@@ -647,7 +889,7 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peer
                 }
             }
         };
-        jobs.extend(plan_masters(&st.masters, &held).into_iter().map(|(item, from)| Job::Master { item, from }));
+        jobs.extend(plan_masters(&st.masters, &skip).into_iter().map(|(item, from)| Job::Master { item, from }));
     }
     jobs.retain(|j| !st.waiting(&j.key()));
     let all: u64 = jobs.iter().map(Job::size).sum();
@@ -793,18 +1035,21 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
             Job::Track(_) => dirs.library.as_path(),
             Job::Master { .. } => dirs.masters.as_path(),
         };
-        let need = job.size();
+        let need = match job.size() {
+            0 => UNKNOWN_SIZE,
+            n => n,
+        };
         if !has_room(&[dirs.library.as_path(), dest], need, ctl.reserved.load(Ordering::Relaxed)) {
             log::info!("replica: no room kept on the disk (or its free space not known); the pulls wait");
             st.queue.push_front(job);
             st.room_wait = Some(Instant::now() + ROOM_WAIT);
             break;
         }
-        ctl.reserved.fetch_add(need, Ordering::Relaxed);
+        let mut room = Reserve::new(ctl.clone(), need);
         let (sh, lib, me, dirs, ctl) = (sh.clone(), lib.clone(), me.to_owned(), dirs.clone(), ctl.clone());
         tasks.spawn(async move {
-            let out = pull(&sh, &lib, &me, &dirs, &job, &from, era, &ctl).await;
-            ctl.reserved.fetch_sub(need, Ordering::Relaxed);
+            let out = pull(&sh, &lib, &me, &dirs, &job, &from, era, &ctl, &mut room).await;
+            drop(room);
             (job, era, out)
         });
         st.next_start = Some(Instant::now() + GAP);
@@ -850,16 +1095,159 @@ fn parts_dir(library: &Path) -> std::io::Result<PathBuf> {
     nikgob_import::fsutil::create_dir_inside(&library.join(".musiclib").join("replica"), library)
 }
 
-/// The BLAKE3 (hex) of the file at `path`.
-fn blake3_of(path: &Path) -> std::io::Result<String> {
+/// Opening never follows a link at the end of the path (Unix
+/// `O_NOFOLLOW`, and no waiting on a pipe).
+#[cfg(unix)]
+fn no_follow(opts: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+}
+
+/// Opening takes a link or another reparse point itself, not what it
+/// points to (then refused: [`reparse`]).
+#[cfg(windows)]
+fn no_follow(opts: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn no_follow(_: &mut OpenOptions) {}
+
+/// Whether `m` is a reparse point's (a link, a mount point…).
+#[cfg(windows)]
+fn reparse(m: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn reparse(_: &Metadata) -> bool {
+    false
+}
+
+/// Whether `m` (not followed) is a plain file's: no link, no reparse point.
+fn plain_meta(m: &Metadata) -> bool {
+    m.file_type().is_file() && !reparse(m)
+}
+
+/// Opens `path` with `opts`, never through a link at its end, and only
+/// when it is a plain file.
+fn plain_open(path: &Path, opts: &mut OpenOptions) -> std::io::Result<std::fs::File> {
+    no_follow(opts);
+    let f = opts.open(path)?;
+    if !plain_meta(&f.metadata()?) {
+        return Err(std::io::Error::other("не обычный файл"));
+    }
+    Ok(f)
+}
+
+/// Opens the part at `path` to write from `offset` on (what is after it
+/// dropped), never through a link: one not there yet is made (only when
+/// nothing has its name, `offset` 0); one there must be a plain file.
+pub(crate) fn open_part(path: &Path, offset: u64) -> std::io::Result<std::fs::File> {
+    let mut f = match plain_open(path, OpenOptions::new().write(true)) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && offset == 0 => plain_open(path, OpenOptions::new().write(true).create_new(true))?,
+        Err(e) => return Err(e),
+    };
+    f.set_len(offset)?;
+    f.seek(SeekFrom::Start(offset))?;
+    Ok(f)
+}
+
+/// The BLAKE3 (hex) of the plain file at `path` (never through a link).
+fn blake3_plain(path: &Path) -> std::io::Result<String> {
     let mut h = blake3::Hasher::new();
-    h.update_reader(std::fs::File::open(path)?)?;
+    h.update_reader(plain_open(path, OpenOptions::new().read(true))?)?;
     Ok(h.finalize().to_hex().to_string())
+}
+
+/// A part in the parts' folder: the file being pulled
+/// (`{key}.{token}.part`) and its note (`.meta`: the file's hash and its
+/// extension). The token is random: no one makes a file of that name
+/// ahead of it.
+#[derive(Clone, Debug)]
+pub(crate) struct Part {
+    pub(crate) file: PathBuf,
+    pub(crate) note: PathBuf,
+}
+
+impl Part {
+    /// A new part of `key` in `dir`.
+    pub(crate) fn new(dir: &Path, key: &str) -> Result<Self, Failed> {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).map_err(|e| Failed::Bad(format!("no randomness: {e}")))?;
+        Ok(Self::named(dir, key, &data_encoding::HEXLOWER.encode(&b)))
+    }
+
+    fn named(dir: &Path, key: &str, token: &str) -> Self {
+        Self { file: dir.join(format!("{key}.{token}.part")), note: dir.join(format!("{key}.{token}.meta")) }
+    }
+
+    /// Its file and its note go (a link of that name goes itself).
+    fn remove(&self) {
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_file(&self.note);
+    }
+}
+
+/// Writes a part's note, a new file put over nothing: the file's hash and
+/// its extension.
+pub(crate) fn write_note(note: &Path, hash: &str, ext: &str) -> std::io::Result<()> {
+    let mut f = plain_open(note, OpenOptions::new().write(true).create_new(true))?;
+    f.write_all(format!("{hash}\n{ext}").as_bytes())?;
+    f.sync_all()
+}
+
+/// A part's note: the file's hash and its extension (none: no note, or
+/// not one).
+fn read_note(note: &Path) -> Option<(String, String)> {
+    let f = plain_open(note, OpenOptions::new().read(true)).ok()?;
+    let mut s = String::new();
+    f.take(NOTE_MAX).read_to_string(&mut s).ok()?;
+    let (h, e) = s.split_once('\n')?;
+    Some((clean_hash(h)?, clean_ext(e)))
+}
+
+/// The part of `key` an earlier try left in `dir`, found by listing it
+/// (only a plain file counts; a link of such a name is never opened): the
+/// one whose note says it is of the file `hash`, with its extension and
+/// its length. The other parts of `key` go, and the notes whose part
+/// never came.
+pub(crate) fn find_part(dir: &Path, key: &str, hash: &str) -> Option<(Part, String, u64)> {
+    let prefix = format!("{key}.");
+    let mut found: Option<(Part, String, u64)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(&prefix) else { continue };
+        let (token, is_part) = match (rest.strip_suffix(".part"), rest.strip_suffix(".meta")) {
+            (Some(t), _) => (t, true),
+            (None, Some(t)) => (t, false),
+            (None, None) => continue,
+        };
+        if token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let part = Part::named(dir, key, token);
+        if !is_part {
+            if std::fs::symlink_metadata(&part.file).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+                let _ = std::fs::remove_file(&part.note);
+            }
+            continue;
+        }
+        let Some(len) = std::fs::symlink_metadata(&part.file).ok().filter(plain_meta).map(|m| m.len()) else { continue };
+        match read_note(&part.note) {
+            Some((h, ext)) if found.is_none() && h == hash => found = Some((part, ext, len)),
+            _ => part.remove(),
+        }
+    }
+    found
 }
 
 /// The part is the file `hash`; one that is not is deleted with its note.
 pub(crate) fn verify_part(part: &Path, meta: &Path, hash: &str) -> Result<(), String> {
-    let sum = blake3_of(part).map_err(|e| format!("{}: {e}", part.display()))?;
+    let sum = blake3_plain(part).map_err(|e| format!("{}: {e}", part.display()))?;
     if sum != hash {
         let _ = std::fs::remove_file(part);
         let _ = std::fs::remove_file(meta);
@@ -869,19 +1257,24 @@ pub(crate) fn verify_part(part: &Path, meta: &Path, hash: &str) -> Result<(), St
 }
 
 /// Writes `resp`'s body to `part` (after its first `offset` bytes, or over
-/// it when `offset` is 0), paced, at most `limit` bytes in all; stops
-/// between two pieces when told or when its plan (`era`) is no longer the
-/// one ([`Failed::Stopped`]), or when the part's disk comes near its
-/// reserve ([`Failed::NoRoom`]); the part stays. How long the part is then.
-pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offset: u64, limit: u64, era: u64, ctl: &Ctl) -> Result<u64, Failed> {
+/// it when `offset` is 0; never through a link: [`open_part`]), paced, at
+/// most `limit` bytes in all; stops between two pieces when told or when
+/// its plan (`era`) is no longer the one ([`Failed::Stopped`]), or when a
+/// write would take the part's disk past its reserve, the other pulls'
+/// bytes kept (`room`; [`Failed::NoRoom`]); the part stays. How long the
+/// part is then.
+pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offset: u64, limit: u64, era: u64, ctl: &Ctl, room: &mut Reserve) -> Result<u64, Failed> {
     let io = |e: std::io::Error| Failed::Bad(format!("{}: {e}", part.display()));
-    let room = part.parent().unwrap_or(part).to_owned();
-    let mut file = if offset == 0 {
-        tokio::fs::File::create(part).await.map_err(io)?
-    } else {
-        tokio::fs::OpenOptions::new().append(true).open(part).await.map_err(io)?
+    let disk = part.parent().unwrap_or(part).to_owned();
+    let mut file = {
+        let p = part.to_owned();
+        let f = tokio::task::spawn_blocking(move || open_part(&p, offset)).await.map_err(|e| Failed::Bad(e.to_string()))?.map_err(io)?;
+        tokio::fs::File::from_std(f)
     };
     let mut len = offset;
+    // The disk as last looked at: its free bytes less what the other
+    // pulls keep (None: not known), and what this one wrote since.
+    let mut seen: Option<Option<u64>> = None;
     let mut since_look = 0u64;
     let mut body = resp.into_body().into_data_stream();
     loop {
@@ -891,21 +1284,27 @@ pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offse
         }
         match tokio::time::timeout(STALL, body.next()).await {
             Ok(Some(Ok(bytes))) => {
-                len += bytes.len() as u64;
+                let n = bytes.len() as u64;
+                len += n;
                 if len > limit {
                     file.flush().await.map_err(io)?;
                     return Err(Failed::Bad("файл больше, чем ожидалось".to_owned()));
                 }
-                since_look += bytes.len() as u64;
-                if since_look >= ROOM_STEP {
+                if seen.is_none() || since_look >= ROOM_STEP {
+                    let others = room.others();
+                    seen = Some(nikgob_runtime::free_bytes(&disk).map(|free| free.saturating_sub(others)));
                     since_look = 0;
-                    if nikgob_runtime::free_bytes(&room).is_none_or(|free| free < MIN_FREE) {
-                        file.flush().await.map_err(io)?;
-                        return Err(Failed::NoRoom);
-                    }
+                }
+                // Each write weighed: what the disk would keep after it.
+                let keeps = seen.flatten().is_some_and(|free| free.saturating_sub(since_look).saturating_sub(n) >= ctl.keep_free);
+                if !keeps {
+                    file.flush().await.map_err(io)?;
+                    return Err(Failed::NoRoom);
                 }
                 file.write_all(&bytes).await.map_err(io)?;
-                ctl.received.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                since_look += n;
+                room.wrote(n);
+                ctl.received.fetch_add(n, Ordering::Relaxed);
                 ctl.pace.take(bytes.len()).await;
             }
             Ok(Some(Err(e))) => {
@@ -932,7 +1331,7 @@ fn header<'a>(r: &'a http::Response<Body>, name: &str) -> Option<&'a str> {
 /// (the first that has it), keeps it and makes it this device's own. Its
 /// bytes.
 #[allow(clippy::too_many_arguments)]
-async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job, from: &[String], era: u64, ctl: &Ctl) -> Result<u64, Failed> {
+async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job, from: &[String], era: u64, ctl: &Ctl, room: &mut Reserve) -> Result<u64, Failed> {
     let library = dirs.library.clone();
     let dir = tokio::task::spawn_blocking(move || parts_dir(&library))
         .await
@@ -940,33 +1339,29 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
         .map_err(|e| Failed::Bad(format!("папка частей: {e}")))?;
     let key = job.key();
     let want = job.hash().to_owned();
-    let part = dir.join(format!("{key}.part"));
-    let meta = dir.join(format!("{key}.meta"));
-    // A part of an earlier try goes on where it stopped when it is of
-    // this very file (its hash, noted beside it); another one starts over.
-    let mut expected: Option<String> = tokio::fs::read_to_string(&meta).await.ok().and_then(|s| clean_hash(&s));
-    if expected.as_deref().is_some_and(|h| h != want) {
-        let _ = tokio::fs::remove_file(&part).await;
-        let _ = tokio::fs::remove_file(&meta).await;
-        expected = None;
-    }
-    let mut offset = match expected {
-        Some(_) => tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0),
-        None => 0,
+    // A part of an earlier try goes on where it stopped when its note says
+    // it is of this very file; the others of this job go.
+    let found = {
+        let (d, k, w) = (dir.clone(), key.clone(), want.clone());
+        tokio::task::spawn_blocking(move || find_part(&d, &k, &w)).await.map_err(|e| Failed::Bad(e.to_string()))?
     };
-    let mut ext = tokio::fs::read_to_string(meta.with_extension("ext")).await.ok().map(|e| clean_ext(&e));
+    let (mut part, mut ext, mut offset) = match found {
+        Some((p, e, len)) => (p, Some(e), len),
+        None => (Part::new(&dir, &key)?, None, 0),
+    };
     // A whole part left (kept, then not made the device's own): kept now.
-    if let (Some(hash), Some(e)) = (expected.clone(), ext.clone())
+    if let Some(e) = ext.clone()
         && offset > 0
         && offset == job.size()
     {
-        let (p, m, h) = (part.clone(), meta.clone(), hash.clone());
+        let (p, m, h) = (part.file.clone(), part.note.clone(), want.clone());
         let whole = tokio::task::spawn_blocking(move || verify_part(&p, &m, &h)).await.map_err(|e| Failed::Bad(e.to_string()))?;
         if whole.is_ok() {
             ctl.received.fetch_add(offset, Ordering::Relaxed);
-            return keep(lib, me, dirs, job, &part, &meta, &hash, &e, offset).await.map(|()| offset);
+            let r = Room { keep: ctl.keep_free, others: room.others() };
+            return keep(lib, me, dirs, job, &part, &want, &e, offset, r).await.map(|()| offset);
         }
-        (offset, expected) = (0, None);
+        (part, ext, offset) = (Part::new(&dir, &key)?, None, 0);
     }
     // Exactly the planned file: its size when it is known.
     let limit = if job.size() > 0 { job.size() } else { FILE_MAX };
@@ -996,12 +1391,12 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
                 continue 'devices;
             }
             // The part is no part of the file there, or the answer is not
-            // the part asked for: from the start.
+            // the part asked for: a new part, from the start.
             let wrong_part = status == http::StatusCode::PARTIAL_CONTENT && !range_starts_at(header(&resp, "content-range"), offset);
             if status == http::StatusCode::RANGE_NOT_SATISFIABLE || wrong_part {
                 drop(resp);
-                let _ = tokio::fs::remove_file(&part).await;
-                (offset, expected) = (0, None);
+                part.remove();
+                (part, ext, offset) = (Part::new(&dir, &key)?, None, 0);
                 continue;
             }
             if !status.is_success() {
@@ -1015,17 +1410,21 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
             }
             let e = clean_ext(header(&resp, nikgob_api::EXT_HEADER).unwrap_or(""));
             let from_byte = if status == http::StatusCode::PARTIAL_CONTENT { offset } else { 0 };
-            if expected.is_none() {
-                tokio::fs::write(&meta, &hash).await.map_err(|e| Failed::Bad(format!("{}: {e}", meta.display())))?;
-                let _ = tokio::fs::write(meta.with_extension("ext"), &e).await;
+            if ext.is_none() {
+                let (n, h, x) = (part.note.clone(), hash.clone(), e.clone());
+                tokio::task::spawn_blocking(move || write_note(&n, &h, &x))
+                    .await
+                    .map_err(|e| Failed::Bad(e.to_string()))?
+                    .map_err(|err| Failed::Bad(format!("{}: {err}", part.note.display())))?;
                 ext = Some(e.clone());
             }
             ctl.received.fetch_add(from_byte, Ordering::Relaxed);
-            let len = receive_paced(resp, &part, from_byte, limit, era, ctl).await?;
-            let (p, m, h) = (part.clone(), meta.clone(), hash.clone());
+            let len = receive_paced(resp, &part.file, from_byte, limit, era, ctl, room).await?;
+            let (p, m, h) = (part.file.clone(), part.note.clone(), hash.clone());
             tokio::task::spawn_blocking(move || verify_part(&p, &m, &h)).await.map_err(|e| Failed::Bad(e.to_string()))?.map_err(Failed::Bad)?;
             let e = ext.clone().unwrap_or(e);
-            keep(lib, me, dirs, job, &part, &meta, &hash, &e, len).await?;
+            let r = Room { keep: ctl.keep_free, others: room.others() };
+            keep(lib, me, dirs, job, &part, &hash, &e, len, r).await?;
             return Ok(len);
         }
     }
@@ -1033,74 +1432,102 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
 }
 
 /// The checked part put in its place and made this device's own (on the
-/// blocking pool).
+/// blocking pool); a copy across disks keeps `room` on the disk it goes
+/// to.
 #[allow(clippy::too_many_arguments)]
-async fn keep(lib: &Library, me: &str, dirs: &Dirs, job: &Job, part: &Path, meta: &Path, hash: &str, ext: &str, size: u64) -> Result<(), Failed> {
-    let (lib, me, dirs, job, part, meta, hash, ext) =
-        (lib.clone(), me.to_owned(), dirs.clone(), job.clone(), part.to_owned(), meta.to_owned(), hash.to_owned(), ext.to_owned());
-    tokio::task::spawn_blocking(move || {
+async fn keep(lib: &Library, me: &str, dirs: &Dirs, job: &Job, part: &Part, hash: &str, ext: &str, size: u64, room: Room) -> Result<(), Failed> {
+    let (lib, me, dirs, job, part, hash, ext) = (lib.clone(), me.to_owned(), dirs.clone(), job.clone(), part.clone(), hash.to_owned(), ext.to_owned());
+    tokio::task::spawn_blocking(move || -> Result<(), Failed> {
         let placed = match &job {
-            Job::Track(w) => place_song(&lib, &dirs.library, &me, w, &part, &hash, &ext, size),
-            Job::Master { item, .. } => place_master(&lib, &dirs.masters, &me, item, &part, &ext),
+            Job::Track(w) => place_song(&lib, &dirs.library, &me, w, &part.file, &hash, &ext, size, room),
+            Job::Master { item, .. } => place_master(&lib, &dirs.masters, &me, item, &part.file, &ext, room),
         }?;
-        let _ = std::fs::remove_file(&meta);
-        let _ = std::fs::remove_file(meta.with_extension("ext"));
+        let _ = std::fs::remove_file(&part.note);
         log::info!("replica: {} kept", placed.display());
         Ok(())
     })
     .await
     .map_err(|e| Failed::Bad(e.to_string()))?
-    .map_err(Failed::Bad)
 }
 
 /// Whether `path` holds exactly the file of `size` bytes and `hash`.
 fn same_file(path: &Path, size: u64, hash: &str) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == size) && blake3_of(path).is_ok_and(|h| h == hash)
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == size) && blake3_plain(path).is_ok_and(|h| h == hash)
+}
+
+/// Whether `a` and `b` (both there) are on one disk: a move between them
+/// is a rename, nothing copied. Not known: no.
+#[cfg(unix)]
+fn same_volume(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev())
+}
+
+#[cfg(windows)]
+fn same_volume(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x.components().next() == y.components().next(),
+        _ => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_volume(_: &Path, _: &Path) -> bool {
+    false
 }
 
 /// Puts the checked `part` at `target`, or at `target (2)`… when the name
 /// is another file's — never over anything, its folders made only inside
-/// `root`, a copy across disks checked before the part goes; the very file
-/// there already (a plain file inside `root`) is taken as it is (the part
-/// goes). Where it is, and whether the part was moved there (false: the
-/// file was there already).
-pub(crate) fn put_in_place(part: &Path, target: &Path, hash: &str, size: u64, root: &Path) -> Result<(PathBuf, bool), String> {
-    let dir = target.parent().ok_or_else(|| format!("{} has no folder", target.display()))?;
-    nikgob_import::fsutil::create_dir_inside(dir, root).map_err(|e| e.to_string())?;
+/// `root`, a copy across disks only when that disk keeps `room` after it
+/// ([`Failed::NoRoom`]: the part stays) and checked before the part goes;
+/// the very file there already (a plain file inside `root`) is taken as it
+/// is (the part goes). Where it is, and whether the part was moved there
+/// (false: the file was there already).
+pub(crate) fn put_in_place(part: &Path, target: &Path, hash: &str, size: u64, root: &Path, room: Room) -> Result<(PathBuf, bool), Failed> {
+    let dir = target.parent().ok_or_else(|| Failed::Bad(format!("{} has no folder", target.display())))?;
+    nikgob_import::fsutil::create_dir_inside(dir, root).map_err(|e| Failed::Bad(e.to_string()))?;
     if nikgob_import::fsutil::plain_file_inside(target, root) && same_file(target, size, hash) {
         let _ = std::fs::remove_file(part);
         return Ok((target.to_owned(), false));
     }
-    let placed = nikgob_import::fsutil::move_unique_verified(part, target, hash).map_err(|e| e.to_string())?;
+    if !same_volume(part, dir) && !room.fits(dir, size) {
+        return Err(Failed::NoRoom);
+    }
+    let placed = nikgob_import::fsutil::move_unique_verified(part, target, hash).map_err(|e| Failed::Bad(e.to_string()))?;
     if !nikgob_import::fsutil::plain_file_inside(&placed, root) {
         let _ = nikgob_import::fsutil::move_new_verified(&placed, part, hash);
-        return Err(format!("{} is outside {}", placed.display(), root.display()));
+        return Err(Failed::Bad(format!("{} is outside {}", placed.display(), root.display())));
     }
     Ok((placed, true))
 }
 
 /// A flat master, `{hash}.<ext>` right in `root`: only under that very
-/// name (a master kept flat is found by it), never over another file.
-fn put_flat(part: &Path, root: &Path, hash: &str, ext: &str, size: u64) -> Result<(PathBuf, bool), String> {
-    nikgob_import::fsutil::create_dir_inside(root, root).map_err(|e| e.to_string())?;
+/// name (a master kept flat is found by it), never over another file, a
+/// copy across disks only when that disk keeps `room` after it.
+fn put_flat(part: &Path, root: &Path, hash: &str, ext: &str, size: u64, room: Room) -> Result<(PathBuf, bool), Failed> {
+    nikgob_import::fsutil::create_dir_inside(root, root).map_err(|e| Failed::Bad(e.to_string()))?;
     let target = root.join(format!("{hash}.{ext}"));
     if nikgob_import::fsutil::plain_file_inside(&target, root) && same_file(&target, size, hash) {
         let _ = std::fs::remove_file(part);
         return Ok((target, false));
     }
-    nikgob_import::fsutil::move_new_verified(part, &target, hash).map_err(|e| format!("{}: {e}", target.display()))?;
+    if !same_volume(part, root) && !room.fits(root, size) {
+        return Err(Failed::NoRoom);
+    }
+    nikgob_import::fsutil::move_new_verified(part, &target, hash).map_err(|e| Failed::Bad(format!("{}: {e}", target.display())))?;
     Ok((target, true))
 }
 
 /// A pulled song's file laid out in `library` as the library names songs
 /// (`Artist/YYYY - Album/NN - Title.ext`) and registered as this device's
-/// (`me`) own source; its format from the device that had it. When it
-/// cannot be registered it goes back to its part (kept for the next try).
+/// (`me`) own source; its format from the device that had it; what it
+/// hashes to noted for the plans. When it cannot be registered it goes
+/// back to its part (kept for the next try).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn place_song(lib: &Library, library: &Path, me: &str, want: &Want, part: &Path, hash: &str, ext: &str, size: u64) -> Result<PathBuf, String> {
-    let layout = nikgob_import::master_files::layout_of_track(lib, want.track_id).ok_or_else(|| "этой песни ещё нет в библиотеке".to_owned())?;
+pub(crate) fn place_song(lib: &Library, library: &Path, me: &str, want: &Want, part: &Path, hash: &str, ext: &str, size: u64, room: Room) -> Result<PathBuf, Failed> {
+    let layout = nikgob_import::master_files::layout_of_track(lib, want.track_id).ok_or_else(|| Failed::Bad("этой песни ещё нет в библиотеке".to_owned()))?;
     let target = layout.target_path(library, ext);
-    let (placed, moved) = put_in_place(part, &target, hash, size, library)?;
+    let (placed, moved) = put_in_place(part, &target, hash, size, library, room)?;
     let of = lib.offer_of_hash(hash).ok().flatten().or_else(|| want.offers.first().cloned());
     let codec = of.as_ref().map_or_else(|| Codec::parse(ext), |o| Codec::parse(&o.codec));
     let mut s = Source::new(want.track_id, SourceKind::LocalFile, placed.to_string_lossy().into_owned(), codec);
@@ -1118,31 +1545,33 @@ pub(crate) fn place_song(lib: &Library, library: &Path, me: &str, want: &Want, p
         if moved {
             let _ = nikgob_import::fsutil::move_new_verified(&placed, part, hash);
         }
-        return Err(e.to_string());
+        return Err(Failed::Bad(e.to_string()));
     }
+    stamp(lib, &placed, hash);
     Ok(placed)
 }
 
 /// A pulled master laid out in `masters` as the library keeps masters (by
 /// name for one track, flat for a disc image or a track not named yet) and
-/// kept as this device's (`me`).
-fn place_master(lib: &Library, masters: &Path, me: &str, item: &MasterItem, part: &Path, ext: &str) -> Result<PathBuf, String> {
+/// kept as this device's (`me`); what it hashes to noted for the plans.
+fn place_master(lib: &Library, masters: &Path, me: &str, item: &MasterItem, part: &Path, ext: &str, room: Room) -> Result<PathBuf, Failed> {
     let layout = match item.tracks.as_slice() {
         [one] => nikgob_import::master_files::layout_of_track(lib, *one),
         _ => None,
     };
     let named = layout.and_then(|l| nikgob_import::master_files::master_target(masters, &l, None, ext));
     let ((placed, moved), by_name) = match named {
-        Some(target) => (put_in_place(part, &target, &item.hash, item.size, masters)?, true),
-        None => (put_flat(part, masters, &item.hash, ext, item.size)?, false),
+        Some(target) => (put_in_place(part, &target, &item.hash, item.size, masters, room)?, true),
+        None => (put_flat(part, masters, &item.hash, ext, item.size, room)?, false),
     };
     let path = by_name.then(|| placed.to_string_lossy().into_owned());
     if let Err(e) = lib.put_pulled_masters(item, path.as_deref(), me) {
         if moved {
             let _ = nikgob_import::fsutil::move_new_verified(&placed, part, &item.hash);
         }
-        return Err(e.to_string());
+        return Err(Failed::Bad(e.to_string()));
     }
+    stamp(lib, &placed, &item.hash);
     Ok(placed)
 }
 
@@ -1356,17 +1785,22 @@ mod tests {
         let part = dir.path().join("t.part");
         let meta = dir.path().join("t.meta");
         std::fs::write(&meta, &hash).unwrap();
-        let ctl = Arc::new(Ctl::new(RATE));
+        let ctl = Arc::new(Ctl { keep_free: 0, ..Ctl::new(RATE) });
+        let mut room = Reserve::new(ctl.clone(), 30_000);
         let chunks: Vec<Vec<u8>> = bytes.chunks(10_000).map(<[u8]>::to_vec).collect();
-        let first = receive_paced(chunks_body(chunks.clone(), 1, ctl.clone()), &part, 0, 30_000, 0, &ctl).await;
+        let first = receive_paced(chunks_body(chunks.clone(), 1, ctl.clone()), &part, 0, 30_000, 0, &ctl, &mut room).await;
         assert_eq!(first, Err(Failed::Stopped));
         let kept = std::fs::metadata(&part).unwrap().len();
         assert_eq!(kept, 20_000, "the pieces before the pause stay");
+        assert_eq!(ctl.reserved.load(Ordering::Relaxed), 10_000, "what is written is no longer kept for it");
         ctl.stop.store(false, Ordering::Relaxed);
         let rest = http::Response::new(Body::from(bytes[kept as usize..].to_vec()));
-        assert_eq!(receive_paced(rest, &part, kept, 30_000, 0, &ctl).await, Ok(30_000));
+        assert_eq!(receive_paced(rest, &part, kept, 30_000, 0, &ctl, &mut room).await, Ok(30_000));
         assert_eq!(ctl.received.load(Ordering::Relaxed), 30_000);
         assert!(verify_part(&part, &meta, &hash).is_ok());
+        drop(room);
+        assert_eq!(ctl.reserved.load(Ordering::Relaxed), 0);
+        let mut room = Reserve::new(ctl.clone(), 0);
 
         std::fs::write(&part, &bytes[..100]).unwrap();
         assert_eq!(verify_part(&part, &meta, &hash).unwrap_err(), "файл пришёл повреждённым");
@@ -1375,10 +1809,87 @@ mod tests {
         // A new profile or new pins: a pull of the old plan stops.
         ctl.era.store(1, Ordering::Relaxed);
         let old = http::Response::new(Body::from(bytes.clone()));
-        assert_eq!(receive_paced(old, &dir.path().join("o.part"), 0, 30_000, 0, &ctl).await, Err(Failed::Stopped));
+        assert_eq!(receive_paced(old, &dir.path().join("o.part"), 0, 30_000, 0, &ctl, &mut room).await, Err(Failed::Stopped));
         // Never more than the planned file's bytes.
         let big = http::Response::new(Body::from(bytes.clone()));
-        assert!(matches!(receive_paced(big, &dir.path().join("b.part"), 0, 100, 1, &ctl).await, Err(Failed::Bad(_))));
+        assert!(matches!(receive_paced(big, &dir.path().join("b.part"), 0, 100, 1, &ctl, &mut room).await, Err(Failed::Bad(_))));
+        // No write takes the disk past its reserve.
+        let full = Arc::new(Ctl { keep_free: u64::MAX, ..Ctl::new(RATE) });
+        let mut none = Reserve::new(full.clone(), 0);
+        let f = dir.path().join("f.part");
+        let r = receive_paced(http::Response::new(Body::from(bytes.clone())), &f, 0, 30_000, 0, &full, &mut none).await;
+        assert_eq!(r, Err(Failed::NoRoom));
+        assert_eq!(std::fs::metadata(&f).unwrap().len(), 0, "not a byte past the reserve");
+    }
+
+    /// A pull keeps for itself what it may still write; the others' share
+    /// is what the rest keep; what it did not write goes back at its end.
+    #[test]
+    fn a_pull_keeps_its_bytes_while_it_runs() {
+        let c = Arc::new(Ctl::new(RATE));
+        let mut a = Reserve::new(c.clone(), 100);
+        let b = Reserve::new(c.clone(), 50);
+        assert_eq!((a.others(), b.others()), (50, 100));
+        a.wrote(30);
+        assert_eq!(c.reserved.load(Ordering::Relaxed), 120);
+        a.wrote(500);
+        assert_eq!(c.reserved.load(Ordering::Relaxed), 50, "a file larger than kept takes nothing of the others'");
+        drop(b);
+        drop(a);
+        assert_eq!(c.reserved.load(Ordering::Relaxed), 0);
+    }
+
+    /// A part is found by listing its folder, only a plain file whose note
+    /// is of the very file; a new one is never made over anything, an old
+    /// one of another file goes, and it is written from where it stopped.
+    #[test]
+    fn parts_are_found_by_listing_and_never_made_over_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h1, h2) = ("1".repeat(64), "2".repeat(64));
+        let p = Part::new(dir.path(), "t-a").unwrap();
+        assert!(p.file.file_name().unwrap().to_string_lossy().len() > "t-a..part".len() + 30, "a random name");
+        write_note(&p.note, &h1, "flac").unwrap();
+        assert!(write_note(&p.note, &h1, "flac").is_err(), "a note is never written over");
+        {
+            let mut f = open_part(&p.file, 0).unwrap();
+            std::io::Write::write_all(&mut f, b"12345").unwrap();
+        }
+        assert!(open_part(&Part::new(dir.path(), "t-a").unwrap().file, 3).is_err(), "only a new part starts at 0");
+        let (found, ext, len) = find_part(dir.path(), "t-a", &h1).unwrap();
+        assert_eq!((found.file.clone(), ext.as_str(), len), (p.file.clone(), "flac", 5));
+        {
+            let mut f = open_part(&p.file, 3).unwrap();
+            std::io::Write::write_all(&mut f, b"xy").unwrap();
+        }
+        assert_eq!(std::fs::read(&p.file).unwrap(), b"123xy", "from where it stopped, what was after it dropped");
+        assert!(find_part(dir.path(), "t-b", &h1).is_none(), "another job's");
+        assert!(find_part(dir.path(), "t-a", &h2).is_none(), "of another file");
+        assert!(!p.file.exists() && !p.note.exists(), "it went");
+        assert!(read_note(&dir.path().join("t-a.0.meta")).is_none());
+        let orphan = Part::new(dir.path(), "t-a").unwrap();
+        write_note(&orphan.note, &h1, "flac").unwrap();
+        assert!(find_part(dir.path(), "t-a", &h1).is_none());
+        assert!(!orphan.note.exists(), "a note whose part never came goes");
+    }
+
+    /// A part's name taken by a link is never written or read through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_part_never_goes_through_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let song = dir.path().join("song.flac");
+        std::fs::write(&song, b"music").unwrap();
+        let p = Part::named(dir.path(), "t-a", &"0".repeat(32));
+        std::os::unix::fs::symlink(&song, &p.file).unwrap();
+        std::os::unix::fs::symlink(&song, &p.note).unwrap();
+        let ctl = Arc::new(Ctl { keep_free: 0, ..Ctl::new(RATE) });
+        let mut room = Reserve::new(ctl.clone(), 0);
+        let r = receive_paced(http::Response::new(Body::from(vec![1u8; 10])), &p.file, 0, 100, 0, &ctl, &mut room).await;
+        assert!(matches!(r, Err(Failed::Bad(_))));
+        assert!(open_part(&p.file, 0).is_err() && blake3_plain(&p.file).is_err() && read_note(&p.note).is_none());
+        assert!(write_note(&p.note, &"1".repeat(64), "flac").is_err());
+        assert!(find_part(dir.path(), "t-a", &"1".repeat(64)).is_none());
+        assert_eq!(std::fs::read(&song).unwrap(), b"music", "the file it points to is untouched");
     }
 
     /// A disk whose free space is not known gets nothing; the reserve and
@@ -1463,7 +1974,7 @@ mod tests {
         let part = root.path().join("t.part");
         std::fs::write(&part, &bytes).unwrap();
 
-        let placed = place_song(&lib, &library, "me", &want(t.id, &hash, bytes.len() as u64), &part, &hash, "opus", bytes.len() as u64).unwrap();
+        let placed = place_song(&lib, &library, "me", &want(t.id, &hash, bytes.len() as u64), &part, &hash, "opus", bytes.len() as u64, Room::default()).unwrap();
         assert_eq!(placed, library.join("Кино").join("1988 - Группа крови").join("01 - Группа крови (2).opus"));
         assert_eq!(std::fs::read(&target).unwrap(), b"another file", "never over another file");
         assert_eq!(std::fs::read(&placed).unwrap(), bytes);
@@ -1472,14 +1983,16 @@ mod tests {
         assert_eq!(s.locator, placed.to_string_lossy());
         assert_eq!((s.file_hash.as_deref(), s.quality_score, s.codec), (Some(hash.as_str()), 70, Codec::Opus));
         let dirs = Dirs { library: library.clone(), masters: library.join(".musiclib").join("masters") };
-        let held = held_on_disk(&lib, &dirs).unwrap();
+        // Its hash noted when it was put there: held without reading it.
+        let (held, pending) = held_on_disk(&lib, &dirs, &mut Rehash { files: 0, bytes: 0 }).unwrap();
         assert_eq!(held[&t.id].iter().map(|f| f.file_hash.as_deref()).collect::<Vec<_>>(), [Some(hash.as_str())]);
+        assert!(pending.is_empty());
         assert!(lib.replica_verified(&hash, "me").unwrap().is_some());
 
         // The same file at the name already: taken as it is.
         std::fs::write(&target, &bytes).unwrap();
         std::fs::write(&part, &bytes).unwrap();
-        let again = put_in_place(&part, &target, &hash, bytes.len() as u64, &library).unwrap();
+        let again = put_in_place(&part, &target, &hash, bytes.len() as u64, &library, Room::default()).unwrap();
         assert_eq!(again, (target.clone(), false), "not moved: the file was there");
         assert!(!part.exists());
     }
@@ -1497,7 +2010,7 @@ mod tests {
         let part = root.path().join("m.part");
         std::fs::write(&part, &bytes).unwrap();
         let item = MasterItem { hash: hash.clone(), codec: "flac".into(), size: bytes.len() as u64, tracks: vec![t.id] };
-        let placed = place_master(&lib, &masters, "me", &item, &part, "flac").unwrap();
+        let placed = place_master(&lib, &masters, "me", &item, &part, "flac", Room::default()).unwrap();
         assert!(placed.starts_with(&masters) && placed.parent() != Some(masters.as_path()), "by name: {}", placed.display());
         let by_name = placed.to_string_lossy().into_owned();
         assert_eq!(lib.get_master(t.id).unwrap().unwrap().file_path.as_deref(), Some(by_name.as_str()));
@@ -1506,34 +2019,51 @@ mod tests {
         let ihash = blake3::hash(&image).to_hex().to_string();
         std::fs::write(&part, &image).unwrap();
         let disc = MasterItem { hash: ihash.clone(), codec: "flac".into(), size: image.len() as u64, tracks: vec![TrackId::new(), TrackId::new()] };
-        let flat = place_master(&lib, &masters, "me", &disc, &part, "flac").unwrap();
+        let flat = place_master(&lib, &masters, "me", &disc, &part, "flac", Room::default()).unwrap();
         assert_eq!(flat, masters.join(format!("{ihash}.flac")));
-        let here = masters_on_disk(&lib, &masters).unwrap();
+        let (here, pending) = masters_on_disk(&lib, &masters, &mut Rehash { files: 0, bytes: 0 }).unwrap();
+        assert!(pending.is_empty(), "their hashes noted when they were put there");
         assert!(here.contains(&ihash), "its copy, though its tracks are not here yet");
         assert!(here.contains(&hash));
     }
 
-    /// What this device holds is what is on its disk: a source or a master
-    /// row whose file is gone is not held, a flat master file is.
+    /// What this device holds is what is on its disk, the very file: a
+    /// source or a master row whose file is gone, outside its folders or
+    /// another file now is not held; a flat master file is; a file not
+    /// read yet waits (its bytes charged) and is read in a later plan.
     #[test]
-    fn only_files_on_the_disk_are_held() {
+    fn only_the_very_files_on_the_disk_are_held() {
         let lib = Library::open_in_memory().unwrap();
         let root = tempfile::tempdir().unwrap();
         let dirs = Dirs { library: root.path().join("Music"), masters: root.path().join("Music").join(".musiclib").join("masters") };
         std::fs::create_dir_all(&dirs.masters).unwrap();
         let t = song(&lib);
+        fn sum(b: &[u8]) -> String {
+            blake3::hash(b).to_hex().to_string()
+        }
         let here = dirs.library.join("a.opus");
         std::fs::write(&here, b"a").unwrap();
-        for (loc, h) in [(here.clone(), "ha"), (dirs.library.join("gone.opus"), "hg")] {
+        let changed = dirs.library.join("b.opus");
+        std::fs::write(&changed, b"now another file").unwrap();
+        let outside = root.path().join("c.opus");
+        std::fs::write(&outside, b"c").unwrap();
+        let rows = [(here.clone(), sum(b"a")), (dirs.library.join("gone.opus"), sum(b"g")), (changed, sum(b"b")), (outside, sum(b"c"))];
+        for (loc, h) in rows {
             let mut s = Source::new(t.id, SourceKind::LocalFile, loc.to_string_lossy().into_owned(), Codec::Opus);
-            s.file_hash = Some(h.into());
+            s.file_hash = Some(h);
             lib.add_source(&s).unwrap();
         }
-        let held = held_on_disk(&lib, &dirs).unwrap();
-        assert_eq!(held[&t.id].iter().map(|f| f.file_hash.as_deref()).collect::<Vec<_>>(), [Some("ha")]);
+        let (held, pending) = held_on_disk(&lib, &dirs, &mut Rehash { files: 0, bytes: 0 }).unwrap();
+        assert!(held.is_empty(), "nothing read yet");
+        assert_eq!(pending.get(&t.id), Some(&(1 + 16)), "the files inside, their bytes on the disk");
+        let (held, pending) = held_on_disk(&lib, &dirs, &mut Rehash::new()).unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(held[&t.id].iter().map(|f| (f.file_hash.clone(), f.size)).collect::<Vec<_>>(), [(Some(sum(b"a")), 1)]);
 
-        let flat = "f".repeat(64);
+        let flat = sum(b"x");
         std::fs::write(dirs.masters.join(format!("{flat}.flac")), b"x").unwrap();
+        let wrong = sum(b"y");
+        std::fs::write(dirs.masters.join(format!("{wrong}.flac")), b"not y").unwrap();
         let gone = dirs.masters.join("Кино").join("01.flac");
         lib.put_master(&Master {
             track_id: t.id,
@@ -1545,8 +2075,26 @@ mod tests {
             replicas: Vec::new(),
         })
         .unwrap();
-        let m = masters_on_disk(&lib, &dirs.masters).unwrap();
+        let (m, waiting) = masters_on_disk(&lib, &dirs.masters, &mut Rehash { files: 0, bytes: 0 }).unwrap();
+        assert!(m.is_empty() && waiting.contains(&flat) && waiting.contains(&wrong));
+        let (m, waiting) = masters_on_disk(&lib, &dirs.masters, &mut Rehash::new()).unwrap();
+        assert!(waiting.is_empty());
         assert!(m.contains(&flat));
+        assert!(!m.contains(&wrong), "a file that is not its master");
         assert!(!m.contains(&"e".repeat(64)), "its file is gone: pulled again");
+    }
+
+    /// A plan reads again at most so many files, the first whatever its
+    /// size.
+    #[test]
+    fn a_plan_reads_a_bounded_number_of_files_again() {
+        let mut r = Rehash::new();
+        assert!(r.take(REHASH_BYTES * 2), "the first one whatever its size");
+        assert!(!r.take(1), "then its bytes ran out");
+        let mut r = Rehash::new();
+        for _ in 0..REHASH_FILES {
+            assert!(r.take(1));
+        }
+        assert!(!r.take(1));
     }
 }
