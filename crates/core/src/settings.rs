@@ -423,20 +423,44 @@ impl Settings {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
         }
-        let mut tmp = path.as_os_str().to_owned();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        let mut file = std::fs::File::create(&tmp).map_err(io)?;
-        file.write_all(text.as_bytes()).map_err(io)?;
-        file.sync_all().map_err(io)?;
-        drop(file);
-        std::fs::rename(&tmp, path).map_err(io)
+        let tmp = temp_path(path);
+        let written = (|| {
+            // A name of this write alone: two writers never share it.
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, path)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written.map_err(io)
     }
+}
+
+/// The temporary file a save of `path` writes first: by this process and
+/// this save, so no other save (here or in another process) writes it.
+fn temp_path(path: &Path) -> PathBuf {
+    static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.{n}.tmp", std::process::id()));
+    PathBuf::from(tmp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_save_writes_its_own_temporary_file() {
+        let p = Path::new("settings.toml");
+        let (a, b) = (temp_path(p), temp_path(p));
+        assert_ne!(a, b);
+        assert!(a.to_string_lossy().starts_with("settings.toml."));
+        assert!(a.to_string_lossy().ends_with(".tmp"));
+    }
 
     fn sample() -> Settings {
         Settings {
