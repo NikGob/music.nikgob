@@ -462,6 +462,53 @@ impl Worker {
     pub(crate) fn share(&mut self, target: v::ShareTarget) {
         self.streaming.share_seq += 1;
         let seq = self.streaming.share_seq;
+        let Some(job) = self.share_job(&target) else { return };
+        let text = job.text.clone();
+        self.publish(|s| {
+            s.share = Some(v::ShareView {
+                target: target.clone(),
+                busy: true,
+                link: None,
+                text: text.clone(),
+            });
+        });
+        // The lookup can take a few seconds: say it started (the result
+        // replaces this toast).
+        self.drop_share_toast();
+        self.toast("Ищу ссылку…", None);
+        self.streaming.share_toast = Some(self.toast_id);
+        self.streaming.spawn(async move {
+            let (outcome, text) = run(job).await;
+            Msg::Shared {
+                seq,
+                target,
+                result: Shared {
+                    link: outcome.link(),
+                    text,
+                    toast: outcome.toast(),
+                },
+            }
+        });
+    }
+
+    /// The share of the local API: the same lookup, its page and text
+    /// answered to `reply` as `{"link", "text", "everywhere"}`, with no
+    /// toast and nothing copied.
+    pub(crate) fn share_for_api(&mut self, target: v::ShareTarget, reply: v::ApiReply) {
+        let Some(job) = self.share_job(&target) else {
+            reply.send(Err("Ничего не нашлось".to_owned()));
+            return;
+        };
+        self.streaming.spawn_reporting(move |_| async move {
+            let (outcome, text) = run(job).await;
+            let everywhere = matches!(outcome, Outcome::Everywhere { .. });
+            reply.send(Ok(serde_json::json!({ "link": outcome.link(), "text": text, "everywhere": everywhere })));
+        });
+    }
+
+    /// What a share of `target` looks up; `None` for a library item that is
+    /// gone.
+    fn share_job(&mut self, target: &v::ShareTarget) -> Option<Job> {
         let services: Vec<Arc<dyn StreamService>> = Service::ALL
             .iter()
             .filter_map(|&s| self.service(s))
@@ -469,7 +516,7 @@ impl Worker {
         // What to copy when nothing is found, the pages known, and how to
         // look the thing up otherwise.
         let mut album_to_fetch = None;
-        let (text, pages, lookup) = match &target {
+        let (text, pages, lookup) = match target {
             v::ShareTarget::StreamTrack(r) => {
                 let text = self
                     .streaming
@@ -492,7 +539,7 @@ impl Worker {
                 (text, page_of(&services, EntityKind::Album, r).into_iter().collect(), info.map(Lookup::Album))
             }
             v::ShareTarget::Track(id) => {
-                let Some(t) = self.lib.get_track(*id).ok().flatten() else { return };
+                let t = self.lib.get_track(*id).ok().flatten()?;
                 let artist = t.artist_credit.display();
                 let text = format!("{artist} — {}", t.title);
                 let pages = self.pages_of_local(&services, EntityKind::Track, *id.as_uuid());
@@ -508,7 +555,7 @@ impl Worker {
                 (text, pages, Some(Lookup::Track(q)))
             }
             v::ShareTarget::Release(id) => {
-                let Some(r) = self.lib.get_release(*id).ok().flatten() else { return };
+                let r = self.lib.get_release(*id).ok().flatten()?;
                 let text = format!("{} — {}", r.artist_credit.display(), r.title);
                 let pages = self.pages_of_local(&services, EntityKind::Album, *id.as_uuid());
                 let info = AlbumInfo {
@@ -519,20 +566,7 @@ impl Worker {
                 (text, pages, Some(Lookup::Album(info)))
             }
         };
-        self.publish(|s| {
-            s.share = Some(v::ShareView {
-                target: target.clone(),
-                busy: true,
-                link: None,
-                text: text.clone(),
-            });
-        });
-        // The lookup can take a few seconds: say it started (the result
-        // replaces this toast).
-        self.drop_share_toast();
-        self.toast("Ищу ссылку…", None);
-        self.streaming.share_toast = Some(self.toast_id);
-        let job = Job {
+        Some(Job {
             clients: self.share_clients(),
             services,
             // Read in the task: the key may change while the player runs.
@@ -542,19 +576,7 @@ impl Worker {
             album_to_fetch,
             deezer_on: self.state.read().prefs.service_enabled(Service::Deezer),
             text,
-        };
-        self.streaming.spawn(async move {
-            let (outcome, text) = run(job).await;
-            Msg::Shared {
-                seq,
-                target,
-                result: Shared {
-                    link: outcome.link(),
-                    text,
-                    toast: outcome.toast(),
-                },
-            }
-        });
+        })
     }
 
     /// The service pages of a library row with known remote ids, the

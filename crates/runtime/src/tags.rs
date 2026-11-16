@@ -180,18 +180,7 @@ impl Worker {
                 });
                 self.toast("Теги сохранены", None);
                 self.reload_after_import();
-                if self.playing.map(|e| e.track) == Some(track) {
-                    let current = self.lib.get_track_row(track).ok().flatten();
-                    let src = self.lib.active_source(track).ok().flatten();
-                    let row = current.as_ref().map(|r| self.res.track(r));
-                    let info = self.res.info(current.as_ref(), src.as_ref());
-                    self.publish(|s| {
-                        s.player.current = row.clone();
-                        s.queue.current = row;
-                        s.info = info;
-                    });
-                    self.track_details(track);
-                }
+                self.retagged_playing(&[track]);
             }
             Internal::Retagged(_, Err(e)) => {
                 log::warn!("retag: {e}");
@@ -203,4 +192,99 @@ impl Worker {
             _ => {}
         }
     }
+
+    /// The song playing, if it is one of `tracks` that took new tags: its
+    /// row and info again.
+    fn retagged_playing(&mut self, tracks: &[TrackId]) {
+        let Some(track) = self.playing.map(|e| e.track).filter(|t| tracks.contains(t)) else { return };
+        let current = self.lib.get_track_row(track).ok().flatten();
+        let src = self.lib.active_source(track).ok().flatten();
+        let row = current.as_ref().map(|r| self.res.track(r));
+        let info = self.res.info(current.as_ref(), src.as_ref());
+        self.publish(|s| {
+            s.player.current = row.clone();
+            s.queue.current = row;
+            s.info = info;
+        });
+        self.track_details(track);
+    }
+
+    /// The tags in the files of `tracks`, read off the loop, to `reply` as
+    /// `{"<id>": {"title", …}}` (a track without a file is left out).
+    pub(crate) fn api_read_tags(&mut self, tracks: Vec<TrackId>, reply: v::ApiReply) {
+        let Some(svc) = &self.import else {
+            reply.send(Err("Файлы библиотеки недоступны".to_owned()));
+            return;
+        };
+        let importer = svc.importer().clone();
+        svc.spawn_blocking(move || {
+            let mut out = serde_json::Map::new();
+            for t in tracks {
+                match importer.read_track_tags(t) {
+                    Ok((_, tags)) => {
+                        out.insert(t.to_string(), edit_json(&tag_edit(&tags)));
+                    }
+                    Err(e) => log::debug!("api: tags of {t}: {e}"),
+                }
+            }
+            reply.send(Ok(serde_json::Value::Object(out)));
+        });
+    }
+
+    /// The local API's retag: each track's file read, the patch put over
+    /// what it has and written (the importer moves the file into place);
+    /// one snackbar for all, to `reply` as `{"done", "failed"}`.
+    pub(crate) fn api_retag(&mut self, tracks: Vec<(TrackId, v::TagPatch)>, reply: v::ApiReply) {
+        let Some(svc) = &self.import else {
+            reply.send(Err("Файлы библиотеки недоступны".to_owned()));
+            return;
+        };
+        let importer = svc.importer().clone();
+        let tx = svc.internal();
+        svc.spawn_blocking(move || {
+            let mut done = Vec::new();
+            let mut failed = Vec::new();
+            for (t, patch) in tracks {
+                let r = importer
+                    .read_track_tags(t)
+                    .map_err(|e| e.to_string())
+                    .and_then(|(_, now)| importer.retag(t, changes(patch.apply(&tag_edit(&now)))).map(|_| ()).map_err(|e| e.to_string()));
+                match r {
+                    Ok(()) => done.push(t),
+                    Err(e) => {
+                        log::warn!("api: retag of {t}: {e}");
+                        failed.push(serde_json::json!({"id": t.to_string(), "error": e}));
+                    }
+                }
+            }
+            let failures = failed.len();
+            reply.send(Ok(serde_json::json!({
+                "done": done.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "failed": failed,
+            })));
+            let _ = tx.send(Internal::ApiRetagged { failed: failures, done });
+        });
+    }
+
+    /// The API's retag came back: one snackbar, the library read again.
+    pub(crate) fn api_retagged(&mut self, done: &[TrackId], failed: usize) {
+        match (done.len(), failed) {
+            (0, 0) => return,
+            (0, _) => self.toast("Не удалось сохранить теги", None),
+            (1, 0) => self.toast("Теги сохранены", None),
+            (n, 0) => self.toast(format!("Теги сохранены: {n}"), None),
+            (n, f) => self.toast(format!("Теги сохранены: {n}, не удалось: {f}"), None),
+        }
+        self.reload_after_import();
+        self.retagged_playing(done);
+    }
+}
+
+/// A [`v::TagEdit`] as the API answers it.
+fn edit_json(e: &v::TagEdit) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for (k, val) in v::tag_fields(e) {
+        m.insert(k.to_owned(), serde_json::Value::String(val.to_owned()));
+    }
+    serde_json::Value::Object(m)
 }

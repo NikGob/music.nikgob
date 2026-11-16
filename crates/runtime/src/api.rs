@@ -6,13 +6,52 @@
 //! [`nikgob_view::ApiView`]) and stays in the file, marked, while its
 //! snackbar's «Отменить» is up; then it goes for good. The last use of a
 //! token is shown at once and written rarely.
+//!
+//! The requests of the API that wait for work of the loop's own (a share
+//! link, the tags in files, a search of the download sources) answer
+//! through their [`ApiReply`]; a download too large to start by itself
+//! waits in «Подтверди» as a card of its own ([`API_CONFIRM_ID`]).
 
 use std::time::{Duration, Instant};
 
+use nikgob_core::model::{ReleaseId, TrackId, WishlistItem, WishlistScope, WishlistStatus};
 use nikgob_core::settings::{ApiSettings, ApiTokenRecord, Settings};
-use nikgob_view::{ApiTokenView, ApiView, Command};
+use nikgob_core::source::SourceError;
+use nikgob_view::{ApiActor, ApiReply, ApiTokenView, ApiView, Command, Confirm, ConfirmOption};
 
 use crate::{PlaybackEvent, Worker};
+
+/// Bit of the «Подтверди» ids of downloads the API asked for (the other
+/// parts of the runtime use bits 44–48).
+pub(crate) const API_CONFIRM_ID: u64 = 1 << 50;
+/// Cards of the API in «Подтверди» at most; a new one pushes out the oldest.
+const API_CONFIRMS: usize = 16;
+/// Offers of a dry search of the sources answered at most.
+const OFFERS_ANSWERED: usize = 12;
+/// A source's dry search at most (the API waits a little longer).
+const SOURCE_SEARCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A download of the API waiting in «Подтверди».
+struct ApiConfirm {
+    card: Confirm,
+    /// What «Скачать» runs.
+    commands: Vec<Command>,
+}
+
+/// The card of a download the API asked for.
+pub(crate) fn confirm_card(id: u64, title: &str, origin: &str, lines: &[String]) -> Confirm {
+    Confirm {
+        id,
+        title: title.to_owned(),
+        origin: origin.to_owned(),
+        question: "Скачать?".to_owned(),
+        options: lines.iter().map(|l| ConfirmOption { label: l.clone(), detail: String::new(), recommended: false }).collect(),
+        skip_label: "Не скачивать".to_owned(),
+        accept_label: "Скачать".to_owned(),
+        pick: None,
+        yes_no: true,
+    }
+}
 
 /// The tokens' last uses are written to settings.toml at most this often
 /// (and when the player quits).
@@ -36,6 +75,14 @@ pub(crate) struct ApiKeep {
     pub(crate) switching_device: bool,
     /// The device heard failed and nothing has played since.
     device_failed: bool,
+    /// Who the API request being run plays for (its token's actor), while
+    /// its commands run: what the history's events are to carry once they
+    /// have an actor.
+    #[allow(dead_code)]
+    pub(crate) actor: Option<ApiActor>,
+    /// Downloads of the API waiting in «Подтверди», oldest first.
+    confirms: Vec<ApiConfirm>,
+    next_confirm: u64,
 }
 
 /// What a device event says of the sound: `Some(true)` it comes out,
@@ -294,18 +341,140 @@ impl Worker {
                 });
                 self.api.used_unsaved = true;
             }
-            Command::ApiRun { commands, ack } => {
+            Command::ApiRun { commands, ack, actor } => {
+                self.api.actor = actor;
                 for c in commands {
                     self.command(c);
                 }
                 // A shuffle asked for a list the request did not make (it had
                 // nothing to play) does not reach a later one.
                 self.api.next_shuffle = None;
+                self.api.actor = None;
                 self.publish(move |s| s.api.synced = s.api.synced.max(ack));
             }
             Command::ApiShuffle(on) => self.api.next_shuffle = Some(on),
+            Command::ApiShare { target, reply } => self.share_for_api(target, reply),
+            Command::ApiReadTags { tracks, reply } => self.api_read_tags(tracks, reply),
+            Command::ApiRetag { tracks, reply } => self.api_retag(tracks, reply),
+            Command::ApiTrash { tracks, what } => {
+                // Never for good: with the Trash off nothing is deleted (the
+                // API refuses such a request before it gets here).
+                if !self.state.read().prefs.use_trash {
+                    log::warn!("api: {} tracks not deleted, the Trash is off", tracks.len());
+                    return;
+                }
+                self.delete_tracks(tracks, &what);
+            }
+            Command::ApiSourceSearch { track, release, reply } => self.api_source_search(track, release, reply),
+            Command::ApiConfirmDownload { title, origin, lines, commands } => {
+                self.api.next_confirm += 1;
+                let id = API_CONFIRM_ID | self.api.next_confirm;
+                if self.api.confirms.len() >= API_CONFIRMS {
+                    let old = self.api.confirms.remove(0);
+                    log::info!("api: the download «{}» waited too long in «Подтверди», dropped", old.card.title);
+                }
+                self.api.confirms.push(ApiConfirm { card: confirm_card(id, &title, &origin, &lines), commands });
+                self.publish_api_confirms();
+            }
             other => log::warn!("api: not an API command {other:?}"),
         }
+    }
+
+    /// The API's cards into «Подтверди» (the other cards stay).
+    fn publish_api_confirms(&mut self) {
+        let cards: Vec<Confirm> = self.api.confirms.iter().map(|c| c.card.clone()).collect();
+        self.publish(move |s| {
+            s.downloads.confirm.retain(|c| c.id & API_CONFIRM_ID == 0);
+            s.downloads.confirm.extend(cards);
+        });
+    }
+
+    /// «Скачать» (`Some`) or «Не скачивать» (`None`) of an API card.
+    pub(crate) fn api_confirm(&mut self, id: u64, option: Option<usize>) {
+        let Some(at) = self.api.confirms.iter().position(|c| c.card.id == id) else { return };
+        let c = self.api.confirms.remove(at);
+        self.publish_api_confirms();
+        if option.is_some() {
+            log::info!("api: «{}» downloads, as confirmed", c.card.title);
+            for command in c.commands {
+                self.command(command);
+            }
+        }
+    }
+
+    /// The download sources searched for a track or an album, nothing
+    /// downloaded: the offers that match it, best first, to `reply`.
+    fn api_source_search(&mut self, track: Option<TrackId>, release: Option<ReleaseId>, reply: ApiReply) {
+        let mut item = WishlistItem::new(WishlistStatus::New, nikgob_library::now_ms());
+        item.track_id = track;
+        item.release_id = release;
+        item.scope = if track.is_some() { WishlistScope::Track } else { WishlistScope::Album };
+        let want = self.want_of(&item);
+        if want.artists.is_empty() || (want.title.is_none() && want.album.is_none()) {
+            reply.send(Err("Не знаю, что искать: у песни нет исполнителя или названия".to_owned()));
+            return;
+        }
+        let sources = self.download_sources();
+        if sources.is_empty() {
+            reply.send(Err("Источники загрузок не настроены".to_owned()));
+            return;
+        }
+        let order: Vec<_> = self.state.read().prefs.source_order().iter().filter(|s| s.on).map(|s| s.key).collect();
+        self.streaming.spawn_reporting(move |_| async move {
+            let asks = sources.iter().map(|s| {
+                let s = s.clone();
+                let want = &want;
+                async move {
+                    let r = match tokio::time::timeout(SOURCE_SEARCH_TIMEOUT, s.search(want)).await {
+                        Ok(r) => r,
+                        Err(_) => Err(SourceError::Unreachable("no answer in time".into())),
+                    };
+                    (s.key(), r)
+                }
+            });
+            let mut offers = Vec::new();
+            let mut asked = Vec::new();
+            let mut failed = Vec::new();
+            for (key, r) in futures_util::future::join_all(asks).await {
+                match r {
+                    Ok(o) => {
+                        asked.push(key.display_name());
+                        offers.extend(o);
+                    }
+                    Err(SourceError::NotConfigured) => {}
+                    Err(e) => failed.push(serde_json::json!({"source": key.display_name(), "error": e.to_string()})),
+                }
+            }
+            let found = offers.len();
+            let ranked = nikgob_sources::select::rank(offers, &want, &order);
+            let list: Vec<serde_json::Value> = ranked
+                .iter()
+                .take(OFFERS_ANSWERED)
+                .map(|r| {
+                    let o = &r.offer;
+                    serde_json::json!({
+                        "source": o.source.display_name(),
+                        "provider": o.provider,
+                        "title": o.title,
+                        "codec": o.format.as_ref().map(|f| f.codec.as_str()),
+                        "bitrate_kbps": o.format.as_ref().and_then(|f| f.bitrate_kbps),
+                        "lossless": o.lossless(),
+                        "size_bytes": o.size_bytes,
+                        "seeders": o.seeders,
+                        "sure": r.verdict.sure,
+                        "score": (r.verdict.score * 100.0).round() / 100.0,
+                    })
+                })
+                .collect();
+            reply.send(Ok(serde_json::json!({
+                "wanted": {"artists": want.artists, "title": want.title, "album": want.album},
+                "asked": asked,
+                "failed": failed,
+                "found": found,
+                "matching": ranked.len(),
+                "offers": list,
+            })));
+        });
     }
 
     /// The loop's tick: revoked tokens whose «Отменить» is gone go for

@@ -62,6 +62,7 @@ pub(crate) use replace::shown_title;
 pub(crate) use wishlist::{WISH_ID, upgrade_job_words};
 pub(crate) use schedule::wake_jitter;
 pub use schedule::StreamSchedule;
+pub use discography::{KeptDiscography, kept_discography};
 pub use web_login::{SOUNDCLOUD_WINDOW_HINT, WINDOW_HINT, WebLogin, WebLoginError, window_hint};
 
 /// How long a YouTube video that did not play is not picked again.

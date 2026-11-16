@@ -76,7 +76,7 @@ pub use recs::{
 };
 pub use nikgob_import::ImportConfig;
 pub use nikgob_metadata::{Metadata, MetadataConfig};
-pub use streams::{SOUNDCLOUD_WINDOW_HINT, StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError, window_hint};
+pub use streams::{KeptDiscography, SOUNDCLOUD_WINDOW_HINT, StreamSchedule, WINDOW_HINT, WebLogin, WebLoginError, kept_discography, window_hint};
 use import::{IMPORT_ID, ImportService, Internal};
 use queue::{Entry, Queue};
 
@@ -318,6 +318,8 @@ pub struct Runtime {
     stopped: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
     /// The worker's thread (a shutdown from it cannot wait for itself).
     worker_id: std::thread::ThreadId,
+    /// The streaming services the worker got, for the local API's lookups.
+    streams: Vec<Arc<dyn StreamService>>,
 }
 
 impl Runtime {
@@ -362,6 +364,7 @@ impl Runtime {
                 initial_prefs.masters_dir = initial_prefs.library_dir.join(".musiclib").join("masters");
             }
         }
+        let streams = config.streams.clone();
         let state = Arc::new(RwLock::new(ViewState {
             prefs: initial_prefs,
             home: nikgob_view::HomeView { loading: true, ..Default::default() },
@@ -388,6 +391,7 @@ impl Runtime {
             worker: parking_lot::Mutex::new(Some(worker)),
             stopped: Arc::default(),
             worker_id,
+            streams,
         };
         rt.send(Command::LoadHome);
         rt.send(Command::LoadLibrary);
@@ -495,9 +499,19 @@ impl Runtime {
 pub struct RuntimeHandle {
     tx: Sender<Msg>,
     state: Arc<RwLock<ViewState>>,
+    streams: Vec<Arc<dyn StreamService>>,
 }
 
 impl RuntimeHandle {
+    /// The service of `kind` as the player would ask it now: switched on,
+    /// and (Spotify) signed in; `None` otherwise.
+    pub fn service(&self, kind: StreamKind) -> Option<Arc<dyn StreamService>> {
+        if !self.state.read().prefs.service_enabled(kind) {
+            return None;
+        }
+        self.streams.iter().find(|s| s.service() == kind && streams::usable(kind, &s.account())).cloned()
+    }
+
     pub fn send(&self, command: Command) {
         let _ = self.tx.send(Msg::Cmd(command));
     }
@@ -517,7 +531,7 @@ impl RuntimeHandle {
 impl Runtime {
     /// A [`RuntimeHandle`] for another thread.
     pub fn handle(&self) -> RuntimeHandle {
-        RuntimeHandle { tx: self.tx.clone(), state: self.state.clone() }
+        RuntimeHandle { tx: self.tx.clone(), state: self.state.clone(), streams: self.streams.clone() }
     }
 }
 
@@ -1820,6 +1834,7 @@ impl Worker {
             Command::ImportFolder(dir) => self.import_paths(vec![dir]),
             Command::MergeEditions(id) => self.merge_editions(id),
             Command::KeepEditionsApart(id) => self.keep_editions_apart(id),
+            Command::ConfirmChoice { id, option } if id & api::API_CONFIRM_ID != 0 => self.api_confirm(id, option),
             Command::ConfirmChoice { id, option } if id & streams::WISH_ID != 0 => {
                 self.wish_confirm(id, option);
             }
@@ -2000,7 +2015,13 @@ impl Worker {
             | Command::ApiStatus { .. }
             | Command::ApiTokensUsed(_)
             | Command::ApiRun { .. }
-            | Command::ApiShuffle(_)) => self.api_command(c),
+            | Command::ApiShuffle(_)
+            | Command::ApiShare { .. }
+            | Command::ApiReadTags { .. }
+            | Command::ApiRetag { .. }
+            | Command::ApiTrash { .. }
+            | Command::ApiSourceSearch { .. }
+            | Command::ApiConfirmDownload { .. }) => self.api_command(c),
         }
     }
 
