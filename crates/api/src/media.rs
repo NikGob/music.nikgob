@@ -10,6 +10,7 @@
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -20,10 +21,12 @@ use nikgob_core::model::{ReleaseId, SourceKind, TrackId};
 use nikgob_runtime::Resolver;
 
 use crate::Shared;
+use crate::auth::Caller;
 use crate::error::{ApiError, query_value};
 use crate::library::{blocking, db};
 
-/// The file's BLAKE3 (hex) as it is now, with `?hash=1`: a paired device
+/// The file's BLAKE3 (hex) as it is now, with `?hash=1` (or with the
+/// `?hash=<blake3>` a paired owner device asks for exactly one file by): it
 /// checks the copy it fetched by it.
 pub const HASH_HEADER: &str = "x-nikgob-blake3";
 /// The file's extension (`flac`, `opus`…), for the copy's name.
@@ -184,11 +187,49 @@ fn best_file(shared: &Shared, track: TrackId) -> Result<Option<(std::fs::File, P
     Ok(local.into_iter().find_map(|s| open_inside(&resolver.path(&s.locator), &roots)))
 }
 
+/// The song's local file whose BLAKE3 the library knows as `hash`, inside
+/// the served folders, open.
+fn file_of_hash(shared: &Shared, track: TrackId, hash: &str) -> Result<Option<(std::fs::File, PathBuf)>, ApiError> {
+    let sources = shared.lib.sources_of_track(track).map_err(db)?;
+    let root = shared.rt.state().prefs.library_dir.clone();
+    let resolver = Resolver::new(shared.lib.clone(), root);
+    let roots = roots(shared);
+    Ok(sources
+        .into_iter()
+        .filter(|s| s.kind == SourceKind::LocalFile && s.available && s.trashed_at.is_none())
+        .filter(|s| s.file_hash.as_deref().is_some_and(|h| h.eq_ignore_ascii_case(hash)))
+        .find_map(|s| open_inside(&resolver.path(&s.locator), &roots)))
+}
+
 /// The BLAKE3 (hex) of the file at `path`.
 fn blake3_of(path: &FsPath) -> std::io::Result<String> {
     let mut h = blake3::Hasher::new();
     h.update_reader(std::fs::File::open(path)?)?;
     Ok(h.finalize().to_hex().to_string())
+}
+
+/// The BLAKE3 of the open `file` at `path`: the one noted when it was last
+/// read, while its size and change time are still those of then; else
+/// read now (and noted).
+pub(crate) fn hash_of_file(shared: &Shared, file: &std::fs::File, path: &FsPath) -> Result<String, ApiError> {
+    let meta = file.metadata().map_err(|e| ApiError::internal(e.to_string()))?;
+    let size = meta.len();
+    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64);
+    let key = path.to_string_lossy();
+    if let Some(mtime) = mtime
+        && let Ok(Some((s, m, h))) = shared.lib.file_stamp(&key)
+        && s == size
+        && m == mtime
+    {
+        return Ok(h);
+    }
+    let sum = blake3_of(path).map_err(|e| ApiError::internal(e.to_string()))?;
+    if let Some(mtime) = mtime
+        && let Err(e) = shared.lib.put_file_stamp(&key, size, mtime, &sum)
+    {
+        log::warn!("media: the hash of {} not noted: {e}", path.display());
+    }
+    Ok(sum)
 }
 
 /// `GET /v1/media/tracks/{id}/audio`.
@@ -198,25 +239,67 @@ fn blake3_of(path: &FsPath) -> std::io::Result<String> {
     tag = "media",
     params(
         ("id" = String, Path, description = "id песни"),
-        ("hash" = Option<String>, Query, description = "1: BLAKE3 файла в заголовке x-nikgob-blake3"),
+        ("hash" = Option<String>, Query, description = "1: BLAKE3 файла в заголовке x-nikgob-blake3; BLAKE3 файла: именно этот файл (только свои устройства Межсети)"),
+        ("profile" = Option<String>, Query, description = "orig: файл как есть, другие форматы позже (только свои устройства Межсети)"),
     ),
     responses(
         (status = 200, description = "Файл как есть"),
         (status = 206, description = "Часть файла по Range"),
+        (status = 400, body = crate::error::ErrorBody),
+        (status = 403, body = crate::error::ErrorBody),
         (status = 404, body = crate::error::ErrorBody),
         (status = 416, description = "Range за концом файла"),
     ),
     security(("bearer" = []), ("token" = []))
 )]
-pub async fn audio(State(sh): State<Arc<Shared>>, Path(id): Path<String>, RawQuery(raw): RawQuery, headers: HeaderMap) -> Result<Response, ApiError> {
+pub async fn audio(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    RawQuery(raw): RawQuery,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
     let id: TrackId = id.parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
-    let hash = query_value(raw.as_deref(), "hash").is_some_and(|v| v == "1");
+    let raw = raw.as_deref();
+    // `hash=1`: the file's hash in a header; `hash=<blake3>`: exactly that
+    // file of the song, its hash in the header too.
+    let (hash, select) = match query_value(raw, "hash").as_deref() {
+        None => (false, None),
+        Some("1") => (true, None),
+        Some(h) if crate::sync::is_hash(&h.to_ascii_lowercase()) => (true, Some(h.to_ascii_lowercase())),
+        Some(_) => return Err(ApiError::bad_request("Неверный hash")),
+    };
+    let profile = query_value(raw, "profile");
+    // The selectors of a copy are the owner's devices' only; the plain
+    // route stays as it is.
+    if profile.is_some() || select.is_some() {
+        crate::sync::peer_of(&caller)?;
+    }
+    // The form the file is asked in: the original only, for now (the
+    // phone's Opus and MP3 come with the phone).
+    if let Some(p) = profile {
+        match nikgob_view::MeshFormat::parse(&p) {
+            Some(f) if f.ready() => {}
+            _ => return Err(ApiError::bad_request("Такого формата пока нет")),
+        }
+    }
     let shared = sh.clone();
     let found = blocking(move || {
-        let Some((file, path)) = best_file(&shared, id)? else {
+        let picked = match &select {
+            Some(h) => file_of_hash(&shared, id, h)?,
+            None => best_file(&shared, id)?,
+        };
+        let Some((file, path)) = picked else {
             return Ok(None);
         };
-        let sum = if hash { Some(blake3_of(&path).map_err(|e| ApiError::internal(e.to_string()))?) } else { None };
+        let sum = if hash { Some(hash_of_file(&shared, &file, &path)?) } else { None };
+        // The file asked for changed since the library hashed it: it is
+        // not here any more.
+        if let (Some(want), Some(sum)) = (&select, &sum)
+            && want != sum
+        {
+            return Ok(None);
+        }
         Ok(Some((file, path, sum)))
     })
     .await?;

@@ -929,9 +929,9 @@ mod tests {
     fn a_transfer_has_a_speed_and_it_falls_when_nothing_comes() {
         let mut map = MapState::default();
         let mut m = MeshView::default();
-        m.nodes.push(MeshNodeView { id: "pi".into(), transfer: Some(MeshTransfer { done: 0, total: 100 << 20, paused: false }), ..MeshNodeView::default() });
+        m.nodes.push(MeshNodeView { id: "pi".into(), transfer: Some(MeshTransfer { done: 0, total: 100 << 20, paused: false, speed: 0 }), ..MeshNodeView::default() });
         track_speeds(&mut map, &m, 0.0);
-        m.nodes[0].transfer = Some(MeshTransfer { done: 10 << 20, total: 100 << 20, paused: false });
+        m.nodes[0].transfer = Some(MeshTransfer { done: 10 << 20, total: 100 << 20, paused: false, speed: 0 });
         track_speeds(&mut map, &m, 1.0);
         let v = map.speeds["pi"].2;
         assert!((v - f64::from(10u32 << 20)).abs() < 1.0, "{v}");
@@ -1028,7 +1028,7 @@ mod tests {
             name: "Pi".into(),
             kind: MeshKind::Pi,
             online: true,
-            transfer: Some(MeshTransfer { done: 1, total: 2, paused: false }),
+            transfer: Some(MeshTransfer { done: 1, total: 2, paused: false, speed: 0 }),
             ..MeshNodeView::default()
         });
         let mut pages = PageState::default();

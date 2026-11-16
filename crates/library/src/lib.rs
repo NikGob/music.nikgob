@@ -40,6 +40,7 @@ mod graph;
 mod recordings;
 mod recs;
 mod repairs;
+pub mod replica;
 pub mod search;
 mod selection;
 mod stats;

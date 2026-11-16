@@ -47,6 +47,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0033_photo_backoff_banners.sql"),
     include_str!("../migrations/0034_mesh.sql"),
     include_str!("../migrations/0035_sync.sql"),
+    include_str!("../migrations/0036_replica.sql"),
+    include_str!("../migrations/0037_replica_moves.sql"),
 
 ];
 

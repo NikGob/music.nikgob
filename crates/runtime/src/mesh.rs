@@ -79,7 +79,23 @@ pub(crate) fn set_pins(all: &mut Vec<MeshPinsRecord>, node: &str, pins: &MeshPin
     }
 }
 
+/// What a device newly paired stores until the owner chooses: a Raspberry
+/// Pi or a server the whole library (what they are for), anything else
+/// nothing, so pairing a laptop never fills its disk unasked.
+pub(crate) fn first_profile(kind: MeshKind) -> MeshProfile {
+    match kind {
+        MeshKind::Pi | MeshKind::Server => MeshProfile::Full,
+        MeshKind::Pc | MeshKind::Phone | MeshKind::Tv => MeshProfile::SoundOnly,
+    }
+}
+
 impl MeshKeep {
+    /// The devices being forgotten (their «Отменить» up, or passed to the
+    /// mesh): their copies count for nothing.
+    pub(crate) fn leaving(&self) -> Vec<String> {
+        self.forgetting.iter().map(|(f, _)| f.clone()).chain(self.sent.iter().cloned()).collect()
+    }
+
     /// The sync with `id` as the view shows it.
     fn sync_of(&self, id: &str) -> MeshSyncView {
         let mut s = self.sync.get(id).cloned().unwrap_or_default();
@@ -146,7 +162,8 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
     for n in &mut nodes {
         n.pins = pins_view(keep.settings.pins_of(&n.id));
         if let Some(t) = n.transfer.as_mut() {
-            t.paused = keep.paused.contains(&n.id);
+            // Paused here, or by the device itself or another one.
+            t.paused = t.paused || keep.paused.contains(&n.id);
         }
     }
     nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
@@ -219,7 +236,7 @@ pub(crate) fn rows_to_write(live: &MeshSnapshot, rows: &[NodeRow], now: i64) -> 
             alias: old.and_then(|o| o.alias.clone()),
             kind: v.kind.key().to_owned(),
             scope: v.scope.key().to_owned(),
-            profile: old.map_or_else(|| MeshProfile::Full.key(), |o| o.profile.clone()),
+            profile: old.map_or_else(|| first_profile(v.kind).key(), |o| o.profile.clone()),
             last_seen: if v.online { Some(now) } else { v.last_seen_ms.or(old.and_then(|o| o.last_seen)) },
             addr: v.addr.clone().or_else(|| old.and_then(|o| o.addr.clone())),
             version: v.version.clone().or_else(|| old.and_then(|o| o.version.clone())),
@@ -346,6 +363,8 @@ impl Worker {
             // A device driven from here that is gone from the list.
             self.connect_check_target();
         }
+        // A forget or another choice reaches the masters' movers at once.
+        self.replica_follow();
     }
 
     /// Changes `[mesh]` in settings.toml; a failure is a toast.
@@ -494,6 +513,8 @@ impl Worker {
                     changed
                 });
                 self.mesh_publish();
+                // What may go is looked at again with the new choice.
+                self.replica_soon();
             }
             Command::MeshSetPins { node_id, pins } => self.mesh_edit(move |m| set_pins(&mut m.pins, &node_id, &pins)),
             Command::MeshPauseTransfer { node_id, paused } => {
@@ -678,6 +699,24 @@ mod tests {
         assert_eq!(w[0].paired_at, Some(1_000_000), "paired once");
     }
 
+    /// A Pi or a server keeps the whole library from its pairing on;
+    /// anything else nothing until the owner chooses; a choice made stays.
+    #[test]
+    fn a_new_device_stores_by_its_kind() {
+        let mut lap = node("l", "Ноутбук", true);
+        lap.view.kind = MeshKind::Pc;
+        let live = MeshSnapshot { paired: true, nodes: vec![node("a", "Pi", true), lap], ..MeshSnapshot::default() };
+        let rows = rows_to_write(&live, &[], 1);
+        assert_eq!(rows[0].profile, "full");
+        assert_eq!(rows[1].profile, "sound");
+        let mut chosen = rows[1].clone();
+        chosen.profile = "library".into();
+        let again = rows_to_write(&live, &[rows[0].clone(), chosen], 100_000);
+        assert!(again.iter().all(|r| r.id != "l" || r.profile == "library"));
+        assert_eq!(first_profile(MeshKind::Server), MeshProfile::Full);
+        assert_eq!(first_profile(MeshKind::Phone), MeshProfile::SoundOnly);
+    }
+
     #[test]
     fn devices_leave_the_table_only_when_a_ring_says_so() {
         let rows = vec![row("a", "Pi"), row("b", "TV"), row("c", "Phone")];
@@ -695,7 +734,7 @@ mod tests {
         let list = nikgob_view::PlaylistId::new();
         assert!(set_pins(&mut settings.pins, "a", &MeshPins { liked: true, playlists: vec![list] }));
         let mut live_a = node("a", "Pi", true);
-        live_a.view.transfer = Some(nikgob_view::MeshTransfer { done: 1, total: 2, paused: false });
+        live_a.view.transfer = Some(nikgob_view::MeshTransfer { done: 1, total: 2, paused: false, speed: 0 });
         let live = MeshSnapshot { running: true, paired: true, nodes: vec![live_a, node("b", "TV", true)], ..MeshSnapshot::default() };
         let ask = MeshForgetAsk { node_id: "a".into(), name: "Pi".into(), originals: Some(4) };
         let keep = MeshKeep {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use iroh::endpoint::{Connection, Endpoint, RecvStream, RelayMode, SendStream, VarInt, presets};
+use iroh::endpoint::{Connection, Endpoint, IncomingAddr, RecvStream, RelayMode, SendStream, VarInt, presets};
 use iroh::{EndpointAddr, PublicKey, SecretKey};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use nikgob_api::LocalApi;
@@ -31,6 +31,12 @@ use crate::{ALPN_CTL, ALPN_HTTP, ALPN_PAIR, MESH_PORT, MeshContext, MeshError, t
 /// reads the ring and the links as they are here).
 #[path = "sync.rs"]
 mod sync;
+
+/// The library's files on this device by the profile the ring holder gives
+/// it, and the copies this computer's masters have on the others (a child
+/// of this module for the same reason).
+#[path = "replica.rs"]
+mod replica;
 
 /// A link sends its presence at least this often…
 const HEARTBEAT: Duration = Duration::from_secs(5);
@@ -62,13 +68,11 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// This computer's address in the home network: the one a connection out
-/// would leave from (a UDP socket only picks its route, nothing is sent).
+/// This computer's best address on the home network (an IPv4 one first):
+/// a private one of a real card ([`discovery::lan_addrs`]).
 fn lan_ip() -> Option<IpAddr> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("10.254.254.254:9").ok()?;
-    let ip = s.local_addr().ok()?.ip();
-    (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+    let all = discovery::lan_addrs();
+    all.iter().copied().find(IpAddr::is_ipv4).or_else(|| all.first().copied())
 }
 
 /// The control link's messages (ALPN `nikgob/ctl/1`).
@@ -155,6 +159,9 @@ struct State {
     running: bool,
     port: Option<u16>,
     lan: Option<IpAddr>,
+    /// This device's home network subnets: only addresses inside them are
+    /// dialled or remembered.
+    subnets: Vec<discovery::Subnet>,
     peers: HashMap<PublicKey, Peer>,
     table: Table,
     /// Addresses the runtime keeps for the paired devices.
@@ -171,6 +178,8 @@ struct Node {
     ep: Endpoint,
     mdns: Option<ServiceDaemon>,
     announced: Mutex<Option<String>>,
+    /// The addresses announced (told in the log when they change).
+    said: Mutex<Vec<IpAddr>>,
     stop: watch::Sender<bool>,
     port: u16,
 }
@@ -195,6 +204,8 @@ pub(crate) struct Shared {
     /// Each device's room for running tunnelled requests.
     streams: Mutex<HashMap<PublicKey, Arc<Semaphore>>>,
     library: Option<nikgob_library::Library>,
+    /// This device's pull of the library's files and the pauses asked here.
+    replica: replica::ReplicaShared,
 }
 
 /// Binds an endpoint with `key`: LAN only, every ALPN of the mesh; on
@@ -264,6 +275,15 @@ async fn join_ticket(ep: &Endpoint, me: &Me, t: &Ticket) -> Result<(Grant, Strin
     out
 }
 
+/// A ticket's text, checked, with only the addresses inside this device's
+/// home network subnets (none left: nothing is dialled).
+fn ticket_on_lan(text: &str) -> Result<Ticket, String> {
+    let mut t = ticket_of(text)?;
+    let subnets = discovery::lan_subnets();
+    t.addrs.retain(|a| discovery::on_lan(a.ip(), &subnets));
+    Ok(t)
+}
+
 /// A ticket's text, checked: decodes, not expired.
 fn ticket_of(text: &str) -> Result<Ticket, String> {
     let t = Ticket::decode(text).map_err(|e| e.to_string())?;
@@ -279,7 +299,7 @@ pub(crate) async fn join_offline(paths: &MeshPaths, name: &str, kind: MeshKind, 
     if let Ok(Some(_)) = Ring::load(&paths.ring(), &key.public()) {
         return Err("Это устройство уже привязано".to_owned());
     }
-    let t = ticket_of(text)?;
+    let t = ticket_on_lan(text)?;
     let ep = bind(&key, false).await.map_err(|e| format!("Не удалось открыть сеть: {e}"))?;
     let me = Me { id: key.public(), name: clean_name(name), kind };
     let out = join_ticket(&ep, &me, &t).await;
@@ -355,6 +375,7 @@ impl Shared {
             running: false,
             port: None,
             lan: None,
+            subnets: Vec::new(),
             peers: HashMap::new(),
             table: Table::default(),
             known: HashMap::new(),
@@ -364,6 +385,8 @@ impl Shared {
             error: None,
             next_link: 0,
         };
+        // The pauses asked here come back before the pull loop starts.
+        let replica = replica::ReplicaShared::load(paths.dir.join(replica::PAUSED));
         Ok(Self {
             paths,
             key,
@@ -382,6 +405,7 @@ impl Shared {
             http_in: Mutex::new((0, Vec::new())),
             streams: Mutex::new(HashMap::new()),
             library: ctx.library,
+            replica,
         })
     }
 
@@ -452,16 +476,55 @@ impl Shared {
         self.state.lock().ring.as_ref().and_then(|r| r.trusted(id).cloned())
     }
 
-    /// Where `id` can be dialled: mDNS first, then the last address that
-    /// worked, then the runtime's.
+    /// Where `id` can be dialled, addresses inside this device's home
+    /// network subnets only: mDNS first, then the last address that worked
+    /// or that it came from, then the runtime's (its node row).
     fn addrs_of(&self, id: &PublicKey) -> Option<Vec<SocketAddr>> {
         let s = self.state.lock();
-        s.table
-            .by_id(id)
-            .map(|x| x.addrs.clone())
-            .filter(|a| !a.is_empty())
-            .or_else(|| s.peers.get(id).and_then(|p| p.addr).map(|a| vec![a]))
-            .or_else(|| s.known.get(id).map(|a| vec![*a]))
+        let mut out: Vec<SocketAddr> = s.table.by_id(id).map(|x| x.addrs.clone()).unwrap_or_default();
+        out.extend(s.peers.get(id).and_then(|p| p.addr));
+        out.extend(s.known.get(id).copied());
+        out.retain(|a| discovery::on_lan(a.ip(), &s.subnets));
+        let mut seen = HashSet::new();
+        out.retain(|a| seen.insert(*a));
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// A ring member reached this device from `from`: kept as where it can
+    /// be dialled when mDNS has nothing of it (the snapshot passes it to
+    /// its node row). Only an address inside this device's home network
+    /// subnets.
+    fn remember_addr(&self, peer: &PublicKey, from: Option<SocketAddr>) {
+        let Some(from) = from.map(|a| SocketAddr::new(a.ip().to_canonical(), a.port())) else { return };
+        if self.trusted_cert(peer).is_none() {
+            return;
+        }
+        let changed = {
+            let mut s = self.state.lock();
+            if !discovery::on_lan(from.ip(), &s.subnets) {
+                return;
+            }
+            let p = s.peers.entry(*peer).or_default();
+            let changed = p.addr != Some(from);
+            p.addr = Some(from);
+            changed
+        };
+        if changed {
+            log::info!("mesh: {} reached this device from {from}", peer.fmt_short());
+            self.notify();
+        }
+    }
+
+    /// This device's presence as `peer` hears it: a guest's device hears
+    /// nothing of what the owner's devices store or pause.
+    fn presence_for(&self, peer: &PublicKey, mut p: Presence) -> Presence {
+        let owner = self.trusted_cert(peer).is_some_and(|c| c.scope == MeshScope::Owner);
+        if !owner {
+            p.holder = false;
+            p.assign.clear();
+            p.pause.clear();
+        }
+        p
     }
 
     fn set_pairing(&self, p: MeshPairing) {
@@ -647,7 +710,17 @@ impl Shared {
         if let Some(old) = node.announced.lock().take() {
             let _ = d.unregister(&old);
         }
-        match discovery::announce(d, &name, &self.key.public(), tag.as_deref(), kind, node.port) {
+        // The home network's addresses only, told once when they change.
+        let ips = discovery::lan_addrs();
+        {
+            let mut said = node.said.lock();
+            if *said != ips {
+                let list: Vec<String> = ips.iter().map(ToString::to_string).collect();
+                log::info!("mesh: announced on the home network at {}", if list.is_empty() { "no address".to_owned() } else { list.join(", ") });
+                *said = ips.clone();
+            }
+        }
+        match discovery::announce(d, &name, &self.key.public(), tag.as_deref(), kind, node.port, &ips) {
             Ok(full) => *node.announced.lock() = Some(full),
             Err(e) => log::warn!("mesh: cannot announce on the network: {e}"),
         }
@@ -670,6 +743,11 @@ impl Shared {
             let p = presence::of_view(&st, &name, kind, &self.version, now_ms());
             (st.mesh.enabled, name, known, p)
         };
+        // The copies: this device's pull, and the devices whose pulls the
+        // owner paused here.
+        let mut p = p;
+        p.transfer = self.replica.transfer();
+        p.pause = self.replica.pause_list();
         let renamed = {
             let mut s = self.state.lock();
             s.known = known.into_iter().collect();
@@ -686,6 +764,8 @@ impl Shared {
                 *cur = p;
                 true
             } else {
+                // The heartbeat carries the transfer's smaller steps.
+                cur.transfer = p.transfer;
                 false
             }
         }) {
@@ -705,12 +785,23 @@ impl Shared {
                 None
             }
         };
-        let node = Arc::new(Node { ep, mdns, announced: Mutex::new(None), stop: watch::channel(false).0, port });
+        // mDNS keeps quiet on the virtual adapters (VPNs, virtual machines'
+        // and containers' switches).
+        if let Some(d) = &mdns {
+            let quiet: Vec<mdns_sd::IfKind> = discovery::quiet_ifaces().into_iter().map(mdns_sd::IfKind::Name).collect();
+            if !quiet.is_empty()
+                && let Err(e) = d.disable_interface(quiet)
+            {
+                log::warn!("mesh: mDNS on the virtual adapters not turned off: {e}");
+            }
+        }
+        let node = Arc::new(Node { ep, mdns, announced: Mutex::new(None), said: Mutex::new(Vec::new()), stop: watch::channel(false).0, port });
         {
             let mut s = self.state.lock();
             s.running = true;
             s.port = Some(port);
             s.lan = lan_ip();
+            s.subnets = discovery::lan_subnets();
             s.error = None;
             if s.ring.is_none() && s.code.is_none() {
                 self.fresh_code(&mut s);
@@ -777,6 +868,7 @@ impl Shared {
             version: Some(self.version.clone()),
             storage: own.storage,
             playing: own.playing,
+            transfer: self.replica.transfer(),
             ..MeshNodeView::default()
         };
         let members: Vec<Cert> = s.ring.as_ref().map(|r| r.others().cloned().collect()).unwrap_or_default();
@@ -792,7 +884,8 @@ impl Shared {
                 .by_id(&id)
                 .and_then(|x| x.addrs.first().copied())
                 .or_else(|| p.and_then(|p| p.addr))
-                .or_else(|| s.known.get(&id).copied());
+                .or_else(|| s.known.get(&id).copied())
+                .filter(|a| discovery::on_lan(a.ip(), &s.subnets));
             let view = MeshNodeView {
                 id: c.node.clone(),
                 name: pres.map(|p| p.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| c.name.clone()),
@@ -805,6 +898,7 @@ impl Shared {
                 version: pres.map(|p| p.version.clone()).filter(|v| !v.is_empty()),
                 storage: pres.and_then(|p| p.storage),
                 playing: if online { pres.and_then(|p| p.playing.clone()) } else { None },
+                transfer: if online { pres.and_then(|p| p.transfer) } else { None },
                 ..MeshNodeView::default()
             };
             nodes.push(MeshSnapshotNode { view, cert: serde_json::to_string(&c).unwrap_or_default() });
@@ -874,6 +968,15 @@ impl Shared {
             }
             Command::MeshSetScope { node_id, scope } => self.set_scope(&node_id, scope),
             Command::MeshClearPairing => self.set_pairing(MeshPairing::Idle),
+            // The pause of a device's copies: this device's own, or told
+            // to the other through the presence.
+            Command::MeshPauseTransfer { node_id, paused } => {
+                self.replica.set_paused(&node_id, paused);
+                self.notify();
+            }
+            Command::ReplicaRecheck { card, hashes, need, leaving } => {
+                tokio::spawn(replica::recheck(self.clone(), card, hashes, need, leaving));
+            }
             other => log::debug!("mesh: not a command of the mesh: {other:?}"),
         }
     }
@@ -939,7 +1042,12 @@ impl Shared {
                 return Err(PairError::Refused(Refusal::NotHolder).user_message());
             }
         }
-        let addrs = self.state.lock().table.by_id(&id).map(|x| x.addrs.clone()).filter(|a| !a.is_empty()).ok_or("Устройство пропало из сети")?;
+        let addrs = {
+            let s = self.state.lock();
+            let on_lan = |a: &&SocketAddr| discovery::on_lan(a.ip(), &s.subnets);
+            s.table.by_id(&id).map(|x| x.addrs.iter().filter(on_lan).copied().collect::<Vec<SocketAddr>>()).filter(|a| !a.is_empty())
+        }
+        .ok_or("Устройство пропало из сети")?;
         let conn = connect(&node.ep, id, &addrs, ALPN_PAIR).await.map_err(|e| PairError::Io(e).user_message())?;
         let me = self.me();
         let (mut send, mut recv) = conn.open_bi().await.map_err(|e| PairError::Io(e.to_string()).user_message())?;
@@ -964,7 +1072,7 @@ impl Shared {
 
     /// Joins the ring of a ticket's holder: its id and name.
     async fn join(self: &Arc<Self>, text: &str) -> Result<(String, String), String> {
-        let t = ticket_of(text)?;
+        let t = ticket_on_lan(text)?;
         if self.state.lock().ring.is_some() {
             return Err("Это устройство уже привязано".to_owned());
         }
@@ -1032,10 +1140,21 @@ impl Shared {
     /// instance, a ticket handed over by `nikgobd pair`.
     async fn tick(self: &Arc<Self>) {
         let running = self.state.lock().running;
-        let lan = if running { lan_ip() } else { None };
+        let all = if running { discovery::lan_addrs() } else { Vec::new() };
+        let subnets = if running { discovery::lan_subnets() } else { Vec::new() };
+        let lan = all.iter().copied().find(IpAddr::is_ipv4).or_else(|| all.first().copied());
+        // The home network's addresses changed (another network, a new
+        // lease): announced again.
+        let node = self.node.lock().clone();
+        if let Some(node) = node
+            && *node.said.lock() != all
+        {
+            self.announce(&node);
+        }
         let expired = {
             let mut s = self.state.lock();
             s.lan = lan;
+            s.subnets = subnets;
             if s.invite.as_ref().is_some_and(|i| now_ms() >= i.expires_ms) {
                 s.invite = None;
                 true
@@ -1066,8 +1185,8 @@ impl Shared {
 
     // ------------------------------------------------------------ links
 
-    fn hello(&self) -> Option<Ctl> {
-        let presence = self.presence.borrow().clone();
+    fn hello(&self, peer: &PublicKey) -> Option<Ctl> {
+        let presence = self.presence_for(peer, self.presence.borrow().clone());
         let s = self.state.lock();
         let r = s.ring.as_ref()?;
         Some(Ctl::Hello { ring: r.public.to_string(), certs: r.members.clone(), revoked: r.revoked.clone(), presence })
@@ -1263,7 +1382,7 @@ impl Shared {
         let opened: Result<(Connection, SendStream, RecvStream), String> = async {
             let conn = connect(&node.ep, id, &addrs, ALPN_CTL).await?;
             let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
-            let hello = self.hello().ok_or("in no ring")?;
+            let hello = self.hello(&id).ok_or("in no ring")?;
             write_frame(&mut send, &hello).await.map_err(|e| e.to_string())?;
             let reply: Ctl = match tokio::time::timeout(HANDSHAKE, read_frame(&mut recv)).await {
                 Ok(r) => r.map_err(|e| e.to_string())?,
@@ -1302,7 +1421,7 @@ impl Shared {
         }
     }
 
-    async fn accept_link(self: Arc<Self>, node: Arc<Node>, conn: Connection, peer: PublicKey, permit: OwnedSemaphorePermit) {
+    async fn accept_link(self: Arc<Self>, node: Arc<Node>, conn: Connection, peer: PublicKey, permit: OwnedSemaphorePermit, from: Option<SocketAddr>) {
         let Ok(Ok((mut send, mut recv))) = tokio::time::timeout(HANDSHAKE, conn.accept_bi()).await else {
             conn.close(VarInt::from_u32(0), b"timeout");
             return;
@@ -1319,7 +1438,8 @@ impl Shared {
             wind_down(&conn, &mut send, &mut recv).await;
             return;
         }
-        let Some(mine) = self.hello() else { return };
+        self.remember_addr(&peer, from);
+        let Some(mine) = self.hello(&peer) else { return };
         if write_frame(&mut send, &mine).await.is_err() {
             return;
         }
@@ -1367,7 +1487,7 @@ impl Shared {
                     if r.is_err() {
                         break;
                     }
-                    let p = pres.borrow_and_update().clone();
+                    let p = self.presence_for(&peer, pres.borrow_and_update().clone());
                     if write_frame(&mut send, &Ctl::Presence { presence: p }).await.is_err() {
                         break;
                     }
@@ -1395,7 +1515,7 @@ impl Shared {
                     if !self.link_current(&peer, n) {
                         break;
                     }
-                    let p = self.presence.borrow().clone();
+                    let p = self.presence_for(&peer, self.presence.borrow().clone());
                     if write_frame(&mut send, &Ctl::Presence { presence: p }).await.is_err() {
                         break;
                     }
@@ -1412,15 +1532,19 @@ impl Shared {
 
     /// An incoming connection, set up; `permit` is its place among those
     /// being set up, held until its handshake is done.
-    async fn incoming(self: Arc<Self>, node: Arc<Node>, conn: Connection, permit: OwnedSemaphorePermit) {
+    /// `from`: the address it came from (kept for a ring member as where
+    /// it can be dialled).
+    async fn incoming(self: Arc<Self>, node: Arc<Node>, conn: Connection, permit: OwnedSemaphorePermit, from: Option<SocketAddr>) {
         let peer = conn.remote_id();
         let alpn = conn.alpn().to_vec();
         if alpn == ALPN_PAIR {
-            self.serve_pair(conn, peer).await;
+            self.clone().serve_pair(conn, peer).await;
             drop(permit);
+            self.remember_addr(&peer, from);
         } else if alpn == ALPN_CTL {
-            self.accept_link(node, conn, peer, permit).await;
+            self.accept_link(node, conn, peer, permit, from).await;
         } else if alpn == ALPN_HTTP {
+            self.remember_addr(&peer, from);
             self.serve_http(conn, peer, permit).await;
         } else {
             conn.close(VarInt::from_u32(1), b"alpn");
@@ -1616,10 +1740,14 @@ async fn accept_loop(sh: Arc<Shared>, node: Arc<Node>) {
             drop(incoming);
             continue;
         };
+        let from = match incoming.remote_addr() {
+            IncomingAddr::Ip(a) => Some(a),
+            _ => None,
+        };
         let (sh, node) = (sh.clone(), node.clone());
         tokio::spawn(async move {
             match tokio::time::timeout(HANDSHAKE, incoming).await {
-                Ok(Ok(conn)) => sh.incoming(node, conn, permit).await,
+                Ok(Ok(conn)) => sh.incoming(node, conn, permit, from).await,
                 Ok(Err(e)) => log::debug!("mesh: an incoming connection failed: {e}"),
                 Err(_) => log::debug!("mesh: an incoming connection timed out"),
             }
@@ -1688,6 +1816,8 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
     let mut changes = sh.wake.subscribe();
     let publisher = tokio::spawn(publish_loop(sh.clone()));
     let syncer = tokio::spawn(sync::run(sh.clone()));
+    let replicator = tokio::spawn(replica::run(sh.clone()));
+    let auditor = tokio::spawn(replica::audit(sh.clone()));
     let mut retry_at: Option<Instant> = None;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1735,6 +1865,8 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
         }
     }
     syncer.abort();
+    replicator.abort();
+    auditor.abort();
     sh.stop_node().await;
     publisher.abort();
     sh.rt.send(Command::MeshUpdate(Box::new(sh.snapshot())));

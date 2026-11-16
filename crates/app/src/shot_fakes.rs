@@ -1675,7 +1675,7 @@ fn mesh(s: &mut ViewState, kind: MeshFake, secs: f64) {
             duration_ms: Some(212_000),
         }),
         profile: MeshProfile::Full,
-        transfer: Some(MeshTransfer { done, total, paused: false }),
+        transfer: Some(MeshTransfer { done, total, paused: false, speed: 0 }),
         ..MeshNodeView::default()
     };
     let phone = MeshNodeView {

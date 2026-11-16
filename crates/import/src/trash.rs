@@ -14,16 +14,15 @@ use nikgob_library::Library;
 use crate::config::ImportConfig;
 use crate::error::Result;
 use crate::fsutil::{
-    check_inside, create_dir_all, move_file, prune_empty_dirs, remove_file, reserve_unique, unix_secs, ymd_from_unix,
+    check_inside, create_dir_all, move_file, move_new_verified, prune_empty_dirs, remove_file, reserve_unique, unix_secs, ymd_from_unix,
 };
 use crate::sanitize::{long_path, sanitize_component, truncate_chars};
 
 /// Retention of trashed files, days.
 pub const TRASH_DAYS: u32 = 30;
 
-/// Moves `file` into `trash_dir` with a date prefix; returns the new location.
-pub fn trash_file(trash_dir: &Path, file: &Path) -> Result<PathBuf> {
-    create_dir_all(trash_dir)?;
+/// `file`'s name in the Trash: today's date before it (`YYYY-MM-DD name`).
+fn dated_name(file: &Path) -> String {
     let (y, m, d) = ymd_from_unix(unix_secs());
     let name = file
         .file_name()
@@ -35,9 +34,15 @@ pub fn trash_file(trash_dir: &Path, file: &Path) -> Result<PathBuf> {
         Some((stem, ext)) if ext.len() <= 8 => format!("{}.{ext}", truncate_chars(stem, 150)),
         _ => truncate_chars(&name, 150),
     };
+    format!("{y:04}-{m:02}-{d:02} {name}")
+}
+
+/// Moves `file` into `trash_dir` with a date prefix; returns the new location.
+pub fn trash_file(trash_dir: &Path, file: &Path) -> Result<PathBuf> {
+    create_dir_all(trash_dir)?;
     // The name is claimed atomically: two files with the same name trashed at
     // once (two Inbox duplicates called `01.flac`) must not overwrite each other.
-    let target = reserve_unique(&trash_dir.join(format!("{y:04}-{m:02}-{d:02} {name}")))?;
+    let target = reserve_unique(&trash_dir.join(dated_name(file)))?;
     if let Err(e) = move_file(file, &target) {
         let _ = remove_file(&target);
         return Err(e);
@@ -299,6 +304,336 @@ fn is_trash_name(path: &Path) -> bool {
         && b[10] == b' '
 }
 
+/// What moving masters to the Trash did: the notes of the files moved
+/// (every one, also when a later one failed) and the first failure.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MasterMoves {
+    pub ids: Vec<i64>,
+    pub error: Option<String>,
+}
+
+/// The caller's lock around the last look before a master file goes and
+/// its removal: what voids the move (a device forgotten, another choice)
+/// takes the same lock, so it lands before or after a removal, never
+/// between the look and it.
+pub trait MoveGate {
+    /// Runs `step` holding the lock when the look under it still lets the
+    /// file go; None when it does not.
+    fn through(&self, step: &mut dyn FnMut() -> std::io::Result<()>) -> Option<std::io::Result<()>>;
+}
+
+/// A plain look (tests, a caller without a lock): the step runs when it
+/// says yes.
+impl<F: Fn() -> bool> MoveGate for F {
+    fn through(&self, step: &mut dyn FnMut() -> std::io::Result<()>) -> Option<std::io::Result<()>> {
+        if self() { Some(step()) } else { None }
+    }
+}
+
+/// Moves exactly `files`, the lossless master files of `file_hash` the
+/// owner confirmed, to the Trash: «Отменить» puts them back
+/// ([`restore_trashed_master`]) and the Trash's days end them
+/// ([`purge_trashed_masters`]). The master rows stay: other devices hold
+/// the file. Each one must be a plain file inside the masters folder that
+/// still is that very file; it is noted first (on its way), put in the
+/// Trash (never over a file there; a hard link, or a copy checked by its
+/// BLAKE3), and only then, through `gate`, the original goes and the note
+/// is marked done. The `.json` sidecar and a disc image's `.cue` stay
+/// where they are.
+pub fn trash_master_files(library: &Library, trash_dir: &Path, masters_dir: &Path, file_hash: &str, files: &[PathBuf], gate: &dyn MoveGate) -> MasterMoves {
+    // Under the masters' lock: an import does not take or lay out a master
+    // of this file meanwhile.
+    let _writes = crate::importer::master_writes();
+    let mut out = MasterMoves::default();
+    if let Err(e) = create_dir_all(trash_dir) {
+        out.error = Some(e.to_string());
+        return out;
+    }
+    for path in files {
+        if !crate::fsutil::plain_file_inside(path, masters_dir) {
+            log::warn!("not moving {} to the Trash: it is not a file inside the masters folder", path.display());
+            continue;
+        }
+        if crate::fsutil::hash_file(path).ok().as_deref() != Some(file_hash) {
+            log::warn!("not moving {} to the Trash: it is not the master it was", path.display());
+            continue;
+        }
+        match trash_one(library, trash_dir, path, file_hash, gate) {
+            Ok(Some(id)) => out.ids.push(id),
+            Ok(None) => {
+                out.error = Some("копий на устройствах уже меньше нужного или выбор изменился".to_owned());
+                break;
+            }
+            Err(e) => {
+                out.error = Some(format!("{}: {e}", path.display()));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// The `n`th name of the link a file is put in the Trash through.
+fn link_name(dest: &Path, n: u32) -> PathBuf {
+    let name = dest.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    if n == 0 { dest.with_file_name(format!(".{name}.nikgob-link")) } else { dest.with_file_name(format!(".{name}.{n}.nikgob-link")) }
+}
+
+/// Puts the content of `src` into `dest` (an empty file claimed for it): a
+/// hard link put over the claim on one volume, made under a link name
+/// nothing has (a name taken: the next one; whatever has it stays); else a
+/// copy into the claim, flushed and checked by its size and BLAKE3.
+fn fill(src: &Path, dest: &Path, hash: &str) -> std::io::Result<()> {
+    for n in 0..100 {
+        let link = link_name(dest, n);
+        match std::fs::hard_link(long_path(src), long_path(&link)) {
+            // Only the link made just now goes when it cannot be put over
+            // the claim.
+            Ok(()) => {
+                return std::fs::rename(long_path(&link), long_path(dest)).inspect_err(|_| {
+                    let _ = std::fs::remove_file(long_path(&link));
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => break,
+        }
+    }
+    let size = std::fs::metadata(long_path(src))?.len();
+    {
+        let mut w = std::fs::OpenOptions::new().write(true).truncate(true).open(long_path(dest))?;
+        let mut r = std::fs::File::open(long_path(src))?;
+        std::io::copy(&mut r, &mut w)?;
+        w.sync_all()?;
+    }
+    let same = std::fs::metadata(long_path(dest)).map(|m| m.len()).ok() == Some(size)
+        && crate::fsutil::hash_file(dest).ok().is_some_and(|h| h.eq_ignore_ascii_case(hash));
+    if same { Ok(()) } else { Err(std::io::Error::other("проверка хеша не прошла")) }
+}
+
+/// One master file to the Trash: a name there claimed, the note written
+/// (on its way), the file put there, and then, through `gate`, the
+/// original removed (still the file looked at) and the note marked done.
+/// Anything short of the removal is undone (the claimed name and the note
+/// go). The note's id; None when the gate said no.
+fn trash_one(library: &Library, trash_dir: &Path, path: &Path, hash: &str, gate: &dyn MoveGate) -> std::result::Result<Option<i64>, String> {
+    let meta = std::fs::symlink_metadata(long_path(path)).map_err(|e| e.to_string())?;
+    let (size, mtime) = (meta.len(), meta.modified().ok());
+    let dest = reserve_unique(&trash_dir.join(dated_name(path))).map_err(|e| e.to_string())?;
+    let id = match library.begin_master_trash(hash, &path.to_string_lossy(), &dest.to_string_lossy(), size) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = std::fs::remove_file(long_path(&dest));
+            return Err(e.to_string());
+        }
+    };
+    let undo = || {
+        let _ = std::fs::remove_file(long_path(&dest));
+        if let Err(e) = library.remove_master_trash(id) {
+            log::warn!("the note of {} stays (on its way; settled at the next start): {e}", dest.display());
+        }
+    };
+    if let Err(e) = fill(path, &dest, hash) {
+        undo();
+        return Err(e.to_string());
+    }
+    let mut step = || -> std::io::Result<()> {
+        let now = std::fs::symlink_metadata(long_path(path))?;
+        if !now.file_type().is_file() || now.len() != size || now.modified().ok() != mtime {
+            return Err(std::io::Error::other("файл изменился"));
+        }
+        std::fs::remove_file(long_path(path))?;
+        library.finish_master_trash(id).map_err(|e| std::io::Error::other(e.to_string()))
+    };
+    match gate.through(&mut step) {
+        Some(Ok(())) => Ok(Some(id)),
+        // The original went, the note was not marked: the file is in the
+        // Trash with its note, settled as done at the next start.
+        Some(Err(e)) if !long_path(path).exists() => {
+            log::warn!("{} is in the Trash; its note is settled at the next start: {e}", dest.display());
+            Ok(Some(id))
+        }
+        Some(Err(e)) => {
+            undo();
+            Err(e.to_string())
+        }
+        None => {
+            undo();
+            Ok(None)
+        }
+    }
+}
+
+/// A file as the settling of a cut move finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Found {
+    /// That very file (a plain file, its BLAKE3 the note's).
+    That,
+    /// Something else has the name.
+    Other,
+    /// Nothing has the name.
+    Gone,
+    /// Not known: not readable, its disk away…
+    Unknown,
+}
+
+/// What is at `path`, against the BLAKE3 `hash`.
+fn found_at(path: &Path, hash: &str) -> Found {
+    match std::fs::symlink_metadata(long_path(path)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Found::Gone,
+        Err(_) => Found::Unknown,
+        Ok(m) if !m.file_type().is_file() => Found::Other,
+        Ok(_) => match crate::fsutil::hash_file(path) {
+            Ok(h) if h.eq_ignore_ascii_case(hash) => Found::That,
+            Ok(_) => Found::Other,
+            Err(_) => Found::Unknown,
+        },
+    }
+}
+
+/// Settles the master files left on their way to the Trash (a move cut
+/// short), from what can be verified now. The only file it ever deletes is
+/// a true duplicate: the Trash file that very file while the original is
+/// there and still that very file too.
+/// - the original there, still that very file → the note goes (and the
+///   Trash file with it when it is that duplicate; any other file there
+///   stays where it is);
+/// - the original's name taken by another file, or nothing there, and the
+///   Trash file that very file → the note is done (a Trash entry with
+///   «Отменить»);
+/// - anything else (a file not readable, a disk away, the Trash folder
+///   not as it should be) → the note stays on its way, told in the log,
+///   looked at again at the next start.
+///
+/// A link a move went through and was cut short at stays where it is
+/// (whose it is cannot be told). How many notes were settled.
+pub fn recover_master_moves(library: &Library, trash_dir: &Path) -> Result<usize> {
+    let mut n = 0;
+    for row in library.master_trash_moving()? {
+        let (src, dest) = (Path::new(&row.path), Path::new(&row.trash_path));
+        let original = found_at(src, &row.file_hash);
+        let in_place = trash_root_ok(trash_dir) && dest.parent() == Some(trash_dir);
+        let trashed = match found_at(dest, &row.file_hash) {
+            // A file there counts only as the Trash's own.
+            Found::That | Found::Other if !in_trash(dest, trash_dir) => Found::Unknown,
+            Found::Gone if !in_place => Found::Unknown,
+            f => f,
+        };
+        let settled = match (original, trashed) {
+            (Found::That, Found::That) => match std::fs::remove_file(long_path(dest)) {
+                Ok(()) => library.remove_master_trash(row.id)?,
+                Err(e) => {
+                    log::warn!("{} stays on its way to the Trash: {} not removed: {e}", row.path, row.trash_path);
+                    false
+                }
+            },
+            // Not that file (a copy cut short, or someone else's): it stays.
+            (Found::That, Found::Other | Found::Gone) => library.remove_master_trash(row.id)?,
+            (Found::Other | Found::Gone, Found::That) => {
+                library.finish_master_trash(row.id)?;
+                true
+            }
+            (original, trashed) => {
+                log::warn!(
+                    "{} stays on its way to the Trash (the original {original:?}, the Trash file {} {trashed:?}); looked at again at the next start",
+                    row.path,
+                    row.trash_path
+                );
+                false
+            }
+        };
+        if settled {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Puts the master file of note `id` back where it was. False when there
+/// is nothing to bring back (no such note, the file gone from the Trash)
+/// or something else took its place: never replaced (the place is claimed
+/// atomically), the file stays in the Trash, noted.
+pub fn restore_trashed_master(library: &Library, id: i64) -> Result<bool> {
+    let Some(row) = library.master_trash_row(id)? else {
+        return Ok(false);
+    };
+    let (from, to) = (PathBuf::from(&row.trash_path), PathBuf::from(&row.path));
+    if !long_path(&from).exists() {
+        library.remove_master_trash(id)?;
+        return Ok(false);
+    }
+    if let Some(dir) = to.parent() {
+        create_dir_all(dir)?;
+    }
+    match move_new_verified(&from, &to, &row.file_hash) {
+        Ok(()) => {
+            library.remove_master_trash(id)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(crate::error::ImportError::io(&to, e)),
+    }
+}
+
+/// Whether the Trash folder at `trash_dir` is a folder itself (not a link
+/// or a junction).
+fn trash_root_ok(trash_dir: &Path) -> bool {
+    std::fs::symlink_metadata(long_path(trash_dir)).is_ok_and(|m| m.is_dir())
+}
+
+/// Whether `path` is a plain file (not a link) right in the Trash folder
+/// at `trash_dir` ([`trash_root_ok`]), resolved still inside it.
+fn in_trash_dir(path: &Path, trash_dir: &Path) -> bool {
+    trash_root_ok(trash_dir)
+        && path.parent() == Some(trash_dir)
+        && std::fs::symlink_metadata(long_path(path)).is_ok_and(|m| m.file_type().is_file())
+        && match (std::fs::canonicalize(long_path(path)), std::fs::canonicalize(long_path(trash_dir))) {
+            (Ok(p), Ok(r)) => p.starts_with(r),
+            _ => false,
+        }
+}
+
+/// Whether `path` is a file the Trash at `trash_dir` holds: a plain file
+/// with a Trash name right in that folder ([`in_trash_dir`]).
+fn in_trash(path: &Path, trash_dir: &Path) -> bool {
+    is_trash_name(path) && in_trash_dir(path, trash_dir)
+}
+
+/// Deletes the master files moved to the Trash more than `days` ago and
+/// their notes: only a file that is in the Trash at `trash_dir`
+/// ([`in_trash`]); a note whose file is elsewhere stays.
+pub fn purge_trashed_masters(library: &Library, trash_dir: &Path, days: u32) -> Result<PurgeReport> {
+    let cutoff = nikgob_library::now_ms() - i64::from(days) * 24 * 60 * 60 * 1000;
+    let mut report = PurgeReport::default();
+    for row in library.master_trash_before(cutoff)? {
+        let path = Path::new(&row.trash_path);
+        match std::fs::symlink_metadata(long_path(path)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.files_missing += 1,
+            Err(e) => {
+                log::warn!("cannot read {}: {e}", row.trash_path);
+                report.files_failed += 1;
+                continue;
+            }
+            Ok(_) if !in_trash(path, trash_dir) => {
+                log::warn!("not deleting {}: it is not in the Trash", row.trash_path);
+                report.files_failed += 1;
+                continue;
+            }
+            Ok(_) => match std::fs::remove_file(long_path(path)) {
+                Ok(()) => report.files_deleted += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.files_missing += 1,
+                Err(e) => {
+                    log::warn!("cannot delete {}: {e}", row.trash_path);
+                    report.files_failed += 1;
+                    continue;
+                }
+            },
+        }
+        library.remove_master_trash(row.id)?;
+        report.rows += 1;
+    }
+    Ok(report)
+}
+
 /// Deletes trashed sources older than `days` and their files.
 pub fn trash_purge(library: &Library, days: u32) -> Result<PurgeReport> {
     let purged = library.purge_trash(days)?;
@@ -329,6 +664,179 @@ pub fn trash_purge(library: &Library, days: u32) -> Result<PurgeReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A master let go of moves to the Trash (only while it is that file,
+    /// only from the masters folder), comes back with «Отменить» (never
+    /// over a file that took its place), and its rows stay throughout.
+    #[test]
+    fn a_master_goes_to_the_trash_and_comes_back() {
+        let root = tempfile::tempdir().unwrap();
+        let (masters, trash) = (root.path().join("masters"), root.path().join("Trash"));
+        let named = masters.join("A").join("2001 - B").join("01 - C.flac");
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        let song = b"fLaC master".to_vec();
+        std::fs::write(&named, &song).unwrap();
+        let hash = crate::fsutil::hash_file(&named).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let artist = lib.upsert_artist(&nikgob_core::model::Artist::new("A")).unwrap();
+        let credit = nikgob_core::model::ArtistCredit::single(artist.name.clone(), Some(artist.id));
+        let t = lib.upsert_track(&nikgob_core::model::Track::new("C", credit)).unwrap();
+        lib.put_master(&nikgob_core::model::Master {
+            track_id: t.id,
+            codec: nikgob_core::model::Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: song.len() as u64,
+            origin: None,
+            file_path: Some(named.to_string_lossy().into_owned()),
+            replicas: Vec::new(),
+        })
+        .unwrap();
+
+        let yes = || true;
+        // Only the files confirmed move: a second copy not on the card stays.
+        let copy = masters.join("A").join("2001 - B").join("01 - C (2).flac");
+        std::fs::write(&copy, &song).unwrap();
+        let moved = trash_master_files(&lib, &trash, &masters, &hash, std::slice::from_ref(&named), &yes);
+        assert_eq!((moved.ids.len(), moved.error.as_deref()), (1, None));
+        let ids = moved.ids;
+        assert!(!named.exists());
+        assert!(copy.exists(), "not on the card, not moved");
+        let row = lib.master_trash_row(ids[0]).unwrap().unwrap();
+        assert!(is_trash_name(Path::new(&row.trash_path)));
+        assert_eq!(std::fs::read(&row.trash_path).unwrap(), song);
+        assert!(lib.get_master(t.id).unwrap().is_some(), "the master row stays");
+        assert!(trash_master_files(&lib, &trash, &masters, &hash, std::slice::from_ref(&named), &yes).ids.is_empty(), "nothing left to move");
+
+        std::fs::write(&named, b"something new").unwrap();
+        assert!(!restore_trashed_master(&lib, ids[0]).unwrap(), "never over another file");
+        assert!(lib.master_trash_row(ids[0]).unwrap().is_some(), "it stays in the Trash, noted");
+        std::fs::remove_file(&named).unwrap();
+        assert!(restore_trashed_master(&lib, ids[0]).unwrap());
+        assert_eq!(std::fs::read(&named).unwrap(), song);
+        assert!(lib.master_trash_row(ids[0]).unwrap().is_none());
+
+        // A file that is not the master any more stays where it is.
+        std::fs::write(&named, b"changed").unwrap();
+        assert!(trash_master_files(&lib, &trash, &masters, &hash, std::slice::from_ref(&named), &yes).ids.is_empty());
+        assert!(named.exists());
+
+        // The look right before each move: once it fails, nothing more
+        // moves, and what moved before is told with the failure.
+        std::fs::write(&named, &song).unwrap();
+        let looks = std::cell::Cell::new(0);
+        let once = || {
+            looks.set(looks.get() + 1);
+            looks.get() == 1
+        };
+        let both = [named.clone(), copy.clone()];
+        let part = trash_master_files(&lib, &trash, &masters, &hash, &both, &once);
+        assert_eq!(part.ids.len(), 1, "the first moved, its note kept for «Отменить»");
+        assert!(part.error.is_some());
+        assert!(!named.exists() && copy.exists());
+    }
+
+    /// A move cut short is settled at the next start from what can be
+    /// verified, deleting only a true duplicate: the original still that
+    /// very file → the note goes, the Trash file with it only when it is
+    /// that very file too (a copy cut short or another file stays, a link
+    /// too); the original gone or its name another file's and the Trash
+    /// file that very file → done, both kept; anything not verified → the
+    /// note stays on its way and nothing is deleted.
+    #[test]
+    fn a_master_move_cut_short_is_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let (masters, trash) = (root.path().join("masters"), root.path().join("Trash"));
+        std::fs::create_dir_all(&masters).unwrap();
+        std::fs::create_dir_all(&trash).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let song = b"fLaC".to_vec();
+        let hash = blake3::hash(&song).to_hex().to_string();
+        let note = |src: &Path, dest: &Path| lib.begin_master_trash(&hash, &src.to_string_lossy(), &dest.to_string_lossy(), 4).unwrap();
+        let moving = |id: i64| lib.master_trash_row(id).unwrap().map(|r| r.moving);
+
+        let kept = masters.join("01.flac");
+        std::fs::write(&kept, &song).unwrap();
+        let half = trash.join("2026-11-16 01.flac");
+        std::fs::write(&half, b"fL").unwrap();
+        let link = trash.join(".2026-11-16 01.flac.nikgob-link");
+        std::fs::write(&link, &song).unwrap();
+        let a = note(kept.as_path(), half.as_path());
+        let twin = masters.join("06.flac");
+        std::fs::write(&twin, &song).unwrap();
+        let copy = trash.join("2026-11-16 06.flac");
+        std::fs::write(&copy, &song).unwrap();
+        let g = note(twin.as_path(), copy.as_path());
+
+        let gone = masters.join("02.flac");
+        let done = trash.join("2026-11-16 02.flac");
+        std::fs::write(&done, &song).unwrap();
+        let b = note(gone.as_path(), done.as_path());
+
+        let taken = masters.join("03.flac");
+        std::fs::write(&taken, b"another file").unwrap();
+        let safe = trash.join("2026-11-16 03.flac");
+        std::fs::write(&safe, &song).unwrap();
+        let c = note(taken.as_path(), safe.as_path());
+
+        let lost = trash.join("2026-11-16 04.flac");
+        let d = note(masters.join("04.flac").as_path(), lost.as_path());
+
+        let wrong = trash.join("2026-11-16 05.flac");
+        std::fs::write(&wrong, b"not it").unwrap();
+        let e = note(masters.join("05.flac").as_path(), wrong.as_path());
+
+        let stray = trash.join(".2026-11-16 09.flac.nikgob-link");
+        std::fs::write(&stray, &song).unwrap();
+
+        assert_eq!(recover_master_moves(&lib, &trash).unwrap(), 4);
+        assert!(kept.exists() && half.exists() && link.exists(), "undone: the original stays, and what is not that very file too");
+        assert_eq!(moving(a), None);
+        assert!(twin.exists() && !copy.exists(), "a true duplicate goes");
+        assert_eq!(moving(g), None);
+        assert!(done.exists());
+        assert_eq!(moving(b), Some(false), "finished");
+        assert_eq!(std::fs::read(&taken).unwrap(), b"another file");
+        assert!(safe.exists());
+        assert_eq!(moving(c), Some(false), "the name is another file's: a Trash entry with undo");
+        assert_eq!(moving(d), Some(true), "nothing to verify: it stays on its way");
+        assert_eq!(moving(e), Some(true));
+        assert!(wrong.exists(), "nothing deleted on a check that says nothing");
+        assert!(stray.exists(), "no note names it");
+
+        // The Trash folder not there (its disk away): nothing settled.
+        let away = root.path().join("Away");
+        let f = lib.begin_master_trash(&hash, &kept.to_string_lossy(), &away.join("2026-11-16 01.flac").to_string_lossy(), 4).unwrap();
+        assert_eq!(recover_master_moves(&lib, &away).unwrap(), 0);
+        assert_eq!(moving(f), Some(true));
+        assert!(kept.exists());
+    }
+
+    /// The Trash's days end a master let go of: its file and its note.
+    #[test]
+    fn masters_in_the_trash_go_after_their_days() {
+        let root = tempfile::tempdir().unwrap();
+        let trash = root.path().join("Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let file = trash.join("2026-10-01 01 - C.flac");
+        std::fs::write(&file, b"x").unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib.put_master_trash("h", "/m/01 - C.flac", &file.to_string_lossy(), 1).unwrap();
+        // A note whose file is not in the Trash (a date-shaped name
+        // elsewhere): never deleted, the note stays.
+        let other = root.path().join("Elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        let stranger = other.join("2026-10-01 01 - C.flac");
+        std::fs::write(&stranger, b"y").unwrap();
+        let kept = lib.put_master_trash("h", "/m/01 - C.flac", &stranger.to_string_lossy(), 1).unwrap();
+        assert_eq!(purge_trashed_masters(&lib, &trash, 30).unwrap().rows, 0, "still in its days");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let r = purge_trashed_masters(&lib, &trash, 0).unwrap();
+        assert_eq!((r.rows, r.files_deleted, r.files_failed), (1, 1, 1));
+        assert!(!file.exists());
+        assert!(lib.master_trash_row(id).unwrap().is_none());
+        assert!(stranger.exists(), "outside the Trash");
+        assert!(lib.master_trash_row(kept).unwrap().is_some());
+    }
 
     #[test]
     fn same_named_files_never_overwrite_each_other_in_trash() {

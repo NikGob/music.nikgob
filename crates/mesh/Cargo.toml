@@ -13,12 +13,17 @@ nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-api = { path = "../api" }
 nikgob-library = { path = "../library" }
+# Where a pulled file goes: the library's own layout, never over a file.
+nikgob-import = { path = "../import" }
 log.workspace = true
 # QUIC between the devices: each one's Ed25519 key is its id; relays and
 # address lookups off (LAN only in this version).
 iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
 # The instances on the home network: `_nikgob._udp.local.`.
 mdns-sd = "0.21.7"
+# This computer's interfaces: only the home network's addresses are
+# announced and dialled (mdns-sd's own dependency).
+if-addrs = "0.15"
 # The pairing's password-authenticated key exchange (RustCrypto PAKEs).
 spake2 = { version = "0.4", features = ["getrandom"] }
 blake3 = "1.8"
@@ -36,6 +41,10 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
 gethostname = "1"
+
+# A part of a pulled file is opened never through a link (`O_NOFOLLOW`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
