@@ -37,6 +37,8 @@ const SENT_S: f64 = 3.0;
 pub(crate) struct MeshUi {
     /// «Добавить устройство».
     pub(crate) add: super::add_device::AddState,
+    /// A nearby device's code window.
+    pub(crate) pair: super::add_device::PairState,
     rename: Option<Rename>,
     favorites: Option<Favorites>,
     /// The forget asked about whose answer went (until the view drops it).
@@ -201,13 +203,14 @@ pub(crate) fn storage_line(n: &MeshNodeView) -> Option<(String, bool)> {
     })
 }
 
-/// This computer's second line: its music, and its originals when it has
-/// some («184,2 ГБ · оригиналы 112 ГБ»).
+/// This computer's second line: all the music it holds, the originals
+/// included — the number the other devices show of it — and of that the
+/// originals when it has some («296 ГБ · оригиналы 112 ГБ»).
 pub(crate) fn this_storage_line(st: &StorageView) -> Option<String> {
     if !st.known {
         return None;
     }
-    Some(if st.masters > 0 { format!("{} · оригиналы {}", size_ru(st.library), size_ru(st.masters)) } else { size_ru(st.library) })
+    Some(if st.masters > 0 { format!("{} · оригиналы {}", size_ru(st.music()), size_ru(st.masters)) } else { size_ru(st.music()) })
 }
 
 /// The share of a device's bar each part takes: (music, originals, rest)
@@ -396,6 +399,7 @@ pub(crate) fn overlays(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &m
     favorites_dialog(ui, state, mem, out);
     forget_dialog(ui, state, mem, out);
     super::add_device::window(ui, state, mem, out);
+    super::add_device::pair_window(ui, state, mem, out);
 }
 
 /// «Переименовать»: the name this device goes by everywhere (empty: the
@@ -572,7 +576,9 @@ mod tests {
         n.profile = MeshProfile::SoundOnly;
         assert_eq!(storage_line(&n), None, "nothing stored, nothing said");
         let st = StorageView { known: true, library: 184 * GB, masters: 112 * GB, disks: Vec::new() };
-        assert_eq!(this_storage_line(&st).as_deref(), Some("184 ГБ · оригиналы 112 ГБ"));
+        assert_eq!(this_storage_line(&st).as_deref(), Some("296 ГБ · оригиналы 112 ГБ"), "the whole, as the other devices show it");
+        let st = StorageView { known: true, library: 4 * GB + 4 * GB / 5, masters: 11 * GB, disks: Vec::new() };
+        assert_eq!(this_storage_line(&st).as_deref(), Some("15,8 ГБ · оригиналы 11 ГБ"));
         assert_eq!(this_storage_line(&StorageView::default()), None);
         assert_eq!(fraction_ru(512 << 20, 25 * GB), "512 МБ / 25 ГБ");
     }

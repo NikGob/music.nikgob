@@ -1,19 +1,22 @@
 //! «Добавить устройство»: a window grown out of the button that opened it
 //! (container transform), two tabs on a card.
 //!
-//! «Подключить»: the QR of the invite (a phone scans it) and, for a device
-//! seen nearby, six cells for the code it shows: the sixth digit sends
-//! them, a wrong code empties them, the window closes itself once a device
-//! is paired. «Гость» makes the invite anew as a guest's (the holder signs
-//! the guest's certificate when it joins); a device added by its code
-//! becomes a guest right after.
+//! «Подключить»: the QR of the invite (a phone scans it), the devices seen
+//! nearby (each opens its code window), «Гость» — the invite made anew as
+//! a guest's (the holder signs the guest's certificate when it joins). The
+//! window closes itself once a device joined with the invite.
+//!
+//! A nearby device's own small window (from its «Подключить»): its avatar
+//! and name, six cells that have the keys at once, nothing else; the sixth
+//! digit sends them, a wrong code empties them and shakes them, a pairing
+//! closes it.
 //!
 //! «Установить»: per platform whose build this computer has — Linux and
 //! Raspberry Pi get one line that downloads the install script from here
 //! with the invite's download key, checks it against its SHA-256 and runs
 //! it with the ticket ([`nikgob_core::releases`]: the ticket never crosses
-//! the network); without a build, the `nikgobd pair` line for one
-//! installed by hand. Windows gets the address of this version's program.
+//! the network); without a build, the `~/.local/bin/nikgobd pair` line for
+//! one installed by hand (where the README installs it). Windows gets the address of this version's program.
 //! Both need the API on the home network: until then the blocker and the
 //! switch that lifts it stand under the line.
 //!
@@ -25,7 +28,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{Align, Color32, Event, Key, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_core::releases::{self, LinuxBuild};
-use nikgob_view::{ApiAccess, ApiView, Command, MeshPairing, MeshScope, MeshView, ViewState};
+use nikgob_view::{ApiAccess, ApiView, Command, MeshKind, MeshPairing, MeshScope, MeshView, ViewState};
 
 use super::mesh_ui::{self, Look, MeshUi};
 use crate::{
@@ -45,6 +48,8 @@ const QR: f32 = 176.0;
 /// A cell of the code, and between two.
 const CELL: egui::Vec2 = vec2(44.0, 56.0);
 const CELL_GAP: f32 = 8.0;
+/// The column beside the QR.
+const COLUMN_W: f32 = 280.0;
 /// The invite is made anew this long before it ends (ms).
 const RENEW_BEFORE_MS: i64 = 60_000;
 /// …at most this often (s).
@@ -78,13 +83,8 @@ pub(crate) struct AddState {
     tab: AddTab,
     /// The control it grew out of.
     from: Option<Rect>,
-    /// The nearby device whose code is typed.
-    nearby: Option<String>,
-    code: String,
-    /// The code sent, while its pairing runs.
-    sent: Option<String>,
+    /// Why the invite could not be made, in words.
     error: Option<String>,
-    focus: bool,
     guest: bool,
     /// «Установить»: the platform shown (0 Linux, 1 Windows).
     platform: usize,
@@ -109,15 +109,16 @@ fn window_id() -> egui::Id {
     egui::Id::new("mesh-add-device")
 }
 
-/// Opens the window on `tab` (out of `from`), for the nearby device
-/// `nearby` if one was picked; asks for an invite.
-pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Option<Rect>, tab: AddTab, nearby: Option<String>, out: &mut Vec<Command>) {
+/// Opens the window on `tab` (out of `from`) and asks for an invite; a
+/// nearby device's code window gives way to it.
+pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Option<Rect>, tab: AddTab, out: &mut Vec<Command>) {
+    if mem.pair.open {
+        close_pair(&mut mem.pair, out);
+    }
     let a = &mut mem.add;
     if !a.open {
         ModalWindow::rewind(ctx, window_id());
         a.from = from;
-        a.code.clear();
-        a.sent = None;
         a.error = None;
         a.guest = false;
         a.lan = lan_of(m);
@@ -129,14 +130,8 @@ pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Op
     a.stale = matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_)).then(|| m.pairing.clone());
     a.open = true;
     a.tab = tab;
-    a.focus = true;
     a.missing_since = Some(now);
     a.renewed_at = now;
-    if nearby.is_some() {
-        a.nearby = nearby;
-        a.code.clear();
-        a.error = None;
-    }
     out.push(Command::MeshClearPairing);
     if m.can_pair() {
         out.push(Command::MeshCreateInvite { scope: wanted_scope(a) });
@@ -265,6 +260,8 @@ pub(crate) fn window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut
     };
     let mut close = false;
     let mut to_tab = tab;
+    // A nearby device picked: its code window takes over.
+    let mut pick: Option<(String, Rect)> = None;
     let dismissed = shell.show(&ctx, open, |ui, _| {
         close = header(ui, &mut to_tab);
         ui.add_space(HEADER_GAP);
@@ -277,7 +274,7 @@ pub(crate) fn window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut
         match cannot_pair(m) {
             Some(why) => error_line(&mut on_card, &why),
             None => match tab {
-                AddTab::Connect => connect(&mut on_card, state, a, now, out),
+                AddTab::Connect => connect(&mut on_card, state, a, now, &mut pick, out),
                 AddTab::Install => install(&mut on_card, state, a, now, out),
             },
         }
@@ -286,10 +283,12 @@ pub(crate) fn window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut
     });
     if to_tab != tab {
         a.tab = to_tab;
-        a.focus = to_tab == AddTab::Connect;
     }
     if open && (dismissed || close) {
         close_window(a, out);
+    }
+    if let Some((id, from)) = pick {
+        open_pair(&ctx, m, mem, Some(from), &id, out);
     }
 }
 
@@ -314,15 +313,12 @@ fn wall_ms() -> i64 {
 
 fn close_window(a: &mut AddState, out: &mut Vec<Command>) {
     a.open = false;
-    a.sent = None;
-    a.code.clear();
     out.push(Command::MeshCancelInvite);
     out.push(Command::MeshClearPairing);
 }
 
-/// What the pairing's state does to the window: paired — it closes (the
-/// new device a guest when asked); a wrong code — said, the cells empty;
-/// six digits typed — sent once.
+/// What the pairing's state does to the window: a device joined with the
+/// invite — it closes; the invite could not be made — said.
 fn follow_pairing(a: &mut AddState, m: &MeshView, out: &mut Vec<Command>) {
     // The end of a pairing from before the window opened, until the
     // runtime has cleared it.
@@ -335,35 +331,12 @@ fn follow_pairing(a: &mut AddState, m: &MeshView, out: &mut Vec<Command>) {
     };
     match &m.pairing {
         _ if stale => {}
-        MeshPairing::Done { node_id } => {
-            // A device added by its code here becomes a guest now; one that
-            // joined with the invite was signed as the invite said.
-            if a.guest && a.sent.is_some() {
-                out.push(Command::MeshSetScope { node_id: node_id.clone(), scope: MeshScope::Guest });
-            }
-            close_window(a, out);
-            return;
-        }
+        MeshPairing::Done { .. } => close_window(a, out),
         MeshPairing::Failed(why) => {
             a.error = Some(why.clone());
-            if a.sent.take().is_some() {
-                a.code.clear();
-                a.focus = true;
-            }
             out.push(Command::MeshClearPairing);
         }
         _ => {}
-    }
-    // The device picked went away: the first one left, if any.
-    if a.nearby.as_ref().is_none_or(|id| !m.nearby.iter().any(|n| n.id == *id)) {
-        a.nearby = m.nearby.first().map(|n| n.id.clone());
-    }
-    if a.code.len() == 6 && a.sent.is_none() && m.pairing != MeshPairing::Working
-        && let Some(id) = a.nearby.clone()
-    {
-        a.sent = Some(a.code.clone());
-        a.error = None;
-        out.push(Command::MeshPairNearby { nearby_id: id, code: a.code.clone() });
     }
 }
 
@@ -388,21 +361,21 @@ fn error_line(ui: &mut Ui, text: &str) {
     ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(text, s.error)).wrap());
 }
 
-/// «Подключить»: the QR, and the code of a nearby device.
-fn connect(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut Vec<Command>) {
+/// «Подключить»: the QR, the devices nearby, «Гость».
+fn connect(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, pick: &mut Option<(String, Rect)>, out: &mut Vec<Command>) {
     let m = &state.mesh;
-    let narrow = ui.available_width() < QR + 24.0 + 6.0 * CELL.x + 5.0 * CELL_GAP;
+    let narrow = ui.available_width() < QR + 24.0 + COLUMN_W;
     let invite_late = a.missing_since.is_some_and(|at| now - at > INVITE_WAIT_S);
     let col_h_key = window_id().with("connect-col");
     let col_h: f32 = ui.ctx().data(|d| d.get_temp(col_h_key)).unwrap_or(0.0);
-    let column = |ui: &mut Ui, a: &mut AddState, out: &mut Vec<Command>| {
-        let r = ui.scope(|ui| code_column(ui, state, a, invite_late, now, out)).response.rect;
+    let column = |ui: &mut Ui, a: &mut AddState, pick: &mut Option<(String, Rect)>, out: &mut Vec<Command>| {
+        let r = ui.scope(|ui| invite_column(ui, state, a, invite_late, now, pick, out)).response.rect;
         ui.ctx().data_mut(|d| d.insert_temp(col_h_key, r.height()));
     };
     if narrow {
         ui.vertical_centered(|ui| qr_plate(ui, m, a, invite_late));
         ui.add_space(20.0);
-        column(ui, a, out);
+        column(ui, a, pick, out);
     } else {
         ui.horizontal_top(|ui| {
             qr_plate(ui, m, a, invite_late);
@@ -410,7 +383,7 @@ fn connect(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut
             ui.vertical(|ui| {
                 // On the QR's middle line.
                 ui.add_space(((QR - col_h) * 0.5).max(0.0));
-                column(ui, a, out);
+                column(ui, a, pick, out);
             });
         });
     }
@@ -471,47 +444,31 @@ fn qr_texture(ctx: &egui::Context, ticket: &str, dark: Color32, light: Color32) 
     Some(ctx.load_texture("mesh-invite-qr", image, egui::TextureOptions::NEAREST))
 }
 
-/// Beside the QR: the nearby device (a chip each when there are several),
-/// its code's cells, what went wrong, «Гость».
-fn code_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: bool, now: f64, out: &mut Vec<Command>) {
+/// Beside the QR: the devices nearby (a row each: its avatar, its name,
+/// «Подключить» opening its code window), what went wrong, «Гость».
+fn invite_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: bool, now: f64, pick: &mut Option<(String, Rect)>, out: &mut Vec<Command>) {
     let m = &state.mesh;
     let s = Theme::get(ui.ctx()).scheme;
-    let working = a.sent.is_some() || m.pairing == MeshPairing::Working;
-    if m.nearby.len() > 1 {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            for n in &m.nearby {
-                let on = a.nearby.as_deref() == Some(n.id.as_str());
-                if ui.add(FilterChip::new(n.name.as_str(), on).one_of().enabled(!working).id_salt(("mesh-add-nearby", &n.id))).clicked() && !on {
-                    a.nearby = Some(n.id.clone());
-                    a.code.clear();
-                    a.error = None;
-                    a.focus = true;
-                }
-            }
-        });
-        ui.add_space(12.0);
-    } else if let Some(n) = m.nearby.first() {
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width().min(6.0 * CELL.x + 5.0 * CELL_GAP), 32.0), Sense::hover());
+    for n in &m.nearby {
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width().min(COLUMN_W), 40.0), Sense::hover());
         mesh_ui::paint_avatar(ui, pos2(row.left() + 16.0, row.center().y), 32.0, &format!("add-{}", n.id), n.kind, Look::default());
-        let g = mesh_ui::text_line(ui.painter(), &n.name, TypeRole::TitleMedium, s.on_surface, row.width() - 44.0);
-        ui.painter().galley(pos2(row.left() + 44.0, row.center().y - g.size().y * 0.5), g, s.on_surface);
-        ui.add_space(12.0);
-    }
-    if a.nearby.is_some() {
-        let focus = std::mem::take(&mut a.focus);
-        code_cells(ui, egui::Id::new("mesh-add-code"), &mut a.code, !working, a.error.is_some(), focus);
-        ui.add_space(8.0);
-        if working {
-            ui.add(LoadingIndicator::new().size(24.0));
+        let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-add-near", &n.id)));
+        let b = right.add(crate::components::Button::new("Подключить").style(Style::Text).size(Size::S).id_salt(("mesh-add-pair", &n.id)));
+        if b.clicked() {
+            *pick = Some((n.id.clone(), b.rect));
         }
+        let room = (b.rect.left() - row.left() - 44.0 - 8.0).max(0.0);
+        let g = mesh_ui::text_line(ui.painter(), &n.name, TypeRole::BodyLarge, s.on_surface, room);
+        ui.painter().galley(pos2(row.left() + 44.0, row.center().y - g.size().y * 0.5), g, s.on_surface);
+    }
+    if !m.nearby.is_empty() {
+        ui.add_space(12.0);
     }
     let error = a.error.clone().or_else(|| invite_late.then(|| "Межсеть не ответила".to_owned()));
-    if let Some(e) = error.filter(|_| !working) {
-        ui.add_space(4.0);
+    if let Some(e) = error {
         error_line(ui, &e);
+        ui.add_space(12.0);
     }
-    ui.add_space(12.0);
     if ui.add(FilterChip::new("Гость", a.guest).id_salt("mesh-add-guest")).clicked() {
         a.guest = !a.guest;
         // The invite shown stops being one: another, of the new scope,
@@ -675,9 +632,185 @@ fn install(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut
     }
 }
 
-/// The line that pairs a headless player installed by hand.
+/// The line that pairs a headless player installed by hand (where the
+/// README installs it: `~/.local/bin` is often not on the PATH of a fresh
+/// shell).
 pub(crate) fn mesh_ui_pair_line(ticket: &str) -> String {
-    format!("nikgobd pair {ticket}")
+    format!("~/.local/bin/nikgobd pair {ticket}")
+}
+
+/// What the device says to a wrong code ([`MeshPairing::Failed`]): the
+/// cells shake, no word.
+const WRONG_CODE: &str = "Неверный код";
+/// How long the cells shake (s), how far (dp) and how many times.
+const SHAKE_S: f64 = 0.45;
+const SHAKE_DP: f32 = 10.0;
+const SHAKE_TIMES: f32 = 4.0;
+/// The code window: its avatar, between it and the name, the name's room,
+/// between the name and the cells.
+const PAIR_AVATAR: f32 = 56.0;
+const PAIR_GAP: f32 = 12.0;
+const PAIR_NAME_H: f32 = 28.0;
+const PAIR_CELLS_GAP: f32 = 24.0;
+
+/// A nearby device's code window.
+#[derive(Default)]
+pub(crate) struct PairState {
+    pub(crate) open: bool,
+    from: Option<Rect>,
+    nearby: String,
+    name: String,
+    kind: MeshKind,
+    code: String,
+    /// The code went; its pairing runs.
+    sent: bool,
+    /// The last code was wrong: the cells in error until a digit comes.
+    wrong: bool,
+    /// When the cells began to shake.
+    shake_at: Option<f64>,
+    /// Another failure (no link, busy), in words.
+    error: Option<String>,
+    focus: bool,
+    /// The pairing's end as it was when the window opened.
+    stale: Option<MeshPairing>,
+}
+
+fn pair_id() -> egui::Id {
+    egui::Id::new("mesh-pair-code")
+}
+
+/// Opens the code window of the nearby device `nearby_id` (out of
+/// `from`); «Добавить устройство» gives way to it.
+pub(crate) fn open_pair(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Option<Rect>, nearby_id: &str, out: &mut Vec<Command>) {
+    let Some(n) = m.nearby.iter().find(|n| n.id == nearby_id) else { return };
+    if mem.add.open {
+        close_window(&mut mem.add, out);
+    }
+    let p = &mut mem.pair;
+    if !p.open || p.nearby != nearby_id {
+        ModalWindow::rewind(ctx, pair_id());
+    }
+    *p = PairState {
+        open: true,
+        from,
+        nearby: n.id.clone(),
+        name: n.name.clone(),
+        kind: n.kind,
+        focus: true,
+        stale: matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_)).then(|| m.pairing.clone()),
+        ..PairState::default()
+    };
+    out.push(Command::MeshClearPairing);
+}
+
+fn close_pair(p: &mut PairState, out: &mut Vec<Command>) {
+    p.open = false;
+    p.sent = false;
+    p.code.clear();
+    out.push(Command::MeshClearPairing);
+}
+
+/// What the pairing does to the code window: paired — it closes; a wrong
+/// code — the cells empty and shake; another failure — said; six digits —
+/// sent once.
+fn follow_pair(p: &mut PairState, m: &MeshView, now: f64, out: &mut Vec<Command>) {
+    let stale = match &p.stale {
+        Some(s) if *s == m.pairing => true,
+        _ => {
+            p.stale = None;
+            false
+        }
+    };
+    match &m.pairing {
+        _ if stale => {}
+        MeshPairing::Done { .. } if p.sent => {
+            close_pair(p, out);
+            return;
+        }
+        MeshPairing::Failed(why) => {
+            if std::mem::take(&mut p.sent) {
+                p.code.clear();
+                p.focus = true;
+            }
+            if why == WRONG_CODE {
+                p.wrong = true;
+                p.shake_at = Some(now);
+                p.error = None;
+            } else {
+                p.error = Some(why.clone());
+            }
+            out.push(Command::MeshClearPairing);
+        }
+        _ => {}
+    }
+    if p.code.len() == 6 && !p.sent && m.pairing != MeshPairing::Working {
+        p.sent = true;
+        p.error = None;
+        out.push(Command::MeshPairNearby { nearby_id: p.nearby.clone(), code: p.code.clone() });
+    }
+}
+
+/// The cells' sideways offset `t` seconds into a shake: a few swings that
+/// die away.
+fn shake_offset(t: f64) -> f32 {
+    if !(0.0..SHAKE_S).contains(&t) {
+        return 0.0;
+    }
+    let k = (t / SHAKE_S) as f32;
+    SHAKE_DP * (1.0 - k) * (k * SHAKE_TIMES * std::f32::consts::TAU).sin()
+}
+
+/// The code window, while it is open (and while it leaves).
+pub(crate) fn pair_window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut Vec<Command>) {
+    let ctx = ui.ctx().clone();
+    let theme = Theme::get(&ctx);
+    let s = theme.scheme;
+    let m = &state.mesh;
+    let now = anim::now(&ctx);
+    let p = &mut mem.pair;
+    if p.open {
+        follow_pair(p, m, now, out);
+    }
+    let cells_w = 6.0 * CELL.x + 5.0 * CELL_GAP;
+    let error_h = if p.error.is_some() { 36.0 } else { 0.0 };
+    let content = PAIR_AVATAR + PAIR_GAP + PAIR_NAME_H + PAIR_CELLS_GAP + CELL.y + error_h;
+    let height = anim::f32(&ctx, pair_id().with("height"), content + 2.0 * modal_window::PADDING, theme.motion.default_spatial);
+    let window = ModalWindow::new(pair_id(), vec2(cells_w + 2.0 * modal_window::PADDING, f32::INFINITY)).height(height);
+    let window = match p.from {
+        Some(from) => window.origin(from),
+        None => window,
+    };
+    let open = p.open;
+    let dismissed = window.show(&ctx, open, |ui, inner| {
+        let mid = inner.center().x;
+        let top = inner.top();
+        mesh_ui::paint_avatar(ui, pos2(mid, top + PAIR_AVATAR * 0.5), PAIR_AVATAR, &format!("pair-{}", p.nearby), p.kind, Look::default());
+        let g = mesh_ui::text_line(ui.painter(), &p.name, TypeRole::TitleLarge, s.on_surface, inner.width());
+        let name_y = top + PAIR_AVATAR + PAIR_GAP + (PAIR_NAME_H - g.size().y) * 0.5;
+        ui.painter().galley(pos2(mid - g.size().x * 0.5, name_y), g, s.on_surface);
+        let shake = p.shake_at.map_or(0.0, |at| shake_offset(now - at));
+        if p.shake_at.is_some_and(|at| now - at < SHAKE_S) {
+            ctx.request_repaint();
+        } else {
+            p.shake_at = None;
+        }
+        let cells_top = top + PAIR_AVATAR + PAIR_GAP + PAIR_NAME_H + PAIR_CELLS_GAP;
+        let cells = Rect::from_min_size(pos2(mid - cells_w * 0.5 + shake, cells_top), vec2(cells_w, CELL.y));
+        let mut c = ui.new_child(UiBuilder::new().max_rect(cells).layout(Layout::left_to_right(Align::Min)).id_salt("mesh-pair-cells"));
+        let working = p.sent || m.pairing == MeshPairing::Working;
+        let focus = std::mem::take(&mut p.focus);
+        if code_cells(&mut c, egui::Id::new("mesh-pair-code-cells"), &mut p.code, !working, p.wrong, focus) && !p.code.is_empty() {
+            p.wrong = false;
+        }
+        if let Some(e) = &p.error {
+            let r = Rect::from_min_size(pos2(inner.left(), cells.bottom() + 12.0), vec2(inner.width(), 24.0));
+            let mut e_ui = ui.new_child(UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Center)).id_salt("mesh-pair-error"));
+            error_line(&mut e_ui, e);
+        }
+    });
+    if open && dismissed {
+        close_pair(p, out);
+    }
 }
 
 #[cfg(test)]
@@ -715,7 +848,7 @@ mod tests {
         let url = windows_url(host, "nkm1abc");
         assert!(url.starts_with("http://192.168.0.10:47210/install/music.nikgob-"), "{url}");
         assert!(url.ends_with(&format!(".exe?k={key}")) && !url.contains("nkm1abc"), "{url}");
-        assert_eq!(mesh_ui_pair_line("nkm1abc"), "nikgobd pair nkm1abc");
+        assert_eq!(mesh_ui_pair_line("nkm1abc"), "~/.local/bin/nikgobd pair nkm1abc");
     }
 
     /// An open window asks for an invite when none is held (spent, gone),
@@ -796,33 +929,63 @@ mod tests {
         assert!(a.stale.is_none(), "cleared once the runtime has");
     }
 
-    /// Paired: the window closes and the device becomes a guest when asked;
-    /// a wrong code is said and the cells empty; six digits go once.
+    /// The code window: six digits go once; a wrong code empties the cells
+    /// and shakes them without a word; another failure is said; a pairing
+    /// closes it.
     #[test]
-    fn the_pairing_drives_the_window() {
-        let mut a = AddState { open: true, nearby: Some("tv".into()), code: "123456".into(), ..AddState::default() };
+    fn the_pairing_drives_the_code_window() {
+        let mut p = PairState { open: true, nearby: "tv".into(), code: "123456".into(), ..PairState::default() };
         let mut m = MeshView { enabled: true, running: true, ..MeshView::default() };
-        m.nearby = vec![nikgob_view::MeshNearbyView { id: "tv".into(), name: "TV".into(), ..Default::default() }];
         let mut out = Vec::new();
-        follow_pairing(&mut a, &m, &mut out);
+        follow_pair(&mut p, &m, 1.0, &mut out);
         assert_eq!(out, vec![Command::MeshPairNearby { nearby_id: "tv".into(), code: "123456".into() }]);
         out.clear();
-        follow_pairing(&mut a, &m, &mut out);
+        follow_pair(&mut p, &m, 1.1, &mut out);
         assert!(out.is_empty(), "sent once");
-        m.pairing = MeshPairing::Failed("Неверный код".into());
-        follow_pairing(&mut a, &m, &mut out);
-        assert_eq!(a.error.as_deref(), Some("Неверный код"));
-        assert!(a.code.is_empty() && a.sent.is_none());
+        m.pairing = MeshPairing::Failed(WRONG_CODE.into());
+        follow_pair(&mut p, &m, 2.0, &mut out);
+        assert!(p.code.is_empty() && !p.sent && p.wrong && p.focus);
+        assert_eq!((p.shake_at, p.error.as_deref()), (Some(2.0), None), "a shake, no caption");
+        m.pairing = MeshPairing::Failed("Нет связи с устройством".into());
+        follow_pair(&mut p, &m, 3.0, &mut out);
+        assert_eq!(p.error.as_deref(), Some("Нет связи с устройством"));
         out.clear();
-        a.guest = true;
-        a.code = "654321".into();
-        follow_pairing(&mut a, &MeshView { pairing: MeshPairing::Idle, ..m.clone() }, &mut out);
-        assert!(a.sent.is_some(), "the new code went");
-        out.clear();
+        p.code = "654321".into();
+        m.pairing = MeshPairing::Idle;
+        follow_pair(&mut p, &m, 4.0, &mut out);
+        assert!(p.sent && p.error.is_none(), "the new code went");
         m.pairing = MeshPairing::Done { node_id: "tv".into() };
-        follow_pairing(&mut a, &m, &mut out);
-        assert!(!a.open);
-        assert_eq!(out[0], Command::MeshSetScope { node_id: "tv".into(), scope: MeshScope::Guest });
+        follow_pair(&mut p, &m, 5.0, &mut out);
+        assert!(!p.open);
+        assert!(!out.iter().any(|c| matches!(c, Command::MeshSetScope { .. })), "an owner's device: «Гость» is the list's");
+    }
+
+    /// The shake swings and dies away, and rests outside its time.
+    #[test]
+    fn the_cells_shake_and_settle() {
+        assert_eq!(shake_offset(-0.1), 0.0);
+        assert_eq!(shake_offset(SHAKE_S), 0.0);
+        let peak = (0..45).map(|i| shake_offset(f64::from(i) * 0.01).abs()).fold(0.0_f32, f32::max);
+        assert!(peak > SHAKE_DP * 0.5 && peak <= SHAKE_DP, "{peak}");
+        assert!(shake_offset(SHAKE_S * 0.95).abs() < SHAKE_DP * 0.1, "nearly still at the end");
+    }
+
+    /// From a nearby row the code window opens for that device alone, and
+    /// «Добавить устройство» gives way to it.
+    #[test]
+    fn a_nearby_device_opens_its_own_code_window() {
+        let ctx = egui::Context::default();
+        let mut m = MeshView { enabled: true, running: true, ..MeshView::default() };
+        m.nearby = vec![nikgob_view::MeshNearbyView { id: "pi".into(), name: "raspberrypi".into(), kind: MeshKind::Pi, ..Default::default() }];
+        let mut mem = MeshUi::default();
+        mem.add.open = true;
+        let mut out = Vec::new();
+        open_pair(&ctx, &m, &mut mem, None, "pi", &mut out);
+        assert!(mem.pair.open && !mem.add.open);
+        assert_eq!((mem.pair.name.as_str(), mem.pair.kind), ("raspberrypi", MeshKind::Pi));
+        assert!(mem.pair.focus, "the cells have the keys at once");
         assert!(out.contains(&Command::MeshCancelInvite));
+        open_pair(&ctx, &m, &mut mem, None, "gone", &mut out);
+        assert_eq!(mem.pair.nearby, "pi", "no such device: nothing changes");
     }
 }

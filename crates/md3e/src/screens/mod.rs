@@ -1421,6 +1421,12 @@ impl Md3eUi {
         pages::open_add_device(ctx, state, &mut self.pages, install, out);
     }
 
+    /// Opens the code window of the first nearby device (scripted
+    /// screenshots).
+    pub fn open_pair_code(&mut self, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
+        pages::open_pair_code(ctx, state, &mut self.pages, out);
+    }
+
     /// Opens the output popover («Где играть») out of the output button
     /// drawn last, else out of the window's bottom right corner (scripted
     /// screenshots).

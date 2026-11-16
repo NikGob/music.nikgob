@@ -729,6 +729,13 @@ impl Shot {
                 ui.open_add_device(ctx, shown.as_ref().unwrap_or(state), arg == "install", out);
                 self.wait = 40;
             }
+            // `devices_pair` opens the code window of the first nearby
+            // device (over Settings → Межсеть or the map).
+            "devices_pair" => {
+                let shown = self.overlay(state);
+                ui.open_pair_code(ctx, shown.as_ref().unwrap_or(state), out);
+                self.wait = 40;
+            }
             // `output` opens the output popover out of the output button
             // drawn last (needs another device: `fake:mesh`, `fake:remote`).
             "output" => {

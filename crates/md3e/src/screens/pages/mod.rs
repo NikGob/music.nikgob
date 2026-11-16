@@ -906,18 +906,26 @@ pub struct PageState {
     pub(crate) first_run: first_run::State,
 }
 
-/// Opens «Добавить устройство» at the first nearby device's code, or on
+/// Opens «Добавить устройство» on «Подключить», or on
 /// «Установить» (scripted screenshots; Settings → Межсеть and «Карта
 /// сети» draw it).
 pub(crate) fn open_add_device(ctx: &Context, state: &ViewState, pages: &mut PageState, install: bool, out: &mut Vec<Command>) {
     let tab = if install { add_device::AddTab::Install } else { add_device::AddTab::Connect };
-    add_device::open(ctx, &state.mesh, &mut pages.mesh, None, tab, state.mesh.nearby.first().map(|n| n.id.clone()), out);
+    add_device::open(ctx, &state.mesh, &mut pages.mesh, None, tab, out);
 }
 
 /// Opens «Добавить устройство» out of `from` (the output popover's
-/// «Добавить»), at the first nearby device's code.
+/// «Добавить»), on «Подключить».
 pub(crate) fn open_add_device_from(ctx: &Context, state: &ViewState, pages: &mut PageState, from: Rect, out: &mut Vec<Command>) {
-    add_device::open(ctx, &state.mesh, &mut pages.mesh, Some(from), add_device::AddTab::Connect, state.mesh.nearby.first().map(|n| n.id.clone()), out);
+    add_device::open(ctx, &state.mesh, &mut pages.mesh, Some(from), add_device::AddTab::Connect, out);
+}
+
+/// Opens the code window of the first nearby device (scripted
+/// screenshots).
+pub(crate) fn open_pair_code(ctx: &Context, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
+    if let Some(n) = state.mesh.nearby.first() {
+        add_device::open_pair(ctx, &state.mesh, &mut pages.mesh, None, &n.id, out);
+    }
 }
 
 /// The devices' window and dialogs when no page of the devices drew them
