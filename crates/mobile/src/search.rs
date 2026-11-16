@@ -151,30 +151,30 @@ impl Search {
             }
             let picks: Vec<nikgob_view::SearchPick> = a.tracks.iter().map(SearchTrack::pick).collect();
             if let Some(top) = &a.top {
-                parts::section(ui, "Лучший результат");
+                parts::section_head(ui, "Лучший результат");
                 match top {
                     TopResult::Track(t) => {
                         let (uri, sub) = track_face(t);
-                        if parts::item(ui, Id::new("search-top"), uri.as_deref(), t.title(), &sub, Picture::Square).clicked() {
+                        if parts::media_row(ui, Id::new("search-top"), uri.as_deref(), t.title(), &sub, Picture::Square).clicked() {
                             out.push(Command::PlaySearch { tracks: vec![t.pick()], start: 0, context: "поиска".into() });
                         }
                     }
                     TopResult::Album(al) => {
                         let (uri, title, sub) = album_face(al);
-                        if parts::item(ui, Id::new("search-top"), uri.as_deref(), &title, &sub, Picture::Square).clicked() {
+                        if parts::media_row(ui, Id::new("search-top"), uri.as_deref(), &title, &sub, Picture::Square).clicked() {
                             page.nav = Some(album_route(al));
                         }
                     }
                     TopResult::Artist(ar) => {
                         let (uri, name) = artist_face(ar);
-                        if parts::item(ui, Id::new("search-top"), uri.as_deref(), &name, "", Picture::Round).clicked() {
+                        if parts::media_row(ui, Id::new("search-top"), uri.as_deref(), &name, "", Picture::Round).clicked() {
                             page.nav = Some(artist_route(ar));
                         }
                     }
                 }
             }
             if !a.tracks.is_empty() {
-                parts::section(ui, "Треки");
+                parts::section_head(ui, "Треки");
                 let here = Route::Home;
                 rows::list(ui, "search-tracks", a.tracks.len(), rows::ROW_H, |ui, i, r| match &a.tracks[i] {
                     SearchTrack::Library(t) => {
@@ -202,38 +202,38 @@ impl Search {
                 });
             }
             if !a.albums.is_empty() {
-                parts::section(ui, "Альбомы");
-                parts::grid(ui, a.albums.len().min(9), 3, |ui, i, r| {
+                parts::section_head(ui, "Альбомы");
+                parts::grid2(ui, "search-al", a.albums.len().min(9), |ui, i, r| {
                     let al = &a.albums[i];
                     let (uri, title, sub) = album_face(al);
-                    if parts::card(ui, r, Id::new(("search-album", i)), uri.as_deref(), &title, &sub, Picture::Square).clicked() {
+                    if parts::grid_card(ui, r, Id::new(("search-album", i)), uri.as_deref(), &title, &sub, Picture::Square).clicked() {
                         page.nav = Some(album_route(al));
                     }
                 });
             }
             if !a.artists.is_empty() {
-                parts::section(ui, "Исполнители");
-                parts::grid(ui, a.artists.len().min(9), 3, |ui, i, r| {
+                parts::section_head(ui, "Исполнители");
+                parts::grid2(ui, "search-ar", a.artists.len().min(9), |ui, i, r| {
                     let ar = &a.artists[i];
                     let (uri, name) = artist_face(ar);
-                    if parts::card(ui, r, Id::new(("search-artist", i)), uri.as_deref(), &name, "", Picture::Round).clicked() {
+                    if parts::grid_card(ui, r, Id::new(("search-artist", i)), uri.as_deref(), &name, "", Picture::Round).clicked() {
                         page.nav = Some(artist_route(ar));
                     }
                 });
             }
             if !a.playlists.is_empty() {
-                parts::section(ui, "Плейлисты");
+                parts::section_head(ui, "Плейлисты");
                 for (i, p) in a.playlists.iter().enumerate() {
                     match p {
                         SearchPlaylist::Library(c) => {
                             let uri = c.cover.as_ref().map(|c| c.uri());
-                            if parts::item(ui, Id::new(("search-pl", i)), uri.as_deref(), &c.name, &text::tracks(u64::from(c.track_count)), Picture::Square).clicked() {
+                            if parts::media_row(ui, Id::new(("search-pl", i)), uri.as_deref(), &c.name, &text::tracks(u64::from(c.track_count)), Picture::Square).clicked() {
                                 page.nav = Some(Route::Playlist(c.id));
                             }
                         }
                         SearchPlaylist::Stream(c) => {
                             let owner = c.owner.clone().unwrap_or_default();
-                            if parts::item(ui, Id::new(("search-pl", i)), None, &c.name, &owner, Picture::Square).clicked() {
+                            if parts::media_row(ui, Id::new(("search-pl", i)), None, &c.name, &owner, Picture::Square).clicked() {
                                 page.nav = Some(Route::Stream(StreamPage::Playlist(c.remote.clone())));
                             }
                         }

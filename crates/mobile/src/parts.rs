@@ -10,9 +10,9 @@ use nikgob_md3e::components::{IconButton, LoadingIndicator, anim};
 use nikgob_md3e::screens::phone;
 use nikgob_md3e::{Icon, Theme, TypeRole};
 use nikgob_shapes::MaterialShape;
-use nikgob_view::{Command, Route, TrackRow, ViewState};
+use nikgob_view::{Route, TrackRow};
 
-use crate::rows::{self, Look};
+use crate::rows;
 use crate::text;
 
 /// What a page asked for this frame.
@@ -94,15 +94,6 @@ pub fn top_bar(ui: &mut Ui, rect: Rect, top: f32, title: &str, solid: f32, back:
 /// put its switch or its ⋮ pulled the next row up under itself.
 pub fn put(ui: &mut Ui, rect: Rect, widget: impl egui::Widget) -> Response {
     ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::centered_and_justified(egui::Direction::TopDown))).add(widget)
-}
-
-/// A section's title over its content.
-pub fn section(ui: &mut Ui, title: &str) {
-    let theme = Theme::get(ui.ctx());
-    ui.add_space(16.0);
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
-    let style = TypeRole::TitleMedium.emphasized();
-    text::paint_line(ui, pos2(r.left() + 16.0, r.center().y - style.line_height * 0.5), title, style, theme.scheme.on_surface, r.width() - 32.0);
 }
 
 /// The waiting indicator in the middle of the page's room.
@@ -321,129 +312,6 @@ fn press_layer(ui: &Ui, rect: Rect, radii: Radii, id: Id, resp: &Response, ink: 
     paint::state_layer(ui.painter(), rect, radii, ink, layer);
 }
 
-/// A card of a grid: the picture (square, or round for an artist) over a
-/// title and a line under it. Tapped: the response's click.
-pub fn card(ui: &mut Ui, rect: Rect, id: Id, uri: Option<&str>, title: &str, sub: &str, picture: Picture) -> Response {
-    let theme = Theme::get(ui.ctx());
-    let s = theme.scheme;
-    let resp = ui.interact(rect, id, Sense::click());
-    let side = rect.width();
-    let pic = Rect::from_min_size(rect.min, vec2(side, side));
-    let press = anim::fraction(ui.ctx(), id.with("press"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
-    let pic = pic.shrink(side * 0.03 * press);
-    match picture {
-        Picture::Square => phone::paint_cover(ui, pic, uri, 12.0),
-        Picture::Round => phone::paint_shape_avatar(ui, pic, uri, &text::initials(title), MaterialShape::Circle, s.secondary_container, s.on_secondary_container),
-    }
-    // The caption: the title over a smaller line, centred under an artist.
-    let ts = TypeRole::BodyMedium.emphasized();
-    let ss = TypeRole::LabelSmall.style();
-    let y = rect.top() + side + CAPTION_GAP;
-    let centred = picture == Picture::Round;
-    for (k, (line, style, color)) in [(title, ts, s.on_surface), (sub, ss, s.on_surface_variant)].into_iter().enumerate() {
-        if line.is_empty() {
-            continue;
-        }
-        let g = text::line(ui, line, style, color, side);
-        let x = if centred { rect.center().x - g.size().x * 0.5 } else { rect.left() };
-        ui.painter().galley(pos2(x, y + if k == 0 { 0.0 } else { ts.line_height }), g, color);
-    }
-    resp
-}
-
-/// The space between a card's picture and its caption.
-const CAPTION_GAP: f32 = 6.0;
-/// The gaps of a grid: across and down (Metrolist's).
-const GRID_GAP_X: f32 = 6.0;
-const GRID_GAP_Y: f32 = 12.0;
-
-/// The height of a card `w` wide.
-pub fn card_h(w: f32) -> f32 {
-    w + CAPTION_GAP + TypeRole::BodyMedium.style().line_height + TypeRole::LabelSmall.style().line_height + 8.0
-}
-
-/// Cards in `cols` columns with the page's margins; `draw` gets each cell.
-pub fn grid(ui: &mut Ui, n: usize, cols: usize, mut draw: impl FnMut(&mut Ui, usize, Rect)) {
-    if n == 0 {
-        return;
-    }
-    let width = ui.available_width();
-    let cols = cols.max(1);
-    let w = (width - 32.0 - GRID_GAP_X * (cols as f32 - 1.0)) / cols as f32;
-    let h = card_h(w);
-    let lines = n.div_ceil(cols);
-    let (area, _) = ui.allocate_exact_size(vec2(width, lines as f32 * (h + GRID_GAP_Y)), Sense::hover());
-    let clip = ui.clip_rect();
-    for i in 0..n {
-        let (line, col) = (i / cols, i % cols);
-        let r = Rect::from_min_size(pos2(area.left() + 16.0 + col as f32 * (w + GRID_GAP_X), area.top() + line as f32 * (h + GRID_GAP_Y)), vec2(w, h));
-        if !clip.intersects(r) {
-            continue;
-        }
-        let mut cui = ui.new_child(UiBuilder::new().max_rect(r).id_salt(("grid-cell", i)));
-        draw(&mut cui, i, r);
-    }
-}
-
-/// A list row of a playlist or an artist: its picture, its name and a
-/// line under it. Tapped: the response's click.
-pub fn item(ui: &mut Ui, id: Id, uri: Option<&str>, title: &str, sub: &str, picture: Picture) -> Response {
-    let theme = Theme::get(ui.ctx());
-    let s = theme.scheme;
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
-    let resp = ui.interact(r, id, Sense::click());
-    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
-    paint::state_layer(ui.painter(), r.shrink2(vec2(8.0, 2.0)), Radii::all(16.0), s.on_surface, layer);
-    let pic = Rect::from_min_size(pos2(r.left() + 16.0, r.center().y - 28.0), vec2(56.0, 56.0));
-    match picture {
-        Picture::Square => phone::paint_cover(ui, pic, uri, 8.0),
-        Picture::Round => phone::paint_shape_avatar(ui, pic, uri, &text::initials(title), MaterialShape::Circle, s.secondary_container, s.on_secondary_container),
-    }
-    let x = pic.right() + 16.0;
-    let w = r.right() - 16.0 - x;
-    let ts = TypeRole::BodyLarge.style();
-    let ss = TypeRole::BodyMedium.style();
-    let y = r.center().y - (ts.line_height + if sub.is_empty() { 0.0 } else { ss.line_height }) * 0.5;
-    text::paint_line(ui, pos2(x, y), title, ts, s.on_surface, w);
-    if !sub.is_empty() {
-        text::paint_line(ui, pos2(x, y + ts.line_height), sub, ss, s.on_surface_variant, w);
-    }
-    resp
-}
-
-/// The tracks of a page as one grouped list: a tap plays `play(i)`, a
-/// swipe to the right plays the song next, a long press or ⋮ opens its
-/// menu.
-#[allow(clippy::too_many_arguments)]
-pub fn tracks(
-    ui: &mut Ui,
-    id: &str,
-    tracks: &[TrackRow],
-    numbered: bool,
-    here: &Route,
-    state: &ViewState,
-    play: impl Fn(usize) -> Command,
-    out: &mut Vec<Command>,
-    page: &mut PageOut,
-) {
-    let row_h = if numbered { rows::NUMBERED_H } else { rows::ROW_H } + rows::GROUP_GAP;
-    let n = tracks.len();
-    rows::list(ui, id, n, row_h, |ui, i, r| {
-        let t = &tracks[i];
-        let look = if numbered { Look::numbered(t, state) } else { Look::list(t, state) }.grouped(i, n);
-        let o = rows::track(ui, r, Id::new((id, i)), t, look, state);
-        if o.tap {
-            out.push(if look.playing { Command::TogglePlay } else { play(i) });
-        }
-        if o.play_next {
-            out.push(Command::PlayNext(vec![t.id]));
-        }
-        if o.menu {
-            page.menu = Some((t.clone(), here.clone()));
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +327,129 @@ mod tests {
     fn a_cover_is_across_the_page_but_never_more_than_half_the_screen() {
         assert_eq!(cover_side(392.0, 852.0), 360.0);
         assert_eq!(cover_side(412.0, 600.0), 300.0);
+    }
+}
+
+/// A section header: 22 sp bold in `primary`, a 52 dp row, the text at x 16.
+pub const SECTION_H: f32 = 52.0;
+
+pub fn section_head(ui: &mut Ui, title: &str) {
+    let theme = Theme::get(ui.ctx());
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), SECTION_H), Sense::hover());
+    let style = TypeRole::TitleLarge.emphasized();
+    text::paint_line(ui, pos2(r.left() + 16.0, r.center().y - style.line_height * 0.5), title, style, theme.scheme.primary, r.width() - 32.0);
+}
+
+/// A library grid: 12 dp outer margin, 24 dp between the two thumbs.
+pub const GRID_OUTER: f32 = 12.0;
+pub const GRID_BETWEEN: f32 = 24.0;
+/// Under a caption before the next thumb (the measured pitch is about 242).
+const GRID_ROW_GAP: f32 = 20.0;
+const GRID_CAPTION: f32 = 6.0;
+
+/// Thumb side of a 2-column grid on a page `page_w` wide: 168 at 384.
+pub fn grid_thumb(page_w: f32) -> f32 {
+    (page_w - GRID_OUTER * 2.0 - GRID_BETWEEN) / 2.0
+}
+
+fn grid_cell_h(thumb: f32) -> f32 {
+    thumb + GRID_CAPTION + TypeRole::TitleMedium.style().line_height + TypeRole::BodyLarge.style().line_height
+}
+
+/// Cards in two columns; `draw` gets each cell.
+pub fn grid2(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, n: usize, mut draw: impl FnMut(&mut Ui, usize, Rect)) {
+    if n == 0 {
+        return;
+    }
+    let width = ui.available_width();
+    let w = grid_thumb(width);
+    let h = grid_cell_h(w);
+    let lines = n.div_ceil(2);
+    let total = lines as f32 * h + lines.saturating_sub(1) as f32 * GRID_ROW_GAP;
+    let (area, _) = ui.allocate_exact_size(vec2(width, total), Sense::hover());
+    let clip = ui.clip_rect();
+    let base = Id::new(id);
+    for i in 0..n {
+        let (line, col) = (i / 2, i % 2);
+        let r = Rect::from_min_size(
+            pos2(area.left() + GRID_OUTER + col as f32 * (w + GRID_BETWEEN), area.top() + line as f32 * (h + GRID_ROW_GAP)),
+            vec2(w, h),
+        );
+        if !clip.intersects(r) {
+            continue;
+        }
+        let mut cui = ui.new_child(UiBuilder::new().max_rect(r).id_salt(base.with(i)));
+        draw(&mut cui, i, r);
+    }
+}
+
+/// A grid card: radius 4 (a circle for an artist), 16 sp bold then 16 sp
+/// muted, 6 dp under the thumb. No play mark on the cover.
+pub fn grid_card(ui: &mut Ui, rect: Rect, id: Id, uri: Option<&str>, title: &str, sub: &str, picture: Picture) -> Response {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let resp = ui.interact(rect, id, Sense::click());
+    let side = rect.width();
+    let pic = Rect::from_min_size(rect.min, vec2(side, side));
+    let round = picture == Picture::Round;
+    let radii = if round { Radii::all(side * 0.5) } else { Radii::all(rows::THUMB_R) };
+    match picture {
+        Picture::Square => phone::paint_cover(ui, pic, uri, rows::THUMB_R),
+        Picture::Round => phone::paint_shape_avatar(ui, pic, uri, &text::initials(title), MaterialShape::Circle, s.secondary_container, s.on_secondary_container),
+    }
+    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
+    paint::state_layer(ui.painter(), pic, radii, s.on_surface, layer);
+    let ts = TypeRole::TitleMedium.emphasized();
+    let ss = TypeRole::BodyLarge.style();
+    let y = pic.bottom() + GRID_CAPTION;
+    for (k, (line, style, color)) in [(title, ts, s.on_surface), (sub, ss, s.on_surface_variant)].into_iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let g = text::line(ui, line, style, color, side);
+        let x = if round { rect.center().x - g.size().x * 0.5 } else { rect.left() };
+        ui.painter().galley(pos2(x, y + if k == 0 { 0.0 } else { ts.line_height }), g, color);
+    }
+    resp
+}
+
+/// A 64 dp list row with a 48 dp thumb at x 14, radius 4 (a circle for an
+/// artist). Title 14 sp bold, subtitle 12 sp.
+pub fn media_row(ui: &mut Ui, id: Id, uri: Option<&str>, title: &str, sub: &str, picture: Picture) -> Response {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), rows::ROW_H), Sense::hover());
+    let resp = ui.interact(r, id, Sense::click());
+    let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
+    paint::state_layer(ui.painter(), r, Radii::all(0.0), s.on_surface, layer);
+    let pic = rows::thumb_rect(r);
+    match picture {
+        Picture::Square => phone::paint_cover(ui, pic, uri, rows::THUMB_R),
+        Picture::Round => phone::paint_shape_avatar(ui, pic, uri, &text::initials(title), MaterialShape::Circle, s.secondary_container, s.on_secondary_container),
+    }
+    let x = r.left() + rows::TITLE_X;
+    let w = (r.right() - 16.0 - x).max(16.0);
+    let ts = TypeRole::TitleSmall.emphasized();
+    let ss = TypeRole::BodySmall.style();
+    let y = r.center().y - (ts.line_height + if sub.is_empty() { 0.0 } else { ss.line_height }) * 0.5;
+    text::paint_line(ui, pos2(x, y), title, ts, s.on_surface, w);
+    if !sub.is_empty() {
+        text::paint_line(ui, pos2(x, y + ts.line_height), sub, ss, s.on_surface_variant, w);
+    }
+    resp
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    #[test]
+    fn a_library_thumb_is_168_on_a_384_page() {
+        assert_eq!(grid_thumb(384.0), 168.0);
+        assert_eq!(grid_thumb(360.0), 156.0);
+        assert_eq!(grid_thumb(392.0), 172.0);
+        assert_eq!(grid_thumb(412.0), 182.0);
+        assert_eq!(grid_cell_h(168.0), 168.0 + 6.0 + TypeRole::TitleMedium.style().line_height + TypeRole::BodyLarge.style().line_height);
+        assert_eq!(SECTION_H, 52.0);
     }
 }

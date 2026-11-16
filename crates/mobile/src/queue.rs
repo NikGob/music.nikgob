@@ -256,8 +256,9 @@ impl QueueSheet {
             let y = r.y.clamp(area.top(), area.bottom().max(area.top() + ROW_H)) - ROW_H * 0.5;
             let rect = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_H));
             let s = theme.scheme;
-            paint::shadow(ui.painter(), rect.shrink2(vec2(8.0, 2.0)), Radii::all(16.0), Elevation::Level2);
-            paint::container(ui.painter(), rect.shrink2(vec2(8.0, 2.0)), Radii::all(16.0), s.surface_container_highest, Stroke::NONE);
+            let plate = rect.shrink2(vec2(rows::CURRENT_INSET, 0.0));
+            paint::shadow(ui.painter(), plate, Radii::all(rows::CURRENT_R), Elevation::Level2);
+            paint::container(ui.painter(), plate, Radii::all(rows::CURRENT_R), s.surface_container, Stroke::NONE);
             let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(("phone-queue-row", e.entry)));
             let look = Look { swipe_next: false, swipe_remove: false, more: false, handle: true, ..Look::list(&e.track, state) };
             let o = rows::track(&mut cui, rect, Id::new(("phone-queue-row", e.entry)), &e.track, look, state);
