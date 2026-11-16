@@ -211,7 +211,7 @@ impl Library {
 
     fn album_cards(&mut self, ui: &mut Ui, releases: &[nikgob_view::ReleaseCard], page: &mut PageOut, list: bool) {
         let sub = |r: &nikgob_view::ReleaseCard| match r.year {
-            Some(y) => format!("{} · {y}", r.artist),
+            Some(y) => format!("{} • {y}", r.artist),
             None => r.artist.clone(),
         };
         if list {

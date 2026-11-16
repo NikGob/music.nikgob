@@ -494,7 +494,7 @@ impl MobileUi {
         let mut top = frame.rect.top() + frame.top;
         if back {
             let bar = Rect::from_min_size(pos2(frame.rect.left() + 4.0, top + 4.0), vec2(48.0, 48.0));
-            if ui.put(bar, nikgob_md3e::components::IconButton::new(Icon::ArrowBack).id_salt("phone-page-back")).clicked() {
+            if crate::parts::put(ui, bar, nikgob_md3e::components::IconButton::new(Icon::ArrowBack).id_salt("phone-page-back")).clicked() {
                 self.nav.back(anim::now(ui.ctx()));
                 return None;
             }

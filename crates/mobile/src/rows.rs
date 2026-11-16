@@ -224,7 +224,7 @@ pub fn track(ui: &mut Ui, rect: Rect, id: Id, t: &TrackRow, look: Look, state: &
     let mut end = row.right() - 4.0;
     if look.more {
         let r = Rect::from_min_size(pos2(end - MORE, row.center().y - MORE * 0.5), vec2(MORE, MORE));
-        if ui.put(r, IconButton::new(Icon::MoreVert).id_salt(id.with("more"))).clicked() {
+        if crate::parts::put(ui, r, IconButton::new(Icon::MoreVert).id_salt(id.with("more"))).clicked() {
             out.menu = true;
         }
         end -= MORE;

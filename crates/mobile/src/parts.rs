@@ -78,7 +78,7 @@ pub fn top_bar(ui: &mut Ui, rect: Rect, top: f32, title: &str, solid: f32, back:
     let mut x = row.left() + 16.0;
     if back {
         let b = Rect::from_min_size(pos2(row.left() + 4.0, row.center().y - 24.0), vec2(48.0, 48.0));
-        tapped = ui.put(b, IconButton::new(Icon::ArrowBack).id_salt("page-back")).clicked();
+        tapped = put(ui, b, IconButton::new(Icon::ArrowBack).id_salt("page-back")).clicked();
         x = b.right() + 4.0;
     }
     if k > 0.01 && !title.is_empty() {
@@ -87,6 +87,13 @@ pub fn top_bar(ui: &mut Ui, rect: Rect, top: f32, title: &str, solid: f32, back:
         ui.painter().galley(pos2(x, row.center().y - g.size().y * 0.5), g, s.on_surface.gamma_multiply(k));
     }
     tapped
+}
+
+/// `widget` centred over `rect`, leaving `ui`'s cursor where it was:
+/// egui's `put` moves the cursor of a column to under `rect`, so a row that
+/// put its switch or its ⋮ pulled the next row up under itself.
+pub fn put(ui: &mut Ui, rect: Rect, widget: impl egui::Widget) -> Response {
+    ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::centered_and_justified(egui::Direction::TopDown))).add(widget)
 }
 
 /// A section's title over its content.
@@ -101,7 +108,17 @@ pub fn section(ui: &mut Ui, title: &str) {
 /// The waiting indicator in the middle of the page's room.
 pub fn loading(ui: &mut Ui) {
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 160.0), Sense::hover());
-    ui.put(Rect::from_center_size(r.center(), vec2(48.0, 48.0)), LoadingIndicator::new().size(48.0));
+    put(ui, Rect::from_center_size(r.center(), vec2(48.0, 48.0)), LoadingIndicator::new().size(48.0));
+}
+
+/// An answer with nothing in it: the search icon over «Ничего не нашлось».
+pub fn nothing(ui: &mut Ui) {
+    let theme = Theme::get(ui.ctx());
+    let s = theme.scheme;
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 160.0), Sense::hover());
+    Icon::Search.widget(false, s.on_surface_variant, 48.0).paint_at(ui, Rect::from_center_size(pos2(r.center().x, r.top() + 56.0), vec2(48.0, 48.0)));
+    let g = text::centred(ui, "Ничего не нашлось", TypeRole::TitleMedium.style(), s.on_surface_variant, r.width() - 32.0, 1);
+    ui.painter().galley(pos2(r.center().x, r.top() + 96.0), g, s.on_surface_variant);
 }
 
 /// An error, the only words a page says of itself.

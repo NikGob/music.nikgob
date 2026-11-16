@@ -169,7 +169,7 @@ fn row(ui: &mut Ui, i: usize, p: &Place) -> (bool, bool) {
     let end = Rect::from_min_size(pos2(r.right() - 52.0, r.center().y - 24.0), vec2(48.0, 48.0));
     let mut swap = false;
     if p.swap {
-        swap = ui.put(end, IconButton::new(Icon::SwapHoriz).id_salt(("phone-output-swap", i))).clicked();
+        swap = crate::parts::put(ui, end, IconButton::new(Icon::SwapHoriz).id_salt(("phone-output-swap", i))).clicked();
     } else if p.selected {
         Icon::Check.widget(true, s.primary, 24.0).paint_at(ui, Rect::from_center_size(end.center(), vec2(24.0, 24.0)));
     }

@@ -31,6 +31,9 @@ pub const MINI_H: f32 = 66.0;
 pub const MINI_MARGIN: f32 = 12.0;
 pub const MINI_GAP: f32 = 6.0;
 const MINI_RADIUS: f32 = MINI_H / 2.0;
+/// Its buttons at the end (♥, play or pause, next) and the room between.
+const MINI_BUTTON: f32 = 40.0;
+const MINI_BUTTON_GAP: f32 = 4.0;
 /// A sideways drag this long changes the song.
 const SKIP: f32 = 64.0;
 
@@ -173,15 +176,12 @@ impl Player {
         let mut inner = ui.new_child(UiBuilder::new().max_rect(content));
         inner.set_clip_rect(rect.shrink(1.0));
         let p = &state.player;
-        // The cover in a circle inside the ring of the progress; it is the
-        // play button too.
+        // The cover in a circle inside the ring of the progress.
         let ring = Rect::from_min_size(pos2(content.left() + dx, content.center().y - 24.0), vec2(48.0, 48.0));
-        if mini_cover(&mut inner, ring, t.cover.as_ref().map(|c| c.uri()).as_deref(), p.fraction_now(), p.status) {
-            out.push(Command::TogglePlay);
-        }
-        let like = Rect::from_min_size(pos2(content.right() - 48.0, content.center().y - 24.0), vec2(48.0, 48.0));
-        let tx = ring.right() + 14.0;
-        let tw = (like.left() - 10.0 - tx).max(16.0);
+        mini_cover(&inner, ring, t.cover.as_ref().map(|c| c.uri()).as_deref(), p.fraction_now());
+        let [like, play, next] = mini_buttons(content);
+        let tx = ring.right() + 12.0;
+        let tw = (like.left() - 8.0 - tx).max(16.0);
         let title = TypeRole::TitleSmall.style();
         let sub = TypeRole::BodySmall.style();
         let ty = content.center().y - (title.line_height + sub.line_height) * 0.5;
@@ -192,13 +192,20 @@ impl Player {
             // Playing on another device: its icon and name first.
             phone::device_icon(target.kind).widget(true, s.primary, 12.0).paint_at(&inner, Rect::from_min_size(pos2(sx, ty + title.line_height + 2.0), vec2(12.0, 12.0)));
             sx += 16.0;
-            let w = text::paint_line(&inner, pos2(sx, ty + title.line_height), format!("{} · ", target.name), sub, s.primary, tw - 16.0);
+            let w = text::paint_line(&inner, pos2(sx, ty + title.line_height), format!("{} • ", target.name), sub, s.primary, tw - 16.0);
             sx += w;
         }
         text::paint_line(&inner, pos2(sx, ty + title.line_height), t.artist.clone(), sub, quiet, (tx + tw - sx).max(8.0));
-        // ♥ in an outlined circle.
+        // ♥ in an outlined circle, play or pause (a circle while paused, a
+        // rounded square while it plays), next.
         if outlined_icon(&mut ui, like, Id::new("phone-mini-like"), Icon::Favorite, t.liked) {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
+        }
+        if play_button(&mut ui, play, Id::new("phone-mini-play"), p.status == Status::Playing, p.status == Status::Buffering, 12.0, MINI_BUTTON * 0.5) {
+            out.push(Command::TogglePlay);
+        }
+        if outlined_icon(&mut ui, next, Id::new("phone-mini-next"), Icon::SkipNext, false) {
+            out.push(Command::Next);
         }
         if p.status == Status::Playing {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -490,14 +497,20 @@ impl Player {
     }
 }
 
+/// The mini player's buttons at the end of its `content`: ♥, play or
+/// pause, next.
+fn mini_buttons(content: Rect) -> [Rect; 3] {
+    let next = Rect::from_min_size(pos2(content.right() - MINI_BUTTON, content.center().y - MINI_BUTTON * 0.5), vec2(MINI_BUTTON, MINI_BUTTON));
+    let play = next.translate(vec2(-(MINI_BUTTON + MINI_BUTTON_GAP), 0.0));
+    let like = play.translate(vec2(-(MINI_BUTTON + MINI_BUTTON_GAP), 0.0));
+    [like, play, next]
+}
+
 /// The mini player's cover: a 38 dp circle in a 48 dp ring of the
-/// progress, dimmed with ▶ while paused, the loading indicator while it
-/// waits. Tapped: true (play or pause).
-fn mini_cover(ui: &mut Ui, ring: Rect, uri: Option<&str>, fraction: f32, status: Status) -> bool {
+/// progress (a tap on it opens the player, as anywhere on the capsule).
+fn mini_cover(ui: &Ui, ring: Rect, uri: Option<&str>, fraction: f32) {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    let id = Id::new("phone-mini-cover");
-    let resp = ui.interact(ring, id, Sense::click());
     let c = ring.center();
     let stroke = 3.0;
     let r = (ring.width() - stroke) * 0.5;
@@ -507,20 +520,7 @@ fn mini_cover(ui: &mut Ui, ring: Rect, uri: Option<&str>, fraction: f32, status:
         ui.painter().add(egui::Shape::line(arc(c, r, f), Stroke::new(stroke, s.primary)));
     }
     let art = Rect::from_center_size(c, vec2(38.0, 38.0));
-    let press = anim::fraction(ui.ctx(), id.with("press"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
-    let art = art.shrink(2.0 * press);
     phone::paint_cover(ui, art, uri, art.width() * 0.5);
-    match status {
-        Status::Buffering => {
-            ui.put(Rect::from_center_size(c, vec2(24.0, 24.0)), LoadingIndicator::new().color(s.primary).size(24.0));
-        }
-        Status::Playing => {}
-        _ => {
-            ui.painter().circle_filled(c, art.width() * 0.5, egui::Color32::from_black_alpha(90));
-            Icon::PlayArrow.widget(true, egui::Color32::WHITE, 20.0).paint_at(ui, Rect::from_center_size(c, vec2(20.0, 20.0)));
-        }
-    }
-    resp.clicked()
 }
 
 /// The points of a ring's arc from the top, clockwise, `f` of the way.
@@ -675,7 +675,7 @@ fn transport_row(ui: &mut Ui, rect: Rect, id: Id, status: Status) -> Option<Tran
             0 => Icon::SkipPrevious.widget(true, ink, size).paint_at(ui, c),
             2 => Icon::SkipNext.widget(true, ink, size).paint_at(ui, c),
             _ if status == Status::Buffering => {
-                ui.put(c, LoadingIndicator::new().color(ink).size(size));
+                crate::parts::put(ui, c, LoadingIndicator::new().color(ink).size(size));
             }
             _ => (if playing { Icon::Pause } else { Icon::PlayArrow }).widget(true, ink, size).paint_at(ui, c),
         }
@@ -711,7 +711,7 @@ pub fn play_button(ui: &mut Ui, rect: Rect, id: Id, playing: bool, buffering: bo
     paint::state_layer(ui.painter(), rect, radii, s.on_primary, layer);
     let icon = (rect.height() * 0.45).round();
     if buffering {
-        ui.put(Rect::from_center_size(rect.center(), vec2(icon, icon)), LoadingIndicator::new().color(s.on_primary).size(icon));
+        crate::parts::put(ui, Rect::from_center_size(rect.center(), vec2(icon, icon)), LoadingIndicator::new().color(s.on_primary).size(icon));
     } else {
         let glyph = if playing { Icon::Pause } else { Icon::PlayArrow };
         glyph.widget(true, s.on_primary, icon).paint_at(ui, Rect::from_center_size(rect.center(), vec2(icon, icon)));
@@ -740,6 +740,18 @@ mod tests {
     fn a_connected_row_is_round_at_its_ends_and_all_round_while_on() {
         assert_eq!(connected_radii(0, 3, false, 40.0).0, [20.0, 4.0, 4.0, 20.0]);
         assert_eq!(connected_radii(1, 3, true, 40.0).0, [20.0; 4]);
+    }
+
+    #[test]
+    fn the_mini_buttons_end_at_the_capsule_edge_and_never_overlap() {
+        let content = Rect::from_min_size(pos2(22.0, 8.0), vec2(316.0, 50.0));
+        let [like, play, next] = mini_buttons(content);
+        assert_eq!(next.right(), content.right());
+        assert_eq!(play.right() + MINI_BUTTON_GAP, next.left());
+        assert_eq!(like.right() + MINI_BUTTON_GAP, play.left());
+        assert_eq!(like.center().y, content.center().y);
+        // A 360 dp phone keeps the title more than 100 dp.
+        assert!(like.left() - 8.0 - (content.left() + 48.0 + 12.0) > 100.0);
     }
 
     #[test]

@@ -163,11 +163,11 @@ impl QueueSheet {
             let style = TypeRole::TitleMedium.style();
             text::paint_line(ui, pos2(head.left(), head.center().y - style.line_height * 0.5), title, style, s.on_surface, save.left() - head.left() - 8.0);
             let has_next = !state.queue.next.is_empty();
-            if ui.put(save, IconButton::new(Icon::PlaylistAdd).enabled(state.queue.current.is_some()).id_salt("phone-queue-save")).clicked() {
+            if crate::parts::put(ui, save, IconButton::new(Icon::PlaylistAdd).enabled(state.queue.current.is_some()).id_salt("phone-queue-save")).clicked() {
                 self.name.clear();
                 self.naming = true;
             }
-            if ui.put(clear, IconButton::new(Icon::Delete).enabled(has_next).id_salt("phone-queue-clear")).clicked() {
+            if crate::parts::put(ui, clear, IconButton::new(Icon::Delete).enabled(has_next).id_salt("phone-queue-clear")).clicked() {
                 out.push(Command::ClearQueue);
             }
             let list = Rect::from_min_max(pos2(rect.left(), head.bottom()), pos2(rect.right(), screen.bottom()));

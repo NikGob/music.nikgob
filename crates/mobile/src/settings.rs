@@ -8,7 +8,7 @@
 use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_core::streaming::{Account, LoginInput, Service};
 use nikgob_md3e::components::paint::{self, Radii};
-use nikgob_md3e::components::{Button, FilterChip, LoadingIndicator, Size, Style, Switch, TextField, anim};
+use nikgob_md3e::components::{Button, ConnectedGroup, LoadingIndicator, Size, Style, Switch, TextField, anim};
 use nikgob_md3e::screens::phone;
 use nikgob_md3e::{Icon, Theme, TypeRole};
 use nikgob_view::{Command, LIKED_PLAYLIST, MeshPairing, Route, ThemeMode, ViewState, kind_label};
@@ -97,15 +97,18 @@ impl Settings {
     fn look(&mut self, ui: &mut Ui, state: &ViewState, out: &mut Vec<Command>) {
         group_title(ui, "Вид");
         let p = &state.prefs;
+        // The theme: a connected group as wide as its row (three chips did
+        // not fit a 360 dp phone).
         let (r, _) = group_row(ui, Id::new("set-theme-row"), 0, 2, Sense::hover());
-        let mut cui = ui.new_child(UiBuilder::new().max_rect(r.shrink2(vec2(12.0, 8.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        cui.spacing_mut().item_spacing.x = 8.0;
-        for (mode, label) in [(ThemeMode::System, "Как в системе"), (ThemeMode::Dark, "Тёмная"), (ThemeMode::Light, "Светлая")] {
-            if cui.add(FilterChip::new(label, p.theme == mode).one_of().id_salt(("set-theme", label))).clicked() && p.theme != mode {
-                let mut next = p.clone();
-                next.theme = mode;
-                out.push(Command::SetPrefs(Box::new(next)));
-            }
+        let inner = r.shrink2(vec2(8.0, 8.0));
+        let mut cui = ui.new_child(UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let modes = [ThemeMode::System, ThemeMode::Dark, ThemeMode::Light];
+        let at = modes.iter().position(|m| *m == p.theme).unwrap_or(0);
+        let w = (inner.width() - 2.0 * 2.0) / 3.0;
+        if let Some(i) = ConnectedGroup::new("set-theme", &["Системная", "Тёмная", "Светлая"]).size(Size::S).equal_width(w).show(&mut cui, at) {
+            let mut next = p.clone();
+            next.theme = modes[i];
+            out.push(Command::SetPrefs(Box::new(next)));
         }
         if let Some(on) = switch(ui, "set-motion", (1, 2), Icon::AutoAwesome, "Меньше движения", p.reduced_motion) {
             let mut next = p.clone();
@@ -125,7 +128,7 @@ impl Settings {
             }
             Account::LoggingIn(_) => {
                 let (r, _) = group_row(ui, Id::new("set-yt-wait"), 0, 1, Sense::hover());
-                ui.put(Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
+                crate::parts::put(ui, Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
             }
             _ => {
                 if link(ui, "set-yt-in", (0, 1), Icon::Login, "Войти", None) {
@@ -216,7 +219,7 @@ impl Settings {
         match &m.pairing {
             MeshPairing::Working => {
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::hover());
-                ui.put(Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
+                crate::parts::put(ui, Rect::from_center_size(r.center(), vec2(32.0, 32.0)), LoadingIndicator::new().size(32.0));
                 return;
             }
             MeshPairing::Failed(why) => parts::error(ui, why),
@@ -249,7 +252,7 @@ fn switch(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, pos: (usize
     text::paint_line(ui, pos2(r.left() + 56.0, r.center().y - ts.line_height * 0.5), label, ts, s.on_surface, r.width() - 56.0 - 80.0);
     let mut v = value;
     let sw = Rect::from_min_size(pos2(r.right() - 16.0 - 52.0, r.center().y - 16.0), vec2(52.0, 32.0));
-    ui.put(sw, Switch::new(&mut v).id_salt(id.with("sw")));
+    crate::parts::put(ui, sw, Switch::new(&mut v).id_salt(id.with("sw")));
     let flipped = v != value;
     if flipped {
         Some(v)

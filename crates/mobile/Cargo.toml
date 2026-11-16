@@ -35,6 +35,7 @@ desktop = [
     "dep:nikgob-recs",
     "dep:nikgob-youtube",
     "dep:nikgob-deezer",
+    "dep:fastframe-fonts",
 ]
 
 [dependencies]
@@ -64,6 +65,9 @@ nikgob-mesh = { path = "../mesh", optional = true }
 nikgob-recs = { path = "../recs", optional = true }
 nikgob-youtube = { path = "../youtube", optional = true }
 nikgob-deezer = { path = "../deezer", optional = true }
+# The installed faces for the scripts Roboto Flex does not draw (Japanese
+# titles), as fastframe chooses them.
+fastframe-fonts = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The window on Wayland and X11 (the workspace's eframe has winit's Linux

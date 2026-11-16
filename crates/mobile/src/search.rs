@@ -2,11 +2,15 @@
 //! its own bar at the top with ← (it takes the keyboard as it opens), then
 //! the one answer of the library and the services together: the best
 //! match, the songs, the albums, the artists and the playlists. A song
-//! plays the answer's songs from it.
+//! plays the answer's songs from it. While the services are asked the
+//! library's own hits stand as the answer (they come at once), and an
+//! answer with nothing in it says so.
 
 use egui::{Id, Rect, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{SearchBar, anim};
-use nikgob_view::{Command, Route, SearchAlbum, SearchArtist, SearchPlaylist, SearchTrack, StreamPage, TopResult, ViewState};
+use nikgob_view::{
+    Command, Route, SearchAlbum, SearchAnswer, SearchArtist, SearchPlaylist, SearchTrack, SearchView, StreamPage, TopResult, ViewState,
+};
 
 use crate::parts::{self, PageOut, Picture};
 use crate::rows::{self, Look};
@@ -22,6 +26,42 @@ pub struct Search {
     edited: Option<f64>,
     /// The bar takes the keyboard on the next frame.
     pub focus: bool,
+    /// The library's hits as an answer while the merged one is on its way,
+    /// and the state's revision they were made at.
+    early: Option<(u64, SearchAnswer)>,
+}
+
+/// The library's own hits for its query as an answer (the merged answer
+/// replaces it when it comes).
+fn library_answer(v: &SearchView) -> SearchAnswer {
+    SearchAnswer {
+        query: v.query.clone(),
+        tracks: v.tracks.iter().cloned().map(SearchTrack::Library).collect(),
+        albums: v.releases.iter().cloned().map(SearchAlbum::Library).collect(),
+        artists: v.artists.iter().cloned().map(SearchArtist::Library).collect(),
+        playlists: v.playlists.iter().cloned().map(SearchPlaylist::Library).collect(),
+        searching: true,
+        ..Default::default()
+    }
+}
+
+/// What answers `q`: the merged answer once it is for `q`, the library's
+/// hits while only they are, else the previous answer (none: nothing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Merged,
+    Library,
+    Previous,
+}
+
+fn source(v: &SearchView, q: &str) -> Source {
+    if v.answer.query.trim() == q {
+        Source::Merged
+    } else if v.query.trim() == q {
+        Source::Library
+    } else {
+        Source::Previous
+    }
 }
 
 /// Where an album of the answer opens.
@@ -85,17 +125,27 @@ impl Search {
         if q.is_empty() {
             return page;
         }
-        let a = &state.search.answer;
+        let view = &state.search;
+        let from = source(view, &q);
+        if from != Source::Library {
+            self.early = None;
+        } else if self.early.as_ref().is_none_or(|(rev, _)| *rev != state.revision) {
+            self.early = Some((state.revision, library_answer(view)));
+        }
+        let waiting = from != Source::Merged || view.answer.searching || view.searching || self.sent != q;
+        let a = self.early.as_ref().map_or(&view.answer, |(_, early)| early);
         crate::scroll("phone-search-scroll", frame.reset).show(&mut cui, |ui| {
             // A scroll started by the finger puts the keyboard away.
             if ui.input(|i| i.pointer.is_decidedly_dragging()) {
                 o.response.surrender_focus();
             }
             if a.is_empty() {
-                if let Some(e) = &a.error {
+                if let Some(e) = a.error.as_ref().filter(|_| !waiting) {
                     parts::error(ui, e);
-                } else if a.searching || state.search.searching || self.sent != q {
+                } else if waiting {
                     parts::loading(ui);
+                } else {
+                    parts::nothing(ui);
                 }
                 return;
             }
@@ -142,7 +192,7 @@ impl Search {
                     }
                     SearchTrack::Stream(t) => {
                         let sub = match t.duration {
-                            Some(d) => format!("{} · {}", t.artist, text::duration(d)),
+                            Some(d) => format!("{} • {}", t.artist, text::duration(d)),
                             None => t.artist.clone(),
                         };
                         if rows::simple(ui, r, Id::new(("search-stream", i)), t.cover_url.as_deref(), &t.title, &sub) {
@@ -217,5 +267,28 @@ fn artist_face(a: &SearchArtist) -> (Option<String>, String) {
     match a {
         SearchArtist::Library(c) => (c.image.as_ref().map(|i| i.uri()), c.name.clone()),
         SearchArtist::Stream(c) => (c.image_url.clone(), c.name.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_library_answers_until_the_merged_answer_comes() {
+        let mut v = SearchView { query: "radiohead".into(), ..Default::default() };
+        assert_eq!(source(&v, "radiohead"), Source::Library);
+        v.answer.query = "radiohead".into();
+        assert_eq!(source(&v, "radiohead"), Source::Merged);
+        assert_eq!(source(&v, "radio"), Source::Previous);
+    }
+
+    #[test]
+    fn the_library_answer_is_marked_as_still_searching() {
+        let v = SearchView { query: "x".into(), ..Default::default() };
+        let a = library_answer(&v);
+        assert!(a.searching);
+        assert_eq!(a.query, "x");
+        assert!(a.is_empty());
     }
 }
