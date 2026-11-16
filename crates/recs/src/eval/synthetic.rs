@@ -344,6 +344,8 @@ fn history(rng: &mut Rng, lib: &Library, t: &Taste, who: &Listener, days: i64, e
                     origin: Some(origin),
                     end_reason: None,
                     attention: None,
+                    actor: Default::default(),
+                    device: Default::default(),
                 });
                 starts += 1;
                 let u = if mode == 3 { t.background[i].max(t.appeal[i]) } else { t.appeal[i] };
@@ -366,6 +368,8 @@ fn history(rng: &mut Rng, lib: &Library, t: &Taste, who: &Listener, days: i64, e
                     origin: None,
                     end_reason: None,
                     attention: if mode == 3 { Some(1.0) } else { None },
+                    actor: Default::default(),
+                    device: Default::default(),
                 });
                 if kind == EventType::Complete {
                     completes[i] += 1;
@@ -375,7 +379,7 @@ fn history(rng: &mut Rng, lib: &Library, t: &Taste, who: &Listener, days: i64, e
                     }
                     if completes[i] == 3 && t.appeal[i] > 0.6 && rng.f32() < 0.6 {
                         likes.push((s.id, ts));
-                        events.push(DPlay { track: s.id, ts, kind: EventType::Like, position_ms: None, context, origin: None, end_reason: None, attention: None });
+                        events.push(DPlay { track: s.id, ts, kind: EventType::Like, position_ms: None, context, origin: None, end_reason: None, attention: None, actor: Default::default(), device: Default::default() });
                     }
                 }
             }

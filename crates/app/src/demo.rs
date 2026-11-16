@@ -709,6 +709,8 @@ mod tests {
                     origin: None,
                     end_reason: None,
                     attention: None,
+                    actor: Default::default(),
+                    device: Default::default(),
                 });
             }
         }

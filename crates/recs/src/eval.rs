@@ -103,6 +103,12 @@ pub struct DPlay {
     pub origin: Option<EventOrigin>,
     pub end_reason: Option<EndReason>,
     pub attention: Option<f32>,
+    /// Who played it and on what kind of device (datasets before them:
+    /// the owner, at a personal device).
+    #[serde(default)]
+    pub actor: crate::context::PlayActor,
+    #[serde(default)]
+    pub device: crate::context::PlayDevice,
 }
 
 impl From<&Play> for DPlay {
@@ -116,6 +122,8 @@ impl From<&Play> for DPlay {
             origin: p.origin,
             end_reason: p.end_reason,
             attention: p.attention,
+            actor: p.actor,
+            device: p.device,
         }
     }
 }
@@ -131,6 +139,8 @@ impl From<&DPlay> for Play {
             origin: p.origin,
             end_reason: p.end_reason,
             attention: p.attention,
+            actor: p.actor,
+            device: p.device,
         }
     }
 }

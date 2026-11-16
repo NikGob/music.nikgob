@@ -30,7 +30,15 @@
 //!   [`CO_WINDOW`] plays before it, a pair once per session: the fallback
 //!   similarity for tracks without a sound vector.
 //! * **Day parts**: per track, how many plays fell into the morning (6–11),
-//!   the day (11–18), the evening (18–23) and the night (23–6), local time.
+//!   the day (11–18), the evening (18–23) and the night (23–6), local time,
+//!   and the positive weights of its outcomes there halving in two months
+//!   ([`Taste::part_lift_at`]).
+//! * **Who and where** ([`crate::context`]): every weight above is times
+//!   the weight of the play's context — who started it, on what kind of
+//!   device, for which device the taste is built; a guest's plays are not
+//!   read at all, and the windows of the tiles count a play weighing at
+//!   least [`crate::context::FULL_PLAY`]. The co-listening keeps the
+//!   sessions of each kind of device apart.
 //! * **Service suggestions** ([`crate::suggest`]): a
 //!   track YouTube Music or Spotify suggests gets up to
 //!   [`crate::suggest::SUGGESTED_CAP`] more affinity, fading out over
@@ -53,6 +61,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use nikgob_core::model::{ArtistId, EndReason, Event, EventContext, EventOrigin, EventType, ReleaseId, TrackId, UnixMs};
 use serde::{Deserialize, Serialize};
 
+use crate::context::{FULL_PLAY, PlayActor, PlayDevice, SLOT_HALF_LIFE_MS, event_weights};
 use crate::suggest;
 
 pub const HOUR_MS: i64 = 60 * 60 * 1000;
@@ -87,8 +96,9 @@ pub const REPEAT_WITHIN_MS: i64 = DAY_MS;
 pub const SESSION_GAP_MS: i64 = 30 * 60 * 1000;
 /// A play links its artist with the artists of this many plays before it.
 pub const CO_WINDOW: usize = 8;
-/// Plays a track needs before its own day-part profile counts.
-const DAYPART_MIN_PLAYS: u16 = 3;
+/// Plays a track needs before its own day-part profile counts (each as
+/// much as it weighs).
+const DAYPART_MIN_PLAYS: f32 = 3.0;
 /// «На повторе» and «Свежие лайки» look this far back.
 pub const ON_REPEAT_MS: i64 = 30 * DAY_MS;
 /// A track played to the end more than [`SATURATED_FROM`] times within
@@ -374,10 +384,16 @@ pub struct Play {
     /// How far the window was while it played (an end): 0 focused, 0.5 in
     /// view behind another window, 1 hidden.
     pub attention: Option<f32>,
+    /// Who started it ([`crate::context`]).
+    pub actor: PlayActor,
+    /// The kind of device it sounded on (the runtime tells it from the
+    /// event's device; personal when not known).
+    pub device: PlayDevice,
 }
 
 impl Play {
-    /// An event played from nowhere in particular.
+    /// An event played from nowhere in particular, the owner's, at a
+    /// personal device.
     pub fn new(track: TrackId, ts: UnixMs, kind: EventType, position_ms: Option<u32>) -> Self {
         Self {
             track,
@@ -388,11 +404,15 @@ impl Play {
             origin: None,
             end_reason: None,
             attention: None,
+            actor: PlayActor::Owner,
+            device: PlayDevice::Personal,
         }
     }
 }
 
 impl From<&Event> for Play {
+    /// The event as it is, its device taken for a personal one (the
+    /// runtime knows the devices: [`Play::device`]).
     fn from(e: &Event) -> Self {
         Self {
             track: e.track_id,
@@ -403,16 +423,19 @@ impl From<&Event> for Play {
             origin: e.origin,
             end_reason: e.end_reason,
             attention: e.attention,
+            actor: PlayActor::of(e.actor),
+            device: PlayDevice::Personal,
         }
     }
 }
 
 /// The weight of each event of a history in order of time (see the module
 /// docs): what a start, a complete and a skip add to a track, and from
-/// when it decays.
+/// when it decays; each times the weight of the play's context
+/// ([`crate::context::event_weights`]).
 struct Weigher {
-    /// A start not ended yet, by track.
-    open: Vec<Option<UnixMs>>,
+    /// A start not ended yet, by track, and its context's weight.
+    open: Vec<Option<(UnixMs, f32)>>,
     last_complete: Vec<Option<UnixMs>>,
     /// Early skips running, and when the last event was (a session).
     streak: u32,
@@ -429,8 +452,9 @@ impl Weigher {
         }
     }
 
-    /// Weighs one event of track `i` (`duration` its length), handing each
-    /// weight and its moment to `add`; true when the event is a play.
+    /// Weighs one event of track `i` (`duration` its length, `w` the
+    /// weight of its context), handing each weight and its moment to
+    /// `add`; true when the event is a play.
     #[allow(clippy::too_many_arguments)]
     fn event(
         &mut self,
@@ -440,6 +464,7 @@ impl Weigher {
         pos: Option<u32>,
         context: EventContext,
         duration: Option<u32>,
+        w: f32,
         add: &mut impl FnMut(usize, UnixMs, f32),
     ) -> bool {
         if self.last_ts.is_none_or(|l| ts - l >= SESSION_GAP_MS) {
@@ -448,20 +473,20 @@ impl Weigher {
         self.last_ts = Some(ts);
         match kind {
             EventType::Start => {
-                if let Some(t0) = self.open[i] {
-                    add(i, t0, W_START_ONLY);
+                if let Some((t0, w0)) = self.open[i] {
+                    add(i, t0, W_START_ONLY * w0);
                 }
                 if self.last_complete[i].is_some_and(|c| ts - c <= REPEAT_WITHIN_MS) {
-                    add(i, ts, W_REPEAT);
+                    add(i, ts, W_REPEAT * w);
                 }
-                self.open[i] = Some(ts);
+                self.open[i] = Some((ts, w));
                 true
             }
             EventType::Complete => {
                 self.streak = 0;
                 // A complete without its start (some imports) is a play too.
                 let counted = self.open[i].take().is_none();
-                add(i, ts, W_COMPLETE);
+                add(i, ts, W_COMPLETE * w);
                 self.last_complete[i] = Some(ts);
                 counted
             }
@@ -471,7 +496,7 @@ impl Weigher {
                     Some(p) if p < EARLY_SKIP_MS => {
                         self.streak += 1;
                         let leafing = self.streak >= SKIP_STREAK_FROM && matches!(context, EventContext::Playlist | EventContext::Library);
-                        add(i, ts, if leafing { W_SKIP_EARLY * SKIP_STREAK_FACTOR } else { W_SKIP_EARLY });
+                        add(i, ts, w * if leafing { W_SKIP_EARLY * SKIP_STREAK_FACTOR } else { W_SKIP_EARLY });
                     }
                     // A skip without a position counts as a late one; how
                     // much was heard, when both are known.
@@ -481,7 +506,7 @@ impl Weigher {
                             (Some(p), Some(d)) if d > 0 => (p as f32 / d as f32).clamp(0.0, 1.0),
                             _ => 0.0,
                         };
-                        add(i, ts, W_SKIP_LATE_HEARD * heard);
+                        add(i, ts, W_SKIP_LATE_HEARD * heard * w);
                     }
                 }
                 false
@@ -492,9 +517,9 @@ impl Weigher {
 
     /// The starts never ended.
     fn finish(self, add: &mut impl FnMut(usize, UnixMs, f32)) {
-        for (i, t0) in self.open.iter().enumerate() {
-            if let Some(t0) = t0 {
-                add(i, *t0, W_START_ONLY);
+        for (i, open) in self.open.iter().enumerate() {
+            if let Some((t0, w0)) = open {
+                add(i, *t0, W_START_ONLY * *w0);
             }
         }
     }
@@ -502,17 +527,22 @@ impl Weigher {
 
 /// The hot affinity ([`Taste::hot_at`]) of every track in `events` at
 /// `now`, `duration` telling a track's length: for a history read without
-/// a catalog (Главная's «Слушать снова»). Imported plays are not this
-/// app's listening: they are left out.
+/// a catalog (Главная's «Слушать снова»), weighed for a personal device
+/// ([`crate::context`]). Imported plays are not this app's listening: they
+/// are left out.
 pub fn hot_affinity(events: &[Play], duration: impl Fn(TrackId) -> Option<u32>, now: UnixMs) -> HashMap<TrackId, f32> {
-    let mut sorted: Vec<&Play> = events
-        .iter()
-        .filter(|p| matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip) && p.origin != Some(EventOrigin::Import))
+    let weights = event_weights(events, PlayDevice::Personal);
+    let mut sorted: Vec<usize> = (0..events.len())
+        .filter(|&k| {
+            let p = &events[k];
+            matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip) && p.origin != Some(EventOrigin::Import) && weights[k] > 0.0
+        })
         .collect();
-    sorted.sort_by_key(|p| p.ts);
+    sorted.sort_by_key(|&k| events[k].ts);
     let mut ids: Vec<TrackId> = Vec::new();
     let mut pos: HashMap<TrackId, usize> = HashMap::new();
-    for p in &sorted {
+    for &k in &sorted {
+        let p = &events[k];
         pos.entry(p.track).or_insert_with(|| {
             ids.push(p.track);
             ids.len() - 1
@@ -521,9 +551,10 @@ pub fn hot_affinity(events: &[Play], duration: impl Fn(TrackId) -> Option<u32>, 
     let mut hot = vec![0.0f32; ids.len()];
     let mut add = |i: usize, ts: UnixMs, w: f32| hot[i] += w * decay(now, ts, HOT_HALF_LIFE_MS);
     let mut weigher = Weigher::new(ids.len());
-    for p in sorted {
+    for k in sorted {
+        let p = &events[k];
         let i = pos[&p.track];
-        weigher.event(i, p.ts, p.kind, p.position_ms, p.context, duration(p.track), &mut add);
+        weigher.event(i, p.ts, p.kind, p.position_ms, p.context, duration(p.track), weights[k], &mut add);
     }
     weigher.finish(&mut add);
     ids.into_iter().zip(hot).collect()
@@ -576,6 +607,9 @@ pub struct TasteInput {
     pub playlists: Vec<Vec<TrackId>>,
     /// How the taste profiles are built ([`crate::profiles`]).
     pub profiles: crate::profiles::Settings,
+    /// The kind of device the recommendations are for: the plays weigh
+    /// by who played them where ([`crate::context::event_weights`]).
+    pub target_device: PlayDevice,
 }
 
 /// Per-track and per-artist signals at one moment (`now`).
@@ -591,7 +625,12 @@ pub struct Taste {
     last_played: Vec<Option<UnixMs>>,
     liked: Vec<bool>,
     liked_time: Vec<Option<UnixMs>>,
-    daypart: Vec<[u16; 4]>,
+    /// Plays by the part of the day, each by its context's weight.
+    daypart: Vec<[f32; 4]>,
+    /// The outcomes' positive weights by the part of the day, halving in
+    /// [`SLOT_HALF_LIFE_MS`] ([`Self::part_lift_at`]), and their sums.
+    part_mass: Vec<[f32; 4]>,
+    part_total: [f32; 4],
     /// The part of the affinity the services' suggestions gave.
     suggested: Vec<f32>,
     /// Anything listened, liked or put in a playlist (suggestions aside).
@@ -629,104 +668,136 @@ fn ordered(a: ArtistId, b: ArtistId) -> (ArtistId, ArtistId) {
 
 impl Taste {
     /// The model of `input` over `catalog` at `now`. Events of tracks the
-    /// catalog lacks are ignored.
+    /// catalog lacks are ignored; each weighs by its context
+    /// ([`crate::context::event_weights`] for [`TasteInput::target_device`]).
     pub fn build(catalog: &Catalog, input: &TasteInput, now: UnixMs) -> Self {
+        Self::build_weighted(catalog, input, &event_weights(&input.events, input.target_device), now)
+    }
+
+    /// [`Self::build`] with the weight of each event of `input` given
+    /// (beside them, in their order).
+    pub fn build_weighted(catalog: &Catalog, input: &TasteInput, weights: &[f32], now: UnixMs) -> Self {
         let n = catalog.len();
         let mut affinity = vec![0.0f32; n];
         let mut plays = vec![0u32; n];
         let mut last_played: Vec<Option<UnixMs>> = vec![None; n];
         let mut liked = vec![false; n];
-        let mut daypart = vec![[0u16; 4]; n];
+        let mut daypart = vec![[0.0f32; 4]; n];
+        let mut part_mass = vec![[0.0f32; 4]; n];
         let mut recent_completes = vec![0u16; n];
         let mut saturated = vec![0u8; n];
         let mut year_ago = vec![0u16; n];
         let mut hot = vec![0.0f32; n];
+        let off = input.utc_offset_min;
 
-        let mut events: Vec<(UnixMs, usize, EventType, Option<u32>, EventContext)> = Vec::new();
-        let mut imported: Vec<(UnixMs, usize, EventType, Option<u32>, EventContext)> = Vec::new();
-        for p in &input.events {
+        type Ev = (UnixMs, usize, EventType, Option<u32>, EventContext, f32, PlayDevice);
+        let mut events: Vec<Ev> = Vec::new();
+        let mut imported: Vec<Ev> = Vec::new();
+        for (k, p) in input.events.iter().enumerate() {
             if !matches!(p.kind, EventType::Start | EventType::Complete | EventType::Skip) {
                 continue;
             }
+            let w = weights.get(k).copied().unwrap_or(1.0);
+            // A guest's: nothing at all.
+            if w <= 0.0 {
+                continue;
+            }
             let Some(i) = catalog.position(p.track) else { continue };
-            let e = (p.ts, i, p.kind, p.position_ms, p.context);
+            let e = (p.ts, i, p.kind, p.position_ms, p.context, w, p.device);
             if p.origin == Some(EventOrigin::Import) { imported.push(e) } else { events.push(e) }
         }
         events.sort_by_key(|e| e.0);
         imported.sort_by_key(|e| e.0);
         // A play (or a complete) of either kind: when it was last played, a
-        // play counted, by part of the day and a year ago.
-        let mut count = |i: usize, ts: UnixMs, play: bool| {
+        // play counted, by part of the day (as much as it weighs) and a
+        // year ago (a whole one).
+        let mut count = |i: usize, ts: UnixMs, play: bool, w: f32| {
             last_played[i] = last_played[i].max(Some(ts));
             if !play {
                 return;
             }
             plays[i] += 1;
-            let part = DayPart::at(ts, input.utc_offset_min).index();
-            daypart[i][part] = daypart[i][part].saturating_add(1);
-            if (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
+            let part = DayPart::at(ts, off).index();
+            daypart[i][part] += w;
+            if w >= FULL_PLAY && (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
                 year_ago[i] = year_ago[i].saturating_add(1);
             }
         };
 
-        // Sessions and co-listening.
+        // Sessions and co-listening, each kind of device its own sessions.
         let mut co_pairs: HashMap<(ArtistId, ArtistId), f32> = HashMap::new();
-        let mut tail: VecDeque<ArtistId> = VecDeque::with_capacity(CO_WINDOW + 1);
-        let mut session_pairs: HashSet<(ArtistId, ArtistId)> = HashSet::new();
-        let mut last_play_ts: Option<UnixMs> = None;
+        let mut tail: [VecDeque<ArtistId>; 2] = [VecDeque::with_capacity(CO_WINDOW + 1), VecDeque::with_capacity(CO_WINDOW + 1)];
+        let mut session_pairs: [HashSet<(ArtistId, ArtistId)>; 2] = [HashSet::new(), HashSet::new()];
+        let mut last_play_ts: [Option<UnixMs>; 2] = [None, None];
         let mut weigher = Weigher::new(n);
         let mut add = |i: usize, ts: UnixMs, w: f32| {
             affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
             hot[i] += w * decay(now, ts, HOT_HALF_LIFE_MS);
+            if w > 0.0 {
+                part_mass[i][DayPart::at(ts, off).index()] += w * decay(now, ts, SLOT_HALF_LIFE_MS);
+            }
         };
 
-        for &(ts, i, kind, pos, context) in &events {
-            let counted_play = weigher.event(i, ts, kind, pos, context, catalog.tracks[i].duration_ms, &mut add);
+        for &(ts, i, kind, pos, context, w, device) in &events {
+            let counted_play = weigher.event(i, ts, kind, pos, context, catalog.tracks[i].duration_ms, w, &mut add);
             if kind == EventType::Complete {
-                if now - ts < ON_REPEAT_MS {
+                if w >= FULL_PLAY && now - ts < ON_REPEAT_MS {
                     recent_completes[i] = recent_completes[i].saturating_add(1);
                 }
-                if now - ts < SATURATION_MS {
+                if w >= FULL_PLAY && now - ts < SATURATION_MS {
                     saturated[i] = saturated[i].saturating_add(1);
                 }
-                count(i, ts, false);
+                count(i, ts, false, w);
             }
             if !counted_play {
                 continue;
             }
-            count(i, ts, true);
+            count(i, ts, true, w);
 
-            if last_play_ts.is_none_or(|l| ts - l >= SESSION_GAP_MS) {
-                tail.clear();
-                session_pairs.clear();
+            let d = usize::from(device == PlayDevice::Ambient);
+            if last_play_ts[d].is_none_or(|l| ts - l >= SESSION_GAP_MS) {
+                tail[d].clear();
+                session_pairs[d].clear();
             }
-            last_play_ts = Some(ts);
+            last_play_ts[d] = Some(ts);
             let Some(a) = catalog.tracks[i].main_artist() else { continue };
-            for &b in &tail {
+            for &b in &tail[d] {
                 if b != a {
                     let pair = ordered(a, b);
-                    if session_pairs.insert(pair) {
-                        *co_pairs.entry(pair).or_default() += 1.0;
+                    if session_pairs[d].insert(pair) {
+                        *co_pairs.entry(pair).or_default() += w;
                     }
                 }
             }
-            tail.push_back(a);
-            if tail.len() > CO_WINDOW {
-                tail.pop_front();
+            tail[d].push_back(a);
+            if tail[d].len() > CO_WINDOW {
+                tail[d].pop_front();
             }
         }
         weigher.finish(&mut add);
         // Imported plays: the long affinity alone, weighed apart (another
-        // service's sessions and skips are not this app's).
+        // service's sessions and skips are not this app's); their times a
+        // little ([`crate::model::IMPORT_SHARE`]).
         let mut weigher = Weigher::new(n);
-        let mut add_long = |i: usize, ts: UnixMs, w: f32| affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
-        for &(ts, i, kind, pos, context) in &imported {
-            let play = weigher.event(i, ts, kind, pos, context, catalog.tracks[i].duration_ms, &mut add_long);
+        let mut add_long = |i: usize, ts: UnixMs, w: f32| {
+            affinity[i] += w * decay(now, ts, HALF_LIFE_MS);
+            if w > 0.0 {
+                part_mass[i][DayPart::at(ts, off).index()] += crate::model::IMPORT_SHARE * w * decay(now, ts, SLOT_HALF_LIFE_MS);
+            }
+        };
+        for &(ts, i, kind, pos, context, w, _) in &imported {
+            let play = weigher.event(i, ts, kind, pos, context, catalog.tracks[i].duration_ms, w, &mut add_long);
             if play || kind == EventType::Complete {
-                count(i, ts, play);
+                count(i, ts, play, w);
             }
         }
         weigher.finish(&mut add_long);
+        let mut part_total = [0.0f32; 4];
+        for m in &part_mass {
+            for (t, x) in part_total.iter_mut().zip(m) {
+                *t += x;
+            }
+        }
         for id in &input.likes {
             if let Some(i) = catalog.position(*id)
                 && !liked[i]
@@ -830,7 +901,7 @@ impl Taste {
         let mut profile = [0.0f32; 4];
         for d in &daypart {
             for (p, c) in profile.iter_mut().zip(d) {
-                *p += f32::from(*c);
+                *p += *c;
             }
         }
         let total: f32 = profile.iter().sum();
@@ -848,6 +919,8 @@ impl Taste {
             liked,
             liked_time,
             daypart,
+            part_mass,
+            part_total,
             suggested,
             history,
             recent_completes,
@@ -942,9 +1015,35 @@ impl Taste {
         self.year_ago.get(i).map_or(0, |c| u32::from(*c))
     }
 
-    /// Plays of the track at `i` in each part of the day.
-    pub fn daypart_plays_at(&self, i: usize) -> [u16; 4] {
+    /// Plays of the track at `i` in each part of the day, each as much as
+    /// its context weighs ([`crate::context`]).
+    pub fn daypart_plays_at(&self, i: usize) -> [f32; 4] {
         self.daypart.get(i).copied().unwrap_or_default()
+    }
+
+    /// The positive weights of the track at `i` in each part of the day,
+    /// halving in [`SLOT_HALF_LIFE_MS`].
+    pub fn part_mass_at(&self, i: usize) -> [f32; 4] {
+        self.part_mass.get(i).copied().unwrap_or_default()
+    }
+
+    /// How much more than everyone's the track at `i` is played in `part`
+    /// ([`crate::context::LIFT_MIN`]…[`crate::context::LIFT_MAX`]): its own
+    /// share of the part leaning on the share of all plays by
+    /// [`crate::context::KAPPA_TRACK_PART`], over that share. 0 before any
+    /// play.
+    pub fn part_lift_at(&self, i: usize, part: DayPart) -> f32 {
+        let all: f32 = self.part_total.iter().sum();
+        if all <= 0.0 {
+            return 0.0;
+        }
+        let m = self.part_mass_at(i);
+        let own: f32 = m.iter().sum();
+        let p = part.index();
+        let share = self.part_total[p] / all;
+        let k = crate::context::KAPPA_TRACK_PART;
+        let smoothed = (m[p] + k * share) / (own + k);
+        (smoothed / share.max(0.05) - 1.0).clamp(crate::context::LIFT_MIN, crate::context::LIFT_MAX)
     }
 
     /// Whether anything was ever liked, played or put in a playlist with
@@ -1008,11 +1107,11 @@ impl Taste {
     /// `part`; 0 for tracks with fewer than three plays.
     pub fn daypart_bonus_at(&self, i: usize, part: DayPart) -> f32 {
         let Some(d) = self.daypart.get(i) else { return 0.0 };
-        let total: u16 = d.iter().sum();
+        let total: f32 = d.iter().sum();
         if total < DAYPART_MIN_PLAYS {
             return 0.0;
         }
-        f32::from(d[part.index()]) / f32::from(total) - 0.25
+        d[part.index()] / total - 0.25
     }
 
     pub fn is_disliked_track(&self, id: TrackId) -> bool {

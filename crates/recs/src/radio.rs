@@ -1984,9 +1984,9 @@ impl RadioState {
                 // Tracks without a sound join by being played in this part.
                 for i in 0..recs.catalog.len() {
                     let plays = recs.taste.daypart_plays_at(i);
-                    let here = f32::from(plays[part.index()]);
+                    let here = plays[part.index()];
                     if here > 0.0 && ok(i) && !recs.index.contains(recs.info(i).id) {
-                        let share = here / plays.iter().map(|p| f32::from(*p)).sum::<f32>();
+                        let share = here / plays.iter().sum::<f32>();
                         add(&mut cands, i, Reason::DayPart(*part), share);
                     }
                 }

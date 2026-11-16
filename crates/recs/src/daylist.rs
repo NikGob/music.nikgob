@@ -49,22 +49,23 @@ impl Recs<'_> {
     /// The daylist's centre for `part` (see the module docs).
     pub fn daylist_centre(&self, part: DayPart) -> Centre {
         let mut sum = [0.0f32; 3];
-        let mut plays = 0u32;
+        // Plays as much as each weighs (another device's background less).
+        let mut plays = 0.0f32;
         for (id, v) in self.index.iter() {
             let Some(i) = self.catalog.position(id) else { continue };
-            let n = u32::from(self.taste.daypart_plays_at(i)[part.index()]);
-            if n == 0 {
+            let n = self.taste.daypart_plays_at(i)[part.index()];
+            if n <= 0.0 {
                 continue;
             }
             let a = Axes::of(&self.norm.z(v)).to_array();
             for (s, x) in sum.iter_mut().zip(a) {
-                *s += n as f32 * x;
+                *s += n * x;
             }
             plays += n;
         }
-        if plays >= CENTRE_MIN_PLAYS {
+        if plays >= CENTRE_MIN_PLAYS as f32 {
             return Centre {
-                axes: Axes::from_array(sum.map(|s| s / plays as f32)),
+                axes: Axes::from_array(sum.map(|s| s / plays)),
                 from_history: true,
             };
         }
@@ -308,10 +309,10 @@ mod tests {
         let at = |day: i64, hour: i64| NOW - day * DAY_MS - NOW.rem_euclid(DAY_MS) + hour * HOUR_MS;
         for d in 1..4 {
             for i in (60..90u128).chain([95]) {
-                events.push(Play { track: tid(i), ts: at(d, 20), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None, attention: None });
+                events.push(Play { track: tid(i), ts: at(d, 20), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None, attention: None, actor: Default::default(), device: Default::default() });
             }
             for i in 0..30u128 {
-                events.push(Play { track: tid(i), ts: at(d, 8), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None, attention: None });
+                events.push(Play { track: tid(i), ts: at(d, 8), kind: EventType::Complete, position_ms: None, context: Default::default(), origin: None, end_reason: None, attention: None, actor: Default::default(), device: Default::default() });
             }
         }
         let input = TasteInput {
