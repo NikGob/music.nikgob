@@ -36,6 +36,22 @@ pub struct Settings {
     pub sources: SourcesSettings,
     pub soulseek: SoulseekSettings,
     pub api: ApiSettings,
+    pub mesh: MeshSettings,
+}
+
+/// The owner's devices (`[mesh]`): on unless switched off; this device's
+/// name (empty: the computer's own name).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MeshSettings {
+    pub enabled: bool,
+    pub name: String,
+}
+
+impl Default for MeshSettings {
+    fn default() -> Self {
+        Self { enabled: true, name: String::new() }
+    }
 }
 
 /// The default port of the local REST API.
@@ -506,6 +522,7 @@ mod tests {
                     revoked_ms: None,
                 }],
             },
+            mesh: MeshSettings { enabled: false, name: "Кабинет".into() },
         }
     }
 
@@ -566,6 +583,24 @@ username = \"me\"
     /// `[api]` reads back as written, a file without it is the defaults
     /// (off, this computer only, port 47210), and the words in the file are
     /// the ones the API speaks.
+    #[test]
+    fn mesh_section_round_trips() {
+        let path = temp_path("mesh");
+        let s = sample();
+        s.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[mesh]"), "{text}");
+        assert_eq!(Settings::load(&path).unwrap().mesh, s.mesh);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+        let none: Settings = toml::from_str("[soulseek]\n").unwrap();
+        assert!(none.mesh.enabled, "on unless switched off");
+        assert!(none.mesh.name.is_empty());
+        let named: Settings = toml::from_str("[mesh]\nname = \"Pi\"\n").unwrap();
+        assert!(named.mesh.enabled);
+        assert_eq!(named.mesh.name, "Pi");
+    }
+
     #[test]
     fn api_section_round_trips() {
         let path = temp_path("api");

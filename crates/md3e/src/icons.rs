@@ -163,6 +163,13 @@ material_icons! {
     ThumbDown => "thumb_down",
     /// «С дополнением»: new songs join a playlist as it plays.
     AutoAwesome => "auto_awesome",
+    /// The owner's devices by kind: a computer, a Raspberry Pi, a phone, a
+    /// TV, a server.
+    Computer => "computer",
+    DeveloperBoard => "developer_board",
+    Smartphone => "smartphone",
+    Tv => "tv",
+    Dns => "dns",
 }
 
 impl Icon {

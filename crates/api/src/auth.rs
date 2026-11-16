@@ -238,6 +238,20 @@ impl Uses {
 /// The guard of every `/v1` route: a token, the right, the rate.
 pub async fn guard(State(sh): State<Arc<Shared>>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_owned();
+    // A paired device through the mesh (in this process only): its
+    // certificate stands for the token; the rights and the rate are the
+    // same.
+    if let Some(crate::Trusted(caller)) = req.extensions_mut().remove::<crate::Trusted>() {
+        let need = needed(req.method(), &path);
+        if !allows(caller.preset, need) {
+            return ApiError::forbidden(need.key()).into_response();
+        }
+        if !sh.limiter.allow(&caller.token_id, Instant::now()) {
+            return ApiError::rate_limited().into_response();
+        }
+        req.extensions_mut().insert(caller);
+        return next.run(req).await;
+    }
     let secret = bearer(req.headers()).or_else(|| {
         if query_token_allowed(&path) { query_value(req.uri().query(), "token") } else { None }
     });

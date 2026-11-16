@@ -236,6 +236,9 @@ fn load_prefs(
 /// Everything that outlives a window.
 struct Core {
     ui: Md3eUi,
+    /// The owner's devices (before the API, whose routes its tunnel uses:
+    /// it stops first).
+    mesh: Option<nikgob_mesh::MeshHandle>,
     /// The local REST API (before the runtime: it stops first).
     api: Option<nikgob_api::ApiHandle>,
     runtime: Runtime,
@@ -361,6 +364,11 @@ impl Resident for Core {
     fn shutdown(&mut self) {
         memory::log_now("exit");
         self.geometry.flush();
+        // Before the runtime: the devices still being forgotten are passed
+        // to the mesh and revoked, on disk, before it stops.
+        if let Some(mesh) = self.mesh.take() {
+            mesh.stop();
+        }
         if let Some(api) = self.api.take() {
             api.stop();
         }
@@ -936,10 +944,34 @@ fn main() -> eframe::Result {
         None
     } else {
         let media_roots = vec![covers_dir.clone()];
-        match nikgob_api::start(nikgob_api::ApiContext { runtime: runtime.handle(), library: api_library, wake: api_wake, media_roots }) {
+        match nikgob_api::start(nikgob_api::ApiContext { runtime: runtime.handle(), library: api_library, wake: api_wake.clone(), media_roots }) {
             Ok(h) => Some(h),
             Err(e) => {
                 log::error!("api: not started: {e}");
+                None
+            }
+        }
+    };
+    // The owner's devices: on unless `[mesh] enabled = false`; never in a
+    // settings sweep, nor in a demo unless NIKGOB_MESH is set (a demo would
+    // show up on the home network as another device).
+    let mesh = if sweep::active() || (demo && std::env::var_os("NIKGOB_MESH").is_none()) {
+        None
+    } else {
+        let ctx = nikgob_mesh::MeshContext {
+            data_dir: data_dir.clone(),
+            device_name: nikgob_mesh::default_name(),
+            kind: nikgob_view::MeshKind::Pc,
+            runtime: runtime.handle(),
+            api: api.as_ref().map(nikgob_api::ApiHandle::local),
+            wake: api_wake.clone(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            headless: false,
+        };
+        match nikgob_mesh::start(ctx) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log::error!("mesh: not started: {e}");
                 None
             }
         }
@@ -975,6 +1007,7 @@ fn main() -> eframe::Result {
     ui.set_synthetic_levels(std::env::var_os("NIKGOB_VIZ_SYNTH").is_some());
     let core = Core {
         ui,
+        mesh,
         api,
         runtime,
         desktop: desktop::Desktop::start(wake),

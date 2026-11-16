@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 mod api;
 mod credit;
+mod mesh;
 pub mod dev;
 pub mod first_run;
 mod player_prefs;
@@ -29,6 +30,7 @@ pub use nikgob_core::model::{
 };
 pub use api::*;
 pub use credit::*;
+pub use mesh::*;
 pub use player_prefs::*;
 pub use recs::*;
 pub use sleep::*;
@@ -3174,6 +3176,8 @@ pub struct ViewState {
     /// device heard failed and nothing has played since. The API answers
     /// its play commands with `503 no_audio`.
     pub no_audio: bool,
+    /// The owner's devices («Межсеть → Устройства»).
+    pub mesh: MeshView,
 }
 
 /// What the user does not want: tracks disliked and artists not to
@@ -3895,6 +3899,38 @@ pub enum Command {
     /// From the API: a download too large to start by itself waits in
     /// «Загрузки → Подтверди» as one card; «Скачать» runs `commands`.
     ApiConfirmDownload { title: String, origin: String, lines: Vec<String>, commands: Vec<Command> },
+
+    // The owner's devices («Межсеть → Устройства»): `[mesh]` of
+    // settings.toml and the node table kept by the runtime, the network
+    // part done by the mesh service.
+    /// The mesh on or off (`[mesh] enabled`).
+    MeshSetEnabled(bool),
+    /// «Подключить» of a nearby device with the code it shows.
+    MeshPairNearby { nearby_id: String, code: String },
+    /// «Добавить устройство»: a one-time ticket for `nikgobd pair`.
+    MeshCreateInvite,
+    /// The invite's dialog closed: the ticket no longer works.
+    MeshCancelInvite,
+    /// Joins the ring of the device that made `ticket`.
+    MeshJoin { ticket: String },
+    /// A device's name here (`None`: this device, `[mesh] name`).
+    MeshRename { node_id: Option<String>, name: String },
+    /// «Забыть»: gone at once with «Отменить» in the snackbar; revoked in
+    /// the ring once the snackbar is gone.
+    MeshForget { node_id: String },
+    /// What a device stores.
+    MeshSetProfile { node_id: String, profile: MeshProfile },
+    /// «Свой» or «Гость» (the ring holder signs it anew).
+    MeshSetScope { node_id: String, scope: MeshScope },
+    /// From the mesh service: what is live now.
+    MeshUpdate(Box<MeshSnapshot>),
+    /// «Отменить» of a forget.
+    MeshRestore { node_id: String },
+    /// The pairing's result was seen: back to idle.
+    MeshClearPairing,
+    /// From the mesh service: a forget could not be done (the device stays
+    /// in the ring); `why` in words.
+    MeshForgetFailed { node_id: String, why: String },
 }
 
 impl Default for Prefs {

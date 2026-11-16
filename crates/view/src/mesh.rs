@@ -1,0 +1,302 @@
+//! «Межсеть → Устройства»: this instance, the owner's other devices (paired
+//! once, trusted by the ring's certificates), the unpaired ones seen nearby,
+//! and the pairing flow. The runtime keeps what is saved (names given here,
+//! the storage profile, a device being forgotten); the mesh service
+//! reports what is live ([`MeshSnapshot`]: online, nearby, presence, the
+//! pairing's state).
+
+use serde::{Deserialize, Serialize};
+
+/// What a device is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshKind {
+    #[default]
+    Pc,
+    Pi,
+    Phone,
+    Tv,
+    Server,
+}
+
+impl MeshKind {
+    pub const ALL: [Self; 5] = [Self::Pc, Self::Pi, Self::Phone, Self::Tv, Self::Server];
+
+    /// Its word in mDNS, certificates and configs (`pc`, `pi`…).
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Pc => "pc",
+            Self::Pi => "pi",
+            Self::Phone => "phone",
+            Self::Tv => "tv",
+            Self::Server => "server",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.key().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
+/// How far a device is trusted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshScope {
+    /// «Свой»: everything.
+    #[default]
+    Owner,
+    /// «Гость»: plays and reads, changes nothing of the owner's.
+    Guest,
+}
+
+impl MeshScope {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Guest => "guest",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "owner" => Some(Self::Owner),
+            "guest" => Some(Self::Guest),
+            _ => None,
+        }
+    }
+}
+
+/// What a device stores (the replica wave fills it in).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshProfile {
+    /// The library, the masters and the database.
+    #[default]
+    Full,
+    /// The library without the masters.
+    Library,
+    /// What is pinned plus a cache up to `cap_bytes`.
+    Favorites { cap_bytes: u64 },
+    /// Nothing but a buffer.
+    SoundOnly,
+}
+
+impl MeshProfile {
+    /// Its word in the node table (`full`, `library`, `favorites:<bytes>`,
+    /// `sound`).
+    pub fn key(self) -> String {
+        match self {
+            Self::Full => "full".to_owned(),
+            Self::Library => "library".to_owned(),
+            Self::Favorites { cap_bytes } => format!("favorites:{cap_bytes}"),
+            Self::SoundOnly => "sound".to_owned(),
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        match s {
+            "full" => Some(Self::Full),
+            "library" => Some(Self::Library),
+            "sound" => Some(Self::SoundOnly),
+            _ => s.strip_prefix("favorites:").and_then(|n| n.parse().ok()).map(|cap_bytes| Self::Favorites { cap_bytes }),
+        }
+    }
+}
+
+/// The library disk of a device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshStorage {
+    /// Bytes the music takes.
+    pub used: u64,
+    /// Bytes left on its disk.
+    pub free: u64,
+}
+
+/// What a device plays, with its clock: the position is `position_ms` at
+/// `at_ms` (that device's unix ms) moving at `rate` (0 while paused).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshPlaying {
+    pub title: String,
+    pub artists: Vec<String>,
+    pub paused: bool,
+    pub position_ms: i64,
+    pub at_ms: i64,
+    pub rate: f32,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+}
+
+/// A running transfer to a device (the replica wave).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeshTransfer {
+    pub done: u64,
+    pub total: u64,
+}
+
+/// One device.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshNodeView {
+    /// Its node id (hex of its Ed25519 public key).
+    pub id: String,
+    pub name: String,
+    pub kind: MeshKind,
+    pub scope: MeshScope,
+    pub online: bool,
+    pub last_seen_ms: Option<i64>,
+    /// `ip:port` it was last reached at.
+    pub addr: Option<String>,
+    pub version: Option<String>,
+    pub storage: Option<MeshStorage>,
+    pub playing: Option<MeshPlaying>,
+    pub profile: MeshProfile,
+    pub transfer: Option<MeshTransfer>,
+}
+
+/// An unpaired instance seen on the home network now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshNearbyView {
+    pub id: String,
+    pub name: String,
+    pub kind: MeshKind,
+    pub addr: Option<String>,
+}
+
+/// The pairing flow.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum MeshPairing {
+    #[default]
+    Idle,
+    /// «Подключить» was pressed: the dialog asks for that device's code.
+    WaitingCode { nearby_id: String },
+    /// The exchange runs.
+    Working,
+    /// Why it did not pair, in words.
+    Failed(String),
+    /// Paired: the new device's id.
+    Done { node_id: String },
+}
+
+/// The invite being shown: the ticket for `nikgobd pair <ticket>` (or a
+/// QR), until `expires_ms` (unix ms) or one use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshInvite {
+    pub ticket: String,
+    pub expires_ms: i64,
+}
+
+/// «Межсеть → Устройства».
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshView {
+    /// `[mesh] enabled` of settings.toml (on unless switched off).
+    pub enabled: bool,
+    /// The mesh service runs (its endpoint is bound, mDNS announces it).
+    pub running: bool,
+    pub this: MeshNodeView,
+    /// Paired devices, this one excluded.
+    pub nodes: Vec<MeshNodeView>,
+    /// Unpaired instances seen by mDNS now.
+    pub nearby: Vec<MeshNearbyView>,
+    pub pairing: MeshPairing,
+    pub invite: Option<MeshInvite>,
+    /// This instance holds the ring's key: it pairs and forgets devices.
+    pub ring_holder: bool,
+    /// This instance is in a ring.
+    pub paired: bool,
+    /// This instance's 6-digit code while it is in no ring (another
+    /// device's «Подключить» asks for it).
+    pub code: Option<String>,
+    /// Why the service cannot run (no network, a port), in words.
+    pub error: Option<String>,
+    /// `[mesh] name` of settings.toml (empty: the computer's name).
+    pub name_setting: String,
+    /// The settings can be saved (there is a settings.toml).
+    pub configurable: bool,
+}
+
+impl MeshView {
+    /// This instance may start a pairing: it holds the ring, or is in none
+    /// (the first pairing makes the ring here).
+    pub fn can_pair(&self) -> bool {
+        self.running && (self.ring_holder || !self.paired)
+    }
+
+    pub fn node(&self, id: &str) -> Option<&MeshNodeView> {
+        self.nodes.iter().find(|n| n.id == id)
+    }
+}
+
+/// A paired device as the mesh service knows it: the view's row and its
+/// certificate (JSON) for the node table.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshSnapshotNode {
+    pub view: MeshNodeView,
+    pub cert: String,
+}
+
+/// What the mesh service reports to the runtime (only when it changed).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeshSnapshot {
+    pub running: bool,
+    pub this: MeshNodeView,
+    pub nodes: Vec<MeshSnapshotNode>,
+    pub nearby: Vec<MeshNearbyView>,
+    pub pairing: MeshPairing,
+    pub invite: Option<MeshInvite>,
+    pub ring_holder: bool,
+    pub paired: bool,
+    pub code: Option<String>,
+    pub error: Option<String>,
+}
+
+/// «Компьютер», «Raspberry Pi»…: a device's kind in words.
+pub fn kind_label(k: MeshKind) -> &'static str {
+    match k {
+        MeshKind::Pc => "Компьютер",
+        MeshKind::Pi => "Raspberry Pi",
+        MeshKind::Phone => "Телефон",
+        MeshKind::Tv => "Телевизор",
+        MeshKind::Server => "Сервер",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_round_trip() {
+        for k in MeshKind::ALL {
+            assert_eq!(MeshKind::parse(k.key()), Some(k));
+        }
+        assert_eq!(MeshKind::parse(" PI "), Some(MeshKind::Pi));
+        assert_eq!(MeshKind::parse("toaster"), None);
+        for s in [MeshScope::Owner, MeshScope::Guest] {
+            assert_eq!(MeshScope::parse(s.key()), Some(s));
+        }
+        for p in [MeshProfile::Full, MeshProfile::Library, MeshProfile::Favorites { cap_bytes: 8 << 30 }, MeshProfile::SoundOnly] {
+            assert_eq!(MeshProfile::parse(&p.key()), Some(p));
+        }
+        assert_eq!(MeshProfile::parse("favorites:x"), None);
+    }
+
+    #[test]
+    fn who_may_pair() {
+        let mut v = MeshView { running: true, ..MeshView::default() };
+        assert!(v.can_pair(), "in no ring: the first pairing makes one");
+        v.paired = true;
+        assert!(!v.can_pair(), "a member that does not hold the ring");
+        v.ring_holder = true;
+        assert!(v.can_pair());
+        v.running = false;
+        assert!(!v.can_pair());
+    }
+
+    #[test]
+    fn presence_survives_json() {
+        let p = MeshPlaying { title: "T".into(), artists: vec!["A".into()], paused: false, position_ms: 1, at_ms: 2, rate: 1.0, duration_ms: None };
+        let back: MeshPlaying = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert_eq!(serde_json::to_string(&MeshKind::Pi).unwrap(), "\"pi\"");
+    }
+}

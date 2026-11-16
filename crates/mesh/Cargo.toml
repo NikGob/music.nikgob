@@ -1,0 +1,42 @@
+[package]
+name = "nikgob-mesh"
+description = "The owner's devices: node keys, the ring of trusted devices, pairing (ticket or code, SPAKE2), discovery on the home network (mDNS), connections (iroh, LAN only), presence and the HTTP tunnel to a device's API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nikgob-core.workspace = true
+nikgob-view.workspace = true
+nikgob-runtime = { path = "../runtime" }
+nikgob-api = { path = "../api" }
+log.workspace = true
+# QUIC between the devices: each one's Ed25519 key is its id; relays and
+# address lookups off (LAN only in this version).
+iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
+# The instances on the home network: `_nikgob._udp.local.`.
+mdns-sd = "0.21.7"
+# The pairing's password-authenticated key exchange (RustCrypto PAKEs).
+spake2 = { version = "0.4", features = ["getrandom"] }
+blake3 = "1.8"
+getrandom = "0.3"
+data-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+# HTTP/1.1 over a QUIC stream (the tunnel to a device's API).
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+gethostname = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[lints]
+workspace = true

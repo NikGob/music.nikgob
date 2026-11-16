@@ -11,6 +11,10 @@
 //! stdin (the duck, the output, play and pause) for trying it by hand.
 //! `nikgobd token <name> [control|full|read] [owner|assistant|agent|guest]`
 //! makes a token for the API while the player is stopped and prints it once.
+//! `nikgobd pair <ticket>` joins the owner's devices with the ticket of
+//! «Добавить устройство» (through the running player, or by itself when it
+//! is stopped); `nikgobd pair-code` prints the code the running player
+//! shows for «Подключить» on another device.
 
 mod config;
 mod console;
@@ -25,8 +29,21 @@ fn main() {
     let mut asked: Option<PathBuf> = None;
     let mut console = false;
     let mut token: Option<Vec<String>> = None;
+    let mut pair: Option<Vec<String>> = None;
+    let mut pair_code = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
+        if let Some(words) = pair.as_mut() {
+            if a == "--config" {
+                match args.next() {
+                    Some(p) => asked = Some(PathBuf::from(p)),
+                    None => usage("--config needs a file"),
+                }
+            } else {
+                words.push(a);
+            }
+            continue;
+        }
         if let Some(words) = token.as_mut() {
             if a == "--config" {
                 match args.next() {
@@ -40,6 +57,8 @@ fn main() {
         }
         match a.as_str() {
             "token" => token = Some(Vec::new()),
+            "pair" => pair = Some(Vec::new()),
+            "pair-code" => pair_code = true,
             "--config" => match args.next() {
                 Some(p) => asked = Some(PathBuf::from(p)),
                 None => usage("--config needs a file"),
@@ -65,6 +84,21 @@ fn main() {
     };
     if let Some(words) = token {
         make_token(&config::Paths::of(&cfg), &words);
+        return;
+    }
+    if let Some(words) = pair {
+        pair_with(&cfg, &words);
+        return;
+    }
+    if pair_code {
+        let paths = config::Paths::of(&cfg);
+        match nikgob_mesh::read_pair_code(&paths.data) {
+            Some(code) => println!("{code}"),
+            None => {
+                eprintln!("nikgobd: no code: the player is paired already, not running, or its mesh is off");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     init_log(&cfg.log);
@@ -101,7 +135,7 @@ fn main() {
     let api = match nikgob_api::start(nikgob_api::ApiContext {
         runtime: host.runtime.handle(),
         library: host.library.clone(),
-        wake: api_wake,
+        wake: api_wake.clone(),
         media_roots: Vec::new(),
     }) {
         Ok(a) => Some(a),
@@ -109,6 +143,28 @@ fn main() {
             log::error!("the API did not start: {e}");
             None
         }
+    };
+    let mesh = if cfg.mesh {
+        let ctx = nikgob_mesh::MeshContext {
+            data_dir: host.paths.data.clone(),
+            device_name: cfg.name.clone().unwrap_or_else(nikgob_mesh::default_name),
+            kind: cfg.mesh_kind(),
+            runtime: host.runtime.handle(),
+            api: api.as_ref().map(nikgob_api::ApiHandle::local),
+            wake: api_wake.clone(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            headless: true,
+        };
+        match nikgob_mesh::start(ctx) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::error!("the mesh did not start: {e}");
+                None
+            }
+        }
+    } else {
+        log::info!("mesh off (mesh = true in the config turns it on)");
+        None
     };
     rt.block_on(async {
         if console {
@@ -121,6 +177,11 @@ fn main() {
         }
     });
     log::info!("stopping");
+    // Before the player: the devices still being forgotten are revoked, on
+    // disk, before the mesh stops.
+    if let Some(m) = mesh {
+        m.stop();
+    }
     if let Some(a) = api {
         a.stop();
     }
@@ -170,8 +231,38 @@ fn make_token(paths: &config::Paths, words: &[String]) {
     }
 }
 
+/// `nikgobd pair <ticket>`: through the running player (it holds the data
+/// dir's lock), or by itself while it is stopped.
+fn pair_with(cfg: &config::Config, words: &[String]) {
+    let ticket = match words {
+        [t] => t.as_str(),
+        [] => usage("pair needs the ticket of «Добавить устройство»"),
+        _ => usage("pair takes one ticket"),
+    };
+    let paths = config::Paths::of(cfg);
+    if let Err(e) = std::fs::create_dir_all(&paths.data) {
+        eprintln!("nikgobd: {}: {e}", paths.data.display());
+        std::process::exit(1);
+    }
+    let out = match lock::DataLock::acquire(&paths.lock) {
+        // Not running: paired here, taken at the next start.
+        Ok(_lock) => {
+            let name = cfg.name.clone().unwrap_or_else(nikgob_mesh::default_name);
+            nikgob_mesh::pair_offline(&paths.data, &name, cfg.mesh_kind(), ticket)
+        }
+        Err(_) => nikgob_mesh::pair_through_running(&paths.data, ticket, std::time::Duration::from_secs(45)),
+    };
+    match out {
+        Ok(holder) => println!("paired with {holder}"),
+        Err(why) => {
+            eprintln!("nikgobd: {why}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn usage(problem: &str) -> ! {
-    eprintln!("nikgobd: {problem}\nusage: nikgobd [--config <file>] [--console] | token <name> [control|full|read] [owner|assistant|agent|guest] [--config <file>] | --print-config | --version");
+    eprintln!("nikgobd: {problem}\nusage: nikgobd [--config <file>] [--console] | token <name> [control|full|read] [owner|assistant|agent|guest] [--config <file>] | pair <ticket> [--config <file>] | pair-code [--config <file>] | --print-config | --version");
     std::process::exit(2);
 }
 

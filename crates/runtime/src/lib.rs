@@ -28,6 +28,7 @@ mod inbox_torrents;
 mod library_load;
 mod library_search;
 mod lyrics;
+mod mesh;
 mod lyrics_keep;
 mod playlist_cover;
 mod recs;
@@ -304,6 +305,11 @@ enum Msg {
     GraphMetadata(Box<nikgob_metadata::Metadata>),
     WebLogin(StreamKind, Arc<dyn WebLogin>),
     KhinsiderBrowser(Arc<dyn nikgob_sources::khinsider::PageBrowser>),
+    /// The mesh service takes the network commands from now on.
+    MeshLink(Arc<dyn Fn(Command) + Send + Sync>),
+    /// The forgets still waiting for their snackbar go to the mesh service
+    /// now; answered once they are passed on (the mesh is about to stop).
+    MeshFlush(Sender<()>),
     Shutdown,
 }
 
@@ -525,6 +531,22 @@ impl RuntimeHandle {
     /// The state (a short read lock: copy out what is needed).
     pub fn state(&self) -> RwLockReadGuard<'_, ViewState> {
         self.state.read()
+    }
+
+    /// The mesh service takes the commands that need the network from now
+    /// on (pairing, invites, forgetting); `f` must not block.
+    pub fn link_mesh(&self, f: impl Fn(Command) + Send + Sync + 'static) {
+        let _ = self.tx.send(Msg::MeshLink(Arc::new(f)));
+    }
+
+    /// Before the mesh stops: the devices still being forgotten are passed
+    /// to it now. Waits at most `wait` for the loop to do it; whether it did.
+    pub fn flush_mesh(&self, wait: Duration) -> bool {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        if self.tx.send(Msg::MeshFlush(tx)).is_err() {
+            return false;
+        }
+        rx.recv_timeout(wait).is_ok()
     }
 }
 
@@ -909,6 +931,8 @@ struct Worker {
     duck: duck::DuckState,
     /// The local API's settings and the tokens' uses ([`api`]).
     api: api::ApiKeep,
+    /// The owner's devices as kept here ([`mesh`]).
+    mesh: mesh::MeshKeep,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -1111,6 +1135,7 @@ impl Worker {
             userdata_export: true,
             duck: Default::default(),
             api: Default::default(),
+            mesh: Default::default(),
         }
     }
 
@@ -1145,6 +1170,7 @@ impl Worker {
         self.wish_restart();
         self.publish_sources();
         self.api_load();
+        self.mesh_load();
         self.start_streams();
         if self.compute {
             self.start_analysis();
@@ -1193,6 +1219,11 @@ impl Worker {
                         if let Some(k) = &self.khinsider {
                             k.set_browser(browser);
                         }
+                    }
+                    Ok(Msg::MeshLink(f)) => self.mesh.link = Some(f),
+                    Ok(Msg::MeshFlush(done)) => {
+                        self.mesh_flush_now();
+                        let _ = done.send(());
                     }
                     Ok(Msg::Shutdown) | Err(_) => {
                         self.record_closed();
@@ -1252,6 +1283,8 @@ impl Worker {
                     self.turn.lap("recs");
                     self.api_tick();
                     self.turn.lap("api");
+                    self.mesh_tick();
+                    self.turn.lap("mesh");
                 }
             }
             std::mem::take(&mut self.turn).end();
@@ -1263,6 +1296,7 @@ impl Worker {
         self.save_session();
         self.save_prefs_due();
         self.api_flush();
+        self.mesh_flush();
         self.session_saved.flush();
         self.recs_flush_weights(true);
         self.niche_flush();
@@ -2022,6 +2056,19 @@ impl Worker {
             | Command::ApiTrash { .. }
             | Command::ApiSourceSearch { .. }
             | Command::ApiConfirmDownload { .. }) => self.api_command(c),
+            c @ (Command::MeshSetEnabled(_)
+            | Command::MeshPairNearby { .. }
+            | Command::MeshCreateInvite
+            | Command::MeshCancelInvite
+            | Command::MeshJoin { .. }
+            | Command::MeshRename { .. }
+            | Command::MeshForget { .. }
+            | Command::MeshSetProfile { .. }
+            | Command::MeshSetScope { .. }
+            | Command::MeshUpdate(_)
+            | Command::MeshRestore { .. }
+            | Command::MeshClearPairing
+            | Command::MeshForgetFailed { .. }) => self.mesh_command(c),
         }
     }
 

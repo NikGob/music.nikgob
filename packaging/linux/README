@@ -24,6 +24,16 @@ Output
 The second column is the sink name to put in output_device. A sink that is
 not there plays on the default output until it comes back.
 
+Pairing with the PC (once)
+  On the PC: Настройки → Межсеть → «Добавить устройство», then here:
+    nikgobd pair <ticket>
+  or, with the player running here, «Подключить» on the PC next to this
+  device and type the code that
+    nikgobd pair-code
+  prints (it is in the log too). The devices find each other over mDNS on
+  the home network (UDP 5353) and talk over UDP 47220 (another port when
+  it is taken); mesh = false in the config turns this off.
+
 Logs and state
   journalctl --user -u nikgobd -f
   systemctl --user status nikgobd

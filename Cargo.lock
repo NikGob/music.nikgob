@@ -5009,6 +5009,7 @@ dependencies = [
  "nikgob-core",
  "nikgob-deezer",
  "nikgob-library",
+ "nikgob-mcp",
  "nikgob-md3e",
  "nikgob-playback",
  "nikgob-recs",
@@ -5060,10 +5061,13 @@ dependencies = [
  "blake3",
  "form_urlencoded",
  "futures-util",
+ "jiff",
  "log",
  "nikgob-core",
  "nikgob-library",
+ "nikgob-mcp",
  "nikgob-metadata",
+ "nikgob-recs",
  "nikgob-runtime",
  "nikgob-view",
  "parking_lot",
@@ -5072,6 +5076,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
  "utoipa",
  "utoipa-swagger-ui",
 ]
@@ -5183,6 +5188,19 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nikgob-mcp"
+version = "0.0.5"
+dependencies = [
+ "env_logger",
+ "log",
+ "nikgob-core",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
