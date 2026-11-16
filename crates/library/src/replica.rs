@@ -115,20 +115,26 @@ fn want_of(track_id: TrackId, mut list: Vec<Offer>) -> Option<Want> {
     Some(Want { track_id, file_hash: best.file_hash, size, offers })
 }
 
-/// Whether what this device holds of a track (`held`) makes pulling `want`
-/// pointless: that very file, or a better one than any offered.
+/// Whether what this device holds of a track (`held`) makes pulling its
+/// best offered file (`best`) pointless: that very file, or a better one.
+pub fn held_satisfies(best: &Offer, held: &[HeldFile]) -> bool {
+    held.iter().any(|h| h.file_hash.as_deref() == Some(best.file_hash.as_str()) || h.quality_score > best.quality_score)
+}
+
 fn satisfied(want: &Want, held: &[HeldFile]) -> bool {
-    let best = want.offers.first().map_or(i32::MIN, |o| o.quality_score);
-    held.iter().any(|h| h.file_hash.as_deref() == Some(want.file_hash.as_str()) || h.quality_score > best)
+    want.offers.first().is_some_and(|best| held_satisfies(best, held))
 }
 
 /// The files to pull, in order: for each track `keep` wants and some
 /// device offers, its best file (by hash) unless this device holds that
-/// very file or a better one (`held`: the files it has on the disk now).
-/// With a cap, what is held of the wanted tracks is charged first; a file
-/// that does not fit any more is passed over and a smaller one after it
-/// may still fit; a file of a size not known is never taken as free.
-pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, Vec<HeldFile>>) -> Vec<Want> {
+/// very file or a better one (`held`: the files it has on the disk now,
+/// each checked to be the file it was). A track with a file here not
+/// checked yet (`pending`: its bytes) waits for the next plan. With a cap,
+/// everything on the disk of all the wanted tracks is charged first, then
+/// the rest is taken in order against what remains: a file that does not
+/// fit is passed over and a smaller one after it may still fit; a file of
+/// a size not known is never taken as free.
+pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, Vec<HeldFile>>, pending: &HashMap<TrackId, u64>) -> Vec<Want> {
     let mut order: Vec<TrackId> = Vec::new();
     let mut by_track: HashMap<TrackId, Vec<Offer>> = HashMap::new();
     for o in offers {
@@ -142,21 +148,26 @@ pub fn plan_tracks(keep: &Keep, offers: Vec<Offer>, held: &HashMap<TrackId, Vec<
     match keep {
         Keep::All => order
             .into_iter()
+            .filter(|t| !pending.contains_key(t))
             .filter_map(|t| by_track.remove(&t).and_then(|list| want_of(t, list)))
             .filter(|w| !satisfied(w, held.get(&w.track_id).unwrap_or(&none)))
             .collect(),
         Keep::Ordered { order: wanted, cap } => {
-            let mut used = 0u64;
             let mut seen = HashSet::new();
+            let wanted: Vec<TrackId> = wanted.iter().copied().filter(|t| seen.insert(*t)).collect();
+            // What the wanted tracks already take on the disk, all of it
+            // first: a track held later in the order is not charged late.
+            let mut used: u64 = wanted
+                .iter()
+                .map(|t| held.get(t).map_or(0, |h| h.iter().map(|f| f.size).sum::<u64>()).saturating_add(pending.get(t).copied().unwrap_or(0)))
+                .fold(0u64, u64::saturating_add);
             let mut out = Vec::new();
             for t in wanted {
-                if !seen.insert(*t) {
+                if pending.contains_key(&t) {
                     continue;
                 }
-                let here = held.get(t).unwrap_or(&none);
-                used = used.saturating_add(here.iter().map(|h| h.size).sum::<u64>());
-                let Some(w) = by_track.remove(t).and_then(|list| want_of(*t, list)) else { continue };
-                if satisfied(&w, here) {
+                let Some(w) = by_track.remove(&t).and_then(|list| want_of(t, list)) else { continue };
+                if satisfied(&w, held.get(&t).unwrap_or(&none)) {
                     continue;
                 }
                 if w.size == 0 || used.saturating_add(w.size) > *cap {
@@ -253,6 +264,8 @@ pub struct MasterTrash {
     pub trash_path: String,
     pub size: u64,
     pub trashed_at: i64,
+    /// Still on its way (noted before the move; done once it moved).
+    pub moving: bool,
 }
 
 fn opt_u32(v: Option<i64>) -> Option<u32> {
@@ -281,10 +294,11 @@ fn trash_of(r: &Row<'_>) -> rusqlite::Result<MasterTrash> {
         trash_path: r.get(3)?,
         size: r.get::<_, i64>(4)?.max(0) as u64,
         trashed_at: r.get(5)?,
+        moving: r.get::<_, String>(6)? == "moving",
     })
 }
 
-const TRASH_COLS: &str = "id, file_hash, path, trash_path, size_bytes, trashed_at";
+const TRASH_COLS: &str = "id, file_hash, path, trash_path, size_bytes, trashed_at, state";
 
 fn upsert_replica(c: &Connection, hash: &str, node: &str, at: i64) -> Result<()> {
     c.execute(
@@ -687,13 +701,43 @@ impl Library {
     /// Notes a master file moved to the Trash (on the disk when it
     /// returns); its id.
     pub fn put_master_trash(&self, file_hash: &str, path: &str, trash_path: &str, size: u64) -> Result<i64> {
+        self.note_master_trash(file_hash, path, trash_path, size, "done")
+    }
+
+    /// Notes a master file about to move from `path` to `trash_path` in
+    /// the Trash, before anything moves (on the disk when it returns): the
+    /// note says it is on its way until [`Self::finish_master_trash`].
+    pub fn begin_master_trash(&self, file_hash: &str, path: &str, trash_path: &str, size: u64) -> Result<i64> {
+        self.note_master_trash(file_hash, path, trash_path, size, "moving")
+    }
+
+    fn note_master_trash(&self, file_hash: &str, path: &str, trash_path: &str, size: u64, state: &str) -> Result<i64> {
         let now = now_ms();
         self.write_durable(|tx| {
             tx.execute(
-                "INSERT INTO master_trash(file_hash, path, trash_path, size_bytes, trashed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![file_hash, path, trash_path, size as i64, now],
+                "INSERT INTO master_trash(file_hash, path, trash_path, size_bytes, trashed_at, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![file_hash, path, trash_path, size as i64, now, state],
             )?;
             Ok(tx.last_insert_rowid())
+        })
+    }
+
+    /// The master file of note `id` is in the Trash now (on the disk when
+    /// it returns).
+    pub fn finish_master_trash(&self, id: i64) -> Result<()> {
+        self.write_durable(|tx| {
+            tx.execute("UPDATE master_trash SET state = 'done' WHERE id = ?1", [id])?;
+            Ok(())
+        })
+    }
+
+    /// The master files noted on their way to the Trash and never marked
+    /// done (a move cut short).
+    pub fn master_trash_moving(&self) -> Result<Vec<MasterTrash>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(&format!("SELECT {TRASH_COLS} FROM master_trash WHERE state = 'moving' ORDER BY id"))?;
+            let rows = stmt.query_map([], trash_of)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
@@ -701,10 +745,11 @@ impl Library {
         self.read(|c| Ok(c.query_row(&format!("SELECT {TRASH_COLS} FROM master_trash WHERE id = ?1"), [id], trash_of).optional()?))
     }
 
-    /// The master files moved to the Trash before `cutoff` (unix ms).
+    /// The master files moved to the Trash before `cutoff` (unix ms), done
+    /// moving.
     pub fn master_trash_before(&self, cutoff: i64) -> Result<Vec<MasterTrash>> {
         self.read(|c| {
-            let mut stmt = c.prepare(&format!("SELECT {TRASH_COLS} FROM master_trash WHERE trashed_at < ?1 ORDER BY id"))?;
+            let mut stmt = c.prepare(&format!("SELECT {TRASH_COLS} FROM master_trash WHERE trashed_at < ?1 AND state = 'done' ORDER BY id"))?;
             let rows = stmt.query_map([cutoff], trash_of)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
@@ -762,8 +807,10 @@ mod tests {
             (t[3], vec![held_file(t[3], "flac3", 30, 90)]),
         ]
         .into();
-        let plan = plan_tracks(&Keep::All, offers, &held);
+        let plan = plan_tracks(&Keep::All, offers.clone(), &held, &HashMap::new());
         assert_eq!(plan.iter().map(|w| w.track_id).collect::<Vec<_>>(), vec![t[0], t[2]], "a held MP3 does not stand for the FLAC; a better file held does");
+        let pending: HashMap<TrackId, u64> = [(t[2], 10)].into();
+        assert_eq!(plan_tracks(&Keep::All, offers, &held, &pending).len(), 1, "a file here not checked yet: the track waits");
         assert_eq!(plan[0].file_hash, "flac");
         assert_eq!(plan[0].offers.iter().map(|o| o.node_id.as_str()).collect::<Vec<_>>(), ["lap", "pc"], "both have that very file");
         assert_eq!(plan[0].size(), 12);
@@ -786,13 +833,21 @@ mod tests {
         ];
         let held: HashMap<TrackId, Vec<HeldFile>> = [(t[3], vec![held_file(t[3], "h3", 25, 50)])].into();
         let keep = Keep::Ordered { order: vec![t[3], t[6], t[0], t[0], t[1], t[5], t[2], t[4]], cap: 100 };
-        let plan = plan_tracks(&keep, offers.clone(), &held);
+        let plan = plan_tracks(&keep, offers.clone(), &held, &HashMap::new());
         // 25 held; size unknown: not free; + 40 = 65; 50 would be 115: passed over; 30 → 95; 20 → 115: no.
         assert_eq!(plan.iter().map(|w| w.track_id).collect::<Vec<_>>(), vec![t[0], t[2]]);
         let roomy = Keep::Ordered { order: vec![t[0], t[1]], cap: 1000 };
-        assert_eq!(plan_tracks(&roomy, offers.clone(), &HashMap::new()).len(), 2);
+        assert_eq!(plan_tracks(&roomy, offers.clone(), &HashMap::new(), &HashMap::new()).len(), 2);
         let none = Keep::Ordered { order: Vec::new(), cap: 1000 };
-        assert!(plan_tracks(&none, offers, &HashMap::new()).is_empty(), "nothing pinned, nothing kept");
+        assert!(plan_tracks(&none, offers.clone(), &HashMap::new(), &HashMap::new()).is_empty(), "nothing pinned, nothing kept");
+        // A track held later in the order is charged before anything is
+        // taken: 80 held + 80 would pass the cap.
+        let late: HashMap<TrackId, Vec<HeldFile>> = [(t[1], vec![held_file(t[1], "h1", 80, 50)])].into();
+        let tight = Keep::Ordered { order: vec![t[0], t[1]], cap: 100 };
+        assert!(plan_tracks(&tight, vec![offer(t[0], "pc", "h0", 80, 50)], &late, &HashMap::new()).is_empty());
+        // A file here not checked yet takes its room too.
+        let waiting: HashMap<TrackId, u64> = [(t[1], 80)].into();
+        assert!(plan_tracks(&tight, vec![offer(t[0], "pc", "h0", 80, 50)], &HashMap::new(), &waiting).is_empty());
     }
 
     fn track(lib: &Library, title: &str, n: u32) -> Track {
@@ -985,5 +1040,13 @@ mod tests {
         assert!(lib.master_trash_before(row.trashed_at).unwrap().is_empty());
         assert!(lib.remove_master_trash(id).unwrap());
         assert!(lib.master_trash_row(id).unwrap().is_none());
+        // On its way: noted first, not purged, done once it moved.
+        let m = lib.begin_master_trash("h2", "/m/B/01.flac", "/t/2026-11-16 B.flac", 7).unwrap();
+        assert!(lib.master_trash_row(m).unwrap().unwrap().moving);
+        assert_eq!(lib.master_trash_moving().unwrap().len(), 1);
+        assert!(lib.master_trash_before(i64::MAX).unwrap().is_empty(), "never purged on its way");
+        lib.finish_master_trash(m).unwrap();
+        assert!(!lib.master_trash_row(m).unwrap().unwrap().moving);
+        assert!(lib.master_trash_moving().unwrap().is_empty());
     }
 }
