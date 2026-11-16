@@ -762,10 +762,10 @@ fn ids_stay_the_same_across_devices() {
 }
 
 /// A guest's plays stay where they were played; the voice assistant's
-/// come, but never into the owner's history: a session of it on the Pi
-/// leaves what the PC's mixes are made of as it was.
+/// come into the history as they are, with who put them on and where (the
+/// taste weighs them by that), the owner's own plays untouched.
 #[test]
-fn the_assistant_and_guests_do_not_move_the_owners_history() {
+fn the_assistant_comes_with_its_actor_and_guests_stay_out() {
     let pc = lib();
     let pi = lib();
     let f = fill(&pc);
@@ -777,16 +777,19 @@ fn the_assistant_and_guests_do_not_move_the_owners_history() {
         pi.record_event_with(track, EventType::Complete, None, Some(180_000), EventContext::Other, as_(actor)).unwrap();
     }
     pull(&pc, &pi);
-    assert_eq!(pc.listening_events().unwrap(), before, "the owner's history as it was");
-    let heard = pc.assistant_events().unwrap();
+    let after = pc.listening_events().unwrap();
+    assert!(before.iter().all(|e| after.contains(e)), "the owner's history as it was");
+    let heard: Vec<_> = after.iter().filter(|e| !before.contains(e)).collect();
     assert_eq!(heard.len(), 4, "the assistant's plays came");
     assert!(heard.iter().all(|e| e.actor == Some(ApiActor::Assistant)));
-    assert!(heard.iter().filter(|e| e.event_type == EventType::Complete).all(|e| e.attention == Some(1.0)), "background");
     assert!(heard.iter().all(|e| e.device.as_str() == id(&pi)), "the device they played on");
+    assert!(!pc.own_device_ids().unwrap().contains(&id(&pi)), "the Pi is not the PC");
     let guests: i64 = pc.read(|c| Ok(c.query_row("SELECT count(*) FROM event WHERE actor = 'guest'", [], |r| r.get(0))?)).unwrap();
     assert_eq!(guests, 0, "a guest's plays never leave the device");
-    // On the Pi itself the guest's plays are kept, out of the history too.
-    assert_eq!(pi.listening_events().unwrap().len(), before.len());
+    // On the Pi itself the guest's plays are kept, out of the history.
+    let on_pi = pi.listening_events().unwrap();
+    assert_eq!(on_pi.len(), before.len() + 4);
+    assert!(on_pi.iter().all(|e| e.actor != Some(ApiActor::Guest)));
 }
 
 /// The device id becomes the node id: the files are noted under it, the
@@ -809,6 +812,8 @@ fn the_device_takes_its_node_id() {
         .unwrap();
     assert_eq!(files, vec!["node-abc".to_owned()]);
     assert_eq!(before.as_deref(), Some(old.as_str()));
+    let own = pc.own_device_ids().unwrap();
+    assert!(own.contains("node-abc") && own.contains(old.as_str()), "the plays of both are its own");
     // New edits carry it.
     pc.unlike(f.track.id).unwrap();
     let by: String = pc.read(|c| Ok(c.query_row("SELECT updated_by FROM likes", [], |r| r.get(0))?)).unwrap();
