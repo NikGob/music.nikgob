@@ -373,22 +373,30 @@ pub fn trash_master_files(library: &Library, trash_dir: &Path, masters_dir: &Pat
     out
 }
 
-/// The name of the link a file is put in the Trash through.
-fn link_name(dest: &Path) -> PathBuf {
-    let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    dest.with_file_name(format!(".{name}.nikgob-link"))
+/// The `n`th name of the link a file is put in the Trash through.
+fn link_name(dest: &Path, n: u32) -> PathBuf {
+    let name = dest.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    if n == 0 { dest.with_file_name(format!(".{name}.nikgob-link")) } else { dest.with_file_name(format!(".{name}.{n}.nikgob-link")) }
 }
 
 /// Puts the content of `src` into `dest` (an empty file claimed for it): a
-/// hard link put over the claim on one volume (made only where nothing has
-/// the link's name); else a copy into it, flushed and checked by its size
-/// and BLAKE3.
+/// hard link put over the claim on one volume, made under a link name
+/// nothing has (a name taken: the next one; whatever has it stays); else a
+/// copy into the claim, flushed and checked by its size and BLAKE3.
 fn fill(src: &Path, dest: &Path, hash: &str) -> std::io::Result<()> {
-    let link = link_name(dest);
-    if std::fs::hard_link(long_path(src), long_path(&link)).is_ok() {
-        return std::fs::rename(long_path(&link), long_path(dest)).inspect_err(|_| {
-            let _ = std::fs::remove_file(long_path(&link));
-        });
+    for n in 0..100 {
+        let link = link_name(dest, n);
+        match std::fs::hard_link(long_path(src), long_path(&link)) {
+            // Only the link made just now goes when it cannot be put over
+            // the claim.
+            Ok(()) => {
+                return std::fs::rename(long_path(&link), long_path(dest)).inspect_err(|_| {
+                    let _ = std::fs::remove_file(long_path(&link));
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => break,
+        }
     }
     let size = std::fs::metadata(long_path(src))?.len();
     {
@@ -483,20 +491,21 @@ fn found_at(path: &Path, hash: &str) -> Found {
 }
 
 /// Settles the master files left on their way to the Trash (a move cut
-/// short), from what can be verified now:
-/// - the original there, still that very file → the file put in the Trash
-///   for it and the note go;
+/// short), from what can be verified now. The only file it ever deletes is
+/// a true duplicate: the Trash file that very file while the original is
+/// there and still that very file too.
+/// - the original there, still that very file → the note goes (and the
+///   Trash file with it when it is that duplicate; any other file there
+///   stays where it is);
 /// - the original's name taken by another file, or nothing there, and the
 ///   Trash file that very file → the note is done (a Trash entry with
 ///   «Отменить»);
 /// - anything else (a file not readable, a disk away, the Trash folder
 ///   not as it should be) → the note stays on its way, told in the log,
-///   looked at again at the next start; nothing is deleted.
+///   looked at again at the next start.
 ///
-/// The link a move went through goes only by its name derived from such a
-/// note, a plain file right in the Trash folder (itself no link), and only
-/// when that very file is still in one of the two places. How many notes
-/// were settled.
+/// A link a move went through and was cut short at stays where it is
+/// (whose it is cannot be told). How many notes were settled.
 pub fn recover_master_moves(library: &Library, trash_dir: &Path) -> Result<usize> {
     let mut n = 0;
     for row in library.master_trash_moving()? {
@@ -509,21 +518,16 @@ pub fn recover_master_moves(library: &Library, trash_dir: &Path) -> Result<usize
             Found::Gone if !in_place => Found::Unknown,
             f => f,
         };
-        if original == Found::That || trashed == Found::That {
-            let link = link_name(dest);
-            if in_trash_dir(&link, trash_dir) {
-                let _ = std::fs::remove_file(long_path(&link));
-            }
-        }
         let settled = match (original, trashed) {
-            (Found::That, Found::That | Found::Other) => match std::fs::remove_file(long_path(dest)) {
+            (Found::That, Found::That) => match std::fs::remove_file(long_path(dest)) {
                 Ok(()) => library.remove_master_trash(row.id)?,
                 Err(e) => {
                     log::warn!("{} stays on its way to the Trash: {} not removed: {e}", row.path, row.trash_path);
                     false
                 }
             },
-            (Found::That, Found::Gone) => library.remove_master_trash(row.id)?,
+            // Not that file (a copy cut short, or someone else's): it stays.
+            (Found::That, Found::Other | Found::Gone) => library.remove_master_trash(row.id)?,
             (Found::Other | Found::Gone, Found::That) => {
                 library.finish_master_trash(row.id)?;
                 true
@@ -732,11 +736,12 @@ mod tests {
     }
 
     /// A move cut short is settled at the next start from what can be
-    /// verified: the original still that very file → the Trash file, its
-    /// link and the note go; the original gone or its name another file's
-    /// and the Trash file that very file → done, both kept; anything not
-    /// verified → the note stays on its way and nothing is deleted. A file
-    /// that only looks like a link is never touched.
+    /// verified, deleting only a true duplicate: the original still that
+    /// very file → the note goes, the Trash file with it only when it is
+    /// that very file too (a copy cut short or another file stays, a link
+    /// too); the original gone or its name another file's and the Trash
+    /// file that very file → done, both kept; anything not verified → the
+    /// note stays on its way and nothing is deleted.
     #[test]
     fn a_master_move_cut_short_is_settled() {
         let root = tempfile::tempdir().unwrap();
@@ -756,6 +761,11 @@ mod tests {
         let link = trash.join(".2026-11-16 01.flac.nikgob-link");
         std::fs::write(&link, &song).unwrap();
         let a = note(kept.as_path(), half.as_path());
+        let twin = masters.join("06.flac");
+        std::fs::write(&twin, &song).unwrap();
+        let copy = trash.join("2026-11-16 06.flac");
+        std::fs::write(&copy, &song).unwrap();
+        let g = note(twin.as_path(), copy.as_path());
 
         let gone = masters.join("02.flac");
         let done = trash.join("2026-11-16 02.flac");
@@ -778,9 +788,11 @@ mod tests {
         let stray = trash.join(".2026-11-16 09.flac.nikgob-link");
         std::fs::write(&stray, &song).unwrap();
 
-        assert_eq!(recover_master_moves(&lib, &trash).unwrap(), 3);
-        assert!(kept.exists() && !half.exists() && !link.exists(), "undone: the original stays");
+        assert_eq!(recover_master_moves(&lib, &trash).unwrap(), 4);
+        assert!(kept.exists() && half.exists() && link.exists(), "undone: the original stays, and what is not that very file too");
         assert_eq!(moving(a), None);
+        assert!(twin.exists() && !copy.exists(), "a true duplicate goes");
+        assert_eq!(moving(g), None);
         assert!(done.exists());
         assert_eq!(moving(b), Some(false), "finished");
         assert_eq!(std::fs::read(&taken).unwrap(), b"another file");
