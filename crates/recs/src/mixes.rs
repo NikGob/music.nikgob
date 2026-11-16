@@ -158,6 +158,9 @@ const LIKED_MS: u64 = 150 * 60_000;
 const PART_POOL: usize = 4;
 const PART_BONUS: f32 = 1.5;
 const PART_LIKED: f32 = 0.3;
+/// A moment of the row stands this much higher per unit of its songs' mean
+/// fit to the part of this weekday ([`Builder::context`]).
+const MOMENT_FIT: f32 = 0.5;
 /// What is listened to now leads: the model's freshness of a love
 /// ([`crate::model::freshness`], [`UserModel::freshness_at`]), which every
 /// surface shares.
@@ -999,7 +1002,7 @@ impl<'a> Builder<'a> {
             cross: false,
             stale: STALE_SHARE,
         };
-        let pool = match key {
+        let mut pool = match key {
             MixKey::Profile(k) => plain(self.profile_tracks(self.profile_index(k)?)),
             MixKey::Liked => {
                 let liked: Vec<usize> = (0..self.value.len()).filter(|&i| self.pickable(i) && self.liked(i)).collect();
@@ -1101,17 +1104,26 @@ impl<'a> Builder<'a> {
                 Pool { tracks, len: each * sides.len(), quota: Some(quota), blocks: Some(2), cross: true, ..plain(Vec::new()) }
             }
         };
+        // In a room a song never played is a skip by voice away: fewer of
+        // them ([`crate::context::AMBIENT_MAX_UNHEARD`]).
+        if self.model.device() == crate::context::PlayDevice::Ambient {
+            pool.unheard = pool.unheard.min(crate::context::AMBIENT_MAX_UNHEARD);
+            pool.floor = pool.floor.min(crate::context::AMBIENT_MAX_UNHEARD);
+        }
         (pool.tracks.len() >= MIN_SONGS).then_some(pool)
     }
 
     /// The loved songs the part of the day `part` hears more than the
-    /// others, the liked ones before the rest: the best [`PART_POOL`] times
-    /// a mix's length.
+    /// others (this weekday's: the song's own part of the day, its
+    /// profile's slot and the sound the user plays then,
+    /// [`crate::context`]), the liked ones before the rest: the best
+    /// [`PART_POOL`] times a mix's length.
     fn part_tracks(&self, part: DayPart) -> Vec<usize> {
+        let slot = self.model.slot().with_part(part);
         let mut scored: Vec<(f32, usize)> = (0..self.value.len())
             .filter(|&i| self.pickable(i) && self.a[i] > 0.0)
             .map(|i| {
-                let more = self.recs.taste.daypart_bonus_at(i, part);
+                let more = self.model.time_bonus_at(i, slot) + self.model.sound_fit_at(i, slot);
                 (self.a[i] * (1.0 + PART_BONUS * more) + if self.liked(i) { PART_LIKED } else { 0.0 }, i)
             })
             .collect();
@@ -2218,6 +2230,12 @@ impl<'a> Builder<'a> {
         }
         let expect = all as f32 * self.model.part_share(part);
         let mut s = ((here as f32 + 1.0) / (expect + 1.0)).ln();
+        // Its songs' fit to this part of this weekday ([`crate::context`]).
+        if !mix.tracks.is_empty() {
+            let slot = self.model.slot().with_part(self.part);
+            let fit: f32 = mix.tracks.iter().map(|&i| self.model.time_bonus_at(i, slot) + self.model.sound_fit_at(i, slot)).sum();
+            s += MOMENT_FIT * fit / mix.tracks.len() as f32;
+        }
         let worlds: HashSet<u64> = mix.tracks.iter().filter_map(|&i| self.recs.info(i).world).collect();
         if !worlds.is_empty() {
             let now = self.model.now();
@@ -2291,19 +2309,19 @@ fn kmeans(pts: &[(&Vector, f32)], k: usize) -> Vec<Vector> {
 }
 
 /// The name of the mix of the part of the day `p` ([`DayPart::index`]):
-/// what it is for, so that it is not taken for «Микс дня».
+/// the moment itself, never taken for «Микс дня».
 pub fn part_title(p: u8) -> &'static str {
     match DayPart::ALL.get(usize::from(p)) {
-        Some(DayPart::Morning) => "На утро",
-        Some(DayPart::Day) => "На день",
-        Some(DayPart::Evening) => "На вечер",
-        _ => "На ночь",
+        Some(DayPart::Morning) => "Доброе утро",
+        Some(DayPart::Day) => "День",
+        Some(DayPart::Evening) => "Вечер",
+        _ => "Ночь",
     }
 }
 
 /// The row of «Миксы для тебя» (beside the «Любимые» tile before it and
-/// «На повторе» after): «Микс дня», the genre mixes, the mix of the part
-/// of the day, the named mixes of the day, the moments — of `daily` (as
+/// «На повторе» after): «Микс дня», the mix of the part of the day, the
+/// genre mixes, the named mixes of the day, the moments — of `daily` (as
 /// [`Builder::daily`] and [`Builder::name_daily`] left it), `part` and
 /// `moments` (the blends first, as [`Builder::lineup`] has them), each
 /// group in its own order, [`ROW_MIXES`] at most. The named mixes only
@@ -2363,7 +2381,9 @@ pub fn row_upto(daily: Vec<Mix>, part: Option<Mix>, moments: Vec<Mix>, more: usi
     // What the row leaves out for want of room: the cards asked for past
     // it (`more`), in their order.
     let mut left: Vec<Mix> = Vec::new();
-    for m in day.into_iter().chain(genres).chain(part).chain(named).chain(moments) {
+    // The mix of this part of the day right after «Микс дня»: on the
+    // first screen beside «Моя волна».
+    for m in day.into_iter().chain(part).chain(genres).chain(named).chain(moments) {
         if out.len() >= ROW_MIXES {
             left.push(m);
             continue;
@@ -3250,7 +3270,7 @@ mod tests {
         let morning = MixKey::Part(DayPart::Morning.index() as u8);
         let pinned = with(&l, &m, DayPart::Morning, |b| b.pinned(&Kept::default()));
         assert_eq!(pinned.iter().map(|x| x.key).collect::<Vec<_>>(), [morning]);
-        assert_eq!(pinned[0].title, "На утро");
+        assert_eq!(pinned[0].title, "Доброе утро");
         assert!(pinned[0].tracks.iter().all(|&i| m.tracks[i].starts > 0), "of what is loved");
         // Every third song liked by hand over the last weeks.
         for (n, i) in (0..330u128).step_by(3).enumerate() {
@@ -3277,7 +3297,7 @@ mod tests {
         assert!(b.pinned(&Kept::default()).is_empty());
         // A part's mix is not taken for «Микс дня».
         let parts: Vec<&str> = DayPart::ALL.iter().map(|p| part_title(p.index() as u8)).collect();
-        for want in ["На утро", "На день", "На вечер", "На ночь"] {
+        for want in ["Доброе утро", "День", "Вечер", "Ночь"] {
             assert!(parts.contains(&want), "{parts:?}");
         }
         assert!(parts.iter().all(|t| !t.to_lowercase().contains("микс")), "{parts:?}");
@@ -3495,9 +3515,9 @@ mod tests {
 
         let full = row(daily(4), part(), moments());
         assert_eq!(full.len(), ROW_MIXES);
-        assert_eq!(keys(&full), [Daily(0), Genre(1), Genre(2), Genre(3), Genre(4), Part(2), Daily(1), Profile(1), Profile(2), Profile(3)]);
+        assert_eq!(keys(&full), [Daily(0), Part(2), Genre(1), Genre(2), Genre(3), Genre(4), Daily(1), Profile(1), Profile(2), Profile(3)]);
         let two = row(daily(2), part(), moments());
-        assert_eq!(keys(&two), [Daily(0), Genre(1), Genre(2), Part(2), Daily(1), Daily(2), Profile(1), Profile(2), Profile(3), Profile(4)]);
+        assert_eq!(keys(&two), [Daily(0), Part(2), Genre(1), Genre(2), Daily(1), Daily(2), Profile(1), Profile(2), Profile(3), Profile(4)]);
         let none = row(daily(0), None, moments());
         assert_eq!(keys(&none), [Daily(0), Daily(1), Daily(2), Profile(1), Profile(2), Profile(3), Profile(4), Profile(5), Profile(6)]);
 
@@ -3509,7 +3529,7 @@ mod tests {
         m[3].genre = Some(1);
         m[4].genre = Some(9);
         let r = row(daily(2), part(), m);
-        assert_eq!(keys(&r), [Daily(0), Genre(1), Genre(2), Part(2), Daily(1), Daily(2), Profile(3), Profile(5), Profile(6)]);
+        assert_eq!(keys(&r), [Daily(0), Part(2), Genre(1), Genre(2), Daily(1), Daily(2), Profile(3), Profile(5), Profile(6)]);
 
         // The kind of song: a profile's mix and a side that keeps to its
         // language are one; two profiles of a kind, or both sides, are not.

@@ -830,9 +830,27 @@ fn next_ranked(
         // graph's (what was listened with it), not a stranger's popularity.
         0.6 * aff + link + 0.5 * near + 0.2 * m.graph.prior(i)
     };
+    // The moment ([`crate::context`]): a song of this part of this weekday
+    // stands higher, and one sounding as the user's music of it — unless a
+    // character was chosen by hand, which then leads alone; in a room
+    // (a speaker) a song of loudness jumping from a whisper to a blast
+    // stands lower.
+    let slot = m.slot();
+    let free_character = filter.character == Character::Any;
+    let room = m.device() == crate::context::PlayDevice::Ambient;
+    let moment = |i: usize| {
+        let mut c = crate::context::WAVE_TIME_WEIGHT * m.time_bonus_at(i, slot);
+        if free_character {
+            c += crate::context::WAVE_SOUND_WEIGHT * m.sound_fit_at(i, slot);
+            if room && let Some(a) = m.axes_at(i) {
+                c -= crate::context::AMBIENT_DYN_PENALTY * (crate::context::AMBIENT_STEADINESS_FLOOR - a.steadiness).clamp(0.0, 1.5);
+            }
+        }
+        c
+    };
     // A song worn out now (skipped early in most of its last plays) stands
     // lower whatever its love.
-    let pulled = |i: usize| pull(i) - WORN_PULL * m.worn(i) - m.embedded_at(i).map_or(0.0, |e| NEW_PUSH_LIB * pushed(e));
+    let pulled = |i: usize| pull(i) + moment(i) - WORN_PULL * m.worn(i) - m.embedded_at(i).map_or(0.0, |e| NEW_PUSH_LIB * pushed(e));
     // One version of a song a session ([`UserModel::work_at`]: an off
     // vocal or a TV size of a song played, queued or served is that song).
     let by_work = part_on(Part::Works);
@@ -917,6 +935,11 @@ fn next_ranked(
             if let Some(e) = at {
                 score *= 1.0 - NEW_PUSH * pushed(&e);
             }
+        }
+        // A new song heard by its preview: how it sounds against the
+        // user's music of this moment (no character chosen by hand).
+        if free_character && let Some(v) = c.vector.as_ref() {
+            score *= 1.0 + m.sound_fit_of(&m.embed(v), slot);
         }
         ext.push((score, k));
         ext_work.insert(k, work);

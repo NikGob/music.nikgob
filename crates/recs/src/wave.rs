@@ -439,9 +439,14 @@ impl Bandit {
     /// docs); one arm of the filter itself when fewer than two are found.
     pub fn arms_of(ctx: &WaveContext<'_>, seed: &WaveSeed) -> Vec<Arm> {
         let m = ctx.model;
-        let part = seed.part.unwrap_or_else(|| m.taste.day_part()).index();
+        let slot = match seed.part {
+            Some(p) => m.slot().with_part(p),
+            None => m.slot(),
+        };
+        let part = slot.part.index();
         let now = m.now();
-        // Per cluster: tracks, plays in the part of the day, love.
+        // Per cluster: tracks, how much it is played in the part of the
+        // day, love.
         let mut by: HashMap<Scene, (u32, f32, f32)> = HashMap::new();
         for i in 0..m.len() {
             if !(ctx.ok)(i) || !fits_filter(ctx, &seed.filter, i) {
@@ -453,8 +458,19 @@ impl Bandit {
             }
             let e = by.entry(scene).or_default();
             e.0 += 1;
-            e.1 += f32::from(m.taste.daypart_plays_at(i)[part]);
+            e.1 += m.taste.part_mass_at(i)[part];
             e.2 += m.tracks[i].aff_long(now).max(0.0);
+        }
+        // A cluster that is a taste profile: its share of this part of this
+        // weekday ([`crate::context::TimeModel::profile_share`]), so a
+        // Saturday morning unlike the other mornings leads its own way.
+        for (scene, e) in by.iter_mut() {
+            if let Scene::Profile(key) = scene
+                && let Some(j) = m.profiles.list.iter().position(|p| p.key == *key)
+                && m.time.learned(slot.part) > 0.0
+            {
+                e.1 = m.profile_slot_share(j, slot);
+            }
         }
         let mut found: Vec<(Scene, u32, f32, f32)> = by.into_iter().filter(|(_, v)| v.0 as usize >= MIN_ARM_TRACKS).map(|(s, v)| (s, v.0, v.1, v.2)).collect();
         found.sort_by(|a, b| b.1.cmp(&a.1).then(scene_order(a.0).cmp(&scene_order(b.0))));
@@ -1134,17 +1150,22 @@ const ATTACK_COST: f32 = 0.5;
 /// ([`crate::pick::dj_cost`]), and the energy kept steady. No artist twice
 /// running; each place a song is put later than the pull put it costs
 /// ([`DELAY_COST`]). The order given wins a tie. A wave of any other
-/// character keeps the pull's order: reordered, the owner's replay heard
-/// fewer of the songs it played next and more skipped sounds back.
+/// character keeps the pull's order at a personal device: reordered, the
+/// owner's replay heard fewer of the songs it played next and more skipped
+/// sounds back. In a room ([`crate::context::PlayDevice::Ambient`]) a wave
+/// of any character is ordered so.
 pub fn sequence(ctx: &WaveContext<'_>, character: Character, session: &Session, queued: &[Ahead], picks: &mut [WavePick]) {
     if !crate::open_world::part_on(crate::open_world::Part::Sequence) {
         return;
     }
-    let steady = matches!(character, Character::Calm | Character::Background);
+    let m = ctx.model;
+    // In a room (a speaker) any wave is kept steady too: no loud head
+    // after a quiet tail.
+    let steady = matches!(character, Character::Calm | Character::Background)
+        || (character == Character::Any && m.device() == crate::context::PlayDevice::Ambient);
     if !steady {
         return;
     }
-    let m = ctx.model;
     let Some(ix) = ctx.index else { return };
     let slots: Vec<usize> = picks.iter().enumerate().filter(|(_, p)| !p.new && matches!(p.item, Item::Track(_))).map(|(k, _)| k).collect();
     if slots.len() < 2 || slots.len() > SEQUENCE_MAX {
