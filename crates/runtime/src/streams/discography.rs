@@ -217,6 +217,38 @@ async fn lookup(
     none(Ok(Vec::new()))
 }
 
+/// The discography of `artist` the library keeps from the last lookup
+/// ([`Worker::load_discography`]), as the artist's page shows it: what is
+/// missing from the library, credited to the artist, grouped and newest
+/// first.
+#[derive(Clone, Debug)]
+pub struct KeptDiscography {
+    /// When it was looked up (unix ms).
+    pub at: UnixMs,
+    /// It is fresh enough to show without a new lookup.
+    pub fresh: bool,
+    /// Why the services gave nothing, when they did not.
+    pub error: Option<String>,
+    pub missing: Vec<StreamAlbum>,
+}
+
+/// [`KeptDiscography`] of `artist`, if one was ever looked up.
+pub fn kept_discography(lib: &nikgob_library::Library, artist: ArtistId) -> Option<KeptDiscography> {
+    let (at, json) = lib.cache_get(&cache_key(artist)).ok().flatten()?;
+    let c: Cached = serde_json::from_str(&json).ok()?;
+    let now = nikgob_library::now_ms();
+    let fresh = now - at < if c.partial { PARTIAL_TTL_MS } else { TTL_MS };
+    let name = lib.get_artist(artist).ok().flatten().map(|a| a.name).unwrap_or_default();
+    let keys = crate::artist_names::credit_keys(lib, artist, &name);
+    let albums: Vec<StreamAlbum> = c.albums.iter().filter(|a| credited(a, &keys)).cloned().collect();
+    let releases = lib.releases_of_artist(artist).unwrap_or_default();
+    let ours: Vec<Have> = releases.iter().map(|r| (album_key(&r.release.title), r.release.year, r.release.release_type)).collect();
+    let ids: HashSet<_> = releases.iter().map(|r| r.release.id).collect();
+    let linked = |remote: &RemoteId| lib.release_by_remote(remote).ok().flatten().is_some_and(|r| ids.contains(&r));
+    let missing = missing(&albums, &ours, linked).into_iter().cloned().collect();
+    Some(KeptDiscography { at, fresh, error: c.error, missing })
+}
+
 impl Worker {
     /// Fills [`v::ArtistDetail::discography`] for the open artist: from the
     /// cache when it is fresh (and, when `retry`, not a failure), else from

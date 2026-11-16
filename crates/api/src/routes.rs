@@ -69,6 +69,21 @@ pub struct PlayBody {
     pub shuffle: Option<bool>,
     /// `replace` by default.
     pub mode: Option<Mode>,
+    /// Switch the output first (an id of `GET /v1/outputs` or a part of a
+    /// name), in the same request: the music starts there.
+    pub output: Option<String>,
+}
+
+impl Shared {
+    /// The output command of `output` (an id, a name or a part of one).
+    pub(crate) fn output_command(&self, output: &str) -> Result<Command, ApiError> {
+        let devices = self.rt.state().prefs.output_devices.clone();
+        match outputs::resolve(output, &devices, cfg!(target_os = "linux")) {
+            Pick::Default => Ok(Command::SetOutputDevice(None)),
+            Pick::Device(name) => Ok(Command::SetOutputDevice(Some(name))),
+            Pick::NotFound => Err(ApiError::not_found("Такого устройства вывода нет")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
@@ -102,13 +117,20 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     if kind == Kind::Wave && mode != Mode::Replace {
         return Err(play::wave_not_queued());
     }
-    sh.audio()?;
+    // The output first: a device that does not exist changes nothing.
+    let output = match b.output.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        Some(o) => Some(sh.output_command(o)?),
+        None => None,
+    };
+    if output.is_none() {
+        sh.audio()?;
+    }
     let query = b.query.clone().unwrap_or_default();
     if b.id.is_none() && query.trim().is_empty() && !matches!(kind, Kind::Liked | Kind::Wave) {
         if sh.empty() {
             return Err(ApiError::nothing_to_play());
         }
-        sh.run(vec![Command::Play]).await?;
+        sh.run_by(Some(caller.actor), output.into_iter().chain([Command::Play]).collect()).await?;
         return Ok(Json(PlayAnswer { matched: None, state: sh.snapshot() }));
     }
     let lib = sh.lib.clone();
@@ -118,12 +140,11 @@ pub async fn play(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Ca
     };
     // The shuffle asked for (or the kind's default) is set before the new
     // list is made: `play::commands` puts `ApiShuffle` first.
-    let commands = play::commands(&target, play::shuffled(target.kind, b.shuffle), mode)?;
-    // Who plays: `caller.actor` is what the listening events this starts
-    // are to carry once events have an actor (the sync wave: see
-    // status-s6-api.md, «Actor»).
+    let commands: Vec<Command> = output.into_iter().chain(play::commands(&target, play::shuffled(target.kind, b.shuffle), mode)?).collect();
+    // Who plays: the loop keeps `caller.actor` while these run, for the
+    // listening events they start once events have an actor.
     log::debug!("api: play {:?} by a token of {:?}", target.kind, caller.actor);
-    sh.run(commands).await?;
+    sh.run_by(Some(caller.actor), commands).await?;
     Ok(Json(PlayAnswer { matched: Some(target.matched()), state: sh.snapshot() }))
 }
 
@@ -396,13 +417,8 @@ pub struct OutputBody {
 pub async fn set_output(State(sh): State<Arc<Shared>>, bytes: Bytes) -> Result<Json<StateAnswer>, ApiError> {
     let b: OutputBody = body(&bytes)?;
     let q = b.output.filter(|o| !o.trim().is_empty()).ok_or_else(|| ApiError::bad_request("Нужен output"))?;
-    let devices = sh.rt.state().prefs.output_devices.clone();
-    let device = match outputs::resolve(&q, &devices, cfg!(target_os = "linux")) {
-        Pick::Default => None,
-        Pick::Device(name) => Some(name),
-        Pick::NotFound => return Err(ApiError::not_found("Такого устройства вывода нет")),
-    };
-    sh.answer(vec![Command::SetOutputDevice(device)]).await
+    let c = sh.output_command(&q)?;
+    sh.answer(vec![c]).await
 }
 
 /// One place of the queue.

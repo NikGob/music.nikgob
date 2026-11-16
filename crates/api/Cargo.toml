@@ -13,6 +13,10 @@ nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-library = { path = "../library" }
 nikgob-metadata = { path = "../metadata" }
+# The sound vectors of similar tracks (the recommendations' index).
+nikgob-recs = { path = "../recs" }
+# The MCP server `/mcp` serves (and `nikgob mcp` on stdio).
+nikgob-mcp = { path = "../mcp" }
 log.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -23,6 +27,10 @@ serde_json = "1"
 parking_lot = "0.12"
 blake3 = "1.8"
 form_urlencoded = "1"
+# The local hours of the listening report.
+jiff = "0.2"
+# `/mcp` calls the `/v1` routes in-process (`ServiceExt::oneshot`).
+tower = { version = "0.5", default-features = false, features = ["util"] }
 # The OpenAPI document of the routes (`/openapi.json`) and Swagger UI on
 # `/docs`, its files built in from utoipa-swagger-ui-vendored: nothing is
 # downloaded by the build or asked of a CDN at run time.

@@ -33,12 +33,12 @@ pub enum Right {
     Output,
     /// The files themselves (audio, covers).
     Media,
-    /// Changes of the library (likes, playlists, tags): none in this wave.
+    /// Changes of the library: likes, playlists, downloads, and (with a
+    /// confirmation) tags and the Trash.
     Library,
 }
 
 impl Right {
-    #[cfg(test)]
     pub const ALL: [Self; 8] =
         [Self::Read, Self::Player, Self::Queue, Self::Volume, Self::Duck, Self::Output, Self::Media, Self::Library];
 
@@ -73,6 +73,11 @@ pub fn needed(method: &Method, path: &str) -> Right {
     let p = path.trim_end_matches('/');
     if p.starts_with("/v1/media/") {
         return Right::Media;
+    }
+    // Any token may talk MCP: each tool's own request to the API needs its
+    // right.
+    if p == "/mcp" {
+        return Right::Read;
     }
     if method == Method::GET || method == Method::HEAD {
         return Right::Read;
@@ -167,20 +172,38 @@ const RATE_PER_S: f64 = 20.0;
 /// …and at once.
 const BURST: f64 = 40.0;
 
+/// Lookups on the services (and the dry search of the download sources) a
+/// second a token may make on average…
+pub const LOOKUPS_PER_S: f64 = 0.5;
+/// …and at once.
+pub const LOOKUP_BURST: f64 = 5.0;
+
 /// A token bucket per token.
-#[derive(Default)]
 pub struct Limiter {
     buckets: Mutex<HashMap<String, (f64, Instant)>>,
+    rate: f64,
+    burst: f64,
+}
+
+impl Default for Limiter {
+    fn default() -> Self {
+        Self::new(RATE_PER_S, BURST)
+    }
 }
 
 impl Limiter {
+    /// `rate` requests a second on average, `burst` at once.
+    pub fn new(rate: f64, burst: f64) -> Self {
+        Self { buckets: Mutex::default(), rate, burst }
+    }
+
     /// Whether the token `id` may make a request at `now`.
     pub fn allow(&self, id: &str, now: Instant) -> bool {
         let mut b = self.buckets.lock();
         // Only kept tokens get here: the map stays as small as their list.
-        let (level, at) = b.entry(id.to_owned()).or_insert((BURST, now));
-        let refill = now.saturating_duration_since(*at).as_secs_f64() * RATE_PER_S;
-        *level = (*level + refill).min(BURST);
+        let (level, at) = b.entry(id.to_owned()).or_insert((self.burst, now));
+        let refill = now.saturating_duration_since(*at).as_secs_f64() * self.rate;
+        *level = (*level + refill).min(self.burst);
         *at = now;
         if *level >= 1.0 {
             *level -= 1.0;
@@ -235,6 +258,42 @@ pub async fn guard(State(sh): State<Arc<Shared>>, mut req: Request, next: Next) 
     }
     req.extensions_mut().insert(caller);
     next.run(req).await
+}
+
+/// `GET /v1/token`: the token of the request.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, utoipa::ToSchema)]
+pub struct TokenInfo {
+    pub id: String,
+    pub name: String,
+    /// `control`, `full` or `read`.
+    pub preset: String,
+    /// `owner`, `assistant`, `agent` or `guest`.
+    pub actor: String,
+    /// What it may do: `read`, `player`, `queue`, `volume`, `duck`,
+    /// `output`, `media`, `library`.
+    pub rights: Vec<String>,
+}
+
+/// A preset or an actor as its serde name.
+fn name_of<T: serde::Serialize>(v: &T) -> String {
+    serde_json::to_value(v).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+}
+
+pub fn token_info(c: &Caller) -> TokenInfo {
+    TokenInfo {
+        id: c.token_id.clone(),
+        name: c.name.clone(),
+        preset: name_of(&c.preset),
+        actor: name_of(&c.actor),
+        rights: Right::ALL.iter().filter(|r| allows(c.preset, **r)).map(|r| r.key().to_owned()).collect(),
+    }
+}
+
+/// Who the token is and what it may do (the MCP server shows its tools by
+/// it).
+#[utoipa::path(get, path = "/v1/token", tag = "player", responses((status = 200, body = TokenInfo)), security(("bearer" = [])))]
+pub async fn whoami(axum::Extension(caller): axum::Extension<Caller>) -> crate::error::Json<TokenInfo> {
+    crate::error::Json(token_info(&caller))
 }
 
 #[cfg(test)]
@@ -352,6 +411,35 @@ mod tests {
         let later = t0 + std::time::Duration::from_millis(500);
         let refilled = (0..100).filter(|_| l.allow("a", later)).count();
         assert_eq!(refilled, (RATE_PER_S * 0.5) as usize);
+    }
+
+    #[test]
+    fn mcp_and_the_new_routes_need_their_rights() {
+        let (get, post, put, del) = (Method::GET, Method::POST, Method::PUT, Method::DELETE);
+        assert_eq!(needed(&post, "/mcp"), Right::Read, "any token talks MCP");
+        assert_eq!(needed(&get, "/mcp"), Right::Read);
+        for p in ["/v1/library/feedback", "/v1/library/retag", "/v1/library/trash", "/v1/playlists/x/tracks", "/v1/playlists/x/remove", "/v1/downloads"] {
+            assert_eq!(needed(&post, p), Right::Library, "{p}");
+        }
+        assert_eq!(needed(&put, "/v1/playlists/x"), Right::Library);
+        assert_eq!(needed(&del, "/v1/playlists/x"), Right::Library);
+        for p in ["/v1/stats/listening", "/v1/discover/search", "/v1/downloads", "/v1/downloads/sources", "/v1/token"] {
+            assert_eq!(needed(&get, p), Right::Read, "{p}");
+        }
+        assert!(!allows(ApiPreset::Control, needed(&post, "/v1/library/trash")));
+        assert!(allows(ApiPreset::Read, needed(&get, "/v1/stats/health")));
+    }
+
+    #[test]
+    fn the_token_says_what_it_may_do() {
+        let c = Caller { token_id: "a".into(), name: "Claude".into(), preset: ApiPreset::Control, actor: ApiActor::Agent };
+        let info = token_info(&c);
+        assert_eq!((info.preset.as_str(), info.actor.as_str()), ("control", "agent"));
+        assert!(info.rights.contains(&"player".to_owned()) && !info.rights.contains(&"library".to_owned()));
+        let lookups = Limiter::new(LOOKUPS_PER_S, LOOKUP_BURST);
+        let t0 = Instant::now();
+        assert_eq!((0..20).filter(|_| lookups.allow("a", t0)).count(), LOOKUP_BURST as usize);
+        assert!(lookups.allow("a", t0 + std::time::Duration::from_secs(2)));
     }
 
     #[test]

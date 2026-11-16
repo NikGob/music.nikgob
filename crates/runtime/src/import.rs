@@ -114,6 +114,8 @@ pub(crate) enum Internal {
         new_dir: PathBuf,
         result: Result<nikgob_import::RelocateReport, String>,
     },
+    /// The local API's retag wrote these tracks (and failed on `failed`).
+    ApiRetagged { done: Vec<TrackId>, failed: usize },
 }
 
 /// Bits above this mark ids of import jobs in the shared "Загрузки" lists;
@@ -822,6 +824,7 @@ impl Worker {
                 self.publish_downloads();
             }
             m @ (Internal::TagSuggestions(..) | Internal::Retagged(..)) => self.tag_result(m),
+            Internal::ApiRetagged { done, failed } => self.api_retagged(&done, failed),
             Internal::Relabeled(track, r) => {
                 if let Err(e) = r {
                     log::warn!("relabelling {track}: {e}");

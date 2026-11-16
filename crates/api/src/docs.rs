@@ -11,7 +11,7 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
     info(
         title = "music.nikgob",
         version = "1",
-        description = "Локальный API плеера. Каждый адрес /v1 требует токен: заголовок `Authorization: Bearer nk_…` (для /v1/events и /v1/media/… можно `?token=nk_…`). Токен создаётся в плеере: Настройки → Межсеть → API и MCP → «Новый токен». Время — в миллисекундах, громкость — от 0 до 1. Ошибка: `{\"error\", \"message\", \"details\"}`."
+        description = "Локальный API плеера. Каждый адрес /v1 требует токен: заголовок `Authorization: Bearer nk_…` (для /v1/events и /v1/media/… можно `?token=nk_…`). Токен создаётся в плеере: Настройки → Межсеть → API и MCP → «Новый токен». Время — в миллисекундах, громкость — от 0 до 1. Ошибка: `{\"error\", \"message\", \"details\"}`. Разрушительные запросы (теги, корзина, удаление из плейлиста, переименование и удаление плейлиста) без `confirm_token` ничего не меняют и отвечают планом и одноразовым `confirm_token` (5 минут, для тех же аргументов). MCP (Streamable HTTP) — `POST /mcp` с тем же токеном."
     ),
     paths(
         crate::routes::state,
@@ -44,6 +44,25 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
         crate::library::lyrics,
         crate::media::audio,
         crate::media::cover,
+        crate::auth::whoami,
+        crate::mutate::feedback,
+        crate::mutate::create_playlist,
+        crate::mutate::add_to_playlist,
+        crate::mutate::rename_playlist,
+        crate::mutate::remove_from_playlist,
+        crate::mutate::delete_playlist,
+        crate::mutate::retag,
+        crate::mutate::trash,
+        crate::stats::listening,
+        crate::stats::forgotten,
+        crate::stats::health,
+        crate::stats::similar,
+        crate::discover::search,
+        crate::discover::discography,
+        crate::discover::share,
+        crate::downloads::inspect,
+        crate::downloads::sources,
+        crate::downloads::enqueue,
     ),
     components(schemas(
         crate::error::ErrorBody,
@@ -84,6 +103,42 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
         crate::library::Lyrics,
         crate::library::LyricsLine,
         crate::library::LyricsWord,
+        crate::auth::TokenInfo,
+        crate::confirm::PlanAnswer,
+        crate::mutate::FeedbackBody,
+        crate::mutate::DoneAnswer,
+        crate::mutate::PlaylistAddBody,
+        crate::mutate::RenameBody,
+        crate::mutate::RemoveBody,
+        crate::mutate::RetagBody,
+        crate::mutate::TrashBody,
+        crate::mutate::Destructive,
+        crate::stats::ListeningAnswer,
+        crate::stats::StatTrackOut,
+        crate::stats::NamedCount,
+        crate::stats::KeyCount,
+        crate::stats::ForgottenAnswer,
+        crate::stats::HealthAnswer,
+        crate::stats::FormatOut,
+        crate::stats::FakeOut,
+        crate::stats::SimilarAnswer,
+        crate::stats::Similar,
+        crate::discover::DiscoverAnswer,
+        crate::discover::ServiceAnswer,
+        crate::discover::FoundTrack,
+        crate::discover::FoundAlbum,
+        crate::discover::FoundArtist,
+        crate::discover::FoundPlaylist,
+        crate::discover::DiscographyAnswer,
+        crate::discover::ShareAnswer,
+        crate::downloads::DownloadsAnswer,
+        crate::downloads::JobOut,
+        crate::downloads::ConfirmOut,
+        crate::downloads::WishOut,
+        crate::downloads::StatusCount,
+        crate::downloads::SourcesAnswer,
+        crate::downloads::EnqueueBody,
+        crate::downloads::EnqueueAnswer,
     )),
     modifiers(&Security),
     tags(
@@ -92,6 +147,10 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
         (name = "outputs", description = "Куда идёт звук"),
         (name = "library", description = "Поиск и чтение библиотеки"),
         (name = "media", description = "Файлы песен и обложки"),
+        (name = "library-edit", description = "Лайки, плейлисты, теги и корзина"),
+        (name = "stats", description = "Аналитика прослушиваний и библиотеки"),
+        (name = "discover", description = "Поиск в сервисах, дискография, ссылка «Поделиться»"),
+        (name = "downloads", description = "Загрузки и «Подтверди»"),
     )
 )]
 pub struct ApiDoc;
@@ -137,9 +196,28 @@ mod tests {
             "/v1/outputs",
             "/v1/player/output",
             "/v1/media/tracks/{id}/audio",
+            "/v1/token",
+            "/v1/library/feedback",
+            "/v1/library/retag",
+            "/v1/library/trash",
+            "/v1/playlists/{id}/tracks",
+            "/v1/playlists/{id}/remove",
+            "/v1/stats/listening",
+            "/v1/stats/forgotten",
+            "/v1/stats/health",
+            "/v1/stats/similar",
+            "/v1/discover/search",
+            "/v1/discover/artists/{id}/discography",
+            "/v1/discover/share",
+            "/v1/downloads",
+            "/v1/downloads/sources",
         ] {
             assert!(paths.contains_key(p), "{p}");
         }
+        assert!(doc["paths"]["/v1/playlists"]["post"].is_object());
+        assert!(doc["paths"]["/v1/playlists/{id}"]["delete"].is_object());
+        assert!(doc["paths"]["/v1/playlists/{id}"]["put"].is_object());
+        assert!(doc["components"]["schemas"]["PlanAnswer"].is_object());
         assert!(doc["paths"]["/v1/player/duck"]["delete"].is_object());
         assert!(doc["components"]["securitySchemes"]["bearer"].is_object());
         assert!(doc["components"]["schemas"]["PlayerState"].is_object());

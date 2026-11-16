@@ -1,0 +1,33 @@
+[package]
+name = "nikgob-mcp"
+description = "The player's MCP server: tools, resources and prompts over the local REST API, served on stdio (`nikgob mcp`) and inside the API on /mcp (Streamable HTTP)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# A console program beside the player: the same stdio server as `nikgob mcp`,
+# for clients that cannot read the stdio of a windowed program.
+[[bin]]
+name = "nikgob-mcp"
+path = "src/main.rs"
+
+[dependencies]
+nikgob-core.workspace = true
+log.workspace = true
+env_logger.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "sync", "macros", "time"] }
+# Only plain HTTP to the player on this computer (or the home network): no TLS.
+reqwest = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[lints]
+workspace = true

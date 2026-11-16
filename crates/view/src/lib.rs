@@ -3869,11 +3869,32 @@ pub enum Command {
     /// From the API server: one request's commands, run one after another
     /// with nothing between them, then `ack` is shown as
     /// [`ApiView::synced`] (acks come in the order they were sent), so the
-    /// answer has their state.
-    ApiRun { commands: Vec<Command>, ack: u64 },
+    /// answer has their state. `actor`: who the request's token plays for
+    /// (kept by the loop while the commands run, for the history).
+    ApiRun { commands: Vec<Command>, ack: u64, actor: Option<ApiActor> },
     /// Inside an [`Command::ApiRun`]: the next list it makes plays shuffled
     /// or in order as this says, whatever the settings of its kind.
     ApiShuffle(bool),
+    /// From the API: a song.link / album.link page for `target`, answered
+    /// to `reply` as `{"link", "text"}`; no toast, nothing copied.
+    ApiShare { target: ShareTarget, reply: ApiReply },
+    /// From the API: the tags in the files of these tracks, answered as
+    /// `{"<track id>": {"title", …}}` (a track without a file is left out).
+    ApiReadTags { tracks: Vec<TrackId>, reply: ApiReply },
+    /// From the API: these tags written into the files and the library,
+    /// each track's fields not named kept as its file has them; answered as
+    /// `{"done": [ids], "failed": [{"id", "error"}]}`.
+    ApiRetag { tracks: Vec<(TrackId, TagPatch)>, reply: ApiReply },
+    /// From the API: these tracks into the Trash at once, one snackbar with
+    /// «Отменить» for all of them. Never deletes for good: nothing happens
+    /// while the Trash is off.
+    ApiTrash { tracks: Vec<TrackId>, what: String },
+    /// From the API: the download sources searched for a track or an album
+    /// without downloading anything, answered as `{"offers": […]}`.
+    ApiSourceSearch { track: Option<TrackId>, release: Option<ReleaseId>, reply: ApiReply },
+    /// From the API: a download too large to start by itself waits in
+    /// «Загрузки → Подтверди» as one card; «Скачать» runs `commands`.
+    ApiConfirmDownload { title: String, origin: String, lines: Vec<String>, commands: Vec<Command> },
 }
 
 impl Default for Prefs {

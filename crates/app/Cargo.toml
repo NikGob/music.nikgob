@@ -22,6 +22,7 @@ nikgob-md3e.workspace = true
 nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-api = { path = "../api" }
+nikgob-mcp = { path = "../mcp" }
 nikgob-library = { path = "../library" }
 nikgob-recs = { path = "../recs" }
 nikgob-audio = { path = "../audio" }
