@@ -2070,7 +2070,10 @@ impl Worker {
             | Command::MeshUpdate(_)
             | Command::MeshRestore { .. }
             | Command::MeshClearPairing
-            | Command::MeshForgetFailed { .. }) => self.mesh_command(c),
+            | Command::MeshForgetFailed { .. }
+            | Command::MeshSetKeepMasters(_)
+            | Command::MeshSetPins { .. }
+            | Command::MeshPauseTransfer { .. }) => self.mesh_command(c),
         }
     }
 

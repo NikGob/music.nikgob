@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 
-use nikgob_core::settings::{MeshSettings, Settings};
+use nikgob_core::settings::{KeepMasters, MeshPinsRecord, MeshSettings, Settings};
 use nikgob_library::NodeRow;
-use nikgob_view::{Command, MeshKind, MeshNodeView, MeshPairing, MeshProfile, MeshScope, MeshSnapshot, MeshView};
+use nikgob_view::{Command, MeshKind, MeshNodeView, MeshPairing, MeshPins, MeshProfile, MeshScope, MeshSnapshot, MeshView};
 
 use crate::Worker;
 
@@ -19,6 +19,9 @@ use crate::Worker;
 const FORGET_AFTER_MS: i64 = 5_000;
 /// A device's last-seen time is written at most this often.
 const SEEN_SAVE_MS: i64 = 60_000;
+/// The originals each device alone holds are counted anew at most this
+/// often (and when the devices or the choice change).
+const SOLE_EVERY_MS: i64 = 10 * 60_000;
 
 /// What the loop keeps of the mesh between turns.
 #[derive(Default)]
@@ -37,6 +40,42 @@ pub(crate) struct MeshKeep {
     sent: Vec<String>,
     /// A pairing that could not even start here (no mesh service).
     failed: Option<String>,
+    /// Per device: the originals whose only verified copy it holds, as last
+    /// counted (only while this computer may let go of its own), when, and
+    /// of which devices.
+    sole: Vec<(String, u64)>,
+    sole_at: Option<i64>,
+    sole_of: Vec<String>,
+    /// Devices whose transfer is paused here.
+    paused: Vec<String>,
+}
+
+/// The pins as the view shows them.
+fn pins_view(r: Option<&MeshPinsRecord>) -> MeshPins {
+    r.map(|r| MeshPins { liked: r.liked, playlists: r.playlists.clone() }).unwrap_or_default()
+}
+
+/// `pins` of device `node` laid into `all` (a record replaced, added, or
+/// dropped when it keeps nothing). True when it changed anything.
+pub(crate) fn set_pins(all: &mut Vec<MeshPinsRecord>, node: &str, pins: &MeshPins) -> bool {
+    let record = MeshPinsRecord { node: node.to_owned(), liked: pins.liked, playlists: pins.playlists.clone() };
+    let empty = !pins.liked && pins.playlists.is_empty();
+    match all.iter().position(|p| p.node == node) {
+        Some(i) if empty => {
+            all.remove(i);
+            true
+        }
+        Some(i) if all[i] != record => {
+            all[i] = record;
+            true
+        }
+        Some(_) => false,
+        None if empty => false,
+        None => {
+            all.push(record);
+            true
+        }
+    }
 }
 
 fn row_view(r: &NodeRow) -> MeshNodeView {
@@ -86,6 +125,13 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
             .collect(),
         None => keep.rows.iter().filter(|r| !hidden(&r.id)).map(row_view).collect(),
     };
+    for n in &mut nodes {
+        n.pins = pins_view(keep.settings.pins_of(&n.id));
+        n.sole_masters = keep.sole.iter().find(|(id, _)| *id == n.id).map_or(0, |(_, c)| *c);
+        if let Some(t) = n.transfer.as_mut() {
+            t.paused = keep.paused.contains(&n.id);
+        }
+    }
     nodes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
     let live = keep.live.clone().unwrap_or_default();
     let pairing = match (&keep.failed, live.pairing) {
@@ -106,6 +152,7 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
         error: live.error,
         name_setting: keep.settings.name.clone(),
         configurable: keep.configurable,
+        keep_masters: keep.settings.keep_masters,
     }
 }
 
@@ -176,7 +223,23 @@ impl Worker {
             Ok(rows) => self.mesh.rows = rows,
             Err(e) => log::warn!("mesh: the paired devices not read: {e}"),
         }
+        self.mesh_count_sole();
         self.mesh_publish();
+    }
+
+    /// Counts the originals each device alone holds (nothing to count while
+    /// this computer keeps all of its own: no forget can lose one then).
+    fn mesh_count_sole(&mut self) {
+        self.mesh.sole_at = Some(nikgob_library::now_ms());
+        self.mesh.sole_of = self.mesh.rows.iter().map(|r| r.id.clone()).collect();
+        if self.mesh.settings.keep_masters == KeepMasters::Always {
+            self.mesh.sole.clear();
+            return;
+        }
+        match self.lib.sole_replicas() {
+            Ok(v) => self.mesh.sole = v,
+            Err(e) => log::warn!("mesh: the devices' originals not counted: {e}"),
+        }
     }
 
     fn mesh_publish(&mut self) {
@@ -237,6 +300,16 @@ impl Worker {
             log::error!("mesh: the forgotten devices not removed: {e}");
         }
         self.mesh.rows.retain(|r| !ids.contains(&r.id));
+        self.mesh.paused.retain(|p| !ids.contains(p));
+        // What a forgotten device pinned goes with it.
+        if self.mesh.settings.pins.iter().any(|p| ids.contains(&p.node)) {
+            let gone = ids.to_vec();
+            self.mesh_edit(move |m| {
+                let before = m.pins.len();
+                m.pins.retain(|p| !gone.contains(&p.node));
+                m.pins.len() != before
+            });
+        }
     }
 
     /// Passes a command that needs the network on to the mesh service.
@@ -313,7 +386,29 @@ impl Worker {
                     self.mesh.failed = None;
                 }
                 self.mesh.live = Some(*snap);
+                if self.mesh.rows.iter().map(|r| &r.id).ne(self.mesh.sole_of.iter()) {
+                    self.mesh_count_sole();
+                }
                 self.mesh_publish();
+            }
+            Command::MeshSetKeepMasters(keep) => {
+                self.mesh_edit(|m| {
+                    let changed = m.keep_masters != keep;
+                    m.keep_masters = keep;
+                    changed
+                });
+                self.mesh_count_sole();
+                self.mesh_publish();
+            }
+            Command::MeshSetPins { node_id, pins } => self.mesh_edit(move |m| set_pins(&mut m.pins, &node_id, &pins)),
+            Command::MeshPauseTransfer { node_id, paused } => {
+                self.mesh.paused.retain(|p| *p != node_id);
+                if paused {
+                    self.mesh.paused.push(node_id.clone());
+                }
+                self.mesh_publish();
+                // The files' side (the replicas) hears it through the mesh.
+                self.mesh_forward(Command::MeshPauseTransfer { node_id, paused });
             }
             Command::MeshForgetFailed { node_id, why } => {
                 self.mesh.sent.retain(|f| *f != node_id);
@@ -336,10 +431,17 @@ impl Worker {
     /// The loop's tick: a device whose «Отменить» is gone is forgotten for
     /// good (its row goes; the ring holder revokes it).
     pub(crate) fn mesh_tick(&mut self) {
+        let now = nikgob_library::now_ms();
+        if self.mesh.settings.keep_masters != KeepMasters::Always
+            && !self.mesh.rows.is_empty()
+            && self.mesh.sole_at.is_none_or(|at| now - at >= SOLE_EVERY_MS)
+        {
+            self.mesh_count_sole();
+            self.mesh_publish();
+        }
         if self.mesh.forgetting.is_empty() {
             return;
         }
-        let now = nikgob_library::now_ms();
         let due: Vec<String> = {
             let st = self.state.read();
             self.mesh
@@ -477,6 +579,47 @@ mod tests {
         assert_eq!(rows_gone(&live, &rows, &[("c".into(), 0)]), vec!["b".to_owned()]);
         let unpaired = MeshSnapshot { paired: false, ..MeshSnapshot::default() };
         assert!(rows_gone(&unpaired, &rows, &[]).is_empty());
+    }
+
+    /// The view carries each device's pins, the originals it alone holds
+    /// and a transfer's pause, and the choice of the originals.
+    #[test]
+    fn pins_sole_copies_and_pauses_show_on_their_devices() {
+        let mut settings = MeshSettings { keep_masters: KeepMasters::AfterOne, ..MeshSettings::default() };
+        let list = nikgob_view::PlaylistId::new();
+        assert!(set_pins(&mut settings.pins, "a", &MeshPins { liked: true, playlists: vec![list] }));
+        let mut live_a = node("a", "Pi", true);
+        live_a.view.transfer = Some(nikgob_view::MeshTransfer { done: 1, total: 2, paused: false });
+        let live = MeshSnapshot { running: true, paired: true, nodes: vec![live_a, node("b", "TV", true)], ..MeshSnapshot::default() };
+        let keep = MeshKeep {
+            rows: vec![row("a", "Pi"), row("b", "TV")],
+            live: Some(live),
+            settings,
+            sole: vec![("a".into(), 4)],
+            paused: vec!["a".into()],
+            ..MeshKeep::default()
+        };
+        let v = merge(&keep);
+        assert_eq!(v.keep_masters, KeepMasters::AfterOne);
+        let a = v.node("a").unwrap();
+        assert_eq!(a.pins, MeshPins { liked: true, playlists: vec![list] });
+        assert_eq!(a.sole_masters, 4);
+        assert!(a.transfer.unwrap().paused);
+        assert!(v.forget_risky(a));
+        let b = v.node("b").unwrap();
+        assert_eq!((b.pins.clone(), b.sole_masters), (MeshPins::default(), 0));
+    }
+
+    #[test]
+    fn pins_are_replaced_and_an_empty_choice_leaves_no_record() {
+        let mut all = Vec::new();
+        assert!(!set_pins(&mut all, "a", &MeshPins::default()), "nothing to keep, nothing written");
+        assert!(set_pins(&mut all, "a", &MeshPins { liked: true, playlists: vec![] }));
+        assert!(!set_pins(&mut all, "a", &MeshPins { liked: true, playlists: vec![] }), "the same again");
+        assert!(set_pins(&mut all, "b", &MeshPins { liked: true, playlists: vec![] }));
+        assert_eq!(all.len(), 2);
+        assert!(set_pins(&mut all, "a", &MeshPins::default()));
+        assert_eq!(all.iter().map(|p| p.node.as_str()).collect::<Vec<_>>(), ["b"]);
     }
 
     #[test]
