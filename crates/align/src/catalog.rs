@@ -97,9 +97,14 @@ pub const RUNTIME: ModelSpec = ModelSpec {
     }],
 };
 
+/// ONNX Runtime has a build here: Windows (DirectML) and Linux on x86_64.
+/// Elsewhere (Linux on ARM, a Raspberry Pi) there is no runtime to download,
+/// so no model is offered or downloaded and what needs one is not available.
+pub const RUNTIME_AVAILABLE: bool = cfg!(any(not(target_os = "linux"), target_arch = "x86_64"));
+
 /// The same version's CPU build: DirectML is Windows' own, and the wheel's
 /// manylinux library needs nothing past glibc and libstdc++.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const RUNTIME: ModelSpec = ModelSpec {
     id: ModelId::Runtime,
     dir: "runtime-1.24.4",
@@ -113,6 +118,15 @@ pub const RUNTIME: ModelSpec = ModelSpec {
             "onnxruntime/capi/libonnxruntime_providers_shared.so",
         ],
     }],
+};
+
+/// No build for this machine ([`RUNTIME_AVAILABLE`]): nothing to download,
+/// never the x86_64 wheel.
+#[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+pub const RUNTIME: ModelSpec = ModelSpec {
+    id: ModelId::Runtime,
+    dir: "runtime-1.24.4",
+    files: &[],
 };
 
 pub const SEPARATOR: ModelSpec = ModelSpec {
@@ -407,6 +421,9 @@ impl Catalog {
     /// Downloads what a part lacks. `progress(done, total)` is called as
     /// bytes come; returning false stops (what came stays for a resume).
     pub fn download(&self, id: ModelId, progress: &mut dyn FnMut(u64, u64) -> bool) -> Result<(), Error> {
+        if !RUNTIME_AVAILABLE {
+            return Err(Error::Unavailable("ONNX Runtime has no build for this machine".into()));
+        }
         let spec = id.spec();
         let dir = self.path(id);
         if dir.join(READY).exists() {
@@ -561,7 +578,7 @@ mod tests {
     #[test]
     fn specs_are_pinned_and_named() {
         for s in ALL {
-            assert!(!s.files.is_empty());
+            assert!(!s.files.is_empty() || (s.id == ModelId::Runtime && !RUNTIME_AVAILABLE));
             for f in s.files {
                 assert_eq!(f.sha256.len(), 64, "{}", f.name);
                 assert!(!f.url.contains("/resolve/main/"), "{} is not pinned", f.url);
@@ -597,6 +614,24 @@ mod tests {
         assert!(c.ready(ModelId::Separator));
         c.remove(ModelId::Separator).unwrap();
         assert_eq!(c.state(ModelId::Separator), ModelState::Missing);
+    }
+
+    #[test]
+    fn without_a_runtime_build_nothing_is_downloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = Catalog::new(dir.path());
+        if RUNTIME_AVAILABLE {
+            assert!(!RUNTIME.files.is_empty());
+        } else {
+            assert!(RUNTIME.files.is_empty(), "never another machine's wheel");
+            assert!(matches!(c.download(ModelId::Runtime, &mut |_, _| true), Err(Error::Unavailable(_))));
+            assert!(matches!(c.download(ModelId::SoundEffnet, &mut |_, _| true), Err(Error::Unavailable(_))));
+            assert!(!c.ready(ModelId::Runtime));
+        }
+        // An x86_64 wheel is only ever the runtime of an x86_64 build.
+        for f in RUNTIME.files {
+            assert!(!f.url.contains("x86_64") || cfg!(target_arch = "x86_64"), "{}", f.url);
+        }
     }
 
     #[test]
