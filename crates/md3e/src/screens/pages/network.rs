@@ -664,14 +664,15 @@ fn passport(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, mem: &mut MeshUi, out: 
 }
 
 /// What «Слушать здесь» and «Пульт» of a passport do: the music of this
-/// window moves to that device (this computer's passport brings it back
-/// while another device plays); this window drives what the device plays,
-/// as it is. Neither for a device out of reach or the one that plays the
+/// window moves to that device (this computer's passport goes back here
+/// while another device plays: a detach after an attach, the music brought
+/// back after a transfer); this window drives what the device plays, as it
+/// is. Neither for a device out of reach or the one that plays the
 /// window's music already.
 fn listen_commands(state: &ViewState, node: Option<&MeshNodeView>) -> (Option<Command>, Option<Command>) {
     let target = state.target.as_ref();
     match node {
-        None => (target.map(|_| Command::OutputTransfer { node_id: None }), None),
+        None => (crate::screens::output::back_here(state), None),
         Some(n) if !n.online || target.is_some_and(|t| t.node_id == n.id) => (None, None),
         Some(n) => (
             Some(Command::OutputTransfer { node_id: Some(n.id.clone()) }),
@@ -692,13 +693,11 @@ fn listen(ui: &mut Ui, state: &ViewState, d: &Dev<'_>, out: &mut Vec<Command>) {
         if let Some(c) = here
             && ui.add(Button::new("Слушать здесь").icon(Icon::SpeakerGroup).style(Style::Filled).size(Size::S).id_salt(("mesh-passport-here", d.id))).clicked()
         {
-            crate::screens::output::set_attached(ui.ctx(), None);
             out.push(c);
         }
         if let Some(c) = remote
             && ui.add(Button::new("Пульт").style(Style::Tonal).size(Size::S).id_salt(("mesh-passport-remote", d.id))).clicked()
         {
-            crate::screens::output::set_attached(ui.ctx(), d.node.map(|n| n.id.clone()));
             out.push(c);
         }
     });
@@ -805,9 +804,13 @@ mod tests {
             link: nikgob_view::RemoteLink::Live,
             volume: 0.5,
             muted: false,
+            how: nikgob_view::RemoteHow::Transferred,
         });
         assert_eq!(listen_commands(&state, Some(&pi)), (None, None));
         assert_eq!(listen_commands(&state, None), (Some(Command::OutputTransfer { node_id: None }), None));
+        // Driven by an attach: back here is this computer's own queue.
+        state.target.as_mut().unwrap().how = nikgob_view::RemoteHow::Attached;
+        assert_eq!(listen_commands(&state, None), (Some(Command::OutputDetach), None));
     }
 
     #[test]

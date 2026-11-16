@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use egui::{Align, Area, Color32, Context, Id, Key, Layout, Modifiers, Order, Rect, Sense, Stroke, Ui, UiBuilder, emath::TSTransform, pos2, vec2};
-use nikgob_view::{Command, MeshKind, MeshNodeView, MeshScope, RemoteLink, Route, Status, ViewState};
+use nikgob_view::{Command, MeshKind, MeshNodeView, MeshScope, RemoteHow, RemoteLink, Route, Status, ViewState};
 
 use super::chrome::Chrome;
 use super::pages::mesh_ui::{self, Look as Avatar};
@@ -37,10 +37,17 @@ const LOST_ALPHA: f32 = 0.55;
 
 const POPOVER_W: f32 = 320.0;
 const PAD: f32 = 8.0;
-/// A place's row, its avatar, the start of its text.
-const ROW_H: f32 = 56.0;
-const AVATAR: f32 = 36.0;
-const TEXT_X: f32 = PAD + AVATAR + 12.0;
+/// A place's row (one height for all, the list's two-line row), the room
+/// inside its container on either side, its avatar, the start of its text.
+const ROW_H: f32 = 72.0;
+const SIDE: f32 = 12.0;
+const AVATAR: f32 = 40.0;
+const TEXT_X: f32 = SIDE + AVATAR + 12.0;
+/// The headline's and the supporting line's boxes (body-large, body-medium)
+/// and the glyph before what plays.
+const HEADLINE_H: f32 = 24.0;
+const SUPPORT_H: f32 = 20.0;
+const SUPPORT_ICON: f32 = 16.0;
 /// Between two places.
 const GAP: f32 = 2.0;
 /// A sound device of this computer under its row.
@@ -246,24 +253,6 @@ fn clear(c: Color32) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, 0)
 }
 
-fn attached_id() -> Id {
-    Id::new("md3e-output-attached")
-}
-
-/// The device this window became the remote of by an attach (a click on it
-/// while it played its own music, «Пульт» of its passport), as chosen
-/// here last: «Этот компьютер» then goes back to this computer's own
-/// queue, and ⇄ beside it brings that device's music here.
-pub(crate) fn attached_node(ctx: &Context) -> Option<String> {
-    ctx.data(|d| d.get_temp::<Option<String>>(attached_id())).flatten()
-}
-
-/// Notes what a choice made of the window: the remote of `node` by an
-/// attach, or none (a transfer, back here).
-pub(crate) fn set_attached(ctx: &Context, node: Option<String>) {
-    ctx.data_mut(|d| d.insert_temp(attached_id(), node));
-}
-
 /// What the popover keeps between frames.
 #[derive(Default)]
 pub(crate) struct OutputUi {
@@ -321,6 +310,17 @@ impl OutputUi {
     }
 }
 
+/// What going back to this computer does while another device plays: back
+/// to this computer's own queue after an attach (nothing moves), that
+/// device's music brought here after a transfer. `None` while this computer
+/// plays.
+pub(crate) fn back_here(state: &ViewState) -> Option<Command> {
+    state.target.as_ref().map(|t| match t.how {
+        RemoteHow::Attached => Command::OutputDetach,
+        RemoteHow::Transferred => Command::OutputTransfer { node_id: None },
+    })
+}
+
 /// The second line of a place.
 #[derive(Clone, Debug, PartialEq)]
 enum Second {
@@ -357,9 +357,11 @@ fn track_line(artist: &str, title: &str) -> String {
 
 /// This computer, then the paired devices (those in reach first, each
 /// group in the ring's order).
-fn places(state: &ViewState, attached: Option<&str>) -> Vec<Place> {
+fn places(state: &ViewState) -> Vec<Place> {
     let target = state.target.as_ref();
-    let attached_to_target = target.is_some_and(|t| attached == Some(t.node_id.as_str()));
+    // The window drives a device's own music: this computer's queue waits
+    // parked, and ⇄ beside each can move the one over the other.
+    let attached = target.is_some_and(|t| t.how == RemoteHow::Attached);
     let parked = state.parked.as_ref().filter(|_| target.is_some()).and_then(|p| p.current.as_ref());
     let second = match parked {
         Some(t) => Some(Second::Playing { line: track_line(&t.artist, &t.title), paused: true }),
@@ -375,7 +377,7 @@ fn places(state: &ViewState, attached: Option<&str>) -> Vec<Place> {
         selected: target.is_none(),
         enabled: true,
         plays: false,
-        swap: attached_to_target,
+        swap: attached,
     }];
     let mut nodes: Vec<&MeshNodeView> = state.mesh.nodes.iter().collect();
     nodes.sort_by_key(|n| !n.online);
@@ -394,41 +396,29 @@ fn places(state: &ViewState, attached: Option<&str>) -> Vec<Place> {
             enabled: n.online || is_target,
             plays,
             // Over what the window drives already only when it came there
-            // by an attach (its own queue is not there).
-            swap: plays && (!is_target || attached == Some(n.id.as_str())),
+            // by an attach (this queue is not there).
+            swap: plays && (!is_target || attached),
         });
     }
     out
 }
 
-/// What a click asks for, and the device the window is the remote of by an
-/// attach afterwards.
-#[derive(Clone, Debug, PartialEq)]
-struct Choice {
-    command: Command,
-    attached: Option<String>,
-}
-
 /// A click on a place's row (`None`: nothing to send). This computer while
-/// another device plays: back to this computer's own queue after an attach,
-/// else that device's music comes back here. A device: attach to one that
-/// plays its own music, else move what plays here there.
-fn row_choice(p: &Place, remote: bool) -> Option<Choice> {
+/// another device plays: [`back_here`]. A device: attach to one that plays
+/// its own music, else move what plays here there.
+fn row_choice(p: &Place, state: &ViewState) -> Option<Command> {
     match &p.node {
-        None if !remote => None,
-        // ⇄ beside it says the device's music came by an attach.
-        None if p.swap => Some(Choice { command: Command::OutputDetach, attached: None }),
-        None => Some(Choice { command: Command::OutputTransfer { node_id: None }, attached: None }),
+        None => back_here(state),
         Some(_) if !p.enabled || p.selected => None,
-        Some(id) if p.plays => Some(Choice { command: Command::OutputAttach { node_id: id.clone() }, attached: Some(id.clone()) }),
-        Some(id) => Some(Choice { command: Command::OutputTransfer { node_id: Some(id.clone()) }, attached: None }),
+        Some(id) if p.plays => Some(Command::OutputAttach { node_id: id.clone() }),
+        Some(id) => Some(Command::OutputTransfer { node_id: Some(id.clone()) }),
     }
 }
 
 /// ⇄ of a place: this queue over what plays on that device, or that
 /// device's music here.
-fn swap_choice(p: &Place) -> Choice {
-    Choice { command: Command::OutputTransfer { node_id: p.node.clone() }, attached: None }
+fn swap_choice(p: &Place) -> Command {
+    Command::OutputTransfer { node_id: p.node.clone() }
 }
 
 /// What the rows of one place asked for this frame.
@@ -482,8 +472,9 @@ fn line(ui: &Ui, text: &str, style: TypeStyle, color: Color32, max_w: f32) -> Ar
 }
 
 /// One place: its row (the avatar, the name with «Гость», what plays
-/// there, ⇄ and the chevron), this computer's sound devices under it, the
-/// volume of the place that plays; on its container while chosen.
+/// there in the list's supporting style, ⇄ and the chevron), this
+/// computer's sound devices under it, the volume of the place that plays;
+/// on its container while chosen. Rows are all of one height.
 #[allow(clippy::too_many_arguments)]
 fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen_device: Option<&str>, chevron: Option<bool>, clickable: bool, volume: &VolumeRow) -> Hit {
     let ctx = ui.ctx().clone();
@@ -519,13 +510,13 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
     }
     hit.row = clickable && resp.clicked();
     let salt = format!("output-{}", p.node.as_deref().unwrap_or("this"));
-    mesh_ui::paint_avatar(ui, pos2(row.left() + PAD + AVATAR / 2.0, row.center().y), AVATAR, &salt, p.kind, p.avatar);
+    mesh_ui::paint_avatar(ui, pos2(row.left() + SIDE + AVATAR / 2.0, row.center().y), AVATAR, &salt, p.kind, p.avatar);
 
     // ⇄ and the chevron at the end (after the row, so they take their clicks).
-    let trail = Rect::from_min_max(pos2(row.left() + TEXT_X, row.top()), pos2(row.right() - PAD, row.bottom()));
+    let trail = Rect::from_min_max(pos2(row.left() + TEXT_X, row.top()), pos2(row.right() - SIDE, row.bottom()));
     let mut tui = ui.new_child(UiBuilder::new().max_rect(trail).layout(Layout::right_to_left(Align::Center)).id_salt(id.with("trail")));
     tui.spacing_mut().item_spacing.x = 4.0;
-    let mut text_right = row.right() - 16.0;
+    let mut text_right = row.right() - SIDE;
     if let Some(open) = chevron {
         let b = tui.add(IconButton::new(if open { Icon::ExpandLess } else { Icon::ExpandMore }).size(Size::Xs).tooltip("Устройства вывода").id_salt(id.with("chevron")));
         hit.chevron = b.clicked();
@@ -538,33 +529,35 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
         text_right = text_right.min(b.rect.left() - 8.0);
     }
 
-    // The name («Гость» after it) and what plays there.
+    // The name («Гость» after it) and, under it, what plays there: the
+    // list's headline and supporting text, the block centred in the row.
     let x = row.left() + TEXT_X;
     let max_w = (text_right - x).max(8.0);
-    let top = if p.second.is_some() { row.center().y - 20.0 } else { row.center().y - 12.0 };
+    let top = if p.second.is_some() { row.center().y - (HEADLINE_H + SUPPORT_H) / 2.0 } else { row.center().y - HEADLINE_H / 2.0 };
     let badge = p.guest.then(|| line(ui, "Гость", TypeRole::LabelSmall.style(), s.on_tertiary_container, 80.0));
-    let badge_w = badge.as_ref().map_or(0.0, |g| g.size().x + 12.0 + 6.0);
+    let badge_w = badge.as_ref().map_or(0.0, |g| g.size().x + 12.0 + 8.0);
     let name = line(ui, &p.name, TypeRole::BodyLarge.style(), content, max_w - badge_w);
     let name_w = name.size().x;
     ui.painter().galley(pos2(x, top), name, content);
     if let Some(g) = badge {
         let alpha = if p.enabled { 1.0 } else { state::DISABLED_CONTENT };
-        let r = Rect::from_min_size(pos2(x + name_w + 6.0, top + 4.0), vec2(g.size().x + 12.0, 16.0));
+        let r = Rect::from_min_size(pos2(x + name_w + 8.0, top + (HEADLINE_H - 16.0) / 2.0), vec2(g.size().x + 12.0, 16.0));
         paint::container(ui.painter(), r, Radii::all(8.0), s.tertiary_container.gamma_multiply(alpha), Stroke::NONE);
-        ui.painter().galley(pos2(r.left() + 6.0, r.center().y - g.size().y / 2.0), g, s.on_tertiary_container);
+        ui.painter().galley(pos2(r.left() + 6.0, r.center().y - g.size().y / 2.0), g, s.on_tertiary_container.gamma_multiply(alpha));
     }
     if let Some(second) = &p.second {
-        let y = top + 24.0;
+        let y = top + HEADLINE_H;
         let (icon, text) = match second {
             Second::Playing { line, paused } => (Some(if *paused { Icon::Pause } else { Icon::PlayArrow }), line.as_str()),
             Second::Device(d) => (None, d.as_str()),
         };
         let mut tx = x;
         if let Some(i) = icon {
-            i.widget(true, variant, 14.0).paint_at(ui, Rect::from_min_size(pos2(x, y + 1.0), vec2(14.0, 14.0)));
-            tx += 18.0;
+            let at = Rect::from_min_size(pos2(x, y + (SUPPORT_H - SUPPORT_ICON) / 2.0), vec2(SUPPORT_ICON, SUPPORT_ICON));
+            i.widget(true, variant, SUPPORT_ICON).paint_at(ui, at);
+            tx += SUPPORT_ICON + 4.0;
         }
-        let g = line(ui, text, TypeRole::BodySmall.style(), variant, text_right - tx);
+        let g = line(ui, text, TypeRole::BodyMedium.style(), variant, text_right - tx);
         ui.painter().galley(pos2(tx, y), g, variant);
     }
 
@@ -588,11 +581,12 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
                 paint::state_layer(sui.painter(), hl, Radii::all(shape::MEDIUM), content, dl);
             }
             let color = if chosen { content } else { variant };
-            let check_w = if chosen { 28.0 } else { 0.0 };
-            let g = line(&sui, name, TypeRole::BodyMedium.style(), color, r.right() - 16.0 - check_w - (r.left() + TEXT_X));
+            // The check stands under the chevron.
+            let check = pos2(r.right() - SIDE - 16.0, r.center().y);
+            let g = line(&sui, name, TypeRole::BodyMedium.style(), color, check.x - 12.0 - 8.0 - (r.left() + TEXT_X));
             sui.painter().galley(pos2(r.left() + TEXT_X, r.center().y - g.size().y / 2.0), g, color);
             if chosen {
-                Icon::Check.widget(true, color, 20.0).paint_at(&sui, Rect::from_center_size(pos2(r.right() - 26.0, r.center().y), vec2(20.0, 20.0)));
+                Icon::Check.widget(true, color, 20.0).paint_at(&sui, Rect::from_center_size(check, vec2(20.0, 20.0)));
             }
             if dr.clicked() {
                 hit.device = Some(i);
@@ -600,21 +594,24 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
         }
     }
 
-    // The volume of the place that plays.
+    // The volume of the place that plays: its mute button under the
+    // avatar, the percent where the row's buttons end. Only the chosen
+    // place's answers; one that leaves folds away disabled.
     let vol = Rect::from_min_size(sub.left_bottom(), vec2(w, room.volume.max(0.0) * VOLUME_H));
     if room.volume > 0.01 {
-        let inner = Rect::from_min_size(pos2(vol.left() + PAD + 2.0, vol.top()), vec2(w - 2.0 * PAD - 4.0, VOLUME_H));
+        let live = p.selected && volume.enabled;
+        let inner = Rect::from_min_max(pos2(vol.left() + SIDE + AVATAR / 2.0 - 16.0, vol.top()), pos2(vol.right() - SIDE, vol.top() + VOLUME_H));
         let mut vui = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)).id_salt(id.with("volume")));
         vui.set_clip_rect(vol.intersect(ui.clip_rect()));
         vui.multiply_opacity(room.volume.clamp(0.0, 1.0));
-        vui.spacing_mut().item_spacing.x = 4.0;
-        if !volume.enabled {
+        vui.spacing_mut().item_spacing.x = 8.0;
+        if !live {
             vui.disable();
         }
         let shown = if volume.muted { 0.0 } else { volume.value };
-        hit.mute = vui.add(IconButton::new(Icon::volume(shown, volume.muted)).size(Size::Xs).tooltip("Без звука").id_salt(id.with("mute"))).clicked();
+        let mute = vui.add(IconButton::new(Icon::volume(shown, volume.muted)).size(Size::Xs).tooltip("Без звука").id_salt(id.with("mute"))).clicked();
         let label_w = 40.0;
-        let slider_w = (vui.available_width() - label_w - 4.0).max(48.0);
+        let slider_w = (vui.available_width() - label_w - 8.0).max(48.0);
         let track = if volume.duck { s.primary.gamma_multiply(0.45) } else { s.primary };
         let o = Slider::new(id.with("slider"), shown)
             .track(8.0)
@@ -623,15 +620,20 @@ fn place(ui: &mut Ui, id: Id, p: &Place, room: &Room, devices: &[String], chosen
             .handle_color(s.primary)
             .value_label(|v| format!("{:.0}%", v * 100.0))
             .show(&mut vui);
-        hit.volume = o.dragging.or(o.committed);
-        let pct = hit.volume.unwrap_or(shown);
+        let moved = o.dragging.or(o.committed);
+        let pct = moved.filter(|_| live).unwrap_or(shown);
         vui.add_sized(vec2(label_w, 20.0), egui::Label::new(TypeRole::LabelMedium.style().rich(format!("{:.0}%", pct * 100.0), content)).selectable(false));
+        if live {
+            hit.mute = mute;
+            hit.volume = moved;
+        }
     }
     hit
 }
 
 /// The popover, while it is open (and while it leaves); drawn with the
-/// overlays, over Now Playing too.
+/// overlays, over Now Playing too. As tall as the window lets it: the
+/// places scroll, «Добавить» · «Карта сети» stay.
 pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out: &mut Vec<Command>) {
     let theme = Theme::get(ctx);
     let (s, motion) = (theme.scheme, theme.motion);
@@ -660,8 +662,7 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
         return;
     };
 
-    let remote = state.target.is_some();
-    let places = places(state, attached_node(ctx).as_deref());
+    let places = places(state);
     let devices = &state.prefs.output_devices;
     let devices_open = chrome.output.devices && !devices.is_empty();
     let rooms: Vec<Room> = places
@@ -675,13 +676,23 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
         .collect();
     let rows_h: f32 = places.iter().zip(&rooms).map(|(p, r)| r.height(if p.node.is_none() { sub_rows(devices) } else { 0 })).sum::<f32>()
         + GAP * places.len().saturating_sub(1) as f32;
-    let size = vec2(POPOVER_W, PAD + rows_h + FOOT_GAP + FOOT_H + PAD);
+    // Above its button when it fits there, else where there is more room;
+    // never taller than that room (the places scroll).
     let screen = ctx.content_rect().shrink(8.0);
+    let chrome_h = PAD + FOOT_GAP + FOOT_H + PAD;
+    let room_above = (anchor.top() - 8.0 - screen.top()).max(0.0);
+    let room_below = (screen.bottom() - anchor.bottom() - 8.0).max(0.0);
+    let full_h = chrome_h + rows_h;
+    let above = full_h <= room_above || room_above >= room_below;
+    let height = full_h.min(if above { room_above } else { room_below }).max(chrome_h + ROW_H.min(rows_h));
+    let list_h = (height - chrome_h).max(0.0);
+    let size = vec2(POPOVER_W, height);
     let x = (anchor.center().x - size.x / 2.0).clamp(screen.left(), (screen.right() - size.x).max(screen.left()));
-    let above = anchor.top() - 8.0 - size.y >= screen.top();
-    let y = if above { anchor.top() - 8.0 - size.y } else { (anchor.bottom() + 8.0).min((screen.bottom() - size.y).max(screen.top())) };
+    let y = if above { anchor.top() - 8.0 - size.y } else { anchor.bottom() + 8.0 };
     let rect = Rect::from_min_size(pos2(x, y), size);
     chrome.output.rect = Some(rect);
+    // The wheel over it scrolls it (Now Playing turns the volume elsewhere).
+    chrome.wheel_block(rect);
 
     let volume = VolumeRow {
         value: chrome.volume_now(ctx, state),
@@ -689,6 +700,7 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
         duck: state.player.duck.is_some(),
         enabled: !lost(state),
     };
+    let remote = state.target.is_some();
     let chosen_device = state.prefs.output_device.clone();
     let mut hits: Vec<Hit> = Vec::new();
     let mut add_at = None;
@@ -711,21 +723,24 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
             let mut col = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)).id_salt(id.with("col")));
             col.set_clip_rect(r.intersect(ui.clip_rect()));
             col.spacing_mut().item_spacing.y = 0.0;
-            for (i, (p, room)) in places.iter().zip(&rooms).enumerate() {
-                if i > 0 {
-                    col.add_space(GAP);
+            egui::ScrollArea::vertical().id_salt(id.with("places")).max_height(list_h).auto_shrink([false, true]).show(&mut col, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (i, (p, room)) in places.iter().zip(&rooms).enumerate() {
+                    if i > 0 {
+                        ui.add_space(GAP);
+                    }
+                    let this = p.node.is_none();
+                    let list: &[String] = if this { devices.as_slice() } else { &[] };
+                    let chevron = (this && !devices.is_empty()).then_some(devices_open);
+                    // This computer while it plays: its row opens the sound
+                    // devices; a device that plays here already: nothing.
+                    let clickable = p.enabled && if this { remote || !devices.is_empty() } else { !p.selected };
+                    let pid = id.with(("place", p.node.as_deref().unwrap_or("")));
+                    hits.push(place(ui, pid, p, room, list, chosen_device.as_deref(), chevron, clickable, &volume));
                 }
-                let this = p.node.is_none();
-                let list: &[String] = if this { devices.as_slice() } else { &[] };
-                let chevron = (this && !devices.is_empty()).then_some(devices_open);
-                // This computer while it plays: its row opens the sound
-                // devices; a device that plays here already: nothing.
-                let clickable = p.enabled && if this { remote || !devices.is_empty() } else { !p.selected };
-                let pid = id.with(("place", p.node.as_deref().unwrap_or("")));
-                hits.push(place(&mut col, pid, p, room, list, chosen_device.as_deref(), chevron, clickable, &volume));
-            }
-            col.add_space(FOOT_GAP);
-            let (foot, _) = col.allocate_exact_size(vec2(col.available_width(), FOOT_H), Sense::hover());
+            });
+            // The footer under the places, at the popover's foot.
+            let foot = Rect::from_min_size(pos2(inner.left(), inner.bottom() - FOOT_H), vec2(inner.width(), FOOT_H));
             let mut left = col.new_child(UiBuilder::new().max_rect(foot).layout(Layout::left_to_right(Align::Center)).id_salt(id.with("foot-left")));
             let add = left.add(Button::new("Добавить").icon(Icon::Add).style(Style::Text).size(Size::Xs).id_salt(id.with("add")));
             if add.clicked() {
@@ -749,7 +764,7 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
         let this = p.node.is_none();
         let mut choice = None;
         if hit.row {
-            match row_choice(p, remote) {
+            match row_choice(p, state) {
                 Some(c) => choice = Some(c),
                 None if this => chrome.output.devices = !chrome.output.devices,
                 None => {}
@@ -764,7 +779,7 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
         if let Some(i) = hit.device {
             out.push(Command::SetOutputDevice(if i == 0 { None } else { devices.get(i - 1).cloned() }));
             // A sound device of this computer means playing here.
-            choice = row_choice(p, remote);
+            choice = row_choice(p, state);
         }
         if hit.mute {
             out.push(Command::ToggleMute);
@@ -773,8 +788,7 @@ pub(crate) fn popover(chrome: &mut Chrome, ctx: &Context, state: &ViewState, out
             chrome.push_volume(state, v, out);
         }
         if let Some(c) = choice {
-            out.push(c.command);
-            set_attached(ctx, c.attached);
+            out.push(c);
         }
     }
     if let Some(at) = add_at {
@@ -804,8 +818,8 @@ mod tests {
         }
     }
 
-    fn target(id: &str) -> RemoteTarget {
-        RemoteTarget { node_id: id.into(), name: id.to_uppercase(), kind: MeshKind::Pi, link: RemoteLink::Live, volume: 0.5, muted: false }
+    fn target(id: &str, how: RemoteHow) -> RemoteTarget {
+        RemoteTarget { node_id: id.into(), name: id.to_uppercase(), kind: MeshKind::Pi, link: RemoteLink::Live, volume: 0.5, muted: false, how }
     }
 
     fn track(title: &str) -> TrackRow {
@@ -838,7 +852,7 @@ mod tests {
         state.mesh.nodes.push(node("pi", false, None));
         assert!(available(&state), "offline counts");
         state.mesh.nodes.clear();
-        state.target = Some(target("pi"));
+        state.target = Some(target("pi", RemoteHow::Transferred));
         assert!(available(&state));
     }
 
@@ -848,7 +862,7 @@ mod tests {
     fn the_volume_shows_whose_it_is() {
         let mut state = ViewState::default();
         assert_eq!(volume_icon(&state, 0.8, false), Icon::VolumeUp);
-        state.target = Some(target("pi"));
+        state.target = Some(target("pi", RemoteHow::Transferred));
         assert_eq!(volume_icon(&state, 0.8, false), Icon::DeveloperBoard);
         assert_eq!(volume_icon(&state, 0.8, true), Icon::VolumeOff);
         assert_eq!(volume_icon(&state, 0.0, false), Icon::VolumeOff);
@@ -866,7 +880,7 @@ mod tests {
         let mut state = ViewState::default();
         state.mesh.nodes = vec![node("phone", false, None), node("pi", true, Some(false)), node("speaker", true, None)];
         state.prefs.output_device = Some("Наушники".into());
-        let p = places(&state, None);
+        let p = places(&state);
         let ids: Vec<Option<&str>> = p.iter().map(|p| p.node.as_deref()).collect();
         assert_eq!(ids, [None, Some("pi"), Some("speaker"), Some("phone")]);
         assert!(p[0].selected && !p[1].selected);
@@ -880,42 +894,45 @@ mod tests {
 
     /// While the window drives a device: that device is chosen, this
     /// computer says what waits parked here; ⇄ stays on the device only
-    /// when the window came there by an attach, and then this computer has
-    /// ⇄ too.
+    /// when the window came there by an attach (as the runtime says), and
+    /// then this computer has ⇄ too.
     #[test]
     fn a_remote_shows_the_parked_queue_and_how_it_came() {
         let mut state = ViewState::default();
         state.mesh.nodes = vec![node("pi", true, Some(false))];
-        state.target = Some(target("pi"));
+        state.target = Some(target("pi", RemoteHow::Transferred));
         state.parked = Some(ParkedView { current: Some(track("Город золотой")), position: std::time::Duration::from_secs(40) });
-        let moved = places(&state, None);
+        let moved = places(&state);
         assert!(!moved[0].selected && moved[1].selected);
         assert_eq!(moved[0].second, Some(Second::Playing { line: "Аквариум — Город золотой".into(), paused: true }));
         assert!(!moved[1].swap && !moved[0].swap, "the queue went there already");
-        let attached = places(&state, Some("pi"));
+        state.target = Some(target("pi", RemoteHow::Attached));
+        let attached = places(&state);
         assert!(attached[1].swap && attached[0].swap);
     }
 
     /// A free device takes what plays here; one playing its own music is
-    /// only driven from here; this computer brings the music back, or after
-    /// an attach goes back to its own queue; ⇄ moves.
+    /// only driven from here; this computer brings the music back after a
+    /// transfer, or after an attach goes back to its own queue; ⇄ moves.
     #[test]
     fn clicks_choose_transfer_or_attach() {
         let mut state = ViewState::default();
         state.mesh.nodes = vec![node("pi", true, Some(false)), node("tv", true, Some(true)), node("phone", false, None)];
-        let p = places(&state, None);
-        assert_eq!(row_choice(&p[0], false), None);
-        assert_eq!(row_choice(&p[1], false), Some(Choice { command: Command::OutputAttach { node_id: "pi".into() }, attached: Some("pi".into()) }));
-        assert_eq!(row_choice(&p[2], false), Some(Choice { command: Command::OutputTransfer { node_id: Some("tv".into()) }, attached: None }), "paused is free");
-        assert_eq!(row_choice(&p[3], false), None, "out of reach");
-        assert_eq!(swap_choice(&p[1]).command, Command::OutputTransfer { node_id: Some("pi".into()) });
+        let p = places(&state);
+        assert_eq!(row_choice(&p[0], &state), None);
+        assert_eq!(row_choice(&p[1], &state), Some(Command::OutputAttach { node_id: "pi".into() }));
+        assert_eq!(row_choice(&p[2], &state), Some(Command::OutputTransfer { node_id: Some("tv".into()) }), "paused is free");
+        assert_eq!(row_choice(&p[3], &state), None, "out of reach");
+        assert_eq!(swap_choice(&p[1]), Command::OutputTransfer { node_id: Some("pi".into()) });
 
-        state.target = Some(target("pi"));
-        let moved = places(&state, None);
-        assert_eq!(row_choice(&moved[0], true).map(|c| c.command), Some(Command::OutputTransfer { node_id: None }));
-        assert_eq!(row_choice(&moved[1], true), None, "it plays here already");
-        let attached = places(&state, Some("pi"));
-        assert_eq!(row_choice(&attached[0], true).map(|c| c.command), Some(Command::OutputDetach));
-        assert_eq!(swap_choice(&attached[0]).command, Command::OutputTransfer { node_id: None });
+        state.target = Some(target("pi", RemoteHow::Transferred));
+        let moved = places(&state);
+        assert_eq!(row_choice(&moved[0], &state), Some(Command::OutputTransfer { node_id: None }));
+        assert_eq!(row_choice(&moved[1], &state), None, "it plays here already");
+        state.target = Some(target("pi", RemoteHow::Attached));
+        let attached = places(&state);
+        assert_eq!(row_choice(&attached[0], &state), Some(Command::OutputDetach));
+        assert_eq!(swap_choice(&attached[0]), Command::OutputTransfer { node_id: None });
+        assert_eq!(back_here(&ViewState::default()), None);
     }
 }
