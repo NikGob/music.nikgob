@@ -1,8 +1,10 @@
 //! Navigation bar: the destinations of a phone in a row along the bottom,
-//! each an icon over its label. The selected one sits in a 56×32 pill that
-//! grows from its centre on the fast spatial spring; a press lays the
-//! state layer over the pill's place. The bar runs down under the gesture
-//! area (`bottom_inset`) in its own colour.
+//! each an icon over its label. The bar is 80 dp tall above the gesture
+//! area: the 56×32 selection pill at +12, the 24 dp icon centred in it,
+//! the 12 sp label at +48 with 16 dp under it. The selected pill grows
+//! from its centre on the fast spatial spring; a press lays the state layer
+//! over the pill's place. The bar runs down under the gesture area
+//! (`bottom_inset`) in its own colour.
 
 use egui::{Align2, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 
@@ -13,11 +15,11 @@ use crate::{
 };
 
 /// The bar's height above the gesture area.
-pub const HEIGHT: f32 = 64.0;
+pub const HEIGHT: f32 = 80.0;
 /// The selection pill.
 const PILL: egui::Vec2 = egui::Vec2::new(56.0, 32.0);
 /// Space over the pill.
-const TOP_PAD: f32 = 6.0;
+const TOP_PAD: f32 = 12.0;
 /// Space between the pill and the label.
 const LABEL_GAP: f32 = 4.0;
 
@@ -121,8 +123,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_label_fits_under_the_pill_within_the_bar() {
+    fn the_label_sits_at_48_with_16_dp_under_it_within_the_bar() {
         let label = TypeRole::LabelMedium.style().line_height;
-        assert!(TOP_PAD + PILL.y + LABEL_GAP + label <= HEIGHT);
+        assert_eq!(TOP_PAD + PILL.y + LABEL_GAP, 48.0);
+        assert!(TOP_PAD + PILL.y + LABEL_GAP + label + 16.0 <= HEIGHT);
     }
 }

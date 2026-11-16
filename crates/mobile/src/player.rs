@@ -1,9 +1,12 @@
 //! The player: the mini player over the navigation bar and the full one
 //! it grows into (Metrolist's bottom-sheet player over our Now Playing).
 //! One spring opens it, 0 the capsule … 1 the screen: a tap or a drag up
-//! on the capsule, a drag down anywhere on the player (or ⌄) closes it, and
-//! a finger let go hands its speed to the spring. Sideways on the capsule
-//! or on the cover changes the song.
+//! on the capsule, a drag down anywhere on the player (or ⌄) closes it,
+//! and a finger let go hands its speed to the spring. Sideways on the
+//! capsule or on the cover changes the song. The capsule's cover ring
+//! plays and pauses: ▶ over the dimmed cover while paused, the loading
+//! indicator while it waits; its fill is the playing cover's tone fading
+//! into the bar's surface container, and its end holds ♥ and next.
 //!
 //! The full player, top to bottom (Metrolist's): ⌄ in a circle, where the
 //! music comes from (a link to it), where it plays in a circle; the cover
@@ -13,27 +16,28 @@
 //! quality; previous, play and next as one connected row whose pressed
 //! button grows (play turns from a pill into a rounded square while it
 //! plays); and along the bottom the queue, the lyrics, shuffle, repeat and
-//! the sound as connected toggles, with ⋮ at the end.
+//! the sound as toggles 6 dp apart, outlined while off and filled while
+//! on, with ⋮ at the end.
 
-use egui::{Id, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Id, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::paint::{self, Radii};
 use nikgob_md3e::components::{LoadingIndicator, Slider, anim};
 use nikgob_md3e::screens::phone;
-use nikgob_md3e::{Icon, Theme, TypeRole, lerp_color};
+use nikgob_md3e::{ColorScheme, Icon, Theme, TypeRole, TypeStyle, lerp_color};
 use nikgob_view::{Command, LikeTarget, Repeat, Route, Status, TrackId, ViewState};
 
 use crate::gesture::{self, Sprung};
 use crate::{MobileEnv, text};
 
-/// The mini player (Metrolist's modern one: a pill).
-pub const MINI_H: f32 = 66.0;
+/// The mini player (Metrolist's pill).
+pub const MINI_H: f32 = 64.0;
 /// Its side margins and the space under it.
 pub const MINI_MARGIN: f32 = 12.0;
-pub const MINI_GAP: f32 = 6.0;
+pub const MINI_GAP: f32 = 7.0;
 const MINI_RADIUS: f32 = MINI_H / 2.0;
-/// Its buttons at the end (♥, play or pause, next) and the room between.
+/// Its trailing circles (♥, next) and the touch each one has.
 const MINI_BUTTON: f32 = 40.0;
-const MINI_BUTTON_GAP: f32 = 4.0;
+const MINI_TOUCH: f32 = 48.0;
 /// A sideways drag this long changes the song.
 const SKIP: f32 = 64.0;
 
@@ -160,9 +164,7 @@ impl Player {
                 None => {}
             }
         }
-        if body.clicked() {
-            self.open(now, state);
-        }
+        let tapped = body.clicked();
         if fade <= 0.01 {
             return;
         }
@@ -171,22 +173,27 @@ impl Player {
         ui.multiply_opacity(fade);
         let radii = Radii::all(MINI_RADIUS);
         paint::shadow(ui.painter(), rect, radii, nikgob_md3e::Elevation::Level2);
-        paint::container(ui.painter(), rect, radii, s.surface_container, Stroke::new(1.0, s.outline.gamma_multiply(0.25)));
-        let content = rect.shrink2(vec2(10.0, 8.0));
+        // The fill: the playing cover's tone at the left fading into the
+        // surface container at the right, with a 1 dp outline around it.
+        let points = paint::rounded_rect_points(rect, radii);
+        ui.painter().add(egui::Shape::mesh(gradient(&points, rect, mini_fill(&s))));
+        paint::container(ui.painter(), rect, radii, egui::Color32::TRANSPARENT, Stroke::new(1.0, s.outline.gamma_multiply(0.25)));
+        let content = rect.shrink2(vec2(8.0, 8.0));
         let mut inner = ui.new_child(UiBuilder::new().max_rect(content));
         inner.set_clip_rect(rect.shrink(1.0));
         let p = &state.player;
-        // The cover in a circle inside the ring of the progress.
+        // The cover in a circle inside the ring of the progress; it is the
+        // play button too.
         let ring = Rect::from_min_size(pos2(content.left() + dx, content.center().y - 24.0), vec2(48.0, 48.0));
-        mini_cover(&inner, ring, t.cover.as_ref().map(|c| c.uri()).as_deref(), p.fraction_now());
-        let [like, play, next] = mini_buttons(content);
-        let tx = ring.right() + 12.0;
+        let cover_tapped = mini_cover(&mut inner, ring, t.cover.as_ref().map(|c| c.uri()).as_deref(), p.fraction_now(), p.status);
+        let [like, next] = mini_buttons(content);
+        let tx = ring.right() + 16.0;
         let tw = (like.left() - 8.0 - tx).max(16.0);
-        let title = TypeRole::TitleSmall.style();
+        let title = TypeRole::TitleSmall.emphasized();
         let sub = TypeRole::BodySmall.style();
         let ty = content.center().y - (title.line_height + sub.line_height) * 0.5;
         text::paint_line(&inner, pos2(tx, ty), t.title.clone(), title, s.on_surface, tw);
-        let quiet = s.on_surface.gamma_multiply(0.7);
+        let muted = s.on_surface_variant;
         let mut sx = tx;
         if let Some(target) = &state.target {
             // Playing on another device: its icon and name first.
@@ -195,17 +202,19 @@ impl Player {
             let w = text::paint_line(&inner, pos2(sx, ty + title.line_height), format!("{} • ", target.name), sub, s.primary, tw - 16.0);
             sx += w;
         }
-        text::paint_line(&inner, pos2(sx, ty + title.line_height), t.artist.clone(), sub, quiet, (tx + tw - sx).max(8.0));
-        // ♥ in an outlined circle, play or pause (a circle while paused, a
-        // rounded square while it plays), next.
+        text::paint_line(&inner, pos2(sx, ty + title.line_height), t.artist.clone(), sub, muted, (tx + tw - sx).max(8.0));
+        // ♥ and next in thin outlined circles at the end.
         if outlined_icon(&mut ui, like, Id::new("phone-mini-like"), Icon::Favorite, t.liked) {
             out.push(Command::Like(LikeTarget::Track(t.id), !t.liked));
         }
-        if play_button(&mut ui, play, Id::new("phone-mini-play"), p.status == Status::Playing, p.status == Status::Buffering, 12.0, MINI_BUTTON * 0.5) {
-            out.push(Command::TogglePlay);
-        }
         if outlined_icon(&mut ui, next, Id::new("phone-mini-next"), Icon::SkipNext, false) {
             out.push(Command::Next);
+        }
+        // The ring plays or pauses; a tap anywhere else opens the player.
+        if cover_tapped {
+            out.push(Command::TogglePlay);
+        } else if tapped {
+            self.open(now, state);
         }
         if p.status == Status::Playing {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
@@ -244,7 +253,7 @@ impl Player {
         phone::ambient(&ui, screen, state, env.bass);
         // The layout, top to bottom.
         let ins = env.insets;
-        let pad = 24.0;
+        let pad = 32.0;
         let col = Rect::from_min_max(pos2(screen.left() + pad, screen.top() + ins.top + 8.0), pos2(screen.right() - pad, screen.bottom() - ins.bottom - 12.0));
         let header = Rect::from_min_size(col.min, vec2(col.width(), 48.0));
         let bottom = Rect::from_min_max(pos2(col.left(), col.bottom() - 48.0), col.max);
@@ -351,8 +360,8 @@ impl Player {
         // The title and the artists, ♥ and «Поделиться» (beside the small
         // cover in the lyrics' head).
         let meta_rect = lerp(meta, Rect::from_min_max(pos2(small.right() + 12.0, small.top()), pos2(col.right(), small.bottom())), lyr);
-        let pair = Rect::from_min_size(pos2(meta_rect.right() - PAIR_W, meta_rect.center().y - 20.0), vec2(PAIR_W, 40.0));
-        let title_style = if lyr > 0.5 { TypeRole::TitleMedium.emphasized() } else { TypeRole::TitleLarge.emphasized() };
+        let pair = Rect::from_min_size(pos2(meta_rect.right() - PAIR_W, meta_rect.center().y - PAIR_H * 0.5), vec2(PAIR_W, PAIR_H));
+        let title_style = if lyr > 0.5 { TypeRole::TitleMedium.emphasized() } else { np_title() };
         let sub_style = if lyr > 0.5 { TypeRole::BodyMedium.style() } else { TypeRole::TitleMedium.style() };
         let tw = pair.left() - meta_rect.left() - 12.0;
         let ty = meta_rect.center().y - (title_style.line_height + 4.0 + sub_style.line_height) * 0.5;
@@ -378,7 +387,7 @@ impl Player {
             self.close(now, state);
         }
         let pair_items = [Toggle { icon: Icon::Favorite, on: t.liked, enabled: true }, Toggle { icon: Icon::Share, on: false, enabled: true }];
-        match toggles(&mut ui, pair, id.with("pair"), &pair_items) {
+        match toggles(&mut ui, pair, id.with("pair"), &pair_items, ToggleRow::Pair) {
             Some(0) => out.push(Command::Like(LikeTarget::Track(t.id), !t.liked)),
             Some(_) => out.push(Command::Share(nikgob_view::ShareTarget::Track(t.id))),
             None => {}
@@ -438,9 +447,9 @@ impl Player {
             Toggle { icon: repeat_icon, on: p.repeat != Repeat::Off, enabled: true },
             Toggle { icon: Icon::Tune, on: false, enabled: true },
         ];
-        let row_w = row_items.len() as f32 * (TOGGLE_W + 2.0) - 2.0;
+        let row_w = toggles_w(row_items.len(), ToggleRow::Row.gap());
         let row = Rect::from_min_size(pos2(bottom.left(), bottom.center().y - 20.0), vec2(row_w, 40.0));
-        match toggles(&mut ui, row, id.with("row"), &row_items) {
+        match toggles(&mut ui, row, id.with("row"), &row_items, ToggleRow::Row) {
             Some(0) => o.queue = true,
             Some(1) => self.lyrics = !self.lyrics,
             Some(2) => out.push(Command::ToggleShuffle),
@@ -497,20 +506,47 @@ impl Player {
     }
 }
 
-/// The mini player's buttons at the end of its `content`: ♥, play or
-/// pause, next.
-fn mini_buttons(content: Rect) -> [Rect; 3] {
+/// The mini player's trailing buttons at the end of `content` (the pill 8
+/// dp in): ♥ and next, 40 dp circles whose 48 dp touches meet, the last
+/// one ending 8 dp before the pill's end.
+fn mini_buttons(content: Rect) -> [Rect; 2] {
     let next = Rect::from_min_size(pos2(content.right() - MINI_BUTTON, content.center().y - MINI_BUTTON * 0.5), vec2(MINI_BUTTON, MINI_BUTTON));
-    let play = next.translate(vec2(-(MINI_BUTTON + MINI_BUTTON_GAP), 0.0));
-    let like = play.translate(vec2(-(MINI_BUTTON + MINI_BUTTON_GAP), 0.0));
-    [like, play, next]
+    let like = next.translate(vec2(-MINI_TOUCH, 0.0));
+    [like, next]
 }
 
-/// The mini player's cover: a 38 dp circle in a 48 dp ring of the
-/// progress (a tap on it opens the player, as anywhere on the capsule).
-fn mini_cover(ui: &Ui, ring: Rect, uri: Option<&str>, fraction: f32) {
+/// The mini player's fill (left to right): the cover's tone fading into
+/// the surface container. The scheme the player draws with already comes
+/// from the playing cover, so its primary container carries the tone,
+/// mixed into the surface.
+fn mini_fill(s: &ColorScheme) -> [egui::Color32; 2] {
+    [lerp_color(s.primary_container, s.surface, 0.5), s.surface_container]
+}
+
+/// A horizontal gradient over a rounded rect's `points` (as
+/// [`paint::rounded_rect_points`]), left edge to right, `fill`'s two
+/// colours.
+fn gradient(points: &[Pos2], rect: Rect, fill: [egui::Color32; 2]) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    let at = |p: Pos2| lerp_color(fill[0], fill[1], ((p.x - rect.left()) / rect.width().max(1e-6)).clamp(0.0, 1.0));
+    for p in points {
+        mesh.colored_vertex(*p, at(*p));
+    }
+    let n = points.len() as u32;
+    for i in 1..n.saturating_sub(1) {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    mesh
+}
+
+/// The mini player's cover: a 40 dp circle in a 48 dp ring of the
+/// progress. It is the play button: paused, the cover is dimmed with a
+/// white ▶ over it; waiting, the loading indicator. Tapped: true.
+fn mini_cover(ui: &mut Ui, ring: Rect, uri: Option<&str>, fraction: f32, status: Status) -> bool {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
+    let id = Id::new("phone-mini-cover");
+    let resp = ui.interact(ring, id, Sense::click());
     let c = ring.center();
     let stroke = 3.0;
     let r = (ring.width() - stroke) * 0.5;
@@ -519,8 +555,20 @@ fn mini_cover(ui: &Ui, ring: Rect, uri: Option<&str>, fraction: f32) {
     if f > 0.0 {
         ui.painter().add(egui::Shape::line(arc(c, r, f), Stroke::new(stroke, s.primary)));
     }
-    let art = Rect::from_center_size(c, vec2(38.0, 38.0));
+    let press = anim::fraction(ui.ctx(), id.with("press"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, theme.motion.fast_spatial);
+    let art = Rect::from_center_size(c, vec2(40.0, 40.0)).shrink(2.0 * press);
     phone::paint_cover(ui, art, uri, art.width() * 0.5);
+    match status {
+        Status::Buffering => {
+            crate::parts::put(ui, Rect::from_center_size(c, vec2(24.0, 24.0)), LoadingIndicator::new().color(s.primary).size(24.0));
+        }
+        Status::Playing => {}
+        _ => {
+            ui.painter().circle_filled(c, art.width() * 0.5, egui::Color32::from_black_alpha(90));
+            Icon::PlayArrow.widget(true, egui::Color32::WHITE, 24.0).paint_at(ui, Rect::from_center_size(c, vec2(24.0, 24.0)));
+        }
+    }
+    resp.clicked()
 }
 
 /// The points of a ring's arc from the top, clockwise, `f` of the way.
@@ -534,25 +582,34 @@ fn arc(c: egui::Pos2, r: f32, f: f32) -> Vec<egui::Pos2> {
         .collect()
 }
 
-/// An icon in a thin circle (Metrolist's mini player buttons); `on` fills
-/// it in the primary colour. Tapped: true.
-fn outlined_icon(ui: &mut Ui, rect: Rect, id: Id, icon: Icon, on: bool) -> bool {
+/// An icon in a thin circle (the mini player's trailing buttons), drawn
+/// `MINI_BUTTON` wide and touched `MINI_TOUCH` wide; `on` fills it in the
+/// primary colour. Tapped: true.
+fn outlined_icon(ui: &mut Ui, circle: Rect, id: Id, icon: Icon, on: bool) -> bool {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
-    let resp = ui.interact(rect, id, Sense::click());
-    let radii = Radii::all(rect.width() * 0.5);
-    paint::container(ui.painter(), rect, radii, egui::Color32::TRANSPARENT, Stroke::new(1.0, s.on_surface.gamma_multiply(0.25)));
+    let resp = ui.interact(circle.expand((MINI_TOUCH - MINI_BUTTON) * 0.5), id, Sense::click());
+    let radii = Radii::all(circle.width() * 0.5);
+    paint::container(ui.painter(), circle, radii, egui::Color32::TRANSPARENT, Stroke::new(1.0, s.on_surface.gamma_multiply(0.25)));
     let layer = anim::fraction(ui.ctx(), id.with("l"), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
-    paint::state_layer(ui.painter(), rect, radii, s.on_surface, layer);
+    paint::state_layer(ui.painter(), circle, radii, s.on_surface, layer);
     let color = if on { s.primary } else { s.on_surface.gamma_multiply(0.7) };
-    icon.widget(on, color, 20.0).paint_at(ui, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)));
+    icon.widget(on, color, 20.0).paint_at(ui, Rect::from_center_size(circle.center(), vec2(20.0, 20.0)));
     resp.clicked()
 }
 
-/// The transport row's height, a toggle's width and the ♥ pair's width.
-const TRANSPORT_H: f32 = 72.0;
-const TOGGLE_W: f32 = 42.0;
-const PAIR_W: f32 = 2.0 * 48.0 + 2.0;
+/// The transport row's height, a toggle's width (the bottom row's height
+/// is 40) and the ♥ | share pair's size.
+const TRANSPORT_H: f32 = 68.0;
+const TOGGLE: f32 = 42.0;
+const PAIR_W: f32 = 2.0 * TOGGLE + 2.0;
+const PAIR_H: f32 = TOGGLE;
+
+/// The track's title in the player: 20 sp emphasized (Metrolist's bold
+/// title), on TitleLarge's line with the artist under it.
+fn np_title() -> TypeStyle {
+    TypeStyle { size: 20.0, ..TypeRole::TitleLarge.emphasized() }
+}
 
 /// A 36 or 40 dp filled circle with an icon (the player's ⌄, «Где играть»
 /// and ⋮); `on` in the primary colour. Tapped: true.
@@ -587,24 +644,61 @@ fn connected_radii(i: usize, n: usize, on: bool, h: f32) -> Radii {
     Radii::sides(l, r)
 }
 
-/// Connected toggles 40 dp tall in `rect`, from its left: tonal while off,
-/// primary while on. The one tapped.
-fn toggles(ui: &mut Ui, rect: Rect, id: Id, items: &[Toggle]) -> Option<usize> {
+/// Which connected group of toggles is drawn: the ♥ | share pair beside
+/// the title, or the row along the player's bottom.
+#[derive(Clone, Copy, PartialEq)]
+enum ToggleRow {
+    /// Joined, tonal while off.
+    Pair,
+    /// 6 dp apart, outlined while off (Metrolist's).
+    Row,
+}
+
+impl ToggleRow {
+    /// The gap between the toggles.
+    fn gap(self) -> f32 {
+        match self {
+            Self::Pair => 2.0,
+            Self::Row => 6.0,
+        }
+    }
+
+    /// Whether a toggle turned off is outlined rather than filled.
+    fn outlined(self) -> bool {
+        self == Self::Row
+    }
+}
+
+/// The width of `n` toggles [`TOGGLE`] wide with `gap` between them.
+fn toggles_w(n: usize, gap: f32) -> f32 {
+    n as f32 * TOGGLE + gap * n.saturating_sub(1) as f32
+}
+
+/// Connected toggles filling `rect`, from its left, as `look` asks:
+/// tonal or outlined (1 dp) while off, primary while on. The one tapped.
+fn toggles(ui: &mut Ui, rect: Rect, id: Id, items: &[Toggle], look: ToggleRow) -> Option<usize> {
     let theme = Theme::get(ui.ctx());
     let s = theme.scheme;
     let n = items.len();
-    let w = (rect.width() - 2.0 * (n as f32 - 1.0)) / n as f32;
+    let gap = look.gap();
+    let w = (rect.width() - gap * (n as f32 - 1.0)) / n as f32;
     let rest = if theme.dark { s.secondary_container.gamma_multiply(0.5) } else { s.secondary_container };
     let mut tapped = None;
     for (i, t) in items.iter().enumerate() {
-        let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + 2.0), rect.top()), vec2(w, rect.height()));
+        let r = Rect::from_min_size(pos2(rect.left() + i as f32 * (w + gap), rect.top()), vec2(w, rect.height()));
         let resp = ui.interact(r, id.with(i), if t.enabled { Sense::click() } else { Sense::hover() });
         let k = anim::fraction(ui.ctx(), id.with(("on", i)), if t.on { 1.0 } else { 0.0 }, theme.motion.fast_effects);
         let radii = connected_radii(i, n, false, r.height()).lerp(connected_radii(i, n, true, r.height()), k);
-        let fill = lerp_color(rest, s.primary, k);
-        let ink = lerp_color(s.on_secondary_container, s.on_primary, k);
+        let (off_fill, off_ink, off_stroke) = if look.outlined() {
+            (egui::Color32::TRANSPARENT, s.on_surface_variant, Stroke::new(1.0, s.outline))
+        } else {
+            (rest, s.on_secondary_container, Stroke::NONE)
+        };
+        let fill = lerp_color(off_fill, s.primary, k);
+        let ink = lerp_color(off_ink, s.on_primary, k);
+        let stroke = if off_stroke.is_empty() { Stroke::NONE } else { Stroke::new(off_stroke.width, lerp_color(off_stroke.color, egui::Color32::TRANSPARENT, k)) };
         let alpha = if t.enabled { 1.0 } else { 0.38 };
-        paint::container(ui.painter(), r, radii, fill.gamma_multiply(alpha), Stroke::NONE);
+        paint::container(ui.painter(), r, radii, fill.gamma_multiply(alpha), stroke);
         let layer = anim::fraction(ui.ctx(), id.with(("l", i)), if resp.is_pointer_button_down_on() { 0.10 } else { 0.0 }, theme.motion.fast_effects);
         paint::state_layer(ui.painter(), r, radii, ink, layer);
         t.icon.widget(t.on, ink.gamma_multiply(alpha), 24.0).paint_at(ui, Rect::from_center_size(r.center(), vec2(24.0, 24.0)));
@@ -633,6 +727,23 @@ pub(crate) fn transport_weights(pressed: Option<usize>) -> [f32; 3] {
     }
 }
 
+/// How wide previous, play and next are of a room `room` wide, as
+/// [`transport_weights`] has them: previous and next keep Metrolist's
+/// 62 dp at rest and play takes the rest; the held button grows on them
+/// and the others give way.
+pub(crate) fn transport_widths(room: f32, weights: [f32; 3]) -> [f32; 3] {
+    let rest = transport_weights(None);
+    // At rest the sides keep 62 dp wherever the room has them.
+    let side = 62.0_f32.min(room / 3.0);
+    let base = [side, (room - 2.0 * side).max(side), side];
+    let mut w: [f32; 3] = std::array::from_fn(|i| (base[i] * weights[i] / rest[i]).max(8.0));
+    let sum: f32 = w.iter().sum();
+    for x in w.iter_mut() {
+        *x *= room / sum.max(1.0);
+    }
+    w
+}
+
 /// Previous, play and next as one connected row `rect` tall: the sides are
 /// tonal pills, play is primary and turns from a pill into a rounded
 /// square while it plays; the button held grows on a spring.
@@ -643,17 +754,16 @@ fn transport_row(ui: &mut Ui, rect: Rect, id: Id, status: Status) -> Option<Tran
     let gap = 8.0;
     let pressed: Option<usize> = ctx.data(|d| d.get_temp(id.with("pressed")));
     let target = transport_weights(pressed);
-    let weights: Vec<f32> = (0..3).map(|i| anim::f32(&ctx, id.with(("w", i)), target[i], theme.motion.fast_spatial).max(0.1)).collect();
-    let sum: f32 = weights.iter().sum();
+    let weights: [f32; 3] = std::array::from_fn(|i| anim::f32(&ctx, id.with(("w", i)), target[i], theme.motion.fast_spatial).max(0.1));
     let room = rect.width() - 2.0 * gap;
+    let widths = transport_widths(room, weights);
     let playing = status == Status::Playing;
     let mut x = rect.left();
     let mut now_pressed = None;
     let mut tapped = None;
-    for (i, w) in weights.iter().enumerate() {
-        let width = room * w / sum;
-        let r = Rect::from_min_size(pos2(x, rect.top()), vec2(width, rect.height()));
-        x += width + gap;
+    for (i, width) in widths.iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, rect.top()), vec2(*width, rect.height()));
+        x += *width + gap;
         let resp = ui.interact(r, id.with(("b", i)), Sense::click());
         if resp.is_pointer_button_down_on() {
             now_pressed = Some(i);
@@ -696,7 +806,8 @@ fn transport_row(ui: &mut Ui, rect: Rect, id: Id, status: Status) -> Option<Tran
 
 /// The play button that is a circle while paused and turns into a rounded
 /// square while playing; a loading indicator while it waits. `square` and
-/// `round`: its radii.
+/// `round`: its radii. (The mini player plays on its cover ring now; the
+/// worlds' cards keep this one.)
 pub fn play_button(ui: &mut Ui, rect: Rect, id: Id, playing: bool, buffering: bool, square: f32, round: f32) -> bool {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
@@ -744,14 +855,75 @@ mod tests {
 
     #[test]
     fn the_mini_buttons_end_at_the_capsule_edge_and_never_overlap() {
-        let content = Rect::from_min_size(pos2(22.0, 8.0), vec2(316.0, 50.0));
-        let [like, play, next] = mini_buttons(content);
-        assert_eq!(next.right(), content.right());
-        assert_eq!(play.right() + MINI_BUTTON_GAP, next.left());
-        assert_eq!(like.right() + MINI_BUTTON_GAP, play.left());
-        assert_eq!(like.center().y, content.center().y);
-        // A 360 dp phone keeps the title more than 100 dp.
-        assert!(like.left() - 8.0 - (content.left() + 48.0 + 12.0) > 100.0);
+        // Metrolist's pill on the owner's phone (384 dp screen): 12 dp side
+        // margins, its content 8 dp in.
+        let pill = Rect::from_min_size(pos2(12.0, 686.0), vec2(360.0, MINI_H));
+        let content = pill.shrink2(vec2(8.0, 8.0));
+        let [like, next] = mini_buttons(content);
+        assert_eq!(next.right(), pill.right() - 8.0, "the last ends 8 dp before the pill's end");
+        assert_eq!(next.left() - like.right(), MINI_TOUCH - MINI_BUTTON, "their touches meet");
+        assert_eq!(next.center().y, content.center().y);
+        // Their touches stay within the pill.
+        assert!(next.expand((MINI_TOUCH - MINI_BUTTON) * 0.5).right() <= pill.right());
+        // The title, 16 dp after the ring, keeps more than 100 dp at 360.
+        let tx = content.left() + 48.0 + 16.0;
+        assert!(like.left() - 8.0 - tx > 100.0);
+    }
+
+    #[test]
+    fn the_transport_sides_keep_62_dp_at_rest_and_play_takes_the_rest() {
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01);
+        // The room a 392 dp screen leaves: a 328 dp column with 8 dp gaps.
+        assert!(near(transport_widths(312.0, transport_weights(None)), [62.0, 188.0, 62.0]));
+        // A 360 dp one has the play pill 156 dp wide.
+        assert!(near(transport_widths(280.0, transport_weights(None)), [62.0, 156.0, 62.0]));
+        // One held grows and the others give way, the room kept.
+        let w = transport_widths(312.0, transport_weights(Some(1)));
+        assert!(w[1] > 188.0 && w[0] < 62.0 && w[2] < 62.0);
+        assert!((w.iter().sum::<f32>() - 312.0).abs() < 0.5);
+        let w = transport_widths(312.0, transport_weights(Some(0)));
+        assert!(w[0] > 62.0 && w[1] < 188.0 && w[2] < 62.0);
+        // A column too narrow for 62 dp sides still fits the three.
+        let w = transport_widths(100.0, transport_weights(None));
+        assert!((w.iter().sum::<f32>() - 100.0).abs() < 0.5);
+        assert!(w.iter().all(|x| *x >= 8.0));
+    }
+
+    #[test]
+    fn the_pair_is_two_joined_squares_and_the_bottom_row_five_toggles_apart() {
+        assert_eq!(toggles_w(2, ToggleRow::Pair.gap()), PAIR_W);
+        assert_eq!((PAIR_W, PAIR_H), (86.0, 42.0));
+        assert_eq!(toggles_w(5, ToggleRow::Row.gap()), 234.0);
+        assert!(ToggleRow::Row.outlined());
+        assert!(!ToggleRow::Pair.outlined());
+    }
+
+    #[test]
+    fn the_pill_fades_from_the_cover_tone_into_the_surface_container() {
+        for dark in [true, false] {
+            let s = ColorScheme::baseline(dark);
+            assert_eq!(mini_fill(&s), [lerp_color(s.primary_container, s.surface, 0.5), s.surface_container]);
+        }
+    }
+
+    #[test]
+    fn the_pill_fill_runs_from_its_left_edge_to_its_right() {
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, vec2(360.0, MINI_H));
+        let points = paint::rounded_rect_points(rect, Radii::all(MINI_RADIUS));
+        assert!(points.len() > 2);
+        let fill = [egui::Color32::from_rgb(10, 20, 30), egui::Color32::from_rgb(200, 100, 50)];
+        let mesh = gradient(&points, rect, fill);
+        assert_eq!(mesh.vertices.len(), points.len());
+        assert_eq!(mesh.indices.len(), (points.len() - 2) * 3);
+        assert!(mesh.vertices.iter().filter(|v| (v.pos.x - rect.left()).abs() < 1e-3).all(|v| v.color == fill[0]));
+        assert!(mesh.vertices.iter().filter(|v| (v.pos.x - rect.right()).abs() < 1e-3).all(|v| v.color == fill[1]));
+    }
+
+    #[test]
+    fn the_players_title_is_20_sp_emphasized_on_the_title_large_line() {
+        let t = np_title();
+        assert_eq!((t.size, t.weight), (20.0, 500));
+        assert_eq!(t.line_height, TypeRole::TitleLarge.style().line_height);
     }
 
     #[test]
