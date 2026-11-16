@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn each_save_writes_its_own_temporary_file() {
         let p = Path::new("settings.toml");
-        let (a, b) = (temp_path(p), temp_path(p));
+        let (a, b) = (super::temp_path(p), super::temp_path(p));
         assert_ne!(a, b);
         assert!(a.to_string_lossy().starts_with("settings.toml."));
         assert!(a.to_string_lossy().ends_with(".tmp"));

@@ -572,6 +572,7 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -587,6 +588,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -5002,6 +5004,7 @@ dependencies = [
  "log",
  "memmap2",
  "mimalloc",
+ "nikgob-api",
  "nikgob-audio",
  "nikgob-core",
  "nikgob-deezer",
@@ -5046,7 +5049,31 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "windows 0.62.2",
- "zip",
+ "zip 2.6.1",
+]
+
+[[package]]
+name = "nikgob-api"
+version = "0.0.5"
+dependencies = [
+ "axum",
+ "blake3",
+ "form_urlencoded",
+ "futures-util",
+ "log",
+ "nikgob-core",
+ "nikgob-library",
+ "nikgob-metadata",
+ "nikgob-runtime",
+ "nikgob-view",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "utoipa",
+ "utoipa-swagger-ui",
 ]
 
 [[package]]
@@ -5073,7 +5100,9 @@ dependencies = [
 name = "nikgob-core"
 version = "0.0.5"
 dependencies = [
+ "blake3",
  "directories",
+ "getrandom 0.3.4",
  "log",
  "serde",
  "serde_json",
@@ -5258,7 +5287,7 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "wiremock",
- "zip",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -5299,7 +5328,7 @@ dependencies = [
  "tokio-tungstenite",
  "windows 0.62.2",
  "windows-core 0.62.2",
- "zip",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -5365,7 +5394,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "url",
  "wiremock",
- "zip",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -5447,6 +5476,7 @@ dependencies = [
  "directories",
  "env_logger",
  "log",
+ "nikgob-api",
  "nikgob-audio",
  "nikgob-core",
  "nikgob-library",
@@ -7480,6 +7510,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-embed"
+version = "8.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e98f580cf7a2863aeb6827800283f52cbe6fb3f3bb7c1843783f903c16dcb8ad"
+dependencies = [
+ "rust-embed-impl",
+ "rust-embed-utils",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-impl"
+version = "8.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a93e2f69cf224a6c7df7509aa5ba4a23f56828ee41b040e92ac8762371eb9ba7"
+dependencies = [
+ "mime_guess",
+ "proc-macro2",
+ "quote",
+ "rust-embed-utils",
+ "syn 2.0.119",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-utils"
+version = "8.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "915e33dccbe7deb2b8a342dc4c517503fe85e0230ddbae40a4fb0220493dad9b"
+dependencies = [
+ "sha2 0.11.1",
+ "walkdir",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9418,6 +9483,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
+name = "utoipa"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bde15df68e80b16c7d16b9616e80770ad158988daa56a27dccd1e55558b0160"
+dependencies = [
+ "indexmap 2.14.2",
+ "serde",
+ "serde_json",
+ "utoipa-gen",
+]
+
+[[package]]
+name = "utoipa-gen"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba0b99ee52df3028635d93840c797102da61f8a7bb3cf751032455895b52ef8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "utoipa-swagger-ui"
+version = "9.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d047458f1b5b65237c2f6dc6db136945667f40a7668627b3490b9513a3d43a55"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "mime_guess",
+ "regex",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "url",
+ "utoipa",
+ "utoipa-swagger-ui-vendored",
+ "zip 3.0.0",
+]
+
+[[package]]
+name = "utoipa-swagger-ui-vendored"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2eebbbfe4093922c2b6734d7c679ebfebd704a0d7e56dfcb0d05818ce28977d"
+
+[[package]]
 name = "uuid"
 version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11044,6 +11157,20 @@ dependencies = [
  "arbitrary",
  "crc32fast",
  "crossbeam-utils",
+ "flate2",
+ "indexmap 2.14.2",
+ "memchr",
+ "zopfli",
+]
+
+[[package]]
+name = "zip"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12598812502ed0105f607f941c386f43d441e00148fce9dec3ca5ffb0bde9308"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
  "flate2",
  "indexmap 2.14.2",
  "memchr",

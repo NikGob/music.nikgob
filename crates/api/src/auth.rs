@@ -38,6 +38,7 @@ pub enum Right {
 }
 
 impl Right {
+    #[cfg(test)]
     pub const ALL: [Self; 8] =
         [Self::Read, Self::Player, Self::Queue, Self::Volume, Self::Duck, Self::Output, Self::Media, Self::Library];
 
