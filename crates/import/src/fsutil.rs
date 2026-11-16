@@ -154,6 +154,112 @@ pub fn move_file_verified(from: &Path, to: &Path, expected_hash: Option<&str>) -
     Ok(hash)
 }
 
+/// Moves `from` to exactly `to`, never replacing anything there: on one
+/// volume a hard link (the same file under its new name) and then the old
+/// name removed; otherwise a copy into `to` claimed with `create_new`,
+/// flushed, its size and BLAKE3 checked against `expected_hash`, and only
+/// then `from` removed. `AlreadyExists` when `to` is taken (nothing
+/// changed); any failure leaves `from` as it was and no `to` of ours.
+pub fn move_new_verified(from: &Path, to: &Path, expected_hash: &str) -> std::io::Result<()> {
+    let (f, t) = (long_path(from), long_path(to));
+    match fs::hard_link(&f, &t) {
+        Ok(()) => {
+            if let Err(e) = fs::remove_file(&f) {
+                let _ = fs::remove_file(&t);
+                return Err(e);
+            }
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+        // Another volume, or a file system without hard links: a copy.
+        Err(_) => {}
+    }
+    let size = fs::metadata(&f)?.len();
+    let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(&t)?;
+    let copied = (|| -> std::io::Result<()> {
+        let mut reader = File::open(&f)?;
+        std::io::copy(&mut reader, &mut writer)?;
+        writer.sync_all()
+    })();
+    drop(writer);
+    if let Err(e) = copied {
+        let _ = fs::remove_file(&t);
+        return Err(e);
+    }
+    let same = fs::metadata(&t).map(|m| m.len()).ok() == Some(size)
+        && hash_file(to).ok().is_some_and(|h| h.eq_ignore_ascii_case(expected_hash));
+    if !same {
+        let _ = fs::remove_file(&t);
+        return Err(std::io::Error::other(format!("проверка хеша не прошла для {}", to.display())));
+    }
+    if let Err(e) = fs::remove_file(&f) {
+        let _ = fs::remove_file(&t);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// [`move_new_verified`] to `target`, or `target (2)`, `(3)`… when the name
+/// is taken: never over a file. Where it went.
+pub fn move_unique_verified(from: &Path, target: &Path, expected_hash: &str) -> std::io::Result<PathBuf> {
+    for n in 1..=999u32 {
+        let candidate = if n == 1 { target.to_path_buf() } else { numbered_path(target, n) };
+        match move_new_verified(from, &candidate, expected_hash) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{}: every name is taken", target.display())))
+}
+
+/// Makes `dir` (written under `root`) and its missing parents, never
+/// outside `root`: every folder on the way that exists, links resolved,
+/// must lie under `root` resolved, and each new one is checked once made.
+/// `root` itself is made when missing. The folder's resolved path.
+pub fn create_dir_inside(dir: &Path, root: &Path) -> std::io::Result<PathBuf> {
+    let outside = || std::io::Error::other(format!("{} is outside {}", dir.display(), root.display()));
+    fs::create_dir_all(long_path(root))?;
+    let real_root = fs::canonicalize(long_path(root))?;
+    let rel = dir.strip_prefix(root).map_err(|_| outside())?;
+    let mut lexical = root.to_path_buf();
+    let mut real = real_root.clone();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(name) => {
+                lexical.push(name);
+                match fs::symlink_metadata(long_path(&lexical)) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => match fs::create_dir(long_path(&lexical)) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e),
+                    },
+                    Err(e) => return Err(e),
+                }
+                real = fs::canonicalize(long_path(&lexical))?;
+                if !real.starts_with(&real_root) || !real.is_dir() {
+                    return Err(outside());
+                }
+            }
+            std::path::Component::CurDir => {}
+            _ => return Err(outside()),
+        }
+    }
+    Ok(real)
+}
+
+/// Whether `path` is a plain file (not a link) that, resolved, lies under
+/// `root` resolved.
+pub fn plain_file_inside(path: &Path, root: &Path) -> bool {
+    let plain = fs::symlink_metadata(long_path(path)).is_ok_and(|m| m.file_type().is_file());
+    plain
+        && match (fs::canonicalize(long_path(path)), fs::canonicalize(long_path(root))) {
+            (Ok(p), Ok(r)) => p.starts_with(r),
+            _ => false,
+        }
+}
+
 pub fn remove_file(path: &Path) -> Result<()> {
     match fs::remove_file(long_path(path)) {
         Ok(()) => Ok(()),
@@ -429,5 +535,49 @@ mod tests {
         std::fs::write(a.join("notes.txt"), b"x").unwrap();
         prune_empty_dirs(&a, root.path());
         assert!(a.join("notes.txt").exists());
+    }
+
+    /// A move never replaces a file: the name taken stays as it was and
+    /// the source stays; a free name gets the file, checked, and the
+    /// source goes; a taken name gets the next number.
+    #[test]
+    fn a_verified_move_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("a.part");
+        let to = dir.path().join("a.flac");
+        std::fs::write(&from, b"master").unwrap();
+        std::fs::write(&to, b"other").unwrap();
+        let hash = hash_file(&from).unwrap();
+        let e = move_new_verified(&from, &to, &hash).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&to).unwrap(), b"other");
+        assert!(from.exists());
+        let placed = move_unique_verified(&from, &to, &hash).unwrap();
+        assert_eq!(placed, dir.path().join("a (2).flac"));
+        assert_eq!(std::fs::read(&placed).unwrap(), b"master");
+        assert!(!from.exists());
+    }
+
+    /// Folders are made only under the root: one that leads out (a link)
+    /// is refused before anything is made below it.
+    #[test]
+    fn folders_are_made_only_inside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("Music");
+        let made = create_dir_inside(&root.join("A").join("2001 - B"), &root).unwrap();
+        assert!(made.is_dir());
+        assert!(create_dir_inside(&dir.path().join("Elsewhere"), &root).is_err());
+        let file = root.join("A").join("01.flac");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(plain_file_inside(&file, &root));
+        assert!(!plain_file_inside(&dir.path().join("nope.flac"), &root));
+        #[cfg(unix)]
+        {
+            let out = dir.path().join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            std::os::unix::fs::symlink(&out, root.join("Link")).unwrap();
+            assert!(create_dir_inside(&root.join("Link").join("C"), &root).is_err());
+            assert!(!out.join("C").exists());
+        }
     }
 }
