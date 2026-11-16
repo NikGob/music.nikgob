@@ -711,15 +711,23 @@ impl Taste {
         // A play (or a complete) of either kind: when it was last played, a
         // play counted, by part of the day (as much as it weighs) and a
         // year ago (a whole one).
+        // What reads as heard (when it was last played, a play counted) takes
+        // a whole play: a speaker's long run heard from afar is weighed in,
+        // never counted.
         let mut count = |i: usize, ts: UnixMs, play: bool, w: f32| {
-            last_played[i] = last_played[i].max(Some(ts));
+            let whole = w >= FULL_PLAY;
+            if whole {
+                last_played[i] = last_played[i].max(Some(ts));
+            }
             if !play {
                 return;
             }
-            plays[i] += 1;
+            if whole {
+                plays[i] += 1;
+            }
             let part = DayPart::at(ts, off).index();
             daypart[i][part] += w;
-            if w >= FULL_PLAY && (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
+            if whole && (ts - (now - YEAR_MS)).abs() <= YEAR_AGO_SPAN_MS {
                 year_ago[i] = year_ago[i].saturating_add(1);
             }
         };
@@ -1472,7 +1480,7 @@ mod tests {
         let radio = |t: &Taste| (10..60u128).map(|i| a(t, i)).sum::<f32>();
         assert!(radio(&taste) > 1.0 && radio(&taste) < 5.0, "{}", radio(&taste));
         let i10 = cat.position(tid(10)).unwrap();
-        assert_eq!(taste.plays_at(i10), 1, "heard");
+        assert_eq!(taste.plays_at(i10), 0, "heard from afar: weighed in, never counted");
         assert_eq!(taste.recent_completes_at(i10), 0, "not on repeat");
         assert_eq!(taste.recent_completes_at(cat.position(tid(1)).unwrap()), 6, "the asked-for song is");
         // On the speaker itself its own radio weighs more.

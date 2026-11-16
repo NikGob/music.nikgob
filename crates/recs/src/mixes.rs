@@ -3706,12 +3706,19 @@ mod tests {
         };
         let (d0, d1) = (daily(&base, &m0), daily(&speaker, &m1));
         assert!((d1 - d0).abs() <= 0.15, "soundtracks in «Микс дня»: {d0} → {d1}");
-        // The songs the speaker played on by itself are not on repeat at the
-        // computer (the three asked for by voice are).
-        let played: Vec<usize> = (220..330).filter(|&i| m1.taste.plays_at(i) > m0.taste.plays_at(i)).collect();
+        // The songs the speaker played on by itself are neither counted as
+        // played nor on repeat at the computer (the three asked for by
+        // voice are).
+        let played: Vec<usize> =
+            (220..330).filter(|&i| speaker.input.events.iter().any(|p| p.actor == PlayActor::Assistant && p.track == tid(i as u128))).collect();
         assert!(played.len() > 50, "{}", played.len());
+        let counted = played.iter().filter(|&&i| m1.taste.plays_at(i) > m0.taste.plays_at(i) || m1.tracks[i].starts > m0.tracks[i].starts).count();
+        assert!(counted <= 3, "{counted} counted as played");
         let more: u32 = played.iter().map(|&i| m1.taste.recent_completes_at(i) - m0.taste.recent_completes_at(i)).sum();
         assert!(more <= 3, "{more} more on repeat");
+        // Nor do they end the library's cold start sooner than the
+        // computer's own plays would.
+        assert!(m1.cold() >= 0.5 * m0.cold() && m1.cold() >= m2.cold(), "{} {} {}", m0.cold(), m1.cold(), m2.cold());
     }
 
     /// A week of habits: quiet Russian songs on weekday mornings (the first
