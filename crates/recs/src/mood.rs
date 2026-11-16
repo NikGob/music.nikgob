@@ -38,7 +38,7 @@ use crate::analysis::Vector;
 use crate::pick::Recs;
 use crate::taste::DayPart;
 
-const TEMPO: usize = 0;
+pub(crate) const TEMPO: usize = 0;
 const ZCR: usize = 1;
 const CENTROID: usize = 2;
 const CENTROID_STD: usize = 3;
