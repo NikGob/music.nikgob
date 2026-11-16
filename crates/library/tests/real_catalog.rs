@@ -74,6 +74,8 @@ fn repairs_of_a_real_catalog() {
     let db = copy_of(std::path::Path::new(&src), dir.path());
     let lib = Library::open(&db).unwrap();
     let c = Connection::open(&db).unwrap();
+    // A write through it would fire the change triggers, which need the library's functions.
+    nikgob_library::register_functions(&c).unwrap();
 
     const OLIVER_STANDARD: &str = "01a165c6-08a2-76c2-90af-02b12ce56bb9";
     const OLIVER_DELUXE: &str = "01a1631b-6225-7562-8e49-ac0eb4f557a8";

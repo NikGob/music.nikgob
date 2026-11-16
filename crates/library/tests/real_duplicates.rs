@@ -68,6 +68,8 @@ fn duplicates_of_a_real_library() {
     }
     let lib = Library::open(&db).unwrap();
     let c = Connection::open(&db).unwrap();
+    // A write through it would fire the change triggers, which need the library's functions.
+    nikgob_library::register_functions(&c).unwrap();
 
     // Stream-only tracks and their sources, to find where each one went.
     let mut stmt = c

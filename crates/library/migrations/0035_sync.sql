@@ -12,21 +12,24 @@
 --   key as `json_array` of the key columns): its number (`seq`, growing over
 --   the whole database), its version (`hlc`, `node`, `gone` for a row deleted)
 --   and the device it came from when it was taken from one (`came_from`: not
---   offered back to that device). Filled by triggers the library installs
---   from its list of synced tables.
+--   offered back to that device), and for a table that ranks rows by a flag
+--   (`lyrics_align.saved`) the flag (of a tombstone: of the row it deleted).
+--   Filled by triggers the library installs from its list of synced tables.
 -- * sync_peer: how far this device has taken each table of each device.
 -- * sync_node: per device: syncing turned off, the other side's database
 --   (its epoch: a new one starts from the beginning), the last good pull.
--- * sync_conflict: rows of another device that did not go through here (a
---   row that could not be written, a delete held back while the row is still
---   used here), kept as they came to be tried again; the cursor may pass them
---   only because they are kept here.
--- * sync_alias: ids of artists, albums and stream sources another device made
---   for what this one has under its own id; incoming references go through it.
+-- * sync_conflict: rows of another device that did not go through here, kept
+--   as they came (with their version `ver`); the cursor may pass them only
+--   because they are kept here. `kind`: identity (an artist, album or stream
+--   this device has under another id: the owner decides; tried again only
+--   when a newer version comes), dependency (cannot be written yet, or points
+--   at an identity conflict), held (a delete held back while the row is still
+--   used here); the last two are tried again at `next_try` (backoff).
 -- * picture: the BLAKE3 hash of each album's cover and artist's photo file
 --   (synced); picture_file: where the file of a hash is on this device (its
 --   own file, or a copy taken from another device into the library's cache);
---   picture_src: the reference each hash was taken from here.
+--   picture_src: the reference last read here (`ok` = 0: it could not be
+--   read at `tried_at`, to be tried again).
 -- * node_file: which device has which file (local sources minus their paths),
 --   kept by the triggers below; synced like the rest.
 -- * event.actor: who started the play (owner | assistant | agent | guest;
@@ -52,6 +55,7 @@ CREATE TABLE change_log (
     node      TEXT NOT NULL,
     gone      INTEGER NOT NULL DEFAULT 0,
     came_from TEXT,
+    flag      INTEGER,
     PRIMARY KEY (tbl, key)
 ) WITHOUT ROWID;
 CREATE INDEX change_log_seq ON change_log(tbl, seq);
@@ -76,23 +80,17 @@ CREATE TABLE sync_conflict (
     peer       TEXT NOT NULL,
     cols       TEXT NOT NULL,
     row        TEXT NOT NULL,
-    held       INTEGER NOT NULL DEFAULT 0,
+    ver        INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
     reason     TEXT NOT NULL,
     first_seen INTEGER NOT NULL,
     last_try   INTEGER NOT NULL,
+    next_try   INTEGER NOT NULL,
     tries      INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (tbl, key, peer)
 ) WITHOUT ROWID;
-CREATE INDEX sync_conflict_try ON sync_conflict(last_try);
-
-CREATE TABLE sync_alias (
-    tbl       TEXT NOT NULL,
-    remote_id TEXT NOT NULL,
-    local_id  TEXT NOT NULL,
-    peer      TEXT NOT NULL,
-    at        INTEGER NOT NULL,
-    PRIMARY KEY (tbl, remote_id)
-) WITHOUT ROWID;
+CREATE INDEX sync_conflict_due ON sync_conflict(next_try) WHERE kind <> 'identity';
+CREATE INDEX sync_conflict_key ON sync_conflict(tbl, key) WHERE kind = 'identity';
 
 CREATE TABLE picture (
     kind TEXT NOT NULL,
@@ -110,7 +108,9 @@ CREATE TABLE picture_file (
 CREATE TABLE picture_src (
     kind TEXT NOT NULL,
     id   TEXT NOT NULL,
-    ref  TEXT NOT NULL,
+    ref      TEXT NOT NULL,
+    ok       INTEGER NOT NULL DEFAULT 0,
+    tried_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (kind, id)
 ) WITHOUT ROWID;
 

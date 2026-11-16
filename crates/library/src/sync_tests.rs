@@ -380,13 +380,14 @@ fn a_catalog_delete_spares_what_is_still_used() {
     assert!(pi.get_track(f.stream.id).unwrap().is_some(), "its own file keeps it");
     assert_eq!(pi.sync_cursors(&pc_id).unwrap().tables.get("track").copied(), pc.sync_heads().unwrap().tables.get("track").copied());
     // The delete held back is kept, and goes once the file does.
-    assert_eq!(pi.sync_conflicts(&pc_id).unwrap(), SyncConflicts { failed: 0, held: 1 });
+    assert_eq!(pi.sync_conflicts(&pc_id).unwrap(), SyncConflicts { held: 1, ..SyncConflicts::default() });
     pi.write(|tx| {
         tx.execute("DELETE FROM source WHERE track_id = ?1", [f.stream.id.to_string()])?;
         Ok(())
     })
     .unwrap();
-    assert_eq!(pi.sync_retry().unwrap(), 1);
+    assert_eq!(pi.sync_retry().unwrap(), 0, "not due yet");
+    assert_eq!(pi.sync_retry_at(now_ms() + 2 * RETRY_MAX_MS).unwrap(), 1);
     assert!(pi.get_track(f.stream.id).unwrap().is_none());
     assert_eq!(pi.sync_conflicts(&pc_id).unwrap(), SyncConflicts::default());
 }
@@ -428,8 +429,8 @@ fn a_row_that_fails_is_kept_and_tried_again() {
     let pc_id = id(&pc);
     let page = pc.sync_changes("source", 0, 100, Some(&id(&pi))).unwrap();
     let done = pi.sync_apply(&page, &pc_id, true).unwrap();
-    assert_eq!((done.taken, done.failed), (0, 1));
-    assert_eq!(pi.sync_conflicts(&pc_id).unwrap(), SyncConflicts { failed: 1, held: 0 });
+    assert_eq!((done.taken, done.waiting), (0, 1));
+    assert_eq!(pi.sync_conflicts(&pc_id).unwrap(), SyncConflicts { waiting: 1, ..SyncConflicts::default() });
     assert_eq!(pi.sync_cursors(&pc_id).unwrap().tables.get("source").copied(), Some(page.next), "kept, so passed");
     pull(&pi, &pc);
     assert_eq!(pi.sync_conflicts(&pc_id).unwrap(), SyncConflicts::default());
@@ -439,11 +440,13 @@ fn a_row_that_fails_is_kept_and_tried_again() {
     assert_eq!(active, 1, "the stream is the track's playing source");
 }
 
-/// Two libraries built apart: the same artist and album under other ids
-/// become one, and what points at the other device's ids (the album's
-/// tracks, the links, likes) points at this one's.
+/// Two libraries built apart with the same artist and album under other
+/// ids: nothing is merged on a guess. The artist and the album are kept as
+/// identity conflicts for the owner (never tried again on their own), what
+/// points at them waits, nothing here changes; a newer version that no
+/// longer clashes goes through.
 #[test]
-fn the_same_artist_and_album_under_other_ids_become_one() {
+fn the_same_artist_or_album_under_another_id_waits_for_the_owner() {
     let pc = lib();
     let laptop = lib();
     let f = fill(&pc);
@@ -452,38 +455,40 @@ fn the_same_artist_and_album_under_other_ids_become_one() {
     let own = laptop.upsert_artist(&Artist::new("КИНО")).unwrap();
     let credit = ArtistCredit::single("Кино".to_owned(), Some(own.id));
     let album = laptop.upsert_release(&Release::new("Группа Крови", credit)).unwrap();
-    assert_ne!(own.id, f.artist.id);
     pull(&laptop, &pc);
-    assert_eq!(laptop.sync_conflicts(&id(&pc)).unwrap(), SyncConflicts::default());
-    assert!(laptop.get_artist(f.artist.id).unwrap().is_none(), "no second Кино");
-    assert!(laptop.get_release(f.release.id).unwrap().is_none(), "no second album");
-    let t = laptop.get_track(f.track.id).unwrap().expect("the track came");
-    assert_eq!(t.release_id, Some(album.id), "on this device's album");
-    let links: Vec<String> = laptop
-        .read(|c| {
-            let mut s = c.prepare("SELECT artist_id FROM track_artist WHERE track_id = ?1")?;
-            let rows = s.query_map([f.track.id.to_string()], |r| r.get(0))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
-        })
-        .unwrap();
-    assert_eq!(links, vec![own.id.to_string()]);
-    let named: i64 = laptop
-        .read(|c| Ok(c.query_row("SELECT count(*) FROM track WHERE instr(artist_credit, ?1) > 0", [f.artist.id.to_string()], |r| r.get(0))?))
-        .unwrap();
-    assert_eq!(named, 0, "the credits name this device's artist");
-    assert!(laptop.is_liked(own.id).unwrap(), "the like of the other id");
-    assert!(laptop.is_liked(album.id).unwrap());
-    // Merging again changes nothing.
-    laptop.sync_start_over(&id(&pc), "again", &[]).unwrap();
-    pull(&laptop, &pc);
+    let kept = laptop.sync_conflicts(&id(&pc)).unwrap();
+    assert_eq!(kept.identity, 2, "{kept:?}");
+    assert!(kept.waiting >= 4, "the album's track, the links, the likes: {kept:?}");
     assert!(laptop.get_artist(f.artist.id).unwrap().is_none());
+    assert!(laptop.get_release(f.release.id).unwrap().is_none());
+    assert!(laptop.get_track(f.track.id).unwrap().is_none(), "its album is not here");
+    assert_eq!(laptop.get_artist(own.id).unwrap().unwrap().name, "КИНО", "nothing here changed");
+    assert!(laptop.get_release(album.id).unwrap().is_some());
+    assert!(!laptop.is_liked(own.id).unwrap(), "no like moved onto another id");
+    assert!(laptop.get_track(f.stream.id).unwrap().is_some(), "what does not point at them came");
+    // Trying again does not touch the identity conflicts.
+    laptop.sync_retry_at(now_ms() + 2 * RETRY_MAX_MS).unwrap();
+    assert_eq!(laptop.sync_conflicts(&id(&pc)).unwrap().identity, 2);
+    // A newer version of the artist that does not clash goes through, and
+    // what waited for it follows.
+    pc.write(|tx| {
+        tx.execute("UPDATE artist SET name = 'Kino (band)' WHERE id = ?1", [f.artist.id.to_string()])?;
+        Ok(())
+    })
+    .unwrap();
+    pull(&laptop, &pc);
+    assert_eq!(laptop.sync_conflicts(&id(&pc)).unwrap().identity, 1, "the album still waits");
+    assert!(laptop.get_artist(f.artist.id).unwrap().is_some());
+    laptop.sync_retry_at(now_ms() + 2 * RETRY_MAX_MS).unwrap();
+    assert!(laptop.is_liked(f.artist.id).unwrap(), "the like that waited for it");
+    assert!(!laptop.is_liked(f.release.id).unwrap(), "the album's still waits");
 }
 
-/// Rows from before sync have no version: where both devices have one, each
-/// keeps its own (a migration is never an edit); a row with its own last
-/// edit time is ordered by it.
+/// Rows from before sync have no version: two that differ end the same on
+/// both devices (the larger device id), two that are the same stay; a row
+/// with its own last edit time is ordered by it.
 #[test]
-fn rows_from_before_sync_never_override_each_other() {
+fn rows_from_before_sync_end_the_same_everywhere() {
     let pc = lib();
     let pi = lib();
     let f = fill(&pc);
@@ -495,7 +500,7 @@ fn rows_from_before_sync_never_override_each_other() {
     pi.set_track_fx(f.track.id, Some("fast")).unwrap();
     for l in [&pc, &pi] {
         l.write(|tx| {
-            tx.execute("DELETE FROM change_log WHERE tbl IN ('lyrics_pick', 'track_fx')", [])?;
+            tx.execute("DELETE FROM change_log WHERE tbl IN ('lyrics_pick', 'track_fx', 'analysis')", [])?;
             backfill(tx)
         })
         .unwrap();
@@ -504,19 +509,116 @@ fn rows_from_before_sync_never_override_each_other() {
     assert_eq!(v, 0);
     pull(&pi, &pc);
     pull(&pc, &pi);
-    assert_eq!(pc.lyrics_pick(f.track.id).unwrap().as_deref(), Some("lrclib"));
-    assert_eq!(pi.lyrics_pick(f.track.id).unwrap().as_deref(), Some("genius"));
+    pull(&pi, &pc);
+    let winner = if id(&pc) > id(&pi) { "lrclib" } else { "genius" };
+    assert_eq!(pc.lyrics_pick(f.track.id).unwrap().as_deref(), Some(winner));
+    assert_eq!(pi.lyrics_pick(f.track.id).unwrap().as_deref(), Some(winner));
     for l in [&pc, &pi] {
         assert_eq!(l.track_fx().unwrap(), vec![(f.track.id, "fast".to_owned())], "the later edit");
     }
+    // The same analysis on both: left alone (not taken, not noted again).
+    let came: Option<String> = pi
+        .read(|c| Ok(c.query_row("SELECT came_from FROM change_log WHERE tbl = 'analysis'", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(came, None);
     // A later edit of either goes over.
     pc.set_lyrics_pick(f.track.id, Some("musixmatch")).unwrap();
     pull(&pi, &pc);
     assert_eq!(pi.lyrics_pick(f.track.id).unwrap().as_deref(), Some("musixmatch"));
 }
 
-/// A word timing the owner saved beats an automatic one made later, on both
-/// devices; between two saved ones the later wins.
+/// A `lyrics_align` row as it travels: version `v`, saved or not, gone or
+/// live.
+fn align_row(v: i64, node: &str, saved: bool, gone: bool, body: &str) -> SyncRow {
+    let d = (!gone).then(|| {
+        vec![
+            Value::from("h"),
+            Value::from(0.9),
+            Value::from("fits"),
+            Value::from(0),
+            Value::from(1.0),
+            Value::from(body),
+            Value::from("test"),
+            Value::from(1),
+            Value::from(i64::from(saved)),
+            Value::from(1),
+        ]
+    });
+    SyncRow { k: r#"["t1","lrclib"]"#.to_owned(), v: (v, node.to_owned(), gone), d, f: Some(saved) }
+}
+
+/// The body left after the rows come in this order (none: no row).
+fn align_after(rows: &[&SyncRow]) -> Option<String> {
+    let l = lib();
+    let t = sync_table("lyrics_align").unwrap();
+    let cols: Vec<String> = t.cols.iter().map(|c| (*c).to_owned()).collect();
+    for r in rows {
+        let page = SyncPage { table: t.name.to_owned(), cols: cols.clone(), rows: vec![(*r).clone()], next: 0, more: false };
+        l.sync_apply(&page, &r.v.1, false).unwrap();
+    }
+    l.read(|c| Ok(c.query_row("SELECT body FROM lyrics_align", [], |r| r.get(0)).optional()?)).unwrap()
+}
+
+fn orders(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for rest in orders(n - 1) {
+        for at in 0..=rest.len() {
+            let mut o = rest.clone();
+            o.insert(at, n - 1);
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// Saved over automatic as one order with deletes in it: a delete keeps
+/// the flag of what it deleted, so an automatic row or the delete of one
+/// never beats a saved row, a later delete of the saved row does — in
+/// every order the rows come.
+#[test]
+fn a_saved_alignment_ranks_over_automatic_rows_and_their_deletes_in_any_order() {
+    let saved = align_row(1, "a", true, false, "mine");
+    let auto = align_row(2, "b", false, false, "auto");
+    let auto_gone = align_row(3, "b", false, true, "");
+    let saved_gone = align_row(4, "a", true, true, "");
+    let all = [&saved, &auto, &auto_gone, &saved_gone];
+    for o in orders(4) {
+        let rows: Vec<&SyncRow> = o.iter().map(|i| all[*i]).collect();
+        assert_eq!(align_after(&rows), None, "the saved row's delete is last: {o:?}");
+    }
+    let three = [&saved, &auto, &auto_gone];
+    for o in orders(3) {
+        let rows: Vec<&SyncRow> = o.iter().map(|i| three[*i]).collect();
+        assert_eq!(align_after(&rows).as_deref(), Some("mine"), "{o:?}");
+    }
+    for o in orders(2) {
+        let pair = [&auto, &auto_gone];
+        let rows: Vec<&SyncRow> = o.iter().map(|i| pair[*i]).collect();
+        assert_eq!(align_after(&rows), None, "the later delete: {o:?}");
+    }
+    // A delete made here carries the flag of the row it deleted.
+    let l = lib();
+    l.write(|tx| {
+        tx.execute(
+            "INSERT INTO lyrics_align(track_id, source, text_hash, fit, timing, body, made_by, made_at, saved, fits)
+             VALUES ('t1', 'lrclib', 'h', 0.9, 'fits', 'mine', 'test', 1, 1, 1)",
+            [],
+        )?;
+        tx.execute("DELETE FROM lyrics_align", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let page = l.sync_changes("lyrics_align", 0, 10, None).unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert!(page.rows[0].v.2 && page.rows[0].f == Some(true));
+}
+
+/// Two devices, real edits: a word timing the owner saved beats an
+/// automatic one made later, on both; between two saved ones the later
+/// wins.
 #[test]
 fn a_saved_alignment_beats_an_automatic_one() {
     let pc = lib();
@@ -564,11 +666,16 @@ fn a_page_from_a_clock_far_ahead_is_refused() {
     assert!(pi.tick() < now_ms() + 60_000);
     page.rows[0].v.0 = version_at(now_ms() + 60_000);
     assert!(!page_ahead(&page, now_ms()), "a minute is within reason");
+    // Taken, the clock is past it before anything else can write.
+    pi.sync_apply(&page, &id(&pc), true).unwrap();
+    pi.upsert_artist(&Artist::new("Би-2")).unwrap();
+    let newest: i64 = pi.read(|c| Ok(c.query_row("SELECT max(hlc) FROM change_log WHERE came_from IS NULL", [], |r| r.get(0))?)).unwrap();
+    assert!(newest > page.rows[0].v.0);
 }
 
 /// The epoch is kept beside the database too: a database put back from a
-/// copy (its epoch not the one beside it) takes a new one, so the other
-/// devices take it from the start.
+/// copy (its epoch not the one beside it), or one that synced and lost the
+/// copy, takes a new one, so the other devices take it from the start.
 #[test]
 fn a_database_put_back_takes_a_new_epoch() {
     let dir = tempfile::tempdir().unwrap();
@@ -581,6 +688,36 @@ fn a_database_put_back_takes_a_new_epoch() {
     let second = Library::open(&path).unwrap().sync_heads().unwrap().epoch;
     assert_ne!(second, first);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), second);
+    // Never synced: a missing copy is written again, the epoch stays.
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(Library::open(&path).unwrap().sync_heads().unwrap().epoch, second);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), second);
+    // Synced: a missing copy means a new epoch.
+    Library::open(&path).unwrap().sync_start_over("pi", "e", &[]).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    let third = Library::open(&path).unwrap().sync_heads().unwrap().epoch;
+    assert_ne!(third, second);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), third);
+}
+
+/// A copy of the epoch that cannot be written: syncing is off on this
+/// database (with the reason), and the epoch does not change at each start.
+#[test]
+fn an_epoch_that_cannot_be_kept_turns_syncing_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("library.sqlite");
+    // A folder where the copy goes: it can be neither read nor written.
+    std::fs::create_dir_all(epoch_file_of(&path)).unwrap();
+    let epoch = |l: &Library| l.read(|c| meta_get(c, "sync.epoch")).unwrap();
+    let lib = Library::open(&path).unwrap();
+    assert!(lib.sync_blocked().is_some());
+    assert!(lib.sync_heads().is_err());
+    let first = epoch(&lib);
+    assert!(first.is_some());
+    drop(lib);
+    let lib = Library::open(&path).unwrap();
+    assert!(lib.sync_blocked().is_some());
+    assert_eq!(epoch(&lib), first, "not a new one at every start");
 }
 
 /// A library that already has things keeps them: the other's are added.

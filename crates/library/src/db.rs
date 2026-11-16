@@ -56,6 +56,8 @@ struct Inner {
     /// The sync clock (see [`crate::sync`]); the change triggers read it
     /// through `sync_hlc()`.
     clock: Arc<AtomicI64>,
+    /// Why syncing is off on this database (see [`Library::sync_blocked`]).
+    sync_blocked: Option<String>,
     /// See [`Library::set_album_likes_tracks`]; the SQL reads it through
     /// `album_likes_tracks()`.
     album_likes_tracks: Arc<AtomicBool>,
@@ -151,6 +153,14 @@ fn prepare_writer(writer: &Connection) -> Result<Shared> {
     Ok(shared)
 }
 
+/// The library's SQL functions on a connection of its own to a library
+/// database (a tool, a test writing through it): without them a write
+/// that fires the change triggers fails («no such function: sync_hlc»).
+/// Its sync clock starts where the database's was left.
+pub fn register_functions(conn: &Connection) -> Result<()> {
+    prepare_writer(conn).map(|_| ())
+}
+
 fn configure(conn: &Connection, writer: bool) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     // Hot reads (queue rows, cards, likes) keep their statements prepared.
@@ -237,7 +247,7 @@ impl Library {
             }
         };
         let epoch_file = path.as_deref().map(crate::sync::epoch_file_of);
-        let hlc = crate::sync::install(&mut writer, device.as_str(), epoch_file.as_deref())?;
+        let crate::sync::Installed { hlc, blocked: sync_blocked } = crate::sync::install(&mut writer, device.as_str(), epoch_file.as_deref())?;
         clock.fetch_max(hlc, Ordering::Relaxed);
         Ok(Self {
             inner: Arc::new(Inner {
@@ -248,6 +258,7 @@ impl Library {
                 device: RwLock::new(device),
                 last_ts: AtomicI64::new(crate::sync::ms_of(hlc)),
                 clock,
+                sync_blocked,
                 album_likes_tracks,
                 path,
             }),
@@ -306,6 +317,12 @@ impl Library {
                 Err(actual) => prev = actual,
             }
         }
+    }
+
+    /// Why syncing is off on this database: the copy of its sync epoch
+    /// beside the file could not be written (none: it is on).
+    pub fn sync_blocked(&self) -> Option<String> {
+        self.inner.sync_blocked.clone()
     }
 
     /// Another device's row of version `seen` was merged in: the clock

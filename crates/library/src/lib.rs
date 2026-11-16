@@ -56,7 +56,7 @@ mod util;
 #[cfg(test)]
 mod tests;
 
-pub use db::Library;
+pub use db::{Library, register_functions};
 pub use lyrics::{AlignCounts, AlignedLyrics, StoredLyrics};
 pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
