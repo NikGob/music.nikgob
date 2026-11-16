@@ -107,7 +107,7 @@ const SENT_S: f64 = 3.0;
 const KEEP_S: f64 = 5.0;
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
-    super::devices::show(ui, state, &mut pages.net.devices, out);
+    super::devices::show(ui, state, pages, out);
     group(ui, "API и MCP");
     let api = &state.api;
     let mem = &mut pages.net;
@@ -311,7 +311,7 @@ fn kept(api: &ApiView, id: &str, waited: f64) -> Kept {
 
 /// This computer's address in the home network: the one a connection out
 /// would leave from (a UDP socket only picks its route, nothing is sent).
-fn lan_ip() -> Option<String> {
+pub(crate) fn lan_ip() -> Option<String> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("10.254.254.254:9").ok()?;
     let ip = s.local_addr().ok()?.ip();
@@ -572,7 +572,7 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Ve
 }
 
 /// Text to copy in a `surface-container-low` box with «Копировать».
-pub(super) fn code_block(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, text: &str, s: crate::ColorScheme) {
+pub(crate) fn code_block(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, text: &str, s: crate::ColorScheme) {
     egui::Frame::new().fill(s.surface_container_low).corner_radius(egui::CornerRadius::same(12)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {

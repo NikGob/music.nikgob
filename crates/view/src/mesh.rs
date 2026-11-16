@@ -7,6 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use nikgob_core::settings::KeepMasters;
+
+use crate::PlaylistId;
+
 /// What a device is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -102,6 +106,36 @@ impl MeshProfile {
             _ => s.strip_prefix("favorites:").and_then(|n| n.parse().ok()).map(|cap_bytes| Self::Favorites { cap_bytes }),
         }
     }
+
+    /// The profile chip's word: «Полная копия», «Библиотека», «Избранное»,
+    /// «Только звук».
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Полная копия",
+            Self::Library => "Библиотека",
+            Self::Favorites { .. } => "Избранное",
+            Self::SoundOnly => "Только звук",
+        }
+    }
+
+    /// The device keeps files of the library (not «Только звук»).
+    pub const fn stores(self) -> bool {
+        !matches!(self, Self::SoundOnly)
+    }
+}
+
+/// «Избранное»: the cap a new choice of it starts with.
+pub const FAVORITES_CAP_DEFAULT: u64 = 16 << 30;
+/// The cap's slider, in GiB.
+pub const FAVORITES_CAP_MIN_GB: u64 = 4;
+pub const FAVORITES_CAP_MAX_GB: u64 = 256;
+
+/// What a device with «Избранное» keeps pinned besides its cache.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshPins {
+    /// «Любимые».
+    pub liked: bool,
+    pub playlists: Vec<PlaylistId>,
 }
 
 /// The library disk of a device.
@@ -132,6 +166,22 @@ pub struct MeshPlaying {
 pub struct MeshTransfer {
     pub done: u64,
     pub total: u64,
+    /// Paused here ([`crate::Command::MeshPauseTransfer`]).
+    #[serde(default)]
+    pub paused: bool,
+}
+
+impl MeshPlaying {
+    /// Where the song is at `now_ms` (that device's clock, close enough to
+    /// this one's on a home network), within its length.
+    pub fn position_at(&self, now_ms: i64) -> i64 {
+        let run = if self.paused { 0.0 } else { f64::from(self.rate) * (now_ms - self.at_ms).max(0) as f64 };
+        let p = self.position_ms + run as i64;
+        match self.duration_ms {
+            Some(d) if d > 0 => p.clamp(0, d),
+            _ => p.max(0),
+        }
+    }
 }
 
 /// One device.
@@ -151,6 +201,12 @@ pub struct MeshNodeView {
     pub playing: Option<MeshPlaying>,
     pub profile: MeshProfile,
     pub transfer: Option<MeshTransfer>,
+    /// «Любимые» and the playlists it keeps with «Избранное» (chosen here).
+    pub pins: MeshPins,
+    /// Lossless originals whose only verified copy is on it (the replicas'
+    /// rows): forgetting it while this computer may let go of originals
+    /// asks first.
+    pub sole_masters: u64,
 }
 
 /// An unpaired instance seen on the home network now.
@@ -212,9 +268,22 @@ pub struct MeshView {
     pub name_setting: String,
     /// The settings can be saved (there is a settings.toml).
     pub configurable: bool,
+    /// «Оригиналы FLAC на ПК» (`[mesh] keep_masters`).
+    pub keep_masters: KeepMasters,
 }
 
 impl MeshView {
+    /// Forgetting `node` could lose originals: it holds the only verified
+    /// copy of some while this computer may let go of its own.
+    pub fn forget_risky(&self, node: &MeshNodeView) -> bool {
+        node.sole_masters > 0 && self.keep_masters != KeepMasters::Always
+    }
+
+    /// The devices there are: this one and the paired ones.
+    pub fn device_count(&self) -> usize {
+        1 + self.nodes.len()
+    }
+
     /// This instance may start a pairing: it holds the ring, or is in none
     /// (the first pairing makes the ring here).
     pub fn can_pair(&self) -> bool {
@@ -290,6 +359,30 @@ mod tests {
         assert!(v.can_pair());
         v.running = false;
         assert!(!v.can_pair());
+    }
+
+    #[test]
+    fn a_forget_is_risky_only_while_originals_may_go() {
+        let mut v = MeshView::default();
+        let mut pi = MeshNodeView { id: "pi".into(), ..MeshNodeView::default() };
+        assert!(!v.forget_risky(&pi));
+        pi.sole_masters = 3;
+        assert!(!v.forget_risky(&pi), "this computer keeps every original");
+        v.keep_masters = KeepMasters::AfterOne;
+        assert!(v.forget_risky(&pi));
+        assert_eq!(v.device_count(), 1);
+    }
+
+    #[test]
+    fn a_remote_song_moves_with_its_clock() {
+        let p = MeshPlaying { position_ms: 10_000, at_ms: 1_000, rate: 1.0, duration_ms: Some(12_000), ..MeshPlaying::default() };
+        assert_eq!(p.position_at(2_000), 11_000);
+        assert_eq!(p.position_at(9_000), 12_000, "never past its end");
+        assert_eq!(p.position_at(500), 10_000, "a clock a little behind");
+        let paused = MeshPlaying { paused: true, ..p.clone() };
+        assert_eq!(paused.position_at(5_000), 10_000);
+        assert_eq!(MeshProfile::Favorites { cap_bytes: 1 }.label(), "Избранное");
+        assert!(!MeshProfile::SoundOnly.stores());
     }
 
     #[test]

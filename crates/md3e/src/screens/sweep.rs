@@ -231,7 +231,7 @@ pub const ALL: &[SettingId] = {
         LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
         Preset(Area::Seeding), NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
         // Межсеть.
-        MeshThis, MeshEnabled, MeshDevices, MeshNearby, ApiEnabled, ApiAccess, ApiPort, ApiTokens,
+        MeshDevices, MeshNearby, MeshKeepMasters, MeshEnabled, ApiEnabled, ApiAccess, ApiPort, ApiTokens,
         // Система.
         UserName, Autostart, AutostartHidden, Preset(Area::Load), FpsLimit, TrayKeepWindow, AutoDownloads, StreamAnalysis, LyricsSeparate, LyricsDeep,
         LyricsWordsAll, ToastTime, DownloadToasts, LibraryDir, MastersDir, Inbox, Trash, ExportData,
@@ -435,7 +435,7 @@ fn spec(id: SettingId) -> Spec {
         S::ApiTokens => Spec::Fixed(List, "a token is made by hand only; its secret is shown once"),
         // The devices live in settings.toml (`[mesh]`) and the node table;
         // the sweep never pairs or joins the home network.
-        S::MeshThis => Spec::Fixed(Field, "kept in settings.toml; typed in, never set by the sweep"),
+        S::MeshKeepMasters => Spec::Fixed(Segments, "kept in settings.toml; the sweep never lets an original go"),
         S::MeshEnabled => Spec::Fixed(Kind::Switch, "kept in settings.toml; the sweep never starts the mesh"),
         S::MeshDevices => Spec::Fixed(List, "devices are paired by hand only"),
         S::MeshNearby => Spec::Fixed(List, "shown only while an unpaired device is on the network"),
@@ -778,7 +778,7 @@ pub fn tab_first(tab: usize) -> SettingId {
         settings_help::TAB_LOOK => SettingId::Theme,
         settings_help::TAB_SERVICES => SettingId::SpotifyEnabled,
         settings_help::TAB_DOWNLOADS => SettingId::Preset(Area::Sources),
-        settings_help::TAB_NET => SettingId::MeshThis,
+        settings_help::TAB_NET => SettingId::MeshDevices,
         _ => SettingId::UserName,
     }
 }
@@ -938,7 +938,7 @@ mod tests {
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
             | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::FirstRun | S::CoverSpinSpeed
             | S::CoverPulseStrength | S::HomeSections | S::Preset(_) | S::ApiEnabled | S::ApiAccess | S::ApiPort
-            | S::ApiTokens | S::MeshThis | S::MeshEnabled | S::MeshDevices | S::MeshNearby => pos(id),
+            | S::ApiTokens | S::MeshEnabled | S::MeshDevices | S::MeshNearby | S::MeshKeepMasters => pos(id),
         }
     }
 
@@ -1031,9 +1031,7 @@ mod tests {
         let mut s = Survey::new(survey_state(), [1600.0, 1000.0]);
         for tab in 0..TABS.len() {
             let rows = s.tab(&Prefs::default(), tab);
-            // «Межсеть» is short: this device, the devices, the API.
-            let least = if tab == settings_help::TAB_NET { 3 } else { 5 };
-            assert!(rows.len() > least, "tab {tab}: {} rows", rows.len());
+            assert!(rows.len() > 5, "tab {tab}: {} rows", rows.len());
             for r in &rows {
                 assert!(ALL.contains(&r.id), "{:?}", r.id);
                 assert!(!r.label.is_empty() && !r.group.is_empty(), "{:?}", r.id);

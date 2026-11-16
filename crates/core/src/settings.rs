@@ -40,18 +40,70 @@ pub struct Settings {
 }
 
 /// The owner's devices (`[mesh]`): on unless switched off; this device's
-/// name (empty: the computer's own name).
+/// name (empty: the computer's own name); when this computer may let go of
+/// its lossless originals; what each device with «Избранное» keeps.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MeshSettings {
     pub enabled: bool,
     pub name: String,
+    pub keep_masters: KeepMasters,
+    pub pins: Vec<MeshPinsRecord>,
 }
 
 impl Default for MeshSettings {
     fn default() -> Self {
-        Self { enabled: true, name: String::new() }
+        Self { enabled: true, name: String::new(), keep_masters: KeepMasters::Always, pins: Vec::new() }
     }
+}
+
+impl MeshSettings {
+    /// What device `node` keeps pinned (nothing when it was never chosen).
+    pub fn pins_of(&self, node: &str) -> Option<&MeshPinsRecord> {
+        self.pins.iter().find(|p| p.node == node)
+    }
+}
+
+/// «Оригиналы FLAC на ПК»: when this computer may let go of a lossless
+/// original that other devices hold (the replicas decide; nothing here
+/// deletes a file).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum KeepMasters {
+    /// «Всегда»: kept here whatever the other devices hold.
+    #[default]
+    #[serde(rename = "always")]
+    Always,
+    /// «После 1 копии»: once one other device holds a verified copy.
+    #[serde(rename = "after1")]
+    AfterOne,
+    /// «После 2 копий»: once two do.
+    #[serde(rename = "after2")]
+    AfterTwo,
+}
+
+impl KeepMasters {
+    pub const ALL: [Self; 3] = [Self::Always, Self::AfterOne, Self::AfterTwo];
+
+    /// The verified copies elsewhere it takes before this computer may let
+    /// go of an original (`None`: never).
+    pub const fn copies(self) -> Option<u32> {
+        match self {
+            Self::Always => None,
+            Self::AfterOne => Some(1),
+            Self::AfterTwo => Some(2),
+        }
+    }
+}
+
+/// What a device with the «Избранное» profile keeps besides its cache:
+/// «Любимые» and the playlists ticked for it (`[[mesh.pins]]`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MeshPinsRecord {
+    /// The device's node id.
+    pub node: String,
+    pub liked: bool,
+    pub playlists: Vec<crate::model::PlaylistId>,
 }
 
 /// The default port of the local REST API.
@@ -522,7 +574,16 @@ mod tests {
                     revoked_ms: None,
                 }],
             },
-            mesh: MeshSettings { enabled: false, name: "Кабинет".into() },
+            mesh: MeshSettings {
+                enabled: false,
+                name: "Кабинет".into(),
+                keep_masters: KeepMasters::AfterTwo,
+                pins: vec![MeshPinsRecord {
+                    node: "ab12".into(),
+                    liked: true,
+                    playlists: vec![crate::model::PlaylistId::from_uuid(crate::model::Uuid::from_u128(7))],
+                }],
+            },
         }
     }
 
@@ -599,6 +660,23 @@ username = \"me\"
         let named: Settings = toml::from_str("[mesh]\nname = \"Pi\"\n").unwrap();
         assert!(named.mesh.enabled);
         assert_eq!(named.mesh.name, "Pi");
+        assert_eq!(named.mesh.keep_masters, KeepMasters::Always, "the originals stay unless told otherwise");
+        assert!(named.mesh.pins.is_empty());
+    }
+
+    /// The originals' choice and the pins are words in the file and read
+    /// back as written.
+    #[test]
+    fn mesh_choices_are_words_in_the_file() {
+        let text = toml::to_string(&sample()).unwrap();
+        assert!(text.contains("keep_masters = \"after2\""), "{text}");
+        assert!(text.contains("[[mesh.pins]]"), "{text}");
+        let s: Settings = toml::from_str("[mesh]\nkeep_masters = \"after1\"\n\n[[mesh.pins]]\nnode = \"pi\"\nliked = true\n").unwrap();
+        assert_eq!(s.mesh.keep_masters, KeepMasters::AfterOne);
+        assert_eq!(s.mesh.pins_of("pi").map(|p| p.liked), Some(true));
+        assert!(s.mesh.pins_of("tv").is_none());
+        assert_eq!(KeepMasters::Always.copies(), None);
+        assert_eq!(KeepMasters::AfterTwo.copies(), Some(2));
     }
 
     #[test]

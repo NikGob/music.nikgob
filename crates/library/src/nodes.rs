@@ -94,6 +94,25 @@ impl Library {
         })
     }
 
+    /// For each device holding some: how many lossless originals have their
+    /// only verified copy there (no other device has verified one).
+    pub fn sole_replicas(&self) -> Result<Vec<(String, u64)>> {
+        self.read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT r.node_id, COUNT(*) FROM replica r
+                 JOIN master m ON m.file_hash = r.file_hash
+                 WHERE r.verified_at IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM replica o
+                       WHERE o.file_hash = r.file_hash AND o.node_id <> r.node_id AND o.verified_at IS NOT NULL)
+                 GROUP BY r.node_id
+                 ORDER BY r.node_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+    }
+
     /// Forgets these devices (their replicas' rows stay: they say where a
     /// file was verified).
     pub fn remove_nodes(&self, ids: &[String]) -> Result<usize> {
@@ -147,6 +166,26 @@ mod tests {
         assert_eq!(lib.remove_nodes(&[n.id.clone()]).unwrap(), 1);
         assert!(lib.nodes().unwrap().is_empty());
         assert_eq!(lib.remove_nodes(&[n.id]).unwrap(), 0);
+    }
+
+    /// Only the originals verified on one device alone count for it.
+    #[test]
+    fn sole_copies_are_counted_per_device() {
+        let lib = Library::open_in_memory().unwrap();
+        assert!(lib.sole_replicas().unwrap().is_empty());
+        lib.write(|tx| {
+            for (t, h) in [("t1", "h1"), ("t2", "h2"), ("t3", "h3")] {
+                tx.execute("INSERT INTO master(track_id, codec, file_hash, size_bytes) VALUES (?1, 'flac', ?2, 10)", [t, h])?;
+            }
+            // h1 only on the Pi; h2 on the Pi and the laptop; h3 on the
+            // laptop not verified yet; h9 has no master.
+            for (h, n, v) in [("h1", "pi", Some(1)), ("h2", "pi", Some(1)), ("h2", "lap", Some(2)), ("h3", "lap", None), ("h9", "pi", Some(1))] {
+                tx.execute("INSERT INTO replica(file_hash, node_id, verified_at) VALUES (?1, ?2, ?3)", rusqlite::params![h, n, v])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(lib.sole_replicas().unwrap(), vec![("pi".to_owned(), 1)]);
     }
 
     /// A library of schema 33 keeps its (unused) node rows and gets the new

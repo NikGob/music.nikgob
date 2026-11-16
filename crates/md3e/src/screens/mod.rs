@@ -1219,7 +1219,7 @@ fn load_for(route: &Route, out: &mut Vec<Command>) {
         // left meanwhile is loaded by the page itself.
         Route::Mix { .. } | Route::NewReleases => {}
         Route::Downloads(_) => out.push(Command::LoadWishlist),
-        Route::Settings | Route::Lyrics | Route::Marks => {}
+        Route::Settings | Route::Lyrics | Route::Marks | Route::Devices => {}
     }
 }
 
@@ -1388,8 +1388,29 @@ impl Md3eUi {
             "lyrics-presets" => S::Preset(nikgob_view::presets::Area::Lyrics),
             "home-sections" => S::HomeSections,
             "source-presets" => S::Preset(nikgob_view::presets::Area::Sources),
+            "devices" => S::MeshDevices,
+            "keep-masters" => S::MeshKeepMasters,
+            "api" => S::ApiEnabled,
             _ => S::CoverClickPause,
         });
+    }
+
+    /// Opens «Карта сети», with the passport of device `select` open (0:
+    /// this computer, n: the n-th paired one) (scripted screenshots).
+    pub fn open_devices_map(&mut self, ctx: &Context, state: &ViewState, select: Option<usize>, out: &mut Vec<Command>) {
+        if let Some(i) = select {
+            let id = if i == 0 { Some(String::new()) } else { state.mesh.nodes.get(i - 1).map(|n| n.id.clone()) };
+            if let Some(id) = id {
+                self.pages.mesh.map.select(id);
+            }
+        }
+        self.navigate(ctx, Route::Devices, out);
+    }
+
+    /// Opens «Добавить устройство» on «Подключить» or, with `install`,
+    /// «Установить» (scripted screenshots).
+    pub fn open_add_device(&mut self, ctx: &Context, state: &ViewState, install: bool, out: &mut Vec<Command>) {
+        pages::open_add_device(ctx, state, &mut self.pages, install, out);
     }
 
     /// Opens the cookies form of «Сервисы»
@@ -1545,7 +1566,7 @@ impl Md3eUi {
                 Some(1)
             }
             Route::Downloads(_) => Some(2),
-            Route::Settings | Route::Marks | Route::Stream(_) | Route::Lyrics => None,
+            Route::Settings | Route::Marks | Route::Devices | Route::Stream(_) | Route::Lyrics => None,
         };
         // A service's page belongs where it was opened from (the search
         // over Главная, an artist of the library…).
@@ -1573,7 +1594,7 @@ impl Md3eUi {
                     items: &items,
                     bottom: &bottom,
                     selected,
-                    bottom_selected: matches!(self.route(), Route::Settings | Route::Marks).then_some(0),
+                    bottom_selected: matches!(self.route(), Route::Settings | Route::Marks | Route::Devices).then_some(0),
                 }
                 .show(ui)
             })
@@ -1610,9 +1631,9 @@ pub(crate) fn np_spring(motion: u8) -> nikgob_motion::Spring {
 }
 
 /// Pages mini mode shows in place of Now Playing: settings, and the artist
-/// opened from the player.
+/// opened from the player, «Карта сети».
 fn compact_page(route: &Route) -> bool {
-    matches!(route, Route::Settings | Route::Artist(_))
+    matches!(route, Route::Settings | Route::Artist(_) | Route::Devices)
 }
 
 #[cfg(test)]

@@ -88,6 +88,15 @@
 //! - `fake:quality:real` / `fake:quality:fake` — what plays is a FLAC whose
 //!   check found it genuine, or made from an MP3 ~128 (its rows and the
 //!   «Качество» section of «Инфо» say so, with the spectrum and its cut).
+//! - `fake:mesh` — the owner's devices: this computer holding the ring, a
+//!   Raspberry Pi online, playing, files going to it (the transfer moves
+//!   on, 12 MiB/s) and holding 12 originals alone while «Оригиналы FLAC на
+//!   ПК» is «После 1 копии», a phone with «Избранное» out of reach, a
+//!   speaker as a guest, a player nearby and the invite of «Добавить
+//!   устройство»; `fake:mesh:alone` — this computer in no ring (its code in
+//!   its row), the player nearby; `fake:mesh:five` — five devices (the
+//!   ring of «Карта сети»). `fake:mesh-api` — the API on the home network
+//!   (the install line without its blocker).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -138,6 +147,10 @@ pub struct Fakes {
     /// `fake:quality:fake` (true) / `fake:quality:real`.
     quality: Option<bool>,
     downloads: bool,
+    /// `fake:mesh…`: the owner's devices (`alone`, `paired`, `five`), since
+    /// when (the transfer moves with the clock), the API open to the home.
+    mesh: Option<(MeshFake, std::time::Instant)>,
+    mesh_api: bool,
 }
 
 impl Fakes {
@@ -195,6 +208,10 @@ impl Fakes {
             "downloads" => self.downloads = true,
             "quality:real" => self.quality = Some(false),
             "quality:fake" => self.quality = Some(true),
+            "mesh" => self.mesh = Some((MeshFake::Paired, std::time::Instant::now())),
+            "mesh:alone" => self.mesh = Some((MeshFake::Alone, std::time::Instant::now())),
+            "mesh:five" => self.mesh = Some((MeshFake::Five, std::time::Instant::now())),
+            "mesh-api" => self.mesh_api = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -238,6 +255,8 @@ impl Fakes {
             || self.fake_flac
             || self.quality.is_some()
             || self.downloads
+            || self.mesh.is_some()
+            || self.mesh_api
     }
 
     /// `state` with the fakes laid over it.
@@ -461,6 +480,16 @@ impl Fakes {
                 syncing: false,
                 error: None,
             });
+        }
+        if let Some((kind, since)) = self.mesh {
+            mesh(&mut s, kind, since.elapsed().as_secs_f64());
+        }
+        if self.mesh_api {
+            s.api.enabled = true;
+            s.api.configurable = true;
+            s.api.access = nikgob_view::ApiAccess::Network;
+            s.api.listening = Some(format!("0.0.0.0:{}", s.api.port));
+            s.api.error = None;
         }
         s
     }
@@ -1480,4 +1509,125 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
         t
     });
     s.home.tiles = tiles.into_iter().take(n).collect();
+}
+
+/// Which devices `fake:mesh…` lays over the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeshFake {
+    /// `fake:mesh:alone`: this computer in no ring yet (its code shown), a
+    /// Raspberry Pi nearby.
+    Alone,
+    /// `fake:mesh`: this computer holding the ring with a Raspberry Pi
+    /// (online, playing, files going to it), a phone with «Избранное»
+    /// (out of reach) and a speaker as a guest; a player nearby; the invite
+    /// of «Добавить устройство».
+    Paired,
+    /// `fake:mesh:five`: five devices, for the ring of «Карта сети».
+    Five,
+}
+
+/// The invite the fakes show (a ticket's shape, no real secret).
+const FAKE_TICKET: &str = "nkm1ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqxot1uwisza345h769ybndrfg8ejkmcpqx";
+
+/// The owner's devices for screenshots (`fake:mesh…`); `secs` since the
+/// fake was laid (the transfer to the Pi moves on with it).
+fn mesh(s: &mut ViewState, kind: MeshFake, secs: f64) {
+    use nikgob_view::{
+        KeepMasters, MeshInvite, MeshKind, MeshNearbyView, MeshNodeView, MeshPins, MeshPlaying, MeshProfile, MeshScope, MeshStorage, MeshTransfer,
+    };
+    const GB: u64 = 1 << 30;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
+    let lists: Vec<nikgob_view::PlaylistId> = s.library.playlists.iter().take(2).map(|p| p.id).collect();
+    if !s.downloads.storage.known {
+        s.downloads.storage = nikgob_view::StorageView {
+            known: true,
+            library: 184 * GB + GB / 5,
+            masters: 112 * GB,
+            disks: vec![nikgob_view::DiskSpace { name: "D:".into(), free: 410 * GB, total: 931 * GB }],
+        };
+    }
+    let m = &mut s.mesh;
+    m.enabled = true;
+    m.running = true;
+    m.configurable = true;
+    m.error = None;
+    m.name_setting = "Кабинет".into();
+    m.this = MeshNodeView {
+        id: "fake-this".into(),
+        name: "DESKTOP-NIK".into(),
+        kind: MeshKind::Pc,
+        online: true,
+        addr: Some("192.168.0.10:47220".into()),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        ..MeshNodeView::default()
+    };
+    let pi_nearby = MeshNearbyView { id: "fake-pi-2".into(), name: "raspberrypi".into(), kind: MeshKind::Pi, addr: Some("192.168.0.31:47220".into()) };
+    m.invite = Some(MeshInvite { ticket: FAKE_TICKET.into(), expires_ms: now + 14 * 60_000 });
+    m.nearby = vec![pi_nearby];
+    if kind == MeshFake::Alone {
+        m.paired = false;
+        m.ring_holder = false;
+        m.code = Some("042917".into());
+        m.nodes.clear();
+        return;
+    }
+    m.paired = true;
+    m.ring_holder = true;
+    m.code = None;
+    m.keep_masters = KeepMasters::AfterOne;
+    let total = 6 * GB;
+    // 12 MiB/s, round and round.
+    let done = ((secs * 12.0 * f64::from(1u32 << 20)) as u64) % total;
+    let pi = MeshNodeView {
+        id: "fake-pi".into(),
+        name: "Raspberry Pi".into(),
+        kind: MeshKind::Pi,
+        online: true,
+        last_seen_ms: Some(now),
+        addr: Some("192.168.0.157:47220".into()),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        storage: Some(MeshStorage { used: 296 * GB, free: 640 * GB }),
+        playing: Some(MeshPlaying {
+            title: "Фонари".into(),
+            artists: vec!["Кино".into()],
+            paused: false,
+            position_ms: 61_000,
+            at_ms: now - (secs * 1000.0) as i64,
+            rate: 1.0,
+            duration_ms: Some(212_000),
+        }),
+        profile: MeshProfile::Full,
+        transfer: Some(MeshTransfer { done, total, paused: false }),
+        sole_masters: 12,
+        ..MeshNodeView::default()
+    };
+    let phone = MeshNodeView {
+        id: "fake-phone".into(),
+        name: "Pixel".into(),
+        kind: MeshKind::Phone,
+        online: false,
+        last_seen_ms: Some(now - 3 * 3_600_000),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        storage: Some(MeshStorage { used: 18 * GB + 2 * GB / 5, free: 40 * GB }),
+        profile: MeshProfile::Favorites { cap_bytes: 25 * GB },
+        pins: MeshPins { liked: true, playlists: lists },
+        ..MeshNodeView::default()
+    };
+    let speaker = MeshNodeView {
+        id: "fake-speaker".into(),
+        name: "Колонка на кухне".into(),
+        kind: MeshKind::Server,
+        scope: MeshScope::Guest,
+        online: true,
+        last_seen_ms: Some(now),
+        profile: MeshProfile::SoundOnly,
+        ..MeshNodeView::default()
+    };
+    m.nodes = match kind {
+        MeshFake::Five => {
+            let tv = MeshNodeView { id: "fake-tv".into(), name: "Телевизор".into(), kind: MeshKind::Tv, online: true, profile: MeshProfile::SoundOnly, ..MeshNodeView::default() };
+            vec![pi, phone, speaker, tv]
+        }
+        _ => vec![pi, phone, speaker],
+    };
 }

@@ -1,5 +1,6 @@
 //! Content pages and the menus and dialogs they open.
 
+mod add_device;
 mod brand;
 pub(super) mod detail;
 mod dialogs;
@@ -11,6 +12,8 @@ pub(crate) mod home;
 mod library;
 mod logos;
 mod marks;
+mod mesh_ui;
+mod network;
 mod search;
 mod shelf;
 mod settings;
@@ -880,6 +883,9 @@ pub struct PageState {
     /// «Межсеть»: the token dialog, what is typed into «Порт», the tokens'
     /// last uses seen (their rows pulse on a new one).
     net: settings::NetState,
+    /// The owner's devices: the dialogs and the window they share, «Карта
+    /// сети».
+    pub(crate) mesh: mesh_ui::MeshUi,
     sp_client_id: String,
     yt_cookies: String,
     yt_form: bool,
@@ -898,6 +904,14 @@ pub struct PageState {
     stream_after_create: Option<(String, StreamAdd)>,
     /// The first run, while it is on screen.
     pub(crate) first_run: first_run::State,
+}
+
+/// Opens «Добавить устройство» at the first nearby device's code, or on
+/// «Установить» (scripted screenshots; Settings → Межсеть and «Карта
+/// сети» draw it).
+pub(crate) fn open_add_device(ctx: &Context, state: &ViewState, pages: &mut PageState, install: bool, out: &mut Vec<Command>) {
+    let tab = if install { add_device::AddTab::Install } else { add_device::AddTab::Connect };
+    add_device::open(ctx, &state.mesh, &mut pages.mesh, None, tab, state.mesh.nearby.first().map(|n| n.id.clone()), out);
 }
 
 /// The library as a list (true) or a grid.
@@ -1721,6 +1735,12 @@ pub fn page(
         settle_scroll(ui, pages, restore, o.offset, o.max);
         return None;
     }
+    // «Карта сети» is a field of its own, not a page that scrolls.
+    if *route == Route::Devices {
+        pages.scroll_now = 0.0;
+        pages.scroll_restore = None;
+        return network::show(ui, state, bottom_inset, pages, out);
+    }
     let mut area = egui::ScrollArea::vertical().id_salt(("page-scroll", id)).auto_shrink([false, false]);
     if let Some(y) = restore {
         area = area.vertical_scroll_offset(y);
@@ -1749,6 +1769,7 @@ pub fn page(
                 Route::Mix { key, world } => detail::mix(ui, *key, world.as_deref(), state, pages, out),
                 Route::NewReleases => home::new_releases(ui, state, pages, out),
                 Route::Marks => marks::show(ui, state, pages, out),
+                Route::Devices => None,
             };
             nav = r.or(nav.take());
             ui.add_space(bottom_inset);

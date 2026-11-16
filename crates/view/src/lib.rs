@@ -3275,6 +3275,9 @@ pub enum Route {
     /// tracks, the artists not recommended and the tracks with a speed of
     /// their own, each taken back there.
     Marks,
+    /// «Карта сети» (from Settings → Межсеть): the owner's devices as
+    /// cards, what flows between them, each one's passport.
+    Devices,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -3941,6 +3944,14 @@ pub enum Command {
     /// From the API: a new playlist with the id the API chose, with these
     /// tracks.
     ApiCreatePlaylist { id: PlaylistId, name: String, tracks: Vec<TrackId> },
+    /// «Оригиналы FLAC на ПК» (`[mesh] keep_masters`); the replicas act on
+    /// it, nothing is deleted by the choice itself.
+    MeshSetKeepMasters(KeepMasters),
+    /// «Избранное» of a device: «Любимые» and the playlists it keeps.
+    MeshSetPins { node_id: String, pins: MeshPins },
+    /// The pause on a transfer's line («Карта сети»): the files to that
+    /// device wait (the replicas honour it).
+    MeshPauseTransfer { node_id: String, paused: bool },
 }
 
 impl Default for Prefs {
