@@ -1,14 +1,19 @@
 //! «Оригиналы FLAC на ПК» (`[mesh] keep_masters`): while it is not
 //! «Всегда», the lossless masters this computer still has whose verified
 //! copies are on enough of the owner's trusted devices are offered on a
-//! «Подтверди» card, each one listed; nothing goes by itself. On «Убрать в
-//! Корзину» the devices are asked to read their copies again right then
-//! (the mesh, [`Command::ReplicaRecheck`]) and only the masters that still
-//! have enough go to the Trash; «Отменить» brings them back, the Trash's
-//! 30 days end them. The master rows stay: the files exist on the devices.
+//! «Подтверди» card, each file that would move listed; nothing goes by
+//! itself. On «Убрать в Корзину» the devices are asked to read their copies
+//! again right then (the mesh, [`Command::ReplicaRecheck`]) and only the
+//! files of the masters that still have enough go to the Trash, each looked
+//! at again right before it moves; a change of the trusted devices or of
+//! the choice meanwhile makes the answer void. «Отменить» brings them back,
+//! the Trash's 30 days end them. The master rows stay: the files exist on
+//! the devices.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use nikgob_library::Library;
@@ -26,20 +31,31 @@ const CARD_MAX: usize = 50;
 /// The devices' second look at their copies is waited for this long.
 const RECHECK_WAIT: Duration = Duration::from_secs(20 * 60);
 
-/// A master on the card.
+/// A master file on the card: one line for each file that would move.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Offered {
     pub(crate) hash: String,
+    /// The file itself.
+    pub(crate) path: PathBuf,
     /// The song: «Title — Artist».
     pub(crate) label: String,
-    /// Where its copies are and its size.
+    /// Where its copies are, its size and where the file is.
     pub(crate) detail: String,
+}
+
+/// What the masters that may go depend on: the choice (how many copies)
+/// and the trusted devices staying. A change makes an answer void.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Watch {
+    need: Option<u32>,
+    devices: Vec<String>,
 }
 
 /// What an accepted card is doing.
 enum Busy {
-    /// Its masters' copies are being read again on the devices.
-    Rechecking { card: u64, hashes: Vec<String>, since: Instant },
+    /// Its masters' copies are being read again on the devices, with the
+    /// state of things it was asked in.
+    Rechecking { card: u64, items: Vec<Offered>, since: Instant, gen: u64 },
     /// The ones that may go are being moved to the Trash.
     Moving,
 }
@@ -58,6 +74,11 @@ pub(crate) struct ReplicaKeep {
     /// again while the player runs.
     kept: HashSet<String>,
     busy: Option<Busy>,
+    /// What the masters that may go depend on, as last seen, and its
+    /// count of changes (read by the thread that moves them, before each
+    /// file).
+    watch: Option<Watch>,
+    gen: Arc<AtomicU64>,
 }
 
 /// «файл», «файла», «файлов» for `n`.
@@ -83,8 +104,8 @@ fn size_words(bytes: u64) -> String {
     }
 }
 
-/// The card of masters that may go (`id`): each one listed; yes moves
-/// exactly those to the Trash, no keeps them.
+/// The card of master files that may go (`id`): each file listed; yes
+/// moves exactly those to the Trash, no keeps them.
 pub(crate) fn keep_card(id: u64, items: &[Offered]) -> Confirm {
     let n = items.len();
     Confirm {
@@ -100,16 +121,16 @@ pub(crate) fn keep_card(id: u64, items: &[Offered]) -> Confirm {
     }
 }
 
-/// The masters to offer: those `need` trusted devices (none of `leaving`)
-/// hold verified copies of, that this computer still has (kept by name and
-/// that file there, or flat in `masters_dir`), not `kept`. Reads the
-/// library and the masters folder: never on the loop.
+/// The master files to offer: every file this computer still has (a plain
+/// file inside `masters_dir`: kept by name, or flat) of the masters `need`
+/// trusted devices (none of `leaving`) hold verified copies of, not
+/// `kept`; one line each, with where it is. Reads the library and the
+/// masters folder: never on the loop.
 pub(crate) fn offer_list(lib: &Library, need: u32, leaving: &[String], masters_dir: &Path, kept: &HashSet<String>) -> Result<Vec<Offered>, String> {
     let all = lib.masters_to_let_go(need, leaving).map_err(|e| e.to_string())?;
     if all.is_empty() {
         return Ok(Vec::new());
     }
-    let flat = if all.iter().any(|g| g.flat) { crate::mesh::flat_masters(masters_dir) } else { HashSet::new() };
     let names: HashMap<String, String> =
         lib.nodes().map(|rows| rows.into_iter().map(|r| (r.id.clone(), r.shown_name().to_owned())).collect()).unwrap_or_default();
     let mut out = Vec::new();
@@ -117,8 +138,13 @@ pub(crate) fn offer_list(lib: &Library, need: u32, leaving: &[String], masters_d
         if kept.contains(&g.file_hash) {
             continue;
         }
-        let here = g.paths.iter().any(|p| Path::new(p).is_file()) || (g.flat && flat.contains(&g.file_hash));
-        if !here {
+        let mut files: Vec<PathBuf> = g.paths.iter().map(PathBuf::from).collect();
+        if g.flat {
+            files.extend(nikgob_import::master_files::flat_master(masters_dir, &g.file_hash));
+        }
+        files.retain(|p| nikgob_import::fsutil::plain_file_inside(p, masters_dir));
+        files.dedup();
+        if files.is_empty() {
             continue;
         }
         let label = g
@@ -127,7 +153,15 @@ pub(crate) fn offer_list(lib: &Library, need: u32, leaving: &[String], masters_d
             .and_then(|t| lib.get_track_row(*t).ok().flatten())
             .map_or_else(|| "Без названия".to_owned(), |r| if r.artist.trim().is_empty() { r.title } else { format!("{} — {}", r.title, r.artist) });
         let on: Vec<String> = g.holders.iter().map(|h| names.get(h).cloned().unwrap_or_else(|| h.chars().take(8).collect())).collect();
-        out.push(Offered { hash: g.file_hash, label, detail: format!("{} · {}", on.join(", "), size_words(g.size)) });
+        for path in files {
+            let shown = path.strip_prefix(masters_dir).unwrap_or(&path).display().to_string();
+            out.push(Offered {
+                hash: g.file_hash.clone(),
+                label: label.clone(),
+                detail: format!("{} · {} · {shown}", on.join(", "), size_words(g.size)),
+                path,
+            });
+        }
     }
     Ok(out)
 }
@@ -139,10 +173,47 @@ impl Worker {
         self.replica.due = None;
     }
 
+    /// The choice and the trusted devices staying, as they are now.
+    fn replica_watch_now(&self) -> Watch {
+        let leaving = self.mesh.leaving();
+        let st = self.state.read();
+        let mut devices: Vec<String> = st
+            .mesh
+            .nodes
+            .iter()
+            .filter(|n| n.scope == nikgob_view::MeshScope::Owner && !leaving.contains(&n.id))
+            .map(|n| n.id.clone())
+            .collect();
+        devices.sort();
+        Watch { need: st.mesh.keep_masters.copies(), devices }
+    }
+
+    /// A change of the choice or of the trusted devices: counted (the
+    /// thread moving masters stops before its next file), and a second
+    /// look under way is void.
+    fn replica_follow(&mut self) {
+        let now = self.replica_watch_now();
+        if self.replica.watch.as_ref() == Some(&now) {
+            return;
+        }
+        let first = self.replica.watch.is_none();
+        self.replica.watch = Some(now);
+        if first {
+            return;
+        }
+        self.replica.gen.fetch_add(1, Ordering::SeqCst);
+        self.replica.due = None;
+        if matches!(self.replica.busy, Some(Busy::Rechecking { .. })) {
+            self.replica.busy = None;
+            self.toast("Устройства или выбор изменились — оригиналы остались на компьютере", None);
+        }
+    }
+
     /// The loop's tick: a look at the masters that may go when due (only
     /// while the choice lets any go); a second look the devices never
     /// answered given up.
     pub(crate) fn replica_tick(&mut self) {
+        self.replica_follow();
         if let Some(Busy::Rechecking { since, .. }) = &self.replica.busy
             && since.elapsed() > RECHECK_WAIT
         {
@@ -188,7 +259,18 @@ impl Worker {
                 return;
             }
         };
-        let items: Vec<Offered> = items.into_iter().filter(|o| !self.replica.kept.contains(&o.hash)).take(CARD_MAX).collect();
+        // Whole masters only: every file of a master on the card, or none.
+        let mut items: Vec<Offered> = items.into_iter().filter(|o| !self.replica.kept.contains(&o.hash)).collect();
+        let mut end = 0;
+        while end < items.len() {
+            let h = items[end].hash.clone();
+            let next = end + items[end..].iter().take_while(|o| o.hash == h).count();
+            if next > CARD_MAX && end > 0 {
+                break;
+            }
+            end = next;
+        }
+        items.truncate(end);
         let card = if items.is_empty() {
             None
         } else {
@@ -223,7 +305,8 @@ impl Worker {
             log::info!("replica: an answer to a card no longer shown");
             return;
         };
-        let hashes: Vec<String> = items.iter().map(|o| o.hash.clone()).collect();
+        let mut hashes: Vec<String> = items.iter().map(|o| o.hash.clone()).collect();
+        hashes.dedup();
         let need = self.state.read().mesh.keep_masters.copies();
         let (Some(_), Some(need)) = (option, need) else {
             self.replica.kept.extend(hashes);
@@ -233,25 +316,43 @@ impl Worker {
             return;
         };
         let Some(link) = self.mesh.link.clone() else {
+            self.replica.card = None;
+            self.replica.due = None;
+            self.replica_publish();
             self.toast("Межсеть не запущена — оригиналы остались на компьютере", None);
             return;
         };
+        self.replica_follow();
+        let gen = self.replica.gen.load(Ordering::SeqCst);
         self.replica.card = None;
-        self.replica.busy = Some(Busy::Rechecking { card, hashes: hashes.clone(), since: Instant::now() });
+        self.replica.busy = Some(Busy::Rechecking { card, items, since: Instant::now(), gen });
         self.replica_publish();
         let leaving = self.mesh.leaving();
         log::info!("replica: {} masters may go; their copies are read again first", hashes.len());
         link(Command::ReplicaRecheck { card, hashes, need, leaving });
     }
 
-    /// The devices' second look: the masters that still have enough
-    /// verified copies go to the Trash (exactly those of the card), the
-    /// others stay.
+    /// The devices' second look: the files of the masters that still have
+    /// enough verified copies go to the Trash (exactly those of the card),
+    /// each looked at again right before it moves; the others stay. Void
+    /// when the trusted devices or the choice changed since it was asked.
     pub(crate) fn replica_rechecked(&mut self, card: u64, ok: Vec<String>, failed: Option<String>) {
-        let asked: HashSet<String> = match &self.replica.busy {
-            Some(Busy::Rechecking { card: c, hashes, .. }) if *c == card => hashes.iter().cloned().collect(),
+        self.replica_follow();
+        let (items, gen) = match &self.replica.busy {
+            Some(Busy::Rechecking { card: c, items, gen, .. }) if *c == card => (items.clone(), *gen),
             _ => return,
         };
+        let Some(need) = self.state.read().mesh.keep_masters.copies() else {
+            self.replica.busy = None;
+            self.toast("Выбор изменился — оригиналы остались на компьютере", None);
+            return;
+        };
+        if self.replica.gen.load(Ordering::SeqCst) != gen {
+            self.replica.busy = None;
+            self.toast("Устройства или выбор изменились — оригиналы остались на компьютере", None);
+            return;
+        }
+        let asked: HashSet<String> = items.iter().map(|o| o.hash.clone()).collect();
         let mut ok: Vec<String> = ok.into_iter().filter(|h| asked.contains(h)).collect();
         ok.sort();
         ok.dedup();
@@ -274,18 +375,28 @@ impl Worker {
         };
         let (trash, masters) = (svc.config().trash_dir.clone(), svc.config().masters_dir());
         let (lib, later) = (self.lib.clone(), self.later_tx.clone());
+        let (watch, leaving) = (self.replica.gen.clone(), self.mesh.leaving());
         self.replica.busy = Some(Busy::Moving);
         let spawned = std::thread::Builder::new().name("nikgob-masters-trash".into()).spawn(move || {
             let (mut ids, mut left) = (Vec::new(), stayed);
             for h in &ok {
-                match nikgob_import::trash::trash_master_files(&lib, &trash, &masters, h) {
-                    Ok(moved) if moved.is_empty() => left += 1,
-                    Ok(mut moved) => ids.append(&mut moved),
-                    Err(e) => {
-                        log::warn!("replica: the master {h} stays: {e}");
-                        left += 1;
-                    }
+                let files: Vec<PathBuf> = items.iter().filter(|o| &o.hash == h).map(|o| o.path.clone()).collect();
+                // Right before each file: nothing changed meanwhile, and the
+                // trusted devices staying still hold enough verified copies.
+                let still = || {
+                    watch.load(Ordering::SeqCst) == gen
+                        && lib.verified_holders(h, &leaving).is_ok_and(|holders| holders.len() >= need as usize)
+                };
+                let moved = nikgob_import::trash::trash_master_files(&lib, &trash, &masters, h, &files, &still);
+                if let Some(e) = &moved.error {
+                    log::warn!("replica: the master {h} stays (in part): {e}");
                 }
+                if moved.ids.is_empty() || moved.error.is_some() {
+                    left += 1;
+                }
+                // Every file moved can come back, also when a later one
+                // failed.
+                ids.extend(moved.ids);
             }
             let _ = later.send(Later::new("masters moved to the Trash", move |w| w.replica_trashed(ids, left)));
         });
@@ -361,8 +472,8 @@ mod tests {
     #[test]
     fn the_card_lists_exactly_what_goes() {
         let items = vec![
-            Offered { hash: "h1".into(), label: "A — B".into(), detail: "Raspberry Pi · 30 МБ".into() },
-            Offered { hash: "h2".into(), label: "C — D".into(), detail: "Raspberry Pi · 1,2 ГБ".into() },
+            Offered { hash: "h1".into(), path: "/m/A/01.flac".into(), label: "A — B".into(), detail: "Raspberry Pi · 30 МБ · A/01.flac".into() },
+            Offered { hash: "h2".into(), path: "/m/h2.flac".into(), label: "C — D".into(), detail: "Raspberry Pi · 1,2 ГБ · h2.flac".into() },
         ];
         let c = keep_card(REPLICA_ID | 1, &items);
         assert!(c.yes_no && c.answerable());
@@ -407,7 +518,9 @@ mod tests {
         let out = offer_list(&lib, 1, &[], dir.path(), &HashSet::new()).unwrap();
         assert_eq!(out.iter().map(|o| o.hash.as_str()).collect::<Vec<_>>(), ["hflat", "hnamed"], "not one gone from here, not one without copies");
         assert_eq!(out[1].label, "Группа крови — Кино");
-        assert_eq!(out[1].detail, "Raspberry Pi · 30 МБ");
+        assert_eq!(out[1].path, named, "the very file that would move");
+        assert_eq!(out[1].detail, format!("Raspberry Pi · 30 МБ · {}", Path::new("Кино").join("01.flac").display()));
+        assert_eq!(out[0].path, dir.path().join("hflat.flac"));
         assert!(offer_list(&lib, 2, &[], dir.path(), &HashSet::new()).unwrap().is_empty(), "two copies wanted");
         assert!(offer_list(&lib, 1, &["pi".into()], dir.path(), &HashSet::new()).unwrap().is_empty(), "the device is being forgotten");
         let kept: HashSet<String> = ["hflat".to_owned()].into();
