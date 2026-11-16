@@ -201,7 +201,7 @@ pub(crate) fn lost_with(only: &[OnlyCopy], flat: &std::collections::HashSet<Stri
 
 /// The stems of the files right in the masters folder (`{hash}.flac`, not
 /// the `.json` sidecars, not the cue sheets).
-pub(crate) fn flat_masters(dir: &std::path::Path) -> std::collections::HashSet<String> {
+fn flat_masters(dir: &std::path::Path) -> std::collections::HashSet<String> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Default::default() };
     rd.flatten()
         .map(|e| e.path())
