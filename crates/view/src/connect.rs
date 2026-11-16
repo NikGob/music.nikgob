@@ -178,6 +178,10 @@ impl ZoneSnapshot {
         let original: Vec<usize> = self.original.iter().filter_map(|&o| at(o)).collect();
         let original = if original.len() == kept.len() { original } else { Vec::new() };
         let autoplay_at = self.autoplay_at.iter().filter_map(|&(p, t)| Some((at(p)?, t))).collect();
+        let mut radio = self.radio.clone();
+        if let Some(r) = radio.as_mut() {
+            remap_radio_places(r, &at);
+        }
         let tracks = kept.iter().map(|&i| self.tracks[i]).collect();
         let out = Self {
             tracks,
@@ -185,10 +189,32 @@ impl ZoneSnapshot {
             index,
             position_ms: if same { self.position_ms } else { 0 },
             autoplay_at,
+            radio,
             ..self
         };
         (out, kept)
     }
+}
+
+/// The field of a radio's save (the runtime's, as `session.json` keeps it)
+/// with the queue places of the entries the radio added: `[[place, track],
+/// …]`.
+pub const RADIO_PLACES: &str = "added_at";
+
+/// The places of a radio's save renumbered by `at` (old place → new); an
+/// entry whose place was left out is the radio's no more.
+fn remap_radio_places(radio: &mut serde_json::Value, at: impl Fn(usize) -> Option<usize>) {
+    let Some(list) = radio.get_mut(RADIO_PLACES).and_then(serde_json::Value::as_array_mut) else { return };
+    list.retain_mut(|pair| {
+        let Some(old) = pair.get(0).and_then(serde_json::Value::as_u64).and_then(|p| usize::try_from(p).ok()) else { return false };
+        match (at(old), pair.get_mut(0)) {
+            (Some(new), Some(slot)) => {
+                *slot = serde_json::Value::from(new);
+                true
+            }
+            _ => false,
+        }
+    });
 }
 
 /// What `POST /v1/player/load` answers.
@@ -367,6 +393,15 @@ impl ZoneState {
         s.position_ms = 0;
         s.server_time_ms = 0;
         serde_json::to_string(&s).unwrap_or_default()
+    }
+
+    /// What tells one queue from another (its tracks and places, the
+    /// modes, what it was started from): a change of it is a new snapshot
+    /// to keep.
+    pub fn queue_key(&self) -> String {
+        let entries: Vec<u64> = self.prev.iter().chain(&self.next).map(|e| e.entry).collect();
+        let radio = self.radio.as_ref().map(|r| r.title.as_str());
+        serde_json::to_string(&(self.track_ids(), entries, self.current_entry, self.shuffle, self.repeat, &self.context, &self.page, radio)).unwrap_or_default()
     }
 
     /// Every track id of the state: the current one, what played, what comes.
@@ -640,45 +675,84 @@ pub fn starts_service_music(c: &Command) -> bool {
 }
 
 /// Work the runtime gives the mesh service (the network part of playing
-/// elsewhere); it answers with [`ConnectReport`]s.
+/// elsewhere); it answers with [`ConnectReport`]s. Everything but `Session`
+/// and `Pull` runs one at a time, in order; work of a session that has
+/// ended is dropped before it touches the network.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectJob {
-    /// Follow `node`'s zone (its event stream) until another `Follow` or
-    /// `Unfollow`: its states and how the link goes come back.
-    Follow { node: String },
-    Unfollow,
-    /// Run these on `node`'s zone, in order.
-    Run { node: String, commands: Vec<RemoteCommand> },
+    /// The target session `gen` begins: follow `node`'s zone (its event
+    /// stream and its snapshot), or none (the target is this device). Every
+    /// earlier session has ended.
+    Session { gen: u64, follow: Option<String> },
+    /// Run these on `node`'s zone, in order, while session `gen` lasts.
+    Run { gen: u64, node: String, commands: Vec<RemoteCommand> },
+    /// Pause `node`'s zone if it can be done while session `gen` lasts and
+    /// before `until` (best effort).
+    Pause { gen: u64, node: String, until: Instant },
     /// Move a zone's music to another: from `from`'s zone (None: this
-    /// device's) to `to`'s (None: here). A remote zone it leaves is paused
-    /// once the other took it.
-    Move { seq: u64, from: Option<String>, to: Option<String> },
-    /// Load `snapshot` into `node`'s zone (the undo of a transfer).
-    Load { seq: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    /// device's) to `to`'s (None: here). The source is paused first (its
+    /// answer awaited: none, nothing moves); a load not known to be taken
+    /// leaves the source paused.
+    Move { seq: u64, gen: u64, from: Option<String>, to: Option<String> },
+    /// The undo of a transfer: `snapshot` back into `node`'s zone.
+    Undo { seq: u64, gen: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    /// «Продолжить здесь»: `snapshot` into this device's zone, only what
+    /// this device can play.
+    Here { seq: u64, gen: u64, snapshot: Box<ZoneSnapshot> },
     /// `track`'s file from device `from` into this device's cache (or the
-    /// copy kept there).
-    Pull { track: TrackId, from: String },
+    /// copy kept there), for the zone's load `load`; `keep` are cached
+    /// files in use (playing, next) that the cache must not drop.
+    Pull { track: TrackId, from: String, load: u64, keep: Vec<PathBuf> },
+}
+
+/// Why a transfer, an undo or a «Продолжить здесь» did not happen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectFail {
+    /// Not done: its session had ended before it ran.
+    Stale,
+    /// Nothing changed (the source did not pause, a snapshot did not come).
+    NothingDone(String),
+    /// The source is paused, and the destination does not play what was
+    /// sent (or did not answer whether it does).
+    NotLoaded(String),
 }
 
 /// What the mesh service reports of a [`ConnectJob`]
 /// ([`Command::ConnectReport`]).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectReport {
-    /// `node`'s zone as its last event says it; `at` is when that was (the
-    /// event's arrival less half the round trip).
-    State { node: String, state: Box<ZoneState>, at: Instant },
-    /// No event (nor keep-alive) from `node` for a while, or again.
-    Link { node: String, link: RemoteLink },
-    Moved { seq: u64, to: Option<String>, result: Result<ZoneLoaded, String> },
-    Loaded { seq: u64, node: String, result: Result<ZoneLoaded, String> },
-    Pulled { track: TrackId, result: Result<PathBuf, String> },
-    /// Commands for `node` did not get there.
-    RunFailed { node: String, why: String },
+    /// `node`'s zone as its last event says it, in session `gen`; `at` is
+    /// when that was (the event's arrival less half the round trip).
+    State { gen: u64, node: String, state: Box<ZoneState>, at: Instant },
+    /// How `node` answers (session `gen`): silent a while, or again.
+    Link { gen: u64, node: String, link: RemoteLink },
+    /// `node`'s whole transferable state, fetched when its queue changed.
+    Snapshot { gen: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    Moved { seq: u64, to: Option<String>, result: Result<ZoneLoaded, ConnectFail> },
+    Undone { seq: u64, node: String, result: Result<ZoneLoaded, ConnectFail> },
+    Here { seq: u64, result: Result<ZoneLoaded, ConnectFail> },
+    Pulled { track: TrackId, from: String, load: u64, result: Result<PathBuf, String> },
+    /// Commands for `node` (session `gen`) did not get there.
+    RunFailed { gen: u64, node: String, why: String },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The radio's own entries keep their places when tracks before them
+    /// are left out, and lose them with their track.
+    #[test]
+    fn a_radios_places_follow_the_kept_tracks() {
+        let t: Vec<TrackId> = (0..5).map(|_| TrackId::new()).collect();
+        let radio = serde_json::json!({ "title": "Радио", RADIO_PLACES: [[1, t[1]], [3, t[3]], [4, t[4]]] });
+        let s = ZoneSnapshot { tracks: t.clone(), index: Some(0), radio: Some(radio), ..ZoneSnapshot::default() };
+        let (kept, skipped) = s.keep(|id| id != t[1] && id != t[2]);
+        assert_eq!(skipped, vec![t[1], t[2]]);
+        let places = kept.radio.as_ref().unwrap()[RADIO_PLACES].clone();
+        assert_eq!(places, serde_json::json!([[1, t[3]], [2, t[4]]]));
+        assert_eq!(kept.radio.as_ref().unwrap()["title"], "Радио");
+    }
 
     fn ids(n: usize) -> Vec<TrackId> {
         (0..n).map(|_| TrackId::new()).collect()
