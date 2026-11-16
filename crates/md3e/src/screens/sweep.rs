@@ -209,7 +209,7 @@ pub const ALL: &[SettingId] = {
         Preset(Area::Lyrics), LyricsStyle, LyricsUnit, LyricsSmooth, LightSpeed, WaveJump, JumpSpeed, LyricsLift, LyricsScale, LyricsLead,
         LyricsDim, LyricsCascade,
         LyricsGlow, LyricsSoftEdges, LyricsSoftDepth, LyricsSoftStrength, LyricsSoftFade, LyricsGap, LyricsGapWaves, LyricsGapHeight,
-        LyricsGapSize, LyricsCountdown, WaveFallback, LyricsReturn, LyricsGenius, SaveLyrics, LyricsCheck, LyricsWordsPlaying,
+        LyricsGapSize, LyricsCountdown, WaveFallback, LyricsReturn, LyricsGenius, SaveLyrics, LyricsCheck, LyricsKeepMisfits, LyricsWordsPlaying,
         LyricsLinesAuto, LyricsStreams, LyricsStreamKeep, LyricsRecognize, LyricsModels,
         // Вид.
         Theme, Scheme, Contrast, Preset(Area::Track), SettingId::CoverShape, ShapeRange, ShapePick, CoverSpin, CoverDir,
@@ -348,6 +348,7 @@ fn spec(id: SettingId) -> Spec {
         S::SaveLyrics => Spec::Switch(|p| &mut p.save_found_lyrics),
         S::LyricsReturn => Spec::Slider(|p| &mut p.lyrics_return_s, 1.0, 15.0, 1.0),
         S::LyricsCheck => Spec::Switch(|p| &mut p.lyrics_check),
+        S::LyricsKeepMisfits => Spec::Switch(|p| &mut p.lyrics_keep_misfits),
         S::LyricsLinesAuto => Spec::Switch(|p| &mut p.lyrics_lines_auto),
         S::LyricsWordsPlaying => Spec::Switch(|p| &mut p.lyrics_words_playing),
         S::LyricsWordsAll => Spec::Switch(|p| &mut p.lyrics_words_all),
@@ -938,7 +939,7 @@ mod tests {
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
             | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::FirstRun | S::CoverSpinSpeed
             | S::CoverPulseStrength | S::HomeSections | S::Preset(_) | S::ApiEnabled | S::ApiAccess | S::ApiPort
-            | S::ApiTokens | S::MeshThis | S::MeshEnabled | S::MeshDevices | S::MeshNearby => pos(id),
+            | S::ApiTokens | S::MeshThis | S::MeshEnabled | S::MeshDevices | S::MeshNearby | S::LyricsKeepMisfits => pos(id),
         }
     }
 

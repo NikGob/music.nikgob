@@ -487,8 +487,8 @@ impl Library {
             )?;
             tx.execute(
                 "INSERT OR IGNORE INTO lyrics_align(track_id, source, text_hash, fit, timing, offset_ms, covered, body,
-                                                    made_by, made_at, saved)
-                 SELECT ?1, source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved
+                                                    made_by, made_at, saved, fits)
+                 SELECT ?1, source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved, fits
                    FROM lyrics_align WHERE track_id = ?2",
                 params![t, twin],
             )?;

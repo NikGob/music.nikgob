@@ -34,11 +34,14 @@ pub struct AlignedLyrics {
     pub timing: String,
     pub offset_ms: i64,
     pub covered: f32,
-    /// JSON lines with the made word timing.
+    /// JSON lines with the made word timing (kept for a text that does not
+    /// fit too, when the user keeps them: see [`Self::fits`]).
     pub body: Option<String>,
     pub made_by: String,
     pub made_at: UnixMs,
     pub saved: bool,
+    /// The text is this recording's: its timing is shown.
+    pub fits: bool,
 }
 
 /// How far the background alignment pass is.
@@ -193,7 +196,7 @@ impl Library {
     pub fn lyrics_aligned(&self, track: TrackId) -> Result<Vec<AlignedLyrics>> {
         self.read(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved
+                "SELECT source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved, fits
                    FROM lyrics_align WHERE track_id = ?1 ORDER BY source",
             )?;
             let rows = stmt.query_map([track.to_string()], |r| {
@@ -208,6 +211,7 @@ impl Library {
                     made_by: r.get(7)?,
                     made_at: r.get(8)?,
                     saved: r.get::<_, i64>(9)? != 0,
+                    fits: r.get::<_, i64>(10)? != 0,
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -219,11 +223,12 @@ impl Library {
     pub fn put_lyrics_aligned(&self, track: TrackId, a: &AlignedLyrics) -> Result<()> {
         self.write(|tx| {
             tx.execute(
-                "INSERT INTO lyrics_align(track_id, source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                "INSERT INTO lyrics_align(track_id, source, text_hash, fit, timing, offset_ms, covered, body, made_by, made_at, saved, fits)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(track_id, source) DO UPDATE SET text_hash = excluded.text_hash, fit = excluded.fit,
                     timing = excluded.timing, offset_ms = excluded.offset_ms, covered = excluded.covered,
-                    body = excluded.body, made_by = excluded.made_by, made_at = excluded.made_at, saved = excluded.saved
+                    body = excluded.body, made_by = excluded.made_by, made_at = excluded.made_at, saved = excluded.saved,
+                    fits = excluded.fits
                  WHERE lyrics_align.saved = 0 OR excluded.saved = 1",
                 params![
                     track.to_string(),
@@ -237,6 +242,7 @@ impl Library {
                     a.made_by,
                     if a.made_at == 0 { now_ms() } else { a.made_at },
                     a.saved,
+                    a.fits,
                 ],
             )?;
             Ok(())

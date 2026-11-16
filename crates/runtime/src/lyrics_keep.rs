@@ -687,6 +687,7 @@ mod tests {
                 made_by: crate::align::MADE_BY.into(),
                 made_at: 0,
                 saved: true,
+                fits: true,
             };
             lib.put_lyrics_aligned(track, &row).unwrap();
         }

@@ -341,6 +341,10 @@ pub enum SettingId {
     MeshDevices,
     /// «Рядом»: unpaired instances on the home network, «Подключить».
     MeshNearby,
+    /// «Сохранять обработанные тексты, даже неудачные»: the word timing of
+    /// a text that does not fit the recording is kept (never made again,
+    /// passed on to the other devices).
+    LyricsKeepMisfits,
 }
 
 /// Where a radio of `kind` takes its tracks, in a few words (the line under
@@ -495,7 +499,7 @@ impl SettingId {
             | LyricsDim | LyricsCascade | LyricsGlow | LyricsSoftEdges | LyricsSoftDepth | LyricsSoftStrength | LyricsSoftFade | LyricsGap
             | LyricsGapWaves | LyricsGapHeight | LyricsGapSize | LyricsCountdown | WaveFallback | LyricsReturn | LyricsGenius
             | SaveLyrics | LyricsCheck | LyricsWordsPlaying | LyricsLinesAuto | LyricsStreams | LyricsStreamKeep | LyricsRecognize
-            | LyricsModels => TAB_LYRICS,
+            | LyricsModels | LyricsKeepMisfits => TAB_LYRICS,
             Theme | Scheme | Contrast | CoverShape | ShapeRange | ShapePick | CoverSpin | CoverDir | CoverPulse | CoverPauseMorph
             | CoverSpinSpeed | CoverPulseStrength | HomeSections
             | Ring | RingStyle | Ambient | AmbientStrength | BgShapes | BgCount | BgSize | BgOpacity
@@ -570,7 +574,7 @@ impl SettingId {
             | CoverPulseStrength | RingStyle | AmbientStrength | BgCount | BgSize
             | BgOpacity | BgSpeed | BgReact | BgColors | BgHue | NpVolumeHold | TapWait | ToastTime
             // Rare cases, gestures, parts of the window and of Главная.
-            | WaveFallback | LyricsCheck | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
+            | WaveFallback | LyricsCheck | LyricsKeepMisfits | LyricsStreamKeep | LyricsRecognize | CoverPauseMorph | CoverClickPause
             | DblClickShape | NpMotion | MixesProfiles | MixesEverything | MixesMoods | MixesOnRepeat | BackgroundCards
             | ProfileNames | Tooltips | PaneLyrics | PaneInfo | TrackMenu | AlbumLike | SingleLike
             | PlayerButton(_) | NavRoot
@@ -683,6 +687,7 @@ impl SettingId {
             SaveLyrics => "Сохранять текст в файл трека",
             LyricsReturn => "Возврат к строке",
             LyricsCheck => "Сверять текст с голосом",
+            LyricsKeepMisfits => "Сохранять обработанные тексты, даже неудачные",
             LyricsLinesAuto => "Строки для простого текста",
             LyricsUi => "Где делать подсветку",
             LyricsWordsPlaying => "Слова для играющей песни",
@@ -900,6 +905,7 @@ impl SettingId {
             SaveLyrics => "Найденный в интернете текст песни сохраняется прямо в файл трека и потом показывается без интернета.",
             LyricsReturn => "Если ты сам прокрутил текст, через столько секунд он вернётся к строке, которую поют.",
             LyricsCheck => "Плеер слушает голос играющей песни и проверяет, её ли это текст. Текст другой песни или другой версии уступает подходящему, а строки, которые спешат или опаздывают, встают по голосу.",
+            LyricsKeepMisfits => "Подсветка слов остаётся в библиотеке, даже если текст не совпал с голосом: её не нужно делать заново, и она уходит на твои другие устройства. Показывается такой текст как раньше — без подсветки по словам.",
             LyricsUi => "Источник текста и то, как его видеть (по словам, по строкам или без подсветки), всегда выбираются в маленьком меню у кнопки под текстом. Здесь выбирается, где делать подсветку по строкам или словам: прямо в этом меню, в окне поверх плеера или на отдельном экране «Текст песни».",
             LyricsLinesAuto => "Если ни у одного источника нет текста со временем строк, плеер сам ставит строки простого текста по голосу играющей песни, и текст идёт вместе с песней.",
             LyricsWordsPlaying => "Плеер сам расставляет слова по голосу в песне, которая играет, и подсветка идёт по словам даже там, где источник дал только строки или простой текст.",

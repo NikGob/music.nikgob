@@ -2111,6 +2111,10 @@ pub struct Prefs {
     /// places ([`TrackMenuItem::default_place`]); empty: the menu as it is
     /// by default ([`Prefs::track_menu_place`]).
     pub track_menu: Vec<TrackMenuSlot>,
+    /// «Сохранять обработанные тексты, даже неудачные»: the word timing of
+    /// a text that does not fit the recording is kept with its verdict
+    /// (never made again, synced to the other devices); shown as before.
+    pub lyrics_keep_misfits: bool,
 }
 
 /// The default of [`Prefs::cover_spin_s`] and its range in the settings.
@@ -4114,6 +4118,7 @@ impl Default for Prefs {
             cover_pulse_strength: COVER_PULSE,
             home_sections: Vec::new(),
             track_menu: Vec::new(),
+            lyrics_keep_misfits: true,
         }
     }
 }

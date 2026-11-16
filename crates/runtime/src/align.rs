@@ -164,6 +164,8 @@ pub(crate) struct Settings {
     pub(crate) models_auto: bool,
     /// «Глубокое создание субтитров».
     pub(crate) deep: bool,
+    /// The setting to keep processed texts, even failed ones.
+    pub(crate) keep_misfits: bool,
 }
 
 impl Settings {
@@ -175,6 +177,7 @@ impl Settings {
             separate: p.lyrics_separate,
             models_auto: p.lyrics_models_auto,
             deep: p.lyrics_deep,
+            keep_misfits: p.lyrics_keep_misfits,
         }
     }
 
@@ -421,8 +424,11 @@ pub(crate) fn fits(f: &Fit) -> bool {
     f.spelled >= FITS || f.heard >= heard || matches!(f.timing, Timing::Fits | Timing::Shifted)
 }
 
-/// A checked text as the library keeps it.
-pub(crate) fn row_of(text: &AlignText, fit: Option<&Fit>) -> AlignedLyrics {
+/// A checked text as the library keeps it. The word timing of a text that
+/// does not fit is kept too when `keep_misfits` (the setting to keep
+/// processed texts, even failed ones): never made again, synced; never
+/// shown as fitting.
+pub(crate) fn row_of(text: &AlignText, fit: Option<&Fit>, keep_misfits: bool) -> AlignedLyrics {
     let fits = fit.is_some_and(fits);
     AlignedLyrics {
         source: text.source.key().to_owned(),
@@ -437,10 +443,11 @@ pub(crate) fn row_of(text: &AlignText, fit: Option<&Fit>) -> AlignedLyrics {
         .to_owned(),
         offset_ms: fit.map_or(0, |f| (f.offset * 1000.0).round() as i64),
         covered: fit.map_or(1.0, |f| f.covered),
-        body: fit.filter(|_| fits).and_then(|f| serde_json::to_string(&f.lines).ok()),
+        body: fit.filter(|_| fits || keep_misfits).and_then(|f| serde_json::to_string(&f.lines).ok()),
         made_by: MADE_BY.to_owned(),
         made_at: 0,
         saved: false,
+        fits,
     }
 }
 
@@ -987,7 +994,7 @@ impl Thread {
                 continue;
             }
             let fit = self.fit(track, &mut prep, t, asked)?;
-            let row = row_of(t, fit.as_ref());
+            let row = row_of(t, fit.as_ref(), self.settings.keep_misfits);
             if let Err(e) = self.lib.put_lyrics_aligned(track, &row) {
                 log::warn!("align: storing {track}: {e}");
             }
@@ -1382,6 +1389,7 @@ impl Worker {
             made_by: MADE_BY.into(),
             made_at: 0,
             saved: true,
+            fits: true,
         };
         if let Err(e) = self.lib.put_lyrics_aligned(track, &row) {
             log::warn!("saving made lyrics: {e}");
@@ -1450,7 +1458,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false, keep_misfits: false };
         let mut t = Thread::new(Library::open_in_memory().unwrap(), dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let track = TrackId::new();
         let check = || Req::Check { track, path: dir.path().join("a.opus"), texts: Vec::new(), recognise: false };
@@ -1533,7 +1541,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let mut service = AlignService::default();
         t.cancel = service.cancel.clone();
@@ -1580,7 +1588,7 @@ mod tests {
         for f in ModelId::AlignerRuDeep.spec().files {
             std::fs::write(deep_part.join(f.name), b"").unwrap();
         }
-        let off = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false };
+        let off = Settings { gpu: false, words_all: false, recognise: false, separate: false, models_auto: false, deep: false, keep_misfits: false };
         let on = Settings { deep: true, ..off };
         let mut t = Thread::new(lib, dir.path().into(), catalog, on, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let track = TrackId::new();
@@ -1626,7 +1634,7 @@ mod tests {
             std::fs::create_dir_all(catalog.path(id)).unwrap();
             std::fs::write(catalog.path(id).join(".ready"), b"").unwrap();
         }
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: true };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: true, keep_misfits: false };
         let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let text = AlignText { source: LyricsSource::Genius, lines: vec![LyricLine::new(Duration::ZERO, "Я иду домой")], timed: false, hash: "h".into() };
         let ids = t.needs(std::slice::from_ref(&text));
@@ -1650,7 +1658,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (_req_tx, req_rx) = crossbeam_channel::unbounded();
         let lib = Library::open_in_memory().unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false };
         let mut t = Thread::new(lib, dir.path().into(), Catalog::new(dir.path()), settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let service = AlignService::default();
         t.checks = service.checks.clone();
@@ -1674,19 +1682,19 @@ mod tests {
     #[test]
     fn a_fitting_text_keeps_its_made_lines_and_a_misfit_none() {
         let text = AlignText { source: LyricsSource::Lrclib, lines: Vec::new(), timed: true, hash: "h".into() };
-        let row = row_of(&text, Some(&fit(0.55, Timing::Shifted)));
+        let row = row_of(&text, Some(&fit(0.55, Timing::Shifted)), false);
         assert_eq!((row.timing.as_str(), row.offset_ms, row.source.as_str()), ("shifted", -2140, "lrclib"));
         assert!(row.body.is_some());
         let (source, a) = Aligned::from_row(&row).unwrap();
         assert_eq!(source, LyricsSource::Lrclib);
         assert!(a.fits && a.offset_early && a.offset == Duration::from_millis(2140));
-        let misfit = row_of(&text, Some(&Fit { heard: 0.3, ..fit(0.01, Timing::Elsewhere) }));
+        let misfit = row_of(&text, Some(&Fit { heard: 0.3, ..fit(0.01, Timing::Elsewhere) }), false);
         // Line times that sit on the voice are this recording's text.
-        assert!(row_of(&text, Some(&Fit { heard: 0.0, ..fit(0.0, Timing::Shifted) })).body.is_some());
+        assert!(row_of(&text, Some(&Fit { heard: 0.0, ..fit(0.0, Timing::Shifted) }), false).body.is_some());
         assert!(misfit.body.is_none());
         assert!(!Aligned::from_row(&misfit).unwrap().1.fits);
         // No aligner spells it: not a verdict on the text.
-        assert_eq!(row_of(&text, None).timing, "none");
+        assert_eq!(row_of(&text, None, false).timing, "none");
     }
 
     #[test]
@@ -1695,17 +1703,32 @@ mod tests {
         // times, and with another song's text.
         let text = AlignText { source: LyricsSource::Genius, lines: Vec::new(), timed: false, hash: "h".into() };
         let ja = |heard: f32, spelled: f32| Fit { heard, aligner: Some(ModelId::AlignerJa), ..fit(spelled, Timing::None) };
-        let right = row_of(&text, Some(&ja(0.12, 0.02)));
+        let right = row_of(&text, Some(&ja(0.12, 0.02)), false);
         assert!(right.body.is_some(), "a right Japanese text is not «Другая запись»");
         assert_eq!(right.timing, "none");
-        assert!(row_of(&text, Some(&ja(0.03, 0.01))).body.is_none());
+        assert!(row_of(&text, Some(&ja(0.03, 0.01)), false).body.is_none());
         // The English aligner hears other songs' texts less than MMS does.
         let en = |heard: f32| Fit { heard, aligner: Some(ModelId::AlignerEn), ..fit(0.02, Timing::None) };
-        assert!(row_of(&text, Some(&en(0.63))).body.is_some());
-        assert!(row_of(&text, Some(&en(0.40))).body.is_none());
+        assert!(row_of(&text, Some(&en(0.63)), false).body.is_some());
+        assert!(row_of(&text, Some(&en(0.40)), false).body.is_none());
         // Another aligner keeps its own bar.
         let ru = Fit { heard: 0.23, ..fit(0.04, Timing::None) };
-        assert!(row_of(&text, Some(&ru)).body.is_none());
+        assert!(row_of(&text, Some(&ru), false).body.is_none());
+    }
+
+    /// Kept processed texts: a misfit keeps its timing in the library, and
+    /// is still shown as not fitting.
+    #[test]
+    fn a_misfit_keeps_its_timing_when_asked_and_still_shows_as_one() {
+        let text = AlignText { source: LyricsSource::Lrclib, lines: Vec::new(), timed: true, hash: "h".into() };
+        let misfit = Fit { heard: 0.3, ..fit(0.01, Timing::Elsewhere) };
+        let kept = row_of(&text, Some(&misfit), true);
+        assert!(kept.body.is_some() && !kept.fits);
+        let (_, a) = Aligned::from_row(&kept).unwrap();
+        assert!(!a.fits && a.lines.is_empty(), "shown as before");
+        let fitting = row_of(&text, Some(&fit(0.55, Timing::Shifted)), true);
+        assert!(fitting.fits && fitting.body.is_some());
+        assert!(row_of(&text, Some(&misfit), false).body.is_none());
     }
 
     #[test]
@@ -1732,7 +1755,7 @@ mod tests {
         let catalog = Catalog::new(dir.path());
         std::fs::create_dir_all(catalog.path(ModelId::AlignerRu)).unwrap();
         std::fs::write(catalog.path(ModelId::AlignerRu).join(".ready"), b"").unwrap();
-        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false };
+        let settings = Settings { gpu: false, words_all: false, recognise: false, separate: true, models_auto: false, deep: false, keep_misfits: false };
         let mut t = Thread::new(lib, dir.path().into(), catalog, settings, tx, req_rx, Arc::new(AtomicBool::new(false)), Duration::ZERO);
         let mut service = AlignService::default();
         assert!(!service.download(ModelId::SeparatorDeep), "no thread: nothing asked");
