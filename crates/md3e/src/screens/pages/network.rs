@@ -550,13 +550,13 @@ fn foot(ui: &mut Ui, rect: Rect, state: &ViewState, mem: &mut MeshUi, out: &mut 
         let mut b = fui.new_child(UiBuilder::new().max_rect(br).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-map-connect", &n.id)));
         let r = b.add(Button::new("Подключить").style(Style::Text).size(Size::S).enabled(can).id_salt(("mesh-map-connect-btn", &n.id)));
         if r.clicked() {
-            add_device::open(ui.ctx(), m, mem, Some(r.rect), AddTab::Connect, Some(n.id.clone()), out);
+            add_device::open_pair(ui.ctx(), m, mem, Some(r.rect), &n.id, out);
         }
     }
     let mut end = fui.new_child(UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)).id_salt("mesh-map-foot-end"));
     let r = end.add(Button::new("Добавить устройство").icon(Icon::Add).style(Style::Tonal).size(Size::S).enabled(can).id_salt("mesh-map-add"));
     if r.clicked() {
-        add_device::open(ui.ctx(), m, mem, Some(r.rect), AddTab::Connect, None, out);
+        add_device::open(ui.ctx(), m, mem, Some(r.rect), AddTab::Connect, out);
     }
 }
 

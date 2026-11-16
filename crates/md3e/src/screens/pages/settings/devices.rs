@@ -301,7 +301,7 @@ fn actions(ui: &mut Ui, state: &ViewState, on: bool, shared: &mut MeshUi, out: &
         let add = Button::new("Добавить устройство").icon(Icon::Add).style(Style::Tonal).size(Size::S).enabled(m.can_pair()).id_salt("mesh-add-device");
         let r = ui.add(add);
         if r.clicked() {
-            add_device::open(ui.ctx(), m, shared, Some(r.rect), AddTab::Connect, None, out);
+            add_device::open(ui.ctx(), m, shared, Some(r.rect), AddTab::Connect, out);
         }
         if m.device_count() >= 2 {
             map = ui.add(Button::new("Карта сети").style(Style::Outlined).size(Size::S).id_salt("mesh-open-map")).clicked();
@@ -339,7 +339,7 @@ fn actions(ui: &mut Ui, state: &ViewState, on: bool, shared: &mut MeshUi, out: &
 
 /// The window is not up (a failure there is said there).
 fn shared_add_closed(shared: &MeshUi) -> bool {
-    !add_device::is_open(&shared.add)
+    !add_device::is_open(&shared.add) && !shared.pair.open
 }
 
 /// «Рядом»: the unpaired players on the home network, each an outlined
@@ -364,7 +364,7 @@ fn nearby(ui: &mut Ui, m: &MeshView, shared: &mut MeshUi, out: &mut Vec<Command>
             let mut child = ui.new_child(UiBuilder::new().max_rect(area).layout(Layout::right_to_left(Align::Center)).id_salt(("mesh-nearby", &d.id)));
             let b = child.add(Button::new("Подключить").style(Style::Filled).size(Size::S).enabled(can).id_salt(("mesh-connect", &d.id)));
             if b.clicked() {
-                add_device::open(ui.ctx(), m, shared, Some(b.rect), AddTab::Connect, Some(d.id.clone()), out);
+                add_device::open_pair(ui.ctx(), m, shared, Some(b.rect), &d.id, out);
             }
             let x = rect.left() + 72.0;
             let g = mesh_ui::text_line(ui.painter(), &d.name, TypeRole::BodyLarge, s.on_surface, (child.min_rect().left() - 12.0 - x).max(8.0));
