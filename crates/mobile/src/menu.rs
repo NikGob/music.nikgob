@@ -50,6 +50,13 @@ impl TrackMenu {
         self.open || self.naming
     }
 
+    /// The open menu turns into the list of playlists (screenshot runs).
+    pub fn open_picker(&mut self) {
+        if self.open {
+            self.picker = true;
+        }
+    }
+
     pub fn close(&mut self) {
         self.open = false;
         self.naming = false;

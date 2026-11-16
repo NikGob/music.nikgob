@@ -179,7 +179,10 @@ impl MobileUi {
     /// frames in), `close` (the player back to its capsule), `lyrics`,
     /// `queue`, `album[:Title]`, `artist[:Name]`, `playlist[:Name]`,
     /// `liked`, `menu` (the track menu of the first row of the page on
-    /// screen, or of what plays), `output` («Где играть»).
+    /// screen, or of what plays; `menu:playlists` on its list of
+    /// playlists), `output` («Где играть»), `liblist[:0]` (Библиотека's
+    /// cards as a list, or back to the grid), `all_settings` (the desktop's
+    /// whole settings from Настройки).
     pub fn shot_step(&mut self, ctx: &Context, verb: &str, arg: &str, state: &ViewState, out: &mut Vec<Command>) -> Option<u32> {
         let now = anim::now(ctx);
         let wait = match verb {
@@ -265,7 +268,20 @@ impl MobileUi {
             "menu" => {
                 if let Some((t, here)) = self.first_row(state) {
                     self.menu.open(t, here);
+                    if arg == "playlists" {
+                        self.menu.open_picker();
+                    }
                 }
+                40
+            }
+            "liblist" => {
+                self.library.set_list(arg != "0");
+                10
+            }
+            "all_settings" => {
+                self.player.close(now, state);
+                self.select(Tab::Settings, now, out);
+                self.go(Route::Settings, now, out);
                 40
             }
             "output" => {

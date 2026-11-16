@@ -54,6 +54,11 @@ pub struct Library {
 }
 
 impl Library {
+    /// Cards in a list instead of a grid (screenshot runs).
+    pub fn set_list(&mut self, on: bool) {
+        self.list = on;
+    }
+
     /// A route asked for this chip (`All`: none).
     pub fn set_tab(&mut self, tab: LibraryTab) {
         self.chip = CHIPS.iter().any(|(t, _)| *t == tab).then_some(tab);
