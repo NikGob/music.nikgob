@@ -1822,8 +1822,9 @@ fn info(
                     .on_hover_text("Откуда идёт звук и в каком качестве");
             }
             // With the content open there is no row for the output button:
-            // another device's pill stands here, by the quality.
-            if compact {
+            // another device's pill stands here, by the quality (the
+            // settings' stage has none: its springs are the real one's).
+            if compact && stage.live {
                 let look = super::output::Look {
                     circle: 0.0,
                     pill: 22.0,
@@ -2005,7 +2006,7 @@ fn info(
     let output_on = super::output::available(state);
     let volume_row = aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
-        let output_w = super::output::slot_width(ui, state, "np-output", output_look, output_on);
+        let output_w = if stage.live { super::output::slot_width(ui, state, "np-output", output_look, output_on) } else { 0.0 };
         // The slider is optional; the wheel sets the volume either way.
         if state.prefs.np_volume {
             let buttons = 48.0 * (1.0 + f32::from(u8::from(dislike.is_some())) + f32::from(u8::from(sound_changed.is_some())))
@@ -2030,7 +2031,9 @@ fn info(
         {
             out.push(Command::ToggleMute);
         }
-        super::output::button(ui, state, "np-output", output_look, output_on, chrome);
+        if stage.live {
+            super::output::button(ui, state, "np-output", output_look, output_on, chrome);
+        }
         if let Some(changed) = sound_changed {
             let button = ui.add(IconButton::new(Icon::Tune).selected(changed).tooltip("Скорость и эквалайзер").id_salt("np-sound"));
             if button.clicked() {
