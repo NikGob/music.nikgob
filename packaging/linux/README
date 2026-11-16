@@ -9,7 +9,8 @@ Install (as the user who owns the sound, not root)
   install -Dm755 nikgobd ~/.local/bin/nikgobd
   install -Dm644 nikgobd.toml ~/.config/nikgob/nikgobd.toml
   install -Dm644 nikgobd.service ~/.config/systemd/user/nikgobd.service
-  # edit ~/.config/nikgob/nikgobd.toml: library_dir, output_device
+  # edit ~/.config/nikgob/nikgobd.toml: library_dir (this machine's own
+  # copy of the music, never a folder the desktop app uses), output_device
   sudo loginctl enable-linger "$USER"
   systemctl --user daemon-reload
   systemctl --user enable --now nikgobd

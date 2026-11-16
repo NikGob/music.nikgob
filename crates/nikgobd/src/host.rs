@@ -101,7 +101,12 @@ impl Host {
             backend,
             wake.callback(),
             StreamSchedule::default(),
-            RuntimeOptions { background_compute: cfg.background_compute },
+            RuntimeOptions {
+                background_compute: cfg.background_compute,
+                // Never into a library folder the app may export to; the
+                // user data goes between devices by the sync.
+                userdata_export: false,
+            },
         );
         if let Some(l) = &links {
             l.connect(runtime.playback_sender());

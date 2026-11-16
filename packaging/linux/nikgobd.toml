@@ -8,7 +8,8 @@
 # crash.log. Default: ~/.local/share/nikgobd
 #data_dir = "~/.local/share/nikgobd"
 
-# The music. Default: <data_dir>/Music
+# The music: this machine's own copy, not a folder the desktop app uses.
+# Default: <data_dir>/Music
 #library_dir = "/mnt/ssd/music.nikgob/Music"
 
 # The lossless masters. Default: <library_dir>/.musiclib/masters

@@ -237,11 +237,16 @@ pub struct RuntimeOptions {
     /// default; the headless player turns them off (a Raspberry Pi gets
     /// their results from another device).
     pub background_compute: bool,
+    /// Playlists, likes and history written to `.musiclib/userdata` next to
+    /// the library (the app's). The headless player turns it off: its
+    /// library folder may be the one the app exports to, and its user data
+    /// goes between devices another way.
+    pub userdata_export: bool,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { background_compute: true }
+        Self { background_compute: true, userdata_export: true }
     }
 }
 
@@ -279,8 +284,12 @@ pub struct Runtime {
     tx: Sender<Msg>,
     pb_tx: Sender<PlaybackEvent>,
     state: Arc<RwLock<ViewState>>,
-    /// Taken by [`Runtime::shutdown`] (or the drop).
+    /// The worker, joined by [`Runtime::shutdown`] (or the drop) ...
     worker: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// ... which sets this once it has ended, for other callers to wait on.
+    stopped: Arc<(parking_lot::Mutex<bool>, parking_lot::Condvar)>,
+    /// The worker's thread (a shutdown from it cannot wait for itself).
+    worker_id: std::thread::ThreadId,
 }
 
 impl Runtime {
@@ -338,15 +347,19 @@ impl Runtime {
                     let mut w = Worker::new(config, playback, state, wake, in_tx);
                     w.streaming.schedule = schedule;
                     w.compute = options.background_compute;
+                    w.userdata_export = options.userdata_export;
                     w.run(rx, pb_rx, in_rx);
                 })
                 .expect("spawn runtime thread")
         };
+        let worker_id = worker.thread().id();
         let rt = Self {
             tx,
             pb_tx,
             state,
             worker: parking_lot::Mutex::new(Some(worker)),
+            stopped: Arc::default(),
+            worker_id,
         };
         rt.send(Command::LoadHome);
         rt.send(Command::LoadLibrary);
@@ -417,21 +430,44 @@ impl Runtime {
 
 impl Runtime {
     /// Stops the worker as the drop does (the session, the prefs and the
-    /// rest saved) and waits for it, through a shared handle: a host whose
-    /// other parts (an API server) still hold the runtime stops it at a
-    /// signal. Commands sent after it go nowhere; a second call returns at
-    /// once.
+    /// rest saved) and waits until it has ended, through a shared handle: a
+    /// host whose other parts (an API server) still hold the runtime stops
+    /// it at a signal. Every caller returns once the worker is gone (one
+    /// joins it, the others wait for that); commands sent after it go
+    /// nowhere. Called on the worker's own thread (from `wake`), it only
+    /// asks the worker to stop and returns: the loop ends after the turn
+    /// it is in, and a later call elsewhere (or the drop) waits for it.
     pub fn shutdown(&self) {
         let _ = self.tx.send(Msg::Shutdown);
+        if std::thread::current().id() == self.worker_id {
+            return;
+        }
         let worker = self.worker.lock().take();
-        if let Some(w) = worker {
-            let _ = w.join();
+        let (done, ended) = &*self.stopped;
+        match worker {
+            Some(w) => {
+                let _ = w.join();
+                *done.lock() = true;
+                ended.notify_all();
+            }
+            None => {
+                let mut d = done.lock();
+                while !*d {
+                    ended.wait(&mut d);
+                }
+            }
         }
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        // The last handle went on the worker's own thread: it is asked to
+        // stop and its thread ends by itself, unjoined.
+        if std::thread::current().id() == self.worker_id {
+            let _ = self.tx.send(Msg::Shutdown);
+            return;
+        }
         self.shutdown();
     }
 }
@@ -792,6 +828,8 @@ struct Worker {
     db_copies: db_copy::DbCopies,
     /// The heavy background passes run ([`RuntimeOptions::background_compute`]).
     compute: bool,
+    /// The user data is exported next to the library ([`RuntimeOptions::userdata_export`]).
+    userdata_export: bool,
     /// The sound lowered for a while ([`duck`]).
     duck: duck::DuckState,
 }
@@ -993,6 +1031,7 @@ impl Worker {
             storage: Default::default(),
             db_copies: Default::default(),
             compute: true,
+            userdata_export: true,
             duck: Default::default(),
         }
     }
@@ -4407,6 +4446,9 @@ impl Worker {
     /// longer matches (a backup of the database put back since) is written
     /// again at once, not at the next change.
     fn export_if_stale(&mut self) {
+        if !self.userdata_export {
+            return;
+        }
         let dir = self.res.path(".musiclib/userdata");
         match self.lib.userdata_export_stale(&dir) {
             Ok(false) => {}
@@ -4428,7 +4470,7 @@ impl Worker {
     /// user data itself changed (most publishes are playback, downloads and
     /// pages, which leave it alone).
     fn maybe_export(&mut self, force: bool) {
-        if self.revision == self.exported_rev {
+        if !self.userdata_export || self.revision == self.exported_rev {
             return;
         }
         if !force && self.last_export.elapsed() < Duration::from_secs(60) {

@@ -16,7 +16,8 @@ pub struct Config {
     /// The library database, prefs, session, settings, the lock and the
     /// crash log. Default: `$XDG_DATA_HOME/nikgobd`.
     pub data_dir: Option<PathBuf>,
-    /// The music (`Music/` of the player). Default: `<data_dir>/Music`.
+    /// The music: this machine's own copy (`Music/` of the player), not a
+    /// folder the desktop app uses. Default: `<data_dir>/Music`.
     pub library_dir: Option<PathBuf>,
     /// The lossless masters. Default: the prefs' (first start:
     /// `<library_dir>/.musiclib/masters`).
