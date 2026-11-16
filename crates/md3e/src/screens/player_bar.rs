@@ -321,25 +321,29 @@ pub fn show(
                 .tooltip("Ещё")
                 .id_salt("bar-more"),
         );
+        // What does not fit in the pill lives in the menu, before the
+        // track's one list.
+        let mut top = Vec::new();
+        top.extend((!show_like).then_some(Act::Like));
+        // «Текст песни» whenever its button is not on the pill: the
+        // side pane shows it, or Now Playing when the pane has none.
+        top.extend((!show_lyrics).then_some(Act::Lyrics));
+        top.extend((!show_volume).then_some(Act::Volume));
+        top.extend((super::output::available(state) && !output_on).then_some(Act::Output));
+        // Placed by «Меню трека» like Now Playing's (F12 anyway).
+        top.push(Act::Visualizer);
+        top.push(Act::SleepMenu);
         if let Some(t) = current {
-            // What does not fit in the pill lives in the menu, before the
-            // track's one list.
-            let mut top = Vec::new();
-            top.extend((!show_like).then_some(Act::Like));
-            // «Текст песни» whenever its button is not on the pill: the
-            // side pane shows it, or Now Playing when the pane has none.
-            top.extend((!show_lyrics).then_some(Act::Lyrics));
-            top.extend((!show_volume).then_some(Act::Volume));
-            top.extend((super::output::available(state) && !output_on).then_some(Act::Output));
-            // Placed by «Меню трека» like Now Playing's (F12 anyway).
-            top.push(Act::Visualizer);
-            top.push(Act::SleepMenu);
             // «Источник и качество»: the side pane when it is on, else its
             // own window.
             let rows = Chrome::player_rows(ui.ctx(), t, state, &top, true, false);
             chrome.track_menu(&more, "bar-more", rows, t, state, Where::Bar, out);
             // A right click on the track (its cover and title): the same.
             chrome.track_context_menu(&info, "bar-track", || Chrome::player_rows(ui.ctx(), t, state, &top, true, false), t, state, Where::Bar, out);
+        } else {
+            // Nothing plays: the player's own rows that need no track
+            // (the volume, «Где играть», the sleep timer).
+            chrome.own_menu(&more, "bar-more", Chrome::own_rows(state, &top), out);
         }
     });
     // A click on the pill between the controls opens Now Playing too.

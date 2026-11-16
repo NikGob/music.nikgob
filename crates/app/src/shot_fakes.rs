@@ -102,7 +102,9 @@
 //!   `fake:mesh` (laid too when not asked): the Pi plays what the player
 //!   shows, this computer's own queue waits parked (its next track);
 //!   `fake:remote:reconnecting` / `fake:remote:lost` — its link late or
-//!   lost; `fake:remote:duck` — the Pi's sound lowered for a while.
+//!   lost; `fake:remote:duck` — the Pi's sound lowered for a while;
+//!   `fake:remote:attached` — reached by an attach (the Pi's own music,
+//!   ⇄ on this computer and the Pi).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -163,6 +165,8 @@ pub struct Fakes {
     remote: Option<nikgob_view::RemoteLink>,
     /// `fake:remote:duck`.
     remote_duck: bool,
+    /// `fake:remote:attached`.
+    remote_attached: bool,
 }
 
 impl Fakes {
@@ -231,6 +235,10 @@ impl Fakes {
             "remote:duck" => {
                 self.remote.get_or_insert(nikgob_view::RemoteLink::Live);
                 self.remote_duck = true;
+            }
+            "remote:attached" => {
+                self.remote.get_or_insert(nikgob_view::RemoteLink::Live);
+                self.remote_attached = true;
             }
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
@@ -522,7 +530,7 @@ impl Fakes {
             if self.mesh.is_none() {
                 mesh(&mut s, MeshFake::Paired, 0.0);
             }
-            remote(&mut s, link, self.remote_duck);
+            remote(&mut s, link, self.remote_duck, self.remote_attached);
         }
         s
     }
@@ -1546,8 +1554,9 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
 
 /// This window as the remote of the Raspberry Pi (`fake:remote…`): the Pi
 /// plays what the player shows, this computer's own queue waits parked at
-/// its next track; `duck`: the Pi's sound lowered for a while.
-fn remote(s: &mut ViewState, link: nikgob_view::RemoteLink, duck: bool) {
+/// its next track; `duck`: the Pi's sound lowered for a while; `attached`:
+/// reached by an attach.
+fn remote(s: &mut ViewState, link: nikgob_view::RemoteLink, duck: bool, attached: bool) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
     let ms = |d: std::time::Duration| i64::try_from(d.as_millis()).unwrap_or(0);
     let playing = s.player.current.as_ref().map(|t| nikgob_view::MeshPlaying {
@@ -1571,6 +1580,7 @@ fn remote(s: &mut ViewState, link: nikgob_view::RemoteLink, duck: bool) {
         link,
         volume: s.player.volume,
         muted: s.player.muted,
+        how: if attached { nikgob_view::RemoteHow::Attached } else { nikgob_view::RemoteHow::Transferred },
     };
     s.target = Some(target);
     s.parked = Some(nikgob_view::ParkedView { current: parked, position: std::time::Duration::from_secs(42) });

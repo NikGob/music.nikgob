@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use nikgob_core::model::{Codec, EventContext, EventOrigin, Source, SourceId, SourceKind, TrackId};
 use nikgob_view::{
-    ApiReply, Command, ConnectFail, ConnectJob, ConnectReport, MeshKind, ParkedView, RemoteCommand, RemoteLink, RemoteTarget, Repeat, Status,
+    ApiReply, Command, ConnectFail, ConnectJob, ConnectReport, MeshKind, ParkedView, RemoteCommand, RemoteHow, RemoteLink, RemoteTarget, Repeat, Status,
     Toast, ToastKind, ZoneEntry, ZoneLoaded, ZoneRepeat, ZoneSnapshot, ZoneState, ZoneStatus, ZoneTrack,
 };
 
@@ -64,6 +64,7 @@ struct Target {
     name: String,
     kind: MeshKind,
     link: RemoteLink,
+    how: RemoteHow,
 }
 
 /// The target's last state and when it was (this device's clock).
@@ -377,7 +378,7 @@ impl Worker {
             self.toast(m.clone(), None);
             return Err(m);
         }
-        self.connect_target(node, name, kind);
+        self.connect_target(node, name, kind, RemoteHow::Attached);
         Ok(())
     }
 
@@ -401,13 +402,13 @@ impl Worker {
 
     /// `node` becomes the target (a new session): this zone parks
     /// (paused), the window follows that device's zone.
-    fn connect_target(&mut self, node: String, name: String, kind: MeshKind) {
+    fn connect_target(&mut self, node: String, name: String, kind: MeshKind, how: RemoteHow) {
         let first = self.connect.target.is_none();
         if first && matches!(self.status, Status::Playing | Status::Buffering) {
             self.pause();
         }
         let parked = first.then(|| self.parked_now());
-        self.connect.target = Some(Target { node: node.clone(), name: name.clone(), kind, link: RemoteLink::Live });
+        self.connect.target = Some(Target { node: node.clone(), name: name.clone(), kind, link: RemoteLink::Live, how });
         self.connect.mirror = None;
         self.connect.full = None;
         self.connect.rows.clear();
@@ -419,7 +420,7 @@ impl Worker {
         let follow = node.clone();
         self.publish(move |s| {
             let (volume, muted) = (s.player.volume, s.player.muted);
-            s.target = Some(RemoteTarget { node_id: node, name, kind, link: RemoteLink::Live, volume, muted });
+            s.target = Some(RemoteTarget { node_id: node, name, kind, link: RemoteLink::Live, volume, muted, how });
             if let Some(p) = parked {
                 s.parked = Some(p);
             }
@@ -633,7 +634,7 @@ impl Worker {
         if from.is_none() && matches!(self.status, Status::Playing | Status::Buffering) {
             self.pause();
         }
-        self.connect_target(node.clone(), name.clone(), kind);
+        self.connect_target(node.clone(), name.clone(), kind, RemoteHow::Transferred);
         if let Some(previous) = loaded.previous.filter(|prev| !prev.paused && prev.index.is_some()) {
             self.connect.undo = Some(Undo { sess: self.connect.sess, node, previous, until: Instant::now() + UNDO_FOR, before: from });
             self.connect_toast_long(format!("Очередь перенесена на {name}"), Some(("Отменить".to_owned(), Command::OutputUndoTransfer)));
@@ -650,7 +651,7 @@ impl Worker {
             match result {
                 Ok(_) => match before.and_then(|n| self.node_view(&n).map(|(name, kind, _)| (n, name, kind))) {
                     // The target before, as it is (paused by the transfer).
-                    Some((n, name, kind)) => self.connect_target(n, name, kind),
+                    Some((n, name, kind)) => self.connect_target(n, name, kind, RemoteHow::Transferred),
                     None => self.connect_detach(),
                 },
                 Err(ConnectFail::Stale) => {}
@@ -798,7 +799,7 @@ impl Worker {
         });
         let current_entry = st.current_entry;
         let current_id = current.as_ref().map(|c| c.id);
-        let target = RemoteTarget { node_id: t.node.clone(), name: t.name.clone(), kind: t.kind, link, volume, muted };
+        let target = RemoteTarget { node_id: t.node.clone(), name: t.name.clone(), kind: t.kind, link, volume, muted, how: t.how };
         if link != RemoteLink::Live {
             self.connect.frozen = Some(position);
         }

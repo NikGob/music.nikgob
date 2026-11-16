@@ -34,6 +34,21 @@ pub struct RemoteTarget {
     /// mirrored into `ViewState.player` too; kept here for the popover's row.
     pub volume: f32,
     pub muted: bool,
+    /// How the window came to drive it: what going back to this device
+    /// does (a detach after an attach, the music brought back after a
+    /// transfer).
+    pub how: RemoteHow,
+}
+
+/// How a remote target was reached.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteHow {
+    /// Made the target as it was (nothing moved): this device's own queue
+    /// waits parked.
+    #[default]
+    Attached,
+    /// What played here moved there (or an undo went back to it).
+    Transferred,
 }
 
 /// How the remote's state reaches this window.
