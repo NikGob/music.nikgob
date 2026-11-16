@@ -32,7 +32,6 @@ form_urlencoded = "1"
 # The local hours of the listening report.
 jiff = "0.2"
 # `/mcp` calls the `/v1` routes in-process (`ServiceExt::oneshot`).
-tower = { version = "0.5", default-features = false, features = ["util"] }
 # The OpenAPI document of the routes (`/openapi.json`) and Swagger UI on
 # `/docs`, its files built in from utoipa-swagger-ui-vendored: nothing is
 # downloaded by the build or asked of a CDN at run time.
