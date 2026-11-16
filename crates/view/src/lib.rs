@@ -3914,8 +3914,9 @@ pub enum Command {
     MeshSetEnabled(bool),
     /// «Подключить» of a nearby device with the code it shows.
     MeshPairNearby { nearby_id: String, code: String },
-    /// «Добавить устройство»: a one-time ticket for `nikgobd pair`.
-    MeshCreateInvite,
+    /// «Добавить устройство»: a one-time ticket for `nikgobd pair` (and the
+    /// QR, the install line); the device that joins with it becomes `scope`.
+    MeshCreateInvite { scope: MeshScope },
     /// The invite's dialog closed: the ticket no longer works.
     MeshCancelInvite,
     /// Joins the ring of the device that made `ticket`.
@@ -3952,6 +3953,8 @@ pub enum Command {
     /// The pause on a transfer's line («Карта сети»): the files to that
     /// device wait (the replicas honour it).
     MeshPauseTransfer { node_id: String, paused: bool },
+    /// The answer to [`MeshView::forget_ask`]: forget anyway, or not.
+    MeshForgetAnswer { node_id: String, forget: bool },
 }
 
 impl Default for Prefs {

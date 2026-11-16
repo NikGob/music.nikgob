@@ -103,6 +103,27 @@ struct Invite {
     expires_ms: i64,
     tries: u32,
     ticket: String,
+    /// The key that opens `/install/` while it lives
+    /// ([`nikgob_core::releases::download_key`]).
+    key: String,
+    /// What a device that joins with it becomes.
+    scope: MeshScope,
+}
+
+/// Whether the invite `held` opens `/install/` to `key` at `now` (unix ms):
+/// alive, not spent by wrong tries, its download key (constant time).
+fn invite_opens(held: Option<&Invite>, key: &str, now: i64) -> bool {
+    held.is_some_and(|i| i.tries < pair::TRIES && now < i.expires_ms && nikgob_core::releases::same_secret(i.key.as_bytes(), key.as_bytes()))
+}
+
+/// What a joiner becomes: the scope of the invite `held` when it joins
+/// with an invite (`invite`, its id: checked alive before), an owner when
+/// the holder added it by its code.
+fn joiner_scope(invite: Option<&str>, held: Option<&Invite>) -> MeshScope {
+    match (invite, held) {
+        (Some(id), Some(i)) if hex(&i.id) == id => i.scope,
+        _ => MeshScope::Owner,
+    }
 }
 
 struct Code {
@@ -513,6 +534,13 @@ impl Shared {
         out
     }
 
+    /// Whether `key` opens `/install/` now: the download key of the invite
+    /// held, alive and not spent, compared in constant time under the lock
+    /// that spends it.
+    pub(crate) fn install_key_ok(&self, key: &str) -> bool {
+        invite_opens(self.state.lock().invite.as_ref(), key, now_ms())
+    }
+
     fn admit_locked(&self, s: &mut State, made: &mut bool, joiner: &PublicKey, name: &str, kind: MeshKind, invite: Option<&str>) -> Result<Grant, Refusal> {
         if let Some(inv) = invite {
             // Checked again under the lock the grant is made under: an
@@ -523,6 +551,10 @@ impl Shared {
                 return Err(Refusal::NoInvite);
             }
         }
+        // The scope chosen when the invite was made, signed into the
+        // certificate under the same lock: never an owner first and a guest
+        // after.
+        let scope = joiner_scope(invite, s.invite.as_ref());
         *made = self.ensure_ring(s)?;
         let Some(rk) = s.ring_key.clone() else { return Err(Refusal::NotHolder) };
         let Some(current) = s.ring.as_ref() else { return Err(Refusal::Internal) };
@@ -533,7 +565,7 @@ impl Shared {
         let mut ring = current.clone();
         let node = joiner.to_string();
         let after = ring.revoked.iter().filter(|r| r.node == node).map(|r| r.revoked_ms + 1).max().unwrap_or(0);
-        let cert = Cert::issue(&rk, joiner, name, kind, MeshScope::Owner, now_ms().max(after));
+        let cert = Cert::issue(&rk, joiner, name, kind, scope, now_ms().max(after));
         ring.admit(cert.clone());
         // Granted only once the ring with it is on disk: never a certificate
         // the holder would no longer know after a restart.
@@ -544,7 +576,10 @@ impl Shared {
         let grant = Grant { ring: ring.public.to_string(), cert, members: ring.members.clone(), revoked: ring.revoked.clone() };
         s.ring = Some(ring);
         if invite.is_some() {
+            // Spent; the window that showed it hears of the device at once
+            // (it closes as a success, asks no new invite).
             s.invite = None;
+            s.pairing = MeshPairing::Done { node_id: node };
         }
         Ok(grant)
     }
@@ -781,7 +816,7 @@ impl Shared {
             nodes,
             nearby,
             pairing: s.pairing.clone(),
-            invite: s.invite.as_ref().map(|i| MeshInvite { ticket: i.ticket.clone(), expires_ms: i.expires_ms }),
+            invite: s.invite.as_ref().map(|i| MeshInvite { ticket: i.ticket.clone(), expires_ms: i.expires_ms, scope: i.scope }),
             ring_holder: s.ring.is_some() && s.ring_key.is_some(),
             paired: s.ring.is_some(),
             code: if s.running && s.ring.is_none() { s.code.as_ref().map(|c| c.code.clone()) } else { None },
@@ -791,7 +826,7 @@ impl Shared {
 
     pub(crate) async fn command(self: &Arc<Self>, c: Command) {
         match c {
-            Command::MeshCreateInvite => self.create_invite(),
+            Command::MeshCreateInvite { scope } => self.create_invite(scope),
             Command::MeshCancelInvite => {
                 self.state.lock().invite = None;
                 self.notify();
@@ -836,7 +871,7 @@ impl Shared {
         }
     }
 
-    fn create_invite(&self) {
+    fn create_invite(&self, scope: MeshScope) {
         let node = self.node.lock().clone();
         let Some(node) = node else {
             self.set_pairing(MeshPairing::Failed("Межсеть выключена".to_owned()));
@@ -871,7 +906,9 @@ impl Shared {
             let ip = s.lan.or_else(lan_ip).unwrap_or(IpAddr::from([127, 0, 0, 1]));
             let expires_ms = now_ms() + ticket::LIFETIME_MS;
             let t = Ticket { holder: self.key.public(), invite: id, secret, expires_ms, addrs: vec![SocketAddr::new(ip, node.port)] };
-            s.invite = Some(Invite { id, secret, expires_ms, tries: 0, ticket: t.encode() });
+            let ticket = t.encode();
+            let key = nikgob_core::releases::download_key(&ticket);
+            s.invite = Some(Invite { id, secret, expires_ms, tries: 0, ticket, key, scope });
             s.pairing = MeshPairing::Idle;
         }
         if made {
@@ -1772,6 +1809,38 @@ mod tests {
         let _ = server.await;
         a.close().await;
         b.close().await;
+    }
+
+    fn invite(scope: MeshScope, expires_ms: i64) -> Invite {
+        let ticket = "nkm1abcdefgh234567".to_owned();
+        Invite { id: [7; 8], secret: [1; 16], expires_ms, tries: 0, key: nikgob_core::releases::download_key(&ticket), ticket, scope }
+    }
+
+    /// The invite held opens `/install/` to its own key only, while alive
+    /// and not spent by wrong tries.
+    #[test]
+    fn only_the_live_invite_held_opens_the_install() {
+        let now = now_ms();
+        let i = invite(MeshScope::Owner, now + 60_000);
+        let key = i.key.clone();
+        assert!(invite_opens(Some(&i), &key, now));
+        assert!(!invite_opens(Some(&i), &key, now + 60_000), "expired");
+        assert!(!invite_opens(Some(&i), &i.ticket, now), "the ticket is no key");
+        assert!(!invite_opens(None, &key, now), "spent or cancelled");
+        let spent = Invite { tries: pair::TRIES, ..invite(MeshScope::Owner, now + 60_000) };
+        assert!(!invite_opens(Some(&spent), &key, now));
+    }
+
+    /// A device joining with a guest invite is signed a guest; one the
+    /// holder adds by its code, an owner.
+    #[test]
+    fn a_joiner_takes_the_scope_of_its_invite() {
+        let g = invite(MeshScope::Guest, now_ms() + 60_000);
+        let id = hex(&g.id);
+        assert_eq!(joiner_scope(Some(id.as_str()), Some(&g)), MeshScope::Guest);
+        assert_eq!(joiner_scope(None, Some(&g)), MeshScope::Owner, "added by its code");
+        assert_eq!(joiner_scope(Some("00"), Some(&g)), MeshScope::Owner);
+        assert_eq!(joiner_scope(Some(id.as_str()), None), MeshScope::Owner);
     }
 
     #[test]

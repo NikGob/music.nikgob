@@ -8,20 +8,17 @@
 
 use std::sync::Arc;
 
-use nikgob_core::settings::{KeepMasters, MeshPinsRecord, MeshSettings, Settings};
-use nikgob_library::NodeRow;
-use nikgob_view::{Command, MeshKind, MeshNodeView, MeshPairing, MeshPins, MeshProfile, MeshScope, MeshSnapshot, MeshView};
+use nikgob_core::settings::{MeshPinsRecord, MeshSettings, Settings};
+use nikgob_library::{NodeRow, OnlyCopy};
+use nikgob_view::{Command, MeshForgetAsk, MeshKind, MeshNodeView, MeshPairing, MeshPins, MeshProfile, MeshScope, MeshSnapshot, MeshView};
 
-use crate::Worker;
+use crate::{Later, Worker};
 
 /// A device being forgotten goes for good no sooner than this after the
 /// click (its snackbar gone).
 const FORGET_AFTER_MS: i64 = 5_000;
 /// A device's last-seen time is written at most this often.
 const SEEN_SAVE_MS: i64 = 60_000;
-/// The originals each device alone holds are counted anew at most this
-/// often (and when the devices or the choice change).
-const SOLE_EVERY_MS: i64 = 10 * 60_000;
 
 /// What the loop keeps of the mesh between turns.
 #[derive(Default)]
@@ -40,12 +37,11 @@ pub(crate) struct MeshKeep {
     sent: Vec<String>,
     /// A pairing that could not even start here (no mesh service).
     failed: Option<String>,
-    /// Per device: the originals whose only verified copy it holds, as last
-    /// counted (only while this computer may let go of its own), when, and
-    /// of which devices.
-    sole: Vec<(String, u64)>,
-    sole_at: Option<i64>,
-    sole_of: Vec<String>,
+    /// Devices whose forget is being checked (the originals only they hold)
+    /// on a thread.
+    checking: Vec<String>,
+    /// A forget the check stopped, waiting for the owner.
+    ask: Option<MeshForgetAsk>,
     /// Devices whose transfer is paused here.
     paused: Vec<String>,
 }
@@ -127,7 +123,6 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
     };
     for n in &mut nodes {
         n.pins = pins_view(keep.settings.pins_of(&n.id));
-        n.sole_masters = keep.sole.iter().find(|(id, _)| *id == n.id).map_or(0, |(_, c)| *c);
         if let Some(t) = n.transfer.as_mut() {
             t.paused = keep.paused.contains(&n.id);
         }
@@ -153,7 +148,40 @@ pub(crate) fn merge(keep: &MeshKeep) -> MeshView {
         name_setting: keep.settings.name.clone(),
         configurable: keep.configurable,
         keep_masters: keep.settings.keep_masters,
+        forget_ask: keep.ask.clone(),
     }
+}
+
+/// How many of `only` (originals one device alone holds a verified copy
+/// of) this computer no longer has either: kept by name and that file gone,
+/// kept flat and no `{hash}.<ext>` among `flat` (the stems of the masters
+/// folder's files). `exists` says whether a path is a file.
+pub(crate) fn lost_with(only: &[OnlyCopy], flat: &std::collections::HashSet<String>, exists: impl Fn(&str) -> bool) -> u64 {
+    only.iter().filter(|o| !(o.paths.iter().any(|p| exists(p.as_str())) || (o.flat && flat.contains(&o.file_hash)))).count() as u64
+}
+
+/// The stems of the files right in the masters folder (`{hash}.flac`, not
+/// the `.json` sidecars, not the cue sheets).
+fn flat_masters(dir: &std::path::Path) -> std::collections::HashSet<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Default::default() };
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json") || e.eq_ignore_ascii_case("cue")))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// The originals forgetting `node` would lose: those only it holds a
+/// verified copy of among the trusted devices staying (`leaving` go too),
+/// that this computer does not have either. Reads the library and the
+/// masters folder: never on the loop.
+fn lost_if_forgotten(lib: &nikgob_library::Library, node: &str, leaving: &[String], masters_dir: &std::path::Path) -> Result<u64, String> {
+    let only = lib.flac_only_on(node, leaving).map_err(|e| e.to_string())?;
+    if only.is_empty() {
+        return Ok(0);
+    }
+    let flat = if only.iter().any(|o| o.flat) { flat_masters(masters_dir) } else { Default::default() };
+    Ok(lost_with(&only, &flat, |p| std::path::Path::new(p).is_file()))
 }
 
 /// The rows a report brings: new devices, and kept ones whose own facts
@@ -223,23 +251,66 @@ impl Worker {
             Ok(rows) => self.mesh.rows = rows,
             Err(e) => log::warn!("mesh: the paired devices not read: {e}"),
         }
-        self.mesh_count_sole();
         self.mesh_publish();
     }
 
-    /// Counts the originals each device alone holds (nothing to count while
-    /// this computer keeps all of its own: no forget can lose one then).
-    fn mesh_count_sole(&mut self) {
-        self.mesh.sole_at = Some(nikgob_library::now_ms());
-        self.mesh.sole_of = self.mesh.rows.iter().map(|r| r.id.clone()).collect();
-        if self.mesh.settings.keep_masters == KeepMasters::Always {
-            self.mesh.sole.clear();
+    /// «Забыть»: first, on a thread, whether originals would go with the
+    /// device (a fresh look at the library and the masters folder); the
+    /// forget starts only on a clean answer, else it waits for the owner.
+    fn mesh_check_forget(&mut self, node_id: String) {
+        let known = self.state.read().mesh.node(&node_id).is_some();
+        if !known || self.mesh.forgetting.iter().any(|(f, _)| *f == node_id) || self.mesh.checking.contains(&node_id) {
             return;
         }
-        match self.lib.sole_replicas() {
-            Ok(v) => self.mesh.sole = v,
-            Err(e) => log::warn!("mesh: the devices' originals not counted: {e}"),
+        let leaving: Vec<String> = self.mesh.forgetting.iter().map(|(f, _)| f.clone()).chain(self.mesh.sent.iter().cloned()).collect();
+        let masters_dir = self.state.read().prefs.masters_dir.clone();
+        let lib = self.lib.clone();
+        let later = self.later_tx.clone();
+        self.mesh.checking.push(node_id.clone());
+        let id = node_id.clone();
+        let spawned = std::thread::Builder::new().name("nikgob-forget-check".into()).spawn(move || {
+            let lost = lost_if_forgotten(&lib, &id, &leaving, &masters_dir);
+            let _ = later.send(Later::new("a forget's originals", move |w| w.mesh_forget_checked(id, lost)));
+        });
+        if let Err(e) = spawned {
+            self.mesh_forget_checked(node_id, Err(e.to_string()));
         }
+    }
+
+    /// What the check found: nothing to lose — the forget starts; some, or
+    /// a check that failed — the owner is asked.
+    fn mesh_forget_checked(&mut self, node_id: String, lost: Result<u64, String>) {
+        self.mesh.checking.retain(|c| *c != node_id);
+        let name = self.state.read().mesh.node(&node_id).map(|n| n.name.clone());
+        let Some(name) = name else { return };
+        match lost {
+            Ok(0) => self.mesh_start_forget(node_id),
+            Ok(n) => {
+                self.mesh.ask = Some(MeshForgetAsk { node_id, name, originals: Some(n) });
+                self.mesh_publish();
+            }
+            Err(e) => {
+                log::warn!("mesh: the originals of a device being forgotten not checked: {e}");
+                self.mesh.ask = Some(MeshForgetAsk { node_id, name, originals: None });
+                self.mesh_publish();
+            }
+        }
+    }
+
+    /// The forget itself: hidden at once, its snackbar's «Отменить» up, for
+    /// good when it is gone.
+    fn mesh_start_forget(&mut self, node_id: String) {
+        let name = {
+            let st = self.state.read();
+            st.mesh.node(&node_id).map(|n| n.name.clone())
+        };
+        let Some(name) = name else { return };
+        if self.mesh.forgetting.iter().any(|(f, _)| *f == node_id) {
+            return;
+        }
+        self.mesh.forgetting.push((node_id.clone(), nikgob_library::now_ms()));
+        self.mesh_publish();
+        self.toast(format!("Устройство «{name}» забыто"), Some(("Отменить".to_owned(), Command::MeshRestore { node_id })));
     }
 
     fn mesh_publish(&mut self) {
@@ -301,6 +372,9 @@ impl Worker {
         }
         self.mesh.rows.retain(|r| !ids.contains(&r.id));
         self.mesh.paused.retain(|p| !ids.contains(p));
+        if self.mesh.ask.as_ref().is_some_and(|a| ids.contains(&a.node_id)) {
+            self.mesh.ask = None;
+        }
         // What a forgotten device pinned goes with it.
         if self.mesh.settings.pins.iter().any(|p| ids.contains(&p.node)) {
             let gone = ids.to_vec();
@@ -320,7 +394,7 @@ impl Worker {
                 f(c);
             }
             None => {
-                if matches!(c, Command::MeshPairNearby { .. } | Command::MeshCreateInvite | Command::MeshJoin { .. }) {
+                if matches!(c, Command::MeshPairNearby { .. } | Command::MeshCreateInvite { .. } | Command::MeshJoin { .. }) {
                     self.mesh.failed = Some("Межсеть не запущена".to_owned());
                     self.mesh_publish();
                 } else if c == Command::MeshClearPairing && self.mesh.failed.take().is_some() {
@@ -358,18 +432,15 @@ impl Worker {
                 self.mesh_put(vec![row]);
                 self.mesh_publish();
             }
-            Command::MeshForget { node_id } => {
-                let name = {
-                    let st = self.state.read();
-                    st.mesh.node(&node_id).map(|n| n.name.clone())
-                };
-                let Some(name) = name else { return };
-                if self.mesh.forgetting.iter().any(|(f, _)| *f == node_id) {
-                    return;
+            Command::MeshForget { node_id } => self.mesh_check_forget(node_id),
+            Command::MeshForgetAnswer { node_id, forget } => {
+                if self.mesh.ask.as_ref().is_some_and(|a| a.node_id == node_id) {
+                    self.mesh.ask = None;
+                    self.mesh_publish();
+                    if forget {
+                        self.mesh_start_forget(node_id);
+                    }
                 }
-                self.mesh.forgetting.push((node_id.clone(), nikgob_library::now_ms()));
-                self.mesh_publish();
-                self.toast(format!("Устройство «{name}» забыто"), Some(("Отменить".to_owned(), Command::MeshRestore { node_id })));
             }
             Command::MeshRestore { node_id } => {
                 self.mesh.forgetting.retain(|(f, _)| *f != node_id);
@@ -386,9 +457,6 @@ impl Worker {
                     self.mesh.failed = None;
                 }
                 self.mesh.live = Some(*snap);
-                if self.mesh.rows.iter().map(|r| &r.id).ne(self.mesh.sole_of.iter()) {
-                    self.mesh_count_sole();
-                }
                 self.mesh_publish();
             }
             Command::MeshSetKeepMasters(keep) => {
@@ -397,7 +465,6 @@ impl Worker {
                     m.keep_masters = keep;
                     changed
                 });
-                self.mesh_count_sole();
                 self.mesh_publish();
             }
             Command::MeshSetPins { node_id, pins } => self.mesh_edit(move |m| set_pins(&mut m.pins, &node_id, &pins)),
@@ -419,7 +486,7 @@ impl Worker {
                 self.toast(format!("Не удалось забыть «{}»: {why}", name.unwrap_or_else(|| "устройство".to_owned())), None);
             }
             c @ (Command::MeshPairNearby { .. }
-            | Command::MeshCreateInvite
+            | Command::MeshCreateInvite { .. }
             | Command::MeshCancelInvite
             | Command::MeshJoin { .. }
             | Command::MeshSetScope { .. }
@@ -432,13 +499,6 @@ impl Worker {
     /// good (its row goes; the ring holder revokes it).
     pub(crate) fn mesh_tick(&mut self) {
         let now = nikgob_library::now_ms();
-        if self.mesh.settings.keep_masters != KeepMasters::Always
-            && !self.mesh.rows.is_empty()
-            && self.mesh.sole_at.is_none_or(|at| now - at >= SOLE_EVERY_MS)
-        {
-            self.mesh_count_sole();
-            self.mesh_publish();
-        }
         if self.mesh.forgetting.is_empty() {
             return;
         }
@@ -581,33 +641,82 @@ mod tests {
         assert!(rows_gone(&unpaired, &rows, &[]).is_empty());
     }
 
-    /// The view carries each device's pins, the originals it alone holds
-    /// and a transfer's pause, and the choice of the originals.
+    /// The view carries each device's pins, a transfer's pause, the choice
+    /// of the originals and a forget waiting for the owner.
     #[test]
-    fn pins_sole_copies_and_pauses_show_on_their_devices() {
-        let mut settings = MeshSettings { keep_masters: KeepMasters::AfterOne, ..MeshSettings::default() };
+    fn pins_pauses_and_a_forget_asked_show_in_the_view() {
+        let mut settings = MeshSettings { keep_masters: nikgob_core::settings::KeepMasters::AfterOne, ..MeshSettings::default() };
         let list = nikgob_view::PlaylistId::new();
         assert!(set_pins(&mut settings.pins, "a", &MeshPins { liked: true, playlists: vec![list] }));
         let mut live_a = node("a", "Pi", true);
         live_a.view.transfer = Some(nikgob_view::MeshTransfer { done: 1, total: 2, paused: false });
         let live = MeshSnapshot { running: true, paired: true, nodes: vec![live_a, node("b", "TV", true)], ..MeshSnapshot::default() };
+        let ask = MeshForgetAsk { node_id: "a".into(), name: "Pi".into(), originals: Some(4) };
         let keep = MeshKeep {
             rows: vec![row("a", "Pi"), row("b", "TV")],
             live: Some(live),
             settings,
-            sole: vec![("a".into(), 4)],
+            ask: Some(ask.clone()),
             paused: vec!["a".into()],
             ..MeshKeep::default()
         };
         let v = merge(&keep);
-        assert_eq!(v.keep_masters, KeepMasters::AfterOne);
+        assert_eq!(v.keep_masters, nikgob_core::settings::KeepMasters::AfterOne);
+        assert_eq!(v.forget_ask, Some(ask));
         let a = v.node("a").unwrap();
         assert_eq!(a.pins, MeshPins { liked: true, playlists: vec![list] });
-        assert_eq!(a.sole_masters, 4);
-        assert!(a.transfer.unwrap().paused);
-        assert!(v.forget_risky(a));
-        let b = v.node("b").unwrap();
-        assert_eq!((b.pins.clone(), b.sole_masters), (MeshPins::default(), 0));
+        assert!(a.transfer.as_ref().unwrap().paused);
+        assert_eq!(v.node("b").unwrap().pins, MeshPins::default());
+    }
+
+    /// An original only the device holds is lost with it unless this
+    /// computer still has its file: by name, that path; flat, its hash in
+    /// the masters folder.
+    #[test]
+    fn an_original_is_lost_only_when_this_computer_lacks_it_too() {
+        let only = |hash: &str, paths: &[&str], flat: bool| OnlyCopy { file_hash: hash.into(), paths: paths.iter().map(|p| (*p).to_owned()).collect(), flat };
+        let list = [
+            only("h1", &[], true),
+            only("h2", &[], true),
+            only("h3", &["/m/a.flac"], false),
+            only("h4", &["/m/gone.flac"], false),
+            only("h5", &["/m/gone.flac"], true),
+        ];
+        let flat: std::collections::HashSet<String> = ["h1".to_owned(), "h5".to_owned()].into();
+        let exists = |p: &str| p == "/m/a.flac";
+        // h2 (flat, not there) and h4 (by name, gone) go; h5 is still flat.
+        assert_eq!(lost_with(&list, &flat, exists), 2);
+        assert_eq!(lost_with(&[], &flat, exists), 0);
+    }
+
+    /// The check over a real library and masters folder: of two originals
+    /// only the Pi holds, the one whose file this computer still has does
+    /// not count; the sidecar of the other is no file of it.
+    #[test]
+    fn a_forget_checks_the_library_and_the_masters_folder() {
+        use nikgob_core::model::{Codec, DeviceId, Master, Replica, TrackId};
+        let lib = nikgob_library::Library::open_in_memory().unwrap();
+        lib.put_nodes(&[row("pi", "Pi")]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("h1.flac"), b"x").unwrap();
+        std::fs::write(dir.path().join("h2.json"), b"{}").unwrap();
+        for h in ["h1", "h2"] {
+            let replica = Replica { file_hash: h.into(), node_id: DeviceId("pi".into()), verified_at: Some(1) };
+            let m = Master {
+                track_id: TrackId::new(),
+                codec: Codec::Flac,
+                file_hash: h.into(),
+                size_bytes: 10,
+                origin: None,
+                file_path: None,
+                replicas: vec![replica],
+            };
+            lib.put_master(&m).unwrap();
+        }
+        assert_eq!(lost_if_forgotten(&lib, "pi", &[], dir.path()), Ok(1), "h2 only");
+        assert_eq!(lost_if_forgotten(&lib, "tv", &[], dir.path()), Ok(0), "holds nothing");
+        let gone = dir.path().join("nowhere");
+        assert_eq!(lost_if_forgotten(&lib, "pi", &[], &gone), Ok(2), "no masters folder: both would go");
     }
 
     #[test]

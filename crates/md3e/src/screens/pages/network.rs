@@ -8,7 +8,7 @@
 //!
 //! Between the cards nothing lies at rest. A line grows only while
 //! something flows: files on their way — a wave from this computer to the
-//! device, its speed and a pause in a capsule on it; music playing on
+//! device, its speed in a capsule on it; music playing on
 //! another device — a calm arc to it. Lines and cards come and go on
 //! springs.
 //!
@@ -210,7 +210,7 @@ pub fn show(ui: &mut Ui, state: &ViewState, bottom_inset: f32, pages: &mut PageS
         track_speeds(&mut mem.map, &state.mesh, anim::now(ui.ctx()));
         let wall = wall_ms();
         let devs = devices(state, wall);
-        if area.width() < NARROW {
+        if !map_fits(area.width(), mem.map.selected.is_some()) {
             column(ui, area, state, &devs, mem, out);
         } else {
             map(ui, area, state, &devs, mem, out);
@@ -218,6 +218,13 @@ pub fn show(ui: &mut Ui, state: &ViewState, bottom_inset: f32, pages: &mut PageS
         mesh_ui::overlays(ui, state, mem, out);
         None
     })
+}
+
+/// The mat of cards has room in `width` beside the passport when one is
+/// open (else the column, the passport in a bottom sheet).
+fn map_fits(width: f32, passport: bool) -> bool {
+    let pane = if passport { PANE_W + GAP } else { 0.0 };
+    width - pane >= NARROW
 }
 
 /// Each transfer's speed, smoothed, from how its bytes moved.
@@ -282,7 +289,7 @@ fn map(ui: &mut Ui, area: Rect, state: &ViewState, devs: &[Dev<'_>], mem: &mut M
     // What flows, under the cards.
     if let Some(this) = rects.first().copied() {
         for (i, d) in devs.iter().enumerate().skip(1) {
-            links(ui, this, rects[i], d, mem, out);
+            links(ui, this, rects[i], d, mem);
         }
     }
     let mut clicked = None;
@@ -466,9 +473,9 @@ fn guest_mark(ui: &mut Ui) {
 }
 
 /// What flows between this computer (`from`) and device `d` (`to`): the
-/// wave of files with their speed and a pause, the arc of music playing
+/// wave of files with their speed, the arc of music playing
 /// there. Each grows from this computer and fades away when it ends.
-fn links(ui: &mut Ui, from: Rect, to: Rect, d: &Dev<'_>, mem: &mut MeshUi, out: &mut Vec<Command>) {
+fn links(ui: &mut Ui, from: Rect, to: Rect, d: &Dev<'_>, mem: &MeshUi) {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let (s, motion) = (theme.scheme, theme.motion);
@@ -485,30 +492,18 @@ fn links(ui: &mut Ui, from: Rect, to: Rect, d: &Dev<'_>, mem: &mut MeshUi, out: 
         let phase = mesh_ui::spin(&ctx, id.with("phase"), running, 1.0 / 0.8);
         let end = a + (b - a) * files;
         mesh_ui::wave_between(ui, a, end, 3.0 * calm, 36.0, phase, Stroke::new(4.0, s.primary.gamma_multiply(files)));
-        // The capsule on the line: the speed and the pause.
-        if files > 0.6 {
+        // The capsule on the line: the speed, while bytes come.
+        let speed = mem.map.speeds.get(&n.id).map_or(0.0, |e| e.2);
+        if files > 0.6 && !paused && speed > 0.0 {
             let alpha = ((files - 0.6) / 0.4).clamp(0.0, 1.0);
-            let speed = mem.map.speeds.get(&n.id).map_or(0.0, |e| e.2);
-            let text = if paused || speed <= 0.0 { None } else { Some(speed_text(speed)) };
-            let galley = text.as_ref().map(|t| ui.painter().layout_no_wrap(t.clone(), TypeRole::LabelSmall.font_id(), s.on_surface));
-            let w = 12.0 + galley.as_ref().map_or(0.0, |g| g.size().x + 8.0) + 32.0 + 2.0;
+            let g = ui.painter().layout_no_wrap(speed_text(speed), TypeRole::LabelSmall.font_id(), s.on_surface);
             let mid = a + (b - a) * 0.5;
-            let cap = Rect::from_center_size(mid, vec2(w, 36.0));
-            let mut cui = ui.new_child(UiBuilder::new().max_rect(cap).layout(Layout::left_to_right(Align::Center)).id_salt(("mesh-map-cap", d.id)));
-            cui.multiply_opacity(alpha);
-            paint::shadow(cui.painter(), cap, Radii::all(18.0), Elevation::Level2);
-            paint::container(cui.painter(), cap, Radii::all(18.0), s.surface_container_high, Stroke::NONE);
-            cui.add_space(12.0);
-            if let Some(g) = galley {
-                let (r, _) = cui.allocate_exact_size(vec2(g.size().x, 20.0), Sense::hover());
-                cui.painter().galley(pos2(r.left(), r.center().y - g.size().y * 0.5), g, s.on_surface);
-                cui.add_space(8.0);
-            }
-            let icon = if paused { Icon::PlayArrow } else { Icon::Pause };
-            let tip = if paused { "Продолжить" } else { "Пауза" };
-            if cui.add(IconButton::new(icon).size(Size::Xs).tooltip(tip).id_salt(("mesh-map-pause", d.id))).clicked() {
-                out.push(Command::MeshPauseTransfer { node_id: n.id.clone(), paused: !paused });
-            }
+            let cap = Rect::from_center_size(mid, vec2(g.size().x + 24.0, 28.0));
+            let mut p = ui.painter().clone();
+            p.set_opacity(alpha);
+            paint::shadow(&p, cap, Radii::all(14.0), Elevation::Level2);
+            paint::container(&p, cap, Radii::all(14.0), s.surface_container_high, Stroke::NONE);
+            p.galley(cap.center() - g.size() * 0.5, g, s.on_surface);
         }
     }
     // Music there: a calm arc bowed away from the courtyard, a dot running
@@ -763,6 +758,16 @@ mod tests {
         assert!(devs[1].look.playing);
         assert_eq!(devs[1].bar.map(|b| (b.0 * 10.0).round()), Some(1.0));
         assert_eq!(profile_word(nikgob_view::MeshProfile::Full), "Полная копия");
+    }
+
+    /// The cards keep the room left beside an open passport: a window of
+    /// 700 dp shows the column then, 1100 dp keeps the mat.
+    #[test]
+    fn the_passport_takes_its_room_from_the_mat() {
+        assert!(map_fits(700.0, false));
+        assert!(!map_fits(700.0, true), "320 dp left: two cards would overlap");
+        assert!(map_fits(1100.0, true));
+        assert!(!map_fits(600.0, false));
     }
 
     /// The page draws on a wide and on a narrow window and sends nothing by

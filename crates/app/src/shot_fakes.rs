@@ -90,13 +90,14 @@
 //!   «Качество» section of «Инфо» say so, with the spectrum and its cut).
 //! - `fake:mesh` — the owner's devices: this computer holding the ring, a
 //!   Raspberry Pi online, playing, files going to it (the transfer moves
-//!   on, 12 MiB/s) and holding 12 originals alone while «Оригиналы FLAC на
-//!   ПК» is «После 1 копии», a phone with «Избранное» out of reach, a
+//!   on, 12 MiB/s) while «Оригиналы FLAC на ПК» is «После 1 копии», a
+//!   phone with «Избранное» out of reach, a
 //!   speaker as a guest, a player nearby and the invite of «Добавить
 //!   устройство»; `fake:mesh:alone` — this computer in no ring (its code in
 //!   its row), the player nearby; `fake:mesh:five` — five devices (the
 //!   ring of «Карта сети»). `fake:mesh-api` — the API on the home network
-//!   (the install line without its blocker).
+//!   (the install line without its blocker). `fake:mesh-forget` — «Забыть»
+//!   of the Raspberry Pi stopped: 12 originals only it holds (the dialog).
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -151,6 +152,8 @@ pub struct Fakes {
     /// when (the transfer moves with the clock), the API open to the home.
     mesh: Option<(MeshFake, std::time::Instant)>,
     mesh_api: bool,
+    /// `fake:mesh-forget`.
+    mesh_forget: bool,
 }
 
 impl Fakes {
@@ -212,6 +215,7 @@ impl Fakes {
             "mesh:alone" => self.mesh = Some((MeshFake::Alone, std::time::Instant::now())),
             "mesh:five" => self.mesh = Some((MeshFake::Five, std::time::Instant::now())),
             "mesh-api" => self.mesh_api = true,
+            "mesh-forget" => self.mesh_forget = true,
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -257,6 +261,7 @@ impl Fakes {
             || self.downloads
             || self.mesh.is_some()
             || self.mesh_api
+            || self.mesh_forget
     }
 
     /// `state` with the fakes laid over it.
@@ -490,6 +495,11 @@ impl Fakes {
             s.api.access = nikgob_view::ApiAccess::Network;
             s.api.listening = Some(format!("0.0.0.0:{}", s.api.port));
             s.api.error = None;
+        }
+        if self.mesh_forget
+            && let Some(pi) = s.mesh.nodes.iter().find(|n| n.kind == nikgob_view::MeshKind::Pi)
+        {
+            s.mesh.forget_ask = Some(nikgob_view::MeshForgetAsk { node_id: pi.id.clone(), name: pi.name.clone(), originals: Some(12) });
         }
         s
     }
@@ -1562,7 +1572,7 @@ fn mesh(s: &mut ViewState, kind: MeshFake, secs: f64) {
         ..MeshNodeView::default()
     };
     let pi_nearby = MeshNearbyView { id: "fake-pi-2".into(), name: "raspberrypi".into(), kind: MeshKind::Pi, addr: Some("192.168.0.31:47220".into()) };
-    m.invite = Some(MeshInvite { ticket: FAKE_TICKET.into(), expires_ms: now + 14 * 60_000 });
+    m.invite = Some(MeshInvite { ticket: FAKE_TICKET.into(), expires_ms: now + 14 * 60_000, scope: MeshScope::Owner });
     m.nearby = vec![pi_nearby];
     if kind == MeshFake::Alone {
         m.paired = false;
@@ -1598,7 +1608,6 @@ fn mesh(s: &mut ViewState, kind: MeshFake, secs: f64) {
         }),
         profile: MeshProfile::Full,
         transfer: Some(MeshTransfer { done, total, paused: false }),
-        sole_masters: 12,
         ..MeshNodeView::default()
     };
     let phone = MeshNodeView {

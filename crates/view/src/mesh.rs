@@ -203,10 +203,18 @@ pub struct MeshNodeView {
     pub transfer: Option<MeshTransfer>,
     /// «Любимые» and the playlists it keeps with «Избранное» (chosen here).
     pub pins: MeshPins,
-    /// Lossless originals whose only verified copy is on it (the replicas'
-    /// rows): forgetting it while this computer may let go of originals
-    /// asks first.
-    pub sole_masters: u64,
+}
+
+/// «Забыть» of a device stopped by the check made at that moment: lossless
+/// originals have their only verified copy there (none on another trusted
+/// device, none left on this computer). The forget waits for an answer
+/// ([`crate::Command::MeshForgetAnswer`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshForgetAsk {
+    pub node_id: String,
+    pub name: String,
+    /// How many; `None` when the check failed (asked as if some would go).
+    pub originals: Option<u64>,
 }
 
 /// An unpaired instance seen on the home network now.
@@ -239,6 +247,8 @@ pub enum MeshPairing {
 pub struct MeshInvite {
     pub ticket: String,
     pub expires_ms: i64,
+    /// What a device that joins with it becomes («Гость» of the window).
+    pub scope: MeshScope,
 }
 
 /// «Межсеть → Устройства».
@@ -270,15 +280,11 @@ pub struct MeshView {
     pub configurable: bool,
     /// «Оригиналы FLAC на ПК» (`[mesh] keep_masters`).
     pub keep_masters: KeepMasters,
+    /// A forget that waits for the owner: it would lose originals.
+    pub forget_ask: Option<MeshForgetAsk>,
 }
 
 impl MeshView {
-    /// Forgetting `node` could lose originals: it holds the only verified
-    /// copy of some while this computer may let go of its own.
-    pub fn forget_risky(&self, node: &MeshNodeView) -> bool {
-        node.sole_masters > 0 && self.keep_masters != KeepMasters::Always
-    }
-
     /// The devices there are: this one and the paired ones.
     pub fn device_count(&self) -> usize {
         1 + self.nodes.len()
@@ -362,15 +368,11 @@ mod tests {
     }
 
     #[test]
-    fn a_forget_is_risky_only_while_originals_may_go() {
+    fn this_computer_counts_among_the_devices() {
         let mut v = MeshView::default();
-        let mut pi = MeshNodeView { id: "pi".into(), ..MeshNodeView::default() };
-        assert!(!v.forget_risky(&pi));
-        pi.sole_masters = 3;
-        assert!(!v.forget_risky(&pi), "this computer keeps every original");
-        v.keep_masters = KeepMasters::AfterOne;
-        assert!(v.forget_risky(&pi));
         assert_eq!(v.device_count(), 1);
+        v.nodes.push(MeshNodeView { id: "pi".into(), ..MeshNodeView::default() });
+        assert_eq!(v.device_count(), 2);
     }
 
     #[test]

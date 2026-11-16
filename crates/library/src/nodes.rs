@@ -32,6 +32,17 @@ pub struct NodeRow {
     pub paired_at: Option<i64>,
 }
 
+/// A lossless original one device alone holds a verified copy of
+/// ([`Library::flac_only_on`]), and where this computer keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OnlyCopy {
+    pub file_hash: String,
+    /// The paths its masters are kept at by name.
+    pub paths: Vec<String>,
+    /// A master of it is kept as `{hash}.<ext>` right in the masters folder.
+    pub flat: bool,
+}
+
 impl NodeRow {
     /// The name the list shows.
     pub fn shown_name(&self) -> &str {
@@ -94,22 +105,42 @@ impl Library {
         })
     }
 
-    /// For each device holding some: how many lossless originals have their
-    /// only verified copy there (no other device has verified one).
-    pub fn sole_replicas(&self) -> Result<Vec<(String, u64)>> {
+    /// The lossless originals (FLAC masters) device `node` holds a verified
+    /// copy of that no other trusted device has verified — an owner's device
+    /// in the node table, not one of `leaving` (being forgotten too); the
+    /// replica rows of forgotten devices stay (they say where a file was
+    /// verified) and count for nothing here. Each file once, with where this
+    /// computer keeps it; whether it still has it is the caller's to look
+    /// at (on disk).
+    pub fn flac_only_on(&self, node: &str, leaving: &[String]) -> Result<Vec<OnlyCopy>> {
+        let leaving = serde_json::to_string(leaving).unwrap_or_else(|_| "[]".into());
         self.read(|c| {
             let mut stmt = c.prepare(
-                "SELECT r.node_id, COUNT(*) FROM replica r
-                 JOIN master m ON m.file_hash = r.file_hash
-                 WHERE r.verified_at IS NOT NULL
+                "SELECT r.file_hash, m.file_path FROM replica r
+                 JOIN master m ON m.file_hash = r.file_hash AND lower(m.codec) = 'flac'
+                 WHERE r.node_id = ?1 AND r.verified_at IS NOT NULL
                    AND NOT EXISTS (
-                       SELECT 1 FROM replica o
-                       WHERE o.file_hash = r.file_hash AND o.node_id <> r.node_id AND o.verified_at IS NOT NULL)
-                 GROUP BY r.node_id
-                 ORDER BY r.node_id",
+                       SELECT 1 FROM replica o JOIN node n ON n.id = o.node_id
+                       WHERE o.file_hash = r.file_hash AND o.node_id <> ?1 AND o.verified_at IS NOT NULL
+                         AND n.scope = 'owner'
+                         AND o.node_id NOT IN (SELECT value FROM json_each(?2)))
+                 ORDER BY r.file_hash, m.file_path",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            let rows = stmt.query_map(params![node, leaving], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?;
+            let mut out: Vec<OnlyCopy> = Vec::new();
+            for row in rows {
+                let (hash, path) = row?;
+                if out.last().is_none_or(|o| o.file_hash != hash) {
+                    out.push(OnlyCopy { file_hash: hash, paths: Vec::new(), flat: false });
+                }
+                let Some(o) = out.last_mut() else { continue };
+                match path {
+                    Some(p) if !o.paths.contains(&p) => o.paths.push(p),
+                    Some(_) => {}
+                    None => o.flat = true,
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -168,24 +199,61 @@ mod tests {
         assert_eq!(lib.remove_nodes(&[n.id]).unwrap(), 0);
     }
 
-    /// Only the originals verified on one device alone count for it.
+    /// Only distinct FLAC originals verified on the device and on no other
+    /// trusted one count: not an MP3 master, not a file a forgotten device
+    /// or a guest holds too (they count for nothing), one a device being
+    /// forgotten too holds as well does count.
     #[test]
-    fn sole_copies_are_counted_per_device() {
+    fn only_copies_count_once_and_only_on_trusted_devices() {
         let lib = Library::open_in_memory().unwrap();
-        assert!(lib.sole_replicas().unwrap().is_empty());
+        assert!(lib.flac_only_on("pi", &[]).unwrap().is_empty());
+        let node = |id: &str, scope: &str| NodeRow { id: id.into(), name: id.into(), kind: "pi".into(), scope: scope.into(), profile: "full".into(), ..NodeRow::default() };
+        lib.put_nodes(&[node("pi", "owner"), node("lap", "owner"), node("tv", "guest")]).unwrap();
         lib.write(|tx| {
-            for (t, h) in [("t1", "h1"), ("t2", "h2"), ("t3", "h3")] {
-                tx.execute("INSERT INTO master(track_id, codec, file_hash, size_bytes) VALUES (?1, 'flac', ?2, 10)", [t, h])?;
+            // Two tracks of one FLAC file (an image), one kept by name.
+            for (t, codec, h, path) in [
+                ("t1", "flac", "h1", None),
+                ("t2", "flac", "h2", None),
+                ("t2b", "flac", "h2", Some("/m/Album/02.flac")),
+                ("t3", "mp3", "h3", None),
+                ("t4", "flac", "h4", None),
+                ("t5", "flac", "h5", None),
+                ("t6", "FLAC", "h6", Some("/m/Other/06.flac")),
+            ] {
+                tx.execute(
+                    "INSERT INTO master(track_id, codec, file_hash, size_bytes, file_path) VALUES (?1, ?2, ?3, 10, ?4)",
+                    rusqlite::params![t, codec, h, path],
+                )?;
             }
-            // h1 only on the Pi; h2 on the Pi and the laptop; h3 on the
-            // laptop not verified yet; h9 has no master.
-            for (h, n, v) in [("h1", "pi", Some(1)), ("h2", "pi", Some(1)), ("h2", "lap", Some(2)), ("h3", "lap", None), ("h9", "pi", Some(1))] {
+            // h1, h2, h3 on the Pi alone; h4 on the Pi and on a forgotten
+            // device; h5 on the Pi and the laptop; h6 on the Pi and the
+            // guest; h7 (no master) on the laptop, not verified on the Pi.
+            for (h, n, v) in [
+                ("h1", "pi", Some(1)),
+                ("h2", "pi", Some(1)),
+                ("h3", "pi", Some(1)),
+                ("h4", "pi", Some(1)),
+                ("h4", "gone", Some(1)),
+                ("h5", "pi", Some(1)),
+                ("h5", "lap", Some(1)),
+                ("h6", "pi", Some(1)),
+                ("h6", "tv", Some(1)),
+                ("h7", "pi", None),
+                ("h7", "lap", Some(1)),
+            ] {
                 tx.execute("INSERT INTO replica(file_hash, node_id, verified_at) VALUES (?1, ?2, ?3)", rusqlite::params![h, n, v])?;
             }
             Ok(())
         })
         .unwrap();
-        assert_eq!(lib.sole_replicas().unwrap(), vec![("pi".to_owned(), 1)]);
+        let only = lib.flac_only_on("pi", &[]).unwrap();
+        let hashes: Vec<&str> = only.iter().map(|o| o.file_hash.as_str()).collect();
+        assert_eq!(hashes, ["h1", "h2", "h4", "h6"]);
+        assert_eq!(only[1], OnlyCopy { file_hash: "h2".into(), paths: vec!["/m/Album/02.flac".into()], flat: true }, "once, both ways it is kept");
+        assert_eq!(only[3], OnlyCopy { file_hash: "h6".into(), paths: vec!["/m/Other/06.flac".into()], flat: false });
+        let leaving = lib.flac_only_on("pi", &["lap".to_owned()]).unwrap();
+        assert_eq!(leaving.iter().map(|o| o.file_hash.as_str()).collect::<Vec<_>>(), ["h1", "h2", "h4", "h5", "h6"], "the laptop goes too");
+        assert!(lib.flac_only_on("lap", &[]).unwrap().is_empty(), "h5 is on the Pi too; h7 has no master");
     }
 
     /// A library of schema 33 keeps its (unused) node rows and gets the new

@@ -21,6 +21,8 @@ uuid = { version = "1", features = ["v7", "serde"] }
 # The tokens of the local API (api_token.rs).
 blake3 = "1.8"
 getrandom = "0.3"
+# The checksums of the install script and the builds handed out (releases.rs).
+sha2 = "0.10"
 
 [dev-dependencies]
 serde_json = "1"

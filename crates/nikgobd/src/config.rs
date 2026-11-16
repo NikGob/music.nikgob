@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn the_example_file_parses_to_the_pi_setup() {
         let cfg = parse(EXAMPLE).expect("the example is valid");
-        assert_eq!(cfg.output_device.as_deref(), Some("alsa_output.usb-3142_fifine_Headset-00.analog-stereo"));
+        assert_eq!(cfg.output_device, None, "no sound choice comes with the example: a fresh device plays on its default output");
         assert!(!cfg.background_compute);
         assert_eq!(cfg.log, "info");
         assert!(cfg.mesh);

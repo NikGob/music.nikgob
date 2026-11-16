@@ -18,7 +18,7 @@
 # The output: a PulseAudio sink name (pactl list short sinks, second
 # column) or a device's description. Missing now, the default output plays
 # until it is back. Unset, the last one chosen over the API is used.
-output_device = "alsa_output.usb-3142_fifine_Headset-00.analog-stereo"
+#output_device = "alsa_output.usb-3142_fifine_Headset-00.analog-stereo"
 
 # Sound analysis and file checks in the background. Off: their results
 # come from the PC.
