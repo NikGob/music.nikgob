@@ -7,6 +7,7 @@
 
 mod align;
 mod analysis;
+mod api;
 mod artist_names;
 mod quality;
 mod same_audio;
@@ -375,6 +376,39 @@ impl Runtime {
     }
 }
 
+/// A handle another thread drives the player with, as the UI does (the
+/// local API's server): it sends commands and reads the state, and does not
+/// keep the worker alive.
+#[derive(Clone)]
+pub struct RuntimeHandle {
+    tx: Sender<Msg>,
+    state: Arc<RwLock<ViewState>>,
+}
+
+impl RuntimeHandle {
+    pub fn send(&self, command: Command) {
+        let _ = self.tx.send(Msg::Cmd(command));
+    }
+
+    pub fn send_all(&self, commands: impl IntoIterator<Item = Command>) {
+        for c in commands {
+            self.send(c);
+        }
+    }
+
+    /// The state (a short read lock: copy out what is needed).
+    pub fn state(&self) -> RwLockReadGuard<'_, ViewState> {
+        self.state.read()
+    }
+}
+
+impl Runtime {
+    /// A [`RuntimeHandle`] for another thread.
+    pub fn handle(&self) -> RuntimeHandle {
+        RuntimeHandle { tx: self.tx.clone(), state: self.state.clone() }
+    }
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         let _ = self.tx.send(Msg::Shutdown);
@@ -738,6 +772,8 @@ struct Worker {
     storage: storage::Storage,
     /// The day's copy of the database next to the masters.
     db_copies: db_copy::DbCopies,
+    /// The local API's settings and the tokens' uses ([`api`]).
+    api: api::ApiKeep,
 }
 
 /// Work a background thread hands back to the worker's loop: what it is
@@ -936,6 +972,7 @@ impl Worker {
             sleep: Default::default(),
             storage: Default::default(),
             db_copies: Default::default(),
+            api: Default::default(),
         }
     }
 
@@ -969,6 +1006,7 @@ impl Worker {
         self.offer_editions();
         self.wish_restart();
         self.publish_sources();
+        self.api_load();
         self.start_streams();
         self.start_analysis();
         self.start_quality();
@@ -1061,6 +1099,8 @@ impl Worker {
                     self.turn.lap("streams");
                     self.recs_tick();
                     self.turn.lap("recs");
+                    self.api_tick();
+                    self.turn.lap("api");
                 }
             }
             std::mem::take(&mut self.turn).end();
@@ -1071,6 +1111,7 @@ impl Worker {
         }
         self.save_session();
         self.save_prefs_due();
+        self.api_flush();
         self.session_saved.flush();
         self.recs_flush_weights(true);
         self.niche_flush();
@@ -1811,6 +1852,15 @@ impl Worker {
                     log::warn!("unhandled {c:?}");
                 }
             }
+            c @ (Command::SetApiEnabled(_)
+            | Command::SetApiAccess(_)
+            | Command::SetApiPort(_)
+            | Command::ApiCreateToken(_)
+            | Command::ApiRevokeToken(_)
+            | Command::ApiRestoreToken(_)
+            | Command::ApiStatus { .. }
+            | Command::ApiTokensUsed(_)
+            | Command::ApiSync(_)) => self.api_command(c),
         }
     }
 
