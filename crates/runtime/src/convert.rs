@@ -257,7 +257,14 @@ impl Resolver {
             if nikgob_library::is_web_ref(&r) {
                 return v::Cover::web(r);
             }
-            let path = self.path(&r);
+            let mut path = self.path(&r);
+            // A cover whose file is not on this device: the copy taken from
+            // another one by its hash, if there is one.
+            if !path.exists()
+                && let Ok(Some(copy)) = self.lib.local_picture("release", &id.to_string())
+            {
+                path = copy;
+            }
             // A cover of the app's covers folder has its texture by its own
             // name; an album folder's, `ambient.png`.
             let ambient = [path.with_extension("ambient.png"), path.with_file_name("ambient.png")]
@@ -290,9 +297,18 @@ impl Resolver {
         if self.photos.is_none() {
             let stored = self.lib.artist_photos().unwrap_or_default();
             let locked = self.lib.locked_artist_photos().unwrap_or_default();
+            // Photos whose file is not on this device: the copies taken from
+            // another one by their hash.
+            let copies = self.lib.local_pictures("artist").unwrap_or_default();
             let map = stored
                 .into_iter()
-                .map(|(id, p)| (id, self.path(&p)))
+                .map(|(id, p)| {
+                    let path = self.path(&p);
+                    match copies.get(&id.to_string()) {
+                        Some(copy) if !path.exists() => (id, copy.clone()),
+                        _ => (id, path),
+                    }
+                })
                 .filter(|(_, p)| p.exists())
                 .map(|(id, path)| (id, (v::Cover { path, seed: None, ambient: None }, locked.contains(&id))))
                 .collect();

@@ -1006,6 +1006,17 @@ pub struct Event {
     /// The player's mean volume while it played (an end), 0…1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<f32>,
+    /// Who started the play: the owner, the voice assistant, an agent, a
+    /// guest (`None`: the owner, and every play older than the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<crate::settings::ApiActor>,
+}
+
+impl Event {
+    /// Who started it (the owner when not told).
+    pub fn actor(&self) -> crate::settings::ApiActor {
+        self.actor.unwrap_or_default()
+    }
 }
 
 /// What a recorded play says beyond its kind and position.
@@ -1016,6 +1027,8 @@ pub struct EventMeta {
     pub end_reason: Option<EndReason>,
     pub attention: Option<f32>,
     pub volume: Option<f32>,
+    /// Who started the play (`None`: the owner).
+    pub actor: Option<crate::settings::ApiActor>,
 }
 
 impl Event {
@@ -1034,6 +1047,7 @@ impl Event {
             end_reason: None,
             attention: None,
             volume: None,
+            actor: None,
         }
     }
 }

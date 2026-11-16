@@ -868,6 +868,7 @@ fn main() -> eframe::Result {
         }
     };
     let api_library = library.clone();
+    let mesh_library = library.clone();
     let import = {
         let mut cfg = nikgob_runtime::ImportConfig::new(
             prefs.library_dir.clone(),
@@ -967,6 +968,7 @@ fn main() -> eframe::Result {
             wake: api_wake.clone(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             headless: false,
+            library: Some(mesh_library),
         };
         match nikgob_mesh::start(ctx) {
             Ok(h) => Some(h),

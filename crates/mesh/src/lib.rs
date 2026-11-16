@@ -62,6 +62,8 @@ pub struct MeshContext {
     /// No window: the code is written to `mesh/pair-code` and logged, and
     /// `nikgobd pair` hands tickets over through `mesh/join-request`.
     pub headless: bool,
+    /// The library, synced with the owner's other devices (`None`: no sync).
+    pub library: Option<nikgob_library::Library>,
 }
 
 /// The computer's name, for a device named nothing else.

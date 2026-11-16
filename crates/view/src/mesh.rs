@@ -203,6 +203,8 @@ pub struct MeshNodeView {
     pub transfer: Option<MeshTransfer>,
     /// «Любимые» and the playlists it keeps with «Избранное» (chosen here).
     pub pins: MeshPins,
+    /// The library's sync with it.
+    pub sync: MeshSyncView,
 }
 
 /// «Забыть» of a device stopped by the check made at that moment: lossless
@@ -215,6 +217,39 @@ pub struct MeshForgetAsk {
     pub name: String,
     /// How many; `None` when the check failed (asked as if some would go).
     pub originals: Option<u64>,
+}
+
+/// The library's sync with a device: its switch (`MeshSetSync`), a pull
+/// running and how far it is (in the device's change numbers: a first sync
+/// of a library is a long one), the last pull that brought something, why
+/// the last one failed, what of it is kept to try again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeshSyncView {
+    /// Turned off for this device.
+    pub off: bool,
+    pub running: bool,
+    pub done: u64,
+    pub total: u64,
+    /// When the last pull that brought rows ended (unix ms).
+    pub last_ms: Option<i64>,
+    /// Why the last pull failed, or that rows of it wait for the owner
+    /// ([`Self::conflicts`]): a blocker to show.
+    pub error: Option<String>,
+    /// Its artists, albums, streams this device has under another id: kept
+    /// until the owner decides.
+    pub conflicts: u32,
+    /// Its rows that cannot be written yet (tried again).
+    pub waiting: u32,
+    /// Its deletes held back while the row is still used here (a file of
+    /// this device keeps a song): not an error.
+    pub held: u32,
+}
+
+impl MeshSyncView {
+    /// How far a running pull is, 0..=1.
+    pub fn fraction(&self) -> f32 {
+        if self.total == 0 { 0.0 } else { (self.done as f64 / self.total as f64).clamp(0.0, 1.0) as f32 }
+    }
 }
 
 /// An unpaired instance seen on the home network now.

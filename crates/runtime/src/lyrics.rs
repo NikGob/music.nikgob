@@ -131,7 +131,10 @@ impl Aligned {
     pub(crate) fn from_row(row: &nikgob_library::AlignedLyrics) -> Option<(LyricsSource, Self)> {
         use nikgob_align::fit::Timing;
         let source = LyricsSource::from_key(&row.source)?;
-        let lines: Vec<LyricLine> = row.body.as_deref().and_then(|b| serde_json::from_str(b).ok()).unwrap_or_default();
+        // A text that does not fit keeps its timing in the library (synced,
+        // never made again) but is shown as before: as not fitting.
+        let lines: Vec<LyricLine> =
+            row.body.as_deref().filter(|_| row.fits).and_then(|b| serde_json::from_str(b).ok()).unwrap_or_default();
         let timing = match row.timing.as_str() {
             "fits" => Timing::Fits,
             "shifted" => Timing::Shifted,
@@ -142,7 +145,7 @@ impl Aligned {
             source,
             Self {
                 hash: row.text_hash.clone(),
-                fits: row.body.is_some(),
+                fits: row.fits && row.body.is_some(),
                 timing,
                 offset: Duration::from_millis(row.offset_ms.unsigned_abs()),
                 offset_early: row.offset_ms < 0,

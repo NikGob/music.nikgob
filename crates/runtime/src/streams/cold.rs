@@ -562,6 +562,7 @@ fn store_history(
                     end_reason: None,
                     attention: None,
                     volume: None,
+                    actor: None,
                 });
             };
             push(p.start_ms, EventType::Start);
@@ -1190,6 +1191,7 @@ impl Worker {
                     end_reason: None,
                     attention: None,
                     volume: None,
+                    actor: None,
                 });
             }
         }

@@ -12,6 +12,7 @@ nikgob-core.workspace = true
 nikgob-view.workspace = true
 nikgob-runtime = { path = "../runtime" }
 nikgob-api = { path = "../api" }
+nikgob-library = { path = "../library" }
 log.workspace = true
 # QUIC between the devices: each one's Ed25519 key is its id; relays and
 # address lookups off (LAN only in this version).

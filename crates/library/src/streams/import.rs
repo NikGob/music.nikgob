@@ -618,6 +618,7 @@ mod tests {
             end_reason: None,
             attention: None,
             volume: None,
+            actor: None,
         }
     }
 

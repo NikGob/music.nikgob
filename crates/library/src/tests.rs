@@ -1423,7 +1423,7 @@ fn migration_adds_the_sketch_table_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
     // The file's number is the schema version it stamps.
-    assert_eq!(SCHEMA_VERSION, 34);
+    assert_eq!(SCHEMA_VERSION, 35);
     let before = 29u32;
     {
         let lib = Library::open(&path).unwrap();
@@ -1435,15 +1435,13 @@ fn migration_adds_the_sketch_table_only() {
     }
     {
         // Back to the schema before the sketches (and before the masters'
-        // paths and the photos' tries that came after them).
+        // paths, the photos' tries, the mesh's and sync's columns and tables
+        // that came after them).
         let conn = rusqlite::Connection::open(&path).unwrap();
+        crate::sync::rewind_before_mesh(&conn);
         conn.execute_batch(
             "DROP TABLE sound_sketch; ALTER TABLE master DROP COLUMN file_path;
-             ALTER TABLE artist_photo DROP COLUMN tries;
-             ALTER TABLE node DROP COLUMN alias; ALTER TABLE node DROP COLUMN scope;
-             ALTER TABLE node DROP COLUMN profile; ALTER TABLE node DROP COLUMN addr;
-             ALTER TABLE node DROP COLUMN version; ALTER TABLE node DROP COLUMN cert;
-             ALTER TABLE node DROP COLUMN paired_at",
+             ALTER TABLE artist_photo DROP COLUMN tries",
         )
         .unwrap();
         conn.pragma_update(None, "user_version", before).unwrap();

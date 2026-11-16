@@ -80,7 +80,6 @@ pub(crate) struct ApiKeep {
     /// Who the API request being run plays for (its token's actor), while
     /// its commands run: what the history's events are to carry once they
     /// have an actor.
-    #[allow(dead_code)]
     pub(crate) actor: Option<ApiActor>,
     /// Downloads of the API waiting in «Подтверди», oldest first.
     confirms: Vec<ApiConfirm>,

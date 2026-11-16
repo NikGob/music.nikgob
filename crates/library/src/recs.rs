@@ -35,6 +35,10 @@ pub struct RecTrack {
     pub song: String,
 }
 
+/// The plays of the owner's own listening: not a guest's, not the voice
+/// assistant's (an agent plays for the owner, as asked).
+const OWN_PLAYS: &str = "coalesce(actor, 'owner') NOT IN ('guest', 'assistant')";
+
 impl Library {
     /// Every track not deleted, with its artists in credit order.
     pub fn rec_tracks(&self) -> Result<Vec<RecTrack>> {
@@ -88,7 +92,10 @@ impl Library {
     }
 
     /// Every start, complete and skip, oldest first (the taste model's
-    /// history; likes and the rest are read as state).
+    /// history; likes and the rest are read as state). Only the owner's
+    /// own listening: a guest's plays never count, and what
+    /// the voice assistant put on (background on another device) is left
+    /// to [`Self::assistant_events`].
     ///
     /// A long history is read again and again (every build of the
     /// recommendations, every home), so the last answer is kept while the
@@ -103,7 +110,7 @@ impl Library {
             }
             let mut stmt = c.prepare_cached(
                 &format!(
-                    "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') ORDER BY ts, id"
+                    "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') AND {OWN_PLAYS} ORDER BY ts, id"
                 ),
             )?;
             let rows = stmt.query_map([], event_from_row)?;
@@ -117,9 +124,30 @@ impl Library {
     /// user listens).
     pub fn seek_events(&self) -> Result<Vec<Event>> {
         self.read(|c| {
-            let mut stmt = c.prepare_cached(&format!("SELECT {EVENT_COLS} FROM event WHERE type = 'seek' ORDER BY ts, id"))?;
+            let mut stmt =
+                c.prepare_cached(&format!("SELECT {EVENT_COLS} FROM event WHERE type = 'seek' AND {OWN_PLAYS} ORDER BY ts, id"))?;
             let rows = stmt.query_map([], event_from_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// The starts, completes and skips the voice assistant put on, oldest
+    /// first, as background listening (heard from afar: `attention` 1),
+    /// with their device: for a context of their own (music asked for on
+    /// that device), never the owner's mixes.
+    pub fn assistant_events(&self) -> Result<Vec<Event>> {
+        self.read(|c| {
+            let mut stmt = c.prepare_cached(&format!(
+                "SELECT {EVENT_COLS} FROM event WHERE type IN ('start', 'complete', 'skip') AND actor = 'assistant' ORDER BY ts, id"
+            ))?;
+            let rows = stmt.query_map([], event_from_row)?;
+            let mut events = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            for e in &mut events {
+                if e.event_type != nikgob_core::model::EventType::Start {
+                    e.attention = Some(1.0);
+                }
+            }
+            Ok(events)
         })
     }
 

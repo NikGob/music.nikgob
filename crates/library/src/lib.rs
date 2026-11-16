@@ -45,6 +45,7 @@ mod selection;
 mod stats;
 mod storage;
 mod streams;
+pub mod sync;
 mod track_fx;
 mod trash;
 
@@ -56,7 +57,7 @@ mod util;
 #[cfg(test)]
 mod tests;
 
-pub use db::Library;
+pub use db::{Library, register_functions};
 pub use lyrics::{AlignCounts, AlignedLyrics, StoredLyrics};
 pub use error::{LibraryError, Result};
 pub use joblog::JOB_LOG_KEEP;
@@ -68,6 +69,7 @@ pub use playlists::LIKED_PLAYLIST_NAME;
 pub use prints::{AudioPrint, NearPrint, PrintTodo, SameAudioOffer, SameSide, WrongAudio};
 pub use quality::{Conversion, FakeOffer, QualityTodo};
 pub use storage::LocalFileSizes;
+pub use sync::{SyncApplied, SyncConflicts, SyncCursors, SyncGroup, SyncHeads, SyncPage, SyncRow, SyncTable, TABLES as SYNC_TABLES, page_ahead, sync_table};
 pub use rec_facts::{LyricsLevel, LyricsSample, PlaylistTracks, TrackFactsRow};
 pub use graph::{GraphEntry, GraphFetch, GraphRow, GraphTag};
 pub use recordings::{PrintToLink, RecordingSide};

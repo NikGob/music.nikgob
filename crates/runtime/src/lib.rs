@@ -810,6 +810,10 @@ struct Worker {
     restored_page: Option<(u64, String)>,
     /// Who chose the next start, when the command that starts it knows.
     next_origin: Option<EventOrigin>,
+    /// Who started the queue that plays: an API request's token (the voice
+    /// assistant, an agent, a guest), `None` the owner. Recorded with each
+    /// play of it.
+    queue_actor: Option<nikgob_core::settings::ApiActor>,
     /// The queue generation of the last start: a start in another queue
     /// is the user's choice.
     origin_gen: Option<u64>,
@@ -1076,6 +1080,7 @@ impl Worker {
             play_context_id: None,
             restored_page: None,
             next_origin: None,
+            queue_actor: None,
             origin_gen: None,
             ended: true,
             heard: Heard::default(),
@@ -2074,7 +2079,9 @@ impl Worker {
             | Command::MeshSetKeepMasters(_)
             | Command::MeshSetPins { .. }
             | Command::MeshPauseTransfer { .. }
-            | Command::MeshForgetAnswer { .. }) => self.mesh_command(c),
+            | Command::MeshForgetAnswer { .. }
+            | Command::MeshSetSync { .. }
+            | Command::MeshSyncReport { .. }) => self.mesh_command(c),
         }
     }
 
@@ -2729,14 +2736,17 @@ impl Worker {
         self.rate = self.speed;
         self.jumped_at = Instant::now();
         if let Some(e) = self.playing {
-            let _ = self.lib.record_event(
+            let _ = self.lib.record_event_with(
                 e.track,
                 EventType::Seek,
                 None,
                 Some(p.as_millis() as u32),
                 self.play_context,
+                EventMeta { actor: self.queue_actor, ..EventMeta::default() },
             );
-            self.recs_seeked(e.track, from.as_millis() as u32, p.as_millis() as u32);
+            if self.queue_teaches() {
+                self.recs_seeked(e.track, from.as_millis() as u32, p.as_millis() as u32);
+            }
         }
         self.publish_player();
         // Nearer the end now: the next track's wait for its Spotify copy is
@@ -2777,10 +2787,12 @@ impl Worker {
         };
         self.ended = false;
         self.heard.reset();
-        let meta = EventMeta { origin: Some(origin), context_id, ..EventMeta::default() };
+        let meta = EventMeta { origin: Some(origin), context_id, actor: self.queue_actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
         self.turn.lap("start recorded");
-        self.recs_started(e.track, origin);
+        if self.queue_teaches() {
+            self.recs_started(e.track, origin);
+        }
         self.turn.lap("recs session");
         self.home_input_changed();
     }
@@ -2801,6 +2813,17 @@ impl Worker {
             self.record_end(true, EndReason::UserPick);
         }
         self.next_origin = Some(origin);
+        // Whoever asked for the new queue (an API request's token while its
+        // commands run; the window: the owner) plays it from now on.
+        self.queue_actor = self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner);
+    }
+
+    /// Whether the plays of the queue that plays teach the live
+    /// recommendations (the session, the skip and next-start models): the
+    /// owner's and an agent's do; a guest's never, the voice assistant's
+    /// are background (as in the history the mixes are made of).
+    fn queue_teaches(&self) -> bool {
+        teaches_live_recs(self.queue_actor)
     }
 
     /// The app closes: the playing (or paused) track ends as it is.
@@ -2832,16 +2855,22 @@ impl Worker {
             || dur.is_some_and(|d| pos.as_millis() as f64 >= f64::from(d) * 0.9);
         let position_ms = pos.as_millis() as u32;
         if reason != EndReason::AppClosed {
-            self.recs_played();
-            self.recs_ended(e.track, complete, position_ms, dur);
-            // After the session: the radio reads its verdict.
-            self.radio_feedback(e.track, complete, position_ms, dur);
+            if self.queue_teaches() {
+                self.recs_played();
+                self.recs_ended(e.track, complete, position_ms, dur);
+            }
+            // After the session: the radio reads its verdict (a radio the
+            // assistant started still follows its skips; a guest's plays
+            // steer nothing).
+            if self.queue_actor != Some(nikgob_core::settings::ApiActor::Guest) {
+                self.radio_feedback(e.track, complete, position_ms, dur);
+            }
             // «Дальше» on a guest is a skip at any point of it.
             self.plus_ended(e.id, reason == EndReason::UserNext || (by_user && !complete));
         }
         self.heard_tick();
         let (attention, volume) = self.heard.take();
-        let meta = EventMeta { end_reason: Some(reason), attention, volume, ..EventMeta::default() };
+        let meta = EventMeta { end_reason: Some(reason), attention, volume, actor: self.queue_actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(
             e.track,
             if complete {
@@ -4662,9 +4691,27 @@ fn youtube_refused_midway(message: &str) -> bool {
     (m.contains("refused") || m.contains("http 403")) && !streams::resolve::video_refused(message)
 }
 
+/// Whether the plays of a queue started by `actor` (`None`: the owner, in
+/// the window) teach the live recommendations ([`Worker::queue_teaches`]).
+pub(crate) fn teaches_live_recs(actor: Option<nikgob_core::settings::ApiActor>) -> bool {
+    !matches!(actor, Some(nikgob_core::settings::ApiActor::Guest | nikgob_core::settings::ApiActor::Assistant))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An assistant's or a guest's queue teaches the live recommendations
+    /// nothing; the owner's and an agent's do.
+    #[test]
+    fn only_the_owners_queues_teach_live_recs() {
+        use nikgob_core::settings::ApiActor;
+        assert!(teaches_live_recs(None));
+        assert!(teaches_live_recs(Some(ApiActor::Owner)));
+        assert!(teaches_live_recs(Some(ApiActor::Agent)));
+        assert!(!teaches_live_recs(Some(ApiActor::Assistant)));
+        assert!(!teaches_live_recs(Some(ApiActor::Guest)));
+    }
 
     fn ms(v: u64) -> Duration {
         Duration::from_millis(v)

@@ -24,6 +24,7 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, p: &mut Prefs, out: &mut Vec<
     switch(ui, Id::LyricsGenius, &mut p.lyrics_genius);
     switch(ui, Id::SaveLyrics, &mut p.save_found_lyrics);
     switch(ui, Id::LyricsCheck, &mut p.lyrics_check);
+    switch(ui, Id::LyricsKeepMisfits, &mut p.lyrics_keep_misfits);
 
     group(ui, "Подсветка сама");
     switch(ui, Id::LyricsWordsPlaying, &mut p.lyrics_words_playing);

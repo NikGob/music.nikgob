@@ -24,8 +24,9 @@ pub fn caller_of(cert: &Cert) -> Caller {
         MeshScope::Owner => (ApiPreset::Full, ApiActor::Owner),
         MeshScope::Guest => (ApiPreset::Control, ApiActor::Guest),
     };
-    let short: String = cert.node.chars().take(10).collect();
-    Caller { token_id: format!("mesh:{short}"), name: cert.name.clone(), preset, actor }
+    // The whole node id: what the device may (syncing turned off with it)
+    // is looked up by it.
+    Caller { token_id: format!("mesh:{}", cert.node), name: cert.name.clone(), preset, actor }
 }
 
 /// Serves one request that comes on `recv`/`send` with the local API.
@@ -97,7 +98,7 @@ mod tests {
         let owner = Cert::issue(&ring, &node, "Pi", nikgob_view::MeshKind::Pi, MeshScope::Owner, 1);
         let c = caller_of(&owner);
         assert_eq!((c.preset, c.actor, c.name.as_str()), (ApiPreset::Full, ApiActor::Owner, "Pi"));
-        assert!(c.token_id.starts_with("mesh:"));
+        assert_eq!(c.token_id, format!("mesh:{node}"), "its whole node id");
         let guest = Cert::issue(&ring, &node, "TV", nikgob_view::MeshKind::Tv, MeshScope::Guest, 1);
         let c = caller_of(&guest);
         assert_eq!((c.preset, c.actor), (ApiPreset::Control, ApiActor::Guest));

@@ -27,6 +27,11 @@ use crate::ticket::{self, Ticket};
 use crate::wire::{read_frame, write_frame};
 use crate::{ALPN_CTL, ALPN_HTTP, ALPN_PAIR, MESH_PORT, MeshContext, MeshError, tunnel};
 
+/// The library's sync with the other devices (a child of this module: it
+/// reads the ring and the links as they are here).
+#[path = "sync.rs"]
+mod sync;
+
 /// A link sends its presence at least this often…
 const HEARTBEAT: Duration = Duration::from_secs(5);
 /// …and a link that hears nothing for this long is dropped (offline).
@@ -189,6 +194,7 @@ pub(crate) struct Shared {
     http_in: Mutex<(u64, Vec<HttpIn>)>,
     /// Each device's room for running tunnelled requests.
     streams: Mutex<HashMap<PublicKey, Arc<Semaphore>>>,
+    library: Option<nikgob_library::Library>,
 }
 
 /// Binds an endpoint with `key`: LAN only, every ALPN of the mesh; on
@@ -375,6 +381,7 @@ impl Shared {
             http: Mutex::new(HashMap::new()),
             http_in: Mutex::new((0, Vec::new())),
             streams: Mutex::new(HashMap::new()),
+            library: ctx.library,
         })
     }
 
@@ -1680,6 +1687,7 @@ async fn publish_loop(sh: Arc<Shared>) {
 pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut stop: oneshot::Receiver<()>) {
     let mut changes = sh.wake.subscribe();
     let publisher = tokio::spawn(publish_loop(sh.clone()));
+    let syncer = tokio::spawn(sync::run(sh.clone()));
     let mut retry_at: Option<Instant> = None;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1726,6 +1734,7 @@ pub(crate) async fn run(sh: Arc<Shared>, mut cmds: mpsc::Receiver<Command>, mut 
             sh.command(c).await;
         }
     }
+    syncer.abort();
     sh.stop_node().await;
     publisher.abort();
     sh.rt.send(Command::MeshUpdate(Box::new(sh.snapshot())));

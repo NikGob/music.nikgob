@@ -455,6 +455,9 @@ mod tests {
         let recent = now_ms() - 86_400_000;
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
+            // Before migrations 34 and 35 (their triggers need the library's
+            // functions), so they run again.
+            crate::sync::rewind_before_mesh(&conn);
             conn.execute(
                 "INSERT INTO artist_photo(artist_id, path, source, fetched_at, photo_locked) VALUES
                     ('a', 'a.jpg', 'deezer', ?1, 0), ('b', NULL, 'deezer', ?1, 0),
@@ -463,7 +466,7 @@ mod tests {
             )
             .unwrap();
             // Migration 33 adds `tries` again.
-            conn.execute_batch(UNDO_LATER).unwrap();
+            conn.execute_batch("ALTER TABLE artist_photo DROP COLUMN tries").unwrap();
             conn.pragma_update(None, "user_version", 31).unwrap();
         }
         let lib = Library::open(&path).unwrap();
@@ -476,14 +479,6 @@ mod tests {
             .unwrap();
         assert_eq!(rows, vec![("a".into(), recent), ("b".into(), 0), ("c".into(), 0), ("d".into(), recent)]);
     }
-
-    /// What the migrations after 32 added, taken off again so an old schema
-    /// version can be replayed onto a library made today.
-    const UNDO_LATER: &str = "ALTER TABLE artist_photo DROP COLUMN tries;
-        ALTER TABLE node DROP COLUMN alias; ALTER TABLE node DROP COLUMN scope;
-        ALTER TABLE node DROP COLUMN profile; ALTER TABLE node DROP COLUMN addr;
-        ALTER TABLE node DROP COLUMN version; ALTER TABLE node DROP COLUMN cert;
-        ALTER TABLE node DROP COLUMN paired_at;";
 
     /// Migration 33: a channel banner stored as an artist's image goes, also
     /// from the front of two images (the other stays); a square Google
@@ -508,10 +503,11 @@ mod tests {
         ];
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
+            crate::sync::rewind_before_mesh(&conn);
             for (id, json) in ids.iter().zip(images) {
                 conn.execute("UPDATE artist SET images = ?2 WHERE id = ?1", params![id.to_string(), json]).unwrap();
             }
-            conn.execute_batch(UNDO_LATER).unwrap();
+            conn.execute_batch("ALTER TABLE artist_photo DROP COLUMN tries").unwrap();
             conn.pragma_update(None, "user_version", 32).unwrap();
         }
         let lib = Library::open(&path).unwrap();
