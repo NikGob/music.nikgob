@@ -299,6 +299,106 @@ fn is_trash_name(path: &Path) -> bool {
         && b[10] == b' '
 }
 
+/// Moves the lossless master files of `file_hash` this computer keeps (by
+/// name, or flat as `{hash}.<ext>` in `masters_dir`) to the Trash, each
+/// noted with where it was (`master_trash`): «Отменить» puts it back
+/// ([`restore_trashed_master`]) and the Trash's days end it
+/// ([`purge_trashed_masters`]). The master rows stay: other devices hold
+/// the file. Only a file inside the masters folder that still is that very
+/// file moves; the `.json` sidecar and a disc image's `.cue` stay where
+/// they are. The ids of the notes.
+pub fn trash_master_files(library: &Library, trash_dir: &Path, masters_dir: &Path, file_hash: &str) -> Result<Vec<i64>> {
+    // Under the masters' lock: an import does not take or lay out a master
+    // of this file meanwhile.
+    let _writes = crate::importer::master_writes();
+    let mut files: Vec<PathBuf> = library
+        .master_files_of_hash(file_hash)?
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| long_path(p).is_file())
+        .collect();
+    if let Some(flat) = crate::master_files::flat_master(masters_dir, file_hash)
+        && !files.contains(&flat)
+    {
+        files.push(flat);
+    }
+    let mut ids = Vec::new();
+    for path in files {
+        if !crate::fsutil::inside_roots(&path, &[masters_dir]) {
+            log::warn!("not moving {} to the Trash: it is outside the masters folder", path.display());
+            continue;
+        }
+        if crate::fsutil::hash_file(&path).ok().as_deref() != Some(file_hash) {
+            log::warn!("not moving {} to the Trash: it is not the master it was", path.display());
+            continue;
+        }
+        let size = crate::fsutil::file_size(&path)?;
+        let dest = trash_file(trash_dir, &path)?;
+        match library.put_master_trash(file_hash, &path.to_string_lossy(), &dest.to_string_lossy(), size) {
+            Ok(id) => ids.push(id),
+            Err(e) => {
+                // A file in the Trash nothing knows of could never come
+                // back: it goes back to its place at once.
+                if let Err(back) = move_file(&dest, &path) {
+                    log::error!("{} stays in the Trash as {}: {back}", path.display(), dest.display());
+                }
+                return Err(e.into());
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Puts the master file of note `id` back where it was. False when there
+/// is nothing to bring back (no such note, the file gone from the Trash)
+/// or something else took its place (never overwritten: it stays in the
+/// Trash, noted).
+pub fn restore_trashed_master(library: &Library, id: i64) -> Result<bool> {
+    let Some(row) = library.master_trash_row(id)? else {
+        return Ok(false);
+    };
+    let (from, to) = (PathBuf::from(&row.trash_path), PathBuf::from(&row.path));
+    if !long_path(&from).exists() {
+        library.remove_master_trash(id)?;
+        return Ok(false);
+    }
+    if long_path(&to).exists() {
+        return Ok(false);
+    }
+    if let Some(dir) = to.parent() {
+        create_dir_all(dir)?;
+    }
+    move_file(&from, &to)?;
+    library.remove_master_trash(id)?;
+    Ok(true)
+}
+
+/// Deletes the master files moved to the Trash more than `days` ago (only
+/// a Trash file's name is ever deleted) and their notes.
+pub fn purge_trashed_masters(library: &Library, days: u32) -> Result<PurgeReport> {
+    let cutoff = nikgob_library::now_ms() - i64::from(days) * 24 * 60 * 60 * 1000;
+    let mut report = PurgeReport::default();
+    for row in library.master_trash_before(cutoff)? {
+        let path = Path::new(&row.trash_path);
+        if !is_trash_name(path) {
+            log::warn!("not deleting {}: it is not a Trash file", row.trash_path);
+        } else {
+            match std::fs::remove_file(long_path(path)) {
+                Ok(()) => report.files_deleted += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => report.files_missing += 1,
+                Err(e) => {
+                    log::warn!("cannot delete {}: {e}", row.trash_path);
+                    report.files_failed += 1;
+                    continue;
+                }
+            }
+        }
+        library.remove_master_trash(row.id)?;
+        report.rows += 1;
+    }
+    Ok(report)
+}
+
 /// Deletes trashed sources older than `days` and their files.
 pub fn trash_purge(library: &Library, days: u32) -> Result<PurgeReport> {
     let purged = library.purge_trash(days)?;
@@ -329,6 +429,73 @@ pub fn trash_purge(library: &Library, days: u32) -> Result<PurgeReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A master let go of moves to the Trash (only while it is that file,
+    /// only from the masters folder), comes back with «Отменить» (never
+    /// over a file that took its place), and its rows stay throughout.
+    #[test]
+    fn a_master_goes_to_the_trash_and_comes_back() {
+        let root = tempfile::tempdir().unwrap();
+        let (masters, trash) = (root.path().join("masters"), root.path().join("Trash"));
+        let named = masters.join("A").join("2001 - B").join("01 - C.flac");
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        let song = b"fLaC master".to_vec();
+        std::fs::write(&named, &song).unwrap();
+        let hash = crate::fsutil::hash_file(&named).unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let artist = lib.upsert_artist(&nikgob_core::model::Artist::new("A")).unwrap();
+        let credit = nikgob_core::model::ArtistCredit::single(artist.name.clone(), Some(artist.id));
+        let t = lib.upsert_track(&nikgob_core::model::Track::new("C", credit)).unwrap();
+        lib.put_master(&nikgob_core::model::Master {
+            track_id: t.id,
+            codec: nikgob_core::model::Codec::Flac,
+            file_hash: hash.clone(),
+            size_bytes: song.len() as u64,
+            origin: None,
+            file_path: Some(named.to_string_lossy().into_owned()),
+            replicas: Vec::new(),
+        })
+        .unwrap();
+
+        let ids = trash_master_files(&lib, &trash, &masters, &hash).unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(!named.exists());
+        let row = lib.master_trash_row(ids[0]).unwrap().unwrap();
+        assert!(is_trash_name(Path::new(&row.trash_path)));
+        assert_eq!(std::fs::read(&row.trash_path).unwrap(), song);
+        assert!(lib.get_master(t.id).unwrap().is_some(), "the master row stays");
+        assert!(trash_master_files(&lib, &trash, &masters, &hash).unwrap().is_empty(), "nothing left to move");
+
+        std::fs::write(&named, b"something new").unwrap();
+        assert!(!restore_trashed_master(&lib, ids[0]).unwrap(), "never over another file");
+        std::fs::remove_file(&named).unwrap();
+        assert!(restore_trashed_master(&lib, ids[0]).unwrap());
+        assert_eq!(std::fs::read(&named).unwrap(), song);
+        assert!(lib.master_trash_row(ids[0]).unwrap().is_none());
+
+        // A file that is not the master any more stays where it is.
+        std::fs::write(&named, b"changed").unwrap();
+        assert!(trash_master_files(&lib, &trash, &masters, &hash).unwrap().is_empty());
+        assert!(named.exists());
+    }
+
+    /// The Trash's days end a master let go of: its file and its note.
+    #[test]
+    fn masters_in_the_trash_go_after_their_days() {
+        let root = tempfile::tempdir().unwrap();
+        let trash = root.path().join("Trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        let file = trash.join("2026-10-01 01 - C.flac");
+        std::fs::write(&file, b"x").unwrap();
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib.put_master_trash("h", "/m/01 - C.flac", &file.to_string_lossy(), 1).unwrap();
+        assert_eq!(purge_trashed_masters(&lib, 30).unwrap().rows, 0, "still in its days");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let r = purge_trashed_masters(&lib, 0).unwrap();
+        assert_eq!((r.rows, r.files_deleted), (1, 1));
+        assert!(!file.exists());
+        assert!(lib.master_trash_row(id).unwrap().is_none());
+    }
 
     #[test]
     fn same_named_files_never_overwrite_each_other_in_trash() {

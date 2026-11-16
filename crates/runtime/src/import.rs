@@ -367,6 +367,12 @@ impl ImportService {
                 Ok(_) => {}
                 Err(e) => log::warn!("trash purge: {e}"),
             }
+            // Masters let go of once the devices held copies of them.
+            match nikgob_import::trash::purge_trashed_masters(&lib, nikgob_import::TRASH_DAYS) {
+                Ok(r) if r.rows > 0 => log::info!("trashed masters purge: {r:?}"),
+                Ok(_) => {}
+                Err(e) => log::warn!("trashed masters purge: {e}"),
+            }
         });
         Some(svc)
     }
