@@ -14,6 +14,7 @@
 
 mod auth;
 mod confirm;
+mod connect;
 mod discover;
 mod docs;
 mod downloads;
@@ -320,14 +321,18 @@ impl Shared {
         self.tokens.find(secret)
     }
 
-    /// Whether token `id` still works (kept and not revoked).
+    /// Whether token `id` still works (kept and not revoked). A caller of
+    /// this process (a paired device, `mesh:…`) has no token to revoke: its
+    /// id has a `:`, which a token's never has.
     pub fn token_works(&self, id: &str) -> bool {
-        self.rt.state().api.tokens.iter().any(|t| t.id == id && !t.revoked)
+        id.contains(':') || self.rt.state().api.tokens.iter().any(|t| t.id == id && !t.revoked)
     }
 
-    /// No sound can come out: `503 no_audio`.
+    /// No sound can come out: `503 no_audio` (unless the music plays on
+    /// another device the window drives).
     pub fn audio(&self) -> Result<(), error::ApiError> {
-        if self.rt.state().no_audio { Err(error::ApiError::no_audio()) } else { Ok(()) }
+        let st = self.rt.state();
+        if st.no_audio && st.target.is_none() { Err(error::ApiError::no_audio()) } else { Ok(()) }
     }
 
     /// The state now.
@@ -378,6 +383,9 @@ fn v1_router(sh: Arc<Shared>, closing: Closing) -> Router {
         .route("/v1/player/volume", put(routes::volume))
         .route("/v1/player/duck", put(routes::duck).delete(routes::unduck))
         .route("/v1/player/output", put(routes::set_output))
+        .route("/v1/player/snapshot", get(connect::snapshot))
+        .route("/v1/player/load", post(connect::load))
+        .route("/v1/player/remote", post(connect::remote))
         .route("/v1/outputs", get(routes::list_outputs))
         .route("/v1/queue", get(routes::queue).post(routes::queue_add).delete(routes::queue_clear))
         .route("/v1/queue/move", post(routes::queue_move))

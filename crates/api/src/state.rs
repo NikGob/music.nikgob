@@ -67,7 +67,7 @@ pub struct NextTrack {
 /// Where the sound goes.
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
 pub struct OutputRef {
-    /// `local:default`, `local:<id>` (`GET /v1/outputs`).
+    /// `local:default`, `local:<id>`, `node:<id>` (`GET /v1/outputs`).
     pub id: String,
     pub name: String,
 }
@@ -153,9 +153,11 @@ impl PlayerState {
         } else {
             st.queue.next.first().map(|e| NextTrack { title: e.track.title.clone(), artists: artists_of(&e.track) })
         };
-        let output = match st.prefs.output_device.as_deref() {
-            Some(name) => OutputRef { id: outputs::local_id(name), name: name.to_owned() },
-            None => OutputRef { id: outputs::DEFAULT_ID.to_owned(), name: outputs::DEFAULT_NAME.to_owned() },
+        let output = match (&st.target, st.prefs.output_device.as_deref()) {
+            // The window drives another device of the home: the state is its.
+            (Some(t), _) => OutputRef { id: format!("{}{}", outputs::NODE_PREFIX, t.node_id), name: t.name.clone() },
+            (None, Some(name)) => OutputRef { id: outputs::local_id(name), name: name.to_owned() },
+            (None, None) => OutputRef { id: outputs::DEFAULT_ID.to_owned(), name: outputs::DEFAULT_NAME.to_owned() },
         };
         Self {
             status,
