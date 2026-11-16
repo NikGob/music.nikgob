@@ -159,6 +159,9 @@ struct State {
     running: bool,
     port: Option<u16>,
     lan: Option<IpAddr>,
+    /// This device's home network subnets: only addresses inside them are
+    /// dialled or remembered.
+    subnets: Vec<discovery::Subnet>,
     peers: HashMap<PublicKey, Peer>,
     table: Table,
     /// Addresses the runtime keeps for the paired devices.
@@ -272,6 +275,15 @@ async fn join_ticket(ep: &Endpoint, me: &Me, t: &Ticket) -> Result<(Grant, Strin
     out
 }
 
+/// A ticket's text, checked, with only the addresses inside this device's
+/// home network subnets (none left: nothing is dialled).
+fn ticket_on_lan(text: &str) -> Result<Ticket, String> {
+    let mut t = ticket_of(text)?;
+    let subnets = discovery::lan_subnets();
+    t.addrs.retain(|a| discovery::on_lan(a.ip(), &subnets));
+    Ok(t)
+}
+
 /// A ticket's text, checked: decodes, not expired.
 fn ticket_of(text: &str) -> Result<Ticket, String> {
     let t = Ticket::decode(text).map_err(|e| e.to_string())?;
@@ -287,7 +299,7 @@ pub(crate) async fn join_offline(paths: &MeshPaths, name: &str, kind: MeshKind, 
     if let Ok(Some(_)) = Ring::load(&paths.ring(), &key.public()) {
         return Err("Это устройство уже привязано".to_owned());
     }
-    let t = ticket_of(text)?;
+    let t = ticket_on_lan(text)?;
     let ep = bind(&key, false).await.map_err(|e| format!("Не удалось открыть сеть: {e}"))?;
     let me = Me { id: key.public(), name: clean_name(name), kind };
     let out = join_ticket(&ep, &me, &t).await;
@@ -363,6 +375,7 @@ impl Shared {
             running: false,
             port: None,
             lan: None,
+            subnets: Vec::new(),
             peers: HashMap::new(),
             table: Table::default(),
             known: HashMap::new(),
@@ -463,15 +476,15 @@ impl Shared {
         self.state.lock().ring.as_ref().and_then(|r| r.trusted(id).cloned())
     }
 
-    /// Where `id` can be dialled, home network addresses only: mDNS first,
-    /// then the last address that worked or that it came from, then the
-    /// runtime's (its node row).
+    /// Where `id` can be dialled, addresses inside this device's home
+    /// network subnets only: mDNS first, then the last address that worked
+    /// or that it came from, then the runtime's (its node row).
     fn addrs_of(&self, id: &PublicKey) -> Option<Vec<SocketAddr>> {
         let s = self.state.lock();
         let mut out: Vec<SocketAddr> = s.table.by_id(id).map(|x| x.addrs.clone()).unwrap_or_default();
         out.extend(s.peers.get(id).and_then(|p| p.addr));
         out.extend(s.known.get(id).copied());
-        out.retain(|a| discovery::lan_ip_ok(a.ip()));
+        out.retain(|a| discovery::on_lan(a.ip(), &s.subnets));
         let mut seen = HashSet::new();
         out.retain(|a| seen.insert(*a));
         (!out.is_empty()).then_some(out)
@@ -479,14 +492,18 @@ impl Shared {
 
     /// A ring member reached this device from `from`: kept as where it can
     /// be dialled when mDNS has nothing of it (the snapshot passes it to
-    /// its node row). Only a home network address.
+    /// its node row). Only an address inside this device's home network
+    /// subnets.
     fn remember_addr(&self, peer: &PublicKey, from: Option<SocketAddr>) {
-        let Some(from) = from.map(|a| SocketAddr::new(a.ip().to_canonical(), a.port())).filter(|a| discovery::lan_ip_ok(a.ip())) else { return };
+        let Some(from) = from.map(|a| SocketAddr::new(a.ip().to_canonical(), a.port())) else { return };
         if self.trusted_cert(peer).is_none() {
             return;
         }
         let changed = {
             let mut s = self.state.lock();
+            if !discovery::on_lan(from.ip(), &s.subnets) {
+                return;
+            }
             let p = s.peers.entry(*peer).or_default();
             let changed = p.addr != Some(from);
             p.addr = Some(from);
@@ -784,6 +801,7 @@ impl Shared {
             s.running = true;
             s.port = Some(port);
             s.lan = lan_ip();
+            s.subnets = discovery::lan_subnets();
             s.error = None;
             if s.ring.is_none() && s.code.is_none() {
                 self.fresh_code(&mut s);
@@ -867,7 +885,7 @@ impl Shared {
                 .and_then(|x| x.addrs.first().copied())
                 .or_else(|| p.and_then(|p| p.addr))
                 .or_else(|| s.known.get(&id).copied())
-                .filter(|a| discovery::lan_ip_ok(a.ip()));
+                .filter(|a| discovery::on_lan(a.ip(), &s.subnets));
             let view = MeshNodeView {
                 id: c.node.clone(),
                 name: pres.map(|p| p.name.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| c.name.clone()),
@@ -1024,7 +1042,12 @@ impl Shared {
                 return Err(PairError::Refused(Refusal::NotHolder).user_message());
             }
         }
-        let addrs = self.state.lock().table.by_id(&id).map(|x| x.addrs.clone()).filter(|a| !a.is_empty()).ok_or("Устройство пропало из сети")?;
+        let addrs = {
+            let s = self.state.lock();
+            let on_lan = |a: &&SocketAddr| discovery::on_lan(a.ip(), &s.subnets);
+            s.table.by_id(&id).map(|x| x.addrs.iter().filter(on_lan).copied().collect::<Vec<SocketAddr>>()).filter(|a| !a.is_empty())
+        }
+        .ok_or("Устройство пропало из сети")?;
         let conn = connect(&node.ep, id, &addrs, ALPN_PAIR).await.map_err(|e| PairError::Io(e).user_message())?;
         let me = self.me();
         let (mut send, mut recv) = conn.open_bi().await.map_err(|e| PairError::Io(e.to_string()).user_message())?;
@@ -1049,7 +1072,7 @@ impl Shared {
 
     /// Joins the ring of a ticket's holder: its id and name.
     async fn join(self: &Arc<Self>, text: &str) -> Result<(String, String), String> {
-        let t = ticket_of(text)?;
+        let t = ticket_on_lan(text)?;
         if self.state.lock().ring.is_some() {
             return Err("Это устройство уже привязано".to_owned());
         }
@@ -1118,6 +1141,7 @@ impl Shared {
     async fn tick(self: &Arc<Self>) {
         let running = self.state.lock().running;
         let all = if running { discovery::lan_addrs() } else { Vec::new() };
+        let subnets = if running { discovery::lan_subnets() } else { Vec::new() };
         let lan = all.iter().copied().find(IpAddr::is_ipv4).or_else(|| all.first().copied());
         // The home network's addresses changed (another network, a new
         // lease): announced again.
@@ -1130,6 +1154,7 @@ impl Shared {
         let expired = {
             let mut s = self.state.lock();
             s.lan = lan;
+            s.subnets = subnets;
             if s.invite.as_ref().is_some_and(|i| now_ms() >= i.expires_ms) {
                 s.invite = None;
                 true

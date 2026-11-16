@@ -4,13 +4,16 @@
 //! heard of for a while is asked about again; one that does not answer
 //! goes (the daemon then reports it removed).
 //!
-//! Only the home network counts: the addresses announced, remembered and
-//! dialled are private ones ([`lan_ip_ok`]: `10/8`, `172.16/12`,
-//! `192.168/16`, IPv6 `fc00::/7` but Tailscale's), announced only from a
-//! real card ([`lan_addrs`]: never Tailscale, Hyper-V/WSL `vEthernet`,
-//! Docker, VirtualBox, VMware, ZeroTier or a tunnel, whatever routes
-//! through it), those of the interface the default route goes through
-//! first. A public address heard of or kept from before is never dialled.
+//! Only the home network counts: the addresses announced are private ones
+//! ([`lan_ip_ok`]: `10/8`, `172.16/12`, `192.168/16`, IPv6 `fc00::/7` but
+//! Tailscale's) of real cards ([`lan_addrs`]: never Tailscale, Hyper-V/WSL
+//! `vEthernet`, Docker, VirtualBox, VMware, ZeroTier, a tunnel or a
+//! point-to-point link, whatever routes through it), those of the
+//! interface the default route goes through first. Another device's
+//! address is dialled or remembered only inside the subnet of one of those
+//! cards ([`on_lan`]): a private address routed elsewhere (a VPN's, an
+//! office's) is not the home network, nor a public one heard of or kept
+//! from before.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
@@ -119,6 +122,76 @@ fn default_route_ip() -> Option<IpAddr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
+/// A subnet this device is on: a real card's private address and the
+/// length of its prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Subnet {
+    pub ip: IpAddr,
+    pub prefix: u8,
+}
+
+impl Subnet {
+    /// Whether `ip` is inside it (an IPv4 one written as IPv6 as itself).
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.ip, ip.to_canonical()) {
+            (IpAddr::V4(a), IpAddr::V4(b)) => same_prefix(u128::from(u32::from(a)) << 96, u128::from(u32::from(b)) << 96, self.prefix.min(32)),
+            (IpAddr::V6(a), IpAddr::V6(b)) => same_prefix(u128::from(a), u128::from(b), self.prefix.min(128)),
+            _ => false,
+        }
+    }
+}
+
+/// Whether `a` and `b` agree in their first `bits` bits.
+fn same_prefix(a: u128, b: u128, bits: u8) -> bool {
+    bits == 0 || (a ^ b) >> (128 - u32::from(bits)) == 0
+}
+
+/// The home network's subnets among `ifaces` (name, address, prefix
+/// length, usable: up and not point-to-point): private addresses of real
+/// cards whose prefix names a network (IPv4 /8 or longer, IPv6 /16 or
+/// longer).
+pub fn subnets_in(ifaces: &[(&str, IpAddr, u8, bool)]) -> Vec<Subnet> {
+    let mut out: Vec<Subnet> = ifaces
+        .iter()
+        .filter(|(name, ip, prefix, usable)| *usable && lan_ip_ok(*ip) && !virtual_iface(name) && *prefix >= if ip.is_ipv4() { 8 } else { 16 })
+        .map(|(_, ip, prefix, _)| Subnet { ip: *ip, prefix: *prefix })
+        .collect();
+    out.dedup();
+    out
+}
+
+/// Whether another device's address `ip` may be dialled or remembered: a
+/// private address inside one of this device's home network `subnets`.
+pub fn on_lan(ip: IpAddr, subnets: &[Subnet]) -> bool {
+    let ip = ip.to_canonical();
+    lan_ip_ok(ip) && subnets.iter().any(|s| s.contains(ip))
+}
+
+/// This computer's interface addresses: name, address, prefix length,
+/// usable (up and not a point-to-point link).
+fn local_ifaces() -> Vec<(String, IpAddr, u8, bool)> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|i| {
+            let down = matches!(i.oper_status, if_addrs::IfOperStatus::Down | if_addrs::IfOperStatus::NotPresent | if_addrs::IfOperStatus::LowerLayerDown);
+            let prefix = match &i.addr {
+                if_addrs::IfAddr::V4(a) => a.prefixlen,
+                if_addrs::IfAddr::V6(a) => a.prefixlen,
+            };
+            let usable = !down && !i.is_p2p;
+            (i.name.clone(), i.ip(), prefix, usable)
+        })
+        .collect()
+}
+
+/// This computer's home network subnets ([`subnets_in`]).
+pub fn lan_subnets() -> Vec<Subnet> {
+    let ifaces = local_ifaces();
+    let list: Vec<(&str, IpAddr, u8, bool)> = ifaces.iter().map(|(n, ip, p, u)| (n.as_str(), *ip, *p, *u)).collect();
+    subnets_in(&list)
+}
+
 /// The LAN addresses among `ifaces` (name, address, up), best first: those
 /// of the interface the default route goes through (`route`: its
 /// address), then the others; only private ones ([`lan_ip_ok`]) of real
@@ -135,16 +208,11 @@ pub fn pick_lan(ifaces: &[(&str, IpAddr, bool)], route: Option<IpAddr>) -> Vec<I
     out.into_iter().map(|(.., ip)| ip).collect()
 }
 
-/// This computer's LAN addresses, best first ([`pick_lan`]).
+/// This computer's LAN addresses, best first ([`pick_lan`]; a
+/// point-to-point link counts as down).
 pub fn lan_addrs() -> Vec<IpAddr> {
-    let ifaces = if_addrs::get_if_addrs().unwrap_or_default();
-    let list: Vec<(&str, IpAddr, bool)> = ifaces
-        .iter()
-        .map(|i| {
-            let down = matches!(i.oper_status, if_addrs::IfOperStatus::Down | if_addrs::IfOperStatus::NotPresent | if_addrs::IfOperStatus::LowerLayerDown);
-            (i.name.as_str(), i.ip(), !down)
-        })
-        .collect();
+    let ifaces = local_ifaces();
+    let list: Vec<(&str, IpAddr, bool)> = ifaces.iter().map(|(n, ip, _, u)| (n.as_str(), *ip, *u)).collect();
     pick_lan(&list, default_route_ip())
 }
 
@@ -351,5 +419,35 @@ mod tests {
         assert!(!virtual_iface("Wi-Fi") && !virtual_iface("eth0") && !virtual_iface("Ethernet 2") && !virtual_iface("wlan0") && !virtual_iface("enp3s0"));
         let order = dial_order([ip("100.101.1.2"), ip("fe80::2"), ip("2a02::5"), ip("fd00::9"), ip("192.168.0.157"), ip("::ffff:10.0.0.4")], 47220);
         assert_eq!(order, [SocketAddr::new(ip("10.0.0.4"), 47220), SocketAddr::new(ip("192.168.0.157"), 47220), SocketAddr::new(ip("fd00::9"), 47220)]);
+    }
+
+    /// Another device is dialled or remembered only inside the subnet of
+    /// one of this device's real cards: a private address routed
+    /// elsewhere, a VPN's or a virtual switch's is not the home network.
+    #[test]
+    fn only_this_networks_subnets_are_dialled() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let ifaces = [
+            ("Wi-Fi", ip("192.168.0.157"), 24, true),
+            ("Ethernet", ip("10.0.0.7"), 24, true),
+            ("Tailscale", ip("100.101.1.2"), 32, true),
+            ("vEthernet (WSL)", ip("172.28.80.1"), 20, true),
+            ("OpenVPN Data Channel", ip("10.8.0.6"), 24, false),
+            ("Wi-Fi", ip("fd12:3456:789a:1::5"), 64, true),
+            ("Wi-Fi", ip("fe80::1"), 64, true),
+            ("Ethernet 3", ip("192.168.7.2"), 0, true),
+        ];
+        let subnets = subnets_in(&ifaces);
+        assert_eq!(subnets.len(), 3, "{subnets:?}");
+        assert!(on_lan(ip("192.168.0.20"), &subnets) && on_lan(ip("::ffff:192.168.0.20"), &subnets));
+        assert!(on_lan(ip("10.0.0.200"), &subnets));
+        assert!(!on_lan(ip("192.168.1.20"), &subnets), "private, another network: routed");
+        assert!(!on_lan(ip("10.8.0.1"), &subnets), "a VPN's");
+        assert!(!on_lan(ip("172.28.80.5"), &subnets), "a virtual switch's");
+        assert!(!on_lan(ip("192.168.7.9"), &subnets), "a prefix that names no network");
+        assert!(on_lan(ip("fd12:3456:789a:1::9"), &subnets) && !on_lan(ip("fd12:3456:789a:2::9"), &subnets));
+        assert!(!on_lan(ip("8.8.8.8"), &[Subnet { ip: ip("8.8.8.1"), prefix: 24 }]), "never a public one");
+        assert!(!on_lan(ip("192.168.0.20"), &[]), "no card: nothing");
+        assert!(Subnet { ip: ip("10.1.2.3"), prefix: 32 }.contains(ip("10.1.2.3")) && !Subnet { ip: ip("10.1.2.3"), prefix: 32 }.contains(ip("10.1.2.4")));
     }
 }
