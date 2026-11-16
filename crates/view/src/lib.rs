@@ -465,6 +465,17 @@ pub struct PlayerView {
     pub soloist: bool,
     /// «Таймер сна», while one runs.
     pub sleep: Option<SleepView>,
+    /// The current duck, if any.
+    pub duck: Option<DuckView>,
+}
+
+/// The sound lowered for a while ([`Command::SetDuck`]): a voice assistant
+/// listens or speaks. The volume stays as it is.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DuckView {
+    pub gain: f32,
+    /// When it ends by itself (unix ms).
+    pub until_unix_ms: i64,
 }
 
 impl Default for PlayerView {
@@ -487,6 +498,7 @@ impl Default for PlayerView {
             soloist: false,
             audio_quality: None,
             sleep: None,
+            duck: None,
         }
     }
 }
@@ -3814,6 +3826,16 @@ pub enum Command {
     /// daylist: its songs after the current track / at the end of the queue.
     PlayMixNext { id: MixId },
     EnqueueMix { id: MixId },
+    /// Lowers the sound to `gain` (0..=1, a factor on the current volume) over
+    /// `fade_ms`; restored by itself `ttl_ms` after the last SetDuck. A new
+    /// SetDuck replaces the gain (fading from the current one) and restarts ttl.
+    SetDuck { gain: f32, fade_ms: u32, ttl_ms: u32 },
+    /// Restores the sound over `fade_ms`. Harmless when not ducked.
+    ClearDuck { fade_ms: u32 },
+    /// Switches the output device: `None` = the system default; `Some(name)` =
+    /// a name from `Prefs::output_devices`, or on Linux also a PulseAudio sink
+    /// name (`alsa_output.usb-…analog-stereo`). Persisted like the Settings pick.
+    SetOutputDevice(Option<String>),
 }
 
 impl Default for Prefs {
