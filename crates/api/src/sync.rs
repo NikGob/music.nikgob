@@ -60,9 +60,12 @@ pub(crate) fn peer_of(caller: &Caller) -> Result<String, ApiError> {
     Ok(node.to_owned())
 }
 
-/// [`peer_of`], and syncing with it is on.
+/// [`peer_of`], and syncing with it is on (and on this database).
 async fn allowed(sh: &Arc<Shared>, caller: &Caller) -> Result<String, ApiError> {
     let peer = peer_of(caller)?;
+    if let Some(why) = sh.lib.sync_blocked() {
+        return Err(ApiError { status: StatusCode::SERVICE_UNAVAILABLE, code: "sync_blocked", message: why, needs: None });
+    }
     let lib = sh.lib.clone();
     let p = peer.clone();
     let off = blocking(move || lib.sync_cursors(&p).map(|c| c.off).map_err(db)).await?;

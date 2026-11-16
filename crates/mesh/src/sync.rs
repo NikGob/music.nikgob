@@ -1,29 +1,36 @@
-//! The library's sync with the owner's other devices: every few seconds,
-//! each paired owner device that is online and not turned off is asked
-//! how far its changes go (`/v1/sync/heads`) and, when it has new ones,
-//! they are taken table by table in pages (`/v1/sync/changes`) and merged
-//! here ([`nikgob_library::Library::sync_apply`], on the blocking pool, one
-//! short transaction a page). Pushing is the other side pulling from here.
-//! A device whose database is another one (its epoch) or went back is
-//! taken from the beginning again: merged, never wiped. A page from a
-//! clock more than five minutes ahead is not taken («часы устройства
-//! спешат»). Errors back off (5 s doubling to 5 min). Every request to the
-//! devices, heads and pictures too, is paced to [`PACE`] (under the API's
-//! rate limit, with room for the rest).
+//! The library's sync with the owner's other devices. Each turn, each
+//! paired owner device that is online and not turned off is asked how far
+//! its changes go (`/v1/sync/heads`) and, when it has new ones, they are
+//! taken table by table in pages (`/v1/sync/changes`) and merged here
+//! ([`nikgob_library::Library::sync_apply`], on the blocking pool, one short
+//! transaction a page) — at most [`PAGES_PER_TURN`] pages a device a turn,
+//! the devices in turn, so a long first sync of one holds up neither the
+//! others nor the pictures; while any has more, the next turn comes soon.
+//! Pushing is the other side pulling from here. A device whose database is
+//! another one (its epoch) or went back is taken from the beginning again:
+//! merged, never wiped. A page from a clock more than five minutes ahead is
+//! not taken («часы устройства спешат»). Errors back off (5 s doubling to
+//! 5 min). Every request to the devices, heads and pictures too, is paced
+//! to [`PACE`] (under the API's rate limit, with room for the rest). When
+//! syncing is off on this database (its epoch's copy could not be kept),
+//! nothing is asked and each device's row says so.
 //!
-//! Each turn the rows kept from before (that did not go through, deletes
-//! held back) are tried again; their count is on the device's row
-//! ([`Command::MeshSyncReport`]) with how a pull goes.
+//! Each turn the kept rows that are due are tried again; their counts are
+//! on the device's row ([`Command::MeshSyncReport`]) with how a pull goes:
+//! artists, albums and streams this device has under another id are the
+//! blocker shown («Не все изменения приняты: N»).
 //!
 //! Pictures: the covers and artist photos this device has are hashed
 //! (BLAKE3) a few at a time; those the synced rows name and this device
-//! lacks are fetched by hash from a device that has them, checked, and
-//! kept in the library's own cache (`.musiclib/covers/sync/<hash>.<ext>`):
-//! never into an album folder, never over a file.
+//! lacks (no file, or its file gone) are fetched by hash from a device that
+//! has them, checked, and kept in the library's own cache
+//! (`.musiclib/covers/sync/<hash>.<ext>`, which has to resolve inside the
+//! library folder): never into an album folder.
 //!
 //! This device's id in the library becomes its node id here (once).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,12 +38,14 @@ use std::time::Duration;
 use axum::body::{Body, Bytes};
 use nikgob_library::{Library, SYNC_TABLES, SyncHeads, SyncPage};
 use nikgob_view::{Command, MeshScope, MeshSyncView};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 
 use super::Shared;
 
-/// How often the devices are asked.
+/// How often the devices are asked when nothing is left to take.
 const EVERY: Duration = Duration::from_secs(5);
+/// The next turn while a device has more to take.
+const SOON: Duration = Duration::from_millis(250);
 /// The longest wait after errors.
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
 /// A running pull reports at most this often.
@@ -44,18 +53,26 @@ const REPORT_EVERY: Duration = Duration::from_millis(500);
 /// The least time between two requests to the devices (about 14 a second;
 /// the API lets a caller 20).
 const PACE: Duration = Duration::from_millis(70);
+/// Pages taken from one device in a turn, at most.
+const PAGES_PER_TURN: u32 = 20;
 /// The largest answer taken.
 const MAX_BODY: usize = 16 << 20;
 /// The largest picture hashed or taken.
 const MAX_PICTURE: u64 = 20 << 20;
 /// Pictures of this device hashed a turn.
 const INDEX_BATCH: u32 = 100;
+/// A picture file that could not be read is read again after this.
+const INDEX_AGAIN: Duration = Duration::from_secs(3_600);
 /// Pictures fetched a turn.
-const FETCH_BATCH: u32 = 20;
+const FETCH_BATCH: usize = 20;
+/// Picture rows looked through for those to fetch, a turn.
+const SCAN_ROWS: u32 = 2_000;
 /// A picture no device gave is asked again after this.
 const FETCH_AGAIN: Duration = Duration::from_secs(600);
 /// Pictures remembered as not given, at most.
 const MISSES_MAX: usize = 2_000;
+/// What a device's row says when syncing is off on this database.
+const BLOCKED: &str = "Синхронизация остановлена: метка базы не записана";
 
 /// What the loop keeps of a device.
 struct Peer {
@@ -168,8 +185,9 @@ pub(crate) fn pending(heads: &SyncHeads, cursors: &std::collections::BTreeMap<St
         .collect()
 }
 
-/// Takes what device `id` has new.
-async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &mut Peer) -> Result<(), Failure> {
+/// Takes what device `id` has new, at most `budget` pages. Whether it has
+/// more (the next turn goes on from the cursors).
+async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &mut Peer, budget: u32) -> Result<bool, Failure> {
     let heads: SyncHeads = get_json(sh, pace, id, "/v1/sync/heads").await?;
     let cursors = {
         let (l, peer) = (lib.clone(), id.to_owned());
@@ -194,16 +212,28 @@ async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &m
     }
     let todo = pending(&heads, &at);
     if todo.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
-    p.view.running = true;
-    p.view.done = 0;
-    p.view.total = todo.iter().map(|(_, from, to)| (to - from) as u64).sum();
+    let left: u64 = todo.iter().map(|(_, from, to)| (to - from) as u64).sum();
+    if p.view.running {
+        // Going on from the last turn: the bar keeps what it had.
+        p.view.total = p.view.done + left;
+    } else {
+        p.view.running = true;
+        p.view.done = 0;
+        p.view.total = left;
+    }
     report(sh, id, p);
-    let (mut taken, mut kept) = (0u64, 0u64);
-    for (table, from, head) in todo {
+    let (mut taken, mut kept, mut pages) = (0u64, 0u64, 0u32);
+    let mut more = false;
+    'tables: for (table, from, head) in todo {
         let mut since = from;
         while since < head {
+            if pages >= budget {
+                more = true;
+                break 'tables;
+            }
+            pages += 1;
             let uri = format!("/v1/sync/changes?table={table}&since={since}&limit={}", nikgob_library::sync::PAGE_ROWS);
             let page: SyncPage = get_json(sh, pace, id, &uri).await?;
             if page.table != table {
@@ -213,13 +243,13 @@ async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &m
                 log::warn!("sync: {id}'s clock runs more than five minutes ahead; nothing of it taken");
                 return Err(Failure::Ahead);
             }
-            let (next, more) = (page.next, page.more);
+            let (next, page_more) = (page.next, page.more);
             let done = {
                 let (l, peer) = (lib.clone(), id.to_owned());
                 blocking(move || l.sync_apply(&page, &peer, true)).await?
             };
             taken += u64::from(done.taken);
-            kept += u64::from(done.held + done.failed);
+            kept += u64::from(done.held + done.waiting + done.identity);
             p.view.done += (next.min(head) - since).max(0) as u64;
             if next <= since {
                 break;
@@ -228,13 +258,13 @@ async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &m
             if p.last_report.elapsed() >= REPORT_EVERY {
                 report(sh, id, p);
             }
-            if !more {
+            if !page_more {
                 break;
             }
         }
     }
     let now = nikgob_library::now_ms();
-    {
+    if !more {
         let (l, peer) = (lib.clone(), id.to_owned());
         blocking(move || l.sync_mark_ok(&peer, now)).await?;
     }
@@ -242,21 +272,22 @@ async fn pull(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, id: &str, p: &m
         p.view.last_ms = Some(now);
     }
     if taken > 0 || kept > 0 {
-        log::info!("sync: from {id}: {taken} rows taken, {kept} kept to try again");
+        log::info!("sync: from {id}: {taken} rows taken, {kept} kept");
     }
-    Ok(())
+    Ok(more)
 }
 
-/// The kept rows of `id` on its row; rows that could not be written are a
-/// blocker to show.
+/// The kept rows of `id` on its row; artists, albums and streams under
+/// another id are the blocker shown.
 async fn note_conflicts(lib: &Library, id: &str, p: &mut Peer) {
     let (l, peer) = (lib.clone(), id.to_owned());
     match blocking(move || l.sync_conflicts(&peer)).await {
         Ok(c) => {
-            p.view.conflicts = c.failed;
+            p.view.conflicts = c.identity;
+            p.view.waiting = c.waiting;
             p.view.held = c.held;
-            if c.failed > 0 && p.view.error.is_none() {
-                p.view.error = Some(format!("Не все изменения приняты: {}", c.failed));
+            if c.identity > 0 && p.view.error.is_none() {
+                p.view.error = Some(format!("Не все изменения приняты: {}", c.identity));
             }
         }
         Err(e) => log::warn!("sync: the kept rows of {id} not read: {e}"),
@@ -287,25 +318,31 @@ pub(crate) fn picture_ext(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// The BLAKE3 hash of the picture file at `path` (none: not one, too big,
-/// not readable).
-fn hash_picture(path: &Path) -> Option<String> {
+/// The BLAKE3 hash of the picture in `bytes` (none: not a picture).
+fn picture_hash(bytes: &[u8]) -> Option<String> {
+    picture_ext(bytes)?;
+    Some(blake3::hash(bytes).to_hex().to_string())
+}
+
+/// The bytes of the file at `path` (none: not a file, too big, not
+/// readable).
+fn read_picture(path: &Path) -> Option<Vec<u8>> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_PICTURE {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
-    picture_ext(&bytes)?;
-    Some(blake3::hash(&bytes).to_hex().to_string())
+    std::fs::read(path).ok()
 }
 
-/// Hashes a few covers and photos of this device.
+/// Hashes a few covers and photos of this device (a reference is done only
+/// once its file was read).
 async fn index_pictures(lib: &Library, library: PathBuf) {
     let l = lib.clone();
+    let again = nikgob_library::now_ms() - INDEX_AGAIN.as_millis() as i64;
     let done = blocking(move || {
-        for (kind, id, reference) in l.pictures_to_index(INDEX_BATCH)? {
+        for (kind, id, reference) in l.pictures_to_index(INDEX_BATCH, again)? {
             let path = picture_at(&reference, &library);
-            let hash = hash_picture(&path);
+            let hash = read_picture(&path).and_then(|b| picture_hash(&b));
             l.put_picture(&kind, &id, &reference, hash.as_deref().map(|h| (h, path.as_path())))?;
         }
         Ok(())
@@ -316,48 +353,117 @@ async fn index_pictures(lib: &Library, library: PathBuf) {
     }
 }
 
-/// Keeps picture `bytes` of `hash` in `dir` (never over a file) and notes
-/// it. Whether it is kept.
-fn keep_picture(lib: &Library, dir: &Path, hash: &str, bytes: &[u8]) -> nikgob_library::Result<bool> {
+/// The cache folder for pictures taken from devices, made if need be: its
+/// real path, only when it is inside the library folder (a link out of it
+/// is refused).
+fn cache_dir(library: &Path) -> std::io::Result<PathBuf> {
+    let dir = library.join(".musiclib").join("covers").join("sync");
+    std::fs::create_dir_all(&dir)?;
+    let real = std::fs::canonicalize(&dir)?;
+    let root = std::fs::canonicalize(library)?;
+    if !real.starts_with(&root) {
+        return Err(std::io::Error::other(format!("{} is outside the library folder", real.display())));
+    }
+    Ok(real)
+}
+
+/// Writes `bytes` to `path` through a new `.part` beside it (never one
+/// left from before: it is removed first).
+fn write_through_part(dir: &Path, hash: &str, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let part = dir.join(format!("{hash}.part"));
+    let open = || std::fs::OpenOptions::new().write(true).create_new(true).open(&part);
+    let mut file = match open() {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&part)?;
+            open()?
+        }
+        Err(e) => return Err(e),
+    };
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&part, path)
+}
+
+/// Keeps picture `bytes` of `hash` in the cache of `library` and notes it.
+/// Whether it is kept. A file already there under that name is used only
+/// when it is that picture; else it is replaced (it is the cache's own).
+fn keep_picture(lib: &Library, library: &Path, hash: &str, bytes: &[u8]) -> nikgob_library::Result<bool> {
     let Some(ext) = picture_ext(bytes) else { return Ok(false) };
     if blake3::hash(bytes).to_hex().as_str() != hash {
         return Ok(false);
     }
-    std::fs::create_dir_all(dir)?;
+    let dir = cache_dir(library)?;
     let path = dir.join(format!("{hash}.{ext}"));
-    if !path.exists() {
-        let tmp = dir.join(format!("{hash}.part"));
-        std::fs::write(&tmp, bytes)?;
-        if path.exists() {
-            let _ = std::fs::remove_file(&tmp);
-        } else {
-            std::fs::rename(&tmp, &path)?;
-        }
+    let there = read_picture(&path).is_some_and(|b| blake3::hash(&b).to_hex().as_str() == hash);
+    if !there {
+        write_through_part(&dir, hash, &path, bytes)?;
     }
     lib.put_picture_file(hash, &path)?;
     Ok(true)
 }
 
-/// Fetches a few pictures this device lacks from `from` (devices synced
-/// with now).
-async fn fetch_pictures(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, library: &Path, from: &[String], misses: &mut HashMap<String, Instant>) {
+/// Up to [`FETCH_BATCH`] pictures to fetch: named by the synced rows, with
+/// no file here or a file gone, not given lately (`skip`), looked for from
+/// `cursor` on (in hash order, wrapping round). And where to look next turn.
+fn pictures_to_fetch(lib: &Library, cursor: &str, skip: &HashSet<String>) -> nikgob_library::Result<(Vec<String>, String)> {
+    let mut out = Vec::new();
+    let mut at = cursor.to_owned();
+    let mut scanned = 0u32;
+    while out.len() < FETCH_BATCH && scanned < SCAN_ROWS {
+        let rows = lib.pictures_wanted(&at, 200)?;
+        if rows.is_empty() {
+            // The end: round again from the start next turn.
+            return Ok((out, String::new()));
+        }
+        scanned += rows.len() as u32;
+        for (hash, file) in rows {
+            at.clone_from(&hash);
+            let lacking = file.is_none_or(|f| !f.is_file());
+            if lacking && !skip.contains(&hash) {
+                out.push(hash);
+                if out.len() >= FETCH_BATCH {
+                    break;
+                }
+            }
+        }
+    }
+    Ok((out, at))
+}
+
+/// What the picture fetching keeps between turns.
+#[derive(Default)]
+struct Fetching {
+    /// Hashes no device gave, and when.
+    misses: HashMap<String, Instant>,
+    /// Where the next look for pictures to fetch starts.
+    cursor: String,
+}
+
+/// Fetches a few pictures this device lacks from `from` (devices that
+/// answered this turn).
+async fn fetch_pictures(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, library: &Path, from: &[String], f: &mut Fetching) {
     if from.is_empty() {
         return;
     }
+    let now = Instant::now();
+    f.misses.retain(|_, at| now.duration_since(*at) < FETCH_AGAIN);
+    let skip: HashSet<String> = f.misses.keys().cloned().collect();
     let wanted = {
-        let l = lib.clone();
-        match blocking(move || l.pictures_missing(FETCH_BATCH * 4)).await {
-            Ok(w) => w,
+        let (l, cursor) = (lib.clone(), f.cursor.clone());
+        match blocking(move || pictures_to_fetch(&l, &cursor, &skip)).await {
+            Ok((w, next)) => {
+                f.cursor = next;
+                w
+            }
             Err(e) => {
-                log::warn!("sync: the pictures missing not read: {e}");
+                log::warn!("sync: the pictures to fetch not read: {e}");
                 return;
             }
         }
     };
-    let now = Instant::now();
-    misses.retain(|_, at| now.duration_since(*at) < FETCH_AGAIN);
-    let dir = library.join(".musiclib").join("covers").join("sync");
-    for hash in wanted.into_iter().filter(|h| !misses.contains_key(h)).take(FETCH_BATCH as usize) {
+    for hash in wanted {
         let mut got = false;
         for id in from {
             let uri = format!("/v1/sync/blob?hash={hash}");
@@ -365,7 +471,7 @@ async fn fetch_pictures(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, libra
             if !status.is_success() {
                 continue;
             }
-            let (l, d, h) = (lib.clone(), dir.clone(), hash.clone());
+            let (l, d, h) = (lib.clone(), library.to_path_buf(), hash.clone());
             match blocking(move || keep_picture(&l, &d, &h, &bytes)).await {
                 Ok(true) => {
                     got = true;
@@ -376,12 +482,23 @@ async fn fetch_pictures(sh: &Arc<Shared>, pace: &mut Pacer, lib: &Library, libra
             }
         }
         if !got {
-            if misses.len() >= MISSES_MAX {
-                misses.clear();
+            if f.misses.len() >= MISSES_MAX {
+                f.misses.clear();
             }
-            misses.insert(hash, Instant::now());
+            f.misses.insert(hash, Instant::now());
         }
     }
+}
+
+/// The devices in this turn's order: each turn starts one further, so none
+/// is always last.
+pub(crate) fn in_turn(mut members: Vec<String>, turn: usize) -> Vec<String> {
+    members.sort();
+    if !members.is_empty() {
+        let n = turn % members.len();
+        members.rotate_left(n);
+    }
+    members
 }
 
 /// The loop, until the mesh stops (it is aborted then).
@@ -396,11 +513,12 @@ pub(crate) async fn run(sh: Arc<Shared>) {
     }
     let mut peers: HashMap<String, Peer> = HashMap::new();
     let mut pace = Pacer { last: None };
-    let mut misses: HashMap<String, Instant> = HashMap::new();
-    let mut tick = tokio::time::interval(EVERY);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    loop {
-        tick.tick().await;
+    let mut fetching = Fetching::default();
+    let mut upkeep: Option<Instant> = None;
+    let mut wait = EVERY;
+    for turn in 0usize.. {
+        tokio::time::sleep(wait).await;
+        wait = EVERY;
         if sh.node.lock().is_none() {
             continue;
         }
@@ -417,10 +535,22 @@ pub(crate) async fn run(sh: Arc<Shared>) {
         if !owner || members.is_empty() {
             continue;
         }
+        peers.retain(|id, _| members.contains(id));
+        if lib.sync_blocked().is_some() {
+            for id in members {
+                let p = peers.entry(id.clone()).or_insert_with(Peer::new);
+                p.view.running = false;
+                p.view.error = Some(BLOCKED.to_owned());
+                report(&sh, &id, p);
+            }
+            continue;
+        }
         let library = sh.rt.state().prefs.library_dir.clone();
-        index_pictures(&lib, library.clone()).await;
-        // What blocked a kept row may have changed here since.
-        {
+        // Hashing and the kept rows' retries at their own pace, not at every
+        // quick turn of a long pull.
+        if upkeep.is_none_or(|at| at.elapsed() >= EVERY) {
+            upkeep = Some(Instant::now());
+            index_pictures(&lib, library.clone()).await;
             let l = lib.clone();
             if let Err(e) = blocking(move || l.sync_retry()).await {
                 log::warn!("sync: the kept rows not tried again: {e}");
@@ -430,9 +560,8 @@ pub(crate) async fn run(sh: Arc<Shared>) {
             let l = lib.clone();
             blocking(move || l.sync_off_nodes()).await.unwrap_or_default()
         };
-        peers.retain(|id, _| members.contains(id));
-        let mut synced = Vec::new();
-        for id in members {
+        let mut answered = Vec::new();
+        for id in in_turn(members, turn) {
             let p = peers.entry(id.clone()).or_insert_with(Peer::new);
             if off.contains(&id) || !sh.online(&id) {
                 if p.view.running {
@@ -444,25 +573,30 @@ pub(crate) async fn run(sh: Arc<Shared>) {
             if Instant::now() < p.next {
                 continue;
             }
-            match pull(&sh, &mut pace, &lib, &id, p).await {
-                Ok(()) => {
+            match pull(&sh, &mut pace, &lib, &id, p, PAGES_PER_TURN).await {
+                Ok(more) => {
                     p.fails = 0;
                     p.next = Instant::now();
                     p.view.error = None;
-                    synced.push(id.clone());
+                    p.view.running = more;
+                    if more {
+                        wait = SOON;
+                    }
+                    answered.push(id.clone());
                 }
                 Err(e) => {
                     p.fails += 1;
                     p.next = Instant::now() + backoff(p.fails);
                     log::info!("sync: with {id} failed ({} in a row): {e:?}", p.fails);
                     p.view.error = Some(e.shown().to_owned());
+                    p.view.running = false;
                 }
             }
-            p.view.running = false;
             note_conflicts(&lib, &id, p).await;
             report(&sh, &id, p);
         }
-        fetch_pictures(&sh, &mut pace, &lib, &library, &synced, &mut misses).await;
+        // The pictures' share of every turn.
+        fetch_pictures(&sh, &mut pace, &lib, &library, &answered, &mut fetching).await;
     }
 }
 
@@ -501,6 +635,15 @@ mod tests {
         assert!(matches!(Failure::from("timed out".to_owned()), Failure::Other(_)));
     }
 
+    #[test]
+    fn the_devices_take_turns() {
+        let m = || vec!["c".to_owned(), "a".to_owned(), "b".to_owned()];
+        assert_eq!(in_turn(m(), 0), ["a", "b", "c"]);
+        assert_eq!(in_turn(m(), 1), ["b", "c", "a"]);
+        assert_eq!(in_turn(m(), 5), ["c", "a", "b"]);
+        assert!(in_turn(Vec::new(), 3).is_empty());
+    }
+
     /// Requests go at most about fourteen a second.
     #[tokio::test(start_paused = true)]
     async fn requests_are_paced() {
@@ -523,20 +666,46 @@ mod tests {
     }
 
     /// A picture taken from a device lands in the cache under its hash,
-    /// only when it is the picture asked for, and never over a file.
+    /// only when it is the picture asked for; a wrong file already there
+    /// under that name is replaced, a right one is used.
     #[test]
     fn a_picture_is_kept_by_its_hash_in_the_cache() {
         let lib = Library::open_in_memory().unwrap();
-        let dir = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
         let bytes = [0xFF, 0xD8, 0xFF, 1, 2, 3];
         let hash = blake3::hash(&bytes).to_hex().to_string();
-        assert!(!keep_picture(&lib, dir.path(), &hash, b"\xFF\xD8\xFFother").unwrap(), "not the one asked for");
-        assert!(!keep_picture(&lib, dir.path(), &blake3::hash(b"text").to_hex(), b"text").unwrap(), "not a picture");
-        assert!(keep_picture(&lib, dir.path(), &hash, &bytes).unwrap());
-        let path = dir.path().join(format!("{hash}.jpg"));
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!keep_picture(&lib, library.path(), &hash, b"\xFF\xD8\xFFother").unwrap(), "not the one asked for");
+        assert!(!keep_picture(&lib, library.path(), &blake3::hash(b"text").to_hex(), b"text").unwrap(), "not a picture");
+        let dir = cache_dir(library.path()).unwrap();
+        let path = dir.join(format!("{hash}.jpg"));
+        std::fs::write(&path, b"\xFF\xD8\xFFstale").unwrap();
+        std::fs::write(dir.join(format!("{hash}.part")), b"left over").unwrap();
+        assert!(keep_picture(&lib, library.path(), &hash, &bytes).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "the wrong file replaced");
         assert_eq!(lib.picture_file(&hash).unwrap(), Some(path.clone()));
-        assert!(keep_picture(&lib, dir.path(), &hash, &bytes).unwrap(), "again: the file stays");
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(keep_picture(&lib, library.path(), &hash, &bytes).unwrap(), "again: the file stays");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no part left");
+    }
+
+    /// The pictures to fetch: those whose file is not here, not those
+    /// given up on lately.
+    #[test]
+    fn pictures_to_fetch_skip_what_is_here_and_what_was_not_given() {
+        let lib = Library::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let here = dir.path().join("here.jpg");
+        std::fs::write(&here, b"ÿØÿ").unwrap();
+        let gone = dir.path().join("gone.jpg");
+        for (i, h) in ["h1", "h2", "h3", "h4"].into_iter().enumerate() {
+            let id = lib.upsert_artist(&nikgob_core::model::Artist::new(format!("A {i}"))).unwrap().id.to_string();
+            lib.put_picture("artist", &id, &format!("{h}.jpg"), Some((h, here.as_path()))).unwrap();
+            if h != "h1" {
+                lib.put_picture_file(h, &gone).unwrap();
+            }
+        }
+        let skip: HashSet<String> = ["h3".to_owned()].into();
+        let (out, next) = pictures_to_fetch(&lib, "", &skip).unwrap();
+        assert_eq!(out, ["h2", "h4"]);
+        assert_eq!(next, "", "the end: round again");
     }
 }

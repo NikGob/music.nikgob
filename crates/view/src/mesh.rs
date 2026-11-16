@@ -168,12 +168,14 @@ pub struct MeshSyncView {
     pub total: u64,
     /// When the last pull that brought rows ended (unix ms).
     pub last_ms: Option<i64>,
-    /// Why the last pull failed, or that rows of it did not go through
+    /// Why the last pull failed, or that rows of it wait for the owner
     /// ([`Self::conflicts`]): a blocker to show.
     pub error: Option<String>,
-    /// Rows of the device that could not be written here, kept and tried
-    /// again.
+    /// Its artists, albums, streams this device has under another id: kept
+    /// until the owner decides.
     pub conflicts: u32,
+    /// Its rows that cannot be written yet (tried again).
+    pub waiting: u32,
     /// Its deletes held back while the row is still used here (a file of
     /// this device keeps a song): not an error.
     pub held: u32,
