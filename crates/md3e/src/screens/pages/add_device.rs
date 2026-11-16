@@ -84,6 +84,9 @@ pub(crate) struct AddState {
     lan: Option<String>,
     /// The QR drawn, and of which ticket and colours.
     qr: Option<(String, Color32, egui::TextureHandle)>,
+    /// The pairing's end as it was when the window opened (another
+    /// window's), not this one's to act on.
+    stale: Option<MeshPairing>,
 }
 
 fn window_id() -> egui::Id {
@@ -106,6 +109,7 @@ pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Op
         a.platform = 0;
     }
     let now = anim::now(ctx);
+    a.stale = matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_)).then(|| m.pairing.clone());
     a.open = true;
     a.tab = tab;
     a.focus = true;
@@ -269,7 +273,17 @@ fn close_window(a: &mut AddState, out: &mut Vec<Command>) {
 /// new device a guest when asked); a wrong code — said, the cells empty;
 /// six digits typed — sent once.
 fn follow_pairing(a: &mut AddState, m: &MeshView, out: &mut Vec<Command>) {
+    // The end of a pairing from before the window opened, until the
+    // runtime has cleared it.
+    let stale = match &a.stale {
+        Some(p) if *p == m.pairing => true,
+        _ => {
+            a.stale = None;
+            false
+        }
+    };
     match &m.pairing {
+        _ if stale => {}
         MeshPairing::Done { node_id } => {
             if a.guest {
                 out.push(Command::MeshSetScope { node_id: node_id.clone(), scope: MeshScope::Guest });
@@ -665,6 +679,18 @@ mod tests {
         assert!(n >= 21 + 4);
         assert!(!m[0], "the quiet zone is light");
         assert!(m[2 * n + 2], "the finder's corner is dark");
+    }
+
+    /// A pairing that ended before the window opened does not close it.
+    #[test]
+    fn an_old_pairing_does_not_close_a_new_window() {
+        let mut a = AddState { open: true, stale: Some(MeshPairing::Done { node_id: "x".into() }), ..AddState::default() };
+        let m = MeshView { pairing: MeshPairing::Done { node_id: "x".into() }, ..MeshView::default() };
+        let mut out = Vec::new();
+        follow_pairing(&mut a, &m, &mut out);
+        assert!(a.open);
+        follow_pairing(&mut a, &MeshView::default(), &mut out);
+        assert!(a.stale.is_none(), "cleared once the runtime has");
     }
 
     /// Paired: the window closes and the device becomes a guest when asked;

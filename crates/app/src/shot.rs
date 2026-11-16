@@ -44,6 +44,10 @@
 //! album's, `radio:playlist` the first playlist's).
 //! `libfilter:text` types into the library's filter, `liblist:1` shows it
 //! as a list, `sort:artist|title|year|added` sorts its albums.
+//! `route:devices` and `devices_map:n` open «Карта сети» (`n` the device
+//! whose passport opens: 0 this computer); `devices_add` opens «Добавить
+//! устройство» (`devices_add:install` on «Установить») over Settings →
+//! Межсеть or the map.
 //! `reopen` closes the window and opens a new one, as the tray does.
 //! `hide:ms` closes the window as its ✕ does (to the tray) and asks for it
 //! back from the tray `ms` later (1000 by default).
@@ -347,6 +351,7 @@ impl Shot {
                     "seeding" => Route::Downloads(DownloadsTab::Seeding),
                     "settings" => Route::Settings,
                     "new_releases" => Route::NewReleases,
+                    "devices" => Route::Devices,
                     _ => Route::Home,
                 };
                 if let Route::Library(tab) = r {
@@ -705,6 +710,22 @@ impl Shot {
             "settings" => {
                 ui.open_settings_at(arg);
                 self.wait = 30;
+            }
+            // `devices_map` opens «Карта сети»; `devices_map:0` with this
+            // computer's passport open, `devices_map:2` the second paired
+            // device's.
+            "devices_map" => {
+                let shown = self.overlay(state);
+                ui.open_devices_map(ctx, shown.as_ref().unwrap_or(state), arg.parse().ok(), out);
+                self.wait = 40;
+            }
+            // `devices_add` opens «Добавить устройство» on «Подключить»
+            // (`devices_add:install` on «Установить»); Settings → Межсеть
+            // or «Карта сети» must be on screen (they draw it).
+            "devices_add" => {
+                let shown = self.overlay(state);
+                ui.open_add_device(ctx, shown.as_ref().unwrap_or(state), arg == "install", out);
+                self.wait = 40;
             }
             // `stream:album:spotify:sp-alb-gruppa` opens a page of a service.
             "stream" => {
