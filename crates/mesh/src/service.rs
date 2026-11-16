@@ -68,10 +68,8 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0))
 }
 
-/// This computer's address in the home network: the one a connection out
-/// would leave from (a UDP socket only picks its route, nothing is sent).
 /// This computer's best address on the home network (an IPv4 one first):
-/// never Tailscale's, a virtual adapter's, loopback or link-local.
+/// a private one of a real card ([`discovery::lan_addrs`]).
 fn lan_ip() -> Option<IpAddr> {
     let all = discovery::lan_addrs();
     all.iter().copied().find(IpAddr::is_ipv4).or_else(|| all.first().copied())
@@ -483,7 +481,7 @@ impl Shared {
     /// be dialled when mDNS has nothing of it (the snapshot passes it to
     /// its node row). Only a home network address.
     fn remember_addr(&self, peer: &PublicKey, from: Option<SocketAddr>) {
-        let Some(from) = from.filter(|a| discovery::lan_ip_ok(a.ip())) else { return };
+        let Some(from) = from.map(|a| SocketAddr::new(a.ip().to_canonical(), a.port())).filter(|a| discovery::lan_ip_ok(a.ip())) else { return };
         if self.trusted_cert(peer).is_none() {
             return;
         }

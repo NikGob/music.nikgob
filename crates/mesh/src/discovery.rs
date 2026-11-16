@@ -4,14 +4,16 @@
 //! heard of for a while is asked about again; one that does not answer
 //! goes (the daemon then reports it removed).
 //!
-//! Only the home network counts: the addresses announced and dialled are
-//! the LAN's ([`lan_addrs`], [`lan_ip_ok`]) — never loopback, link-local,
-//! Tailscale's (100.64.0.0/10, `fd7a:115c:a1e0::/48`) or a virtual
-//! adapter's (Hyper-V/WSL `vEthernet`, Docker, VPNs), the private
-//! (RFC 1918) ones of the interface the default route goes through first.
+//! Only the home network counts: the addresses announced, remembered and
+//! dialled are private ones ([`lan_ip_ok`]: `10/8`, `172.16/12`,
+//! `192.168/16`, IPv6 `fc00::/7` but Tailscale's), announced only from a
+//! real card ([`lan_addrs`]: never Tailscale, Hyper-V/WSL `vEthernet`,
+//! Docker, VirtualBox, VMware, ZeroTier or a tunnel, whatever routes
+//! through it), those of the interface the default route goes through
+//! first. A public address heard of or kept from before is never dialled.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use iroh::PublicKey;
@@ -64,18 +66,13 @@ pub fn instance_name(fullname: &str) -> String {
     base.trim_end_matches('.').replace("\\.", ".").replace("\\032", " ")
 }
 
-/// The addresses to dial, best first: IPv4 before IPv6, loopback last.
+/// The addresses to dial, the home network's only ([`lan_ip_ok`]), IPv4
+/// before IPv6.
 pub fn dial_order(ips: impl IntoIterator<Item = IpAddr>, port: u16) -> Vec<SocketAddr> {
-    let mut v: Vec<SocketAddr> = ips.into_iter().filter(|ip| lan_ip_ok(*ip)).map(|ip| SocketAddr::new(ip, port)).collect();
-    v.sort_by_key(|a| (!is_private(a.ip()), !a.is_ipv4(), a.ip().to_string()));
+    let mut v: Vec<SocketAddr> = ips.into_iter().map(|ip| ip.to_canonical()).filter(|ip| lan_ip_ok(*ip)).map(|ip| SocketAddr::new(ip, port)).collect();
+    v.sort_by_key(|a| (!a.is_ipv4(), a.ip().to_string()));
     v.dedup();
     v
-}
-
-/// Tailscale's IPv4 range, 100.64.0.0/10 (shared address space).
-fn is_cgnat(v: Ipv4Addr) -> bool {
-    let o = v.octets();
-    o[0] == 100 && (o[1] & 0xc0) == 64
 }
 
 /// Tailscale's IPv6 range, `fd7a:115c:a1e0::/48`.
@@ -84,20 +81,15 @@ fn is_tailscale_v6(v: Ipv6Addr) -> bool {
 }
 
 /// Whether `ip` is one the owner's devices may reach each other at on the
-/// home network: not loopback, link-local, unspecified, multicast or
-/// Tailscale's.
+/// home network: a private one ([`is_private`]; an IPv4 one written as
+/// IPv6 counts as itself). Public, loopback, link-local and Tailscale's
+/// addresses never are.
 pub fn lan_ip_ok(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => !(v.is_loopback() || v.is_link_local() || v.is_unspecified() || v.is_multicast() || v.is_broadcast() || is_cgnat(v)),
-        IpAddr::V6(v) => {
-            let link_local = (v.segments()[0] & 0xffc0) == 0xfe80;
-            !(v.is_loopback() || v.is_unspecified() || v.is_multicast() || link_local || is_tailscale_v6(v))
-        }
-    }
+    is_private(ip.to_canonical())
 }
 
 /// A private address: RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), or an
-/// IPv6 unique local one that is not Tailscale's.
+/// IPv6 unique local one (`fc00::/7`) that is not Tailscale's.
 pub fn is_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => v.is_private(),
@@ -127,29 +119,16 @@ fn default_route_ip() -> Option<IpAddr> {
     (!ip.is_unspecified()).then_some(ip)
 }
 
-/// The LAN addresses among `ifaces` (name, address, up), best first: the
-/// private ones of the interface the default route goes through (`route`:
-/// its address), the other private ones, then the others; never those
-/// [`lan_ip_ok`] refuses, never a virtual interface's (unless the default
-/// route goes through it: a virtual switch bridged to the real card).
+/// The LAN addresses among `ifaces` (name, address, up), best first: those
+/// of the interface the default route goes through (`route`: its
+/// address), then the others; only private ones ([`lan_ip_ok`]) of real
+/// cards — never a virtual interface's, whatever routes through it.
 pub fn pick_lan(ifaces: &[(&str, IpAddr, bool)], route: Option<IpAddr>) -> Vec<IpAddr> {
     let route_iface = route.filter(|r| lan_ip_ok(*r)).and_then(|r| ifaces.iter().find(|(_, ip, _)| *ip == r).map(|(n, ..)| *n));
-    let mut out: Vec<(u8, bool, IpAddr)> = ifaces
+    let mut out: Vec<(bool, bool, IpAddr)> = ifaces
         .iter()
-        .filter(|(_, ip, up)| *up && lan_ip_ok(*ip))
-        .filter_map(|(name, ip, _)| {
-            let on_route = route_iface == Some(*name);
-            if !on_route && virtual_iface(name) {
-                return None;
-            }
-            let rank = match (on_route, is_private(*ip)) {
-                (true, true) => 0,
-                (false, true) => 1,
-                (true, false) => 2,
-                (false, false) => 3,
-            };
-            Some((rank, ip.is_ipv6(), *ip))
-        })
+        .filter(|(name, ip, up)| *up && lan_ip_ok(*ip) && !virtual_iface(name))
+        .map(|(name, ip, _)| (route_iface != Some(*name), ip.is_ipv6(), *ip))
         .collect();
     out.sort();
     out.dedup_by_key(|(.., ip)| *ip);
@@ -169,16 +148,10 @@ pub fn lan_addrs() -> Vec<IpAddr> {
     pick_lan(&list, default_route_ip())
 }
 
-/// The virtual interfaces mDNS keeps quiet on (not the one the default
-/// route goes through).
+/// The virtual interfaces mDNS keeps quiet on: all of them.
 pub fn quiet_ifaces() -> Vec<String> {
     let ifaces = if_addrs::get_if_addrs().unwrap_or_default();
-    let route = default_route_ip();
-    let mut names: Vec<String> = ifaces
-        .iter()
-        .filter(|i| virtual_iface(&i.name) && route.is_none_or(|r| !ifaces.iter().any(|j| j.name == i.name && j.ip() == r)))
-        .map(|i| i.name.clone())
-        .collect();
+    let mut names: Vec<String> = ifaces.iter().filter(|i| virtual_iface(&i.name)).map(|i| i.name.clone()).collect();
     names.sort();
     names.dedup();
     names
@@ -344,9 +317,10 @@ mod tests {
         assert_eq!(t.removed("Кухня._nikgob._udp.local."), Change::Nothing);
     }
 
-    /// Only the home network's addresses: the default route's private
-    /// ones first, never Tailscale's, a virtual adapter's, loopback or
-    /// link-local; a virtual switch the default route goes through counts.
+    /// Only the home network's addresses: private ones of real cards, the
+    /// default route's first; never Tailscale's, a virtual adapter's (one
+    /// the default route goes through too), public, loopback or
+    /// link-local ones.
     #[test]
     fn only_lan_addresses_are_announced_and_dialled() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
@@ -363,11 +337,19 @@ mod tests {
         assert_eq!(pick_lan(&ifaces, Some(ip("192.168.0.157"))), [ip("192.168.0.157"), ip("10.0.0.7")]);
         assert_eq!(pick_lan(&ifaces, Some(ip("100.101.1.2"))), [ip("10.0.0.7"), ip("192.168.0.157")], "an exit node: no route to prefer");
         let bridged = [("vEthernet (External)", ip("192.168.0.20"), true), ("vEthernet (WSL)", ip("172.28.80.1"), true)];
-        assert_eq!(pick_lan(&bridged, Some(ip("192.168.0.20"))), [ip("192.168.0.20")]);
-        assert!(!lan_ip_ok(ip("100.64.0.1")) && lan_ip_ok(ip("100.128.0.1")));
-        assert!(!lan_ip_ok(ip("fd7a:115c:a1e0::1")) && is_private(ip("fd00::1")));
-        assert!(virtual_iface("tailscale0") && virtual_iface("vEthernet (Default Switch)") && !virtual_iface("Wi-Fi") && !virtual_iface("eth0"));
-        let order = dial_order([ip("100.101.1.2"), ip("fe80::2"), ip("2a02::5"), ip("192.168.0.157")], 47220);
-        assert_eq!(order, [SocketAddr::new(ip("192.168.0.157"), 47220), SocketAddr::new(ip("2a02::5"), 47220)]);
+        assert!(pick_lan(&bridged, Some(ip("192.168.0.20"))).is_empty(), "a virtual switch never, the default route through it or not");
+        let public = [("Ethernet", ip("85.64.1.2"), true), ("Wi-Fi", ip("2a02::5"), true), ("Wi-Fi", ip("fd12::5"), true)];
+        assert_eq!(pick_lan(&public, Some(ip("85.64.1.2"))), [ip("fd12::5")]);
+        assert!(!lan_ip_ok(ip("100.64.0.1")) && !lan_ip_ok(ip("100.128.0.1")) && !lan_ip_ok(ip("8.8.8.8")));
+        assert!(lan_ip_ok(ip("10.1.2.3")) && lan_ip_ok(ip("172.16.0.1")) && !lan_ip_ok(ip("172.32.0.1")) && lan_ip_ok(ip("192.168.1.1")));
+        assert!(!lan_ip_ok(ip("fd7a:115c:a1e0::1")) && lan_ip_ok(ip("fd00::1")) && !lan_ip_ok(ip("2a02::5")));
+        assert!(lan_ip_ok(ip("::ffff:192.168.0.5")) && !lan_ip_ok(ip("::ffff:8.8.8.8")));
+        assert!(!lan_ip_ok(ip("127.0.0.1")) && !lan_ip_ok(ip("169.254.1.1")) && !lan_ip_ok(ip("fe80::1")));
+        for name in ["tailscale0", "vEthernet (Default Switch)", "VirtualBox Host-Only Network", "VMware Network Adapter VMnet8", "docker0", "wg0", "tun0", "tap0", "utun3", "ZeroTier One [abc]", "zt7nnig26"] {
+            assert!(virtual_iface(name), "{name}");
+        }
+        assert!(!virtual_iface("Wi-Fi") && !virtual_iface("eth0") && !virtual_iface("Ethernet 2") && !virtual_iface("wlan0") && !virtual_iface("enp3s0"));
+        let order = dial_order([ip("100.101.1.2"), ip("fe80::2"), ip("2a02::5"), ip("fd00::9"), ip("192.168.0.157"), ip("::ffff:10.0.0.4")], 47220);
+        assert_eq!(order, [SocketAddr::new(ip("10.0.0.4"), 47220), SocketAddr::new(ip("192.168.0.157"), 47220), SocketAddr::new(ip("fd00::9"), 47220)]);
     }
 }
