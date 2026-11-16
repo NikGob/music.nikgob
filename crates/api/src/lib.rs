@@ -53,7 +53,8 @@ impl Wake {
         self.0.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
+    /// A receiver that sees every wake (the mesh follows the view with it).
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.subscribe()
     }
 }
@@ -82,6 +83,51 @@ pub struct ApiContext {
 pub struct ApiHandle {
     stop: Option<oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    local: LocalApi,
+}
+
+/// The `/v1` routes for callers known by other means than a token (a
+/// paired device through the mesh's tunnel): the same handlers, rights and
+/// rate limit, served in this process, whether the TCP listener is on or
+/// not.
+#[derive(Clone)]
+pub struct LocalApi {
+    router: Router,
+    /// Ends the event streams it serves when the API stops.
+    closing: Option<Arc<watch::Sender<bool>>>,
+}
+
+/// The caller of an in-process request, put there by [`LocalApi::call`]
+/// only (a request from the network cannot carry it).
+#[derive(Clone)]
+pub(crate) struct Trusted(pub Caller);
+
+impl LocalApi {
+    fn new(sh: Arc<Shared>) -> Self {
+        let (closing, closed) = watch::channel(false);
+        Self { router: router(sh, Closing(closed)), closing: Some(Arc::new(closing)) }
+    }
+
+    /// A router of one's own behind [`Self::call`] (no rights checked): for
+    /// tests of what carries the requests.
+    pub fn for_router(router: Router) -> Self {
+        Self { router, closing: None }
+    }
+
+    /// Answers `req` as `caller`.
+    pub async fn call(&self, caller: Caller, mut req: axum::extract::Request) -> axum::response::Response {
+        req.extensions_mut().insert(Trusted(caller));
+        match tower::ServiceExt::oneshot(self.router.clone(), req).await {
+            Ok(r) => r,
+            Err(never) => match never {},
+        }
+    }
+
+    fn close(&self) {
+        if let Some(c) = &self.closing {
+            let _ = c.send(true);
+        }
+    }
 }
 
 impl ApiHandle {
@@ -89,7 +135,13 @@ impl ApiHandle {
         self.shutdown();
     }
 
+    /// The routes in this process, for the mesh's tunnel.
+    pub fn local(&self) -> LocalApi {
+        self.local.clone()
+    }
+
     fn shutdown(&mut self) {
+        self.local.close();
         if let Some(s) = self.stop.take() {
             let _ = s.send(());
         }
@@ -108,6 +160,8 @@ impl Drop for ApiHandle {
 /// Starts the API's thread. It listens only while the settings say so.
 pub fn start(ctx: ApiContext) -> std::io::Result<ApiHandle> {
     let (stop_tx, stop_rx) = oneshot::channel();
+    let sh = Arc::new(Shared::new(ctx));
+    let local = LocalApi::new(sh.clone());
     let thread = std::thread::Builder::new().name("nikgob-api".into()).spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("nikgob-api-io").enable_all().build() {
             Ok(rt) => rt,
@@ -116,10 +170,10 @@ pub fn start(ctx: ApiContext) -> std::io::Result<ApiHandle> {
                 return;
             }
         };
-        rt.block_on(supervise(ctx, stop_rx));
+        rt.block_on(supervise(sh, stop_rx));
         rt.shutdown_timeout(Duration::from_secs(1));
     })?;
-    Ok(ApiHandle { stop: Some(stop_tx), thread: Some(thread) })
+    Ok(ApiHandle { stop: Some(stop_tx), thread: Some(thread), local })
 }
 
 /// How long an answer waits for the runtime to get past its commands.
@@ -312,8 +366,7 @@ impl Server {
 }
 
 /// Keeps the server as the settings say, until `stop`.
-async fn supervise(ctx: ApiContext, mut stop: oneshot::Receiver<()>) {
-    let sh = Arc::new(Shared::new(ctx));
+async fn supervise(sh: Arc<Shared>, mut stop: oneshot::Receiver<()>) {
     let mut changes = sh.wake.subscribe();
     let mut running: Option<Server> = None;
     let mut reported: Option<(Option<String>, Option<String>)> = None;
@@ -393,6 +446,41 @@ mod tests {
         assert_eq!(bind_error(&busy, "127.0.0.1", 47210), "Порт 47210 занят");
         let none = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
         assert_eq!(bind_error(&none, "192.168.0.157", 47210), "У компьютера нет адреса 192.168.0.157");
+    }
+
+    /// A paired device's request in this process: its caller's rights
+    /// count as a token's would, and nothing without a caller gets in.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_in_process_caller_has_its_rights() {
+        use axum::body::Body;
+        use nikgob_view::{ApiActor, ApiPreset};
+        let library = Library::open_in_memory().unwrap();
+        let rt = nikgob_runtime::Runtime::start(
+            nikgob_runtime::RuntimeConfig {
+                library: library.clone(),
+                streams: Vec::new(),
+                library_dir: std::env::temp_dir(),
+                prefs: nikgob_view::Prefs::default(),
+                prefs_path: None,
+                settings_path: None,
+                import: None,
+            },
+            Box::new(nikgob_runtime::NullPlayback),
+            Arc::new(|| {}),
+        );
+        let ctx = ApiContext { runtime: rt.handle(), library, wake: Wake::new(), media_roots: Vec::new() };
+        let local = LocalApi::new(Arc::new(Shared::new(ctx)));
+        let caller = |preset| Caller { token_id: "mesh:abc".into(), name: "Pi".into(), preset, actor: ApiActor::Owner };
+        let get = || axum::http::Request::get("/v1/state").body(Body::empty()).unwrap();
+        let r = local.call(caller(ApiPreset::Full), get()).await;
+        assert_eq!(r.status(), axum::http::StatusCode::OK);
+        let pause = || axum::http::Request::post("/v1/player/pause").body(Body::empty()).unwrap();
+        let r = local.call(caller(ApiPreset::Read), pause()).await;
+        assert_eq!(r.status(), axum::http::StatusCode::FORBIDDEN);
+        // Straight to the router, as from the network: no token, no entry.
+        let r = tower::ServiceExt::oneshot(local.router.clone(), get()).await.unwrap();
+        assert_eq!(r.status(), axum::http::StatusCode::UNAUTHORIZED);
+        drop(rt);
     }
 
     /// Two servers cannot share a port: the second says so.
