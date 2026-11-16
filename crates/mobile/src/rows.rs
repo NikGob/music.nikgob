@@ -1,26 +1,33 @@
 //! The track row of the phone (Metrolist's song item): 64 dp with a 48 dp
 //! cover (56 dp with the track's number on an album), the title over the
-//! artist and the length, a filled mark before them when the song has a
-//! file here, and one ⋮ at the end. A tap plays; a long press or ⋮ opens
-//! the track's menu; a swipe to the right plays it next (the queue's rows
-//! swipe left to leave). The playing row lies on the secondary container
-//! with live bars over its cover.
+//! artist and the length («Артист • 3:42»), a filled mark before them when
+//! the song has a file here, and one ⋮ at the end. A tap plays; a long
+//! press or ⋮ opens the track's menu; a swipe to the right plays it next
+//! (the queue's rows swipe left to leave). On a page the rows stand as one
+//! grouped list (Metrolist's): cards 3 dp apart on the surface container,
+//! the group's ends round. The playing row is a pill on the primary
+//! container, its cover a circle with live bars over it.
 
 use egui::{Id, Rect, Response, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::paint::{self, Radii};
 use nikgob_md3e::components::{Equalizer, IconButton};
 use nikgob_md3e::screens::phone;
-use nikgob_md3e::{Icon, Theme, TypeRole};
+use nikgob_md3e::{Icon, Theme, TypeRole, lerp_color};
 use nikgob_view::{Status, TrackRow, ViewState};
 
 use crate::{gesture, text};
 
 pub const ROW_H: f32 = 64.0;
 pub const NUMBERED_H: f32 = 56.0;
+/// The space under each card of a grouped list.
+pub const GROUP_GAP: f32 = 3.0;
 const SIDE: f32 = 16.0;
 const COVER: f32 = 48.0;
-const NUMBER_W: f32 = 28.0;
+const NUMBER_W: f32 = 36.0;
 const MORE: f32 = 48.0;
+/// A group's ends and its inner corners.
+const GROUP_END: f32 = 16.0;
+const GROUP_INNER: f32 = 4.0;
 
 /// What sits at the start of the row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +51,8 @@ pub struct Look {
     pub more: bool,
     /// A drag handle at the end (the queue's order).
     pub handle: bool,
+    /// One card of a grouped list: its place and the group's length.
+    pub group: Option<(usize, usize)>,
 }
 
 impl Look {
@@ -56,12 +65,26 @@ impl Look {
             swipe_remove: false,
             more: true,
             handle: false,
+            group: None,
         }
     }
 
     pub fn numbered(t: &TrackRow, state: &ViewState) -> Self {
         Self { lead: Lead::Number(t.track_no), ..Self::list(t, state) }
     }
+
+    /// As card `i` of a grouped list of `n`.
+    pub fn grouped(self, i: usize, n: usize) -> Self {
+        Self { group: Some((i, n)), ..self }
+    }
+}
+
+/// The corners of card `i` of a grouped list of `n`: the group's ends
+/// round, the inside small.
+pub fn group_radii(i: usize, n: usize) -> Radii {
+    let top = if i == 0 { GROUP_END } else { GROUP_INNER };
+    let bottom = if i + 1 >= n { GROUP_END } else { GROUP_INNER };
+    Radii([top, top, bottom, bottom])
 }
 
 /// `t` is the one playing.
@@ -78,49 +101,77 @@ pub struct RowOut {
     pub handle: Option<Response>,
 }
 
-/// The second line: «Артист · 3:42».
+/// The second line: «Артист • 3:42».
 fn supporting(t: &TrackRow) -> String {
     match t.duration {
-        Some(d) if !t.artist.is_empty() => format!("{} · {}", t.artist, text::duration(d)),
+        Some(d) if !t.artist.is_empty() => format!("{} • {}", t.artist, text::duration(d)),
         Some(d) => text::duration(d),
         None => t.artist.clone(),
     }
 }
 
-/// Draws the row of `t` over `rect`.
+/// Draws the row of `t` over `rect` (a grouped card: `rect` holds the gap
+/// under it too).
 pub fn track(ui: &mut Ui, rect: Rect, id: Id, t: &TrackRow, look: Look, state: &ViewState) -> RowOut {
     let ctx = ui.ctx().clone();
     let theme = Theme::get(&ctx);
     let s = theme.scheme;
-    let g = gesture::row(ui, rect, id, look.swipe_next, look.swipe_remove);
+    // The card of a grouped list, with the page's margins; a plain row
+    // fills its rect.
+    let (body, inset) = match look.group {
+        Some(_) => (Rect::from_min_max(pos2(rect.left() + 16.0, rect.top()), pos2(rect.right() - 16.0, rect.bottom() - GROUP_GAP)), 8.0),
+        None => (rect, SIDE),
+    };
+    let g = gesture::row(ui, body, id, look.swipe_next, look.swipe_remove);
     let mut out = RowOut { tap: g.tap, menu: g.long, play_next: g.swiped, remove: g.swiped_left, handle: None };
     let live = (g.offset != 0.0).then_some(g.offset);
     let dx = gesture::follow(&ctx, id.with("x"), live, theme.motion.fast_spatial);
+    let rest = match look.group {
+        Some((i, n)) => group_radii(i, n),
+        None => Radii::all(16.0),
+    };
     // What the swipe does, revealed under the row.
     if dx.abs() > 0.5 {
         let k = (dx.abs() / gesture::SWIPE_TRIGGER).clamp(0.0, 1.0);
-        let (band, fill, on, icon) = if dx > 0.0 {
-            (Rect::from_min_max(rect.min, pos2(rect.left() + dx, rect.bottom())), s.primary_container, s.on_primary_container, Icon::QueueMusic)
+        let (fill, on, icon) = if dx > 0.0 {
+            (s.primary_container, s.on_primary_container, Icon::QueueMusic)
         } else {
-            (Rect::from_min_max(pos2(rect.right() + dx, rect.top()), rect.max), s.error_container, s.on_error_container, Icon::Delete)
+            (s.error_container, s.on_error_container, Icon::Delete)
         };
-        paint::container(ui.painter(), band, Radii::all(0.0), fill.gamma_multiply(0.4 + 0.6 * k), Stroke::NONE);
+        paint::container(ui.painter(), body, rest, fill.gamma_multiply(0.4 + 0.6 * k), Stroke::NONE);
         let size = 20.0 + 4.0 * k;
-        let c = if dx > 0.0 { pos2(rect.left() + 28.0, rect.center().y) } else { pos2(rect.right() - 28.0, rect.center().y) };
+        let c = if dx > 0.0 { pos2(body.left() + 28.0, body.center().y) } else { pos2(body.right() - 28.0, body.center().y) };
         icon.widget(k >= 1.0, on.gamma_multiply(k), size).paint_at(ui, Rect::from_center_size(c, vec2(size, size)));
     }
-    let row = rect.translate(vec2(dx, 0.0));
+    let row = body.translate(vec2(dx, 0.0));
     let alpha = if look.muted { 0.38 } else { 1.0 };
-    if look.playing {
-        paint::container(ui.painter(), row.shrink2(vec2(8.0, 2.0)), Radii::all(16.0), s.secondary_container, Stroke::NONE);
+    // The card, turning into a pill on the primary container while it plays.
+    let current = nikgob_md3e::components::anim::fraction(&ctx, id.with("current"), if look.playing { 1.0 } else { 0.0 }, theme.motion.fast_effects);
+    let pill = Radii::all(row.height() * 0.5);
+    let (card, radii) = match look.group {
+        Some(_) => (row, rest.lerp(pill, current)),
+        None => (row.shrink2(vec2(8.0, 2.0)), Radii::all(16.0).lerp(Radii::all((row.height() - 4.0) * 0.5), current)),
+    };
+    let base = if look.group.is_some() {
+        s.surface_container
     } else if dx.abs() > 0.5 {
+        s.surface
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    let fill = lerp_color(base, s.primary_container, current);
+    if look.group.is_none() && dx.abs() > 0.5 && current < 0.01 {
         paint::container(ui.painter(), row, Radii::all(0.0), s.surface, Stroke::NONE);
+    } else {
+        paint::container(ui.painter(), card, radii, fill, Stroke::NONE);
     }
     let pressed = g.response.is_pointer_button_down_on() && live.is_none();
     let layer = nikgob_md3e::components::anim::fraction(&ctx, id.with("layer"), if pressed { 0.10 } else { 0.0 }, theme.motion.fast_effects);
-    paint::state_layer(ui.painter(), row.shrink2(vec2(8.0, 2.0)), Radii::all(16.0), s.on_surface, layer);
+    paint::state_layer(ui.painter(), card, radii, s.on_surface, layer);
+    let ink = lerp_color(s.on_surface, s.on_primary_container, current);
+    let quiet = lerp_color(s.on_surface_variant, s.on_primary_container, current);
 
-    let mut x = row.left() + SIDE;
+    let mut x = row.left() + inset;
     let now_playing = look.playing && state.player.status == Status::Playing;
     match look.lead {
         Lead::Cover => {
@@ -128,24 +179,26 @@ pub fn track(ui: &mut Ui, rect: Rect, id: Id, t: &TrackRow, look: Look, state: &
             let uri = t.cover.as_ref().map(|c| c.uri());
             let mut cui = ui.new_child(UiBuilder::new().max_rect(c));
             cui.multiply_opacity(alpha);
-            phone::paint_cover(&cui, c, uri.as_deref(), 8.0);
+            // The playing cover is a circle.
+            let r = 8.0 + (COVER * 0.5 - 8.0) * current;
+            phone::paint_cover(&cui, c, uri.as_deref(), r);
             if look.playing {
-                paint::container(ui.painter(), c, Radii::all(8.0), egui::Color32::from_black_alpha(110), Stroke::NONE);
+                paint::container(ui.painter(), c, Radii::all(r), egui::Color32::from_black_alpha(110), Stroke::NONE);
                 Equalizer::new(id.with("eq"), egui::Color32::WHITE).size(20.0).playing(now_playing).paint_at(ui, Rect::from_center_size(c.center(), vec2(20.0, 20.0)));
             }
-            x = c.right() + SIDE;
+            x = c.right() + 12.0;
         }
         Lead::Number(n) => {
             let c = Rect::from_min_size(pos2(x, row.top()), vec2(NUMBER_W, row.height()));
             if look.playing {
-                Equalizer::new(id.with("eq"), s.primary).size(20.0).playing(now_playing).paint_at(ui, Rect::from_center_size(c.center(), vec2(20.0, 20.0)));
+                Equalizer::new(id.with("eq"), s.on_primary_container).size(20.0).playing(now_playing).paint_at(ui, Rect::from_center_size(c.center(), vec2(20.0, 20.0)));
             } else if n > 0 {
-                ui.painter().text(c.center(), egui::Align2::CENTER_CENTER, n.to_string(), TypeRole::BodyLarge.font_id(), s.on_surface_variant.gamma_multiply(alpha));
+                ui.painter().text(c.center(), egui::Align2::CENTER_CENTER, n.to_string(), TypeRole::BodyMedium.font_id(), s.on_surface_variant.gamma_multiply(alpha));
             }
-            x = c.right() + SIDE;
+            x = c.right() + 8.0;
         }
     }
-    let mut right = row.right() - SIDE;
+    let mut right = row.right() - inset;
     if look.more {
         right = row.right() - 4.0 - MORE;
     }
@@ -153,20 +206,20 @@ pub fn track(ui: &mut Ui, rect: Rect, id: Id, t: &TrackRow, look: Look, state: &
         right -= MORE;
     }
     let w = (right - x - 8.0).max(16.0);
-    let title_style = TypeRole::BodyLarge.style();
-    let sub_style = TypeRole::BodyMedium.style();
+    let title_style = if look.playing { TypeRole::BodyLarge.emphasized() } else { TypeRole::BodyLarge.style() };
+    let sub_style = TypeRole::BodySmall.style();
     let top = row.center().y - (title_style.line_height + sub_style.line_height) * 0.5;
-    let title_color = if look.playing { s.on_secondary_container } else { s.on_surface };
-    text::paint_line(ui, pos2(x, top), t.title.clone(), title_style, title_color.gamma_multiply(alpha), w);
+    text::paint_line(ui, pos2(x, top), t.title.clone(), title_style, ink.gamma_multiply(alpha), w);
     let mut sx = x;
     let sy = top + title_style.line_height;
     if t.has_local {
+        let mark = lerp_color(s.primary, s.on_primary_container, current);
         Icon::DownloadDone
-            .widget(true, s.primary.gamma_multiply(alpha), 14.0)
+            .widget(true, mark.gamma_multiply(alpha), 14.0)
             .paint_at(ui, Rect::from_min_size(pos2(sx, sy + (sub_style.line_height - 14.0) * 0.5), vec2(14.0, 14.0)));
         sx += 18.0;
     }
-    text::paint_line(ui, pos2(sx, sy), supporting(t), sub_style, s.on_surface_variant.gamma_multiply(alpha), (right - sx - 8.0).max(16.0));
+    text::paint_line(ui, pos2(sx, sy), supporting(t), sub_style, quiet.gamma_multiply(alpha), (right - sx - 8.0).max(16.0));
 
     let mut end = row.right() - 4.0;
     if look.more {
@@ -250,5 +303,13 @@ mod tests {
         assert_eq!(in_sight(clip, -1180.0, 64.0, 1000), 20..27);
         assert_eq!(in_sight(clip, 100.0, 64.0, 3), 0..3);
         assert_eq!(in_sight(clip, 600.0, 64.0, 3), 0..0);
+    }
+
+    #[test]
+    fn a_group_is_round_at_its_ends() {
+        assert_eq!(group_radii(0, 3).0, [16.0, 16.0, 4.0, 4.0]);
+        assert_eq!(group_radii(1, 3).0, [4.0; 4]);
+        assert_eq!(group_radii(2, 3).0, [4.0, 4.0, 16.0, 16.0]);
+        assert_eq!(group_radii(0, 1).0, [16.0; 4]);
     }
 }

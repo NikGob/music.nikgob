@@ -1,22 +1,22 @@
 //! The pages of an album, a playlist and an artist (Metrolist's album,
-//! playlist and artist screens): the bar with ← over a centred head (the
-//! picture, the kicker, the title, the artist, the numbers), the row of
-//! actions, then the tracks; an artist's page has its popular tracks, its
-//! albums and its singles under the head. The bar turns solid with the
-//! title once the head has scrolled under it.
+//! playlist and artist screens): the bar with ← over the head (the cover
+//! across the page and a card with the title, the artist and the facts; an
+//! artist's picture centred), the row of «Слушать» and shuffle with its
+//! toggles, then the tracks as one grouped list; an artist's page has its
+//! popular tracks, its albums and its singles under the head. The bar turns
+//! solid with the title once the head has scrolled under it.
 
 use egui::{Id, Ui};
-use nikgob_md3e::components::{Button, IconButton, Size, Style};
 use nikgob_md3e::Icon;
 use nikgob_view::{
     ArtistId, Command, LIKED_PLAYLIST, LikeTarget, MeshPins, PlaylistId, RadioSeed, ReleaseDetail, ReleaseId, ReleaseType, Route, ViewState,
 };
 
-use crate::parts::{self, Head, PageOut, Picture};
+use crate::parts::{self, Action, Head, PageOut, Picture};
 use crate::{PageFrame, text};
 
-/// Scrolled this far the bar shows the title.
-const SOLID_FROM: f32 = 220.0;
+/// Scrolled this far past the picture the bar shows the title.
+const SOLID_AFTER: f32 = 24.0;
 
 /// How an album's word reads in the kicker.
 pub fn kind_word(t: ReleaseType) -> &'static str {
@@ -40,14 +40,15 @@ pub fn album_play(d: &ReleaseDetail, start: Option<nikgob_view::TrackId>, shuffl
     }
 }
 
-/// The scroll of a page and the bar over it; `body` draws the page.
-fn page(ui: &mut Ui, frame: PageFrame, id: impl std::hash::Hash + std::fmt::Debug, title: &str, mut body: impl FnMut(&mut Ui)) -> PageOut {
+/// The scroll of a page and the bar over it; `body` draws the page, whose
+/// head's picture is `picture` tall.
+fn page(ui: &mut Ui, frame: PageFrame, id: impl std::hash::Hash + std::fmt::Debug, title: &str, picture: f32, mut body: impl FnMut(&mut Ui)) -> PageOut {
     let mut out = PageOut::default();
     let o = crate::scroll(id, frame.reset).show(ui, |ui| {
         body(ui);
         ui.add_space(24.0);
     });
-    let solid = ((o.state.offset.y - SOLID_FROM) / 48.0).clamp(0.0, 1.0);
+    let solid = ((o.state.offset.y - picture - SOLID_AFTER) / 48.0).clamp(0.0, 1.0);
     if parts::top_bar(ui, frame.rect, frame.top, title, solid, true) {
         out.back = true;
     }
@@ -58,7 +59,8 @@ pub fn album(ui: &mut Ui, frame: PageFrame, id: ReleaseId, state: &ViewState, ou
     let d = state.release.as_ref().filter(|d| d.card.id == id);
     let mut inner = PageOut::default();
     let title = d.map_or("", |d| d.card.title.as_str());
-    let mut bar = page(ui, frame, ("phone-album", id), title, |ui| {
+    let picture = parts::cover_side(frame.rect.width(), ui.ctx().content_rect().height());
+    let mut bar = page(ui, frame, ("phone-album", id), title, picture, |ui| {
         let Some(d) = d else {
             ui.add_space(frame.top + parts::BAR_H);
             parts::loading(ui);
@@ -66,10 +68,10 @@ pub fn album(ui: &mut Ui, frame: PageFrame, id: ReleaseId, state: &ViewState, ou
         };
         let c = &d.card;
         let kicker = match c.year {
-            Some(y) => format!("{} · {y}", kind_word(c.release_type)),
+            Some(y) => format!("{} • {y}", kind_word(c.release_type)),
             None => kind_word(c.release_type).to_owned(),
         };
-        let numbers = format!("{} · {}", text::tracks(d.tracks.len() as u64), text::total(d.total_duration));
+        let numbers = format!("{} • {}", text::tracks(d.tracks.len() as u64), text::total(d.total_duration));
         let head = Head {
             uri: c.cover.as_ref().map(|c| c.uri()),
             picture: Picture::Square,
@@ -83,20 +85,18 @@ pub fn album(ui: &mut Ui, frame: PageFrame, id: ReleaseId, state: &ViewState, ou
         {
             inner.nav = Some(Route::Artist(a));
         }
-        parts::actions(ui, 300.0, |ui| {
-            if ui.add(Button::new("Слушать").icon(Icon::PlayArrow).style(Style::Filled).size(Size::M).id_salt("album-play")).clicked() {
-                out.push(album_play(d, None, false));
-            }
-            if ui.add(IconButton::new(Icon::Shuffle).style(Style::Tonal).size(Size::M).id_salt("album-shuffle")).clicked() {
-                out.push(album_play(d, None, true));
-            }
-            if ui.add(IconButton::new(Icon::Favorite).selected(d.liked).size(Size::M).id_salt("album-like")).clicked() {
-                out.push(Command::Like(LikeTarget::Release(id), !d.liked));
-            }
-            if ui.add(IconButton::new(Icon::QueueMusic).size(Size::M).id_salt("album-next")).clicked() {
-                out.push(Command::PlayReleaseNext(id));
-            }
-        });
+        let row = parts::play_row(ui, Id::new("album-row"), true, &[Action { icon: Icon::Favorite, on: d.liked }, Action { icon: Icon::QueueMusic, on: false }]);
+        if row.play {
+            out.push(album_play(d, None, false));
+        }
+        if row.shuffle {
+            out.push(album_play(d, None, true));
+        }
+        match row.action {
+            Some(0) => out.push(Command::Like(LikeTarget::Release(id), !d.liked)),
+            Some(_) => out.push(Command::PlayReleaseNext(id)),
+            None => {}
+        }
         let here = Route::Release(id);
         parts::tracks(ui, "album-tracks", &d.tracks, true, &here, state, |i| album_play(d, Some(d.tracks[i].id), false), out, &mut inner);
     });
@@ -127,13 +127,14 @@ pub fn playlist(ui: &mut Ui, frame: PageFrame, id: PlaylistId, state: &ViewState
     let d = state.playlist.as_ref().filter(|d| d.card.id == id);
     let mut inner = PageOut::default();
     let title = d.map_or("", |d| d.card.name.as_str());
-    let mut bar = page(ui, frame, ("phone-playlist", id), title, |ui| {
+    let picture = parts::cover_side(frame.rect.width(), ui.ctx().content_rect().height());
+    let mut bar = page(ui, frame, ("phone-playlist", id), title, picture, |ui| {
         let Some(d) = d else {
             ui.add_space(frame.top + parts::BAR_H);
             parts::loading(ui);
             return;
         };
-        let numbers = format!("{} · {}", text::tracks(d.tracks.len() as u64), text::total(d.total_duration));
+        let numbers = format!("{} • {}", text::tracks(d.tracks.len() as u64), text::total(d.total_duration));
         let head = Head {
             uri: d.card.cover.as_ref().map(|c| c.uri()),
             picture: Picture::Square,
@@ -144,27 +145,26 @@ pub fn playlist(ui: &mut Ui, frame: PageFrame, id: PlaylistId, state: &ViewState
         };
         parts::head(ui, frame.top, &head);
         let empty = d.tracks.is_empty();
-        parts::actions(ui, 300.0, |ui| {
-            if ui.add(Button::new("Слушать").icon(Icon::PlayArrow).style(Style::Filled).size(Size::M).enabled(!empty).id_salt("pl-play")).clicked() {
-                out.push(Command::PlayPlaylist { id, start: None, shuffle: false });
-            }
-            if ui.add(IconButton::new(Icon::Shuffle).style(Style::Tonal).size(Size::M).enabled(!empty).id_salt("pl-shuffle")).clicked() {
-                out.push(Command::PlayPlaylist { id, start: None, shuffle: true });
-            }
-            if ui.add(IconButton::new(Icon::QueueMusic).size(Size::M).enabled(!empty).id_salt("pl-next")).clicked() {
-                out.push(Command::PlayPlaylistNext(id));
-            }
-            // Kept on this phone with its «Избранное», while it is one of
-            // the owner's devices.
-            if state.mesh.paired {
-                let pins = &state.mesh.this.pins;
-                let on = pinned(pins, id);
-                let icon = if on { Icon::DownloadDone } else { Icon::Download };
-                if ui.add(IconButton::new(icon).selected(on).size(Size::M).id_salt("pl-pin")).clicked() {
-                    out.push(Command::MeshSetPins { node_id: state.mesh.this.id.clone(), pins: toggle_pin(pins, id) });
-                }
-            }
-        });
+        // «Следующим», and kept on this phone with its «Избранное» while it
+        // is one of the owner's devices.
+        let pins = &state.mesh.this.pins;
+        let kept = pinned(pins, id);
+        let mut actions = vec![Action { icon: Icon::QueueMusic, on: false }];
+        if state.mesh.paired {
+            actions.push(Action { icon: if kept { Icon::DownloadDone } else { Icon::Download }, on: kept });
+        }
+        let row = parts::play_row(ui, Id::new("pl-row"), !empty, &actions);
+        if row.play {
+            out.push(Command::PlayPlaylist { id, start: None, shuffle: false });
+        }
+        if row.shuffle {
+            out.push(Command::PlayPlaylist { id, start: None, shuffle: true });
+        }
+        match row.action {
+            Some(0) if !empty => out.push(Command::PlayPlaylistNext(id)),
+            Some(1) => out.push(Command::MeshSetPins { node_id: state.mesh.this.id.clone(), pins: toggle_pin(pins, id) }),
+            _ => {}
+        }
         let here = Route::Playlist(id);
         parts::tracks(
             ui,
@@ -187,7 +187,7 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
     let d = state.artist.as_ref().filter(|d| d.card.id == id);
     let mut inner = PageOut::default();
     let title = d.map_or("", |d| d.card.name.as_str());
-    let mut bar = page(ui, frame, ("phone-artist", id), title, |ui| {
+    let mut bar = page(ui, frame, ("phone-artist", id), title, 168.0, |ui| {
         let Some(d) = d else {
             ui.add_space(frame.top + parts::BAR_H);
             parts::loading(ui);
@@ -203,20 +203,18 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
             numbers: (c.track_count > 0).then(|| text::tracks(u64::from(c.track_count))),
         };
         parts::head(ui, frame.top, &head);
-        parts::actions(ui, 300.0, |ui| {
-            if ui.add(Button::new("Слушать").icon(Icon::PlayArrow).style(Style::Filled).size(Size::M).id_salt("ar-play")).clicked() {
-                out.push(Command::PlayArtist { id, shuffle: false });
-            }
-            if ui.add(IconButton::new(Icon::Shuffle).style(Style::Tonal).size(Size::M).id_salt("ar-shuffle")).clicked() {
-                out.push(Command::PlayArtist { id, shuffle: true });
-            }
-            if ui.add(IconButton::new(Icon::Radio).size(Size::M).id_salt("ar-radio")).clicked() {
-                out.push(Command::StartRadio { seed: RadioSeed::Artist(id) });
-            }
-            if ui.add(IconButton::new(Icon::Favorite).selected(d.liked).size(Size::M).id_salt("ar-like")).clicked() {
-                out.push(Command::Like(LikeTarget::Artist(id), !d.liked));
-            }
-        });
+        let row = parts::play_row(ui, Id::new("ar-row"), true, &[Action { icon: Icon::Favorite, on: d.liked }, Action { icon: Icon::Radio, on: false }]);
+        if row.play {
+            out.push(Command::PlayArtist { id, shuffle: false });
+        }
+        if row.shuffle {
+            out.push(Command::PlayArtist { id, shuffle: true });
+        }
+        match row.action {
+            Some(0) => out.push(Command::Like(LikeTarget::Artist(id), !d.liked)),
+            Some(_) => out.push(Command::StartRadio { seed: RadioSeed::Artist(id) }),
+            None => {}
+        }
         let here = Route::Artist(id);
         if !d.top_tracks.is_empty() {
             parts::section(ui, "Популярные треки");
@@ -240,7 +238,7 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
                 continue;
             }
             parts::section(ui, name);
-            parts::grid(ui, releases.len(), 2, |ui, i, r| {
+            parts::grid(ui, releases.len(), 3, |ui, i, r| {
                 let rel = &releases[i];
                 let uri = rel.cover.as_ref().map(|c| c.uri());
                 let sub = rel.year.map(|y| y.to_string()).unwrap_or_default();

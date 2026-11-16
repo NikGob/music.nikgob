@@ -30,6 +30,13 @@ pub fn centred(ui: &Ui, text: impl Into<String>, style: TypeStyle, color: Color3
     ui.painter().layout_job(job)
 }
 
+/// `text` in at most `rows` lines from the left, cut with «…».
+pub fn block(ui: &Ui, text: impl Into<String>, style: TypeStyle, color: Color32, max_w: f32, rows: usize) -> Arc<Galley> {
+    let mut job = egui::text::LayoutJob::single_section(text.into(), style.text_format(color));
+    job.wrap = TextWrapping { max_width: max_w.max(1.0), max_rows: rows.max(1), break_anywhere: false, overflow_character: Some('…') };
+    ui.painter().layout_job(job)
+}
+
 /// «3:42», «1:02:05».
 pub fn duration(d: Duration) -> String {
     let s = d.as_secs();

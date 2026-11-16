@@ -3,9 +3,9 @@
 //! «Исполнители», «Треки» — and with none of them the playlists over the
 //! latest albums. A chip tapped again, or ✕ before the chips, goes back to
 //! all of it. Under a chip, a row of its tools: the sort (a sheet) or a new
-//! playlist on the left, grid or list on the right. Albums and playlists
-//! stand in two columns, artists in three; the tracks are one long list
-//! loaded as it scrolls.
+//! playlist on the left, grid or list on the right. Albums, playlists and
+//! artists stand in three columns (Metrolist's grid); the tracks are one
+//! long list loaded as it scrolls.
 
 use egui::{Context, Id, Rect, Sense, Ui, UiBuilder, pos2, vec2};
 use nikgob_md3e::components::{BottomSheet, Button, ConnectedGroup, FilterChip, IconButton, Size, Style, TextInputDialog, TextInputResult};
@@ -190,7 +190,7 @@ impl Library {
             return;
         }
         let pls = &state.library.playlists;
-        parts::grid(ui, pls.len(), 2, |ui, i, r| {
+        parts::grid(ui, pls.len(), 3, |ui, i, r| {
             let p = &pls[i];
             let uri = p.cover.as_ref().map(|c| c.uri());
             if parts::card(ui, r, Id::new(("lib-pl-card", p.id)), uri.as_deref(), &p.name, &text::tracks(u64::from(p.track_count)), Picture::Square).clicked() {
@@ -218,7 +218,7 @@ impl Library {
             }
             return;
         }
-        parts::grid(ui, releases.len(), 2, |ui, i, rect| {
+        parts::grid(ui, releases.len(), 3, |ui, i, rect| {
             let r = &releases[i];
             let uri = r.cover.as_ref().map(|c| c.uri());
             if parts::card(ui, rect, Id::new(("lib-al-card", r.id)), uri.as_deref(), &r.title, &sub(r), Picture::Square).clicked() {

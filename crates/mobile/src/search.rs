@@ -153,7 +153,7 @@ impl Search {
             }
             if !a.albums.is_empty() {
                 parts::section(ui, "Альбомы");
-                parts::grid(ui, a.albums.len().min(8), 2, |ui, i, r| {
+                parts::grid(ui, a.albums.len().min(9), 3, |ui, i, r| {
                     let al = &a.albums[i];
                     let (uri, title, sub) = album_face(al);
                     if parts::card(ui, r, Id::new(("search-album", i)), uri.as_deref(), &title, &sub, Picture::Square).clicked() {
