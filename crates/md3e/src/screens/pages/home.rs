@@ -202,6 +202,7 @@ pub fn compact_mix_w(page_w: f32) -> f32 {
 
 /// How many of those cards a page `page_w` wide shows, the first inset
 /// `margin`, [`COMPACT_MIX_GAP`] between them.
+#[cfg(test)]
 pub fn compact_mix_shown(page_w: f32, card_w: f32, margin: f32) -> f32 {
     let step = card_w + COMPACT_MIX_GAP;
     if step <= 0.0 { 0.0 } else { (page_w - margin) / step }
