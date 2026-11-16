@@ -323,6 +323,15 @@ pub enum SettingId {
     Spotify,
     YouTube,
     SoundCloud,
+    // Межсеть → API и MCP.
+    /// «Использовать»: the local REST API on or off, «Открыть /docs».
+    ApiEnabled,
+    /// «Доступ»: this computer only, or the home network.
+    ApiAccess,
+    /// «Порт» of the API.
+    ApiPort,
+    /// «Токены»: «Новый токен» and the list of tokens.
+    ApiTokens,
 }
 
 /// Where a radio of `kind` takes its tracks, in a few words (the line under
@@ -369,9 +378,10 @@ pub const TAB_LYRICS: usize = 1;
 pub const TAB_LOOK: usize = 2;
 pub const TAB_SERVICES: usize = 3;
 pub const TAB_DOWNLOADS: usize = 4;
-pub const TAB_SYSTEM: usize = 5;
+pub const TAB_NET: usize = 5;
+pub const TAB_SYSTEM: usize = 6;
 /// Labels of the tab switch, in [`SettingId::tab`] order.
-pub const TABS: [&str; 6] = ["Музыка", "Тексты", "Вид", "Сервисы", "Загрузки", "Система"];
+pub const TABS: [&str; 7] = ["Музыка", "Тексты", "Вид", "Сервисы", "Загрузки", "Межсеть", "Система"];
 
 /// The tabs beside which the live stage stands (the lyrics and the looks).
 pub fn stage_tab(tab: usize) -> bool {
@@ -492,6 +502,7 @@ impl SettingId {
             DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
             | Soulseek | SoulseekShare | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
             | SoulseekUpload => TAB_DOWNLOADS,
+            ApiEnabled | ApiAccess | ApiPort | ApiTokens => TAB_NET,
             UserName | Autostart | AutostartHidden | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate
             | LyricsDeep | LyricsWordsAll | ToastTime | DownloadToasts | LibraryDir | MastersDir | Inbox | Trash | ExportData
             // «Для разработчика».
@@ -532,7 +543,10 @@ impl SettingId {
             // Загрузки.
             | DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | Soulseek | Prowlarr
             // Система.
-            | UserName | Autostart | AutostartHidden | DownloadToasts | LibraryDir | Inbox | Trash | Preset(_) => Level::Simple,
+            | UserName | Autostart | AutostartHidden | DownloadToasts | LibraryDir | Inbox | Trash | Preset(_)
+            // Межсеть: the switch and the tokens (a token is what every
+            // client needs).
+            | ApiEnabled | ApiTokens => Level::Simple,
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile | FirstRun => Level::Dev,
@@ -556,7 +570,7 @@ impl SettingId {
             | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
             | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit | SoulseekUpload
             | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep | LyricsWordsAll
-            | MastersDir | ExportData => Level::Deep,
+            | MastersDir | ExportData | ApiAccess | ApiPort => Level::Deep,
         }
     }
 
@@ -771,6 +785,10 @@ impl SettingId {
             SeedRatio => "Предел отдачи",
             DownloadLimit => "Скорость загрузки",
             UploadLimit => "Отдача торрентов",
+            ApiEnabled => "Использовать",
+            ApiAccess => "Доступ",
+            ApiPort => "Порт",
+            ApiTokens => "Токены",
         }
     }
 
@@ -922,6 +940,10 @@ impl SettingId {
             SeedRatio => "Раздача остановится, когда ты отдашь во столько раз больше, чем скачал. До упора влево — без предела.",
             DownloadLimit => "Максимальная скорость скачивания торрентов, чтобы не занимать весь интернет. До упора вправо — без лимита.",
             UploadLimit => "Максимальная скорость, с которой торренты отдают скачанное другим. До упора вправо — без лимита.",
+            ApiEnabled => "Локальный API плеера: им управляют голосовой ассистент, скрипты и ИИ-агенты — включают музыку, ставят паузу, меняют громкость и очередь, ищут в библиотеке. Каждому нужен свой токен. «Открыть /docs» — описание всех запросов с примерами; кнопка работает, когда API действительно слушает порт.",
+            ApiAccess => "«Этот компьютер» — к API могут обратиться только программы на этом компьютере. «Домашняя сеть» — ещё и другие устройства дома: колонка с ассистентом, телефон, второй компьютер; без токена не пустит никого. Windows при первом открытии в сеть спросит, разрешить ли плееру входящие подключения, — разреши для частных сетей. Адрес, заданный в settings.toml (как на Raspberry Pi), показан рядом.",
+            ApiPort => "Порт, на котором слушает API, от 1024 до 65535; по умолчанию 47210. Меняй, только если он занят другой программой, и не забудь поменять его в настройках ассистента.",
+            ApiTokens => "Токен — пароль для одной программы. Он показывается один раз, сразу после создания: скопируй его тогда, потом плеер хранит только его отпечаток и показать снова не сможет. Права: «Управление» — плеер, очередь, громкость, приглушение, вывод звука, поиск и чтение; «Полный» — всё, кроме токенов и устройств; «Только чтение» — смотреть и искать. «Кто включает» попадает в историю прослушиваний: музыка, которую включил ассистент или гость, не портит твои рекомендации. «Отозвать» отключает токен сразу; передумал — «Отменить».",
             Spotify => "Вход в аккаунт Spotify через браузер со своим ключом: поиск, лайки, плейлисты и история. Нужен Premium — без него Spotify не подключить, а YouTube Music работает и так. Пароль приложение не видит.",
             SpotifyEnabled => "Выключи — Spotify не используется нигде: ни в поиске, ни для звука, ни для лайков. Вход при этом не забывается.",
             SpotifyPlayback => "Отдельное разрешение на звук из Spotify (второе окно согласия). Пока его нет, те же треки играют с YouTube Music — в плеере это видно по подписи «YouTube».",
@@ -3008,6 +3030,8 @@ mod tests {
             (S::AlbumVersions, TAB_MUSIC),
             (S::PlayerButton(v::PlayerButton::Sound), TAB_LOOK),
             (S::NavRoot, TAB_LOOK),
+            (S::ApiEnabled, TAB_NET),
+            (S::ApiTokens, TAB_NET),
         ] {
             assert_eq!(id.tab(), tab, "{id:?}");
         }

@@ -230,6 +230,8 @@ pub const ALL: &[SettingId] = {
         DownloadSource(Src::Soundcloud), DownloadSource(Src::Dogmazic),
         LikeDownload, UpgradeBar, UpgradeEvery, OpusBitrate, UpgradeAuto, FakeFlac, FakeRestore, Soulseek, SoulseekShare, Prowlarr,
         Preset(Area::Seeding), NoSeed, SeedLimit, SeedDays, SeedRatio, DownloadLimit, UploadLimit, SoulseekUpload,
+        // Межсеть.
+        ApiEnabled, ApiAccess, ApiPort, ApiTokens,
         // Система.
         UserName, Autostart, AutostartHidden, Preset(Area::Load), FpsLimit, TrayKeepWindow, AutoDownloads, StreamAnalysis, LyricsSeparate, LyricsDeep,
         LyricsWordsAll, ToastTime, DownloadToasts, LibraryDir, MastersDir, Inbox, Trash, ExportData,
@@ -425,6 +427,12 @@ fn spec(id: SettingId) -> Spec {
         S::SeedRatio => Spec::Slider(|p| &mut p.seed_ratio, 0.0, 5.0, 0.5),
         S::DownloadLimit => Spec::Speed(|p| &mut p.download_limit_kbps),
         S::UploadLimit => Spec::Speed(|p| &mut p.upload_limit_kbps),
+        // The local API lives in settings.toml (`[api]`), not in the prefs:
+        // the sweep never opens a port or makes a token.
+        S::ApiEnabled => Spec::Fixed(Kind::Switch, "kept in settings.toml; the sweep never opens the API's port"),
+        S::ApiAccess => Spec::Fixed(Segments, "kept in settings.toml; the sweep never opens the API to the network"),
+        S::ApiPort => Spec::Fixed(Field, "kept in settings.toml; typed in, never set by the sweep"),
+        S::ApiTokens => Spec::Fixed(List, "a token is made by hand only; its secret is shown once"),
     }
 }
 
@@ -764,6 +772,7 @@ pub fn tab_first(tab: usize) -> SettingId {
         settings_help::TAB_LOOK => SettingId::Theme,
         settings_help::TAB_SERVICES => SettingId::SpotifyEnabled,
         settings_help::TAB_DOWNLOADS => SettingId::Preset(Area::Sources),
+        settings_help::TAB_NET => SettingId::ApiEnabled,
         _ => SettingId::UserName,
     }
 }
@@ -922,7 +931,8 @@ mod tests {
             | S::Trash | S::ExportData | S::LyricsUi | S::LyricsGpu | S::LyricsModelsAuto | S::MusicBrainz | S::AcoustId
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
             | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::FirstRun | S::CoverSpinSpeed
-            | S::CoverPulseStrength | S::HomeSections | S::Preset(_) => pos(id),
+            | S::CoverPulseStrength | S::HomeSections | S::Preset(_) | S::ApiEnabled | S::ApiAccess | S::ApiPort
+            | S::ApiTokens => pos(id),
         }
     }
 
@@ -1015,7 +1025,9 @@ mod tests {
         let mut s = Survey::new(survey_state(), [1600.0, 1000.0]);
         for tab in 0..TABS.len() {
             let rows = s.tab(&Prefs::default(), tab);
-            assert!(rows.len() > 5, "tab {tab}: {} rows", rows.len());
+            // «Межсеть» has only «API и MCP» until the devices come.
+            let least = if tab == settings_help::TAB_NET { 3 } else { 5 };
+            assert!(rows.len() > least, "tab {tab}: {} rows", rows.len());
             for r in &rows {
                 assert!(ALL.contains(&r.id), "{:?}", r.id);
                 assert!(!r.label.is_empty() && !r.group.is_empty(), "{:?}", r.id);

@@ -790,7 +790,7 @@ pub struct PageState {
     pub focus_setting: Option<SettingId>,
     /// The whole group of [`Self::focus_setting`] is shown, not the row.
     pub focus_group: bool,
-    /// Settings tab: [`settings_help::TABS`] (0 «Музыка» … 5 «Система»).
+    /// Settings tab: [`settings_help::TABS`] (0 «Музыка» … 6 «Система»).
     settings_tab: usize,
     /// «Просто · Подробно» held for this session whatever the prefs say
     /// (the settings sweep, tests); `None`: `Prefs::settings_deep`.
@@ -877,6 +877,9 @@ pub struct PageState {
     soloist_flow: bool,
     soloist_offered: bool,
     soloist_action: Option<nikgob_view::SoloistAction>,
+    /// «Межсеть»: the token dialog, what is typed into «Порт», the tokens'
+    /// last uses seen (their rows pulse on a new one).
+    net: settings::NetState,
     sp_client_id: String,
     yt_cookies: String,
     yt_form: bool,
