@@ -6,8 +6,17 @@
 //! the mesh service: [`ConnectReport::State`]), and this zone is parked:
 //! paused, its queue kept, shown as [`nikgob_view::ParkedView`]. The link's
 //! state comes from the service too: buffering after 1.5 s without a word,
-//! «Нет связи» after 3 s, and back by itself; sound never starts here by
-//! itself.
+//! «Нет связи» after 3 s, and back by itself.
+//!
+//! Each target is a session with a generation of its own: what is sent for
+//! a session (forwarded commands, a pause) carries it, and the service
+//! drops work of a session that has ended; reports of an ended session are
+//! ignored here. Transfers, attaches, detaches, undos and «Продолжить
+//! здесь» go one at a time: one asked while another runs waits for it.
+//!
+//! The one rule: nothing here starts sound by itself to make up for
+//! something. When it is not known what happened, things stay paused and
+//! the owner acts.
 //!
 //! A transfer is done by the service with the API's snapshot and load
 //! ([`ConnectJob::Move`]); the loop answers those two requests itself
@@ -15,15 +24,15 @@
 //! it has no file of fetches each from the device that sent them into a
 //! cache of its own ([`ConnectJob::Pull`]), waiting for it as for a stream.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nikgob_core::model::{Codec, EventContext, EventOrigin, Source, SourceId, SourceKind, TrackId};
 use nikgob_view::{
-    Command, ConnectJob, ConnectReport, MeshKind, ParkedView, RemoteCommand, RemoteLink, RemoteTarget, Repeat, Status, Toast, ToastKind,
-    ZoneEntry, ZoneLoaded, ZoneRepeat, ZoneSnapshot, ZoneState, ZoneStatus, ZoneTrack,
+    ApiReply, Command, ConnectFail, ConnectJob, ConnectReport, MeshKind, ParkedView, RemoteCommand, RemoteLink, RemoteTarget, Repeat, Status,
+    Toast, ToastKind, ZoneEntry, ZoneLoaded, ZoneRepeat, ZoneSnapshot, ZoneState, ZoneStatus, ZoneTrack,
 };
 
 use crate::Worker;
@@ -32,18 +41,23 @@ use crate::queue::{self, Entry};
 /// How long «Отменить» of a transfer onto a playing device works (its
 /// snackbar stays 8 s).
 const UNDO_FOR: Duration = Duration::from_secs(9);
-/// «Продолжить здесь» starts this much before where the remote was.
+/// «Продолжить здесь» after a lost link starts this much before where the
+/// remote was.
 const CONTINUE_BACK: Duration = Duration::from_millis(1500);
+/// The best-effort pause of a remote left by «Продолжить здесь» is dropped
+/// when it has not got there in this long.
+const PAUSE_FOR: Duration = Duration::from_secs(5);
 /// After a volume set here, the remote's reports of its volume (perhaps
 /// sent before it heard of the set) are not shown for this long.
 const VOLUME_HOLD: Duration = Duration::from_millis(800);
-/// A transfer not answered in this long no longer holds the next one.
-const PENDING_FOR: Duration = Duration::from_secs(20);
+/// Target changes waiting for the one that runs.
+const WAITING_MAX: usize = 16;
 /// Files of the next tracks fetched ahead.
 const PULL_AHEAD: usize = 2;
 
-/// Where the loop hands the network part to the mesh service.
-pub(crate) type ConnectLink = Arc<dyn Fn(ConnectJob) + Send + Sync>;
+/// Where the loop hands the network part to the mesh service; false when
+/// the job could not be taken.
+pub(crate) type ConnectLink = Arc<dyn Fn(ConnectJob) -> bool + Send + Sync>;
 
 struct Target {
     node: String,
@@ -58,38 +72,47 @@ struct Mirror {
     at: Instant,
 }
 
-/// A transfer waiting for its answer.
-struct Pending {
+/// What runs now of the target changes.
+enum Doing {
+    /// A transfer from `from` (None: this device) to `to` (None: here).
+    Move { from: Option<String> },
+    /// The undo of a transfer; the target before it (None: this device).
+    Undo { before: Option<String> },
+    /// «Продолжить здесь».
+    Here,
+}
+
+/// A target change sent to the service, waiting for its report.
+struct Busy {
     seq: u64,
-    from: Option<String>,
-    at: Instant,
-    /// What the music came from was playing (an undo plays it again).
-    was_playing: bool,
+    /// The session it was asked in.
+    gen: u64,
+    doing: Doing,
+    /// The API's request waiting for its end.
+    reply: Option<ApiReply>,
 }
 
 /// «Отменить» of a transfer onto a device that was playing.
 struct Undo {
+    /// The session it was raised for: another target since, no undo.
+    gen: u64,
     node: String,
     previous: ZoneSnapshot,
     until: Instant,
     /// The target before the transfer (None: this device).
     before: Option<String>,
-    before_playing: bool,
-}
-
-/// An undo sent, waiting for its answer.
-struct Undoing {
-    seq: u64,
-    before: Option<String>,
-    before_playing: bool,
 }
 
 /// What the loop keeps of playing elsewhere.
 #[derive(Default)]
 pub(crate) struct ConnectKeep {
     pub(crate) link: Option<ConnectLink>,
+    /// The target session's generation.
+    gen: u64,
     target: Option<Target>,
     mirror: Option<Mirror>,
+    /// The target's whole transferable state, as last fetched.
+    full: Option<ZoneSnapshot>,
     /// The rows of the mirrored tracks (this library's), and the ids they
     /// were made for.
     rows: HashMap<TrackId, nikgob_view::TrackRow>,
@@ -99,14 +122,18 @@ pub(crate) struct ConnectKeep {
     /// Where the display stopped while the link is not live.
     frozen: Option<Duration>,
     seq: u64,
-    pending: Option<Pending>,
+    busy: Option<Busy>,
+    /// Target changes asked while one runs, in order.
+    waiting: VecDeque<Command>,
     undo: Option<Undo>,
-    undoing: Option<Undoing>,
     lost_toast: Option<u64>,
     volume_hold: Option<Instant>,
     /// The device files are fetched from: the last one that loaded or drove
     /// this zone.
     pull_from: Option<String>,
+    /// The zone's loads, counted: a file asked for an earlier one is not
+    /// this one's.
+    load_gen: u64,
     /// Files another device sent for tracks this library has no file of.
     files: HashMap<TrackId, PathBuf>,
     pulling: HashSet<TrackId>,
@@ -142,14 +169,21 @@ fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// The answer of the API's transfer: done, or why not.
+fn answer(reply: Option<ApiReply>, result: Result<(), String>) {
+    let Some(r) = reply else { return };
+    r.send(Ok(match result {
+        Ok(()) => serde_json::json!({ "done": true }),
+        Err(message) => serde_json::json!({ "done": false, "message": message }),
+    }));
+}
+
 impl Worker {
-    /// Hands `job` to the mesh service; false when there is none.
+    /// Hands `job` to the mesh service; false when there is none (or it
+    /// could not take it).
     fn connect_send(&self, job: ConnectJob) -> bool {
         match self.connect.link.clone() {
-            Some(f) => {
-                f(job);
-                true
-            }
+            Some(f) => f(job),
             None => false,
         }
     }
@@ -170,7 +204,8 @@ impl Worker {
         };
         if let Some(rc) = RemoteCommand::of(&c) {
             self.connect_optimistic(&rc);
-            if !self.connect_send(ConnectJob::Run { node, commands: vec![rc] }) {
+            let gen = self.connect.gen;
+            if !self.connect_send(ConnectJob::Run { gen, node, commands: vec![rc] }) {
                 log::warn!("connect: a command for the target dropped: no mesh service");
             }
             return None;
@@ -207,11 +242,23 @@ impl Worker {
 
     pub(crate) fn connect_command(&mut self, c: Command) {
         match c {
-            Command::OutputTransfer { node_id } => self.connect_transfer(node_id),
-            Command::OutputAttach { node_id } => self.connect_attach(node_id),
-            Command::OutputDetach => self.connect_detach(),
-            Command::OutputContinueHere => self.connect_continue_here(),
-            Command::OutputUndoTransfer => self.connect_undo(),
+            c @ (Command::OutputTransfer { .. }
+            | Command::OutputAttach { .. }
+            | Command::OutputDetach
+            | Command::OutputContinueHere
+            | Command::OutputUndoTransfer
+            | Command::ApiTransfer { .. }) => {
+                if self.connect.busy.is_none() {
+                    self.connect_op(c);
+                } else if self.connect.waiting.len() < WAITING_MAX {
+                    self.connect.waiting.push_back(c);
+                } else {
+                    log::warn!("connect: too many target changes waiting, one dropped");
+                    if let Command::ApiTransfer { reply, .. } = c {
+                        answer(Some(reply), Err("Слишком много переносов подряд".to_owned()));
+                    }
+                }
+            }
             Command::ApiSnapshot { reply } => {
                 let s = self.zone_snapshot();
                 reply.send(serde_json::to_value(s).map_err(|e| e.to_string()));
@@ -234,70 +281,104 @@ impl Worker {
         }
     }
 
+    /// A target change, with none running.
+    fn connect_op(&mut self, c: Command) {
+        match c {
+            Command::OutputTransfer { node_id } => self.connect_transfer(node_id, None),
+            Command::OutputAttach { node_id } => {
+                let _ = self.connect_attach(node_id);
+            }
+            Command::OutputDetach => self.connect_detach(),
+            Command::OutputContinueHere => self.connect_continue_here(),
+            Command::OutputUndoTransfer => self.connect_undo(),
+            Command::ApiTransfer { node_id, attach: false, reply } => self.connect_transfer(node_id, Some(reply)),
+            Command::ApiTransfer { node_id: Some(node), attach: true, reply } => answer(Some(reply), self.connect_attach(node)),
+            Command::ApiTransfer { node_id: None, attach: true, reply } => {
+                self.connect_detach();
+                answer(Some(reply), Ok(()));
+            }
+            other => log::warn!("connect: not a target change {other:?}"),
+        }
+    }
+
+    /// The next target change waiting, now that none runs.
+    fn connect_next(&mut self) {
+        while self.connect.busy.is_none() {
+            let Some(c) = self.connect.waiting.pop_front() else { break };
+            self.connect_op(c);
+        }
+    }
+
     /// A paired device's name, kind and whether it is online.
     fn node_view(&self, id: &str) -> Option<(String, MeshKind, bool)> {
         let st = self.state.read();
         st.mesh.node(id).map(|n| (n.name.clone(), n.kind, n.online))
     }
 
-    /// The music the target plays (as last mirrored).
-    fn mirror_playing(&self) -> bool {
-        self.connect.mirror.as_ref().is_some_and(|m| m.state.status == ZoneStatus::Playing)
+    /// A new target session: what was sent for the one before is dropped.
+    fn connect_session(&mut self, follow: Option<String>) {
+        self.connect.gen += 1;
+        let gen = self.connect.gen;
+        if !self.connect_send(ConnectJob::Session { gen, follow }) {
+            log::warn!("connect: no mesh service for the target's session");
+        }
     }
 
-    fn connect_transfer(&mut self, to: Option<String>) {
-        if self.connect.pending.as_ref().is_some_and(|p| p.at.elapsed() < PENDING_FOR) {
-            log::info!("connect: a transfer is on its way, another waits for it");
-            return;
-        }
+    fn connect_transfer(&mut self, to: Option<String>, reply: Option<ApiReply>) {
         let from = self.connect.target.as_ref().map(|t| t.node.clone());
         match to {
             Some(node) => {
                 if from.as_deref() == Some(node.as_str()) {
+                    answer(reply, Ok(()));
                     return;
                 }
-                let Some((name, _, online)) = self.node_view(&node) else { return };
+                let Some((name, _, online)) = self.node_view(&node) else {
+                    answer(reply, Err("Такого устройства нет".to_owned()));
+                    return;
+                };
                 if !online {
-                    self.toast(format!("{name} не в сети"), None);
+                    let m = format!("{name} не в сети");
+                    self.toast(m.clone(), None);
+                    answer(reply, Err(m));
                     return;
                 }
                 // Nothing here to move: that device is the target as it is.
                 if from.is_none() && self.queue.current().is_none() {
-                    self.connect_attach(node);
+                    answer(reply, self.connect_attach(node));
                     return;
                 }
-                let was_playing = match from {
-                    None => matches!(self.status, Status::Playing | Status::Buffering),
-                    Some(_) => self.mirror_playing(),
-                };
-                self.connect_move(from, Some(node), was_playing);
+                self.connect_move(from, Some(node), reply);
             }
             // Here already.
-            None if from.is_none() => {}
-            None => self.connect_move(from, None, false),
+            None if from.is_none() => answer(reply, Ok(())),
+            None => self.connect_move(from, None, reply),
         }
     }
 
-    fn connect_move(&mut self, from: Option<String>, to: Option<String>, was_playing: bool) {
+    fn connect_move(&mut self, from: Option<String>, to: Option<String>, reply: Option<ApiReply>) {
         self.connect.seq += 1;
-        let seq = self.connect.seq;
-        if !self.connect_send(ConnectJob::Move { seq, from: from.clone(), to }) {
+        let (seq, gen) = (self.connect.seq, self.connect.gen);
+        if !self.connect_send(ConnectJob::Move { seq, gen, from: from.clone(), to }) {
             self.toast("Межсеть не запущена", None);
+            answer(reply, Err("Межсеть не запущена".to_owned()));
             return;
         }
-        self.connect.pending = Some(Pending { seq, from, at: Instant::now(), was_playing });
+        self.connect.busy = Some(Busy { seq, gen, doing: Doing::Move { from }, reply });
     }
 
-    fn connect_attach(&mut self, node: String) {
+    /// `node` becomes the target as it is (nothing moves); why not.
+    fn connect_attach(&mut self, node: String) -> Result<(), String> {
         if self.connect.target.as_ref().is_some_and(|t| t.node == node) {
-            return;
+            return Ok(());
         }
-        let Some((name, kind, online)) = self.node_view(&node) else { return };
+        let Some((name, kind, online)) = self.node_view(&node) else { return Err("Такого устройства нет".to_owned()) };
         if !online {
-            self.toast(format!("{name} не в сети"), None);
-            return;
+            let m = format!("{name} не в сети");
+            self.toast(m.clone(), None);
+            return Err(m);
         }
         self.connect_target(node, name, kind);
+        Ok(())
     }
 
     /// What this zone holds now, for the parked view.
@@ -318,8 +399,8 @@ impl Worker {
         self.publish(move |s| s.parked = Some(parked));
     }
 
-    /// `node` becomes the target: this zone parks (paused), the window
-    /// follows that device's zone.
+    /// `node` becomes the target (a new session): this zone parks
+    /// (paused), the window follows that device's zone.
     fn connect_target(&mut self, node: String, name: String, kind: MeshKind) {
         let first = self.connect.target.is_none();
         if first && matches!(self.status, Status::Playing | Status::Buffering) {
@@ -328,10 +409,12 @@ impl Worker {
         let parked = first.then(|| self.parked_now());
         self.connect.target = Some(Target { node: node.clone(), name: name.clone(), kind, link: RemoteLink::Live });
         self.connect.mirror = None;
+        self.connect.full = None;
         self.connect.rows.clear();
         self.connect.row_ids.clear();
         self.connect.shown = None;
         self.connect.frozen = None;
+        self.connect.undo = None;
         self.connect_drop_lost_toast();
         let follow = node.clone();
         self.publish(move |s| {
@@ -346,9 +429,7 @@ impl Worker {
             s.player.status = Status::Buffering;
             s.player.rate = 0.0;
         });
-        if !self.connect_send(ConnectJob::Follow { node: follow }) {
-            log::warn!("connect: no mesh service to follow the target");
-        }
+        self.connect_session(Some(follow));
     }
 
     fn connect_detach(&mut self) {
@@ -359,17 +440,20 @@ impl Worker {
         self.connect_show_local();
     }
 
-    /// The target is this device again (the mirror forgotten; the view's
-    /// player is put back by [`Self::connect_show_local`] or a load).
+    /// The target is this device again (a new session; the mirror
+    /// forgotten; the view's player is put back by
+    /// [`Self::connect_show_local`] or a load).
     fn connect_leave(&mut self) {
         self.connect.target = None;
         self.connect.mirror = None;
+        self.connect.full = None;
         self.connect.rows.clear();
         self.connect.row_ids.clear();
         self.connect.shown = None;
         self.connect.frozen = None;
         self.connect.volume_hold = None;
-        self.connect_send(ConnectJob::Unfollow);
+        self.connect.undo = None;
+        self.connect_session(None);
         let lost = self.connect.lost_toast.take();
         self.publish(move |s| {
             s.target = None;
@@ -390,106 +474,213 @@ impl Worker {
         self.sleep_publish();
     }
 
-    fn connect_continue_here(&mut self) {
+    /// The device driven is no longer one of the owner's (forgotten,
+    /// revoked, gone from the ring): the window is this device's again,
+    /// its zone as it was (paused).
+    pub(crate) fn connect_check_target(&mut self) {
         let Some(node) = self.connect.target.as_ref().map(|t| t.node.clone()) else { return };
-        let snapshot = self.connect.mirror.as_ref().map(|m| {
-            let at = self.state.read().player.position_now();
-            m.state.snapshot(ms(at.saturating_sub(CONTINUE_BACK)))
-        });
-        // The remote stops if it still hears (no double sound once it is back).
-        self.connect_send(ConnectJob::Run { node: node.clone(), commands: vec![RemoteCommand::Pause] });
-        self.connect_leave();
-        match snapshot {
-            Some(s) if s.index.is_some() => {
-                self.zone_load(s, Some(node));
-            }
-            _ => self.connect_show_local(),
+        if self.state.read().mesh.node(&node).is_some() {
+            return;
         }
+        log::info!("connect: the device driven is no longer paired: back to this one");
+        self.connect_leave();
+        self.connect_show_local();
     }
 
+    /// «Продолжить здесь»: the target's music plays here, from the state
+    /// last known of it (a little before, after a lost link), only what
+    /// this device can play. The target's session ends first (what was
+    /// sent there and not done is dropped); the remote gets a pause if it
+    /// still hears within a few seconds. With this device the target, its
+    /// own paused zone goes on.
+    fn connect_continue_here(&mut self) {
+        let Some((node, live)) = self.connect.target.as_ref().map(|t| (t.node.clone(), t.link == RemoteLink::Live)) else {
+            if self.status == Status::Paused {
+                self.resume();
+            }
+            return;
+        };
+        let shown = self.state.read().player.position_now();
+        let at = ms(if live { shown } else { shown.saturating_sub(CONTINUE_BACK) });
+        let mirrored = self.connect.mirror.as_ref().map(|m| m.state.current.as_ref().map(|c| c.id));
+        let snapshot = match (&self.connect.full, &self.connect.mirror) {
+            (Some(f), Some(_)) if f.current().is_some() && Some(f.current()) == mirrored => Some(f.clone()),
+            (_, Some(m)) => Some(m.state.snapshot(at)),
+            (Some(f), None) => Some(f.clone()),
+            (None, None) => None,
+        }
+        .map(|s| ZoneSnapshot {
+            position_ms: at,
+            paused: false,
+            // The remote may not answer: only files of this library.
+            files: Vec::new(),
+            ..s
+        });
+        self.connect_leave();
+        self.connect_show_local();
+        let gen = self.connect.gen;
+        if let Some(snapshot) = snapshot.filter(|s| s.index.is_some()) {
+            self.connect.seq += 1;
+            let seq = self.connect.seq;
+            if self.connect_send(ConnectJob::Here { seq, gen, snapshot: Box::new(snapshot) }) {
+                self.connect.busy = Some(Busy { seq, gen, doing: Doing::Here, reply: None });
+            }
+        }
+        self.connect_send(ConnectJob::Pause { gen, node, until: Instant::now() + PAUSE_FOR });
+    }
+
+    /// «Отменить» of a transfer: the device's music before it comes back
+    /// (it was playing: that is the point), and the target before it; only
+    /// while the target is still the one the transfer made.
     fn connect_undo(&mut self) {
         let Some(u) = self.connect.undo.take() else { return };
-        if Instant::now() > u.until {
+        if Instant::now() > u.until || u.gen != self.connect.gen {
+            log::info!("connect: the undo came too late (or the target changed)");
             return;
         }
         self.connect.seq += 1;
         let seq = self.connect.seq;
-        if self.connect_send(ConnectJob::Load { seq, node: u.node, snapshot: Box::new(u.previous) }) {
-            self.connect.undoing = Some(Undoing { seq, before: u.before, before_playing: u.before_playing });
+        if self.connect_send(ConnectJob::Undo { seq, gen: u.gen, node: u.node, snapshot: Box::new(u.previous) }) {
+            self.connect.busy = Some(Busy { seq, gen: u.gen, doing: Doing::Undo { before: u.before }, reply: None });
         }
     }
 
     fn connect_report(&mut self, r: ConnectReport) {
         match r {
-            ConnectReport::State { node, state, at } => self.connect_state(&node, *state, at),
-            ConnectReport::Link { node, link } => self.connect_link(&node, link),
+            ConnectReport::State { gen, node, state, at } => {
+                if gen == self.connect.gen {
+                    self.connect_state(&node, *state, at);
+                }
+            }
+            ConnectReport::Link { gen, node, link } => {
+                if gen == self.connect.gen {
+                    self.connect_link(&node, link);
+                }
+            }
+            ConnectReport::Snapshot { gen, node, snapshot } => {
+                if gen == self.connect.gen && self.connect.target.as_ref().is_some_and(|t| t.node == node) {
+                    self.connect.full = Some(*snapshot);
+                }
+            }
             ConnectReport::Moved { seq, to, result } => self.connect_moved(seq, to, result),
-            ConnectReport::Loaded { seq, result, .. } => self.connect_undone(seq, result),
-            ConnectReport::Pulled { track, result } => self.connect_pulled(track, result),
-            ConnectReport::RunFailed { node, why } => {
+            ConnectReport::Undone { seq, result, .. } => self.connect_undone(seq, result),
+            ConnectReport::Here { seq, result } => self.connect_here_done(seq, result),
+            ConnectReport::Pulled { track, from, load, result } => self.connect_pulled(track, &from, load, result),
+            ConnectReport::RunFailed { node, why, .. } => {
                 let short: String = node.chars().take(10).collect();
                 log::info!("connect: commands for {short}… did not get there: {why}");
             }
         }
     }
 
-    fn connect_moved(&mut self, seq: u64, to: Option<String>, result: Result<ZoneLoaded, String>) {
-        let Some(p) = self.connect.pending.take_if(|p| p.seq == seq) else { return };
-        match (result, to) {
-            (Err(why), Some(node)) => {
-                let name = self.node_view(&node).map(|n| n.0).unwrap_or_default();
-                log::warn!("connect: the transfer to {name} failed: {why}");
-                self.toast(format!("Не удалось перенести на {name}: {why}"), None);
+    /// The busy change `seq`, when it is that one.
+    fn connect_done(&mut self, seq: u64) -> Option<Busy> {
+        self.connect.busy.take_if(|b| b.seq == seq)
+    }
+
+    fn connect_moved(&mut self, seq: u64, to: Option<String>, result: Result<ZoneLoaded, ConnectFail>) {
+        let Some(b) = self.connect_done(seq) else { return };
+        let from = match b.doing {
+            Doing::Move { from } => from,
+            _ => None,
+        };
+        let same = b.gen == self.connect.gen;
+        let name = to.as_deref().and_then(|n| self.node_view(n)).map(|v| v.0).unwrap_or_default();
+        let failed = match &to {
+            Some(_) => format!("Не удалось перенести на {name}"),
+            None => "Не удалось вернуть музыку сюда".to_owned(),
+        };
+        let outcome = match result {
+            Ok(_) if !same => {
+                log::info!("connect: a transfer ended after the target changed: left as it is");
+                Ok(())
             }
-            (Err(why), None) => {
-                log::warn!("connect: the music did not come back here: {why}");
-                self.toast(format!("Не удалось вернуть музыку сюда: {why}"), None);
-            }
-            (Ok(answer), Some(node)) => {
-                let Some((name, kind, _)) = self.node_view(&node) else { return };
-                // What moved stops here (the service paused a remote it left).
-                if p.from.is_none() && matches!(self.status, Status::Playing | Status::Buffering) {
-                    self.pause();
+            Ok(loaded) => {
+                match to {
+                    Some(node) => self.connect_moved_to(node, from, loaded),
+                    // The load here made this device the target already.
+                    None => {
+                        if self.connect.target.is_some() {
+                            self.connect_leave();
+                            self.connect_show_local();
+                        }
+                    }
                 }
-                self.connect_target(node.clone(), name.clone(), kind);
-                // Onto a device that was playing: its music can come back.
-                if let Some(previous) = answer.previous.filter(|prev| !prev.paused && prev.index.is_some()) {
-                    self.connect.undo = Some(Undo { node, previous, until: Instant::now() + UNDO_FOR, before: p.from, before_playing: p.was_playing });
-                    self.connect_toast_long(format!("Очередь перенесена на {name}"), Some(("Отменить".to_owned(), Command::OutputUndoTransfer)));
-                }
+                Ok(())
             }
-            (Ok(_), None) => {
-                // The load here made this device the target already.
-                if self.connect.target.is_some() {
-                    self.connect_leave();
-                    self.connect_show_local();
-                }
+            Err(ConnectFail::Stale) => Err("Устройство сменилось".to_owned()),
+            Err(ConnectFail::NothingDone(why)) => {
+                log::warn!("connect: {failed}: {why}");
+                self.toast(failed.clone(), None);
+                Err(failed)
             }
+            Err(ConnectFail::NotLoaded(why)) => {
+                // The source is paused and stays so: the owner chooses.
+                log::warn!("connect: {failed}: {why}");
+                self.connect_toast_long(failed.clone(), Some(("Продолжить здесь".to_owned(), Command::OutputContinueHere)));
+                Err(failed)
+            }
+        };
+        answer(b.reply, outcome);
+        self.connect_next();
+    }
+
+    /// `node` took the music: it is the target; onto a device that was
+    /// playing, its music can come back for a while.
+    fn connect_moved_to(&mut self, node: String, from: Option<String>, loaded: ZoneLoaded) {
+        let Some((name, kind, _)) = self.node_view(&node) else { return };
+        // What moved stops here (the service paused it; a play since too).
+        if from.is_none() && matches!(self.status, Status::Playing | Status::Buffering) {
+            self.pause();
+        }
+        self.connect_target(node.clone(), name.clone(), kind);
+        if let Some(previous) = loaded.previous.filter(|prev| !prev.paused && prev.index.is_some()) {
+            self.connect.undo = Some(Undo { gen: self.connect.gen, node, previous, until: Instant::now() + UNDO_FOR, before: from });
+            self.connect_toast_long(format!("Очередь перенесена на {name}"), Some(("Отменить".to_owned(), Command::OutputUndoTransfer)));
         }
     }
 
-    fn connect_undone(&mut self, seq: u64, result: Result<ZoneLoaded, String>) {
-        let Some(u) = self.connect.undoing.take_if(|u| u.seq == seq) else { return };
-        if let Err(why) = result {
-            log::warn!("connect: the undo failed: {why}");
-            self.toast(format!("Не удалось отменить: {why}"), None);
+    fn connect_undone(&mut self, seq: u64, result: Result<ZoneLoaded, ConnectFail>) {
+        let Some(b) = self.connect_done(seq) else { return };
+        let before = match b.doing {
+            Doing::Undo { before } => before,
+            _ => None,
+        };
+        if b.gen == self.connect.gen {
+            match result {
+                Ok(_) => match before.and_then(|n| self.node_view(&n).map(|(name, kind, _)| (n, name, kind))) {
+                    // The target before, as it is (paused by the transfer).
+                    Some((n, name, kind)) => self.connect_target(n, name, kind),
+                    None => self.connect_detach(),
+                },
+                Err(ConnectFail::Stale) => {}
+                Err(ConnectFail::NothingDone(why) | ConnectFail::NotLoaded(why)) => {
+                    log::warn!("connect: the undo failed: {why}");
+                    self.toast("Не удалось отменить", None);
+                }
+            }
+        }
+        self.connect_next();
+    }
+
+    fn connect_here_done(&mut self, seq: u64, result: Result<ZoneLoaded, ConnectFail>) {
+        if self.connect_done(seq).is_none() {
             return;
         }
-        match u.before {
-            None => {
-                self.connect_detach();
-                if u.before_playing {
-                    self.resume();
+        match result {
+            Ok(loaded) => {
+                if !loaded.skipped.is_empty() {
+                    let ids: Vec<String> = loaded.skipped.iter().map(ToString::to_string).collect();
+                    log::info!("connect: not here, left out: {}", ids.join(", "));
                 }
             }
-            Some(before) => {
-                let Some((name, kind, _)) = self.node_view(&before) else { return };
-                self.connect_target(before.clone(), name, kind);
-                if u.before_playing {
-                    self.connect_send(ConnectJob::Run { node: before, commands: vec![RemoteCommand::Play] });
-                }
+            Err(ConnectFail::Stale) => {}
+            Err(ConnectFail::NothingDone(why) | ConnectFail::NotLoaded(why)) => {
+                log::warn!("connect: «Продолжить здесь» failed: {why}");
+                self.toast(format!("Не удалось продолжить здесь: {why}"), None);
             }
         }
+        self.connect_next();
     }
 
     /// A toast that stays 8 s; its id.
@@ -719,6 +910,9 @@ impl Worker {
         if from.is_some() {
             self.connect.pull_from = from;
         }
+        // Files asked for the queue before are not this one's.
+        self.connect.load_gen += 1;
+        self.connect.pulling.clear();
         self.connect.unpullable.clear();
         self.user_switch(EventOrigin::Manual);
         self.playback.stop();
@@ -805,11 +999,28 @@ impl Worker {
             return true;
         }
         let Some(from) = self.connect.pull_from.clone() else { return false };
-        if !self.connect_send(ConnectJob::Pull { track, from }) {
+        let (load, keep) = (self.connect.load_gen, self.connect_keep());
+        if !self.connect_send(ConnectJob::Pull { track, from, load, keep }) {
             return false;
         }
         self.connect.pulling.insert(track);
         true
+    }
+
+    /// The cached files in use: the playing track's, the next ones'.
+    fn connect_keep(&self) -> Vec<PathBuf> {
+        let mut tracks: Vec<TrackId> = self.playing.iter().map(|e| e.track).collect();
+        tracks.extend(self.queue.peek_auto_next().map(|e| e.track));
+        tracks.extend(self.queue.ahead(PULL_AHEAD).into_iter().map(|e| e.track));
+        let mut keep: Vec<PathBuf> = Vec::new();
+        for t in tracks {
+            if let Some(p) = self.connect.files.get(&t)
+                && !keep.contains(p)
+            {
+                keep.push(p.clone());
+            }
+        }
+        keep
     }
 
     /// The files of the next tracks fetched ahead (while this zone plays
@@ -835,12 +1046,21 @@ impl Worker {
         }
     }
 
-    fn connect_pulled(&mut self, track: TrackId, result: Result<PathBuf, String>) {
+    /// A file came (or did not) from `from`, asked for load `load`.
+    fn connect_pulled(&mut self, track: TrackId, from: &str, load: u64, result: Result<PathBuf, String>) {
+        // Asked for a queue before this one: not this one's.
+        if load != self.connect.load_gen {
+            return;
+        }
         self.connect.pulling.remove(&track);
+        let current_source = self.connect.pull_from.as_deref() == Some(from);
         match result {
             Ok(path) => {
                 self.connect.files.insert(track, path);
             }
+            // A device that is no longer the one files come from: asked
+            // again of the one that is (below), never marked.
+            Err(why) if !current_source => log::info!("connect: no file of {track} from a device left: {why}"),
             Err(why) => {
                 log::warn!("connect: no file of {track} from the other device: {why}");
                 self.connect.unpullable.insert(track);
@@ -849,27 +1069,53 @@ impl Worker {
         let have = self.connect.files.contains_key(&track);
         let waiting = self.playing.filter(|e| e.track == track && self.playing_source.is_none());
         if let Some(e) = waiting {
+            if !have && !current_source && self.connect_pull(track) {
+                return;
+            }
             let paused = self.status == Status::Paused;
-            match have.then(|| self.request_skipping(e, &[])).flatten() {
-                Some((req, source, kind)) => {
+            if paused {
+                // Kept for an explicit resume (it starts it from the
+                // queue's current entry): nothing starts while paused.
+                self.connect_keep_paused(e, have);
+            } else {
+                match have.then(|| self.request_skipping(e, &[])).flatten() {
                     // (A place it is to go on from: `start_with` seeks there.)
-                    self.start_with(e, req, source, kind);
-                    if paused {
-                        self.playback.pause();
-                        self.status = Status::Paused;
-                        self.publish_player();
-                    }
+                    Some((req, source, kind)) => self.start_with(e, req, source, kind),
+                    None => match self.queue.skip_forward() {
+                        Some(n) if n.id != e.id => self.start(n),
+                        _ => self.stop(),
+                    },
                 }
-                None => match self.queue.skip_forward() {
-                    Some(n) if n.id != e.id && paused => self.start_kept_paused(n),
-                    Some(n) if n.id != e.id => self.start(n),
-                    _ => self.stop(),
-                },
             }
         } else if self.queue.peek_auto_next().is_some_and(|n| n.track == track) {
             self.preload_next();
         }
         self.connect_prefetch();
+    }
+
+    /// The waiting entry `e`, paused meanwhile: it (with its file) or the
+    /// next one (without) waits paused for a resume, as a restored queue
+    /// does, nothing opened.
+    fn connect_keep_paused(&mut self, e: Entry, have: bool) {
+        let at = if have {
+            self.position
+        } else {
+            match self.queue.skip_forward() {
+                Some(n) if n.id != e.id => Duration::ZERO,
+                _ => {
+                    self.stop();
+                    return;
+                }
+            }
+        };
+        self.playback.stop();
+        self.playing = None;
+        self.playing_source = None;
+        self.resume_at = Some(at);
+        self.position = at;
+        self.position_at = Instant::now();
+        self.status = Status::Paused;
+        self.publish_now_playing();
     }
 }
 
