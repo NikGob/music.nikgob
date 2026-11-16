@@ -66,6 +66,8 @@ pub enum Refusal {
     /// It cannot sign (not the ring's holder).
     NotHolder,
     Internal,
+    /// The ring has no room for another device.
+    Full,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,6 +101,7 @@ impl PairError {
             Self::Refused(Refusal::Busy) => "Устройство занято другой привязкой".to_owned(),
             Self::Refused(Refusal::Paired) => "Устройство уже привязано".to_owned(),
             Self::Refused(Refusal::NotHolder) => "Привязывать может только главное устройство".to_owned(),
+            Self::Refused(Refusal::Full) => "В кольце нет места для нового устройства".to_owned(),
             Self::Refused(Refusal::Internal) | Self::Protocol => "Устройство ответило не так".to_owned(),
             Self::Io(_) => "Нет связи с устройством".to_owned(),
             Self::Ring(_) => "Не удалось сохранить привязку".to_owned(),
@@ -145,6 +148,20 @@ pub trait PairHost: Send + Sync {
     fn code_done(&self, ok: bool);
     /// Keeps what the ring gave (joiner).
     fn accept(&self, grant: Grant, holder: &PublicKey, holder_name: &str) -> Result<(), PairError>;
+}
+
+/// One try with the code, taken: it ends however the exchange ends, a
+/// timeout or a dropped connection too (a failure unless marked done), so
+/// the code is never left taken.
+struct CodeTurn<'a> {
+    host: &'a dyn PairHost,
+    ok: bool,
+}
+
+impl Drop for CodeTurn<'_> {
+    fn drop(&mut self) {
+        self.host.code_done(self.ok);
+    }
 }
 
 /// What a listening side did.
@@ -330,6 +347,7 @@ where
                     return Err(PairError::Refused(reason));
                 }
             };
+            let mut turn = CodeTurn { host, ok: false };
             let out = async {
                 let msg_b = bytes(&spake)?;
                 let (s, msg_a) = start(true, code.as_bytes(), &me.id, peer);
@@ -350,7 +368,8 @@ where
                 }
             }
             .await;
-            host.code_done(out.is_ok());
+            turn.ok = out.is_ok();
+            drop(turn);
             out
         }
     }
@@ -532,6 +551,30 @@ pub(crate) mod tests {
         assert_eq!(old.unwrap_err(), PairError::Wrong, "the old code no longer works");
         let (new, _) = code_try("654321", &host, &pc, &pi).await;
         assert!(new.is_ok());
+    }
+
+    /// A holder that sends its half and then goes silent: when the try is
+    /// dropped (the service's timeout), the code is free again and the try
+    /// counts as a wrong one.
+    #[tokio::test]
+    async fn a_try_cut_short_frees_the_code() {
+        let (pc, pi) = (me(2, "PC", MeshKind::Pc), me(3, "Pi", MeshKind::Pi));
+        let host = Host::new(&pc.id, pi.id);
+        let (a, b) = tokio::io::duplex(64 << 10);
+        let (mut ar, mut aw) = tokio::io::split(a);
+        let (mut br, mut bw) = tokio::io::split(b);
+        let (_s, msg_b) = start(false, b"123456", &pi.id, &pc.id);
+        write_frame(&mut aw, &Msg::Hello { mode: Mode::Code, spake: hex(&msg_b), name: "PC".into(), kind: MeshKind::Pc }).await.unwrap();
+        let served = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            let out = serve(&mut br, &mut bw, &pi, &pc.id, &host);
+            let reply = read_frame::<_, Msg>(&mut ar);
+            tokio::join!(out, reply)
+        })
+        .await;
+        assert!(served.is_err(), "the holder never finished");
+        let c = host.code.lock().unwrap().clone();
+        assert!(!c.2, "the code is no longer taken");
+        assert_eq!(c.1, 1, "the cut try counts");
     }
 
     #[test]
