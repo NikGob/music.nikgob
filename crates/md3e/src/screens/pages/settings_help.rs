@@ -333,14 +333,15 @@ pub enum SettingId {
     /// «Токены»: «Новый токен» and the list of tokens.
     ApiTokens,
     // Межсеть → Устройства.
-    /// «Это устройство»: its name, its code while it is in no ring.
-    MeshThis,
     /// «Связь с устройствами»: the mesh on or off.
     MeshEnabled,
-    /// «Мои устройства»: «Добавить устройство» and the paired devices.
+    /// «Устройства»: this device and the paired ones, «Добавить устройство»,
+    /// «Карта сети».
     MeshDevices,
     /// «Рядом»: unpaired instances on the home network, «Подключить».
     MeshNearby,
+    /// «Оригиналы FLAC на ПК»: always, after one copy, after two.
+    MeshKeepMasters,
 }
 
 /// Where a radio of `kind` takes its tracks, in a few words (the line under
@@ -511,7 +512,7 @@ impl SettingId {
             DownloadSource(_) | LikeDownload | UpgradeBar | UpgradeEvery | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
             | Soulseek | SoulseekShare | Prowlarr | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit
             | SoulseekUpload => TAB_DOWNLOADS,
-            ApiEnabled | ApiAccess | ApiPort | ApiTokens | MeshThis | MeshEnabled | MeshDevices | MeshNearby => TAB_NET,
+            ApiEnabled | ApiAccess | ApiPort | ApiTokens | MeshEnabled | MeshDevices | MeshNearby | MeshKeepMasters => TAB_NET,
             UserName | Autostart | AutostartHidden | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate
             | LyricsDeep | LyricsWordsAll | ToastTime | DownloadToasts | LibraryDir | MastersDir | Inbox | Trash | ExportData
             // «Для разработчика».
@@ -555,7 +556,7 @@ impl SettingId {
             | UserName | Autostart | AutostartHidden | DownloadToasts | LibraryDir | Inbox | Trash | Preset(_)
             // Межсеть: this device, the devices, the API's switch and the
             // tokens (a token is what every client needs).
-            | ApiEnabled | ApiTokens | MeshThis | MeshDevices | MeshNearby => Level::Simple,
+            | ApiEnabled | ApiTokens | MeshDevices | MeshNearby => Level::Simple,
             LyricsUi | LyricsGpu | LyricsModelsAuto | MusicBrainz | AcoustId | LastfmKey | ListenbrainzToken
             | BackgroundCountsLess | ProfilesSplit | GraphServices | GraphOpenData | GraphPersonal | LibraryAsTaste
             | DislikeInRecs | DemoProfile | FirstRun => Level::Dev,
@@ -579,7 +580,7 @@ impl SettingId {
             | ImportFiles | ImportSavedSongs | StreamCache | OpusBitrate | UpgradeAuto | FakeFlac | FakeRestore
             | SoulseekShare | NoSeed | SeedLimit | SeedDays | SeedRatio | DownloadLimit | UploadLimit | SoulseekUpload
             | FpsLimit | TrayKeepWindow | AutoDownloads | StreamAnalysis | LyricsSeparate | LyricsDeep | LyricsWordsAll
-            | MastersDir | ExportData | ApiAccess | ApiPort | MeshEnabled => Level::Deep,
+            | MastersDir | ExportData | ApiAccess | ApiPort | MeshEnabled | MeshKeepMasters => Level::Deep,
         }
     }
 
@@ -798,10 +799,10 @@ impl SettingId {
             ApiAccess => "Доступ",
             ApiPort => "Порт",
             ApiTokens => "Токены",
-            MeshThis => "Это устройство",
             MeshEnabled => "Связь с устройствами",
-            MeshDevices => "Мои устройства",
+            MeshDevices => "Устройства",
             MeshNearby => "Рядом",
+            MeshKeepMasters => "Оригиналы FLAC на ПК",
         }
     }
 
@@ -956,9 +957,9 @@ impl SettingId {
             ApiEnabled => "Локальный API плеера: им управляют голосовой ассистент, скрипты и ИИ-агенты — включают музыку, ставят паузу, меняют громкость и очередь, ищут в библиотеке. Каждому нужен свой токен. «Открыть /docs» — описание всех запросов с примерами; кнопка работает, когда API действительно слушает порт.",
             ApiAccess => "«Этот компьютер» — к API могут обратиться только программы на этом компьютере. «Домашняя сеть» — ещё и другие устройства дома: колонка с ассистентом, телефон, второй компьютер; без токена не пустит никого. Windows при первом открытии в сеть спросит, разрешить ли плееру входящие подключения, — разреши для частных сетей. Адрес, заданный в settings.toml (как на Raspberry Pi), показан рядом.",
             ApiPort => "Порт, на котором слушает API, от 1024 до 65535; по умолчанию 47210. Меняй, только если он занят другой программой, и не забудь поменять его в настройках ассистента.",
-            MeshThis => "Имя, под которым этот плеер видят другие твои устройства; пусто — имя компьютера. Пока устройство ни к чему не привязано, рядом с именем стоит его код из шести цифр: его вводят в «Подключить» на другом устройстве.",
             MeshEnabled => "Плеер сам находит другие твои устройства в домашней сети — компьютер, Raspberry Pi с nikgobd, потом телефон и телевизор — и держит с ними связь. Выключи — он не виден в сети и никого не видит; привязки при этом сохраняются.",
-            MeshDevices => "Привязанные устройства доверяют друг другу: видят, что где играет, и могут управлять друг другом. Цвет круга у значка — в сети ли устройство. «Добавить устройство» даёт одноразовое приглашение на 15 минут: на Raspberry Pi или сервере выполни показанную команду nikgobd pair. «Забыть» отключает устройство на всех сразу; передумал — «Отменить». Windows при первом включении спросит, разрешить ли плееру связь в сети, — разреши для частных сетей, иначе устройства друг друга не увидят.",
+            MeshDevices => "Первая строка — этот компьютер, ниже — привязанные устройства: они доверяют друг другу, видят, что где играет, и могут управлять друг другом. Форма значка — какое это устройство, заливка — в сети ли оно; пока там играет музыка, значок крутится. Число — сколько места занимает музыка на устройстве. Чип справа — что устройство хранит: полную копию, библиотеку без оригиналов, только избранное (до выбранного объёма) или ничего. «Гость» — устройство может играть и читать, но ничего твоего не меняет. Пока на устройство едут файлы, по нижнему краю строки бежит волна. «Добавить устройство» даёт одноразовое приглашение на 15 минут: QR-код и команду установки для Linux и Raspberry Pi. «Забыть» отключает устройство на всех сразу; передумал — «Отменить». «Карта сети» показывает, как устройства связаны и что между ними идёт. Windows при первом включении спросит, разрешить ли плееру связь в сети, — разреши для частных сетей, иначе устройства друг друга не увидят. Пока этот компьютер ни к чему не привязан, в его строке стоит код из шести цифр: его вводят в «Подключить» на другом устройстве.",
+            MeshKeepMasters => "Оригиналы FLAC занимают больше всего места. «Всегда» — они остаются на этом компьютере, что бы ни хранили другие устройства. «После 1 копии» и «После 2 копий» — компьютер может отпустить оригинал, когда его проверенная копия лежит на одном или двух других устройствах (например, на Raspberry Pi с полной копией); файл уходит в корзину, а не удаляется сразу. Пока у какого-то устройства единственные копии, «Забыть» его сначала спросит.",
             MeshNearby => "Плееры в домашней сети, ещё не привязанные к твоим устройствам. «Подключить» спросит код, который показывает то устройство; на Raspberry Pi его печатает команда nikgobd pair-code. После пяти неверных кодов устройство покажет новый.",
             ApiTokens => "Токен — пароль для одной программы. Он показывается один раз, сразу после создания: скопируй его тогда, потом плеер хранит только его отпечаток и показать снова не сможет. Права: «Управление» — плеер, очередь, громкость, приглушение, вывод звука, поиск и чтение библиотеки; «Полный» — то же и сами файлы песен и обложки; «Только чтение» — смотреть и искать. «Кто включает» — кто будет пользоваться токеном: ты, ассистент, агент или гость. «Отозвать» отключает токен сразу; передумал — «Отменить».",
             Spotify => "Вход в аккаунт Spotify через браузер со своим ключом: поиск, лайки, плейлисты и история. Нужен Premium — без него Spotify не подключить, а YouTube Music работает и так. Пароль приложение не видит.",
@@ -3049,7 +3050,7 @@ mod tests {
             (S::NavRoot, TAB_LOOK),
             (S::ApiEnabled, TAB_NET),
             (S::ApiTokens, TAB_NET),
-            (S::MeshThis, TAB_NET),
+            (S::MeshKeepMasters, TAB_NET),
             (S::MeshDevices, TAB_NET),
         ] {
             assert_eq!(id.tab(), tab, "{id:?}");

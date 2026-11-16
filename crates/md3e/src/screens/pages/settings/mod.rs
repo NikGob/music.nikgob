@@ -32,7 +32,7 @@ mod system;
 use egui::{Align2, Key, Modifiers, Rangef, Rect, Sense, Ui, UiBuilder, Vec2, emath::GuiRounding as _, pos2, vec2};
 use nikgob_view::{Command, CoverShape, PrefPatch, Prefs, ViewState};
 
-pub(crate) use net::NetState;
+pub(crate) use net::{NetState, ago, code_block, lan_ip};
 pub(super) use rows::fmt_speed;
 pub(crate) use services::{
     SoloistDialog, cookies_fields, login_error, login_prompt, open_url, paused_line, spotify_steps, step, token_fields,
