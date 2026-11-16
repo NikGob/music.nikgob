@@ -1,5 +1,6 @@
 //! Player core.
 
+pub mod api_token;
 pub mod clip_title;
 pub mod cover_frame;
 pub mod credit;

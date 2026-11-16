@@ -35,6 +35,145 @@ pub struct Settings {
     pub streaming: StreamingSettings,
     pub sources: SourcesSettings,
     pub soulseek: SoulseekSettings,
+    pub api: ApiSettings,
+}
+
+/// The default port of the local REST API.
+pub const API_PORT: u16 = 47210;
+
+/// Who may reach the local REST API.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiAccess {
+    /// This computer only (`127.0.0.1`).
+    #[default]
+    Local,
+    /// The home network too (`0.0.0.0`, or [`ApiSettings::address`]).
+    Network,
+}
+
+/// What a token may do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiPreset {
+    /// The player, the queue, the volume, the duck, the output, reading and
+    /// searching.
+    #[default]
+    Control,
+    /// Everything but the tokens and the devices.
+    Full,
+    /// Reading and searching only.
+    Read,
+}
+
+impl ApiPreset {
+    pub const ALL: [Self; 3] = [Self::Control, Self::Full, Self::Read];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Full => "full",
+            Self::Read => "read",
+        }
+    }
+}
+
+/// Who plays with a token: the listening history keeps it, so music an
+/// assistant or a guest turned on does not bend the owner's
+/// recommendations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiActor {
+    #[default]
+    Owner,
+    Assistant,
+    Agent,
+    Guest,
+}
+
+impl ApiActor {
+    pub const ALL: [Self; 4] = [Self::Owner, Self::Assistant, Self::Agent, Self::Guest];
+
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Assistant => "assistant",
+            Self::Agent => "agent",
+            Self::Guest => "guest",
+        }
+    }
+}
+
+/// One token of the API. The secret itself is never stored: only its
+/// BLAKE3 hash ([`crate::api_token::hash`]).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApiTokenRecord {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub preset: ApiPreset,
+    #[serde(default)]
+    pub actor: ApiActor,
+    /// Hex BLAKE3 of the secret.
+    pub hash: String,
+    #[serde(default)]
+    pub created_ms: i64,
+    #[serde(default)]
+    pub last_used_ms: Option<i64>,
+    /// Revoked at (unix ms): refused from then on, removed once its undo
+    /// is gone.
+    #[serde(default)]
+    pub revoked_ms: Option<i64>,
+}
+
+impl fmt::Debug for ApiTokenRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiTokenRecord")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("preset", &self.preset)
+            .field("actor", &self.actor)
+            .field("hash", &"<redacted>")
+            .field("created_ms", &self.created_ms)
+            .field("last_used_ms", &self.last_used_ms)
+            .field("revoked_ms", &self.revoked_ms)
+            .finish()
+    }
+}
+
+/// The local REST API (`[api]`): off until switched on, on this computer
+/// only unless the user opens it to the home network.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiSettings {
+    pub enabled: bool,
+    pub access: ApiAccess,
+    /// Listen on exactly this address (`192.168.0.157`), whatever `access`
+    /// says; empty: by `access`.
+    pub address: String,
+    pub port: u16,
+    pub tokens: Vec<ApiTokenRecord>,
+}
+
+impl Default for ApiSettings {
+    fn default() -> Self {
+        Self { enabled: false, access: ApiAccess::Local, address: String::new(), port: API_PORT, tokens: Vec::new() }
+    }
+}
+
+impl ApiSettings {
+    /// The address the server listens on: the explicit one, else by
+    /// [`Self::access`].
+    pub fn bind_ip(&self) -> String {
+        let explicit = self.address.trim();
+        if !explicit.is_empty() {
+            return explicit.to_owned();
+        }
+        match self.access {
+            ApiAccess::Local => "127.0.0.1".to_owned(),
+            ApiAccess::Network => "0.0.0.0".to_owned(),
+        }
+    }
 }
 
 /// Where the download sources other than the indexer live. Public instances, no accounts. Qobuz and Tidal
@@ -327,6 +466,22 @@ mod tests {
                 remote_token: "slsk-token".into(),
                 ..SoulseekSettings::default()
             },
+            api: ApiSettings {
+                enabled: true,
+                access: ApiAccess::Network,
+                address: "192.168.0.157".into(),
+                port: 47211,
+                tokens: vec![ApiTokenRecord {
+                    id: "t1".into(),
+                    name: "Ассистент на Pi".into(),
+                    preset: ApiPreset::Control,
+                    actor: ApiActor::Assistant,
+                    hash: "api-hash-secret".into(),
+                    created_ms: 1_763_300_000_000,
+                    last_used_ms: Some(1_763_300_000_420),
+                    revoked_ms: None,
+                }],
+            },
         }
     }
 
@@ -379,7 +534,44 @@ username = \"me\"
         assert!(!dbg.contains("slsk-token"));
         assert!(!dbg.contains("navi-pass"));
         assert!(!dbg.contains("dz-pass"));
+        assert!(!dbg.contains("api-hash-secret"));
         assert!(dbg.contains("navi-user"));
         assert!(dbg.contains("localhost:9696"));
+    }
+
+    /// `[api]` reads back as written, a file without it is the defaults
+    /// (off, this computer only, port 47210), and the words in the file are
+    /// the ones the API speaks.
+    #[test]
+    fn api_section_round_trips() {
+        let path = temp_path("api");
+        let s = sample();
+        s.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[api]"), "{text}");
+        assert!(text.contains("access = \"network\""), "{text}");
+        assert!(text.contains("preset = \"control\""), "{text}");
+        assert!(text.contains("actor = \"assistant\""), "{text}");
+        assert!(!text.contains("revoked_ms"), "None is left out: {text}");
+        assert_eq!(Settings::load(&path).unwrap().api, s.api);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+
+        let none: Settings = toml::from_str("[soulseek]\n").unwrap();
+        assert_eq!(none.api, ApiSettings::default());
+        assert!(!none.api.enabled);
+        assert_eq!(none.api.port, API_PORT);
+        assert_eq!(none.api.bind_ip(), "127.0.0.1");
+        let open = ApiSettings { access: ApiAccess::Network, ..ApiSettings::default() };
+        assert_eq!(open.bind_ip(), "0.0.0.0");
+        let pinned = ApiSettings { address: " 192.168.0.157 ".into(), ..ApiSettings::default() };
+        assert_eq!(pinned.bind_ip(), "192.168.0.157");
+
+        let partial: Settings = toml::from_str(
+            "[api]\nenabled = true\n[[api.tokens]]\nid = \"a\"\nname = \"x\"\nhash = \"h\"\n",
+        )
+        .unwrap();
+        assert_eq!(partial.api.port, API_PORT);
+        assert_eq!(partial.api.tokens[0].preset, ApiPreset::Control);
+        assert_eq!(partial.api.tokens[0].actor, ApiActor::Owner);
     }
 }
