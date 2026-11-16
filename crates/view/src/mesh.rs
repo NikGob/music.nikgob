@@ -239,6 +239,8 @@ pub enum MeshPairing {
 pub struct MeshInvite {
     pub ticket: String,
     pub expires_ms: i64,
+    /// What a device that joins with it becomes («Гость» of the window).
+    pub scope: MeshScope,
 }
 
 /// «Межсеть → Устройства».

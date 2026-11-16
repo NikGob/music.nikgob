@@ -320,7 +320,7 @@ impl Worker {
                 f(c);
             }
             None => {
-                if matches!(c, Command::MeshPairNearby { .. } | Command::MeshCreateInvite | Command::MeshJoin { .. }) {
+                if matches!(c, Command::MeshPairNearby { .. } | Command::MeshCreateInvite { .. } | Command::MeshJoin { .. }) {
                     self.mesh.failed = Some("Межсеть не запущена".to_owned());
                     self.mesh_publish();
                 } else if c == Command::MeshClearPairing && self.mesh.failed.take().is_some() {
@@ -419,7 +419,7 @@ impl Worker {
                 self.toast(format!("Не удалось забыть «{}»: {why}", name.unwrap_or_else(|| "устройство".to_owned())), None);
             }
             c @ (Command::MeshPairNearby { .. }
-            | Command::MeshCreateInvite
+            | Command::MeshCreateInvite { .. }
             | Command::MeshCancelInvite
             | Command::MeshJoin { .. }
             | Command::MeshSetScope { .. }

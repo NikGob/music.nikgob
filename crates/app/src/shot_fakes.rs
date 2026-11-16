@@ -1562,7 +1562,7 @@ fn mesh(s: &mut ViewState, kind: MeshFake, secs: f64) {
         ..MeshNodeView::default()
     };
     let pi_nearby = MeshNearbyView { id: "fake-pi-2".into(), name: "raspberrypi".into(), kind: MeshKind::Pi, addr: Some("192.168.0.31:47220".into()) };
-    m.invite = Some(MeshInvite { ticket: FAKE_TICKET.into(), expires_ms: now + 14 * 60_000 });
+    m.invite = Some(MeshInvite { ticket: FAKE_TICKET.into(), expires_ms: now + 14 * 60_000, scope: MeshScope::Owner });
     m.nearby = vec![pi_nearby];
     if kind == MeshFake::Alone {
         m.paired = false;

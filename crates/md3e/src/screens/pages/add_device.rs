@@ -3,21 +3,28 @@
 //!
 //! «Подключить»: the QR of the invite (a phone scans it) and, for a device
 //! seen nearby, six cells for the code it shows: the sixth digit sends
-//! them, a wrong code empties them, the window closes itself once the
-//! device is paired (as a guest when «Гость» is on).
+//! them, a wrong code empties them, the window closes itself once a device
+//! is paired. «Гость» makes the invite anew as a guest's (the holder signs
+//! the guest's certificate when it joins); a device added by its code
+//! becomes a guest right after.
 //!
 //! «Установить»: per platform whose build this computer has — Linux and
-//! Raspberry Pi get one line that downloads the headless player from here,
-//! installs it, pairs and starts it (`curl … | sh`, the ticket in it);
-//! without a build, the `nikgobd pair` line for one installed by hand.
-//! Windows gets the address of this version's program. Both need the API
-//! on the home network: until then the blocker and the switch that lifts
-//! it stand under the line.
+//! Raspberry Pi get one line that downloads the install script from here
+//! with the invite's download key, checks it against its SHA-256 and runs
+//! it with the ticket ([`nikgob_core::releases`]: the ticket never crosses
+//! the network); without a build, the `nikgobd pair` line for one
+//! installed by hand. Windows gets the address of this version's program.
+//! Both need the API on the home network: until then the blocker and the
+//! switch that lifts it stand under the line.
 //!
 //! The invite lives 15 minutes; while the window stays open a new one
-//! takes its place shortly before.
+//! takes its place shortly before, and one spent or gone is asked for
+//! again.
+
+use std::sync::{Arc, Mutex, PoisonError};
 
 use egui::{Align, Color32, Event, Key, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use nikgob_core::releases::{self, LinuxBuild};
 use nikgob_view::{ApiAccess, ApiView, Command, MeshPairing, MeshScope, MeshView, ViewState};
 
 use super::mesh_ui::{self, Look, MeshUi};
@@ -53,12 +60,16 @@ pub(crate) enum AddTab {
     Install,
 }
 
-/// The builds this computer can hand out, looked for when the window opens.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The builds this computer can hand out, looked for (and the Linux ones'
+/// checksums made) on a thread of their own when the window opens.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Builds {
-    linux: bool,
+    linux: Vec<LinuxBuild>,
     windows: bool,
 }
+
+/// This version (the API's: one version for the whole player).
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// What the window keeps.
 #[derive(Default)]
@@ -77,9 +88,14 @@ pub(crate) struct AddState {
     guest: bool,
     /// «Установить»: the platform shown (0 Linux, 1 Windows).
     platform: usize,
-    opened_at: f64,
+    /// Since when no invite of the scope wanted is shown (none: one is).
+    missing_since: Option<f64>,
+    /// When an invite was last asked for.
     renewed_at: f64,
-    builds: Builds,
+    /// The builds, once looked for.
+    builds: Arc<Mutex<Option<Builds>>>,
+    /// The Linux line made, and of which address and ticket.
+    line: Option<(String, String, String)>,
     /// This computer's address in the home network, for the lines.
     lan: Option<String>,
     /// The QR drawn, and of which ticket and colours.
@@ -104,16 +120,17 @@ pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Op
         a.sent = None;
         a.error = None;
         a.guest = false;
-        a.builds = find_builds();
         a.lan = lan_of(m);
         a.platform = 0;
+        a.line = None;
+        a.builds = look_for_builds(ctx);
     }
     let now = anim::now(ctx);
     a.stale = matches!(m.pairing, MeshPairing::Done { .. } | MeshPairing::Failed(_)).then(|| m.pairing.clone());
     a.open = true;
     a.tab = tab;
     a.focus = true;
-    a.opened_at = now;
+    a.missing_since = Some(now);
     a.renewed_at = now;
     if nearby.is_some() {
         a.nearby = nearby;
@@ -122,7 +139,7 @@ pub(crate) fn open(ctx: &egui::Context, m: &MeshView, mem: &mut MeshUi, from: Op
     }
     out.push(Command::MeshClearPairing);
     if m.can_pair() {
-        out.push(Command::MeshCreateInvite);
+        out.push(Command::MeshCreateInvite { scope: wanted_scope(a) });
     }
 }
 
@@ -131,15 +148,31 @@ pub(crate) fn is_open(a: &AddState) -> bool {
     a.open
 }
 
+/// What a device joining now should become.
+fn wanted_scope(a: &AddState) -> MeshScope {
+    if a.guest { MeshScope::Guest } else { MeshScope::Owner }
+}
+
+/// Looks for the builds on a thread (the tarballs' checksums take a
+/// moment the first time); the window draws again when they are known.
+fn look_for_builds(ctx: &egui::Context) -> Arc<Mutex<Option<Builds>>> {
+    let slot = Arc::new(Mutex::new(None));
+    let (to, ctx) = (slot.clone(), ctx.clone());
+    let started = std::thread::Builder::new().name("nikgob-builds".into()).spawn(move || {
+        let found = find_builds();
+        *to.lock().unwrap_or_else(PoisonError::into_inner) = Some(found);
+        ctx.request_repaint();
+    });
+    if started.is_err() {
+        *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(Builds::default());
+    }
+    slot
+}
+
 /// The builds of this version in the releases folder.
 fn find_builds() -> Builds {
-    use nikgob_core::releases::{LINUX_ARCHES, find_in, nikgobd_tarball, releases_dir, windows_exe};
-    let version = env!("CARGO_PKG_VERSION");
-    let Some(dir) = releases_dir() else { return Builds::default() };
-    Builds {
-        linux: LINUX_ARCHES.iter().any(|a| find_in(&dir, &nikgobd_tarball(version, a)).is_some()),
-        windows: find_in(&dir, &windows_exe(version)).is_some(),
-    }
+    let Some(dir) = releases::releases_dir() else { return Builds::default() };
+    Builds { linux: releases::linux_builds(&dir, VERSION), windows: releases::find_in(&dir, &releases::windows_exe(VERSION)).is_some() }
 }
 
 /// This computer's home address: the mesh's, else the route out.
@@ -156,17 +189,19 @@ pub(crate) fn api_host(api: &ApiView, lan: Option<&str>) -> Option<String> {
     Some(if host.contains(':') { format!("[{host}]") } else { host })
 }
 
-/// The line that installs the headless player on Linux from this computer.
-pub(crate) fn install_line(host: &str, port: u16, ticket: &str) -> String {
-    format!("curl -fsSL \"http://{host}:{port}/install/{SCRIPT}?t={ticket}\" | sh")
+/// The line that installs the headless player on Linux from `host`
+/// (host:port): the script the API serves for the ticket's download key,
+/// pinned by the checksum of exactly those bytes, run with the ticket.
+pub(crate) fn install_line(host: &str, ticket: &str, builds: &[LinuxBuild]) -> String {
+    let key = releases::download_key(ticket);
+    let script = releases::install_script(host, &key, VERSION, builds);
+    releases::install_command(host, &key, &releases::sha256_hex(script.as_bytes()), ticket)
 }
 
-/// The install script's name (the API's `/install/` serves it).
-pub(crate) const SCRIPT: &str = "nikgobd.sh";
-
-/// Where Windows downloads this version of the player from this computer.
-pub(crate) fn windows_url(host: &str, port: u16, ticket: &str) -> String {
-    format!("http://{host}:{port}/install/{}?t={ticket}", nikgob_core::releases::windows_exe(env!("CARGO_PKG_VERSION")))
+/// Where Windows downloads this version of the player from `host`
+/// (host:port).
+pub(crate) fn windows_url(host: &str, ticket: &str) -> String {
+    releases::windows_url(host, &releases::download_key(ticket), VERSION)
 }
 
 /// What keeps the API from the home network, and the command that lifts
@@ -204,17 +239,18 @@ pub(crate) fn window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut
     let a = &mut mem.add;
     if a.open {
         follow_pairing(a, m, out);
-        // Before the invite ends, a new one in its place.
-        if let Some(inv) = &m.invite
-            && inv.expires_ms - wall < RENEW_BEFORE_MS
-            && now - a.renewed_at > RENEW_EVERY_S
-            && m.can_pair()
-        {
+        let scope = wanted_scope(a);
+        if needs_invite(m, scope, wall) && now - a.renewed_at > RENEW_EVERY_S && m.can_pair() {
             a.renewed_at = now;
-            out.push(Command::MeshCreateInvite);
+            out.push(Command::MeshCreateInvite { scope });
         }
-        if m.invite.is_none() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        if shown_invite(m, scope).is_some() {
+            a.missing_since = None;
+        } else {
+            a.missing_since.get_or_insert(now);
+            // Until it comes: soon after the ask, then at the next try.
+            let wait = if now - a.renewed_at < INVITE_WAIT_S { 0.2 } else { 1.0 };
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
         }
     }
     let open = a.open;
@@ -241,7 +277,7 @@ pub(crate) fn window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut
         match cannot_pair(m) {
             Some(why) => error_line(&mut on_card, &why),
             None => match tab {
-                AddTab::Connect => connect(&mut on_card, state, a, now),
+                AddTab::Connect => connect(&mut on_card, state, a, now, out),
                 AddTab::Install => install(&mut on_card, state, a, now, out),
             },
         }
@@ -254,6 +290,21 @@ pub(crate) fn window(ui: &mut Ui, state: &ViewState, mem: &mut MeshUi, out: &mut
     }
     if open && (dismissed || close) {
         close_window(a, out);
+    }
+}
+
+/// The invite to show: the one held, if it makes what «Гость» asks for.
+fn shown_invite(m: &MeshView, scope: MeshScope) -> Option<&nikgob_view::MeshInvite> {
+    m.invite.as_ref().filter(|i| i.scope == scope)
+}
+
+/// An open window wants another invite at `wall` (unix ms): none is held
+/// (spent by a device that joined, gone with an expiry), it is of the
+/// other scope, or it ends soon.
+fn needs_invite(m: &MeshView, scope: MeshScope, wall: i64) -> bool {
+    match &m.invite {
+        None => true,
+        Some(i) => i.scope != scope || i.expires_ms - wall < RENEW_BEFORE_MS,
     }
 }
 
@@ -285,7 +336,9 @@ fn follow_pairing(a: &mut AddState, m: &MeshView, out: &mut Vec<Command>) {
     match &m.pairing {
         _ if stale => {}
         MeshPairing::Done { node_id } => {
-            if a.guest {
+            // A device added by its code here becomes a guest now; one that
+            // joined with the invite was signed as the invite said.
+            if a.guest && a.sent.is_some() {
                 out.push(Command::MeshSetScope { node_id: node_id.clone(), scope: MeshScope::Guest });
             }
             close_window(a, out);
@@ -336,20 +389,20 @@ fn error_line(ui: &mut Ui, text: &str) {
 }
 
 /// «Подключить»: the QR, and the code of a nearby device.
-fn connect(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64) {
+fn connect(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut Vec<Command>) {
     let m = &state.mesh;
     let narrow = ui.available_width() < QR + 24.0 + 6.0 * CELL.x + 5.0 * CELL_GAP;
-    let invite_late = m.invite.is_none() && now - a.opened_at > INVITE_WAIT_S;
+    let invite_late = a.missing_since.is_some_and(|at| now - at > INVITE_WAIT_S);
     let col_h_key = window_id().with("connect-col");
     let col_h: f32 = ui.ctx().data(|d| d.get_temp(col_h_key)).unwrap_or(0.0);
-    let column = |ui: &mut Ui, a: &mut AddState| {
-        let r = ui.scope(|ui| code_column(ui, state, a, invite_late)).response.rect;
+    let column = |ui: &mut Ui, a: &mut AddState, out: &mut Vec<Command>| {
+        let r = ui.scope(|ui| code_column(ui, state, a, invite_late, now, out)).response.rect;
         ui.ctx().data_mut(|d| d.insert_temp(col_h_key, r.height()));
     };
     if narrow {
         ui.vertical_centered(|ui| qr_plate(ui, m, a, invite_late));
         ui.add_space(20.0);
-        column(ui, a);
+        column(ui, a, out);
     } else {
         ui.horizontal_top(|ui| {
             qr_plate(ui, m, a, invite_late);
@@ -357,7 +410,7 @@ fn connect(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64) {
             ui.vertical(|ui| {
                 // On the QR's middle line.
                 ui.add_space(((QR - col_h) * 0.5).max(0.0));
-                column(ui, a);
+                column(ui, a, out);
             });
         });
     }
@@ -370,7 +423,7 @@ fn qr_plate(ui: &mut Ui, m: &MeshView, a: &mut AddState, late: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(QR, QR), Sense::hover());
     // Dark modules on light, whatever the theme: a reader wants them so.
     let (dark, light) = if luma(s.on_surface) < luma(s.surface) { (s.on_surface, s.surface) } else { (s.surface, s.on_surface) };
-    let Some(inv) = &m.invite else {
+    let Some(inv) = shown_invite(m, wanted_scope(a)) else {
         paint::container(ui.painter(), rect, Radii::all(16.0), s.surface_container_high, Stroke::NONE);
         if !late {
             let mut c = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(rect.center(), vec2(48.0, 48.0))));
@@ -420,7 +473,7 @@ fn qr_texture(ctx: &egui::Context, ticket: &str, dark: Color32, light: Color32) 
 
 /// Beside the QR: the nearby device (a chip each when there are several),
 /// its code's cells, what went wrong, «Гость».
-fn code_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: bool) {
+fn code_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: bool, now: f64, out: &mut Vec<Command>) {
     let m = &state.mesh;
     let s = Theme::get(ui.ctx()).scheme;
     let working = a.sent.is_some() || m.pairing == MeshPairing::Working;
@@ -461,6 +514,12 @@ fn code_column(ui: &mut Ui, state: &ViewState, a: &mut AddState, invite_late: bo
     ui.add_space(12.0);
     if ui.add(FilterChip::new("Гость", a.guest).id_salt("mesh-add-guest")).clicked() {
         a.guest = !a.guest;
+        // The invite shown stops being one: another, of the new scope,
+        // signs what joins with it (the QR waits for it).
+        if m.can_pair() {
+            a.renewed_at = now;
+            out.push(Command::MeshCreateInvite { scope: wanted_scope(a) });
+        }
     }
 }
 
@@ -561,16 +620,18 @@ fn digit_of(key: Key) -> Option<u8> {
 fn install(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut Vec<Command>) {
     let m = &state.mesh;
     let s = Theme::get(ui.ctx()).scheme;
-    let Some(inv) = &m.invite else {
-        if now - a.opened_at > INVITE_WAIT_S {
+    let builds = a.builds.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let (Some(inv), Some(builds)) = (shown_invite(m, wanted_scope(a)), builds) else {
+        if a.missing_since.is_some_and(|at| now - at > INVITE_WAIT_S) {
             error_line(ui, "Межсеть не ответила");
         } else {
             ui.add(LoadingIndicator::new().size(32.0));
         }
         return;
     };
+    let linux = !builds.linux.is_empty();
     // Windows only when its program is here (no tab that leads nowhere).
-    let platforms: &[&str] = if a.builds.windows { &["Linux и Raspberry Pi", "Windows"] } else { &["Linux и Raspberry Pi"] };
+    let platforms: &[&str] = if builds.windows { &["Linux и Raspberry Pi", "Windows"] } else { &["Linux и Raspberry Pi"] };
     if a.platform >= platforms.len() {
         a.platform = 0;
     }
@@ -581,11 +642,17 @@ fn install(ui: &mut Ui, state: &ViewState, a: &mut AddState, now: f64, out: &mut
         ui.add_space(16.0);
     }
     let api = &state.api;
-    let host = api_host(api, a.lan.as_deref());
-    let served = (a.platform == 0 && a.builds.linux) || a.platform == 1;
+    let host = api_host(api, a.lan.as_deref()).map(|h| format!("{h}:{}", api.port));
+    let served = (a.platform == 0 && linux) || a.platform == 1;
     let line = match (a.platform, &host) {
-        (0, Some(h)) if a.builds.linux => install_line(h, api.port, &inv.ticket),
-        (1, Some(h)) => windows_url(h, api.port, &inv.ticket),
+        (0, Some(h)) if linux => {
+            // Made once per address and ticket (a checksum of the script).
+            if !a.line.as_ref().is_some_and(|(lh, lt, _)| lh == h && *lt == inv.ticket) {
+                a.line = Some((h.clone(), inv.ticket.clone(), install_line(h, &inv.ticket, &builds.linux)));
+            }
+            a.line.as_ref().map(|(_, _, l)| l.clone()).unwrap_or_default()
+        }
+        (1, Some(h)) => windows_url(h, &inv.ticket),
         // No build to hand out (or no home address): pairing one installed
         // by hand.
         _ => mesh_ui_pair_line(&inv.ticket),
@@ -630,16 +697,52 @@ mod tests {
         assert_eq!(digit_of(Key::A), None);
     }
 
+    /// The Linux line downloads with the key, pins the very script the API
+    /// serves for it and hands the script the ticket; no pipe into sh.
     #[test]
-    fn the_lines_carry_the_address_and_the_ticket() {
-        assert_eq!(
-            install_line("192.168.0.10", 47210, "nkm1abc"),
-            "curl -fsSL \"http://192.168.0.10:47210/install/nikgobd.sh?t=nkm1abc\" | sh"
-        );
-        assert!(windows_url("192.168.0.10", 47210, "nkm1abc").starts_with("http://192.168.0.10:47210/install/music.nikgob-"));
-        assert!(windows_url("192.168.0.10", 47210, "nkm1abc").ends_with(".exe?t=nkm1abc"));
+    fn the_lines_carry_the_address_the_key_and_the_ticket() {
+        let builds = [LinuxBuild { arch: "aarch64", sha256: "ab".repeat(32) }];
+        let host = "192.168.0.10:47210";
+        let key = releases::download_key("nkm1abc");
+        let line = install_line(host, "nkm1abc", &builds);
+        let served = releases::install_script(host, &key, VERSION, &builds);
+        let sum = releases::sha256_hex(served.as_bytes());
+        assert_eq!(line, releases::install_command(host, &key, &sum, "nkm1abc"));
+        assert!(line.contains(&format!("/install/nikgobd.sh?k={key}")), "{line}");
+        assert!(line.contains(&sum) && line.ends_with(" nkm1abc"), "{line}");
+        assert!(!line.contains("| sh"), "{line}");
+        assert_ne!(line, install_line(host, "nkm1abc", &[]), "another set of builds, another script");
+        let url = windows_url(host, "nkm1abc");
+        assert!(url.starts_with("http://192.168.0.10:47210/install/music.nikgob-"), "{url}");
+        assert!(url.ends_with(&format!(".exe?k={key}")) && !url.contains("nkm1abc"), "{url}");
         assert_eq!(mesh_ui_pair_line("nkm1abc"), "nikgobd pair nkm1abc");
-        assert_eq!(SCRIPT, "nikgobd.sh");
+    }
+
+    /// An open window asks for an invite when none is held (spent, gone),
+    /// when the one held is of the other scope, and before it ends.
+    #[test]
+    fn the_window_keeps_an_invite_of_its_scope() {
+        let mut m = MeshView::default();
+        assert!(needs_invite(&m, MeshScope::Owner, 0), "none held");
+        m.invite = Some(nikgob_view::MeshInvite { ticket: "nkm1abc".into(), expires_ms: 600_000, scope: MeshScope::Owner });
+        assert!(!needs_invite(&m, MeshScope::Owner, 0));
+        assert!(shown_invite(&m, MeshScope::Owner).is_some());
+        assert!(needs_invite(&m, MeshScope::Guest, 0), "«Гость» wants a guest's invite");
+        assert!(shown_invite(&m, MeshScope::Guest).is_none(), "the owner's QR is not shown for a guest");
+        assert!(needs_invite(&m, MeshScope::Owner, 600_000 - RENEW_BEFORE_MS + 1), "ending soon");
+    }
+
+    /// A device that joined with the invite closes the window as it was
+    /// signed (no scope set after); only one added by its code here becomes
+    /// a guest after.
+    #[test]
+    fn a_guest_invite_is_not_made_a_guest_again() {
+        let mut a = AddState { open: true, guest: true, ..AddState::default() };
+        let m = MeshView { pairing: MeshPairing::Done { node_id: "pi".into() }, ..MeshView::default() };
+        let mut out = Vec::new();
+        follow_pairing(&mut a, &m, &mut out);
+        assert!(!a.open);
+        assert!(!out.iter().any(|c| matches!(c, Command::MeshSetScope { .. })), "{out:?}");
     }
 
     #[test]
@@ -712,6 +815,10 @@ mod tests {
         assert!(a.code.is_empty() && a.sent.is_none());
         out.clear();
         a.guest = true;
+        a.code = "654321".into();
+        follow_pairing(&mut a, &MeshView { pairing: MeshPairing::Idle, ..m.clone() }, &mut out);
+        assert!(a.sent.is_some(), "the new code went");
+        out.clear();
         m.pairing = MeshPairing::Done { node_id: "tv".into() };
         follow_pairing(&mut a, &m, &mut out);
         assert!(!a.open);

@@ -9,7 +9,7 @@
 //! the port (47210 by default); it tells the runtime where it listens or
 //! why it cannot ([`nikgob_view::Command::ApiStatus`]). Every `/v1` route
 //! needs a token; `/docs` (Swagger UI) and `/openapi.json` do not, and
-//! `/install/` wants the invite shown in «Добавить устройство» instead. It
+//! `/install/` wants the download key of the invite the mesh holds instead. It
 //! needs no window: the headless player starts it the same way.
 
 mod auth;
@@ -45,6 +45,7 @@ use nikgob_view::{ApiActor, ApiReply, Command};
 
 pub use auth::Caller;
 pub use tokens::create_token;
+pub use install::{InstallCheck, set_install_check};
 
 /// Wakes the API when the runtime publishes a change. Give the runtime a
 /// wake that calls both the window's and this one's [`Wake::wake`].
@@ -580,8 +581,9 @@ mod tests {
         drop(rt);
     }
 
-    /// `/install/` answers only with the invite shown now, and only this
-    /// version's builds.
+    /// `/install/` answers only to the key the mesh's check takes, and only
+    /// with this version's builds; the script carries the key, not the
+    /// ticket.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_install_script_wants_the_invite() {
         use axum::body::Body;
@@ -604,29 +606,31 @@ mod tests {
         let ctx = ApiContext { runtime: h.clone(), library, wake: Wake::new(), media_roots: Vec::new() };
         let local = LocalApi::new(Arc::new(Shared::new(ctx)));
         let ask = |path: &str| Request::get(path).header("host", "192.168.0.10:47210").body(Body::empty()).unwrap();
+        let key = nikgob_core::releases::download_key("nkm1abc");
+        let script = format!("/install/nikgobd.sh?k={key}");
+        set_install_check(None);
+        let r = tower::ServiceExt::oneshot(local.router.clone(), ask(&script)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "no mesh, no invite");
+        let want = key.clone();
+        set_install_check(Some(Arc::new(move |k: &str| nikgob_core::releases::same_secret(k.as_bytes(), want.as_bytes()))));
+        let other = format!("/install/nikgobd.sh?k={}", nikgob_core::releases::download_key("nkm1abd"));
+        let r = tower::ServiceExt::oneshot(local.router.clone(), ask(&other)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "another invite's key");
         let r = tower::ServiceExt::oneshot(local.router.clone(), ask("/install/nikgobd.sh?t=nkm1abc")).await.unwrap();
-        assert_eq!(r.status(), StatusCode::NOT_FOUND, "no invite shown");
-        let invite = nikgob_view::MeshInvite { ticket: "nkm1abc".into(), expires_ms: nikgob_library::now_ms() + 60_000 };
-        h.send(Command::MeshUpdate(Box::new(nikgob_view::MeshSnapshot { invite: Some(invite), ..Default::default() })));
-        for _ in 0..200 {
-            if h.state().mesh.invite.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let r = tower::ServiceExt::oneshot(local.router.clone(), ask("/install/nikgobd.sh?t=nkm1abd")).await.unwrap();
-        assert_eq!(r.status(), StatusCode::NOT_FOUND, "another ticket");
-        let r = tower::ServiceExt::oneshot(local.router.clone(), ask("/install/nikgobd.sh?t=nkm1abc")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "the ticket opens nothing");
+        let r = tower::ServiceExt::oneshot(local.router.clone(), ask(&script)).await.unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let body = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("base='http://192.168.0.10:47210'"), "{text}");
-        assert!(text.contains("ticket='nkm1abc'"), "{text}");
-        let other = ask("/install/nikgobd-0.0.0-linux-aarch64.tar.gz?t=nkm1abc");
-        let r = tower::ServiceExt::oneshot(local.router.clone(), other).await.unwrap();
+        assert!(text.contains(&format!("key='{key}'")), "{text}");
+        assert!(!text.contains("nkm1abc"), "{text}");
+        let old = ask(&format!("/install/nikgobd-0.0.0-linux-aarch64.tar.gz?k={key}"));
+        let r = tower::ServiceExt::oneshot(local.router.clone(), old).await.unwrap();
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "not this version");
-        let r = tower::ServiceExt::oneshot(local.router.clone(), ask("/install/settings.toml?t=nkm1abc")).await.unwrap();
+        let r = tower::ServiceExt::oneshot(local.router.clone(), ask(&format!("/install/settings.toml?k={key}"))).await.unwrap();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        set_install_check(None);
         drop(rt);
     }
 

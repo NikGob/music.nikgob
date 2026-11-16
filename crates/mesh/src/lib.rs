@@ -145,6 +145,7 @@ impl MeshHandle {
 
     fn shutdown(&mut self) {
         if let Some(s) = self.stop.take() {
+            nikgob_api::set_install_check(None);
             // The forgets still waiting reach the mesh before the stop (at
             // most [`FLUSH_WAIT`]); it does what it was given, revocations
             // written, before its thread ends.
@@ -173,6 +174,9 @@ pub fn start(ctx: MeshContext) -> std::io::Result<MeshHandle> {
     let runtime = ctx.runtime.clone();
     let sh = Arc::new(service::Shared::new(ctx)?);
     let client = MeshClient { sh: sh.clone(), rt: rt.handle().clone() };
+    // `/install/` asks the invite itself, not the view of it.
+    let held = Arc::downgrade(&sh);
+    nikgob_api::set_install_check(Some(Arc::new(move |key: &str| held.upgrade().is_some_and(|s| s.install_key_ok(key)))));
     let runtime_link = runtime.clone();
     runtime_link.link_mesh(move |c| {
         if cmd_tx.try_send(c).is_err() {

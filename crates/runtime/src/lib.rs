@@ -2060,7 +2060,7 @@ impl Worker {
             | Command::ApiCreatePlaylist { .. }) => self.api_command(c),
             c @ (Command::MeshSetEnabled(_)
             | Command::MeshPairNearby { .. }
-            | Command::MeshCreateInvite
+            | Command::MeshCreateInvite { .. }
             | Command::MeshCancelInvite
             | Command::MeshJoin { .. }
             | Command::MeshRename { .. }
