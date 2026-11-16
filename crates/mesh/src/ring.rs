@@ -352,6 +352,28 @@ pub(crate) mod tests {
         assert!(ring.trusted(&pi).is_some());
     }
 
+    /// The holder forgets the TV: the Pi hears of it from the holder's list,
+    /// the TV from anyone's, and finds itself out of the ring.
+    #[test]
+    fn a_revocation_goes_round_the_ring() {
+        let ring_key = key(1);
+        let (pc, pi, tv) = (key(2).public(), key(3).public(), key(4).public());
+        let mut holder = Ring::create(&ring_key, &pc, "PC", MeshKind::Pc, 10);
+        let pi_cert = Cert::issue(&ring_key, &pi, "Pi", MeshKind::Pi, MeshScope::Owner, 20);
+        let tv_cert = Cert::issue(&ring_key, &tv, "TV", MeshKind::Tv, MeshScope::Guest, 30);
+        holder.admit(pi_cert.clone());
+        holder.admit(tv_cert.clone());
+        let mut at_pi = Ring::received(&holder.public.to_string(), &pi, pi_cert, &holder.members, &holder.revoked).unwrap();
+        let mut at_tv = Ring::received(&holder.public.to_string(), &tv, tv_cert, &holder.members, &holder.revoked).unwrap();
+        assert!(at_pi.trusted(&tv).is_some() && at_tv.trusted(&pi).is_some());
+        holder.merge(&[], &[Revocation::issue(&ring_key, &tv, 40)]);
+        assert!(at_pi.merge(&holder.members, &holder.revoked));
+        assert!(at_pi.trusted(&tv).is_none(), "the Pi no longer trusts the TV");
+        assert!(at_tv.merge(&at_pi.members, &at_pi.revoked));
+        assert!(at_tv.me_revoked(), "the TV learns it was forgotten");
+        assert!(!at_pi.merge(&at_tv.members, &at_tv.revoked), "nothing new comes back");
+    }
+
     #[test]
     fn merging_takes_only_the_rings_newer_certificates() {
         let ring_key = key(1);
