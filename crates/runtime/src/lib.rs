@@ -84,6 +84,9 @@ use queue::{Entry, Queue};
 
 /// How many of the tracks before the current one the queue view lists.
 const HISTORY_SHOWN: usize = 50;
+/// The entries kept with who added or picked them before those gone from
+/// the queue are let go.
+const ENTRY_ACTORS_KEPT: usize = 64;
 
 /// In a [`PlaybackEvent::Error`] of a SoundCloud track: SoundCloud streams
 /// it only with DRM, and the backend can play it through SoundCloud's own
@@ -832,8 +835,14 @@ struct Worker {
     next_origin: Option<EventOrigin>,
     /// Who started the queue that plays: an API request's token (the voice
     /// assistant, an agent, a guest), `None` the owner. Recorded with each
-    /// play of it.
+    /// play of it…
     queue_actor: Option<nikgob_core::settings::ApiActor>,
+    /// …but an entry added or picked by someone else plays as them (a
+    /// guest's song in the owner's queue is the guest's, the next one the
+    /// owner's again)…
+    entry_actor: std::collections::HashMap<u64, Option<nikgob_core::settings::ApiActor>>,
+    /// …and the playing entry's, from its start.
+    play_actor: Option<nikgob_core::settings::ApiActor>,
     /// The queue generation of the last start: a start in another queue
     /// is the user's choice.
     origin_gen: Option<u64>,
@@ -1004,6 +1013,33 @@ fn edits_queue(c: &Command) -> bool {
     )
 }
 
+/// Whether `c` adds songs to the queue that plays (after the current one
+/// or at its end), its own entries for who added them
+/// ([`Worker::entry_actor`]).
+fn adds_to_queue(c: &Command) -> bool {
+    matches!(
+        c,
+        Command::PlayNext(_)
+            | Command::Enqueue(_)
+            | Command::PlayReleaseNext(_)
+            | Command::EnqueueRelease(_)
+            | Command::PlayPlaylistNext(_)
+            | Command::EnqueuePlaylist(_)
+            | Command::PlayArtistNext(_)
+            | Command::EnqueueArtist(_)
+            | Command::PlayStreamNext(_)
+            | Command::EnqueueStream(_)
+            | Command::PlayStreamAlbumNext(_)
+            | Command::EnqueueStreamAlbum(_)
+            | Command::PlayStreamPlaylistNext(_)
+            | Command::EnqueueStreamPlaylist(_)
+            | Command::PlayStreamArtistNext(_)
+            | Command::EnqueueStreamArtist(_)
+            | Command::PlayMixNext { .. }
+            | Command::EnqueueMix { .. }
+    )
+}
+
 impl Worker {
     fn new(
         config: RuntimeConfig,
@@ -1103,6 +1139,8 @@ impl Worker {
             restored_page: None,
             next_origin: None,
             queue_actor: None,
+            entry_actor: std::collections::HashMap::new(),
+            play_actor: None,
             origin_gen: None,
             ended: true,
             heard: Heard::default(),
@@ -1434,7 +1472,26 @@ impl Worker {
 
     // ---------------------------------------------------------------- commands
 
+    /// [`Self::command_now`]; what it adds to the queue plays as whoever
+    /// added it when that is not whose the queue is (a guest's song in the
+    /// owner's queue is the guest's, the owner's in an assistant's queue the
+    /// owner's).
     fn command(&mut self, c: Command) {
+        if !adds_to_queue(&c) {
+            return self.command_now(c);
+        }
+        let before: std::collections::HashSet<u64> = self.queue.upcoming().iter().map(|e| e.id).collect();
+        self.command_now(c);
+        let by = self.api_actor();
+        if by != self.queue_actor {
+            let added: Vec<u64> = self.queue.upcoming().iter().map(|e| e.id).filter(|id| !before.contains(id)).collect();
+            for id in added {
+                self.entry_actor.insert(id, by);
+            }
+        }
+    }
+
+    fn command_now(&mut self, c: Command) {
         for i in 0..self.services.len() {
             let mut handled = false;
             let mut st = self.state.write();
@@ -1481,7 +1538,7 @@ impl Worker {
                 if self.position_now() > Duration::from_secs(3) || self.queue.current().is_none() {
                     self.seek(Duration::ZERO);
                 } else if let Some(e) = self.queue.previous() {
-                    self.user_switch(EventOrigin::Manual);
+                    self.user_pick(EventOrigin::Manual, e.id);
                     self.start(e);
                 }
             }
@@ -1643,7 +1700,7 @@ impl Worker {
             }
             Command::PlayQueueEntry(entry) => {
                 if let Some(e) = self.queue.jump(entry) {
-                    self.user_switch(EventOrigin::Manual);
+                    self.user_pick(EventOrigin::Manual, e.id);
                     self.start(e);
                 }
             }
@@ -1743,7 +1800,7 @@ impl Worker {
                         }
                         // The like's actor: the voice assistant's «нравится»
                         // is its own in the history, as its plays are.
-                        let actor = self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner);
+                        let actor = self.api_actor();
                         let _ = self.lib.record_event_with(
                             t,
                             if on { EventType::Like } else { EventType::Unlike },
@@ -2854,7 +2911,14 @@ impl Worker {
         };
         self.ended = false;
         self.heard.reset();
-        let meta = EventMeta { origin: Some(origin), context_id, actor: self.queue_actor, ..EventMeta::default() };
+        // Who plays it: whoever added or picked it, else whoever's queue it is.
+        self.play_actor = self.entry_actor.get(&e.id).copied().unwrap_or(self.queue_actor);
+        if self.entry_actor.len() > ENTRY_ACTORS_KEPT {
+            let live: std::collections::HashSet<u64> =
+                self.queue.history().iter().chain(self.queue.upcoming()).map(|x| x.id).chain([e.id]).collect();
+            self.entry_actor.retain(|id, _| live.contains(id));
+        }
+        let meta = EventMeta { origin: Some(origin), context_id, actor: self.play_actor, ..EventMeta::default() };
         let _ = self.lib.record_event_with(e.track, EventType::Start, kind, Some(0), context, meta);
         self.turn.lap("start recorded");
         if self.queue_teaches() {
@@ -2873,6 +2937,12 @@ impl Worker {
         self.heard.tick(playing, away, volume);
     }
 
+    /// The actor of the API request that runs now (its token's), `None`
+    /// the owner (an owner's token, the window).
+    fn api_actor(&self) -> Option<nikgob_core::settings::ApiActor> {
+        self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner)
+    }
+
     /// The user picks something else to play (`origin` of what comes): the
     /// playing track ends here.
     pub(crate) fn user_switch(&mut self, origin: EventOrigin) {
@@ -2882,23 +2952,40 @@ impl Worker {
         self.next_origin = Some(origin);
         // Whoever asked for the new queue (an API request's token while its
         // commands run; the window: the owner) plays it from now on.
-        self.queue_actor = self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner);
+        self.queue_actor = self.api_actor();
     }
 
-    /// Whether the plays of the queue that plays teach the live
-    /// recommendations (the session, the skip and next-start models): the
-    /// owner's and an agent's do; a guest's never, the voice assistant's
-    /// are background (as in the history the mixes are made of).
+    /// The user picks another entry of the queue that plays (`origin` of
+    /// what comes): the playing track ends here, the picked `entry` plays
+    /// as whoever picked it, and the queue stays whose it was (after a
+    /// guest's pick in the owner's queue the next song is the owner's).
+    pub(crate) fn user_pick(&mut self, origin: EventOrigin, entry: u64) {
+        if !self.ended {
+            self.record_end(true, EndReason::UserPick);
+        }
+        self.next_origin = Some(origin);
+        let by = self.api_actor();
+        if by == self.queue_actor {
+            self.entry_actor.remove(&entry);
+        } else {
+            self.entry_actor.insert(entry, by);
+        }
+    }
+
+    /// Whether the play that plays teaches the live recommendations (the
+    /// session, the skip and next-start models): the owner's and an
+    /// agent's do; a guest's never, the voice assistant's are background
+    /// (as in the history the mixes are made of).
     fn queue_teaches(&self) -> bool {
-        teaches_live_recs(self.queue_actor)
+        teaches_live_recs(self.play_actor)
     }
 
     /// Who ends or seeks the song that plays: an API request's token
     /// while its commands run (the voice assistant's «дальше» is its own;
-    /// an owner's token is the owner, as the window is), else whoever's
-    /// queue it is.
+    /// an owner's token is the owner, as the window is), else whoever
+    /// plays it.
     fn hand_actor(&self) -> Option<nikgob_core::settings::ApiActor> {
-        self.api.actor.filter(|a| *a != nikgob_core::settings::ApiActor::Owner).or(self.queue_actor)
+        self.api_actor().or(self.play_actor)
     }
 
     /// The app closes: the playing (or paused) track ends as it is.
@@ -2941,7 +3028,7 @@ impl Worker {
             // After the session: the radio reads its verdict (a radio the
             // assistant started still follows its skips; a guest's plays
             // and skips steer nothing).
-            if self.queue_actor != guest && actor != guest {
+            if self.play_actor != guest && actor != guest {
                 self.radio_feedback(e.track, complete, position_ms, dur);
             }
             // «Дальше» on a guest is a skip at any point of it.
