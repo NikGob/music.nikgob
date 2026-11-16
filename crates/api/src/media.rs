@@ -106,7 +106,7 @@ pub fn inside(path: &FsPath, roots: &[PathBuf]) -> Option<PathBuf> {
 
 /// The folders files are served from, links followed (a folder that is
 /// not there is left out).
-fn roots(shared: &Shared) -> Vec<PathBuf> {
+pub(crate) fn roots(shared: &Shared) -> Vec<PathBuf> {
     let (library, masters) = {
         let st = shared.rt.state();
         (st.prefs.library_dir.clone(), st.prefs.masters_dir.clone())
@@ -121,7 +121,7 @@ fn roots(shared: &Shared) -> Vec<PathBuf> {
 
 /// Opens `path` if it is a file inside `roots`: by its real path, which is
 /// checked again once open (a link put in between is refused).
-fn open_inside(path: &FsPath, roots: &[PathBuf]) -> Option<(std::fs::File, PathBuf)> {
+pub(crate) fn open_inside(path: &FsPath, roots: &[PathBuf]) -> Option<(std::fs::File, PathBuf)> {
     let real = inside(path, roots)?;
     let file = std::fs::File::open(&real).ok()?;
     let still = std::fs::canonicalize(&real).ok()? == real;
@@ -130,7 +130,7 @@ fn open_inside(path: &FsPath, roots: &[PathBuf]) -> Option<(std::fs::File, PathB
 
 /// The open file `file` (named `path`, for its type) as the answer to
 /// `headers` (its Range).
-async fn serve_file(file: std::fs::File, path: &FsPath, headers: &HeaderMap) -> Result<Response, ApiError> {
+pub(crate) async fn serve_file(file: std::fs::File, path: &FsPath, headers: &HeaderMap) -> Result<Response, ApiError> {
     let gone = || ApiError::not_found("Файла нет");
     let mut file = tokio::fs::File::from_std(file);
     let size = file.metadata().await.map_err(|_| gone())?.len();

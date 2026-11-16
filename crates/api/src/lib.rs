@@ -21,6 +21,7 @@ mod outputs;
 mod play;
 mod routes;
 mod state;
+mod sync;
 pub mod tokens;
 
 use std::sync::Arc;
@@ -308,6 +309,10 @@ pub(crate) fn router(sh: Arc<Shared>, closing: Closing) -> Router {
         .route("/v1/playlists/{id}", get(library::playlist))
         .route("/v1/media/tracks/{id}/audio", get(media::audio))
         .route("/v1/media/albums/{id}/cover", get(media::cover))
+        .route("/v1/sync/heads", get(sync::heads))
+        .route("/v1/sync/changes", get(sync::changes))
+        .route("/v1/sync/apply", post(sync::apply))
+        .route("/v1/sync/blob", get(sync::blob))
         .route_layer(axum::middleware::from_fn_with_state(sh.clone(), auth::guard))
         .layer(axum::Extension(closing))
         .with_state(sh);
