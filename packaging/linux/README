@@ -29,6 +29,11 @@ Logs and state
   ~/.local/share/nikgobd/crash.log      panics
   ~/.local/share/nikgobd/               library database, prefs, session
 
+Trying it by hand (stop the service first: one nikgobd per data dir)
+  nikgobd --console
+then type help; e.g. "liked", "duck 0.18 120 8000", "unduck", "status",
+"device alsa_output.usb-3142_fifine_Headset-00.analog-stereo".
+
 Stop and remove
   systemctl --user disable --now nikgobd
   rm ~/.local/bin/nikgobd ~/.config/systemd/user/nikgobd.service

@@ -7,9 +7,11 @@
 //! `NIKGOBD_*` variables override it. `--print-config` prints an example.
 //! It logs to stderr (the journal under systemd) and appends panics to
 //! `crash.log` in its data dir; SIGTERM or Ctrl+C stops it as the app
-//! quits, its session and prefs saved.
+//! quits, its session and prefs saved. `--console` takes commands typed on
+//! stdin (the duck, the output, play and pause) for trying it by hand.
 
 mod config;
+mod console;
 mod host;
 mod lock;
 mod wake;
@@ -19,6 +21,7 @@ use std::path::PathBuf;
 
 fn main() {
     let mut asked: Option<PathBuf> = None;
+    let mut console = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -26,6 +29,7 @@ fn main() {
                 Some(p) => asked = Some(PathBuf::from(p)),
                 None => usage("--config needs a file"),
             },
+            "--console" => console = true,
             "--print-config" => {
                 print!("{}", config::EXAMPLE);
                 return;
@@ -74,7 +78,14 @@ fn main() {
         // A server next to the player starts here, on this runtime, with
         // `host.runtime`, `host.library`, `host.settings` and
         // `host.wake.add(...)` for the state's changes.
-        stopped().await;
+        if console {
+            tokio::select! {
+                () = stopped() => {}
+                () = console::run(&host.runtime) => {}
+            }
+        } else {
+            stopped().await;
+        }
     });
     log::info!("stopping");
     host.shutdown();
@@ -83,7 +94,7 @@ fn main() {
 }
 
 fn usage(problem: &str) -> ! {
-    eprintln!("nikgobd: {problem}\nusage: nikgobd [--config <file>] | --print-config | --version");
+    eprintln!("nikgobd: {problem}\nusage: nikgobd [--config <file>] [--console] | --print-config | --version");
     std::process::exit(2);
 }
 
