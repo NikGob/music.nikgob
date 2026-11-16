@@ -53,11 +53,29 @@ struct TokenDialog {
     actor_picked: bool,
     /// The name field takes the focus when the dialog opens.
     focus: bool,
+    /// Sent, the secret held until the player says the token is kept.
+    waiting: Option<Waiting>,
+    /// Why the last one was not kept.
+    error: Option<String>,
     made: Option<Made>,
+}
+
+/// A token sent to the player, and when.
+struct Waiting {
+    made: Made,
+    at: f64,
+}
+
+/// What became of a token sent.
+enum Kept {
+    Yes,
+    No(String),
+    NotYet,
 }
 
 /// A token just made.
 struct Made {
+    id: String,
     name: String,
     secret: String,
     actor: ApiActor,
@@ -84,6 +102,8 @@ const SNIPPETS: [&str; 3] = ["Claude Code", "mcpServers JSON", "curl"];
 const PULSE_S: f64 = 0.25;
 /// How long the switch shows its new place before the runtime has it.
 const SENT_S: f64 = 3.0;
+/// How long a token sent may wait for the player to keep it.
+const KEEP_S: f64 = 5.0;
 
 pub(super) fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &mut Vec<Command>) {
     // «Устройства» comes with the devices wave; a group with no row has no
@@ -98,10 +118,10 @@ pub(super) fn show(ui: &mut Ui, state: &ViewState, pages: &mut PageState, out: &
     dimmed(ui, !on, |ui| {
         access_row(ui, api, out);
         port_row(ui, api, mem, out);
-        tokens_row(ui, mem, out);
+        tokens_row(ui, mem, now, out);
         token_list(ui, api, mem, now, out);
     });
-    dialog(ui, api, mem, out);
+    dialog(ui, api, mem, now, out);
 }
 
 /// The switch as the user flipped it, until the runtime shows that.
@@ -228,7 +248,7 @@ fn first_snippet(actor: ApiActor) -> usize {
 }
 
 /// «Токены»: «Новый токен», its menu two ready ones.
-fn tokens_row(ui: &mut Ui, mem: &mut NetState, out: &mut Vec<Command>) {
+fn tokens_row(ui: &mut Ui, mem: &mut NetState, now: f64, out: &mut Vec<Command>) {
     row(ui, Id::ApiTokens, |ui| {
         let o = SplitButton::new("api-new-token", "Новый токен")
             .icon(Icon::Add)
@@ -244,6 +264,8 @@ fn tokens_row(ui: &mut Ui, mem: &mut NetState, out: &mut Vec<Command>) {
                 actor: ApiActor::Assistant,
                 actor_picked: false,
                 focus: true,
+                waiting: None,
+                error: None,
                 made: None,
             });
         }
@@ -255,7 +277,9 @@ fn tokens_row(ui: &mut Ui, mem: &mut NetState, out: &mut Vec<Command>) {
                 actor,
                 actor_picked: true,
                 focus: false,
-                made: Some(made),
+                waiting: Some(Waiting { made, at: now }),
+                error: None,
+                made: None,
             });
         }
     });
@@ -267,9 +291,23 @@ fn make(name: &str, preset: ApiPreset, actor: ApiActor, out: &mut Vec<Command>) 
         log::error!("api: no randomness for a token");
         return None;
     };
-    let shown = token.name.clone();
+    let (id, shown) = (token.id.clone(), token.name.clone());
     out.push(Command::ApiCreateToken(token));
-    Some(Made { name: shown, secret, actor, snippet: first_snippet(actor), lan: lan_ip() })
+    Some(Made { id, name: shown, secret, actor, snippet: first_snippet(actor), lan: lan_ip() })
+}
+
+/// Whether the player kept token `id` (it is in the view), refused it,
+/// or not yet, `waited` seconds after it was sent.
+fn kept(api: &ApiView, id: &str, waited: f64) -> Kept {
+    if api.tokens.iter().any(|t| t.id == id) {
+        Kept::Yes
+    } else if let Some((_, why)) = api.token_failed.as_ref().filter(|(f, _)| f == id) {
+        Kept::No(why.clone())
+    } else if waited > KEEP_S {
+        Kept::No("Плеер не ответил".to_owned())
+    } else {
+        Kept::NotYet
+    }
 }
 
 /// This computer's address in the home network: the one a connection out
@@ -406,13 +444,25 @@ fn snippet_host(api: &ApiView, lan: Option<&str>) -> String {
 
 /// The token dialog: the form, then (in the same window) the secret with
 /// its snippets.
-fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, out: &mut Vec<Command>) {
+fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, now: f64, out: &mut Vec<Command>) {
     let Some(d) = mem.dialog.as_mut() else { return };
     let ctx = ui.ctx().clone();
     let s = Theme::get(&ctx).scheme;
     let mut open = true;
+    // The secret shows only once the player has kept the token.
+    if let Some(w) = d.waiting.as_ref() {
+        match kept(api, &w.made.id, now - w.at) {
+            Kept::Yes => d.made = d.waiting.take().map(|w| w.made),
+            Kept::No(why) => {
+                d.waiting = None;
+                d.error = Some(why);
+            }
+            Kept::NotYet => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+        }
+    }
     if d.made.is_none() {
-        let can = !d.name.trim().is_empty();
+        let can = !d.name.trim().is_empty() && d.waiting.is_none();
+        let waiting = d.waiting.is_some();
         let mut submitted = false;
         let r = Dialog::new("api-token-dialog", "Новый токен")
             .max_width(480.0)
@@ -458,11 +508,22 @@ fn dialog(ui: &mut Ui, api: &ApiView, mem: &mut NetState, out: &mut Vec<Command>
                         d.actor_picked = true;
                     }
                 });
+                if let Some(e) = &d.error {
+                    ui.add_space(16.0);
+                    ui.add(egui::Label::new(TypeRole::BodyMedium.style().rich(e, s.error)).wrap());
+                }
+                if waiting {
+                    ui.add_space(16.0);
+                    ui.add(LoadingIndicator::new().size(24.0));
+                }
             });
         if (r.action == Some(1) || submitted) && can {
             match make(&d.name, d.preset, d.actor, out) {
-                Some(m) => d.made = Some(m),
-                None => mem.dialog = None,
+                Some(made) => {
+                    d.error = None;
+                    d.waiting = Some(Waiting { made, at: now });
+                }
+                None => d.error = Some("Не удалось создать токен".to_owned()),
             }
         } else if r.action.is_some() || r.dismissed || !open {
             mem.dialog = None;
@@ -573,6 +634,29 @@ mod tests {
         assert_eq!(local_host(&api), "192.168.0.157");
         api.address.clear();
         assert_eq!(local_host(&api), "127.0.0.1");
+    }
+
+    /// The secret shows only for a token the player kept; a refusal or no
+    /// answer in time is an error.
+    #[test]
+    fn a_token_is_shown_once_kept() {
+        let mut api = ApiView::default();
+        assert!(matches!(kept(&api, "a", 0.5), Kept::NotYet));
+        assert!(matches!(kept(&api, "a", KEEP_S + 1.0), Kept::No(_)));
+        api.token_failed = Some(("a".into(), "Не удалось сохранить настройки".into()));
+        assert!(matches!(kept(&api, "a", 0.5), Kept::No(ref why) if why == "Не удалось сохранить настройки"));
+        assert!(matches!(kept(&api, "b", 0.5), Kept::NotYet), "another token's failure");
+        api.tokens.push(ApiTokenView {
+            id: "b".into(),
+            name: "B".into(),
+            preset: ApiPreset::Full,
+            actor: ApiActor::Agent,
+            created_ms: 0,
+            last_used_ms: None,
+            revoked: false,
+            hash: String::new(),
+        });
+        assert!(matches!(kept(&api, "b", 0.5), Kept::Yes));
     }
 
     #[test]

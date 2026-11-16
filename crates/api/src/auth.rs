@@ -56,8 +56,9 @@ impl Right {
 }
 
 /// Whether a token of `preset` has `right`: «Управление» drives the player
-/// and reads, «Полный» does everything but the tokens and the devices (no
-/// route of this wave), «Только чтение» reads.
+/// and reads (the state, the queue, the library), but not the files
+/// themselves; «Полный» does everything (the tokens and the devices have no
+/// route in this wave); «Только чтение» reads.
 pub fn allows(preset: ApiPreset, right: Right) -> bool {
     match preset {
         ApiPreset::Full => true,
@@ -314,7 +315,11 @@ mod tests {
         for (m, p, r) in cases {
             assert_eq!(needed(m, p), r, "{m} {p}");
         }
-        // The assistant's token: everything the voice contract uses.
+        // The assistant's token: everything the voice contract uses, the
+        // library's reads too; the files need «Полный».
+        assert!(allows(ApiPreset::Control, needed(&get, "/v1/search")));
+        assert!(allows(ApiPreset::Control, needed(&get, "/v1/albums/x")));
+        assert!(!allows(ApiPreset::Control, needed(&get, "/v1/media/tracks/x/audio")));
         for (m, p, _) in cases.iter().filter(|c| !c.1.starts_with("/v1/media") && c.1 != "/v1/playlists") {
             assert!(allows(ApiPreset::Control, needed(m, p)), "{m} {p}");
         }
