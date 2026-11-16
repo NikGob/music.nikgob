@@ -1656,8 +1656,8 @@ impl Library {
     }
 }
 
-/// Takes a test database back before the mesh's and sync's migrations
-/// (34, 35): their triggers, tables and columns go, so older migrations
+/// Takes a test database back before the mesh's, sync's and replicas'
+/// migrations (34–37): their triggers, tables and columns go, so older migrations
 /// can run again on it.
 #[cfg(test)]
 pub(crate) fn rewind_before_mesh(conn: &Connection) {
@@ -1678,7 +1678,8 @@ pub(crate) fn rewind_before_mesh(conn: &Connection) {
          ALTER TABLE node DROP COLUMN profile; ALTER TABLE node DROP COLUMN addr;
          ALTER TABLE node DROP COLUMN version; ALTER TABLE node DROP COLUMN cert;
          ALTER TABLE node DROP COLUMN paired_at;
-         DELETE FROM meta WHERE key IN ('sync.triggers', 'sync.epoch')",
+         DELETE FROM meta WHERE key IN ('sync.triggers', 'sync.epoch');
+         DROP TABLE IF EXISTS master_trash; DROP TABLE IF EXISTS file_stamp;",
     )
     .unwrap();
 }
