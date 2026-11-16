@@ -27,6 +27,7 @@ mod media;
 mod mutate;
 mod outputs;
 mod play;
+mod replica;
 mod routes;
 mod state;
 mod stats;
@@ -427,6 +428,9 @@ fn v1_router(sh: Arc<Shared>, closing: Closing) -> Router {
         .route("/v1/sync/changes", get(sync::changes))
         .route("/v1/sync/apply", post(sync::apply))
         .route("/v1/sync/blob", get(sync::blob))
+        .route("/v1/replica/masters", get(replica::masters))
+        .route("/v1/replica/masters/{hash}", get(replica::master_file))
+        .route("/v1/replica/check", post(replica::check))
         .route_layer(axum::middleware::from_fn_with_state(sh.clone(), auth::guard))
         .layer(axum::Extension(closing))
         .with_state(sh)

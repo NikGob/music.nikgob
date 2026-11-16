@@ -199,10 +199,12 @@ fn blake3_of(path: &FsPath) -> std::io::Result<String> {
     params(
         ("id" = String, Path, description = "id песни"),
         ("hash" = Option<String>, Query, description = "1: BLAKE3 файла в заголовке x-nikgob-blake3"),
+        ("profile" = Option<String>, Query, description = "orig: файл как есть (другие форматы позже)"),
     ),
     responses(
         (status = 200, description = "Файл как есть"),
         (status = 206, description = "Часть файла по Range"),
+        (status = 400, body = crate::error::ErrorBody),
         (status = 404, body = crate::error::ErrorBody),
         (status = 416, description = "Range за концом файла"),
     ),
@@ -211,6 +213,14 @@ fn blake3_of(path: &FsPath) -> std::io::Result<String> {
 pub async fn audio(State(sh): State<Arc<Shared>>, Path(id): Path<String>, RawQuery(raw): RawQuery, headers: HeaderMap) -> Result<Response, ApiError> {
     let id: TrackId = id.parse().map_err(|_| ApiError::bad_request("Неверный id"))?;
     let hash = query_value(raw.as_deref(), "hash").is_some_and(|v| v == "1");
+    // The form the file is asked in: the original only, for now (the
+    // phone's Opus and MP3 come with the phone).
+    if let Some(p) = query_value(raw.as_deref(), "profile") {
+        match nikgob_view::MeshFormat::parse(&p) {
+            Some(f) if f.ready() => {}
+            _ => return Err(ApiError::bad_request("Такого формата пока нет")),
+        }
+    }
     let shared = sh.clone();
     let found = blocking(move || {
         let Some((file, path)) = best_file(&shared, id)? else {
