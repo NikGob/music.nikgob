@@ -168,6 +168,7 @@ fn a_remote_sends_its_commands_and_mirrors_the_target() {
         assert!((st.player.volume - 0.4).abs() < 1e-6);
         let target = st.target.as_ref().unwrap();
         assert_eq!((target.link, target.kind, target.name.as_str()), (RemoteLink::Live, MeshKind::Pi, "Raspberry Pi"));
+        assert_eq!(target.how, nikgob_view::RemoteHow::Attached, "nothing moved: back here is a detach");
         assert!(st.player.position_now() >= Duration::from_secs(10));
     }
 
@@ -246,6 +247,26 @@ fn a_transfer_moves_through_the_service_and_parks_this_zone() {
     rt.send(Command::OutputUndoTransfer);
     std::thread::sleep(Duration::from_millis(100));
     assert!(!jobs.lock().unwrap().iter().any(|j| matches!(j, ConnectJob::Undo { .. })));
+}
+
+/// A transfer that took makes the device the target as reached by a
+/// transfer (going back brings its music here, not a detach).
+#[test]
+fn a_transfer_says_how_the_target_was_reached() {
+    let (lib, t) = library(2);
+    let rt = Runtime::start(config(lib), Box::new(NullPlayback), Arc::new(|| {}));
+    let h = rt.handle();
+    let jobs = service(&h);
+    device(&h, &rt, "pi-node", "Pi");
+    rt.send(Command::PlayTracks { tracks: t.clone(), start: 0, context: "библиотеки".into() });
+    wait("playing here", || rt.state().player.status == Status::Playing);
+    rt.send(Command::OutputTransfer { node_id: Some("pi-node".into()) });
+    wait("the move asked", || move_of(&jobs, "pi-node").is_some());
+    let seq = move_of(&jobs, "pi-node").unwrap();
+    let loaded = ZoneLoaded { previous: None, skipped: Vec::new(), loaded: 2 };
+    h.send(Command::ConnectReport(Box::new(ConnectReport::Moved { seq, to: Some("pi-node".into()), result: Ok(loaded) })));
+    wait("the target", || rt.state().target.is_some());
+    assert_eq!(rt.state().target.as_ref().map(|t| t.how), Some(nikgob_view::RemoteHow::Transferred));
 }
 
 /// A load that did not take: the source stays paused, the toast offers

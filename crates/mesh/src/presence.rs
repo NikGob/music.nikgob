@@ -155,6 +155,7 @@ mod tests {
             link: nikgob_view::RemoteLink::Live,
             volume: 1.0,
             muted: false,
+            how: nikgob_view::RemoteHow::Transferred,
         });
         assert_eq!(of_view(&st, "PC", MeshKind::Pc, "0.0.5", 1).playing, None, "nothing parked");
         let mut own = st.player.current.clone().unwrap();
