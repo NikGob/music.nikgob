@@ -2,20 +2,28 @@
 //! jobs here ([`ConnectJob`]) and gets what came of them back
 //! ([`Command::ConnectReport`]).
 //!
+//! - Sessions: each target is a session with a generation; work sent for
+//!   one (forwards, a pause, a transfer, an undo) is dropped once another
+//!   began, before it touches the network, and a forward on its way is
+//!   cut off.
+//! - One at a time: forwards, transfers, undos and «Продолжить здесь» run
+//!   in order from one queue, each step with a deadline for the whole
+//!   answer.
+//! - A transfer pauses the source and waits for its answer (none: nothing
+//!   moves), then loads the destination; a load not answered is checked
+//!   against what the destination plays. Nothing is ever started again to
+//!   make up for a failure: the source stays paused.
 //! - Following a zone: its event stream (`GET /v1/events?zone=1`) through
 //!   the tunnel, each state reported with when it was (its arrival less
 //!   half the round trip, measured by a light request every half second
 //!   that also tells whether the device still answers: «буферизация»
 //!   after 1.5 s of silence, «нет связи» after 3 s, live again as soon as
-//!   it answers).
-//! - Forwarding: the commands of a remote, in order, as few requests as
-//!   they come (`POST /v1/player/remote`; volume drags folded).
-//! - Transfers and their undo: a zone's snapshot and its load, this
-//!   device's through its API in this process.
+//!   it answers), and its whole snapshot fetched when its queue changes.
 //! - Files: a track this device has no file of, from the device that sent
 //!   the queue, into `<data dir>/cache/remote/<blake3>.<ext>` (resumed
-//!   with Range, checked by its hash, the least recently used dropped
-//!   past 4 GB). Never into the library's folders.
+//!   with Range, checked by its hash, a kept copy checked again before it
+//!   is used, the least recently used dropped past 4 GB but never one in
+//!   use). Never into the library's folders.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -27,25 +35,25 @@ use futures_util::StreamExt as _;
 use nikgob_api::{Caller, LocalApi};
 use nikgob_core::model::TrackId;
 use nikgob_runtime::RuntimeHandle;
-use nikgob_view::{ApiActor, ApiPreset, Command, ConnectJob, ConnectReport, RemoteCommand, RemoteLink, ZoneLoaded, ZoneSnapshot, ZoneState};
+use nikgob_view::{
+    ApiActor, ApiPreset, Command, ConnectFail, ConnectJob, ConnectReport, RemoteCommand, RemoteLink, ZoneLoaded, ZoneSnapshot, ZoneState,
+};
 use parking_lot::Mutex;
 use tokio::io::AsyncWriteExt as _;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::{MeshClient, MeshError};
 
 /// Jobs waiting for the service (the runtime never waits on it).
 const JOBS: usize = 256;
-/// Forwarded commands waiting to be sent.
-const RUNS: usize = 256;
+/// Operations waiting for the one that runs.
+const OPS: usize = 256;
 /// At most this many commands in one forward (the API's own limit).
 const REMOTE_MAX: usize = 64;
-/// A zone's event stream is open within this.
+/// A zone's event stream is open within this (its body then streams).
 const OPEN_WAIT: Duration = Duration::from_secs(6);
 /// The light request that tells the device still answers, this often…
 const PING_EVERY: Duration = Duration::from_millis(500);
-/// …each given this long.
-const PING_WAIT: Duration = Duration::from_secs(6);
 /// How often the link's state is looked at.
 const CHECK_EVERY: Duration = Duration::from_millis(250);
 /// A broken event stream is opened again after this, doubling up to
@@ -56,12 +64,13 @@ const RECONNECT_MAX: Duration = Duration::from_secs(2);
 const RECONNECTING_AFTER: Duration = Duration::from_millis(1500);
 /// …and this long: no link.
 const LOST_AFTER: Duration = Duration::from_secs(3);
-/// A forward is answered within this.
-const RUN_WAIT: Duration = Duration::from_secs(6);
-/// A snapshot is answered within this.
-const SNAPSHOT_WAIT: Duration = Duration::from_secs(8);
-/// A load is answered within this (the API gives the player 10 s).
+/// A small request (a forward, a pause, a snapshot, the ping) is answered,
+/// all of it, within this…
+const SMALL_WAIT: Duration = Duration::from_secs(5);
+/// …and a load within this (the API gives the player 10 s).
 const LOAD_WAIT: Duration = Duration::from_secs(15);
+/// A followed zone's snapshot is fetched at most this often.
+const SNAPSHOT_GAP: Duration = Duration::from_secs(1);
 /// A file's answer begins within this…
 const PULL_HEAD_WAIT: Duration = Duration::from_secs(10);
 /// …and never stops longer than this.
@@ -78,6 +87,9 @@ const PART_STALE: Duration = Duration::from_secs(3600);
 const JSON_MAX: usize = 16 << 20;
 /// An event stream's line (or event) longer than this breaks it.
 const SSE_MAX: usize = 4 << 20;
+/// The generation of a session a transfer or an undo ended (until the
+/// runtime begins the next one).
+const ENDED: u64 = u64::MAX;
 
 /// Aborts its task when dropped.
 struct Abort(tokio::task::JoinHandle<()>);
@@ -97,22 +109,38 @@ struct Ctx {
     runtime: RuntimeHandle,
     /// `<data dir>/cache/remote`.
     cache: PathBuf,
+    /// The session now.
+    live: Arc<watch::Sender<u64>>,
+    /// The cached files in use (the runtime's last word): never evicted.
+    keep: Arc<Mutex<Vec<PathBuf>>>,
+    /// One eviction at a time.
+    evicting: Arc<Mutex<()>>,
 }
 
 /// Starts the service on the mesh's runtime `rt`; the runtime hands it its
 /// jobs from now on ([`RuntimeHandle::link_connect`]).
 pub(crate) fn start(rt: &tokio::runtime::Handle, client: MeshClient, api: Option<LocalApi>, runtime: RuntimeHandle, data_dir: &Path) {
     let (tx, rx) = mpsc::channel::<ConnectJob>(JOBS);
-    runtime.link_connect(move |job| {
-        if tx.try_send(job).is_err() {
+    runtime.link_connect(move |job| match tx.try_send(job) {
+        Ok(()) => true,
+        Err(_) => {
             log::warn!("connect: a job dropped (the mesh is busy or stopped)");
+            false
         }
     });
-    let ctx = Ctx { client, api, runtime, cache: data_dir.join("cache").join("remote") };
+    let ctx = Ctx {
+        client,
+        api,
+        runtime,
+        cache: data_dir.join("cache").join("remote"),
+        live: Arc::new(watch::channel(0).0),
+        keep: Arc::default(),
+        evicting: Arc::default(),
+    };
     rt.spawn(dispatch(ctx, rx));
 }
 
-/// Russian words for a request to a device that failed, for a toast.
+/// Russian words for a request to a device that failed.
 fn why(e: &MeshError) -> String {
     log::debug!("connect: {e}");
     match e {
@@ -138,8 +166,25 @@ impl Ctx {
         self.runtime.send(Command::ConnectReport(Box::new(r)));
     }
 
+    /// The session now.
+    fn session(&self) -> u64 {
+        *self.live.borrow()
+    }
+
+    /// Session `gen` ended (by a transfer or an undo it made): what was
+    /// sent for it and still waits is dropped.
+    fn end(&self, gen: u64) {
+        self.live.send_if_modified(|g| {
+            let same = *g == gen;
+            if same {
+                *g = ENDED;
+            }
+            same
+        });
+    }
+
     /// `req` to the API of `node` (None: this device's, its caller naming
-    /// `peer`, the device the files come from), answered within `wait`.
+    /// `peer`, the device the files come from); its head within `wait`.
     async fn call(&self, node: Option<&str>, peer: Option<&str>, req: http::Request<Body>, wait: Duration) -> Result<http::Response<Body>, String> {
         match node {
             Some(n) => match tokio::time::timeout(wait, self.client.request(n, req)).await {
@@ -155,23 +200,34 @@ impl Ctx {
         }
     }
 
-    /// [`Self::call`] whose answer is JSON; an error answer is its message.
+    /// [`Self::call`] whose answer is JSON, all of it within `wait`; an
+    /// error answer is its message.
     async fn json(&self, node: Option<&str>, peer: Option<&str>, req: http::Request<Body>, wait: Duration) -> Result<serde_json::Value, String> {
-        let r = self.call(node, peer, req, wait).await?;
-        let status = r.status();
-        let bytes = axum::body::to_bytes(r.into_body(), JSON_MAX).await.map_err(|e| e.to_string())?;
-        if !status.is_success() {
-            let message = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned));
-            return Err(message.unwrap_or_else(|| status.to_string()));
-        }
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        let whole = async {
+            let r = self.call(node, peer, req, wait).await?;
+            let status = r.status();
+            let bytes = axum::body::to_bytes(r.into_body(), JSON_MAX).await.map_err(|e| e.to_string())?;
+            if !status.is_success() {
+                let message = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned));
+                return Err(message.unwrap_or_else(|| status.to_string()));
+            }
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        };
+        tokio::time::timeout(wait, whole).await.unwrap_or_else(|_| Err("устройство не ответило".to_owned()))
     }
 
-    /// Runs `commands` on `node`'s zone.
-    async fn run(&self, node: &str, commands: &[RemoteCommand]) -> Result<(), String> {
+    /// Runs `commands` on `node`'s zone (None: this device's).
+    async fn run(&self, node: Option<&str>, commands: &[RemoteCommand]) -> Result<(), String> {
         let body = serde_json::to_vec(&serde_json::json!({ "commands": commands })).map_err(|e| e.to_string())?;
         let req = request(http::Method::POST, "/v1/player/remote", Some(body))?;
-        self.json(Some(node), None, req, RUN_WAIT).await.map(|_| ())
+        self.json(node, None, req, SMALL_WAIT).await.map(|_| ())
+    }
+
+    /// `node`'s zone as a snapshot (None: this device's).
+    async fn snapshot(&self, node: Option<&str>) -> Result<ZoneSnapshot, String> {
+        let req = request(http::Method::GET, "/v1/player/snapshot", None)?;
+        let v = self.json(node, None, req, SMALL_WAIT).await?;
+        serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
     /// Loads `snapshot` into `node`'s zone (None: this device's, its files
@@ -184,40 +240,47 @@ impl Ctx {
     }
 }
 
+/// What runs one at a time, in order.
+enum Op {
+    Run { gen: u64, node: String, commands: Vec<RemoteCommand> },
+    Pause { gen: u64, node: String, until: Instant },
+    Move { seq: u64, gen: u64, from: Option<String>, to: Option<String> },
+    Undo { seq: u64, gen: u64, node: String, snapshot: Box<ZoneSnapshot> },
+    Here { seq: u64, gen: u64, snapshot: Box<ZoneSnapshot> },
+}
+
+impl Op {
+    /// The report of an operation that will not run.
+    fn not_run(self, why: ConnectFail) -> Option<ConnectReport> {
+        match self {
+            Op::Move { seq, to, .. } => Some(ConnectReport::Moved { seq, to, result: Err(why) }),
+            Op::Undo { seq, node, .. } => Some(ConnectReport::Undone { seq, node, result: Err(why) }),
+            Op::Here { seq, .. } => Some(ConnectReport::Here { seq, result: Err(why) }),
+            Op::Run { .. } | Op::Pause { .. } => None,
+        }
+    }
+}
+
 async fn dispatch(ctx: Ctx, mut jobs: mpsc::Receiver<ConnectJob>) {
-    let (run_tx, run_rx) = mpsc::channel::<(String, Vec<RemoteCommand>)>(RUNS);
-    let _runner = Abort(tokio::spawn(runner(ctx.clone(), run_rx)));
+    let (op_tx, op_rx) = mpsc::channel::<Op>(OPS);
+    let _runner = Abort(tokio::spawn(runner(ctx.clone(), op_rx)));
     // Dropping it stops the zone it followed.
     let mut _follower: Option<Abort> = None;
     let pulls = Arc::new(Semaphore::new(PULLS_AT_ONCE));
-    let pulling: Arc<Mutex<HashSet<TrackId>>> = Arc::default();
+    let pulling: Arc<Mutex<HashSet<(TrackId, String, u64)>>> = Arc::default();
     while let Some(job) = jobs.recv().await {
-        match job {
-            // A new stream every time: its first event is the state now,
-            // which the runtime waits for.
-            ConnectJob::Follow { node } => _follower = Some(Abort(tokio::spawn(follow(ctx.clone(), node)))),
-            ConnectJob::Unfollow => _follower = None,
-            ConnectJob::Run { node, commands } => {
-                if run_tx.try_send((node, commands)).is_err() {
-                    log::warn!("connect: commands dropped (too many waiting)");
-                }
+        let op = match job {
+            ConnectJob::Session { gen, follow } => {
+                ctx.live.send_replace(gen);
+                // A new stream every time: its first event is the state
+                // now, which the runtime waits for.
+                _follower = follow.map(|node| Abort(tokio::spawn(follow_zone(ctx.clone(), node, gen))));
+                continue;
             }
-            ConnectJob::Move { seq, from, to } => {
-                let c = ctx.clone();
-                tokio::spawn(async move {
-                    let result = transfer(&c, from.as_deref(), to.as_deref()).await;
-                    c.report(ConnectReport::Moved { seq, to, result });
-                });
-            }
-            ConnectJob::Load { seq, node, snapshot } => {
-                let c = ctx.clone();
-                tokio::spawn(async move {
-                    let result = c.load(Some(&node), None, &snapshot).await;
-                    c.report(ConnectReport::Loaded { seq, node, result });
-                });
-            }
-            ConnectJob::Pull { track, from } => {
-                if !pulling.lock().insert(track) {
+            ConnectJob::Pull { track, from, load, keep } => {
+                *ctx.keep.lock() = keep;
+                let key = (track, from.clone(), load);
+                if !pulling.lock().insert(key.clone()) {
                     continue;
                 }
                 let (c, pulls, pulling) = (ctx.clone(), pulls.clone(), pulling.clone());
@@ -226,39 +289,157 @@ async fn dispatch(ctx: Ctx, mut jobs: mpsc::Receiver<ConnectJob>) {
                         Ok(_permit) => pull(&c, track, &from).await,
                         Err(_) => Err("Межсеть выключена".to_owned()),
                     };
-                    pulling.lock().remove(&track);
+                    pulling.lock().remove(&key);
                     if let Err(e) = &result {
                         log::info!("connect: the file of {track} did not come: {e}");
                     }
-                    c.report(ConnectReport::Pulled { track, result });
+                    c.report(ConnectReport::Pulled { track, from, load, result });
                 });
+                continue;
+            }
+            ConnectJob::Run { gen, node, commands } => Op::Run { gen, node, commands },
+            ConnectJob::Pause { gen, node, until } => Op::Pause { gen, node, until },
+            ConnectJob::Move { seq, gen, from, to } => Op::Move { seq, gen, from, to },
+            ConnectJob::Undo { seq, gen, node, snapshot } => Op::Undo { seq, gen, node, snapshot },
+            ConnectJob::Here { seq, gen, snapshot } => Op::Here { seq, gen, snapshot },
+        };
+        if let Err(e) = op_tx.try_send(op) {
+            log::warn!("connect: too much waiting, an operation dropped");
+            let op = match e {
+                mpsc::error::TrySendError::Full(op) | mpsc::error::TrySendError::Closed(op) => op,
+            };
+            if let Some(r) = op.not_run(ConnectFail::NothingDone("слишком много дел сразу".to_owned())) {
+                ctx.report(r);
             }
         }
     }
 }
 
+/// The operations, one at a time; those of an ended session dropped.
+async fn runner(ctx: Ctx, mut rx: mpsc::Receiver<Op>) {
+    let mut next: Option<Op> = None;
+    loop {
+        let op = match next.take() {
+            Some(op) => op,
+            None => match rx.recv().await {
+                Some(op) => op,
+                None => return,
+            },
+        };
+        let gen_now = ctx.session();
+        match op {
+            Op::Run { gen, node, mut commands } => {
+                // What waits of the same session and device goes along.
+                while commands.len() < REMOTE_MAX {
+                    match rx.try_recv() {
+                        Ok(Op::Run { gen: g, node: n, commands: more }) if g == gen && n == node => commands.extend(more),
+                        Ok(other) => {
+                            next = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if gen != gen_now {
+                    continue;
+                }
+                let mut ended = ctx.live.subscribe();
+                for chunk in collapse(commands).chunks(REMOTE_MAX) {
+                    tokio::select! {
+                        r = ctx.run(Some(&node), chunk) => {
+                            if let Err(why) = r {
+                                ctx.report(ConnectReport::RunFailed { gen, node: node.clone(), why });
+                                break;
+                            }
+                        }
+                        () = async {
+                            let _ = ended.wait_for(|g| *g != gen).await;
+                        } => break,
+                    }
+                }
+            }
+            Op::Pause { gen, node, until } => {
+                if gen != gen_now {
+                    continue;
+                }
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    continue;
+                }
+                match tokio::time::timeout(left, ctx.run(Some(&node), &[RemoteCommand::Pause])).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => log::info!("connect: the device left did not pause: {e}"),
+                    Err(_) => log::info!("connect: the device left did not pause in time"),
+                }
+            }
+            Op::Move { seq, gen, from, to } => {
+                let result = if gen != gen_now { Err(ConnectFail::Stale) } else { transfer(&ctx, from.as_deref(), to.as_deref()).await };
+                if result.is_ok() {
+                    ctx.end(gen);
+                }
+                ctx.report(ConnectReport::Moved { seq, to, result });
+            }
+            Op::Undo { seq, gen, node, snapshot } => {
+                let result = if gen != gen_now { Err(ConnectFail::Stale) } else { undo(&ctx, &node, &snapshot).await };
+                if result.is_ok() {
+                    ctx.end(gen);
+                }
+                ctx.report(ConnectReport::Undone { seq, node, result });
+            }
+            Op::Here { seq, gen, snapshot } => {
+                let result = if gen != gen_now {
+                    Err(ConnectFail::Stale)
+                } else {
+                    // Only what this device has a file of: the device left
+                    // may not answer.
+                    ctx.load(None, None, &snapshot).await.map_err(ConnectFail::NotLoaded)
+                };
+                ctx.report(ConnectReport::Here { seq, result });
+            }
+        }
+    }
+}
+
+/// Whether `dest` (a zone's snapshot) plays what `sent` asked of it.
+pub(crate) fn plays_what_was_sent(dest: &ZoneSnapshot, sent: &ZoneSnapshot) -> bool {
+    dest.current().is_some() && dest.current() == sent.current() && dest.paused == sent.paused
+}
+
 /// Moves `from`'s music (None: this device's) to `to`'s zone (None:
-/// here). A remote zone it leaves is paused first (no double sound), and
-/// plays again when the other could not take it.
-async fn transfer(ctx: &Ctx, from: Option<&str>, to: Option<&str>) -> Result<ZoneLoaded, String> {
-    let req = request(http::Method::GET, "/v1/player/snapshot", None)?;
-    let snapshot: ZoneSnapshot = serde_json::from_value(ctx.json(from, to, req, SNAPSHOT_WAIT).await?).map_err(|e| e.to_string())?;
-    let was_playing = !snapshot.paused;
-    if let Some(f) = from
-        && was_playing
-        && let Err(e) = ctx.run(f, &[RemoteCommand::Pause]).await
-    {
-        log::info!("connect: the device the music leaves did not pause: {e}");
+/// here): the source paused (its answer awaited), then the load; a load
+/// not answered is checked against what the destination plays. Nothing is
+/// started again: a failure after the pause leaves the source paused.
+async fn transfer(ctx: &Ctx, from: Option<&str>, to: Option<&str>) -> Result<ZoneLoaded, ConnectFail> {
+    let mut snapshot = ctx.snapshot(from).await.map_err(ConnectFail::NothingDone)?;
+    if !snapshot.paused {
+        let asked = Instant::now();
+        ctx.run(from, &[RemoteCommand::Pause]).await.map_err(ConnectFail::NothingDone)?;
+        // It played on while the pause went: the destination starts there.
+        snapshot.position_ms = snapshot.position_ms.saturating_add(u64::try_from(asked.elapsed().as_millis()).unwrap_or(0));
     }
-    let loaded = ctx.load(to, from, &snapshot).await;
-    if loaded.is_err()
-        && was_playing
-        && let Some(f) = from
-        && let Err(e) = ctx.run(f, &[RemoteCommand::Play]).await
-    {
-        log::info!("connect: the device the music stayed on did not play again: {e}");
+    match ctx.load(to, from, &snapshot).await {
+        Ok(loaded) => Ok(loaded),
+        Err(e) => match ctx.snapshot(to).await {
+            // It took it after all (the answer was lost).
+            Ok(dest) if plays_what_was_sent(&dest, &snapshot) => {
+                log::info!("connect: the load's answer did not come, but the device plays it");
+                Ok(ZoneLoaded { previous: None, skipped: Vec::new(), loaded: dest.tracks.len() })
+            }
+            _ => Err(ConnectFail::NotLoaded(e)),
+        },
     }
-    loaded
+}
+
+/// The undo of a transfer: `snapshot` back into `node`'s zone (checked
+/// against what it plays when the answer does not come).
+async fn undo(ctx: &Ctx, node: &str, snapshot: &ZoneSnapshot) -> Result<ZoneLoaded, ConnectFail> {
+    match ctx.load(Some(node), None, snapshot).await {
+        Ok(loaded) => Ok(loaded),
+        Err(e) => match ctx.snapshot(Some(node)).await {
+            Ok(dest) if plays_what_was_sent(&dest, snapshot) => Ok(ZoneLoaded { previous: None, skipped: Vec::new(), loaded: dest.tracks.len() }),
+            _ => Err(ConnectFail::NotLoaded(e)),
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -279,40 +460,6 @@ pub(crate) fn collapse(commands: Vec<RemoteCommand>) -> Vec<RemoteCommand> {
         out.push(c);
     }
     out
-}
-
-/// The commands waiting, in order, one run per device in a row (each
-/// folded).
-pub(crate) fn group(batch: Vec<(String, Vec<RemoteCommand>)>) -> Vec<(String, Vec<RemoteCommand>)> {
-    let mut out: Vec<(String, Vec<RemoteCommand>)> = Vec::new();
-    for (node, commands) in batch {
-        match out.last_mut() {
-            Some((last, list)) if *last == node => list.extend(commands),
-            _ => out.push((node, commands)),
-        }
-    }
-    out.into_iter().map(|(node, list)| (node, collapse(list))).collect()
-}
-
-/// Sends the forwarded commands in order: what came while a request was
-/// on its way goes in the next one.
-async fn runner(ctx: Ctx, mut rx: mpsc::Receiver<(String, Vec<RemoteCommand>)>) {
-    while let Some(first) = rx.recv().await {
-        let mut batch = vec![first];
-        while batch.len() < RUNS
-            && let Ok(more) = rx.try_recv()
-        {
-            batch.push(more);
-        }
-        for (node, commands) in group(batch) {
-            for chunk in commands.chunks(REMOTE_MAX) {
-                if let Err(why) = ctx.run(&node, chunk).await {
-                    ctx.report(ConnectReport::RunFailed { node: node.clone(), why });
-                    break;
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -427,21 +574,23 @@ async fn ping(ctx: Ctx, node: String, tx: mpsc::Sender<Duration>) {
         every.tick().await;
         let Ok(req) = request(http::Method::GET, "/v1/token", None) else { return };
         let t = Instant::now();
-        if let Ok(r) = ctx.call(Some(&node), None, req, PING_WAIT).await
-            && r.status().is_success()
-        {
-            let rtt = t.elapsed();
-            drop(r);
-            if tx.send(rtt).await.is_err() {
-                return;
-            }
+        if ctx.json(Some(&node), None, req, SMALL_WAIT).await.is_ok() && tx.send(t.elapsed()).await.is_err() {
+            return;
         }
     }
 }
 
 type Opening = std::pin::Pin<Box<dyn std::future::Future<Output = Result<http::Response<Body>, String>> + Send>>;
+type Fetching = std::pin::Pin<Box<dyn std::future::Future<Output = (String, Result<ZoneSnapshot, String>)> + Send>>;
 
 async fn opened(f: &mut Option<Opening>) -> Result<http::Response<Body>, String> {
+    match f {
+        Some(f) => f.await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn fetched(f: &mut Option<Fetching>) -> (String, Result<ZoneSnapshot, String>) {
     match f {
         Some(f) => f.await,
         None => std::future::pending().await,
@@ -455,9 +604,54 @@ async fn chunk(s: &mut Option<axum::body::BodyDataStream>) -> Option<Result<axum
     }
 }
 
-/// Follows `node`'s zone until aborted: its states and its link to the
-/// runtime. It never sends the device anything but reads.
-async fn follow(ctx: Ctx, node: String) {
+/// When a followed zone's snapshot is to be fetched: its queue changed
+/// since the last one fetched, none on its way, the last at least
+/// [`SNAPSHOT_GAP`] ago.
+#[derive(Default)]
+pub(crate) struct SnapshotWant {
+    fetched: Option<String>,
+    wanted: Option<String>,
+    on_way: bool,
+    last: Option<Instant>,
+}
+
+impl SnapshotWant {
+    /// The zone's queue is `key` now.
+    pub(crate) fn seen(&mut self, key: String) {
+        if self.fetched.as_deref() != Some(key.as_str()) {
+            self.wanted = Some(key);
+        }
+    }
+
+    /// The key to fetch now, if one is.
+    pub(crate) fn start(&mut self, now: Instant) -> Option<String> {
+        if self.on_way || self.last.is_some_and(|l| now.saturating_duration_since(l) < SNAPSHOT_GAP) {
+            return None;
+        }
+        let key = self.wanted.take()?;
+        self.on_way = true;
+        self.last = Some(now);
+        Some(key)
+    }
+
+    /// The fetch of `key` ended (`ok`: its snapshot came).
+    pub(crate) fn done(&mut self, key: String, ok: bool) {
+        self.on_way = false;
+        if ok {
+            if self.wanted.as_deref() == Some(key.as_str()) {
+                self.wanted = None;
+            }
+            self.fetched = Some(key);
+        } else if self.wanted.is_none() {
+            self.wanted = Some(key);
+        }
+    }
+}
+
+/// Follows `node`'s zone (session `gen`) until aborted: its states, its
+/// snapshot when its queue changes, and its link, to the runtime. It
+/// never sends the device anything but reads.
+async fn follow_zone(ctx: Ctx, node: String, gen: u64) {
     let (rtt_tx, mut rtt_rx) = mpsc::channel::<Duration>(8);
     let _pinger = Abort(tokio::spawn(ping(ctx.clone(), node.clone(), rtt_tx)));
     let mut link = Link::new(Instant::now());
@@ -469,12 +663,23 @@ async fn follow(ctx: Ctx, node: String) {
     let mut sse = Sse::default();
     let mut backoff = RECONNECT_MIN;
     let mut retry_at = tokio::time::Instant::now();
+    let mut want = SnapshotWant::default();
+    let mut fetching: Option<Fetching> = None;
     loop {
         if stream.is_none() && opening.is_none() && tokio::time::Instant::now() >= retry_at {
             let (c, n) = (ctx.clone(), node.clone());
             opening = Some(Box::pin(async move {
                 let req = request(http::Method::GET, "/v1/events?zone=1", None)?;
                 c.call(Some(&n), None, req, OPEN_WAIT).await
+            }));
+        }
+        if fetching.is_none()
+            && let Some(key) = want.start(Instant::now())
+        {
+            let (c, n) = (ctx.clone(), node.clone());
+            fetching = Some(Box::pin(async move {
+                let r = c.snapshot(Some(&n)).await;
+                (key, r)
             }));
         }
         tokio::select! {
@@ -493,6 +698,19 @@ async fn follow(ctx: Ctx, node: String) {
                     }
                 }
             }
+            (key, r) = fetched(&mut fetching) => {
+                fetching = None;
+                match r {
+                    Ok(snapshot) => {
+                        want.done(key, true);
+                        ctx.report(ConnectReport::Snapshot { gen, node: node.clone(), snapshot: Box::new(snapshot) });
+                    }
+                    Err(e) => {
+                        log::debug!("connect: the zone's snapshot did not come: {e}");
+                        want.done(key, false);
+                    }
+                }
+            }
             c = chunk(&mut stream) => match c {
                 Some(Ok(bytes)) => match sse.push(&bytes) {
                     Some(events) => {
@@ -505,9 +723,10 @@ async fn follow(ctx: Ctx, node: String) {
                             }
                             match serde_json::from_str::<ZoneState>(&data) {
                                 Ok(state) => {
+                                    want.seen(state.queue_key());
                                     let half = rtt.unwrap_or_default() / 2;
                                     let at = Instant::now().checked_sub(half).unwrap_or_else(Instant::now);
-                                    ctx.report(ConnectReport::State { node: node.clone(), state: Box::new(state), at });
+                                    ctx.report(ConnectReport::State { gen, node: node.clone(), state: Box::new(state), at });
                                 }
                                 Err(e) => log::debug!("connect: a zone event not understood: {e}"),
                             }
@@ -539,7 +758,7 @@ async fn follow(ctx: Ctx, node: String) {
             _ = check.tick() => {}
         }
         if let Some(l) = link.check(Instant::now()) {
-            ctx.report(ConnectReport::Link { node: node.clone(), link: l });
+            ctx.report(ConnectReport::Link { gen, node: node.clone(), link: l });
         }
     }
 }
@@ -564,9 +783,18 @@ fn header<'a>(r: &'a http::Response<Body>, name: &str) -> Option<&'a str> {
     r.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
+/// Whether a `Content-Range` (`bytes a-b/n`) begins at `offset`.
+pub(crate) fn range_starts_at(content_range: Option<&str>, offset: u64) -> bool {
+    content_range
+        .and_then(|v| v.trim().strip_prefix("bytes "))
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(a, _)| a.trim().parse::<u64>().ok())
+        == Some(offset)
+}
+
 /// The files to delete so `files` (path, size, last used) hold at most
-/// `cap` bytes: the least recently used first, never `keep`.
-pub(crate) fn evict_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, cap: u64, keep: &Path) -> Vec<PathBuf> {
+/// `cap` bytes: the least recently used first, never one of `keep`.
+pub(crate) fn evict_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, cap: u64, keep: &[PathBuf]) -> Vec<PathBuf> {
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     files.sort_by_key(|f| f.2);
     let mut out = Vec::new();
@@ -574,7 +802,7 @@ pub(crate) fn evict_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, cap: u64, k
         if total <= cap {
             break;
         }
-        if path == keep {
+        if keep.contains(&path) {
             continue;
         }
         total = total.saturating_sub(size);
@@ -583,9 +811,9 @@ pub(crate) fn evict_plan(mut files: Vec<(PathBuf, u64, SystemTime)>, cap: u64, k
     out
 }
 
-/// Keeps the cache at `dir` within [`CACHE_MAX`] (`keep` stays): its
-/// files, and parts nobody writes any more.
-fn evict(dir: &Path, keep: &Path) {
+/// Keeps the cache at `dir` within [`CACHE_MAX`]: its files, and parts
+/// nobody writes any more; `keep` (in use, just fetched) stay.
+fn evict(dir: &Path, keep: &[PathBuf]) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let now = SystemTime::now();
     let mut files = Vec::new();
@@ -609,7 +837,6 @@ fn evict(dir: &Path, keep: &Path) {
                     let _ = std::fs::remove_file(path.with_extension("meta"));
                 }
             }
-            // In use (playing, on Windows): next time.
             Err(e) => log::debug!("connect: {} stays in the cache: {e}", path.display()),
         }
     }
@@ -627,6 +854,26 @@ fn blake3_of(path: &Path) -> std::io::Result<String> {
     let mut h = blake3::Hasher::new();
     h.update_reader(std::fs::File::open(path)?)?;
     Ok(h.finalize().to_hex().to_string())
+}
+
+/// A copy kept as `done` that still is `hash` (marked used); one that is
+/// not is deleted.
+pub(crate) async fn reuse(done: &Path, hash: &str) -> bool {
+    let (d, h) = (done.to_owned(), hash.to_owned());
+    tokio::task::spawn_blocking(move || match blake3_of(&d) {
+        Ok(sum) if sum == h => {
+            touch(&d);
+            true
+        }
+        Ok(_) => {
+            log::warn!("connect: {} changed in the cache: fetched again", d.display());
+            let _ = std::fs::remove_file(&d);
+            false
+        }
+        Err(_) => false,
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Writes `resp`'s body to `part` (after its first `offset` bytes, or over
@@ -681,7 +928,7 @@ pub(crate) async fn finish(part: &Path, hash: &str, done: &Path) -> Result<(), S
 }
 
 /// `track`'s file from device `from` into the cache (or the copy kept
-/// there); its path.
+/// there, checked); its path.
 async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> {
     let dir = ctx.cache.clone();
     tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("кэш: {e}"))?;
@@ -706,8 +953,11 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         if status == http::StatusCode::NOT_FOUND {
             return Err("на том устройстве нет файла этой песни".to_owned());
         }
-        if status == http::StatusCode::RANGE_NOT_SATISFIABLE {
-            // The part is no part of the file there: from the start.
+        // The part is no part of the file there, or the answer is not the
+        // part asked for: from the start.
+        let wrong_part = status == http::StatusCode::PARTIAL_CONTENT && !range_starts_at(header(&resp, "content-range"), offset);
+        if status == http::StatusCode::RANGE_NOT_SATISFIABLE || wrong_part {
+            drop(resp);
             let _ = tokio::fs::remove_file(&part).await;
             (offset, expected) = (0, None);
             continue;
@@ -718,19 +968,15 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         let hash = header(&resp, nikgob_api::HASH_HEADER).and_then(clean_hash).ok_or_else(|| "тот плеер не сказал хэш файла".to_owned())?;
         let ext = clean_ext(header(&resp, nikgob_api::EXT_HEADER).unwrap_or(""));
         let done = dir.join(format!("{hash}.{ext}"));
-        if tokio::fs::try_exists(&done).await.unwrap_or(false) {
+        if tokio::fs::try_exists(&done).await.unwrap_or(false) && reuse(&done, &hash).await {
             drop(resp);
-            let (d, p) = (done.clone(), part.clone());
-            let _ = tokio::task::spawn_blocking(move || {
-                touch(&d);
-                let _ = std::fs::remove_file(&p);
-                let _ = std::fs::remove_file(p.with_extension("meta"));
-            })
-            .await;
+            let _ = tokio::fs::remove_file(&part).await;
+            let _ = tokio::fs::remove_file(&meta).await;
             return Ok(done);
         }
         if expected.as_deref().is_some_and(|h| h != hash) {
             // The file there changed since the part began.
+            drop(resp);
             let _ = tokio::fs::remove_file(&part).await;
             (offset, expected) = (0, None);
             continue;
@@ -747,8 +993,14 @@ async fn pull(ctx: &Ctx, track: TrackId, from: &str) -> Result<PathBuf, String> 
         }
         receive(resp, &part, from_byte).await?;
         finish(&part, &hash, &done).await?;
-        let (d, keep) = (dir.clone(), done.clone());
-        let _ = tokio::task::spawn_blocking(move || evict(&d, &keep)).await;
+        let mut keep = ctx.keep.lock().clone();
+        keep.push(done.clone());
+        let (d, evicting) = (dir.clone(), ctx.evicting.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            let _one = evicting.lock();
+            evict(&d, &keep);
+        })
+        .await;
         return Ok(done);
     }
     Err("файл на том устройстве всё время меняется".to_owned())
@@ -774,13 +1026,6 @@ mod tests {
         use RemoteCommand::*;
         let c = collapse(vec![SetVolume { volume: 0.1 }, SetVolume { volume: 0.2 }, Pause, SetVolume { volume: 0.3 }, Seek { ms: 1 }, Seek { ms: 2 }, Next]);
         assert_eq!(c, vec![SetVolume { volume: 0.2 }, Pause, SetVolume { volume: 0.3 }, Seek { ms: 2 }, Next]);
-        let g = group(vec![
-            ("a".into(), vec![SetVolume { volume: 0.1 }]),
-            ("a".into(), vec![SetVolume { volume: 0.5 }]),
-            ("b".into(), vec![Pause]),
-            ("a".into(), vec![Next]),
-        ]);
-        assert_eq!(g, vec![("a".into(), vec![SetVolume { volume: 0.5 }]), ("b".into(), vec![Pause]), ("a".into(), vec![Next])]);
     }
 
     #[test]
@@ -796,12 +1041,13 @@ mod tests {
     }
 
     #[test]
-    fn the_least_recently_used_go_first() {
+    fn the_least_recently_used_go_first_but_never_one_in_use() {
         let at = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(s);
         let files = vec![(PathBuf::from("new"), 40, at(30)), (PathBuf::from("old"), 40, at(10)), (PathBuf::from("mid"), 40, at(20))];
-        assert_eq!(evict_plan(files.clone(), 100, Path::new("x")), vec![PathBuf::from("old")]);
-        assert_eq!(evict_plan(files.clone(), 40, Path::new("old")), vec![PathBuf::from("mid"), PathBuf::from("new")], "never the one kept");
-        assert!(evict_plan(files, 200, Path::new("x")).is_empty());
+        assert_eq!(evict_plan(files.clone(), 100, &[]), vec![PathBuf::from("old")]);
+        assert_eq!(evict_plan(files.clone(), 40, &[PathBuf::from("old")]), vec![PathBuf::from("mid"), PathBuf::from("new")], "never one kept");
+        assert_eq!(evict_plan(files.clone(), 0, &[PathBuf::from("old"), PathBuf::from("new")]), vec![PathBuf::from("mid")]);
+        assert!(evict_plan(files, 200, &[]).is_empty());
     }
 
     #[test]
@@ -813,10 +1059,47 @@ mod tests {
         assert_eq!(clean_ext("FLAC"), "flac");
         assert_eq!(clean_ext("../x"), "bin");
         assert_eq!(clean_ext(""), "bin");
+        assert!(range_starts_at(Some("bytes 4000-9999/10000"), 4000));
+        assert!(!range_starts_at(Some("bytes 0-9999/10000"), 4000));
+        assert!(!range_starts_at(None, 4000));
+        assert!(!range_starts_at(Some("items 4000-9999/10000"), 4000));
+    }
+
+    #[test]
+    fn a_followed_zones_snapshot_is_fetched_when_its_queue_changes() {
+        let t = Instant::now();
+        let mut w = SnapshotWant::default();
+        assert_eq!(w.start(t), None, "nothing seen");
+        w.seen("a".into());
+        assert_eq!(w.start(t).as_deref(), Some("a"));
+        w.seen("b".into());
+        assert_eq!(w.start(t + Duration::from_secs(5)), None, "one on its way");
+        w.done("a".into(), true);
+        assert_eq!(w.start(t + Duration::from_millis(500)), None, "too soon");
+        assert_eq!(w.start(t + Duration::from_secs(2)).as_deref(), Some("b"));
+        w.done("b".into(), false);
+        assert_eq!(w.start(t + Duration::from_secs(4)).as_deref(), Some("b"), "a failed fetch is tried again");
+        w.done("b".into(), true);
+        w.seen("b".into());
+        assert_eq!(w.start(t + Duration::from_secs(9)), None, "the same queue");
+    }
+
+    #[test]
+    fn a_load_is_known_taken_by_what_the_device_plays() {
+        let t: Vec<TrackId> = (0..3).map(|_| TrackId::new()).collect();
+        let sent = ZoneSnapshot { tracks: t.clone(), index: Some(1), ..ZoneSnapshot::default() };
+        let same = ZoneSnapshot { tracks: vec![t[1], t[2]], index: Some(0), ..ZoneSnapshot::default() };
+        assert!(plays_what_was_sent(&same, &sent));
+        let paused = ZoneSnapshot { paused: true, ..same.clone() };
+        assert!(!plays_what_was_sent(&paused, &sent));
+        let other = ZoneSnapshot { tracks: vec![t[0]], index: Some(0), ..ZoneSnapshot::default() };
+        assert!(!plays_what_was_sent(&other, &sent));
+        assert!(!plays_what_was_sent(&ZoneSnapshot::default(), &ZoneSnapshot::default()), "nothing is not it");
     }
 
     /// A file comes in two parts (the second resumed), is checked by its
-    /// hash and kept; a damaged one is deleted.
+    /// hash and kept; a damaged one is deleted; a kept copy is checked
+    /// again before it is used.
     #[tokio::test]
     async fn a_file_is_received_checked_and_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -830,10 +1113,15 @@ mod tests {
         finish(&part, &hash, &done).await.unwrap();
         assert_eq!(std::fs::read(&done).unwrap(), bytes);
         assert!(!part.exists());
+        assert!(reuse(&done, &hash).await);
 
         receive(resp(&bytes[..10]), &part, 0).await.unwrap();
         let other = dir.path().join("other.flac");
         assert_eq!(finish(&part, &hash, &other).await.unwrap_err(), "файл пришёл повреждённым");
         assert!(!part.exists() && !other.exists());
+
+        std::fs::write(&done, b"changed").unwrap();
+        assert!(!reuse(&done, &hash).await, "a changed copy is not used");
+        assert!(!done.exists(), "and is dropped");
     }
 }
