@@ -635,11 +635,17 @@ impl Playback for Engine {
         self.volume = volume;
         #[cfg(feature = "live")]
         {
+            // The player heard by itself plays at the volume with the sleep
+            // fade and the duck; a routed one (its sound captured, its own
+            // output inaudible) and an idle one take the plain volume.
+            let level = self.live_level();
+            let direct_soloist = self.live_direct && matches!(self.on_live, Some(Live::Soloist(_)));
+            let direct_widget = self.live_direct && matches!(self.on_live, Some(Live::Widget(_)));
             if let Some(s) = &self.soloist {
-                s.set_volume(volume);
+                s.set_volume(if direct_soloist { level } else { volume });
             }
             if let Some(w) = &self.widget {
-                w.set_volume(volume);
+                w.set_volume(if direct_widget { level } else { volume });
             }
         }
         if !self.live_direct {
