@@ -368,7 +368,8 @@ impl ImportService {
                 Err(e) => log::warn!("trash purge: {e}"),
             }
             // Masters on their way to the Trash when the player stopped:
-            // finished or undone first.
+            // finished or undone first, from what can be verified (kept on
+            // their way otherwise).
             match nikgob_import::trash::recover_master_moves(&lib, &cfg.trash_dir) {
                 Ok(n) if n > 0 => log::info!("master moves settled: {n}"),
                 Ok(_) => {}
