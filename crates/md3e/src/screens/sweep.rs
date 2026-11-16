@@ -939,7 +939,7 @@ mod tests {
             | S::LastfmKey | S::ListenbrainzToken | S::BackgroundCountsLess | S::ProfilesSplit | S::GraphServices
             | S::GraphOpenData | S::GraphPersonal | S::LibraryAsTaste | S::DislikeInRecs | S::DemoProfile | S::FirstRun | S::CoverSpinSpeed
             | S::CoverPulseStrength | S::HomeSections | S::Preset(_) | S::ApiEnabled | S::ApiAccess | S::ApiPort
-            | S::ApiTokens | S::MeshThis | S::MeshEnabled | S::MeshDevices | S::MeshNearby | S::MeshKeepMasters | S::LyricsKeepMisfits => pos(id),
+            | S::ApiTokens | S::MeshEnabled | S::MeshDevices | S::MeshNearby | S::MeshKeepMasters | S::LyricsKeepMisfits => pos(id),
         }
     }
 
