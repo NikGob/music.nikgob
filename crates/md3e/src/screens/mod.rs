@@ -15,6 +15,7 @@ mod info_window;
 mod lyrics;
 mod lyrics_front;
 pub mod lyrics_ui;
+mod output;
 mod pages;
 mod pane;
 mod player_bar;
@@ -610,6 +611,9 @@ impl Md3eUi {
             .flatten();
         let snack = np_spot.unwrap_or((overlay_area, 64.0 + 16.0 + 16.0));
         self.pages.overlays(ctx, state, overlay_area, snack, out);
+        // The devices' window and dialogs over any page (the output
+        // popover's «Добавить»), unless a page of the devices drew them.
+        pages::mesh_overlays_elsewhere(root, state, &mut self.pages, out);
         self.chrome.overlays(ctx, state, out);
         self.find_song.show(ctx, state, out);
         lyrics_ui::overlays(ctx, state, out);
@@ -726,6 +730,10 @@ impl Md3eUi {
 
         if let Some(id) = self.chrome.setting.take() {
             self.pages.open_setting(id);
+        }
+        // «Добавить» of the output popover: the window grows out of it.
+        if let Some(from) = self.chrome.output.add_device.take() {
+            pages::open_add_device_from(ctx, state, &mut self.pages, from, out);
         }
         // «Настройки текста» and the «Текст песни» page, asked under the
         // lyrics.
@@ -1411,6 +1419,15 @@ impl Md3eUi {
     /// «Установить» (scripted screenshots).
     pub fn open_add_device(&mut self, ctx: &Context, state: &ViewState, install: bool, out: &mut Vec<Command>) {
         pages::open_add_device(ctx, state, &mut self.pages, install, out);
+    }
+
+    /// Opens the output popover («Где играть») out of the output button
+    /// drawn last, else out of the window's bottom right corner (scripted
+    /// screenshots).
+    pub fn open_output(&mut self, ctx: &Context) {
+        let corner = ctx.content_rect().right_bottom();
+        let fallback = Rect::from_min_max(corner - vec2(120.0, 72.0), corner - vec2(80.0, 32.0));
+        self.chrome.output.open_from_last(fallback);
     }
 
     /// Opens the cookies form of «Сервисы»

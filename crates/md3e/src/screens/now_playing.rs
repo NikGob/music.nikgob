@@ -1003,7 +1003,11 @@ pub fn show_on(
             // last.
             // «Текст песни» while its button is hidden (L opens it too).
             let lyrics = (!state.prefs.player_buttons.lyrics).then_some(Act::Lyrics);
-            let top: Vec<Act> = lyrics.into_iter().chain([Act::Visualizer, Act::SleepMenu]).collect();
+            // «Где играть» while the content is open (its layouts have no
+            // row for the button) and this computer plays: another
+            // device's pill stands under the progress bar then.
+            let output = (chrome.np_slot != NpSlot::None && state.target.is_none() && super::output::available(state)).then_some(Act::Output);
+            let top: Vec<Act> = lyrics.into_iter().chain(output).chain([Act::Visualizer, Act::SleepMenu]).collect();
             let rows = Chrome::player_rows(&ctx, t, state, &top, true, true);
             chrome.track_menu(&more, "np-more", rows, t, state, Where::Np, out);
         }
@@ -1429,7 +1433,7 @@ fn volume_pop(ui: &mut Ui, area: Rect, state: &ViewState, chrome: &mut Chrome, s
                 .id_salt("np-vol-pop-row"),
         );
         if row
-            .add(IconButton::new(Icon::volume(volume, p.muted)).tooltip("Звук").id_salt("np-vol-pop-mute"))
+            .add(IconButton::new(super::output::volume_icon(state, volume, p.muted)).tooltip("Звук").id_salt("np-vol-pop-mute"))
             .clicked()
         {
             out.push(Command::ToggleMute);
@@ -1701,7 +1705,10 @@ fn info(
     let ctx = ui.ctx().clone();
     let s = Theme::get(&ctx).scheme;
     let p = &state.player;
-    let playing = p.status == Status::Playing;
+    // Another device's music while its link is lost is not shown as
+    // playing; while its state comes late, the loading indicator.
+    let playing = p.status == Status::Playing && !super::output::lost(state);
+    let buffering = p.status == Status::Buffering || super::output::reconnecting(state);
     let current = p.current.as_ref();
     let col = rect;
     let mut y = col.top();
@@ -1814,6 +1821,23 @@ fn info(
                 ui.label(TypeRole::LabelMedium.style().rich(line, s.on_surface_variant))
                     .on_hover_text("Откуда идёт звук и в каком качестве");
             }
+            // With the content open there is no row for the output button:
+            // another device's pill stands here, by the quality (the
+            // settings' stage has none: its springs are the real one's).
+            if compact && stage.live {
+                let look = super::output::Look {
+                    circle: 0.0,
+                    pill: 22.0,
+                    content: s.on_surface_variant,
+                    accent: (s.primary, s.on_primary),
+                    collapsed: false,
+                };
+                let wanted = state.target.is_some();
+                if super::output::slot_width(ui, state, "np-compact-output", look, wanted) > 0.0 {
+                    ui.add_space(8.0);
+                }
+                super::output::button(ui, state, "np-compact-output", look, wanted, chrome);
+            }
         });
     });
     y += 64.0 + if compact { 16.0 } else { PROGRESS_GAP };
@@ -1863,7 +1887,7 @@ fn info(
         .size(hero_size)
         .style(Style::Filled)
         .shape(BtnShape::Round)
-        .selected(playing || p.status == Status::Buffering)
+        .selected(playing || buffering)
         .filled_icon(true)
         .colors(Colors {
             container: s.primary,
@@ -1898,7 +1922,7 @@ fn info(
     if r[prev].clicked() {
         chrome::press_previous(&ctx, state, out);
     }
-    if p.status == Status::Buffering {
+    if buffering {
         common::buffering_overlay(ui, r[prev + 1].rect, s.primary, s.on_primary);
     }
     if r[prev + 1].clicked() {
@@ -1970,11 +1994,23 @@ fn info(
     let sound_changed =
         current.filter(|_| buttons.sound).map(|t| state.prefs.eq_on || state.speeds.of(t.id) != nikgob_view::SpeedVariant::Normal);
     let dislike = current.filter(|_| state.prefs.dislike_button).map(|t| (t.id, state.dislikes.track(t.id)));
+    // «Где играть» left of the volume once there is another device; the
+    // pill of another device's name while the window drives it.
+    let output_look = super::output::Look {
+        circle: 40.0,
+        pill: 28.0,
+        content: s.on_surface_variant,
+        accent: (s.primary, s.on_primary),
+        collapsed: false,
+    };
+    let output_on = super::output::available(state);
     let volume_row = aui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let volume = if p.muted { 0.0 } else { chrome.volume_now(&ctx, state) };
+        let output_w = if stage.live { super::output::slot_width(ui, state, "np-output", output_look, output_on) } else { 0.0 };
         // The slider is optional; the wheel sets the volume either way.
         if state.prefs.np_volume {
-            let buttons = 48.0 * (1.0 + f32::from(u8::from(dislike.is_some())) + f32::from(u8::from(sound_changed.is_some())));
+            let buttons = 48.0 * (1.0 + f32::from(u8::from(dislike.is_some())) + f32::from(u8::from(sound_changed.is_some())))
+                + if output_w > 0.0 { output_w + 8.0 } else { 0.0 };
             let w = (ui.available_width() - buttons).clamp(96.0, 220.0);
             let vo = Slider::new("np-vol", volume)
                 .track(8.0)
@@ -1994,6 +2030,9 @@ fn info(
             .clicked()
         {
             out.push(Command::ToggleMute);
+        }
+        if stage.live {
+            super::output::button(ui, state, "np-output", output_look, output_on, chrome);
         }
         if let Some(changed) = sound_changed {
             let button = ui.add(IconButton::new(Icon::Tune).selected(changed).tooltip("Скорость и эквалайзер").id_salt("np-sound"));

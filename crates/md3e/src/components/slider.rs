@@ -86,6 +86,7 @@ pub struct Slider {
     label: Option<Box<dyn Fn(f32) -> String>>,
     active: Option<Color32>,
     inactive: Option<Color32>,
+    handle: Option<Color32>,
 }
 
 impl Slider {
@@ -100,6 +101,7 @@ impl Slider {
             label: None,
             active: None,
             inactive: None,
+            handle: None,
         }
     }
 
@@ -134,6 +136,13 @@ impl Slider {
     pub fn colors(mut self, active: Color32, inactive: Color32) -> Self {
         self.active = Some(active);
         self.inactive = Some(inactive);
+        self
+    }
+
+    /// The handle in a colour of its own (the active track's otherwise):
+    /// a value that holds while what it sets is lowered for a while.
+    pub fn handle_color(mut self, color: Color32) -> Self {
+        self.handle = Some(color);
         self
     }
 
@@ -276,7 +285,7 @@ impl Slider {
 
             // Handle bar.
             let handle = Rect::from_center_size(pos2(x, cy), vec2(handle_w, height));
-            paint::container(ui.painter(), handle, Radii::all(shape::FULL), active, Stroke::NONE);
+            paint::container(ui.painter(), handle, Radii::all(shape::FULL), self.handle.unwrap_or(active), Stroke::NONE);
 
             // Value indicator above the handle while dragging.
             if let (true, Some(label)) = (pressed, &self.label) {

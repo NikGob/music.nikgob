@@ -47,7 +47,9 @@
 //! `route:devices` and `devices_map:n` open «Карта сети» (`n` the device
 //! whose passport opens: 0 this computer); `devices_add` opens «Добавить
 //! устройство» (`devices_add:install` on «Установить») over Settings →
-//! Межсеть or the map.
+//! Межсеть or the map. `output` opens the output popover («Где играть»)
+//! out of the output button drawn last (the floating player's, Now
+//! Playing's while it is open).
 //! `reopen` closes the window and opens a new one, as the tray does.
 //! `hide:ms` closes the window as its ✕ does (to the tray) and asks for it
 //! back from the tray `ms` later (1000 by default).
@@ -725,6 +727,12 @@ impl Shot {
             "devices_add" => {
                 let shown = self.overlay(state);
                 ui.open_add_device(ctx, shown.as_ref().unwrap_or(state), arg == "install", out);
+                self.wait = 40;
+            }
+            // `output` opens the output popover out of the output button
+            // drawn last (needs another device: `fake:mesh`, `fake:remote`).
+            "output" => {
+                ui.open_output(ctx);
                 self.wait = 40;
             }
             // `stream:album:spotify:sp-alb-gruppa` opens a page of a service.

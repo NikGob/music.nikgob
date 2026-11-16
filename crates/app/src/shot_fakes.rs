@@ -98,6 +98,11 @@
 //!   ring of «Карта сети»). `fake:mesh-api` — the API on the home network
 //!   (the install line without its blocker). `fake:mesh-forget` — «Забыть»
 //!   of the Raspberry Pi stopped: 12 originals only it holds (the dialog).
+//! - `fake:remote` — this window is the remote of the Raspberry Pi of
+//!   `fake:mesh` (laid too when not asked): the Pi plays what the player
+//!   shows, this computer's own queue waits parked (its next track);
+//!   `fake:remote:reconnecting` / `fake:remote:lost` — its link late or
+//!   lost; `fake:remote:duck` — the Pi's sound lowered for a while.
 
 use nikgob_core::streaming::{FakeService, PlaylistSyncMode, RemoteId, Service};
 use nikgob_view::{
@@ -154,6 +159,10 @@ pub struct Fakes {
     mesh_api: bool,
     /// `fake:mesh-forget`.
     mesh_forget: bool,
+    /// `fake:remote…`: the window drives the Pi, its link as named.
+    remote: Option<nikgob_view::RemoteLink>,
+    /// `fake:remote:duck`.
+    remote_duck: bool,
 }
 
 impl Fakes {
@@ -216,6 +225,13 @@ impl Fakes {
             "mesh:five" => self.mesh = Some((MeshFake::Five, std::time::Instant::now())),
             "mesh-api" => self.mesh_api = true,
             "mesh-forget" => self.mesh_forget = true,
+            "remote" => self.remote = Some(nikgob_view::RemoteLink::Live),
+            "remote:reconnecting" => self.remote = Some(nikgob_view::RemoteLink::Reconnecting),
+            "remote:lost" => self.remote = Some(nikgob_view::RemoteLink::Lost),
+            "remote:duck" => {
+                self.remote.get_or_insert(nikgob_view::RemoteLink::Live);
+                self.remote_duck = true;
+            }
             c if c.starts_with("craft:") => self.craft = Some(c["craft:".len()..].to_owned()),
             c if c.starts_with("lyrics-home:") => self.lyrics_home = Some(c["lyrics-home:".len()..].to_owned()),
             c if c.starts_with("chip:") => self.chip = Some(c["chip:".len()..].to_owned()),
@@ -262,6 +278,7 @@ impl Fakes {
             || self.mesh.is_some()
             || self.mesh_api
             || self.mesh_forget
+            || self.remote.is_some()
     }
 
     /// `state` with the fakes laid over it.
@@ -500,6 +517,12 @@ impl Fakes {
             && let Some(pi) = s.mesh.nodes.iter().find(|n| n.kind == nikgob_view::MeshKind::Pi)
         {
             s.mesh.forget_ask = Some(nikgob_view::MeshForgetAsk { node_id: pi.id.clone(), name: pi.name.clone(), originals: Some(12) });
+        }
+        if let Some(link) = self.remote {
+            if self.mesh.is_none() {
+                mesh(&mut s, MeshFake::Paired, 0.0);
+            }
+            remote(&mut s, link, self.remote_duck);
         }
         s
     }
@@ -1519,6 +1542,41 @@ fn bento(s: &mut ViewState, n: usize, daylist: bool) {
         t
     });
     s.home.tiles = tiles.into_iter().take(n).collect();
+}
+
+/// This window as the remote of the Raspberry Pi (`fake:remote…`): the Pi
+/// plays what the player shows, this computer's own queue waits parked at
+/// its next track; `duck`: the Pi's sound lowered for a while.
+fn remote(s: &mut ViewState, link: nikgob_view::RemoteLink, duck: bool) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(0));
+    let ms = |d: std::time::Duration| i64::try_from(d.as_millis()).unwrap_or(0);
+    let playing = s.player.current.as_ref().map(|t| nikgob_view::MeshPlaying {
+        title: t.title.clone(),
+        artists: vec![t.artist.clone()],
+        paused: s.player.status != Status::Playing,
+        position_ms: ms(s.player.position),
+        at_ms: now,
+        rate: 1.0,
+        duration_ms: s.player.duration.map(ms),
+    });
+    let parked = s.queue.next.first().map(|e| e.track.clone()).or_else(|| s.player.current.clone());
+    let Some(pi) = s.mesh.nodes.iter_mut().find(|n| n.kind == nikgob_view::MeshKind::Pi) else { return };
+    if playing.is_some() {
+        pi.playing = playing;
+    }
+    let target = nikgob_view::RemoteTarget {
+        node_id: pi.id.clone(),
+        name: pi.name.clone(),
+        kind: pi.kind,
+        link,
+        volume: s.player.volume,
+        muted: s.player.muted,
+    };
+    s.target = Some(target);
+    s.parked = Some(nikgob_view::ParkedView { current: parked, position: std::time::Duration::from_secs(42) });
+    if duck {
+        s.player.duck = Some(nikgob_view::DuckView { gain: 0.15, until_unix_ms: now + 5_000 });
+    }
 }
 
 /// Which devices `fake:mesh…` lays over the view.

@@ -170,6 +170,10 @@ material_icons! {
     Smartphone => "smartphone",
     Tv => "tv",
     Dns => "dns",
+    /// «Где играть»: the output button beside the volume.
+    SpeakerGroup => "speaker_group",
+    /// «Перенести сюда»: a queue moved onto another device.
+    SwapHoriz => "swap_horiz",
 }
 
 impl Icon {

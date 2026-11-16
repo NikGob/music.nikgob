@@ -140,8 +140,10 @@ pub fn show(
         {
             chrome::press_previous(ui.ctx(), state, out);
         }
-        let playing = p.status == Status::Playing;
-        let buffering = p.status == Status::Buffering;
+        // Another device's music while its link is lost is not shown as
+        // playing; while its state comes late, the loading indicator.
+        let playing = p.status == Status::Playing && !super::output::lost(state);
+        let buffering = p.status == Status::Buffering || super::output::reconnecting(state);
         // Play/pause: filled toggle M; playing = square, paused = round.
         // A stream that is still opening shows a loading indicator instead.
         let play = ui.add(
@@ -189,13 +191,27 @@ pub fn show(
         let show_queue = buttons.queue;
         let (show_like, show_lyrics, show_volume) = (!compact && buttons.like, wide && lyrics_on && buttons.lyrics, wide);
         let trailing = [show_like, show_queue, show_lyrics, show_volume, true].into_iter().filter(|b| *b).count();
+        // «Где играть» by the volume once there is another device: in ⋮
+        // while this computer plays and the pill is short of room; the
+        // pill of another device's name stays whatever the width, so it is
+        // always seen whose volume the wheel turns.
+        let output_look = super::output::Look {
+            circle: 40.0,
+            pill: 26.0,
+            content: item.content,
+            accent: (play_colors.container, play_colors.content),
+            collapsed: rect.width() < 520.0,
+        };
+        let output_on = super::output::available(state) && (wide || state.target.is_some());
+        let output_w = super::output::slot_width(ui, state, "bar-output", output_look, output_on);
+        let output_room = if output_w > 0.0 { output_w + 4.0 } else { 0.0 };
 
         // Progress: label, slider, label; a bare slider when narrower; a
         // line under the title when there is no room at all.
         // A running sleep timer's chip before the ⋮: with its time while
         // the slider keeps its room, else the moon alone (never a button
         // less).
-        let buttons_w = trailing as f32 * 44.0;
+        let buttons_w = trailing as f32 * 44.0 + output_room;
         let slider_min = if compact { 112.0 } else { 160.0 };
         let sleep_full = super::sleep_ui::chip_width(ui, state, "bar-sleep", false);
         let sleep_small = !wide || ui.available_width() - buttons_w - sleep_full - 8.0 < slider_min;
@@ -281,6 +297,7 @@ pub fn show(
         {
             result.toggle_pane = Some(PaneTab::Lyrics);
         }
+        super::output::button(ui, state, "bar-output", output_look, output_on, chrome);
         if show_volume {
             let level = chrome.volume_now(ui.ctx(), state);
             let mut btn = IconButton::new(Icon::volume(level, p.muted))
@@ -313,6 +330,7 @@ pub fn show(
             // side pane shows it, or Now Playing when the pane has none.
             top.extend((!show_lyrics).then_some(Act::Lyrics));
             top.extend((!show_volume).then_some(Act::Volume));
+            top.extend((super::output::available(state) && !output_on).then_some(Act::Output));
             // Placed by «Меню трека» like Now Playing's (F12 anyway).
             top.push(Act::Visualizer);
             top.push(Act::SleepMenu);
