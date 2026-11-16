@@ -6020,6 +6020,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "if-addrs",
  "iroh",
  "log",
  "mdns-sd",

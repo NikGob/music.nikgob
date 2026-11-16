@@ -7,18 +7,23 @@
 //! копия»: every track's file and every lossless master; «Библиотека»:
 //! every track's file; «Избранное»: «Любимые» and the pinned playlists up
 //! to the cap — and pulls what it lacks from the owner's devices that have
-//! it, through the tunnel: a song's file from `/v1/media/tracks/{id}/audio`
-//! (the original as it is: [`nikgob_view::MeshFormat`]), a master from
-//! `/v1/replica/masters/{hash}`. At most [`AT_ONCE`] files at a time, paced
-//! to [`RATE`], resumed from a part left by an earlier try (Range), checked
-//! against its BLAKE3 before it is kept, paused by the owner (here, or on
-//! the device that asks it in its presence), never past
-//! [`MIN_FREE`] left on the disk. The parts wait in
-//! `<library>/.musiclib/replica`; a file lands as the library lays songs
-//! out (`Artist/YYYY - Album/NN - Title.ext`, a master in the masters
-//! folder), never over another file, and becomes this device's own (a
-//! source, a master row, a `replica` row). The sending device writes
-//! nothing.
+//! it, through the tunnel: a song's best file by its hash from
+//! `/v1/media/tracks/{id}/audio?hash=` (the original as it is:
+//! [`nikgob_view::MeshFormat`]), a master from `/v1/replica/masters/{hash}`.
+//! What it holds is what is on its disk now, not what rows say. At most
+//! [`AT_ONCE`] files at a time, paced to [`RATE`], resumed from a part left
+//! by an earlier try (Range), checked against its BLAKE3 before it is kept,
+//! paused by the owner (here, or on the device that asks it in its
+//! presence; the pauses asked here outlive a restart), never past
+//! [`MIN_FREE`] left on the disks it writes to (the running pulls' bytes
+//! reserved, looked at again while it writes; a disk whose free space is
+//! not known gets nothing). A new profile or new pins drop the old plan at
+//! once. The parts wait in `<library>/.musiclib/replica`; a file lands as
+//! the library lays songs out (`Artist/YYYY - Album/NN - Title.ext`, a
+//! master in the masters folder), only in folders inside them, never over
+//! another file, checked again after a copy across disks, and becomes this
+//! device's own (a source, a master row, a `replica` row). The sending
+//! device writes nothing.
 //!
 //! **Copies of this computer's masters** (a device with a window): every
 //! [`AUDIT_EVERY`] each owner device online is asked which of this
@@ -36,7 +41,8 @@ use axum::body::Body;
 use futures_util::StreamExt as _;
 use nikgob_core::model::{Codec, Source, SourceKind};
 use nikgob_library::Library;
-use nikgob_library::replica::{CheckAnswer, CheckAsk, Held, Keep, MasterItem, MastersPage, Want, plan_tracks};
+use nikgob_core::model::TrackId;
+use nikgob_library::replica::{CheckAnswer, CheckAsk, Held, HeldFile, Keep, MasterItem, MastersPage, Offer, Want, best_offers, plan_tracks};
 use nikgob_view::{Command, MeshProfile, MeshScope, MeshTransfer};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -96,6 +102,17 @@ const RECHECK_BATCH: usize = 10;
 const RECHECK_WAIT: Duration = Duration::from_secs(5 * 60);
 /// Where the profile the holder gave is kept, in the mesh's folder.
 const SAVED: &str = "replica.json";
+/// Where the pauses asked here are kept, in the mesh's folder.
+pub(crate) const PAUSED: &str = "replica-paused.json";
+/// While a file is written, the disk's free space is looked at again each
+/// time this much more came.
+const ROOM_STEP: u64 = 16 << 20;
+/// A disk without room (or whose room is not known) is looked at again
+/// after this.
+const ROOM_WAIT: Duration = Duration::from_secs(60);
+/// Files of «Избранное» whose size is not known are asked for it, at most
+/// this many a plan.
+const SIZE_ASKS: usize = 200;
 
 /// What the service keeps of the copies (in [`Shared`]).
 #[derive(Default)]
@@ -107,9 +124,21 @@ pub(crate) struct ReplicaShared {
     paused: Mutex<HashSet<String>>,
     /// Wakes the loop (a pause, a resume).
     poke: Notify,
+    /// Where the pauses are kept (none: not kept).
+    file: Option<PathBuf>,
 }
 
 impl ReplicaShared {
+    /// The pauses kept in `file`: restored before the pull loop starts.
+    pub(crate) fn load(file: PathBuf) -> Self {
+        let paused: HashSet<String> =
+            std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok()).unwrap_or_default().into_iter().collect();
+        if !paused.is_empty() {
+            log::info!("replica: {} devices' pulls paused here", paused.len());
+        }
+        Self { paused: Mutex::new(paused), file: Some(file), ..Self::default() }
+    }
+
     pub(crate) fn transfer(&self) -> Option<MeshTransfer> {
         *self.transfer.lock()
     }
@@ -127,6 +156,17 @@ impl ReplicaShared {
                 p.insert(node.to_owned());
             } else {
                 p.remove(node);
+            }
+        }
+        if let Some(file) = &self.file {
+            let list = self.pause_list();
+            match serde_json::to_vec(&list) {
+                Ok(bytes) => {
+                    if let Err(e) = crate::keys::write_atomic(file, &bytes, false) {
+                        log::warn!("replica: the pauses not kept: {}: {e}", file.display());
+                    }
+                }
+                Err(e) => log::warn!("replica: the pauses not kept: {e}"),
             }
         }
         self.poke.notify_one();
@@ -164,14 +204,30 @@ pub(crate) struct Ctl {
     /// Stop between two pieces (paused, or nothing to pull any more): the
     /// part stays for the next try.
     pub(crate) stop: AtomicBool,
+    /// The plan's number: a pull of an older plan stops between two
+    /// pieces (a new profile or new pins).
+    pub(crate) gen: AtomicU64,
     /// Bytes pulled in this round (a resumed part counts whole).
     pub(crate) received: AtomicU64,
+    /// Bytes the running pulls may still write: kept free on the disks.
+    pub(crate) reserved: AtomicU64,
     pub(crate) pace: Pace,
 }
 
 impl Ctl {
     pub(crate) fn new(rate: f64) -> Self {
-        Self { stop: AtomicBool::new(false), received: AtomicU64::new(0), pace: Pace::new(rate) }
+        Self {
+            stop: AtomicBool::new(false),
+            gen: AtomicU64::new(0),
+            received: AtomicU64::new(0),
+            reserved: AtomicU64::new(0),
+            pace: Pace::new(rate),
+        }
+    }
+
+    /// Whether a pull of plan `gen` stops now.
+    fn halted(&self, gen: u64) -> bool {
+        self.stop.load(Ordering::Relaxed) || self.gen.load(Ordering::Relaxed) != gen
     }
 }
 
@@ -180,6 +236,8 @@ impl Ctl {
 pub(crate) enum Failed {
     /// Stopped between two pieces: its part stays, it goes on later.
     Stopped,
+    /// The disk came near its reserve: its part stays, it waits for room.
+    NoRoom,
     /// No device asked has it.
     NotThere,
     Bad(String),
@@ -210,6 +268,14 @@ impl Job {
         }
     }
 
+    /// The very file it is (its BLAKE3).
+    fn hash(&self) -> &str {
+        match self {
+            Self::Track(w) => &w.file_hash,
+            Self::Master { item, .. } => &item.hash,
+        }
+    }
+
     /// The devices it may come from.
     fn holders(&self) -> Vec<String> {
         match self {
@@ -221,9 +287,9 @@ impl Job {
 
 /// Where the files land: the library folder and the masters folder.
 #[derive(Clone, Debug)]
-struct Dirs {
-    library: PathBuf,
-    masters: PathBuf,
+pub(crate) struct Dirs {
+    pub(crate) library: PathBuf,
+    pub(crate) masters: PathBuf,
 }
 
 /// A file that failed: how often, and when it is tried again.
@@ -248,6 +314,8 @@ struct Puller {
     /// The holder's last word (also kept on disk).
     saved: Option<Assigned>,
     next_start: Option<Instant>,
+    /// No file starts before this (a disk without room).
+    room_wait: Option<Instant>,
     /// The round's bytes in all (done ones included).
     total: u64,
     /// For the speed: the bytes and the time of the last turn.
@@ -268,12 +336,6 @@ impl Puller {
         w.fails = w.fails.saturating_add(1);
         w.until = Instant::now() + retry_after(w.fails);
     }
-}
-
-/// The most bytes a file of `size` (0: not known) may come with: room for
-/// new tags of the file there, never without an end.
-pub(crate) fn size_limit(size: u64) -> u64 {
-    if size == 0 { FILE_MAX } else { size.saturating_mul(2).max(size.saturating_add(64 << 20)).min(FILE_MAX) }
 }
 
 /// The wait after `fails` failures of a file.
@@ -409,16 +471,95 @@ async fn masters_of(sh: &Arc<Shared>, peer: &str) -> Result<Vec<MasterItem>, Str
 
 // ------------------------------------------------------------ planning
 
-/// The songs' files to pull for `a` from the devices `peers` have.
-fn plan_songs(lib: &Library, a: &Assigned, peers: &[String]) -> nikgob_library::Result<Vec<Want>> {
+/// A locator as a path (a relative one is the library folder's).
+fn absolute(locator: &str, library: &Path) -> PathBuf {
+    let p = Path::new(locator);
+    if p.is_absolute() { p.to_owned() } else { library.join(p) }
+}
+
+/// The songs' files this device holds now: its live local sources whose
+/// file is on the disk, inside the library or the masters folder.
+pub(crate) fn held_on_disk(lib: &Library, dirs: &Dirs) -> nikgob_library::Result<HashMap<TrackId, Vec<HeldFile>>> {
+    let mut out: HashMap<TrackId, Vec<HeldFile>> = HashMap::new();
+    for f in lib.replica_held_files()? {
+        let path = absolute(&f.locator, &dirs.library);
+        let inside = path.starts_with(&dirs.library) || path.starts_with(&dirs.masters);
+        if inside && std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            out.entry(f.track_id).or_default().push(f);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `s` is a BLAKE3 as the library writes it (64 lowercase hex).
+fn is_hash(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The masters this device holds now: those its master rows keep by name
+/// with the file there, and the files kept flat (`{hash}.<ext>` right in
+/// the masters folder, a disc image's too).
+pub(crate) fn masters_on_disk(lib: &Library, masters: &Path) -> nikgob_library::Result<HashSet<String>> {
+    let mut out: HashSet<String> = lib
+        .master_paths()?
+        .into_iter()
+        .filter_map(|(h, p)| p.filter(|p| Path::new(p).is_file()).map(|_| h))
+        .collect();
+    if let Ok(rd) = std::fs::read_dir(masters) {
+        for p in rd.flatten().map(|e| e.path()) {
+            let side = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json") || e.eq_ignore_ascii_case("cue"));
+            if side || !p.is_file() {
+                continue;
+            }
+            if let Some(stem) = p.file_stem().map(|s| s.to_string_lossy().into_owned())
+                && is_hash(&stem)
+            {
+                out.insert(stem);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// What a plan starts from: the offers of the devices online, «Избранное»'s
+/// order, and what this device holds on its disk.
+struct Ground {
+    offers: Vec<Offer>,
+    keep: Keep,
+    held: HashMap<TrackId, Vec<HeldFile>>,
+}
+
+fn ground(lib: &Library, a: &Assigned, peers: &[String], dirs: &Dirs) -> nikgob_library::Result<Option<Ground>> {
     let keep = match a.profile {
         MeshProfile::Full | MeshProfile::Library => Keep::All,
         MeshProfile::Favorites { cap_bytes } => Keep::Ordered { order: lib.replica_order(a.liked, &a.playlists)?, cap: cap_bytes },
-        MeshProfile::SoundOnly => return Ok(Vec::new()),
+        MeshProfile::SoundOnly => return Ok(None),
     };
-    let offers = lib.replica_offers(peers)?;
-    let held = lib.replica_held()?;
-    Ok(plan_tracks(&keep, offers, &held))
+    Ok(Some(Ground { offers: lib.replica_offers(peers)?, keep, held: held_on_disk(lib, dirs)? }))
+}
+
+/// The best files of «Избранное»'s tracks whose size no device told, in
+/// its order, at most [`SIZE_ASKS`].
+fn sizes_to_ask(g: &Ground) -> Vec<Offer> {
+    let Keep::Ordered { order, .. } = &g.keep else { return Vec::new() };
+    let best = best_offers(&g.offers);
+    let mut seen = HashSet::new();
+    order.iter().filter(|t| seen.insert(**t)).filter_map(|t| best.get(t)).filter(|o| o.size == 0).take(SIZE_ASKS).cloned().collect()
+}
+
+/// The size of the file `hash` of track `track` on device `peer`, from the
+/// answer to its first byte.
+async fn size_of(sh: &Arc<Shared>, peer: &str, track: TrackId, hash: &str) -> Option<u64> {
+    let uri = format!("/v1/media/tracks/{track}/audio?profile={}&hash={hash}", nikgob_view::MeshFormat::Orig.key());
+    let req = http::Request::get(uri).header(http::header::RANGE, "bytes=0-0").body(Body::empty()).ok()?;
+    let resp = tokio::time::timeout(HEAD_WAIT, sh.request(peer, req)).await.ok()?.ok()?;
+    let total = match resp.status() {
+        http::StatusCode::PARTIAL_CONTENT => header(&resp, "content-range").and_then(|v| v.rsplit_once('/')).and_then(|(_, n)| n.trim().parse().ok()),
+        http::StatusCode::OK => header(&resp, "content-length").and_then(|v| v.trim().parse().ok()),
+        _ => None,
+    };
+    drop(resp);
+    total.filter(|n| *n > 0)
 }
 
 /// The masters to pull: those the devices list that this device neither
@@ -440,15 +581,43 @@ pub(crate) fn plan_masters(lists: &HashMap<String, (Instant, Vec<MasterItem>)>, 
 }
 
 /// A new plan: what `a` wants and this device lacks.
-async fn replan(sh: &Arc<Shared>, lib: &Library, me: &str, a: &Assigned, peers: &[String], st: &mut Puller, ctl: &Ctl) {
-    let songs = {
-        let (l, a, p) = (lib.clone(), a.clone(), peers.to_vec());
-        match blocking(move || plan_songs(&l, &a, &p)).await {
-            Ok(w) => w,
+async fn replan(sh: &Arc<Shared>, lib: &Library, dirs: &Dirs, a: &Assigned, peers: &[String], st: &mut Puller, ctl: &Ctl) {
+    let ground = {
+        let (l, a, p, d) = (lib.clone(), a.clone(), peers.to_vec(), dirs.clone());
+        match blocking(move || ground(&l, &a, &p, &d)).await {
+            Ok(g) => g,
             Err(e) => {
                 log::warn!("replica: the songs to keep not worked out: {e}");
                 st.planned_at = Some(Instant::now());
                 return;
+            }
+        }
+    };
+    let songs = match ground {
+        None => Vec::new(),
+        Some(mut g) => {
+            // «Избранное» charges each file with its real size: one no
+            // device told is asked for it first (one still not known is
+            // never taken as free).
+            let mut sizes: HashMap<String, u64> = HashMap::new();
+            for o in sizes_to_ask(&g) {
+                if let Some(n) = size_of(sh, &o.node_id, o.track_id, &o.file_hash).await {
+                    sizes.insert(o.file_hash.clone(), n);
+                }
+                tokio::time::sleep(PACE).await;
+            }
+            for o in g.offers.iter_mut().filter(|o| o.size == 0) {
+                if let Some(n) = sizes.get(&o.file_hash) {
+                    o.size = *n;
+                }
+            }
+            match tokio::task::spawn_blocking(move || plan_tracks(&g.keep, g.offers, &g.held)).await {
+                Ok(w) => w,
+                Err(e) => {
+                    log::warn!("replica: the songs to keep not worked out: {e}");
+                    st.planned_at = Some(Instant::now());
+                    return;
+                }
             }
         }
     };
@@ -468,8 +637,15 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, me: &str, a: &Assigned, peers: 
         }
         st.masters.retain(|p, _| peers.contains(p));
         let held = {
-            let (l, m) = (lib.clone(), me.to_owned());
-            blocking(move || l.masters_held(&m)).await.unwrap_or_default()
+            let (l, m) = (lib.clone(), dirs.masters.clone());
+            match blocking(move || masters_on_disk(&l, &m)).await {
+                Ok(h) => h,
+                Err(e) => {
+                    log::warn!("replica: the masters here not read: {e}");
+                    st.planned_at = Some(Instant::now());
+                    return;
+                }
+            }
         };
         jobs.extend(plan_masters(&st.masters, &held).into_iter().map(|(item, from)| Job::Master { item, from }));
     }
@@ -496,6 +672,9 @@ async fn replan(sh: &Arc<Shared>, lib: &Library, me: &str, a: &Assigned, peers: 
 
 // ------------------------------------------------------------- the loop
 
+/// A pull's end: the job, the plan it was of, how it went.
+type Done = (Job, u64, Result<u64, Failed>);
+
 /// Pulls what this device should hold, until the mesh stops (it is aborted
 /// then; the running pulls go with it, their parts stay).
 pub(crate) async fn run(sh: Arc<Shared>) {
@@ -503,7 +682,7 @@ pub(crate) async fn run(sh: Arc<Shared>) {
     let me = sh.key.public().to_string();
     let ctl = Arc::new(Ctl::new(RATE));
     let mut st = Puller { saved: load_saved(&sh), ..Puller::default() };
-    let mut tasks: JoinSet<(Job, Result<u64, Failed>)> = JoinSet::new();
+    let mut tasks: JoinSet<Done> = JoinSet::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -511,12 +690,24 @@ pub(crate) async fn run(sh: Arc<Shared>) {
             _ = tick.tick() => {}
             _ = sh.replica.poke.notified() => {}
             Some(done) = tasks.join_next(), if !tasks.is_empty() => match done {
-                Ok((job, Ok(bytes))) => {
+                Ok((job, _, Ok(bytes))) => {
                     log::debug!("replica: {} kept ({bytes} bytes)", job.key());
                     st.failed.remove(&job.key());
                 }
-                Ok((job, Err(Failed::Stopped))) => st.queue.push_front(job),
-                Ok((job, Err(e))) => {
+                // A pull of an older plan is dropped with it.
+                Ok((job, gen, Err(Failed::Stopped))) => {
+                    if gen == ctl.gen.load(Ordering::Relaxed) {
+                        st.queue.push_front(job);
+                    }
+                }
+                Ok((job, gen, Err(Failed::NoRoom))) => {
+                    log::info!("replica: the disk is near its reserve; {} waits", job.key());
+                    st.room_wait = Some(Instant::now() + ROOM_WAIT);
+                    if gen == ctl.gen.load(Ordering::Relaxed) {
+                        st.queue.push_front(job);
+                    }
+                }
+                Ok((job, _, Err(e))) => {
                     log::info!("replica: {} not pulled: {e:?}", job.key());
                     st.fail(job.key());
                 }
@@ -527,9 +718,33 @@ pub(crate) async fn run(sh: Arc<Shared>) {
     }
 }
 
+/// The nearest folder of `p` that exists (itself, or a parent).
+fn existing(p: &Path) -> Option<&Path> {
+    p.ancestors().find(|a| !a.as_os_str().is_empty() && a.exists())
+}
+
+/// Whether each disk of `dirs` keeps [`MIN_FREE`] after `need` more bytes
+/// and the running pulls' `reserved` ones; a disk whose free space is not
+/// known has no room.
+pub(crate) fn has_room(dirs: &[&Path], need: u64, reserved: u64) -> bool {
+    dirs.iter().all(|d| {
+        existing(d).and_then(nikgob_runtime::free_bytes).is_some_and(|free| free >= need.saturating_add(reserved).saturating_add(MIN_FREE))
+    })
+}
+
+/// The old plan goes: no more pulls of it, the running ones stop between
+/// two pieces (their parts stay), the next plan comes at once.
+fn drop_plan(st: &mut Puller, ctl: &Ctl) {
+    ctl.gen.fetch_add(1, Ordering::Relaxed);
+    st.queue.clear();
+    st.plan_for = None;
+    st.planned_at = None;
+    st.cut = false;
+}
+
 /// One turn: whether this device keeps copies now, a plan when due, the
 /// next pulls started, the numbers shown.
-async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mut Puller, tasks: &mut JoinSet<(Job, Result<u64, Failed>)>) {
+async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mut Puller, tasks: &mut JoinSet<Done>) {
     let running = sh.node.lock().is_some();
     let peers = if running { owner_peers(sh) } else { Vec::new() };
     let assigned = assignment(sh, me, st);
@@ -542,11 +757,18 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
     let keeps = assigned.as_ref().filter(|a| a.profile.stores() && a.profile.format().ready());
     let Some(a) = keeps.filter(|_| running && !dirs.library.as_os_str().is_empty()).cloned() else {
         ctl.stop.store(true, Ordering::Relaxed);
-        st.queue.clear();
-        st.planned_at = None;
+        if st.plan_for.is_some() || !st.queue.is_empty() {
+            drop_plan(st, ctl);
+        }
         show(sh, st, ctl, tasks, false);
         return;
     };
+    // A new profile or new pins: what the old plan still had to pull goes
+    // at once.
+    if st.plan_for.as_ref().is_some_and(|p| *p != a) {
+        log::info!("replica: the profile or the pins changed; planned again");
+        drop_plan(st, ctl);
+    }
     let here = sh.replica.paused.lock().clone();
     let paused = paused_by(&here, &owner_presences(sh), me);
     ctl.stop.store(paused, Ordering::Relaxed);
@@ -556,26 +778,34 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
     }
     let due = st.planned_at.is_none_or(|t| t.elapsed() >= PLAN_AGAIN) || st.cut || st.plan_for.as_ref() != Some(&a);
     if st.queue.is_empty() && tasks.is_empty() && due && !peers.is_empty() {
-        replan(sh, lib, me, &a, &peers, st, ctl).await;
+        replan(sh, lib, &dirs, &a, &peers, st, ctl).await;
     }
-    while tasks.len() < AT_ONCE && st.next_start.is_none_or(|t| Instant::now() >= t) {
+    let gen = ctl.gen.load(Ordering::Relaxed);
+    while tasks.len() < AT_ONCE && st.next_start.is_none_or(|t| Instant::now() >= t) && st.room_wait.is_none_or(|t| Instant::now() >= t) {
         let Some(job) = st.queue.pop_front() else { break };
         let from: Vec<String> = job.holders().into_iter().filter(|p| peers.contains(p)).collect();
         if from.is_empty() || st.waiting(&job.key()) {
             continue;
         }
-        if let Some(free) = nikgob_runtime::free_bytes(&dirs.library)
-            && free < job.size().saturating_add(MIN_FREE)
-        {
-            // The disk keeps its room: the file waits (the next turn looks
-            // again).
+        // The disks it writes to (the part's and the file's) keep their
+        // reserve, the running pulls' bytes counted.
+        let dest = match &job {
+            Job::Track(_) => dirs.library.as_path(),
+            Job::Master { .. } => dirs.masters.as_path(),
+        };
+        let need = job.size();
+        if !has_room(&[dirs.library.as_path(), dest], need, ctl.reserved.load(Ordering::Relaxed)) {
+            log::info!("replica: no room kept on the disk (or its free space not known); the pulls wait");
             st.queue.push_front(job);
+            st.room_wait = Some(Instant::now() + ROOM_WAIT);
             break;
         }
+        ctl.reserved.fetch_add(need, Ordering::Relaxed);
         let (sh, lib, me, dirs, ctl) = (sh.clone(), lib.clone(), me.to_owned(), dirs.clone(), ctl.clone());
         tasks.spawn(async move {
-            let out = pull(&sh, &lib, &me, &dirs, &job, &from, &ctl).await;
-            (job, out)
+            let out = pull(&sh, &lib, &me, &dirs, &job, &from, gen, &ctl).await;
+            ctl.reserved.fetch_sub(need, Ordering::Relaxed);
+            (job, gen, out)
         });
         st.next_start = Some(Instant::now() + GAP);
     }
@@ -583,7 +813,7 @@ async fn turn(sh: &Arc<Shared>, lib: &Library, me: &str, ctl: &Arc<Ctl>, st: &mu
 }
 
 /// The transfer as this device shows it (and tells the others).
-fn show(sh: &Shared, st: &mut Puller, ctl: &Ctl, tasks: &JoinSet<(Job, Result<u64, Failed>)>, paused: bool) {
+fn show(sh: &Shared, st: &mut Puller, ctl: &Ctl, tasks: &JoinSet<Done>, paused: bool) {
     let busy = !st.queue.is_empty() || !tasks.is_empty();
     let now = Instant::now();
     let received = ctl.received.load(Ordering::Relaxed);
@@ -614,17 +844,10 @@ fn show(sh: &Shared, st: &mut Puller, ctl: &Ctl, tasks: &JoinSet<(Job, Result<u6
 
 // --------------------------------------------------------------- a pull
 
-/// The folder of the parts, made if need be: its real path, only inside
-/// the library folder.
+/// The folder of the parts, made if need be only inside the library
+/// folder: its real path.
 fn parts_dir(library: &Path) -> std::io::Result<PathBuf> {
-    let dir = library.join(".musiclib").join("replica");
-    std::fs::create_dir_all(&dir)?;
-    let real = std::fs::canonicalize(&dir)?;
-    let root = std::fs::canonicalize(library)?;
-    if !real.starts_with(&root) {
-        return Err(std::io::Error::other(format!("{} is outside the library folder", real.display())));
-    }
-    Ok(real)
+    nikgob_import::fsutil::create_dir_inside(&library.join(".musiclib").join("replica"), library)
 }
 
 /// The BLAKE3 (hex) of the file at `path`.
@@ -647,19 +870,22 @@ pub(crate) fn verify_part(part: &Path, meta: &Path, hash: &str) -> Result<(), St
 
 /// Writes `resp`'s body to `part` (after its first `offset` bytes, or over
 /// it when `offset` is 0), paced, at most `limit` bytes in all; stops
-/// between two pieces when told ([`Failed::Stopped`], the part kept). How
-/// long the part is then.
-pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offset: u64, limit: u64, ctl: &Ctl) -> Result<u64, Failed> {
+/// between two pieces when told or when its plan (`gen`) is no longer the
+/// one ([`Failed::Stopped`]), or when the part's disk comes near its
+/// reserve ([`Failed::NoRoom`]); the part stays. How long the part is then.
+pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offset: u64, limit: u64, gen: u64, ctl: &Ctl) -> Result<u64, Failed> {
     let io = |e: std::io::Error| Failed::Bad(format!("{}: {e}", part.display()));
+    let room = part.parent().unwrap_or(part).to_owned();
     let mut file = if offset == 0 {
         tokio::fs::File::create(part).await.map_err(io)?
     } else {
         tokio::fs::OpenOptions::new().append(true).open(part).await.map_err(io)?
     };
     let mut len = offset;
+    let mut since_look = 0u64;
     let mut body = resp.into_body().into_data_stream();
     loop {
-        if ctl.stop.load(Ordering::Relaxed) {
+        if ctl.halted(gen) {
             file.flush().await.map_err(io)?;
             return Err(Failed::Stopped);
         }
@@ -669,6 +895,14 @@ pub(crate) async fn receive_paced(resp: http::Response<Body>, part: &Path, offse
                 if len > limit {
                     file.flush().await.map_err(io)?;
                     return Err(Failed::Bad("файл больше, чем ожидалось".to_owned()));
+                }
+                since_look += bytes.len() as u64;
+                if since_look >= ROOM_STEP {
+                    since_look = 0;
+                    if nikgob_runtime::free_bytes(&room).is_none_or(|free| free < MIN_FREE) {
+                        file.flush().await.map_err(io)?;
+                        return Err(Failed::NoRoom);
+                    }
                 }
                 file.write_all(&bytes).await.map_err(io)?;
                 ctl.received.fetch_add(bytes.len() as u64, Ordering::Relaxed);
@@ -694,20 +928,28 @@ fn header<'a>(r: &'a http::Response<Body>, name: &str) -> Option<&'a str> {
     r.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
-/// Pulls `job` from the devices `from` (the first that has it), keeps it
-/// and makes it this device's own. Its bytes.
-async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job, from: &[String], ctl: &Ctl) -> Result<u64, Failed> {
+/// Pulls `job` (exactly its file, by its hash) from the devices `from`
+/// (the first that has it), keeps it and makes it this device's own. Its
+/// bytes.
+#[allow(clippy::too_many_arguments)]
+async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job, from: &[String], gen: u64, ctl: &Ctl) -> Result<u64, Failed> {
     let library = dirs.library.clone();
     let dir = tokio::task::spawn_blocking(move || parts_dir(&library))
         .await
         .map_err(|e| Failed::Bad(e.to_string()))?
         .map_err(|e| Failed::Bad(format!("папка частей: {e}")))?;
     let key = job.key();
+    let want = job.hash().to_owned();
     let part = dir.join(format!("{key}.part"));
     let meta = dir.join(format!("{key}.meta"));
-    // A part of an earlier try goes on where it stopped, if the file is
-    // still the one it was (its hash, noted beside it).
+    // A part of an earlier try goes on where it stopped when it is of
+    // this very file (its hash, noted beside it); another one starts over.
     let mut expected: Option<String> = tokio::fs::read_to_string(&meta).await.ok().and_then(|s| clean_hash(&s));
+    if expected.as_deref().is_some_and(|h| h != want) {
+        let _ = tokio::fs::remove_file(&part).await;
+        let _ = tokio::fs::remove_file(&meta).await;
+        expected = None;
+    }
     let mut offset = match expected {
         Some(_) => tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0),
         None => 0,
@@ -726,11 +968,13 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
         }
         (offset, expected) = (0, None);
     }
+    // Exactly the planned file: its size when it is known.
+    let limit = if job.size() > 0 { job.size() } else { FILE_MAX };
     let mut not_there = 0usize;
     'devices: for peer in from {
         for _ in 0..3 {
             let uri = match job {
-                Job::Track(w) => format!("/v1/media/tracks/{}/audio?profile={}&hash=1", w.track_id, nikgob_view::MeshFormat::Orig.key()),
+                Job::Track(w) => format!("/v1/media/tracks/{}/audio?profile={}&hash={}", w.track_id, nikgob_view::MeshFormat::Orig.key(), w.file_hash),
                 Job::Master { item, .. } => format!("/v1/replica/masters/{}", item.hash),
             };
             let mut b = http::Request::get(uri);
@@ -766,28 +1010,18 @@ async fn pull(sh: &Arc<Shared>, lib: &Library, me: &str, dirs: &Dirs, job: &Job,
             let Some(hash) = header(&resp, nikgob_api::HASH_HEADER).and_then(clean_hash) else {
                 return Err(Failed::Bad("то устройство не сказало хэш файла".to_owned()));
             };
-            if let Job::Master { item, .. } = job
-                && item.hash != hash
-            {
+            if hash != want {
                 return Err(Failed::Bad("не тот файл".to_owned()));
             }
             let e = clean_ext(header(&resp, nikgob_api::EXT_HEADER).unwrap_or(""));
-            if expected.as_deref().is_some_and(|h| h != hash) {
-                // The file there changed since the part began.
-                drop(resp);
-                let _ = tokio::fs::remove_file(&part).await;
-                (offset, expected) = (0, None);
-                continue;
-            }
             let from_byte = if status == http::StatusCode::PARTIAL_CONTENT { offset } else { 0 };
             if expected.is_none() {
                 tokio::fs::write(&meta, &hash).await.map_err(|e| Failed::Bad(format!("{}: {e}", meta.display())))?;
                 let _ = tokio::fs::write(meta.with_extension("ext"), &e).await;
-                expected = Some(hash.clone());
                 ext = Some(e.clone());
             }
             ctl.received.fetch_add(from_byte, Ordering::Relaxed);
-            let len = receive_paced(resp, &part, from_byte, size_limit(job.size()), ctl).await?;
+            let len = receive_paced(resp, &part, from_byte, limit, gen, ctl).await?;
             let (p, m, h) = (part.clone(), meta.clone(), hash.clone());
             tokio::task::spawn_blocking(move || verify_part(&p, &m, &h)).await.map_err(|e| Failed::Bad(e.to_string()))?.map_err(Failed::Bad)?;
             let e = ext.clone().unwrap_or(e);
@@ -825,44 +1059,36 @@ fn same_file(path: &Path, size: u64, hash: &str) -> bool {
 }
 
 /// Puts the checked `part` at `target`, or at `target (2)`… when the name
-/// is another file's — never over anything; the very file there already
-/// is taken as it is (the part goes). Only inside `root`. Where it is, and
-/// whether the part was moved there (false: the file was there already).
+/// is another file's — never over anything, its folders made only inside
+/// `root`, a copy across disks checked before the part goes; the very file
+/// there already (a plain file inside `root`) is taken as it is (the part
+/// goes). Where it is, and whether the part was moved there (false: the
+/// file was there already).
 pub(crate) fn put_in_place(part: &Path, target: &Path, hash: &str, size: u64, root: &Path) -> Result<(PathBuf, bool), String> {
     let dir = target.parent().ok_or_else(|| format!("{} has no folder", target.display()))?;
-    nikgob_import::fsutil::create_dir_all(dir).map_err(|e| e.to_string())?;
-    if !nikgob_import::fsutil::inside_roots(dir, &[root]) {
-        return Err(format!("{} is outside the library", dir.display()));
-    }
-    if same_file(target, size, hash) {
+    nikgob_import::fsutil::create_dir_inside(dir, root).map_err(|e| e.to_string())?;
+    if nikgob_import::fsutil::plain_file_inside(target, root) && same_file(target, size, hash) {
         let _ = std::fs::remove_file(part);
         return Ok((target.to_owned(), false));
     }
-    let reserved = nikgob_import::fsutil::reserve_unique(target).map_err(|e| e.to_string())?;
-    if let Err(e) = nikgob_import::fsutil::move_file(part, &reserved) {
-        let _ = nikgob_import::fsutil::remove_file(&reserved);
-        return Err(e.to_string());
+    let placed = nikgob_import::fsutil::move_unique_verified(part, target, hash).map_err(|e| e.to_string())?;
+    if !nikgob_import::fsutil::plain_file_inside(&placed, root) {
+        let _ = nikgob_import::fsutil::move_new_verified(&placed, part, hash);
+        return Err(format!("{} is outside {}", placed.display(), root.display()));
     }
-    Ok((reserved, true))
+    Ok((placed, true))
 }
 
 /// A flat master, `{hash}.<ext>` right in `root`: only under that very
 /// name (a master kept flat is found by it), never over another file.
 fn put_flat(part: &Path, root: &Path, hash: &str, ext: &str, size: u64) -> Result<(PathBuf, bool), String> {
-    nikgob_import::fsutil::create_dir_all(root).map_err(|e| e.to_string())?;
+    nikgob_import::fsutil::create_dir_inside(root, root).map_err(|e| e.to_string())?;
     let target = root.join(format!("{hash}.{ext}"));
-    if same_file(&target, size, hash) {
+    if nikgob_import::fsutil::plain_file_inside(&target, root) && same_file(&target, size, hash) {
         let _ = std::fs::remove_file(part);
         return Ok((target, false));
     }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&target) {
-        Ok(_) => {}
-        Err(e) => return Err(format!("{}: {e}", target.display())),
-    }
-    if let Err(e) = nikgob_import::fsutil::move_file(part, &target) {
-        let _ = nikgob_import::fsutil::remove_file(&target);
-        return Err(e.to_string());
-    }
+    nikgob_import::fsutil::move_new_verified(part, &target, hash).map_err(|e| format!("{}: {e}", target.display()))?;
     Ok((target, true))
 }
 
@@ -890,7 +1116,7 @@ pub(crate) fn place_song(lib: &Library, library: &Path, me: &str, want: &Want, p
     if let Err(e) = lib.put_pulled_file(&s, me) {
         // Only what was moved goes back (a file found there stays).
         if moved {
-            let _ = nikgob_import::fsutil::move_file(&placed, part);
+            let _ = nikgob_import::fsutil::move_new_verified(&placed, part, hash);
         }
         return Err(e.to_string());
     }
@@ -913,7 +1139,7 @@ fn place_master(lib: &Library, masters: &Path, me: &str, item: &MasterItem, part
     let path = by_name.then(|| placed.to_string_lossy().into_owned());
     if let Err(e) = lib.put_pulled_masters(item, path.as_deref(), me) {
         if moved {
-            let _ = nikgob_import::fsutil::move_file(&placed, part);
+            let _ = nikgob_import::fsutil::move_new_verified(&placed, part, &item.hash);
         }
         return Err(e.to_string());
     }
@@ -974,7 +1200,9 @@ async fn audit_peer(sh: &Arc<Shared>, lib: &Library, peer: &str) -> Result<bool,
         let Some(last) = hashes.last().cloned() else { break };
         let ask = CheckAsk { hashes, rehash: false };
         let a: CheckAnswer = post_json(sh, peer, "/v1/replica/check", &ask, ASK_WAIT).await?;
-        let (l, p, asked) = (lib.clone(), peer.to_owned(), ask.hashes);
+        // A file not read this time is not one gone: its row stays.
+        let asked: Vec<String> = ask.hashes.into_iter().filter(|h| !a.deferred.contains(h)).collect();
+        let (l, p) = (lib.clone(), peer.to_owned());
         changed |= blocking(move || l.set_node_replicas(&p, &asked, &a.held)).await?;
         after = last;
         tokio::time::sleep(PACE).await;
@@ -1006,14 +1234,24 @@ pub(crate) async fn recheck(sh: Arc<Shared>, card: u64, hashes: Vec<String>, nee
     for peer in &peers {
         let mut held = Vec::new();
         let mut ok = true;
-        for chunk in hashes.chunks(RECHECK_BATCH) {
-            let ask = CheckAsk { hashes: chunk.to_vec(), rehash: true };
+        // A batch first; a file it did not read (the budget ran out) is
+        // asked again alone (a file larger than the budget is read so).
+        let mut asks: VecDeque<Vec<String>> = hashes.chunks(RECHECK_BATCH).map(<[String]>::to_vec).collect();
+        let mut alone: HashSet<String> = HashSet::new();
+        while let Some(chunk) = asks.pop_front() {
+            let ask = CheckAsk { hashes: chunk.clone(), rehash: true };
             match post_json::<CheckAnswer>(&sh, peer, "/v1/replica/check", &ask, RECHECK_WAIT).await {
                 Ok(a) => {
+                    let read: Vec<String> = chunk.iter().filter(|h| !a.deferred.contains(h)).cloned().collect();
                     if let Some(lib) = sh.library.clone() {
-                        let (p, c, h) = (peer.clone(), chunk.to_vec(), a.held.clone());
+                        let (p, c, h) = (peer.clone(), read, a.held.clone());
                         if let Err(e) = blocking(move || lib.set_node_replicas(&p, &c, &h)).await {
                             log::warn!("replica: the copies on {peer} not noted: {e}");
+                        }
+                    }
+                    for d in a.deferred.iter().filter(|d| chunk.contains(d)) {
+                        if alone.insert(d.clone()) {
+                            asks.push_back(vec![d.clone()]);
                         }
                     }
                     held.extend(a.held);
@@ -1046,8 +1284,7 @@ pub(crate) async fn recheck(sh: Arc<Shared>, card: u64, hashes: Vec<String>, nee
 
 #[cfg(test)]
 mod tests {
-    use nikgob_core::model::{Artist, ArtistCredit, Release, Track, TrackId};
-    use nikgob_library::replica::Offer;
+    use nikgob_core::model::{Artist, ArtistCredit, Master, Release, Track};
 
     use super::*;
     use crate::presence::Presence;
@@ -1121,19 +1358,49 @@ mod tests {
         std::fs::write(&meta, &hash).unwrap();
         let ctl = Arc::new(Ctl::new(RATE));
         let chunks: Vec<Vec<u8>> = bytes.chunks(10_000).map(<[u8]>::to_vec).collect();
-        let first = receive_paced(chunks_body(chunks.clone(), 1, ctl.clone()), &part, 0, size_limit(30_000), &ctl).await;
+        let first = receive_paced(chunks_body(chunks.clone(), 1, ctl.clone()), &part, 0, 30_000, 0, &ctl).await;
         assert_eq!(first, Err(Failed::Stopped));
         let kept = std::fs::metadata(&part).unwrap().len();
         assert_eq!(kept, 20_000, "the pieces before the pause stay");
         ctl.stop.store(false, Ordering::Relaxed);
         let rest = http::Response::new(Body::from(bytes[kept as usize..].to_vec()));
-        assert_eq!(receive_paced(rest, &part, kept, size_limit(30_000), &ctl).await, Ok(30_000));
+        assert_eq!(receive_paced(rest, &part, kept, 30_000, 0, &ctl).await, Ok(30_000));
         assert_eq!(ctl.received.load(Ordering::Relaxed), 30_000);
         assert!(verify_part(&part, &meta, &hash).is_ok());
 
         std::fs::write(&part, &bytes[..100]).unwrap();
         assert_eq!(verify_part(&part, &meta, &hash).unwrap_err(), "файл пришёл повреждённым");
         assert!(!part.exists() && !meta.exists());
+
+        // A new profile or new pins: a pull of the old plan stops.
+        ctl.gen.store(1, Ordering::Relaxed);
+        let old = http::Response::new(Body::from(bytes.clone()));
+        assert_eq!(receive_paced(old, &dir.path().join("o.part"), 0, 30_000, 0, &ctl).await, Err(Failed::Stopped));
+        // Never more than the planned file's bytes.
+        let big = http::Response::new(Body::from(bytes.clone()));
+        assert!(matches!(receive_paced(big, &dir.path().join("b.part"), 0, 100, 1, &ctl).await, Err(Failed::Bad(_))));
+    }
+
+    /// A disk whose free space is not known gets nothing; the reserve and
+    /// the running pulls' bytes are kept.
+    #[test]
+    fn a_disk_keeps_its_reserve() {
+        assert!(!has_room(&[Path::new("")], 0, 0), "free space not known");
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_room(&[dir.path()], u64::MAX / 2, 0), "never past the reserve");
+        assert!(!has_room(&[dir.path()], 0, u64::MAX / 2), "the running pulls' bytes count");
+    }
+
+    /// The pauses asked here are kept and come back after a restart.
+    #[test]
+    fn pauses_asked_here_outlive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(PAUSED);
+        let r = ReplicaShared::load(file.clone());
+        r.set_paused("pi", true);
+        r.set_paused("tv", true);
+        r.set_paused("tv", false);
+        assert_eq!(ReplicaShared::load(file).pause_list(), ["pi"]);
     }
 
     /// The pulls together keep to the rate.
@@ -1162,6 +1429,8 @@ mod tests {
     fn want(t: TrackId, hash: &str, size: u64) -> Want {
         Want {
             track_id: t,
+            file_hash: hash.into(),
+            size,
             offers: vec![Offer {
                 track_id: t,
                 node_id: "pc".into(),
@@ -1202,7 +1471,9 @@ mod tests {
         let s = lib.active_source(t.id).unwrap().unwrap();
         assert_eq!(s.locator, placed.to_string_lossy());
         assert_eq!((s.file_hash.as_deref(), s.quality_score, s.codec), (Some(hash.as_str()), 70, Codec::Opus));
-        assert_eq!(lib.replica_held().unwrap().get(&t.id), Some(&(bytes.len() as u64)));
+        let dirs = Dirs { library: library.clone(), masters: library.join(".musiclib").join("masters") };
+        let held = held_on_disk(&lib, &dirs).unwrap();
+        assert_eq!(held[&t.id].iter().map(|f| f.file_hash.as_deref()).collect::<Vec<_>>(), [Some(hash.as_str())]);
         assert!(lib.replica_verified(&hash, "me").unwrap().is_some());
 
         // The same file at the name already: taken as it is.
@@ -1237,6 +1508,45 @@ mod tests {
         let disc = MasterItem { hash: ihash.clone(), codec: "flac".into(), size: image.len() as u64, tracks: vec![TrackId::new(), TrackId::new()] };
         let flat = place_master(&lib, &masters, "me", &disc, &part, "flac").unwrap();
         assert_eq!(flat, masters.join(format!("{ihash}.flac")));
-        assert!(lib.masters_held("me").unwrap().contains(&ihash), "its copy, though its tracks are not here yet");
+        let here = masters_on_disk(&lib, &masters).unwrap();
+        assert!(here.contains(&ihash), "its copy, though its tracks are not here yet");
+        assert!(here.contains(&hash));
+    }
+
+    /// What this device holds is what is on its disk: a source or a master
+    /// row whose file is gone is not held, a flat master file is.
+    #[test]
+    fn only_files_on_the_disk_are_held() {
+        let lib = Library::open_in_memory().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dirs = Dirs { library: root.path().join("Music"), masters: root.path().join("Music").join(".musiclib").join("masters") };
+        std::fs::create_dir_all(&dirs.masters).unwrap();
+        let t = song(&lib);
+        let here = dirs.library.join("a.opus");
+        std::fs::write(&here, b"a").unwrap();
+        for (loc, h) in [(here.clone(), "ha"), (dirs.library.join("gone.opus"), "hg")] {
+            let mut s = Source::new(t.id, SourceKind::LocalFile, loc.to_string_lossy().into_owned(), Codec::Opus);
+            s.file_hash = Some(h.into());
+            lib.add_source(&s).unwrap();
+        }
+        let held = held_on_disk(&lib, &dirs).unwrap();
+        assert_eq!(held[&t.id].iter().map(|f| f.file_hash.as_deref()).collect::<Vec<_>>(), [Some("ha")]);
+
+        let flat = "f".repeat(64);
+        std::fs::write(dirs.masters.join(format!("{flat}.flac")), b"x").unwrap();
+        let gone = dirs.masters.join("Кино").join("01.flac");
+        lib.put_master(&Master {
+            track_id: t.id,
+            codec: Codec::Flac,
+            file_hash: "e".repeat(64),
+            size_bytes: 1,
+            origin: None,
+            file_path: Some(gone.to_string_lossy().into_owned()),
+            replicas: Vec::new(),
+        })
+        .unwrap();
+        let m = masters_on_disk(&lib, &dirs.masters).unwrap();
+        assert!(m.contains(&flat));
+        assert!(!m.contains(&"e".repeat(64)), "its file is gone: pulled again");
     }
 }

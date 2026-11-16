@@ -21,6 +21,9 @@ log.workspace = true
 iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
 # The instances on the home network: `_nikgob._udp.local.`.
 mdns-sd = "0.21.7"
+# This computer's interfaces: only the home network's addresses are
+# announced and dialled (mdns-sd's own dependency).
+if-addrs = "0.15"
 # The pairing's password-authenticated key exchange (RustCrypto PAKEs).
 spake2 = { version = "0.4", features = ["getrandom"] }
 blake3 = "1.8"
