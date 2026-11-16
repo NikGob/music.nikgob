@@ -12,15 +12,21 @@
 //! no window: the headless player starts it the same way.
 
 mod auth;
+mod confirm;
+mod discover;
 mod docs;
+mod downloads;
 mod error;
 mod events;
 mod library;
+mod mcp;
 mod media;
+mod mutate;
 mod outputs;
 mod play;
 mod routes;
 mod state;
+mod stats;
 pub mod tokens;
 
 use std::sync::Arc;
@@ -33,7 +39,7 @@ use tokio::sync::{oneshot, watch};
 
 use nikgob_library::Library;
 use nikgob_runtime::RuntimeHandle;
-use nikgob_view::Command;
+use nikgob_view::{ApiActor, ApiReply, Command};
 
 pub use auth::Caller;
 pub use tokens::create_token;
@@ -142,6 +148,13 @@ pub(crate) struct Shared {
     /// The last acknowledgement sent; held while a request is sent, so the
     /// loop gets the requests in the order of their acknowledgements.
     sent: parking_lot::Mutex<u64>,
+    /// The plans of destructive requests waiting for their confirmation.
+    pub confirms: confirm::Store,
+    /// Lookups on the services and the sources, per token (slower).
+    pub lookups: auth::Limiter,
+    /// The library's sound vectors for similar tracks, made at most every
+    /// few minutes.
+    pub sound: stats::SoundCache,
 }
 
 impl Shared {
@@ -156,6 +169,9 @@ impl Shared {
             uses: auth::Uses::default(),
             sse_clients: AtomicUsize::new(0),
             sent: parking_lot::Mutex::new(0),
+            confirms: confirm::Store::default(),
+            lookups: auth::Limiter::new(auth::LOOKUPS_PER_S, auth::LOOKUP_BURST),
+            sound: stats::SoundCache::default(),
         }
     }
 
@@ -166,11 +182,17 @@ impl Shared {
     /// Not shown in time: an error, not a state the commands may not have
     /// made.
     pub async fn run(&self, commands: Vec<Command>) -> Result<(), error::ApiError> {
+        self.run_by(None, commands).await
+    }
+
+    /// [`Self::run`] of a request whose token plays for `actor`: the loop
+    /// keeps it while the commands run (for the history).
+    pub async fn run_by(&self, actor: Option<ApiActor>, commands: Vec<Command>) -> Result<(), error::ApiError> {
         let mut changes = self.wake.subscribe();
         let ack = {
             let mut sent = self.sent.lock();
             *sent += 1;
-            self.rt.send(Command::ApiRun { commands, ack: *sent });
+            self.rt.send(Command::ApiRun { commands, ack: *sent, actor });
             *sent
         };
         let deadline = tokio::time::Instant::now() + SYNC_WAIT;
@@ -185,6 +207,38 @@ impl Shared {
                     return Err(error::ApiError::timeout());
                 }
             }
+        }
+    }
+
+    /// Sends the command `make` builds around a reply (as one request of
+    /// `actor`), then waits at most `wait` for the loop's answer: work of
+    /// its own (a lookup, a read of files) that ends after the loop took
+    /// the request.
+    pub async fn ask(&self, actor: Option<ApiActor>, wait: Duration, make: impl FnOnce(ApiReply) -> Command) -> Result<serde_json::Value, error::ApiError> {
+        let (tx, rx) = oneshot::channel();
+        let slot = Arc::new(parking_lot::Mutex::new(Some(tx)));
+        let reply = ApiReply::new(move |answer| {
+            if let Some(tx) = slot.lock().take() {
+                let _ = tx.send(answer);
+            }
+        });
+        self.run_by(actor, vec![make(reply)]).await?;
+        match tokio::time::timeout(wait, rx).await {
+            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Err(why))) => Err(error::ApiError::of(axum::http::StatusCode::BAD_GATEWAY, "lookup_failed", why)),
+            // The loop dropped the request without an answer.
+            Ok(Err(_)) => Err(error::ApiError::internal("Плеер не ответил на запрос")),
+            Err(_) => Err(error::ApiError::of(axum::http::StatusCode::GATEWAY_TIMEOUT, "lookup_timeout", "Поиск не успел за отведённое время")),
+        }
+    }
+
+    /// Whether `caller` may make another lookup on the services now
+    /// (`429` otherwise).
+    pub fn lookup_allowed(&self, caller: &Caller) -> Result<(), error::ApiError> {
+        if self.lookups.allow(&caller.token_id, std::time::Instant::now()) {
+            Ok(())
+        } else {
+            Err(error::ApiError::of(axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Слишком частые поиски в сервисах: подожди немного"))
         }
     }
 
@@ -224,10 +278,23 @@ async fn not_found() -> error::ApiError {
     error::ApiError::not_found("Нет такого адреса")
 }
 
-/// The routes: `/v1` behind the token, the docs open.
+/// The routes: `/v1` and `/mcp` behind the token, the docs open.
 pub(crate) fn router(sh: Arc<Shared>, closing: Closing) -> Router {
-    let v1 = Router::new()
+    let v1 = v1_router(sh.clone(), closing);
+    // MCP calls the `/v1` routes in-process with the caller's token.
+    let mcp = Router::new()
+        .route("/mcp", post(mcp::post).get(mcp::other).delete(mcp::other))
+        .route_layer(axum::middleware::from_fn_with_state(sh.clone(), auth::guard))
+        .layer(axum::Extension(mcp::Inner(v1.clone())))
+        .with_state(sh);
+    Router::new().merge(v1).merge(mcp).merge(docs::swagger()).fallback(not_found)
+}
+
+/// The `/v1` routes behind the token.
+fn v1_router(sh: Arc<Shared>, closing: Closing) -> Router {
+    Router::new()
         .route("/v1/state", get(routes::state))
+        .route("/v1/token", get(auth::whoami))
         .route("/v1/events", get(events::events))
         .route("/v1/player/play", post(routes::play))
         .route("/v1/player/pause", post(routes::pause))
@@ -250,14 +317,27 @@ pub(crate) fn router(sh: Arc<Shared>, closing: Closing) -> Router {
         .route("/v1/tracks/{id}/lyrics", get(library::lyrics))
         .route("/v1/albums/{id}", get(library::album))
         .route("/v1/artists/{id}", get(library::artist))
-        .route("/v1/playlists", get(library::playlists))
-        .route("/v1/playlists/{id}", get(library::playlist))
+        .route("/v1/playlists", get(library::playlists).post(mutate::create_playlist))
+        .route("/v1/playlists/{id}", get(library::playlist).put(mutate::rename_playlist).delete(mutate::delete_playlist))
+        .route("/v1/playlists/{id}/tracks", post(mutate::add_to_playlist))
+        .route("/v1/playlists/{id}/remove", post(mutate::remove_from_playlist))
+        .route("/v1/library/feedback", post(mutate::feedback))
+        .route("/v1/library/retag", post(mutate::retag))
+        .route("/v1/library/trash", post(mutate::trash))
+        .route("/v1/stats/listening", get(stats::listening))
+        .route("/v1/stats/forgotten", get(stats::forgotten))
+        .route("/v1/stats/health", get(stats::health))
+        .route("/v1/stats/similar", get(stats::similar))
+        .route("/v1/discover/search", get(discover::search))
+        .route("/v1/discover/artists/{id}/discography", get(discover::discography))
+        .route("/v1/discover/share", get(discover::share))
+        .route("/v1/downloads", get(downloads::inspect).post(downloads::enqueue))
+        .route("/v1/downloads/sources", get(downloads::sources))
         .route("/v1/media/tracks/{id}/audio", get(media::audio))
         .route("/v1/media/albums/{id}/cover", get(media::cover))
         .route_layer(axum::middleware::from_fn_with_state(sh.clone(), auth::guard))
         .layer(axum::Extension(closing))
-        .with_state(sh);
-    Router::new().merge(v1).merge(docs::swagger()).fallback(not_found)
+        .with_state(sh)
 }
 
 /// The address to listen on: `ip:port` (`[ip]:port` for IPv6).

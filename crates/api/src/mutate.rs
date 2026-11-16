@@ -1,0 +1,753 @@
+//! Changes of the library, each the command the window's buttons send:
+//! likes and the rest of the feedback, playlists, tags and the Trash. The
+//! additive and reversible ones act at once; the destructive ones (tags,
+//! the Trash, removing from, renaming or deleting a playlist) answer the
+//! exact plan and a one-time `confirm_token` first ([`crate::confirm`]).
+//! Nothing here deletes a file for good: the Trash only, and nothing at
+//! all while the Trash is off.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use axum::Extension;
+use axum::body::Bytes;
+use axum::extract::{Path, RawQuery, State};
+use axum::http::StatusCode;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use utoipa::ToSchema;
+
+use nikgob_core::model::{ArtistId, LikeTarget, PlaylistId, ReleaseId, TrackId};
+use nikgob_core::streaming::{RemoteId, Service};
+use nikgob_library::Library;
+use nikgob_view::{Command, LIKED_PLAYLIST, RecTarget, TagPatch};
+
+use crate::Shared;
+use crate::auth::Caller;
+use crate::confirm::{PlanAnswer, args_hash};
+use crate::error::{ApiError, Json, body, query_value};
+use crate::library::{LIKED_ID, Playlist, blocking, db};
+
+/// Tracks one retag may change at most.
+const RETAG_MAX: usize = 200;
+/// Tracks one request may move to the Trash at most.
+const TRASH_MAX: usize = 2000;
+/// Names a plan lists at most (the count says the rest).
+const PLAN_NAMES: usize = 50;
+
+/// `service:id` of a service's track or album (`spotify:4uLU…`).
+pub fn remote_id(s: &str) -> Option<RemoteId> {
+    let (service, id) = s.trim().split_once(':')?;
+    let service = Service::parse(service)?;
+    (!id.is_empty()).then(|| RemoteId::new(service, id))
+}
+
+fn bad_id() -> ApiError {
+    ApiError::bad_request("Неверный id")
+}
+
+fn gone() -> ApiError {
+    ApiError::not_found("Ничего не нашлось")
+}
+
+fn track_ids(ids: &[String]) -> Result<Vec<TrackId>, ApiError> {
+    ids.iter().map(|s| s.trim().parse::<TrackId>().map_err(|_| ApiError::bad_request(format!("Неверный id песни: {s}")))).collect()
+}
+
+fn release_ids(ids: &[String]) -> Result<Vec<ReleaseId>, ApiError> {
+    ids.iter().map(|s| s.trim().parse::<ReleaseId>().map_err(|_| ApiError::bad_request(format!("Неверный id альбома: {s}")))).collect()
+}
+
+fn remote_ids(ids: &[String]) -> Result<Vec<RemoteId>, ApiError> {
+    ids.iter().map(|s| remote_id(s).ok_or_else(|| ApiError::bad_request(format!("Неверный id сервиса (нужно service:id): {s}")))).collect()
+}
+
+/// The playlist of an API id (`liked` is «Любимые»).
+fn playlist_id(s: &str) -> Result<PlaylistId, ApiError> {
+    if s == LIKED_ID { Ok(LIKED_PLAYLIST) } else { s.parse().map_err(|_| bad_id()) }
+}
+
+/// «1 трек», «3 трека», «12 треков».
+pub fn tracks_word(n: usize) -> String {
+    let word = match (n % 10, n % 100) {
+        (1, x) if x != 11 => "трек",
+        (2..=4, x) if !(12..=14).contains(&x) => "трека",
+        _ => "треков",
+    };
+    format!("{n} {word}")
+}
+
+// ---------------------------------------------------------------- feedback
+
+/// `POST /v1/library/feedback`.
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+pub struct FeedbackBody {
+    /// `like`, `unlike`, `dislike`, `undislike`, `dont_recommend`,
+    /// `recommend`, `add_to_library`, `remove_from_library`.
+    pub action: Option<String>,
+    /// `track`, `album`, `artist`.
+    pub kind: Option<String>,
+    /// A library id, or `service:id` of a service's track or album.
+    pub id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+pub struct DoneAnswer {
+    /// `done`.
+    pub status: String,
+    #[schema(value_type = Object)]
+    pub result: Value,
+}
+
+fn done(result: Value) -> Json<DoneAnswer> {
+    Json(DoneAnswer { status: "done".to_owned(), result })
+}
+
+/// The thing feedback is about.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Target {
+    Track(TrackId),
+    Album(ReleaseId),
+    Artist(ArtistId),
+    StreamTrack(RemoteId),
+    StreamAlbum(RemoteId),
+}
+
+pub fn target_of(kind: &str, id: &str) -> Result<Target, ApiError> {
+    if let Some(r) = remote_id(id) {
+        return match kind {
+            "track" => Ok(Target::StreamTrack(r)),
+            "album" => Ok(Target::StreamAlbum(r)),
+            _ => Err(ApiError::bad_request("Исполнителя сервиса можно отметить только по id библиотеки")),
+        };
+    }
+    match kind {
+        "track" => id.trim().parse().map(Target::Track).map_err(|_| bad_id()),
+        "album" => id.trim().parse().map(Target::Album).map_err(|_| bad_id()),
+        "artist" => id.trim().parse().map(Target::Artist).map_err(|_| bad_id()),
+        _ => Err(ApiError::bad_request("kind: track, album или artist")),
+    }
+}
+
+/// The command of feedback `action` on `t`: the one the window's button
+/// sends (each with its «Отменить»).
+pub fn feedback_command(action: &str, t: &Target) -> Result<Command, ApiError> {
+    let no = || ApiError::bad_request(format!("{action} нельзя для такого объекта"));
+    Ok(match (action, t) {
+        ("like" | "unlike", Target::Track(id)) => Command::Like(LikeTarget::Track(*id), action == "like"),
+        ("like" | "unlike", Target::Album(id)) => Command::Like(LikeTarget::Release(*id), action == "like"),
+        ("like" | "unlike", Target::Artist(id)) => Command::Like(LikeTarget::Artist(*id), action == "like"),
+        ("like" | "unlike", Target::StreamTrack(r)) => Command::LikeStream { track: r.clone(), on: action == "like" },
+        ("like" | "unlike", Target::StreamAlbum(r)) => Command::LikeStreamAlbum { album: r.clone(), on: action == "like" },
+        ("dislike" | "undislike", Target::Track(id)) => Command::Dislike { track: *id, dislike: action == "dislike", sure: true, relike: false },
+        ("dont_recommend" | "recommend", Target::Track(id)) => Command::RecFeedback { target: RecTarget::Track(*id), dislike: action == "dont_recommend" },
+        ("dont_recommend" | "recommend", Target::Artist(id)) => Command::RecFeedback { target: RecTarget::Artist(*id), dislike: action == "dont_recommend" },
+        ("dont_recommend" | "recommend", Target::StreamTrack(r)) => {
+            Command::RecFeedback { target: RecTarget::StreamTrack(r.clone()), dislike: action == "dont_recommend" }
+        }
+        ("add_to_library" | "remove_from_library", Target::Track(id)) => Command::TrackInLibrary { track: *id, on: action == "add_to_library" },
+        ("add_to_library" | "remove_from_library", Target::Album(id)) => Command::AddWholeAlbum { id: *id, on: action == "add_to_library" },
+        ("add_to_library" | "remove_from_library", Target::StreamTrack(r)) => Command::StreamInLibrary { track: r.clone(), on: action == "add_to_library" },
+        (
+            "like" | "unlike" | "dislike" | "undislike" | "dont_recommend" | "recommend" | "add_to_library" | "remove_from_library",
+            _,
+        ) => return Err(no()),
+        _ => return Err(ApiError::bad_request("action: like, unlike, dislike, undislike, dont_recommend, recommend, add_to_library или remove_from_library")),
+    })
+}
+
+/// The name of a library thing; `not_found` when it is not there.
+fn title_of(lib: &Library, t: &Target) -> Result<Option<String>, ApiError> {
+    Ok(match t {
+        Target::Track(id) => Some(lib.get_track_row(*id).map_err(db)?.ok_or_else(gone)?.title),
+        Target::Album(id) => Some(lib.get_release(*id).map_err(db)?.ok_or_else(gone)?.title),
+        Target::Artist(id) => Some(lib.get_artist(*id).map_err(db)?.ok_or_else(gone)?.name),
+        Target::StreamTrack(_) | Target::StreamAlbum(_) => None,
+    })
+}
+
+/// Likes, «Не нравится», «Не рекомендовать», «В библиотеку»: reversible,
+/// each with the app's «Отменить».
+#[utoipa::path(
+    post,
+    path = "/v1/library/feedback",
+    tag = "library-edit",
+    request_body(content = FeedbackBody, content_type = "application/json"),
+    responses((status = 200, body = DoneAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn feedback(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<DoneAnswer>, ApiError> {
+    let b: FeedbackBody = body(&bytes)?;
+    let (Some(action), Some(kind), Some(id)) = (b.action, b.kind, b.id) else {
+        return Err(ApiError::bad_request("Нужны action, kind и id"));
+    };
+    let target = target_of(kind.trim(), &id)?;
+    let command = feedback_command(action.trim(), &target)?;
+    let lib = sh.lib.clone();
+    let t = target.clone();
+    let title = blocking(move || title_of(&lib, &t)).await?;
+    sh.run_by(Some(caller.actor), vec![command]).await?;
+    Ok(done(json!({"action": action.trim(), "kind": kind.trim(), "id": id.trim(), "title": title})))
+}
+
+// ---------------------------------------------------------------- playlists
+
+/// `POST /v1/playlists` and `POST /v1/playlists/{id}/tracks`.
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+pub struct PlaylistAddBody {
+    /// A new playlist's name (`POST /v1/playlists`).
+    pub name: Option<String>,
+    #[serde(default)]
+    pub track_ids: Vec<String>,
+    /// Its tracks in album order.
+    pub album_id: Option<String>,
+    /// Service tracks, `service:id` (they join the library).
+    #[serde(default)]
+    pub remote_track_ids: Vec<String>,
+}
+
+/// A playlist as it is now.
+fn playlist_now(lib: &Library, id: PlaylistId) -> Result<Playlist, ApiError> {
+    if id == LIKED_PLAYLIST {
+        return Ok(Playlist { id: LIKED_ID.to_owned(), name: nikgob_library::LIKED_PLAYLIST_NAME.to_owned(), track_count: lib.liked_count().map_err(db)? });
+    }
+    let p = lib.get_playlist(id).map_err(db)?.ok_or_else(|| ApiError::not_found("Такого плейлиста нет"))?;
+    let count = lib.list_playlists().map_err(db)?.into_iter().find(|s| s.id == Some(id)).map_or(0, |s| s.track_count);
+    Ok(Playlist { id: p.id.to_string(), name: p.name, track_count: count })
+}
+
+/// Checks the songs and the album exist; the album's songs in order.
+fn album_tracks(lib: &Library, album: Option<&str>) -> Result<Vec<TrackId>, ApiError> {
+    let Some(a) = album else { return Ok(Vec::new()) };
+    let id: ReleaseId = a.trim().parse().map_err(|_| bad_id())?;
+    lib.get_release(id).map_err(db)?.ok_or_else(|| ApiError::not_found("Такого альбома нет"))?;
+    Ok(lib.tracks_of_release(id).map_err(db)?.into_iter().map(|t| t.id).collect())
+}
+
+fn known_tracks(lib: &Library, ids: &[TrackId]) -> Result<(), ApiError> {
+    let found = lib.get_track_rows(ids).map_err(db)?;
+    match ids.iter().find(|t| !found.contains_key(t)) {
+        Some(t) => Err(ApiError::not_found(format!("Нет такой песни: {t}"))),
+        None => Ok(()),
+    }
+}
+
+/// Creates a playlist, with songs, an album's songs or songs of a service.
+#[utoipa::path(
+    post,
+    path = "/v1/playlists",
+    tag = "library-edit",
+    request_body(content = PlaylistAddBody, content_type = "application/json"),
+    responses((status = 200, body = DoneAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn create_playlist(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<DoneAnswer>, ApiError> {
+    let b: PlaylistAddBody = body(&bytes)?;
+    let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| ApiError::bad_request("Нужно name"))?.to_owned();
+    let mut tracks = track_ids(&b.track_ids)?;
+    let remotes = remote_ids(&b.remote_track_ids)?;
+    let lib = sh.lib.clone();
+    let album = b.album_id.clone();
+    let (before, tracks) = blocking(move || {
+        known_tracks(&lib, &tracks)?;
+        tracks.extend(album_tracks(&lib, album.as_deref())?);
+        let before: Vec<PlaylistId> = lib.list_playlists().map_err(db)?.into_iter().filter_map(|p| p.id).collect();
+        Ok((before, tracks))
+    })
+    .await?;
+    let first = if tracks.is_empty() { Command::CreatePlaylist(name.clone()) } else { Command::SaveTracksAsPlaylist { name: name.clone(), tracks } };
+    sh.run_by(Some(caller.actor), vec![first]).await?;
+    // The new playlist: the one of that name that was not there before.
+    let lib = sh.lib.clone();
+    let wanted = name.clone();
+    let id = blocking(move || {
+        Ok(lib.list_playlists().map_err(db)?.into_iter().filter_map(|p| p.id.filter(|id| !before.contains(id) && p.name == wanted)).next())
+    })
+    .await?
+    .ok_or_else(|| ApiError::internal("Плейлист не создался"))?;
+    if !remotes.is_empty() {
+        sh.run_by(Some(caller.actor), vec![Command::AddStreamToPlaylist(id, remotes)]).await?;
+    }
+    let lib = sh.lib.clone();
+    let p = blocking(move || playlist_now(&lib, id)).await?;
+    Ok(done(json!({"playlist": p})))
+}
+
+/// Adds songs, an album's songs or songs of a service to a playlist
+/// (`liked`: likes them). Only adds.
+#[utoipa::path(
+    post,
+    path = "/v1/playlists/{id}/tracks",
+    tag = "library-edit",
+    params(("id" = String, Path, description = "id плейлиста или liked")),
+    request_body(content = PlaylistAddBody, content_type = "application/json"),
+    responses((status = 200, body = DoneAnswer), (status = 400, body = crate::error::ErrorBody), (status = 404, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn add_to_playlist(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Json<DoneAnswer>, ApiError> {
+    let b: PlaylistAddBody = body(&bytes)?;
+    let pid = playlist_id(&id)?;
+    let tracks = track_ids(&b.track_ids)?;
+    let remotes = remote_ids(&b.remote_track_ids)?;
+    let album: Option<ReleaseId> = b.album_id.as_deref().map(|a| a.trim().parse().map_err(|_| bad_id())).transpose()?;
+    if tracks.is_empty() && remotes.is_empty() && album.is_none() {
+        return Err(ApiError::bad_request("Нечего добавить: track_ids, album_id или remote_track_ids"));
+    }
+    let lib = sh.lib.clone();
+    let t = tracks.clone();
+    blocking(move || {
+        playlist_now(&lib, pid)?;
+        known_tracks(&lib, &t)?;
+        if let Some(a) = album {
+            lib.get_release(a).map_err(db)?.ok_or_else(|| ApiError::not_found("Такого альбома нет"))?;
+        }
+        Ok(())
+    })
+    .await?;
+    let mut commands = Vec::new();
+    if !tracks.is_empty() {
+        commands.push(Command::AddToPlaylist(pid, tracks));
+    }
+    if let Some(a) = album {
+        commands.push(Command::AddAlbumToPlaylist(pid, a));
+    }
+    if !remotes.is_empty() {
+        commands.push(Command::AddStreamToPlaylist(pid, remotes));
+    }
+    sh.run_by(Some(caller.actor), commands).await?;
+    let lib = sh.lib.clone();
+    let p = blocking(move || playlist_now(&lib, pid)).await?;
+    Ok(done(json!({"playlist": p})))
+}
+
+/// A destructive request's arguments, without its token.
+fn plan_or_take(sh: &Shared, caller: &Caller, route: &str, args: &Value, token: Option<&str>) -> Result<Option<String>, ApiError> {
+    let hash = args_hash(route, args);
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => {
+            sh.confirms.take(t, &caller.token_id, &hash, Instant::now())?;
+            Ok(None)
+        }
+        None => sh.confirms.issue(&caller.token_id, &hash, Instant::now()).map(Some),
+    }
+}
+
+/// Either the plan (with a token) or, confirmed, what was done.
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum Destructive {
+    Plan(PlanAnswer),
+    Done(DoneAnswer),
+}
+
+/// `PUT /v1/playlists/{id}`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct RenameBody {
+    pub name: Option<String>,
+    pub confirm_token: Option<String>,
+}
+
+/// Renames a playlist (with a confirmation).
+#[utoipa::path(
+    put,
+    path = "/v1/playlists/{id}",
+    tag = "library-edit",
+    params(("id" = String, Path, description = "id плейлиста")),
+    request_body(content = RenameBody, content_type = "application/json"),
+    responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn rename_playlist(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Json<Destructive>, ApiError> {
+    let b: RenameBody = body(&bytes)?;
+    let pid = playlist_id(&id)?;
+    if pid == LIKED_PLAYLIST {
+        return Err(ApiError::bad_request("«Любимые» не переименовать"));
+    }
+    let name = b.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).ok_or_else(|| ApiError::bad_request("Нужно name"))?.to_owned();
+    let lib = sh.lib.clone();
+    let p = blocking(move || playlist_now(&lib, pid)).await?;
+    let args = json!({"playlist": id, "name": name});
+    if let Some(token) = plan_or_take(&sh, &caller, "PUT /v1/playlists/{id}", &args, b.confirm_token.as_deref())? {
+        let plan = json!({"playlist": p.id, "before": p.name, "after": name});
+        return Ok(Json(Destructive::Plan(PlanAnswer::new("playlist_rename", 1, plan, true, token))));
+    }
+    sh.run_by(Some(caller.actor), vec![Command::RenamePlaylist(pid, name)]).await?;
+    let lib = sh.lib.clone();
+    let p = blocking(move || playlist_now(&lib, pid)).await?;
+    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"playlist": p}) })))
+}
+
+/// `POST /v1/playlists/{id}/remove`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct RemoveBody {
+    #[serde(default)]
+    pub track_ids: Vec<String>,
+    pub confirm_token: Option<String>,
+}
+
+/// Takes songs out of a playlist (with a confirmation; each comes back
+/// with the app's «Отменить»). Out of «Любимые» is an unlike.
+#[utoipa::path(
+    post,
+    path = "/v1/playlists/{id}/remove",
+    tag = "library-edit",
+    params(("id" = String, Path, description = "id плейлиста или liked")),
+    request_body(content = RemoveBody, content_type = "application/json"),
+    responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn remove_from_playlist(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    bytes: Bytes,
+) -> Result<Json<Destructive>, ApiError> {
+    let b: RemoveBody = body(&bytes)?;
+    let pid = playlist_id(&id)?;
+    let tracks = track_ids(&b.track_ids)?;
+    if tracks.is_empty() {
+        return Err(ApiError::bad_request("Нужен track_ids"));
+    }
+    let lib = sh.lib.clone();
+    let t = tracks.clone();
+    let (p, inside, outside) = blocking(move || {
+        let p = playlist_now(&lib, pid)?;
+        let rows = if pid == LIKED_PLAYLIST { lib.liked_tracks(0, u32::MAX).map_err(db)? } else { lib.playlist_entries(pid, 0, u32::MAX).map_err(db)?.into_iter().map(|e| e.track).collect() };
+        let mut inside = Vec::new();
+        let mut outside = Vec::new();
+        for id in t {
+            match rows.iter().find(|r| r.id == id) {
+                Some(r) => inside.push((id, format!("{} — {}", r.artist, r.title))),
+                None => outside.push(id.to_string()),
+            }
+        }
+        Ok((p, inside, outside))
+    })
+    .await?;
+    let args = json!({"playlist": id, "track_ids": tracks.iter().map(ToString::to_string).collect::<Vec<_>>()});
+    if let Some(token) = plan_or_take(&sh, &caller, "POST /v1/playlists/{id}/remove", &args, b.confirm_token.as_deref())? {
+        let plan = json!({
+            "playlist": {"id": p.id, "name": p.name, "track_count": p.track_count},
+            "remove": inside.iter().take(PLAN_NAMES).map(|(id, name)| json!({"id": id.to_string(), "name": name})).collect::<Vec<_>>(),
+            "not_in_playlist": outside,
+        });
+        return Ok(Json(Destructive::Plan(PlanAnswer::new("playlist_remove", inside.len(), plan, true, token))));
+    }
+    let commands: Vec<Command> = inside.iter().map(|(t, _)| Command::RemoveFromPlaylist(pid, *t)).collect();
+    let removed = commands.len();
+    if !commands.is_empty() {
+        sh.run_by(Some(caller.actor), commands).await?;
+    }
+    let lib = sh.lib.clone();
+    let p = blocking(move || playlist_now(&lib, pid)).await?;
+    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"removed": removed, "playlist": p}) })))
+}
+
+/// Deletes a playlist (with a confirmation; the app has no «Отменить»
+/// for it). Its songs stay in the library.
+#[utoipa::path(
+    delete,
+    path = "/v1/playlists/{id}",
+    tag = "library-edit",
+    params(("id" = String, Path, description = "id плейлиста"), ("confirm_token" = Option<String>, Query, description = "Из ответа без него")),
+    responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn delete_playlist(
+    State(sh): State<Arc<Shared>>,
+    Extension(caller): Extension<Caller>,
+    Path(id): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Destructive>, ApiError> {
+    let pid = playlist_id(&id)?;
+    if pid == LIKED_PLAYLIST {
+        return Err(ApiError::bad_request("«Любимые» не удалить"));
+    }
+    let lib = sh.lib.clone();
+    let p = blocking(move || playlist_now(&lib, pid)).await?;
+    let token = query_value(raw.as_deref(), "confirm_token");
+    if let Some(token) = plan_or_take(&sh, &caller, "DELETE /v1/playlists/{id}", &json!({"playlist": id}), token.as_deref())? {
+        let plan = json!({"delete": {"id": p.id, "name": p.name, "track_count": p.track_count}, "songs_stay_in_library": true});
+        return Ok(Json(Destructive::Plan(PlanAnswer::new("playlist_delete", 1, plan, false, token))));
+    }
+    sh.run_by(Some(caller.actor), vec![Command::DeletePlaylist(pid)]).await?;
+    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"deleted": p}) })))
+}
+
+// ---------------------------------------------------------------- tags
+
+/// `POST /v1/library/retag`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct RetagBody {
+    #[serde(default)]
+    pub track_ids: Vec<String>,
+    /// The fields to write; the ones not given stay as the file has them.
+    #[schema(value_type = Object)]
+    #[serde(default)]
+    pub changes: TagPatch,
+    pub confirm_token: Option<String>,
+}
+
+/// Whether the numbers of `p` are numbers.
+pub fn check_patch(p: &TagPatch) -> Result<(), ApiError> {
+    if p.is_empty() {
+        return Err(ApiError::bad_request("changes: нечего менять"));
+    }
+    let digits = |v: &Option<String>| v.as_deref().map(str::trim).is_none_or(|s| s.is_empty() || s.chars().all(|c| c.is_ascii_digit()));
+    if !digits(&p.track_no) || !digits(&p.disc_no) {
+        return Err(ApiError::bad_request("track_no и disc_no — числа"));
+    }
+    if p.year.as_deref().map(str::trim).is_some_and(|y| !y.is_empty() && (y.len() != 4 || !y.chars().all(|c| c.is_ascii_digit()))) {
+        return Err(ApiError::bad_request("year — четыре цифры"));
+    }
+    Ok(())
+}
+
+/// The plan of one track: each field the patch changes, before → after;
+/// `None` when nothing would change.
+pub fn retag_plan(now: &Value, p: &TagPatch) -> Option<Value> {
+    let mut out = serde_json::Map::new();
+    for (k, new) in p.fields() {
+        let Some(new) = new.map(str::trim) else { continue };
+        let old = now.get(k).and_then(Value::as_str).unwrap_or_default();
+        if old != new {
+            out.insert(k.to_owned(), json!({"before": old, "after": new}));
+        }
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// Writes tags into the files of songs and the library (with a
+/// confirmation; the plan has each song's fields before and after — the
+/// app keeps no other copy of them).
+#[utoipa::path(
+    post,
+    path = "/v1/library/retag",
+    tag = "library-edit",
+    request_body(content = RetagBody, content_type = "application/json"),
+    responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn retag(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<Destructive>, ApiError> {
+    let b: RetagBody = body(&bytes)?;
+    let tracks = track_ids(&b.track_ids)?;
+    if tracks.is_empty() {
+        return Err(ApiError::bad_request("Нужен track_ids"));
+    }
+    if tracks.len() > RETAG_MAX {
+        return Err(ApiError::bad_request(format!("Не больше {RETAG_MAX} песен за раз")));
+    }
+    check_patch(&b.changes)?;
+    let lib = sh.lib.clone();
+    let t = tracks.clone();
+    blocking(move || known_tracks(&lib, &t)).await?;
+    // What the files have now.
+    let t = tracks.clone();
+    let now = sh.ask(Some(caller.actor), Duration::from_secs(30), move |reply| Command::ApiReadTags { tracks: t, reply }).await?;
+    let mut changes = Vec::new();
+    let mut without_file = Vec::new();
+    let mut same = Vec::new();
+    for t in &tracks {
+        match now.get(t.to_string()) {
+            None => without_file.push(t.to_string()),
+            Some(tags) => match retag_plan(tags, &b.changes) {
+                Some(plan) => {
+                    let name = format!("{} — {}", tags.get("artist").and_then(Value::as_str).unwrap_or_default(), tags.get("title").and_then(Value::as_str).unwrap_or_default());
+                    changes.push((*t, name, plan));
+                }
+                None => same.push(t.to_string()),
+            },
+        }
+    }
+    let args = serde_json::to_value(RetagBody { confirm_token: None, ..b.clone() }).unwrap_or_default();
+    if let Some(token) = plan_or_take(&sh, &caller, "POST /v1/library/retag", &args, b.confirm_token.as_deref())? {
+        let plan = json!({
+            "tracks": changes.iter().take(PLAN_NAMES).map(|(id, name, fields)| json!({"id": id.to_string(), "name": name, "fields": fields})).collect::<Vec<_>>(),
+            "without_file": without_file,
+            "already_so": same,
+            "files_renamed": "the files move to the place their new tags name",
+        });
+        return Ok(Json(Destructive::Plan(PlanAnswer::new("retag", changes.len(), plan, false, token))));
+    }
+    if changes.is_empty() {
+        return Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"done": [], "failed": [], "without_file": without_file, "already_so": same}) })));
+    }
+    let patch = b.changes.clone();
+    let list: Vec<(TrackId, TagPatch)> = changes.iter().map(|(t, _, _)| (*t, patch.clone())).collect();
+    let wait = Duration::from_secs((10 + list.len() as u64).min(120));
+    let mut result = sh.ask(Some(caller.actor), wait, move |reply| Command::ApiRetag { tracks: list, reply }).await?;
+    if let Some(m) = result.as_object_mut() {
+        m.insert("without_file".to_owned(), json!(without_file));
+        m.insert("already_so".to_owned(), json!(same));
+    }
+    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result })))
+}
+
+// ---------------------------------------------------------------- the Trash
+
+/// `POST /v1/library/trash`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct TrashBody {
+    #[serde(default)]
+    pub track_ids: Vec<String>,
+    #[serde(default)]
+    pub album_ids: Vec<String>,
+    pub confirm_token: Option<String>,
+}
+
+/// The toast's word for what goes: «Трек», «Альбом», «12 треков».
+pub fn trash_what(tracks: usize, only_one_album: bool) -> String {
+    match (tracks, only_one_album) {
+        (_, true) => "Альбом".to_owned(),
+        (1, false) => "Трек".to_owned(),
+        (n, false) => tracks_word(n),
+    }
+}
+
+/// Moves songs and albums to the library's Trash (with a confirmation):
+/// kept 30 days, the app's «Отменить» and Trash bring them back. Never
+/// deletes for good; refused while the Trash is off in the settings.
+#[utoipa::path(
+    post,
+    path = "/v1/library/trash",
+    tag = "library-edit",
+    request_body(content = TrashBody, content_type = "application/json"),
+    responses((status = 200, body = Destructive), (status = 400, body = crate::error::ErrorBody), (status = 409, body = crate::error::ErrorBody)),
+    security(("bearer" = []))
+)]
+pub async fn trash(State(sh): State<Arc<Shared>>, Extension(caller): Extension<Caller>, bytes: Bytes) -> Result<Json<Destructive>, ApiError> {
+    let b: TrashBody = body(&bytes)?;
+    if !sh.rt.state().prefs.use_trash {
+        return Err(ApiError::of(StatusCode::CONFLICT, "trash_off", "Корзина выключена в настройках: через API ничего не удаляется"));
+    }
+    let tracks = track_ids(&b.track_ids)?;
+    let albums = release_ids(&b.album_ids)?;
+    if tracks.is_empty() && albums.is_empty() {
+        return Err(ApiError::bad_request("Нужен track_ids или album_ids"));
+    }
+    let lib = sh.lib.clone();
+    let (all, names, album_names) = blocking(move || {
+        let mut all: Vec<TrackId> = Vec::new();
+        let mut album_names = Vec::new();
+        for a in &albums {
+            let r = lib.get_release(*a).map_err(db)?.ok_or_else(|| ApiError::not_found(format!("Нет такого альбома: {a}")))?;
+            album_names.push(json!({"id": a.to_string(), "name": format!("{} — {}", r.artist_credit.display(), r.title)}));
+            for t in lib.tracks_of_release(*a).map_err(db)? {
+                if !all.contains(&t.id) {
+                    all.push(t.id);
+                }
+            }
+        }
+        known_tracks(&lib, &tracks)?;
+        for t in tracks {
+            if !all.contains(&t) {
+                all.push(t);
+            }
+        }
+        let rows = lib.get_track_rows(&all).map_err(db)?;
+        let names: Vec<Value> = all
+            .iter()
+            .take(PLAN_NAMES)
+            .filter_map(|t| rows.get(t).map(|r| json!({"id": t.to_string(), "name": format!("{} — {}", r.artist, r.title), "has_file": r.has_local})))
+            .collect();
+        Ok((all, names, album_names))
+    })
+    .await?;
+    if all.len() > TRASH_MAX {
+        return Err(ApiError::bad_request(format!("Не больше {TRASH_MAX} песен за раз")));
+    }
+    let args = serde_json::to_value(TrashBody { confirm_token: None, ..b.clone() }).unwrap_or_default();
+    if let Some(token) = plan_or_take(&sh, &caller, "POST /v1/library/trash", &args, b.confirm_token.as_deref())? {
+        let plan = json!({"albums": album_names, "tracks": names, "to": "the library's Trash, 30 days"});
+        return Ok(Json(Destructive::Plan(PlanAnswer::new("trash", all.len(), plan, true, token))));
+    }
+    let what = trash_what(all.len(), b.album_ids.len() == 1 && b.track_ids.is_empty());
+    let n = all.len();
+    sh.run_by(Some(caller.actor), vec![Command::ApiTrash { tracks: all, what }]).await?;
+    Ok(Json(Destructive::Done(DoneAnswer { status: "done".to_owned(), result: json!({"trashed": n, "undo": "the app's «Отменить» or its Trash"}) })))
+}
+
+|(k, _)| *k).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_ids_and_words() {
+        assert_eq!(remote_id("spotify:4uLU"), Some(RemoteId::new(Service::Spotify, "4uLU")));
+        assert_eq!(remote_id("deezer:"), None);
+        assert_eq!(remote_id("nope:1"), None);
+        assert_eq!(remote_id("0190a1b2-0000-7000-8000-000000000000"), None);
+        assert_eq!(tracks_word(1), "1 трек");
+        assert_eq!(tracks_word(3), "3 трека");
+        assert_eq!(tracks_word(12), "12 треков");
+        assert_eq!(tracks_word(21), "21 трек");
+        assert_eq!(tracks_word(111), "111 треков");
+        assert_eq!(trash_what(1, false), "Трек");
+        assert_eq!(trash_what(10, true), "Альбом");
+        assert_eq!(trash_what(5, false), "5 треков");
+    }
+
+    #[test]
+    fn each_feedback_is_the_buttons_command() {
+        let t = TrackId::new();
+        let a = ArtistId::new();
+        let r = RemoteId::new(Service::Deezer, "1");
+        assert_eq!(feedback_command("like", &Target::Track(t)).unwrap(), Command::Like(LikeTarget::Track(t), true));
+        assert_eq!(feedback_command("unlike", &Target::Artist(a)).unwrap(), Command::Like(LikeTarget::Artist(a), false));
+        assert_eq!(feedback_command("like", &Target::StreamTrack(r.clone())).unwrap(), Command::LikeStream { track: r.clone(), on: true });
+        assert_eq!(
+            feedback_command("dislike", &Target::Track(t)).unwrap(),
+            Command::Dislike { track: t, dislike: true, sure: true, relike: false }
+        );
+        assert_eq!(
+            feedback_command("dont_recommend", &Target::Artist(a)).unwrap(),
+            Command::RecFeedback { target: RecTarget::Artist(a), dislike: true }
+        );
+        assert_eq!(feedback_command("add_to_library", &Target::Track(t)).unwrap(), Command::TrackInLibrary { track: t, on: true });
+        assert_eq!(feedback_command("dislike", &Target::Artist(a)).unwrap_err().code, "bad_request");
+        assert_eq!(feedback_command("explode", &Target::Track(t)).unwrap_err().code, "bad_request");
+        assert!(matches!(target_of("track", "youtube:abc"), Ok(Target::StreamTrack(_))));
+        assert!(target_of("artist", "youtube:abc").is_err());
+        assert!(target_of("track", "nope").is_err());
+        assert!(target_of("song", &t.to_string()).is_err());
+    }
+
+    #[test]
+    fn a_retag_plan_has_only_what_changes() {
+        let now = json!({"title": "Old", "artist": "A", "year": "1988", "genre": ""});
+        let p = TagPatch { title: Some("New".into()), year: Some("1988".into()), ..Default::default() };
+        let plan = retag_plan(&now, &p).unwrap();
+        assert_eq!(plan, json!({"title": {"before": "Old", "after": "New"}}));
+        let same = TagPatch { artist: Some(" A ".into()), ..Default::default() };
+        assert!(retag_plan(&now, &same).is_none());
+        assert!(check_patch(&TagPatch::default()).is_err());
+        assert!(check_patch(&TagPatch { year: Some("88".into()), ..Default::default() }).is_err());
+        assert!(check_patch(&TagPatch { track_no: Some("x".into()), ..Default::default() }).is_err());
+        assert!(check_patch(&TagPatch { year: Some("1988".into()), track_no: Some("3".into()), ..Default::default() }).is_ok());
+    }
+
+    #[test]
+    fn the_plan_answer_reads_as_the_contract_says() {
+        let p = PlanAnswer::new("trash", 2, json!({"tracks": []}), true, "ct_x".into());
+        let v = serde_json::to_value(Destructive::Plan(p)).unwrap();
+        assert_eq!(v["status"], "needs_confirmation");
+        assert_eq!(v["confirm_token"], "ct_x");
+        assert_eq!(v["expires_in_s"], 300);
+        assert_eq!(v["affected"], 2);
+        let d = serde_json::to_value(Destructive::Done(DoneAnswer { status: "done".into(), result: json!({"trashed": 2}) })).unwrap();
+        assert_eq!(d, json!({"status": "done", "result": {"trashed": 2}}));
+    }
+}

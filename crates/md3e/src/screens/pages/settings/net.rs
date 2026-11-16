@@ -97,7 +97,7 @@ impl Drop for Made {
 const PRESETS: [ApiPreset; 3] = [ApiPreset::Control, ApiPreset::Full, ApiPreset::Read];
 const ACTORS: [ApiActor; 4] = [ApiActor::Owner, ApiActor::Assistant, ApiActor::Agent, ApiActor::Guest];
 /// The snippets of the dialog's second step.
-const SNIPPETS: [&str; 3] = ["Claude Code", "mcpServers JSON", "curl"];
+const SNIPPETS: [&str; 4] = ["Claude Code", "mcpServers JSON", "curl", "MCP по сети"];
 /// How long a used token's row stays lit before it fades back.
 const PULSE_S: f64 = 0.25;
 /// How long the switch shows its new place before the runtime has it.
@@ -427,6 +427,7 @@ pub(crate) fn snippet(kind: usize, token: &str, exe: &str, host: &str, port: u16
             json_str(exe),
             json_str(token)
         ),
+        3 => format!("claude mcp add --transport http music http://{host}:{port}/mcp --header \"Authorization: Bearer {token}\""),
         _ => format!("curl -H \"Authorization: Bearer {token}\" http://{host}:{port}/v1/state"),
     }
 }
@@ -620,6 +621,8 @@ mod tests {
         assert!(json.contains(&format!("\"NIKGOB_TOKEN\": \"{t}\"")), "{json}");
         let curl = snippet(2, t, exe, "192.168.0.10", 47211);
         assert_eq!(curl, format!("curl -H \"Authorization: Bearer {t}\" http://192.168.0.10:47211/v1/state"));
+        let http = snippet(3, t, exe, "192.168.0.10", 47211);
+        assert_eq!(http, format!("claude mcp add --transport http music http://192.168.0.10:47211/mcp --header \"Authorization: Bearer {t}\""));
     }
 
     #[test]

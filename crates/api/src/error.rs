@@ -16,7 +16,9 @@ pub const JSON: &str = "application/json; charset=utf-8";
 pub struct ErrorBody {
     /// `bad_request`, `unauthorized`, `forbidden`, `not_found`,
     /// `nothing_to_play`, `rate_limited`, `no_audio`, `player_timeout`,
-    /// `internal`.
+    /// `trash_off`, `confirm_unknown`, `confirm_expired`,
+    /// `confirm_mismatch`, `no_services`, `lookup_failed`,
+    /// `lookup_timeout`, `internal`.
     pub error: String,
     /// What went wrong, in Russian.
     pub message: String,
@@ -81,6 +83,12 @@ impl ApiError {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
+    }
+
+    /// An error of its own code and status (`trash_off` 409,
+    /// `confirm_expired` 409, `lookup_timeout` 504…).
+    pub fn of(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(status, code, message)
     }
 
     pub fn body(&self) -> ErrorBody {

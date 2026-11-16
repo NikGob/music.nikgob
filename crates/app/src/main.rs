@@ -612,6 +612,14 @@ fn main() -> eframe::Result {
     // The allocator's options before anything else allocates much.
     memory::tune();
     LAUNCHED.get_or_init(Instant::now);
+    // `nikgob mcp`: only the MCP server on stdin/stdout for an agent on
+    // this computer; it talks to the running player over its API. No
+    // window, no lock, no log file; stdout is the protocol, logs go to
+    // stderr. A windowed exe gets the pipes its client hands it.
+    if std::env::args().nth(1).is_some_and(|a| a == "mcp") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).target(env_logger::Target::Stderr).init();
+        std::process::exit(nikgob_mcp::stdio::main());
+    }
     // `--youtube-login` / `--soundcloud-login`: this run is only a sign-in
     // window; `--khinsider-page`: a hidden page read; `--sc-widget`: only
     // SoundCloud's player host. They log to stderr, which the app copies
