@@ -3431,8 +3431,8 @@ mod tests {
         assert!(row(Vec::new(), None, Vec::new()).is_empty());
     }
 
-    /// The row of a library with two genres: «Микс дня», the genre mixes,
-    /// the part's mix, the named mixes, the moments, ten at most; no two
+    /// The row of a library with two genres: «Микс дня», the part's mix,
+    /// the genre mixes, the named mixes, the moments, ten at most; no two
     /// cards of one name, none sharing more than [`OVERLAP`] of its songs
     /// with a card before it; the named mixes and the profiles that are a
     /// genre's songs again are not there, nor is the liked songs' mix.
@@ -3462,8 +3462,8 @@ mod tests {
         assert!(titles.contains(&"Хип-хоп микс") && titles.contains(&"J-pop микс"), "{titles:?}");
         let rank = |k: MixKey| match k {
             MixKey::Daily(0) => 0,
-            MixKey::Genre(_) => 1,
-            MixKey::Part(_) => 2,
+            MixKey::Part(_) => 1,
+            MixKey::Genre(_) => 2,
             MixKey::Daily(_) => 3,
             _ => 4,
         };
