@@ -695,7 +695,7 @@ mod tests {
         let list = nikgob_view::PlaylistId::new();
         assert!(set_pins(&mut settings.pins, "a", &MeshPins { liked: true, playlists: vec![list] }));
         let mut live_a = node("a", "Pi", true);
-        live_a.view.transfer = Some(nikgob_view::MeshTransfer { done: 1, total: 2, paused: false });
+        live_a.view.transfer = Some(nikgob_view::MeshTransfer { done: 1, total: 2, paused: false, speed: 0 });
         let live = MeshSnapshot { running: true, paired: true, nodes: vec![live_a, node("b", "TV", true)], ..MeshSnapshot::default() };
         let ask = MeshForgetAsk { node_id: "a".into(), name: "Pi".into(), originals: Some(4) };
         let keep = MeshKeep {

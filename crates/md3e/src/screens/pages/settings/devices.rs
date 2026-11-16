@@ -452,7 +452,7 @@ mod tests {
                 online: true,
                 storage: Some(MeshStorage { used: 100 << 30, free: 400 << 30 }),
                 playing: Some(MeshPlaying { title: "Song".into(), ..MeshPlaying::default() }),
-                transfer: Some(MeshTransfer { done: 1, total: 4, paused: false }),
+                transfer: Some(MeshTransfer { done: 1, total: 4, paused: false, speed: 0 }),
                 ..MeshNodeView::default()
             },
             MeshNodeView { id: "ph".into(), name: "Телефон".into(), kind: MeshKind::Phone, profile: MeshProfile::Favorites { cap_bytes: 16 << 30 }, ..MeshNodeView::default() },

@@ -122,6 +122,46 @@ impl MeshProfile {
     pub const fn stores(self) -> bool {
         !matches!(self, Self::SoundOnly)
     }
+
+    /// The form its files take: the originals as they are for every
+    /// profile now (the phone's Opus or MP3 come with the phone).
+    pub const fn format(self) -> MeshFormat {
+        MeshFormat::Orig
+    }
+}
+
+/// The form a device keeps the library's files in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshFormat {
+    /// The file as it is (lossy files and masters alike).
+    #[default]
+    Orig,
+    /// Opus made by the device that sends it (not yet).
+    Opus,
+    /// MP3 made from the lossless master; lossy originals go as they are
+    /// (not yet).
+    Mp3,
+}
+
+impl MeshFormat {
+    /// Its word in `?profile=` of the media route.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Orig => "orig",
+            Self::Opus => "opus",
+            Self::Mp3 => "mp3",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::Orig, Self::Opus, Self::Mp3].into_iter().find(|f| f.key() == s.trim())
+    }
+
+    /// A device can send its files in this form now.
+    pub const fn ready(self) -> bool {
+        matches!(self, Self::Orig)
+    }
 }
 
 /// «Избранное»: the cap a new choice of it starts with.
@@ -169,6 +209,9 @@ pub struct MeshTransfer {
     /// Paused here ([`crate::Command::MeshPauseTransfer`]).
     #[serde(default)]
     pub paused: bool,
+    /// Bytes a second now (0 while paused or waiting).
+    #[serde(default)]
+    pub speed: u64,
 }
 
 impl MeshPlaying {
@@ -388,6 +431,11 @@ mod tests {
             assert_eq!(MeshProfile::parse(&p.key()), Some(p));
         }
         assert_eq!(MeshProfile::parse("favorites:x"), None);
+        for f in [MeshFormat::Orig, MeshFormat::Opus, MeshFormat::Mp3] {
+            assert_eq!(MeshFormat::parse(f.key()), Some(f));
+        }
+        assert_eq!(MeshProfile::Favorites { cap_bytes: 1 }.format(), MeshFormat::Orig, "originals only for now");
+        assert!(MeshFormat::Orig.ready() && !MeshFormat::Mp3.ready());
     }
 
     #[test]

@@ -4007,6 +4007,21 @@ pub enum Command {
     /// (None: back here), or with `attach` an attach (None: a detach),
     /// answered when it is done as `{"done": bool, "message"?: text}`.
     ApiTransfer { node_id: Option<String>, attach: bool, reply: ApiReply },
+
+    // The copies of the library on the owner's devices.
+    /// From the worker to the mesh: right before the masters of a
+    /// «Подтверди» card (`card`) go to the Trash, each trusted device
+    /// (none of `leaving`) is asked to read its copies of `hashes` again;
+    /// answered with [`Command::ReplicaRechecked`].
+    ReplicaRecheck { card: u64, hashes: Vec<String>, need: u32, leaving: Vec<String> },
+    /// From the mesh: the masters of `card` that still have `need` verified
+    /// copies (`ok`), and why none could be checked (`failed`).
+    ReplicaRechecked { card: u64, ok: Vec<String>, failed: Option<String> },
+    /// «Отменить» of masters moved to the Trash: they go back.
+    ReplicaUndoTrash { ids: Vec<i64> },
+    /// From the mesh: what the devices hold of this computer's masters
+    /// changed (the masters that may go are looked at again).
+    ReplicaCopiesChanged,
 }
 
 impl Default for Prefs {
