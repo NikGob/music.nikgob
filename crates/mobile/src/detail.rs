@@ -1,9 +1,10 @@
 //! The pages of an album, a playlist and an artist. An album or a playlist
 //! has a 240 dp cover (radius 4), the title, the artist, the year and the
 //! length centred under it, then ♥ or shuffle, ▶ and ⋮ as circles. The
-//! tracks are flat 64 dp rows. An artist's picture stays centred; its
-//! sections use the 22 sp headers and the same rows. The album's bar shows
-//! the title from the start; a playlist's bar shows none until it scrolls.
+//! tracks are flat 64 dp rows. An artist's picture stays centred, and its
+//! actions are the same circles (♥, ▶, ⋮ with shuffle and radio). The
+//! album's bar shows the title from the start; a playlist's bar shows none
+//! until it scrolls.
 
 use egui::{Color32, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 use nikgob_md3e::components::paint::{self, Radii};
@@ -14,7 +15,7 @@ use nikgob_view::{
     ArtistId, Command, LIKED_PLAYLIST, LikeTarget, MeshPins, PlaylistId, RadioSeed, ReleaseDetail, ReleaseId, Route, ViewState,
 };
 
-use crate::parts::{self, Action, Head, PageOut, Picture};
+use crate::parts::{self, Head, PageOut, Picture};
 use crate::rows::{self, Look};
 use crate::{PageFrame, text};
 
@@ -138,18 +139,33 @@ fn collection_head(ui: &mut Ui, top: f32, id: Id, h: &Collection<'_>, menu: Menu
     centred_line(ui, h.count, s.on_surface_variant, max_w);
 
     ui.add_space(16.0);
+    let row = circles(ui, id, h.side, h.side_on, h.enabled, menu);
+    HeadOut { artist, play: row.play, side: row.side, menu: row.menu }
+}
+
+struct Circles {
+    side: bool,
+    play: bool,
+    menu: Option<usize>,
+}
+
+/// ♥ or shuffle, ▶ and ⋮, centred: 48 / 72 / 48, 16 dp gaps. The side
+/// circles sit on surface_container, ▶ on primary_container with a 32 dp
+/// icon. 16 under the row.
+fn circles(ui: &mut Ui, id: Id, side_icon: Icon, side_on: bool, enabled: bool, menu: Menu) -> Circles {
+    let s = Theme::get(ui.ctx()).scheme;
+    let width = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(width, PLAY_D), Sense::hover());
     let x0 = r.left() + action_origin(width);
     let side = Rect::from_min_size(pos2(x0, r.center().y - SIDE_D * 0.5), vec2(SIDE_D, SIDE_D));
     let play = Rect::from_min_size(pos2(x0 + SIDE_D + ACTION_GAP, r.top()), vec2(PLAY_D, PLAY_D));
     let more = Rect::from_min_size(pos2(play.right() + ACTION_GAP, r.center().y - SIDE_D * 0.5), vec2(SIDE_D, SIDE_D));
-    let side_ink = if h.side_on { s.primary } else { s.on_surface };
-    let side_resp = circle(ui, side, id.with("side"), h.side, h.side_on, s.surface_container, side_ink, SIDE_ICON, h.enabled);
-    let play_resp = circle(ui, play, id.with("play"), Icon::PlayArrow, true, s.primary_container, s.on_primary_container, PLAY_ICON, h.enabled);
+    let side_ink = if side_on { s.primary } else { s.on_surface };
+    let side_resp = circle(ui, side, id.with("side"), side_icon, side_on, s.surface_container, side_ink, SIDE_ICON, enabled);
+    let play_resp = circle(ui, play, id.with("play"), Icon::PlayArrow, true, s.primary_container, s.on_primary_container, PLAY_ICON, enabled);
     let more_resp = circle(ui, more, id.with("more"), Icon::MoreVert, false, s.surface_container, s.on_surface, SIDE_ICON, true);
-    let picked = menu.align_center(true).attach(&more_resp);
     ui.add_space(16.0);
-    HeadOut { artist, play: h.enabled && play_resp.clicked(), side: h.enabled && side_resp.clicked(), menu: picked }
+    Circles { side: enabled && side_resp.clicked(), play: enabled && play_resp.clicked(), menu: menu.align_center(true).attach(&more_resp) }
 }
 
 fn centred_line(ui: &mut Ui, line: &str, color: Color32, max_w: f32) {
@@ -355,17 +371,20 @@ pub fn artist(ui: &mut Ui, frame: PageFrame, id: ArtistId, state: &ViewState, ou
             numbers: (c.track_count > 0).then(|| text::tracks(u64::from(c.track_count))),
         };
         parts::head(ui, frame.top, &head);
-        let row = parts::play_row(ui, Id::new("ar-row"), true, &[Action { icon: Icon::Favorite, on: d.liked }, Action { icon: Icon::Radio, on: false }]);
+        let menu = Menu::new(("ar-menu", id))
+            .item(MenuItem::new("Перемешать").icon(Icon::Shuffle))
+            .item(MenuItem::new("Радио исполнителя").icon(Icon::Radio));
+        let row = circles(ui, Id::new(("ar-circles", id)), Icon::Favorite, d.liked, true, menu);
         if row.play {
             out.push(Command::PlayArtist { id, shuffle: false });
         }
-        if row.shuffle {
-            out.push(Command::PlayArtist { id, shuffle: true });
+        if row.side {
+            out.push(Command::Like(LikeTarget::Artist(id), !d.liked));
         }
-        match row.action {
-            Some(0) => out.push(Command::Like(LikeTarget::Artist(id), !d.liked)),
-            Some(_) => out.push(Command::StartRadio { seed: RadioSeed::Artist(id) }),
-            None => {}
+        match row.menu {
+            Some(0) => out.push(Command::PlayArtist { id, shuffle: true }),
+            Some(1) => out.push(Command::StartRadio { seed: RadioSeed::Artist(id) }),
+            _ => {}
         }
         let here = Route::Artist(id);
         if !d.top_tracks.is_empty() {
