@@ -543,8 +543,6 @@ impl RuntimeHandle {
         let _ = self.tx.send(Msg::MeshLink(Arc::new(f)));
     }
 
-    /// Before the mesh stops: the devices still being forgotten are passed
-    /// to it now. Waits at most `wait` for the loop to do it; whether it did.
     /// The mesh service takes the network part of playing on another
     /// device from now on (following a zone, forwarding, transfers, the
     /// files fetched); `f` must not block.
@@ -552,6 +550,8 @@ impl RuntimeHandle {
         let _ = self.tx.send(Msg::ConnectLink(Arc::new(f)));
     }
 
+    /// Before the mesh stops: the devices still being forgotten are passed
+    /// to it now. Waits at most `wait` for the loop to do it; whether it did.
     pub fn flush_mesh(&self, wait: Duration) -> bool {
         let (tx, rx) = crossbeam_channel::bounded(1);
         if self.tx.send(Msg::MeshFlush(tx)).is_err() {

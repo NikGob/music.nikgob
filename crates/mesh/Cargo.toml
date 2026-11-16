@@ -26,7 +26,9 @@ data-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util", "fs"] }
+# The event stream of a zone a remote follows, read as it comes.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # HTTP/1.1 over a QUIC stream (the tunnel to a device's API).
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

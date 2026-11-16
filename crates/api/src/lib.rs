@@ -45,6 +45,7 @@ use nikgob_runtime::RuntimeHandle;
 use nikgob_view::{ApiActor, ApiReply, Command};
 
 pub use auth::Caller;
+pub use media::{EXT_HEADER, HASH_HEADER};
 pub use tokens::create_token;
 
 /// Wakes the API when the runtime publishes a change. Give the runtime a
