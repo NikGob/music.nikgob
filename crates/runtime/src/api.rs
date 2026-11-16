@@ -570,4 +570,18 @@ mod tests {
         assert!(view.tokens[0].revoked);
         assert_eq!(view.live_tokens().count(), 0);
     }
+
+    /// A download of the API waits as a yes-or-no card of its own bit, its
+    /// lines shown, «Скачать» and «Не скачивать».
+    #[test]
+    fn an_api_download_card() {
+        let c = confirm_card(API_CONFIRM_ID | 3, "A — B и ещё 4", "Запрос «Claude»", &["A — B".to_owned(), "C — D".to_owned()]);
+        assert_eq!(c.id & API_CONFIRM_ID, API_CONFIRM_ID);
+        for other in [1u64 << 44, 1 << 45, 1 << 47, 1 << 48] {
+            assert_eq!(c.id & other, 0, "no other part's bit");
+        }
+        assert!(c.yes_no && c.answerable());
+        assert_eq!(c.options.len(), 2);
+        assert_eq!((c.accept_label.as_str(), c.skip_label.as_str()), ("Скачать", "Не скачивать"));
+    }
 }
