@@ -18,6 +18,7 @@ pub mod lyrics_ui;
 mod output;
 mod pages;
 mod pane;
+pub mod phone;
 mod player_bar;
 mod sleep_ui;
 mod sound_quality;
